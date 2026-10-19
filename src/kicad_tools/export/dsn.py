@@ -208,6 +208,11 @@ class NetClassInfo:
     nets: list[str] = field(default_factory=list)
 
 
+def _node_on_edge_cuts(node: SExp) -> bool:
+    layer = node.find("layer")
+    return bool(layer and layer.children and _get_str(layer.children[0]) == "Edge.Cuts")
+
+
 class KiCadToDSNExporter:
     """Export a KiCad PCB file to Specctra DSN format.
 
@@ -346,46 +351,75 @@ class KiCadToDSNExporter:
                             self._default_via_drill = _get_float(nc_child.children[0]) or 0.4
 
     def _extract_board_outline(self) -> None:
-        """Extract board outline from Edge.Cuts layer."""
+        """Extract the board boundary and cutouts from the Edge.Cuts layer.
+
+        Every top-level Edge.Cuts graphic is polygonized, so segments need not
+        be stored head to tail. The largest face is the boundary; its interior
+        rings (and any closed loop inside it) become keepouts on every copper
+        layer. Geometry that cannot be carried is listed, never dropped.
+        """
         assert self._pcb is not None
-        points: list[tuple[float, float]] = []
+        self._board_outline = []
+        self._outline_cutouts: list[list[tuple[float, float]]] = []
 
-        for child in self._pcb.children:
-            if not hasattr(child, "name"):
+        for fp_node in self._pcb.children:
+            if not hasattr(fp_node, "name") or not _is_footprint_tag(fp_node.name):
                 continue
+            if any(
+                _node_on_edge_cuts(g)
+                for g in fp_node.children
+                if (getattr(g, "name", None) or "").startswith("fp_")
+            ):
+                self._omit(
+                    "footprint-embedded Edge.Cuts graphics are not exported as board outline"
+                )
+                break
 
-            # Handle gr_rect on Edge.Cuts
-            if child.name == "gr_rect":
-                layer_node = child.find("layer")
-                if layer_node and len(layer_node.children) >= 1:
-                    layer_name = _get_str(layer_node.children[0])
-                    if layer_name == "Edge.Cuts":
-                        start = child.find("start")
-                        end = child.find("end")
-                        if start and end and len(start.children) >= 2 and len(end.children) >= 2:
-                            x1 = _get_float(start.children[0]) or 0.0
-                            y1 = _get_float(start.children[1]) or 0.0
-                            x2 = _get_float(end.children[0]) or 0.0
-                            y2 = _get_float(end.children[1]) or 0.0
-                            points = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+        from ..core.board_outline import board_outline_segments, outline_graphics
 
-            # Handle gr_line on Edge.Cuts
-            elif child.name == "gr_line":
-                layer_node = child.find("layer")
-                if layer_node and len(layer_node.children) >= 1:
-                    layer_name = _get_str(layer_node.children[0])
-                    if layer_name == "Edge.Cuts":
-                        start = child.find("start")
-                        end = child.find("end")
-                        if start and end and len(start.children) >= 2 and len(end.children) >= 2:
-                            x1 = _get_float(start.children[0]) or 0.0
-                            y1 = _get_float(start.children[1]) or 0.0
-                            x2 = _get_float(end.children[0]) or 0.0
-                            y2 = _get_float(end.children[1]) or 0.0
-                            points.append((x1, y1))
-                            points.append((x2, y2))
+        if not any(True for _ in outline_graphics(self._pcb)):
+            return
+        try:
+            segments = board_outline_segments(self._pcb)
+        except ValueError as exc:
+            self._omit(f"board outline not exported: {exc}")
+            return
 
-        self._board_outline = points
+        from shapely.geometry import LineString, Polygon  # type: ignore[import-untyped]
+        from shapely.ops import polygonize_full, unary_union  # type: ignore[import-untyped]
+
+        def snap(pt: tuple[float, float]) -> tuple[float, float]:
+            return (round(pt[0], 3), round(pt[1], 3))  # 1 um: close endpoint micro-gaps
+
+        lines = [LineString([snap(a), snap(b)]) for a, b in segments if snap(a) != snap(b)]
+        faces, dangles, cuts, invalid = (
+            polygonize_full(unary_union(lines)) if lines else ((), (), (), ())
+        )
+        faces = list(faces.geoms) if hasattr(faces, "geoms") else list(faces)
+        if not faces:
+            self._omit(
+                "board outline not exported: Edge.Cuts does not form a closed outline "
+                "(open or dangling segments)"
+            )
+            return
+        board = max(faces, key=lambda f: f.area)
+        if not (hasattr(dangles, "is_empty") and dangles.is_empty):
+            self._omit("Edge.Cuts has dangling segments that do not close a loop; ignored")
+        self._board_outline = list(board.exterior.coords)[:-1]
+
+        shell = Polygon(board.exterior)
+        cutouts = [Polygon(ring) for ring in board.interiors]
+        for face in faces:
+            if face is board:
+                continue
+            if not shell.contains(face.representative_point()):
+                self._omit("Edge.Cuts closed loop outside the main board outline is not exported")
+            elif not any(c.contains(face.representative_point()) for c in cutouts):
+                cutouts.append(Polygon(face.exterior))
+        self._outline_cutouts = [list(c.exterior.coords)[:-1] for c in cutouts if c.area > 0]
+        for cutout in self._outline_cutouts:
+            for layer in self._layers:
+                self._keepouts.append(("keepout", layer, cutout))
 
     def _extract_footprints(self) -> None:
         """Extract footprint placements and pad info."""
@@ -989,13 +1023,7 @@ class KiCadToDSNExporter:
         try:
             from shapely.geometry import Polygon  # type: ignore[import-untyped]
 
-            ring: list[tuple[float, float]] = []
-            for pt in outline:  # gr_line outlines repeat each shared vertex
-                if not ring or pt != ring[-1]:
-                    ring.append(pt)
-            if len(ring) > 1 and ring[0] == ring[-1]:
-                ring.pop()
-            poly = Polygon(ring)
+            poly = Polygon(outline)
             inset = poly.buffer(-self._edge_clearance, join_style=2) if poly.is_valid else None
         except (ImportError, ValueError):
             inset = None
