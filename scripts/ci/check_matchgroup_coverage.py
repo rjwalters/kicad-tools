@@ -129,6 +129,13 @@ from kicad_tools.sidecars import (
 # and ``check_routed_drc.py`` agree on the count they gate against.
 # ``net_class_map_resolver`` lives next to this script in ``scripts/ci``.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from identity_allowance import (  # noqa: E402
+    Allowance,
+    error_identities,
+    format_stale,
+    stale_entries,
+    unlisted_findings,
+)
 from net_class_map_resolver import count_blocking_errors  # noqa: E402
 
 # --- shared with check_routed_drc.py / check_diffpair_coverage.py ------------
@@ -495,7 +502,11 @@ def measure_pour_connectivity(recipe_mod, pcb_path: Path, pour_nets: set[str]) -
 
 
 def count_errors_via_kct_check(
-    pcb_path: Path, sidecar: Path | None, *, error_rules: dict[str, int] | None = None
+    pcb_path: Path,
+    sidecar: Path | None,
+    *,
+    error_rules: dict[str, int] | None = None,
+    error_violations: list[dict] | None = None,
 ) -> int:
     """Count BLOCKING errors via ``kct check --mfr jlcpcb --errors-only``.
 
@@ -578,6 +589,10 @@ def count_errors_via_kct_check(
             if violation.get("severity") == "error":
                 rule = violation.get("rule_id", "unknown")
                 error_rules[rule] = error_rules.get(rule, 0) + 1
+    if error_violations is not None:
+        error_violations.extend(
+            v for v in data.get("violations", []) if v.get("severity") == "error"
+        )
     return blocking
 
 
@@ -590,12 +605,29 @@ def count_errors_via_kct_check(
 #   seed-42 re-route TMDS_D1    gap ~0.49 mm -> 125.3 ohm
 # (declared 100 ohm +/-10 %).  Same root cause as #7312 (board 06) and the
 # shared router defect #7344.  Seed-42 yields 4 errors: MIPI_DAT1 P/N and
-# TMDS_D1 P/N.  Capped, not open: a fifth impedance error still fails.
-MATCHGROUP_FIXTURE_RULE_CAPS: dict[str, int] = {"impedance": 4}
+# TMDS_D1 P/N.
+# Allowed by identity, not by count (#7359, #7270 Q3 ruling): only these nets
+# may carry an ``impedance`` error, and a listed net that stops failing makes
+# its entry stale and fails the gate.  Deleting an entry is the whole of #7349.
+MATCHGROUP_FIXTURE_ALLOWED_FINDINGS: Allowance = {
+    ("impedance", "MIPI_DAT1_N"): 7332,
+    ("impedance", "MIPI_DAT1_P"): 7332,
+    ("impedance", "TMDS_D1_N"): 7332,
+    ("impedance", "TMDS_D1_P"): 7332,
+}
 
 
-def unexpected_baseline_errors(key: str, errors: dict[str, int]) -> dict[str, int]:
-    """Historical skew improvements cannot absorb new physical defects."""
+def unexpected_baseline_errors(
+    key: str,
+    errors: dict[str, int],
+    identities: dict[str, set[str]] | None = None,
+) -> dict[str, int]:
+    """Historical skew improvements cannot absorb new physical defects.
+
+    ``identities`` maps rule -> nets carrying an error (``error_identities``).
+    A rule with allowance entries is judged per net; without ``identities``
+    nothing of such a rule is trusted, so every finding counts as unexpected.
+    """
     if key not in MATCHGROUP_VIOLATION_BASELINE:
         return {}
     expected = {
@@ -604,11 +636,27 @@ def unexpected_baseline_errors(key: str, errors: dict[str, int]) -> dict[str, in
         "match_group_length_skew",
         "connectivity",
     }
-    return {
-        rule: count
-        for rule, count in errors.items()
-        if count and rule not in expected and count > MATCHGROUP_FIXTURE_RULE_CAPS.get(rule, 0)
-    }
+    allowed_rules = {rule for rule, _ in MATCHGROUP_FIXTURE_ALLOWED_FINDINGS}
+    unexpected: dict[str, int] = {}
+    for rule, count in errors.items():
+        if not count or rule in expected:
+            continue
+        if rule in allowed_rules and identities is not None:
+            count = len(
+                unlisted_findings(
+                    MATCHGROUP_FIXTURE_ALLOWED_FINDINGS, rule, identities.get(rule, set())
+                )
+            )
+        if count:
+            unexpected[rule] = count
+    return unexpected
+
+
+def stale_allowances(key: str, identities: dict[str, set[str]]) -> list[tuple[str, str, int]]:
+    """Listed findings that no longer occur on the baselined board."""
+    if key not in MATCHGROUP_VIOLATION_BASELINE:
+        return []
+    return stale_entries(MATCHGROUP_FIXTURE_ALLOWED_FINDINGS, identities)
 
 
 def compute_rule_coverage(
@@ -859,7 +907,10 @@ def check_board(
     #      would zero the counter even with a correct error count).
     try:
         error_rules: dict[str, int] = {}
-        error_count = count_errors_via_kct_check(routed_pcb, sidecar, error_rules=error_rules)
+        error_violations: list[dict] = []
+        error_count = count_errors_via_kct_check(
+            routed_pcb, sidecar, error_rules=error_rules, error_violations=error_violations
+        )
     except RuntimeError as e:
         annotate_error(str(routed_pcb), f"kct check failed: {e}")
         return 1
@@ -987,9 +1038,14 @@ def check_board(
                 f"({len(pour_nets)} pour nets, copper-union audit)."
             )
 
-    unexpected = unexpected_baseline_errors(lookup_key, error_rules)
+    identities = error_identities(error_violations)
+    unexpected = unexpected_baseline_errors(lookup_key, error_rules, identities)
     if unexpected:
         annotate_error(str(routed_pcb), f"Errors outside historical group baseline: {unexpected}")
+        failed = True
+    stale = stale_allowances(lookup_key, identities)
+    if stale:
+        annotate_error(str(routed_pcb), f"Stale identity allowance: {format_stale(stale)}")
         failed = True
 
     # AC #1 (allowlist semantic): error count must be <= allowed.
