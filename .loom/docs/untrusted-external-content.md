@@ -75,6 +75,14 @@ that read forge text without the full block (`champion.md`,
 `architect.md`, `hermit.md`, `auditor.md`, `epic.md`, `imagine.md`, `loom.md`,
 `watch.md`) carry a shorter one-line pointer near the top.
 
+### Who wrote the issue being promoted (#10827)
+
+The rule above covers markers and control phrases. A separate gate covers the
+**issue author**: an issue from an untrusted author may be curated, but an
+automated verdict does not promote it to `loom:issue`; a trusted maintainer adopts
+it or re-files it. Same predicate, no second trust table. See
+[`label-state-machine.md`](label-state-machine.md) § "The author gate on promotion".
+
 ### Harness rate-limit reminders: a text match, not a quota reading (#11411)
 
 Claude Code appends a "GitHub API rate limit … sleep until reset" reminder to

@@ -965,7 +965,8 @@ operational check on a fleet host (shadow recipe above), not a CI check.
 **Long-running task liveness and self-update decisions (#10414).** Each
 long-running daemon loop beats a process-global liveness registry
 (`crate::task_liveness`) once per finished iteration. The loops are the
-self-update loop (`auto_update`) and each role-runner
+self-update loop (`auto_update`), the CI telemetry poller (`ci_telemetry`, #12793;
+its per-cycle outcome metrics are in `telemetry-schema.md`) and each role-runner
 loop (`role_runner.<role>`). Every 60 s, on its own ticker independent of the
 collector pass, the daemon exports `loom.daemon.task_alive{task}`. The value
 is `1` while the loop has beaten within its staleness window. That window is

@@ -52,16 +52,7 @@ CURATOR_MD="$PROMPT_DIR/curator.md"
 source "$TEST_DIR/lib/require-daemon-bin.sh"
 loom_test_require_daemon_bin "$SCRIPTS_DIR" "classify-dependency-block"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-NC='\033[0m'
-
-TESTS_RUN=0
-TESTS_PASSED=0
-TESTS_FAILED=0
-
-pass() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1)); echo -e "  ${GREEN}PASS${NC}: $1"; }
-fail() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1)); echo -e "  ${RED}FAIL${NC}: $1"; }
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
 assert_eq() {
     local expected="$1" actual="$2" msg="$3"
@@ -1271,7 +1262,6 @@ assert_eq "2" "$RC" "unreadable root issue exits 2"
 #
 # The scan itself is NOT retired: it stays wired into the watchdog suites for
 # the rest of the repo's shell. See defaults/scripts/tests/lib/heredoc-body-safety.sh.
-
 
 echo
 echo "--- Doc pins: the Champion prose actually calls the gate ---"
