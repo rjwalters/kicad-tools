@@ -652,6 +652,15 @@ def _copy_unannotated(src: Path, dst: Path) -> None:
     dst.write_text(_PIN_CHILD.sub("", src.read_text()))
 
 
+def _pin_annotation(path: Path) -> list[tuple[str, str, str, str]]:
+    """Every pad's ``(ref, number, pinfunction, pintype)``, order-free."""
+    return sorted(
+        (fp.reference, pad.number, pad.pinfunction, pad.pintype)
+        for fp in PCB.load(path).footprints
+        for pad in fp.pads
+    )
+
+
 @pytest.mark.parametrize(
     "pcb_name", ["stm32_devboard.kicad_pcb", "stm32_devboard_routed.kicad_pcb"]
 )
@@ -671,8 +680,23 @@ def test_fleet_board04_power_pin_nets(tmp_path: Path, pcb_name: str) -> None:
     result = annotate_pcb_file_pintypes(pcb, sch)
     assert result.missing_pads == []
     assert result.updated > 0
-    # The committed board is the annotation's fixed point (issue #6025).
-    assert pcb.read_bytes() == src.read_bytes()
+    # The committed board carries exactly the annotation the schematic
+    # implies (issue #6025): same (pinfunction, pintype) on every pad, and
+    # the annotation touched nothing but those children.  Byte order is not
+    # compared here -- a native kicad-cli re-save (board 04 since #7317 /
+    # #7343) places ``pintype`` before ``uuid``/``net`` whereas the
+    # annotator appends it after them (issue #7374).
+    assert _pin_annotation(pcb) == _pin_annotation(src)
+    assert _PIN_CHILD.sub("", pcb.read_text()) == _PIN_CHILD.sub("", src.read_text())
+
+    # The committed board is the annotation's fixed point (issue #6025):
+    # re-annotating it as committed is a byte-identical no-op.
+    fixed = tmp_path / f"fixed-{pcb_name}"
+    fixed.write_bytes(src.read_bytes())
+    again = annotate_pcb_file_pintypes(fixed, sch)
+    assert again.missing_pads == []
+    assert again.updated == 0
+    assert fixed.read_bytes() == src.read_bytes()
 
     loaded = PCB.load(pcb)
     # MCP1825S (U1): VI power_in on +5V, VO power_out on +3.3V; the STM32's

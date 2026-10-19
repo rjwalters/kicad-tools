@@ -86,29 +86,62 @@ class TestCheckZeroViolations:
         mod = _load_helper_module()
         assert mod.check_zero_violations({"match_group_length_skew": 4}, baseline=4) == []
 
-    def test_board_07_documented_via_skew_baseline(self):
-        """Board 07's documented match-group baseline is 1 -- a single value
-        that satisfies BOTH the reroute and ``--skip-route`` paths.
+    def test_board_07_allowance_is_keyed_to_named_groups(self):
+        """Board 07's allowance names its groups (Issue #7339, #7270 Q3).
 
-        On the reroute path (the Match-Group Routing Regression CI job) the
-        #3931 via-aware match-group tuner compensates ADDR_BUS's via-count
-        imbalance (A4/A6 escape behind a full-stack via; the tuner adds F.Cu
-        meander to the flat members), so ADDR_BUS's via-inclusive skew
-        converges to within tolerance and no longer fires.  Only MIPI_CSI_LANES'
-        pair-only skew (the group #3916 newly makes checkable) remains, giving a
-        reroute count of 1.  HDMI_TMDS_LANES does not fire -- its
-        TMDS_D0_N/TMDS_D1_N legs stay unrouted after the reroute, so the
-        unrouted-leg gate excludes it.
-
-        On the ``--skip-route`` committed-artifact path the count is also 1: the
-        #3931 router fix does NOT regenerate the committed artifact (an artifact
-        refresh is the separately-tracked #3925 churn work), so that artifact
-        still carries the pre-fix via-imbalanced ADDR_BUS (which fires) while
-        MIPI/HDMI/DDR are gated out by the unrouted-leg rule.  Neither count is
-        silently absorbed by the large error-count allowlist floor."""
+        Reroute path: MIPI_CSI_LANES pair-only skew (#3916) plus
+        DDR_DATA_BYTE_0 (16.717 mm vs 0.100 mm tol, seed 42), which fires now
+        that DQ0 is routed (#7331).  A count would let another group be
+        absorbed in place of a known one.  Delete the DDR entry once the
+        tuner fixes it (#5798 / #6447).
+        """
         mod = _load_helper_module()
         key = "boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb"
-        assert mod.MATCHGROUP_VIOLATION_BASELINE.get(key, 0) == 1
+        assert set(mod.MATCHGROUP_ALLOWED_GROUPS[key]) == {"MIPI_CSI_LANES", "DDR_DATA_BYTE_0"}
+        assert not hasattr(mod, "MATCHGROUP_VIOLATION_BASELINE")
+
+    def test_fixture_impedance_allowance_kept(self):
+        """#7347's impedance allowance survives the group rework (net-keyed, #7359)."""
+        mod = _load_helper_module()
+        assert {rule for rule, _ in mod.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS} == {"impedance"}
+
+
+class TestCheckGroupAllowances:
+    ALLOWED = {"MIPI_CSI_LANES": "#3916", "DDR_DATA_BYTE_0": "#7339"}
+
+    def test_exactly_the_allowed_groups_pass(self):
+        mod = _load_helper_module()
+        fired = {"MIPI_CSI_LANES", "DDR_DATA_BYTE_0"}
+        assert mod.check_group_allowances(fired, self.ALLOWED, enforce_stale=True) == []
+
+    def test_different_group_failing_fails_even_at_same_count(self):
+        """ADDR_BUS regressing must not be absorbed in place of DDR."""
+        mod = _load_helper_module()
+        fired = {"MIPI_CSI_LANES", "ADDR_BUS"}
+        failures = mod.check_group_allowances(fired, self.ALLOWED, enforce_stale=False)
+        assert any("ADDR_BUS" in f for f in failures)
+
+    def test_extra_group_on_top_of_allowed_fails(self):
+        mod = _load_helper_module()
+        fired = {"MIPI_CSI_LANES", "DDR_DATA_BYTE_0", "ADDR_BUS"}
+        assert mod.check_group_allowances(fired, self.ALLOWED, enforce_stale=True)
+
+    def test_allowed_group_disappearing_is_stale(self):
+        mod = _load_helper_module()
+        failures = mod.check_group_allowances({"MIPI_CSI_LANES"}, self.ALLOWED, enforce_stale=True)
+        assert len(failures) == 1
+        assert "STALE" in failures[0] and "DDR_DATA_BYTE_0" in failures[0]
+
+    def test_committed_artifact_path_does_not_enforce_stale(self):
+        """``--skip-route``: DDR is gated out as partially routed, so it does
+        not fire there; that must not trip the staleness check."""
+        mod = _load_helper_module()
+        assert mod.check_group_allowances(set(), self.ALLOWED, enforce_stale=False) == []
+
+    def test_no_allowance_is_strict(self):
+        mod = _load_helper_module()
+        assert mod.check_group_allowances({"X"}, {}, enforce_stale=True)
+        assert mod.check_group_allowances(set(), {}, enforce_stale=True) == []
 
 
 # ---------------------------------------------------------------------------
@@ -397,13 +430,31 @@ class TestMatchgroupJobContainer:
 class TestUnexpectedBaselineErrors:
     KEY = "boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb"
 
-    def test_impedance_up_to_cap_tolerated(self):
-        mod = _load_helper_module()
-        assert mod.unexpected_baseline_errors(self.KEY, {"impedance": 4}) == {}
+    NETS = {"MIPI_DAT1_N", "MIPI_DAT1_P", "TMDS_D1_N", "TMDS_D1_P"}
 
-    def test_impedance_over_cap_reported(self):
+    def test_listed_impedance_nets_tolerated(self):
         mod = _load_helper_module()
-        assert mod.unexpected_baseline_errors(self.KEY, {"impedance": 5}) == {"impedance": 5}
+        found = {"impedance": set(self.NETS)}
+        assert mod.unexpected_baseline_errors(self.KEY, {"impedance": 4}, found) == {}
+        assert mod.stale_allowances(self.KEY, found) == []
+
+    def test_unlisted_impedance_net_reported_within_old_cap(self):
+        mod = _load_helper_module()
+        found = {"impedance": {"MIPI_DAT1_N", "MIPI_DAT1_P", "TMDS_D1_N", "DDR_DQS0_P"}}
+        assert mod.unexpected_baseline_errors(self.KEY, {"impedance": 4}, found) == {"impedance": 1}
+
+    def test_fixed_listed_finding_is_stale(self):
+        mod = _load_helper_module()
+        found = {"impedance": self.NETS - {"TMDS_D1_P"}}
+        assert mod.unexpected_baseline_errors(self.KEY, {"impedance": 3}, found) == {}
+        assert mod.stale_allowances(self.KEY, found) == [("impedance", "TMDS_D1_P", 7332)]
+
+    def test_cap_constant_removed(self):
+        assert not hasattr(_load_helper_module(), "MATCHGROUP_FIXTURE_RULE_CAPS")
+
+    def test_non_baselined_key_has_no_stale_entries(self):
+        mod = _load_helper_module()
+        assert mod.stale_allowances("boards/other.kicad_pcb", {}) == []
 
     def test_unrelated_rule_reported(self):
         mod = _load_helper_module()

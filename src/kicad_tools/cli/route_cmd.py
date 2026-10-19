@@ -2232,6 +2232,48 @@ def _run_match_group_tuning_phase(router: Any, args: argparse.Namespace, *, quie
             )
 
 
+def _run_diffpair_gap_tightening_phase(
+    router: Any,
+    args: argparse.Namespace,
+    *,
+    quiet: bool = False,
+) -> Any:
+    """Run the opt-in diff-pair gap-tightening pass (Issue #7344).
+
+    Engaged only by ``--tighten-diffpair-gap``; without it this is a no-op,
+    so routing output is byte-identical.  Called after the geometric
+    post-passes and before skew / match-group tuning, so the tuners see the
+    final trunk lengths.  Returns the per-pair results, or ``None`` when the
+    pass did not run.
+    """
+    if not getattr(args, "tighten_diffpair_gap", False):
+        return None
+    if not router.routes:
+        if not quiet:
+            print("\n--- Diff-Pair Gap Tightening: skipped (no routes) ---")
+        return None
+    if not quiet:
+        print("\n--- Diff-Pair Gap Tightening (Issue #7344) ---")
+    _ci_snapshot = _connectivity_snapshot(router)
+    results = router.apply_diffpair_gap_tightening(verbose=not quiet)
+    _enforce_connectivity_invariant_or_exit(
+        router,
+        _ci_snapshot,
+        phase="tighten_diffpair_gap",
+        args=args,
+        quiet=quiet,
+    )
+    if not quiet:
+        if not results:
+            print("  No differential pairs detected; nothing to tighten.")
+        else:
+            n_tight = sum(1 for r in results.values() if r.reason == "tightened")
+            n_band = sum(1 for r in results.values() if r.reason == "in_band")
+            n_declined = len(results) - n_tight - n_band
+            print(f"  Summary: {n_tight} tightened, {n_band} in band, {n_declined} declined")
+    return results
+
+
 def _diffpair_skew_tuning_mode(args: argparse.Namespace) -> str | None:
     """Which diff-pair skew tuning (if any) runs after routing.
 
@@ -2354,6 +2396,181 @@ def _run_diffpair_skew_tuning(
                 f"{n_over} still over the kct check skew limit"
             )
     return tune_results
+
+
+def _run_post_route_pipeline(
+    router: Any,
+    args: argparse.Namespace,
+    *,
+    quiet: bool,
+    restore_route_grid: bool = False,
+    report_segment_delta: bool = False,
+) -> int | None:
+    """Run the shared post-route pipeline on ``router``'s committed copper.
+
+    Issue #7377 (step 1): ``kct route`` used to carry four copy-pasted
+    post-route tails -- ``route_with_layer_escalation`` (the default
+    ``--auto-layers`` flow), ``route_with_rule_relaxation``,
+    ``route_with_combined_escalation`` and the single-attempt tail of
+    ``_run_main_impl`` -- and they drifted: ``--length-match-diffpairs``
+    (#2648) and the #6664 lattice skew auto-tune lived only in the
+    single-attempt tail, so the default flow silently skipped them.  Every
+    tail now calls this one helper, so a new post-route pass is wired once.
+
+    The sequence (unchanged from the four tails):
+
+    1. ``optimization`` stage boundary, per-stage quality recorder (#4732),
+       grid-engine gate for the geometric post-passes (#4281);
+    2. trace optimizer, then the DRC nudge under a connectivity
+       snapshot/enforce guard (#2596);
+    3. collinear consolidation (#4732);
+    4. ``finalization`` stage boundary, finalize gate (#4208) and the
+       stage-quality report;
+    5. diff-pair gap tightening (#7344), diff-pair skew tuning
+       (#2648/#6664), then match-group tuning (#2723/#6968) -- the tuners
+       run in that order so each sees the final trunk geometry and the
+       within-pair skew invariant holds before group tuning.
+
+    ``restore_route_grid`` and ``report_segment_delta`` preserve two
+    single-attempt-only behaviours (re-marking grid copper before the
+    optimizer, and the ``Segments: a -> b`` summary print).
+
+    Returns the exit code to return when an interrupt stopped the run at a
+    stage boundary (#6324), else ``None``.  The caller runs
+    ``_finalize_routes`` next.
+    """
+    from kicad_tools.cli.progress import spinner
+
+    _stop_rc = _stage_boundary("optimization")  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
+    # Pre-optimization statistics for the single-attempt summary print.
+    pre_segments = sum(len(r.segments) for r in router.routes)
+    pre_vias = sum(len(r.vias) for r in router.routes)
+
+    # Issue #4732: opt-in per-stage routing-quality instrumentation.
+    # Read-only -- it measures the copper each stage hands to the next
+    # so the surviving fragment/staircase artifacts can be attributed
+    # to a stage instead of guessed at.  ``None`` (the default) makes
+    # every record/print below a no-op.
+    _stage_quality = _make_stage_quality_recorder(args)
+    _record_stage_quality(_stage_quality, STAGE_PRE_OPTIMIZE, router)
+
+    # Issue #4281: the geometric post-passes (optimize + DRC nudge) are
+    # grid-engine-only -- lattice/mesh copper must not be touched.
+    _post_passes_enabled = _engine_post_passes_enabled(args, quiet=quiet)
+    if _post_passes_enabled:
+        _mark_nongrid_routes_for_post_pass(router, args, quiet=quiet)
+        if restore_route_grid and _resolve_route_engine(args) == "grid":
+            _restore_route_grid(router, router.routes)
+
+    # Optimize traces (unless --no-optimize/--raw flag is set)
+    if (
+        _post_passes_enabled
+        and not args.no_optimize
+        and router.routes
+        and _optimization_fits_budget(args, quiet=quiet)
+    ):
+        _optimize_traces(router, args, quiet=quiet)
+        _record_stage_quality(_stage_quality, STAGE_POST_OPTIMIZE, router)
+
+    _stop_rc = _stage_boundary("drc-nudge")  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
+    # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
+    # the nudge is NOT covered by --no-optimize, so it needs its own gate).
+    # Issue #6273: like the optimizer, it yields to save / fill / DRC when
+    # routing overran into the post-route reserve.
+    if (
+        _post_passes_enabled
+        and router.routes
+        and _optimization_fits_budget(args, quiet=quiet, stage="DRC nudge")
+    ):
+        from kicad_tools.router.drc_nudge import drc_verify_and_nudge
+
+        # Issue #2596: snapshot connectivity again before nudge.  The
+        # post-optimize routes are the new baseline -- nudge must not
+        # regress them further.
+        _ci_snapshot_nudge = _connectivity_snapshot(router)
+
+        with spinner("DRC nudge pass...", quiet=quiet):
+            nudge_result = drc_verify_and_nudge(router)
+        if not quiet and nudge_result.initial_violations > 0:
+            print(f"  {nudge_result.summary()}")
+
+        _enforce_connectivity_invariant_or_exit(
+            router,
+            _ci_snapshot_nudge,
+            phase="nudge",
+            args=args,
+            quiet=quiet,
+        )
+        _record_stage_quality(_stage_quality, STAGE_POST_NUDGE, router)
+
+    _stop_rc = _stage_boundary("consolidation")  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
+    # Issue #4732: post-nudge collinear consolidation.  Runs LAST of the
+    # geometric passes so it also absorbs fragments the nudge introduced.
+    _run_consolidation_pass(
+        router,
+        args,
+        post_passes_enabled=_post_passes_enabled,
+        stage_recorder=_stage_quality,
+        quiet=quiet,
+    )
+
+    _stop_rc = _stage_boundary("finalization")  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
+    # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
+    # over the post-optimize/post-nudge copper.  An rtree-less
+    # optimizer can introduce a cross-net crossing the pre-optimize
+    # finalize gate never saw; demote it before the canonical write.
+    # Issue #4281: unconditional -- runs even when the geometric
+    # post-passes are skipped for non-grid engines (defense in depth).
+    if router.routes:
+        _finalize_committed_copper_or_demote(router, quiet=quiet)
+    _record_stage_quality(_stage_quality, STAGE_POST_FINALIZE, router)
+    _print_stage_quality_report(_stage_quality)
+
+    if report_segment_delta and _post_passes_enabled and router.routes and not quiet:
+        post_segments = sum(len(r.segments) for r in router.routes)
+        post_vias = sum(len(r.vias) for r in router.routes)
+        segment_reduction = (
+            ((pre_segments - post_segments) / pre_segments * 100) if pre_segments > 0 else 0
+        )
+        via_reduction = ((pre_vias - post_vias) / pre_vias * 100) if pre_vias > 0 else 0
+        print(f"  Segments: {pre_segments} -> {post_segments} ({-segment_reduction:+.1f}%)")
+        if pre_vias > 0:
+            print(f"  Vias:     {pre_vias} -> {post_vias} ({-via_reduction:+.1f}%)")
+
+    # Issue #7344: opt-in diff-pair gap tightening, before skew and
+    # match-group tuning so both tuners see the final trunk lengths.
+    _run_diffpair_gap_tightening_phase(router, args, quiet=quiet)
+
+    # Differential-pair length-match (skew) tuning -- Epic #2556 Phase 3I
+    # (Issue #2648) via --length-match-diffpairs, and auto-engaged on lattice
+    # output with --differential-pairs (Issue #6664).  Issue #7377: before
+    # this helper existed only the single-attempt tail ran it, so both were
+    # silent no-ops on the default --auto-layers path.
+    if router.routes:
+        _run_diffpair_skew_tuning(router, args, quiet=quiet)
+
+    # N-trace match-group length-match (skew) tuning -- Epic #2661 Phase 3H
+    # (Issue #2723).  Engaged via --length-match-groups (opt-in).  Runs
+    # AFTER --length-match-diffpairs so the within-pair skew invariant is
+    # preserved before group tuning perturbs lane lengths.  Graceful
+    # short-circuit when no groups are declared / detected.
+    #
+    # Issue #6674: on the lattice engine the tuner also runs WITHOUT the
+    # flag, for declared groups whose spread exceeds the limit ``kct check``
+    # enforces (``engage="checker_limit"``).  Grid is not auto-engaged
+    # (frozen for pair-adjacent features until #6448); the explicit flag
+    # keeps its legacy ``length_critical`` gating on every engine.
+    # Issue #6968: the escalation flows run it too.
+    _run_match_group_tuning_phase(router, args, quiet=quiet)
+    return None
 
 
 def _engine_post_passes_enabled(
@@ -12037,98 +12254,11 @@ def route_with_layer_escalation(
         stall_label="layer escalation",
     )
 
-    # Issue #4732: opt-in per-stage routing-quality instrumentation.
-    # Read-only -- it measures the copper each stage hands to the next
-    # so the surviving fragment/staircase artifacts can be attributed
-    # to a stage instead of guessed at.  ``None`` (the default) makes
-    # every record/print below a no-op.
-    _stage_quality = _make_stage_quality_recorder(args)
-    _record_stage_quality(_stage_quality, STAGE_PRE_OPTIMIZE, final_result.router)
-
-    # Issue #4281: the geometric post-passes (optimize + DRC nudge) are
-    # grid-engine-only -- lattice/mesh copper must not be touched.
-    _post_passes_enabled = _engine_post_passes_enabled(args, quiet=quiet)
-    if _post_passes_enabled:
-        _mark_nongrid_routes_for_post_pass(final_result.router, args, quiet=quiet)
-
-    _stop_rc = _stage_boundary("optimization")  # issue #6324
+    # Issue #7377: the shared post-route pipeline (optimize -> DRC nudge ->
+    # consolidation -> finalize gate -> gap / skew / match-group tuning).
+    _stop_rc = _run_post_route_pipeline(final_result.router, args, quiet=quiet)
     if _stop_rc is not None:
         return _stop_rc
-    # Optimize traces
-    if (
-        _post_passes_enabled
-        and not args.no_optimize
-        and final_result.router.routes
-        and _optimization_fits_budget(args, quiet=quiet)
-    ):
-        _optimize_traces(final_result.router, args, quiet=quiet)
-        _record_stage_quality(_stage_quality, STAGE_POST_OPTIMIZE, final_result.router)
-
-    _stop_rc = _stage_boundary("drc-nudge")  # issue #6324
-    if _stop_rc is not None:
-        return _stop_rc
-    # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
-    # the nudge is NOT covered by --no-optimize, so it needs its own gate).
-    # Issue #6273: like the optimizer, it yields to save / fill / DRC when
-    # routing overran into the post-route reserve.
-    if (
-        _post_passes_enabled
-        and final_result.router.routes
-        and _optimization_fits_budget(args, quiet=quiet, stage="DRC nudge")
-    ):
-        from kicad_tools.router.drc_nudge import drc_verify_and_nudge
-
-        # Issue #2596: snapshot connectivity again before nudge.  The
-        # post-optimize routes are the new baseline -- nudge must not
-        # regress them further.
-        _ci_snapshot_nudge = _connectivity_snapshot(final_result.router)
-
-        with spinner("DRC nudge pass...", quiet=quiet):
-            nudge_result = drc_verify_and_nudge(final_result.router)
-        if not quiet and nudge_result.initial_violations > 0:
-            print(f"  {nudge_result.summary()}")
-
-        _enforce_connectivity_invariant_or_exit(
-            final_result.router,
-            _ci_snapshot_nudge,
-            phase="nudge",
-            args=args,
-            quiet=quiet,
-        )
-        _record_stage_quality(_stage_quality, STAGE_POST_NUDGE, final_result.router)
-
-    _stop_rc = _stage_boundary("consolidation")  # issue #6324
-    if _stop_rc is not None:
-        return _stop_rc
-    # Issue #4732: post-nudge collinear consolidation.  Runs LAST of the
-    # geometric passes so it also absorbs fragments the nudge introduced.
-    _run_consolidation_pass(
-        final_result.router,
-        args,
-        post_passes_enabled=_post_passes_enabled,
-        stage_recorder=_stage_quality,
-        quiet=quiet,
-    )
-
-    _stop_rc = _stage_boundary("finalization")  # issue #6324
-    if _stop_rc is not None:
-        return _stop_rc
-    # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
-    # over the post-optimize/post-nudge copper.  An rtree-less
-    # optimizer can introduce a cross-net crossing the pre-optimize
-    # finalize gate never saw; demote it before the canonical write.
-    # Issue #4281: unconditional -- runs even when the geometric
-    # post-passes are skipped for non-grid engines (defense in depth).
-    if final_result.router.routes:
-        _finalize_committed_copper_or_demote(final_result.router, quiet=quiet)
-    _record_stage_quality(_stage_quality, STAGE_POST_FINALIZE, final_result.router)
-    _print_stage_quality_report(_stage_quality)
-
-    # Issue #6968: match-group length tuning on the escalation result.  This
-    # is the default ``kct route`` flow; before #6968 only the single-attempt
-    # tail of ``_run_main_impl`` ran the tuner, so --length-match-groups
-    # silently tuned nothing here.
-    _run_match_group_tuning_phase(final_result.router, args, quiet=quiet)
 
     # Finalize: cleanup -> sexp -> stats (canonical ordering)
     _final_multi_pad_ids = {n for n, p in final_result.router.nets.items() if n > 0 and len(p) >= 2}
@@ -13088,96 +13218,11 @@ def route_with_rule_relaxation(
         print(f"\nWARNING: Design uses {args.manufacturer.upper()} minimum tolerances.")
         print("Consider adding layers for more manufacturing margin.")
 
-    # Issue #4732: opt-in per-stage routing-quality instrumentation.
-    # Read-only -- it measures the copper each stage hands to the next
-    # so the surviving fragment/staircase artifacts can be attributed
-    # to a stage instead of guessed at.  ``None`` (the default) makes
-    # every record/print below a no-op.
-    _stage_quality = _make_stage_quality_recorder(args)
-    _record_stage_quality(_stage_quality, STAGE_PRE_OPTIMIZE, final_result.router)
-
-    # Issue #4281: the geometric post-passes (optimize + DRC nudge) are
-    # grid-engine-only -- lattice/mesh copper must not be touched.
-    _post_passes_enabled = _engine_post_passes_enabled(args, quiet=quiet)
-    if _post_passes_enabled:
-        _mark_nongrid_routes_for_post_pass(final_result.router, args, quiet=quiet)
-
-    _stop_rc = _stage_boundary("optimization")  # issue #6324
+    # Issue #7377: the shared post-route pipeline (optimize -> DRC nudge ->
+    # consolidation -> finalize gate -> gap / skew / match-group tuning).
+    _stop_rc = _run_post_route_pipeline(final_result.router, args, quiet=quiet)
     if _stop_rc is not None:
         return _stop_rc
-    # Optimize traces
-    if (
-        _post_passes_enabled
-        and not args.no_optimize
-        and final_result.router.routes
-        and _optimization_fits_budget(args, quiet=quiet)
-    ):
-        _optimize_traces(final_result.router, args, quiet=quiet)
-        _record_stage_quality(_stage_quality, STAGE_POST_OPTIMIZE, final_result.router)
-
-    _stop_rc = _stage_boundary("drc-nudge")  # issue #6324
-    if _stop_rc is not None:
-        return _stop_rc
-    # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
-    # the nudge is NOT covered by --no-optimize, so it needs its own gate).
-    # Issue #6273: like the optimizer, it yields to save / fill / DRC when
-    # routing overran into the post-route reserve.
-    if (
-        _post_passes_enabled
-        and final_result.router.routes
-        and _optimization_fits_budget(args, quiet=quiet, stage="DRC nudge")
-    ):
-        from kicad_tools.router.drc_nudge import drc_verify_and_nudge
-
-        # Issue #2596: snapshot connectivity before nudge.
-        _ci_snapshot_nudge = _connectivity_snapshot(final_result.router)
-
-        with spinner("DRC nudge pass...", quiet=quiet):
-            nudge_result = drc_verify_and_nudge(final_result.router)
-        if not quiet and nudge_result.initial_violations > 0:
-            print(f"  {nudge_result.summary()}")
-
-        _enforce_connectivity_invariant_or_exit(
-            final_result.router,
-            _ci_snapshot_nudge,
-            phase="nudge",
-            args=args,
-            quiet=quiet,
-        )
-        _record_stage_quality(_stage_quality, STAGE_POST_NUDGE, final_result.router)
-
-    _stop_rc = _stage_boundary("consolidation")  # issue #6324
-    if _stop_rc is not None:
-        return _stop_rc
-    # Issue #4732: post-nudge collinear consolidation.  Runs LAST of the
-    # geometric passes so it also absorbs fragments the nudge introduced.
-    _run_consolidation_pass(
-        final_result.router,
-        args,
-        post_passes_enabled=_post_passes_enabled,
-        stage_recorder=_stage_quality,
-        quiet=quiet,
-    )
-
-    _stop_rc = _stage_boundary("finalization")  # issue #6324
-    if _stop_rc is not None:
-        return _stop_rc
-    # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
-    # over the post-optimize/post-nudge copper.  An rtree-less
-    # optimizer can introduce a cross-net crossing the pre-optimize
-    # finalize gate never saw; demote it before the canonical write.
-    # Issue #4281: unconditional -- runs even when the geometric
-    # post-passes are skipped for non-grid engines (defense in depth).
-    if final_result.router.routes:
-        _finalize_committed_copper_or_demote(final_result.router, quiet=quiet)
-    _record_stage_quality(_stage_quality, STAGE_POST_FINALIZE, final_result.router)
-    _print_stage_quality_report(_stage_quality)
-
-    # Issue #6968: match-group length tuning on the escalation result.  This
-    # is the default ``kct route`` flow; before #6968 only the single-attempt
-    # tail of ``_run_main_impl`` ran the tuner, so --length-match-groups
-    # silently tuned nothing here.
-    _run_match_group_tuning_phase(final_result.router, args, quiet=quiet)
 
     # Finalize: cleanup -> sexp -> stats (canonical ordering)
     _final_multi_pad_ids = {n for n, p in final_result.router.nets.items() if n > 0 and len(p) >= 2}
@@ -15710,96 +15755,11 @@ def route_with_combined_escalation(
         print(f"\nWARNING: Design uses {args.manufacturer.upper()} minimum tolerances.")
         print("Consider redesigning placement for more margin.")
 
-    # Issue #4732: opt-in per-stage routing-quality instrumentation.
-    # Read-only -- it measures the copper each stage hands to the next
-    # so the surviving fragment/staircase artifacts can be attributed
-    # to a stage instead of guessed at.  ``None`` (the default) makes
-    # every record/print below a no-op.
-    _stage_quality = _make_stage_quality_recorder(args)
-    _record_stage_quality(_stage_quality, STAGE_PRE_OPTIMIZE, final_result.router)
-
-    # Issue #4281: the geometric post-passes (optimize + DRC nudge) are
-    # grid-engine-only -- lattice/mesh copper must not be touched.
-    _post_passes_enabled = _engine_post_passes_enabled(args, quiet=quiet)
-    if _post_passes_enabled:
-        _mark_nongrid_routes_for_post_pass(final_result.router, args, quiet=quiet)
-
-    _stop_rc = _stage_boundary("optimization")  # issue #6324
+    # Issue #7377: the shared post-route pipeline (optimize -> DRC nudge ->
+    # consolidation -> finalize gate -> gap / skew / match-group tuning).
+    _stop_rc = _run_post_route_pipeline(final_result.router, args, quiet=quiet)
     if _stop_rc is not None:
         return _stop_rc
-    # Optimize traces
-    if (
-        _post_passes_enabled
-        and not args.no_optimize
-        and final_result.router.routes
-        and _optimization_fits_budget(args, quiet=quiet)
-    ):
-        _optimize_traces(final_result.router, args, quiet=quiet)
-        _record_stage_quality(_stage_quality, STAGE_POST_OPTIMIZE, final_result.router)
-
-    _stop_rc = _stage_boundary("drc-nudge")  # issue #6324
-    if _stop_rc is not None:
-        return _stop_rc
-    # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
-    # the nudge is NOT covered by --no-optimize, so it needs its own gate).
-    # Issue #6273: like the optimizer, it yields to save / fill / DRC when
-    # routing overran into the post-route reserve.
-    if (
-        _post_passes_enabled
-        and final_result.router.routes
-        and _optimization_fits_budget(args, quiet=quiet, stage="DRC nudge")
-    ):
-        from kicad_tools.router.drc_nudge import drc_verify_and_nudge
-
-        # Issue #2596: snapshot connectivity before nudge.
-        _ci_snapshot_nudge = _connectivity_snapshot(final_result.router)
-
-        with spinner("DRC nudge pass...", quiet=quiet):
-            nudge_result = drc_verify_and_nudge(final_result.router)
-        if not quiet and nudge_result.initial_violations > 0:
-            print(f"  {nudge_result.summary()}")
-
-        _enforce_connectivity_invariant_or_exit(
-            final_result.router,
-            _ci_snapshot_nudge,
-            phase="nudge",
-            args=args,
-            quiet=quiet,
-        )
-        _record_stage_quality(_stage_quality, STAGE_POST_NUDGE, final_result.router)
-
-    _stop_rc = _stage_boundary("consolidation")  # issue #6324
-    if _stop_rc is not None:
-        return _stop_rc
-    # Issue #4732: post-nudge collinear consolidation.  Runs LAST of the
-    # geometric passes so it also absorbs fragments the nudge introduced.
-    _run_consolidation_pass(
-        final_result.router,
-        args,
-        post_passes_enabled=_post_passes_enabled,
-        stage_recorder=_stage_quality,
-        quiet=quiet,
-    )
-
-    _stop_rc = _stage_boundary("finalization")  # issue #6324
-    if _stop_rc is not None:
-        return _stop_rc
-    # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
-    # over the post-optimize/post-nudge copper.  An rtree-less
-    # optimizer can introduce a cross-net crossing the pre-optimize
-    # finalize gate never saw; demote it before the canonical write.
-    # Issue #4281: unconditional -- runs even when the geometric
-    # post-passes are skipped for non-grid engines (defense in depth).
-    if final_result.router.routes:
-        _finalize_committed_copper_or_demote(final_result.router, quiet=quiet)
-    _record_stage_quality(_stage_quality, STAGE_POST_FINALIZE, final_result.router)
-    _print_stage_quality_report(_stage_quality)
-
-    # Issue #6968: match-group length tuning on the escalation result.  This
-    # is the default ``kct route`` flow; before #6968 only the single-attempt
-    # tail of ``_run_main_impl`` ran the tuner, so --length-match-groups
-    # silently tuned nothing here.
-    _run_match_group_tuning_phase(final_result.router, args, quiet=quiet)
 
     # Finalize: cleanup -> sexp -> stats (canonical ordering)
     _final_multi_pad_ids = {n for n, p in final_result.router.nets.items() if n > 0 and len(p) >= 2}
@@ -18958,6 +18918,22 @@ def _route_parser() -> argparse.ArgumentParser:
             "length-critical diff pair until skew is within the per-class "
             "tolerance. Requires --differential-pairs to be set; emits a "
             "warning and short-circuits otherwise."
+        ),
+    )
+    parser.add_argument(
+        "--tighten-diffpair-gap",
+        dest="tighten_diffpair_gap",
+        action="store_true",
+        help=(
+            "Opt-in post-route pass (Issue #7344): squeeze parallel diff-pair "
+            "trunks whose coupled Zdiff is above their class's "
+            "target_diff_impedance band toward the gap at which the "
+            "impedance check's own model hits the target (never below the "
+            "pair's floored intra-pair gap).  Both rails move symmetrically "
+            "with 45-degree jogs, so skew is unchanged; each edit is checked "
+            "for clearance, connectivity and impedance and skipped on any "
+            "failure.  Runs before skew and match-group tuning.  Off by "
+            "default: routing output is unchanged without it."
         ),
     )
     parser.add_argument(
@@ -23036,131 +23012,13 @@ def _run_main_impl(args, parser, argv) -> int:
 
         _rss.mark("post-cache-write")
 
-    _stop_rc = _stage_boundary("optimization")  # issue #6324
-    if _stop_rc is not None:
-        return _stop_rc
-    # Get pre-optimization statistics (also used in the no-optimize path
-    # below so the segment/via summary print does not raise
-    # UnboundLocalError when --no-optimize is set).
-    pre_segments = sum(len(r.segments) for r in router.routes)
-    pre_vias = sum(len(r.vias) for r in router.routes)
-
-    # Issue #4732: opt-in per-stage routing-quality instrumentation.
-    # Read-only -- it measures the copper each stage hands to the next
-    # so the surviving fragment/staircase artifacts can be attributed
-    # to a stage instead of guessed at.  ``None`` (the default) makes
-    # every record/print below a no-op.
-    _stage_quality = _make_stage_quality_recorder(args)
-    _record_stage_quality(_stage_quality, STAGE_PRE_OPTIMIZE, router)
-
-    # Issue #4281: the geometric post-passes (optimize + DRC nudge) are
-    # grid-engine-only -- lattice/mesh copper must not be touched.
-    _post_passes_enabled = _engine_post_passes_enabled(args, quiet=quiet)
-    if _post_passes_enabled:
-        _mark_nongrid_routes_for_post_pass(router, args, quiet=quiet)
-        if _resolve_route_engine(args) == "grid":
-            _restore_route_grid(router, router.routes)
-
-    # Optimize traces (unless --no-optimize/--raw flag is set)
-    if (
-        _post_passes_enabled
-        and not args.no_optimize
-        and router.routes
-        and _optimization_fits_budget(args, quiet=quiet)
-    ):
-        _optimize_traces(router, args, quiet=quiet)
-        _record_stage_quality(_stage_quality, STAGE_POST_OPTIMIZE, router)
-
-    _stop_rc = _stage_boundary("drc-nudge")  # issue #6324
-    if _stop_rc is not None:
-        return _stop_rc
-    # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
-    # the nudge is NOT covered by --no-optimize, so it needs its own gate).
-    # Issue #6273: like the optimizer, it yields to save / fill / DRC when
-    # routing overran into the post-route reserve.
-    if (
-        _post_passes_enabled
-        and router.routes
-        and _optimization_fits_budget(args, quiet=quiet, stage="DRC nudge")
-    ):
-        from kicad_tools.router.drc_nudge import drc_verify_and_nudge
-
-        # Issue #2596: snapshot connectivity before nudge.
-        _ci_snapshot_nudge = _connectivity_snapshot(router)
-
-        with spinner("DRC nudge pass...", quiet=quiet):
-            nudge_result = drc_verify_and_nudge(router)
-        if not quiet and nudge_result.initial_violations > 0:
-            print(f"  {nudge_result.summary()}")
-
-        _enforce_connectivity_invariant_or_exit(
-            router,
-            _ci_snapshot_nudge,
-            phase="nudge",
-            args=args,
-            quiet=quiet,
-        )
-        _record_stage_quality(_stage_quality, STAGE_POST_NUDGE, router)
-
-    _stop_rc = _stage_boundary("consolidation")  # issue #6324
-    if _stop_rc is not None:
-        return _stop_rc
-    # Issue #4732: post-nudge collinear consolidation.  Runs LAST of the
-    # geometric passes so it also absorbs fragments the nudge introduced.
-    _run_consolidation_pass(
-        router,
-        args,
-        post_passes_enabled=_post_passes_enabled,
-        stage_recorder=_stage_quality,
-        quiet=quiet,
+    # Issue #7377: the shared post-route pipeline (optimize -> DRC nudge ->
+    # consolidation -> finalize gate -> gap / skew / match-group tuning).
+    _stop_rc = _run_post_route_pipeline(
+        router, args, quiet=quiet, restore_route_grid=True, report_segment_delta=True
     )
-
-    _stop_rc = _stage_boundary("finalization")  # issue #6324
     if _stop_rc is not None:
         return _stop_rc
-    # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
-    # over the post-optimize/post-nudge copper.  An rtree-less
-    # optimizer can introduce a cross-net crossing the pre-optimize
-    # finalize gate never saw; demote it before the canonical write.
-    # Issue #4281: unconditional -- runs even when the geometric
-    # post-passes are skipped for non-grid engines (defense in depth).
-    if router.routes:
-        _finalize_committed_copper_or_demote(router, quiet=quiet)
-    _record_stage_quality(_stage_quality, STAGE_POST_FINALIZE, router)
-    _print_stage_quality_report(_stage_quality)
-
-    if _post_passes_enabled and router.routes:
-        # Get post-optimization statistics
-        post_segments = sum(len(r.segments) for r in router.routes)
-        post_vias = sum(len(r.vias) for r in router.routes)
-
-        if not quiet:
-            segment_reduction = (
-                ((pre_segments - post_segments) / pre_segments * 100) if pre_segments > 0 else 0
-            )
-            via_reduction = ((pre_vias - post_vias) / pre_vias * 100) if pre_vias > 0 else 0
-            print(f"  Segments: {pre_segments} -> {post_segments} ({-segment_reduction:+.1f}%)")
-            if pre_vias > 0:
-                print(f"  Vias:     {pre_vias} -> {post_vias} ({-via_reduction:+.1f}%)")
-
-    # Differential-pair length-match (skew) tuning -- Epic #2556 Phase 3I
-    # (Issue #2648) via --length-match-diffpairs, and auto-engaged on lattice
-    # output with --differential-pairs (Issue #6664).
-    if router.routes:
-        _run_diffpair_skew_tuning(router, args, quiet=quiet)
-
-    # N-trace match-group length-match (skew) tuning -- Epic #2661 Phase 3H
-    # (Issue #2723).  Engaged via --length-match-groups (opt-in).  Runs
-    # AFTER --length-match-diffpairs so the within-pair skew invariant is
-    # preserved before group tuning perturbs lane lengths.  Graceful
-    # short-circuit when no groups are declared / detected.
-    #
-    # Issue #6674: on the lattice engine the tuner also runs WITHOUT the
-    # flag, for declared groups whose spread exceeds the limit ``kct check``
-    # enforces (``engage="checker_limit"``).  Grid is not auto-engaged
-    # (frozen for pair-adjacent features until #6448); the explicit flag
-    # keeps its legacy ``length_critical`` gating on every engine.
-    _run_match_group_tuning_phase(router, args, quiet=quiet)
 
     # Finalize: cleanup -> sexp -> stats (canonical ordering)
     multi_pad_net_ids = set(multi_pad_nets)

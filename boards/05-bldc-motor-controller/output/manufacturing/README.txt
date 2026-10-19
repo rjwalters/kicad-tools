@@ -6,8 +6,8 @@ target is 0.5A; nominal comparator trip is 1A and firmware caps duty at 25%.
 Physical motor operation and thermal performance have not been measured.
 Do not increase these limits without bench validation. Read HARDWARE.md.
 
-SMT assembly: 36 CPL placements. Hand-solder J1-J5 and RV1 afterward.
-The BOM includes these six sourcing entries; they are absent from the SMT CPL.
+Assembly: 42 CPL placements (36 SMT + six through-hole parts: J1-J5, RV1).
+JLCPCB assembles through-hole parts (#7242); J1-J5 and RV1 are in the BOM and CPL.
 Solder U2/U3 exposed pads; their thermal vias are part of the SMT land pattern.
 Observe IC/header pin1, C1 polarity and D1/D2/D3 polarity marks.
 

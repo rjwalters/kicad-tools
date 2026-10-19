@@ -1131,6 +1131,35 @@ measured a matcher.**
    group ceiling is spent first. The other limit is BYTE1's unfinished DQ9,
    which is a routing problem.
 
+10. **The ceiling starves the largest-deficit members because of visit
+    order (Issue #5798).** This item is a unit-level result. No board 07
+    route was run for it, so it makes no claim about board 07's spreads.
+    `_tune_match_group_single_ended` visited members in `group.net_ids`
+    (declaration) order. Item 9 shows the 16-insert ceiling spent before A9
+    and A11 are tried. The reproducer is
+    `tests/test_match_group_tuning.py::TestCascadeBudget::test_ceiling_is_spent_on_largest_deficits_first`:
+    a 14-net group of nine members 2 mm short and four members 30 mm short
+    (the per-member cap of 2 inserts each), so demand is 17 inserts against
+    the ceiling of 16. In declaration order the last 30 mm member got one
+    insert and reported `cascade_budget_exhausted`. Members are now visited
+    by descending deficit (ties keep declaration order), so every 30 mm
+    member gets its two inserts and the one 2 mm member that closes the least
+    skew reports `cascade_budget_exhausted`. The returned dict is still in
+    declaration order. `MAX_TOTAL_INSERTS_PER_GROUP` and the per-member caps
+    are unchanged; item 7 refutes them as the lever.
+
+    This does not close SDRAM_ADDRESS. BA0 and BA1 still need about 40 mm
+    each and the per-member cap supplies 7.8 and 11.7 mm (item 9), so the
+    group stays over 5.0 mm at current limits. What the change buys is that
+    the ceiling is spent on the members that set the group's minimum. Whether
+    that moves board 07's ADDRESS spread is unmeasured here.
+
+    Original acceptance criteria 3 and 4 are met: item 8 shows
+    `--length-match-groups` costs no connections (160/161 on and off) and
+    item 9 shows it adds no kicad-cli error under either rule set after
+    #7162. The kct and ref rows of `krt_compare.py` were re-run in items 8
+    and 9; KRT rows are reused from pass 2.
+
 **Verdict.** The gap survives deconfounding. It is not the routing cap. It is
 the three wiring gaps in (1), then DRC-limited meander room and the
 all-or-nothing rollback in (3). Item 6 shows #7043 (PR #7048) closes
