@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "checked_at": "2026-10-18T23:09:35+00:00",
+  "checked_at": "2026-10-18T23:59:00+00:00",
   "mode": "assembly",
   "status": "ready",
   "blockers": [],
@@ -8,7 +8,7 @@
     {
       "name": "bom",
       "status": "passed",
-      "detail": "All42 exact LCSC identities match source parts;23 BOM groups,36 SMT CPL placements;J1-J5/RV1 manual assembly."
+      "detail": "All42 exact LCSC identities match source parts;23 BOM groups,42 CPL placements (36 SMT + J1-J5/RV1 through-hole, JLCPCB-assembled since #7239)."
     },
     {
       "name": "kct_check",
@@ -23,7 +23,7 @@
     {
       "name": "artifacts",
       "status": "passed",
-      "detail": "23 BOM groups/42 exact identities,36 SMT placements,6 manual parts; complete Gerber/drill/drawings/KiCad source/firmware package and SHA256 integrity. CPL regenerated through manufacturer profile: D1/D2/D3=180 degrees, U1=270 degrees; library-qualified names preserve corrections. Other CPL fields unchanged; package archive and manifest verified."
+      "detail": "23 BOM groups/42 exact identities,42 CPL placements (36 SMT + 6 through-hole) in the Gerber/drill frame (#7059, #7241); complete Gerber/drill/drawings/KiCad source/firmware package and SHA256 integrity. CPL regenerated through manufacturer profile: D1/D2/D3=180 degrees, U1=270 degrees; library-qualified names preserve corrections. Other CPL fields unchanged; package archive and manifest verified."
     },
     {
       "name": "source_reconstruction",
@@ -64,17 +64,17 @@
     "output/board05_revB.kicad_sym": "05702cd35f2a300e46dd79349044695cc2e4cd80e6078b417ef057a71207257c",
     "output/board05_revB.pretty/CP_Elec_8x10.5_PolarityMark.kicad_mod": "544e9e4de35e1f673f5c2efc24e8b485c70a49f9ae51d3624e855c1f6a3b0178",
     "output/board05_revB.pretty/TI_PWP0028C_EP3.4x9.7_Mask3.1x5.18_ThermalVias.kicad_mod": "6be1ab0e106cbf957d0d708d72f06518a70af776ded5b64de8a2f62f65c833d7",
-    "output/drc_report.json": "bac9323001b4365a0dd95c28d8ab14bf14869d9d2ea3f86f0e7db2875321c1e0",
-    "output/erc_report.json": "45366e563ec5d2a850fc064407959b521617f5bbc33cac099b8c28405b0afd66",
+    "output/drc_report.json": "bd5397ac1b18435df067f90c1767e77fa7b1976b185d918f3a9540af1df3d4e0",
+    "output/erc_report.json": "651abcfc8a766dfa0cbd606b487859cb596690fa405d3bfdf8d1ed78e2535ccd",
     "output/fp-lib-table": "4a62ef010ac70b70114c6c1db80d54a3e8964c143796c20c79a31fcf166b3c11",
     "output/lvs.json": "52fed944df95bc4d3650b2774ce6b714e731e310d9d9a761553b25055b3e1a25",
     "output/manufacturing/HARDWARE.md": "c18a5ccc40e0f0e862b062d70d9be509f7ceed9de5c6fb8df95b711f69d7dd74",
-    "output/manufacturing/README.txt": "f5a73c37465fba2197b746564bcea3be328c69094e3a7e773cef590cd8f6a6d9",
+    "output/manufacturing/README.txt": "820be1d9ae6a81171e5d07b69dce287e95b13a81431ff50a27252b178027dec7",
     "output/manufacturing/assembly-back.pdf": "f6c1d5815cbaf1a05c350590a5ee17e9a8dbf2c9b25d9ebbf77869c0155a7efd",
     "output/manufacturing/assembly-front.pdf": "9dff7451d0e7f5f797adf0071e2fa618f95036bd9bf64d9f29734febf96e14c6",
     "output/manufacturing/bom_jlcpcb.csv": "6e04b5c78e81ebd85f18e72142d21906dda4165d5ca9b7f7d6159729b54c5506",
     "output/manufacturing/check-report.json": "50fd9a160510e11db6ba7fc902a087eea4087c960b03d9bfb70cd470249a3020",
-    "output/manufacturing/cpl_jlcpcb.csv": "84a86a6db7a27d9a52b1aa7f45e7a4b7c4fd5965e45b23dbd4a48d2866b558cc",
+    "output/manufacturing/cpl_jlcpcb.csv": "6b8231d3b65a8d0d7c13a0354f76fd852716c4ddacc2cd5f1410baabe0ce858d",
     "output/manufacturing/firmware/Makefile": "f105bf145347705a625a825aad34614c3e4001c7260793991f68cca37587516c",
     "output/manufacturing/firmware/bldc.hex": "4482dd25f19c36ab8ed4a6514904b6668bbe7a11264f788b50a9cd0810916412",
     "output/manufacturing/firmware/commutation.h": "2193ce070b97ab9591b9045b0b58fe84070fa04726e2f0ed7a7a7fb6111380d0",
@@ -92,9 +92,9 @@
     "output/manufacturing/kct-check.json": "50fd9a160510e11db6ba7fc902a087eea4087c960b03d9bfb70cd470249a3020",
     "output/manufacturing/kicad_project.zip": "875af0eff99ed1af4f80a29a29a0860992f8846e21538898577552934dbebedf",
     "output/manufacturing/lvs.json": "52fed944df95bc4d3650b2774ce6b714e731e310d9d9a761553b25055b3e1a25",
-    "output/manufacturing/manifest.json": "ccd6c65537aa167d733bebe3feaa55923359668d1d733056c3ac112e116fd718",
+    "output/manufacturing/manifest.json": "b09437bc821692fa926fadeab9abaddfedbc1ea6fc07cf4fcf8b1c264572181d",
     "output/manufacturing/native-drc.json": "604449a31cd023f804af85b1ad66f21f364193aad574acc6e65487c1784a985c",
-    "output/manufacturing/native-erc.json": "45366e563ec5d2a850fc064407959b521617f5bbc33cac099b8c28405b0afd66",
+    "output/manufacturing/native-erc.json": "651abcfc8a766dfa0cbd606b487859cb596690fa405d3bfdf8d1ed78e2535ccd",
     "output/manufacturing/project.kct": "069f467cabeda773e36897cf2a4a7012577bda6258e119cb6cc24a0a856a0d6b",
     "output/manufacturing/renders/3d-back.png": "ec0126e348b9f440792f9224a68b713dd86d59b15ad3c9c3b5a4de8de6fe1a8e",
     "output/manufacturing/renders/3d-front.png": "8a5486120518e28a5126af21d961ea5966e0378c513930681473e4f4a7e9ff83",
@@ -103,7 +103,7 @@
     "output/manufacturing/report.md": "2a8be894b2281161fa0df2b4b92e44e3da615c5e908edd91f573c93e006d1774",
     "output/manufacturing/report.pdf": "0ecfb21366b397388d2e6e91eced43a7ea180c6528d3ea596c91a375d4f64b31",
     "output/manufacturing/schematic.pdf": "3bb8564323757ed17fbffed573e01e456c851fbd84863ce978028e45f065e9b2",
-    "output/manufacturing.zip": "58d460e000b736fb1ae759bad6f7d16c7e876e457a01fa431f708ba3b6277f20",
+    "output/manufacturing.zip": "8db91dc24c7fa2777f3cf69c4a2eefe27adef766c16c15134df6d8e7032e9649",
     "output/project.kct": "4369ceb55221ee30b4a25e636e1fb6d41c9cb12fcebc11a3a6136f9090e20af7",
     "output/readiness/45-alignment.json": "5f7217e95e929fbe8ea5c45aa0d8535ebd5ec39ef3f131539cc7413d30a5eedf",
     "output/readiness/drill-relocations.json": "aff479ed240c2180417e10dd9068b9f2d8ad6c40befb33ae1183a4ee2ece94cd",
@@ -111,7 +111,7 @@
     "output/readiness/firmware.txt": "b2c277cbb5ca50e0adc39a950aa493d8857cb446f36273c5dc7d687871c5abc8",
     "output/readiness/kct-check.json": "50fd9a160510e11db6ba7fc902a087eea4087c960b03d9bfb70cd470249a3020",
     "output/readiness/native-drc.json": "604449a31cd023f804af85b1ad66f21f364193aad574acc6e65487c1784a985c",
-    "output/readiness/native-erc.json": "45366e563ec5d2a850fc064407959b521617f5bbc33cac099b8c28405b0afd66",
+    "output/readiness/native-erc.json": "651abcfc8a766dfa0cbd606b487859cb596690fa405d3bfdf8d1ed78e2535ccd",
     "output/readiness/reconstruction.txt": "c11e65c070656735650c1c9aa9d5a7f2a6d5ee84a77e2983d4d65672fb685cd9",
     "output/renders/3d-back.png": "ec0126e348b9f440792f9224a68b713dd86d59b15ad3c9c3b5a4de8de6fe1a8e",
     "output/renders/3d-front.png": "8a5486120518e28a5126af21d961ea5966e0378c513930681473e4f4a7e9ff83",

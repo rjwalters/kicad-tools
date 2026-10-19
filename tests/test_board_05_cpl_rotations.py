@@ -3,8 +3,6 @@
 import csv
 from pathlib import Path
 
-import pytest
-
 from kicad_tools.export.assembly import AssemblyPackage
 
 OUTPUT = Path(__file__).resolve().parents[1] / "boards/05-bldc-motor-controller/output"
@@ -34,35 +32,15 @@ def test_board05_package_export_applies_rotation_profile(tmp_path):
         assert float(rows[reference]["Rotation"]) == rotation
 
 
-def test_board05_saved_cpl_smt_rows_apply_rotation_profile(tmp_path):
-    """The committed CPL's SMT rows keep the rotation profile.
-
-    Coordinates are excluded: the committed bundle predates the Gerber-frame
-    CPL fix (#7059) and refreshes on the next board regen.
-    """
+def test_board05_saved_cpl_matches_fresh_export(tmp_path):
+    """The committed CPL is the current export: rotations, THT rows and the
+    Gerber/drill frame (#7059) all included (#7241)."""
     rows = _fresh_rows(tmp_path)
     with (OUTPUT / "manufacturing/cpl_jlcpcb.csv").open() as stream:
         saved = {row["Designator"]: row for row in csv.DictReader(stream)}
-    coords = {"Mid X", "Mid Y"}
-
-    def strip(table):
-        return {
-            ref: {k: v for k, v in row.items() if k not in coords}
-            for ref, row in table.items()
-            if ref not in THT_REFS
-        }
-
-    assert strip(saved) == strip(rows)
+    assert saved == rows
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "#7268: the committed board 05 CPL predates THT inclusion (#7239) and lacks "
-        "J1-J5/RV1; refresh_readiness.py refuses to re-pin it on #7220 "
-        "via_at_pad_edge warnings (#7273; old-frame CPL, #7241)"
-    ),
-)
 def test_board05_saved_cpl_includes_tht_rows():
     with (OUTPUT / "manufacturing/cpl_jlcpcb.csv").open() as stream:
         saved = {row["Designator"] for row in csv.DictReader(stream)}
