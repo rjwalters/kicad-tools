@@ -15,6 +15,9 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-19
 
+- **PR #7438**: refactor(boards): run board 03 readiness receipt in-process via readiness_cmd.main
+- **PR #7428**: fix(blocks): wire OpAmpBlock and multi-channel ESD array to real pins
+- **Issue #7410** (closed): Gate regenerate_boards_03_04_6076.py's board-03 readiness.json promotion (#7358 allowlist)
 - **PR #7454**: build(deps-dev): Bump the npm-minor-patch group across 1 directory with 2 updates
 - **PR #7448**: fix: compare pin-header pin count in LCSC package guard
 - **PR #7447**: test: pin board 06's reviewed PZ254V header sourcing (fix main red)
