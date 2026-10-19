@@ -15,6 +15,14 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-19
 
+- **PR #7455**: fix(readiness): give board 04 drc_targets so refresh re-pins its native-drc.json
+- **Issue #7435** (closed): refresh_readiness: board 04 has no drc_targets, so nothing re-pins its native-drc.json
+- **PR #7473**: ci: restore import-not-found nanobind entry in mypy baseline
+- **Issue #7472** (closed): main red: mypy-baseline.txt dropped the nanobind import-not-found line, failing test_baseline_keeps_both_nanobind_signatures
+- **PR #7470**: fix: measure escape-via mask-dam distance in the pad's rotated frame
+- **Issue #7467** (closed): Router escape mask-dam gate ignores residual pad rotation
+- **PR #7462**: fix(router): equal vias for crossed lattice fallback diff-pair legs (#7093)
+- **Issue #7322** (closed): Stitcher and pour-repair/escape via placement ignore the mask-dam floor (follow-up to #7296)
 - **PR #7459**: fix: keep stitch and escape vias out of the SMD mask-dam zone
 - **PR #7452**: build(deps-dev): Bump cmake from 4.4.3 to 4.4.4
 - **PR #7451**: build(deps): Bump the uv-minor-patch group across 1 directory with 4 updates

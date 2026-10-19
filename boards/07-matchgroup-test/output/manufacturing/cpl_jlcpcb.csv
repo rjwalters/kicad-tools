@@ -31,9 +31,9 @@ C8,100nF,Capacitor_SMD:C_0603_1608Metric,141.0620mm,-102.7500mm,180.0,Bottom
 C9,100nF,Capacitor_SMD:C_0603_1608Metric,141.0620mm,-95.0000mm,180.0,Bottom
 D1,GREEN,LED_SMD:LED_0603_1608Metric,138.5000mm,-135.0000mm,180.0,Top
 D2,RED,LED_SMD:LED_0603_1608Metric,144.5000mm,-135.0000mm,180.0,Top
-J1,5V_INPUT,Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,103.5000mm,-75.0000mm,0.0,Top
-J2,SWD_3V3,Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical,103.5000mm,-110.0000mm,0.0,Top
-J3,UART_3V3,Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical,103.5000mm,-133.0000mm,0.0,Top
+J1,5V_INPUT,Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,103.5000mm,-76.2700mm,0.0,Top
+J2,SWD_3V3,Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical,103.5000mm,-116.3500mm,0.0,Top
+J3,UART_3V3,Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical,103.5000mm,-135.5400mm,0.0,Top
 R1,0R,Resistor_SMD:R_0603_1608Metric,117.5000mm,-85.0000mm,0.0,Top
 R2,10k,Resistor_SMD:R_0603_1608Metric,128.5000mm,-129.0000mm,0.0,Top
 R3,10k,Resistor_SMD:R_0603_1608Metric,115.5000mm,-95.0000mm,0.0,Top

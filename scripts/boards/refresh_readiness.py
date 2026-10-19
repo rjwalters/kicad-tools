@@ -150,10 +150,16 @@ BOARDS: dict[str, BoardConfig] = {
     # ``kct check --mfr jlcpcb-tier1`` reports its reviewed vias as errors.
     # The schematic is re-checked by native ERC (no report copies are
     # rewritten: its committed reports also carry a Linux-container run).
+    # Its native DRC evidence is owned here (Issue #7435): the pintype
+    # annotator no longer writes it (Issue #7409).
     "04-stm32-devboard": BoardConfig(
         routed_pcb="output/stm32_devboard_routed.kicad_pcb",
         schematic="output/stm32_devboard.kicad_sch",
         tier="jlcpcb-tier1",
+        drc_targets=(
+            "output/readiness/native-drc.json",
+            "output/manufacturing/native-drc.json",
+        ),
         erc=(ErcJob("04-native-erc.json", "output", "stm32_devboard.kicad_sch", ()),),
         check_script="check_manufacturing.py",
         mirrors=(("output/manufacturing/design-source", "."),),
