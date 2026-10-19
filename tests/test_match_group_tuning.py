@@ -3689,9 +3689,97 @@ class TestNoOvershootPastGroupMaximum:
         excess = self._run(0.7, refits=3, monkeypatch=monkeypatch)
         assert excess <= 1e-8, f"member ended {excess * 1000:.4f}um past the target"
 
-    def test_without_refit_the_host_overshoots(self, monkeypatch):
-        """Guards the test geometry: with the refit off it overshoots."""
-        assert self._run(0.7, refits=0, monkeypatch=monkeypatch) > 1e-6
+    @pytest.mark.parametrize("angle_deg", [0.0, 5.0, 13.0, 22.5, 30.0, 58.0, 75.0, 89.0])
+    @pytest.mark.parametrize("shortfall", [0.3, 1.3])
+    def test_member_never_ends_past_target_on_any_host_angle(
+        self, angle_deg, shortfall, monkeypatch
+    ):
+        """Whatever the refit manages, the committed route is never past target."""
+        import math
+
+        from kicad_tools.router.length import LengthTracker
+
+        host_len = 20.0
+        a = math.radians(angle_deg)
+        host = Route(
+            net=1,
+            net_name="D0",
+            segments=[
+                Segment(
+                    x1=0.0,
+                    y1=0.0,
+                    x2=host_len * math.cos(a),
+                    y2=host_len * math.sin(a),
+                    width=0.2,
+                    layer=Layer.F_CU,
+                    net=1,
+                    net_name="D0",
+                )
+            ],
+        )
+        target = host_len + shortfall
+        group = _ddr_group(net_ids=[1, 2], tolerance=0.1)
+        routes = {1: host, 2: _straight_route(2, "D1", target, y=30.0)}
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            config=SerpentineConfig(amplitude=0.15, gap_factor=2.0),
+        )
+        excess = LengthTracker.calculate_route_length(results[1][0]) - target
+        assert excess <= 1e-6, f"member ended {excess:.6f}mm past the target"
+
+    @pytest.mark.parametrize("angle_deg", [0.0, 3.3, 13.0, 22.5, 45.0, 58.0])
+    @pytest.mark.parametrize("need", [0.3, 0.9, 2.0])
+    def test_per_bump_fallback_never_passes_the_need(self, angle_deg, need):
+        import math
+
+        from kicad_tools.router.length import LengthTracker
+        from kicad_tools.router.match_group_tuning import _place_bumps_per_host
+
+        a = math.radians(angle_deg)
+        host = Route(
+            net=1,
+            net_name="D0",
+            segments=[
+                Segment(
+                    x1=0.0,
+                    y1=0.0,
+                    x2=12.0 * math.cos(a),
+                    y2=12.0 * math.sin(a),
+                    width=0.2,
+                    layer=Layer.F_CU,
+                    net=1,
+                    net_name="D0",
+                )
+            ],
+        )
+        before = LengthTracker.calculate_route_length(host)
+        placed = _place_bumps_per_host(
+            host,
+            length_needed=need,
+            tolerance_mm=0.1,
+            base_config=SerpentineConfig(amplitude=1.0, gap_factor=2.0),
+            host_floor=1.0,
+            fixed_segment_ids=None,
+            other_group_routes={},
+            check=lambda segs: None,
+        )
+        if placed is None:
+            return
+        added = LengthTracker.calculate_route_length(placed) - before
+        assert added <= need + 1e-6, f"per-bump added {added:.6f}mm for a need of {need}mm"
+
+    def test_without_refit_the_overshooting_candidate_is_rejected(self, monkeypatch):
+        """With the refit off the raw trombone overshoots, so the guard rejects it.
+
+        The member is left short rather than committed past the target; the
+        refit is what lets the same host land inside the tolerance.
+        """
+        without_refit = self._run(0.7, refits=0, monkeypatch=monkeypatch)
+        assert -0.5 < without_refit < -0.1  # rejected: still short, never past
+        assert self._run(0.7, refits=3, monkeypatch=monkeypatch) > -0.1
 
 
 # =============================================================================

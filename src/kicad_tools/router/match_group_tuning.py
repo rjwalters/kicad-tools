@@ -292,6 +292,7 @@ TUNE_RESULT_REASONS: tuple[str, ...] = (
     "exceeded_max_inserts",
     "cascade_budget_exhausted",
     "post_insertion_drc_violation",
+    "overshoot",
     "no_suitable_segment",
     "unrouted",
     "not_length_critical",
@@ -308,6 +309,7 @@ REASON_SUMMARY_LABELS: dict[str, str] = {
     "tuned": "tuned",
     "already_within_tolerance": "clean",
     "post_insertion_drc_violation": "rolled back",
+    "overshoot": "rolled back",
     "exceeded_max_inserts": "budget-exhausted",
     "cascade_budget_exhausted": "budget-exhausted",
     "not_length_critical": "skipped",
@@ -1439,6 +1441,22 @@ def _tune_match_group_single_ended(
                             vias=current_route.vias.copy(),
                         )
 
+                    # Issue #7423: the refit above is best-effort (it gives up
+                    # when the amplitude would go non-positive, the loop count
+                    # changes, or the budget runs out).  "Never past the group
+                    # target" is enforced here, on the measured route, so it
+                    # holds by construction rather than by convergence.
+                    final_overshoot = _measure(candidate_route) - target_length
+                    if final_overshoot > OVERSHOOT_EPS_MM:
+                        last_failure_reason = "overshoot"
+                        last_failure_message = (
+                            f"Candidate meander rejected on net {net_id} "
+                            f"segment {seg_idx} (amplitude "
+                            f"{attempt_config.amplitude:.3f}mm): would end "
+                            f"{final_overshoot:.4f}mm past the group target"
+                        )
+                        continue  # try the next (smaller) amplitude
+
                     # Post-insertion DRC self-check.  Issue #3317
                     # follow-up: also check segment-vs-via at
                     # ``via_clearance_mm``, diff-pair intra-pair at
@@ -1645,8 +1663,8 @@ def _place_bumps_per_host(
     (``base * BUMP_AMPLITUDE_SHRINK**n`` to ``BUMP_MIN_AMPLITUDE_MM``) on the
     outer side first, then the opposite side; when both sides are blocked the
     cursor skips forward and any remaining length spills onto the next run.
-    A bump never adds more than the length still needed, so the route is
-    never pushed past the target.  ``check`` is the clearance gate
+    A bump's measured added length never exceeds the length still needed
+    (Issue #7423), so the route is never pushed past the target.  ``check`` is the clearance gate
     (``None`` = clear); it is applied to every bump and again to the
     assembled result.
 
@@ -1724,9 +1742,19 @@ def _place_bumps_per_host(
                     )
                     if not result.success or len(result.new_segments) <= 1:
                         continue
+                    # Issue #7423: book the bump's MEASURED added length; on an
+                    # off-angle host the snapped frame adds more than
+                    # ``2 * bump_amp``.  A bump that would pass the target is
+                    # skipped (the next rung is smaller).
+                    bump_added = (
+                        sum(math.hypot(sg.x2 - sg.x1, sg.y2 - sg.y1) for sg in result.new_segments)
+                        - bump_len
+                    )
+                    if bump_added > remaining + OVERSHOOT_EPS_MM:
+                        continue
                     if check(result.new_segments) is None:
                         placed = result.new_segments
-                        added = 2.0 * bump_amp
+                        added = bump_added
                         break
                 if placed is not None:
                     break
