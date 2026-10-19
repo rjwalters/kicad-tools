@@ -1,11 +1,11 @@
 {
   "file": "output/usb_joystick_routed.kicad_pcb",
   "manufacturer": "jlcpcb-tier1",
-  "pcb_sha256": "9520237d99732b6f1b272cd9921345ad03bd94b87faa37c1f9c7a0a3ff9e014d",
+  "pcb_sha256": "e87aedb5f5cf2d4a132e7029deb0707de299494014fdcb657b77a83025a6d7f6",
   "layers": 4,
   "summary": {
     "errors": 0,
-    "warnings": 7,
+    "warnings": 1,
     "infos": 10,
     "waived": 0,
     "rules_checked": 76,
@@ -265,161 +265,13 @@
       "waived": false,
       "key": "diffpair_uncoupled_length||USB_MCU_D+,USB_MCU_D-|",
       "evidence_hash": "ev2:9ca41e890dfecad0"
-    },
-    {
-      "rule_id": "thermal_asymmetry",
-      "type": "unknown",
-      "severity": "warning",
-      "message": "C10 thermal asymmetry (tombstoning risk): pad 2 (net 'GND') is solid to 'GND' fill on F.Cu; pad 1 (net 'JOY_X') has no zone connection (trace only) -- give the solid terminal a thermal relief (or balance the other terminal)",
-      "location": [
-        131.275,
-        89.5
-      ],
-      "layer": "F.Cu",
-      "actual_value": null,
-      "required_value": null,
-      "items": [
-        "C10",
-        "C10-2",
-        "C10-1"
-      ],
-      "nets": [
-        "GND",
-        "JOY_X"
-      ],
-      "status": "warning",
-      "waived": false,
-      "key": "thermal_asymmetry|C10,C10-1,C10-2|GND,JOY_X|F.Cu",
-      "evidence_hash": "ev2:1c3af2926b591285"
-    },
-    {
-      "rule_id": "thermal_asymmetry",
-      "type": "unknown",
-      "severity": "warning",
-      "message": "C11 thermal asymmetry (tombstoning risk): pad 2 (net 'GND') is solid to 'GND' fill on F.Cu; pad 1 (net 'JOY_Y') has no zone connection (trace only) -- give the solid terminal a thermal relief (or balance the other terminal)",
-      "location": [
-        131.275,
-        92.5
-      ],
-      "layer": "F.Cu",
-      "actual_value": null,
-      "required_value": null,
-      "items": [
-        "C11",
-        "C11-2",
-        "C11-1"
-      ],
-      "nets": [
-        "GND",
-        "JOY_Y"
-      ],
-      "status": "warning",
-      "waived": false,
-      "key": "thermal_asymmetry|C11,C11-1,C11-2|GND,JOY_Y|F.Cu",
-      "evidence_hash": "ev2:4f2870bb8e4cf43a"
-    },
-    {
-      "rule_id": "thermal_asymmetry",
-      "type": "unknown",
-      "severity": "warning",
-      "message": "PTH pin J1-A1 (net 'GND', drill 0.40mm) is connected solid to zone fill on 3 layers (F.Cu, In1.Cu, B.Cu); barrel fill is at risk when wave-, selective- or hand-soldered -- use thermal reliefs on this pin",
-      "location": [
-        149.475,
-        63.3
-      ],
-      "layer": "F.Cu",
-      "actual_value": 3.0,
-      "required_value": 1.0,
-      "items": [
-        "J1",
-        "J1-A1"
-      ],
-      "nets": [
-        "GND"
-      ],
-      "status": "warning",
-      "waived": false,
-      "key": "thermal_asymmetry|J1,J1-A1|GND|F.Cu",
-      "evidence_hash": "ev2:c5bc344b9959c160"
-    },
-    {
-      "rule_id": "thermal_asymmetry",
-      "type": "unknown",
-      "severity": "warning",
-      "message": "PTH pin J1-A12 (net 'GND', drill 0.40mm) is connected solid to zone fill on 3 layers (F.Cu, In1.Cu, B.Cu); barrel fill is at risk when wave-, selective- or hand-soldered -- use thermal reliefs on this pin",
-      "location": [
-        143.525,
-        63.3
-      ],
-      "layer": "F.Cu",
-      "actual_value": 3.0,
-      "required_value": 1.0,
-      "items": [
-        "J1",
-        "J1-A12"
-      ],
-      "nets": [
-        "GND"
-      ],
-      "status": "warning",
-      "waived": false,
-      "key": "thermal_asymmetry|J1,J1-A12|GND|F.Cu",
-      "evidence_hash": "ev2:6892792969380346"
-    },
-    {
-      "rule_id": "thermal_asymmetry",
-      "type": "unknown",
-      "severity": "warning",
-      "message": "PTH pin J1-B1 (net 'GND', drill 0.40mm) is connected solid to zone fill on 3 layers (F.Cu, In1.Cu, B.Cu); barrel fill is at risk when wave-, selective- or hand-soldered -- use thermal reliefs on this pin",
-      "location": [
-        143.525,
-        61.95
-      ],
-      "layer": "F.Cu",
-      "actual_value": 3.0,
-      "required_value": 1.0,
-      "items": [
-        "J1",
-        "J1-B1"
-      ],
-      "nets": [
-        "GND"
-      ],
-      "status": "warning",
-      "waived": false,
-      "key": "thermal_asymmetry|J1,J1-B1|GND|F.Cu",
-      "evidence_hash": "ev2:170b6462c1ef626c"
-    },
-    {
-      "rule_id": "thermal_asymmetry",
-      "type": "unknown",
-      "severity": "warning",
-      "message": "PTH pin J1-B12 (net 'GND', drill 0.40mm) is connected solid to zone fill on 3 layers (F.Cu, In1.Cu, B.Cu); barrel fill is at risk when wave-, selective- or hand-soldered -- use thermal reliefs on this pin",
-      "location": [
-        149.475,
-        61.95
-      ],
-      "layer": "F.Cu",
-      "actual_value": 3.0,
-      "required_value": 1.0,
-      "items": [
-        "J1",
-        "J1-B12"
-      ],
-      "nets": [
-        "GND"
-      ],
-      "status": "warning",
-      "waived": false,
-      "key": "thermal_asymmetry|J1,J1-B12|GND|F.Cu",
-      "evidence_hash": "ev2:eb6da3d0f974150e"
     }
   ],
   "mask_copper_assessments": [],
   "meta_checks": {
     "drc": {
       "status": "PASSED",
-      "detail": "76 rules checked, 0 error(s), 7 warning(s)"
+      "detail": "76 rules checked, 0 error(s), 1 warning(s)"
     },
     "erc": {
       "status": "PASSED",
@@ -447,8 +299,8 @@
     "segments_per_net": 40.0,
     "zero_length_count": 0,
     "median_length_mm": 0.565685424949246,
-    "fragment_count": 98,
-    "fragment_fraction": 0.09074074074074075,
+    "fragment_count": 99,
+    "fragment_fraction": 0.09166666666666666,
     "orthogonal_count": 496,
     "diagonal_45_count": 584,
     "off_axis_count": 0,

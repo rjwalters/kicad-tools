@@ -1123,6 +1123,7 @@ class ManufacturingPackage:
             from ..report.generator import ReportGenerator
             from ..report.models import ReportData
             from ..report.net_class_map import resolve_committed_net_class_map
+            from ..report.utils import find_schematic
         except ImportError:
             logger.warning(
                 "Report generation skipped: required dependency not installed (e.g. jinja2)"
@@ -1150,6 +1151,7 @@ class ManufacturingPackage:
                 pcb_path=self.pcb_path,
                 manufacturer=self.manufacturer,
                 net_class_map_path=net_class_map_path,
+                schematic_path=self.schematic_path or find_schematic(self.pcb_path),
             )
             collector.collect_all(data_dir)
 
