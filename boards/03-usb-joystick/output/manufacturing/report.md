@@ -2,7 +2,7 @@
 title: "usb_joystick_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.23.0"
-date: "Rev 1 | 2026-10-18 | jlcpcb-tier1"
+date: "Rev 1 | 2026-10-19 | jlcpcb-tier1"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true

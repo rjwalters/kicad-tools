@@ -29,8 +29,8 @@
       "size": 4103
     },
     "cpl_jlcpcb.csv": {
-      "sha256": "6b8231d3b65a8d0d7c13a0354f76fd852716c4ddacc2cd5f1410baabe0ce858d",
-      "size": 3255
+      "sha256": "2c67e2998be11853cb2f4687981d80f3a9f786fcad2c0d89901c99b3d3f467ae",
+      "size": 3256
     },
     "design-source.zip": {
       "sha256": "2292cf7cd014252120a60332b41e9bdb964467392fd9823d53b5447cefbc37d3",
@@ -109,7 +109,7 @@
       "size": 1214
     },
     "native-erc.json": {
-      "sha256": "651abcfc8a766dfa0cbd606b487859cb596690fa405d3bfdf8d1ed78e2535ccd",
+      "sha256": "c3cdb2a0658c1554b457bbd310213aa3c988f0139050a6c7fe6c9091a68ff534",
       "size": 988
     },
     "project.kct": {

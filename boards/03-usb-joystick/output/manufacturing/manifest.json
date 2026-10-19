@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.23.0",
-  "generated_at": "2026-10-18T21:48:45.946401+00:00",
+  "generated_at": "2026-10-19T09:02:10.144257+00:00",
   "manufacturer": "jlcpcb-tier1",
   "files": {
     "DESIGN_REVIEW.md": {
@@ -33,7 +33,7 @@
       "size": 14232
     },
     "cpl_jlcpcb.csv": {
-      "sha256": "77f4911b0cee3381fbff404690797ebb4bede6fabc174df4340815cc23ab3c62",
+      "sha256": "213c62a3a2c9292f5c3845b76f4b447141a2206a83043afddd2a42a4c3064b05",
       "size": 2854
     },
     "design-source/DESIGN_REVIEW.md": {
@@ -173,8 +173,8 @@
       "size": 2192
     },
     "gerbers/gerbers.zip": {
-      "sha256": "fe692448c33121f81bb55dce275e9acf28e7ed5734b2c8d1af73e160944010f5",
-      "size": 128858
+      "sha256": "be9f4ca9d26511a9abd23773565f1e8e116fc04726a4f5de1f811864cc4e580a",
+      "size": 128859
     },
     "images/assembly.png": {
       "sha256": "26b109c1b656a2b0cde61770cba90124abf1a2feea0046292f4cb66f1f76d599",
@@ -209,11 +209,11 @@
       "size": 482526
     },
     "images/schematic_usb_joystick.png": {
-      "sha256": "435c684096c4c22d4f460823a2584c6e3f09f6663b89176976bbbaec2728eea2",
-      "size": 486460
+      "sha256": "c0a3950fda2f26c18ad6359ba1ccd02e953d67c0be8d2b40d3d8553de7445c79",
+      "size": 486466
     },
     "kicad_project.zip": {
-      "sha256": "ce40c656e355e13e201dec67a7325c3b093885c5a9c7284f18b307e753453cee",
+      "sha256": "520c820c7bffe0ac04b389ccfa7d26cd6bfaa32c59f03e42045f651f7517572a",
       "size": 195327
     },
     "manufacturing-requirements.json": {
@@ -313,12 +313,12 @@
       "size": 3153
     },
     "report.md": {
-      "sha256": "3ef60146402da148be86ff96599c5923252f54dd1c08b57854ffcfd95314e045",
+      "sha256": "c4f87492e49e62833f21211cf39ea749b3fba424241d2e80536f1cee6d46de08",
       "size": 4667
     },
     "report.pdf": {
-      "sha256": "c9e6bb6bf13c93d1527f28136e00b06e28a3ea90eac802b599abe60c8fa65944",
-      "size": 3258027
+      "sha256": "9ebc6d736b5eaadd339f238a2eb22b3f0948a71d29d024e805905d4395a91a08",
+      "size": 3291564
     },
     "schematic.pdf": {
       "sha256": "6fe021a9ea56eb056b2fc6dc24e3fee47c4f6555c6141a4ad1ec755b51aa0d98",
@@ -396,8 +396,8 @@
     {
       "name": "bom_lcsc_values",
       "status": "WARN",
-      "message": "10 of 38 assigned item(s) verified (offline catalog and parts cache); 28 unverifiable (not in parts cache or offline catalog)",
-      "details": "unverified: U1 -> C44854, U2 -> C7519, F1 -> C126817, Y1 -> C2442665, J2 -> C265104, J3 -> C21285200, R1 -> C105580, R2 -> C105580 (and 20 more)"
+      "message": "0 of 38 assigned item(s) verified (no source); 38 unverifiable (not in parts cache or offline catalog)",
+      "details": "unverified: U1 -> C44854, J1 -> C7095263, U2 -> C7519, F1 -> C126817, Y1 -> C2442665, J2 -> C265104, J3 -> C21285200, R1 -> C105580 (and 30 more)"
     },
     {
       "name": "bom_pcb_match",
@@ -418,7 +418,7 @@
       "name": "erc",
       "status": "WARN",
       "message": "ERC report is not bound to this schematic (unhashed); re-run kct build's ERC step or pass --erc-report",
-      "details": "boards/03-usb-joystick/output/erc_report.json records no schematic_sha256 and no output/readiness.json pins it together with this schematic, so its verdict is not evidence for the current schematic"
+      "details": "boards/03-usb-joystick/output/erc_report.json records no schematic_sha256 and no output/readiness.json records it as produced from this schematic, so its verdict is not evidence for the current schematic"
     }
   ],
   "fabrication_process": {
