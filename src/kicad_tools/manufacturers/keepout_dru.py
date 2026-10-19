@@ -309,6 +309,8 @@ def apply_keepout_rules(
     existing: str | None,
     pcb_path: str | Path,
     kicad_cli_version: str | None = None,
+    *,
+    path: str | Path | None = None,
 ) -> str | None:
     """Convenience: :func:`merge_keepout_block` with the board's own rules.
 
@@ -318,10 +320,36 @@ def apply_keepout_rules(
     ``None``/unparseable keeps the block: an unknown version fails toward
     enforcement.
 
+    Removing an existing block is reported on stderr, never silent (Issue
+    #7383): the rewritten sidecar holds fewer rules than before, which is only
+    safe on the release that wrote it.  ``path`` names the ``.kicad_dru`` in
+    that notice and does not affect the output.
+
     May return ``""`` (the stale block was the only content), so callers must
     test ``is not None`` rather than ``or`` when falling back.
     """
     parsed = parse_kicad_cli_version(kicad_cli_version)
     if parsed is not None and parsed >= KEEPOUT_NATIVE_MIN_KICAD_VERSION:
-        return merge_keepout_block(existing, [])
+        merged = merge_keepout_block(existing, [])
+        if merged != existing:
+            _report_native_gate_removal(existing or "", kicad_cli_version, path)
+        return merged
     return merge_keepout_block(existing, keepout_rules_for_board(pcb_path))
+
+
+def _report_native_gate_removal(
+    existing: str, kicad_cli_version: str | None, path: str | Path | None
+) -> None:
+    """Explain on stderr why the keepout block left the sidecar (Issue #7383)."""
+    count = existing.count(f'(rule "{KEEPOUT_RULE_PREFIX} ')
+    name = str(path) if path is not None else ".kicad_dru content"
+    floor = ".".join(str(part) for part in KEEPOUT_NATIVE_MIN_KICAD_VERSION)
+    installed = (kicad_cli_version or "").strip()
+    print(
+        f"Note: {name}: removed the kct keepout-rule block ({count} rule(s)). "
+        f"kicad-cli {installed} enforces keepout rule areas natively (>= {floor}, "
+        "Issue #7198), so the same items are still reported, under the keepout "
+        f"area's name. kicad-cli < {floor} does not enforce them without the "
+        "block: re-emit the sidecar with that release before running DRC there.",
+        file=sys.stderr,
+    )
