@@ -133,7 +133,7 @@ case "$HRC $HC" in
   "0 "*" state=clear "*|"0 "*" state=champion-hold "*|"2 ") ;;
   "0 "*" state=stray-operator "*) gh pr edit "$PR_NUMBER" --remove-label "loom:operator" ;;
   "0 "*" state=contradiction "*) OTHER_VERDICT_LABEL=${HC##* detail=} ;;
-  *) echo "SKIP #$PR_NUMBER: ${HC:-rc=$HRC} — no merge, no comment"; continue ;;
+  *) echo "SKIP #$PR_NUMBER: ${HC:-rc=$HRC} — no merge, no comment"; continue ;;  # single-PR step: outcome=skipped reason=janitor_rc3
 esac
 
 if [ -n "$OTHER_VERDICT_LABEL" ]; then
@@ -200,7 +200,7 @@ VERDICT_RC=$?
 |------|---------|--------|
 | `0` | **FRESH** — the approval was rendered against the current head SHA | Proceed to criterion 1. |
 | `10` | No verdict label (raced away between listing and now) | **Skip this PR** — it is no longer merge-eligible. |
-| `11` | **UNVERIFIABLE** — no trusted marker could be confirmed for this verdict (on `loom:pr` this now means markers `could not be authenticated`: loom-daemon lacks `forge trusted-comments`, #9548) | **Do NOT merge** a `loom:pr` PR on `11`: skip it and report it in the completion summary. `post-verdict.sh` marks every verdict (#6382), so an approval with no confirmed marker approves no known tree (#9258: one merged with the literal body `@-`). |
+| `11` | **UNVERIFIABLE** — no trusted marker could be confirmed for this verdict (on `loom:pr` this now means markers `could not be authenticated`: loom-daemon lacks `forge trusted-comments`, #9548) | **Do NOT merge** a `loom:pr` PR on `11`: skip it (a single-PR step: `outcome=skipped reason=verdict_rc11`) and report it in the completion summary. `post-verdict.sh` marks every verdict (#6382), so an approval with no confirmed marker approves no known tree (#9258: one merged with the literal body `@-`). |
 | `12` | **STALE** — the approval covers a tree that is gone, or (#9258) it carried no trusted marker at all, so it never covered a known tree. Never anchored | **Do NOT merge.** The guard already removed `loom:pr`, re-queued the PR as `loom:review-requested`, and posted a comment naming both SHAs. `continue` to the next PR. |
 | any other | `gh`/environment error | **Do NOT merge.** Treat exactly like any other `gh` failure in this document — skip the PR this pass and retry next tick. Never read an error as "the approval is fine". |
 
@@ -265,7 +265,7 @@ printf '%s\n' "$P" "$K" "$C" | jq -s '.[0] as $p | {labels: [$p.labels[] | {name
   mergeable: (if $p.mergeable == true then "MERGEABLE" elif $p.mergeable == false then "CONFLICTING" else "UNKNOWN" end),
   createdAt: $p.created_at, updatedAt: $p.updated_at, additions: $p.additions, deletions: $p.deletions,
   commits: [.[1:-1][][] | {oid: .sha, committedDate: .commit.committer.date}], comments: .[-1]}' > "$PR_FACTS" \
-  || { rm -f "$PR_FACTS"; echo "SKIP #$PR_NUMBER: PR facts unread (or comments unauthenticated) — no merge, no comment"; continue; }
+  || { rm -f "$PR_FACTS"; echo "SKIP #$PR_NUMBER: PR facts unread (or comments unauthenticated) — no merge, no comment"; continue; }  # single-PR step: outcome=skipped reason=facts_unread
 ```
 
 The other blocks re-derive the path with the same `PR_FACTS=` line, because
@@ -2354,6 +2354,19 @@ observation over time), so this is where "PR merged" becomes "issue done".
 ```bash
 PR_NUMBER=$1
 
+# Per-repo switch (#12703): `champion.outOfBandAcGate`, resolved through the
+# daemon's config tiers (fleet / repo-class / .loom/config.json). Only an
+# explicit boolean `false` turns the gate off; absent, unreadable, a missing
+# verb or any non-boolean value keeps it ON (fail closed).
+ac_gate_enabled() {
+  local out
+  command -v loom-daemon >/dev/null 2>&1 || return 0
+  out=$(loom-daemon config get champion.outOfBandAcGate --json 2>/dev/null) || return 0
+  printf '%s' "$out" | jq -e '.found == true and .value == false' >/dev/null 2>&1 && return 1
+  return 0
+}
+if ac_gate_enabled; then AC_GATE=on; else AC_GATE=off; fi
+
 # GitHub's own parser (closingIssuesReferences): the set it auto-closes on
 # merge. Ignores `Updates #N`, `See #N`, code fences, `Discloses #N` (#3267) —
 # but is NOT negation-aware, hence the #1057 check in the loop.
@@ -2383,9 +2396,15 @@ for issue in $LINKED_ISSUES; do
   # Exit codes: 0 CLEAR / 10 NO-AC / 11 SATISFIED (current-SHA marker present)
   #             12 UNVERIFIED / 13 STALE-MARKER / 1 ERROR.
   # 0, 10 and 11 fall through to the unchanged close logic below.
-  AC_REPORT=$(./.loom/scripts/classify-ac-verification.sh \
-    --issue "$issue" --pr "$PR_NUMBER" --head-sha "$HEAD_SHA")
-  AC_RC=$?
+  # `champion.outOfBandAcGate=false` (#12703): skip the classifier entirely
+  # (exit 10 = NO-AC, which falls through to the unchanged close logic).
+  if [ "$AC_GATE" = "off" ]; then
+    AC_REPORT=""; AC_RC=10
+  else
+    AC_REPORT=$(./.loom/scripts/classify-ac-verification.sh \
+      --issue "$issue" --pr "$PR_NUMBER" --head-sha "$HEAD_SHA")
+    AC_RC=$?
+  fi
 
   # 1 (ERROR) is grouped with 12/13 deliberately: "the classifier could not
   # run" is not "the criteria are met". Fail closed — see item 5 below.
@@ -2437,6 +2456,19 @@ the pipeline noticed it had not been performed. The shape generalizes: any issue
 of the form "X was silently missed / dropped / not observed" has it, because the
 thing to verify is an **absence**, and an absence is exactly what a unit test
 cannot distinguish from a correctly-passing filter.
+
+**Per-repo switch: `champion.outOfBandAcGate` (#12703).** Boolean, **absent =
+`true`** (the gate as described below). A repo that tests on its live deployment
+and does not want a human hold waiting on a confirmation of a real run sets it
+`false` through the normal config tiers (for fleet-gitops: the repo's override
+in `fleet.yml`; no new plumbing, same resolution as `champion.standingAuthorizations`).
+First use case: 2AMLogic/loom-ui. With `false`, Step 4 runs neither the
+classifier nor `hold_issue_on_unverified_ac` for any linked issue: no
+`loom:operator` is added for an out-of-band criterion and the issue closes as
+normal. Only an explicit boolean `false` disables the gate; absent, unreadable,
+a missing `loom-daemon config` verb or a non-boolean value (including the
+string `"false"`) leaves it on. The gate text below stays in this file and is
+inert when the switch is off.
 
 **What the gate does.** `./.loom/scripts/classify-ac-verification.sh` reads the
 linked issue's body, extracts its acceptance-criteria checklist, classifies each

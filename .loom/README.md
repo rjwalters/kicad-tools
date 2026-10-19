@@ -28,8 +28,8 @@ Custom roles override system defaults when they have the same filename.
 Loom installs machine-managed payload here that your repo neither authors nor
 formats: installer-emitted JSON stamps (`config.json`, `install-metadata.json`)
 whose indentation will not match your Biome config, and
-`scripts/experiments/judge-fanout-workflow.js`, a Claude Code Workflow script
-whose legal top-level `return` is a hard **parse error** for any standard-JS
+a (since retired) Claude Code Workflow script,
+`scripts/experiments/judge-fanout-workflow.js`, whose legal top-level `return` is a hard **parse error** for any standard-JS
 parser. Without this carve-out those files make `biome check .` permanently red
 on code you did not write.
 
