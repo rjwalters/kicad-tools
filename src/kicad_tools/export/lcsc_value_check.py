@@ -834,6 +834,81 @@ def find_ic_package_mismatch(
 
 
 # ---------------------------------------------------------------------------
+# Pin-header row x pin count (issue #7446).
+# ---------------------------------------------------------------------------
+
+_HEADER_FP_RE = re.compile(r"PIN(?:HEADER|SOCKET)_(\d+)X(\d+)")
+# ``NxM`` / ``N*M`` / ``NxMP`` -- never a pitch/dimension (``2.54mm``, ``5.84mm``).
+_HEADER_SHAPE_RE = re.compile(r"(?<![\d.])(\d+)\s*[xX*]\s*(\d+)P?(?![\d.]|\s*mm)")
+# Single-token total pin count in an MPN: ``PZ254V-11-08P`` (not ``-2PZZ``).
+_HEADER_MPN_COUNT_RE = re.compile(r"-(\d{1,3})P(?![A-Za-z0-9])")
+
+
+def _part_header_count(
+    part_description: str, part_mfr: str
+) -> tuple[int, tuple[int, int] | None] | None:
+    """Return ``(total pins, (rows, cols) or None)`` stated by an LCSC record."""
+    for text in (part_description, part_mfr):
+        m = _HEADER_SHAPE_RE.search(text or "")
+        if m is not None:
+            rows, cols = int(m.group(1)), int(m.group(2))
+            if rows and cols:
+                return rows * cols, (rows, cols)
+    m = _HEADER_MPN_COUNT_RE.search(part_mfr or "")
+    if m is not None and int(m.group(1)):
+        return int(m.group(1)), None
+    return None
+
+
+def find_header_pin_mismatch(
+    footprint_name: str,
+    pad_numbers: Iterable[str] | None,
+    part_package: str,
+    part_description: str = "",
+    part_mfr: str = "",
+) -> PackageMismatch | None:
+    """Compare a pin header/socket's stated pin count with its footprint.
+
+    Preflight-only companion of :func:`find_ic_package_mismatch` (issue
+    #7446): the IC guard ignores connectors, so a 1x2 header on a
+    ``PinHeader_1x08`` footprint passed on pitch alone.
+
+    The footprint must be named ``PinHeader_RxC`` / ``PinSocket_RxC`` and the
+    part must state a count (``NxM`` in the description/MPN, or a ``-NNP`` MPN
+    suffix meaning total pins).  A mismatch is a different total, a different
+    ``NxM`` shape, or a numeric pad count that differs from the part's total.
+    Anything unparseable returns ``None`` (cannot validate).
+    """
+    fp_label = footprint_name.rsplit(":", 1)[-1] if footprint_name else ""
+    fm = _HEADER_FP_RE.search(fp_label.upper())
+    if fm is None:
+        return None
+    stated = _part_header_count(part_description, part_mfr)
+    if stated is None:
+        return None
+    total, shape = stated
+    fp_rows, fp_cols = int(fm.group(1)), int(fm.group(2))
+
+    def mismatch(source: str) -> PackageMismatch:
+        return PackageMismatch(
+            requested_package=fp_label,
+            candidate_package=part_package,
+            candidate_source=source,
+        )
+
+    if total != fp_rows * fp_cols or (
+        shape is not None and sorted(shape) != sorted((fp_rows, fp_cols))
+    ):
+        label = f"{shape[0]}x{shape[1]}" if shape else str(total)
+        return mismatch(f"pin count {label} vs footprint {fp_rows}x{fp_cols:02d}")
+    if pad_numbers is not None:
+        count = _numeric_pad_count(pad_numbers)
+        if count and count != total:
+            return mismatch(f"pin count {total} vs {count} footprint pads")
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Tri-state assignment verdict (issue #7166).
 # ---------------------------------------------------------------------------
 
@@ -881,6 +956,10 @@ def _compare_part(
         )
     if mismatch is None and check_ic and (footprint or pad_numbers is not None):
         mismatch = find_ic_package_mismatch(footprint, pad_numbers, part.package)
+        if mismatch is None:
+            mismatch = find_header_pin_mismatch(
+                footprint, pad_numbers, part.package, part.description, part.mfr_part
+            )
     return mismatch
 
 
