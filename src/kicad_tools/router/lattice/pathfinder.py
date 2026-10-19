@@ -304,6 +304,32 @@ class _PairResult:
     gateway: str | None = None
 
 
+@dataclass
+class _HybridParityCtx:
+    """A hybrid pick whose legs ended with unequal via counts (issue #7093).
+
+    Everything :meth:`LatticePathfinder._hybrid_parity_pick` needs to re-search
+    a leg after the run: ``items`` maps polarity to ``(real pad, virtual trunk
+    site)``, ``pres`` is the emitted pick (its routes identify it in the final
+    route map), the rest are the pick's own search and check parameters.
+    """
+
+    pc: CoupledConnection
+    items: dict[str, tuple[Pad, Pad]]
+    trunk: _PairResult
+    legs: dict[str, _RouteResult]
+    pres: _PairResult
+    escape_plan: dict[int, EscapeChoice]
+    strict: LatticePairwise | None
+    floor: float
+    reqs: list[float] | None
+    cap: float
+    max_vias: int | None
+    vias_used: int
+    half: float
+    clr: float
+
+
 #: Bounded retries of a pair search after a ``pair-partner-pad`` decline (#6839).
 _PARTNER_PAD_RETRIES = 4
 
@@ -545,6 +571,14 @@ class LatticePathfinder:
         # Issue #7093: ``key -> (vias_P, vias_N)`` of each fallback pair whose
         # committed legs have unequal via counts (no candidate had parity).
         self.pair_via_mismatch: dict[object, tuple[int, int]] = {}
+        # Issue #7093: hybrid picks whose legs ended with unequal vias,
+        # recorded during negotiation and offered a mirrored leg by
+        # :meth:`_hybrid_parity_pass` once the board is finished; the pass's
+        # outcome per pair key lands in ``hybrid_parity_log``.  Setting
+        # ``hybrid_parity`` False skips the pass (copper exactly as before).
+        self.hybrid_parity: bool = True
+        self._hybrid_parity_ctx: list[_HybridParityCtx] = []
+        self.hybrid_parity_log: dict[object, str] = {}
         # Issue #4355: immovable copper from NON-listed nets (the preserved
         # ``router.existing_routes``), pre-processed into per-segment seed
         # tuples ``(layer_idx, a, b, net, half_width, clearance)`` plus via
@@ -4155,7 +4189,6 @@ class LatticePathfinder:
                     f"legs P/N={lens[0]:.1f}/{lens[1]:.1f} mm (cap {cap_text}); "
                     f"vias P/N={sum(1 for v, _s in pres.vias if v == net_p)}/"
                     f"{sum(1 for v, _s in pres.vias if v == net_n)}"
-                    + ("; a leg mirrored for via parity (#7093)" if why == "ok-mirrored" else "")
                 )
                 return pres, terminal, ""
         if shortest is not None:
@@ -4199,7 +4232,6 @@ class LatticePathfinder:
         from ..pairplan.hybrid import MIN_TRUNK_PITCHES
 
         hard_p, hard_n = (pc.pad_p_a, pc.pad_n_a) if hard_a else (pc.pad_p_b, pc.pad_n_b)
-        measure = self.pair_length_measure or _default_pair_length
         layer_enum = self.layer_stack.index_to_layer_enum(layer)
 
         def vsite(real: Pad, pt: Pt) -> Pad:
@@ -4291,48 +4323,168 @@ class LatticePathfinder:
             return pres, why, lens, trunk_mm
 
         # Issue #7093: the legs change layers a different number of times.
-        # Offer each leg the partner's layer sequence (the #7255 mirrored
-        # search) and keep a via-equal result only when it is no worse than
-        # this pick on skew AND on length, element-wise: the pick above
-        # stays the reference, so no other decision moves.
+        # The mirrored re-search is NOT run here: a replacement leg committed
+        # mid-negotiation is copper every later pair and net routes around,
+        # and on board 06rf it cost two fallback pairs their via parity and
+        # set off a #6489 pad-growth re-negotiation.  The pick is recorded and
+        # :meth:`_hybrid_parity_pass` offers the mirrored legs after the run,
+        # against the board's final copper, so nothing else can move.
+        self._hybrid_parity_ctx.append(
+            _HybridParityCtx(
+                pc=pc,
+                items={"P": (hard_p, v_p), "N": (hard_n, v_n)},
+                trunk=trunk,
+                legs=legs,
+                pres=pres,
+                escape_plan=escape_plan,
+                strict=strict,
+                floor=floor,
+                reqs=reqs,
+                cap=cap,
+                max_vias=max_vias,
+                vias_used=vias_used,
+                half=half,
+                clr=clr,
+            )
+        )
+        return pres, why, lens, trunk_mm
+
+    def _hybrid_parity_pick(
+        self,
+        ctx: _HybridParityCtx,
+        *,
+        committed: CommittedCopper,
+    ) -> tuple[_PairResult, str, tuple[float, float] | None]:
+        """The via-equal replacement of a recorded hybrid pick, if any (#7093).
+
+        Offers each leg the partner's layer sequence (the #7255 mirrored
+        search, :meth:`_hybrid_parity_legs`) against ``committed`` and keeps
+        a via-equal result only when it passes every :meth:`_hybrid_result`
+        gate and is no worse than the pick on skew AND on length,
+        element-wise.  Returns ``(result, "ok-mirrored", leg lengths)`` for a
+        replacement, else ``(ctx.pres, "ok", None)``.
+        """
+        measure = self.pair_length_measure or _default_pair_length
+
         def rank(res: _PairResult) -> tuple[float, float]:
             lp, ln = (measure(r) for r in res.routes)
             return (round(abs(lp - ln), 3), round(lp + ln, 3))
 
+        (hard_p, _vp), (hard_n, _vn) = ctx.items["P"], ctx.items["N"]
+        pres, why, lens = ctx.pres, "ok", None
         best = rank(pres)
         for alt in self._hybrid_parity_legs(
-            pc,
-            items={"P": (hard_p, v_p), "N": (hard_n, v_n)},
-            trunk=trunk,
-            legs=legs,
+            ctx.pc,
+            items=ctx.items,
+            trunk=ctx.trunk,
+            legs=ctx.legs,
             committed=committed,
-            history=history,
-            present=present,
-            escape_plan=escape_plan,
-            strict=strict,
-            floor=floor,
-            half=half,
-            clr=clr,
+            history=PhysicalHistory(),
+            present=1.0,
+            escape_plan=ctx.escape_plan,
+            strict=ctx.strict,
+            floor=ctx.floor,
+            half=ctx.half,
+            clr=ctx.clr,
         ):
             apres, _awhy, alens = self._hybrid_result(
-                pc,
+                ctx.pc,
                 hard_p,
                 hard_n,
-                trunk,
+                ctx.trunk,
                 alt,
-                cap=cap,
-                max_vias=max_vias,
-                vias_used=vias_used,
-                reqs=reqs,
-                half=half,
-                clr=clr,
+                cap=ctx.cap,
+                max_vias=ctx.max_vias,
+                vias_used=ctx.vias_used,
+                reqs=ctx.reqs,
+                half=ctx.half,
+                clr=ctx.clr,
             )
             if apres is None:
                 continue
             r_alt = rank(apres)
             if all(a <= b for a, b in zip(r_alt, best, strict=True)):
                 pres, why, lens, best = apres, "ok-mirrored", alens, r_alt
-        return pres, why, lens, trunk_mm
+        return pres, why, lens
+
+    def _hybrid_parity_pass(
+        self,
+        routes: dict[object, Route],
+        connections: list[Connection],
+        coupled: list[CoupledConnection],
+    ) -> None:
+        """Replace a finished hybrid's unequal-via legs in place (issue #7093).
+
+        Runs once, after :meth:`route_netset` has settled every net (pad
+        growth rounds and the gateway rollback included).  For each hybrid
+        pick recorded by :meth:`_try_hybrid_start` whose copper is still the
+        pair's emitted copper (identity: a rolled-back or superseded pass
+        never matches), every OTHER route is committed as a hard obstacle at
+        its own class clearance and :meth:`_hybrid_parity_pick` may swap one
+        leg for a via-equal mirrored one.  Only that pair's two routes can
+        change, so no other pair's vias, no routed count and no class-pad
+        repair can move -- the board-level guarantee board 06rf needed.
+        """
+        ctxs, self._hybrid_parity_ctx = self._hybrid_parity_ctx, []
+        if not self.hybrid_parity or not ctxs:
+            return
+        classes: dict[object, object | None] = {c[0]: c[3] for c in connections}
+        for pc in coupled:
+            for pol in ("P", "N"):
+                classes[(pc.key, pol)] = pc.net_class
+        for ctx in ctxs:
+            key = ctx.pc.key
+            own = ((key, "P"), (key, "N"))
+            if (
+                routes.get(own[0]) is not ctx.pres.routes[0]
+                or routes.get(own[1]) is not ctx.pres.routes[1]
+            ):
+                continue
+            committed = self._fresh_committed()
+            for rkey, route in routes.items():
+                if rkey in own:
+                    continue
+                self._commit_route_copper(route, classes.get(rkey), committed)
+            before = tuple(len(r.vias) for r in ctx.pres.routes)
+            pres, why, lens = self._hybrid_parity_pick(ctx, committed=committed)
+            if why != "ok-mirrored" or lens is None:
+                self.hybrid_parity_log[key] = (
+                    f"vias P/N={before[0]}/{before[1]}: no via-equal mirrored leg fits "
+                    "the finished board without more skew or length; kept"
+                )
+                continue
+            routes[own[0]], routes[own[1]] = pres.routes[0], pres.routes[1]
+            after = tuple(len(r.vias) for r in pres.routes)
+            self.hybrid_parity_log[key] = (
+                f"vias P/N={before[0]}/{before[1]} -> {after[0]}/{after[1]}: a leg "
+                f"mirrored for via parity against the finished board, legs P/N="
+                f"{lens[0]:.1f}/{lens[1]:.1f} mm; no other copper moved"
+            )
+
+    def _commit_route_copper(
+        self, route: Route, net_class: object | None, committed: CommittedCopper
+    ) -> None:
+        """Commit an emitted ``Route``'s copper at its own class clearance (#7093).
+
+        Segments at their emitted width, vias at the routing via size -- the
+        same geometry the negotiation committed them with.
+        """
+        for seg in route.segments:
+            try:
+                layer_idx = self.layer_stack.layer_enum_to_index(seg.layer)
+            except Exception:
+                continue
+            if not (0 <= layer_idx < self.num_layers):
+                continue
+            a, b = (seg.x1, seg.y1), (seg.x2, seg.y2)
+            if dist(a, b) <= 1e-9:
+                continue
+            _half, clr = self._conn_geometry(net_class, seg.net)
+            half = (seg.width or self.rules.trace_width) / 2.0
+            committed.add_run(layer_idx, [a, b], seg.net, half, clr)
+        for via in route.vias:
+            _half, clr = self._conn_geometry(net_class, via.net)
+            committed.add_via((via.x, via.y), via.net, clr)
 
     def _hybrid_parity_legs(
         self,
@@ -5286,6 +5438,33 @@ class LatticePathfinder:
         return out
 
     def route_netset(
+        self,
+        connections: list[Connection],
+        **kwargs: Any,
+    ) -> tuple[dict[object, Route], LatticeNegotiationStats]:
+        """Negotiate (:meth:`_route_netset_gateways`), then the hybrid parity pass.
+
+        Issue #7093: a hybrid pair whose single-ended legs changed layers a
+        different number of times is offered a via-equal mirrored leg only
+        here, after every net has settled (:meth:`_hybrid_parity_pass`).  A
+        replacement chosen mid-negotiation moved the copper later pairs
+        routed around: on board 06rf it cleared USB3_RX2 but cost USB3_RX1 and
+        USB3_TX1 their via parity and set off a #6489 re-negotiation (2.3x
+        the run time).  Here the only copper that can change is that pair's
+        own, so the negotiation, its growth rounds and every other route are
+        exactly what they are without the pass.  Skipped once the deadline
+        has passed.
+        """
+        self._hybrid_parity_ctx = []
+        self.hybrid_parity_log = {}
+        result = self._route_netset_gateways(connections, **kwargs)
+        deadline = kwargs.get("deadline")
+        if not result[1].deadline_hit and (deadline is None or time.monotonic() < deadline):
+            self._hybrid_parity_pass(result[0], connections, list(kwargs.get("coupled") or []))
+        self._hybrid_parity_ctx = []
+        return result
+
+    def _route_netset_gateways(
         self,
         connections: list[Connection],
         **kwargs: Any,
