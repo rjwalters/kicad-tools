@@ -186,7 +186,8 @@ _TRIVIAL_CONDITIONS: dict[str, frozenset[str]] = {
 
 #: ``.kicad_pro`` ``design_settings.rules`` minima Specctra cannot express.
 #: ``min_copper_edge_clearance`` is not listed: it is carried by insetting the
-#: exported ``(boundary ...)`` (issue #6784).
+#: exported ``(boundary ...)`` and growing the Edge.Cuts cutout keepouts
+#: (issues #6784, #7482).
 _INEXPRESSIBLE_PROJECT_MINIMA = (
     "min_hole_clearance",
     "min_hole_to_hole",
@@ -240,6 +241,8 @@ class KiCadToDSNExporter:
         self._net_class: dict[str, str] = {}  # net name -> KiCad class name
         self._planes: list[tuple[str, str, list[tuple[float, float]]]] = []
         self._keepouts: list[tuple[str, str, list[tuple[float, float]]]] = []
+        # Edge.Cuts interior loops at the raw cut edge; emitted as keepouts (#7482)
+        self._outline_cutouts: list[list[tuple[float, float]]] = []
         self._omissions: list[str] = []
         self._edge_clearance: float = 0.0  # mm, .kicad_pro min_copper_edge_clearance
         self._via_padstack_name: str = ""
@@ -355,13 +358,16 @@ class KiCadToDSNExporter:
         """Extract the board boundary and cutouts from the Edge.Cuts layer.
 
         Every top-level Edge.Cuts graphic is polygonized, so segments need not
-        be stored head to tail. The largest face is the boundary; its interior
-        rings (and any closed loop inside it) become keepouts on every copper
-        layer. Geometry that cannot be carried is listed, never dropped.
+        be stored head to tail. The board is the face whose *exterior* ring
+        encloses the most area: a face's own ``area`` has its holes subtracted,
+        so ranking by it lets a large cutout outrank the board around it. The
+        board's interior rings are its cutouts; ``_generate_structure`` emits
+        them as keepouts on every copper layer. Geometry that cannot be carried
+        is listed, never dropped.
         """
         assert self._pcb is not None
         self._board_outline = []
-        self._outline_cutouts: list[list[tuple[float, float]]] = []
+        self._outline_cutouts = []
 
         for fp_node in self._pcb.children:
             if not hasattr(fp_node, "name") or not _is_footprint_tag(fp_node.name):
@@ -403,7 +409,7 @@ class KiCadToDSNExporter:
                 "(open or dangling segments)"
             )
             return
-        board = max(faces, key=lambda f: f.area)
+        board = max(faces, key=lambda f: Polygon(f.exterior).area)
         if not (hasattr(dangles, "is_empty") and dangles.is_empty):
             self._omit("Edge.Cuts has dangling segments that do not close a loop; ignored")
         self._board_outline = list(board.exterior.coords)[:-1]
@@ -413,14 +419,16 @@ class KiCadToDSNExporter:
         for face in faces:
             if face is board:
                 continue
-            if not shell.contains(face.representative_point()):
+            inside = face.representative_point()
+            if not shell.contains(inside):
                 self._omit("Edge.Cuts closed loop outside the main board outline is not exported")
-            elif not any(c.contains(face.representative_point()) for c in cutouts):
+                continue
+            host = next((c for c in cutouts if c.contains(inside)), None)
+            if host is None:
                 cutouts.append(Polygon(face.exterior))
+            elif Polygon(face.exterior).area < host.area - 1e-6:
+                self._omit("Edge.Cuts island inside a board cutout is not exported")
         self._outline_cutouts = [list(c.exterior.coords)[:-1] for c in cutouts if c.area > 0]
-        for cutout in self._outline_cutouts:
-            for layer in self._layers:
-                self._keepouts.append(("keepout", layer, cutout))
 
     def _extract_footprints(self) -> None:
         """Extract footprint placements and pad info."""
@@ -1059,33 +1067,39 @@ class KiCadToDSNExporter:
         parts.append(")")
         return "\n".join(parts)
 
-    def _boundary_points(self) -> list[tuple[float, float]]:
-        """The outline exported as ``(boundary ...)``, inset by the edge clearance.
+    def _copper_region(
+        self,
+    ) -> tuple[list[tuple[float, float]], list[list[tuple[float, float]]]]:
+        """The ``(boundary ...)`` ring and cutout keepouts, both moved in by the edge clearance.
 
         Specctra has no copper-to-edge rule, but a router never places copper
-        outside the boundary, so insetting the polygon by
-        ``min_copper_edge_clearance`` carries it as plain geometry. Pads that
-        already sit inside the band are fixed placement: they stay where they
-        are and are listed as an omission rather than routed through. When the
-        inset cannot be computed the original outline is exported and the
-        clearance is listed as not carried.
+        outside the boundary or inside a keepout, so insetting the board (its
+        outer ring shrinks, its cutouts grow) by ``min_copper_edge_clearance``
+        carries the rule as plain geometry, around cutouts as well as the
+        outer edge. Pads that already sit inside the band are fixed placement:
+        they stay where they are and are listed as an omission rather than
+        routed through. When the inset cannot be computed the raw outline and
+        cutouts are exported and the clearance is listed as not carried.
         """
-        outline = self._board_outline
+        outline, cutouts = self._board_outline, self._outline_cutouts
         if not outline or self._edge_clearance <= 0:
-            return outline
+            return outline, cutouts
         try:
             from shapely.geometry import Polygon
+            from shapely.ops import unary_union
 
             poly = Polygon(outline)
+            if cutouts:
+                poly = poly.difference(unary_union([Polygon(c) for c in cutouts]))
             inset = poly.buffer(-self._edge_clearance, join_style=2) if poly.is_valid else None
         except (ImportError, ValueError):
             inset = None
         if inset is None or inset.is_empty or inset.geom_type != "Polygon":
             self._omit(
                 f".kicad_pro rule min_copper_edge_clearance {self._edge_clearance:g} mm: "
-                "board outline cannot be inset; boundary exported uninset"
+                "board outline cannot be inset; boundary and cutouts exported uninset"
             )
-            return outline
+            return outline, cutouts
         in_band = sorted(
             f"{fp.reference}.{pad.number}"
             for fp in self._footprints
@@ -1097,7 +1111,10 @@ class KiCadToDSNExporter:
                 f"{len(in_band)} pad(s) sit inside the {self._edge_clearance:g} mm "
                 f"copper-to-edge band (fixed placement): {', '.join(in_band)}"
             )
-        return list(inset.exterior.coords)[:-1]
+        return (
+            list(inset.exterior.coords)[:-1],
+            [list(ring.coords)[:-1] for ring in inset.interiors],
+        )
 
     @staticmethod
     def _pad_center(fp: FootprintInfo, pad: PadInfo) -> Any:
@@ -1126,8 +1143,8 @@ class KiCadToDSNExporter:
             lines.append("      )")
             lines.append("    )")
 
-        # Board boundary, inset by min_copper_edge_clearance (issue #6784)
-        boundary = self._boundary_points()
+        # Board boundary and cutouts, inset by min_copper_edge_clearance (#6784, #7482)
+        boundary, cutouts = self._copper_region()
         if boundary:
             lines.append("    (boundary")
             lines.append("      (path pcb 0")
@@ -1155,7 +1172,9 @@ class KiCadToDSNExporter:
             lines.append(f"    (plane {_dsn_quote(net)}")
             lines.append(_dsn_polygon(dsn_layer, polygon))
             lines.append("    )")
-        for tag, layer, polygon in self._keepouts:
+        keepouts = list(self._keepouts)
+        keepouts += [("keepout", layer, c) for c in cutouts for layer in self._layers]
+        for tag, layer, polygon in keepouts:
             dsn_layer = KICAD_TO_DSN_LAYER.get(layer, layer)
             lines.append(f'    ({tag} ""')
             lines.append(_dsn_polygon(dsn_layer, polygon))

@@ -636,7 +636,9 @@ class TestBoardOutline:
     """Edge.Cuts shapes become one valid boundary; cutouts become keepouts (#7482)."""
 
     @staticmethod
-    def _export(tmp_path, edge_cuts, extra=""):
+    def _export(tmp_path, edge_cuts, extra="", edge_clearance=None):
+        import json
+
         pcb = tmp_path / "outline.kicad_pcb"
         pcb.write_text(
             '(kicad_pcb (version 20240108) (generator "t")\n'
@@ -644,8 +646,23 @@ class TestBoardOutline:
             f"{edge_cuts}\n{extra}\n)\n",
             encoding="utf-8",
         )
+        if edge_clearance is not None:
+            rules = {"min_copper_edge_clearance": edge_clearance}
+            pro = {"board": {"design_settings": {"rules": rules}}}
+            pcb.with_suffix(".kicad_pro").write_text(json.dumps(pro), encoding="utf-8")
         exporter = KiCadToDSNExporter(pcb)
         return exporter, exporter.export()
+
+    @staticmethod
+    def _keepouts(dsn):
+        """``(layer, Polygon)`` for every ``(keepout "" (polygon ...))``, in mm."""
+        from shapely.geometry import Polygon
+
+        out = []
+        for layer, body in re.findall(r'\(keepout ""\s*\(polygon (\S+) 0 ([^)]*)\)', dsn):
+            v = [float(x) / 1000.0 for x in body.split()]
+            out.append((layer, Polygon(list(zip(v[0::2], v[1::2], strict=True)))))
+        return out
 
     @staticmethod
     def _boundary(dsn):
@@ -675,6 +692,14 @@ class TestBoardOutline:
         poly = self._boundary(dsn)
         assert poly.is_valid
         assert poly.area == pytest.approx(6000)
+
+    def test_in_order_lines_have_no_duplicate_vertices(self, tmp_path):
+        p = [(0, 0), (100, 0), (100, 60), (0, 60)]
+        edges = "\n".join(self._line(p[i], p[(i + 1) % 4]) for i in range(4))
+        _, dsn = self._export(tmp_path, edges)
+        poly = self._boundary(dsn)
+        assert poly.area == pytest.approx(6000)
+        assert len(poly.exterior.coords) == 5  # 4 corners + closure
 
     def test_gr_poly(self, tmp_path):
         edges = '(gr_poly (pts (xy 0 0) (xy 100 0) (xy 100 60) (xy 0 60)) (layer "Edge.Cuts"))'
@@ -715,6 +740,56 @@ class TestBoardOutline:
         assert len(re.findall(r'\(keepout ""', dsn)) == 2  # F.Cu and B.Cu
         assert not any("Edge.Cuts" in o for o in exporter.omissions)
 
+    def test_annular_board_hole_larger_than_copper(self, tmp_path):
+        """An LED ring: the r=25 hole encloses more area than the copper annulus."""
+        import math
+
+        edges = (
+            '(gr_circle (center 50 50) (end 80 50) (layer "Edge.Cuts"))\n'
+            '(gr_circle (center 50 50) (end 75 50) (layer "Edge.Cuts"))'
+        )
+        exporter, dsn = self._export(tmp_path, edges)
+        assert self._boundary(dsn).area == pytest.approx(math.pi * 900, rel=0.01)
+        keepouts = self._keepouts(dsn)
+        assert sorted(layer for layer, _ in keepouts) == ["B.Cu", "F.Cu"]
+        for _, hole in keepouts:
+            assert hole.area == pytest.approx(math.pi * 625, rel=0.01)
+        assert not any("Edge.Cuts" in o for o in exporter.omissions)
+
+    def test_frame_board_window_larger_than_copper(self, tmp_path):
+        edges = (
+            '(gr_rect (start 0 0) (end 100 100) (layer "Edge.Cuts"))\n'
+            '(gr_rect (start 5 5) (end 95 95) (layer "Edge.Cuts"))'
+        )
+        exporter, dsn = self._export(tmp_path, edges)
+        assert self._boundary(dsn).area == pytest.approx(10000)
+        keepouts = self._keepouts(dsn)
+        assert len(keepouts) == 2
+        assert all(hole.area == pytest.approx(8100) for _, hole in keepouts)
+        assert not any("Edge.Cuts" in o for o in exporter.omissions)
+
+    def test_edge_clearance_grows_cutout_keepouts(self, tmp_path):
+        """min_copper_edge_clearance applies at a cutout edge, not only the outer one."""
+        from shapely.geometry import box
+
+        edges = (
+            '(gr_rect (start 0 0) (end 100 60) (layer "Edge.Cuts"))\n'
+            '(gr_rect (start 40 20) (end 60 40) (layer "Edge.Cuts"))'
+        )
+        fp = (
+            '(footprint "TP" (layer "F.Cu") (at 50 19.8)\n'
+            '  (property "Reference" "TP1" (at 0 0) (layer "F.SilkS"))\n'
+            '  (pad "1" smd rect (at 0 0) (size 0.2 0.2) (layers "F.Cu")))'
+        )
+        exporter, dsn = self._export(tmp_path, edges, fp, edge_clearance=0.5)
+        assert self._boundary(dsn).equals(box(0.5, 0.5, 99.5, 59.5))
+        keepouts = self._keepouts(dsn)
+        assert len(keepouts) == 2
+        for _, hole in keepouts:
+            assert hole.symmetric_difference(box(39.5, 19.5, 60.5, 40.5)).area < 1e-6
+        assert any("copper-to-edge band" in o and "TP1.1" in o for o in exporter.omissions)
+        assert not any("cannot be inset" in o for o in exporter.omissions)
+
     def test_open_outline_is_omitted(self, tmp_path):
         edges = "\n".join([self._line((0, 0), (100, 0)), self._line((100, 0), (100, 60))])
         exporter, dsn = self._export(tmp_path, edges)
@@ -740,7 +815,9 @@ class TestBoardOutline:
             ]
         )
         _, dsn = self._export(tmp_path, edges)
-        assert self._boundary(dsn).area == pytest.approx(6000, abs=0.1)
+        poly = self._boundary(dsn)
+        assert poly.area == pytest.approx(6000, abs=0.1)
+        assert len(poly.exterior.coords) == 5  # 4 corners + closure, gaps welded
 
     def test_charlieplex_routed_board_boundary_is_valid(self, tmp_path):
         import shutil
@@ -751,7 +828,15 @@ class TestBoardOutline:
         )
         dst = tmp_path / src.name
         shutil.copy(src, dst)
-        assert self._boundary(KiCadToDSNExporter(dst).export()).is_valid
+        shutil.copy(src.with_suffix(".kicad_pro"), dst.with_suffix(".kicad_pro"))
+        from shapely.geometry import box
+
+        boundary = self._boundary(KiCadToDSNExporter(dst).export())
+        assert boundary.is_valid
+        # Edge.Cuts is the 50 x 55 mm rectangle (123.5, 77.5)-(173.5, 132.5); the
+        # board's .kicad_pro min_copper_edge_clearance of 0.3 mm insets it.
+        assert len(boundary.exterior.coords) == 5
+        assert boundary.symmetric_difference(box(123.8, 77.8, 173.2, 132.2)).area < 1e-6
 
 
 # ---------------------------------------------------------------------------
