@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
+from kicad_tools.kicad_install import windows_kicad_base_dirs, windows_kicad_install_roots
 from kicad_tools.schema.pcb import FOOTPRINT_TAGS, _is_footprint_tag
 
 from .kicad_toolchain import (
@@ -312,11 +313,11 @@ def _kicad_cli_candidates() -> list[Path]:
         # Linux
         "/usr/bin/kicad-cli",
         "/usr/local/bin/kicad-cli",
-        # Windows (common paths)
-        "C:/Program Files/KiCad/8.0/bin/kicad-cli.exe",
-        "C:/Program Files/KiCad/7.0/bin/kicad-cli.exe",
-        "C:/Program Files/KiCad/bin/kicad-cli.exe",
     ]
+    if sys.platform == "win32":
+        # Versioned installs (newest first), then the unversioned layout.
+        locations += [str(root / "bin" / "kicad-cli.exe") for root in windows_kicad_install_roots()]
+        locations += [str(base / "bin" / "kicad-cli.exe") for base in windows_kicad_base_dirs()]
 
     for loc in locations:
         path = Path(loc)
