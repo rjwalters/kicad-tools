@@ -304,6 +304,88 @@ def test_usb3_tx2_45_degree_shape_is_tightened_into_band():
     _assert_45(ar)
 
 
+# --- Skew is bounded cumulatively, not per squeeze (#7349 review) ---------
+
+
+def _three_run_board():
+    """Three collinear 5 mm runs, P pinned by mid-trunk test pads.
+
+    Each P trunk segment carries a P-net test pad at its midpoint that only
+    just touches P's copper, so moving P strands it: only a single-rail N
+    squeeze can commit.  The gap sits
+    0.003 mm above the 110-ohm band edge, so only the last ladder rung fits
+    under ``SKEW_TOLERANCE_MM`` and each committed run lengthens N by about
+    0.0085 mm.  P starts 0.010 mm longer than N.
+    """
+    band = _gap_for(MIPI_W, 110.0)
+    cc = round(band + 0.003 + MIPI_W, 4)
+    y_p, y_n = 10.0, round(10.0 + cc, 4)
+    xs = [5.0, 10.0, 15.0, 20.0]
+
+    def rail(y, end_x):
+        segs = [((4.4, y), (5.0, y), MIPI_W)]
+        segs += [((a, y), (b, y), MIPI_W) for a, b in zip(xs, xs[1:], strict=False)]
+        return segs + [((20.0, y), (end_x, y), MIPI_W)]
+
+    rails = {1: rail(y_p, 20.61), 2: rail(y_n, 20.6)}
+    pads = [
+        ("U1", 1, (4.4, y_p)),
+        ("U2", 2, (4.4, y_n)),
+        ("J1", 1, (20.61, y_p)),
+        ("J2", 2, (20.6, y_n)),
+    ]
+    test_pads = [
+        # 0.05 mm pad on P's outer edge overlapping its copper by 0.0025 mm:
+        # any move of P toward N strands it.
+        (f"TP{i}", 1, "MIPI_DAT1_P", ((a + b) / 2, y_p - 0.135), 0.05)
+        for i, (a, b) in enumerate(zip(xs, xs[1:], strict=False))
+    ]
+    return _board(
+        "MIPI_DAT1_P", "MIPI_DAT1_N", _class(100.0, 10.0), rails, pads, extra_pads=test_pads
+    )
+
+
+def test_repeated_squeezes_never_worsen_pair_skew_beyond_pre_pass_value():
+    ar = _three_run_board()
+    skew_before = abs(_skew(ar))
+    assert skew_before == pytest.approx(0.01, abs=1e-6)
+
+    results = ar.apply_diffpair_gap_tightening(verbose=False, stackup=STACKUP)
+
+    res = results[("MIPI_DAT1_P", "MIPI_DAT1_N")]
+    assert len(res.runs) == 3, res
+    # Two runs fit under the pre-pass skew; the third would exceed it.
+    assert res.runs_tightened == 2, res
+    assert [r.mode for r in res.runs if r.status == "tightened"] == ["single_n", "single_n"]
+    # The third run is declined (its reported reason is the first rung's
+    # failure); the companion test below shows the cumulative skew bound is
+    # what declines it.
+    assert res.runs[2].status.startswith("declined:"), res
+    assert abs(_skew(ar)) <= skew_before + 1e-6
+    assert res.skew_after_mm <= res.skew_before_mm + 1e-6
+    assert _clearance_errors(ar) == []
+    assert _connected(ar) == {1: True, 2: True}
+    _assert_45(ar)
+
+
+def test_per_squeeze_tolerance_alone_lets_skew_drift(monkeypatch):
+    # Shows the fixture really compounds: without the cumulative bound every
+    # squeeze passes the 0.01 mm per-squeeze gate, and the pair ends up worse
+    # than it started (the board 06 USB3_RX1 +0.028 mm drift).
+    import kicad_tools.router.diffpair_gap_tightening as dgt
+
+    monkeypatch.setattr(dgt, "CUMULATIVE_SKEW_EPS_MM", math.inf)
+    ar = _three_run_board()
+    skew_before = abs(_skew(ar))
+
+    res = ar.apply_diffpair_gap_tightening(verbose=False, stackup=STACKUP)[
+        ("MIPI_DAT1_P", "MIPI_DAT1_N")
+    ]
+
+    assert res.runs_tightened == 3, res
+    assert abs(_skew(ar)) > skew_before + 0.005
+
+
 # --- No-op on an in-band pair (board 03 style, ~89 ohm of 90) -------------
 
 

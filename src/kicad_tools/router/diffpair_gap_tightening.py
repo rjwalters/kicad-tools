@@ -24,7 +24,9 @@ This module is a geometry-only post-pass that squeezes such a trunk:
 4. Every candidate is gated on exact geometry before it is committed:
    foreign pad / via / copper clearance
    (:meth:`Autorouter._skew_tune_foreign_clearance_ok`), pad connectivity
-   of both nets, skew (<= ``SKEW_TOLERANCE_MM`` change), and the
+   of both nets, skew (<= ``SKEW_TOLERANCE_MM`` change per squeeze, and
+   never above the pair's skew before the pass -- see
+   ``CUMULATIVE_SKEW_EPS_MM``), and the
    ``ImpedanceRule`` post-condition (the squeezed trunk is in band and no
    segment becomes a newly judged out-of-band one).  A run that fails all
    candidates is left byte-identical and reported as ``declined:<reason>``.
@@ -65,6 +67,13 @@ MIN_TRUNK_MM = 0.2
 
 #: A committed squeeze may change the pair's skew by at most this much (mm).
 SKEW_TOLERANCE_MM = 0.01
+
+#: Cumulative bound (Issue #7349 review): after any number of squeezes the
+#: pair's ``|skew|`` may not exceed its value before the pass by more than
+#: this float-noise epsilon (mm).  ``SKEW_TOLERANCE_MM`` alone is measured
+#: against the copper of the previous squeeze, so it compounds across runs
+#: (board 06 USB3_RX1 drifted +0.028 mm over two committed runs).
+CUMULATIVE_SKEW_EPS_MM = 1e-6
 
 #: Upper bound on runs attempted per pair (defensive loop guard).
 MAX_RUNS_PER_PAIR = 32
@@ -529,6 +538,9 @@ def tighten_pair(
 
     routes = list(router.routes)
     result.skew_before_mm = abs(skew_of(routes))
+    # Captured once: every squeeze is bounded against the pre-pass skew, not
+    # against the previous squeeze's copper, so drift cannot accumulate.
+    baseline_skew = result.skew_before_mm
     attempted: set[tuple] = set()
     first_decline: str | None = None
     target_gaps: list[float] = []
@@ -649,6 +661,7 @@ def tighten_pair(
                     foreign_preserved=foreign_preserved,
                     skew_before=skew_of(routes),
                     skew_after=skew_of(candidate),
+                    baseline_skew=baseline_skew,
                     before_conn=before_conn,
                     connected=connected,
                     judge=judge,
@@ -702,6 +715,7 @@ def _gate(
     foreign_preserved: list[Route],
     skew_before: float,
     skew_after: float,
+    baseline_skew: float,
     before_conn: dict[int, int],
     connected: Any,
     judge: Any,
@@ -709,8 +723,11 @@ def _gate(
     before_judged: dict[int, tuple[bool, float, float]],
 ) -> str | None:
     """None when ``candidate`` may be committed, else ``declined:<reason>``."""
-    # Skew: unchanged to first order for a symmetric squeeze.
+    # Skew: unchanged to first order for a symmetric squeeze.  Bounded both
+    # per squeeze and, cumulatively, against the pair's pre-pass skew.
     if abs(skew_after) > abs(skew_before) + SKEW_TOLERANCE_MM:
+        return "declined:skew"
+    if abs(skew_after) > baseline_skew + CUMULATIVE_SKEW_EPS_MM:
         return "declined:skew"
     # Foreign pads / vias / copper at the class clearance, the partner at the
     # floored intra-pair gap (the same gate the skew tuner uses).
