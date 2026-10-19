@@ -108,31 +108,6 @@ def _xfail(reason: str, raises: type[BaseException] | None = None) -> pytest.Mar
 
 # -- Known defects -----------------------------------------------------------
 
-CAN_ESD = _xfail(
-    "#7402: CANTransceiver ESD path puts CANH/CANL ports at tvs_anode.x + 5, "
-    "past the TVS pin and off any wire",
-    AssertionError,
-)
-GATE_DRIVER = _xfail(
-    "#7402: GateDriverBlock adds no wires; VCC/GND/BOOT_*/GATE_*/PWM_* are "
-    "fixed offsets matching no driver pin",
-    AssertionError,
-)
-B2B_SOURCE = _xfail(
-    "#7402: BackToBackFETPair SOURCE port sits at an off-grid Kelvin midpoint "
-    "and misses its grid-snapped wire end",
-    AssertionError,
-)
-I2C_GND = _xfail(
-    "#7402: I2CPullups without filter caps exposes a phantom 'virtual GND point'",
-    AssertionError,
-)
-GPIO_PULL_RAIL = _xfail(
-    "#7402: create_gpio_pull_resistor without a button exposes a phantom "
-    "opposite-rail alias (VCC for a pull-down, GND for a pull-up)",
-    AssertionError,
-)
-
 # -- Cases -------------------------------------------------------------------
 #
 # Each case is (id, export_name, factory).  ``export_name`` is the
@@ -261,7 +236,6 @@ case(
     "CANTransceiver[esd]",
     "CANTransceiver",
     lambda s: B.CANTransceiver(s, X, Y, esd_protection=True),
-    CAN_ESD,
 )
 case(
     "CANTransceiver[termination]",
@@ -275,7 +249,7 @@ case(
 )
 for _factory in ("mcp2551", "sn65hvd230", "tja1050"):
     _name = f"create_can_transceiver_{_factory}"
-    case(_name, _name, lambda s, n=_name: getattr(B, n)(s, X, Y), CAN_ESD)
+    case(_name, _name, lambda s, n=_name: getattr(B, n)(s, X, Y))
     case(
         f"{_name}[no_esd]",
         _name,
@@ -333,13 +307,12 @@ case("create_usb_type_c", "create_usb_type_c", lambda s: B.create_usb_type_c(s, 
 case("create_usb_micro_b", "create_usb_micro_b", lambda s: B.create_usb_micro_b(s, X, Y))
 
 # Interface: I2C, joystick
-case("I2CPullups", "I2CPullups", lambda s: B.I2CPullups(s, X, Y), I2C_GND)
+case("I2CPullups", "I2CPullups", lambda s: B.I2CPullups(s, X, Y))
 for _speed in ("standard", "fast", "fast_plus"):
     case(
         f"create_i2c_pullups[{_speed}]",
         "create_i2c_pullups",
         lambda s, sp=_speed: B.create_i2c_pullups(s, X, Y, speed=sp),
-        I2C_GND,
     )
 case(
     "create_i2c_pullups[filter]",
@@ -373,13 +346,11 @@ case(
     "create_gpio_pull_resistor[down]",
     "create_gpio_pull_resistor",
     lambda s: B.create_gpio_pull_resistor(s, X, Y),
-    GPIO_PULL_RAIL,
 )
 case(
     "create_gpio_pull_resistor[up]",
     "create_gpio_pull_resistor",
     lambda s: B.create_gpio_pull_resistor(s, X, Y, pull_type="up", rail="VCC"),
-    GPIO_PULL_RAIL,
 )
 
 # Motor control
@@ -396,7 +367,6 @@ for _driver in ("3-phase", "half-bridge"):
         f"GateDriverBlock[{_driver}]",
         "GateDriverBlock",
         lambda s, d=_driver: B.GateDriverBlock(s, X, Y, driver_type=d),
-        GATE_DRIVER,
     )
 case(
     "GateDriveResistorArray", "GateDriveResistorArray", lambda s: B.GateDriveResistorArray(s, X, Y)
@@ -406,7 +376,7 @@ case(
     "BootstrapCapacitorArray",
     lambda s: B.BootstrapCapacitorArray(s, X, Y),
 )
-case("BackToBackFETPair", "BackToBackFETPair", lambda s: B.BackToBackFETPair(s, X, Y), B2B_SOURCE)
+case("BackToBackFETPair", "BackToBackFETPair", lambda s: B.BackToBackFETPair(s, X, Y))
 case(
     "UCC27211GateDriver",
     "UCC27211GateDriver",
@@ -827,14 +797,43 @@ def test_reverse_polarity_pfet_takes_the_input_on_its_drain(
     assert pins[s_] == port(vout), "the protected output must come from the source"
     assert len({port(vin), port(vout), port("GND")}) == 3
     gate_net = pins[g]
-    if "R_gate" in block.components:
-        r_gate = block.components["R_gate"].reference
+    gate_r = next((k for k in ("R_gate", "R_GATE") if k in block.components), None)
+    if gate_r:
+        r_gate = block.components[gate_r].reference
         assert gate_net == pins[f"{r_gate}.1"]
         assert pins[f"{r_gate}.2"] == port("GND")
     else:
         assert gate_net == port("GND"), "the gate must be tied to ground"
     if "C_FILT" in block.components:
         assert pins[f"{block.components['C_FILT'].reference}.1"] == port(vout)
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        pytest.param(lambda s: B.BarrelJackInput(s, X, Y), id="BarrelJackInput"),
+        pytest.param(lambda s: B.create_12v_barrel_jack(s, X, Y), id="create_12v_barrel_jack"),
+    ],
+)
+def test_barrel_jack_pfet_clamps_vgs_with_a_zener(factory: Factory) -> None:
+    """R_GATE returns the gate to the sleeve; D_GATE clamps G-S (issue #7489)."""
+    sch = Schematic(title="barrel jack gate clamp")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        block = factory(sch)
+    nets, pins = _pin_nets(sch)
+    port = lambda name: _net_at(sch, nets, block.ports[name])  # noqa: E731
+    q = block.components["Q"]
+    gate, source = pins[f"Q1.{_pin_number(q, 'G')}"], pins[f"Q1.{_pin_number(q, 'S')}"]
+    r, d = block.components["R_GATE"], block.components["D_GATE"]
+    ref_r, ref_d = r.reference, d.reference
+
+    assert gate != source, "the gate must not be shorted to the source"
+    assert pins[f"{ref_d}.{_pin_number(d, 'K')}"] == source, "Zener cathode on the source"
+    assert pins[f"{ref_d}.{_pin_number(d, 'A')}"] == gate, "Zener anode on the gate"
+    assert pins[f"{ref_r}.1"] == gate
+    assert pins[f"{ref_r}.2"] == port("GND"), "gate resistor returns to the sleeve"
+    assert gate != port("GND"), "the gate may no longer be tied straight to the sleeve"
 
 
 @pytest.mark.parametrize("protection", ["diode", "none"])

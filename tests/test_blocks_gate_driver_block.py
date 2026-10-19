@@ -180,8 +180,8 @@ class TestGateDriverBlockPinNets:
 
     def test_alias_port_does_not_clobber_existing(self, mock_schematic):
         """A net name colliding with an existing port (e.g. ``GND``) keeps the old port."""
-        # The block already has a "GND" placeholder port at (x, y + 20).
-        original_gnd = (100, 120)
+        # The block already has a "GND" port at the real GND pin (mock: (x, y + 10)).
+        original_gnd = (100, 110)
         block = GateDriverBlock(
             mock_schematic,
             x=100,
@@ -189,7 +189,7 @@ class TestGateDriverBlockPinNets:
             bootstrap_caps=None,
             pin_nets={"GND": "GND"},  # try to overwrite
         )
-        # Original placeholder still wins.
+        # The existing port still wins.
         assert block.ports["GND"] == original_gnd
 
     def test_labels_anchored_to_wire_endpoints(self, mock_schematic):
@@ -252,5 +252,5 @@ class TestGateDriverBlockPinNets:
             pin_nets={"UHSG": "GATE_DRV_AH"},
         )
         # Original placeholder ports survive in both blocks.
-        for key in ("VCC", "GND", "BOOT_A", "GATE_HS_A", "GATE_LS_A", "PWM_H_A"):
+        for key in ("VCC", "GND", "GATE_HS_A", "GATE_LS_A"):
             assert b1.ports[key] == b2.ports[key]
