@@ -15,6 +15,7 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-20
 
+- **Issue #7583** (closed): board 06: impedance finding on USB2_D- once the native pad test applies per-pad classes (follow-up to #7569)
 - **PR #7601**: fix(router): measure foreign pads at true width in coupled pair legs
 - **PR #7635**: fix: accept KiCad 6 Sheet file/Sheet name spellings in all sheet walkers
 - **PR #7631**: fix(route): run stitching, failed-net export and parity summary on every tail
