@@ -20,6 +20,7 @@ from typing import Any
 
 from kicad_tools.schema import Schematic
 from kicad_tools.schema.hierarchy import build_hierarchy
+from kicad_tools.sexp.power import is_power_symbol
 
 
 def is_missing_footprint(sym: Any) -> bool:
@@ -40,6 +41,7 @@ def should_skip_symbol(
     *,
     include_power: bool = False,
     include_dnp: bool = False,
+    sch: Schematic | None = None,
 ) -> bool:
     """Mirror ``check_missing_footprints``'s skip rules.
 
@@ -48,42 +50,35 @@ def should_skip_symbol(
     surface every reference (e.g. a "force-everything" audit pass) can
     opt in via the keyword arguments.
 
-    "Power symbol" matches the same convention as
-    :attr:`kicad_tools.schema.bom.BOMItem.is_power_symbol`: KiCad's stock
-    ``power:`` library, kicad-tools' synthesized ``kicad_tools_pwr:``
-    library (used by ``Schematic.add_pwr_symbol`` for non-stock rails
-    like ``VIN``/``VMOTOR`` — see #3291), and any symbol whose reference
-    carries the virtual ``#PWR`` designator. These are footprint-less by
-    design and must never trip the missing-footprint gate (#3866).
+    "Power symbol" is defined by :func:`_is_power_symbol` (the shared
+    predicate behind :attr:`kicad_tools.schema.bom.BOMItem.is_power_symbol`;
+    pass *sch* so the library ``(power)`` flag is honoured). These are
+    footprint-less by design and must never trip the missing-footprint
+    gate (#3866).
     """
-    if not include_power and _is_power_symbol(sym):
+    if not include_power and _is_power_symbol(sym, sch):
         return True
     if not include_dnp and getattr(sym, "dnp", False):
         return True
     return False
 
 
-# Power/virtual library prefixes treated as footprint-less by design.
-# Mirrors the prefix rule of ``BOMItem.is_power_symbol`` (schema/bom.py).
-# Since #7615 the BOM predicate also reads the library ``(power)`` flag and
-# treats any ``#`` reference as virtual; this copy has not followed yet
-# (follow-up: #7637).
-_POWER_LIB_PREFIXES = ("power:", "kicad_tools_pwr:")
-
-
-def _is_power_symbol(sym: Any) -> bool:
+def _is_power_symbol(sym: Any, sch: Schematic | None = None) -> bool:
     """Return ``True`` for power/virtual symbols (no footprint by design).
 
-    Mirrors :attr:`kicad_tools.schema.bom.BOMItem.is_power_symbol`: any
-    stock ``power:`` or synthesized ``kicad_tools_pwr:`` library symbol,
-    plus the legacy ``#PWR`` reference prefix as a fallback for symbols
-    whose ``lib_id`` was stripped or rewritten on load.
+    Delegates to :func:`kicad_tools.sexp.power.is_power_symbol`, the same
+    predicate :attr:`kicad_tools.schema.bom.BOMItem.is_power_symbol` uses:
+    the library ``(power)`` flag read from *sch*'s embedded ``lib_symbols``
+    (so a project-library ``PWR_FLAG`` counts, #7637), the stock ``power:``
+    / ``kicad_tools_pwr:`` prefixes, and any ``#`` reference. Without *sch*
+    only the prefix and reference rules apply.
     """
-    lib_id = getattr(sym, "lib_id", "") or ""
-    if lib_id.startswith(_POWER_LIB_PREFIXES):
-        return True
-    ref = getattr(sym, "reference", "") or ""
-    return ref.startswith("#PWR")
+    return is_power_symbol(
+        getattr(sym, "lib_id", "") or "",
+        getattr(sym, "reference", "") or "",
+        lookup=sch.get_lib_symbol if sch is not None else None,
+        placed=getattr(sym, "_sexp", None),
+    )
 
 
 def iter_missing_footprint_symbols(
@@ -135,6 +130,7 @@ def iter_missing_footprint_symbols(
                 sym,
                 include_power=include_power,
                 include_dnp=include_dnp,
+                sch=sch,
             ):
                 continue
             if not include_assigned and not is_missing_footprint(sym):

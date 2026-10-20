@@ -103,7 +103,15 @@ def parse_connect(spec: str) -> ConnectSpec:
 
 
 def _is_power_symbol(lib_id: str) -> bool:
-    """Check if lib_id denotes a power symbol."""
+    """Check if lib_id denotes a power symbol.
+
+    Deliberately stays prefix-only (stock ``power:``), unlike the shared
+    :func:`kicad_tools.sexp.power.is_power_symbol` (#7637): a power symbol
+    is placed through ``Schematic.add_power(name)``, which always builds a
+    ``power:<name>`` lib_id, so routing a project-library ``(power)`` symbol
+    there would place the wrong library symbol. Such symbols go through
+    ``add_symbol`` with their own ``lib_id`` instead.
+    """
     return lib_id.startswith("power:")
 
 
