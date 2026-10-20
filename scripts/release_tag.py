@@ -303,6 +303,27 @@ def release_notes(changelog_text: str, version: str) -> str:
     return notes + "\n"
 
 
+# GitHub rejects a release body over 125,000 characters with a 422 (Issue #7608).
+RELEASE_BODY_LIMIT = 125_000
+RELEASE_BODY_BUDGET = 120_000
+
+
+def fit_release_notes(notes: str, tag: str, slug: str, budget: int = RELEASE_BODY_BUDGET) -> str:
+    """``notes`` if it fits in ``budget``, else a bullet-boundary cut + a link to the full section.
+
+    Same approach as the release PR body (:func:`release_plan.truncate_section`, #7562),
+    linking to ``CHANGELOG.md`` at the tag.
+    """
+    if len(notes) <= budget:
+        return notes
+    url = f"https://github.com/{slug}/blob/{tag}/CHANGELOG.md"
+    pointer = (
+        f"_Notes truncated to fit GitHub's {RELEASE_BODY_LIMIT:,}-character release body "
+        f"limit; the full {tag} section is in [`CHANGELOG.md` at `{tag}`]({url})._\n"
+    )
+    return rp.truncate_section(notes, budget, pointer)
+
+
 # --- PyPI -------------------------------------------------------------------------
 
 
@@ -410,7 +431,9 @@ def run_finalize(
             "publish run (it skips files PyPI already has), or follow RELEASING.md's manual "
             "fallback."
         )
-    notes = release_notes(git.show(sha, "CHANGELOG.md"), version)
+    notes = fit_release_notes(
+        release_notes(git.show(sha, "CHANGELOG.md"), version), tag, forge.slug
+    )
     if forge.release_exists(tag):
         out.append(f"GitHub Release {tag} already exists: not recreating")
     elif mode == "on":
