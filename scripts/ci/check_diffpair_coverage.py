@@ -170,7 +170,7 @@ DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
     # Seed-42 re-route, PR #7570 / #7491 (2026-10-20): skew vs max_skew_mm.
     ("diffpair_length_skew", "MIPI_CLK+/MIPI_CLK-"): DIFFPAIR_SKEW_TRACKER,  # 1.311 / 0.300
     ("diffpair_length_skew", "MIPI_D0+/MIPI_D0-"): DIFFPAIR_SKEW_TRACKER,  # 2.320 / 0.300
-    ("diffpair_length_skew", "PCIE_RX+/PCIE_RX-"): DIFFPAIR_SKEW_TRACKER,  # 2.117 / 0.500
+    ("diffpair_length_skew", "PCIE_RX+/PCIE_RX-"): DIFFPAIR_SKEW_TRACKER,  # 1.693 / 0.500
     ("diffpair_length_skew", "USB2_D+/USB2_D-"): DIFFPAIR_SKEW_TRACKER,  # 1.896 / 1.000
     ("diffpair_length_skew", "USB3_RX2+/USB3_RX2-"): DIFFPAIR_SKEW_TRACKER,  # 3.329 / 0.500
 }
