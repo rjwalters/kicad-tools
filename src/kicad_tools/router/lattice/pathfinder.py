@@ -264,6 +264,21 @@ def _crossing_mirror(start: int, end: int, layers: frozenset[int]) -> LayerMirro
 
 
 @dataclass(frozen=True)
+class _JointExtras:
+    """A joint re-route of one P and one N extra (issue #7093).
+
+    ``moves`` is ``((P extra, new route), (N extra, new route))``,
+    ``lengths`` their pair-length-measure lengths in the same order, and
+    ``skew_before`` / ``skew_after`` the pair's summed-length skew (mm).
+    """
+
+    moves: tuple[tuple[Connection, Route], tuple[Connection, Route]]
+    lengths: tuple[float, float]
+    skew_before: float
+    skew_after: float
+
+
+@dataclass(frozen=True)
 class PadGrowthRound:
     """One #6489 grown-keep-out re-negotiation attempt, for the log (issue #6670).
 
@@ -4598,12 +4613,15 @@ class LatticePathfinder:
 
         Among those the shortest wins; ties keep the earlier.  Only that one
         extra's copper can change, so no other route, routed count or pair
-        moves.  A pair with no fitting extra keeps its copper (logged in
-        :attr:`extra_parity_log`) and is still reported by the end-of-run
-        via audit.  Board 06rf's ``USB2_D`` is such a pair: its two J1 extras
-        cross, so ``USB2_D+`` copying the ``USB2_D-`` hop comes back planar
-        (the pads' launch radii touch) and ``USB2_D-`` has no planar way past
-        ``USB2_D+``.
+        moves.  When no single extra fits, one P and one N extra are
+        re-routed together (:meth:`_joint_extra_parity`): board 06rf's
+        ``USB2_D`` J1 extras cross, so ``USB2_D+`` copying the ``USB2_D-``
+        hop comes back planar (the pads' launch radii touch) and ``USB2_D-``
+        has no planar way past ``USB2_D+``, but with both lifted ``USB2_D-``
+        goes straight and ``USB2_D+`` round its far pad.  Then only those two
+        extras' copper can change.  A pair with no fitting extra either way
+        keeps its copper (logged in :attr:`extra_parity_log`) and is still
+        reported by the end-of-run via audit.
 
         ``deadline`` (``time.monotonic()``) is re-checked before every
         search: once it passes, the pair being searched and every later one
@@ -4691,16 +4709,46 @@ class LatticePathfinder:
                         break
                 if timed_out:
                     break
+            joint: _JointExtras | None = None
+            if best is None and not timed_out:
+                joint, timed_out = self._joint_extra_parity(
+                    routes,
+                    classes,
+                    extras[p_net],
+                    extras[n_net],
+                    totals,
+                    (p_net, n_net),
+                    measure,
+                    deadline,
+                )
             if timed_out:
                 self.extra_parity_log[(p_net, n_net)] = (
                     f"{names} vias {before[0]}/{before[1]}: deadline reached before "
                     "every extra-pad attachment was tried; kept"
                 )
                 return
+            if joint is not None:
+                for conn, route in joint.moves:
+                    routes[conn[0]] = route
+                after = {p_net: 0, n_net: 0}
+                for r in routes.values():
+                    if r.net in after:
+                        after[r.net] += len(r.vias)
+                legs = ", ".join(
+                    f"{c[2].ref}.{c[2].pin}->{c[1].ref}.{c[1].pin} ({length:.2f} mm)"
+                    for (c, _r), length in zip(joint.moves, joint.lengths, strict=True)
+                )
+                self.extra_parity_log[(p_net, n_net)] = (
+                    f"{names} vias {before[0]}/{before[1]} -> {after[p_net]}/{after[n_net]}: "
+                    f"extras {legs} re-routed jointly, skew {joint.skew_before:.2f} -> "
+                    f"{joint.skew_after:.2f} mm; no other copper moved"
+                )
+                continue
             if best is None:
                 self.extra_parity_log[(p_net, n_net)] = (
                     f"{names} vias {before[0]}/{before[1]}: no extra-pad attachment "
-                    "could copy its partner's layer changes on the finished board; kept"
+                    "could copy its partner's layer changes on the finished board, "
+                    "alone or re-routed jointly with its partner's; kept"
                 )
                 continue
             length, moved, route = best
@@ -4715,6 +4763,154 @@ class LatticePathfinder:
                 f"re-routed on its partner's layer changes ({length:.2f} mm); "
                 "no other copper moved"
             )
+
+    def _joint_extra_mirrors(
+        self, own: Connection, routes: dict[object, Route], partner: Connection
+    ) -> list[LayerMirror | None]:
+        """Layer plans a jointly re-routed extra is searched under (#7093).
+
+        ``None`` (a free search), planar on its pads' layer when both its
+        pads meet its route on one layer, its own route's layer changes and
+        its partner extra's (:meth:`_extra_mirror`).  Duplicates dropped,
+        order kept.
+        """
+        route = routes[own[0]]
+        out: list[LayerMirror | None] = [None]
+        a = self._route_end_layer(route, own[1])
+        b = self._route_end_layer(route, own[2])
+        if a is not None and a == b:
+            out.append(LayerMirror(a, a, frozenset({a}), True))
+        for mirror in (
+            self._extra_mirror(route, own[1], own[2]),
+            self._extra_mirror(routes[partner[0]], partner[1], partner[2]),
+        ):
+            if mirror is not None and mirror not in out:
+                out.append(mirror)
+        return out
+
+    def _joint_extra_parity(
+        self,
+        routes: dict[object, Route],
+        classes: dict[object, object | None],
+        p_extras: list[Connection],
+        n_extras: list[Connection],
+        totals: dict[int, int],
+        nets: tuple[int, int],
+        measure: Callable[[Route], float],
+        deadline: float | None,
+    ) -> tuple[_JointExtras | None, bool]:
+        """Re-route one P extra and one N extra together for via parity (#7093).
+
+        The fallback of :meth:`_extra_parity_pass` when no single extra can
+        copy its partner's layer changes.  On board 06rf the ``USB2_D`` J1
+        extras cross in an X: ``USB2_D-`` drops through B.Cu under the planar
+        ``USB2_D+`` (2 / 4 vias), ``USB2_D+`` cannot add a hop past
+        ``USB2_D-``'s B.Cu copper and ``USB2_D-`` has no planar way past
+        ``USB2_D+``.  With BOTH lifted, one can take the straight planar way
+        and the other a planar way round its partner's far pad -- an option
+        neither single re-route can see.
+
+        For every (P extra, N extra), both orders, and each layer plan of
+        :meth:`_joint_extra_mirrors`: the first extra is searched against
+        every other route of the board (the two lifted ones excluded), then
+        the second against those routes plus the first's new copper.  Both
+        searches pass :meth:`_search_single`'s self-DRC gate.  A result is
+        kept only when
+
+        * the two nets' via totals come out equal,
+        * each new extra is no longer than the longer of the two extras it
+          replaces, plus :data:`_PARITY_LENGTH_TOLERANCE_MM` (pair length
+          measure),
+        * and the pair's skew (each net's summed route length) is not worse.
+
+        The shortest total wins; ties keep the earlier.  Returns ``(choice
+        or None, timed_out)``; ``deadline`` is re-checked before every search.
+        """
+        p_net, n_net = nets
+
+        def skew(replaced: dict[object, Route]) -> float:
+            sums = {p_net: 0.0, n_net: 0.0}
+            for rkey, route in routes.items():
+                route = replaced.get(rkey, route)
+                if route.net in sums:
+                    sums[route.net] += measure(route)
+            return abs(sums[p_net] - sums[n_net])
+
+        skew_before = skew({})
+        best: _JointExtras | None = None
+        for p_conn in p_extras:
+            for n_conn in n_extras:
+                lifted = (p_conn[0], n_conn[0])
+                old = {p_conn[0]: routes[p_conn[0]], n_conn[0]: routes[n_conn[0]]}
+                bound = max(measure(r) for r in old.values()) + _PARITY_LENGTH_TOLERANCE_MM
+                plans = {
+                    p_conn[0]: self._joint_extra_mirrors(p_conn, routes, n_conn),
+                    n_conn[0]: self._joint_extra_mirrors(n_conn, routes, p_conn),
+                }
+                # Via totals of each net without the two lifted extras.
+                rest = {
+                    p_net: totals[p_net] - len(old[p_conn[0]].vias),
+                    n_net: totals[n_net] - len(old[n_conn[0]].vias),
+                }
+                base: CommittedCopper | None = None
+                for first, second in ((p_conn, n_conn), (n_conn, p_conn)):
+                    for m1 in plans[first[0]]:
+                        if deadline is not None and time.monotonic() >= deadline:
+                            return None, True
+                        if base is None:
+                            base = self._fresh_committed()
+                            for rkey, route in routes.items():
+                                if rkey not in lifted:
+                                    self._commit_route_copper(route, classes.get(rkey), base)
+                        r1, _why = self._search_single(
+                            first,
+                            committed=base,
+                            history=PhysicalHistory(),
+                            present=1.0,
+                            escape_plan={},
+                            mirror=m1,
+                        )
+                        if r1 is None:
+                            continue
+                        len1 = measure(r1.route)
+                        if len1 > bound + 1e-9:
+                            continue
+                        under = self._fresh_committed()
+                        for rkey, route in routes.items():
+                            if rkey not in lifted:
+                                self._commit_route_copper(route, classes.get(rkey), under)
+                        self._commit_route_copper(r1.route, classes.get(first[0]), under)
+                        first_net = first[1].net
+                        second_net = second[1].net
+                        need = rest[first_net] + len(r1.route.vias) - rest[second_net]
+                        if need < 0:
+                            continue
+                        for m2 in plans[second[0]]:
+                            if deadline is not None and time.monotonic() >= deadline:
+                                return None, True
+                            r2, _why = self._search_single(
+                                second,
+                                committed=under,
+                                history=PhysicalHistory(),
+                                present=1.0,
+                                escape_plan={},
+                                mirror=m2,
+                            )
+                            if r2 is None or len(r2.route.vias) != need:
+                                continue
+                            len2 = measure(r2.route)
+                            if len2 > bound + 1e-9:
+                                continue
+                            after = skew({first[0]: r1.route, second[0]: r2.route})
+                            if after > skew_before + 1e-9:
+                                continue
+                            moves = ((first, r1.route), (second, r2.route))
+                            if p_conn is not first:
+                                moves = (moves[1], moves[0])
+                            lengths = (len1, len2) if p_conn is first else (len2, len1)
+                            if best is None or sum(lengths) < sum(best.lengths) - 1e-9:
+                                best = _JointExtras(moves, lengths, skew_before, after)
+        return best, False
 
     def _commit_route_copper(
         self, route: Route, net_class: object | None, committed: CommittedCopper
