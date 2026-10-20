@@ -4,6 +4,7 @@ KiCad Schematic Element Models
 Wire, Junction, Label, HierarchicalLabel, GlobalLabel, PowerSymbol, and WireCollision classes.
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
@@ -23,6 +24,7 @@ from kicad_tools.sexp.builders import (
     uuid_node,
     wire_node,
 )
+from kicad_tools.sexp.power import is_power_symbol
 
 if TYPE_CHECKING:
     from .symbol import SymbolDef
@@ -366,8 +368,16 @@ class PowerSymbol:
 
     @property
     def is_power_flag(self) -> bool:
-        """Whether this symbol declares an external driver without naming a net."""
-        return self.lib_id in {"power:PWR_FLAG", "PWR_FLAG"}
+        """Whether this symbol declares an external driver without naming a net.
+
+        Matched by symbol name in *any* library (``power:PWR_FLAG``, a bare
+        ``PWR_FLAG``, or a project-library copy such as ``myproj:PWR_FLAG``),
+        since the parser routes library-flagged power symbols from any
+        library here (#7637). Otherwise a project-library flag would report
+        its Value ``"PWR_FLAG"`` as a global net name and merge every flagged
+        rail into one ``PWR_FLAG`` net.
+        """
+        return self.lib_id.rsplit(":", 1)[-1] == "PWR_FLAG"
 
     @property
     def net_name(self) -> str | None:
@@ -485,24 +495,30 @@ class PowerSymbol:
         )
 
     @staticmethod
-    def is_power_symbol(node: SExp) -> bool:
+    def is_power_symbol(node: SExp, lib_symbols: Mapping[str, SExp] | None = None) -> bool:
         """Check if an S-expression node represents a power symbol.
 
-        Power symbols are identified by:
-        1. lib_id starting with "power:"
-        2. Reference starting with "#PWR"
+        Delegates to the shared :func:`kicad_tools.sexp.power.is_power_symbol`
+        (#7637): the library ``(power)`` flag looked up in *lib_symbols* (the
+        schematic's embedded ``lib_symbols`` by name), the stock ``power:`` /
+        ``kicad_tools_pwr:`` prefixes, or a ``#`` reference designator when
+        the symbol has no embedded definition (so a non-power ``#LOGO1``
+        stays an ordinary symbol). When *lib_symbols* is omitted only the
+        prefix and reference rules apply.
         """
         lib_id_node = node.get("lib_id")
-        if lib_id_node:
-            lib_id = str(lib_id_node.get_first_atom())
-            if lib_id.startswith("power:"):
-                return True
+        lib_id = str(lib_id_node.get_first_atom()) if lib_id_node else ""
 
-        # Also check reference for #PWR pattern
+        reference = ""
         for prop_node in node.find_all("property"):
             atoms = prop_node.get_atoms()
-            if len(atoms) >= 2:
-                if str(atoms[0]) == "Reference" and str(atoms[1]).startswith("#PWR"):
-                    return True
+            if len(atoms) >= 2 and str(atoms[0]) == "Reference":
+                reference = str(atoms[1])
+                break
 
-        return False
+        return is_power_symbol(
+            lib_id,
+            reference,
+            lookup=lib_symbols.get if lib_symbols is not None else None,
+            placed=node,
+        )

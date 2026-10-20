@@ -553,7 +553,7 @@ class SchematicIOMixin:
         # Parse placed symbols (those with lib_id)
         for child in doc.children:
             if child.name == "symbol" and child.get("lib_id"):
-                if PowerSymbol.is_power_symbol(child):
+                if PowerSymbol.is_power_symbol(child, embedded_lib_symbols):
                     pwr = PowerSymbol.from_sexp(child)
                     _attach_source(pwr, child)
                     sch.power_symbols.append(pwr)
