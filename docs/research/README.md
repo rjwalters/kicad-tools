@@ -83,6 +83,7 @@ Measured experiments on `kct route`; several record negative results.
 | [Grid pad shape](grid-pad-shape.md) | Router pad shape coverage |
 | [Router pad rotation audit](router-pad-rotation-audit.md) | Router pad rotation consumer audit |
 | [MCP clearance and grid audit](mcp-clearance-grid-audit.md) | MCP clearance and router grid audit |
+| [Clearance-kernel acceptance audit](clearance-kernel-acceptance-audit.md) | Epic #5509 criterion-to-evidence reconciliation (#7577) |
 | [Connectivity contact paths](connectivity-contact-paths-5133.md) | Existing physical contact paths in the Board06 extractor |
 | [Copper LVS zone suppression](copper-lvs-zone-suppression.md) | Independent Board05 evidence |
 
