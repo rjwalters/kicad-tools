@@ -4455,7 +4455,17 @@ class CppPathfinder:
         # fallback, on by default; ``--no-fallback-bidirectional`` restores
         # the one-way search.
         _py_rules = self._py_router.rules
-        if getattr(_py_rules, "fallback_bidirectional", False) is True:
+        # Diff-pair legs and match-group members stay on the one-way search:
+        # the bidirectional path perturbs their length/impedance symmetry
+        # (board 07 TMDS lanes regress under it).
+        _nc = net_class
+        if _nc is None:
+            _nc = self._py_router._get_net_class(net_name)
+        _length_constrained = _nc is not None and (
+            getattr(_nc, "diffpair_partner", None) is not None
+            or getattr(_nc, "length_match_group", None) is not None
+        )
+        if getattr(_py_rules, "fallback_bidirectional", False) is True and not _length_constrained:
             route = self._py_router.route_auto(
                 start,
                 end,

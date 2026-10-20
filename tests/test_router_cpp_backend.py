@@ -1310,8 +1310,8 @@ class TestCppPathfinderPythonFallback:
         end = Pad(x=8.0, y=8.0, width=0.5, height=0.5, layer=Layer.F_CU, net=net, net_name=net_name)
         return start, end
 
-    def test_fallback_default_dispatches_route_auto(self):
-        """Issue #6527: by default the fallback runs ``route_auto`` with the
+    def test_fallback_opt_in_dispatches_route_auto(self):
+        """Issue #6527: when opted in the fallback runs ``route_auto`` with the
         fallback threshold, forwarding the deadline and Steiner goals."""
         if not is_cpp_available():
             pytest.skip("C++ backend not available")
@@ -1321,7 +1321,7 @@ class TestCppPathfinderPythonFallback:
         from kicad_tools.router.primitives import Route
         from kicad_tools.router.rules import DesignRules
 
-        assert DesignRules().fallback_bidirectional is True
+        assert DesignRules().fallback_bidirectional is False
         pf = self._make_pf(fallback_bidirectional=True)
         start, end = self._pads()
         fake = self._make_failing_impl()
@@ -1342,6 +1342,81 @@ class TestCppPathfinderPythonFallback:
         assert "per_net_timeout" in kwargs and "extra_goal_cells" in kwargs
         assert result is fallback_route
         assert pf.fallback_stats["fallback_count"] == 1
+
+    def test_fallback_opt_in_runs_real_route_bidirectional(self):
+        """Issue #6527: a C++ give-up reaches the REAL bidirectional search.
+
+        Only ``route_bidirectional`` is wrapped (spied), never replaced, so the
+        committed path is the one the real Python ``Router`` produced.  Fails
+        if ``route_bidirectional`` is stubbed out to return ``None``.
+        """
+        if not is_cpp_available():
+            pytest.skip("C++ backend not available")
+
+        from unittest import mock
+
+        from kicad_tools.router.pathfinder import Router
+
+        pf = self._make_pf(fallback_bidirectional=True)
+        start, end = self._pads()
+        fake = self._make_failing_impl()
+        real = Router.route_bidirectional
+        produced = []
+
+        def _spy(self_, *args, **kwargs):
+            out = real(self_, *args, **kwargs)
+            produced.append(out)
+            return out
+
+        with (
+            mock.patch.object(pf, "_impl", fake),
+            mock.patch.object(Router, "route_bidirectional", autospec=True, side_effect=_spy),
+        ):
+            result = pf.route(start, end)
+
+        # The committed path IS the one the real bidirectional search found
+        # (stubbing it to ``None`` would fall through to the one-way retry).
+        assert len(produced) == 1 and produced[0] is not None
+        assert result is not None and result.segments
+        assert result.segments == produced[0].segments
+        assert pf.fallback_stats["fallback_count"] == 1
+
+    @pytest.mark.parametrize(
+        "nc_kwargs",
+        [{"diffpair_partner": "N1_N"}, {"length_match_group": "GRP"}],
+        ids=["diffpair_leg", "match_group_member"],
+    )
+    @pytest.mark.parametrize("pass_net_class", [True, False], ids=["explicit", "resolved"])
+    def test_length_constrained_nets_stay_one_way(self, nc_kwargs, pass_net_class):
+        """Issue #6527: diff-pair legs and match-group members never call
+        ``route_bidirectional``; they keep the one-way fallback."""
+        if not is_cpp_available():
+            pytest.skip("C++ backend not available")
+
+        from unittest import mock
+
+        from kicad_tools.router.pathfinder import Router
+        from kicad_tools.router.primitives import Route
+        from kicad_tools.router.rules import NetClassRouting
+
+        pf = self._make_pf(fallback_bidirectional=True)
+        start, end = self._pads()
+        nc = NetClassRouting(name="LC", priority=1, **nc_kwargs)
+        fake = self._make_failing_impl()
+        one_way = Route(net=1, net_name="N1")
+        with (
+            mock.patch.object(pf, "_impl", fake),
+            mock.patch.object(Router, "_get_net_class", return_value=nc),
+            mock.patch.object(Router, "route_bidirectional") as bidir,
+            mock.patch.object(Router, "route_auto") as auto,
+            mock.patch.object(Router, "route", return_value=one_way) as one,
+        ):
+            result = pf.route(start, end, net_class=nc if pass_net_class else None)
+
+        bidir.assert_not_called()
+        auto.assert_not_called()
+        one.assert_called_once()
+        assert result is one_way
 
     def test_fallback_none_result_not_counted(self):
         """A Python fallback that finds no route returns None and is not counted.

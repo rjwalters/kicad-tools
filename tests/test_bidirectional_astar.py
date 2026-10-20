@@ -523,9 +523,9 @@ class TestRouteAutoFallbackPlumbing:
 
         return mk(5.0, 5.0), mk(x2, 5.0)
 
-    def test_fallback_default_is_bidirectional_for_every_request(self):
+    def test_fallback_bidirectional_is_opt_in_with_threshold_zero(self):
         rules = DesignRules()
-        assert rules.fallback_bidirectional is True
+        assert rules.fallback_bidirectional is False
         assert rules.fallback_bidirectional_threshold == 0
         # The generic route_auto threshold is unchanged.
         assert rules.bidirectional_threshold == 1000
