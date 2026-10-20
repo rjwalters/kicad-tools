@@ -417,7 +417,7 @@ job_board_05_routing_regression() {
     /tmp/board05-ci || true
   test -f /tmp/board05-ci/bldc_controller_routed.kicad_pcb
   uv run python scripts/ci/check_board_05_blocking.py \
-    --max-blocking 7 \
+    --max-blocking 0 \
     /tmp/board05-ci/bldc_controller_routed.kicad_pcb
 }
 

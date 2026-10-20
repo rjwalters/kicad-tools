@@ -1,10 +1,9 @@
 """Tests for the board-05 blocking-net CI gate (issue #3822).
 
 ``scripts/ci/check_board_05_blocking.py`` regenerates + routes board 05 in
-CI and asserts ``blocking_incomplete_count <= --max-blocking`` (default 7,
-one net above the Phase-5-measured CI ceiling of 6; board-05's CI re-route
-reaches 6 blocking with Phase 5 active and diverges from the committed
-0-blocking artifact -- issue #4479).
+CI and asserts ``blocking_incomplete_count <= --max-blocking`` (default 0:
+board-05's CI regen measures 0 blocking nets on main, matching the committed
+artifact -- issue #7547; the earlier Phase-5 bound of 7 is retired).
 
 The pass/fail VERDICT against a real route is CI-only (the macOS host routes
 board 05 to more blocking nets than the Linux CI router -- the documented
@@ -39,20 +38,14 @@ def _load_helper():
     return module
 
 
-def test_default_threshold_locks_in_phase5_gain() -> None:
+def test_default_threshold_is_zero() -> None:
     helper = _load_helper()
-    assert helper.DEFAULT_MAX_BLOCKING == 7
+    assert helper.DEFAULT_MAX_BLOCKING == 0
 
 
-def test_default_clears_phase5_ci_floor(tmp_path, monkeypatch) -> None:
-    """Rationale for the default of 7 (issue #4479): Phase 5 lowered board-05's
-    fresh-regen CI floor to 6 blocking, so the gate must pass at the measured
-    ceiling of 6 (and at the exact bound of 7) and only fail above it.
-
-    This documents WHY 7 was chosen: 6 (the Phase-5 CI measurement) must be
-    green with one net of margin, while 8 (a gross regression beyond the
-    bound) must still red.
-    """
+def test_default_fails_on_a_single_blocking_net(tmp_path, monkeypatch) -> None:
+    """Issue #7547: with the default, 0 blocking passes and ONE blocking net
+    fails (exit 2) -- the old Phase-5 bound of 7 would have let it through."""
     helper = _load_helper()
     pcb = tmp_path / "bldc_controller_routed.kicad_pcb"
     pcb.write_text("(kicad_pcb)")
@@ -64,21 +57,36 @@ def test_default_clears_phase5_ci_floor(tmp_path, monkeypatch) -> None:
             lambda _p: (count, [f"NET{i}" for i in range(count)]),
         )
 
-    # 6 -- the Phase-5-measured CI ceiling -- passes with one net of margin.
-    route_to(6)
+    route_to(0)
     assert helper.check_pcb(pcb, max_blocking=helper.DEFAULT_MAX_BLOCKING)[0] == 0
 
-    # 7 (the exact bound) still passes; 8 (gross regression) fails.
-    route_to(7)
-    assert helper.check_pcb(pcb, max_blocking=helper.DEFAULT_MAX_BLOCKING)[0] == 0
-    route_to(8)
+    route_to(1)
     exit_code, message = helper.check_pcb(pcb, max_blocking=helper.DEFAULT_MAX_BLOCKING)
     assert exit_code == 2
     assert "regression" in message.lower()
+    assert "NET0" in message
+
+    # The retired Phase-5 ceiling of 6 now fails too.
+    route_to(6)
+    assert helper.check_pcb(pcb, max_blocking=helper.DEFAULT_MAX_BLOCKING)[0] == 2
+
+
+def test_main_default_fails_on_one_blocking_net(tmp_path, monkeypatch, capsys) -> None:
+    """``main`` with no --max-blocking (the CI default) exits 2 on 1 net."""
+    helper = _load_helper()
+    pcb = tmp_path / "bldc_controller_routed.kicad_pcb"
+    pcb.write_text("(kicad_pcb)")
+
+    monkeypatch.setattr(helper, "count_blocking", lambda _p: (1, ["PHASE_A"]))
+
+    assert helper.main([str(pcb)]) == 2
+    out = capsys.readouterr().out
+    assert "MEASURED blocking_incomplete_count = 1 (threshold <= 0)" in out
+    assert "PHASE_A" in out
 
 
 def test_check_pcb_passes_at_ci_ceiling(tmp_path, monkeypatch) -> None:
-    """6 blocking nets (Phase-5 CI ceiling) with --max-blocking 7 -> exit 0."""
+    """An explicit --max-blocking 7 still passes 6 blocking nets (threshold logic)."""
     helper = _load_helper()
     pcb = tmp_path / "bldc_controller_routed.kicad_pcb"
     pcb.write_text("(kicad_pcb)")
@@ -95,7 +103,7 @@ def test_check_pcb_passes_at_ci_ceiling(tmp_path, monkeypatch) -> None:
 
 
 def test_check_pcb_passes_when_below_threshold(tmp_path, monkeypatch) -> None:
-    """A future improvement (5 blocking) still passes the <= 7 gate."""
+    """5 blocking nets pass an explicit --max-blocking 7 (threshold logic)."""
     helper = _load_helper()
     pcb = tmp_path / "bldc_controller_routed.kicad_pcb"
     pcb.write_text("(kicad_pcb)")
@@ -107,7 +115,7 @@ def test_check_pcb_passes_when_below_threshold(tmp_path, monkeypatch) -> None:
 
 
 def test_check_pcb_fails_on_gross_regression(tmp_path, monkeypatch) -> None:
-    """12 blocking nets (well beyond the bound) with default -> exit 2."""
+    """12 blocking nets beyond an explicit bound of 7 -> exit 2."""
     helper = _load_helper()
     pcb = tmp_path / "bldc_controller_routed.kicad_pcb"
     pcb.write_text("(kicad_pcb)")
@@ -125,22 +133,7 @@ def test_check_pcb_fails_on_gross_regression(tmp_path, monkeypatch) -> None:
 
 
 def test_check_pcb_fails_when_threshold_below_actual(tmp_path, monkeypatch) -> None:
-    """--max-blocking 0 against the measured 6 -> exit 2 (test-plan check)."""
-    helper = _load_helper()
-    pcb = tmp_path / "bldc_controller_routed.kicad_pcb"
-    pcb.write_text("(kicad_pcb)")
-
-    monkeypatch.setattr(helper, "count_blocking", lambda _p: (6, [f"NET{i}" for i in range(6)]))
-
-    exit_code, _ = helper.check_pcb(pcb, max_blocking=0)
-    assert exit_code == 2
-
-
-def test_check_pcb_fails_when_tightened_toward_committed(tmp_path, monkeypatch) -> None:
-    """Tightening --max-blocking to 0 (the committed artifact) fails at the
-    current fresh-regen floor of 6 -- this is the lever #4548 (escape-corridor
-    reservation) and the ISENSE -leg follow-up will pull as they close the
-    remaining blocking cohort toward 0."""
+    """--max-blocking 0 against 6 blocking nets -> exit 2."""
     helper = _load_helper()
     pcb = tmp_path / "bldc_controller_routed.kicad_pcb"
     pcb.write_text("(kicad_pcb)")
@@ -166,11 +159,12 @@ def test_main_prints_measured_count_on_pass(tmp_path, monkeypatch, capsys) -> No
     pcb = tmp_path / "bldc_controller_routed.kicad_pcb"
     pcb.write_text("(kicad_pcb)")
 
-    monkeypatch.setattr(helper, "count_blocking", lambda _p: (6, [f"NET{i}" for i in range(6)]))
+    monkeypatch.setattr(helper, "count_blocking", lambda _p: (0, []))
 
     assert helper.main([str(pcb)]) == 0
     out = capsys.readouterr().out
-    assert "MEASURED blocking_incomplete_count = 6" in out
+    assert "MEASURED blocking_incomplete_count = 0" in out
+    assert "blocking nets: (none)" in out
 
 
 def test_main_prints_measured_count_on_regression(tmp_path, monkeypatch, capsys) -> None:
@@ -203,9 +197,10 @@ def test_main_parses_max_blocking_arg(tmp_path, monkeypatch) -> None:
 
     monkeypatch.setattr(helper, "count_blocking", lambda _p: (6, ["A", "B"]))
 
-    # default 7 -> 6 passes
-    assert helper.main([str(pcb)]) == 0
-    # tightened to 5 -> 6 fails
+    # default 0 -> 6 fails
+    assert helper.main([str(pcb)]) == 2
+    # explicit 7 -> 6 passes; 5 -> 6 fails
+    assert helper.main([str(pcb), "--max-blocking", "7"]) == 0
     assert helper.main([str(pcb), "--max-blocking", "5"]) == 2
 
 
