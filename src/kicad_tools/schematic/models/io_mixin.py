@@ -367,6 +367,7 @@ class SchematicIOMixin:
         # here so mypy can see them when this mixin references them.
         _PWR_SYNTH_LIB_PREFIX: str
         _synthesized_pwr_defs: dict[str, SExp]
+        paper: str
         text_notes: list[tuple[str, float, float]]
         _source_doc: SExp | None
         _source_consumed: list[SExp]
