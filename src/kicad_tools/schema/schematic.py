@@ -16,6 +16,7 @@ from kicad_tools.sexp import SExp
 
 from ..core.schematic_uuids import UuidMinter, pin_uuid
 from ..core.sexp_file import load_schematic, save_schematic
+from ..core.sheet_properties import SHEET_FILE_KEYS, SHEET_NAME_KEYS
 from .label import GlobalLabel, HierarchicalLabel, Label
 from .library import LibrarySymbol, resolve_extends
 from .symbol import SymbolInstance, SymbolPin, SymbolProperty
@@ -93,9 +94,9 @@ class SheetInstance:
         if sexp.find("property"):
             for prop in sexp.find_all("property"):
                 prop_name = prop.get_string(0)
-                if prop_name == "Sheetname":
+                if prop_name in SHEET_NAME_KEYS:
                     name = prop.get_string(1) or ""
-                elif prop_name == "Sheetfile":
+                elif prop_name in SHEET_FILE_KEYS:
                     filename = prop.get_string(1) or ""
 
         if uuid_node := sexp.find("uuid"):

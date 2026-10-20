@@ -21,6 +21,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from kicad_tools.core.sheet_properties import SHEET_NAME_KEYS
 from kicad_tools.schema.hierarchy import (
     HierarchicalLabelInfo,
     build_hierarchy,
@@ -227,7 +228,7 @@ def _remove_sheet_pin(
     target_sheet = None
     for sheet in sexp.find_all("sheet"):
         for prop in sheet.find_all("property"):
-            if prop.get_string(0) == "Sheetname" and prop.get_string(1) == sheet_name:
+            if prop.get_string(0) in SHEET_NAME_KEYS and prop.get_string(1) == sheet_name:
                 target_sheet = sheet
                 break
         if target_sheet:
@@ -274,7 +275,10 @@ def _remove_sheet_pin(
                 in_target_sheet = False
 
         # Check if this is the start of our target sheet
-        if f'Sheetname" "{sheet_name}"' in line or f'Sheetname"{sheet_name}"' in line:
+        if any(
+            f'{key}" "{sheet_name}"' in line or f'{key}"{sheet_name}"' in line
+            for key in SHEET_NAME_KEYS
+        ):
             in_target_sheet = True
 
         # If we're in target sheet and hit the pin to remove
