@@ -148,6 +148,12 @@ DIFFPAIR_FIXTURE_KEY = "boards/06-diffpair-test/regression-fixture/diffpair_test
 # gone, but its skew (1.896 mm vs 1.000) is now over, so it moves to the skew
 # block below; USB3_RX1 now measures 0.411 mm skew against its 0.500 limit, so
 # its skew identity is gone too.
+# Issue #7575: the residual USB3_TX2- finding was a false positive.  Its
+# judged segment, the 21.65 mm F.Cu run (31.5, 23.15)->(53.15, 23.15), had one
+# partner piece in the coupling window: a 0.02 mm TX2+ stub inside U2.F2's own
+# pad, at a 0.335 mm gap (the TX2+ trunk is 0.975 mm away, a breakout).  The
+# coupled-length rule no longer counts it, so the impedance entry is gone and
+# the seed-42 re-route has no impedance finding.
 #
 # Issue #7367 -- the ``diffpair_length_skew`` pairs, keyed by pair, not by a
 # count.  Until #7367 the gate let every skew/continuity finding through by
@@ -166,10 +172,8 @@ DIFFPAIR_SKEW_TRACKER = 7548
 # Allowed by identity, not by count (#7359, #7270 Q3 ruling): only these
 # identities may carry the listed errors, a listed identity that stops firing
 # makes its entry stale and fails the gate, and an allowed finding does not
-# count against the (now strict 0) routed-DRC total.  Deleting the impedance
-# entry is #7349's job.
+# count against the (now strict 0) routed-DRC total.
 DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
-    ("impedance", "USB3_TX2-"): 7349,
     # Seed-42 re-route, PR #7570 / #7491 (2026-10-20): skew vs max_skew_mm.
     ("diffpair_length_skew", "MIPI_D0+/MIPI_D0-"): DIFFPAIR_SKEW_TRACKER,  # 2.320 / 0.300
     ("diffpair_length_skew", "USB2_D+/USB2_D-"): DIFFPAIR_SKEW_TRACKER,  # 1.896 / 1.000
