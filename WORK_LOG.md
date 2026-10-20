@@ -15,6 +15,51 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-20
 
+- **PR #7599**: test(route): golden harness for kct route's four entry paths (#7377)
+- **PR #7598**: docs(router): drop the closed square-meander divergence from #7546's rationale
+- **PR #7571**: fix(router): verify lattice pair legs at their true width against other nets' copper
+- **PR #7585**: fix(board06): length-match diff pairs with the checker-limit skew tuner
+- **PR #7589**: test: run kicad-cli on tmp fixture copies; smoke hash names fixture diffs
+- **PR #7579**: feat(router): drained-frontier exit for bidirectional A*, opt-in bidirectional Python fallback (#6527)
+- **PR #7595**: chore(loom): resync installed Loom to v0.19.1196
+- **PR #7592**: fix(router): hold match-group meanders to the tuned net's own class; enable board 07 length matching
+- **PR #7590**: fix: pair diff-pair primitives by probe-end coverage, matching kicad-cli
+- **PR #7574**: fix(router): reserve plane-via sites for pour-only 2-pad parts
+- **PR #7587**: fix(router): report hybrid pair-rule failures with blockers; document lattice --seed (#7586)
+- **PR #7572**: feat(router): sourced per-class intra-pair skew limits (Q16)
+- **PR #6661**: fix(diffpair): reproduce KiCad's primitive pairing in uncoupled length
+- **PR #7581**: docs(research): audit clearance-kernel epic acceptance against existing evidence
+- **PR #7564**: feat(router): chamfered trombone corners and an honest plain fallback (#7546)
+- **PR #7568**: chore(schematic): declare paper attribute on SchematicIOMixin for mypy
+- **PR #7555**: ci: tighten board 07 known-opens set to TMDS_D0_N
+- **PR #7563**: fix(release): mint a fresh App token before each writing release phase
+- **PR #7566**: chore(tooling): update loom 0.19.1193→0.19.1194
+- **PR #7556**: ci: key the board 06/07 synthetic-fixture DRC gates by identity (#7367)
+- **PR #7562**: chore(release): keep release PR body under GitHub's 65,536-char limit
+- **PR #7551**: fix(router): via-parity pass for lattice diff-pair extra-pad attachments
+- **PR #7558**: docs(board07): record TMDS_D0_N blocking reason on the 30/31 layout
+- **PR #7461**: fix(router): re-fit match-group meander amplitude so a member never ends past the target
+- **PR #7533**: chore(release): close changelog gaps for #7402 and #7472
+- **PR #7553**: ci: tighten board 05 blocking-net gate from <= 7 to == 0
+- **Issue #7593** (closed): ci: pinned kicad-cli meander-divergence tests fail on main (test_chamfered_bumps_7546, test_uncoupled_tuning_pattern_7521)
+- **Issue #7543** (closed): router: coupled search places pair vias too close to neighbouring pairs once exact pad outlines open corridors (blocks #7517)
+- **Issue #7588** (closed): Flaky: test_mcp_tool_smoke[export_assembly] 'modified the checked-in fixtures' (release PR #7582)
+- **Issue #6527** (closed): router: Router.route_bidirectional has no production caller; wire it into the Python fallback and measure, or remove it
+- **Issue #7423** (closed): Board 07: enable route-time length matching in the committed map after #7397 (no-worse re-measure; #5798 Q4 ruling)
+- **Issue #7565** (closed): Black-box spec: KiCad diff-pair primitive pairing from kicad-cli probes only
+- **Issue #7586** (closed): router: hybrid pair-rule failure reporting + lattice --seed docs (#7580 items 2, 4)
+- **Issue #6554** (closed): diffpair: reproduce KiCad's diff_pair_uncoupled primitive pairing exactly (kct is a lower bound)
+- **Issue #7577** (closed): Audit clearance-kernel epic acceptance against delivered evidence
+- **Issue #7567** (closed): Type Check gate fails on main: io_mixin.py "Cannot determine type of paper" [has-type]
+- **Issue #7093** (closed): router: differential pair gets unequal via counts when a leg falls back to uncoupled routing (board 03 USB_D 2 vs 3; blocks #6394)
+- **Issue #7552** (closed): Board 07 E2E: exact known-opens set (5 nets) fails now that the recipe leaves only TMDS_D0_N open; blocks BOARD_07_CI_ENABLED
+- **Issue #7559** (closed): release-pr.yml: App token expires during the ~1h CI wait, so the gate fails with 401 after CI goes green
+- **Issue #7367** (closed): Key the board 06/07 synthetic-fixture DRC gates by identity: drop routed-drc-tolerance 18/8 and DIFFPAIR_VIOLATION_BASELINE (unblocks BOARD_07_CI_ENABLED; extends #7359)
+- **Issue #5508** (closed): Epic: pad-access invariant — no committed route may strand an unrouted pad
+- **Issue #7561** (closed): release_plan.py: release PR body exceeds GitHub's 65,536-char limit (422), so v0.24.0 PR can't open
+- **Issue #7554** (closed): Board 07 seed-42 re-route: TMDS_D0_N open (30/31)
+- **Issue #7532** (closed): Release gate: add changelog fragment for #7402 and mark #7472 internal (unblock v0.24.0)
+- **Issue #7547** (closed): CI: tighten board 05 blocking-net gate from <= 7 to 0 (or identity-keyed)
 - **PR #7544**: fix(boards): stop committing kct readiness --verify receipts
 - **PR #7542**: feat(check): leave KiCad tuning patterns out of the uncoupled measure (#7521)
 - **PR #7541**: fix: create output dir before ampacity sidecar write; update resolver no-sidecar premise (Closes #7539)
