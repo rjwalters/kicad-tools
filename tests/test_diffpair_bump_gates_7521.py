@@ -1,7 +1,8 @@
 """AC3 geometry gates for diff-pair skew bumps (issue #7521).
 
-Excursion strictly below 1x the pair gap (operator ruling Q27), jogs at least 3x the trace width, and the
-bump within 15 mm of a mismatch source in the same via-delimited run.
+Excursion at most 2x the pair gap (the interim of operator ruling Q35, issue
+#7649; ruling Q27's < 1x returns with #7649), jogs at least 3x the trace width,
+and the bump within 15 mm of a mismatch source in the same via-delimited run.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from kicad_tools.router.diffpair import (
     DifferentialSignal,
 )
 from kicad_tools.router.diffpair_bump_gates import (
+    MAX_EXCURSION_GAPS,
     MAX_SOURCE_DISTANCE_MM,
     bump_gate_violation,
     jog_spaced,
@@ -29,8 +31,10 @@ from kicad_tools.router.primitives import Route, Segment, Via
 
 W = 0.2
 GAP = 0.15
-#: A compliant excursion: strictly below one gap.
-AMP = 0.9 * GAP
+#: The excursion limit: 2x the gap (operator ruling Q35, interim; issue #7649).
+LIMIT = MAX_EXCURSION_GAPS * GAP
+#: A compliant excursion, above the old 1x cap of ruling Q27.
+AMP = 1.5 * GAP
 
 
 def _seg(x1, y1, x2, y2, net=1, name="D+", layer=Layer.F_CU):
@@ -65,15 +69,19 @@ def _violation(bump, host=None, partner=None):
 
 
 class TestExcursion:
-    def test_below_the_gap_passes(self):
-        assert _violation(_bump(2.0, 0.99 * GAP, 0.6)) is None
+    def test_limit_is_the_2x_interim(self):
+        """Operator ruling Q35: 2x the gap until issue #7649 restores 1x."""
+        assert MAX_EXCURSION_GAPS == 2.0
 
-    def test_exactly_the_gap_is_rejected(self):
-        """S1 < 2S is strict: a push-out of one full gap (S1 = 2S) fails."""
-        assert "excursion" in _violation(_bump(2.0, GAP, 0.6))
+    def test_between_one_and_two_gaps_passes(self):
+        assert _violation(_bump(2.0, 1.5 * GAP, 0.6)) is None
 
-    def test_beyond_the_gap_is_rejected(self):
-        assert "excursion" in _violation(_bump(2.0, GAP + 0.05, 0.6))
+    def test_exactly_the_limit_passes(self):
+        """Q35: a bump may *reach* 2x the gap."""
+        assert _violation(_bump(2.0, LIMIT, 0.6)) is None
+
+    def test_beyond_the_limit_is_rejected(self):
+        assert "excursion" in _violation(_bump(2.0, LIMIT + 0.01, 0.6))
 
 
 class TestJog:
@@ -221,7 +229,7 @@ def test_tuned_bumps_obey_the_gates(chamfer):
     assert result.inserts_applied >= 1
     assert result.skew_after_mm < 1.5  # the bump closed some of the 1.5 mm skew
     offsets = [abs(v) for s in p_out.segments for v in (s.y1, s.y2)]
-    assert max(offsets) < GAP
+    assert max(offsets) <= LIMIT + 1e-6
     # Operator ruling Q32: compliant bumps are plain copper, never a pattern.
     assert all(s.tuning_pattern is None for s in p_out.segments)
     for s in p_out.segments:
@@ -278,3 +286,29 @@ def test_mid_run_longest_host_with_far_bump_is_not_tuned():
         for x, y in ((s.x1, s.y1), (s.x2, s.y2)):
             if abs(y) > 1e-9:
                 assert min(x, 75 - x) <= MAX_SOURCE_DISTANCE_MM + 1e-6
+
+
+def test_gate_refusal_is_reported_when_the_pair_stays_over():
+    """A gate-refused bump is never dropped silently (operator ruling Q27).
+
+    Only the mid-run host [19, 69] is long enough to take a bump (the 1.9 mm
+    flanks are under the 2 mm host minimum), so every placement sits at least
+    19 mm from the run ends: the proximity gate refuses each one, and the
+    refusal survives into the result even though the cascade ends on a
+    generic failure.
+    """
+    flank = 1.9
+    left = [_seg(i * flank, 0, (i + 1) * flank, 0) for i in range(10)]
+    right = [_seg(69 + i * flank, 0, 69 + (i + 1) * flank, 0) for i in range(10)]
+    p = Route(net=1, net_name="D+", segments=[*left, _seg(19, 0, 69, 0), *right])
+    end = 69 + 10 * flank
+    n = Route(net=2, net_name="D-", segments=[_seg(0, -0.35, end + 1.0, -0.35, 2, "D-")])
+    _p, _n, result = tune_diff_pair_skew(
+        _pair(),
+        {1: p, 2: n},
+        tolerance_mm=0.15,
+        intra_pair_clearance_mm=GAP,
+    )
+    assert not result.success
+    assert "mismatch source" in result.gate_refusal
+    assert result.gate_refusal in result.message

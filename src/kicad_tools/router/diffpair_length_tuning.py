@@ -144,6 +144,12 @@ class DiffPairTuneResult:
         tolerance_mm: The skew limit the pair was tuned against (Issue
             #6664: reported next to the before/after skew).  ``None`` when
             the caller did not record it.
+        gate_refusal: Issue #7521: the last AC3 bump-gate refusal (excursion,
+            jog or mismatch-source proximity) of any candidate, ``""`` when no
+            gate refused one.  A refused bump is never committed; when the
+            pair ends outside its tolerance the refusal is also appended to
+            ``message``, so it is never dropped silently behind a later,
+            generic failure.
     """
 
     success: bool = False
@@ -154,6 +160,7 @@ class DiffPairTuneResult:
     skew_after_mm: float = 0.0
     message: str = ""
     tolerance_mm: float | None = None
+    gate_refusal: str = ""
     # The trombone results, kept for diagnostic / test inspection.  An
     # entry is present for every attempt (including rejected ones).
     serpentine_results: list[SerpentineResult] = field(default_factory=list)
@@ -170,7 +177,7 @@ class DiffPairTuneResult:
 # targets (very large skew on a congested board).
 MAX_INSERTS_PER_PAIR: int = 3
 
-# Issue #7521: the excursion cap (below 1x the pair gap) shrinks each bump, so
+# Issue #7521: the excursion cap (2x the pair gap, issue #7649) shrinks each bump, so
 # the default budget grows with it, up to this multiple of
 # :data:`MAX_INSERTS_PER_PAIR`.
 MAX_INSERT_BUDGET_SCALE: int = 4
@@ -407,9 +414,9 @@ def tune_diff_pair_skew(
     base_config = dataclasses.replace(
         config or SerpentineConfig(), corner_chamfer_widths=corner_chamfer_widths
     )
-    # Issue #7521 (AC3, operator ruling Q27): a bump stays strictly under 1x
-    # the pair gap, so cap the loop amplitude there and let the generator add
-    # loops instead.  Each insert then adds less, so the default cascade
+    # Issue #7521 (AC3): a bump stays within 2x the pair gap (the interim of
+    # operator ruling Q35, issue #7649), so cap the loop amplitude there and
+    # let the generator add loops instead.  Each insert then adds less, so the default cascade
     # budget scales with the cap (an explicit ``max_inserts`` is honoured).
     gated = intra_pair_clearance_mm > 0.0
     if gated:
@@ -519,6 +526,7 @@ def tune_diff_pair_skew(
             )
             if gate_violation is not None:
                 generator_failure = gate_violation
+                result.gate_refusal = gate_violation
                 continue
             # Issue #7521: a pattern-form candidate (ungated tuning only) is
             # tagged before the uncoupled guard measures it (the measure
@@ -652,6 +660,10 @@ def tune_diff_pair_skew(
     result.skew_after_mm = (
         abs(target_length - measure(current_shorter)) if result.inserts_applied > 0 else skew
     )
+    # Issue #7521: a gate that refused a bump is named even when a later,
+    # generic failure ended the cascade.
+    if result.gate_refusal and not result.success and result.gate_refusal not in result.message:
+        result.message = f"{result.message} (bump gate refused a candidate: {result.gate_refusal})"
 
     # Issue #7521: record the pair's final state on the bumps' patterns
     # (``last_status``), the way KiCad reports a saved pattern.
@@ -750,7 +762,8 @@ MAX_HOST_CANDIDATES: int = 3
 
 #: Amplitude back-off ladder applied to ``SerpentineConfig.amplitude`` when a
 #: placement is rejected (same ladder the match-group tuner uses).  No factor
-#: above 1: a taller loop pushes the bump out past 1x the pair gap (Q27).
+#: above 1: a taller loop pushes the bump out past the excursion cap
+#: (2x the pair gap, issue #7649).
 AMPLITUDE_LADDER: tuple[float, ...] = (1.0, 0.5, 0.25)
 
 
@@ -833,6 +846,11 @@ def _min_chamfered_amplitude(config: SerpentineConfig, width: float) -> float:
     smaller need is met by a one-width bump instead: it adds
     ``2 * width * (sqrt(2) - 1)`` and the skew lands inside the tolerance
     window on the other side.  ``0`` for square loops.
+
+    Single-loop bumps only (Issue #7521): raising each of N loops to the
+    floor multiplies the overshoot by N, and with the 2x excursion cap
+    (issue #7649) a one-width loop's ``~0.83 W`` step is coarser than most
+    pair tolerances, so multi-loop bumps keep their exact-fit amplitude.
     """
     # Issue #7521: never above the (excursion-capped) amplitude itself.
     return min(width, config.amplitude) if config.corner_chamfer_widths > 0.0 else 0.0
@@ -887,10 +905,11 @@ def _placement_options(
         )
 
     # First option: identical to the original attempt apart from sizing.
-    _, amplitude = exact_fit_amplitude(
+    first_loops, amplitude = exact_fit_amplitude(
         length_needed, base_config.amplitude, base_config, first_host[1].width
     )
-    amplitude = max(amplitude, _min_chamfered_amplitude(base_config, first_host[1].width))
+    if first_loops == 1:
+        amplitude = max(amplitude, _min_chamfered_amplitude(base_config, first_host[1].width))
     generator = SerpentineGenerator(config_for(amplitude, first_hint, first_host[1].width))
     seg_idx, host = first_host
     if fixed_segment_ids:
@@ -938,7 +957,8 @@ def _placement_options(
                     loops, amp = exact_fit_amplitude(
                         length_needed, base_config.amplitude * factor, base_config, host.width
                     )
-                    amp = max(amp, _min_chamfered_amplitude(base_config, host.width))
+                    if loops == 1:
+                        amp = max(amp, _min_chamfered_amplitude(base_config, host.width))
                     lead_in: list[Segment] = []
                     lead_out: list[Segment] = []
                     sub_host = host

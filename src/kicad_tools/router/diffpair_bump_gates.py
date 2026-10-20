@@ -5,10 +5,11 @@ and how large a skew bump may be.  Sources are cited in
 ``docs/research/diffpair-skew-compensation.md``: [N1][T] for excursion and
 jog, [T][R1] for proximity:
 
-* **Excursion** strictly below :data:`MAX_EXCURSION_GAPS` x the nominal pair
-  gap (operator ruling Q27: AN10373's S1 < 2S, with S1 the leg spacing inside
-  the bump, bounds the push-out at less than one gap), so the bump stays
-  inside the pair's own coupling envelope.
+* **Excursion** at most :data:`MAX_EXCURSION_GAPS` x the nominal pair gap.
+  The sources (AN10373's S1 < 2S, with S1 the leg spacing inside the bump)
+  bound the push-out at less than one gap (operator ruling Q27).  Operator
+  ruling Q35 relaxes that to 2x as an **interim**, until source-side skew
+  avoidance exists; issue #7649 tracks moving back to 1x.
 * **Jog** (a run of the bump parallel to its host line) at least
   :data:`MIN_JOG_WIDTHS` x the trace width, so no loop is a sub-width stub.
 * **Proximity**: the bump sits within :data:`MAX_SOURCE_DISTANCE_MM` of a
@@ -34,12 +35,18 @@ if TYPE_CHECKING:
     from .optimizer.serpentine import SerpentineConfig
     from .primitives import Route, Segment
 
-#: Excursion limit, in nominal pair gaps (edge to edge).  The cap is strict:
-#: a bump must stay *below* it (S1 < 2S, operator ruling Q27).
-MAX_EXCURSION_GAPS: float = 1.0
+#: Excursion limit, in nominal pair gaps (edge to edge).  A bump may reach it.
+#:
+#: INTERIM (operator ruling Q35, issue #7649): 2x the gap.  The sources
+#: (AN10373's S1 < 2S) and operator ruling Q27 put the limit below 1x, but at
+#: < 1x each chamfered bump adds only ~0.83 h of length, too little to close
+#: most skews (board 06 failed its skew gate on 5 pairs, the bench boards 15
+#: of 20).  Issue #7649 tracks source-side skew avoidance (symmetric breakout,
+#: balanced bends, polarity swap) and the return of this constant to 1x.
+MAX_EXCURSION_GAPS: float = 2.0
 
 #: The generator sizes bumps to this fraction of the limit, so a bump the
-#: tuner builds sits strictly under the strict cap.
+#: tuner builds sits under the cap with a margin for coordinate rounding.
 EXCURSION_HEADROOM: float = 0.99
 
 #: Smallest jog (flat run parallel to the host line), in trace widths.
@@ -73,8 +80,8 @@ def jog_spaced(config: SerpentineConfig, width: float) -> SerpentineConfig:
 def max_excursion_mm(nominal_gap_mm: float) -> float:
     """The excursion limit for a pair whose edge-to-edge gap is ``nominal_gap_mm``.
 
-    A bump must stay strictly below it; see :func:`bump_amplitude_cap_mm` for
-    the amplitude the generator is given.
+    A bump may reach it but not exceed it (the 2x interim of issue #7649); see
+    :func:`bump_amplitude_cap_mm` for the amplitude the generator is given.
     """
     return MAX_EXCURSION_GAPS * nominal_gap_mm
 
@@ -120,9 +127,10 @@ def bump_gate_violation(
     excursion = max(
         abs(offset(x, y)) for s in new_segments for x, y in ((s.x1, s.y1), (s.x2, s.y2))
     )
-    if limit > 0.0 and excursion >= limit - _EPS_MM:
+    # Issue #7649: the limit is the 2x interim of operator ruling Q35.
+    if limit > 0.0 and excursion > limit + _EPS_MM:
         return (
-            f"bump excursion {excursion:.3f} mm is not below {MAX_EXCURSION_GAPS:g}x the "
+            f"bump excursion {excursion:.3f} mm exceeds {MAX_EXCURSION_GAPS:g}x the "
             f"pair gap ({limit:.3f} mm)"
         )
 
