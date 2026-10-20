@@ -12389,6 +12389,10 @@ def route_with_layer_escalation(
         quiet=quiet,
     )
 
+    # Issue #7377: --stitch-power-planes runs on every tail, after the save
+    # and before the zone fill (same position as the single-attempt path).
+    _run_post_save_stitching(args, output_path, quiet=quiet)
+
     # Fill copper-pour zones now that traces exist (issue #2516).
     # Must run BEFORE DRC so the DRC sees filled zones rather than bare
     # zone outlines and does not flag zone-to-trace clearance against
@@ -12565,6 +12569,16 @@ def route_with_layer_escalation(
         # ``nets_routed`` / ``nets_to_route`` / ``overflow`` to construct
         # ``RoutingResultMetrics`` and call ``decide_escalation``.
         args._last_layer_result = final_result
+
+    # Issue #7377: pair via-parity summary + --export-failed-nets on every tail.
+    _run_post_verdict_reports(
+        args,
+        final_result.router,
+        final_result.net_map,
+        all_nets_routed=final_result.nets_routed == final_result.nets_to_route,
+        nets_to_route_ids=_final_multi_pad_ids,
+        quiet=quiet,
+    )
 
     # Issue #6376: post-save connectivity failure exits 6 in every flow
     # (any disconnect under --strict; a counted-connected net without it).
@@ -13354,6 +13368,10 @@ def route_with_rule_relaxation(
         quiet=quiet,
     )
 
+    # Issue #7377: --stitch-power-planes runs on every tail, after the save
+    # and before the zone fill (same position as the single-attempt path).
+    _run_post_save_stitching(args, output_path, quiet=quiet)
+
     # Fill copper-pour zones now that traces exist (issue #2516).
     if final_result.nets_routed > 0:
         _fill_zones_after_route(output_path, quiet=quiet, router=final_result.router, args=args)
@@ -13511,6 +13529,16 @@ def route_with_rule_relaxation(
                 # Issue #4979: inherited-only findings (any newly created
                 # ones already replaced the banner above).
                 _print_layer_intent_addendum(_layer_intent)
+
+    # Issue #7377: pair via-parity summary + --export-failed-nets on every tail.
+    _run_post_verdict_reports(
+        args,
+        final_result.router,
+        final_result.net_map,
+        all_nets_routed=final_result.nets_routed == final_result.nets_to_route,
+        nets_to_route_ids=_final_multi_pad_ids,
+        quiet=quiet,
+    )
 
     # Issue #6376: post-save connectivity failure exits 6 in every flow
     # (any disconnect under --strict; a counted-connected net without it).
@@ -15890,6 +15918,10 @@ def route_with_combined_escalation(
         quiet=quiet,
     )
 
+    # Issue #7377: --stitch-power-planes runs on every tail, after the save
+    # and before the zone fill (same position as the single-attempt path).
+    _run_post_save_stitching(args, output_path, quiet=quiet)
+
     # Fill copper-pour zones now that traces exist (issue #2516).
     if final_result.nets_routed > 0:
         _fill_zones_after_route(output_path, quiet=quiet, router=final_result.router, args=args)
@@ -16054,6 +16086,16 @@ def route_with_combined_escalation(
                 # Issue #4979: inherited-only findings (any newly created
                 # ones already replaced the banner above).
                 _print_layer_intent_addendum(_layer_intent)
+
+    # Issue #7377: pair via-parity summary + --export-failed-nets on every tail.
+    _run_post_verdict_reports(
+        args,
+        final_result.router,
+        final_result.net_map,
+        all_nets_routed=final_result.nets_routed == final_result.nets_to_route,
+        nets_to_route_ids=_final_multi_pad_ids,
+        quiet=quiet,
+    )
 
     # Issue #6376: post-save connectivity failure exits 6 in every flow
     # (any disconnect under --strict; a counted-connected net without it).
@@ -16279,6 +16321,131 @@ def _warn_region_parallel_ignored(args, path: str) -> None:
         f"warning: --region-parallel ignored: the {path} path does not support region parallelism",
         file=sys.stderr,
         flush=True,
+    )
+
+
+def _warn_escalation_flags_ignored(args) -> None:
+    """Warn once per run that strategy-selecting flags are ignored by the escalation ladders (#7377).
+
+    ``--progressive-clearance`` and ``--bus-routing`` pick the routing
+    *strategy*, and only the single-attempt path has the branch that honours
+    them.  The escalation ladders (layer / rule-relaxation / combined, and the
+    mfr-tier and size wrappers around them) never read either flag, so without
+    this warning the run silently behaves as if it was not passed.  Stderr, so
+    ``--format json`` stdout is untouched; guarded by a flag on ``args`` so the
+    wrappers' repeated ladder entries do not repeat it.
+    """
+    if getattr(args, "_escalation_flags_warned", False):
+        return
+    ignored = [
+        flag
+        for flag, attr in (
+            ("--progressive-clearance", "progressive_clearance"),
+            ("--bus-routing", "bus_routing"),
+        )
+        if getattr(args, attr, False)
+    ]
+    if not ignored:
+        return
+    with contextlib.suppress(AttributeError):  # frozen namespace
+        args._escalation_flags_warned = True
+    print(
+        f"warning: {', '.join(ignored)} ignored: the escalation ladders "
+        "(--auto-layers / --adaptive-rules / --auto-mfr-tier / --auto-pcb-size) "
+        "do not support it; re-run with --no-auto-layers to use it",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _run_post_save_stitching(args, output_path: Path, *, quiet: bool = False):
+    """Run ``--stitch-power-planes`` on the saved board; shared by every tail (#7377).
+
+    Must run after the routed board is saved and verified, and before the
+    copper-pour zone fill so the fill and DRC see the stitching vias.  Returns
+    the ``run_stitch`` result, or ``None`` when the flag is off, ``--dry-run``
+    is set, or the board has no plane nets.
+    """
+    if not getattr(args, "stitch_power_planes", False) or args.dry_run:
+        return None
+
+    from kicad_tools.cli.stitch_cmd import find_all_plane_nets, run_stitch
+    from kicad_tools.core.sexp_file import load_pcb as load_stitch_pcb
+
+    if not quiet:
+        print("\n--- Stitching Power Planes ---")
+
+    # Load the saved PCB to find plane nets
+    plane_nets = find_all_plane_nets(load_stitch_pcb(output_path))
+    if not plane_nets:
+        if not quiet:
+            print("  No power plane nets found (no zones with assigned nets)")
+        return None
+
+    net_names = list(plane_nets.keys())
+    if not quiet:
+        print(f"  Found {len(net_names)} power plane nets: {', '.join(sorted(net_names))}")
+
+    stitch_result = run_stitch(
+        pcb_path=output_path,
+        net_names=net_names,
+        via_size=args.via_diameter,  # Use same via size as routing
+        drill=args.via_drill,
+        clearance=args.clearance,
+        dry_run=False,
+    )
+
+    if not quiet:
+        if stitch_result.vias_added:
+            print(f"  Added {len(stitch_result.vias_added)} stitching vias")
+        else:
+            print("  No stitching vias needed (all pads already connected)")
+    return stitch_result
+
+
+def _export_failed_nets_if_requested(
+    args,
+    router: "Autorouter",
+    net_map: dict[str, int],
+    *,
+    all_nets_routed: bool,
+    nets_to_route_ids: set[int] | None,
+    quiet: bool = False,
+) -> None:
+    """Write the ``--export-failed-nets`` file when requested and nets failed (#7377)."""
+    if getattr(args, "export_failed_nets", None) and not all_nets_routed:
+        _export_failed_nets(
+            router,
+            net_map,
+            args.export_failed_nets,
+            quiet=quiet,
+            nets_to_route_ids=nets_to_route_ids,
+        )
+
+
+def _run_post_verdict_reports(
+    args,
+    router: "Autorouter",
+    net_map: dict[str, int],
+    *,
+    all_nets_routed: bool,
+    nets_to_route_ids: set[int] | None,
+    quiet: bool = False,
+) -> None:
+    """End-of-run report steps every ``kct route`` tail shares (#7377).
+
+    The pair via-parity summary (#7425) and ``--export-failed-nets``.  Before
+    #7377 both were wired into the single-attempt tail only, so the default
+    ``--auto-layers`` path silently dropped them.
+    """
+    _print_pair_via_parity_summary(router, quiet=quiet)
+    _export_failed_nets_if_requested(
+        args,
+        router,
+        net_map,
+        all_nets_routed=all_nets_routed,
+        nets_to_route_ids=nets_to_route_ids,
+        quiet=quiet,
     )
 
 
@@ -21430,6 +21597,14 @@ def _run_main_impl(args, parser, argv) -> int:
     # Per Q4: auto-load project.kct EscalationPolicy + envelope_hard +
     # mounting_hole_group when a project.kct sits next to the PCB.
     _analyze_dry_run = bool(args.dry_run and args.analyze)
+    if not _analyze_dry_run and (
+        getattr(args, "auto_pcb_size", False)
+        or getattr(args, "auto_mfr_tier", False)
+        or args.auto_layers
+        or args.adaptive_rules
+    ):
+        # Issue #7377: strategy flags the escalation ladders never read.
+        _warn_escalation_flags_ignored(args)
     if getattr(args, "auto_pcb_size", False) and not _analyze_dry_run:
         # Q5 enforcement: --auto-pcb-size implies --auto-layers unless
         # the user explicitly passed --no-auto-layers.
@@ -23354,41 +23529,7 @@ def _run_main_impl(args, parser, argv) -> int:
     output_verification_regressed = output_verification.regressed
 
     # Run power plane stitching if requested
-    stitch_result = None
-    if getattr(args, "stitch_power_planes", False) and not args.dry_run:
-        from kicad_tools.cli.stitch_cmd import find_all_plane_nets, run_stitch
-
-        if not quiet:
-            print("\n--- Stitching Power Planes ---")
-
-        # Load the saved PCB to find plane nets
-        from kicad_tools.core.sexp_file import load_pcb as load_stitch_pcb
-
-        stitch_sexp = load_stitch_pcb(output_path)
-        plane_nets = find_all_plane_nets(stitch_sexp)
-
-        if plane_nets:
-            net_names = list(plane_nets.keys())
-            if not quiet:
-                print(f"  Found {len(net_names)} power plane nets: {', '.join(sorted(net_names))}")
-
-            stitch_result = run_stitch(
-                pcb_path=output_path,
-                net_names=net_names,
-                via_size=args.via_diameter,  # Use same via size as routing
-                drill=args.via_drill,
-                clearance=args.clearance,
-                dry_run=False,
-            )
-
-            if not quiet:
-                if stitch_result.vias_added:
-                    print(f"  Added {len(stitch_result.vias_added)} stitching vias")
-                else:
-                    print("  No stitching vias needed (all pads already connected)")
-        else:
-            if not quiet:
-                print("  No power plane nets found (no zones with assigned nets)")
+    _run_post_save_stitching(args, output_path, quiet=quiet)
 
     # Fill copper-pour zones now that traces (and any stitching vias)
     # are in place (issue #2516).  Must run BEFORE DRC so the DRC sees
@@ -23756,14 +23897,14 @@ def _run_main_impl(args, parser, argv) -> int:
             )
 
     # Export failed nets to file if requested
-    if getattr(args, "export_failed_nets", None) and not all_nets_routed:
-        _export_failed_nets(
-            router,
-            net_map,
-            args.export_failed_nets,
-            quiet=quiet,
-            nets_to_route_ids=multi_pad_net_ids,
-        )
+    _export_failed_nets_if_requested(
+        args,
+        router,
+        net_map,
+        all_nets_routed=all_nets_routed,
+        nets_to_route_ids=multi_pad_net_ids,
+        quiet=quiet,
+    )
 
     # Issue #4477 (epic #4465, Phase 4): ``--complete`` blocking-copper
     # reporting.  Built from *pcb_path* -- the resolved working board -- so
