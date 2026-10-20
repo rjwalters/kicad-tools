@@ -12,7 +12,6 @@ from pathlib import Path
 
 from kicad_tools.sexp import SExp
 
-from .hierarchy import build_hierarchy
 from .schematic import Schematic
 from .symbol import SymbolInstance
 
@@ -298,6 +297,59 @@ def _lib_symbol_key(sym: SymbolInstance) -> str:
     return sym.lib_id
 
 
+def _bom_item_from_symbol(
+    sym,
+    reference: str,
+    schematic: Schematic,
+    power_by_key: dict[str, bool],
+) -> BOMItem | None:
+    """Convert one placed symbol to a :class:`BOMItem` (``None`` for power symbols).
+
+    ``reference`` is the designator of this *placement*, which differs from
+    ``sym.reference`` when the symbol's sheet file is placed more than once.
+    ``schematic`` is the sheet the symbol lives on: its embedded ``lib_symbols``
+    decide ``is_power`` (#7615). ``power_by_key`` caches one walk per library
+    key and must not be shared across schematics.
+    """
+    # Skip power symbols
+    if sym.lib_id.startswith("power:"):
+        return None
+
+    key = _lib_symbol_key(sym)
+    if key not in power_by_key:
+        power_by_key[key] = _is_power_lib_symbol(schematic, key)
+
+    item = BOMItem(
+        reference=reference,
+        value=sym.value,
+        footprint=sym.footprint,
+        lib_id=sym.lib_id,
+        datasheet=sym.datasheet,
+        dnp=sym.dnp,
+        in_bom=sym.in_bom,
+        on_board=sym.on_board,
+        is_power=power_by_key[key],
+    )
+
+    # Extract additional properties
+    for name, prop in sym.properties.items():
+        value = prop.value
+
+        # Map common property names
+        if name.lower() in ("description", "desc"):
+            item.description = value
+        elif name.lower() in ("manufacturer", "mfr", "mfg"):
+            item.manufacturer = value
+        elif name.lower() in ("mpn", "mfr_pn", "manufacturer_pn", "pn"):
+            item.mpn = value
+        elif name.lower() in ("lcsc", "lcsc_pn", "lcsc part", "jlc", "jlcpcb"):
+            item.lcsc = value
+        else:
+            item.properties[name] = value
+
+    return item
+
+
 def extract_bom_from_schematic(schematic: Schematic) -> list[BOMItem]:
     """Extract BOM items from a single schematic."""
     items = []
@@ -305,45 +357,9 @@ def extract_bom_from_schematic(schematic: Schematic) -> list[BOMItem]:
     power_by_key: dict[str, bool] = {}
 
     for sym in schematic.symbols:
-        # Skip power symbols
-        if sym.lib_id.startswith("power:"):
-            continue
-
-        key = _lib_symbol_key(sym)
-        if key not in power_by_key:
-            power_by_key[key] = _is_power_lib_symbol(schematic, key)
-        is_power = power_by_key[key]
-
-        # Extract standard properties
-        item = BOMItem(
-            reference=sym.reference,
-            value=sym.value,
-            footprint=sym.footprint,
-            lib_id=sym.lib_id,
-            datasheet=sym.datasheet,
-            dnp=sym.dnp,
-            in_bom=sym.in_bom,
-            on_board=sym.on_board,
-            is_power=is_power,
-        )
-
-        # Extract additional properties
-        for name, prop in sym.properties.items():
-            value = prop.value
-
-            # Map common property names
-            if name.lower() in ("description", "desc"):
-                item.description = value
-            elif name.lower() in ("manufacturer", "mfr", "mfg"):
-                item.manufacturer = value
-            elif name.lower() in ("mpn", "mfr_pn", "manufacturer_pn", "pn"):
-                item.mpn = value
-            elif name.lower() in ("lcsc", "lcsc_pn", "lcsc part", "jlc", "jlcpcb"):
-                item.lcsc = value
-            else:
-                item.properties[name] = value
-
-        items.append(item)
+        item = _bom_item_from_symbol(sym, sym.reference, schematic, power_by_key)
+        if item is not None:
+            items.append(item)
 
     return items
 
@@ -352,7 +368,10 @@ def extract_bom_hierarchical(root_schematic: str) -> BOM:
     """
     Extract BOM from a hierarchical schematic.
 
-    Traverses all sheets and collects components.
+    Walks every sheet *placement* (a sheet file placed twice contributes its
+    components twice) and uses each placement's own reference designator from
+    the symbol's ``(instances ...)`` block, as KiCad does (issue #7616).
+    A multi-unit symbol yields one item per placement, not one per unit.
 
     Args:
         root_schematic: Path to the root .kicad_sch file
@@ -365,20 +384,39 @@ def extract_bom_hierarchical(root_schematic: str) -> BOM:
         Exception: If the root schematic cannot be parsed. Failing
             sub-sheets are skipped.
     """
-    # The root sheet must load: a missing or unparseable root is an error,
-    # not an empty BOM. Only failing sub-sheets are skipped below.
-    root_sch = Schematic.load(root_schematic)
-    hierarchy = build_hierarchy(root_schematic)
-    all_items = extract_bom_from_schematic(root_sch)
+    # Imported lazily: lvs imports the schema package.
+    from ..lvs.board_lvs import _instance_reference_map, _walk_hierarchy_schematics
 
-    for node in hierarchy.all_nodes()[1:]:
-        try:
-            sch = Schematic.load(node.path)
-            items = extract_bom_from_schematic(sch)
-            all_items.extend(items)
-        except Exception:
-            # Skip sub-sheets that can't be loaded
-            pass
+    # The root sheet must load: a missing or unparseable root is an error,
+    # not an empty BOM. Only failing sub-sheets are skipped (with their
+    # subtree) by the walker.
+    Schematic.load(root_schematic)
+
+    visits = list(_walk_hierarchy_schematics(Path(root_schematic), skip_unloadable=True))
+    placements: dict[Path, int] = {}
+    for visit in visits:
+        key = visit.source.resolve()
+        placements[key] = placements.get(key, 0) + 1
+
+    all_items: list[BOMItem] = []
+    for visit in visits:
+        # The walker yields its own Schematic model; BOM needs this module's.
+        sch = Schematic.load(str(visit.source))
+        # Only a re-placed sheet file needs per-placement renaming.
+        renames = _instance_reference_map(visit) if placements[visit.source.resolve()] > 1 else {}
+        power_by_key: dict[str, bool] = {}
+        first_unit: dict[str, int] = {}
+        for sym in sch.symbols:
+            ref = renames.get(sym.reference, sym.reference)
+            # Collapse only a further *unit* of an annotated multi-unit part.
+            # Unannotated parts all share ``R?`` and each is its own line.
+            if ref and not ref.endswith("?"):
+                if ref in first_unit and sym.unit != first_unit[ref]:
+                    continue
+                first_unit.setdefault(ref, sym.unit)
+            item = _bom_item_from_symbol(sym, ref, sch, power_by_key)
+            if item is not None:
+                all_items.append(item)
 
     return BOM(items=all_items, source=root_schematic)
 

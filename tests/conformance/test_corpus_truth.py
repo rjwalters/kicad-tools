@@ -20,26 +20,24 @@ item: the CI ``test`` job runs with ``--timeout=60`` and ``-n auto``, so a
 batched item would be a timeout waiting to happen -- and would report one
 failure for the whole corpus instead of naming the seed that broke.
 
-Each item launches kicad-cli, so the smoke corpus is kept small on purpose;
-the published table is measured out-of-band over a much wider seed range.
+Each ``(seed, fill state)`` costs a kicad-cli run, so the smoke corpus is kept
+small on purpose; the published table is measured out-of-band over a much wider
+seed range. The run is made once per session (``conftest.corpus_oracle``) and
+shared with ``test_corpus.py``, which asks about the same seeded boards.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from tests.conformance.adapters import KIND_CLEARANCE, KIND_COPPER_EDGE
-from tests.conformance.board import write_case
-from tests.conformance.conftest import requires_kicad_cli
+from tests.conformance.conftest import CorpusOracle, requires_kicad_cli
 from tests.conformance.generator import BOUNDARY_BAND_MM, PairKind, generate_case
-from tests.conformance.oracle import run_oracle
 
 pytestmark = requires_kicad_cli
 
 # Kept deliberately small: this is the *smoke* corpus that runs on every PR,
-# and every item here launches a kicad-cli process. The CI ``test`` job runs
+# and every seed here costs a kicad-cli process. The CI ``test`` job runs
 # ``-n auto`` inside a 12 GiB cgroup alongside the C++ router suite, so each
 # extra concurrent kicad-cli is memory the rest of the suite does not get. The
 # published table is regenerated over a much wider seed range out-of-band by
@@ -59,7 +57,7 @@ ZONE_PAIR_SEEDS = (7, 22)
 
 
 @pytest.mark.parametrize("seed", CI_SEEDS)
-def test_kicad_cli_reproduces_the_intended_geometry(seed: int, tmp_path: Path) -> None:
+def test_kicad_cli_reproduces_the_intended_geometry(seed: int, corpus_oracle: CorpusOracle) -> None:
     """The generator's intent and KiCad's measurement agree, per seed.
 
     Both halves of the harness self-check are asserted from a **single**
@@ -76,8 +74,7 @@ def test_kicad_cli_reproduces_the_intended_geometry(seed: int, tmp_path: Path) -
        and the corpus is not probing where it thinks it is.
     """
     case = generate_case(seed)
-    board = write_case(case, tmp_path)
-    result = run_oracle(board.pcb_path, refill=False, work_dir=tmp_path)
+    result = corpus_oracle(seed, refill=False)
 
     # Split by verdict kind: a ``copper-edge`` pair is reported by kicad-cli as
     # a one-sided ``copper_edge_clearance`` row against a *different* rule
@@ -126,7 +123,9 @@ def test_kicad_cli_reproduces_the_intended_geometry(seed: int, tmp_path: Path) -
 
 
 @pytest.mark.parametrize("seed", REFILL_SEEDS)
-def test_non_zone_verdicts_are_fill_state_independent(seed: int, tmp_path: Path) -> None:
+def test_non_zone_verdicts_are_fill_state_independent(
+    seed: int, corpus_oracle: CorpusOracle
+) -> None:
     """Refilling zones changes zone rows only.
 
     Zones are written unfilled, so an unrefilled run sees no zone copper at
@@ -134,10 +133,8 @@ def test_non_zone_verdicts_are_fill_state_independent(seed: int, tmp_path: Path)
     the cheaper unrefilled run a valid basis for the non-zone columns of the
     table.
     """
-    case = generate_case(seed)
-    board = write_case(case, tmp_path)
-    as_is = run_oracle(board.pcb_path, refill=False, work_dir=tmp_path)
-    refilled = run_oracle(board.pcb_path, refill=True, work_dir=tmp_path)
+    as_is = corpus_oracle(seed, refill=False)
+    refilled = corpus_oracle(seed, refill=True)
 
     assert as_is.without_zones() == refilled.without_zones(), (
         f"seed {seed}: refilling changed a non-zone verdict\n"
@@ -148,7 +145,9 @@ def test_non_zone_verdicts_are_fill_state_independent(seed: int, tmp_path: Path)
 
 
 @pytest.mark.parametrize("seed", ZONE_PAIR_SEEDS)
-def test_refilled_fill_realises_the_intended_zone_gap(seed: int, tmp_path: Path) -> None:
+def test_refilled_fill_realises_the_intended_zone_gap(
+    seed: int, corpus_oracle: CorpusOracle
+) -> None:
     """The zone half of the harness self-check, closed against KiCad's filler.
 
     ``test_generator`` asserts the probe sits at the intended gap from the
@@ -174,8 +173,7 @@ def test_refilled_fill_realises_the_intended_zone_gap(seed: int, tmp_path: Path)
     assert zone_pairs, f"seed {seed} no longer carries a zone pair -- re-pin ZONE_PAIR_SEEDS"
     assert case.zone is not None
 
-    board = write_case(case, tmp_path)
-    refilled = run_oracle(board.pcb_path, refill=True, work_dir=tmp_path)
+    refilled = corpus_oracle(seed, refill=True)
 
     flagged = {v.nets for v in refilled.verdicts if v.zone}
     assert not (flagged & {p.nets for p in zone_pairs}), (
