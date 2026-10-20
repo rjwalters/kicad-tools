@@ -65,7 +65,7 @@ BOARD06_KEY = "boards/06-diffpair-test/regression-fixture/diffpair_test_routed.k
 # Identities of the residual CI seed-42 re-route findings after the #7344
 # gap-tightening pass (#7349) and the #7296 mask-dam floor, not of the committed
 # PCB: the gate judges the re-route.
-BOARD06_IMPEDANCE_NETS = {"USB3_TX2-", "USB2_D-"}
+BOARD06_IMPEDANCE_NETS = {"USB3_TX2-"}
 # Issue #7569: USB2_D routes within its uncoupled-length limit, so #7401's
 # entry is gone; any uncoupled-length finding is new.
 BOARD06_UNCOUPLED_PAIR = "USB2_D+/USB2_D-"
@@ -94,13 +94,13 @@ def test_board06_impedance_allowance_is_keyed_by_net_with_issue():
         i
         for (r, _), i in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS.items()
         if r != "diffpair_length_skew"
-    } == {7349, 7583}
+    } == {7349}
 
 
 def test_board06_listed_impedance_findings_pass():
     gate = load("check_diffpair_coverage")
     found = {"impedance": set(BOARD06_IMPEDANCE_NETS), **_skew(gate)}
-    errors = {"impedance": 2}
+    errors = {"impedance": 1}
     assert gate.unexpected_baseline_errors(BOARD06_KEY, errors, found) == {}
     assert gate.stale_allowances(BOARD06_KEY, found) == []
 
@@ -122,19 +122,17 @@ def test_board06_new_impedance_net_fails():
         "impedance": set(BOARD06_IMPEDANCE_NETS) | {"USB3_TX2+"},
         **_skew(gate),
     }
-    errors = {"impedance": 3}
+    errors = {"impedance": 2}
     assert gate.unexpected_baseline_errors(BOARD06_KEY, errors, found) == {"impedance": 1}
     assert gate.stale_allowances(BOARD06_KEY, found) == []
 
 
 def test_board06_fixed_impedance_finding_makes_allowance_stale():
-    """Issues #7349/#7583: once an impedance net tightens fully its entry must be deleted."""
+    """Issue #7349: once USB3_TX2 tightens fully the entry must be deleted."""
     gate = load("check_diffpair_coverage")
-    found = {"impedance": {"USB2_D-"}, **_skew(gate)}
+    found = dict(_skew(gate))
     assert gate.stale_allowances(BOARD06_KEY, found) == [("impedance", "USB3_TX2-", 7349)]
     assert "#7349" in gate.format_stale(gate.stale_allowances(BOARD06_KEY, found))
-    found = {"impedance": {"USB3_TX2-"}, **_skew(gate)}
-    assert gate.stale_allowances(BOARD06_KEY, found) == [("impedance", "USB2_D-", 7583)]
 
 
 def test_board06_impedance_without_identities_is_not_trusted():
