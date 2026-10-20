@@ -339,15 +339,22 @@ def test_pass_replaces_only_the_hybrids_own_legs() -> None:
     assert pf._hybrid_parity_ctx == []
 
 
-def test_pass_rejects_a_mirrored_leg_that_foreign_copper_blocks() -> None:
-    # The reject path: foreign B.Cu copper boxes P's through-hole start, so
-    # the mirrored leg (B.Cu first, like N's) cannot leave it.  The finished
-    # board's copper is a hard obstacle, never something the leg pushes.
+def _boxed_start() -> list:
+    """Foreign B.Cu copper boxing P's through-hole start pad."""
     from kicad_tools.router.layers import Layer
 
     box = [(2.2, 4.2), (3.8, 4.2), (3.8, 5.55), (2.2, 5.55), (2.2, 4.2)]
-    foreign = [(a[0], a[1], b[0], b[1], Layer.B_CU) for a, b in zip(box, box[1:], strict=False)]
-    pf, pc, routes, other = _finished_board(foreign=foreign)
+    return [(a[0], a[1], b[0], b[1], Layer.B_CU) for a, b in zip(box, box[1:], strict=False)]
+
+
+def test_pass_rejects_a_mirrored_leg_that_foreign_copper_blocks(monkeypatch) -> None:
+    # The reject path: foreign B.Cu copper boxes P's through-hole start, so
+    # the mirrored leg (B.Cu first, like N's) cannot leave it.  The finished
+    # board's copper is a hard obstacle, never something the leg pushes.
+    # (The #7580 joint search, which can leave on F.Cu first, is switched off
+    # here; it has its own test below.)
+    monkeypatch.setattr(LatticePathfinder, "_hybrid_joint_legs", lambda self, *a, **k: [])
+    pf, pc, routes, other = _finished_board(foreign=_boxed_start())
     pick = (routes[(pc.key, "P")], routes[(pc.key, "N")])
     pf._hybrid_parity_pass(routes, [], [pc])
     assert (routes[(pc.key, "P")], routes[(pc.key, "N")]) == pick
@@ -412,3 +419,106 @@ def test_route_netset_skips_the_pass_on_a_deadline_hit(monkeypatch) -> None:
     out, _stats = pf.route_netset([], coupled=[pc])
     assert out[(pc.key, "P")] is pick and pf.hybrid_parity_log == {}
     assert pf._hybrid_parity_ctx == []
+
+
+# --- issue #7580: both legs re-searched together, and the failure report -----
+
+
+def test_joint_legs_find_a_via_equal_pair_the_mirror_cannot() -> None:
+    # Foreign B.Cu copper boxes P's start, so P cannot copy N's B.Cu-first
+    # sequence while N's leg stays put.  Lifting BOTH legs lets P leave on
+    # F.Cu and drop to B.Cu past the box, and N follow on the same layers.
+    pf, pc, routes, _other = _finished_board(foreign=_boxed_start())
+    ctx = pf._hybrid_parity_ctx[0]
+    committed = pf._fresh_committed()
+    pf._commit_route_copper(routes["other"], None, committed)
+    before = (len(committed.vias), len(committed.via_copper))
+    mirrored = pf._hybrid_parity_legs(
+        pc,
+        items=ctx.items,
+        trunk=ctx.trunk,
+        legs=ctx.legs,
+        committed=committed,
+        history={},
+        present=0.0,
+        escape_plan={},
+        strict=None,
+        floor=0.0,
+        half=ctx.half,
+        clr=ctx.clr,
+    )
+    assert mirrored == []
+    joint = pf._hybrid_joint_legs(ctx, committed=committed)
+    assert joint, "no via-equal joint pair was found"
+    for alt in joint:
+        assert len(alt["P"].route.vias) == len(alt["N"].route.vias) > 0
+        # Both legs are new copper: neither is the pick's.
+        assert alt["P"] is not ctx.legs["P"] and alt["N"] is not ctx.legs["N"]
+    assert (len(committed.vias), len(committed.via_copper)) == before
+    assert committed._trial_depth == 0
+
+
+def test_route_netset_commits_a_joint_pair_when_the_mirror_is_blocked(monkeypatch) -> None:
+    # End to end through ``route_netset`` (negotiation stubbed to the
+    # finished board): the boxed start defeats every mirrored leg, the joint
+    # search clears the pair to equal vias, and no other copper moves.
+    pf, pc, routes, other = _finished_board(foreign=_boxed_start())
+    other_before = list(other.segments)
+    _stub_negotiation(monkeypatch, pf, pc, routes, deadline_hit=False)
+    out, _stats = pf.route_netset([], coupled=[pc])
+    vias = [len(out[(pc.key, p)].vias) for p in ("P", "N")]
+    assert vias[0] == vias[1] > 0
+    assert "both legs re-searched together" in pf.hybrid_parity_log[pc.key]
+    assert out["other"] is other and other.segments == other_before
+
+
+def test_route_netset_reports_a_rejected_via_equal_pair_as_a_pair_rule_failure(
+    monkeypatch,
+) -> None:
+    # Real lengths: every via-equal pair costs skew AND length against the
+    # 0/1 pick, so the pick is kept -- and the log says it is a pair-rule
+    # failure and how much worse the best via-equal pair was.
+    pf, pc, routes, _other = _finished_board()
+    pf.pair_length_measure = None
+    pick = (routes[(pc.key, "P")], routes[(pc.key, "N")])
+    _stub_negotiation(monkeypatch, pf, pc, routes, deadline_hit=False)
+    out, _stats = pf.route_netset([], coupled=[pc])
+    assert out[(pc.key, "P")] is pick[0] and out[(pc.key, "N")] is pick[1]
+    note = pf.hybrid_parity_log[pc.key]
+    assert note.startswith("vias P/N=0/1: pair-rule failure, kept")
+    assert "best rejected: vias" in note
+    assert "none exists against the trunk alone either" in note
+
+
+def test_failure_note_names_the_nets_blocking_a_trunk_alone_pair() -> None:
+    # Against the trunk alone a via-equal pair fits (the pick is measured
+    # long, so it qualifies as no worse).  On the "finished board" a foreign
+    # net X runs a bar across both layers that every such pair must cross,
+    # and the report names X as what is in its way.
+    from kicad_tools.router.lattice.pathfinder import _default_pair_length
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Segment
+
+    pf, pc, routes, _other = _finished_board()
+    ctx = pf._hybrid_parity_ctx[0]
+    pick = (routes[(pc.key, "P")], routes[(pc.key, "N")])
+
+    def measure(route):
+        if route is pick[0] or route is pick[1]:
+            return 1000.0 if route is pick[0] else 1010.0
+        return _default_pair_length(route)
+
+    pf.pair_length_measure = measure
+    bar = Route(net=9, net_name="X")
+    for layer in (Layer.F_CU, Layer.B_CU):
+        bar.segments.append(Segment(10.0, -1.0, 10.0, 13.0, 0.2, layer, 9, "X"))
+    committed = pf._fresh_committed()
+    pf._commit_route_copper(bar, None, committed)
+    found = pf._hybrid_parity_blockers(ctx, committed=committed, net_names={9: "X"})
+    assert found is not None
+    vias, (skew, total), names = found
+    assert vias[0] == vias[1] and names == ["X"]
+    assert (skew, total) <= (10.0, 2010.0)
+    note = pf._hybrid_parity_failure_note(ctx, (0, 1), committed=committed, net_names={9: "X"})
+    assert note.startswith("vias P/N=0/1: pair-rule failure, kept")
+    assert note.endswith("blocked on the finished board by: X")
