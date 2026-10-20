@@ -433,23 +433,23 @@ class TestMatchgroupJobContainer:
 class TestUnexpectedBaselineErrors:
     KEY = "boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb"
 
-    NETS = {"MIPI_DAT1_N", "MIPI_DAT1_P", "TMDS_D1_N", "TMDS_D1_P"}
+    NETS = {"TMDS_D1_N", "TMDS_D1_P"}
 
     def test_listed_impedance_nets_tolerated(self):
         mod = _load_helper_module()
         found = {"impedance": set(self.NETS)}
-        assert mod.unexpected_baseline_errors(self.KEY, {"impedance": 4}, found) == {}
+        assert mod.unexpected_baseline_errors(self.KEY, {"impedance": 2}, found) == {}
         assert [s for s in mod.stale_allowances(self.KEY, found) if s[0] == "impedance"] == []
 
     def test_unlisted_impedance_net_reported_within_old_cap(self):
         mod = _load_helper_module()
-        found = {"impedance": {"MIPI_DAT1_N", "MIPI_DAT1_P", "TMDS_D1_N", "DDR_DQS0_P"}}
-        assert mod.unexpected_baseline_errors(self.KEY, {"impedance": 4}, found) == {"impedance": 1}
+        found = {"impedance": {"TMDS_D1_N", "TMDS_D1_P", "DDR_DQS0_P"}}
+        assert mod.unexpected_baseline_errors(self.KEY, {"impedance": 3}, found) == {"impedance": 1}
 
     def test_fixed_listed_finding_is_stale(self):
         mod = _load_helper_module()
         found = {"impedance": self.NETS - {"TMDS_D1_P"}}
-        assert mod.unexpected_baseline_errors(self.KEY, {"impedance": 3}, found) == {}
+        assert mod.unexpected_baseline_errors(self.KEY, {"impedance": 1}, found) == {}
         stale = [s for s in mod.stale_allowances(self.KEY, found) if s[0] == "impedance"]
         assert stale == [("impedance", "TMDS_D1_P", 7349)]
 

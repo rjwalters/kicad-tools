@@ -604,6 +604,10 @@ def count_errors_via_kct_check(
 # fraction 86.7 % -> 84.6 %; TMDS_D1 48.372 -> 49.379 mm), so the
 # uncoupled-length gate (operator Q12) declines them and the 4 entries stay.
 # Deleting these 4 entries is the whole of #7349.
+# Issue #7612: the skew tuner's foreign-clearance gate no longer vetoes a bump
+# for a near-miss its host segment already had, so the pass's second MIPI_DAT1
+# run is no longer declined for skew: MIPI_DAT1 tightens 2/2 runs (Zdiff
+# 130.5 -> 100.0 ohm) and its 2 entries are gone.  TMDS_D1's 2 stay.
 #
 # Issue #7367 -- the ``diffpair_length_skew`` pairs, keyed by pair, not by a
 # count.  Until #7367 the gate let every skew/continuity finding through by
@@ -618,8 +622,6 @@ def count_errors_via_kct_check(
 # on the full re-route is stale and fails the gate, and an allowed finding
 # does not count against the (now strict 0) routed-DRC total.
 MATCHGROUP_FIXTURE_ALLOWED_FINDINGS: Allowance = {
-    ("impedance", "MIPI_DAT1_N"): 7349,
-    ("impedance", "MIPI_DAT1_P"): 7349,
     ("impedance", "TMDS_D1_N"): 7349,
     ("impedance", "TMDS_D1_P"): 7349,
     # skew vs max_skew_mm, mm
