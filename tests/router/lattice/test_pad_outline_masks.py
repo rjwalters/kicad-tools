@@ -173,3 +173,44 @@ def test_pathfinder_feeds_pad_class_into_outline_test():
     obstacles = pf.obstacles
     pf.set_pad_class_clearances([Y1_CLASS_CLEARANCE])
     assert pf.obstacles is obstacles
+
+
+# Pair legs see the same outline as single-ended legs (#7503 judge, head
+# 42493cb): with the single-ended checks on the exact outline but the pair
+# checks (``coupled.pads_block_*_grown``) still on ``pad_rects``, the coupled
+# search lost the pad-corner corridors the single-ended legs take, and 06rf's
+# USB3_RX1/TX1 fell back to uncoupled routes.
+
+
+@pytest.mark.parametrize("gap", [0.14, 0.166, 0.199, 0.21, 0.3])
+@pytest.mark.parametrize("class_extra", [None, [Y1_CLASS_CLEARANCE - Y1_BASE_CLEARANCE]])
+def test_pair_checks_agree_with_single_ended_outline(gap, class_extra):
+    from kicad_tools.router.lattice.coupled import (
+        pads_block_point_grown,
+        pads_block_segment_grown,
+    )
+
+    model = _y1_model(class_extra)
+    p = _y1_probe(gap)
+    single = model.segment_blocked(p, p, 0, net=12)
+    assert pads_block_segment_grown(model, p, p, 0, {12, 13}, 0.0) is single
+    assert pads_block_point_grown(model, p, 0, {12, 13}, 0.0) is single
+
+
+def test_pair_checks_release_corner_the_rectangle_blocked():
+    from kicad_tools.router.lattice.coupled import (
+        pads_block_point_grown,
+        pads_block_segment_grown,
+    )
+
+    model = _y1_model([Y1_CLASS_CLEARANCE - Y1_BASE_CLEARANCE])
+    p = _y1_probe(0.21)
+    x0, y0, x1, y1 = model.pad_rects[0]
+    assert x0 < p[0] < x1 and y0 < p[1] < y1  # the old rectangle blocked it
+    assert not pads_block_point_grown(model, p, 0, {12, 13}, 0.0)
+    assert not pads_block_segment_grown(model, p, p, 0, {12, 13}, 0.0)
+    # The fat half-envelope ``extra`` still widens the exact keep-out.
+    assert pads_block_point_grown(model, p, 0, {12, 13}, 0.05)
+    # Exempt (centerline) mode and own-net mode still skip the pad.
+    assert not pads_block_point_grown(model, _y1_probe(0.1), 0, {6}, 0.0)
+    assert not pads_block_point_grown(model, _y1_probe(0.1), 0, set(), 0.0, frozenset({0}))

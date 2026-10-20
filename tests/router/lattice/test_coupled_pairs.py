@@ -1098,7 +1098,10 @@ def test_core_reserves_no_escape_site_for_an_unrouted_sandwiched_pad() -> None:
     coupled, _reserved = router._lattice_coupled_connections()
     mask = router._ensure_lattice_pathfinder()._keepouts
     assert not any(a.name.startswith("pair-escape-via:") for a in (mask.areas if mask else ()))
-    assert coupled[1].anchor_a == pytest.approx((17.44, 6.0))
+    # Issue #7503: the anchor search judges pads by their true outline, so
+    # U2.4/U2.6's square keep-out corners no longer push it out to 17.44;
+    # at 17.29 it is 0.898 mm from both (0.45 mm required).
+    assert coupled[1].anchor_a == pytest.approx((17.29, 6.0))
 
 
 def test_core_pair_leaves_a_sealed_routed_pad_its_escape_via(capsys) -> None:
