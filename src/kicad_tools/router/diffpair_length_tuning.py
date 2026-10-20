@@ -310,8 +310,6 @@ def tune_diff_pair_skew(
             result,
         )
 
-    from kicad_tools.validate.rules.diffpair_uncoupled_length import UNCOUPLED_EPSILON_MM
-
     from .length import LengthTracker  # avoid cycle
 
     measure = route_length or LengthTracker.calculate_route_length
@@ -419,6 +417,7 @@ def tune_diff_pair_skew(
             break
 
         candidate_route = None
+        cand_bump: tuple[TuningPattern, list[Segment]] | None = None
         drc_rejected = False
         generator_failure = ""
         pre_insert_figure: float | None = None  # computed on first need (#6795)
@@ -444,6 +443,21 @@ def tune_diff_pair_skew(
             if measure(cand_route) - measure(current_shorter) <= 1e-9:
                 generator_failure = "serpentine added no length"
                 continue
+            # Issue #7521: the bump is written as a KiCad tuning pattern, so
+            # tag it before the uncoupled guard measures the candidate (the
+            # measure leaves pattern copper out, as kicad-cli 10.0.6 does).
+            # Only the segments that leave the host line are members.
+            for seg in cand_serp.new_segments:
+                seg.tuning_pattern = None
+            cand_bump = skew_bump_pattern(
+                cand_serp.new_segments,
+                longer_route,
+                diff_pair_gap=intra_pair_clearance_mm,
+                min_spacing=base_config.min_spacing * base_config.gap_factor,
+                tolerance_mm=tolerance_mm,
+            )
+            if cand_bump is not None:
+                tag_skew_bump(cand_bump[1], cand_bump[0])
             # Uncoupled-length guard (issue #6795): do not trade a skew error
             # for an uncoupled-length error.  The figure is the one
             # ``kct check`` judges -- the MAX of both halves' uncoupled
@@ -452,17 +466,31 @@ def tune_diff_pair_skew(
             # AND worse than before this insert is rejected: on a pair already
             # over the limit (on either half) the skew can still be fixed as
             # long as the uncoupled figure does not grow.
+            #
+            # Issue #7521: the figure leaves tuning-pattern copper out on both
+            # sides, so a pattern uncouples the partner span opposite the bump
+            # (kicad-cli 10.0.6 does the same).  When that pushes the pair
+            # over, the same bump as plain copper -- the pre-#7521 output,
+            # measured the same honest way -- is tried before giving up, so
+            # emitting patterns never costs a fix main would have made.
             if max_uncoupled_mm is not None:
+                if pre_insert_figure is None:
+                    pre_insert_figure = _pair_uncoupled_mm(current_shorter, longer_route)
                 cand_figure = _pair_uncoupled_mm(cand_route, longer_route)
-                if cand_figure > max_uncoupled_mm + UNCOUPLED_EPSILON_MM:
-                    if pre_insert_figure is None:
-                        pre_insert_figure = _pair_uncoupled_mm(current_shorter, longer_route)
-                    if cand_figure > pre_insert_figure + UNCOUPLED_EPSILON_MM:
-                        generator_failure = (
-                            f"uncoupled length exceeds limit ({cand_figure:.3f} mm > "
-                            f"{max_uncoupled_mm:.3f} mm, was {pre_insert_figure:.3f} mm)"
-                        )
-                        continue
+                if not _uncoupled_ok(cand_figure, pre_insert_figure, max_uncoupled_mm):
+                    if cand_bump is not None:
+                        for seg in cand_bump[1]:
+                            seg.tuning_pattern = None
+                        plain_figure = _pair_uncoupled_mm(cand_route, longer_route)
+                        if _uncoupled_ok(plain_figure, pre_insert_figure, max_uncoupled_mm):
+                            cand_bump = None  # commit the bump as plain copper
+                            cand_figure = plain_figure
+                if not _uncoupled_ok(cand_figure, pre_insert_figure, max_uncoupled_mm):
+                    generator_failure = (
+                        f"uncoupled length exceeds limit ({cand_figure:.3f} mm > "
+                        f"{max_uncoupled_mm:.3f} mm, was {pre_insert_figure:.3f} mm)"
+                    )
+                    continue
             # Post-insertion DRC self-check.  The candidate route's new
             # segments must not violate intra-pair clearance against the
             # partner OR collide with any other routed net's segments.
@@ -507,20 +535,8 @@ def tune_diff_pair_skew(
         # Commit this attempt's new route and re-measure skew.
         current_shorter = candidate_route
         result.inserts_applied += 1
-        # Issue #7521: the bump is written as a KiCad tuning pattern.  Only
-        # the segments that leave the host line are members.
-        for seg in cand_serp.new_segments:
-            seg.tuning_pattern = None
-        bump = skew_bump_pattern(
-            cand_serp.new_segments,
-            longer_route,
-            diff_pair_gap=intra_pair_clearance_mm,
-            min_spacing=base_config.min_spacing * base_config.gap_factor,
-            tolerance_mm=tolerance_mm,
-        )
-        if bump is not None:
-            tag_skew_bump(bump[1], bump[0])
-            bumps.append((bump[1], bump[0]))
+        if cand_bump is not None:
+            bumps.append((cand_bump[1], cand_bump[0]))
         new_shorter_length = measure(current_shorter)
         current_skew = (
             abs(new_shorter_length - target_length)
@@ -579,8 +595,19 @@ def tune_diff_pair_skew(
 
 
 def _checker_segments(segments: list[Segment]) -> list[tuple[float, float, float, float, str]]:
-    """Segments as the ``(x1, y1, x2, y2, layer)`` tuples the uncoupled-length rule reads."""
-    return [(s.x1, s.y1, s.x2, s.y2, str(s.layer)) for s in segments]
+    """Segments as the ``(x1, y1, x2, y2, layer)`` tuples the uncoupled-length rule reads.
+
+    Issue #7521: tuning-pattern copper (``Segment.tuning_pattern``) is left
+    out, as ``kct check`` and pinned kicad-cli 10.0.6 leave it out.
+    """
+    return [(s.x1, s.y1, s.x2, s.y2, str(s.layer)) for s in segments if s.tuning_pattern is None]
+
+
+def _uncoupled_ok(figure: float, before: float, limit: float) -> bool:
+    """The #6795 guard: within ``limit``, or no worse than ``before``."""
+    from kicad_tools.validate.rules.diffpair_uncoupled_length import UNCOUPLED_EPSILON_MM
+
+    return figure <= limit + UNCOUPLED_EPSILON_MM or figure <= before + UNCOUPLED_EPSILON_MM
 
 
 def _pair_uncoupled_mm(a: Route, b: Route) -> float:
@@ -588,7 +615,8 @@ def _pair_uncoupled_mm(a: Route, b: Route) -> float:
 
     ``diffpair_uncoupled_length`` fails a pair on ``max(uncoupled(P),
     uncoupled(N))``, each half measured against the other, so this is
-    symmetric in its arguments.
+    symmetric in its arguments.  Tuning-pattern copper is excluded on both
+    sides (issue #7521).
     """
     from kicad_tools.validate.rules.diffpair_uncoupled_length import measure_uncoupled
 

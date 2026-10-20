@@ -28,6 +28,7 @@ How KiCad measures, and so how kct does (pinned on kicad-cli 10.0.6 by
 | What is coupled? | The projected overlap of same-layer segments that are parallel (anti-parallel too) to within about 0.01°. 0.02° is already uncoupled. |
 | Distance limit? | None, unless a `diff_pair_gap (max ..)` is present. kct emits only `(min ..)`, so two parallel runs 10 mm apart are coupled. |
 | Via barrels? | Not counted. Vias that sit side by side cost nothing; offset vias cost only the track copper left without a partner. |
+| Tuning patterns? | Tracks that are `members` of a `(generated ... (type tuning_pattern))` object are dropped on **both** sides: they are not uncoupled copper of their own net, and the other net does not couple to them. So the partner's copper opposite a skew bump still counts (Issue #7521, operator ruling Q16). |
 
 ### Known divergences
 
@@ -40,9 +41,13 @@ How KiCad measures, and so how kct does (pinned on kicad-cli 10.0.6 by
   fail kicad-cli. `test_known_divergence_kct_never_exceeds_kicad_on_committed_copper`
   pins the gap. Every committed pair is far below its limit in both engines.
 * **Arcs** are not measured by kct.
-* **Meanders:** KiCad's `diff_pair_uncoupled` is known to misreport on them. No
-  committed board has one; the first fixture belongs to the length-tuning phase
-  (#6447).
+* **Meanders as plain copper:** KiCad's `diff_pair_uncoupled` is known to
+  misreport on them. On kicad-cli 10.0.6, a bump with 45-degree legs agrees
+  with kct. A trombone with perpendicular legs (the router's serpentine) has
+  its flat tops counted as uncoupled by KiCad and as coupled by kct, so KiCad
+  reads higher. `tests/test_uncoupled_tuning_pattern_7521.py` pins this.
+  Written as a tuning pattern, which the router's skew tuner does
+  (Issue #7521), the bump is outside both measures and the two engines agree.
 
 ### The per-terminal figure (kct-only)
 

@@ -31,14 +31,19 @@ failure.
 What pinned kicad-cli 10.0.6 does with one (measured, Issue #7521)
 =================================================================
 
-* Member tracks are left out of the diff-pair *uncoupled length* total and
-  out of the *gap out of range* check.
-* The partner leg's copper opposite the bump is not a member, so it still
-  counts as uncoupled.  The residual is about the bump's base-line length,
-  which is shorter than the bump path itself.  That is why only the segments
-  that leave the host line are made members here: making the coupled lead-in
-  and lead-out straight runs members too would uncouple the partner opposite
-  them and *raise* KiCad's figure.
+* Member tracks are left out of the diff-pair *uncoupled length* measure on
+  both sides: they are not uncoupled copper of their net, and the other net
+  does not couple to them.  They are also out of the *gap out of range*
+  check.
+* So the partner leg's copper opposite the bump, which is now beside
+  nothing, counts as uncoupled: about the bump's base-line length.  Under
+  min-only gap rules (all kct writes) that can exceed the plain bump's own
+  figure: a 45-degree bump with a 1.8 mm base reads 1.13 mm as plain copper
+  and 1.8 mm as a pattern.  ``kct check`` measures the same way (operator
+  ruling Q16), and the skew tuner falls back to plain copper when the
+  pattern form would break the uncoupled limit.  Only the segments that
+  leave the host line are members: making the coupled lead-in and lead-out
+  runs members too would uncouple the partner opposite them as well.
 
 Emission
 ========
@@ -61,6 +66,8 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from kicad_tools.sexp import SExp
+
     from .primitives import Route, Segment
 
 #: ``tuning_mode`` of a skew pattern (lengthens one leg of a diff pair).
@@ -345,6 +352,43 @@ class TuningPatternRecord:
 _GENERATED_RE = re.compile(r"\(generated\b")
 
 
+def _record(node: SExp) -> TuningPatternRecord | None:
+    """The record of one ``(generated ...)`` node, ``None`` if not a tuning pattern."""
+
+    def atom(tag: str) -> str:
+        child = node.find_child(tag)
+        value = child.get_first_atom() if child is not None else None
+        return "" if value is None else str(value)
+
+    if atom("type") != "tuning_pattern":
+        return None
+    members_node = node.find_child("members")
+    members = tuple(str(v) for v in members_node.get_atoms()) if members_node else ()
+    return TuningPatternRecord(
+        uuid=atom("uuid"),
+        tuning_mode=atom("tuning_mode"),
+        net_name=atom("last_netname"),
+        layer=atom("layer"),
+        members=members,
+    )
+
+
+def board_tuning_patterns(root: SExp) -> list[TuningPatternRecord]:
+    """Every tuning pattern among the top-level items of a parsed board."""
+    records = (_record(c) for c in root.children if c.name == "generated")
+    return [r for r in records if r is not None]
+
+
+def tuning_pattern_member_uuids(root: SExp) -> frozenset[str]:
+    """Uuids of every track owned by a tuning pattern of a parsed board.
+
+    Issue #7521 (operator ruling Q16): pinned kicad-cli 10.0.6 leaves these
+    tracks out of the diff-pair uncoupled-length measure entirely, as the
+    measured net *and* as the partner beside which the other net couples.
+    """
+    return frozenset(m for r in board_tuning_patterns(root) for m in r.members)
+
+
 def read_tuning_patterns(text: str) -> list[TuningPatternRecord]:
     """Return every ``tuning_pattern`` generator object in ``text``."""
     from kicad_tools.sexp import parse_string
@@ -368,26 +412,9 @@ def read_tuning_patterns(text: str) -> list[TuningPatternRecord]:
                 if depth == 0:
                     break
             i += 1
-        node = parse_string(text[match.start() : i + 1])
-
-        def atom(tag: str, node=node) -> str:
-            child = node.find(tag)
-            value = child.get_first_atom() if child is not None else None
-            return "" if value is None else str(value)
-
-        if atom("type") != "tuning_pattern":
-            continue
-        members_node = node.find("members")
-        members = tuple(str(v) for v in members_node.get_atoms()) if members_node else ()
-        records.append(
-            TuningPatternRecord(
-                uuid=atom("uuid"),
-                tuning_mode=atom("tuning_mode"),
-                net_name=atom("last_netname"),
-                layer=atom("layer"),
-                members=members,
-            )
-        )
+        record = _record(parse_string(text[match.start() : i + 1]))
+        if record is not None:
+            records.append(record)
     return records
 
 
@@ -398,9 +425,11 @@ __all__ = [
     "STATUS_TUNED",
     "TuningPattern",
     "TuningPatternRecord",
+    "board_tuning_patterns",
     "bump_members",
     "read_tuning_patterns",
     "retag",
     "skew_bump_pattern",
     "tag_skew_bump",
+    "tuning_pattern_member_uuids",
 ]
