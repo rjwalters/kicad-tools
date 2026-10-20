@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Literal, NamedTuple
 from . import wall_deadline as _wall_deadline
 from .pad_landing import pad_landing_geometry
 from .resource_guard import reraise_if_resource_exhaustion
+from .search_radius import search_radius_cells
 
 if TYPE_CHECKING:
     import numpy as np
@@ -91,7 +92,26 @@ logger = logging.getLogger(__name__)
 # v54 (Issue #6473): ``CoupledPathfinder.route`` holds a layer change to the
 # fab hole-to-hole floor against the pair's own earlier vias and between the
 # P and N via of the move.  A v53 .so returns coupled via pairs below it.
-_REQUIRED_CPP_BUILD_VERSION = 55
+# v56 (Issue #6718): ``Grid3D.set_pad_authored`` takes a trailing ``rratio``
+# (the file's roundrect corner ratio); a v55 .so rejects the argument.
+# v57 (Issue #6761): both A* loops honour hard escape fences -- a
+# ``PadChannelBudget`` with an infinite penalty refuses the cell, and
+# ``layer == -2`` is a via-only fence.  A v56 .so would price the fences as
+# an ordinary (infinite) cost and read ``layer == -2`` as out of range.
+# v58 (Issue #6826): ``CoupledPathfinder.route`` bounds the endpoint zones'
+# spacing tolerance by each end's pad-pitch delta + 1, not the zone radius.  A
+# v57 .so diverges from the Python coupled mirror.
+# v59 (Issue #6840): ``CoupledPathfinder.set_partner_via_clearance`` -- the
+# joint search keeps each rail clear of the partner's via barrels on every
+# layer.  A v58 .so lacks the setter and diverges from the Python mirror.
+# v60 (Issue #6994): native A* search radii use the guarded
+# ``search_radius_cells`` rule shared with Python (new binding
+# ``router_cpp.search_radius_cells``).  A v59 .so searches one ring wider on
+# float-noise inputs (Default rules @ 0.1 mm) than the Python mirror.
+# v61 (Issue #7296): ``DesignRules.min_via_pad_edge_gap`` + the coupled
+# pathfinder's mask-dam refusal; v62: the same floor in the single-ended A*'s
+# via check.  A v61 .so lets single-ended vias into the dam zone.
+_REQUIRED_CPP_BUILD_VERSION = 62
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
@@ -163,6 +183,24 @@ _CPP_IMPORT_ERROR: str | None = None
 # can report the numbers the staleness guard actually cares about, even after
 # the version guard below nulls out ``router_cpp``.
 _CPP_BUILD_VERSION: int | None = None
+
+
+def _allow_smd_vias(rules) -> bool:
+    """May a via be drilled into an SMD pad under ``rules.manufacturer``?
+
+    Unknown manufacturer -> unspecified capability is retained (permissive),
+    matching ``pathfinder.Router``'s fallback.  Shared by the single-ended and
+    the coupled (Issue #6840) rules marshalling.
+    """
+    from .mfr_limits import get_mfr_limits
+
+    allow = True
+    if getattr(rules, "manufacturer", None):
+        with contextlib.suppress(ValueError):
+            allow = bool(get_mfr_limits(rules.manufacturer).via_in_pad_supported)
+    return allow
+
+
 _CPP_EXTENSION_PATH: str | None = None
 try:
     if TYPE_CHECKING:
@@ -1380,21 +1418,14 @@ class CppPathfinder:
         cpp_rules = router_cpp.DesignRules()
         cpp_rules.trace_width = rules.trace_width
         cpp_rules.trace_clearance = rules.trace_clearance
-        from .mfr_limits import get_mfr_limits
-
-        cpp_rules.allow_smd_vias = True
-        if rules.manufacturer:
-            # Unknown manufacturer -> unspecified capability is retained
-            # (permissive), matching pathfinder.Router's fallback.
-            with contextlib.suppress(ValueError):
-                cpp_rules.allow_smd_vias = bool(
-                    get_mfr_limits(rules.manufacturer).via_in_pad_supported
-                )
+        cpp_rules.allow_smd_vias = _allow_smd_vias(rules)
         cpp_rules.via_drill = rules.via_drill
         cpp_rules.via_diameter = rules.via_diameter
         cpp_rules.via_clearance = rules.via_clearance
         cpp_rules.min_drill_clearance = rules.min_drill_clearance
         cpp_rules.min_hole_to_hole = rules.min_hole_to_hole
+        # Issue #7296: the mask-dam floor for the single-ended via check.
+        cpp_rules.min_via_pad_edge_gap = float(getattr(rules, "min_via_pad_edge_gap", 0.0) or 0.0)
         cpp_rules.grid_resolution = rules.grid_resolution
         cpp_rules.cost_straight = rules.cost_straight
         cpp_rules.cost_turn = rules.cost_turn
@@ -1431,6 +1462,9 @@ class CppPathfinder:
         # own default) until/unless the allowed-layers filter narrows it.
         self._routable_layers: list[int] = list(grid.get_routable_indices())
         self._apply_allowed_layers_to_routable()
+        # Issue #6876: the construction-time set, so the per-call plane opt-in
+        # widening can tell it apart from a caller's own narrowing (a lock).
+        self._construction_routable_layers: list[int] = list(self._routable_layers)
 
         # Lazy Python fallback router (constructed on first fallback)
         self._py_router: Router | None = None
@@ -1628,6 +1662,11 @@ class CppPathfinder:
         # Kept separate from the #3143 list so neither setter clobbers the
         # other; :meth:`_filter_pad_channel_budgets_for_net` concatenates.
         self._pad_lane_budgets: list = []  # list[router_cpp.PadChannelBudget]
+        # Issue #6761: fine-pitch lanes for the hard escape fences, set by
+        # :meth:`set_pad_lane_fences`; turned into per-connection budgets by
+        # :meth:`_escape_fence_budgets`.
+        self._pad_lane_fences: list = []  # list[pad_lanes.FenceLane]
+        self._escape_fence_fallbacks = 0
 
     def set_segment_foreign_context(
         self,
@@ -1737,6 +1776,44 @@ class CppPathfinder:
         lane list.  Pass ``None`` or ``[]`` to clear.
         """
         self._pad_lane_budgets = list(budgets) if budgets else []
+
+    def set_pad_lane_fences(self, fence_lanes: list | None) -> None:
+        """Install the fine-pitch lanes the escape fences are built from (Issue #6761).
+
+        Pass ``None`` or ``[]`` to clear (no connection is fenced).  See
+        :func:`kicad_tools.router.pad_lanes.escape_fence_rects`.
+        """
+        self._pad_lane_fences = list(fence_lanes) if fence_lanes else []
+
+    def _escape_fence_budgets(
+        self,
+        start: Pad,
+        end: Pad,
+        *,
+        trace_width: float,
+        trace_clearance: float,
+        via_size: float,
+    ) -> list:
+        """Hard escape fences for one connection (Issue #6761).
+
+        Empty unless ``start`` or ``end`` is a pad of a fine-pitch column.
+        The bands leave room for a minimum-width (``rules.trace_width``)
+        straight exit along every other-net lane centreline of that column.
+        """
+        fence_lanes = getattr(self, "_pad_lane_fences", None)
+        if not fence_lanes:
+            return []
+        from .pad_lanes import build_escape_fence_budgets
+
+        foreign_half = float(self._rules.trace_width) / 2.0
+        return build_escape_fence_budgets(
+            fence_lanes,
+            (getattr(start, "key", None), getattr(end, "key", None)),
+            int(start.net),
+            self._grid,
+            trace_band_mm=float(trace_width) / 2.0 + float(trace_clearance) + foreign_half,
+            via_band_mm=float(via_size) / 2.0 + float(self._rules.via_clearance) + foreign_half,
+        )
 
     def invalidate_pad_geometry_cache(self) -> None:
         """Mirror changed physical drills before the next native via query."""
@@ -1987,6 +2064,38 @@ class CppPathfinder:
         if permitted and permitted != list(base):
             self.set_routable_layers(permitted)
 
+    def _opted_in_plane_layers(
+        self, net_class: NetClassRouting | None, hard_avoided: frozenset[int]
+    ) -> list[int]:
+        """Layers to add to the routable vector for this net's opt-in (#6876).
+
+        Exactly the class's ``allow_plane_layers`` that ``rules.allowed_layers``
+        excludes and the net does not hard-avoid, and only while the shared
+        vector is still the construction-time set -- a caller-narrowed vector
+        (a single-layer lock) is never widened.
+        """
+        from .layers import Layer
+        from .rules import allowed_plane_layer_indices
+
+        allowed = self._rules.allowed_layers
+        if allowed is None or net_class is None:
+            return []
+        opted = allowed_plane_layer_indices(net_class)
+        if not opted:
+            return []
+        if self._routable_layers != getattr(
+            self, "_construction_routable_layers", self._routable_layers
+        ):
+            return []
+        out: list[int] = []
+        for idx in self._grid.get_routable_indices():
+            if idx not in opted or idx in hard_avoided or idx in self._routable_layers:
+                continue
+            if Layer(self._grid.index_to_layer(idx)).kicad_name in allowed:
+                continue
+            out.append(idx)
+        return out
+
     def _hard_avoided_layers(self, net_class: NetClassRouting | None) -> frozenset[int]:
         """Grid-layer indices to HARD-block for this net (Issue #4433).
 
@@ -2012,16 +2121,21 @@ class CppPathfinder:
             return frozenset()
         return net_class.hard_avoided_layer_indices(self._rules.strict_layers)
 
-    def _is_layer_allowed(self, layer_idx: int) -> bool:
+    def _is_layer_allowed(self, layer_idx: int, net_class: NetClassRouting | None = None) -> bool:
         """Check if routing on this layer is allowed by allowed_layers constraint.
+
+        Issue #6876: ``net_class``'s ``allow_plane_layers`` opt-in widens the
+        gate for the named layers (shared :func:`~.rules.layer_permitted`).
 
         Args:
             layer_idx: Grid layer index
+            net_class: The routed net's class, or None (no opt-in).
 
         Returns:
             True if layer is allowed (or no restriction), False if blocked
         """
         from .layers import Layer
+        from .rules import layer_permitted
 
         if self._rules.allowed_layers is None:
             return True  # No restriction
@@ -2029,7 +2143,7 @@ class CppPathfinder:
         # Convert grid index to Layer enum value, then to KiCad name for comparison
         layer_value = self._grid.index_to_layer(layer_idx)
         layer = Layer(layer_value)
-        return layer.kicad_name in self._rules.allowed_layers
+        return layer_permitted(self._rules, net_class, layer_idx, layer.kicad_name)
 
     def _compute_pad_bounds(
         self, pad: Pad, trace_width: float | None = None
@@ -2348,10 +2462,12 @@ class CppPathfinder:
                 else [end_layer]
             )
 
-        # Filter start/end layers by allowed_layers constraint
+        # Filter start/end layers by allowed_layers constraint.  Issue #6876:
+        # per net, so a class's ``allow_plane_layers`` opt-in is honoured.
         if self._rules.allowed_layers is not None:
-            start_layers = [l for l in start_layers if self._is_layer_allowed(l)]
-            end_layers = [l for l in end_layers if self._is_layer_allowed(l)]
+            seed_class = self._net_class_map.get(start.net_name)
+            start_layers = [l for l in start_layers if self._is_layer_allowed(l, seed_class)]
+            end_layers = [l for l in end_layers if self._is_layer_allowed(l, seed_class)]
             # If no valid layers remain, routing is impossible
             if not start_layers or not end_layers:
                 return None
@@ -2363,15 +2479,16 @@ class CppPathfinder:
         net_class = self._net_class_map.get(start.net_name)
         net_trace_width = net_class.trace_width if net_class else self._rules.trace_width
         net_trace_clearance = net_class.clearance if net_class else self._rules.trace_clearance
-        trace_radius_cells = max(
-            1,
-            math.ceil((net_trace_width / 2 + net_trace_clearance) / self._grid.resolution),
+        # Issue #6994: the same guarded radius as the Python Router (was a
+        # bare ceil that added a phantom cell on float-noise inputs, e.g.
+        # Default rules @ 0.1 mm gave 4 cells instead of 3).
+        trace_radius_cells = search_radius_cells(
+            net_trace_width / 2, net_trace_clearance, self._grid.resolution
         )
 
         net_via_size = net_class.via_size if net_class else self._rules.via_diameter
-        via_radius_cells = max(
-            1,
-            math.ceil((net_via_size / 2 + self._rules.via_clearance) / self._grid.resolution),
+        via_radius_cells = search_radius_cells(
+            net_via_size / 2, self._rules.via_clearance, self._grid.resolution
         )
 
         # Issue #4433: hard per-net avoid_layers for the NATIVE backend (the
@@ -2429,11 +2546,8 @@ class CppPathfinder:
                 if intra_pair_clearance is not None:
                     partner_net_id = int(partner_id)
                     search_intra_pair_clearance = intra_pair_clearance
-                    intra_pair_radius_cells = max(
-                        1,
-                        math.ceil(
-                            (net_trace_width / 2 + intra_pair_clearance) / self._grid.resolution
-                        ),
+                    intra_pair_radius_cells = search_radius_cells(
+                        net_trace_width / 2, intra_pair_clearance, self._grid.resolution
                     )
 
         # Issue #2427: Compute pad metal bounds and approach zones.
@@ -2491,14 +2605,29 @@ class CppPathfinder:
         # net.  The Python fallback constructs its own Router that re-derives
         # the hard block from the same net_class, so it stays enforced there
         # too regardless of this narrowing.
+        #
+        # Issue #6876: the construction-time ``_apply_allowed_layers_to_routable``
+        # narrowed the shared vector to ``rules.allowed_layers`` for every net.
+        # When this net's class opts in to reserved plane layers
+        # (``allow_plane_layers``), WIDEN the vector for this call by exactly
+        # those opted-in layers that the board-wide gate excludes (hard-avoided
+        # layers still removed -- hard avoid wins).  Only the construction-time
+        # set is widened: a caller that narrowed the vector itself (e.g.
+        # ``DiffPairRouter._layer_locked_router``'s single-layer, no-via probe)
+        # keeps its lock.  The change is applied inside the ``try`` below and
+        # restored by its ``finally``.  No C++ source change.
         saved_routable_layers: list[int] | None = None
-        if hard_avoided_layers:
-            narrowed_routable = [
-                idx for idx in self._routable_layers if idx not in hard_avoided_layers
-            ]
+        pending_routable: list[int] | None = None
+        opted_in_layers = self._opted_in_plane_layers(net_class, hard_avoided_layers)
+        if hard_avoided_layers or opted_in_layers:
+            if opted_in_layers:
+                widened = set(self._routable_layers) | set(opted_in_layers)
+                candidate = [idx for idx in self._grid.get_routable_indices() if idx in widened]
+            else:
+                candidate = list(self._routable_layers)
+            narrowed_routable = [idx for idx in candidate if idx not in hard_avoided_layers]
             if narrowed_routable and narrowed_routable != self._routable_layers:
-                saved_routable_layers = list(self._routable_layers)
-                self.set_routable_layers(narrowed_routable)
+                pending_routable = narrowed_routable
 
         # Issue #4511 / Epic #4431 Phase 2b: search-time pairwise (HV-isolation)
         # avoidance.  Phase 2a wired ``_sync_pairwise_domains_to_cpp()`` only
@@ -2517,6 +2646,18 @@ class CppPathfinder:
         # accumulated avoidance boosts and remaining budget) instead of only
         # continuing the preserved open set.  Every pushed setter is
         # idempotent, so calling them again before a restart is safe.
+        # Issue #6761: hard escape fences when this connection starts or ends
+        # on a fine-pitch column pad.  ``fence_state`` lets the first failed
+        # search drop them (see the retry below).
+        escape_fences = self._escape_fence_budgets(
+            start,
+            end,
+            trace_width=net_trace_width,
+            trace_clearance=net_trace_clearance,
+            via_size=net_via_size,
+        )
+        fence_state = {"on": bool(escape_fences)}
+
         def _run_fresh_search(timeout_s: float, max_iters: int):
             self._sync_pairwise_domains_to_cpp()
             # Give the C++ search the routing net's copper half-extents so the
@@ -2618,11 +2759,23 @@ class CppPathfinder:
                 # an escape pad is not penalised for routing through its
                 # OWN escape endpoint -- only contention from OTHER nets
                 # is shaped.
-                self._filter_pad_channel_budgets_for_net(start.net),
+                self._filter_pad_channel_budgets_for_net(start.net)
+                + (escape_fences if fence_state["on"] else []),
             )
 
         try:
+            if pending_routable is not None:
+                saved_routable_layers = list(self._routable_layers)
+                self.set_routable_layers(pending_routable)
             result = _run_fresh_search(timeout_seconds, self._effective_search_iterations)
+            if not result.success and fence_state["on"]:
+                # Issue #6761: a fence reshapes an escape, it must never lose
+                # a connection -- when the fenced search finds nothing (e.g.
+                # an obstacle inside the lane forces an early turn), retry
+                # once on the unfenced cost function.
+                fence_state["on"] = False
+                self._escape_fence_fallbacks = getattr(self, "_escape_fence_fallbacks", 0) + 1
+                result = _run_fresh_search(timeout_seconds, self._effective_search_iterations)
 
             if not result.success:
                 # Issue #2476: Capture structured failure diagnostics from
@@ -4298,7 +4451,13 @@ class CppPathfinder:
         t0 = time.monotonic()
         # Python Router.route() does not accept start_layers/end_layers;
         # it derives layer information internally from pad attributes.
-        route = self._py_router.route(
+        # Issue #6527: opt-in bidirectional A* for the fallback (default off).
+        _fallback_route = (
+            self._py_router.route_auto
+            if getattr(self._py_router.rules, "fallback_bidirectional", False) is True
+            else self._py_router.route
+        )
+        route = _fallback_route(
             start,
             end,
             net_class=net_class,
@@ -4770,9 +4929,12 @@ class CppPathfinder:
         # falling back to the global rules.trace_width.
         net_trace_width = net_class.trace_width if net_class else self._rules.trace_width
         net_trace_clearance = net_class.clearance if net_class else self._rules.trace_clearance
-        trace_half_width_cells = max(
-            1,
-            int((net_trace_width / 2 + net_trace_clearance) / self._grid.resolution + 0.5),
+        # Issue #6994: scan the same guarded radius the search was blocked
+        # at.  The old round-to-nearest rule scanned one ring too few
+        # (Default rules @ 0.127 mm: 2 cells vs 3), so outer-ring nets that
+        # blocked the route were never offered for rip-up.
+        trace_half_width_cells = search_radius_cells(
+            net_trace_width / 2, net_trace_clearance, self._grid.resolution
         )
 
         while True:
@@ -4857,15 +5019,8 @@ class CppPathfinder:
         # Compute trace half-width in cells (mirrors pathfinder.py:117).
         # CppPathfinder doesn't currently cache _trace_half_width_cells,
         # so compute it here on demand.
-        trace_half_width_cells = max(
-            1,
-            math.ceil(
-                round(
-                    (self._rules.trace_width / 2 + self._rules.trace_clearance)
-                    / self._grid.resolution,
-                    6,
-                )
-            ),
+        trace_half_width_cells = search_radius_cells(
+            self._rules.trace_width / 2, self._rules.trace_clearance, self._grid.resolution
         )
 
         # _pad_blocked lookup requires the original Python RoutingGrid.
@@ -5139,10 +5294,14 @@ def sync_authored_floors(cpp_grid: CppGrid, py_grid: RoutingGrid) -> None:
             "Rebuild the native router (`kct build-native`): authored netclass "
             "clearance support (Issue #6243) is required"
         )
+    from .clearance_shapes import pad_kernel_params
+
     for index, pad in enumerate(py_grid._pads):
+        # Issue #6718: the same effective (shape, rratio) ``pad_shape`` uses.
+        shape, rratio = pad_kernel_params(pad)
         impl.set_pad_authored(
             index,
-            pad.shape,
+            shape,
             pad.width,
             pad.height,
             pad.rotation,
@@ -5150,6 +5309,7 @@ def sync_authored_floors(cpp_grid: CppGrid, py_grid: RoutingGrid) -> None:
             pad.y,
             pad.drill if pad.through_hole else 0.0,
             float(pad.authored_clearance),
+            rratio,
         )
     # Installs the floors and rebuilds the native index (or drops it when
     # nothing is active any more).
@@ -5289,8 +5449,8 @@ class CppCoupledPathfinder:
     path (Issue #4065 curator guidance: do NOT port ``_reconstruct``).
 
     v1 scope (deferred features stay on the Python fallback): this wrapper is
-    only used for the ``partner_aware`` heuristic with ``allow_swap_via`` off;
-    the Python caller checks those preconditions before dispatching here.
+    only used for the ``partner_aware`` heuristic; the Python caller checks
+    that precondition before dispatching here.
     """
 
     def __init__(
@@ -5329,6 +5489,13 @@ class CppCoupledPathfinder:
         # this issue wires up).  Marshalled here so a future coupled-attractor
         # port needs no additional plumbing.
         cpp_rules.cost_corridor_attractor = float(rules.cost_corridor_attractor)
+        # Issue #6840: the fab's via-in-pad capability, resolved exactly as the
+        # single-ended marshalling does, so the coupled via move can refuse a
+        # barrel drilled into an SMD pad (its endpoint waiver let one through).
+        cpp_rules.allow_smd_vias = _allow_smd_vias(rules)
+        # Issue #7296: the mask-dam floor, so the coupled via move refuses a
+        # drill edge within the fab's dam of an SMD pad.
+        cpp_rules.min_via_pad_edge_gap = float(getattr(rules, "min_via_pad_edge_gap", 0.0) or 0.0)
         self._impl = router_cpp.CoupledPathfinder(
             cpp_grid._impl,
             cpp_rules,
@@ -5351,6 +5518,20 @@ class CppCoupledPathfinder:
     def via_blocked(self, gx: int, gy: int, net: int) -> bool:
         """Probe the coupled via predicate (Issue #5410 parity testing)."""
         return bool(self._impl.via_blocked(gx, gy, net))
+
+    def set_partner_via_clearance(
+        self, p_trace_vs_n_via: float, n_trace_vs_p_via: float, via_vs_via: float
+    ) -> None:
+        """Install the via-aware partner clearance radii (Issue #6840).
+
+        All three are centre-to-centre distances in GRID CELLS (unrounded):
+        P centreline vs an N via, N centreline vs a P via, and P via vs N
+        via.  ``0`` disables a check.  See
+        :meth:`CoupledPathfinder._partner_via_radii_cells`.
+        """
+        self._impl.set_partner_via_clearance(
+            float(p_trace_vs_n_via), float(n_trace_vs_p_via), float(via_vs_via)
+        )
 
     def set_halo_net_dimensions(
         self,

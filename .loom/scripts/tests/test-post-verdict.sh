@@ -36,20 +36,6 @@ GUARD="$SCRIPTS_DIR/verdict-staleness-guard.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
 
-assert_not_contains() {
-  local haystack="$1" needle="$2" msg="$3"
-  TESTS_RUN=$((TESTS_RUN + 1))
-  if [[ "$haystack" != *"$needle"* ]]; then
-    TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "  ${GREEN}PASS${NC}: $msg"
-  else
-    TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "  ${RED}FAIL${NC}: $msg"
-    echo "    Unexpected substring: '$needle'"
-    echo "    In: '$haystack'"
-  fi
-}
-
 
 if [[ ! -x "$POST_VERDICT" ]]; then
   echo -e "${RED}FATAL${NC}: $POST_VERDICT not found or not executable" >&2
@@ -210,6 +196,9 @@ if [[ "${1:-}" == forge && "${2:-}" == verdict-* && "${3:-}" == --help ]]; then
   exit 0
 fi
 if [[ "${1:-}" == --version ]]; then echo "loom-daemon 0.19.870 (mock)"; exit 0; fi
+# #12475: the reconciliation gate reads comment verdicts through the trust
+# filter; this suite posts none, so the filter just echoes its (empty) stdin.
+if [[ "${1:-} ${2:-}" == "forge trusted-comments" ]]; then cat; exit 0; fi
 if [[ "${1:-} ${2:-}" == "forge verdict-gate" ]]; then
   printf '%s\n' "$*" >> "$D/daemon-calls.log"
   [[ -f "$D/gate-answer" ]] || { echo "LOOM-VERDICT-GATE PROCEED ok"; exit 0; }
@@ -233,7 +222,16 @@ if [[ "${1:-} ${2:-}" == "forge verdict-labels" ]]; then
   [[ -f "$D/labels-fail" ]] && { echo "forge verdict-labels: did not hold: missing loom:pr.  Repair: gh pr edit $3 --add-label loom:pr" >&2; exit 1; }
   echo "LOOM-VERDICT-LABELS OK"; exit 0
 fi
-echo "mock loom-daemon: forge comment not under test here" >&2
+# #9865: comments post only through the daemon; the mock lands them on the
+# suite's stub gh (as `gh issue comment`) so the call-log assertions still hold.
+if [[ "${1:-} ${2:-}" == "forge comment" ]]; then
+  _n="$3"; shift 3; _repo=""; _body=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in --repo) _repo="$2"; shift 2 ;; --body) _body="$2"; shift 2 ;; *) shift ;; esac
+  done
+  exec gh issue comment "$_n" --repo "$_repo" --body "$_body"
+fi
+echo "mock loom-daemon: unexpected invocation: $*" >&2
 exit 127
 MOCK
 chmod +x "$STUB_DIR/loom-daemon"
@@ -463,7 +461,15 @@ else
   for token in approved changes-requested; do
     reset_state
     run_pv 200 "$token" 0123456789abcdef0123456789abcdef01234567 --body "cross-check"
-    GUARD_REGEX="${GUARD_MARKER_TEMPLATE//\$VERDICT_TOKEN/$token}"
+    # The guard's reader accepts aliases ($VERDICT_ALT); mirror its mapping so
+    # the canonical writer output is checked against the alias-tolerant reader.
+    case "$token" in
+      approved) token_alt='approved|approve' ;;
+      changes-requested) token_alt='changes-requested|request-changes' ;;
+      *) token_alt="$token" ;;
+    esac
+    GUARD_REGEX="${GUARD_MARKER_TEMPLATE//\$VERDICT_ALT/$token_alt}"
+    GUARD_REGEX="${GUARD_REGEX//\$VERDICT_TOKEN/$token}"
     # -E (POSIX extended), not -P: the guard's own regex uses only portable
     # ERE syntax ([0-9a-f]{7,40}), and BSD grep (macOS) has no -P at all.
     if printf '%s' "$LAST_BODY" | grep -Eq -- "$GUARD_REGEX"; then

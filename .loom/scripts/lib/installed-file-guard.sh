@@ -312,14 +312,14 @@ loom_bash_write_targets() {
                 if (( started )); then toks+=("$tok"); tok=''; started=0; fi ;;
             $'\n'|';'|'&'|'|'|'('|')'|'{'|'}')
                 if (( started )); then toks+=("$tok"); tok=''; started=0; fi
-                toks+=($'\001SEP') ;;
+                toks+=($'\002SEP') ;;  # \002 not \001: bash 3.2 doubles a literal \001 (CTLESC) in array assignment (#12043)
             '<')
                 if (( started )); then toks+=("$tok"); tok=''; started=0; fi
-                toks+=($'\001IN') ;;
+                toks+=($'\002IN') ;;
             '>')
                 if (( started )); then toks+=("$tok"); tok=''; started=0; fi
                 while [[ "${s:i+1:1}" == '>' || "${s:i+1:1}" == '|' ]]; do (( i++ )); done
-                toks+=($'\001OUT') ;;
+                toks+=($'\002OUT') ;;
             *)
                 tok+="$c"; started=1 ;;
         esac
@@ -331,7 +331,7 @@ loom_bash_write_targets() {
     local -a args=()
     for t in ${toks[@]+"${toks[@]}"}; do
         case "$t" in
-            $'\001SEP')
+            $'\002SEP')
                 # End of a simple command: emit its idiom-specific targets.
                 case "$base" in
                     tee) for a in ${args[@]+"${args[@]}"}; do printf '%s\n' "$a"; done ;;
@@ -343,8 +343,8 @@ loom_bash_write_targets() {
                 esac
                 cmd=''; base=''; args=(); sed_inplace=0; pending=''
                 continue ;;
-            $'\001OUT') pending=out; continue ;;
-            $'\001IN')  pending=in;  continue ;;
+            $'\002OUT') pending=out; continue ;;
+            $'\002IN')  pending=in;  continue ;;
         esac
         if [[ "$pending" == out ]]; then printf '%s\n' "$t"; pending=''; continue; fi
         if [[ "$pending" == in ]];  then pending=''; continue; fi

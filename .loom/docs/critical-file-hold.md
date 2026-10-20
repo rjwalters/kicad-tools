@@ -64,7 +64,8 @@ only mean a human removed it.
 ## Why the release survives an equivalent head move (#9416)
 
 #9016 scoped the release to a head SHA. That was one step too literal: it made
-every tree-identical re-date push (#8248's freshness remedy, #8508) re-arm a hold
+every tree-identical re-date push (#8248's freshness remedy, #8508, retired by
+#12063) re-arm a hold
 the operator had already released on a byte-identical diff. #9348 paid that tax
 four times to land one PR on 2026-09-28.
 
@@ -92,8 +93,7 @@ Three properties are not negotiable, and the prompt restates each one:
    never an unreviewed merge. The re-arm notice quotes the verb's one-line
    reason (#10875), so "could not compare" is never mistaken for a real change.
 3. **The hold is what is exempted, never a check.** CI re-runs against the new
-   head regardless of which equivalence carried the release; the base really did
-   move, which is the whole point of the re-date remedy.
+   head regardless of which equivalence carried the release.
 
 The conservative arm is still needed for what evidence cannot settle: a push that
 really did change the diff between the operator's removal and the next tick.

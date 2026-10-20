@@ -58,6 +58,7 @@ from kicad_tools.router.quality_probe import (
     segment_records,
 )
 from kicad_tools.schema.pcb import Segment as SchemaSegment
+from tests.route_cli import route_args
 
 # ---------------------------------------------------------------------------
 # Scaffolding
@@ -388,7 +389,7 @@ def _inner_route_parser() -> argparse.ArgumentParser:
 
 
 class TestFlagDefinedInBothParsers:
-    """Guards the ``tests/test_cli_parser_drift.py`` inner/outer contract."""
+    """The flag is on the ``kct route`` parser (``route_cmd._route_parser``)."""
 
     def test_flag_on_inner_route_cmd_parser(self):
         args = _inner_route_parser().parse_args(["board.kicad_pcb", "--report-stage-quality"])
@@ -399,15 +400,11 @@ class TestFlagDefinedInBothParsers:
         assert args.report_stage_quality is False
 
     def test_flag_on_unified_parser(self):
-        from kicad_tools.cli.parser import create_parser
-
-        args = create_parser().parse_args(["route", "board.kicad_pcb", "--report-stage-quality"])
+        args = route_args(["board.kicad_pcb", "--report-stage-quality"])
         assert args.report_stage_quality is True
 
     def test_default_off_on_unified_parser(self):
-        from kicad_tools.cli.parser import create_parser
-
-        args = create_parser().parse_args(["route", "board.kicad_pcb"])
+        args = route_args(["board.kicad_pcb"])
         assert args.report_stage_quality is False
 
     def test_help_documents_it_as_advisory(self):
@@ -423,19 +420,16 @@ class TestFlagDefinedInBothParsers:
 
 
 def _dispatch(argv: list[str]) -> list[str]:
-    """Parse ``argv`` with the real outer parser; return the inner argv."""
-    from kicad_tools.cli.commands.routing import run_route_command
-    from kicad_tools.cli.parser import create_parser
+    """Run ``kct <argv>`` in-process; return the argv ``route_cmd.main`` got."""
+    from tests.route_cli import kct_route
 
-    args = create_parser().parse_args(argv)
-    with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-        mock_main.return_value = 0
-        run_route_command(args)
-        return list(mock_main.call_args[0][0])
+    assert argv[0] == "route"
+    forwarded, _ = kct_route(argv[1:])
+    return forwarded
 
 
 class TestDispatcherForwarding:
-    """``run_route_command`` forwards the flag only when it is set."""
+    """``kct route`` passes the flag through only when it is given."""
 
     def test_forwarded_when_set(self, tmp_path: Path):
         pcb = tmp_path / "board.kicad_pcb"
@@ -946,11 +940,11 @@ class TestRunConsolidationPassGating:
         assert "Consolidation:" not in capsys.readouterr().out
 
     def test_wired_into_every_route_output_path(self):
-        """All four ``kct route`` output paths must call the pass.
+        """All four ``kct route`` output paths must run the pass.
 
-        The optimize/nudge wire-in has historically been copy-pasted into
-        four places; a fifth caller that forgets it would silently ship
-        un-consolidated copper on the escalation paths.
+        The optimize/nudge wire-in used to be copy-pasted into four places;
+        Issue #7377 moved it into ``_run_post_route_pipeline``, so the pass
+        must live there and every output path must call that pipeline.
         """
         import inspect
 
@@ -959,13 +953,14 @@ class TestRunConsolidationPassGating:
         # The public entry now wraps placement/deadline finalization; keep
         # its delegation checked as well as each implementation call site.
         assert "_run_main_impl(args, parser, argv)" in inspect.getsource(route_cmd._main_impl)
+        assert "_run_consolidation_pass(" in inspect.getsource(route_cmd._run_post_route_pipeline)
         for fn in (
             route_cmd.route_with_layer_escalation,
             route_cmd.route_with_rule_relaxation,
             route_cmd.route_with_combined_escalation,
             route_cmd._run_main_impl,
         ):
-            assert "_run_consolidation_pass(" in inspect.getsource(fn), fn.__name__
+            assert "_run_post_route_pipeline(" in inspect.getsource(fn), fn.__name__
 
 
 # ---------------------------------------------------------------------------

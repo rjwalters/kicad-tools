@@ -74,6 +74,7 @@ __all__ = [
     "AuthoredViolation",
     "authored_violations",
     "pad_authored_floor",
+    "pad_label",
     "pair_floor",
 ]
 
@@ -116,6 +117,10 @@ class AuthoredViolation:
     required: float
     actual: float
     kind: str  # "pad" | "segment" | "via"
+    #: Issue #6670: a human name for the foreign copper (``"GND pad U2.G3"``).
+    #: A neutralised pour pad is ``net 0`` in the router, which hides both the
+    #: net whose class sets the floor and which pad it is; empty when unknown.
+    other_label: str = ""
 
 
 @dataclass(frozen=True)
@@ -127,6 +132,19 @@ class _Item:
     x: float
     y: float
     bbox: tuple[float, float, float, float]
+    label: str = ""
+
+
+def pad_label(pad: Pad) -> str:
+    """``"<net name> pad <REF>.<PAD>"`` for log lines (issue #6670).
+
+    Uses the pad's retained ``net_name``, so a pour pad neutralised to net 0
+    is still named by its real net (``GND pad U2.G3``).  Falls back to the
+    net id and omits the designator when the pad carries none.
+    """
+    name = pad.net_name or f"net {pad.net}"
+    ref = f" {pad.ref}.{pad.pin}" if pad.ref and pad.pin else (f" {pad.ref}" if pad.ref else "")
+    return f"{name} pad{ref}"
 
 
 def _seg_bbox(seg: Segment) -> tuple[float, float, float, float]:
@@ -181,6 +199,7 @@ class AuthoredCopperIndex:
                     pad.x,
                     pad.y,
                     _pad_bbox(pad),
+                    pad_label(pad),
                 )
             )
         self.add_routes(routes)
@@ -265,6 +284,7 @@ class AuthoredCopperIndex:
                     required,
                     copper_gap(shape, item.shape),
                     item.kind,
+                    item.label,
                 )
         return None
 

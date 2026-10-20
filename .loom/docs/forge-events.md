@@ -409,39 +409,56 @@ minutes, or at once after a `401`.
 
 ### 8.1 Discovery reads
 
-The work finder's candidate listings and the stage-dwell sampler's stage
-listings ask the mirror first: `GET /v1/mirror/items?repo=&label=&state=open`
-(every page, with bodies). The step engine's all-open listing (#11897) asks
-the same endpoint with no `label`; it is the only caller allowed to, and it
-stands in for the unfiltered ETag walk of every open item. Each item may
-carry `labels_at` (label → time applied), which the stage-entry provider
-reads first. The answer is used only when **every** page's
-watermark is fresh:
+Discovery reads the mirror once per step tick (§8.1.1). The per-listing mirror
+leg that used to precede each ETag-cached REST listing (`GET /v1/mirror/items`
+per label, per repo, per caller, with a two-minute stale hold and a 60-second
+error back-off) was removed in #12307: a configuration that selected it
+(`forge.mirror.discovery = "per_call"`, formerly the default) is accepted and
+now lists per repo exactly as `"direct"` does.
 
-- the mirror knows the repo, it has not moved, and it has completed at least
-  one reconcile (before that its holdings may be only what webhooks named);
-- the newest of `last_event_at` and `last_reconciled_at` is within
-  `maxStalenessSecs` of `served_at`;
-- `served_at` is within `maxStalenessSecs` of the host's clock.
+The tick's one snapshot also feeds the other loops that used to list the forge
+on their own, so on `"worklist"` they make no listing of their own: the
+blocked-queue gauge (`loom:blocked` rows), quarantine reconciliation's blocked
+set and claim reconciliation's open-PR listing. A repo the snapshot has not
+read is a failed listing for them, never an empty one, and a stale repo is
+served as it is: what those loops write stays gated on live reads of their own
+(the per-issue comment and timeline scans, a PR's mergeability and state).
+Discovery forge reads per tick are 0 in this mode (`loom.discovery.forge_reads`
+on the tick span).
 
-Anything else (stale, unknown, never reconciled, moved, an error, a timeout,
-a malformed answer) reads the listing exactly as before, through the
-ETag-cached REST path and the gateway when one is set. A stale or unknown
-repo is not asked again for two minutes, or until the change stream reports
-a change for it, and after any failed request no
-listing asks the mirror for 60 seconds, so a down mirror costs one bounded
-wait, not one per listing. A listing never fails, and never reads as an
-empty queue, because of the mirror.
-
-An idle repo whose last event and reconcile are both older than the bound
-falls back. That costs little: an unchanged REST listing is a `304`. The
-mirror's saving is on active repos, where every host used to pay its own
-`200` for the same change.
+An idle repo whose last event and reconcile are both older than
+`maxStalenessSecs` is served anyway and counted in `loom.discovery.stale_repos`.
 
 **Decision reads never come from the mirror.** Claim, label-transition and
 merge reads stay on their current path (the poll gate's invariant 3: reads
-that gate a decision are never held). The mirror's listing answers only discovery reads, and a source
-test pins its three call sites.
+that gate a decision are never held). A source test pins the modules that name
+the mirror or the snapshot.
+
+### 8.1.1 The worklist and the discovery chain (`forge.mirror.discovery`, #12311)
+
+`"worklist"` is **one read per step tick**: `GET /v1/mirror/worklist`, which returns, per repo, a `status`
+(`ok` | `unknown` | `backfilling` | `error`), the watermark, and every open
+issue and PR with the fields discovery uses. It is ETagged, so an unchanged
+fleet costs a `304`; the daemon keeps one in-memory `(etag, body)`, replaced
+every tick, dropped on restart, never persisted and never merged with the
+change stream.
+
+The daemon walks a chain from the first tier and records the tier that
+answered (`loom.discovery.tier`):
+
+| Tier | Used when | How |
+|---|---|---|
+| `mirror` | first | the worklist, for every repo whose `status` is `ok` |
+| `gateway` | the request failed, or a repo's `status` is not `ok` | the direct per-repo listing through the read gateway; only the repos the mirror could not answer for |
+| `gh` | standalone always; on the fleet when the gateway also fails | the same listing with the installation's credential |
+| `none` | every configured tier failed | no draw from that repo this tick; running sessions are unaffected |
+
+No `forge.mirror` block means the chain is `gh` alone; `"direct"` skips the
+mirror (break-glass). On the fleet the fallback tiers are outage modes and
+are capped: a repo is listed at most once per work-finder interval and drawn
+from its last listing in between; a gateway reserve refusal ends the tick's
+discovery without tripping the rate-limit breaker; and there is no writer
+tier. Claim, label-transition and merge reads never read the snapshot.
 
 ### 8.2 Wakes
 
@@ -478,7 +495,7 @@ have to be enabled.
   mirror to the pull that saw it; divide by `changes` for the mean).
 
 That discovery no longer reaches GitHub shows as `loom.forge.calls` for
-`caller` `work_finder` and `stage_dwell` falling while `reads{outcome=hit}`
+`caller` `work_finder` falling while `reads{outcome=hit}`
 rises.
 
 **Break-glass.** Unset `forge.mirror`. Within a minute no listing asks the

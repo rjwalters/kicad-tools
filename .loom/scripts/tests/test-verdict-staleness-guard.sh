@@ -415,6 +415,16 @@ assert_eq "0" "$RC" "(b) Marker SHA == head SHA -> exit 0"
 assert_eq "FRESH" "$(get_field "$OUT" DECISION)" "(b) DECISION=FRESH"
 assert_eq "$SHA_A" "$(get_field "$OUT" MARKER_SHA)" "(b) MARKER_SHA reported"
 
+# (b1) Lenient reader: a hand-posted `verdict=approve` marker (not the canonical
+#      `approved`) must still be read, not treated as no verdict (#12104).
+reset_state
+pr_json 200 "$SHA_A" "loom:pr"
+{ echo "["; verdict_comment "2026-08-08T02:22:00Z" "$SHA_A" "approve"; echo "]"; } > "$STUB_DIR/comments-200.json"
+run_guard 200
+assert_eq "0" "$RC" "(b1) verdict=approve marker, SHA == head -> exit 0"
+assert_eq "FRESH" "$(get_field "$OUT" DECISION)" "(b1) DECISION=FRESH"
+assert_eq "$SHA_A" "$(get_field "$OUT" MARKER_SHA)" "(b1) MARKER_SHA reported"
+
 # (b2) Regression: an unchanged-head PR must never be re-queued, even with
 #      --clear (no spurious label writes on ordinary re-runs / comment-only
 #      activity).

@@ -16,7 +16,7 @@ board 03's `USB_D+`, with J1, R4 and U2, gets 19.05 mm). A limit that is an
 `uncited` table value is a warning. The finding names its source.
 
 ```bash
-kct check board.kicad_pcb --rules=diffpair_uncoupled_length
+kct check board.kicad_pcb --only diffpair_uncoupled_length
 ```
 
 How KiCad measures, and so how kct does (pinned on kicad-cli 10.0.6 by
@@ -28,32 +28,32 @@ How KiCad measures, and so how kct does (pinned on kicad-cli 10.0.6 by
 | What is coupled? | The projected overlap of a P segment and an N segment on one layer that are parallel (anti-parallel too) to within about 0.01° (0.02° is already uncoupled), **unless copper stands between them where the overlap starts** (see "How pairs are formed"). |
 | Distance limit? | None, unless a `diff_pair_gap (max ..)` is present. kct emits only `(min ..)`, so two parallel runs 10 mm apart are coupled. |
 | Via barrels? | Not counted. Vias that sit side by side cost nothing; offset vias cost only the track copper left without a partner. |
+| Tuning patterns? | Tracks that are `members` of a `(generated ... (type tuning_pattern))` object are dropped on **both** sides: they are not uncoupled copper of their own net, and the other net does not couple to them. So the partner's copper opposite a skew bump still counts (Issue #7521, operator ruling Q16). Under the min-only gap rules kct writes, a pattern can therefore read *higher* than the same bump as plain copper: a 45-degree bump with a 1.8 mm base reads 1.13 mm plain and 1.8 mm as a pattern, in both engines. |
 
 ### How pairs are formed
 
-Issue #6554. KiCad pairs primitives; kct matches it (to 1 µm on every
-committed pair and pinned probe) with a rule inferred from black-box probes:
+Issue #6554. kct's pairing rule is inferred **only from black-box kicad-cli
+probes** (input boards and output figures); it matches every committed board:
 
 * Each parallel same-layer P/N segment pair couples over its overlap, and the
   pairs are **summed**, not unioned (a net can read negative; kct clamps at 0).
-* A pair does **not** couple at all when other copper (a track of any net, a
-  via or a pad, at any distance) crosses the straight line between the traces
-  at the **start of their overlap**; copper overlapping either trace does not
-  block, nor does copper starting later (an N stub at 3 to 8 mm on a 0 to 16 mm
-  run leaves it coupled; one at 0 to 5 mm uncouples it all).
-* "Start" follows the **P trace's stored direction**: P stored 20 → 0 anchors
-  at x = 20. N's and the blocker's direction are irrelevant.
-* A trace lying wholly inside a pad of its own net is not paired; board 06's
-  two buried stubs (0.125 and 0.2 mm) are KiCad's whole extra 0.325 mm.
+* A pair does **not** couple when other copper (any net's track, a via or a
+  pad, at any distance) crosses the line between the traces at the **start of
+  their overlap**; copper overlapping either trace, or starting later, does not.
+* "Start" follows the **P trace's stored direction** (P stored 20 → 0 anchors
+  at x = 20). A trace wholly inside a pad of its own net is not paired.
 
 ### Known divergences
 
-* **Third-net copper overlapping a pair trace** (a short) and a **third-net pad
-  over a trace** are paired by KiCad in ways kct does not model; neither occurs
-  on a routed pair. kct models every pad as its (rotated) rectangle.
-* **Arcs** are not measured by kct.
-* **Meanders:** KiCad's `diff_pair_uncoupled` is known to misreport on them; the
-  first fixture belongs to the length-tuning phase (#6447).
+* **Board 06's regression fixture:** kct reads 4 of 9 pairs 0.07 to 0.21 mm
+  below kicad-cli (USB2_D 8.423 vs 8.573 mm), and three probes with copper
+  touching a trace or a pad edge differ (strict xfails in the 6443 test). A
+  pair that close to its limit can pass kct and fail kicad-cli. Issue #7565.
+* **Third-net copper overlapping a pair trace** (a short) is not modelled; kct
+  models every pad as its (rotated) rectangle. **Arcs** are not measured.
+* **Meanders as plain copper:** KiCad can read a router trombone higher than
+  kct (`tests/test_uncoupled_tuning_pattern_7521.py`), so the skew tuner writes
+  every bump as a tuning pattern, which both engines measure alike.
 
 ### The per-terminal figure (kct-only)
 
@@ -75,7 +75,7 @@ the net) to `max_uncoupled_per_terminal_mm`, counting only uncoupled copper
   With `"none"` the per-terminal figures sum to the net's total.
 * **Severity** follows the per-terminal limit's source (class or cited:
   `error`; `uncited`: `warning`). A net with no pads has no figure. Board 03's
-  worst terminal is U2 on `USB_D+`, 1.959 mm against 6.35 mm.
+  worst terminal is U2 on `USB_D+`, 2.095 mm against 6.35 mm.
 
 ### Pairs KiCad does not recognise by name
 

@@ -233,6 +233,27 @@ _POWER_RAIL_DOT_DECIMAL_RE = re.compile(r"^([+\-])(\d+)\.(\d+)V$")
 _POWER_RAIL_WHOLE_RE = re.compile(r"^([+\-])(\d+)V$")
 
 
+def iter_copper_pads(pcb: PCB) -> Iterator[tuple[Footprint, Pad]]:
+    """Yield ``(footprint, pad)`` for every pad that can carry a net.
+
+    Non-plated holes (``np_thru_hole``) have no copper and never sit on a
+    net, so they are skipped.  Shared by ``kct validate --sync`` and
+    ``kct fleet status`` so both read pad nets through the schema parser,
+    which understands the numbered ``(net N "name")`` and the KiCad 10
+    name-only ``(net "name")`` dialects alike (issue #6815).
+    """
+    for fp in pcb.footprints:
+        for pad in fp.pads:
+            if pad.type == "np_thru_hole":
+                continue
+            yield fp, pad
+
+
+def pad_net_names(pcb: PCB) -> set[str]:
+    """Return the set of non-empty net names attached to copper pads."""
+    return {pad.net_name for _fp, pad in iter_copper_pads(pcb) if pad.net_name}
+
+
 def canonicalize_power_net(name: str) -> str:
     """Return the canonical form of a power-rail net name.
 
@@ -683,6 +704,126 @@ def _transform_zone_object(zone: Zone, mapper, flip_layers: bool) -> None:
         zone.filled_polygon_layers = [_flip_side_layer(name) for name in zone.filled_polygon_layers]
 
 
+# Pad fields whose assignment is mirrored into the backing ``(pad ...)`` node
+# (issue #4518/#4560 for the first three, issue #7479 for the rest).  Every
+# other public ``Pad`` field is dataclass-only; :meth:`PCB.save` refuses to
+# write a board where such a field no longer matches its node.
+_PAD_WRITE_THROUGH_FIELDS = frozenset(
+    {
+        "rotation",
+        "position",
+        "layers",
+        "size",
+        "drill",
+        "drill_size",
+        "drill_offset",
+        "shape",
+        "roundrect_rratio",
+        "solder_mask_margin",
+        "zone_connect",
+    }
+)
+
+# Where a freshly created pad child goes: after the first of these that exists.
+_PAD_CHILD_AFTER: dict[str, tuple[str, ...]] = {
+    "size": ("at",),
+    "drill": ("size", "at"),
+    "roundrect_rratio": ("layers", "drill", "size", "at"),
+    "solder_mask_margin": ("pinfunction", "pintype", "net", "roundrect_rratio", "layers"),
+    "zone_connect": (
+        "solder_mask_margin",
+        "pinfunction",
+        "pintype",
+        "net",
+        "roundrect_rratio",
+        "layers",
+    ),
+}
+
+
+def _insert_pad_child(pad_node: SExp, new: SExp) -> None:
+    """Insert ``new`` into a ``(pad ...)`` node in KiCad's usual token order."""
+    for tag in _PAD_CHILD_AFTER.get(new.name or "", ()):
+        anchor = pad_node.find_child(tag)
+        if anchor is None:
+            continue
+        for idx, child in enumerate(pad_node.children):
+            if child is anchor:
+                pad_node.children.insert(idx + 1, new)
+                return
+    pad_node.children.append(new)
+
+
+def _set_float_at(node: SExp, index: int, value: float) -> None:
+    """``set_value`` that leaves an already-equal token (and its formatting) alone."""
+    current = node.get_float(index)
+    if current is not None and (current == value or (current != current and value != value)):
+        return
+    node.set_value(index, float(value))
+
+
+def _write_pad_drill_through(pad: Pad, sexp_node: SExp, name: str, value: object) -> None:
+    """Mirror ``drill`` / ``drill_size`` / ``drill_offset`` into ``(drill ...)``."""
+    drill_node = sexp_node.find_child("drill")
+    is_oval = drill_node is not None and drill_node.get_string(0) == "oval"
+
+    if name == "drill":
+        if drill_node is None:
+            if float(value) != 0.0:  # type: ignore[arg-type]
+                _insert_pad_child(sexp_node, SExp.list("drill", float(value)))  # type: ignore[arg-type]
+        else:
+            _set_float_at(drill_node, 0, float(value))  # type: ignore[arg-type]
+
+    elif name == "drill_size":
+        if value is None:
+            return
+        w, h = cast("tuple[float, float]", value)
+        if drill_node is None:
+            _insert_pad_child(sexp_node, SExp.list("drill", SExp.atom("oval"), w, h))
+        elif is_oval:
+            _set_float_at(drill_node, 1, float(w))
+            _set_float_at(drill_node, 2, float(h))
+        else:
+            # Round hole -> slot: ``(drill D)`` becomes ``(drill oval W H)``;
+            # a nested ``(offset ...)`` stays where it was.
+            drill_node.children[0:1] = [SExp.atom("oval"), SExp.atom(float(w)), SExp.atom(float(h))]
+            object.__setattr__(pad, "drill", 0.0)
+
+    elif name == "drill_offset":
+        dx, dy = cast("tuple[float, float]", value)
+        offset_node = drill_node.find_child("offset") if drill_node is not None else None
+        if offset_node is None and (dx, dy) == (0.0, 0.0):
+            return
+        if drill_node is None:
+            if pad.drill_size is not None:
+                drill_node = SExp.list("drill", SExp.atom("oval"), *pad.drill_size)
+            else:
+                drill_node = SExp.list("drill", float(pad.drill))
+            _insert_pad_child(sexp_node, drill_node)
+        if offset_node is None:
+            drill_node.append(SExp.list("offset", float(dx), float(dy)))
+        else:
+            _set_float_at(offset_node, 0, float(dx))
+            _set_float_at(offset_node, 1, float(dy))
+
+
+def _write_pad_optional_through(sexp_node: SExp, tag: str, value: object) -> None:
+    """Mirror a single-value optional pad token, creating or removing the node."""
+    node = sexp_node.find_child(tag)
+    if value is None:
+        if node is not None:
+            sexp_node.remove_child(tag)
+        return
+    if node is None:
+        new_value = int(value) if tag == "zone_connect" else float(value)  # type: ignore[call-overload,arg-type]
+        _insert_pad_child(sexp_node, SExp.list(tag, new_value))
+    elif tag == "zone_connect":
+        if node.get_int(0) != int(value):  # type: ignore[call-overload]
+            node.set_value(0, int(value))  # type: ignore[call-overload]
+    else:
+        _set_float_at(node, 0, float(value))  # type: ignore[arg-type]
+
+
 @dataclass
 class Pad:
     """Component pad."""
@@ -697,6 +838,11 @@ class Pad:
     net_name: str = ""
     drill: float = 0.0
     solder_mask_margin: float | None = None
+    # Per-pad zone connection override from ``(zone_connect N)``: 0 = none,
+    # 1 = thermal reliefs, 2 = solid, 3 = thermal reliefs for THT only.
+    # ``None`` when absent (the pad inherits its zone's ``connect_pads``).
+    # Read-only; ``thermal_asymmetry`` resolves the effective mode (#7220).
+    zone_connect: int | None = None
     uuid: str = ""
     # Per-pad rotation in degrees (the optional third token of ``(at x y angle)``).
     # KiCad stores this angle in the ABSOLUTE board frame -- it already includes
@@ -731,6 +877,21 @@ class Pad:
     pinfunction: str = ""
 
     def __setattr__(self, name: str, value: object) -> None:
+        # An oval hole has no single diameter: refuse *before* storing so the
+        # Python value and the tree cannot diverge (issue #7479).
+        if name == "drill":
+            node: SExp | None = self.__dict__.get("_sexp_node")
+            drill_child = node.find_child("drill") if node is not None else None
+            if (
+                drill_child is not None
+                and drill_child.get_string(0) == "oval"
+                and float(value) != self.__dict__.get("drill", 0.0)  # type: ignore[arg-type]
+            ):
+                raise ValueError(
+                    "Pad.drill cannot be set on an oval-drill pad; "
+                    "assign Pad.drill_size = (width, height) instead"
+                )
+
         # Store the Python value first via the default mechanism.
         super().__setattr__(name, value)
 
@@ -739,11 +900,14 @@ class Pad:
         # write-through to the fields a mirror/layer-flip mutates -- before
         # that, assigning ``pad.position`` or ``pad.layers`` updated the
         # dataclass but silently never reached ``PCB.save``, so a flipped
-        # board would have saved half-flipped with no error signal).  During
-        # ``__init__`` (and for pads never linked to a node, e.g. freshly
-        # instantiated library pads or test doubles) ``_sexp_node`` is None and
-        # this is a no-op -- matching ``Footprint.__setattr__``'s guard.
-        if name not in ("rotation", "position", "layers"):
+        # board would have saved half-flipped with no error signal).  Issue
+        # #7479 adds the geometry/fab fields (``size``, ``drill*``, ``shape``,
+        # ``roundrect_rratio``, ``solder_mask_margin``, ``zone_connect``).
+        # During ``__init__`` (and for pads never linked to a node, e.g.
+        # freshly instantiated library pads or test doubles) ``_sexp_node`` is
+        # None and this is a no-op -- matching ``Footprint.__setattr__``'s
+        # guard.
+        if name not in _PAD_WRITE_THROUGH_FIELDS:
             return
         sexp_node: SExp | None = self.__dict__.get("_sexp_node")
         if sexp_node is None:
@@ -777,6 +941,25 @@ class Pad:
                     SExp.quoted_atom(str(layer_name))
                     for layer_name in value  # type: ignore[attr-defined]
                 ]
+
+        elif name == "size":
+            w, h = cast("tuple[float, float]", value)
+            size_node = sexp_node.find_child("size")
+            if size_node is None:
+                _insert_pad_child(sexp_node, SExp.list("size", float(w), float(h)))
+            else:
+                _set_float_at(size_node, 0, float(w))
+                _set_float_at(size_node, 1, float(h))
+
+        elif name in ("drill", "drill_size", "drill_offset"):
+            _write_pad_drill_through(self, sexp_node, name, value)
+
+        elif name == "shape":
+            if sexp_node.get_string(2) != value:
+                sexp_node.set_value(2, str(value))
+
+        elif name in ("roundrect_rratio", "solder_mask_margin", "zone_connect"):
+            _write_pad_optional_through(sexp_node, name, value)
 
     @property
     def net(self) -> int:
@@ -851,6 +1034,10 @@ class Pad:
         # Solder mask margin (per-pad override)
         if mask_margin := sexp.find("solder_mask_margin"):
             pad.solder_mask_margin = mask_margin.get_float(0)
+
+        # Per-pad zone connection override (issue #7220)
+        if zone_connect := sexp.find_child("zone_connect"):
+            pad.zone_connect = zone_connect.get_int(0)
 
         # UUID
         if uuid := sexp.find("uuid"):
@@ -1376,6 +1563,14 @@ class Footprint:
             # don't drop tokens the parser doesn't yet model.
             self._sync_attr_node()
 
+    @property
+    def sheet_position(self) -> tuple[float, float]:
+        """Footprint origin in sheet-absolute coordinates (Y down), as stored
+        in the ``(at ...)`` node -- ``position`` plus the board origin."""
+        ox, oy = self.__dict__.get("_board_origin", (0.0, 0.0))
+        x, y = self.position
+        return (x + ox, y + oy)
+
     def _placement_frame(self) -> _FootprintFrame | None:
         """Board-relative ``(x, y, rotation, is_back)``; None before init."""
         state = self.__dict__
@@ -1453,6 +1648,26 @@ class Footprint:
         if sexp_node is None:
             return 0
         return keep_footprint_texts_upright(sexp_node)
+
+    @property
+    def attr_flags(self) -> frozenset[str]:
+        """Every flag token in the footprint's ``(attr ...)`` block (Issue #7204).
+
+        Covers the modeled flags (``exclude_from_pos_files``,
+        ``exclude_from_bom``, ``dnp``) and the ones kept verbatim but not
+        modeled (``board_only``, ``allow_missing_courtyard``,
+        ``allow_soldermask_bridges``, ...).  The footprint type (``smd`` /
+        ``through_hole``) is :attr:`attr`, not a flag.
+        """
+        flags = set(self.__dict__.get("_attr_unknown_tokens", []) or [])
+        if self.exclude_from_pos_files:
+            flags.add("exclude_from_pos_files")
+        if self.exclude_from_bom:
+            flags.add("exclude_from_bom")
+        if self.dnp:
+            flags.add("dnp")
+        flags.discard("locked")
+        return frozenset(flags)
 
     def _sync_attr_node(self) -> None:
         """Rebuild the ``(attr ...)`` child of ``_sexp_node`` from Python state.
@@ -6136,6 +6351,7 @@ class PCB:
         rotation: float = 0.0,
         layer: str = "F.Cu",
         value: str = "",
+        library_id: str | None = None,
     ) -> Footprint:
         """
         Add a footprint from a .kicad_mod file to the PCB.
@@ -6157,6 +6373,9 @@ class PCB:
             rotation: Rotation angle in degrees (default: 0)
             layer: Layer to place footprint on ("F.Cu" or "B.Cu", default: "F.Cu")
             value: Component value (e.g., "100nF", "10k")
+            library_id: Optional ``Library:Footprint`` lib ID to write as the
+                placed footprint's name. Defaults to the file's own name,
+                which is bare (no library nickname) for ``.kicad_mod`` files.
 
         Returns:
             The Footprint object that was added to the PCB
@@ -6178,6 +6397,11 @@ class PCB:
         """
         # Load the footprint from file
         fp_sexp = load_footprint(kicad_mod_path)
+
+        # Keep the Library:Footprint lib ID so kicad-cli's schematic-parity
+        # check can match it against the symbol's Footprint field (#7213).
+        if library_id:
+            fp_sexp.set_value(0, library_id)
 
         # Deterministic UUID for this footprint instance (Issue #6076)
         new_uuid = self.mint_uuid("footprint", reference)
@@ -6460,6 +6684,7 @@ class PCB:
                             rotation=rotation,
                             layer=layer,
                             value=value,
+                            library_id=f"{library_name}:{footprint_name.removesuffix('.kicad_mod')}",
                         )
                     break
 
@@ -6489,6 +6714,7 @@ class PCB:
             rotation=rotation,
             layer=layer,
             value=value,
+            library_id=f"{library_name}:{footprint_name.removesuffix('.kicad_mod')}",
         )
 
     def add_net(self, net_name: str) -> Net:
@@ -7867,6 +8093,76 @@ class PCB:
             "segments_boundary_skipped": boundary_skipped_segments,
         }
 
+    def _unpersisted_edits(self) -> list[str]:
+        """List ``ref/pad.field`` edits that ``save()`` would silently drop.
+
+        ``save()`` serialises the S-expression tree, so a ``Pad``/``Footprint``
+        field with no write-through only changes the Python object.  Re-parse
+        each linked node and report the identity/net fields that no longer
+        match it (issue #7479).  The supported mutators
+        (``update_footprint_reference`` and friends) edit the node as well, so
+        they never show up here; in-memory-only edits stay legal until saved.
+        """
+        problems: list[str] = []
+        for fp in self._footprints:
+            fp_node = fp.__dict__.get("_sexp_node")
+            if fp_node is None:
+                continue
+            ref = fp.reference or fp.name or "?"
+            node_fp = Footprint.from_sexp(fp_node)
+            for fname in ("name", "reference", "value", "description", "tags", "uuid"):
+                if getattr(fp, fname) != getattr(node_fp, fname):
+                    problems.append(f"{ref}.{fname}")
+            if fp.properties != node_fp.properties:
+                changed = sorted(
+                    k
+                    for k in fp.properties.keys() | node_fp.properties.keys()
+                    if fp.properties.get(k) != node_fp.properties.get(k)
+                )
+                problems.extend(f"{ref}.properties[{k!r}]" for k in changed)
+            pad_nodes = fp_node.find_all("pad")
+            if len(fp.pads) != len(pad_nodes):
+                problems.append(f"{ref}.pads ({len(fp.pads)} in memory, {len(pad_nodes)} in file)")
+                continue
+            for pad in fp.pads:
+                pad_node = pad.__dict__.get("_sexp_node")
+                if pad_node is None:
+                    problems.append(f"{ref}/pad {pad.number}: not linked to the board")
+                    continue
+                node_pad = Pad.from_sexp(pad_node)
+                if node_pad is None:
+                    continue
+                fields = ["number", "type", "uuid", "pintype", "pinfunction"]
+                net_node = pad_node.find_child("net")
+                # Number-only ``(net N)`` pads get ``net_name`` filled in memory
+                # by ``_fixup_net_numbers``; only a node with a name atom can
+                # disagree (issue #7519).
+                name_idx = 0 if net_node is None or net_node.get_int(0) is None else 1
+                if net_node is None or net_node.get_string(name_idx) is not None:
+                    fields.append("net_name")
+                # Name-only ``(net "X")`` pads get ``net_number`` filled in memory
+                # by ``_fixup_net_numbers``; only a numbered node can disagree.
+                if net_node is not None and net_node.get_int(0) is not None:
+                    fields.append("net_number")
+                for fname in fields:
+                    if getattr(pad, fname) != getattr(node_pad, fname):
+                        problems.append(f"{ref}/pad {node_pad.number}.{fname}")
+        return problems
+
+    def _check_no_unpersisted_edits(self) -> None:
+        problems = self._unpersisted_edits()
+        if problems:
+            raise ValueError(
+                "PCB.save() would silently drop edits that are not mirrored into the "
+                "S-expression tree (nothing was written): "
+                + ", ".join(problems)
+                + ". Use the supported API instead: update_footprint_reference(), "
+                "update_footprint_value() or assign_net_to_footprint_pad(); "
+                "Pad.size/drill/drill_size/drill_offset/shape/roundrect_rratio/"
+                "solder_mask_margin/zone_connect and Footprint.position/rotation/layer "
+                "write through."
+            )
+
     def save(self, path: str | Path | None = None) -> None:
         """
         Save the PCB to a file.
@@ -7876,8 +8172,12 @@ class PCB:
                   path from load() or the last save location.
 
         Raises:
-            ValueError: If no path provided and PCB has no stored path
+            ValueError: If no path provided and PCB has no stored path, or if
+                a ``Pad``/``Footprint`` field that is not mirrored into the
+                S-expression tree was edited directly (issue #7479); nothing
+                is written in that case.
         """
+        self._check_no_unpersisted_edits()
         if path is None:
             if self._path is None:
                 raise ValueError(
@@ -7901,23 +8201,33 @@ class PCB:
         *,
         manufacturer: str = "jlcpcb",
         layers: list[str] | None = None,
-        include_drill: bool = True,
-        create_zip: bool = False,
+        include_drill: bool | None = None,
+        create_zip: bool | None = None,
     ) -> Path:
         """
         Export Gerber files for PCB fabrication.
 
         Uses kicad-cli to generate Gerber files with manufacturer-specific settings.
 
+        Every argument is honoured for every manufacturer (Issue #7023). For the
+        presets (``"jlcpcb"``, ``"pcbway"``, ``"oshpark"``) the preset supplies the
+        defaults and an explicitly passed argument overrides it.
+
         Args:
             output_dir: Directory for output files
-            manufacturer: Manufacturer preset ("jlcpcb", "pcbway", "oshpark")
-            layers: Specific layers to export (default: all copper + required layers)
-            include_drill: Include drill files (default: True)
-            create_zip: Create a zip archive of all files (default: False)
+            manufacturer: Manufacturer preset ("jlcpcb", "pcbway", "oshpark") or
+                any other name for a generic export
+            layers: Specific layers to export, passed verbatim to kicad-cli
+                (default: all copper + required layers). A list without
+                ``Edge.Cuts`` logs a warning.
+            include_drill: Include drill files (default when omitted: True)
+            create_zip: Create a zip archive of all files. When omitted, presets
+                return a ready-to-upload zip (loose files removed) and the
+                generic path returns the directory. ``False`` always returns
+                the directory with loose files; ``True`` always returns a zip.
 
         Returns:
-            Path to output directory (or zip file if create_zip=True)
+            Path to the zip file when zipping, otherwise the output directory
 
         Raises:
             ValueError: If PCB has no stored path (save first)
@@ -7925,9 +8235,9 @@ class PCB:
 
         Example:
             >>> pcb = PCB.load("board.kicad_pcb")
-            >>> pcb.export_gerbers("./gerbers", manufacturer="jlcpcb")
-            >>> # Or with zip output
-            >>> pcb.export_gerbers("./output", manufacturer="jlcpcb", create_zip=True)
+            >>> pcb.export_gerbers("./output", manufacturer="jlcpcb")  # -> zip
+            >>> # Loose files instead of a zip
+            >>> pcb.export_gerbers("./gerbers", manufacturer="jlcpcb", create_zip=False)
         """
         from ..export import GerberConfig, GerberExporter
 
@@ -7939,13 +8249,16 @@ class PCB:
             result = exporter.export_for_manufacturer(
                 manufacturer.lower(),
                 output_dir,
+                layers=layers,
+                generate_drill=include_drill,
+                create_zip=create_zip,
             )
         else:
             config = GerberConfig(
                 output_dir=Path(output_dir),
                 layers=layers or [],
-                generate_drill=include_drill,
-                create_zip=create_zip,
+                generate_drill=True if include_drill is None else include_drill,
+                create_zip=False if create_zip is None else create_zip,
             )
             result = exporter.export(config, output_dir)
 
@@ -8096,6 +8409,7 @@ class PCB:
             >>> pcb.export_placement("cpl_jlcpcb.csv", format="jlcpcb")
         """
         from ..export import export_pnp as _export_pnp
+        from ..export.pnp import _aux_origin_of
 
         footprints = list(self.footprints)
 
@@ -8112,8 +8426,8 @@ class PCB:
         # Pass config=None so the formatter resolves the effective config —
         # the single source of truth (issues #3616/#3618).  Synthesizing a
         # bare PnPExportConfig() here would defeat manufacturer defaults such
-        # as JLCPCB's exclude_tht=True, shipping THT rows in the CPL.
-        pnp_csv = _export_pnp(footprints, mfr, config=None)
+        # as a fab-specific exclude_tht default.
+        pnp_csv = _export_pnp(footprints, mfr, config=None, aux_origin=_aux_origin_of(self.setup))
 
         # Write to file
         output_path = Path(output)
@@ -8235,7 +8549,8 @@ class PCB:
         Export Gerbers and drill files as a single zip archive.
 
         Convenience method for quick export of fabrication files ready
-        for upload to PCB manufacturers.
+        for upload to PCB manufacturers. The archive holds the Gerber and
+        drill files directly at its root (no nested ``gerbers.zip``).
 
         Args:
             output: Output zip file path
@@ -8260,7 +8575,14 @@ class PCB:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             exporter = GerberExporter(pcb_path)
-            exporter.export_for_manufacturer(manufacturer.lower(), temp_path)
+            # Loose files only: the preset would otherwise zip and clean the
+            # temp dir, nesting its gerbers.zip inside ours (Issue #7023).
+            exporter.export_for_manufacturer(
+                manufacturer.lower(),
+                temp_path,
+                generate_drill=include_drill,
+                create_zip=False,
+            )
 
             # Create zip
             import zipfile

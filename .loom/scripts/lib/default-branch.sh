@@ -140,19 +140,18 @@ loom_default_branch() {
 # the failure mode here is code execution, not a malformed ref. Legitimate Loom
 # branch names — `main`, `feature/issue-42`, `hotfix/x.y`, `a-b_c.d` — all pass.
 check_branch_name() {
-    # `local LC_ALL=C` is load-bearing, not tidiness. Bracket ranges in a bash
-    # `[[ =~ ]]` are resolved by the CURRENT locale's collation, so under the
-    # UTF-8 locale a fleet host normally runs, `[[ "ábc" =~ ^[A-Za-z0-9]+$ ]]`
-    # MATCHES — the allowlist silently stops being ASCII-only and drifts away
-    # from the Rust half (`refname::check_refname`, which uses
-    # `is_ascii_alphanumeric` and has a `rejects_non_ascii` test). Forcing the C
-    # locale makes the match byte-wise, so both halves accept exactly the same
-    # set on every host. Bash restores the previous value when the function
-    # returns, so no caller's locale is disturbed.
-    local LC_ALL=C name="${1-}" what="${2:-branch name}" why=""
+    # The allowlist is spelled out as an explicit character list, NOT bracket
+    # ranges, on purpose. Ranges in a bash `[[ =~ ]]` are resolved by the CURRENT
+    # locale's collation, so under a UTF-8 locale `[[ "ábc" =~ ^[A-Za-z0-9]+$ ]]`
+    # MATCHES and the allowlist would drift from the Rust half
+    # (`refname::check_refname`, `is_ascii_alphanumeric`). An explicit list has
+    # no collation, so the match is ASCII-only under any LC_ALL/LANG without
+    # touching the locale (a function-scoped `local LC_ALL=C` intermittently
+    # SIGSEGV'd bash 5.3 on restore, #10127).
+    local name="${1-}" what="${2:-branch name}" why="" _alnum='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
     if   [[ -z "$name" ]];                                     then why="it is empty"
     elif [[ "$name" == -* || "$name" == *=* ]];                then why="it starts with '-' or contains '=' — the switch and option-argument forms git re-parses instead of treating the name as a ref (e.g. --upload-pack=/tmp/x)"
-    elif ! [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]];     then why="it is outside the allowlist ^[A-Za-z0-9][A-Za-z0-9._/-]*\$"
+    elif ! [[ "$name" =~ ^[${_alnum}][${_alnum}._/-]*$ ]];     then why="it is outside the allowlist ^[A-Za-z0-9][A-Za-z0-9._/-]*\$"
     elif [[ "$name" == *. || "$name" == */ || "$name" == *//* || "$name" == */.* || "$name" == *..* ]]; then why="it ends in '.' or '/', or has an empty, dot-leading or '..' path segment"
     else return 0
     fi

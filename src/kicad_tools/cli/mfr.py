@@ -60,6 +60,8 @@ def _profile_payload(profile) -> dict:
             "min_bga_pitch_mm": profile.assembly.min_bga_pitch_mm,
             "supports_double_sided": profile.assembly.supports_double_sided,
         }
+        if profile.assembly_tiers:
+            payload["assembly"]["tiers"] = [t.to_dict() for t in profile.assembly_tiers]
     else:
         payload["assembly"] = None
     if profile.parts_library:
@@ -141,6 +143,17 @@ def cmd_info(args):
             print(f"  Min component pitch: {profile.assembly.min_component_pitch_mm} mm")
             print(f"  Min BGA pitch: {profile.assembly.min_bga_pitch_mm} mm")
             print(f"  Double-sided: {'Yes' if profile.assembly.supports_double_sided else 'No'}")
+        for svc in profile.assembly_tiers:
+            extras = []
+            if svc.min_package:
+                extras.append(f"min package {svc.min_package}")
+            extras.append(f"IC pitch {svc.min_component_pitch_mm:g} mm")
+            extras.append(f"BGA pitch {svc.min_bga_pitch_mm:g} mm")
+            extras.append("double-sided" if svc.supports_double_sided else "single-sided")
+            if svc.min_board_size_mm:
+                w, h = svc.min_board_size_mm
+                extras.append(f"min board {w:g}x{h:g} mm")
+            print(f"  Tier {svc.display_name}: {', '.join(extras)}")
     else:
         print("\nAssembly: Not available")
 
@@ -386,13 +399,16 @@ def cmd_export_dru(args):
 def cmd_apply_rules(args):
     """Apply manufacturer design rules to a KiCad project or PCB file."""
     from kicad_tools.core.project_file import (
-        add_netclass_definition,
-        apply_manufacturer_rules,
         load_project,
         save_project,
         set_manufacturer_metadata,
     )
+    from kicad_tools.core.rule_loosening import RuleLooseningError
     from kicad_tools.core.sexp_file import load_pcb, save_pcb
+    from kicad_tools.manufacturers.project_generator import (
+        build_project_rules,
+        merge_project_rules_guarded,
+    )
 
     json_mode = _wants_json(args)
 
@@ -434,7 +450,14 @@ def cmd_apply_rules(args):
         )
         print(f"  Min via diameter:  {rules.min_via_diameter_mm:.3f} mm")
         print(f"  Min via drill:     {rules.min_via_drill_mm:.3f} mm")
-        print(f"  Min annular ring:  {rules.min_annular_ring_mm:.3f} mm")
+        # The .kicad_pro built-in floor is the micro-via one (#3734/#3736):
+        # KiCad has no micro-via annular key, so standard-via annular ring is
+        # enforced by the .kicad_dru "Annular Ring" rule and kct check --mfr.
+        print(
+            f"  Min annular ring:  {rules.min_annular_ring_mm:.3f} mm (standard vias; "
+            f".kicad_pro floor {build_project_rules(rules)['min_via_annular_width']:.3f} mm "
+            "for micro vias)"
+        )
         print(f"  Copper to edge:    {rules.min_copper_to_edge_mm:.3f} mm")
 
     if args.dry_run:
@@ -452,17 +475,18 @@ def cmd_apply_rules(args):
         except Exception as e:
             _fail(args, f"Error loading project: {e}", stderr=True)
 
-        # Apply manufacturer rules
-        apply_manufacturer_rules(
-            data,
-            min_clearance_mm=rules.min_clearance_mm,
-            min_track_width_mm=rules.min_trace_width_mm,
-            min_via_diameter_mm=rules.min_via_diameter_mm,
-            min_via_drill_mm=rules.min_via_drill_mm,
-            min_annular_ring_mm=rules.min_annular_ring_mm,
-            min_hole_diameter_mm=rules.min_hole_diameter_mm,
-            min_copper_to_edge_mm=rules.min_copper_to_edge_mm,
-        )
+        # Apply manufacturer rules through the one #6191 stricter-wins policy
+        # the .kicad_pcb branch below already uses (Issue #7385): a stricter
+        # authored minimum or Default-netclass value is kept, and a rewrite
+        # that would loosen an authored rule refuses.  merge_project_rules
+        # also writes the Default netclass so KiCad's clearance DRC test
+        # (which reads the applied netclass clearance, not
+        # design_settings.rules.min_clearance) enforces the manufacturer tier
+        # instead of the stock 0.20 mm Default (issue #4097).
+        try:
+            merge_report = merge_project_rules_guarded(data, rules, writer="kct mfr apply-rules")
+        except RuleLooseningError as e:
+            _fail(args, f"Error: {e}", stderr=True)
 
         # Set manufacturer metadata
         set_manufacturer_metadata(
@@ -471,19 +495,10 @@ def cmd_apply_rules(args):
             layers=args.layers,
             copper_oz=args.copper,
         )
-
-        # Write/update the Default netclass so KiCad's clearance DRC test
-        # (which reads the applied netclass clearance, not
-        # design_settings.rules.min_clearance) enforces the manufacturer tier
-        # instead of the stock 0.20 mm Default (issue #4097).
-        add_netclass_definition(
-            data,
-            "Default",
-            track_width=rules.min_trace_width_mm,
-            clearance=rules.min_clearance_mm,
-            via_diameter=rules.min_via_diameter_mm,
-            via_drill=rules.min_via_drill_mm,
-        )
+        payload["rule_merge"] = merge_report.to_dict()
+        if not json_mode:
+            for line in merge_report.messages():
+                print(line)
 
         # Save
         output_path = Path(args.output) if args.output else file_path
@@ -622,9 +637,28 @@ def _update_zone_clearances(sexp, clearance_mm: float) -> int:
     return zones_updated
 
 
+def resolve_layer_count(pcb, explicit: int | None) -> int:
+    """Effective copper-layer count: explicit value, else the board's, else 2."""
+    if explicit is not None:
+        return explicit
+    detected = len(pcb.copper_layers)
+    return detected if detected > 0 else 2
+
+
 def cmd_validate(args):
-    """Validate a PCB design against manufacturer design rules."""
+    """Validate a PCB against manufacturer design rules with the kct DRC engine.
+
+    Issue #7188: runs :class:`~kicad_tools.validate.DRCChecker` -- the same
+    engine and pad-grid policy as ``kct check --mfr`` and
+    ``ManufacturingAudit`` (#3497) -- so geometric clearance and connectivity
+    are actually checked.  No kicad-cli is needed; ``kct drc <pcb> --mfr <m>``
+    is the kicad-cli path.  Two fab-*setting* checks the engine does not have
+    (footprint pad drill and zone ``connect_pads`` clearance) are kept from
+    the old walker, as errors.  Exit 1 on any error; warnings do not fail.
+    """
     from kicad_tools.core.sexp_file import load_pcb
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate import DRCChecker
 
     json_mode = _wants_json(args)
 
@@ -633,7 +667,6 @@ def cmd_validate(args):
     except ValueError as e:
         _fail(args, f"Error: {e}")
 
-    rules = profile.get_design_rules(args.layers, args.copper)
     file_path = Path(args.file)
 
     if not file_path.exists():
@@ -644,15 +677,21 @@ def cmd_validate(args):
 
     try:
         sexp = load_pcb(file_path)
+        pcb = PCB.load(str(file_path))
     except Exception as e:
         _fail(args, f"Error loading PCB: {e}", stderr=True)
+
+    # Layer count: explicit --layers wins; otherwise read it from the board
+    # (same rule as ``kct check``) so 4-layer boards get 4-layer rules.
+    layers = resolve_layer_count(pcb, args.layers)
+    rules = profile.get_design_rules(layers, args.copper)
 
     if not json_mode:
         print(f"\n{'=' * 60}")
         print(f"VALIDATING AGAINST {profile.name.upper()} RULES")
         print(f"{'=' * 60}")
         print(f"\nFile: {file_path}")
-        print(f"Configuration: {args.layers}-layer, {args.copper}oz copper")
+        print(f"Configuration: {layers}-layer, {args.copper}oz copper")
 
         print("\nDesign Rules:")
         print(
@@ -666,112 +705,147 @@ def cmd_validate(args):
         print(f"  Min via diameter:  {rules.min_via_diameter_mm:.3f} mm")
         print(f"  Min via drill:     {rules.min_via_drill_mm:.3f} mm")
 
-    # Run validation checks
-    violations = _validate_pcb_design(sexp, rules)
+    checker = DRCChecker(
+        pcb,
+        manufacturer=args.manufacturer,
+        layers=layers,
+        copper_oz=args.copper,
+    )
+    results = checker.check_all(pad_grid_auto_derive=True)
+
+    def _finding(v) -> dict:
+        return {
+            "type": v.rule_id,
+            "detail": v.message,
+            "severity": v.severity,
+            "rule_id": v.rule_id,
+        }
+
+    errors = [_finding(v) for v in results.errors]
+    errors.extend(
+        {"type": v_type, "detail": detail, "severity": "error", "rule_id": rule_id}
+        for v_type, rule_id, detail in _fab_setting_findings(
+            sexp, rules, declared_clearance_mm=_declared_clearance_mm(file_path)
+        )
+    )
+    warnings = [_finding(v) for v in results.warnings]
 
     if json_mode:
         emit_json(
             {
                 "file": str(file_path),
                 "manufacturer": profile.id,
-                "layers": args.layers,
+                "layers": layers,
                 "copper_oz": args.copper,
                 "rules": rules.to_dict(),
-                "violations": [
-                    {"type": v_type, "detail": v_details} for v_type, v_details in violations
-                ],
-                "ok": not violations,
+                "violations": errors,
+                "warnings": warnings,
+                "ok": not errors,
             }
         )
-        if violations:
+        if errors:
             sys.exit(1)
         return
 
     print(f"\n{'-' * 60}")
+    mfr = profile.name.upper()
 
-    if violations:
-        print(f"\nVIOLATIONS FOUND: {len(violations)}")
+    if errors:
+        print(f"\nERRORS FOUND: {len(errors)}")
         print()
-
-        for v_type, v_details in violations:
-            print(f"  [{v_type}] {v_details}")
-
-        print(f"\n{'=' * 60}")
-        sys.exit(1)
+        for finding in errors:
+            print(f"  [{finding['rule_id']}] {finding['detail']}")
     else:
-        print("\nNo violations found - design meets manufacturer requirements.")
-        print(f"\n{'=' * 60}")
+        print(f"\nNo errors from the kct DRC engine for {mfr} ({layers}-layer).")
+
+    if warnings:
+        print(
+            f"\nWarnings: {len(warnings)} (run `kct check {file_path} --mfr {profile.id}` to list)"
+        )
+
+    print(f"\nFor kicad-cli's own DRC: kct drc {file_path} --mfr {profile.id}")
+    print(f"\n{'=' * 60}")
+    if errors:
+        sys.exit(1)
 
 
-def _validate_pcb_design(sexp, rules) -> list[tuple[str, str]]:
-    """Validate PCB design against manufacturer rules.
+#: ``(type, rule_id)`` of the residual fab-setting findings (Issue #7188).
+_HOLE_SIZE = ("HOLE_SIZE", "fab_pad_drill_min")
+_ZONE_CLEARANCE = ("ZONE_CLEARANCE", "fab_zone_clearance_setting")
+
+
+def _declared_clearance_mm(pcb_path) -> float | None:
+    """Largest unconditional clearance the board's own files declare (Issue #7246).
+
+    Takes the max of the ``.kicad_dru``, project minimum and netclass
+    clearances; ``None`` when no sidecar declares one.
+    """
+    from kicad_tools.router.clearance_resolver import read_declared_clearance_rules
+
+    declared = read_declared_clearance_rules(pcb_path)
+    values = [
+        v
+        for v in (
+            declared.dru_mm,
+            declared.project_min_clearance_mm,
+            declared.net_class_clearance_mm,
+            declared.board_net_class_mm,
+        )
+        if v is not None
+    ]
+    return max(values) if values else None
+
+
+def _fab_setting_findings(
+    sexp, rules, declared_clearance_mm: float | None = None
+) -> list[tuple[str, str, str]]:
+    """Fab-setting checks ``DRCChecker`` does not cover (Issue #7188).
+
+    * a footprint pad drill below ``min_hole_diameter_mm`` (both
+      ``(footprint ...)`` and legacy ``(module ...)`` tags, issue #4892);
+    * a zone ``connect_pads`` clearance *setting* below ``min_clearance_mm``
+      whose *effective* clearance is also below it: KiCad fills to the larger
+      of the setting and the rule clearance, so a larger
+      ``declared_clearance_mm`` masks a low raw setting (Issue #7246).
+
+    Trace width and via size/drill are checked by ``DRCChecker``
+    (``DimensionRules``) and are no longer duplicated here.
 
     Args:
         sexp: PCB S-expression tree
         rules: DesignRules from manufacturer profile
+        declared_clearance_mm: Largest board/netclass/DRU clearance declared
+            for the board, or ``None`` when none is known.
 
     Returns:
-        List of (violation_type, details) tuples
+        List of ``(type, rule_id, detail)`` tuples; every one is an error.
     """
     from kicad_tools.sexp import SExp
 
-    violations = []
+    findings: list[tuple[str, str, str]] = []
 
-    # Check trace widths
-    for child in sexp.values:
-        if isinstance(child, SExp) and child.tag == "segment":
-            width = child.find_child("width")
-            if width:
-                trace_width = width.get_float(0) or 0.0
-                if trace_width < rules.min_trace_width_mm:
-                    violations.append(
-                        (
-                            "TRACE_WIDTH",
-                            f"Trace width {trace_width:.4f}mm < min {rules.min_trace_width_mm:.4f}mm",
-                        )
-                    )
-
-    # Check via diameters and drills
-    for child in sexp.values:
-        if isinstance(child, SExp) and child.tag == "via":
-            size = child.find_child("size")
-            drill = child.find_child("drill")
-
-            if size:
-                via_diameter = size.get_float(0) or 0.0
-                if via_diameter < rules.min_via_diameter_mm:
-                    violations.append(
-                        (
-                            "VIA_DIAMETER",
-                            f"Via diameter {via_diameter:.3f}mm < min {rules.min_via_diameter_mm:.3f}mm",
-                        )
-                    )
-
-            if drill:
-                via_drill = drill.get_float(0) or 0.0
-                if via_drill < rules.min_via_drill_mm:
-                    violations.append(
-                        (
-                            "VIA_DRILL",
-                            f"Via drill {via_drill:.3f}mm < min {rules.min_via_drill_mm:.3f}mm",
-                        )
-                    )
-
-    # Check zone clearances
+    # Check zone clearance settings
     for child in sexp.values:
         if isinstance(child, SExp) and child.tag == "zone":
+            # Keepout zones (e.g. "Remove isolated pour fragment" cutouts)
+            # are not pours: their connect_pads clearance is a KiCad
+            # placeholder (0) that never applies, so it is not a fab setting.
+            if child.find_child("keepout") is not None:
+                continue
             connect_pads = child.find_child("connect_pads")
             if connect_pads:
                 clearance = connect_pads.find_child("clearance")
                 if clearance:
                     zone_clearance = clearance.get_float(0) or 0.0
-                    if zone_clearance < rules.min_clearance_mm:
-                        net = child.find_child("net_name")
-                        net_name = net.get_string(0) if net else "unknown"
-                        violations.append(
+                    effective = max(zone_clearance, declared_clearance_mm or 0.0)
+                    if effective < rules.min_clearance_mm:
+                        net = child.find_child("net_name") or child.find_child("net")
+                        net_name = (net.get_string(0) if net else None) or "unknown"
+                        findings.append(
                             (
-                                "ZONE_CLEARANCE",
-                                f"Zone '{net_name}' clearance {zone_clearance:.4f}mm < min {rules.min_clearance_mm:.4f}mm",
+                                *_ZONE_CLEARANCE,
+                                f"Zone '{net_name}' clearance {effective:.4f}mm "
+                                f"< min {rules.min_clearance_mm:.4f}mm",
                             )
                         )
 
@@ -789,14 +863,15 @@ def _validate_pcb_design(sexp, rules) -> list[tuple[str, str]]:
                 if drill:
                     drill_size = drill.get_float(0) or 0.0
                     if drill_size > 0 and drill_size < rules.min_hole_diameter_mm:
-                        violations.append(
+                        findings.append(
                             (
-                                "HOLE_SIZE",
-                                f"{ref or 'Unknown'}: Hole {drill_size:.3f}mm < min {rules.min_hole_diameter_mm:.3f}mm",
+                                *_HOLE_SIZE,
+                                f"{ref or 'Unknown'}: Hole {drill_size:.3f}mm "
+                                f"< min {rules.min_hole_diameter_mm:.3f}mm",
                             )
                         )
 
-    return violations
+    return findings
 
 
 def main(argv=None):
@@ -883,13 +958,22 @@ Examples:
     # validate
     p_validate = subparsers.add_parser(
         "validate",
-        help="Validate PCB against manufacturer rules",
-        description="Check a PCB design against manufacturer design rules. "
-        "Reports violations for trace widths, via sizes, zone clearances, etc.",
+        help="Validate PCB against manufacturer rules (kct DRC engine)",
+        description="Check a PCB against manufacturer design rules with the kct DRC "
+        "engine (clearance, connectivity, dimensions -- the same engine as "
+        "`kct check --mfr`), plus pad-drill and zone-clearance settings. No "
+        "kicad-cli needed; use `kct drc <pcb> --mfr <m>` for kicad-cli's DRC. "
+        "Exits 1 on any error; warnings do not fail.",
     )
     p_validate.add_argument("file", help="Path to .kicad_pcb file")
     p_validate.add_argument("manufacturer", help="Manufacturer ID (jlcpcb, seeed, etc.)")
-    p_validate.add_argument("-l", "--layers", type=int, default=2, help="Layer count (default: 2)")
+    p_validate.add_argument(
+        "-l",
+        "--layers",
+        type=int,
+        default=None,
+        help="Layer count (default: auto-detect from board)",
+    )
     p_validate.add_argument("-c", "--copper", type=float, default=1.0, help="Copper weight (oz)")
     add_format_flag(p_validate)
     p_validate.set_defaults(func=cmd_validate)

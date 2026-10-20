@@ -548,6 +548,60 @@ def test_weld_move_clears_the_land_and_is_idempotent(process, repaired):
     assert process.repair(repaired) == 0
 
 
+def test_repair_screen_without_fill_matches_the_full_copy_screen(process, repaired):
+    """Detaching the fill once screens moves exactly as a full copy did.
+
+    ``_repair_staged`` used to deep-copy the whole board per move and then
+    clear the copied zones' ``filled_polygons``; most of a repair run went
+    into copying fill vertices it threw away (issue #7374).  The screening
+    model built while the fill is detached must equal that one, and leaving
+    the context must restore ``doc`` byte for byte.
+    """
+    import copy
+    import dataclasses
+
+    from kicad_tools.schema.pcb import PCB
+
+    doc = parse_file(repaired)
+    before = serialize_sexp(doc)
+
+    legacy = PCB(copy.deepcopy(doc))
+    assert any(zone.filled_polygons for zone in legacy.zones)  # non-vacuous
+    for zone in legacy.zones:
+        zone.filled_polygons.clear()
+
+    with process._zone_fills_detached(doc):
+        assert not any(z.find_children("filled_polygon") for z in doc.find_children("zone"))
+        fast = PCB(copy.deepcopy(doc))
+    assert serialize_sexp(doc) == before
+
+    def zone_state(pcb):
+        return [
+            {
+                f.name: getattr(zone, f.name)
+                for f in dataclasses.fields(zone)
+                # Only the parallel fill-layer list differs: the legacy path
+                # never cleared it, and every reader indexes it by fill.
+                if f.name != "filled_polygon_layers" and not f.name.startswith("_")
+            }
+            for zone in pcb.zones
+        ]
+
+    assert zone_state(fast) == zone_state(legacy)
+    assert [(v.position, v.size, v.drill, v.layers, v.net_number) for v in fast.vias] == [
+        (v.position, v.size, v.drill, v.layers, v.net_number) for v in legacy.vias
+    ]
+    assert [(s.start, s.end, s.width, s.layer, s.net_number) for s in fast.segments] == [
+        (s.start, s.end, s.width, s.layer, s.net_number) for s in legacy.segments
+    ]
+    # The raw tree (read by the relocation helpers' source-copper checks) is
+    # the legacy copy minus exactly the fill children.
+    stripped = copy.deepcopy(legacy._sexp)
+    for zone in stripped.find_children("zone"):
+        zone.children = [c for c in zone.children if c.is_atom or c.name != "filled_polygon"]
+    assert serialize_sexp(fast._sexp) == serialize_sexp(stripped)
+
+
 def test_absent_weld_moves_are_allowed(process, repaired):
     """The committed (pre-#6425) route has none of the welds."""
     assert process.WELD_MOVES
@@ -622,3 +676,29 @@ def test_tie_via_skipped_only_for_a_pad_already_welded_off_pad(tmp_path, welded)
     recipe = _recipe()
     pcb = PCB.load(path)
     assert recipe._pad_has_offpad_bond(pcb, 33.25, 25.838, "GND") == ("U2.23" if welded else None)
+
+
+@pytest.mark.parametrize("reaches_via", [True, False])
+def test_tie_via_skipped_for_a_multi_leg_off_pad_weld(tmp_path, reaches_via):
+    """Issue #6683: a shape-aware stitch welds LQFP VSS pads through a
+    dog-leg / extended escape (pad -> waypoint -> via).  That bond must be
+    recognized, or ``tie_power_pads`` drops its legacy in-pad micro via onto
+    the NRST B.Cu track (U2.8 / U2.23 shorted GND to NRST in board 04's CI).
+    A path that stops short of the via is not a bond."""
+    from kicad_tools.schema.pcb import PCB
+
+    end = "33.75 27.4" if reaches_via else "33.6 27.4"
+    text = f"""(kicad_pcb (version 20240108) (generator "test")
+      (layers (0 "F.Cu" signal) (31 "B.Cu" signal)) (net 0 "") (net 1 "GND")
+      (footprint "test" (layer "F.Cu") (at 33.25 26.16)
+        (property "Reference" "U2")
+        (pad "23" smd rect (at 0 0) (size 0.3 1.475) (layers "F.Cu") (net 1 "GND")))
+      (via (at 33.75 27.4) (size 0.3) (drill 0.15) (layers "F.Cu" "B.Cu") (net 1))
+      (segment (start 33.25 26.16) (end 33.25 27.4) (width 0.15) (layer "F.Cu") (net 1))
+      (segment (start 33.25 27.4) (end {end}) (width 0.15) (layer "F.Cu") (net 1))
+    )"""
+    path = tmp_path / "tie.kicad_pcb"
+    path.write_text(text)
+    pcb = PCB.load(path)
+    expected = "U2.23" if reaches_via else None
+    assert _recipe()._pad_has_offpad_bond(pcb, 33.25, 25.838, "GND") == expected

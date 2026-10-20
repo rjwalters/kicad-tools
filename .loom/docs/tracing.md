@@ -12,51 +12,14 @@ No trace or span ID is random; the derivations and the provenance every span
 carries are policy: [trace identity](trace-identity.md). An issue
 number never identifies an execution: retries and restarts of one issue are
 distinct executions, each with a root span ID derived from its sweep id. An
-issue sweep's trace ID, however, is its issue's **story trace** (#9037), keyed
-per story key v1 (#9068; owner doc: 2AMLogic/2am
-`infra/signoz/docs/story-trace.md`): trace ID and story root span ID are
-SHA-256-derived from `loom-story/v1:github:<repo_id>:<issue>`, where `repo_id`
-is GitHub's numeric id for the checkout's `origin` (resolved once per repo and
-cached), so every sweep of the issue, on any host and across renames, lands in
-one trace, parented to the story root and tagged `loom.issue`, `loom.repo`,
-`loom.story_id`, `loom.story` (`owner/repo#n`) and `loom.story.key_version`
-(`v1`). Completed CI runs of the issue join the same story as `loom.ci.run` /
-`loom.ci.job` spans (#9088; see
-[ci-observability](ci-observability.md#story-stitching-9088)). The story root
-span itself is emitted when the story ends (a later phase of #9037); until
-then backends show it as a missing parent. Executions outside an issue, in a
-checkout with no GitHub `origin`, or whose `repo_id` cannot be resolved
-(warned once per repo) get their own deterministic trace derived from the
-repo key and sweep id — never a random one. Before an owned sweep process is
+issue sweep's trace is derived from its repo key and sweep id too — never a
+random one. Before an owned sweep process is
 spawned, Loom persists its root identity under `.loom/logs/trace-context/` and
 passes `LOOM_TRACEPARENT`, the standard W3C `TRACEPARENT` (same value, see
 "Worker-native sub-spans" below) plus `LOOM_TRACE_CONTEXT_FILE` to that child. Reopening
 the same execution after a daemon restart reuses its identity. A new attempt
 gets a new execution identity. The parser accepts strict W3C version-00 context;
 it rejects malformed, uppercase, and zero IDs.
-
-The story's GitHub-shaped **phase spans** are emitted by the 2AMLogic/2am
-storyline reconciler, not by Loom; Loom only derives and accepts their IDs
-(`story_span_id`, `sha256(input:span:<kind>:<source_event_id>)[0..8]`) over
-the story key's closed kind list `STORY_SPAN_KINDS`, kept byte-for-byte in parity with
-2am's `vectors.json` (`loom-daemon/tests/fixtures/story_vectors_d32_v1.json`):
-`story.intake`, `story.queue_dwell`, `story.ci`, `story.ci.queue`,
-`story.ci.run`, `story.review_wait`, `story.rework`, `story.merge`,
-`story.reopened`, `story.operator_hold`. The 2026-09-28 amendment (#9334,
-#9335, #9336) derives `story.review_wait` once per review round; adds
-`story.rework`, the role-neutral envelope from a round's first `labeled
-loom:changes-requested` to the next `labeled loom:review-requested` (absent if
-the PR closes mid-rework; active Doctor/Builder time is the Loom spans nested
-inside it); and adds `story.operator_hold`, one overlapping sibling per
-application of a hold label (`loom:operator-only`, `-blocked`, `-mechanical`,
-`-decision`, `-objective`, or bare `loom:operator`) from `labeled` to
-`unlabeled` or the item's close, keyed by its `labeled` event and tagged
-`loom.story.operator_hold.kind` = the label suffix (`only | blocked |
-mechanical | decision | objective | operator`); it never shortens
-`story.intake` or `story.queue_dwell`. The repeating kinds carry
-`loom.attempt` in its generalized meaning ([trace identity](trace-identity.md)).
-Reconciler spans reach SigNoz through 2am's own host-local collector, not the
-Loom gateway, so these `loom.story.*` attributes need no Loom `keep_keys` entry.
 
 The context directory is private and files are written atomically with fsync.
 An exclusive file lock serializes creators. A corrupt, busy, or full context
@@ -234,11 +197,9 @@ above stays required: synthetic completions, and pre-#9438 data, are still
 `loom.role_attempt` spans have distinct IDs for retries. Explicit checkpoint
 attempt numbers are retained. Unknown usage remains absent; measured zero stays
 zero. Each attempt's token usage is a set of per-model `loom.runtime.usage`
-children with `loom.usage.scope=attempt` (#9303): `loom-daemon usage-record`,
-run after each checkpoint write, reads the role subagent's transcript and
-journals them under the role's newest attempt, or, in an operator session with
-no inherited context, under a `loom.role_attempt` it creates in the issue's
-story trace (`loom.timing_source=transcript_window`). The whole execution's
+children with `loom.usage.scope=attempt` (#9303), written by the daemon for
+its own role-runner ticks. No CLI an attended or outside session can call
+emits usage telemetry (#12536): only daemon work is recorded. The whole execution's
 usage is the `scope=execution` set; see `telemetry-schema.md` for how to total
 the two without double counting. Outcome logs include existing grouped usage, failure classification, ordered
 Judge verdicts and Doctor counts. Grouped usage inherits the source journal's
@@ -355,6 +316,18 @@ A run a planned roll ended (#11263) instead closes as
 unplanned crash stays `process_lost`. A resumed role run carries
 `loom.resumed_from` = that item id. Failure-rate queries and the role-failures
 watch should exclude `interrupted_by_roll`.
+
+A step's `loom.sweep` root (`loom.sweep_id=step-<role>-<item>-…`, #12253) is
+closed by the step's own end, when the reaper, a cancel or startup sees the
+session exit: `loom.result` is the same `success`/`failure` its
+`role_tick.outcome` reports, with `loom.role`, the step's model and effort,
+`loom.exit_code` when known, and on a failure a `loom.failure_class` of
+`timeout-ceiling`, `cancelled`, `step-outcome-failed` (the session's
+`LOOM_STEP_OUTCOME class=failed`), `exit-<code>` or `exit-unobserved`. A step a
+roll stopped closes as `interrupted_by_roll`. Orphan recovery leaves a step's
+span alone while the step's claim lock still names it and its leader or its
+process group lives, so `process_lost` on a step means the step really died
+unobserved.
 
 ## Journals and recovery
 

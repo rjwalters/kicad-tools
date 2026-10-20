@@ -7,6 +7,7 @@ be described as laser microvias or use an unselected via-in-pad process.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import hashlib
 import json
@@ -33,7 +34,9 @@ OPTIONS = {
     "source": SOURCE,
 }
 # Exact pad/net/placement contract; copper and UUIDs are checked separately.
-PHYSICAL_SHA256 = "bde54c82117736336cbe72c2bb6329ca152626027ffff3ed81b0da98e9eb1288"
+# Re-pinned for Issue #7204: Y1 moved 1 mm east (x=+22 -> +23) so its stock
+# HC49-4H courtyard clears C2's; no other pad, net or footprint changed.
+PHYSICAL_SHA256 = "bddb9aeb5d4c6ac1f78fa0daf2980fef796994e5b70cb03ca18bdcc93cc87f4f"
 # ref.pad, net, reviewed original via center, reviewed off-pad center (board relative).
 MOVES = [
     ("U1.2", "GND", (10.24, 11.61), (10.24, 12.55)),
@@ -300,6 +303,26 @@ def repair(pcb_path):
     return changed
 
 
+@contextlib.contextmanager
+def _zone_fills_detached(doc):
+    """Hold every zone's ``filled_polygon`` children out of ``doc`` meanwhile.
+
+    The repair loop screens each move on a fresh model of ``doc`` with the
+    obsolete fill removed.  Deep-copying the full board per move and then
+    discarding the fill cost most of a repair run (issue #7374), so the fill
+    is detached once instead and each move copies only the rest.  No move
+    edits a zone, so restoring the saved child lists is exact.
+    """
+    saved = [(zone, zone.children) for zone in doc.find_children("zone")]
+    for zone, children in saved:
+        zone.children = [c for c in children if c.is_atom or c.name != "filled_polygon"]
+    try:
+        yield
+    finally:
+        for zone, children in saved:
+            zone.children = children
+
+
 def _repair_staged(pcb_path):
     """Move reviewed escapes/route vias and add a tail on every used layer."""
     pcb_path = Path(pcb_path)
@@ -307,6 +330,24 @@ def _repair_staged(pcb_path):
         raise ValueError("Board04 physical design changed: review new via escapes")
     pcb, doc = PCB.load(pcb_path), parse_file(pcb_path)
     ox, oy = pcb.board_origin
+    with _zone_fills_detached(doc):
+        changed = _apply_moves(pcb_path, doc, ox, oy)
+    for via in doc.find_children("via"):
+        via.remove_child("tenting")
+        via.add(parse_string("(tenting (front yes) (back yes))"))
+    pcb_path.write_text(serialize_sexp(doc))
+    trim_obsolete_nrst_tail(pcb_path)
+    trim_redundant_gnd_stitch(pcb_path)
+    trim_single_layer_welds(pcb_path)
+    (pcb_path.parent / "manufacturing-requirements.json").write_text(
+        json.dumps(OPTIONS, indent=2) + "\n"
+    )
+    validate_process(pcb_path, check_native=False)
+    return changed
+
+
+def _apply_moves(pcb_path, doc, ox, oy):
+    """Apply every reviewed move to ``doc``; return how many moved."""
     changed = 0
     for move in MOVES + INSET_ROUTE_MOVES + WELD_MOVES:
         # The recipe refills after repair. Screen fixed copper against the
@@ -383,17 +424,6 @@ def _repair_staged(pcb_path):
                 )
             )
         changed += 1
-    for via in doc.find_children("via"):
-        via.remove_child("tenting")
-        via.add(parse_string("(tenting (front yes) (back yes))"))
-    pcb_path.write_text(serialize_sexp(doc))
-    trim_obsolete_nrst_tail(pcb_path)
-    trim_redundant_gnd_stitch(pcb_path)
-    trim_single_layer_welds(pcb_path)
-    (pcb_path.parent / "manufacturing-requirements.json").write_text(
-        json.dumps(OPTIONS, indent=2) + "\n"
-    )
-    validate_process(pcb_path, check_native=False)
     return changed
 
 

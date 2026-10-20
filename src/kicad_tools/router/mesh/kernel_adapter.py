@@ -91,6 +91,7 @@ __all__ = [
     "MeshOutline",
     "MeshPad",
     "MeshRegion",
+    "clears_cut",
     "copper_leg",
     "leg",
     "leg_clears",
@@ -211,10 +212,15 @@ def pad_of(pad: Pad) -> MeshPad | None:
     """
     if pad.width <= 0.0 or pad.height <= 0.0:
         return None
+    # Issue #6718: the file's roundrect ratio (rect when unknown), never 0.25.
+    from kicad_tools.router.clearance_shapes import pad_kernel_params
+
+    shape, rratio = pad_kernel_params(pad)
     return make_pad(
-        pad.shape,
+        shape,
         pad.width,
         pad.height,
+        rratio,
         rotation_deg=pad.rotation,
         cx=pad.x,
         cy=pad.y,
@@ -304,6 +310,19 @@ def outline_of(outline: Sequence[Pt]) -> MeshOutline | None:
 # ---------------------------------------------------------------------------
 # Predicates
 # ---------------------------------------------------------------------------
+
+
+def clears_cut(copper: KSegment, cut: MeshOutline, required_mm: float) -> bool:
+    """True when ``copper`` keeps ``required_mm`` from an interior ``Edge.Cuts`` loop.
+
+    Issue #6822.  Unlike :meth:`MeshOutline.clears_edge` there is no
+    short-circuit for a non-positive requirement: copper across a routed cut
+    (a board window, cutout or round hole) is never valid output, so even a
+    ``0.0`` requirement is measured -- the exact-geometry form of the grid's
+    #6043 physical floor, and the same ``gap >= margin`` comparison the lattice
+    engine's ``EscapeBoundary`` makes.
+    """
+    return copper_gap(copper, cut.edge) >= required_mm - MESH_CLEARANCE_EPSILON_MM
 
 
 def leg_touches(candidate: KSegment, region: MeshRegion) -> bool:

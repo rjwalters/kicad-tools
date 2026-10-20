@@ -29,16 +29,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 FILING_LOCK_LIB="$SCRIPTS_DIR/lib/filing-lock.sh"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-NC='\033[0m'
-
-TESTS_RUN=0
-TESTS_PASSED=0
-TESTS_FAILED=0
-
-pass() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1)); echo -e "  ${GREEN}PASS${NC}: $1"; }
-fail() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1)); echo -e "  ${RED}FAIL${NC}: $1"; }
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
 assert_eq() {
     if [[ "$1" == "$2" ]]; then pass "$3"; else fail "$3 (expected '$2', got '$1')"; fi
@@ -310,6 +301,23 @@ if grep -q "loom_filing_lock_acquire" "$SCRIPTS_DIR/create-issue.sh" \
 else
     fail "create-issue.sh does not acquire the lock / does not propagate the DEFER exit code"
 fi
+
+echo ""
+echo "=== host identity comes from loom-daemon host-id (#10023) ==="
+
+HID_DIR="$(mktemp -d)"
+printf '#!/usr/bin/env bash\n[[ "${1:-}" == "host-id" ]] && { echo persisted-host-abc; exit 0; }\nexit 0\n' > "$HID_DIR/fake-daemon"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$HID_DIR/failing-daemon"
+chmod +x "$HID_DIR/fake-daemon" "$HID_DIR/failing-daemon"
+GOT="$(env -u LOOM_HOST_ID HOSTNAME=some-distinct-hostname LOOM_DAEMON_BIN="$HID_DIR/fake-daemon" \
+    bash -c 'source "$1"; loom_filing_lock_host' _ "$FILING_LOCK_LIB")"
+[[ "$GOT" == "persisted-host-abc" ]] && pass "owner host equals loom-daemon host-id, not \$HOSTNAME" \
+    || fail "owner host was '$GOT', expected persisted-host-abc"
+GOT="$(env -u LOOM_HOST_ID HOSTNAME=some-distinct-hostname LOOM_DAEMON_BIN="$HID_DIR/failing-daemon" \
+    bash -c 'source "$1"; loom_filing_lock_host' _ "$FILING_LOCK_LIB")"
+[[ "$GOT" == "unknown-host" ]] && pass "a failing host-id yields the unknown-host literal" \
+    || fail "failing host-id produced '$GOT', expected unknown-host"
+rm -rf "$HID_DIR"
 
 echo ""
 echo "==============================================="

@@ -303,13 +303,22 @@ class ReportFigureGenerator:
                     str(tmp),
                     str(sch_path),
                 ]
-                subprocess.run(
+                proc = subprocess.run(
                     cmd,
                     capture_output=True,
                     text=True,
                     timeout=60,
                     check=False,
                 )
+                if proc.returncode != 0:
+                    from kicad_tools.drc.geometric import describe_returncode
+
+                    logger.warning(
+                        "kicad-cli schematic SVG export failed for %s: %s",
+                        sch_path,
+                        describe_returncode(proc.returncode),
+                    )
+                    return []
 
                 svg_files: Sequence[Path] = sorted(tmp.glob("*.svg"))
                 if not svg_files:

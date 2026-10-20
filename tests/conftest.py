@@ -213,11 +213,16 @@ def _clear_find_kicad_cli_cache():
     that mocks ``shutil.which`` / ``Path.exists`` would otherwise leak its
     result into (or inherit a stale result from) neighbouring tests.
     """
-    from kicad_tools.cli.runner import find_kicad_cli
+    from kicad_tools.cli.runner import _kicad_drc_supports_refill, find_kicad_cli
 
+    # Issue #6724: the ``--refill-zones`` probe is memoised per kicad-cli path
+    # too; a test that stubs ``subprocess.run`` would otherwise cache "no
+    # refill support" for a real kicad-cli path and leak it to later tests.
     find_kicad_cli.cache_clear()
+    _kicad_drc_supports_refill.cache_clear()
     yield
     find_kicad_cli.cache_clear()
+    _kicad_drc_supports_refill.cache_clear()
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -435,6 +440,7 @@ DRC_CLEAN_PCB = """(kicad_pcb
     (31 "B.Cu" signal)
     (37 "F.SilkS" user "F.Silkscreen")
     (44 "Edge.Cuts" user)
+    (47 "F.CrtYd" user "F.Courtyard")
     (49 "F.Fab" user)
   )
   (setup (pad_to_mask_clearance 0))
@@ -454,6 +460,7 @@ DRC_CLEAN_PCB = """(kicad_pcb
       (effects (font (size 1.0 1.0) (thickness 0.15)))
       (uuid "00000000-0000-0000-0000-000000000011"))
     (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "00000000-0000-0000-0000-000000000012"))
+    (fp_rect (start -0.93 -0.47) (end 0.93 0.47) (stroke (width 0.05) (type solid)) (fill no) (layer "F.CrtYd"))
     (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64)
       (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
     (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64)
@@ -467,6 +474,7 @@ DRC_CLEAN_PCB = """(kicad_pcb
       (effects (font (size 1.0 1.0) (thickness 0.15)))
       (uuid "00000000-0000-0000-0000-000000000031"))
     (property "Value" "GND" (at 0 1.5 0) (layer "F.Fab") (uuid "00000000-0000-0000-0000-000000000032"))
+    (fp_rect (start -0.75 -0.75) (end 0.75 0.75) (stroke (width 0.05) (type solid)) (fill no) (layer "F.CrtYd"))
     (pad "1" smd roundrect (at 0 0) (size 1.0 1.0)
       (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
   )

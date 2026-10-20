@@ -340,6 +340,9 @@ def run_check_command(args) -> int:
     # Issue #4601: forward the sidecar auto-discovery opt-out.
     if getattr(args, "no_net_class_map", False):
         sub_argv.append("--no-net-class-map")
+    # Issue #6044: forward the opt-in missing-routing-policy gate.
+    if getattr(args, "require_routing_policy", False):
+        sub_argv.append("--require-routing-policy")
     # Issue #4980/#5124: forward the declared branch-specific current-path
     # sidecar and its auto-discovery opt-out, mirroring --net-class-map /
     # --no-net-class-map immediately above.
@@ -638,5 +641,9 @@ def run_audit_command(args) -> int:
         sub_argv.extend(["--hv-pollution-degree", str(args.audit_hv_pollution_degree)])
     if getattr(args, "audit_hv_material_group", "IIIa") != "IIIa":
         sub_argv.extend(["--hv-material-group", args.audit_hv_material_group])
+    if getattr(args, "audit_hv_overvoltage_category", "II") != "II":
+        sub_argv.extend(["--hv-overvoltage-category", args.audit_hv_overvoltage_category])
+    if getattr(args, "audit_hv_insulation", "basic") != "basic":
+        sub_argv.extend(["--hv-insulation", args.audit_hv_insulation])
 
     return audit_main(sub_argv)

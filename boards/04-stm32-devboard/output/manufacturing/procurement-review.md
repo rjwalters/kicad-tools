@@ -18,3 +18,38 @@ Use exact reviewed parts; substitutions need electrical and footprint review. U1
 | R2 | 0805W8F1002T5E | [C17414](https://www.lcsc.com/product-detail/C17414.html) |
 | D1 | 17-21SURC/S530-A2/TR8 | [C131244](https://www.lcsc.com/product-detail/C131244.html) |
 | J1 | 2.54-1x6P | [C37208](https://www.lcsc.com/product-detail/C37208.html) |
+
+## 2026-10-18 CPL rotation correction (issue #7200)
+
+`cpl_jlcpcb.csv` is regenerated with the JLCPCB rotation profile
+(`jlcpcb_rotations.yaml`) and in the Gerber/drill-origin frame (#7059). The
+2026-09-10 package shipped these rotations uncorrected. Rotation changes are
+placement changes, so this section records them explicitly:
+
+| Reference | Footprint | Old rotation | New rotation |
+|---|---|---|---|
+| D1 | LED_0805_2012Metric | 0 | 180 |
+| U1 | SOT-223-3_TabPin2 | 0 | 180 |
+| U2 | LQFP-48_7x7mm_P0.5mm | 0 | 270 |
+
+Raw KiCad `pos` reports 0 for all three; the new values come from the JLCPCB
+profile, not from the board. **Pending human orientation review:** no person
+has yet checked these against the JLC part footprints / datasheet pin-1 marks.
+Do not order assembly from this CPL until that review is recorded here.
+
+## 2026-10-19 Through-hole parts in the JLCPCB BOM/CPL (issue #7268)
+
+JLCPCB's PCBA capability page
+(https://jlcpcb.com/capabilities/pcb-assembly-capabilities, fetched
+2026-10-18) lists both Economic and Standard PCBA as "SMT/Thru-hole", so by
+operator decision (issue #7239) `kct export --mfr jlcpcb` no longer excludes
+through-hole parts. This package's `bom_jlcpcb.csv` and `cpl_jlcpcb.csv` now
+also list the through-hole Y1 (X49SD8MSB2SC, C114147) and J1 (2.54-1x6P,
+C37208) for JLCPCB assembly, and `manual-assembly-bom.csv` is retired. Any
+statement above or in the earlier package that these parts are hand-soldered
+or excluded from the CPL is superseded for them.
+
+**Procurement must review these through-hole rows** (part identity, JLCPCB
+through-hole assembly eligibility and stock, and placement orientation)
+before ordering assembly. This note records the export change only: it is
+not a re-review, and no new supplier lookup or stock check was performed.

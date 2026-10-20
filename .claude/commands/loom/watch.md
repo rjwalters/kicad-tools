@@ -160,7 +160,7 @@ branching:
 | Section | Fallback probe |
 |---------|----------------|
 | Trusted liveness | `pgrep -f '[l]oom-daemon'` **and** the pid file (`.loom/.daemon.pid`, or `$HOME/.loom/.daemon.pid` in machine mode) — both, cross-checked |
-| Dispatch state | `loom-daemon status --json` (in-flight sweeps, dynamic cap + which term binds, health-gate halt state) |
+| Dispatch state | `loom-daemon status --json` (in-flight sweeps, the configured cap, health-gate halt state) |
 | Token pool | `loom-daemon tokens check --ranking --json` (or, to stay cheap, the mtime + contents of `.loom/tokens/.ranking`) |
 | Role ticks | tail `~/.loom/daemon.log` for the window; count *persistent* failures only (a failure that self-recovered on the same root's next tick is transient — ignore it) |
 | Queue depth | `gh issue list --label 'loom:issue' --state open` per managed root |

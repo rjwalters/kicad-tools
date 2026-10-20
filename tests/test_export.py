@@ -59,6 +59,11 @@ class MockFootprint:
     attr: str = "smd"
     dnp: bool = False
 
+    @property
+    def sheet_position(self) -> tuple:
+        # Mock boards have a (0, 0) board origin: position is already sheet-absolute.
+        return self.position
+
 
 class TestBOMExportConfig:
     """Tests for BOMExportConfig."""
@@ -480,6 +485,13 @@ class TestGetAuxOrigin:
         assert origin == (0.0, 0.0)
 
 
+def _cpl_rows(output: str) -> dict[str, dict[str, str]]:
+    import csv
+    import io
+
+    return {r["Designator"]: r for r in csv.DictReader(io.StringIO(output))}
+
+
 class TestExportPnPWithAuxOrigin:
     """Tests for export_pnp with auxiliary origin auto-detection."""
 
@@ -489,9 +501,8 @@ class TestExportPnPWithAuxOrigin:
             MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu"),
         ]
         output = export_pnp(footprints, "jlcpcb")
-        assert "R1" in output
-        assert "10.0000mm" in output
-        assert "20.0000mm" in output
+        row = _cpl_rows(output)["R1"]
+        assert (row["Mid X"], row["Mid Y"]) == ("10.0000mm", "-20.0000mm")
 
     def test_export_pnp_with_pcb_path_zero_origin(self):
         """export_pnp with pcb_path but (0,0) aux origin should not change coords."""
@@ -500,8 +511,8 @@ class TestExportPnPWithAuxOrigin:
             MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu"),
         ]
         output = export_pnp(footprints, "jlcpcb", pcb_path=fixture)
-        assert "10.0000mm" in output
-        assert "20.0000mm" in output
+        row = _cpl_rows(output)["R1"]
+        assert (row["Mid X"], row["Mid Y"]) == ("10.0000mm", "-20.0000mm")
 
     def test_export_pnp_use_aux_origin_disabled(self):
         """export_pnp with use_aux_origin=False should skip origin auto-detection."""
@@ -511,8 +522,8 @@ class TestExportPnPWithAuxOrigin:
             MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu"),
         ]
         output = export_pnp(footprints, "jlcpcb", config=config, pcb_path=fixture)
-        assert "10.0000mm" in output
-        assert "20.0000mm" in output
+        row = _cpl_rows(output)["R1"]
+        assert (row["Mid X"], row["Mid Y"]) == ("10.0000mm", "-20.0000mm")
 
     def test_export_pnp_manual_offset_combined(self):
         """Manual x_offset/y_offset should combine with aux origin offset."""
@@ -523,19 +534,19 @@ class TestExportPnPWithAuxOrigin:
             MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu"),
         ]
         output = export_pnp(footprints, "jlcpcb", config=config, pcb_path=fixture)
-        # 10 + 5 = 15, 20 + (-3) = 17
-        assert "15.0000mm" in output
-        assert "17.0000mm" in output
+        # x: 10 + 5 = 15; Y-up frame: -20 + (-3) = -23
+        row = _cpl_rows(output)["R1"]
+        assert (row["Mid X"], row["Mid Y"]) == ("15.0000mm", "-23.0000mm")
 
-    def test_aux_origin_config_none_jlcpcb_excludes_tht(self, tmp_path):
+    def test_aux_origin_config_none_jlcpcb_includes_tht(self, tmp_path):
         """Aux-origin branch + config=None must honor JLCPCB's exclude_tht default.
 
         Regression test for issue #3618: the aux-origin branch used to
         synthesize a bare PnPExportConfig when config was None, silently
-        dropping the JLCPCB formatter's exclude_tht=True default.  The CPL
-        would then include THT rows while the hand-solder set (computed from
-        the formatter's effective config) listed the same parts as excluded —
-        a CPL/exclusion divergence.
+        dropping the formatter's default.  The CPL and the hand-solder set
+        (computed from the formatter's effective config) could then diverge.
+        JLCPCB now assembles THT (issue #7239), so the default includes THT
+        and the hand-solder set is empty.
         """
         # Build a PCB with a NONZERO aux origin so the branch actually fires.
         fixture = Path(__file__).parent / "fixtures" / "projects" / "multilayer_zones.kicad_pcb"
@@ -560,19 +571,17 @@ class TestExportPnPWithAuxOrigin:
 
         output = export_pnp(footprints, "jlcpcb", config=None, pcb_path=pcb_path)
 
-        # THT component excluded from the CPL (JLCPCB default)...
-        assert "J1" not in output
-        # ...while the SMD part remains, shifted by the aux origin:
-        # 110 - 100 = 10, 70 - 50 = 20.
-        assert "R1" in output
-        assert "10.0000mm" in output
-        assert "20.0000mm" in output
+        # THT component kept in the CPL (JLCPCB default, issue #7239),
+        # in the aux-origin, Y-up frame: x = 110 - 100 = 10, y = 50 - 70 = -20
+        # for R1 and x = 50, y = -10 for J1.
+        rows = _cpl_rows(output)
+        assert (rows["R1"]["Mid X"], rows["R1"]["Mid Y"]) == ("10.0000mm", "-20.0000mm")
+        assert (rows["J1"]["Mid X"], rows["J1"]["Mid Y"]) == ("50.0000mm", "-10.0000mm")
 
         # The hand-solder set computed from the formatter's effective config
-        # (the assembly.py pattern) must AGREE with the CPL: J1 is listed.
+        # (the assembly.py pattern) must AGREE with the CPL: nothing excluded.
         effective = get_pnp_formatter("jlcpcb", None).config
-        excluded = extract_tht_exclusions(footprints, effective)
-        assert [p.reference for p in excluded] == ["J1"]
+        assert extract_tht_exclusions(footprints, effective) == []
 
     def test_aux_origin_explicit_config_fields_preserved(self, tmp_path):
         """dataclasses.replace path keeps all caller-set fields intact."""
@@ -592,10 +601,63 @@ class TestExportPnPWithAuxOrigin:
 
         # Explicit exclude_tht=False overrides the JLCPCB default: J1 stays.
         assert "J1" in output
-        # Manual offsets combine with aux origin: 110 + 5 - 100 = 15,
-        # 70 + (-3) - 50 = 17.
-        assert "15.0000mm" in output
-        assert "17.0000mm" in output
+        # Manual offsets apply after the frame transform:
+        # x = 110 - 100 + 5 = 15; y = (50 - 70) + (-3) = -23.
+        row = _cpl_rows(output)["R1"]
+        assert (row["Mid X"], row["Mid Y"]) == ("15.0000mm", "-23.0000mm")
+
+
+class TestCplFrame:
+    """CPL coordinates use KiCad's pos frame / the Gerbers' frame (#7059)."""
+
+    FPS = [
+        MockFootprint("R1", "10k", "0402", (105.0, 105.0), 0.0, "F.Cu"),
+        MockFootprint("R2", "10k", "0402", (115.0, 107.0), 180.0, "B.Cu"),
+    ]
+
+    def _xy(self, output, ref):
+        row = _cpl_rows(output)[ref]
+        return row["Mid X"], row["Mid Y"]
+
+    def test_aux_origin_lower_left(self):
+        out = export_pnp(self.FPS, "jlcpcb", aux_origin=(100.0, 110.0))
+        assert self._xy(out, "R1") == ("5.0000mm", "5.0000mm")
+        assert self._xy(out, "R2") == ("15.0000mm", "3.0000mm")
+        assert _cpl_rows(out)["R2"]["Rotation"] == "180.0"
+        assert _cpl_rows(out)["R2"]["Layer"] == "Bottom"
+
+    def test_no_aux_origin(self):
+        out = export_pnp(self.FPS, "jlcpcb")
+        assert self._xy(out, "R1") == ("105.0000mm", "-105.0000mm")
+        assert self._xy(out, "R2") == ("115.0000mm", "-107.0000mm")
+
+    def test_use_aux_origin_false_ignores_origin(self):
+        cfg = PnPExportConfig(use_aux_origin=False)
+        out = export_pnp(self.FPS, "jlcpcb", config=cfg, aux_origin=(100.0, 110.0))
+        assert self._xy(out, "R1") == ("105.0000mm", "-105.0000mm")
+
+    @pytest.mark.parametrize("mfr", ["generic", "pcbway", "seeed"])
+    def test_other_formatters_share_frame(self, mfr):
+        out = export_pnp(self.FPS, mfr, aux_origin=(100.0, 110.0))
+        r2 = next(line for line in out.splitlines() if "R2" in line)
+        assert "15.0000" in r2 and "3.0000" in r2 and "-" not in r2
+
+    def test_pcb_path_reads_aux_origin(self, tmp_path):
+        fixture = Path(__file__).parent / "fixtures" / "projects" / "multilayer_zones.kicad_pcb"
+        text = fixture.read_text().replace("(aux_axis_origin 0 0)", "(aux_axis_origin 100 110)")
+        pcb_path = tmp_path / "b.kicad_pcb"
+        pcb_path.write_text(text)
+        out = export_pnp(self.FPS, "jlcpcb", pcb_path=pcb_path)
+        assert self._xy(out, "R2") == ("15.0000mm", "3.0000mm")
+
+    def test_footprint_sheet_position_adds_board_origin(self):
+        from kicad_tools.schema.pcb import Footprint
+
+        fp = Footprint(
+            name="x", layer="F.Cu", position=(5.0, 5.0), rotation=0.0, reference="R1", value="v"
+        )
+        object.__setattr__(fp, "_board_origin", (100.0, 100.0))
+        assert fp.sheet_position == (105.0, 105.0)
 
 
 class TestGerberExporter:
@@ -750,16 +812,16 @@ class TestExtractPlacementsDNPFiltering:
 class TestJLCPCBPnPFormatterDefaults:
     """Tests for JLCPCB formatter default THT exclusion."""
 
-    def test_jlcpcb_defaults_exclude_tht(self):
-        """JLCPCB formatter should default to exclude_tht=True."""
+    def test_jlcpcb_defaults_include_tht(self):
+        """JLCPCB formatter should default to exclude_tht=False (issue #7239)."""
         formatter = JLCPCBPnPFormatter()
-        assert formatter.config.exclude_tht is True
-
-    def test_jlcpcb_explicit_include_tht(self):
-        """Passing exclude_tht=False should override JLCPCB default."""
-        config = PnPExportConfig(exclude_tht=False)
-        formatter = JLCPCBPnPFormatter(config)
         assert formatter.config.exclude_tht is False
+
+    def test_jlcpcb_explicit_exclude_tht(self):
+        """Passing exclude_tht=True should override JLCPCB default."""
+        config = PnPExportConfig(exclude_tht=True)
+        formatter = JLCPCBPnPFormatter(config)
+        assert formatter.config.exclude_tht is True
 
     def test_generic_does_not_exclude_tht(self):
         """Generic formatter should include THT by default."""
@@ -784,18 +846,18 @@ class TestExportPnPTHTIntegration:
             ),
         ]
 
-    def test_jlcpcb_excludes_tht(self, mixed_footprints):
-        """JLCPCB export should exclude THT components by default."""
+    def test_jlcpcb_includes_tht(self, mixed_footprints):
+        """JLCPCB export should include THT components by default (issue #7239)."""
         output = export_pnp(mixed_footprints, "jlcpcb")
         assert "R1" in output
-        assert "J1" not in output
+        assert "J1" in output
 
-    def test_jlcpcb_include_tht_override(self, mixed_footprints):
-        """JLCPCB export with exclude_tht=False should include THT."""
-        config = PnPExportConfig(exclude_tht=False)
+    def test_jlcpcb_exclude_tht_override(self, mixed_footprints):
+        """JLCPCB export with exclude_tht=True should drop THT."""
+        config = PnPExportConfig(exclude_tht=True)
         output = export_pnp(mixed_footprints, "jlcpcb", config=config)
         assert "R1" in output
-        assert "J1" in output
+        assert "J1" not in output
 
     def test_generic_includes_tht(self, mixed_footprints):
         """Generic export should include THT components by default."""
@@ -811,15 +873,15 @@ class TestExportPnPTHTIntegration:
 
 
 class TestAssemblyPackageJLCPCBTHTIntegration:
-    """Integration test: AssemblyPackage JLCPCB path excludes THT components."""
+    """Integration test: AssemblyPackage JLCPCB path keeps THT components."""
 
-    def test_jlcpcb_assembly_package_excludes_tht(self, tmp_path):
+    def test_jlcpcb_assembly_package_includes_tht(self, tmp_path):
         """AssemblyPackage with manufacturer='jlcpcb' and no explicit pnp_config
-        should produce a CPL file that excludes through-hole components.
+        should produce a CPL file that includes through-hole components
+        (JLCPCB assembles THT, issue #7239).
 
-        This guards against a regression where AssemblyPackage._generate_pnp()
-        created a bare PnPExportConfig (exclude_tht=False) instead of letting
-        the JLCPCB formatter supply its own default (exclude_tht=True).
+        This guards against AssemblyPackage._generate_pnp() overriding the
+        JLCPCB formatter's own default with a bare PnPExportConfig.
         """
         from unittest.mock import MagicMock, patch
 
@@ -866,29 +928,32 @@ class TestAssemblyPackageJLCPCBTHTIntegration:
         # SMD components must be present
         assert "R1" in cpl_content
         assert "C1" in cpl_content
-        # THT connector must be excluded
-        assert "J1" not in cpl_content
+        # THT connector must be present
+        assert "J1" in cpl_content
 
 
 class TestAssemblyPackageExplicitSourcingIntegration:
-    """Integration regression for issue #4995.
+    """Integration regression for issue #4995, on the real board 06 PCB.
 
-    Uses the real ``boards/06-diffpair-test`` fixture -- the exact
-    reproduction cited in the issue. Its ``project.kct`` spec explicitly
-    sources J1/J2/J3 as Samtec headers (``mpn`` set, no ``lcsc``). Before
-    the fix, ``enrich_bom_lcsc``'s generic (value, footprint) auto-matcher
-    silently assigned J1 an unrelated LCSC part (``C404027``); after the
-    fix, these three references must stay unresolved (blank ``LCSC Part
-    #``) even with default ``auto_lcsc=True``.
+    #4995: board 06's spec sourced J1/J2/J3 as Samtec headers (``mpn`` set,
+    no ``lcsc``) and ``enrich_bom_lcsc``'s generic (value, footprint)
+    auto-matcher silently gave J1 an unrelated LCSC part (``C404027``).
+    Explicit MPN-only parts must stay unresolved even with the default
+    ``auto_lcsc=True``.
+
+    Issue #7422 (operator ruling #7268 Q2 = 3) since swapped J1-J3 for
+    reviewed LCSC-stocked PZ254V headers, so the committed spec no longer
+    has an MPN-only part. The guard therefore runs against a temporary copy
+    of the spec with the Samtec entries restored (issue #7445), and a second
+    test pins the reviewed sourcing on the committed spec.
     """
 
-    def test_board06_explicit_samtec_headers_stay_unresolved(self):
+    @staticmethod
+    def _export_rows(spec_path: Path | None = None):
         from kicad_tools.export.assembly import AssemblyConfig, AssemblyPackage
+        from tests._board06_sourcing import BOARD06_PCB
 
-        repo_root = Path(__file__).resolve().parent.parent
-        board_dir = repo_root / "boards" / "06-diffpair-test"
-        pcb_path = board_dir / "output" / "diffpair_test_routed.kicad_pcb"
-        if not pcb_path.exists():
+        if not BOARD06_PCB.exists():
             pytest.skip("board06 routed fixture not present in this checkout")
 
         config = AssemblyConfig(
@@ -897,20 +962,14 @@ class TestAssemblyPackageExplicitSourcingIntegration:
             include_gerbers=False,
             auto_lcsc=True,  # exercise the default, not the --no-auto-lcsc workaround
             merge_lcsc=False,  # isolate spec-overlay behavior from any committed CSV
+            spec_path=spec_path,
         )
-
-        pkg = AssemblyPackage(
-            pcb_path=pcb_path,
-            manufacturer="jlcpcb-tier1",
-            config=config,
-        )
+        pkg = AssemblyPackage(pcb_path=BOARD06_PCB, manufacturer="jlcpcb-tier1", config=config)
 
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
-            out_dir = Path(tmp)
-            result = pkg.export(output_dir=out_dir)
-
+            result = pkg.export(output_dir=Path(tmp))
             assert result.bom_path is not None
             with open(result.bom_path, newline="") as f:
                 rows = list(csv.DictReader(f))
@@ -919,10 +978,17 @@ class TestAssemblyPackageExplicitSourcingIntegration:
         for row in rows:
             for ref in row["Designator"].split(","):
                 by_ref[ref.strip()] = row
+        return result, by_ref
 
-        # J1/J2/J3 are the explicit Samtec-sourced headers from the spec --
-        # they must never acquire a generic LCSC substitute.
-        for ref in ("J1", "J2", "J3"):
+    def test_board06_explicit_samtec_headers_stay_unresolved(self, tmp_path):
+        from tests._board06_sourcing import SAMTEC_HEADERS, write_samtec_spec
+
+        result, by_ref = self._export_rows(write_samtec_spec(tmp_path))
+
+        # The explicit Samtec-sourced headers must never acquire a generic
+        # LCSC substitute -- not the old C404027, and not the PZ254V parts
+        # the committed spec now reviews either.
+        for ref in SAMTEC_HEADERS:
             assert ref in by_ref, f"{ref} missing from generated BOM"
             assert by_ref[ref]["LCSC Part #"] == "", (
                 f"{ref} acquired an unreviewed LCSC substitute "
@@ -937,11 +1003,27 @@ class TestAssemblyPackageExplicitSourcingIntegration:
         assert result.lcsc_enrichment.spec_unresolved == 3
         assert {
             e for entry in result.lcsc_enrichment.spec_unresolved_entries for e in entry.references
-        } == {
-            "J1",
-            "J2",
-            "J3",
+        } == set(SAMTEC_HEADERS)
+
+    def test_board06_reviewed_pz254v_headers_come_from_the_spec(self):
+        """The committed spec's reviewed J1-J3 sourcing (#7422) is emitted exactly."""
+        from tests._board06_sourcing import REVIEWED_HEADERS
+
+        result, by_ref = self._export_rows()
+
+        for ref, (_mpn, lcsc) in REVIEWED_HEADERS.items():
+            assert by_ref[ref]["LCSC Part #"] == lcsc, ref
+        assert result.lcsc_enrichment is not None
+        assert result.lcsc_enrichment.spec_unresolved == 0
+        header_entries = {
+            ref: entry
+            for entry in result.lcsc_enrichment.entries
+            for ref in entry.references
+            if ref in REVIEWED_HEADERS
         }
+        assert set(header_entries) == set(REVIEWED_HEADERS)
+        for ref, entry in header_entries.items():
+            assert (entry.source, entry.lcsc_part) == ("spec", REVIEWED_HEADERS[ref][1]), ref
 
 
 class TestExtractTHTExclusions:
@@ -1091,8 +1173,8 @@ class TestAssemblyPackageTHTExcludedSurfacing:
             return pkg.export(output_dir=tmp_path / "out")
 
     def test_jlcpcb_records_tht_excluded(self, tmp_path):
-        """JLCPCB default (exclude_tht=True) surfaces the excluded refs."""
-        pkg = self._make_package(tmp_path)
+        """An explicit exclude_tht=True on JLCPCB surfaces the excluded refs."""
+        pkg = self._make_package(tmp_path, pnp_config=PnPExportConfig(exclude_tht=True))
         result = self._export_with_footprints(
             pkg,
             tmp_path,
@@ -1119,6 +1201,22 @@ class TestAssemblyPackageTHTExcludedSurfacing:
         assert "J1" not in cpl_content
         assert "SW1" not in cpl_content
         assert "R1" in cpl_content
+
+    def test_jlcpcb_default_has_no_tht_excluded(self, tmp_path):
+        """JLCPCB assembles THT (issue #7239): default leaves nothing to hand-solder."""
+        pkg = self._make_package(tmp_path)
+        result = self._export_with_footprints(
+            pkg,
+            tmp_path,
+            [
+                MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu", attr="smd"),
+                MockFootprint(
+                    "J1", "Conn", "PinHeader_1x04", (50.0, 10.0), 0.0, "F.Cu", attr="through_hole"
+                ),
+            ],
+        )
+        assert result.tht_excluded == []
+        assert "J1" in result.pnp_path.read_text()
 
     def test_smd_only_board_has_empty_tht_excluded(self, tmp_path):
         pkg = self._make_package(tmp_path)

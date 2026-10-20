@@ -213,11 +213,34 @@ def test_run_refuses_on_manifest_drift(fr, tmp_repo, tmp_path, monkeypatch, caps
     manifest["boards"][0]["input"]["sha256"] = "0" * 64
     path.write_text(json.dumps(manifest))
     verify = fr.verify_manifest
-    monkeypatch.setattr(fr, "verify_manifest", lambda m, repo=None: verify(m, repo=tmp_repo))
+    monkeypatch.setattr(
+        fr, "verify_manifest", lambda m, repo=None, keys=None: verify(m, repo=tmp_repo, keys=keys)
+    )
     assert fr.main(["--manifest", str(path), "verify"]) == 1
     rc = fr.main(["--manifest", str(path), "run", "--work-dir", str(tmp_path / "w"), "--tools", ""])
     assert rc == 2
     assert "manifest drift -- refusing to run" in capsys.readouterr().out
+
+
+def test_run_checks_drift_only_for_selected_boards(fr, tmp_repo, tmp_path, monkeypatch, capsys):
+    path = tmp_path / "manifest.json"
+    manifest = _frozen(fr, tmp_repo)
+    manifest["boards"][0]["input"]["sha256"] = "0" * 64  # board 00 drifted
+    real = fr.load_manifest()
+    for key in ("budgets", "pins", "stripping_policy"):
+        manifest[key] = real[key]
+    path.write_text(json.dumps(manifest))
+    verify = fr.verify_manifest
+    monkeypatch.setattr(
+        fr, "verify_manifest", lambda m, repo=None, keys=None: verify(m, repo=tmp_repo, keys=keys)
+    )
+    assert fr.verify_manifest(manifest, keys={"01"}) == []
+    assert any("hash drifted" in p for p in fr.verify_manifest(manifest, keys={"00", "01"}))
+    base = ["--manifest", str(path), "run", "--work-dir", str(tmp_path / "w"), "--tools", ""]
+    assert fr.main([*base, "--boards", "00"]) == 2
+    assert "manifest drift -- refusing to run" in capsys.readouterr().out
+    fr.main([*base, "--boards", "01"])
+    assert "manifest drift" not in capsys.readouterr().out
 
 
 def test_manifest_covers_fleet_with_explicit_markers(manifest):
@@ -403,16 +426,20 @@ def rule_bearing(tmp_path, board00_pcb):
 
 
 def test_dsn_audit_detects_omitted_constraints(fr, rule_bearing):
+    not_routing: list = []
     lost = fr.dsn_audit(
         rule_bearing,
         rule_bearing.with_suffix(".kicad_pro"),
         rule_bearing.with_suffix(".kicad_dru"),
         rule_bearing.with_suffix(".dsn"),
+        not_routing,
     )
     kinds = {e["kind"] for e in lost}
-    assert {"dru", "keepout", "zone", "copper_text"} <= kinds
+    assert {"keepout", "zone", "copper_text"} <= kinds
     details = " ".join(e["detail"] for e in lost)
-    assert "edge_clearance" in details
+    # Issue #6756: a fab-only rule is reported as not-routing, not as a loss.
+    assert "dru" not in kinds and "edge_clearance" not in details
+    assert [n["type"] for n in not_routing] == ["edge_clearance"]
     # Issue #6642: only the genuinely omitted rule area and zone are reported;
     # the plain keepout ("ko") and the GND pour are exported since #6594.
     keepouts = [e["detail"] for e in lost if e["kind"] == "keepout"]
@@ -508,18 +535,36 @@ def test_ses_round_trip_preserves_placement_and_pad_nets(fr, prep, tmp_path):
     assert out.read_text().count("(segment ") == 2
 
 
-def test_ses_import_loss_is_reported_not_hidden(fr, prep, tmp_path):
-    """Standard Freerouting nesting: our importer drops it; the audit must say so."""
+def test_ses_import_nested_session_with_resolution_is_lossless(fr, prep, tmp_path):
+    """Standard Freerouting nesting and ``(resolution um 10)`` import cleanly since #6593."""
     ses = tmp_path / "b.ses"
     ses.write_text(NESTED_SES)
     out = tmp_path / "routed.kicad_pcb"
     lost, counts = fr.ses_import(ses, prep.pcb, out)
     assert counts["ses"]["wires"] == 2
+    assert counts["imported_wires"] == 2
+    assert lost == []
+    assert out.exists()
+
+
+def test_ses_import_reports_dropped_wires_and_unapplied_resolution(fr, prep, tmp_path, monkeypatch):
+    """A regression in the importer must still surface as a loss, not be hidden."""
+    from kicad_tools.export.ses import SESToKiCadImporter
+
+    real_parse = SESToKiCadImporter.parse
+
+    def lossy_parse(self):
+        real_parse(self)
+        self._wires = self._wires[:1]
+        self._resolution_unit, self._resolution = "um", 1.0
+
+    monkeypatch.setattr(SESToKiCadImporter, "parse", lossy_parse)
+    ses = tmp_path / "b.ses"
+    ses.write_text(NESTED_SES)
+    lost, _ = fr.ses_import(ses, prep.pcb, tmp_path / "routed.kicad_pcb")
     details = [e["detail"] for e in lost]
-    if counts["imported_wires"] < 2:  # today: 0 (issue #6593)
-        assert f"{counts['imported_wires']}/2 SES wires imported" in details
-    assert any("resolution um 10" in d for d in details)
-    assert out.exists()  # the merge base is always written, even with 0 routes
+    assert "1/2 SES wires imported" in details
+    assert any("resolution um 10" in d and "applied um 1" in d for d in details)
 
 
 # ---------------------------------------------------------------------------
@@ -590,7 +635,8 @@ def test_fastroute_partial_ses_then_hang_is_timeout(fr, prep, board00, tmp_path)
     assert rec.outcome == "timeout"
     assert rec.partial_artifact and rec.partial_artifact.endswith(".ses")
     assert rec.score is None
-    assert rec.lost_constraints  # the DSN audit ran before routing
+    # the DSN audit ran before routing: its inert-rule output is recorded
+    assert rec.not_routing_rules
 
 
 def test_rerun_cannot_reuse_stale_artifacts(fr, prep, board00, tmp_path):
@@ -701,3 +747,226 @@ def test_outcome_vocabulary_is_closed(fr):
 def test_work_dir_inside_repo_is_refused(fr, tmp_path):
     assert fr.main(["run", "--work-dir", str(REPO_ROOT / "tmp-fleet"), "--tools", ""]) == 2
     assert not (REPO_ROOT / "tmp-fleet").exists()
+
+
+def _audit_with_dru(fr, rule_bearing, dru_text, *, dsn_edit=None):
+    dsn = rule_bearing.with_suffix(".dsn")
+    rule_bearing.with_suffix(".kicad_dru").write_text(dru_text)
+    if dsn_edit is not None:
+        from kicad_tools.export.dsn import KiCadToDSNExporter
+
+        dsn.write_text(dsn_edit(KiCadToDSNExporter(rule_bearing).export(dsn)))
+    not_routing: list = []
+    lost = fr.dsn_audit(
+        rule_bearing,
+        rule_bearing.with_suffix(".kicad_pro"),
+        rule_bearing.with_suffix(".kicad_dru"),
+        dsn,
+        not_routing,
+    )
+    return [e for e in lost if e["kind"] == "dru"], not_routing
+
+
+def test_dsn_audit_fab_only_rules_are_not_routing_not_lost(fr, rule_bearing):
+    dru, not_routing = _audit_with_dru(
+        fr,
+        rule_bearing,
+        '(version 1)\n(rule "Silk" (constraint silk_clearance (min 0.15mm)))\n'
+        '(rule "Ann" (constraint annular_width (min 0.13mm)))\n'
+        '(rule "Edge" (constraint edge_clearance (min 0.5mm)))\n',
+    )
+    assert dru == []
+    assert {n["type"] for n in not_routing} == {
+        "silk_clearance",
+        "annular_width",
+        "edge_clearance",
+    }
+
+
+_POWER_RULE = (
+    "(version 1)\n"
+    '(rule "Reviewed clearance - Power" (condition "A.NetClass == \'Power\' || '
+    "B.NetClass == 'Power'\") (constraint clearance (min 0.2mm)))\n"
+)
+
+
+def test_dsn_audit_class_clearance_covered_by_class_block(fr, rule_bearing):
+    dru, _ = _audit_with_dru(fr, rule_bearing, _POWER_RULE)  # Power clearance 0.3 >= 0.2
+    assert dru == []
+
+
+def test_dsn_audit_class_clearance_lost_when_class_block_weaker_or_absent(fr, rule_bearing):
+    def weaken(text):
+        start = text.index("(class Power")
+        head, tail = text[:start], text[start:]
+        return head + re.sub(r"\(clearance [\d.]+\)", "(clearance 100.0)", tail, count=1)
+
+    dru, _ = _audit_with_dru(fr, rule_bearing, _POWER_RULE, dsn_edit=weaken)
+    assert len(dru) == 1 and "Reviewed clearance - Power" in dru[0]["detail"]
+
+    def drop(text):
+        return re.sub(r"\n    \(class Power\b.*?\n    \)", "", text, count=1, flags=re.S)
+
+    dru, _ = _audit_with_dru(fr, rule_bearing, _POWER_RULE, dsn_edit=drop)
+    assert len(dru) == 1
+
+
+def test_dsn_audit_unexpressible_routing_rules_stay_lost(fr, rule_bearing):
+    dru, not_routing = _audit_with_dru(
+        fr,
+        rule_bearing,
+        "(version 1)\n"
+        '(rule "Layered" (layer "F.Cu") (constraint clearance (min 0.5mm)))\n'
+        '(rule "NoClass" (condition "A.Type == \'Via\'") (constraint clearance (min 0.5mm)))\n'
+        '(rule "Ghost" (condition "A.NetClass == \'Nope\'") (constraint clearance (min 0.5mm)))\n',
+    )
+    named = " ".join(e["detail"] for e in dru)
+    assert "'Layered'" in named and "'NoClass'" in named
+    # Issue #6800: 'Nope' has no member nets, so Ghost is inert, not a loss.
+    assert "'Ghost'" not in named
+    assert [r["rule"] for r in not_routing] == ["Ghost"]
+
+
+def test_dsn_audit_class_clearance_on_empty_class_is_not_routing(fr, rule_bearing):
+    dru, not_routing = _audit_with_dru(
+        fr,
+        rule_bearing,
+        "(version 1)\n"
+        '(rule "Empty one" (condition "A.NetClass == \'Nope\'") '
+        "(constraint clearance (min 0.5mm)))\n"
+        "(rule \"Empty two\" (condition \"A.NetClass == 'Nope' || B.NetClass == 'Void'\") "
+        "(constraint clearance (min 0.5mm)))\n",
+    )
+    assert dru == []
+    assert not_routing == [
+        {"rule": "Empty one", "type": "clearance", "min_mm": 0.5},
+        {"rule": "Empty two", "type": "clearance", "min_mm": 0.5},
+    ]
+
+
+def test_dsn_audit_class_clearance_mixed_empty_and_populated_stays_lost(fr, rule_bearing):
+    dru, not_routing = _audit_with_dru(
+        fr,
+        rule_bearing,
+        "(version 1)\n"
+        "(rule \"Mixed\" (condition \"A.NetClass == 'Nope' || B.NetClass == 'Power'\") "
+        "(constraint clearance (min 100mm)))\n",
+    )
+    assert len(dru) == 1 and "'Mixed'" in dru[0]["detail"]
+    assert not_routing == []
+
+
+def _audit_pro(fr, rule_bearing, edit_pro, dru_text=None):
+    pro_path = rule_bearing.with_suffix(".kicad_pro")
+    pro = json.loads(pro_path.read_text())
+    edit_pro(pro)
+    pro_path.write_text(json.dumps(pro))
+    dru = rule_bearing.with_suffix(".kicad_dru")
+    if dru_text is not None:
+        dru.write_text(dru_text)
+    not_routing: list = []
+    lost = fr.dsn_audit(rule_bearing, pro_path, dru, rule_bearing.with_suffix(".dsn"), not_routing)
+    return lost, not_routing
+
+
+def _set_edge(value):
+    def edit(pro):
+        pro.setdefault("board", {}).setdefault("design_settings", {}).setdefault("rules", {})[
+            "min_copper_edge_clearance"
+        ] = value
+
+    return edit
+
+
+def test_dsn_audit_edge_clearance_carried_by_inset_boundary(fr, rule_bearing):
+    lost, _ = _audit_pro(fr, rule_bearing, _set_edge(0.3))
+    assert [e for e in lost if e["kind"] == "board_rule"] == []
+
+
+def test_dsn_audit_edge_clearance_lost_when_boundary_not_inset_enough(fr, rule_bearing):
+    _audit_pro(fr, rule_bearing, _set_edge(0.3))  # export once with the inset
+    dsn = rule_bearing.with_suffix(".dsn")
+    # Restore the raw outline: the DSN on disk is what the audit trusts.
+    from kicad_tools.export.dsn import KiCadToDSNExporter
+
+    exp = KiCadToDSNExporter(rule_bearing)
+    exp._load()
+    exp._edge_clearance = 0.0
+    dsn.write_text(exp.export())
+    lost, _ = _audit_pro(fr, rule_bearing, _set_edge(0.3))
+    assert any(e["kind"] == "board_rule" and "min_copper_edge" in e["detail"] for e in lost)
+
+
+def test_dsn_audit_zero_edge_clearance_is_not_a_loss(fr, rule_bearing):
+    lost, _ = _audit_pro(fr, rule_bearing, _set_edge(0))
+    assert [e for e in lost if e["kind"] == "board_rule"] == []
+
+
+def test_dsn_audit_diff_pair_gap_implied_by_class_clearance(fr, rule_bearing):
+    rule = (
+        '(version 1)\n(rule "Gap" (condition "A.NetClass == \'Power\'") '
+        "(constraint diff_pair_gap (min {gap}mm)))\n"
+    )
+    dru, _ = _audit_with_dru(fr, rule_bearing, rule.format(gap=0.3))  # == Power clearance
+    assert dru == []
+    dru, _ = _audit_with_dru(fr, rule_bearing, rule.format(gap=0.2))
+    assert dru == []
+
+
+def test_dsn_audit_diff_pair_gap_stricter_than_class_clearance_is_lost(fr, rule_bearing):
+    rule = (
+        '(version 1)\n(rule "Gap" (condition "A.NetClass == \'Power\'") '
+        "(constraint diff_pair_gap (min 0.4mm)))\n"
+    )
+    dru, _ = _audit_with_dru(fr, rule_bearing, rule)
+    assert len(dru) == 1 and "diff_pair_gap" in dru[0]["detail"]
+
+
+def test_dsn_audit_zone_and_smd_pad_clearance_are_not_representable(fr, rule_bearing):
+    dru, not_routing = _audit_with_dru(
+        fr,
+        rule_bearing,
+        "(version 1)\n"
+        '(rule "Native zone clearance" (layer "F.Cu")\n'
+        "  (condition \"(A.Type == 'Zone' && A.NetName == 'GND') || "
+        "(B.Type == 'Zone' && B.NetName == 'GND')\")\n"
+        "  (constraint clearance (min 0.3mm)))\n"
+        '(rule "SMD Pad Clearance - jlcpcb"\n'
+        "  (condition \"A.Type == 'Pad' && B.Type == 'Pad' && A.Pad_Type == 'SMD' && "
+        "B.Pad_Type == 'SMD' && A.Net != B.Net\")\n"
+        "  (constraint clearance (min 0.5mm)))\n",
+    )
+    assert dru == []
+    assert {n["rule"] for n in not_routing} == {
+        "Native zone clearance",
+        "SMD Pad Clearance - jlcpcb",
+    }
+
+
+def test_dsn_audit_name_only_zone_or_smd_rule_is_still_a_loss(fr, rule_bearing):
+    """The name alone is not enough: a rule whose condition also selects
+    tracks (or has none) is still something the router must honour."""
+    dru, not_routing = _audit_with_dru(
+        fr,
+        rule_bearing,
+        "(version 1)\n"
+        '(rule "Native zone clearance" (layer "F.Cu") (constraint clearance (min 0.3mm)))\n'
+        '(rule "SMD Pad Clearance - jlcpcb"\n'
+        "  (condition \"A.Type == 'Pad' && B.Type == 'Track'\")\n"
+        "  (constraint clearance (min 0.5mm)))\n",
+    )
+    assert not_routing == []
+    assert len(dru) == 2
+
+
+def test_dsn_audit_diff_pair_length_rules_stay_lost(fr, rule_bearing):
+    dru, not_routing = _audit_with_dru(
+        fr,
+        rule_bearing,
+        "(version 1)\n"
+        '(rule "Skew" (condition "A.NetClass == \'Power\'") (constraint skew (max 0.1mm)))\n'
+        '(rule "Unc" (condition "A.NetClass == \'Power\'") '
+        "(constraint diff_pair_uncoupled (max 5mm)))\n"
+        '(rule "Vias" (condition "A.NetClass == \'Power\'") (constraint via_count (max 2)))\n',
+    )
+    assert len(dru) == 3 and not_routing == []

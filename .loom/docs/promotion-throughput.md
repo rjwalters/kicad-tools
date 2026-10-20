@@ -10,7 +10,7 @@ Three throttles caused that tail. Each is fixed below.
 
 ## 1. Promotion runs every pass, even while PRs remain
 
-> **Step dispatch (accepted design, #11894; not yet implemented).** Under `autonomous.workFinder.stepDispatch: on`, promotion runs as one terminal targeted Champion step per curated issue (`/loom:champion --issue N`). The PR-row and promotion slices and `tier2Cap` described below don't apply to those steps. See [`docs/design/work-finder-step-dispatch.md`](https://github.com/rjwalters/loom/blob/main/docs/design/work-finder-step-dispatch.md) §12.
+> **Step dispatch (#11894, live since #11909).** Promotion runs as one terminal targeted Champion step per curated issue (`/loom:champion --issue N`), drawn by the work finder. The interval Champion runs `--non-item` only, so the PR-row and promotion slices and `tier2Cap` described below no longer drive promotion. See [`docs/design/work-finder-step-dispatch.md`](https://github.com/rjwalters/loom/blob/main/docs/design/work-finder-step-dispatch.md) §12.
 
 Champion used to promote only once no PRs remained. A repository with a steady
 or held PR queue never reached promotion. On 2026-10-07, rjwalters/loom had 38
@@ -237,7 +237,7 @@ A premise-false close (#7657) ends the issue instead. What this retired:
   anyway: Curator's revise always changes the hash. `PRIOR_REJECTIONS` alone
   bounds the round trip.
 - **The dependency defer**, which left the issue curated with a marker patched
-  onto a comment. It is a block now, lifted by `release-stale-blocked`.
+  onto a comment. It is a block now, lifted by a role or a human (#11301).
 - **`loom:needs-revision`.** `labels.json` retires it onto `loom:triage` with
   `also_remove: ["loom:curated"]`, so `loom-daemon labels migrate` moves an
   open item to the state a revise verdict writes today. A migrated item has no

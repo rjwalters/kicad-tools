@@ -146,3 +146,27 @@ def test_segments_copper_touch_is_invariant_under_collinear_splits():
                 for i in range(parts)
             )
             assert touched is expected, f"{parts}-way split changed the verdict"
+
+
+@pytest.mark.parametrize("offset", [(0.0, 0.0), (150.0, 150.0), (-4.0, 92.0), (1024.0, -2048.0)])
+def test_segments_copper_touch_is_translation_invariant_at_a_tie(offset):
+    """#7224: ``point_segment_distance`` uses translation-invariant differences.
+
+    Coordinates are dyadic rationals and offsets integers, so every coordinate
+    difference is exact under translation; the verdict at the exact tie
+    (``reach == distance``) must therefore be identical for every offset.
+    """
+    from kicad_tools.geometry.copper import point_segment_distance
+
+    ox, oy = offset
+    a0, a1 = (0.0, 0.0), (7.5, 2.25)
+    p = (3.25, 1.5)
+    base = point_segment_distance(p, a0, a1)
+    sh = lambda q: (q[0] + ox, q[1] + oy)  # noqa: E731
+    assert point_segment_distance(sh(p), sh(a0), sh(a1)) == base
+
+    # Two-segment capsule tie: B is a degenerate segment at p; widths chosen
+    # so reach equals the exact centerline distance.
+    width = 2 * base
+    assert segments_copper_touch(sh(a0), sh(a1), width, sh(p), sh(p), 0.0)
+    assert not segments_copper_touch(sh(a0), sh(a1), width * (1 - 1e-9), sh(p), sh(p), 0.0)

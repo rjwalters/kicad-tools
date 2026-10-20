@@ -64,15 +64,16 @@ import re
 import shutil
 import signal
 import sys
-import textwrap
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 from kicad_tools.core.kicad_lock import check_kicad_lock
+from kicad_tools.sexp.scan import has_unquoted
 
 from .route_deadline import record_stage, restore_stage
+from .route_exit_codes_help import ROUTE_EXIT_CODES_EPILOG, ROUTE_PERFORMANCE_EPILOG
 from .route_placement import for_attempt, select_result
 
 if TYPE_CHECKING:
@@ -420,8 +421,6 @@ def _multistart_trial_kwargs(args) -> dict:
     """
     negotiated_kwargs: dict = {
         "max_iterations": args.iterations,
-        "batch_routing": getattr(args, "batch_routing", False)
-        or getattr(args, "high_performance", False),
         "hierarchical": getattr(args, "hierarchical", False),
         "perturbation": getattr(args, "perturbation", True),
         "use_targeted_ripup": getattr(args, "targeted_ripup", False),
@@ -612,7 +611,14 @@ def _print_unverified_banner(args, output_path, headline: str) -> None:
     """Replace a SUCCESS banner whose verification was skipped (issue #6273)."""
     checks = _unverified_checks(args)
     print(f"UNVERIFIED: {headline}")
-    print(f"  Skipped for --timeout: {', '.join(checks)} -- the board was NOT verified.")
+    failure = getattr(args, "_stranded_pour_failure", None)
+    failure = failure if isinstance(failure, str) and failure else None
+    timed = [c for c in checks if not (failure and c == "stranded-pour check")]
+    if timed:
+        print(f"  Skipped for --timeout: {', '.join(timed)} -- the board was NOT verified.")
+    if failure and len(timed) < len(checks):
+        # Issue #6724: kicad-cli itself failed, not the --timeout budget.
+        print(f"  kicad-cli failed during the stranded-pour check ({failure}) -- NOT verified.")
     print(
         f"  Run 'kct check {output_path} --mfr {getattr(args, 'manufacturer', 'jlcpcb')}' "
         "before manufacturing (exit code "
@@ -1732,7 +1738,7 @@ def _write_routed_pcb(
     tmp_path.write_text(output_content)
     # fsync the file so a crash between write and rename does not leave
     # a partial-content tmp file masquerading as the routed PCB.
-    with open(tmp_path, "rb") as f:
+    with open(tmp_path, "r+b") as f:
         os.fsync(f.fileno())
     os.replace(tmp_path, output_path)
     from .route_receipt import record_publication
@@ -1740,6 +1746,81 @@ def _write_routed_pcb(
     record_publication(output_path)
 
     return output_path
+
+
+def _committed_coupled_skip_nets(router) -> set[int] | None:
+    """Nets the trace optimizer must leave untouched (Issue #6840).
+
+    Every diff pair the coupled pre-pass committed AS COUPLED (recorded by
+    ``DiffPairRouter.route_differential_pair_coupled`` on the autorouter;
+    independent fallbacks are never in it).  ``optimize_routes_grid_synced``
+    already passes ``skip_nets`` through untouched (#3508), but ``kct route``
+    never supplied it, so the optimizer rewrote one rail of a committed pair
+    onto a different row (06rf MIPI_D0: 0.40 mm uncoupled at commit, 20.1 mm
+    in the final board).  ``None`` when there is nothing to skip.
+    """
+    nets = getattr(router, "_committed_coupled_nets", None)
+    if not isinstance(nets, set) or not nets:
+        return None
+    return set(nets)
+
+
+def _optimize_traces(router: "Autorouter", args: argparse.Namespace, *, quiet: bool) -> None:
+    """The ``kct route`` trace-optimization pass, shared by every pipeline.
+
+    Builds the standard :class:`TraceOptimizer`, snapshots connectivity
+    (#2596), runs the grid-transactional optimize (#3507) and enforces the
+    connectivity invariant.  Committed coupled diff pairs are passed as
+    ``skip_nets`` (#6840) so the optimizer never rewrites one rail of a pair
+    the coupled pre-pass committed.  Issue #6847: one helper instead of four
+    copies, so the skip set cannot drift out of a single pipeline and the
+    behaviour is testable without driving a whole route.
+    """
+    from kicad_tools.cli.progress import spinner
+    from kicad_tools.router.optimizer import (
+        OptimizationConfig,
+        TraceOptimizer,
+        make_collision_checker,
+        optimize_routes_grid_synced,
+    )
+
+    if not quiet:
+        print("\n--- Optimizing traces ---")
+
+    opt_config = OptimizationConfig(
+        merge_collinear=True,
+        eliminate_zigzags=True,
+        compress_staircase=True,
+        convert_45_corners=True,
+        corner_chamfer_size=0.5,
+        minimize_vias=True,
+    )
+    # Issue #2303: Use overflow-tolerant collision checking when the router
+    # finished with residual overflow.  This prevents the optimizer from
+    # fragmenting routes through overused cells.
+    has_overflow = router.grid.get_total_overflow() > 0
+    collision_checker = make_collision_checker(router.grid, ignore_overflow=has_overflow)
+    optimizer = TraceOptimizer(config=opt_config, collision_checker=collision_checker)
+
+    # Issue #2596: snapshot per-net connectivity before optimize so any net
+    # whose pad-to-pad connectivity regresses can be reverted.
+    _ci_snapshot = _connectivity_snapshot(router)
+
+    with spinner("Optimizing traces...", quiet=quiet):
+        # Issue #3507: grid-transactional optimize -- each mutated route's old
+        # copper is unmarked and the new copper marked so the grid never goes
+        # stale across the pass.
+        optimize_routes_grid_synced(
+            router, optimizer, skip_nets=_committed_coupled_skip_nets(router)
+        )
+
+    _enforce_connectivity_invariant_or_exit(
+        router,
+        _ci_snapshot,
+        phase="optimize",
+        args=args,
+        quiet=quiet,
+    )
 
 
 def _connectivity_snapshot(router: "Autorouter"):
@@ -1913,6 +1994,28 @@ def _resolve_route_engine(args: argparse.Namespace) -> str:
     return getattr(args, "route_engine", "grid") or "grid"
 
 
+def _match_group_tuning_engage(args: argparse.Namespace, router: Any) -> str | None:
+    """Return the match-group tuning engage policy for this run, or ``None``.
+
+    Issue #6674:
+
+    * ``--length-match-groups`` -> ``"length_critical"`` on every engine
+      (the legacy opt-in behaviour, unchanged).
+    * no flag, ``--route-engine lattice``, and at least one loaded net class
+      declares ``length_match_group`` -> ``"checker_limit"``: tune the
+      groups ``kct check`` would fail, to the checker's own tolerance.
+    * otherwise (including every grid run without the flag) -> ``None``.
+    """
+    if getattr(args, "length_match_groups", False):
+        return "length_critical"
+    if _resolve_route_engine(args) != "lattice":
+        return None
+    net_class_map = getattr(router, "net_class_map", None) or {}
+    if any(nc.effective_length_match_group() for nc in net_class_map.values()):
+        return "checker_limit"
+    return None
+
+
 def _run_consolidation_pass(
     router: Any,
     args: argparse.Namespace,
@@ -1971,6 +2074,503 @@ def _run_consolidation_pass(
     _record_stage_quality(stage_recorder, STAGE_POST_CONSOLIDATE, router)
     if not quiet and stats.runs_merged:
         print(f"  Consolidation: {stats.summary()}")
+
+
+def _warn_match_groups_gated_off(router: Any, detected_groups: list) -> None:
+    """Warn on stderr when ``length_critical=False`` gates every group off (#6968).
+
+    ``--length-match-groups`` keeps its legacy ``length_critical`` gate, so a
+    class map that declares ``length_match_group`` but leaves
+    ``length_critical: false`` (board 07's sidecar) tunes nothing: every
+    member comes back ``not_length_critical``.  Like #3440's no-declaration
+    warning this goes to stderr regardless of ``--quiet``.  The flag does NOT
+    override the per-class ``length_critical=False``: that is the class map
+    owner's explicit decision.
+    """
+    resolve = getattr(router, "_resolve_net_class_for_group", None)
+    if resolve is None:
+        return
+    gated: list[str] = []
+    for group in detected_groups:
+        try:
+            net_class = resolve(group)
+        except Exception:  # noqa: BLE001 - a warning must never break routing
+            net_class = None
+        if net_class is not None and not net_class.length_critical:
+            gated.append(group.name)
+    if not gated or len(gated) != len(detected_groups):
+        return
+    print(
+        "WARNING: --length-match-groups is INACTIVE: every detected match "
+        f"group ({', '.join(sorted(gated))}) belongs to a net class with "
+        "length_critical=false, so no skew tuning will run.  Set "
+        '"length_critical": true on those classes in the --net-class-map '
+        "sidecar to tune them.",
+        file=sys.stderr,
+    )
+
+
+def _run_match_group_tuning_phase(router: Any, args: argparse.Namespace, *, quiet: bool) -> None:
+    """Run the N-trace match-group length tuner on ``router``'s final copper.
+
+    Shared by the single-attempt tail of ``_run_main_impl`` and the escalation
+    flows (Issue #6968: the default ``--auto-layers`` path used to skip it, so
+    ``--length-match-groups`` silently tuned nothing on a plain ``kct route``).
+    Call it once, after the geometric post-passes and the finalize gate and
+    before ``_finalize_routes``.
+    """
+    _mg_engage = _match_group_tuning_engage(args, router)
+    _mg_auto = _mg_engage == "checker_limit"
+    if _mg_engage is None:
+        return
+    if not router.routes:
+        if _mg_engage == "length_critical":
+            # Issue #6968: never skip an explicit request silently.
+            print(
+                "WARNING: --length-match-groups did not run: the router "
+                "committed no routes, so there is no copper to tune.",
+                file=sys.stderr,
+            )
+        return
+    from kicad_tools.router.match_group_detection import detect_match_groups
+
+    if not quiet:
+        if _mg_auto:
+            print(
+                "\n--- Length-Match Groups (auto: lattice, kct check "
+                "match_group_length_skew limit; Issue #6674) ---"
+            )
+        else:
+            print("\n--- Length-Match Groups (Epic #2661 Phase 3H) ---")
+    # Issue #3440: --length-match-groups silently no-ops without
+    # length_match_group declarations (detection consults
+    # NetClassRouting declarations exclusively when suffix inference
+    # is off; the built-in DEFAULT_NET_CLASS_MAP declares none).
+    # Warn LOUDLY -- on stderr, regardless of --quiet -- so a recipe
+    # that forgot --net-class-map doesn't sail through with untuned
+    # skew.
+    _has_group_declarations = any(
+        nc.effective_length_match_group() for nc in router.net_class_map.values()
+    )
+    if not _has_group_declarations:
+        print(
+            "WARNING: --length-match-groups is INACTIVE: no loaded net "
+            "class declares length_match_group, so no match groups can "
+            "be detected and no skew tuning will run.  Pass "
+            "--net-class-map <sidecar.json> (e.g. the board's "
+            "output/net_class_map.json) with length_match_group "
+            "declarations.",
+            file=sys.stderr,
+        )
+    # Build net_to_class + a class-name-keyed routing map so the
+    # explicit-declaration consultation in ``_gather_explicit_groups``
+    # can find each net's NetClassRouting.  ``router.net_class_map`` is
+    # keyed by NET NAME (e.g. "DQ0"), but ``detect_match_groups`` looks
+    # up by CLASS NAME (e.g. "DDR_DATA_BYTE_0").  Mirrors the
+    # synth_routing idiom in ``validate/match_group_skew.py:174-181``
+    # (Issue #3098 -- without this the detector returned an empty
+    # group list and the orchestrator silently no-op'd).
+    net_to_class: dict[str, str] = {}
+    synth_routing: dict = dict(router.net_class_map)
+    for net_name, net_class in router.net_class_map.items():
+        net_to_class[net_name] = net_class.name
+        synth_routing.setdefault(net_class.name, net_class)
+    try:
+        detected_groups = detect_match_groups(
+            net_names=router.net_names,
+            net_class_routing=synth_routing,
+            net_to_class=net_to_class,
+            length_tracker=router.length_tracker,
+            enable_suffix_inference=False,
+        )
+    except Exception as exc:
+        if not quiet:
+            print(f"  Match-group detection failed: {exc}; skipping.")
+        detected_groups = []
+
+    if detected_groups and _mg_engage == "length_critical":
+        _warn_match_groups_gated_off(router, detected_groups)
+
+    if not detected_groups:
+        if not quiet:
+            print("  No match groups detected; nothing to tune.")
+    else:
+        # Snapshot connectivity for the pad-to-pad invariant.
+        _ci_snapshot_groups = _connectivity_snapshot(router)
+        tune_results_groups = router.apply_match_group_tuning(
+            detected_groups=detected_groups,
+            verbose=not quiet,
+            engage=_mg_engage,
+        )
+        _enforce_connectivity_invariant_or_exit(
+            router,
+            _ci_snapshot_groups,
+            phase="length_match_groups",
+            args=args,
+            quiet=quiet,
+        )
+        if not quiet:
+            # Aggregate per-member counters across all groups for a
+            # single end-of-phase summary line.  Issue #3440: the
+            # shared formatter counts EVERY TuneResult.reason value
+            # (the legacy five-bucket line silently dropped
+            # ``reference`` / ``longer_than_reference`` / ``unrouted``
+            # members, producing the all-zeros line for a
+            # 15.4mm-skew group).
+            from kicad_tools.router.match_group_tuning import (
+                format_reason_counts,
+            )
+
+            all_results = [
+                res
+                for member_dict in tune_results_groups.values()
+                for (_route, res) in member_dict.values()
+            ]
+            print(
+                f"  Summary: {len(tune_results_groups)} groups, "
+                f"{format_reason_counts(r.reason for r in all_results)}"
+            )
+
+
+def _run_diffpair_gap_tightening_phase(
+    router: Any,
+    args: argparse.Namespace,
+    *,
+    quiet: bool = False,
+) -> Any:
+    """Run the opt-in diff-pair gap-tightening pass (Issue #7344).
+
+    Engaged only by ``--tighten-diffpair-gap``; without it this is a no-op,
+    so routing output is byte-identical.  Called after the geometric
+    post-passes and before skew / match-group tuning, so the tuners see the
+    final trunk lengths.  Returns the per-pair results, or ``None`` when the
+    pass did not run.
+    """
+    if not getattr(args, "tighten_diffpair_gap", False):
+        return None
+    if not router.routes:
+        if not quiet:
+            print("\n--- Diff-Pair Gap Tightening: skipped (no routes) ---")
+        return None
+    if not quiet:
+        print("\n--- Diff-Pair Gap Tightening (Issue #7344) ---")
+    _ci_snapshot = _connectivity_snapshot(router)
+    results = router.apply_diffpair_gap_tightening(verbose=not quiet)
+    _enforce_connectivity_invariant_or_exit(
+        router,
+        _ci_snapshot,
+        phase="tighten_diffpair_gap",
+        args=args,
+        quiet=quiet,
+    )
+    if not quiet:
+        if not results:
+            print("  No differential pairs detected; nothing to tighten.")
+        else:
+            n_tight = sum(1 for r in results.values() if r.reason == "tightened")
+            n_band = sum(1 for r in results.values() if r.reason == "in_band")
+            n_declined = len(results) - n_tight - n_band
+            print(f"  Summary: {n_tight} tightened, {n_band} in band, {n_declined} declined")
+    return results
+
+
+def _diffpair_skew_tuning_mode(args: argparse.Namespace) -> str | None:
+    """Which diff-pair skew tuning (if any) runs after routing.
+
+    * ``"length_critical"`` -- ``--length-match-diffpairs`` (Issue #2648),
+      on every engine: tune ``length_critical`` classes to
+      ``effective_skew_tolerance(0.5)``.  Unchanged by Issue #6664.
+    * ``"checker_skew_limit"`` -- Issue #6664: the resolved engine is
+      ``lattice`` and ``--differential-pairs`` is set.  Tune every pair whose
+      skew ``kct check`` fails as an error, to the checker's own limit.  Grid
+      is frozen for new pair features until #6448, so it never auto-engages.
+    * ``None`` -- no tuning.
+    """
+    if getattr(args, "length_match_diffpairs", False):
+        return "length_critical"
+    if getattr(args, "differential_pairs", False) and _resolve_route_engine(args) == "lattice":
+        return "checker_skew_limit"
+    return None
+
+
+def _run_diffpair_skew_tuning(
+    router: Any,
+    args: argparse.Namespace,
+    *,
+    quiet: bool = False,
+) -> Any:
+    """Run the post-route diff-pair skew tuner when engaged (see
+    :func:`_diffpair_skew_tuning_mode`).  Returns the per-pair results, or
+    ``None`` when the tuner did not run."""
+    mode = _diffpair_skew_tuning_mode(args)
+    if mode is None:
+        return None
+    if mode == "length_critical" and not args.differential_pairs:
+        if not quiet:
+            print(
+                "\n--- Length-Match Diff-Pairs: skipped ---\n"
+                "  --length-match-diffpairs requires --differential-pairs "
+                "(no detection means no pairs to tune)."
+            )
+        return None
+
+    from kicad_tools.router.diffpair_detection import detect_diff_pairs
+
+    if mode == "length_critical":
+        if not quiet:
+            print("\n--- Length-Match Diff-Pairs (Epic #2556 Phase 3I) ---")
+        detected_pairs = detect_diff_pairs(net_names=router.net_names)
+    else:
+        if not quiet:
+            print("\n--- Diff-Pair Skew Tuning (lattice, kct check skew limit; Issue #6664) ---")
+        # Issue #6664 (#6447 item 4): detect with the class map, so
+        # class-declared pairs (diffpair_partner) are found, not only
+        # _P/_N-suffixed ones -- the same synthesis ``kct check`` uses.
+        from kicad_tools.router.diffpair_detection import build_synth_routing
+
+        class_routing, net_to_class = build_synth_routing(
+            getattr(router, "net_class_map", None) or {}
+        )
+        detected_pairs = detect_diff_pairs(
+            net_names=router.net_names,
+            net_class_routing=class_routing or None,
+            net_to_class=net_to_class or None,
+        )
+    if not detected_pairs:
+        if not quiet:
+            print("  No differential pairs detected; nothing to tune.")
+        return None
+
+    # Snapshot connectivity for the pad-to-pad invariant.
+    _ci_snapshot_skew = _connectivity_snapshot(router)
+    if mode == "length_critical":
+        tune_results = router.apply_diffpair_length_tuning(
+            detected_pairs=detected_pairs,
+            verbose=not quiet,
+        )
+    else:
+        tune_results = router.apply_diffpair_length_tuning(
+            detected_pairs=detected_pairs,
+            verbose=not quiet,
+            engage="checker_skew_limit",
+        )
+    _enforce_connectivity_invariant_or_exit(
+        router,
+        _ci_snapshot_skew,
+        phase="length_match_diffpairs",
+        args=args,
+        quiet=quiet,
+    )
+    if not quiet:
+        n_tuned = sum(1 for r in tune_results.values() if r.reason == "tuned")
+        n_clean = sum(1 for r in tune_results.values() if r.reason == "already_within_tolerance")
+        n_rollback = sum(
+            1 for r in tune_results.values() if r.reason == "post_insertion_drc_violation"
+        )
+        n_budget = sum(1 for r in tune_results.values() if r.reason == "exceeded_max_inserts")
+        n_overshoot = sum(1 for r in tune_results.values() if r.reason == "overshoot")
+        if mode == "length_critical":
+            n_skipped = sum(1 for r in tune_results.values() if r.reason == "not_length_critical")
+            print(
+                f"  Summary: {n_tuned} tuned, {n_clean} clean, "
+                f"{n_rollback} rolled back, {n_budget} budget-exhausted, "
+                f"{n_overshoot} overshoot, "
+                f"{n_skipped} skipped (not length-critical)"
+            )
+        else:
+            n_declined = sum(
+                1 for r in tune_results.values() if r.reason == "skew_limit_not_enforced"
+            )
+            n_over = sum(
+                1
+                for r in tune_results.values()
+                if r.tolerance_mm is not None
+                and r.reason != "skew_limit_not_enforced"
+                and r.skew_after_mm > r.tolerance_mm
+            )
+            print(
+                f"  Summary: {n_tuned} tuned, {n_clean} clean, "
+                f"{n_rollback} rolled back, {n_budget} budget-exhausted, "
+                f"{n_overshoot} overshoot, "
+                f"{n_declined} declined (limit is a warning), "
+                f"{n_over} still over the kct check skew limit"
+            )
+    return tune_results
+
+
+def _run_post_route_pipeline(
+    router: Any,
+    args: argparse.Namespace,
+    *,
+    quiet: bool,
+    restore_route_grid: bool = False,
+    report_segment_delta: bool = False,
+) -> int | None:
+    """Run the shared post-route pipeline on ``router``'s committed copper.
+
+    Issue #7377 (step 1): ``kct route`` used to carry four copy-pasted
+    post-route tails -- ``route_with_layer_escalation`` (the default
+    ``--auto-layers`` flow), ``route_with_rule_relaxation``,
+    ``route_with_combined_escalation`` and the single-attempt tail of
+    ``_run_main_impl`` -- and they drifted: ``--length-match-diffpairs``
+    (#2648) and the #6664 lattice skew auto-tune lived only in the
+    single-attempt tail, so the default flow silently skipped them.  Every
+    tail now calls this one helper, so a new post-route pass is wired once.
+
+    The sequence (unchanged from the four tails):
+
+    1. ``optimization`` stage boundary, per-stage quality recorder (#4732),
+       grid-engine gate for the geometric post-passes (#4281);
+    2. trace optimizer, then the DRC nudge under a connectivity
+       snapshot/enforce guard (#2596);
+    3. collinear consolidation (#4732);
+    4. ``finalization`` stage boundary, finalize gate (#4208) and the
+       stage-quality report;
+    5. diff-pair gap tightening (#7344), diff-pair skew tuning
+       (#2648/#6664), then match-group tuning (#2723/#6968) -- the tuners
+       run in that order so each sees the final trunk geometry and the
+       within-pair skew invariant holds before group tuning.
+
+    ``restore_route_grid`` and ``report_segment_delta`` preserve two
+    single-attempt-only behaviours (re-marking grid copper before the
+    optimizer, and the ``Segments: a -> b`` summary print).
+
+    Returns the exit code to return when an interrupt stopped the run at a
+    stage boundary (#6324), else ``None``.  The caller runs
+    ``_finalize_routes`` next.
+    """
+    from kicad_tools.cli.progress import spinner
+
+    _stop_rc = _stage_boundary("optimization")  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
+    # Pre-optimization statistics for the single-attempt summary print.
+    pre_segments = sum(len(r.segments) for r in router.routes)
+    pre_vias = sum(len(r.vias) for r in router.routes)
+
+    # Issue #4732: opt-in per-stage routing-quality instrumentation.
+    # Read-only -- it measures the copper each stage hands to the next
+    # so the surviving fragment/staircase artifacts can be attributed
+    # to a stage instead of guessed at.  ``None`` (the default) makes
+    # every record/print below a no-op.
+    _stage_quality = _make_stage_quality_recorder(args)
+    _record_stage_quality(_stage_quality, STAGE_PRE_OPTIMIZE, router)
+
+    # Issue #4281: the geometric post-passes (optimize + DRC nudge) are
+    # grid-engine-only -- lattice/mesh copper must not be touched.
+    _post_passes_enabled = _engine_post_passes_enabled(args, quiet=quiet)
+    if _post_passes_enabled:
+        _mark_nongrid_routes_for_post_pass(router, args, quiet=quiet)
+        if restore_route_grid and _resolve_route_engine(args) == "grid":
+            _restore_route_grid(router, router.routes)
+
+    # Optimize traces (unless --no-optimize/--raw flag is set)
+    if (
+        _post_passes_enabled
+        and not args.no_optimize
+        and router.routes
+        and _optimization_fits_budget(args, quiet=quiet)
+    ):
+        _optimize_traces(router, args, quiet=quiet)
+        _record_stage_quality(_stage_quality, STAGE_POST_OPTIMIZE, router)
+
+    _stop_rc = _stage_boundary("drc-nudge")  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
+    # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
+    # the nudge is NOT covered by --no-optimize, so it needs its own gate).
+    # Issue #6273: like the optimizer, it yields to save / fill / DRC when
+    # routing overran into the post-route reserve.
+    if (
+        _post_passes_enabled
+        and router.routes
+        and _optimization_fits_budget(args, quiet=quiet, stage="DRC nudge")
+    ):
+        from kicad_tools.router.drc_nudge import drc_verify_and_nudge
+
+        # Issue #2596: snapshot connectivity again before nudge.  The
+        # post-optimize routes are the new baseline -- nudge must not
+        # regress them further.
+        _ci_snapshot_nudge = _connectivity_snapshot(router)
+
+        with spinner("DRC nudge pass...", quiet=quiet):
+            nudge_result = drc_verify_and_nudge(router)
+        if not quiet and nudge_result.initial_violations > 0:
+            print(f"  {nudge_result.summary()}")
+
+        _enforce_connectivity_invariant_or_exit(
+            router,
+            _ci_snapshot_nudge,
+            phase="nudge",
+            args=args,
+            quiet=quiet,
+        )
+        _record_stage_quality(_stage_quality, STAGE_POST_NUDGE, router)
+
+    _stop_rc = _stage_boundary("consolidation")  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
+    # Issue #4732: post-nudge collinear consolidation.  Runs LAST of the
+    # geometric passes so it also absorbs fragments the nudge introduced.
+    _run_consolidation_pass(
+        router,
+        args,
+        post_passes_enabled=_post_passes_enabled,
+        stage_recorder=_stage_quality,
+        quiet=quiet,
+    )
+
+    _stop_rc = _stage_boundary("finalization")  # issue #6324
+    if _stop_rc is not None:
+        return _stop_rc
+    # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
+    # over the post-optimize/post-nudge copper.  An rtree-less
+    # optimizer can introduce a cross-net crossing the pre-optimize
+    # finalize gate never saw; demote it before the canonical write.
+    # Issue #4281: unconditional -- runs even when the geometric
+    # post-passes are skipped for non-grid engines (defense in depth).
+    if router.routes:
+        _finalize_committed_copper_or_demote(router, quiet=quiet)
+    _record_stage_quality(_stage_quality, STAGE_POST_FINALIZE, router)
+    _print_stage_quality_report(_stage_quality)
+
+    if report_segment_delta and _post_passes_enabled and router.routes and not quiet:
+        post_segments = sum(len(r.segments) for r in router.routes)
+        post_vias = sum(len(r.vias) for r in router.routes)
+        segment_reduction = (
+            ((pre_segments - post_segments) / pre_segments * 100) if pre_segments > 0 else 0
+        )
+        via_reduction = ((pre_vias - post_vias) / pre_vias * 100) if pre_vias > 0 else 0
+        print(f"  Segments: {pre_segments} -> {post_segments} ({-segment_reduction:+.1f}%)")
+        if pre_vias > 0:
+            print(f"  Vias:     {pre_vias} -> {post_vias} ({-via_reduction:+.1f}%)")
+
+    # Issue #7344: opt-in diff-pair gap tightening, before skew and
+    # match-group tuning so both tuners see the final trunk lengths.
+    _run_diffpair_gap_tightening_phase(router, args, quiet=quiet)
+
+    # Differential-pair length-match (skew) tuning -- Epic #2556 Phase 3I
+    # (Issue #2648) via --length-match-diffpairs, and auto-engaged on lattice
+    # output with --differential-pairs (Issue #6664).  Issue #7377: before
+    # this helper existed only the single-attempt tail ran it, so both were
+    # silent no-ops on the default --auto-layers path.
+    if router.routes:
+        _run_diffpair_skew_tuning(router, args, quiet=quiet)
+
+    # N-trace match-group length-match (skew) tuning -- Epic #2661 Phase 3H
+    # (Issue #2723).  Engaged via --length-match-groups (opt-in).  Runs
+    # AFTER --length-match-diffpairs so the within-pair skew invariant is
+    # preserved before group tuning perturbs lane lengths.  Graceful
+    # short-circuit when no groups are declared / detected.
+    #
+    # Issue #6674: on the lattice engine the tuner also runs WITHOUT the
+    # flag, for declared groups whose spread exceeds the limit ``kct check``
+    # enforces (``engage="checker_limit"``).  Grid is not auto-engaged
+    # (frozen for pair-adjacent features until #6448); the explicit flag
+    # keeps its legacy ``length_critical`` gating on every engine.
+    # Issue #6968: the escalation flows run it too.
+    _run_match_group_tuning_phase(router, args, quiet=quiet)
+    return None
 
 
 def _engine_post_passes_enabled(
@@ -3135,7 +3735,7 @@ def _process_state_guard() -> "Iterator[None]":
     """Snapshot/restore the process-global state that ``_main_impl`` stamps.
 
     ``route_cmd.main()`` is invoked **in-process** by ``kct route``
-    (``commands/routing.py``) and by dozens of test files, but the
+    (``cli.main``'s argv passthrough) and by dozens of test files, but the
     implementation mutates process-global state and (before issue #4559)
     restored none of it, silently poisoning every subsequent in-process
     invocation.  This guard wraps the outermost ``main()`` boundary and
@@ -3357,7 +3957,7 @@ def _save_partial_results() -> bool:
             # ``<path>.write_text(<content variable>)`` shape.
             tmp_path = save_path.with_suffix(save_path.suffix + ".tmp")
             tmp_path.write_text(output_content)
-            with open(tmp_path, "rb") as f:
+            with open(tmp_path, "r+b") as f:
                 os.fsync(f.fileno())
             os.replace(tmp_path, save_path)
             from .route_receipt import record_publication
@@ -3377,6 +3977,18 @@ def _save_partial_results() -> bool:
                 snapshot=str(save_path),
                 **info,
             )
+
+            # Issue #6694: persist the routing plan for the board just saved
+            # (``<stem>_partial.routing_plan.json``), BEFORE the slow witness
+            # write below, so a deadline run keeps its most useful diagnostic
+            # without reaching the canonical save.  Pure JSON dump of an
+            # already-built plan (milliseconds); non-fatal on any failure.
+            with contextlib.suppress(Exception):
+                _write_routing_plan_sidecar(
+                    cast(Path, save_path),
+                    getattr(router, "routing_plan", None),
+                    quiet=True,
+                )
 
             # Issue #5639: the deadline / SIGINT save path is the ONLY save
             # path a deadline-killed run ever reaches -- the normal save path
@@ -4337,18 +4949,14 @@ def _router_pair_gaps(
     """
     if pairs is None or net_class_map is None:
         return None
-    from kicad_tools.router.diffpair_detection import build_synth_routing
+    from kicad_tools.router.diffpair_detection import build_synth_routing, coupled_pair_net_class
     from kicad_tools.router.diffpair_routing import _floored_pair_gap
 
-    synth_routing, net_to_class = build_synth_routing(net_class_map)
+    synth = build_synth_routing(net_class_map)
     gaps: list[tuple[str, str, float]] = []
     for p, n in pairs:
-        nc = net_class_map.get(p) or net_class_map.get(n)
+        nc = coupled_pair_net_class(p, n, net_class_map, synth)
         if nc is None:
-            nc = synth_routing.get(net_to_class.get(p, "")) or synth_routing.get(
-                net_to_class.get(n, "")
-            )
-        if nc is None or not hasattr(nc, "effective_intra_pair_clearance"):
             continue
         gaps.append((p, n, _floored_pair_gap(router, nc)))
     return gaps
@@ -4616,6 +5224,47 @@ def count_cross_engine_duplicates(
                 duplicates += 1
                 break
     return duplicates
+
+
+def _native_drc_failure_advice(geo) -> list[str]:
+    """Per-cause advice for a native kicad-cli DRC that did not complete (#6724).
+
+    Upgrade KiCad only for an unsupported option or a board kicad-cli could
+    not load; blame memory only for a SIGKILL (the OOM killer's signal); for
+    any other failure point at kicad-cli's own output (already in the note).
+    """
+    import signal
+
+    from kicad_tools.drc.geometric import (
+        REASON_LOAD_FAILED,
+        REASON_UNSUPPORTED,
+    )
+
+    reason = getattr(geo, "reason", None)
+    returncode = getattr(geo, "returncode", None)
+    if reason == REASON_UNSUPPORTED:
+        return [
+            "The board was NOT checked by KiCad: this kicad-cli rejected an option kct passed.",
+            "Upgrade KiCad (kicad-cli) to a version that supports it.",
+        ]
+    if reason == REASON_LOAD_FAILED:
+        return [
+            "The board was NOT checked by KiCad: kicad-cli could not load the board file.",
+            "It is possibly saved in a newer KiCad file format than this kicad-cli reads "
+            "(e.g. a KiCad 10 board on KiCad 8/9); upgrade KiCad (kicad-cli).",
+        ]
+    sigkill = getattr(signal, "SIGKILL", None)  # absent on Windows (#6739)
+    if sigkill is not None and isinstance(returncode, int) and returncode == -sigkill:
+        return [
+            "The board was NOT checked by KiCad: kicad-cli was killed (SIGKILL), most "
+            "likely by the out-of-memory killer.",
+            "Re-run when kicad-cli has enough memory.",
+        ]
+    return [
+        "The board was NOT checked by KiCad; a failed kicad-cli run is never a clean result.",
+        "kicad-cli's error output is quoted above; run 'kicad-cli pcb drc' on the board to "
+        "reproduce the failure.",
+    ]
 
 
 def run_post_route_drc(
@@ -4886,10 +5535,48 @@ def run_post_route_drc(
         # (strict_drc=False) preserves the internal-only PASS for KiCad-less
         # environments.
         strict_drc_failed = strict_drc and not geo.ran
-        if strict_drc_failed:
+        # Issue #6724: kicad-cli was found but crashed, was killed (e.g. by
+        # the OOM killer) or left no usable report.  That is not a
+        # KiCad-less environment, so it fails the gate even without
+        # --strict-drc: the board was meant to be judged and was not.
+        native_drc_failed = getattr(geo, "failed", False) is True and not strict_drc_failed
+        if strict_drc_failed or native_drc_failed:
             error_count += 1
 
-        if not quiet and strict_drc_failed:
+        def _list_findings(shown_error_count: int) -> None:
+            # Show first few violations
+            shown = 0
+            for v in results.errors[:5]:
+                location = f" at ({v.location[0]:.2f}, {v.location[1]:.2f})" if v.location else ""
+                print(f"    - {v.rule_id}: {v.message}{location}")
+                shown += 1
+            if shown_error_count > 5:
+                print(f"    ... and {shown_error_count - 5} more errors")
+
+            if warning_count > 0 and shown < 5:
+                for v in results.warnings[: 5 - shown]:
+                    location = (
+                        f" at ({v.location[0]:.2f}, {v.location[1]:.2f})" if v.location else ""
+                    )
+                    print(f"    - {v.rule_id}: {v.message}{location}")
+                if warning_count > (5 - shown):
+                    print(f"    ... and {warning_count - (5 - shown)} more warnings")
+
+            print(f"\n  Run 'kct check {output_path} --mfr {manufacturer}' for full details")
+            if shown_error_count > 0:
+                print(f"  Run 'kct fix-drc {output_path}' to auto-repair clearance violations")
+
+        if not quiet and native_drc_failed:
+            print("\n--- DRC Validation ---")
+            print(f"  DRC FAILURE: native kicad-cli DRC did not complete ({geo.note}).")
+            for line in _native_drc_failure_advice(geo):
+                print(f"    {line}")
+            if results.error_count > 0 or warning_count > 0:
+                print(f"  Internal errors: {results.error_count}")
+                if warning_count > 0:
+                    print(f"  Internal warnings: {warning_count}")
+                _list_findings(results.error_count)
+        elif not quiet and strict_drc_failed:
             print("\n--- DRC Validation ---")
             reason_text = geo.note or "native geometric DRC did not run"
             print(f"  STRICT DRC FAILURE: native kicad-cli DRC did not run ({reason_text}).")
@@ -4939,29 +5626,7 @@ def run_post_route_drc(
                 if warning_count > 0:
                     print(f"  Warnings: {warning_count}")
 
-                # Show first few violations
-                shown = 0
-                for v in results.errors[:5]:
-                    location = (
-                        f" at ({v.location[0]:.2f}, {v.location[1]:.2f})" if v.location else ""
-                    )
-                    print(f"    - {v.rule_id}: {v.message}{location}")
-                    shown += 1
-                if error_count > 5:
-                    print(f"    ... and {error_count - 5} more errors")
-
-                if warning_count > 0 and shown < 5:
-                    for v in results.warnings[: 5 - shown]:
-                        location = (
-                            f" at ({v.location[0]:.2f}, {v.location[1]:.2f})" if v.location else ""
-                        )
-                        print(f"    - {v.rule_id}: {v.message}{location}")
-                    if warning_count > (5 - shown):
-                        print(f"    ... and {warning_count - (5 - shown)} more warnings")
-
-                print(f"\n  Run 'kct check {output_path} --mfr {manufacturer}' for full details")
-                if error_count > 0:
-                    print(f"  Run 'kct fix-drc {output_path}' to auto-repair clearance violations")
+                _list_findings(error_count)
 
         return error_count, warning_count
 
@@ -6146,7 +6811,7 @@ def _fill_zones_after_route(
         args._placement_fill_error = None
         try:
             text = output_path.read_text()
-            if not re.search(r"\(zone\s", text):
+            if not has_unquoted(text, r"\(zone\s"):  # Issue #6873
                 return
             # Use the same propagated source/fabrication constraints as DRC,
             # before native filling can bake a weaker default into the output.
@@ -6163,6 +6828,15 @@ def _fill_zones_after_route(
                 coupled_pairs=coupled_pairs,
                 pair_gaps=_router_pair_gaps(coupled_pairs, class_map, router),
             )
+            # Issue #7026: the selective fill stages the sibling ``.kicad_dru``,
+            # so write the native zone-clearance block first, as the full-fill
+            # path below does.  A refusal lands in ``_placement_fill_error``.
+            if getattr(args, "native_zone_clearance", False):
+                from kicad_tools.zones.native_clearance import (
+                    write_native_zone_clearance_rules,
+                )
+
+                write_native_zone_clearance_rules(output_path)
             fill_around_fixed_copper(output_path, disposition.preserve_copper_nets)
             if not quiet:
                 print("  Zone fill: complete; placement-excluded copper preserved")
@@ -6202,7 +6876,8 @@ def _fill_zones_after_route(
     except OSError as exc:
         logger.warning("Zone fill: could not read %s: %s", output_path, exc)
         return
-    if "(zone " not in text and "(zone\n" not in text and "(zone\t" not in text:
+    # Issue #6873: a ``(zone`` inside a quoted string is not a zone.
+    if not has_unquoted(text, r"\(zone[ \n\t]"):
         # Nothing to fill -- skip silently to avoid log noise on the
         # majority of boards that have no copper pours.
         return
@@ -6241,6 +6916,17 @@ def _fill_zones_after_route(
             coupled_pairs=coupled_pairs,
             pair_gaps=_router_pair_gaps(coupled_pairs, class_map, router),
         )
+
+    # Issue #7026: a recipe that fills under ``native_clearance=True`` ships a
+    # ``clearance + min_thickness / 2`` carve the router cannot otherwise see,
+    # so pour-link closure was proven under a narrower carve than the one
+    # shipped.  Write the same block here so the fill, the oracle's
+    # ``--refill-zones`` DRC and the closer's refill all read it.  A refusal
+    # (e.g. a stronger existing clearance contract) fails the route loudly.
+    if getattr(args, "native_zone_clearance", False):
+        from kicad_tools.zones.native_clearance import write_native_zone_clearance_rules
+
+        write_native_zone_clearance_rules(output_path)
 
     _fill_started = time.monotonic()
     # Issue #6273: on a --timeout run the fill (and its starved-thermal
@@ -6496,7 +7182,7 @@ def _print_power_stall_suggestions(
     print("Suggestions:")
     print(f'  1. Add copper zones for power nets:  --power-nets "{pour_arg}"')
     print("  2. Increase layer count:              --layers 4 (or --max-layers 6)")
-    print(f"  3. Manual routing in KiCad for the {len(stalled_nets)} remaining net(s)")
+    print(f"  3. Diagnose the {len(stalled_nets)} remaining net(s):       kct net-status --why")
     print()
 
 
@@ -7119,6 +7805,18 @@ def _apply_plane_via_reservation(
         logger.warning("Plane-via reservation skipped: %s", exc)
         return
     args._plane_via_reservation = reservation
+    links = getattr(reservation, "array_links", None) or []
+    if links and not quiet:
+        # Issue #6673: same-pour ball clusters of an area array on a layer
+        # their pour floods are kept whole on the lattice engine.
+        link_nets = sorted({link.net_name for link in links})
+        print(
+            f"  Area-array pour continuity (#6673): {len(links)} protected link(s) "
+            f"on {', '.join(link_nets)}"
+        )
+        released = getattr(reservation, "array_links_released", None) or []
+        if released:
+            print(f"    links dropped to keep an exit for: {', '.join(released)}")
     if quiet or not (reservation.sites or reservation.unreserved):
         return
     served = sum(len(site.pads) for site in reservation.sites)
@@ -7458,10 +8156,12 @@ def _warn_rule_areas_other_engine(pcb_path: Path, engine: str) -> None:
     the experimental MESH engine still commits copper straight through them
     -- say so once.  A warning, not a gate.  Headless ``kicad-cli pcb drc``
     10.0.1 does not flag copper inside a keepout rule area on its own; the
-    backstop is the explicit per-area ``intersectsArea`` disallow rule kct
-    writes into the routed board's ``.kicad_dru`` (Issue #6039,
-    :mod:`kicad_tools.manufacturers.keepout_dru`), so the native DRC run
-    after routing reports any crossing as ``items_not_allowed``.
+    backstop there is the explicit per-area ``intersectsArea`` disallow rule
+    kct writes into the routed board's ``.kicad_dru`` (Issue #6039,
+    :mod:`kicad_tools.manufacturers.keepout_dru`).  From 10.0.6 native DRC
+    enforces rule areas itself and kct writes no rule (Issue #7198); either
+    way the native DRC run after routing reports any crossing as
+    ``items_not_allowed``.
     Pour-void-only rule areas (the ``kct zones hv-keepout`` output) trigger
     nothing here: they never constrain routing on any engine.  A cheap text
     scan on purpose -- no board model is built this early.
@@ -7792,6 +8492,22 @@ def _audited_trace_copper(router: "Autorouter", *, id_to_name=None) -> "list[Rou
     """
     routed = list(getattr(router, "routes", None) or [])
     return routed + _preserved_trace_copper(router, routed=routed, id_to_name=id_to_name)
+
+
+def _print_pair_via_parity_summary(router: "Autorouter", *, quiet: bool = False) -> None:
+    """Print the end-of-run ``Pair Via-Parity Failures`` block (#7425, #7093 AC1)."""
+    failures = getattr(router, "pair_via_parity_failures", None)
+    if not failures or quiet:
+        return
+    print(f"\n--- Pair Via-Parity Failures ({len(failures)}) ---")
+    for f in failures:
+        print(
+            f"  {f.p_name}/{f.n_name}: {f.p_name} {f.vias_p} via(s), {f.n_name} {f.vias_n} via(s)"
+        )
+    print(
+        "  (reported only; exit status unchanged. `kct check` flags these as "
+        "diffpair_uncoupled_length)"
+    )
 
 
 def _preserved_trace_copper(
@@ -8206,12 +8922,18 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
     so the run exits :data:`EXIT_UNVERIFIED` rather than passing the gate.
     """
     from kicad_tools.router.completion_verdict import allow_stranded_pour_pads, oracle_rounds
-    from kicad_tools.router.oracle_completion import DEFAULT_ORACLE_ROUNDS, STOP_DEADLINE
+    from kicad_tools.router.oracle_completion import (
+        DEFAULT_ORACLE_ROUNDS,
+        STOP_DEADLINE,
+        STOP_NOT_RUN,
+    )
 
     args._stranded_pour_links = 0
     # Issue #6273: True when the check was cut by --timeout before KiCad
     # reported anything -- the count above is then unknown, not 0.
     args._stranded_pour_unknown = False
+    # Issue #6724: why the check is unknown when kicad-cli failed (not --timeout).
+    args._stranded_pour_failure = None
     args._allow_stranded_pour_pads = allow_stranded_pour_pads(
         bool(getattr(args, "allow_stranded_pour_pads", False))
     )
@@ -8280,6 +9002,16 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
     if not result.ran:
         if not quiet:
             print(f"  skipped: {result.note or 'kicad-cli DRC did not run'}")
+        if result.stop_reason == STOP_NOT_RUN:
+            # Issue #6724: kicad-cli is installed (checked above) but its
+            # first DRC crashed, was killed or timed out, so the stranded-pad
+            # count was never measured.  Reporting 0 would pass the #5785
+            # gate on a board KiCad may call unconnected (boards 03/04 printed
+            # a false "0 -> 0 (converged)" after an OOM kill).
+            args._stranded_pour_unknown = True
+            args._stranded_pour_failure = result.note or "kicad-cli DRC did not run"
+            if not quiet:
+                print("  stranded-pour status UNKNOWN -- the run is reported unverified")
         if result.stop_reason == STOP_DEADLINE:
             # Issue #6273: the deadline, not KiCad, ended the check, so the
             # stranded-pad count was never measured.  0 would pass the #5785
@@ -8505,6 +9237,44 @@ def _print_input_clearance_findings(
         print(f"    ... and {len(violations) - 20} more")
 
 
+def _report_input_pad_overlaps(router, args, pcb_path, *, quiet: bool = False) -> None:
+    """Print a pre-route ``INPUT DEFECT`` block for overlapping pads (#6693).
+
+    Different-net pads whose copper already overlaps in the input board short
+    their nets before any routing happens, and any copper the router lands on
+    one of them touches the other.  Surfacing them up front tells the user the
+    post-route shorts against those pads are input defects, not routing
+    failures.  Report-only: exit codes are unchanged.  Printed once per run
+    (the escalation ladders reload the board per attempt).
+    """
+    if quiet or getattr(args, "_input_pad_overlaps_reported", False):
+        return
+    from kicad_tools.router.io import input_pad_overlaps, summarize_input_pad_overlaps
+
+    try:
+        overlaps = input_pad_overlaps(router)
+    except Exception:  # pragma: no cover - diagnostic only, never fatal
+        return
+    with contextlib.suppress(AttributeError):
+        args._input_pad_overlaps_reported = True
+    if not overlaps:
+        return
+    print("\n--- INPUT DEFECT: overlapping different-net pads ---")
+    print(
+        f"  {len(overlaps)} pair(s) of different-net pads already overlap in the input "
+        f"board -- these nets are shorted before routing:"
+    )
+    for line in summarize_input_pad_overlaps(overlaps):
+        print(f"    {line}")
+    for o in overlaps[:5]:
+        print(f"    e.g. {o.pad_a} ({o.net_a}) overlaps {o.pad_b} ({o.net_b})")
+    print(
+        "  Shorts against these pads are counted as pre-existing in the input board "
+        "(input defect), not caused by routing."
+    )
+    print(f"  Inspect: kct check {pcb_path} --only clearance  (clearance_pad_pad SHORT findings)")
+
+
 def _print_short_findings(shorts: "Sequence[ClearanceViolation]") -> None:
     """Report cross-net copper overlap explicitly (Issue #5862)."""
     from kicad_tools.router.io import describe_short, short_origin_summary
@@ -8543,6 +9313,8 @@ def _print_short_failure_banner(shorts: "Sequence[ClearanceViolation]", output_p
     listed in their own section.
     """
     from kicad_tools.router.io import (
+        ORIGIN_INPUT,
+        ORIGIN_INPUT_PAD_OVERLAP,
         describe_input_clearance,
         describe_short,
         short_origin_summary,
@@ -8565,12 +9337,20 @@ def _print_short_failure_banner(shorts: "Sequence[ClearanceViolation]", output_p
         print()
         print("Copper of different nets physically overlaps. KiCad DRC reports this")
         print("class as `shorting_items`; this board is NOT manufacturable as written.")
-        if any(v.is_input_defect for v in real_shorts):
+        if any(v.origin == ORIGIN_INPUT for v in real_shorts):
             # Issue #6229: an inherited short fails the run like a routing short
             # (the output is unmanufacturable either way), but the fix is in the
             # input board, not in the router's settings.
             print("Shorts marked 'pre-existing' were already in the input board and were")
             print("kept by --preserve-existing; fix or remove that copper in the input.")
+        if any(v.origin == ORIGIN_INPUT_PAD_OVERLAP for v in real_shorts):
+            # Issue #6693: the obstacle pad already overlaps a pad of the
+            # routed net in the input, so no copper placement can clear it.
+            print("Shorts marked 'pads ... already overlap' are against a pad whose copper")
+            print("already overlaps a different-net pad in the input board (e.g. a stale")
+            print("pad angle on a rotated footprint); no routing can clear them. Fix the")
+            print("pad geometry in the input; `kct check <pcb> --only clearance` lists the")
+            print("overlapping pads as `clearance_pad_pad` SHORT findings.")
     if near_misses:
         if real_shorts:
             print()
@@ -9737,7 +10517,11 @@ def _audit_plane_layer_reservation(router: "Autorouter", layer_stack) -> "list":
     """
     from kicad_tools.router.layer_advisories import plane_layer_signal_violations
 
-    violations = plane_layer_signal_violations(router.routes, layer_stack)
+    # Issue #6876: (net, layer) pairs the net's class opted in to via
+    # ``allow_plane_layers`` are deliberate, not violations.
+    violations = plane_layer_signal_violations(
+        router.routes, layer_stack, getattr(router, "net_class_map", None)
+    )
     if violations:
         print(
             "\n".join(v.message for v in violations),
@@ -10485,6 +11269,7 @@ def route_with_layer_escalation(
         # to a HARD constraint for the ampacity-free case (nets with a declared
         # ``target_ampacity`` are hard-blocked regardless of this flag).
         strict_layers=getattr(args, "strict_layers", False),
+        fallback_bidirectional=getattr(args, "fallback_bidirectional", False),
         # Issue #4475 (epic #4465 Phase 3): stage the lattice engine's
         # same-net via-in-pad attach as a LAST RESORT (in-layer / free-space
         # via first) instead of the #4284 opportunistic tier-only gate.
@@ -10540,7 +11325,12 @@ def route_with_layer_escalation(
         )
 
     # Auto-classify pour nets and extend skip_nets
-    _skipped, _no_zone = _auto_skip_pour_nets(pcb_path, skip_nets, quiet=quiet)
+    _skipped, _no_zone = _auto_skip_pour_nets(
+        pcb_path,
+        skip_nets,
+        quiet=quiet,
+        net_class_map=getattr(args, "_loaded_net_class_map", None),
+    )
     # Issue #4688: stash the auto-skipped names (exact board net names) so the
     # --net-class-map resolver's phase 3 can match sidecar keys naming them —
     # they enter neither router.net_names nor router.existing_routes.
@@ -10910,6 +11700,8 @@ def route_with_layer_escalation(
         _apply_net_class_map_sidecar(router, args, quiet=quiet)
         # Issue #4431: attach the --voltage-map HV pairwise-clearance table.
         _apply_pairwise_clearance(router, args, quiet=quiet)
+        # Issue #6693: name overlapping different-net input pads up front.
+        _report_input_pad_overlaps(router, args, display_input_path, quiet=quiet)
         # Issue #5520: --no-routing-plan (report-only plan stage).
         _apply_routing_plan_flag(router, args)
         # Issue #5521: --plan-gate refuses an infeasible plan here --
@@ -10986,6 +11778,7 @@ def route_with_layer_escalation(
 
         try:
             if _should_use_escape_routing(router, escape_flag, quiet):
+                _warn_region_parallel_ignored(args, "escape pre-phase")
                 # Issue #3952: compose the escape pre-phase with the
                 # CoupledPathfinder diff-pair pre-pass when
                 # --differential-pairs is requested so Phase A runs on
@@ -11010,12 +11803,14 @@ def route_with_layer_escalation(
                         **_deterministic_rescue_kwargs(args),
                     )
             elif getattr(args, "multi_resolution", False):
+                _warn_region_parallel_ignored(args, "multi-resolution")
                 router.route_all_multi_resolution(
                     use_negotiated=(args.strategy == "negotiated"),
                     max_iterations=args.iterations,
                     timeout=_attempt_timeout,
                 )
             elif getattr(args, "two_phase", False) and args.strategy == "negotiated":
+                _warn_region_parallel_ignored(args, "two-phase")
                 router.route_all_two_phase(
                     use_negotiated=True,
                     corridor_width_factor=2.0,
@@ -11042,8 +11837,6 @@ def route_with_layer_escalation(
                     max_iterations=args.iterations,
                     timeout=_attempt_timeout,
                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
-                    batch_routing=getattr(args, "batch_routing", False)
-                    or getattr(args, "high_performance", False),
                     hierarchical=getattr(args, "hierarchical", False),
                     perturbation=getattr(args, "perturbation", True),
                     # Issue #3039: forward --seed for deterministic routing.
@@ -11069,6 +11862,7 @@ def route_with_layer_escalation(
                     **_deterministic_rescue_kwargs(args),
                 )
             elif args.strategy == "basic":
+                _warn_region_parallel_ignored(args, "basic strategy")
                 # Issue #4697: forward the user's budgets rather than calling
                 # route_all() bare (which tripped the #2794 no-timeout guard
                 # pointing straight back here).  This binds the GRID engine;
@@ -11080,6 +11874,7 @@ def route_with_layer_escalation(
                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                 )
             elif args.strategy == "monte-carlo":
+                _warn_region_parallel_ignored(args, "monte-carlo strategy")
                 router.route_all_monte_carlo(
                     num_trials=args.mc_trials,
                     **_multistart_trial_kwargs(args),
@@ -11087,6 +11882,7 @@ def route_with_layer_escalation(
                     timeout=_attempt_timeout,
                 )
             elif args.strategy == "evolutionary":
+                _warn_region_parallel_ignored(args, "evolutionary strategy")
                 router.route_all_evolutionary(
                     pop_size=args.pop_size,
                     generations=args.generations,
@@ -11474,135 +12270,11 @@ def route_with_layer_escalation(
         stall_label="layer escalation",
     )
 
-    # Issue #4732: opt-in per-stage routing-quality instrumentation.
-    # Read-only -- it measures the copper each stage hands to the next
-    # so the surviving fragment/staircase artifacts can be attributed
-    # to a stage instead of guessed at.  ``None`` (the default) makes
-    # every record/print below a no-op.
-    _stage_quality = _make_stage_quality_recorder(args)
-    _record_stage_quality(_stage_quality, STAGE_PRE_OPTIMIZE, final_result.router)
-
-    # Issue #4281: the geometric post-passes (optimize + DRC nudge) are
-    # grid-engine-only -- lattice/mesh copper must not be touched.
-    _post_passes_enabled = _engine_post_passes_enabled(args, quiet=quiet)
-    if _post_passes_enabled:
-        _mark_nongrid_routes_for_post_pass(final_result.router, args, quiet=quiet)
-
-    _stop_rc = _stage_boundary("optimization")  # issue #6324
+    # Issue #7377: the shared post-route pipeline (optimize -> DRC nudge ->
+    # consolidation -> finalize gate -> gap / skew / match-group tuning).
+    _stop_rc = _run_post_route_pipeline(final_result.router, args, quiet=quiet)
     if _stop_rc is not None:
         return _stop_rc
-    # Optimize traces
-    if (
-        _post_passes_enabled
-        and not args.no_optimize
-        and final_result.router.routes
-        and _optimization_fits_budget(args, quiet=quiet)
-    ):
-        from kicad_tools.router.optimizer import (
-            OptimizationConfig,
-            TraceOptimizer,
-            make_collision_checker,
-            optimize_routes_grid_synced,
-        )
-
-        if not quiet:
-            print("\n--- Optimizing traces ---")
-
-        opt_config = OptimizationConfig(
-            merge_collinear=True,
-            eliminate_zigzags=True,
-            compress_staircase=True,
-            convert_45_corners=True,
-            corner_chamfer_size=0.5,
-            minimize_vias=True,
-        )
-        # Issue #2303: Use overflow-tolerant collision checking when
-        # the router finished with residual overflow.  This prevents the
-        # optimizer from fragmenting routes through overused cells.
-        has_overflow = final_result.router.grid.get_total_overflow() > 0
-        collision_checker = make_collision_checker(
-            final_result.router.grid, ignore_overflow=has_overflow
-        )
-        optimizer = TraceOptimizer(config=opt_config, collision_checker=collision_checker)
-
-        # Issue #2596: snapshot per-net connectivity before optimize so
-        # we can revert any net whose pad-to-pad connectivity regresses.
-        _ci_snapshot = _connectivity_snapshot(final_result.router)
-
-        with spinner("Optimizing traces...", quiet=quiet):
-            # Issue #3507: grid-transactional optimize -- each mutated
-            # route's old copper is unmarked and the new copper marked so
-            # the grid never goes stale across the pass.
-            optimize_routes_grid_synced(final_result.router, optimizer)
-
-        _enforce_connectivity_invariant_or_exit(
-            final_result.router,
-            _ci_snapshot,
-            phase="optimize",
-            args=args,
-            quiet=quiet,
-        )
-        _record_stage_quality(_stage_quality, STAGE_POST_OPTIMIZE, final_result.router)
-
-    _stop_rc = _stage_boundary("drc-nudge")  # issue #6324
-    if _stop_rc is not None:
-        return _stop_rc
-    # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
-    # the nudge is NOT covered by --no-optimize, so it needs its own gate).
-    # Issue #6273: like the optimizer, it yields to save / fill / DRC when
-    # routing overran into the post-route reserve.
-    if (
-        _post_passes_enabled
-        and final_result.router.routes
-        and _optimization_fits_budget(args, quiet=quiet, stage="DRC nudge")
-    ):
-        from kicad_tools.router.drc_nudge import drc_verify_and_nudge
-
-        # Issue #2596: snapshot connectivity again before nudge.  The
-        # post-optimize routes are the new baseline -- nudge must not
-        # regress them further.
-        _ci_snapshot_nudge = _connectivity_snapshot(final_result.router)
-
-        with spinner("DRC nudge pass...", quiet=quiet):
-            nudge_result = drc_verify_and_nudge(final_result.router)
-        if not quiet and nudge_result.initial_violations > 0:
-            print(f"  {nudge_result.summary()}")
-
-        _enforce_connectivity_invariant_or_exit(
-            final_result.router,
-            _ci_snapshot_nudge,
-            phase="nudge",
-            args=args,
-            quiet=quiet,
-        )
-        _record_stage_quality(_stage_quality, STAGE_POST_NUDGE, final_result.router)
-
-    _stop_rc = _stage_boundary("consolidation")  # issue #6324
-    if _stop_rc is not None:
-        return _stop_rc
-    # Issue #4732: post-nudge collinear consolidation.  Runs LAST of the
-    # geometric passes so it also absorbs fragments the nudge introduced.
-    _run_consolidation_pass(
-        final_result.router,
-        args,
-        post_passes_enabled=_post_passes_enabled,
-        stage_recorder=_stage_quality,
-        quiet=quiet,
-    )
-
-    _stop_rc = _stage_boundary("finalization")  # issue #6324
-    if _stop_rc is not None:
-        return _stop_rc
-    # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
-    # over the post-optimize/post-nudge copper.  An rtree-less
-    # optimizer can introduce a cross-net crossing the pre-optimize
-    # finalize gate never saw; demote it before the canonical write.
-    # Issue #4281: unconditional -- runs even when the geometric
-    # post-passes are skipped for non-grid engines (defense in depth).
-    if final_result.router.routes:
-        _finalize_committed_copper_or_demote(final_result.router, quiet=quiet)
-    _record_stage_quality(_stage_quality, STAGE_POST_FINALIZE, final_result.router)
-    _print_stage_quality_report(_stage_quality)
 
     # Finalize: cleanup -> sexp -> stats (canonical ordering)
     _final_multi_pad_ids = {n for n, p in final_result.router.nets.items() if n > 0 and len(p) >= 2}
@@ -11984,7 +12656,12 @@ def route_with_rule_relaxation(
         )
 
     # Auto-classify pour nets and extend skip_nets
-    _skipped, _no_zone = _auto_skip_pour_nets(pcb_path, skip_nets, quiet=quiet)
+    _skipped, _no_zone = _auto_skip_pour_nets(
+        pcb_path,
+        skip_nets,
+        quiet=quiet,
+        net_class_map=getattr(args, "_loaded_net_class_map", None),
+    )
     # Issue #4688: stash the auto-skipped names (exact board net names) so the
     # --net-class-map resolver's phase 3 can match sidecar keys naming them —
     # they enter neither router.net_names nor router.existing_routes.
@@ -12133,6 +12810,7 @@ def route_with_rule_relaxation(
             auto_mfr_tier_in_progress=getattr(args, "_auto_mfr_tier_in_progress", False),
             # Issue #4433: forward --strict-layers (hard per-net avoid_layers).
             strict_layers=getattr(args, "strict_layers", False),
+            fallback_bidirectional=getattr(args, "fallback_bidirectional", False),
             # Issue #4475 (epic #4465 Phase 3): stage via-in-pad as a
             # LAST RESORT on the lattice engine. Default off is
             # bit-for-bit pre-#4475.
@@ -12212,6 +12890,8 @@ def route_with_rule_relaxation(
         _apply_net_class_map_sidecar(router, args, quiet=quiet)
         # Issue #4431: attach the --voltage-map HV pairwise-clearance table.
         _apply_pairwise_clearance(router, args, quiet=quiet)
+        # Issue #6693: name overlapping different-net input pads up front.
+        _report_input_pad_overlaps(router, args, display_input_path, quiet=quiet)
         # Issue #5520: --no-routing-plan (report-only plan stage).
         _apply_routing_plan_flag(router, args)
         # Issue #5521: --plan-gate refuses an infeasible plan here --
@@ -12274,6 +12954,7 @@ def route_with_rule_relaxation(
 
         try:
             if _should_use_escape_routing(router, escape_flag, quiet):
+                _warn_region_parallel_ignored(args, "escape pre-phase")
                 # Issue #3952: compose the escape pre-phase with the
                 # CoupledPathfinder diff-pair pre-pass when
                 # --differential-pairs is requested so Phase A runs on
@@ -12298,12 +12979,14 @@ def route_with_rule_relaxation(
                         **_deterministic_rescue_kwargs(args),
                     )
             elif getattr(args, "multi_resolution", False):
+                _warn_region_parallel_ignored(args, "multi-resolution")
                 router.route_all_multi_resolution(
                     use_negotiated=(args.strategy == "negotiated"),
                     max_iterations=args.iterations,
                     timeout=_attempt_timeout,
                 )
             elif getattr(args, "two_phase", False) and args.strategy == "negotiated":
+                _warn_region_parallel_ignored(args, "two-phase")
                 router.route_all_two_phase(
                     use_negotiated=True,
                     corridor_width_factor=2.0,
@@ -12330,8 +13013,6 @@ def route_with_rule_relaxation(
                     max_iterations=args.iterations,
                     timeout=_attempt_timeout,
                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
-                    batch_routing=getattr(args, "batch_routing", False)
-                    or getattr(args, "high_performance", False),
                     hierarchical=getattr(args, "hierarchical", False),
                     perturbation=getattr(args, "perturbation", True),
                     # Issue #3039: forward --seed for deterministic routing.
@@ -12357,6 +13038,7 @@ def route_with_rule_relaxation(
                     **_deterministic_rescue_kwargs(args),
                 )
             elif args.strategy == "basic":
+                _warn_region_parallel_ignored(args, "basic strategy")
                 # Issue #4697: forward the user's budgets rather than calling
                 # route_all() bare (which tripped the #2794 no-timeout guard
                 # pointing straight back here).  This binds the GRID engine;
@@ -12368,6 +13050,7 @@ def route_with_rule_relaxation(
                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                 )
             elif args.strategy == "monte-carlo":
+                _warn_region_parallel_ignored(args, "monte-carlo strategy")
                 router.route_all_monte_carlo(
                     num_trials=args.mc_trials,
                     **_multistart_trial_kwargs(args),
@@ -12375,6 +13058,7 @@ def route_with_rule_relaxation(
                     timeout=_attempt_timeout,
                 )
             elif args.strategy == "evolutionary":
+                _warn_region_parallel_ignored(args, "evolutionary strategy")
                 router.route_all_evolutionary(
                     pop_size=args.pop_size,
                     generations=args.generations,
@@ -12550,130 +13234,11 @@ def route_with_rule_relaxation(
         print(f"\nWARNING: Design uses {args.manufacturer.upper()} minimum tolerances.")
         print("Consider adding layers for more manufacturing margin.")
 
-    # Issue #4732: opt-in per-stage routing-quality instrumentation.
-    # Read-only -- it measures the copper each stage hands to the next
-    # so the surviving fragment/staircase artifacts can be attributed
-    # to a stage instead of guessed at.  ``None`` (the default) makes
-    # every record/print below a no-op.
-    _stage_quality = _make_stage_quality_recorder(args)
-    _record_stage_quality(_stage_quality, STAGE_PRE_OPTIMIZE, final_result.router)
-
-    # Issue #4281: the geometric post-passes (optimize + DRC nudge) are
-    # grid-engine-only -- lattice/mesh copper must not be touched.
-    _post_passes_enabled = _engine_post_passes_enabled(args, quiet=quiet)
-    if _post_passes_enabled:
-        _mark_nongrid_routes_for_post_pass(final_result.router, args, quiet=quiet)
-
-    _stop_rc = _stage_boundary("optimization")  # issue #6324
+    # Issue #7377: the shared post-route pipeline (optimize -> DRC nudge ->
+    # consolidation -> finalize gate -> gap / skew / match-group tuning).
+    _stop_rc = _run_post_route_pipeline(final_result.router, args, quiet=quiet)
     if _stop_rc is not None:
         return _stop_rc
-    # Optimize traces
-    if (
-        _post_passes_enabled
-        and not args.no_optimize
-        and final_result.router.routes
-        and _optimization_fits_budget(args, quiet=quiet)
-    ):
-        from kicad_tools.router.optimizer import (
-            OptimizationConfig,
-            TraceOptimizer,
-            make_collision_checker,
-            optimize_routes_grid_synced,
-        )
-
-        if not quiet:
-            print("\n--- Optimizing traces ---")
-
-        opt_config = OptimizationConfig(
-            merge_collinear=True,
-            eliminate_zigzags=True,
-            compress_staircase=True,
-            convert_45_corners=True,
-            corner_chamfer_size=0.5,
-            minimize_vias=True,
-        )
-        # Issue #2303: Use overflow-tolerant collision checking when
-        # the router finished with residual overflow.
-        has_overflow = final_result.router.grid.get_total_overflow() > 0
-        collision_checker = make_collision_checker(
-            final_result.router.grid, ignore_overflow=has_overflow
-        )
-        optimizer = TraceOptimizer(config=opt_config, collision_checker=collision_checker)
-
-        # Issue #2596: snapshot per-net connectivity before optimize.
-        _ci_snapshot = _connectivity_snapshot(final_result.router)
-
-        with spinner("Optimizing traces...", quiet=quiet):
-            # Issue #3507: grid-transactional optimize (see
-            # optimize_routes_grid_synced).
-            optimize_routes_grid_synced(final_result.router, optimizer)
-
-        _enforce_connectivity_invariant_or_exit(
-            final_result.router,
-            _ci_snapshot,
-            phase="optimize",
-            args=args,
-            quiet=quiet,
-        )
-        _record_stage_quality(_stage_quality, STAGE_POST_OPTIMIZE, final_result.router)
-
-    _stop_rc = _stage_boundary("drc-nudge")  # issue #6324
-    if _stop_rc is not None:
-        return _stop_rc
-    # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
-    # the nudge is NOT covered by --no-optimize, so it needs its own gate).
-    # Issue #6273: like the optimizer, it yields to save / fill / DRC when
-    # routing overran into the post-route reserve.
-    if (
-        _post_passes_enabled
-        and final_result.router.routes
-        and _optimization_fits_budget(args, quiet=quiet, stage="DRC nudge")
-    ):
-        from kicad_tools.router.drc_nudge import drc_verify_and_nudge
-
-        # Issue #2596: snapshot connectivity before nudge.
-        _ci_snapshot_nudge = _connectivity_snapshot(final_result.router)
-
-        with spinner("DRC nudge pass...", quiet=quiet):
-            nudge_result = drc_verify_and_nudge(final_result.router)
-        if not quiet and nudge_result.initial_violations > 0:
-            print(f"  {nudge_result.summary()}")
-
-        _enforce_connectivity_invariant_or_exit(
-            final_result.router,
-            _ci_snapshot_nudge,
-            phase="nudge",
-            args=args,
-            quiet=quiet,
-        )
-        _record_stage_quality(_stage_quality, STAGE_POST_NUDGE, final_result.router)
-
-    _stop_rc = _stage_boundary("consolidation")  # issue #6324
-    if _stop_rc is not None:
-        return _stop_rc
-    # Issue #4732: post-nudge collinear consolidation.  Runs LAST of the
-    # geometric passes so it also absorbs fragments the nudge introduced.
-    _run_consolidation_pass(
-        final_result.router,
-        args,
-        post_passes_enabled=_post_passes_enabled,
-        stage_recorder=_stage_quality,
-        quiet=quiet,
-    )
-
-    _stop_rc = _stage_boundary("finalization")  # issue #6324
-    if _stop_rc is not None:
-        return _stop_rc
-    # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
-    # over the post-optimize/post-nudge copper.  An rtree-less
-    # optimizer can introduce a cross-net crossing the pre-optimize
-    # finalize gate never saw; demote it before the canonical write.
-    # Issue #4281: unconditional -- runs even when the geometric
-    # post-passes are skipped for non-grid engines (defense in depth).
-    if final_result.router.routes:
-        _finalize_committed_copper_or_demote(final_result.router, quiet=quiet)
-    _record_stage_quality(_stage_quality, STAGE_POST_FINALIZE, final_result.router)
-    _print_stage_quality_report(_stage_quality)
 
     # Finalize: cleanup -> sexp -> stats (canonical ordering)
     _final_multi_pad_ids = {n for n, p in final_result.router.nets.items() if n > 0 and len(p) >= 2}
@@ -14535,7 +15100,12 @@ def route_with_combined_escalation(
         )
 
     # Auto-classify pour nets and extend skip_nets
-    _skipped, _no_zone = _auto_skip_pour_nets(pcb_path, skip_nets, quiet=quiet)
+    _skipped, _no_zone = _auto_skip_pour_nets(
+        pcb_path,
+        skip_nets,
+        quiet=quiet,
+        net_class_map=getattr(args, "_loaded_net_class_map", None),
+    )
     # Issue #4688: stash the auto-skipped names (exact board net names) so the
     # --net-class-map resolver's phase 3 can match sidecar keys naming them —
     # they enter neither router.net_names nor router.existing_routes.
@@ -14734,6 +15304,7 @@ def route_with_combined_escalation(
                 auto_mfr_tier_in_progress=getattr(args, "_auto_mfr_tier_in_progress", False),
                 # Issue #4433: forward --strict-layers (hard per-net avoid_layers).
                 strict_layers=getattr(args, "strict_layers", False),
+                fallback_bidirectional=getattr(args, "fallback_bidirectional", False),
                 # Issue #4475 (epic #4465 Phase 3): stage via-in-pad as a
                 # LAST RESORT on the lattice engine. Default off is
                 # bit-for-bit pre-#4475.
@@ -14816,6 +15387,8 @@ def route_with_combined_escalation(
             _apply_net_class_map_sidecar(router, args, quiet=quiet)
             # Issue #4431: attach the --voltage-map HV pairwise-clearance table.
             _apply_pairwise_clearance(router, args, quiet=quiet)
+            # Issue #6693: name overlapping different-net input pads up front.
+            _report_input_pad_overlaps(router, args, display_input_path, quiet=quiet)
             # Issue #5520: --no-routing-plan (report-only plan stage).
             _apply_routing_plan_flag(router, args)
             # Issue #5521: --plan-gate refuses an infeasible plan here --
@@ -14863,6 +15436,7 @@ def route_with_combined_escalation(
 
             try:
                 if _should_use_escape_routing(router, escape_flag, quiet):
+                    _warn_region_parallel_ignored(args, "escape pre-phase")
                     # Issue #3952: compose escape + diff-pair pre-pass when
                     # --differential-pairs is requested (combined 2D
                     # escalation path); otherwise unchanged escape path.
@@ -14885,12 +15459,14 @@ def route_with_combined_escalation(
                             **_deterministic_rescue_kwargs(args),
                         )
                 elif getattr(args, "multi_resolution", False):
+                    _warn_region_parallel_ignored(args, "multi-resolution")
                     router.route_all_multi_resolution(
                         use_negotiated=(args.strategy == "negotiated"),
                         max_iterations=args.iterations,
                         timeout=_attempt_timeout,
                     )
                 elif getattr(args, "two_phase", False) and args.strategy == "negotiated":
+                    _warn_region_parallel_ignored(args, "two-phase")
                     router.route_all_two_phase(
                         use_negotiated=True,
                         corridor_width_factor=2.0,
@@ -14906,8 +15482,6 @@ def route_with_combined_escalation(
                         max_iterations=args.iterations,
                         timeout=_attempt_timeout,
                         per_net_timeout=getattr(args, "per_net_timeout", None) or None,
-                        batch_routing=getattr(args, "batch_routing", False)
-                        or getattr(args, "high_performance", False),
                         hierarchical=getattr(args, "hierarchical", False),
                         perturbation=getattr(args, "perturbation", True),
                         # Issue #3039: forward --seed for deterministic routing.
@@ -14933,6 +15507,7 @@ def route_with_combined_escalation(
                         **_deterministic_rescue_kwargs(args),
                     )
                 elif args.strategy == "basic":
+                    _warn_region_parallel_ignored(args, "basic strategy")
                     # Issue #4697: forward the user's budgets rather than calling
                     # route_all() bare (which tripped the #2794 no-timeout guard
                     # pointing straight back here).  This binds the GRID engine;
@@ -14944,6 +15519,7 @@ def route_with_combined_escalation(
                         per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                     )
                 elif args.strategy == "monte-carlo":
+                    _warn_region_parallel_ignored(args, "monte-carlo strategy")
                     router.route_all_monte_carlo(
                         num_trials=args.mc_trials,
                         **_multistart_trial_kwargs(args),
@@ -14951,6 +15527,7 @@ def route_with_combined_escalation(
                         timeout=_attempt_timeout,
                     )
                 elif args.strategy == "evolutionary":
+                    _warn_region_parallel_ignored(args, "evolutionary strategy")
                     router.route_all_evolutionary(
                         pop_size=args.pop_size,
                         generations=args.generations,
@@ -15194,130 +15771,11 @@ def route_with_combined_escalation(
         print(f"\nWARNING: Design uses {args.manufacturer.upper()} minimum tolerances.")
         print("Consider redesigning placement for more margin.")
 
-    # Issue #4732: opt-in per-stage routing-quality instrumentation.
-    # Read-only -- it measures the copper each stage hands to the next
-    # so the surviving fragment/staircase artifacts can be attributed
-    # to a stage instead of guessed at.  ``None`` (the default) makes
-    # every record/print below a no-op.
-    _stage_quality = _make_stage_quality_recorder(args)
-    _record_stage_quality(_stage_quality, STAGE_PRE_OPTIMIZE, final_result.router)
-
-    # Issue #4281: the geometric post-passes (optimize + DRC nudge) are
-    # grid-engine-only -- lattice/mesh copper must not be touched.
-    _post_passes_enabled = _engine_post_passes_enabled(args, quiet=quiet)
-    if _post_passes_enabled:
-        _mark_nongrid_routes_for_post_pass(final_result.router, args, quiet=quiet)
-
-    _stop_rc = _stage_boundary("optimization")  # issue #6324
+    # Issue #7377: the shared post-route pipeline (optimize -> DRC nudge ->
+    # consolidation -> finalize gate -> gap / skew / match-group tuning).
+    _stop_rc = _run_post_route_pipeline(final_result.router, args, quiet=quiet)
     if _stop_rc is not None:
         return _stop_rc
-    # Optimize traces
-    if (
-        _post_passes_enabled
-        and not args.no_optimize
-        and final_result.router.routes
-        and _optimization_fits_budget(args, quiet=quiet)
-    ):
-        from kicad_tools.router.optimizer import (
-            OptimizationConfig,
-            TraceOptimizer,
-            make_collision_checker,
-            optimize_routes_grid_synced,
-        )
-
-        if not quiet:
-            print("\n--- Optimizing traces ---")
-
-        opt_config = OptimizationConfig(
-            merge_collinear=True,
-            eliminate_zigzags=True,
-            compress_staircase=True,
-            convert_45_corners=True,
-            corner_chamfer_size=0.5,
-            minimize_vias=True,
-        )
-        # Issue #2303: Use overflow-tolerant collision checking when
-        # the router finished with residual overflow.
-        has_overflow = final_result.router.grid.get_total_overflow() > 0
-        collision_checker = make_collision_checker(
-            final_result.router.grid, ignore_overflow=has_overflow
-        )
-        optimizer = TraceOptimizer(config=opt_config, collision_checker=collision_checker)
-
-        # Issue #2596: snapshot per-net connectivity before optimize.
-        _ci_snapshot = _connectivity_snapshot(final_result.router)
-
-        with spinner("Optimizing traces...", quiet=quiet):
-            # Issue #3507: grid-transactional optimize (see
-            # optimize_routes_grid_synced).
-            optimize_routes_grid_synced(final_result.router, optimizer)
-
-        _enforce_connectivity_invariant_or_exit(
-            final_result.router,
-            _ci_snapshot,
-            phase="optimize",
-            args=args,
-            quiet=quiet,
-        )
-        _record_stage_quality(_stage_quality, STAGE_POST_OPTIMIZE, final_result.router)
-
-    _stop_rc = _stage_boundary("drc-nudge")  # issue #6324
-    if _stop_rc is not None:
-        return _stop_rc
-    # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
-    # the nudge is NOT covered by --no-optimize, so it needs its own gate).
-    # Issue #6273: like the optimizer, it yields to save / fill / DRC when
-    # routing overran into the post-route reserve.
-    if (
-        _post_passes_enabled
-        and final_result.router.routes
-        and _optimization_fits_budget(args, quiet=quiet, stage="DRC nudge")
-    ):
-        from kicad_tools.router.drc_nudge import drc_verify_and_nudge
-
-        # Issue #2596: snapshot connectivity before nudge.
-        _ci_snapshot_nudge = _connectivity_snapshot(final_result.router)
-
-        with spinner("DRC nudge pass...", quiet=quiet):
-            nudge_result = drc_verify_and_nudge(final_result.router)
-        if not quiet and nudge_result.initial_violations > 0:
-            print(f"  {nudge_result.summary()}")
-
-        _enforce_connectivity_invariant_or_exit(
-            final_result.router,
-            _ci_snapshot_nudge,
-            phase="nudge",
-            args=args,
-            quiet=quiet,
-        )
-        _record_stage_quality(_stage_quality, STAGE_POST_NUDGE, final_result.router)
-
-    _stop_rc = _stage_boundary("consolidation")  # issue #6324
-    if _stop_rc is not None:
-        return _stop_rc
-    # Issue #4732: post-nudge collinear consolidation.  Runs LAST of the
-    # geometric passes so it also absorbs fragments the nudge introduced.
-    _run_consolidation_pass(
-        final_result.router,
-        args,
-        post_passes_enabled=_post_passes_enabled,
-        stage_recorder=_stage_quality,
-        quiet=quiet,
-    )
-
-    _stop_rc = _stage_boundary("finalization")  # issue #6324
-    if _stop_rc is not None:
-        return _stop_rc
-    # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
-    # over the post-optimize/post-nudge copper.  An rtree-less
-    # optimizer can introduce a cross-net crossing the pre-optimize
-    # finalize gate never saw; demote it before the canonical write.
-    # Issue #4281: unconditional -- runs even when the geometric
-    # post-passes are skipped for non-grid engines (defense in depth).
-    if final_result.router.routes:
-        _finalize_committed_copper_or_demote(final_result.router, quiet=quiet)
-    _record_stage_quality(_stage_quality, STAGE_POST_FINALIZE, final_result.router)
-    _print_stage_quality_report(_stage_quality)
 
     # Finalize: cleanup -> sexp -> stats (canonical ordering)
     _final_multi_pad_ids = {n for n, p in final_result.router.nets.items() if n > 0 and len(p) >= 2}
@@ -15772,6 +16230,29 @@ def _build_diffpair_config(args):
     )
 
 
+def _warn_region_parallel_ignored(args, path: str) -> None:
+    """Warn once per run that ``--region-parallel`` is ignored on ``path`` (Issue #7072).
+
+    Only ``route_all_negotiated`` honours ``region_parallel``; every other
+    dispatch branch (escape pre-phase, two-phase, multi-resolution, basic,
+    ...) never reads it.  Whether a branch is taken depends on board geometry,
+    so the call sits inside each non-forwarding branch.  The warning goes to
+    stderr (so ``--format json`` stdout is untouched) and is guarded by a flag
+    on ``args`` so escalation-ladder retries do not repeat it.
+    """
+    if not getattr(args, "region_parallel", False):
+        return
+    if getattr(args, "_region_parallel_warned", False):
+        return
+    with contextlib.suppress(AttributeError):  # frozen namespace
+        args._region_parallel_warned = True
+    print(
+        f"warning: --region-parallel ignored: the {path} path does not support region parallelism",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 def _should_use_escape_routing(router, escape_flag: bool | None, quiet: bool) -> bool:
     """Determine whether to use escape routing for the current board.
 
@@ -15783,21 +16264,30 @@ def _should_use_escape_routing(router, escape_flag: bool | None, quiet: bool) ->
     Returns:
         True if escape routing should be used.
     """
+    use_escape, message = _escape_routing_decision(router, escape_flag)
+    if message is not None and not quiet:
+        print(message)
+    return use_escape
+
+
+def _escape_routing_decision(router, escape_flag: bool | None) -> tuple[bool, str | None]:
+    """Silent core of :func:`_should_use_escape_routing` (Issue #6666).
+
+    Returns ``(use_escape, message)``; ``message`` is the line
+    ``_should_use_escape_routing`` prints, so a caller that needs the decision
+    before it knows whether to announce it can print it later.
+    """
     if escape_flag is True:
-        if not quiet:
-            print("  Escape routing: enabled (--escape-routing)")
-        return True
+        return True, "  Escape routing: enabled (--escape-routing)"
     if escape_flag is False:
-        return False
+        return False, None
 
     # Auto-detect dense packages
     dense_packages = router.detect_dense_packages()
     if dense_packages:
-        if not quiet:
-            refs = [p.ref for p in dense_packages]
-            print(f"  Escape routing: auto-enabled (dense packages: {refs})")
-        return True
-    return False
+        refs = [p.ref for p in dense_packages]
+        return True, f"  Escape routing: auto-enabled (dense packages: {refs})"
+    return False, None
 
 
 def _parse_region_box(
@@ -16151,7 +16641,7 @@ _CENSUS_GATE_EXIT_CODE = 9
 def _census_gate_pct(value: str) -> float:
     """argparse ``type=`` for ``--census-advisory-gate-pct`` (#4799).
 
-    Delegates to the router-side validator so the inner and outer parsers
+    Delegates to the router-side validator so the parser and the router
     cannot disagree about what a legal threshold is.  Raises ``ValueError``,
     which argparse renders as its standard "invalid value" error (exit 2).
     """
@@ -17537,7 +18027,7 @@ def _in_process_main_impl(argv: list[str] | None = None) -> int:
     process-global state ``_main_impl`` stamps -- the ``KICAD_TOOLS_*``
     escalation env vars, the ``--seed`` global-RNG seeding, the SIGINT
     handler, and the ``_interrupt_state`` router pin -- so in-process
-    callers (``kct route`` via ``commands/routing.py`` and the test
+    callers (``kct route`` via ``cli.main`` and the test
     suite) are not poisoned.  The state stays stamped for the entire
     invocation; only the outermost exit (return *or* raise) restores it.
     """
@@ -17597,28 +18087,7 @@ def _route_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="kicad-tools route",
         description="Autoroute a KiCad PCB file",
-        epilog=textwrap.dedent("""\
-            exit codes:
-              0  all nets routed (or meets --min-completion), DRC clean
-              1  fatal failure -- no nets routed
-              2  partial routing -- below threshold or requested placement-blocked nets
-              3  post-route validation or processing failed:
-                 DRC violations remain, --auto-fix rolled back (issue #2852),
-                 the --voltage-map HV pairwise audit failed (issue #4588),
-                 selective zone filling failed, or staged repair could not
-                 preserve fixed copper and net membership
-              4  partial routing AND segment-segment or HV pairwise
-                 clearance violations (issues #1666, #4588)
-              5  interrupted by SIGINT with partial results saved
-              8  --complete: one or more unroutable links remain (issue #4477)
-              9  a pre-route gate fired -- detailed routing was not started;
-                 the stderr prefix says which:
-                 [crosstail-gate] --census-advisory-gate predicts an inert
-                 crossover lattice (issue #4799, before any router work), or
-                 [plan-gate] --plan-gate found the routing plan infeasible
-                 (issue #5510-1c, after the plan stage, before any detailed
-                 routing); --force overrides the latter
-        """),
+        epilog=ROUTE_EXIT_CODES_EPILOG + "\n" + ROUTE_PERFORMANCE_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("pcb", help="Path to .kicad_pcb file")
@@ -17670,7 +18139,7 @@ def _route_parser() -> argparse.ArgumentParser:
             "KiCad-oracle completion rounds for pour nets (Issue #5785). After "
             "the zone fill, route exactly the links kicad-cli reports as "
             "unconnected_items on GND/VCC-style pours, up to N rounds, stopping "
-            "at zero or when the count stops falling. Default 3; 0 disables the "
+            "at zero or when the count stops falling. Default 12; 0 disables the "
             "loop and the stranded-pad verdict."
         ),
     )
@@ -18138,9 +18607,7 @@ def _route_parser() -> argparse.ArgumentParser:
             "Use 0 to disable checkpointing (only the terminal save fires)."
         ),
     )
-    # Issue #5945: best-so-far checkpoint file + resume.  Mirror of the outer
-    # parser flags in parser.py; tests/test_cli_parser_drift.py keeps them in
-    # sync.
+    # Issue #5945: best-so-far checkpoint file + resume.
     parser.add_argument(
         "--checkpoint",
         metavar="PATH",
@@ -18170,8 +18637,7 @@ def _route_parser() -> argparse.ArgumentParser:
             "(Issue #5945)."
         ),
     )
-    # Issue #6054: --lint-gate.  Mirror of the outer parser flags in
-    # parser.py; tests/test_cli_parser_drift.py keeps them in sync.
+    # Issue #6054: --lint-gate.
     parser.add_argument(
         "--lint-gate",
         action="store_true",
@@ -18201,11 +18667,9 @@ def _route_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="With --lint-gate, new warning findings also roll the route back.",
     )
-    # Issue #2819: declare --max-search-iterations on the inner parser so the
-    # forwarding shim in ``commands/routing.py`` can hand it through.  Default
-    # 0 = use the historical ``cols * rows * 4`` heuristic (matches the outer
-    # parser declaration at parser.py and the C++ A* backstop semantics from
-    # Issue #2610).
+    # Issue #2819: --max-search-iterations.  Default 0 = use the historical
+    # ``cols * rows * 4`` heuristic (matches the C++ A* backstop semantics
+    # from Issue #2610).
     parser.add_argument(
         "--max-search-iterations",
         type=int,
@@ -18357,9 +18821,7 @@ def _route_parser() -> argparse.ArgumentParser:
             "historical whole-set PathFinder-style loop. 'sequential-n1' is "
             "a KRT-style prototype dispatched via "
             "``Autorouter._ripup_strategy`` (see "
-            "src/kicad_tools/router/sequential_ripup.py). Mirror of the "
-            "outer ``parser.py`` flag; both sites must stay in sync per "
-            "the --order-method precedent above."
+            "src/kicad_tools/router/sequential_ripup.py)."
         ),
     )
     parser.add_argument(
@@ -18374,8 +18836,7 @@ def _route_parser() -> argparse.ArgumentParser:
             "'blocked' (no path even on an empty board -- the JSON lists the "
             "pads/keepouts/edge closing it off as 'blockers'). Reported under "
             "'unrouted' in --format json output. Connections the budget does "
-            "not reach are 'unclassified'. 0 disables the pass. Default: 20. "
-            "Mirror of the outer parser.py flag."
+            "not reach are 'unclassified'. 0 disables the pass. Default: 20."
         ),
     )
     parser.add_argument(
@@ -18473,6 +18934,22 @@ def _route_parser() -> argparse.ArgumentParser:
             "length-critical diff pair until skew is within the per-class "
             "tolerance. Requires --differential-pairs to be set; emits a "
             "warning and short-circuits otherwise."
+        ),
+    )
+    parser.add_argument(
+        "--tighten-diffpair-gap",
+        dest="tighten_diffpair_gap",
+        action="store_true",
+        help=(
+            "Opt-in post-route pass (Issue #7344): squeeze parallel diff-pair "
+            "trunks whose coupled Zdiff is above their class's "
+            "target_diff_impedance band toward the gap at which the "
+            "impedance check's own model hits the target (never below the "
+            "pair's floored intra-pair gap).  Both rails move symmetrically "
+            "with 45-degree jogs, so skew is unchanged; each edit is checked "
+            "for clearance, connectivity and impedance and skipped on any "
+            "failure.  Runs before skew and match-group tuning.  Off by "
+            "default: routing output is unchanged without it."
         ),
     )
     parser.add_argument(
@@ -18695,7 +19172,9 @@ def _route_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help=(
-            "Force routing even when grid resolution exceeds clearance. "
+            "Force routing even when grid resolution exceeds clearance, or "
+            "when an explicit --grid exceeds the backend's cell ceiling "
+            "(20M cells Python, 100M C++; issue #6875). "
             "Without this flag, routing will fail if grid > clearance to "
             "prevent DRC violations. Use with caution."
         ),
@@ -18803,8 +19282,6 @@ def _route_parser() -> argparse.ArgumentParser:
         ),
     )
     # Issue #4178: hard-gate on native (kicad-cli) DRC actually running.
-    # Mirror of the outer parser.py flag; both sites must stay in sync per
-    # ``tests/test_cli_parser_drift.py``.
     parser.add_argument(
         "--strict-drc",
         action="store_true",
@@ -18819,9 +19296,18 @@ def _route_parser() -> argparse.ArgumentParser:
             "actually run and passed."
         ),
     )
-    # Issue #4433: opt-in HARD per-net avoid_layers.  Mirror of the outer
-    # parser.py flag; both sites must stay in sync per
-    # ``tests/test_cli_parser_drift.py``.
+    # Issue #4433: opt-in HARD per-net avoid_layers.
+    parser.add_argument(
+        "--fallback-bidirectional",
+        action="store_true",
+        default=False,
+        help=(
+            "Issue #6527 (experimental, default off): let the C++ backend's "
+            "Python fallback use route_auto (bidirectional A* for paths of "
+            ">= bidirectional_threshold cells, one-way retry sharing one "
+            "deadline) instead of the one-way route()."
+        ),
+    )
     parser.add_argument(
         "--strict-layers",
         action="store_true",
@@ -18840,8 +19326,7 @@ def _route_parser() -> argparse.ArgumentParser:
     # Issue #5014: HARD signal-layer eligibility for controlled-impedance
     # plane assignments. Issue #5789: defaults to ON -- a declared reference
     # plane is hard-excluded from signal routing unless the caller opts out
-    # with --no-reserve-plane-layers. Mirror of the outer parser.py flag;
-    # both sites must stay in sync per ``tests/test_cli_parser_drift.py``.
+    # with --no-reserve-plane-layers.
     parser.add_argument(
         "--reserve-plane-layers",
         action=argparse.BooleanOptionalAction,
@@ -18858,7 +19343,9 @@ def _route_parser() -> argparse.ArgumentParser:
             "PLANE layers (--layers 2, 4-all, or an all-signal "
             "auto-detected board). Pass --no-reserve-plane-layers to allow "
             "signal routing across declared plane layers (pre-#5789 "
-            "behavior)."
+            "behavior). A net class can opt in to named reserved planes "
+            "with allow_plane_layers in its net-class map; every other "
+            "class stays off them (Issue #6876)."
         ),
     )
     # Issue #3154: advisory schematic/PCB drift banner.  When a schematic is
@@ -18975,6 +19462,18 @@ def _route_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--native-zone-clearance",
+        action="store_true",
+        default=False,
+        help=(
+            "Write the native zone-clearance DRU block (zone clearance + "
+            "min_thickness / 2, as run_fill_zones(native_clearance=True) does) "
+            "before the post-route zone fill, so the fill and the pour-link "
+            "oracle judge the carve the board ships with (Issue #7026). "
+            "Fails the route if the block cannot be written."
+        ),
+    )
+    parser.add_argument(
         "--copper",
         default=None,
         metavar="OZ",
@@ -19077,11 +19576,7 @@ def _route_parser() -> argparse.ArgumentParser:
         ),
     )
     # Issue #2606: stagnation + outer-timeout guards on the
-    # PlacementFeedbackLoop.  Mirror parser.py:2349-2376 so the
-    # top-level forwarder in commands/routing.py can pass these
-    # through without tripping argparse.  Defaults match parser.py.
-    # Issue #2620: previously missing on the inner parser, causing
-    # "unrecognized arguments" when the forwarder injected them.
+    # PlacementFeedbackLoop.
     parser.add_argument(
         "--placement-feedback-stagnation-patience",
         type=int,
@@ -19107,9 +19602,7 @@ def _route_parser() -> argparse.ArgumentParser:
         ),
     )
     # Issue #4468 (epic #3438 Phase 3): classifier-driven placement-DELTA
-    # feedback.  Mirror of the outer parser flags in parser.py + the
-    # forwarding shim in commands/routing.py; all three sites must stay in
-    # sync per ``tests/test_cli_parser_drift.py``.
+    # feedback.
     parser.add_argument(
         "--placement-delta-feedback",
         action=argparse.BooleanOptionalAction,
@@ -19542,29 +20035,28 @@ def _route_parser() -> argparse.ArgumentParser:
         "--batch-routing",
         action="store_true",
         help=(
-            "Enable GPU-accelerated batch routing for parallel net processing. "
-            "Routes multiple independent nets simultaneously using GPU compute. "
-            "Best results with 4+ independent nets and Metal/CUDA GPU. "
-            "Enabled automatically in high-performance mode."
+            "DEPRECATED: no effect (GPU batch routing removed, #7051). "
+            "Use --region-parallel / the C++ backend instead."
         ),
     )
-    # Issue #3054 (Phase 2 of #3045): expose region-based parallelism on the
-    # inner parser so the outer ``kct route --region-parallel`` flag has a
-    # forwarding target.  ``route_all_negotiated`` already implements the
+    # Issue #3054 (Phase 2 of #3045): expose region-based parallelism as
+    # ``kct route --region-parallel``.  ``route_all_negotiated`` already implements the
     # partitioning logic; this is wiring only.
     parser.add_argument(
         "--region-parallel",
         action="store_true",
         default=False,
         help=(
-            "Enable region-based parallel routing (Issue #965). Partitions "
-            "the routing grid into regions and routes non-adjacent regions "
-            "in parallel during each negotiated iteration. Default off. "
+            "Enable region-based partitioning (Issue #965). Applies only to "
+            "the plain negotiated path; it is ignored (with a warning) on the "
+            "escape pre-phase, two-phase, multi-resolution and basic paths. "
+            "Worker searches currently serialize on the grid lock and the "
+            "GIL, so no speedup should be expected. Default off. "
             "NOTE: auto-disabled with a log warning on small / dense boards "
             "where nets-per-region falls below 16 -- the partition + worker "
             "overhead would exceed the per-region A* savings on those "
             "workloads (Issue #3100; board-07 case showed +55%% wall-clock). "
-            "Best used on >= 64-net boards with a 2x2 partition."
+            "Only engages on >= 64-net boards with a 2x2 partition."
         ),
     )
     parser.add_argument(
@@ -19625,7 +20117,7 @@ def _route_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help=(
             "Export failed nets (fully-unrouted and partial) to a file for "
-            "triage or manual completion in KiCad. A '.json' path emits "
+            "triage and automation (e.g. feed to kct net-status --why). A '.json' path emits "
             "structured per-net detail (status, connected/total pads, and the "
             "stranded pad names for partial nets); any other extension emits "
             "one net name per line. The file is always written when routing "
@@ -19637,7 +20129,11 @@ def _route_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-cache",
         action="store_true",
-        help="Disable routing cache (force fresh routing)",
+        help=(
+            "Disable routing cache (force fresh routing). The cache already "
+            "invalidates on kicad_tools code and native router build changes, "
+            "so this is not needed after router edits"
+        ),
     )
     parser.add_argument(
         "--cache-only",
@@ -19923,6 +20419,7 @@ def _emit_route_json_fallback(args, exit_code: int) -> None:
                 single_pad_count=getattr(last, "single_pad_count", 0),
                 # Issue #6239: the exit code is the run's single final verdict.
                 verdict=_verdict_for_exit(exit_code),
+                grid_selection=getattr(args, "_grid_selection", None),
             )
             return
         except Exception as exc:  # pragma: no cover - defensive
@@ -19958,6 +20455,43 @@ def _dry_run_layer_counts(pcb_path: Path, args, argv) -> tuple[list[int], bool]:
 
         return [detect_layer_stack(pcb_path.read_text()).num_layers], False
     return [6 if layers == "6" else 4 if str(layers).startswith("4") else 2], False
+
+
+def _check_explicit_grid_ceiling(pcb_path: Path, args, argv) -> int | None:
+    """Refuse an explicit ``--grid`` past the backend's cell ceiling (Issue #6875).
+
+    The cell count is taken at the largest layer count the run would try
+    (the ``--auto-layers`` ladder, else the fixed stack), so a later rung
+    cannot allocate past the ceiling either.  Returns 1 after printing the
+    error, or None to proceed.  ``--force`` skips the check (caller).
+    """
+    from kicad_tools.router.grid_limits import (
+        explicit_grid_ceiling_error,
+        resolve_limit_backend,
+    )
+    from kicad_tools.router.io import extract_board_dimensions
+
+    try:
+        dims = extract_board_dimensions(pcb_path)
+        layer_counts, _ = _dry_run_layer_counts(pcb_path, args, argv)
+    except Exception:
+        # Outline/stack problems are reported by the loader with better text.
+        return None
+    if not dims or not layer_counts:
+        return None
+    clearance = getattr(args, "clearance", None)
+    message = explicit_grid_ceiling_error(
+        width=dims[0],
+        height=dims[1],
+        resolution=float(args.grid),
+        num_layers=max(layer_counts),
+        backend=resolve_limit_backend(getattr(args, "backend", "auto")),
+        clearance=clearance if isinstance(clearance, (int, float)) else None,
+    )
+    if message is None:
+        return None
+    print(message, file=sys.stderr)
+    return 1
 
 
 def _print_dry_run_plan(
@@ -20516,6 +21050,18 @@ def _run_main_impl(args, parser, argv) -> int:
         )
         return 1
 
+    # Issue #7051: --batch-routing is a deprecated no-op (GPU batch routing was
+    # never wired in).  Warn once per invocation; routing is unaffected.
+    if getattr(args, "batch_routing", False):
+        import warnings
+
+        _msg = (
+            "--batch-routing has no effect and will be removed; "
+            "use --region-parallel / the C++ backend (see #7051, #7053)"
+        )
+        print(f"Warning: {_msg}", file=sys.stderr)
+        warnings.warn(_msg, DeprecationWarning, stacklevel=2)
+
     # Apply high-performance settings if requested
     if getattr(args, "high_performance", False):
         from kicad_tools.performance import get_performance_config
@@ -20707,6 +21253,9 @@ def _run_main_impl(args, parser, argv) -> int:
                 file=sys.stderr,
             )
             return 1
+    # Issue #6875: reported as ``grid.selection`` in --format json and on the
+    # text ``Grid:`` line.
+    args._grid_selection = "explicit" if grid_auto_result is None else "auto"
 
     # Handle cache-related commands early
     if args.cache_stats:
@@ -20796,6 +21345,14 @@ def _run_main_impl(args, parser, argv) -> int:
     # every escalation dispatch below (``_analyze_dry_run``, issue #6648) and
     # runs the single-attempt complexity + routability analysis, which
     # returns before routing.
+    # Issue #6875: an explicit grid is no longer coarsened (#6741), so refuse
+    # one that would allocate past the backend's cell ceiling -- before any
+    # flow dispatch (and before --dry-run, which reports the same error).
+    if grid_auto_result is None and not args.force:
+        _ceiling_rc = _check_explicit_grid_ceiling(pcb_path, args, argv)
+        if _ceiling_rc is not None:
+            return _ceiling_rc
+
     if args.dry_run and not args.analyze:
         return _print_dry_run_plan(
             pcb_path,
@@ -20919,7 +21476,12 @@ def _run_main_impl(args, parser, argv) -> int:
         )
 
     # Auto-classify pour nets and extend skip_nets
-    _skipped, _no_zone = _auto_skip_pour_nets(pcb_path, skip_nets, quiet=args.quiet)
+    _skipped, _no_zone = _auto_skip_pour_nets(
+        pcb_path,
+        skip_nets,
+        quiet=args.quiet,
+        net_class_map=getattr(args, "_loaded_net_class_map", None),
+    )
     # Issue #4688: stash the auto-skipped names (exact board net names) so the
     # --net-class-map resolver's phase 3 can match sidecar keys naming them —
     # they enter neither router.net_names nor router.existing_routes.
@@ -21043,6 +21605,7 @@ def _run_main_impl(args, parser, argv) -> int:
         # to a HARD constraint for the ampacity-free case (nets with a declared
         # ``target_ampacity`` are hard-blocked regardless of this flag).
         strict_layers=getattr(args, "strict_layers", False),
+        fallback_bidirectional=getattr(args, "fallback_bidirectional", False),
         # Issue #4475 (epic #4465 Phase 3): stage the lattice engine's
         # same-net via-in-pad attach as a LAST RESORT (in-layer / free-space
         # via first) instead of the #4284 opportunistic tier-only gate.
@@ -21150,6 +21713,8 @@ def _run_main_impl(args, parser, argv) -> int:
     _apply_net_class_map_sidecar(router, args, quiet=quiet)
     # Issue #4431: attach the --voltage-map HV pairwise-clearance table.
     _apply_pairwise_clearance(router, args, quiet=quiet)
+    # Issue #6693: name overlapping different-net input pads up front.
+    _report_input_pad_overlaps(router, args, display_input_path, quiet=quiet)
     # Issue #5520: --no-routing-plan (report-only plan stage).
     _apply_routing_plan_flag(router, args)
     # Issue #5521: --plan-gate refuses an infeasible plan here --
@@ -21293,8 +21858,12 @@ def _run_main_impl(args, parser, argv) -> int:
 
         backend_status = format_backend_status(backend_info, grid_cells)
         flush_print(f"  Backend:    {backend_status}")
+        # Issue #6875: name the pitch actually routed on (and any coarsening).
+        from kicad_tools.router.grid_limits import format_grid_line
+
         flush_print(
-            f"  Grid:       {router.grid.cols}x{router.grid.rows}x{router.grid.num_layers} = {grid_cells:,} cells"
+            "  Grid:       "
+            + format_grid_line(router.grid_report(getattr(args, "_grid_selection", None)))
         )
         flush_print(f"  Total nets: {len(net_map)}")
         flush_print(f"  Nets to route: {nets_to_route} (multi-pad signal nets)")
@@ -21684,6 +22253,9 @@ def _run_main_impl(args, parser, argv) -> int:
                 cached_routes = cache.deserialize_routes(cached_result.routes_data)
 
                 cached_usage = cache.deserialize_route_usage(cached_result.routes_data)
+                cached_coupled_nets = cache.deserialize_committed_coupled_nets(
+                    cached_result.routes_data
+                )
 
             else:
                 if not quiet:
@@ -21724,6 +22296,9 @@ def _run_main_impl(args, parser, argv) -> int:
         try:
             router.grid.import_route_usage(cached_usage)
             router.restore_route_snapshot(cached_routes)
+            # Issue #7003: the optimizer skips coupled pairs the routing
+            # dispatch committed; a hit skips the dispatch, so replay them.
+            router._committed_coupled_nets = set(cached_coupled_nets)
             if not quiet:
                 print("  Using cached routing result")
         except Exception as exc:
@@ -21844,17 +22419,60 @@ def _run_main_impl(args, parser, argv) -> int:
         def do_routing():
             nonlocal diffpair_warnings, relaxed_nets_report, diffpair_budget_exit_pairs
 
-            # Adaptive multi-resolution routing (when --grid auto selects it)
-            if multi_res_plan is not None and multi_res_plan.is_multi_resolution:
+            # Issue #6666: decide escape routing ONCE, before the adaptive
+            # branch (the decision prints, so it must not be re-evaluated).
+            # The adaptive branch used to return before this decision was
+            # ever made.  That was latent until PR #4877 let
+            # ``compute_multi_resolution_plan`` see KiCad 7+ refs; after it,
+            # a board whose adaptive Phase 1 escapes 0 pads of a fine-pitch
+            # part (chorus-test's U8 once #6646 declined full-stack micro
+            # vias) hard-failed with FinePitchEscapeFailure instead of
+            # reaching the dense-package escape pre-phase that used to route
+            # it (30/51).
+            #
+            # The pre-phase only pre-empts the adaptive branch when the
+            # adaptive Phase 1 WOULD hard-fail (a read-only preview of the
+            # same escape search).  Boards whose Phase 1 succeeds keep the
+            # adaptive branch byte-for-byte: on board 07 the escape pre-phase
+            # routes far worse than adaptive (#3438), so pre-empting on
+            # every dense package regressed it.
+            use_adaptive_grid = multi_res_plan is not None and multi_res_plan.is_multi_resolution
+            use_escape_routing, escape_message = _escape_routing_decision(
+                router, escape_routing_flag
+            )
+            adaptive_router = None
+            if use_adaptive_grid:
                 from kicad_tools.router.adaptive_grid import AdaptiveGridRouter
 
-                if not quiet:
-                    flush_print("  Using adaptive multi-resolution grid strategy")
                 adaptive_router = AdaptiveGridRouter(
                     grid=router.grid,
                     rules=router.rules,  # Issue #6243: carries authored minima
                     router=router,
                 )
+                if use_escape_routing:
+                    phase1_failure = adaptive_router.preview_phase1(router.pads)
+                    if phase1_failure is None:
+                        # Adaptive Phase 1 escapes every fine-pitch part:
+                        # keep the adaptive branch (its own escapes).
+                        use_escape_routing = False
+                        escape_message = None
+                    else:
+                        use_adaptive_grid = False
+                        if not quiet:
+                            flush_print(
+                                "  Adaptive multi-resolution grid skipped: its Phase 1 "
+                                f"would escape 0/{phase1_failure.attempted_pads} pads of "
+                                f"{phase1_failure.component_ref}; falling back to the "
+                                "dense-package escape pre-phase (#6666)"
+                            )
+            if escape_message is not None and not quiet:
+                flush_print(escape_message)
+
+            # Adaptive multi-resolution routing (when --grid auto selects it)
+            if use_adaptive_grid:
+                assert adaptive_router is not None
+                if not quiet:
+                    flush_print("  Using adaptive multi-resolution grid strategy")
 
                 # Build nets dict (filter to routable multi-pad nets)
                 adaptive_nets = {
@@ -21879,8 +22497,6 @@ def _run_main_impl(args, parser, argv) -> int:
                                     max_iterations=args.iterations,
                                     timeout=_budgeted_timeout(args),
                                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
-                                    batch_routing=getattr(args, "batch_routing", False)
-                                    or getattr(args, "high_performance", False),
                                     hierarchical=getattr(args, "hierarchical", False),
                                     perturbation=getattr(args, "perturbation", True),
                                     # Issue #3039: forward --seed for deterministic routing.
@@ -21906,6 +22522,7 @@ def _run_main_impl(args, parser, argv) -> int:
                                     ),
                                     **_deterministic_rescue_kwargs(args),
                                 )
+                            _warn_region_parallel_ignored(args, "basic strategy")
                             # Issue #4697: forward the user's budgets rather than calling
                             # route_all() bare (which tripped the #2794 no-timeout guard
                             # pointing straight back here).  This binds the GRID engine;
@@ -21940,6 +22557,7 @@ def _run_main_impl(args, parser, argv) -> int:
                         diffpair_budget_exit_pairs.extend(router.diffpair_budget_exit_pair_names())
                         return result
                     if args.strategy == "evolutionary":
+                        _warn_region_parallel_ignored(args, "evolutionary strategy (adaptive grid)")
                         return router.route_all_evolutionary(
                             pop_size=args.pop_size,
                             generations=args.generations,
@@ -21948,6 +22566,7 @@ def _run_main_impl(args, parser, argv) -> int:
                             timeout=_budgeted_timeout(args),
                         )
                     elif args.strategy == "monte-carlo":
+                        _warn_region_parallel_ignored(args, "monte-carlo strategy")
                         return router.route_all_monte_carlo(
                             num_trials=args.mc_trials,
                             **_multistart_trial_kwargs(args),
@@ -21955,6 +22574,7 @@ def _run_main_impl(args, parser, argv) -> int:
                             timeout=_budgeted_timeout(args),
                         )
                     elif getattr(args, "two_phase", False) and args.strategy == "negotiated":
+                        _warn_region_parallel_ignored(args, "two-phase")
                         return router.route_all_two_phase(
                             use_negotiated=True,
                             corridor_width_factor=2.0,
@@ -21970,8 +22590,6 @@ def _run_main_impl(args, parser, argv) -> int:
                             max_iterations=args.iterations,
                             timeout=_budgeted_timeout(args),
                             per_net_timeout=getattr(args, "per_net_timeout", None) or None,
-                            batch_routing=getattr(args, "batch_routing", False)
-                            or getattr(args, "high_performance", False),
                             hierarchical=getattr(args, "hierarchical", False),
                             perturbation=getattr(args, "perturbation", True),
                             # Issue #3039: forward --seed for deterministic routing.
@@ -21995,6 +22613,7 @@ def _run_main_impl(args, parser, argv) -> int:
                             **_deterministic_rescue_kwargs(args),
                         )
                     else:
+                        _warn_region_parallel_ignored(args, "basic strategy")
                         # Issue #4697: forward the user's budgets rather than calling
                         # route_all() bare (which tripped the #2794 no-timeout guard
                         # pointing straight back here).  This binds the GRID engine;
@@ -22017,8 +22636,10 @@ def _run_main_impl(args, parser, argv) -> int:
 
                 return adaptive_result.all_routes
 
-            # Check if escape routing should run as a pre-phase
-            if _should_use_escape_routing(router, escape_routing_flag, quiet):
+            # Check if escape routing should run as a pre-phase (decided once
+            # above -- Issue #6666)
+            if use_escape_routing:
+                _warn_region_parallel_ignored(args, "escape pre-phase")
                 # Issue #3952: compose the escape pre-phase with the
                 # CoupledPathfinder diff-pair pre-pass when
                 # --differential-pairs is requested so Phase A runs on
@@ -22052,6 +22673,7 @@ def _run_main_impl(args, parser, argv) -> int:
 
             # Progressive clearance relaxation mode
             if getattr(args, "progressive_clearance", False):
+                _warn_region_parallel_ignored(args, "progressive-clearance")
                 routes, relaxed_nets_report = router.route_with_progressive_clearance(
                     min_clearance=getattr(args, "min_clearance", None),
                     num_relaxation_levels=getattr(args, "relaxation_levels", 3),
@@ -22060,12 +22682,14 @@ def _run_main_impl(args, parser, argv) -> int:
                 )
                 return routes
             elif getattr(args, "multi_resolution", False):
+                _warn_region_parallel_ignored(args, "multi-resolution")
                 return router.route_all_multi_resolution(
                     use_negotiated=(args.strategy == "negotiated"),
                     max_iterations=args.iterations,
                     timeout=_budgeted_timeout(args),
                 )
             elif getattr(args, "two_phase", False) and args.strategy == "negotiated":
+                _warn_region_parallel_ignored(args, "two-phase")
                 return router.route_all_two_phase(
                     use_negotiated=True,
                     corridor_width_factor=2.0,
@@ -22085,8 +22709,6 @@ def _run_main_impl(args, parser, argv) -> int:
                         max_iterations=args.iterations,
                         timeout=_budgeted_timeout(args),
                         per_net_timeout=getattr(args, "per_net_timeout", None) or None,
-                        batch_routing=getattr(args, "batch_routing", False)
-                        or getattr(args, "high_performance", False),
                         hierarchical=getattr(args, "hierarchical", False),
                         perturbation=getattr(args, "perturbation", True),
                         # Issue #3039: forward --seed for deterministic routing.
@@ -22132,8 +22754,6 @@ def _run_main_impl(args, parser, argv) -> int:
                     max_iterations=args.iterations,
                     timeout=_budgeted_timeout(args),
                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
-                    batch_routing=getattr(args, "batch_routing", False)
-                    or getattr(args, "high_performance", False),
                     hierarchical=getattr(args, "hierarchical", False),
                     perturbation=getattr(args, "perturbation", True),
                     # Issue #3039: forward --seed for deterministic routing.
@@ -22158,6 +22778,7 @@ def _run_main_impl(args, parser, argv) -> int:
                     **_deterministic_rescue_kwargs(args),
                 )
             elif args.differential_pairs and args.strategy == "basic":
+                _warn_region_parallel_ignored(args, "basic strategy")
                 # Issue #3321: forward --timeout so the diff-pair pre-pass
                 # derives a per-pair budget when the user has not opted in
                 # via --diffpair-per-pair-timeout.
@@ -22171,8 +22792,10 @@ def _run_main_impl(args, parser, argv) -> int:
                 diffpair_budget_exit_pairs.extend(router.diffpair_budget_exit_pair_names())
                 return result
             elif args.bus_routing and args.strategy == "basic":
+                _warn_region_parallel_ignored(args, "basic strategy")
                 return router.route_all_with_buses(bus_config)
             elif args.strategy == "basic":
+                _warn_region_parallel_ignored(args, "basic strategy")
                 # Issue #4697: forward the user's budgets rather than calling
                 # route_all() bare (which tripped the #2794 no-timeout guard
                 # pointing straight back here).  This binds the GRID engine;
@@ -22184,6 +22807,7 @@ def _run_main_impl(args, parser, argv) -> int:
                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                 )
             elif args.differential_pairs and args.strategy in ("monte-carlo", "evolutionary"):
+                _warn_region_parallel_ignored(args, "monte-carlo/evolutionary strategy")
                 # Issue #2464: MC/GA reset the grid per trial (see
                 # _reset_for_new_trial), which would wipe pre-routed
                 # diff-pair traces.  For now, surface a warning and fall
@@ -22211,6 +22835,7 @@ def _run_main_impl(args, parser, argv) -> int:
                         timeout=_budgeted_timeout(args),
                     )
             elif args.strategy == "monte-carlo":
+                _warn_region_parallel_ignored(args, "monte-carlo strategy")
                 return router.route_all_monte_carlo(
                     num_trials=args.mc_trials,
                     **_multistart_trial_kwargs(args),
@@ -22218,6 +22843,7 @@ def _run_main_impl(args, parser, argv) -> int:
                     timeout=_budgeted_timeout(args),
                 )
             elif args.strategy == "evolutionary":
+                _warn_region_parallel_ignored(args, "evolutionary strategy")
                 return router.route_all_evolutionary(
                     pop_size=args.pop_size,
                     generations=args.generations,
@@ -22392,6 +23018,7 @@ def _run_main_impl(args, parser, argv) -> int:
                     stats,
                     routing_time_ms,
                     route_usage=router.grid.export_route_usage(),
+                    committed_coupled_nets=_committed_coupled_skip_nets(router),
                 )
                 if not quiet:
                     print(f"  Cached routing result ({routing_time_ms}ms compute time)")
@@ -22401,303 +23028,13 @@ def _run_main_impl(args, parser, argv) -> int:
 
         _rss.mark("post-cache-write")
 
-    _stop_rc = _stage_boundary("optimization")  # issue #6324
-    if _stop_rc is not None:
-        return _stop_rc
-    # Get pre-optimization statistics (also used in the no-optimize path
-    # below so the segment/via summary print does not raise
-    # UnboundLocalError when --no-optimize is set).
-    pre_segments = sum(len(r.segments) for r in router.routes)
-    pre_vias = sum(len(r.vias) for r in router.routes)
-
-    # Issue #4732: opt-in per-stage routing-quality instrumentation.
-    # Read-only -- it measures the copper each stage hands to the next
-    # so the surviving fragment/staircase artifacts can be attributed
-    # to a stage instead of guessed at.  ``None`` (the default) makes
-    # every record/print below a no-op.
-    _stage_quality = _make_stage_quality_recorder(args)
-    _record_stage_quality(_stage_quality, STAGE_PRE_OPTIMIZE, router)
-
-    # Issue #4281: the geometric post-passes (optimize + DRC nudge) are
-    # grid-engine-only -- lattice/mesh copper must not be touched.
-    _post_passes_enabled = _engine_post_passes_enabled(args, quiet=quiet)
-    if _post_passes_enabled:
-        _mark_nongrid_routes_for_post_pass(router, args, quiet=quiet)
-        if _resolve_route_engine(args) == "grid":
-            _restore_route_grid(router, router.routes)
-
-    # Optimize traces (unless --no-optimize/--raw flag is set)
-    if (
-        _post_passes_enabled
-        and not args.no_optimize
-        and router.routes
-        and _optimization_fits_budget(args, quiet=quiet)
-    ):
-        from kicad_tools.router.optimizer import (
-            OptimizationConfig,
-            TraceOptimizer,
-            make_collision_checker,
-            optimize_routes_grid_synced,
-        )
-
-        if not quiet:
-            print("\n--- Optimizing traces ---")
-
-        # Configure and run optimizer
-        opt_config = OptimizationConfig(
-            merge_collinear=True,
-            eliminate_zigzags=True,
-            compress_staircase=True,
-            convert_45_corners=True,
-            corner_chamfer_size=0.5,
-            minimize_vias=True,
-        )
-        # Issue #2303: Use overflow-tolerant collision checking when
-        # the router finished with residual overflow.
-        has_overflow = router.grid.get_total_overflow() > 0
-        collision_checker = make_collision_checker(router.grid, ignore_overflow=has_overflow)
-        optimizer = TraceOptimizer(config=opt_config, collision_checker=collision_checker)
-
-        # Issue #2596: snapshot per-net connectivity before optimize so
-        # any net whose pad-to-pad connectivity regresses can be reverted.
-        _ci_snapshot = _connectivity_snapshot(router)
-
-        with spinner("Optimizing traces...", quiet=quiet):
-            # Issue #3507: grid-transactional optimize (see
-            # optimize_routes_grid_synced).
-            optimize_routes_grid_synced(router, optimizer)
-
-        _enforce_connectivity_invariant_or_exit(
-            router,
-            _ci_snapshot,
-            phase="optimize",
-            args=args,
-            quiet=quiet,
-        )
-        _record_stage_quality(_stage_quality, STAGE_POST_OPTIMIZE, router)
-
-    _stop_rc = _stage_boundary("drc-nudge")  # issue #6324
-    if _stop_rc is not None:
-        return _stop_rc
-    # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
-    # the nudge is NOT covered by --no-optimize, so it needs its own gate).
-    # Issue #6273: like the optimizer, it yields to save / fill / DRC when
-    # routing overran into the post-route reserve.
-    if (
-        _post_passes_enabled
-        and router.routes
-        and _optimization_fits_budget(args, quiet=quiet, stage="DRC nudge")
-    ):
-        from kicad_tools.router.drc_nudge import drc_verify_and_nudge
-
-        # Issue #2596: snapshot connectivity before nudge.
-        _ci_snapshot_nudge = _connectivity_snapshot(router)
-
-        with spinner("DRC nudge pass...", quiet=quiet):
-            nudge_result = drc_verify_and_nudge(router)
-        if not quiet and nudge_result.initial_violations > 0:
-            print(f"  {nudge_result.summary()}")
-
-        _enforce_connectivity_invariant_or_exit(
-            router,
-            _ci_snapshot_nudge,
-            phase="nudge",
-            args=args,
-            quiet=quiet,
-        )
-        _record_stage_quality(_stage_quality, STAGE_POST_NUDGE, router)
-
-    _stop_rc = _stage_boundary("consolidation")  # issue #6324
-    if _stop_rc is not None:
-        return _stop_rc
-    # Issue #4732: post-nudge collinear consolidation.  Runs LAST of the
-    # geometric passes so it also absorbs fragments the nudge introduced.
-    _run_consolidation_pass(
-        router,
-        args,
-        post_passes_enabled=_post_passes_enabled,
-        stage_recorder=_stage_quality,
-        quiet=quiet,
+    # Issue #7377: the shared post-route pipeline (optimize -> DRC nudge ->
+    # consolidation -> finalize gate -> gap / skew / match-group tuning).
+    _stop_rc = _run_post_route_pipeline(
+        router, args, quiet=quiet, restore_route_grid=True, report_segment_delta=True
     )
-
-    _stop_rc = _stage_boundary("finalization")  # issue #6324
     if _stop_rc is not None:
         return _stop_rc
-    # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
-    # over the post-optimize/post-nudge copper.  An rtree-less
-    # optimizer can introduce a cross-net crossing the pre-optimize
-    # finalize gate never saw; demote it before the canonical write.
-    # Issue #4281: unconditional -- runs even when the geometric
-    # post-passes are skipped for non-grid engines (defense in depth).
-    if router.routes:
-        _finalize_committed_copper_or_demote(router, quiet=quiet)
-    _record_stage_quality(_stage_quality, STAGE_POST_FINALIZE, router)
-    _print_stage_quality_report(_stage_quality)
-
-    if _post_passes_enabled and router.routes:
-        # Get post-optimization statistics
-        post_segments = sum(len(r.segments) for r in router.routes)
-        post_vias = sum(len(r.vias) for r in router.routes)
-
-        if not quiet:
-            segment_reduction = (
-                ((pre_segments - post_segments) / pre_segments * 100) if pre_segments > 0 else 0
-            )
-            via_reduction = ((pre_vias - post_vias) / pre_vias * 100) if pre_vias > 0 else 0
-            print(f"  Segments: {pre_segments} -> {post_segments} ({-segment_reduction:+.1f}%)")
-            if pre_vias > 0:
-                print(f"  Vias:     {pre_vias} -> {post_vias} ({-via_reduction:+.1f}%)")
-
-    # Differential-pair length-match (skew) tuning -- Epic #2556 Phase 3I (Issue #2648).
-    # Engaged via --length-match-diffpairs (opt-in).  Requires --differential-pairs;
-    # otherwise emit a warning and short-circuit (no detection means no pairs).
-    if getattr(args, "length_match_diffpairs", False) and router.routes:
-        if not args.differential_pairs:
-            if not quiet:
-                print(
-                    "\n--- Length-Match Diff-Pairs: skipped ---\n"
-                    "  --length-match-diffpairs requires --differential-pairs "
-                    "(no detection means no pairs to tune)."
-                )
-        else:
-            from kicad_tools.router.diffpair_detection import detect_diff_pairs
-
-            if not quiet:
-                print("\n--- Length-Match Diff-Pairs (Epic #2556 Phase 3I) ---")
-            detected_pairs = detect_diff_pairs(net_names=router.net_names)
-            if not detected_pairs:
-                if not quiet:
-                    print("  No differential pairs detected; nothing to tune.")
-            else:
-                # Snapshot connectivity for the pad-to-pad invariant.
-                _ci_snapshot_skew = _connectivity_snapshot(router)
-                tune_results = router.apply_diffpair_length_tuning(
-                    detected_pairs=detected_pairs,
-                    verbose=not quiet,
-                )
-                _enforce_connectivity_invariant_or_exit(
-                    router,
-                    _ci_snapshot_skew,
-                    phase="length_match_diffpairs",
-                    args=args,
-                    quiet=quiet,
-                )
-                if not quiet:
-                    n_tuned = sum(1 for r in tune_results.values() if r.reason == "tuned")
-                    n_clean = sum(
-                        1 for r in tune_results.values() if r.reason == "already_within_tolerance"
-                    )
-                    n_rollback = sum(
-                        1
-                        for r in tune_results.values()
-                        if r.reason == "post_insertion_drc_violation"
-                    )
-                    n_budget = sum(
-                        1 for r in tune_results.values() if r.reason == "exceeded_max_inserts"
-                    )
-                    n_skipped = sum(
-                        1 for r in tune_results.values() if r.reason == "not_length_critical"
-                    )
-                    print(
-                        f"  Summary: {n_tuned} tuned, {n_clean} clean, "
-                        f"{n_rollback} rolled back, {n_budget} budget-exhausted, "
-                        f"{n_skipped} skipped (not length-critical)"
-                    )
-
-    # N-trace match-group length-match (skew) tuning -- Epic #2661 Phase 3H
-    # (Issue #2723).  Engaged via --length-match-groups (opt-in).  Runs
-    # AFTER --length-match-diffpairs so the within-pair skew invariant is
-    # preserved before group tuning perturbs lane lengths.  Graceful
-    # short-circuit when no groups are declared / detected.
-    if getattr(args, "length_match_groups", False) and router.routes:
-        from kicad_tools.router.match_group_detection import detect_match_groups
-
-        if not quiet:
-            print("\n--- Length-Match Groups (Epic #2661 Phase 3H) ---")
-        # Issue #3440: --length-match-groups silently no-ops without
-        # length_match_group declarations (detection consults
-        # NetClassRouting declarations exclusively when suffix inference
-        # is off; the built-in DEFAULT_NET_CLASS_MAP declares none).
-        # Warn LOUDLY -- on stderr, regardless of --quiet -- so a recipe
-        # that forgot --net-class-map doesn't sail through with untuned
-        # skew.
-        _has_group_declarations = any(
-            nc.effective_length_match_group() for nc in router.net_class_map.values()
-        )
-        if not _has_group_declarations:
-            print(
-                "WARNING: --length-match-groups is INACTIVE: no loaded net "
-                "class declares length_match_group, so no match groups can "
-                "be detected and no skew tuning will run.  Pass "
-                "--net-class-map <sidecar.json> (e.g. the board's "
-                "output/net_class_map.json) with length_match_group "
-                "declarations.",
-                file=sys.stderr,
-            )
-        # Build net_to_class + a class-name-keyed routing map so the
-        # explicit-declaration consultation in ``_gather_explicit_groups``
-        # can find each net's NetClassRouting.  ``router.net_class_map`` is
-        # keyed by NET NAME (e.g. "DQ0"), but ``detect_match_groups`` looks
-        # up by CLASS NAME (e.g. "DDR_DATA_BYTE_0").  Mirrors the
-        # synth_routing idiom in ``validate/match_group_skew.py:174-181``
-        # (Issue #3098 -- without this the detector returned an empty
-        # group list and the orchestrator silently no-op'd).
-        net_to_class: dict[str, str] = {}
-        synth_routing: dict = dict(router.net_class_map)
-        for net_name, net_class in router.net_class_map.items():
-            net_to_class[net_name] = net_class.name
-            synth_routing.setdefault(net_class.name, net_class)
-        try:
-            detected_groups = detect_match_groups(
-                net_names=router.net_names,
-                net_class_routing=synth_routing,
-                net_to_class=net_to_class,
-                length_tracker=router.length_tracker,
-                enable_suffix_inference=False,
-            )
-        except Exception as exc:
-            if not quiet:
-                print(f"  Match-group detection failed: {exc}; skipping.")
-            detected_groups = []
-
-        if not detected_groups:
-            if not quiet:
-                print("  No match groups detected; nothing to tune.")
-        else:
-            # Snapshot connectivity for the pad-to-pad invariant.
-            _ci_snapshot_groups = _connectivity_snapshot(router)
-            tune_results_groups = router.apply_match_group_tuning(
-                detected_groups=detected_groups,
-                verbose=not quiet,
-            )
-            _enforce_connectivity_invariant_or_exit(
-                router,
-                _ci_snapshot_groups,
-                phase="length_match_groups",
-                args=args,
-                quiet=quiet,
-            )
-            if not quiet:
-                # Aggregate per-member counters across all groups for a
-                # single end-of-phase summary line.  Issue #3440: the
-                # shared formatter counts EVERY TuneResult.reason value
-                # (the legacy five-bucket line silently dropped
-                # ``reference`` / ``longer_than_reference`` / ``unrouted``
-                # members, producing the all-zeros line for a
-                # 15.4mm-skew group).
-                from kicad_tools.router.match_group_tuning import (
-                    format_reason_counts,
-                )
-
-                all_results = [
-                    res
-                    for member_dict in tune_results_groups.values()
-                    for (_route, res) in member_dict.values()
-                ]
-                print(
-                    f"  Summary: {len(tune_results_groups)} groups, "
-                    f"{format_reason_counts(r.reason for r in all_results)}"
-                )
 
     # Finalize: cleanup -> sexp -> stats (canonical ordering)
     multi_pad_net_ids = set(multi_pad_nets)
@@ -22764,6 +23101,13 @@ def _run_main_impl(args, parser, argv) -> int:
             "`kct check` results if this board is dense with matched-length "
             "bundles."
         )
+
+    # Issue #7425 (#7093 AC1): engaged diff pairs the router committed with
+    # unequal P/N via counts -- the same pairs ``kct check`` reports as
+    # ``diffpair_uncoupled_length`` "unequal via counts".  Reported only: the
+    # exit status is unchanged (the JSON report carries the same list under
+    # ``pair_via_parity_failures``).
+    _print_pair_via_parity_summary(router, quiet=quiet)
 
     # Report nets that needed clearance relaxation (--progressive-clearance mode)
     if relaxed_nets_report and not quiet:
@@ -23333,6 +23677,7 @@ def _run_main_impl(args, parser, argv) -> int:
             single_pad_count=len(single_pad_nets),
             routing_plan=_routing_plan_json,
             verdict=_final_verdict,
+            grid_selection=getattr(args, "_grid_selection", None),
         )
 
     # Save partial results on clean partial exit (not just SIGINT)
@@ -23345,7 +23690,9 @@ def _run_main_impl(args, parser, argv) -> int:
             # source board (see _save_partial_results), not a frozen pre-pass
             # snapshot. Emit exactly one canonical-output line.
             print(f"  Canonical output: {output_path} (full route + optimize + DRC)")
-            print("  Open in KiCad to complete remaining nets manually")
+            print(
+                "  Next: kct net-status --why (diagnose stuck nets), then re-run with --timeout / --layers"
+            )
 
     # Export failed nets to file if requested
     if getattr(args, "export_failed_nets", None) and not all_nets_routed:
@@ -23451,8 +23798,9 @@ def _run_main_impl(args, parser, argv) -> int:
     #     not the router.
     # 10 = UNVERIFIED (EXIT_UNVERIFIED, issue #6273): everything that would
     #     have returned 0, except that the post-route DRC and/or the #5785
-    #     stranded-pour check was skipped because the hard --timeout could
-    #     not cover it.  The board is saved; run ``kct check`` on it.  Only
+    #     stranded-pour check did not complete (the hard --timeout ran out,
+    #     or kicad-cli crashed/was killed/timed out, issue #6724).  The
+    #     board is saved; run ``kct check`` on it.  Only
     #     ever replaces 0 -- a known failure keeps its own code.  JSON
     #     ``summary.verdict`` is ``"unverified"``.
     #

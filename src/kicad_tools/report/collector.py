@@ -67,6 +67,9 @@ class ReportDataCollector:
             DRC section instead of silently no-op'ing (Part B of #4008). When
             ``None`` the report keeps the documented graceful no-op behavior
             for external-router boards.
+        schematic_path: Optional explicit schematic forwarded to
+            ``ManufacturingAudit`` so the report's ERC runs against it when
+            auto-resolution from the PCB path would not find it (#7153).
     """
 
     def __init__(
@@ -76,8 +79,10 @@ class ReportDataCollector:
         quantity: int = 5,
         skip_erc: bool = False,
         net_class_map_path: str | Path | None = None,
+        schematic_path: str | Path | None = None,
     ) -> None:
         self.pcb_path = Path(pcb_path)
+        self.schematic_path = Path(schematic_path) if schematic_path is not None else None
         self.manufacturer = manufacturer
         self.quantity = quantity
         self.skip_erc = skip_erc
@@ -118,6 +123,7 @@ class ReportDataCollector:
                 quantity=self.quantity,
                 skip_erc=self.skip_erc,
                 net_class_map_path=self.net_class_map_path,
+                schematic_path=self.schematic_path,
             )
             audit_result = audit.run()
         except Exception:
@@ -428,7 +434,24 @@ class ReportDataCollector:
         """
         if audit_result is None:
             return None
-        return audit_result.drc.to_dict()
+        data = audit_result.drc.to_dict()
+        # Issue #7153: name the rule set and split the summed error count
+        # per engine.  ``error_count`` adds kicad-cli's geometric errors on
+        # top of the ``--mfr`` engine's, and one defect (e.g. an undersized
+        # via drill) is usually reported by both -- so a reader seeing only
+        # the sum double-counts it.  kicad-cli types are recorded under the
+        # ``kicad-cli:`` namespace in ``violations_by_type`` (errors only),
+        # so the native share is the remainder.  ``blocking_count`` and
+        # ``passed`` are left untouched.
+        data["manufacturer"] = self.manufacturer
+        by_type = data.get("violations_by_type") or {}
+        geometric = sum(
+            int(count) for key, count in by_type.items() if str(key).startswith("kicad-cli:")
+        )
+        error_count = int(data.get("error_count") or 0)
+        data["geometric_error_count"] = geometric if data.get("geometric_drc_ran") else None
+        data["native_error_count"] = max(error_count - geometric, 0)
+        return data
 
     def collect_erc(self, audit_result: AuditResult | None) -> dict[str, Any] | None:
         """Extract ERC sub-section from a pre-run AuditResult.
@@ -1056,9 +1079,10 @@ class ReportDataCollector:
     def _extract_assembly_notes(self, pcb: Any) -> dict[str, Any] | None:
         """Generate assembly guidance from PCB footprint analysis.
 
-        Detects fine-pitch packages (QFP, BGA), thermal pads, and
-        polarized components. Returns ``None`` when no noteworthy
-        assembly observations are found.
+        Detects fine-pitch packages (QFP, BGA), thermal pads, polarized
+        components and bottom-side (double-sided assembly) placements
+        (Issue #7204). Returns ``None`` when no noteworthy assembly
+        observations are found.
         """
         import re
 
@@ -1066,6 +1090,7 @@ class ReportDataCollector:
         thermal_pad_count = 0
         polarized_count = 0
         fine_pitch_parts: list[str] = []
+        bottom_side_parts: list[str] = []
         _FINE_PITCH_CAP = 10  # cap listed parts for readability
 
         for fp in pcb.footprints:
@@ -1086,7 +1111,27 @@ class ReportDataCollector:
             if ref.startswith("D") or re.search(r"(CP_Elec|Polarized|LED)", fp_name, re.IGNORECASE):
                 polarized_count += 1
 
-        if fine_pitch_count == 0 and thermal_pad_count == 0 and polarized_count == 0:
+            # Bottom-side placements (double-sided assembly).  Applies the CPL
+            # filter's position-file-excluded and DNP rules but has no fab
+            # context, so unlike the JLCPCB CPL export it still counts
+            # through-hole parts; the figure is advisory.
+            if (
+                getattr(fp, "layer", "") == "B.Cu"
+                and not getattr(fp, "exclude_from_pos_files", False)
+                and not getattr(fp, "dnp", False)
+            ):
+                bottom_side_parts.append(ref or fp_name)
+
+        bottom_side_parts.sort(
+            key=lambda r: [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", r)]
+        )
+        bottom_side_count = len(bottom_side_parts)
+        if (
+            fine_pitch_count == 0
+            and thermal_pad_count == 0
+            and polarized_count == 0
+            and bottom_side_count == 0
+        ):
             return None
 
         summary_parts: list[str] = []
@@ -1103,11 +1148,18 @@ class ReportDataCollector:
                 f"{polarized_count} polarized component{'s' if polarized_count != 1 else ''}"
             )
 
+        if bottom_side_count:
+            summary_parts.append(
+                f"{bottom_side_count} bottom-side component{'s' if bottom_side_count != 1 else ''}"
+            )
+
         return {
             "fine_pitch_count": fine_pitch_count,
             "fine_pitch_parts": fine_pitch_parts,
             "thermal_pad_count": thermal_pad_count,
             "polarized_count": polarized_count,
+            "bottom_side_count": bottom_side_count,
+            "bottom_side_parts": bottom_side_parts[:_FINE_PITCH_CAP],
             "summary": "; ".join(summary_parts),
         }
 

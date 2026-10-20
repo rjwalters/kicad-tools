@@ -46,6 +46,10 @@ class RouteHaloGeometry:
         #: (issue #5617).  See :attr:`state_version`.
         self._version = 0
         self._complete = False
+        #: Issue #6508: while True, :meth:`record` is a no-op.  Set by
+        #: ``RoutingGrid`` while it re-stamps a surviving route's halo after a
+        #: neighbour's rip-up -- that copper is already recorded.
+        self.frozen = False
         self._cells = np.zeros((0, 0, 0), dtype=np.int32)
         self._objects: list[tuple] = []
         # Axis-aligned (minx, miny, maxx, maxy) of each object's centreline,
@@ -64,6 +68,8 @@ class RouteHaloGeometry:
         return (1, via.net, -1, x, y, x, y, via.diameter, via.drill)
 
     def record(self, key: tuple, radius: int, add: bool) -> None:
+        if self.frozen:
+            return
         mark = (key, radius)
         if add:
             self.marks[mark] += 1

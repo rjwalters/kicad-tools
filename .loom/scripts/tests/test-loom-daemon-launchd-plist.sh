@@ -601,10 +601,11 @@ assert_contains "$sess_render_out" "$SESSION_TEST_LABEL" "#6568: an explicit LOO
 # 22b. Identical strip on the systemd tier -- the incident's mechanism is
 #      per-platform but the laundering is not.
 sess_unit_out=$( cd "$WORKDIR" && HOME="$SESSION_HOME" \
-    env -u LOOM_MAIN_HEALTH_GATE "${session_env[@]}" LOOM_WORK_FINDER=1 \
+    env -u LOOM_MAIN_HEALTH_GATE "${session_env[@]}" LOOM_WORK_FINDER=1 LOOM_SAFEHOUSE_ENABLED=1 \
     LOOM_SYSTEMD_UNIT="loom-daemon-session-test.service" LOOM_DAEMON_BIN="$FAKE_BIN" \
     bash "$START_SCRIPT" --print-unit 2>/dev/null )
-assert_contains "$sess_unit_out" "Environment=LOOM_WORK_FINDER=1" "#6568 control: the systemd unit still forwards a legitimate exported LOOM_* var"
+assert_contains "$sess_unit_out" "Environment=LOOM_SAFEHOUSE_ENABLED=1" "#6568 control: the systemd unit still forwards a legitimate exported LOOM_* var"
+assert_not_contains "$sess_unit_out" "Environment=LOOM_WORK_FINDER=" "#11951: the systemd unit leaves autonomy env to the host's supervisor env"
 assert_not_contains "$sess_unit_out" "Environment=LOOM_SWEEP_CLAIM_OWNED=" "#6568: LOOM_SWEEP_CLAIM_OWNED never reaches the rendered systemd unit"
 assert_not_contains "$sess_unit_out" "Environment=LOOM_TERMINAL_ID=" "#6568: LOOM_TERMINAL_ID never reaches the rendered systemd unit"
 assert_not_contains "$sess_unit_out" "Environment=LOOM_ROLE=" "#6568: LOOM_ROLE never reaches the rendered systemd unit"

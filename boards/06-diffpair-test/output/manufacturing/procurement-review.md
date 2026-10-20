@@ -44,12 +44,12 @@ compliance claim. This board is an LVDS demonstration, not a USB/PCIe/MIPI devic
 | C17 | Samsung CL21A106KAYNNNE, 10 µF | [C15850](https://www.lcsc.com/product-detail/C15850.html) | 0805, X5R, 25 V |
 | R1–R4 | UNI-ROYAL 0603WAF1000T5E, 100 Ω | [C22775](https://www.lcsc.com/product-detail/C22775.html) | 0603, 1% |
 | R5–R8 | UNI-ROYAL 0603WAF1003T5E, 100 kΩ | [C25803](https://www.lcsc.com/product-detail/C25803.html) | 0603, 1% |
-| J1 | Samtec TSW-102-07-G-S | [Manufacturer](https://www.samtec.com/products/tsw-102-07-g-s) | 1 × 2, 2.54 mm THT |
-| J2/J3 | Samtec TSW-108-07-G-S | [Manufacturer](https://www.samtec.com/products/tsw-108-07-g-s) | 1 × 8, 2.54 mm THT |
+| J1 | XFCN PZ254V-11-02P | [C492401](https://www.lcsc.com/product-detail/C492401.html) | 1 × 2, 2.54 mm THT, straight male pin header |
+| J2/J3 | XFCN PZ254V-11-08P | [C492407](https://www.lcsc.com/product-detail/C492407.html) | 1 × 8, 2.54 mm THT, straight male pin header |
 
 Supplier identities were checked 2026-09-10. Inventory and assembly-provider
 availability must be checked when ordering; a listing is not a reservation.
-The headers are manual through-hole assembly after SMT.
+The headers are assembled by JLCPCB (through-hole assembly) and are in `bom_jlcpcb.csv`/`cpl_jlcpcb.csv`.
 
 ## Reproduce
 
@@ -75,3 +75,73 @@ The sidecar explicitly excludes both inner reference layers from auxiliary
 routing. The finalizer applies four reviewed off-land via moves and rejects
 any signal track on a reference plane, non-through via span, or drill overlap
 with an SMT land. Ordinary via processing is used; POFV is not required.
+
+## 2026-10-18 CPL rotation correction (issue #7200)
+
+`cpl_jlcpcb.csv` is regenerated with the JLCPCB rotation profile
+(`jlcpcb_rotations.yaml`) and in the Gerber/drill-origin frame (#7059). The
+2026-09-10 package shipped these rotations uncorrected. Rotation changes are
+placement changes, so this section records them explicitly:
+
+| Reference | Footprint | Old rotation | New rotation |
+|---|---|---|---|
+| U1 | SOIC-8_3.9x4.9mm_P1.27mm | 0 | 270 |
+| U2 | SOIC-8_3.9x4.9mm_P1.27mm | 0 | 270 |
+| U3 | SOIC-8_3.9x4.9mm_P1.27mm | 0 | 270 |
+| U4 | SOIC-8_3.9x4.9mm_P1.27mm | 0 | 270 |
+| U5 | SOIC-8_3.9x4.9mm_P1.27mm | 0 | 270 |
+| U6 | SOIC-8_3.9x4.9mm_P1.27mm | 0 | 270 |
+| U7 | SOIC-8_3.9x4.9mm_P1.27mm | 0 | 270 |
+| U8 | SOIC-8_3.9x4.9mm_P1.27mm | 0 | 270 |
+
+Raw KiCad `pos` reports 0 for all eight (U1–U8); the new values come from the JLCPCB
+profile, not from the board. **Pending human orientation review:** no person
+has yet checked these against the JLC part footprints / datasheet pin-1 marks.
+Do not order assembly from this CPL until that review is recorded here.
+
+## 2026-10-19 Samtec headers replaced by LCSC-stocked headers (issue #7422)
+
+By operator ruling (#7268, Q2 = 3) the Samtec TSW headers J1-J3 are replaced
+with straight male 2.54 mm pin headers that LCSC/JLCPCB stock, so JLCPCB can
+assemble them. J1-J3 are now in `bom_jlcpcb.csv` and `cpl_jlcpcb.csv`, and
+`manual-assembly-bom.csv` is retired. Copper, schematic and footprints are
+unchanged: the board already used the generic
+`PinHeader_1xNN_P2.54mm_Vertical` footprints, not Samtec-specific ones.
+
+Stock and price were read with `kct parts lookup --no-cache` on 2026-10-19.
+Stock changes daily and a listing is not a reservation. The price is the unit
+price at the lowest LCSC price break, which is 50 pcs for C492401 and 10 pcs for
+C492407 on LCSC's product pages (2026-10-19). `kct parts lookup` labels that
+first break "1", but single pieces are not sold at that price.
+
+| Ref | Was | Now | Pins | Stock | Unit price (lowest break) |
+|-----|-----|-----|------|-------|---------------------------|
+| J1 | Samtec TSW-102-07-G-S | XFCN PZ254V-11-02P, C492401 | 1 × 2 | 1,082,699 | $0.0187 (50 pcs) |
+| J2, J3 | Samtec TSW-108-07-G-S | XFCN PZ254V-11-08P, C492407 | 1 × 8 | 330,352 | $0.0523 (10 pcs) |
+
+Equivalence for this board: same pin counts, single row, 2.54 mm pitch,
+straight male. Pin-to-net assignment is set by the unchanged footprint. The
+headers carry 3.3 V, ground and the LVTTL inputs/outputs; the LVDS pairs run
+between the ICs and do not touch them, so the headers are outside the 100 ohm
+differential structure.
+
+Not verified: pin cross-section and hole-size fit against the footprint's drill
+(taken from the LCSC listing text only, no datasheet check), plating and
+mating-cycle rating relative to the Samtec parts, and JLCPCB through-hole
+assembly eligibility of these two part numbers. Procurement must review these
+rows before ordering.
+
+## 2026-10-19 Design report no longer lists J1-J3 as hand-solder (issue #7268)
+
+`report.md`/`report.pdf` are regenerated with `kct export --mfr
+jlcpcb-tier1` from the committed routed PCB. Since issue #7239 the JLCPCB
+export keeps through-hole parts in the CPL, so the report's former
+"Hand-Solder (THT) Components" section, which said J1-J3 are excluded from
+the pick-and-place file, is gone. `bom_jlcpcb.csv` and `cpl_jlcpcb.csv` are
+unchanged: they already list J1-J3 (issue #7422).
+
+**Procurement must review the J1-J3 through-hole rows** (part identity,
+JLCPCB through-hole assembly eligibility and stock, and placement
+orientation) before ordering assembly. This note records the report change
+only: it is not a re-review, and no new supplier lookup or stock check was
+performed.

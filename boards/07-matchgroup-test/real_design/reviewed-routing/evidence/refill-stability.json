@@ -1,10 +1,10 @@
 {
-  "after_sha256": "046fe0602f78f7dd5b5b89c26f6a6ca87d2a518088928569d5479fda4d3558fe",
-  "before_sha256": "046fe0602f78f7dd5b5b89c26f6a6ca87d2a518088928569d5479fda4d3558fe",
+  "after_sha256": "ae86ebe3111122a90415bb08d38caca86a2ab40edc4d90c1aa5d3186c99b6b58",
+  "before_sha256": "ae86ebe3111122a90415bb08d38caca86a2ab40edc4d90c1aa5d3186c99b6b58",
   "byte_identical": true,
   "fill_identical": true,
   "native_rule_sha256": {
-    ".kicad_dru": "4b7ed2eb30f225d6c18d7f4c8275a1cca926c338860d63fe23e39a714efa2cde",
+    ".kicad_dru": "93011b4981b5ce61aac093cdec9210878300c92d909fc079e5e26b02bf6bbc9e",
     ".kicad_pro": "631b225f4cd529c8a2d8ce94d5e40cbedb01139984528a132430dcc3adae63b7"
   },
   "native_unconnected_items": 0,

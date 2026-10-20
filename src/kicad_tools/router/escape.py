@@ -44,11 +44,13 @@ from kicad_tools.core.geometry import point_to_segment_distance
 from kicad_tools.core.types import copper_span_contains
 
 from .layers import Layer, LayerType
+from .pad_geometry import pad_point_distance
 from .primitives import Pad, Route, Segment, Via
 from .via_clearance import point_clear_of_copper, segment_clears_foreign_via
 from .via_in_pad_eligibility import (
     resolve_component_hole_context,
     resolve_process,
+    via_drill_at_pad_edge,
     via_geometry_eligible,
     via_in_pad_candidate_eligible,
 )
@@ -353,8 +355,11 @@ def escape_endpoint_pad(
         pin=pad.pin,
         through_hole=pad.through_hole if unchanged and extent is None else False,
         drill=pad.drill if unchanged and extent is None else 0.0,
+        side=pad.side,
         rotation=rotation,
         shape=shape,
+        # Issue #6718: an unchanged terminal keeps its authored roundrect corners.
+        roundrect_rratio=pad.roundrect_rratio if shape == pad.shape else None,
         escape_terminal=not (unchanged and extent is None),
     )
 
@@ -5574,24 +5579,13 @@ class EscapeRouter:
         subtracts half-widths separately).
         """
 
-        def _dot(ax: float, ay: float, bx: float, by: float) -> float:
-            return ax * bx + ay * by
-
-        def _clamp01(v: float) -> float:
-            return max(0.0, min(1.0, v))
-
         def _point_seg_dist(
             px: float, py: float, ax: float, ay: float, bx: float, by: float
         ) -> float:
             abx, aby = bx - ax, by - ay
-            apx, apy = px - ax, py - ay
-            len_sq = abx * abx + aby * aby
-            if len_sq < 1e-12:
-                return math.sqrt(apx * apx + apy * apy)
-            t = _clamp01(_dot(apx, apy, abx, aby) / len_sq)
-            cx, cy = ax + t * abx, ay + t * aby
-            dx, dy_val = px - cx, py - cy
-            return math.sqrt(dx * dx + dy_val * dy_val)
+            if abx * abx + aby * aby < 1e-12:
+                return math.hypot(px - ax, py - ay)
+            return point_to_segment_distance(px, py, ax, ay, bx, by)
 
         # Check all four endpoint-to-segment distances, plus
         # segment-segment closest approach.
@@ -6964,6 +6958,7 @@ class EscapeRouter:
                     foreign_pads=foreign_pads,
                     foreign_tracks=foreign_tracks,
                     existing_drills=existing_drills,
+                    dam_pads=[*(foreign_pads or []), *pads],
                 ):
                     via = self._make_escape_via(
                         x=via_x,
@@ -7008,6 +7003,7 @@ class EscapeRouter:
         via_diameter: float | None = None,
         existing_drills: list[tuple[float, float, float]] | None = None,
         via_drill: float | None = None,
+        dam_pads: list[Pad] | None = None,
     ) -> bool:
         """Check if a via can be placed at the given position.
 
@@ -7048,6 +7044,10 @@ class EscapeRouter:
                 preserving back-compat for callers without drill context.
             via_drill: Candidate via drill diameter (mm) for the hole-to-hole
                 check.  Defaults to the design rules' via drill.
+            dam_pads: Pads (any net) whose solder-mask dam the drill must
+                stay out of (Issue #7322, the #7296 ``via_at_pad_edge``
+                floor).  Defaults to ``foreign_pads``; callers that
+                pre-filter out the via's own net pass the unfiltered list.
 
         Returns:
             True if the position is clear; False if blocked.
@@ -7165,6 +7165,16 @@ class EscapeRouter:
             ):
                 return False
 
+        # Issue #7322: the drill must not sit in an SMD pad's mask-dam zone
+        # (same predicate as the router's A*, #7296).
+        if self._via_in_pad_edge_zone(
+            x,
+            y,
+            via_drill if via_drill is not None else self.rules.via_drill,
+            dam_pads if dam_pads is not None else foreign_pads,
+        ):
+            return False
+
         # Issue #3855: drill hole-to-hole guard.  The copper-clearance check
         # above operates on PAD diameters; it does not enforce the fab's
         # drill-to-drill (hole-to-hole) minimum, so an escape via could land
@@ -7180,6 +7190,29 @@ class EscapeRouter:
                 return False
 
         return True
+
+    def _via_in_pad_edge_zone(
+        self,
+        x: float,
+        y: float,
+        drill: float,
+        pads: list[Pad] | None,
+    ) -> bool:
+        """True when a drill at ``(x, y)`` sits in an SMD pad's mask-dam zone.
+
+        Issue #7322: ``via_drill_at_pad_edge`` fed the distance from the
+        drill centre to each non-through-hole pad rectangle, with
+        ``rules.min_via_pad_edge_gap`` as the floor (0 disables).
+        """
+        floor = float(getattr(self.rules, "min_via_pad_edge_gap", 0.0) or 0.0)
+        if floor <= 0.0 or not pads:
+            return False
+        for p in pads:
+            if getattr(p, "through_hole", False):
+                continue
+            if via_drill_at_pad_edge(pad_point_distance(p, x, y), drill, floor):
+                return True
+        return False
 
     def _via_clears_other_pads(
         self,
@@ -7363,6 +7396,7 @@ class EscapeRouter:
             foreign_pads=foreign_pads,
             clearance=effective_clearance,
             via_diameter=via_diameter,
+            dam_pads=package.pads,
         ):
             return via_x, via_y, False
 
@@ -8554,8 +8588,6 @@ class EscapeRouter:
             cand_x = pad.x + dx * offset
             cand_y = pad.y + dy * offset
 
-            from .pad_geometry import pad_point_distance
-
             # Do not merely mark the via off-pad: prove its copper is clear
             # of every SMT land in the package, including its own net.
             pads = package.pads if package is not None else [pad]
@@ -8584,6 +8616,7 @@ class EscapeRouter:
                 foreign_pads=foreign_pads,
                 clearance=effective_clearance,
                 via_diameter=via_diameter,
+                dam_pads=package.pads if package is not None else None,
             ):
                 # Issue #3430: ``_can_place_via`` validates only against
                 # footprint pads (and populated grid cells), NOT against

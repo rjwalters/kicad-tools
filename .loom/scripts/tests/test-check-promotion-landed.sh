@@ -39,19 +39,6 @@ CHAMPION_MD="$PROMPT_DIR/champion-issue-promo.md"
 # shellcheck source=lib/assert.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
-assert_not_contains() {
-    local haystack="$1" needle="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if [[ "$haystack" != *"$needle"* ]]; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Unexpected substring: '$needle'"
-    fi
-}
-
 assert_doc_contains() {
     local file="$1" needle="$2" msg="$3"
     TESTS_RUN=$((TESTS_RUN + 1))
@@ -209,6 +196,12 @@ STUB_DIR_FROM_ENV="${LOOM_TEST_STUB_DIR:?stub loom-daemon: LOOM_TEST_STUB_DIR no
 if [[ "$*" == "labels list --property hold --with-retired" && -f "$STUB_DIR_FROM_ENV/hold-labels" ]]; then
   exec cat "$STUB_DIR_FROM_ENV/hold-labels"
 fi
+# $STUB_DIR/author-gate holds the promotion-author answer (#10827); absent: TRUSTED.
+if [[ "$1" == "forge" && "$2" == "promotion-author" ]]; then
+  if [[ -f "$STUB_DIR_FROM_ENV/author-gate-fail" ]]; then exit 1; fi
+  if [[ -f "$STUB_DIR_FROM_ENV/author-gate" ]]; then cat "$STUB_DIR_FROM_ENV/author-gate"; else echo TRUSTED; fi
+  exit 0
+fi
 if [[ "$1" == "forge" && "$2" == "trusted-comments" && ! -f "$STUB_DIR_FROM_ENV/trust-verb-missing" ]]; then
   exec jq -c '[.[] | select(
       ((.author_association // "") | ascii_upcase | IN("OWNER","MEMBER","COLLABORATOR"))
@@ -288,7 +281,7 @@ reset_state() {
     rm -f "$STUB_DIR"/issue-fail-* "$STUB_DIR"/verify-fail-* "$STUB_DIR"/timeline-fail-*
     rm -f "$STUB_DIR"/comment-fail-* "$STUB_DIR"/edit-fail-*
     rm -f "$STUB_DIR"/comment-writes.log "$STUB_DIR"/edit-writes.log
-    rm -f "$STUB_DIR"/comments-fail-* "$STUB_DIR"/trust-verb-missing
+    rm -f "$STUB_DIR"/comments-fail-* "$STUB_DIR"/trust-verb-missing "$STUB_DIR"/author-gate "$STUB_DIR"/author-gate-fail
 }
 
 run_sut() {
@@ -359,6 +352,26 @@ assert_eq "COMPLETED" "$(get_field "$OUT" DECISION)" "(e) DECISION=COMPLETED"
 assert_contains "$EDITS" "loom:issue" "(e) the completing edit adds loom:issue"
 assert_not_contains "$EDITS" "tier:" "(e) the completing edit adds no retired tier label (#11512)"
 assert_contains "$COMMENTS_POSTED" "6464" "(e) a reconciliation comment is posted on the issue"
+
+# (e2) Author gate (#10827): an untrusted or unverifiable author is never
+#     completed by the backstop - no label edit, no comment. Fail closed.
+for mode in untrusted unknown failed; do
+  reset_state
+  issue_json "OPEN" "$(labels_json "loom:curated")" \
+    "[$(approved_comment "2026-08-18T00:00:00Z" "**Goal Alignment**: fine")]" \
+    > "$STUB_DIR/issue-6465.json"
+  stage_verify 6465 "$(labels_json "loom:issue")"
+  case "$mode" in
+    untrusted) echo "UNTRUSTED drive-by" > "$STUB_DIR/author-gate" ;;
+    unknown) echo "UNKNOWN the issue could not be read" > "$STUB_DIR/author-gate" ;;
+    failed) : > "$STUB_DIR/author-gate-fail" ;;
+  esac
+  run_sut --issue 6465 --apply
+  assert_eq "0" "$RC" "(e2/$mode) held by the author gate -> exit 0"
+  assert_eq "ALREADY_ESCALATED" "$(get_field "$OUT" DECISION)" "(e2/$mode) DECISION=ALREADY_ESCALATED"
+  assert_not_contains "$EDITS" "loom:issue" "(e2/$mode) no loom:issue is applied"
+  assert_eq "" "$COMMENTS_POSTED" "(e2/$mode) no comment is posted"
+done
 
 # (f) A current verdict names no tier at all -> still COMPLETED, never an
 #     escalation (before #11512 an unrecoverable tier escalated to an operator).

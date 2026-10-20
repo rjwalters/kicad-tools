@@ -315,8 +315,11 @@ echo "Testing installation-id validation (#4456)..."
 # constant so no signing is required.
 STUB_INSTALL_BODY='{"id": 55}'
 STUB_INSTALL_CODE='200'
+export STUB_CURL_ARGV_LOG="$WORK_DIR/curl-argv.log"
+: > "$STUB_CURL_ARGV_LOG"
 curl() {
     local url=""
+    printf '%s\n' "$*" >> "$STUB_CURL_ARGV_LOG"
     for _a in "$@"; do url="$_a"; done
     case "$url" in
         */installation) printf '%s\n%s' "$STUB_INSTALL_BODY" "$STUB_INSTALL_CODE" ;;
@@ -328,6 +331,16 @@ github_app_jwt() { echo "fake.jwt.signature"; }
 
 export LOOM_GITHUB_APP_ID="424242"
 export LOOM_GITHUB_APP_KEY_PATH="$KEY_PATH"
+
+# Credentials must never reach curl's argv (#10463): the stub records every
+# invocation's argv; run both API helpers, then assert no Authorization header.
+_github_app_api_get_installation "acme/widgets" >/dev/null 2>&1 || true
+_github_app_api_mint_token "55" >/dev/null 2>&1 || true
+if [[ -s "$STUB_CURL_ARGV_LOG" ]] && ! grep -q 'Authorization:\|fake\.jwt' "$STUB_CURL_ARGV_LOG"; then
+    pass "curl argv carries no Authorization header or JWT (#10463)"
+else
+    fail "curl argv must not contain 'Authorization:' or the JWT" "$(cat "$STUB_CURL_ARGV_LOG")"
+fi
 
 # Valid numeric id -> echoed, success.
 STUB_INSTALL_BODY='{"id": 55}'
@@ -485,6 +498,96 @@ fi
 
 unset -f curl github_app_jwt
 unset LOOM_GITHUB_APP_ID LOOM_GITHUB_APP_KEY_PATH STUB_INSTALL_BODY STUB_INSTALL_CODE
+
+# ============================================================================
+# Per-owner writer selection (forge.identities.writers[], #12446)
+# ============================================================================
+echo "Testing per-owner writer selection..."
+
+WRITERS_REPO="$WORK_DIR/writers-repo"
+mkdir -p "$WRITERS_REPO/.loom"
+cat > "$WRITERS_REPO/.loom/config.json" <<CFG
+{"forge":{"githubApp":{"appId":"100","privateKeyPath":"$KEY_PATH"},
+  "identities":{"writers":[
+    {"appId":"200","privateKeyPath":"$KEY_PATH","owners":["OrgTwo","org-three"]},
+    {"appId":"300","privateKeyPath":"$KEY_PATH","owners":["orgtwo"]}]}}}
+CFG
+unset LOOM_GITHUB_APP_ID LOOM_GITHUB_APP_KEY_PATH 2>/dev/null || true
+
+resolved_app_for() {
+    REPO_ROOT="$WRITERS_REPO" LOOM_CONFIG_DEFAULTS_FILE="" bash -c "
+        source '$LIB_DIR/github-app-token.sh'
+        github_app_configured '$1' && printf '%s' \"\$_GH_APP_ID\"
+      "
+}
+
+if [[ "$(resolved_app_for orgtwo)" == "200" && "$(resolved_app_for ORG-THREE)" == "200" ]]; then
+    pass "a listed owner resolves its writer app (case-insensitive, first match wins)"
+else
+    fail "listed owner should resolve writers[0]" "orgtwo=$(resolved_app_for orgtwo) org-three=$(resolved_app_for ORG-THREE)"
+fi
+if [[ "$(resolved_app_for someone-else)" == "100" && "$(resolved_app_for '')" == "100" ]]; then
+    pass "an unlisted owner (or none) falls back to forge.githubApp"
+else
+    fail "unlisted owner should fall back to forge.githubApp"
+fi
+if [[ "$(LOOM_GITHUB_APP_ID=999 LOOM_GITHUB_APP_KEY_PATH="$KEY_PATH" resolved_app_for orgtwo)" == "999" ]]; then
+    pass "env LOOM_GITHUB_APP_ID still beats a per-owner writer"
+else
+    fail "env override should beat writers[]"
+fi
+
+# The shell filter must agree with `forge_identity::writer_for_owner` on
+# malformed entries (Rust drops one bad element / skips one bad entry; it never
+# turns the whole `writers[]` off).
+WRITERS_REPO_ORIG="$WRITERS_REPO"
+WRITERS_REPO="$WORK_DIR/writers-repo-edge"
+mkdir -p "$WRITERS_REPO/.loom"
+cat > "$WRITERS_REPO/.loom/config.json" <<CFG
+{"forge":{"githubApp":{"appId":"100","privateKeyPath":"$KEY_PATH"},
+  "identities":{"writers":[
+    {"appId":"  ","privateKeyPath":"$KEY_PATH","owners":["emptyid"]},
+    {"appId":"400","privateKeyPath":"   ","owners":["emptykey"]},
+    {"appId":"500","privateKeyPath":"$KEY_PATH","owners":[7,null," Spaced ","mixed","bad_name","-lead"]},
+    {"appId":600,"privateKeyPath":"$KEY_PATH","owners":["emptyid","emptykey","numid"]}]}}}
+CFG
+if [[ "$(resolved_app_for spaced)" == "500" && "$(resolved_app_for mixed)" == "500" ]]; then
+    pass "a non-string owners element is dropped alone; surrounding whitespace is trimmed"
+else
+    fail "bad owners element must not hide the list" "spaced=$(resolved_app_for spaced) mixed=$(resolved_app_for mixed)"
+fi
+if [[ "$(resolved_app_for emptyid)" == "600" && "$(resolved_app_for emptykey)" == "600" && "$(resolved_app_for numid)" == "600" ]]; then
+    pass "an entry with an empty appId / privateKeyPath is skipped; numeric appId accepted"
+else
+    fail "invalid entries should be skipped" "emptyid=$(resolved_app_for emptyid) emptykey=$(resolved_app_for emptykey) numid=$(resolved_app_for numid)"
+fi
+if [[ "$(resolved_app_for bad_name)" == "100" && "$(resolved_app_for -lead)" == "100" ]]; then
+    pass "an owner that is not a valid GitHub login is dropped, as valid_owner drops it"
+else
+    fail "invalid owner names should not match a writer" "bad_name=$(resolved_app_for bad_name) -lead=$(resolved_app_for -lead)"
+fi
+WRITERS_REPO="$WRITERS_REPO_ORIG"
+
+# Two owners mint with two different app ids through the CLI envelope.
+export LOOM_GITHUB_APP_CACHE_DIR="$WORK_DIR/cache-writers"
+curl() {
+    local url="" arg
+    for arg in "$@"; do [[ "$arg" == https://* ]] && url="$arg"; done
+    if [[ "$url" == */installation ]]; then
+        printf '{"id": 77}\n200'
+    else
+        printf '{"token":"ghs_stub","expires_at":"2099-01-01T00:00:00Z"}\n201'
+    fi
+}
+export -f curl
+listed_out=$(REPO_ROOT="$WRITERS_REPO" LOOM_CONFIG_DEFAULTS_FILE="" bash "$LIB_DIR/github-app-token.sh" get-token "orgtwo/repo")
+other_out=$(REPO_ROOT="$WRITERS_REPO" LOOM_CONFIG_DEFAULTS_FILE="" bash "$LIB_DIR/github-app-token.sh" get-token "someone-else/repo")
+if [[ "$(echo "$listed_out" | jq -r '.app_id')" == "200" && "$(echo "$other_out" | jq -r '.app_id')" == "100" ]]; then
+    pass "get-token mints with a different app id per owner"
+else
+    fail "get-token should report per-owner app ids" "listed=$listed_out other=$other_out"
+fi
+unset -f curl
 
 # --- Summary ---
 echo ""

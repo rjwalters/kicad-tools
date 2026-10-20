@@ -251,7 +251,8 @@ failures independently confirmed pre-existing and host-environmental — an
 accurate report), then CI failed **five** gates: the markdown-token ratchet, the
 role-prompt-prefix ratchet, `check-dangling-links.sh`, `check-docs-defaults-parity.sh`,
 and the install-surface link check — a ratchet violation plus one missing
-`.loom/docs/` symlink. Every one reproduces locally in about a second. The cost
+`.loom/docs/` symlink. (#12106 later removed both ratchets and the parity
+check from CI.) Every one reproduces locally in about a second. The cost
 of not being able to learn that without pushing was one full
 Builder → CI → Judge → Doctor lap.
 
@@ -278,14 +279,10 @@ and does not call this script:
 
 - each gate is its own named step under `if: ${{ !cancelled() }}`, so one red
   gate never hides another and the step name says which one failed; and
-- each step sits inside a `# component:` marker that `loom-daemon`'s
-  required-check freshness guard pins per component
-  ([`stale_checks/inputs.rs`](https://github.com/rjwalters/loom/blob/main/loom-daemon/src/merge_pr/stale_checks/inputs.rs)
-  `REQUIRED_CHECKS`), whose pin test fails if a component's steps run a script
-  missing from that component's spec.
+- each step sits inside a `# component:` marker naming its gate group.
 
 Having CI invoke the aggregate instead would collapse fifteen named steps into
-one opaque one and break that pin test. Reading the workflow costs CI nothing
+one opaque one. Reading the workflow costs CI nothing
 and changes nothing about it.
 
 #### Ordering, and why it is unconditional
@@ -349,12 +346,21 @@ belonged to `Install Surface Checks`, outside the mirrored job. This section is
 the audit that says what the gate does and does not predict.
 
 **Audited at** `9ca463f06afa2864aa58f3adbeb8e1a4d743a2ad` (`main`, workflow
-`.github/workflows/ci.yml`). Re-audit when the jobs below change. The set of
-required status contexts is `REQUIRED_CONTEXTS` in
-[`stale_checks/inputs.rs`](https://github.com/rjwalters/loom/blob/main/loom-daemon/src/merge_pr/stale_checks/inputs.rs):
+`.github/workflows/ci.yml`). Re-audit when the jobs below change. Since
+#12106, `Structural Checks`, `Daemon Checks`, `Install Surface Checks` and
+`Repo Hygiene Checks` are one `Lint` job (which `check-structural.sh` now
+mirrors), and the one required context is `CI Result`; the rows below predate
+that merge. The set of required status contexts at the audit, from the `main`
+ruleset (`gh api repos/{owner}/{repo}/rules/branches/main`), was:
 `Structural Checks`, `Shell Syntax (macos-latest)`, `Daemon Checks`, `CI Result`.
 `Install Surface Checks` is **not** itself required; it reaches `main`'s merge
 gate only through `CI Result`.
+
+Since #12106 CI no longer runs the shell budget, the shell allowlist, the
+markdown-token / role-prompt / CLAUDE.md budgets, the pipefail and
+daemon-subcommand ratchets, doc TOC / anchor / docs-parity checks or the
+agent-skills sync; the rows below that time those were measured before it. Do
+not run them as CI gates.
 
 **A local green does not imply any CI context passed.** It means the rows
 marked "mirrored" below passed on this host, nothing more.
@@ -371,7 +377,7 @@ is claimed.
 |---|---|---|---|---|---|---|---|
 | `Structural Checks` | `bash scripts/check-structural.sh` (derived: 34 invocations, 33 run) | Stage 0, both tiers, before cargo | every `bash <script>.sh [args]` step in the job, in order, including `--self-test` steps | the `check-defaults-version-bump.sh --forbid-bump` step (SKIP: needs `${{ }}` PR SHAs); every non-`bash` step (conflict-marker `git grep`, `jq`/YAML parse of `config.json` and workflow templates, inline `run:` bodies); `actions/checkout` environment | bash, git, standard Unix tools | 33 passed, 1 skipped in 617s (loaded) | Reproduces the derived subset; **partial**, not job equivalence |
 | `Shell Syntax (macos-latest)` | `bash scripts/check-structural.sh --job "Shell Syntax (macos-latest)"` lists 5 commands; **but** stage 0 already runs the same scripts via `Structural Checks` | Stage 0 | the five `bash <script>.sh` steps, on whatever `bash` is first on `PATH` | the bash 3.2 assertion step (inline); the macOS runner image; any bash version other than the host's `PATH` bash | stock macOS `/bin/bash` 3.2.57 | syntax scan 23s, allowlist self-test 16s, pipefail ratchet 26s, subcommand ratchet 25s + 3s self-test (all loaded, under `/bin/bash` 3.2.57) | Syntax component reproduced under 3.2 (below); the runner itself is **not** reproduced |
-| `Daemon Checks` | `loom-daemon shell-budget --check`; `bash scripts/check-gitignore-convergence.sh . <daemon>`; `loom-daemon check-guard-wiring --repo-root .`; `loom-daemon secret-scan --range <base>..<head>` | **Not wired.** Needs a built daemon, so post-build if ever wired | all four component gates, each run by hand | `--job "Daemon Checks"` derives only the gitignore line, with a **relative** `target/debug/loom-daemon` path that does not exist under an isolated `CARGO_TARGET_DIR`; the other three are daemon subcommands the parser does not match | a debug `loom-daemon` | shell-budget 39s, other three about 1s each (daemon build itself 947s, loaded) | Locally reproducible, **not mirrored** |
+| `Daemon Checks` | `bash scripts/check-gitignore-convergence.sh . <daemon>`; `loom-daemon check-guard-wiring --repo-root .`; `loom-daemon secret-scan --range <base>..<head>` | **Not wired.** Needs a built daemon, so post-build if ever wired | all three component gates, each run by hand | `--job "Daemon Checks"` derives only the gitignore line, with a **relative** `target/debug/loom-daemon` path that does not exist under an isolated `CARGO_TARGET_DIR`; the other two are daemon subcommands the parser does not match | a debug `loom-daemon` | about 1s each (daemon build itself 947s, loaded) | Locally reproducible, **not mirrored** |
 | `Install Surface Checks` | `loom-daemon generate-agent-skills --check`; then the fixture recipe below | **Not wired.** Post-build | skills sync: reproduced. Fresh-install link check: reproduced by the recipe, not by `--job` | `--job "Install Surface Checks"` derives `bash .loom/scripts/verify-install.sh check-links` with **no** fixture and **no** `cd`: run from the repo root it checks this repo's own `.loom/`, not a fresh install, and so is a false assurance. The adjacent-release compatibility contract needs published releases and network | debug daemon, git, network for `install-compat` | `generate-agent-skills --check` under 1s; fixture `init` 77-131s, `check-links` 13-20s (loaded). `install-compat check` **not measured** (network/release assets) | Skills sync and link check reproducible; compatibility contract **not reproducible offline** |
 | `CI Result` | none | none | n/a | the aggregate of 25 `needs:` jobs (every job above plus Rust unit tests, OTLP, repo-hygiene, image jobs, installer suites, and others) | the GitHub Actions context | not measured | **Not reproducible**; it is a verdict over other jobs and cannot be run |
 
@@ -387,8 +393,9 @@ fixtures to test the *parser*; it never initializes the current complete
 
 #### Installed-tree link independence: verdict
 
-**Verdict: independent.** The source-tree checks
-(`scripts/check-dangling-links.sh`, `scripts/check-docs-defaults-parity.sh`) do
+**Verdict: independent.** (`check-docs-defaults-parity.sh` was retired with
+its CI step in #12106; the table records the audit as run.) The source-tree checks
+(`scripts/check-dangling-links.sh`, `scripts/check-docs-defaults-parity.sh`) did
 not subsume `loom-daemon init` followed by `verify-install.sh check-links` on a
 fresh fixture. A controlled fixture passes both source checks and fails the
 installed-tree check.
@@ -461,9 +468,9 @@ git -C "$FIXTURE" -c user.email=x@example.com -c user.name=x commit -q --allow-e
 Stock macOS ships `/bin/bash` 3.2.57, and `check-shell-syntax.sh` resolves
 `bash -n` through `PATH`, not its own shebang. With a directory holding a
 `bash` symlink to `/bin/bash` placed first on `PATH`, `bash defaults/scripts/check-shell-syntax.sh --quiet --dir .`
-and `bash scripts/check-shell-allowlist.sh --self-test` both exited 0 under 3.2.57
-on this host, and the two ratchets also passed under `/bin/bash`. That
-reproduces the syntax and ratchet *components* of the CI job under a real bash
+exited 0 under 3.2.57 on this host. (The allowlist and the two ratchets this
+audit also ran were retired from CI in #12106.) That
+reproduces the syntax *component* of the CI job under a real bash
 3.2; it does not reproduce the macOS runner image, its awk, or the job's inline
 bash-version assertion. On a host whose `PATH` bash is 4.x or 5.x (Homebrew),
 stage 0's derived run of these same scripts exercises that newer bash only.
@@ -597,6 +604,9 @@ gate reds on a **dispatch worker** while the same commit is green in CI:
   gate deliberately does **not** sanitize the environment wholesale: it needs
   the real `PATH`/`HOME`/credential environment to run at all, and an `env -i`
   wrapper would hide exactly the host-shaped reds this section is about.
+  Since #9851 the Rust step is also hermetic to `LOOM_RUNTIME*` through
+  `.cargo/config.toml` `[env]`, which forces `LOOM_RUNTIME` and every
+  `LOOM_RUNTIME_<ROLE>` empty for cargo-run test binaries.
 
 **The gate runs at a mild throttle relative to sweeps (#4020, revises #3985).**
 `build-gate.sh` now defaults to `nice 5` — a mild positive niceness, a real but

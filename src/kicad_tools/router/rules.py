@@ -116,6 +116,15 @@ class DesignRules:
     # pre-check and the DRC post-check agree.  Defaults to 0.5 so behavior is
     # correct even when no manufacturer profile is threaded in.
     min_hole_to_hole: float = 0.5  # mm
+    # Minimum gap, drill edge to SMD pad copper edge, for a via that does NOT
+    # overlap the pad (Issue #7296).  The checker's ``via_at_pad_edge`` warning
+    # (Issue #7220) fires when a drill edge sits closer than the fab's
+    # ``min_solder_mask_dam_mm`` to a pad's mask aperture -- no dam is left to
+    # hold the tent.  This is that dam plus the pad's mask expansion; ``None``
+    # takes the dam from :attr:`manufacturer`'s profile (0 when unresolvable).
+    # A drill that overlaps pad copper is the via-in-pad decision, governed by
+    # ``allow_smd_vias``, and is not affected.
+    min_via_pad_edge_gap: float | None = None  # mm
     grid_resolution: float = 0.1  # mm (routing grid)
     grid_origin_offset: tuple[float, float] = (
         0.0,
@@ -442,6 +451,11 @@ class DesignRules:
     # see :meth:`NetClassRouting.hard_avoided_layer_indices`.
     strict_layers: bool = False
 
+    # Issue #6527: when True, the C++ backend's Python fallback calls
+    # ``Router.route_auto`` (bidirectional A* for long paths, one-way retry
+    # sharing one deadline) instead of ``Router.route``.  Default off.
+    fallback_bidirectional: bool = False
+
     # Bidirectional A* configuration (Issue #964)
     # Enable parallel frontier exploration for large paths
     bidirectional_search: bool = True  # Enable bidirectional A* by default
@@ -519,6 +533,17 @@ class DesignRules:
             except ValueError:
                 # Unknown manufacturer: keep the conservative 0.5 default.
                 pass
+        if self.min_via_pad_edge_gap is None:
+            self.min_via_pad_edge_gap = 0.0
+            if self.manufacturer:
+                try:
+                    from kicad_tools.manufacturers import get_profile
+
+                    self.min_via_pad_edge_gap = float(
+                        get_profile(self.manufacturer).get_design_rules().min_solder_mask_dam_mm
+                    )
+                except (ValueError, KeyError, ImportError, IndexError):
+                    pass
 
     def pair_gap(self, net_class: "NetClassRouting") -> "PairGap":
         """The edge-to-edge gap a coupled pair of ``net_class`` is laid at.
@@ -1227,7 +1252,20 @@ class LengthConstraint:
 
         Unknown keys are ignored (forward compatibility); missing keys
         fall back to dataclass defaults where applicable.
+
+        Raises:
+            TypeError: ``data`` is not a dict.
+            ValueError: The required ``net_id`` field is missing.  Issue
+                #6820: this used to escape as a bare ``KeyError``, which no
+                net-class-map consumer catches, so ``kct check`` printed a
+                traceback for a hand-written ``length_constraint``.
         """
+        if not isinstance(data, dict):
+            raise TypeError(f"length_constraint must be a dict, got {type(data).__name__}")
+        if "net_id" not in data:
+            raise ValueError(
+                f"length_constraint requires a 'net_id' field; got keys: {sorted(data.keys())}"
+            )
         return cls(
             net_id=data["net_id"],
             min_length=data.get("min_length"),
@@ -1314,6 +1352,22 @@ class NetClassRouting:
     preferred_layers: list[int] | None = None  # Layer indices to prefer (lower cost)
     avoid_layers: list[int] | None = None  # Layer indices to avoid (higher cost)
     layer_cost_multiplier: float = 2.0  # Cost penalty for non-preferred layers
+
+    # Per-class plane-layer opt-in (Issue #6876, ruling on #6824)
+    allow_plane_layers: list[int] | None = None
+    """Reserved plane layers this class may route signal copper on.
+
+    ``--reserve-plane-layers`` (on by default, #5014/#5789) removes every
+    PLANE layer from :attr:`DesignRules.allowed_layers` board-wide.  A class
+    that lists a layer here (KiCad name or grid index; normalized to grid
+    indices by :meth:`from_dict`, exactly like :attr:`avoid_layers`) is
+    exempted from that gate for the named layers only -- every other class
+    stays off the plane.  The check is :func:`layer_permitted`, shared by the
+    grid, C++, lattice, mesh and coupled paths.  Naming a layer that is not
+    reserved is a no-op; a layer that is both opted in and hard-avoided stays
+    blocked (hard avoid wins).  ``None`` (the default) routes exactly as
+    before.
+    """
 
     # Length constraint parameters (Issue #630)
     length_constraint: LengthConstraint | None = None  # Length constraint for this net class
@@ -1917,6 +1971,9 @@ class NetClassRouting:
                 list(self.preferred_layers) if self.preferred_layers is not None else None
             ),
             "avoid_layers": (list(self.avoid_layers) if self.avoid_layers is not None else None),
+            "allow_plane_layers": (
+                list(self.allow_plane_layers) if self.allow_plane_layers is not None else None
+            ),
             "layer_cost_multiplier": self.layer_cost_multiplier,
             "length_constraint": (
                 self.length_constraint.to_dict() if self.length_constraint is not None else None
@@ -2012,6 +2069,12 @@ class NetClassRouting:
                 data.get("avoid_layers"),
                 layer_stack,
                 f"net class {data['name']!r} avoid_layers",
+                on_absent="drop",
+            ),
+            allow_plane_layers=_resolve_layer_index_list(
+                data.get("allow_plane_layers"),
+                layer_stack,
+                f"net class {data['name']!r} allow_plane_layers",
                 on_absent="drop",
             ),
             layer_cost_multiplier=data.get("layer_cost_multiplier", 2.0),
@@ -2161,6 +2224,68 @@ NET_CLASS_DEFAULT = NetClassRouting(
 )
 
 
+def allowed_plane_layer_indices(net_class: object) -> frozenset[int]:
+    """Grid indices a net class opted in to via ``allow_plane_layers`` (#6876).
+
+    Entries are normally ints (``NetClassRouting.from_dict`` normalizes them).
+    A residual layer *name* from an in-process construction is resolved the
+    stack-less way (``"F.Cu"`` -> 0, ``"In<k>.Cu"`` -> k); one that cannot be
+    resolved without a stack (``"B.Cu"``) is left to :func:`layer_permitted`,
+    which also matches by name.  ``None`` / a class without the field / an
+    empty list -> empty set (the pre-#6876 behaviour).
+    """
+    opted = getattr(net_class, "allow_plane_layers", None)
+    if not opted:
+        return frozenset()
+    out: set[int] = set()
+    for entry in opted:
+        try:
+            out.add(resolve_layer_index(entry, None))
+        except LayerResolutionError:
+            continue
+    return frozenset(out)
+
+
+def layer_permitted(
+    rules: object,
+    net_class: object,
+    layer_idx: int,
+    layer_name: str,
+) -> bool:
+    """The ``rules.allowed_layers`` gate, widened by the class's opt-in (#6876).
+
+    ``DesignRules.allowed_layers`` is the board-wide hard layer gate
+    (``--reserve-plane-layers`` populates it with every non-PLANE layer).  A
+    net class may exempt itself, for the named layers only, through
+    :attr:`NetClassRouting.allow_plane_layers`.  This is the ONE predicate
+    every layer-permission path consults (grid pathfinder, C++ seed filter
+    and per-call routable widening, lattice, mesh, and the coupled pair
+    filter), so the opt-in cannot be honoured by one engine and ignored by
+    another (the #6865 gap).
+
+    Hard ``avoid_layers`` filtering is NOT folded in here: callers keep
+    applying it separately, so a layer that is both opted in and hard-avoided
+    stays blocked.
+
+    Args:
+        rules: The active :class:`DesignRules` (or anything exposing
+            ``allowed_layers``; ``None`` / missing -> no gate).
+        net_class: The net's :class:`NetClassRouting`, or ``None``.
+        layer_idx: Grid-layer index being tested.
+        layer_name: KiCad name of that layer (``"In2.Cu"``).
+
+    Returns:
+        True when the layer may carry this net's copper.
+    """
+    allowed = getattr(rules, "allowed_layers", None)
+    if allowed is None or layer_name in allowed:
+        return True
+    opted = getattr(net_class, "allow_plane_layers", None)
+    if not opted:
+        return False
+    return layer_idx in allowed_plane_layer_indices(net_class) or layer_name in opted
+
+
 def create_net_class_map(
     power_nets: list[str] | None = None,
     clock_nets: list[str] | None = None,
@@ -2277,6 +2402,11 @@ def net_class_map_from_dict(
             # Re-raise with the owning sidecar key so the CLI preload message
             # names both the bad token and the net it belongs to (#4587).
             raise LayerResolutionError(f"net-class entry {net_name!r}: {e}") from e
+        except (TypeError, ValueError) as e:
+            # Issue #6820: name the owning entry for every malformed-entry
+            # error (e.g. a ``length_constraint`` without ``net_id``), not just
+            # layer-resolution ones, so the user can find it in the sidecar.
+            raise type(e)(f"net-class entry {net_name!r}: {e}") from e
     return result
 
 
@@ -2361,7 +2491,13 @@ def net_class_map_from_path(
             except (KeyError, OSError, ValueError):
                 stack = None
 
-    return net_class_map_from_dict(data, layer_stack=stack)
+    try:
+        return net_class_map_from_dict(data, layer_stack=stack)
+    except (TypeError, ValueError) as e:
+        # Issue #6820: prefix the sidecar path so a CLI error names the file
+        # as well as the entry.  ``type(e)`` keeps ``LayerResolutionError``
+        # (a ``ValueError``) distinguishable for callers that care.
+        raise type(e)(f"{sidecar_path}: {e}") from e
 
 
 # Threshold for classifying a 2-pin signal net as "simple" (short) vs "complex" (long).

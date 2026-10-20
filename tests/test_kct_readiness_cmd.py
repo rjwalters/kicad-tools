@@ -43,7 +43,10 @@ def make_board(tmp_path: Path) -> Path:
     (output / SCH_NAME).write_text("(kicad_sch demo)\n")
     (output / PRO_NAME).write_text('{"board": {}}\n')
     (output / "demo_routed.kicad_dru").write_text("(version 1)\n")
-    (board / "project.kct").write_text("[project]\nmanufacturer = jlcpcb\n")
+    (board / "project.kct").write_text(
+        "kct_version: '1.0'\nproject:\n  name: t\n"
+        "requirements:\n  manufacturing:\n    target_fab: jlcpcb\n"
+    )
     return board
 
 
@@ -75,8 +78,22 @@ class FakeEngines:
         drawings_ok: bool = True,
         coverage: dict | None = None,
         stale_waivers: int = 0,
+        lcsc_check: dict | None = None,
+        omit_lcsc_check: bool = False,
     ) -> None:
         self.board = board
+        # The bundle preflight's ``bom_lcsc_values`` entry the bom gate reads
+        # (issue #7166); ``omit_lcsc_check`` models a manifest without one.
+        self.lcsc_check = (
+            None
+            if omit_lcsc_check
+            else lcsc_check
+            or {
+                "name": "bom_lcsc_values",
+                "status": "OK",
+                "message": "3 of 3 assigned item(s) verified against parts cache",
+            }
+        )
         self.coverage = coverage
         self.stale_waivers = stale_waivers
         self.check_errors = check_errors
@@ -229,9 +246,10 @@ class FakeEngines:
                 if not source.is_relative_to(pcb.parent):
                     continue
                 zf.write(source, source.relative_to(pcb.parent).as_posix())
-        (output_dir / "manifest.json").write_text(
-            json.dumps({"version": "1.0", "manufacturer": mfr, "files": {}}, indent=2)
-        )
+        manifest: dict = {"version": "1.0", "manufacturer": mfr, "files": {}}
+        if self.lcsc_check is not None:
+            manifest["preflight"] = [self.lcsc_check]
+        (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
         return EngineRun(ok=True)
 
     def schematic_pdf(self, schematic: Path, output: Path) -> EngineRun:
@@ -358,6 +376,29 @@ def test_report_hashes_sources_rules_and_delivered_files(tmp_path):
         assert inputs[required] == digest, required
     # The report never hashes itself.
     assert "output/readiness.json" not in inputs
+
+
+def test_report_sources_never_stamps_a_leftover_native_report(tmp_path):
+    """Issue #7277: a native-drc-raw.json from an earlier run is not 'produced'.
+
+    ``report_sources`` vouches that each listed report was computed from the
+    current PCB.  A raw report this run's engine did not write (here: left by
+    a previous run, and the fake engine writes only native-drc.json) must be
+    cleared, not stamped with the current PCB hash.
+    """
+    board = make_board(tmp_path)
+    evidence = board / "output" / "readiness"
+    evidence.mkdir(parents=True)
+    (evidence / "native-drc-raw.json").write_text('{"violations": [], "stale": true}\n')
+    fake = FakeEngines(board)
+
+    code, report = run(board, fake)
+
+    assert code == 0, report.get("blockers")
+    pcb_sha = hashlib.sha256((board / "output" / PCB_NAME).read_bytes()).hexdigest()
+    assert report["report_sources"] == {"output/readiness/native-drc.json": pcb_sha}
+    assert "output/readiness/native-drc-raw.json" not in report["inputs"]
+    assert not (evidence / "native-drc-raw.json").exists()
 
 
 def test_full_archive_lives_outside_the_checksummed_directory(tmp_path):
@@ -622,6 +663,32 @@ def test_blocking_unknown_coverage_is_not_a_pass(tmp_path):
     assert "segment_zone" in joined and "zone_fills_absent" in joined
 
 
+def test_courtyard_less_board_refuses_sign_off_even_with_ack_warnings(tmp_path):
+    """Issue #7204: a board whose footprints lack courtyards cannot be signed off.
+
+    ``courtyard_missing`` warnings can be acknowledged, but the blocking
+    ``unknown:no_courtyard_geometry`` coverage behind them cannot.
+    """
+    board = make_board(tmp_path)
+    fake = FakeEngines(
+        board,
+        coverage={
+            "clearance": _coverage("checked", None, True),
+            "courtyard_overlap": _coverage(
+                "unknown", "no_courtyard_geometry (3 of 3 footprints)", True
+            ),
+        },
+    )
+
+    code, report = run(board, fake, "--ack-warnings", "courtyard_missing")
+
+    assert code != 0
+    assert report["status"] != "ready"
+    assert check_status(report, "kct_check") == "not_run"
+    joined = " ".join(report["blockers"])
+    assert "courtyard_overlap" in joined and "no_courtyard_geometry" in joined
+
+
 def test_advisory_unknown_and_skipped_coverage_still_pass(tmp_path):
     board = make_board(tmp_path)
     fake = FakeEngines(
@@ -734,7 +801,28 @@ def test_placeholder_ids_are_ignored_for_a_pcb_only_order(tmp_path):
     assert check_status(report, "bom") == "passed"
 
 
-def test_through_hole_parts_must_not_ride_in_the_smt_cpl(tmp_path):
+@pytest.fixture
+def smt_only_fab(monkeypatch):
+    """Make ``jlcpcb`` behave as a still-SMT-only fab (JLCPCB itself offers THT, #7239)."""
+    from kicad_tools.export.preflight import PreflightChecker
+
+    monkeypatch.setattr(PreflightChecker, "_SMT_ONLY_MANUFACTURERS", {"jlcpcb"})
+
+
+def test_jlcpcb_cpl_may_carry_through_hole_parts(tmp_path):
+    board = make_board(tmp_path)
+    fake = FakeEngines(board, tht_refs=("D1", "J1"), cpl_refs=("R1", "U1", "D1", "J1"))
+
+    code, report = run(board, fake)
+
+    assert code == 0
+    assert check_status(report, "bom") == "passed"
+    readme = (board / "output" / "manufacturing" / "README.txt").read_text()
+    assert "INCLUDED in the CPL" in readme
+    assert "hand-soldered" not in readme
+
+
+def test_through_hole_parts_must_not_ride_in_the_smt_cpl(tmp_path, smt_only_fab):
     board = make_board(tmp_path)
     fake = FakeEngines(board, tht_refs=("D1", "J1"), cpl_refs=("R1", "U1", "D1"))
 
@@ -745,7 +833,7 @@ def test_through_hole_parts_must_not_ride_in_the_smt_cpl(tmp_path):
     assert any("hand-soldered" in blocker for blocker in report["blockers"])
 
 
-def test_include_tht_opts_into_a_cpl_carrying_through_hole_parts(tmp_path):
+def test_include_tht_opts_into_a_cpl_carrying_through_hole_parts(tmp_path, smt_only_fab):
     board = make_board(tmp_path)
     fake = FakeEngines(board, tht_refs=("D1",), cpl_refs=("R1", "U1", "D1"))
 
@@ -755,7 +843,7 @@ def test_include_tht_opts_into_a_cpl_carrying_through_hole_parts(tmp_path):
     assert check_status(report, "bom") == "passed"
 
 
-def test_excluded_tht_parts_are_named_as_hand_solder_items(tmp_path):
+def test_excluded_tht_parts_are_named_as_hand_solder_items(tmp_path, smt_only_fab):
     board = make_board(tmp_path)
     fake = FakeEngines(board, tht_refs=("D1", "J1"), cpl_refs=("R1", "U1"))
 
@@ -1269,3 +1357,308 @@ def test_unified_cli_dispatches_the_readiness_subcommand(tmp_path, monkeypatch):
 
     assert cli_main(["readiness", str(board), "--mfr", "jlcpcb", "--pcb-only"]) == 0
     assert seen["argv"] == [str(board), "--mfr", "jlcpcb", "--pcb-only"]
+
+
+# ---------------------------------------------------------------------------
+# Issue #7166: the bom gate reads the bundle's bom_lcsc_values preflight
+# ---------------------------------------------------------------------------
+
+
+def _bom_check(report: dict) -> dict:
+    return next(c for c in report["checks"] if c["name"] == "bom")
+
+
+def test_bom_gate_fails_when_bundle_lcsc_check_failed(tmp_path):
+    board = make_board(tmp_path)
+    fake = FakeEngines(
+        board,
+        lcsc_check={
+            "name": "bom_lcsc_values",
+            "status": "FAIL",
+            "message": "1 BOM item(s) assigned an LCSC part whose value or package "
+            "does not match the BOM row",
+            "details": "R5 (10k) -> C25744: part package '0402' (MPN leading size code "
+            "0402) does not match footprint package '0603' [parts cache]",
+        },
+    )
+
+    code, report = run(board, fake)
+
+    assert code != 0
+    assert report["status"] != "ready"
+    bom = _bom_check(report)
+    assert bom["status"] == "failed"
+    assert "LCSC part check FAIL" in bom["detail"]
+    assert any(
+        "does not match the BOM row's value/package" in b and "R5" in b and "C25744" in b
+        for b in report["blockers"]
+    )
+
+
+def test_bom_gate_not_run_when_manifest_lacks_lcsc_check(tmp_path):
+    board = make_board(tmp_path)
+    fake = FakeEngines(board, omit_lcsc_check=True)
+
+    code, report = run(board, fake)
+
+    assert code != 0
+    bom = _bom_check(report)
+    assert bom["status"] == "not_run"
+    assert any("LCSC part/package check did not run" in b for b in report["blockers"])
+
+
+def test_bom_gate_passes_unverified_warn_without_claiming_verified(tmp_path):
+    board = make_board(tmp_path)
+    message = (
+        "2 of 3 assigned item(s) verified (parts cache); 1 unverifiable "
+        "(not in parts cache or offline catalog)"
+    )
+    fake = FakeEngines(
+        board,
+        lcsc_check={
+            "name": "bom_lcsc_values",
+            "status": "WARN",
+            "message": message,
+            "details": "unverified: U1 -> C8734",
+        },
+    )
+
+    code, report = run(board, fake)
+
+    assert code == 0
+    bom = _bom_check(report)
+    assert bom["status"] == "passed"
+    assert "verified procurement identities" not in bom["detail"]
+    assert "part check WARN" in bom["detail"]
+    assert message in bom["detail"]
+    # The refs behind the WARN are kept, not just its summary (issue #7446).
+    assert "unverified: U1 -> C8734" in bom["detail"]
+
+
+def test_bom_gate_keeps_header_unverified_refs_and_reason(tmp_path):
+    board = make_board(tmp_path)
+    fake = FakeEngines(
+        board,
+        lcsc_check={
+            "name": "bom_lcsc_values",
+            "status": "WARN",
+            "message": (
+                "2 of 3 assigned item(s) verified (parts cache); 1 unverifiable "
+                "(header part(s) with pin count not verifiable)"
+            ),
+            "details": "unverified: J1 -> C999999 (pin count not stated by part)",
+        },
+    )
+
+    code, report = run(board, fake)
+
+    assert code == 0
+    bom = _bom_check(report)
+    assert "J1 -> C999999 (pin count not stated by part)" in bom["detail"]
+
+
+def test_bom_gate_strict_header_fail_is_not_called_a_mismatch(tmp_path):
+    board = make_board(tmp_path)
+    fake = FakeEngines(
+        board,
+        lcsc_check={
+            "name": "bom_lcsc_values",
+            "status": "FAIL",
+            "message": "1 pin header/socket part(s): pin count not verifiable (strict preflight)",
+            "details": "pin count not verifiable: J1 -> C999999 (pin count not stated by part)",
+        },
+    )
+
+    code, report = run(board, fake)
+
+    assert code != 0
+    assert _bom_check(report)["status"] == "failed"
+    blockers = [b for b in report["blockers"] if "J1 -> C999999" in b]
+    assert blockers and all("does not match" not in b for b in blockers)
+    assert any("states no verifiable pin count" in b for b in blockers)
+
+
+def test_verify_mode_reads_the_retained_manifest_lcsc_check(tmp_path):
+    board = make_board(tmp_path)
+    assert run(board, FakeEngines(board))[0] == 0
+
+    manifest_path = board / "output" / "manufacturing" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    assert [p["status"] for p in manifest["preflight"]] == ["OK"]
+    manifest["preflight"][0].update(
+        status="FAIL",
+        message="1 BOM item(s) assigned an LCSC part whose value or package does not match",
+        details="U2 (USBLC6) -> C51118: part package 'SOT-25-5' (pin count 5 vs 6 "
+        "footprint pads) does not match footprint package 'SOT-23-6' [offline catalog]",
+    )
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+
+    fake = FakeEngines(board)
+    code = readiness_cmd.main([str(board), "--mfr", "jlcpcb"], engines=fake.bundle())
+
+    # (The hand-edited manifest also no longer matches the outer archive, so
+    # the artifacts gate fails too; the point here is the named bom blocker.)
+    assert code != 0
+    assert "export" not in fake.calls
+    report = json.loads(
+        (board / "output" / "readiness-verification" / "readiness.json").read_text()
+    )
+    bom = _bom_check(report)
+    assert bom["status"] == "failed"
+    assert any("C51118" in b for b in report["blockers"])
+
+
+class TestDiscoverTierFromSpec:
+    """Issue #7250: _discover_tier reads target_fab through load_spec."""
+
+    def _pcb(self, tmp_path):
+        pcb = tmp_path / "output" / "b.kicad_pcb"
+        pcb.parent.mkdir()
+        pcb.write_text("")
+        return pcb
+
+    def test_yaml_spec_target_fab(self, tmp_path):
+        from kicad_tools.cli.readiness_cmd import _discover_tier
+
+        (tmp_path / "project.kct").write_text(
+            "kct_version: '1.0'\n"
+            "project:\n  name: t\n"
+            "requirements:\n  manufacturing:\n    target_fab: jlcpcb-tier1\n"
+        )
+        assert _discover_tier(tmp_path, self._pcb(tmp_path)) == "jlcpcb-tier1"
+
+    def test_spec_without_target_fab_is_none(self, tmp_path):
+        from kicad_tools.cli.readiness_cmd import _discover_tier
+
+        (tmp_path / "project.kct").write_text("kct_version: '1.0'\nproject:\n  name: t\n")
+        assert _discover_tier(tmp_path, self._pcb(tmp_path)) is None
+
+    def test_unloadable_spec_is_none(self, tmp_path):
+        from kicad_tools.cli.readiness_cmd import _discover_tier
+
+        (tmp_path / "project.kct").write_text(": : not yaml [")
+        assert _discover_tier(tmp_path, self._pcb(tmp_path)) is None
+
+
+# ---------------------------------------------------------------------------
+# Issue #7356: one saved-vs-refilled rule shared by every producer
+# ---------------------------------------------------------------------------
+
+_FILL_CASES = [
+    ("equal", {"F.Cu": 100.0}, {"F.Cu": 100.0}, False),
+    ("within", {"F.Cu": 100.0}, {"F.Cu": 100.005}, False),
+    ("exactly_at_tolerance", {"F.Cu": 100.0}, {"F.Cu": 100.01}, False),
+    ("over", {"F.Cu": 100.0}, {"F.Cu": 100.5}, True),
+    ("between_1x_and_2x_tolerance", {"F.Cu": 100.0}, {"F.Cu": 100.015}, True),
+    ("one_sided_refilled", {"F.Cu": 100.0}, {"F.Cu": 100.0, "B.Cu": 2.0}, True),
+    ("one_sided_saved", {"F.Cu": 100.0, "B.Cu": 2.0}, {"F.Cu": 100.0}, True),
+    # A layer present on one side only diverges even when its delta is within
+    # tolerance: the copper inventory changed, not just its area.
+    ("one_sided_refilled_zero_area", {"F.Cu": 100.0}, {"F.Cu": 100.0, "B.Cu": 0.0}, True),
+    ("one_sided_saved_zero_area", {"F.Cu": 100.0, "B.Cu": 0.0}, {"F.Cu": 100.0}, True),
+]
+
+
+@pytest.mark.parametrize(("name", "saved", "refilled", "diverges"), _FILL_CASES)
+def test_saved_vs_refilled_gives_the_gate_verdict(tmp_path, name, saved, refilled, diverges):
+    """The shared function and ``_gate_refill`` agree on every case."""
+    from kicad_tools.cli.readiness_cmd import saved_vs_refilled
+
+    board = make_board(tmp_path)
+    pcb = board / "output" / PCB_NAME
+    areas = iter([saved, refilled])
+    fake = FakeEngines(board)
+    fake.fill_areas = lambda _pcb: next(areas)  # type: ignore[method-assign]
+    result = saved_vs_refilled(pcb, 0.01, engines=fake)
+    assert result.diverges is diverges
+
+    fake2 = FakeEngines(board)
+    areas2 = iter([saved, refilled])
+    fake2.fill_areas = lambda _pcb: next(areas2)  # type: ignore[method-assign]
+    _code, report = run(board, fake2)
+    assert (check_status(report, "zone_fill") == "failed") is diverges
+
+
+def test_saved_vs_refilled_rejects_bad_tolerance_and_missing_refill(tmp_path):
+    from kicad_tools.cli.readiness_cmd import (
+        EngineRun,
+        FillRefillUnavailable,
+        saved_vs_refilled,
+    )
+
+    board = make_board(tmp_path)
+    pcb = board / "output" / PCB_NAME
+    fake = FakeEngines(board)
+    for bad in (-1.0, float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            saved_vs_refilled(pcb, bad, engines=fake)
+    fake.refill = lambda _pcb: EngineRun(ok=False, detail="no kicad-cli")  # type: ignore[method-assign]
+    with pytest.raises(FillRefillUnavailable, match="no kicad-cli"):
+        saved_vs_refilled(pcb, engines=fake)
+
+
+def _fake_with_areas(board, saved, refilled):
+    fake = FakeEngines(board)
+    areas = iter([saved, refilled])
+    fake.fill_areas = lambda _pcb: next(areas)  # type: ignore[method-assign]
+    return fake
+
+
+class TestRequireSavedFillMatchesRefill:
+    """The refusal shared by the board producer scripts (Issue #7356)."""
+
+    def test_divergent_areas_raise(self, tmp_path):
+        from kicad_tools.cli.readiness_cmd import require_saved_fill_matches_refill
+
+        board = make_board(tmp_path)
+        pcb = board / "output" / PCB_NAME
+        fake = _fake_with_areas(board, {"F.Cu": 100.0}, {"F.Cu": 100.5})
+        with pytest.raises(RuntimeError, match="differs from an independent refill"):
+            require_saved_fill_matches_refill(pcb, 0.01, engines=fake)
+
+    def test_one_sided_layer_within_tolerance_raises(self, tmp_path):
+        from kicad_tools.cli.readiness_cmd import require_saved_fill_matches_refill
+
+        board = make_board(tmp_path)
+        pcb = board / "output" / PCB_NAME
+        fake = _fake_with_areas(board, {"F.Cu": 100.0}, {"F.Cu": 100.0, "B.Cu": 0.0})
+        with pytest.raises(RuntimeError, match="changed layer inventory"):
+            require_saved_fill_matches_refill(pcb, 0.01, engines=fake)
+
+    def test_matching_areas_return_the_deltas_written_as_evidence(self, tmp_path):
+        from kicad_tools.cli.readiness_cmd import require_saved_fill_matches_refill
+
+        board = make_board(tmp_path)
+        pcb = board / "output" / PCB_NAME
+        saved = {"F.Cu": 100.0, "B.Cu": 50.0}
+        refilled = {"F.Cu": 100.005, "B.Cu": 50.0}
+        result = require_saved_fill_matches_refill(
+            pcb, 0.01, engines=_fake_with_areas(board, saved, refilled)
+        )
+        assert not result.diverges
+        assert result.deltas == pytest.approx({"F.Cu": 0.005, "B.Cu": 0.0})
+
+        # The gate writes its fill-consistency.json deltas from the same rule.
+        _code, report = run(board, _fake_with_areas(board, saved, refilled))
+        evidence = json.loads(
+            (board / "output" / "readiness" / "fill-consistency.json").read_text()
+        )
+        assert evidence["deltas_mm2"] == pytest.approx(result.deltas)
+        assert check_status(report, "zone_fill") == "passed"
+
+    def test_refill_unavailable_raises_a_runtime_error_subclass(self, tmp_path):
+        from kicad_tools.cli.readiness_cmd import (
+            EngineRun,
+            FillRefillUnavailable,
+            require_saved_fill_matches_refill,
+        )
+
+        board = make_board(tmp_path)
+        pcb = board / "output" / PCB_NAME
+        fake = FakeEngines(board)
+        fake.refill = lambda _pcb: EngineRun(ok=False, detail="no kicad-cli")  # type: ignore[method-assign]
+        # RuntimeError subclass: native_refill_board_04_7337 catches RuntimeError
+        # and prints REFUSED, so an unavailable refill refuses the same way.
+        assert issubclass(FillRefillUnavailable, RuntimeError)
+        with pytest.raises(FillRefillUnavailable, match="no kicad-cli"):
+            require_saved_fill_matches_refill(pcb, engines=fake)

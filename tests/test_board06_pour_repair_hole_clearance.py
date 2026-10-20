@@ -19,15 +19,16 @@ with the two ``HOLE_CLEAR`` blocks removed and GREEN against the current
 one.
 
 Isolating the branch means threading a narrow geometric window, because
-the pre-existing *copper* guard (``CLEAR`` = 0.15 mm, against the via
-barrel / the pad's circumscribed copper circle) covers most of the same
-ground.  The blocker therefore sits in the band where the copper guard is
+the pre-existing *copper* guard (``CLEAR``, against the via barrel / the
+pad's true copper) covers most of the same ground.  Since Issue #6748 that
+guard is the per-pair NET-CLASS clearance -- 0.2 mm between the Power-class
+``+1V2`` pour and the unclassed ``SIG`` blocker -- and pads are measured by
+their true shape, so the band below was re-threaded for those values.  The blocker therefore sits in the band where the copper guard is
 satisfied and only the hole floor is violated -- ``test_*_geometry_isolates_*``
 below pins that band with plain shapely so a future reader can see the
 rejection has exactly one possible source.  For the through-hole pad that
-band only exists at a sub-IPC annulus (the index models pad copper by its
-*circumscribed* circle, which outgrows ``drill / 2 + 0.10 mm`` for any
-realistically-annular pad), so ``TH_PAD_SIZE``/``TH_PAD_DRILL`` below are
+band only exists at a sub-IPC annulus (the copper guard's reach outgrows
+the hole guard's for any realistically-annular pad), so ``TH_PAD_SIZE``/``TH_PAD_DRILL`` below are
 deliberately degenerate: they are a control on the code, not a claim about
 board geometry that ships.
 
@@ -49,7 +50,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 BOARD_DIR = REPO_ROOT / "boards" / "06-diffpair-test"
 
 # --- the recipe's own literals, mirrored for the isolation assertions ------
-CLEAR = 0.15  # copper-to-copper floor in ``_path_ok``
+#: Copper-to-copper floor in ``_path_ok`` for this fixture's pair: the
+#: per-pair class clearance ``max(0.15, class(+1V2), class(SIG))`` = Power's
+#: 0.2 mm (Issue #6748; it was a flat 0.15 mm before).
+CLEAR = 0.2
 HOLE_CLEAR = 0.25  # #5608 drill-hole floor in ``_path_ok``
 BRIDGE_W = 0.2  # width of a sub-stage B / D bridge
 
@@ -69,16 +73,16 @@ BRIDGE = ((144.350, 85.000), (140.650, 85.000))
 BLOCKER_X = 142.5
 
 # A foreign via with a 0.45 mm annular ring over a 0.40 mm drill.  Its
-# barrel guard reaches 0.225 + CLEAR + BRIDGE_W/2 = 0.475 mm from centre;
+# barrel guard reaches 0.225 + CLEAR + BRIDGE_W/2 = 0.525 mm from centre;
 # its hole guard reaches 0.200 + HOLE_CLEAR + BRIDGE_W/2 = 0.550 mm.
 VIA_SIZE = 0.45
 VIA_DRILL = 0.40
-VIA_BLOCKING_Y = 85.51  # 0.510 mm off the bridge: inside the hole floor only
+VIA_BLOCKING_Y = 85.54  # 0.540 mm off the bridge: inside the hole floor only
 VIA_CLEARING_Y = 85.60  # 0.600 mm off the bridge: outside both floors
 VIA_SMALL_DRILL = 0.20  # same barrel, hole guard shrinks to 0.450 mm
 
-# A foreign through-hole pad.  Copper guard: 0.19*sqrt(2)/2 + CLEAR +
-# BRIDGE_W/2 = 0.384 mm; hole guard: 0.075 + HOLE_CLEAR + BRIDGE_W/2 =
+# A foreign through-hole pad.  Copper guard (true circular copper, #6748):
+# 0.19/2 + CLEAR + BRIDGE_W/2 = 0.395 mm; hole guard: 0.075 + HOLE_CLEAR + BRIDGE_W/2 =
 # 0.425 mm.  See the module docstring on why the annulus is degenerate.
 TH_PAD_SIZE = 0.19
 TH_PAD_DRILL = 0.15
@@ -352,16 +356,15 @@ def test_via_geometry_isolates_the_hole_floor_from_the_copper_floor():
 def test_pad_geometry_isolates_the_hole_floor_from_the_copper_floor():
     """Same isolation for the pad branch, against the index's copper model.
 
-    ``_repair_pour_connectivity`` models pad copper by the *circumscribed*
-    circle (half the diagonal), so that -- not the pad's nominal size -- is
-    what the hole floor has to out-reach here.
+    Since Issue #6748 ``_repair_pour_connectivity`` measures foreign pad
+    copper by its TRUE shape through the clearance kernel -- for this circle
+    pad, a disc of the nominal radius -- so that is what the hole floor has
+    to out-reach here.
     """
-    import math
-
     from shapely.geometry import LineString, Point
 
     path = LineString(BRIDGE).buffer(BRIDGE_W / 2.0)
-    half_diag = math.hypot(TH_PAD_SIZE, TH_PAD_SIZE) / 2.0
+    half_diag = TH_PAD_SIZE / 2.0
     centre = Point(BLOCKER_X, PAD_BLOCKING_Y)
     assert path.distance(centre.buffer(half_diag)) >= CLEAR
     assert path.distance(centre.buffer(TH_PAD_DRILL / 2.0)) < HOLE_CLEAR

@@ -43,16 +43,7 @@ LOOM_START_SH="$SCRIPTS_DIR/cli/loom-start.sh"
 VALIDATE_ROLES_SH="$SCRIPTS_DIR/validate-roles.sh"
 FORGE_HELPERS_LIB="$SCRIPTS_DIR/lib/forge-helpers.sh"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-NC='\033[0m'
-
-TESTS_RUN=0
-TESTS_PASSED=0
-TESTS_FAILED=0
-
-pass() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1)); echo -e "  ${GREEN}PASS${NC}: $1"; }
-fail() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1)); echo -e "  ${RED}FAIL${NC}: $1"; }
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
 if ! command -v jq >/dev/null 2>&1; then
     echo "jq not found on PATH -- skipping test-config-tiers-cli-migration.sh"

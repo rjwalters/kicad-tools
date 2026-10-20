@@ -1626,25 +1626,6 @@ if [[ -d "$WORKTREE_PATH" ]]; then
     _wt_lease_claim; exit 0
 fi
 
-# --- Pre-creation claim probe (#9453 Phase 1) ----------------------------
-# Reached only on the CREATE path (the reuse arm above already exited),
-# before `git worktree add` below. `loom-daemon forge check-claim
-# --force-claim` aggregates the four claim signals; --force-claim because
-# this script's caller has ALWAYS already claimed by the time it runs
-# (builder.md: claim, then create worktree), so the issue legitimately
-# carries the caller's own `loom:building` label, lease, and possibly
-# branch -- the only legs that still refuse are OPEN_PR ("do not build a
-# duplicate"), TARGET_IS_PR (#9929, the number is a PR), CLOSED (#11863,
-# nothing left to build) and FROZEN (#11743, `loom:frozen`: a human took the
-# issue out of every lane), the legs --force-claim can never override. Only exit 0
-# (blocked; its reason token went to >&3, its explanation to stderr)
-# refuses; a read failure, an old daemon, or any other code fails OPEN,
-# exactly like the #8553/#5783 guards above. A caller refused here adopts
-# the existing PR (create-pr.sh) or stands down -- never a suffix branch.
-# requires-daemon: forge optional   #9453 — `forge check-claim` at worktree creation; without it (absent or pre-#9453 binary) no pre-create OPEN_PR gate is performed and creation proceeds as before
-# shellcheck disable=SC2015  # the trailing `|| true` IS the fail-open path: only exit 0 (blocked) refuses
-[[ -n "$_WT_DAEMON_BIN" ]] && "$_WT_DAEMON_BIN" forge check-claim "$ISSUE_NUMBER" --force-claim >&3 && exit 1 || true
-
 # Check if branch already exists
 if git show-ref --verify --quiet "refs/heads/$BRANCH_NAME"; then
     # The whole arm — the reuse warning, the #6095/#6100 upstream-tracking
@@ -1687,6 +1668,22 @@ else
         fi
         CREATE_ARGS=("$WORKTREE_PATH" "-b" "$BRANCH_NAME" "origin/$BRANCH_NAME")
     else
+        # --- Pre-creation claim probe (#9453 Phase 1; fresh-branch only, #9828) ---
+        # Guards fresh-branch creation ONLY: a caller reusing a local or origin
+        # feature/issue-<N> branch (above) is continuing that open PR -- a Doctor
+        # (#9828) -- so OPEN_PR there is expected, and the reuse resolver already
+        # refuses to shadow a real PR. Here we would branch fresh off BASE_REF, so
+        # an open linked PR (e.g. on another branch name) means a duplicate build.
+        # --force-claim: the caller has already claimed (builder.md), so its own
+        # `loom:building`/lease are expected; OPEN_PR, TARGET_IS_PR (#9929, the
+        # number is a PR), CLOSED (#11863, nothing left to build) and FROZEN
+        # (#11743, `loom:frozen`) are the legs it never overrides. Only exit 0
+        # (blocked; reason token to >&3, explanation to stderr) refuses; a read failure, an old daemon, or any other code fails
+        # OPEN, like the #8553/#5783 guards. A refused caller adopts the existing
+        # PR (create-pr.sh) or stands down -- never a suffix branch.
+        # requires-daemon: forge optional   #9453 — `forge check-claim` at worktree creation; without it (absent or pre-#9453 binary) no pre-create OPEN_PR gate is performed and creation proceeds as before
+        # shellcheck disable=SC2015  # the trailing `|| true` IS the fail-open path: only exit 0 (blocked) refuses
+        [[ -n "$_WT_DAEMON_BIN" ]] && "$_WT_DAEMON_BIN" forge check-claim "$ISSUE_NUMBER" --force-claim >&3 && exit 1 || true
         # Create new branch from the base ref (origin/$DEFAULT_BRANCH by default, or
         # the --base override for a stacked child — #3729).
         [[ "$JSON_OUTPUT" == "true" ]] || print_info "Creating new branch from $BASE_DISPLAY"

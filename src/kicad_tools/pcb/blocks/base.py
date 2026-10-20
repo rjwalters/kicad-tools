@@ -12,7 +12,7 @@ routing only needs to connect to the ports.
 """
 
 from ..geometry import Layer, Point, Rectangle
-from ..placement import ComponentPlacement, get_footprint_pads
+from ..placement import ComponentPlacement, get_footprint_pads, kicad_rotate
 from ..primitives import Port, TraceSegment, Via
 
 
@@ -185,29 +185,35 @@ class PCBBlock:
             available = list(self.ports.keys())
             raise KeyError(f"Port '{name}' not found. Available: {available}")
 
-        # Get port position relative to block
-        rel_pos = self.ports[name].position
+        return self.to_board(self.ports[name].position)
 
-        # Apply block rotation
-        if self.rotation != 0:
-            rel_pos = rel_pos.rotate(self.rotation)
-
-        # Apply block origin
-        return rel_pos + self.origin
+    def pad_board_position(self, pad_ref: str) -> Point:
+        """Get absolute (board) position of a pad given as ``"REF.PAD"``."""
+        ref, _, pad_name = pad_ref.partition(".")
+        if ref not in self.components:
+            raise KeyError(f"Component '{ref}' not found in block")
+        comp = self.components[ref]
+        if pad_name not in comp.pads:
+            raise KeyError(f"Pad '{pad_name}' not found on {ref} (from '{pad_ref}')")
+        return self.to_board(comp.pad_position(pad_name))
 
     def component_position(self, ref: str) -> Point:
         """Get absolute position of a component after placement."""
         if ref not in self.components:
             raise KeyError(f"Component '{ref}' not found in block")
 
-        comp = self.components[ref]
-        rel_pos = comp.position
+        return self.to_board(self.components[ref].position)
 
-        # Apply block rotation
+    def to_board(self, rel: Point) -> Point:
+        """Map a block-relative point to a board point.
+
+        Rotates by the block rotation in KiCad's convention (the same
+        transform KiCad applies to the exported footprints, #7046) and
+        translates by the block origin. Rotation 0 is a pure translation.
+        """
         if self.rotation != 0:
-            rel_pos = rel_pos.rotate(self.rotation)
-
-        return rel_pos + self.origin
+            return kicad_rotate(rel, self.rotation, self.origin)
+        return rel + self.origin
 
     @property
     def bounding_box(self) -> Rectangle:
@@ -252,16 +258,8 @@ class PCBBlock:
         """Get traces with absolute positions for PCB export."""
         result = []
         for trace in self.traces:
-            start = trace.start
-            end = trace.end
-
-            # Apply block transformation
-            if self.rotation != 0:
-                start = start.rotate(self.rotation)
-                end = end.rotate(self.rotation)
-
-            start = start + self.origin
-            end = end + self.origin
+            start = self.to_board(trace.start)
+            end = self.to_board(trace.end)
 
             result.append(
                 {

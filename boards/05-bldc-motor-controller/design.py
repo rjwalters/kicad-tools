@@ -1006,6 +1006,11 @@ def create_bldc_controller(output_dir: Path) -> Path:
         ref_start=1,
         ref_prefix="Q",
         mosfet_value="IRLZ44N",
+        # Issue #6290: the PCB side places ``TO-220-3_Vertical`` whose pads
+        # are 1=G, 2=D, 3=S.  ``board05_custom:Q_NMOS_GDS`` (Device:Q_NMOS, G=1 D=2 S=3) numbers its pins the
+        # same way, so schematic pin numbers == footprint pad names and LVS
+        # binds every Q1-Q6 pad (``Device:Q_NMOS`` numbers its pins D/G/S).
+        mosfet_symbol="board05_custom:Q_NMOS_GDS",
         phase_labels=["C", "B", "A"],
         phase_spacing=75,
         hs_ls_spacing=40,

@@ -36,8 +36,14 @@ gate passes.  Stages, in order:
    report; ``kicad-cli`` re-plots the assembly PDFs; ``kct render`` the
    board renders.  Also re-written: the saved-fill native DRC report,
    ``fill-consistency.json``, ``refill-stability.json`` and the ``kct check``
-   report.  The fresh export's CPL must equal the committed one: placement
-   is not this driver's business.
+   report.  The fresh export's CPL must equal the committed one, or differ only in
+   ``Mid X``/``Mid Y`` by matching the routed PCB's Gerber/drill frame (#7059,
+   #7199): placement is not this driver's business.
+   Board 04 (Issue #7357) re-plots only the ``gerber_members`` of its committed
+   ``gerbers.zip`` (copper and F.Silkscreen; every other member keeps its bytes)
+   instead of a whole ``kct export``, and writes ``output/drc_report.json`` from
+   its recipe's ``run_drc`` once the bundle is final.  Its check report comes
+   from the board-local ``check_manufacturing.py``, not ``kct check``.
 5. ``refresh_readiness.py``'s pipeline: native ERC, deterministic archive
    rebuilds, manifest re-hash (only ``files`` may change), its gates
    (refilled native DRC, ``kct check``, ``net-status``, ``validate --sync``),
@@ -73,7 +79,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import _cpl_frame as cpl_frame  # noqa: E402
 import declare_router_netclasses_6390 as netclasses  # noqa: E402
+import refresh_copper_gerbers_6404 as copper_gerbers  # noqa: E402
 import refresh_readiness as rr  # noqa: E402
 
 GateFailure = rr.GateFailure
@@ -81,6 +89,11 @@ log = rr.log
 sha256 = rr.sha256
 
 REPO_ROOT = rr.REPO_ROOT
+
+
+#: ``gerbers.zip`` members plotted from the saved copper fills / the front silk.
+COPPER_MEMBER = copper_gerbers.COPPER_MEMBER
+SILK_MEMBER = re.compile(r"-F_Silkscreen\.[A-Za-z0-9]+$")
 
 
 @dataclass(frozen=True)
@@ -102,14 +115,26 @@ class BundleConfig:
     )
     #: Board-relative render directory re-plotted by ``kct render`` (or None).
     renders: str | None = "output/renders"
-    #: Board-relative copies of the saved-fill native DRC report.
-    saved_drc_reports: tuple[str, ...] = ("output/manufacturing/native-drc.json",)
+    #: Board-relative copies of the saved-fill native DRC report.  Never a path in
+    #: ``BoardConfig.drc_targets``: those hold the refilled report, written by
+    #: ``refresh_readiness.repin_staged`` (Issue #7353).
+    saved_drc_reports: tuple[str, ...] = ()
     #: Board-relative copies of the saved-vs-refilled area deltas.
     fill_consistency: tuple[str, ...] = ("output/manufacturing/fill-consistency.json",)
     #: Board-relative copies of the refill-stability record.
     refill_stability: tuple[str, ...] = ()
     #: Board-relative copies of the ``kct check`` report on the published PCB.
     check_reports: tuple[str, ...] = ("output/manufacturing/check-report.json",)
+    #: Board-relative copies of the schematic-parity native DRC report on the
+    #: saved fills (board 04): must be finding-free; rewritten only when its
+    #: findings change, so a rerun keeps the committed ``date``.
+    parity_drc_reports: tuple[str, ...] = ()
+    #: When set, the re-plot swaps just these ``gerbers/gerbers.zip`` members for
+    #: a fresh plot, instead of a whole ``kct export`` (board 04, Issue #7357).
+    gerber_members: tuple[re.Pattern[str], ...] = ()
+    #: Board-relative recipe whose ``run_drc(routed_pcb)`` writes
+    #: ``output/drc_report.json`` against the final bundle (board 04).
+    recipe_drc: str | None = None
     #: Board-specific evidence stage (a key of ``EVIDENCE_STAGES``).
     evidence: str | None = None
     #: Board-relative evidence PCB that must equal the published routed PCB.
@@ -117,13 +142,31 @@ class BundleConfig:
 
 
 BUNDLES: dict[str, BundleConfig] = {
-    "07-matchgroup-test": BundleConfig(
-        manufacturer="jlcpcb",
-        saved_drc_reports=(
-            "output/drc_report.json",
+    # Board 04: ``check_manufacturing.py`` replaces ``kct check`` (its paid
+    # 0.15 mm drill process), the committed DRC is the schematic-parity run, and
+    # only the copper and F.Silkscreen Gerbers follow the saved fills (#7357).
+    "04-stm32-devboard": BundleConfig(
+        manufacturer="jlcpcb-tier1",
+        export_members=(),
+        assembly_pdfs=(),
+        renders=None,
+        parity_drc_reports=(
             "output/readiness/native-drc.json",
             "output/manufacturing/native-drc.json",
         ),
+        fill_consistency=(
+            "output/readiness/fill-consistency.json",
+            "output/manufacturing/fill-consistency.json",
+        ),
+        check_reports=(
+            "output/readiness/kct-check.json",
+            "output/manufacturing/check-report.json",
+        ),
+        gerber_members=(COPPER_MEMBER, SILK_MEMBER),
+        recipe_drc="generate_design.py",
+    ),
+    "07-matchgroup-test": BundleConfig(
+        manufacturer="jlcpcb",
         fill_consistency=(
             "output/readiness/fill-consistency.json",
             "output/manufacturing/fill-consistency.json",
@@ -409,6 +452,65 @@ def gate_saved_fill_drc(staged: Path, cfg: rr.BoardConfig) -> bytes:
     return data
 
 
+def parity_drc_findings(report: dict) -> dict[str, int]:
+    """Violation, unconnected and schematic-parity counts of a parity DRC report."""
+    return {
+        "violations": len(report.get("violations", [])),
+        "unconnected": len(report.get("unconnected_items", [])),
+        "parity": len(report.get("schematic_parity", [])),
+    }
+
+
+def gate_parity_drc(staged: Path, cfg: rr.BoardConfig, bundle: BundleConfig) -> None:
+    """Schematic-parity native DRC on the saved fills: must report nothing (board 04).
+
+    Writes ``bundle.parity_drc_reports`` only when the findings differ from the
+    committed copy (kicad-cli stamps a wall-clock ``date``).
+    """
+    from kicad_tools.cli.kicad_toolchain import finalize_native_drc_report
+
+    with tempfile.TemporaryDirectory(prefix="refresh-bundles-parity-") as tmp:
+        work = _fill_context(staged / cfg.routed_pcb, Path(tmp) / "board")
+        report = Path(tmp) / "native-drc.json"
+        run(
+            [
+                "kicad-cli",
+                "pcb",
+                "drc",
+                "--format",
+                "json",
+                "--severity-error",
+                "--severity-warning",
+                "--schematic-parity",
+                "--units",
+                "mm",
+                "--output",
+                str(report),
+                str(work),
+            ]
+        )
+        if not report.is_file():
+            raise GateFailure("kicad-cli DRC (schematic parity) did not run")
+        data = finalize_native_drc_report(report)  # Issue #6962: refuses lib findings
+        raw = report.read_bytes()
+    counts = parity_drc_findings(data)
+    log(
+        f"  gate kicad-cli DRC (schematic parity): {counts['violations']} violation(s), "
+        f"{counts['unconnected']} unconnected, {counts['parity']} parity"
+    )
+    if any(counts.values()):
+        raise GateFailure(f"native DRC (schematic parity) is not clean ({counts})")
+    for target in bundle.parity_drc_reports:
+        path = staged / target
+        if not path.is_file():
+            raise GateFailure(f"{target}: not part of the committed board; refusing to add it")
+        committed = json.loads(path.read_text())
+        if {k: v for k, v in committed.items() if k != "date"} != {
+            k: v for k, v in data.items() if k != "date"
+        }:
+            path.write_bytes(raw)
+
+
 # --------------------------------------------------------------------------- stage 4
 def _project_archive(cfg: rr.BoardConfig) -> tuple[str, tuple[str, ...]]:
     for archive, search in cfg.archives:
@@ -422,6 +524,26 @@ def bundle_is_stale(staged: Path, cfg: rr.BoardConfig) -> bool:
     return not archive_is_current(staged / archive, [staged / s for s in search])
 
 
+def check_fresh_cpl(committed: bytes, fresh: bytes, routed_pcb: Path) -> None:
+    """Refuse a fresh CPL that moves a part; accept a pure coordinate-frame refresh (#7199).
+
+    Byte-identical is always fine.  A change is accepted only when every column
+    but ``Mid X``/``Mid Y`` is unchanged *and* the fresh coordinates equal the
+    routed PCB's own Gerber/drill frame, i.e. the placement did not move.
+    """
+    if fresh == committed:
+        return
+    if not cpl_frame.only_coordinates_differ(committed, fresh):
+        raise GateFailure("fresh CPL differs from the committed one: placement changed")
+    problems = cpl_frame.coordinate_mismatches(cpl_frame.read_cpl(fresh), routed_pcb)
+    if problems:
+        raise GateFailure(
+            "fresh CPL differs from the committed one and does not match the routed PCB's "
+            "drill frame: placement changed: " + "; ".join(problems[:3])
+        )
+    log("  CPL: coordinate-frame refresh only (columns other than Mid X/Mid Y unchanged)")
+
+
 def stage_replot(staged: Path, cfg: rr.BoardConfig, bundle: BundleConfig) -> list[str]:
     """Re-plot every artifact drawn from the routed PCB's copper."""
     from kicad_tools.cli.readiness_cmd import _export_assembly_pdf
@@ -431,6 +553,15 @@ def stage_replot(staged: Path, cfg: rr.BoardConfig, bundle: BundleConfig) -> lis
     routed = staged / cfg.routed_pcb
     mfg = staged / "output" / "manufacturing"
     written: list[str] = []
+    if bundle.gerber_members:
+        archive = mfg / "gerbers" / "gerbers.zip"
+        for pattern in bundle.gerber_members:
+            written.extend(
+                f"output/manufacturing/gerbers/gerbers.zip:{name}"
+                for name in copper_gerbers.refresh_copper_gerbers(routed, archive, pattern)
+            )
+        log(f"  re-plot: {len(written)} Gerber member(s) from the published routed PCB")
+        return written
     with tempfile.TemporaryDirectory(prefix="refresh-bundles-plot-") as tmp:
         project = Path(tmp) / "output"
         shutil.copytree(
@@ -454,8 +585,11 @@ def stage_replot(staged: Path, cfg: rr.BoardConfig, bundle: BundleConfig) -> lis
         if (project / routed.name).read_bytes() != routed.read_bytes():
             raise GateFailure("kct export modified the routed PCB it plotted")
         if (export / "cpl_jlcpcb.csv").is_file() and (mfg / "cpl_jlcpcb.csv").is_file():
-            if (export / "cpl_jlcpcb.csv").read_bytes() != (mfg / "cpl_jlcpcb.csv").read_bytes():
-                raise GateFailure("fresh CPL differs from the committed one: placement changed")
+            check_fresh_cpl(
+                (mfg / "cpl_jlcpcb.csv").read_bytes(),
+                (export / "cpl_jlcpcb.csv").read_bytes(),
+                routed,
+            )
         for pattern in bundle.export_members:
             committed = sorted(p.relative_to(mfg).as_posix() for p in mfg.glob(pattern))
             fresh = sorted(p.relative_to(export).as_posix() for p in export.glob(pattern))
@@ -498,11 +632,22 @@ def stage_replot(staged: Path, cfg: rr.BoardConfig, bundle: BundleConfig) -> lis
 
 
 def stage_check_report(staged: Path, cfg: rr.BoardConfig, bundle: BundleConfig) -> None:
-    """Write the bundle's ``kct check`` report (board-relative path, so reproducible)."""
+    """Write the bundle's ``kct check`` report (board-relative path, so reproducible).
+
+    A board with a ``check_script`` (board 04) runs that instead, as its gate does.
+    """
     with tempfile.TemporaryDirectory(prefix="refresh-bundles-check-") as tmp:
         report = Path(tmp) / "check.json"
-        run(
-            rr.kct(
+        if cfg.check_script is not None:
+            command = [
+                sys.executable,
+                str(staged / cfg.check_script),
+                str(staged / cfg.routed_pcb),
+                str(report),
+            ]
+            env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+        else:
+            command = rr.kct(
                 "check",
                 cfg.routed_pcb,
                 "--mfr",
@@ -511,13 +656,47 @@ def stage_check_report(staged: Path, cfg: rr.BoardConfig, bundle: BundleConfig) 
                 "json",
                 "--output",
                 str(report),
-            ),
-            cwd=staged,
-        )
+            )
+            env = None
+        run(command, cwd=staged, env=env)
         if not report.is_file():
-            raise GateFailure("kct check did not produce a report")
+            raise GateFailure("the check did not produce a report")
         data = report.read_bytes()
     _write_targets(staged, bundle.check_reports, data)
+
+
+def stage_recipe_drc(staged: Path, cfg: rr.BoardConfig, bundle: BundleConfig) -> None:
+    """Capture the recipe's ``run_drc`` report as ``output/drc_report.json`` (board 04).
+
+    The report runs the manifest meta-check against the bundle, so it must
+    come after the manifest re-hash; it is not itself part of the bundle.
+    """
+    assert bundle.recipe_drc is not None
+    snippet = (
+        "import runpy, sys; from pathlib import Path; "
+        "recipe = runpy.run_path(sys.argv[1], run_name='refresh_bundles_recipe'); "
+        "print('run_drc:', recipe['run_drc'](Path(sys.argv[2])))"
+    )
+    proc = run(
+        [
+            sys.executable,
+            "-c",
+            snippet,
+            str(staged / bundle.recipe_drc),
+            str(staged / cfg.routed_pcb),
+        ],
+        cwd=staged,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": str(staged)},
+    )
+    report = staged / "output" / "drc_report.json"
+    if not report.is_file():
+        raise GateFailure(f"{bundle.recipe_drc} run_drc wrote no report: {proc.stderr[-2000:]}")
+    status = json.loads(report.read_text()).get("meta_checks", {}).get("manifest", {}).get("status")
+    if status != "PASSED":
+        raise GateFailure(
+            f"output/drc_report.json: manifest meta-check is {status!r}, not 'PASSED'"
+        )
+    log(f"  recipe {proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else 'run_drc'}")
 
 
 # --------------------------------------------------------------------------- driver
@@ -530,16 +709,14 @@ def refresh_bundle(
     build_dir: Path | None = None,
     force_replot: bool = False,
     dry_run: bool = False,
+    known_issue: list[str] | None = None,
+    resolve_known_issue: list[str] | None = None,
 ) -> list[str]:
-    from kicad_tools.cli.board_readiness import read_readiness
-
     cfg = rr.BOARDS[board.name]
     bundle = BUNDLES[board.name]
     with tempfile.TemporaryDirectory(prefix="refresh-bundles-") as tmp:
         staged = Path(tmp) / board.name
         shutil.copytree(board, staged, ignore=shutil.ignore_patterns("__pycache__"))
-        out = staged / "output"
-        mfg = out / "manufacturing"
 
         if bundle.evidence is not None:
             EVIDENCE_STAGES[bundle.evidence](staged, cfg, build_dir)
@@ -552,6 +729,8 @@ def refresh_bundle(
                 "was filled under other rules than its sidecars"
             )
         saved_drc = gate_saved_fill_drc(staged, cfg)
+        if bundle.parity_drc_reports:
+            gate_parity_drc(staged, cfg, bundle)
 
         stale = force_replot or bundle_is_stale(staged, cfg)
         if stale:
@@ -577,75 +756,31 @@ def refresh_bundle(
         else:
             log("  re-plot: bundle already binds the current routed project files; kept")
 
-        for job in cfg.erc:
-            data = rr.native_erc(staged, job, reuse_erc, save_erc)
-            for target in job.targets:
-                (staged / target).write_bytes(data)
-            log(f"  native ERC {job.schematic}: 0 violations -> {len(job.targets)} report copies")
-
-        for archive, search in cfg.archives:
-            changed = rr.rebuild_archive(staged / archive, [staged / s for s in search])
-            log(f"  {archive}: rebuilt; members with new content {changed}")
-
-        refresher = rr.load_refresher(staged, cfg.manifest_refresher)
-        before = json.loads((mfg / "manifest.json").read_text())
-        refresher(mfg)
-        if stale:
-            # The bundle's check report records the manifest meta-check, so
-            # it runs against the re-hashed bundle and is hashed in after.
+        # Issue #7353: the ERC, DRC, archive, manifest, gate and re-pin tail is
+        # refresh_readiness's, not a copy of it.  The check report records the
+        # manifest meta-check, so it is built against the re-hashed bundle and
+        # hashed in by the second re-hash.
+        def after_manifest() -> None:
             stage_check_report(staged, cfg, bundle)
-            refresher(mfg)
-        after = json.loads((mfg / "manifest.json").read_text())
-        if {k: v for k, v in before.items() if k != "files"} != {
-            k: v for k, v in after.items() if k != "files"
-        }:
-            raise GateFailure("manifest refresh changed fields other than 'files'")
-        changed = rr.rebuild_archive(out / "manufacturing.zip", [mfg])
-        log(f"  output/manufacturing.zip: rebuilt; members with new content {changed}")
+            if bundle.recipe_drc is not None:
+                # run_drc's manifest meta-check needs the check report hashed in.
+                rr.load_refresher(staged, cfg.manifest_refresher)(
+                    staged / "output" / "manufacturing"
+                )
+                stage_recipe_drc(staged, cfg, bundle)
 
-        drc_errors = rr.gate_native_drc(staged, cfg)
-        lvs_clean, lvs_mismatches = rr.gate_kct_check(staged, cfg)
-        routed_pct = rr.gate_net_status(staged, cfg)
-        rr.gate_sync(staged, cfg)
-
-        report_path = out / "readiness.json"
-        report = json.loads(report_path.read_text())
-        measured = {
-            "drc_violations": drc_errors,
-            "nets_routed_pct": routed_pct,
-            "lvs_clean": lvs_clean,
-            "lvs_mismatches": lvs_mismatches,
-        }
-        differs = rr.compare_metrics(report.get("metrics", {}), measured)
-        if differs:
-            raise GateFailure(
-                f"measured metrics differ from readiness.json: "
-                f"{ {k: (report['metrics'][k], measured[k]) for k in differs} }"
-            )
-        if report.get("status") != "ready" or report.get("blockers"):
-            raise GateFailure("readiness.json is not a ready report; refusing to re-pin")
-        for name in report["inputs"]:
-            report["inputs"][name] = sha256(staged / name)
-        report["checked_at"] = checked_at
-        report_path.write_text(json.dumps(report, indent=2) + "\n")
-        verdict = read_readiness(staged)
-        if verdict["status"] != "ready":
-            raise GateFailure(f"staged report does not validate: {verdict['blockers']}")
-        log(f"  read_readiness(staged): ready, metrics {verdict.get('metrics')}")
-
-        published = sorted(
-            p.relative_to(staged).as_posix()
-            for p in staged.rglob("*")
-            if p.is_file()
-            and "__pycache__" not in p.relative_to(staged).parts
-            and (board / p.relative_to(staged)).is_file()
-            and p.read_bytes() != (board / p.relative_to(staged)).read_bytes()
+        return rr.repin_staged(
+            board,
+            staged,
+            cfg,
+            checked_at,
+            reuse_erc=reuse_erc,
+            save_erc=save_erc,
+            dry_run=dry_run,
+            known_issue=known_issue,
+            resolve_known_issue=resolve_known_issue,
+            after_manifest=after_manifest if stale else None,
         )
-        if not dry_run:
-            for name in published:
-                shutil.copy2(staged / name, board / name)
-        log(f"  {'would publish' if dry_run else 'published'} {len(published)} file(s)")
-        return published
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -692,4 +827,6 @@ if __name__ == "__main__":
         [os.environ.get("KICAD_CLI_DIR", "/Applications/KiCad/KiCad.app/Contents/MacOS")]
         + os.environ.get("PATH", "").split(os.pathsep)
     )
-    raise SystemExit(main())
+    from kicad_tools.cli.kicad_toolchain import run_on_evidence_toolchain
+
+    raise SystemExit(run_on_evidence_toolchain(main, [REPO_ROOT]))

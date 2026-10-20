@@ -3,6 +3,7 @@
 import csv
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -86,8 +87,8 @@ def export_package(output):
         "target is 0.5A; nominal comparator trip is 1A and firmware caps duty at 25%.\n"
         "Physical motor operation and thermal performance have not been measured.\n"
         "Do not increase these limits without bench validation. Read HARDWARE.md.\n\n"
-        "SMT assembly: 36 CPL placements. Hand-solder J1-J5 and RV1 afterward.\n"
-        "The BOM includes these six sourcing entries; they are absent from the SMT CPL.\n"
+        "Assembly: 42 CPL placements (36 SMT + six through-hole parts: J1-J5, RV1).\n"
+        "JLCPCB assembles through-hole parts (#7242); J1-J5 and RV1 are in the BOM and CPL.\n"
         "Solder U2/U3 exposed pads; their thermal vias are part of the SMT land pattern.\n"
         "Observe IC/header pin1, C1 polarity and D1/D2/D3 polarity marks.\n\n"
         "J1:1=VIN,2=GND; J2:1/2/3=phases A/B/C; J3:1=5V,2=GND,3/4/5=Hall A/B/C,6=GND.\n"
@@ -97,14 +98,23 @@ def export_package(output):
         "Program firmware/bldc.hex via slow AVR ISP, using factory internal-RC clock fuses.\n\n"
         "Fresh native DRC/refill:0 violations/0opens; native ERC:0; label/copper LVS:0.\n"
         "Manufacturer checks:0 errors/0warnings. No DRC waivers.\n"
-        "gerbers/gerbers.zip: fabrication; bom_jlcpcb.csv: procurement; cpl_jlcpcb.csv: SMT.\n"
+        "gerbers/gerbers.zip: fabrication; bom_jlcpcb.csv: procurement; cpl_jlcpcb.csv: SMT+THT.\n"
         "kicad_project.zip includes the exact PCB/schematic and local footprint/symbol libraries.\n"
         "schematic.pdf and assembly-front/back.pdf are production drawings.\n"
         "HARDWARE.md, firmware/, check reports and manifest.json complete the package.\n"
     )
     cpl = list(csv.DictReader((destination / "cpl_jlcpcb.csv").open()))
-    assert len(cpl) == 36
-    assert not {"J1", "J2", "J3", "J4", "J5", "RV1"} & {row["Designator"] for row in cpl}
+    # JLCPCB assembles through-hole parts, so since #7242 the CPL lists every
+    # placed footprint (36 SMT + J1-J5 + RV1), not only the SMT ones.
+    board_refs = set(
+        re.findall(
+            r'\(property "Reference" "([^"]+)"',
+            (output / "bldc_controller_routed.kicad_pcb").read_text(),
+        )
+    )
+    assert {row["Designator"] for row in cpl} == board_refs
+    assert len(cpl) == len(board_refs) == 42
+    assert {"J1", "J2", "J3", "J4", "J5", "RV1"} <= board_refs
     assert {"U1", "U2", "U3"} <= {row["Designator"] for row in cpl}
     # Exporter's generic project ZIP does not discover project-local libraries.
     archive = destination / "kicad_project.zip"

@@ -38,6 +38,8 @@ import importlib.util
 import io
 import json
 import re
+import shutil
+import subprocess
 import sys
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -356,9 +358,14 @@ class TestDeterministicGeneration:
         sidecar = generate_design_mod.write_sidecar(classes, tmp_path)
         serialized = json.loads(sidecar.read_text())
         physics = CoupledLines(Stackup.jlcpcb_4layer())
-        for name in ("MIPI_CLK_P", "MIPI_DAT0_N", "TMDS_D0_P", "TMDS_D2_N"):
+        for name in ("MIPI_CLK_P", "MIPI_DAT0_N", "TMDS_D0_P", "TMDS_D2_N", "DQS_P", "DQS_N"):
             cls = classes[name]
-            assert cls.intra_pair_clearance == pytest.approx(0.10)
+            # Issue #7060: width held at 0.225 mm, gap solved for 100 ohm;
+            # the authored 0.10 mm gap is the minimum.  Issue #7319: the DDR
+            # strobe pair is sized the same way.
+            assert cls.target_diff_impedance == pytest.approx(100.0)
+            assert cls.trace_width == pytest.approx(0.225)
+            assert cls.intra_pair_clearance == pytest.approx(0.135)
             assert cls.clearance == pytest.approx(0.10)
             assert cls.trace_width >= 0.15
             actual = physics.edge_coupled_microstrip(
@@ -373,7 +380,19 @@ class TestDeterministicGeneration:
             assert serialized[name]["coupled_continuity_threshold"] == 0.85
 
         # Sizing must not invent a target or alter unrelated routing geometry.
-        assert classes["DQS_P"] == generate_design_mod.ddr_dqs_pair_net_class()
+        # Issue #7319: DQS now carries an authored 100 ohm target; sizing
+        # changes only its width and gap.
+        from dataclasses import replace
+
+        authored_dqs = generate_design_mod.ddr_dqs_pair_net_class()
+        assert (
+            replace(
+                classes["DQS_P"],
+                trace_width=authored_dqs.trace_width,
+                intra_pair_clearance=authored_dqs.intra_pair_clearance,
+            )
+            == authored_dqs
+        )
         assert classes["DQ0"] == generate_design_mod.ddr_data_byte_0_net_class()
         assert classes["A0"] == generate_design_mod.addr_bus_net_class()
 
@@ -402,9 +421,12 @@ class TestDeterministicGeneration:
 
         classes = generate_design_mod.build_net_class_map()
         physics = CoupledLines(Stackup.jlcpcb_4layer())
-        for name in ("MIPI_CLK_P", "MIPI_DAT0_N", "TMDS_D0_P", "TMDS_D2_N"):
+        for name in ("MIPI_CLK_P", "MIPI_DAT0_N", "TMDS_D0_P", "TMDS_D2_N", "DQS_P", "DQS_N"):
             cls = classes[name]
-            assert cls.intra_pair_clearance == pytest.approx(0.10)
+            # Issue #7060: width held at 0.225 mm, gap solved for 100 ohm;
+            # the authored 0.10 mm gap is the minimum.
+            assert cls.trace_width == pytest.approx(0.225)
+            assert cls.intra_pair_clearance == pytest.approx(0.135)
             actual = physics.edge_coupled_microstrip(
                 cls.trace_width, cls.intra_pair_clearance, "F.Cu"
             ).zdiff
@@ -586,7 +608,7 @@ class TestAddrBusViaInclusiveSkew:
         data = json.loads(sidecar.read_text())
         return {net: NetClassRouting(**entry) for net, entry in data.items()}
 
-    def test_addr_bus_via_inclusive_skew_within_tolerance(
+    def test_addr_bus_via_inclusive_skew_is_the_kicad_cli_figure(
         self, routed_pcb, net_class_map_from_sidecar
     ) -> None:
         """#4007: 4-layer via-inclusive ADDR_BUS skew is WITHIN tolerance.
@@ -615,17 +637,16 @@ class TestAddrBusViaInclusiveSkew:
         assert "ADDR_BUS" in skew_seen, (
             "ADDR_BUS group should be measured on the fully-routed board 07 artifact"
         )
-        # Measured 0.0015 mm on the regenerated 2026-07-09 artifact.
-        assert skew_seen["ADDR_BUS"] < 0.5, (
-            f"Issue #4007: ADDR_BUS via-inclusive skew {skew_seen['ADDR_BUS']:.4f} mm "
-            "must be WITHIN the 0.5 mm group tolerance once standard vias are "
-            "measured as full-stack through-vias (the tuner already compensates "
-            "the copper against that drilled length).  A value back above 0.5 mm "
-            "means the through-via measurement regressed to the old blind-segment "
-            "model (#4007), re-opening the tuner/checker split."
-        )
+        # Issue #6730: the committed regression fixture was re-tuned in place
+        # with ``kct retune-lengths --group ADDR_BUS`` (nets A4/A6 only; all
+        # other copper preserved).  It was 1.0998 mm apart before (kicad-cli
+        # measures a via by the layers it connects); it is now 0.0169 mm,
+        # well inside the 0.5 mm tolerance, by both our checker and
+        # kicad-cli (see ``test_addr_bus_lengths_match_kicad_cli``).
+        assert skew_seen["ADDR_BUS"] == pytest.approx(0.0169, abs=0.002)
+        assert skew_seen["ADDR_BUS"] <= 0.5
 
-    def test_standard_via_still_contributes_drilled_length(
+    def test_standard_via_still_contributes_stackup_span(
         self, routed_pcb, net_class_map_from_sidecar
     ) -> None:
         """#3915 guard: the drilled via length is still VISIBLE in the metric.
@@ -655,18 +676,21 @@ class TestAddrBusViaInclusiveSkew:
         )
 
         assert "ADDR_BUS" in skew_blind
-        # Measured on the 2026-07-09 artifact: blind 1.6015 mm, via 0.0015 mm,
-        # so the drilled via length shifts the metric by ~1.6 mm.  A standard
-        # through-via on a 1.6 mm 4-layer stack contributes its full drill
-        # depth; ADDR carries a multi-traversal imbalance.
-        gap = abs(skew_via["ADDR_BUS"] - skew_blind["ADDR_BUS"])
-        assert gap > 0.2, (
-            f"Via-inclusive ADDR_BUS skew ({skew_via['ADDR_BUS']:.4f} mm) must "
-            f"differ from the via-blind value ({skew_blind['ADDR_BUS']:.4f} mm) by "
-            f"the drilled via length; |gap| was {gap:.4f} mm.  A ~0 gap means the "
-            "board_thickness_mm/num_copper_layers wiring regressed (#3915) -- a "
-            "standard via stopped contributing drilled length to the measurement."
+        # Issue #6725: the stackup comes from the board itself, so the
+        # ``board_thickness_mm`` / ``num_copper_layers`` arguments cannot make
+        # the via contribution appear or vanish -- both calls agree.
+        assert skew_via["ADDR_BUS"] == pytest.approx(skew_blind["ADDR_BUS"])
+        # And the via IS counted: dropping every via's span from the measurement
+        # would move the group skew by far more than a micron.
+        from kicad_tools.router.diffpair_length import DiffPairLengthTracker
+
+        sample_net = next(n for n in routed_pcb.nets.values() if n.name == "A4")
+        planar = sum(
+            ((s.end[0] - s.start[0]) ** 2 + (s.end[1] - s.start[1]) ** 2) ** 0.5
+            for s in routed_pcb.segments_in_net(sample_net.number)
         )
+        measured = DiffPairLengthTracker.measure_net_from_pcb(routed_pcb, sample_net.number)
+        assert abs(measured - planar) > 0.2, "vias stopped contributing stackup span"
 
     def test_checker_reports_no_addr_bus_violation_on_four_layer_board(
         self, routed_pcb, net_class_map_from_sidecar
@@ -689,20 +713,66 @@ class TestAddrBusViaInclusiveSkew:
             layers=4,
             net_class_map=net_class_map_from_sidecar,
         )
-        # The 4-layer design rules must still be threaded through (the #3915
-        # wiring); otherwise the "no violation" below would be vacuous.
-        assert checker.design_rules.board_thickness_mm == 1.6
-
         results = checker.check_match_group_length_skew()
 
         addr_violations = [v for v in results.violations if "ADDR_BUS" in v.message]
-        assert not addr_violations, (
-            "Issue #4007: DRCChecker(layers=4) must NOT report an ADDR_BUS "
-            "match-group length-skew violation -- once standard vias are measured "
-            "as through-vias the checker agrees with the tuner at PASS.  A fresh "
-            f"ADDR_BUS violation ({[v.actual_value for v in addr_violations]}) "
-            "means the tuner/checker split reopened."
+        # Issue #6730: the retuned fixture holds ADDR_BUS inside the 0.5 mm
+        # tolerance, so ``kct check`` reports no violation.
+        assert addr_violations == []
+
+    @pytest.mark.skipif(shutil.which("kicad-cli") is None, reason="kicad-cli not installed")
+    def test_addr_bus_lengths_match_kicad_cli(self, routed_pcb, tmp_path) -> None:
+        """Issue #6725: per-net lengths agree with kicad-cli within 1 micron.
+
+        ``kicad-cli`` is asked for every net's length through a custom DRC
+        ``length`` rule; the A0..A7 address nets (two pads each, so the DRC
+        figure is the whole net) must equal ``kct check``'s measurement.
+        """
+        from kicad_tools.router.diffpair_length import DiffPairLengthTracker
+
+        board = tmp_path / "board.kicad_pcb"
+        shutil.copy(OUTPUT_DIR / "matchgroup_test_routed.kicad_pcb", board)
+        (tmp_path / "board.kicad_dru").write_text(
+            "(version 1)\n"
+            "(rule len (constraint length (max 0.001mm)) (condition \"A.NetName != ''\"))\n"
         )
+        out = tmp_path / "drc.json"
+        subprocess.run(
+            [
+                "kicad-cli",
+                "pcb",
+                "drc",
+                "--format",
+                "json",
+                "--severity-all",
+                "-o",
+                str(out),
+                str(board),
+            ],
+            capture_output=True,
+            timeout=300,
+            check=False,
+        )
+        if not out.exists():
+            pytest.skip("kicad-cli produced no DRC report")
+        by_name = {n.name: n.number for n in routed_pcb.nets.values()}
+        wanted = {f"A{i}" for i in range(8)}
+        actual: dict[str, float] = {}
+        for violation in json.loads(out.read_text()).get("violations", []):
+            m = re.search(r"actual ([0-9.]+) mm", violation.get("description", ""))
+            names = {
+                g.group(1)
+                for item in violation.get("items", [])
+                if (g := re.search(r"\[(.*?)\] of", item.get("description", "")))
+            }
+            if m and len(names) == 1 and (name := names.pop()) in wanted:
+                actual[name] = float(m.group(1))
+        if not actual:
+            pytest.skip("kicad-cli reported no length for the ADDR nets")
+        assert set(actual) == wanted
+        for name, kicad_len in actual.items():
+            ours = DiffPairLengthTracker.measure_net_from_pcb(routed_pcb, by_name[name])
+            assert ours == pytest.approx(kicad_len, abs=1e-3), name
 
 
 # =============================================================================

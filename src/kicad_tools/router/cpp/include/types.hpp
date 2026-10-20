@@ -6,6 +6,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <vector>
@@ -322,7 +323,28 @@ namespace router {
 // between the P and N via of the move itself.  A v53 .so returns coupled
 // routes with via pairs below the floor, and diverges from the Python coupled
 // loop, which applies the same check.
-constexpr int ROUTER_CPP_BUILD_VERSION = 55;
+// v56 (Issue #6718): ``Grid3D::set_pad_authored`` gained a trailing ``rratio``
+// so the authored gate measures a roundrect with the file's corner ratio (or
+// as a rect when unknown) instead of a hardcoded 0.25.  The Python side passes
+// it on every pad, so a v55 .so must be rejected.
+// v58 (Issue #6826): ``CoupledPathfinder::route`` bounds the relaxed endpoint
+// zones' spacing tolerance by each end's own pad-pitch delta + 1 instead of the
+// zone radius.  A v57 .so searches a much larger joint state space than the
+// Python mirror, so coupled parity (and the Board07 replay) diverge.
+// v59 (Issue #6840): ``CoupledPathfinder::set_partner_via_clearance`` -- the
+// joint search keeps each rail via-clearance from the partner's vias on every
+// layer, and a layer change keeps both new barrels clear of the partner's
+// trail and vias.  The Python side calls the new setter, so a v58 .so must be
+// rejected.
+// v60 (Issue #6994): every native A* search radius (constructor trace / via
+// radii, pairwise widening, coupled rule-area via radius) goes through
+// ``search_radius_cells`` -- the guarded exact ceiling shared with Python --
+// instead of a bare float32 ``ceil`` that added a phantom cell on float-noise
+// inputs.  Routing output changes, and the Python parity test calls the new
+// ``router_cpp.search_radius_cells`` binding, so a v59 .so must be rejected.
+// v61: ``DesignRules::min_via_pad_edge_gap`` + coupled pad-edge refusal (#7296).
+// v62: the same floor in the single-ended A*'s via check (#7296).
+constexpr int ROUTER_CPP_BUILD_VERSION = 62;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
@@ -679,12 +701,19 @@ struct PadBounds {
 // Used by:
 //   Pathfinder::run_astar_loop / Pathfinder::route (the per-cell cost
 //   helper ``get_pad_channel_cost`` consults a pre-built lookup table).
+// Issue #6761: ``PadChannelBudget.layer`` value marking a hard *via* fence.
+// A via fence never prices a trace step; the via-expansion branches refuse a
+// layer change at any of its cells.  A budget with an infinite
+// ``overflow_penalty`` on a real layer (>= 0) is a hard *trace* fence: the
+// search never steps onto (or drops a via onto) its cells.
+constexpr int PAD_VIA_FENCE_LAYER = -2;
+
 struct PadChannelBudget {
     int gx1 = 0;
     int gy1 = 0;
     int gx2 = 0;
     int gy2 = 0;
-    int layer = -1;        // -1 = applies to all routing layers
+    int layer = -1;        // -1 = applies to all routing layers; -2 = via fence (#6761)
     int capacity = 0;      // 0 = inert (no penalty enforced)
     float overflow_penalty = 0.0f;
     uint32_t origin_pad_ref_hash = 0;  // Reserved for future per-package use.
@@ -717,6 +746,10 @@ struct DesignRules {
     float congestion_threshold = 0.5f;
     float min_drill_clearance = 0.102f;
     float min_hole_to_hole = 0.5f;
+    // Issue #7296: mask-dam floor, drill edge to SMD pad copper edge, for a
+    // via that does not overlap the pad (Python
+    // ``DesignRules.min_via_pad_edge_gap``).  0 disables.
+    float min_via_pad_edge_gap = 0.0f;
     // Issue #4071: soft corridor-attractor bonus (mirrors Python
     // ``DesignRules.cost_corridor_attractor``, default 3.0).  Subtracted
     // from a cell's positive step cost when the cell is reserved for the
@@ -734,6 +767,24 @@ struct DesignRules {
 // by which object it happens to be validating.
 inline float trace_via_clearance(float trace_clearance, float via_clearance) {
     return std::max(trace_clearance, via_clearance);
+}
+
+// Epic #5509 / Issue #6994: A* search radius in cells -- the native mirror of
+// Python ``search_radius.search_radius_cells`` (the Issue #864 guarded rule):
+// the exact ceiling of ``x = (half_mm + clearance_mm) / resolution``, at
+// least 1.  Computes in double; snaps ``x`` to the nearest integer when within
+// 1e-4 cells, because float32 rule/resolution inputs carry ~1e-7 relative
+// noise that Python's ``round(x, 6)`` is too tight to absorb (e.g. trace
+// 0.8/0.3 @ 0.025 mm: x32 = 28.0000x, and via 0.6/0.2 @ 0.1 mm:
+// x32 = 5.0000000745).  With rule values quantized to 0.001 mm on the
+// supported grids a non-integer ``x`` is never closer than ~1/127 to an
+// integer, so the snap never swallows a real fractional cell
+// (``tests/router/test_search_radius_cells.py`` pins Python/C++ parity).
+inline int search_radius_cells(double half_mm, double clearance_mm, double resolution) {
+    const double x = (half_mm + clearance_mm) / resolution;
+    const double nearest = std::round(x);
+    const double cells = (std::abs(x - nearest) <= 1e-4) ? nearest : std::ceil(x);
+    return std::max(1, static_cast<int>(cells));
 }
 
 // Pad info for geometric validation (Issue #2439)

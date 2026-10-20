@@ -6,8 +6,10 @@ This script is the match-group sibling of
 4N).  It catches regressions in the **match-group routing + DRC
 algorithm itself** by re-routing a board from scratch and asserting:
 
-  1. The post-route DRC error count is within the per-board allowlist
-     (same semantic as ``check_routed_drc.py`` / ``check_diffpair_coverage.py``).
+  1. Every blocking post-route DRC finding is listed by identity in the
+     board's allowance (Issue #7367), every listed entry still fires, and
+     the count of blocking findings outside the allowance is within the
+     per-board allowlist (absent = 0, the fixture's value).
   2. The ``match_group_length_skew`` DRC rule was actually exercised by
      the check (i.e., its per-rule counter is >= 1).  Without this
      assertion a regression that disables match-group detection (e.g.,
@@ -39,7 +41,9 @@ Exit codes (mirror ``check_routed_drc.py`` / ``check_diffpair_coverage.py``):
     0 -- Gate passed (errors within tolerance AND the rule was exercised).
     1 -- Tool failure (board dir missing, route step crashed, allowlist
          parse error, etc.).
-    2 -- Gate failed: errors exceed allowlist OR the rule did not run.
+    2 -- Gate failed: errors exceed allowlist OR the rule did not run OR
+         fewer signal nets complete than the recipe's
+         ``REQUIRED_SIGNAL_REACH`` (Issue #7319).
 
 GitHub-Actions ``::error file=...::`` annotations are emitted on failure
 so the PR Files-changed view surfaces the failure inline.
@@ -108,7 +112,11 @@ from pathlib import Path
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from board_recipe_artifacts import recipe_baseline_key, recipe_output_dir  # noqa: E402
+from board_recipe_artifacts import (  # noqa: E402
+    measure_signal_reach,
+    recipe_baseline_key,
+    recipe_output_dir,
+)
 
 # Issue #4634: the sidecar filename rules are shared with ``kct check``, the
 # routed-DRC gate and the ``kct export`` report surface via the stdlib-only
@@ -123,6 +131,14 @@ from kicad_tools.sidecars import (
 # and ``check_routed_drc.py`` agree on the count they gate against.
 # ``net_class_map_resolver`` lives next to this script in ``scripts/ci``.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from identity_allowance import (  # noqa: E402
+    Allowance,
+    error_identities,
+    format_stale,
+    stale_entries,
+    unallowed_findings,
+    unlisted_findings,
+)
 from net_class_map_resolver import count_blocking_errors  # noqa: E402
 
 # --- shared with check_routed_drc.py / check_diffpair_coverage.py ------------
@@ -137,95 +153,76 @@ DEFAULT_ALLOWLIST = Path(".github/routed-drc-tolerance.yml")
 # canonical rule_id string + per-rule counter increment (Issue #2702).
 MATCHGROUP_RULE_IDS: tuple[str, ...] = ("match_group_length_skew",)
 
-# Issue #3828 -- documented match-group violation BASELINE (per routed PCB).
-# Symmetric with ``check_diffpair_coverage.DIFFPAIR_VIOLATION_BASELINE``.
-# The map exists so a board with an accepted, separately-tracked match-group
-# skew baseline can document it loudly rather than relying on the large
-# error-count allowlist floor to absorb new skew errors.  Keyed by
-# repo-relative routed-PCB path.
+#: Open tracker for board 07's seed-42 skew residuals (Issue #7367): the 6
+#: diff pairs and 2 match groups below.  The groups used to cite #3916 / #7339
+#: (closed) and #5798 (pending close).
+MATCHGROUP_SKEW_TRACKER = 7550
+
+# Repo-relative key of board 07's synthetic regression fixture.  Its re-route
+# lands in the git-ignored ``regression-output/``, which
+# ``recipe_baseline_key`` canonicalises back to this key.
+MATCHGROUP_FIXTURE_KEY = (
+    "boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb"
+)
+
+# Issue #3828 / #7339 -- the match groups that may carry a
+# ``match_group_length_skew`` error, each with an OPEN tracking issue.
 #
-# Issue #3931 (via-imbalance now COMPENSATED by the tuner) -- board 07's
-# ADDR_BUS match group carries a via-count mismatch: the A4/A6 members escape
-# to an inner layer behind a full-stack via while A0/A1/A2/A3/A5/A7 route flat
-# on F.Cu, adding ~1.6 mm of via drilled length that pushed the group past its
-# 0.5 mm length-match tolerance.  This was invisible while the DRC checker was
-# via-blind; PR #3915 threaded the board stackup (``board_thickness_mm`` /
-# ``num_copper_layers``) into ``derive_group_skew_data`` so via-transition
-# length is now counted, and the pre-existing imbalance was flagged as 1
-# ``match_group_length_skew`` error.  #3931 closes the loop on the *router*
-# side: the match-group length tuner is now ALSO via-aware
-# (``tune_match_group_v2`` / ``_tune_match_group_single_ended`` measure member
-# lengths with ``MatchGroupTracker._measure_route_total`` when a stackup is
-# supplied), so during a re-route the tuner adds F.Cu meander to the via-free
-# members to compensate the via-carrying members' drilled length.  A
-# via-imbalanced group therefore converges to within tolerance and ADDR_BUS no
-# longer fires on the reroute path.
+# Issue #3931: ADDR_BUS's via-count imbalance is compensated by the via-aware
+# tuner, so it no longer fires on the re-route.  Issue #3916 made pair-only
+# groups checkable; MIPI_CSI_LANES is the one pair-only group whose skew
+# survives (7.039 mm vs 0.050 mm).  Issue #7339: DDR_DATA_BYTE_0 fires once
+# DQ0 routes (#7331): 16.717 mm vs 0.100 mm.  Both are tracked in #7550.
 #
-# Issue #3916 (pair-only groups now length-checked) -- the producer used to
-# skip any match group whose members were exclusively differential pairs
-# (``net_ids=[]`` after ``_extract_pair_ids``), so board 07's MIPI_CSI_LANES
-# and HDMI_TMDS_LANES were never skew-checked.  ``derive_group_skew_data`` now
-# measures diff-pair members via the pair-average ``(L_P + L_N) / 2``
-# contribution, making both groups checkable.  MIPI_CSI_LANES is the one
-# genuine pair-only skew that survives -- it is tracked separately under #3916
-# and remains the sole entry in this baseline.
+# Per the operator ruling in #7270 (Q3) the allowance is NOT a count: it names
+# the exact groups that may fire, so a DIFFERENT group failing (e.g. ADDR_BUS
+# regressing) still trips the gate.  On the full-reroute path (the Match-Group
+# Routing Regression CI job) an allowed group that no longer fires is STALE
+# and fails the gate, so fixing a group forces its entry to be deleted.  On
+# ``--skip-route`` the group allowance stays an upper bound only
+# (``enforce_stale=False``, unchanged by #7367): the committed fixture gates
+# DDR/HDMI out as partially routed.  Staleness of the identity entries in
+# MATCHGROUP_FIXTURE_ALLOWED_FINDINGS is enforced on both paths.
 #
-# The value the gate observes depends on WHICH artifact it runs against, and a
-# SINGLE baseline of **1** satisfies BOTH paths:
-#
-#   * ``--skip-route`` (committed-artifact path, used by the diff-driven
-#     routed-pcb-drc-check and by local verification): counts exactly **1**
-#     match-group violation.  The #3931 tuner fix is a ROUTER change and does
-#     NOT regenerate the committed ``matchgroup_test_routed.kicad_pcb``
-#     artifact, so that artifact still carries the pre-fix via-imbalanced
-#     ADDR_BUS (which fires) while MIPI/HDMI/DDR are gated out by the
-#     partial-routing rule (at least one unrouted diff-pair leg each: e.g.
-#     MIPI_CLK_N, TMDS_D0_*, DQ3 carry zero geometry).  So the committed
-#     artifact reports 1 (ADDR_BUS), which passes (1 <= 1).  (Refreshing the
-#     committed artifact to also clear ADDR_BUS is the artifact-churn work
-#     tracked in #3925 -- once it lands the committed count drops to the MIPI
-#     violation and this baseline can be revisited.)
-#
-#   * full reroute (the Match-Group Routing Regression CI job, which runs
-#     ``generate_design.py --step route`` end-to-end before the gate):
-#     also counts **1**.  The via-aware tuner now compensates ADDR_BUS's via
-#     imbalance during the re-route, so ADDR_BUS lands within tolerance and no
-#     longer fires; only MIPI_CSI_LANES's pair-only skew (#3916) remains.
-#     HDMI_TMDS_LANES does NOT fire even after the reroute: its TMDS_D0_N /
-#     TMDS_D1_N legs remain unrouted ("still stranded -- NO relief path"), so
-#     the unrouted-leg gate correctly excludes HDMI.
-#
-# Composition of the baseline (1):
-#   1x MIPI_CSI_LANES pair-only skew (#3916).  (Prior to #3931 the reroute
-#   count was 2 = ADDR_BUS via-imbalance + MIPI; the via-aware tuner removed
-#   the ADDR_BUS term, so the reroute count is now 1 and matches the
-#   committed-artifact count.)
-MATCHGROUP_VIOLATION_BASELINE: dict[str, int] = {
-    "boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb": 1,
+# REMOVAL: delete an entry once its group meets its length-match tolerance
+# (tracked in the issue it cites).
+MATCHGROUP_ALLOWED_GROUPS: dict[str, dict[str, int]] = {
+    MATCHGROUP_FIXTURE_KEY: {
+        "MIPI_CSI_LANES": MATCHGROUP_SKEW_TRACKER,
+        "DDR_DATA_BYTE_0": MATCHGROUP_SKEW_TRACKER,
+    },
 }
 
 
-def check_zero_violations(
-    error_violations_by_rule: dict[str, int],
-    baseline: int,
-    required_rule_ids: tuple[str, ...] = MATCHGROUP_RULE_IDS,
+def check_group_allowances(
+    fired_groups: set[str],
+    allowed_groups: dict[str, int],
+    *,
+    enforce_stale: bool,
 ) -> list[str]:
-    """Return failure strings when match-group violations exceed baseline.
+    """Return failures for match groups outside / no longer needing the allowance.
 
-    Issue #3828: the old gate asserted coverage>=1 (the rule RAN) but never
-    that it found zero violations -- so a future ``match_group_length_skew``
-    regression of a few nets would slip under the large error-count allowlist
-    floor (board 07's is 120) and the coverage check would still pass.  This
-    mirrors ``check_diffpair_coverage.check_zero_violations``.
+    Issue #7339 / #7270 Q3: the allowance is keyed to named groups plus a
+    tracking issue, not a count.  A fired group that is not allowed fails
+    (so a different regression is never absorbed in place of a known one);
+    with ``enforce_stale`` an allowed group that did not fire fails too, so
+    fixing it forces removal of its entry.
     """
-    total = sum(error_violations_by_rule.get(rid, 0) for rid in required_rule_ids)
-    if total <= baseline:
-        return []
-    detail = ", ".join(f"{rid}={error_violations_by_rule.get(rid, 0)}" for rid in required_rule_ids)
-    return [
-        f"match-group error-severity violations ({total}) EXCEED the documented "
-        f"baseline ({baseline}): {detail}"
-    ]
+    failures: list[str] = []
+    unexpected = sorted(fired_groups - allowed_groups.keys())
+    if unexpected:
+        failures.append(
+            "match-group skew fired on group(s) with no allowance: " + ", ".join(unexpected)
+        )
+    if enforce_stale:
+        stale = sorted(allowed_groups.keys() - fired_groups)
+        if stale:
+            detail = ", ".join(f"{g} (#{allowed_groups[g]})" for g in stale)
+            failures.append(
+                f"STALE allowance: {detail} no longer fires -- remove the entry from "
+                "MATCHGROUP_ALLOWED_GROUPS"
+            )
+    return failures
 
 
 def load_allowlist(allowlist_path: Path) -> dict[str, int]:
@@ -489,7 +486,11 @@ def measure_pour_connectivity(recipe_mod, pcb_path: Path, pour_nets: set[str]) -
 
 
 def count_errors_via_kct_check(
-    pcb_path: Path, sidecar: Path | None, *, error_rules: dict[str, int] | None = None
+    pcb_path: Path,
+    sidecar: Path | None,
+    *,
+    error_rules: dict[str, int] | None = None,
+    error_violations: list[dict] | None = None,
 ) -> int:
     """Count BLOCKING errors via ``kct check --mfr jlcpcb --errors-only``.
 
@@ -572,26 +573,136 @@ def count_errors_via_kct_check(
             if violation.get("severity") == "error":
                 rule = violation.get("rule_id", "unknown")
                 error_rules[rule] = error_rules.get(rule, 0) + 1
+    if error_violations is not None:
+        error_violations.extend(
+            v for v in data.get("violations", []) if v.get("severity") == "error"
+        )
     return blocking
 
 
-def unexpected_baseline_errors(key: str, errors: dict[str, int]) -> dict[str, int]:
-    """Historical skew improvements cannot absorb new physical defects."""
-    if key not in MATCHGROUP_VIOLATION_BASELINE:
+# Issue #7332 -- declared ``target_diff_impedance`` is judged on coupled
+# segments (#7306/#7293).  The model is right; the routed copper misses.  The
+# coupled trunk keeps the breakout pitch instead of tightening to the solved
+# ``intra_pair_clearance`` (0.100 mm in net_class_map.json):
+#   fixture MIPI_DAT1 trunk F.Cu w=0.225  gap 0.283 mm vs 0.100 mm -> 116.3 ohm
+#   seed-42 re-route MIPI_DAT1  gap ~0.43 mm -> 122.6 ohm
+#   seed-42 re-route TMDS_D1    gap ~0.49 mm -> 125.3 ohm
+# (declared 100 ohm +/-10 %).  Same root cause as #7312 (board 06) and the
+# shared router defect #7344.  Seed-42 yields 4 errors: MIPI_DAT1 P/N and
+# TMDS_D1 P/N.
+# Issue #7349: the recipe now runs the #7344 gap-tightening pass
+# (``--tighten-diffpair-gap``).  Measured on the seed-42 re-route with #7397's
+# match-group top-up merged, the pass leaves all 4 findings: MIPI_DAT1 tightens
+# 1 of its 2 runs (the other is declined because it would worsen the pair's
+# ``kct check`` skew), so its remaining run still reads 122.5 ohm; TMDS_D1
+# (125.2 ohm) is declined for the same reason.  MIPI_DAT1's skew drops
+# 1.440 -> 1.021 mm.
+# The #7349 unequal (``balanced_*``) splits can bring both pairs to 100 ohm,
+# but only by adding uncoupled jogs to trunks that already sit inside the
+# 0.5 mm coupling window (MIPI_DAT1 uncoupled P+N 4.341 -> 5.095 mm, coupled
+# fraction 86.7 % -> 84.6 %; TMDS_D1 48.372 -> 49.379 mm), so the
+# uncoupled-length gate (operator Q12) declines them and the 4 entries stay.
+# Deleting these 4 entries is the whole of #7349.
+#
+# Issue #7367 -- the ``diffpair_length_skew`` pairs, keyed by pair, not by a
+# count.  Until #7367 the gate let every skew/continuity finding through by
+# rule and bounded them only with the ``.github/routed-drc-tolerance.yml``
+# total of 8, so a new pair could fail in place of a fixed one.  The pairs
+# below are the ones the seed-42 re-route measures over ``max_skew_mm``
+# (``e1c361478``, 2026-10-20, identical to ``c2c1beb02``); each cites #7550.
+#
+# Allowed by identity, not by count (#7359, #7270 Q3 ruling): only these
+# identities may carry the listed errors, a listed identity that stops firing
+# on the full re-route is stale and fails the gate, and an allowed finding
+# does not count against the (now strict 0) routed-DRC total.
+MATCHGROUP_FIXTURE_ALLOWED_FINDINGS: Allowance = {
+    ("impedance", "MIPI_DAT1_N"): 7349,
+    ("impedance", "MIPI_DAT1_P"): 7349,
+    ("impedance", "TMDS_D1_N"): 7349,
+    ("impedance", "TMDS_D1_P"): 7349,
+    # skew vs max_skew_mm, mm
+    ("diffpair_length_skew", "DQS_N/DQS_P"): MATCHGROUP_SKEW_TRACKER,  # 5.562 / 0.050
+    ("diffpair_length_skew", "MIPI_CLK_N/MIPI_CLK_P"): MATCHGROUP_SKEW_TRACKER,  # 4.854 / 0.050
+    ("diffpair_length_skew", "MIPI_DAT0_N/MIPI_DAT0_P"): MATCHGROUP_SKEW_TRACKER,  # 4.060 / 0.050
+    ("diffpair_length_skew", "MIPI_DAT1_N/MIPI_DAT1_P"): MATCHGROUP_SKEW_TRACKER,  # 1.021 / 0.050
+    ("diffpair_length_skew", "TMDS_D1_N/TMDS_D1_P"): MATCHGROUP_SKEW_TRACKER,  # 4.968 / 0.075
+    ("diffpair_length_skew", "TMDS_D2_N/TMDS_D2_P"): MATCHGROUP_SKEW_TRACKER,  # 0.730 / 0.075
+}
+
+#: Every board key that carries an identity allowance (Issue #7367).  A key
+#: absent here has no allowance at all: every blocking finding counts.
+MATCHGROUP_ALLOWANCES: dict[str, Allowance] = {
+    MATCHGROUP_FIXTURE_KEY: MATCHGROUP_FIXTURE_ALLOWED_FINDINGS,
+}
+
+
+def _is_advisory(rule: str) -> bool:
+    """``connectivity`` and friends are reported but never block (Issue #4008)."""
+    from kicad_tools.validate.checker import DRCChecker
+
+    return DRCChecker.is_advisory_rule(rule)
+
+
+def board_allowance(key: str) -> Allowance:
+    """Every ``(rule, identity)`` allowed on ``key``: findings plus named groups.
+
+    The match groups in ``MATCHGROUP_ALLOWED_GROUPS`` are identities of the
+    ``match_group_length_skew`` rule, so they are folded in here; their
+    staleness is judged by ``check_group_allowances``.
+    """
+    allowance = dict(MATCHGROUP_ALLOWANCES.get(key, {}))
+    for group, issue in MATCHGROUP_ALLOWED_GROUPS.get(key, {}).items():
+        allowance[("match_group_length_skew", group)] = issue
+    return allowance
+
+
+def unexpected_baseline_errors(
+    key: str,
+    errors: dict[str, int],
+    identities: dict[str, set[str]] | None = None,
+) -> dict[str, int]:
+    """Blocking findings on an allowance key that no entry covers, per rule.
+
+    ``identities`` maps rule -> identities carrying an error
+    (``error_identities``).  Every blocking rule is judged by identity
+    (Issue #7367: no rule is let through by name); without ``identities``
+    nothing is trusted, so every finding counts as unexpected.  Advisory
+    ``connectivity`` is outside the blocking set (reach is gated by
+    ``check_signal_reach``).  A key with no allowance returns ``{}``: there
+    the strict-0 total already fails on any blocking finding.
+    """
+    if key not in MATCHGROUP_ALLOWANCES and key not in MATCHGROUP_ALLOWED_GROUPS:
         return {}
-    expected = {
-        "diffpair_length_skew",
-        "diffpair_routing_continuity",
-        "match_group_length_skew",
-        "connectivity",
-    }
-    return {rule: count for rule, count in errors.items() if count and rule not in expected}
+    allowance = board_allowance(key)
+    unexpected: dict[str, int] = {}
+    for rule, count in errors.items():
+        if not count or _is_advisory(rule):
+            continue
+        if identities is not None:
+            count = len(unlisted_findings(allowance, rule, identities.get(rule, set())))
+        if count:
+            unexpected[rule] = count
+    return unexpected
+
+
+def stale_allowances(key: str, identities: dict[str, set[str]]) -> list[tuple[str, str, int]]:
+    """Listed findings that no longer occur on the baselined board."""
+    return stale_entries(MATCHGROUP_ALLOWANCES.get(key, {}), identities)
+
+
+def unallowed_blocking(key: str, violations: list[dict]) -> list[tuple[str, str]]:
+    """Blocking findings ``key``'s allowance does not cover (Issue #7367).
+
+    This, not the raw blocking count, is what the routed-DRC total is
+    compared to: an identity-allowed finding never uses up budget.
+    """
+    return unallowed_findings(board_allowance(key), violations, advisory=_is_advisory)
 
 
 def compute_rule_coverage(
     pcb_path: Path,
     net_class_map: dict | None,
-) -> tuple[dict[str, int], dict[str, int]]:
+) -> tuple[dict[str, int], dict[str, int], set[str]]:
     """Compute per-rule check counts AND per-rule error-violation counts.
 
     Issue #3828: also returns a ``{rule_id -> error_violation_count}`` map
@@ -622,10 +733,11 @@ def compute_rule_coverage(
             match-group rule to engage.
 
     Returns:
-        A ``(rules_checked_by_rule, error_violations_by_rule)`` tuple.
-        The first maps ``rule_id -> times-run`` (coverage); the second
+        A ``(rules_checked_by_rule, error_violations_by_rule, fired_groups)``
+        tuple.  The first maps ``rule_id -> times-run`` (coverage); the second
         maps ``rule_id -> count of error-severity violations`` (restricted
-        to ``MATCHGROUP_RULE_IDS``).
+        to ``MATCHGROUP_RULE_IDS``); the third is the set of match-group
+        names with an error-severity violation (Issue #7339).
 
     Raises:
         RuntimeError: If the PCB cannot be loaded.
@@ -665,7 +777,13 @@ def compute_rule_coverage(
             1 for v in results.violations if v.rule_id == rule_id and v.is_error
         )
 
-    return dict(results.rules_checked_by_rule), error_violations_by_rule
+    fired_groups = {
+        name
+        for v in results.violations
+        if v.rule_id in MATCHGROUP_RULE_IDS and v.is_error
+        for name in v.items
+    }
+    return dict(results.rules_checked_by_rule), error_violations_by_rule, fired_groups
 
 
 def check_rule_coverage(
@@ -683,6 +801,46 @@ def check_rule_coverage(
         if rules_checked_by_rule.get(rule_id, 0) < 1:
             missing.append(rule_id)
     return missing
+
+
+def check_signal_reach(
+    board_dir: Path,
+    routed_pcb: Path,
+    required_reach: int | None,
+    pour_nets: set[str],
+) -> int:
+    """Assert the board's ``REQUIRED_SIGNAL_REACH`` contract (Issue #7319).
+
+    Counts complete signal nets (pour nets excluded) with the same
+    :func:`board_recipe_artifacts.measure_signal_reach` board 06's gate
+    uses.  Returns an exit code: 0 (met, or the board declares no
+    contract), 2 (gate failure: reach below the contract, incomplete nets
+    named), or 1 (tool failure: the measurement could not run -- a skipped
+    reach check must never pass silently).
+    """
+    if required_reach is None:
+        return 0
+    try:
+        complete, signal_total, incomplete_names = measure_signal_reach(routed_pcb, pour_nets)
+    except Exception as e:
+        annotate_error(str(routed_pcb), f"Reach measurement failed: {e}")
+        return 1
+    print(
+        f"[matchgroup-coverage] Signal reach: {complete}/{signal_total} "
+        f"(required: {required_reach}); incomplete: {incomplete_names or 'none'}"
+    )
+    if complete < required_reach:
+        annotate_error(
+            str(routed_pcb),
+            f"Reach regression on re-routed {routed_pcb}: only "
+            f"{complete}/{signal_total} signal nets complete "
+            f"(required {required_reach}).  Incomplete: "
+            f"{', '.join(incomplete_names)}.  See "
+            f"{board_dir.name}/generate_design.py REQUIRED_SIGNAL_REACH.",
+        )
+        return 2
+    print(f"[matchgroup-coverage] OK: reach {complete}/{signal_total} >= {required_reach}.")
+    return 0
 
 
 def check_board(
@@ -759,12 +917,16 @@ def check_board(
     # Issue #3617: read the board's pour-connectivity contract.  Boards
     # that declare ``REQUIRE_POUR_CONNECTIVITY = True`` get a hard
     # copper-union pour audit; boards without it skip the term.
+    # Issue #7319: the same module's ``REQUIRED_SIGNAL_REACH`` (board 06's
+    # #3413 phase 5 contract) gets a hard reach assertion.
     pour_nets: set[str] = set()
     require_pour_connectivity = False
+    required_reach: int | None = None
     recipe_mod = None
     try:
         recipe_mod = load_board_recipe_module(board_dir)
         if recipe_mod is not None:
+            required_reach = getattr(recipe_mod, "REQUIRED_SIGNAL_REACH", None)
             pour_nets = set(getattr(recipe_mod, "POUR_NETS", ()) or ())
             require_pour_connectivity = bool(
                 getattr(recipe_mod, "REQUIRE_POUR_CONNECTIVITY", False)
@@ -792,19 +954,22 @@ def check_board(
     #      would zero the counter even with a correct error count).
     try:
         error_rules: dict[str, int] = {}
-        error_count = count_errors_via_kct_check(routed_pcb, sidecar, error_rules=error_rules)
+        error_violations: list[dict] = []
+        error_count = count_errors_via_kct_check(
+            routed_pcb, sidecar, error_rules=error_rules, error_violations=error_violations
+        )
     except RuntimeError as e:
         annotate_error(str(routed_pcb), f"kct check failed: {e}")
         return 1
     try:
-        rules_by_rule, matchgroup_error_violations = compute_rule_coverage(
+        rules_by_rule, matchgroup_error_violations, fired_groups = compute_rule_coverage(
             routed_pcb, net_class_map
         )
     except RuntimeError as e:
         annotate_error(str(routed_pcb), f"Rule-coverage probe failed: {e}")
         return 1
 
-    baseline = MATCHGROUP_VIOLATION_BASELINE.get(lookup_key, 0)
+    allowed_groups = MATCHGROUP_ALLOWED_GROUPS.get(lookup_key, {})
 
     print(f"\n[matchgroup-coverage] Board: {board_dir.name}")
     print(f"[matchgroup-coverage] Routed PCB: {routed_pcb}")
@@ -814,10 +979,20 @@ def check_board(
     print(f"[matchgroup-coverage] rules_checked_by_rule: {rules_by_rule}")
     print(
         f"[matchgroup-coverage] match-group error violations: "
-        f"{matchgroup_error_violations} (baseline: {baseline})"
+        f"{matchgroup_error_violations} (fired groups: {sorted(fired_groups)}; "
+        f"allowed: {sorted(allowed_groups)})"
     )
 
     failed = False
+
+    # Issue #7319: reach assertion.  Before it, the seed-42 re-route
+    # dropped DQ0 (30/31 -> 29/31) after #7163 and the gate stayed silent;
+    # the only symptom was a tripled wall time.
+    reach_rc = check_signal_reach(board_dir, routed_pcb, required_reach, pour_nets)
+    if reach_rc == 1:
+        return 1
+    if reach_rc:
+        failed = True
 
     # AC #4: the match_group_length_skew rule must have been exercised.
     missing = check_rule_coverage(rules_by_rule)
@@ -843,37 +1018,37 @@ def check_board(
             "rule(s) exercised."
         )
 
-    # Issue #3828: zero-violation assertion (symmetric with the diff-pair
-    # gate).  Distinct from coverage>=1 (a rule that RAN) and from the
-    # error-count allowlist: the match-group rule's ERROR-severity violation
-    # count must not exceed the documented per-board baseline (default 0).
-    # Without it a future match_group_length_skew regression of a few nets
-    # would slip under board 07's large 120-error allowlist floor and the
-    # coverage>=1 check would still pass.
-    violation_failures = check_zero_violations(matchgroup_error_violations, baseline)
+    # Issue #3828 / #7339: zero-violation assertion with a NAMED allowance.
+    # Distinct from coverage>=1 (a rule that RAN) and from the error-count
+    # allowlist: only the groups in MATCHGROUP_ALLOWED_GROUPS may fire (default
+    # none), and on the full reroute each must still fire (else it is stale).
+    # Without it a future match_group_length_skew regression would slip under
+    # board 07's large 120-error allowlist floor, or be absorbed in place of a
+    # known group by a bare count.
+    violation_failures = check_group_allowances(
+        fired_groups, allowed_groups, enforce_stale=not skip_route
+    )
     if violation_failures:
         msg = (
             f"Match-group VIOLATION regression on {routed_pcb}: "
             f"{'; '.join(violation_failures)}.  These are real length-match "
             "skew defects measured WITH the net-class sidecar.  Either fix the "
             "routing so the groups meet their length-match tolerance, or -- if "
-            "this is an accepted, separately-tracked baseline -- raise "
-            "MATCHGROUP_VIOLATION_BASELINE for this PCB in "
-            "scripts/ci/check_matchgroup_coverage.py with a tracking reference. "
-            "Do NOT silently widen it: the point of this gate is to catch "
-            "regressions beyond the documented baseline."
+            "this is an accepted, separately-tracked defect -- add the NAMED "
+            "group with its tracking issue to MATCHGROUP_ALLOWED_GROUPS in "
+            "scripts/ci/check_matchgroup_coverage.py.  Do NOT allow by count: "
+            "the point of this gate is to catch regressions beyond the "
+            "documented groups."
         )
         annotate_error(str(routed_pcb), msg)
         failed = True
+    elif not allowed_groups:
+        print("[matchgroup-coverage] OK: 0 match-group error violations (strict).")
     else:
-        if baseline == 0:
-            print("[matchgroup-coverage] OK: 0 match-group error violations (strict).")
-        else:
-            total = sum(matchgroup_error_violations.get(rid, 0) for rid in MATCHGROUP_RULE_IDS)
-            print(
-                f"[matchgroup-coverage] OK: {total} match-group error violation(s) "
-                f"within documented baseline {baseline}."
-            )
+        print(
+            f"[matchgroup-coverage] OK: fired groups {sorted(fired_groups)} are all "
+            "within the named allowance."
+        )
 
     # Issue #3617: pour-connectivity assertion.  The board recipe's
     # copper-union audit verdict was previously informational only -- the
@@ -911,36 +1086,62 @@ def check_board(
                 f"({len(pour_nets)} pour nets, copper-union audit)."
             )
 
-    unexpected = unexpected_baseline_errors(lookup_key, error_rules)
+    identities = error_identities(error_violations)
+    unexpected = unexpected_baseline_errors(lookup_key, error_rules, identities)
     if unexpected:
-        annotate_error(str(routed_pcb), f"Errors outside historical group baseline: {unexpected}")
+        detail = "; ".join(
+            f"{rule} on {', '.join(unlisted_findings(board_allowance(lookup_key), rule, identities.get(rule, set())))}"
+            for rule in sorted(unexpected)
+        )
+        annotate_error(
+            str(routed_pcb),
+            f"Errors outside the identity allowance: {unexpected} ({detail}).  Fix them, "
+            "or -- for an accepted, separately-tracked defect -- list the identity with "
+            "its OPEN tracking issue in MATCHGROUP_FIXTURE_ALLOWED_FINDINGS.",
+        )
+        failed = True
+    # Issue #7367: an allowance entry that no longer fires fails the gate (on
+    # the full re-route and on the E2E job's regenerated bundle alike), so
+    # fixing a finding forces its entry out.  It is never just a warning.
+    stale = stale_allowances(lookup_key, identities)
+    if stale:
+        annotate_error(str(routed_pcb), f"Stale identity allowance: {format_stale(stale)}")
         failed = True
 
-    # AC #1 (allowlist semantic): error count must be <= allowed.
-    if error_count > allowed:
+    # AC #1 (allowlist semantic), Issue #7367: the blocking findings NOT
+    # covered by the identity allowance must be <= allowed (absent = 0).
+    # Identity-allowed findings never consume this budget.
+    unallowed = unallowed_blocking(lookup_key, error_violations)
+    print(
+        f"[matchgroup-coverage] Unallowed blocking findings: {len(unallowed)} "
+        f"(allowed: {allowed}) {unallowed or ''}"
+    )
+    if len(unallowed) > allowed:
         if allowed == 0:
             msg = (
-                f"DRC errors detected on re-routed {routed_pcb}: {error_count} "
-                f"error(s).  Boards NOT in .github/routed-drc-tolerance.yml must "
-                "report 0 errors.  Fix the routing regression or add an explicit "
-                "allowlist entry with reviewer sign-off."
+                f"DRC errors detected on re-routed {routed_pcb}: {len(unallowed)} "
+                f"blocking error(s) outside the identity allowance: {unallowed}.  "
+                "Boards NOT in .github/routed-drc-tolerance.yml must report 0 such "
+                "errors.  Fix the routing regression; do not add a count."
             )
         else:
             msg = (
-                f"DRC regression on re-routed {routed_pcb}: {error_count} "
-                f"error(s) exceeds allowlist value {allowed} in "
-                ".github/routed-drc-tolerance.yml.  Either fix the new "
-                "violations or (if intentional) raise the allowlist value."
+                f"DRC regression on re-routed {routed_pcb}: {len(unallowed)} "
+                f"unallowed error(s) exceeds allowlist value {allowed} in "
+                f".github/routed-drc-tolerance.yml: {unallowed}."
             )
         annotate_error(str(routed_pcb), msg)
         failed = True
+    elif allowed == 0:
+        print(
+            f"[matchgroup-coverage] OK: 0 unallowed errors (strict gate; "
+            f"{error_count - len(unallowed)} identity-allowed)."
+        )
     else:
-        if allowed == 0:
-            print("[matchgroup-coverage] OK: 0 errors (strict gate).")
-        else:
-            print(
-                f"[matchgroup-coverage] OK: {error_count} errors (within allowlist max {allowed})."
-            )
+        print(
+            f"[matchgroup-coverage] OK: {len(unallowed)} unallowed errors "
+            f"(within allowlist max {allowed})."
+        )
 
     return 2 if failed else 0
 

@@ -107,7 +107,7 @@ def test_equal_physical_pairs_remain_unchanged():
     before = list(ar.routes)
     results = ar.apply_match_group_tuning([group], verbose=False)["P"]
     assert results[1][1].reason == "already_within_tolerance"
-    assert results[1][1].length_after_mm == pytest.approx(11.6)
+    assert results[1][1].length_after_mm == pytest.approx(11.58)
     assert [id(r) for r in ar.routes] == [id(r) for r in before]
 
 
@@ -191,8 +191,8 @@ def test_trailing_scalars_share_physical_pair_reference_and_via_context():
     results = ar.apply_match_group_tuning([group], verbose=False)["P"]
     assert results[5][1].reason == "tuned"
     assert results[6][1].reason == "already_within_tolerance"
-    assert physical_length(ar, 5) == pytest.approx(11.6, abs=0.02)
-    assert results[6][1].length_before_mm == pytest.approx(11.6)
+    assert physical_length(ar, 5) == pytest.approx(11.58, abs=0.02)
+    assert results[6][1].length_before_mm == pytest.approx(11.58)
     assert sum(LengthTracker.calculate_route_length(r) for r in ar.routes if r.net == 6) == 10
 
 
@@ -216,5 +216,5 @@ def test_sqlite_cache_hit_preserves_pre_tuning_fragments_and_physical_result(tmp
     warm.apply_match_group_tuning([group], verbose=False)
     assert warm.routes == cold.routes
     assert (physical_length(warm, 1) + physical_length(warm, 2)) / 2 == pytest.approx(
-        11.6, abs=0.02
+        11.58, abs=0.02
     )

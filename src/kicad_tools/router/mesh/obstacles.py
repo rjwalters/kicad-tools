@@ -42,6 +42,7 @@ from .kernel_adapter import (
     MeshOutline,
     MeshPad,
     MeshRegion,
+    clears_cut,
     copper_leg,
     leg,
     leg_clears,
@@ -101,6 +102,8 @@ class ObstacleModel:
         pads: Sequence[Pad] = (),
         edge_clearance: float = 0.0,
         pad_floors: Mapping[int, float] | None = None,
+        cutouts: Sequence[Sequence[Pt]] = (),
+        cutout_clearance: float = 0.0,
     ) -> None:
         """Build an obstacle model.
 
@@ -123,6 +126,13 @@ class ObstacleModel:
                 (``DesignRules.net_clearance_floors``).  A pad whose net (or
                 the pad itself) carries one is cleared at
                 ``max(clearance, floor)``.  ``None``/empty is byte-identical.
+            cutouts: Issue #6822 -- interior ``Edge.Cuts`` loops (board
+                windows, cutouts, round holes), each a ring WITHOUT a repeated
+                final vertex.  A leg may not start or end inside one, and its
+                copper must keep ``cutout_clearance`` from the loop.  Empty
+                (the default) is byte-identical.
+            cutout_clearance: Copper-to-cut requirement in mm for ``cutouts``.
+                Measured even at ``0.0`` (copper may not overlap the cut).
         """
         self.outline = outline
         self.keepouts = keepouts
@@ -134,6 +144,8 @@ class ObstacleModel:
         self.pads = list(pads)
         self.edge_clearance = edge_clearance
         self.pad_floors = dict(pad_floors or {})
+        self.cutouts = [list(ring) for ring in cutouts]
+        self.cutout_clearance = max(float(cutout_clearance), 0.0)
         self._kernel: _KernelShapes | None = None
 
     def _shapes(self) -> _KernelShapes:
@@ -175,6 +187,11 @@ class ObstacleModel:
                         for pad, required in zip(self.pads, pad_required, strict=True)
                     )
                     if shape is not None
+                ),
+                cutouts=tuple(
+                    (cut, _grown_box(cut.ring, self.half + self.cutout_clearance))
+                    for cut in (outline_of(ring) for ring in self.cutouts)
+                    if cut is not None
                 ),
             )
             self._kernel = cached
@@ -226,6 +243,17 @@ class ObstacleModel:
         lo_x, hi_x = (a[0], b[0]) if a[0] <= b[0] else (b[0], a[0])
         lo_y, hi_y = (a[1], b[1]) if a[1] <= b[1] else (b[1], a[1])
 
+        if shapes.cutouts:
+            # Issue #6822: an interior Edge.Cuts loop is a hole in the board.
+            copper = copper_leg(a, b, self.half)
+            for cut, (cx0, cy0, cx1, cy1) in shapes.cutouts:
+                if hi_x < cx0 or lo_x > cx1 or hi_y < cy0 or lo_y > cy1:
+                    continue
+                if cut.contains(a) or cut.contains(b):
+                    return False
+                if not clears_cut(copper, cut, self.cutout_clearance):
+                    return False
+
         if shapes.pads:
             copper = copper_leg(a, b, self.half)
             for pad, (px0, py0, px1, py1), required in shapes.pads:
@@ -259,7 +287,7 @@ class _KernelShapes:
     restriction, not "nothing is inside the board".
     """
 
-    __slots__ = ("keepouts", "outline", "pads", "pours")
+    __slots__ = ("cutouts", "keepouts", "outline", "pads", "pours")
 
     def __init__(
         self,
@@ -267,8 +295,21 @@ class _KernelShapes:
         keepouts: tuple[tuple[MeshRegion, Box], ...],
         pours: tuple[tuple[MeshRegion, Box], ...],
         pads: tuple[tuple[MeshPad, Box, float], ...] = (),
+        cutouts: tuple[tuple[MeshOutline, Box], ...] = (),
     ) -> None:
         self.outline = outline
         self.keepouts = keepouts
         self.pours = pours
         self.pads = pads
+        self.cutouts = cutouts
+
+
+def _grown_box(ring: Sequence[Pt], reach: float) -> Box:
+    """``ring``'s bounding box grown by ``reach`` (broad phase, issue #6822).
+
+    A leg whose centreline box misses it can neither start inside the loop
+    nor bring copper within the requirement of it.
+    """
+    xs = [p[0] for p in ring]
+    ys = [p[1] for p in ring]
+    return (min(xs) - reach, min(ys) - reach, max(xs) + reach, max(ys) + reach)

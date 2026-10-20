@@ -492,12 +492,19 @@ class FootprintLibrary:
 
         # Pattern to match pad definitions
         # (pad "1" smd roundrect (at -0.775 0) ...)
-        pad_pattern = r'\(pad\s+"([^"]+)"\s+\w+\s+\w+\s*\(at\s+([-\d.]+)\s+([-\d.]+)'
+        # Only openers outside quoted strings count, so a descr mentioning a
+        # pad cannot add one (Issue #6873).
+        from kicad_tools.sexp.scan import iter_unquoted
 
-        for match in re.finditer(pad_pattern, content):
-            pad_name = match.group(1)
-            x = float(match.group(2))
-            y = float(match.group(3))
+        pad_pattern = (
+            r'\(pad\s+"(?P<name>[^"]+)"\s+\w+\s+\w+\s*'
+            r"\(at\s+(?P<x>[-\d.]+)\s+(?P<y>[-\d.]+)"
+        )
+
+        for match in iter_unquoted(content, pad_pattern):
+            pad_name = match.group("name")
+            x = float(match.group("x"))
+            y = float(match.group("y"))
             pads[pad_name] = (x, y)
 
         return pads

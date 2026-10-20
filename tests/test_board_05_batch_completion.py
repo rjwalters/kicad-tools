@@ -17,7 +17,7 @@ finished nets stay protected.
 These are cheap static (AST) guards -- KiCad-independent, no routing -- that
 pin the wiring and its ordering.  The routing outcome itself is asserted by
 the ``board-05-routing-regression`` CI job
-(``scripts/ci/check_board_05_blocking.py --max-blocking 7``).
+(``scripts/ci/check_board_05_blocking.py --max-blocking 0``).
 
 This module also guards the #3912 exit-code gate: ``main()`` must call
 ``evaluate_pipeline_gate(...)`` with ``route_allowance=0`` (a literal ``0``)

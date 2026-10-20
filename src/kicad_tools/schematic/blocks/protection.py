@@ -2,10 +2,13 @@
 
 from typing import TYPE_CHECKING, Literal
 
+from ._pins import diode_pin_position
 from .base import CircuitBlock
 
 if TYPE_CHECKING:
     from kicad_sch_helper import Schematic
+
+    from ..models.symbol import SymbolInstance
 
 
 class ESDProtectionBlock(CircuitBlock):
@@ -51,7 +54,10 @@ class ESDProtectionBlock(CircuitBlock):
             sch: Schematic to add to
             x: X coordinate
             y: Y coordinate
-            channels: Number of channels to protect (1-8)
+            channels: Number of channels to protect.  ``1`` places a single
+                TVS diode; ``2`` or more uses ``esd_array_symbol`` and may not
+                exceed the number of I/O channels that part has (2 for the
+                default ``USBLC6-2SC6``), otherwise ``ValueError`` is raised.
             ref: Reference designator
             tvs_symbol: KiCad symbol for single TVS diode
             esd_array_symbol: KiCad symbol for multi-channel ESD array
@@ -70,7 +76,9 @@ class ESDProtectionBlock(CircuitBlock):
             self.ports = {
                 "IN": (x - 10, y),
                 "OUT": (x + 10, y),
-                "GND": tvs.pin_position("A"),  # Anode to ground
+                # ``Device:D_TVS`` is bidirectional (A1/A2); the helper maps
+                # anode/cathode onto pins 2/1 when the names are absent.
+                "GND": diode_pin_position(tvs, "A"),  # Anode to ground
             }
 
             # Wire signal path
@@ -78,21 +86,54 @@ class ESDProtectionBlock(CircuitBlock):
             sch.add_wire((x, y), self.ports["OUT"])
 
             # Wire TVS cathode to signal path
-            cathode = tvs.pin_position("K")
+            cathode = diode_pin_position(tvs, "K")
             sch.add_wire(cathode, (x, y))
         else:
-            # Multi-channel ESD array
+            # Multi-channel ESD array (e.g. USBLC6-2SC6): each channel is a
+            # through-line -- an I/O pin on the left of the symbol and its
+            # twin on the right -- so the array sits in the signal path.
             esd = sch.add_symbol(esd_array_symbol, x, y, ref, "")
             self.components["U_ESD"] = esd
 
-            # Define ports based on typical ESD array pinout
-            spacing = 10
-            for i in range(min(channels, 4)):  # Most arrays have 2-4 channels
-                self.ports[f"IN{i + 1}"] = (x - 15, y - spacing * (i - 1))
-                self.ports[f"OUT{i + 1}"] = (x + 15, y - spacing * (i - 1))
+            lines = self._io_lines(esd)
+            if channels > len(lines):
+                raise ValueError(
+                    f"{esd_array_symbol} provides {len(lines)} ESD channel(s); {channels} requested"
+                )
+            for i, (left, right) in enumerate(lines[:channels], start=1):
+                self.ports[f"IN{i}"] = esd.pin_position(left)
+                self.ports[f"OUT{i}"] = esd.pin_position(right)
 
-            self.ports["GND"] = (x, y + 15)
-            self.ports["VCC"] = (x, y - 15)
+            self.ports["GND"] = esd.pin_position(self._rail_pin(esd, "GND"))
+            self.ports["VCC"] = esd.pin_position(self._rail_pin(esd, "VBUS", "VCC", "VDD"))
+
+    @staticmethod
+    def _io_lines(esd: "SymbolInstance") -> list[tuple[str, str]]:
+        """Pair each ESD array I/O pin with its same-named twin.
+
+        Returns ``(left_pin_number, right_pin_number)`` per channel, ordered
+        top to bottom; ``USBLC6-2SC6`` has two such channels (pins 1/6, 3/4).
+        """
+        groups: dict[str, list] = {}
+        for pin in esd.symbol_def.pins:
+            if pin.name.upper().startswith("I/O"):
+                groups.setdefault(pin.name, []).append(pin)
+        lines = []
+        for pins in groups.values():
+            if len(pins) == 2:
+                left, right = sorted(pins, key=lambda p: esd.pin_position(p.number)[0])
+                lines.append((left.number, right.number))
+        lines.sort(key=lambda pair: esd.pin_position(pair[0])[1])
+        return lines
+
+    @staticmethod
+    def _rail_pin(esd: "SymbolInstance", *names: str) -> str:
+        """Number of the first pin whose name matches one of ``names``."""
+        for name in names:
+            for pin in esd.symbol_def.pins:
+                if pin.name.upper() == name:
+                    return pin.number
+        raise ValueError(f"ESD array symbol has none of the pins {names}")
 
 
 class FuseBlock(CircuitBlock):
@@ -190,13 +231,22 @@ class ReversePolarityBlock(CircuitBlock):
     Reverse polarity protection.
 
     Schematic (P-FET):
-        VIN ──[Q1 P-FET]── VOUT
-                 │
-                 G
-                 │
-               [R_gate]
-                 │
-                GND
+        VIN ──D[Q1 P-FET]S── VOUT
+                   │
+                   G
+                   │
+                [R_gate]
+                   │
+                  GND
+
+    The P-FET's **drain** takes the input and its **source** feeds the load.
+    At power-up the body diode (anode on the drain, cathode on the source)
+    conducts forward, the source rises, and the grounded gate then sees
+    Vgs = -VOUT and turns the channel on, bypassing the diode drop.  With
+    the input reversed the body diode is reverse-biased and Vgs >= 0, so the
+    FET stays off and blocks.  Swapping drain and source would leave the
+    body diode conducting from the load back into a reversed input
+    (issue #7399).
 
     Schematic (Diode):
         VIN ──[D1]── VOUT
@@ -214,7 +264,7 @@ class ReversePolarityBlock(CircuitBlock):
         y: float,
         topology: Literal["diode", "pfet"] = "pfet",
         ref: str = "Q1",
-        mosfet_symbol: str = "Device:Q_PMOS_GSD",
+        mosfet_symbol: str = "Device:Q_PMOS",
         diode_symbol: str = "Device:D_Schottky",
         resistor_symbol: str = "Device:R",
     ):
@@ -227,7 +277,9 @@ class ReversePolarityBlock(CircuitBlock):
             y: Y coordinate
             topology: Protection topology ("diode" or "pfet")
             ref: Reference designator
-            mosfet_symbol: KiCad symbol for P-FET
+            mosfet_symbol: KiCad symbol for P-FET (pins named G/S/D).
+                KiCad 10 replaced the per-pinout ``Q_PMOS_GSD`` variants with
+                the single generic ``Device:Q_PMOS`` (issue #7399).
             diode_symbol: KiCad symbol for diode
             resistor_symbol: KiCad symbol for resistor
         """
@@ -245,24 +297,24 @@ class ReversePolarityBlock(CircuitBlock):
                 "VOUT": diode.pin_position("K"),
             }
         else:
-            # P-FET topology (lower voltage drop)
-            # Place P-FET
+            # P-FET topology (lower voltage drop).  Rotated so the drain
+            # (input) is on the left, the source (output) on the right and
+            # the gate points down.
             pfet = sch.add_symbol(mosfet_symbol, x, y, ref, "", rotation=90)
             self.components["Q"] = pfet
 
-            # Place gate resistor
+            # Gate resistor stands vertically under the gate pin.
+            gate = pfet.pin_position("G")
             r_num = ref[1:] if ref[1:].isdigit() else "1"
-            r_gate = sch.add_symbol(resistor_symbol, x, y + 15, f"R{r_num}", "10k", rotation=90)
+            r_gate = sch.add_symbol(resistor_symbol, gate[0], gate[1] + 7.62, f"R{r_num}", "10k")
             self.components["R_gate"] = r_gate
 
             # Wire gate to resistor
-            gate = pfet.pin_position("G")
-            r_top = r_gate.pin_position("1")
-            sch.add_wire(gate, r_top)
+            sch.add_wire(gate, r_gate.pin_position("1"))
 
             self.ports = {
-                "VIN": pfet.pin_position("S"),  # Source (input)
-                "VOUT": pfet.pin_position("D"),  # Drain (output)
+                "VIN": pfet.pin_position("D"),  # Drain (input, body-diode anode)
+                "VOUT": pfet.pin_position("S"),  # Source (output, to the load)
                 "GND": r_gate.pin_position("2"),
             }
 
@@ -359,7 +411,7 @@ class ThermalCutoffBlock(CircuitBlock):
         y: float,
         temp_rating: str = "85C",
         ref: str = "TH1",
-        thermal_symbol: str = "Device:Thermal_Cutoff",
+        thermal_symbol: str = "Device:Fuse",
     ):
         """
         Create a thermal cutoff block.
@@ -370,7 +422,11 @@ class ThermalCutoffBlock(CircuitBlock):
             y: Y coordinate
             temp_rating: Temperature rating string
             ref: Reference designator
-            thermal_symbol: KiCad symbol for thermal cutoff
+            thermal_symbol: KiCad symbol for thermal cutoff.  KiCad 10 ships
+                no thermal-cutoff (TCO) symbol, so the default is the generic
+                two-terminal ``Device:Fuse`` -- a TCO is a one-shot thermal
+                fuse, and the value field carries the temperature rating
+                (issue #7399).  Pass a project symbol to override.
         """
         super().__init__(sch, x, y)
 

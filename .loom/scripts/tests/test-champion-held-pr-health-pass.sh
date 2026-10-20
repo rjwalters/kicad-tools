@@ -157,20 +157,6 @@ LABEL_SM_MD="$DOCS_DIR/label-state-machine.md"
 # shellcheck source=lib/assert.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
-assert_contains() {
-    local haystack="$1" needle="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if grep -qF -- "$needle" <<<"$haystack"; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Missing '$needle' in:"
-        sed 's/^/      /' <<<"$haystack"
-    fi
-}
-
 assert_lacks() {
     local haystack="$1" needle="$2" msg="$3"
     TESTS_RUN=$((TESTS_RUN + 1))
@@ -1284,8 +1270,8 @@ assert_doc_lacks "$CHAMPION_MD" \
     "criterion #5 no longer derives staleness from the bot-comment-bumped updatedAt field (#6843)"
 
 assert_doc_contains "$CHAMPION_MD" \
-    'PR_DATA=$(gh pr view <number> --json createdAt,commits,comments)' \
-    "criterion #5 reads commits + comments (+ createdAt floor) instead of updatedAt (#6843)"
+    'PR_DATA=$(cat "$(git rev-parse --git-common-dir)/loom-champion-facts-pr-<number>.json")' \
+    "criterion #5 reads the PR facts' commits + comments (+ createdAt floor) instead of updatedAt (#6843, #12242)"
 
 assert_doc_contains "$CHAMPION_MD" \
     'select((.body | test("champion:|Automated by Champion role")) | not) | .createdAt)' \

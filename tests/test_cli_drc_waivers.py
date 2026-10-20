@@ -115,13 +115,16 @@ class TestExitGate:
     def test_all_errors_waived_exits_zero(self, tmp_path, capsys):
         report = _report(tmp_path)
         waiver = _waivers(tmp_path / "w.json", [COURTYARD_WAIVER, CLEARANCE_WAIVER])
-        rc = drc_cmd.main([str(report), "--waivers", str(waiver)])
+        rc = drc_cmd.main([str(report), "--waivers", str(waiver), "--allow-incomplete"])
         out = capsys.readouterr().out
         assert rc == 0
         assert "Errors:     0" in out
         assert "Waived:     2" in out
         assert "WAIVED (documented exceptions, non-blocking):" in out
-        assert "DRC PASSED - No unwaived violations" in out
+        # Issue #7077: report input cannot say parity ran, so the verdict is
+        # INCOMPLETE rather than PASSED -- but never FAILED once all are waived.
+        assert "DRC FAILED" not in out
+        assert "DRC INCOMPLETE - Schematic parity NOT RUN" in out
 
     def test_unwaived_error_still_exits_nonzero(self, tmp_path, capsys):
         report = _report(tmp_path)
@@ -138,7 +141,7 @@ class TestExitGate:
         report = _report(tmp_path)
         waiver = _waivers(tmp_path / "w.json", [COURTYARD_WAIVER, CLEARANCE_WAIVER])
         # --strict exits 2 on warnings; waived findings must not trip it.
-        rc = drc_cmd.main([str(report), "--waivers", str(waiver), "--strict"])
+        rc = drc_cmd.main([str(report), "--waivers", str(waiver), "--strict", "--allow-incomplete"])
         out = capsys.readouterr().out
         assert rc == 0
         assert "Warnings:   0" in out
@@ -212,10 +215,19 @@ class TestJsonOutput:
     def test_status_waived_keeps_severity(self, tmp_path, capsys):
         report = _report(tmp_path)
         waiver = _waivers(tmp_path / "w.json", [COURTYARD_WAIVER, CLEARANCE_WAIVER])
-        rc = drc_cmd.main([str(report), "--waivers", str(waiver), "--format", "json"])
+        rc = drc_cmd.main(
+            [str(report), "--waivers", str(waiver), "--format", "json", "--allow-incomplete"]
+        )
         data = json.loads(capsys.readouterr().out)
         assert rc == 0
-        assert data["summary"] == {"errors": 0, "warnings": 0, "waived": 2}
+        assert data["summary"] == {
+            "errors": 0,
+            "warnings": 0,
+            "unconnected": 0,
+            "parity_errors": 0,
+            "parity_warnings": 0,
+            "waived": 2,
+        }
         for v in data["violations"]:
             assert v["waived"] is True
             assert v["status"] == "waived"
@@ -230,7 +242,13 @@ class TestJsonOutput:
         report = _report(tmp_path)
         drc_cmd.main([str(report), "--format", "json"])
         data = json.loads(capsys.readouterr().out)
-        assert data["summary"] == {"errors": 2, "warnings": 0}
+        assert data["summary"] == {
+            "errors": 2,
+            "warnings": 0,
+            "unconnected": 0,
+            "parity_errors": 0,
+            "parity_warnings": 0,
+        }
         for v in data["violations"]:
             assert "status" not in v
             assert "waived" not in v
@@ -252,7 +270,7 @@ class TestUnusedWaivers:
                 },
             ],
         )
-        rc = drc_cmd.main([str(report), "--waivers", str(waiver)])
+        rc = drc_cmd.main([str(report), "--waivers", str(waiver), "--allow-incomplete"])
         out = capsys.readouterr().out
         assert rc == 0  # advisory only -- never gates
         assert "UNUSED WAIVERS (advisory, non-blocking):" in out
@@ -274,7 +292,9 @@ class TestUnusedWaivers:
                 },
             ],
         )
-        rc = drc_cmd.main([str(report), "--waivers", str(waiver), "--format", "json"])
+        rc = drc_cmd.main(
+            [str(report), "--waivers", str(waiver), "--format", "json", "--allow-incomplete"]
+        )
         data = json.loads(capsys.readouterr().out)
         assert rc == 0
         unused = data["unused_waivers"]
@@ -316,7 +336,7 @@ class TestSidecarContract:
     def test_auto_discovered_sidecar_applies(self, tmp_path, capsys):
         report = _report(tmp_path)
         _waivers(tmp_path / ".kct_waivers.json", [COURTYARD_WAIVER, CLEARANCE_WAIVER])
-        rc = drc_cmd.main([str(report)])
+        rc = drc_cmd.main([str(report), "--allow-incomplete"])
         captured = capsys.readouterr()
         assert rc == 0
         assert "auto-loaded waivers sidecar" in captured.err
@@ -326,7 +346,7 @@ class TestSidecarContract:
         (tmp_path / "output").mkdir()
         report = _report(tmp_path)
         _waivers(tmp_path / "output" / ".kct_waivers.json", [COURTYARD_WAIVER, CLEARANCE_WAIVER])
-        rc = drc_cmd.main([str(report)])
+        rc = drc_cmd.main([str(report), "--allow-incomplete"])
         assert rc == 0
         assert "Waived:     2" in capsys.readouterr().out
 
@@ -353,7 +373,9 @@ class TestFilterInteractions:
     def test_summary_format_has_waived_column(self, tmp_path, capsys):
         report = _report(tmp_path)
         waiver = _waivers(tmp_path / "w.json", [COURTYARD_WAIVER, CLEARANCE_WAIVER])
-        rc = drc_cmd.main([str(report), "--waivers", str(waiver), "--format", "summary"])
+        rc = drc_cmd.main(
+            [str(report), "--waivers", str(waiver), "--format", "summary", "--allow-incomplete"]
+        )
         out = capsys.readouterr().out
         assert rc == 0
         header = next(line for line in out.splitlines() if line.startswith("Type"))
@@ -396,7 +418,7 @@ class TestTextReportInput:
         rpt = tmp_path / "board-drc.rpt"
         rpt.write_text(self.RPT)
         waiver = _waivers(tmp_path / "w.json", [COURTYARD_WAIVER])
-        rc = drc_cmd.main([str(rpt), "--waivers", str(waiver)])
+        rc = drc_cmd.main([str(rpt), "--waivers", str(waiver), "--allow-incomplete"])
         out = capsys.readouterr().out
         assert rc == 0
         assert "Waived:     1" in out
@@ -410,7 +432,7 @@ class TestOuterParserParity:
 
         report = _report(tmp_path)
         waiver = _waivers(tmp_path / "w.json", [COURTYARD_WAIVER, CLEARANCE_WAIVER])
-        rc = cli_main(["drc", str(report), "--waivers", str(waiver)])
+        rc = cli_main(["drc", str(report), "--waivers", str(waiver), "--allow-incomplete"])
         out = capsys.readouterr().out
         assert rc == 0
         assert "Waived:     2" in out
@@ -492,7 +514,9 @@ class TestPartiallyReflessFindings:
             tmp_path / "w.json",
             [{"rule": "clearance", "items": ["U3"], "reason": "reviewed", "issue": "#4765"}],
         )
-        rc = drc_cmd.main([str(report), "--waivers", str(waiver), "--format", "json"])
+        rc = drc_cmd.main(
+            [str(report), "--waivers", str(waiver), "--format", "json", "--allow-incomplete"]
+        )
         data = json.loads(capsys.readouterr().out)
         assert rc == 0
         # Documented consequence: the entry waives the whole CLASS of U3
@@ -539,7 +563,7 @@ class TestReportInputDiscoversBoardDir:
     def test_board_dir_sidecar_is_discovered_for_report_input(self, tmp_path, capsys):
         board_dir, report = self._board_layout(tmp_path)
         sidecar = _waivers(board_dir / ".kct_waivers.json", [COURTYARD_WAIVER, CLEARANCE_WAIVER])
-        rc = drc_cmd.main([str(report)])
+        rc = drc_cmd.main([str(report), "--allow-incomplete"])
         captured = capsys.readouterr()
         assert rc == 0
         assert f"auto-loaded waivers sidecar: {sidecar}" in captured.err

@@ -7,9 +7,10 @@ Procedure for Curator's "Draining `loom:blocked-unnamed`" section.
 `loom-daemon check-stale-blocked` classifies a `loom:blocked` issue that names
 no blocker and states no reason as **Undocumented**. Guide's unblock sweep skips
 it and Curator's discovery queries exclude `loom:blocked`, so it never re-enters
-any queue. The daemon tick (beside `release-stale-blocked`, #10556) therefore
-applies `loom:blocked-unnamed` to each such **issue** (never a PR), and Curator
-drains it.
+any queue. A daemon tick used to apply `loom:blocked-unnamed` to each such
+**issue** (never a PR) for Curator to drain. That tick was retired with the
+release pass (#11301): nothing applies the label any more, and Curator drains
+the issues that still carry it.
 
 The tick never labels an issue that carries: `loom:operator` or
 `loom:frozen`; `loom:curating` or
@@ -66,7 +67,7 @@ Then do **exactly one** of:
 
 | Finding | Action |
 |---|---|
-| **An open blocker exists** (issue or PR, often named only in a comment) | `loom-daemon park-record apply <n> --blocked-by <ref> --by curator`. A cross-repo blocker goes in `--reason` until `OWNER/REPO#N` refs are supported. Outcome `named`. |
+| **An open blocker exists** (issue or PR, often named only in a comment) | `loom-daemon park-record apply <n> --blocked-by <ref> --by curator`. A cross-repo blocker is passed as `--blocked-by OWNER/REPO#N` (supported since #10443). Outcome `named`. |
 | **A real hold with no numbered blocker** (human step, ruling, external event) | `loom-daemon park-record apply <n> --reason "<why>" --by curator`. The stated reason makes the issue `HeldWithReason`, so the tick does not re-queue it while that hold stands. A genuine human ask is routed per the operator-label rules in `label-state-machine.md` instead of parked. Outcome `kept`. |
 | **Nothing blocks it** | Remove `loom:blocked` and post an evidence comment (what you checked, and what is closed). **Never add `loom:issue`.** If label history shows `loom:issue` was applied before the block, say so and add `loom:curated` so Champion's normal promotion lane can re-approve it. Outcome `released`. |
 

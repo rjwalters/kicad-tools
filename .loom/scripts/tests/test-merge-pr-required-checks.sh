@@ -54,7 +54,7 @@ source "$FUNCS"
 
 # --- Structural wiring ---
 echo "Testing _check_required_checks wiring..."
-call_line="$(awk '/\|\| _check_ci_result settled; \[\[ "\$AUTO_MERGE" == "true" \]\] \|\| _check_required_checks$/ { print NR; exit }' "$MERGE_PR_SRC")"
+call_line="$(awk '/^unset _MPS_JSON _MPS_FRESH_SHA; \[\[ "\$AUTO_MERGE" == "true" \]\] \|\| _check_required_checks$/ { print NR; exit }' "$MERGE_PR_SRC")"
 merge_line="$(awk '/forge_merge_pr "\$REPO_NWO" "\$PR_NUMBER" "\$MERGE_PRECONDITION_SHA"/ { print NR; exit }' "$MERGE_PR_SRC")"
 auto_line="$(awk '/^if \[\[ "\$AUTO_MERGE" == "true" \]\]; then$/ { print NR; exit }' "$MERGE_PR_SRC")"
 if [[ -n "$call_line" && -n "$merge_line" && "$call_line" -lt "$merge_line" ]]; then

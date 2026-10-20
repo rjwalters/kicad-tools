@@ -1,0 +1,171 @@
+{
+  "known_issues": [
+    {
+      "issue": 6269,
+      "kind": "exception",
+      "summary": "Paid 0.15 mm mechanical-drill via process (ruling #7147); the generic jlcpcb-tier1 kct check reports the reviewed vias as errors, the board's own check_manufacturing.py models the process",
+      "recorded": "2026-10-19",
+      "errors": [
+        {
+          "rule": "dimension_annular_ring",
+          "at": [
+            144.3,
+            90.25
+          ]
+        },
+        {
+          "rule": "dimension_annular_ring",
+          "at": [
+            146.45,
+            89.25
+          ]
+        },
+        {
+          "rule": "dimension_annular_ring",
+          "at": [
+            147.15,
+            89.75
+          ]
+        },
+        {
+          "rule": "dimension_annular_ring",
+          "at": [
+            147.25,
+            86.5
+          ]
+        },
+        {
+          "rule": "dimension_annular_ring",
+          "at": [
+            151.25,
+            86.5
+          ]
+        },
+        {
+          "rule": "dimension_annular_ring",
+          "at": [
+            151.75,
+            92.45
+          ]
+        },
+        {
+          "rule": "dimension_annular_ring",
+          "at": [
+            155.05,
+            87.25
+          ]
+        },
+        {
+          "rule": "dimension_via_diameter",
+          "at": [
+            144.3,
+            90.25
+          ]
+        },
+        {
+          "rule": "dimension_via_diameter",
+          "at": [
+            146.45,
+            89.25
+          ]
+        },
+        {
+          "rule": "dimension_via_diameter",
+          "at": [
+            147.15,
+            89.75
+          ]
+        },
+        {
+          "rule": "dimension_via_diameter",
+          "at": [
+            147.25,
+            86.5
+          ]
+        },
+        {
+          "rule": "dimension_via_diameter",
+          "at": [
+            151.25,
+            86.5
+          ]
+        },
+        {
+          "rule": "dimension_via_diameter",
+          "at": [
+            151.75,
+            92.45
+          ]
+        },
+        {
+          "rule": "dimension_via_diameter",
+          "at": [
+            155.05,
+            87.25
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            144.3,
+            90.25
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            146.45,
+            89.25
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            147.15,
+            89.75
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            147.25,
+            86.5
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            151.25,
+            86.5
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            151.75,
+            92.45
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            155.05,
+            87.25
+          ]
+        },
+        {
+          "rule": "netclass_annular_ring",
+          "item": "netclass:Default"
+        },
+        {
+          "rule": "netclass_via_diameter",
+          "item": "netclass:Default"
+        },
+        {
+          "rule": "netclass_via_drill",
+          "item": "netclass:Default"
+        }
+      ]
+    }
+  ]
+}

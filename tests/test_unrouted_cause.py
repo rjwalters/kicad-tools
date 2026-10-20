@@ -38,6 +38,7 @@ from kicad_tools.router.unrouted_cause import (
     CAUSE_UNCLASSIFIED,
     diagnose_unrouted,
 )
+from tests.route_cli import route_args
 
 BACKENDS = [
     pytest.param(True, id="python"),
@@ -367,12 +368,9 @@ def test_cli_stash_is_off_for_text_output_and_zero_budget(args: argparse.Namespa
 
 
 def test_budget_flag_parses_and_is_forwarded() -> None:
-    from kicad_tools.cli.commands import routing as routing_commands
-    from kicad_tools.cli.parser import create_parser
+    from kicad_tools.cli import main as cli_main
 
-    args = create_parser().parse_args(
-        ["route", "board.kicad_pcb", "--diagnose-unrouted-budget", "7.5"]
-    )
+    args = route_args(["board.kicad_pcb", "--diagnose-unrouted-budget", "7.5"])
     assert args.diagnose_unrouted_budget == 7.5
 
     captured: dict[str, list[str]] = {}
@@ -386,7 +384,7 @@ def test_budget_flag_parses_and_is_forwarded() -> None:
     original = route_cmd.main
     route_cmd.main = fake_main  # type: ignore[assignment]
     try:
-        routing_commands.run_route_command(args)
+        cli_main(["route", "board.kicad_pcb", "--diagnose-unrouted-budget", "7.5"])
     finally:
         route_cmd.main = original  # type: ignore[assignment]
     argv = captured["argv"]

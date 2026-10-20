@@ -73,13 +73,14 @@ class TestExportPlacement:
             assert result == output
             assert output.exists()
 
-    def test_export_placement_jlcpcb_excludes_tht(self, test_project_pcb, tmp_path):
+    def test_export_placement_jlcpcb_includes_tht(self, test_project_pcb, tmp_path):
         """export_placement(format="jlcpcb") must honor JLCPCB's exclude_tht default.
+
+        JLCPCB assembles THT (issue #7239), so the default keeps THT rows.
 
         Regression test for issue #3627: export_placement() used to synthesize a
         bare PnPExportConfig() and pass it to export_pnp(), defeating the JLCPCB
-        formatter's exclude_tht=True default.  The CPL would then ship THT rows,
-        diverging from export_pnp(..., config=None).  Passing config=None lets the
+        formatter's own default.  The CPL could then diverge from export_pnp(..., config=None).  Passing config=None lets the
         formatter resolve the effective config (single source of truth, #3616/#3618).
         """
         # Inject a through-hole footprint into the SMD-only fixture so the
@@ -111,9 +112,9 @@ class TestExportPlacement:
         pcb.export_placement(output, format="jlcpcb")
         content = output.read_text()
 
-        # THT part excluded from the CPL by JLCPCB's exclude_tht default...
-        assert "J1" not in content
-        # ...while SMD parts remain.
+        # THT part kept in the CPL by JLCPCB's exclude_tht=False default...
+        assert "J1" in content
+        # ...alongside the SMD parts.
         assert "R1" in content
         assert "C1" in content
 
@@ -208,6 +209,9 @@ class TestExportGerbersZip:
                 with zipfile.ZipFile(output, "r") as zf:
                     names = zf.namelist()
                     assert len(names) > 0
+                    # Files sit at the root, not inside a nested gerbers.zip
+                    # (Issue #7023).
+                    assert not any(n.endswith(".zip") for n in names)
             except ExportError as e:
                 # kicad-cli may fail for various reasons
                 pytest.skip(f"kicad-cli export failed: {e}")

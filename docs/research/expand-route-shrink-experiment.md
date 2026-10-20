@@ -1586,16 +1586,69 @@ signal nets and the 5 pour nets are excluded, as board 05 excluded its
 | `congestion_saturated`, `escape_blocked` | 0 | n/a |
 | `pour_discontinuous` | 5 (pour nets, excluded) | n/a |
 
-Hand-computed from the gate plan, not from the fleet table: recall is 3/37
-(0.08) and precision is 2/2. The precision is vacuous because every attempted
-net is open, so any edge would be "crossed by a stuck net". The
-`budget_starved` labels conflict with the router's own record: the sidecar
-gives `no_path` for all 37 nets, and the witness reports them sealed in by their
-own neighbour pads. They are escape failures, not budget starvation. That
-classifier disagreement is part of #6666's escape collapse, so it was not filed
-separately.
+The 2026-10-14 run gave no fleet-table row, so its recall and precision were
+counted by hand from the gate plan (3/37 and a vacuous 2/2). The 2026-10-16
+re-measure below replaces those numbers.
 
-### Verdict: no-go (board 05 measured; chorus-test run but not measurable)
+**Chorus-test re-measure (#6694).** Run on the operator's Mac after #6707 made
+the partial-save exit write `<stem>_partial.routing_plan.json` for the board it
+saves. Provenance: kct `8ce092f1f` (main), chorus `1582f69` (the v21 fixture is
+byte-identical to `3883176`), 2026-10-16, cpp backend built (`kct build-native`,
+build version 59), in a detached worktree with output in a scratch dir outside
+both repos. The argv is the main pass that `route_chorus.py` runs today. Since
+#6666 that recipe includes `--allow-offboard`, so J2/J4's 31 nets are attempted
+and not skipped as placement-invalid. `--no-cache` is added as before:
+
+```
+PYTHONHASHSEED=0 kct route $CHORUS --output $SCRATCH/chorus/chorus-test-revA_routed.kicad_pcb \
+  --manufacturer jlcpcb-tier1 --backend cpp --layers 4 --no-auto-layers \
+  --micro-via-in-pad-fallback --deterministic-budget --per-net-iterations 1000000 \
+  --placement-feedback --placement-feedback-budget 5 --iterations 50 --auto-fix \
+  --auto-fix-passes 2 --timeout 1200 --allow-offboard --seed 42 --no-cache
+P=$SCRATCH/chorus/chorus-test-revA_routed_partial.kicad_pcb
+kct net-status $P --why --format json
+kct net-status $P --strict --format json > $SCRATCH/chorus/net_status.json
+python scripts/routing_plan_fleet_table.py $SCRATCH/chorus --sha 8ce092f1f
+```
+
+The route used its full budget and exited 124. The stage deadline fired during
+detailed routing. The results summary gives 29/51 signal nets routed, 14
+partial and 8 unrouted, which matches the 22 open nets below. The run then
+saved through the partial path: `timeout.json` records
+`stage: partial-save`, `status: partial` and the snapshot
+`chorus-test-revA_routed_partial.kicad_pcb`. The canonical board was
+quarantined as `*_timeout_unverified_*.kicad_pcb`. Beside the snapshot, the run
+wrote `chorus-test-revA_routed_partial.routing_plan.json`, whose `source.pcb`
+names the `_partial` board, and `net-status --why` auto-loaded it. The run
+also reported 18 shorts (16 pre-existing in the input, #6693), and DRC was
+skipped for lack of time left, so this board is a measurement input, not a
+routed result.
+
+| board | pcb | kct SHA | date | plan_s | relief_s | total_overflow | overflowed_edges | feasible | unrouted | unrouted_crossing | recall | precision | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| chorus | chorus-test-revA_routed_partial.kicad_pcb | 8ce092f1f | 2026-10-16 | 0.06 | 1.95 | 9 | 6 | false | 22 | 3 | 0.14 (3/22) | 0.50 (3/6) | BOOT0, DAC_CLK_DIV2, I2S_DIN, I2S_LRCLK, LATCH, MCU/DBG_LED, MCU/DBG_LED2, NRST, Net-(C23-Pad1), Net-(C36-Pad2), Net-(D2-A), Net-(U5-VNEG), Net-(Y2-OUT), SCL, SDA, SPI_MISO, SPI_MOSI, SPI_NSS, SPI_SCK, SWCLK, SWDIO, SYNC_R |
+
+`net-status --strict` reports 27 incomplete nets. The table drops the 5 the
+plan files as `pour_skipped` (+3.3V, +3.3VA, +5V, GNDA, GNDD), leaving 22. Broken
+down by `--why` class:
+
+| stuck class | stuck nets | cross an overflowed edge |
+|---|---|---|
+| `congestion_saturated` | 12 | 2 (BOOT0 on 42-60, DAC_CLK_DIV2 on 74-92) |
+| `placement_bound` | 4 (MCU/DBG_LED2, Net-(Y2-OUT), SCL, SWCLK) | 1 (SWCLK on 129-130) |
+| `budget_starved` | 5 (LATCH, SDA, SPI_MISO, SPI_MOSI, SWDIO) | 0 |
+| `escape_blocked` | 1 (SPI_SCK) | 0 |
+
+| overflowed edge | demand / cap | nets crossing | crossed by a stuck net |
+|---|---|---|---|
+| 6-24 (`U5`) | 2.5 / 1 | I2S_BCLK, DAC_FLT | no |
+| 6-7 (`U5`) | 3.5 / 2 | I2S_BCLK, Net-(LED4-K), Net-(U5-LDOO) | no |
+| 24-42 (`U5`/`NT3`) | 2.5 / 1 | DAC_CLK, DAC_FLT | no |
+| 42-60 (`NT3`,`U5` / `U9`) | 2.5 / 1 | BOOT0, DAC_CLK | yes (BOOT0) |
+| 129-130 (`U8`) | 2.36 / 1 | SWCLK, UART_RX | yes (SWCLK) |
+| 74-92 (`U8`) | 1.14 / 1 | DAC_CLK_DIV2 | yes (DAC_CLK_DIV2) |
+
+### Verdict: no-go (board 05 and chorus-test measured)
 
 - The only `PLACEMENT_BOUND` net does cross an overflowed edge, but that net is
   one of three real opens, and the plan misses the two `CONGESTION_SATURATED`
@@ -1611,21 +1664,23 @@ separately.
   `PLACEMENT_BOUND` trigger already identifies EN_B.
 - This agrees with the #6304 measurement that inter-footprint channels are
   nowhere near full on the fleet.
-- Chorus-test does not change this. Its route collapsed (0/37, #6666), and
-  without a plan sidecar there is no fleet-table row. The hand-computed recall
-  from the gate plan is 3/37, which is lower than board 05's. Its precision is
-  vacuous. The one `move_component` relief (`U8` -2 mm) sits on an edge
-  crossed by a `budget_starved` net, not a `placement_bound` one, so it would
-  not have triggered `placement_nudge` for a placement reason either. The
-  no-go stands, and no build issue is filed.
+- Chorus-test does not change this. On the #6694 re-measure, recall is 0.14
+  (3/22), lower than board 05's 0.33, and precision is 0.50 (3/6), the same as
+  board 05's. 19 of the 22 open nets cross no overflowed edge. Only 1 of the 4
+  `placement_bound` nets (SWCLK) crosses one. Its edge (129-130) carries a
+  `move_component` relief for `U8`, so that is the one case where a plan
+  trigger would have pointed `placement_nudge` at a placement-bound net. Three
+  of the six overflowed edges, all around `U5`, are crossed by no stuck net.
+  The no-go stands, and no build issue is filed.
 
 Caveats: single run per board. Board 05 is not seed-deterministic (#3894,
 #6329), so another run may differ by a net. The earlier table's six opens came
-from a 3600 s run; this one has three. The chorus run hit its stage deadline
-and is not reproducible to the net. Its numbers describe a router regression
-(#6666) rather than the plan-overflow question. Chorus therefore remains
-effectively unmeasured until #6666 restores a working route that writes the
-plan sidecar. Re-run the argv above at that point.
+from a 3600 s run; this one has three. Both chorus runs hit
+their stage deadline and are not reproducible to the net. The #6694 row was
+measured on the deadline-saved `_partial` board with `--allow-offboard` (J2/J4
+pads still sit outside Edge.Cuts, #6666), so it is not a manufacturable
+configuration. The 2026-10-14 numbers describe the #6666 regression rather than
+the plan-overflow question.
 
 ## The one shrink: board 03 rigid 1.5x back to 1x (Issue #6310)
 

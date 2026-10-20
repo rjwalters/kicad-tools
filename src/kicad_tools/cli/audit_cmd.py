@@ -18,6 +18,10 @@ Exit Codes:
     0 - Ready for manufacturing (no errors)
     1 - Command failure (file not found, parse error, etc.)
     2 - Not ready (errors found) or warnings found with --strict
+
+--format json keeps the audit's own top-level "verdict"
+(ready|warning|not_ready) and adds "gate_verdict" (pass|fail) and
+"exit_code", the process exit code (Issue #7230).
 """
 
 import argparse
@@ -26,7 +30,9 @@ import sys
 from pathlib import Path
 
 from kicad_tools.audit import AuditResult, AuditVerdict, ManufacturingAudit
-from kicad_tools.manufacturers import get_manufacturer_ids
+from kicad_tools.manufacturers import get_all_manufacturer_names, get_profile
+
+from ._gate import gate_exit_code
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -50,7 +56,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--mfr",
         "-m",
-        choices=get_manufacturer_ids(),
+        choices=get_all_manufacturer_names(),
         default="jlcpcb",
         help="Target manufacturer (default: jlcpcb)",
     )
@@ -157,6 +163,28 @@ def main(argv: list[str] | None = None) -> int:
         help="Insulation material group by CTI (default: IIIa, conservative for FR-4).",
     )
     parser.add_argument(
+        "--hv-overvoltage-category",
+        dest="hv_overvoltage_category",
+        choices=["I", "II", "III", "IV"],
+        default="II",
+        help=(
+            "IEC 60664-1 overvoltage category for the derived clearance "
+            "(Table F.1 rated impulse voltage).  Default II (mains appliance)."
+        ),
+    )
+    parser.add_argument(
+        "--hv-insulation",
+        dest="hv_insulation",
+        choices=["basic", "supplementary", "reinforced"],
+        default="basic",
+        help=(
+            "Insulation type the derived creepage/clearance must provide "
+            "(IEC 60664-1 clause 5.2.5 / 6.2).  Default basic; opt in to "
+            "reinforced for mains-to-SELV barriers (Table F.1 impulse voltage "
+            "one step higher, 2x creepage).  supplementary uses the basic values."
+        ),
+    )
+    parser.add_argument(
         "--strict",
         action="store_true",
         help="Exit with code 2 on warnings",
@@ -169,6 +197,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = parser.parse_args(argv)
+    args.mfr = get_profile(args.mfr).id
 
     # Validate input file - resolve to absolute path for reliable file access
     path = Path(args.project_or_pcb).resolve()
@@ -201,6 +230,8 @@ def main(argv: list[str] | None = None) -> int:
             hv_working_voltage=args.hv_working_voltage,
             hv_pollution_degree=args.hv_pollution_degree,
             hv_material_group=args.hv_material_group,
+            hv_overvoltage_category=args.hv_overvoltage_category,
+            hv_insulation=args.hv_insulation,
         )
         result = audit.run()
     except ValueError as e:
@@ -210,23 +241,27 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Error running audit: {e}", file=sys.stderr)
         return 1
 
+    # Exit code, decided before output so ``--format json`` can carry it
+    # (Issue #7230).
+    # Exit 2 = audit ran successfully but found issues (NOT_READY or WARNING+strict)
+    # Exit 1 = reserved for tool-level failures (file not found, parse error) above
+    # Exit 0 = board is ready for manufacturing
+    exit_code, gate_verdict = gate_exit_code(
+        1 if result.verdict == AuditVerdict.NOT_READY else 0,
+        1 if result.verdict == AuditVerdict.WARNING else 0,
+        strict=args.strict,
+        style="check",
+    )
+
     # Output results
     if args.format == "json":
-        output_json(result)
+        output_json(result, gate_verdict=gate_verdict, exit_code=exit_code)
     elif args.format == "summary":
         output_summary(result)
     else:
         output_table(result, args.verbose)
 
-    # Determine exit code
-    # Exit 2 = audit ran successfully but found issues (NOT_READY or WARNING+strict)
-    # Exit 1 = reserved for tool-level failures (file not found, parse error) above
-    # Exit 0 = board is ready for manufacturing
-    if result.verdict == AuditVerdict.NOT_READY or (
-        result.verdict == AuditVerdict.WARNING and args.strict
-    ):
-        return 2
-    return 0
+    return exit_code
 
 
 def output_table(result: AuditResult, verbose: bool = False) -> None:
@@ -259,15 +294,22 @@ def output_table(result: AuditResult, verbose: bool = False) -> None:
 
     # ERC
     erc = result.erc
-    erc_status = "PASS" if erc.passed else "FAIL"
-    erc_icon = "OK" if erc.passed else "X"
-    print(f"\n[{erc_icon}] ERC (Electrical Rules Check): {erc_status}")
-    if erc.error_count > 0 or erc.warning_count > 0:
-        print(f"    Errors: {erc.error_count}, Warnings: {erc.warning_count}")
+    if erc.could_not_verify:
+        # Issue #7083: kicad-cli missing / ERC timed out -- the schematic was
+        # never checked, so this is neither PASS nor FAIL.
+        print("\n[!!] ERC (Electrical Rules Check): NOT RUN")
         if erc.details:
-            print(f"    Details: {erc.details}")
-    elif erc.details:
-        print(f"    Note: {erc.details}")
+            print(f"    Note: {erc.details}")
+    else:
+        erc_status = "PASS" if erc.passed else "FAIL"
+        erc_icon = "OK" if erc.passed else "X"
+        print(f"\n[{erc_icon}] ERC (Electrical Rules Check): {erc_status}")
+        if erc.error_count > 0 or erc.warning_count > 0:
+            print(f"    Errors: {erc.error_count}, Warnings: {erc.warning_count}")
+            if erc.details:
+                print(f"    Details: {erc.details}")
+        elif erc.details:
+            print(f"    Note: {erc.details}")
 
     # DRC
     drc = result.drc
@@ -306,7 +348,12 @@ def output_table(result: AuditResult, verbose: bool = False) -> None:
 
     # Sync drift (schematic <-> PCB)
     sync = result.sync
-    if sync.skipped:
+    if sync.could_not_verify:
+        # Issue #7083: the sync check crashed, so drift was never measured.
+        print("\n[!!] Sync (Schematic <-> PCB): NOT RUN")
+        if sync.details:
+            print(f"    Note: {sync.details}")
+    elif sync.skipped:
         print("\n[--] Sync (Schematic <-> PCB): SKIPPED")
         if sync.details:
             print(f"    Note: {sync.details}")
@@ -491,6 +538,8 @@ def _output_isolation_section(iso) -> None:
     if iso.standard:
         edition = f" {iso.standard_edition}" if iso.standard_edition else ""
         print(f"    Standard: {iso.standard}{edition}")
+        if iso.insulation:
+            print(f"    Insulation: {iso.insulation} (assumed for the derived requirement)")
 
     # Creepage (surface path) -- always thresholded.
     if iso.min_creepage_mm is not None and iso.required_creepage_mm is not None:
@@ -529,9 +578,24 @@ def _output_isolation_section(iso) -> None:
         print(f"    NOTE: {DISCLAIMER}")
 
 
-def output_json(result: AuditResult) -> None:
-    """Output audit results as JSON."""
-    print(json.dumps(result.to_dict(), indent=2, default=str))
+def output_json(
+    result: AuditResult,
+    *,
+    gate_verdict: str | None = None,
+    exit_code: int | None = None,
+) -> None:
+    """Output audit results as JSON.
+
+    Issue #7230: ``verdict`` stays the audit's own ``ready``/``warning``/
+    ``not_ready``; the exit gate's ``pass``/``fail`` is the additive
+    ``gate_verdict`` next to ``exit_code``.
+    """
+    data = result.to_dict()
+    if gate_verdict is not None:
+        data["gate_verdict"] = gate_verdict
+    if exit_code is not None:
+        data["exit_code"] = exit_code
+    print(json.dumps(data, indent=2, default=str))
 
 
 def output_summary(result: AuditResult) -> None:

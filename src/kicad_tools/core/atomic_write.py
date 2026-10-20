@@ -75,7 +75,11 @@ def atomic_write_text(
     else:
         tmp_path.write_text(content, encoding=encoding)
 
-    with open(tmp_path, "rb") as f:
+    # Issue #7478: fsync needs a handle with write access. On Windows
+    # ``os.fsync`` is ``_commit()`` -> ``FlushFileBuffers``, which rejects a
+    # read-only ("rb") handle with EBADF. "r+b" opens for writing without
+    # truncating the bytes written above.
+    with open(tmp_path, "r+b") as f:
         os.fsync(f.fileno())
 
     os.replace(tmp_path, path)

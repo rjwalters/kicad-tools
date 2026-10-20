@@ -370,3 +370,38 @@ class TestUnifiedPresetResolution:
 
         corrections = pkg._get_rotation_corrections()
         assert corrections is None
+
+
+class TestPosFrameFallback:
+    """Footprint-like objects without ``sheet_position`` use ``position``."""
+
+    @staticmethod
+    def _fp():
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            reference="R1",
+            value="10k",
+            name="0805",
+            position=(10.0, 20.0),
+            rotation=0.0,
+            layer="F.Cu",
+            exclude_from_pos_files=False,
+            attr="smd",
+            dnp=False,
+            pads=[],
+        )
+
+    def test_extract_placements_without_sheet_position(self):
+        from kicad_tools.export.pnp import extract_placements
+
+        cfg = PnPExportConfig(use_aux_origin=True)
+        (p,) = extract_placements([self._fp()], cfg, aux_origin=(4.0, 5.0))
+        assert (p.x, p.y) == pytest.approx((6.0, -15.0))
+
+    def test_no_aux_origin_flips_y_only(self):
+        from kicad_tools.export.pnp import extract_placements
+
+        cfg = PnPExportConfig(use_aux_origin=False)
+        (p,) = extract_placements([self._fp()], cfg)
+        assert (p.x, p.y) == pytest.approx((10.0, -20.0))

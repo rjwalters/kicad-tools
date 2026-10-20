@@ -908,6 +908,34 @@ class TestProjectCreate:
         assert "(end 50" in pcb_content or "(end 50.0" in pcb_content
         assert "30)" in pcb_content or "30.0)" in pcb_content
 
+    def test_create_pcb_outline_is_origin_anchored(self, tmp_path):
+        """Blank board comes from PCB.create: origin (0,0), four gr_lines (#7047)."""
+        import datetime
+
+        from kicad_tools.schema.pcb import PCB
+
+        Project.create("t", directory=tmp_path, board_width=50, board_height=30)
+        pcb_file = tmp_path / "t.kicad_pcb"
+        text = pcb_file.read_text()
+
+        pcb = PCB.load(str(pcb_file))
+        assert pcb.board_size == (50.0, 30.0)
+        outline = pcb.get_board_outline()
+        assert min(x for x, _ in outline) == 0
+        assert min(y for _, y in outline) == 0
+        assert text.count("(gr_line") == 4
+        assert "gr_rect" not in text
+        assert '"F.Cu"' in text and '"B.Cu"' in text
+        assert datetime.date.today().isoformat() not in text
+
+    def test_create_pcb_is_byte_stable(self, tmp_path):
+        """Two runs write byte-identical PCB files (#7047, #6076)."""
+        a = tmp_path / "a"
+        b = tmp_path / "b"
+        Project.create("t", directory=a, board_width=50, board_height=30)
+        Project.create("t", directory=b, board_width=50, board_height=30)
+        assert (a / "t.kicad_pcb").read_bytes() == (b / "t.kicad_pcb").read_bytes()
+
     def test_create_in_nonexistent_directory(self, tmp_path):
         """Test that create makes the directory if it doesn't exist."""
         new_dir = tmp_path / "new" / "nested" / "dir"
@@ -1020,6 +1048,88 @@ class TestProjectRoute:
         # Should have routing statistics
         assert hasattr(result, "routed_nets")
         assert hasattr(result, "total_nets")
+
+    def test_route_merges_collinear_grid_steps(self, tmp_path, monkeypatch):
+        """A straight run is saved as merged copper, not one segment per grid step (#7138)."""
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (general (thickness 1.6))
+          (layers
+            (0 "F.Cu" signal)
+            (31 "B.Cu" signal)
+            (44 "Edge.Cuts" user)
+          )
+          (net 0 "")
+          (net 1 "SIG")
+          (gr_line (start 0 0) (end 40 0) (layer "Edge.Cuts") (stroke (width 0.1)))
+          (gr_line (start 40 0) (end 40 20) (layer "Edge.Cuts") (stroke (width 0.1)))
+          (gr_line (start 40 20) (end 0 20) (layer "Edge.Cuts") (stroke (width 0.1)))
+          (gr_line (start 0 20) (end 0 0) (layer "Edge.Cuts") (stroke (width 0.1)))
+          (footprint "R_0603" (layer "F.Cu") (at 10 10) (attr smd)
+            (property "Reference" "R1")
+            (pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "SIG"))
+          )
+          (footprint "R_0603" (layer "F.Cu") (at 20 10) (attr smd)
+            (property "Reference" "R2")
+            (pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "SIG"))
+          )
+        )
+        """
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(pcb_content)
+
+        import dataclasses
+
+        from kicad_tools import router as router_pkg
+
+        real_load = router_pkg.load_pcb_for_routing
+
+        def fragmenting_load(*args, **kwargs):
+            """Make route_all emit one segment per 0.1 mm grid step."""
+            router, net_map = real_load(*args, **kwargs)
+            real_route_all = router.route_all
+
+            def route_all(*a, **k):
+                routes = real_route_all(*a, **k)
+                for route in routes:
+                    pieces = []
+                    for seg in route.segments:
+                        n = 100  # the 10 mm run in 0.1 mm steps
+                        for i in range(n):
+                            t0, t1 = i / n, (i + 1) / n
+                            pieces.append(
+                                dataclasses.replace(
+                                    seg,
+                                    x1=seg.x1 + (seg.x2 - seg.x1) * t0,
+                                    y1=seg.y1 + (seg.y2 - seg.y1) * t0,
+                                    x2=seg.x1 + (seg.x2 - seg.x1) * t1,
+                                    y2=seg.y1 + (seg.y2 - seg.y1) * t1,
+                                )
+                            )
+                    route.segments = pieces
+                return routes
+
+            router.route_all = route_all
+            return router, net_map
+
+        monkeypatch.setattr(router_pkg, "load_pcb_for_routing", fragmenting_load)
+
+        result = Project(pcb=pcb_path).route()
+
+        saved = PCB.load(str(pcb_path)).segments
+        assert saved, "no copper was saved"
+        # ~100 raw grid-step segments must collapse to a straight run.
+        assert len(saved) == 1
+        assert result.total_segments == len(saved)
+        assert result.total_length_mm == pytest.approx(
+            sum(
+                ((s.end[0] - s.start[0]) ** 2 + (s.end[1] - s.start[1]) ** 2) ** 0.5 for s in saved
+            ),
+            abs=0.01,
+        )
 
 
 class TestProjectCheckDRC:

@@ -4,6 +4,39 @@ Complete documentation for all kicad-tools MCP server tools.
 
 ## Export Tools
 
+### validate_assembly_bom
+
+Validate a BOM for JLCPCB assembly.
+
+**Description**: Checks every BOM component against the LCSC/JLCPCB parts library and categorizes it by tier (Basic/Extended), stock status and availability. When a PCB is supplied or found next to the schematic (`<stem>_routed.kicad_pcb`, then `<stem>.kicad_pcb`), it also runs `kct export`'s `bom_lcsc_values` preflight check (Issue #7260): each assigned LCSC part's value and package against the BOM row and the PCB footprint, using the local parts cache and the offline catalog (no network). A `FAIL` sets `summary.assembly_ready` to `false`; a `WARN` (part in neither source, so not checked) does not.
+
+**Parameters**:
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `schematic_path` | string | Yes | - | Path to .kicad_sch file |
+| `quantity` | integer | No | `1` | Number of boards (multiplies component quantities) |
+| `pcb_path` | string | No | discovered | Path to .kicad_pcb for the `bom_lcsc_values` package check |
+
+**Response** (abridged):
+
+```json
+{
+  "success": true,
+  "summary": {"total_items": 12, "assembly_ready": false, "...": "..."},
+  "items": [...],
+  "bom_lcsc_values": {
+    "status": "FAIL",
+    "message": "1 BOM item(s) assigned an LCSC part whose value or package does not match the BOM row",
+    "details": "C10 -> C1525 ..."
+  }
+}
+```
+
+`bom_lcsc_values` is absent when no PCB resolved.
+
+---
+
 ### export_gerbers
 
 Export Gerber files for PCB manufacturing.
@@ -16,7 +49,7 @@ Export Gerber files for PCB manufacturing.
 |-----------|------|----------|---------|-------------|
 | `pcb_path` | string | Yes | - | Path to .kicad_pcb file |
 | `output_dir` | string | Yes | - | Directory for output files |
-| `manufacturer` | string | No | `"generic"` | Manufacturer preset: `"generic"`, `"jlcpcb"`, `"pcbway"`, `"oshpark"`, `"seeed"` |
+| `manufacturer` | string | No | `"generic"` | Manufacturer preset or tier id: any id `kct export --mfr` accepts (`"generic"`, `"jlcpcb"`, `"jlcpcb-tier1"`, `"pcbway"`, `"oshpark"`, `"seeed"`, plus registry aliases). Tier ids use their parent fab's Gerber preset (#7276) |
 | `include_drill` | boolean | No | `true` | Include drill files (Excellon format) |
 | `zip_output` | boolean | No | `true` | Create zip archive of all files |
 
@@ -88,7 +121,11 @@ Export Bill of Materials from a schematic file.
 
 Generate complete assembly package for manufacturing.
 
-**Description**: Creates a comprehensive manufacturing package including Gerber files, BOM, and pick-and-place (PnP/CPL) files tailored to specific manufacturers. Outputs a single zip file ready for upload.
+**Description**: Runs the same pipeline as `kct export` (Issue #7260): the DRC short/open safety floor, every preflight check (`bom_pcb_match`, `bom_cpl_match`, `bom_lcsc_values`, `assembly_package_limits`, `stackup_copper`, DRC/ERC report provenance, ...), then Gerbers, BOM, pick-and-place (PnP/CPL), a README and a manifest, plus a single zip file ready for upload. The report PDF and KiCad project zip that `kct export` also builds are not generated.
+
+- **Preflight gates the export.** With `strict_preflight` (the default here; `kct export` needs `--strict-preflight`) any preflight `FAIL` refuses the export. With `strict_preflight: false`, FAILs become `warnings`, except the unbuildable-BOM block (`bom_pcb_match`: BOM references with no PCB footprint) and the DRC safety floor, which always refuse. "Could not check" outcomes (no DRC/ERC report on disk, an LCSC part in neither the cache nor the catalog) are `WARN`s and never block.
+- **A refused export** returns `success: false`, the failures in `error`, and writes no BOM, CPL, Gerbers or upload zip (`zip_file: null`).
+- **Side effect**: like `kct export`, it writes sibling `<board>.kicad_pro` / `<board>.kicad_dru` holding the manufacturer's DRC constraints next to the source PCB (#5746). Run it on a scratch copy if the input directory must stay untouched.
 
 **Parameters**:
 
@@ -97,7 +134,8 @@ Generate complete assembly package for manufacturing.
 | `pcb_path` | string | Yes | - | Path to .kicad_pcb file |
 | `schematic_path` | string | Yes | - | Path to .kicad_sch file |
 | `output_dir` | string | Yes | - | Directory for output files |
-| `manufacturer` | string | No | `"jlcpcb"` | Target manufacturer: `"jlcpcb"`, `"pcbway"`, `"seeed"`, `"generic"` |
+| `manufacturer` | string | No | board's `target_fab` | Target manufacturer or tier id: any id `kct export --mfr` accepts (`"jlcpcb"`, `"jlcpcb-tier1"`, `"pcbway"`, `"seeed"`, `"generic"`, ...). Omitted: resolved like `kct check` (`fab_profile.json` > `project.kct` `target_fab` > `"jlcpcb"`); the resolved id and its origin are returned as `manufacturer` / `manufacturer_source` (#7276). A report-provenance refusal names the tier to pass |
+| `strict_preflight` | boolean | No | `true` | Any preflight `FAIL` blocks the export. `false` matches `kct export` without `--strict-preflight` |
 
 **Response**:
 
@@ -112,63 +150,108 @@ Generate complete assembly package for manufacturing.
     "layer_count": 4
   },
   "bom": {
-    "output_path": "/path/to/bom.csv",
+    "output_path": "/path/to/bom_jlcpcb.csv",
     "component_count": 45,
-    "unique_parts": 45,
+    "unique_parts": 21,
     "missing_lcsc": 3
   },
   "pnp": {
-    "output_path": "/path/to/cpl.csv",
-    "component_count": 127,
-    "layers": ["top", "bottom"]
+    "output_path": "/path/to/cpl_jlcpcb.csv",
+    "component_count": 42,
+    "layers": ["top", "bottom"],
+    "rotation_corrections": 2
   },
-  "zip_file": "/path/to/board-jlcpcb-assembly.zip",
-  "warnings": ["3 parts missing LCSC part numbers"]
+  "zip_file": "/path/to/bom_jlcpcb-jlcpcb-assembly.zip",
+  "preflight": [
+    {"name": "bom_pcb_match", "status": "OK", "message": "BOM and PCB references match", "details": ""},
+    {"name": "drc", "status": "WARN", "message": "No DRC report found", "details": ""}
+  ],
+  "warnings": ["3 parts missing LCSC part numbers"],
+  "error": null
 }
 ```
+
+`bom.component_count` counts component instances written to the BOM (DNP and virtual symbols excluded); `bom.unique_parts` counts distinct value/footprint/LCSC rows. `pnp.component_count` counts CPL rows (through-hole parts are included for JLCPCB; they are excluded only for SMT-only fabs).
+
+`pnp.rotation_corrections` is the number of CPL rows whose rotation was shifted by the manufacturer's per-footprint correction table (e.g. SOIC-8, SOT-23 on JLCPCB); it is `0` for manufacturers without corrections.
 
 ---
 
 ## Analysis Tools
 
-### analyze_board
+### board_summary
 
 Get board summary including layers, components, nets, and dimensions.
 
-**Description**: Returns comprehensive information about a PCB file including layer stack, component count, net count, and board dimensions.
+**Description**: Returns a high-level overview of a PCB file (offline, no KiCad required): board dimensions, layer information, component counts by type, net summary with routing status, zones, and overall routing completion.
 
 **Parameters**:
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `pcb_path` | string | Yes | - | Path to .kicad_pcb file |
+| `pcb_path` | string | Yes | - | Absolute path to .kicad_pcb file |
 
-**Response**:
+**Response** (from a real call on `tests/fixtures/projects/test_project.kicad_pcb`):
 
 ```json
 {
-  "success": true,
-  "file_path": "/path/to/board.kicad_pcb",
-  "layers": {
-    "count": 4,
-    "copper_layers": ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
+  "file_path": "/path/to/test_project.kicad_pcb",
+  "board_dimensions": {
+    "width_mm": 60.0,
+    "height_mm": 30.0,
+    "area_mm2": 1800.0,
+    "outline_type": "rectangle"
   },
-  "dimensions": {
-    "width_mm": 100.0,
-    "height_mm": 80.0,
-    "area_mm2": 8000.0
+  "layers": {
+    "copper_layers": 2,
+    "layer_names": ["F.Cu", "B.Cu"],
+    "has_internal_planes": false
   },
   "components": {
-    "total": 127,
-    "smd": 115,
-    "tht": 12
+    "total_count": 3,
+    "smd_count": 3,
+    "through_hole_count": 0,
+    "by_type": {"resistor": 1, "capacitor": 1, "diode": 1},
+    "fixed_count": 0,
+    "unplaced_count": 0
   },
   "nets": {
-    "count": 89,
-    "power_nets": ["VCC", "GND", "3V3"]
+    "total_nets": 3,
+    "routed_nets": 1,
+    "unrouted_nets": 2,
+    "power_nets": ["VIN", "GND"],
+    "high_fanout_nets": []
+  },
+  "zones": [],
+  "routing_status": {
+    "completion_percent": 33.3,
+    "total_airwires": 2,
+    "total_trace_length_mm": 18.4,
+    "via_count": 0
   }
 }
 ```
+
+---
+
+### board_inspect
+
+Inspect one aspect of a PCB in detail.
+
+**Description**: Unlike `board_summary`, returns focused, detailed data for a single aspect: `footprints` (position, type, pads), `nets` (per-net routing status), `layers` (stackup), `design_rules` (setup parameters) or `zones` (thermal relief settings). Works offline.
+
+**Parameters**:
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `pcb_path` | string | Yes | - | Absolute path to .kicad_pcb file |
+| `aspect` | string | Yes | - | One of `"footprints"`, `"nets"`, `"layers"`, `"design_rules"`, `"zones"` |
+| `layer` | string | No | - | Filter by layer name |
+| `reference_prefix` | string | No | - | Filter footprints by reference prefix (e.g. `"R"`). `footprints` only |
+| `unrouted_only` | boolean | No | `false` | Only unrouted/incomplete nets. `nets` only |
+| `net_name` | string | No | - | Filter zones by net name (e.g. `"GND"`). `zones` only |
+
+The response shape depends on `aspect`.
 
 ---
 
@@ -176,32 +259,45 @@ Get board summary including layers, components, nets, and dimensions.
 
 Run design rule check and return violations.
 
-**Description**: Executes pure Python DRC against the board and returns all violations with locations and severity.
+**Description**: Runs `kct check`'s rule set against the board (Issue #7260) and returns violations with locations, affected items, and `kct check`'s `verdict` / `exit_code`. The rule set is the one `kct check` builds: layer count resolved from the board, stackup copper weights, the `.kicad_pro` authored minimum clearance, the reviewed fabrication-floor override, net-class-map / current-path / waiver sidecars and the path-dependent rules. The verdict includes the ERC + LVS + manifest meta rollup, so a board whose ERC or LVS cannot run (no kicad-cli, no schematic) is `incomplete` rather than `pass`. `passed` is `true` only when `verdict` is `"pass"`. The `manufacturer` parameter is passed to the underlying function as `rules=`. There is no `layers` parameter.
 
 **Parameters**:
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `pcb_path` | string | Yes | - | Path to .kicad_pcb file |
-| `manufacturer` | string | No | `"generic"` | Manufacturer rules: `"jlcpcb"`, `"pcbway"`, `"oshpark"` |
+| `pcb_path` | string | Yes | - | Absolute path to .kicad_pcb file |
+| `manufacturer` | string | No | resolved like `kct check` | Manufacturer preset or tier id (any registry id, e.g. `"jlcpcb"`, `"jlcpcb-tier1"`, `"oshpark"`, `"pcbway"`, `"seeed"`). Omitted: `fab_profile.json` > `project.kct` `target_fab` > `"jlcpcb"` |
+| `severity_filter` | string | No | `"all"` | `"all"`, `"error"` or `"warning"`. A view filter: the verdict always counts every violation |
+| `allow_incomplete` | boolean | No | `false` | Like `kct check --allow-incomplete`: an `incomplete` verdict returns `exit_code: 0` (`passed` stays `false`) |
+| `schematic_path` | string | No | discovered | Explicit `.kicad_sch` for the ERC/LVS meta rollup |
 
 **Response**:
 
 ```json
 {
-  "success": true,
   "passed": false,
   "violation_count": 3,
+  "error_count": 2,
+  "warning_count": 1,
   "violations": [
     {
-      "type": "clearance",
-      "severity": "error",
-      "message": "Clearance violation: 0.10mm < 0.15mm minimum",
-      "location": [45.2, 32.1],
-      "layer": "F.Cu",
-      "items": ["U1-pad1", "R3-pad2"]
+      "id": "drc-0002-37624703",
+      "type": "pin1_marker_missing",
+      "severity": "warning",
+      "message": "D1 (LED_SMD:LED_0603_1608Metric) has no silkscreen pin-1 / polarity marker ...",
+      "location": {"x_mm": 139.2, "y_mm": 50.0, "layer": "F.Cu"},
+      "affected_items": [{"item_type": "component", "reference": "D1", "net": null}],
+      "fix_suggestion": null,
+      "required_value_mm": 2.5,
+      "actual_value_mm": null
     }
-  ]
+  ],
+  "summary_by_type": {"connectivity": 2, "pin1_marker_missing": 1},
+  "manufacturer": "jlcpcb",
+  "layers": 2,
+  "verdict": "fail",
+  "exit_code": 2,
+  "notes": []
 }
 ```
 
@@ -285,7 +381,7 @@ Measure clearance between items on the PCB.
   "item1": "U1",
   "item2": "C3",
   "min_clearance_mm": 0.254,
-  "location": [45.2, 32.1],
+  "location": {"x": 45.2, "y": 32.1},
   "layer": "F.Cu",
   "clearances": [
     {
@@ -294,7 +390,7 @@ Measure clearance between items on the PCB.
       "to_item": "C3-1",
       "to_type": "pad",
       "clearance_mm": 0.254,
-      "location": [45.2, 32.1],
+      "location": {"x": 45.2, "y": 32.1},
       "layer": "F.Cu"
     }
   ],
@@ -376,6 +472,8 @@ Query the impact of a hypothetical component move without applying it.
   "warnings": []
 }
 ```
+
+`routing_impact.estimated_length_change_mm` is the change in total Euclidean pin-MST length over the nets of the moved component (positive = longer). `routing_impact.crossing_changes` is the signed change in inter-net crossings (`crossing_count`, star topology) between the board before and after the move.
 
 ---
 
@@ -512,24 +610,31 @@ Get AI-friendly placement improvement recommendations.
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `pcb_path` | string | Yes | - | Path to .kicad_pcb file |
-| `max_suggestions` | number | No | 10 | Maximum number of suggestions to return |
+| `component` | string | No | - | Specific component reference to analyze |
+| `max_suggestions` | integer | No | 10 | Maximum number of suggestions to return (1-50) |
+
+Suggestions are ordered most-in-need-first (most violated constraints, then lowest confidence). An unknown `component` returns `success: false` with an error naming it.
 
 **Response**:
 
 ```json
 {
   "success": true,
+  "pcb_path": "/path/to/board.kicad_pcb",
   "suggestions": [
     {
-      "component": "C1",
-      "current_position": [43.0, 30.5],
-      "suggested_position": [45.2, 32.1],
-      "rationale": "Move bypass capacitor closer to U1 VDD pin for better decoupling",
-      "expected_improvement": 2.5,
-      "category": "signal_integrity"
+      "reference": "C1",
+      "suggested_x": 45.2,
+      "suggested_y": 32.1,
+      "suggested_rotation": 0.0,
+      "confidence": 0.62,
+      "rationale": ["Close to U1 (decoupling)"],
+      "constraints_satisfied": [],
+      "constraints_violated": ["decoupling distance"],
+      "alternatives": []
     }
   ],
-  "current_score": 78.5
+  "count": 1
 }
 ```
 
@@ -541,32 +646,48 @@ Get AI-friendly placement improvement recommendations.
 
 Route a specific net with configurable strategy.
 
-**Description**: Attempts to route a single net using the A* autorouter. Returns the routing result including path details and any issues encountered.
+**Description**: Attempts to route a single net using the autorouter and writes the result to a PCB file.
+
+> **The input file is not overwritten by default.** When `output_path` is omitted the routed board is written to `<stem>_routed.kicad_pcb` next to the input. The input is overwritten **only** if you pass `output_path` equal to `pcb_path`. (Before Issue #7111, omitting `output_path` overwrote the input.)
 
 **Parameters**:
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `pcb_path` | string | Yes | - | Path to .kicad_pcb file |
-| `net_name` | string | Yes | - | Name of the net to route |
-| `layer` | string | No | - | Preferred routing layer (e.g., `"F.Cu"`) |
-| `width` | number | No | - | Trace width in mm (uses default if not specified) |
+| `net_name` | string | Yes | - | Name of the net to route (e.g. `"GND"`, `"SPI_CLK"`) |
+| `output_path` | string | No | `<stem>_routed.kicad_pcb` | Output file. Set equal to `pcb_path` to overwrite the input. The result's `output_path` is `null` when nothing was written (net already routed, or fewer than 2 pads) |
+| `strategy` | string | No | `"auto"` | `"auto"`, `"shortest"` or `"avoid_vias"` |
+| `layer_preference` | string | No | - | Preferred layer (e.g. `"F.Cu"`, `"B.Cu"`) |
+
+There is no trace-width parameter; width comes from the board's design rules.
 
 **Response**:
 
 ```json
 {
   "success": true,
-  "net": "SPI_CLK",
-  "routed": true,
-  "path": {
-    "length_mm": 12.5,
-    "via_count": 1,
-    "layers_used": ["F.Cu", "B.Cu"]
-  },
-  "warnings": []
+  "net_name": "SPI_CLK",
+  "routed_connections": 2,
+  "total_connections": 2,
+  "trace_length_mm": 12.5,
+  "vias_used": 1,
+  "layers_used": ["B.Cu", "F.Cu"],
+  "output_path": "/path/to/board_routed.kicad_pcb",
+  "error_message": null,
+  "suggestions": [],
+  "warnings": [],
+  "grid": null
 }
 ```
+
+On failure `success` is false, `error_message` explains why and `suggestions` lists next steps.
+
+`grid` is the routing grid actually used
+(`requested_mm`, `used_mm`, `cols`, `rows`, `layers`, `cells`, `selection`,
+`coarsened`, `coarsened_reason`). On a large board the adaptive cell cap can
+route on a coarser pitch than the board's rules ask for; `grid.coarsened` is
+then true and `warnings` says so (Issue #6875).
 
 ---
 
@@ -574,28 +695,33 @@ Route a specific net with configurable strategy.
 
 List nets that still need routing.
 
-**Description**: Returns a list of all nets that have not been fully routed, including partial routing information.
+**Description**: Returns nets that are unrouted or (optionally) partially routed, with difficulty estimates.
 
 **Parameters**:
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `pcb_path` | string | Yes | - | Path to .kicad_pcb file |
+| `include_partial` | boolean | No | `true` | Include partially routed nets in results |
 
 **Response**:
 
 ```json
 {
-  "success": true,
-  "unrouted_count": 12,
-  "total_nets": 89,
-  "completion_percent": 86.5,
-  "unrouted_nets": [
+  "total_nets": 3,
+  "unrouted_count": 0,
+  "partial_count": 2,
+  "complete_count": 1,
+  "nets": [
     {
-      "name": "SPI_CLK",
-      "pin_count": 3,
-      "connections_needed": 2,
-      "estimated_difficulty": "medium"
+      "name": "NET1",
+      "status": "incomplete",
+      "pins": 3,
+      "routed_connections": 1,
+      "total_connections": 2,
+      "estimated_length_mm": 38.4,
+      "difficulty": "medium",
+      "reason": "Moderate routing distance"
     }
   ]
 }

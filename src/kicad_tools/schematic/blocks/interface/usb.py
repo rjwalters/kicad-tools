@@ -3,6 +3,7 @@
 import contextlib
 from typing import TYPE_CHECKING
 
+from .._pins import diode_pin_position
 from ..base import CircuitBlock
 from ..interfaces import DataPort, PowerPort
 
@@ -63,22 +64,25 @@ class USBConnector(CircuitBlock):
         sch.add_wire(usb.port("D-"), mcu.port("USB_DM"))
     """
 
-    # Connector type configurations
+    # Connector type configurations.  Symbol IDs are the KiCad 10 names
+    # (issue #7399): the bare ``USB_C_Receptacle_USB2.0`` became the
+    # ``_16P``/``_14P`` pair (16P is the common 16-pin USB 2.0 receptacle),
+    # and ``USB_Micro-B``/``USB_Mini-B`` are ``USB_B_Micro``/``USB_B_Mini``.
     CONNECTOR_CONFIGS = {
         "type-c": {
-            "symbol": "Connector:USB_C_Receptacle_USB2.0",
+            "symbol": "Connector:USB_C_Receptacle_USB2.0_16P",
             "pins": ["VBUS", "GND", "D+", "D-", "CC1", "CC2", "SHIELD"],
             "has_cc": True,
             "has_id": False,
         },
         "micro-b": {
-            "symbol": "Connector:USB_Micro-B",
+            "symbol": "Connector:USB_B_Micro",
             "pins": ["VBUS", "GND", "D+", "D-", "ID", "SHIELD"],
             "has_cc": False,
             "has_id": True,
         },
         "mini-b": {
-            "symbol": "Connector:USB_Mini-B",
+            "symbol": "Connector:USB_B_Mini",
             "pins": ["VBUS", "GND", "D+", "D-", "ID"],
             "has_cc": False,
             "has_id": True,
@@ -102,7 +106,7 @@ class USBConnector(CircuitBlock):
         ref_prefix: str = "J",
         tvs_ref_start: int = 1,
         connector_symbol: str | None = None,
-        esd_tvs_symbol: str = "Device:D_TVS",
+        esd_tvs_symbol: str = "Power_Protection:USBLC6-2SC6",
         vbus_tvs_symbol: str = "Device:D_TVS",
         esd_tvs_value: str = "USBLC6-2SC6",
         vbus_tvs_value: str = "SMBJ5.0A",
@@ -120,7 +124,8 @@ class USBConnector(CircuitBlock):
             ref_prefix: Reference designator prefix (e.g., "J" or "J1")
             tvs_ref_start: Starting reference number for TVS diodes
             connector_symbol: KiCad symbol for connector (auto-selected if None)
-            esd_tvs_symbol: KiCad symbol for ESD TVS diode
+            esd_tvs_symbol: KiCad symbol for the dual-line ESD array (must use the
+                USBLC6-2SC6 pin numbering: I/O1 = 1/6, GND = 2, I/O2 = 3/4, VBUS = 5)
             vbus_tvs_symbol: KiCad symbol for VBUS TVS diode
             esd_tvs_value: Part value for ESD TVS (e.g., "USBLC6-2SC6")
             vbus_tvs_value: Part value for VBUS TVS (e.g., "SMBJ5.0A")
@@ -172,7 +177,10 @@ class USBConnector(CircuitBlock):
         # Add ESD protection on D+/D- if requested
         if esd_protection and "D+" in conn_pins and "D-" in conn_pins:
             tvs_ref = f"D{tvs_ref_start + tvs_idx}"
-            # Place ESD TVS diode (dual-line ESD like USBLC6-2SC6)
+            # Dual-line ESD array (USBLC6-2SC6 pinout): I/O1 = pins 1/6,
+            # GND = pin 2, I/O2 = pins 3/4, VBUS = pin 5.  Each line passes
+            # straight through the array, so the connector side lands on
+            # pins 1/3 and the protected side leaves from pins 6/4.
             tvs_x = x + tvs_offset_x
             tvs_y = (conn_pins["D+"][1] + conn_pins["D-"][1]) / 2
 
@@ -181,23 +189,46 @@ class USBConnector(CircuitBlock):
             self.components["TVS_ESD"] = self.esd_tvs
             tvs_idx += 1
 
-            # Wire D+ through TVS
-            dp_conn = conn_pins["D+"]
-            tvs_pin1 = self.esd_tvs.pin_position("A")
-            tvs_pin2 = self.esd_tvs.pin_position("K")
+            io1_in = self.esd_tvs.pin_position("1")
+            io2_in = self.esd_tvs.pin_position("3")
+            io1_out = self.esd_tvs.pin_position("6")
+            io2_out = self.esd_tvs.pin_position("4")
+            tvs_gnd = self.esd_tvs.pin_position("2")
+            tvs_vbus = self.esd_tvs.pin_position("5")
 
-            # Connect D+ from connector to TVS input
-            sch.add_wire(dp_conn, (tvs_pin1[0], dp_conn[1]))
+            # Upper connector line takes the upper channel so the two
+            # routes never overlap.  Each route jogs in its own column
+            # (never a shared one) so D+ and D- cannot short.
+            lines = sorted(("D+", "D-"), key=lambda n: conn_pins[n][1])
+            channels = {lines[0]: (io1_in, io1_out), lines[1]: (io2_in, io2_out)}
+            for col, name in enumerate(lines):
+                tvs_in, tvs_out = channels[name]
+                jog_x = io1_in[0] - 2.54 * (col + 1)
+                self._route(
+                    sch, [conn_pins[name], (jog_x, conn_pins[name][1]), (jog_x, tvs_in[1]), tvs_in]
+                )
+                # Short stub so the protected side is a wire, not a bare pin;
+                # the port sits on its far end.
+                stub_end = (tvs_out[0] + 2.54, tvs_out[1])
+                sch.add_wire(tvs_out, stub_end)
+                output_positions[name] = stub_end
 
-            # D+ output is after TVS (use same x as TVS output)
-            output_positions["D+"] = (tvs_pin2[0], dp_conn[1])
-
-            # Wire D- through TVS (assuming dual-channel TVS)
-            dm_conn = conn_pins["D-"]
-            sch.add_wire(dm_conn, (tvs_pin1[0], dm_conn[1]))
-
-            # D- output is after TVS
-            output_positions["D-"] = (tvs_pin2[0], dm_conn[1])
+            # Reference pins: GND below, VBUS above, each tied to the
+            # connector's pin through a column left of the signal jogs.
+            if "GND" in conn_pins:
+                gnd = conn_pins["GND"]
+                col_x = io1_in[0] - 10.16
+                low_y = tvs_gnd[1] + 2.54
+                self._route(
+                    sch, [gnd, (col_x, gnd[1]), (col_x, low_y), (tvs_gnd[0], low_y), tvs_gnd]
+                )
+            if "VBUS" in conn_pins:
+                vbus = conn_pins["VBUS"]
+                col_x = io1_in[0] - 7.62
+                high_y = tvs_vbus[1] - 2.54
+                self._route(
+                    sch, [vbus, (col_x, vbus[1]), (col_x, high_y), (tvs_vbus[0], high_y), tvs_vbus]
+                )
 
         else:
             # No ESD protection, output is same as connector pin
@@ -221,8 +252,8 @@ class USBConnector(CircuitBlock):
             tvs_idx += 1
 
             # Wire VBUS through TVS
-            vbus_anode = self.vbus_tvs.pin_position("A")
-            vbus_cathode = self.vbus_tvs.pin_position("K")
+            vbus_anode = diode_pin_position(self.vbus_tvs, "A")
+            vbus_cathode = diode_pin_position(self.vbus_tvs, "K")
 
             # Connect VBUS from connector to TVS
             sch.add_wire(vbus_conn, vbus_anode)
@@ -274,6 +305,13 @@ class USBConnector(CircuitBlock):
 
         # Register typed ports with interface metadata
         self._register_typed_ports()
+
+    @staticmethod
+    def _route(sch: "Schematic", points: list[tuple[float, float]]) -> None:
+        """Draw a polyline of wires through ``points``, skipping zero-length hops."""
+        for start, end in zip(points, points[1:], strict=False):
+            if start != end:
+                sch.add_wire(start, end)
 
     def _register_typed_ports(self) -> None:
         """Register typed ports with USB interface metadata."""

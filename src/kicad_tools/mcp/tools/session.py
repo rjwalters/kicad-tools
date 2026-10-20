@@ -41,6 +41,7 @@ from kicad_tools.intent import (
     IntentDeclaration,
     create_intent_declaration,
 )
+from kicad_tools.mcp.context import SessionContext
 from kicad_tools.mcp.types import (
     ApplyMoveResult,
     ClearIntentResult,
@@ -82,6 +83,8 @@ class SessionMetadata:
         session: The underlying PlacementSession object
         initial_score: Score at session start
         intents: List of declared design intents
+        context: Decision/checkpoint context. Lives on the metadata so it
+            is dropped with the session on commit, rollback or expiry.
     """
 
     session_id: str
@@ -89,6 +92,10 @@ class SessionMetadata:
     session: PlacementSession
     initial_score: float
     intents: list[IntentDeclaration] = field(default_factory=list)
+    context: SessionContext = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.context = SessionContext(session_id=self.session_id, pcb_path=self.pcb_path)
 
     def declare_intent(self, declaration: IntentDeclaration) -> None:
         """Add an intent declaration to the session."""
@@ -536,6 +543,8 @@ def query_move(
             recommendation += " | WARNING: Area becoming congested"
         if "intent_risk" in warning_types:
             recommendation += " | WARNING: May affect design intent constraints"
+        if "thermal" in warning_types:
+            recommendation += " | WARNING: Heat sources clustering"
 
     return QueryMoveResult(
         success=True,

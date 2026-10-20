@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from kicad_tools.validate.mask_copper import MaskCopperAssessment
 
+from .parity import SchematicParityStatus, schematic_parity_status
 from .violation import DRCViolation, Location, Severity, ViolationType
 
 if TYPE_CHECKING:
@@ -44,6 +45,42 @@ class DRCReport:
     #: Deliberately NOT part of ``violations`` -- see the class docstring.
     unconnected_items: list[DRCViolation] = field(default_factory=list)
     mask_copper_assessments: list[MaskCopperAssessment] = field(default_factory=list)
+    #: Board/schematic mismatches from KiCad's ``schematic_parity`` array
+    #: (Issue #7077).  Like :attr:`unconnected_items`, deliberately NOT part
+    #: of ``violations``; entries keep their kicad-cli severity.
+    schematic_parity: list[DRCViolation] = field(default_factory=list)
+    #: Whether kicad-cli actually ran the parity checks: ``True``/``False``
+    #: when this process ran kicad-cli and saw its output, ``None`` when
+    #: unknown (a report loaded from disk -- an empty ``schematic_parity``
+    #: array cannot tell "clean" from "never ran").
+    schematic_parity_ran: bool | None = None
+    #: Why parity did NOT RUN, when the run knows the cause (Issue #7147).
+    schematic_parity_reason: str | None = None
+    #: The schematic kicad-cli ran parity against, when known (Issue #7147).
+    schematic_parity_schematic: str | None = None
+    #: Manufacturer/tier id whose rules produced this report (issue #7153).
+    #: Parsed from the kct-check JSON ``manufacturer`` key; ``None`` for
+    #: kicad-cli reports, which do not record one.
+    manufacturer: str | None = None
+    #: sha256 of the checked PCB's raw bytes, from the report's top-level
+    #: ``pcb_sha256`` key (issue #7190).  ``kct check --output`` writes it;
+    #: ``None`` when absent (kicad-cli reports, older kct reports).  Binds
+    #: the report to the PCB content it describes -- see
+    #: :mod:`kicad_tools.drc.report_binding`.
+    pcb_sha256: str | None = None
+    #: The kct-check JSON ``fabrication_overrides`` block (board-local paid
+    #: factory options the report was checked under), or ``None``.
+    fabrication_overrides: dict | None = None
+
+    @property
+    def schematic_parity_status(self) -> SchematicParityStatus:
+        """PASSED / FAILED / NOT RUN, derived in one place (Issue #7077)."""
+        return schematic_parity_status(
+            self.schematic_parity,
+            self.schematic_parity_ran,
+            self.schematic_parity_reason,
+            self.schematic_parity_schematic,
+        )
 
     @property
     def passed(self) -> bool:
@@ -73,6 +110,41 @@ class DRCReport:
             *self.unconnected_items,
             *(v for v in self.violations if v.type == ViolationType.UNCONNECTED_ITEMS),
         ]
+
+    def connectivity_errors(self) -> list[DRCViolation]:
+        """Return the unwaived, error-severity connectivity entries (Issue #7188).
+
+        :meth:`connectivity_items` filtered by :attr:`DRCViolation.is_error`,
+        covering both the KiCad JSON shape (:attr:`unconnected_items`) and the
+        text ``.rpt`` shape (opens inside :attr:`violations`).  This is the
+        single definition of "this board has blocking opens" shared by
+        ``kct drc``, export preflight and the manufacturing package.
+        """
+        return [v for v in self.connectivity_items() if v.is_error]
+
+    def blocking_items(self) -> list[DRCViolation]:
+        """Return every finding that should block fabrication (Issue #7188).
+
+        That is :attr:`errors` (error-severity geometric violations, which for
+        a text ``.rpt`` already include its opens) plus the error-severity
+        entries of :attr:`unconnected_items` (KiCad JSON opens).  The two
+        sources are disjoint by construction, so nothing is double counted.
+
+        :attr:`error_count` / :attr:`passed` deliberately keep their
+        geometric-only meaning (#4498); this is the wider gate count.
+
+        Not included, on purpose:
+
+        * :attr:`schematic_parity` -- parity has its own PASSED / FAILED /
+          NOT RUN gate (:attr:`schematic_parity_status`, #7077).
+        * :attr:`mask_copper_assessments` -- already gated by :attr:`passed`.
+        """
+        return [*self.errors, *(v for v in self.unconnected_items if v.is_error)]
+
+    @property
+    def blocking_count(self) -> int:
+        """Number of :meth:`blocking_items` (Issue #7188)."""
+        return len(self.blocking_items())
 
     @property
     def error_count(self) -> int:
@@ -154,6 +226,11 @@ class DRCReport:
             # Connectivity relationships are not geometric violations and
             # are carried through the geometric filter pipeline untouched.
             unconnected_items=list(self.unconnected_items),
+            schematic_parity=list(self.schematic_parity),
+            schematic_parity_ran=self.schematic_parity_ran,
+            schematic_parity_reason=self.schematic_parity_reason,
+            schematic_parity_schematic=self.schematic_parity_schematic,
+            pcb_sha256=self.pcb_sha256,
         )
 
     def summary(self) -> dict:
@@ -286,6 +363,14 @@ def parse_text_report(content: str, source_file: str = "") -> DRCReport:
             current_violation["severity"] = Severity.from_string(rule_match.group(2))
             continue
 
+        # Severity line without a rule: "Local override; warning" (kicad-cli 10
+        # writes it for e.g. via_dangling).  Without this the violation kept
+        # the default ERROR severity (Issue #7170).
+        override_match = re.match(r"\s+Local override;\s*(error|warning)", line, re.IGNORECASE)
+        if override_match:
+            current_violation["severity"] = Severity.from_string(override_match.group(1))
+            continue
+
         # Location line: @(x mm, y mm): description
         loc_match = re.match(r"\s+@\s*\(\s*([\d.]+)\s*mm\s*,\s*([\d.]+)\s*mm\s*\):\s*(.+)", line)
         if loc_match:
@@ -415,7 +500,21 @@ def _parse_kct_check_json(data: dict, source_file: str = "") -> DRCReport:
             MaskCopperAssessment.from_dict(a) for a in data.get("mask_copper_assessments", [])
         ],
         footprint_errors=0,
+        manufacturer=_optional_str(data.get("manufacturer")),
+        pcb_sha256=_optional_str(data.get("pcb_sha256")),
+        fabrication_overrides=(
+            data["fabrication_overrides"]
+            if isinstance(data.get("fabrication_overrides"), dict)
+            else None
+        ),
     )
+
+
+def _optional_str(value: object) -> str | None:
+    """Return a stripped non-empty string, else ``None``."""
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
 
 
 def _parse_kicad_cli_json(data: dict, source_file: str = "") -> DRCReport:
@@ -432,16 +531,19 @@ def _parse_kicad_cli_json(data: dict, source_file: str = "") -> DRCReport:
 
     violations: list[DRCViolation] = []
     unconnected: list[DRCViolation] = []
+    parity: list[DRCViolation] = []
 
     # KiCad stores connectivity relationships in a sibling top-level array,
     # not in ``violations``.  Both are parsed through the same typed
     # representation, but they land in *separate* collections: merging them
     # would silently redefine every geometric-DRC consumer of
     # ``DRCReport.violations`` / ``error_count`` as a combined
-    # geometry+connectivity check (issue #4498).
-    for item, is_connectivity in [
-        *((v, False) for v in data.get("violations", [])),
-        *((u, True) for u in data.get("unconnected_items", [])),
+    # geometry+connectivity check (issue #4498).  Schematic-parity findings
+    # get their own collection for the same reason (issue #7077).
+    for item, bucket in [
+        *((v, violations) for v in data.get("violations", [])),
+        *((u, unconnected) for u in data.get("unconnected_items", [])),
+        *((p, parity) for p in data.get("schematic_parity", [])),
     ]:
         type_str = item.get("type", "unknown")
         message = item.get("description", "")
@@ -513,10 +615,7 @@ def _parse_kicad_cli_json(data: dict, source_file: str = "") -> DRCReport:
         from kicad_tools.feedback import generate_drc_suggestions
 
         violation.suggestions = generate_drc_suggestions(violation)
-        if is_connectivity:
-            unconnected.append(violation)
-        else:
-            violations.append(violation)
+        bucket.append(violation)
 
     return DRCReport(
         source_file=source_file,
@@ -525,6 +624,8 @@ def _parse_kicad_cli_json(data: dict, source_file: str = "") -> DRCReport:
         violations=violations,
         footprint_errors=data.get("footprint_errors", 0),
         unconnected_items=unconnected,
+        schematic_parity=parity,
+        pcb_sha256=_optional_str(data.get("pcb_sha256")),
     )
 
 
@@ -557,13 +658,30 @@ def _extract_values(data: dict, message: str) -> None:
         data["actual_value_mm"] = float(width_match.group(2))
         return
 
-    # Pattern: "min X.XXXX mm; actual Y.YYYY mm" (kicad-cli 10 hole-to-hole wording)
+    # Pattern: "min X.XXXX mm; actual Y.YYYY mm" (kicad-cli 10 hole-to-hole
+    # wording), also with words between ``min`` and the number -- "min
+    # diameter 0.6000 mm; actual 0.4000 mm" (via_diameter) and "min hole
+    # 0.3000 mm; actual ..." (drill_out_of_range).  Issue #7170.
     min_actual_match = re.search(
-        r"\bmin(?:imum)?\s+([\d.]+)\s*mm.*?actual\s+(-?[\d.]+)\s*mm", message, re.IGNORECASE
+        r"\bmin(?:imum)?\s+(?:[a-z]+\s+)*?([\d.]+)\s*mm.*?actual\s+(-?[\d.]+)\s*mm",
+        message,
+        re.IGNORECASE,
     )
     if min_actual_match:
         data["required_value_mm"] = float(min_actual_match.group(1))
         data["actual_value_mm"] = float(min_actual_match.group(2))
+        return
+
+    # Pattern: "max hole X.XXXX mm; actual Y.YYYY mm" (upper-bound constraints,
+    # e.g. drill_out_of_range on a too-large hole).  Issue #7170.
+    max_actual_match = re.search(
+        r"\bmax(?:imum)?\s+(?:[a-z]+\s+)*?([\d.]+)\s*mm.*?actual\s+(-?[\d.]+)\s*mm",
+        message,
+        re.IGNORECASE,
+    )
+    if max_actual_match:
+        data["required_value_mm"] = float(max_actual_match.group(1))
+        data["actual_value_mm"] = float(max_actual_match.group(2))
         return
 
 

@@ -73,12 +73,12 @@ kct bom project.kicad_sch --format csv --group
 
 # Run ERC (requires kicad-cli)
 kct erc project.kicad_sch
-kct erc project.kicad_sch --strict
+kct erc project.kicad_sch --errors-only
 
 # Run DRC with manufacturer rules
 kct drc board.kicad_pcb
 kct drc board.kicad_pcb --mfr jlcpcb
-kct drc --compare  # Compare manufacturer rules
+kct mfr compare  # Compare manufacturer rules
 ```
 
 ### Python API
@@ -198,7 +198,7 @@ Or configure Claude Desktop by hand (`~/Library/Application Support/Claude/claud
 ```
 
 Available MCP tools:
-- **Analysis**: `analyze_board`, `get_drc_violations`, `measure_clearance`
+- **Analysis**: `board_summary`, `get_drc_violations`, `measure_clearance`
 - **Export**: `export_gerbers`, `export_bom`, `export_assembly`
 - **Placement**: `placement_analyze`, `placement_suggestions`
 - **Sessions**: `start_session`, `query_move`, `apply_move`, `commit`, `rollback`
@@ -366,8 +366,8 @@ Run design rule checks without requiring kicad-cli:
 # Check against manufacturer rules
 kct check board.kicad_pcb --mfr jlcpcb --format json
 
-# Check with custom rules
-kct check board.kicad_pcb --clearance 0.15 --trace-width 0.2
+# Check against a 4-layer, 2 oz manufacturer rule set
+kct check board.kicad_pcb --mfr jlcpcb --layers 4 --copper 2
 ```
 
 Python API:
@@ -415,7 +415,7 @@ pcb.save("optimized.kicad_pcb")
 
 CLI usage:
 ```bash
-kct placement board.kicad_pcb --optimize --iterations 1000
+kct placement optimize board.kicad_pcb --iterations 1000
 ```
 
 ### Trace Optimization
@@ -450,9 +450,6 @@ kct datasheet download STM32F103C8T6 -o datasheets/
 
 # Convert PDF to markdown
 kct datasheet convert datasheet.pdf -o datasheet.md
-
-# Extract pin tables
-kct datasheet extract-pins datasheet.pdf
 
 # Extract images and tables
 kct datasheet extract-images datasheet.pdf -o images/
@@ -609,7 +606,12 @@ full list (every command and subcommand) lives in
 | `kct build-native` | Build the C++ router backend for 10-100x faster routing |
 | `kct mcp serve` | Start MCP server for AI agent integration |
 
-All commands support `--format json` for machine-readable output.
+Every `kct` subcommand that produces a result accepts `--format json` for
+machine-readable output (some older commands also keep `--json` as a legacy
+alias). A few commands are deliberately exempt -- e.g. `interactive`,
+`mcp serve` and `run` -- see
+[Machine Output](docs/reference/machine-output.md) for the inventory,
+exemptions and per-command JSON shapes.
 
 ### PCB Tools
 
@@ -650,117 +652,13 @@ All commands support `--format json` for machine-readable output.
 | `mcp` | MCP server for AI agent integration |
 | `pcb.layout` | Layout preservation for PCB regeneration |
 
-## What's New (v0.21.1, September 2026)
+## What's New
 
-Recent additions an agent reading these docs cold should know about. Older
-entries live in [CHANGELOG.md](CHANGELOG.md).
-
-- **Routing, validation and CLI hot-path performance sweep** (v0.21.0) —
-  measured removal of overhead across the router, validator, placement and
-  CLI: `import kicad_tools` 1.46 s → 0.34 s user CPU, the A\* neighbor-batch
-  cost ~3.9× faster with identical routes, the placement C++ path ~64 s →
-  0.55 s, board-05 LVS pin resolution ~20× faster. Local measurements; the
-  hosted-CI median comparison remains open on #5240.
-- **MCP server requires the mcp 2.x SDK** (v0.21.0, breaking for `[mcp]`
-  extra users) — `FastMCP` was renamed to `mcp.server.mcpserver.MCPServer`
-  and the `fastmcp` pin is now `>=4,<5`. In-process API callers using the
-  stdio `MCPServer` dataclass are unaffected.
-- **Copper-LVS and `kct net-status` decide on physical copper contact**
-  (v0.21.0) — a net owning a zone somewhere no longer suppresses its `open`
-  findings, copper contact is decided over a segment's full length, dangling
-  tracks are detected by copper-cap contact, and `kct check` gains a
-  geometry-based copper-slit detector.
-- **Pour bridges terminate on existing same-net copper** (v0.21.0) — pour
-  repair reuses an existing same-net via barrel or through-hole pad as the
-  bridge terminus instead of adding a new via; board07 pour repair is now
-  frame-independent with native-refill stability.
-- **Legacy `(module …)` footprints and rotated pads are honored everywhere**
-  (v0.21.0) — KiCad-4-era boards are recognized by every router/zones/DRC/LVS/
-  panel tree-walk, and non-cardinal pad rotation is applied in every obstacle,
-  clearance and thermal consumer so a rotated pad is priced identically
-  everywhere.
-- **Slimmer sdist and honest failure modes** (v0.21.1) — the sdist drops from
-  127 MB to 18 MB (board artifacts and evidence trees excluded; the wheel is
-  unchanged), `kct route` on board06 refuses a foreign input PCB with a named
-  error instead of emitting misleading `UNREPAIRED` lines, and the
-  access-witness sidecar is written even on a wall-clock deadline kill.
-- **Search-time HV pairwise clearance in the lattice engine** (v0.20.0) — with
-  `--voltage-map`, the lattice router now *avoids* HV↔LV proximity during
-  search instead of merely failing the post-route gate; KiCad keepout rule
-  areas are honored too, with a per-net-class `spatial_keepouts` sidecar
-  filter for declared HV-domain segregation.
-- **`kct sch tidy`** (v0.20.0) — headless autoplace of Reference/Value fields
-  (bbox-relative, rotation/mirror-aware) with `--refs`, `--threshold`,
-  `--dry-run`, and a strict cosmetic-only guarantee (netlist/BOM/ERC provably
-  unchanged). Pairs with the new `sch_fields` advisory lint in `kct check`
-  (`sch_field_offset` / `sch_field_overlap`).
-- **`kct net-status` strict by default** (v0.20.0) — connectivity now uses
-  real copper geometry (kicad-cli semantics) instead of endpoint proximity,
-  eliminating false opens on poured nets; `--legacy-proximity` restores the
-  old model, and `--strict --why` now compose.
-- **`kct pcb add-3d-models --refresh`** (v0.20.0) — re-resolve and rewrite
-  existing `(model ...)` refs in place through the current tier chain
-  (library → variant → substitution → LCSC sidecar); default remains
-  byte-identical insert-only.
-- **Board-edge keepout auto-resolution** (v0.20.0) — in-process routing via
-  `load_pcb_for_routing` now derives the board-edge keepout from the
-  manufacturer's `min_edge_clearance` automatically (explicit `0` opts out),
-  matching what the CLI already did.
-- **HV-isolation design loop** (v0.19.0) — `kct creepage --voltage-map` derives
-  each conductor pair's required creepage from its own `|ΔV|` instead of one
-  group working voltage; `kct zones hv-keepout` generates plane voids so inner
-  pours clear HV nets; `kct optimize-placement --voltage-map` / `--hv-domains`
-  place HV parts with a hard creepage-keepout feasibility term. The
-  `/kct:hv-isolation-loop` skill sequences the whole loop.
-- **`kct creepage-export-rules`** (since v0.19.0) — export voltage-domain
-  netclasses plus pairwise HV clearance `(rule ...)` clauses into the project so
-  `kicad-cli pcb drc` enforces creepage too, not just `kct creepage`.
-- **`kct check --emit-dru` / `--emit-drc-constraints`** (v0.19.0) — emit
-  `.kicad_dru` / `.kicad_pro` sidecars from the checker's already-resolved
-  `--mfr` floors, so `kicad-cli pcb drc` and `kct check` reason over identical
-  rules by construction.
-- **`kct analyze component-stress`** (v0.20.0) — operating-state MOSFET
-  VDS/VGS gate: evaluates `V(D)-V(S)` / `V(G)-V(S)` per state of an explicit
-  `--states` manifest against sourced `Vds_max`/`Vgs_max` symbol fields. No
-  circuit-state inference — an undeclared state, unresolved D/G/S pin role,
-  unbound terminal or uncited rating is reported `UNRESOLVED` (a release
-  blocker), never a silent pass, and a creepage waiver can never suppress it.
-  Exact MPN and distinct, valid terminal-pin assignments are required;
-  conflicting rating or identity fields remain unresolved. The
-  census includes identifiable MOSFETs in child sheets; reused sheets, duplicate
-  references, and repeated local labels without proven global connections remain
-  unresolved. State/net aliases and duplicate JSON/YAML
-  keys cannot overwrite operating data. A project-specific coverage checklist
-  must be nonempty, and structured states cannot mix `nets:` with shorthand
-  potentials. These checks do not infer circuit states or qualify hardware.
-- **`kct analyze electrical-rating`** (v0.19.0) — deterministic, advisory
-  LED-overcurrent and capacitor voltage-derating checks sourced from schematic
-  fields; parts missing ratings are skipped, never failed.
-- **`kct fix-vias` off-pad relocation** (v0.19.0) — relocate via-in-pad and
-  plane-stitch vias off-pad while preserving connectivity, with THT
-  hole-to-hole clearance checking and multi-branch relocation.
-- **`kct doctor`** (v0.19.0) — diagnose an installation's version-record drift
-  (dependency pin, `.kct/install-metadata.json`, CLAUDE.md marker block).
-  Advisory by default; `--strict` exits non-zero so it can gate CI.
-- **`kct route --complete`** (since v0.19.0) — targeted completion pass: detect
-  the still-unconnected links and route only those, treating every other net's
-  copper as a fixed obstacle. Implies `--preserve-existing` and never deletes
-  copper; skip pour-carried nets with `--complete-exclude-nets`. See
-  [CLI Reference → route](docs/reference/cli.md#route).
-- **`kct creepage` HV audit + `kct analyze current-sense`** (v0.18.0) — per-pair
-  creepage census against IEC 60664-1 / 62368-1 tables (slot-aware, clearance
-  and creepage reported as distinct values), and an analog lint for
-  sense↔high-current parallel runs, sense-loop area, and Kelvin-tap integrity.
-  A below-standard HV pair fails the `kct audit` gate.
-- **Real `--nets NET[,NET...]` on `route` / `route-auto`** (v0.18.0) — route
-  only the listed nets (inverse of `--skip-nets`); non-listed copper is treated
-  as a fixed obstacle.
-- **Experimental routing substrates** (v0.17.0) — `--route-engine lattice`
-  (adaptive octilinear; 45°-legal copper by construction) and `--route-engine mesh` (constrained-Delaunay navmesh), both default **off**. `--route-engine grid` remains the default and is unchanged. See
-  [Routing Guide](docs/guides/routing.md).
-- **`kct net-status --why`** (v0.17.0) — ranked fix recommendations explaining
-  why each incomplete net is stuck, with pin-order-verified reversed-bundle
-  detection.
+Release notes live in [CHANGELOG.md](CHANGELOG.md) (one section per release,
+newest first) and on the
+[GitHub Releases page](https://github.com/rjwalters/kicad-tools/releases).
+Changes merged since the last release are collected as fragments under
+[`changelog.d/`](changelog.d/) until the next release assembles them.
 
 ## Features
 
@@ -857,20 +755,44 @@ uv run ruff format .
    already immune (it runs `--no-incremental`); see
    [`docs/contributing/development.md`](docs/contributing/development.md#the-stale-mypy_cache-trap).
 
-4. **Initialize KiCad's global library tables before trusting native ERC/DRC
-   results.** `kct check`'s native ERC leg (and the board 03/04 reviewed
-   paid-drill gates, which run `kct check` with `--strict`) shell out to
-   `kicad-cli`, which reads the host's `fp-lib-table`/`sym-lib-table` under
-   `~/.config/kicad/<version>/` (GUI-provisioned on first launch — a fresh
-   worktree or CI container has neither). Without them, kicad-cli raises
-   ordinary `lib_symbol_issues`/`footprint_link_issues` strict-mode ERC
-   warnings that read identically to a genuine footprint/symbol-link defect
-   in the schematic (issue #5860). CI always runs this first, so the
-   committed `boards/*/output/check-report.json` files are unaffected; run
-   it yourself once per host before relying on `kct check` locally:
+4. **Know where kicad-cli's library tables come from before trusting native
+   ERC/DRC results.** kicad-cli resolves stock nicknames (`Resistor_SMD:`)
+   through the *global* `fp-lib-table`/`sym-lib-table` in its config home,
+   which the GUI writes on first launch -- or never, on a fresh host, CI
+   container or `docker run --user 0:0`. Without them every stock footprint
+   becomes a `lib_footprint_issues` DRC warning and every stock symbol an ERC
+   warning that reads like a real defect (issues #5860, #6962; board 03 once
+   gained 37 of them). The library configuration is part of the pinned
+   toolchain, not of the host:
+
+   - **Where it comes from.** `src/kicad_tools/data/kicad-config/10.0/` holds
+     flat copies of the stock tables shipped in CI's pinned image (CI's
+     `KICAD_IMAGE` digest in `.github/workflows/ci.yml`).
+   - **How producers isolate it.** Every evidence producer (`kct readiness`,
+     `scripts/boards/refresh_readiness.py`, the `scripts/boards/regenerate_*`
+     scripts) and every KiCad CI job runs kicad-cli with a scratch
+     `KICAD_CONFIG_HOME` holding exactly those tables, and never reads or
+     writes your GUI config. kct's Docker fallback (`KCT_KICAD_DOCKER=1`)
+     runs the same pinned digest, not the floating `kicad/kicad:10.0` tag.
+   - **Native evidence needs the pinned toolchain.** Producers refuse (exit 2,
+     nothing written) a kicad-cli other than the image's release (10.0.6), and
+     refuse any DRC report with `lib_footprint_issues`. On a host with another
+     KiCad release, route kicad-cli through the image:
+     `KCT_KICAD_DOCKER=1 uv run kct readiness boards/<board> --verify --checked-at <ISO>`.
+     A fixed `--checked-at` makes two runs byte-identical.
+   - **How to check it.**
+
+     ```bash
+     uv run python -m kicad_tools.cli.kicad_toolchain --check            # host kicad-cli
+     KCT_KICAD_DOCKER=1 uv run python -m kicad_tools.cli.kicad_toolchain --check
+     ```
+
+   For ad-hoc `kct check` runs outside a producer, point the current shell
+   at the pinned tables (CI's container jobs do this in their "Initialize
+   stock KiCad libraries" step):
 
    ```bash
-   uv run python scripts/ci/init_kicad_libraries.py
+   eval "$(python3 scripts/ci/init_kicad_libraries.py --shell)"
    ```
 
 The build's `nanobind` dependency is composed into the default dev
@@ -991,6 +913,7 @@ weekly.
 ### Autorouters
 
 - **[KiCadRoutingTools](https://github.com/drandyhaas/KiCadRoutingTools)** (MIT, Python + Rust, 488★) -- **Benchmarked against us.** The closest peer to `kct route`: octilinear multi-layer A\* with via insertion, diff pairs, length matching, BGA/QFN fanout and plane pours, shipped as both a KiCad 9/10 action plugin and a CLI. Benchmarked head-to-head against us on eight demo boards under one shared `kicad-cli` referee: it is faster and completes more nets on the sparse and medium boards, while on the dense boards it emits literal shorts where we instead run out of time. Our evaluation: [docs/research/kicad-routing-tools-comparison.md](docs/research/kicad-routing-tools-comparison.md).
+- **[TraceMaker](https://github.com/DingoOz/TraceMaker)** (GPL-3.0-or-later, C++20 + CUDA, 42★) -- **Benchmarked against us.** C++20/CUDA KiCad 9/10 router that reads and writes `.kicad_pcb` directly and is judged by `kicad-cli` DRC. Octilinear-lattice A\* with exact legality checks, negotiated rip-up, an 8-variant deterministic portfolio under a `--work` budget, min-cost-flow escape-corridor reservation, a nogood cache, coupled diff-pair search, and a SQLite bandit that learns which variant to pick across runs; the GPU only accelerates cost fields. On PCBWorld D3 the circuit-skills author reports 0.99 / 1.00 / 0.90 clean on the small / medium / large splits, against about 0.7 / 0.7 / 0.2 for Freerouting 2.2.4 -- third-party, single 60 s runs, not reproduced by us, and on PCBench boards TraceMaker was developed against (its own held-out figure is 73-78% clean). Its "clean" also excludes DRC errors already in the input board, looser than our 0-DRC bar. Days old; copyleft, so ideas only, and run only as an external binary. Our evaluations: [docs/research/kct-route-escape-flow-experiment.md](docs/research/kct-route-escape-flow-experiment.md), [benchmarks/external/fleet_routers/verdict.md](benchmarks/external/fleet_routers/verdict.md).
 - **[freerouting](https://github.com/freerouting/freerouting)** (GPL-3.0, Java, 2068★) -- the long-standing Specctra DSN/SES autorouter and the baseline most KiCad users try first. Has a headless CLI, but the DSN round-trip is a lossy interchange boundary: it routes a translated view of the board rather than the `.kicad_pcb` itself. We operate on the board file directly, which is what lets LVS and the manufacturing gates run against the same artifact that gets fabricated. PCBWorld's paper reports it as the strongest published rule-based baseline on real boards (Clean Pass 0.80 / 0.78 on D3-A / D3-B). fastroute is a faster Rust port of it with a byte-identical parity mode.
 - **[OrthoRoute](https://github.com/bbenchoff/OrthoRoute)** (MIT, Python + CUDA/Metal, 411★) -- GPU-accelerated PathFinder routing, with plugin and headless modes. Its author is explicit that it targets a narrow class of very large, dense, highly regular multilayer backplanes and BGA escape patterns and does poorly on typical boards -- the opposite end of the board-size spectrum from our demo fleet.
 - **[DeepPCB KiCad plugin](https://github.com/instadeepai/deeppcb-kicad-plugin)** (Apache-2.0, Python, 66★) -- **Evaluated and not adopted.** An open-source plugin in front of a closed, credit-metered cloud router. The plugin is local; the routing is not. It requires an account and API key, so it cannot participate in an offline or air-gapped CI pipeline. DeepPCB's own published benchmark numbers are recorded in `benchmarks/external/boards.toml` for side-by-side comparison. Our evaluations: [benchmarks/external/README.md](benchmarks/external/README.md), [benchmarks/external/results/report.md](benchmarks/external/results/report.md).
@@ -1000,13 +923,13 @@ weekly.
 
 - **[atopile](https://github.com/atopile/atopile)** (MIT, Python, 3964★) -- **Ideas adopted.** A language and compiler for describing boards as code (`.ato`), with constraint solving, a package registry and parametric part selection via its Faebryk library; it emits a netlist and updates a KiCad layout, but deliberately stops at "place and route in KiCad". That is exactly where we start, which makes the two complementary rather than competing. Our MCP server exists because of this evaluation. Our evaluations: [docs/research/atopile-research-synthesis.md](docs/research/atopile-research-synthesis.md), [docs/research/faebryk-component-library.md](docs/research/faebryk-component-library.md), [docs/research/atopile-constraint-solving.md](docs/research/atopile-constraint-solving.md), [docs/research/atopile-interface-patterns.md](docs/research/atopile-interface-patterns.md), [docs/research/atopile-layout-reuse.md](docs/research/atopile-layout-reuse.md), [docs/research/atopile-lsp-analysis.md](docs/research/atopile-lsp-analysis.md), [docs/research/atopile-mcp-analysis.md](docs/research/atopile-mcp-analysis.md), [docs/research/atopile-package-registry.md](docs/research/atopile-package-registry.md), [docs/research/atopile-error-handling.md](docs/research/atopile-error-handling.md).
 - **[SKiDL](https://github.com/devbisme/skidl)** (MIT, Python, 1675★) -- the original Python-as-schematic-capture tool: a program describes the circuit and SKiDL emits netlists, XML BOMs and (for KiCad 6-10) editable schematics, with its own ERC. Another upstream producer of the files we consume.
-- **[tscircuit](https://github.com/tscircuit/tscircuit)** (MIT, TypeScript, 2776★) -- **Evaluated and not adopted.** "React for Electronics" -- circuits described in TypeScript/React and compiled to its own Circuit JSON. Its `circuit-json-to-kicad` converter emits `.kicad_sch`, `.kicad_pcb` (with traces, vias and pours) and `.kicad_pro`, and `kicad-to-circuit-json` reads them back, so it is an upstream producer of the files we consume, like atopile and SKiDL. **Gated and not yet usable as a front end**: five representative designs were run through `kct check --mfr`, LVS and `kicad-cli pcb drc --refill-zones`, before and after re-routing with `kct route`, and all five failed. The blocking defect is that its schematic and PCB converters name the same net differently, so no emitted project can pass LVS at all; vias, netclass and silkscreen defaults also sit below every mainstream fab floor. Our parser reads the files without complaint, and `kct route` produced opens where tscircuit's own autorouter produced shorts. Six upstream defects recorded with reproducers; the relation stays upstream/complementary and all six look fixable. Our evaluation: [docs/research/tscircuit-evaluation.md](docs/research/tscircuit-evaluation.md).
+- **[tscircuit](https://github.com/tscircuit/tscircuit)** (MIT, TypeScript, 2776★) -- **Evaluated and not adopted.** "React for Electronics" -- circuits described in TypeScript/React and compiled to its own Circuit JSON. Its `circuit-json-to-kicad` converter emits `.kicad_sch`, `.kicad_pcb` (with traces, vias and pours) and `.kicad_pro`, and `kicad-to-circuit-json` reads them back, so it is an upstream producer of the files we consume, like atopile and SKiDL. **Gated and not yet usable as a front end**: five representative designs were run through `kct check --mfr`, LVS and `kicad-cli pcb drc --refill-zones`, before and after re-routing with `kct route`, and all five failed. The blocking defect is that its schematic and PCB converters name the same net differently, so no emitted project can pass LVS at all; vias, netclass and silkscreen defaults also sit below every mainstream fab floor. Our parser reads the files without complaint, and `kct route` produced opens where tscircuit's own autorouter produced shorts. Six upstream defects were recorded with reproducers and re-verified on upstream HEAD (2026-10-18): three confirmed and tracked upstream, two fixed or covered upstream, one not a bug. The relation stays upstream/complementary. Our evaluation: [docs/research/tscircuit-evaluation.md](docs/research/tscircuit-evaluation.md).
 - **[component-importer-for-kicad](https://github.com/robertxdx/component-importer-for-kicad)** (MIT, Python, 55★) -- **Evaluated and not adopted.** Evaluated as a vendor-ZIP (SnapEDA / Ultra Librarian) ingestion backend for symbol and footprint import. Verdict was borrow-with-refactor rather than vendor: its headless modules are PyQt6-free and close to the surface we need, but a clean-room re-implementation of roughly 600 LoC plus a `kct ingest-zip` CLI is the smaller change. Not built yet. Our evaluation: [docs/research/component-importer-for-kicad-evaluation.md](docs/research/component-importer-for-kicad-evaluation.md).
 
 ### Agent and MCP interfaces
 
 - **[Zeo](https://github.com/zeodotdev/zeo)** (AGPL-3.0, C++, 31★) -- a KiCad fork with an integrated AI agent sidebar and MCP server. Takes a complementary approach: live editor manipulation via IPC vs. our offline file-based analysis and optimization.
-- **[Konnect](https://github.com/mixelpixx/Konnect)** (AGPL-3.0, Rust, 841★) -- **Ideas adopted.** A single-binary native KiCad 10 plugin exposing a very large LLM tool surface (217 tools) across schematic, layout, routing, placement, review and manufacturing. AGPL means no code can move between it and this MIT repo in either direction, so our engagement is capability-level only: we audited its connectivity primitives, its tool-economy design and its design-rule handling against our own surface. Five of its six connectivity primitives we already had; the sixth (near-miss auto-snap repair) was a real gap. Our evaluations: [docs/research/konnect-connectivity-audit.md](docs/research/konnect-connectivity-audit.md), [docs/konnect-item1-toolset-economy-audit.md](docs/konnect-item1-toolset-economy-audit.md), [docs/konnect-item8-design-rules-audit.md](docs/konnect-item8-design-rules-audit.md).
+- **[Konnect](https://github.com/mixelpixx/Konnect)** (AGPL-3.0, Rust, 1200★) -- **Ideas adopted.** A single-binary native KiCad 10 plugin exposing a very large LLM tool surface (228 tools in 21 toolsets) across schematic, layout, routing, placement, review and manufacturing. AGPL means no code can move between it and this MIT repo in either direction, so our engagement is capability-level only: we audited its connectivity primitives, its tool-economy design and its design-rule handling against our own surface. Five of its six connectivity primitives we already had; the sixth (near-miss auto-snap repair) was a real gap. Re-checked at v0.13: four new ideas adopted as follow-ups (visual baselines, truth-contract audit, honest-schema CI guard, SES provenance). Our evaluations: [docs/research/konnect-connectivity-audit.md](docs/research/konnect-connectivity-audit.md), [docs/konnect-item1-toolset-economy-audit.md](docs/konnect-item1-toolset-economy-audit.md), [docs/konnect-item8-design-rules-audit.md](docs/konnect-item8-design-rules-audit.md), [docs/research/konnect-v013-delta.md](docs/research/konnect-v013-delta.md).
 - **[copperhead](https://github.com/copperheadhq/copperhead)** (Apache-2.0, TypeScript, 312★) -- **Ideas adopted.** "cursor for circuit boards": a natural-language brief drives direct edits to `.kicad_sch` / `.kicad_pcb`, gated by an LLM-free `check` and wrapped in a git snapshot that auto-rolls-back on failure. It does not route, and verifies with `kicad-cli` ERC/DRC only -- no LVS, no manufacturing cross-gate. Its *process* design (design memory as committed artifacts, a constraints registry, a per-run audit trail) is the part worth borrowing. Note: moved from `chouhanindustries/copperhead` since our note was written. Our evaluation: [docs/research/copperhead-workflow-ideas.md](docs/research/copperhead-workflow-ideas.md).
 - **[Seeed-Studio/kicad-mcp-server](https://github.com/Seeed-Studio/kicad-mcp-server)** (no `LICENSE` committed, Python, 135★) -- the closest peer to `kct mcp serve`: an MCP server that reads schematic and PCB files offline (shelling out to `kicad-cli` for validation) to trace pin-level connections and edit designs. Overlaps our read/analyze tools; carries no router, LVS or fab-readiness gates. Its README claims MIT but the repo commits no LICENSE file, so we treat it as all-rights-reserved and copy nothing.
 - **[circuit-skills](https://github.com/punkfab/circuit-skills)** (no `LICENSE` committed, Python, 9★) -- Claude Code skills for code-driven electronics: ngspice/Falstad circuit simulation, a tscircuit-placement -> KiCad IPC (`kipy`) route-and-DRC loop, board/enclosure fit co-design and 3D renders. Its `route_eval` harness now runs five routing backends on any KiCad board (two Freerouting versions, TraceMaker, the tscircuit router, and an experimental `srj-legal` that has TraceMaker re-route what KiCad's DRC rejects in tscircuit output) and keeps the best, with an optional fastroute backend and a PCBWorld D3 harness; it self-reports 0.98 Clean Pass on D3-A for `srj-legal`, unreproduced by us. Overlaps our `/kct:*` skills, but still assumes the tail is hand-finished in KiCad -- the opposite of our fully automated bar. No LICENSE committed, so ideas only; mining tracked in issue #5886. Our evaluations: [docs/research/circuit-skills-evaluation.md](docs/research/circuit-skills-evaluation.md), [docs/research/placement_score_calibration.md](docs/research/placement_score_calibration.md).
@@ -1029,8 +952,7 @@ weekly.
 
 Recorded in the registry with a re-evaluation trigger, deliberately not featured above yet:
 
-- **[TraceMaker](https://github.com/DingoOz/TraceMaker)** (GPL-3.0-or-later, C++20 + CUDA, 42★) -- C++20/CUDA KiCad 9/10 router that reads and writes `.kicad_pcb` directly and is judged by `kicad-cli` DRC. Octilinear-lattice A\* with exact legality checks, negotiated rip-up, an 8-variant deterministic portfolio under a `--work` budget, min-cost-flow escape-corridor reservation, a nogood cache, coupled diff-pair search, and a SQLite bandit that learns which variant to pick across runs; the GPU only accelerates cost fields. On PCBWorld D3 the circuit-skills author reports 0.99 / 1.00 / 0.90 clean on the small / medium / large splits, against about 0.7 / 0.7 / 0.2 for Freerouting 2.2.4 -- third-party, single 60 s runs, not reproduced by us, and on PCBench boards TraceMaker was developed against (its own held-out figure is 73-78% clean). Its "clean" also excludes DRC errors already in the input board, looser than our 0-DRC bar. Days old; copyleft, so ideas only, and run only as an external binary. Our evaluation: [docs/research/kct-route-escape-flow-experiment.md](docs/research/kct-route-escape-flow-experiment.md).
-- **[fastroute](https://github.com/parisxmas/fastroute)** (GPL-3.0, Rust, 73★) -- Rust port of freerouting: Specctra DSN in, SES out, with a `--parity` mode it claims is byte-identical to Freerouting on its 20 benchmark boards. Its own measurements show about 4-5x less wall time (2102 s vs 510 s over those boards, 420 s with PGO) in 20-300 MB instead of 1-2 GB, and it adds fixes for several Freerouting optimizer bugs, multi-start, length tuning, diff pairs and impedance-derived widths. A pcbnew plugin patches the gaps in KiCad's lossy Specctra export (DRU clearances, keepouts, planes). Like freerouting it routes a translated view rather than the board file. Copyleft, so ideas only.
+- **[fastroute](https://github.com/parisxmas/fastroute)** (GPL-3.0, Rust, 73★) -- Rust port of freerouting: Specctra DSN in, SES out, with a `--parity` mode it claims is byte-identical to Freerouting on its 20 benchmark boards. Its own measurements show about 4-5x less wall time (2102 s vs 510 s over those boards, 420 s with PGO) in 20-300 MB instead of 1-2 GB, and it adds fixes for several Freerouting optimizer bugs, multi-start, length tuning, diff pairs and impedance-derived widths. A pcbnew plugin patches the gaps in KiCad's lossy Specctra export (DRU clearances, keepouts, planes). Like freerouting it routes a translated view rather than the board file. Copyleft, so ideas only. Our evaluation: [benchmarks/external/fleet_routers/verdict.md](benchmarks/external/fleet_routers/verdict.md).
 - **[AutoRoute](https://github.com/pingpongshow/AutoRoute)** (MIT, Rust, 0★) -- Rust negotiated-congestion router with an exact-DRC clearance model, a headless CLI and DSN/SES KiCad integration. Recorded rather than featured: 8 commits and no adoption signal yet, so there is nothing stable to measure against.
 - **[Topola](https://codeberg.org/topola/topola)** (MIT, Rust, 33★) -- work-in-progress interactive topological (rubber-band) router and autorouter in Rust, funded through NLnet's NGI0 Entrust fund. Routing topologically before committing geometry is a different shape of search from our grid A\*, and the license is permissive -- but it is pre-release and we have not run it.
 - **[circuit-synth](https://github.com/circuit-synth/circuit-synth)** (MIT, Python, 279★) -- Python-defined circuits (`@circuit` functions over KiCad library symbols and footprints) compiled to KiCad projects, built around Claude Code with slash commands for symbol search and design help. Another upstream producer of the files we consume, in the SKiDL mould; no pushes since March 2026, and we have not run its output through our gates.
@@ -1039,6 +961,18 @@ Recorded in the registry with a re-evaluation trigger, deliberately not featured
 - **[kicad-happy](https://github.com/aklofas/kicad-happy)** (MIT, Python, 1343★) -- agent skills (Claude Code, Codex and others) for design-level review of KiCad projects: power trees computed from feedback dividers, connector-by-connector ESD audits, passive-network checks, SPICE and EMC pre-compliance, plus datasheet and distributor lookups. That is the circuit-level review our `/kct:ee-review` does not yet do; it does not route or gate manufacturing.
 - **[KiCAD-MCP-Server](https://github.com/mixelpixx/KiCAD-MCP-Server)** (MIT, Python + TypeScript, 2592★) -- the most-starred KiCad MCP server: project setup, schematic editing, placement, routing via Freerouting, DRC/ERC, export, custom symbol and footprint generation and JLCPCB parts lookup. It is the MIT predecessor of Konnect, which its authors now say is where new development happens. Not yet compared tool-by-tool with `kct mcp serve`.
 - **[KiCad MCP Pro](https://github.com/oaslananka/kicad-mcp-pro)** (MIT, Python, 119★) -- an MCP server for KiCad with staged permission profiles: a default of 24 read-only review tools, a `build` profile for controlled edits, and a `release` profile for human-gated manufacturing export. Those stages map onto our sign-off gates. It is candid that its SI/PI/EMC/thermal tools are first-order estimates rather than sign-off.
+- **[KiCad AI Assistant](https://github.com/paul356/KiCad-AI-Assistant)** (MIT, Python, 112★) -- a KiCad 10 action plugin that embeds an LLM chat panel inside the editor and exposes a built-in MCP server (also runnable standalone) with schematic and PCB editing, placement, zones and DRC/ERC tools. Live-editor surface, so it sits on the GUI side of our non-goals; read from README only, not run. Our evaluation: [docs/research/reporecon-kicad-ai-sweep.md](docs/research/reporecon-kicad-ai-sweep.md).
+- **[kicad-harness](https://github.com/zxkmm/kicad-harness)** (AGPL-3.0, Python, 33★) -- an Agent Skill plus a Python tool (`kh`) that gives an agent library lookup, region renders to PNG, DRC/ERC, IPC editing of an open board and datasheet-to-footprint generation; its distinctive idea is a repo the agent is expected to edit and push while using it. AGPL: ideas only, read from README only. Our evaluation: [docs/research/reporecon-kicad-ai-sweep.md](docs/research/reporecon-kicad-ai-sweep.md).
+- **[blwfish/kicad-mcp](https://github.com/blwfish/kicad-mcp)** (MIT, Python, 25★) -- an MCP server (18 domain-router tools, 2,000+ tests) that takes an agent from schematic to placed, Freerouting-routed, zoned and panelized board; its own README recommends Freerouting v2.2.3 for routing. Same end-to-end promise as `kct`, routed through an external router. Read from README only. Our evaluation: [docs/research/reporecon-kicad-ai-sweep.md](docs/research/reporecon-kicad-ai-sweep.md).
+- **[mcp-server-kicad](https://github.com/ProductOfAmerica/mcp-server-kicad)** (GPL-3.0, Python, 13★) -- a 109-tool MCP server that edits KiCad files on disk (schematic capture, PCB layout, libraries, ERC/DRC, exports) with Freerouting for routing and an `auto_place_decoupling_cap` helper. File-based like us. GPL: ideas only, read from README only. Our evaluation: [docs/research/reporecon-kicad-ai-sweep.md](docs/research/reporecon-kicad-ai-sweep.md).
+- **[KiCad Copilot](https://github.com/biosshot/kicad-copilot)** (MIT, JavaScript, 16★) -- a file-oriented MCP server (no IPC, no plugin) for schematic generation, a JavaScript placement DSL with PNG/SVG preview, local routing through `eda-copilot-router` with a managed KiCadRoutingTools backend, simple pours, and integrated kicad-happy analysis. Its router is KRT, which we have already benchmarked, so there is no separate router to measure. Read from README only. Our evaluation: [docs/research/reporecon-kicad-ai-sweep.md](docs/research/reporecon-kicad-ai-sweep.md).
+- **[KiPilot MCP](https://github.com/belaszalontai/kipilot-mcp)** (Apache-2.0, Python, 11★) -- a 135-tool MCP server over KiCad 10's official `kicad-python` IPC API, including export jobs, design-rule access and netlist import. Live-GUI session by design, the opposite of our offline stance. Apache-2.0: ideas only. Read from README only. Our evaluation: [docs/research/reporecon-kicad-ai-sweep.md](docs/research/reporecon-kicad-ai-sweep.md).
+- **[traces](https://github.com/usetraces/traces)** (MIT, Python + TypeScript, 6★) -- local, bring-your-own-key tooling for KiCad: a semantic component-sourcing MCP server, a KiCad plugin and a `/src` semantic rule-check skill. Sourcing and schematic review, not layout, so it complements `kct` rather than competing. Read from README only. Our evaluation: [docs/research/reporecon-kicad-ai-sweep.md](docs/research/reporecon-kicad-ai-sweep.md).
+- **[Agentic KiCad Skills](https://github.com/IxTechCrypto/kicad-skills)** (MIT, Python, 6★) -- modular agent skills (board-regime classifier, high-current, high-speed, RF, datasheet-to-footprint) with verification scripts for KiCad 10. Same shape as our `/kct:*` skills; content is design-rule guidance. Read from README only. Our evaluation: [docs/research/reporecon-kicad-ai-sweep.md](docs/research/reporecon-kicad-ai-sweep.md).
+- **[kicad-llm-plugin](https://github.com/jasiek/kicad-llm-plugin)** (MIT, Python, 22★) -- a KiCad plugin that sends the schematic to a chosen local or remote LLM and renders a design-review report (fatal flaws, good practice, nice-to-haves). Review only; no editing. Read from README only. Our evaluation: [docs/research/reporecon-kicad-ai-sweep.md](docs/research/reporecon-kicad-ai-sweep.md).
+- **[IronEmperor](https://github.com/thehengyao/iron-emperor)** (MIT, Python, 11★) -- an LCSC/JLCPCB-centred generator that turns a plain-language brief into a BOM, KiCad project and 3D-printed enclosure through a multi-agent pipeline. Generator, not a layout tool; its value is parts sourcing. Read from README only. Our evaluation: [docs/research/reporecon-kicad-ai-sweep.md](docs/research/reporecon-kicad-ai-sweep.md).
+- **[kicad-agentic-mcp](https://github.com/nevenfo/kicad-agentic-mcp)** (AGPL-3.0, Rust, 5★) -- a Rust MCP server and agentic control layer for KiCad 10 that mixes LLM planning with deterministic tools. Days old, AGPL: ideas only. Listed from its description and licence file; README not studied. Our evaluation: [docs/research/reporecon-kicad-ai-sweep.md](docs/research/reporecon-kicad-ai-sweep.md).
+- **[ai-circuit-design-tests](https://github.com/devbisme/ai-circuit-design-tests)** (no `LICENSE` committed, Python, 6★) -- a third-party test bench that runs AI KiCad tools (copperhead, kicad-happy, kicad-harness, KiCad AI Assistant, kicad-mcp-pro, kicad-mcp-server, Konnect, skidl-skills) on real design prompts and records transcripts, cost and an executive summary per run. kicad-tools is not among the tools tested; the README invites outside evaluations as issues. No LICENSE: all rights reserved, ideas only. Our evaluation: [docs/research/reporecon-kicad-ai-sweep.md](docs/research/reporecon-kicad-ai-sweep.md).
 - **[KiKit](https://github.com/yaqwsx/KiKit)** (MIT, Python, 2038★) -- the standard KiCad panelization tool, as a library, plugin and CLI: regular and oddly-shaped panels, fab-data export from manufacturer presets, stencils, multi-board projects and presentation pages. Overlaps `kct panel` and `kct export`; we have not compared feature or fab-preset coverage.
 - **[kicad-jlcpcb-tools](https://github.com/Bouni/kicad-jlcpcb-tools)** (MIT, Python, 2096★) -- a KiCad plugin that generates JLCPCB Gerbers, drill, BOM and CPL files, and assigns LCSC part numbers to footprints by searching the JLCPCB parts database. A GUI-plugin take on what our JLCPCB export and `/kct:tapeout` BOM checks do headlessly.
 - **[jlcparts](https://github.com/yaqwsx/jlcparts)** (MIT, Python, 837★) -- a parametric-search front end over the JLCPCB/LCSC assembly catalogue, regularly rebuilt. A candidate data source for the LCSC part-number and stock checks in `/kct:tapeout`, if its terms and refresh cadence suit us.

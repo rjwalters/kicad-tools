@@ -2971,3 +2971,24 @@ class TestNetlistByproductLocation:
         reconciler._assign_nets(pcb)  # must not raise
 
         pcb.assign_nets_from_netlist.assert_not_called()
+
+
+class TestFootprintsEquivalent:
+    """Nickname-aware footprint comparison (issue #7213)."""
+
+    def test_nickname_drift_flagged(self):
+        from kicad_tools.sync.reconciler import _footprints_equivalent
+
+        assert not _footprints_equivalent("Capacitor_SMD:C_0603", "Resistor_SMD:C_0603")
+
+    def test_matching_lib_ids_equivalent(self):
+        from kicad_tools.sync.reconciler import _footprints_equivalent
+
+        assert _footprints_equivalent("Capacitor_SMD:C_0603", "Capacitor_SMD:C_0603")
+
+    def test_legacy_bare_name_tolerated(self):
+        from kicad_tools.sync.reconciler import _footprints_equivalent
+
+        assert _footprints_equivalent("Capacitor_SMD:C_0603", "C_0603")
+        assert _footprints_equivalent("C_0603", "Capacitor_SMD:C_0603")
+        assert not _footprints_equivalent("Capacitor_SMD:C_0603", "C_0402")

@@ -310,6 +310,7 @@ class TestDriftPrevention:
             "route_via": "manual",
             "preferred_layers": [3, 4, 5],
             "avoid_layers": [6, 7],
+            "allow_plane_layers": [1, 2],
             "layer_cost_multiplier": 4.5,
             "length_constraint": LengthConstraint(
                 net_id=11,
@@ -623,3 +624,40 @@ class TestNetClassMapLayerNameResolution:
     def test_layer_resolution_error_is_a_value_error(self):
         """Existing ``except (TypeError, ValueError)`` guards keep catching it."""
         assert issubclass(LayerResolutionError, ValueError)
+
+
+class TestAllowPlaneLayers:
+    """Issue #6876: ``allow_plane_layers`` round-trips like ``avoid_layers``."""
+
+    def test_roundtrip_ints(self):
+        nc = NetClassRouting(name="USB", allow_plane_layers=[2])
+        wire = nc.to_dict()
+        assert wire["allow_plane_layers"] == [2]
+        assert NetClassRouting.from_dict(wire) == nc
+
+    def test_default_is_none(self):
+        assert NetClassRouting(name="x").to_dict()["allow_plane_layers"] is None
+        assert NetClassRouting.from_dict({"name": "x"}).allow_plane_layers is None
+
+    def test_name_resolves_against_stack(self):
+        nc = NetClassRouting.from_dict(
+            {"name": "USB", "allow_plane_layers": ["In2.Cu"]},
+            layer_stack=LayerStack.four_layer_sig_gnd_pwr_sig(),
+        )
+        assert nc.allow_plane_layers == [2]
+
+    def test_absent_layer_dropped_on_two_layer_stack(self):
+        nc = NetClassRouting.from_dict(
+            {"name": "USB", "allow_plane_layers": ["In2.Cu"]},
+            layer_stack=LayerStack.two_layer(),
+        )
+        assert nc.allow_plane_layers == []
+
+    def test_map_roundtrip_through_path(self, tmp_path):
+        from kicad_tools.router.rules import net_class_map_from_path
+
+        m = {"USB_D+": NetClassRouting(name="USB", allow_plane_layers=[2])}
+        path = tmp_path / "ncm.json"
+        path.write_text(json.dumps(net_class_map_to_dict(m)))
+        loaded = net_class_map_from_path(path, layer_stack=LayerStack.four_layer_sig_gnd_pwr_sig())
+        assert loaded["USB_D+"].allow_plane_layers == [2]

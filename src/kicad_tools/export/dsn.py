@@ -34,7 +34,10 @@ silently dropped or approximated.
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import logging
+import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -72,6 +75,39 @@ def um_to_mm(um: float) -> float:
     return um / 1000.0
 
 
+REVISION_SIDECAR_SUFFIX = ".dsn-revision.json"
+
+
+def board_revision_hash(pcb_path: str | Path) -> str:
+    """SHA-256 of the board file with CRLF normalised to LF (issue #6915)."""
+    data = Path(pcb_path).read_bytes().replace(b"\r\n", b"\n")
+    return hashlib.sha256(data).hexdigest()
+
+
+def revision_sidecar_path(pcb_path: str | Path) -> Path:
+    """Sidecar recording which board revision a DSN was exported from."""
+    pcb_path = Path(pcb_path)
+    return pcb_path.with_name(pcb_path.stem + REVISION_SIDECAR_SUFFIX)
+
+
+def write_revision_sidecar(pcb_path: str | Path, dsn_path: str | Path) -> Path:
+    """Write ``<pcb stem>.dsn-revision.json`` beside the PCB."""
+    sidecar = revision_sidecar_path(pcb_path)
+    payload = {"board_sha256": board_revision_hash(pcb_path), "dsn": Path(dsn_path).name}
+    sidecar.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return sidecar
+
+
+def read_revision_sidecar(pcb_path: str | Path) -> str | None:
+    """Return the recorded board hash, or None when absent or unreadable."""
+    sidecar = revision_sidecar_path(pcb_path)
+    try:
+        value = json.loads(sidecar.read_text(encoding="utf-8")).get("board_sha256")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return value if isinstance(value, str) and value else None
+
+
 @dataclass
 class PadInfo:
     """Information about a single pad in a footprint."""
@@ -88,6 +124,9 @@ class PadInfo:
     net_number: int
     net_name: str
     roundrect_rratio: float = 0.0
+    drill_slot: tuple[float, float] | None = None  # (w, h) mm of an oval drill
+    rotation: float = 0.0  # degrees within the footprint (pad angle - footprint angle)
+    block: str = ""  # canonical source text of a custom pad, for its primitives
 
 
 @dataclass
@@ -149,8 +188,10 @@ _TRIVIAL_CONDITIONS: dict[str, frozenset[str]] = {
 }
 
 #: ``.kicad_pro`` ``design_settings.rules`` minima Specctra cannot express.
+#: ``min_copper_edge_clearance`` is not listed: it is carried by insetting the
+#: exported ``(boundary ...)`` and growing the Edge.Cuts cutout keepouts
+#: (issues #6784, #7482).
 _INEXPRESSIBLE_PROJECT_MINIMA = (
-    "min_copper_edge_clearance",
     "min_hole_clearance",
     "min_hole_to_hole",
     "min_through_hole_diameter",
@@ -172,6 +213,11 @@ class NetClassInfo:
     nets: list[str] = field(default_factory=list)
 
 
+def _node_on_edge_cuts(node: SExp) -> bool:
+    layer = node.find("layer")
+    return bool(layer and layer.children and _get_str(layer.children[0]) == "Edge.Cuts")
+
+
 class KiCadToDSNExporter:
     """Export a KiCad PCB file to Specctra DSN format.
 
@@ -185,6 +231,7 @@ class KiCadToDSNExporter:
         self._layers: list[str] = []
         self._nets: dict[int, str] = {}
         self._footprints: list[FootprintInfo] = []
+        self._image_names: dict[int, str] | None = None  # id(fp) -> image name
         self._segments: list[SegmentInfo] = []
         self._vias: list[ViaInfo] = []
         self._board_outline: list[tuple[float, float]] = []
@@ -198,7 +245,10 @@ class KiCadToDSNExporter:
         self._net_class: dict[str, str] = {}  # net name -> KiCad class name
         self._planes: list[tuple[str, str, list[tuple[float, float]]]] = []
         self._keepouts: list[tuple[str, str, list[tuple[float, float]]]] = []
+        # Edge.Cuts interior loops at the raw cut edge; emitted as keepouts (#7482)
+        self._outline_cutouts: list[list[tuple[float, float]]] = []
         self._omissions: list[str] = []
+        self._edge_clearance: float = 0.0  # mm, .kicad_pro min_copper_edge_clearance
         self._via_padstack_name: str = ""
 
     def _load(self) -> None:
@@ -309,46 +359,80 @@ class KiCadToDSNExporter:
                             self._default_via_drill = _get_float(nc_child.children[0]) or 0.4
 
     def _extract_board_outline(self) -> None:
-        """Extract board outline from Edge.Cuts layer."""
+        """Extract the board boundary and cutouts from the Edge.Cuts layer.
+
+        Every top-level Edge.Cuts graphic is polygonized, so segments need not
+        be stored head to tail. The board is the face whose *exterior* ring
+        encloses the most area: a face's own ``area`` has its holes subtracted,
+        so ranking by it lets a large cutout outrank the board around it. The
+        board's interior rings are its cutouts; ``_generate_structure`` emits
+        them as keepouts on every copper layer. Geometry that cannot be carried
+        is listed, never dropped.
+        """
         assert self._pcb is not None
-        points: list[tuple[float, float]] = []
+        self._board_outline = []
+        self._outline_cutouts = []
 
-        for child in self._pcb.children:
-            if not hasattr(child, "name"):
+        for fp_node in self._pcb.children:
+            if not hasattr(fp_node, "name") or not _is_footprint_tag(fp_node.name):
                 continue
+            if any(
+                _node_on_edge_cuts(g)
+                for g in fp_node.children
+                if (getattr(g, "name", None) or "").startswith("fp_")
+            ):
+                self._omit(
+                    "footprint-embedded Edge.Cuts graphics are not exported as board outline"
+                )
+                break
 
-            # Handle gr_rect on Edge.Cuts
-            if child.name == "gr_rect":
-                layer_node = child.find("layer")
-                if layer_node and len(layer_node.children) >= 1:
-                    layer_name = _get_str(layer_node.children[0])
-                    if layer_name == "Edge.Cuts":
-                        start = child.find("start")
-                        end = child.find("end")
-                        if start and end and len(start.children) >= 2 and len(end.children) >= 2:
-                            x1 = _get_float(start.children[0]) or 0.0
-                            y1 = _get_float(start.children[1]) or 0.0
-                            x2 = _get_float(end.children[0]) or 0.0
-                            y2 = _get_float(end.children[1]) or 0.0
-                            points = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+        from ..core.board_outline import board_outline_segments, outline_graphics
 
-            # Handle gr_line on Edge.Cuts
-            elif child.name == "gr_line":
-                layer_node = child.find("layer")
-                if layer_node and len(layer_node.children) >= 1:
-                    layer_name = _get_str(layer_node.children[0])
-                    if layer_name == "Edge.Cuts":
-                        start = child.find("start")
-                        end = child.find("end")
-                        if start and end and len(start.children) >= 2 and len(end.children) >= 2:
-                            x1 = _get_float(start.children[0]) or 0.0
-                            y1 = _get_float(start.children[1]) or 0.0
-                            x2 = _get_float(end.children[0]) or 0.0
-                            y2 = _get_float(end.children[1]) or 0.0
-                            points.append((x1, y1))
-                            points.append((x2, y2))
+        if not any(True for _ in outline_graphics(self._pcb)):
+            return
+        try:
+            segments = board_outline_segments(self._pcb)
+        except ValueError as exc:
+            self._omit(f"board outline not exported: {exc}")
+            return
 
-        self._board_outline = points
+        from shapely.geometry import LineString, Polygon  # type: ignore[import-untyped]
+        from shapely.ops import polygonize_full, unary_union  # type: ignore[import-untyped]
+
+        def snap(pt: tuple[float, float]) -> tuple[float, float]:
+            return (round(pt[0], 3), round(pt[1], 3))  # 1 um: close endpoint micro-gaps
+
+        lines = [LineString([snap(a), snap(b)]) for a, b in segments if snap(a) != snap(b)]
+        faces, dangles, cuts, invalid = (
+            polygonize_full(unary_union(lines)) if lines else ((), (), (), ())
+        )
+        faces = list(faces.geoms) if hasattr(faces, "geoms") else list(faces)
+        if not faces:
+            self._omit(
+                "board outline not exported: Edge.Cuts does not form a closed outline "
+                "(open or dangling segments)"
+            )
+            return
+        board = max(faces, key=lambda f: Polygon(f.exterior).area)
+        if not (hasattr(dangles, "is_empty") and dangles.is_empty):
+            self._omit("Edge.Cuts has dangling segments that do not close a loop; ignored")
+        self._board_outline = list(board.exterior.coords)[:-1]
+
+        shell = Polygon(board.exterior)
+        cutouts = [Polygon(ring) for ring in board.interiors]
+        for face in faces:
+            if face is board:
+                continue
+            inside = face.representative_point()
+            if not shell.contains(inside):
+                self._omit("Edge.Cuts closed loop outside the main board outline is not exported")
+                continue
+            host = next((c for c in cutouts if c.contains(inside)), None)
+            if host is None:
+                cutouts.append(Polygon(face.exterior))
+            elif Polygon(face.exterior).area < host.area - 1e-6:
+                self._omit("Edge.Cuts island inside a board cutout is not exported")
+        self._outline_cutouts = [list(c.exterior.coords)[:-1] for c in cutouts if c.area > 0]
 
     def _extract_footprints(self) -> None:
         """Extract footprint placements and pad info."""
@@ -397,14 +481,19 @@ class KiCadToDSNExporter:
             # Extract pads
             for sub in child.children:
                 if hasattr(sub, "name") and sub.name == "pad":
-                    pad = self._parse_pad(sub)
+                    pad = self._parse_pad(sub, rotation)
                     if pad:
                         fp_info.pads.append(pad)
 
             self._footprints.append(fp_info)
 
-    def _parse_pad(self, pad_node: SExp) -> PadInfo | None:
-        """Parse a pad S-expression into PadInfo."""
+    def _parse_pad(self, pad_node: SExp, fp_rotation: float = 0.0) -> PadInfo | None:
+        """Parse a pad S-expression into PadInfo.
+
+        A pad's ``(at x y angle)`` angle is absolute (it already includes the
+        footprint rotation), so the rotation inside the footprint image is
+        ``angle - fp_rotation``.
+        """
         if len(pad_node.children) < 3:
             return None
 
@@ -414,10 +503,12 @@ class KiCadToDSNExporter:
 
         # Position relative to footprint
         at_node = pad_node.find("at")
-        px, py = 0.0, 0.0
+        px, py, pad_angle = 0.0, 0.0, 0.0
         if at_node and len(at_node.children) >= 2:
             px = _get_float(at_node.children[0]) or 0.0
             py = _get_float(at_node.children[1]) or 0.0
+            if len(at_node.children) >= 3:
+                pad_angle = _get_float(at_node.children[2]) or 0.0
 
         # Size
         size_node = pad_node.find("size")
@@ -428,9 +519,17 @@ class KiCadToDSNExporter:
 
         # Drill
         drill = 0.0
+        drill_slot: tuple[float, float] | None = None
         drill_node = pad_node.find("drill")
         if drill_node and drill_node.children:
-            drill = _get_float(drill_node.children[0]) or 0.0
+            if _get_str(drill_node.children[0]) == "oval":
+                # (drill oval W H [offset ...]): a slot
+                dims = [_get_float(c) for c in drill_node.children[1:3]]
+                if len(dims) == 2 and all(d for d in dims):
+                    drill_slot = (dims[0] or 0.0, dims[1] or 0.0)
+                    drill = min(drill_slot)
+            else:
+                drill = _get_float(drill_node.children[0]) or 0.0
 
         # Layers
         layers_node = pad_node.find("layers")
@@ -463,6 +562,9 @@ class KiCadToDSNExporter:
             net_number=net_num,
             net_name=net_name,
             roundrect_rratio=rratio,
+            drill_slot=drill_slot,
+            rotation=(pad_angle - fp_rotation) % 360.0,
+            block=pad_node.to_string(compact=True) if pad_shape == "custom" else "",
         )
 
     def _extract_existing_routes(self) -> None:
@@ -605,6 +707,7 @@ class KiCadToDSNExporter:
                 continue
             for info in self._classes.values():
                 setattr(info, attr, max(getattr(info, attr), floor))
+        self._edge_clearance = _mm(section.get("min_copper_edge_clearance"), 0.0)
         for key in _INEXPRESSIBLE_PROJECT_MINIMA:
             value = _mm(section.get(key), 0.0)
             if value > 0:
@@ -649,6 +752,10 @@ class KiCadToDSNExporter:
     def _expand_zone_layers(self, zone: Zone) -> list[str]:
         """The board copper layers a zone covers (wildcards expanded)."""
         specs = zone.layers or ([zone.layer] if zone.layer else [])
+        return self._resolve_copper_layers(specs)
+
+    def _resolve_copper_layers(self, specs: list[str]) -> list[str]:
+        """The board copper layers named by layer specs (wildcards expanded)."""
         out: list[str] = []
         for spec in specs:
             if spec == "*.Cu":
@@ -793,60 +900,201 @@ class KiCadToDSNExporter:
             net_name=net_name,
         )
 
-    def _make_padstack_name(self, pad: PadInfo) -> str:
-        """Generate a unique padstack name for a pad geometry."""
-        if pad.pad_type == "thru_hole":
-            # Through-hole: include drill info
-            w = mm_to_um(pad.width)
-            h = mm_to_um(pad.height)
-            d = mm_to_um(pad.drill)
-            return f"Round[A]Pad_{w}x{h}_Drill{d}_um"
-        else:
-            # SMD: layer-specific
-            w = mm_to_um(pad.width)
-            h = mm_to_um(pad.height)
-            layer = pad.layers[0] if pad.layers else "F.Cu"
-            side = "T" if "F.Cu" in layer else "B"
-            return f"Rect[{side}]Pad_{w}x{h}_um"
+    def _pad_copper_layers(self, pad: PadInfo) -> list[str]:
+        """The board copper layers a pad's layer list covers."""
+        return self._resolve_copper_layers(pad.layers)
 
-    def _build_padstack_def(self, name: str, pad: PadInfo) -> str:
+    def _pad_is_pin(self, pad: PadInfo) -> bool:
+        """Whether a pad is exported as an image pin.
+
+        An NPTH hole is an obstacle, not a connection target (it becomes
+        an image keepout), and a pad with no copper layer on this board
+        (paste-only, mask-only) has nothing for the router to see.
+        """
+        if pad.pad_type == "np_thru_hole":
+            return False
+        return bool(self._pad_copper_layers(pad)) or pad.pad_type == "thru_hole"
+
+    def _npth_keepouts(self, pad: PadInfo, px_um: float, py_um: float) -> list[str]:
+        """Image keepouts for an NPTH hole: one per declared copper layer."""
+        if pad.width > pad.drill + 1e-6 and pad.drill > 0:
+            self._omit(
+                f"NPTH pad {pad.number!r} has a copper annulus; "
+                "only its drill is exported as a keepout"
+            )
+        lines: list[str] = []
+        slot = pad.drill_slot
+        for layer in self._layers:
+            dsn_layer = _dsn_quote(KICAD_TO_DSN_LAYER.get(layer, layer))
+            if slot and abs(slot[0] - slot[1]) > 1e-6:
+                w, h = mm_to_um(slot[0]), mm_to_um(slot[1])
+                half = abs(w - h) / 2
+                dx, dy = (half, 0.0) if w > h else (0.0, half)
+                lines.append(
+                    f'      (keepout "" (path {dsn_layer} {min(w, h):.1f} '
+                    f"{px_um - dx:.1f} {py_um - dy:.1f} {px_um + dx:.1f} {py_um + dy:.1f}))"
+                )
+            else:
+                d = mm_to_um(pad.drill or min(pad.width, pad.height))
+                lines.append(
+                    f'      (keepout "" (circle {dsn_layer} {d:.1f} {px_um:.1f} {py_um:.1f}))'
+                )
+        return lines
+
+    def _pad_shape(self, pad: PadInfo, mirror: bool) -> tuple[str, tuple[float, ...]]:
+        """:meth:`_pad_outline` rounded to the 0.1 um the DSN is written in."""
+        kind, numbers = self._pad_outline(pad, mirror)
+        return kind, tuple(round(v, 1) + 0.0 for v in numbers)
+
+    def _pad_outline(self, pad: PadInfo, mirror: bool) -> tuple[str, tuple[float, ...]]:
+        """The copper outline of a pad in image coordinates (um), layer-agnostic.
+
+        Returns ``(kind, numbers)``: ``rect`` (x1 y1 x2 y2), ``circle`` (d),
+        ``path`` (width x1 y1 x2 y2) or ``polygon`` (x y ...). Anything not
+        exactly representable is over-approximated, never under-approximated.
+        ``mirror`` negates x like the pin offsets of a back-side image.
+        """
+        sign = -1.0 if mirror else 1.0
+        rot = round(pad.rotation % 360.0, 6)
+        w, h = mm_to_um(pad.width), mm_to_um(pad.height)
+
+        def rect_shape(rw: float, rh: float) -> tuple[str, tuple[float, ...]]:
+            return "rect", (-rw / 2, -rh / 2, rw / 2, rh / 2)
+
+        if pad.shape == "circle":
+            return "circle", (max(w, h),)
+        if pad.shape == "custom":
+            hull = self._custom_pad_hull(pad)
+            if hull is not None:
+                return "polygon", tuple(
+                    v for x, y in hull for v in (sign * mm_to_um(x), mm_to_um(y))
+                )
+            # Unsupported primitives and no bound either: the anchor box.
+            self._omit(
+                f"custom pad {pad.number!r} copper is exported as its anchor box; "
+                "its primitives could not be bounded"
+            )
+            return rect_shape(w, h)
+        a = math.radians(-rot)  # KiCad angles are CCW on a y-down board
+        ca, sa = math.cos(a), math.sin(a)
+
+        def place(px: float, py: float) -> tuple[float, float]:
+            return sign * (px * ca - py * sa), px * sa + py * ca
+
+        if pad.shape == "oval" and abs(w - h) > 1e-6:
+            half = abs(w - h) / 2
+            (x1, y1), (x2, y2) = (
+                (place(-half, 0.0), place(half, 0.0))
+                if w > h
+                else (place(0.0, -half), place(0.0, half))
+            )
+            return "path", (min(w, h), x1, y1, x2, y2)
+        if pad.shape == "oval":
+            return "circle", (w,)
+        if pad.shape == "trapezoid":
+            self._omit(
+                f"trapezoid pad {pad.number!r} is exported as its nominal rectangle; "
+                "its skewed corners are not represented"
+            )
+        quarter = rot % 90.0
+        if quarter < 1e-6 or quarter > 90.0 - 1e-6:
+            if round(rot / 90.0) % 2 == 1:
+                w, h = h, w
+            return rect_shape(w, h)
+        # Rect/roundrect at an arbitrary angle: the rotated corners.
+        pts: list[float] = []
+        for cx, cy in ((-w / 2, -h / 2), (w / 2, -h / 2), (w / 2, h / 2), (-w / 2, h / 2)):
+            pts += list(place(cx, cy))
+        return "polygon", tuple(pts)
+
+    def _custom_pad_hull(self, pad: PadInfo) -> list[tuple[float, float]] | None:
+        """Convex hull (mm, pad-local, rotated into the image) of a custom pad."""
+        from ..router.fixed_copper import bounding_pad_copper, custom_pad_copper
+
+        kwargs: dict[str, Any] = {
+            "reference": "",
+            "pad_number": pad.number,
+            "x": 0.0,
+            "y": 0.0,
+            "rotation": pad.rotation,
+            "source_net": "",
+            "source_net_id": 0,
+        }
+        copper: Any
+        try:
+            copper = custom_pad_copper(pad.block, **kwargs)
+        except ValueError:
+            try:
+                copper = bounding_pad_copper(pad.block, **kwargs)
+            except ValueError:
+                copper = None
+            if copper is not None:
+                self._omit(
+                    f"custom pad {pad.number!r} has primitives the exporter cannot "
+                    "reproduce; its copper is exported as a bounding polygon"
+                )
+        if copper is None or copper.geometry.is_empty:
+            return None
+        hull = copper.geometry.convex_hull
+        if hull.geom_type != "Polygon":
+            return None
+        if hull.area - copper.geometry.area > 1e-6:
+            self._omit(
+                f"custom pad {pad.number!r} is concave; its copper is exported as the convex hull"
+            )
+        return [(x, y) for x, y in list(hull.exterior.coords)[:-1]]
+
+    def _make_padstack_name(self, pad: PadInfo, shape: tuple[str, tuple[float, ...]]) -> str:
+        """Generate a unique padstack name for a pad geometry.
+
+        A plain rectangle keeps the size-only name; any other shape appends a
+        short hash of its geometry so equal-size pads of different shape (or
+        rotation) never share a padstack.
+        """
+        kind, numbers = shape
+        if kind == "rect":
+            w, h = round(numbers[2] - numbers[0], 1), round(numbers[3] - numbers[1], 1)
+            suffix = ""
+        else:
+            w, h = mm_to_um(pad.width), mm_to_um(pad.height)
+            digest = hashlib.sha1(f"{kind}{numbers}".encode()).hexdigest()[:8]
+            suffix = f"_{kind}{digest}"
+        if pad.pad_type == "thru_hole":
+            d = mm_to_um(pad.drill)
+            return f"Round[A]Pad_{w}x{h}_Drill{d}{suffix}_um"
+        copper = self._pad_copper_layers(pad) or ["F.Cu"]
+        if copper == ["F.Cu"]:
+            side = "T"
+        elif copper == ["B.Cu"]:
+            side = "B"
+        else:
+            side = "M" + "".join(str(self._layers.index(c)) for c in copper)
+        return f"Rect[{side}]Pad_{w}x{h}{suffix}_um"
+
+    def _build_padstack_def(
+        self, name: str, pad: PadInfo, shape: tuple[str, tuple[float, ...]]
+    ) -> str:
         """Build DSN padstack definition for a pad."""
+        kind, n = shape
         lines: list[str] = []
         lines.append(f"    (padstack {_dsn_quote(name)}")
 
         if pad.pad_type == "thru_hole":
-            # Through-hole pad: shapes on all copper layers
-            w = mm_to_um(pad.width)
-            h = mm_to_um(pad.height)
-            for layer in self._layers:
-                dsn_layer = KICAD_TO_DSN_LAYER.get(layer, layer)
-                if pad.shape in ("rect",):
-                    lines.append(
-                        f"      (shape (rect {_dsn_quote(dsn_layer)} {-w / 2:.1f} {-h / 2:.1f} {w / 2:.1f} {h / 2:.1f}))"
-                    )
-                else:
-                    # oval/circle -> use rect approximation for DSN
-                    lines.append(
-                        f"      (shape (rect {_dsn_quote(dsn_layer)} {-w / 2:.1f} {-h / 2:.1f} {w / 2:.1f} {h / 2:.1f}))"
-                    )
-            lines.append("      (attach off)")
+            layers = list(self._layers)  # shapes on all copper layers
         else:
-            # SMD pad: shape on one layer only
-            w = mm_to_um(pad.width)
-            h = mm_to_um(pad.height)
-            pad_layer = pad.layers[0] if pad.layers else "F.Cu"
-            # Map to copper layer only
-            if "F.Cu" in pad_layer:
-                dsn_layer = "F.Cu"
-            elif "B.Cu" in pad_layer:
-                dsn_layer = "B.Cu"
+            layers = self._pad_copper_layers(pad) or ["F.Cu"]
+        for layer in layers:
+            dsn_layer = _dsn_quote(KICAD_TO_DSN_LAYER.get(layer, layer))
+            if kind == "circle":
+                body = f"circle {dsn_layer} {n[0]:.1f} 0.0 0.0"
+            elif kind == "path":
+                body = f"path {dsn_layer} " + " ".join(f"{v:.1f}" for v in n)
+            elif kind == "polygon":
+                body = f"polygon {dsn_layer} 0 " + " ".join(f"{v:.1f}" for v in n)
             else:
-                dsn_layer = pad_layer
-            dsn_layer = KICAD_TO_DSN_LAYER.get(dsn_layer, dsn_layer)
-            lines.append(
-                f"      (shape (rect {_dsn_quote(dsn_layer)} {-w / 2:.1f} {-h / 2:.1f} {w / 2:.1f} {h / 2:.1f}))"
-            )
-            lines.append("      (attach off)")
+                body = f"rect {dsn_layer} " + " ".join(f"{v:.1f}" for v in n)
+            lines.append(f"      (shape ({body}))")
+        lines.append("      (attach off)")
 
         lines.append("    )")
         return "\n".join(lines)
@@ -894,6 +1142,7 @@ class KiCadToDSNExporter:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_text(dsn, encoding="utf-8")
             logger.info("Exported DSN to %s", output_path)
+            write_revision_sidecar(self.pcb_path, output_path)
 
         return dsn
 
@@ -933,31 +1182,92 @@ class KiCadToDSNExporter:
         parts.append(")")
         return "\n".join(parts)
 
+    def _copper_region(
+        self,
+    ) -> tuple[list[tuple[float, float]], list[list[tuple[float, float]]]]:
+        """The ``(boundary ...)`` ring and cutout keepouts, both moved in by the edge clearance.
+
+        Specctra has no copper-to-edge rule, but a router never places copper
+        outside the boundary or inside a keepout, so insetting the board (its
+        outer ring shrinks, its cutouts grow) by ``min_copper_edge_clearance``
+        carries the rule as plain geometry, around cutouts as well as the
+        outer edge. Pads that already sit inside the band are fixed placement:
+        they stay where they are and are listed as an omission rather than
+        routed through. When the inset cannot be computed the raw outline and
+        cutouts are exported and the clearance is listed as not carried.
+        """
+        outline, cutouts = self._board_outline, self._outline_cutouts
+        if not outline or self._edge_clearance <= 0:
+            return outline, cutouts
+        try:
+            from shapely.geometry import Polygon
+            from shapely.ops import unary_union
+
+            poly = Polygon(outline)
+            if cutouts:
+                poly = poly.difference(unary_union([Polygon(c) for c in cutouts]))
+            inset = poly.buffer(-self._edge_clearance, join_style=2) if poly.is_valid else None
+        except (ImportError, ValueError):
+            inset = None
+        if inset is None or inset.is_empty or inset.geom_type != "Polygon":
+            self._omit(
+                f".kicad_pro rule min_copper_edge_clearance {self._edge_clearance:g} mm: "
+                "board outline cannot be inset; boundary and cutouts exported uninset"
+            )
+            return outline, cutouts
+        in_band = sorted(
+            f"{fp.reference}.{pad.number}"
+            for fp in self._footprints
+            for pad in fp.pads
+            if not inset.buffer(1e-6).contains(self._pad_center(fp, pad))
+        )
+        if in_band:
+            self._omit(
+                f"{len(in_band)} pad(s) sit inside the {self._edge_clearance:g} mm "
+                f"copper-to-edge band (fixed placement): {', '.join(in_band)}"
+            )
+        return (
+            list(inset.exterior.coords)[:-1],
+            [list(ring.coords)[:-1] for ring in inset.interiors],
+        )
+
+    @staticmethod
+    def _pad_center(fp: FootprintInfo, pad: PadInfo) -> Any:
+        import math
+
+        from shapely.geometry import Point
+
+        a = math.radians(-fp.rotation)  # KiCad rotation is CCW on a y-down board
+        return Point(
+            fp.x + pad.x * math.cos(a) - pad.y * math.sin(a),
+            fp.y + pad.x * math.sin(a) + pad.y * math.cos(a),
+        )
+
     def _generate_structure(self) -> str:
         """Generate the (structure ...) section."""
         lines: list[str] = []
         lines.append("  (structure")
 
         # Layers
-        for layer in self._layers:
+        for index, layer in enumerate(self._layers):
             dsn_layer = KICAD_TO_DSN_LAYER.get(layer, layer)
             lines.append(f"    (layer {_dsn_quote(dsn_layer)}")
             lines.append("      (type signal)")
             lines.append("      (property")
-            lines.append("        (index 0)")
+            lines.append(f"        (index {index})")
             lines.append("      )")
             lines.append("    )")
 
-        # Board boundary
-        if self._board_outline:
+        # Board boundary and cutouts, inset by min_copper_edge_clearance (#6784, #7482)
+        boundary, cutouts = self._copper_region()
+        if boundary:
             lines.append("    (boundary")
             lines.append("      (path pcb 0")
-            for x, y in self._board_outline:
+            for x, y in boundary:
                 lines.append(f"        {mm_to_um(x):.1f} {mm_to_um(y):.1f}")
             # Close the polygon
-            if self._board_outline:
-                x0, y0 = self._board_outline[0]
-                lines.append(f"        {mm_to_um(x0):.1f} {mm_to_um(y0):.1f}")
+            x0, y0 = boundary[0]
+            lines.append(f"        {mm_to_um(x0):.1f} {mm_to_um(y0):.1f}")
             lines.append("      )")
             lines.append("    )")
 
@@ -977,7 +1287,9 @@ class KiCadToDSNExporter:
             lines.append(f"    (plane {_dsn_quote(net)}")
             lines.append(_dsn_polygon(dsn_layer, polygon))
             lines.append("    )")
-        for tag, layer, polygon in self._keepouts:
+        keepouts = list(self._keepouts)
+        keepouts += [("keepout", layer, c) for c in cutouts for layer in self._layers]
+        for tag, layer, polygon in keepouts:
             dsn_layer = KICAD_TO_DSN_LAYER.get(layer, layer)
             lines.append(f'    ({tag} ""')
             lines.append(_dsn_polygon(dsn_layer, polygon))
@@ -986,21 +1298,70 @@ class KiCadToDSNExporter:
         lines.append("  )")
         return "\n".join(lines)
 
+    def _image_name(self, fp: FootprintInfo) -> str:
+        """Image name for a footprint: one image per (library, side, pad geometry).
+
+        A Specctra reader mirrors a back-placed image in x, while KiCad's
+        file already stores back-side pad offsets flipped, so back images
+        are distinct from front ones and carry x-negated pins (issue #7481).
+
+        Pad shapes depend on each pad's rotation *relative to the footprint*,
+        which differs between instances of one library footprint (same
+        absolute pad angle, different footprint rotation). The first variant
+        of a (library, side) keeps the plain name; any later variant with
+        different pad geometry gets a short hash suffix so it is not
+        flattened onto the first instance's copper (issue #7484).
+        """
+        if self._image_names is None:
+            self._image_names = {}
+            variants: dict[str, dict[tuple, str]] = {}
+            for other in self._footprints:
+                base = _sanitize_name(other.footprint_lib)
+                if other.layer != "F.Cu":
+                    base = f"{base}__back"
+                sig = tuple(
+                    (
+                        p.number,
+                        p.pad_type,
+                        p.shape,
+                        p.x,
+                        p.y,
+                        p.width,
+                        p.height,
+                        p.drill,
+                        p.drill_slot,
+                        tuple(p.layers),
+                        p.roundrect_rratio,
+                        p.rotation,
+                        p.block,
+                    )
+                    for p in other.pads
+                )
+                known = variants.setdefault(base, {})
+                if sig not in known:
+                    digest = hashlib.sha1(repr(sig).encode()).hexdigest()[:6]
+                    known[sig] = base if not known else f"{base}__{digest}"
+                self._image_names[id(other)] = known[sig]
+        return self._image_names.get(id(fp)) or _sanitize_name(fp.footprint_lib)
+
     def _generate_placement(self) -> str:
         """Generate the (placement ...) section."""
         lines: list[str] = []
         lines.append("  (placement")
 
         for fp in self._footprints:
-            image_name = _sanitize_name(fp.footprint_lib)
+            image_name = self._image_name(fp)
             side = "front" if fp.layer == "F.Cu" else "back"
             x_um = mm_to_um(fp.x)
             y_um = mm_to_um(fp.y)
-            rot = fp.rotation
+            # KiCad's angle is CCW on a y-down board; a Specctra reader
+            # rotates by +theta in the numeric (x, y) frame, so write -theta
+            # (issue #7481). Matches ``_pad_center``.
+            rot = round((-fp.rotation) % 360.0, 4)
 
             lines.append(f"    (component {_dsn_quote(image_name)}")
             lines.append(
-                f"      (place {_dsn_quote(fp.reference)} {x_um:.1f} {y_um:.1f} {side} {rot:.1f})"
+                f"      (place {_dsn_quote(fp.reference)} {x_um:.1f} {y_um:.1f} {side} {rot:g})"
             )
             lines.append("    )")
 
@@ -1017,7 +1378,7 @@ class KiCadToDSNExporter:
         padstack_defs: dict[str, str] = {}
 
         for fp in self._footprints:
-            image_name = _sanitize_name(fp.footprint_lib)
+            image_name = self._image_name(fp)
             if image_name in seen_images:
                 continue
             seen_images.add(image_name)
@@ -1025,12 +1386,24 @@ class KiCadToDSNExporter:
             lines.append(f"    (image {_dsn_quote(image_name)}")
 
             for pad in fp.pads:
-                ps_name = self._make_padstack_name(pad)
-                if ps_name not in padstack_defs:
-                    padstack_defs[ps_name] = self._build_padstack_def(ps_name, pad)
-
-                px_um = mm_to_um(pad.x)
+                # Back-side offsets are already flipped in the KiCad file;
+                # pre-negate x so the reader's back-side mirror restores them.
+                # Padstack layers stay as the file names them (B.Cu pads on
+                # B.Cu): whether a reader also swaps a back image's layers is
+                # not verified black-box yet (issue #7481 open question).
+                px_um = mm_to_um(-pad.x if fp.layer != "F.Cu" else pad.x)
                 py_um = mm_to_um(pad.y)
+                if pad.pad_type == "np_thru_hole":
+                    lines.extend(self._npth_keepouts(pad, px_um, py_um))
+                    continue
+                if not self._pad_is_pin(pad):
+                    continue
+
+                shape = self._pad_shape(pad, fp.layer != "F.Cu")
+                ps_name = self._make_padstack_name(pad, shape)
+                if ps_name not in padstack_defs:
+                    padstack_defs[ps_name] = self._build_padstack_def(ps_name, pad, shape)
+
                 lines.append(
                     f"      (pin {_dsn_quote(ps_name)} {_dsn_quote(pad.number)} {px_um:.1f} {py_um:.1f})"
                 )
@@ -1067,7 +1440,7 @@ class KiCadToDSNExporter:
             for pad in fp.pads:
                 # Keyed on the net *name*: a name-only (KiCad 9/10) net is
                 # still a net; only an empty name means "no net" (#6594).
-                if pad.net_name:
+                if pad.net_name and self._pad_is_pin(pad):
                     net_pins.setdefault(pad.net_name, []).append(f"{fp.reference}-{pad.number}")
 
         # Generate net definitions

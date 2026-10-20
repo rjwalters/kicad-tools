@@ -329,7 +329,13 @@ def board07() -> None:
 
 
 if __name__ == "__main__":
-    os.chdir(WT)
-    board05()
-    board06()
-    board07()
+    from kicad_tools.cli.kicad_toolchain import run_on_evidence_toolchain
+
+    def _main() -> int:
+        os.chdir(WT)
+        board05()
+        board06()
+        board07()
+        return 0
+
+    sys.exit(run_on_evidence_toolchain(_main, [WT]))

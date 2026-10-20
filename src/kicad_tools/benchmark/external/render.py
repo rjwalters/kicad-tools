@@ -16,7 +16,8 @@ Rendering rules that keep the published table honest:
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 from .metrics import (
     ARTIFACT_SOURCE_FALLBACK_INPUT,
@@ -25,7 +26,7 @@ from .metrics import (
     BenchmarkReport,
 )
 
-__all__ = ["render_markdown", "render_report_markdown"]
+__all__ = ["render_d3_markdown", "render_markdown", "render_report_markdown"]
 
 
 def _fmt_timing(report: BenchmarkReport) -> str:
@@ -254,3 +255,145 @@ def render_markdown(
 def render_report_markdown(report: BenchmarkReport) -> str:
     """Render a single report as a one-row table (convenience wrapper)."""
     return render_markdown([report], title=f"Benchmark: {report.board_id}")
+
+
+# --------------------------------------------------------------------------
+# PCBWorld D3 aggregate (issue #6332)
+# --------------------------------------------------------------------------
+
+
+def _fmt_rate(r: Mapping[str, Any]) -> str:
+    n = r["denominator"]
+    if not n:
+        return "n/a (0 boards)"
+    if r["rate"] is not None:
+        return f"{r['rate']:.3f} ({r['passed']}/{n})"
+    return (
+        f"unknown: {r['passed']}/{n} known pass, {r['unknown']} unknown "
+        f"-> [{r['lower']:.3f}, {r['upper']:.3f}]"
+    )
+
+
+def _fmt_dist(d: Mapping[str, Any], unit: str = "") -> str:
+    if not d.get("n"):
+        return "no data"
+    return (
+        f"n={d['n']}; min {d['min']:g}{unit} / p50 {d['p50']:g}{unit} / p90 {d['p90']:g}{unit} "
+        f"/ max {d['max']:g}{unit}; mean {d['mean']:g}{unit}"
+    )
+
+
+def _d3_section(lines: list[str], name: str, block: Mapping[str, Any]) -> None:
+    lines.extend([f"### {name} ({block['boards']} boards)", ""])
+    lines.extend(["| Metric | @1 | @5 |", "|---|---|---|"])
+    at1, at5 = block["at1"], block["at5"]
+    if "pcbworld_clean_pass" not in at5:  # @5 not measured: every @5 cell says so
+        at5 = {
+            "pcbworld_clean_pass": None,
+            "local_clean": None,
+            **{k: None for k in at1 if k not in ("pcbworld_clean_pass", "local_clean")},
+            "rule": at5["rule"],
+        }
+
+    def rate_cell(r: Mapping[str, Any] | None) -> str:
+        return "not measured" if r is None else _fmt_rate(r)
+
+    def dist_cell(d: Mapping[str, Any] | None, unit: str = "") -> str:
+        return "not measured" if d is None else _fmt_dist(d, unit)
+
+    rows = [
+        ("PCBWorld Clean Pass", _fmt_rate(at1["pcbworld_clean_pass"]),
+         rate_cell(at5["pcbworld_clean_pass"])),
+        ("Local bar (100% + kct check + kicad-cli DRC)", _fmt_rate(at1["local_clean"]),
+         rate_cell(at5["local_clean"])),
+        ("Routability (scored boards)", _fmt_dist(at1["routability"]),
+         dist_cell(at5["routability"])),
+        ("Error-level DRV (scored boards)", _fmt_dist(at1["drv_errors_only"]),
+         dist_cell(at5["drv_errors_only"])),
+        ("Vias", _fmt_dist(at1["vias"]), dist_cell(at5["vias"])),
+        ("Wirelength", _fmt_dist(at1["wirelength_mm"], " mm"),
+         dist_cell(at5["wirelength_mm"], " mm")),
+        ("Wirelength / human reference", _fmt_dist(at1["wirelength_vs_human"]),
+         dist_cell(at5["wirelength_vs_human"])),
+    ]  # fmt: skip
+    for label, a, b in rows:
+        lines.append(f"| {label} | {a} | {b} |")
+    lines.extend(
+        [
+            "",
+            f"- @5 rule: {at5['rule']}.",
+            "- Wall time over every rollout (C++ backend only): "
+            + _fmt_dist(block["wall_clock_s_all_rollouts"], " s")
+            + f"; {block['timing_refused_attempts']} attempt(s) with timing refused.",
+        ]
+    )
+    failures = block["failure_classes_at1"]
+    if failures:
+        lines.append(
+            "- Non-passing @1 boards by class: "
+            + ", ".join(f"`{k}` {v}" for k, v in failures.items())
+            + "."
+        )
+    lines.append("")
+
+
+def render_d3_markdown(results: Mapping[str, Any]) -> str:
+    """Render a committed D3 ``results.json`` (``kct-pcbworld-d3-results/1``).
+
+    Pure function of the compact data: the aggregate is recomputed from the
+    per-attempt records every time, so a re-render of committed data must
+    produce a byte-identical report.
+    """
+    from .d3 import RESULTS_SCHEMA, aggregate_d3
+
+    if results.get("schema") != RESULTS_SCHEMA:
+        raise ValueError(f"not a {RESULTS_SCHEMA} document: {results.get('schema')!r}")
+    run = results["run"]
+    agg = aggregate_d3(
+        results.get("attempts", []),
+        board_ids=results["board_ids"],
+        rollouts=int(run["rollouts"]),
+        seeds=run.get("seeds"),
+        deterministic=bool(run.get("deterministic")),
+        subsets=results.get("subsets") or {},
+    )
+    split = results.get("split", "d3")
+    lines = [
+        f"# PCBWorld {split} baseline: `kct route` (generated -- do not edit)",
+        "",
+        f"Re-rendered from `results.json` by `kct bench external --render-d3`. "
+        f"Schema `{RESULTS_SCHEMA}`.",
+        "",
+        "## Coverage",
+        "",
+        f"- Manifest boards: {agg['manifest_boards']}; declared rollouts per board: "
+        f"{agg['declared_rollouts']} (seeds {run.get('seeds')}).",
+        f"- Attempts: {agg['attempts_recorded']} recorded of {agg['attempts_expected']} "
+        f"expected; {agg['attempts_missing']} missing (explicit `missing` rows).",
+        "- Attempt status counts: "
+        + (", ".join(f"`{k}` {v}" for k, v in agg["status_counts"].items()) or "none")
+        + ".",
+        f"- Complete (every attempt has a known verdict): **{'yes' if agg['complete'] else 'no'}**.",
+        "",
+        "## Results",
+        "",
+    ]
+    _d3_section(lines, f"Full {split} test split", agg["full"])
+    for name, block in agg["subsets"].items():
+        _d3_section(lines, f"Subset `{name}`", block)
+
+    comparators = results.get("comparators") or []
+    if comparators:
+        lines.extend(["## Published comparators (not re-scored here)", ""])
+        lines.extend(["| Router | CP | Set | Source |", "|---|---|---|---|"])
+        for c in comparators:
+            lines.append(f"| {c['router']} | {c['cp']} | {c['set']} | {c['source']} |")
+        lines.append("")
+
+    prov = results.get("provenance") or {}
+    if prov:
+        lines.extend(["## Provenance", ""])
+        for key in sorted(prov):
+            lines.append(f"- `{key}`: `{prov[key]}`")
+        lines.append("")
+    return "\n".join(lines).rstrip("\n") + "\n"

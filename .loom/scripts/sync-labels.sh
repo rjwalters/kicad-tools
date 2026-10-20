@@ -88,6 +88,17 @@
 # read-only preview (`labels migrate` without --apply); otherwise it passes
 # --apply. GitHub-only; the logic is `loom-daemon labels migrate`. It does not
 # imply --prune-undeclared (a wider delete); pass both to get both.
+# Exit codes (#11746):
+#   0  success (all label writes applied; --check: live set matches)
+#   1  unexpected failure / forge lookup error (a defect, not absorbed)
+#   2  usage error (bad option or argument)
+#   3  --check found drift
+#   4  --check could not reach the forge (check not run)
+#   5  one or more label writes failed (N of M, printed on stderr). A GitHub
+#      rate limit (secondary rate limit / HTTP 429) is retried with backoff
+#      first, honouring Retry-After; only a write that still fails counts.
+#      The run applies every other label before exiting; re-running is safe.
+#
 # requires-daemon: labels optional  only --prune-undeclared/--migrate-retired need `labels undeclared`/`labels migrate`; an older binary is refused with a clear message there and every other path is unaffected
 #
 # This is the installed-tree counterpart of the source-only
@@ -451,32 +462,48 @@ github_maybe_delete_label() {
   fi
 }
 
-github_sync_label() {
-  local name="$1" description="$2" color="$3"
+# Label-write accounting (#11746). Every create/update the mutating sync
+# attempts counts once in WRITE_ATTEMPTS; one that still fails after the
+# rate-limit retry below counts in WRITE_FAILURES, which turns into exit 5.
+WRITE_ATTEMPTS=0 WRITE_FAILURES=0
 
-  if "$GH_READ" label list -R "$REPO" --json name --jq '.[].name' 2>&1 | grep -q "^${name}$" 2>/dev/null; then
-    if output=$(gh label edit "$name" -R "$REPO" --description "$description" --color "$color" 2>&1); then
-      info "Updated label: $name"
-    else
-      warning "Failed to update label: $name"
-      echo "$output" >&2
-    fi
+# gh_label_write ARGS...: `gh label ARGS...` with a bounded retry for a GitHub
+# rate limit (403/429 "secondary rate limit" / Retry-After): a fleet sync of
+# many repos back to back trips it predictably. Any other error fails at once.
+# Captured output lands in GH_WRITE_OUT. Wait: Retry-After when the output
+# names one, else 5s doubling per attempt, capped at 60s. SYNC_LABELS_RETRY_DELAY
+# (seconds) pins the wait, so a test need not sleep.
+GH_WRITE_OUT=""
+gh_label_write() {
+  local attempt=0 delay
+  while ! GH_WRITE_OUT=$(gh label "$@" 2>&1); do
+    [[ "$attempt" -lt 4 && "${GH_WRITE_OUT,,}" =~ rate.limit|http.429 ]] || return 1
+    delay=$((5 << attempt))
+    [[ "${GH_WRITE_OUT,,}" =~ retry-after:?[[:space:]]*([0-9]+) ]] && delay="${BASH_REMATCH[1]}"
+    delay="${SYNC_LABELS_RETRY_DELAY:-$((delay > 60 ? 60 : delay))}"
+    warning "GitHub rate limit on label write; retrying in ${delay}s ($((++attempt))/4)"
+    sleep "$delay"
+  done
+}
+
+# Capitalize first letter. `${x^}` is bash 4.0+ (bad substitution on macOS 3.2).
+_capitalize() {
+  printf '%s%s' "$(printf '%s' "${1:0:1}" | tr '[:lower:]' '[:upper:]')" "${1:1}"
+}
+
+github_sync_label() {
+  local name="$1" description="$2" color="$3" verb=create
+  local args=("$name" -R "$REPO" --description "$description" --color "$color")
+  WRITE_ATTEMPTS=$((WRITE_ATTEMPTS + 1))
+  [[ $'\n'"$("$GH_READ" label list -R "$REPO" --json name --jq '.[].name' 2>&1)"$'\n' != *$'\n'"$name"$'\n'* ]] || verb=edit
+  if gh_label_write "$verb" "${args[@]}" \
+    || { [[ "$verb" == create && "$GH_WRITE_OUT" == *"already exists"* ]] && verb=edit && gh_label_write edit "${args[@]}"; }; then
+    verb=${verb/edit/update}
+    info "$(_capitalize "$verb")d label: $name"
   else
-    if output=$(gh label create "$name" -R "$REPO" --description "$description" --color "$color" 2>&1); then
-      info "Created label: $name"
-    else
-      if echo "$output" | grep -q "already exists"; then
-        if update_output=$(gh label edit "$name" -R "$REPO" --description "$description" --color "$color" 2>&1); then
-          info "Updated label: $name"
-        else
-          warning "Failed to update label: $name"
-          echo "$update_output" >&2
-        fi
-      else
-        warning "Failed to create label: $name"
-        echo "$output" >&2
-      fi
-    fi
+    warning "Failed to ${verb/edit/update} label: $name"
+    echo "$GH_WRITE_OUT" >&2
+    WRITE_FAILURES=$((WRITE_FAILURES + 1))
   fi
 }
 
@@ -772,27 +799,16 @@ gitea_maybe_delete_label() {
 }
 
 gitea_sync_label() {
-  local name="$1" description="$2" color="$3"
-  local label_id
+  local name="$1" description="$2" color="$3" verb=create method=POST label_id payload
   label_id=$(gitea_label_id "$name")
-
-  local payload
+  WRITE_ATTEMPTS=$((WRITE_ATTEMPTS + 1))
   payload="{\"name\":$(printf '%s' "$name" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip()))'),\"description\":$(printf '%s' "$description" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip()))'),\"color\":\"#${color}\"}"
-
-  if [[ -n "$label_id" ]]; then
-    # Update existing label
-    if gitea_api PATCH "repos/${FORGE_OWNER}/${FORGE_REPO}/labels/${label_id}" -d "$payload" >/dev/null 2>&1; then
-      info "Updated label: $name"
-    else
-      warning "Failed to update label: $name"
-    fi
+  [[ -z "$label_id" ]] || { verb=update method=PATCH; label_id="/${label_id}"; }
+  if gitea_api "$method" "repos/${FORGE_OWNER}/${FORGE_REPO}/labels${label_id}" -d "$payload" >/dev/null 2>&1; then
+    info "$(_capitalize "$verb")d label: $name"
   else
-    # Create new label
-    if gitea_api POST "repos/${FORGE_OWNER}/${FORGE_REPO}/labels" -d "$payload" >/dev/null 2>&1; then
-      info "Created label: $name"
-    else
-      warning "Failed to create label: $name"
-    fi
+    warning "Failed to $verb label: $name"
+    WRITE_FAILURES=$((WRITE_FAILURES + 1))
   fi
 }
 
@@ -990,6 +1006,10 @@ done
 if [ "$label_count" -gt 0 ]; then
   if [[ "$DRY_RUN" -eq 1 ]]; then
     success "Dry run complete: $label_count labels would be synced to $REPO"
+  elif [[ "$WRITE_FAILURES" -gt 0 ]]; then
+    # Exit 5 is deferred to the end of the script so the optional
+    # --prune-undeclared / --migrate-retired steps below still run.
+    echo -e "${RED}✗ ${WRITE_FAILURES} of ${WRITE_ATTEMPTS} label writes failed on $REPO${NC}" >&2
   else
     success "Synced $label_count labels"
   fi
@@ -1000,3 +1020,7 @@ fi
 # --migrate-retired (#11511): after the additive sync above, so every
 # replacement label exists before `labels migrate` relabels onto it.
 [[ "$MIGRATE_RETIRED" -eq 0 ]] || daemon_labels migrate-retired migrate --apply "No retired labels left to migrate on $REPO" "Retired-label migration not finished on $REPO (listed above)" --repo "$REPO"
+
+# Any label write that still failed after the rate-limit retry (#11746): exit
+# 5, distinct from 3 (--check drift) and 4 (--check could not reach the forge).
+[[ "$WRITE_FAILURES" -eq 0 ]] || exit 5

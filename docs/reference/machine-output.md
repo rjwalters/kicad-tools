@@ -92,8 +92,9 @@ The sixth batch swept the board-improvement / rule-derivation drivers --
 The seventh and final batch swept the multi-stage orchestrators -- `build`,
 `pipeline`, `stitch` (3). **The #4674 backlog is now empty**: the 4 leaves
 still in the audit's `prose-only` bucket are the 4 documented exemptions.
-The route workstream has since exposed its existing `--format` through the outer
-parser; its staged output still has the qualification described below.
+The route workstream has since exposed its existing `--format` through `kct
+route` (which, since #7017, hands its argv straight to `route_cmd`'s parser);
+its staged output still has the qualification described below.
 `tests/test_format_json_sweep_orchestrators.py` pins that bucket against
 exactly that list, so a new prose-only leaf fails a test rather than silently
 re-opening the backlog.
@@ -127,9 +128,12 @@ reachable through `kct`:
   machine-output flag. `kct mfr rules --format json` is now wired end-to-end
   (outer parser → shim → inner parser) and the inner `--json` boolean was
   removed rather than aliased — it never shipped on any reachable surface.
-- `route_cmd.py` `--format` — now forwarded by `kct route` as part of #5348.
-  The parser drift guard covers both entry points. See "Routing output" below
-  for the scope of its structured diagnostics.
+- `route_cmd.py` `--format` — reachable through `kct route` since #5348. Since
+  #7017 `kct route` is a passthrough (`cli/__init__.py` hands its raw argv to
+  `route_cmd.main`, like `footprint generate`), so every `route_cmd` flag is
+  user-facing; the audit resolves the `route` stub to `route_cmd._route_parser`
+  (`parser.resolve_passthrough`). See "Routing output" below for the scope of
+  its structured diagnostics.
 
 ## Classification of the 72 prose-only subcommands
 
@@ -163,6 +167,32 @@ and `placement_disposition` -- whether layer escalation is on or off
 Only runs that never built a router (dry runs, early validation exits) fall back
 to the minimal `{"exit_code", "verdict"}` document, and a run killed by
 `--timeout` prints no document.
+
+The document also carries a `grid` object -- the routing grid the run
+actually built (Issue #6875):
+
+| Key | Meaning |
+|-----|---------|
+| `requested_mm` | Pitch asked for: the explicit `--grid` value, or the `--grid auto` selection |
+| `used_mm` | Pitch actually routed on |
+| `cols`, `rows`, `layers`, `cells` | Grid dimensions; `cells = cols * rows * layers` |
+| `selection` | `"explicit"` (`--grid 0.1`) or `"auto"` (`--grid auto`) |
+| `coarsened` | `true` only when the adaptive cell cap replaced the requested pitch (never for `kct route` since #6741) |
+| `coarsened_reason` | Why it was coarsened, else `null` |
+
+The text output's `Grid:` line names the same pitch and selection
+(`Grid: 0.1mm pitch (explicit), 501x401x2 = 401,802 cells`). An explicit grid
+whose cell count would pass the backend's ceiling (20,000,000 cells on Python,
+100,000,000 on C++, counted at the largest layer count the run would try) stops
+with an error before routing; `--force` routes at the requested pitch anyway.
+
+`summary.verdict` is `"success"` (exit 0), `"unverified"` (exit 10) or
+`"failed"` (any other non-zero exit). `"unverified"` means the post-route DRC
+and/or the stranded-pour check did not complete: `--timeout` ran out, or
+kicad-cli crashed, was killed or hit its per-call DRC timeout (Issue #6724).
+The board is saved but not verified, so run `kct check` on it before
+manufacturing. It only ever replaces a would-be exit 0 (Issue #6273; see the
+[`kct route` exit-code ladder](cli.md#kct-route-ladder)).
 
 Every default route also builds a report-only `RoutingPlan` (tile-level
 demand/capacity/overflow from the tile-based global-routing pass) written
@@ -295,7 +325,7 @@ Shapes:
 | `create-pcb` | `{"command": "create-pcb", "schematic", "output", "board": {width_mm, height_mm, layers}, "components_found", "placement": {skipped, placed, failed[], warnings[]}, "nets": {assigned, missing_footprints[]}, "summary", "dry_run", "saved", "success"}` |
 | `panel` | `{"command": "panel", "input", "output", "grid": {rows, cols, spacing_mm, spacing_x_mm, spacing_y_mm}, "board_count", "tabs", "cut_method", "vcut_layer", "tab_width_mm", "tab_count", "frame", "frame_space_mm", "vscore_clearance_mm", "vscore_clearance_source", "mfr", "vscore_supported", "warnings", "tooling_holes", "fiducials", "success"}` (`vcut_layer`, `vscore_clearance_mm`, `vscore_clearance_source` and `mfr` are `null` unless `--cut vcut`; `vscore_clearance_source` is `"cli"` for `--vscore-clearance`, `"fab"` for the resolved fab profile's published figure, or `"unsourced_default"` when that fab publishes none; `mfr` is the resolved fab profile (`null` with an explicit `--vscore-clearance` and no `--mfr`); `spacing_mm` is the resolved gap -- 0 for a butted V-cut panel -- or `null` when the two axes differ; `frame_space_mm` is `null` without `--frame`; `vscore_supported` is `false` when the resolved fab's docs say it offers no V-scoring (e.g. `oshpark`; `warnings` then also carries a message suggesting `--cut mousebite`), otherwise `null`; `warnings` lists gapped V-cut seams, copper too close to a score line and that unsupported-fab notice) |
 | `report generate` | `{"command": "generate", "input", "manufacturer", "output_dir", "project_name", "report_path", "pdf_path", "data_source": "auto-collect"\|"data-dir"\|"skeleton", "figures": {generated, skipped_reason}, "success"}` |
-| `screenshot` | `{"command": "screenshot", "input", "output", "width_px", "height_px", "layers_rendered", "success"}` |
+| `screenshot` | `{"command": "screenshot", "input", "output", "width_px", "height_px", "layers_rendered", "success"}` -- `--baseline-save DIR` replaces the render keys with `baseline: {saved, sidecar, renderer: {kicad_cli, cairosvg}, options, width_px, height_px}`; `--baseline-compare DIR` (issue #6912) emits `{"command", "input", "baseline", "status": "identical"\|"changed", "drift_fraction", "changed_pixels", "total_pixels", "success"}`, or `status: "renderer_mismatch"` with `differences: [{field, baseline, current}]`, no drift keys, `success: false` and a non-zero exit when the baseline's renderer versions, render options or dimensions differ; a missing/corrupt baseline is the usual `{"error", "success": false}` |
 | `board-view overview\|net\|layers\|crop` (issue #6316) | `{"command": "board-view", "view", "input", "output", "net", "units": "mm", "frame": "board-relative"\|"sheet-absolute", "board_origin_mm": [x, y], "frame_note", "window_mm": [x0, y0, x1, y1], "width_px", "height_px", "px_per_mm", "pad_labels_drawn", "title", "color_key", "pours_drawn": false, "unfinished_net_count", "missing_link_count", "missing_links": {net: [{"from", "to", "from_mm", "to_mm", "length_mm"}]}, "pour_advisory": [{"net", "open_connections", "islands", "zone_layers"}], "caveat", "success"}` — every coordinate is in `frame`; `board_origin_mm` is the sheet position of the board-relative (0, 0), so sheet-absolute = board-relative + origin; `missing_links` holds exactly the nets `kct check`'s connectivity rule reports, one entry per open connection; `pour_advisory` holds the pour nets that rule treats as advisory (no link); `outline_error` appears only when the board outline could not be read |
 | `board-view list` | the same document without the image keys (`output`, `window_mm`, `width_px`, `height_px`, `px_per_mm`, `pad_labels_drawn`, `title`, `color_key`, `pours_drawn`); JSON is this view's default format |
 
@@ -334,7 +364,7 @@ an improvement or an enforceable rule set from it: `optimize-placement`,
 | Command | Document |
 |---|---|
 | `optimize-placement` | `{"command": "optimize-placement", "pcb", "output", "strategy", "seed_method", "max_iterations", "board": {width_mm, height_mm, components, nets}, "mode": "evaluate"\|"optimize", "scores": {…}, "feasible", "infeasible_detail", "iterations", "wall_time_s", "interrupted", "overlaps_remaining", "allow_infeasible", "dry_run", "saved", "written_to", "success"}` — `scores` is `{"current": …}` under `--dry-run` and `{"initial", "final"}` otherwise; each score is `{total, feasible, breakdown}` with the breakdown taken straight off the cost dataclass. The `--dry-run` document additionally carries `"wirelength_estimators": {centre_anchored_mm, pad_anchored_mm, delta_mm, delta_pct, scored, pads_available, pad_count}` — the same layout measured both ways (issue #4831 M5); `scored` names the one the objective used (`--pad-anchored-wirelength` switches it), the other is report-only and `delta_pct` is `null` when the centre-anchored estimate is 0. Both documents carry `"decoupling": [{net, cap, pin, distance_mm}, …]` — each decoupling cap's assigned IC supply pin and its distance in the scored (`--dry-run`) or written placement, empty when the board has no cap/supply-pin structure or the `decoupling` weight is 0 (issue #6020). Under `--route-check` the optimize document also carries `"route_check": {enabled, budget, stages: [{stage, skipped, accepted, incumbent, candidate, note}], routes_run, route_wall_time_s, accepted_stage, warnings}`; each `incumbent`/`candidate` is `{nets_routed, nets_requested, completion, drc_errors, exit_code, wall_time_s, reproducible, error}`, and `route_wall_time_s` / `wall_time_s` are volatile. The key is absent without the flag (issue #6234). The optimize document also carries `"snap_silk_repair"`: `null` when the decoupling snap moved nothing, else `{affected, moved, unresolved: [{reference, status, reason}], error}` — the references whose silkscreen text was re-anchored after the snap, and any it had to leave in place (issue #6256) |
-| `optimize-traces` | `{"command": "optimize-traces", "pcb", "output", "net_filter", "optimizations": {merge_collinear, eliminate_zigzags, convert_45_corners, chamfer_size_mm}, "drc_aware", "manufacturer", "layers", "copper_oz", "stats": {segments_before/after, corners_before/after, length_before_mm/after_mm, …}, "dry_run", "saved", "written_to", "success"}` |
+| `optimize-traces` | `{"command": "optimize-traces", "pcb", "output", "net_filter", "optimizations": {merge_collinear, eliminate_zigzags, convert_45_corners, chamfer_size_mm}, "drc_aware", "manufacturer", "layers", "copper_oz", "stats": {nets_optimized, nets_rolled_back, segments_before, segments_after, segment_reduction_pct, corners_before, corners_after, length_before_mm, length_after_mm, length_reduction_pct, drc_errors_before, drc_errors_after, per_net: [{net, segments_before, segments_after, length_before_mm, length_after_mm, rolled_back}]}, "dry_run", "saved", "written_to", "success"}` — `stats.per_net` has one entry per optimized net; `-v/--verbose` prints the same data as a per-net table in text mode (issue #7065) |
 | `route-auto` | `{"command": "route-auto", "pcb", "output", "strategy", "dry_run", "nets": [...], "nets_requested", "nets_routed", "success"}` — one `nets[]` entry per requested net in request order: routed entries carry `success`/`partial`/`strategy_used`/`metrics`/`segments_written`/`warnings`/`pads_connected`/`pads_total`/`error`/`alternative_strategies` (plus `rolled_back`/`rolled_back_to_pass` when a regressing pass was undone -- such an entry reports `success: false`, and `resumed: true` for a net skipped because the `--resume` checkpoint already completed it, Issue #5945; a partial or failed entry also carries `unrouted` + `unrouted_diagnosis`, the `kct route` congested/blocked/unclassified schema, unless `--diagnose-unrouted-budget 0`, Issue #6001), `--dry-run` entries carry the preview (`would_route`, `via_drill_mm` + `via_drill_source`, …). Under `--lint-gate` the document also carries `lint_gate` (below) and, on a rollback, every routed entry reports `success: false` with `lint_gate_rolled_back: true` |
 | `reason` | `{"command": "reason", "pcb", "output", "dry_run", "warnings", "drc": {ran, source, …}, "board": {…}, "mode": "prompt"\|"analyze"\|"export-state"\|"auto-route", …, "success"}` — plus the mode's own payload: `prompt`, `analysis`, `state` + `state_output`, or `auto_route` (`attempted`/`routed`/`nets[]`) with `saved`/`written_to` |
 | `creepage-export-rules` | `{"command": "creepage-export-rules", "project", "pcb", "dru", "voltage_map", "standard", "pollution_degree", "material_group", "hv_threshold_v", "dru_floor_mm", "domains", "net_domains", "nets_assigned", "rules": [{name, condition, min_mm}], "bridging_exemptions", "dru_block", "dry_run", "written", "skipped_reason", "success"}` — `dru_block` is carried only on the `--dry-run` path (mirroring the prose that prints it instead of writing it) |

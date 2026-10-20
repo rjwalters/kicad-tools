@@ -14,7 +14,7 @@ from fractions import Fraction
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable, Iterable, Mapping
     from pathlib import Path
 
     from kicad_tools.explain.decisions import DecisionStore
@@ -24,6 +24,8 @@ if TYPE_CHECKING:
     from kicad_tools.progress import ProgressCallback
 
     from .io import FineZone
+    from .kicad_length import KicadLengthModel
+    from .pairplan.outcome import PairOutcome
     from .pathfinder import Router
     from .region_graph import RegionGraph
     from .routing_plan import RoutingPlan
@@ -35,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 import contextlib
 
+from . import negotiated_budget as _negotiated_budget
 from . import via_conflict as _via_conflict_module
 from . import wall_deadline as _wall_deadline
 from .access_ripup import (
@@ -63,10 +66,10 @@ from .algorithms import (
     GRACE_PASS_BUDGET_S,
     GRACE_PASS_TIER_CAPS_S,
     PER_NET_CAP_STAGE_FRACTION,
-    POST_NEGOTIATION_SWEEP_BUDGET_S,
-    POST_NEGOTIATION_SWEEP_PER_NET_S,
-    POST_NEGOTIATION_SWEEP_PER_NET_SAFETY_BACKSTOP_S,
-    POST_NEGOTIATION_SWEEP_SAFETY_BACKSTOP_S,
+    POST_NEGOTIATION_SWEEP_BUDGET_S,  # noqa: F401  (re-exported; used by negotiated_budget)
+    POST_NEGOTIATION_SWEEP_PER_NET_S,  # noqa: F401  (re-exported; used by negotiated_budget)
+    POST_NEGOTIATION_SWEEP_PER_NET_SAFETY_BACKSTOP_S,  # noqa: F401  (re-exported; used by negotiated_budget)
+    POST_NEGOTIATION_SWEEP_SAFETY_BACKSTOP_S,  # noqa: F401  (re-exported; used by negotiated_budget)
     HierarchicalRouter,
     MonteCarloRouter,
     MSTRouter,
@@ -97,6 +100,7 @@ from .diffpair import DifferentialPair, DifferentialPairConfig, LengthMismatchWa
 from .diffpair_length import DiffPairLengthTracker
 from .diffpair_length_tuning import DiffPairTuneResult
 from .diffpair_routing import DiffPairRouter, IntraPairClearanceViolation
+from .edge_keepout import install_edge_keepout, refresh_edge_keepout_floor
 from .escape import (
     EscapeRoute,
     EscapeRouter,
@@ -110,14 +114,21 @@ from .failure_analysis import (
     FailureCause,
     RootCauseAnalyzer,
 )
-from .grid import RoutingGrid
+from .grid import RoutingGrid, routed_halo_radius_cells
 from .kelvin import detect_kelvin_topology
 from .layers import Layer, LayerStack
 from .length import LengthTracker, LengthViolation
 from .match_group_length import MatchGroup, MatchGroupTracker
+from .negotiated_budget import (
+    RELIEF_RESCUE_TXN_FLOOR_S,
+    RELIEF_RESCUE_TXN_FRACTION,
+    RELIEF_SUBSEARCH_BUDGET_S,  # noqa: F401  (re-exported; cli/route_cmd.py imports it)
+    RELIEF_SUBSEARCH_SAFETY_BACKSTOP_S,  # noqa: F401  (re-exported)
+)
 from .net_class import NetClass, classify_from_name
 from .output import format_failed_nets_summary
 from .pad_access_invariant import AccessVeto, PadAccessInvariant
+from .pair_via_parity import PairViaParityFailure
 from .parallel import (
     ParallelRouter,
     RegionBasedNegotiatedRouter,
@@ -188,85 +199,6 @@ _ESCAPE_CORRIDOR_MAX_LENGTH_MM = 5.0
 # 4-layer stack this confines reservations to layers [1, 2] instead of spanning
 # all four; degrades gracefully to the outer layers on a 2-layer board.
 _ESCAPE_CORRIDOR_INNER_LAYERS_ONLY = True
-
-# Issue #4536: wall-clock budget for the relief rescue's SUB-searches (the
-# min-conflict probe rounds and the displaced-victim re-land passes inside
-# :meth:`Autorouter._relief_rescue`).  This is the historical value and is
-# LOAD-BEARING for routed reach on every run that is NOT expansion-capped -- a
-# victim that fails to re-land within the budget rolls the whole transaction
-# back (no-net-loss guarantee), so the value decides whether the rescued net is
-# kept or dropped.
-#
-# On board-06 seed-42 the natural victim re-land time sits in the 8-12 s band on
-# GitHub's ubuntu runners, i.e. this 10 s value STRADDLES it: the same commit
-# reached 21/21 on one runner and 20/21 on another purely on machine speed (CI
-# runs 31214686048 vs 31213011136 are line-identical up to the MIPI_RST rescue
-# and then diverge on whether MIPI_CLK- re-lands).
-#
-# ``deterministic_rescue=True`` swaps this wall clock for the per-net
-# node-expansion cap whenever one is active (``--deterministic-budget`` /
-# ``per_net_iterations``), which takes machine speed out of the rescue's
-# commit/roll-back decision.  Issue #4730 tried making that the fleet default
-# and MEASURED A REGRESSION -- see ``DETERMINISTIC_RESCUE_DEFAULT`` -- so this
-# value remains the default bound everywhere except callers that opt in
-# explicitly (board 06).
-RELIEF_SUBSEARCH_BUDGET_S = 10.0
-
-# Issue #4536: the wall clock kept under ``deterministic_rescue=True``.  It is
-# deliberately ~10x the measured natural sub-search time (a per-net search that
-# exhausts the 1M-expansion cap costs ~11 s on a CI runner), so it is NOT
-# load-bearing -- the binding bound is the node-expansion cap.  It exists only
-# to keep the one path that the expansion cap does not price in seconds (a
-# pure-Python A* fallback, 10-100x slower than the C++ backend) from grinding
-# for minutes inside a rescue, per the #3989 lesson.
-RELIEF_SUBSEARCH_SAFETY_BACKSTOP_S = 120.0
-
-# Issue #4781: proportional bound on a single relief-rescue TRANSACTION.  The
-# sub-search budgets above bound each stage of a rescue (probe rounds, victim
-# re-lands, nested rescues), but their PRODUCT is unbounded -- the #3413 defect
-# one level up.  Measured on board 07 (#4770, CI run 31281260812): one ``DQ3``
-# transaction spent 279.1 s -- 46% of the whole 600 s stage -- ripping 9
-# blockers and then rolling back verbatim, and the rip-up iteration that
-# produces the board's 26th net is the one that time starved.
-#
-# The bound: a transaction (INCLUDING its depth-1 nested rescues, which share
-# the parent's allowance -- the parent's commit gate depends on them, so a
-# separate allowance would just rebuild the unbounded product) may spend at
-# most ``max(RELIEF_RESCUE_TXN_FRACTION * remaining, RELIEF_RESCUE_TXN_FLOOR_S)``
-# where ``remaining = deadline - transaction_start`` is the stage budget left
-# when the transaction begins.  It is evaluated ONLY at the existing
-# ``_past_deadline()`` check sites (top of each probe round, per victim
-# re-land, before each nested rescue) -- never inside the A* sub-searches --
-# so a single sub-search can still legally overshoot the allowance by up to
-# one sub-search budget (120 s worst case under ``deterministic_rescue``).
-# On breach the transaction rolls back verbatim via the existing
-# ``_rollback()``; aborting early is free by construction (the board is
-# restored either way) -- it can only cost rescues that would have succeeded.
-#
-# Calibration, from the #4770 per-pass rescue tables
-# (``boards/07-matchgroup-test/diagnostic-runs/README.md``):
-#
-#   * The FLOOR (90 s) sits above the longest transaction the healthy `main`
-#     arm ever completes (70.6 s, ``DQ4``, board 07 initial pass) -- so on a
-#     main-shaped trajectory the bound never fires and board 07's A/B inputs
-#     are unchanged.  Near the stage end the stage deadline is checked first,
-#     so the floor never EXTENDS a transaction past ``deadline``.
-#   * The FRACTION (25%) caps an early-stage pathological transaction: the
-#     ``DQ3`` rescue began with ~337 s of stage remaining, so its allowance
-#     becomes max(84.3, 90) = 90 s instead of the 279.1 s it actually spent,
-#     returning ~189 s to the rip-up loop that produces reach.
-#
-# The bound is FLAT, not scaled by how much the rescue has already achieved:
-# ``DQ3`` had "achieved" 9 rips and 7/9 re-lands at 279 s and still rolled
-# back -- progress through the rescue pipeline is not a predictor of commit,
-# so paying more for it just re-opens the hole.
-#
-# When the stage has no deadline (``timeout=None`` -> ``relief_deadline is
-# None``: board 06's deterministic regen, the two-phase stall-relief hook)
-# there is no denominator and the bound is structurally inert -- behavior is
-# byte-identical to pre-#4781.
-RELIEF_RESCUE_TXN_FRACTION = 0.25
-RELIEF_RESCUE_TXN_FLOOR_S = 90.0
 
 # Issue #4730: the default for the relief-rescue sub-search bound, shared by
 # every entry point that can reach a rescue -- :meth:`Autorouter._relief_rescue`,
@@ -697,28 +629,92 @@ def _format_pad_ref(pad: Pad) -> str:
 def _aggregate_pair_outcome(segment_outcomes: list[str]) -> str:
     """One lattice diff-pair outcome from its chain segments (issue #6378).
 
-    * a single segment (every pair without an interior part): its outcome,
-      unchanged;
-    * every segment ``coupled``: ``"coupled"``;
-    * every segment in the #6373 fallback: ``"uncoupled-fallback:<reason>"``
-      (the first segment's reason);
-    * some segments coupled: ``"partially-coupled:<k>/<n>"``;
-    * otherwise (no segment coupled, not all in fallback): the first
-      non-coupled segment's outcome.
+    Kept at this path for its callers and tests; the rule itself is
+    :func:`kicad_tools.router.pairplan.outcome.aggregate_label` (issue #6837).
     """
-    if not segment_outcomes:
-        return "not-attempted"
-    if len(segment_outcomes) == 1:
-        return segment_outcomes[0]
-    n = len(segment_outcomes)
-    k = sum(1 for o in segment_outcomes if o == "coupled")
-    if k == n:
-        return "coupled"
-    if k > 0:
-        return f"partially-coupled:{k}/{n}"
-    if all(o.startswith("uncoupled-fallback:") for o in segment_outcomes):
-        return segment_outcomes[0]
-    return next(o for o in segment_outcomes if not o.startswith("uncoupled-fallback:"))
+    from .pairplan.outcome import aggregate_label
+
+    return aggregate_label(segment_outcomes)
+
+
+@functools.cache
+def _lattice_tap_retry_outcomes() -> frozenset[str]:
+    """``uncoupled-fallback:pair-<r>`` for every exhausted-search reason ``r``.
+
+    Built from :data:`kicad_tools.router.lattice.pathfinder.EXHAUSTED_SEARCH_REASONS`
+    -- the constants ``_route_impl`` actually returns -- so a renamed or
+    refined decline reason cannot silently drift out of the tap-chain retry
+    gate (issue #6743).  The ``pair-`` prefix and the ``uncoupled-fallback:``
+    wrapper are the ones ``_route_pair_impl`` and the #6373 fallback apply.
+    Imported lazily, like the pathfinder itself, so ``core`` stays cheap to
+    import.
+    """
+    from .lattice.pathfinder import EXHAUSTED_SEARCH_REASONS
+
+    return frozenset(f"uncoupled-fallback:pair-{r}" for r in EXHAUSTED_SEARCH_REASONS)
+
+
+def segment_via_counts(
+    coupled: list[Any], routes_by_key: Mapping[object, Route]
+) -> dict[object, tuple[int, int]]:
+    """``{segment key: (vias_P, vias_N)}`` of every segment's COMMITTED legs (#7093).
+
+    Every lattice pair outcome -- coupled, gateway, hybrid or uncoupled
+    fallback -- commits its two legs under ``(pc.key, "P")`` /
+    ``(pc.key, "N")``, so the counts are read off the copper the negotiation
+    actually returned.  A segment with a missing or empty leg is skipped (an
+    open is reported as an open).  Reading the routes, not the fallback
+    flush's :attr:`~.lattice.pathfinder.LatticePathfinder.pair_via_mismatch`
+    record, keeps the report true when a retry that re-flushed the pair is
+    discarded (#6535 tap chain, #6842 gateway offer, #6444 gateway rollback)
+    and covers the #6446 hybrid legs, which never reach the flush.
+    """
+    counts: dict[object, tuple[int, int]] = {}
+    for pc in coupled:
+        legs = (routes_by_key.get((pc.key, "P")), routes_by_key.get((pc.key, "N")))
+        if any(leg is None or not leg.segments for leg in legs):
+            continue
+        counts[pc.key] = (len(legs[0].vias), len(legs[1].vias))  # type: ignore[union-attr]
+    return counts
+
+
+#: Why a segment's unequal vias could not be avoided, by segment status.
+_VIA_MISMATCH_CAUSE = {
+    "uncoupled-fallback": "no fallback candidate had via parity",
+    "hybrid": "the hybrid's single-ended legs found no via-equal pair",
+}
+
+
+def pair_via_mismatch_warnings(
+    coupled: list[Any],
+    outcomes: Mapping[object, str],
+    counts: Mapping[object, tuple[int, int]],
+) -> list[str]:
+    """One ``WARNING`` line per segment committed with unequal P/N via counts.
+
+    Issue #7093: ``counts`` is ``key -> (vias_P, vias_N)`` of each segment's
+    committed legs (:func:`segment_via_counts`).  The check is per segment,
+    keyed by ``pc.key``, so it fires whatever the whole pair's outcome is:
+    ``uncoupled-fallback:``, ``partially-coupled:<k>/<n>`` (board 03's USB_D)
+    or ``hybrid:``.  Unequal vias are a pair-rule failure the router could
+    not avoid; never silent.  The coupled and gateway outcomes give equal
+    counts by construction, so a line naming one of them is a router bug.
+    """
+    from .pairplan.outcome import segment_record
+
+    lines: list[str] = []
+    for pc in coupled:
+        got = counts.get(pc.key)
+        if got is None or got[0] == got[1]:
+            continue
+        status = segment_record(outcomes, pc.key).status
+        cause = _VIA_MISMATCH_CAUSE.get(status, f"segment outcome {status}")
+        span = f"{pc.pad_p_a.ref}.{pc.pad_p_a.pin}->{pc.pad_p_b.ref}.{pc.pad_p_b.pin}"
+        lines.append(
+            f"  WARNING: diff pair {pc.pair_name} {span} legs have unequal via "
+            f"counts (P={got[0]}, N={got[1]}); {cause}"
+        )
+    return lines
 
 
 def _lattice_tap_chain_retry_pairs(
@@ -727,17 +723,57 @@ def _lattice_tap_chain_retry_pairs(
     """Single-trunk pairs to retry as tap chains (issue #6535).
 
     A pair qualifies when its connection is the single trunk (the 3-tuple
-    ``("pair", p, n)`` key -- a #6378 chained pair is not retried), the trunk
-    declined with exactly ``pair-no-path`` (and was therefore routed by the
+    ``("pair", p, n)`` key -- a #6378 chained pair is not retried), the trunk's
+    coupled A* ran and was exhausted (and the pair was therefore routed by the
     #6373 uncoupled fallback), and :func:`choose_pair_tap_chain` offered a
     different chain for it (``available``).
+
+    "Exhausted" is :func:`_lattice_tap_retry_outcomes`: ``pair-no-path`` and its
+    two diagnostic refinements, ``pair-no-path-keepout-constrained`` (#4605;
+    #6697 made the fat pair search consult the keepout mask, so a board with
+    #6401 plane-via reservations now reports this) and
+    ``pair-no-path-layer-constrained`` (#4979).  Issue #6743: the gate used to
+    compare the bare ``pair-no-path`` literal, so #6697's honest relabel
+    silently disabled this retry and board 06b fell from 3/4 to 0/4 coupled.
+    The layer-constrained refinement is included for the same reason: the
+    reason labels are a precedence order (keepout outranks layer outranks
+    plain), not distinct failure classes, so a search pruned by BOTH a keepout
+    and a layer set already qualifies -- excluding one pruned only by the layer
+    set would be incoherent.  A tap chain does not lift either constraint; it
+    only re-routes around the tap part, and the #6550 keep rule discards a
+    retry that does not improve coupling.  Declines where no corridor search
+    ran or the failure is not the corridor (``pair-no-parity``,
+    ``pair-partner-pad``, ``pair-empty-route``, ...) never qualify.
     """
+    exhausted = _lattice_tap_retry_outcomes()
     return frozenset(
         pc.pair_name
         for pc in coupled
+        if len(pc.key) == 3 and pc.pair_name in available and outcomes.get(pc.key) in exhausted
+    )
+
+
+def _lattice_gateway_offer_keys(
+    coupled: list[Any], outcomes: dict[object, str], available: set[str]
+) -> frozenset[object]:
+    """Skipped single trunks that still deserve a gateway retry (issue #6842).
+
+    The #6444 gateway retry is withheld from every single trunk with a #6535
+    tap-chain alternative (``available``), on the assumption the tap retry
+    serves it first.  That retry only runs for the
+    :func:`_lattice_tap_retry_outcomes` declines, and may be discarded, so a
+    trunk that still sits in ``coupled`` (a kept tap retry replaces its key
+    with chain segments) and declined for a gateway-eligible reason
+    (``GATEWAY_RETRY_REASONS``, including ``pair-leg-keepout``) got neither.
+    """
+    from .lattice.pathfinder import GATEWAY_RETRY_REASONS
+
+    return frozenset(
+        pc.key
+        for pc in coupled
         if len(pc.key) == 3
         and pc.pair_name in available
-        and outcomes.get(pc.key) == "uncoupled-fallback:pair-no-path"
+        and outcomes.get(pc.key, "").removeprefix("uncoupled-fallback:") in GATEWAY_RETRY_REASONS
     )
 
 
@@ -942,6 +978,8 @@ def worker_router_kwargs(config: dict) -> dict[str, Any]:
             kwargs[key] = int(config[key])
     if config.get("force_python"):
         kwargs["force_python"] = True
+    if config.get("adaptive_grid") is False:
+        kwargs["adaptive_grid"] = False
     return kwargs
 
 
@@ -1019,6 +1057,7 @@ def build_worker_router(config: dict) -> Autorouter:
             terminal_id=pad_data.get("terminal_id", ""),
             pin=str(pad_data["number"]),
             through_hole=pad_data.get("through_hole", False),
+            side=None if pad_data.get("side") is None else Layer(pad_data["side"]),
             drill=pad_data.get("drill", 0.0),
             drill_size=pad_data.get("drill_size"),
             drill_rotation=pad_data.get("drill_rotation", 0.0),
@@ -1028,6 +1067,7 @@ def build_worker_router(config: dict) -> Autorouter:
             # it would rebuild every rotated pad as axis-aligned.
             rotation=pad_data.get("rotation", 0.0),
             shape=pad_data.get("shape", "rect"),
+            roundrect_rratio=pad_data.get("roundrect_rratio"),
         )
         key = pad.key
         if key in router.pads and router.pads[key].net != pad.net:
@@ -1061,13 +1101,16 @@ def build_worker_router(config: dict) -> Autorouter:
     # "edge_clearance" keys.  Store them back on the router too so
     # ``validate_routes`` can still flag edge violations, matching
     # parent-process behaviour.
+    # Issue #6043: the physical keepout floor used when no clearance is set
+    # travels the same way ("edge_keepout_floor"), and the shared helper
+    # picks clearance-or-floor so the worker blocks what the parent did.
     edge_segments = config.get("edge_segments")
     edge_clearance = config.get("edge_clearance")
     if edge_segments is not None:
         router._edge_segments = edge_segments
         router._edge_clearance = edge_clearance
-        if edge_segments and edge_clearance:
-            router.grid.add_edge_keepout(edge_segments, edge_clearance)
+        router._edge_keepout_floor = config.get("edge_keepout_floor")
+        install_edge_keepout(router, router.grid)
 
     # Issue #5555: same treatment for ``add_obstacle`` keepouts -- they only
     # reach this worker via the "obstacles" key of the serialized config.
@@ -1561,6 +1604,7 @@ class Autorouter:
         max_search_iterations: int = 0,
         per_net_iterations: int = 0,
         strategy: str = "grid",
+        adaptive_grid: bool = True,
     ):
         """Initialize the autorouter.
 
@@ -1592,8 +1636,19 @@ class Autorouter:
                 ``"grid"`` (default, uniform-grid A*), ``"mesh"`` (navmesh,
                 #4268/#4269), or ``"lattice"`` (adaptive octilinear lattice,
                 #4278).
+            adaptive_grid: Issue #972 -- when True (default), a board whose
+                ``rules.grid_resolution`` would exceed the backend's cell
+                threshold is routed on a coarser adaptive pitch (logged as a
+                warning).  Issue #6741: callers whose pitch was already
+                chosen and clearance-checked (``load_pcb_for_routing``, i.e.
+                ``kct route --grid``) pass False so that pitch is honoured.
         """
         self.rules = rules or DesignRules()
+        self._adaptive_grid = bool(adaptive_grid)
+        # Issue #6875: set by ``_create_grid_and_routers`` when the #972
+        # adaptive cap replaced the requested pitch -- ``{"requested_mm",
+        # "used_mm", "reason"}`` -- else None.  Read via :meth:`grid_report`.
+        self.grid_coarsening: dict[str, Any] | None = None
         # Issue #3524: copy the default map instead of aliasing it.  The
         # autorouter writes per-net overrides into ``self.net_class_map``
         # (impedance synthesis, diff-pair partner wiring, matrix layer
@@ -1846,6 +1901,16 @@ class Autorouter:
         # Issue #4270: per-diff-pair coupled-routing outcomes for the lattice
         # engine ("coupled" or a decline reason), keyed by pair base name.
         self._lattice_pair_outcomes: dict[str, str] = {}
+        # Issue #6837: the structured record behind each of those strings
+        # (``PairOutcome.label`` is the string), rebuilt with them.
+        self._lattice_pair_outcome_records: dict[str, PairOutcome] = {}
+        # Issue #7093: engaged pairs committed with unequal P/N via counts
+        # (see :meth:`_audit_pair_via_parity`), refreshed by every
+        # ``_finalize_routing``; plus the pairs the lattice's per-segment
+        # report already named and the failures already printed.
+        self.pair_via_parity_failures: list[PairViaParityFailure] = []
+        self._lattice_via_warned_nets: set[frozenset[int | None]] = set()
+        self._reported_pair_via_parity: set[tuple[str, str, int, int]] = set()
         # Issue #6378: a pair that passes through an interior part (board 03
         # USB_D through the ESD part U2) is routed as a chain -- one coupled
         # connection per segment plus single-ended P/N hops inside the part.
@@ -1855,6 +1920,11 @@ class Autorouter:
         # multi-segment pair (empty for single-segment pairs).
         self._lattice_pair_hops: list[tuple[object, int, Pad, Pad]] = []
         self._lattice_pair_segment_outcomes: list[tuple[str, str, str]] = []
+        # Issue #6698: generated equivalent-pin ties of engaged pairs (the far
+        # row of a USB-C receptacle tied to the row the chain launches from),
+        # as ``(key, route, ("REF.PIN", "REF.PIN"))``.  Fixed copper during the
+        # negotiation and merged into its output.
+        self._lattice_pair_ties: list[tuple[object, Route, tuple[str, str]]] = []
         # Issue #4472 (epic #4465, Phase 2): localized per-link lattice build.
         # When set to a WORLD-coordinate ``(x1, y1, x2, y2)`` box,
         # :meth:`_ensure_lattice_pathfinder` builds the octilinear lattice +
@@ -2100,6 +2170,14 @@ class Autorouter:
         # edge keepout (Issue #2743).
         self._edge_segments: list[tuple[tuple[float, float], tuple[float, float]]] | None = None
 
+        # Issue #6043: physical board-edge keepout radius used when no
+        # positive ``_edge_clearance`` is set (``None`` or ``0``), so copper
+        # can never be laid across an Edge.Cuts cut.  Deliberately separate
+        # from ``_edge_clearance``: validate_routes / drc_nudge read that as
+        # a copper-to-edge clearance and must not see this grid radius.
+        # Every keepout install goes through ``edge_keepout.install_edge_keepout``.
+        self._edge_keepout_floor: float | None = None
+
         # Keepouts registered through :meth:`add_obstacle` (Issue #5555).
         # Sibling of ``_edge_segments`` / ``_edge_clearance`` above: the
         # blocked cells live on the *grid*, which ``_reset_for_new_trial``
@@ -2173,6 +2251,9 @@ class Autorouter:
         # Issue #5786: nets a pose-coupled diff pair already committed; the
         # two-phase main pass must not re-route them.
         self._pose_coupled_nets: set[int] = set()
+        # Issue #6840: nets of every diff pair the pre-pass committed AS
+        # COUPLED; ``kct route`` keeps the trace optimizer off them.
+        self._committed_coupled_nets: set[int] = set()
 
         # Issue #4463: set by ``route_all_with_diffpairs`` for the duration of
         # a shadow-ON main strategy.  Tells ``route_all_negotiated`` that the
@@ -2395,12 +2476,40 @@ class Autorouter:
             if is_cpp_available():
                 adaptive_threshold = 50_000_000
 
-        if estimated_cells > adaptive_threshold:
+        # Issue #6741: never coarsen a pitch the caller pinned (an explicit
+        # ``--grid`` or the budget-aware auto-grid selection) -- that pitch
+        # was the one checked against clearance.
+        if getattr(self, "_adaptive_grid", True) and estimated_cells > adaptive_threshold:
             # Use adaptive resolution for better performance on large boards
             grid = RoutingGrid.create_adaptive(
                 width, height, self.rules, origin_x, origin_y, layer_stack=self.layer_stack
             )
+            if abs(grid.resolution - self.rules.grid_resolution) > 1e-9:
+                # Issue #6875: record it so callers can report it (JSON
+                # ``grid`` block, ``route_pcb`` stats, the MCP tool).
+                self.grid_coarsening = {
+                    "requested_mm": float(self.rules.grid_resolution),
+                    "used_mm": float(grid.resolution),
+                    "reason": (
+                        f"adaptive cell cap (Issue #972): the requested pitch needs "
+                        f"~{int(estimated_cells):,} cells, above the "
+                        f"{adaptive_threshold:,}-cell threshold of the "
+                        f"{'Python' if adaptive_threshold == 500_000 else 'C++'} backend"
+                    ),
+                }
+                logger.warning(
+                    "Adaptive grid (Issue #972): requested %.4gmm pitch would need "
+                    "~%s cells (threshold %s); routing on %.4gmm instead. Pass "
+                    "adaptive_grid=False to honour the requested pitch.",
+                    self.rules.grid_resolution,
+                    f"{int(estimated_cells):,}",
+                    f"{adaptive_threshold:,}",
+                    grid.resolution,
+                )
+            else:
+                self.grid_coarsening = None
         else:
+            self.grid_coarsening = None
             grid = RoutingGrid(
                 width, height, self.rules, origin_x, origin_y, layer_stack=self.layer_stack
             )
@@ -2483,8 +2592,9 @@ class Autorouter:
         # instead of the global rules.trace_width, matching the Python
         # grid's mark_route() behaviour for per-net-class trace widths.
         for seg in route.segments:
-            total_clearance = seg.width / 2 + self.rules.trace_clearance
-            clearance_cells = int(total_clearance / self.grid.resolution) + 1
+            clearance_cells = routed_halo_radius_cells(
+                seg, self.rules, self.grid.resolution, cpp=True
+            )
             gx1, gy1 = self.grid.world_to_grid(seg.x1, seg.y1)
             gx2, gy2 = self.grid.world_to_grid(seg.x2, seg.y2)
             layer_idx = self.grid.layer_to_index(seg.layer.value)
@@ -2493,20 +2603,9 @@ class Autorouter:
         # Mark all vias on C++ grid
         for via in route.vias:
             gx, gy = self.grid.world_to_grid(via.x, via.y)
-            # Issue #2466: Use ``ceil`` (not ``int``) for the via blocking
-            # radius so that grid-cell blocking matches the validator's
-            # geometric ``via_diameter/2 + via_clearance`` keepout.  The
-            # previous ``int(...)`` truncation under-blocked by up to one
-            # grid cell, allowing the search to place a via that the post-
-            # route validator would later flag.  Mirrors the +1 safety
-            # margin in ``RoutingGrid._mark_via`` (Issue #1797).
-            radius_cells = (
-                math.ceil(
-                    (via.diameter / 2 + self.rules.via_clearance + self.rules.trace_width / 2)
-                    / self.grid.resolution
-                )
-                + 1
-            )
+            # Issue #2466: the CPPV variant rounds up (see
+            # ``routed_halo_radius_cells``).
+            radius_cells = routed_halo_radius_cells(via, self.rules, self.grid.resolution, cpp=True)
             cpp_grid.mark_via(gx, gy, via.net, radius_cells)
 
     # ------------------------------------------------------------------
@@ -2942,6 +3041,35 @@ class Autorouter:
         if hasattr(self.router, "update_layer_fill_ratios"):
             self.router.update_layer_fill_ratios()
 
+    def grid_report(self, selection: str | None = None) -> dict[str, Any]:
+        """The routing grid actually built, for machine output (Issue #6875).
+
+        Args:
+            selection: How the requested pitch was chosen -- ``"explicit"``
+                (``--grid 0.1``), ``"auto"`` (``--grid auto``) -- or None for
+                a library caller that set ``rules.grid_resolution`` itself.
+
+        Returns:
+            ``{"requested_mm", "used_mm", "cols", "rows", "layers", "cells",
+            "selection", "coarsened", "coarsened_reason"}``.  ``coarsened`` is
+            True only when the #972 adaptive cap replaced the requested pitch;
+            ``coarsened_reason`` then says why (else None).
+        """
+        grid = self.grid
+        coarsening = getattr(self, "grid_coarsening", None)
+        requested = coarsening["requested_mm"] if coarsening else float(self.rules.grid_resolution)
+        return {
+            "requested_mm": round(float(requested), 6),
+            "used_mm": round(float(grid.resolution), 6),
+            "cols": int(grid.cols),
+            "rows": int(grid.rows),
+            "layers": int(grid.num_layers),
+            "cells": int(grid.cols) * int(grid.rows) * int(grid.num_layers),
+            "selection": selection,
+            "coarsened": coarsening is not None,
+            "coarsened_reason": coarsening["reason"] if coarsening else None,
+        }
+
     @property
     def physics_available(self) -> bool:
         """Check if physics calculations are available."""
@@ -3097,8 +3225,11 @@ class Autorouter:
                 pin=pin,
                 through_hole=pad_info.get("through_hole", False),
                 drill=pad_info.get("drill", 0.0),
+                # Issue #6780: footprint side, read only by the length model.
+                side=pad_info.get("side"),
                 rotation=pad_info.get("rotation", 0.0),
                 shape=pad_info.get("shape", "rect"),
+                roundrect_rratio=pad_info.get("roundrect_rratio"),
                 # Issue #6243: a neutralised pad keeps its authored minimum.
                 authored_clearance=float(pad_info.get("authored_clearance", 0.0) or 0.0),
             )
@@ -3579,6 +3710,57 @@ class Autorouter:
             obstacle_segments=obstacle_segments,
         )
 
+    def _create_kelvin_terminal_ties(
+        self, net: int, pads: list[tuple[str, str]]
+    ) -> tuple[list[Route], set[int]]:
+        """Tie neighbouring same-net pins of one package on a Kelvin net.
+
+        Issue #6799.  A Kelvin star routes every terminal to the shunt on its
+        own, isolated from its siblings.  On board 05 that sent the DRV8313's
+        adjacent PGND pins U2.6 and U2.7 (GND_SENSE, 0.65 mm pitch) out as two
+        branches; U2.7's branch dropped a via in U2.6's only exit lane and
+        U2.6 stayed unconnected.  Such pins are *assumed* to be one terminal
+        (joined inside the package; this is not verified), so they get the
+        straight pad-to-pad tie every non-Kelvin net already gets, and the
+        star routes one branch for the pair.
+
+        Only pins too close for any trace to pass between them are tied, only
+        with a straight tie (``neighbours_only``), and resistor pads are never
+        tied (a four-terminal shunt keeps its force and sense pads apart).
+        Other same-package terminals keep their own branch to the shunt.
+
+        Limitation: the choice is purely geometric, so an adjacent force pin
+        and high-impedance sense input of one non-resistor package on the
+        same sense-named net (regulator OUT/SENSE, connector F+/S+) are tied
+        too.  See :func:`kelvin.is_tieable_kelvin_terminal`.
+
+        Returns:
+            ``(routes, connected_indices)`` with indices into ``pads``, the
+            shape :meth:`_create_intra_ic_routes` returns.
+        """
+        from .kelvin import is_tieable_kelvin_terminal
+
+        index_map = [
+            i
+            for i, key in enumerate(pads)
+            if key in self.pads and is_tieable_kelvin_terminal(self.pads[key])
+        ]
+        if len(index_map) < 2:
+            return [], set()
+        obstacle_segments = [
+            seg for route in self.routes if route.net != net for seg in route.segments
+        ]
+        routes, local = create_intra_ic_routes(
+            net,
+            [pads[i] for i in index_map],
+            self.pads,
+            self.rules,
+            self.net_class_map,
+            obstacle_segments=obstacle_segments,
+            neighbours_only=True,
+        )
+        return routes, {index_map[i] for i in local}
+
     def _get_unrouted_pads(self, exclude_net: int | None = None) -> list[Pad]:
         """Get list of pads that haven't been routed yet.
 
@@ -3819,7 +4001,7 @@ class Autorouter:
 
     def _ensure_mesh_pathfinder(self) -> Any:
         """Lazily construct the per-board :class:`MeshPathfinder` (built once)."""
-        from .mesh.pathfinder import MeshPathfinder
+        from .mesh.pathfinder import MeshPathfinder, interior_edge_loops
 
         if self._mesh_pathfinder is None:
             # ``_board_bbox`` is only populated from Edge.Cuts (io.py) when the
@@ -3839,12 +4021,28 @@ class Autorouter:
             # Issue #4276: hand the mesh the board's real copper stack so the
             # 2.5D via injection replicates the mesh across the actual routing
             # layer count instead of assuming 2.
+            # Issue #6822: ``outline`` is only the outer bounding box, so the
+            # interior Edge.Cuts loops (windows, cutouts, round holes) are
+            # handed over separately and become navmesh holes plus measured
+            # obstacles.  Without them the mesh routed straight across a cut.
+            edge_segments = self._edge_segments or []
             self._mesh_pathfinder = MeshPathfinder(
                 outline,
                 list(self.pads.values()),
                 self.rules,
                 layer_stack=self.layer_stack,
+                cutouts=interior_edge_loops(edge_segments),
+                cutout_margin=float(getattr(edge_segments, "max_error_mm", 0.0) or 0.0),
             )
+        # Issue #6822: when no positive clearance was resolved the cutouts
+        # keep the #6043 physical floor (a centreline radius), re-read every
+        # call so a floor grown by ``refresh_edge_keepout_floor`` is honoured.
+        # Only the interior cutouts use it -- see the outer-outline note below.
+        self._mesh_pathfinder.cutout_floor = (
+            0.0
+            if (self._edge_clearance or 0.0) > 0
+            else float(getattr(self, "_edge_keepout_floor", None) or 0.0)
+        )
         self._mesh_pathfinder.fixed_fills = self.grid.fixed_fills
         # Epic #5509 Phase 3e: hand the mesh fit the SAME already-resolved
         # copper-to-board-edge floor the grid's ``add_edge_keepout`` and the
@@ -3852,6 +4050,12 @@ class Autorouter:
         # cannot disagree about it.  No new rule value is introduced here -- an
         # unset ``_edge_clearance`` stays 0.0, which leaves the mesh outline
         # branch the pure containment test it was before that phase.
+        # Issue #6043: ``_edge_keepout_floor`` is deliberately NOT used here.
+        # It is a grid-quantisation radius (half-extent + half a diagonal
+        # cell); the mesh and lattice measure exact copper gaps, where "no
+        # clearance" correctly means a requirement of 0.0.  The interior
+        # cutouts (issue #6822) are the exception, set above: copper across a
+        # routed cut is never valid, so they keep the floor.
         self._mesh_pathfinder.edge_clearance = self._edge_clearance or 0.0
         return self._mesh_pathfinder
 
@@ -4018,6 +4222,12 @@ class Autorouter:
                 )
             )
         self._lattice_pathfinder.fixed_fills = self.grid.fixed_fills
+        # Issue #6703: rank uncoupled-fallback leg candidates on the skew
+        # ``kct check`` reports (segments plus drilled via barrels).
+        if hasattr(self, "rules") and hasattr(self, "layer_stack"):
+            self._lattice_pathfinder.pair_length_measure = self._checker_route_length(
+                len(self.layer_stack.layers) if self.layer_stack is not None else 2
+            )
         if hasattr(self._lattice_pathfinder, "set_escape_boundary"):
             self._lattice_pathfinder.set_escape_boundary(
                 self._edge_segments, self._edge_clearance or 0.0
@@ -4452,6 +4662,28 @@ class Autorouter:
             hi_y = min(by1, lo_y + coarse)
         return (lo_x, lo_y, hi_x, hi_y)
 
+    @staticmethod
+    def _print_pair_gateway_lines(coupled: list, gateways: dict, gateway_log: dict) -> None:
+        """Print one gateway line per pair: the gateway it took, else why it declined.
+
+        Issue #6932: a decline is printed even when the pair then routed
+        planar (``coupled``) -- a gateway-first decline followed by a planar
+        success is exactly the case whose reason was previously suppressed.
+        A pair with no ``gateway_log`` entry (gateway-first gate never
+        entered) prints nothing.
+        """
+        for pc in coupled:
+            label = f"{pc.pad_p_a.ref}.{pc.pad_p_a.pin}->{pc.pad_p_b.ref}.{pc.pad_p_b.pin}"
+            if pc.key in gateways:
+                print(
+                    f"  Diff-pair gateway (lattice) {pc.pair_name} {label}: "
+                    f"coupled through {gateways[pc.key]}"
+                )
+            elif pc.key in gateway_log:
+                print(
+                    f"  Diff-pair gateway (lattice) {pc.pair_name} {label}: {gateway_log[pc.key]}"
+                )
+
     def _print_pair_threshold_report(self) -> None:
         """Print the continuity / skew thresholds ``kct check`` applies per pair (#6442)."""
         from kicad_tools.validate.diffpair_engagement import pair_threshold_report
@@ -4500,7 +4732,8 @@ class Autorouter:
         trunk that declined ``pair-no-path``.  Every engaged pair that HAS such
         an alternative is recorded in :attr:`_lattice_tap_chain_pairs`.
         """
-        from .lattice.coupled import CoupledConnection, choose_pair_chain, choose_pair_tap_chain
+        from .lattice.coupled import CoupledConnection
+        from .pairplan.chain import choose_pair_chain, choose_pair_tap_chain
 
         coupled: list[Any] = []
         reserved: dict[int, list[tuple[str, str]]] = {}
@@ -4571,6 +4804,9 @@ class Autorouter:
             if nc is None:
                 self._lattice_pair_outcomes[pair_name] = "no-net-class"
                 continue
+            nc = self._pair_plane_opt_in_class(
+                nc, self.net_class_map.get(p_name), self.net_class_map.get(n_name)
+            )
             trace_w = nc.trace_width or self.rules.trace_width
             # Fab floor (issue #4270) and authored board floor (issue #6443):
             # an intra-pair air gap below the manufacturer's minimum copper
@@ -4670,9 +4906,18 @@ class Autorouter:
             )
             pair_nets = {pc.pad_p_a.net, pc.pad_n_a.net}
             half = pc.pitch / 2.0
+            # Issue #6697: first reserve an escape via site for a routed pad
+            # the pair start would seal in (board 03 VBUS U2.5), so the
+            # anchor below slides past it instead of capping it.
+            self._lattice_reserve_pair_escape_sites(pf, obstacles, pc, pair_nets)
             # The rule-area mask (+ #6401 pour-pad via reservations) installed
-            # by ``_negotiate_lattice_netset`` before this call.
-            keepouts = getattr(pf, "_keepouts", None)
+            # by ``_negotiate_lattice_netset`` before this call.  Issue #6956:
+            # without the pair-net exemptions -- the planar anchor still
+            # slides past the reservations exactly as before; only the
+            # search (fat body, gateway fans and attaches) may use them.
+            keepouts = self._lattice_keepouts_without_pair_exemptions(
+                getattr(pf, "_keepouts", None)
+            )
             trace_half = (getattr(pc.net_class, "trace_width", None) or self.rules.trace_width) / 2
             anchor_a = relocate_pair_anchor(
                 obstacles,
@@ -4703,6 +4948,238 @@ class Autorouter:
         if anchor_a is None and anchor_b is None:
             return pc
         return replace(pc, anchor_a=anchor_a, anchor_b=anchor_b)
+
+    #: How far (mm) a #6697 pair-escape via site may move from the pad edge
+    #: to land on a lattice node where the sealed net's via is legal.
+    _PAIR_ESCAPE_SITE_SEARCH_MM = 0.5
+
+    def _lattice_reserve_pair_escape_sites(
+        self, pf: Any, obstacles: Any, pc: Any, pair_nets: set[int]
+    ) -> None:
+        """Reserve a via site for a routed pad a pair start would seal (#6697).
+
+        :func:`~.lattice.coupled.sandwiched_pad_escape_sites` finds, at each
+        segment end, a routed single-layer pad between the pair's own pads
+        (board 03: VBUS U2.5 between USB_D+ U2.4 and USB_D- U2.6).  Each site
+        is moved to the nearest lattice node (within
+        :attr:`_PAIR_ESCAPE_SITE_SEARCH_MM`) where the sealed net's via is
+        legal -- the via can only ever land on a node -- and joins the
+        pathfinder's keepout mask as a disc (via + clearance, all layers,
+        tracks and vias) that every net but the sealed one keeps out of.  The anchor relocation, the
+        fat pair search and every other net then leave the pad its exit, and
+        the sealed net can drop its via there.  Idempotent per site name, so
+        a rebuilt connection list (#6535 tap-chain retry) adds nothing twice.
+        """
+        from .lattice.coupled import sandwiched_pad_escape_sites
+        from .lattice.obstacles import KeepoutArea, LatticeKeepoutMask
+        from .plane_via_sites import _regular_polygon
+
+        routed = frozenset(
+            net for net, keys in self.nets.items() if net and len(dict.fromkeys(keys)) >= 2
+        )
+        if not routed:
+            return
+        num_layers = int(pf.num_layers)
+        via_radius = float(pf.rules.via_diameter) / 2.0
+        new: list[Any] = []
+        mask = getattr(pf, "_keepouts", None)
+        have = {a.name for a in (mask.areas if mask else ())}
+        ends = (
+            (pc.pad_p_a, pc.pad_n_a, pc.mid_b),
+            (pc.pad_p_b, pc.pad_n_b, pc.mid_a),
+        )
+        for pad_p, pad_n, toward in ends:
+            for pad, site in sandwiched_pad_escape_sites(
+                obstacles,
+                pad_p,
+                pad_n,
+                toward,
+                pair_nets=pair_nets,
+                routed_nets=routed,
+                via_radius=via_radius,
+                clearance_for=lambda net: self._lattice_escape_clearance(net, pc.net_class),
+            ):
+                name_net = self.net_names.get(pad.net) or pad.net_name or str(pad.net)
+                name = f"pair-escape-via:{name_net}:{pad.ref}.{pad.pin}"
+                # Issue #6956: the pair this site exists for (its nets are
+                # exempted by ``_lattice_exempt_pair_reservations``).
+                owners: dict[str, frozenset[int]] | None = getattr(
+                    self, "_lattice_pair_escape_owner", None
+                )
+                if owners is None:
+                    owners = {}
+                    self._lattice_pair_escape_owner = owners
+                owners.setdefault(name, frozenset(pair_nets))
+                if name in have:
+                    continue
+                # The sealed net's class clearance, floored at the pair's and
+                # the board's: the strongest spacing anything keeps from it.
+                clearance = self._lattice_escape_clearance(pad.net, pc.net_class)
+                node = self._lattice_escape_via_node(pf, pad.net, site, clearance)
+                if node is None:
+                    continue
+                have.add(name)
+                site = node
+                new.append(
+                    KeepoutArea(
+                        # A hair over the via + clearance: the polygon is
+                        # circumscribed, the via sits exactly on its centre.
+                        polygon=_regular_polygon(site[0], site[1], via_radius + clearance + 1e-3),
+                        layers=frozenset(range(num_layers)),
+                        blocks_tracks=True,
+                        blocks_vias=True,
+                        exempt=frozenset({pad.net}),
+                        name=name,
+                    )
+                )
+                print(
+                    f"  Pair escape via site (#6697): {name_net} {pad.ref}.{pad.pin} sits "
+                    f"between {pc.pair_name}'s pads; reserved at ({site[0]:.3f}, {site[1]:.3f})"
+                )
+        if new:
+            pf.set_keepouts(LatticeKeepoutMask(tuple(mask.areas if mask else ()) + tuple(new)))
+
+    def _lattice_exempt_pair_reservations(self, coupled: list[Any]) -> None:
+        """Exempt each declared pair's nets from its own reservations (#6956).
+
+        Board 03: ``USB_D[1]``'s In2.Cu gateway at U2 is closed by two static
+        keep-outs that block every net, the pair's own included -- the #6697
+        escape site for VBUS U2.5 (reserved between the pair's own pads,
+        on the only south route of the fans) and the #6401 pour-pad via site
+        for GND U2.2 (under U2's body, on the pass-under route).  Both exist
+        for a pair that stays on the pad layer and know nothing about its
+        gateway.
+
+        The policy: a reservation inside a declared pair's gateway envelope
+        at that pair's own footprint (:func:`~.plane_via_sites.
+        pair_gateway_envelope_contains`, grown by the largest gateway
+        setback) exempts the pair's two nets -- every #6697 escape site the
+        pair caused always does -- and stays a hard keep-out for every other
+        net.  The pour link / sealed net still has to close afterwards (the
+        post-route oracle and stitcher re-verify it).  The added exemptions
+        are recorded on :attr:`_lattice_pair_exempt_added` so the planar
+        anchor relocation can keep seeing the un-exempted reservations.
+        """
+        from dataclasses import replace
+
+        from .lattice.obstacles import LatticeKeepoutMask
+        from .pairplan.gateway import MAX_GATEWAY_SETBACK_MM
+        from .plane_via_sites import exempt_pair_in_gateway_envelope
+
+        pf = getattr(self, "_lattice_pathfinder", None)
+        mask = getattr(pf, "_keepouts", None)
+        if pf is None or not mask or not coupled:
+            return
+        added: dict[str, frozenset[int]] = getattr(self, "_lattice_pair_exempt_added", None) or {}
+        escape_owner: dict[str, frozenset[int]] = (
+            getattr(self, "_lattice_pair_escape_owner", None) or {}
+        )
+        areas = list(mask.areas)
+        changed = False
+        for pc in coupled:
+            nets = frozenset({pc.pad_p_a.net, pc.pad_n_a.net})
+            names: list[str] = []
+            for pad_p, pad_n in ((pc.pad_p_a, pc.pad_n_a), (pc.pad_p_b, pc.pad_n_b)):
+                areas, hit = exempt_pair_in_gateway_envelope(
+                    areas, pad_p, pad_n, nets, setback=MAX_GATEWAY_SETBACK_MM
+                )
+                names.extend(hit)
+            for idx, area in enumerate(areas):
+                if escape_owner.get(area.name) == nets and not nets <= area.exempt:
+                    areas[idx] = replace(area, exempt=area.exempt | nets)
+                    names.append(area.name)
+            for name in dict.fromkeys(names):
+                added[name] = added.get(name, frozenset()) | nets
+                changed = True
+                print(
+                    f"  Pair reservation exemption (#6956): {name} lies in "
+                    f"{pc.pair_name}'s gateway envelope; exempts the pair's nets"
+                )
+        self._lattice_pair_exempt_added = added
+        if changed:
+            pf.set_keepouts(LatticeKeepoutMask(tuple(areas)))
+
+    def _lattice_keepouts_without_pair_exemptions(self, mask: Any) -> Any:
+        """``mask`` with the #6956 pair-net exemptions taken back out."""
+        added = getattr(self, "_lattice_pair_exempt_added", None)
+        if not mask or not added:
+            return mask
+        from dataclasses import replace
+
+        from .lattice.obstacles import LatticeKeepoutMask
+
+        areas = tuple(
+            replace(a, exempt=a.exempt - added[a.name]) if a.name in added else a
+            for a in mask.areas
+        )
+        return LatticeKeepoutMask(areas)
+
+    def _lattice_escape_via_node(
+        self, pf: Any, net: int, site: tuple[float, float], clearance: float
+    ) -> tuple[float, float] | None:
+        """The lattice node nearest ``site`` where ``net`` may drop a via (#6697).
+
+        Legal means :meth:`LatticePathfinder._via_ok` on an empty board (no
+        via-in-pad on the default fab tier, foreign pads cleared by
+        ``clearance``, rule areas honoured).  ``None`` when no node within
+        :attr:`_PAIR_ESCAPE_SITE_SEARCH_MM` qualifies.
+        """
+        lattice = pf.build()
+        unit = float(lattice.unit)
+        if unit <= 0.0:
+            return None
+        reach = self._PAIR_ESCAPE_SITE_SEARCH_MM
+        k0 = lattice.node_key(site[0] - reach, site[1] - reach)
+        k1 = lattice.node_key(site[0] + reach, site[1] + reach)
+        committed = pf._fresh_committed()
+        best: tuple[float, tuple[float, float]] | None = None
+        for i in range(k0[0], k1[0] + 1):
+            for j in range(k0[1], k1[1] + 1):
+                if (i, j) not in lattice.nodes:
+                    continue
+                pt = lattice.node_point((i, j))
+                d = math.hypot(pt[0] - site[0], pt[1] - site[1])
+                if d > reach or (best is not None and d >= best[0]):
+                    continue
+                if pf._via_ok((i, j), net, committed, clearance=clearance):
+                    best = (d, pt)
+        return None if best is None else best[1]
+
+    def _lattice_escape_clearance(self, net: int, pair_class: Any) -> float:
+        """Clearance kept from a #6697 escape via of ``net`` (mm)."""
+        name = self.net_names.get(net)
+        nc = self.net_class_map.get(name) if name else None
+        return max(
+            float(self.rules.trace_clearance),
+            float(getattr(nc, "clearance", None) or 0.0),
+            float(getattr(pair_class, "clearance", None) or 0.0),
+        )
+
+    def _lattice_pair_gateway_limits(
+        self, pairs: list[Any]
+    ) -> dict[object, tuple[float | None, int | None]]:
+        """Per-segment protocol limits for the #6444 gateway retry.
+
+        ``{pc.key: (max uncoupled mm per terminal, max vias per net)}`` from
+        :func:`~kicad_tools.validate.diffpair_engagement.resolve_pair_thresholds`
+        -- the same resolver ``kct check`` uses, so a gateway is never built
+        that the checker would then fail on fan length or via count.
+        """
+        from kicad_tools.validate.diffpair_engagement import resolve_pair_thresholds
+
+        limits: dict[object, tuple[float | None, int | None]] = {}
+        ncm = getattr(self, "net_class_map", None)
+        for pc in pairs:
+            try:
+                t = resolve_pair_thresholds(
+                    ncm,
+                    self.net_names.get(pc.pad_p_a.net) or pc.pad_p_a.net_name or "",
+                    self.net_names.get(pc.pad_n_a.net) or pc.pad_n_a.net_name or "",
+                )
+            except Exception:  # limits are a bound, never a reason to crash
+                continue
+            limits[pc.key] = (t.max_uncoupled_per_terminal_mm, t.max_vias_per_net)
+        return limits
 
     def _negotiate_lattice_netset(self) -> dict[int, list[Route]]:
         """Negotiate every routable net through the shared lattice (#4278).
@@ -4761,6 +5238,8 @@ class Autorouter:
         # (byte-identical no-constraint path).
         if hasattr(pf, "set_keepouts"):
             pf.set_keepouts(self._lattice_keepouts_with_plane_via_sites())
+            # Issue #6956: a fresh mask carries no pair-net exemptions.
+            self._lattice_pair_exempt_added = {}
 
         coupled, connections = self._lattice_netset_connections()
 
@@ -4792,6 +5271,7 @@ class Autorouter:
         # this the lattice sees the non-listed pads but not the traces between
         # them and legally crosses foreign copper -> segment-segment shorts.
         fixed_copper = [r for r in self.existing_routes if r.net not in self.nets]
+
         # Issue #4597: preserved copper keeps its NET-CLASS clearance across the
         # pass boundary.  ``--preserve-existing`` composition (the documented
         # 2-step HV-outer recipe, generalized to voltage-binned groups) routes
@@ -4805,15 +5285,18 @@ class Autorouter:
         # so a preserved net is spaced identically to the same net routed
         # in-pass.  The pathfinder stays geometry-only: it receives a plain
         # ``{net_id: clearance}`` map, never the name-keyed class table.
+        def _seed_clearance(routes: list[Route], table: dict[int, float]) -> None:
+            for route in routes:
+                if route.net in table:
+                    continue
+                name = self.net_names.get(route.net) or getattr(route, "net_name", None)
+                nc = self.net_class_map.get(name) if name else None
+                clr = getattr(nc, "clearance", None) or 0.0
+                if clr > self.rules.trace_clearance:
+                    table[route.net] = clr
+
         fixed_clearance: dict[int, float] = {}
-        for route in fixed_copper:
-            if route.net in fixed_clearance:
-                continue
-            name = self.net_names.get(route.net) or getattr(route, "net_name", None)
-            nc = self.net_class_map.get(name) if name else None
-            clr = getattr(nc, "clearance", None) or 0.0
-            if clr > self.rules.trace_clearance:
-                fixed_clearance[route.net] = clr
+        _seed_clearance(fixed_copper, fixed_clearance)
         # Issue #4472: per-link wall-clock deadline.  ``--complete`` stamps a
         # per-link budget so each completion search aborts within a bounded
         # budget instead of grinding (issue #4434's >10-minute non-termination)
@@ -4839,12 +5322,45 @@ class Autorouter:
                 else min(deadline, self._lattice_deadline)
             )
 
-        def _negotiate(conns: list[Any], pairs: list[Any]) -> Any:
-            return pf.route_netset(
+        ran: dict[int, list[Any]] = {}
+
+        def _negotiate(
+            conns: list[Any], pairs: list[Any], gateway_offer: frozenset[object] = frozenset()
+        ) -> Any:
+            # Issue #6842: remember which connections each pair list ran with,
+            # so the post-tap-retry gateway offer can re-run the surviving one.
+            ran[id(pairs)] = conns
+            # Issue #6698: the generated equivalent-pin ties of THIS connection
+            # set (the tap-chain retry rebuilds them) are fixed copper seeded
+            # at their class clearance: every other net routes around them,
+            # and the same-net exemption lets the pair's own legs land on
+            # the tied pads.  They are merged into the output below.
+            ties = list(getattr(self, "_lattice_pair_ties", []))
+            fixed = fixed_copper
+            clearance = fixed_clearance
+            if ties:
+                fixed = fixed_copper + [route for _key, route, _ends in ties]
+                clearance = dict(fixed_clearance)
+                _seed_clearance(fixed, clearance)
+            # Issue #6444: each segment's protocol limits bound its fan-via
+            # gateway retry (fan length, vias per net).
+            if hasattr(pf, "pair_gateway_limits"):
+                pf.pair_gateway_limits = self._lattice_pair_gateway_limits(pairs)
+                # A single trunk that has a #6535 tap chain keeps that retry
+                # first: the chain couples on the pad layer without vias,
+                # which is exactly today's copper for LVDS-style pairs.
+                taps: set[str] = set(getattr(self, "_lattice_tap_chain_pairs", set()) or ())
+                # Issue #6842: ``gateway_offer`` lifts the skip for trunks the
+                # tap retry did not serve (see ``_lattice_gateway_offer_retry``).
+                pf.pair_gateway_skip = (
+                    frozenset(pc.key for pc in pairs if len(pc.key) == 3 and pc.pair_name in taps)
+                    - gateway_offer
+                )
+            routes, stats_ = pf.route_netset(
                 conns,
                 coupled=pairs,
-                fixed_copper=fixed_copper,
-                fixed_clearance=fixed_clearance,
+                fixed_copper=fixed,
+                fixed_clearance=clearance,
                 max_iterations=max_iterations,
                 deadline=deadline,
                 # Issue #6373: a declined coupled pair falls back to two
@@ -4852,10 +5368,18 @@ class Autorouter:
                 uncoupled_fallback=True,
                 # Issue #6437: pair-net copper moves only within a skew budget.
                 pair_nets=getattr(self, "_lattice_pair_net_ids", None),
+                # Issue #6444: a segment whose planar search is exhausted gets
+                # one fan-via gateway retry on another layer.
+                **({"pair_gateways": True} if hasattr(pf, "pair_gateway_limits") else {}),
             )
+            for key, route, _ends in ties:
+                routes[key] = route
+            return routes, stats_
 
         routes_by_key, stats = _negotiate(connections, coupled)
-        # Issue #6535: a single trunk that declined ``pair-no-path`` because a
+        # Issue #6535: a single trunk that declined ``pair-no-path`` (or a
+        # #4605/#4979 ``-keepout-``/``-layer-constrained`` refinement of it,
+        # issue #6743) because a
         # tap part (board 06 LVDS termination resistor) straddles its corridor
         # gets one retry as an IC -> tap -> IC chain.  Pairs whose trunk
         # coupled -- and boards with no such pair -- never reach this.
@@ -4868,6 +5392,17 @@ class Autorouter:
         if retry_pairs and not stats.deadline_hit:
             routes_by_key, stats, coupled = self._lattice_tap_chain_retry(
                 pf, _negotiate, retry_pairs, (routes_by_key, stats, coupled)
+            )
+        # Issue #6842: a trunk held back from its gateway retry for a tap
+        # chain that never ran, or was discarded, still gets the gateway.
+        offer = _lattice_gateway_offer_keys(
+            coupled,
+            getattr(pf, "pair_outcomes", {}),
+            getattr(self, "_lattice_tap_chain_pairs", set()),
+        )
+        if offer and hasattr(pf, "pair_gateway_limits") and not stats.deadline_hit:
+            routes_by_key, stats = self._lattice_gateway_offer_retry(
+                pf, _negotiate, ran[id(coupled)], coupled, offer, (routes_by_key, stats)
             )
         self._lattice_negotiation_stats = stats
         self._warn_lattice_pair_nets_routed_twice()
@@ -4901,6 +5436,16 @@ class Autorouter:
                 f"{len(pf._class_pad_growth)} grown pad keep-out(s) "
                 f"(lattice_builds={stats.lattice_builds})"
             )
+            # Issue #6670: say whether each growth round was kept or rolled
+            # back -- the count above is the restored one after a rollback.
+            for n, rnd in enumerate(getattr(pf, "class_pad_growth_rounds", ()), 1):
+                parts = f" (whole part: {', '.join(rnd.footprints)})" if rnd.footprints else ""
+                print(
+                    f"    growth attempt {n}: +{rnd.grown} pad(s){parts}; routed "
+                    f"{rnd.routed_before}->{rnd.routed_after}, track-pad shortfalls "
+                    f"{rnd.left_before}->{rnd.left_after}: "
+                    f"{'kept' if rnd.kept else 'rolled back'}"
+                )
         if repair is not None and repair.skipped == "voltage-map":
             print(
                 "  Pad class clearance (#6395): skipped -- HV pairwise clearance "
@@ -4957,25 +5502,33 @@ class Autorouter:
         # Honest per-pair reporting (issue #4270 acceptance): engaged /
         # coupled / declined-with-reason, mirroring failure_reasons.
         if coupled or self._lattice_pair_outcomes:
+            from .pairplan.outcome import PairOutcome, SegmentOutcome, segment_record
+
             outcomes = getattr(pf, "pair_outcomes", {})
             # Issue #6378: a chained pair has several segments sharing one
             # ``pair_name``; aggregate them instead of letting the last
             # segment overwrite the others.
-            seg_outcomes: dict[str, list[tuple[str, str]]] = {}
+            seg_outcomes: dict[str, list[tuple[str, SegmentOutcome]]] = {}
             for pc in coupled:
                 label = f"{pc.pad_p_a.ref}.{pc.pad_p_a.pin}->{pc.pad_p_b.ref}.{pc.pad_p_b.pin}"
                 seg_outcomes.setdefault(pc.pair_name, []).append(
-                    (label, outcomes.get(pc.key, "not-attempted"))
+                    (label, segment_record(outcomes, pc.key))
                 )
+            # Issue #6837: the structured record of every pair; the printed
+            # strings below are derived from it (``PairOutcome.label``).
+            records: dict[str, PairOutcome] = {
+                name: PairOutcome(name, pre_chain=outcome)
+                for name, outcome in self._lattice_pair_outcomes.items()
+            }
             self._lattice_pair_segment_outcomes = []
             for name, segs in seg_outcomes.items():
-                self._lattice_pair_outcomes[name] = _aggregate_pair_outcome(
-                    [o for _label, o in segs]
-                )
+                records[name] = PairOutcome(name, tuple(segs))
+                self._lattice_pair_outcomes[name] = records[name].label
                 if len(segs) > 1:
                     self._lattice_pair_segment_outcomes.extend(
-                        (name, label, o) for label, o in segs
+                        (name, label, o.label) for label, o in segs
                     )
+            self._lattice_pair_outcome_records = records
             n_coupled = sum(1 for v in self._lattice_pair_outcomes.values() if v == "coupled")
             print(f"  Diff pairs (lattice): {n_coupled}/{len(self._lattice_pair_outcomes)} coupled")
             for name, outcome in sorted(self._lattice_pair_outcomes.items()):
@@ -4984,6 +5537,47 @@ class Autorouter:
                     (label, o) for n, label, o in self._lattice_pair_segment_outcomes if n == name
                 ):
                     print(f"      {name}[{idx}] {label}: {seg_outcome}")
+            # Issue #6446: a hybrid pair (coupled trunk + single-ended legs at
+            # one terminal) is counted apart so the ``coupled`` line above
+            # keeps its meaning.
+            n_hybrid = sum(
+                1 for v in self._lattice_pair_outcomes.values() if v.startswith("hybrid:")
+            )
+            if n_hybrid:
+                print(f"  Diff pairs (lattice) hybrid: {n_hybrid}")
+            # Issue #6444: name every fan-via gateway, and why a retried
+            # segment's gateway declined (layer, setback, vias, candidates per
+            # terminal).  Printed AFTER the outcome list, whose layout the
+            # diff-pair bench parses.
+            gateways = getattr(pf, "pair_gateways", {}) or {}
+            gateway_log = getattr(pf, "pair_gateway_log", {}) or {}
+            rollback = getattr(pf, "pair_gateway_rollback", None)
+            if isinstance(rollback, str):
+                print(f"  Diff-pair gateway (lattice): {rollback}")
+            self._print_pair_gateway_lines(coupled, gateways, gateway_log)
+            # Issue #6446: one line per segment the one-ended hybrid retry was
+            # offered to -- the coupled trunk and its legs on success, or the
+            # hard terminal and the shortest legs found against the cap.
+            hybrid_log = getattr(pf, "pair_hybrid_log", {}) or {}
+            for pc in coupled:
+                if pc.key in hybrid_log and outcomes.get(pc.key, "") != "coupled":
+                    label = f"{pc.pad_p_a.ref}.{pc.pad_p_a.pin}->{pc.pad_p_b.ref}.{pc.pad_p_b.pin}"
+                    print(
+                        f"  Diff-pair hybrid (lattice) {pc.pair_name} {label}: {hybrid_log[pc.key]}"
+                    )
+                    # Issue #7093: the post-route via-parity pass on this hybrid.
+                    parity_note = (getattr(pf, "hybrid_parity_log", {}) or {}).get(pc.key)
+                    if isinstance(parity_note, str):
+                        print(
+                            f"  Diff-pair hybrid parity (lattice) {pc.pair_name} {label}: "
+                            f"{parity_note}"
+                        )
+            # Issue #7093: the post-route via-parity pass on extra-pad
+            # attachments (one line per pair it was offered to).
+            extra_log = getattr(pf, "extra_parity_log", {}) or {}
+            for note in extra_log.values():
+                if isinstance(note, str):
+                    print(f"  Diff-pair extra parity (lattice) {note}")
             self._print_pair_threshold_report()
             # Issue #6373: a pair routed by the uncoupled fallback is a
             # diff-pair WARNING (coupling / skew not guaranteed), not an open
@@ -4994,6 +5588,12 @@ class Autorouter:
                         f"  WARNING: diff pair {name} routed uncoupled "
                         f"(coupled run declined: {outcome.split(':', 1)[1]}); "
                         "intra-pair gap and length matching are not guaranteed"
+                    )
+                elif outcome.startswith("hybrid:"):
+                    print(
+                        f"  NOTE: diff pair {name} is hybrid (coupled trunk, single-ended "
+                        f"legs at {outcome.split(':', 1)[1]}); intra-pair gap holds on the "
+                        "trunk only"
                     )
                 elif outcome.startswith("partially-coupled:"):
                     # Issue #6378: name the segments that did not couple.
@@ -5008,6 +5608,20 @@ class Autorouter:
                         f"{', '.join(uncoupled)}; intra-pair gap and length "
                         "matching are not guaranteed there"
                     )
+            # Issue #7093: unequal layer changes on a segment's fallback legs
+            # are a pair-rule failure the fallback could not avoid; never
+            # silent.  Per segment, so a partially-coupled or hybrid pair's
+            # fallback segment warns too.
+            via_counts = segment_via_counts(coupled, routes_by_key)
+            for line in pair_via_mismatch_warnings(coupled, outcomes, via_counts):
+                print(line)
+            # The pair-level audit in ``_finalize_routing`` would repeat these
+            # pairs; it names only pairs this per-segment report did not.
+            self._lattice_via_warned_nets = {
+                frozenset((pc.pad_p_a.net, pc.pad_n_a.net))
+                for pc in coupled
+                if pc.key in via_counts and via_counts[pc.key][0] != via_counts[pc.key][1]
+            }
 
         by_net: dict[int, list[Route]] = {}
         for route in routes_by_key.values():
@@ -5033,8 +5647,14 @@ class Autorouter:
             if tap_chain_pairs
             else self._lattice_coupled_connections()
         )
+        # Issue #6956: a reservation in a declared pair's gateway envelope
+        # (and every #6697 escape site) exempts that pair's two nets.
+        self._lattice_exempt_pair_reservations(coupled)
 
         connections: list[tuple[object, Pad, Pad, object]] = []
+        # Issue #6698: generated same-part equivalent-pin ties (rebuilt on
+        # every call -- the #6535 tap-chain retry calls this again).
+        tied = self._lattice_plan_pair_ties(reserved)
         for net, pad_keys in self.nets.items():
             if net == 0:
                 continue
@@ -5062,6 +5682,11 @@ class Autorouter:
                         res_pads,
                         key=lambda rp: math.hypot(rp.x - other.x, rp.y - other.y),
                     )
+                    # Issue #6698: an extra on the anchor's own part (the far
+                    # row of a USB-C receptacle) is tied by a generated,
+                    # exactly verified stub instead of a lattice search.
+                    if (net, seq) in tied:
+                        continue
                     connections.append(((net, seq), anchor, other, net_class))
                 continue
             pads = [p for _k, p in keyed]
@@ -5101,8 +5726,300 @@ class Autorouter:
                 f"{pc.pad_n_a.ref}.{pc.pad_n_a.pin}",
                 f"{pc.pad_n_b.ref}.{pc.pad_n_b.pin}",
             )
+        for tie_key, _route, tie_ends in self._lattice_pair_ties:
+            endpoints[tie_key] = tie_ends
         self._lattice_connection_endpoints = endpoints
         return coupled, connections
+
+    @staticmethod
+    def _pair_plane_opt_in_class(nc: Any, p_class: Any, n_class: Any) -> Any:
+        """The coupled pair's class with BOTH nets' plane opt-in (Issue #6876).
+
+        A lattice :class:`CoupledConnection` carries ONE class (the P net's,
+        or N's when P has none), and every coupled layer gate reads it.  Pair
+        copper belongs to both nets, so a reserved plane layer is legal for
+        the pair only when both classes opt in via ``allow_plane_layers``:
+        return a copy of ``nc`` whose ``allow_plane_layers`` is the
+        intersection (a class-less net contributes no opt-in).  ``nc`` itself
+        is returned unchanged when that already holds (always, for classes
+        without the field), so routing is byte-identical without an opt-in.
+        """
+        from dataclasses import replace as _dc_replace
+
+        from .rules import allowed_plane_layer_indices
+
+        own = allowed_plane_layer_indices(nc)
+        if not own:
+            return nc
+        both = allowed_plane_layer_indices(p_class) & allowed_plane_layer_indices(n_class)
+        if own == both:
+            return nc
+        try:
+            return _dc_replace(nc, allow_plane_layers=sorted(both) or None)
+        except TypeError:
+            return nc
+
+    def _lattice_plan_pair_ties(
+        self, reserved: dict[int, list[tuple[str, str]]]
+    ) -> set[tuple[int, int]]:
+        """Tie each engaged pair's same-part extras to their anchors (#6698).
+
+        Rebuilds :attr:`_lattice_pair_ties` and returns the ``(net, seq)``
+        extras it tied -- :meth:`_lattice_netset_connections` emits no
+        single-ended connection for those.  An extra is *eligible* when its
+        nearest reserved anchor (the same pick the connection loop makes) is
+        on the same footprint within :data:`MAX_TIE_STUB_MM` and both pads
+        share a routing layer.  The tie is planned only on shared layers the
+        pair may use (:func:`~kicad_tools.router.pair_layer_filter.pair_permitted_layers`,
+        the coupled search's filter: ``rules.allowed_layers`` and both nets'
+        hard ``avoid_layers``, #6866); an extra with none declines the pair's
+        ties below.  It is tied with :func:`plan_equivalent_pin_tie`
+        (exact pad copper; the class width from ``self.net_class_map`` --
+        after impedance synthesis -- necked down to
+        ``rules.min_trace_width_floor`` at the least).
+
+        Ties are committed per pair, all or nothing: when any eligible extra
+        of either net has no clearing tie (a single-layer SMD receptacle has
+        room for only one of the two crossing ties -- board 06rf USB2_D), the
+        pair keeps today's connections for every extra, so P and N are not
+        attached by different mechanisms.  That includes a pair where only one
+        net has an eligible extra: neither net is tied (#6697).  A tie must also clear
+        fixed fills and other-net preserved vias.  No ties at all when the
+        pathfinder is unavailable or an HV pairwise table is installed (not
+        modelled by the planner).
+        """
+        self._lattice_pair_ties = []
+        if not reserved:
+            return set()
+        from .pair_layer_filter import pair_permitted_layers
+        from .pairplan.tie import MAX_TIE_STUB_MM, PlannedTie, plan_equivalent_pin_tie
+        from .primitives import Segment
+
+        try:
+            pf = self._ensure_lattice_pathfinder()
+            if getattr(pf, "_pairwise", None) is not None:
+                return set()
+            layer_stack = pf.layer_stack
+            routable = set(layer_stack.get_routable_indices())
+            all_pads = list(pf.pads)
+        except Exception:
+            return set()
+        keepouts = getattr(pf, "_keepouts", None)
+        fixed_fills = getattr(pf, "fixed_fills", None)
+        layer_cache: dict[int, tuple[int, ...]] = {}
+
+        def pad_layers(pad: Pad) -> tuple[int, ...]:
+            got = layer_cache.get(id(pad))
+            if got is None:
+                got = layer_cache[id(pad)] = tuple(pf._pad_layer_indices(pad))
+            return got
+
+        def clearance_for(net: int) -> float:
+            name = self.net_names.get(net)
+            nc = self.net_class_map.get(name) if name else None
+            return max(
+                getattr(nc, "clearance", None) or 0.0,
+                self.rules.trace_clearance,
+                self.rules.authored_floor(net),
+            )
+
+        # Other-net preserved copper the negotiation also holds fixed.
+        fixed_runs: list[tuple[int, Any, Any, float, int]] = []
+        for route in self.existing_routes:
+            if route.net in self.nets:
+                continue
+            for seg in route.segments:
+                try:
+                    idx = layer_stack.layer_enum_to_index(seg.layer)
+                except Exception:
+                    continue
+                half = (seg.width or self.rules.trace_width) / 2.0
+                fixed_runs.append((idx, (seg.x1, seg.y1), (seg.x2, seg.y2), half, seg.net))
+            # Preserved vias are zero-length runs at the via radius on every
+            # layer the barrel spans (a point obstacle for the planner).
+            for via in getattr(route, "vias", None) or ():
+                try:
+                    lo, hi = sorted(layer_stack.layer_enum_to_index(lyr) for lyr in via.layers)
+                except Exception:
+                    continue
+                pt = (via.x, via.y)
+                for idx in range(lo, hi + 1):
+                    fixed_runs.append((idx, pt, pt, via.diameter / 2.0, via.net))
+
+        # Issue #6866: tie copper honours the same layer filter as the coupled
+        # search -- ``rules.allowed_layers`` (``--reserve-plane-layers``) and
+        # the union of BOTH nets' hard ``avoid_layers``.  Before #6866 a tie
+        # between two through-hole pads could land on a reserved plane (board
+        # 03 USB_D- on the In1.Cu GND plane).
+        partners = getattr(self, "_lattice_pair_net_ids", None) or {}
+        layer_names = {ld.index: ld.name for ld in getattr(layer_stack, "layers", ())}
+
+        def class_of(net: int | None) -> Any:
+            if net is None:
+                return None
+            name = self.net_names.get(net)
+            return self.net_class_map.get(name) if name else None
+
+        def permitted(net: int, layers: list[int]) -> list[int]:
+            return pair_permitted_layers(
+                layers,
+                lambda idx: layer_names.get(idx, ""),
+                self.rules,
+                (class_of(net), class_of(partners.get(net))),
+            )
+
+        # Eligible extras per pair net, keyed and anchored exactly as the
+        # connection loop keys and anchors them.  ``layers`` is the PERMITTED
+        # subset of the layers both pads share; it may be empty, in which case
+        # the pair declines its ties below (#6866).
+        eligible: dict[int, list[tuple[int, Pad, Pad, Any, list[int]]]] = {}
+        for net, pad_keys in self.nets.items():
+            res_keys = reserved.get(net)
+            if net == 0 or not res_keys:
+                continue
+            keyed = [(k, self.pads[k]) for k in dict.fromkeys(pad_keys) if k in self.pads]
+            if len(keyed) < 2:
+                continue
+            net_name = self.net_names.get(net) or keyed[0][1].net_name
+            net_class = self.net_class_map.get(net_name) if net_name else None
+            res_pads = [p for k, p in keyed if k in res_keys]
+            extras = [p for k, p in keyed if k not in res_keys]
+            for seq, other in enumerate(extras):
+                anchor = min(res_pads, key=lambda rp: math.hypot(rp.x - other.x, rp.y - other.y))
+                if not anchor.ref or anchor.ref != other.ref:
+                    continue
+                if math.hypot(anchor.x - other.x, anchor.y - other.y) > MAX_TIE_STUB_MM:
+                    continue
+                layers = sorted(set(pad_layers(anchor)) & set(pad_layers(other)) & routable)
+                if layers:
+                    eligible.setdefault(net, []).append(
+                        (seq, anchor, other, net_class, permitted(net, layers))
+                    )
+
+        def plan(net: int, item: Any, accepted: list[PlannedTie]) -> PlannedTie | None:
+            _seq, anchor, extra, net_class, layers = item
+            width = getattr(net_class, "trace_width", None) or self.rules.trace_width
+            clearance = clearance_for(net)
+
+            def blocked(a: Any, b: Any, layer: int, half: float) -> bool:
+                # Fixed fills (preserved zone fills, degraded custom-pad
+                # copper) are in neither ``pf.pads`` nor ``existing_routes``;
+                # veto them for every leg, with or without rule areas.
+                if fixed_fills and not fixed_fills.segment_clear(a, b, layer, half, clearance):
+                    return True
+                return keepouts is not None and bool(
+                    keepouts.segment_blocked(a, b, layer, net, half)
+                )
+
+            try:
+                return plan_equivalent_pin_tie(
+                    extra,
+                    anchor,
+                    all_pads,
+                    layers,
+                    width=width,
+                    clearance=clearance,
+                    min_width=self.rules.min_trace_width_floor,
+                    accepted=accepted,
+                    on_layer=lambda pad, layer: layer in pad_layers(pad),
+                    clearance_for=clearance_for,
+                    fixed_runs=fixed_runs,
+                    blocked=blocked,
+                )
+            except Exception:
+                return None
+
+        accepted: list[PlannedTie] = []
+        tied: set[tuple[int, int]] = set()
+        done: set[int] = set()
+        for net in list(eligible):
+            if net in done:
+                continue
+            group = [net]
+            partner = partners.get(net)
+            if partner is None or partner not in eligible:
+                # Issue #6697: all or nothing means BOTH nets.  A half-tie
+                # (one net tied, its partner routed single-ended) attached P
+                # and N by different mechanisms and made 06rf USB2_D's
+                # uncoupled length worse (8.677 -> 12.951 mm).
+                done.add(net)
+                names = "/".join(
+                    self.net_names.get(g, str(g)) for g in (net, partner) if g is not None
+                )
+                print(
+                    f"  Diff-pair ties {names}: not used (partner net has no tie "
+                    "candidate); extras routed as before (issues #6698, #6697)"
+                )
+                continue
+            if partner not in done:
+                group.append(partner)
+            done.update(group)
+            local = list(accepted)
+            planned: list[tuple[int, Any, PlannedTie]] = []
+            declined: str | None = None
+            for g in group:
+                for item in eligible[g]:
+                    pair_ends = f"{item[2].ref}.{item[2].pin}->{item[1].ref}.{item[1].pin}"
+                    if not item[4]:
+                        declined = (
+                            f"{pair_ends} has no permitted tie layer "
+                            "(allowed_layers / hard avoid_layers, issue #6866)"
+                        )
+                        break
+                    tie = plan(g, item, local)
+                    if tie is None:
+                        declined = f"{pair_ends} has no clearing tie"
+                        break
+                    local.append(tie)
+                    planned.append((g, item, tie))
+                if declined:
+                    break
+            names = "/".join(self.net_names.get(g, str(g)) for g in group)
+            if declined:
+                print(
+                    f"  Diff-pair ties {names}: not used ({declined}); "
+                    "extras routed as before (issue #6698)"
+                )
+                continue
+            accepted = local
+            for g, (seq, anchor, extra, _nc, _layers), tie in planned:
+                self._lattice_commit_pair_tie(g, anchor, extra, tie, Segment, layer_stack)
+                tied.add((g, seq))
+        return tied
+
+    def _lattice_commit_pair_tie(
+        self, net: int, anchor: Pad, extra: Pad, tie: Any, segment_cls: Any, layer_stack: Any
+    ) -> None:
+        """Record one planned tie as a fixed :class:`Route` and log it (#6698)."""
+        name = self.net_names.get(net) or extra.net_name
+        layer_enum = layer_stack.index_to_layer_enum(tie.layer)
+        route = Route(
+            net=net,
+            net_name=name,
+            segments=[
+                segment_cls(
+                    x1=a[0],
+                    y1=a[1],
+                    x2=b[0],
+                    y2=b[1],
+                    width=tie.width,
+                    layer=layer_enum,
+                    net=net,
+                    net_name=name,
+                )
+                for a, b in zip(tie.points, tie.points[1:], strict=False)
+            ],
+        )
+        ends = (f"{extra.ref}.{extra.pin}", f"{anchor.ref}.{anchor.pin}")
+        key = (net, "tie", len(self._lattice_pair_ties))
+        self._lattice_pair_ties.append((key, route, ends))
+        necked = (
+            f" (necked from {tie.class_width:.2f} mm)" if tie.width < tie.class_width - 1e-9 else ""
+        )
+        print(
+            f"  Diff-pair tie {name} {ends[0]}->{ends[1]}: {layer_enum.kicad_name} "
+            f"{tie.length:.2f} mm @ {tie.width:.2f} mm{necked}"
+        )
 
     def _lattice_tap_chain_retry(
         self,
@@ -5129,10 +6046,21 @@ class Autorouter:
             self._lattice_pair_hops,
             self._lattice_tap_chain_pairs,
             self._lattice_connection_endpoints,
+            # Issue #6698: the retry rebuilds the ties; a discarded retry must
+            # not leave its ties behind the first run's routes and endpoints.
+            # ``getattr``: duck-typed routers in tests predate ties.
+            getattr(self, "_lattice_pair_ties", []),
             pf.failure_reasons,
             pf.pair_outcomes,
+            # Issue #6834: a discarded retry must not leave its gateway
+            # diagnostics describing a run whose copper was thrown away.
+            # ``getattr``: duck-typed routers in tests predate gateways.
+            getattr(pf, "pair_gateways", {}),
+            dict(getattr(pf, "pair_gateway_log", {})),
+            getattr(pf, "pair_gateway_rollback", None),
             pf.class_pad_repair_stats,
             dict(pf._class_pad_growth),
+            list(getattr(pf, "class_pad_growth_rounds", [])),
             pf._lattice,
             pf._obstacles,
         )
@@ -5140,6 +6068,18 @@ class Autorouter:
         # Every pair's first-run coupling, read before the retry's
         # ``route_netset`` replaces ``pf.pair_outcomes`` (issue #6550).
         first_coupling = _lattice_pair_coupling(first_coupled, pf.pair_outcomes)
+        # Issue #6743: name the decline reason(s) that actually qualified the
+        # retried trunks (``pair-no-path`` or a ``-keepout-``/``-layer-
+        # constrained`` refinement, see :func:`_lattice_tap_retry_outcomes`).
+        declined = ", ".join(
+            sorted(
+                {
+                    pf.pair_outcomes[pc.key].removeprefix("uncoupled-fallback:")
+                    for pc in first_coupled
+                    if pc.pair_name in retry_pairs and pc.key in pf.pair_outcomes
+                }
+            )
+        )
         if pf._class_pad_growth:
             # The first negotiation left grown pad keep-outs (#6489) baked into
             # the lattice; ``route_netset`` starts from ungrown pads, so the
@@ -5157,7 +6097,7 @@ class Autorouter:
         score = sum(k / n for name, (k, n) in coupling.items() if name in retry_pairs)
         print(
             f"  Diff pairs (lattice): tap-chain retry for {len(retry_pairs)} pair(s) whose "
-            f"trunk declined pair-no-path ({', '.join(sorted(retry_pairs))}): "
+            f"trunk declined {declined or 'pair-no-path'} ({', '.join(sorted(retry_pairs))}): "
             f"{'kept' if kept else 'discarded'} (coupled segments {first_score:g} -> "
             f"{score:g}, unrouted connections {first_failed} -> {failed}"
             f"{', deadline hit' if stats.deadline_hit else ''}"
@@ -5170,14 +6110,94 @@ class Autorouter:
             self._lattice_pair_hops,
             self._lattice_tap_chain_pairs,
             self._lattice_connection_endpoints,
+            self._lattice_pair_ties,
             pf.failure_reasons,
             pf.pair_outcomes,
+            pf.pair_gateways,
+            pf.pair_gateway_log,
+            pf.pair_gateway_rollback,
             pf.class_pad_repair_stats,
             pf._class_pad_growth,
+            pf.class_pad_growth_rounds,
             pf._lattice,
             pf._obstacles,
         ) = saved
         return first_routes, first_stats, first_coupled
+
+    def _lattice_gateway_offer_retry(
+        self,
+        pf: Any,
+        negotiate: Any,
+        connections: list[Any],
+        coupled: list[Any],
+        offer: frozenset[object],
+        first: tuple[dict[object, Route], Any],
+    ) -> tuple[dict[object, Route], Any]:
+        """Re-negotiate once with the gateway skip lifted for ``offer`` (issue #6842).
+
+        The skipped trunks keep their key (the tap retry was not kept for
+        them), so the same ``connections``/``coupled`` run again.  The result
+        is kept only when the offered pairs couple strictly more, no other
+        pair loses a coupled segment, no more connections are unrouted
+        (:func:`_lattice_tap_chain_retry_keeps`) and no more class-pad
+        shortfalls remain -- a gateway that buys no coupling must not change
+        today's copper.  Otherwise the pathfinder's state is restored.
+        """
+        first_routes, first_stats = first
+        saved = (
+            pf.failure_reasons,
+            pf.pair_outcomes,
+            pf.class_pad_repair_stats,
+            dict(pf._class_pad_growth),
+            list(getattr(pf, "class_pad_growth_rounds", [])),
+            getattr(pf, "pair_gateways", {}),
+            dict(getattr(pf, "pair_gateway_log", {})),
+            getattr(pf, "pair_gateway_rollback", None),
+            pf._lattice,
+            pf._obstacles,
+        )
+        first_failed = len(pf.failure_reasons)
+        first_left = pf.class_pad_repair_stats.total_remaining if pf.class_pad_repair_stats else 0
+        first_coupling = _lattice_pair_coupling(coupled, pf.pair_outcomes)
+        pairs = frozenset(pc.pair_name for pc in coupled if pc.key in offer)
+        if pf._class_pad_growth:
+            # Start from an ungrown substrate, as the tap-chain retry does.
+            pf._lattice = None
+            pf._obstacles = None
+        routes_by_key, stats = negotiate(connections, coupled, offer)
+        coupling = _lattice_pair_coupling(coupled, pf.pair_outcomes)
+        failed = len(pf.failure_reasons)
+        left = pf.class_pad_repair_stats.total_remaining if pf.class_pad_repair_stats else 0
+        kept, regressed = _lattice_tap_chain_retry_keeps(
+            first_coupling, coupling, pairs, first_failed, failed, stats.deadline_hit
+        )
+        kept = kept and left <= first_left
+        first_score = sum(k / n for name, (k, n) in first_coupling.items() if name in pairs)
+        score = sum(k / n for name, (k, n) in coupling.items() if name in pairs)
+        print(
+            f"  Diff pairs (lattice): gateway offer for {len(pairs)} pair(s) skipped "
+            f"for a tap chain that did not serve them ({', '.join(sorted(pairs))}): "
+            f"{'kept' if kept else 'discarded'} (coupled segments {first_score:g} -> "
+            f"{score:g}, unrouted connections {first_failed} -> {failed}, class-pad "
+            f"shortfalls {first_left} -> {left}"
+            f"{', deadline hit' if stats.deadline_hit else ''}"
+            f"{', regressed: ' + ', '.join(regressed) if regressed else ''}; issue #6842)"
+        )
+        if kept:
+            return routes_by_key, stats
+        (
+            pf.failure_reasons,
+            pf.pair_outcomes,
+            pf.class_pad_repair_stats,
+            pf._class_pad_growth,
+            pf.class_pad_growth_rounds,
+            pf.pair_gateways,
+            pf.pair_gateway_log,
+            pf.pair_gateway_rollback,
+            pf._lattice,
+            pf._obstacles,
+        ) = saved
+        return first_routes, first_stats
 
     def _warn_lattice_pair_nets_routed_twice(self) -> None:
         """Name any diff-pair net that already carries another engine's copper.
@@ -5287,11 +6307,21 @@ class Autorouter:
                 for layer, width in layer_widths.items():
                     print(f"    {layer}: {width * 1000:.1f}mil ({width:.3f}mm)")
 
-        # Kelvin terminals must each reach the shunt. An intra-IC shortcut
-        # would join two sense branches before the topology planner sees them.
+        # Kelvin terminals must each reach the shunt. A general intra-IC
+        # shortcut would join two sense branches before the topology planner
+        # sees them; only neighbouring duplicate pins are tied (#6799).
         kelvin = detect_kelvin_topology([self.pads[p] for p in pads] + stub_targets)
         if kelvin is not None:
-            pads_for_routing = pads
+            tie_routes, tied = self._create_kelvin_terminal_ties(net, pads)
+            for route in tie_routes:
+                self._mark_route(route)
+                routes.append(route)
+                self.routes.append(route)
+            pads_for_routing = reduce_pads_after_intra_ic(pads, tied, pad_lookup=self.pads)
+            if tied:
+                kelvin = detect_kelvin_topology(
+                    [self.pads[p] for p in pads_for_routing] + stub_targets
+                )
         else:
             # Handle intra-IC connections first
             intra_routes, connected_indices = self._create_intra_ic_routes(net, pads)
@@ -7311,6 +8341,11 @@ class Autorouter:
         # before the first search.  Idempotent per grid.
         self._install_grid_rule_area_keepouts()
 
+        # Issue #6043: net classes may have widened since the loader set
+        # the no-clearance edge keepout floor; grow it (additively) so the
+        # widest copper still cannot reach an Edge.Cuts cut.
+        refresh_edge_keepout_floor(self)
+
         # 1. Build name -> id reverse map from self.net_names.  First
         #    occurrence wins (matches diffpair_detection._name_to_id_map
         #    behavior).  Skip empty names to avoid collisions.
@@ -7508,6 +8543,7 @@ class Autorouter:
                     board_thickness_mm=None,
                     num_copper_layers=None,
                 )
+            self._audit_pair_via_parity()
         except ImportError:
             # diffpair_detection module unavailable -- silently skip the
             # diff-pair block but continue to the match-group block.
@@ -7546,6 +8582,89 @@ class Autorouter:
             board_thickness_mm=None,
             num_copper_layers=None,
         )
+
+    def _pair_via_parity_copper(self) -> list[Route]:
+        """The copper ``kct check`` sees on the written board, for the parity audit.
+
+        Mirrors ``_finalize_routes`` (``cli/route_cmd.py``): preserved copper of
+        a net re-routed this run is dropped ("the freshly-routed copper wins"),
+        except for ``_stub_terminals`` nets whose outside stub is kept.  A
+        route present in both lists is counted once (dedupe by ``id()``).
+        """
+        routed_net_ids = {r.net for r in self.routes} - set(
+            getattr(self, "_stub_terminals", None) or {}
+        )
+        copper: list[Route] = []
+        seen: set[int] = set()
+        for route in [
+            *self.routes,
+            *(r for r in self.existing_routes if r.net not in routed_net_ids),
+        ]:
+            if id(route) not in seen:
+                seen.add(id(route))
+                copper.append(route)
+        return copper
+
+    def _audit_pair_via_parity(self) -> None:
+        """Report every engaged pair committed with unequal via counts (#7093).
+
+        Engine-agnostic backstop behind every ``route_all_*`` entry point (it
+        runs in :meth:`_finalize_routing`).  The pairs are the ones ``kct
+        check`` engages -- detected through :func:`~.diffpair_detection.
+        build_synth_routing` (so a class whose per-net variants disagree picks
+        the same pairs the checker does, #7425) and opted in by their net
+        class (:func:`~.diffpair.should_engage_coupled`).  The counts are every
+        via on each net -- the routes committed this run plus the copper kept
+        by ``--preserve-existing`` / ``--nets`` -- as the checker counts them
+        on the written board.  The router keeps the counts equal where it can
+        (coupled and gateway outcomes by construction, the lattice fallback by
+        ranking and mirrored legs); where it could not -- a lattice fallback
+        or hybrid leg, the grid engine's independent fallback, a pair deferred
+        to the single-ended main loop -- the result is a pair-rule failure,
+        recorded in :attr:`pair_via_parity_failures` and printed, never
+        silent.  A pair the lattice's per-segment report already named is not
+        printed twice.
+        """
+        from .diffpair import should_engage_coupled
+        from .diffpair_detection import build_synth_routing, detect_diff_pairs
+        from .pair_via_parity import audit_pair_via_parity
+
+        synth_routing, net_to_class = build_synth_routing(self.net_class_map)
+        try:
+            detected_pairs = detect_diff_pairs(
+                self.net_names,
+                net_class_routing=synth_routing,
+                net_to_class=net_to_class,
+                kicad_groups=getattr(self, "kicad_diff_pair_groups", None),
+            )
+        except Exception:
+            # Defensive: detection failure must not break routing.
+            detected_pairs = []
+        pairs: list[tuple[int, str, int, str]] = []
+        for dp in detected_pairs:
+            pair = dp.pair
+            engaged, _reason = should_engage_coupled(
+                pair, net_class_routing=synth_routing, net_to_class=net_to_class
+            )
+            if engaged:
+                pos, neg = pair.positive, pair.negative
+                pairs.append((pos.net_id, pos.net_name, neg.net_id, neg.net_name))
+        failures = audit_pair_via_parity(self._pair_via_parity_copper(), pairs)
+        self.pair_via_parity_failures = failures
+        names = {name: net for net, name in self.net_names.items()}
+        warned: set[frozenset[int | None]] = getattr(self, "_lattice_via_warned_nets", set())
+        reported: set[tuple[str, str, int, int]] | None = getattr(
+            self, "_reported_pair_via_parity", None
+        )
+        if reported is None:
+            reported = self._reported_pair_via_parity = set()
+        for f in failures:
+            nets = frozenset((names.get(f.p_name), names.get(f.n_name)))
+            sig = (f.p_name, f.n_name, f.vias_p, f.vias_n)
+            if nets in warned or sig in reported:
+                continue
+            reported.add(sig)
+            print(f.warning())
 
     # ------------------------------------------------------------------
     # Diff-pair partner map for escape routing
@@ -7809,7 +8928,8 @@ class Autorouter:
         Creates per-net NetClassRouting entries with ``preferred_layers``
         set, so the pathfinder's ``_get_layer_preference_cost()`` biases
         A* toward the assigned layer.  If the net already has a net class
-        entry, a copy is created with the layer preference added.
+        entry, a copy is created with the layer preference added; a class
+        that already authors ``preferred_layers`` is left untouched (#6824).
 
         Issue #2432.
 
@@ -7838,6 +8958,12 @@ class Autorouter:
                 continue
             existing = self.net_class_map.get(net_name)
             if existing is not None:
+                if existing.preferred_layers:
+                    # Issue #6824: an authored ``preferred_layers`` is a
+                    # deliberate layer intent (board 03 puts USB_D on
+                    # In2.Cu); the matrix assignment is only an automatic
+                    # hint and must not overwrite it.
+                    continue
                 # Issue #4979: never prefer a layer this class hard-blocks.
                 hard_avoided = existing.hard_avoided_layer_indices(self.rules.strict_layers)
                 allowed = [x for x in layers if x not in hard_avoided] if hard_avoided else layers
@@ -9600,7 +10726,8 @@ class Autorouter:
             progress_callback: Optional callback for progress updates
             parallel: If True, route independent nets in parallel using
                 bounding box analysis to find non-overlapping net groups.
-                Can provide 3-4x speedup for boards with many independent nets.
+                Net searches take the grid lock, so no speedup should be
+                expected (see docs/research/gpu-routing-design.md section 3).
             max_workers: Maximum number of parallel workers (default: 4).
                 Only used when parallel=True.
             interleaved: If True, use interleaved ordering for N-port nets.
@@ -10691,8 +11818,9 @@ class Autorouter:
         """Route all nets using parallel execution where possible.
 
         Groups nets by bounding box independence and routes independent
-        nets concurrently using ThreadPoolExecutor. This can provide
-        3-4x speedup for boards with many independent nets.
+        nets concurrently using ThreadPoolExecutor. Net searches take the
+        grid lock, so no speedup should be expected (see
+        docs/research/gpu-routing-design.md section 3).
 
         Args:
             net_order: Optional explicit net ordering (by priority)
@@ -11108,7 +12236,9 @@ class Autorouter:
                 This improves convergence for difficult routing scenarios.
             region_parallel: If True, use region-based parallelism (Issue #965).
                 Partitions the grid into regions and routes non-adjacent regions
-                in parallel during each iteration, providing 2-3x speedup.
+                in parallel during each iteration. Worker searches currently
+                serialize on the grid lock and the GIL, so no speedup should be
+                expected (docs/research/gpu-routing-design.md section 3).
             partition_rows: Number of region rows for partitioning (default 2)
             partition_cols: Number of region columns for partitioning (default 2)
             max_parallel_workers: Maximum parallel workers per region group (default 4)
@@ -11122,9 +12252,8 @@ class Autorouter:
                 (advanced users / regression tests).  Default 16, chosen so the
                 board-07 workload trips the gate but boards 04/05 (60+ nets) do
                 not.
-            batch_routing: If True, use GPU-accelerated batch routing (Issue #1092).
-                Routes multiple independent nets simultaneously using GPU compute.
-                Best results with 4+ independent nets and Metal/CUDA GPU.
+            batch_routing: Deprecated and ignored (Issue #7051); emits a DeprecationWarning
+                when True.
             hierarchical: If True, use hierarchical coarse-to-fine routing (Issue #1092).
                 First performs global routing on a coarse grid, then refines with
                 the fine grid near pads and congestion points.
@@ -11416,7 +12545,14 @@ class Autorouter:
                 f"{max_parallel_workers} workers)"
             )
         if batch_routing:
-            print("  Batch routing: enabled (GPU-accelerated)")
+            import warnings
+
+            warnings.warn(
+                "batch_routing has no effect (GPU batch routing was removed, "
+                "Issue #7051) and will be removed",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         if ema_smoothing:
             print(f"  EMA smoothing: enabled (alpha={ema_alpha})")
         if exponential_cost:
@@ -11433,6 +12569,8 @@ class Autorouter:
         # Track overflow history for adaptive mode (Issue #633)
         overflow_history: list[int] = []
         escape_strategy_index = 0
+        # Issue #7071: nets rerouted per rip-up iteration; sizes the escape cap.
+        iteration_reroute_counts: list[int] = []
 
         # Issue #3942 (Bug A): buffer oscillation/escape diagnostics printed
         # mid-loop and only surface them if the router ends with stranded nets
@@ -11453,6 +12591,24 @@ class Autorouter:
             100%%-routed board produces no failure-flavored wording.
             """
             deferred_oscillation_msgs.append(message)
+
+        def _print_escape_summary(router: NegotiatedRouter) -> None:
+            """One unbuffered line per escape (Issue #7071).
+
+            Unlike ``_emit_oscillation_msg`` this survives #3942: the time an
+            escape costs must stay visible on a 100%%-routed board.  The
+            wording avoids the failure phrases that gate pins.
+            """
+            info = router.last_escape_summary
+            if info is None:
+                return
+            cap = "" if info.reroute_cap is None else f" of {info.reroute_cap}"
+            flush_print(
+                f"  Escape: {info.strategies_tried} strategies, {info.seconds:.1f}s, "
+                f"{info.reroutes}{cap} reroutes, overflow "
+                f"{info.overflow_before} to {info.overflow_after}, "
+                f"{'kept' if info.kept else 'rolled back'}"
+            )
 
         # Issue #2334: Stochastic perturbation state tracking.
         # perturbation_stagnation_count tracks how many iterations the
@@ -11615,7 +12771,7 @@ class Autorouter:
 
         # Issue #3100: Auto-gate ``region_parallel`` on small / dense workloads.
         # PR #3068 wired ``--region-parallel`` through ``route_all_negotiated``
-        # but the docstring's "2-3x speedup" only materializes when each region
+        # but any benefit only materializes when each region
         # has enough independent nets to amortize the worker startup, grid
         # thread-safety conversion, and inter-iteration handoff costs.  The
         # board-07 re-benchmark on #3045 showed +55% wall-clock with 31 nets
@@ -13260,6 +14416,7 @@ class Autorouter:
 
                     if stalled_nets:
                         nets_to_reroute = [n for n in nets_to_reroute if n not in stalled_nets]
+                    iteration_reroute_counts.append(len(nets_to_reroute))
 
                     # Issue #2396: When overflow is 0 but nets remain unrouted,
                     # the rip-up loop has no overflow signal to act on.  Force
@@ -13820,8 +14977,13 @@ class Autorouter:
                                 strategy_index=escape_strategy_index,
                                 per_net_timeout=iter_per_net_cap,
                                 escape_budget=escape_budget,
+                                reroute_cap=_negotiated_budget.escape_reroute_cap(
+                                    iteration_reroute_counts
+                                ),
                             )
                             escape_strategy_index += tried
+                            _print_escape_summary(neg_router)
+                            overflow = new_overflow if not success else overflow
 
                             if success:
                                 _emit_oscillation_msg(
@@ -14531,8 +15693,13 @@ class Autorouter:
                             strategy_index=escape_strategy_index,
                             per_net_timeout=iter_per_net_cap,
                             escape_budget=escape_budget,
+                            reroute_cap=_negotiated_budget.escape_reroute_cap(
+                                iteration_reroute_counts
+                            ),
                         )
                         escape_strategy_index += tried
+                        _print_escape_summary(neg_router)
+                        overflow = new_overflow if not success else overflow
 
                         if success:
                             _emit_oscillation_msg(
@@ -15238,161 +16405,47 @@ class Autorouter:
         return probe_routes, victims
 
     def _active_expansion_cap(self) -> int:
-        """The binding per-net node-expansion cap, or ``0`` when uncapped.
-
-        The deterministic bound this router can hand a sub-search is the
-        SMALLER of the tuned per-net cap (``--per-net-iterations`` /
-        ``per_net_iterations``, #3881) and the memory backstop
-        (``--max-search-iterations``, #2610); ``--deterministic-budget``
-        sets both, an explicit flag may set only one.  ``0`` means neither
-        is active, i.e. there is no machine-independent bound available and
-        a wall clock has to stay in force.
-
-        Extracted (Issue #4724) so the relief rescue (#4536) and the
-        post-negotiation sweep (#4159) ask the SAME question -- a second
-        copy of this ``min()`` is exactly how two budget selectors drift
-        into disagreeing about what "deterministic mode" means.
-        """
-        return min(
-            (
-                cap
-                for cap in (
-                    getattr(self, "_per_net_iterations", 0),
-                    getattr(self, "_max_search_iterations", 0),
-                )
-                if cap
-            ),
-            default=0,
+        """The binding per-net node-expansion cap, or ``0`` when uncapped."""
+        return _negotiated_budget.active_expansion_cap(
+            getattr(self, "_per_net_iterations", 0),
+            getattr(self, "_max_search_iterations", 0),
         )
 
     def _wall_clock_free_arm(self, deterministic_rescue: bool) -> bool:
-        """True when the negotiated loop must not read a wall clock for reach.
-
-        Issue #6475.  ``deterministic_rescue`` with an active expansion cap
-        means the caller asked for a route that does not depend on machine
-        load.  The oscillation-escape budget (#2415) and the per-iteration
-        per-net cap derived from the remaining stage budget (#3989) are both
-        wall clocks that decide reach, so both switch off here.  The stage
-        deadline (``check_timeout``) is left alone.
-        """
-        return bool(deterministic_rescue and self._active_expansion_cap())
+        """See :func:`negotiated_budget.wall_clock_free_arm`."""
+        return _negotiated_budget.wall_clock_free_arm(
+            self._active_expansion_cap(), deterministic_rescue
+        )
 
     def _escape_budget(
         self, timeout: float | None, start_time: float, deterministic_rescue: bool
     ) -> float | None:
-        """Wall-clock budget for ``escape_local_minimum`` (Issue #2415 / #6475).
-
-        ``None`` (unbounded; each strategy is still bounded by the per-net
-        expansion cap) on the deterministic arm or when there is no stage
-        timeout; otherwise ``min(60, 25% of the remaining stage budget)``.
-        """
-        if timeout is None or self._wall_clock_free_arm(deterministic_rescue):
-            return None
-        remaining = timeout - (time.time() - start_time)
-        return max(0.0, min(60.0, remaining * 0.25))
+        """See :func:`negotiated_budget.escape_budget`."""
+        return _negotiated_budget.escape_budget(
+            self._active_expansion_cap(), timeout, start_time, deterministic_rescue
+        )
 
     def _wall_clock_arm_line(self, deterministic_rescue: bool) -> str:
-        """Routing-log line naming the escape-budget / per-iteration-cap arm (#6475)."""
-        if self._wall_clock_free_arm(deterministic_rescue):
-            return (
-                "  Escape budget / per-iteration per-net cap: iteration-bounded "
-                "(deterministic rescue; issue #6475) -- oscillation escape and "
-                "per-net searches do not read a wall clock"
-            )
-        return (
-            "  Escape budget / per-iteration per-net cap: wall clock "
-            "(60s escape budget, remaining-budget per-net cap; deterministic "
-            "rescue is off or no expansion cap is active; issue #6475)"
+        """See :func:`negotiated_budget.wall_clock_arm_line`."""
+        return _negotiated_budget.wall_clock_arm_line(
+            self._active_expansion_cap(), deterministic_rescue
         )
 
     def _relief_subsearch_budget(
         self, per_net_timeout: float | None, deterministic_rescue: bool
     ) -> float | None:
-        """Budget for the relief rescue's probe / victim-re-land searches.
-
-        Issue #4536.  The rescue is a TRANSACTION with a no-net-loss
-        guarantee: if a displaced victim does not re-land, the whole
-        rescue rolls back and the rescued net stays unrouted.  The budget
-        those sub-searches get is therefore **reach-determining**, not a
-        mere performance knob.
-
-        Historically that budget was a flat ``RELIEF_SUBSEARCH_BUDGET_S``
-        (10 s) wall clock.  On board-06 seed-42 the natural victim
-        re-land time on GitHub ubuntu runners sits in the 8-12 s band --
-        i.e. the budget STRADDLES it, and the SAME code at the SAME
-        commit lands 21/21 on a fast runner and 20/21 on a slow one (the
-        rescue of ``MIPI_RST`` at iteration 2 keeps or drops
-        ``MIPI_CLK-``).  That is the same defect class as the 360 s stage
-        backstop this issue removed, one level down.
-
-        ``deterministic_rescue=True`` replaces the wall clock with the
-        DETERMINISTIC per-net node-expansion cap that already bounds every
-        other search in the stage (``--deterministic-budget`` /
-        ``per_net_iterations``, #3877/#3881): the sub-search runs exactly
-        the same number of node expansions on every machine, so the rescue
-        commits or rolls back identically everywhere.
-        ``RELIEF_SUBSEARCH_SAFETY_BACKSTOP_S`` is kept as a NON-load-bearing
-        outer guard (~10x the natural sub-search time) purely for the
-        pure-Python A* fallback, which the expansion cap does not price in
-        seconds.
-
-        The deterministic mode requires an active expansion cap; without
-        one there is no deterministic bound to fall back on, so the
-        historical wall clock is kept (degrading to the pre-#4536
-        behavior rather than to an unbounded search).
-
-        Issue #4730 proposed making ``deterministic_rescue=True`` the
-        fleet default and measured a board-07 regression on the
-        negotiated entry point, so it stays OPT-IN
-        (:data:`DETERMINISTIC_RESCUE_DEFAULT` is ``False``); board 06
-        opts in explicitly.  Every entry point that can reach a rescue
-        now carries the value per call, so the choice is made where the
-        measurement is.
-        """
-        if deterministic_rescue and self._active_expansion_cap():
-            return RELIEF_SUBSEARCH_SAFETY_BACKSTOP_S
-        if per_net_timeout:
-            return min(RELIEF_SUBSEARCH_BUDGET_S, per_net_timeout)
-        return RELIEF_SUBSEARCH_BUDGET_S
+        """See :func:`negotiated_budget.relief_subsearch_budget`."""
+        return _negotiated_budget.relief_subsearch_budget(
+            self._active_expansion_cap(), per_net_timeout, deterministic_rescue
+        )
 
     def _relief_reland_retry_budget(
         self, per_net_timeout: float | None, subsearch_budget: float | None
     ) -> float | None:
-        """Budget for re-landing a victim whose reduced-budget re-land ran out of time.
-
-        Issue #6151.  The rescue re-lands its displaced victims under the
-        REDUCED :meth:`_relief_subsearch_budget` (10 s wall clock by default)
-        so a hopeless rescue fails fast.  A victim did originally land under
-        the caller's full ``per_net_timeout`` though, and on board 03 the
-        ``USB_D+`` re-land (a 5-pad net, two J1 rows plus the MCU side) needs
-        ~1.5 s idle but ~4.5 s at a load average of 60 and more beyond that --
-        the reduced budget straddles it, so the SAME rescue commits on an idle
-        machine and loses a net on a busy one.
-
-        A victim whose first re-land *consumed* its budget (a geometric
-        failure returns well before it -- the open set drains) is retried
-        once under the budget it originally routed with:
-
-        * the caller's ``per_net_timeout`` when one is set (the plain
-          ``kct route`` path: 30 s);
-        * otherwise, when a node-expansion cap is active
-          (``--deterministic-budget``), the non-binding
-          :data:`RELIEF_SUBSEARCH_SAFETY_BACKSTOP_S` -- the expansion cap is
-          then the binding, machine-independent bound, exactly the
-          ``deterministic_rescue`` arm of :meth:`_relief_subsearch_budget`;
-        * otherwise the sub-search budget unchanged (no larger bound exists
-          that is not unbounded).
-
-        Never smaller than ``subsearch_budget``; ``None`` (unbounded) stays
-        ``None``.
-        """
-        if subsearch_budget is None:
-            return None
-        if per_net_timeout:
-            return max(subsearch_budget, per_net_timeout)
-        if self._active_expansion_cap():
-            return max(subsearch_budget, RELIEF_SUBSEARCH_SAFETY_BACKSTOP_S)
-        return subsearch_budget
+        """See :func:`negotiated_budget.relief_reland_retry_budget`."""
+        return _negotiated_budget.relief_reland_retry_budget(
+            self._active_expansion_cap(), per_net_timeout, subsearch_budget
+        )
 
     @staticmethod
     def _relief_victim_connected_pads(
@@ -15419,82 +16472,13 @@ class Autorouter:
     def _relief_subsearch_bound_line(
         self, per_net_timeout: float | None, deterministic_rescue: bool
     ) -> str:
-        """Routing-log line recording which relief-rescue sub-search bound is live.
-
-        Issue #4536 put this in the log because the bound decides whether a
-        rescue COMMITS -- i.e. it decides routed reach, so any routing log
-        used as A/B evidence has to say which one was in force.  The
-        ``iteration-bounded`` wording is the greppable evidence line; do not
-        reword it.
-
-        The arms state facts, not caller intent.  The deterministic bound is
-        opt-in (:data:`DETERMINISTIC_RESCUE_DEFAULT` is ``False`` after #4730's
-        measured board-07 regression), so the OFF arm is reached both by the
-        ordinary default and by an explicit opt-out, and the capless
-        wall-clock arm is reached by an opt-in run that simply has no
-        expansion cap to hand the sub-searches to.  Neither arm claims a
-        request it cannot know about.
-
-        Emitted by both routing entry points that can reach a relief rescue:
-        :meth:`route_all_negotiated` and :meth:`route_all_two_phase` (whose
-        stall-relief hook, #3471, calls :meth:`_relief_rescue` positionally
-        with the bound bound on by ``functools.partial``).  Each reports the
-        value ITS call is running under, so an opt-in is visible in the log
-        rather than assumed.
-        """
+        """See :func:`negotiated_budget.relief_subsearch_bound_line`."""
         budget = self._relief_subsearch_budget(per_net_timeout, deterministic_rescue)
-        if deterministic_rescue and budget == RELIEF_SUBSEARCH_SAFETY_BACKSTOP_S:
-            return (
-                "  Relief-rescue sub-search cap: iteration-bounded "
-                "(per-net node-expansion cap; issue #4536) -- probe / "
-                "victim-re-land outcomes are machine-independent; "
-                f"{RELIEF_SUBSEARCH_SAFETY_BACKSTOP_S:.0f}s wall clock kept "
-                "only as a non-binding Python-fallback backstop"
-            )
-        wall_clock = float(budget if budget else RELIEF_SUBSEARCH_BUDGET_S)
-        if deterministic_rescue:
-            return (
-                f"  Relief-rescue sub-search cap: {wall_clock:.1f}s wall clock -- "
-                "no per-net node-expansion cap is active, so the machine-dependent "
-                "bound is kept (issue #4536)"
-            )
-        return (
-            f"  Relief-rescue sub-search cap: {wall_clock:.1f}s wall clock -- "
-            "deterministic rescue is off for this route (the default; opt in with "
-            "deterministic_rescue=True; issue #4730)"
-        )
+        return _negotiated_budget.relief_subsearch_bound_line(budget, deterministic_rescue)
 
     def _relief_txn_bound_line(self, timeout: float | None) -> str:
-        """Routing-log line recording the relief-rescue TRANSACTION bound in force.
-
-        Issue #4781.  Same evidence discipline as
-        :meth:`_relief_subsearch_bound_line` (#4536): the bound decides how
-        much of the stage budget a single rescue can burn before rolling
-        back -- i.e. it decides how many rip-up iterations the stage can
-        afford, which decides reach -- so any routing log used as A/B
-        evidence has to say which arm was live.  The
-        ``Relief-rescue transaction bound:`` prefix is the greppable
-        evidence token; do not reword it.
-
-        Args:
-            timeout: The stage wall-clock budget of the calling loop, or
-                ``None`` when the stage runs without a deadline (then
-                ``relief_deadline is None`` and the bound is structurally
-                inert -- there is no "remaining stage budget" denominator).
-        """
-        if timeout is not None:
-            return (
-                "  Relief-rescue transaction bound: proportional -- one rescue "
-                "transaction (nested rescues share the parent's allowance) may "
-                f"spend at most max({RELIEF_RESCUE_TXN_FRACTION:.0%} of the "
-                f"remaining stage budget, {RELIEF_RESCUE_TXN_FLOOR_S:.0f}s) "
-                "before rolling back verbatim (issue #4781)"
-            )
-        return (
-            "  Relief-rescue transaction bound: none -- the stage has no "
-            "wall-clock deadline, so transactions are bounded by their "
-            "sub-search caps only (issue #4781)"
-        )
+        """See :func:`negotiated_budget.relief_txn_bound_line`."""
+        return _negotiated_budget.relief_txn_bound_line(timeout)
 
     def _post_negotiation_sweep_bounds(
         self,
@@ -15503,77 +16487,10 @@ class Autorouter:
         elapsed: float,
         timed_out: bool,
     ) -> tuple[float, float | None]:
-        """Bounds for the #4159 post-negotiation rescue sweep.
-
-        Returns ``(whole_sweep_budget_s, per_net_budget_s)``.
-
-        Issue #4724.  The sweep decides WHICH stranded nets get one solo
-        re-attempt on the live grid, so both of its historical bounds --
-        ``POST_NEGOTIATION_SWEEP_BUDGET_S`` (60 s for the whole pass) and
-        ``POST_NEGOTIATION_SWEEP_PER_NET_S`` (10 s per net) -- decide routed
-        REACH, not runtime.  They were applied UNCONDITIONALLY, including on
-        the deterministic-budget callers that pass ``timeout=None`` /
-        ``per_net_timeout=None`` precisely so that no wall clock decides
-        anything (the #4536 rationale, board 06's regen).  A capped per-net
-        search that runs to its 1M-expansion cap costs ~11 s on a CI runner,
-        so the 10 s per-net bound straddles it exactly the way the relief
-        rescue's 10 s sub-search budget did.
-
-        Selection table -- the same shape as
-        :meth:`_relief_subsearch_budget`, so the two cannot drift:
-
-        * **Unbudgeted caller + active expansion cap** -> the deterministic
-          arm: the node-expansion cap is the binding bound and the returned
-          wall clocks are the ~10x non-binding backstops
-          (``POST_NEGOTIATION_SWEEP_SAFETY_BACKSTOP_S`` /
-          ``POST_NEGOTIATION_SWEEP_PER_NET_SAFETY_BACKSTOP_S``) that keep a
-          pure-Python fallback from grinding.
-        * **Unbudgeted caller, no expansion cap** -> unchanged 60 s / 10 s.
-          There is no machine-independent bound to fall back on, so the
-          historical wall clock is kept rather than degrading to an
-          unbounded sweep (identical reasoning to #4536's capless arm).
-        * **Budgeted caller** (``timeout`` set) -> unchanged: the sweep gets
-          ``min(60 s, remaining stage budget)`` when the loop exited with
-          budget left, else its own contained 60 s allowance, and the per-net
-          cap is clamped by any caller ``per_net_timeout``.
-
-        Args:
-            timeout: The stage wall-clock budget the caller passed, or
-                ``None`` for an unbudgeted (deterministic) run.
-            per_net_timeout: The caller's per-net A* budget, or ``None``.
-            elapsed: Seconds spent in the negotiated loop so far (used only
-                to compute the remaining stage budget of a budgeted caller).
-            timed_out: Whether the loop exited on the stage timeout (then
-                the remaining budget is spent and the sweep runs on its own
-                contained allowance, as before).
-        """
-        if timeout is None and per_net_timeout is None and self._active_expansion_cap():
-            return (
-                POST_NEGOTIATION_SWEEP_SAFETY_BACKSTOP_S,
-                POST_NEGOTIATION_SWEEP_PER_NET_SAFETY_BACKSTOP_S,
-            )
-
-        sweep_remaining: float | None = None
-        if timeout is not None:
-            sweep_remaining = timeout - elapsed
-        if sweep_remaining is not None and sweep_remaining > 0 and not timed_out:
-            sweep_budget = min(POST_NEGOTIATION_SWEEP_BUDGET_S, sweep_remaining)
-        else:
-            sweep_budget = POST_NEGOTIATION_SWEEP_BUDGET_S
-
-        sweep_per_net = per_net_timeout
-        if not sweep_per_net:
-            # Issue #4776: a literal ``0.0`` is the ``--deterministic-budget``
-            # "wall-clock cutoff disabled" sentinel.  Treat it the way
-            # :meth:`_relief_subsearch_budget` already does (falsy == absent);
-            # taking ``min(0.0, 10 s)`` instead handed every stranded net a
-            # zero-second solo budget and silently no-op'd the sweep.  The
-            # ``is None`` gate on the safety-backstop arm above is
-            # deliberately unchanged.
-            sweep_per_net = POST_NEGOTIATION_SWEEP_PER_NET_S
-        else:
-            sweep_per_net = min(sweep_per_net, POST_NEGOTIATION_SWEEP_PER_NET_S)
-        return max(0.0, sweep_budget), sweep_per_net
+        """See :func:`negotiated_budget.post_negotiation_sweep_bounds`."""
+        return _negotiated_budget.post_negotiation_sweep_bounds(
+            self._active_expansion_cap(), timeout, per_net_timeout, elapsed, timed_out
+        )
 
     def _post_negotiation_sweep_bound_line(
         self,
@@ -15582,39 +16499,12 @@ class Autorouter:
         elapsed: float,
         timed_out: bool,
     ) -> str:
-        """Routing-log line recording which sweep bound is live (Issue #4724).
-
-        Same evidence discipline as :meth:`_relief_subsearch_bound_line`
-        (#4536): the bound decides which stranded nets get a rescue, so a
-        routing log used as A/B evidence has to say which one was in force.
-        The ``iteration-bounded`` wording is the greppable evidence token;
-        do not reword it.
-        """
+        """See :func:`negotiated_budget.post_negotiation_sweep_bound_line`."""
         budget, per_net = self._post_negotiation_sweep_bounds(
             timeout, per_net_timeout, elapsed, timed_out
         )
-        if budget == POST_NEGOTIATION_SWEEP_SAFETY_BACKSTOP_S:
-            return (
-                "  Post-negotiation sweep bound: iteration-bounded "
-                "(per-net node-expansion cap; issue #4724) -- which stranded "
-                "nets are rescued is machine-independent; "
-                f"{POST_NEGOTIATION_SWEEP_SAFETY_BACKSTOP_S:.0f}s/"
-                f"{POST_NEGOTIATION_SWEEP_PER_NET_SAFETY_BACKSTOP_S:.0f}s wall "
-                "clocks kept only as non-binding Python-fallback backstops"
-            )
-        per_net_str = "unbounded" if per_net is None else f"{per_net:.1f}s"
-        if timeout is not None:
-            why = "the caller passed a stage timeout (issue #4159)"
-        elif per_net_timeout is not None:
-            why = "the caller passed an explicit per-net wall clock (issue #4159)"
-        else:
-            why = (
-                "no per-net node-expansion cap is active, so the "
-                "machine-dependent bound is kept (issue #4724)"
-            )
-        return (
-            f"  Post-negotiation sweep bound: {budget:.1f}s whole-sweep / "
-            f"{per_net_str} per-net wall clock -- {why}"
+        return _negotiated_budget.post_negotiation_sweep_bound_line(
+            budget, per_net, timeout, per_net_timeout
         )
 
     def _relief_rescue(
@@ -16260,7 +17150,16 @@ class Autorouter:
         routes: list[Route] = []
         kelvin = detect_kelvin_topology([self.pads[p] for p in pads] + stub_targets)
         if kelvin is not None:
-            pads_for_routing = pads
+            # Issue #6799: neighbouring duplicate pins are one Kelvin terminal.
+            tie_routes, tied = self._create_kelvin_terminal_ties(net, pads)
+            for route in tie_routes:
+                self._mark_route(route)
+                routes.append(route)
+            pads_for_routing = reduce_pads_after_intra_ic(pads, tied, pad_lookup=self.pads)
+            if tied:
+                kelvin = detect_kelvin_topology(
+                    [self.pads[p] for p in pads_for_routing] + stub_targets
+                )
         else:
             intra_routes, connected_indices = self._create_intra_ic_routes(net, pads)
             for route in intra_routes:
@@ -17965,8 +18864,8 @@ class Autorouter:
         # persisted ``_edge_segments`` / ``_edge_clearance`` so a Monte
         # Carlo / evolutionary trial reset does not silently reopen the
         # board-edge exclusion zone for the next search.
-        if self._edge_segments and self._edge_clearance:
-            self.grid.add_edge_keepout(self._edge_segments, self._edge_clearance)
+        # Issue #6043: the helper also reinstalls the no-clearance floor.
+        install_edge_keepout(self, self.grid)
 
         # Issue #5555: same reasoning for keepouts registered through
         # ``add_obstacle`` (component bodies, mechanical exclusions,
@@ -18061,6 +18960,7 @@ class Autorouter:
                     "net_name": pad.net_name,
                     "layer": pad.layer.value if hasattr(pad.layer, "value") else str(pad.layer),
                     "through_hole": pad.through_hole,
+                    "side": pad.side.value if pad.side is not None else None,
                     "drill": pad.drill,
                     "drill_size": pad.drill_size,
                     "drill_rotation": pad.drill_rotation,
@@ -18068,6 +18968,7 @@ class Autorouter:
                     "steiner_point": pad.steiner_point,
                     "rotation": pad.rotation,
                     "shape": pad.shape,
+                    "roundrect_rratio": pad.roundrect_rratio,
                     "pin_pitch": self.grid._pad_pin_pitch.get(id(pad)),
                 }
             )
@@ -18107,6 +19008,8 @@ class Autorouter:
             if self._edge_segments is not None
             else [],
             "edge_clearance": self._edge_clearance,
+            # Issue #6043: the no-clearance physical keepout floor.
+            "edge_keepout_floor": self._edge_keepout_floor,
             # Issue #5555: keepouts registered through ``add_obstacle``.
             # Same rationale as the edge geometry above -- a worker process
             # builds its own Autorouter from this dict and would otherwise
@@ -18138,6 +19041,8 @@ class Autorouter:
             "per_net_iterations": getattr(self, "_per_net_iterations", 0),
             "max_search_iterations": getattr(self, "_max_search_iterations", 0),
             "force_python": bool(getattr(self, "_force_python", False)),
+            # Issue #6741: a worker must route on the parent's pitch.
+            "adaptive_grid": bool(getattr(self, "_adaptive_grid", True)),
         }
 
     def route_all_monte_carlo(
@@ -18669,9 +19574,12 @@ class Autorouter:
             if not routed:
                 break
             hit = routed[0]
+            # Issue #6670: name the foreign copper.  A pour pad neutralised to
+            # net 0 read as "net 0 pad", hiding the GND class floor and the pad.
+            other = hit.other_label or f"net {hit.other_net} {hit.kind}"
             flush_print(
                 f"    Net {hit.net} ({self.net_names.get(hit.net, '?')}): {hit.actual:.3f}mm "
-                f"from net {hit.other_net} {hit.kind} at ({hit.x:.3f}, {hit.y:.3f}) is below "
+                f"from {other} at ({hit.x:.3f}, {hit.y:.3f}) is below "
                 f"the authored netclass minimum {hit.required:.3f}mm; demoted to unrouted"
             )
             victims.append(hit.net)
@@ -19547,10 +20455,60 @@ class Autorouter:
             verbose=verbose,
         )
 
+    def apply_diffpair_gap_tightening(
+        self,
+        detected_pairs: list | None = None,
+        *,
+        verbose: bool = True,
+        stackup: Any = None,
+        candidate_window_mm: float | None = None,
+    ) -> dict[tuple[str, str], Any]:
+        """Squeeze uncoupled diff-pair trunks to their target gap (Issue #7344).
+
+        Opt-in post-route pass (``kct route --tighten-diffpair-gap``).  For
+        each pair whose class declares ``target_diff_impedance``, parallel
+        same-layer P/N runs whose coupled Zdiff is above the tolerance band
+        are moved symmetrically toward each other to the gap at which
+        ``ImpedanceRule``'s own model hits the target (never below
+        :meth:`_pair_gap_mm`), joined to the untouched ends with 45-degree
+        jogs.  Each edit is gated on foreign clearance
+        (:meth:`_skew_tune_foreign_clearance_ok`), pad connectivity, skew and
+        the impedance post-condition, and is skipped (copper unchanged) on
+        any failure.  See :mod:`kicad_tools.router.diffpair_gap_tightening`.
+
+        Args:
+            detected_pairs: Pairs to process; ``None`` detects them from the
+                class map the way ``kct check`` does.
+            verbose: Print one line per pair.
+            stackup: Stackup for the coupled model; ``None`` resolves the
+                one ``kct check`` will use for the routed board.
+            candidate_window_mm: Widest edge gap considered (default
+                :data:`~kicad_tools.router.diffpair_gap_tightening.DEFAULT_CANDIDATE_WINDOW_MM`).
+
+        Returns:
+            ``{(p_net_name, n_net_name): GapTighteningResult}``.
+        """
+        from .diffpair_gap_tightening import (
+            DEFAULT_CANDIDATE_WINDOW_MM,
+            tighten_diffpair_gaps,
+        )
+
+        return tighten_diffpair_gaps(
+            self,
+            detected_pairs,
+            verbose=verbose,
+            stackup=stackup,
+            candidate_window_mm=(
+                DEFAULT_CANDIDATE_WINDOW_MM if candidate_window_mm is None else candidate_window_mm
+            ),
+        )
+
     def apply_diffpair_length_tuning(
         self,
         detected_pairs: list,
         verbose: bool = True,
+        *,
+        engage: str = "length_critical",
     ) -> dict[tuple[str, str], DiffPairTuneResult]:
         """Apply per-pair length-match (skew) tuning to detected diff pairs.
 
@@ -19570,6 +20528,16 @@ class Autorouter:
                 Pairs whose net class is not length-critical are skipped
                 in-place via the engagement gate.
             verbose: Whether to print progress information.
+            engage: Engagement policy.  ``"length_critical"`` (default, the
+                ``--length-match-diffpairs`` contract of Issue #2648): tune
+                only pairs whose class is ``length_critical=True``, against
+                ``effective_skew_tolerance(0.5)``.  ``"checker_skew_limit"``
+                (Issue #6664, the lattice auto-engage path): tune every pair
+                whose skew limit ``kct check`` enforces as an error --
+                ``resolve_pair_thresholds(...).skew_severity == "error"`` --
+                against that same ``skew_mm``, regardless of
+                ``length_critical``.  A pair whose limit resolves to a
+                warning is declined with ``reason="skew_limit_not_enforced"``.
 
         Returns:
             ``{(p_net_name, n_net_name): DiffPairTuneResult}`` for each
@@ -19578,24 +20546,13 @@ class Autorouter:
         """
         from .diffpair_length_tuning import tune_diff_pair_skew
 
+        if engage not in ("length_critical", "checker_skew_limit"):
+            raise ValueError(f"unknown diff-pair tuning engagement policy: {engage!r}")
+
         results: dict[tuple[str, str], DiffPairTuneResult] = {}
 
         # Complete-net views include fixed escapes and every mutable fragment.
-        fragments_by_net: dict[int, list[Route]] = {}
-        for route in self.routes:
-            fragments_by_net.setdefault(route.net, []).append(route)
-        routes_by_net = {
-            net: fragments[0]
-            if len(fragments) == 1
-            else Route(
-                net=net,
-                net_name=fragments[0].net_name,
-                segments=[segment for route in fragments for segment in route.segments],
-                vias=[via for route in fragments for via in route.vias],
-                is_escape=all(route.is_escape for route in fragments),
-            )
-            for net, fragments in fragments_by_net.items()
-        }
+        routes_by_net = self._net_routes_merged()
         fixed_segment_ids = {id(s) for r in self.routes if r.is_escape for s in r.segments}
 
         # Update the skew tracker so the post-tuning results are queryable.
@@ -19610,6 +20567,27 @@ class Autorouter:
             num_copper_layers=num_layers,
         )
 
+        # Issue #6664: the checker-limit path measures skew exactly as
+        # ``kct check`` does -- segments plus drilled via barrels at the
+        # manufacturer profile's board thickness, standard vias promoted to
+        # through-vias (``derive_skew_limits`` -> ``measure_net_from_pcb``).
+        # A via-blind measure picks the wrong "shorter" half on a pair with
+        # unequal via counts and can make the checker's skew worse (07rf
+        # TMDS_D2: 1.029 -> 5.029 mm).  The ``length_critical`` path keeps its
+        # segment-only measure (byte-identical ``--length-match-diffpairs``).
+        route_length = None
+        if engage == "checker_skew_limit":
+            route_length = self._checker_route_length(num_layers)
+
+        # Issue #6795: component count per net, for the uncoupled-length limit.
+        net_components: dict[str, int] = {}
+        if engage == "checker_skew_limit":
+            refs: dict[str, set[str]] = {}
+            for pad in self.pads.values():
+                if pad.net_name and pad.ref:
+                    refs.setdefault(pad.net_name, set()).add(pad.ref)
+            net_components = {name: len(r) for name, r in refs.items()}
+
         for dp in detected_pairs:
             # Default per-class info.  When a net class is not configured for
             # this pair (the common synthetic-test case) the tuner is
@@ -19619,6 +20597,7 @@ class Autorouter:
             tolerance_mm = 0.5
             intra_pair_clearance_mm = self.rules.trace_clearance
             length_critical = True
+            max_uncoupled_mm: float | None = None
 
             p_name = dp.pair.positive.net_name
             n_name = dp.pair.negative.net_name
@@ -19629,6 +20608,35 @@ class Autorouter:
                 # never re-closes a pair below the board's own minimum.
                 intra_pair_clearance_mm = self._pair_gap_mm(net_class)
                 length_critical = net_class.length_critical
+
+            if engage == "checker_skew_limit":
+                # Issue #6664: engage on the limit ``kct check`` fails the
+                # board on, and tune to exactly that number -- the single
+                # source shared with the checker (#6442/#6443).
+                from kicad_tools.validate.diffpair_engagement import (
+                    resolve_pair_thresholds,
+                )
+
+                thresholds = resolve_pair_thresholds(
+                    getattr(self, "net_class_map", None), p_name, n_name
+                )
+                tolerance_mm = thresholds.skew_mm
+                length_critical = True
+                from kicad_tools.validate.rules.diffpair_uncoupled_length import (
+                    uncoupled_limit,
+                )
+
+                max_uncoupled_mm, _how = uncoupled_limit(
+                    thresholds, max(net_components.get(p_name, 0), net_components.get(n_name, 0))
+                )
+                if thresholds.skew_severity != "error":
+                    result = self._declined_skew_result(
+                        dp, routes_by_net, tolerance_mm, thresholds.skew_severity, route_length
+                    )
+                    results[(p_name, n_name)] = result
+                    if verbose:
+                        print(self._format_skew_tune_line(p_name, n_name, result))
+                    continue
 
             p_route, n_route, result = tune_diff_pair_skew(
                 dp,
@@ -19644,7 +20652,41 @@ class Autorouter:
                 grid=self.grid,
                 prefer_reserved_slack=self.enable_slack_corridor_widening,
                 fixed_segment_ids=fixed_segment_ids,
+                extra_clearance_ok=(
+                    self._skew_tune_foreign_clearance_ok(
+                        routes_by_net,
+                        partner_of={
+                            dp.pair.positive.net_id: dp.pair.negative.net_id,
+                            dp.pair.negative.net_id: dp.pair.positive.net_id,
+                        },
+                        intra_pair_clearance_mm=intra_pair_clearance_mm,
+                    )
+                    if engage == "checker_skew_limit"
+                    else None
+                ),
+                route_length=route_length,
+                max_uncoupled_mm=max_uncoupled_mm,
             )
+            if (
+                engage == "checker_skew_limit"
+                and result.inserts_applied
+                and result.skew_after_mm > result.skew_before_mm + 1e-9
+            ):
+                # Issue #6664 backstop: never ship a "tune" that leaves the
+                # checker's skew worse than it found it.
+                p_route = routes_by_net[dp.pair.positive.net_id]
+                n_route = routes_by_net[dp.pair.negative.net_id]
+                result = DiffPairTuneResult(
+                    success=False,
+                    reason="rolled_back_skew_worse",
+                    attempts=result.attempts,
+                    skew_before_mm=result.skew_before_mm,
+                    skew_after_mm=result.skew_before_mm,
+                    message=(
+                        f"Tuning would raise skew {result.skew_before_mm:.3f}mm -> "
+                        f"{result.skew_after_mm:.3f}mm; rolled back."
+                    ),
+                )
 
             changed = {
                 net: route
@@ -19679,9 +20721,12 @@ class Autorouter:
                         published.append(replacements.pop(fragment.net))
                 self.restore_route_snapshot(published, replaced_routes=previous)
 
+            result.tolerance_mm = tolerance_mm
             results[(p_name, n_name)] = result
 
-            if verbose:
+            if verbose and engage == "checker_skew_limit":
+                print(self._format_skew_tune_line(p_name, n_name, result))
+            elif verbose:
                 summary = f"  {p_name}/{n_name}: {result.reason}"
                 if result.inserts_applied:
                     summary += (
@@ -19700,10 +20745,310 @@ class Autorouter:
         )
         return results
 
+    def _net_class_clearance_mm(self, net: int, name: str = "") -> float:
+        """Net-class clearance (mm) declared for ``net``, or 0.0 when none.
+
+        Looked up by the net's name in ``net_class_map`` (``name`` is the
+        fallback for pads whose net id has no registered name).  Shared by
+        the skew-tune foreign-copper gate (Issue #6664) and the match-group
+        tuner's pairwise ``max(class(a), class(b))`` floor (Issue #6969).
+        """
+        class_map = getattr(self, "net_class_map", None) or {}
+        net_names = getattr(self, "net_names", None) or {}
+        key = (net_names.get(net, "") if net else "") or name
+        nc = class_map.get(key) if key else None
+        return float(getattr(nc, "clearance", 0.0) or 0.0) if nc is not None else 0.0
+
+    def _skew_tune_foreign_clearance_ok(
+        self,
+        routes_by_net: dict[int, Route],
+        *,
+        partner_of: dict[int, int],
+        intra_pair_clearance_mm: float,
+    ) -> Callable[[list[Any], int], bool]:
+        """Foreign-copper gate for a skew-tuning bump (Issue #6664).
+
+        The tuner's built-in self-check measures new segments against other
+        nets' *segments* at the pair's intra-pair gap.  ``kct check`` and
+        KiCad hold foreign copper to ``max(class(a), class(b))`` and also
+        check pads and vias, so a bump could pass the built-in check and
+        still land 0.163 mm from a 0.2 mm ``Power`` pad (board 06rf).  This
+        gate rejects a bump whose segments come closer than
+        ``max(board clearance, own class clearance, foreign class
+        clearance, component clearance)`` to any foreign pad, via or
+        segment on the same layer.  The pair's own partner is held to the
+        intra-pair gap instead (the coupled pair legitimately runs closer
+        than the class clearance), matching the built-in self-check.
+        """
+        from kicad_tools.core.geometry import point_to_segment_distance, segment_clearance
+
+        from .grid import pad_segment_edge_clearance
+
+        base = float(self.rules.trace_clearance)
+        pads = list(getattr(self.grid, "_pads", None) or self.pads.values())
+        pitches = self.component_pitches
+        class_clearance = self._net_class_clearance_mm
+
+        def ok(new_segments: list[Any], net: int) -> bool:
+            own = max(base, class_clearance(net))
+            partner = partner_of.get(net)
+            for seg in new_segments:
+                half = seg.width / 2
+                lo_x, hi_x = min(seg.x1, seg.x2), max(seg.x1, seg.x2)
+                lo_y, hi_y = min(seg.y1, seg.y2), max(seg.y1, seg.y2)
+                for pad in pads:
+                    if pad.net == net or getattr(pad, "steiner_point", False):
+                        continue
+                    if not pad.through_hole and pad.layer != seg.layer:
+                        continue
+                    reach = max(pad.width, pad.height) + half + 1.0
+                    if (
+                        pad.x < lo_x - reach
+                        or pad.x > hi_x + reach
+                        or pad.y < lo_y - reach
+                        or pad.y > hi_y + reach
+                    ):
+                        continue
+                    required = (
+                        intra_pair_clearance_mm
+                        if pad.net == partner
+                        else max(
+                            own,
+                            class_clearance(pad.net, pad.net_name or ""),
+                            self.rules.get_clearance_for_component(
+                                pad.ref, pitches.get(pad.component_key) if pitches else None
+                            ),
+                        )
+                    )
+                    gap = pad_segment_edge_clearance(pad, seg.x1, seg.y1, seg.x2, seg.y2, half)
+                    if gap + 1e-9 < required:
+                        return False
+                for other_net, route in routes_by_net.items():
+                    if other_net == net:
+                        continue
+                    required = (
+                        intra_pair_clearance_mm
+                        if other_net == partner
+                        else max(own, class_clearance(other_net))
+                    )
+                    for via in route.vias:
+                        radius = via.diameter / 2
+                        dist = point_to_segment_distance(
+                            via.x, via.y, seg.x1, seg.y1, seg.x2, seg.y2
+                        )
+                        if dist - half - radius + 1e-9 < required:
+                            return False
+                    for other in route.segments:
+                        if other.layer != seg.layer:
+                            continue
+                        margin = required + half + other.width / 2
+                        if (
+                            min(other.x1, other.x2) > hi_x + margin
+                            or max(other.x1, other.x2) < lo_x - margin
+                            or min(other.y1, other.y2) > hi_y + margin
+                            or max(other.y1, other.y2) < lo_y - margin
+                        ):
+                            continue
+                        gap = segment_clearance(
+                            seg.x1,
+                            seg.y1,
+                            seg.x2,
+                            seg.y2,
+                            seg.width,
+                            other.x1,
+                            other.y1,
+                            other.x2,
+                            other.y2,
+                            other.width,
+                        )
+                        if gap + 1e-9 < required:
+                            return False
+            return True
+
+        return ok
+
+    def _kicad_length_model(self, num_layers: int) -> KicadLengthModel:
+        """The kicad-cli-exact length model for this router's board (issue #6725).
+
+        The stackup is the one the router writes into: the source PCB's own
+        (explicit ``(setup (stackup))``, else KiCad's default for its
+        ``(general (thickness))``) when the router was loaded from a board
+        file, otherwise KiCad's default for the manufacturer profile's board
+        thickness.  Pad copper comes from ``self.pads`` so track chains
+        entering a pad are clipped to its centre exactly as ``kct check`` /
+        kicad-cli measure them.
+        """
+        from .kicad_length import KicadLengthModel, KicadStackup
+
+        cache = getattr(self, "_kicad_stackup_cache", None)
+        if cache is None or cache[0] != num_layers:
+            stackup: KicadStackup | None = None
+            source = getattr(self, "_impedance_source_pcb_path", None)
+            if source is not None:
+                try:
+                    from kicad_tools.schema.pcb import PCB
+
+                    candidate = KicadStackup.from_pcb(PCB.load(source))
+                    if len(candidate.copper) == num_layers:
+                        stackup = candidate
+                except Exception:  # noqa: BLE001 - fall back to the default stackup
+                    stackup = None
+            if stackup is None:
+                thickness = None
+                _mfr_rules = self._build_manufacturer_design_rules()
+                if _mfr_rules is not None:
+                    thickness = getattr(_mfr_rules, "board_thickness_mm", None)
+                stackup = KicadStackup.default(thickness or 1.6, num_layers)
+            cache = (num_layers, stackup)
+            self._kicad_stackup_cache = cache
+        return KicadLengthModel.for_router(
+            cache[1], (p for p in self.pads.values() if not p.steiner_point)
+        )
+
+    def _preserved_fragments(self, net_ids: set[int], *, invert: bool = False) -> list[Route]:
+        """Preserved-copper fragments of ``net_ids`` not already in ``self.routes``.
+
+        ``invert=True`` returns the fragments of every net *outside*
+        ``net_ids`` instead (Issue #7159): foreign preserved copper the
+        length tuner must clear but never measure or edit.
+
+        Issue #6968: under ``--preserve-existing`` the input board's copper
+        (board 07's 7-9 mm SDRAM escape stubs) lives in ``existing_routes``,
+        not ``self.routes``, so a tuner measuring ``self.routes`` alone saw
+        only the newly routed part of each net.  Fragments already present in
+        ``self.routes`` (by identity) are skipped so nothing is counted twice.
+
+        Only copper the writer will actually re-emit is returned, mirroring
+        ``route_cmd._finalize_routes``: a net that was freshly routed drops
+        its preserved copper (the fresh route wins) unless it is a stub net
+        (``_stub_terminals``, #4170), and the placement disposition's
+        ``preserve_copper_nets`` / neutral routes are excluded.
+        """
+        in_routes = {id(r) for r in self.routes}
+        routed_net_ids = {r.net for r in self.routes} - set(
+            getattr(self, "_stub_terminals", None) or {}
+        )
+        disposition = getattr(self, "placement_disposition", None)
+        dropped_names: set[str] = set()
+        neutral_ids: set[int] = set()
+        if disposition is not None:
+            dropped_names = set(getattr(disposition, "preserve_copper_nets", ()) or ())
+            neutral_ids = {id(r) for r in getattr(self, "placement_neutral_routes", ()) or ()}
+        return [
+            r
+            for r in (getattr(self, "existing_routes", None) or ())
+            if (r.net in net_ids) != invert
+            and r.net not in routed_net_ids
+            and id(r) not in in_routes
+            and id(r) not in neutral_ids
+            and r.net_name not in dropped_names
+            and (r.segments or r.vias)
+        ]
+
+    def _net_routes_merged(self, preserved: Iterable[Route] = ()) -> dict[int, Route]:
+        """One complete-net :class:`Route` per net, for the length tuners.
+
+        A net can be held as several Route fragments (fixed escapes plus
+        channel routes).  Multi-fragment nets are merged into one Route
+        carrying every fragment's segments and vias.  Fragments that meet at a
+        via each carry it; the length measure (``kicad_length.route_geometry``)
+        counts such a via once, so the merged Route measures as the whole net
+        (Issue #6792).  A single-fragment net keeps its Route object, so the
+        tuners can still edit it in place.
+
+        ``preserved`` (Issue #6968) adds preserved-copper fragments (from
+        :meth:`_preserved_fragments`) to their nets' merged Route, so the
+        measured length is the whole net as written.  Callers must treat
+        those fragments' segments and vias as fixed.
+        """
+        preserved = list(preserved)
+        preserved_ids = {id(r) for r in preserved}
+        fragments_by_net: dict[int, list[Route]] = {}
+        for route in [*self.routes, *preserved]:
+            fragments_by_net.setdefault(route.net, []).append(route)
+        # A preserved fragment is never handed out by identity: the tuners
+        # may edit a single-fragment Route in place, and preserved copper
+        # must stay byte-identical.
+        return {
+            net: fragments[0]
+            if len(fragments) == 1 and id(fragments[0]) not in preserved_ids
+            else Route(
+                net=net,
+                net_name=fragments[0].net_name,
+                segments=[s for r in fragments for s in r.segments],
+                vias=[v for r in fragments for v in r.vias],
+                is_escape=all(r.is_escape or id(r) in preserved_ids for r in fragments),
+            )
+            for net, fragments in fragments_by_net.items()
+        }
+
+    def _checker_route_length(self, num_layers: int) -> Callable[[Route], float]:
+        """``Route -> mm`` measured the way ``kct check``'s skew rule measures (#6664).
+
+        Issue #6725: the shared kicad-cli-exact measurement
+        (:mod:`kicad_tools.router.kicad_length`) -- the same function the
+        checker applies to the written board, so the tuner converges on the
+        number ``kct check`` and kicad-cli report.
+        """
+        model = self._kicad_length_model(num_layers)
+
+        def measure(route: Route) -> float:
+            return model.route_length(route)
+
+        return measure
+
+    @staticmethod
+    def _declined_skew_result(
+        dp,
+        routes_by_net: dict[int, Route],
+        tolerance_mm: float,
+        severity: str,
+        route_length: Callable[[Route], float] | None = None,
+    ) -> DiffPairTuneResult:
+        """A no-change result for a pair whose skew limit the checker only warns on."""
+        from .length import LengthTracker
+
+        measure = route_length or LengthTracker.calculate_route_length
+        p_route = routes_by_net.get(dp.pair.positive.net_id)
+        n_route = routes_by_net.get(dp.pair.negative.net_id)
+        skew = 0.0
+        if p_route is not None and n_route is not None:
+            skew = abs(measure(p_route) - measure(n_route))
+        return DiffPairTuneResult(
+            success=True,
+            reason="skew_limit_not_enforced",
+            skew_before_mm=skew,
+            skew_after_mm=skew,
+            tolerance_mm=tolerance_mm,
+            message=(
+                f"Skew limit {tolerance_mm:.3f}mm resolves to severity "
+                f"{severity!r}; kct check does not fail on it, so it is not tuned."
+            ),
+        )
+
+    @staticmethod
+    def _format_skew_tune_line(p_name: str, n_name: str, result: DiffPairTuneResult) -> str:
+        """One report line per pair for the checker-limit tuning path (Issue #6664)."""
+        limit = f"{result.tolerance_mm:.3f}mm" if result.tolerance_mm is not None else "n/a"
+        line = (
+            f"  {p_name}/{n_name}: {result.reason} "
+            f"(skew {result.skew_before_mm:.3f}mm -> {result.skew_after_mm:.3f}mm, "
+            f"limit {limit}"
+        )
+        if result.inserts_applied:
+            line += f", {result.inserts_applied} inserts"
+        line += ")"
+        if not result.success and result.message and result.reason not in ("tuned",):
+            line += f" -- {result.message}"
+        if result.tolerance_mm is not None and result.skew_after_mm > result.tolerance_mm:
+            line += " -- STILL OVER LIMIT"
+        return line
+
     def apply_match_group_tuning(
         self,
         detected_groups: list[MatchGroup],
         verbose: bool = True,
+        engage: str = "length_critical",
     ) -> dict[str, dict[int, tuple[Route, Any]]]:
         """Apply N-trace serpentine tuning to detected match groups.
 
@@ -19732,6 +21077,18 @@ class Autorouter:
                 :func:`tune_match_group_v2` and returned with
                 ``reason="not_length_critical"``.
             verbose: Whether to print progress information.
+            engage: Engagement policy.  ``"length_critical"`` (default,
+                the ``--length-match-groups`` behaviour) gates on the
+                class's ``length_critical`` flag and tunes to
+                ``effective_length_match_tolerance(0.5)``.
+                ``"checker_limit"`` (Issue #6674, the lattice auto-engaged
+                path) engages on the limit ``kct check`` enforces: the
+                tolerance comes from
+                :func:`~kicad_tools.validate.match_group_skew.resolve_group_tolerance_mm`
+                and a group is tuned only when its checker-measured
+                spread (single-ended lengths plus pair averages, vias
+                included) exceeds that tolerance.  Other groups are not
+                touched and map to an empty result dict.
 
         Returns:
             ``{group_name: {net_id: (route, result)}}`` for each group
@@ -19748,22 +21105,31 @@ class Autorouter:
 
         # A net can contain separate escape and channel Route objects. The
         # tuner needs their complete geometry for lengths and foreign clearance.
-        fragments_by_net: dict[int, list[Route]] = {}
-        for route in self.routes:
-            fragments_by_net.setdefault(route.net, []).append(route)
-        routes_by_net = {
-            net: fragments[0]
-            if len(fragments) == 1
-            else Route(
-                net=net,
-                net_name=fragments[0].net_name,
-                segments=[s for r in fragments for s in r.segments],
-                vias=[v for r in fragments for v in r.vias],
-                is_escape=all(r.is_escape for r in fragments),
-            )
-            for net, fragments in fragments_by_net.items()
-        }
+        #
+        # Issue #6968: a group member's preserved copper (``existing_routes``
+        # under --preserve-existing, e.g. board 07's input escape stubs) is
+        # part of the net's length too.  It is merged in for measurement and
+        # held FIXED: its segments are never edited and never re-published
+        # into ``self.routes`` (the writer already emits it from the input).
+        member_net_ids: set[int] = set()
+        for _grp in detected_groups:
+            member_net_ids.update(_grp.net_ids)
+            for _pair in _grp.pair_ids:
+                member_net_ids.update(_pair)
+        preserved = self._preserved_fragments(member_net_ids)
+        preserved_segment_ids = {id(s) for r in preserved for s in r.segments}
+        preserved_via_ids = {id(v) for r in preserved for v in r.vias}
+        preserved_nets = {r.net for r in preserved}
+        # Issue #7159: preserved copper of nets OUTSIDE the groups (board 07's
+        # input vias/tracks) is invisible to the tuner's clearance passes
+        # unless it is in ``routes_by_net``.  Merge it in for clearance only:
+        # it stays out of ``preserved_*`` (so it is never stripped/published)
+        # and out of the skew tracker below.  Groups never name these nets,
+        # so the tuner neither measures nor edits them.
+        foreign_preserved = self._preserved_fragments(member_net_ids, invert=True)
+        routes_by_net = self._net_routes_merged([*preserved, *foreign_preserved])
         fixed_segment_ids = {id(s) for r in self.routes if r.is_escape for s in r.segments}
+        fixed_segment_ids |= preserved_segment_ids
 
         # Update the match-group skew tracker so the post-tuning results are
         # queryable.  Use the layer-stack count when available, else default
@@ -19773,37 +21139,17 @@ class Autorouter:
         else:
             num_layers = 2
 
-        # Issue #3931: the board thickness the tuner uses to compute per-via
-        # drilled length MUST match the value the ``match_group_length_skew``
-        # DRC rule measures with, or the tuner would target a different skew
-        # than the checker validates.  The router's own ``self.rules``
-        # (``router.rules.DesignRules``) has NO ``board_thickness_mm`` field
-        # -- only ``manufacturers.base.DesignRules`` does (see the
-        # ``update_diffpair_skew`` docstring above).  The DRC checker reads
-        # the manufacturer profile's ``board_thickness_mm``, so we source the
-        # SAME value here via ``_build_manufacturer_design_rules`` (the
-        # manufacturer profile's DesignRules, honoring ``self.rules.manufacturer``
-        # and the layer count).  When that helper is unavailable (manufacturers
-        # module missing) we fall back to ``None`` -> vias contribute 0.0 and
-        # the tuner stays via-blind (byte-for-byte legacy behavior).  Record
-        # the tracker's lengths via-inclusively too, so post-tuning skew
-        # queries reflect drilled length.
+        # Issue #6725: measure exactly as kicad-cli / ``kct check`` do (board
+        # stackup span between connected layers, pad/via clipping) through the
+        # one shared function; ``board_thickness_mm`` and
+        # ``blind_buried_supported`` no longer enter the length measurement.
         board_thickness_mm: float | None = None
-        _mfr_rules = self._build_manufacturer_design_rules()
-        if _mfr_rules is not None:
-            board_thickness_mm = getattr(_mfr_rules, "board_thickness_mm", None)
+        length_model = self._kicad_length_model(num_layers)
 
-        # Issue #4007: resolve whether the board supports blind/buried vias.
-        # The router only ever emits through-holes (``standard_*layer`` via
-        # rules; ``hdi_4layer`` is defined but never instantiated) plus
-        # laser-drilled MICRO in-pad vias, so blind/buried support is False
-        # for every current board.  When False, the length measurement
-        # promotes each standard (non-micro) via to a full through-via --
-        # matching what KiCad's post-route zone-fill re-save materializes on
-        # disk, so the tuner's converged skew equals what ``kct check``
-        # re-derives from the committed PCB.  Sourced from ``self.via_rules``
-        # (an optional attribute) so an HDI board can opt back into partial
-        # spans; defaults to False.
+        # Issue #6675: the resolved via model is still plumbed through the
+        # engagement gate, the tuner and the rollback guard so they agree on
+        # what the router may emit.  Sourced from ``self.via_rules`` (an
+        # optional attribute); defaults to False (through-holes only).
         blind_buried_supported = False
         _via_rules = getattr(self, "via_rules", None)
         if _via_rules is not None:
@@ -19813,11 +21159,12 @@ class Autorouter:
             )
 
         self._match_group_tracker.record_routes(
-            routes=self.routes,
+            routes=list(self._net_routes_merged(preserved).values()),
             groups=detected_groups,
             num_copper_layers=num_layers,
             board_thickness_mm=board_thickness_mm,
             blind_buried_supported=blind_buried_supported,
+            length_model=length_model,
         )
 
         # Issue #3317 follow-up (judge change-request on PR #3317):
@@ -19856,6 +21203,30 @@ class Autorouter:
             pads_by_net.setdefault(pad.net, []).append(pad)
         pad_clearance_mm = self.rules.trace_clearance
 
+        # Issues #6969/#6979: per-net class clearances, so a group whose
+        # floor is relaxed to its own class holds every neighbour to the
+        # pairwise KiCad rule max(group class, neighbour class).  Pads
+        # contribute their net names as a fallback for ids without a
+        # registered name.  KiCad puts every net without a class -- and
+        # net-0 (no-net) copper -- in the Default class, so those neighbours
+        # get the Default class clearance, or ``rules.trace_clearance`` when
+        # no Default class is declared.  Every routed net and every pad's
+        # net (unrouted ones included) gets an entry.
+        net_clearance_mm: dict[int, float] = {}
+        _clearance_names: dict[int, str] = {}
+        for _pad in self.pads.values():
+            _clearance_names.setdefault(_pad.net, getattr(_pad, "net_name", "") or "")
+        _default_class = (getattr(self, "net_class_map", None) or {}).get("Default")
+        _default_class_mm = float(getattr(_default_class, "clearance", 0.0) or 0.0)
+        if _default_class_mm <= 0.0:
+            _default_class_mm = float(self.rules.trace_clearance)
+        for _nid in set(self.net_names) | set(routes_by_net) | set(_clearance_names):
+            _c = self._net_class_clearance_mm(_nid, _clearance_names.get(_nid, ""))
+            net_clearance_mm[_nid] = _c if _c > 0.0 else _default_class_mm
+
+        if engage not in ("length_critical", "checker_limit"):
+            raise ValueError(f"unknown match-group engage policy: {engage!r}")
+
         for group in detected_groups:
             # Default per-class info.  When a net class is not configured
             # for this group's reference net (the common synthetic-test
@@ -19866,8 +21237,35 @@ class Autorouter:
             intra_pair_clearance_mm = self.rules.trace_clearance
             length_critical = True
 
+            group_via_clearance_mm = via_clearance_mm
+            group_pad_clearance_mm = pad_clearance_mm
+            group_net_clearance_mm: dict[int, float] | None = None
+
             net_class = self._resolve_net_class_for_group(group)
             if net_class is not None:
+                # Issue #6969: the post-insertion DRC self-check used the
+                # router-global clearance (0.200mm) even where the group's
+                # class declares less (SDRAM: 0.175mm), rejecting meanders
+                # the board's own rules allow.  Honour the class value, never
+                # below the manufacturer / authored floors, and never above
+                # the global rule (this only relaxes, it cannot tighten).
+                # KiCad's pairwise clearance is the larger of the two items'
+                # class values; ``class_floor_mm`` is only this group's half.
+                # Each neighbour is held to max(floor, its class) through
+                # ``net_clearance_mm`` below (Issue #6979), which replaces
+                # #6972's board-wide strictest-class clamp.
+                class_floor_mm = max(
+                    float(net_class.clearance),
+                    self.rules.mfr_clearance_floor or 0.0,
+                    self.rules.authored_min_clearance or 0.0,
+                )
+                if class_floor_mm < intra_group_clearance_mm:
+                    intra_group_clearance_mm = class_floor_mm
+                group_via_clearance_mm = min(via_clearance_mm, max(class_floor_mm, 0.0))
+                group_pad_clearance_mm = min(pad_clearance_mm, max(class_floor_mm, 0.0))
+                # The relaxed floor is this group's half of the rule only;
+                # KiCad holds each neighbour to max(own, neighbour class).
+                group_net_clearance_mm = net_clearance_mm
                 tolerance_mm = net_class.effective_length_match_tolerance(0.5)
                 # Issue #6443: floored like the routed gap.
                 intra_pair_clearance_mm = self._pair_gap_mm(net_class)
@@ -19885,6 +21283,72 @@ class Autorouter:
             # intra-group floor.
             intra_pair_clearance_mm = min(intra_pair_clearance_mm, intra_group_clearance_mm)
 
+            if engage == "checker_limit":
+                # Issue #6674: engage on the number ``kct check`` fails the
+                # board on.  ``match_group_length_skew`` is error severity for
+                # every declared group regardless of ``length_critical``, so
+                # the class flag does not gate here; the tolerance comes from
+                # the checker's own resolver.
+                from kicad_tools.validate.match_group_skew import (
+                    resolve_group_tolerance_mm,
+                )
+
+                tolerance_mm = resolve_group_tolerance_mm(
+                    group, self.net_names, getattr(self, "net_class_map", None)
+                )
+                length_critical = True
+                # Issue #6675: the gate, the rollback guard below and the
+                # tuner all measure with the RESOLVED via model.  ``kct check``
+                # (``validate/checker.py`` -> ``derive_group_skew_data``)
+                # always measures with ``blind_buried_supported=False``; the
+                # two agree on every board the router emits (through-holes
+                # only), but an HDI board allowing blind/buried vias would
+                # see router and checker diverge here -- by design, not by
+                # accident.
+                spread_mm = self._checker_group_spread_mm(
+                    group,
+                    routes_by_net,
+                    board_thickness_mm,
+                    num_layers,
+                    length_model,
+                    blind_buried_supported=blind_buried_supported,
+                )
+                if spread_mm is None or spread_mm <= tolerance_mm:
+                    results[group.name] = {}
+                    if verbose:
+                        if spread_mm is None:
+                            print(f"  {group.name}: not tuned (a member is unrouted)")
+                        else:
+                            print(
+                                f"  {group.name}: within limit "
+                                f"(spread {spread_mm:.3f}mm <= {tolerance_mm:.3f}mm); "
+                                "not tuned"
+                            )
+                    continue
+                if verbose:
+                    print(
+                        f"  {group.name}: spread {spread_mm:.3f}mm > limit "
+                        f"{tolerance_mm:.3f}mm; tuning"
+                    )
+
+            # Issue #6675: the pair-skew invariant needs each pair's own
+            # checker limit, so a pair the diff-pair tuner (#6664) left inside
+            # it stays inside it while the group tuner lengthens the lane.
+            pair_skew_limits_mm: dict[tuple[int, int], float] | None = None
+            if engage == "checker_limit" and group.pair_ids:
+                from kicad_tools.validate.diffpair_engagement import (
+                    resolve_pair_thresholds,
+                )
+
+                pair_skew_limits_mm = {
+                    (p_id, n_id): resolve_pair_thresholds(
+                        getattr(self, "net_class_map", None),
+                        self.net_names.get(p_id, ""),
+                        self.net_names.get(n_id, ""),
+                    ).skew_mm
+                    for p_id, n_id in group.pair_ids
+                }
+
             # Phase 2F (#2701) requires intra_pair_clearance_mm
             # unconditionally for groups whose pair_ids is non-empty.  The
             # single-ended path inside tune_match_group_v2 ignores it
@@ -19899,14 +21363,18 @@ class Autorouter:
                     intra_group_clearance_mm=intra_group_clearance_mm,
                     intra_pair_clearance_mm=intra_pair_clearance_mm,
                     length_critical=length_critical,
-                    via_clearance_mm=via_clearance_mm,
+                    via_clearance_mm=group_via_clearance_mm,
                     diff_pair_partners=diff_pair_partners_by_id,
                     pads_by_net=pads_by_net,
-                    pad_clearance_mm=pad_clearance_mm,
+                    pad_clearance_mm=group_pad_clearance_mm,
+                    net_clearance_mm=group_net_clearance_mm,
                     board_thickness_mm=board_thickness_mm,
                     num_copper_layers=num_layers,
                     blind_buried_supported=blind_buried_supported,
+                    length_model=length_model,
                     fixed_segment_ids=fixed_segment_ids,
+                    pair_fallbacks=engage == "checker_limit",
+                    pair_skew_limits_mm=pair_skew_limits_mm,
                 )
             except ValueError as exc:
                 # Defensive: a malformed group (e.g. mixed pair/scalar
@@ -19916,6 +21384,50 @@ class Autorouter:
                     print(f"  {group.name}: skipped ({exc})")
                 results[group.name] = {}
                 continue
+
+            # Issue #6675 rollback guard: in checker-limit mode a group that is
+            # still over the limit after tuning keeps NONE of its serpentines.
+            # Committing meanders that do not clear the error only adds copper
+            # (07rf DDR_DATA_BYTE_0: "8 tuned" next to an unchanged 18.171mm).
+            still_over_limit: tuple[float, float] | None = None
+            improved_still_over = False
+            if engage == "checker_limit":
+                spread_after = self._checker_group_spread_mm(
+                    group,
+                    routes_by_net,
+                    board_thickness_mm,
+                    num_layers,
+                    length_model,
+                    blind_buried_supported=blind_buried_supported,
+                )
+                if spread_after is not None and spread_after > tolerance_mm:
+                    still_over_limit = (spread_after, tolerance_mm)
+                    from .match_group_tuning import (
+                        mark_group_improved_still_over_limit,
+                        mark_group_rolled_back,
+                    )
+
+                    # Issue #6969: keep the DRC-clean meanders when the spread
+                    # strictly improved; roll back only when it did not.  The
+                    # group is still reported as NOT achieved.
+                    if spread_mm is not None and spread_after < spread_mm:
+                        group_results = mark_group_improved_still_over_limit(
+                            group_results,
+                            spread_before_mm=spread_mm,
+                            spread_mm=spread_after,
+                            tolerance_mm=tolerance_mm,
+                        )
+                        improved_still_over = True
+                    else:
+                        group_results = mark_group_rolled_back(
+                            group_results,
+                            before_by_net,
+                            spread_mm=spread_after,
+                            tolerance_mm=tolerance_mm,
+                        )
+                        for net in group_results:
+                            if net in before_by_net:
+                                routes_by_net[net] = before_by_net[net]
 
             # The tuner mutates its lookup as members commit. Compare against
             # the pre-call view, preserving original fragments on no-op/rollback.
@@ -19931,6 +21443,9 @@ class Autorouter:
                 for net, route in changed.items():
                     escapes = [r for r in previous_routes if r.net == net and r.is_escape]
                     escape_via_ids = {id(v) for r in escapes for v in r.vias}
+                    # Issue #6968: preserved copper is fixed and stays out of
+                    # ``self.routes``; strip it like an escape fragment.
+                    escape_via_ids |= preserved_via_ids
                     replacements[net] = (
                         Route(
                             net=route.net,
@@ -19938,7 +21453,7 @@ class Autorouter:
                             segments=[s for s in route.segments if id(s) not in fixed_segment_ids],
                             vias=[v for v in route.vias if id(v) not in escape_via_ids],
                         )
-                        if escapes
+                        if escapes or net in preserved_nets
                         else route
                     )
                 published: list[Route] = []
@@ -19973,9 +21488,45 @@ class Autorouter:
                     (res.length_before_mm, res.length_after_mm)
                     for (_r, res) in group_results.values()
                 )
-                if _skew is not None:
+                if still_over_limit is not None:
+                    print(
+                        f"    STILL OVER LIMIT: spread {still_over_limit[0]:.3f}mm > "
+                        f"limit {still_over_limit[1]:.3f}mm after tuning; "
+                        + (
+                            "kept the DRC-clean serpentines (improved, not achieved)"
+                            if improved_still_over
+                            else "rolled back every serpentine in the group"
+                        )
+                    )
+                elif _skew is not None:
                     _skew_before, _skew_after = _skew
                     print(f"    skew: {_skew_before:.3f}mm -> {_skew_after:.3f}mm")
+                else:
+                    # Issue #6968: a group the tuner declined (e.g. gated off
+                    # by ``length_critical=False``) carries no per-member
+                    # lengths, so report its measured spread -- preserved
+                    # copper included -- the way ``kct check`` measures it.
+                    _spread_before = self._checker_group_spread_mm(
+                        group,
+                        before_by_net,
+                        board_thickness_mm,
+                        num_layers,
+                        length_model,
+                        blind_buried_supported=blind_buried_supported,
+                    )
+                    _spread_after = self._checker_group_spread_mm(
+                        group,
+                        routes_by_net,
+                        board_thickness_mm,
+                        num_layers,
+                        length_model,
+                        blind_buried_supported=blind_buried_supported,
+                    )
+                    if _spread_before is not None and _spread_after is not None:
+                        print(
+                            f"    skew: {_spread_before:.3f}mm -> {_spread_after:.3f}mm "
+                            f"(limit {tolerance_mm:.3f}mm)"
+                        )
                 # Issue #3440 addendum: rollbacks / budget exhaustion /
                 # missing segments must say WHY (which DRC rule the
                 # candidate meander violated, requested-vs-achieved mm)
@@ -19985,6 +21536,7 @@ class Autorouter:
                     "exceeded_max_inserts",
                     "cascade_budget_exhausted",
                     "no_suitable_segment",
+                    "rolled_back_pair_skew",
                 )
                 for member_net_id in sorted(group_results):
                     res = group_results[member_net_id][1]
@@ -19998,13 +21550,65 @@ class Autorouter:
         # the DRC rule) so the post-tuning skew query reflects drilled
         # length, not planar-only copper.
         self._match_group_tracker.record_routes(
-            routes=self.routes,
+            routes=list(self._net_routes_merged(preserved).values()),
             groups=detected_groups,
             num_copper_layers=num_layers,
             board_thickness_mm=board_thickness_mm,
             blind_buried_supported=blind_buried_supported,
+            length_model=length_model,
         )
         return results
+
+    @staticmethod
+    def _checker_group_spread_mm(
+        group: MatchGroup,
+        routes_by_net: dict[int, Route],
+        board_thickness_mm: float | None,
+        num_copper_layers: int,
+        length_model: KicadLengthModel | None = None,
+        *,
+        blind_buried_supported: bool = False,
+    ) -> float | None:
+        """Return ``group``'s skew measured the way ``kct check`` measures it.
+
+        Mirrors :func:`~kicad_tools.validate.match_group_skew.derive_group_skew_data`
+        (Issue #6674): single-ended members contribute their length, each
+        diff-pair member contributes ``(L_P + L_N) / 2``, and every length is
+        the shared kicad-cli-exact measurement (issue #6725).  Returns ``None`` when a member is unrouted
+        or fewer than two lanes exist -- the checker omits such groups.
+
+        ``blind_buried_supported`` (Issue #6675) is the router's resolved via
+        model, so the engagement gate, the rollback guard and the tuner agree.
+        The default ``False`` is what ``kct check`` always uses.
+        """
+        from .match_group_length import MatchGroupTracker
+
+        def _length(net_id: int) -> float | None:
+            route = routes_by_net.get(net_id)
+            if route is None or (not route.segments and not route.vias):
+                return None
+            return MatchGroupTracker._measure_route_total(
+                route,
+                board_thickness_mm,
+                num_copper_layers,
+                blind_buried_supported=blind_buried_supported,
+                length_model=length_model,
+            )
+
+        lanes: list[float] = []
+        for net_id in group.net_ids:
+            length = _length(net_id)
+            if length is None:
+                return None
+            lanes.append(length)
+        for p_id, n_id in group.pair_ids:
+            l_p, l_n = _length(p_id), _length(n_id)
+            if l_p is None or l_n is None:
+                return None
+            lanes.append((l_p + l_n) / 2.0)
+        if len(lanes) < 2:
+            return None
+        return max(lanes) - min(lanes)
 
     def _resolve_net_class_for_group(self, group: MatchGroup) -> Any | None:
         """Best-effort lookup of the NetClassRouting for a match group.
@@ -21200,6 +22804,7 @@ class Autorouter:
             float(self.rules.cost_straight),
         )
         setter(budgets)
+        self._install_escape_fences(regions)
         if budgets and getattr(self, "_pad_lane_budget_count_logged", None) != len(budgets):
             self._pad_lane_budget_count_logged = len(budgets)
             flush_print(
@@ -21209,6 +22814,58 @@ class Autorouter:
                 f"penalty {lane_penalty_factor():.2f}x cost_straight (Issue #6382)"
             )
         return len(budgets)
+
+    def _install_escape_fences(self, regions: list) -> int:
+        """Install the fine-pitch lanes for the hard escape fences (Issue #6761).
+
+        A connection that starts or ends on a fine-pitch column pad may not
+        cross another net's lane of that column, nor drop a via into it (see
+        :func:`kicad_tools.router.pad_lanes.escape_fence_rects`), so the first
+        wide net out of a column can no longer seal its neighbours' exits
+        (board 05: PHASE_C over U2.10/U2.11).  No-op (and clears previous
+        lanes) under ``KCT_DISABLE_ESCAPE_FENCES=1``, on the Python backend,
+        or with no fine-pitch region.
+
+        Returns:
+            Number of lanes installed.
+        """
+        setter = getattr(self.router, "set_pad_lane_fences", None)
+        if setter is None:
+            return 0
+        from .pad_lanes import collect_fence_lanes, escape_fences_disabled, tight_fence_lanes
+
+        if escape_fences_disabled() or not regions:
+            setter([])
+            return 0
+        fence_lanes = collect_fence_lanes(
+            self.pads.values(),
+            regions,
+            lambda pad: self.grid.layer_to_index(pad.layer.value),
+        )
+        # Only columns whose lanes are narrower than a via footprint of their
+        # own nets: there a via or a turn inside the band necessarily takes a
+        # neighbour's exit.  A coarser column (U1's 0.8 mm TQFP on board 05)
+        # keeps the soft #6382 lanes alone.
+        fence_lanes = tight_fence_lanes(
+            fence_lanes,
+            self._net_via_diameter,
+            float(self.rules.via_clearance),
+        )
+        setter(fence_lanes)
+        if fence_lanes and getattr(self, "_escape_fence_count_logged", None) != len(fence_lanes):
+            self._escape_fence_count_logged = len(fence_lanes)
+            flush_print(
+                f"  Escape fences: {len(fence_lanes)} fine-pitch lane(s) fenced for "
+                f"connections that start or end on their column (Issue #6761)"
+            )
+        return len(fence_lanes)
+
+    def _net_via_diameter(self, net: int) -> float:
+        """The via diameter ``net`` routes with (its net class, else the board rule)."""
+        net_class = self.net_class_map.get(self.net_names.get(net, ""))
+        if net_class is not None and getattr(net_class, "via_size", None):
+            return float(net_class.via_size)
+        return float(self.rules.via_diameter)
 
     def _build_pad_channel_budgets(
         self,
@@ -22874,8 +24531,8 @@ class Autorouter:
         # so the same board-frame ``_edge_segments`` correctly re-project
         # onto this cropped, shifted-origin, finer-resolution grid --
         # cells outside the fine grid's bounding box are simply skipped.
-        if self._edge_segments and self._edge_clearance:
-            fine_grid.add_edge_keepout(self._edge_segments, self._edge_clearance)
+        # Issue #6043: the helper also reinstalls the no-clearance floor.
+        install_edge_keepout(self, fine_grid)
         # Mark already-routed and preserved copper as obstacles on fine grid
         for route in [*self.existing_routes, *self.routes]:
             fine_grid.mark_route(route)

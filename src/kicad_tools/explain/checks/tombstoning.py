@@ -89,32 +89,50 @@ class TombstoningRiskCheck:
                     )
                 )
 
-            # Check for thermal imbalance (one pad on large pour)
-            thermal_imbalance = self._check_thermal_imbalance(pcb, fp, pad1, pad2)
-            if thermal_imbalance:
-                large_pad, zone_net = thermal_imbalance
-                mistakes.append(
-                    Mistake(
-                        category=MistakeCategory.MANUFACTURABILITY,
-                        severity="warning",
-                        title="Thermal imbalance may cause tombstoning",
-                        components=[fp.reference],
-                        location=fp.position,
-                        explanation=(
-                            f"{fp.reference} pad {large_pad.number} is connected to "
-                            f"copper zone ({zone_net}), while the other pad is not. "
-                            f"The thermal mass difference can cause tombstoning: "
-                            f"the pad on the zone heats slower, so solder melts "
-                            f"unevenly."
-                        ),
-                        fix_suggestion=(
-                            "Add thermal relief to the zone connection, or add "
-                            "copper to balance thermal mass on both pads. Consider "
-                            "adding thermal spokes or reducing zone connection width."
-                        ),
-                        learn_more_url="docs/mistakes/tombstoning.md",
-                    )
+        # Thermal imbalance: one terminal solid to its own-layer pour, the
+        # other on a trace or thermal relief.  Issue #7220: the geometry is
+        # the ``kct check`` ``thermal_asymmetry`` rule's, so both tools report
+        # the same passives (the old copy counted any same-net zone on any
+        # layer and ignored fill geometry and zone_connect).
+        from ...validate.rules.thermal_asymmetry import asymmetric_passives
+
+        for asym in asymmetric_passives(pcb):
+            fp = asym.footprint
+            solid = asym.solid_pad
+            other = asym.other_pad
+            solid_layers = sorted({c.layer for c in asym.solid_contacts if c.mode == "solid"})
+            zone_net = next(
+                (c.zone_net for c in asym.solid_contacts if c.mode == "solid"), solid.net_name
+            )
+            other_text = (
+                "is connected through a thermal relief"
+                if asym.other_contacts
+                else "reaches copper only through a trace"
+            )
+            mistakes.append(
+                Mistake(
+                    category=MistakeCategory.MANUFACTURABILITY,
+                    severity="warning",
+                    title="Thermal imbalance may cause tombstoning",
+                    components=[fp.reference],
+                    location=fp.position,
+                    explanation=(
+                        f"{fp.reference} pad {solid.number} is connected solid to "
+                        f"the {zone_net} copper zone on {', '.join(solid_layers)}, "
+                        f"while pad {other.number} {other_text}. "
+                        f"The thermal mass difference can cause tombstoning: "
+                        f"the pad on the zone heats slower, so solder melts "
+                        f"unevenly."
+                    ),
+                    fix_suggestion=(
+                        "Add thermal relief to the zone connection, or add "
+                        "copper to balance thermal mass on both pads. Consider "
+                        "adding thermal spokes or reducing zone connection width."
+                    ),
+                    learn_more_url="docs/mistakes/tombstoning.md",
+                    measurements={"solid_layers": float(len(solid_layers))},
                 )
+            )
 
         return mistakes
 
@@ -136,43 +154,3 @@ class TombstoningRiskCheck:
 
         total_pad_area = sum(p.size[0] * p.size[1] for p in fp.pads if p.type == "smd")
         return total_pad_area < MAX_PASSIVE_SIZE_FOR_RISK
-
-    def _check_thermal_imbalance(
-        self,
-        pcb: PCB,
-        fp: Footprint,
-        pad1,
-        pad2,
-    ) -> tuple | None:
-        """Check if one pad has significantly more thermal mass.
-
-        Returns (pad_with_zone, zone_net_name) if imbalance found, else None.
-        """
-        # Check if either pad is connected to a zone
-        pad1_zones = self._count_zone_connections(pcb, fp, pad1)
-        pad2_zones = self._count_zone_connections(pcb, fp, pad2)
-
-        if pad1_zones > 0 and pad2_zones == 0:
-            return (pad1, self._get_zone_net(pcb, pad1))
-        if pad2_zones > 0 and pad1_zones == 0:
-            return (pad2, self._get_zone_net(pcb, pad2))
-
-        return None
-
-    def _count_zone_connections(self, pcb: PCB, fp: Footprint, pad) -> int:
-        """Count how many zones a pad is connected to."""
-        count = 0
-        pad_net = pad.net_number
-
-        for zone in pcb.zones:
-            if zone.net_number == pad_net:
-                count += 1
-
-        return count
-
-    def _get_zone_net(self, pcb: PCB, pad) -> str:
-        """Get the net name of a zone connected to this pad."""
-        for zone in pcb.zones:
-            if zone.net_number == pad.net_number:
-                return zone.net_name or f"Net {zone.net_number}"
-        return "unknown"

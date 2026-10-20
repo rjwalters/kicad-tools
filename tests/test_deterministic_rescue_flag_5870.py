@@ -43,7 +43,6 @@ import ast
 import inspect
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 
@@ -53,6 +52,7 @@ from kicad_tools.cli.route_cmd import (
     _normalize_deterministic_budget,
     _route_parser,
 )
+from tests.route_cli import kct_route
 
 #: Every ``Autorouter`` entry point that can reach a relief rescue and takes
 #: ``deterministic_rescue`` (see ``tests/test_relief_subsearch_budget.py``).
@@ -84,41 +84,14 @@ def test_inner_parser_declares_the_flag_off_by_default():
     assert parser.parse_args(["board.kicad_pcb", "--deterministic-rescue"]).deterministic_rescue
 
 
-def test_outer_parser_declares_the_flag():
-    from kicad_tools.cli.parser import create_parser
-
-    args = create_parser().parse_args(["route", "board.kicad_pcb", "--deterministic-rescue"])
-    assert args.deterministic_rescue is True
-
-
 @pytest.mark.parametrize("requested", [True, False])
-def test_outer_command_forwards_the_flag(requested):
-    from kicad_tools.cli.commands.routing import run_route_command
-
-    args = SimpleNamespace(
-        pcb="test.kicad_pcb",
-        output=None,
-        strategy="negotiated",
-        skip_nets=None,
-        grid="auto",
-        trace_width=0.2,
-        clearance=0.15,
-        via_drill=0.3,
-        via_diameter=0.6,
-        mc_trials=10,
-        iterations=15,
-        verbose=False,
-        dry_run=True,
-        quiet=True,
-        power_nets=None,
-        deterministic_budget=True,
-        deterministic_rescue=requested,
-    )
-    with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-        mock_main.return_value = 0
-        run_route_command(args)
-        sub_argv = mock_main.call_args[0][0]
-    assert ("--deterministic-rescue" in sub_argv) is requested
+def test_kct_route_forwards_the_flag(requested):
+    argv = ["test.kicad_pcb", "--deterministic-budget"]
+    if requested:
+        argv.append("--deterministic-rescue")
+    forwarded, args = kct_route(argv)
+    assert ("--deterministic-rescue" in forwarded) is requested
+    assert args.deterministic_rescue is requested
 
 
 def _entry_point_calls() -> list[ast.Call]:

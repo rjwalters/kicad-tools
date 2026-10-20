@@ -79,43 +79,14 @@ Open the schematic in KiCad to view and continue the design.
 
 ## Manufacturing readiness status
 
-For the current readiness state, run:
+The current readiness state lives in `output/readiness.json` (hash-bound to
+the committed files, including any recorded `known_issues`). To see it:
 
 ```bash
 uv run kct fleet status --boards-dir boards/04-stm32-devboard
 ```
 
-**Last verified 2026-06-17 (#3765)**: the schematic and PCB now share one
-canonical 12-net model — `compare_netlists(schematic, routed_pcb)` is **clean
-(0 mismatches)** and `schematic_net_count == pcb_net_count == 12` with no drift.
-The schematic was brought into pad-for-pad agreement with the PCB's `NETS`
-table: the 3.3 V rail uses the `+3.3V` spelling (synthesized power symbol),
-`BOOT0` and `LED_K` are named nets (no KiCad `Net-(...)` placeholders), and the
-U1 (AMS1117) and J1 (SWD header) pinouts follow the PCB pad order. ERC passes.
-
-The committed routed PCB **routes NRST cleanly** (`NRST` `U2.7` → `J1.5`, 2/2
-connected) and has **0 blocking DRC errors** against `--mfr jlcpcb-tier1`
-(`over_tolerance: false`, ship-ready `passed: true`, 52/55 pads). One
-**non-blocking `connectivity` advisory** remains (filtered from the CI gate per
-#3074):
-
-- `GND` (`U2.23`): the LQFP-48 west-corner VSS pad whose `OSC_OUT` B.Cu escape
-  window is too tight for even a 0.3 mm micro-via stitch (the documented
-  #2834 / #3033 case). The MCU VSS rail still bonds to plane through the other
-  stitched VSS pads.
-
-**Routed-PCB regeneration note (#3773):** the zone-filler regression described
-in #3773 (~30 `clearance_*_zone` shorts on fresh regen) **no longer reproduces**
-as of the 2026-07-05 fresh-build sweep: a from-scratch `generate_design.py` run
-produced a fully routed board with copper-LVS 0 shorts / 0 opens and
-`kicad-cli pcb drc --refill-zones` reporting 0 violations. Caveats that remain:
-the recipe is run-twice non-idempotent (first run from a clean dir exits 1 via
-a constraint-sidecar interaction, second run passes — #3919) and `kct build`
-still cannot reproduce the board (#3918), so regenerate via
-`generate_design.py` directly.
-
-The 2026-05-11 audit table (router 8/9, #2695/#2696/#3075/#3080) was removed
-when those issues closed — see issue #3212 for the rationale.
+This README does not repeat it, so it cannot go stale.
 
 ## Schematic Layout
 
@@ -293,7 +264,7 @@ Schematic-to-PCB synchronization still uses the CLI workflow above;
 
 ## Related Examples
 
-- [examples/01-schematic-analysis](../../examples/01-schematic-analysis/) - Parse existing schematics
-- [examples/02-bom-generation](../../examples/02-bom-generation/) - Extract BOM from designs
-- [examples/03-drc-checking](../../examples/03-drc-checking/) - Validate against manufacturer rules
-- [examples/04-autorouter](../../examples/04-autorouter/) - PCB autorouting strategies
+- examples/01-schematic-analysis (../../examples/01-schematic-analysis/, not included in this bundle) - Parse existing schematics
+- examples/02-bom-generation (../../examples/02-bom-generation/, not included in this bundle) - Extract BOM from designs
+- examples/03-drc-checking (../../examples/03-drc-checking/, not included in this bundle) - Validate against manufacturer rules
+- examples/04-autorouter (../../examples/04-autorouter/, not included in this bundle) - PCB autorouting strategies

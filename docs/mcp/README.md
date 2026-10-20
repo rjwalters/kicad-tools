@@ -45,7 +45,8 @@ pip install "kicad-tools[mcp]"
 The MCP server provides 16 tools organized into five categories:
 
 ### Analysis Tools
-- **analyze_board** - Get board summary (layers, components, nets, dimensions)
+- **board_summary** - Get board summary (layers, components, nets, dimensions)
+- **board_inspect** - Inspect one aspect of a board in detail
 - **get_drc_violations** - Run DRC and return violations with locations
 - **placement_analyze** - Analyze component placement quality
 - **placement_suggestions** - Get AI-friendly placement recommendations

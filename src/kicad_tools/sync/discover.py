@@ -153,6 +153,22 @@ def resolve_schematic_for_pcb(pcb_path: str | Path) -> Path | None:
     return None
 
 
+def unresolved_schematic_candidates(pcb_path: str | Path) -> list[Path]:
+    """The candidate root schematics that made resolution ambiguous (Issue #7147).
+
+    Meant for the case where :func:`resolve_schematic_for_pcb` returned
+    ``None``: more than one entry means several candidates were found and the
+    resolver refused to guess; zero or one means nothing usable was found.
+    Paired roots (step 3) take precedence over the bare sibling list (step 4),
+    mirroring the resolver's own order.
+    """
+    project_dir = Path(pcb_path).parent
+    paired = _paired_root_schematics(project_dir)
+    if paired:
+        return paired
+    return sorted(project_dir.glob("*.kicad_sch"))
+
+
 def resolve_target_fab_for_pcb(pcb_path: str | Path) -> str | None:
     """Resolve the target fabricator profile declared for a PCB (issue #3920).
 
@@ -202,3 +218,64 @@ def resolve_target_fab_for_pcb(pcb_path: str | Path) -> str | None:
         logger.debug("Failed to read target_fab from project.kct: %s", e)
 
     return None
+
+
+def _project_kct_for_pcb(pcb_path: Path) -> Path | None:
+    """``project.kct`` next to the PCB, else one directory up (same search order)."""
+    kct_path = pcb_path.parent / "project.kct"
+    if not kct_path.exists():
+        kct_path = pcb_path.parent.parent / "project.kct"
+    return kct_path if kct_path.exists() else None
+
+
+def resolve_declared_currents_for_pcb(pcb_path: str | Path) -> list[str]:
+    """Labels of the current requirements a PCB's ``project.kct`` declares (issue #7206).
+
+    kct never infers *which net* carries a spec current (``target_ampacity``
+    stays declarative); this only answers "does the spec claim a current at
+    all?", so an absent ``target_ampacity`` can be reported ``unknown`` rather
+    than a vacuous ``skipped``.  A value counts as declared when it is
+    non-null; it need not parse (``"4.6mA per LED at 5V"``).
+
+    Sources: ``intent.interfaces[].current_max``,
+    ``requirements.electrical.input.current``,
+    ``requirements.electrical.outputs[].current_max`` and any other
+    ``requirements.electrical`` key containing ``current`` (``motor_current``).
+
+    Returns ``[]`` when no ``project.kct`` is found or it is unreadable.
+    """
+    kct_path = _project_kct_for_pcb(Path(pcb_path))
+    if kct_path is None:
+        return []
+    try:
+        import yaml  # type: ignore[import-untyped]
+
+        data = yaml.safe_load(kct_path.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001 - unreadable spec keeps today's behaviour
+        logger.debug("Failed to read declared currents from project.kct: %s", e)
+        return []
+    if not isinstance(data, dict):
+        return []
+
+    found: list[str] = []
+
+    def _dict(value: object) -> dict:
+        return value if isinstance(value, dict) else {}
+
+    def _list(value: object) -> list:
+        return value if isinstance(value, list) else []
+
+    for i, iface in enumerate(_list(_dict(data.get("intent")).get("interfaces"))):
+        if isinstance(iface, dict) and iface.get("current_max") is not None:
+            found.append(f"interfaces[{iface.get('name', i)}].current_max")
+
+    electrical = _dict(_dict(data.get("requirements")).get("electrical"))
+    if _dict(electrical.get("input")).get("current") is not None:
+        found.append("input.current")
+    for i, out in enumerate(_list(electrical.get("outputs"))):
+        if isinstance(out, dict) and out.get("current_max") is not None:
+            found.append(f"outputs[{out.get('rail', i)}].current_max")
+    for key, value in electrical.items():
+        if key not in ("input", "outputs") and "current" in str(key) and value is not None:
+            found.append(str(key))
+    return found

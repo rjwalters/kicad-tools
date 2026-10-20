@@ -79,6 +79,10 @@ def foreign_reservations(
     result.copper = copy.deepcopy(committed.copper)
     result.vias = list(committed.vias)
     result.via_copper = list(committed.via_copper)
+    # Issue #6703: a throwaway reservation copy never joins the source's
+    # trial journal (its commits are not the source's to roll back).
+    result._journal = None
+    result._trial_depth = 0
     for choice in foreign:
         choice.reserve(result)
     return result

@@ -375,20 +375,42 @@ class TestDeadlineContract:
         )
         router = Router(grid, rules)
 
-        t0 = time.monotonic()
-        router.route(start, end, per_net_timeout=0.3)
-        short = time.monotonic() - t0
+        # Issue #6296: raw wall time of a 0.3s vs 1.0s budget is dominated
+        # by fixed per-call overhead (~1s on a loaded runner), so the old
+        # ``long > short`` comparison was noise.  Use budgets whose
+        # difference (3s) dwarfs scheduling jitter, take the MINIMUM of a
+        # few repeats per budget to reject load spikes, and require the
+        # wall-clock gap to capture a large share of the budget delta.
+        # Fixed overhead is common to both runs and cancels in the
+        # difference.  If the deadline were ignored both runs would hit the
+        # same iteration cap and the gap would be ~0.
+        short_budget, long_budget, repeats = 1.0, 4.0, 3
+        overhead_slack = 15.0
 
-        t0 = time.monotonic()
-        router.route(start, end, per_net_timeout=1.0)
-        long = time.monotonic() - t0
+        def _min_wall(budget: float) -> float:
+            samples = []
+            for _ in range(repeats):
+                t0 = time.monotonic()
+                router.route(start, end, per_net_timeout=budget)
+                elapsed = time.monotonic() - t0
+                # An ignored deadline runs to the iteration cap (~45s on
+                # this grid), far beyond budget + slack.  The
+                # slack absorbs fixed setup overhead plus runner load.
+                assert elapsed <= budget + overhead_slack, (
+                    f"{budget}s budget took {elapsed:.3f}s "
+                    f"(> {budget + overhead_slack:.1f}s): deadline appears ignored"
+                )
+                samples.append(elapsed)
+            return min(samples)
 
-        # Long budget should be measurably larger.  The ratio test is
-        # loose because of setup overhead at the small end; the key
-        # invariant is that long > short, not the exact factor.
-        assert long > short, (
+        short = _min_wall(short_budget)
+        long = _min_wall(long_budget)
+
+        min_gap = 0.25 * (long_budget - short_budget)
+        assert long - short >= min_gap, (
             f"Wall-clock did not scale with budget: "
-            f"0.3s budget -> {short:.3f}s, 1.0s budget -> {long:.3f}s. "
+            f"{short_budget}s budget -> {short:.3f}s, {long_budget}s budget -> "
+            f"{long:.3f}s (gap {long - short:.3f}s < required {min_gap:.3f}s). "
             f"This suggests the deadline is being ignored "
             f"(likely iteration cap firing first)."
         )

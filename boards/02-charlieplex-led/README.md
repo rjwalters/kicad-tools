@@ -2,7 +2,7 @@
 
 A working 3 × 3 red LED sequencer built around a real ATtiny85-20PU. Four GPIO pins drive nine LEDs through four 330 Ω resistors. The 50 × 55 mm, two-layer board includes regulated 3.3–5 V power input, supply decoupling, reset pullup, and a standard six-pin AVR ISP header.
 
-See [HARDWARE.md](HARDWARE.md) for the complete pinout, verified component identities, power instructions and firmware programming. U1, J1 and J2 are hand-soldered after the sixteen SMT components are assembled. The supplied firmware advances through D1–D9; physical hardware testing has not yet been performed.
+See [HARDWARE.md](HARDWARE.md) for the complete pinout, verified component identities, power instructions and firmware programming. U1, J1 and J2 are through-hole parts listed in the CPL and BOM for fab assembly (procurement review). The supplied firmware advances through D1–D9; physical hardware testing has not yet been performed.
 
 ## Rebuild
 

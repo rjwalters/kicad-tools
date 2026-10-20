@@ -60,7 +60,8 @@ The driver's independent internal short-circuit protection remains present.
 
 ## Assembly
 
-The JLCPCB CPL contains SMT parts only. Hand-solder J1–J5 and RV1 afterward.
+The JLCPCB CPL lists all 42 placements: 36 SMT parts plus the through-hole
+J1–J5 and RV1, which JLCPCB assembles (#7242).
 Match square header pads to pin 1. Match U1/U2/U3 pin 1, D1/D2 cathode marks,
 D3 LED cathode and C1 capacitor polarity to the assembly drawings. U2 and U3
 exposed pads must be soldered; their numbered plated thermal vias do not

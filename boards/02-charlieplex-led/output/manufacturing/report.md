@@ -1,8 +1,8 @@
 ---
 title: "charlieplex_3x3_routed"
 subtitle: "Design Report"
-author: "kicad-tools 0.22.0"
-date: "Rev 1 | 2026-10-14 | jlcpcb"
+author: "kicad-tools 0.23.0"
+date: "Rev 1 | 2026-10-19 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -20,7 +20,7 @@ header-includes:
 | Layers | 2 copper (F.Cu, B.Cu) |
 | Footprints | 19 (16 SMD, 3 THT, 0 other) |
 | Nets | 12 |
-| Traces | 452 segments |
+| Traces | 456 segments |
 | Vias | 28 |
 | Board Size | 50.0 x 55.0 mm |
 
@@ -36,16 +36,6 @@ ATtiny85 Charlieplex LED Grid
 
 - **Polarized components**: 9 -- check orientation markings
 
-## Hand-Solder (THT) Components
-
-The following 3 through-hole components are **excluded from the SMT pick-and-place file** and must be hand-soldered (or wave/selective-soldered) after SMT assembly. They appear in the BOM for sourcing.
-
-| Value | Package | Qty | References |
-|-------|---------|-----|------------|
-| POWER | PinHeader_1x02_P2.54mm_Vertical | 1 | J1 |
-| AVR-ISP | PinHeader_2x03_P2.54mm_Vertical | 1 | J2 |
-| ATtiny85-20PU | DIP-8_W7.62mm | 1 | U1 |
-
 ## ERC Status
 
 | Metric | Count |
@@ -53,8 +43,7 @@ The following 3 through-hole components are **excluded from the SMT pick-and-pla
 | Errors | 0 |
 | Warnings | 0 |
 
-**Status**: SKIPPED -- ERC skipped by user request
-
+**Status**: PASS
 
 \newpage
 
@@ -113,15 +102,18 @@ The following 3 through-hole components are **excluded from the SMT pick-and-pla
 
 \newpage
 
-## DRC Status
+## DRC Status (`--mfr jlcpcb` rules)
 
 | Metric | Count |
 |--------|-------|
 | Errors | 0 |
+| Errors: kct (`--mfr jlcpcb` rules) | 0 |
+| Errors: kicad-cli (geometric) | 0 |
 | Warnings | 0 |
 | Blocking | 0 |
 
 **Status**: PASS
+
 ### Violations by Type
 
 | Violation Type | Count |

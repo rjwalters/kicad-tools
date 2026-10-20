@@ -110,16 +110,14 @@ If a number is provided (e.g., `/curator 42`):
    gh api "repos/{owner}/{repo}/issues/<number>" --jq '[(.pull_request != null), .state, ([.labels[].name] | join(","))] | @tsv'   # live; true = a PR
    gh api repos/{owner}/{repo}/issues/<number>/labels -f 'labels[]=loom:curating'
    ```
-2. **Skip** "Finding Work" and curate directly
+2. **Skip** "Finding Work" and curate directly. A Curator lease held by your own `$LOOM_SWEEP_ID` (a daemon step pre-takes it; `loom-daemon lease pr check <number> --role curator` prints `held-self`) is yours, not a peer's — still add `loom:curating` yourself, the same override `LEASE_ALREADY_HELD` has in `builder.md`
 3. End with `LOOM_STEP_OUTCOME role=curator target=<n> class=<verdict|noop|refused|failed> reason=<token>` (`.loom/docs/targeted-role-invocation.md`)
 
 **CRITICAL**: pool gate, kind probe, then claim, BEFORE any other work; `loom:curating` is the claim. Gate fails: no claim, report it deferred. **Kind probe: `true` (a PR) or a failed read means refuse** (no label or body write, #9929); the labels API accepts a PR number silently. So do `closed`, `loom:frozen`, any `loom:operator*` label (#11861) and a hard-exclusion label (#11863). Applies to every claim path (supplied, resumed, discovered).
 
 **Already `loom:curating`?** Run the "Stale `loom:curating` Claim Check" (under "Claiming Work") first.
 
-No number: use "Finding Work" below. The daemon may pass `--backlog-level
-<lenient|normal|strict> [--backlog-open <n>] --backlog-target <n>`; they feed
-only "Admission: keep or close" and are ignored when a number is given.
+No number: use "Finding Work" below.
 
 ## Label Workflow
 
@@ -387,7 +385,7 @@ bounce routed them to you).
 1. **Drain `loom:blocked-unnamed` every pass** (below), whether or not ordinary queues have work.
 2. Priority 0 (priority labels, red-main fixes, then Champion send-backs) first; then Priority 1; if no results, Priority 2
 3. Take the first result (queries return oldest first)
-4. Admission (Priority 2), then enhance and mark `loom:curated`
+4. Enhance and mark `loom:curated`
 5. **Nothing found and the drain yielded nothing?** Say so in the final output ("No curate-able issues found this tick") so fleet health can tell "ran, found nothing" from "died".
 
 ## Claiming Work
@@ -445,7 +443,7 @@ Then decide on `$CLAIM_STATE`:
 |---|---|---|
 | `unclaimed` | the issue does not actually carry `loom:curating` right now | Claim it normally: `gh api repos/{owner}/{repo}/issues/$N/labels -f 'labels[]=loom:curating'` |
 | `fresh` | a Curator is plausibly still enhancing this issue | **Do not stomp the claim.** Record a stand-down (see below), then skip this issue and continue to the next candidate. |
-| `stale` | no *claimant* activity for ≥ `LOOM_STALE_CURATING_MINUTES` (default **30**) — the claiming Curator's process almost certainly died mid-enhancement | Reclaim (see below), then proceed with normal curation. |
+| `stale` | no *claimant* activity for ≥ `LOOM_STALE_CURATING_MINUTES` (default **45**) — the claiming Curator's process almost certainly died mid-enhancement | Reclaim (see below), then proceed with normal curation. |
 | `stale-bounded-fallback` | the stand-down streak reached `LOOM_MAX_STANDDOWN_STREAK` (default **3**) **and** the claim's own age is ≥ `LOOM_STALE_CURATING_MINUTES` | Force-reclaim (see below) — the livelock breaker. |
 | `unknown` | a timeline/label read failed, or its markers could not be authenticated (#9548) | **Fail safe: treat exactly like `fresh`.** Never stomp a claim on API failure or missing data. |
 
@@ -514,7 +512,7 @@ this reclaim comment:
 
 ```bash
 gh api -X DELETE repos/{owner}/{repo}/issues/$N/labels/loom%3Acurating
-./.loom/scripts/post-comment.sh $N --body "Reclaiming loom:curating claim: $STANDDOWN_COUNT stand-down passes, no curation progress for ${LOOM_STALE_CURATING_MINUTES:-30}m (bounded by LOOM_MAX_STANDDOWN_STREAK=${LOOM_MAX_STANDDOWN_STREAK:-3}) — breaking the livelock."
+./.loom/scripts/post-comment.sh $N --body "Reclaiming loom:curating claim: $STANDDOWN_COUNT stand-down passes, no curation progress for ${LOOM_STALE_CURATING_MINUTES:-45}m (bounded by LOOM_MAX_STANDDOWN_STREAK=${LOOM_MAX_STANDDOWN_STREAK:-3}) — breaking the livelock."
 gh api repos/{owner}/{repo}/issues/$N/labels -f 'labels[]=loom:curating'
 # Continue with normal curation
 ```
@@ -524,7 +522,7 @@ pass the pool gate first, else stand down):
 
 ```bash
 gh api -X DELETE repos/{owner}/{repo}/issues/$N/labels/loom%3Acurating
-./.loom/scripts/post-comment.sh $N --body "Reclaiming stale loom:curating claim (idle ${IDLE_MINUTES}m > ${LOOM_STALE_CURATING_MINUTES:-30}m, no claimant activity) — the prior sweep likely died mid-enhancement."
+./.loom/scripts/post-comment.sh $N --body "Reclaiming stale loom:curating claim (idle ${IDLE_MINUTES}m > ${LOOM_STALE_CURATING_MINUTES:-45}m, no claimant activity) — the prior sweep likely died mid-enhancement."
 gh api repos/{owner}/{repo}/issues/$N/labels -f 'labels[]=loom:curating'
 # Continue with normal curation
 ```
@@ -537,7 +535,7 @@ not been resynced yet): fall back to the **age-only** rule — read the latest
 **not** reintroduce a "any comment after the claim means fresh" test — that is
 precisely the defect this section exists to fix.
 
-**Env vars**: `LOOM_STALE_CURATING_MINUTES` (default **30**, the Judge's
+**Env vars**: `LOOM_STALE_CURATING_MINUTES` (default **45**, the Judge's
 `LOOM_STALE_REVIEWING_MINUTES` default, since a Curator pass runs about as long
 as a review; raise it for long measurement passes) and
 `LOOM_MAX_STANDDOWN_STREAK` (default **3**, shared with `judge.md`/`doctor.md`).
@@ -550,24 +548,9 @@ reconciliation & the sweep journal"); only this agent-side check does.
 
 **STOP**: no `loom:curating` label yet? Run the pool gate and claim first ("Claiming Work").
 
-### Admission: keep or close (#11819)
+### Living trackers are left as found (#10886)
 
-Before the premise gate, only for a Priority 2 (`loom:triage`) issue when the dispatch passed `--backlog-level`. Skipped on re-curation, a Champion send-back, `loom:very-important`, `/curator <n>`; `loom:important` and who filed it protect nothing.
-
-- **lenient**: no-op. **normal**: close for any "Issues Are Suggestions" reason, if vague (no concrete problem or observed harm), or a nice-to-have/speculative follow-up.
-- **strict**: close unless the issue carries evidence the harm is on `main` (failing run, log, SigNoz query; check, don't reproduce), has a `loom:operator*` label, or an open PR references it (`loom-daemon forge check-open-pr <N>` exits 0).
-
-**Never closed here**: a `reopened` event in `gh api --paginate repos/{owner}/{repo}/issues/<N>/timeline` (human override); a sibling the consolidation gate would fold; a pending human decision (route it); `loom:building`; the operator-session lane.
-
-**Close** (`<open>` is `?` if not passed), then the next candidate; no `curation-complete`:
-```bash
-./.loom/scripts/post-comment.sh <N> --body "Closed at admission: backlog <open>/<target> (<level>). <reason>. Reopen if this matters."
-gh api -X DELETE repos/{owner}/{repo}/issues/<N>/labels/loom%3Acurating
-gh api -X DELETE repos/{owner}/{repo}/issues/<N>/labels/loom%3Atriage
-gh issue close <N> --reason "not planned"
-```
-
-**Parents/children** (the consolidation gate's parent test): closing a parent closes each open child the same way, its comment naming the parent; if any child is never-closed, keep the parent. Closing a child comments `#<child> closed at admission: <reason>` on its parent. If that was the parent's last open child and the parent is itself in this step's scope (`loom:triage`, not exempt), judge it now at the same level; otherwise leave it.
+An issue whose body has `<!-- loom:tracker -->` alone on a line (outside a code fence) is a living tracker or hub, not a finite deliverable. Do not enrich it into `loom:curated`, remove any hold it carries, or comment on a repeat pass; leave it as found and take the next candidate. Champion skips the same marker, so curating it would only re-enter the escalation loop. Removing the marker returns it to the normal flow.
 
 ### The premise gate runs BEFORE enrichment (#8396)
 
@@ -1611,7 +1594,7 @@ H=$(printf '%s\n%s' "$(jq -r '.title // ""' <<<"$J")" "$(jq -r '.body // ""' <<<
 loom-daemon forge trusted-comments --fetch <N> --gh-shape | jq -r '.[].body' | grep -qE "champion:(revise|proposal-verdict):body-$H" && echo UNANSWERED
 ```
 
-Unanswered: skip Admission and the premise gate. Claim it (`loom:curating`), read that trusted comment (first bullet list = findings), then:
+Unanswered: skip the premise gate. Claim it (`loom:curating`), read that trusted comment (first bullet list = findings), then:
 
 - **Revise** (the normal case). Edit the body, never only comment (an unchanged body is a failed round). Fix each finding
   (verify against `origin/main`) or refute it with evidence, then append a
@@ -1632,8 +1615,9 @@ never edit. Champion's `PRIOR_REJECTIONS` bounds the rounds: `.loom/docs/promoti
 
 ## Draining `loom:blocked-unnamed` (#10558)
 
-The daemon labels a `loom:blocked` issue naming no blocker or reason
-`loom:blocked-unnamed`. Every pass, regardless of Priority 0-2, query
+The daemon used to label a `loom:blocked` issue naming no blocker or reason
+`loom:blocked-unnamed`; that pass was retired (#11301), so the label is only
+on issues it queued before then. Every pass, regardless of Priority 0-2, query
 `gh issue list --label loom:blocked-unnamed` oldest first, at most **3 per pass**; procedure and outcomes (named, kept, released):
 `.loom/docs/unnamed-block-review.md`. Never add `loom:issue`.
 
@@ -1643,7 +1627,7 @@ The daemon labels a `loom:blocked` issue naming no blocker or reason
 are retired: "Checking Operator-Held Premises" (#6849, which commented when a
 parked reference closed) and "De-escalating Fact-Based Champion Escalations"
 (#7650, which removed the label). A dependency-only wait is a `loom:blocked`
-park, which the daemon's release pass lifts; everything left on
+park (nothing lifts it automatically since #11301); everything left on
 `loom:operator` waits for a human, who removes the label.
 `loom:decision-malformed` is the exception that is not one: the operator's
 bounce hands that item to Curator ("Repairing `loom:decision-malformed`").

@@ -487,3 +487,157 @@ class TestBidirectionalConfiguration:
         assert rules.bidirectional_search is False
         assert rules.bidirectional_threshold == 500
         assert rules.parallel_workers == 4
+
+
+class TestRouteAutoFallbackPlumbing:
+    """Issue #6527: route_auto as a drop-in for the C++ Python fallback."""
+
+    @staticmethod
+    def _make(threshold):
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.15,
+            via_drill=0.3,
+            via_diameter=0.6,
+            grid_resolution=0.1,
+            bidirectional_search=True,
+            bidirectional_threshold=threshold,
+        )
+        grid = RoutingGrid(width=50.0, height=40.0, rules=rules, layer_stack=LayerStack.two_layer())
+        return Router(grid=grid, rules=rules)
+
+    @staticmethod
+    def _pads(x2=45.0):
+        def mk(x, y):
+            return Pad(
+                x=x,
+                y=y,
+                width=0.5,
+                height=0.5,
+                net=1,
+                net_name="N1",
+                layer=Layer.F_CU,
+                through_hole=False,
+                drill=0,
+            )
+
+        return mk(5.0, 5.0), mk(x2, 5.0)
+
+    def test_flag_default_off(self):
+        assert DesignRules().fallback_bidirectional is False
+
+    def test_steiner_goals_never_ignored(self, monkeypatch):
+        """With extra goals the bidirectional half declines; one-way gets them."""
+        router = self._make(10)
+        a, b = self._pads()
+        goals = {(100, 50, 0)}
+        seen = {}
+        orig = router.route
+
+        def spy(*args, **kw):
+            seen["goals"] = kw.get("extra_goal_cells")
+            return orig(*args, **kw)
+
+        monkeypatch.setattr(router, "route", spy)
+        monkeypatch.setattr(
+            router,
+            "_expand_bidirectional_neighbors",
+            lambda *a, **k: pytest.fail("bidirectional must not run with goals"),
+        )
+        router.route_auto(a, b, extra_goal_cells=goals)
+        assert seen["goals"] == goals
+        assert router.route_bidirectional(a, b, extra_goal_cells=goals) is None
+        assert router.last_route_exhausted is False
+
+    def test_bidirectional_success_status(self):
+        router = self._make(10)
+        a, b = self._pads()
+        assert router.route_auto(a, b) is not None
+        assert router.last_route_exhausted is False
+        assert router.last_route_deadline_hit is False
+
+    def test_bidirectional_exhausted_status(self):
+        router = self._make(10)
+        a, b = self._pads()
+        grid = router.grid
+        # Issue #6750: route_bidirectional only reports exhaustion once BOTH
+        # frontiers are empty, so the drain covers every cell reachable from
+        # either pad.  A single wall across the board left the whole 500x400x2
+        # grid reachable (~50s on CI against a 60s timeout).  Instead confine
+        # each pad to a small pocket (+/-2 mm) on every layer: the pockets are
+        # disjoint, so the search still drains and fails, but cheaply.
+        pockets = []
+        for pad in (a, b):
+            cx, cy = grid.world_to_grid(pad.x, pad.y)
+            pockets.append((cx - 20, cx + 20, cy - 20, cy + 20))
+
+        def in_pocket(gx, gy):
+            return any(x0 <= gx <= x1 and y0 <= gy <= y1 for x0, x1, y0, y1 in pockets)
+
+        for layer in range(grid.num_layers):
+            for gy in range(grid.rows):
+                row = grid.grid[layer][gy]
+                for gx in range(grid.cols):
+                    if not in_pocket(gx, gy):
+                        row[gx].blocked = True
+        assert router.route_bidirectional(a, b) is None
+        assert router.last_route_exhausted is True
+        assert router.last_route_deadline_hit is False
+
+        # Control: joining the pockets with a corridor along the pads' row
+        # makes the same search succeed, so the failure above is caused by
+        # the confinement and not by an unrelated setup problem.
+        _, row_y = grid.world_to_grid(a.x, a.y)
+        for layer in range(grid.num_layers):
+            for gy in range(row_y - 3, row_y + 4):
+                for gx in range(grid.cols):
+                    grid.grid[layer][gy][gx].blocked = False
+        assert router.route_bidirectional(a, b) is not None
+        assert router.last_route_exhausted is False
+
+    def test_deadline_hit_in_bidirectional_half(self, monkeypatch):
+        """Expired budget: the bidirectional half hits the deadline; no retry."""
+        router = self._make(10)
+        a, b = self._pads()
+        called = []
+        monkeypatch.setattr(router, "route", lambda *a, **k: called.append(k) or None)
+        monkeypatch.setattr(
+            "kicad_tools.router.pathfinder._wall_deadline.clamp_search_timeout",
+            lambda t: t,
+        )
+        for layer in range(router.grid.num_layers):
+            for gy in range(router.grid.rows):
+                router.grid.grid[layer][gy][router.grid.world_to_grid(25.0, 5.0)[0]].blocked = True
+        import itertools
+
+        import kicad_tools.router.pathfinder as pf
+
+        ticks = itertools.count()
+        monkeypatch.setattr(pf.time, "monotonic", lambda: float(next(ticks)))
+        assert router.route_auto(a, b, per_net_timeout=0.5) is None
+        assert router.last_route_deadline_hit is True
+        assert router.last_route_exhausted is False
+        assert called == []
+
+    def test_failed_bidirectional_and_retry_share_one_deadline(self, monkeypatch):
+        router = self._make(10)
+        a, b = self._pads()
+        got = {}
+        monkeypatch.setattr(router, "route_bidirectional", lambda *a, **k: None)
+        monkeypatch.setattr(router, "route", lambda *a, **k: got.update(k) or None)
+        import kicad_tools.router.pathfinder as pf
+
+        clock = iter([100.0, 103.0, 103.0, 103.0])
+        monkeypatch.setattr(pf.time, "monotonic", lambda: next(clock))
+        router.route_auto(a, b, per_net_timeout=10.0)
+        assert got["per_net_timeout"] == pytest.approx(7.0)
+
+    def test_below_threshold_keeps_one_way(self, monkeypatch):
+        router = self._make(10000)
+        a, b = self._pads()
+        monkeypatch.setattr(
+            router,
+            "route_bidirectional",
+            lambda *a, **k: pytest.fail("below threshold must stay one-way"),
+        )
+        assert router.route_auto(a, b, per_net_timeout=30.0) is not None

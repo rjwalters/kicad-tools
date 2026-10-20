@@ -90,12 +90,15 @@ The manual path still works and takes precedence: while a hand-opened
   result and the assembled section to the job summary, and opens or comments
   nothing.
 - **Gate:** checked on the exact `origin/main` SHA.
-  - The newest `CI` push run on that SHA has every release-topic job green or
+  - The newest `CI` main run (schedule, `workflow_dispatch`, or a legacy
+    push run) on that SHA has every release-topic job green or
     skipped: Lint & Format, Type Check, Test, C++ Build Check, kicad-cli
     Round-trip Smoke, Routed PCB DRC Check, Diff-Pair, Match-Group, Board 00
     E2E. Skipped always counts as not red, because Match-Group is skipped
-    while `BOARD_07_CI_ENABLED` is unset. If the run is still in progress,
-    the workflow waits up to 90 min.
+    while `BOARD_07_CI_ENABLED` is unset. Main CI runs hourly on the newest
+    main rather than on every merge (#5986), so when the SHA has no main run
+    yet the workflow dispatches one. If the run is still in progress, the
+    workflow waits up to 90 min.
   - `changelog_gap_report.py` reports no gaps.
   - `uv lock --check` passes.
 
@@ -117,6 +120,11 @@ The manual path still works and takes precedence: while a hand-opened
       full `uv lock` rewrites hundreds of marker lines across uv versions;
       `uv lock --check` is re-run on the result;
     - a WORK_LOG entry.
+  - Body: the level, its reasons, the gate notes, the merged PRs and the
+    section. Every body the workflow posts stays under 60,000 characters
+    (GitHub rejects more than 65,536 with a 422, #7561). A long release lists
+    a PR count instead of every number, and its section is cut at a bullet
+    with a link to the full `CHANGELOG.md` on `release/vX.Y.Z`.
   - At most one is open at a time. The same version is force-pushed and
     edited in place. A new version supersedes the old PR, which is closed and
     its branch deleted.

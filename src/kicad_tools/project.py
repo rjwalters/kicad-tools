@@ -39,7 +39,6 @@ from typing import TYPE_CHECKING, Any
 
 from .core.schematic_uuids import root_sheet_uuid, stable_uuid
 from .core.version import (
-    KICAD_BOARD_FORMAT_VERSION,
     KICAD_GENERATOR_VERSION,
     KICAD_SCH_FORMAT_VERSION,
 )
@@ -329,8 +328,6 @@ class Project:
         # creating the same project twice writes identical files.
         project_uuid = stable_uuid("project", name)
         schematic_uuid = root_sheet_uuid(name, "")
-        pcb_uuid = stable_uuid("project-pcb", name)
-        outline_uuid = stable_uuid("project-pcb", name, "outline")
 
         # Create minimal .kicad_pro file (JSON format)
         project_data = {
@@ -360,76 +357,16 @@ class Project:
 '''
         schematic_path.write_text(schematic_content)
 
-        # Create minimal .kicad_pcb file (S-expression format)
-        pcb_content = f'''(kicad_pcb (version {KICAD_BOARD_FORMAT_VERSION}) (generator "kicad_tools") (generator_version "{KICAD_GENERATOR_VERSION}")
-
-  (general
-    (thickness 1.6)
-  )
-
-  (paper "A4")
-
-  (layers
-    (0 "F.Cu" signal)
-    (31 "B.Cu" signal)
-    (32 "B.Adhes" user "B.Adhesive")
-    (33 "F.Adhes" user "F.Adhesive")
-    (34 "B.Paste" user)
-    (35 "F.Paste" user)
-    (36 "B.SilkS" user "B.Silkscreen")
-    (37 "F.SilkS" user "F.Silkscreen")
-    (38 "B.Mask" user)
-    (39 "F.Mask" user)
-    (40 "Dwgs.User" user "User.Drawings")
-    (41 "Cmts.User" user "User.Comments")
-    (42 "Eco1.User" user "User.Eco1")
-    (43 "Eco2.User" user "User.Eco2")
-    (44 "Edge.Cuts" user)
-    (45 "Margin" user)
-    (46 "B.CrtYd" user "B.Courtyard")
-    (47 "F.CrtYd" user "F.Courtyard")
-    (48 "B.Fab" user)
-    (49 "F.Fab" user)
-    (50 "User.1" user)
-    (51 "User.2" user)
-    (52 "User.3" user)
-    (53 "User.4" user)
-    (54 "User.5" user)
-    (55 "User.6" user)
-    (56 "User.7" user)
-    (57 "User.8" user)
-    (58 "User.9" user)
-  )
-
-  (setup
-    (stackup
-      (layer "F.SilkS" (type "Top Silk Screen"))
-      (layer "F.Paste" (type "Top Solder Paste"))
-      (layer "F.Mask" (type "Top Solder Mask") (thickness 0.01))
-      (layer "F.Cu" (type "copper") (thickness 0.035))
-      (layer "dielectric 1" (type "core") (thickness 1.51) (material "FR4") (epsilon_r 4.5) (loss_tangent 0.02))
-      (layer "B.Cu" (type "copper") (thickness 0.035))
-      (layer "B.Mask" (type "Bottom Solder Mask") (thickness 0.01))
-      (layer "B.Paste" (type "Bottom Solder Paste"))
-      (layer "B.SilkS" (type "Bottom Silk Screen"))
-      (copper_finish "None")
-    )
-    (pad_to_mask_clearance 0)
-  )
-
-  (net 0 "")
-
-  (uuid "{pcb_uuid}")
-
-  (gr_rect (start 0 0) (end {board_width} {board_height})
-    (stroke (width 0.15) (type default))
-    (fill none)
-    (layer "Edge.Cuts")
-    (uuid "{outline_uuid}")
-  )
-)
-'''
-        pcb_path.write_text(pcb_content)
+        # Blank board via the canonical builder (Issue #7047). center=False
+        # keeps the (0,0) origin; board_date="" keeps output byte-stable.
+        PCB.create(
+            width=board_width,
+            height=board_height,
+            layers=2,
+            center=False,
+            title=name,
+            board_date="",
+        ).save(pcb_path)
 
         logger.info(f"Created KiCad project: {project_path}")
 
@@ -778,7 +715,14 @@ class Project:
         # Route all nets
         routes = router.route_all(nets_to_route)
 
-        # Get routing statistics
+        # Collapse per-grid-cell segments into straight runs, as `kct route`
+        # does (Issue #7138); falls back to the raw routes on failure.
+        if routes:
+            from .router.optimizer.merge import merge_collinear_routes
+
+            merge_collinear_routes(router)
+
+        # Get routing statistics (after the merge so they match saved copper)
         stats = router.get_statistics()
 
         # Merge routes into PCB if any routes were created
@@ -824,10 +768,21 @@ class Project:
             manufacturer: Manufacturer ID (jlcpcb, pcbway, oshpark, etc.)
             layers: Layer count for rules lookup
             copper_oz: Copper weight in oz
-            report_path: Path to KiCad DRC report file (.rpt)
+            report_path: Path to KiCad DRC report file (.rpt or .json)
 
         Returns:
-            List of ManufacturerCheck results
+            One ManufacturerCheck per violation in the report (Issue #7170).
+            A violation kct has no fab-limit check for is returned with
+            ``result == CheckResult.UNKNOWN`` and ``rule_name ==
+            "not_checked"`` (``check.is_not_checked``); it is not
+            ``is_compatible``, and keeps kicad-cli's severity on
+            ``check.violation``.
+
+            Error-severity unconnected items ("missing connection" opens) are
+            included for both report formats: each is a ``CheckResult.FAIL``
+            with ``rule_name == "connection"`` (Issue #7188).  A KiCad JSON
+            report keeps them outside ``violations`` (#4498), so before this
+            they were silently dropped for ``.json`` input.
 
         Raises:
             FileNotFoundError: If no DRC report found
@@ -871,6 +826,7 @@ class Project:
             manufacturer_id=manufacturer,
             layers=layers,
             copper_oz=copper_oz,
+            include_unconnected=True,
         )
 
         logger.info(f"DRC check: {len(checks)} violations checked against {manufacturer} rules")

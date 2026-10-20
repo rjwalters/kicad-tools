@@ -78,6 +78,36 @@ PCB_CLUSTERED = """(kicad_pcb
 """
 
 
+def _regulator(ref: str, x: float, y: float, uuid_n: int) -> str:
+    return f"""  (footprint "Package_TO_SOT_SMD:SOT-223-3_TabPin2"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-{uuid_n:012d}")
+    (at {x} {y})
+    (property "Reference" "{ref}" (at 0 -4 0) (layer "F.SilkS") (uuid "00000000-0000-0000-0000-{uuid_n + 1:012d}"))
+    (property "Value" "AMS1117-3.3" (at 0 4 0) (layer "F.Fab") (uuid "00000000-0000-0000-0000-{uuid_n + 2:012d}"))
+    (pad "1" smd rect (at -2.3 -3.15) (size 1 1.5) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "GND"))
+    (pad "2" smd rect (at 0 -3.15) (size 1 1.5) (layers "F.Cu" "F.Paste" "F.Mask") (net 4 "SPI_CLK"))
+    (pad "3" smd rect (at 2.3 -3.15) (size 1 1.5) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "USB_D+"))
+  )
+"""
+
+
+# A GND pour so a lone regulator is not already "critical" for lack of copper.
+_GND_ZONE = """  (zone (net 1) (net_name "GND") (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000900")
+    (hatch edge 0.5) (connect_pads (clearance 0.2)) (min_thickness 0.2)
+    (fill yes (thermal_gap 0.4) (thermal_bridge_width 0.35))
+    (polygon (pts (xy 100 100) (xy 200 100) (xy 200 200) (xy 100 200)))
+  )
+"""
+
+# PCB_CLUSTERED plus two LDO regulators (0.5 W each) placed >10 mm apart.
+# Board coordinates are relative to the Edge.Cuts origin (100, 100).
+PCB_THERMAL = PCB_CLUSTERED.rstrip().removesuffix(")") + (
+    _regulator("U2", 105, 190, 100) + _regulator("U3", 180, 190, 200) + _GND_ZONE + ")\n"
+)
+
+
 class TestPredictiveWarning:
     """Tests for PredictiveWarning dataclass."""
 
@@ -431,5 +461,87 @@ class TestMCPIntegration:
 
         assert "predictions" in result_dict
         assert isinstance(result_dict["predictions"], list)
+
+        reset_session_manager()
+
+
+class TestThermalPrediction:
+    """Tests for the thermal heat-source clustering prediction."""
+
+    @pytest.fixture
+    def session(self, tmp_path) -> PlacementSession:
+        pcb_file = tmp_path / "thermal.kicad_pcb"
+        pcb_file.write_text(PCB_THERMAL)
+        return PlacementSession(PCB.load(str(pcb_file)))
+
+    @pytest.fixture
+    def analyzer(self, session) -> PredictiveAnalyzer:
+        return PredictiveAnalyzer(session)
+
+    @staticmethod
+    def _thermal(warnings: list[PredictiveWarning]) -> list[PredictiveWarning]:
+        return [w for w in warnings if w.type == "thermal"]
+
+    def test_clustering_heat_sources_warns(self, analyzer) -> None:
+        warnings = self._thermal(analyzer.analyze_move("U2", (75.0, 90.0)))
+
+        assert len(warnings) == 1
+        w = warnings[0]
+        assert w.confidence >= 0.5
+        assert "U3" in w.message
+        assert w.suggestion
+        assert w.location is not None
+
+    def test_distant_move_no_warning(self, analyzer) -> None:
+        assert self._thermal(analyzer.analyze_move("U2", (30.0, 90.0))) == []
+
+    def test_non_heat_source_no_warning(self, analyzer) -> None:
+        # C1 is a capacitor, R1 is a 0402 resistor (below min power)
+        assert self._thermal(analyzer.analyze_move("C1", (78.0, 90.0))) == []
+        assert self._thermal(analyzer.analyze_move("R1", (78.0, 90.0))) == []
+
+    def test_uses_live_positions(self, session, analyzer) -> None:
+        # U3 starts 75 mm from the target; moving U2 there is harmless...
+        assert self._thermal(analyzer.analyze_move("U2", (10.0, 50.0))) == []
+        # ...until U3 is applied next to it. The stale PCB would still say 80,90.
+        session.apply_move("U3", 15.0, 50.0)
+        warnings = self._thermal(PredictiveAnalyzer(session).analyze_move("U2", (10.0, 50.0)))
+        assert len(warnings) == 1
+        assert "U3" in warnings[0].message
+
+    def test_already_clustered_move_not_worse_no_warning(self, session) -> None:
+        session.apply_move("U3", 10.0, 90.0)
+        analyzer = PredictiveAnalyzer(session)
+        # U2 already sits within 10 mm of U3; shifting slightly doesn't worsen it
+        assert self._thermal(analyzer.analyze_move("U2", (6.0, 90.0))) == []
+
+    def test_warning_to_dict_round_trip(self, analyzer) -> None:
+        w = self._thermal(analyzer.analyze_move("U2", (75.0, 90.0)))[0]
+        d = w.to_dict()
+        assert d["type"] == "thermal"
+        assert d["confidence"] == round(w.confidence, 2)
+        assert d["location"] == {"x": round(w.location[0], 3), "y": round(w.location[1], 3)}
+
+    def test_thermal_analysis_time(self, analyzer) -> None:
+        analyzer.analyze_move("U2", (75.0, 90.0))
+        assert analyzer._last_analysis_time_ms < 50
+
+    def test_query_move_recommendation_mentions_thermal(self, tmp_path) -> None:
+        from kicad_tools.mcp.tools.session import (
+            query_move,
+            reset_session_manager,
+            start_session,
+        )
+
+        reset_session_manager()
+        pcb_file = tmp_path / "thermal.kicad_pcb"
+        pcb_file.write_text(PCB_THERMAL)
+        result = start_session(str(pcb_file))
+        assert result.success
+
+        query_result = query_move(result.session_id, "U2", 75.0, 90.0)
+        assert query_result.success
+        assert any(p.type == "thermal" for p in query_result.predictions)
+        assert "WARNING: Heat sources clustering" in query_result.recommendation
 
         reset_session_manager()

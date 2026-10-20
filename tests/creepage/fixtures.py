@@ -37,13 +37,14 @@ _OUTLINE = """\
   (gr_line (start 100 120) (end 100 100) (layer "Edge.Cuts") (width 0.1))
 """
 
-# Interior milled slot: a tall thin rectangle at x in [119.8, 120.2],
+# Interior milled slot: a tall rectangle at x in [119.0, 121.0] (2 mm wide --
+# wider than IEC 60664-1 dimension X so it is a detour, not a bridged groove),
 # y in [103, 117], lying directly between the two pads (which sit at y=110).
 _SLOT = """\
-  (gr_line (start 119.8 103) (end 120.2 103) (layer "Edge.Cuts") (width 0.1))
-  (gr_line (start 120.2 103) (end 120.2 117) (layer "Edge.Cuts") (width 0.1))
-  (gr_line (start 120.2 117) (end 119.8 117) (layer "Edge.Cuts") (width 0.1))
-  (gr_line (start 119.8 117) (end 119.8 103) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 119.0 103) (end 121.0 103) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 121.0 103) (end 121.0 117) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 121.0 117) (end 119.0 117) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 119.0 117) (end 119.0 103) (layer "Edge.Cuts") (width 0.1))
 """
 
 
@@ -85,6 +86,25 @@ def board_close_hv_source() -> str:
     parts = [_HEADER, _OUTLINE]
     parts.append(_footprint("U1", 110, 110, 1, "L_MAINS"))
     parts.append(_footprint("U2", 113, 110, 2, "GND"))
+    parts.append(")\n")
+    return "".join(parts)
+
+
+def board_two_pad_gap_source(
+    gap_mm: float, hv_name: str = "HV_LINE", other_name: str = "SELV"
+) -> str:
+    """Two 2x2 mm pads ``gap_mm`` apart edge-to-edge (issue #7057 repro).
+
+    ``hv_name`` sits at x=110 (copper edge x=111); ``other_name`` is placed so
+    its copper edge sits at x=111+gap_mm.  No slot, so creepage == clearance
+    == ``gap_mm`` for the pad pair.  Both pads are >= 9 mm from the board edge.
+    """
+    header = _HEADER.replace('(net 1 "L_MAINS")', f'(net 1 "{hv_name}")').replace(
+        '(net 2 "GND")', f'(net 2 "{other_name}")'
+    )
+    parts = [header, _OUTLINE]
+    parts.append(_footprint("J1", 110, 110, 1, hv_name))
+    parts.append(_footprint("J2", round(112 + gap_mm, 6), 110, 2, other_name))
     parts.append(")\n")
     return "".join(parts)
 

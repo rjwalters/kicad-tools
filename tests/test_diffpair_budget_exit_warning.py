@@ -517,6 +517,23 @@ def test_partial_exit_keeps_budget_exit_promotion():
     collapse signature does NOT hold, so the #3270 promotion still runs for
     the budget-exited pair's nets -- board-06-style behaviour is unchanged."""
     router = _one_easy_one_hard_pair_router()
+    # Issue #6807: pin the pose-centerline search OFF.  The hard pair's
+    # joint A* stops on a budget -- since #6835 raised the flag-off default
+    # to 700000 iters/phase (1.4M total since the 2026-10-18 ruling) that is the *wall-clock* budget (~136k open-phase
+    # iters, ~1.5 s with the C++ backend; it was the 20000-iteration phase
+    # cap, ~0.2 s, before) -- and either way ``last_timeout_exceeded`` makes
+    # it budget-exit.  Since #5895 (cc39c2849) the pose search then gets
+    # whatever is left of the 0.5 s per-pair wall clock -- but only when at
+    # least ``_POSE_CENTERLINE_MIN_BUDGET_S`` (0.25 s) remains.  On a fast
+    # host (macOS arm64: ~0.27 s left) the pose search runs and *routes* the
+    # hard pair as a centerline trunk, so nothing budget-exits; on a slower
+    # host (Linux CI) less than 0.25 s is left, the search is skipped and the
+    # pair defers.  Both are correct #5895 behaviour; which one you get is a
+    # wall-clock race.  This test pins the #4107 partial-exit promotion
+    # logic, which needs the hard pair to budget-exit, so take the race out.
+    # The pose search's own budget contract is covered by
+    # ``test_pose_search_honours_a_spent_wall_clock_budget`` below.
+    router._diffpair.enable_pose_centerline = False
     config = DifferentialPairConfig(enabled=True, spacing=0.8)
 
     promotion_at_strategy: dict[str, set[int]] = {}
@@ -606,3 +623,34 @@ def test_pose_search_honours_a_spent_wall_clock_budget(monkeypatch):
 
     assert calls == [], f"pose search ran on a spent wall-clock budget: {calls}"
     assert router._diffpair._last_budget_exit_pair_names == ["DP"]
+
+
+def test_flagoff_budget_exceptions_keep_pcie_and_lvds_at_the_old_cap():
+    """Issue #6835 (operator ruling 2026-10-18): PCIE_TX, PCIE_RX (coupling it
+    regresses PCIE_TX) and the LVDS<n> pairs keep the pre-#6835 40,000 budget;
+    every other pair gets the default."""
+    from kicad_tools.router import diffpair_routing as dr
+
+    default = dr.COUPLED_FLAGOFF_MAX_ITERATIONS
+    assert default == 1_400_000
+    for name in (
+        "PCIE_TX",
+        "PCIE_TX_",
+        "pcie_tx",
+        "PCIE_RX",
+        "PCIE_RX_",
+        "LVDS1",
+        "LVDS4_",
+        "LVDS",
+    ):
+        assert dr._flagoff_budget_for_pair(name) == 40_000, name
+    for name in ("USB3_RX1", "USB3_TX1", "MIPI_CLK", "USB2_D", "LVDS_CLK_X"):
+        assert dr._flagoff_budget_for_pair(name) == default, name
+
+
+def test_flagoff_budget_exceptions_never_exceed_the_env_cap(monkeypatch):
+    from kicad_tools.router import diffpair_routing as dr
+
+    monkeypatch.setattr(dr, "COUPLED_FLAGOFF_MAX_ITERATIONS", 20_000)
+    assert dr._flagoff_budget_for_pair("PCIE_TX") == 20_000
+    assert dr._flagoff_budget_for_pair("MIPI_CLK") == 20_000

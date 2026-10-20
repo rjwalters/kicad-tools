@@ -273,11 +273,11 @@ count_label() {
 # before #5664 a repo holding several parked proposals rendered EXACTLY like
 # an empty backlog here, so "parked and not moving" and "genuinely nothing
 # pending" were indistinguishable without reading labels by hand.
-# loom:operator needs a human; loom:blocked waits on something named and is
-# released automatically once it resolves (release-stale-blocked,
-# check-stale-blocked); loom:frozen is a human's "not now". A "blocked" count
-# that stays high across several `loom status` calls is the signal worth
-# noticing: the self-heal is not (yet) resolving something it should.
+# loom:operator needs a human; loom:blocked waits on something named and
+# stays blocked until a role or a human clears it (nothing releases it
+# automatically since #11301; `check-stale-blocked` reports cleared blockers);
+# loom:frozen is a human's "not now". A "blocked" count that stays high across
+# several `loom status` calls is the signal worth noticing.
 #
 # JSON (#11795): the keys are "loom:operator", "loom:blocked" and
 # "loom:frozen". The pre-#11795 keys ("loom:operator-only",

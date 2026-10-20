@@ -34,6 +34,7 @@ from __future__ import annotations
 import math
 from typing import Any, Protocol
 
+from kicad_tools.core.geometry import point_in_polygon as _core_point_in_polygon
 from kicad_tools.core.geometry import point_to_segment_distance
 
 # ---------------------------------------------------------------------------
@@ -85,6 +86,17 @@ DEFAULT_MIN_HOLE_TO_HOLE = 0.5
 #: ``validate.rules.dimensions.DRC_TOLERANCE`` so the router pre-check and the
 #: DRC post-check agree on borderline geometry.
 HOLE_TO_HOLE_TOLERANCE = 1e-3
+
+#: Issue #6671: slack for the board writers' 0.01 mm coordinate rounding
+#: (:func:`kicad_tools.sexp.builders.fmt`).  Each axis moves by at most
+#: 0.005 mm, so one via moves by at most ``0.005 * sqrt(2)`` ~= 0.0071 mm.
+#: When BOTH vias of a pair are new (placed in the same pass, both still
+#: unrounded) their centres can close by twice that, ~= 0.0142 mm, on a
+#: diagonal.  0.015 covers that worst case.  (06rf: two GND welds planned
+#: 0.800 mm apart were written 0.797 mm apart, a jlcpcb
+#: ``hole_to_hole_clearance`` error of 0.497 < 0.500 mm.)  Drill spacing
+#: checks keep this much slack.
+COORD_WRITE_GUARD_MM = 0.015
 
 
 def drill_hole_to_hole_clear(
@@ -161,22 +173,8 @@ def drill_hole_to_hole_clear(
 
 
 def _point_in_polygon(x: float, y: float, polygon: list[tuple[float, float]]) -> bool:
-    """Ray-casting point-in-polygon test.
-
-    A duplicate of :func:`kicad_tools.cli.stitch_cmd.point_in_polygon` kept
-    private to this module so the shared helper has no circular
-    dependency on the stitch CLI.
-    """
-    n = len(polygon)
-    inside = False
-    j = n - 1
-    for i in range(n):
-        xi, yi = polygon[i]
-        xj, yj = polygon[j]
-        if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
-            inside = not inside
-        j = i
-    return inside
+    """Half-open ray-casting point-in-polygon test (see core.geometry)."""
+    return _core_point_in_polygon(x, y, polygon, boundary_inside=False)
 
 
 def _point_clear_of_filled_polygons(

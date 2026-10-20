@@ -557,3 +557,21 @@ def test_compute_fom_hard_constraints_short_circuit_does_not_skip_term_computati
     assert result.soft_score > 0  # soft computation didn't get skipped
     for name in SOFT_TERM_NAMES:
         assert name in result.soft_terms
+
+
+def test_check_hard_constraints_manufacturer_is_unused(tmp_path: Path):
+    """``manufacturer`` is reserved: any value behaves like ``None`` (#7065)."""
+    allow = tmp_path / "tol.yaml"
+    allow.write_text("tolerances:\n  myboard.kicad_pcb: 5\n")
+    for errors in (3, 9):
+        results = [
+            check_hard_constraints(
+                _empty_pcb(),
+                manufacturer=mfr,
+                drc_report=_StubReport(errors),
+                tolerance_allowlist_path=allow,
+                pcb_path="myboard.kicad_pcb",
+            )
+            for mfr in (None, "jlcpcb")
+        ]
+        assert results[0] == results[1]

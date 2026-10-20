@@ -854,3 +854,27 @@ class TestReportPackageInit:
 
         assert FigureEntry is not None
         assert ReportFigureGenerator is not None
+
+
+class TestKilledKicadCliSchematic:
+    """A killed kicad-cli (-9) yields no schematic figures, even with partial SVGs (#6742)."""
+
+    @patch("kicad_tools.report.figures.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli"))
+    @patch("kicad_tools.report.figures.subprocess.run")
+    def test_killed_schematic_export_returns_no_figures(
+        self, mock_subprocess, mock_find_cli, tmp_path, caplog
+    ):
+        sch = tmp_path / "main.kicad_sch"
+        sch.touch()
+
+        def fake_run(cmd, **kwargs):
+            _write_svg_stub(Path(cmd[cmd.index("--output") + 1]) / "main.svg")
+            return MagicMock(returncode=-9, stderr="")
+
+        mock_subprocess.side_effect = fake_run
+
+        with caplog.at_level(logging.WARNING):
+            entries = ReportFigureGenerator()._generate_schematic_figures(sch, tmp_path / "figs")
+
+        assert entries == []
+        assert "SIGKILL" in caplog.text

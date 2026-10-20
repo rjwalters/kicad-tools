@@ -1115,3 +1115,150 @@ class TestSessionManagerContainerProtocol:
 
         rollback_session(r1.session_id)
         rollback_session(r2.session_id)
+
+
+class TestQueryMoveImprovingRecommendation:
+    """Issue #7099: score_delta is real, so the improving-move branch is reachable."""
+
+    def test_improving_move_recommendation(self, session_pcb_path: str) -> None:
+        session_id = start_session(session_pcb_path).session_id
+        result = query_move(session_id, "R1", 30.0, 30.0)
+
+        assert result.score_delta < 0
+        assert "Move improves placement score" in result.recommendation
+
+        rollback_session(session_id)
+
+
+class TestSharedSessionStore:
+    """start_session and the context tools share one store (Issue #7121)."""
+
+    CONTEXT_CALLS = {
+        "record_decision": {"action": "move", "target": "R1"},
+        "get_decision_history": {},
+        "annotate_decision": {"decision_id": "dec_x", "feedback": "f"},
+        "get_session_context": {},
+        "create_checkpoint": {"name": "n"},
+        "restore_checkpoint": {"checkpoint_id": "cp_x"},
+        "get_session_summary": {},
+    }
+
+    @pytest.fixture
+    def board(self, tmp_path: Path) -> Path:
+        src = Path(__file__).parent / "fixtures" / "projects" / "test_project.kicad_pcb"
+        dest = tmp_path / "board.kicad_pcb"
+        dest.write_bytes(src.read_bytes())
+        return dest
+
+    @pytest.fixture
+    def call(self):
+        from kicad_tools.mcp.server import MCPServer
+
+        return MCPServer().call_tool
+
+    @pytest.fixture
+    def sid(self, call, board: Path) -> str:
+        result = call("start_session", {"pcb_path": str(board)})
+        assert result["success"]
+        return result["session_id"]
+
+    @staticmethod
+    def _position(path: Path, ref: str) -> tuple[float, float]:
+        pcb = PCB.load(str(path))
+        fp = next(f for f in pcb.footprints if f.reference == ref)
+        return (fp.position[0], fp.position[1])
+
+    def test_context_available_right_after_start(self, call, sid, board):
+        ctx = call("get_session_context", {"session_id": sid})
+        assert ctx["success"]
+        full = call("get_session_context", {"session_id": sid, "detail_level": "full"})
+        assert full["pcb_path"] == str(board.absolute())
+        summary = call("get_session_summary", {"session_id": sid})
+        assert f"PCB: {board.absolute()}" in summary["summary"]
+
+    def test_intents_read_live(self, call, sid):
+        call("declare_power_rail", {"session_id": sid, "net": "VIN", "voltage": 5.0})
+        full = call("get_session_context", {"session_id": sid, "detail_level": "full"})
+        assert "power_rail" in full["intents"]
+        call("clear_intent", {"session_id": sid})
+        full = call("get_session_context", {"session_id": sid, "detail_level": "full"})
+        assert "power_rail" not in full["intents"]
+
+    def test_unknown_ids_rejected(self, call):
+        for tool, extra in self.CONTEXT_CALLS.items():
+            result = call(tool, {"session_id": "nope", **extra})
+            assert result["success"] is False, tool
+            assert "Session not found: nope" in result["error_message"], tool
+
+    @pytest.mark.parametrize("closer", ["commit", "rollback"])
+    def test_context_closes_with_session(self, call, sid, tmp_path, closer):
+        if closer == "commit":
+            call(
+                "commit_session", {"session_id": sid, "output_path": str(tmp_path / "o.kicad_pcb")}
+            )
+        else:
+            call("rollback_session", {"session_id": sid})
+        for tool, extra in self.CONTEXT_CALLS.items():
+            result = call(tool, {"session_id": sid, **extra})
+            assert result["success"] is False, tool
+            assert f"Session not found: {sid}" in result["error_message"], tool
+
+    def test_fresh_checkpoint_captures_live_state(self, call, sid):
+        initial = get_session_manager().get(sid).initial_score
+        result = call("create_checkpoint", {"session_id": sid, "name": "fresh"})
+        assert result["success"]
+        assert result["pending_moves"] == 0
+        assert len(result["positions"]) == 3
+        snap = get_session_manager().get(sid).context.snapshots[-1]
+        assert snap.score == pytest.approx(initial)
+        assert snap.pending_moves == 0
+
+    def test_restore_checkpoint_rejects_unknown_checkpoint(self, call, sid):
+        result = call("restore_checkpoint", {"session_id": sid, "checkpoint_id": "cp_nope"})
+        assert result["success"] is False
+        assert "Checkpoint not found: cp_nope" in result["error_message"]
+
+    def test_restore_via_undo_path(self, call, sid, tmp_path):
+        call("apply_move", {"session_id": sid, "ref": "R1", "x": 10, "y": 10})
+        cp = call("create_checkpoint", {"session_id": sid, "name": "a"})["checkpoint_id"]
+        call("apply_move", {"session_id": sid, "ref": "R1", "x": 40, "y": 20})
+        restored = call("restore_checkpoint", {"session_id": sid, "checkpoint_id": cp})
+        assert restored["success"]
+        assert restored["pending_moves"] == 1
+        assert restored["positions"]["R1"][:2] == [10, 10]
+        # Restoring again is idempotent.
+        again = call("restore_checkpoint", {"session_id": sid, "checkpoint_id": cp})
+        assert again["success"] and again["pending_moves"] == 1
+        out = tmp_path / "out.kicad_pcb"
+        committed = call("commit_session", {"session_id": sid, "output_path": str(out)})
+        assert committed["moves_applied"] == 1
+        assert self._position(out, "R1") == pytest.approx((10.0, 10.0))
+
+    def test_restore_via_reapply_path(self, call, sid):
+        start = get_session_manager().get(sid).session._capture_state().positions
+        call("apply_move", {"session_id": sid, "ref": "R1", "x": 10, "y": 10})
+        cp = call("create_checkpoint", {"session_id": sid})["checkpoint_id"]
+        call("undo_move", {"session_id": sid})
+        call("apply_move", {"session_id": sid, "ref": "C1", "x": 30, "y": 30})
+        restored = call("restore_checkpoint", {"session_id": sid, "checkpoint_id": cp})
+        assert restored["success"]
+        live = get_session_manager().get(sid).session._capture_state().positions
+        assert live["R1"][:2] == (10, 10)
+        assert live["C1"] == start["C1"]
+
+    def test_restore_at_depth_zero(self, call, sid):
+        cp = call("create_checkpoint", {"session_id": sid})["checkpoint_id"]
+        call("apply_move", {"session_id": sid, "ref": "R1", "x": 10, "y": 10})
+        restored = call("restore_checkpoint", {"session_id": sid, "checkpoint_id": cp})
+        assert restored["success"]
+        assert restored["pending_moves"] == 0
+
+    def test_undo_resyncs_drc_engine(self, sid):
+        # Driven on the session directly: the apply_move tool's DRC-delta
+        # conversion currently fails when a move introduces a violation.
+        session = get_session_manager().get(sid).session
+        before = session.get_drc_summary()["total_violations"]
+        session.apply_move("R1", 25, 15)
+        assert session.get_drc_summary()["total_violations"] > before
+        assert session.undo()
+        assert session.get_drc_summary()["total_violations"] == before

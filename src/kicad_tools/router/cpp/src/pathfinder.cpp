@@ -56,14 +56,13 @@ Pathfinder::Pathfinder(Grid3D& grid, const DesignRules& rules, bool diagonal_rou
     // This enforces clearance as a hard constraint during routing.
     // Issue #553: Previously only checked trace_width/2, causing DRC violations
     // when traces were placed too close to obstacles.
-    trace_half_width_cells_ = std::max(
-        1, static_cast<int>(std::ceil(
-            (rules.trace_width / 2 + rules.trace_clearance) / grid.resolution())));
+    // Issue #6994: guarded rounding shared with Python (search_radius_cells).
+    trace_half_width_cells_ = search_radius_cells(
+        rules.trace_width / 2, rules.trace_clearance, grid.resolution());
 
     // Pre-compute via blocking radius in grid cells
-    via_half_cells_ = std::max(
-        1, static_cast<int>(std::ceil(
-            (rules.via_diameter / 2 + rules.via_clearance) / grid.resolution())));
+    via_half_cells_ = search_radius_cells(
+        rules.via_diameter / 2, rules.via_clearance, grid.resolution());
 
     // Issue #3229: Pre-compute the circular (Euclidean) kernel offsets at
     // ``trace_half_width_cells_``.  The legacy implementation scanned a
@@ -185,6 +184,50 @@ void Pathfinder::ensure_search_arrays_sized() {
         search_current_gen_ = 0;
     }
     ++search_current_gen_;
+}
+
+// Issue #5617: see ``via_verdict_`` in pathfinder.hpp.  Same generation-
+// stamp scheme as ``ensure_search_arrays_sized()``: O(1) invalidation per
+// epoch, full reset only on a grid resize or a uint32 wraparound.
+void Pathfinder::begin_via_verdict_epoch() {
+    const int cols = grid_.cols();
+    const int rows = grid_.rows();
+    if (cols != via_verdict_cols_ || rows != via_verdict_rows_) {
+        const size_t total = static_cast<size_t>(cols) * static_cast<size_t>(rows);
+        via_verdict_gen_.assign(total, 0u);
+        via_verdict_.assign(total, ViaVerdict{});
+        via_verdict_cols_ = cols;
+        via_verdict_rows_ = rows;
+        via_verdict_epoch_ = 0;
+    }
+    if (via_verdict_epoch_ == std::numeric_limits<uint32_t>::max()) {
+        std::fill(via_verdict_gen_.begin(), via_verdict_gen_.end(), 0u);
+        via_verdict_epoch_ = 0;
+    }
+    ++via_verdict_epoch_;
+}
+
+bool Pathfinder::search_via_blocked_cached(int x, int y, int& out_blocking_net,
+                                           float& out_world_x, float& out_world_y) {
+    if (grid_.pairwise_active()) {
+        return is_via_blocked_diag(x, y, search_net_, search_negotiated_mode_,
+                                   search_via_radius_cells_,
+                                   out_blocking_net, out_world_x, out_world_y);
+    }
+    const size_t idx = static_cast<size_t>(y) * static_cast<size_t>(via_verdict_cols_) +
+                       static_cast<size_t>(x);
+    ViaVerdict& v = via_verdict_[idx];
+    if (via_verdict_gen_[idx] != via_verdict_epoch_) {
+        const bool result = is_via_blocked_diag(
+            x, y, search_net_, search_negotiated_mode_, search_via_radius_cells_,
+            v.blocking_net, v.world_x, v.world_y);
+        v.blocked = result ? 1 : 0;
+        via_verdict_gen_[idx] = via_verdict_epoch_;
+    }
+    out_blocking_net = v.blocking_net;
+    out_world_x = v.world_x;
+    out_world_y = v.world_y;
+    return v.blocked != 0;
 }
 
 bool Pathfinder::trace_halo_cell_clear(int cx, int cy, int layer, int x1, int y1,
@@ -765,8 +808,7 @@ float Pathfinder::relief_conflict_cost(int x, int y, int layer, int net) const {
 int Pathfinder::pairwise_wide_radius_cells(float half_mm) const {
     const float cmax = grid_.max_pairwise_clearance();
     if (cmax <= 0.0f) return 0;
-    return std::max(
-        1, static_cast<int>(std::ceil((half_mm + cmax) / grid_.resolution())));
+    return search_radius_cells(half_mm, cmax, grid_.resolution());
 }
 
 bool Pathfinder::cross_domain_trace_blocked(int x, int y, int layer, int net,
@@ -801,8 +843,7 @@ bool Pathfinder::cross_domain_trace_blocked(int x, int y, int layer, int net,
             if (required <= 0.0f) continue;  // same domain / no widening
             // Widened radius for THIS specific pair (<= wide_radius).  A cell
             // inside the annulus but outside this pair's requirement is fine.
-            const int pair_r = std::max(
-                1, static_cast<int>(std::ceil((half_mm + required) / res)));
+            const int pair_r = search_radius_cells(half_mm, required, res);
             if (dist_sq > pair_r * pair_r) continue;
             // Attach-zone exemption (#4506) at the approximate gap midpoint:
             // a rated domain-bridging footprint may neck the pair down to the
@@ -852,8 +893,7 @@ bool Pathfinder::cross_domain_via_blocked(int x, int y, int net) const {
                 const float required =
                     grid_.pairwise_required_clearance(net, cell.net);
                 if (required <= 0.0f) continue;
-                const int pair_r = std::max(
-                    1, static_cast<int>(std::ceil((half_mm + required) / res)));
+                const int pair_r = search_radius_cells(half_mm, required, res);
                 if (dist_sq > pair_r * pair_r) continue;
                 const auto fw = grid_.grid_to_world(cx, cy);
                 const float mx = (cw.first + fw.first) * 0.5f;
@@ -1006,6 +1046,31 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
             ? search_fill_via_clearance_ : rules_.via_clearance);
         for (int layer = 0; layer < grid_.layers(); ++layer)
             if (!grid_.fixed_fill_clear(wx, wy, wx, wy, layer, half, reach)) return true;
+    }
+
+    // Issue #7296: mask-dam zone beside an SMD pad (drill clears the copper
+    // but leaves < min_via_pad_edge_gap to it).  Outside the allow_smd_vias
+    // gate: via-in-pad being allowed does not waive the dam.  Same arithmetic
+    // as Python ``Router._pad_edge_clear``.
+    if (rules_.min_via_pad_edge_gap > 0.0f) {
+        const auto [wx, wy] = grid_.grid_to_world(x, y);
+        const float radius = rules_.via_drill / 2.0f;
+        const float floor_mm = rules_.min_via_pad_edge_gap;
+        for (const auto& pad : grid_.pads()) {
+            if (pad.layer_idx < 0) continue;  // Through-hole pad, not SMD.
+            float local_x = wx - pad.x, local_y = wy - pad.y;
+            if (pad.rotation != 0.0f) {
+                const float angle = pad.rotation * 3.14159265358979323846f / 180.0f;
+                const float c = std::cos(angle), s = std::sin(angle);
+                const float rotated_x = c * local_x - s * local_y;
+                local_y = s * local_x + c * local_y;
+                local_x = rotated_x;
+            }
+            const float dx = std::max(std::abs(local_x) - pad.width / 2.0f, 0.0f);
+            const float dy = std::max(std::abs(local_y) - pad.height / 2.0f, 0.0f);
+            const float dist = std::sqrt(dx * dx + dy * dy);
+            if (dist >= radius && dist < radius + floor_mm) return true;
+        }
     }
 
     if (!rules_.allow_smd_vias) {
@@ -1284,6 +1349,16 @@ float Pathfinder::get_pad_channel_cost(int x, int y, int layer) const {
     return it->second;
 }
 
+bool Pathfinder::is_pad_via_fenced(int x, int y) const {
+    // Issue #6761: hard via fence (``PadChannelBudget.layer ==
+    // PAD_VIA_FENCE_LAYER``).  Same empty() fast path as the cost lookup.
+    if (search_pad_budget_cost_lookup_.empty()) {
+        return false;
+    }
+    return search_pad_budget_cost_lookup_.count(
+               std::make_tuple(x, y, PAD_VIA_FENCE_LAYER)) > 0;
+}
+
 // Issue #3143: Helper that materialises a per-cell pad-channel cost lookup
 // from the list of ``PadChannelBudget`` rectangles supplied by the caller.
 // Each cell inside a budget's bbox (intersected with the routing-grid
@@ -1329,6 +1404,11 @@ static void build_pad_channel_cost_lookup(
         if (b.layer == -1) {
             target_layers.reserve(layers);
             for (int l = 0; l < layers; ++l) target_layers.push_back(l);
+        } else if (b.layer == PAD_VIA_FENCE_LAYER) {
+            // Issue #6761: a via fence.  Registered under the pseudo-layer
+            // key so it never prices a trace step; consulted only by the
+            // via-expansion branches through ``is_pad_via_fenced``.
+            target_layers.push_back(PAD_VIA_FENCE_LAYER);
         } else if (b.layer >= 0 && b.layer < layers) {
             target_layers.push_back(b.layer);
         } else {
@@ -1929,6 +2009,8 @@ RouteResult Pathfinder::route(
             // active, the per-cell penalty accumulates into the A* g_score
             // so the search prefers less-contested escape paths.
             float pad_channel_cost = get_pad_channel_cost(nx, ny, nlayer);
+            // Issue #6761: an infinite budget is a hard escape fence.
+            if (std::isinf(pad_channel_cost)) continue;
 
             // Issue #4071: diff-pair / match-group corridor attractor.
             // Subtract a bonus when this cell is reserved for our net so
@@ -1977,6 +2059,7 @@ RouteResult Pathfinder::route(
 
         // Try layer change (via)
         int own_vias_clear = -1;  // Issue #6464: lazily evaluated once per node
+        ViaBlockMemo via_memo;    // Issue #5617: once per node, not per layer
         for (int new_layer : routable_layers_) {
             if (new_layer == current.layer) continue;
 
@@ -1985,9 +2068,9 @@ RouteResult Pathfinder::route(
             // rule is what caused the rejection.
             int blocking_net = 0;
             float block_wx = 0.0f, block_wy = 0.0f;
-            if (is_via_blocked_diag(current.x, current.y, net, negotiated_mode,
-                                    via_radius_cells,
-                                    blocking_net, block_wx, block_wy)) {
+            if (via_memo.blocked(*this, current.x, current.y, net, negotiated_mode,
+                                 via_radius_cells,
+                                 blocking_net, block_wx, block_wy)) {
                 if (blocking_net != 0) {
                     ++via_block_count;
                     last_blocking_net = blocking_net;
@@ -2026,6 +2109,10 @@ RouteResult Pathfinder::route(
             // contested channel.
             float pad_channel_cost =
                 get_pad_channel_cost(current.x, current.y, new_layer);
+            // Issue #6761: hard escape fences -- a via may neither land on a
+            // fenced trace cell nor drop inside a via fence.
+            if (std::isinf(pad_channel_cost) ||
+                is_pad_via_fenced(current.x, current.y)) continue;
 
             // Issue #4071: corridor attractor on the via-drop destination
             // cell -- the reservation is what makes the router prefer to
@@ -2276,6 +2363,9 @@ RouteResult Pathfinder::run_astar_loop() {
     const auto& ep = search_end_pad_bounds_;
 
     constexpr int kTimeoutCheckInterval = 1024;
+
+    // Issue #5617: via-drop verdicts are valid for this call only.
+    begin_via_verdict_epoch();
 
     while (!search_open_set_.empty() && last_iterations_ < search_max_iterations_) {
         last_iterations_++;
@@ -2678,6 +2768,8 @@ RouteResult Pathfinder::run_astar_loop() {
             // lookup populated at ``route_resumable()`` entry.  Empty
             // budget => returns 0.0 (zero overhead).
             float pad_channel_cost = get_pad_channel_cost(nx, ny, nlayer);
+            // Issue #6761: an infinite budget is a hard escape fence.
+            if (std::isinf(pad_channel_cost)) continue;
 
             // Issue #4071: corridor attractor (resumable / negotiated path).
             // Mirrors the one-shot ``route()`` contribution above using the
@@ -2734,12 +2826,12 @@ RouteResult Pathfinder::run_astar_loop() {
 
             // Issue #2476: Diagnostic-aware via blocking check so we can
             // record which stored-via net rejected our candidate slot.
+            // Issue #5617: one verdict per (x, y) per loop call, replayed
+            // for every other target layer and every other layer's node.
             int blocking_net = 0;
             float block_wx = 0.0f, block_wy = 0.0f;
-            if (is_via_blocked_diag(current.x, current.y, search_net_,
-                                    search_negotiated_mode_,
-                                    search_via_radius_cells_,
-                                    blocking_net, block_wx, block_wy)) {
+            if (search_via_blocked_cached(current.x, current.y,
+                                          blocking_net, block_wx, block_wy)) {
                 if (blocking_net != 0) {
                     ++search_via_block_count_;
                     search_last_blocking_net_ = blocking_net;
@@ -2779,6 +2871,10 @@ RouteResult Pathfinder::run_astar_loop() {
             // one-shot route() via path.
             float pad_channel_cost =
                 get_pad_channel_cost(current.x, current.y, new_layer);
+            // Issue #6761: hard escape fences -- a via may neither land on a
+            // fenced trace cell nor drop inside a via fence.
+            if (std::isinf(pad_channel_cost) ||
+                is_pad_via_fenced(current.x, current.y)) continue;
 
             // Issue #4071: corridor attractor on the via-drop destination
             // (resumable / negotiated path), mirroring the one-shot via

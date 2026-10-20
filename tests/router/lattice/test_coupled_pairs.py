@@ -219,10 +219,12 @@ def test_pair_routes_coupled_at_exact_pitch_with_correct_polarity() -> None:
     route_n = routes[(pc.key, "N")]
     assert route_p.net == 1 and route_n.net == 2
     assert not route_p.vias and not route_n.vias  # planar v1
-    # Legs terminate on their exact pads (polarity-correct attach).
+    # Legs terminate inside their own pads' copper (polarity-correct attach),
+    # at the pad-entry point rather than the pad centre (issue #6959).
     ends_p = {(s.x1, s.y1) for s in route_p.segments} | {(s.x2, s.y2) for s in route_p.segments}
-    assert (pc.pad_p_a.x, pc.pad_p_a.y) in ends_p
-    assert (pc.pad_p_b.x, pc.pad_p_b.y) in ends_p
+    for pad in (pc.pad_p_a, pc.pad_p_b):
+        reach = pad.width / 2.0 - _HS.trace_width / 2.0 + 1e-6
+        assert any(abs(x - pad.x) <= reach and abs(y - pad.y) <= reach for x, y in ends_p)
     # The coupled body sits at exactly the pitch: the straight mid-corridor
     # segments of the two legs are pitch apart.
     min_sep = min(
@@ -269,11 +271,11 @@ def test_pair_declines_when_fat_envelope_is_blocked() -> None:
 
 def test_pair_declines_when_emitted_leg_violates_keepout() -> None:
     # A track-keepout rule area spanning the pair corridor on both layers
-    # (#4605/#4672).  The fat centerline search deliberately skips the
-    # keepout mask, so the coarse search succeeds -- the finish gate's
-    # emitted-leg re-verification (probing every leg segment at trace_w/2)
-    # must catch the violation and decline with the ``pair-leg-keepout``
-    # attribution, emitting NOTHING (never split, #3906).
+    # (#4605/#4672).  The wall is un-passable, so the pair must decline and
+    # emit NOTHING (never split, #3906).  Since #6697 the fat centerline
+    # search sees the mask itself and reports ``pair-no-path``; the finish
+    # gate's emitted-leg re-verification stays as the backstop for the attach
+    # doglegs (``pair-leg-keepout``).
     from kicad_tools.router.lattice.obstacles import KeepoutArea, LatticeKeepoutMask
 
     wall = KeepoutArea(
@@ -288,8 +290,12 @@ def test_pair_declines_when_emitted_leg_violates_keepout() -> None:
     pf, pc = _pair_board()
     pf.set_keepouts(LatticeKeepoutMask([wall]))
     routes, stats = pf.route_netset([], coupled=[pc])
-    assert pf.pair_outcomes[pc.key] == "pair-leg-keepout", pf.pair_outcomes
-    assert pf.failure_reasons[pc.key] == "pair-leg-keepout"
+    assert pf.pair_outcomes[pc.key] in {
+        "pair-no-path",
+        "pair-no-path-keepout-constrained",
+        "pair-leg-keepout",
+    }, pf.pair_outcomes
+    assert pf.failure_reasons[pc.key] == pf.pair_outcomes[pc.key]
     assert routes == {}
     assert stats.routed == 0 and stats.total == 1
     # Control: the identical board with no keepout couples cleanly (proves
@@ -298,6 +304,38 @@ def test_pair_declines_when_emitted_leg_violates_keepout() -> None:
     routes2, stats2 = pf2.route_netset([], coupled=[pc2])
     assert pf2.pair_outcomes[pc2.key] == "coupled"
     assert stats2.routed == 1 and routes2
+
+
+def test_pair_detours_around_a_keepout_reservation_and_still_couples() -> None:
+    # Issue #6697: a small keepout (the shape of a #6401 pour-pad via
+    # reservation) sits ON the straight pair corridor, with room to go
+    # around it.  The fat centerline search used to skip the keepout mask, so
+    # the shortest path ran straight through it and the finish gate declined
+    # the pair (``pair-leg-keepout``) -- on board 03 this lost USB_MCU_D's
+    # coupling once negotiation history displaced the centerline onto the
+    # U1.5 GND reservation.  The search must route around it and couple.
+    from kicad_tools.router.lattice.obstacles import KeepoutArea, LatticeKeepoutMask
+
+    site = KeepoutArea(
+        polygon=((14.0, 4.0), (16.0, 4.0), (16.0, 7.0), (14.0, 7.0)),
+        layers=frozenset({0, 1}),
+        blocks_tracks=True,
+        blocks_vias=True,
+        only=None,
+        exempt=frozenset(),
+        name="plane-via-fill:GND:U1.5",
+    )
+    pf, pc = _pair_board()
+    mask = LatticeKeepoutMask([site])
+    pf.set_keepouts(mask)
+    routes, _stats = pf.route_netset([], coupled=[pc])
+    assert pf.pair_outcomes[pc.key] == "coupled", pf.pair_outcomes
+    for pol in ("P", "N"):
+        for seg in routes[(pc.key, pol)].segments:
+            layer = 0 if seg.layer.name.startswith("F") else 1
+            assert not mask.segment_blocked(
+                (seg.x1, seg.y1), (seg.x2, seg.y2), layer, seg.net, seg.width / 2.0
+            )
 
 
 def test_pair_declines_when_emitted_leg_violates_pairwise_pad_requirement() -> None:
@@ -402,8 +440,10 @@ def test_polarity_twist_resolves_via_hook_when_room_exists() -> None:
     if pf.pair_outcomes[pc.key] == "coupled":
         route_p = routes[(pc.key, "P")]
         ends_p = {(s.x1, s.y1) for s in route_p.segments} | {(s.x2, s.y2) for s in route_p.segments}
-        assert (pc.pad_p_a.x, pc.pad_p_a.y) in ends_p
-        assert (pc.pad_p_b.x, pc.pad_p_b.y) in ends_p
+        # Inside the pad copper, not at its centre (issue #6959).
+        for pad in (pc.pad_p_a, pc.pad_p_b):
+            reach = pad.width / 2.0 - _HS.trace_width / 2.0 + 1e-6
+            assert any(abs(x - pad.x) <= reach and abs(y - pad.y) <= reach for x, y in ends_p)
         from kicad_tools.router.diffpair_routing import find_intra_pair_clearance_violations
 
         violation = find_intra_pair_clearance_violations(
@@ -490,6 +530,17 @@ def test_core_stays_single_ended_without_coupled_routing_opt_in() -> None:
 # ---------------------------------------------------------------------------
 # Issue #6373: decline-reason split + uncoupled fallback
 # ---------------------------------------------------------------------------
+
+
+def _no_gateway_retry(monkeypatch) -> None:
+    """Disable the #6444 fan-via gateway retry for a fallback-contract test.
+
+    The slot walls block F.Cu only, so on these 2-layer fixtures the gateway
+    retry would couple the pair on B.Cu; these tests pin the #6373 fallback.
+    """
+    from kicad_tools.router.lattice import pathfinder as pathfinder_mod
+
+    monkeypatch.setattr(pathfinder_mod, "GATEWAY_RETRY_REASONS", frozenset())
 
 
 def _slot_walls() -> list[Pad]:
@@ -691,10 +742,11 @@ def test_uncoupled_fallback_extras_land_on_connected_copper() -> None:
         assert _net_connected([r for r in routes.values() if r.net == net], pads), net
 
 
-def test_core_uses_uncoupled_fallback_for_blocked_pair(capsys) -> None:
+def test_core_uses_uncoupled_fallback_for_blocked_pair(capsys, monkeypatch) -> None:
     # Through the Autorouter (core.py): the lattice engine always enables
     # the fallback, so a blocked pair is reported as a diff-pair WARNING and
     # both nets still get copper (issue #6373).
+    _no_gateway_retry(monkeypatch)
     router = _autorouter({"D+": _HS, "D-": _HS})
     for i, wall in enumerate(_slot_walls()):
         # One single-pad net per wall: an obstacle, never itself routed.
@@ -942,9 +994,10 @@ def test_core_chains_pair_through_pass_through_part(capsys) -> None:
     assert "D[0] J1.1->U2.3: coupled" in out and "D[1] U2.4->U1.1: coupled" in out
 
 
-def test_core_reports_partially_coupled_pair(capsys) -> None:
+def test_core_reports_partially_coupled_pair(capsys, monkeypatch) -> None:
     # A slot wall in the J1 -> U2 segment: that segment falls back
     # single-ended (#6373, per segment) while U2 -> U1 still couples.
+    _no_gateway_retry(monkeypatch)
     walls = [
         Pad(
             x=8.0,
@@ -970,6 +1023,111 @@ def test_core_reports_partially_coupled_pair(capsys) -> None:
     out = capsys.readouterr().out
     assert "WARNING: diff pair D only partially coupled (1/2 segments)" in out
     assert "J1.1->U2.3 (uncoupled-fallback:" in out
+
+
+# Issue #6697: board 03's U2.5 (VBUS) sits between the pair pads U2.4/U2.6.
+# Its inner end faces a sealed pocket (the U2.3->U2.4 / U2.1->U2.6 hops on
+# both sides, U2.2 and its GND via beyond), so its only exit is outward --
+# exactly where the relocated pair anchor starts the coupled run.
+_VBUS_POWER = NetClassRouting(name="Power", trace_width=0.5, clearance=0.2)
+
+
+def _sealed_vbus_pads() -> list[Pad]:
+    far = Pad(
+        x=_SOT_OUT_X,
+        y=11.0,
+        width=1.0,
+        height=1.0,
+        net=10,
+        net_name="VBUS",
+        layer=Layer.F_CU,
+        ref="J9",
+        pin="1",
+        through_hole=True,
+        drill=0.4,
+    )
+    # Stands in for board 03's U2.2 GND via: fills the pocket between the rows.
+    plug = Pad(
+        x=15.0,
+        y=6.0,
+        width=1.0,
+        height=1.2,
+        net=30,
+        net_name="X",
+        layer=Layer.F_CU,
+        ref="U2",
+        pin="7",
+    )
+    return [far, plug]
+
+
+def test_sandwiched_pad_escape_site_sits_off_the_outer_edge() -> None:
+    from kicad_tools.router.lattice.coupled import sandwiched_pad_escape_sites
+
+    router = _chain_autorouter(_sealed_vbus_pads())
+    pf = router._ensure_lattice_pathfinder()
+    pads = _chain_pads()
+    kw = {"pair_nets": {1, 2}, "via_radius": 0.3, "clearance_for": lambda _n: 0.2}
+    sites = sandwiched_pad_escape_sites(
+        pf.obstacles, pads["U2.4"], pads["U2.6"], (27.0, 6.0), routed_nets={10}, **kw
+    )
+    assert [(p.ref, p.pin) for p, _s in sites] == [("U2", "5")]
+    site = sites[0][1]
+    # Just past U2.5's outer (+x) edge, on the side the segment runs to.
+    assert site == pytest.approx((_SOT_OUT_X + _SOT_W / 2.0 + 0.3, 6.0))
+    # Facing the body, the via would sit in the plugged pocket: no legal
+    # site.  An unrouted net gets nothing either.
+    assert (
+        sandwiched_pad_escape_sites(
+            pf.obstacles, pads["U2.4"], pads["U2.6"], (0.0, 6.0), routed_nets={10}, **kw
+        )
+        == []
+    )
+    assert (
+        sandwiched_pad_escape_sites(
+            pf.obstacles, pads["U2.4"], pads["U2.6"], (27.0, 6.0), routed_nets=set(), **kw
+        )
+        == []
+    )
+
+
+def test_core_reserves_no_escape_site_for_an_unrouted_sandwiched_pad() -> None:
+    # The plain chain: U2.5 is VBUS's only pad, so nothing is reserved and
+    # the anchors are exactly the #6378 ones.
+    router = _chain_autorouter()
+    coupled, _reserved = router._lattice_coupled_connections()
+    mask = router._ensure_lattice_pathfinder()._keepouts
+    assert not any(a.name.startswith("pair-escape-via:") for a in (mask.areas if mask else ()))
+    assert coupled[1].anchor_a == pytest.approx((17.44, 6.0))
+
+
+def test_core_pair_leaves_a_sealed_routed_pad_its_escape_via(capsys) -> None:
+    # Fails before #6697: the anchor sat just off U2.5's edge, VBUS could
+    # only leave through the pair corridor, and negotiation split the pair
+    # (``partially-coupled:1/2``).  Now U2.5 gets a via site the pair routes
+    # around: both segments couple AND VBUS drops its via there.
+    router = _chain_autorouter(_sealed_vbus_pads())
+    router.net_class_map["VBUS"] = _VBUS_POWER
+    routes = {net: router.route_net(net) for net in (1, 2, 10)}
+    pads = _chain_pads()
+    far = _sealed_vbus_pads()[0]
+    stats = router._lattice_negotiation_stats
+    assert stats.routed == stats.total and stats.converged, stats
+    assert _net_connected(routes[10], [pads["U2.5"], far])
+    assert router._lattice_pair_outcomes == {"D": "coupled"}, router._lattice_pair_outcomes
+    out = capsys.readouterr().out
+    assert "Pair escape via site (#6697): VBUS U2.5 sits between D's pads" in out
+    mask = router._ensure_lattice_pathfinder()._keepouts
+    (site,) = [a for a in mask.areas if a.name == "pair-escape-via:VBUS:U2.5"]
+    # Issue #6956: the pair the site exists for is exempt too (its gateway
+    # fans may need the corridor); every other net is still kept out.
+    assert site.exempt == frozenset({10, 1, 2})
+    assert site.applies_to(30)
+    vias = [v for r in routes[10] for v in r.vias]
+    assert any(
+        site.bbox[0] <= v.x <= site.bbox[2] and site.bbox[1] <= v.y <= site.bbox[3] for v in vias
+    ), vias
+    assert all(o == "coupled" for _n, _l, o in router._lattice_pair_segment_outcomes)
 
 
 def test_core_single_segment_pair_keeps_legacy_key() -> None:
@@ -1207,8 +1365,10 @@ def test_declined_trunk_is_retried_as_a_tap_chain(capsys, monkeypatch) -> None:
 
     pads = _tap_pads() + _tap_walls()
 
-    # Control: with the retry removed the trunk falls back uncoupled.
+    # Control: with the retry removed the trunk falls back uncoupled (the
+    # #6842 gateway offer would couple it through a fan-via gateway instead).
     monkeypatch.setattr(core, "_lattice_tap_chain_retry_pairs", lambda *a: frozenset())
+    monkeypatch.setattr(core, "_lattice_gateway_offer_keys", lambda *a: frozenset())
     router = _trunk_autorouter(pads)
     router.route_net(1)
     assert router._lattice_pair_outcomes == {"D": "uncoupled-fallback:pair-no-path"}
@@ -1271,6 +1431,57 @@ def test_tap_chain_retry_pairs_selection() -> None:
     }
     got = _lattice_tap_chain_retry_pairs(coupled, outcomes, {"A", "B", "C", "E"})
     assert got == frozenset({"A"})
+
+
+def test_tap_chain_retry_pairs_accepts_constrained_no_path_refinements() -> None:
+    """Issue #6743: #6697 made the fat pair search report the honest
+    ``pair-no-path-keepout-constrained`` (#4605) on boards with plane-via
+    reservations, and the exact-literal gate silently stopped retrying --
+    board 06b fell from 3/4 to 0/4 coupled.  Every exhausted-search reason
+    qualifies; declines that are not an exhausted corridor search do not."""
+    from types import SimpleNamespace
+
+    from kicad_tools.router.core import _lattice_tap_chain_retry_pairs
+    from kicad_tools.router.lattice.pathfinder import EXHAUSTED_SEARCH_REASONS
+
+    def pc(key, name):
+        return SimpleNamespace(key=key, pair_name=name)
+
+    coupled = [
+        pc(("pair", 1, 2), "KO"),
+        pc(("pair", 3, 4), "LAYER"),
+        pc(("pair", 5, 6), "PLAIN"),
+        pc(("pair", 7, 8), "PARTNER"),
+        pc(("pair", 9, 10), "PARITY"),
+        pc(("pair", 11, 12), "EGRESS"),
+        pc(("pair", 13, 14), "KO_NOALT"),  # qualifying reason, no alternative
+    ]
+    outcomes = {
+        ("pair", 1, 2): "uncoupled-fallback:pair-no-path-keepout-constrained",
+        ("pair", 3, 4): "uncoupled-fallback:pair-no-path-layer-constrained",
+        ("pair", 5, 6): "uncoupled-fallback:pair-no-path",
+        ("pair", 7, 8): "uncoupled-fallback:pair-partner-pad",
+        ("pair", 9, 10): "uncoupled-fallback:pair-no-parity",
+        ("pair", 11, 12): "uncoupled-fallback:pair-no-egress-start",
+        ("pair", 13, 14): "uncoupled-fallback:pair-no-path-keepout-constrained",
+    }
+    available = {"KO", "LAYER", "PLAIN", "PARTNER", "PARITY", "EGRESS"}
+    got = _lattice_tap_chain_retry_pairs(coupled, outcomes, available)
+    assert got == frozenset({"KO", "LAYER", "PLAIN"})
+
+    # The gate is derived from the reasons the pathfinder actually returns, so
+    # a future rename/refinement there cannot drift out of it unnoticed.
+    assert {
+        "no-path",
+        "no-path-keepout-constrained",
+        "no-path-layer-constrained",
+    } == EXHAUSTED_SEARCH_REASONS
+    for reason in EXHAUSTED_SEARCH_REASONS:
+        one = [pc(("pair", 1, 2), "X")]
+        got = _lattice_tap_chain_retry_pairs(
+            one, {("pair", 1, 2): f"uncoupled-fallback:pair-{reason}"}, {"X"}
+        )
+        assert got == frozenset({"X"}), reason
 
 
 # ---------------------------------------------------------------------------
@@ -1448,11 +1659,13 @@ def test_discarded_tap_chain_retry_equals_a_run_without_retry(capsys, monkeypatc
         return router, routes
 
     monkeypatch.setattr(core, "_lattice_tap_chain_retry_pairs", lambda *a: frozenset())
+    monkeypatch.setattr(core, "_lattice_gateway_offer_keys", lambda *a: frozenset())
     base, base_routes = run()
     assert "tap-chain retry" not in capsys.readouterr().out
     monkeypatch.undo()
 
     monkeypatch.setattr(core, "_lattice_tap_chain_retry_keeps", lambda *a: (False, []))
+    monkeypatch.setattr(core, "_lattice_gateway_offer_keys", lambda *a: frozenset())
     forced, forced_routes = run()
     out = capsys.readouterr().out
     assert "tap-chain retry for 1 pair(s) whose trunk declined pair-no-path (D): discarded (" in out
@@ -1472,3 +1685,302 @@ def test_discarded_tap_chain_retry_equals_a_run_without_retry(capsys, monkeypatc
     for f in dataclasses.fields(a):
         if f.name != "elapsed_s":
             assert getattr(a, f.name) == getattr(b, f.name), f.name
+
+
+# ---------------------------------------------------------------------------
+# Issue #6698: launch from the row facing the chain + generated row ties
+# ---------------------------------------------------------------------------
+
+# A USB-C receptacle's D+/D- rows (board 03 J1, GCT USB4085): 0.7 mm round THT
+# pads, 0.85 mm pitch, rows 1.35 mm apart.  The A row faces the ESD part U2;
+# the B row sits behind it, its D+/D- order mirrored (B6 behind A7).
+_USBC_A_X, _USBC_B_X = 3.0, 1.65
+_USBC_LO, _USBC_HI = 5.575, 6.425
+
+
+def _usbc(x: float, y: float, net: int, name: str, pin: str) -> Pad:
+    return Pad(
+        x=x,
+        y=y,
+        width=0.7,
+        height=0.7,
+        net=net,
+        net_name=name,
+        layer=Layer.F_CU,
+        ref="J1",
+        pin=pin,
+        through_hole=True,
+        drill=0.4,
+        shape="circle",
+    )
+
+
+def _usbc_pads(*, smd: bool = False) -> dict[str, Pad]:
+    pads = {
+        "A6": _usbc(_USBC_A_X, _USBC_LO, 1, "D+", "A6"),
+        "A7": _usbc(_USBC_A_X, _USBC_HI, 2, "D-", "A7"),
+        "B6": _usbc(_USBC_B_X, _USBC_HI, 1, "D+", "B6"),
+        "B7": _usbc(_USBC_B_X, _USBC_LO, 2, "D-", "B7"),
+    }
+    if smd:
+        from dataclasses import replace
+
+        pads = {k: replace(p, through_hole=False, drill=0.0) for k, p in pads.items()}
+    return pads
+
+
+def _usbc_chain_pads(*, smd: bool = False) -> dict[str, Pad]:
+    pads = {k: v for k, v in _chain_pads().items() if not k.startswith("J1.")}
+    return {**{f"J1.{k}": v for k, v in _usbc_pads(smd=smd).items()}, **pads}
+
+
+def test_choose_pair_chain_launches_from_the_row_facing_the_chain() -> None:
+    from kicad_tools.router.lattice.coupled import choose_pair_chain
+
+    pads = _usbc_chain_pads()
+    ps = [pads[k] for k in ("J1.B6", "J1.A6", "U2.3", "U2.4", "U1.P")]
+    ns = [pads[k] for k in ("J1.B7", "J1.A7", "U2.1", "U2.6", "U1.N")]
+    # The farthest-apart end is still the walled-in B row ...
+    ends = choose_pair_endpoints(ps, ns)
+    assert ends is not None and ends[0] == (0, 0)
+    chain = choose_pair_chain(ps, ns)
+    assert chain is not None
+    # ... but segment 0 now starts at the A row; hops and the far end are unchanged.
+    assert chain.segments == [((1, 1), (2, 2)), ((3, 3), (4, 4))]
+    assert chain.hops == [((2, 2), (3, 3))]
+
+
+def test_choose_pair_chain_end_repick_needs_an_interior_part() -> None:
+    from kicad_tools.router.lattice.coupled import choose_pair_chain
+
+    # Dual-row end, no interior part: the single farthest-apart trunk (B row).
+    usbc = _usbc_pads()
+    far_p = _pad(27.0, 5.5, 1, "D+", ref="U1")
+    far_n = _pad(27.0, 6.5, 2, "D-", ref="U1")
+    ps = [usbc["B6"], usbc["A6"], far_p]
+    ns = [usbc["B7"], usbc["A7"], far_n]
+    chain = choose_pair_chain(ps, ns)
+    assert chain is not None
+    assert chain.segments == [choose_pair_endpoints(ps, ns)] and chain.hops == []
+
+
+def _tie_kwargs(**over):
+    kw = {"width": 0.30, "clearance": 0.15, "min_width": 0.1016}
+    kw.update(over)
+    return kw
+
+
+def _plan_both(pads: dict[str, Pad], layers, **over):
+    from kicad_tools.router.lattice.coupled import plan_equivalent_pin_tie
+
+    foreign = list(pads.values())
+    tie_p = plan_equivalent_pin_tie(pads["B6"], pads["A6"], foreign, layers, **_tie_kwargs(**over))
+    accepted = [tie_p] if tie_p is not None else []
+    tie_n = plan_equivalent_pin_tie(
+        pads["B7"], pads["A7"], foreign, layers, accepted=accepted, **_tie_kwargs(**over)
+    )
+    return tie_p, tie_n
+
+
+def _tie_pad_clearance(tie, pad: Pad) -> float:
+    from shapely.geometry import LineString, Point
+
+    copper = LineString(tie.points).buffer(tie.width / 2.0, quad_segs=64)
+    return copper.distance(Point(pad.x, pad.y).buffer(pad.width / 2.0, quad_segs=64))
+
+
+def test_equivalent_pin_ties_neck_down_onto_different_layers() -> None:
+    pads = _usbc_pads()
+    tie_p, tie_n = _plan_both(pads, [0, 1])
+    assert tie_p is not None and tie_n is not None
+    for tie in (tie_p, tie_n):
+        assert tie.length == pytest.approx(1.70, abs=0.01)
+        assert tie.width == pytest.approx(0.20)
+        assert tie.class_width == pytest.approx(0.30)
+        assert all(_is_octilinear(a, b) for a, b in zip(tie.points, tie.points[1:], strict=False))
+    # The two ties cross, so they land on different layers.
+    assert tie_p.layer != tie_n.layer
+    # Exact copper clears every other-net pad by the class clearance.
+    for tie in (tie_p, tie_n):
+        for pad in pads.values():
+            if pad.net != tie.net:
+                assert _tie_pad_clearance(tie, pad) >= 0.15 - 1e-6
+
+
+def test_equivalent_pin_tie_single_layer_connector_yields_one_tie() -> None:
+    tie_p, tie_n = _plan_both(_usbc_pads(smd=True), [0])
+    assert tie_p is not None and tie_n is None
+
+
+def test_equivalent_pin_tie_declines_when_no_fab_width_fits() -> None:
+    tie_p, tie_n = _plan_both(_usbc_pads(), [0, 1], clearance=0.25)
+    assert tie_p is None and tie_n is None
+    # Without a fab floor there is no neck-down: 0.30 mm never fits.
+    assert _plan_both(_usbc_pads(), [0, 1], min_width=None) == (None, None)
+
+
+def test_equivalent_pin_tie_roundrect_falls_back_to_the_pad_box() -> None:
+    from dataclasses import replace
+
+    from kicad_tools.router.lattice.coupled import plan_equivalent_pin_tie
+
+    pads = _usbc_pads()
+    # A roundrect foreign pad (``_pad_waiver_polygon`` returns None for it) is
+    # its full bounding box -- never "no obstacle".  A 0.3 mm probe 0.38 mm
+    # off the D+ tie's diagonal leaves room for a necked tie as a circle, but
+    # its box corner points at the leg and leaves none.
+    off = 0.38 / math.sqrt(2.0)
+    mid = ((_USBC_B_X + _USBC_B_X + 0.85) / 2.0, (_USBC_HI + _USBC_LO) / 2.0)
+    probe = replace(
+        pads["B7"], x=mid[0] + off, y=mid[1] + off, width=0.3, height=0.3, net=9, net_name="X"
+    )
+    as_circle = plan_equivalent_pin_tie(
+        pads["B6"], pads["A6"], [*pads.values(), probe], [0], **_tie_kwargs()
+    )
+    assert as_circle is not None, "the round probe leaves room"
+    boxed = replace(probe, shape="roundrect")
+    assert (
+        plan_equivalent_pin_tie(
+            pads["B6"], pads["A6"], [*pads.values(), boxed], [0], **_tie_kwargs()
+        )
+        is None
+    )
+
+
+def _usbc_autorouter(*, smd: bool = False) -> object:
+    from kicad_tools.router.core import Autorouter
+
+    # Board 03 under the protocol: 0.15 mm board clearance, jlcpcb 4-layer
+    # 1 oz fab floor (``rules.min_trace_width_floor``, #4700).
+    rules = DesignRules(trace_width=0.2, trace_clearance=0.15, manufacturer="jlcpcb")
+    rules.min_trace_width_floor = 0.1016
+    router = Autorouter(
+        30, 12, strategy="lattice", rules=rules, net_class_map={"D+": _HS, "D-": _HS}
+    )
+    for key, pad in _usbc_chain_pads(smd=smd).items():
+        router.pads[(pad.ref, key)] = pad
+        router.nets.setdefault(pad.net, []).append((pad.ref, key))
+        router.net_names[pad.net] = pad.net_name
+    return router
+
+
+def test_core_ties_the_far_usbc_row_as_fixed_copper(capsys, monkeypatch) -> None:
+    router = _usbc_autorouter()
+    pf = router._ensure_lattice_pathfinder()
+    seen: dict = {}
+    real = pf.route_netset
+
+    def spy(conns, **kw):
+        seen.setdefault("fixed", kw.get("fixed_copper"))
+        seen.setdefault("conns", list(conns))
+        return real(conns, **kw)
+
+    monkeypatch.setattr(pf, "route_netset", spy)
+    routes_p = router.route_net(1)
+    routes_n = router.route_net(2)
+    out = capsys.readouterr().out
+    assert "Diff-pair tie D+ J1.B6->J1.A6" in out and "Diff-pair tie D- J1.B7->J1.A7" in out
+    assert "D[0] J1.A6->U2.3" in out
+    ties = router._lattice_pair_ties
+    assert [t[0] for t in ties] == [(1, "tie", 0), (2, "tie", 1)]
+    # No single-ended connection for a tied extra.
+    assert not any(isinstance(k, tuple) and k[1:] == (0,) for k, *_ in seen["conns"])
+    tie_routes = [route for _k, route, _e in ties]
+    assert all(any(r is f for f in seen["fixed"]) for r in tie_routes)
+    assert all(any(r is t for t in routes_p + routes_n) for r in tie_routes)
+    pads = _usbc_chain_pads()
+    assert _net_connected(routes_p, [pads[k] for k in ("J1.A6", "J1.B6", "U2.3", "U2.4", "U1.P")])
+    assert _net_connected(routes_n, [pads[k] for k in ("J1.A7", "J1.B7", "U2.1", "U2.6", "U1.N")])
+    assert router._lattice_connection_endpoints[(1, "tie", 0)] == ("J1.B6", "J1.A6")
+
+
+def _todays_connections(router, monkeypatch) -> list:
+    """The connection list with the #6698 tie pass switched off."""
+    with monkeypatch.context() as m:
+        m.setattr(router, "_lattice_plan_pair_ties", lambda reserved: set())
+        _c, conns = router._lattice_netset_connections()
+    return conns
+
+
+def test_core_without_a_tie_keeps_todays_connections(monkeypatch) -> None:
+    import kicad_tools.router.pairplan.tie as tie_mod
+
+    router = _usbc_autorouter()
+    router._ensure_lattice_pathfinder()
+    today = _todays_connections(router, monkeypatch)
+    monkeypatch.setattr(tie_mod, "plan_equivalent_pin_tie", lambda *a, **k: None)
+    _c, declined = router._lattice_netset_connections()
+    assert router._lattice_pair_ties == []
+    assert declined == today
+    assert any(k == (1, 0) for k, *_ in today) and any(k == (2, 0) for k, *_ in today)
+
+
+def test_core_ties_a_pair_all_or_nothing(capsys, monkeypatch) -> None:
+    # A single-layer (SMD) receptacle has room for only one of the two
+    # crossing ties: the pair keeps today's connections for BOTH extras
+    # rather than attaching D+ and D- by different mechanisms (board 06rf).
+    router = _usbc_autorouter(smd=True)
+    router._ensure_lattice_pathfinder()
+    today = _todays_connections(router, monkeypatch)
+    _c, conns = router._lattice_netset_connections()
+    assert router._lattice_pair_ties == []
+    assert conns == today
+    assert "Diff-pair ties D+/D-: not used (J1.B7->J1.A7 has no clearing tie)" in (
+        capsys.readouterr().out
+    )
+
+
+def test_core_ties_neither_net_when_only_one_has_a_candidate(capsys, monkeypatch) -> None:
+    # Issue #6697: when only D+ has an eligible far-row extra (D-'s B7 shares
+    # no routing layer with its anchor here), tying D+ alone would attach P
+    # and N by different mechanisms -- the half-tie that made 06rf USB2_D's
+    # uncoupled length worse.  Neither net is tied.
+    router = _usbc_autorouter()
+    pf = router._ensure_lattice_pathfinder()
+    real = pf._pad_layer_indices
+
+    def layers(pad):
+        if pad.ref == "J1" and pad.pin == "B7":
+            return []
+        return real(pad)
+
+    monkeypatch.setattr(pf, "_pad_layer_indices", layers)
+    today = _todays_connections(router, monkeypatch)
+    _c, conns = router._lattice_netset_connections()
+    assert router._lattice_pair_ties == []
+    assert conns == today
+    assert any(k == (1, 0) for k, *_ in conns) and any(k == (2, 0) for k, *_ in conns)
+    assert "Diff-pair ties D+/D-: not used (partner net has no tie candidate)" in (
+        capsys.readouterr().out
+    )
+
+
+def test_core_declines_ties_through_a_fixed_fill(capsys) -> None:
+    # Preserved zone fills / degraded custom-pad copper are in neither
+    # ``pf.pads`` nor ``existing_routes``: a fill across the connector must
+    # veto every dogleg, and the all-or-nothing rule then drops both ties.
+    from shapely.geometry import box
+
+    from kicad_tools.router.fixed_copper import FixedFill, FixedFillObstacles
+
+    router = _usbc_autorouter()
+    copper = box(_USBC_B_X - 0.2, _USBC_LO - 0.5, _USBC_A_X + 0.2, _USBC_HI + 0.5)
+    router.grid.install_fixed_fills(
+        FixedFillObstacles(tuple(FixedFill("GND", 99, layer, 0.2, copper) for layer in (0, 1)))
+    )
+    router._lattice_netset_connections()
+    assert router._lattice_pair_ties == []
+    assert "Diff-pair ties D+/D-: not used" in capsys.readouterr().out
+
+
+def test_core_declines_ties_through_a_preserved_other_net_via(capsys) -> None:
+    from kicad_tools.router.primitives import Route, Via
+
+    router = _usbc_autorouter()
+    mid = ((_USBC_A_X + _USBC_B_X) / 2.0, (_USBC_LO + _USBC_HI) / 2.0)
+    via = Via(x=mid[0], y=mid[1], drill=0.6, diameter=1.2, layers=(Layer.F_CU, Layer.B_CU), net=99)
+    router.existing_routes.append(Route(net=99, net_name="GND", segments=[], vias=[via]))
+    router._ensure_lattice_pathfinder()
+    router._lattice_netset_connections()
+    assert router._lattice_pair_ties == []
+    assert "Diff-pair ties D+/D-: not used" in capsys.readouterr().out

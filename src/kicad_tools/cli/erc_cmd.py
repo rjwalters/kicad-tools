@@ -14,20 +14,20 @@ Exit Codes:
     1 - Errors found or command failure
     2 - Warnings found (only with --strict)
 
-Cross-sheet global labels:
-    When run on a schematic, single_global_label / isolated_pin_label
-    false positives for global labels spanning multiple sheets are
-    suppressed automatically (matching `kct sch validate`). When parsing a
-    bare report (.json/.rpt) this suppression is skipped because the
-    schematic hierarchy needed to build the cross-sheet label inventory is
-    not available -- run on the .kicad_sch directly for filtered results.
+Verdict:
+    Every violation kicad-cli reports (minus KiCad exclusions) counts toward
+    the exit code.  The only suppression is an explicit --filter-config, and
+    it is always disclosed (`Filtered:` in the table, `summary.filtered` in
+    JSON).  Running on a schematic gives at least the findings of parsing
+    kicad-cli's own report for it; it additionally runs a cross-sheet
+    duplicate-reference check.
 """
 
 import argparse
-import contextlib
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 from ..erc import (
     ERC_CATEGORIES,
@@ -35,13 +35,17 @@ from ..erc import (
     ERCReport,
     ERCViolation,
     check_cross_sheet_duplicates,
-    filter_cross_sheet_global_labels_objs,
 )
+from ._gate import gate_exit_code, hidden_by_view_filter  # noqa: F401  (re-exported; Issue #7230)
 from .runner import find_kicad_cli, run_erc
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Main entry point for kicad-erc command."""
+def build_parser() -> argparse.ArgumentParser:
+    """Return the ``kicad-erc`` argument parser.
+
+    ``kct erc [parse]`` mirrors every option declared here (Issue #7161);
+    ``tests/test_cli_parser_drift.py`` fails if the two drift apart.
+    """
     parser = argparse.ArgumentParser(
         prog="kicad-erc",
         description="Run ERC on schematics or parse ERC reports",
@@ -111,7 +115,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="List all known ERC violation types and exit",
     )
+    return parser
 
+
+def main(argv: list[str] | None = None) -> int:
+    """Main entry point for kicad-erc command."""
+    parser = build_parser()
     args = parser.parse_args(argv)
 
     # Mode: List types
@@ -127,19 +136,12 @@ def main(argv: list[str] | None = None) -> int:
 
     input_path = Path(args.input)
 
-    # Root schematic used to build the cross-sheet global-label inventory.
-    # Only available when ERC is run on a schematic (not when parsing a bare
-    # report), so the false-positive filter is skipped for report-only input.
-    schematic_for_filter: str | None = None
-
     # Determine if input is schematic or report
     if input_path.suffix == ".kicad_sch":
         # Run ERC on schematic
         report = run_erc_on_schematic(input_path, args.output, args.keep_report)
         if report is None:
             return 1
-
-        schematic_for_filter = str(input_path)
 
         # Run cross-sheet duplicate reference check (supplements KiCad ERC)
         try:
@@ -162,28 +164,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Error: Unsupported file type: {input_path.suffix}", file=sys.stderr)
         print("Expected .kicad_sch (schematic) or .json/.rpt (report)", file=sys.stderr)
         return 1
-
-    # Suppress cross-sheet global-label false positives.
-    #
-    # KiCad's ERC engine emits single_global_label / isolated_pin_label
-    # per-sheet without aggregating a global label across the full
-    # hierarchy, so a label that legitimately spans >= 2 sheets is wrongly
-    # reported as isolated.  The dict-based filter is already applied on the
-    # `kct sch validate` / preflight path; apply the ERCViolation-aware
-    # variant here so `kct erc` is consistent.
-    #
-    # Building the inventory requires a real `.kicad_sch` hierarchy, so this
-    # is skipped when only a bare report (.json/.rpt) is supplied -- the
-    # hierarchy cannot be reconstructed from the report alone.  Wrapped in
-    # try/except to degrade gracefully (matching check_cross_sheet_duplicates)
-    # so a parsing hiccup never turns a clean ERC into a crash.
-    if schematic_for_filter is not None:
-        # Non-fatal: filtering is supplemental; on any error (e.g. a malformed
-        # or missing hierarchy) the raw violations are kept unchanged.
-        with contextlib.suppress(Exception):
-            report.violations = filter_cross_sheet_global_labels_objs(
-                report.violations, schematic_for_filter
-            )
 
     # Apply violation filters from config file
     filter_ignored_count = 0
@@ -211,8 +191,15 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Error loading filter config: {e}", file=sys.stderr)
             return 1
 
-    # Apply filters
-    violations = [v for v in report.violations if not v.excluded]
+    # The verdict set: everything left after KiCad exclusions and the
+    # deliberate ``--filter-config`` suppression.  The exit code is computed
+    # from this set -- the view filters below only change what is *shown*, so
+    # a filter that hides every error can never read as a clean board
+    # (Issue #7094).
+    gate_violations = [v for v in report.violations if not v.excluded]
+
+    # View filters (display only)
+    violations = list(gate_violations)
 
     if args.errors_only:
         violations = [v for v in violations if v.is_error]
@@ -230,25 +217,46 @@ def main(argv: list[str] | None = None) -> int:
     if args.sheet:
         violations = [v for v in violations if args.sheet in v.sheet]
 
+    hidden = hidden_by_view_filter(gate_violations, violations)
+
+    # Exit code -- from the pre-view-filter set, decided before output so
+    # ``--format json`` can carry it (Issue #7230).
+    error_count = sum(1 for v in gate_violations if v.is_error)
+    warning_count = len(gate_violations) - error_count
+    exit_code, verdict = gate_exit_code(error_count, warning_count, strict=args.strict, style="drc")
+
     # Output
     if args.format == "json":
-        output_json(violations, report, filtered_count=filter_ignored_count)
+        output_json(
+            violations,
+            report,
+            filtered_count=filter_ignored_count,
+            hidden=hidden,
+            verdict=verdict,
+            exit_code=exit_code,
+        )
     elif args.format == "summary":
-        output_summary(violations, report, filtered_count=filter_ignored_count)
+        output_summary(violations, report, filtered_count=filter_ignored_count, hidden=hidden)
     else:
         output_table(
-            violations, report, args.verbose, args.by_sheet, filtered_count=filter_ignored_count
+            violations,
+            report,
+            args.verbose,
+            args.by_sheet,
+            filtered_count=filter_ignored_count,
+            hidden=hidden,
         )
 
-    # Exit code
-    error_count = sum(1 for v in violations if v.is_error)
-    warning_count = len(violations) - error_count
+    return exit_code
 
-    if error_count > 0:
-        return 1
-    elif warning_count > 0 and args.strict:
-        return 2
-    return 0
+
+def no_match_message(hidden: dict[str, int]) -> str:
+    """``No violations match the filter (N hidden: E error(s), W warning(s))``."""
+    total = hidden["errors"] + hidden["warnings"]
+    return (
+        f"No violations match the filter ({total} hidden: "
+        f"{hidden['errors']} error(s), {hidden['warnings']} warning(s))"
+    )
 
 
 def run_erc_on_schematic(
@@ -297,10 +305,17 @@ def output_table(
     verbose: bool = False,
     by_sheet: bool = False,
     filtered_count: int = 0,
+    hidden: dict[str, int] | None = None,
 ) -> None:
-    """Output violations as a formatted table."""
+    """Output violations as a formatted table.
+
+    ``hidden`` is the count of violations a view filter left out (see
+    :func:`hidden_by_view_filter`); the verdict line accounts for them.
+    """
     error_count = sum(1 for v in violations if v.is_error)
     warning_count = len(violations) - error_count
+    hidden_errors = hidden["errors"] if hidden else 0
+    hidden_warnings = hidden["warnings"] if hidden else 0
 
     print(f"\n{'=' * 60}")
     print("ERC VALIDATION SUMMARY")
@@ -315,13 +330,25 @@ def output_table(
     print(f"  Errors:     {error_count}")
     print(f"  Warnings:   {warning_count}")
     if filtered_count > 0:
-        print(f"  Filtered:   {filtered_count} violations filtered")
+        print(f"  Filtered:   {filtered_count} (--filter-config, not counted)")
     if report.exclusion_count > 0:
         print(f"  Excluded:   {report.exclusion_count} (not counted)")
+    if hidden:
+        print(
+            f"  Hidden:     {hidden_errors} error(s), {hidden_warnings} warning(s) "
+            "by view filter (still counted)"
+        )
 
     if not violations:
         print(f"\n{'=' * 60}")
-        print("ERC PASSED - No violations found")
+        if not hidden:
+            print("ERC PASSED - No violations found")
+            return
+        print(no_match_message(hidden))
+        if hidden_errors:
+            print("ERC FAILED - Fix errors before proceeding (hidden by view filter)")
+        else:
+            print("ERC WARNING - Review warnings (hidden by view filter)")
         return
 
     # Group by type summary
@@ -365,7 +392,7 @@ def output_table(
             print(f"\n  ... and {len(warnings) - 20} more warnings (use --verbose)")
 
     print(f"\n{'=' * 60}")
-    if errors:
+    if errors or hidden_errors:
         print("ERC FAILED - Fix errors before proceeding")
     else:
         print("ERC WARNING - Review warnings")
@@ -412,30 +439,51 @@ def _print_single(v: ERCViolation, verbose: bool, indent: str = "  ") -> None:
                 print(f"{indent}      - {suggestion}")
 
 
-def output_json(violations: list[ERCViolation], report: ERCReport, filtered_count: int = 0) -> None:
-    """Output violations as JSON."""
+def output_json(
+    violations: list[ERCViolation],
+    report: ERCReport,
+    filtered_count: int = 0,
+    hidden: dict[str, int] | None = None,
+    verdict: str | None = None,
+    exit_code: int | None = None,
+) -> None:
+    """Output violations as JSON.
+
+    Issue #7230: top-level ``verdict`` and ``exit_code`` when given.
+    """
     summary: dict = {
         "errors": sum(1 for v in violations if v.is_error),
         "warnings": sum(1 for v in violations if not v.is_error),
     }
     if filtered_count > 0:
         summary["filtered"] = filtered_count
+    if hidden:
+        summary["hidden_by_view_filter"] = hidden
 
-    data = {
+    data: dict[str, Any] = {
         "source": report.source_file,
         "kicad_version": report.kicad_version,
         "summary": summary,
         "violations": [v.to_dict() for v in violations],
     }
+    if verdict is not None:
+        data["verdict"] = verdict
+    if exit_code is not None:
+        data["exit_code"] = exit_code
     print(json.dumps(data, indent=2))
 
 
 def output_summary(
-    violations: list[ERCViolation], report: ERCReport, filtered_count: int = 0
+    violations: list[ERCViolation],
+    report: ERCReport,
+    filtered_count: int = 0,
+    hidden: dict[str, int] | None = None,
 ) -> None:
     """Output violation summary by type."""
     if not violations:
-        if filtered_count > 0:
+        if hidden:
+            print(f"{no_match_message(hidden)}.")
+        elif filtered_count > 0:
             print(f"No ERC violations found ({filtered_count} violations filtered).")
         else:
             print("No ERC violations found.")
@@ -465,6 +513,11 @@ def output_summary(
     total_errors = sum(c["errors"] for c in by_type.values())
     total_warnings = sum(c["warnings"] for c in by_type.values())
     print(f"{'TOTAL':<35} {total_errors:<8} {total_warnings:<8}")
+    if hidden:
+        print(
+            f"Hidden by view filter: {hidden['errors']} error(s), "
+            f"{hidden['warnings']} warning(s) (still counted)"
+        )
 
 
 def print_types() -> None:

@@ -148,10 +148,14 @@ def test_board_01_drc_clean_with_jlcpcb_rules() -> None:
     # now passes the geometric ``silk_over_copper`` rule cleanly, so the
     # earlier ``_SILK_PLACEMENT_RULES`` carve-out is removed and the strict
     # 0-warning gate holds unconditionally.
+    #
+    # Issues #7220 / #7295: R2's solid pad-2 override is gone (the thermal
+    # spoke ladder narrows the spoke before going solid), so the
+    # ``thermal_asymmetry`` advisory no longer fires and no warning is allowed.
     warn_count = sum(1 for v in results.violations if v.is_warning)
 
     sample = [
-        f"{v.rule_id}: {v.message}" for v in results.violations if v.is_error or v.is_warning
+        f"{v.rule_id}: {v.message}" for v in results.violations if (v.is_error or v.is_warning)
     ][:5]
     assert error_count == 0, f"Expected 0 DRC errors, got {error_count}; sample={sample}"
     assert warn_count == 0, f"Expected 0 DRC warnings, got {warn_count}; sample={sample}"

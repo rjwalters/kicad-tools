@@ -1,7 +1,7 @@
 # Merge-Queue CI Qualification
 
 **Issue #10257** (Phase C of #9978). With GitHub's merge queue, Loom would
-enqueue a Judge-approved PR rather than re-dating and merging it directly. That
+enqueue a Judge-approved PR rather than merging it directly. That
 only protects `main` if every suite Loom relies on validates the **combined
 merge-group tree**, meaning the base plus every PR queued ahead of this one. A
 workflow can list `merge_group` as a trigger and still skip the suites that
@@ -9,8 +9,10 @@ matter on it. This document covers the read-only tooling that proves a
 repository's workflows are qualified, the prerequisites for enabling queue mode,
 and how to roll back.
 
-**Status:** this is preparation only. Nothing in Loom enqueues yet: Phases A
-and B, #10255 and #10256, provide the queue controls and the Champion handoff.
+**Status:** queue execution is compiled on (#12323) but opt-in via
+`champion.mergeMode=queue`. Phases A and B, #10255 and #10256, provide the queue
+controls and the Champion handoff; the `merge_group` check workflow is the
+optional template `defaults/optional/github-workflows/merge-group-check.yml`.
 `rjwalters/loom` is user-owned, and GitHub documents merge queues for
 organization-owned repositories, so this repository is **not eligible** for the
 live pilot. Its `ci.yml` carries a `merge_group` trigger anyway. The trigger is
@@ -92,6 +94,7 @@ see becomes a named `*_UNKNOWN` failure, never a pass.
 | Active `merge_queue` rule on the branch | `NO_MERGE_QUEUE_RULE`, `MERGE_QUEUE_UNKNOWN` |
 | Required status checks exist | `NO_REQUIRED_CHECKS` |
 | Each required check covers `merge_group` | `MISSING_REQUIRED_SUITE`, `REQUIRED_SUITE_UNCOVERED` |
+| Writer App installation has `statuses: write` | `WRITER_CANNOT_POST_STATUSES` |
 | No other audit finding | `WORKFLOW_NOT_QUALIFIED` |
 
 A GitHub App installation token (`ghs_…`, the fleet's usual credential) gets
@@ -100,9 +103,31 @@ check reads that as `PERMISSION_UNKNOWN`, not as a denial. To get a real
 answer, run `eligibility` with a credential whose permissions are visible, or
 record `can_push` in a `--facts` file.
 
+`WRITER_CANNOT_POST_STATUSES` is read from the writer App's installation
+(`GET /orgs/{org}/installations`, matched by app id or slug), never from
+`repos/{nwo}.permissions`. It fires when that installation's `statuses` is
+`read` or absent. It is not evaluated (no failure) when no writer App is
+configured for the owner or the installation list is unreadable.
+
 The `--facts` file has the shape
-`{"repository","owner_type","branch","can_push","rules":[{"type","ruleset_id","parameters"}]}`.
+`{"repository","owner_type","branch","can_push","writer_statuses","rules":[{"type","ruleset_id","parameters"}]}`
+(`writer_statuses` is `read`, `write` or `none`).
 A missing or `null` field means "unknown".
+
+## Handoff is idempotent and refuses a writer that cannot post
+
+`forge merge-queue step` / `handoff` posts the `loom/merge-authorization`
+status on the approved head, so the writer needs `statuses: write`. Two guards
+run before the first grant write or revoke (#12579):
+
+- A PR already queued at the approved head under a live grant for that same head
+  reports `LOOM-MERGE-QUEUE-HANDED-OFF` ("was already in the queue") and changes
+  nothing: no revoke, no re-grant, no status write. A credential that cannot
+  post statuses therefore cannot dequeue a PR another identity queued.
+- Otherwise, a writer App whose installation has `statuses` below `write` is
+  refused with `[WRITER_CANNOT_POST_STATUSES]` (exit 3) before any grant is
+  written. Nothing is revoked and an existing queue entry is left alone. Fix the
+  App's permission; Loom does not change it.
 
 ## How `ci.yml` is qualified
 
@@ -116,9 +141,9 @@ A missing or `null` field means "unknown".
   exception on `push` (#10825, [ci-principles](ci-principles.md) rule 3).
   Their condition puts `github.event_name == 'merge_group' ||` first, so a
   merge group still runs them unconditionally, while a push runs them only
-  when the push-only `changes-push` job finds an image input or fails.
-  `changes-push` never runs on a PR or a merge group, so the audit does not
-  count it as a relied-on suite.
+  when the `changes` job finds an image input or fails. `changes` never runs
+  on a merge group (it carries the `pr-only` audit marker), so the audit does
+  not count it as a relied-on suite.
 - The concurrency group for a merge-group run is keyed on
   `merge_group.head_sha`, so it can never share a group with a PR run, with
   `main`, or with another merge group. `cancel-in-progress` stays true only
@@ -126,14 +151,15 @@ A missing or `null` field means "unknown".
   ([ci-principles](ci-principles.md) rule 2).
 - The PR-only steps that guard the merged tree also run on `merge_group`, over
   `merge_group.base_sha..head_sha`. These are the version-bearing-file check
-  in `Structural Checks` and the secret scan in `Daemon Checks`.
-- No checkout sets `ref:`, so every checkout lands on `github.sha`, which is
-  the merge-group head.
+  and the secret scan, both in `Lint`.
+- No checkout that runs on `merge_group` sets `ref:`, so every such checkout
+  lands on `github.sha`, which is the merge-group head. (`Detect Changes`
+  checks out the PR base, and does not run on `merge_group`.)
 - Regression tests in `loom-daemon/src/merge_group_ci/tests.rs` audit this
   repository's own workflows against `.loom/config.json`'s required checks.
   They also assert that every job still runs on `push` and may still run on a
-  PR. The exceptions are named explicitly: `changes-push` (push-only), and the
-  four image jobs, which must not be `Skipped` on push and must `Run` on
+  PR. The exceptions are named explicitly: `changes` (PR and push only), and
+  the four image jobs, which must not be `Skipped` on push and must `Run` on
   `merge_group`.
 
 ## Enablement prerequisites (all required, in order)
@@ -150,6 +176,40 @@ A missing or `null` field means "unknown".
    approval-to-merge median and p90, re-date pushes, head-induced Judge
    re-reviews, CI runs and runner-minutes per merged PR, and red-main
    incidents.
+
+## The authorization context is excluded from the CI verdict gate (#12526)
+
+`loom/merge-authorization` is a required context on the queue repo, but
+Champion posts it only AFTER the Judge approves. `forge wait-checks` (and so
+`post-verdict.sh` and the CI-gate recovery) therefore ignores it when deciding
+`GREEN`: absent or `pending` it does not hold the wait, or the Judge would
+wait for a status that only its own approval can cause and time out. A posted
+`failure` (a revocation) still counts as failing in both default and
+`--required-only` modes. `merge-pr.sh`'s zero-row settle
+(`merge_pr/zero_checks.rs`) is unchanged: it runs post-authorization and does
+not use the verdict path.
+
+## A queue drop caused by lost infrastructure is retried once (#12573)
+
+GitHub reports a runner lost mid-job as `failed_checks`, which Loom first
+classified as `check-failure` and routed to Doctor (`loom:pr` →
+`loom:changes-requested`), though the PR's code was green. When the drop is
+`check-failure`, the reconcile pass reads the check runs on the removed group
+commit (`beforeCommit.oid` of the removal event, readable after the group ref
+is deleted) and reclassifies it as `dropped-infra` only if:
+
+- at least one run failed, and every failed run ended `cancelled` or
+  `timed_out`, and
+- none of those runs' jobs has a step that ended `failure` (a test or build
+  that ran and failed is a real failure), and
+- no earlier `dropped-infra` revoke marker covers the same head.
+
+`dropped-infra` takes the `timeout` route: labels unchanged, `loom:pr` kept,
+and the next Champion pass re-enqueues with a fresh authorization. The CLI
+prints `LOOM-MERGE-QUEUE-DROPPED reason=dropped-infra`. The one-retry bound is
+per head: the second infra drop on the same head, a mixed set, an in-progress
+run, an unreadable or empty check-run read, or a missing group commit all stay
+`check-failure` and go to Doctor as before (fail closed).
 
 ## Rollback to direct mode
 
@@ -190,14 +250,15 @@ The findings:
   together. They do not reduce Loom's per-PR run count, and this design does
   not assume they do.
 - **Expected cost shape.** Per merged PR, queue mode adds one full
-  `merge_group` run of about 86 runner-minutes and removes the re-date reruns
-  that direct mode pays whenever `main` moves under an approved PR. Whether
+  `merge_group` run of about 86 runner-minutes, and in exchange tests the
+  combined tree that direct mode merges untested when `main` moves under an
+  approved PR (#12063 removed direct mode's re-date reruns). Whether
   that nets out positive is the pilot's question. GitHub fast-forwards `main`
   to the merge-group head, so the `push` run on `main` re-tests an identical
   SHA. Removing that `push` run would be a separate, evidence-gated change and
   is **not** made here: `main` verification stays (rule 2).
-- **Interaction to watch in the pilot:** `version-bump-on-merge.yml` pushes
-  directly to `main`, at most once per `RELEASE_MIN_INTERVAL` (24 h by
+- **Interaction to watch in the pilot:** `version-bump-on-merge.yml` lands
+  its bump commit directly on `main` (through the fleet publisher, not a PR), at most once per `RELEASE_MIN_INTERVAL` (24 h by
   default, #11174; see [`release-cadence.md`](release-cadence.md)). In a
   queue-enabled repository, each such push moves the base under every queued
   entry. The pilot repository must

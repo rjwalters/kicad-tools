@@ -1955,12 +1955,15 @@ class TestBarrelJackInputMocked:
         def create_mock_component(symbol, x, y, ref, *args, **kwargs):
             comp = Mock()
             if "Barrel" in str(symbol):
-                # Barrel jack pins
+                # Connector:Barrel_Jack_Switch pins are unnamed in KiCad 10:
+                # 1 = centre pin (tip), 2 = sleeve, 3 = switch.  Unknown names
+                # raise, so a block asking for a pin the real symbol lacks
+                # (the old "Tip"/"Sleeve", issue #7399) fails here too.
                 comp.pin_position.side_effect = lambda name: {
-                    "Tip": (x - 10, y),
-                    "Sleeve": (x - 10, y + 10),
-                    "Switch": (x - 10, y + 5),
-                }.get(name, (0, 0))
+                    "1": (x - 10, y),
+                    "2": (x - 10, y + 10),
+                    "3": (x - 10, y + 5),
+                }[name]
             elif "PMOS" in str(symbol) or "Q_PMOS" in str(symbol):
                 # P-FET pins
                 comp.pin_position.side_effect = lambda name: {
@@ -2932,7 +2935,8 @@ class TestI2CPullupsMocked:
         """Verify I2C pull-ups port definitions."""
         pullups = I2CPullups(mock_schematic, x=100, y=100)
         assert "VCC" in pullups.ports
-        assert "GND" in pullups.ports
+        # Without filter caps there is no ground connection point (#7507)
+        assert "GND" not in pullups.ports
         assert "SDA" in pullups.ports
         assert "SCL" in pullups.ports
 

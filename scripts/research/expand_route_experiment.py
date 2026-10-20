@@ -148,12 +148,17 @@ class Board:
     #: (``06b``: ``LVDS\\d_[PN]``). Only the ``pairs`` subcommand honours it.
     strip_nets: str | None = None
     #: Repo-relative committed ``net_class_map.json`` handed to ``kct route
-    #: --net-class-map`` by the ``pairs`` subcommand, so the router and
-    #: ``kct check`` resolve the same per-pair thresholds (Issue #6442).
+    #: --net-class-map`` by the ``pairs`` and ``route`` subcommands, so the
+    #: router and ``kct check`` resolve the same per-pair thresholds
+    #: (Issues #6442, #6829).
     net_class_map: str | None = None
     #: ``True`` for rows that only make sense under ``pairs`` (they carry
     #: copper the ``route`` scaler would tear off its pads, or need a strip).
     pair_bench_only: bool = False
+    #: Track/via keepout rule areas written into the staged routing input (not
+    #: into the committed board): ``(name, layers, ((x, y), ...))`` in board
+    #: file coordinates. Copper pours stay allowed. ``pairs`` only (Issue #7498).
+    route_keepouts: tuple[tuple[str, tuple[str, ...], tuple[tuple[float, float], ...]], ...] = ()
 
 
 # The chorus fixture lives in a sibling repository. ``boards/external`` is a
@@ -189,9 +194,31 @@ BOARDS: dict[str, Board] = {
         "03",
         "boards/03-usb-joystick/output/usb_joystick.kicad_pcb",
         layers=4,
-        # Used by ``pairs`` only (``route`` ignores it): USB_D carries a 25 %
-        # continuity threshold here that the classifier's own map does not.
+        # Route under the same tier-1 sidecars the recipe fills with, so the
+        # plan's pour links hold under the recipe's 0.3 mm native zone
+        # clearance and not just under a plain ``jlcpcb`` fill (Issue #7026).
+        # ``--native-zone-clearance`` writes that native block before the fill;
+        # the tier alone does not (Issue #7026).
+        kct_args=("--manufacturer", "jlcpcb-tier1", "--native-zone-clearance"),
+        manufacturer="jlcpcb-tier1",
+        # USB_D carries a 25 % continuity threshold here that the classifier's
+        # own map does not, and a map-less route holds it to the generic
+        # 0.5 mm skew default instead of USB2_FS (Issue #6829).
         net_class_map="boards/03-usb-joystick/output/net_class_map.json",
+        # Issue #7498: C11.2 (GND, 131.275/92.5, 0.9 x 0.95 mm) needs its lower
+        # thermal spoke to reach pour.  A track at y=93.5 under the pad leaves
+        # only ~0.1 mm of pour between the pad and the track after the 0.3 mm
+        # native carve, so the fill starves the spoke (``starved_thermal``).
+        # Keep F.Cu tracks/vias off the strip from the pad's lower edge to
+        # y=93.65; the reviewed plan's JOY_Y_RAW run at y=93.8 (edge 93.7)
+        # stays outside it.
+        route_keepouts=(
+            (
+                "c11_pad2_spoke_7498",
+                ("F.Cu",),
+                ((130.825, 92.975), (131.725, 92.975), (131.725, 93.65), (130.825, 93.65)),
+            ),
+        ),
     ),
     # Diff-pair benchmark rows (Issue #6442; ``pairs`` subcommand only).
     # 06b: the committed LVDS board with every ``LVDS<n>_[PN]`` track and via
@@ -237,6 +264,21 @@ BOARDS: dict[str, Board] = {
         note="out-of-tree fixture; main-pass recipe only",
     ),
 }
+
+
+def net_class_map_args(board: Board) -> list[str]:
+    """``--net-class-map <committed map>`` for *board*, or ``[]`` if it has none.
+
+    A board that declares a committed map must route with it: without it the
+    router falls back to the generic pair limits (Issue #6829). A declared map
+    that is missing on disk is a loud failure, never a silent generic fallback.
+    """
+    if not board.net_class_map:
+        return []
+    path = REPO / board.net_class_map
+    if not path.is_file():
+        raise FileNotFoundError(f"board {board.key}: committed net-class map not found: {path}")
+    return ["--net-class-map", str(path)]
 
 
 def resolve_board_path(board: Board, chorus_pcb: Path | None = None) -> Path | None:
@@ -1440,6 +1482,7 @@ def run_one(
     log = run_dir / "route.log"
     extra = [
         *board.kct_args,
+        *net_class_map_args(board),
         *extra_args,
         "--seed",
         str(seed),
@@ -1888,7 +1931,7 @@ def _cmd_plan(args) -> int:
                 row["scale_report"] = report.to_dict()
                 cmd = [sys.executable, "-m", "kicad_tools.cli", "route", str(inp)]
                 cmd += ["-o", str(run_dir / "unused.kicad_pcb"), "--dry-run", "--no-cache"]
-                cmd += [*board.kct_args, *args.extra.split()]
+                cmd += [*board.kct_args, *net_class_map_args(board), *args.extra.split()]
                 cmd += grid_args(scale, args.grid_policy, args.grid_mm)
                 done = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, timeout=300)
                 row["cmd"] = " ".join(cmd[1:])

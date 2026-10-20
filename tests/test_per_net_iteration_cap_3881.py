@@ -50,6 +50,7 @@ from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules
+from tests.route_cli import kct_route
 
 requires_cpp = pytest.mark.skipif(
     not is_cpp_available(),
@@ -117,63 +118,27 @@ class TestNormalizeDefaultsPerNetCap:
 
 
 class TestPerNetCapForwarding:
-    """``--per-net-iterations`` must flow through the two-parser CLI shim."""
-
-    def _args(self, **overrides) -> SimpleNamespace:
-        args = SimpleNamespace(
-            pcb="test.kicad_pcb",
-            output=None,
-            strategy="negotiated",
-            skip_nets=None,
-            grid="auto",
-            trace_width=0.2,
-            clearance=0.15,
-            via_drill=0.3,
-            via_diameter=0.6,
-            mc_trials=10,
-            iterations=15,
-            verbose=False,
-            dry_run=True,
-            quiet=True,
-            power_nets=None,
-            deterministic_budget=False,
-            per_net_iterations=0,
-        )
-        for k, v in overrides.items():
-            setattr(args, k, v)
-        return args
+    """``--per-net-iterations`` must reach the router through ``kct route``."""
 
     def test_forwarded_when_set(self):
-        from kicad_tools.cli.commands.routing import run_route_command
+        forwarded, args = kct_route(["test.kicad_pcb", "--per-net-iterations", "750000"])
+        assert forwarded[forwarded.index("--per-net-iterations") + 1] == "750000"
+        assert args.per_net_iterations == 750_000
 
-        args = self._args(per_net_iterations=750_000)
-        with mock.patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-            sub_argv = mock_main.call_args[0][0]
-        assert "--per-net-iterations" in sub_argv
-        idx = sub_argv.index("--per-net-iterations")
-        assert sub_argv[idx + 1] == "750000"
-
-    def test_not_forwarded_when_default(self):
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        args = self._args(per_net_iterations=0)
-        with mock.patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-            sub_argv = mock_main.call_args[0][0]
-        assert "--per-net-iterations" not in sub_argv
+    def test_not_forwarded_when_unset(self):
+        forwarded, args = kct_route(["test.kicad_pcb"])
+        assert "--per-net-iterations" not in forwarded
+        assert args.per_net_iterations == 0
 
     def test_flag_on_both_parsers(self):
-        """``--per-net-iterations`` lives on both inner and outer parsers."""
+        """``--per-net-iterations`` is on the ``kct route`` parser and ``route_cmd.main``."""
         import argparse
 
-        from kicad_tools.cli.parser import create_parser
+        from kicad_tools.cli.parser import create_parser, resolve_passthrough
         from kicad_tools.cli.route_cmd import main as route_main
 
-        # Outer parser flags.
-        main_parser = create_parser()
+        # ``kct route`` parser flags (the passthrough stub resolved, #7017).
+        main_parser = resolve_passthrough(create_parser())
         outer: set[str] = set()
         for action in main_parser._actions:
             choices = getattr(action, "choices", None)

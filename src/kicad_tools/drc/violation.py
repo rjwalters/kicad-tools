@@ -68,6 +68,7 @@ def _init_type_category_map() -> None:
             # fixable nature (serpentine tuning of the shorter members up
             # to the longest, Phase 2E's domain), categorized identically.
             ViolationType.MATCH_GROUP_LENGTH_SKEW: ViolationCategory.ROUTING,
+            ViolationType.ROUTING_POLICY: ViolationCategory.ROUTING,
             ViolationType.TRACK_WIDTH: ViolationCategory.ROUTING,
             ViolationType.TRACK_ANGLE: ViolationCategory.ROUTING,
             ViolationType.DIMENSION_TRACE_WIDTH: ViolationCategory.ROUTING,
@@ -194,6 +195,10 @@ class ViolationType(Enum):
     # identity is the group's *name* (Phase 1B convention), not a P/N
     # name tuple.
     MATCH_GROUP_LENGTH_SKEW = "match_group_length_skew"
+    # Per-net routing policy (Issue #6044): a net's declared
+    # ``max_vias_per_net`` / ``length_constraint.max_length``, or a sensitive
+    # class with no policy under ``--require-routing-policy``.
+    ROUTING_POLICY = "routing_policy"
     # Differential-pair routing continuity (Issue #2640, Epic #2556 Phase 2G).
     # Fires when an *engaged* differential pair's coupled fraction (the
     # share of P's routed length whose nearest point on N is within the
@@ -262,6 +267,8 @@ class ViolationType(Enum):
     SILK_OVERLAP = "silk_overlap"
     SILKSCREEN_LINE_WIDTH = "silkscreen_line_width"
     SILKSCREEN_TEXT_HEIGHT = "silkscreen_text_height"
+    SILKSCREEN_TEXT_THICKNESS = "silkscreen_text_thickness"
+    SILK_REF_OBSCURED = "silk_ref_obscured"
     SILKSCREEN_OVER_PAD = "silkscreen_over_pad"
     # Coverage advisory, not a board defect (Issue #5811): a silk primitive
     # kct's clearance geometry does not model (circle/arc) was skipped, so
@@ -392,6 +399,8 @@ class ViolationType(Enum):
             # above).  This entry is the only defense; do NOT delete it
             # as "redundant".
             "match_group_length_skew": cls.MATCH_GROUP_LENGTH_SKEW,
+            # Issue #6044.  Explicit: the fuzzy fallback would yield UNKNOWN.
+            "routing_policy": cls.ROUTING_POLICY,
             # Differential-pair routing continuity (Issue #2640, Epic #2556
             # Phase 2G).  MUST be aliased explicitly even though the
             # rule_id string ``"diffpair_routing_continuity"`` does NOT
@@ -427,6 +436,8 @@ class ViolationType(Enum):
             # silkscreen rules from validate silkscreen checker
             "silkscreen_line_width": cls.SILKSCREEN_LINE_WIDTH,
             "silkscreen_text_height": cls.SILKSCREEN_TEXT_HEIGHT,
+            "silkscreen_text_thickness": cls.SILKSCREEN_TEXT_THICKNESS,
+            "silk_ref_obscured": cls.SILK_REF_OBSCURED,
             "silkscreen_over_pad": cls.SILKSCREEN_OVER_PAD,
             # solder mask rules from validate solder_mask checker
             "solder_mask_clearance": cls.SOLDER_MASK_CLEARANCE,
@@ -466,6 +477,21 @@ class ViolationType(Enum):
             "copper_sliver": cls.COPPER_SLIVER,
             "physical_copper_gap": cls.PHYSICAL_COPPER_GAP,
             "physical_copper_gap_incomplete": cls.PHYSICAL_COPPER_GAP_INCOMPLETE,
+            # kicad-cli 10 DRC type strings that ``kct drc --mfr`` judges
+            # against fab floors (Issue #7170).  Explicit, because the fuzzy
+            # fallback mis-routes every one of them: ``annular_width``,
+            # ``hole_to_hole`` and ``via_diameter`` fell to UNKNOWN (so the
+            # --mfr annular branch never fired on real kicad-cli output),
+            # ``hole_clearance`` (hole-to-copper) matched the generic
+            # ``"clearance"`` and was judged against the copper-to-copper
+            # floor, and ``drill_out_of_range`` only matched ``"drill"`` by
+            # accident.  tests/test_drc_mfr_not_checked_7170.py pins all 67
+            # kicad-cli 10.0.6 keys; do NOT delete these as "redundant".
+            "annular_width": cls.VIA_ANNULAR_WIDTH,
+            "hole_to_hole": cls.HOLE_TO_HOLE_CLEARANCE,
+            "via_diameter": cls.DIMENSION_VIA_DIAMETER,
+            "hole_clearance": cls.DRILL_CLEARANCE,
+            "drill_out_of_range": cls.DRILL_HOLE_TOO_SMALL,
         }
 
         alias_match = _ALIASES.get(s_lower)

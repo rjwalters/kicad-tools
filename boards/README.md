@@ -30,19 +30,22 @@ kct build boards/01-voltage-divider --mfr jlcpcb
 
 | # | Board | Status | Components | Nets | Notes |
 |---|-------|--------|------------|------|-------|
-| 00 | [Simple LED](00-simple-led/) | Assembly ready | 3 | 3 | Manual D1/J1 after SMT. |
-| 01 | [Voltage Divider](01-voltage-divider/) | Assembly ready | 4 | 3 | Manual J1/J2 after SMT. |
-| 02 | [Charlieplex LED](02-charlieplex-led/) | Assembly ready | 19 | 12 | Real ATtiny85, compiled firmware; manual MCU and headers. |
-| 03 | [USB Joystick](03-usb-joystick/) | Assembly ready | 38 | 27 | Real ATmega32U4 HID circuit; four-layer filled/capped via process. |
-| 04 | [STM32 Dev Board](04-stm32-devboard/) | Assembly ready | 17 | 12 | Correct MCP1825S regulator; paid 0.15 mm mechanical drills. |
-| 05 | [BLDC Motor Controller](05-bldc-motor-controller/) | Assembly ready | 42 | 37 | DRV8313 + ATmega328P; firmware and conservative bring-up limits supplied. |
+| 00 | [Simple LED](00-simple-led/) | Assembly ready | 3 | 3 | THT parts fab-assembled (procurement review). |
+| 01 | [Voltage Divider](01-voltage-divider/) | Assembly ready | 4 | 3 | THT parts fab-assembled (procurement review). |
+| 02 | [Charlieplex LED](02-charlieplex-led/) | Assembly ready · 1 known issue | 19 | 12 | Real ATtiny85, compiled firmware; THT MCU and headers fab-assembled (procurement review). Advisory [#7220] (vias at R3/R4 pad edges). |
+| 03 | [USB Joystick](03-usb-joystick/) | **Not ready** (known defect) | 38 | 27 | Real ATmega32U4 HID circuit; four-layer filled/capped via process. Defect [#7250]: USB pair 71.6 Ω vs the 90 Ω spec. Advisory [#7220]. |
+| 04 | [STM32 Dev Board](04-stm32-devboard/) | Assembly ready · 1 known issue | 17 | 12 | Correct MCP1825S regulator; paid 0.15 mm mechanical drills (exception [#6269], ruling #7147). |
+| 05 | [BLDC Motor Controller](05-bldc-motor-controller/) | Assembly ready · 2 known issues | 42 | 37 | DRV8313 + ATmega328P; firmware and conservative bring-up limits supplied. Order 1 oz inner copper (advisory [#7209]). Advisory [#7220]. |
 | 06 | [Four-channel LVDS demo](06-diffpair-test/) | Assembly ready | 36 | 18 | Real SN65LVDS1/2, four-layer stack with outer-layer signals; three manual headers. |
 | 07 | [8 MiB SDRAM exerciser](07-matchgroup-test/) | Assembly ready | 43 | 55 | STM32F429 + IS42S16400J, six layers, 48 MHz SDRAM; legacy Epic [#2661] fixture archived. |
 | 08 | [Precision acquisition](08-precision-acquisition/) | Planned | — | — | Four simultaneous differential ADC channels with USB streaming. |
 | 09 | [USB-C PD power supply](09-usbc-pd-power/) | Development | 47 | 32 | Real PD sink, 5 V / 3 A target buck and Kelvin telemetry; routing/procurement pending. |
 
 Assembly readiness applies only to the exact checked source and manufacturing
-package bound by each `output/readiness.json`. Hardware testing remains pending.
+package bound by each `output/readiness.json`. Each report also records its
+board's open `known_issues` (Issue #7261): an open **defect** keeps the board
+not ready; **exceptions** and **advisories** are disclosed but keep it ready.
+`kct fleet status` shows them (`YES*` / `known: #N`). Hardware testing remains pending.
 Follow each board's fabrication process and manual-assembly instructions;
 regenerating a board requires fresh validation and export. See the
 [readiness audit](../docs/demo-readiness-2026-09-09.md) for evidence and tool issues.
@@ -251,12 +254,8 @@ evidence, which catches rails the name heuristic misses (`VREG_1V2`, `VCAP1`).
 The generators write PCBs directly, so they have to add this data
 themselves ([#5985]):
 
-- **Board 04** calls `annotate_pcb_file_pintypes(pcb_path, sch_path)` right
-  after it writes the unrouted PCB. The router merges tracks into that text,
-  so the routed PCB inherits the annotation. Its committed outputs have not
-  been regenerated yet ([#6025]).
-- **Board 09** calls it right after it writes the PCB, and its committed
-  output carries `pintype` ([#5998]). A buck converter's switch-node pin
+- **Board 09** calls `annotate_pcb_file_pintypes(pcb_path, sch_path)` right
+  after it writes the PCB, and its committed output carries `pintype` ([#5998]). A buck converter's switch-node pin
   (`SW`, `LX`, `PH`) is typed `power_out`, but `kct detect-mistakes` does not
   treat the switch node as a rail.
 - **Boards 00 and 01** call it right after they write the unrouted PCB, and
@@ -273,10 +272,23 @@ themselves ([#5985]):
   regenerated through `scripts/boards/regenerate_boards_03_04_6076.py`; copper
   is byte-identical in count and position. The two joystick mounting pads
   `J2.MP` have no schematic pin and carry none ([#6025]).
-- **Other boards** are not wired yet, and their committed outputs carry no
-  `pintype` ([#6025]). To annotate a board by hand, run this on its unrouted
-  and routed PCBs. It edits only the pads' `pinfunction`/`pintype` children
-  and keeps every other byte:
+- **Boards 04, 05 and 06** call it right after they write the unrouted PCB
+  (`generate_design.py`, `redesign/hardware.py`, `assembled-demo/generate.py`).
+  Their routed copper is reviewed and hash-bound, so it was not re-routed:
+  `scripts/boards/annotate_pintypes_6025.py` regenerates each unrouted PCB
+  with the board's generator, annotates the routed PCB in place, and swaps in
+  re-plotted copper Gerbers. It refuses any change beyond the pads'
+  `pinfunction`/`pintype` children and the Gerber `%TO.P` pad attributes.
+  `refresh_readiness.py` then re-pinned each `readiness.json` ([#6025]).
+- **Board 07**'s `real_design/build_source.py` and `build.py` annotate the
+  copies they make of the hash-bound authored and reviewed-routing fixtures,
+  which stay unannotated. `refresh_bundles_6404.py` published the routed PCB
+  `build.py` validated, with its evidence (`output/readiness/checked.*`).
+  `output/matchgroup_test.kicad_pcb` has no producer and was annotated in
+  place ([#6025]).
+- **Board 08** has no committed PCB yet. To annotate a new or external
+  board by hand, run this on its unrouted and routed PCBs. It edits only the
+  pads' `pinfunction`/`pintype` children and keeps every other byte:
 
   ```bash
   uv run kct pcb annotate-pintypes boards/04-stm32-devboard/output/stm32_devboard.kicad_pcb \
@@ -363,10 +375,9 @@ uv run python boards/00-simple-led/generate_design.py /tmp/out
 KCT_REQUIRE_SPEC=1 uv run python boards/00-simple-led/generate_design.py /tmp/out
 ```
 
-L2 is not the default because it is not currently clean across the fleet:
-`boards/01-voltage-divider/project.kct` fails semantic validation with
-`Progress: current phase 'complete' not found in phases` — a bookkeeping defect
-in the spec's `progress` block, tracked separately. All 8 boards pass L1.
+All 10 boards currently pass L0, L1 and L2 (`validate_spec` returns
+`(True, [])` for every `boards/*/project.kct`). Whether L2 should become the
+default is a separate decision; it remains strict-mode only.
 
 **Non-goal — this is not a schema-completeness check.** The precondition asks
 only *"does this board carry captured intent that parses?"*. It deliberately
@@ -490,3 +501,8 @@ worktrees — they dangle unless the sibling repos are checked out locally.
 
 - [examples/](../examples/) - Feature-specific demos (BOM, DRC, placement, etc.)
 - [examples/04-autorouter/](../examples/04-autorouter/) - Routing strategy comparisons
+
+[#6269]: https://github.com/rjwalters/kicad-tools/issues/6269
+[#7209]: https://github.com/rjwalters/kicad-tools/issues/7209
+[#7220]: https://github.com/rjwalters/kicad-tools/issues/7220
+[#7250]: https://github.com/rjwalters/kicad-tools/issues/7250

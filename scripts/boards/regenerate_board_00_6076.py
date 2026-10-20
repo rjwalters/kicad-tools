@@ -34,8 +34,8 @@ and mapping helpers it reuses.
    ``kct check --mfr jlcpcb``, ``kct net-status``, ``kct validate --sync``; and
    ``read_readiness()`` on the board itself.
 
-``output/erc_report.json`` and ``output/drc_report.json`` have no producer
-(the recipe no longer writes them) and are left as they are.
+``output/erc_report.json`` and ``output/drc_report.json`` had no producer
+(the recipe no longer writes them); issue #7190 deleted them.
 
 Rerunning is idempotent: once regenerated, every UUID map is the identity.
 
@@ -320,4 +320,6 @@ if __name__ == "__main__":
         [os.environ.get("KICAD_CLI_DIR", "/Applications/KiCad/KiCad.app/Contents/MacOS")]
         + os.environ.get("PATH", "").split(os.pathsep)
     )
-    raise SystemExit(main())
+    from kicad_tools.cli.kicad_toolchain import run_on_evidence_toolchain
+
+    raise SystemExit(run_on_evidence_toolchain(main, [REPO_ROOT]))

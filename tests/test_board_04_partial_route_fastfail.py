@@ -99,6 +99,18 @@ class TestBoard04PartialRouteFastFail:
         )
 
     def test_full_route_still_reaches_lvs_gate(self, monkeypatch, tmp_path: Path) -> None:
+        # Issue #6724: route_pcb is stubbed, so the routed board is never
+        # written and a real kicad-cli cannot load it.  That load failure
+        # used to read as a clean native DRC; stub the leg as clean instead.
+        from kicad_tools.drc.geometric import GeometricDRCResult, SavedFillCheck
+
+        monkeypatch.setattr(
+            "kicad_tools.recipes.gate.run_geometric_drc",
+            lambda *a, **k: GeometricDRCResult(ran=True),
+        )
+        monkeypatch.setattr(
+            "kicad_tools.recipes.gate.check_saved_fill", lambda *a, **k: SavedFillCheck(ran=True)
+        )
         module = _load_board04_module()
         self._stub_pipeline_prefix(module, monkeypatch, tmp_path)
         monkeypatch.setattr(module, "route_pcb", lambda *a, **k: True)

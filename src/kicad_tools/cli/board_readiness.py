@@ -8,6 +8,8 @@ import math
 from datetime import datetime
 from pathlib import Path
 
+from .known_issues import KNOWN_ISSUES_FILENAME, defects, validate_known_issues
+
 
 def read_readiness(board_dir: Path) -> dict:
     """Load the v1 sidecar, failing closed on missing or changed evidence.
@@ -102,6 +104,14 @@ def read_readiness(board_dir: Path) -> dict:
         }
         if not required.issubset(inputs):
             raise ValueError("Evidence omits current project or rule files")
+        if "manufacturer" in data and (
+            not isinstance(data["manufacturer"], str) or not data["manufacturer"]
+        ):
+            raise ValueError("invalid manufacturer")
+        known_issues = _bound_known_issues(data, inputs, root)
+        if data["status"] == "ready" and defects(known_issues):
+            numbers = ", ".join(f"#{entry['issue']}" for entry in defects(known_issues))
+            raise ValueError(f"Ready conflicts with known defect {numbers}")
         if data["status"] == "ready":
             if not {"kct_check", "native_drc", "artifacts", "bom"}.issubset(
                 c["name"] for c in checks
@@ -122,3 +132,65 @@ def read_readiness(board_dir: Path) -> dict:
         return {**unknown, "blockers": ["Readiness report or checked files are missing."]}
     except (OSError, ValueError, TypeError, KeyError) as exc:
         return {**unknown, "blockers": [f"Readiness needs verification: {exc}"]}
+
+
+def _bound_known_issues(data: dict, inputs: dict, root: Path) -> list[dict]:
+    """Validate ``known_issues`` and require it to match its hashed evidence (#7261).
+
+    The report itself is not hashed, so the list is also written to a
+    ``known-issues.json`` evidence file listed in ``inputs`` (whose hash was
+    checked above).  A list missing from that file, or differing from it, is
+    an edited or stale record.  A ``known-issues.json`` left in the evidence
+    folder but absent from ``inputs`` is an unbound-and-dropped record (#7323).
+    Only the record's own evidence folder(s) are scanned: ``--verify`` writes
+    to ``output/readiness-verification/`` while the committed evidence stays in
+    ``output/readiness/``, and neither folder orphans the other (#7337).
+    """
+    known_issues = validate_known_issues(data.get("known_issues"))
+    orphans = sorted(
+        rel
+        for folder in _evidence_folders(data, inputs)
+        for path in (root / folder).rglob(KNOWN_ISSUES_FILENAME)
+        if path.is_file() and (rel := path.relative_to(root).as_posix()) not in inputs
+    )
+    if orphans:
+        raise ValueError(f"{orphans[0]} is not listed in inputs (orphaned known-issues evidence)")
+    bound = [name for name in inputs if Path(name).name == KNOWN_ISSUES_FILENAME]
+    if len(bound) > 1:
+        raise ValueError("known_issues is bound to more than one evidence file")
+    if not bound:
+        if known_issues:
+            raise ValueError("known_issues is not bound to hashed evidence")
+        return known_issues
+    recorded = json.loads((root / bound[0]).read_text())
+    if (
+        not isinstance(recorded, dict)
+        or validate_known_issues(recorded.get("known_issues")) != known_issues
+    ):
+        raise ValueError("known_issues differs from its hashed evidence")
+    return known_issues
+
+
+def _evidence_folders(data: dict, inputs: dict) -> set[str]:
+    """Board-relative evidence folders the record itself names (#7337).
+
+    The folder of an evidence path is its first directory below ``output/``
+    (``output/readiness/refilled-native/x.json`` -> ``output/readiness``), or
+    its first directory when the board has no ``output/`` folder.  Folders come
+    from the ``evidence`` map and from any bound ``known-issues.json``; a
+    record naming neither falls back to the default ``output/readiness``.
+    """
+    evidence = data.get("evidence")
+    names = (
+        [v for v in evidence.values() if isinstance(v, str)] if isinstance(evidence, dict) else []
+    )
+    names += [n for n in inputs if Path(n).name == KNOWN_ISSUES_FILENAME]
+    folders = set()
+    for name in names:
+        parts = Path(name).parts
+        if ".." in parts or Path(name).is_absolute():
+            continue
+        depth = 2 if parts[:1] == ("output",) else 1
+        if len(parts) > depth:
+            folders.add(Path(*parts[:depth]).as_posix())
+    return folders or {"output/readiness"}

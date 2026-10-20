@@ -49,17 +49,8 @@ loom_test_require_daemon_bin "$SCRIPTS_DIR" "worktree-sparse" "worktree-existing
 
 WORKTREE_SH="$SCRIPTS_DIR/worktree.sh"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 YELLOW='\033[1;33m'
-NC='\033[0m'
-
-TESTS_RUN=0
-TESTS_PASSED=0
-TESTS_FAILED=0
-
-pass() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1)); echo -e "  ${GREEN}PASS${NC}: $1"; }
-fail() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1)); echo -e "  ${RED}FAIL${NC}: $1"; }
 
 assert_file_exists() {
     if [[ -f "$1" ]]; then pass "$2"; else fail "$2 (expected file: $1)"; fi

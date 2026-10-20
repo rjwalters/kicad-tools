@@ -30,22 +30,21 @@ loom-daemon curation-complete --repo owner/repo --issue N \
   --completion-id UUID --workspace-root MAIN_WORKSPACE
 ```
 
-Generate a fresh UUID once for this completed pass; retain it for retries.
-A genuine re-curation uses a new UUID even when numeric values are unchanged.
-Use the actual model/runtime of this Curator, never a Builder or a later tick.
-Daemon-mediated sessions expose `LOOM_CURATION_MODEL` and
-`LOOM_CURATION_RUNTIME` from their admitted launch; attended sessions supply
-their known actual identities. Use `unknown` for unavailable provenance; the fact carries JSON null and no
-model/runtime attribute for that field. Never guess, and never change readiness
-or strand otherwise complete curation because provenance is unknown.
-The workspace root must be the main checkout monitored by the daemon. Both
-attended and daemon-mediated curation use this same command and producer.
+The command is the points gate and label writer only; it writes no telemetry.
+`--model`, `--runtime` and `--completion-id` are still accepted but ignored, so
+existing invocations keep working. Pass your actual model/runtime (or `unknown`)
+and any UUID; never guess, and never change readiness or strand otherwise
+complete curation over them. The workspace root must be the main checkout
+monitored by the daemon.
 
 The command fetches the current body and rejects missing, malformed, duplicate
-or invalid concrete estimates; backticks and fenced examples do not count.
-On fetch/validation/persistence failure, keep the curation claim and retry or
-report the failure. Never announce completion without its journalled fact.
-The durable envelope dates the completion, not later export; normal daemon
-backfill delivers it to configured telemetry queues without new credentials.
-Export retries keep the same UUID, timestamp and fact identity. Retrying a
-successful completion does not reread its numeric values into a new fact.
+or invalid points markers; backticks and fenced examples do not count. On
+fetch/validation failure, keep the curation claim and retry or report the
+failure. Retrying is safe: it resolves the points again and re-applies the
+labels idempotently.
+
+The `issue.estimate` fact is the daemon's job, not yours (#12118). When it
+observes an open, recently updated issue carrying `loom:curated` and a valid
+`loom:estimate` marker, it journals the fact once, keyed on repo, issue and the
+marker values; the Curator's model and runtime are not observable there, so the
+fact carries them as null. A malformed or absent marker emits nothing.

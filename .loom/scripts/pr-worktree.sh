@@ -9,20 +9,20 @@
 # ordinary Loom-issue PR (branch `feature/issue-<N>`) whenever no builder
 # `issue-<N>` worktree already exists locally at review time — see
 # `defaults/.claude/commands/loom/judge.md`'s "Worktree-Aware Code Access"
-# section (#6264). In that shape the intended/documented case for
-# `feature/issue-<N>` branches is `worktree.sh <ISSUE_NUMBER>` (below); this
-# script's own worktree/branch-name mismatch (a `pr-<N>` directory holding a
-# `feature/issue-<N>` branch) is exactly why a leftover review worktree could
-# be missed by `merge-pr.sh`'s cleanup — fixed there, not here, by #6264.
+# section (#6264, #11194): it is the Judge's supported review checkout for any
+# PR shape. This script's worktree/branch-name mismatch (a `pr-<N>` directory
+# holding a `feature/issue-<N>` branch) is exactly why a leftover review
+# worktree could be missed by `merge-pr.sh`'s cleanup — fixed there, not here,
+# by #6264.
 #
 # Typical uses:
 #   - External-fork PRs (e.g., jperla/loom:fix/claude-code-2.1-compat)
 #   - Ad-hoc branch names that don't include a Loom issue number
 #   - A Judge/Doctor review of a Loom-issue PR with no local builder worktree
 #
-# For Loom-issue PRs whose branch IS `feature/issue-<N>` AND a builder
-# worktree may already exist, prefer:
-#   ./.loom/scripts/worktree.sh <ISSUE_NUMBER>
+# If a builder `issue-<N>` worktree already holds the PR's branch, this script
+# exits 1 naming it; reuse that worktree (after checking it matches the PR)
+# rather than creating another checkout.
 #
 # What it does:
 #   1. Fetches the PR's branch into a local tracking branch via `gh pr checkout`
@@ -81,12 +81,12 @@ Loom PR Worktree Helper
 
 Usage: ./.loom/scripts/pr-worktree.sh <PR_NUMBER>
 
-Creates an isolated worktree at .loom/worktrees/pr-<PR_NUMBER>/ for a PR
-whose branch doesn't fit the `feature/issue-<N>` convention (typically
-external-fork PRs). The PR's branch is checked out inside the worktree —
-never in the orchestrator's main worktree.
+Checks the PR out in .loom/worktrees/pr-<PR_NUMBER>/ (reused if present), never
+in the main worktree, when no builder issue-<N> worktree holds its branch: the
+Judge's supported review checkout for any PR shape.
 
-For Loom-issue PRs (branch = feature/issue-<N>), use worktree.sh instead.
+If another worktree holds the branch, exits 1 and names the holder; use it or
+stop. Never invent a judge-* directory or run raw `git worktree add` instead.
 
 Exit codes:
   0 = worktree ready at .loom/worktrees/pr-<PR_NUMBER>/
@@ -133,17 +133,6 @@ fi
 # `git fetch origin -- "$DEFAULT_BRANCH"` below can never receive one.)
 
 WORKTREE_PATH="$WORKTREE_ROOT_DIR/pr-$PR_NUMBER"
-
-# Attended live output for the issue this PR closes (#10120): an attended Judge
-# never claims, so this checkout is where its output starts publishing. Every
-# decision (only exactly one closing issue, subagents only, a silent no-op when
-# live output is off) lives in `loom-daemon live-output-attend --pr`; this file
-# is a `contract` entry and admits no logic. Never fails the checkout.
-# requires-daemon: live-output-attend optional   #10120 — an absent or older binary (no `--pr`) just publishes nothing; output is discarded either way
-# shellcheck source=lib/locate-daemon-bin.sh
-source "$(dirname "${BASH_SOURCE[0]}")/lib/locate-daemon-bin.sh" 2>/dev/null || true
-_LD_BIN="$(loom_resolve_self_daemon_bin 2>/dev/null || true)"
-[[ -z "$_LD_BIN" ]] || "$_LD_BIN" live-output-attend --pr "$PR_NUMBER" --workspace "$REPO_ROOT" >/dev/null 2>&1 || true
 
 # If the worktree already exists, treat it as reusable. The doctor may
 # re-enter for the same PR across multiple iterations.

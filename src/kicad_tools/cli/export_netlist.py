@@ -310,9 +310,17 @@ def export_netlist(
     ]
 
     try:
+        # Issue #6724: a netlist left over from an earlier run must not pass
+        # for this one's output when kicad-cli fails or is killed.
+        output_path.unlink(missing_ok=True)
         result = subprocess.run(cmd, capture_output=True, text=True)
 
-        if not output_path.exists():
+        if result.returncode != 0:
+            from kicad_tools.drc.geometric import describe_returncode
+
+            detail = (result.stderr or "").strip()
+            return False, describe_returncode(result.returncode) + (f": {detail}" if detail else "")
+        if not output_path.exists() or output_path.stat().st_size == 0:
             return False, result.stderr or "Netlist export produced no output"
 
         return True, ""

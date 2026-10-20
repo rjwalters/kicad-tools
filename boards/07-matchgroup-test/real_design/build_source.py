@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import re
 import shutil
 import sys
 import tempfile
@@ -29,11 +30,57 @@ def circuit_identity(pcb: PCB) -> dict:
         if footprint.reference in result:
             raise ValueError(f"Duplicate reference: {footprint.reference}")
         result[footprint.reference] = {
-            "footprint": footprint.name,
+            # The authored fixture is hash-bound and carries bare names, while
+            # the fresh PCB carries Library:Footprint lib IDs (Issue #7213).
+            "footprint": footprint.name.split(":")[-1],
             "value": footprint.value,
             "pads": sorted((pad.number, pad.net_name or "") for pad in footprint.pads),
         }
     return result
+
+
+def annotate_pads(pcb: Path, schematic: Path) -> int:
+    """Copy schematic pin names/electrical types onto ``pcb``'s pads (issue #6025).
+
+    ``kct detect-mistakes`` reads the ``(pintype ...)`` evidence for rails.
+    Every numbered pad must map to a schematic pin.
+    """
+    from kicad_tools.operations.pintype import annotate_pcb_file_pintypes
+
+    annotation = annotate_pcb_file_pintypes(pcb, schematic)
+    if annotation.missing_pads:
+        raise ValueError(f"Pads without a schematic pin: {annotation.missing_pads}")
+    return annotation.annotated
+
+
+def apply_library_ids(pcb: Path, schematic: Path) -> int:
+    """Write each schematic symbol's ``Library:Footprint`` ID onto ``pcb`` (issue #7213).
+
+    The hash-bound fixtures carry bare footprint names, which kicad-cli reports
+    as ``footprint_symbol_mismatch`` against the schematic's Footprint field.
+    Only the footprint name atom changes; every other byte is kept. A footprint
+    whose reference has no schematic footprint, or whose footprint name differs
+    from the schematic's, is an error.
+    """
+    from kicad_tools.schema.schematic import Schematic
+
+    lib_ids = {sym.reference: sym.footprint for sym in Schematic.load(schematic).symbols}
+    text = pcb.read_text(encoding="utf-8")
+    heads = list(re.finditer(r'^\t\(footprint "([^"]+)"', text, re.M))
+    edits = []
+    for i, head in enumerate(heads):
+        end = heads[i + 1].start() if i + 1 < len(heads) else len(text)
+        ref = re.search(r'\(property "Reference" "([^"]+)"', text[head.start() : end])
+        lib_id = lib_ids.get(ref.group(1)) if ref else None
+        if not lib_id or ":" not in lib_id:
+            raise ValueError(f"No schematic library footprint for {ref and ref.group(1)}")
+        if lib_id.split(":", 1)[1] != head.group(1).split(":")[-1]:
+            raise ValueError(f"{ref.group(1)}: {head.group(1)} differs from schematic {lib_id}")
+        edits.append((head.start(1), head.end(1), lib_id))
+    for start, end, lib_id in reversed(edits):
+        text = text[:start] + lib_id + text[end:]
+    pcb.write_text(text, encoding="utf-8")
+    return len(edits)
 
 
 def build(output: Path) -> dict:
@@ -69,6 +116,11 @@ def build(output: Path) -> dict:
                 shutil.copy2(path, output / path.name)
         for name in manifest["sha256"]:
             shutil.copy2(fixture / name, output / name)
+        # Issue #6025: the authored fixture is hash-bound and immutable, so the
+        # schematic pin names/types are carried onto the pads of the copy,
+        # the first unrouted PCB this recipe writes.
+        annotate_pads(output / "sdram_demo.kicad_pcb", output / "sdram_demo.kicad_sch")
+        apply_library_ids(output / "sdram_demo.kicad_pcb", output / "sdram_demo.kicad_sch")
         constraints = json.loads((output / "sdram_constraints.json").read_text())
         constraints.update(stackup=manifest["stackup"], trace_width_mm=0.18)
         (output / "sdram_constraints.json").write_text(json.dumps(constraints, indent=2) + "\n")

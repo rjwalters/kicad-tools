@@ -1,8 +1,8 @@
 ---
 title: "bldc_controller_routed"
 subtitle: "Design Report"
-author: "kicad-tools 0.20.0"
-date: "Rev 1 | 2026-09-14 | jlcpcb"
+author: "kicad-tools 0.23.0"
+date: "Rev 1 | 2026-10-19 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -20,7 +20,7 @@ header-includes:
 | Layers | 4 copper (F.Cu, In1.Cu, In2.Cu, B.Cu) |
 | Footprints | 42 (36 SMD, 6 THT, 0 other) |
 | Nets | 37 |
-| Traces | 8114 segments |
+| Traces | 8119 segments |
 | Vias | 136 |
 | Board Size | 70.0 x 90.0 mm |
 
@@ -50,10 +50,6 @@ Sensored BLDC Controller
 |----------|---------|
 | SPI | MISO, MOSI, SCK |
 
-### Power Architecture
-
-**Power Rails**: PWR_FLAG
-
 ## Assembly Notes
 
 1 fine-pitch component; 2 thermal pads; 4 polarized components
@@ -62,19 +58,6 @@ Sensored BLDC Controller
 - **Thermal pads**: 2 -- verify solder paste apertures
 - **Polarized components**: 4 -- check orientation markings
 
-## Hand-Solder (THT) Components
-
-The following 6 through-hole components are **excluded from the SMT pick-and-place file** and must be hand-soldered (or wave/selective-soldered) after SMT assembly. They appear in the BOM for sourcing.
-
-| Value | Package | Qty | References |
-|-------|---------|-----|------------|
-| 12-24V INPUT | PinHeader_1x02_P2.54mm_Vertical | 1 | J1 |
-| MOTOR ABC | PinHeader_1x03_P2.54mm_Vertical | 1 | J2 |
-| HALL | PinHeader_1x06_P2.54mm_Vertical | 1 | J3 |
-| AVR ISP | PinHeader_2x03_P2.54mm_Vertical | 1 | J4 |
-| RUN SWITCH | PinHeader_1x02_P2.54mm_Vertical | 1 | J5 |
-| 10k | Potentiometer_Bourns_3296W_Vertical | 1 | RV1 |
-
 ## ERC Status
 
 | Metric | Count |
@@ -82,8 +65,7 @@ The following 6 through-hole components are **excluded from the SMT pick-and-pla
 | Errors | 0 |
 | Warnings | 0 |
 
-**Status**: SKIPPED -- ERC skipped by user request
-
+**Status**: PASS
 
 \newpage
 
@@ -165,15 +147,18 @@ The following 6 through-hole components are **excluded from the SMT pick-and-pla
 
 \newpage
 
-## DRC Status
+## DRC Status (`--mfr jlcpcb` rules)
 
 | Metric | Count |
 |--------|-------|
 | Errors | 0 |
+| Errors: kct (`--mfr jlcpcb` rules) | 0 |
+| Errors: kicad-cli (geometric) | 0 |
 | Warnings | 0 |
 | Blocking | 0 |
 
 **Status**: PASS
+
 
 
 \newpage
@@ -184,7 +169,7 @@ The following 6 through-hole components are **excluded from the SMT pick-and-pla
 
 ### Action Items
 
-- **[OPTIONAL]** Verify zone fill in KiCad for 2 zone-connected nets
+- **[OPTIONAL]** Refill zones to verify 2 zone-connected nets, then re-run kct audit
 - **[OPTIONAL]** Analog net: GND_SENSE — analog signal; noise-sensitive, avoid crossing digital signals
 - **[OPTIONAL]** Analog net: SENSE_IN — analog signal; noise-sensitive, avoid crossing digital signals
 

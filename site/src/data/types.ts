@@ -37,6 +37,20 @@ export interface CostEstimate {
   batch_total_usd?: number;
 }
 
+/** An open issue recorded against a board's readiness evidence (#7261). */
+export interface KnownIssue {
+  issue: number;
+  /** `defect` keeps the board from ready; `exception`/`advisory` are disclosed. */
+  kind: "defect" | "exception" | "advisory";
+  summary: string;
+  /** ISO date (YYYY-MM-DD) the issue was recorded. */
+  recorded: string;
+  /** `kct check` warning findings the issue accounts for, as sorted unique identities (#7389). */
+  warnings?: { rule: string; ref: string; pad: string }[];
+  /** `exception` only: `kct check` errors accepted, as sorted unique `{rule, at: [x_mm, y_mm]}` or location-less `{rule, item}` identities (#7355). */
+  errors?: ({ rule: string; at: [number, number] } | { rule: string; item: string })[];
+}
+
 export interface Readiness {
   schema_version?: number;
   checked_at?: string;
@@ -46,6 +60,9 @@ export interface Readiness {
   inputs?: Record<string, string>;
   checks?: Array<{ name: string; status: "passed" | "failed" | "not_run"; detail?: string }>;
   evidence?: Record<string, string>;
+  /** Fabrication tier the evidence was produced for. */
+  manufacturer?: string;
+  known_issues?: KnownIssue[];
   metrics?: {
     drc_violations?: number;
     nets_routed_pct?: number;

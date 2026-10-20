@@ -39,23 +39,32 @@ test-build-gate-timeout.sh
 test-build-rs-watchset.sh
 test-build-slot.sh
 test-cargo-test-daemon-guard.sh
+test-champion-capped-hold-routing.sh
 test-champion-ci-checks-no-checks-signal.sh
+test-champion-ci-workflow-blast.sh
 test-champion-critical-file-check.sh
 test-champion-evaluating-reclaim-trust.sh
+test-champion-epic-child-discovery.sh
+test-champion-epic-escalation-evaluations.sh
 test-champion-epic-escalation-respects-human-hold.sh
 test-champion-epic-phase-marker-normalization.sh
 test-champion-epic-verdict-marker-scope.sh
+test-champion-followon-out-of-scope.sh
 test-champion-held-pr-health-pass.sh
 test-champion-issue-promo-escalation-respects-human-hold.sh
 test-champion-markerless-park.sh
 test-champion-merge-queue-step-no-fallthrough.sh
+test-champion-out-of-band-ac-gate-switch.sh
 test-champion-pr-merge-hold-release.sh
 test-champion-pr-merge-negation-guard.sh
+test-champion-post-claim-recheck.sh
 test-champion-premise-false-close.sh
 test-champion-promotion-throughput.sh
 test-champion-standing-authorization.sh
 test-champion-targeted-modes.sh
 test-champion-terminal-verdicts.sh
+test-champion-tracker-marker-skip.sh
+test-check-cas-recheck-consistency.sh
 test-check-ci-status.sh
 test-ci-suite-manifest-installed-layout.sh
 test-check-config-no-host-paths.sh
@@ -68,7 +77,6 @@ test-check-host-sleep.sh
 test-check-defaults-version-bump.sh
 test-check-ingest-key-file.sh
 test-check-main-freshness.sh
-test-check-pipefail-early-exit.sh
 test-check-promotion-landed.sh
 test-check-quarantine-stashes.sh
 test-check-runtime-capabilities.sh
@@ -84,7 +92,6 @@ test-config-tiers-cli-migration.sh
 test-cpu-budget.sh
 test-create-issue-refuse-labels.sh
 test-create-pr-priority-labels.sh
-test-create-pr-provenance.sh
 test-create-pr-rate-limit-fallback.sh
 test-create-pr-review-gate.sh
 test-create-pr-superseded-issue.sh
@@ -119,6 +126,7 @@ test-guide-operator-hold-exclude.sh
 test-guide-plan-body-stable-sort.sh
 test-guide-pool-pressure-defer.sh
 test-guide-superseding-block-merge-state.sh
+test-guide-work-log-rotation.sh
 test-guide-unblock-merged-blocker.sh
 test-guide-work-log-debounce.sh
 test-guide-work-log-issue-out-of-order.sh
@@ -142,8 +150,8 @@ test-install-stash-scope.sh
 test-install-sync-labels.sh
 test-jq-reserved-word-args.sh
 test-judge-fallback-cap.sh
-test-judge-fanout-experiment.sh
 test-judge-payload-drop-guard.sh
+test-judge-spec-reconcile.sh
 test-judge-tdd-merge-base.sh
 test-land-resync-commit.sh
 test-live-state-sandbox.sh
@@ -159,13 +167,13 @@ test-merge-pr-app-permission-fallback.sh
 test-merge-pr-auto-merge-disabled-fallback.sh
 test-merge-pr-auto-queued-stacked-children.sh
 test-merge-pr-expected-head.sh
+test-merge-pr-feature-branch-close.sh
 test-merge-pr-pr-state.sh
 test-merge-pr-check-runs-404-fallback.sh
 test-merge-pr-daemon-version-floor.sh
 test-merge-pr-rate-limit-fallback.sh
 test-merge-pr-stacked-child-branch-delete.sh
 test-merge-pr-tree-checks.sh
-test-merge-pr-ci-result.sh
 test-merge-pr-required-checks.sh
 test-nextest-daemon-guard.sh
 test-operator-hold-routing.sh
@@ -227,6 +235,7 @@ test-sync-labels-migrate-retired.sh
 test-token-cache-affinity.sh
 test-claude-wrapper-proxy-rotation.sh
 test-sync-labels-repo-flag.sh
+test-sync-labels-write-failures.sh
 test-verdict-staleness-guard.sh
 test-verify-install-scope.sh
 test-version-bump-workflow-identity.sh
@@ -243,6 +252,7 @@ test-worktree-sentinel.sh
 
 # tests/hooks/ (repo root) — Claude-path guard suites, wired since #4769.
 tests/hooks/test-guard-destructive-dispatcher.sh
+tests/hooks/test-guard-install-matrix.sh
 tests/hooks/test-guard-destructive-cargo-and-perf.sh
 tests/hooks/test-guard-destructive-category-opt-ins.sh
 tests/hooks/test-guard-destructive-core.sh

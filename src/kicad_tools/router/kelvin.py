@@ -125,6 +125,28 @@ def _is_shunt_pad(pad: Pad) -> bool:
     return False
 
 
+def is_tieable_kelvin_terminal(pad: Pad) -> bool:
+    """May this Kelvin terminal be tied to a neighbouring pin of its package?
+
+    Issue #6799.  Two neighbouring same-net pins of one package (the
+    DRV8313's PGND1/PGND2) are treated as one terminal, because routing each
+    to the Kelvin point on its own can make the first branch seal its
+    neighbour's exit.  The router *assumes* the package joins such pins
+    inside; nothing verifies it.  Resistor pads are never tied: a
+    four-terminal shunt's force and sense pads share the net, and keeping
+    those apart is the whole point of the star.
+
+    Limitation: this predicate sees only the refdes and footprint, so it
+    cannot tell a force pin from a high-impedance sense input on a non-
+    resistor package (a regulator's OUT/SENSE, a connector's F+/S+).  If
+    such pins are adjacent on one sense-named net they are tied, and the
+    sense pin reads the force path's IR drop.  The remedy is a separate net
+    for the sense input, or a net tie at the shunt.  See the Kelvin section
+    of ``docs/guides/routing.md``.
+    """
+    return not _is_shunt_pad(pad)
+
+
 def is_sense_net_name(net_name: str) -> bool:
     """Return True when ``net_name`` reads as a current-sense / Kelvin net.
 

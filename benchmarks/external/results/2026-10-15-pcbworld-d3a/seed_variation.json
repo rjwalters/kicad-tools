@@ -1,0 +1,453 @@
+{
+  "boards": [
+    {
+      "board": "simple_led.kicad_pcb",
+      "distinct_geometries_across_seeds": 1,
+      "repeat_stable": true,
+      "runs": [
+        {
+          "error": null,
+          "exit_code": 0,
+          "geometry": {
+            "arcs": 0,
+            "segments": 5,
+            "sha256": "5878d9c3632e636203c826c44c4511783958515aa9d6ca1e2dc89da3346fed08",
+            "vias": 0
+          },
+          "label": "s1",
+          "seed": 1,
+          "wall_s": 5.32
+        },
+        {
+          "error": null,
+          "exit_code": 0,
+          "geometry": {
+            "arcs": 0,
+            "segments": 5,
+            "sha256": "5878d9c3632e636203c826c44c4511783958515aa9d6ca1e2dc89da3346fed08",
+            "vias": 0
+          },
+          "label": "s2",
+          "seed": 2,
+          "wall_s": 3.84
+        },
+        {
+          "error": null,
+          "exit_code": 0,
+          "geometry": {
+            "arcs": 0,
+            "segments": 5,
+            "sha256": "5878d9c3632e636203c826c44c4511783958515aa9d6ca1e2dc89da3346fed08",
+            "vias": 0
+          },
+          "label": "s3",
+          "seed": 3,
+          "wall_s": 3.83
+        },
+        {
+          "error": null,
+          "exit_code": 0,
+          "geometry": {
+            "arcs": 0,
+            "segments": 5,
+            "sha256": "5878d9c3632e636203c826c44c4511783958515aa9d6ca1e2dc89da3346fed08",
+            "vias": 0
+          },
+          "label": "s4",
+          "seed": 4,
+          "wall_s": 3.83
+        },
+        {
+          "error": null,
+          "exit_code": 0,
+          "geometry": {
+            "arcs": 0,
+            "segments": 5,
+            "sha256": "5878d9c3632e636203c826c44c4511783958515aa9d6ca1e2dc89da3346fed08",
+            "vias": 0
+          },
+          "label": "s5",
+          "seed": 5,
+          "wall_s": 3.78
+        },
+        {
+          "error": null,
+          "exit_code": 0,
+          "geometry": {
+            "arcs": 0,
+            "segments": 5,
+            "sha256": "5878d9c3632e636203c826c44c4511783958515aa9d6ca1e2dc89da3346fed08",
+            "vias": 0
+          },
+          "label": "s1-repeat",
+          "seed": 1,
+          "wall_s": 3.88
+        }
+      ],
+      "seed_varies": false
+    },
+    {
+      "board": "voltage_divider.kicad_pcb",
+      "distinct_geometries_across_seeds": 3,
+      "repeat_stable": true,
+      "runs": [
+        {
+          "error": null,
+          "exit_code": 0,
+          "geometry": {
+            "arcs": 0,
+            "segments": 31,
+            "sha256": "4010879438d4f339b49a9f4e890b3746e4d4ca4310396816cf149dafbf0c6de5",
+            "vias": 5
+          },
+          "label": "s1",
+          "seed": 1,
+          "wall_s": 5.04
+        },
+        {
+          "error": null,
+          "exit_code": 0,
+          "geometry": {
+            "arcs": 0,
+            "segments": 31,
+            "sha256": "4010879438d4f339b49a9f4e890b3746e4d4ca4310396816cf149dafbf0c6de5",
+            "vias": 5
+          },
+          "label": "s2",
+          "seed": 2,
+          "wall_s": 5.03
+        },
+        {
+          "error": null,
+          "exit_code": 0,
+          "geometry": {
+            "arcs": 0,
+            "segments": 31,
+            "sha256": "4010879438d4f339b49a9f4e890b3746e4d4ca4310396816cf149dafbf0c6de5",
+            "vias": 5
+          },
+          "label": "s3",
+          "seed": 3,
+          "wall_s": 5.08
+        },
+        {
+          "error": null,
+          "exit_code": 0,
+          "geometry": {
+            "arcs": 0,
+            "segments": 27,
+            "sha256": "611502332b1bb7fc36d4c82b79b1268faf70ae30ea606242e1d99621e48e46e5",
+            "vias": 3
+          },
+          "label": "s4",
+          "seed": 4,
+          "wall_s": 4.83
+        },
+        {
+          "error": null,
+          "exit_code": 0,
+          "geometry": {
+            "arcs": 0,
+            "segments": 31,
+            "sha256": "4df4334c598608ff15cd500da0632b9e233e18b5ae846d3cd2850ddf2df121f7",
+            "vias": 5
+          },
+          "label": "s5",
+          "seed": 5,
+          "wall_s": 4.99
+        },
+        {
+          "error": null,
+          "exit_code": 0,
+          "geometry": {
+            "arcs": 0,
+            "segments": 31,
+            "sha256": "4010879438d4f339b49a9f4e890b3746e4d4ca4310396816cf149dafbf0c6de5",
+            "vias": 5
+          },
+          "label": "s1-repeat",
+          "seed": 1,
+          "wall_s": 4.93
+        }
+      ],
+      "seed_varies": true
+    },
+    {
+      "board": "charlieplex_3x3.kicad_pcb",
+      "distinct_geometries_across_seeds": 1,
+      "repeat_stable": true,
+      "runs": [
+        {
+          "error": null,
+          "exit_code": 0,
+          "geometry": {
+            "arcs": 0,
+            "segments": 255,
+            "sha256": "6343dc6731734bef8881da4fed2487aa8a6f96002ab6ab2b605fb2d003a10adf",
+            "vias": 43
+          },
+          "label": "s1",
+          "seed": 1,
+          "wall_s": 57.96
+        },
+        {
+          "error": null,
+          "exit_code": 0,
+          "geometry": {
+            "arcs": 0,
+            "segments": 255,
+            "sha256": "6343dc6731734bef8881da4fed2487aa8a6f96002ab6ab2b605fb2d003a10adf",
+            "vias": 43
+          },
+          "label": "s2",
+          "seed": 2,
+          "wall_s": 58.36
+        },
+        {
+          "error": null,
+          "exit_code": 0,
+          "geometry": {
+            "arcs": 0,
+            "segments": 255,
+            "sha256": "6343dc6731734bef8881da4fed2487aa8a6f96002ab6ab2b605fb2d003a10adf",
+            "vias": 43
+          },
+          "label": "s3",
+          "seed": 3,
+          "wall_s": 57.81
+        },
+        {
+          "error": null,
+          "exit_code": 0,
+          "geometry": {
+            "arcs": 0,
+            "segments": 255,
+            "sha256": "6343dc6731734bef8881da4fed2487aa8a6f96002ab6ab2b605fb2d003a10adf",
+            "vias": 43
+          },
+          "label": "s4",
+          "seed": 4,
+          "wall_s": 57.86
+        },
+        {
+          "error": null,
+          "exit_code": 0,
+          "geometry": {
+            "arcs": 0,
+            "segments": 255,
+            "sha256": "6343dc6731734bef8881da4fed2487aa8a6f96002ab6ab2b605fb2d003a10adf",
+            "vias": 43
+          },
+          "label": "s5",
+          "seed": 5,
+          "wall_s": 58.97
+        },
+        {
+          "error": null,
+          "exit_code": 0,
+          "geometry": {
+            "arcs": 0,
+            "segments": 255,
+            "sha256": "6343dc6731734bef8881da4fed2487aa8a6f96002ab6ab2b605fb2d003a10adf",
+            "vias": 43
+          },
+          "label": "s1-repeat",
+          "seed": 1,
+          "wall_s": 60.79
+        }
+      ],
+      "seed_varies": false
+    },
+    {
+      "board": "usb_joystick.kicad_pcb",
+      "distinct_geometries_across_seeds": 4,
+      "repeat_stable": false,
+      "runs": [
+        {
+          "error": null,
+          "exit_code": 2,
+          "geometry": {
+            "arcs": 0,
+            "segments": 1767,
+            "sha256": "3b104be17b931463eca565a54c57b9edc8c528d2e57a4998e39bc4b17ae55c62",
+            "vias": 30
+          },
+          "label": "s1",
+          "seed": 1,
+          "wall_s": 167.11
+        },
+        {
+          "error": null,
+          "exit_code": 2,
+          "geometry": {
+            "arcs": 0,
+            "segments": 2432,
+            "sha256": "18f84e3a7a42ca2a5f5ca5f01d2b7d6165dfd21ebbdafc441e588e3ba72526c8",
+            "vias": 40
+          },
+          "label": "s2",
+          "seed": 2,
+          "wall_s": 164.6
+        },
+        {
+          "error": null,
+          "exit_code": 2,
+          "geometry": {
+            "arcs": 0,
+            "segments": 305,
+            "sha256": "af3905f9c1e6761644feb5e521cc06618062517d025c75c59de5a3b5ca060044",
+            "vias": 40
+          },
+          "label": "s3",
+          "seed": 3,
+          "wall_s": 169.08
+        },
+        {
+          "error": null,
+          "exit_code": 2,
+          "geometry": {
+            "arcs": 0,
+            "segments": 314,
+            "sha256": "879c61e0ec7dd372824bb7b6045e7cb43f6b9652f71dd5935b30c6217247b291",
+            "vias": 42
+          },
+          "label": "s4",
+          "seed": 4,
+          "wall_s": 171.35
+        },
+        {
+          "error": null,
+          "exit_code": 2,
+          "geometry": {
+            "arcs": 0,
+            "segments": 314,
+            "sha256": "879c61e0ec7dd372824bb7b6045e7cb43f6b9652f71dd5935b30c6217247b291",
+            "vias": 42
+          },
+          "label": "s5",
+          "seed": 5,
+          "wall_s": 170.81
+        },
+        {
+          "error": null,
+          "exit_code": 2,
+          "geometry": {
+            "arcs": 0,
+            "segments": 314,
+            "sha256": "879c61e0ec7dd372824bb7b6045e7cb43f6b9652f71dd5935b30c6217247b291",
+            "vias": 42
+          },
+          "label": "s1-repeat",
+          "seed": 1,
+          "wall_s": 170.69
+        }
+      ],
+      "seed_varies": true
+    },
+    {
+      "board": "stm32_devboard.kicad_pcb",
+      "distinct_geometries_across_seeds": 1,
+      "repeat_stable": true,
+      "runs": [
+        {
+          "error": null,
+          "exit_code": 0,
+          "geometry": {
+            "arcs": 0,
+            "segments": 112,
+            "sha256": "13936e59b3ffef1ca138bb48d4d85bfe0acaaa0ddcb53fcd85c1923b0d6a31f3",
+            "vias": 35
+          },
+          "label": "s1",
+          "seed": 1,
+          "wall_s": 18.07
+        },
+        {
+          "error": null,
+          "exit_code": 0,
+          "geometry": {
+            "arcs": 0,
+            "segments": 112,
+            "sha256": "13936e59b3ffef1ca138bb48d4d85bfe0acaaa0ddcb53fcd85c1923b0d6a31f3",
+            "vias": 35
+          },
+          "label": "s2",
+          "seed": 2,
+          "wall_s": 18.12
+        },
+        {
+          "error": null,
+          "exit_code": 0,
+          "geometry": {
+            "arcs": 0,
+            "segments": 112,
+            "sha256": "13936e59b3ffef1ca138bb48d4d85bfe0acaaa0ddcb53fcd85c1923b0d6a31f3",
+            "vias": 35
+          },
+          "label": "s3",
+          "seed": 3,
+          "wall_s": 18.12
+        },
+        {
+          "error": null,
+          "exit_code": 0,
+          "geometry": {
+            "arcs": 0,
+            "segments": 112,
+            "sha256": "13936e59b3ffef1ca138bb48d4d85bfe0acaaa0ddcb53fcd85c1923b0d6a31f3",
+            "vias": 35
+          },
+          "label": "s4",
+          "seed": 4,
+          "wall_s": 18.07
+        },
+        {
+          "error": null,
+          "exit_code": 0,
+          "geometry": {
+            "arcs": 0,
+            "segments": 112,
+            "sha256": "13936e59b3ffef1ca138bb48d4d85bfe0acaaa0ddcb53fcd85c1923b0d6a31f3",
+            "vias": 35
+          },
+          "label": "s5",
+          "seed": 5,
+          "wall_s": 18.12
+        },
+        {
+          "error": null,
+          "exit_code": 0,
+          "geometry": {
+            "arcs": 0,
+            "segments": 112,
+            "sha256": "13936e59b3ffef1ca138bb48d4d85bfe0acaaa0ddcb53fcd85c1923b0d6a31f3",
+            "vias": 35
+          },
+          "label": "s1-repeat",
+          "seed": 1,
+          "wall_s": 18.12
+        }
+      ],
+      "seed_varies": false
+    }
+  ],
+  "provenance": {
+    "backend": "cpp",
+    "backend_version": "1.0.0",
+    "kicad_tools_commit": "52481a96588a3285a503e952d7d9d72549e85c0c",
+    "native_backend": true,
+    "platform": "Linux-6.17.0-1019-aws-x86_64-with-glibc2.39",
+    "python": "3.12.3"
+  },
+  "route_extra_args": [],
+  "schema": "kct-seed-variation/1",
+  "seeds": [
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "timeout_s": 180.0,
+  "verdict": "nondeterministic"
+}

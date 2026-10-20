@@ -15,11 +15,34 @@ from kicad_tools.cli.check_cmd import (
     run_selected_checks,
     write_json_report,
 )
+from kicad_tools.validate.known_warnings import known_warning_count, unaccepted_warnings
 from kicad_tools.validate.rules.waivers import (
     apply_waivers,
     discover_waivers_sidecar,
     load_waivers,
 )
+
+#: Issue #7298 / #7295: the nine 0805s whose pad 1 the starved-thermal repair
+#: used to force solid (``thermal_asymmetry``) now take a narrower spoke
+#: (#7295), so board 04 has no accepted warnings left.  The mechanism stays so
+#: a future reviewed exception is a pinned ``(rule, ref, pad)`` entry, not a
+#: loosened gate; any warning or error fails the DRC leg.
+BOARD04_KNOWN_WARNINGS: dict[tuple[str, str, str], str] = {}
+
+
+def drc_verdict(violations) -> SubCheckResult:
+    """The DRC meta-check leg: 0 errors and no warning outside the known list."""
+    violations = list(violations)
+    errors = sum(v.is_error for v in violations)
+    warnings = sum(v.is_warning for v in violations)
+    extra = unaccepted_warnings(violations, BOARD04_KNOWN_WARNINGS)
+    detail = f"{errors} errors, {warnings} warnings"
+    known = known_warning_count(violations, BOARD04_KNOWN_WARNINGS)
+    if known:
+        detail += f" ({known} known, #7295)"
+    if extra:
+        detail += f"; unaccepted: {'; '.join(extra)}"
+    return SubCheckResult("PASSED" if not errors and not extra else "FAILED", detail)
 
 
 def check(pcb_path, report_path):
@@ -33,12 +56,7 @@ def check(pcb_path, report_path):
     waivers_path = discover_waivers_sidecar(pcb_path)
     if waivers_path is not None:
         apply_waivers(results, load_waivers(waivers_path))
-    errors = sum(v.is_error for v in results.violations)
-    warnings = sum(v.is_warning for v in results.violations)
-    drc = SubCheckResult(
-        "PASSED" if not errors and not warnings else "FAILED",
-        f"{errors} errors, {warnings} warnings",
-    )
+    drc = drc_verdict(results.violations)
     meta = run_meta_checks(pcb_path, drc, schematic=str(sch), strict=True)
     write_json_report(
         results.violations, results, pcb_path, "jlcpcb-tier1", 0, report_path, meta=meta

@@ -12,8 +12,8 @@
 # nothing would ever re-apply the label.
 #
 # Curator investigation for #6715 found the hypothesis does NOT reproduce
-# against this repo's current `defaults/`: the escalation `gh issue edit` is
-# add-only (`--add-label "loom:operator"`, no
+# against this repo's current `defaults/`: the escalation is add-only (since
+# #10098 a `loom-daemon operator-decision apply` call that passes no
 # `--remove-label` at all). This suite is the anti-regression mechanism that
 # keeps it that way, modeled directly on
 # defaults/scripts/tests/test-operator-hold-routing.sh's pattern:
@@ -22,7 +22,7 @@
 #      `loom:epic` (a static grep, exercised against pass/fail fixtures so it
 #      can never pass vacuously).
 #   2. WIRING -- champion-epic.md states the preservation requirement in
-#      prose near the escalation block (Step 4's `gh issue edit`), so a
+#      prose near the escalation block (Step 4's `operator-decision apply`), so a
 #      future edit to that block cannot silently reintroduce the bug without
 #      also having to touch documentation that contradicts the change.
 #
@@ -57,16 +57,7 @@ fi
 
 CHAMPION_EPIC="$ROLE_DIR/champion-epic.md"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-NC='\033[0m'
-
-TESTS_RUN=0
-TESTS_PASSED=0
-TESTS_FAILED=0
-
-pass() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1)); echo -e "  ${GREEN}PASS${NC}: $1"; }
-fail() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1)); echo -e "  ${RED}FAIL${NC}: $1"; }
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
 # Print every offending "<file>:<line>: <text>" -- a line where a
 # `--remove-label` argument's token list literally contains `loom:epic`.

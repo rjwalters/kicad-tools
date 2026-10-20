@@ -37,7 +37,6 @@ decision 2026-05-21):
 from __future__ import annotations
 
 import argparse
-import contextlib
 import datetime as _dt
 import json
 import re
@@ -46,6 +45,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 from kicad_tools.analysis.net_status import NetStatusAnalyzer
+from kicad_tools.cli.known_issues import KnownIssueError, defects, validate_known_issues
 from kicad_tools.schema.pcb import canonicalize_power_nets
 
 SCHEMA_VERSION = "1.1"
@@ -263,6 +263,13 @@ class DRCStatus:
     # report exists.
     blocking_errors: int = 0
     advisory_errors_by_rule: dict[str, int] = field(default_factory=dict)
+    # Issue #7190: True when a ``drc_report.json`` exists but is not bound
+    # to the routed PCB's current content (no matching ``pcb_sha256`` and no
+    # readiness co-binding) AND has no blocking errors.  Such a report is
+    # disregarded (``report_exists`` False): an unbound report can fail a
+    # board but never pass it.  An unbound report WITH blocking errors is
+    # kept (``report_exists`` True) so it still blocks.
+    unbound: bool = False
 
     @property
     def over_tolerance(self) -> bool:
@@ -314,6 +321,7 @@ class DRCStatus:
             "tolerance_key": self.tolerance_key,
             "over_tolerance": self.over_tolerance,
             "advisory_only": self.advisory_only,
+            "unbound": self.unbound,
         }
 
 
@@ -328,6 +336,8 @@ class BoardStatus:
     manufacturing: ManufacturingStatus
     drc: DRCStatus = field(default_factory=DRCStatus)
     blockers: list[str] = field(default_factory=list)
+    # Issue #7261: open issues recorded in ``output/readiness.json``.
+    known_issues: list[dict] = field(default_factory=list)
 
     @property
     def ship_ready(self) -> bool:
@@ -343,6 +353,7 @@ class BoardStatus:
             "drc": self.drc.to_dict(),
             "ship_ready": self.ship_ready,
             "blockers": list(self.blockers),
+            "known_issues": [dict(entry) for entry in self.known_issues],
         }
 
 
@@ -364,6 +375,9 @@ class ERCStatus:
     errors: int = 0
     warnings: int = 0
     report_path: str | None = None
+    # Issue #7190: a clean report found on disk but not bound to the
+    # schematic's current content -- disregarded, see ``DRCStatus.unbound``.
+    unbound: bool = False
 
     @property
     def has_errors(self) -> bool:
@@ -376,6 +390,7 @@ class ERCStatus:
             "warnings": self.warnings,
             "report_path": self.report_path,
             "has_errors": self.has_errors,
+            "unbound": self.unbound,
         }
 
 
@@ -431,15 +446,84 @@ def _now_iso() -> str:
     return _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
 
 
+def _spec_declared_pcb(board_dir: Path) -> Path | None:
+    """Resolve the PCB declared in ``project.kct`` ``artifacts``, if it exists.
+
+    Prefers ``pcb_routed`` and falls back to ``pcb`` (issue #6815), for
+    boards whose PCB is not named ``*_routed.kicad_pcb``.
+    """
+    kct = board_dir / "project.kct"
+    if not kct.is_file():
+        return None
+    try:
+        from kicad_tools.spec.parser import load_spec
+
+        spec = load_spec(kct)
+    except Exception:  # noqa: BLE001 - any malformed spec just means "no hint"
+        return None
+    artifacts = spec.project.artifacts
+    if artifacts is None:
+        return None
+    for rel in (artifacts.pcb_routed, artifacts.pcb):
+        if rel:
+            candidate = board_dir / rel
+            if candidate.is_file():
+                return candidate
+    return None
+
+
 def _discover_routed_pcb(board_dir: Path, pattern: str) -> Path | None:
-    """Find the first routed PCB inside a board's output/ directory."""
+    """Find a board's routed PCB.
+
+    Looks for ``pattern`` inside ``output/`` first, then falls back to
+    the PCB declared in ``project.kct`` ``artifacts`` (issue #6815).
+    """
     output_dir = board_dir / "output"
-    if not output_dir.is_dir():
-        return None
-    matches = sorted(output_dir.glob(pattern))
-    if not matches:
-        return None
-    return matches[0]
+    if output_dir.is_dir():
+        matches = sorted(output_dir.glob(pattern))
+        if matches:
+            return matches[0]
+    return _spec_declared_pcb(board_dir)
+
+
+def _skip_reason(board_dir: Path) -> str:
+    """Explain why a board directory has no routed PCB to survey."""
+    parts: list[str] = []
+    if not (board_dir / "output").is_dir():
+        parts.append("no output/ directory")
+    else:
+        parts.append("no routed PCB found")
+    kct = board_dir / "project.kct"
+    if kct.is_file():
+        try:
+            from kicad_tools.spec.parser import load_spec
+
+            progress = load_spec(kct).progress
+            current = getattr(progress, "phase", None) if progress is not None else None
+            if current is not None:
+                parts.append(f"phase: {getattr(current, 'value', current)}")
+        except Exception:  # noqa: BLE001
+            pass
+    return "; ".join(parts)
+
+
+def _find_skipped_boards(boards_dir: Path, pattern: str) -> list[dict[str, str]]:
+    """List board directories that were not surveyed, with a reason.
+
+    A "board directory" is a non-hidden sub-directory that has either a
+    ``project.kct`` or an ``output/`` directory.  Never affects exit status.
+    """
+    if not boards_dir.is_dir() or _is_single_board_dir(boards_dir):
+        return []
+    skipped: list[dict[str, str]] = []
+    for entry in sorted(boards_dir.iterdir()):
+        if not entry.is_dir() or entry.name.startswith("."):
+            continue
+        if not ((entry / "project.kct").is_file() or (entry / "output").is_dir()):
+            continue
+        if _discover_routed_pcb(entry, pattern) is None:
+            skipped.append({"name": entry.name, "reason": _skip_reason(entry)})
+    return skipped
 
 
 def _detect_manufacturing(board_dir: Path) -> ManufacturingStatus:
@@ -636,6 +720,20 @@ def _detect_drc(
                 blocking += 1
         drc.blocking_errors = blocking
         drc.advisory_errors_by_rule = advisory
+
+    # Issue #7190: a report not bound to this PCB's content (git checkout
+    # resets mtimes, so only a recorded ``pcb_sha256`` or readiness
+    # co-binding counts) can fail the board but never pass it.
+    from kicad_tools.drc.report_binding import BindingStatus, binding_status
+
+    recorded = report.get("pcb_sha256") if isinstance(report, dict) else None
+    binding = binding_status(
+        report_path, routed_pcb, recorded if isinstance(recorded, str) else None
+    )
+    if binding is not BindingStatus.BOUND:
+        has_blocking = drc.blocking_errors > 0 if isinstance(violations, list) else drc.errors > 0
+        if not has_blocking:
+            return DRCStatus(tolerance=tolerance, tolerance_key=matched_key, unbound=True)
     drc.report_exists = True
     return drc
 
@@ -718,19 +816,53 @@ def _detect_erc(board_dir: Path) -> ERCStatus:
                 elif severity == "warning":
                     warnings += 1
 
+    # Issue #7190: a clean report not bound to the schematic's current
+    # content is disregarded (it can fail the board, never pass it).
+    if errors == 0:
+        from kicad_tools.drc.report_binding import BindingStatus, binding_status
+
+        recorded = data.get("schematic_sha256") if isinstance(data, dict) else None
+        schematic = _erc_report_schematic(report_path, data, board_dir)
+        binding = binding_status(
+            report_path,
+            schematic,
+            recorded if isinstance(recorded, str) else None,
+            hierarchical=True,
+        )
+        if binding is not BindingStatus.BOUND:
+            return ERCStatus(report_path=str(report_path), unbound=True)
+
     erc.report_exists = True
     erc.errors = errors
     erc.warnings = warnings
     return erc
 
 
+def _erc_report_schematic(report_path: Path, data: object, board_dir: Path) -> Path | None:
+    """The schematic an ERC report describes, for content binding (#7190).
+
+    Prefers the ``.kicad_sch`` the report names (kicad-cli ``source``),
+    looked up beside the report, in ``<board>/output`` and in ``<board>``;
+    falls back to ``<stem>`` of a ``<stem>-erc.json`` report name.
+    """
+    names: list[str] = []
+    source = data.get("source") if isinstance(data, dict) else None
+    if isinstance(source, str) and source.strip():
+        name = re.split(r"[\\/]", source.strip())[-1]
+        if name.lower().endswith(".kicad_sch"):
+            names.append(name)
+    if report_path.name.endswith("-erc.json"):
+        names.append(report_path.name[: -len("-erc.json")] + ".kicad_sch")
+    for name in names:
+        for directory in (report_path.parent, board_dir / "output", board_dir):
+            candidate = directory / name
+            if candidate.is_file():
+                return candidate
+    return None
+
+
 _SCH_LABEL_RE = re.compile(r'\(\s*(?:label|global_label|hierarchical_label)\s+"([^"]+)"')
 _SCH_POWER_SYMBOL_RE = re.compile(r'\(\s*lib_id\s+"power:([^"]+)"')
-# Match ``(net NUMBER "NAME")`` -- shared between top-level
-# declarations and pad-nested references.  Pad context is
-# distinguished by the streaming parser in
-# ``_extract_pcb_pad_net_numbers``.
-_PCB_NET_NUMBERED_RE = re.compile(r'\(net\s+(\d+)\s+"([^"]+)"')
 
 
 def _extract_schematic_nets(sch_path: Path) -> set[str] | None:
@@ -784,62 +916,6 @@ def _extract_schematic_nets(sch_path: Path) -> set[str] | None:
     return labels
 
 
-def _extract_pcb_pad_net_numbers(pcb_text: str) -> set[int]:
-    """Return the set of net numbers actually referenced by pads.
-
-    Pads in KiCad PCB files appear as ``(pad "NUM" TYPE SHAPE ...
-    (net N "NAME") ...)`` blocks nested inside ``(footprint ...)``.
-    Top-level ``(net N "NAME")`` declarations exist for *every* known
-    net even when no pad references the net -- routing-only artifacts
-    (segments / vias / zones left over from older sync rounds) keep
-    their declarations after their pads have been reassigned.
-
-    Returning the *number* set rather than the *name* set lets the
-    caller cross-reference with top-level declarations to determine
-    which named nets are pad-referenced and which are routing-only.
-
-    Uses a depth-tracked streaming scan rather than a single regex
-    because pad bodies can span many lines and contain nested forms.
-    """
-    pad_net_numbers: set[int] = set()
-    i = 0
-    n = len(pcb_text)
-    while True:
-        idx = pcb_text.find("(pad ", i)
-        if idx < 0:
-            idx = pcb_text.find("(pad\t", i)
-        if idx < 0:
-            idx = pcb_text.find("(pad\n", i)
-        if idx < 0:
-            break
-        # Find the end of this pad's s-expression by tracking depth.
-        depth = 0
-        j = idx
-        body_start = idx
-        body_end = idx
-        while j < n:
-            c = pcb_text[j]
-            if c == "(":
-                depth += 1
-            elif c == ")":
-                depth -= 1
-                if depth == 0:
-                    body_end = j + 1
-                    break
-            j += 1
-        if body_end <= body_start:
-            i = idx + 5
-            continue
-        body = pcb_text[body_start:body_end]
-        # Match (net N "name") inside the pad body
-        m = _PCB_NET_NUMBERED_RE.search(body)
-        if m:
-            with contextlib.suppress(ValueError):
-                pad_net_numbers.add(int(m.group(1)))
-        i = body_end
-    return pad_net_numbers
-
-
 def _extract_pcb_named_nets(pcb_path: Path) -> set[str] | None:
     """Return the set of non-empty PCB nets that have at least one pad.
 
@@ -869,28 +945,24 @@ def _extract_pcb_named_nets(pcb_path: Path) -> set[str] | None:
     an earlier sync round would surface as drift even though they
     have no pads.
 
-    Returns ``None`` on read failure.
+    Returns ``None`` on read or parse failure.
     """
+    # Read pad nets through the schema parser -- the same source
+    # ``kct validate --sync`` uses -- so both the numbered
+    # ``(net N "name")`` and the KiCad 10 name-only ``(net "name")``
+    # pad dialects work (issue #6815).  Only pads are read, so
+    # routing-only net declarations drop out automatically.
+    from kicad_tools.schema.pcb import PCB, pad_net_names
+
     try:
-        text = pcb_path.read_text()
-    except OSError:
+        pcb = PCB.load(pcb_path)
+    except Exception:  # noqa: BLE001 - unreadable/unparseable PCB means "unknown"
         return None
-    pad_net_numbers = _extract_pcb_pad_net_numbers(text)
-    nets: set[str] = set()
-    for m in _PCB_NET_NUMBERED_RE.finditer(text):
-        try:
-            num = int(m.group(1))
-        except ValueError:
-            continue
-        if num not in pad_net_numbers:
-            continue
-        name = m.group(2)
-        if not name:
-            continue
-        if name.startswith("Net-(") or name.startswith("unconnected-("):
-            continue
-        nets.add(name)
-    return nets
+    return {
+        name
+        for name in pad_net_names(pcb)
+        if not (name.startswith("Net-(") or name.startswith("unconnected-("))
+    }
 
 
 def _find_source_schematic(board_dir: Path) -> Path | None:
@@ -997,6 +1069,26 @@ def _detect_source_drift(
         added[:sample_limit],
         removed[:sample_limit],
     )
+
+
+def _detect_known_issues(board_dir: Path) -> list[dict]:
+    """Open issues recorded in ``output/readiness.json`` (Issue #7261).
+
+    Warn-only like the other report readers: a missing, unreadable or
+    malformed report contributes nothing (and never adds a blocker).  Hash
+    validation is ``kct readiness`` / ``read_readiness()``'s job; fleet only
+    surfaces what the report discloses.
+    """
+    report = board_dir / "output" / "readiness.json"
+    try:
+        data = json.loads(report.read_text())
+        return validate_known_issues(data.get("known_issues"))
+    except (OSError, ValueError, AttributeError, KnownIssueError):
+        return []
+
+
+def _known_label(entries: list[dict]) -> str:
+    return "known: " + ",".join(f"#{entry['issue']}" for entry in entries)
 
 
 def _compute_routing(routed_pcb: Path) -> RoutingStatus:
@@ -1158,6 +1250,9 @@ def _survey_board(
         drc = _detect_drc(routed_pcb, drc_tolerances or {})
 
     blockers = _compute_blockers(routing, mfg, routed_pcb, drc)
+    known_issues = _detect_known_issues(board_dir)
+    # An open known defect means the board fails its own spec (Issue #7261).
+    blockers.extend(f"known defect #{entry['issue']}" for entry in defects(known_issues))
 
     return BoardStatus(
         name=board_dir.name,
@@ -1167,6 +1262,7 @@ def _survey_board(
         manufacturing=mfg,
         drc=drc,
         blockers=blockers,
+        known_issues=known_issues,
     )
 
 
@@ -1190,8 +1286,8 @@ def _discover_boards(
     """Survey every board sub-directory of ``boards_dir``.
 
     A board is discovered if it contains a routed PCB matching ``pattern``
-    under ``<board>/output/``. Boards without a routed PCB are silently
-    skipped (they haven't reached the routing stage yet).
+    under ``<board>/output/``. Boards without a routed PCB are skipped
+    (reported separately by :func:`_find_skipped_boards`).
 
     When ``boards_dir`` itself looks like a board directory (see
     :func:`_is_single_board_dir`), it is surveyed directly as a single
@@ -1214,11 +1310,6 @@ def _discover_boards(
             continue
         # Skip dotfiles / hidden dirs and obvious non-board names.
         if entry.name.startswith("."):
-            continue
-        # A directory without an output/ sub-dir is not yet at routing
-        # stage -- skip it silently.
-        output_dir = entry / "output"
-        if not output_dir.is_dir():
             continue
         # Skip directories with no routed PCB matching the pattern.
         if _discover_routed_pcb(entry, pattern) is None:
@@ -1287,9 +1378,6 @@ def _discover_ship_ready(
         if not entry.is_dir():
             continue
         if entry.name.startswith("."):
-            continue
-        output_dir = entry / "output"
-        if not output_dir.is_dir():
             continue
         if _discover_routed_pcb(entry, pattern) is None:
             continue
@@ -1413,7 +1501,8 @@ def _drc_label(drc: DRCStatus) -> str:
     """Render the DRC column cell.
 
     ``-``       : no ``drc_report.json`` yet (backwards-compat: do not
-                  block ship-ready).
+                  block ship-ready), or a clean report that is not bound to
+                  the PCB's current content (issue #7190; JSON ``unbound``).
     ``N``       : N errors, within tolerance (N <= allowance).
     ``N!``      : N errors, exceeds tolerance (drives the ship-ready
                   ``NO`` blocker).
@@ -1429,6 +1518,7 @@ def _format_table(
     boards_dir: Path,
     *,
     ship_only: bool,
+    skipped: list[dict[str, str]] | None = None,
 ) -> str:
     """Format a fixed-width plain-ASCII table."""
     lines: list[str] = []
@@ -1452,9 +1542,12 @@ def _format_table(
             stale = _stale_label(b.manufacturing)
             drc_cell = _drc_label(b.drc)
             if b.ship_ready:
-                ship = "YES"
+                # ``YES*``: ready, with disclosed exceptions/advisories.
+                ship = "YES*" if b.known_issues else "YES"
             else:
                 ship = f"NO  ({b.blockers[0]})"
+            if b.known_issues:
+                ship = f"{ship}  {_known_label(b.known_issues)}"
             lines.append(
                 f"{b.name[:28]:<28} {pads:>7} {pct:>5} {mfr:<8} {stale:<6} {drc_cell:>5} {ship}"
             )
@@ -1468,17 +1561,29 @@ def _format_table(
         )
         stale_count = sum(1 for b in boards if b.manufacturing.stale)
         drc_failing = sum(1 for b in boards if b.drc.over_tolerance)
+        with_known = sum(1 for b in boards if b.known_issues)
         lines.append(
             f"{len(boards)} boards surveyed, {ship_ready} ship-ready, "
             f"{incomplete} incomplete, {stale_count} artifacts stale, "
-            f"{drc_failing} DRC over tolerance"
+            f"{drc_failing} DRC over tolerance, {with_known} with known issues"
         )
+        if with_known:
+            lines.append("YES* = ship-ready with disclosed known issues (output/readiness.json)")
         lines.append(f"boards-dir: {boards_dir}")
+
+    if skipped:
+        lines.append("")
+        for item in skipped:
+            lines.append(f"skipped: {item['name']} ({item['reason']})")
 
     return "\n".join(lines)
 
 
-def _format_json(boards: list[BoardStatus], boards_dir: Path) -> str:
+def _format_json(
+    boards: list[BoardStatus],
+    boards_dir: Path,
+    skipped: list[dict[str, str]] | None = None,
+) -> str:
     summary = {
         "total": len(boards),
         "ship_ready": sum(1 for b in boards if b.ship_ready),
@@ -1488,6 +1593,7 @@ def _format_json(boards: list[BoardStatus], boards_dir: Path) -> str:
         "stale_artifacts": sum(1 for b in boards if b.manufacturing.stale),
         "missing_artifacts": sum(1 for b in boards if not b.manufacturing.has_all),
         "drc_over_tolerance": sum(1 for b in boards if b.drc.over_tolerance),
+        "with_known_issues": sum(1 for b in boards if b.known_issues),
     }
     doc = {
         "schema_version": SCHEMA_VERSION,
@@ -1495,6 +1601,7 @@ def _format_json(boards: list[BoardStatus], boards_dir: Path) -> str:
         "boards_dir": str(boards_dir),
         "summary": summary,
         "boards": [b.to_dict() for b in boards],
+        "skipped": list(skipped or []),
     }
     return json.dumps(doc, indent=2)
 
@@ -1609,11 +1716,12 @@ def run_status(args: argparse.Namespace) -> int:
     boards_dir = Path(args.boards_dir)
     tolerance_path = Path(getattr(args, "drc_tolerance_file", _DRC_TOLERANCE_PATH))
     boards = _discover_boards(boards_dir, args.pattern, tolerance_path)
+    skipped = _find_skipped_boards(boards_dir, args.pattern)
 
     if args.format == "json":
-        print(_format_json(boards, boards_dir))
+        print(_format_json(boards, boards_dir, skipped))
     else:
-        print(_format_table(boards, boards_dir, ship_only=args.ship_only))
+        print(_format_table(boards, boards_dir, ship_only=args.ship_only, skipped=skipped))
 
     if not boards:
         return 2  # No boards found counts as not-ship-ready.

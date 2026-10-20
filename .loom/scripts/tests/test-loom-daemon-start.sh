@@ -1204,7 +1204,7 @@ bg_proc_track "$DEK_SD_PID1"
 ( cd "$WORKDIR" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
     PATH="$DEK_SD_BIN:$PATH" HOME="$DEK_SD_HOME" \
     LOOM_SYSTEMD_FORCE=1 LOOM_SYSTEMD_UNIT="$DEK_SD_UNIT" \
-    LOOM_SAFEHOUSE_ENABLED=1 LOOM_WORK_FINDER=1 \
+    LOOM_SAFEHOUSE_ENABLED=1 \
     LOOM_DAEMON_BIN="$FAKE_BIN" \
     LOOM_SOCKET_PATH="$DEK_SD_HOME/.loom/loom-daemon.sock" \
     LOOM_AUTONOMY_MARKER="$DEK_SD_HOME/.loom/autonomy-desired" \
@@ -1266,7 +1266,7 @@ bg_proc_track "$DEK_SD_PID3"
 ( cd "$WORKDIR" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
     PATH="$DEK_SD_BIN:$PATH" HOME="$DEK_SD_HOME" \
     LOOM_SYSTEMD_FORCE=1 LOOM_SYSTEMD_UNIT="$DEK_SD_UNIT" \
-    LOOM_SAFEHOUSE_ENABLED=1 LOOM_WORK_FINDER=1 \
+    LOOM_SAFEHOUSE_ENABLED=1 \
     LOOM_DAEMON_BIN="$FAKE_BIN" \
     LOOM_SOCKET_PATH="$DEK_SD_HOME/.loom/loom-daemon.sock" \
     LOOM_AUTONOMY_MARKER="$DEK_SD_HOME/.loom/autonomy-desired" \
@@ -1560,16 +1560,18 @@ AD_SD_UNIT="loom-daemon-ad-test-$$.service"
 AD8_HOME="$(mktemp -d)"; mkdir -p "$AD8_HOME/.loom/logs"
 AD8_LOG="$WORKDIR/ad8-install.log"; : > "$AD8_LOG"
 
-# Install the "prior" unit with LOOM_WORK_FINDER=1.
+# Install the "prior" unit, then give it a pre-#11951 LOOM_WORK_FINDER=1 line
+# (the start script no longer renders one).
 sleep 30 & AD8_SLEEP_PID1=$!
 bg_proc_track "$AD8_SLEEP_PID1"
 make_sd_stub "$AD8_LOG" "$AD8_SLEEP_PID1"
 ( cd "$WORKDIR" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
     PATH="$SD_BIN:$PATH" HOME="$AD8_HOME" LOOM_SYSTEMD_FORCE=1 LOOM_SYSTEMD_UNIT="$AD_SD_UNIT" \
-    LOOM_WORK_FINDER=1 LOOM_DAEMON_BIN="$FAKE_BIN" \
-    LOOM_SOCKET_PATH="$AD8_HOME/.loom/loom-daemon.sock" \
+    LOOM_DAEMON_BIN="$FAKE_BIN" LOOM_SOCKET_PATH="$AD8_HOME/.loom/loom-daemon.sock" \
     LOOM_AUTONOMY_MARKER="$AD8_HOME/.loom/autonomy-desired" \
     bash "$START_SCRIPT" --no-launchd >/dev/null 2>&1 )
+AD8_UNIT_DIR="$AD8_HOME/.config/systemd/user"
+printf '%s\n' '[Service]' 'Environment=LOOM_WORK_FINDER=1' >> "$AD8_UNIT_DIR/$AD_SD_UNIT"
 # Kill AND reap the decoy synchronously (`wait`, not just `kill`) before the
 # very next invocation runs its already-running guard: a killed-but-not-yet-
 # reaped child is still a ZOMBIE in the process table, and `kill -0` on a
@@ -1642,30 +1644,24 @@ else
     echo "  enable-now count: $ad8_enable_count; systemctl calls: $(cat "$AD8_LOG" 2>/dev/null)"
 fi
 
-# AD9. The escape hatch: the SAME detected downgrade, but with an explicit
-#      --work-finder this invocation -- proceeds normally (exit 0), proving
-#      the refusal is only for the SILENT case, not a hard block on ever
-#      re-installing over a prior autonomous unit.
+# AD9. The way out on systemd (#11951): the unit no longer carries autonomy
+#      env, so the host's drop-in owns it. With one setting the work finder
+#      on, the SAME plain start proceeds (exit 0) and purges the base line.
 sleep 30 & AD9_SLEEP_PID=$!
 bg_proc_track "$AD9_SLEEP_PID"
 make_sd_stub "$AD8_LOG" "$AD9_SLEEP_PID"
+mkdir -p "$AD8_UNIT_DIR/$AD_SD_UNIT.d"
+printf '%s\n' '[Service]' 'Environment=LOOM_WORK_FINDER=1' > "$AD8_UNIT_DIR/$AD_SD_UNIT.d/15-autonomy.conf"
 ad9_out=$( cd "$WORKDIR" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
     PATH="$SD_BIN:$PATH" HOME="$AD8_HOME" LOOM_SYSTEMD_FORCE=1 LOOM_SYSTEMD_UNIT="$AD_SD_UNIT" \
-    LOOM_DAEMON_BIN="$FAKE_BIN" \
-    LOOM_SOCKET_PATH="$AD8_HOME/.loom/loom-daemon.sock" \
+    LOOM_DAEMON_BIN="$FAKE_BIN" LOOM_SOCKET_PATH="$AD8_HOME/.loom/loom-daemon.sock" \
     LOOM_AUTONOMY_MARKER="$AD8_HOME/.loom/autonomy-desired" \
-    bash "$START_SCRIPT" --no-launchd --work-finder 2>&1 )
+    bash "$START_SCRIPT" --no-launchd 2>&1 )
 ad9_rc=$?
-assert_eq "0" "$ad9_rc" "autonomy downgrade (systemd): an explicit --work-finder on the SAME detected-downgrade host proceeds normally (#5409 AC1 escape hatch)"
-TESTS_RUN=$((TESTS_RUN + 1))
-if ! grep -qi 'autonomy downgrade' <<<"$ad9_out"; then
-    TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "${GREEN}✓${NC} autonomy downgrade (systemd): an explicit --work-finder is not silent -- no warning, no refusal (#5409)"
-else
-    TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "${RED}✗${NC} autonomy downgrade (systemd): an explicit --work-finder is not silent -- no warning, no refusal"
-    echo "  output: $ad9_out"
-fi
+assert_eq "0" "$ad9_rc" "autonomy downgrade (systemd): a drop-in that sets the work finder lets the SAME plain start proceed (#11951)"
+assert_not_contains "$ad9_out" "autonomy downgrade" "autonomy downgrade (systemd): a drop-in-owned work finder is out of the start's reach -- no warning (#11951)"
+assert_not_contains "$(cat "$AD8_UNIT_DIR/$AD_SD_UNIT")" "LOOM_WORK_FINDER" "autonomy downgrade (systemd): the re-render purges the base unit's autonomy line (#11951)"
+assert_contains "$(cat "$AD8_HOME/.loom/autonomy-desired")" "work_finder=1" "autonomy downgrade (systemd): the marker records the drop-in's effective value (#11951)"
 kill "$AD9_SLEEP_PID" 2>/dev/null || true
 wait "$AD9_SLEEP_PID" 2>/dev/null || true
 # Same real-path fix as the AD8 setup above -- AD9's successful start writes

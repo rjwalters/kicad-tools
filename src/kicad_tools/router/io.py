@@ -39,10 +39,12 @@ import math
 import re
 import warnings
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
+from kicad_tools.sexp.scan import find_unquoted, iter_unquoted
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +54,7 @@ if TYPE_CHECKING:
     from kicad_tools.progress import ProgressCallback
 
     from .board_clearance_rules import BoardClearanceRules
+    from .clearance_shapes import KPad, KShape
     from .primitives import Pad, Route, Segment
     from .stub_terminals import StubTerminal
 
@@ -61,7 +64,13 @@ from .class_clearance_floors import (
     merge_named_floors,
     remember_authored_floors,
 )
+from .clearance_shapes import NO_INTERACTION as _NO_INTERACTION
+from .clearance_shapes import copper_gap as _copper_gap
+from .clearance_shapes import pad_shape as _kernel_pad_shape
+from .clearance_shapes import segment_shape as _kernel_segment_shape
+from .clearance_shapes import via_shape as _kernel_via_shape
 from .core import Autorouter
+from .edge_keepout import compute_edge_keepout_floor, install_edge_keepout
 from .fixed_copper import FixedPadCopper, custom_pad_copper, degraded_pad_copper
 from .geometry import (
     point_to_segment_distance as _geom_point_to_seg_dist,
@@ -70,7 +79,7 @@ from .geometry import (
     segment_to_segment_distance as _geom_seg_to_seg_dist,
 )
 from .layers import Layer, LayerDefinition, LayerStack, LayerType
-from .pad_geometry import pad_local_point, pad_point_distance
+from .pad_geometry import pad_point_distance, pad_segment_distance
 from .rules import DEFAULT_NET_CLASS_MAP, DesignRules, NetClassRouting
 
 # Floating-point tolerance for clearance comparisons in validate_routes
@@ -295,6 +304,15 @@ class PCBDesignRules:
         )
 
 
+#: ``ClearanceViolation.origin`` for copper kept by ``--preserve-existing`` (#6229).
+ORIGIN_INPUT = "input"
+#: ``ClearanceViolation.origin`` for a short against a pad that already
+#: overlaps a pad of the copper's own net in the input board (#6693).
+ORIGIN_INPUT_PAD_OVERLAP = "input_pad_overlap"
+#: Origins whose short already existed in the input board.
+INPUT_DEFECT_ORIGINS = frozenset({ORIGIN_INPUT, ORIGIN_INPUT_PAD_OVERLAP})
+
+
 @dataclass
 class ClearanceViolation:
     """A potential clearance violation detected during post-route validation.
@@ -344,13 +362,28 @@ class ClearanceViolation:
     # produced it; ``"input"`` means it is copper kept verbatim from the
     # input board by ``--preserve-existing`` -- an input defect the router
     # inherited, not one it created.
+    #
+    # Issue #6693: ``"input_pad_overlap"`` means routed copper touches a pad of
+    # its own net that already overlaps the obstacle pad in the input board
+    # (e.g. a stale pad angle makes neighbouring fine-pitch pads overlap).  The
+    # two nets were shorted before routing began; no placement of the routed
+    # copper can clear the obstacle, so the short is an input defect too.
     origin: str = "routing"
     obstacle_pad: str = ""  # "REF.PIN" when ``obstacle_type == "pad"`` (Issue #6229)
+    #: Issue #6693: "REF.PIN" of the own-net pad that overlaps ``obstacle_pad``
+    #: in the input board (set only when ``origin == "input_pad_overlap"``).
+    overlapping_pad: str = ""
 
     @property
     def is_input_defect(self) -> bool:
-        """True when the offending copper was kept from the input board (#6229)."""
-        return self.origin == "input"
+        """True when the short already existed in the input board (#6229, #6693).
+
+        Either the offending copper was kept from the input board by
+        ``--preserve-existing`` (``origin == "input"``), or it touches a pad
+        that already overlaps the obstacle pad in the input
+        (``origin == "input_pad_overlap"``).
+        """
+        return self.origin in INPUT_DEFECT_ORIGINS
 
     @property
     def is_short(self) -> bool:
@@ -389,6 +422,12 @@ def describe_short(v: ClearanceViolation) -> str:
     loc = f" at ({v.location[0]:.3f}, {v.location[1]:.3f})" if v.location else ""
     layer_str = f" on {v.layer.kicad_name}" if v.layer is not None else ""
     overlap = f": overlap {-v.distance:.3f}mm"
+    if v.origin == ORIGIN_INPUT_PAD_OVERLAP:
+        return (
+            f"pre-existing short in input board (pads {v.overlapping_pad} and "
+            f"{v.obstacle_pad} already overlap): "
+            f"{_input_pair_label(v)}{loc}{layer_str}{overlap}"
+        )
     if v.is_input_defect:
         return (
             "pre-existing short in input board (kept by --preserve-existing): "
@@ -460,6 +499,192 @@ def kicad_rule_severity(pcb_path: str | Path | None, rule: str, default: str = "
     if isinstance(value, str) and value.lower() in KICAD_SEVERITY_LEVELS:
         return value.lower()
     return default
+
+
+@dataclass(frozen=True)
+class InputPadOverlap:
+    """Two different-net pads whose copper overlaps in the input board (#6693).
+
+    Found on the router's own pad model (:attr:`Autorouter.pads`), so it
+    agrees with the post-route short check in :func:`validate_routes`.
+    ``kct check`` reports the same pairs as ``clearance_pad_pad`` ``SHORT``
+    findings.
+    """
+
+    pad_a: str  # "REF.PIN"
+    pad_b: str
+    ref_a: str
+    ref_b: str
+    net_a: str
+    net_b: str
+
+
+def _pad_net_key(pad: Pad) -> int | str | None:
+    """Electrical identity of a pad for the overlap scan, ``None`` if unconnected.
+
+    Skipped pour-net pads carry net id ``0`` plus their name (Issue #6225),
+    so they are keyed by name; a pad with neither is truly unconnected.
+    """
+    if pad.net != 0:
+        return pad.net
+    return f"name:{pad.net_name}" if pad.net_name else None
+
+
+def _pad_copper_polygon(pad: Pad):
+    """Shapely polygon of a pad's copper envelope (rotated rect, or a disc)."""
+    from shapely import Point, Polygon  # type: ignore[import-untyped]
+
+    if pad.shape == "circle":
+        return Point(pad.x, pad.y).buffer(min(pad.width, pad.height) / 2.0, 32)
+    hw, hh = pad.width / 2.0, pad.height / 2.0
+    # Inverse of ``pad_local_point``: board = centre + R(-rotation) . local.
+    angle = math.radians(pad.rotation)
+    c, s = math.cos(angle), math.sin(angle)
+    corners = [(-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)]
+    return Polygon([(pad.x + c * lx + s * ly, pad.y - s * lx + c * ly) for lx, ly in corners])
+
+
+#: Minimum overlap area (mm^2) that counts as overlapping copper: excludes
+#: pads that merely touch along an edge or corner.
+_PAD_OVERLAP_MIN_AREA_MM2 = 1e-6
+
+#: Tolerance (mm) when testing that copper's contact with a foreign pad lies
+#: inside the own-net pad overlapping it (#6693): absorbs float noise from the
+#: polygon intersection without excusing any visible intrusion.
+_INTRUSION_TOLERANCE_MM = 1e-4
+
+
+def _intrusion_inside_partner(
+    obstacle: Pad,
+    partner: Pad,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    half: float,
+) -> bool:
+    """Whether copper's contact with ``obstacle`` lies inside ``partner`` (#6693).
+
+    The copper is the segment ``(x1, y1)-(x2, y2)`` buffered by ``half`` (a
+    disc when the endpoints coincide, i.e. a via).  It is attributed to the
+    input only when ``(copper & obstacle) - partner`` is empty: every point
+    where it meets the foreign pad is already shorted by the input's own pad
+    overlap, so no copper placement could have avoided it.  Uses the same pad
+    polygons as :func:`find_input_pad_overlaps`.  A zero-area contact (copper
+    grazing the obstacle's edge) must also be covered, so a graze outside the
+    overlap stays a routing short.
+    """
+    from shapely import LineString, Point
+
+    if (x1, y1) == (x2, y2):
+        copper = Point(x1, y1).buffer(half, 32)
+    else:
+        copper = LineString([(x1, y1), (x2, y2)]).buffer(half, 32)
+    contact = copper.intersection(_pad_copper_polygon(obstacle))
+    if contact.is_empty:
+        # The shapely envelope disagrees with the validator's distance model
+        # (e.g. a circle pad's disc vs its rect): don't excuse the short.
+        return False
+    covered: bool = _pad_copper_polygon(partner).buffer(_INTRUSION_TOLERANCE_MM).covers(contact)
+    return covered
+
+
+def find_input_pad_overlaps(pads) -> list[InputPadOverlap]:
+    """Different-net pad pairs whose copper overlaps (Issue #6693).
+
+    ``pads`` is a ``{(ref, pin): Pad}`` mapping (``Autorouter.pads``).  Two
+    pads overlap when they share a copper layer (SMD on the same layer, or
+    either is through-hole) and their envelopes intersect with positive area.
+    Unconnected pads and virtual Steiner points are ignored.  Pairs are
+    returned in ``pads`` order.
+    """
+    from shapely import STRtree
+
+    entries: list[tuple[str, str, Pad, int | str]] = []
+    for (ref, pin), pad in pads.items():
+        if getattr(pad, "steiner_point", False):
+            continue
+        key = _pad_net_key(pad)
+        if key is None:
+            continue
+        entries.append((ref, pin, pad, key))
+    if len(entries) < 2:
+        return []
+    polys = [_pad_copper_polygon(e[2]) for e in entries]
+    tree = STRtree(polys)
+    overlaps: list[InputPadOverlap] = []
+    for i, (ref_a, pin_a, pad_a, key_a) in enumerate(entries):
+        for j in sorted(int(k) for k in tree.query(polys[i])):
+            if j <= i:
+                continue
+            ref_b, pin_b, pad_b, key_b = entries[j]
+            if key_a == key_b:
+                continue
+            if not (pad_a.through_hole or pad_b.through_hole or pad_a.layer == pad_b.layer):
+                continue
+            if polys[i].intersection(polys[j]).area <= _PAD_OVERLAP_MIN_AREA_MM2:
+                continue
+            overlaps.append(
+                InputPadOverlap(
+                    pad_a=f"{ref_a}.{pin_a}",
+                    pad_b=f"{ref_b}.{pin_b}",
+                    ref_a=ref_a,
+                    ref_b=ref_b,
+                    net_a=pad_a.net_name or f"Net {pad_a.net}",
+                    net_b=pad_b.net_name or f"Net {pad_b.net}",
+                )
+            )
+    return overlaps
+
+
+def input_pad_overlaps(router: Autorouter) -> list[InputPadOverlap]:
+    """:func:`find_input_pad_overlaps` over ``router.pads``, memoized (#6693).
+
+    Pads are fixed for a routing run, so the scan is cached on the router
+    (keyed by the identity and size of its pad map).
+    """
+    pads = getattr(router, "pads", None) or {}
+    cache_key = (id(pads), len(pads))
+    cached = getattr(router, "_input_pad_overlap_cache", None)
+    if cached is not None and cached[0] == cache_key:
+        hit: list[InputPadOverlap] = cached[1]
+        return hit
+    overlaps = find_input_pad_overlaps(pads)
+    with contextlib.suppress(AttributeError):
+        setattr(router, "_input_pad_overlap_cache", (cache_key, overlaps))  # noqa: B010
+    return overlaps
+
+
+def _input_overlap_partners(router: Autorouter) -> dict[int, list[tuple[str, Pad]]]:
+    """``id(pad) -> [("REF.PIN", overlapping foreign-net pad), ...]`` (#6693)."""
+    overlaps = input_pad_overlaps(router)
+    if not overlaps:
+        return {}
+    by_name = {f"{ref}.{pin}": pad for (ref, pin), pad in router.pads.items()}
+    partners: dict[int, list[tuple[str, Pad]]] = {}
+    for o in overlaps:
+        pad_a, pad_b = by_name.get(o.pad_a), by_name.get(o.pad_b)
+        if pad_a is None or pad_b is None:
+            continue
+        partners.setdefault(id(pad_a), []).append((o.pad_b, pad_b))
+        partners.setdefault(id(pad_b), []).append((o.pad_a, pad_a))
+    return partners
+
+
+def summarize_input_pad_overlaps(overlaps: list[InputPadOverlap]) -> list[str]:
+    """``["U8: 19 overlapping different-net pad pair(s)", ...]`` (#6693).
+
+    Grouped by footprint (``"J2/J4"`` for a pair spanning two footprints),
+    largest group first.
+    """
+    counts: Counter[str] = Counter()
+    for o in overlaps:
+        group = o.ref_a if o.ref_a == o.ref_b else "/".join(sorted((o.ref_a, o.ref_b)))
+        counts[group] += 1
+    return [
+        f"{group}: {n} overlapping different-net pad pair(s)"
+        for group, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
 
 
 def short_origin_summary(shorts: list[ClearanceViolation]) -> str:
@@ -2233,6 +2458,29 @@ def extract_board_origin(pcb_path_or_text: str | Path) -> tuple[float, float] | 
     return bounds[:2] if bounds is not None else None
 
 
+def _footprint_source_sections(pcb_text: str, footprints: Sequence[Any]) -> list[str]:
+    """Return each footprint's exact source text, in *footprints* order.
+
+    *footprints* must be the ``Footprint`` objects of a ``PCB`` built from a
+    tree parsed from *pcb_text* (each carries its ``_sexp_node``).  The slices
+    come from the parser's own offsets, so they can never get out of step
+    with the parsed footprints the way a ``re.split`` on ``(footprint `` did
+    when a ``descr`` or tag string contained that text (Issue #6873).
+    """
+    from kicad_tools.sexp import source_span
+
+    sections: list[str] = []
+    for footprint in footprints:
+        node = footprint._sexp_node
+        span = source_span(node) if node is not None else None
+        if span is None:
+            raise ValueError(
+                "Cannot read footprint source: it was not parsed as a top-level board item"
+            )
+        sections.append(pcb_text[span[0] : span[1]])
+    return sections
+
+
 def extract_pad_positions(pcb_path_or_text: str | Path) -> list[PadPosition]:
     """Extract pad positions from a KiCad PCB file for grid analysis.
 
@@ -2260,13 +2508,15 @@ def extract_pad_positions(pcb_path_or_text: str | Path) -> list[PadPosition]:
 
     positions: list[PadPosition] = []
 
-    # Split by footprint for easier parsing
-    footprint_sections = re.split(r"(?=\((?:footprint|module)\s)", pcb_text)
-
-    for section in footprint_sections:
-        if not section.startswith("(footprint") and not section.startswith("(module"):
-            continue
-
+    # Split by footprint for easier parsing.  Only openers outside quoted
+    # strings start a section, so a descr or tag mentioning ``(footprint X)``
+    # cannot add one (Issue #6873).  Unlike the full loaders, nothing here is
+    # paired with parsed footprints, so this string-aware scan (~7x cheaper
+    # than parsing a large board) is enough; it keeps the lightweight path
+    # lightweight.
+    starts = [m.start() for m in iter_unquoted(pcb_text, r"\((?:footprint|module)\s")]
+    for start, end in itertools.pairwise([*starts, len(pcb_text)]):
+        section = pcb_text[start:end]
         # Get footprint position and rotation
         at_match = re.search(r"\(at\s+([-\d.]+)\s+([-\d.]+)(?:\s+([-\d.]+))?\)", section)
         if not at_match:
@@ -2464,12 +2714,12 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
 
     identity_document = IdentityPCB(parse_identity_document(pcb_text))
     source_keys = footprint_keys(identity_document.footprints)
-    footprint_sections = [
-        section
-        for section in re.split(r"(?=\((?:footprint|module)\s)", pcb_text)
-        if section.startswith("(footprint") or section.startswith("(module")
-    ]
-    for section, component_id in zip(footprint_sections, source_keys, strict=True):
+    footprint_sections = _footprint_source_sections(pcb_text, identity_document.footprints)
+    for section, component_id, footprint in zip(
+        footprint_sections, source_keys, identity_document.footprints, strict=True
+    ):
+        # Issue #6780: the footprint's copper side, for the length model.
+        fp_side = Layer.B_CU if footprint.layer == "B.Cu" else Layer.F_CU
         # Get footprint library name (e.g. "Package_QFP:TQFP-32_7x7mm_P0.8mm")
         footprint_name_match = re.search(r'\(footprint\s+"([^"]*)"', section)
         footprint_name = footprint_name_match.group(1) if footprint_name_match else ""
@@ -2547,9 +2797,11 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
                     pin=pin,
                     layer=layer,
                     through_hole=is_thru,
+                    side=fp_side,
                     footprint_name=footprint_name,
                     rotation=pad_rotation,
                     shape=pad_shape,
+                    roundrect_rratio=_pad_rratio_from_block(pad_block, pad_shape),
                 )
             )
 
@@ -2578,6 +2830,68 @@ def _get_pair_clearance(
     clearance_a = class_a.clearance if class_a else default_clearance
     clearance_b = class_b.clearance if class_b else default_clearance
     return max(clearance_a, clearance_b)
+
+
+def _coupled_pair_trace_gaps(
+    router: Autorouter,
+    net_names: dict[int, str],
+    net_class_map: dict[str, NetClassRouting] | None,
+) -> dict[frozenset[int], float]:
+    """``{frozenset((p_id, n_id)): gap_mm}`` for every engaged coupled pair (Issue #6810).
+
+    The trace-to-trace requirement between the P and N copper of a pair the
+    router coupled-routes is that pair's floored diff-pair gap, not the net
+    class's clearance -- the rule both external engines apply: ``kct check``
+    skips same-pair segments in ``ClearanceRule`` and holds them to
+    ``DesignRules.pair_gap`` (``DiffPairClearanceIntraRule``), and the
+    exported DRU exempts the pair from the class clearance and adds
+    ``diff_pair_gap``.  The pair set is the same
+    :func:`~kicad_tools.router.diffpair_detection.coupled_engaged_pairs` the
+    DRU exemption uses, and the gap the same
+    :func:`~kicad_tools.router.diffpair_routing._floored_pair_gap` the DRU's
+    ``diff_pair_gap`` value comes from, so the three checks agree by
+    construction.  A ``+``/``-`` named pair the router does not engage
+    (Kelvin ``ISENSE+``/``ISENSE-``, #4178) is absent and keeps the full
+    clearance.
+
+    Recomputed per call (no memo): it is one pass over the net names,
+    negligible next to the segment sweeps, and so can never replay a gap
+    from a class map or rule set that has since changed.
+    """
+    if not net_class_map or not net_names:
+        return {}
+    groups = getattr(router, "kicad_diff_pair_groups", None)
+
+    from .diffpair_detection import (
+        build_synth_routing,
+        coupled_engaged_pairs,
+        coupled_pair_net_class,
+    )
+    from .diffpair_routing import _floored_pair_gap
+
+    gaps: dict[frozenset[int], float] = {}
+    try:
+        pairs = coupled_engaged_pairs(net_names, net_class_map, groups)
+        if pairs:
+            name_to_id: dict[str, int] = {}
+            for nid, name in net_names.items():
+                name_to_id.setdefault(name, nid)
+            synth = build_synth_routing(net_class_map)
+            for p, n in pairs:
+                p_id = name_to_id.get(p)
+                n_id = name_to_id.get(n)
+                if p_id is None or n_id is None or p_id == n_id:
+                    continue
+                nc = coupled_pair_net_class(p, n, net_class_map, synth)
+                if nc is None:
+                    continue
+                gap = _floored_pair_gap(router, nc)
+                if gap > 0.0:
+                    gaps[frozenset((p_id, n_id))] = gap
+    except Exception:  # pragma: no cover - never let pair lookup break validation
+        logger.debug("coupled pair-gap lookup failed; using class clearance", exc_info=True)
+        gaps = {}
+    return gaps
 
 
 def _pad_on_net(pad: Pad, route_net: int, route_name: str | None) -> bool:
@@ -2775,6 +3089,27 @@ def validate_routes(
         for route in router.routes
     ]
 
+    # Issue #6718: pads are measured as their real copper (round, oval,
+    # roundrect, rect) through the shared clearance kernel -- the model
+    # ``kct check``, kicad-cli and the kept-copper audit below already use.
+    # The previous rectangle model held a round pad to its bounding square,
+    # so a trace passing the rounded corner read ~0.145 mm closer than it
+    # was and fed phantom violations to rip-up, the short gate and the
+    # DRC-nudge repair.  Kernel pads are built once per pad.
+    _pad_kshapes: dict[int, KPad] = {}
+
+    def _kpad(pad: Pad) -> KPad:
+        kpad = _pad_kshapes.get(id(pad))
+        if kpad is None:
+            kpad = _kernel_pad_shape(pad)
+            _pad_kshapes[id(pad)] = kpad
+        return kpad
+
+    def _kernel_pad_gap(shape: KShape, pad: Pad) -> float:
+        """Edge-to-edge gap from kernel copper ``shape`` to ``pad``'s real copper."""
+        gap = _copper_gap(shape, _kpad(pad))
+        return math.inf if gap == _NO_INTERACTION else gap
+
     # Memoized per-net-pair clearance.  ``max()`` is symmetric, so
     # ``_get_pair_clearance(a, b, ...) == _get_pair_clearance(b, a, ...)``;
     # keying by the sorted pair lets both call orders share one entry.
@@ -2788,6 +3123,22 @@ def validate_routes(
         value = _get_pair_clearance(net_a, net_b, clearance, net_names, ncm)
         _pair_clearance_cache[key] = value
         return value
+
+    # Issue #6810: trace-to-trace requirement between two nets.  P against N
+    # of an engaged coupled pair is held to the pair's floored diff-pair gap
+    # (the value ``kct check`` and the exported DRU's ``diff_pair_gap`` use),
+    # not the class clearance -- a pair laid at its own gap is the intended
+    # geometry, not a violation.  Every other net pair, and every pad / via
+    # requirement (those keep ``_pair_clearance``), is unchanged.  The gap is
+    # still positive, so P/N overlap is still reported as a short.
+    _coupled_trace_gaps = _coupled_pair_trace_gaps(router, net_names, ncm)
+
+    def _trace_pair_clearance(net_a: int, net_b: int) -> float:
+        if _coupled_trace_gaps:
+            gap = _coupled_trace_gaps.get(frozenset((net_a, net_b)))
+            if gap is not None:
+                return gap
+        return _pair_clearance(net_a, net_b)
 
     # Issue #3545: NET-AWARE component_inherent classification.  A
     # same-component FOREIGN-net pad violation is only "inherent" (and
@@ -2963,13 +3314,23 @@ def validate_routes(
     # loop walked, so the surviving vias are visited identically.
     _via_obstacles_by_net: dict[int, list[tuple[int, float, float, float]]] = {}
 
+    # Issue #5798: the preserved-copper obstacle universe is the copper the
+    # output CARRIES (:func:`kept_input_routes`), not every input route in
+    # ``router.existing_routes``.  A net this run re-routed drops its stale
+    # input copper on write (``_finalize_routes``), so checking routed copper
+    # against those stubs reported shorts the written board does not have:
+    # board 07 with ``--length-match-groups`` failed with 19 "routing short
+    # [via]" findings, every one against a dropped SDRAM escape-stub via,
+    # while kicad-cli 10.0.6 found no error on the saved board.
+    _kept_obstacle_routes = kept_input_routes(router)
+
     def _via_obstacles(route_net: int) -> list[tuple[int, float, float, float]]:
         """Vias from other-net routes, as ``(net, x, y, radius)`` tuples."""
         cached = _via_obstacles_by_net.get(route_net)
         if cached is not None:
             return cached
         entries: list[tuple[int, float, float, float]] = []
-        for other_route in itertools.chain(router.routes, getattr(router, "existing_routes", [])):
+        for other_route in itertools.chain(router.routes, _kept_obstacle_routes):
             if other_route.net == route_net:
                 continue
             for via in other_route.vias:
@@ -3004,7 +3365,7 @@ def validate_routes(
         if cached is not None:
             return cached
         entries: list[tuple[int, Segment, Layer, float, float, float, float]] = []
-        for other_route in getattr(router, "existing_routes", []):
+        for other_route in _kept_obstacle_routes:
             if other_route.net == route_net:
                 continue
             for other_seg in other_route.segments:
@@ -3021,6 +3382,57 @@ def validate_routes(
                 )
         _existing_seg_obstacles_by_net[route_net] = entries
         return entries
+
+    # Issue #6693: a short against a pad that already overlaps a pad of the
+    # copper's own net in the input board is an input defect -- the nets were
+    # shorted before routing began and no copper placement can clear the
+    # obstacle.  The overlap scan is lazy (it only runs once a pad short is
+    # found) and memoized on the router.
+    _overlap_partners: dict[int, list[tuple[str, Pad]]] | None = None
+
+    def _input_overlap_pad(
+        obstacle: Pad,
+        route_net: int,
+        route_name: str | None,
+        copper_layer: Layer | None,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        half: float,
+    ) -> str:
+        """ "REF.PIN" of the own-net pad overlapping ``obstacle`` that the copper
+        touches, or ``""`` when the short is the routing's own (#6693)."""
+        nonlocal _overlap_partners
+        if _overlap_partners is None:
+            try:
+                _overlap_partners = _input_overlap_partners(router)
+            except Exception:  # pragma: no cover - diagnostic only, never fatal
+                logger.debug("input pad-overlap scan failed", exc_info=True)
+                _overlap_partners = {}
+        for name, partner in _overlap_partners.get(id(obstacle), ()):
+            if not _pad_on_net(partner, route_net, route_name):
+                continue
+            if (
+                copper_layer is not None
+                and not partner.through_hole
+                and partner.layer != copper_layer
+            ):
+                continue
+            if (x1, y1) == (x2, y2):
+                gap = pad_point_distance(partner, x1, y1) - half
+            else:
+                gap = pad_segment_distance(partner, x1, y1, x2, y2) - half
+            if gap > 0.0:
+                continue
+            # The copper touching its own pad is not enough: an escape
+            # segment that starts in A and then cuts through B's body away
+            # from the A/B overlap is a real routing short.  Only the part
+            # of the copper's contact with B that A already covers is
+            # pre-existing, so require ``(copper & B) - A`` to be empty.
+            if _intrusion_inside_partner(obstacle, partner, x1, y1, x2, y2, half):
+                return name
+        return ""
 
     # Check each route segment against pads of different nets
     for route_idx, route in enumerate(router.routes):
@@ -3041,6 +3453,7 @@ def validate_routes(
                 seg_mid_y,
                 seg_half_len,
             ) = seg_geom
+            seg_kshape: KShape | None = None  # kernel copper, built on the first near pad
 
             # --- Segment-to-pad checks ---
             for (
@@ -3068,27 +3481,15 @@ def validate_routes(
                 if gap_lower_bound >= pair_clear - _CLEARANCE_EPSILON_MM:
                     continue
 
-                # Calculate minimum distance from the segment to the
-                # pad's true axis-aligned rectangle.  Issue #3592: the
-                # previous model treated every pad as a circle of radius
-                # ``max(width, height) / 2``, which over-estimated the
-                # extent of long, thin SMD pads (e.g. an LQFP land at
-                # 1.475 x 0.3 mm) along their short axis by ~0.6 mm and
-                # produced false-positive ``[pad]`` clearance violations
-                # for traces that legally clear the rectangular copper.
-                # Transform to the residual-angle local pad frame so the
-                # rectangle represents rotated copper, not its enlarged AABB.
-                effective_dist = (
-                    _segment_to_aabb_distance(
-                        *pad_local_point(pad, segment.x1, segment.y1),
-                        *pad_local_point(pad, segment.x2, segment.y2),
-                        0.0,
-                        0.0,
-                        pad.width / 2,
-                        pad.height / 2,
-                    )
-                    - seg_half_width
-                )
+                # Exact edge-to-edge gap from the trace to the pad's real
+                # copper (Issue #6718): the shared clearance kernel models
+                # circle / oval / roundrect / rect pads at their residual
+                # rotation (Issue #3592's long thin lands included), so a
+                # trace past a round pad's corner is not held to the
+                # pad's bounding square.
+                if seg_kshape is None:
+                    seg_kshape = _kernel_segment_shape(segment)
+                effective_dist = _kernel_pad_gap(seg_kshape, pad)
 
                 if effective_dist < pair_clear - _CLEARANCE_EPSILON_MM:
                     # Detect component-inherent violations: obstacle pad is
@@ -3122,6 +3523,21 @@ def validate_routes(
                         and effective_dist >= 0.0
                         and _same_component_relaxation_active(ref)
                     )
+                    overlap_pad = (
+                        _input_overlap_pad(
+                            pad,
+                            route_net,
+                            route.net_name or net_names.get(route_net),
+                            seg_layer,
+                            segment.x1,
+                            segment.y1,
+                            segment.x2,
+                            segment.y2,
+                            seg_half_width,
+                        )
+                        if effective_dist <= 0.0
+                        else ""
+                    )
 
                     violations.append(
                         ClearanceViolation(
@@ -3145,6 +3561,8 @@ def validate_routes(
                             component_inherent=is_component_inherent,
                             layer=segment.layer,
                             obstacle_pad=f"{ref}.{pad.pin}",
+                            origin=ORIGIN_INPUT_PAD_OVERLAP if overlap_pad else "routing",
+                            overlapping_pad=overlap_pad,
                         )
                     )
 
@@ -3159,7 +3577,7 @@ def validate_routes(
                 # Issue #5240: the required clearance depends only on the
                 # two nets, so resolve it once per route pair instead of
                 # once per segment pair.
-                pair_clear = _pair_clearance(route_net, other_route.net)
+                pair_clear = _trace_pair_clearance(route_net, other_route.net)
                 pair_limit = pair_clear - _CLEARANCE_EPSILON_MM
 
                 for (
@@ -3248,7 +3666,7 @@ def validate_routes(
                 if other_layer != seg_layer:
                     continue
 
-                pair_clear = _pair_clearance(route_net, other_net)
+                pair_clear = _trace_pair_clearance(route_net, other_net)
 
                 # Same guaranteed circle lower bound the routes-vs-routes
                 # sweep above uses: skip the exact distance call only when
@@ -3353,6 +3771,7 @@ def validate_routes(
 
         for via in route.vias:
             via_radius = via.diameter / 2
+            via_kshape: KShape | None = None  # kernel copper, built on the first near pad
 
             for (ref, num), pad in router.pads.items():
                 # Issue #6225: a skipped pour-net pad (net id rewritten to
@@ -3366,11 +3785,21 @@ def validate_routes(
                 if pad.net == 0 and not pad.net_name:
                     continue
 
-                # Issue #3592: model the pad as its true axis-aligned
-                # rectangle rather than a bounding circle so anisotropic
-                # SMD lands do not produce false-positive via-clearance
-                # violations along their short axis.
-                effective_dist = pad_point_distance(pad, via.x, via.y) - via_radius
+                # Cheap lower-bound rejection: the pad's half-diagonal
+                # bounds its copper whatever its shape, so a pad whose
+                # bounding circle clears the via cannot violate.
+                if (
+                    math.hypot(pad.x - via.x, pad.y - via.y) - via_radius - _pad_radius(pad)
+                    >= via_clear - _CLEARANCE_EPSILON_MM
+                ):
+                    continue
+
+                # Exact edge-to-edge gap to the pad's real copper through
+                # the shared clearance kernel (Issue #6718; #3592's
+                # anisotropic SMD lands are exact here too).
+                if via_kshape is None:
+                    via_kshape = _kernel_via_shape(via)
+                effective_dist = _kernel_pad_gap(via_kshape, pad)
 
                 if effective_dist < via_clear - _CLEARANCE_EPSILON_MM:
                     # Issue #2757: cross-net pad on the same component is
@@ -3390,6 +3819,21 @@ def validate_routes(
                         and not (pad.net == 0 and pad.net_name)
                         and effective_dist >= 0.0
                         and _same_component_relaxation_active(ref)
+                    )
+                    overlap_pad = (
+                        _input_overlap_pad(
+                            pad,
+                            route_net,
+                            route_name,
+                            None,
+                            via.x,
+                            via.y,
+                            via.x,
+                            via.y,
+                            via_radius,
+                        )
+                        if effective_dist <= 0.0
+                        else ""
                     )
 
                     violations.append(
@@ -3412,8 +3856,9 @@ def validate_routes(
                             ),
                             location=(pad.x, pad.y),
                             component_inherent=is_component_inherent,
-                            origin=via_origin,
+                            origin=ORIGIN_INPUT_PAD_OVERLAP if overlap_pad else via_origin,
                             obstacle_pad=f"{ref}.{num}",
+                            overlapping_pad=overlap_pad,
                         )
                     )
 
@@ -3478,9 +3923,9 @@ def validate_routes(
                         )
 
     # --- Via-to-via checks: new routes vs pre-existing routes ---
-    existing_routes = getattr(router, "existing_routes", [])
+    # Issue #5798: only kept copper the output carries (see above).
     for route_a in router.routes:
-        for route_b in existing_routes:
+        for route_b in _kept_obstacle_routes:
             if route_a.net == route_b.net:
                 continue
 
@@ -3577,7 +4022,12 @@ def validate_routes(
     # This is geometry error, deliberately kept separate from
     # ``_CLEARANCE_EPSILON_MM`` (a floating-point comparison tolerance).
     edge_outline_error = float(getattr(edge_segments, "max_error_mm", 0.0) or 0.0)
-    if edge_clearance is not None and edge_clearance > 0 and edge_segments:
+    # Issue #6043: with no clearance resolved (``None``/``0``) the check
+    # still runs at ``required = 0.0`` so copper that overlaps a cut
+    # (``actual_clearance < 0``) is reported rather than silently passed.
+    if edge_clearance is None or edge_clearance <= 0:
+        edge_clearance = 0.0
+    if edge_segments:
         for route in router.routes:
             route_net = route.net
             for seg_idx, segment in enumerate(route.segments):
@@ -3970,6 +4420,16 @@ def kept_copper_clearance_violations(
     def pair_clearance(net_a: int, net_b: int) -> float:
         return _get_pair_clearance(net_a, net_b, clearance, net_names, ncm)
 
+    # Issue #6810: ``_kept_copper_violations`` reads its ``pair_clearance``
+    # only for trace-to-trace pairs (and only without ``board_rules``, whose
+    # DRU already carries the coupled-pair exemption), so the coupled
+    # pair-gap view goes there; foreign pads keep ``pair_clearance``.
+    coupled_gaps = _coupled_pair_trace_gaps(router, net_names, ncm)
+
+    def trace_pair_clearance(net_a: int, net_b: int) -> float:
+        gap = coupled_gaps.get(frozenset((net_a, net_b))) if coupled_gaps else None
+        return gap if gap is not None else pair_clearance(net_a, net_b)
+
     obstacles_cache: dict[tuple[int, str | None], list] = {}
 
     def pad_obstacles(route_net: int, route_name: str | None) -> list:
@@ -3985,7 +4445,7 @@ def kept_copper_clearance_violations(
         pad_obstacles=pad_obstacles,
         route_net_name=route_net_name,
         resolve_net_name=resolve_net_name,
-        pair_clearance=pair_clearance,
+        pair_clearance=trace_pair_clearance,
         via_clear=via_clear,
         clearance_bound=max(clearance, via_clear, *(c.clearance for c in (ncm or {}).values())),
         shorts=False,
@@ -4090,108 +4550,6 @@ def _segment_to_segment_distance(
 ) -> float:
     """Calculate minimum distance between two line segments."""
     return _geom_seg_to_seg_dist(x1, y1, x2, y2, x3, y3, x4, y4)
-
-
-def _point_to_aabb_distance(
-    px: float, py: float, cx: float, cy: float, half_w: float, half_h: float
-) -> float:
-    """Minimum distance from a point to an axis-aligned rectangle.
-
-    The rectangle is centred at ``(cx, cy)`` with half-extents
-    ``half_w`` (X) and ``half_h`` (Y).  Returns 0.0 when the point is
-    inside the rectangle.
-
-    Issue #3592: the segment-to-pad clearance check previously modelled
-    every pad as a CIRCLE of radius ``max(width, height) / 2``.  For a
-    long, thin SMD pad (e.g. an LQFP land at 1.475 x 0.3 mm) that
-    over-estimates the pad extent along the short axis by ~0.6 mm,
-    producing false-positive clearance violations when a trace passes
-    the pad's narrow side at a distance that is legal against the real
-    rectangular copper.  Modelling the pad as its true axis-aligned
-    bounding box (pad dimensions are already rotated into PCB space at
-    load time, see ``load_pcb_for_routing``) removes that bias.
-    """
-    dx = max(abs(px - cx) - half_w, 0.0)
-    dy = max(abs(py - cy) - half_h, 0.0)
-    return math.hypot(dx, dy)
-
-
-def _segment_to_aabb_distance(
-    x1: float,
-    y1: float,
-    x2: float,
-    y2: float,
-    cx: float,
-    cy: float,
-    half_w: float,
-    half_h: float,
-) -> float:
-    """Signed centerline distance from a segment to an axis-aligned rect.
-
-    Sign convention (matches ``validate.rules.clearance.
-    _rect_segment_centerline_distance``):
-
-    - **Positive** -- segment is entirely outside the rectangle.
-    - **Zero**     -- segment touches/crosses the rectangle boundary.
-    - **Negative** -- the segment centerline lies inside the rectangle;
-      the magnitude is the deepest penetration (smallest distance to an
-      escaping edge), so the post-route DRC summary can still flag
-      "trace runs through pad metal" with a meaningful depth.
-
-    Used by the segment-to-pad clearance check so that anisotropic pads
-    are modelled by their true rectangular footprint rather than a
-    bounding circle (issue #3592).
-    """
-    left, right = cx - half_w, cx + half_w
-    bottom, top = cy - half_h, cy + half_h
-
-    def _inside(px: float, py: float) -> bool:
-        return left <= px <= right and bottom <= py <= top
-
-    p1_in = _inside(x1, y1)
-    p2_in = _inside(x2, y2)
-
-    if p1_in and p2_in:
-        # Whole centerline inside the rect -- report the deepest
-        # (most negative) signed penetration along the segment.
-        def _signed_depth(px: float, py: float) -> float:
-            gap_x = max(px - right, left - px)
-            gap_y = max(py - top, bottom - py)
-            return max(gap_x, gap_y)
-
-        deepest = min(_signed_depth(x1, y1), _signed_depth(x2, y2))
-        steps = 32
-        dx, dy = x2 - x1, y2 - y1
-        for i in range(1, steps):
-            t = i / steps
-            d = _signed_depth(x1 + t * dx, y1 + t * dy)
-            if d < deepest:
-                deepest = d
-        return deepest
-
-    if p1_in != p2_in:
-        # One endpoint inside, one outside -- the centerline crosses an
-        # edge, so it touches the boundary.
-        return 0.0
-
-    # Both endpoints outside: the segment either clears the rectangle or
-    # crosses straight through it.  Decompose the rectangle into its four
-    # edges and take the minimum segment-to-edge distance; a crossing
-    # produces distance 0 because the segment intersects an edge.
-    corners = [
-        (left, top),
-        (right, top),
-        (right, bottom),
-        (left, bottom),
-    ]
-    best = math.inf
-    for i in range(4):
-        ax, ay = corners[i]
-        bx, by = corners[(i + 1) % 4]
-        d = _geom_seg_to_seg_dist(x1, y1, x2, y2, ax, ay, bx, by)
-        if d < best:
-            best = d
-    return best
 
 
 def detect_layer_stack(pcb_text: str) -> LayerStack:
@@ -4428,6 +4786,7 @@ def route_pcb(
     origin_y: float = 0,
     skip_nets: list[str] | None = None,
     progress_callback: ProgressCallback | None = None,
+    adaptive_grid: bool = True,
 ) -> tuple[str, dict]:
     """
     Route a PCB given component placements and net assignments.
@@ -4451,9 +4810,15 @@ def route_pcb(
         progress_callback: Optional callback for progress reporting.
             Signature: (progress: float, message: str, cancelable: bool) -> bool
             Returns False to cancel, True to continue.
+        adaptive_grid: Issue #6875.  True (default) keeps the #972 adaptive
+            cell cap, which may route a large board on a coarser pitch than
+            ``rules.grid_resolution``; False routes on exactly that pitch.
 
     Returns:
-        Tuple of (sexp_string, statistics_dict)
+        Tuple of (sexp_string, statistics_dict).  ``statistics_dict["grid"]``
+        is :meth:`Autorouter.grid_report` -- the pitch actually used, and
+        ``coarsened`` / ``coarsened_reason`` when the adaptive cap replaced
+        the requested one (Issue #6875).
     """
     if rules is None:
         rules = DesignRules()
@@ -4466,7 +4831,15 @@ def route_pcb(
         origin_x=origin_x,
         origin_y=origin_y,
         rules=rules,
+        adaptive_grid=adaptive_grid,
     )
+    grid_report = router.grid_report()
+    if grid_report["coarsened"]:
+        print(
+            f"  Grid: routing on {grid_report['used_mm']:.4g}mm, not the requested "
+            f"{grid_report['requested_mm']:.4g}mm ({grid_report['coarsened_reason']}); "
+            "pass adaptive_grid=False to keep the requested pitch"
+        )
 
     from kicad_tools.schema.physical_identity import component_keys
 
@@ -4508,6 +4881,7 @@ def route_pcb(
                     "y": cy + ry,
                     "width": pad.get("width", 0.5),
                     "shape": pad.get("shape", "rect"),
+                    "roundrect_rratio": pad.get("roundrect_rratio"),
                     "height": pad.get("height", 0.5),
                     "net": net_num,
                     "net_name": net_name,
@@ -4543,6 +4917,7 @@ def route_pcb(
     router.cleanup_artifacts()
     sexp = router.to_sexp(skip_cleanup=True)
     stats = router.get_statistics()
+    stats["grid"] = grid_report
     print(
         f"  Completed: {stats['routes']} routes, {stats['segments']} segments, {stats['vias']} vias"
     )
@@ -4598,6 +4973,32 @@ def _pad_shape_from_block(pad_block: str, ref: str, pin: str) -> str:
         pin=pin,
         has_padstack=re.search(r"\(padstack(?:\s|\))", pad_block) is not None,
     )
+
+
+def _pad_rratio_from_block(pad_block: str, shape: str) -> float | None:
+    """The file's ``(roundrect_rratio X)`` for a ``roundrect`` pad (issue #6718).
+
+    Returns ``None`` for any other shape, and for a roundrect whose block
+    carries no parseable ratio -- the clearance kernel then measures it as its
+    rectangle (conservative) rather than assuming KiCad's 0.25 default.
+    """
+    if shape != "roundrect":
+        return None
+    match = re.search(r"\(roundrect_rratio\s+([-+\d.eE]+)\s*\)", pad_block)
+    if match is None:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
+
+
+def _schema_pad_rratio(pad) -> float | None:
+    """``schema.pcb.Pad.roundrect_rratio`` for a roundrect pad, else ``None``."""
+    if getattr(pad, "shape", None) != "roundrect":
+        return None
+    value = getattr(pad, "roundrect_rratio", None)
+    return float(value) if value is not None else None
 
 
 def _schema_pad_shape(pad, ref: str) -> str:
@@ -4670,10 +5071,14 @@ def _extract_pad_blocks(section: str) -> list[str]:
     """
     pad_blocks: list[str] = []
 
-    # Find all positions where "(pad " starts
+    # Find all positions where "(pad " starts *outside* a quoted string.
+    # A plain ``str.find`` would also match text such as
+    # ``(descr "Heatsink pins (pad 4, net HS) ...")`` (Issues #6740, #6873).
+    # Each scan resumes just past a completed block, which is always outside
+    # a string, as :func:`find_unquoted` requires.
     start_pos = 0
     while True:
-        pad_start = section.find("(pad ", start_pos)
+        pad_start = find_unquoted(section, "(pad ", start_pos)
         if pad_start == -1:
             break
 
@@ -4797,6 +5202,7 @@ def _install_fine_pitch_regions_from_components(
                         drill=float(pad_info.get("drill", 0.0)),
                         rotation=float(pad_info.get("rotation", 0.0)),
                         shape=pad_info.get("shape", "rect"),
+                        roundrect_rratio=pad_info.get("roundrect_rratio"),
                     )
                 )
             except (TypeError, ValueError, KeyError):
@@ -5104,11 +5510,7 @@ def load_pcb_for_routing(
     identity_document = IdentityPCB(parse_identity_document(pcb_text))
     source_keys = footprint_keys(identity_document.footprints)
     validate_netlist_selectors(identity_document.footprints, netlist or {})
-    footprint_sections = [
-        section
-        for section in re.split(r"(?=\((?:footprint|module)\s)", pcb_text)
-        if section.startswith("(footprint") or section.startswith("(module")
-    ]
+    footprint_sections = _footprint_source_sections(pcb_text, identity_document.footprints)
     for section, component_id, footprint in zip(
         footprint_sections, source_keys, identity_document.footprints, strict=True
     ):
@@ -5134,6 +5536,8 @@ def load_pcb_for_routing(
         fp_rot = float(at_match.group(3)) if at_match.group(3) else 0
 
         ref = _footprint_reference(section)
+        # Issue #6780: the footprint's copper side, for the length model.
+        fp_side = Layer.B_CU if footprint.layer == "B.Cu" else Layer.F_CU
 
         # Parse pads - extract complete (pad ...) blocks
         # KiCad 7+ uses multi-line pad definitions, so we need to extract
@@ -5318,8 +5722,10 @@ def load_pcb_for_routing(
                     "through_hole": pad_type == "thru_hole",
                     "drill": drill_size,
                     "layer": pad_layer,
+                    "side": fp_side,
                     "rotation": pad_rotation,
                     "shape": pad_shape,
+                    "roundrect_rratio": _pad_rratio_from_block(pad_block, pad_shape),
                 }
             )
 
@@ -5566,6 +5972,9 @@ def load_pcb_for_routing(
         per_net_iterations=per_net_iterations,
         # Issue #4268: mesh-router strategy selector (default "grid").
         strategy=strategy,
+        # Issue #6741: honour the pitch validated above; the #972 adaptive
+        # cell cap silently coarsened an explicit ``--grid``.
+        adaptive_grid=False,
     )
 
     router.placement_disposition = placement_disposition
@@ -5652,9 +6061,10 @@ def load_pcb_for_routing(
     # whose ``kct check --mfr`` would then fail the result with
     # ``edge_clearance_trace`` errors.  Resolve the same per-tier
     # ``MfrLimits.min_edge_clearance`` floor here so route-time keepout ==
-    # check-time floor.  An explicit ``edge_clearance`` (including ``0`` as
-    # the documented opt-out) always wins; unknown/absent manufacturers
-    # resolve to None (no keepout, pre-#4568 behavior).
+    # check-time floor.  An explicit ``edge_clearance`` always wins;
+    # unknown/absent manufacturers resolve to None.  Since #6043 neither
+    # ``None`` nor an explicit ``0`` disables the keepout any more: both get
+    # the physical floor below, which only stops copper crossing the cut.
     if edge_clearance is None:
         from .mfr_limits import resolve_edge_clearance
 
@@ -5665,9 +6075,25 @@ def load_pcb_for_routing(
         # Store on router so EscapeRouter can clamp escape points (Issue #2136)
         router._edge_clearance = edge_clearance
         if edge_segments:
-            blocked_cells = router.grid.add_edge_keepout(edge_segments, edge_clearance)
+            blocked_cells = install_edge_keepout(router, router.grid)
             if blocked_cells > 0:
                 print(f"  Edge clearance: {edge_clearance}mm, {blocked_cells} cells blocked")
+    elif edge_segments:
+        # Issue #6043: no clearance resolved (or an explicit 0).  Copper
+        # across a routed Edge.Cuts cut -- outer outline or an interior
+        # window/cutout/hole -- is never valid output, so the grid still
+        # gets a physical floor: the widest copper half-extent plus a
+        # half-diagonal-cell quantisation margin.  It is stored apart from
+        # ``_edge_clearance`` (which validate_routes / drc_nudge read as a
+        # copper-to-edge clearance) so post-route checks see no phantom
+        # requirement.
+        router._edge_keepout_floor = compute_edge_keepout_floor(router)
+        blocked_cells = install_edge_keepout(router, router.grid)
+        if blocked_cells > 0:
+            print(
+                f"  Edge keepout floor: {router._edge_keepout_floor:.3f}mm "
+                f"(no edge clearance set), {blocked_cells} cells blocked"
+            )
 
     # Load existing routes as obstacles for multi-pass routing
     if load_existing_routes or preserve_placement or placement_fixed_pads:
@@ -5760,6 +6186,16 @@ def load_pcb_for_routing(
 
             # Determine net ID from first available element
             net_id = segs[0].net if segs else vias[0].net
+
+            # Issue #6970: KiCad-10 name-only copper (no numeric net header)
+            # parses as net 0, which would make it foreign to every real net.
+            # Resolve it through the dialect-normalized net_map, as the
+            # preserve_placement re-key below does.
+            mapped_id = net_map.get(net_name, 0)
+            if net_id == 0 and mapped_id > 0:
+                net_id = mapped_id
+                segs = [replace(seg, net=net_id) for seg in segs]
+                vias = [replace(via, net=net_id) for via in vias]
 
             route = Route(
                 net=net_id,
@@ -6277,9 +6713,15 @@ def verify_output_connectivity(
     # vanished.  The old endpoint-snapping check hid that (it joined an F.Cu
     # and a B.Cu endpoint at the same XY with or without a via); the
     # layer-aware contact model needs the via to bridge the layers.
-    _body = r"(?:[^()]*\((?:[^()]*\([^()]*\))*[^()]*\))*[^()]*\)"
-    seg_block_re = re.compile(r"\(segment\b" + _body)
-    via_block_re = re.compile(r"\(via\b" + _body)
+    #
+    # Issue #6873: blocks are found outside quoted strings only (a descr can
+    # spell out a whole ``(segment ...)``), and the body skips whole strings
+    # so a ``)`` inside one cannot end a block -- or leave the scan inside a
+    # string.
+    _atoms = r'[^()"]*(?:"[^"\\]*(?:\\[\s\S][^"\\]*)*"[^()"]*)*'
+    _body = rf"(?:{_atoms}\((?:{_atoms}\({_atoms}\))*{_atoms}\))*{_atoms}\)"
+    seg_block_pattern = r"\(segment\b" + _body
+    via_block_pattern = r"\(via\b" + _body
     start_re = re.compile(r"\(start\s+([\d.+-]+)\s+([\d.+-]+)\)")
     end_re = re.compile(r"\(end\s+([\d.+-]+)\s+([\d.+-]+)\)")
     at_re = re.compile(r"\(at\s+([\d.+-]+)\s+([\d.+-]+)\)")
@@ -6333,7 +6775,7 @@ def verify_output_connectivity(
 
     # Group parsed segments by net
     segments_by_net: dict[int, list[Segment]] = {}
-    for block_match in seg_block_re.finditer(pcb_content):
+    for block_match in iter_unquoted(pcb_content, seg_block_pattern):
         block = block_match.group(0)
         s_m = start_re.search(block)
         e_m = end_re.search(block)
@@ -6361,7 +6803,7 @@ def verify_output_connectivity(
     # Group parsed vias by net
     vias_by_net: dict[int, list[Via]] = {}
     vias_read_as_through = 0
-    for block_match in via_block_re.finditer(pcb_content):
+    for block_match in iter_unquoted(pcb_content, via_block_pattern):
         block = block_match.group(0)
         at_m = at_re.search(block)
         net_id = _block_net_id(block)

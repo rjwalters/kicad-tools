@@ -699,6 +699,29 @@ class TestReportGenerator:
         assert "SKIPPED" in content
         assert "PASS" not in content.split("## ERC Status")[1].split("##")[0]
 
+    def test_erc_not_run_status(self, tmp_path: Path) -> None:
+        """ERC renders NOT RUN (not PASS/SKIPPED) when it could not run (#7083)."""
+        data = _full_data(
+            erc={
+                "error_count": 0,
+                "warning_count": 0,
+                "passed": False,
+                "skipped": False,
+                "could_not_verify": True,
+                "details": "kicad-cli not installed",
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+
+        content = report_path.read_text(encoding="utf-8")
+        section = content.split("## ERC Status")[1].split("##")[0]
+        assert "NOT RUN" in section
+        assert "PASS" not in section
+        assert "SKIPPED" not in section
+        assert "FAIL" not in section
+        assert "kicad-cli not installed" in section
+
     def test_erc_pass_not_affected_by_skipped_false(self, tmp_path: Path) -> None:
         """ERC renders PASS when skipped is False (explicit)."""
         data = _full_data(

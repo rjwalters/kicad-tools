@@ -578,6 +578,30 @@ class TestCheckMetaCheck:
         )
         assert "INCOMPLETE" in overall_line
 
+    def test_meta_check_kicad_cli_absent_is_incomplete_not_passed(
+        self, tmp_path: Path, capsys, monkeypatch
+    ):
+        """kicad-cli absent -> ERC NOT RUN, Overall INCOMPLETE, exit 2 (issue #6913).
+
+        The board has a sibling schematic and a fresh manifest, so ERC is
+        the only sub-check that needs kicad-cli.  An unrunnable ERC must
+        never be rendered as PASSED nor allowed to roll up to PASSED.
+        """
+        from kicad_tools.cli import runner
+        from kicad_tools.cli.check_cmd import main
+
+        pcb, _manifest = _stage_board00_copy(tmp_path)
+        monkeypatch.setattr(runner, "find_kicad_cli", lambda: None)
+
+        result = main([str(pcb)])
+        assert result == 2
+        out = capsys.readouterr().out
+        erc_line = next(line for line in out.splitlines() if line.startswith("ERC:"))
+        assert "NOT RUN" in erc_line and "PASSED" not in erc_line
+        assert "kicad-cli not found" in erc_line
+        overall_line = next(line for line in out.splitlines() if line.startswith("Overall:"))
+        assert "INCOMPLETE" in overall_line and "PASSED" not in overall_line
+
     def test_meta_check_allow_incomplete_passes(self, drc_clean_pcb: Path, capsys):
         """--allow-incomplete lets NOT RUN sub-checks exit 0 (issue #3750).
 

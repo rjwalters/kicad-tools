@@ -1,0 +1,4884 @@
+{
+  "environment": {
+    "kct_revision": "9a1fb50494be21d567b2bc50e7fc6aa2febbcd56",
+    "kct_tree_dirty": false,
+    "kct_worktree": "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335",
+    "native_backend": {
+      "backend": "cpp",
+      "available": true,
+      "version": "1.0.0",
+      "build_version": 56,
+      "unavailable_reason": null
+    },
+    "kicad_cli": "kicad-cli",
+    "kicad_cli_version": "10.0.6",
+    "python": "3.12.3",
+    "host": {
+      "platform": "Linux-7.0.0-1014-aws-x86_64-with-glibc2.39",
+      "machine": "x86_64",
+      "cpus": 16
+    },
+    "budgets": {
+      "wall_cap_s": 600,
+      "threads": 1,
+      "seed": 1,
+      "tracemaker_work": 50000000
+    },
+    "started_utc": "2026-10-15T16:23:37Z",
+    "pins": {
+      "tracemaker": {
+        "repo_url": "https://github.com/DingoOz/TraceMaker",
+        "commit": "89ff58ca86b2104ac6c55ae8a5dc77e4ab3e8d00",
+        "license_compat": "copyleft-ideas-only",
+        "build": "cmake -S <checkout> -B <checkout>/build/cpu-only -DCMAKE_BUILD_TYPE=RelWithDebInfo -DTM_ENABLE_CUDA=OFF -DTM_BUILD_TESTS=OFF -DTM_WERROR=OFF -DTM_BUILD_PYTHON=OFF && cmake --build <checkout>/build/cpu-only --target tracemaker -j 2",
+        "default_executable": "build/cpu-only/src/app/tracemaker",
+        "command": "tracemaker route <in.kicad_pcb> -o <out.kicad_pcb> --work <tracemaker_work> --seed <seed> --threads <threads> --no-gpu --no-kb --json <summary.json>",
+        "cli_verified_from": "src/app/main.cpp at the pinned commit (route subcommand options)",
+        "learned_state": "--no-kb: the cross-run knowledge base is neither read nor written",
+        "determinism_note": "upstream claims output is identical at any --threads under --work; not verified by this protocol",
+        "build_environment": {
+          "os": "Ubuntu 24.04",
+          "cmake": "3.28",
+          "compiler": "g++ 13 (the presets' g++-15 is not needed)",
+          "system_packages": "Boost, Eigen3, SQLite3 and zstd development packages from the host (versions not recorded)",
+          "scratch_prefix_deps": {
+            "nlohmann_json": "v3.11.3 (-DJSON_BuildTests=OFF)",
+            "CLI11": "v2.4.2 (-DCLI11_BUILD_TESTS=OFF -DCLI11_BUILD_EXAMPLES=OFF)"
+          },
+          "scratch_prefix_recipe": "clone each at the tag, cmake -S <src> -B <src>/b -DCMAKE_INSTALL_PREFIX=/tmp/fleet/prefix && cmake --install <src>/b; then configure TraceMaker with -DCMAKE_PREFIX_PATH=/tmp/fleet/prefix. Nothing is installed on the host."
+        }
+      },
+      "fastroute": {
+        "repo_url": "https://github.com/parisxmas/fastroute",
+        "commit": "e5d52c4544795422b8b28077acc0605fdf11265a",
+        "license_compat": "copyleft-ideas-only",
+        "build": "cargo build --release -p fastroute --locked -j 2",
+        "default_executable": "target/release/fastroute",
+        "command": "fastroute -de <board.dsn> -do <board.ses> --router.autorouter.max_threads=<threads> --router.optimizer.max_threads=<threads> --report=<report.json>",
+        "cli_verified_from": "`fastroute --help` of the pinned build (0.1.7)",
+        "interchange": "DSN from kicad_tools.export.dsn.KiCadToDSNExporter; SES merged back with kicad_tools.export.ses.SESToKiCadImporter into the normalized input",
+        "partial_output_note": "fastroute rewrites the .ses with the best board so far, so a partial session exists at timeout; the row stays `timeout`"
+      },
+      "kct": {
+        "command": "kct route <in.kicad_pcb> -o <out.kicad_pcb> --backend cpp --seed <seed>",
+        "requires": "C++ backend built in the active worktree (`uv run kct build-native`); otherwise the row is tool-failure/native-backend"
+      }
+    },
+    "manifest_sha256": "e9d97d53ebccdc6cf23a52ce80b835c16fef97640b4f32c738e378a736d32989"
+  },
+  "stripping_policy": {
+    "name": "strip-tracks-and-vias",
+    "removes": [
+      "segment",
+      "arc",
+      "via"
+    ],
+    "scope": "top-level children of (kicad_pcb ...) only; nested forms such as arcs in zone outlines are untouched",
+    "preserves": [
+      "footprints and pads (placement, rotation, side, pad nets)",
+      "board outline",
+      "zones (keepout and copper; fills are recomputed by the referee)",
+      "rule areas",
+      "layer stack and setup",
+      "net table",
+      "graphics and text"
+    ],
+    "applies_to": "every included board identically; fixed-placement baseline only (preserved-copper, fanout and length-tuning variants are separate, not mixed into baseline rows)"
+  },
+  "rows": [
+    {
+      "tool": "input",
+      "board": "00",
+      "outcome": "reference",
+      "reason": "normalized input; pre-existing errors stay in every routed row's headline",
+      "stage": null,
+      "exit_code": null,
+      "timed_out": false,
+      "wall_s": null,
+      "commands": [],
+      "log": null,
+      "output": "/tmp/fleet6335/work/00/input/simple_led.kicad_pcb",
+      "partial_artifact": null,
+      "lost_constraints": [],
+      "not_routing_rules": [],
+      "placement_violations": [],
+      "tool_config": {
+        "normalized_input_sha256": "966ea56c48d9093388837d6937586537197a55d57f0c441ac5187f9e42ee807e",
+        "stripped": {
+          "segment": 0,
+          "arc": 0,
+          "via": 0
+        }
+      },
+      "interchange": null,
+      "score": {
+        "graded_rules_sha256": {
+          ".kicad_pro": "3caf1e78675ae98ed2583327391677b4ce51e4f2fd712c2c155529f81476265a",
+          ".kicad_dru": "b1be95e9fb56ff826f5ca6d9ee9b5c085987f1257ec1cd0e8d41c23e0f396f81"
+        },
+        "drc": {
+          "ran": true,
+          "errors_total": 0,
+          "errors_by_type": {},
+          "warnings": 3,
+          "unconnected": 3,
+          "kicad_version": "10.0.6",
+          "command": [
+            "kicad-cli",
+            "pcb",
+            "drc",
+            "--refill-zones",
+            "--severity-all",
+            "--all-track-errors",
+            "--format",
+            "json",
+            "--units",
+            "mm",
+            "--save-board",
+            "--output",
+            "/tmp/fleet6335/work/00/input-score/score/drc.json",
+            "/tmp/fleet6335/work/00/input-score/score/simple_led.kicad_pcb"
+          ]
+        },
+        "completion": {
+          "connections_routed": 0,
+          "connections_total": 3,
+          "completion_pct": 0.0,
+          "nets_total": 3,
+          "nets_complete": 0,
+          "nets_incomplete": 3,
+          "nets_unrouted": 0,
+          "nets_blocking_incomplete": 1
+        },
+        "via_count": 0,
+        "wirelength_mm": 0,
+        "kct_check": {
+          "ran": true,
+          "passed": false,
+          "error_count": 3,
+          "warning_count": 0,
+          "errors_by_rule": {
+            "connectivity": 3
+          },
+          "note": null,
+          "manufacturer": "jlcpcb",
+          "net_class_map_path": null,
+          "inactive_rules": [
+            "match_group_length_skew",
+            "diffpair_length_skew",
+            "diffpair_routing_continuity",
+            "diffpair_uncoupled_length"
+          ]
+        },
+        "sync": {
+          "ran": true,
+          "in_sync": true,
+          "summary": {
+            "errors": 0,
+            "warnings": 0,
+            "missing_on_pcb": 0,
+            "orphaned_on_pcb": 0,
+            "net_mismatches": 0,
+            "pin_mismatches": 0
+          },
+          "command": [
+            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            "validate",
+            "--sync",
+            "-s",
+            "/tmp/fleet6335/work/00/input/frozen/simple_led.kicad_sch",
+            "-p",
+            "/tmp/fleet6335/work/00/input-score/score/simple_led.kicad_pcb",
+            "--format",
+            "json"
+          ]
+        },
+        "clean_pass": false
+      }
+    },
+    {
+      "tool": "kct",
+      "board": "00",
+      "outcome": "success",
+      "reason": null,
+      "stage": null,
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_s": 23.62,
+      "commands": [
+        [
+          "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+          "route",
+          "/tmp/fleet6335/work/00/kct/run/simple_led.kicad_pcb",
+          "-o",
+          "/tmp/fleet6335/work/00/kct/run/simple_led_routed.kicad_pcb",
+          "--backend",
+          "cpp",
+          "--seed",
+          "1"
+        ]
+      ],
+      "log": "/tmp/fleet6335/work/00/kct/run/run.log",
+      "output": "/tmp/fleet6335/work/00/kct/run/simple_led_routed.kicad_pcb",
+      "partial_artifact": null,
+      "lost_constraints": [],
+      "not_routing_rules": [],
+      "placement_violations": [],
+      "tool_config": {
+        "wall_cap_s": 600.0,
+        "backend": {
+          "backend": "cpp",
+          "available": true,
+          "version": "1.0.0",
+          "build_version": 56,
+          "unavailable_reason": null
+        },
+        "kicad_tools_package": "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/src/kicad_tools/__init__.py",
+        "zones_added_by_tool": [
+          "GND@B.Cu",
+          "VCC@F.Cu"
+        ],
+        "normalized_input_sha256": "966ea56c48d9093388837d6937586537197a55d57f0c441ac5187f9e42ee807e"
+      },
+      "interchange": null,
+      "score": {
+        "graded_rules_sha256": {
+          ".kicad_pro": "3caf1e78675ae98ed2583327391677b4ce51e4f2fd712c2c155529f81476265a",
+          ".kicad_dru": "b1be95e9fb56ff826f5ca6d9ee9b5c085987f1257ec1cd0e8d41c23e0f396f81"
+        },
+        "drc": {
+          "ran": true,
+          "errors_total": 0,
+          "errors_by_type": {},
+          "warnings": 3,
+          "unconnected": 0,
+          "kicad_version": "10.0.6",
+          "command": [
+            "kicad-cli",
+            "pcb",
+            "drc",
+            "--refill-zones",
+            "--severity-all",
+            "--all-track-errors",
+            "--format",
+            "json",
+            "--units",
+            "mm",
+            "--save-board",
+            "--output",
+            "/tmp/fleet6335/work/00/kct/score/drc.json",
+            "/tmp/fleet6335/work/00/kct/score/simple_led.kicad_pcb"
+          ]
+        },
+        "completion": {
+          "connections_routed": 3,
+          "connections_total": 3,
+          "completion_pct": 100.0,
+          "nets_total": 3,
+          "nets_complete": 3,
+          "nets_incomplete": 0,
+          "nets_unrouted": 0,
+          "nets_blocking_incomplete": 0
+        },
+        "via_count": 0,
+        "wirelength_mm": 8.71,
+        "kct_check": {
+          "ran": true,
+          "passed": true,
+          "error_count": 0,
+          "warning_count": 0,
+          "errors_by_rule": {},
+          "note": null,
+          "manufacturer": "jlcpcb",
+          "net_class_map_path": null,
+          "inactive_rules": [
+            "match_group_length_skew",
+            "diffpair_length_skew",
+            "diffpair_routing_continuity",
+            "diffpair_uncoupled_length"
+          ]
+        },
+        "sync": {
+          "ran": true,
+          "in_sync": true,
+          "summary": {
+            "errors": 0,
+            "warnings": 0,
+            "missing_on_pcb": 0,
+            "orphaned_on_pcb": 0,
+            "net_mismatches": 0,
+            "pin_mismatches": 0
+          },
+          "command": [
+            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            "validate",
+            "--sync",
+            "-s",
+            "/tmp/fleet6335/work/00/input/frozen/simple_led.kicad_sch",
+            "-p",
+            "/tmp/fleet6335/work/00/kct/score/simple_led.kicad_pcb",
+            "--format",
+            "json"
+          ]
+        },
+        "clean_pass": true
+      }
+    },
+    {
+      "tool": "tracemaker",
+      "board": "00",
+      "outcome": "success",
+      "reason": null,
+      "stage": null,
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_s": 0.11,
+      "commands": [
+        [
+          "/tmp/fleet6335/TraceMaker/build/cpu-only/src/app/tracemaker",
+          "route",
+          "/tmp/fleet6335/work/00/tracemaker/run/simple_led.kicad_pcb",
+          "-o",
+          "/tmp/fleet6335/work/00/tracemaker/run/simple_led_routed.kicad_pcb",
+          "--work",
+          "50000000",
+          "--seed",
+          "1",
+          "--threads",
+          "1",
+          "--no-gpu",
+          "--no-kb",
+          "--json",
+          "/tmp/fleet6335/work/00/tracemaker/run/tracemaker-summary.json"
+        ]
+      ],
+      "log": "/tmp/fleet6335/work/00/tracemaker/run/run.log",
+      "output": "/tmp/fleet6335/work/00/tracemaker/run/simple_led_routed.kicad_pcb",
+      "partial_artifact": null,
+      "lost_constraints": [],
+      "not_routing_rules": [],
+      "placement_violations": [],
+      "tool_config": {
+        "wall_cap_s": 600.0,
+        "pin_check": "89ff58ca86b2104ac6c55ae8a5dc77e4ab3e8d00",
+        "executable": "/tmp/fleet6335/TraceMaker/build/cpu-only/src/app/tracemaker",
+        "executable_sha256": "d254662ce819f6be08c0d30e5d951093fd76f733b4b7cc889e5bb390e6ed471c",
+        "learned_state": "isolated: --no-kb (knowledge base neither read nor written)",
+        "gpu": "disabled: --no-gpu",
+        "zones_added_by_tool": [],
+        "normalized_input_sha256": "966ea56c48d9093388837d6937586537197a55d57f0c441ac5187f9e42ee807e"
+      },
+      "interchange": null,
+      "score": {
+        "graded_rules_sha256": {
+          ".kicad_pro": "3caf1e78675ae98ed2583327391677b4ce51e4f2fd712c2c155529f81476265a",
+          ".kicad_dru": "b1be95e9fb56ff826f5ca6d9ee9b5c085987f1257ec1cd0e8d41c23e0f396f81"
+        },
+        "drc": {
+          "ran": true,
+          "errors_total": 0,
+          "errors_by_type": {},
+          "warnings": 3,
+          "unconnected": 0,
+          "kicad_version": "10.0.6",
+          "command": [
+            "kicad-cli",
+            "pcb",
+            "drc",
+            "--refill-zones",
+            "--severity-all",
+            "--all-track-errors",
+            "--format",
+            "json",
+            "--units",
+            "mm",
+            "--save-board",
+            "--output",
+            "/tmp/fleet6335/work/00/tracemaker/score/drc.json",
+            "/tmp/fleet6335/work/00/tracemaker/score/simple_led.kicad_pcb"
+          ]
+        },
+        "completion": {
+          "connections_routed": 3,
+          "connections_total": 3,
+          "completion_pct": 100.0,
+          "nets_total": 3,
+          "nets_complete": 3,
+          "nets_incomplete": 0,
+          "nets_unrouted": 0,
+          "nets_blocking_incomplete": 0
+        },
+        "via_count": 0,
+        "wirelength_mm": 29.66,
+        "kct_check": {
+          "ran": true,
+          "passed": true,
+          "error_count": 0,
+          "warning_count": 0,
+          "errors_by_rule": {},
+          "note": null,
+          "manufacturer": "jlcpcb",
+          "net_class_map_path": null,
+          "inactive_rules": [
+            "match_group_length_skew",
+            "diffpair_length_skew",
+            "diffpair_routing_continuity",
+            "diffpair_uncoupled_length"
+          ]
+        },
+        "sync": {
+          "ran": true,
+          "in_sync": true,
+          "summary": {
+            "errors": 0,
+            "warnings": 0,
+            "missing_on_pcb": 0,
+            "orphaned_on_pcb": 0,
+            "net_mismatches": 0,
+            "pin_mismatches": 0
+          },
+          "command": [
+            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            "validate",
+            "--sync",
+            "-s",
+            "/tmp/fleet6335/work/00/input/frozen/simple_led.kicad_sch",
+            "-p",
+            "/tmp/fleet6335/work/00/tracemaker/score/simple_led.kicad_pcb",
+            "--format",
+            "json"
+          ]
+        },
+        "clean_pass": true
+      }
+    },
+    {
+      "tool": "fastroute",
+      "board": "00",
+      "outcome": "non-comparable",
+      "reason": "1 constraint(s) lost at the DSN/SES boundary",
+      "stage": null,
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_s": 0.03,
+      "commands": [
+        [
+          "/tmp/fleet6335/fastroute/target/release/fastroute",
+          "-de",
+          "/tmp/fleet6335/work/00/fastroute/run/simple_led.dsn",
+          "-do",
+          "/tmp/fleet6335/work/00/fastroute/run/simple_led.ses",
+          "--router.autorouter.max_threads=1",
+          "--router.optimizer.max_threads=1",
+          "--report=/tmp/fleet6335/work/00/fastroute/run/fastroute-report.json"
+        ]
+      ],
+      "log": "/tmp/fleet6335/work/00/fastroute/run/run.log",
+      "output": "/tmp/fleet6335/work/00/fastroute/run/simple_led_routed.kicad_pcb",
+      "partial_artifact": null,
+      "lost_constraints": [
+        {
+          "kind": "dru",
+          "detail": "rule 'Reviewed clearance - Power': clearance min 0.2 mm not in DSN"
+        }
+      ],
+      "not_routing_rules": [
+        {
+          "rule": "Silk to Pad - jlcpcb",
+          "type": "silk_clearance",
+          "min_mm": 0.15
+        },
+        {
+          "rule": "PTH Hole to Track - jlcpcb",
+          "type": "hole_clearance",
+          "min_mm": 0.28
+        },
+        {
+          "rule": "Inner PTH Hole to Copper - jlcpcb",
+          "type": "hole_clearance",
+          "min_mm": 0.3
+        },
+        {
+          "rule": "Annular Ring - jlcpcb",
+          "type": "annular_width",
+          "min_mm": 0.15
+        },
+        {
+          "rule": "PTH Annular Ring - jlcpcb",
+          "type": "annular_width",
+          "min_mm": 0.18
+        },
+        {
+          "rule": "Copper to Edge - jlcpcb",
+          "type": "edge_clearance",
+          "min_mm": 0.3
+        },
+        {
+          "rule": "Hole to Edge - jlcpcb",
+          "type": "physical_hole_clearance",
+          "min_mm": 0.5
+        },
+        {
+          "rule": "Silkscreen Width - jlcpcb",
+          "type": "text_thickness",
+          "min_mm": 0.15
+        },
+        {
+          "rule": "Silkscreen Height - jlcpcb",
+          "type": "text_height",
+          "min_mm": 1.0
+        }
+      ],
+      "placement_violations": [],
+      "tool_config": {
+        "wall_cap_s": 600.0,
+        "pin_check": "e5d52c4544795422b8b28077acc0605fdf11265a",
+        "executable": "/tmp/fleet6335/fastroute/target/release/fastroute",
+        "executable_sha256": "26a02e3e2254540064a99b8f2dc85ec43ad2b377a6c3523e38b01517c6c418c8",
+        "zones_added_by_tool": [],
+        "normalized_input_sha256": "966ea56c48d9093388837d6937586537197a55d57f0c441ac5187f9e42ee807e"
+      },
+      "interchange": {
+        "ses": {
+          "wires": 7,
+          "vias": 0,
+          "resolution_unit": "um",
+          "resolution": 10.0
+        },
+        "imported_wires": 7,
+        "imported_vias": 0
+      },
+      "score": {
+        "graded_rules_sha256": {
+          ".kicad_pro": "3caf1e78675ae98ed2583327391677b4ce51e4f2fd712c2c155529f81476265a",
+          ".kicad_dru": "b1be95e9fb56ff826f5ca6d9ee9b5c085987f1257ec1cd0e8d41c23e0f396f81"
+        },
+        "drc": {
+          "ran": true,
+          "errors_total": 0,
+          "errors_by_type": {},
+          "warnings": 3,
+          "unconnected": 0,
+          "kicad_version": "10.0.6",
+          "command": [
+            "kicad-cli",
+            "pcb",
+            "drc",
+            "--refill-zones",
+            "--severity-all",
+            "--all-track-errors",
+            "--format",
+            "json",
+            "--units",
+            "mm",
+            "--save-board",
+            "--output",
+            "/tmp/fleet6335/work/00/fastroute/score/drc.json",
+            "/tmp/fleet6335/work/00/fastroute/score/simple_led.kicad_pcb"
+          ]
+        },
+        "completion": {
+          "connections_routed": 3,
+          "connections_total": 3,
+          "completion_pct": 100.0,
+          "nets_total": 3,
+          "nets_complete": 3,
+          "nets_incomplete": 0,
+          "nets_unrouted": 0,
+          "nets_blocking_incomplete": 0
+        },
+        "via_count": 0,
+        "wirelength_mm": 30.17,
+        "kct_check": {
+          "ran": true,
+          "passed": true,
+          "error_count": 0,
+          "warning_count": 0,
+          "errors_by_rule": {},
+          "note": null,
+          "manufacturer": "jlcpcb",
+          "net_class_map_path": null,
+          "inactive_rules": [
+            "match_group_length_skew",
+            "diffpair_length_skew",
+            "diffpair_routing_continuity",
+            "diffpair_uncoupled_length"
+          ]
+        },
+        "sync": {
+          "ran": true,
+          "in_sync": true,
+          "summary": {
+            "errors": 0,
+            "warnings": 0,
+            "missing_on_pcb": 0,
+            "orphaned_on_pcb": 0,
+            "net_mismatches": 0,
+            "pin_mismatches": 0
+          },
+          "command": [
+            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            "validate",
+            "--sync",
+            "-s",
+            "/tmp/fleet6335/work/00/input/frozen/simple_led.kicad_sch",
+            "-p",
+            "/tmp/fleet6335/work/00/fastroute/score/simple_led.kicad_pcb",
+            "--format",
+            "json"
+          ]
+        },
+        "clean_pass": true
+      }
+    },
+    {
+      "tool": "input",
+      "board": "01",
+      "outcome": "reference",
+      "reason": "normalized input; pre-existing errors stay in every routed row's headline",
+      "stage": null,
+      "exit_code": null,
+      "timed_out": false,
+      "wall_s": null,
+      "commands": [],
+      "log": null,
+      "output": "/tmp/fleet6335/work/01/input/voltage_divider.kicad_pcb",
+      "partial_artifact": null,
+      "lost_constraints": [],
+      "not_routing_rules": [],
+      "placement_violations": [],
+      "tool_config": {
+        "normalized_input_sha256": "8a64019d0c7e5a57ff164b63b527463f8322d35d2d824372ee28ab6fedb80c68",
+        "stripped": {
+          "segment": 0,
+          "arc": 0,
+          "via": 0
+        }
+      },
+      "interchange": null,
+      "score": {
+        "graded_rules_sha256": {
+          ".kicad_pro": "d729bd613d8798b7b1b3acf39d153f8447342e393587afff543b1c21a3e3f5c9",
+          ".kicad_dru": "d9816b36c04dc038b445b0d44943e1bd879c7a69f00b12a496de346e23ed70e0"
+        },
+        "drc": {
+          "ran": true,
+          "errors_total": 0,
+          "errors_by_type": {},
+          "warnings": 4,
+          "unconnected": 5,
+          "kicad_version": "10.0.6",
+          "command": [
+            "kicad-cli",
+            "pcb",
+            "drc",
+            "--refill-zones",
+            "--severity-all",
+            "--all-track-errors",
+            "--format",
+            "json",
+            "--units",
+            "mm",
+            "--save-board",
+            "--output",
+            "/tmp/fleet6335/work/01/input-score/score/drc.json",
+            "/tmp/fleet6335/work/01/input-score/score/voltage_divider.kicad_pcb"
+          ]
+        },
+        "completion": {
+          "connections_routed": 0,
+          "connections_total": 5,
+          "completion_pct": 0.0,
+          "nets_total": 3,
+          "nets_complete": 0,
+          "nets_incomplete": 3,
+          "nets_unrouted": 0,
+          "nets_blocking_incomplete": 0
+        },
+        "via_count": 0,
+        "wirelength_mm": 0,
+        "kct_check": {
+          "ran": true,
+          "passed": false,
+          "error_count": 3,
+          "warning_count": 0,
+          "errors_by_rule": {
+            "connectivity": 3
+          },
+          "note": null,
+          "manufacturer": "jlcpcb",
+          "net_class_map_path": null,
+          "inactive_rules": [
+            "match_group_length_skew",
+            "diffpair_length_skew",
+            "diffpair_routing_continuity",
+            "diffpair_uncoupled_length"
+          ]
+        },
+        "sync": {
+          "ran": true,
+          "in_sync": true,
+          "summary": {
+            "errors": 0,
+            "warnings": 0,
+            "missing_on_pcb": 0,
+            "orphaned_on_pcb": 0,
+            "net_mismatches": 0,
+            "pin_mismatches": 0
+          },
+          "command": [
+            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            "validate",
+            "--sync",
+            "-s",
+            "/tmp/fleet6335/work/01/input/frozen/voltage_divider.kicad_sch",
+            "-p",
+            "/tmp/fleet6335/work/01/input-score/score/voltage_divider.kicad_pcb",
+            "--format",
+            "json"
+          ]
+        },
+        "clean_pass": false
+      }
+    },
+    {
+      "tool": "kct",
+      "board": "01",
+      "outcome": "success",
+      "reason": null,
+      "stage": null,
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_s": 10.07,
+      "commands": [
+        [
+          "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+          "route",
+          "/tmp/fleet6335/work/01/kct/run/voltage_divider.kicad_pcb",
+          "-o",
+          "/tmp/fleet6335/work/01/kct/run/voltage_divider_routed.kicad_pcb",
+          "--backend",
+          "cpp",
+          "--seed",
+          "1"
+        ]
+      ],
+      "log": "/tmp/fleet6335/work/01/kct/run/run.log",
+      "output": "/tmp/fleet6335/work/01/kct/run/voltage_divider_routed.kicad_pcb",
+      "partial_artifact": null,
+      "lost_constraints": [],
+      "not_routing_rules": [],
+      "placement_violations": [],
+      "tool_config": {
+        "wall_cap_s": 600.0,
+        "backend": {
+          "backend": "cpp",
+          "available": true,
+          "version": "1.0.0",
+          "build_version": 56,
+          "unavailable_reason": null
+        },
+        "kicad_tools_package": "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/src/kicad_tools/__init__.py",
+        "zones_added_by_tool": [],
+        "normalized_input_sha256": "8a64019d0c7e5a57ff164b63b527463f8322d35d2d824372ee28ab6fedb80c68"
+      },
+      "interchange": null,
+      "score": {
+        "graded_rules_sha256": {
+          ".kicad_pro": "d729bd613d8798b7b1b3acf39d153f8447342e393587afff543b1c21a3e3f5c9",
+          ".kicad_dru": "d9816b36c04dc038b445b0d44943e1bd879c7a69f00b12a496de346e23ed70e0"
+        },
+        "drc": {
+          "ran": true,
+          "errors_total": 0,
+          "errors_by_type": {},
+          "warnings": 4,
+          "unconnected": 0,
+          "kicad_version": "10.0.6",
+          "command": [
+            "kicad-cli",
+            "pcb",
+            "drc",
+            "--refill-zones",
+            "--severity-all",
+            "--all-track-errors",
+            "--format",
+            "json",
+            "--units",
+            "mm",
+            "--save-board",
+            "--output",
+            "/tmp/fleet6335/work/01/kct/score/drc.json",
+            "/tmp/fleet6335/work/01/kct/score/voltage_divider.kicad_pcb"
+          ]
+        },
+        "completion": {
+          "connections_routed": 5,
+          "connections_total": 5,
+          "completion_pct": 100.0,
+          "nets_total": 3,
+          "nets_complete": 3,
+          "nets_incomplete": 0,
+          "nets_unrouted": 0,
+          "nets_blocking_incomplete": 0
+        },
+        "via_count": 5,
+        "wirelength_mm": 65.25,
+        "kct_check": {
+          "ran": true,
+          "passed": true,
+          "error_count": 0,
+          "warning_count": 0,
+          "errors_by_rule": {},
+          "note": null,
+          "manufacturer": "jlcpcb",
+          "net_class_map_path": null,
+          "inactive_rules": [
+            "match_group_length_skew",
+            "diffpair_length_skew",
+            "diffpair_routing_continuity",
+            "diffpair_uncoupled_length"
+          ]
+        },
+        "sync": {
+          "ran": true,
+          "in_sync": true,
+          "summary": {
+            "errors": 0,
+            "warnings": 0,
+            "missing_on_pcb": 0,
+            "orphaned_on_pcb": 0,
+            "net_mismatches": 0,
+            "pin_mismatches": 0
+          },
+          "command": [
+            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            "validate",
+            "--sync",
+            "-s",
+            "/tmp/fleet6335/work/01/input/frozen/voltage_divider.kicad_sch",
+            "-p",
+            "/tmp/fleet6335/work/01/kct/score/voltage_divider.kicad_pcb",
+            "--format",
+            "json"
+          ]
+        },
+        "clean_pass": true
+      }
+    },
+    {
+      "tool": "tracemaker",
+      "board": "01",
+      "outcome": "success",
+      "reason": null,
+      "stage": null,
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_s": 0.47,
+      "commands": [
+        [
+          "/tmp/fleet6335/TraceMaker/build/cpu-only/src/app/tracemaker",
+          "route",
+          "/tmp/fleet6335/work/01/tracemaker/run/voltage_divider.kicad_pcb",
+          "-o",
+          "/tmp/fleet6335/work/01/tracemaker/run/voltage_divider_routed.kicad_pcb",
+          "--work",
+          "50000000",
+          "--seed",
+          "1",
+          "--threads",
+          "1",
+          "--no-gpu",
+          "--no-kb",
+          "--json",
+          "/tmp/fleet6335/work/01/tracemaker/run/tracemaker-summary.json"
+        ]
+      ],
+      "log": "/tmp/fleet6335/work/01/tracemaker/run/run.log",
+      "output": "/tmp/fleet6335/work/01/tracemaker/run/voltage_divider_routed.kicad_pcb",
+      "partial_artifact": null,
+      "lost_constraints": [],
+      "not_routing_rules": [],
+      "placement_violations": [],
+      "tool_config": {
+        "wall_cap_s": 600.0,
+        "pin_check": "89ff58ca86b2104ac6c55ae8a5dc77e4ab3e8d00",
+        "executable": "/tmp/fleet6335/TraceMaker/build/cpu-only/src/app/tracemaker",
+        "executable_sha256": "d254662ce819f6be08c0d30e5d951093fd76f733b4b7cc889e5bb390e6ed471c",
+        "learned_state": "isolated: --no-kb (knowledge base neither read nor written)",
+        "gpu": "disabled: --no-gpu",
+        "zones_added_by_tool": [],
+        "normalized_input_sha256": "8a64019d0c7e5a57ff164b63b527463f8322d35d2d824372ee28ab6fedb80c68"
+      },
+      "interchange": null,
+      "score": {
+        "graded_rules_sha256": {
+          ".kicad_pro": "d729bd613d8798b7b1b3acf39d153f8447342e393587afff543b1c21a3e3f5c9",
+          ".kicad_dru": "d9816b36c04dc038b445b0d44943e1bd879c7a69f00b12a496de346e23ed70e0"
+        },
+        "drc": {
+          "ran": true,
+          "errors_total": 0,
+          "errors_by_type": {},
+          "warnings": 4,
+          "unconnected": 0,
+          "kicad_version": "10.0.6",
+          "command": [
+            "kicad-cli",
+            "pcb",
+            "drc",
+            "--refill-zones",
+            "--severity-all",
+            "--all-track-errors",
+            "--format",
+            "json",
+            "--units",
+            "mm",
+            "--save-board",
+            "--output",
+            "/tmp/fleet6335/work/01/tracemaker/score/drc.json",
+            "/tmp/fleet6335/work/01/tracemaker/score/voltage_divider.kicad_pcb"
+          ]
+        },
+        "completion": {
+          "connections_routed": 5,
+          "connections_total": 5,
+          "completion_pct": 100.0,
+          "nets_total": 3,
+          "nets_complete": 3,
+          "nets_incomplete": 0,
+          "nets_unrouted": 0,
+          "nets_blocking_incomplete": 0
+        },
+        "via_count": 0,
+        "wirelength_mm": 54.02,
+        "kct_check": {
+          "ran": true,
+          "passed": true,
+          "error_count": 0,
+          "warning_count": 0,
+          "errors_by_rule": {},
+          "note": null,
+          "manufacturer": "jlcpcb",
+          "net_class_map_path": null,
+          "inactive_rules": [
+            "match_group_length_skew",
+            "diffpair_length_skew",
+            "diffpair_routing_continuity",
+            "diffpair_uncoupled_length"
+          ]
+        },
+        "sync": {
+          "ran": true,
+          "in_sync": true,
+          "summary": {
+            "errors": 0,
+            "warnings": 0,
+            "missing_on_pcb": 0,
+            "orphaned_on_pcb": 0,
+            "net_mismatches": 0,
+            "pin_mismatches": 0
+          },
+          "command": [
+            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            "validate",
+            "--sync",
+            "-s",
+            "/tmp/fleet6335/work/01/input/frozen/voltage_divider.kicad_sch",
+            "-p",
+            "/tmp/fleet6335/work/01/tracemaker/score/voltage_divider.kicad_pcb",
+            "--format",
+            "json"
+          ]
+        },
+        "clean_pass": true
+      }
+    },
+    {
+      "tool": "fastroute",
+      "board": "01",
+      "outcome": "non-comparable",
+      "reason": "1 constraint(s) lost at the DSN/SES boundary",
+      "stage": null,
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_s": 0.02,
+      "commands": [
+        [
+          "/tmp/fleet6335/fastroute/target/release/fastroute",
+          "-de",
+          "/tmp/fleet6335/work/01/fastroute/run/voltage_divider.dsn",
+          "-do",
+          "/tmp/fleet6335/work/01/fastroute/run/voltage_divider.ses",
+          "--router.autorouter.max_threads=1",
+          "--router.optimizer.max_threads=1",
+          "--report=/tmp/fleet6335/work/01/fastroute/run/fastroute-report.json"
+        ]
+      ],
+      "log": "/tmp/fleet6335/work/01/fastroute/run/run.log",
+      "output": "/tmp/fleet6335/work/01/fastroute/run/voltage_divider_routed.kicad_pcb",
+      "partial_artifact": null,
+      "lost_constraints": [
+        {
+          "kind": "dru",
+          "detail": "rule 'Reviewed clearance - Power': clearance min 0.2 mm not in DSN"
+        }
+      ],
+      "not_routing_rules": [
+        {
+          "rule": "Silk to Pad - jlcpcb",
+          "type": "silk_clearance",
+          "min_mm": 0.15
+        },
+        {
+          "rule": "PTH Hole to Track - jlcpcb",
+          "type": "hole_clearance",
+          "min_mm": 0.28
+        },
+        {
+          "rule": "Inner PTH Hole to Copper - jlcpcb",
+          "type": "hole_clearance",
+          "min_mm": 0.3
+        },
+        {
+          "rule": "Annular Ring - jlcpcb",
+          "type": "annular_width",
+          "min_mm": 0.15
+        },
+        {
+          "rule": "PTH Annular Ring - jlcpcb",
+          "type": "annular_width",
+          "min_mm": 0.18
+        },
+        {
+          "rule": "Copper to Edge - jlcpcb",
+          "type": "edge_clearance",
+          "min_mm": 0.3
+        },
+        {
+          "rule": "Hole to Edge - jlcpcb",
+          "type": "physical_hole_clearance",
+          "min_mm": 0.5
+        },
+        {
+          "rule": "Silkscreen Width - jlcpcb",
+          "type": "text_thickness",
+          "min_mm": 0.15
+        },
+        {
+          "rule": "Silkscreen Height - jlcpcb",
+          "type": "text_height",
+          "min_mm": 1.0
+        }
+      ],
+      "placement_violations": [],
+      "tool_config": {
+        "wall_cap_s": 600.0,
+        "pin_check": "e5d52c4544795422b8b28077acc0605fdf11265a",
+        "executable": "/tmp/fleet6335/fastroute/target/release/fastroute",
+        "executable_sha256": "26a02e3e2254540064a99b8f2dc85ec43ad2b377a6c3523e38b01517c6c418c8",
+        "zones_added_by_tool": [],
+        "normalized_input_sha256": "8a64019d0c7e5a57ff164b63b527463f8322d35d2d824372ee28ab6fedb80c68"
+      },
+      "interchange": {
+        "ses": {
+          "wires": 16,
+          "vias": 0,
+          "resolution_unit": "um",
+          "resolution": 10.0
+        },
+        "imported_wires": 16,
+        "imported_vias": 0
+      },
+      "score": {
+        "graded_rules_sha256": {
+          ".kicad_pro": "d729bd613d8798b7b1b3acf39d153f8447342e393587afff543b1c21a3e3f5c9",
+          ".kicad_dru": "d9816b36c04dc038b445b0d44943e1bd879c7a69f00b12a496de346e23ed70e0"
+        },
+        "drc": {
+          "ran": true,
+          "errors_total": 0,
+          "errors_by_type": {},
+          "warnings": 4,
+          "unconnected": 0,
+          "kicad_version": "10.0.6",
+          "command": [
+            "kicad-cli",
+            "pcb",
+            "drc",
+            "--refill-zones",
+            "--severity-all",
+            "--all-track-errors",
+            "--format",
+            "json",
+            "--units",
+            "mm",
+            "--save-board",
+            "--output",
+            "/tmp/fleet6335/work/01/fastroute/score/drc.json",
+            "/tmp/fleet6335/work/01/fastroute/score/voltage_divider.kicad_pcb"
+          ]
+        },
+        "completion": {
+          "connections_routed": 5,
+          "connections_total": 5,
+          "completion_pct": 100.0,
+          "nets_total": 3,
+          "nets_complete": 3,
+          "nets_incomplete": 0,
+          "nets_unrouted": 0,
+          "nets_blocking_incomplete": 0
+        },
+        "via_count": 0,
+        "wirelength_mm": 54.62,
+        "kct_check": {
+          "ran": true,
+          "passed": true,
+          "error_count": 0,
+          "warning_count": 0,
+          "errors_by_rule": {},
+          "note": null,
+          "manufacturer": "jlcpcb",
+          "net_class_map_path": null,
+          "inactive_rules": [
+            "match_group_length_skew",
+            "diffpair_length_skew",
+            "diffpair_routing_continuity",
+            "diffpair_uncoupled_length"
+          ]
+        },
+        "sync": {
+          "ran": true,
+          "in_sync": true,
+          "summary": {
+            "errors": 0,
+            "warnings": 0,
+            "missing_on_pcb": 0,
+            "orphaned_on_pcb": 0,
+            "net_mismatches": 0,
+            "pin_mismatches": 0
+          },
+          "command": [
+            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            "validate",
+            "--sync",
+            "-s",
+            "/tmp/fleet6335/work/01/input/frozen/voltage_divider.kicad_sch",
+            "-p",
+            "/tmp/fleet6335/work/01/fastroute/score/voltage_divider.kicad_pcb",
+            "--format",
+            "json"
+          ]
+        },
+        "clean_pass": true
+      }
+    },
+    {
+      "tool": "input",
+      "board": "02",
+      "outcome": "reference",
+      "reason": "normalized input; pre-existing errors stay in every routed row's headline",
+      "stage": null,
+      "exit_code": null,
+      "timed_out": false,
+      "wall_s": null,
+      "commands": [],
+      "log": null,
+      "output": "/tmp/fleet6335/work/02/input/charlieplex_3x3.kicad_pcb",
+      "partial_artifact": null,
+      "lost_constraints": [],
+      "not_routing_rules": [],
+      "placement_violations": [],
+      "tool_config": {
+        "normalized_input_sha256": "848a242b0b3ba6a623aa7a03969adefa457905610bff49da022e8acdc3432b8d",
+        "stripped": {
+          "segment": 0,
+          "arc": 0,
+          "via": 0
+        }
+      },
+      "interchange": null,
+      "score": {
+        "graded_rules_sha256": {
+          ".kicad_pro": "c151d047aecc35b8dcffb8df692c7be105c4864a8cfe66a899aefcdc7689ae38",
+          ".kicad_dru": "605daba617abad8a6dc6da2cadac4c6d565eace926791bcd10204a04b060eb46"
+        },
+        "drc": {
+          "ran": true,
+          "errors_total": 0,
+          "errors_by_type": {},
+          "warnings": 0,
+          "unconnected": 36,
+          "kicad_version": "10.0.6",
+          "command": [
+            "kicad-cli",
+            "pcb",
+            "drc",
+            "--refill-zones",
+            "--severity-all",
+            "--all-track-errors",
+            "--format",
+            "json",
+            "--units",
+            "mm",
+            "--save-board",
+            "--output",
+            "/tmp/fleet6335/work/02/input-score/score/drc.json",
+            "/tmp/fleet6335/work/02/input-score/score/charlieplex_3x3.kicad_pcb"
+          ]
+        },
+        "completion": {
+          "connections_routed": 0,
+          "connections_total": 36,
+          "completion_pct": 0.0,
+          "nets_total": 12,
+          "nets_complete": 0,
+          "nets_incomplete": 12,
+          "nets_unrouted": 0,
+          "nets_blocking_incomplete": 10
+        },
+        "via_count": 0,
+        "wirelength_mm": 0,
+        "kct_check": {
+          "ran": true,
+          "passed": false,
+          "error_count": 12,
+          "warning_count": 61,
+          "errors_by_rule": {
+            "connectivity": 12
+          },
+          "note": null,
+          "manufacturer": "jlcpcb",
+          "net_class_map_path": null,
+          "inactive_rules": [
+            "match_group_length_skew",
+            "diffpair_length_skew",
+            "diffpair_routing_continuity",
+            "diffpair_uncoupled_length"
+          ]
+        },
+        "sync": {
+          "ran": true,
+          "in_sync": true,
+          "summary": {
+            "errors": 0,
+            "warnings": 0,
+            "missing_on_pcb": 0,
+            "orphaned_on_pcb": 0,
+            "net_mismatches": 0,
+            "pin_mismatches": 0
+          },
+          "command": [
+            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            "validate",
+            "--sync",
+            "-s",
+            "/tmp/fleet6335/work/02/input/frozen/charlieplex_3x3.kicad_sch",
+            "-p",
+            "/tmp/fleet6335/work/02/input-score/score/charlieplex_3x3.kicad_pcb",
+            "--format",
+            "json"
+          ]
+        },
+        "clean_pass": false
+      }
+    },
+    {
+      "tool": "kct",
+      "board": "02",
+      "outcome": "success",
+      "reason": null,
+      "stage": null,
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_s": 185.35,
+      "commands": [
+        [
+          "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+          "route",
+          "/tmp/fleet6335/work/02/kct/run/charlieplex_3x3.kicad_pcb",
+          "-o",
+          "/tmp/fleet6335/work/02/kct/run/charlieplex_3x3_routed.kicad_pcb",
+          "--backend",
+          "cpp",
+          "--seed",
+          "1"
+        ]
+      ],
+      "log": "/tmp/fleet6335/work/02/kct/run/run.log",
+      "output": "/tmp/fleet6335/work/02/kct/run/charlieplex_3x3_routed.kicad_pcb",
+      "partial_artifact": null,
+      "lost_constraints": [],
+      "not_routing_rules": [],
+      "placement_violations": [],
+      "tool_config": {
+        "wall_cap_s": 600.0,
+        "backend": {
+          "backend": "cpp",
+          "available": true,
+          "version": "1.0.0",
+          "build_version": 56,
+          "unavailable_reason": null
+        },
+        "kicad_tools_package": "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/src/kicad_tools/__init__.py",
+        "zones_added_by_tool": [
+          "GND@B.Cu",
+          "VCC@F.Cu"
+        ],
+        "normalized_input_sha256": "848a242b0b3ba6a623aa7a03969adefa457905610bff49da022e8acdc3432b8d"
+      },
+      "interchange": null,
+      "score": {
+        "graded_rules_sha256": {
+          ".kicad_pro": "c151d047aecc35b8dcffb8df692c7be105c4864a8cfe66a899aefcdc7689ae38",
+          ".kicad_dru": "605daba617abad8a6dc6da2cadac4c6d565eace926791bcd10204a04b060eb46"
+        },
+        "drc": {
+          "ran": true,
+          "errors_total": 0,
+          "errors_by_type": {},
+          "warnings": 3,
+          "unconnected": 0,
+          "kicad_version": "10.0.6",
+          "command": [
+            "kicad-cli",
+            "pcb",
+            "drc",
+            "--refill-zones",
+            "--severity-all",
+            "--all-track-errors",
+            "--format",
+            "json",
+            "--units",
+            "mm",
+            "--save-board",
+            "--output",
+            "/tmp/fleet6335/work/02/kct/score/drc.json",
+            "/tmp/fleet6335/work/02/kct/score/charlieplex_3x3.kicad_pcb"
+          ]
+        },
+        "completion": {
+          "connections_routed": 36,
+          "connections_total": 36,
+          "completion_pct": 100.0,
+          "nets_total": 12,
+          "nets_complete": 12,
+          "nets_incomplete": 0,
+          "nets_unrouted": 0,
+          "nets_blocking_incomplete": 0
+        },
+        "via_count": 43,
+        "wirelength_mm": 406.64,
+        "kct_check": {
+          "ran": true,
+          "passed": true,
+          "error_count": 0,
+          "warning_count": 64,
+          "errors_by_rule": {},
+          "note": null,
+          "manufacturer": "jlcpcb",
+          "net_class_map_path": null,
+          "inactive_rules": [
+            "match_group_length_skew",
+            "diffpair_length_skew",
+            "diffpair_routing_continuity",
+            "diffpair_uncoupled_length"
+          ]
+        },
+        "sync": {
+          "ran": true,
+          "in_sync": true,
+          "summary": {
+            "errors": 0,
+            "warnings": 0,
+            "missing_on_pcb": 0,
+            "orphaned_on_pcb": 0,
+            "net_mismatches": 0,
+            "pin_mismatches": 0
+          },
+          "command": [
+            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            "validate",
+            "--sync",
+            "-s",
+            "/tmp/fleet6335/work/02/input/frozen/charlieplex_3x3.kicad_sch",
+            "-p",
+            "/tmp/fleet6335/work/02/kct/score/charlieplex_3x3.kicad_pcb",
+            "--format",
+            "json"
+          ]
+        },
+        "clean_pass": true
+      }
+    },
+    {
+      "tool": "tracemaker",
+      "board": "02",
+      "outcome": "success",
+      "reason": null,
+      "stage": null,
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_s": 19.66,
+      "commands": [
+        [
+          "/tmp/fleet6335/TraceMaker/build/cpu-only/src/app/tracemaker",
+          "route",
+          "/tmp/fleet6335/work/02/tracemaker/run/charlieplex_3x3.kicad_pcb",
+          "-o",
+          "/tmp/fleet6335/work/02/tracemaker/run/charlieplex_3x3_routed.kicad_pcb",
+          "--work",
+          "50000000",
+          "--seed",
+          "1",
+          "--threads",
+          "1",
+          "--no-gpu",
+          "--no-kb",
+          "--json",
+          "/tmp/fleet6335/work/02/tracemaker/run/tracemaker-summary.json"
+        ]
+      ],
+      "log": "/tmp/fleet6335/work/02/tracemaker/run/run.log",
+      "output": "/tmp/fleet6335/work/02/tracemaker/run/charlieplex_3x3_routed.kicad_pcb",
+      "partial_artifact": null,
+      "lost_constraints": [],
+      "not_routing_rules": [],
+      "placement_violations": [],
+      "tool_config": {
+        "wall_cap_s": 600.0,
+        "pin_check": "89ff58ca86b2104ac6c55ae8a5dc77e4ab3e8d00",
+        "executable": "/tmp/fleet6335/TraceMaker/build/cpu-only/src/app/tracemaker",
+        "executable_sha256": "d254662ce819f6be08c0d30e5d951093fd76f733b4b7cc889e5bb390e6ed471c",
+        "learned_state": "isolated: --no-kb (knowledge base neither read nor written)",
+        "gpu": "disabled: --no-gpu",
+        "zones_added_by_tool": [],
+        "normalized_input_sha256": "848a242b0b3ba6a623aa7a03969adefa457905610bff49da022e8acdc3432b8d"
+      },
+      "interchange": null,
+      "score": {
+        "graded_rules_sha256": {
+          ".kicad_pro": "c151d047aecc35b8dcffb8df692c7be105c4864a8cfe66a899aefcdc7689ae38",
+          ".kicad_dru": "605daba617abad8a6dc6da2cadac4c6d565eace926791bcd10204a04b060eb46"
+        },
+        "drc": {
+          "ran": true,
+          "errors_total": 0,
+          "errors_by_type": {},
+          "warnings": 0,
+          "unconnected": 0,
+          "kicad_version": "10.0.6",
+          "command": [
+            "kicad-cli",
+            "pcb",
+            "drc",
+            "--refill-zones",
+            "--severity-all",
+            "--all-track-errors",
+            "--format",
+            "json",
+            "--units",
+            "mm",
+            "--save-board",
+            "--output",
+            "/tmp/fleet6335/work/02/tracemaker/score/drc.json",
+            "/tmp/fleet6335/work/02/tracemaker/score/charlieplex_3x3.kicad_pcb"
+          ]
+        },
+        "completion": {
+          "connections_routed": 36,
+          "connections_total": 36,
+          "completion_pct": 100.0,
+          "nets_total": 12,
+          "nets_complete": 12,
+          "nets_incomplete": 0,
+          "nets_unrouted": 0,
+          "nets_blocking_incomplete": 0
+        },
+        "via_count": 9,
+        "wirelength_mm": 478.38,
+        "kct_check": {
+          "ran": true,
+          "passed": false,
+          "error_count": 3,
+          "warning_count": 61,
+          "errors_by_rule": {
+            "via_in_pad": 3
+          },
+          "note": null,
+          "manufacturer": "jlcpcb",
+          "net_class_map_path": null,
+          "inactive_rules": [
+            "match_group_length_skew",
+            "diffpair_length_skew",
+            "diffpair_routing_continuity",
+            "diffpair_uncoupled_length"
+          ]
+        },
+        "sync": {
+          "ran": true,
+          "in_sync": true,
+          "summary": {
+            "errors": 0,
+            "warnings": 0,
+            "missing_on_pcb": 0,
+            "orphaned_on_pcb": 0,
+            "net_mismatches": 0,
+            "pin_mismatches": 0
+          },
+          "command": [
+            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            "validate",
+            "--sync",
+            "-s",
+            "/tmp/fleet6335/work/02/input/frozen/charlieplex_3x3.kicad_sch",
+            "-p",
+            "/tmp/fleet6335/work/02/tracemaker/score/charlieplex_3x3.kicad_pcb",
+            "--format",
+            "json"
+          ]
+        },
+        "clean_pass": false
+      }
+    },
+    {
+      "tool": "fastroute",
+      "board": "02",
+      "outcome": "non-comparable",
+      "reason": "2 constraint(s) lost at the DSN/SES boundary",
+      "stage": null,
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_s": 2.37,
+      "commands": [
+        [
+          "/tmp/fleet6335/fastroute/target/release/fastroute",
+          "-de",
+          "/tmp/fleet6335/work/02/fastroute/run/charlieplex_3x3.dsn",
+          "-do",
+          "/tmp/fleet6335/work/02/fastroute/run/charlieplex_3x3.ses",
+          "--router.autorouter.max_threads=1",
+          "--router.optimizer.max_threads=1",
+          "--report=/tmp/fleet6335/work/02/fastroute/run/fastroute-report.json"
+        ]
+      ],
+      "log": "/tmp/fleet6335/work/02/fastroute/run/run.log",
+      "output": "/tmp/fleet6335/work/02/fastroute/run/charlieplex_3x3_routed.kicad_pcb",
+      "partial_artifact": null,
+      "lost_constraints": [
+        {
+          "kind": "dru",
+          "detail": "rule 'Reviewed clearance - Clock': clearance min 0.2 mm not in DSN"
+        },
+        {
+          "kind": "dru",
+          "detail": "rule 'Reviewed clearance - Power': clearance min 0.2 mm not in DSN"
+        }
+      ],
+      "not_routing_rules": [
+        {
+          "rule": "Silk to Pad - jlcpcb",
+          "type": "silk_clearance",
+          "min_mm": 0.15
+        },
+        {
+          "rule": "PTH Hole to Track - jlcpcb",
+          "type": "hole_clearance",
+          "min_mm": 0.28
+        },
+        {
+          "rule": "Inner PTH Hole to Copper - jlcpcb",
+          "type": "hole_clearance",
+          "min_mm": 0.3
+        },
+        {
+          "rule": "Annular Ring - jlcpcb",
+          "type": "annular_width",
+          "min_mm": 0.15
+        },
+        {
+          "rule": "PTH Annular Ring - jlcpcb",
+          "type": "annular_width",
+          "min_mm": 0.18
+        },
+        {
+          "rule": "Copper to Edge - jlcpcb",
+          "type": "edge_clearance",
+          "min_mm": 0.3
+        },
+        {
+          "rule": "Hole to Edge - jlcpcb",
+          "type": "physical_hole_clearance",
+          "min_mm": 0.5
+        },
+        {
+          "rule": "Silkscreen Width - jlcpcb",
+          "type": "text_thickness",
+          "min_mm": 0.15
+        },
+        {
+          "rule": "Silkscreen Height - jlcpcb",
+          "type": "text_height",
+          "min_mm": 1.0
+        }
+      ],
+      "placement_violations": [],
+      "tool_config": {
+        "wall_cap_s": 600.0,
+        "pin_check": "e5d52c4544795422b8b28077acc0605fdf11265a",
+        "executable": "/tmp/fleet6335/fastroute/target/release/fastroute",
+        "executable_sha256": "26a02e3e2254540064a99b8f2dc85ec43ad2b377a6c3523e38b01517c6c418c8",
+        "zones_added_by_tool": [],
+        "normalized_input_sha256": "848a242b0b3ba6a623aa7a03969adefa457905610bff49da022e8acdc3432b8d"
+      },
+      "interchange": {
+        "ses": {
+          "wires": 96,
+          "vias": 6,
+          "resolution_unit": "um",
+          "resolution": 10.0
+        },
+        "imported_wires": 96,
+        "imported_vias": 6
+      },
+      "score": {
+        "graded_rules_sha256": {
+          ".kicad_pro": "c151d047aecc35b8dcffb8df692c7be105c4864a8cfe66a899aefcdc7689ae38",
+          ".kicad_dru": "605daba617abad8a6dc6da2cadac4c6d565eace926791bcd10204a04b060eb46"
+        },
+        "drc": {
+          "ran": true,
+          "errors_total": 6,
+          "errors_by_type": {
+            "annular_width": 6
+          },
+          "warnings": 0,
+          "unconnected": 0,
+          "kicad_version": "10.0.6",
+          "command": [
+            "kicad-cli",
+            "pcb",
+            "drc",
+            "--refill-zones",
+            "--severity-all",
+            "--all-track-errors",
+            "--format",
+            "json",
+            "--units",
+            "mm",
+            "--save-board",
+            "--output",
+            "/tmp/fleet6335/work/02/fastroute/score/drc.json",
+            "/tmp/fleet6335/work/02/fastroute/score/charlieplex_3x3.kicad_pcb"
+          ]
+        },
+        "completion": {
+          "connections_routed": 36,
+          "connections_total": 36,
+          "completion_pct": 100.0,
+          "nets_total": 12,
+          "nets_complete": 12,
+          "nets_incomplete": 0,
+          "nets_unrouted": 0,
+          "nets_blocking_incomplete": 0
+        },
+        "via_count": 6,
+        "wirelength_mm": 509.78,
+        "kct_check": {
+          "ran": true,
+          "passed": false,
+          "error_count": 6,
+          "warning_count": 61,
+          "errors_by_rule": {
+            "dimension_annular_ring": 6
+          },
+          "note": null,
+          "manufacturer": "jlcpcb",
+          "net_class_map_path": null,
+          "inactive_rules": [
+            "match_group_length_skew",
+            "diffpair_length_skew",
+            "diffpair_routing_continuity",
+            "diffpair_uncoupled_length"
+          ]
+        },
+        "sync": {
+          "ran": true,
+          "in_sync": true,
+          "summary": {
+            "errors": 0,
+            "warnings": 0,
+            "missing_on_pcb": 0,
+            "orphaned_on_pcb": 0,
+            "net_mismatches": 0,
+            "pin_mismatches": 0
+          },
+          "command": [
+            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            "validate",
+            "--sync",
+            "-s",
+            "/tmp/fleet6335/work/02/input/frozen/charlieplex_3x3.kicad_sch",
+            "-p",
+            "/tmp/fleet6335/work/02/fastroute/score/charlieplex_3x3.kicad_pcb",
+            "--format",
+            "json"
+          ]
+        },
+        "clean_pass": false
+      }
+    },
+    {
+      "tool": "input",
+      "board": "03",
+      "outcome": "reference",
+      "reason": "normalized input; pre-existing errors stay in every routed row's headline",
+      "stage": null,
+      "exit_code": null,
+      "timed_out": false,
+      "wall_s": null,
+      "commands": [],
+      "log": null,
+      "output": "/tmp/fleet6335/work/03/input/usb_joystick.kicad_pcb",
+      "partial_artifact": null,
+      "lost_constraints": [],
+      "not_routing_rules": [],
+      "placement_violations": [],
+      "tool_config": {
+        "normalized_input_sha256": "3691a5a5775ecde3c7ff28ce35dcaa005837ba16ed6a8ca508a16f1b3382702e",
+        "stripped": {
+          "segment": 0,
+          "arc": 0,
+          "via": 0
+        }
+      },
+      "interchange": null,
+      "score": {
+        "graded_rules_sha256": {
+          ".kicad_pro": "09c8746ffab5b0449d13f3b777d87c4786c2abc2cfa2df7eb796e12f83822c05",
+          ".kicad_dru": "c44d93c7564deb55af71cc3effd698cf79c8d29362f04e0d95268aaab0dd3e93"
+        },
+        "drc": {
+          "ran": true,
+          "errors_total": 0,
+          "errors_by_type": {},
+          "warnings": 39,
+          "unconnected": 72,
+          "kicad_version": "10.0.6",
+          "command": [
+            "kicad-cli",
+            "pcb",
+            "drc",
+            "--refill-zones",
+            "--severity-all",
+            "--all-track-errors",
+            "--format",
+            "json",
+            "--units",
+            "mm",
+            "--save-board",
+            "--output",
+            "/tmp/fleet6335/work/03/input-score/score/drc.json",
+            "/tmp/fleet6335/work/03/input-score/score/usb_joystick.kicad_pcb"
+          ]
+        },
+        "completion": {
+          "connections_routed": 43,
+          "connections_total": 115,
+          "completion_pct": 37.39,
+          "nets_total": 27,
+          "nets_complete": 1,
+          "nets_incomplete": 26,
+          "nets_unrouted": 0,
+          "nets_blocking_incomplete": 24
+        },
+        "via_count": 0,
+        "wirelength_mm": 0,
+        "kct_check": {
+          "ran": true,
+          "passed": false,
+          "error_count": 25,
+          "warning_count": 39,
+          "errors_by_rule": {
+            "connectivity": 25
+          },
+          "note": null,
+          "manufacturer": "jlcpcb",
+          "net_class_map_path": null,
+          "inactive_rules": [
+            "match_group_length_skew",
+            "diffpair_length_skew",
+            "diffpair_routing_continuity",
+            "diffpair_uncoupled_length"
+          ]
+        },
+        "sync": {
+          "ran": true,
+          "in_sync": true,
+          "summary": {
+            "errors": 0,
+            "warnings": 0,
+            "missing_on_pcb": 0,
+            "orphaned_on_pcb": 0,
+            "net_mismatches": 0,
+            "pin_mismatches": 0
+          },
+          "command": [
+            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            "validate",
+            "--sync",
+            "-s",
+            "/tmp/fleet6335/work/03/input/frozen/usb_joystick.kicad_sch",
+            "-p",
+            "/tmp/fleet6335/work/03/input-score/score/usb_joystick.kicad_pcb",
+            "--format",
+            "json"
+          ]
+        },
+        "clean_pass": false
+      }
+    },
+    {
+      "tool": "kct",
+      "board": "03",
+      "outcome": "success",
+      "reason": null,
+      "stage": null,
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_s": 212.22,
+      "commands": [
+        [
+          "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+          "route",
+          "/tmp/fleet6335/work/03/kct/run/usb_joystick.kicad_pcb",
+          "-o",
+          "/tmp/fleet6335/work/03/kct/run/usb_joystick_routed.kicad_pcb",
+          "--backend",
+          "cpp",
+          "--seed",
+          "1"
+        ]
+      ],
+      "log": "/tmp/fleet6335/work/03/kct/run/run.log",
+      "output": "/tmp/fleet6335/work/03/kct/run/usb_joystick_routed.kicad_pcb",
+      "partial_artifact": null,
+      "lost_constraints": [],
+      "not_routing_rules": [],
+      "placement_violations": [],
+      "tool_config": {
+        "wall_cap_s": 600.0,
+        "backend": {
+          "backend": "cpp",
+          "available": true,
+          "version": "1.0.0",
+          "build_version": 56,
+          "unavailable_reason": null
+        },
+        "kicad_tools_package": "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/src/kicad_tools/__init__.py",
+        "zones_added_by_tool": [
+          "VBUS@In2.Cu"
+        ],
+        "normalized_input_sha256": "3691a5a5775ecde3c7ff28ce35dcaa005837ba16ed6a8ca508a16f1b3382702e"
+      },
+      "interchange": null,
+      "score": {
+        "graded_rules_sha256": {
+          ".kicad_pro": "09c8746ffab5b0449d13f3b777d87c4786c2abc2cfa2df7eb796e12f83822c05",
+          ".kicad_dru": "c44d93c7564deb55af71cc3effd698cf79c8d29362f04e0d95268aaab0dd3e93"
+        },
+        "drc": {
+          "ran": true,
+          "errors_total": 5,
+          "errors_by_type": {
+            "diff_pair_uncoupled_length_too_long": 1,
+            "starved_thermal": 4
+          },
+          "warnings": 39,
+          "unconnected": 1,
+          "kicad_version": "10.0.6",
+          "command": [
+            "kicad-cli",
+            "pcb",
+            "drc",
+            "--refill-zones",
+            "--severity-all",
+            "--all-track-errors",
+            "--format",
+            "json",
+            "--units",
+            "mm",
+            "--save-board",
+            "--output",
+            "/tmp/fleet6335/work/03/kct/score/drc.json",
+            "/tmp/fleet6335/work/03/kct/score/usb_joystick.kicad_pcb"
+          ]
+        },
+        "completion": {
+          "connections_routed": 114,
+          "connections_total": 115,
+          "completion_pct": 99.13,
+          "nets_total": 27,
+          "nets_complete": 26,
+          "nets_incomplete": 1,
+          "nets_unrouted": 0,
+          "nets_blocking_incomplete": 0
+        },
+        "via_count": 69,
+        "wirelength_mm": 733.18,
+        "kct_check": {
+          "ran": true,
+          "passed": true,
+          "error_count": 0,
+          "warning_count": 40,
+          "errors_by_rule": {},
+          "note": null,
+          "manufacturer": "jlcpcb",
+          "net_class_map_path": null,
+          "inactive_rules": [
+            "match_group_length_skew",
+            "diffpair_length_skew",
+            "diffpair_routing_continuity",
+            "diffpair_uncoupled_length"
+          ]
+        },
+        "sync": {
+          "ran": true,
+          "in_sync": true,
+          "summary": {
+            "errors": 0,
+            "warnings": 0,
+            "missing_on_pcb": 0,
+            "orphaned_on_pcb": 0,
+            "net_mismatches": 0,
+            "pin_mismatches": 0
+          },
+          "command": [
+            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            "validate",
+            "--sync",
+            "-s",
+            "/tmp/fleet6335/work/03/input/frozen/usb_joystick.kicad_sch",
+            "-p",
+            "/tmp/fleet6335/work/03/kct/score/usb_joystick.kicad_pcb",
+            "--format",
+            "json"
+          ]
+        },
+        "clean_pass": false
+      }
+    },
+    {
+      "tool": "tracemaker",
+      "board": "03",
+      "outcome": "success",
+      "reason": null,
+      "stage": null,
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_s": 218.56,
+      "commands": [
+        [
+          "/tmp/fleet6335/TraceMaker/build/cpu-only/src/app/tracemaker",
+          "route",
+          "/tmp/fleet6335/work/03/tracemaker/run/usb_joystick.kicad_pcb",
+          "-o",
+          "/tmp/fleet6335/work/03/tracemaker/run/usb_joystick_routed.kicad_pcb",
+          "--work",
+          "50000000",
+          "--seed",
+          "1",
+          "--threads",
+          "1",
+          "--no-gpu",
+          "--no-kb",
+          "--json",
+          "/tmp/fleet6335/work/03/tracemaker/run/tracemaker-summary.json"
+        ]
+      ],
+      "log": "/tmp/fleet6335/work/03/tracemaker/run/run.log",
+      "output": "/tmp/fleet6335/work/03/tracemaker/run/usb_joystick_routed.kicad_pcb",
+      "partial_artifact": null,
+      "lost_constraints": [],
+      "not_routing_rules": [],
+      "placement_violations": [],
+      "tool_config": {
+        "wall_cap_s": 600.0,
+        "pin_check": "89ff58ca86b2104ac6c55ae8a5dc77e4ab3e8d00",
+        "executable": "/tmp/fleet6335/TraceMaker/build/cpu-only/src/app/tracemaker",
+        "executable_sha256": "d254662ce819f6be08c0d30e5d951093fd76f733b4b7cc889e5bb390e6ed471c",
+        "learned_state": "isolated: --no-kb (knowledge base neither read nor written)",
+        "gpu": "disabled: --no-gpu",
+        "zones_added_by_tool": [],
+        "normalized_input_sha256": "3691a5a5775ecde3c7ff28ce35dcaa005837ba16ed6a8ca508a16f1b3382702e"
+      },
+      "interchange": null,
+      "score": {
+        "graded_rules_sha256": {
+          ".kicad_pro": "09c8746ffab5b0449d13f3b777d87c4786c2abc2cfa2df7eb796e12f83822c05",
+          ".kicad_dru": "c44d93c7564deb55af71cc3effd698cf79c8d29362f04e0d95268aaab0dd3e93"
+        },
+        "drc": {
+          "ran": true,
+          "errors_total": 1,
+          "errors_by_type": {
+            "starved_thermal": 1
+          },
+          "warnings": 36,
+          "unconnected": 0,
+          "kicad_version": "10.0.6",
+          "command": [
+            "kicad-cli",
+            "pcb",
+            "drc",
+            "--refill-zones",
+            "--severity-all",
+            "--all-track-errors",
+            "--format",
+            "json",
+            "--units",
+            "mm",
+            "--save-board",
+            "--output",
+            "/tmp/fleet6335/work/03/tracemaker/score/drc.json",
+            "/tmp/fleet6335/work/03/tracemaker/score/usb_joystick.kicad_pcb"
+          ]
+        },
+        "completion": {
+          "connections_routed": 115,
+          "connections_total": 115,
+          "completion_pct": 100.0,
+          "nets_total": 27,
+          "nets_complete": 27,
+          "nets_incomplete": 0,
+          "nets_unrouted": 0,
+          "nets_blocking_incomplete": 0
+        },
+        "via_count": 60,
+        "wirelength_mm": 949.14,
+        "kct_check": {
+          "ran": true,
+          "passed": false,
+          "error_count": 30,
+          "warning_count": 36,
+          "errors_by_rule": {
+            "via_in_pad": 30
+          },
+          "note": null,
+          "manufacturer": "jlcpcb",
+          "net_class_map_path": null,
+          "inactive_rules": [
+            "match_group_length_skew",
+            "diffpair_length_skew",
+            "diffpair_routing_continuity",
+            "diffpair_uncoupled_length"
+          ]
+        },
+        "sync": {
+          "ran": true,
+          "in_sync": true,
+          "summary": {
+            "errors": 0,
+            "warnings": 0,
+            "missing_on_pcb": 0,
+            "orphaned_on_pcb": 0,
+            "net_mismatches": 0,
+            "pin_mismatches": 0
+          },
+          "command": [
+            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            "validate",
+            "--sync",
+            "-s",
+            "/tmp/fleet6335/work/03/input/frozen/usb_joystick.kicad_sch",
+            "-p",
+            "/tmp/fleet6335/work/03/tracemaker/score/usb_joystick.kicad_pcb",
+            "--format",
+            "json"
+          ]
+        },
+        "clean_pass": false
+      }
+    },
+    {
+      "tool": "fastroute",
+      "board": "03",
+      "outcome": "non-comparable",
+      "reason": "14 constraint(s) lost at the DSN/SES boundary",
+      "stage": null,
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_s": 8.54,
+      "commands": [
+        [
+          "/tmp/fleet6335/fastroute/target/release/fastroute",
+          "-de",
+          "/tmp/fleet6335/work/03/fastroute/run/usb_joystick.dsn",
+          "-do",
+          "/tmp/fleet6335/work/03/fastroute/run/usb_joystick.ses",
+          "--router.autorouter.max_threads=1",
+          "--router.optimizer.max_threads=1",
+          "--report=/tmp/fleet6335/work/03/fastroute/run/fastroute-report.json"
+        ]
+      ],
+      "log": "/tmp/fleet6335/work/03/fastroute/run/run.log",
+      "output": "/tmp/fleet6335/work/03/fastroute/run/usb_joystick_routed.kicad_pcb",
+      "partial_artifact": null,
+      "lost_constraints": [
+        {
+          "kind": "dru",
+          "detail": "rule 'Reviewed clearance - Clock': clearance min 0.2 mm not in DSN"
+        },
+        {
+          "kind": "dru",
+          "detail": "rule 'Reviewed clearance - Power': clearance min 0.2 mm not in DSN"
+        },
+        {
+          "kind": "dru",
+          "detail": "rule 'Native zone clearance B.Cu GND': clearance min 0.3 mm not in DSN"
+        },
+        {
+          "kind": "dru",
+          "detail": "rule 'Native zone clearance F.Cu GND': clearance min 0.3 mm not in DSN"
+        },
+        {
+          "kind": "dru",
+          "detail": "rule 'Native zone clearance In1.Cu GND': clearance min 0.3 mm not in DSN"
+        },
+        {
+          "kind": "dru",
+          "detail": "rule 'Native zone clearance In2.Cu VCC': clearance min 0.3 mm not in DSN"
+        },
+        {
+          "kind": "dru",
+          "detail": "rule 'kct diff pair gap - USB_D+/USB_D-': diff_pair_gap min 0.15 mm not in DSN"
+        },
+        {
+          "kind": "dru",
+          "detail": "rule 'kct diff pair gap - USB_MCU_D+/USB_MCU_D-': diff_pair_gap min 0.15 mm not in DSN"
+        },
+        {
+          "kind": "dru",
+          "detail": "rule 'kct diff pair uncoupled - USB_D+/USB_D-': diff_pair_uncoupled min None mm not in DSN"
+        },
+        {
+          "kind": "dru",
+          "detail": "rule 'kct diff pair skew - USB_D+/USB_D-': skew min None mm not in DSN"
+        },
+        {
+          "kind": "dru",
+          "detail": "rule 'kct diff pair vias - USB_D+/USB_D-': via_count min None mm not in DSN"
+        },
+        {
+          "kind": "dru",
+          "detail": "rule 'kct diff pair uncoupled - USB_MCU_D+/USB_MCU_D-': diff_pair_uncoupled min None mm not in DSN"
+        },
+        {
+          "kind": "dru",
+          "detail": "rule 'kct diff pair skew - USB_MCU_D+/USB_MCU_D-': skew min None mm not in DSN"
+        },
+        {
+          "kind": "dru",
+          "detail": "rule 'kct diff pair vias - USB_MCU_D+/USB_MCU_D-': via_count min None mm not in DSN"
+        }
+      ],
+      "not_routing_rules": [
+        {
+          "rule": "Silk to Pad - jlcpcb-tier1",
+          "type": "silk_clearance",
+          "min_mm": 0.15
+        },
+        {
+          "rule": "PTH Hole to Track - jlcpcb-tier1",
+          "type": "hole_clearance",
+          "min_mm": 0.28
+        },
+        {
+          "rule": "Inner PTH Hole to Copper - jlcpcb-tier1",
+          "type": "hole_clearance",
+          "min_mm": 0.3
+        },
+        {
+          "rule": "Annular Ring - jlcpcb-tier1",
+          "type": "annular_width",
+          "min_mm": 0.1
+        },
+        {
+          "rule": "PTH Annular Ring - jlcpcb-tier1",
+          "type": "annular_width",
+          "min_mm": 0.15
+        },
+        {
+          "rule": "Copper to Edge - jlcpcb-tier1",
+          "type": "edge_clearance",
+          "min_mm": 0.3
+        },
+        {
+          "rule": "Hole to Edge - jlcpcb-tier1",
+          "type": "physical_hole_clearance",
+          "min_mm": 0.4
+        },
+        {
+          "rule": "Silkscreen Width - jlcpcb-tier1",
+          "type": "text_thickness",
+          "min_mm": 0.15
+        },
+        {
+          "rule": "Silkscreen Height - jlcpcb-tier1",
+          "type": "text_height",
+          "min_mm": 1.0
+        }
+      ],
+      "placement_violations": [],
+      "tool_config": {
+        "wall_cap_s": 600.0,
+        "pin_check": "e5d52c4544795422b8b28077acc0605fdf11265a",
+        "executable": "/tmp/fleet6335/fastroute/target/release/fastroute",
+        "executable_sha256": "26a02e3e2254540064a99b8f2dc85ec43ad2b377a6c3523e38b01517c6c418c8",
+        "zones_added_by_tool": [],
+        "normalized_input_sha256": "3691a5a5775ecde3c7ff28ce35dcaa005837ba16ed6a8ca508a16f1b3382702e"
+      },
+      "interchange": {
+        "ses": {
+          "wires": 223,
+          "vias": 49,
+          "resolution_unit": "um",
+          "resolution": 10.0
+        },
+        "imported_wires": 223,
+        "imported_vias": 49
+      },
+      "score": {
+        "graded_rules_sha256": {
+          ".kicad_pro": "09c8746ffab5b0449d13f3b777d87c4786c2abc2cfa2df7eb796e12f83822c05",
+          ".kicad_dru": "c44d93c7564deb55af71cc3effd698cf79c8d29362f04e0d95268aaab0dd3e93"
+        },
+        "drc": {
+          "ran": true,
+          "errors_total": 83,
+          "errors_by_type": {
+            "clearance": 1,
+            "diff_pair_uncoupled_length_too_long": 2,
+            "shorting_items": 36,
+            "skew_out_of_range": 2,
+            "solder_mask_bridge": 36,
+            "starved_thermal": 6
+          },
+          "warnings": 36,
+          "unconnected": 41,
+          "kicad_version": "10.0.6",
+          "command": [
+            "kicad-cli",
+            "pcb",
+            "drc",
+            "--refill-zones",
+            "--severity-all",
+            "--all-track-errors",
+            "--format",
+            "json",
+            "--units",
+            "mm",
+            "--save-board",
+            "--output",
+            "/tmp/fleet6335/work/03/fastroute/score/drc.json",
+            "/tmp/fleet6335/work/03/fastroute/score/usb_joystick.kicad_pcb"
+          ]
+        },
+        "completion": {
+          "connections_routed": 75,
+          "connections_total": 115,
+          "completion_pct": 65.22,
+          "nets_total": 27,
+          "nets_complete": 2,
+          "nets_incomplete": 25,
+          "nets_unrouted": 0,
+          "nets_blocking_incomplete": 22
+        },
+        "via_count": 49,
+        "wirelength_mm": 785.53,
+        "kct_check": {
+          "ran": true,
+          "passed": false,
+          "error_count": 48,
+          "warning_count": 36,
+          "errors_by_rule": {
+            "clearance_pad_segment": 25,
+            "connectivity": 23
+          },
+          "note": null,
+          "manufacturer": "jlcpcb",
+          "net_class_map_path": null,
+          "inactive_rules": [
+            "match_group_length_skew",
+            "diffpair_length_skew",
+            "diffpair_routing_continuity",
+            "diffpair_uncoupled_length"
+          ]
+        },
+        "sync": {
+          "ran": true,
+          "in_sync": true,
+          "summary": {
+            "errors": 0,
+            "warnings": 0,
+            "missing_on_pcb": 0,
+            "orphaned_on_pcb": 0,
+            "net_mismatches": 0,
+            "pin_mismatches": 0
+          },
+          "command": [
+            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            "validate",
+            "--sync",
+            "-s",
+            "/tmp/fleet6335/work/03/input/frozen/usb_joystick.kicad_sch",
+            "-p",
+            "/tmp/fleet6335/work/03/fastroute/score/usb_joystick.kicad_pcb",
+            "--format",
+            "json"
+          ]
+        },
+        "clean_pass": false
+      }
+    },
+    {
+      "tool": "input",
+      "board": "04",
+      "outcome": "reference",
+      "reason": "normalized input; pre-existing errors stay in every routed row's headline",
+      "stage": null,
+      "exit_code": null,
+      "timed_out": false,
+      "wall_s": null,
+      "commands": [],
+      "log": null,
+      "output": "/tmp/fleet6335/work/04/input/stm32_devboard.kicad_pcb",
+      "partial_artifact": null,
+      "lost_constraints": [],
+      "not_routing_rules": [],
+      "placement_violations": [],
+      "tool_config": {
+        "normalized_input_sha256": "06dd6711d0eebddf65d74f2e4015e3751cd01f0d9e31858ef2a0ea34a6c995dd",
+        "stripped": {
+          "segment": 0,
+          "arc": 0,
+          "via": 0
+        }
+      },
+      "interchange": null,
+      "score": {
+        "graded_rules_sha256": {
+          ".kicad_pro": "13e8bbe652a672ea673545b4cbb8f0bbf85f3e58999f58d395527833fa665354",
+          ".kicad_dru": "7e654117eb597b5596d55075cd11cc70de9002d7a76d30c53f76230a9583c7a2"
+        },
+        "drc": {
+          "ran": true,
+          "errors_total": 0,
+          "errors_by_type": {},
+          "warnings": 17,
+          "unconnected": 43,
+          "kicad_version": "10.0.6",
+          "command": [
+            "kicad-cli",
+            "pcb",
+            "drc",
+            "--refill-zones",
+            "--severity-all",
+            "--all-track-errors",
+            "--format",
+            "json",
+            "--units",
+            "mm",
+            "--save-board",
+            "--output",
+            "/tmp/fleet6335/work/04/input-score/score/drc.json",
+            "/tmp/fleet6335/work/04/input-score/score/stm32_devboard.kicad_pcb"
+          ]
+        },
+        "completion": {
+          "connections_routed": 0,
+          "connections_total": 43,
+          "completion_pct": 0.0,
+          "nets_total": 12,
+          "nets_complete": 0,
+          "nets_incomplete": 12,
+          "nets_unrouted": 0,
+          "nets_blocking_incomplete": 9
+        },
+        "via_count": 0,
+        "wirelength_mm": 0,
+        "kct_check": {
+          "ran": true,
+          "passed": false,
+          "error_count": 12,
+          "warning_count": 0,
+          "errors_by_rule": {
+            "connectivity": 12
+          },
+          "note": null,
+          "manufacturer": "jlcpcb",
+          "net_class_map_path": null,
+          "inactive_rules": [
+            "match_group_length_skew",
+            "diffpair_length_skew",
+            "diffpair_routing_continuity",
+            "diffpair_uncoupled_length"
+          ]
+        },
+        "sync": {
+          "ran": true,
+          "in_sync": true,
+          "summary": {
+            "errors": 0,
+            "warnings": 0,
+            "missing_on_pcb": 0,
+            "orphaned_on_pcb": 0,
+            "net_mismatches": 0,
+            "pin_mismatches": 0
+          },
+          "command": [
+            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            "validate",
+            "--sync",
+            "-s",
+            "/tmp/fleet6335/work/04/input/frozen/stm32_devboard.kicad_sch",
+            "-p",
+            "/tmp/fleet6335/work/04/input-score/score/stm32_devboard.kicad_pcb",
+            "--format",
+            "json"
+          ]
+        },
+        "clean_pass": false
+      }
+    },
+    {
+      "tool": "kct",
+      "board": "04",
+      "outcome": "success",
+      "reason": null,
+      "stage": null,
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_s": 55.82,
+      "commands": [
+        [
+          "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+          "route",
+          "/tmp/fleet6335/work/04/kct/run/stm32_devboard.kicad_pcb",
+          "-o",
+          "/tmp/fleet6335/work/04/kct/run/stm32_devboard_routed.kicad_pcb",
+          "--backend",
+          "cpp",
+          "--seed",
+          "1"
+        ]
+      ],
+      "log": "/tmp/fleet6335/work/04/kct/run/run.log",
+      "output": "/tmp/fleet6335/work/04/kct/run/stm32_devboard_routed.kicad_pcb",
+      "partial_artifact": null,
+      "lost_constraints": [],
+      "not_routing_rules": [],
+      "placement_violations": [],
+      "tool_config": {
+        "wall_cap_s": 600.0,
+        "backend": {
+          "backend": "cpp",
+          "available": true,
+          "version": "1.0.0",
+          "build_version": 56,
+          "unavailable_reason": null
+        },
+        "kicad_tools_package": "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/src/kicad_tools/__init__.py",
+        "zones_added_by_tool": [
+          "+3.3V@F.Cu",
+          "+5V@F.Cu",
+          "GND@B.Cu"
+        ],
+        "normalized_input_sha256": "06dd6711d0eebddf65d74f2e4015e3751cd01f0d9e31858ef2a0ea34a6c995dd"
+      },
+      "interchange": null,
+      "score": {
+        "graded_rules_sha256": {
+          ".kicad_pro": "13e8bbe652a672ea673545b4cbb8f0bbf85f3e58999f58d395527833fa665354",
+          ".kicad_dru": "7e654117eb597b5596d55075cd11cc70de9002d7a76d30c53f76230a9583c7a2"
+        },
+        "drc": {
+          "ran": true,
+          "errors_total": 0,
+          "errors_by_type": {},
+          "warnings": 17,
+          "unconnected": 0,
+          "kicad_version": "10.0.6",
+          "command": [
+            "kicad-cli",
+            "pcb",
+            "drc",
+            "--refill-zones",
+            "--severity-all",
+            "--all-track-errors",
+            "--format",
+            "json",
+            "--units",
+            "mm",
+            "--save-board",
+            "--output",
+            "/tmp/fleet6335/work/04/kct/score/drc.json",
+            "/tmp/fleet6335/work/04/kct/score/stm32_devboard.kicad_pcb"
+          ]
+        },
+        "completion": {
+          "connections_routed": 43,
+          "connections_total": 43,
+          "completion_pct": 100.0,
+          "nets_total": 12,
+          "nets_complete": 12,
+          "nets_incomplete": 0,
+          "nets_unrouted": 0,
+          "nets_blocking_incomplete": 0
+        },
+        "via_count": 35,
+        "wirelength_mm": 214.54,
+        "kct_check": {
+          "ran": true,
+          "passed": true,
+          "error_count": 0,
+          "warning_count": 0,
+          "errors_by_rule": {},
+          "note": null,
+          "manufacturer": "jlcpcb",
+          "net_class_map_path": null,
+          "inactive_rules": [
+            "match_group_length_skew",
+            "diffpair_length_skew",
+            "diffpair_routing_continuity",
+            "diffpair_uncoupled_length"
+          ]
+        },
+        "sync": {
+          "ran": true,
+          "in_sync": true,
+          "summary": {
+            "errors": 0,
+            "warnings": 0,
+            "missing_on_pcb": 0,
+            "orphaned_on_pcb": 0,
+            "net_mismatches": 0,
+            "pin_mismatches": 0
+          },
+          "command": [
+            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            "validate",
+            "--sync",
+            "-s",
+            "/tmp/fleet6335/work/04/input/frozen/stm32_devboard.kicad_sch",
+            "-p",
+            "/tmp/fleet6335/work/04/kct/score/stm32_devboard.kicad_pcb",
+            "--format",
+            "json"
+          ]
+        },
+        "clean_pass": true
+      }
+    },
+    {
+      "tool": "tracemaker",
+      "board": "04",
+      "outcome": "success",
+      "reason": null,
+      "stage": null,
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_s": 33.46,
+      "commands": [
+        [
+          "/tmp/fleet6335/TraceMaker/build/cpu-only/src/app/tracemaker",
+          "route",
+          "/tmp/fleet6335/work/04/tracemaker/run/stm32_devboard.kicad_pcb",
+          "-o",
+          "/tmp/fleet6335/work/04/tracemaker/run/stm32_devboard_routed.kicad_pcb",
+          "--work",
+          "50000000",
+          "--seed",
+          "1",
+          "--threads",
+          "1",
+          "--no-gpu",
+          "--no-kb",
+          "--json",
+          "/tmp/fleet6335/work/04/tracemaker/run/tracemaker-summary.json"
+        ]
+      ],
+      "log": "/tmp/fleet6335/work/04/tracemaker/run/run.log",
+      "output": "/tmp/fleet6335/work/04/tracemaker/run/stm32_devboard_routed.kicad_pcb",
+      "partial_artifact": null,
+      "lost_constraints": [],
+      "not_routing_rules": [],
+      "placement_violations": [],
+      "tool_config": {
+        "wall_cap_s": 600.0,
+        "pin_check": "89ff58ca86b2104ac6c55ae8a5dc77e4ab3e8d00",
+        "executable": "/tmp/fleet6335/TraceMaker/build/cpu-only/src/app/tracemaker",
+        "executable_sha256": "d254662ce819f6be08c0d30e5d951093fd76f733b4b7cc889e5bb390e6ed471c",
+        "learned_state": "isolated: --no-kb (knowledge base neither read nor written)",
+        "gpu": "disabled: --no-gpu",
+        "zones_added_by_tool": [],
+        "normalized_input_sha256": "06dd6711d0eebddf65d74f2e4015e3751cd01f0d9e31858ef2a0ea34a6c995dd"
+      },
+      "interchange": null,
+      "score": {
+        "graded_rules_sha256": {
+          ".kicad_pro": "13e8bbe652a672ea673545b4cbb8f0bbf85f3e58999f58d395527833fa665354",
+          ".kicad_dru": "7e654117eb597b5596d55075cd11cc70de9002d7a76d30c53f76230a9583c7a2"
+        },
+        "drc": {
+          "ran": true,
+          "errors_total": 0,
+          "errors_by_type": {},
+          "warnings": 18,
+          "unconnected": 0,
+          "kicad_version": "10.0.6",
+          "command": [
+            "kicad-cli",
+            "pcb",
+            "drc",
+            "--refill-zones",
+            "--severity-all",
+            "--all-track-errors",
+            "--format",
+            "json",
+            "--units",
+            "mm",
+            "--save-board",
+            "--output",
+            "/tmp/fleet6335/work/04/tracemaker/score/drc.json",
+            "/tmp/fleet6335/work/04/tracemaker/score/stm32_devboard.kicad_pcb"
+          ]
+        },
+        "completion": {
+          "connections_routed": 43,
+          "connections_total": 43,
+          "completion_pct": 100.0,
+          "nets_total": 12,
+          "nets_complete": 12,
+          "nets_incomplete": 0,
+          "nets_unrouted": 0,
+          "nets_blocking_incomplete": 0
+        },
+        "via_count": 22,
+        "wirelength_mm": 408.56,
+        "kct_check": {
+          "ran": true,
+          "passed": false,
+          "error_count": 7,
+          "warning_count": 0,
+          "errors_by_rule": {
+            "hole_to_hole_clearance": 1,
+            "via_in_pad": 6
+          },
+          "note": null,
+          "manufacturer": "jlcpcb",
+          "net_class_map_path": null,
+          "inactive_rules": [
+            "match_group_length_skew",
+            "diffpair_length_skew",
+            "diffpair_routing_continuity",
+            "diffpair_uncoupled_length"
+          ]
+        },
+        "sync": {
+          "ran": true,
+          "in_sync": true,
+          "summary": {
+            "errors": 0,
+            "warnings": 0,
+            "missing_on_pcb": 0,
+            "orphaned_on_pcb": 0,
+            "net_mismatches": 0,
+            "pin_mismatches": 0
+          },
+          "command": [
+            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            "validate",
+            "--sync",
+            "-s",
+            "/tmp/fleet6335/work/04/input/frozen/stm32_devboard.kicad_sch",
+            "-p",
+            "/tmp/fleet6335/work/04/tracemaker/score/stm32_devboard.kicad_pcb",
+            "--format",
+            "json"
+          ]
+        },
+        "clean_pass": false
+      }
+    },
+    {
+      "tool": "fastroute",
+      "board": "04",
+      "outcome": "non-comparable",
+      "reason": "2 constraint(s) lost at the DSN/SES boundary",
+      "stage": null,
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_s": 2.87,
+      "commands": [
+        [
+          "/tmp/fleet6335/fastroute/target/release/fastroute",
+          "-de",
+          "/tmp/fleet6335/work/04/fastroute/run/stm32_devboard.dsn",
+          "-do",
+          "/tmp/fleet6335/work/04/fastroute/run/stm32_devboard.ses",
+          "--router.autorouter.max_threads=1",
+          "--router.optimizer.max_threads=1",
+          "--report=/tmp/fleet6335/work/04/fastroute/run/fastroute-report.json"
+        ]
+      ],
+      "log": "/tmp/fleet6335/work/04/fastroute/run/run.log",
+      "output": "/tmp/fleet6335/work/04/fastroute/run/stm32_devboard_routed.kicad_pcb",
+      "partial_artifact": null,
+      "lost_constraints": [
+        {
+          "kind": "dru",
+          "detail": "rule 'kct net class clearance - Clock': clearance min 0.2 mm not in DSN"
+        },
+        {
+          "kind": "dru",
+          "detail": "rule 'kct net class clearance - Power': clearance min 0.2 mm not in DSN"
+        }
+      ],
+      "not_routing_rules": [
+        {
+          "rule": "Silk to Pad - jlcpcb-tier1",
+          "type": "silk_clearance",
+          "min_mm": 0.15
+        },
+        {
+          "rule": "PTH Hole to Track - jlcpcb-tier1",
+          "type": "hole_clearance",
+          "min_mm": 0.28
+        },
+        {
+          "rule": "Inner PTH Hole to Copper - jlcpcb-tier1",
+          "type": "hole_clearance",
+          "min_mm": 0.3
+        },
+        {
+          "rule": "Annular Ring - jlcpcb-tier1",
+          "type": "annular_width",
+          "min_mm": 0.075
+        },
+        {
+          "rule": "PTH Annular Ring - jlcpcb-tier1",
+          "type": "annular_width",
+          "min_mm": 0.18
+        },
+        {
+          "rule": "Copper to Edge - jlcpcb-tier1",
+          "type": "edge_clearance",
+          "min_mm": 0.3
+        },
+        {
+          "rule": "Hole to Edge - jlcpcb-tier1",
+          "type": "physical_hole_clearance",
+          "min_mm": 0.5
+        },
+        {
+          "rule": "Silkscreen Width - jlcpcb-tier1",
+          "type": "text_thickness",
+          "min_mm": 0.15
+        },
+        {
+          "rule": "Silkscreen Height - jlcpcb-tier1",
+          "type": "text_height",
+          "min_mm": 1.0
+        }
+      ],
+      "placement_violations": [],
+      "tool_config": {
+        "wall_cap_s": 600.0,
+        "pin_check": "e5d52c4544795422b8b28077acc0605fdf11265a",
+        "executable": "/tmp/fleet6335/fastroute/target/release/fastroute",
+        "executable_sha256": "26a02e3e2254540064a99b8f2dc85ec43ad2b377a6c3523e38b01517c6c418c8",
+        "zones_added_by_tool": [],
+        "normalized_input_sha256": "06dd6711d0eebddf65d74f2e4015e3751cd01f0d9e31858ef2a0ea34a6c995dd"
+      },
+      "interchange": {
+        "ses": {
+          "wires": 119,
+          "vias": 10,
+          "resolution_unit": "um",
+          "resolution": 10.0
+        },
+        "imported_wires": 119,
+        "imported_vias": 10
+      },
+      "score": {
+        "graded_rules_sha256": {
+          ".kicad_pro": "13e8bbe652a672ea673545b4cbb8f0bbf85f3e58999f58d395527833fa665354",
+          ".kicad_dru": "7e654117eb597b5596d55075cd11cc70de9002d7a76d30c53f76230a9583c7a2"
+        },
+        "drc": {
+          "ran": true,
+          "errors_total": 0,
+          "errors_by_type": {},
+          "warnings": 17,
+          "unconnected": 0,
+          "kicad_version": "10.0.6",
+          "command": [
+            "kicad-cli",
+            "pcb",
+            "drc",
+            "--refill-zones",
+            "--severity-all",
+            "--all-track-errors",
+            "--format",
+            "json",
+            "--units",
+            "mm",
+            "--save-board",
+            "--output",
+            "/tmp/fleet6335/work/04/fastroute/score/drc.json",
+            "/tmp/fleet6335/work/04/fastroute/score/stm32_devboard.kicad_pcb"
+          ]
+        },
+        "completion": {
+          "connections_routed": 43,
+          "connections_total": 43,
+          "completion_pct": 100.0,
+          "nets_total": 12,
+          "nets_complete": 12,
+          "nets_incomplete": 0,
+          "nets_unrouted": 0,
+          "nets_blocking_incomplete": 0
+        },
+        "via_count": 10,
+        "wirelength_mm": 455.93,
+        "kct_check": {
+          "ran": true,
+          "passed": false,
+          "error_count": 10,
+          "warning_count": 0,
+          "errors_by_rule": {
+            "dimension_annular_ring": 10
+          },
+          "note": null,
+          "manufacturer": "jlcpcb",
+          "net_class_map_path": null,
+          "inactive_rules": [
+            "match_group_length_skew",
+            "diffpair_length_skew",
+            "diffpair_routing_continuity",
+            "diffpair_uncoupled_length"
+          ]
+        },
+        "sync": {
+          "ran": true,
+          "in_sync": true,
+          "summary": {
+            "errors": 0,
+            "warnings": 0,
+            "missing_on_pcb": 0,
+            "orphaned_on_pcb": 0,
+            "net_mismatches": 0,
+            "pin_mismatches": 0
+          },
+          "command": [
+            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            "validate",
+            "--sync",
+            "-s",
+            "/tmp/fleet6335/work/04/input/frozen/stm32_devboard.kicad_sch",
+            "-p",
+            "/tmp/fleet6335/work/04/fastroute/score/stm32_devboard.kicad_pcb",
+            "--format",
+            "json"
+          ]
+        },
+        "clean_pass": false
+      }
+    },
+    {
+      "tool": "input",
+      "board": "05",
+      "outcome": "reference",
+      "reason": "normalized input; pre-existing errors stay in every routed row's headline",
+      "stage": null,
+      "exit_code": null,
+      "timed_out": false,
+      "wall_s": null,
+      "commands": [],
+      "log": null,
+      "output": "/tmp/fleet6335/work/05/input/bldc_controller.kicad_pcb",
+      "partial_artifact": null,
+      "lost_constraints": [],
+      "not_routing_rules": [],
+      "placement_violations": [],
+      "tool_config": {
+        "normalized_input_sha256": "ab26025538bae070c8090a9080706caab667b463dfadb463291813e2a594cbc1",
+        "stripped": {
+          "segment": 0,
+          "arc": 0,
+          "via": 0
+        }
+      },
+      "interchange": null,
+      "score": {
+        "graded_rules_sha256": {
+          ".kicad_pro": "3dc23815199999d4f6d55c47d8e8ab0ec3edd4b6f5a20af9e85d26da5568fbd2",
+          ".kicad_dru": "8d2a82b2bef304dda540b329fcca1520b1addee2f489bf094e3b678d042b1d76"
+        },
+        "drc": {
+          "ran": true,
+          "errors_total": 0,
+          "errors_by_type": {},
+          "warnings": 7,
+          "unconnected": 112,
+          "kicad_version": "10.0.6",
+          "command": [
+            "kicad-cli",
+            "pcb",
+            "drc",
+            "--refill-zones",
+            "--severity-all",
+            "--all-track-errors",
+            "--format",
+            "json",
+            "--units",
+            "mm",
+            "--save-board",
+            "--output",
+            "/tmp/fleet6335/work/05/input-score/score/drc.json",
+            "/tmp/fleet6335/work/05/input-score/score/bldc_controller.kicad_pcb"
+          ]
+        },
+        "completion": {
+          "connections_routed": 30,
+          "connections_total": 142,
+          "completion_pct": 21.13,
+          "nets_total": 37,
+          "nets_complete": 0,
+          "nets_incomplete": 37,
+          "nets_unrouted": 0,
+          "nets_blocking_incomplete": 31
+        },
+        "via_count": 0,
+        "wirelength_mm": 0,
+        "kct_check": {
+          "ran": true,
+          "passed": false,
+          "error_count": 37,
+          "warning_count": 137,
+          "errors_by_rule": {
+            "connectivity": 37
+          },
+          "note": null,
+          "manufacturer": "jlcpcb",
+          "net_class_map_path": null,
+          "inactive_rules": [
+            "match_group_length_skew",
+            "diffpair_length_skew",
+            "diffpair_routing_continuity",
+            "diffpair_uncoupled_length"
+          ]
+        },
+        "sync": {
+          "ran": true,
+          "in_sync": true,
+          "summary": {
+            "errors": 0,
+            "warnings": 0,
+            "missing_on_pcb": 0,
+            "orphaned_on_pcb": 0,
+            "net_mismatches": 0,
+            "pin_mismatches": 0
+          },
+          "command": [
+            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            "validate",
+            "--sync",
+            "-s",
+            "/tmp/fleet6335/work/05/input/frozen/bldc_controller.kicad_sch",
+            "-p",
+            "/tmp/fleet6335/work/05/input-score/score/bldc_controller.kicad_pcb",
+            "--format",
+            "json"
+          ]
+        },
+        "clean_pass": false
+      }
+    },
+    {
+      "tool": "kct",
+      "board": "05",
+      "outcome": "timeout",
+      "reason": "killed at the 600s wall cap",
+      "stage": null,
+      "exit_code": -1,
+      "timed_out": true,
+      "wall_s": 620.2,
+      "commands": [
+        [
+          "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+          "route",
+          "/tmp/fleet6335/work/05/kct/run/bldc_controller.kicad_pcb",
+          "-o",
+          "/tmp/fleet6335/work/05/kct/run/bldc_controller_routed.kicad_pcb",
+          "--backend",
+          "cpp",
+          "--seed",
+          "1"
+        ]
+      ],
+      "log": "/tmp/fleet6335/work/05/kct/run/run.log",
+      "output": null,
+      "partial_artifact": "/tmp/fleet6335/work/05/kct/run/bldc_controller_routed.kicad_pcb",
+      "lost_constraints": [],
+      "not_routing_rules": [],
+      "placement_violations": [],
+      "tool_config": {
+        "wall_cap_s": 600.0,
+        "backend": {
+          "backend": "cpp",
+          "available": true,
+          "version": "1.0.0",
+          "build_version": 56,
+          "unavailable_reason": null
+        },
+        "kicad_tools_package": "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/src/kicad_tools/__init__.py",
+        "normalized_input_sha256": "ab26025538bae070c8090a9080706caab667b463dfadb463291813e2a594cbc1"
+      },
+      "interchange": null,
+      "score": null
+    },
+    {
+      "tool": "tracemaker",
+      "board": "05",
+      "outcome": "success",
+      "reason": null,
+      "stage": null,
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_s": 220.39,
+      "commands": [
+        [
+          "/tmp/fleet6335/TraceMaker/build/cpu-only/src/app/tracemaker",
+          "route",
+          "/tmp/fleet6335/work/05/tracemaker/run/bldc_controller.kicad_pcb",
+          "-o",
+          "/tmp/fleet6335/work/05/tracemaker/run/bldc_controller_routed.kicad_pcb",
+          "--work",
+          "50000000",
+          "--seed",
+          "1",
+          "--threads",
+          "1",
+          "--no-gpu",
+          "--no-kb",
+          "--json",
+          "/tmp/fleet6335/work/05/tracemaker/run/tracemaker-summary.json"
+        ]
+      ],
+      "log": "/tmp/fleet6335/work/05/tracemaker/run/run.log",
+      "output": "/tmp/fleet6335/work/05/tracemaker/run/bldc_controller_routed.kicad_pcb",
+      "partial_artifact": null,
+      "lost_constraints": [],
+      "not_routing_rules": [],
+      "placement_violations": [],
+      "tool_config": {
+        "wall_cap_s": 600.0,
+        "pin_check": "89ff58ca86b2104ac6c55ae8a5dc77e4ab3e8d00",
+        "executable": "/tmp/fleet6335/TraceMaker/build/cpu-only/src/app/tracemaker",
+        "executable_sha256": "d254662ce819f6be08c0d30e5d951093fd76f733b4b7cc889e5bb390e6ed471c",
+        "learned_state": "isolated: --no-kb (knowledge base neither read nor written)",
+        "gpu": "disabled: --no-gpu",
+        "zones_added_by_tool": [],
+        "normalized_input_sha256": "ab26025538bae070c8090a9080706caab667b463dfadb463291813e2a594cbc1"
+      },
+      "interchange": null,
+      "score": {
+        "graded_rules_sha256": {
+          ".kicad_pro": "3dc23815199999d4f6d55c47d8e8ab0ec3edd4b6f5a20af9e85d26da5568fbd2",
+          ".kicad_dru": "8d2a82b2bef304dda540b329fcca1520b1addee2f489bf094e3b678d042b1d76"
+        },
+        "drc": {
+          "ran": true,
+          "errors_total": 0,
+          "errors_by_type": {},
+          "warnings": 7,
+          "unconnected": 0,
+          "kicad_version": "10.0.6",
+          "command": [
+            "kicad-cli",
+            "pcb",
+            "drc",
+            "--refill-zones",
+            "--severity-all",
+            "--all-track-errors",
+            "--format",
+            "json",
+            "--units",
+            "mm",
+            "--save-board",
+            "--output",
+            "/tmp/fleet6335/work/05/tracemaker/score/drc.json",
+            "/tmp/fleet6335/work/05/tracemaker/score/bldc_controller.kicad_pcb"
+          ]
+        },
+        "completion": {
+          "connections_routed": 142,
+          "connections_total": 142,
+          "completion_pct": 100.0,
+          "nets_total": 37,
+          "nets_complete": 37,
+          "nets_incomplete": 0,
+          "nets_unrouted": 0,
+          "nets_blocking_incomplete": 0
+        },
+        "via_count": 60,
+        "wirelength_mm": 1143.97,
+        "kct_check": {
+          "ran": true,
+          "passed": false,
+          "error_count": 15,
+          "warning_count": 137,
+          "errors_by_rule": {
+            "via_in_pad": 15
+          },
+          "note": null,
+          "manufacturer": "jlcpcb",
+          "net_class_map_path": null,
+          "inactive_rules": [
+            "match_group_length_skew",
+            "diffpair_length_skew",
+            "diffpair_routing_continuity",
+            "diffpair_uncoupled_length"
+          ]
+        },
+        "sync": {
+          "ran": true,
+          "in_sync": true,
+          "summary": {
+            "errors": 0,
+            "warnings": 0,
+            "missing_on_pcb": 0,
+            "orphaned_on_pcb": 0,
+            "net_mismatches": 0,
+            "pin_mismatches": 0
+          },
+          "command": [
+            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            "validate",
+            "--sync",
+            "-s",
+            "/tmp/fleet6335/work/05/input/frozen/bldc_controller.kicad_sch",
+            "-p",
+            "/tmp/fleet6335/work/05/tracemaker/score/bldc_controller.kicad_pcb",
+            "--format",
+            "json"
+          ]
+        },
+        "clean_pass": false
+      }
+    },
+    {
+      "tool": "fastroute",
+      "board": "05",
+      "outcome": "non-comparable",
+      "reason": "9 constraint(s) lost at the DSN/SES boundary",
+      "stage": null,
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_s": 16.01,
+      "commands": [
+        [
+          "/tmp/fleet6335/fastroute/target/release/fastroute",
+          "-de",
+          "/tmp/fleet6335/work/05/fastroute/run/bldc_controller.dsn",
+          "-do",
+          "/tmp/fleet6335/work/05/fastroute/run/bldc_controller.ses",
+          "--router.autorouter.max_threads=1",
+          "--router.optimizer.max_threads=1",
+          "--report=/tmp/fleet6335/work/05/fastroute/run/fastroute-report.json"
+        ]
+      ],
+      "log": "/tmp/fleet6335/work/05/fastroute/run/run.log",
+      "output": "/tmp/fleet6335/work/05/fastroute/run/bldc_controller_routed.kicad_pcb",
+      "partial_artifact": null,
+      "lost_constraints": [
+        {
+          "kind": "board_rule",
+          "detail": "min_copper_edge_clearance 0.3 mm not exported"
+        },
+        {
+          "kind": "dru",
+          "detail": "rule 'SMD Pad Clearance - jlcpcb': clearance min 0.15 mm not in DSN"
+        },
+        {
+          "kind": "dru",
+          "detail": "rule 'Reviewed clearance - Audio': clearance min 0.15 mm not in DSN"
+        },
+        {
+          "kind": "dru",
+          "detail": "rule 'Reviewed clearance - Debug': clearance min 0.15 mm not in DSN"
+        },
+        {
+          "kind": "dru",
+          "detail": "rule 'Reviewed clearance - Differential': clearance min 0.15 mm not in DSN"
+        },
+        {
+          "kind": "dru",
+          "detail": "rule 'Reviewed clearance - Digital': clearance min 0.15 mm not in DSN"
+        },
+        {
+          "kind": "dru",
+          "detail": "rule 'Reviewed clearance - Clock': clearance min 0.2 mm not in DSN"
+        },
+        {
+          "kind": "dru",
+          "detail": "rule 'Reviewed clearance - HighCurrentSignal': clearance min 0.2 mm not in DSN"
+        },
+        {
+          "kind": "dru",
+          "detail": "rule 'Reviewed clearance - Power': clearance min 0.2 mm not in DSN"
+        }
+      ],
+      "not_routing_rules": [
+        {
+          "rule": "Silk to Pad - jlcpcb",
+          "type": "silk_clearance",
+          "min_mm": 0.15
+        },
+        {
+          "rule": "PTH Hole to Track - jlcpcb",
+          "type": "hole_clearance",
+          "min_mm": 0.28
+        },
+        {
+          "rule": "Inner PTH Hole to Copper - jlcpcb",
+          "type": "hole_clearance",
+          "min_mm": 0.3
+        },
+        {
+          "rule": "Annular Ring - jlcpcb",
+          "type": "annular_width",
+          "min_mm": 0.1
+        },
+        {
+          "rule": "PTH Annular Ring - jlcpcb",
+          "type": "annular_width",
+          "min_mm": 0.15
+        },
+        {
+          "rule": "Copper to Edge - jlcpcb",
+          "type": "edge_clearance",
+          "min_mm": 0.3
+        },
+        {
+          "rule": "Hole to Edge - jlcpcb",
+          "type": "physical_hole_clearance",
+          "min_mm": 0.4
+        },
+        {
+          "rule": "Silkscreen Width - jlcpcb",
+          "type": "text_thickness",
+          "min_mm": 0.15
+        },
+        {
+          "rule": "Silkscreen Height - jlcpcb",
+          "type": "text_height",
+          "min_mm": 1.0
+        }
+      ],
+      "placement_violations": [],
+      "tool_config": {
+        "wall_cap_s": 600.0,
+        "pin_check": "e5d52c4544795422b8b28077acc0605fdf11265a",
+        "executable": "/tmp/fleet6335/fastroute/target/release/fastroute",
+        "executable_sha256": "26a02e3e2254540064a99b8f2dc85ec43ad2b377a6c3523e38b01517c6c418c8",
+        "zones_added_by_tool": [],
+        "normalized_input_sha256": "ab26025538bae070c8090a9080706caab667b463dfadb463291813e2a594cbc1"
+      },
+      "interchange": {
+        "ses": {
+          "wires": 326,
+          "vias": 43,
+          "resolution_unit": "um",
+          "resolution": 10.0
+        },
+        "imported_wires": 326,
+        "imported_vias": 43
+      },
+      "score": {
+        "graded_rules_sha256": {
+          ".kicad_pro": "3dc23815199999d4f6d55c47d8e8ab0ec3edd4b6f5a20af9e85d26da5568fbd2",
+          ".kicad_dru": "8d2a82b2bef304dda540b329fcca1520b1addee2f489bf094e3b678d042b1d76"
+        },
+        "drc": {
+          "ran": true,
+          "errors_total": 20,
+          "errors_by_type": {
+            "hole_clearance": 20
+          },
+          "warnings": 12,
+          "unconnected": 1,
+          "kicad_version": "10.0.6",
+          "command": [
+            "kicad-cli",
+            "pcb",
+            "drc",
+            "--refill-zones",
+            "--severity-all",
+            "--all-track-errors",
+            "--format",
+            "json",
+            "--units",
+            "mm",
+            "--save-board",
+            "--output",
+            "/tmp/fleet6335/work/05/fastroute/score/drc.json",
+            "/tmp/fleet6335/work/05/fastroute/score/bldc_controller.kicad_pcb"
+          ]
+        },
+        "completion": {
+          "connections_routed": 141,
+          "connections_total": 142,
+          "completion_pct": 99.3,
+          "nets_total": 37,
+          "nets_complete": 36,
+          "nets_incomplete": 1,
+          "nets_unrouted": 0,
+          "nets_blocking_incomplete": 0
+        },
+        "via_count": 43,
+        "wirelength_mm": 1297.33,
+        "kct_check": {
+          "ran": true,
+          "passed": false,
+          "error_count": 6,
+          "warning_count": 137,
+          "errors_by_rule": {
+            "connectivity": 1,
+            "hole_to_hole_clearance": 5
+          },
+          "note": null,
+          "manufacturer": "jlcpcb",
+          "net_class_map_path": null,
+          "inactive_rules": [
+            "match_group_length_skew",
+            "diffpair_length_skew",
+            "diffpair_routing_continuity",
+            "diffpair_uncoupled_length"
+          ]
+        },
+        "sync": {
+          "ran": true,
+          "in_sync": true,
+          "summary": {
+            "errors": 0,
+            "warnings": 0,
+            "missing_on_pcb": 0,
+            "orphaned_on_pcb": 0,
+            "net_mismatches": 0,
+            "pin_mismatches": 0
+          },
+          "command": [
+            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            "validate",
+            "--sync",
+            "-s",
+            "/tmp/fleet6335/work/05/input/frozen/bldc_controller.kicad_sch",
+            "-p",
+            "/tmp/fleet6335/work/05/fastroute/score/bldc_controller.kicad_pcb",
+            "--format",
+            "json"
+          ]
+        },
+        "clean_pass": false
+      }
+    },
+    {
+      "tool": "input",
+      "board": "06",
+      "outcome": "reference",
+      "reason": "normalized input; pre-existing errors stay in every routed row's headline",
+      "stage": null,
+      "exit_code": null,
+      "timed_out": false,
+      "wall_s": null,
+      "commands": [],
+      "log": null,
+      "output": "/tmp/fleet6335/work/06/input/diffpair_test.kicad_pcb",
+      "partial_artifact": null,
+      "lost_constraints": [],
+      "not_routing_rules": [],
+      "placement_violations": [],
+      "tool_config": {
+        "normalized_input_sha256": "c0c47e096704625e3580846484f7a640810f37d9a288480e11166cb26d58183b",
+        "stripped": {
+          "segment": 118,
+          "arc": 0,
+          "via": 54
+        }
+      },
+      "interchange": null,
+      "score": {
+        "graded_rules_sha256": {
+          ".kicad_pro": "48e2bf25ed4c9aa03d2bd7b818adedcfad1d524134b3d3e97cfe816ad395567c",
+          ".kicad_dru": "825b4a72d64154263d5c41685256590510d5358a7b8b3fdac45ac31a3052c466"
+        },
+        "drc": {
+          "ran": true,
+          "errors_total": 0,
+          "errors_by_type": {},
+          "warnings": 0,
+          "unconnected": 82,
+          "kicad_version": "10.0.6",
+          "command": [
+            "kicad-cli",
+            "pcb",
+            "drc",
+            "--refill-zones",
+            "--severity-all",
+            "--all-track-errors",
+            "--format",
+            "json",
+            "--units",
+            "mm",
+            "--save-board",
+            "--output",
+            "/tmp/fleet6335/work/06/input-score/score/drc.json",
+            "/tmp/fleet6335/work/06/input-score/score/diffpair_test.kicad_pcb"
+          ]
+        },
+        "completion": {
+          "connections_routed": 8,
+          "connections_total": 90,
+          "completion_pct": 8.89,
+          "nets_total": 18,
+          "nets_complete": 0,
+          "nets_incomplete": 18,
+          "nets_unrouted": 0,
+          "nets_blocking_incomplete": 16
+        },
+        "via_count": 0,
+        "wirelength_mm": 0,
+        "kct_check": {
+          "ran": true,
+          "passed": false,
+          "error_count": 16,
+          "warning_count": 0,
+          "errors_by_rule": {
+            "connectivity": 16
+          },
+          "note": null,
+          "manufacturer": "jlcpcb",
+          "net_class_map_path": null,
+          "inactive_rules": [
+            "match_group_length_skew",
+            "diffpair_length_skew",
+            "diffpair_routing_continuity",
+            "diffpair_uncoupled_length"
+          ]
+        },
+        "sync": {
+          "ran": true,
+          "in_sync": true,
+          "summary": {
+            "errors": 0,
+            "warnings": 0,
+            "missing_on_pcb": 0,
+            "orphaned_on_pcb": 0,
+            "net_mismatches": 0,
+            "pin_mismatches": 0
+          },
+          "command": [
+            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            "validate",
+            "--sync",
+            "-s",
+            "/tmp/fleet6335/work/06/input/frozen/diffpair_test.kicad_sch",
+            "-p",
+            "/tmp/fleet6335/work/06/input-score/score/diffpair_test.kicad_pcb",
+            "--format",
+            "json"
+          ]
+        },
+        "clean_pass": false
+      }
+    },
+    {
+      "tool": "kct",
+      "board": "06",
+      "outcome": "success",
+      "reason": null,
+      "stage": null,
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_s": 62.38,
+      "commands": [
+        [
+          "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+          "route",
+          "/tmp/fleet6335/work/06/kct/run/diffpair_test.kicad_pcb",
+          "-o",
+          "/tmp/fleet6335/work/06/kct/run/diffpair_test_routed.kicad_pcb",
+          "--backend",
+          "cpp",
+          "--seed",
+          "1"
+        ]
+      ],
+      "log": "/tmp/fleet6335/work/06/kct/run/run.log",
+      "output": "/tmp/fleet6335/work/06/kct/run/diffpair_test_routed.kicad_pcb",
+      "partial_artifact": null,
+      "lost_constraints": [],
+      "not_routing_rules": [],
+      "placement_violations": [],
+      "tool_config": {
+        "wall_cap_s": 600.0,
+        "backend": {
+          "backend": "cpp",
+          "available": true,
+          "version": "1.0.0",
+          "build_version": 56,
+          "unavailable_reason": null
+        },
+        "kicad_tools_package": "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/src/kicad_tools/__init__.py",
+        "zones_added_by_tool": [],
+        "normalized_input_sha256": "c0c47e096704625e3580846484f7a640810f37d9a288480e11166cb26d58183b"
+      },
+      "interchange": null,
+      "score": {
+        "graded_rules_sha256": {
+          ".kicad_pro": "48e2bf25ed4c9aa03d2bd7b818adedcfad1d524134b3d3e97cfe816ad395567c",
+          ".kicad_dru": "825b4a72d64154263d5c41685256590510d5358a7b8b3fdac45ac31a3052c466"
+        },
+        "drc": {
+          "ran": true,
+          "errors_total": 0,
+          "errors_by_type": {},
+          "warnings": 0,
+          "unconnected": 0,
+          "kicad_version": "10.0.6",
+          "command": [
+            "kicad-cli",
+            "pcb",
+            "drc",
+            "--refill-zones",
+            "--severity-all",
+            "--all-track-errors",
+            "--format",
+            "json",
+            "--units",
+            "mm",
+            "--save-board",
+            "--output",
+            "/tmp/fleet6335/work/06/kct/score/drc.json",
+            "/tmp/fleet6335/work/06/kct/score/diffpair_test.kicad_pcb"
+          ]
+        },
+        "completion": {
+          "connections_routed": 90,
+          "connections_total": 90,
+          "completion_pct": 100.0,
+          "nets_total": 18,
+          "nets_complete": 18,
+          "nets_incomplete": 0,
+          "nets_unrouted": 0,
+          "nets_blocking_incomplete": 0
+        },
+        "via_count": 55,
+        "wirelength_mm": 507.88,
+        "kct_check": {
+          "ran": true,
+          "passed": true,
+          "error_count": 0,
+          "warning_count": 0,
+          "errors_by_rule": {},
+          "note": null,
+          "manufacturer": "jlcpcb",
+          "net_class_map_path": null,
+          "inactive_rules": [
+            "match_group_length_skew",
+            "diffpair_length_skew",
+            "diffpair_routing_continuity",
+            "diffpair_uncoupled_length"
+          ]
+        },
+        "sync": {
+          "ran": true,
+          "in_sync": true,
+          "summary": {
+            "errors": 0,
+            "warnings": 0,
+            "missing_on_pcb": 0,
+            "orphaned_on_pcb": 0,
+            "net_mismatches": 0,
+            "pin_mismatches": 0
+          },
+          "command": [
+            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            "validate",
+            "--sync",
+            "-s",
+            "/tmp/fleet6335/work/06/input/frozen/diffpair_test.kicad_sch",
+            "-p",
+            "/tmp/fleet6335/work/06/kct/score/diffpair_test.kicad_pcb",
+            "--format",
+            "json"
+          ]
+        },
+        "clean_pass": true
+      }
+    },
+    {
+      "tool": "tracemaker",
+      "board": "06",
+      "outcome": "success",
+      "reason": null,
+      "stage": null,
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_s": 49.36,
+      "commands": [
+        [
+          "/tmp/fleet6335/TraceMaker/build/cpu-only/src/app/tracemaker",
+          "route",
+          "/tmp/fleet6335/work/06/tracemaker/run/diffpair_test.kicad_pcb",
+          "-o",
+          "/tmp/fleet6335/work/06/tracemaker/run/diffpair_test_routed.kicad_pcb",
+          "--work",
+          "50000000",
+          "--seed",
+          "1",
+          "--threads",
+          "1",
+          "--no-gpu",
+          "--no-kb",
+          "--json",
+          "/tmp/fleet6335/work/06/tracemaker/run/tracemaker-summary.json"
+        ]
+      ],
+      "log": "/tmp/fleet6335/work/06/tracemaker/run/run.log",
+      "output": "/tmp/fleet6335/work/06/tracemaker/run/diffpair_test_routed.kicad_pcb",
+      "partial_artifact": null,
+      "lost_constraints": [],
+      "not_routing_rules": [],
+      "placement_violations": [],
+      "tool_config": {
+        "wall_cap_s": 600.0,
+        "pin_check": "89ff58ca86b2104ac6c55ae8a5dc77e4ab3e8d00",
+        "executable": "/tmp/fleet6335/TraceMaker/build/cpu-only/src/app/tracemaker",
+        "executable_sha256": "d254662ce819f6be08c0d30e5d951093fd76f733b4b7cc889e5bb390e6ed471c",
+        "learned_state": "isolated: --no-kb (knowledge base neither read nor written)",
+        "gpu": "disabled: --no-gpu",
+        "zones_added_by_tool": [],
+        "normalized_input_sha256": "c0c47e096704625e3580846484f7a640810f37d9a288480e11166cb26d58183b"
+      },
+      "interchange": null,
+      "score": {
+        "graded_rules_sha256": {
+          ".kicad_pro": "48e2bf25ed4c9aa03d2bd7b818adedcfad1d524134b3d3e97cfe816ad395567c",
+          ".kicad_dru": "825b4a72d64154263d5c41685256590510d5358a7b8b3fdac45ac31a3052c466"
+        },
+        "drc": {
+          "ran": true,
+          "errors_total": 0,
+          "errors_by_type": {},
+          "warnings": 0,
+          "unconnected": 0,
+          "kicad_version": "10.0.6",
+          "command": [
+            "kicad-cli",
+            "pcb",
+            "drc",
+            "--refill-zones",
+            "--severity-all",
+            "--all-track-errors",
+            "--format",
+            "json",
+            "--units",
+            "mm",
+            "--save-board",
+            "--output",
+            "/tmp/fleet6335/work/06/tracemaker/score/drc.json",
+            "/tmp/fleet6335/work/06/tracemaker/score/diffpair_test.kicad_pcb"
+          ]
+        },
+        "completion": {
+          "connections_routed": 90,
+          "connections_total": 90,
+          "completion_pct": 100.0,
+          "nets_total": 18,
+          "nets_complete": 18,
+          "nets_incomplete": 0,
+          "nets_unrouted": 0,
+          "nets_blocking_incomplete": 0
+        },
+        "via_count": 25,
+        "wirelength_mm": 847.44,
+        "kct_check": {
+          "ran": true,
+          "passed": false,
+          "error_count": 10,
+          "warning_count": 0,
+          "errors_by_rule": {
+            "via_in_pad": 10
+          },
+          "note": null,
+          "manufacturer": "jlcpcb",
+          "net_class_map_path": null,
+          "inactive_rules": [
+            "match_group_length_skew",
+            "diffpair_length_skew",
+            "diffpair_routing_continuity",
+            "diffpair_uncoupled_length"
+          ]
+        },
+        "sync": {
+          "ran": true,
+          "in_sync": true,
+          "summary": {
+            "errors": 0,
+            "warnings": 0,
+            "missing_on_pcb": 0,
+            "orphaned_on_pcb": 0,
+            "net_mismatches": 0,
+            "pin_mismatches": 0
+          },
+          "command": [
+            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            "validate",
+            "--sync",
+            "-s",
+            "/tmp/fleet6335/work/06/input/frozen/diffpair_test.kicad_sch",
+            "-p",
+            "/tmp/fleet6335/work/06/tracemaker/score/diffpair_test.kicad_pcb",
+            "--format",
+            "json"
+          ]
+        },
+        "clean_pass": false
+      }
+    },
+    {
+      "tool": "fastroute",
+      "board": "06",
+      "outcome": "non-comparable",
+      "reason": "10 constraint(s) lost at the DSN/SES boundary",
+      "stage": null,
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_s": 1.97,
+      "commands": [
+        [
+          "/tmp/fleet6335/fastroute/target/release/fastroute",
+          "-de",
+          "/tmp/fleet6335/work/06/fastroute/run/diffpair_test.dsn",
+          "-do",
+          "/tmp/fleet6335/work/06/fastroute/run/diffpair_test.ses",
+          "--router.autorouter.max_threads=1",
+          "--router.optimizer.max_threads=1",
+          "--report=/tmp/fleet6335/work/06/fastroute/run/fastroute-report.json"
+        ]
+      ],
+      "log": "/tmp/fleet6335/work/06/fastroute/run/run.log",
+      "output": "/tmp/fleet6335/work/06/fastroute/run/diffpair_test_routed.kicad_pcb",
+      "partial_artifact": null,
+      "lost_constraints": [
+        {
+          "kind": "board_rule",
+          "detail": "min_copper_edge_clearance 0.3 mm not exported"
+        },
+        {
+          "kind": "dru",
+          "detail": "rule 'Reviewed clearance - Power': clearance min 0.2 mm not in DSN"
+        },
+        {
+          "kind": "dru",
+          "detail": "rule 'kct diff pair gap - LVDS1_P/LVDS1_N': diff_pair_gap min 0.15 mm not in DSN"
+        },
+        {
+          "kind": "dru",
+          "detail": "rule 'kct diff pair gap - LVDS2_P/LVDS2_N': diff_pair_gap min 0.15 mm not in DSN"
+        },
+        {
+          "kind": "dru",
+          "detail": "rule 'kct diff pair gap - LVDS3_P/LVDS3_N': diff_pair_gap min 0.15 mm not in DSN"
+        },
+        {
+          "kind": "dru",
+          "detail": "rule 'kct diff pair gap - LVDS4_P/LVDS4_N': diff_pair_gap min 0.15 mm not in DSN"
+        },
+        {
+          "kind": "dru",
+          "detail": "rule 'kct diff pair skew - LVDS1_P/LVDS1_N': skew min None mm not in DSN"
+        },
+        {
+          "kind": "dru",
+          "detail": "rule 'kct diff pair skew - LVDS2_P/LVDS2_N': skew min None mm not in DSN"
+        },
+        {
+          "kind": "dru",
+          "detail": "rule 'kct diff pair skew - LVDS3_P/LVDS3_N': skew min None mm not in DSN"
+        },
+        {
+          "kind": "dru",
+          "detail": "rule 'kct diff pair skew - LVDS4_P/LVDS4_N': skew min None mm not in DSN"
+        }
+      ],
+      "not_routing_rules": [
+        {
+          "rule": "Silk to Pad - jlcpcb",
+          "type": "silk_clearance",
+          "min_mm": 0.15
+        },
+        {
+          "rule": "PTH Hole to Track - jlcpcb",
+          "type": "hole_clearance",
+          "min_mm": 0.28
+        },
+        {
+          "rule": "Inner PTH Hole to Copper - jlcpcb",
+          "type": "hole_clearance",
+          "min_mm": 0.3
+        },
+        {
+          "rule": "Annular Ring - jlcpcb",
+          "type": "annular_width",
+          "min_mm": 0.1
+        },
+        {
+          "rule": "PTH Annular Ring - jlcpcb",
+          "type": "annular_width",
+          "min_mm": 0.15
+        },
+        {
+          "rule": "Copper to Edge - jlcpcb",
+          "type": "edge_clearance",
+          "min_mm": 0.3
+        },
+        {
+          "rule": "Hole to Edge - jlcpcb",
+          "type": "physical_hole_clearance",
+          "min_mm": 0.4
+        },
+        {
+          "rule": "Silkscreen Width - jlcpcb",
+          "type": "text_thickness",
+          "min_mm": 0.15
+        },
+        {
+          "rule": "Silkscreen Height - jlcpcb",
+          "type": "text_height",
+          "min_mm": 1.0
+        }
+      ],
+      "placement_violations": [],
+      "tool_config": {
+        "wall_cap_s": 600.0,
+        "pin_check": "e5d52c4544795422b8b28077acc0605fdf11265a",
+        "executable": "/tmp/fleet6335/fastroute/target/release/fastroute",
+        "executable_sha256": "26a02e3e2254540064a99b8f2dc85ec43ad2b377a6c3523e38b01517c6c418c8",
+        "zones_added_by_tool": [],
+        "normalized_input_sha256": "c0c47e096704625e3580846484f7a640810f37d9a288480e11166cb26d58183b"
+      },
+      "interchange": {
+        "ses": {
+          "wires": 189,
+          "vias": 21,
+          "resolution_unit": "um",
+          "resolution": 10.0
+        },
+        "imported_wires": 189,
+        "imported_vias": 21
+      },
+      "score": {
+        "graded_rules_sha256": {
+          ".kicad_pro": "48e2bf25ed4c9aa03d2bd7b818adedcfad1d524134b3d3e97cfe816ad395567c",
+          ".kicad_dru": "825b4a72d64154263d5c41685256590510d5358a7b8b3fdac45ac31a3052c466"
+        },
+        "drc": {
+          "ran": true,
+          "errors_total": 20,
+          "errors_by_type": {
+            "shorting_items": 8,
+            "skew_out_of_range": 4,
+            "solder_mask_bridge": 8
+          },
+          "warnings": 0,
+          "unconnected": 8,
+          "kicad_version": "10.0.6",
+          "command": [
+            "kicad-cli",
+            "pcb",
+            "drc",
+            "--refill-zones",
+            "--severity-all",
+            "--all-track-errors",
+            "--format",
+            "json",
+            "--units",
+            "mm",
+            "--save-board",
+            "--output",
+            "/tmp/fleet6335/work/06/fastroute/score/drc.json",
+            "/tmp/fleet6335/work/06/fastroute/score/diffpair_test.kicad_pcb"
+          ]
+        },
+        "completion": {
+          "connections_routed": 82,
+          "connections_total": 90,
+          "completion_pct": 91.11,
+          "nets_total": 18,
+          "nets_complete": 10,
+          "nets_incomplete": 8,
+          "nets_unrouted": 0,
+          "nets_blocking_incomplete": 8
+        },
+        "via_count": 21,
+        "wirelength_mm": 603.04,
+        "kct_check": {
+          "ran": true,
+          "passed": false,
+          "error_count": 16,
+          "warning_count": 0,
+          "errors_by_rule": {
+            "clearance_pad_segment": 8,
+            "connectivity": 8
+          },
+          "note": null,
+          "manufacturer": "jlcpcb",
+          "net_class_map_path": null,
+          "inactive_rules": [
+            "match_group_length_skew",
+            "diffpair_length_skew",
+            "diffpair_routing_continuity",
+            "diffpair_uncoupled_length"
+          ]
+        },
+        "sync": {
+          "ran": true,
+          "in_sync": true,
+          "summary": {
+            "errors": 0,
+            "warnings": 0,
+            "missing_on_pcb": 0,
+            "orphaned_on_pcb": 0,
+            "net_mismatches": 0,
+            "pin_mismatches": 0
+          },
+          "command": [
+            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            "validate",
+            "--sync",
+            "-s",
+            "/tmp/fleet6335/work/06/input/frozen/diffpair_test.kicad_sch",
+            "-p",
+            "/tmp/fleet6335/work/06/fastroute/score/diffpair_test.kicad_pcb",
+            "--format",
+            "json"
+          ]
+        },
+        "clean_pass": false
+      }
+    },
+    {
+      "tool": "input",
+      "board": "07",
+      "outcome": "reference",
+      "reason": "normalized input; pre-existing errors stay in every routed row's headline",
+      "stage": null,
+      "exit_code": null,
+      "timed_out": false,
+      "wall_s": null,
+      "commands": [],
+      "log": null,
+      "output": "/tmp/fleet6335/work/07/input/matchgroup_test.kicad_pcb",
+      "partial_artifact": null,
+      "lost_constraints": [],
+      "not_routing_rules": [],
+      "placement_violations": [],
+      "tool_config": {
+        "normalized_input_sha256": "3a82d04edb252dc9c1a26e6ec8493adb0aecca1f63a553d5cf3ee280803858b7",
+        "stripped": {
+          "segment": 3742,
+          "arc": 0,
+          "via": 170
+        }
+      },
+      "interchange": null,
+      "score": {
+        "graded_rules_sha256": {
+          ".kicad_pro": "f6ee5e69e9cd153a3ca4b57f8fa9005f8c755774db97a6c5a6ad0c6378b79198",
+          ".kicad_dru": "4b7ed2eb30f225d6c18d7f4c8275a1cca926c338860d63fe23e39a714efa2cde"
+        },
+        "drc": {
+          "ran": true,
+          "errors_total": 0,
+          "errors_by_type": {},
+          "warnings": 0,
+          "unconnected": 159,
+          "kicad_version": "10.0.6",
+          "command": [
+            "kicad-cli",
+            "pcb",
+            "drc",
+            "--refill-zones",
+            "--severity-all",
+            "--all-track-errors",
+            "--format",
+            "json",
+            "--units",
+            "mm",
+            "--save-board",
+            "--output",
+            "/tmp/fleet6335/work/07/input-score/score/drc.json",
+            "/tmp/fleet6335/work/07/input-score/score/matchgroup_test.kicad_pcb"
+          ]
+        },
+        "completion": {
+          "connections_routed": 2,
+          "connections_total": 161,
+          "completion_pct": 1.24,
+          "nets_total": 55,
+          "nets_complete": 0,
+          "nets_incomplete": 55,
+          "nets_unrouted": 0,
+          "nets_blocking_incomplete": 49
+        },
+        "via_count": 0,
+        "wirelength_mm": 0,
+        "kct_check": {
+          "ran": true,
+          "passed": false,
+          "error_count": 53,
+          "warning_count": 118,
+          "errors_by_rule": {
+            "connectivity": 53
+          },
+          "note": null,
+          "manufacturer": "jlcpcb",
+          "net_class_map_path": null,
+          "inactive_rules": [
+            "match_group_length_skew",
+            "diffpair_length_skew",
+            "diffpair_routing_continuity",
+            "diffpair_uncoupled_length"
+          ]
+        },
+        "sync": {
+          "ran": true,
+          "in_sync": true,
+          "summary": {
+            "errors": 0,
+            "warnings": 0,
+            "missing_on_pcb": 0,
+            "orphaned_on_pcb": 0,
+            "net_mismatches": 0,
+            "pin_mismatches": 0
+          },
+          "command": [
+            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            "validate",
+            "--sync",
+            "-s",
+            "/tmp/fleet6335/work/07/input/frozen/matchgroup_test.kicad_sch",
+            "-p",
+            "/tmp/fleet6335/work/07/input-score/score/matchgroup_test.kicad_pcb",
+            "--format",
+            "json"
+          ]
+        },
+        "clean_pass": false
+      }
+    },
+    {
+      "tool": "kct",
+      "board": "07",
+      "outcome": "timeout",
+      "reason": "killed at the 600s wall cap",
+      "stage": null,
+      "exit_code": -1,
+      "timed_out": true,
+      "wall_s": 620.16,
+      "commands": [
+        [
+          "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+          "route",
+          "/tmp/fleet6335/work/07/kct/run/matchgroup_test.kicad_pcb",
+          "-o",
+          "/tmp/fleet6335/work/07/kct/run/matchgroup_test_routed.kicad_pcb",
+          "--backend",
+          "cpp",
+          "--seed",
+          "1"
+        ]
+      ],
+      "log": "/tmp/fleet6335/work/07/kct/run/run.log",
+      "output": null,
+      "partial_artifact": "/tmp/fleet6335/work/07/kct/run/matchgroup_test_routed.kicad_pcb",
+      "lost_constraints": [],
+      "not_routing_rules": [],
+      "placement_violations": [],
+      "tool_config": {
+        "wall_cap_s": 600.0,
+        "backend": {
+          "backend": "cpp",
+          "available": true,
+          "version": "1.0.0",
+          "build_version": 56,
+          "unavailable_reason": null
+        },
+        "kicad_tools_package": "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/src/kicad_tools/__init__.py",
+        "normalized_input_sha256": "3a82d04edb252dc9c1a26e6ec8493adb0aecca1f63a553d5cf3ee280803858b7"
+      },
+      "interchange": null,
+      "score": null
+    },
+    {
+      "tool": "tracemaker",
+      "board": "07",
+      "outcome": "timeout",
+      "reason": "killed at the 600s wall cap",
+      "stage": null,
+      "exit_code": -1,
+      "timed_out": true,
+      "wall_s": 600.13,
+      "commands": [
+        [
+          "/tmp/fleet6335/TraceMaker/build/cpu-only/src/app/tracemaker",
+          "route",
+          "/tmp/fleet6335/work/07/tracemaker/run/matchgroup_test.kicad_pcb",
+          "-o",
+          "/tmp/fleet6335/work/07/tracemaker/run/matchgroup_test_routed.kicad_pcb",
+          "--work",
+          "50000000",
+          "--seed",
+          "1",
+          "--threads",
+          "1",
+          "--no-gpu",
+          "--no-kb",
+          "--json",
+          "/tmp/fleet6335/work/07/tracemaker/run/tracemaker-summary.json"
+        ]
+      ],
+      "log": "/tmp/fleet6335/work/07/tracemaker/run/run.log",
+      "output": null,
+      "partial_artifact": null,
+      "lost_constraints": [],
+      "not_routing_rules": [],
+      "placement_violations": [],
+      "tool_config": {
+        "wall_cap_s": 600.0,
+        "pin_check": "89ff58ca86b2104ac6c55ae8a5dc77e4ab3e8d00",
+        "executable": "/tmp/fleet6335/TraceMaker/build/cpu-only/src/app/tracemaker",
+        "executable_sha256": "d254662ce819f6be08c0d30e5d951093fd76f733b4b7cc889e5bb390e6ed471c",
+        "learned_state": "isolated: --no-kb (knowledge base neither read nor written)",
+        "gpu": "disabled: --no-gpu",
+        "normalized_input_sha256": "3a82d04edb252dc9c1a26e6ec8493adb0aecca1f63a553d5cf3ee280803858b7"
+      },
+      "interchange": null,
+      "score": null
+    },
+    {
+      "tool": "fastroute",
+      "board": "07",
+      "outcome": "non-comparable",
+      "reason": "7 constraint(s) lost at the DSN/SES boundary",
+      "stage": null,
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_s": 9.39,
+      "commands": [
+        [
+          "/tmp/fleet6335/fastroute/target/release/fastroute",
+          "-de",
+          "/tmp/fleet6335/work/07/fastroute/run/matchgroup_test.dsn",
+          "-do",
+          "/tmp/fleet6335/work/07/fastroute/run/matchgroup_test.ses",
+          "--router.autorouter.max_threads=1",
+          "--router.optimizer.max_threads=1",
+          "--report=/tmp/fleet6335/work/07/fastroute/run/fastroute-report.json"
+        ]
+      ],
+      "log": "/tmp/fleet6335/work/07/fastroute/run/run.log",
+      "output": "/tmp/fleet6335/work/07/fastroute/run/matchgroup_test_routed.kicad_pcb",
+      "partial_artifact": null,
+      "lost_constraints": [
+        {
+          "kind": "board_rule",
+          "detail": "min_copper_edge_clearance 0.3 mm not exported"
+        },
+        {
+          "kind": "dru",
+          "detail": "rule 'Reviewed clearance - AUX': clearance min 0.175 mm not in DSN"
+        },
+        {
+          "kind": "dru",
+          "detail": "rule 'Reviewed clearance - SDRAM_ADDRESS': clearance min 0.175 mm not in DSN"
+        },
+        {
+          "kind": "dru",
+          "detail": "rule 'Reviewed clearance - SDRAM_BYTE0': clearance min 0.175 mm not in DSN"
+        },
+        {
+          "kind": "dru",
+          "detail": "rule 'Reviewed clearance - SDRAM_BYTE1': clearance min 0.175 mm not in DSN"
+        },
+        {
+          "kind": "dru",
+          "detail": "rule 'Reviewed clearance - SDRAM_COMMAND': clearance min 0.175 mm not in DSN"
+        },
+        {
+          "kind": "dru",
+          "detail": "rule 'Reviewed clearance - SWD_CLOCK': clearance min 0.175 mm not in DSN"
+        }
+      ],
+      "not_routing_rules": [
+        {
+          "rule": "Silk to Pad - jlcpcb",
+          "type": "silk_clearance",
+          "min_mm": 0.15
+        },
+        {
+          "rule": "PTH Hole to Track - jlcpcb",
+          "type": "hole_clearance",
+          "min_mm": 0.28
+        },
+        {
+          "rule": "Inner PTH Hole to Copper - jlcpcb",
+          "type": "hole_clearance",
+          "min_mm": 0.3
+        },
+        {
+          "rule": "Annular Ring - jlcpcb",
+          "type": "annular_width",
+          "min_mm": 0.15
+        },
+        {
+          "rule": "PTH Annular Ring - jlcpcb",
+          "type": "annular_width",
+          "min_mm": 0.15
+        },
+        {
+          "rule": "Copper to Edge - jlcpcb",
+          "type": "edge_clearance",
+          "min_mm": 0.3
+        },
+        {
+          "rule": "Hole to Edge - jlcpcb",
+          "type": "physical_hole_clearance",
+          "min_mm": 0.4
+        },
+        {
+          "rule": "Silkscreen Width - jlcpcb",
+          "type": "text_thickness",
+          "min_mm": 0.15
+        },
+        {
+          "rule": "Silkscreen Height - jlcpcb",
+          "type": "text_height",
+          "min_mm": 1.0
+        }
+      ],
+      "placement_violations": [],
+      "tool_config": {
+        "wall_cap_s": 600.0,
+        "pin_check": "e5d52c4544795422b8b28077acc0605fdf11265a",
+        "executable": "/tmp/fleet6335/fastroute/target/release/fastroute",
+        "executable_sha256": "26a02e3e2254540064a99b8f2dc85ec43ad2b377a6c3523e38b01517c6c418c8",
+        "zones_added_by_tool": [],
+        "normalized_input_sha256": "3a82d04edb252dc9c1a26e6ec8493adb0aecca1f63a553d5cf3ee280803858b7"
+      },
+      "interchange": {
+        "ses": {
+          "wires": 437,
+          "vias": 138,
+          "resolution_unit": "um",
+          "resolution": 10.0
+        },
+        "imported_wires": 437,
+        "imported_vias": 138
+      },
+      "score": {
+        "graded_rules_sha256": {
+          ".kicad_pro": "f6ee5e69e9cd153a3ca4b57f8fa9005f8c755774db97a6c5a6ad0c6378b79198",
+          ".kicad_dru": "4b7ed2eb30f225d6c18d7f4c8275a1cca926c338860d63fe23e39a714efa2cde"
+        },
+        "drc": {
+          "ran": true,
+          "errors_total": 549,
+          "errors_by_type": {
+            "annular_width": 138,
+            "hole_clearance": 199,
+            "shorting_items": 36,
+            "solder_mask_bridge": 36,
+            "track_width": 140
+          },
+          "warnings": 0,
+          "unconnected": 31,
+          "kicad_version": "10.0.6",
+          "command": [
+            "kicad-cli",
+            "pcb",
+            "drc",
+            "--refill-zones",
+            "--severity-all",
+            "--all-track-errors",
+            "--format",
+            "json",
+            "--units",
+            "mm",
+            "--save-board",
+            "--output",
+            "/tmp/fleet6335/work/07/fastroute/score/drc.json",
+            "/tmp/fleet6335/work/07/fastroute/score/matchgroup_test.kicad_pcb"
+          ]
+        },
+        "completion": {
+          "connections_routed": 130,
+          "connections_total": 161,
+          "completion_pct": 80.75,
+          "nets_total": 55,
+          "nets_complete": 51,
+          "nets_incomplete": 4,
+          "nets_unrouted": 0,
+          "nets_blocking_incomplete": 0
+        },
+        "via_count": 138,
+        "wirelength_mm": 2325.6,
+        "kct_check": {
+          "ran": true,
+          "passed": false,
+          "error_count": 209,
+          "warning_count": 118,
+          "errors_by_rule": {
+            "clearance_pad_segment": 36,
+            "connectivity": 2,
+            "dimension_annular_ring": 138,
+            "hole_to_hole_clearance": 33
+          },
+          "note": null,
+          "manufacturer": "jlcpcb",
+          "net_class_map_path": null,
+          "inactive_rules": [
+            "match_group_length_skew",
+            "diffpair_length_skew",
+            "diffpair_routing_continuity",
+            "diffpair_uncoupled_length"
+          ]
+        },
+        "sync": {
+          "ran": true,
+          "in_sync": true,
+          "summary": {
+            "errors": 0,
+            "warnings": 0,
+            "missing_on_pcb": 0,
+            "orphaned_on_pcb": 0,
+            "net_mismatches": 0,
+            "pin_mismatches": 0
+          },
+          "command": [
+            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            "validate",
+            "--sync",
+            "-s",
+            "/tmp/fleet6335/work/07/input/frozen/matchgroup_test.kicad_sch",
+            "-p",
+            "/tmp/fleet6335/work/07/fastroute/score/matchgroup_test.kicad_pcb",
+            "--format",
+            "json"
+          ]
+        },
+        "clean_pass": false
+      }
+    },
+    {
+      "tool": "kct",
+      "board": "08",
+      "outcome": "unsupported",
+      "reason": "no committed .kicad_pcb at this revision",
+      "stage": null,
+      "exit_code": null,
+      "timed_out": false,
+      "wall_s": null,
+      "commands": [],
+      "log": null,
+      "output": null,
+      "partial_artifact": null,
+      "lost_constraints": [],
+      "not_routing_rules": [],
+      "placement_violations": [],
+      "tool_config": {},
+      "interchange": null,
+      "score": null
+    },
+    {
+      "tool": "tracemaker",
+      "board": "08",
+      "outcome": "unsupported",
+      "reason": "no committed .kicad_pcb at this revision",
+      "stage": null,
+      "exit_code": null,
+      "timed_out": false,
+      "wall_s": null,
+      "commands": [],
+      "log": null,
+      "output": null,
+      "partial_artifact": null,
+      "lost_constraints": [],
+      "not_routing_rules": [],
+      "placement_violations": [],
+      "tool_config": {},
+      "interchange": null,
+      "score": null
+    },
+    {
+      "tool": "fastroute",
+      "board": "08",
+      "outcome": "unsupported",
+      "reason": "no committed .kicad_pcb at this revision",
+      "stage": null,
+      "exit_code": null,
+      "timed_out": false,
+      "wall_s": null,
+      "commands": [],
+      "log": null,
+      "output": null,
+      "partial_artifact": null,
+      "lost_constraints": [],
+      "not_routing_rules": [],
+      "placement_violations": [],
+      "tool_config": {},
+      "interchange": null,
+      "score": null
+    },
+    {
+      "tool": "input",
+      "board": "09",
+      "outcome": "reference",
+      "reason": "normalized input; pre-existing errors stay in every routed row's headline",
+      "stage": null,
+      "exit_code": null,
+      "timed_out": false,
+      "wall_s": null,
+      "commands": [],
+      "log": null,
+      "output": "/tmp/fleet6335/work/09/input/usbc_pd_power.kicad_pcb",
+      "partial_artifact": null,
+      "lost_constraints": [],
+      "not_routing_rules": [],
+      "placement_violations": [],
+      "tool_config": {
+        "normalized_input_sha256": "a4a5fe0d622e302a29bb21e82dbebb257b9aada001ca9c06b3c5311ba2f83892",
+        "stripped": {
+          "segment": 318,
+          "arc": 0,
+          "via": 92
+        }
+      },
+      "interchange": null,
+      "score": {
+        "graded_rules_sha256": {
+          ".kicad_pro": "46e70ad622f62a250039b8ed3a792497b33bf6c7a0d18eb689a5f513a4ae2c22",
+          ".kicad_dru": null
+        },
+        "drc": {
+          "ran": true,
+          "errors_total": 0,
+          "errors_by_type": {},
+          "warnings": 1,
+          "unconnected": 115,
+          "kicad_version": "10.0.6",
+          "command": [
+            "kicad-cli",
+            "pcb",
+            "drc",
+            "--refill-zones",
+            "--severity-all",
+            "--all-track-errors",
+            "--format",
+            "json",
+            "--units",
+            "mm",
+            "--save-board",
+            "--output",
+            "/tmp/fleet6335/work/09/input-score/score/drc.json",
+            "/tmp/fleet6335/work/09/input-score/score/usbc_pd_power.kicad_pcb"
+          ]
+        },
+        "completion": {
+          "connections_routed": 9,
+          "connections_total": 124,
+          "completion_pct": 7.26,
+          "nets_total": 32,
+          "nets_complete": 0,
+          "nets_incomplete": 32,
+          "nets_unrouted": 0,
+          "nets_blocking_incomplete": 22
+        },
+        "via_count": 0,
+        "wirelength_mm": 0,
+        "kct_check": {
+          "ran": true,
+          "passed": false,
+          "error_count": 31,
+          "warning_count": 147,
+          "errors_by_rule": {
+            "connectivity": 31
+          },
+          "note": null,
+          "manufacturer": "jlcpcb",
+          "net_class_map_path": null,
+          "inactive_rules": [
+            "match_group_length_skew",
+            "diffpair_length_skew",
+            "diffpair_routing_continuity",
+            "diffpair_uncoupled_length"
+          ]
+        },
+        "sync": {
+          "ran": true,
+          "in_sync": true,
+          "summary": {
+            "errors": 0,
+            "warnings": 0,
+            "missing_on_pcb": 0,
+            "orphaned_on_pcb": 0,
+            "net_mismatches": 0,
+            "pin_mismatches": 0
+          },
+          "command": [
+            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            "validate",
+            "--sync",
+            "-s",
+            "/tmp/fleet6335/work/09/input/frozen/usbc_pd_power.kicad_sch",
+            "-p",
+            "/tmp/fleet6335/work/09/input-score/score/usbc_pd_power.kicad_pcb",
+            "--format",
+            "json"
+          ]
+        },
+        "clean_pass": false
+      }
+    },
+    {
+      "tool": "kct",
+      "board": "09",
+      "outcome": "timeout",
+      "reason": "killed at the 600s wall cap",
+      "stage": null,
+      "exit_code": -1,
+      "timed_out": true,
+      "wall_s": 620.15,
+      "commands": [
+        [
+          "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+          "route",
+          "/tmp/fleet6335/work/09/kct/run/usbc_pd_power.kicad_pcb",
+          "-o",
+          "/tmp/fleet6335/work/09/kct/run/usbc_pd_power_routed.kicad_pcb",
+          "--backend",
+          "cpp",
+          "--seed",
+          "1"
+        ]
+      ],
+      "log": "/tmp/fleet6335/work/09/kct/run/run.log",
+      "output": null,
+      "partial_artifact": "/tmp/fleet6335/work/09/kct/run/usbc_pd_power_routed.kicad_pcb",
+      "lost_constraints": [],
+      "not_routing_rules": [],
+      "placement_violations": [],
+      "tool_config": {
+        "wall_cap_s": 600.0,
+        "backend": {
+          "backend": "cpp",
+          "available": true,
+          "version": "1.0.0",
+          "build_version": 56,
+          "unavailable_reason": null
+        },
+        "kicad_tools_package": "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/src/kicad_tools/__init__.py",
+        "normalized_input_sha256": "a4a5fe0d622e302a29bb21e82dbebb257b9aada001ca9c06b3c5311ba2f83892"
+      },
+      "interchange": null,
+      "score": null
+    },
+    {
+      "tool": "tracemaker",
+      "board": "09",
+      "outcome": "success",
+      "reason": null,
+      "stage": null,
+      "exit_code": 3,
+      "timed_out": false,
+      "wall_s": 589.73,
+      "commands": [
+        [
+          "/tmp/fleet6335/TraceMaker/build/cpu-only/src/app/tracemaker",
+          "route",
+          "/tmp/fleet6335/work/09/tracemaker/run/usbc_pd_power.kicad_pcb",
+          "-o",
+          "/tmp/fleet6335/work/09/tracemaker/run/usbc_pd_power_routed.kicad_pcb",
+          "--work",
+          "50000000",
+          "--seed",
+          "1",
+          "--threads",
+          "1",
+          "--no-gpu",
+          "--no-kb",
+          "--json",
+          "/tmp/fleet6335/work/09/tracemaker/run/tracemaker-summary.json"
+        ]
+      ],
+      "log": "/tmp/fleet6335/work/09/tracemaker/run/run.log",
+      "output": "/tmp/fleet6335/work/09/tracemaker/run/usbc_pd_power_routed.kicad_pcb",
+      "partial_artifact": null,
+      "lost_constraints": [],
+      "not_routing_rules": [],
+      "placement_violations": [],
+      "tool_config": {
+        "wall_cap_s": 600.0,
+        "pin_check": "89ff58ca86b2104ac6c55ae8a5dc77e4ab3e8d00",
+        "executable": "/tmp/fleet6335/TraceMaker/build/cpu-only/src/app/tracemaker",
+        "executable_sha256": "d254662ce819f6be08c0d30e5d951093fd76f733b4b7cc889e5bb390e6ed471c",
+        "learned_state": "isolated: --no-kb (knowledge base neither read nor written)",
+        "gpu": "disabled: --no-gpu",
+        "zones_added_by_tool": [],
+        "normalized_input_sha256": "a4a5fe0d622e302a29bb21e82dbebb257b9aada001ca9c06b3c5311ba2f83892"
+      },
+      "interchange": null,
+      "score": {
+        "graded_rules_sha256": {
+          ".kicad_pro": "46e70ad622f62a250039b8ed3a792497b33bf6c7a0d18eb689a5f513a4ae2c22",
+          ".kicad_dru": null
+        },
+        "drc": {
+          "ran": true,
+          "errors_total": 0,
+          "errors_by_type": {},
+          "warnings": 2,
+          "unconnected": 10,
+          "kicad_version": "10.0.6",
+          "command": [
+            "kicad-cli",
+            "pcb",
+            "drc",
+            "--refill-zones",
+            "--severity-all",
+            "--all-track-errors",
+            "--format",
+            "json",
+            "--units",
+            "mm",
+            "--save-board",
+            "--output",
+            "/tmp/fleet6335/work/09/tracemaker/score/drc.json",
+            "/tmp/fleet6335/work/09/tracemaker/score/usbc_pd_power.kicad_pcb"
+          ]
+        },
+        "completion": {
+          "connections_routed": 114,
+          "connections_total": 124,
+          "completion_pct": 91.94,
+          "nets_total": 32,
+          "nets_complete": 23,
+          "nets_incomplete": 9,
+          "nets_unrouted": 0,
+          "nets_blocking_incomplete": 5
+        },
+        "via_count": 27,
+        "wirelength_mm": 775.62,
+        "kct_check": {
+          "ran": true,
+          "passed": false,
+          "error_count": 39,
+          "warning_count": 150,
+          "errors_by_rule": {
+            "connectivity": 9,
+            "hole_to_hole_clearance": 1,
+            "via_in_pad": 29
+          },
+          "note": null,
+          "manufacturer": "jlcpcb",
+          "net_class_map_path": null,
+          "inactive_rules": [
+            "match_group_length_skew",
+            "diffpair_length_skew",
+            "diffpair_routing_continuity",
+            "diffpair_uncoupled_length"
+          ]
+        },
+        "sync": {
+          "ran": true,
+          "in_sync": true,
+          "summary": {
+            "errors": 0,
+            "warnings": 0,
+            "missing_on_pcb": 0,
+            "orphaned_on_pcb": 0,
+            "net_mismatches": 0,
+            "pin_mismatches": 0
+          },
+          "command": [
+            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            "validate",
+            "--sync",
+            "-s",
+            "/tmp/fleet6335/work/09/input/frozen/usbc_pd_power.kicad_sch",
+            "-p",
+            "/tmp/fleet6335/work/09/tracemaker/score/usbc_pd_power.kicad_pcb",
+            "--format",
+            "json"
+          ]
+        },
+        "clean_pass": false
+      }
+    },
+    {
+      "tool": "fastroute",
+      "board": "09",
+      "outcome": "non-comparable",
+      "reason": "1 constraint(s) lost at the DSN/SES boundary",
+      "stage": null,
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_s": 12.74,
+      "commands": [
+        [
+          "/tmp/fleet6335/fastroute/target/release/fastroute",
+          "-de",
+          "/tmp/fleet6335/work/09/fastroute/run/usbc_pd_power.dsn",
+          "-do",
+          "/tmp/fleet6335/work/09/fastroute/run/usbc_pd_power.ses",
+          "--router.autorouter.max_threads=1",
+          "--router.optimizer.max_threads=1",
+          "--report=/tmp/fleet6335/work/09/fastroute/run/fastroute-report.json"
+        ]
+      ],
+      "log": "/tmp/fleet6335/work/09/fastroute/run/run.log",
+      "output": "/tmp/fleet6335/work/09/fastroute/run/usbc_pd_power_routed.kicad_pcb",
+      "partial_artifact": null,
+      "lost_constraints": [
+        {
+          "kind": "board_rule",
+          "detail": "min_copper_edge_clearance 0.3 mm not exported"
+        }
+      ],
+      "not_routing_rules": [],
+      "placement_violations": [],
+      "tool_config": {
+        "wall_cap_s": 600.0,
+        "pin_check": "e5d52c4544795422b8b28077acc0605fdf11265a",
+        "executable": "/tmp/fleet6335/fastroute/target/release/fastroute",
+        "executable_sha256": "26a02e3e2254540064a99b8f2dc85ec43ad2b377a6c3523e38b01517c6c418c8",
+        "zones_added_by_tool": [],
+        "normalized_input_sha256": "a4a5fe0d622e302a29bb21e82dbebb257b9aada001ca9c06b3c5311ba2f83892"
+      },
+      "interchange": {
+        "ses": {
+          "wires": 323,
+          "vias": 45,
+          "resolution_unit": "um",
+          "resolution": 10.0
+        },
+        "imported_wires": 323,
+        "imported_vias": 45
+      },
+      "score": {
+        "graded_rules_sha256": {
+          ".kicad_pro": "46e70ad622f62a250039b8ed3a792497b33bf6c7a0d18eb689a5f513a4ae2c22",
+          ".kicad_dru": null
+        },
+        "drc": {
+          "ran": true,
+          "errors_total": 20,
+          "errors_by_type": {
+            "shorting_items": 10,
+            "solder_mask_bridge": 10
+          },
+          "warnings": 1,
+          "unconnected": 7,
+          "kicad_version": "10.0.6",
+          "command": [
+            "kicad-cli",
+            "pcb",
+            "drc",
+            "--refill-zones",
+            "--severity-all",
+            "--all-track-errors",
+            "--format",
+            "json",
+            "--units",
+            "mm",
+            "--save-board",
+            "--output",
+            "/tmp/fleet6335/work/09/fastroute/score/drc.json",
+            "/tmp/fleet6335/work/09/fastroute/score/usbc_pd_power.kicad_pcb"
+          ]
+        },
+        "completion": {
+          "connections_routed": 117,
+          "connections_total": 124,
+          "completion_pct": 94.35,
+          "nets_total": 32,
+          "nets_complete": 28,
+          "nets_incomplete": 4,
+          "nets_unrouted": 0,
+          "nets_blocking_incomplete": 1
+        },
+        "via_count": 45,
+        "wirelength_mm": 1124.24,
+        "kct_check": {
+          "ran": true,
+          "passed": false,
+          "error_count": 17,
+          "warning_count": 147,
+          "errors_by_rule": {
+            "clearance_pad_segment": 10,
+            "connectivity": 3,
+            "hole_to_hole_clearance": 4
+          },
+          "note": null,
+          "manufacturer": "jlcpcb",
+          "net_class_map_path": null,
+          "inactive_rules": [
+            "match_group_length_skew",
+            "diffpair_length_skew",
+            "diffpair_routing_continuity",
+            "diffpair_uncoupled_length"
+          ]
+        },
+        "sync": {
+          "ran": true,
+          "in_sync": true,
+          "summary": {
+            "errors": 0,
+            "warnings": 0,
+            "missing_on_pcb": 0,
+            "orphaned_on_pcb": 0,
+            "net_mismatches": 0,
+            "pin_mismatches": 0
+          },
+          "command": [
+            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            "validate",
+            "--sync",
+            "-s",
+            "/tmp/fleet6335/work/09/input/frozen/usbc_pd_power.kicad_sch",
+            "-p",
+            "/tmp/fleet6335/work/09/fastroute/score/usbc_pd_power.kicad_pcb",
+            "--format",
+            "json"
+          ]
+        },
+        "clean_pass": false
+      }
+    }
+  ]
+}

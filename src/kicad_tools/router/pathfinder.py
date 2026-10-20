@@ -44,7 +44,8 @@ from .layers import Layer
 from .pad_landing import landing_cost, pad_landing_geometry
 from .primitives import Pad, Route, Segment, Via
 from .quantize import dogleg_points, is_45_aligned
-from .rules import DEFAULT_NET_CLASS_MAP, DesignRules, NetClassRouting
+from .rules import DEFAULT_NET_CLASS_MAP, DesignRules, NetClassRouting, layer_permitted
+from .search_radius import search_radius_cells
 from .via_clearance import point_clear_of_copper, segment_clears_foreign_via
 
 # Issue #3135: env-gated A* neighbor-expansion trace.  Set
@@ -355,39 +356,15 @@ class Router:
         # This enforces clearance as a hard constraint during routing.
         # Issue #553: Previously only checked trace_width/2, causing DRC violations
         # when traces were placed too close to obstacles.
-        # Issue #864: Use round() before ceil() to avoid floating point errors
-        # causing an extra cell of clearance (e.g., 0.30000000000000004 -> 4 cells
-        # instead of 3 cells).
-        self._trace_half_width_cells = max(
-            1,
-            math.ceil(
-                round(
-                    (self.rules.trace_width / 2 + self.rules.trace_clearance)
-                    / self.grid.resolution,
-                    6,
-                )
-            ),
+        # Guarded rounding (Issue #864), see search_radius_cells.
+        self._trace_half_width_cells = search_radius_cells(
+            self.rules.trace_width / 2, self.rules.trace_clearance, self.grid.resolution
         )
 
         # Pre-calculate via blocking radius in grid cells
         # Via needs diameter/2 + clearance from other objects (pads, traces, vias)
-        # Issue #864: Use round() before ceil() to avoid floating point errors.
-        self._via_half_cells = max(
-            1,
-            math.ceil(
-                round(
-                    (self.rules.via_diameter / 2 + self.rules.via_clearance) / self.grid.resolution,
-                    6,
-                )
-            ),
-        )
-
-        # Pre-compute neighbor arrays for batch cost computation (Issue #963)
-        # Store offsets and cost multipliers as NumPy arrays for vectorized operations
-        self._neighbor_dx = np.array([dx for dx, _, _, _ in self.neighbors_2d], dtype=np.int32)
-        self._neighbor_dy = np.array([dy for _, dy, _, _ in self.neighbors_2d], dtype=np.int32)
-        self._neighbor_cost_mult = np.array(
-            [cost_mult for _, _, _, cost_mult in self.neighbors_2d], dtype=np.float64
+        self._via_half_cells = search_radius_cells(
+            self.rules.via_diameter / 2, self.rules.via_clearance, self.grid.resolution
         )
 
         # Pre-compute via checking offsets for vectorized blocking check (Issue #966)
@@ -440,7 +417,6 @@ class Router:
         # Key: (gx, gy, net), Value: True if valid, False if blocked
         # Cache is cleared when routes are modified (invalidates blocking state)
         self._via_cache: dict[tuple[int, int, int, int], bool] = {}
-        self._via_cache_enabled: bool = True
 
         # Issue #5617: memo for the route-halo via probe that opens
         # ``_is_via_blocked`` (``_via_halo_clear([], layer, gx, gy, net,
@@ -475,6 +451,9 @@ class Router:
         self._hole_site_cache_token: tuple[object, int, bool] | None = None
         self._pad_drill_site_cache: dict[tuple[int, int], bool] = {}
         self._pad_drill_cache_token: object | None = None
+        # Issue #7296: mask-dam-zone memo, tokened like ``_pad_drill_site_cache``.
+        self._pad_edge_site_cache: dict[tuple[int, int], bool] = {}
+        self._pad_edge_cache_token: object | None = None
 
         # Issue #5617: memo for ``_is_trace_blocked``'s Euclidean-disc
         # kernel (#3229).  ``(dist_sq, within_disc)`` is a pure function of
@@ -1445,15 +1424,7 @@ class Router:
         # Compute grid cell radius for each (trace_width, clearance) pair
         for tw in trace_widths:
             for clearance in clearances:
-                radius = max(
-                    1,
-                    math.ceil(
-                        round(
-                            (tw / 2 + clearance) / self.grid.resolution,
-                            6,
-                        )
-                    ),
-                )
+                radius = search_radius_cells(tw / 2, clearance, self.grid.resolution)
                 self._clearance_radii[(tw, clearance)] = radius
 
     def get_clearance_radius_cells(
@@ -1479,15 +1450,7 @@ class Router:
             return self._clearance_radii[cache_key]
 
         # Compute and cache
-        radius = max(
-            1,
-            math.ceil(
-                round(
-                    (tw / 2 + clearance_mm) / self.grid.resolution,
-                    6,
-                )
-            ),
-        )
+        radius = search_radius_cells(tw / 2, clearance_mm, self.grid.resolution)
         self._clearance_radii[cache_key] = radius
         return radius
 
@@ -3195,7 +3158,7 @@ class Router:
         res = self.grid.resolution
         # Issue #864 rounding idiom: round before ceil so FP noise cannot
         # add a phantom cell of widening.
-        wide_r = max(1, math.ceil(round((half_mm + state.max_widen) / res, 6)))
+        wide_r = search_radius_cells(half_mm, state.max_widen, res)
         if wide_r <= scalar_radius:
             return False  # the matrix never widens beyond the scalar kernel
 
@@ -3243,7 +3206,7 @@ class Router:
                 continue  # same domain / no widening for this pair
             # Widened radius for THIS specific pair (<= wide_r).  A cell in
             # the annulus but outside this pair's requirement is fine.
-            pair_r = max(1, math.ceil(round((half_mm + required) / res, 6)))
+            pair_r = search_radius_cells(half_mm, required, res)
             if int(dist_sq[row, col]) > pair_r * pair_r:
                 continue
             if zones:
@@ -3333,7 +3296,7 @@ class Router:
         for foreign_dom, required in enumerate(state.matrix[dom]):
             if foreign_dom == dom or required <= 0.0:
                 continue
-            pair_r = max(1, math.ceil(round((half_mm + required) / res, 6)))
+            pair_r = search_radius_cells(half_mm, required, res)
             if pair_r <= scalar_radius:
                 continue  # the scalar dilation already covers this pair
             foreign_ids = net_ids_by_domain.get(foreign_dom)
@@ -3566,7 +3529,7 @@ class Router:
         own_name = state.id_to_name.get(net, "")
         half_mm = self._get_trace_width_for_net(own_name) / 2.0
         # Issue #864 rounding idiom (round before ceil), as in the hard kernels.
-        hard_r = max(1, math.ceil(round((half_mm + state.max_widen) / res, 6)))
+        hard_r = search_radius_cells(half_mm, state.max_widen, res)
         band = max(1, math.ceil(round(state.max_widen * 0.5 / res, 6)))
         return state, hard_r, band
 
@@ -3720,9 +3683,8 @@ class Router:
         Issue #3438: in relief-probe mode, foreign usage-0 non-obstacle
         cells (passable only in relief mode) charge an additional
         ``_RELIEF_CONFLICT_PENALTY`` so the probe is a min-conflict
-        search.  Note: ``_batch_negotiated_costs`` does NOT apply the
-        relief penalty -- the relief probe always runs through the
-        scalar ``route()`` path, which uses this method.
+        search.  The relief probe always runs through the scalar
+        ``route()`` path, which uses this method.
         """
         cost = self.grid.get_negotiated_cost(gx, gy, layer, present_factor, net=net)
         if self.relief_mode and net is not None:
@@ -3925,6 +3887,46 @@ class Router:
             self._pad_drill_site_cache[key] = hit
         return hit
 
+    def _pad_edge_clear(self, gx: int, gy: int) -> bool:
+        """True unless a via at ``(gx, gy)`` sits in an SMD pad's mask-dam zone (#7296).
+
+        Same arithmetic as :func:`~.via_in_pad_eligibility.via_drill_at_pad_edge`
+        (the drill clears the copper but its edge is within
+        ``rules.min_via_pad_edge_gap`` of it), vectorised over every
+        non-through-hole pad like :meth:`_non_th_pad_drill_clear` and memoised
+        on the same geometry-tuple token.  Applies whether or not the fab
+        allows via-in-pad: a drill overlapping copper is that decision, not
+        this one.  Scans every SMD pad, not only other-net ones, so it errs
+        conservative against the same-net-only checker.
+        """
+        floor = float(self.rules.min_via_pad_edge_gap or 0.0)
+        if floor <= 0.0:
+            return True
+        geometry = self._non_th_pad_geometry()
+        if geometry is not self._pad_edge_cache_token:
+            self._pad_edge_site_cache.clear()
+            self._pad_edge_cache_token = geometry
+        key = (gx, gy)
+        hit = self._pad_edge_site_cache.get(key)
+        if hit is None:
+            pxs, pys, half_w, half_h, cos_r, sin_r = geometry
+            hit = True
+            if pxs.size:
+                wx, wy = self.grid.grid_to_world(gx, gy)
+                radius = self.rules.via_drill / 2.0
+                dx = wx - pxs
+                dy = wy - pys
+                lx = cos_r * dx - sin_r * dy
+                ly = sin_r * dx + cos_r * dy
+                ex = np.maximum(np.abs(lx) - half_w, 0.0)
+                ey = np.maximum(np.abs(ly) - half_h, 0.0)
+                dist = np.hypot(ex, ey)
+                hit = not bool(np.any((dist >= radius) & (dist < radius + floor)))
+            if len(self._pad_edge_site_cache) >= self._SITE_CACHE_MAX:
+                self._pad_edge_site_cache.clear()
+            self._pad_edge_site_cache[key] = hit
+        return hit
+
     def _check_via_placement_cached(
         self,
         gx: int,
@@ -3960,7 +3962,7 @@ class Router:
         # Issue #1692: Include radius in cache key so different net classes
         # don't collide in the cache.
         effective_radius = radius if radius is not None else self._via_half_cells
-        if self._via_cache_enabled and not allow_sharing:
+        if not allow_sharing:
             cache_key = (gx, gy, net, effective_radius)
             if cache_key in self._via_cache:
                 return self._via_cache[cache_key]
@@ -3979,6 +3981,10 @@ class Router:
         # ``net``, ``radius`` or ``allow_sharing``.
         if not self._allow_smd_vias and not self._non_th_pad_drill_clear(gx, gy):
             return False
+        # Issue #7296: the mask-dam zone beside an SMD pad, which applies even
+        # where via-in-pad is allowed (the drill does not touch the copper).
+        if not self._pad_edge_clear(gx, gy):
+            return False
 
         # Check all layers using priority ordering.
         # Issue #2325: Skip plane layers when checking via blockage.  On plane
@@ -3991,7 +3997,7 @@ class Router:
                 continue
             if self._is_via_blocked(gx, gy, check_layer, net, allow_sharing, radius=radius):
                 # Cache the negative result
-                if self._via_cache_enabled and not allow_sharing:
+                if not allow_sharing:
                     self._via_cache[(gx, gy, net, effective_radius)] = False
                 return False
 
@@ -4028,12 +4034,12 @@ class Router:
                 other_net_tracks=self._foreign_track_adapters,
                 other_net_pads=other_pads,
             ):
-                if self._via_cache_enabled and not allow_sharing:
+                if not allow_sharing:
                     self._via_cache[(gx, gy, net, effective_radius)] = False
                 return False
 
         # Via is valid on all layers - cache positive result
-        if self._via_cache_enabled and not allow_sharing:
+        if not allow_sharing:
             self._via_cache[(gx, gy, net, effective_radius)] = True
         return True
 
@@ -4092,16 +4098,6 @@ class Router:
         self._pad_drill_site_cache.clear()
         self._pad_drill_cache_token = None
         self.grid.refresh_component_holes()
-
-    def set_via_cache_enabled(self, enabled: bool) -> None:
-        """Enable or disable via caching.
-
-        Args:
-            enabled: True to enable caching, False to disable.
-        """
-        self._via_cache_enabled = enabled
-        if not enabled:
-            self._via_cache.clear()
 
     def _get_congestion_cost(self, gx: int, gy: int, layer: int) -> float:
         """Get additional cost based on congestion at this location."""
@@ -4198,67 +4194,6 @@ class Router:
             0.0 if (dx == dx0 and dy == dy0) else cost_turn
             for dx, dy, _dlayer, _cost_mult in self.neighbors_2d
         ]
-
-    def _batch_negotiated_costs(
-        self,
-        current_x: int,
-        current_y: int,
-        layer: int,
-        present_cost_factor: float,
-        skip_mask: np.ndarray,
-    ) -> np.ndarray:
-        """Batch compute negotiated costs for all 2D neighbors using vectorized NumPy.
-
-        Issue #963: Pre-compute negotiated costs for all neighbors in a single
-        batch operation.
-
-        Args:
-            current_x: Current grid x coordinate
-            current_y: Current grid y coordinate
-            layer: Current layer index
-            present_cost_factor: Multiplier for current sharing penalty
-            skip_mask: Boolean array indicating neighbors to skip (e.g., near pads)
-
-        Returns:
-            Array of negotiated costs indexed by neighbor offset index.
-        """
-        # Compute neighbor coordinates
-        nx_arr = current_x + self._neighbor_dx
-        ny_arr = current_y + self._neighbor_dy
-
-        # Bounds mask combined with skip mask
-        valid = (
-            (nx_arr >= 0)
-            & (nx_arr < self.grid.cols)
-            & (ny_arr >= 0)
-            & (ny_arr < self.grid.rows)
-            & ~skip_mask
-        )
-
-        # Initialize costs array
-        costs = np.zeros(len(self.neighbors_2d), dtype=np.float64)
-
-        # Get valid indices
-        valid_indices = np.where(valid)[0]
-        if len(valid_indices) == 0:
-            return costs
-
-        # Batch lookup usage counts and history costs using fancy indexing
-        usage_counts = self.grid._usage_count[layer, ny_arr[valid_indices], nx_arr[valid_indices]]
-        history_costs = self.grid._history_cost[layer, ny_arr[valid_indices], nx_arr[valid_indices]]
-
-        # Compute present cost + history cost
-        # Issue #2333: When EMA smoothing is active, use the smoothed
-        # per-cell present cost instead of the raw usage * factor.
-        if self.grid._present_cost_ema is not None:
-            present_costs = self.grid._present_cost_ema[
-                layer, ny_arr[valid_indices], nx_arr[valid_indices]
-            ]
-        else:
-            present_costs = present_cost_factor * usage_counts
-        costs[valid_indices] = present_costs + history_costs
-
-        return costs
 
     def _is_zone_cell(self, gx: int, gy: int, layer: int) -> bool:
         """Check if a cell is part of a zone (copper pour)."""
@@ -4378,15 +4313,20 @@ class Router:
             return frozenset()
         return net_class.hard_avoided_layer_indices(self.rules.strict_layers)
 
-    def _is_layer_allowed(self, layer_idx: int) -> bool:
+    def _is_layer_allowed(self, layer_idx: int, net_class: NetClassRouting | None = None) -> bool:
         """Check if routing on this layer is allowed (Issue #715).
 
         When allowed_layers is set in DesignRules, only those layers
         can be used for routing. This provides a hard constraint for
         single-layer or restricted-layer routing.
 
+        Issue #6876: ``net_class``'s ``allow_plane_layers`` opt-in widens the
+        gate for the named layers only (via the shared
+        :func:`~kicad_tools.router.rules.layer_permitted` predicate).
+
         Args:
             layer_idx: Grid layer index
+            net_class: The routed net's class, or None (no opt-in).
 
         Returns:
             True if layer is allowed (or no restriction), False if blocked
@@ -4397,7 +4337,7 @@ class Router:
         # Convert grid index to Layer enum value, then to KiCad name for comparison
         layer_value = self.grid.index_to_layer(layer_idx)
         layer = Layer(layer_value)
-        return layer.kicad_name in self.rules.allowed_layers
+        return layer_permitted(self.rules, net_class, layer_idx, layer.kicad_name)
 
     def _can_place_via_in_zones(self, gx: int, gy: int, net: int) -> bool:
         """Check if via placement is legal considering zones on all layers.
@@ -4558,14 +4498,8 @@ class Router:
         # reserve space during pathfinding, not just at segment creation.
         net_trace_width = net_class.trace_width if net_class else self.rules.trace_width
         net_trace_clearance = net_class.clearance if net_class else self.rules.trace_clearance
-        net_trace_half_width_cells = max(
-            1,
-            math.ceil(
-                round(
-                    (net_trace_width / 2 + net_trace_clearance) / self.grid.resolution,
-                    6,
-                )
-            ),
+        net_trace_half_width_cells = search_radius_cells(
+            net_trace_width / 2, net_trace_clearance, self.grid.resolution
         )
 
         # Issue #2559 / Epic #2556 Phase 1C: Resolve diff-pair partner and
@@ -4578,14 +4512,8 @@ class Router:
         partner_net_id = self._resolve_partner_net_id(start.net_name)
         if partner_net_id is not None and net_class is not None:
             net_intra_pair_clearance = net_class.effective_intra_pair_clearance()
-            net_partner_half_width_cells = max(
-                1,
-                math.ceil(
-                    round(
-                        (net_trace_width / 2 + net_intra_pair_clearance) / self.grid.resolution,
-                        6,
-                    )
-                ),
+            net_partner_half_width_cells = search_radius_cells(
+                net_trace_width / 2, net_intra_pair_clearance, self.grid.resolution
             )
         else:
             net_partner_half_width_cells = net_trace_half_width_cells
@@ -4603,14 +4531,8 @@ class Router:
         # Issue #1692: Compute per-net via clearance radius.  Net classes
         # may specify larger via_size which requires a wider blocking check.
         net_via_size = net_class.via_size if net_class else self.rules.via_diameter
-        net_via_half_cells = max(
-            1,
-            math.ceil(
-                round(
-                    (net_via_size / 2 + self.rules.via_clearance) / self.grid.resolution,
-                    6,
-                )
-            ),
+        net_via_half_cells = search_radius_cells(
+            net_via_size / 2, self.rules.via_clearance, self.grid.resolution
         )
 
         # In negotiated mode, allow resource sharing
@@ -4680,8 +4602,8 @@ class Router:
 
         # Filter start/end layers by allowed_layers constraint (Issue #715)
         if self.rules.allowed_layers is not None:
-            start_layers = [l for l in start_layers if self._is_layer_allowed(l)]
-            end_layers = [l for l in end_layers if self._is_layer_allowed(l)]
+            start_layers = [l for l in start_layers if self._is_layer_allowed(l, net_class)]
+            end_layers = [l for l in end_layers if self._is_layer_allowed(l, net_class)]
             # If no valid layers remain, routing is impossible
             if not start_layers or not end_layers:
                 return None
@@ -5446,8 +5368,8 @@ class Router:
                 if new_layer == current.layer:
                     continue
 
-                # Check layer constraint (Issue #715)
-                if not self._is_layer_allowed(new_layer):
+                # Check layer constraint (Issue #715; #6876 per-class opt-in)
+                if not self._is_layer_allowed(new_layer, net_class):
                     continue
 
                 # Issue #4433: hard per-net avoid_layers -- refuse to via onto
@@ -6374,6 +6296,8 @@ class Router:
         negotiated_mode: bool = False,
         present_cost_factor: float = 0.0,
         weight: float = 1.0,
+        per_net_timeout: float | None = None,
+        extra_goal_cells: set[tuple[int, int, int]] | None = None,
     ) -> Route | None:
         """Route between two pads using bidirectional A* search.
 
@@ -6397,10 +6321,29 @@ class Router:
             negotiated_mode: If True, allow sharing resources with cost penalty
             present_cost_factor: Multiplier for current sharing penalty
             weight: A* weight factor (1.0 = optimal, >1.0 = faster but suboptimal)
+            per_net_timeout: Optional wall-clock budget (seconds) for this search
+                (Issue #6527).  Sampled every 1024 iterations, like ``_route_impl``;
+                on expiry ``last_route_deadline_hit`` is set and None returned.
+            extra_goal_cells: Steiner tree goal cells (Issue #6527).  The
+                bidirectional search has no multi-goal support, so a non-empty
+                set is never silently ignored: the search declines (returns
+                None without exhausting) and the caller must use the one-way
+                :meth:`route`, which honours the goals.
 
         Returns:
             Route if path found, None otherwise
         """
+        # Issue #6527: status attributes mirror ``_route_impl`` (reset first so
+        # every early exit leaves them in a defined state).
+        self.last_route_exhausted = False
+        self.last_route_deadline_hit = False
+        self.last_route_deadline_iterations = 0
+
+        if extra_goal_cells:
+            return None
+
+        per_net_timeout = _wall_deadline.clamp_search_timeout(per_net_timeout)
+
         # Issue #966: Clear via cache at start of route (grid state may have changed)
         self.clear_via_cache()
 
@@ -6423,14 +6366,8 @@ class Router:
         # which under-reserves space for wider net classes (e.g. POWER).
         net_trace_width = net_class.trace_width if net_class else self.rules.trace_width
         net_trace_clearance = net_class.clearance if net_class else self.rules.trace_clearance
-        net_trace_half_width_cells = max(
-            1,
-            math.ceil(
-                round(
-                    (net_trace_width / 2 + net_trace_clearance) / self.grid.resolution,
-                    6,
-                )
-            ),
+        net_trace_half_width_cells = search_radius_cells(
+            net_trace_width / 2, net_trace_clearance, self.grid.resolution
         )
 
         # Issue #2559 / Epic #2556 Phase 1C: Resolve diff-pair partner for
@@ -6442,14 +6379,8 @@ class Router:
         partner_net_id = self._resolve_partner_net_id(start.net_name)
         if partner_net_id is not None and net_class is not None:
             net_intra_pair_clearance = net_class.effective_intra_pair_clearance()
-            net_partner_half_width_cells = max(
-                1,
-                math.ceil(
-                    round(
-                        (net_trace_width / 2 + net_intra_pair_clearance) / self.grid.resolution,
-                        6,
-                    )
-                ),
+            net_partner_half_width_cells = search_radius_cells(
+                net_trace_width / 2, net_intra_pair_clearance, self.grid.resolution
             )
         else:
             net_partner_half_width_cells = net_trace_half_width_cells
@@ -6466,14 +6397,8 @@ class Router:
 
         # Issue #1692: Compute per-net via clearance radius.
         net_via_size = net_class.via_size if net_class else self.rules.via_diameter
-        net_via_half_cells = max(
-            1,
-            math.ceil(
-                round(
-                    (net_via_size / 2 + self.rules.via_clearance) / self.grid.resolution,
-                    6,
-                )
-            ),
+        net_via_half_cells = search_radius_cells(
+            net_via_size / 2, self.rules.via_clearance, self.grid.resolution
         )
 
         # Convert to grid coordinates
@@ -6491,8 +6416,8 @@ class Router:
 
         # Apply layer constraints
         if self.rules.allowed_layers is not None:
-            start_layers = [l for l in start_layers if self._is_layer_allowed(l)]
-            end_layers = [l for l in end_layers if self._is_layer_allowed(l)]
+            start_layers = [l for l in start_layers if self._is_layer_allowed(l, net_class)]
+            end_layers = [l for l in end_layers if self._is_layer_allowed(l, net_class)]
             if not start_layers or not end_layers:
                 return None
 
@@ -6694,8 +6619,19 @@ class Router:
         if self._max_iterations_override is not None:
             max_iterations = min(max_iterations, self._max_iterations_override)
 
+        bidi_deadline = time.monotonic() + per_net_timeout if per_net_timeout is not None else None
+        bidi_deadline_hit = False
+
         while (forward_open or backward_open) and iterations < max_iterations:
             iterations += 1
+
+            # Issue #6527: per-net wall-clock deadline (same cadence as _route_impl)
+            if bidi_deadline is not None and iterations % 1024 == 0:
+                if time.monotonic() >= bidi_deadline:
+                    bidi_deadline_hit = True
+                    self.last_route_deadline_hit = True
+                    self.last_route_deadline_iterations = iterations
+                    break
 
             # Alternate between forward and backward search
             # Process forward step
@@ -6798,6 +6734,8 @@ class Router:
                 end,
             )
 
+        # Issue #6527: only drained frontiers prove unreachability (#6098).
+        self.last_route_exhausted = not forward_open and not backward_open and not bidi_deadline_hit
         return None
 
     def _expand_bidirectional_neighbors(
@@ -7147,14 +7085,15 @@ class Router:
         # Issue #4433: hard per-net avoid_layers -- resolved once for this
         # expansion so the via loop below refuses to change onto an avoided
         # inner plane.  Empty set => no-op (soft default preserved).
-        bidi_hard_avoided = self._hard_avoided_layers(self._get_net_class(source_pad.net_name))
+        bidi_net_class = self._get_net_class(source_pad.net_name)
+        bidi_hard_avoided = self._hard_avoided_layers(bidi_net_class)
 
         # Try layer changes (vias)
         for new_layer in self.grid.get_routable_indices():
             if new_layer == current.layer:
                 continue
 
-            if not self._is_layer_allowed(new_layer):
+            if not self._is_layer_allowed(new_layer, bidi_net_class):
                 continue
 
             # Issue #4433: refuse a via onto a hard-avoided layer for this net.
@@ -7349,6 +7288,8 @@ class Router:
         negotiated_mode: bool = False,
         present_cost_factor: float = 0.0,
         weight: float = 1.0,
+        per_net_timeout: float | None = None,
+        extra_goal_cells: set[tuple[int, int, int]] | None = None,
     ) -> Route | None:
         """Route using automatic algorithm selection.
 
@@ -7357,8 +7298,11 @@ class Router:
         - Distance between pads (bidirectional for long paths)
         - Configuration settings
 
-        This is the recommended entry point for routing, as it automatically
-        selects the best algorithm for the task.
+        Issue #6527: ``per_net_timeout`` is ONE budget shared by a failed
+        bidirectional attempt and its one-way retry (the retry receives only
+        the time remaining).  ``extra_goal_cells`` is forwarded; the
+        bidirectional search declines Steiner-goal requests so the one-way
+        search (which honours them) runs.
 
         Args:
             start: Source pad
@@ -7367,26 +7311,59 @@ class Router:
             negotiated_mode: If True, allow sharing resources with cost penalty
             present_cost_factor: Multiplier for current sharing penalty
             weight: A* weight factor
+            per_net_timeout: Optional shared wall-clock budget in seconds
+            extra_goal_cells: Optional Steiner tree goal cells
 
         Returns:
             Route if path found, None otherwise
         """
-        # Check if bidirectional search is enabled
         if not self.rules.bidirectional_search:
-            return self.route(start, end, net_class, negotiated_mode, present_cost_factor, weight)
+            return self.route(
+                start,
+                end,
+                net_class,
+                negotiated_mode,
+                present_cost_factor,
+                weight,
+                per_net_timeout=per_net_timeout,
+                extra_goal_cells=extra_goal_cells,
+            )
 
         # Calculate Manhattan distance in grid cells
         start_gx, start_gy = self.grid.world_to_grid(start.x, start.y)
         end_gx, end_gy = self.grid.world_to_grid(end.x, end.y)
         manhattan_dist = abs(end_gx - start_gx) + abs(end_gy - start_gy)
 
-        # Use bidirectional for paths exceeding threshold
-        if manhattan_dist >= self.rules.bidirectional_threshold:
+        remaining = per_net_timeout
+        # Use bidirectional for paths exceeding threshold (and no Steiner goals)
+        if manhattan_dist >= self.rules.bidirectional_threshold and not extra_goal_cells:
+            t0 = time.monotonic()
             result = self.route_bidirectional(
-                start, end, net_class, negotiated_mode, present_cost_factor, weight
+                start,
+                end,
+                net_class,
+                negotiated_mode,
+                present_cost_factor,
+                weight,
+                per_net_timeout=per_net_timeout,
             )
             if result is not None:
                 return result
+            if per_net_timeout is not None:
+                remaining = per_net_timeout - (time.monotonic() - t0)
+                if remaining <= 0 or self.last_route_deadline_hit:
+                    # Budget spent in the bidirectional half: no retry.
+                    self.last_route_deadline_hit = True
+                    return None
             # Fall back to standard A* if bidirectional fails
 
-        return self.route(start, end, net_class, negotiated_mode, present_cost_factor, weight)
+        return self.route(
+            start,
+            end,
+            net_class,
+            negotiated_mode,
+            present_cost_factor,
+            weight,
+            per_net_timeout=remaining,
+            extra_goal_cells=extra_goal_cells,
+        )

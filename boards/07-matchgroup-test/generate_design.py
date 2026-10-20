@@ -198,6 +198,14 @@ def ddr_dqs_pair_net_class() -> NetClassRouting:
         intra_pair_clearance=0.10,
         coupled_routing=True,  # Phase 2E
         coupled_continuity_threshold=0.85,  # Phase 2G
+        # Issue #7319: an explicit 100 ohm target, sized by
+        # ``_size_tightly_coupled_class`` like MIPI/HDMI (#7060).  Without it
+        # the router synthesizes the same target from the validator's
+        # ``.*_[PN]$`` default and re-solves the WIDTH at the 0.1016 mm
+        # manufacturer gap floor -- 0.175 mm under the #7163 field solve,
+        # which cost DQ0 on the seed-42 re-route (30/31 -> 29/31).
+        target_diff_impedance=100.0,
+        impedance_tolerance_percent=10.0,
         skew_tolerance_mm=0.05,  # Phase 3H: tight DDR strobe budget
         length_critical=True,
         length_match_group="DDR_DATA_BYTE_0",  # Group membership
@@ -273,13 +281,31 @@ def addr_bus_net_class() -> NetClassRouting:
     )
 
 
+# Issue #7060: widths the compact coupled routing on this board is validated
+# at (#4969 / ``repair_mipi.py``).  The tightly-coupled solve below holds
+# these and solves the GAP for the target Zdiff.
+_ROUTABLE_DIFF_WIDTH_MM: dict[str, float] = {
+    "MIPI_CSI_LANES": 0.225,
+    "HDMI_TMDS_LANES": 0.225,
+    "DDR_DQS": 0.225,  # Issue #7319: pre-#7163 routed DQS width
+}
+
+
 def _size_tightly_coupled_class(net_class: NetClassRouting) -> NetClassRouting:
-    """Size an impedance-constrained pair without changing its authored gap.
+    """Size an impedance-constrained pair as a compact, tightly coupled pair.
 
     The unconstrained impedance resolver can choose an approximately 8 mm
     gap, which defeats the compact coupled routing this testbench exercises.
-    As on board 06, solve width at the declared gap on the JLCPCB stackup.
-    Classes without an explicit impedance target keep their declared width.
+    As on board 06 (Issue #7060), hold the class's routing-validated width
+    (``_ROUTABLE_DIFF_WIDTH_MM``) and solve the gap for the target Zdiff on
+    the JLCPCB stackup, rounded to 0.005 mm and never tighter than the
+    authored ``intra_pair_clearance``.  Solving width at the authored gap
+    instead narrowed both 100 ohm classes to 0.175 mm under the #7060
+    two-conductor field solve, and the seed-42 re-route at that width
+    exceeded the DRC allowlist (9 > 8).  A class with no validated width, or
+    whose target the gap cannot reach, falls back to solving width at the
+    authored gap.  Classes without an explicit impedance target keep their
+    declared geometry.
     """
     from dataclasses import replace
 
@@ -292,21 +318,37 @@ def _size_tightly_coupled_class(net_class: NetClassRouting) -> NetClassRouting:
         return net_class
 
     coupled_lines = CoupledLines(Stackup.jlcpcb_4layer())
-    lo, hi = 0.15, 1.0  # Board specification's minimum trace width.
-    for _ in range(40):
-        mid = (lo + hi) / 2
-        if coupled_lines.edge_coupled_microstrip(mid, gap, "F.Cu").zdiff > target:
-            lo = mid
-        else:
-            hi = mid
-    width = round(round(((lo + hi) / 2) / 0.025) * 0.025, 4)
-    actual = coupled_lines.edge_coupled_microstrip(width, gap, "F.Cu").zdiff
+
+    def zdiff(width_mm: float, gap_mm: float) -> float:
+        return coupled_lines.edge_coupled_microstrip(width_mm, gap_mm, "F.Cu").zdiff
+
+    held = _ROUTABLE_DIFF_WIDTH_MM.get(net_class.name)
+    if held is not None and zdiff(held, gap) <= target <= zdiff(held, 1.0):
+        lo, hi = gap, 1.0
+        while hi - lo > 0.0005:
+            mid = (lo + hi) / 2
+            if zdiff(held, mid) < target:
+                lo = mid
+            else:
+                hi = mid
+        width = held
+        gap = max(round(round(((lo + hi) / 2) / 0.005) * 0.005, 4), gap)
+    else:
+        lo, hi = 0.15, 1.0  # Board specification's minimum trace width.
+        for _ in range(40):
+            mid = (lo + hi) / 2
+            if zdiff(mid, gap) > target:
+                lo = mid
+            else:
+                hi = mid
+        width = round(round(((lo + hi) / 2) / 0.025) * 0.025, 4)
+    actual = zdiff(width, gap)
     if abs(actual - target) > target * net_class.impedance_tolerance_percent / 100:
         raise ValueError(
-            f"{net_class.name}: cannot meet {target:g} ohm at authored gap {gap:g} mm "
+            f"{net_class.name}: cannot meet {target:g} ohm at gap {gap:g} mm "
             f"with a manufacturable width (resolved {actual:.3f} ohm at {width:g} mm)"
         )
-    return replace(net_class, trace_width=width)
+    return replace(net_class, trace_width=width, intra_pair_clearance=gap)
 
 
 def build_net_class_map(*, preserve_authored_gap: bool = True) -> dict[str, NetClassRouting]:
@@ -321,7 +363,7 @@ def build_net_class_map(*, preserve_authored_gap: bool = True) -> dict[str, NetC
 
     ``preserve_authored_gap`` opts into the fixed-gap width sizing measured
     by ``repair_mipi.py`` (Issue #4969): resolve ``trace_width`` for the
-    impedance-constrained MIPI/HDMI classes at their authored 0.10mm
+    impedance-constrained MIPI/HDMI/DQS classes at their authored 0.10mm
     ``intra_pair_clearance`` gap via the JLCPCB four-layer coupled-
     microstrip model, instead of leaving them at the raw declared width
     (0.15mm, which models to ~127.6 ohm -- outside the classes' 10%
@@ -334,6 +376,17 @@ def build_net_class_map(*, preserve_authored_gap: bool = True) -> dict[str, NetC
     must never disagree about pair sizing again (#4969).  Kept as an
     explicit opt-out (rather than removed outright) only so a future
     diagnostic run can still request the raw, un-widened declaration.
+
+    Issue #7060: under the two-conductor field solve the sizing holds the
+    0.225 mm routing width and widens the gap to 0.135 mm (99.7 ohm); the
+    authored 0.10 mm gap is now the minimum rather than a fixed value (see
+    ``_size_tightly_coupled_class``).
+
+    Issue #7319: all three diff classes -- MIPI, HDMI and the DDR strobe
+    pair -- are sized this way.  DQS used to carry no target, so the router
+    synthesized 100 ohm from the validator's ``.*_[PN]$`` default and
+    re-solved its WIDTH at the 0.1016 mm manufacturer gap floor (0.175 mm
+    under the #7163 field solve), which lost DQ0 on the seed-42 re-route.
     """
     ddr = ddr_data_byte_0_net_class()
     dqs = ddr_dqs_pair_net_class()
@@ -342,6 +395,7 @@ def build_net_class_map(*, preserve_authored_gap: bool = True) -> dict[str, NetC
     if preserve_authored_gap:
         mipi = _size_tightly_coupled_class(mipi)
         hdmi = _size_tightly_coupled_class(hdmi)
+        dqs = _size_tightly_coupled_class(dqs)
     addr = addr_bus_net_class()
 
     return {
@@ -399,6 +453,15 @@ def build_net_class_map(*, preserve_authored_gap: bool = True) -> dict[str, NetC
 # This mirrors board 06's POUR_NETS contract (Issue #3413 phase 5 / #3509)
 # so both boards declare their plane nets in one place.
 POUR_NETS: list[str] = ["GND", "+1V2", "+1V8"]
+
+# Issue #7319: reach contract, board 06's #3413 phase 5 shape.  The CI gate
+# (``check_matchgroup_coverage.py``) counts the re-routed artifact's COMPLETE
+# signal nets per ``NetStatusAnalyzer`` (pour nets excluded: 34 - 3 = 31) and
+# fails (exit 2, open nets named) below this.  30 is the seed-42 reach both
+# before #7163 and with the DQS pair sized like MIPI/HDMI (TMDS_D0_N open on
+# both).  Without it the #7163 drop of DQ0 (30 -> 29) passed silently and
+# showed up only as a tripled gate wall time.
+REQUIRED_SIGNAL_REACH: int = 30
 
 # Issue #3617: pour-connectivity contract.  When True, the CI gate runs
 # this recipe's shapely copper-union audit (``_audit_pour_nets``) against
@@ -801,10 +864,18 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
        validated trace (vias span all layers, so via-to-via bridges can
        cross on B.Cu where F.Cu/In1.Cu are blocked).
 
-    Every via and trace is validated with shapely against ALL existing
-    copper: foreign pads / segments / vias by >= 0.15 mm on the relevant
-    layers, no overlap with ANY pad (the via-in-pad ban, same-net
-    included), drill-to-drill >= 0.45 mm center distance.  Foreign zone
+    Every via and trace is validated against ALL existing copper: foreign
+    pads / segments / vias by the NET-CLASS clearance ``c(P, N) =
+    max(0.15, class(P).clearance, class(N).clearance)`` on the relevant
+    layers (Issue #6736 -- 0.2 mm for this board's Power-class pour nets,
+    the value KiCad's ``Reviewed clearance - Power`` rule enforces), no
+    overlap with ANY pad (the via-in-pad ban, same-net included),
+    drill-to-drill >= 0.45 mm center distance.  Foreign PADS are measured
+    with their true shape through the shared clearance kernel
+    (``kicad_tools.validate.clearance_shapes.pad_shape``: rect, roundrect
+    with the file's corner ratio, circle, oval), so a diagonal stub or
+    bridge leg is held off a pad's corner exactly as KiCad measures it.
+    Foreign zone
     FILLS are not obstacles -- the re-fill that follows this pass
     recomputes them and carves clearance around the new copper.
 
@@ -816,12 +887,21 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
     """
     import math
     import re
+    import warnings
+    from dataclasses import replace
 
     from shapely.geometry import LineString, Point, Polygon
     from shapely.ops import nearest_points
 
     from kicad_tools.analysis.net_status import NetStatusAnalyzer
     from kicad_tools.core.schematic_uuids import UuidMinter, uuids_in_text
+    from kicad_tools.router.clearance_kernel import (
+        CLEARANCE_EPSILON_MM,
+        KSegment,
+        KVia,
+        copper_gap,
+    )
+    from kicad_tools.validate.clearance_shapes import pad_shape as kernel_pad_shape
     from kicad_tools.zones.pour_bridge import BridgeSide, plan_via_hop_bridge
 
     text = pcb_path.read_text()
@@ -836,7 +916,10 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
     analyzer = NetStatusAnalyzer(pcb_path)
     origin_x, origin_y = analyzer.pcb.board_origin
 
-    # Pads: (geom, net, layers, drill_r, center, name, is_th)
+    # Pads: (geom, net, layers, drill_r, center, name, is_th, inscribed,
+    #        kpad, bound_r) -- ``kpad`` / ``bound_r`` are Issue #6736's true
+    #        pad copper and the radius of the circle (about ``center``) that
+    #        encloses it.
     pad_index: list[tuple] = []
     for fp in analyzer.pcb.footprints:
         theta = math.radians(fp.rotation or 0.0)
@@ -859,6 +942,22 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
             half_diag = math.hypot(pad.size[0], pad.size[1]) / 2.0
             inscribed_r = min(pad.size) / 2.0
             drill_r = float(getattr(pad, "drill", 0.0) or 0.0) / 2.0
+            # Issue #6736: the pad's TRUE copper for clearance, from the
+            # shared kernel adapter (board-relative, so shifted into the
+            # absolute frame the segments / vias above are read in).  The
+            # circumscribed circle stays as the via-in-pad ban's footprint
+            # and as an exact-safe prefilter (it contains the pad).
+            kpad = kernel_pad_shape(pad, fp)
+            kpad = replace(
+                kpad,
+                core=tuple((cx + origin_x, cy + origin_y) for cx, cy in kpad.core),
+                cx=kpad.cx + origin_x,
+                cy=kpad.cy + origin_y,
+            )
+            bound_r = (
+                max((math.hypot(cx - x, cy - y) for cx, cy in kpad.core), default=0.0)
+                + kpad.corner_radius
+            )
             pad_index.append(
                 (
                     Point(x, y).buffer(half_diag),
@@ -869,6 +968,8 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                     f"{fp.reference}.{pad.number}",
                     is_th,
                     Point(x, y).buffer(inscribed_r),
+                    kpad,
+                    bound_r,
                 )
             )
 
@@ -959,28 +1060,61 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
     # shipped two ~0.39 mm violations on the re-routed artifact.
     MIN_HOLE_TO_HOLE = 0.5
 
+    # Issue #6736: the clearance new copper on pour net P keeps from copper
+    # on net N is ``c(P, N) = max(CLEAR, class(P), class(N))`` -- the grid
+    # router's rule (``io._get_pair_clearance``) and the oracle closer's
+    # (``PourLinkCloser.pair_clearance``).  A flat 0.15 mm let a +1V2 bridge
+    # leg ship 0.1913 mm from U1.24 (GND) against KiCad's 0.2 mm Power rule.
+    with warnings.catch_warnings():
+        # The map's signal classes carry deprecated knobs the route step
+        # already warned about; only the clearances are read here.
+        warnings.simplefilter("ignore", DeprecationWarning)
+        net_classes = build_net_class_map()
+    class_clearance: dict[str, float] = {
+        name: max(CLEAR, float(cls.clearance)) for name, cls in net_classes.items()
+    }
+
+    def _pair_clear(net: str, other: str | None) -> float:
+        return max(class_clearance.get(net, CLEAR), class_clearance.get(other or "", CLEAR))
+
+    def _pad_too_close(
+        kshape: KSegment | KVia, entry: tuple, required: float, cheap: float
+    ) -> bool:
+        """Whether ``kshape`` comes within ``required`` of pad ``entry``'s copper.
+
+        ``cheap`` is the copper distance to the circle that encloses the
+        pad (``bound_r``), so ``cheap >= required`` already proves the pair
+        clear; otherwise the shared kernel measures the true pad shape.
+        """
+        if cheap >= required:
+            return False
+        return copper_gap(kshape, entry[8]) < required - CLEARANCE_EPSILON_MM
+
     def _via_ok(net: str, vx: float, vy: float) -> bool:
         if not (min_x <= vx <= max_x and min_y <= vy <= max_y):
             return False
         vpt = Point(vx, vy)
         vgeom = vpt.buffer(VIA_R)
+        kvia = KVia(x=vx, y=vy, diameter=2 * VIA_R, drill=2 * VIA_DRILL_R)
         for entry in pad_index:
             geom, pnet, _layers, drill_r, (px, py) = entry[:5]
             if vgeom.intersects(geom):
                 return False  # via-in-pad ban (same-net included)
-            if pnet != net and vgeom.distance(geom) < CLEAR:
-                return False
+            if pnet != net:
+                cheap = math.hypot(vx - px, vy - py) - VIA_R - entry[9]
+                if _pad_too_close(kvia, entry, _pair_clear(net, pnet), cheap):
+                    return False
             if drill_r > 0 and math.hypot(vx - px, vy - py) < (
                 drill_r + VIA_DRILL_R + MIN_HOLE_TO_HOLE
             ):
                 return False
         for geom, snet, _lay in seg_index:
-            if snet != net and vgeom.distance(geom) < CLEAR:
+            if snet != net and vgeom.distance(geom) < _pair_clear(net, snet):
                 return False
         for pt, vnet, radius, drill_r in via_index:
             if pt.distance(vpt) < MIN_HOLE_TO_HOLE + VIA_DRILL_R + drill_r:
                 return False
-            if vnet != net and vgeom.distance(pt.buffer(radius)) < CLEAR:
+            if vnet != net and vgeom.distance(pt.buffer(radius)) < _pair_clear(net, vnet):
                 return False
         return True
 
@@ -994,16 +1128,20 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
         for x, y in (p0, p1):
             if not (min_x - 0.3 <= x <= max_x + 0.3 and min_y - 0.3 <= y <= max_y + 0.3):
                 return False
-        path = LineString([p0, p1]).buffer(width / 2.0)
+        centreline = LineString([p0, p1])
+        path = centreline.buffer(width / 2.0)
+        kseg = KSegment(x1=p0[0], y1=p0[1], x2=p1[0], y2=p1[1], width=width)
         for entry in pad_index:
-            geom, pnet, layers = entry[:3]
-            if pnet != net and layer in layers and path.distance(geom) < CLEAR:
-                return False
+            geom, pnet, layers, _drill_r, (px, py) = entry[:5]
+            if pnet != net and layer in layers:
+                cheap = centreline.distance(Point(px, py)) - width / 2.0 - entry[9]
+                if _pad_too_close(kseg, entry, _pair_clear(net, pnet), cheap):
+                    return False
         for geom, snet, lay in seg_index:
-            if snet != net and lay == layer and path.distance(geom) < CLEAR:
+            if snet != net and lay == layer and path.distance(geom) < _pair_clear(net, snet):
                 return False
         for pt, vnet, radius, _drill_r in via_index:
-            if vnet != net and path.distance(pt.buffer(radius)) < CLEAR:
+            if vnet != net and path.distance(pt.buffer(radius)) < _pair_clear(net, vnet):
                 return False
         return True
 
@@ -1104,7 +1242,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
             if vnet == net:
                 own.append((pt.buffer(radius), all_layers, "via"))
         for entry in pad_index:
-            _obst, pnet, layers, _dr, center, name, is_th, inscribed = entry
+            _obst, pnet, layers, _dr, center, name, is_th, inscribed = entry[:8]
             if pnet == net:
                 # Inscribed-circle copper for own-net union (matches the
                 # audit's conservative connectivity model).
@@ -2067,6 +2205,16 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     #     the residual TMDS_D0/D1 disconnects at U4 sit in the
     #     two-phase EscapeRouter pipeline (#3143 escape endpoint
     #     overrides), i.e. the #3438 lane.
+    #
+    # Issue #6852 addendum (2026-10-16): live re-measure of
+    # ``--differential-pairs`` (one-line change, seed 42,
+    # ``PYTHONHASHSEED=42``, native build 59).  Six of seven pairs still
+    # hit the 20,000-iteration coupled-search phase cap in ~1 s and fall
+    # back to single-ended routing; final state is 28/29 routed with
+    # TMDS_D0_N stranded and ``skew_out_of_range=6``.  The bounded
+    # controls (tests/test_coupled_search_replay_board07_pairs.py) show
+    # the joint A* needs 48k-180k iterations even on an empty grid, so
+    # the flag stays off until a search-shape fix lands (#5333).
     cmd = [
         sys.executable,
         "-m",
@@ -2112,6 +2260,11 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         ",".join(skip_nets),
         "--net-class-map",
         str(sidecar_path),
+        # Issue #7349 (follow-up to #7344): the pairs route single-ended
+        # (see the --differential-pairs note above), so their parallel trunks
+        # keep the breakout pitch.  The opt-in post-route pass squeezes each
+        # declared pair's trunk to the impedance-solved gap.
+        "--tighten-diffpair-gap",
         "--length-match-groups",
     ]
 

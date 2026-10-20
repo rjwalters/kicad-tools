@@ -144,7 +144,8 @@ class TransmissionLine:
 
         Microstrip is an outer layer trace (F.Cu or B.Cu) with the dielectric
         below and air above. This method uses the Hammerstad-Jensen equations
-        which are accurate to within 0.2% for most practical geometries.
+        including their finite-thickness terms; Z0 agrees with the published
+        Hammerstad-Jensen (1980) model to within 0.2% for typical PCB geometries.
 
         Args:
             width_mm: Trace width in millimeters
@@ -192,38 +193,43 @@ class TransmissionLine:
         Returns:
             ImpedanceResult
         """
-        # Effective width accounting for copper thickness
-        # From Hammerstad-Jensen, accounts for fringing due to copper thickness
+
+        def _z01(u_: float) -> float:
+            """Air-filled microstrip impedance (Hammerstad-Jensen)."""
+            f_u = 6 + (2 * math.pi - 6) * math.exp(-((30.666 / u_) ** 0.7528))
+            return 60 * math.log(f_u / u_ + math.sqrt(1 + (2 / u_) ** 2))
+
+        u = w / h
+
+        # Finite copper thickness (Hammerstad-Jensen 1980): a width increment
+        # du1 for the air-filled line and a smaller du_r in the dielectric.
+        du1 = 0.0
+        du_r = 0.0
         if t > 0 and h > 0:
-            # Prevent division by zero or log of non-positive values
-            denom1 = (t / h) ** 2
-            denom2 = (t / (w * math.pi + 1.1 * t * math.pi)) ** 2
-            if denom1 + denom2 > 0:
-                w_eff = w + (t / math.pi) * math.log(4 * math.e / math.sqrt(denom1 + denom2))
-            else:
-                w_eff = w
-        else:
-            w_eff = w
+            t_h = t / h
+            coth = 1 / math.tanh(math.sqrt(6.517 * u))
+            du1 = (t_h / math.pi) * math.log(1 + 4 * math.e / (t_h * coth**2))
+            du_r = 0.5 * (1 + 1 / math.cosh(math.sqrt(max(er - 1, 0.0)))) * du1
+        u_1 = u + du1
+        u_r = u + du_r
 
-        # Normalized width
-        u = w_eff / h
-
-        # Effective dielectric constant (Hammerstad-Jensen)
-        # Equation for epsilon_eff
+        # Effective dielectric constant (Hammerstad-Jensen) at the dielectric width
         a = (
             1
-            + (1 / 49) * math.log((u**4 + (u / 52) ** 2) / (u**4 + 0.432))
-            + (1 / 18.7) * math.log(1 + (u / 18.1) ** 3)
+            + (1 / 49) * math.log((u_r**4 + (u_r / 52) ** 2) / (u_r**4 + 0.432))
+            + (1 / 18.7) * math.log(1 + (u_r / 18.1) ** 3)
         )
 
         b = 0.564 * ((er - 0.9) / (er + 3)) ** 0.053
 
-        eps_eff = (er + 1) / 2 + ((er - 1) / 2) * (1 + 10 / u) ** (-a * b)
+        eps_eff = (er + 1) / 2 + ((er - 1) / 2) * (1 + 10 / u_r) ** (-a * b)
 
-        # Characteristic impedance (Hammerstad-Jensen)
-        # Two different formulas for narrow and wide traces
-        f_u = 6 + (2 * math.pi - 6) * math.exp(-((30.666 / u) ** 0.7528))
-        z0 = (60 / math.sqrt(eps_eff)) * math.log(f_u / u + math.sqrt(1 + (2 / u) ** 2))
+        # Characteristic impedance from the dielectric width
+        z0 = _z01(u_r) / math.sqrt(eps_eff)
+
+        # Thickness correction to eps_eff (Hammerstad-Jensen 1980)
+        if du1:
+            eps_eff *= (_z01(u_1) / _z01(u_r)) ** 2
 
         # Phase velocity
         v_p = SPEED_OF_LIGHT / math.sqrt(eps_eff)
@@ -368,10 +374,10 @@ class TransmissionLine:
             alpha_c_db = 0
 
         # Dielectric loss
-        # alpha_d = (pi * f * sqrt(eps_eff) * tan_d) / c
-        # But for microstrip, we need the filling factor
+        # alpha_d = pi * f * er * q * tan_d / (sqrt(eps_eff) * c)  (Pozar eq. 3.198)
+        # where q is the filling factor
         q = (eps_eff - 1) / (er - 1) if er > 1 else 0.5
-        alpha_d = math.pi * freq_hz * math.sqrt(eps_eff) * er * q * tan_d / SPEED_OF_LIGHT
+        alpha_d = math.pi * freq_hz * er * q * tan_d / (math.sqrt(eps_eff) * SPEED_OF_LIGHT)
         alpha_d_db = alpha_d * 8.686  # Np/m to dB/m
 
         return alpha_c_db + alpha_d_db
@@ -514,7 +520,9 @@ class TransmissionLine:
     ) -> tuple[ImpedanceResult, float]:
         """Calculate differential microstrip impedance.
 
-        For edge-coupled differential pairs on outer layers.
+        For edge-coupled differential pairs on outer layers. The
+        differential impedance is that of
+        :meth:`CoupledLines.edge_coupled_microstrip`.
 
         Args:
             width_mm: Individual trace width in mm
@@ -525,20 +533,14 @@ class TransmissionLine:
         Returns:
             Tuple of (single-ended result, differential impedance)
         """
-        # First calculate single-ended impedance
+        # Imported here because coupled_lines imports this module.
+        from .coupled_lines import CoupledLines
+
         single = self.microstrip(width_mm, layer, frequency_ghz)
-
-        # Differential impedance approximation
-        # Zdiff ≈ 2 * Z0 * (1 - k), where k is coupling coefficient
-        # k depends on spacing/height ratio
-        h = self.stackup.get_reference_plane_distance(layer)
-        s_over_h = spacing_mm / h if h > 0 else 1.0
-
-        # Empirical coupling coefficient (loose coupling approximation)
-        # k decreases as spacing increases
-        k = math.exp(-2.0 * s_over_h) if s_over_h > 0 else 0.5
-
-        z_diff = 2 * single.z0 * (1 - 0.347 * k)
+        # One coupled-microstrip model: delegate to the field solve (#7060).
+        z_diff = (
+            CoupledLines(self.stackup).edge_coupled_microstrip(width_mm, spacing_mm, layer).zdiff
+        )
 
         return single, z_diff
 
@@ -638,45 +640,33 @@ class TransmissionLine:
         k0 = a / b
         k0_prime = math.sqrt(1 - k0 * k0)
 
-        # k1: modulus accounting for bottom ground plane
-        # Uses sinh transformation for finite ground plane distance
-        try:
-            sinh_a = math.sinh(math.pi * a / (2 * h))
-            sinh_b = math.sinh(math.pi * b / (2 * h))
-            k1 = sinh_a / sinh_b if sinh_b != 0 else k0
-        except OverflowError:
-            # For very large a/h or b/h, sinh overflows
-            # In this limit, k1 approaches k0
-            k1 = k0
-        k1_prime = math.sqrt(1 - k1 * k1)
+        # k3: modulus accounting for the bottom ground plane (conductor-backed
+        # CPW, Ghione & Naldi 1987). tanh, not sinh: the back conductor sits
+        # below the dielectric, so the strip-to-ground mapping is a tanh.
+        tanh_b = math.tanh(math.pi * b / (2 * h))
+        k3 = math.tanh(math.pi * a / (2 * h)) / tanh_b if tanh_b > 0 else k0
+        k3_prime = math.sqrt(1 - k3 * k3)
 
         # Complete elliptic integrals
         K_k0 = _elliptic_k(k0)
         K_k0_prime = _elliptic_k(k0_prime)
-        K_k1 = _elliptic_k(k1)
-        K_k1_prime = _elliptic_k(k1_prime)
+        K_k3 = _elliptic_k(k3)
+        K_k3_prime = _elliptic_k(k3_prime)
 
-        # Effective dielectric constant
-        # q is the filling factor based on conformal mapping
-        if K_k1_prime > 0 and K_k0 > 0:
-            q = (K_k1 * K_k0_prime) / (K_k1_prime * K_k0)
-        else:
-            q = 0.5  # Default filling factor
-        eps_eff = 1 + (er - 1) * q / 2
+        if not all(math.isfinite(v) and v > 0 for v in (K_k0, K_k0_prime, K_k3, K_k3_prime)):
+            raise ValueError(
+                f"CPWG geometry out of range for closed-form model "
+                f"(w={w}, g={g}, h={h}): elliptic integrals are degenerate"
+            )
+
+        # Effective dielectric constant (conductor-backed CPW)
+        # r = K(k0') K(k3) / (K(k0) K(k3')); eps_eff = (1 + er*r) / (1 + r)
+        r = (K_k0_prime * K_k3) / (K_k0 * K_k3_prime)
+        eps_eff = (1 + er * r) / (1 + r)
 
         # Characteristic impedance
-        # Z0 = (60*pi / sqrt(eps_eff)) * 1 / (K(k0)/K(k0') + K(k1)/K(k1'))
-        if K_k0_prime > 0 and K_k1_prime > 0:
-            sum_ratios = K_k0 / K_k0_prime + K_k1 / K_k1_prime
-            if sum_ratios > 0:
-                z0 = (60 * math.pi / math.sqrt(eps_eff)) / sum_ratios
-            else:
-                z0 = 50.0  # Fallback
-        else:
-            z0 = 50.0  # Fallback
-
-        # Clamp to reasonable range
-        z0 = max(10, min(z0, 200))
+        # Z0 = (60*pi / sqrt(eps_eff)) / (K(k0)/K(k0') + K(k3)/K(k3'))
+        z0 = (60 * math.pi / math.sqrt(eps_eff)) / (K_k0 / K_k0_prime + K_k3 / K_k3_prime)
 
         # Phase velocity
         v_p = SPEED_OF_LIGHT / math.sqrt(eps_eff)
@@ -742,7 +732,7 @@ class TransmissionLine:
         # Dielectric loss
         # Similar to microstrip with filling factor
         q = (eps_eff - 1) / (er - 1) if er > 1 else 0.5
-        alpha_d = math.pi * freq_hz * math.sqrt(eps_eff) * er * q * tan_d / SPEED_OF_LIGHT
+        alpha_d = math.pi * freq_hz * er * q * tan_d / (math.sqrt(eps_eff) * SPEED_OF_LIGHT)
         alpha_d_db = alpha_d * 8.686  # Np/m to dB/m
 
         return alpha_c_db + alpha_d_db
@@ -892,24 +882,34 @@ class TransmissionLine:
         tolerance: float,
         max_iterations: int,
     ) -> tuple[float, float]:
-        """Solve for balanced CPWG geometry (gap ≈ width)."""
-        # For balanced geometry, width ≈ gap
-        # Start with rough estimate based on height
-        w_initial = h * 0.5  # Reasonable starting point
+        """Solve for balanced CPWG geometry (gap == width).
 
-        # Iterate: for each width, find gap, then adjust width toward gap
-        w = w_initial
+        Z0(w, w) is not monotonic for w well below h (it peaks near w ~ h/2
+        and then falls off), so bisect only on the monotonically decreasing
+        branch w >= h. Targets outside that branch raise ValueError rather
+        than returning a degenerate micron-scale geometry.
+        """
+        w_lo = h
+        w_hi = h * 20.0
+        z_lo = self.cpwg(w_lo, w_lo, layer).z0
+        z_hi = self.cpwg(w_hi, w_hi, layer).z0
+        if not (z_hi <= z0_target <= z_lo):
+            raise ValueError(
+                f"No balanced CPWG geometry (gap == width) on {layer} gives "
+                f"{z0_target} ohm; reachable range is {z_hi:.1f}-{z_lo:.1f} ohm "
+                f"for w in [{w_lo:.3f}, {w_hi:.3f}] mm"
+            )
+
         for _ in range(max_iterations):
-            # Find gap for current width
-            _, g = self._solve_cpwg_gap(z0_target, w, layer, h, tolerance, max_iterations // 2)
+            w_mid = (w_lo + w_hi) / 2
+            z_mid = self.cpwg(w_mid, w_mid, layer).z0
+            if abs(z_mid - z0_target) / z0_target < tolerance:
+                return (w_mid, w_mid)
+            # Impedance decreases with width on this branch
+            if z_mid > z0_target:
+                w_lo = w_mid
+            else:
+                w_hi = w_mid
 
-            # Check if balanced
-            if abs(w - g) / max(w, g) < tolerance:
-                return (w, g)
-
-            # Move width toward gap
-            w = (w + g) / 2
-
-        # Return last result
-        _, g = self._solve_cpwg_gap(z0_target, w, layer, h, tolerance, max_iterations // 2)
-        return (w, g)
+        w_mid = (w_lo + w_hi) / 2
+        return (w_mid, w_mid)

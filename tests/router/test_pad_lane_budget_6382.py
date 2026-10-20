@@ -45,7 +45,12 @@ LEFT_TIP = LEFT_X - PAD_LONG / 2
 
 @pytest.fixture(autouse=True)
 def _clear_lane_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in (DISABLE_ENV, "KCT_PAD_LANE_LENGTH_MM", "KCT_PAD_LANE_PENALTY"):
+    for name in (
+        DISABLE_ENV,
+        "KCT_PAD_LANE_LENGTH_MM",
+        "KCT_PAD_LANE_PENALTY",
+        "KCT_DISABLE_ESCAPE_FENCES",
+    ):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -406,6 +411,9 @@ def _lane_crossings(routes, y: float) -> list[float]:
 def _route_pair(monkeypatch: pytest.MonkeyPatch, *, disabled: bool):
     if disabled:
         monkeypatch.setenv(DISABLE_ENV, "1")
+        # Issue #6761: the hard escape fences would keep WIDE out of NB's
+        # lane on their own; main's crossing needs both switched off.
+        monkeypatch.setenv("KCT_DISABLE_ESCAPE_FENCES", "1")
     router, nb_y = _build_router((4.0, 13.5))
     installed = router._install_pad_lane_budgets()
     wide = router.route_net(1)
@@ -447,8 +455,13 @@ def test_escape_hatch_reproduces_main_crossing(monkeypatch: pytest.MonkeyPatch) 
 
 
 @requires_cpp
-def test_never_stricter_when_only_path_crosses_lane() -> None:
-    """A soft cost: when every legal path crosses the lane, WIDE still routes."""
+def test_never_stricter_when_only_path_crosses_lane(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A soft cost: when every legal path crosses the lane, WIDE still routes.
+
+    The #6761 escape fences are switched off: this pins the soft lane cost
+    alone (the fences' own fallback is covered in test_escape_fence_6761).
+    """
+    monkeypatch.setenv("KCT_DISABLE_ESCAPE_FENCES", "1")
     router, nb_y = _build_router((8.0, 12.6), wall=True)
     assert router._install_pad_lane_budgets() == 4
     wide = router.route_net(1)

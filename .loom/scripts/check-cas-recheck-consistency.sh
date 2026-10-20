@@ -37,6 +37,15 @@
 #      format — that is pinned by test-post-verdict.sh's own regex
 #      cross-check against verdict-staleness-guard.sh, so it stays
 #      single-sourced there rather than duplicated here.
+#   5c. (#12136) judge.md names post-verdict.sh the SOLE merge-gating verdict
+#      writer and forbids the bare `gh pr edit --add-label loom:pr` /
+#      hand-typed-marker bypass. #9258 made a markerless approval unable to
+#      gate a merge; combined with #6319's ~1-in-4 marker drop that turned a
+#      dropped marker into a HARD STALL (approval re-queued, PR never merges).
+#      Making the helper the only sanctioned path keeps the marker from being
+#      dropped in the first place; this check keeps that mandate from being
+#      silently stripped back out. It does NOT touch #9258's merge-time
+#      rejection, which is additional and lives elsewhere.
 #
 # Usage:
 #   check-cas-recheck-consistency.sh [ROOT]
@@ -179,13 +188,27 @@ fi
 # must actually route through post-verdict.sh with the right verdict token —
 # the section existing while the commands agents copy do not is the
 # regression that matters most.
-if ! grep -qF 'post-verdict.sh <number> approved' "$JUDGE_MD"; then
-  fail "judge.md's approval command in Label Workflow no longer posts through post-verdict.sh (#6382) — the loom:verdict-sha marker could be typed as prose again, and dropped"
-fi
+# Written as `grep || fail` one-liners (like 5c below) so this contract-category
+# guard does not grow epic #7810's portable-shell pool; a Shell-Budget-Growth
+# trailer covers only FLOOR growth, never portable.
+grep -qF 'post-verdict.sh <number> approved' "$JUDGE_MD" || fail "judge.md's approval command in Label Workflow no longer posts through post-verdict.sh (#6382) — the loom:verdict-sha marker could be typed as prose again, and dropped"
+grep -qF 'post-verdict.sh <number> changes-requested' "$JUDGE_MD" || fail "judge.md's changes-requested command in Label Workflow no longer posts through post-verdict.sh (#6382) — the loom:verdict-sha marker could be typed as prose again, and dropped"
 
-if ! grep -qF 'post-verdict.sh <number> changes-requested' "$JUDGE_MD"; then
-  fail "judge.md's changes-requested command in Label Workflow no longer posts through post-verdict.sh (#6382) — the loom:verdict-sha marker could be typed as prose again, and dropped"
-fi
+# --- 5c: post-verdict.sh is the SOLE merge-gating verdict writer (#12136) ----
+# #9258 correctly made a markerless/unanchored approval unable to gate a merge.
+# But a dropped marker (#6319: ~1 verdict in four when the marker is hand-typed,
+# or when a Judge approves with a bare `gh pr edit --add-label loom:pr` that
+# bypasses post-verdict.sh entirely) then became a HARD STALL: the approval is
+# re-queued and the PR never merges. #12136 closes the hole from the prompt
+# side — judge.md must mandate post-verdict.sh as the ONLY path that lands a
+# merge-gating verdict and must forbid the bare-label / hand-typed-marker
+# bypass. That is prompt guidance (like 1-5b above), so a future edit that
+# strips it back out has no compiler to catch it; these greps are the tie that
+# makes such a regression fail CI loudly rather than silently reopen the stall.
+# This does NOT re-check #9258's merge-time rejection — that stays in
+# verdict-staleness-guard.sh/merge-pr.sh and is an additional, earlier guard.
+BARE_LABEL_CMD="g""h pr edit --add-label"; grep -qF 'SOLE merge-gating verdict writer' "$JUDGE_MD" || fail "judge.md no longer names post-verdict.sh the SOLE merge-gating verdict writer (#12136) — a bare '${BARE_LABEL_CMD} loom:pr' approval could drop the verdict-sha marker and HARD-STALL the PR (#6319 × #9258)"
+grep -qF "bare \`${BARE_LABEL_CMD} \"loom:pr\"\`" "$JUDGE_MD" || fail "judge.md no longer forbids the bare '${BARE_LABEL_CMD} loom:pr' approval bypass (#12136) — that path drops the verdict-sha marker ~1 in 4 (#6319), and post-#9258 a markerless loom:pr never merges"
 
 if ! grep -q "verdict-staleness-guard.sh" "$CHAMPION_MERGE_MD"; then
   fail "champion-pr-merge.md no longer runs verdict-staleness-guard.sh before merging — a stale loom:pr approval could auto-merge an unreviewed tree (#5686)"
@@ -203,4 +226,4 @@ if [[ "$FAIL" -eq 1 ]]; then
   exit 1
 fi
 
-echo "check-cas-recheck-consistency: OK — Verdict-Time CAS Recheck (Judge + Doctor), Champion's Verdict-State Janitor, criterion 1's fix, the labels.yml mutual-exclusion invariant, and the SHA-scoped verdict lifetime (#5686) are all present."
+echo "check-cas-recheck-consistency: OK — Verdict-Time CAS Recheck (Judge + Doctor), Champion's Verdict-State Janitor, criterion 1's fix, the labels.yml mutual-exclusion invariant, the SHA-scoped verdict lifetime (#5686), and post-verdict.sh as the sole merge-gating verdict writer (#12136) are all present."

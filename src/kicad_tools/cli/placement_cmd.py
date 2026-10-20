@@ -771,14 +771,17 @@ def cmd_align(args) -> int:
 
     # Align components
     axis = "horizontal" if args.axis == "row" else "vertical"
-    with spinner(f"Aligning {axis}ly...", quiet=quiet):
-        count = align_components(
-            optimizer,
-            refs,
-            axis=axis,
-            reference=args.reference,
-            tolerance_mm=args.tolerance,
-        )
+    try:
+        with spinner(f"Aligning {axis}ly...", quiet=quiet):
+            count = align_components(
+                optimizer,
+                refs,
+                axis=axis,
+                reference=args.reference,
+                tolerance_mm=args.tolerance,
+            )
+    except ValueError as e:
+        return _fail(args, f"Error: {e}")
 
     if not quiet:
         print(f"Aligned {count} components")
@@ -1089,7 +1092,7 @@ def _estimate_routability(pcb_path: Path, quiet: bool = False) -> tuple[float, i
                     ry = px * sin_r + py * cos_r
                     is_pth = pad.type == "thru_hole"
 
-                    from kicad_tools.router.io import _schema_pad_shape
+                    from kicad_tools.router.io import _schema_pad_rratio, _schema_pad_shape
 
                     pads.append(
                         {
@@ -1110,6 +1113,7 @@ def _estimate_routability(pcb_path: Path, quiet: bool = False) -> tuple[float, i
                             # models need for a correct rotated-pad AABB.
                             "rotation": pad.rotation,
                             "shape": _schema_pad_shape(pad, ref),
+                            "roundrect_rratio": _schema_pad_rratio(pad),
                         }
                     )
 

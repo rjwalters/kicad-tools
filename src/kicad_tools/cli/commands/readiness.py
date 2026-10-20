@@ -50,6 +50,12 @@ def run_readiness_command(args) -> int:
     if ack:
         sub_argv.extend(["--ack-warnings", ack])
 
+    for spec in getattr(args, "readiness_known_issue", None) or []:
+        sub_argv.extend(["--known-issue", spec])
+
+    for number in getattr(args, "readiness_resolve_known_issue", None) or []:
+        sub_argv.extend(["--resolve-known-issue", str(number)])
+
     if getattr(args, "readiness_include_tht", False):
         sub_argv.append("--include-tht")
 
@@ -83,6 +89,10 @@ def run_readiness_command(args) -> int:
     fill_tolerance = getattr(args, "readiness_fill_tolerance", None)
     if fill_tolerance is not None:
         sub_argv.extend(["--fill-tolerance", str(fill_tolerance)])
+
+    checked_at = getattr(args, "readiness_checked_at", None)
+    if checked_at:
+        sub_argv.extend(["--checked-at", checked_at])
 
     if getattr(args, "format", "text") != "text":
         sub_argv.extend(["--format", args.format])

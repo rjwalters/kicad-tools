@@ -34,7 +34,9 @@ from .parser import (
     parse_sexp,
     parse_string,
     serialize_sexp,
+    source_span,
 )
+from .scan import find_unquoted, has_unquoted, iter_unquoted
 
 __all__ = [
     # Parser classes and functions
@@ -44,6 +46,11 @@ __all__ = [
     "Document",
     "parse_file",
     "parse_string",
+    "source_span",
+    # Token search that skips quoted strings (issue #6873)
+    "find_unquoted",
+    "has_unquoted",
+    "iter_unquoted",
     # Pad chamfer writer-safety normalizer (issue #4393)
     "normalize_chamfer",
     # Backward compatibility with core/sexp.py

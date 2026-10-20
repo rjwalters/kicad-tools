@@ -65,7 +65,12 @@ from ..primitives import Pad, Route, Segment, pad_half_extents
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .pathfinder import LatticePathfinder
 
-__all__ = ["PAIR_LENGTH_TOLERANCE_MM", "ClassPadRepairStats", "repair_class_pad_pairs"]
+__all__ = [
+    "PAIR_LENGTH_TOLERANCE_MM",
+    "ClassPadRepairStats",
+    "pad_class_requirements",
+    "repair_class_pad_pairs",
+]
 
 #: Extra gap past the requirement for a moved segment, mm.  Absorbs the 4-decimal
 #: rounding of the KiCad writer (5e-5) with a wide safety factor.
@@ -124,37 +129,6 @@ def _vkey(layer: int, x: float, y: float) -> _Vertex:
     return (layer, round(x, _KEY_DIGITS), round(y, _KEY_DIGITS))
 
 
-def _pad_gap(seg: Segment, shape: Any, pad: Pad, *, strict: bool) -> float:
-    """Edge gap from ``seg`` to ``pad``.
-
-    ``strict=False`` is the exact clearance kernel -- what both DRC engines
-    measure, and what decides whether a shortfall is real.  ``strict=True``
-    additionally takes the router's own pre-save check
-    (:func:`~kicad_tools.router.io.validate_routes`), which holds every pad to
-    its full rectangle and so over-reports near a round or oval pad's corner.
-    A repair first tries to satisfy both, so the self-check agrees with DRC,
-    and falls back to the kernel alone when the rectangle leaves no legal move.
-    """
-    kernel = copper_gap(shape, pad_shape(pad))
-    if not strict:
-        return kernel
-    from ..io import _segment_to_aabb_distance
-    from ..pad_geometry import pad_local_point
-
-    rect = (
-        _segment_to_aabb_distance(
-            *pad_local_point(pad, seg.x1, seg.y1),
-            *pad_local_point(pad, seg.x2, seg.y2),
-            0.0,
-            0.0,
-            pad.width / 2.0,
-            pad.height / 2.0,
-        )
-        - seg.width / 2.0
-    )
-    return min(kernel, rect)
-
-
 def _seg_len(seg: Segment) -> float:
     return math.hypot(seg.x2 - seg.x1, seg.y2 - seg.y1)
 
@@ -162,6 +136,21 @@ def _seg_len(seg: Segment) -> float:
 def _point_in_pad(x: float, y: float, pad: Pad) -> bool:
     hw, hh = pad_half_extents(pad)
     return abs(x - pad.x) <= hw + _EPS and abs(y - pad.y) <= hh + _EPS
+
+
+def pad_class_requirements(pf: LatticePathfinder) -> list[float] | None:
+    """Each pad's own clearance requirement, aligned with ``pf.pads``.
+
+    ``max(pad class, authored floor, board base)``: the pad side of every
+    track-vs-pad pair the repair enforces.  ``None`` when the router installed
+    no pad classes (:meth:`LatticePathfinder.set_pad_class_clearances`).
+    """
+    classes = pf.pad_class_clearances
+    if classes is None:
+        return None
+    floors = pf.rules.net_clearance_floors
+    base = pf.rules.trace_clearance
+    return [max(classes[i], pad_authored_floor(p, floors), base) for i, p in enumerate(pf.pads)]
 
 
 def repair_class_pad_pairs(
@@ -201,9 +190,9 @@ def repair_class_pad_pairs(
         stats.skipped = "voltage-map"
         return stats
     pads: Sequence[Pad] = pf.pads
-    floors = pf.rules.net_clearance_floors
     base = pf.rules.trace_clearance
-    pad_req = [max(classes[i], pad_authored_floor(p, floors), base) for i, p in enumerate(pads)]
+    pad_req = pad_class_requirements(pf)
+    assert pad_req is not None  # ``classes`` was checked above
     if not any(r > base + _EPS for r in pad_req):
         return stats
     pair_set = frozenset(pair_nets)
@@ -238,9 +227,7 @@ def repair_class_pad_pairs(
 
     reach_max = max(pad_req) + 0.5
 
-    def pad_shortfalls(
-        key: object, seg: Segment, *, class_only: bool, strict: bool = False
-    ) -> list:
+    def pad_shortfalls(key: object, seg: Segment, *, class_only: bool) -> list:
         """Foreign pads ``seg`` is too close to: ``(pad, required, gap)``."""
         layer = lidx(seg.layer)
         if layer is None:
@@ -256,7 +243,9 @@ def repair_class_pad_pairs(
             required = max(own, pad_req[i])
             if class_only and pad_req[i] <= own + _EPS:
                 continue  # the search already held this pair
-            gap = _pad_gap(seg, shape, pad, strict=strict)
+            # The exact clearance kernel: what both DRC engines measure and,
+            # since issue #6718, what ``validate_routes`` measures too.
+            gap = copper_gap(shape, pad_shape(pad))
             if gap < required - _EPS:
                 found.append((i, required, gap))
         return found
@@ -276,11 +265,11 @@ def repair_class_pad_pairs(
                 committed.add_via((via.x, via.y), route.net, clr, radius=via.diameter / 2.0)
         return committed
 
-    def detect(strict: bool) -> list[_Shortfall]:
+    def detect() -> list[_Shortfall]:
         out = []
         for key in movable:
             for idx, seg in enumerate(routes[key].segments):
-                for i, required, gap in pad_shortfalls(key, seg, class_only=True, strict=strict):
+                for i, required, gap in pad_shortfalls(key, seg, class_only=True):
                     out.append(_Shortfall(key, idx, i, required, gap))
         out.sort(key=lambda s: s.gap - s.required)
         return out
@@ -331,8 +320,8 @@ def repair_class_pad_pairs(
                     stats.via_found += 1
     stats.via_remaining = stats.via_found
 
-    stats.found = len(detect(strict=False))
-    candidates = detect(strict=True)
+    candidates = detect()
+    stats.found = len(candidates)
     if not candidates:
         stats.pair_skipped = pair_left()
         record_left()
@@ -345,37 +334,32 @@ def repair_class_pad_pairs(
         moved_any = False
         for sf in candidates:
             seg = routes[sf.key].segments[sf.seg_index]
-            # Strict model first; the kernel alone when the rectangle leaves
-            # no legal move.  A shortfall may already be gone (an earlier move).
-            for strict in (True, False):
-                still = [
-                    s
-                    for s in pad_shortfalls(sf.key, seg, class_only=True, strict=strict)
-                    if s[0] == sf.pad_index
-                ]
-                if not still:
-                    break
-                if committed is None:
-                    committed = build_committed()
+            # A shortfall may already be gone (an earlier move).
+            still = [
+                s for s in pad_shortfalls(sf.key, seg, class_only=True) if s[0] == sf.pad_index
+            ]
+            if not still:
+                continue
+            if committed is None:
+                committed = build_committed()
 
-                def pads_ok(key: object, new: Segment, strict: bool = strict) -> bool:
-                    return not pad_shortfalls(key, new, class_only=False, strict=strict)
+            def pads_ok(key: object, new: Segment) -> bool:
+                return not pad_shortfalls(key, new, class_only=False)
 
-                budget = (
-                    (pair_drift, partners, pair_length_tolerance)
-                    if routes[sf.key].net in pair_set
-                    else None
-                )
-                if _try_move(
-                    pf, routes, movable, sf, still[0], own_clr, pads_ok, committed, lidx, budget
-                ):
-                    committed = None  # geometry changed: rebuild before the next check
-                    moved_any = True
-                    break
-        candidates = detect(strict=True)
+            budget = (
+                (pair_drift, partners, pair_length_tolerance)
+                if routes[sf.key].net in pair_set
+                else None
+            )
+            if _try_move(
+                pf, routes, movable, sf, still[0], own_clr, pads_ok, committed, lidx, budget
+            ):
+                committed = None  # geometry changed: rebuild before the next check
+                moved_any = True
+        candidates = detect()
         if not moved_any:
             break
-    stats.remaining = len(detect(strict=False))
+    stats.remaining = len(candidates)
     stats.repaired = max(0, stats.found - stats.remaining)
     stats.pair_skipped = pair_left()
     record_left()
@@ -515,3 +499,49 @@ def _try_move(
             old.x1, old.y1, old.x2, old.y2 = new.x1, new.y1, new.x2, new.y2
         return True
     return False
+
+
+def class_pad_shortfalls(pf: LatticePathfinder, route: Route, net_class: object | None) -> int:
+    """Count ``route``'s track-vs-pad pairs below the pad's own class (#6703).
+
+    The lattice search holds foreign pads only to the connection's own
+    clearance; a pad whose class asks for more is enforced afterwards by
+    :func:`repair_class_pad_pairs`.  On a diff-pair net that repair may move
+    copper only within a 0.01 mm skew budget (#6437), so a leftover shortfall
+    there ends with the whole net demoted by the router's backstop.  The
+    uncoupled-fallback leg chooser uses this count to prefer leg pairs the
+    repair will not have to touch.
+    """
+    pad_req = pad_class_requirements(pf)
+    if pad_req is None or pf._pairwise is not None or not route.segments:
+        return 0
+    own = pf._conn_geometry(net_class, route.net)[1]
+    candidates = [i for i, req in enumerate(pad_req) if req > own + _EPS]
+    if not candidates:
+        return 0
+    pads = pf.pads
+    reach_max = max(pad_req[i] for i in candidates) + 0.5
+    count = 0
+    for seg in route.segments:
+        try:
+            layer = pf.layer_stack.layer_enum_to_index(seg.layer)
+        except Exception:
+            continue
+        reach = seg.width / 2.0 + reach_max
+        x0, x1 = min(seg.x1, seg.x2) - reach, max(seg.x1, seg.x2) + reach
+        y0, y1 = min(seg.y1, seg.y2) - reach, max(seg.y1, seg.y2) + reach
+        shape = None
+        for i in candidates:
+            pad = pads[i]
+            if pad.net == route.net:
+                continue
+            hw, hh = pad_half_extents(pad)
+            if pad.x + hw < x0 or pad.x - hw > x1 or pad.y + hh < y0 or pad.y - hh > y1:
+                continue
+            if layer not in pf._pad_layer_indices(pad):
+                continue
+            if shape is None:
+                shape = segment_shape(seg)
+            if copper_gap(shape, pad_shape(pad)) < max(own, pad_req[i]) - _EPS:
+                count += 1
+    return count

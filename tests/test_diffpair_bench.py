@@ -150,6 +150,35 @@ def test_parse_pair_log_handles_chained_and_plain_logs():
     assert bench.parse_pair_log(plain)["outcomes"]["USB_MCU_D"] == "coupled"
 
 
+def test_hybrid_outcome_is_parsed_and_counted_apart_from_coupled():
+    """Issue #6446: ``hybrid:<ref>.<pin>`` is neither coupled nor a fallback."""
+    log = (
+        "  Diff pairs (lattice): 1/3 coupled\n"
+        "    TMDS_D0: hybrid:U4.B1\n"
+        "    TMDS_D1: uncoupled-fallback:pair-no-path\n"
+        "    TMDS_CK: coupled\n"
+        "  Diff pairs (lattice) hybrid: 1\n"
+        "  Diff-pair hybrid (lattice) TMDS_D0 J2.1->U4.B1: hybrid B.Cu trunk\n"
+    )
+    parsed = bench.parse_pair_log(log)
+    assert parsed["outcomes"] == {
+        "TMDS_D0": "hybrid:U4.B1",
+        "TMDS_D1": "uncoupled-fallback:pair-no-path",
+        "TMDS_CK": "coupled",
+    }
+    row = {
+        "board": "07rf",
+        "engine": "lattice",
+        "seed": 42,
+        "pairs": [{"outcome": o} for o in parsed["outcomes"].values()],
+    }
+    table = bench.render([row]).splitlines()
+    header = [c.strip() for c in table[0].strip("|").split("|")]
+    cells = [c.strip() for c in table[2].strip("|").split("|")]
+    assert cells[header.index("Pairs coupled")] == "1/3"
+    assert cells[header.index("Pairs hybrid")] == "1"
+
+
 def test_compare_flags_differing_pair_metrics():
     a = {"rows": [{"board": "03", "engine": "grid", "seed": 42, "pair_digest": "aa"}]}
     same = {"rows": [{"board": "03", "engine": "grid", "seed": 42, "pair_digest": "aa"}]}
@@ -287,10 +316,16 @@ def test_board03_bench_rows_carry_the_limit_and_the_stretch_figure():
         assert row["protocol"] == "USB2_FS"
         assert row["skew_source"].startswith("protocol:USB2_FS (Renesas")
         assert (row["skew_severity"], row["skew_pass"]) == ("error", True)
-        assert (row["skew_stretch_mm"], row["skew_stretch_pass"]) == (0.5, True)
+        assert row["skew_stretch_mm"] == 0.5
         assert row["max_uncoupled_per_terminal_mm"] == 6.35
         assert row["max_vias_per_net"] == 4
-    assert rows["USB_D"]["skew_mm"] == pytest.approx(0.166, abs=0.001)
+    # Issue #6725: skew is measured the way kicad-cli does, vias included.
+    # Issue #6394: the copper re-derived from a fresh lattice route has equal
+    # track lengths but one more USB_D- via (#7093), which puts the pair
+    # 1.32 mm apart -- inside the 2.5 mm gate, outside the 0.5 mm stretch.
+    assert rows["USB_D"]["skew_mm"] == pytest.approx(1.32, abs=0.001)
+    assert rows["USB_D"]["skew_stretch_pass"] is False
+    assert rows["USB_MCU_D"]["skew_stretch_pass"] is True
     table = bench.render_pairs(
         [{"board": "03", "engine": "-", "seed": 0, "pairs": list(rows.values())}]
     )

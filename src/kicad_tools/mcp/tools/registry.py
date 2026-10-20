@@ -123,12 +123,20 @@ def _make_params(
         "type": "object",
         "properties": properties,
         "required": required or [],
+        "additionalProperties": False,
     }
 
 
 # -----------------------------------------------------------------------------
 # Export Tools
 # -----------------------------------------------------------------------------
+
+# Manufacturer id enums come from the registry, not a hard-coded list, so the
+# MCP tools accept exactly what the CLI's ``--mfr`` does (Issue #7276).
+from kicad_tools.manufacturers import get_all_manufacturer_names  # noqa: E402
+
+_DRC_MANUFACTURER_IDS: list[str] = get_all_manufacturer_names()
+_EXPORT_MANUFACTURER_IDS: list[str] = [*_DRC_MANUFACTURER_IDS, "generic"]
 
 
 def _handler_validate_assembly_bom(params: dict[str, Any]) -> dict[str, Any]:
@@ -138,6 +146,7 @@ def _handler_validate_assembly_bom(params: dict[str, Any]) -> dict[str, Any]:
     return validate_assembly_bom(
         schematic_path=params["schematic_path"],
         quantity=params.get("quantity", 1),
+        pcb_path=params.get("pcb_path"),
     )
 
 
@@ -147,8 +156,11 @@ register_tool(
         "Validate a BOM for JLCPCB assembly. Checks all components against the "
         "LCSC/JLCPCB parts library and categorizes them by tier (Basic/Extended), "
         "stock status, and availability. Returns a summary of parts that are "
-        "available, out of stock, or missing LCSC part numbers. Use this to "
-        "verify assembly readiness before ordering."
+        "available, out of stock, or missing LCSC part numbers. When a PCB is given "
+        "or found next to the schematic, also returns `kct export`'s bom_lcsc_values "
+        "check (assigned LCSC part value/package vs the BOM row and PCB footprint); "
+        "a FAIL sets summary.assembly_ready false. Use this to verify assembly "
+        "readiness before ordering."
     ),
     parameters=_make_params(
         properties={
@@ -160,6 +172,14 @@ register_tool(
                 "type": "integer",
                 "description": "Number of boards (multiplies component quantities)",
                 "default": 1,
+            },
+            "pcb_path": {
+                "type": "string",
+                "description": (
+                    "Path to .kicad_pcb for the bom_lcsc_values package check "
+                    "(default: <stem>_routed.kicad_pcb or <stem>.kicad_pcb next to "
+                    "the schematic)"
+                ),
             },
         },
         required=["schematic_path"],
@@ -202,8 +222,11 @@ register_tool(
             },
             "manufacturer": {
                 "type": "string",
-                "description": "Manufacturer preset",
-                "enum": ["generic", "jlcpcb", "pcbway", "oshpark", "seeed"],
+                "description": (
+                    "Manufacturer preset or tier id (the ids `kct export --mfr` accepts, "
+                    "e.g. jlcpcb, jlcpcb-tier1, oshpark, generic)"
+                ),
+                "enum": _EXPORT_MANUFACTURER_IDS,
                 "default": "generic",
             },
             "include_drill": {
@@ -290,7 +313,8 @@ def _handler_export_assembly(params: dict[str, Any]) -> dict[str, Any]:
         pcb_path=params["pcb_path"],
         schematic_path=params["schematic_path"],
         output_dir=params["output_dir"],
-        manufacturer=params.get("manufacturer", "jlcpcb"),
+        manufacturer=params.get("manufacturer"),
+        strict_preflight=params.get("strict_preflight", True),
     )
     return result.to_dict()
 
@@ -300,8 +324,14 @@ register_tool(
     description=(
         "Generate complete assembly package for manufacturing. Creates Gerber files, "
         "bill of materials (BOM), and pick-and-place (PnP/CPL) files tailored to "
-        "specific manufacturers. Outputs a single zip file ready for upload to "
-        "JLCPCB, PCBWay, Seeed, or generic assembly services."
+        "specific manufacturers, plus a single zip file ready for upload to "
+        "JLCPCB, PCBWay, Seeed, or generic assembly services. Runs the same pipeline "
+        "as `kct export`: the DRC short/open safety floor and every preflight check "
+        "(returned in `preflight`). A preflight FAIL refuses the export by default "
+        "(strict_preflight); an unbuildable BOM or a DRC-floor failure always refuses. "
+        "A refused export returns success=false and writes no BOM, CPL, Gerbers or "
+        "zip. Side effect: writes sibling <board>.kicad_pro / <board>.kicad_dru "
+        "(the manufacturer's DRC constraints) next to the source PCB, as `kct export` does."
     ),
     parameters=_make_params(
         properties={
@@ -319,9 +349,22 @@ register_tool(
             },
             "manufacturer": {
                 "type": "string",
-                "description": "Target manufacturer for assembly",
-                "enum": ["jlcpcb", "pcbway", "seeed", "generic"],
-                "default": "jlcpcb",
+                "description": (
+                    "Target manufacturer or tier id (the ids `kct export --mfr` accepts, "
+                    "e.g. jlcpcb, jlcpcb-tier1, pcbway, seeed, generic). Omit to use the "
+                    "board's project.kct target_fab (resolved like `kct check`, falling "
+                    "back to jlcpcb); the resolved id is returned as `manufacturer`."
+                ),
+                "enum": _EXPORT_MANUFACTURER_IDS,
+            },
+            "strict_preflight": {
+                "type": "boolean",
+                "description": (
+                    "Any preflight FAIL blocks the export (default true). false "
+                    "matches `kct export` without --strict-preflight: FAILs become "
+                    "warnings, except the unbuildable-BOM block and the DRC safety floor."
+                ),
+                "default": True,
             },
         },
         required=["pcb_path", "schematic_path", "output_dir"],
@@ -456,9 +499,8 @@ def _handler_placement_suggestions(params: dict[str, Any]) -> dict[str, Any]:
         pcb_path=params["pcb_path"],
         component=params.get("component"),
         max_suggestions=params.get("max_suggestions", 10),
-        strategy=params.get("strategy", "balanced"),
     )
-    return result.to_dict()
+    return result
 
 
 register_tool(
@@ -482,12 +524,6 @@ register_tool(
                 "type": "integer",
                 "description": "Maximum number of suggestions (1-50)",
                 "default": 10,
-            },
-            "strategy": {
-                "type": "string",
-                "description": "Optimization strategy (balanced, wire_length, thermal, si)",
-                "enum": ["balanced", "wire_length", "thermal", "si"],
-                "default": "balanced",
             },
         },
         required=["pcb_path"],
@@ -1070,8 +1106,6 @@ def _handler_create_checkpoint(params: dict[str, Any]) -> dict[str, Any]:
     result = create_checkpoint(
         session_id=params["session_id"],
         name=params.get("name"),
-        drc_violation_count=params.get("drc_violation_count", 0),
-        score=params.get("score", 0.0),
     )
     return result.to_dict()
 
@@ -1079,8 +1113,9 @@ def _handler_create_checkpoint(params: dict[str, Any]) -> dict[str, Any]:
 register_tool(
     name="create_checkpoint",
     description=(
-        "Create named checkpoint for potential rollback. Saves current "
-        "session state that can be restored later using restore_checkpoint."
+        "Create named checkpoint for potential rollback. Captures the live "
+        "placement state (positions, score, violations, move depth) so "
+        "restore_checkpoint can restore it."
     ),
     parameters=_make_params(
         properties={
@@ -1091,16 +1126,6 @@ register_tool(
             "name": {
                 "type": "string",
                 "description": "Human-readable checkpoint name (optional)",
-            },
-            "drc_violation_count": {
-                "type": "integer",
-                "description": "Current DRC violation count",
-                "default": 0,
-            },
-            "score": {
-                "type": "number",
-                "description": "Current placement score",
-                "default": 0.0,
             },
         },
         required=["session_id"],
@@ -1124,8 +1149,9 @@ def _handler_restore_checkpoint(params: dict[str, Any]) -> dict[str, Any]:
 register_tool(
     name="restore_checkpoint",
     description=(
-        "Restore session to checkpoint state. Retrieves the saved state "
-        "associated with a checkpoint for restoration."
+        "Restore the placement session to a checkpoint: moves made after it "
+        "are undone or reverted, and success is reported only if live "
+        "positions match the snapshot."
     ),
     parameters=_make_params(
         properties={
@@ -1267,6 +1293,77 @@ register_tool(
         required=["pcb_path", "item1"],
     ),
     handler=_handler_measure_clearance,
+    category="analysis",
+)
+
+
+def _handler_get_drc_violations(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle get_drc_violations tool call."""
+    from kicad_tools.mcp.tools.analysis import get_drc_violations
+
+    result = get_drc_violations(
+        pcb_path=params["pcb_path"],
+        rules=params.get("manufacturer"),
+        severity_filter=params.get("severity_filter", "all"),
+        allow_incomplete=params.get("allow_incomplete", False),
+        schematic_path=params.get("schematic_path"),
+    )
+    return result.to_dict()
+
+
+register_tool(
+    name="get_drc_violations",
+    description=(
+        "Run `kct check`'s design rule check on a KiCad PCB and return violations with "
+        "locations and fix suggestions, plus `kct check`'s verdict (pass/fail/incomplete) "
+        "and exit code. Uses the same rule set as `kct check`: layer count from the board, "
+        "stackup copper, fabrication-floor override, waiver and net-class sidecars, and the "
+        "ERC + LVS + manifest meta rollup. `passed` is true only when the verdict is pass; "
+        "a board whose ERC/LVS cannot run (no kicad-cli or schematic) is incomplete."
+    ),
+    parameters=_make_params(
+        properties={
+            "pcb_path": {
+                "type": "string",
+                "description": "Absolute path to .kicad_pcb file",
+            },
+            "manufacturer": {
+                "type": "string",
+                "description": (
+                    "Manufacturer preset or tier id (any registry id, e.g. jlcpcb, "
+                    "jlcpcb-tier1, oshpark, pcbway, seeed). Omit to resolve it like "
+                    "`kct check` (fab_profile.json > project.kct > jlcpcb)."
+                ),
+                "enum": _DRC_MANUFACTURER_IDS,
+            },
+            "severity_filter": {
+                "type": "string",
+                "description": (
+                    "Which violations to return (a view filter; the verdict always "
+                    "counts every violation)"
+                ),
+                "enum": ["all", "error", "warning"],
+                "default": "all",
+            },
+            "allow_incomplete": {
+                "type": "boolean",
+                "description": (
+                    "Like `kct check --allow-incomplete`: an incomplete verdict "
+                    "(ERC/LVS not run) returns exit_code 0. `passed` stays false."
+                ),
+                "default": False,
+            },
+            "schematic_path": {
+                "type": "string",
+                "description": (
+                    "Explicit .kicad_sch for the ERC/LVS meta rollup (default: "
+                    "discovered next to the PCB, as `kct check` does)"
+                ),
+            },
+        },
+        required=["pcb_path"],
+    ),
+    handler=_handler_get_drc_violations,
     category="analysis",
 )
 
@@ -1447,7 +1544,7 @@ register_tool(
             },
             "output_path": {
                 "type": "string",
-                "description": "Output file path (optional, overwrites original if not specified)",
+                "description": "Output file path (optional). Defaults to <stem>_routed.kicad_pcb next to the input; the input is overwritten only if output_path equals pcb_path",
             },
             "strategy": {
                 "type": "string",

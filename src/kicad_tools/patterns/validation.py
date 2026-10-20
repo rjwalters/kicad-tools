@@ -448,6 +448,19 @@ class PatternValidator:
         result = PatternValidationResult(pattern_type="Decoupling")
         rules_checked = 0
 
+        # Nothing to validate is not a pass (issue #6913).
+        if not capacitors:
+            result.add(
+                PatternViolation(
+                    severity="error",
+                    rule="no_capacitors",
+                    message=f"No decoupling capacitors specified for {ic}",
+                    component=ic,
+                )
+            )
+            result.rules_checked = 1
+            return result
+
         # Get IC position
         ic_fp = pcb.get_footprint(ic)
         if not ic_fp:

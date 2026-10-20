@@ -10,8 +10,13 @@ Usage:
 Options:
     --format {text,json}   Output format (default: text)
     --lib-path <path>      Path to symbol libraries (for pin checking)
-    --strict               Exit with error on any warning
+    --strict               Exit 1 on any warning (errors and checks not run
+                           already exit 1)
     --quiet                Only show errors, not warnings
+
+Exit codes: 0 pass, 1 errors / a check not run / warnings with --strict.
+--format json carries the same answer as top-level "verdict"
+(pass|fail|incomplete) and "exit_code" (Issue #7230).
 
 Examples:
     python3 sch-validate.py project.kicad_sch
@@ -27,12 +32,10 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from kicad_tools.cli._gate import gate_exit_code
 from kicad_tools.cli.runner import find_kicad_cli
 from kicad_tools.cli.sch_footprint_common import iter_missing_footprint_symbols
 from kicad_tools.erc.cross_sheet import (
-    filter_cross_sheet_global_labels,
-    filter_cross_sheet_power_violations,
-    filter_phantom_wire_violations,
     reattribute_symbol_violations,
     reattribute_wire_dangling_violations,
 )
@@ -52,6 +55,19 @@ class ValidationIssue:
     items: list[str] = field(default_factory=list)  # Contextual items (label/net names)
 
 
+class CheckNotRun(Exception):  # noqa: N818 -- an outcome, not an error
+    """Raised by a check that could not run (e.g. kicad-cli missing).
+
+    ``validate_schematic`` records the check under
+    ``ValidationResult.checks_not_run`` instead of ``checks_run`` and the
+    result can no longer pass (Issue #7094).
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 @dataclass
 class ValidationResult:
     """Complete validation results."""
@@ -59,6 +75,9 @@ class ValidationResult:
     schematic: str
     issues: list[ValidationIssue] = field(default_factory=list)
     checks_run: list[str] = field(default_factory=list)
+    # Checks that were requested (not ``--skip``-ped) but did not run, as
+    # ``{"check": name, "reason": why}`` records (Issue #7094).
+    checks_not_run: list[dict[str, str]] = field(default_factory=list)
 
     @property
     def error_count(self) -> int:
@@ -70,7 +89,9 @@ class ValidationResult:
 
     @property
     def passed(self) -> bool:
-        return self.error_count == 0
+        # A check that did not run did not check anything: INCOMPLETE is not
+        # a pass (mirrors ``kct check``'s NOT RUN convention, Issue #7094).
+        return self.error_count == 0 and not self.checks_not_run
 
 
 # Violation types whose messages benefit from label/net name enrichment.
@@ -88,23 +109,22 @@ _LABEL_TYPES: frozenset[str] = frozenset(
 
 
 def run_erc(schematic_path: str) -> list[ValidationIssue]:
-    """Run KiCad ERC check."""
+    """Run KiCad ERC check.
+
+    Raises:
+        CheckNotRun: when ERC did not actually check the schematic --
+            kicad-cli missing, timed out, killed, wrote no report, or any
+            other failure (Issue #7094).  Use ``--skip erc`` to opt out.
+    """
     issues = []
 
-    try:
-        # Find kicad-cli using the shared lookup that checks PATH
-        # and platform-specific installation locations (e.g. macOS app bundle)
-        kicad_cli_path = find_kicad_cli()
-        if kicad_cli_path is None:
-            issues.append(
-                ValidationIssue(
-                    severity="warning",
-                    category="erc",
-                    message="kicad-cli not found, ERC check skipped",
-                )
-            )
-            return issues
+    # Find kicad-cli using the shared lookup that checks PATH
+    # and platform-specific installation locations (e.g. macOS app bundle)
+    kicad_cli_path = find_kicad_cli()
+    if kicad_cli_path is None:
+        raise CheckNotRun("kicad-cli not found")
 
+    try:
         kicad_cli = str(kicad_cli_path)
 
         # Run ERC
@@ -114,7 +134,7 @@ def run_erc(schematic_path: str) -> list[ValidationIssue]:
             output_file = f.name
 
         try:
-            subprocess.run(
+            proc = subprocess.run(
                 [
                     kicad_cli,
                     "sch",
@@ -130,6 +150,18 @@ def run_erc(schematic_path: str) -> list[ValidationIssue]:
                 text=True,
                 timeout=60,
             )
+
+            # Issue #6724: the output file is pre-created empty, which used to
+            # read as "no ERC findings".  A kicad-cli killed by a signal or one
+            # that wrote nothing did not check the schematic.
+            if proc.returncode < 0 or Path(output_file).stat().st_size == 0:
+                from kicad_tools.drc.geometric import describe_returncode
+
+                raise RuntimeError(
+                    describe_returncode(proc.returncode)
+                    if proc.returncode < 0
+                    else f"kicad-cli wrote no ERC report (exit {proc.returncode})"
+                )
 
             # Parse results
             if Path(output_file).exists():
@@ -148,19 +180,12 @@ def run_erc(schematic_path: str) -> list[ValidationIssue]:
                                 violation["_sheet_path"] = sheet.get("path", "")
                                 raw_violations.append(violation)
 
-                        # Filter false-positive single_global_label /
-                        # isolated_pin_label violations for labels that
-                        # actually appear on multiple sheets.
-                        raw_violations = filter_cross_sheet_global_labels(
-                            raw_violations, schematic_path
-                        )
-
-                        # Filter false-positive power_pin_not_driven
-                        # violations for power nets that have a
-                        # power_out driver on another sheet.
-                        raw_violations = filter_cross_sheet_power_violations(
-                            raw_violations, schematic_path
-                        )
+                        # No cross-sheet suppression of isolated_pin_label /
+                        # single_global_label / power_pin_not_driven: KiCad 10
+                        # aggregates both across the hierarchy, and the old
+                        # name-count heuristics only dropped true positives
+                        # (Issue #7161).  Connectivity is checked separately
+                        # by the orphan_label rule.
 
                         # Re-attribute wire_dangling / endpoint_off_grid
                         # violations from root sheet to the correct child
@@ -176,12 +201,10 @@ def run_erc(schematic_path: str) -> list[ValidationIssue]:
                             raw_violations, schematic_path
                         )
 
-                        # Filter phantom wire_dangling violations whose
-                        # coordinates do not correspond to any wire,
-                        # junction, or label in the schematic files.
-                        raw_violations = filter_phantom_wire_violations(
-                            raw_violations, schematic_path
-                        )
+                        # No phantom wire_dangling filter: the one added for
+                        # #2205 keyed on a top-level ``pos`` KiCad 10 never
+                        # emits, so it was dead, and wiring it to the per-item
+                        # ``pos`` would drop real floating wires (Issue #7170).
 
                         for violation in raw_violations:
                             item_descs = [
@@ -214,22 +237,10 @@ def run_erc(schematic_path: str) -> list[ValidationIssue]:
         finally:
             Path(output_file).unlink(missing_ok=True)
 
-    except subprocess.TimeoutExpired:
-        issues.append(
-            ValidationIssue(
-                severity="warning",
-                category="erc",
-                message="ERC check timed out",
-            )
-        )
+    except subprocess.TimeoutExpired as e:
+        raise CheckNotRun(f"ERC check timed out after {e.timeout:g}s") from e
     except Exception as e:
-        issues.append(
-            ValidationIssue(
-                severity="warning",
-                category="erc",
-                message=f"ERC check failed: {e}",
-            )
-        )
+        raise CheckNotRun(f"ERC check failed: {e}") from e
 
     return issues
 
@@ -804,7 +815,7 @@ def check_missing_project_instances(schematic_path: str) -> list[ValidationIssue
     from kicad_tools.cli.sch_repair_instances import (
         _extract_symbols_with_instance_info,
     )
-    from kicad_tools.cli.sch_set_footprint import _collect_schematic_files
+    from kicad_tools.cli.sch_wire_common import _collect_schematic_files
 
     issues: list[ValidationIssue] = []
 
@@ -2662,7 +2673,9 @@ def check_nrst_filter_cap(schematic_path: str) -> list[ValidationIssue]:
     return issues
 
 
-def check_symbol_footprint_pin_mismatch(schematic_path: str) -> list[ValidationIssue]:
+def check_symbol_footprint_pin_mismatch(
+    schematic_path: str, lib_manager=None
+) -> list[ValidationIssue]:
     """Check that each symbol's pin count matches its assigned footprint's pad count.
 
     Compares the number of pins in the embedded ``lib_symbols`` entry against
@@ -2707,6 +2720,8 @@ def check_symbol_footprint_pin_mismatch(schematic_path: str) -> list[ValidationI
                         continue
 
                     lib_sym = lib_sym_cache.get(sym.lib_id)
+                    if lib_sym is None and lib_manager is not None:
+                        lib_sym = lib_manager.get_symbol(sym.lib_id)
                     if lib_sym is None:
                         continue
 
@@ -2777,7 +2792,7 @@ def check_symbol_footprint_pin_mismatch(schematic_path: str) -> list[ValidationI
 # ---------------------------------------------------------------------------
 
 
-def check_lib_symbols_mismatch(schematic_path: str) -> list[ValidationIssue]:
+def check_lib_symbols_mismatch(schematic_path: str, lib_manager=None) -> list[ValidationIssue]:
     """Check that every placed symbol's ``lib_id`` has a matching ``lib_symbols`` entry.
 
     The ``lib_symbols`` section of a ``.kicad_sch`` file contains embedded
@@ -2812,6 +2827,9 @@ def check_lib_symbols_mismatch(schematic_path: str) -> list[ValidationIssue]:
                         continue
 
                     if sym.lib_id and sym.lib_id not in defined_lib_ids:
+                        hint = ""
+                        if lib_manager is not None and lib_manager.get_symbol(sym.lib_id):
+                            hint = " (resolvable from --lib-path)"
                         issues.append(
                             ValidationIssue(
                                 severity="error",
@@ -2819,7 +2837,7 @@ def check_lib_symbols_mismatch(schematic_path: str) -> list[ValidationIssue]:
                                 message=(
                                     f"{sym.reference}: placed symbol references "
                                     f"lib_id '{sym.lib_id}' which has no matching "
-                                    f"entry in lib_symbols"
+                                    f"entry in lib_symbols{hint}"
                                 ),
                                 location=node.get_path_string(),
                             )
@@ -3368,15 +3386,48 @@ def check_value_consistency(schematic_path: str) -> list[ValidationIssue]:
     return issues
 
 
+def build_lib_manager(lib_paths: list[str] | None):
+    """Build a :class:`LibraryManager` from ``--lib-path`` directories (#7065).
+
+    Follows the loading pattern of ``sch_check_connections``: every
+    ``*.kicad_sym`` directly under each path is loaded, and the path is also
+    registered as a search path.  Missing or unreadable locations warn on
+    stderr and are skipped.  Returns ``None`` when ``lib_paths`` is empty.
+
+    The manager deliberately does *not* include the schematic's embedded
+    symbols: embedded ``lib_symbols`` stay authoritative and this manager is
+    only consulted as a fallback on a miss.
+    """
+    if not lib_paths:
+        return None
+    from kicad_tools.schema.library import LibraryManager
+
+    manager = LibraryManager()
+    for path in lib_paths:
+        p = Path(path)
+        if not p.is_dir():
+            print(f"Warning: --lib-path is not a directory: {path}", file=sys.stderr)
+            continue
+        manager.add_search_path(str(p))
+        for lib_file in sorted(p.glob("*.kicad_sym")):
+            try:
+                manager.load_library(str(lib_file))
+            except Exception as e:
+                print(f"Warning: Could not load {lib_file}: {e}", file=sys.stderr)
+    return manager
+
+
 def _resolve_lib_symbols_for_design(
     schematic_path: str,
+    lib_manager=None,
 ) -> tuple[list[tuple[str, Schematic]], dict[str, object]]:
     """Build the (sheets, lib_symbols) inputs used by the new ERC rules.
 
     Walks the schematic hierarchy starting at ``schematic_path``,
     loads every sheet, and resolves every ``lib_id`` used to a
     :class:`LibrarySymbol` via the schematic's embedded
-    ``lib_symbols`` section.
+    ``lib_symbols`` section.  When ``lib_manager`` is given (``--lib-path``),
+    it is consulted only for ids the embedded section cannot resolve.
 
     Returns:
         Tuple ``(sheets, lib_symbols)`` where ``sheets`` is a list of
@@ -3399,6 +3450,8 @@ def _resolve_lib_symbols_for_design(
             for sym in sch.symbols:
                 if sym.lib_id and sym.lib_id not in lib_symbols:
                     resolved = sch.get_lib_symbol_resolved(sym.lib_id)
+                    if resolved is None and lib_manager is not None:
+                        resolved = lib_manager.get_symbol(sym.lib_id)
                     if resolved is not None:
                         lib_symbols[sym.lib_id] = resolved
     except Exception:
@@ -3409,6 +3462,8 @@ def _resolve_lib_symbols_for_design(
             for sym in sch.symbols:
                 if sym.lib_id and sym.lib_id not in lib_symbols:
                     resolved = sch.get_lib_symbol_resolved(sym.lib_id)
+                    if resolved is None and lib_manager is not None:
+                        resolved = lib_manager.get_symbol(sym.lib_id)
                     if resolved is not None:
                         lib_symbols[sym.lib_id] = resolved
         except Exception:
@@ -3417,7 +3472,7 @@ def _resolve_lib_symbols_for_design(
     return sheets, lib_symbols
 
 
-def check_orphan_labels(schematic_path: str) -> list[ValidationIssue]:
+def check_orphan_labels(schematic_path: str, lib_manager=None) -> list[ValidationIssue]:
     """Detect labels asserting a named signal that only reach one pin.
 
     A label with a meaningful name (e.g., ``UART_TX``) syntactically
@@ -3435,7 +3490,7 @@ def check_orphan_labels(schematic_path: str) -> list[ValidationIssue]:
     try:
         from kicad_tools.validate.sch_orphan_label import find_orphan_labels
 
-        sheets, lib_symbols = _resolve_lib_symbols_for_design(schematic_path)
+        sheets, lib_symbols = _resolve_lib_symbols_for_design(schematic_path, lib_manager)
         if not sheets:
             return issues
         findings = find_orphan_labels(sheets, lib_symbols)
@@ -3466,7 +3521,7 @@ def check_orphan_labels(schematic_path: str) -> list[ValidationIssue]:
     return issues
 
 
-def check_wire_stubs(schematic_path: str) -> list[ValidationIssue]:
+def check_wire_stubs(schematic_path: str, lib_manager=None) -> list[ValidationIssue]:
     """Detect wires whose free endpoint is short of a pin by N grid units.
 
     Catches the "off-by-one-grid" defect class found in the
@@ -3483,7 +3538,7 @@ def check_wire_stubs(schematic_path: str) -> list[ValidationIssue]:
     try:
         from kicad_tools.validate.sch_wire_stub import find_wire_stubs
 
-        sheets, lib_symbols = _resolve_lib_symbols_for_design(schematic_path)
+        sheets, lib_symbols = _resolve_lib_symbols_for_design(schematic_path, lib_manager)
         if not sheets:
             return issues
         findings = find_wire_stubs(sheets, lib_symbols)
@@ -3520,27 +3575,50 @@ def check_wire_stubs(schematic_path: str) -> list[ValidationIssue]:
     return issues
 
 
+def require_loadable_root(schematic_path: str) -> None:
+    """Raise if the root schematic cannot be loaded (#7028).
+
+    Each check below degrades a load failure into a warning, so without this
+    an empty or unparseable root would "pass" with a handful of warnings.
+    """
+    Schematic.load(schematic_path)
+
+
 def validate_schematic(
     schematic_path: str,
-    lib_paths: list[str] = None,
+    lib_paths: list[str] | None = None,
     skip_checks: set[str] | None = None,
 ) -> ValidationResult:
     """Run all validation checks.
 
     Args:
         schematic_path: Path to the root ``.kicad_sch`` file.
-        lib_paths: Optional symbol library paths.
+        lib_paths: Optional directories of ``.kicad_sym`` files used as a
+            fallback when a placed symbol is absent from the embedded
+            ``lib_symbols`` (embedded symbols stay authoritative).
         skip_checks: Set of check category names to skip (e.g.
             ``{"swd_routing", "i2c_pullups"}``).
     """
+    require_loadable_root(schematic_path)
     result = ValidationResult(schematic=schematic_path)
     _skip: set[str] = skip_checks or set()
 
-    def _run(category: str, fn):
+    lib_manager = build_lib_manager(lib_paths)
+
+    def _run(category: str, fn, *, with_libs: bool = False):
         if category in _skip:
             return
+        try:
+            if with_libs and lib_manager is not None:
+                issues = fn(schematic_path, lib_manager)
+            else:
+                issues = fn(schematic_path)
+        except CheckNotRun as e:
+            result.checks_not_run.append({"check": category, "reason": e.reason})
+            return
+        # Only a check that actually completed is listed as run (#7094).
         result.checks_run.append(category)
-        result.issues.extend(fn(schematic_path))
+        result.issues.extend(issues)
 
     # ERC
     _run("erc", run_erc)
@@ -3600,21 +3678,21 @@ def validate_schematic(
     _run("nrst_filter", check_nrst_filter_cap)
 
     # Symbol-to-footprint pin/pad count mismatch
-    _run("symbol_footprint_pin_count", check_symbol_footprint_pin_mismatch)
+    _run("symbol_footprint_pin_count", check_symbol_footprint_pin_mismatch, with_libs=True)
 
     # lib_symbols definition mismatch (placed lib_id missing from lib_symbols)
-    _run("lib_symbols_mismatch", check_lib_symbols_mismatch)
+    _run("lib_symbols_mismatch", check_lib_symbols_mismatch, with_libs=True)
 
     # Matched channel symmetry detection
     _run("matched_channel_symmetry", check_matched_channel_symmetry)
 
     # Orphan-label detection (label asserts named signal but only
     # reaches one pin in the design -- issue #2613).
-    _run("orphan_label", check_orphan_labels)
+    _run("orphan_label", check_orphan_labels, with_libs=True)
 
     # Wire-stub detection (wire endpoint misses a pin by an integer
     # multiple of the schematic grid -- issue #2613).
-    _run("wire_stub", check_wire_stubs)
+    _run("wire_stub", check_wire_stubs, with_libs=True)
 
     return result
 
@@ -3630,7 +3708,11 @@ def main(argv=None):
     parser.add_argument(
         "--lib-path", action="append", dest="lib_paths", help="Path to symbol libraries"
     )
-    parser.add_argument("--strict", action="store_true", help="Exit with error on any warning")
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Exit 1 on any warning (errors and checks not run already exit 1)",
+    )
     parser.add_argument("--quiet", "-q", action="store_true", help="Only show errors")
     parser.add_argument(
         "--skip",
@@ -3647,7 +3729,22 @@ def main(argv=None):
         sys.exit(1)
 
     skip_set: set[str] = set(args.skip_checks) if args.skip_checks else set()
-    result = validate_schematic(args.schematic, args.lib_paths, skip_checks=skip_set)
+    try:
+        result = validate_schematic(args.schematic, args.lib_paths, skip_checks=skip_set)
+    except Exception as e:
+        print(f"Error loading schematic: {args.schematic}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # Exit code, decided before output so ``--format json`` can carry it
+    # (Issue #7230).  INCOMPLETE (a check not run) is non-zero, like
+    # ``kct check``'s NOT RUN (#7094).
+    exit_code, verdict = gate_exit_code(
+        result.error_count,
+        result.warning_count,
+        incomplete=bool(result.checks_not_run),
+        strict=args.strict,
+        style="sch",
+    )
 
     if args.format == "json":
         print(
@@ -3658,6 +3755,7 @@ def main(argv=None):
                     "error_count": result.error_count,
                     "warning_count": result.warning_count,
                     "checks_run": result.checks_run,
+                    "checks_not_run": result.checks_not_run,
                     "issues": [
                         {
                             "severity": i.severity,
@@ -3669,6 +3767,8 @@ def main(argv=None):
                         for i in result.issues
                         if not args.quiet or i.severity == "error"
                     ],
+                    "verdict": verdict,
+                    "exit_code": exit_code,
                 },
                 indent=2,
             )
@@ -3676,11 +3776,8 @@ def main(argv=None):
     else:
         print_result(result, args.quiet)
 
-    # Exit code
-    if result.error_count > 0:
-        sys.exit(1)
-    if args.strict and result.warning_count > 0:
-        sys.exit(1)
+    if exit_code:
+        sys.exit(exit_code)
 
 
 def print_result(result: ValidationResult, quiet: bool = False):
@@ -3688,14 +3785,21 @@ def print_result(result: ValidationResult, quiet: bool = False):
     print(f"Validation: {Path(result.schematic).name}")
     print("=" * 60)
 
+    for not_run in result.checks_not_run:
+        print(f"INCOMPLETE: {not_run['check']} not run ({not_run['reason']})")
+
     if result.passed and result.warning_count == 0:
         print("✅ All checks passed!")
     elif result.passed:
         print(f"⚠️  Passed with {result.warning_count} warnings")
-    else:
+    elif result.error_count > 0 or not result.checks_not_run:
         print(f"❌ Failed: {result.error_count} errors, {result.warning_count} warnings")
+    else:
+        print(f"❌ Incomplete: {result.error_count} errors, {result.warning_count} warnings")
 
     print(f"\nChecks run: {', '.join(result.checks_run)}")
+    if result.checks_not_run:
+        print(f"Checks not run: {', '.join(c['check'] for c in result.checks_not_run)}")
 
     # Group issues by category
     by_category = {}

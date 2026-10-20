@@ -22,6 +22,8 @@
 (rule "Via Drill - jlcpcb-tier1"
   (condition "A.Type == 'via' && A.Via_Type != 'Micro'")
   (constraint hole_size (min 0.2mm)))
+(rule "Max Hole Size - jlcpcb-tier1"
+  (constraint hole_size (max 6.3mm)))
 (rule "Via Diameter - jlcpcb-tier1"
   (condition "A.Type == 'via' && A.Via_Type != 'Micro'")
   (constraint via_diameter (min 0.45mm)))
@@ -37,11 +39,17 @@
   (condition "(A.Type == 'via' || A.Type == 'pad') && B.Layer == 'Edge.Cuts'")
   (constraint physical_hole_clearance (min 0.4mm)))
 (rule "Silkscreen Width - jlcpcb-tier1"
-  (condition "A.Type == 'text' && A.Layer == 'F.Silkscreen'")
+  (condition "A.Type == 'text' && (A.Layer == 'F.Silkscreen' || A.Layer == 'B.Silkscreen')")
   (constraint text_thickness (min 0.15mm)))
 (rule "Silkscreen Height - jlcpcb-tier1"
-  (condition "A.Type == 'text' && A.Layer == 'F.Silkscreen'")
+  (condition "A.Type == 'text' && (A.Layer == 'F.Silkscreen' || A.Layer == 'B.Silkscreen')")
   (constraint text_height (min 1.0mm)))
+(rule "Ampacity Min Width (Power, external) - jlcpcb-tier1"
+  (condition "A.NetClass == 'Power' && A.Type == 'track' && (A.Layer == 'F.Cu' || A.Layer == 'B.Cu')")
+  (constraint track_width (min 0.0125mm)))
+(rule "Ampacity Min Width (Power, internal) - jlcpcb-tier1"
+  (condition "A.NetClass == 'Power' && A.Type == 'track' && A.Layer != 'F.Cu' && A.Layer != 'B.Cu'")
+  (constraint track_width (min 0.0751mm)))
 
 (rule "Reviewed clearance - Debug"
   (condition "(A.NetClass == 'Debug' || B.NetClass == 'Debug') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference) && !A.isCoupledDiffPair()")
@@ -68,24 +76,6 @@
   (constraint clearance (min 0.2mm)))
 # END kct fab floors
 
-# BEGIN kct native zone clearance
-(rule "Native zone clearance B.Cu GND"
-  (layer "B.Cu")
-  (condition "(A.Type == 'Zone' && A.NetName == 'GND') || (B.Type == 'Zone' && B.NetName == 'GND')")
-  (constraint clearance (min 0.3mm)))
-(rule "Native zone clearance F.Cu GND"
-  (layer "F.Cu")
-  (condition "(A.Type == 'Zone' && A.NetName == 'GND') || (B.Type == 'Zone' && B.NetName == 'GND')")
-  (constraint clearance (min 0.3mm)))
-(rule "Native zone clearance In1.Cu GND"
-  (layer "In1.Cu")
-  (condition "(A.Type == 'Zone' && A.NetName == 'GND') || (B.Type == 'Zone' && B.NetName == 'GND')")
-  (constraint clearance (min 0.3mm)))
-(rule "Native zone clearance In2.Cu VCC"
-  (layer "In2.Cu")
-  (condition "(A.Type == 'Zone' && A.NetName == 'VCC') || (B.Type == 'Zone' && B.NetName == 'VCC')")
-  (constraint clearance (min 0.3mm)))
-# END kct native zone clearance
 
 # BEGIN kct router diff-pair gaps (Issue #6443) -- managed, do not edit
 # The gap the router laid each coupled pair at: max(class intra-pair
@@ -118,3 +108,22 @@
   (condition "A.inDiffPair('USB_MCU_D')")
   (constraint via_count (max 4)))
 # END kct router diff-pair gaps
+
+# BEGIN kct native zone clearance
+(rule "Native zone clearance B.Cu GND"
+  (layer "B.Cu")
+  (condition "(A.Type == 'Zone' && A.NetName == 'GND') || (B.Type == 'Zone' && B.NetName == 'GND')")
+  (constraint clearance (min 0.3mm)))
+(rule "Native zone clearance F.Cu GND"
+  (layer "F.Cu")
+  (condition "(A.Type == 'Zone' && A.NetName == 'GND') || (B.Type == 'Zone' && B.NetName == 'GND')")
+  (constraint clearance (min 0.3mm)))
+(rule "Native zone clearance In1.Cu GND"
+  (layer "In1.Cu")
+  (condition "(A.Type == 'Zone' && A.NetName == 'GND') || (B.Type == 'Zone' && B.NetName == 'GND')")
+  (constraint clearance (min 0.3mm)))
+(rule "Native zone clearance In2.Cu VCC"
+  (layer "In2.Cu")
+  (condition "(A.Type == 'Zone' && A.NetName == 'VCC') || (B.Type == 'Zone' && B.NetName == 'VCC')")
+  (constraint clearance (min 0.3mm)))
+# END kct native zone clearance

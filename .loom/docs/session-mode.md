@@ -53,8 +53,8 @@ initialized Loom, or is this a session-mode install?") and points here, instead 
 telling every operator who lands there to reinstall Loom.
 
 That hint is stated unconditionally rather than behind a `.mode == "session"`
-test. `loom-start.sh` is `contract` shell in epic #7810's portable pool, which may
-not grow (`loom-daemon shell-budget --check` enforces it) — and a conditional
+test. `loom-start.sh` is `contract` shell in epic #7810's portable pool, which
+the shell-language policy keeps from growing — and a conditional
 diagnosis is not worth 7 portable lines when a static line naming both causes
 carries the same
 operator out of the same dead end. A consequence worth stating: session mode is

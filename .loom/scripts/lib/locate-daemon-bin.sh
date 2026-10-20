@@ -286,7 +286,16 @@ loom_resolve_self_daemon_bin() {
     loom_daemon_self_bin_override && return 0
     local self_root
     self_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." 2>/dev/null && pwd)" || self_root=""
-    local base candidate
+    local base candidate installed="" installed_v="" cand_v=""
+    # The installed daemon (tier 3/4's answer), resolved once: a repo-local build
+    # OLDER than it is stale and is skipped (#10079) -- a months-old target/release
+    # in the role runner's cwd otherwise shadows the install and dies with
+    # `unrecognized subcommand` on anything recent (e.g. `forge comment`).
+    installed="$(command -v loom-daemon 2>/dev/null || true)"
+    if [[ -z "$installed" || ! -x "$installed" ]]; then
+        installed="${LOOM_DAEMON_BIN_DIR:-$HOME/.local/bin}/loom-daemon"
+    fi
+    installed_v="$(_loom_daemon_reported_version "$installed")"
     for base in "${CARGO_TARGET_DIR:-}" "${self_root:+$self_root/target}" \
                 "${REPO_ROOT:+$REPO_ROOT/target}" \
                 "${REPO_ROOT:+$REPO_ROOT/loom-daemon/target}"; do
@@ -294,6 +303,13 @@ loom_resolve_self_daemon_bin() {
         for candidate in "$base/release/loom-daemon" "$base/debug/loom-daemon"; do
             if [[ -x "$candidate" ]]; then
                 if _loom_self_bin_answers_as_daemon "$candidate"; then
+                    cand_v="$(_loom_daemon_reported_version "$candidate")"
+                    # Fail open: an unreadable version on either side keeps today's choice.
+                    if [[ -n "$cand_v" && -n "$installed_v" ]] \
+                        && _loom_daemon_version_lt "$cand_v" "$installed_v"; then
+                        echo "loom_resolve_self_daemon_bin: ignoring $candidate (v$cand_v) — older than the installed $installed (v$installed_v); falling through to the installed binary" >&2
+                        continue
+                    fi
                     printf '%s\n' "$candidate"
                     return 0
                 fi
@@ -548,10 +564,8 @@ _loom_daemon_version_preflight() {
 # loom_daemon_version_preflight <subcommand> <resolved-bin>
 #
 # The PUBLIC, standalone form, for a stub that does its own resolution and its
-# own `exec`. `skip-labels.sh` is the first: it is a Shape-A `stub` in
-# scripts/shell-allowlist.txt, a category machine-checked on the requirement
-# that its LAST code line IS the `exec` (scripts/check-shell-allowlist.sh), so
-# it cannot hand the exec to a helper without forfeiting that category. One
+# own `exec`. `skip-labels.sh` is the first: it is a Shape-A stub whose LAST
+# code line IS the `exec`, so it cannot hand the exec to a helper. One
 # call one line above its own exec gets it the identical guard.
 #
 # ${BASH_SOURCE[1]} is the calling stub -- which is what lets the marker live

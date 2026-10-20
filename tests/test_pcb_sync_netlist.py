@@ -427,6 +427,45 @@ class TestSyncNetlist:
         assert not result.orphaned
         assert not result.errors
 
+    def test_added_footprint_keeps_library_id(self, tmp_path, monkeypatch):
+        """An added footprint keeps ``Library:Footprint`` on the PCB (issue #7213).
+
+        ``sync_netlist`` places missing parts through ``PCB.add_footprint``;
+        the schematic's nickname must survive, or kicad-cli's parity check
+        reports ``footprint_symbol_mismatch`` on every added part.
+        """
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+        from kicad_tools.validate.netlist import NetlistValidator
+
+        fixture = (
+            Path(__file__).parent
+            / "fixtures"
+            / "Test_Library.pretty"
+            / "C_0402_1005Metric.kicad_mod"
+        )
+
+        class _Paths:
+            found = True
+            footprints_path = tmp_path
+
+            @staticmethod
+            def get_footprint_file(library, name):
+                return fixture
+
+        monkeypatch.setattr("kicad_tools.schema.pcb.detect_kicad_library_path", lambda: _Paths)
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(MINIMAL_SCHEMATIC)
+        pcb.write_text(PCB_MISSING_R1)
+
+        result = sync_netlist(sch, pcb, dry_run=False)
+
+        assert [a.reference for a in result.added] == ["R1"]
+        assert not result.errors
+        assert '(footprint "Resistor_SMD:R_0402"' in pcb.read_text()
+        assert NetlistValidator(sch, pcb).validate().footprint_mismatches == []
+
     def test_dry_run_does_not_modify_pcb(self, tmp_path):
         """dry_run=True leaves PCB file unchanged."""
         from kicad_tools.cli.pcb_sync_netlist import sync_netlist

@@ -62,8 +62,9 @@ Division floors deliberately — three sweeps on six usable cores get 2 each,
 never 2.67 rounded up — so the shares can only ever under-subscribe the host.
 The one exception is the 1-core floor: a budget below 1 core would deadlock a
 sweep, so more sweeps than usable cores still get 1 each. That is a bounded
-overshoot (N cores, not N x host) and it is the admission side's job to not
-get there — see [`admission_brake`](https://github.com/rjwalters/loom/blob/main/loom-daemon/src/admission_brake.rs).
+overshoot (N cores, not N x host). Keeping the sweep count below the usable
+core count is the operator's job: the only admission cap is
+`autonomous.workFinder.maxConcurrent` (#12406).
 
 ### Where the concurrent-sweep count comes from
 
@@ -159,8 +160,8 @@ default that could kill a legitimate long build.
 | `LOOM_SWEEP_INFLIGHT_SWEEPS` | — | *(auto)* | Override the concurrent-sweep divisor instead of asking the local daemon for it. |
 | `LOOM_SWEEP_INFLIGHT_PROBE_TIMEOUT_SECS` | — | `10` | Hard bound on the `loom-daemon status --json` probe. On timeout the divisor falls back to `1`. |
 | `LOOM_SWEEP_WALLCLOCK_CEILING_SECS` | `autonomous.spawnWallClockCeilingSecs` | `0` (disabled) | Adds `RuntimeMaxSec=<secs>` to the systemd scope when non-zero. |
-| `LOOM_SWEEP_MEMORY_MAX` | — | *(auto)* | Per-scope `MemoryMax` (#11094). Unset = derive from the daemon's observed per-repo peak (`~/.loom/ram-peaks.json`): `max(LOOM_SWEEP_MEMORY_MAX_MIN_MB, high-water * LOOM_SWEEP_MEMORY_MAX_PCT/100)`, and **no limit at all without history** for that repo. `0`/`off` disables; a positive integer is an explicit MiB limit. Paired with `OOMPolicy=continue`, an over-budget build is killed inside its own cgroup instead of by the kernel's global OOM killer. `MemoryMax` rather than `MemoryHigh`: `MemoryHigh` only throttles, so a runaway build on a no-swap host would stall rather than fail. Skipped when the limit would be >= host RAM or systemd rejects it (memory controller not delegated). Computed by `loom-daemon ram-scope-limit`; a binary without that subcommand means no limit. |
-| `LOOM_SWEEP_MEMORY_MAX_PCT` / `_MIN_MB` | — | `200` / `4096` | Multiple of the observed peak, and floor in MiB, for the derived limit. |
+| `LOOM_SWEEP_MEMORY_MAX` | `autonomous.agentMemoryMax` | `auto` | Per-scope `MemoryMax` (#11094). `auto` (or unset) = derive from the daemon's observed per-repo peak (`~/.loom/ram-peaks.json`): `max(LOOM_SWEEP_MEMORY_MAX_MIN_MB, high-water * LOOM_SWEEP_MEMORY_MAX_PCT/100)`, and **no limit at all without history** for that repo. `off` (or `0`) disables; a positive integer is an explicit MiB limit. The config keys (#12246) are read on every spawn and include the daemon workspace's host-local tier, so the fleet can set them per host without a restart; see `daemon-reference.md` §"Per-agent scope MemoryMax". Paired with `OOMPolicy=continue`, an over-budget build is killed inside its own cgroup instead of by the kernel's global OOM killer. `MemoryMax` rather than `MemoryHigh`: `MemoryHigh` only throttles, so a runaway build on a no-swap host would stall rather than fail. Skipped when the limit would be >= host RAM or systemd rejects it (memory controller not delegated). Computed by `loom-daemon ram-scope-limit`; a binary without that subcommand means no limit. |
+| `LOOM_SWEEP_MEMORY_MAX_PCT` / `_MIN_MB` | `autonomous.agentMemoryMaxPct` / `autonomous.agentMemoryMaxMinMb` | `200` / `4096` | Multiple of the observed peak, and floor in MiB, for the derived limit. |
 | `LOOM_SWEEP_CPU_BUDGET_CORES` | — | *(output only)* | Exported into the child with this sweep's computed share; read it, don't set it. |
 
 Precedence for the config-backed tunables: env > config > default, the same
@@ -174,11 +175,9 @@ tier order used throughout Loom (see `spawn-claude.sh`'s own niceness knobs,
   siblings all finish keeps its smaller share until it exits.
 - **Compute consumed by anything that is not a sweep** — a human's own
   `cargo build`, an unrelated service on the box. The divisor counts sweeps,
-  not load; the load-aware side is
-  [`admission_brake`](https://github.com/rjwalters/loom/blob/main/loom-daemon/src/admission_brake.rs)
-  / [`host_breaker`](https://github.com/rjwalters/loom/blob/main/loom-daemon/src/host_breaker.rs),
-  which gate whether a *new* sweep starts (they never resize a running one —
-  that gap is what #5979 closed).
+  not load. The daemon has no load-aware admission gate (#12406 removed
+  them); an operator watches the exported `loom.host.*` load, RAM and disk
+  metrics and sets `autonomous.workFinder.maxConcurrent` to match.
 - **Hosts whose concurrent agents the local daemon does not track** — the
   count comes from `loom-daemon status --json`. Agents launched outside the
   daemon (a hand-run `claude` that never went through `spawn-claude.sh`) are

@@ -31,7 +31,7 @@
 #   check-evaluating-staleness.sh --issue <N> [--label <label>] [--threshold-minutes <n>]
 #
 # --label defaults to "loom:evaluating"; --threshold-minutes defaults to
-# LOOM_STALE_EVALUATING_MINUTES (or 15 if unset) — the same env var name and
+# LOOM_STALE_EVALUATING_MINUTES (or 45 if unset, longer than a Champion step's 30-minute timeout, #11909) — the same env var name and
 # default champion-issue-promo.md's Claim section already documents.
 #
 # Output (stdout — one KEY=VALUE per line, machine-parseable):
@@ -59,7 +59,7 @@ set -uo pipefail
 
 ISSUE=""
 LABEL="loom:evaluating"
-THRESHOLD_MIN="${LOOM_STALE_EVALUATING_MINUTES:-15}"
+THRESHOLD_MIN="${LOOM_STALE_EVALUATING_MINUTES:-45}"
 
 usage() {
   echo "Usage: $0 --issue <N> [--label <label>] [--threshold-minutes <n>]" >&2

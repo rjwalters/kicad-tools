@@ -31,16 +31,7 @@ SCRIPTS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 TELEMETRY_SH="$SCRIPTS_DIR/merge-admission-telemetry.sh"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-NC='\033[0m'
-
-TESTS_RUN=0
-TESTS_PASSED=0
-TESTS_FAILED=0
-
-pass() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1)); echo -e "  ${GREEN}PASS${NC}: $1"; }
-fail() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1)); echo -e "  ${RED}FAIL${NC}: $1"; }
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
 if [[ ! -x "$TELEMETRY_SH" ]]; then
     fail "$TELEMETRY_SH missing or not executable"
@@ -283,6 +274,40 @@ if [[ "$RC" == "2" ]]; then pass "unknown command -> exit 2"; else fail "expecte
 RC=0
 (cd "$SANDBOX_REPO" && "$TELEMETRY_SH" --help >/dev/null 2>&1) || RC=$?
 if [[ "$RC" == "0" ]]; then pass "--help -> exit 0"; else fail "expected exit 0, got $RC"; fi
+
+# --- Test: host_id comes from `loom-daemon host-id`, not the hostname (#10023)
+echo ""
+echo "Test: host_id equals loom-daemon host-id, not \$HOSTNAME"
+
+HID_DIR="$(mktemp -d)"
+cat > "$HID_DIR/fake-daemon" <<'STUB'
+#!/usr/bin/env bash
+[[ "${1:-}" == "host-id" ]] && { echo "persisted-host-abc"; exit 0; }
+exit 0
+STUB
+chmod +x "$HID_DIR/fake-daemon"
+RC=0
+(cd "$SANDBOX_REPO" && env -u LOOM_HOST_ID HOSTNAME="some-distinct-hostname" \
+    LOOM_DAEMON_BIN="$HID_DIR/fake-daemon" LOOM_MERGE_ADMISSION_TELEMETRY_LOG="$HID_DIR/out.jsonl" \
+    "$TELEMETRY_SH" record --pr 77 --repo acme/widgets --action merge >/dev/null 2>&1) || RC=$?
+if [[ "$RC" == "0" && "$(jq -r '.host_id' "$HID_DIR/out.jsonl" 2>/dev/null)" == "persisted-host-abc" ]]; then
+    pass "host_id is the loom-daemon host-id output, not \$HOSTNAME"
+else
+    fail "host_id was '$(jq -r '.host_id' "$HID_DIR/out.jsonl" 2>/dev/null)' (rc=$RC), expected persisted-host-abc"
+fi
+
+printf '#!/usr/bin/env bash\nexit 1\n' > "$HID_DIR/failing-daemon"
+chmod +x "$HID_DIR/failing-daemon"
+rm -f "$HID_DIR/out.jsonl"
+(cd "$SANDBOX_REPO" && env -u LOOM_HOST_ID HOSTNAME="some-distinct-hostname" \
+    LOOM_DAEMON_BIN="$HID_DIR/failing-daemon" LOOM_MERGE_ADMISSION_TELEMETRY_LOG="$HID_DIR/out.jsonl" \
+    "$TELEMETRY_SH" record --pr 77 --repo acme/widgets --action merge >/dev/null 2>&1) || true
+if [[ "$(jq -r '.host_id' "$HID_DIR/out.jsonl" 2>/dev/null)" == "unknown-host" ]]; then
+    pass "a failing host-id yields the unknown-host literal, not the hostname"
+else
+    fail "failing host-id produced '$(jq -r '.host_id' "$HID_DIR/out.jsonl" 2>/dev/null)', expected unknown-host"
+fi
+rm -rf "$HID_DIR"
 
 # ---------------------------------------------------------------------------
 echo ""

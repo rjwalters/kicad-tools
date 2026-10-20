@@ -52,7 +52,7 @@ from kicad_tools.cli.sch_connectivity import (
     is_pin_connected,
     to_coord,
 )
-from kicad_tools.cli.sch_set_footprint import _collect_schematic_files
+from kicad_tools.cli.sch_wire_common import _collect_schematic_files
 from kicad_tools.schema import Schematic
 
 

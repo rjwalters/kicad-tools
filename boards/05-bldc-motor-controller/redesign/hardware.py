@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from math import cos, radians, sin
 from pathlib import Path
 
+from kicad_tools.operations.pintype import annotate_pcb_file_pintypes
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.schematic.models.schematic import Schematic
 from kicad_tools.sexp import parse_file, parse_string, serialize_sexp
@@ -471,20 +472,16 @@ def build_pcb():
         )
     )
     for part in parts():
-        fp = (
+        if part.footprint.startswith("board05_revB:"):
             pcb.add_footprint_from_file(
                 ROOT / "board05_revB.pretty" / (part.footprint.split(":")[1] + ".kicad_mod"),
                 part.ref,
                 *part.xy,
                 value=part.value,
+                library_id=part.footprint,
             )
-            if part.footprint.startswith("board05_revB:")
-            else pcb.add_footprint(part.footprint, part.ref, *part.xy, value=part.value)
-        )
-        # Use the placed footprint's backing node. A recursive UUID search can
-        # select a pad/property UUID instead of the footprint instance.
-        fp._sexp_node.set_value(0, part.footprint)
-        fp.name = part.footprint
+        else:
+            pcb.add_footprint(part.footprint, part.ref, *part.xy, value=part.value)
         for number, net in part.nets.items():
             assert pcb.assign_net_to_footprint_pad(part.ref, number, net), (part.ref, number)
     for footprint in pcb._sexp.find_all("footprint"):
@@ -516,6 +513,15 @@ def generate(output):
                 )
     (output / "bldc_controller.kicad_sch").write_text(serialize_sexp(schematic))
     build_pcb().save(output / "bldc_controller.kicad_pcb")
+    # Issue #6025: carry schematic pin names/types onto the pads right after
+    # the unrouted PCB is written.  build.py copies this board before
+    # replaying routing.json, so the routed PCB inherits the ``(pintype ...)``
+    # evidence ``kct detect-mistakes`` reads for rails.
+    annotation = annotate_pcb_file_pintypes(
+        output / "bldc_controller.kicad_pcb", output / "bldc_controller.kicad_sch"
+    )
+    if annotation.missing_pads:
+        raise RuntimeError(f"pads without a schematic pin: {annotation.missing_pads}")
     shutil.copy2(ROOT / "board05_revB.kicad_sym", output / "board05_revB.kicad_sym")
     shutil.copytree(
         ROOT / "board05_revB.pretty", output / "board05_revB.pretty", dirs_exist_ok=True

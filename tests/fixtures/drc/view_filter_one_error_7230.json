@@ -1,0 +1,3 @@
+{"$schema":"https://schemas.kicad.org/drc.v1.json","source":"simple_led_routed.kicad_pcb","date":"2026-10-18T00:00:00","kicad_version":"10.0.6","coordinate_units":"mm",
+"violations":[{"type":"clearance","description":"Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.0500 mm)","severity":"error","items":[{"description":"Track [GND] on F.Cu, length 1.0 mm","pos":{"x":10,"y":10},"uuid":"a"},{"description":"Track [LED_ANODE] on F.Cu, length 1.0 mm","pos":{"x":10,"y":10.05},"uuid":"b"}]}],
+"unconnected_items":[],"schematic_parity":[]}

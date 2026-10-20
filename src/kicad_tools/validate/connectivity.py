@@ -39,6 +39,7 @@ if TYPE_CHECKING:
 # tracing autorouter segment/via copper — never hard-fails.  The boolean
 # probe is delegated to the shared guard in :mod:`kicad_tools._shapely`.
 from kicad_tools._shapely import has_shapely as _has_shapely
+from kicad_tools.core.geometry import point_in_polygon as _core_point_in_polygon
 from kicad_tools.geometry.copper import (
     PAD_FALLBACK_ERODE,
     pad_copper_outline,
@@ -510,7 +511,6 @@ class ConnectivityValidator:
         if self.pcb_path is None:
             return None
 
-        import subprocess
         import tempfile
 
         from kicad_tools.cli.runner import find_kicad_cli
@@ -533,23 +533,28 @@ class ConnectivityValidator:
                     stacklevel=2,
                 )
             return None
+        from kicad_tools.cli.runner import run_kicad_drc_command
+
+        # Issue #6724: KiCad 8/9 reject --refill-zones (exit 1, no report);
+        # it is passed unless this kicad-cli definitively lacks it, and a
+        # rejected run is retried without it.
         with tempfile.NamedTemporaryFile(suffix=".json") as report_file:
-            proc = subprocess.run(
-                [
+            proc, _refilled = run_kicad_drc_command(
+                lambda refill: [
                     str(kicad_cli),
                     "pcb",
                     "drc",
-                    "--refill-zones",
+                    *(["--refill-zones"] if refill else []),
                     "--format",
                     "json",
                     "-o",
                     report_file.name,
                     str(self.pcb_path),
                 ],
-                capture_output=True,
-                text=True,
+                Path(kicad_cli),
+                refill_zones=True,
                 timeout=120,
-                check=False,
+                text=True,
             )
             if proc.returncode not in (0, 5):
                 import warnings
@@ -1692,23 +1697,7 @@ class ConnectivityValidator:
         Returns:
             True if point is inside polygon
         """
-        n = len(polygon)
-        if n < 3:
-            return False
-
-        x, y = point
-        inside = False
-        j = n - 1
-
-        for i in range(n):
-            xi, yi = polygon[i]
-            xj, yj = polygon[j]
-
-            if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
-                inside = not inside
-            j = i
-
-        return inside
+        return _core_point_in_polygon(point[0], point[1], polygon, boundary_inside=False)
 
     @staticmethod
     def _pad_layer_matches_zone(

@@ -630,12 +630,16 @@ class ERCExplainer:
 
         explanation.fixes = [
             FixSuggestion(
-                description="Run 'Annotate Schematic' to reassign references",
-                command="kct sch annotate <schematic>",
+                description="Run 'kct sch re-annotate <schematic>' to renumber references uniquely",
+                command="kct sch re-annotate <schematic>",
                 priority=1,
             ),
             FixSuggestion(
-                description="Manually edit one symbol's reference to be unique",
+                description=(
+                    "Renumber only the duplicated prefix with "
+                    "'kct sch re-annotate <schematic> --prefix <PREFIX>'"
+                ),
+                command="kct sch re-annotate <schematic> --prefix <PREFIX>",
                 priority=2,
             ),
             FixSuggestion(
@@ -849,12 +853,16 @@ class ERCExplainer:
 
         explanation.fixes = [
             FixSuggestion(
-                description="Run 'Annotate Schematic' from Tools menu",
-                command="kct sch annotate <schematic>",
+                description=(
+                    "Run 'kct sch re-annotate <schematic> --unannotated-only' "
+                    "to assign the missing reference designators"
+                ),
+                command="kct sch re-annotate <schematic> --unannotated-only",
                 priority=1,
             ),
             FixSuggestion(
-                description="Manually enter reference designator (press E to edit)",
+                description="Preview the assignment first by adding --dry-run to re-annotate",
+                command="kct sch re-annotate <schematic> --unannotated-only --dry-run",
                 priority=2,
             ),
         ]
@@ -1144,15 +1152,22 @@ def output_text(explanations: list[ViolationExplanation], report: ERCReport) -> 
         print("Review warnings and fix if needed.")
 
 
-def output_json(explanations: list[ViolationExplanation], report: ERCReport) -> None:
+def output_json(
+    explanations: list[ViolationExplanation],
+    report: ERCReport,
+    hidden: dict[str, int] | None = None,
+) -> None:
     """Output explanations as JSON."""
+    summary: dict = {
+        "errors": sum(1 for e in explanations if e.violation.is_error),
+        "warnings": sum(1 for e in explanations if not e.violation.is_error),
+    }
+    if hidden:
+        summary["hidden_by_view_filter"] = hidden
     data = {
         "source": report.source_file,
         "kicad_version": report.kicad_version,
-        "summary": {
-            "errors": sum(1 for e in explanations if e.violation.is_error),
-            "warnings": sum(1 for e in explanations if not e.violation.is_error),
-        },
+        "summary": summary,
         "explanations": [e.to_dict() for e in explanations],
     }
     print(json.dumps(data, indent=2))
@@ -1210,8 +1225,16 @@ def main(argv: list[str] | None = None) -> int:
     if schematic_path:
         all_labels = gather_labels_from_schematic(schematic_path)
 
-    # Filter violations
-    violations = [v for v in report.violations if not v.excluded]
+    from ._gate import hidden_by_view_filter
+    from .erc_cmd import no_match_message
+
+    # Verdict set: the exit code is computed from this, before the view
+    # filters, so a ``--type`` that hides every error is not a pass (#7094).
+    gate_violations = [v for v in report.violations if not v.excluded]
+    gate_errors = sum(1 for v in gate_violations if v.is_error)
+
+    # View filters (display only)
+    violations = list(gate_violations)
 
     if args.errors_only:
         violations = [v for v in violations if v.is_error]
@@ -1224,9 +1247,16 @@ def main(argv: list[str] | None = None) -> int:
             if filter_lower in v.type_str.lower() or filter_lower in v.description.lower()
         ]
 
+    hidden = hidden_by_view_filter(gate_violations, violations)
+
     if not violations:
-        print("No ERC violations to explain.")
-        return 0
+        if hidden is None:
+            print("No ERC violations to explain.")
+        elif args.format == "json":
+            output_json([], report, hidden=hidden)
+        else:
+            print(no_match_message(hidden))
+        return 1 if gate_errors > 0 else 0
 
     # Generate explanations
     explainer = ERCExplainer(schematic_path=schematic_path, all_labels=all_labels)
@@ -1234,13 +1264,17 @@ def main(argv: list[str] | None = None) -> int:
 
     # Output
     if args.format == "json":
-        output_json(explanations, report)
+        output_json(explanations, report, hidden=hidden)
     else:
         output_text(explanations, report)
+        if hidden:
+            print(
+                f"Hidden by view filter: {hidden['errors']} error(s), "
+                f"{hidden['warnings']} warning(s) (still counted)"
+            )
 
-    # Return error code
-    error_count = sum(1 for e in explanations if e.violation.is_error)
-    return 1 if error_count > 0 else 0
+    # Return error code (pre-view-filter)
+    return 1 if gate_errors > 0 else 0
 
 
 if __name__ == "__main__":

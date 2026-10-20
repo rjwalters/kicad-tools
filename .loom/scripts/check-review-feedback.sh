@@ -31,6 +31,17 @@
 #   because the head moved: it is reported as NEEDS_RECONCILIATION, which the
 #   caller clears with evidence of repair or explicit disposition.
 #
+# COMMENT VERDICTS (#12475)
+#
+#   The fleet posts its Judge verdicts as PR COMMENTS carrying a
+#   `<!-- loom:verdict-sha sha=<head> verdict=changes-requested -->` marker, not
+#   as formal reviews. Every such comment from a trusted author (`loom-daemon
+#   forge trusted-comments`, #9548), at any head, counts as an outstanding
+#   request (REVIEWS_BLOCKING_CURRENT_HEAD / _OLDER_HEAD, its comment id in
+#   REVIEW_BLOCKING_IDS) until a LATER trusted approved verdict comment carries
+#   `reconciled=yes` in its review-reconciliation marker. Each counts
+#   individually, never grouped per author.
+#
 # Usage:
 #   check-review-feedback.sh --number N [options]
 #
@@ -97,7 +108,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _usage() {
     # Keep this range in sync with the header block above ("Usage:" through
     # the exit-code table).
-    sed -n '34,89p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '45,100p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 _die() {
@@ -152,7 +163,10 @@ if [[ -n "$HEAD_SHA" && ! "$HEAD_SHA" =~ ^[0-9a-f]{7,40}$ ]]; then
 fi
 
 if [[ -z "$FINDINGS_FILE" ]]; then
-    FINDINGS_FILE="$(mktemp "${TMPDIR:-/tmp}/loom-review-feedback-${NUMBER}.XXXXXX")"
+    # #9896: deterministic per-PR path (repeat runs overwrite it, so the
+    # caller-read file cannot accumulate); a trap-rm would delete it before
+    # the caller reads it.
+    FINDINGS_FILE="${TMPDIR:-/tmp}/loom-review-feedback-${NUMBER}.txt"
 fi
 : > "$FINDINGS_FILE"
 
@@ -326,6 +340,62 @@ BLOCKING_CURRENT=$(printf '%s' "$REVIEW_SUMMARY" | jq -r '.blocking_current | le
 BLOCKING_OLDER=$(printf '%s' "$REVIEW_SUMMARY" | jq -r '.blocking_older | length')
 BLOCKING_IDS=$(printf '%s' "$REVIEW_SUMMARY" | jq -r '(.current_ids + .older_ids) | join(" ")')
 printf '%s' "$REVIEW_SUMMARY" | jq -r '(.current_findings + .older_findings + .unknown_findings)[]' >> "$FINDINGS_FILE"
+
+# --- 1b. Comment verdicts (#12475) -----------------------------------------
+# The fleet's normal verdict channel is a PR COMMENT (post-verdict.sh), not a
+# formal review, so a changes-requested verdict posted that way was invisible
+# to section 1: #12465 was approved with `blocking_older=0` over two live
+# blocking verdicts. Collect every changes-requested `loom:verdict-sha` marker
+# at ANY head. Authors are authenticated with `forge trusted-comments` (#9548);
+# a marker from an untrusted author is prose and is ignored. Each verdict counts
+# individually (fleet and attended Judges post as one identity, and #12465 had
+# two concurrent verdicts at one head). It is superseded only by a LATER trusted
+# approved verdict whose reconciliation marker says `reconciled=yes`, i.e. one
+# that already had to cite it by id. A missing `trusted-comments` verb or a
+# partial read is UNKNOWN, never clean.
+# requires-daemon: forge optional   Without `forge trusted-comments` no author can be verified, so the gate reports UNKNOWN (exit 12) rather than reading unauthenticated verdicts.
+if ! VERDICT_COMMENTS=$(gh api "repos/$NWO/issues/$NUMBER/comments?per_page=100" --paginate 2> /dev/null \
+    | "${LOOM_DAEMON_SELF_BIN:-${LOOM_DAEMON_BIN:-loom-daemon}}" forge trusted-comments 2> /dev/null); then
+    _fail_unknown "the comment-verdict read (issues/$NUMBER/comments, trusted authors only) failed or paginated incompletely"
+fi
+
+VERDICT_SUMMARY=$(printf '%s\n' "$VERDICT_COMMENTS" | jq -s --arg head "$HEAD_SHA" '
+    def at_head($c): ($c != "") and ($c == $head or ($c | startswith($head)) or ($head | startswith($c)));
+    # The marker is appended last by post-verdict.sh; a body that merely quotes
+    # an earlier marker must not outvote it, so the LAST match wins.
+    def verdict: (.body // "")
+        | [scan("<!-- loom:verdict-sha sha=([0-9a-f]{7,40}) verdict=(approved|changes-requested) -->")]
+        | last;
+    map(if type == "array" then .[] else . end)
+    | map(select(. != null and (.body // "") != ""))
+    | map(. + {v: verdict} | select(.v != null) | . + {sha: .v[0], kind: .v[1]})
+    | sort_by(.id) as $all
+    | ($all | map(select(.kind == "approved"
+          and ((.body | test("<!-- loom:review-reconciliation [^>]*reconciled=yes")))))) as $reconciled
+    | ($all | map(select(.kind == "changes-requested"))) as $cr
+    | [$cr[] | . as $c | select(([$reconciled[] | select(.id > $c.id)] | length) == 0)] as $outstanding
+    | {
+        total: ($all | length),
+        current: [$outstanding[] | select(at_head(.sha))],
+        older: [$outstanding[] | select(at_head(.sha) | not)]
+      }
+    | . + {
+        current_findings: [.current[]
+            | "comment verdict \(.id) changes-requested by \(.user.login) at sha \(.sha) [CURRENT HEAD] :: \((.body | split("\n")[0] // "")[0:200])"],
+        older_findings: [.older[]
+            | "comment verdict \(.id) changes-requested by \(.user.login) at sha \(.sha) [OLDER HEAD — needs evidence of repair or explicit disposition] :: \((.body | split("\n")[0] // "")[0:200])"],
+        ids: [(.current + .older)[] | .id | tostring]
+      }
+' 2> /dev/null)
+[[ -n "$VERDICT_SUMMARY" ]] || _fail_unknown "the comment-verdict payload could not be parsed — verdict state is unknown"
+
+REVIEWS_TOTAL=$((REVIEWS_TOTAL + $(printf '%s' "$VERDICT_SUMMARY" | jq -r '.total')))
+BLOCKING_CURRENT=$((BLOCKING_CURRENT + $(printf '%s' "$VERDICT_SUMMARY" | jq -r '.current | length')))
+BLOCKING_OLDER=$((BLOCKING_OLDER + $(printf '%s' "$VERDICT_SUMMARY" | jq -r '.older | length')))
+VERDICT_IDS=$(printf '%s' "$VERDICT_SUMMARY" | jq -r '.ids | join(" ")')
+BLOCKING_IDS="${BLOCKING_IDS:+$BLOCKING_IDS }$VERDICT_IDS"
+BLOCKING_IDS="${BLOCKING_IDS% }"
+printf '%s' "$VERDICT_SUMMARY" | jq -r '(.current_findings + .older_findings)[]' >> "$FINDINGS_FILE"
 
 # --- 2. Inline review threads and their ACTUAL resolution state ------------
 THREADS_NDJSON=$(forge_get_pr_review_threads "$NWO" "$NUMBER" 2>/dev/null)

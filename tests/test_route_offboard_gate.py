@@ -116,10 +116,8 @@ class TestRouteOffboardGateOuterEntry:
     ``TestRouteOffboardGate`` calls ``route_cmd.main`` (the inner parser)
     directly.  These tests go through ``kicad_tools.cli.main`` -- the same
     dispatch path as ``kct route <board> ...`` on the command line -- so they
-    exercise the outer ``_add_route_parser`` registration *and* the
-    ``run_route_command`` argv reconstruction.  A regression where
-    ``--allow-offboard`` is only wired on the inner parser (the original defect
-    the Judge flagged) would be caught here but not by the inner-parser tests.
+    exercise the ``kct`` argv passthrough to ``route_cmd.main`` (issue #7017)
+    as well as the gate itself.
     """
 
     def test_outer_entry_aborts_when_offboard(self, offboard_pcb: Path, capsys):

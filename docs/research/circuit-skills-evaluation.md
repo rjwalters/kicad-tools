@@ -20,13 +20,13 @@ the routing tail by hand in KiCad. Our bar is the opposite (a fully automated, 0
 What it is good for is the 169-line problem catalog in `docs/history/problems.md`. About two thirds of it
 is tscircuit export defects, Freerouting quirks, Blender and SWIG crashes, fab-bundle bookkeeping and shell
 hygiene that do not touch our pipeline. Of the rest, almost everything is **already caught by a `kct check`
-rule or already handled in the router**. Three real gaps came out of it, each now an issue:
+rule or already handled in the router**. Three candidate gaps came out of it, each filed as an issue; two were real:
 
 | Gap | Issue |
 |---|---|
 | Router crosses interior board windows when no edge clearance resolves | #6043 |
 | No per-net-group routing policy gate (max vias, max length, missing policy fails) | #6044 |
-| `fix-drc` has no rip-up-and-reroute fallback once nudging fails | #6045 |
+| ~~`fix-drc` has no rip-up-and-reroute fallback once nudging fails~~ (already existed: `--local-reroute`; closed not planned) | #6045 |
 
 Its self-reported PCBWorld D3 result (0.98 Clean Pass for the experimental `srj-legal` backend) is
 **unverified by us**. Benchmarking it belongs to #5942; nothing here confirms or disputes the number.
@@ -70,7 +70,7 @@ verify.
 
 | # | Candidate | Verdict | Evidence pointer |
 |---|---|---|---|
-| 1 | `problems.md` gotchas | **adopt (partial)**: triaged below, 3 gaps filed | Table below; #6043, #6044, #6045 |
+| 1 | `problems.md` gotchas | **adopt (partial)**: triaged below, 2 real gaps filed (#6045 closed: already have) | Table below; #6043, #6044, #6045 |
 | 2 | Auto-keepouts around interior holes | **adopt (partial)** | Check above; `router/io.py` edge-keepout block, `router/grid.py::add_edge_keepout`; #6043 |
 | 3 | Net-fragment reconciliation for per-subcircuit nets | **not applicable** | We do not ingest tscircuit routing. Cross-file net-name mismatches from tscircuit are already analysed in `docs/research/tscircuit-evaluation.md` (Interop gate, #5847; failure caught by LVS, `kct check`/`lvs`). Repairing them belongs upstream. |
 | 4 | Enclosure-fit gating from a mechanical model | **not applicable (for now)** | Closest analogue: `optim/keepout.py` (mechanical keepouts, auto-detect from mounting holes/connectors) and `optim/edge_placement.py` (connector edge constraints). No STEP/enclosure datum import exists; not traced for demand. No issue filed; revisit if a board needs a shell. |
@@ -86,7 +86,7 @@ verify.
 |---|---|---|---|
 | U1 | Placement score fitted on routing outcomes (reported 0.89 pairwise on 319 placements, 64 boards; unverified) | **duplicate-of-#5948** | Placement scoring today: `docs/placement-scoring.md`. Measured in [`placement_score_calibration.md`](placement_score_calibration.md): on two corpora our best pre-route signal ranks at most 0.75 of same-board pairs, a fitted combination does not beat the best single signal, and the score was not adopted as an acceptance gate (`--route-check` instead, #6234). |
 | U2 | Finish-or-re-place diagnosis (closest candidate, are the leftovers in congested cells) | **duplicate-of-#5944** (also #5945 for the best-so-far part) | #5944 classifies congested vs blocked per unrouted connection. |
-| U3 | Rip up what DRC flags, then re-route with widening radius | **adopt** | `kct fix-drc` (`cli/fix_drc_cmd.py`) and `repair-clearance` only nudge: `drc/repair_clearance.py`, `drc/repair_drill_clearance.py`. `route_fixed_repair.py` is the natural re-route building block. Filed #6045. |
+| U3 | Rip up what DRC flags, then re-route with widening radius | **already have** | `kct fix-drc --local-reroute` (on by default, #1399/#1405) already rips up the offending segment and A*-re-routes it when nudging fails, with clustered reroute (#1408), `--max-passes`, connectivity rollback (#2851/#2862) and `--transactional`. Remaining gaps (widening radius, whole-connection or via rip-up) are unproven; #6045 closed as not planned. |
 | U4a | Floating-SMD-pad gate (opposite-layer copper, no via) | **already have** | Checked: a B.Cu trace ending under an F.Cu SMD pad with no via makes `kct check` report `connectivity` ("1 of 2 pads stranded") and `track_dangling`. `validate/connectivity.py` deliberately does not fuse via-less crossings (#3783). |
 | U4b | Critical-routing policy gate (max vias, max length, mismatch; missing policy fails) | **adopt (partial)** | Mismatch is covered by `validate/match_group_skew.py` and `validate/diffpair_skew.py`. A via/length cap and "no policy is a failure" are not present (searched `src/kicad_tools` for `max_vias` etc.: not found). Filed #6044. |
 | U5 | Multi-router ranking in `route-auto` | **duplicate-of-#5947** (portfolio) / blocked on #5942 | Subprocess-only GPL tools; only worth doing if #5942 shows they beat us. No separate issue. |
@@ -175,11 +175,11 @@ use). "Not traced" means we did not look.
 
 | Gotcha | Status | Note |
 |---|---|---|
-| Blind finishers add shorts | handled | Our repair loops re-run DRC; adopted-in-spirit rule for #6045: accept only non-regressing passes. |
+| Blind finishers add shorts | handled | Our repair loops re-run DRC; `kct fix-drc` already rolls back fixes that break connectivity (#2851/#2862) and offers `--transactional` (#6045 closed: already have). |
 | Finisher "OK" that connected nothing | handled | Connectivity check (above). |
 | Hard-coded-coordinate patches | n/a | Workflow hygiene; our repairs are rule-driven. |
 | GND-pad vias shorting against stubs | handled | Clearance and `via_under_body` checks; not traced further. |
-| Unconnected pin in congested cap cluster | gap | Diagnosis side is #5944; fix side is #6045. |
+| Unconnected pin in congested cap cluster | handled | Diagnosis: congested-vs-blocked (#5944, closed). Fix: `kct fix-drc --local-reroute` rips up and re-routes (see U3; #6045 closed). Whole-connection or via rip-up remains unproven, as noted in U3. |
 | One net cannot cross a corridor | handled | Zero-ohm jumper / local pour idea is a design choice; `kct zones` plus `pour_bridge.py` cover the local-pour half. |
 
 ### 6. Verification gates that lied
@@ -245,7 +245,7 @@ check" lessons are the useful part.
 
 - #6043: route: block copper across interior `Edge.Cuts` loops even when no edge clearance resolves
 - #6044: check: per-net-group routing policy gate
-- #6045: fix-drc: rip-up-and-reroute fallback
+- #6045: fix-drc: rip-up-and-reroute fallback (closed not planned: `--local-reroute` already does this; see U3)
 - Already covered elsewhere, not re-filed: #5944 (congested vs blocked), #5945 (checkpoint and rollback),
   #5948 (placement score calibration), #5947 (portfolio and TraceMaker techniques), #5942 (D3 benchmark,
   including the 0.98 claim).

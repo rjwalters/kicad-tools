@@ -23,6 +23,30 @@ Rationale: `.loom/docs/critical-file-hold.md`.
 - The release is scoped to a **diff, not a commit id** (#9416): this verdict is a
   pure function of the file list, so the operator decided about that change.
 
+## A covering standing authorization means no hold (#12528)
+
+The FAIL above is "one-way terminal" only for a PR no operator pre-authorized.
+`champion-pr-merge.md` criterion #3 runs `standing_auth_eval critical` first: a
+`champion.standingAuthorizations` class with `"coversCriticalFiles": true` that
+matches the whole diff (`filePatterns` exact subset; no `excludeFilePatterns`
+file; no `forbiddenDiffPatterns` line in any added/removed line; no kept-set
+path; `judgeApproval` and `greenCi` holding) passes #3, so this tick receives
+`$CRITERION3_RESULT="PASS"` and writes no hold. Any open episode closes through
+the ordinary PASS row (cleared notice + remove `loom:blocked`), naming the class
+id. One file outside the class, an excluded file, a forbidden line or an
+unreadable diff restores the FAIL and this whole machine. The kept set (the
+merge gate, guard hooks, credential selection, installers/updaters,
+migrations) is never satisfiable by a class.
+
+A `"criticalFilesOnly": true` class (#12648) passes #3 the same way, but is
+matched against the critical-file hits alone (the files #3 flags, and each
+one's `previous_filename`): every hit must match its `filePatterns`, none its
+`excludeFilePatterns`, no forbidden line in the hits' patches, no kept-set path
+anywhere in the PR, conditions holding. The other changed files are left to
+criterion #2, which this class never satisfies. A PASS under it closes an open
+episode through the same ordinary PASS row; if criterion #2 then holds the PR,
+that is criterion #2's own hold, not this machine's.
+
 ## The state machine
 
 The state is whichever of these three markers is the **latest** trusted comment
@@ -74,7 +98,12 @@ CF_JSON=$(gh pr view "$PR_NUMBER" --json comments,labels,headRefOid)
 CF_TRUST=raw; T=$(loom-daemon forge trusted-comments --fetch "$PR_NUMBER" --gh-shape) && CF_JSON=$(jq --argjson c "$T" '.comments = $c' <<<"$CF_JSON") && CF_TRUST=ok
 HEAD_SHA=$(jq -r '.headRefOid' <<<"$CF_JSON")
 HOLD_LABEL_NOW=$(jq -r '[.labels[].name] | any(. == "loom:blocked")' <<<"$CF_JSON")
-cf_park() { loom-daemon park-record apply --pr "$PR_NUMBER" --reason "champion critical-file hold" --by champion >/dev/null 2>&1 || true; }
+cf_park() {
+  loom-daemon park-record apply --pr "$PR_NUMBER" --reason "champion critical-file hold" --by champion >/dev/null 2>&1 || true
+  # #10937: an OPEN issue/PR the hold waits on, if the notice names one; inert (Guide skips a standing Champion hold)
+  for N in ${CF_BLOCKER_NUMBERS:-}; do loom-daemon park-record apply --pr "$PR_NUMBER" --blocked-by "$N" \
+    --reason "champion critical-file hold: human evidence gate" --by champion >/dev/null 2>&1 || true; done
+}
 
 LAST_STATE=$(jq -r --arg h "$HOLD_MARKER" --arg c "$CLEARED_MARKER" --arg r "$RELEASED_MARKER" \
   '[.comments[] | select((.body | startswith($h)) or (.body | startswith($c)) or (.body | startswith($r)))] | last | .body // ""' <<<"$CF_JSON")
@@ -156,7 +185,7 @@ gh pr edit $PR_NUMBER --remove-label \"loom:blocked\"
 
 Removing \`loom:blocked\` is your release, and it is durable (#9016): Champion
 will **not** put it back while this PR's change is the one this notice
-describes. A push that changes the diff re-arms the hold (a re-date push or a
+describes. A push that changes the diff re-arms the hold (a tree-identical push or a
 clean merge of \`main\` does not, #9416); one that leaves every critical-file
 pattern clears it. \`loom:pr\` stays: Judge's approval stands.
 ${CF_WF_NOTE}

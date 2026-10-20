@@ -86,37 +86,6 @@ retired() { # <what> <property> <why-structural> <successor>
     echo "      successor:  $4"
 }
 
-assert_contains() {
-    local haystack="$1" needle="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    # Here-string, not a pipe, so grep -q exiting early on a match cannot
-    # SIGPIPE printf and (under set -o pipefail) flip the pipeline non-zero
-    # despite a match — a size-sensitive flake on large haystacks (#3820).
-    if grep -qF -- "$needle" <<<"$haystack"; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Expected substring: '$needle'"
-        echo "    In: '$haystack'"
-    fi
-}
-
-assert_not_contains() {
-    local haystack="$1" needle="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if ! grep -qF -- "$needle" <<<"$haystack"; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Unexpected substring: '$needle'"
-        echo "    In: '$haystack'"
-    fi
-}
-
 # --- Minimal logging shims the extracted functions call ---
 info()    { echo "INFO: $*"; }
 success() { echo "OK: $*"; }
@@ -230,14 +199,14 @@ if [[ "$1" == "api" ]]; then
       exit 0
       ;;
     */comments)
-      # #9774: a POST to the comments endpoint is the daemon chokepoint's
-      # shape (forge comment -> gh api --input -). This suite's subject is
-      # the partial-increment flow over the gh ladder, and LOOM_DAEMON_SELF_BIN
-      # is pinned to the real binary above — so fail the daemon's POST here
-      # and let forge_gh_comment_rl_safe fall back to the recorded `issue
-      # comment` shape. A silent exit 0 would succeed without recording
-      # anything, which is exactly what the assertions below must not allow.
-      exit 1
+      # #9774/#9865: a POST to the comments endpoint is the daemon chokepoint's
+      # shape (forge comment -> gh api --input FILE), and it is the ONLY comment
+      # path now. Record it in the `issue comment` shape the assertions below
+      # read, so a comment that never lands still fails them.
+      _rest="${path#repos/}"; _repo="${_rest%%/issues/*}"
+      _num="${_rest#*/issues/}"; _num="${_num%%/*}"
+      echo "issue comment $_num --repo $_repo --body $(jq -r .body "$3" 2>/dev/null)" >> "$LOG"
+      exit 0
       ;;
   esac
 

@@ -37,15 +37,7 @@ else
 fi
 CHAMPION_MD="$PROMPT_DIR/champion-pr-merge.md"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-NC='\033[0m'
-TESTS_RUN=0
-TESTS_PASSED=0
-TESTS_FAILED=0
-
-pass() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1)); echo -e "  ${GREEN}PASS${NC}: $1"; }
-fail() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1)); echo -e "  ${RED}FAIL${NC}: $1"; }
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
 assert_eq() {
     if [[ "$1" == "$2" ]]; then pass "$3"; else fail "$3 (expected '$1', got '$2')"; fi
@@ -80,10 +72,13 @@ printf '%s\n' '#!/usr/bin/env bash' 'echo "POST $*" >>"$STUB_LOG"' >"$WORK/.loom
 chmod +x "$WORK/.loom/scripts/post-comment.sh"
 
 # ---- forge stubs ------------------------------------------------------------
-# FIX_PR       gh pr view --json commits,labels,headRefOid payload
-# FIX_COMMENTS loom-daemon forge trusted-comments --gh-shape payload
+# FIX_PR       the "0. PR facts" payload (commits, labels, headRefOid; #12242)
+# FIX_COMMENTS its trusted comments (loom-daemon forge trusted-comments --gh-shape)
 # FIX_EVENTS   issues/N/events payload; FIX_EVENTS_FAIL=1 makes the read fail
 # FIX_LIST     gh pr list payload for the census
+git() { [[ "$*" == "rev-parse --git-common-dir" ]] && echo "$WORK"; }
+# Write the "0. PR facts" file the precheck reads, from FIX_PR + FIX_COMMENTS.
+write_facts() { jq --argjson c "$FIX_COMMENTS" '.comments = $c' <<<"$FIX_PR" >"$WORK/loom-champion-facts-pr-$1.json"; }
 gh() {
     case "$1 $2" in
         "pr view") printf '%s\n' "$FIX_PR" ;;
@@ -118,7 +113,7 @@ gh_read() {
         *) echo "unexpected GH_READ call: $*" >&2; return 99 ;;
     esac
 }
-export -f gh loom-daemon gh_read
+export -f git gh loom-daemon gh_read
 
 HOLD_AT="2026-10-09T08:53:41Z"
 HOLD_HEAD="d4ea576427e62a710459ab601250e462993c19b7"
@@ -144,6 +139,7 @@ run_precheck() {
         cd "$WORK" || exit 1
         export STUB_LOG="$WORK/log"; : >"$STUB_LOG"
         PR_NUMBER=10280
+        write_facts "$PR_NUMBER"
         for _once in 1; do eval "$PRECHECK" >/dev/null 2>&1; done
         echo "BLOCKED=$MERGE_BLOCKED_BY_HOLD PRIOR=$PRIOR_HOLD MANUAL=${MANUAL_RELEASE_SINCE_HOLD:-} REASON=${RELEASE_REASON:-}"
         cat "$STUB_LOG"
@@ -158,6 +154,7 @@ run_hold_behavior() {
         export STUB_LOG="$WORK/log"; : >"$STUB_LOG"
         PR_NUMBER=10280
         GH_READ=gh_read
+        write_facts "$PR_NUMBER"
         for _once in 1; do eval "$PRECHECK" >/dev/null 2>&1; done
         MERGE_BLOCKED_BY_HOLD=false   # axes judged red this tick -> Hold behavior runs
         local block
@@ -262,6 +259,22 @@ FIX_PR=$(pr_json "$HOLD_HEAD" loom:pr); FIX_COMMENTS="[$HOLD_COMMENT]"
 FIX_EVENTS=$(UNLABELED=loom:operator unlabeled_event "2026-10-10T12:00:00Z")
 OUT=$(run_precheck)
 assert_contains "$OUT" "MANUAL=true" "a legacy loom:operator removal is release (e)"
+echo
+
+echo "Test 7c: a loom:operator removal AFTER the capped-hold recommendation clears the inbox, not the hold (#11905)"
+REC_COMMENT=$(jq -n '{author: {login: "loom-fleet-dispatch"}, body: "<!-- champion:capped-hold-recommendation -->\nreview it", createdAt: "2026-10-10T06:00:00Z"}')
+FIX_COMMENTS="[$HOLD_COMMENT, $REC_COMMENT]"
+FIX_EVENTS=$(UNLABELED=loom:operator unlabeled_event "2026-10-10T12:00:00Z")
+OUT=$(run_precheck)
+assert_contains "$OUT" "BLOCKED=true PRIOR=true MANUAL=false" "the inbox clearing is not release (e)"
+assert_contains "$OUT" "PARK park-record apply --pr 10280 --reason champion merge-risk hold --by champion" "the missing loom:blocked is repaired instead"
+FIX_EVENTS=$(unlabeled_event "2026-10-10T12:00:00Z")
+OUT=$(run_precheck)
+assert_contains "$OUT" "MANUAL=true" "a human loom:blocked removal still releases after the recommendation"
+FIX_EVENTS=$(UNLABELED=loom:operator unlabeled_event "2026-10-10T03:00:00Z")
+OUT=$(run_precheck)
+assert_contains "$OUT" "MANUAL=true" "a loom:operator removal before the recommendation still releases"
+FIX_COMMENTS="[$HOLD_COMMENT]"
 echo
 
 echo "Test 8: head moved AND label removed -> (c) is the reason, MANUAL still set for the outcome rule"

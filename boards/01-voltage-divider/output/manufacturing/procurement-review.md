@@ -12,6 +12,34 @@ agree on the following corrected selections and assembly treatment.
 | R1, R2 | 0805W8F1002T5E | C17414 | 10 kΩ, 0805 resistors; SMT CPL includes R1 and R2 |
 | J1, J2 | ZX-PZ2.54-1-2PZZ | C7501260 | 2-pin 2.54 mm through-hole headers; hand-solder, excluded from SMT CPL |
 
+## CPL frame refresh — 2026-10-18
+
+Re-issuing this package for issue #7190 (board 01's `sym-lib-table` and
+`kicad_tools_pwr.kicad_sym` now ship in `kicad_project.zip`) regenerated
+`cpl_jlcpcb.csv` in the Gerber/drill frame introduced by issue #7059 (no aux
+origin on this board, so X is sheet-absolute and Y is negated). Only the
+`Mid X`/`Mid Y` columns changed: R1 `15,8` → `148.5,-83` mm and R2 `15,17` →
+`148.5,-92` mm, the same 9 mm R1–R2 spacing. `Designator`, `Val`, `Package`,
+`Rotation` and `Layer` are byte-identical to the CPL reviewed above, and
+`bom_jlcpcb.csv` is unchanged. The identity table above therefore still
+applies. No new supplier lookup or stock check was performed.
+
+## Through-hole parts now in the JLCPCB BOM/CPL — 2026-10-18 (issue #7239)
+
+JLCPCB's PCBA capability page
+(https://jlcpcb.com/capabilities/pcb-assembly-capabilities, fetched
+2026-10-18) lists both Economic and Standard PCBA as "SMT/Thru-hole", so by
+operator decision (issue #7239) `kct export --mfr jlcpcb` no longer excludes
+through-hole parts. This package's `cpl_jlcpcb.csv` now also lists the
+through-hole parts J1 and J2 (2-pin headers) for JLCPCB assembly; `bom_jlcpcb.csv` is unchanged (it already listed J1 and J2).
+Any statement above that these parts are hand-soldered or excluded
+from the CPL describes the earlier package and is superseded for them.
+
+**Procurement must review these through-hole rows** (part identity, JLCPCB
+through-hole assembly eligibility and stock, and placement orientation)
+before ordering assembly. This note records the export change only: it is
+not a re-review, and no new supplier lookup or stock check was performed.
+
 ## Fleet audit context
 
 The source corrections and redesigns were integrated in commit

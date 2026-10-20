@@ -7,87 +7,17 @@ from pathlib import Path
 from kicad_tools.cli.sch_validate import (
     check_power_pin_polarity,
 )
+from tests._sch_sexp_builders import (
+    make_lib_symbol as _make_ic_lib_symbol,
+)
+from tests._sch_sexp_builders import (
+    make_symbol_instance as _make_symbol_instance,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers to generate synthetic KiCad schematics
 # ---------------------------------------------------------------------------
 # Reuse the same pattern as test_sch_validate_power_short.py
-
-
-def _make_ic_lib_symbol(
-    lib_id: str,
-    pins: list[tuple[str, str, str]],
-) -> str:
-    """Generate a lib_symbols entry for an IC.
-
-    Args:
-        lib_id: e.g. "IC:SomeChip"
-        pins: list of (pin_number, pin_name, pin_type) tuples
-    """
-    part_name = lib_id.split(":")[-1] if ":" in lib_id else lib_id
-    pin_blocks = []
-    for i, (num, name, ptype) in enumerate(pins):
-        y = i * 2.54
-        pin_blocks.append(
-            f"""(pin {ptype} line
-                    (at 0 {y:.2f} 0)
-                    (length 2.54)
-                    (name "{name}")
-                    (number "{num}")
-                )"""
-        )
-    pin_str = "\n".join(pin_blocks)
-    return f"""(symbol "{lib_id}"
-            (pin_names (offset 0.254))
-            (symbol "{part_name}_0_1"
-                (rectangle
-                    (start -5.08 -{(len(pins) * 2.54) + 1.27:.2f})
-                    (end 5.08 1.27)
-                    (stroke (width 0.254))
-                    (fill (type background))
-                )
-            )
-            (symbol "{part_name}_1_1"
-                {pin_str}
-            )
-        )"""
-
-
-def _make_symbol_instance(
-    ref: str,
-    lib_id: str,
-    pins: list[tuple[str, str, str]],
-    x: float,
-    y: float,
-) -> str:
-    """Generate a symbol instance S-expression."""
-    pin_entries = "\n".join(f'(pin "{num}" (uuid "pin-{ref.lower()}-{num}"))' for num, _, _ in pins)
-    return f"""(symbol
-        (lib_id "{lib_id}")
-        (at {x} {y} 0)
-        (unit 1)
-        (in_bom yes)
-        (on_board yes)
-        (dnp no)
-        (uuid "uuid-{ref.lower()}")
-        (property "Reference" "{ref}"
-            (at {x + 2} {y - 2} 0)
-            (effects (font (size 1.27 1.27)) (justify left))
-        )
-        (property "Value" "{lib_id.split(":")[-1]}"
-            (at {x + 2} {y} 0)
-            (effects (font (size 1.27 1.27)) (justify left))
-        )
-        (property "Footprint" ""
-            (at {x} {y} 0)
-            (effects (font (size 1.27 1.27)) hide)
-        )
-        (property "Datasheet" "~"
-            (at {x} {y} 0)
-            (effects (font (size 1.27 1.27)) hide)
-        )
-        {pin_entries}
-    )"""
 
 
 def _make_single_ic_schematic(

@@ -218,6 +218,23 @@ double hole_gap(const KShape& a, const KShape& b);
 // hole requirement with the same epsilon.
 bool clear(const KShape& a, const KShape& b, double required_mm);
 
+// Issue #5617: the same verdict for the four trivially-copyable pair kinds the
+// A* search asks on every step (stored-via and stored-segment broad-phase
+// hits).  Overload resolution prefers these over the ``KShape`` form, which
+// had to build -- and destroy -- two ``std::variant`` temporaries per call
+// (the variant carries ``KZonePoly``/``KPad``'s vectors, so neither is free):
+// ~7 % of the Board 06 re-route's phase 4.  Each one is ``copper_gap``'s own
+// branch -- the same layer gate, the same canonical argument order, the same
+// per-pair distance function -- so the answer is bit-for-bit the dispatcher's.
+// The ``router_cpp.clear`` binding routes these pair kinds through the
+// overloads (so the cross-port parity corpus runs them), and
+// ``tests/router/test_typed_kernel_clear_5617.py`` holds them to
+// ``copper_gap(a, b) >= required - EPSILON`` at the threshold itself.
+bool clear(const KSegment& a, const KSegment& b, double required_mm);
+bool clear(const KSegment& a, const KVia& b, double required_mm);
+bool clear(const KVia& a, const KSegment& b, double required_mm);
+bool clear(const KVia& a, const KVia& b, double required_mm);
+
 // ---------------------------------------------------------------------------
 // Indexed-consumer primitives (Epic #5509, Phase 3f)
 // ---------------------------------------------------------------------------

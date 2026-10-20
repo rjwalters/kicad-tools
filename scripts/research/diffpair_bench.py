@@ -235,6 +235,37 @@ def committed_copper_matches(routed: Path, board: ere.Board, nets: set[str]) -> 
     return None
 
 
+def add_route_keepouts(text: str, keepouts) -> str:
+    """Append track/via keepout rule areas to a ``.kicad_pcb`` text (Issue #7498).
+
+    Pours stay allowed, so the fill is unchanged; only the router is steered.
+    The areas live in the staged input and the routed output, never in the
+    committed board or the saved plan.
+    """
+    from kicad_tools.sexp import serialize_sexp
+    from kicad_tools.sexp.builders import keepout_node
+
+    body = text.rstrip()
+    if not body.endswith(")"):
+        raise PairBenchError("board text does not end with a closing parenthesis")
+    zones = "\n".join(
+        "  "
+        + serialize_sexp(
+            keepout_node(
+                list(points),
+                list(layers),
+                no_tracks=True,
+                no_vias=True,
+                no_pour=False,
+                uuid_str=f"7498{index:04d}-0000-4000-8000-000000000000",
+                name=name,
+            )
+        )
+        for index, (name, layers, points) in enumerate(keepouts)
+    )
+    return f"{body[:-1].rstrip()}\n{zones}\n)\n"
+
+
 def prepare_input(board: ere.Board, run_dir: Path, committed_map: bool = True) -> tuple[Path, dict]:
     """Copy *board*'s input into *run_dir* with pair copper stripped, then guard it.
 
@@ -250,6 +281,8 @@ def prepare_input(board: ere.Board, run_dir: Path, committed_map: bool = True) -
     stripped = 0
     if board.strip_nets:
         text, stripped = krt_compare.strip_net_copper(text, board.strip_nets)
+    if board.route_keepouts:
+        text = add_route_keepouts(text, board.route_keepouts)
     dst.write_text(text)
     for suffix in (".kicad_pro", ".kicad_dru"):
         sib = src.with_suffix(suffix)
@@ -738,18 +771,21 @@ def run_cell(
 
 def render(rows: list[dict]) -> str:
     head = (
-        "| Board | Engine | Seed | Map | Valid | Pairs coupled | Nets | kct err (by rule) | "
-        "kicad-cli err (by type) | unconn | Manufacturable | Wall s |\n"
-        "|---|---|---|---|---|---|---|---|---|---|---|---|"
+        "| Board | Engine | Seed | Map | Valid | Pairs coupled | Pairs hybrid | Nets | "
+        "kct err (by rule) | kicad-cli err (by type) | unconn | Manufacturable | Wall s |\n"
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|"
     )
     out = [head]
     for r in rows:
         pairs = r.get("pairs") or []
         coupled = sum(1 for p in pairs if (p.get("outcome") or "").startswith("coupled"))
+        # Issue #6446: ``hybrid:<ref>.<pin>`` is a coupled trunk with
+        # single-ended legs at one terminal -- counted apart, never as coupled.
+        hybrid = sum(1 for p in pairs if (p.get("outcome") or "").startswith("hybrid:"))
         out.append(
             f"| {r['board']} | {r['engine']} | {r['seed']} | "
             f"{r.get('net_class_map_mode', 'committed')} | {r.get('valid')} | "
-            f"{coupled}/{len(pairs)} | {r.get('nets_routed', '-')} | "
+            f"{coupled}/{len(pairs)} | {hybrid} | {r.get('nets_routed', '-')} | "
             f"{r.get('kct_errors_by_rule') or '-'} | {r.get('kicad_cli_errors_by_type') or '-'} | "
             f"{r.get('kicad_drc_unconnected', '-')} | {r.get('manufacturable')} | {r.get('wall_s', '-')} |"
         )

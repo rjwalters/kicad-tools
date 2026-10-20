@@ -1,13 +1,14 @@
 {
   "file": "output/voltage_divider_routed.kicad_pcb",
   "manufacturer": "jlcpcb",
+  "pcb_sha256": "9a42943ac4b05d748ddfad96940c7363592fefec69ca65319a739ebbef530045",
   "layers": 2,
   "summary": {
     "errors": 0,
     "warnings": 0,
     "infos": 2,
     "waived": 0,
-    "rules_checked": 56,
+    "rules_checked": 66,
     "rules_checked_by_rule": {
       "connectivity": 1,
       "copper_sliver": 1,
@@ -24,13 +25,21 @@
       "netclass_via_drill": 1,
       "netclass_annular_ring": 1,
       "sch_field_offset": 1,
-      "sch_field_overlap": 1
+      "sch_field_overlap": 1,
+      "spec_conformance_dimensions": 1,
+      "spec_conformance_layers": 1,
+      "spec_conformance_min_trace": 1,
+      "spec_conformance_min_via": 1,
+      "spec_conformance_min_drill": 1,
+      "spec_conformance_target_fab": 1
     },
     "passed": true,
     "stale_waivers": 0,
-    "coverage_checked": 32,
-    "coverage_skipped": 5,
-    "coverage_unknown": [],
+    "coverage_checked": 30,
+    "coverage_skipped": 10,
+    "coverage_unknown": [
+      "spec_conformance"
+    ],
     "coverage_blocking_unknown": []
   },
   "violations": [
@@ -38,13 +47,13 @@
       "rule_id": "connector_edge_distance",
       "type": "unknown",
       "severity": "info",
-      "message": "J2 (Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical): 4.15mm from nearest board edge",
+      "message": "J2 (Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical): 3.23mm from nearest board edge",
       "location": [
         158.5,
         87.5
       ],
       "layer": "F.Cu",
-      "actual_value": 4.149999999999999,
+      "actual_value": 3.2300000000000004,
       "required_value": null,
       "items": [
         "J2"
@@ -53,19 +62,19 @@
       "status": "info",
       "waived": false,
       "key": "connector_edge_distance|J2||F.Cu",
-      "evidence_hash": "ev2:83fc93fe488b4d73"
+      "evidence_hash": "ev2:74eed1079c727e55"
     },
     {
       "rule_id": "connector_edge_distance",
       "type": "unknown",
       "severity": "info",
-      "message": "J1 (Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical): 4.15mm from nearest board edge",
+      "message": "J1 (Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical): 3.23mm from nearest board edge",
       "location": [
         138.5,
         87.5
       ],
       "layer": "F.Cu",
-      "actual_value": 4.150000000000001,
+      "actual_value": 3.2300000000000004,
       "required_value": null,
       "items": [
         "J1"
@@ -74,14 +83,14 @@
       "status": "info",
       "waived": false,
       "key": "connector_edge_distance|J1||F.Cu",
-      "evidence_hash": "ev2:4efad749ae38e79d"
+      "evidence_hash": "ev2:47c6a04f9a2c6ff4"
     }
   ],
   "mask_copper_assessments": [],
   "meta_checks": {
     "drc": {
       "status": "PASSED",
-      "detail": "56 rules checked, 0 error(s), 0 warning(s)"
+      "detail": "66 rules checked, 0 error(s), 0 warning(s)"
     },
     "erc": {
       "status": "PASSED",
@@ -167,21 +176,21 @@
       "blocking": true
     },
     "diffpair_length_skew": {
-      "status": "checked",
-      "state": "checked",
-      "reason": null,
+      "status": "skipped:no_diff_pairs_detected",
+      "state": "skipped",
+      "reason": "no_diff_pairs_detected",
       "blocking": true
     },
     "diffpair_routing_continuity": {
-      "status": "checked",
-      "state": "checked",
-      "reason": null,
+      "status": "skipped:no_diff_pairs_detected",
+      "state": "skipped",
+      "reason": "no_diff_pairs_detected",
       "blocking": true
     },
     "diffpair_uncoupled_length": {
-      "status": "checked",
-      "state": "checked",
-      "reason": null,
+      "status": "skipped:no_diff_pairs_detected",
+      "state": "skipped",
+      "reason": "no_diff_pairs_detected",
       "blocking": true
     },
     "dimensions": {
@@ -221,9 +230,9 @@
       "blocking": true
     },
     "match_group_length_skew": {
-      "status": "checked",
-      "state": "checked",
-      "reason": null,
+      "status": "skipped:no_net_class_map",
+      "state": "skipped",
+      "reason": "no_net_class_map",
       "blocking": true
     },
     "netclass_clearance_copper": {
@@ -274,6 +283,12 @@
       "reason": null,
       "blocking": false
     },
+    "routing_policy": {
+      "status": "skipped:no_declared_policies",
+      "state": "skipped",
+      "reason": "no_declared_policies",
+      "blocking": true
+    },
     "sch_fields": {
       "status": "checked",
       "state": "checked",
@@ -304,7 +319,25 @@
       "reason": null,
       "blocking": true
     },
+    "spec_conformance": {
+      "status": "unknown:unread_spec_keys:requirements.electrical.division_ratio,requirements.electrical.output,requirements.manufacturing.min_space",
+      "state": "unknown",
+      "reason": "unread_spec_keys:requirements.electrical.division_ratio,requirements.electrical.output,requirements.manufacturing.min_space",
+      "blocking": false
+    },
+    "thermal_asymmetry": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
     "via_in_pad": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "via_type": {
       "status": "checked",
       "state": "checked",
       "reason": null,
@@ -340,5 +373,7 @@
       "reason": null,
       "blocking": true
     }
-  }
+  },
+  "verdict": "incomplete",
+  "exit_code": 2
 }

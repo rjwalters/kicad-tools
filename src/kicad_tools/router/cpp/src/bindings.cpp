@@ -39,6 +39,13 @@ NB_MODULE(router_cpp, m) {
           "trace_clearance"_a, "via_clearance"_a,
           "Issue #6272: max(trace_clearance, via_clearance) -- the native "
           "trace/via copper floor.");
+    // Issue #6994: the native A* search radius, exposed for the Python/C++
+    // parity test against ``search_radius.search_radius_cells``.
+    m.def("search_radius_cells", &search_radius_cells,
+          "half_mm"_a, "clearance_mm"_a, "resolution"_a,
+          "Issue #6994: guarded A* search radius in cells, "
+          "max(1, ceil(x)) with x = (half + clearance) / resolution snapped "
+          "to the nearest integer within 1e-4 cells.");
     m.doc() = "C++ router core for high-performance PCB routing";
 
     // GridCell struct
@@ -86,6 +93,7 @@ NB_MODULE(router_cpp, m) {
         .def_rw("congestion_threshold", &DesignRules::congestion_threshold)
         .def_rw("min_drill_clearance", &DesignRules::min_drill_clearance)
         .def_rw("min_hole_to_hole", &DesignRules::min_hole_to_hole)
+        .def_rw("min_via_pad_edge_gap", &DesignRules::min_via_pad_edge_gap)
         // Issue #4071: soft corridor-attractor bonus (Python default 3.0).
         .def_rw("cost_corridor_attractor", &DesignRules::cost_corridor_attractor);
 
@@ -376,7 +384,7 @@ NB_MODULE(router_cpp, m) {
         .def("authored_pair_floor", &Grid3D::authored_pair_floor, "net_a"_a, "net_b"_a)
         .def("set_pad_authored", &Grid3D::set_pad_authored,
              "index"_a, "shape"_a, "width"_a, "height"_a, "rotation"_a,
-             "x"_a, "y"_a, "drill"_a, "item_floor"_a)
+             "x"_a, "y"_a, "drill"_a, "item_floor"_a, "rratio"_a)
         .def("rebuild_authored_index", &Grid3D::rebuild_authored_index)
         .def("authored_active", &Grid3D::authored_active)
         .def("authored_segment_clear", &Grid3D::authored_segment_clear,
@@ -786,6 +794,9 @@ NB_MODULE(router_cpp, m) {
 
     nb::class_<CoupledPathfinder>(m, "CoupledPathfinder")
         .def("set_fill_rail_dimensions", &CoupledPathfinder::set_fill_rail_dimensions)
+        // Issue #6840: via-aware partner clearance radii (grid cells).
+        .def("set_partner_via_clearance", &CoupledPathfinder::set_partner_via_clearance,
+             nb::arg("p_trace_vs_n_via"), nb::arg("n_trace_vs_p_via"), nb::arg("via_vs_via"))
         // Issue #5410 (B1): the net-class dimensions the dynamic route-halo
         // refinement re-measures with.  Without these the C++ arm waives
         // clearance the raster enforced whenever a net class is wider than

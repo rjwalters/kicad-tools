@@ -43,6 +43,7 @@ from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.schema import LibraryManager, Schematic
 from kicad_tools.schema.instances import build_instance_path, find_project_name
 from kicad_tools.schema.wire import Wire
+from kicad_tools.schematic.grid import snap_to_grid
 
 
 @dataclass
@@ -51,11 +52,6 @@ class PlannedAction:
 
     kind: str  # "symbol", "power", "wire", "junction", "embed"
     description: str
-
-
-def _snap(value: float, grid: float = 1.27) -> float:
-    """Snap a coordinate to the nearest grid point."""
-    return round(value / grid) * grid
 
 
 def _cross(o: tuple[float, float], a: tuple[float, float], b: tuple[float, float]) -> float:
@@ -204,7 +200,7 @@ def _find_clear_offset(
 
     for step in range(1, max_steps + 1):
         for direction in (primary_dir, -primary_dir):
-            candidate_x = _snap(pin_x + direction * step * grid)
+            candidate_x = snap_to_grid(pin_x + direction * step * grid)
             # Check vertical segment at candidate_x
             seg_start = (candidate_x, wire_start_y)
             seg_end = (candidate_x, wire_end_y)
@@ -388,13 +384,13 @@ def run_add_pull_resistor(args) -> int:
 
     if direction == "up":
         # Resistor center above the IC pin
-        res_x = _snap(pin_x)
-        res_y = _snap(pin_y - offset)
+        res_x = snap_to_grid(pin_x)
+        res_y = snap_to_grid(pin_y - offset)
         res_rotation = 0.0
     else:
         # Resistor center below the IC pin
-        res_x = _snap(pin_x)
-        res_y = _snap(pin_y + offset)
+        res_x = snap_to_grid(pin_x)
+        res_y = snap_to_grid(pin_y + offset)
         res_rotation = 0.0
 
     res_position = (res_x, res_y)
@@ -444,12 +440,12 @@ def run_add_pull_resistor(args) -> int:
     # Power symbol position: at the far end of the resistor
     # Power symbols connect at their pin position, so place at the power-side pin
     if direction == "up":
-        power_x = _snap(power_side_pin[0])
-        power_y = _snap(power_side_pin[1])
+        power_x = snap_to_grid(power_side_pin[0])
+        power_y = snap_to_grid(power_side_pin[1])
         power_rotation = 0.0
     else:
-        power_x = _snap(power_side_pin[0])
-        power_y = _snap(power_side_pin[1])
+        power_x = snap_to_grid(power_side_pin[0])
+        power_y = snap_to_grid(power_side_pin[1])
         power_rotation = 180.0
 
     power_position = (power_x, power_y)
@@ -475,10 +471,10 @@ def run_add_pull_resistor(args) -> int:
 
     # --- Check for wire path crossings and reroute if needed ---
     # Compute the planned wire segments (IC pin -> resistor, resistor -> power)
-    ic_pin_snapped = (_snap(pin_x), _snap(pin_y))
-    ic_side_snapped = (_snap(ic_side_pin[0]), _snap(ic_side_pin[1]))
-    power_side_snapped = (_snap(power_side_pin[0]), _snap(power_side_pin[1]))
-    power_pos_snapped = (_snap(power_x), _snap(power_y))
+    ic_pin_snapped = (snap_to_grid(pin_x), snap_to_grid(pin_y))
+    ic_side_snapped = (snap_to_grid(ic_side_pin[0]), snap_to_grid(ic_side_pin[1]))
+    power_side_snapped = (snap_to_grid(power_side_pin[0]), snap_to_grid(power_side_pin[1]))
+    power_pos_snapped = (snap_to_grid(power_x), snap_to_grid(power_y))
 
     # Build list of wire segments to place: each is (start, end)
     wire_segments: list[tuple[tuple[float, float], tuple[float, float]]] = []
@@ -527,17 +523,17 @@ def run_add_pull_resistor(args) -> int:
                 power_side_pin = res_pin1
 
             # Recompute power position
-            power_x = _snap(power_side_pin[0])
-            power_y = _snap(power_side_pin[1])
+            power_x = snap_to_grid(power_side_pin[0])
+            power_y = snap_to_grid(power_side_pin[1])
             power_position = (power_x, power_y)
 
             # Recompute snapped coordinates
-            ic_side_snapped = (_snap(ic_side_pin[0]), _snap(ic_side_pin[1]))
-            power_side_snapped = (_snap(power_side_pin[0]), _snap(power_side_pin[1]))
-            power_pos_snapped = (_snap(power_x), _snap(power_y))
+            ic_side_snapped = (snap_to_grid(ic_side_pin[0]), snap_to_grid(ic_side_pin[1]))
+            power_side_snapped = (snap_to_grid(power_side_pin[0]), snap_to_grid(power_side_pin[1]))
+            power_pos_snapped = (snap_to_grid(power_x), snap_to_grid(power_y))
 
             # L-shaped route: horizontal from IC pin, then vertical to resistor
-            corner = (_snap(clear_x), ic_pin_snapped[1])
+            corner = (snap_to_grid(clear_x), ic_pin_snapped[1])
             wire_segments.append((ic_pin_snapped, corner))
             wire_segments.append((corner, ic_side_snapped))
 

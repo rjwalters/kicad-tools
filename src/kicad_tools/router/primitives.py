@@ -18,8 +18,12 @@ import random
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from .layers import Layer
+
+if TYPE_CHECKING:
+    from .tuning_pattern import TuningPattern
 
 # Issue #3272: Deterministic UUID mode.  When :func:`enable_deterministic_uuids`
 # is called the per-element UUID emitted by :meth:`Segment.to_sexp` and
@@ -356,6 +360,10 @@ class Segment:
     layer: Layer
     net: int = 0
     net_name: str = ""
+    # Issue #7521: the KiCad tuning pattern (skew-compensation bump) that owns
+    # this segment, if any.  :meth:`Route.to_sexp` writes one ``(generated
+    # ...)`` block per pattern naming its segments.  Not part of equality.
+    tuning_pattern: "TuningPattern | None" = field(default=None, compare=False, repr=False)
 
     @property
     def start(self) -> tuple[float, float]:
@@ -367,8 +375,11 @@ class Segment:
         """Return the end point as a tuple (x2, y2)."""
         return (self.x2, self.y2)
 
-    def to_sexp(self, name_only: bool = False) -> str:
+    def to_sexp(self, name_only: bool = False, *, uuid: str | None = None) -> str:
         """Generate KiCad S-expression.
+
+        Issue #7521: ``uuid`` pins the emitted uuid (a tuning pattern names
+        its member segments by uuid); ``None`` mints a fresh one.
 
         Issue #4416: when ``name_only`` is True and :attr:`net_name` is
         known, the net reference is emitted as ``(net "name")`` to match a
@@ -416,7 +427,7 @@ class Segment:
 \t\t(end {self.x2:.4f} {self.y2:.4f})
 \t\t(width {_fmt(self.width)})
 \t\t(layer "{self.layer.kicad_name}")
-\t\t(uuid "{_make_uuid()}")
+\t\t(uuid "{uuid or _make_uuid()}")
 \t\t(net {net_ref})
 \t)"""
 
@@ -448,12 +459,26 @@ class Route:
         Issue #4416: ``name_only`` is threaded to every segment/via emitter
         so a route appended to a KiCad-10 name-based board keeps that
         board's ``(net "name")`` dialect.
+
+        Issue #7521: segments tagged with a tuning pattern
+        (``Segment.tuning_pattern``) are followed by one KiCad ``(generated
+        ...)`` tuning-pattern block per pattern, whose ``members`` are the
+        uuids just written for exactly those segments.
         """
         parts = []
+        patterns: dict[int, tuple[TuningPattern, list[str]]] = {}
         for seg in self.segments:
-            parts.append(seg.to_sexp(name_only=name_only))
+            pattern = seg.tuning_pattern
+            if pattern is None:
+                parts.append(seg.to_sexp(name_only=name_only))
+                continue
+            seg_uuid = _make_uuid()
+            parts.append(seg.to_sexp(name_only=name_only, uuid=seg_uuid))
+            patterns.setdefault(id(pattern), (pattern, []))[1].append(seg_uuid)
         for via in self.vias:
             parts.append(via.to_sexp(name_only=name_only))
+        for pattern, members in patterns.values():
+            parts.append(pattern.to_sexp(members, _make_uuid()))
         return "\n\t".join(parts)
 
     def copy_geometry(self) -> "Route":
@@ -591,9 +616,24 @@ class Pad:
     shape: str = "rect"
     """Authored shape; absent programmatic metadata uses a conservative rectangle.
 
-    Circles alone use a disc. Oval and roundrect use their enclosing rotated
-    rectangle until exact rounded geometry is supported. Custom/trapezoid
-    nominal dimensions do not bound their copper and are rejected explicitly.
+    The clearance kernel (:func:`~kicad_tools.router.clearance_shapes.pad_shape`)
+    measures circles as discs and ovals as stadiums -- both are fully
+    determined by ``width``/``height``. A roundrect's corner radius is
+    ``roundrect_rratio * min(width, height)``, so it is measured exactly only
+    when :attr:`roundrect_rratio` carries the file's ratio; without one it is
+    measured as its enclosing rotated rectangle (never an assumed ratio, which
+    would over-round a small-ratio pad's corners and hide a real near-miss --
+    issue #6718). Grid/AABB consumers still use the enclosing rectangle.
+    Custom/trapezoid nominal dimensions do not bound their copper and are
+    rejected explicitly.
+    """
+
+    roundrect_rratio: float | None = None
+    """The file's ``(roundrect_rratio X)`` for a ``roundrect`` pad (issue #6718).
+
+    ``None`` means "unknown": the clearance kernel then treats the roundrect as
+    its rectangle, which can only over-report a corner near-miss. Ignored for
+    every other shape.
     """
 
     # Physical drill metadata, independent of the copper's residual rotation.
@@ -613,6 +653,20 @@ class Pad:
     nets all become net ``0``).  The authored minimum belongs to the copper, not
     to the routing target, so it survives the neutralisation.  ``0.0`` -- the
     default -- defers entirely to ``DesignRules.net_clearance_floors``.
+    """
+
+    side: Layer | None = None
+    """Copper layer of the owning footprint's side (issue #6780).
+
+    ``Layer.F_CU`` for a front footprint, ``Layer.B_CU`` for a back one;
+    ``None`` when the constructor did not know (programmatic pads), in which
+    case consumers fall back to :attr:`layer`.  A through-hole pad's
+    :attr:`layer` is always ``F.Cu`` (the loaders do not record per-layer
+    copper for ``*.Cu`` pads), so only this field tells a back-side
+    footprint's through-hole pad apart.  Only the kicad-cli length model
+    (:func:`~kicad_tools.router.kicad_length.router_pad`) reads it: kicad-cli
+    connects a via inside a through-hole pad on the footprint's side only.
+    Routing, clearance and grid code ignore it.
     """
 
     @property

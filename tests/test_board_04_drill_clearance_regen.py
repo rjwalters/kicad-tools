@@ -313,6 +313,9 @@ def test_fresh_regen_is_tier1_hole_to_hole_clean(tmp_path: Path) -> None:
         f"{reviewed_run.stderr[-2000:]}"
     )
     reviewed_payload = json.loads(reviewed_report.read_text())
+    # Issues #7220 / #7295: the thermal-spoke ladder removed the solid 0805
+    # terminals ``thermal_asymmetry`` reported, so the reviewed gate (which
+    # fails on any warning) must pass outright.
     assert reviewed_payload["meta_checks"]["drc"]["status"] == "PASSED", (
         "Fresh board-04 regen fails its OWN reviewed paid-drill DRC gate "
         "(boards/04-stm32-devboard/check_manufacturing.py), the verdict "

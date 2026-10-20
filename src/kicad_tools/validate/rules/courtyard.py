@@ -17,16 +17,31 @@ Courtyard-outline extraction supports two representations:
 * ``fp_rect`` -- a single axis-aligned rectangle (fast path).
 * ``fp_line`` -- a closed loop of line segments chained by endpoint matching.
 
-A courtyard that cannot be resolved from these (e.g. an ``fp_poly``-only
-outline, or an ``fp_line`` chain that does not close) emits an ``info``-severity
-"could not resolve courtyard outline" finding instead of silently skipping the
-footprint, so the gap is visible rather than a silent false negative.
+A courtyard that cannot be resolved from these (e.g. an ``fp_line`` chain that
+does not close) emits an ``info``-severity "could not resolve courtyard
+outline" finding instead of silently skipping the footprint, so the gap is
+visible rather than a silent false negative.
+
+A footprint with pads and **no** ``F.CrtYd`` / ``B.CrtYd`` geometry at all
+emits a ``warning``-severity ``courtyard_missing`` finding (Issue #7204):
+neither this rule nor KiCad (whose ``missing_courtyard`` rule defaults to
+ignore) can test it against its neighbours, so before #7204 such boards
+passed with zero pairs evaluated.  Exempt: footprints with the
+``allow_missing_courtyard`` attr flag (the opt-out KiCad's own rule honours) or
+``board_only``, footprints with no
+pads, and the ``MountingHole:`` / ``Fiducial:`` / ``NetTie:`` libraries (see
+:func:`kicad_tools.geometry.courtyard.courtyard_exempt`).  DNP parts are not
+exempt.  ``kct check`` coverage then reports ``courtyard_overlap`` as the
+blocking ``unknown:no_courtyard_geometry (N of M footprints)``, counting both
+missing and unresolvable outlines, so sign-off refuses until every footprint
+can be evaluated.
 
 Note on ``fp_poly``: the schema parser now records ``fp_poly`` vertices in
 :attr:`FootprintGraphic.points`.  This rule *does* consume them when present
 (a closed polygon is directly usable), so the "unresolved" info finding is
-reserved for genuinely-degenerate outlines (no CrtYd geometry, non-closing
-line chains, or fewer than three vertices).
+reserved for genuinely-degenerate outlines (non-closing line chains, arc-only
+outlines, or fewer than three vertices); a footprint with no CrtYd geometry at
+all gets ``courtyard_missing`` instead.
 """
 
 from __future__ import annotations
@@ -43,6 +58,7 @@ from kicad_tools.geometry.courtyard import (
     _has_courtyard_geometry,
     _rect_ring,
     _side_has_geometry,
+    courtyard_exempt,
 )
 
 from ..violations import DRCResults, DRCViolation
@@ -55,6 +71,7 @@ if TYPE_CHECKING:
 # both ``kct check`` and ``kct placement check`` share one source of truth),
 # but historically imported from this module.
 __all__ = [
+    "COURTYARD_MISSING_RULE_ID",
     "COURTYARD_RULE_ID",
     "COURTYARD_UNRESOLVED_RULE_ID",
     "COURTYARD_UNUSED_WAIVER_RULE_ID",
@@ -76,6 +93,9 @@ COURTYARD_RULE_ID = "courtyards_overlap"
 # Rule id for the advisory "could not resolve courtyard outline" info finding.
 COURTYARD_UNRESOLVED_RULE_ID = "courtyard_outline_unresolved"
 
+# Rule id for the "footprint has no courtyard" warning (Issue #7204).
+COURTYARD_MISSING_RULE_ID = "courtyard_missing"
+
 # Rule id for the advisory "unused waiver" info finding.
 COURTYARD_UNUSED_WAIVER_RULE_ID = "courtyard_waiver_unused"
 
@@ -93,6 +113,9 @@ class CourtyardOverlapRule:
         - ``courtyards_overlap``: two courtyards overlap (error, or waived).
         - ``courtyard_outline_unresolved``: a footprint's courtyard could not
           be resolved to a polygon (info).
+        - ``courtyard_missing``: a non-exempt footprint has no courtyard
+          geometry at all, so its overlaps were not checked (warning,
+          Issue #7204).
         - ``courtyard_waiver_unused``: a loaded waiver names a pair not present
           on the board (info).
     """
@@ -129,6 +152,24 @@ class CourtyardOverlapRule:
         polygons: dict[tuple[str, str], Any] = {}
         for fp in footprints:
             has_geom = _has_courtyard_geometry(fp)
+            if not has_geom and not courtyard_exempt(fp):
+                # Issue #7204: no outline to test at all -- say so instead of
+                # silently passing the footprint.
+                results.add(
+                    DRCViolation(
+                        rule_id=COURTYARD_MISSING_RULE_ID,
+                        severity="warning",
+                        message=(
+                            f"{fp.reference} ({fp.name}) has no F.CrtYd/B.CrtYd "
+                            f"courtyard; courtyard overlap not checked for this "
+                            f"footprint -- add a courtyard, or set "
+                            f"(attr ... allow_missing_courtyard) if it has no body"
+                        ),
+                        location=fp.position,
+                        layer=fp.layer,
+                        items=(fp.reference,),
+                    )
+                )
             resolved_any = False
             for side in ("F", "B"):
                 # Only attempt sides that actually have geometry.

@@ -722,7 +722,7 @@ safehoused's egress subsystem mirrors well-formed **`completion`** envelopes out
 of allowlisted rooms — redacted and delay-buffered — to a `sink_url`; that is
 what feeds the public fleet feed. Loom is the producer:
 
-- **Emit point (two, since #4583)**:
+- **Emit point (three, since #12152)**:
   1. The narration sink, on `SweepExited`. Exit status alone proves nothing, so
      the sink checks **forge truth** (`gh pr list --head feature/issue-N
      --state merged`, in the event's workspace root, 10s timeout) and emits
@@ -761,6 +761,22 @@ what feeds the public fleet feed. Loom is the producer:
        workspace means narrating months-old PRs as if they just landed. Seven
        days is far beyond any plausible daemon outage, so the daemon-was-down
        case below still recovers.
+     - **Deferred, then caught up from a watermark (#12152)**: while the
+       shared rate-limit breaker cools, a reconciliation tick is *deferred*,
+       not spent: no forge call, the round-robin cursor and the seed-only
+       slot stay, and the pass is counted `deferred`
+       (`loom.feed.reconcile_passes`). Each workspace keeps a watermark, the
+       start of its last pass the forge answered (in memory; a pass whose
+       read failed keeps it). Once a workspace has one, its pass asks for
+       everything merged since then, less one hour of slack for search-index
+       lag: `gh pr list --state merged --search "merged:>=<watermark>"
+       --limit 100`. So a stretch the breaker held the pass out of is read in
+       full on the first tick after it clears, whatever the listing order or
+       the number of PRs merged meanwhile. A full page logs a warning and
+       still advances the watermark. The first pass after a restart has no
+       watermark and is the `--limit 30` query above. Every answered pass logs
+       one `info` line (rows read, completions found, watermark), and the
+       edges of a deferral log one each.
      - **Seed-only first pass per workspace (#4649)**: the lookback window
        alone still allowed a *burst* — up to 30 genuinely-in-window merges
        narrated in one tick — the very first time a workspace was reconciled
@@ -776,6 +792,24 @@ what feeds the public fleet feed. Loom is the producer:
        Trade-off: a merge that landed just before a fresh install is silently
        never narrated, which is acceptable since nothing was watching the feed
        at install time anyway.
+  3. **A Champion merge step's end** (#12152). Since item-first step
+     dispatch (#12009) most work runs as steps, one role session per stage,
+     and a step is not an issue sweep: it never emits `SweepExited`, so path 1
+     stopped firing for it. The step tick publishes `step.item.{N}.ended`
+     (`Event::StepEnded`) once per ended step, after the step ledger has
+     classified it, with the ledger's `class` and `reason`. The sink looks
+     only at a `champion_merge` step whose class is `verdict` and whose reason
+     is not `rejected` (`step_narrates_completion`); a `noop`, `refused` or
+     `failed` step, and every other role's step, narrate nothing and make no
+     forge call. A Builder's opened PR is unfinished work, not a completion,
+     as it was for sweeps. For a qualifying step it reads the PR (`gh pr view
+     <N> --json number,headRefName,url,mergedAt,createdAt,title,additions,
+     deletions`) and narrates only when `mergedAt` is set, with the PR's
+     `createdAt`/`mergedAt` as the clock, the same envelope the
+     reconciliation pass would build. It shares the dedup set (and the peer
+     dedup) with paths 1 and 2, so one merge narrates once whichever path sees
+     it first. While the breaker cools the lookup is skipped and nothing is
+     recorded as narrated, so path 2 picks the merge up.
 - **`meta` (`completion-v1`)**: `{schema, agent, repo, ref, result, started_at,
   completed_at}` required, plus optional `issue`/`tokens`/`tokens_by_model`/
   `title`/`additions`/`deletions`/`visibility` (envelope-v1 preserves unknown
@@ -1708,6 +1742,22 @@ visibility, which #9294 closed:
   only counters, so the one command an operator actually runs showed a six-day
   fleet-wide outage as ordinary output. A DEGRADED channel now prints a
   `DEGRADED (…)` line with its reason directly under the counters.
+
+### Fleet-wide no-op hold streak (#12024)
+
+The no-op hold (#10156) parks an issue after `holdThreshold` consecutive no-op
+sweeps with an unchanged fingerprint. Its streak used to be per host, so a loop
+spread across six dispatchers never tripped it (ten no-ops in 97 minutes, no
+host above two). Each counted no-op now publishes a `ClaimKind::NoopStreak` ad
+(`noop_streak` on the wire) carrying the sender's **own** count in
+`consecutive` and the fingerprint's digest in a new `fingerprint` field. The
+receiver keeps one entry per host and the counting host adds the peers' counts
+**on the same fingerprint** to its own, so a change to the issue restarts the
+fleet streak without an announcement. Parking or releasing the hold publishes
+a break (`streak_break: true`) that drops every host's entry and resets each
+host's local count. It is a new kind, so an older peer drops it as unknown and
+nothing else on the wire changes. See `peer_claims::noop_streak_tally` and
+[`label-state-machine.md` → No-op hold](label-state-machine.md#no-op-hold-10156).
 
 ### Fleet-wide token-pool exhaustion hold: the third brake lane (#8001)
 

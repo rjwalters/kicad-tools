@@ -3839,7 +3839,10 @@ if [[ "$DRY_RUN" -eq 0 && "${LOOM_RESYNC_SKIP_USER_SCOPE:-0}" != "1" \
         # shellcheck source=/dev/null
         source "$SOURCE_ROOT/scripts/install/provision-skills.sh"
         provision_loom_dispatcher "$SOURCE_ROOT" >&2 || true
-        provision_loom_skills "${LOOM_HOME:-$HOME/.local/share/loom}" >&2 || true
+        # SOURCE_ROOT is the reference: a machine checkout older than the
+        # tree this run synced from must not supply the user-scope /loom:*
+        # commands, which shadow every repo's own fresher copy.
+        provision_loom_skills "${LOOM_HOME:-$HOME/.local/share/loom}" "" "$SOURCE_ROOT" >&2 || true
     ) || printf '%b\n' "${YELLOW}[resync] user-scope skill provisioning failed (non-fatal).${NC}" >&2
 fi
 
@@ -3861,17 +3864,16 @@ else
     printf '%b\n' "${GREEN}[resync] Already in sync (${N_UNCHANGED} unchanged, ${N_SKIPPED} skipped).${NC}${CHECK_NOTE}"
 fi
 
-# #11713: operator presence wiring. `operatorPresence.enabled` (fleet key in the
-# machine-level defaults.json), LOOM_OPERATOR_PRESENCE=1|0 or the local
-# ~/.loom/operator-presence.optout file decide whether the user-scope presence
-# hooks are merged into (or stripped from) ~/.claude/settings.json. A no-op when
-# none of them is set, when the machine checkout lacks provision-hooks.sh, and
-# in --dry-run. Best-effort: resync never fails on it.
+# #12121: operator presence is derived by the daemon, so resync only STRIPS the
+# retired user-scope presence-beat.sh hook entries and LOOM_OPERATOR_PRESENCE=1
+# env entry from ~/.claude/settings.json. A no-op when the machine checkout
+# lacks provision-hooks.sh and in --dry-run. Best-effort: resync never fails
+# on it.
 _PRESENCE_LIB="${LOOM_HOME:-$HOME/.local/share/loom}/scripts/install/provision-hooks.sh"
 if [[ "${DRY_RUN:-0}" != "1" && -r "$_PRESENCE_LIB" ]]; then
     # shellcheck source=/dev/null
     ( source "$_PRESENCE_LIB" && provision_operator_presence ) \
-        || warn "operator presence wiring not fully applied (see messages above); resync itself completed."
+        || warn "stripping the retired operator presence wiring was not fully applied (see messages above); resync itself completed."
 fi
 
 # 75 (EX_TEMPFAIL), matching create-issue.sh's DEFERRED convention: the

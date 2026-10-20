@@ -16,9 +16,8 @@ Coverage:
    ``cli/parser.py`` parser and the standalone ``route_cmd.py`` parser.
 2. **AC #6: missing file** returns exit 1 with a clear stderr message
    (parity with the ``kct check`` error paths).
-3. **Forwarding**: ``run_route_command`` propagates the sidecar path to
-   the inner ``route_cmd.main`` argv (mirrors the
-   ``--length-match-groups`` plumbing pattern).
+3. **Forwarding**: ``kct route`` hands the sidecar path to
+   ``route_cmd.main`` (verbatim since issue #7017).
 4. **Error paths**: malformed JSON and structurally-invalid sidecars
    return exit 1.
 """
@@ -35,6 +34,9 @@ from unittest.mock import patch
 
 import pytest
 
+from kicad_tools.cli import main as cli_main
+from tests.route_cli import kct_route, route_args
+
 # =============================================================================
 # AC #1: Flag declared in both parsers
 # =============================================================================
@@ -45,13 +47,11 @@ class TestFlagDefinedInBothParsers:
 
     def test_net_class_map_in_unified_parser_help(self):
         """``kct route --help`` (unified parser) lists ``--net-class-map``."""
-        from kicad_tools.cli.parser import create_parser
 
-        parser = create_parser()
         help_output = StringIO()
         with patch.object(sys, "stdout", help_output):
             with contextlib.suppress(SystemExit):
-                parser.parse_args(["route", "--help"])
+                cli_main(["route", "--help"])
         help_text = help_output.getvalue()
         assert "--net-class-map" in help_text
 
@@ -68,97 +68,34 @@ class TestFlagDefinedInBothParsers:
 
     def test_net_class_map_parses_via_unified_parser(self):
         """``kct route --net-class-map PATH`` is parseable via the unified parser."""
-        from kicad_tools.cli.parser import create_parser
 
-        parser = create_parser()
-        args = parser.parse_args(
-            ["route", "test.kicad_pcb", "--net-class-map", "/tmp/sidecar.json"]
-        )
+        args = route_args(["test.kicad_pcb", "--net-class-map", "/tmp/sidecar.json"])
         assert args.net_class_map == "/tmp/sidecar.json"
 
     def test_net_class_map_default_none_in_unified_parser(self):
         """When omitted, ``net_class_map`` defaults to ``None``."""
-        from kicad_tools.cli.parser import create_parser
 
-        parser = create_parser()
-        args = parser.parse_args(["route", "test.kicad_pcb"])
+        args = route_args(["test.kicad_pcb"])
         assert args.net_class_map is None
 
 
 # =============================================================================
-# Forwarding: run_route_command -> route_cmd.main
+# Forwarding: kct route -> route_cmd.main
 # =============================================================================
 
 
-def _base_args(**overrides) -> SimpleNamespace:
-    """Build a minimal args namespace mirroring ``run_route_command``'s needs."""
-    base: dict[str, object] = {
-        "pcb": "test.kicad_pcb",
-        "output": None,
-        "strategy": "negotiated",
-        "skip_nets": None,
-        "grid": "auto",
-        "trace_width": 0.2,
-        "clearance": 0.15,
-        "via_drill": 0.3,
-        "via_diameter": 0.6,
-        "mc_trials": 10,
-        "iterations": 15,
-        "verbose": False,
-        "dry_run": True,
-        "quiet": True,
-        "power_nets": None,
-        "layers": "auto",
-        "force": False,
-        "no_optimize": False,
-        "auto_layers": False,
-        "max_layers": 6,
-        "min_completion": 0.95,
-        "adaptive_rules": False,
-        "min_trace": None,
-        "min_clearance_floor": None,
-        "manufacturer": "jlcpcb",
-        "high_performance": False,
-        "skip_drc": False,
-        "auto_fix": False,
-        "auto_fix_passes": None,
-        "export_failed_nets": None,
-        "differential_pairs": False,
-        "diffpair_spacing": None,
-        "diffpair_max_delta": None,
-        "length_match_diffpairs": False,
-        "length_match_groups": False,
-        "strict": False,
-        "net_class_map": None,
-    }
-    base.update(overrides)
-    return SimpleNamespace(**base)
-
-
 class TestForwarding:
-    """``run_route_command`` forwards the new flag when set, omits otherwise."""
+    """``kct route`` hands the flag to the router verbatim (issue #7017)."""
 
     def test_net_class_map_forwarded_when_set(self):
-        from kicad_tools.cli.commands.routing import run_route_command
+        forwarded, args = kct_route(["test.kicad_pcb", "--net-class-map", "/tmp/sidecar.json"])
+        assert forwarded[forwarded.index("--net-class-map") + 1] == "/tmp/sidecar.json"
+        assert args.net_class_map == "/tmp/sidecar.json"
 
-        args = _base_args(net_class_map="/tmp/sidecar.json")
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-            call_args = mock_main.call_args[0][0]
-            assert "--net-class-map" in call_args
-            idx = call_args.index("--net-class-map")
-            assert call_args[idx + 1] == "/tmp/sidecar.json"
-
-    def test_net_class_map_not_forwarded_when_none(self):
-        from kicad_tools.cli.commands.routing import run_route_command
-
-        args = _base_args(net_class_map=None)
-        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
-            mock_main.return_value = 0
-            run_route_command(args)
-            call_args = mock_main.call_args[0][0]
-            assert "--net-class-map" not in call_args
+    def test_net_class_map_absent_when_unset(self):
+        forwarded, args = kct_route(["test.kicad_pcb"])
+        assert "--net-class-map" not in forwarded
+        assert args.net_class_map is None
 
 
 # =============================================================================

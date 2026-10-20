@@ -94,6 +94,12 @@ class CorpusSpec:
     guide_board_filename: str
     splits_file: str
     splits: Mapping[str, SplitSpec] = field(default_factory=dict)
+    # The bare variant ``make_guide`` writes next to the guide board. PCBWorld
+    # loads the *routed* guide and deletes its tracks/vias at ``reset()``; we
+    # route from this pre-stripped file instead (issue #6332).
+    unrouted_board_filename: str = ""
+    # Named sub-denominators: alias -> (split alias, path inside PCBWorld).
+    subsets: Mapping[str, tuple[str, str]] = field(default_factory=dict)
 
 
 def load_corpus(path: Path = DEFAULT_CORPUS_PATH) -> CorpusSpec:
@@ -123,6 +129,14 @@ def load_corpus(path: Path = DEFAULT_CORPUS_PATH) -> CorpusSpec:
             guide_board_filename=prep["guide_board_filename"],
             splits_file=prep["splits_file"],
             splits=splits,
+            unrouted_board_filename=prep.get(
+                "unrouted_board_filename",
+                prep["guide_board_filename"].replace(".kicad_pcb", "_unrouted.kicad_pcb"),
+            ),
+            subsets={
+                alias: (entry["split"], entry["path"])
+                for alias, entry in (data.get("subsets") or {}).items()
+            },
         )
     except KeyError as exc:
         raise PCBWorldError(f"{path}: missing required key {exc}") from exc
@@ -359,7 +373,12 @@ def resolve_tools(
 
 @dataclass(frozen=True)
 class PreparedBoard:
-    """A prepared D3 ``guide`` board with stable identity and provenance."""
+    """A prepared D3 ``guide`` board with stable identity and provenance.
+
+    ``guide_pcb`` is the unrouted routing input (``make_guide``'s
+    ``*_unrouted.kicad_pcb``); ``reference_pcb`` is the routed guide board
+    PCBWorld's split names, kept only as the human wirelength/via reference.
+    """
 
     board_id: str  # pcbworld/<split>/<NNNN_name> -- stable, from PCBWorld's own split file
     split: str
@@ -369,6 +388,7 @@ class PreparedBoard:
     guide_pro: Path | None
     input_sha256: str
     pro_sha256: str | None
+    reference_pcb: Path | None = None
 
     @property
     def slug(self) -> str:
@@ -376,15 +396,38 @@ class PreparedBoard:
         return re.sub(r"[^A-Za-z0-9._-]+", "_", self.board_id.replace("/", "_"))
 
 
-def select_boards(corpus: CorpusSpec, split: str, pcbworld_dir: Path, limit: int) -> list[str]:
-    """Deterministic smoke subset: the first ``limit`` names of the split's test list.
+def load_subset(corpus: CorpusSpec, alias: str, pcbworld_dir: Path) -> tuple[str, list[str]]:
+    """Read a named sub-denominator (e.g. ``fair95``) from PCBWorld's own files.
+
+    Returns ``(split_alias, names)``. Comment and blank lines are skipped.
+    """
+    if alias not in corpus.subsets:
+        raise PCBWorldError(f"unknown subset {alias!r}; available: {sorted(corpus.subsets)}")
+    split, rel = corpus.subsets[alias]
+    try:
+        text = (pcbworld_dir / rel).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise PCBWorldError(
+            f"subset {alias!r}: cannot read {rel} in PCBWorld at "
+            f"{corpus.pcbworld_commit[:12]}: {exc}"
+        ) from exc
+    names = [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.startswith("#")]
+    return split, names
+
+
+def select_boards(
+    corpus: CorpusSpec, split: str, pcbworld_dir: Path, limit: int | None
+) -> list[str]:
+    """Deterministic subset: the first ``limit`` names of the split's test list.
+
+    ``limit=None`` returns the whole split (the published denominator).
 
     The board list is read from PCBWorld's own files at the pin -- no list is
     stored in this repository.
     """
     if split not in corpus.splits:
         raise PCBWorldError(f"unknown split {split!r}; available: {sorted(corpus.splits)}")
-    if limit < 1:
+    if limit is not None and limit < 1:
         raise PCBWorldError(f"--limit must be >= 1, got {limit}")
     spec = corpus.splits[split]
     try:
@@ -405,7 +448,7 @@ def select_boards(corpus: CorpusSpec, split: str, pcbworld_dir: Path, limit: int
         )
     overrides = (boards_json.get("_test_overrides") or {}).get(entry["difficulty"], {})
     names = [overrides.get(n, n) for n in names]
-    return names[:limit]
+    return names if limit is None else names[:limit]
 
 
 def strip_prefix(name: str) -> str:
@@ -465,8 +508,14 @@ def prepare_boards(
     pcbench_dir: Path,
     work_dir: Path,
     runner: Callable[..., Any] = subprocess.run,
+    failures: dict[str, str] | None = None,
 ) -> list[PreparedBoard]:
     """Run PCBWorld's four prep steps on ``names`` and return the guide boards.
+
+    ``failures``, when given, turns a per-board failure (no guide produced,
+    or an "unrouted" variant that still carries copper) into an entry
+    ``{board_id: reason}`` instead of an exception, so one bad board never
+    hides the rest of the split. Whole-step failures always raise.
 
     Only the selected PCBench boards are staged (as symlinks) into the prep
     input root, so the steps process the smoke subset rather than the corpus.
@@ -484,7 +533,7 @@ def prepare_boards(
             return None
         for cand in sorted_out.iterdir():
             if cand.is_dir() and strip_prefix(cand.name) == strip_prefix(name):
-                guide = cand / corpus.guide_board_filename
+                guide = cand / corpus.unrouted_board_filename
                 if guide.is_file():
                     return cand
         return None
@@ -543,19 +592,29 @@ def prepare_boards(
 
     prepared: list[PreparedBoard] = []
     for name in names:
-        folder = locate(name)
-        if folder is None:
-            raise PCBWorldError(
-                f"PCBWorld preparation finished but produced no "
-                f"{corpus.guide_board_filename} for {name!r} under {sorted_out} -- the board "
-                "may have failed conversion; inspect the prep logs."
-            )
-        guide = folder / corpus.guide_board_filename
-        assert_unrouted(guide)
-        pro = guide.with_suffix(".kicad_pro")
+        board_id = f"pcbworld/{split}/{name}"
+        try:
+            folder = locate(name)
+            if folder is None:
+                raise PCBWorldError(
+                    f"PCBWorld preparation finished but produced no "
+                    f"{corpus.unrouted_board_filename} for {name!r} under {sorted_out} -- the "
+                    "board may have failed conversion; inspect the prep logs."
+                )
+            guide = folder / corpus.unrouted_board_filename
+            assert_unrouted(guide)
+        except PCBWorldError as exc:
+            if failures is None:
+                raise
+            failures[board_id] = str(exc)
+            continue
+        reference = folder / corpus.guide_board_filename
+        # make_guide writes a single .kicad_pro next to the routed guide; it
+        # carries the board's design rules for both variants.
+        pro = reference.with_suffix(".kicad_pro")
         prepared.append(
             PreparedBoard(
-                board_id=f"pcbworld/{split}/{name}",
+                board_id=board_id,
                 split=split,
                 name=name,
                 source_name=strip_prefix(name),
@@ -563,6 +622,7 @@ def prepare_boards(
                 guide_pro=pro if pro.is_file() else None,
                 input_sha256=file_sha256(guide),
                 pro_sha256=file_sha256(pro) if pro.is_file() else None,
+                reference_pcb=reference if reference.is_file() else None,
             )
         )
     return prepared
@@ -710,6 +770,9 @@ def score_boards(
                     "drv_errors_only_count": _num(row.get("drv_errors_only_count")) if ok else None,
                     "potential_gain": _num(row.get("potential_gain")),
                     "final_potential": _num(row.get("final_potential")),
+                    # Tie-break inputs of PCBWorld's winner key (absent -> None).
+                    "wirelength_mm": _num(row.get("wirelength_mm")) if ok else None,
+                    "via_count": _num(row.get("via_count")) if ok else None,
                 }
             )
         chosen = rollouts[0]  # kct runs one rollout per board in Phase 1

@@ -24,10 +24,10 @@ kicad-tools includes an A* pathfinding-based autorouter that supports:
 kct route board.kicad_pcb -o routed.kicad_pcb
 
 # Route specific net
-kct route board.kicad_pcb --net CLK -o routed.kicad_pcb
+kct route board.kicad_pcb --nets CLK -o routed.kicad_pcb
 
 # With custom trace width
-kct route board.kicad_pcb --width 0.25 -o routed.kicad_pcb
+kct route board.kicad_pcb --trace-width 0.25 -o routed.kicad_pcb
 ```
 
 ### Design Rules
@@ -37,7 +37,7 @@ kct route board.kicad_pcb --width 0.25 -o routed.kicad_pcb
 kct route board.kicad_pcb --mfr jlcpcb
 
 # Custom clearance
-kct route board.kicad_pcb --clearance 0.15 --via-size 0.6
+kct route board.kicad_pcb --clearance 0.15 --via-diameter 0.6
 ```
 
 ---
@@ -79,8 +79,40 @@ and net-class targets still apply.
 Recognized nets use separate branches from the shunt pad. Previously routed
 branches and other terminals become temporary physical obstacles during each
 search. This applies to Python and C++ grid routing, including negotiated
-routing, and avoids joining nearby pins of the same IC before routing the star.
-An existing shunt escape does not move the tap to its outer endpoint.
+routing. The general same-IC shortcut that non-Kelvin nets get (which ties
+pins up to a few millimetres apart and can wrap around the package) is not
+used on Kelvin nets. An existing shunt escape does not move the tap to its
+outer endpoint.
+
+**Neighbouring duplicate pins are tied first (issue #6799).** Before the star
+is built, the router ties some same-net pins pad-to-pad. Two pads are tied
+when all of the following hold:
+
+- they belong to the same package, and that package is not a resistor (no
+  `R<n>` reference and no resistor/shunt footprint), so a four-terminal
+  shunt's force and sense pads are never tied;
+- the copper gap between them is smaller than one trace width plus two
+  clearances (`gap < trace_width + 2 * clearance` for the net's class), so no
+  copper of any net could pass between them;
+- a straight pad-to-pad tie is legal against the package's other pads and
+  existing copper. No perimeter wrap is tried.
+
+The tied pair then counts as one terminal and gets one branch to the shunt.
+Pins with room for a trace between them keep their own branches. On board 05
+this ties the DRV8313's PGND1/PGND2 pins (0.65 mm pitch on `GND_SENSE`), so
+the two branches no longer block each other's exits.
+
+The router assumes such pins are joined inside the package. It does not
+check this: the rule looks only at geometry and the reference designator. It
+cannot tell a force pin from a high-impedance sense input. On 0.5 mm and
+0.65 mm pitch packages, every adjacent same-net pair meets the gap condition.
+If a package puts a force pin next to a sense input on the same sense-named
+net, the two are tied. Examples are a remote-sense regulator's adjacent `OUT`
+and `SENSE` pins on a `VOUT_SENSE` net, or a fine-pitch connector with `F+`
+and `S+` on one net. The sense pin then loses its own branch and reads the
+shunt voltage plus the force path's IR drop, which defeats the Kelvin
+connection. To keep a sense input separate, give it its own net, or join it
+to the force net with a net tie at the shunt.
 
 This standalone example constructs an adversarial four-terminal net: the force
 terminal lies directly between the shunt and a sense terminal.
@@ -108,13 +140,35 @@ branches = router.route_net(1)
 assert len(branches) == 3
 ```
 
+**Post-route optimization keeps the branches apart.** The trace optimizer
+runs after routing and its collision checker guards other nets only. On a
+recognised Kelvin net it now also lists the same-net copper each rewritten
+route touches outside the shunt pad: sibling branches and the net's other
+terminal pads. If a chamfer, staircase compression or other rewrite would
+touch anything the routed branch did not already touch, the whole route
+keeps its routed geometry and the log prints
+`Kelvin branch isolation: N route(s) kept pre-optimization geometry`. Contact
+the router already committed is left alone, not reported here, but a rewrite
+may not push it further from the shunt pad: the sense tap reads the force
+path's IR drop up to the furthest point the branches share. Ordinary nets
+are optimized exactly as before.
+
+`kct optimize-traces` applies the same rules to an already-routed board. It
+reads the Kelvin nets from the board's pads, splits each one into the
+branches left once the shunt pad is cut away, optimizes each branch on its
+own and keeps any branch whose rewrite would touch a sibling. Branches the
+board already joins outside the shunt count as one branch. A board with no
+sense-named net is processed exactly as before, without reading its pads.
+
 The physical-isolation implementation described here covers the grid engine;
 mesh and lattice routing have separate implementations. It does not repair
 pre-existing copper that already joins sense and force branches away from the
 shunt. Small shunt pads or dense obstacles may still prevent completion. Check
 the emitted copper and native saved/refilled connectivity: an electrical
 same-net connectivity result alone does not prove the intended Kelvin tap.
-Dense-board completion remains tracked in [issue #5398](https://github.com/rjwalters/kicad-tools/issues/5398).
+On the board 05 DRV8301 stress fixture (`design.py::legacy_main()`), all five
+ISENSE nets now finish as stars that meet only on their shunt pads
+([issue #5398](https://github.com/rjwalters/kicad-tools/issues/5398)).
 
 #### Inward off-pad access for trapped Kelvin terminals
 
@@ -662,7 +716,6 @@ kct route board.kicad_pcb -o routed.kicad_pcb
 
 # Opt out (byte-identical to pre-#5891 behaviour).
 kct route board.kicad_pcb -o routed.kicad_pcb --no-pad-access-invariant
-kct route-auto board.kicad_pcb --no-pad-access-invariant
 ```
 
 Each refusal is retained as a witness, so a run can say *which* pad it

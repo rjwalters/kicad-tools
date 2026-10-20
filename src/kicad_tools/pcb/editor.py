@@ -1009,12 +1009,13 @@ class SeeedFusion4Layer:
     @classmethod
     def power_trace_width(cls, current_ma: float, temp_rise_c: float = 10) -> float:
         """Calculate trace width for given current (external layer, 1oz copper)."""
-        # IPC-2221 formula (simplified)
-        # Area (mils²) = (I / (k * ΔT^b))^(1/c)
-        # For external: k=0.048, b=0.44, c=0.725
-        area_mils2 = (current_ma / (0.048 * (temp_rise_c**0.44))) ** (1 / 0.725)
-        width_mils = area_mils2 / 1.4  # Assuming 1oz = 1.4 mils thick
-        width_mm = width_mils * 0.0254
+        from kicad_tools.physics.ampacity import width_for_current
+
+        if current_ma <= 0:
+            return cls.MIN_TRACE_WIDTH
+
+        # width_for_current takes amps; this API takes milliamps.
+        width_mm = width_for_current(current_ma / 1000.0, 1.0, delta_t_c=temp_rise_c)
         return max(width_mm, cls.MIN_TRACE_WIDTH)
 
 

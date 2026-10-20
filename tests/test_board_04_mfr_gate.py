@@ -27,6 +27,19 @@ TOLERANCE_YAML = REPO_ROOT / ".github/routed-drc-tolerance.yml"
 BOARD_04_RELPATH = BOARD_04_ROUTED_PCB.relative_to(REPO_ROOT).as_posix()
 
 
+# Issues #7220 / #7295: the nine 0805s whose +3.3V/+5V terminal the starved-
+# thermal repair used to force solid now take a narrower thermal spoke, so the
+# reviewed gate accepts no warnings at all (``BOARD04_KNOWN_WARNINGS`` is
+# empty; tests/test_board_known_warnings.py).
+KNOWN_7220_WARNINGS: list[tuple[str, str]] = []
+
+
+def _warnings(report: dict) -> list[tuple[str, str]]:
+    return sorted(
+        (v["rule_id"], v["items"][0]) for v in report["violations"] if v["severity"] == "warning"
+    )
+
+
 @pytest.fixture(scope="module")
 def board_04_mfr_check(tmp_path_factory) -> dict:
     report = tmp_path_factory.mktemp("board04-process") / "check.json"
@@ -42,14 +55,18 @@ def board_04_mfr_check(tmp_path_factory) -> dict:
         timeout=120,
         check=False,
     )
-    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.returncode == 0 and report.is_file(), proc.stdout + proc.stderr
     return json.loads(report.read_text())
 
 
 def test_board_04_reviewed_process_is_strictly_clean(board_04_mfr_check: dict) -> None:
     report = board_04_mfr_check
     assert report["summary"]["errors"] == 0
-    assert report["meta_checks"]["overall"] == "PASSED"
+    assert _warnings(report) == KNOWN_7220_WARNINGS
+    meta = report["meta_checks"]
+    for gate in ("drc", "erc", "lvs", "manifest"):
+        assert meta[gate]["status"] == "PASSED", gate
+    assert meta["drc"]["detail"] == "0 errors, 0 warnings"
     assert report["fabrication_overrides"]["suppressed_findings"] == 0
     assert report["fabrication_overrides"]["paid_factory_option"] == "0.15 mm minimum via hole size"
     assert report["fabrication_overrides"]["via_type"] == "through"

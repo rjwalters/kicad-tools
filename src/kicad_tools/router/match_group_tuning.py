@@ -155,8 +155,9 @@ Out of scope for Phase 2F:
 from __future__ import annotations
 
 import logging
+import math
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from .diffpair_length_tuning import (
@@ -171,8 +172,9 @@ from .optimizer.serpentine import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Callable, Iterable, Iterator
 
+    from .kicad_length import KicadLengthModel
     from .match_group_length import MatchGroup
     from .primitives import Pad, Route, Segment
 
@@ -252,6 +254,113 @@ MAX_SEGMENT_RETRY_CANDIDATES: int = 3
 #: into A2's own corridor.
 AMPLITUDE_BACKOFF_FACTORS: tuple[float, ...] = (1.0, 0.5, 0.25, 0.125)
 
+# Issue #7423: a committed meander must not end past the group target.  The
+# amplitude is re-fitted (at most this many times) while the member is more
+# than ``OVERSHOOT_EPS_MM`` past it.
+MAX_OVERSHOOT_REFITS: int = 3
+OVERSHOOT_EPS_MM: float = 1e-9
+
+# Issue #7423: ``Segment.to_sexp`` writes coordinates at 4 decimal places and
+# ``kct check`` reads that written copper, so the overshoot guards measure the
+# route as written (see :func:`_as_written`).  A refit aims this far UNDER the
+# target so the next rounding of the rebuilt candidate lands on the safe side;
+# the undershoot (0.2 um) is far inside any tuning tolerance.
+WRITER_COORD_DECIMALS: int = 4
+QUANTIZED_REFIT_MARGIN_MM: float = 2e-4
+
+
+#: Per-bump placement (Issue #7043).  When every whole-trombone attempt on a
+#: net is rejected, the tuner places single bumps one at a time: each bump
+#: searches its own amplitude downward (``base * BUMP_AMPLITUDE_SHRINK**n``)
+#: to ``BUMP_MIN_AMPLITUDE_MM`` against the same clearance rules, so one
+#: blocked loop no longer disqualifies the whole host segment.
+BUMP_AMPLITUDE_SHRINK: float = 0.7
+BUMP_MIN_AMPLITUDE_MM: float = 0.2
+
+
+def _as_written(route: Route) -> Route:
+    """Return ``route`` with segment coordinates rounded as the PCB writer does.
+
+    ``Segment.to_sexp`` formats with ``:.4f``; ``round`` is correctly rounded
+    on the same binary value, so the two agree.  Vias are written at full
+    precision by the writer and are left alone.
+    """
+    nd = WRITER_COORD_DECIMALS
+    return replace(
+        route,
+        segments=[
+            replace(
+                sg,
+                x1=round(sg.x1, nd),
+                y1=round(sg.y1, nd),
+                x2=round(sg.x2, nd),
+                y2=round(sg.y2, nd),
+            )
+            for sg in route.segments
+        ],
+    )
+
+
+def _pair_leg_bounds(
+    leg_ceiling_mm: float | None,
+    lane_ceiling_mm: float,
+    len_p0: float,
+    len_n0: float,
+) -> tuple[float, float] | None:
+    """Per-trace ceilings for a pair lane (Issue #7423).
+
+    A tuned trace may not end past the reference's longest written trace
+    (``leg_ceiling_mm``) -- unless the pair's own routed skew already puts it
+    further above its lane than that: a lane matched to the target then
+    carries that trace ``lane_ceiling_mm + (L_trace - L_lane)`` and lane
+    matching (the length rule for pairs) needs that much.  The tuner never
+    increases a trace's excess over its own lane; it keeps the excess the
+    routed skew gave it.
+    ``len_p0`` / ``len_n0`` are the pair's lengths before any tuning.
+    """
+    if leg_ceiling_mm is None:
+        return None
+    lane0 = (len_p0 + len_n0) / 2.0
+    return (
+        max(leg_ceiling_mm, lane_ceiling_mm + max(0.0, len_p0 - lane0)),
+        max(leg_ceiling_mm, lane_ceiling_mm + max(0.0, len_n0 - lane0)),
+    )
+
+
+def _pair_overshoot_mm(
+    measure: Callable[[Route], float],
+    cand_p: Route,
+    cand_n: Route,
+    before_p: Route,
+    before_n: Route,
+    lane_ceiling_mm: float,
+    leg_bounds_mm: tuple[float, float] | None,
+) -> float:
+    """How far a pair candidate ends past its ceilings (Issue #7423).
+
+    Lengths are the worst of in-memory and as-written (4 dp), as for the
+    single-ended guard.  The lane ``(L(p) + L(n)) / 2`` is held to
+    ``lane_ceiling_mm``; a trace that this candidate lengthened is also held
+    to its bound in ``leg_bounds_mm`` (see :func:`_pair_leg_bounds`).
+    Returns the largest excess -- ``<= 0`` means the candidate is safe.
+    Mirrored and centreline meanders add the same length to both traces, so
+    lowering the requested length by this amount removes the excess.
+    """
+
+    def written(route: Route) -> float:
+        return max(measure(route), measure(_as_written(route)))
+
+    wp, wn = written(cand_p), written(cand_n)
+    excess = (wp + wn) / 2.0 - lane_ceiling_mm
+    if leg_bounds_mm is not None:
+        for after, before, bound in (
+            (wp, before_p, leg_bounds_mm[0]),
+            (wn, before_n, leg_bounds_mm[1]),
+        ):
+            if after > written(before) + OVERSHOOT_EPS_MM:
+                excess = max(excess, after - bound)
+    return excess
+
 
 # ---------------------------------------------------------------------------
 # Reason registry + summary formatting (Issue #3440 observability)
@@ -275,9 +384,13 @@ TUNE_RESULT_REASONS: tuple[str, ...] = (
     "exceeded_max_inserts",
     "cascade_budget_exhausted",
     "post_insertion_drc_violation",
+    "overshoot",
     "no_suitable_segment",
     "unrouted",
     "not_length_critical",
+    "rolled_back_pair_skew",
+    "rolled_back_still_over_limit",
+    "improved_still_over_limit",
 )
 
 
@@ -288,6 +401,7 @@ REASON_SUMMARY_LABELS: dict[str, str] = {
     "tuned": "tuned",
     "already_within_tolerance": "clean",
     "post_insertion_drc_violation": "rolled back",
+    "overshoot": "rolled back",
     "exceeded_max_inserts": "budget-exhausted",
     "cascade_budget_exhausted": "budget-exhausted",
     "not_length_critical": "skipped",
@@ -295,6 +409,9 @@ REASON_SUMMARY_LABELS: dict[str, str] = {
     "longer_than_reference": "longer-than-ref",
     "unrouted": "unrouted",
     "no_suitable_segment": "no-segment",
+    "rolled_back_pair_skew": "pair-skew rollback",
+    "rolled_back_still_over_limit": "over-limit rollback",
+    "improved_still_over_limit": "improved, still over limit",
 }
 
 #: Buckets that are ALWAYS printed (the legacy five) in canonical order.
@@ -315,6 +432,8 @@ _OPTIONAL_BUCKETS: tuple[str, ...] = (
     "longer-than-ref",
     "unrouted",
     "no-segment",
+    "pair-skew rollback",
+    "over-limit rollback",
 )
 
 
@@ -444,6 +563,14 @@ class TuneResult:
             * ``"unrouted"`` -- the member was not in ``routes_by_net``.
             * ``"not_length_critical"`` -- the engagement gate fired:
               ``length_critical=False``, no change was made.
+            * ``"rolled_back_pair_skew"`` -- (Issue #6675, pair members
+              with ``pair_fallbacks``) every candidate that lengthened the
+              lane would have pushed the pair's own via-inclusive skew past
+              the pair-skew invariant; both halves were left unchanged.
+            * ``"rolled_back_still_over_limit"`` -- (Issue #6675) the member
+              was tuned, but its group was still over its limit afterwards,
+              so the caller restored every member of the group to its
+              pre-tuning route (see :func:`mark_group_rolled_back`).
         attempts: Number of trombone insertions actually attempted for
             this member.
         inserts_applied: Number of trombones whose post-insertion check
@@ -486,10 +613,14 @@ def tune_match_group_v2(
     diff_pair_partners: dict[int, int] | None = None,
     pads_by_net: dict[int, list[Pad]] | None = None,
     pad_clearance_mm: float | None = None,
+    net_clearance_mm: dict[int, float] | None = None,
     board_thickness_mm: float | None = None,
     num_copper_layers: int = 4,
     blind_buried_supported: bool = True,
+    length_model: KicadLengthModel | None = None,
     fixed_segment_ids: set[int] | None = None,
+    pair_fallbacks: bool = False,
+    pair_skew_limits_mm: dict[tuple[int, int], float] | None = None,
 ) -> dict[int, tuple[Route, TuneResult]]:
     """Tune the lengths of an N-trace match group to within tolerance.
 
@@ -622,6 +753,22 @@ def tune_match_group_v2(
             complete-net view. These contribute length and block foreign
             copper, but cannot be merged or replaced by a meander. The caller
             keeps the referenced segments alive throughout tuning.
+        pair_fallbacks: Issue #6675 (default ``False``, the legacy Phase 2F
+            behaviour).  When ``True`` a pair member whose mirrored meander
+            cannot be placed is not declined on the first failure: the tuner
+            tries up to :data:`MAX_SEGMENT_RETRY_CANDIDATES` P-side hosts,
+            then a centreline meander on a coupled span (both rails gain the
+            same length and keep their gap -- the lattice coupled-pair case),
+            then per-leg single-ended meanders on the pair's uncoupled copper
+            (the lattice uncoupled-fallback case).  Every candidate must keep
+            the pair's via-inclusive skew within the pair-skew invariant (see
+            :func:`_pair_skew_allowance`).  The router turns this on for the
+            lattice auto-engaged path (``engage="checker_limit"``).
+        pair_skew_limits_mm: ``{(p_net_id, n_net_id): skew_limit_mm}`` -- the
+            per-pair limit ``kct check`` enforces
+            (``resolve_pair_thresholds(...).skew_mm``).  Used only with
+            ``pair_fallbacks``: a pair inside its limit before tuning must
+            still be inside it afterwards.
 
     Returns:
         ``{net_id: (route, result)}`` for every member of ``group``.
@@ -685,6 +832,8 @@ def tune_match_group_v2(
     # member for budget purposes -- the geometry is logically a single
     # "lane perturbation" (Phase 2F AC #8).
     member_count = len(group.net_ids) + len(group.pair_ids)
+    # An explicit per-member budget is a hard cap: no ceiling top-up round.
+    ceiling_topup = max_inserts_per_member is None
     if max_inserts_per_member is None:
         if member_count > 4:
             max_inserts_per_member = MAX_INSERTS_PER_GROUP_MEMBER_LARGE
@@ -708,9 +857,13 @@ def tune_match_group_v2(
             diff_pair_partners=diff_pair_partners,
             pads_by_net=pads_by_net,
             pad_clearance_mm=pad_clearance_mm,
+            net_clearance_mm=net_clearance_mm,
             board_thickness_mm=board_thickness_mm,
             num_copper_layers=num_copper_layers,
             blind_buried_supported=blind_buried_supported,
+            length_model=length_model,
+            pair_fallbacks=pair_fallbacks,
+            pair_skew_limits_mm=pair_skew_limits_mm,
         )
 
     return _tune_match_group_single_ended(
@@ -726,10 +879,13 @@ def tune_match_group_v2(
         intra_pair_clearance_mm=intra_pair_clearance_mm,
         pads_by_net=pads_by_net,
         pad_clearance_mm=pad_clearance_mm,
+        net_clearance_mm=net_clearance_mm,
         board_thickness_mm=board_thickness_mm,
         num_copper_layers=num_copper_layers,
         blind_buried_supported=blind_buried_supported,
+        length_model=length_model,
         fixed_segment_ids=fixed_segment_ids,
+        ceiling_topup=ceiling_topup,
     )
 
 
@@ -747,11 +903,17 @@ def _tune_match_group_single_ended(
     intra_pair_clearance_mm: float | None = None,
     pads_by_net: dict[int, list[Pad]] | None = None,
     pad_clearance_mm: float | None = None,
+    net_clearance_mm: dict[int, float] | None = None,
     board_thickness_mm: float | None = None,
     num_copper_layers: int = 4,
     blind_buried_supported: bool = True,
+    length_model: KicadLengthModel | None = None,
     fixed_segment_ids: set[int] | None = None,
     reference_length_mm: float | None = None,
+    reference_ceiling_mm: float | None = None,
+    hint_routes: dict[int, Route] | None = None,
+    both_sides: bool = False,
+    ceiling_topup: bool = False,
 ) -> dict[int, tuple[Route, TuneResult]]:
     """Scalar Phase 2E path: each net in ``group.net_ids`` tuned independently.
 
@@ -763,7 +925,16 @@ def _tune_match_group_single_ended(
     See :func:`tune_match_group_v2` for the public docstring; the
     arguments are passed through unchanged except that ``tolerance_mm``
     and ``max_inserts_per_member`` have already been resolved from the
-    public API's ``None`` defaults.
+    public API's ``None`` defaults.  ``ceiling_topup`` (Issue #5798) lets a
+    member that stopped at its per-member budget take one more insert from
+    the group ceiling's leftover after the first pass; the dispatcher sets it
+    only when the per-member budget was defaulted, not passed explicitly.
+
+    ``reference_ceiling_mm`` (Issue #7423) is a caller-computed cap on every
+    tuning target: the reference as written (4 dp) when the reference is not
+    a route in this sub-group -- a pair lane, a per-leg share of one, or a
+    scalar the caller already resolved.  The target is the minimum of it and
+    the in-group written reference.
     """
     base_config = config or SerpentineConfig()
     results: dict[int, tuple[Route, TuneResult]] = {}
@@ -827,7 +998,17 @@ def _tune_match_group_single_ended(
             board_thickness_mm,
             num_copper_layers,
             blind_buried_supported=blind_buried_supported,
+            length_model=length_model,
         )
+
+    def _measure_written(route: Route) -> float:
+        """Worst of the in-memory and as-written length (Issue #7423).
+
+        ``kct check`` judges the 4 dp written copper, but the in-memory
+        route is what later passes see, so "never past the target" must
+        hold on both.
+        """
+        return max(_measure(route), _measure(_as_written(route)))
 
     member_lengths: dict[int, float] = {}
     for net_id in group.net_ids:
@@ -838,11 +1019,18 @@ def _tune_match_group_single_ended(
 
     # Resolve the reference length per policy.
     ref_length: float | None
+    # Issue #7423: the member whose route supplies ``ref_length`` (``None``
+    # when the target is a caller-supplied lane/leg value with no route).
+    ref_source_net_id: int | None
     if group.reference_net_id is not None:
         ref_length = member_lengths.get(group.reference_net_id)
+        ref_source_net_id = group.reference_net_id
     else:
         # Longest-in-group default.
-        ref_length = max(member_lengths.values()) if member_lengths else None
+        if member_lengths:
+            ref_source_net_id, ref_length = max(member_lengths.items(), key=lambda kv: kv[1])
+        else:
+            ref_source_net_id, ref_length = None, None
 
     # --- Issue #3440: auto-promote when the pace car is not the longest -
     # The tuner is lengthen-only.  When the declared reference routes
@@ -864,6 +1052,19 @@ def _tune_match_group_single_ended(
     # members within tolerance above it return
     # ``reason="longer_than_reference"``.
     if reference_length_mm is not None:
+        # Issue #7423: keep the in-group source only while it really supplies
+        # the caller's value.  A declared scalar reference (mixed group)
+        # does; so does the longest scalar when the caller's group-wide
+        # maximum IS that scalar (mixed group, default reference).  A
+        # pair-lane or per-leg target has no route here and is capped by the
+        # caller's ``reference_ceiling_mm`` instead.
+        if group.reference_net_id is not None:
+            ref_source_net_id = group.reference_net_id
+        elif (
+            ref_source_net_id is not None
+            and member_lengths.get(ref_source_net_id) != reference_length_mm
+        ):
+            ref_source_net_id = None
         ref_length = reference_length_mm
     effective_reference_net_id: int | None = group.reference_net_id
     if group.reference_net_id is not None and ref_length is not None and member_lengths:
@@ -886,11 +1087,75 @@ def _tune_match_group_single_ended(
             )
             effective_reference_net_id = None
             ref_length = longest_len
+            ref_source_net_id = longest_id
+
+    # Issue #7423: ``kct check`` compares a member against the reference AS
+    # WRITTEN (4 dp), not against its in-memory floats.  An off-angle
+    # reference can round shorter when written, so a member tuned exactly
+    # onto the in-memory target would end past it in the file.  Every
+    # tuning target (re-fit, per-bump, group maximum) is therefore capped at
+    # the reference's written length as well.  The reference itself is never
+    # modified by this pass, so the cap is computed once.
+    target_ceiling: float | None = ref_length
+    ref_source_route = (
+        routes_by_net.get(ref_source_net_id) if ref_source_net_id is not None else None
+    )
+    if ref_length is not None and ref_source_route is not None:
+        target_ceiling = min(ref_length, _measure(_as_written(ref_source_route)))
+    if ref_length is not None and reference_ceiling_mm is not None:
+        target_ceiling = min(
+            target_ceiling if target_ceiling is not None else ref_length,
+            reference_ceiling_mm,
+        )
 
     # --- Per-member iteration -------------------------------------------
     total_inserts_committed = 0  # group-level cumulative counter
 
-    for net_id in group.net_ids:
+    # Issue #5798: spend the group ceiling where it closes the most skew.
+    # ``group.net_ids`` order is declaration order, so on a 14-member group
+    # (board 07 SDRAM_ADDRESS) the ceiling was used up on early, small-deficit
+    # members and the shortest ones (BA0/BA1) never got their inserts.  Visit
+    # members by descending deficit instead (stable: ties keep declaration
+    # order).  Unrouted members have no length and sort last.
+    def _deficit(nid: int) -> float:
+        if ref_length is None or nid not in member_lengths:
+            return 0.0
+        return ref_length - member_lengths[nid]
+
+    visit_order = sorted(group.net_ids, key=lambda nid: -_deficit(nid))
+
+    # Issue #5798 (Revision 3): one top-up round from the unused ceiling.
+    # The per-member cap exists to share the group ceiling, so once every
+    # member has had its share, a member that stopped at the cap
+    # (``exceeded_max_inserts``) may take ONE more insert from whatever the
+    # ceiling has left, largest remaining deficit first.  On board 07's
+    # complete 07m route SDRAM_BYTE0 stopped at 5.80 mm with DQ6 at its cap
+    # 0.8 mm short and 4 of the 16 ceiling inserts unused.  The ceiling still
+    # bounds the total, and a group whose ceiling is spent (SDRAM_ADDRESS) is
+    # unchanged.  Only when the per-member budget was defaulted
+    # (``ceiling_topup``); an explicit budget stays a hard cap.
+    # ``topup_prior`` holds the first-pass result to merge into.
+    topup_prior: dict[int, TuneResult] = {}
+
+    def _visits() -> Iterator[tuple[int, int]]:
+        for nid in visit_order:
+            yield nid, max_inserts_per_member
+        if not ceiling_topup or ref_length is None:
+            return
+        capped = [
+            nid
+            for nid in visit_order
+            if nid in results and results[nid][1].reason == "exceeded_max_inserts"
+        ]
+        remaining = {nid: ref_length - results[nid][1].length_after_mm for nid in capped}
+        for nid in sorted(capped, key=lambda n: -remaining[n]):
+            if total_inserts_committed >= MAX_TOTAL_INSERTS_PER_GROUP:
+                return
+            topup_prior[nid] = results[nid][1]
+            member_lengths[nid] = results[nid][1].length_after_mm
+            yield nid, 1
+
+    for net_id, member_cap in _visits():
         route = routes_by_net.get(net_id)
         if route is None:
             results[net_id] = (
@@ -1044,7 +1309,8 @@ def _tune_match_group_single_ended(
             results[net_id] = (original_route, per_member_result)
             continue
 
-        target_length = ref_length
+        # Issue #7423: the reference as written, not its in-memory length.
+        target_length = target_ceiling if target_ceiling is not None else ref_length
 
         # Each iteration: rank candidate segments, then for each (best
         # first) compute the outer-normal hint, attempt one trombone,
@@ -1057,7 +1323,7 @@ def _tune_match_group_single_ended(
         # now try up to :data:`MAX_SEGMENT_RETRY_CANDIDATES` segments
         # per attempt before rolling back -- this is the curator's
         # "Option A: per-segment retry" recipe.
-        for attempt in range(max_inserts_per_member):
+        for attempt in range(member_cap):
             per_member_result.attempts = attempt + 1
 
             # Group-level ceiling can trip mid-loop too.
@@ -1068,7 +1334,11 @@ def _tune_match_group_single_ended(
                     f"({MAX_TOTAL_INSERTS_PER_GROUP}) exhausted "
                     f"during tuning of net {net_id}."
                 )
-                current_route = original_route
+                # Issue #5798: keep this member's earlier DRC-clean commits
+                # (they already count toward the ceiling), as the
+                # post-insertion-DRC path below does.  Reset only when none.
+                if per_member_result.inserts_applied == 0:
+                    current_route = original_route
                 break
 
             # Rank up to MAX_SEGMENT_RETRY_CANDIDATES candidate
@@ -1105,7 +1375,13 @@ def _tune_match_group_single_ended(
                     f"No segment long enough for a trombone on net {net_id} "
                     f"(skew={current_skew:.4f}mm > tol={tolerance_mm:.4f}mm)"
                 )
-                current_route = original_route
+                # Issue #5798: a host can run out AFTER an earlier attempt
+                # committed (the first meander used the only long segment).
+                # Discarding that commit left board 07's shortest SDRAM_ADDRESS
+                # members untouched, so the group spread never moved and the
+                # whole group was rolled back.  Keep partial progress.
+                if per_member_result.inserts_applied == 0:
+                    current_route = original_route
                 break
 
             # Precompute the length needed (constant across this
@@ -1128,6 +1404,11 @@ def _tune_match_group_single_ended(
                 for other_id in group.net_ids
                 if other_id != net_id and other_id in routes_by_net
             }
+            # Issue #6675: a pair leg tuned on its own also bulges away
+            # from its partner and the rest of its group.
+            for other_id, other_route in (hint_routes or {}).items():
+                if other_id != net_id:
+                    other_group_routes.setdefault(other_id, other_route)
 
             # Try the candidates in rank order.  Commit the first one
             # whose trombone passes the post-insertion DRC self-check.
@@ -1166,7 +1447,15 @@ def _tune_match_group_single_ended(
                 # the same correction at a smaller amplitude spreads
                 # into many shallow humps that stay inside the
                 # candidate's own corridor.
-                for amp_factor in AMPLITUDE_BACKOFF_FACTORS:
+                #
+                # Issue #6675: a pair leg tuned on its own (``both_sides``)
+                # retries the ladder bulging the other way before giving up
+                # on the host -- the "outer" side of a leg in a dense bus is
+                # often the blocked one.
+                ladder = [(hint, factor) for factor in AMPLITUDE_BACKOFF_FACTORS]
+                if both_sides:
+                    ladder += [((-hint[0], -hint[1]), f) for f in AMPLITUDE_BACKOFF_FACTORS]
+                for side_hint, amp_factor in ladder:
                     import math as _math
 
                     # Exact-fit amplitude (Issue #3440): the trombone
@@ -1193,7 +1482,7 @@ def _tune_match_group_single_ended(
                         gap_factor=base_config.gap_factor,
                         max_iterations=base_config.max_iterations,
                         side="outer",
-                        outer_normal_hint=hint,
+                        outer_normal_hint=side_hint,
                     )
                     attempt_generator = SerpentineGenerator(attempt_config)
 
@@ -1201,9 +1490,20 @@ def _tune_match_group_single_ended(
                     # (not the one ``find_best_segment`` would pick --
                     # we splice by hand so the per-segment retry
                     # actually tries a different segment).
-                    serp_result = attempt_generator.generate_trombone(
-                        insertion_segment, length_needed
-                    )
+                    host_segment = insertion_segment
+                    lead_in: list[Segment] = []
+                    lead_out: list[Segment] = []
+                    if both_sides:
+                        # Issue #6675: centre a pair leg's meander on its host
+                        # instead of starting it at the host's first endpoint,
+                        # where the leg usually fans out next to its partner.
+                        host_segment, lead_in, lead_out = _centered_sub_host(
+                            insertion_segment,
+                            loops=planned_loops,
+                            gap_mm=base_config.min_spacing * base_config.gap_factor,
+                            min_length_mm=host_floor,
+                        )
+                    serp_result = attempt_generator.generate_trombone(host_segment, length_needed)
                     per_member_result.serpentine_results.append(serp_result)
 
                     if not serp_result.success:
@@ -1223,7 +1523,9 @@ def _tune_match_group_single_ended(
                     # ``SerpentineGenerator.add_serpentine`` verbatim).
                     new_segments_full = (
                         current_route.segments[:seg_idx]
+                        + lead_in
                         + serp_result.new_segments
+                        + lead_out
                         + current_route.segments[seg_idx + 1 :]
                     )
                     from .primitives import Route as _Route
@@ -1234,6 +1536,86 @@ def _tune_match_group_single_ended(
                         segments=new_segments_full,
                         vias=current_route.vias.copy(),
                     )
+
+                    # Issue #7423: the trombone's real added length is not
+                    # exactly ``length_needed`` -- the snapped frame and the
+                    # exit dogleg change the host's forward travel, so the
+                    # member can land a few microns past the group maximum
+                    # and raise it.  The added length is linear in the
+                    # amplitude (``2 * loops`` per mm), so shrink the
+                    # amplitude by the measured overshoot and rebuild.
+                    # Never grows the amplitude: an undershoot stays inside
+                    # the tolerance and a bigger meander risks the DRC gate.
+                    prev_overshoot: float | None = None
+                    for _refit in range(MAX_OVERSHOOT_REFITS):
+                        overshoot = _measure_written(candidate_route) - target_length
+                        if overshoot <= OVERSHOOT_EPS_MM or serp_result.num_loops <= 0:
+                            break
+                        amp_step = (overshoot + QUANTIZED_REFIT_MARGIN_MM) / (
+                            2.0 * serp_result.num_loops
+                        )
+                        if (
+                            prev_overshoot is not None
+                            and overshoot >= prev_overshoot - OVERSHOOT_EPS_MM
+                        ):
+                            # The last step was below the writer's 4 dp grid,
+                            # so the written copper did not move: step one
+                            # written quantum instead.
+                            amp_step = max(amp_step, 10.0**-WRITER_COORD_DECIMALS)
+                        prev_overshoot = overshoot
+                        refit_amplitude = attempt_config.amplitude - amp_step
+                        if refit_amplitude <= 0.0:
+                            break
+                        attempt_config = SerpentineConfig(
+                            style=attempt_config.style,
+                            amplitude=refit_amplitude,
+                            min_spacing=attempt_config.min_spacing,
+                            min_segment_length=attempt_config.min_segment_length,
+                            gap_factor=attempt_config.gap_factor,
+                            max_iterations=attempt_config.max_iterations,
+                            side=attempt_config.side,
+                            outer_normal_hint=attempt_config.outer_normal_hint,
+                        )
+                        refit_result = SerpentineGenerator(attempt_config).generate_trombone(
+                            host_segment,
+                            # Keep the generator's ceil() on the same loop count.
+                            2.0 * refit_amplitude * serp_result.num_loops * (1.0 - 1e-9),
+                        )
+                        if (
+                            not refit_result.success
+                            or refit_result.num_loops != serp_result.num_loops
+                        ):
+                            break
+                        serp_result = refit_result
+                        per_member_result.serpentine_results[-1] = serp_result
+                        candidate_route = _Route(
+                            net=current_route.net,
+                            net_name=current_route.net_name,
+                            segments=(
+                                current_route.segments[:seg_idx]
+                                + lead_in
+                                + serp_result.new_segments
+                                + lead_out
+                                + current_route.segments[seg_idx + 1 :]
+                            ),
+                            vias=current_route.vias.copy(),
+                        )
+
+                    # Issue #7423: the refit above is best-effort (it gives up
+                    # when the amplitude would go non-positive, the loop count
+                    # changes, or the budget runs out).  "Never past the group
+                    # target" is enforced here, on the measured route, so it
+                    # holds by construction rather than by convergence.
+                    final_overshoot = _measure_written(candidate_route) - target_length
+                    if final_overshoot > OVERSHOOT_EPS_MM:
+                        last_failure_reason = "overshoot"
+                        last_failure_message = (
+                            f"Candidate meander rejected on net {net_id} "
+                            f"segment {seg_idx} (amplitude "
+                            f"{attempt_config.amplitude:.3f}mm): would end "
+                            f"{final_overshoot:.4f}mm past the group target"
+                        )
+                        continue  # try the next (smaller) amplitude
 
                     # Post-insertion DRC self-check.  Issue #3317
                     # follow-up: also check segment-vs-via at
@@ -1255,6 +1637,7 @@ def _tune_match_group_single_ended(
                         intra_pair_clearance_mm=intra_pair_clearance_mm,
                         foreign_pads=foreign_pads,
                         pad_clearance_mm=pad_clearance_mm,
+                        net_clearance_mm=net_clearance_mm,
                     )
                     if drc_detail is not None:
                         last_failure_reason = "post_insertion_drc_violation"
@@ -1281,6 +1664,57 @@ def _tune_match_group_single_ended(
 
                 if committed_this_attempt:
                     break  # exit candidate loop on successful commit
+
+            if not committed_this_attempt and not both_sides:
+                # Issue #7043: the whole-trombone attempts were all rejected.
+                # Place single bumps per host instead of giving up on the
+                # whole host because one loop conflicts with foreign copper.
+                def _bump_check(segs: list[Segment], _nid: int = net_id) -> str | None:
+                    return _post_insertion_clearance_detail_group(
+                        new_segments=segs,
+                        candidate_net_id=_nid,
+                        group_net_ids=set(group.net_ids),
+                        routes_by_net=routes_by_net,
+                        intra_group_clearance_mm=intra_group_clearance_mm,
+                        via_clearance_mm=via_clearance_mm,
+                        diff_pair_partners=diff_pair_partners,
+                        intra_pair_clearance_mm=intra_pair_clearance_mm,
+                        foreign_pads=foreign_pads,
+                        pad_clearance_mm=pad_clearance_mm,
+                        net_clearance_mm=net_clearance_mm,
+                    )
+
+                bumped_route = _place_bumps_per_host(
+                    current_route,
+                    length_needed=length_needed,
+                    tolerance_mm=tolerance_mm,
+                    base_config=base_config,
+                    host_floor=host_floor,
+                    fixed_segment_ids=fixed_segment_ids,
+                    other_group_routes=other_group_routes,
+                    check=_bump_check,
+                )
+                # Issue #7423: the per-bump booking is geometric; enforce
+                # "never past the group target" on the measured route too, as
+                # the trombone path does, so it holds by construction.
+                if bumped_route is not None:
+                    bump_overshoot = _measure_written(bumped_route) - target_length
+                    if bump_overshoot > OVERSHOOT_EPS_MM:
+                        last_failure_reason = "overshoot"
+                        last_failure_message = (
+                            f"Per-bump fallback rejected on net {net_id}: would end "
+                            f"{bump_overshoot:.4f}mm past the group target"
+                        )
+                        bumped_route = None
+                if bumped_route is not None:
+                    current_route = bumped_route
+                    per_member_result.inserts_applied += 1
+                    total_inserts_committed += 1
+                    committed_this_attempt = True
+                    current_skew = abs(target_length - _measure(current_route))
+                    if current_skew <= tolerance_mm:
+                        per_member_result.success = True
+                        per_member_result.reason = "tuned"
 
             if not committed_this_attempt:
                 # Every candidate in this attempt failed.  Surface the
@@ -1349,6 +1783,22 @@ def _tune_match_group_single_ended(
             assert current_route is original_route
             assert current_route.segments is original_segments
 
+        # Top-up visit: report one result per member, counted from the
+        # member's original route (the first pass's commits are kept).
+        prior = topup_prior.pop(net_id, None)
+        if prior is not None:
+            per_member_result.attempts += prior.attempts
+            per_member_result.inserts_applied += prior.inserts_applied
+            per_member_result.length_before_mm = prior.length_before_mm
+            per_member_result.serpentine_results = (
+                prior.serpentine_results + per_member_result.serpentine_results
+            )
+            per_member_result.message = (
+                f"{per_member_result.message} [ceiling top-up after "
+                f"{prior.inserts_applied} first-pass insert(s); "
+                f"{per_member_result.inserts_applied} in total]"
+            )
+
         results[net_id] = (current_route, per_member_result)
 
         # Issue #3440 staleness fix: publish the tuned route into
@@ -1363,7 +1813,214 @@ def _tune_match_group_single_ended(
         if per_member_result.inserts_applied > 0:
             routes_by_net[net_id] = current_route
 
-    return results
+    # Report in declaration order regardless of the visit order above.
+    return {nid: results[nid] for nid in group.net_ids if nid in results}
+
+
+def _place_bumps_per_host(
+    route: Route,
+    *,
+    length_needed: float,
+    tolerance_mm: float,
+    base_config: SerpentineConfig,
+    host_floor: float,
+    fixed_segment_ids: set[int] | None,
+    other_group_routes: dict[int, Route],
+    check: Callable[[list[Segment]], str | None],
+) -> Route | None:
+    """Single-ended per-bump fallback (Issue #7043).
+
+    Walks the straight runs of ``route`` (best host first) and places one
+    single-loop bump at a time.  Each bump searches its amplitude downward
+    (``base * BUMP_AMPLITUDE_SHRINK**n`` to ``BUMP_MIN_AMPLITUDE_MM``) on the
+    outer side first, then the opposite side; when both sides are blocked the
+    cursor skips forward and any remaining length spills onto the next run.
+    A bump's measured added length never exceeds the length still needed
+    (Issue #7423), so the route is never pushed past the target.  ``check`` is the clearance gate
+    (``None`` = clear); it is applied to every bump and again to the
+    assembled result.
+
+    Returns the new route, or ``None`` when no bump could be placed or the
+    assembled result is rejected.
+    """
+    from .primitives import Route as _Route
+    from .primitives import Segment as _Segment
+
+    gap = base_config.min_spacing * base_config.gap_factor
+    bump_len = max((3.0 * gap) / 0.9 + 1e-6, 1e-6)
+    ladder: list[float] = []
+    amp = base_config.amplitude
+    while amp > BUMP_MIN_AMPLITUDE_MM:
+        ladder.append(amp)
+        amp *= BUMP_AMPLITUDE_SHRINK
+    ladder.append(BUMP_MIN_AMPLITUDE_MM)
+
+    hosts = _rank_candidate_segments(
+        route,
+        min_segment_length=max(host_floor, bump_len),
+        max_candidates=len(route.segments),
+        fixed_segment_ids=fixed_segment_ids,
+    )
+    remaining = length_needed
+    replacements: dict[int, list[Segment]] = {}
+    all_bumps: list[Segment] = []
+
+    def piece(host: Segment, x1: float, y1: float, x2: float, y2: float) -> Segment:
+        return _Segment(
+            x1=x1,
+            y1=y1,
+            x2=x2,
+            y2=y2,
+            width=host.width,
+            layer=host.layer,
+            net=host.net,
+            net_name=host.net_name,
+        )
+
+    for seg_idx, host in hosts:
+        if remaining <= tolerance_mm:
+            break
+        length = math.hypot(host.x2 - host.x1, host.y2 - host.y1)
+        ux = (host.x2 - host.x1) / length
+        uy = (host.y2 - host.y1) / length
+        hint = _outer_normal_hint_group(
+            host, candidate_net_id=host.net, group_routes=other_group_routes
+        )
+        out: list[Segment] = []
+        straight_x, straight_y = host.x1, host.y1
+        cursor = 0.0
+        placed_here = False
+        while remaining > tolerance_mm and cursor + bump_len <= length - 1e-6:
+            ax, ay = host.x1 + ux * cursor, host.y1 + uy * cursor
+            bx, by = ax + ux * bump_len, ay + uy * bump_len
+            sub_host = piece(host, ax, ay, bx, by)
+            placed: list[Segment] | None = None
+            added = 0.0
+            for side in (hint, (-hint[0], -hint[1])):
+                for ladder_amp in ladder:
+                    bump_amp = min(
+                        ladder_amp, max(remaining - QUANTIZED_REFIT_MARGIN_MM, 0.0) / 2.0
+                    )
+                    if bump_amp <= 0.0:
+                        continue
+                    cfg = SerpentineConfig(
+                        style=base_config.style,
+                        amplitude=bump_amp,
+                        min_spacing=base_config.min_spacing,
+                        min_segment_length=bump_len,
+                        gap_factor=base_config.gap_factor,
+                        max_iterations=1,
+                        side="outer",
+                        outer_normal_hint=side,
+                    )
+                    result = SerpentineGenerator(cfg).generate_trombone(
+                        sub_host, 2.0 * bump_amp * (1.0 + 1e-9)
+                    )
+                    if not result.success or len(result.new_segments) <= 1:
+                        continue
+                    # Issue #7423: book the bump's MEASURED added length; on an
+                    # off-angle host the snapped frame adds more than
+                    # ``2 * bump_amp``.  A bump that would pass the target is
+                    # skipped (the next rung is smaller).
+                    # Measured as written (4 dp): ``kct check`` judges the
+                    # rounded copper, not the in-memory floats.
+                    written = _as_written(
+                        _Route(net=host.net, net_name=host.net_name, segments=result.new_segments)
+                    ).segments
+                    written_host = _as_written(
+                        _Route(net=host.net, net_name=host.net_name, segments=[sub_host])
+                    ).segments[0]
+                    bump_added = sum(
+                        math.hypot(sg.x2 - sg.x1, sg.y2 - sg.y1) for sg in written
+                    ) - math.hypot(
+                        written_host.x2 - written_host.x1, written_host.y2 - written_host.y1
+                    )
+                    if bump_added > remaining + OVERSHOOT_EPS_MM:
+                        continue
+                    if check(result.new_segments) is None:
+                        placed = result.new_segments
+                        added = bump_added
+                        break
+                if placed is not None:
+                    break
+            if placed is None:
+                cursor += bump_len  # both sides blocked: skip forward
+                continue
+            if math.hypot(ax - straight_x, ay - straight_y) > 1e-9:
+                out.append(piece(host, straight_x, straight_y, ax, ay))
+            out.extend(placed)
+            all_bumps.extend(placed)
+            straight_x, straight_y = bx, by
+            cursor += bump_len
+            remaining -= added
+            placed_here = True
+        if placed_here:
+            if math.hypot(host.x2 - straight_x, host.y2 - straight_y) > 1e-9:
+                out.append(piece(host, straight_x, straight_y, host.x2, host.y2))
+            replacements[seg_idx] = out
+
+    if not replacements:
+        return None
+    # Final gate on the assembled result.
+    if check(all_bumps) is not None:
+        return None
+    segments: list[Segment] = []
+    for i, seg in enumerate(route.segments):
+        segments.extend(replacements.get(i, [seg]))
+    return _Route(
+        net=route.net,
+        net_name=route.net_name,
+        segments=segments,
+        vias=route.vias.copy(),
+    )
+
+
+def _centered_sub_host(
+    segment: Segment,
+    *,
+    loops: int,
+    gap_mm: float,
+    min_length_mm: float,
+) -> tuple[Segment, list[Segment], list[Segment]]:
+    """Split ``segment`` so a ``loops``-loop trombone sits in its middle.
+
+    Returns ``(sub_host, lead_in, lead_out)``: ``lead_in + [sub_host] +
+    lead_out`` runs from ``segment``'s first endpoint to its second, and
+    ``sub_host`` is just long enough for the trombone generator to fit
+    ``loops`` loops (its own 90% margin included), never shorter than
+    ``min_length_mm``.  When the host has no slack the segment is returned
+    unchanged with empty leads.
+    """
+    from .primitives import Segment as _Segment
+
+    length = math.hypot(segment.x2 - segment.x1, segment.y2 - segment.y1)
+    needed = ((2 * loops + 1) * gap_mm) / 0.9 + 1e-6
+    sub_length = max(needed, min_length_mm)
+    if length <= 0.0 or sub_length >= length - 1e-6:
+        return segment, [], []
+    ux = (segment.x2 - segment.x1) / length
+    uy = (segment.y2 - segment.y1) / length
+    offset = (length - sub_length) / 2.0
+    ax, ay = segment.x1 + ux * offset, segment.y1 + uy * offset
+    bx, by = ax + ux * sub_length, ay + uy * sub_length
+
+    def piece(x1: float, y1: float, x2: float, y2: float) -> _Segment:
+        return _Segment(
+            x1=x1,
+            y1=y1,
+            x2=x2,
+            y2=y2,
+            width=segment.width,
+            layer=segment.layer,
+            net=segment.net,
+            net_name=segment.net_name,
+        )
+
+    return (
+        piece(ax, ay, bx, by),
+        [piece(segment.x1, segment.y1, ax, ay)],
+        [piece(bx, by, segment.x2, segment.y2)],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1583,6 +2240,7 @@ def _post_insertion_clearance_ok_group(
     intra_pair_clearance_mm: float | None = None,
     foreign_pads: list[Pad] | None = None,
     pad_clearance_mm: float | None = None,
+    net_clearance_mm: dict[int, float] | None = None,
 ) -> bool:
     """Boolean wrapper around :func:`_post_insertion_clearance_detail_group`.
 
@@ -1601,6 +2259,7 @@ def _post_insertion_clearance_ok_group(
             intra_pair_clearance_mm=intra_pair_clearance_mm,
             foreign_pads=foreign_pads,
             pad_clearance_mm=pad_clearance_mm,
+            net_clearance_mm=net_clearance_mm,
         )
         is None
     )
@@ -1618,6 +2277,7 @@ def _post_insertion_clearance_detail_group(
     intra_pair_clearance_mm: float | None = None,
     foreign_pads: list[Pad] | None = None,
     pad_clearance_mm: float | None = None,
+    net_clearance_mm: dict[int, float] | None = None,
 ) -> str | None:
     """Return ``None`` if the proposed serpentine segments are DRC-safe,
     else a human-readable description of the FIRST violation found.
@@ -1737,6 +2397,15 @@ def _post_insertion_clearance_detail_group(
         pad_clearance_mm: Optional segment-to-pad edge clearance
             floor in mm.  Required when ``foreign_pads`` is non-empty.
             Typical value: ``DesignRules.trace_clearance`` (0.2 mm).
+        net_clearance_mm: Optional ``{net_id: class_clearance_mm}`` map
+            (Issue #6969).  When supplied, every foreign item in passes
+            1, 2, 3 and 5 is held to the pairwise KiCad rule
+            ``max(pass floor, neighbour's class clearance)`` instead of the
+            pass floor alone, so a group whose own class is looser than a
+            neighbour's class cannot place copper inside the neighbour's
+            clearance.  The candidate's diff-pair partner is exempt (it is
+            held to ``intra_pair_clearance_mm`` by pass 4).  ``None`` keeps
+            the single-threshold behaviour.
 
     Returns:
         ``None`` if no clearance violation is introduced; otherwise a
@@ -1745,6 +2414,15 @@ def _post_insertion_clearance_detail_group(
     """
     from .clearance_shapes import copper_gap, pad_shape, segment_shape, via_shape
 
+    partner_net_id = (diff_pair_partners or {}).get(candidate_net_id)
+
+    def _floor(base_mm: float, other_net_id: int | None) -> float:
+        # Issue #6969: KiCad holds two items to the larger of their two
+        # class clearances; ``base_mm`` is already this group's floor.
+        if not net_clearance_mm or other_net_id is None or other_net_id == partner_net_id:
+            return base_mm
+        return max(base_mm, net_clearance_mm.get(other_net_id, 0.0))
+
     # Pass 1: intra-group.  Every other group member.
     for other_id in group_net_ids:
         if other_id == candidate_net_id:
@@ -1752,6 +2430,7 @@ def _post_insertion_clearance_detail_group(
         other_route = routes_by_net.get(other_id)
         if other_route is None:
             continue
+        member_floor = _floor(intra_group_clearance_mm, other_id)
         for new_seg in new_segments:
             for pseg in other_route.segments:
                 if pseg.layer != new_seg.layer:
@@ -1760,15 +2439,15 @@ def _post_insertion_clearance_detail_group(
                 if not _segments_within(
                     new_seg,
                     pseg,
-                    intra_group_clearance_mm + new_seg.width / 2 + pseg.width / 2 + 1e-9,
+                    member_floor + new_seg.width / 2 + pseg.width / 2 + 1e-9,
                 ):
                     continue
                 clearance = copper_gap(segment_shape(new_seg), segment_shape(pseg))
-                if clearance + 1e-9 < intra_group_clearance_mm:
+                if clearance + 1e-9 < member_floor:
                     return (
                         f"intra-group clearance vs group member "
                         f"{other_route.net_name!r} on {new_seg.layer}: "
-                        f"{clearance:.3f}mm < {intra_group_clearance_mm:.3f}mm"
+                        f"{clearance:.3f}mm < {member_floor:.3f}mm"
                     )
 
     # Pass 2: inter-net.  Every non-group routed net.
@@ -1777,6 +2456,7 @@ def _post_insertion_clearance_detail_group(
             continue
         if other_net_id in group_net_ids:
             continue
+        neighbor_floor = _floor(intra_group_clearance_mm, other_net_id)
         for new_seg in new_segments:
             for oseg in other_route.segments:
                 if oseg.layer != new_seg.layer:
@@ -1785,15 +2465,15 @@ def _post_insertion_clearance_detail_group(
                 if not _segments_within(
                     new_seg,
                     oseg,
-                    intra_group_clearance_mm + new_seg.width / 2 + oseg.width / 2 + 1e-9,
+                    neighbor_floor + new_seg.width / 2 + oseg.width / 2 + 1e-9,
                 ):
                     continue
                 clearance = copper_gap(segment_shape(new_seg), segment_shape(oseg))
-                if clearance + 1e-9 < intra_group_clearance_mm:
+                if clearance + 1e-9 < neighbor_floor:
                     return (
                         f"inter-net clearance vs neighbor net "
                         f"{other_route.net_name!r} on {new_seg.layer}: "
-                        f"{clearance:.3f}mm < {intra_group_clearance_mm:.3f}mm"
+                        f"{clearance:.3f}mm < {neighbor_floor:.3f}mm"
                     )
 
     # Pass 3 (Issue #3317 follow-up): segment-vs-via clearance.
@@ -1805,6 +2485,7 @@ def _post_insertion_clearance_detail_group(
         for other_net_id, other_route in routes_by_net.items():
             if other_net_id == candidate_net_id:
                 continue
+            via_floor = _floor(via_clearance_mm, other_net_id)
             for via in other_route.vias:
                 # Ordinary vias serialize as through-hole barrels even when
                 # their routing endpoints name only part of the stack. Only
@@ -1816,12 +2497,12 @@ def _post_insertion_clearance_detail_group(
                     if via.is_micro and not first_layer <= new_seg.layer.stack_order <= last_layer:
                         continue
                     edge_clearance = copper_gap(segment_shape(new_seg), via_shape_)
-                    if edge_clearance + 1e-9 < via_clearance_mm:
+                    if edge_clearance + 1e-9 < via_floor:
                         return (
                             f"segment-vs-via clearance vs net "
                             f"{other_route.net_name!r} via at "
                             f"({via.x:.2f}, {via.y:.2f}) on {new_seg.layer}: "
-                            f"{edge_clearance:.3f}mm < {via_clearance_mm:.3f}mm"
+                            f"{edge_clearance:.3f}mm < {via_floor:.3f}mm"
                         )
 
     # Pass 4 (Issue #3317 follow-up): diff-pair intra-pair clearance.
@@ -1868,15 +2549,16 @@ def _post_insertion_clearance_detail_group(
             # specific.
             pad_through_hole = getattr(pad, "through_hole", False)
             pad_shape_ = pad_shape(pad)
+            pad_floor = _floor(pad_clearance_mm, getattr(pad, "net", None))
             for new_seg in new_segments:
                 if not pad_through_hole and pad.layer != new_seg.layer:
                     continue
                 edge_clearance = copper_gap(segment_shape(new_seg), pad_shape_)
-                if edge_clearance + 1e-9 < pad_clearance_mm:
+                if edge_clearance + 1e-9 < pad_floor:
                     return (
                         f"segment-vs-pad clearance vs foreign pad at "
                         f"({pad.x:.2f}, {pad.y:.2f}) on {new_seg.layer}: "
-                        f"{edge_clearance:.3f}mm < {pad_clearance_mm:.3f}mm"
+                        f"{edge_clearance:.3f}mm < {pad_floor:.3f}mm"
                     )
 
     return None
@@ -2359,6 +3041,7 @@ def _post_insertion_clearance_detail_pair_group(
     via_clearance_mm: float | None = None,
     pads_by_net: dict[int, list[Pad]] | None = None,
     pad_clearance_mm: float | None = None,
+    net_clearance_mm: dict[int, float] | None = None,
     candidate_p_route: Route | None = None,
     candidate_n_route: Route | None = None,
 ) -> str | None:
@@ -2449,6 +3132,7 @@ def _post_insertion_clearance_detail_pair_group(
             via_clearance_mm=via_clearance_mm,
             foreign_pads=foreign_pads,
             pad_clearance_mm=pad_clearance_mm,
+            net_clearance_mm=net_clearance_mm,
         )
         if detail is not None:
             return detail
@@ -2467,6 +3151,662 @@ def _post_insertion_clearance_detail_pair_group(
     return None
 
 
+# ---------------------------------------------------------------------------
+# Issue #6675: pair members on lattice output
+# ---------------------------------------------------------------------------
+
+
+#: Slack (mm) the pair-skew invariant allows on top of a pair's pre-tuning
+#: skew.  Mirrored meanders re-snap reflected endpoints to the routing grid,
+#: so they can shift a pair's skew by a few microns; anything beyond this is
+#: a real skew change and the candidate is rejected.
+PAIR_SKEW_SLACK_MM: float = 1e-3
+
+
+def _pair_skew_allowance(skew_before_mm: float, limit_mm: float | None) -> float:
+    """Largest pair skew a group-tuning candidate may leave (Issue #6675).
+
+    The pair-skew invariant: the group tuner may lengthen a pair member only
+    if the pair's own via-inclusive skew does not grow (beyond
+    :data:`PAIR_SKEW_SLACK_MM` of rounding), and a pair that was inside its
+    checker limit (``resolve_pair_thresholds(...).skew_mm``) stays inside it.
+    """
+    allowance = skew_before_mm + PAIR_SKEW_SLACK_MM
+    if limit_mm is not None and skew_before_mm <= limit_mm:
+        allowance = min(allowance, max(limit_mm, skew_before_mm))
+    return allowance
+
+
+def _merge_mutable_runs(route: Route, fixed_segment_ids: set[int] | None) -> Route:
+    """Merge collinear runs of a route's mutable segments (fixed ones kept).
+
+    Same normalisation the single-ended path applies before ranking hosts;
+    returns ``route`` itself when nothing merges.
+    """
+    if len(route.segments) < 2:
+        return route
+    from itertools import groupby
+
+    from .optimizer.algorithms import merge_collinear
+    from .optimizer.config import OptimizationConfig
+    from .primitives import Route as _Route
+
+    merged: list[Segment] = []
+    for fixed, run in groupby(route.segments, key=lambda s: id(s) in (fixed_segment_ids or ())):
+        segments = list(run)
+        merged.extend(segments if fixed else merge_collinear(segments, OptimizationConfig()))
+    if len(merged) >= len(route.segments):
+        return route
+    return _Route(
+        net=route.net,
+        net_name=route.net_name,
+        segments=merged,
+        vias=route.vias.copy(),
+        is_escape=route.is_escape,
+    )
+
+
+def _coupling_window_mm() -> float:
+    """Edge gap under which ``kct check`` counts two parallel rails as coupled."""
+    from kicad_tools.validate.rules.diffpair_routing_continuity import (
+        DEFAULT_COUPLING_WINDOW_MM,
+    )
+
+    return DEFAULT_COUPLING_WINDOW_MM
+
+
+def _tune_pair_lane_with_fallbacks(
+    *,
+    group: MatchGroup,
+    p_id: int,
+    n_id: int,
+    routes_by_net: dict[int, Route],
+    result_p: TuneResult,
+    result_n: TuneResult,
+    target_length: float,
+    tolerance_mm: float,
+    group_net_ids: set[int],
+    intra_group_clearance_mm: float,
+    intra_pair_clearance_mm: float,
+    base_config: SerpentineConfig,
+    config: SerpentineConfig | None,
+    max_inserts_per_member: int,
+    group_budget_left: int,
+    grid_resolution_mm: float,
+    fixed_segment_ids: set[int] | None,
+    via_clearance_mm: float | None,
+    diff_pair_partners: dict[int, int] | None,
+    pads_by_net: dict[int, list[Pad]] | None,
+    pad_clearance_mm: float | None,
+    net_clearance_mm: dict[int, float] | None = None,
+    board_thickness_mm: float | None,
+    num_copper_layers: int,
+    blind_buried_supported: bool,
+    length_model: KicadLengthModel | None = None,
+    measure: Callable[[Route], float],
+    pair_skew_limit_mm: float | None,
+    leg_ceiling_mm: float | None = None,
+) -> tuple[Route, Route, int]:
+    """Lengthen one pair lane toward ``target_length`` (Issue #6675).
+
+    Each attempt tries, in order, and commits the first candidate that passes
+    the paired DRC self-check AND the pair-skew invariant
+    (:func:`_pair_skew_allowance`):
+
+    1. **Mirrored meander** (the Phase 2F strategy, unchanged for the first
+       host) on up to :data:`MAX_SEGMENT_RETRY_CANDIDATES` ranked P-side
+       hosts -- a failed host no longer ends the pair.
+    2. **Centreline meander** on up to :data:`MAX_SEGMENT_RETRY_CANDIDATES`
+       coupled spans (:mod:`~kicad_tools.router.pair_centerline_meander`):
+       both rails gain the same length and keep their gap, which is what a
+       lattice coupled pair needs (its rails have different breakpoints, so
+       the mirror never lands on an N host).
+    3. **Per-leg meanders** (last resort, ends the cascade): each leg is
+       tuned single-ended toward its own target so the lane reaches the group
+       target and the within-pair skew shrinks.  Coupled copper is never a
+       host, so a coupled pair's trunk is untouched.
+
+    Returns ``(p_route, n_route, inserts_committed)``.  When nothing commits,
+    the original route objects are returned by reference.
+
+    Issue #7423: ``target_length`` is the reference lane as written, and no
+    candidate may end past it, or lengthen a trace past its bound from
+    ``leg_ceiling_mm`` (:func:`_pair_leg_bounds`), measured as written (see
+    :func:`_pair_overshoot_mm`).  A candidate that would is rebuilt with the
+    requested length lowered by the excess (at most
+    :data:`MAX_OVERSHOOT_REFITS` times) and otherwise rejected.
+    """
+    from .pair_centerline_meander import (
+        centerline_meander,
+        find_coupled_spans,
+        meander_footprint_mm,
+    )
+    from .primitives import Route as _Route
+
+    original_p = routes_by_net[p_id]
+    original_n = routes_by_net[n_id]
+    current_p, current_n = original_p, original_n
+    len_p0, len_n0 = measure(original_p), measure(original_n)
+    skew_allowance = _pair_skew_allowance(abs(len_p0 - len_n0), pair_skew_limit_mm)
+    leg_bounds = _pair_leg_bounds(leg_ceiling_mm, target_length, len_p0, len_n0)
+    committed = 0
+    last_reason = ""
+    last_message = ""
+
+    other_member_routes = {
+        other: routes_by_net[other]
+        for other in group_net_ids
+        if other not in (p_id, n_id) and other in routes_by_net
+    }
+
+    def lane(p: Route, n: Route) -> float:
+        return (measure(p) + measure(n)) / 2.0
+
+    def skew_ok(p: Route, n: Route) -> bool:
+        return abs(measure(p) - measure(n)) <= skew_allowance + 1e-9
+
+    def overshoot(cand_p: Route, cand_n: Route, before_p: Route, before_n: Route) -> float:
+        return _pair_overshoot_mm(
+            measure, cand_p, cand_n, before_p, before_n, target_length, leg_bounds
+        )
+
+    def paired_drc(
+        new_p: list[Segment],
+        new_n: list[Segment],
+        cand_p: Route,
+        cand_n: Route,
+        pair_floor: float,
+    ) -> str | None:
+        return _post_insertion_clearance_detail_pair_group(
+            new_p_segments=new_p,
+            new_n_segments=new_n,
+            candidate_p_id=p_id,
+            candidate_n_id=n_id,
+            group_net_ids=group_net_ids,
+            routes_by_net=routes_by_net,
+            intra_group_clearance_mm=intra_group_clearance_mm,
+            intra_pair_clearance_mm=pair_floor,
+            via_clearance_mm=via_clearance_mm,
+            pads_by_net=pads_by_net,
+            pad_clearance_mm=pad_clearance_mm,
+            net_clearance_mm=net_clearance_mm,
+            candidate_p_route=cand_p,
+            candidate_n_route=cand_n,
+        )
+
+    def splice(route: Route, index: int, new_segments: list[Segment]) -> Route:
+        return _Route(
+            net=route.net,
+            net_name=route.net_name,
+            segments=route.segments[:index] + new_segments + route.segments[index + 1 :],
+            vias=route.vias.copy(),
+            is_escape=route.is_escape,
+        )
+
+    per_leg_ran = False
+    for attempt in range(max_inserts_per_member):
+        result_p.attempts = result_n.attempts = attempt + 1
+        length_needed = target_length - lane(current_p, current_n)
+        if length_needed <= tolerance_mm:
+            break
+        if committed >= group_budget_left:
+            last_reason = "cascade_budget_exhausted"
+            last_message = (
+                f"Group {group.name!r} cumulative budget ({MAX_TOTAL_INSERTS_PER_GROUP}) "
+                f"exhausted during tuning of pair ({p_id}, {n_id})."
+            )
+            break
+
+        candidate: tuple[Route, Route] | None = None
+
+        # --- Strategy 1: mirrored meander, retried over ranked P hosts.
+        hosts = _rank_candidate_segments(
+            current_p,
+            base_config.min_segment_length,
+            max_candidates=MAX_SEGMENT_RETRY_CANDIDATES,
+            fixed_segment_ids=fixed_segment_ids,
+        )
+        if not hosts:
+            last_reason = "no_suitable_segment"
+            last_message = (
+                f"No segment long enough for a trombone on net {p_id} "
+                f"(pair lane deficit {length_needed:.4f}mm)."
+            )
+        for p_idx, p_seg in hosts:
+            n_corr = _find_corresponding_n_segment(
+                current_n, p_seg, fixed_segment_ids=fixed_segment_ids
+            )
+            if n_corr is None:
+                last_reason = "no_suitable_segment"
+                last_message = (
+                    f"No corresponding N-side segment found for the P-side "
+                    f"insertion segment on pair ({p_id}, {n_id})."
+                )
+                continue
+            n_idx, n_seg = n_corr
+            cx, cy = _pair_centerline_midpoint(p_seg, n_seg)
+            hint = _outer_normal_hint_pair_group(
+                p_seg,
+                n_seg,
+                candidate_p_id=p_id,
+                candidate_n_id=n_id,
+                group_routes=other_member_routes,
+            )
+            # Issue #7423: rebuild with a smaller request while the written
+            # candidate ends past the target (or a trace past the reference).
+            need = length_needed
+            built: tuple[Route, Route, list[Segment]] | None = None
+            excess = 0.0
+            for _refit in range(MAX_OVERSHOOT_REFITS + 1):
+                loops = max(1, math.ceil(need / (2.0 * base_config.amplitude)))
+                generator = SerpentineGenerator(
+                    SerpentineConfig(
+                        style=base_config.style,
+                        amplitude=need / (2.0 * loops) * (1.0 + 1e-9),
+                        min_spacing=base_config.min_spacing,
+                        min_segment_length=base_config.min_segment_length,
+                        gap_factor=base_config.gap_factor,
+                        max_iterations=base_config.max_iterations,
+                        side="outer",
+                        outer_normal_hint=hint,
+                    )
+                )
+                serp = generator.generate_trombone(p_seg, need)
+                built = None
+                if not serp.success:
+                    last_reason = "no_suitable_segment"
+                    last_message = (
+                        f"P-side trombone generation failed for pair ({p_id}, {n_id}): "
+                        f"{serp.message}"
+                    )
+                    break
+                new_n = _mirror_segments_about_centerline(
+                    serp.new_segments,
+                    p_net_id=p_id,
+                    n_net_id=n_id,
+                    n_net_name=current_n.net_name,
+                    cx=cx,
+                    cy=cy,
+                    nx=hint[0],
+                    ny=hint[1],
+                    grid_resolution_mm=grid_resolution_mm,
+                )
+                cand_n_or_none = _splice_mirrored_n_route(
+                    current_n, n_insertion_seg_index=n_idx, mirrored_segments=new_n
+                )
+                if cand_n_or_none is None:
+                    last_reason = "no_suitable_segment"
+                    last_message = (
+                        "Reflected P-side geometry does not correspond to the selected "
+                        f"N-side host segment's endpoints for pair ({p_id}, {n_id})."
+                    )
+                    break
+                built = (splice(current_p, p_idx, serp.new_segments), cand_n_or_none, new_n)
+                excess = overshoot(built[0], built[1], current_p, current_n)
+                if excess <= OVERSHOOT_EPS_MM:
+                    break
+                need -= excess + QUANTIZED_REFIT_MARGIN_MM
+                if need <= 0.0:
+                    break
+            result_p.serpentine_results.append(serp)
+            result_n.serpentine_results.append(serp)
+            if built is None:
+                continue
+            if excess > OVERSHOOT_EPS_MM:
+                last_reason = "overshoot"
+                last_message = (
+                    f"Mirrored meander on pair ({p_id}, {n_id}) would end "
+                    f"{excess:.4f}mm past the group target as written."
+                )
+                continue
+            cand_p, cand_n, new_n = built
+            detail = paired_drc(serp.new_segments, new_n, cand_p, cand_n, intra_pair_clearance_mm)
+            if detail is not None:
+                last_reason = "post_insertion_drc_violation"
+                last_message = (
+                    f"Pair-aware DRC self-check failed on pair ({p_id}, {n_id}): {detail}"
+                )
+                continue
+            if not skew_ok(cand_p, cand_n):
+                last_reason = "rolled_back_pair_skew"
+                last_message = (
+                    f"Mirrored meander on pair ({p_id}, {n_id}) would raise its skew "
+                    f"past {skew_allowance:.3f}mm."
+                )
+                continue
+            candidate = (cand_p, cand_n)
+            break
+
+        # --- Strategy 2: centreline meander on a coupled span.
+        if candidate is None:
+            merged_p = _merge_mutable_runs(current_p, fixed_segment_ids)
+            merged_n = _merge_mutable_runs(current_n, fixed_segment_ids)
+            leg_spacing = base_config.min_spacing * base_config.gap_factor
+            # Only spans that can host at least one bump are candidates, so a
+            # few short coupled stubs never use up the retry fan.
+            spans = [
+                span
+                for span in find_coupled_spans(
+                    merged_p,
+                    merged_n,
+                    max_edge_gap_mm=_coupling_window_mm(),
+                    fixed_segment_ids=fixed_segment_ids,
+                )
+                if span.overlap_mm >= meander_footprint_mm(span.pitch_mm, leg_spacing, 1)
+            ][:MAX_SEGMENT_RETRY_CANDIDATES]
+            for span in spans:
+                p_host = merged_p.segments[span.p_index]
+                n_host = merged_n.segments[span.n_index]
+                # Within-pair floor: the meander keeps the host's own gap, so
+                # never demand more than the rails already have.
+                host_gap = abs(span.pitch_mm) - (p_host.width + n_host.width) / 2.0
+                pair_floor = min(intra_pair_clearance_mm, host_gap - 1e-6)
+                hint = _outer_normal_hint_pair_group(
+                    p_host,
+                    n_host,
+                    candidate_p_id=p_id,
+                    candidate_n_id=n_id,
+                    group_routes=other_member_routes,
+                )
+                first_side = 1 if hint[0] * span.nx + hint[1] * span.ny >= 0.0 else -1
+                for side in (first_side, -first_side):
+                    for amp_factor in AMPLITUDE_BACKOFF_FACTORS:
+                        meander = centerline_meander(
+                            span,
+                            p_host,
+                            n_host,
+                            length_add_mm=length_needed,
+                            amplitude_mm=base_config.amplitude * amp_factor,
+                            leg_spacing_mm=leg_spacing,
+                            side=side,
+                        )
+                        if meander is None:
+                            last_reason = last_reason or "no_suitable_segment"
+                            break
+                        cand_p = splice(merged_p, span.p_index, meander.p_segments)
+                        cand_n = splice(merged_n, span.n_index, meander.n_segments)
+                        # Issue #7423: rebuild with a smaller request while
+                        # the written candidate ends past the target.
+                        need = length_needed
+                        excess = overshoot(cand_p, cand_n, current_p, current_n)
+                        for _refit in range(MAX_OVERSHOOT_REFITS):
+                            if excess <= OVERSHOOT_EPS_MM:
+                                break
+                            need -= excess + QUANTIZED_REFIT_MARGIN_MM
+                            refit = (
+                                centerline_meander(
+                                    span,
+                                    p_host,
+                                    n_host,
+                                    length_add_mm=need,
+                                    amplitude_mm=base_config.amplitude * amp_factor,
+                                    leg_spacing_mm=leg_spacing,
+                                    side=side,
+                                )
+                                if need > 0.0
+                                else None
+                            )
+                            if refit is None:
+                                break
+                            meander = refit
+                            cand_p = splice(merged_p, span.p_index, meander.p_segments)
+                            cand_n = splice(merged_n, span.n_index, meander.n_segments)
+                            excess = overshoot(cand_p, cand_n, current_p, current_n)
+                        if excess > OVERSHOOT_EPS_MM:
+                            last_reason = "overshoot"
+                            last_message = (
+                                f"Centreline meander on pair ({p_id}, {n_id}) would end "
+                                f"{excess:.4f}mm past the group target as written."
+                            )
+                            continue
+                        detail = paired_drc(
+                            meander.p_segments, meander.n_segments, cand_p, cand_n, pair_floor
+                        )
+                        if detail is not None:
+                            last_reason = "post_insertion_drc_violation"
+                            last_message = (
+                                f"Centreline meander on pair ({p_id}, {n_id}) rejected: {detail}"
+                            )
+                            continue
+                        if not skew_ok(cand_p, cand_n):
+                            last_reason = "rolled_back_pair_skew"
+                            last_message = (
+                                f"Centreline meander on pair ({p_id}, {n_id}) would raise "
+                                f"its skew past {skew_allowance:.3f}mm."
+                            )
+                            continue
+                        candidate = (cand_p, cand_n)
+                        break
+                    if candidate is not None:
+                        break
+                if candidate is not None:
+                    break
+
+        if candidate is not None:
+            current_p, current_n = candidate
+            committed += 1
+            result_p.inserts_applied += 1
+            result_n.inserts_applied += 1
+            continue
+
+        # --- Strategy 3: per-leg meanders on uncoupled copper (ends cascade).
+        per_leg_ran = True
+        leg = _tune_pair_legs_single_ended(
+            group=group,
+            p_id=p_id,
+            n_id=n_id,
+            p_route=current_p,
+            n_route=current_n,
+            routes_by_net=routes_by_net,
+            target_length=target_length,
+            tolerance_mm=tolerance_mm,
+            other_member_routes=other_member_routes,
+            intra_group_clearance_mm=intra_group_clearance_mm,
+            intra_pair_clearance_mm=intra_pair_clearance_mm,
+            config=config,
+            max_inserts_per_member=max_inserts_per_member,
+            via_clearance_mm=via_clearance_mm,
+            diff_pair_partners=diff_pair_partners,
+            pads_by_net=pads_by_net,
+            pad_clearance_mm=pad_clearance_mm,
+            net_clearance_mm=net_clearance_mm,
+            board_thickness_mm=board_thickness_mm,
+            num_copper_layers=num_copper_layers,
+            blind_buried_supported=blind_buried_supported,
+            length_model=length_model,
+            fixed_segment_ids=fixed_segment_ids,
+            measure=measure,
+            skew_allowance_mm=skew_allowance,
+            leg_bounds_mm=leg_bounds,
+        )
+        if isinstance(leg, tuple):
+            current_p, current_n, leg_inserts = leg
+            committed += leg_inserts
+            result_p.inserts_applied += leg_inserts
+            result_n.inserts_applied += leg_inserts
+        else:
+            if leg:
+                last_reason, last_message = leg.split("|", 1)
+        break
+
+    # --- Outcome --------------------------------------------------------
+    final_lane = lane(current_p, current_n)
+    residual = abs(target_length - final_lane)
+    for r, route, before in ((result_p, current_p, len_p0), (result_n, current_n, len_n0)):
+        r.length_after_mm = measure(route) if committed else before
+        if residual <= tolerance_mm:
+            r.success = True
+            r.reason = "tuned" if committed else "already_within_tolerance"
+            r.message = (
+                f"Pair ({p_id}, {n_id}) lane {final_lane:.4f}mm within "
+                f"{tolerance_mm:.4f}mm of {target_length:.4f}mm."
+            )
+        else:
+            r.success = False
+            if committed and not last_reason and not per_leg_ran:
+                r.reason = "exceeded_max_inserts"
+            else:
+                r.reason = last_reason or "exceeded_max_inserts"
+            r.message = (last_message or f"Cascade budget exhausted on pair ({p_id}, {n_id}).") + (
+                f" Lane {final_lane:.4f}mm vs target {target_length:.4f}mm "
+                f"(residual {residual:.4f}mm > tol {tolerance_mm:.4f}mm; "
+                f"{committed} inserts committed)."
+            )
+    if not committed:
+        current_p, current_n = original_p, original_n
+    return current_p, current_n, committed
+
+
+def _tune_pair_legs_single_ended(
+    *,
+    group: MatchGroup,
+    p_id: int,
+    n_id: int,
+    p_route: Route,
+    n_route: Route,
+    routes_by_net: dict[int, Route],
+    target_length: float,
+    tolerance_mm: float,
+    other_member_routes: dict[int, Route],
+    intra_group_clearance_mm: float,
+    intra_pair_clearance_mm: float,
+    config: SerpentineConfig | None,
+    max_inserts_per_member: int,
+    via_clearance_mm: float | None,
+    diff_pair_partners: dict[int, int] | None,
+    pads_by_net: dict[int, list[Pad]] | None,
+    pad_clearance_mm: float | None,
+    net_clearance_mm: dict[int, float] | None = None,
+    board_thickness_mm: float | None,
+    num_copper_layers: int,
+    blind_buried_supported: bool,
+    length_model: KicadLengthModel | None = None,
+    fixed_segment_ids: set[int] | None,
+    measure: Callable[[Route], float],
+    skew_allowance_mm: float,
+    leg_bounds_mm: tuple[float, float] | None = None,
+) -> tuple[Route, Route, int] | str:
+    """Tune each leg of a pair on its own toward the group target (Issue #6675).
+
+    Per-leg targets put the lane average on ``target_length`` with the
+    smallest possible within-pair skew: both legs go to the target when both
+    are short of it; otherwise the longer leg stays and the shorter one makes
+    up the lane.  Segments that belong to a coupled span are never hosts, so
+    a partially coupled pair keeps its coupled trunk.
+
+    Returns ``(p_route, n_route, inserts)`` on a commit, else
+    ``"<reason>|<message>"``.  On rejection ``routes_by_net`` is restored.
+
+    Issue #7423: the leg shares are computed from the legs as written, each
+    is capped at its bound in ``leg_bounds_mm`` (:func:`_pair_leg_bounds`)
+    and handed to the single-ended tuner as a written-precision ceiling, so
+    the written lane never ends past ``target_length`` and no leg past its
+    bound.
+    """
+    from .match_group_length import MatchGroup as _MatchGroup
+    from .pair_centerline_meander import coupled_segment_ids
+
+    def written(route: Route) -> float:
+        return max(measure(route), measure(_as_written(route)))
+
+    len_p, len_n = measure(p_route), measure(n_route)
+    wlen_p, wlen_n = written(p_route), written(n_route)
+    if wlen_p <= target_length and wlen_n <= target_length:
+        target_p = target_n = target_length
+    elif wlen_p > target_length:
+        target_p, target_n = len_p, 2.0 * target_length - wlen_p
+    else:
+        target_p, target_n = 2.0 * target_length - wlen_n, len_n
+    if leg_bounds_mm is not None:
+        target_p, target_n = min(target_p, leg_bounds_mm[0]), min(target_n, leg_bounds_mm[1])
+
+    locked = set(fixed_segment_ids or ()) | coupled_segment_ids(
+        p_route, n_route, max_edge_gap_mm=_coupling_window_mm()
+    )
+    saved = {p_id: routes_by_net.get(p_id), n_id: routes_by_net.get(n_id)}
+    routes_by_net[p_id] = p_route
+    routes_by_net[n_id] = n_route
+    partners = dict(diff_pair_partners or {})
+    partners[p_id] = n_id
+    partners[n_id] = p_id
+    leg_tol = tolerance_mm / 4.0
+
+    def restore() -> None:
+        for nid, route in saved.items():
+            if route is None:
+                routes_by_net.pop(nid, None)
+            else:
+                routes_by_net[nid] = route
+
+    inserts = 0
+    reasons: list[str] = []
+    for leg, partner, target in ((p_id, n_id, target_p), (n_id, p_id, target_n)):
+        if target - measure(routes_by_net[leg]) <= leg_tol:
+            continue
+        sub = _MatchGroup(
+            name=f"{group.name}__leg{leg}",
+            net_ids=[leg],
+            pair_ids=[],
+            tolerance=leg_tol,
+            reference_net_id=None,
+            source=group.source,
+        )
+        leg_results = _tune_match_group_single_ended(
+            sub,
+            routes_by_net,
+            tolerance_mm=leg_tol,
+            intra_group_clearance_mm=intra_group_clearance_mm,
+            config=config,
+            max_inserts_per_member=max_inserts_per_member,
+            length_critical=True,
+            via_clearance_mm=via_clearance_mm,
+            diff_pair_partners=partners,
+            intra_pair_clearance_mm=intra_pair_clearance_mm,
+            pads_by_net=pads_by_net,
+            pad_clearance_mm=pad_clearance_mm,
+            net_clearance_mm=net_clearance_mm,
+            board_thickness_mm=board_thickness_mm,
+            num_copper_layers=num_copper_layers,
+            blind_buried_supported=blind_buried_supported,
+            length_model=length_model,
+            fixed_segment_ids=locked,
+            reference_length_mm=target,
+            reference_ceiling_mm=target,
+            hint_routes={partner: routes_by_net[partner], **other_member_routes},
+            both_sides=True,
+        )
+        _route, leg_result = leg_results[leg]
+        inserts += leg_result.inserts_applied
+        if leg_result.reason != "tuned":
+            reasons.append(f"{leg_result.reason}|leg {leg}: {leg_result.message}")
+
+    new_p, new_n = routes_by_net[p_id], routes_by_net[n_id]
+    if inserts == 0:
+        restore()
+        return reasons[-1] if reasons else ""
+    if abs(measure(new_p) - measure(new_n)) > skew_allowance_mm + 1e-9:
+        restore()
+        return (
+            f"rolled_back_pair_skew|Per-leg meanders on pair ({p_id}, {n_id}) would "
+            f"leave its skew at {abs(measure(new_p) - measure(new_n)):.3f}mm "
+            f"(> {skew_allowance_mm:.3f}mm); both legs rolled back."
+        )
+    if (measure(new_p) + measure(new_n)) / 2.0 <= (len_p + len_n) / 2.0 + 1e-9:
+        restore()
+        return reasons[-1] if reasons else ""
+    excess = _pair_overshoot_mm(
+        measure, new_p, new_n, p_route, n_route, target_length, leg_bounds_mm
+    )
+    if excess > OVERSHOOT_EPS_MM:
+        # Backstop: the per-leg ceilings above should make this unreachable.
+        restore()
+        return (
+            f"overshoot|Per-leg meanders on pair ({p_id}, {n_id}) would end "
+            f"{excess:.4f}mm past the group target as written; both legs rolled back."
+        )
+    return new_p, new_n, inserts
+
+
 def _tune_match_group_of_pairs(
     group: MatchGroup,
     routes_by_net: dict[int, Route],
@@ -2483,9 +3823,13 @@ def _tune_match_group_of_pairs(
     diff_pair_partners: dict[int, int] | None = None,
     pads_by_net: dict[int, list[Pad]] | None = None,
     pad_clearance_mm: float | None = None,
+    net_clearance_mm: dict[int, float] | None = None,
     board_thickness_mm: float | None = None,
     num_copper_layers: int = 4,
     blind_buried_supported: bool = True,
+    length_model: KicadLengthModel | None = None,
+    pair_fallbacks: bool = False,
+    pair_skew_limits_mm: dict[tuple[int, int], float] | None = None,
 ) -> dict[int, tuple[Route, TuneResult]]:
     """Pair-aware Phase 2F path: mirrored serpentine geometry for pair members.
 
@@ -2513,6 +3857,10 @@ def _tune_match_group_of_pairs(
     group AFTER the pair-aware sweep.  This preserves the policy that
     scalars and pairs are tuned with their respective specialized
     geometries.
+
+    With ``pair_fallbacks`` (Issue #6675) each lane is handed to
+    :func:`_tune_pair_lane_with_fallbacks` instead of the single-host mirror
+    cascade below.
 
     See :func:`tune_match_group_v2` for the public docstring.
     """
@@ -2563,6 +3911,7 @@ def _tune_match_group_of_pairs(
             board_thickness_mm,
             num_copper_layers,
             blind_buried_supported=blind_buried_supported,
+            length_model=length_model,
         )
 
     member_lengths: dict[int, float] = {}
@@ -2595,9 +3944,9 @@ def _tune_match_group_of_pairs(
     #   * group.reference_net_id = paired half -> that lane's average
     #     is the target.
     ref_length: float | None = None
+    ref_pair: tuple[int, int] | None = None
     if group.reference_net_id is not None:
         # Is the reference a paired half?
-        ref_pair: tuple[int, int] | None = None
         for p_id, n_id in group.pair_ids:
             if group.reference_net_id in (p_id, n_id):
                 ref_pair = (p_id, n_id)
@@ -2613,6 +3962,36 @@ def _tune_match_group_of_pairs(
                 candidates.append(member_lengths[net_id])
         if candidates:
             ref_length = max(candidates)
+
+    # Issue #7423: ``kct check`` judges the reference AS WRITTEN (4 dp).  A
+    # reference pair is still copper: its written lane ``(W(p) + W(n)) / 2``
+    # can round shorter than the in-memory lane, so a lane tuned exactly onto
+    # the in-memory target would end past it in the file.  Cap the lane
+    # target at the written reference lane (a scalar reference is a lane of
+    # one trace), and cap any tuned trace at the reference's longest written
+    # trace.  The reference is never modified here, so both caps are fixed.
+    ref_lane_ceiling: float | None = None
+    ref_leg_ceiling: float | None = None
+    if ref_length is not None:
+        ref_sources: list[tuple[int, ...]] = []
+        if group.reference_net_id is not None:
+            if ref_pair is not None and ref_pair in lane_lengths:
+                ref_sources = [ref_pair]
+            elif group.reference_net_id in member_lengths:
+                ref_sources = [(group.reference_net_id,)]
+        else:
+            ref_sources = [pair for pair, lane in lane_lengths.items() if lane == ref_length]
+            ref_sources += [
+                (nid,) for nid in group.net_ids if member_lengths.get(nid) == ref_length
+            ]
+        for src in ref_sources:
+            written = [_measure(_as_written(routes_by_net[nid])) for nid in src]
+            lane_w = min(ref_length, sum(written) / len(written))
+            leg_w = min(max(member_lengths[nid] for nid in src), max(written))
+            ref_lane_ceiling = lane_w if ref_lane_ceiling is None else min(ref_lane_ceiling, lane_w)
+            ref_leg_ceiling = leg_w if ref_leg_ceiling is None else min(ref_leg_ceiling, leg_w)
+        if ref_lane_ceiling is None:
+            ref_lane_ceiling = ref_length
 
     # --- Per-pair iteration --------------------------------------------
     total_inserts_committed = 0
@@ -2747,8 +4126,55 @@ def _tune_match_group_of_pairs(
             continue
 
         # Mirrored copper increases both halves equally, so the target is
-        # the reference lane average, measured with the same via context.
-        target_length = ref_length
+        # the reference lane average, measured with the same via context --
+        # capped at the reference as written (Issue #7423).
+        target_length = ref_lane_ceiling if ref_lane_ceiling is not None else ref_length
+
+        if pair_fallbacks:
+            # Issue #6675: host retry, centreline meanders for lattice
+            # coupled pairs, per-leg tuning for uncoupled pairs, all under
+            # the pair-skew invariant.
+            current_p, current_n, committed = _tune_pair_lane_with_fallbacks(
+                group=group,
+                p_id=p_id,
+                n_id=n_id,
+                routes_by_net=routes_by_net,
+                result_p=per_pair_result_p,
+                result_n=per_pair_result_n,
+                target_length=target_length,
+                tolerance_mm=tolerance_mm,
+                group_net_ids=group_net_ids,
+                intra_group_clearance_mm=intra_group_clearance_mm,
+                intra_pair_clearance_mm=intra_pair_clearance_mm,
+                base_config=base_config,
+                config=config,
+                max_inserts_per_member=max_inserts_per_member,
+                group_budget_left=MAX_TOTAL_INSERTS_PER_GROUP - total_inserts_committed,
+                grid_resolution_mm=grid_resolution_mm,
+                fixed_segment_ids=fixed_segment_ids,
+                via_clearance_mm=via_clearance_mm,
+                diff_pair_partners=diff_pair_partners,
+                pads_by_net=pads_by_net,
+                pad_clearance_mm=pad_clearance_mm,
+                net_clearance_mm=net_clearance_mm,
+                board_thickness_mm=board_thickness_mm,
+                num_copper_layers=num_copper_layers,
+                blind_buried_supported=blind_buried_supported,
+                length_model=length_model,
+                measure=_measure,
+                pair_skew_limit_mm=(pair_skew_limits_mm or {}).get((p_id, n_id)),
+                leg_ceiling_mm=ref_leg_ceiling,
+            )
+            total_inserts_committed += committed
+            results[p_id] = (current_p, per_pair_result_p)
+            results[n_id] = (current_n, per_pair_result_n)
+            if current_p is not original_p_route or current_n is not original_n_route:
+                routes_by_net[p_id] = current_p
+                routes_by_net[n_id] = current_n
+            else:
+                routes_by_net[p_id] = original_p_route
+                routes_by_net[n_id] = original_n_route
+            continue
 
         # Inner attempt loop (mirrors Phase 2E single-ended structure
         # but operates on the pair as a single logical "member").
@@ -2837,87 +4263,122 @@ def _tune_match_group_of_pairs(
                 group_routes=other_member_routes,
             )
 
-            # --- Step 4: generate P-side meander.
-            loops = max(1, math.ceil(length_needed / (2.0 * base_config.amplitude)))
-            amplitude = length_needed / (2.0 * loops) * (1.0 + 1e-9)
-            attempt_config = SerpentineConfig(
-                style=base_config.style,
-                amplitude=amplitude,
-                min_spacing=base_config.min_spacing,
-                min_segment_length=base_config.min_segment_length,
-                gap_factor=base_config.gap_factor,
-                max_iterations=base_config.max_iterations,
-                side="outer",
-                outer_normal_hint=hint,
-            )
-            attempt_generator = SerpentineGenerator(attempt_config)
-            if fixed_segment_ids:
-                # Honor the selected mutable host. add_serpentine would rank
-                # the full route again and could select a longer fixed escape.
-                p_serp_result = attempt_generator.generate_trombone(
-                    p_insertion_segment, length_needed
+            # --- Steps 4-5: generate the P-side meander and mirror it.
+            # Issue #7423: rebuilt with a smaller request while the written
+            # candidate ends past the target (or a trace past the reference);
+            # a candidate that still does is rejected like a failed build.
+            need = length_needed
+            build_failed = False
+            excess = 0.0
+            for _refit in range(MAX_OVERSHOOT_REFITS + 1):
+                loops = max(1, math.ceil(need / (2.0 * base_config.amplitude)))
+                amplitude = need / (2.0 * loops) * (1.0 + 1e-9)
+                attempt_config = SerpentineConfig(
+                    style=base_config.style,
+                    amplitude=amplitude,
+                    min_spacing=base_config.min_spacing,
+                    min_segment_length=base_config.min_segment_length,
+                    gap_factor=base_config.gap_factor,
+                    max_iterations=base_config.max_iterations,
+                    side="outer",
+                    outer_normal_hint=hint,
                 )
-                candidate_p_route = Route(
-                    net=current_p.net,
-                    net_name=current_p.net_name,
-                    segments=(
-                        current_p.segments[:_p_seg_idx]
-                        + p_serp_result.new_segments
-                        + current_p.segments[_p_seg_idx + 1 :]
+                attempt_generator = SerpentineGenerator(attempt_config)
+                if fixed_segment_ids:
+                    # Honor the selected mutable host. add_serpentine would rank
+                    # the full route again and could select a longer fixed escape.
+                    p_serp_result = attempt_generator.generate_trombone(p_insertion_segment, need)
+                    candidate_p_route = Route(
+                        net=current_p.net,
+                        net_name=current_p.net_name,
+                        segments=(
+                            current_p.segments[:_p_seg_idx]
+                            + p_serp_result.new_segments
+                            + current_p.segments[_p_seg_idx + 1 :]
+                        ),
+                        vias=current_p.vias.copy(),
+                        is_escape=current_p.is_escape,
+                    )
+                else:
+                    candidate_p_route, p_serp_result = attempt_generator.add_serpentine(
+                        current_p, LengthTracker.calculate_route_length(current_p) + need
+                    )
+
+                if not p_serp_result.success:
+                    for r in (per_pair_result_p, per_pair_result_n):
+                        r.reason = "no_suitable_segment"
+                        r.message = (
+                            f"P-side trombone generation failed for pair "
+                            f"({p_id}, {n_id}): {p_serp_result.message}"
+                        )
+                    build_failed = True
+                    break
+
+                # --- Step 5: mirror P-side segments to N-side.
+                new_n_segments = _mirror_segments_about_centerline(
+                    p_serp_result.new_segments,
+                    p_net_id=p_id,
+                    n_net_id=n_id,
+                    n_net_name=current_n.net_name,
+                    cx=cx,
+                    cy=cy,
+                    nx=hint[0],
+                    ny=hint[1],
+                    grid_resolution_mm=grid_resolution_mm,
+                )
+                maybe_n_candidate = _splice_mirrored_n_route(
+                    current_n,
+                    n_insertion_seg_index=n_insertion_seg_idx,
+                    mirrored_segments=new_n_segments,
+                )
+                if maybe_n_candidate is None:
+                    # Issue #4984: the reflected P-side geometry's endpoints
+                    # do not correspond to the selected N-side host
+                    # segment's own endpoints -- splicing anyway would
+                    # produce a discontinuous route with asymmetric added
+                    # length. Reject the candidate and roll back, same as
+                    # any other failed insertion attempt this cascade loop.
+                    for r in (per_pair_result_p, per_pair_result_n):
+                        r.reason = "no_suitable_segment"
+                        r.message = (
+                            "Reflected P-side geometry does not correspond to "
+                            "the selected N-side host segment's endpoints for "
+                            f"pair ({p_id}, {n_id}); rejecting candidate rather "
+                            "than splicing a malformed route."
+                        )
+                    build_failed = True
+                    break
+                candidate_n_route = maybe_n_candidate
+                excess = _pair_overshoot_mm(
+                    _measure,
+                    candidate_p_route,
+                    candidate_n_route,
+                    current_p,
+                    current_n,
+                    target_length,
+                    _pair_leg_bounds(
+                        ref_leg_ceiling,
+                        target_length,
+                        member_lengths[p_id],
+                        member_lengths[n_id],
                     ),
-                    vias=current_p.vias.copy(),
-                    is_escape=current_p.is_escape,
                 )
-            else:
-                candidate_p_route, p_serp_result = attempt_generator.add_serpentine(
-                    current_p, LengthTracker.calculate_route_length(current_p) + length_needed
-                )
+                if excess <= OVERSHOOT_EPS_MM:
+                    break
+                need -= excess + QUANTIZED_REFIT_MARGIN_MM
+                if need <= 0.0:
+                    break
             per_pair_result_p.serpentine_results.append(p_serp_result)
             per_pair_result_n.serpentine_results.append(p_serp_result)
-
-            if not p_serp_result.success:
+            if not build_failed and excess > OVERSHOOT_EPS_MM:
                 for r in (per_pair_result_p, per_pair_result_n):
-                    r.reason = "no_suitable_segment"
+                    r.reason = "overshoot"
                     r.message = (
-                        f"P-side trombone generation failed for pair "
-                        f"({p_id}, {n_id}): {p_serp_result.message}"
+                        f"Mirrored meander on pair ({p_id}, {n_id}) would end "
+                        f"{excess:.4f}mm past the group target as written; rolled back."
                     )
-                current_p = original_p_route
-                current_n = original_n_route
-                break
-
-            # --- Step 5: mirror P-side segments to N-side.
-            new_n_segments = _mirror_segments_about_centerline(
-                p_serp_result.new_segments,
-                p_net_id=p_id,
-                n_net_id=n_id,
-                n_net_name=current_n.net_name,
-                cx=cx,
-                cy=cy,
-                nx=hint[0],
-                ny=hint[1],
-                grid_resolution_mm=grid_resolution_mm,
-            )
-            candidate_n_route = _splice_mirrored_n_route(
-                current_n,
-                n_insertion_seg_index=n_insertion_seg_idx,
-                mirrored_segments=new_n_segments,
-            )
-            if candidate_n_route is None:
-                # Issue #4984: the reflected P-side geometry's endpoints
-                # do not correspond to the selected N-side host
-                # segment's own endpoints -- splicing anyway would
-                # produce a discontinuous route with asymmetric added
-                # length. Reject the candidate and roll back, same as
-                # any other failed insertion attempt this cascade loop.
-                for r in (per_pair_result_p, per_pair_result_n):
-                    r.reason = "no_suitable_segment"
-                    r.message = (
-                        "Reflected P-side geometry does not correspond to "
-                        "the selected N-side host segment's endpoints for "
-                        f"pair ({p_id}, {n_id}); rejecting candidate rather "
-                        "than splicing a malformed route."
-                    )
+                build_failed = True
+            if build_failed:
                 current_p = original_p_route
                 current_n = original_n_route
                 break
@@ -2935,6 +4396,7 @@ def _tune_match_group_of_pairs(
                 via_clearance_mm=via_clearance_mm,
                 pads_by_net=pads_by_net,
                 pad_clearance_mm=pad_clearance_mm,
+                net_clearance_mm=net_clearance_mm,
                 candidate_p_route=candidate_p_route,
                 candidate_n_route=candidate_n_route,
             )
@@ -3047,15 +4509,94 @@ def _tune_match_group_of_pairs(
             diff_pair_partners=diff_pair_partners,
             pads_by_net=pads_by_net,
             pad_clearance_mm=pad_clearance_mm,
+            net_clearance_mm=net_clearance_mm,
             board_thickness_mm=board_thickness_mm,
             num_copper_layers=num_copper_layers,
             blind_buried_supported=blind_buried_supported,
+            length_model=length_model,
             reference_length_mm=ref_length,
+            # Issue #7423: the group reference as written, whichever member
+            # (lane or scalar) supplies it.
+            reference_ceiling_mm=ref_lane_ceiling,
         )
         for nid, (r_route, r_result) in scalar_results.items():
             results[nid] = (r_route, r_result)
 
     return results
+
+
+def mark_group_rolled_back(
+    group_results: dict[int, tuple[Route, TuneResult]],
+    before_by_net: dict[int, Route],
+    *,
+    spread_mm: float,
+    tolerance_mm: float,
+) -> dict[int, tuple[Route, TuneResult]]:
+    """Restore a group that is still over its limit after tuning (Issue #6675).
+
+    Returns ``group_results`` with every member's route replaced by its
+    pre-tuning route from ``before_by_net`` (the same object, so no
+    serpentine of the group is committed).  Members that had committed an
+    insertion are re-labelled ``"rolled_back_still_over_limit"``; members the
+    tuner left alone keep their own reason (``no_suitable_segment`` etc.) so
+    the log still says why the group could not converge.
+    """
+    restored: dict[int, tuple[Route, TuneResult]] = {}
+    for net_id, (route, result) in group_results.items():
+        original = before_by_net.get(net_id, route)
+        if result.inserts_applied > 0 or route is not original:
+            result = TuneResult(
+                success=False,
+                reason="rolled_back_still_over_limit",
+                attempts=result.attempts,
+                inserts_applied=0,
+                length_before_mm=result.length_before_mm,
+                length_after_mm=result.length_before_mm,
+                message=(
+                    f"Group still over its limit after tuning (spread "
+                    f"{spread_mm:.3f}mm > {tolerance_mm:.3f}mm); pre-tuning route "
+                    f"restored (tuner outcome was {result.reason!r})."
+                ),
+                serpentine_results=result.serpentine_results,
+            )
+        restored[net_id] = (original, result)
+    return restored
+
+
+def mark_group_improved_still_over_limit(
+    group_results: dict[int, tuple[Route, TuneResult]],
+    *,
+    spread_before_mm: float,
+    spread_mm: float,
+    tolerance_mm: float,
+) -> dict[int, tuple[Route, TuneResult]]:
+    """Keep a group's meanders when it improved but is still over its limit (Issue #6969).
+
+    Routes are left as the tuner committed them (every one is DRC-clean by
+    the tuner's own post-insertion check).  Members that committed an
+    insertion are re-labelled ``"improved_still_over_limit"`` with
+    ``success=False`` so the group is never counted as achieved.
+    """
+    kept: dict[int, tuple[Route, TuneResult]] = {}
+    for net_id, (route, result) in group_results.items():
+        if result.inserts_applied > 0:
+            result = TuneResult(
+                success=False,
+                reason="improved_still_over_limit",
+                attempts=result.attempts,
+                inserts_applied=result.inserts_applied,
+                length_before_mm=result.length_before_mm,
+                length_after_mm=result.length_after_mm,
+                message=(
+                    f"Group improved (spread {spread_before_mm:.3f}mm -> "
+                    f"{spread_mm:.3f}mm) but is still over its limit "
+                    f"({tolerance_mm:.3f}mm); DRC-clean meanders kept "
+                    f"(tuner outcome was {result.reason!r})."
+                ),
+                serpentine_results=result.serpentine_results,
+            )
+        kept[net_id] = (route, result)
+    return kept
 
 
 # ---------------------------------------------------------------------------
@@ -3087,6 +4628,8 @@ __all__ = [
     "TUNE_RESULT_REASONS",
     "TuneResult",
     "format_reason_counts",
+    "mark_group_improved_still_over_limit",
+    "mark_group_rolled_back",
     "tune_match_group_v2",
 ]
 

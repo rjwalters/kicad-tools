@@ -241,6 +241,37 @@ def create_zones_for_pcb(pcb_path: Path) -> int:
     return zone_count
 
 
+def router_net_class_map(routed_path: Path) -> dict | None:
+    """The net-class map ``kct route`` routed this board under (Issue #6394).
+
+    ``kct route --net-class-map`` routes with ``DEFAULT_NET_CLASS_MAP`` plus
+    the name classifier for every other board net (``router/io.py``), with
+    the loaded sidecar merged over it, and declares that whole map in the
+    routed ``.kicad_pro``/``.kicad_dru`` (#6390).  The recipe replays the
+    plan instead of routing, so it rebuilds the same map here: the sidecar
+    :func:`route_pcb` wrote beside *routed_path*, over the classifier's map
+    of the board's nets.  Declaring only the sidecar's nine nets would drop
+    the classifier's ``Digital``/``Clock`` clearances to ``Default`` and
+    loosen the board's rules.  ``None`` when there is no sidecar, which
+    keeps whatever the sidecars already declare.
+    """
+    sidecar = routed_path.parent / "net_class_map.json"
+    if not sidecar.exists():
+        return None
+    from kicad_tools.router.net_class import classify_and_apply_rules
+    from kicad_tools.router.rules import DEFAULT_NET_CLASS_MAP, net_class_map_from_path
+    from kicad_tools.schema.pcb import PCB
+
+    names = {
+        number: net.name for number, net in PCB.load(str(routed_path)).nets.items() if net.name
+    }
+    merged = dict(DEFAULT_NET_CLASS_MAP)
+    for name, routing in classify_and_apply_rules(names).items():
+        merged.setdefault(name, routing)
+    merged.update(net_class_map_from_path(sidecar, pcb_path=routed_path))
+    return merged
+
+
 def apply_manufacturing_profile(routed_path: Path, *, manufacturer: str = "jlcpcb-tier1") -> None:
     """Persist the manufacturer profile's design-rule floors BEFORE any fill.
 
@@ -297,6 +328,7 @@ def apply_manufacturing_profile(routed_path: Path, *, manufacturer: str = "jlcpc
         manufacturer_id=profile.id,
         layers=layers,
         copper_oz=1.0,
+        router_net_classes=router_net_class_map(routed_path),
     )
     if written:
         print("   DRC-constraint sidecars: " + ", ".join(str(p) for p in written))
@@ -349,6 +381,80 @@ def fill_zones_in_routed_pcb(routed_path: Path) -> int:
         return zone_count
     except Exception:
         return 0
+
+
+#: Issue #7275: explicit per-pad thermal reliefs for the six GND pads the
+#: generic fill used to tie solid (``thermal_asymmetry``).  Keyed by
+#: ``(reference, pad number)``; each value is the extra per-pad thermal
+#: geometry written next to ``(zone_connect 1)``.  An explicit
+#: ``zone_connect`` makes the generic selective pass and the starved-thermal
+#: repair (``zones/fill_clearance.py``) leave the pad alone, so a starved
+#: spoke now fails pinned native DRC instead of silently turning solid.
+#:
+#: * C10-2: the JOY_X track above blocks the 0/90 degree top spoke; 45 degree
+#:   spokes land 2 in the pour below.
+#: * C11-2: default spokes.  Its bottom spoke needs the JOY_Y_RAW track moved
+#:   down to y=93.8 (``routing-plan.json``) so pour runs under the part.
+#: * J1-A1/A12: default spokes already land 2.
+#: * J1-B1/B12: the USB_CC2 track wrapping the shield tab cuts a pocket off
+#:   above the pin.  A 0.30 mm spoke pair on the shield side merges that
+#:   pocket with the copper shared with A1/A12 and the shield tab, so both
+#:   spokes reach a multiply-connected region.
+BOARD03_PAD_THERMALS: dict[tuple[str, str], dict[str, float]] = {
+    ("C10", "2"): {"thermal_bridge_angle": 45},
+    ("C11", "2"): {},
+    ("J1", "A1"): {},
+    ("J1", "A12"): {},
+    ("J1", "B1"): {"thermal_bridge_angle": 45, "thermal_bridge_width": 0.3, "thermal_gap": 0.2},
+    ("J1", "B12"): {"thermal_bridge_angle": 45, "thermal_bridge_width": 0.3, "thermal_gap": 0.2},
+}
+
+_PAD_THERMAL_TOKENS = (
+    "zone_connect",
+    "thermal_width",
+    "thermal_bridge_width",
+    "thermal_gap",
+    "thermal_bridge_angle",
+)
+
+
+def apply_pad_thermal_overrides(routed_path: Path) -> int:
+    """Write :data:`BOARD03_PAD_THERMALS` onto the routed PCB (Issue #7275).
+
+    Runs BEFORE :func:`fill_zones_in_routed_pcb`.  Any earlier per-pad
+    connection or thermal token on these pads is replaced, so the step is
+    idempotent.  Raises when a listed pad is missing, so a footprint change
+    cannot silently drop a relief.  Returns the number of pads written.
+    """
+    from kicad_tools.core.sexp_file import load_pcb, save_pcb
+    from kicad_tools.sexp import SExp
+
+    print("\nApplying per-pad thermal reliefs (issue #7275)...")
+    doc = load_pcb(routed_path)
+    found: set[tuple[str, str]] = set()
+    for fp in doc.find_all("footprint"):
+        ref = next(
+            (p.get_string(1) for p in fp.find_all("property") if p.get_string(0) == "Reference"),
+            None,
+        )
+        for pad in fp.find_all("pad"):
+            key = (ref or "", pad.get_string(0) or "")
+            extra = BOARD03_PAD_THERMALS.get(key)
+            if extra is None:
+                continue
+            for tok in _PAD_THERMAL_TOKENS:
+                for node in pad.find_all(tok):
+                    pad.children.remove(node)
+            pad.append(SExp.list("zone_connect", 1))
+            for tok, value in extra.items():
+                pad.append(SExp.list(tok, value))
+            found.add(key)
+    missing = sorted(set(BOARD03_PAD_THERMALS) - found)
+    if missing:
+        raise RuntimeError(f"pad thermal overrides: pads not found on the board: {missing}")
+    save_pcb(doc, routed_path)
+    print(f"   {len(found)} pad(s) set to explicit thermal relief")
+    return len(found)
 
 
 def add_gnd_stitching_vias(routed_path: Path) -> int:
@@ -661,12 +767,32 @@ def route_pcb(input_path: Path, output_path: Path, *, use_saved_plan: bool = Tru
                 # Table 2) instead of the generic 0.5 mm.  0.5 mm remains the
                 # P5 stretch target (#6447).
                 pair_protocol="USB2_FS",
+                # Issue #7294 (#7250 PR-D): declare the USB 2.0 90 ohm
+                # differential target so ``kct check`` judges it at error level.
+                target_diff_impedance=90.0,
             )
+    # Issue #6876 (operator ruling on #6824): the USB-C-side pair may run on
+    # the reserved In2.Cu plane.  ``--reserve-plane-layers`` keeps every other
+    # class off it; ``allow_plane_layers`` makes In2.Cu legal for these two
+    # nets only, and ``preferred_layers`` (#6854's lattice surcharge) steers
+    # the common run there.  USB_MCU_D+/- (the <=4 mm MCU launches) keep
+    # their default layers.
+    from kicad_tools.router.rules import resolve_layer_index
+
+    in2 = resolve_layer_index("In2.Cu")
+    for net in ["USB_D+", "USB_D-"]:
+        net_class_map[net] = _dc_replace(
+            net_class_map[net], allow_plane_layers=[in2], preferred_layers=[in2]
+        )
     # Issue #6443: no ``coupled_continuity_threshold`` override.  Continuity
     # is info-only now; the short USB-C/ESD branches are bounded by the
     # uncoupled-length limit (USB2_FS: 6.35 mm x components on the net) and
     # by routing_plan.usb_geometry (>=4 mm common run, <=16 mm copper,
     # <=2.5 mm skew).
+    # Issue #7206: project.kct declares 100 mA (USB_C current_max, input.current);
+    # kct never infers which net carries it, so map it onto the supply nets.
+    for net in ["VCC", "VBUS"]:
+        net_class_map[net] = _dc_replace(net_class_map[net], target_ampacity=0.1)
     sidecar_path = output_path.parent / "net_class_map.json"
     sidecar_path.write_text(_json.dumps(net_class_map_to_dict(net_class_map), indent=2))
     print(f"   Wrote net-class-map sidecar: {sidecar_path}")
@@ -845,34 +971,21 @@ def export_manufacturing_bundle(routed_path: Path, output_dir: Path) -> bool:
         for error in result.errors:
             print(f"   Export error: {error}")
         return False
-    # Keep the separate manual assembly leg explicit in the supplier files.
-    import csv
+    # Issue #7239: JLCPCB assembles through-hole parts, so the export keeps the
+    # USB4085 J1 in bom_jlcpcb.csv and cpl_jlcpcb.csv.  The former separate
+    # manual-assembly leg (manual-assembly-bom.csv) is retired; remove a stale
+    # copy so the package does not list J1 as both fab- and hand-assembled.
     import hashlib
     import zipfile
 
-    bom = mfg_dir / "bom_jlcpcb.csv"
-    with bom.open(newline="") as handle:
-        reader = csv.DictReader(handle)
-        columns = reader.fieldnames
-        rows = list(reader)
-    manual = [row for row in rows if row["Designator"] == "J1"]
-    if len(manual) != 1:
-        raise ValueError("Expected exactly one USB-C J1 manual assembly BOM row")
-    for target, entries in [
-        (bom, [row for row in rows if row not in manual]),
-        (mfg_dir / "manual-assembly-bom.csv", manual),
-    ]:
-        with target.open("w", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=columns)
-            writer.writeheader()
-            writer.writerows(entries)
+    (mfg_dir / "manual-assembly-bom.csv").unlink(missing_ok=True)
 
     (mfg_dir / "README.txt").write_text(
         "USB joystick revision B — fabrication and assembly package\n"
         "\n"
         "Order the exact four-layer stackup and Epoxy-filled & Capped POFV/VIPPO process in manufacturing-requirements.json. Do not use ordinary open or merely tented vias.\n"
         "\n"
-        "Use bom_jlcpcb.csv and cpl_jlcpcb.csv for SMT assembly. J1 USB4085-GF-A is a separate manual through-hole assembly operation listed in manual-assembly-bom.csv. Use exact reviewed supplier parts; no automatic substitutions.\n"
+        "Use bom_jlcpcb.csv and cpl_jlcpcb.csv for assembly. Since issue #7239 they also list the through-hole J1 USB4085-GF-A for JLCPCB assembly (formerly a separate manual operation); procurement must review the J1 row before ordering (see procurement-review.json). Use exact reviewed supplier parts; no automatic substitutions.\n"
         "\n"
         "After inspection, program the supplied 8 MHz firmware and fuses through J3 as described in firmware/README.md. Power the programmer/board from one regulated 5 V source with USB disconnected. No bootloader is required.\n"
         "\n"
@@ -1068,6 +1181,11 @@ def main() -> int:
         # defaults instead of the profile the board is reviewed/routed/
         # exported against, producing real (not phantom) floating pads.
         apply_manufacturing_profile(routed_path)
+
+        # Step 5.47: Explicit thermal reliefs on the six GND pads the generic
+        # fill would tie solid (#7275), so they stay balanced and any starved
+        # spoke fails native DRC instead of being repaired into solid copper.
+        apply_pad_thermal_overrides(routed_path)
 
         # Step 5.5: Fill the zone polygons in the routed PCB so DRC's
         # ``connectivity`` rule sees the power-net pads as connected.  This

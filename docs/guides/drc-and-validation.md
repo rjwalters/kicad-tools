@@ -220,6 +220,19 @@ dropped rather than rejecting the sidecar — silently for `avoid_layers`,
 with a one-line warning for `preferred_layers` (#4685, #4709). Malformed
 tokens (`Bogus.Cu`) remain fatal.
 
+**Plane-layer opt-in (`allow_plane_layers`).** `kct route
+--reserve-plane-layers` (on by default) keeps every class off the stack's
+PLANE layers. A class can opt in to named reserved planes with
+`"allow_plane_layers": ["In2.Cu"]` (names or grid indices, normalized and
+dropped-when-absent exactly like `avoid_layers`). The opt-in is honoured by
+every engine (grid, C++, lattice, mesh) and by the diff-pair coupled search
+and tie step, where **both** nets of the pair must opt in. Other classes stay
+off the plane. Hard `avoid_layers` still wins, and naming a layer that is not
+reserved does nothing. The post-route "signal copper on a reference plane"
+warning skips the opted-in `(net, layer)` pairs only. Pair it with
+`preferred_layers` when you also want to steer the route there: board 03's
+`USB_D+`/`USB_D-` set both to In2.Cu (#6876).
+
 **Auto-discovery.** When `--net-class-map` is omitted, `kct check` probes for a
 sidecar next to the board. Two filename conventions are accepted — the
 stem-keyed `<board-stem>.net_class_map.json` (hand-maintained trees that keep
@@ -286,6 +299,68 @@ from the board's `build_net_class_map()`. The match-group gate
 `<board-dir>/output`. This keeps the CI gates' error counts in parity with the
 in-pipeline DRC while leaving the standalone `kct check` no-op contract
 unchanged.
+
+## CLI: Routing Policies (`routing_policy`)
+
+Issue #6044.  The `routing_policy` category holds a net to the routing limits
+its own net-class-map entry declares.  It reads the same sidecar as the
+diff-pair and match-group rules (auto-discovered or `--net-class-map`); there
+is no separate policy file.  Two `NetClassRouting` fields are policies, for
+single-ended nets as well as pair members:
+
+| Field | Unit | Enforced as |
+|-------|------|-------------|
+| `max_vias_per_net` | integer count | the net's via count must not exceed it |
+| `length_constraint.max_length` | mm | the net's total routed length must not exceed it (+1e-6 mm slack) |
+
+```json
+{
+  "/CLK": {"name": "Clock", "length_critical": true, "max_vias_per_net": 2},
+  "/FB": {
+    "name": "Analog",
+    "noise_sensitive": true,
+    "length_constraint": {"net_id": 0, "max_length": 25.0}
+  }
+}
+```
+
+- **Membership is the map key.**  Each entry is one net, keyed by net name and
+  resolved onto board names the same way as ampacity targets, so a net can
+  never match two policies.  Reports name the entry's class `name` as the
+  group.  `length_constraint` still requires its `net_id` field to load, but
+  `routing_policy` ignores the value: the key identifies the net.
+- **Vias:** every via on the net counts (through, blind/buried, micro).  A
+  KiCad via carries one net, so a via is never charged to two nets.
+- **Length:** the total routed copper of the net as
+  `kicad_tools.router.kicad_length.measure_pcb_net` reports it (the measure the
+  skew checks and tuners use), with every branch of a multi-pin net summed.
+  This is **total** length, not pin-to-pin length.
+- **Track arcs:** that measure reads straight segments only.  A net with a
+  length limit and any track arc gets a `warning`, "length unmeasured (track
+  arcs)", instead of a pass.
+- **Diff pairs:** a pair net whose pair limits carry a via cap is already held
+  to it by `diffpair_uncoupled_length`, so `routing_policy` does not report its
+  vias a second time (unless that category is deselected with `--only`/`--skip`).
+- **Severity:** a limit violation is an `error`.  A malformed value (negative,
+  fractional or non-numeric `max_vias_per_net`; zero, negative or non-numeric
+  `max_length`) is an `error` naming the net, never a crash.  Findings set
+  `items` and `nets` to the net, so a `.kct_waivers.json` entry
+  (`"rule": "routing_policy", "items": ["/CLK"]`) waives one.
+- **Never a silent pass:** a policy whose key matches no board net, or whose
+  net has no copper, or whose category is deselected, prints a stderr warning,
+  as undeclared ampacity targets do.
+
+Limits apply only where an entry declares them, so a map without these fields
+changes nothing.
+
+**Requiring a policy (opt-in).**  `kct check --require-routing-policy` also
+fails every *sensitive* class — an entry with `length_critical`,
+`noise_sensitive`, `length_match_group` or `diffpair_partner` set, and with
+routed copper — that declares neither field.  Pour nets (`is_pour_net`) are
+exempt.  One `error` is reported per class `name`, listing its nets.  The flag
+needs a net-class map: without one (or with `--no-net-class-map`, or with
+`routing_policy` deselected) the command exits 1 with a usage error rather
+than passing.
 
 ## CLI: Waivers, Revision Diffs and Coverage (Issue #5946)
 
@@ -468,6 +543,13 @@ evaluate the board. Examples:
 - Diff-pair skew or continuity with `needs_input:net_class_map` on a board
   with diff-pair-named nets.
 - `netclass_floor` or `netclass_clearance_copper` with an unreadable `.kicad_pro`.
+- `courtyard_overlap` with `no_courtyard_geometry (N of M footprints)`: N
+  footprints have no `F.CrtYd`/`B.CrtYd` outline (each also gets a
+  `courtyard_missing` warning) or one that does not resolve to a polygon, so
+  their overlaps were never tested. Add the courtyards, or set
+  `(attr ... allow_missing_courtyard)` on a part with no body. Footprints with
+  no pads, `board_only` footprints and the `MountingHole:`, `Fiducial:` and
+  `NetTie:` libraries are exempt (Issue #7204).
 
 `skipped` means the check did not apply, for example because nothing was
 declared to verify or it was deselected. The table output prints every

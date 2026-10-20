@@ -46,6 +46,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from kicad_tools.router.via_clearance import COORD_WRITE_GUARD_MM
+
 if TYPE_CHECKING:
     from kicad_tools.schema.pcb import PCB
 
@@ -520,7 +522,10 @@ def route_link(
     if pads_here:
         via_bad |= mask_of(unary_union(pads_here).buffer(rules.via_size / 2 + 0.05))
     drill_disks = [
-        Point(dx, dy).buffer(dd / 2 + rules.via_drill / 2 + rules.hole_to_hole)
+        # Issue #6671: + the slack the board writer's 0.01 mm rounding can eat.
+        Point(dx, dy).buffer(
+            dd / 2 + rules.via_drill / 2 + rules.hole_to_hole + COORD_WRITE_GUARD_MM
+        )
         for dx, dy, dd in model.drills
         if window.distance(Point(dx, dy)) < 2.0
     ]

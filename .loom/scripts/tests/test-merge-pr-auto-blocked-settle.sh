@@ -66,22 +66,6 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 YELLOW='\033[1;33m'
 
 
-assert_contains() {
-    local haystack="$1" needle="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    # Here-string, never a pipe: `grep -q` exits on first match and would
-    # SIGPIPE the producer under `set -o pipefail` (#7771 class).
-    if grep -qF -- "$needle" <<<"$haystack"; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Expected substring: '$needle'"
-        echo "    In: '$haystack'"
-    fi
-}
-
 # The verdict-contradiction guard's decision is `loom-daemon merge-pr
 # verdict-contradiction`. Pin the binary this suite tests against — FATAL,
 # never a skip (a suite that skipped itself would report green while testing
@@ -117,9 +101,6 @@ _extract_block() {
     awk '/^_check_verdict_label_contradiction\(\) \{/ { print; exit }' "$MERGE_PR_SRC"
     _extract_block '_wait_for_checks_then_sync_merge() {'
     _extract_block '_revalidate_merge_guards() {'
-    # The CI-run gate (#10567) is defined AND invoked on one line in merge-pr.sh,
-    # so it cannot be extracted; it has its own tests. Stub it as clear here.
-    echo '_check_ci_result() { return 0; }'
 } > "$FUNCS_FILE"
 
 for fn in error_head_moved _check_loom_pr_label _check_verdict_label_contradiction \

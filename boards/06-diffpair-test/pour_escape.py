@@ -73,12 +73,17 @@ _IGNORED_FLOOR_FAMILIES = {
     "Silkscreen Width": ("text_thickness", None),
     "Silkscreen Height": ("text_height", None),
     "Solder Mask Clearance": ("solder_mask_margin", None),
+    # Issue #7132: the manufacturer's maximum drill.  This search only adds
+    # small via drills, so an upper bound on hole size never constrains it.
+    "Max Hole Size": ("hole_size", None),
 }
+# Families whose constraint is an upper bound rather than a ``min`` floor.
+_MAX_CONSTRAINT_FAMILIES = frozenset({"Max Hole Size"})
 _DRU_RULE_RE = re.compile(
     r'\(rule "(?P<name>[^"]+)"\n'
     r"(?:\s*\(layer (?P<layer>\w+)\)\n)?"
     r'(?:\s*\(condition "(?P<condition>[^"]*)"\)\n)?'
-    r"\s*\(constraint (?P<constraint>\w+) \(min (?P<value>[0-9.]+)mm\)\)\)"
+    r"\s*\(constraint (?P<constraint>\w+) \((?P<kind>min|max) (?P<value>[0-9.]+)mm\)\)\)"
 )
 
 # Issue #6443: the router's managed diff-pair block
@@ -201,6 +206,8 @@ def _floor_block_minima(dru_text: str) -> dict[str, float] | None:
             return None  # hand-edited or unrecognized stanza -- fail closed
         family = match.group("name").split(" - ")[0]
         constraint = match.group("constraint")
+        if match.group("kind") != ("max" if family in _MAX_CONSTRAINT_FAMILIES else "min"):
+            return None  # a floor became a ceiling (or vice versa) -- fail closed
         folded = _FOLDED_FLOOR_FAMILIES.get(family)
         if folded is not None:
             expected, field = folded
@@ -231,10 +238,18 @@ class EscapeRules:
     annulus: float = 0.1
     hole_gap: float = 0.5  # Preserve this recipe's stronger drill-spacing floor.
     hole_copper: float = 0.25
+    # Issue #7322: the fab's solder-mask dam (``DesignRules.min_via_pad_edge_gap``,
+    # #7296). A via drill may not sit in this band just outside an SMD pad
+    # (``kct check`` ``via_at_pad_edge``). 0 disables it.
+    pad_edge_gap: float = 0.0
 
     @classmethod
-    def from_project(cls, path: Path) -> EscapeRules:
-        """Strengthen defaults with project minima; reject unmodeled custom rules."""
+    def from_project(cls, path: Path, *, pad_edge_gap: float = 0.0) -> EscapeRules:
+        """Strengthen defaults with project minima; reject unmodeled custom rules.
+
+        ``pad_edge_gap`` is not a project setting; the caller supplies the fab's
+        mask-dam floor.
+        """
         dru_path = path.with_suffix(".kicad_dru")
         dru_floor_minima: dict[str, float] = {}
         if dru_path.exists():
@@ -291,6 +306,9 @@ class EscapeRules:
             if "clearance" in net_class:
                 values["clearance"] = max(values["clearance"], number(net_class["clearance"]))
         values["diameter"] = max(values["diameter"], values["drill"] + 2 * values["annulus"])
+        if not math.isfinite(pad_edge_gap) or pad_edge_gap < 0:
+            raise ValueError("Pad-edge gap must be a finite nonnegative number")
+        values["pad_edge_gap"] = float(pad_edge_gap)
         return cls(**values)
 
 
@@ -348,6 +366,14 @@ def find_escape(
                     )
         if pnet != net:
             via_blocks.append(geom.buffer(drill_radius + rules.hole_copper + guard))
+        # Issue #7322: keep the drill out of an SMD pad's mask-dam band. The
+        # band is ``drill/2 <= distance < drill/2 + gap`` from the copper, the
+        # region ``via_drill_at_pad_edge`` flags; the part overlapping copper is
+        # already blocked above, so the buffer is the whole zone. Through-hole
+        # pads have no mask dam to protect here.
+        is_smd = not (entry[6] if len(entry) > 6 else hole_radius)
+        if rules.pad_edge_gap > 0 and is_smd:
+            via_blocks.append(geom.buffer(drill_radius + rules.pad_edge_gap + guard))
     for geom, snet, lay in segments:
         if snet != net:
             via_blocks.append(

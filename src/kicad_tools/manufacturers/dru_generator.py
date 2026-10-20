@@ -447,6 +447,14 @@ def generate_dru(
         f"  (constraint hole_size (min {rules.min_via_drill_mm}mm)))"
     )
 
+    # --- Max Hole Size ---
+    # Issue #7132: enforce the manufacturer's maximum drill.  Unconditional so
+    # it covers vias, PTH pads and NPTH pads alike (the limit is global).
+    lines.append(
+        f'(rule "Max Hole Size{label_suffix}"\n'
+        f"  (constraint hole_size (max {rules.max_hole_diameter_mm}mm)))"
+    )
+
     # --- Via Diameter ---
     lines.append(
         f'(rule "Via Diameter{label_suffix}"\n'
@@ -483,14 +491,14 @@ def generate_dru(
     # --- Silkscreen Width ---
     lines.append(
         f'(rule "Silkscreen Width{label_suffix}"\n'
-        f"  (condition \"A.Type == 'text' && A.Layer == 'F.Silkscreen'\")\n"
+        f"  (condition \"A.Type == 'text' && (A.Layer == 'F.Silkscreen' || A.Layer == 'B.Silkscreen')\")\n"
         f"  (constraint text_thickness (min {rules.min_silkscreen_width_mm}mm)))"
     )
 
     # --- Silkscreen Height ---
     lines.append(
         f'(rule "Silkscreen Height{label_suffix}"\n'
-        f"  (condition \"A.Type == 'text' && A.Layer == 'F.Silkscreen'\")\n"
+        f"  (condition \"A.Type == 'text' && (A.Layer == 'F.Silkscreen' || A.Layer == 'B.Silkscreen')\")\n"
         f"  (constraint text_height (min {rules.min_silkscreen_height_mm}mm)))"
     )
 

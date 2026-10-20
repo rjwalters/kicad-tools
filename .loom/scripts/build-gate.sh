@@ -264,7 +264,7 @@ cd "$(git rev-parse --show-toplevel)"
 # STRUCTURAL PHASE — first, and in BOTH tiers (#9140).
 #
 # Until #9140 this gate ran cargo, the doctests and five bash suites and none of
-# the ~30 structural/ratchet gates CI's required `Structural Checks` job
+# the structural gates CI's `Lint` job
 # enforces, so a Builder could report a fully green local gate and still fail CI
 # on checks that are fast, deterministic and need no build at all. PR #9137 is
 # the receipt: an honest 9300/9303 local green, then five CI failures (markdown

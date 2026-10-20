@@ -2,7 +2,7 @@ Manufacturing package for voltage_divider_routed.kicad_pcb
 
 Fabrication tier : jlcpcb
 Mode             : assembly
-Generated        : 2026-10-14T17:28:58.810371+00:00
+Generated        : 2026-10-18T22:00:00+00:00
 
 Assembly package: BOM and CPL are included.
 
@@ -31,7 +31,7 @@ Contents
 
 Hand-solder / through-hole items
 --------------------------------
-  The following parts are EXCLUDED from the SMT CPL and must be hand-soldered:
+  The following through-hole parts are INCLUDED in the CPL and BOM for fab assembly (flag for procurement review):
   J1, J2
 
 Warning review (per rule)

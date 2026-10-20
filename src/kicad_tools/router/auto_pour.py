@@ -139,6 +139,33 @@ def map_declares_routed(routing: Any) -> bool:
     )
 
 
+def map_declares_pour(routing: Any) -> bool:
+    """Return True when a net-class map entry declares its net a *pour*.
+
+    Issue #6669: the mirror of :func:`map_declares_routed`.  An entry with
+    ``is_pour_net=True`` or ``route_via="pour"`` declares a pour, and that is
+    exactly what the router's ``_is_pour_net`` reads from the merged map, so
+    such a net is skipped by the router whatever its name looks like.
+    Auto-pour must therefore give it a zone (or, failing that, auto-skip must
+    hand it back to the router as traces) -- otherwise the net gets no copper
+    at all (board 06rf ``VBUS_USB``, which the name classifier reads as
+    high-speed because it contains ``USB``).
+    """
+    if routing is None:
+        return False
+    return not map_declares_routed(routing)
+
+
+def _map_pour_class(routing: Any, net_name: str):
+    """Pick the :class:`NetClass` used to lay out a map-declared pour zone."""
+    from kicad_tools.router.net_class import NetClass
+
+    label = f"{getattr(routing, 'name', '')} {net_name}".lower()
+    if "gnd" in label or "ground" in label:
+        return NetClass.GROUND
+    return NetClass.POWER
+
+
 def classify_pour_candidates(
     net_names: dict[int, str],
     *,
@@ -161,7 +188,10 @@ def classify_pour_candidates(
             net whose entry declares it routed (see
             :func:`map_declares_routed`, issue #6599) is not a pour
             candidate; it counts as a signal net for the all-power guard,
-            because the router will route it.
+            because the router will route it.  Conversely (issue #6669), a
+            net the name classifier does *not* read as POWER/GROUND but
+            whose entry declares it a pour (see :func:`map_declares_pour`)
+            *is* a pour candidate, since the router will skip it as one.
         map_routed_out: Optional list; the names of nets dropped by
             ``net_class_map`` are appended to it so the caller can log them.
 
@@ -202,13 +232,26 @@ def classify_pour_candidates(
                     map_routed_out.append(net_name)
                 continue
             pour_nets.append((net_name, classification.net_class))
+        elif net_class_map is not None and map_declares_pour(net_class_map.get(net_name)):
+            # Issue #6669: the map declares a pour the name heuristic missed.
+            pour_nets.append((net_name, _map_pour_class(net_class_map[net_name], net_name)))
         else:
             signal_net_count += 1
 
     # Count unclassified nets (those that didn't meet confidence threshold)
-    # as signal nets -- they are certainly not power/ground.
-    unclassified = len(net_names) - len(classifications)
-    signal_net_count += unclassified
+    # as signal nets -- they are certainly not power/ground -- unless the
+    # map declares them a pour (issue #6669).
+    for net_id, net_name in net_names.items():
+        if net_id in classifications:
+            continue
+        if (
+            net_class_map is not None
+            and not _is_erc_marker_net(net_name)
+            and map_declares_pour(net_class_map.get(net_name))
+        ):
+            pour_nets.append((net_name, _map_pour_class(net_class_map[net_name], net_name)))
+        else:
+            signal_net_count += 1
 
     is_all_power_board = bool(pour_nets) and signal_net_count == 0
     return pour_nets, signal_net_count, is_all_power_board
@@ -334,10 +377,16 @@ def _remove_zones_for_nets(pcb_path: Path, net_names: set[str]) -> None:
     # Iterate every ``(zone`` opener in the file and decide whether to
     # remove that span.  We walk forward across the text rebuilding it
     # rather than relying on per-line state.
+    #
+    # Issue #6873: only openers outside quoted strings count.  A zone name or
+    # footprint descr such as ``"pour (zone keepout, see note"`` used to be
+    # taken for a zone whose span never closed, and the bail-out below then
+    # left every real zone after it in place.
+    from kicad_tools.sexp.scan import iter_unquoted
+
     out_parts: list[str] = []
     cursor = 0
-    zone_start_pattern = re.compile(r"\(zone\b")
-    for m in zone_start_pattern.finditer(pcb_text):
+    for m in iter_unquoted(pcb_text, r"\(zone\b"):
         start = m.start()
         if start < cursor:
             # This opener lies inside a span we already removed (e.g. a
@@ -371,10 +420,29 @@ def _remove_zones_for_nets(pcb_path: Path, net_names: set[str]) -> None:
     pcb_path.write_text("".join(out_parts))
 
 
+def board_net_names(pcb_text: str) -> dict[int, str]:
+    """Return ``{net id: net name}`` for every named net on the board.
+
+    Resolves both KiCad net dialects with the routing loader's own mapping,
+    :func:`kicad_tools.router.io._build_net_number_map`: numbered
+    ``(net N "NAME")`` references keep their authored ids, and a KiCad-10
+    name-only board (``(net "NAME")`` everywhere, no header table) gets the
+    same synthetic ids the loader assigns.  Before issue #6989 this stage
+    read only the numbered form, so a name-only board had no nets here and
+    pour auto-skip, auto-pour and the plane-via reservation silently did
+    nothing.  The scan is quote-aware, so a ``(net ...)`` inside a string is
+    not mistaken for a net.
+    """
+    from kicad_tools.router.io import _build_net_number_map
+
+    return {num: name for name, num in _build_net_number_map(pcb_text).items() if num > 0 and name}
+
+
 def auto_skip_pour_nets(
     pcb_path: Path,
     skip_nets: list[str],
     quiet: bool = False,
+    net_class_map: Mapping[str, NetClassRouting] | None = None,
 ) -> tuple[list[str], list[str]]:
     """Detect non-pathfinder nets in the PCB and add them to the skip list.
 
@@ -399,6 +467,16 @@ def auto_skip_pour_nets(
         skip_nets: Mutable list of net names already marked for skipping
             (e.g. from ``--skip-nets`` CLI flag).  Modified in place.
         quiet: Suppress informational output.
+        net_class_map: Optional ``--net-class-map`` sidecar
+            (``{net_name: NetClassRouting}``, issue #6669).  An entry that
+            declares its net a pour (:func:`map_declares_pour`) replaces the
+            name classifier's verdict for that net, so a pour the name
+            heuristic misses (06rf ``VBUS_USB``) is auto-skipped when it has
+            a zone and lands in ``no_zone_nets`` when it does not.  This is
+            the same map the router merges and reads in ``_is_pour_net``,
+            so the two can no longer disagree.  Map entries declaring a net
+            routed are not applied here (#6599 handles them in auto-pour,
+            and the router's own merged map routes them).
 
     Returns:
         Tuple of (auto_skipped, no_zone_nets):
@@ -428,14 +506,16 @@ def auto_skip_pour_nets(
         from kicad_tools.router.net_class import classify_and_apply_rules
 
         pcb_text = Path(pcb_path).read_text()
-        net_names: dict[int, str] = {}
-        for m in re.finditer(r'\(net\s+(\d+)\s+"([^"]+)"\)', pcb_text):
-            net_num, name = int(m.group(1)), m.group(2)
-            if net_num > 0:
-                net_names[net_num] = name
+        net_names = board_net_names(pcb_text)
 
         if net_names:
-            net_class_map = classify_and_apply_rules(net_names)
+            class_map = classify_and_apply_rules(net_names)
+            if net_class_map:
+                # Issue #6669: a map-declared pour wins over the name verdict.
+                board_names = set(net_names.values())
+                for name, routing in net_class_map.items():
+                    if name in board_names and map_declares_pour(routing):
+                        class_map[name] = routing
             # Only auto-skip pour nets that actually have zones in the PCB.
             # Nets classified as pour by name (e.g. +5V) but without a zone
             # must still be routed as signals.
@@ -477,7 +557,7 @@ def auto_skip_pour_nets(
             # zone.  See _is_erc_marker_net above for the filter.
             pour_skip = [
                 name
-                for name, routing in net_class_map.items()
+                for name, routing in class_map.items()
                 if _wants_pour(routing)
                 and name not in skip_nets
                 and name in nets_with_zones
@@ -488,7 +568,7 @@ def auto_skip_pour_nets(
             # markers are still excluded for the same reason as above.
             manual_skip = [
                 name
-                for name, routing in net_class_map.items()
+                for name, routing in class_map.items()
                 if _wants_manual(routing) and name not in skip_nets and not _is_erc_marker_net(name)
             ]
             auto_skip = pour_skip + manual_skip
@@ -504,10 +584,16 @@ def auto_skip_pour_nets(
             # which never get zones by design).  ``route_via="manual"``
             # nets are intentionally NOT in this list -- the designer has
             # declared they will handle routing by hand, not via a zone.
+            #
+            # Issue #6669 backstop: the router's ``_is_pour_net`` skips any
+            # net whose class has ``is_pour_net=True`` -- even one whose
+            # ``route_via="pathfinder"`` keeps it out of ``pour_skip`` above.
+            # Every such net lacking a zone must be handed back to the router
+            # here, or it is skipped with no zone and gets no copper at all.
             no_zone = [
                 name
-                for name, routing in net_class_map.items()
-                if _wants_pour(routing)
+                for name, routing in class_map.items()
+                if (_wants_pour(routing) or routing.is_pour_net)
                 and name not in skip_nets
                 and name not in nets_with_zones
                 and not _is_erc_marker_net(name)
@@ -580,13 +666,9 @@ def auto_pour_if_missing(
     pcb_text = pcb_path.read_text()
 
     # ------------------------------------------------------------------
-    # 1. Build net inventory from the file header
+    # 1. Build net inventory (numbered and name-only dialects, #6989)
     # ------------------------------------------------------------------
-    net_names: dict[int, str] = {}
-    for m in re.finditer(r'\(net\s+(\d+)\s+"([^"]+)"\)', pcb_text):
-        net_num, name = int(m.group(1)), m.group(2)
-        if net_num > 0:
-            net_names[net_num] = name
+    net_names = board_net_names(pcb_text)
 
     if not net_names:
         return 0, []

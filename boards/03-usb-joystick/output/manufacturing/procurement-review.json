@@ -71,5 +71,10 @@
       "source": "https://www.lcsc.com/product-detail/C126817.html"
     }
   },
-  "pending": {}
+  "pending": {},
+  "tht_jlcpcb_assembly_note": {
+    "date": "2026-10-18",
+    "issue": "#7239",
+    "note": "JLCPCB's PCBA capability page (https://jlcpcb.com/capabilities/pcb-assembly-capabilities, fetched 2026-10-18) lists both Economic and Standard PCBA as SMT/Thru-hole, so by operator decision (issue #7239) kct export --mfr jlcpcb no longer excludes through-hole parts. bom_jlcpcb.csv and cpl_jlcpcb.csv now also list the through-hole J1 (USB4085-GF-A, C7095263) for JLCPCB assembly, and manual-assembly-bom.csv is retired. Procurement must review the J1 rows (part identity, JLCPCB through-hole assembly eligibility and stock, and placement orientation) before ordering assembly. This note records the export change only: it is not a re-review, and no new supplier lookup or stock check was performed."
+  }
 }

@@ -114,7 +114,12 @@ def main():
     # Import here (rather than at module scope) so the import path is
     # set up before ``generate_design`` pulls in its router deps.
     sys.path.insert(0, str(Path(__file__).parent))
-    from generate_design import route_pcb  # noqa: E402
+    from generate_design import (  # noqa: E402
+        add_gnd_stitching_vias,
+        apply_manufacturing_profile,
+        fill_zones_in_routed_pcb,
+        route_pcb,
+    )
 
     # Parse arguments
     demo_dir = Path(__file__).parent
@@ -143,6 +148,17 @@ def main():
     # Delegate to the canonical recipe.  ``route_pcb()`` prints its own
     # progress block and returns True on full success, False on partial.
     success = route_pcb(input_path, output_path)
+
+    # Issue #6394: finish the board the way the recipe does (its Steps 5.4,
+    # 5.45 and 5.5) before checking it: stitch, persist the jlcpcb-tier1 sidecars --
+    # including the native zone-clearance block -- and fill under them.
+    # Without this the demo's refill ran under rules the shipped board does
+    # not carry, and kicad-cli reported starved thermals the shipped fill
+    # does not have.
+    if success:
+        add_gnd_stitching_vias(output_path)
+        apply_manufacturing_profile(output_path)
+        fill_zones_in_routed_pcb(output_path)
 
     # Run DRC validation on the resulting routed PCB.  This is in addition
     # to whatever the recipe does internally so the demo always surfaces

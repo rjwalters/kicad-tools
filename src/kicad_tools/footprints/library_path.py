@@ -10,8 +10,10 @@ import platform
 from dataclasses import dataclass
 from pathlib import Path
 
+from kicad_tools.kicad_install import windows_kicad_base_dirs, windows_kicad_install_roots
+
 # Default library paths for each platform
-_KICAD_LIBRARY_PATHS = {
+_KICAD_LIBRARY_PATHS: dict[str, list[str | Path]] = {
     "Darwin": [  # macOS
         # KiCad 8.x standard installation
         "/Applications/KiCad/KiCad.app/Contents/SharedSupport/footprints",
@@ -36,11 +38,8 @@ _KICAD_LIBRARY_PATHS = {
         Path.home() / ".var/app/org.kicad.KiCad/data/kicad/footprints",
     ],
     "Windows": [
-        Path("C:/Program Files/KiCad/share/kicad/footprints"),
-        Path("C:/Program Files (x86)/KiCad/share/kicad/footprints"),
-        Path.home() / "AppData/Local/Programs/KiCad/share/kicad/footprints",
-        # KiCad 8.x versioned paths
-        Path("C:/Program Files/KiCad/8.0/share/kicad/footprints"),
+        # Unversioned installs (Program Files, Program Files (x86), AppData) are
+        # derived from windows_kicad_base_dirs() in detect_kicad_library_path().
         Path.home() / "Documents/KiCad/8.0/footprints",
     ],
 }
@@ -209,7 +208,14 @@ def detect_kicad_library_path(config_override: str | Path | None = None) -> Libr
 
     # 3. Check platform-specific defaults
     system = platform.system()
-    default_paths = _KICAD_LIBRARY_PATHS.get(system, [])
+    default_paths = [Path(p) for p in _KICAD_LIBRARY_PATHS.get(system, [])]
+    if system == "Windows":
+        # Versioned installs (newest first), then unversioned, then user dirs.
+        default_paths = (
+            [root / "share" / "kicad" / "footprints" for root in windows_kicad_install_roots()]
+            + [base / "share" / "kicad" / "footprints" for base in windows_kicad_base_dirs()]
+            + default_paths
+        )
 
     for path in default_paths:
         path = Path(path)
@@ -255,6 +261,33 @@ def parse_library_id(lib_id: str) -> tuple[str | None, str]:
         library, footprint = lib_id.split(":", 1)
         return library, footprint
     return None, lib_id
+
+
+def compare_footprint_lib_ids(schematic_id: str, pcb_id: str) -> str:
+    """Classify how a schematic footprint lib ID relates to a PCB one.
+
+    Returns one of:
+
+    * ``"match"`` -- same footprint name, and the library nicknames agree
+      (or neither side has one).
+    * ``"nickname_missing"`` -- same footprint name, but exactly one side
+      lacks the ``Library:`` nickname (a legacy board written before
+      ``PCB.add_footprint`` kept it, Issue #7213). kicad-cli's parity
+      check reports this as ``footprint_symbol_mismatch``; it is the same
+      package, so callers should treat it as informational, not drift.
+    * ``"mismatch"`` -- different footprint names, or both sides carry a
+      nickname and the nicknames differ (``Capacitor_SMD:X`` vs
+      ``Resistor_SMD:X``).
+    """
+    sch_lib, sch_name = parse_library_id(schematic_id)
+    pcb_lib, pcb_name = parse_library_id(pcb_id)
+    if sch_name != pcb_name:
+        return "mismatch"
+    if sch_lib and pcb_lib:
+        return "match" if sch_lib == pcb_lib else "mismatch"
+    if sch_lib or pcb_lib:
+        return "nickname_missing"
+    return "match"
 
 
 def list_available_libraries(paths: LibraryPaths) -> list[str]:

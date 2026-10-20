@@ -16,8 +16,7 @@ day, each starting its own `main` CI run and then a release, which queued PR
 CI behind it and moved every non-fleet `autoUpdate` host. The operator
 direction (2026-10-09) is **at most one release a day**.
 
-- **The gate.** `scripts/version-bump-gate.sh` (unit-tested by
-  `scripts/test-version-bump-gate.sh`) runs before any toolchain setup. The
+- **The gate.** `scripts/version-bump-gate.sh` runs before any toolchain setup. The
   last bump is the newest **first-parent** `main` commit that changed
   `VERSION`, timed by its **committer** time (PRs cannot change `VERSION`, so
   only bump commits match; tags and Release dates are never read). A run bumps
@@ -25,8 +24,20 @@ direction (2026-10-09) is **at most one release a day**.
   `defaults/` changed since that bump. Otherwise it exits green and changes
   nothing, with `deferred: last bump <sha> at <UTC>; next bump eligible at
   <UTC>` (or `nothing to release`) in the job summary. The gate is re-checked
-  after every `git fetch` in the push-retry loop, so a bump that lands mid-race
-  makes the run defer instead of bumping twice.
+  after every `git fetch` in the publish-retry loop, so a bump that lands
+  mid-race makes the run defer instead of bumping twice.
+- **How the bump reaches `main` (#12063).** The workflow never pushes. Its
+  `bump-version` job runs the gate and `scripts/version.sh bump patch`; its
+  `publish` job, the only one with `id-token: write` and with no action in
+  it, POSTs the changed version files to the fleet publisher with a GitHub
+  Actions OIDC token. The publisher commits them as `loom-fleet-publisher`
+  only if they are exactly a one-patch-step bump of the `parent` named, and
+  only while `main` is still at that parent. On `409 head_moved` or `503
+  upstream_ambiguous` the job re-reads `main` and re-runs the gate; if `main`
+  moved without touching a version file, the same bump is sent with the new
+  tip as its parent, and if a version file changed, the next run recomputes
+  it (a forced run fails red and has to be dispatched again). Any refusal
+  fails the run red; there is no fallback to a direct push.
 - **The interval.** Repository variable `RELEASE_MIN_INTERVAL`, in seconds;
   unset means `86400`. A non-integer or negative value fails the run red — it
   never falls back to "always bump". `0` explicitly disables the limit. A
@@ -52,6 +63,44 @@ direction (2026-10-09) is **at most one release a day**.
   a reason, wait for that commit's `CI` to go green and `release.yml` to
   publish, then raise `loom_min_version` to the released tag.
 
+## Manual escape hatch: a hand-cut bump PR (#12132)
+
+The bump's credential is not one the daemons spend. Before #12063 the workflow
+pushed with a token minted from the fleet dispatch App, the same installation
+the daemons fall back to as writer. During a fleet-wide read drain that
+installation's hourly limit ran out, and three forced bumps for the release
+carrying the drain fix failed with HTTP 403. The fix needed a release, and the
+release needed the drained credential. Now the bump goes through the fleet
+publisher, which commits as its own App (`loom-fleet-publisher`). That App's
+limit is separate from the dispatch App's, and its commit still triggers `CI`.
+A plain `GITHUB_TOKEN` push would not, so the bump would never be released.
+
+If the publisher is unavailable (a refusal, an outage, or its own App
+rate-limited) and a release can't wait for it, cut the bump by hand:
+
+1. On a branch off the current `main`, run `scripts/version.sh bump patch`
+   (it needs `cargo` and `npm` on `PATH`, which regenerate the lockfiles).
+   The diff must touch exactly the files of the last workflow bump commit and
+   nothing else. Check against that commit with
+   `git show --stat $(git log -1 --first-parent --format=%H origin/main -- VERSION)`:
+   `VERSION`, `Cargo.toml`, `Cargo.lock`, `package.json`,
+   `mcp-loom/package.json`, `mcp-loom/package-lock.json`,
+   `.loom/install-metadata.json` (7 files, 9 lines at the time of writing).
+2. Open it as a PR titled `chore: bump version to <X.Y.Z>`. Say in the body why
+   the workflow couldn't publish it and what the release ships.
+3. Its `CI Result` fails at its `Lint` job (the version-bump guard), because the PR gate
+   (`check-defaults-version-bump.sh --forbid-bump`) rejects any PR that changes
+   a version value. That is expected. A person with the repository admin role
+   merges it with a merge commit, using **their own token** and bypassing the
+   required check. No agent or fleet App merges it.
+4. The merge commit's `CI` runs on `main`, where the gate is PR-only, and
+   `release.yml` tags it on green using `GITHUB_TOKEN`, exactly as for a
+   workflow bump. The merge commit changed `VERSION` on the first parent, so
+   the cadence gate counts it as the last bump and starts the next window.
+
+This is how 0.19.1163 shipped (#12131). Use it only when the workflow can't
+publish. A hand bump while the publisher works races the next workflow bump.
+
 ## The decision: a release is a green `main` commit with an unreleased `VERSION` (#10826)
 
 `.github/workflows/release.yml` releases automatically, and **only** from a
@@ -68,8 +117,7 @@ direction (2026-10-09) is **at most one release a day**.
   `v<VERSION>` is created at that commit, and every build job checks the tag
   out, so the tag, the binary's `--version` (`Cargo.toml` at that tree) and the
   tested tree are the same thing.
-- **When it publishes** (`scripts/release-decision.sh`, unit-tested by
-  `scripts/test-release-decision.sh`): only if no tag or Release `v<VERSION>`
+- **When it publishes** (`scripts/release-decision.sh`): only if no tag or Release `v<VERSION>`
   exists yet, no **newer** version has already been released (a late re-run of
   an old green CI run never publishes an older version after a newer one), and
   `head_sha` is still reachable from `main` (rewritten history never
@@ -301,7 +349,7 @@ refusal, never its outcome.
 
 `loom-daemon-update.sh`'s own resolver (the shell twin `--fetch` uses) still
 emits the flat, pre-#8515 wording: it is a `contract`-category script, frozen by
-both the file-size ratchet and the portable shell budget, so the classification
+the portable shell budget, so the classification
 cannot be added there without first porting the resolution behind the daemon.
 Tracked separately in
 [#8654](https://github.com/rjwalters/loom/issues/8654).
@@ -418,3 +466,5 @@ does not exist, because then nothing can be run against it.
 - Issue [#8290](https://github.com/rjwalters/loom/issues/8290) — the one-off
   `gh release create` HTTP 403 that motivated the retry logic and the
   "accepted gap" decision above.
+- Issue [#12132](https://github.com/rjwalters/loom/issues/12132) — the bump
+  blocked by a drained dispatch-App limit, and the manual escape hatch above.

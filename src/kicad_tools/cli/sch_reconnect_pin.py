@@ -35,13 +35,14 @@ from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.schema import LibraryManager, Schematic
 from kicad_tools.schema.instances import build_instance_path, find_project_name
 from kicad_tools.schema.library import LibrarySymbol
+from kicad_tools.schematic.grid import snap_to_grid
 from kicad_tools.sexp import SExp
 
 from .sch_disconnect import (
     POINT_TOLERANCE,
-    _find_wires_at_point,
     resolve_pin_position,
 )
+from .sch_wire_common import _find_wires_at_point
 
 # Standard KiCad grid spacing
 GRID = 2.54
@@ -65,11 +66,6 @@ class StubTrace:
     global_labels: list[SExp] = field(default_factory=list)
     is_stub: bool = True  # True if no other pins connect to these wires
     far_end: tuple[float, float] | None = None  # endpoint opposite the pin
-
-
-def _snap(value: float, grid: float = 1.27) -> float:
-    """Snap a coordinate to the nearest grid point."""
-    return round(value / grid) * grid
 
 
 def _points_match(
@@ -162,30 +158,6 @@ def _find_global_labels_at_point(
         if abs(lx - point[0]) <= tolerance and abs(ly - point[1]) <= tolerance:
             matches.append(lbl_sexp)
     return matches
-
-
-def _count_pins_at_point(
-    schematic: Schematic,
-    lib_manager: LibraryManager | None,
-    point: tuple[float, float],
-    exclude_ref: str,
-    tolerance: float = POINT_TOLERANCE,
-) -> int:
-    """Count component pins (not power symbols) touching *point*, excluding *exclude_ref*."""
-    count = 0
-    for sym in schematic.symbols:
-        if sym.reference == exclude_ref:
-            continue
-        if sym.lib_id.startswith("power:"):
-            continue
-        # Quick bounding-box reject
-        if abs(sym.position[0] - point[0]) > 50 or abs(sym.position[1] - point[1]) > 50:
-            continue
-        # We'd need lib_manager to resolve pin positions accurately, but for
-        # a simpler heuristic we check if any wire endpoints connect other
-        # components.  For now, skip expensive resolution -- the caller checks
-        # the stub heuristic via wire branch counting instead.
-    return count
 
 
 def trace_stub(
@@ -418,7 +390,7 @@ def plan_reconnect(
         if stub.is_stub and stub.far_end:
             place_pos = stub.far_end
         else:
-            place_pos = (pos[0], _snap(pos[1] + GRID))
+            place_pos = (pos[0], snap_to_grid(pos[1] + GRID))
         planned.append(
             PlannedAction(
                 "add_power",
@@ -485,12 +457,12 @@ def execute_reconnect(
         place_pos = stub.far_end
     elif not stub.wires:
         if is_power:
-            place_pos = (pin_pos[0], _snap(pin_pos[1] + GRID))
+            place_pos = (pin_pos[0], snap_to_grid(pin_pos[1] + GRID))
         else:
             place_pos = pin_pos
     else:
         if is_power:
-            place_pos = (pin_pos[0], _snap(pin_pos[1] + GRID))
+            place_pos = (pin_pos[0], snap_to_grid(pin_pos[1] + GRID))
         else:
             place_pos = pin_pos
 

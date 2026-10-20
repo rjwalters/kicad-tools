@@ -52,6 +52,7 @@ import logging
 import math
 import re
 import time
+from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -82,11 +83,23 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-#: Default number of oracle rounds (KRT uses 3 as well).
-DEFAULT_ORACLE_ROUNDS = 3
+#: Default number of oracle rounds.  KRT uses 3; Issue #6671 raised ours to 12.
+#: A round only runs while the previous one strictly lowered the link count,
+#: and since a regression withdraws just its culprits (rather than the whole
+#: round) each round is cheap but closes fewer links: board 06rf took six
+#: rounds to go 128 -> 80 -> 21 -> 16 -> 5 -> 1 -> 0, and ten (one of them a
+#: repair round) once a VBUS_USB pour was added.  ``--timeout`` still bounds
+#: the loop (Issue #6273).
+DEFAULT_ORACLE_ROUNDS = 12
 
 #: Most floating fill islands bonded per net in one attempt.
 MAX_ISLAND_JOINS = 16
+
+#: Issue #6671: footprint escalations one oracle round may spend.  Each
+#: withdraws every closure on footprints NOT yet escalated and costs one more
+#: oracle run.  06rf (after #6664) needs two: U2's BGA welds first, then
+#: J3's connector welds, which slice the +1V2 pour one at a time.
+MAX_FOOTPRINT_ESCALATIONS = 3
 
 #: Issue #6384: the ``offset`` / ``escape_distance`` pad welds pass to
 #: ``run_stitch``.  ``PourLinkCloser.weld_clearance`` derives each pad's
@@ -432,6 +445,87 @@ def avoided_sites(banned: Iterable[str]) -> dict[str, list[tuple[float, float]]]
     return out
 
 
+#: Issue #6671: how far (mm) a board via / segment end may sit from the
+#: closer copper it is matched to.  The board writers round coordinates to
+#: 0.01 mm (a weld planned at y = 64.415 is written at 64.41), so the
+#: recorded capsule and the written node differ by up to 0.005 mm.
+WITHDRAW_MATCH_TOLERANCE_MM = 0.01
+
+Capsule = tuple[float, float, float, float, float]
+
+
+def _copper_nodes(sexp: Any) -> list[tuple[Any, tuple[float, ...]]]:
+    """Top-level ``via`` ``(x, y)`` and ``segment`` ``(x1, y1, x2, y2)`` nodes."""
+    out: list[tuple[Any, tuple[float, ...]]] = []
+    for node in sexp.iter_children():
+        if node.tag == "via":
+            at = node.find_child("at")
+            if at is not None:
+                out.append((node, (at.get_float(0) or 0.0, at.get_float(1) or 0.0)))
+        elif node.tag == "segment":
+            a, b = node.find_child("start"), node.find_child("end")
+            if a is not None and b is not None:
+                out.append(
+                    (
+                        node,
+                        (
+                            a.get_float(0) or 0.0,
+                            a.get_float(1) or 0.0,
+                            b.get_float(0) or 0.0,
+                            b.get_float(1) or 0.0,
+                        ),
+                    )
+                )
+    return out
+
+
+def _same_geometry(g: tuple[float, ...], h: tuple[float, ...], tol: float) -> bool:
+    if len(g) != len(h):
+        return False
+    if all(abs(u - v) <= tol for u, v in zip(g, h, strict=True)):
+        return True
+    # A segment matches end-for-end in either direction.
+    return len(g) == 4 and all(abs(u - v) <= tol for u, v in zip(g, (*h[2:], *h[:2]), strict=True))
+
+
+def withdraw_copper(
+    pcb_path: Path,
+    before: bytes,
+    capsules: Iterable[Capsule],
+    tolerance: float = WITHDRAW_MATCH_TOLERANCE_MM,
+) -> int:
+    """Delete the vias / segments an attempt placed as ``capsules`` (Issue #6671).
+
+    ``before`` holds the board as it was before the attempt: a node whose
+    geometry it already carried is pre-existing copper and is never touched.
+    A zero-length capsule names a via, any other capsule a segment.  Returns
+    how many nodes were removed (the board is rewritten only when > 0).
+    Zones are NOT refilled here.
+    """
+    from kicad_tools.core.sexp_file import load_pcb, save_pcb
+    from kicad_tools.sexp import parse_string
+
+    wanted: list[tuple[float, ...]] = []
+    for x1, y1, x2, y2, _half in capsules:
+        wanted.append((x1, y1) if (x1, y1) == (x2, y2) else (x1, y1, x2, y2))
+    if not wanted:
+        return 0
+    old = [g for _node, g in _copper_nodes(parse_string(before.decode("utf-8")))]
+    doc = load_pcb(pcb_path)
+    doomed = []
+    for node, g in _copper_nodes(doc):
+        if not any(_same_geometry(g, w, tolerance) for w in wanted):
+            continue
+        if any(_same_geometry(g, o, tolerance) for o in old):
+            continue
+        doomed.append(node)
+    for node in doomed:
+        doc.remove(node)
+    if doomed:
+        save_pcb(doc, pcb_path)
+    return len(doomed)
+
+
 #: ``closer(pcb_path, links, banned_keys) -> ClosureAttempt``; edits the board.
 LinkCloser = Callable[[Path, Sequence[OracleLink], frozenset[str]], ClosureAttempt]
 #: ``oracle(pcb_path) -> GeometricDRCResult``; never edits the board.
@@ -498,8 +592,58 @@ def _capsule_distance(px: float, py: float, cap: tuple[float, float, float, floa
     return math.hypot(px - (x1 + t * dx), py - (y1 + t * dy)) - half
 
 
+#: Issue #6671: DRC types that describe a whole net (pair), not a place.
+#: kicad-cli anchors them on an arbitrary item of the net, which moves
+#: between runs with the copper untouched (06rf: three diff-pair skew errors
+#: reappeared with identical values at another track), so their identity is
+#: the rule, never the anchor.
+NET_LEVEL_TYPES = frozenset({"skew_out_of_range", "length_out_of_range"})
+
+_RULE_RE = re.compile(r"\brule '([^']*)'")
+
+
 def _violation_signature(v: DRCViolation) -> tuple:
+    if v.type_str in NET_LEVEL_TYPES:
+        # ``v.rule`` is just the type string on some parse paths.
+        m = _RULE_RE.search(v.message or "")
+        rule = m.group(1) if m else ""
+        if rule:
+            return (v.type_str, rule, tuple(sorted(v.nets or ())))
     return (v.type_str, tuple(sorted((round(x, 3), round(y, 3)) for x, y in _item_positions(v))))
+
+
+def footprint_key(ref: str) -> str:
+    """Banned-key form withdrawing every closure on footprint ``ref`` (Issue #6671).
+
+    :class:`PourLinkCloser` neither welds a pad of a banned footprint nor
+    routes a link with an endpoint on it.
+    """
+    return f"fp:{ref}"
+
+
+def banned_footprints(banned: Iterable[str]) -> set[str]:
+    """The footprint references ``banned`` withdraws (see :func:`footprint_key`)."""
+    return {entry[3:] for entry in banned if entry.startswith("fp:")}
+
+
+def closer_key_refs(key: str) -> set[str]:
+    """Footprint references whose pads closer ``key`` welds or links (Issue #6671).
+
+    ``pad:NET:REF.PAD`` names one; a ``route:`` key names every ``... of
+    REF`` endpoint in its link description.
+    """
+    kind, _, rest = key.partition(":")
+    if kind == "pad" and ":" in rest:
+        ref, sep, _num = rest.rsplit(":", 1)[-1].rpartition(".")
+        return {ref} if sep and ref else set()
+    if kind == "route":
+        refs: set[str] = set()
+        for part in rest.split("|"):
+            m = _PAD_RE.search(part)
+            if m:
+                refs.add(m.group("ref").split("#", 1)[0])
+        return refs
+    return set()
 
 
 def attribute_regressions(
@@ -621,6 +765,27 @@ def attribute_link_regressions(
     return blamed
 
 
+#: Issue #6671: how near (mm, copper edge to point) a kept closure on another
+#: net must come to a still-stranded item to be suspected of stranding it.
+REPAIR_RADIUS_MM = 1.0
+
+
+def _repair_suspects(
+    points: Iterable[tuple[str, float, float]],
+    kept: Mapping[str, Sequence[Capsule]],
+    radius: float = REPAIR_RADIUS_MM,
+) -> set[str]:
+    """Kept closer keys on another net within ``radius`` of a stranded point."""
+    out: set[str] = set()
+    for net, x, y in points:
+        for key, caps in kept.items():
+            if closer_key_net(key) == net:
+                continue
+            if any(_capsule_distance(x, y, c) <= radius for c in caps):
+                out.add(key)
+    return out
+
+
 def run_oracle_completion(
     pcb_path: Path,
     *,
@@ -638,7 +803,9 @@ def run_oracle_completion(
     """Close the KiCad-reported unconnected links on ``nets``, round by round.
 
     Termination is guaranteed: at most ``max_rounds`` rounds, each with at
-    most ``1 + max_retries`` closer attempts, and the loop stops early when
+    most ``2 + max_retries + MAX_FOOTPRINT_ESCALATIONS`` attempts (the
+    retries, up to :data:`MAX_FOOTPRINT_ESCALATIONS` footprint escalations and
+    one final re-check of a pruned attempt), and the loop stops early when
 
     * the in-scope link count reaches zero (``converged``),
     * the closer places nothing (``no_closer``),
@@ -664,7 +831,16 @@ def run_oracle_completion(
             KiCad but neither counted nor closed here.
         max_rounds: Round budget (``0`` disables the loop).
         max_retries: Attribution retries per round after a DRC or per-net
-            link regression (one shared budget).
+            link regression (one shared budget).  Issue #6671: when the
+            closer has a ``withdraw(pcb_path, before, footprints)`` method
+            (:meth:`PourLinkCloser.withdraw`), a retry removes just the
+            blamed closures from the attempted board and re-checks the rest,
+            instead of restoring the board and re-running the closer; the
+            withdrawn weld sites stay banned in later rounds.  When the
+            budget is spent and the last check still regressed, ONE more
+            check withdraws every closure on the footprints that keep being
+            blamed (:func:`footprint_key`), so a dense footprint no longer
+            discards the clean closures elsewhere on the board.
         log: Optional progress sink.
         time_left: Issue #6273.  Seconds the caller can still spend (``None``
             = unbounded).  ``kct route --timeout`` is a hard total enforced by
@@ -694,6 +870,10 @@ def run_oracle_completion(
     """
     scope = set(nets)
     say = log or (lambda _msg: None)
+    #: Issue #6671: optional in-place withdrawal of single closures.
+    withdraw: Callable[[Path, bytes, Mapping[str, Sequence[Capsule]]], int] | None = getattr(
+        closer, "withdraw", None
+    )
     #: Issue #6273: measured seconds of each bare DRC call and of each
     #: attempt (closer, which refills the zones, plus its DRC).
     drc_costs: list[float] = []
@@ -749,7 +929,17 @@ def run_oracle_completion(
     #: Issue #6428: via sites whose copper opened a link on another net.  A
     #: site is a fixed place on the board, so it stays banned in later rounds.
     withdrawn_sites: set[str] = set()
-    for rnd in range(max_rounds):
+    #: Issue #6671: the copper every KEPT round placed, by closer key, and the
+    #: board as the loop found it (never withdrawn from).
+    kept_caps: dict[str, list[Capsule]] = {}
+    original = pcb_path.read_bytes()
+    stranded_points = getattr(closer, "stranded_points", None)
+    #: A pending repair round: the state to restore if it does not pay off.
+    repair: tuple[int, bytes, GeometricDRCResult, list[OracleLink], set[str]] | None = None
+    repaired = False
+    rnd = -1
+    while rnd + 1 < max_rounds:
+        rnd += 1
         count, errors = len(links), geo.error_count
         say(
             f"  Oracle round {rnd + 1}: {count} unconnected link(s) on {', '.join(sorted({lk.net for lk in links}))}"
@@ -765,20 +955,131 @@ def run_oracle_completion(
         #: The stop reason when the retry budget runs out: the kind of the
         #: last regression the round retried after.
         last_regression = STOP_DRC_REGRESSED
-        for _ in range(1 + max_retries):
+        budget = 1 + max_retries
+        #: Issue #6671: per footprint, how many of this round's regressions
+        #: blamed one of its closures; the refs the LAST regression blamed;
+        #: and every closer key the round's attempts placed.
+        ref_hits: Counter[str] = Counter()
+        last_refs: set[str] = set()
+        round_keys: set[str] = set()
+        escalated_refs: set[str] = set()
+        escalations = 0
+        #: Whether the round already spent its one final re-check of a
+        #: pruned attempt (see the budget check below).
+        rechecked = False
+        blamed_refs: set[str] = set()
+        #: Issue #6671: an attempt whose culprits were withdrawn from the
+        #: board in place (``closer.withdraw``); the next evaluation re-checks
+        #: what is left of it instead of re-running the closer, so a few bad
+        #: welds no longer cost the round its clean ones.
+        reuse: ClosureAttempt | None = None
+        reuse_started = 0.0
+
+        def subtract(att: ClosureAttempt, keys: Iterable[str]) -> bool:
+            """Withdraw ``keys``' copper from the attempted board; ``False`` = cannot."""
+            nonlocal reuse_started
+            if withdraw is None or not affordable(attempt=True):
+                return False
+            doomed = {k: att.footprints[k] for k in sorted(keys) if att.footprints.get(k)}
+            if not doomed or len(doomed) == len(att.footprints):
+                return False  # nothing to remove, or nothing would be left
+            reuse_started = time.monotonic()
+            try:
+                removed = withdraw(pcb_path, backup, doomed)
+            except Exception as exc:  # withdrawal must never fail the loop
+                logger.warning("Oracle closure withdrawal failed: %s", exc)
+                return False
+            if not removed:
+                return False
+            gone = [(c[0], c[1]) for caps in doomed.values() for c in caps if c[:2] == c[2:4]]
+            for k in doomed:
+                att.footprints.pop(k, None)
+                att.sites.pop(k, None)
+            att.vias = [
+                v
+                for v in att.vias
+                if not any(
+                    math.hypot(v[0] - x, v[1] - y) <= VIA_MATCH_TOLERANCE_MM for x, y in gone
+                )
+            ]
+            att.applied = max(att.applied - len(doomed), 0)
+            return True
+
+        while True:
+            if attempts >= budget:
+                # Issue #6671: the retry budget is spent and the last attempt
+                # still regressed.  Instead of discarding the whole round
+                # (06rf: ~120 clean closures thrown away for 7 BGA welds),
+                # withdraw EVERY closure on the footprints that keep being
+                # blamed -- in two or more of the round's regressions, else
+                # in the last one -- and try once more: one dense footprint
+                # must not veto the board.
+                # Issue #6671: up to MAX_FOOTPRINT_ESCALATIONS per round, each
+                # on footprints not escalated yet (a second dense footprint
+                # can keep regressing once the first is gone: 06rf U2, J3).
+                hot = {r for r, n in ref_hits.items() if n >= 2} - escalated_refs
+                blamed_refs = hot or (set(last_refs) - escalated_refs)
+                escalation = {footprint_key(ref) for ref in blamed_refs} | {
+                    k for k in round_keys if closer_key_refs(k) & blamed_refs
+                }
+                if (
+                    escalations >= MAX_FOOTPRINT_ESCALATIONS
+                    or not blamed_refs
+                    or not escalation - banned
+                ):
+                    if reuse is not None and not rechecked:
+                        # The pending attempt has had its last culprits
+                        # withdrawn but was never re-checked.  Discarding it
+                        # unchecked throws away every clean closure of the
+                        # round (06rf on main after #6664: four retries, the
+                        # last pruning J3/U3 welds, then 131 -> 131).  Spend
+                        # ONE more oracle run on it; it is kept only if that
+                        # run passes every gate, and a further regression
+                        # ends the round as before.
+                        rechecked = True
+                        budget += 1
+                        say("    retry budget spent; re-checking the pruned attempt once")
+                        continue
+                    if reuse is not None:
+                        pcb_path.write_bytes(backup)
+                        reuse = None
+                    stop = last_regression
+                    break
+                escalations += 1
+                escalated_refs |= blamed_refs
+                budget += 1
+                refs = ", ".join(sorted(blamed_refs))
+                say(f"    retry budget spent; withdrawing every closure on {refs}")
+                round_notes.extend(
+                    f"{footprint_key(ref)}: withdrawn -- its closures kept raising KiCad DRC"
+                    for ref in sorted(blamed_refs)
+                )
+                banned |= escalation
+                if reuse is not None:
+                    keys = {k for k in reuse.footprints if closer_key_refs(k) & blamed_refs}
+                    if keys and not subtract(reuse, keys):
+                        pcb_path.write_bytes(backup)
+                        reuse = None
             if not affordable(attempt=True):
                 # The board holds the last kept round's bytes here: the first
                 # attempt has not touched it and a refused one was restored.
+                if reuse is not None:
+                    pcb_path.write_bytes(backup)
+                    reuse = None
                 stop = STOP_DEADLINE
                 break
             attempts += 1
-            started = time.monotonic()
-            attempt = closer(pcb_path, links, frozenset(banned))
-            round_notes.extend(attempt.notes)
-            if attempt.applied == 0:
-                pcb_path.write_bytes(backup)
-                stop = STOP_NO_CLOSER
-                break
+            if reuse is None:
+                started = time.monotonic()
+                attempt = closer(pcb_path, links, frozenset(banned))
+                round_notes.extend(attempt.notes)
+                round_keys |= set(attempt.footprints)
+                if attempt.applied == 0:
+                    pcb_path.write_bytes(backup)
+                    stop = STOP_NO_CLOSER
+                    break
+            else:
+                attempt, reuse, started = reuse, None, reuse_started
             geo_after = oracle(pcb_path)
             attempt_costs.append(time.monotonic() - started)
             if not geo_after.ran:
@@ -792,8 +1093,8 @@ def run_oracle_completion(
                     attribute_regressions(geo, geo_after, attempt.footprints, exempt=exempt)
                     - banned
                 )
-                pcb_path.write_bytes(backup)
                 if not culprits:
+                    pcb_path.write_bytes(backup)
                     stop = STOP_DRC_REGRESSED
                     break
                 say(f"    DRC +{gated - errors}; retrying without {', '.join(sorted(culprits))}")
@@ -802,7 +1103,18 @@ def run_oracle_completion(
                     for c in sorted(culprits)
                 )
                 banned |= culprits
+                # Issue #6671: a weld site that raised DRC stays banned in
+                # later rounds too (the pad is re-welded elsewhere).
+                withdrawn_sites |= {
+                    site_key(c, x, y) for c in culprits for x, y in attempt.sites.get(c, ())
+                }
+                last_refs = {r for c in culprits for r in closer_key_refs(c)}
+                ref_hits.update(last_refs)
                 last_regression = STOP_DRC_REGRESSED
+                if subtract(attempt, culprits):
+                    reuse = attempt
+                else:
+                    pcb_path.write_bytes(backup)
                 continue
             # Issue #6428: per-net gate.  A round may not open a link on any
             # net (in scope or not), however many it closes elsewhere.
@@ -840,7 +1152,14 @@ def run_oracle_completion(
                 for c in culprits:
                     banned |= bans[c]
                     withdrawn_sites |= {b for b in bans[c] if b.startswith("site:")}
+                last_refs = {r for c in culprits for r in closer_key_refs(c)}
+                ref_hits.update(last_refs)
                 last_regression = STOP_NO_PROGRESS
+                pcb_path.write_bytes(after_bytes)
+                if subtract(attempt, culprits):
+                    reuse = attempt
+                else:
+                    pcb_path.write_bytes(backup)
                 continue
             if len(in_scope(geo_after)) >= count:
                 pcb_path.write_bytes(backup)
@@ -848,8 +1167,6 @@ def run_oracle_completion(
                 break
             kept = True
             break
-        else:
-            stop = last_regression
 
         if attempts:
             # A round that stopped before its first attempt (deadline) learned
@@ -869,11 +1186,83 @@ def run_oracle_completion(
                 banned=tuple(sorted(banned)),
             )
         )
+        if repair is not None:
+            pre_count, pre_bytes, pre_geo, pre_links, suspects = repair
+            repair = None
+            # The round's own DRC gate compared against the post-withdrawal
+            # board; a repair is judged against the LAST KEPT board, so it
+            # can never end with more errors than the state it replaced.
+            raised = 0
+            if kept and attempt is not None:
+                raised = (
+                    gated_error_count(
+                        pre_geo, geo_after, declared_via_exemption(attempt, declared_via)
+                    )
+                    - pre_geo.error_count
+                )
+            if not kept or len(after_links) >= pre_count or raised > 0:
+                # The repair did not pay off: put the withdrawn closures back.
+                pcb_path.write_bytes(pre_bytes)
+                settled |= suspects
+                withdrawn_sites -= suspects
+                geo, links = pre_geo, pre_links
+                if raised > 0:
+                    say(f"    repair raised KiCad DRC by {raised}; closures restored")
+                else:
+                    say(f"    repair did not lower {pre_count} link(s); closures restored")
+                result.stop_reason = stop or STOP_NO_PROGRESS
+                break
+            # It paid off: a later dead end may be repaired again (each
+            # repair must lower the count, and its suspects stay banned).
+            repaired = False
         if not kept:
-            result.stop_reason = stop or STOP_NO_PROGRESS
-            break
+            suspects = set()
+            if (
+                not repaired
+                and withdraw is not None
+                and stranded_points is not None
+                and stop in (STOP_NO_CLOSER, STOP_NO_PROGRESS, STOP_DRC_REGRESSED)
+                and rnd + 1 < max_rounds
+                and affordable(attempt=True)
+            ):
+                suspects = _repair_suspects(stranded_points(pcb_path, links), kept_caps)
+            if not suspects:
+                result.stop_reason = stop or STOP_NO_PROGRESS
+                break
+            # Issue #6671: the links left are stranded by copper an earlier
+            # round kept for ANOTHER net (board 03: a VCC dog-leg weld fenced
+            # GND pad C5.2's fill island in).  Withdraw that copper, ban its
+            # keys so their links are closed another way, and spend one more
+            # round; it is undone unless it lowers the count.
+            repaired = True
+            pre_bytes = pcb_path.read_bytes()
+            assert withdraw is not None  # suspects are only sought with it
+            try:
+                removed = withdraw(pcb_path, original, {k: kept_caps[k] for k in sorted(suspects)})
+            except Exception as exc:  # repair must never fail the loop
+                logger.warning("Oracle repair withdrawal failed: %s", exc)
+                removed = 0
+            geo_w = oracle(pcb_path) if removed else None
+            if geo_w is None or not geo_w.ran:
+                pcb_path.write_bytes(pre_bytes)
+                result.stop_reason = stop or STOP_NO_PROGRESS
+                break
+            say(
+                f"    {count} link(s) stranded by kept closures; withdrawing "
+                f"{', '.join(sorted(suspects))} and retrying"
+            )
+            result.closer_notes.extend(
+                f"{k}: withdrawn -- its copper stranded a link on another net"
+                for k in sorted(suspects)
+            )
+            repair = (count, pre_bytes, geo, links, suspects)
+            settled -= suspects
+            withdrawn_sites |= suspects
+            geo, links = geo_w, in_scope(geo_w)
+            continue
         if attempt is not None:
             settled |= set(attempt.footprints)
+            kept_caps.update(attempt.footprints)
             result.relaxed_links.extend(attempt.relaxed)
         geo, links = geo_after, after_links
         say(f"    kept: {count} -> {len(links)} link(s)")
@@ -1028,11 +1417,22 @@ class PourLinkCloser:
         links = canonical_links(links)
         if self.canonical_clusters:
             links = self._cluster_links(pcb_path, links, attempt)
+        # Issue #6671: footprints the loop withdrew wholesale.
+        dropped = banned_footprints(banned)
+
+        def on_dropped(end: OracleEndpoint) -> bool:
+            return end.kind == "pad" and end.ref in dropped
+
         pads_by_net: dict[str, set[str]] = {}
         for lk in links:
             for end in (lk.a, lk.b):
                 key = end.pad_key
-                if key and f"pad:{lk.net}:{key}" not in banned:
+                if key and on_dropped(end):
+                    attempt.notes.append(
+                        f"{lk.net} {key}: footprint {end.ref} withdrawn -- its "
+                        "closures kept raising KiCad DRC"
+                    )
+                elif key and f"pad:{lk.net}:{key}" not in banned:
                     pads_by_net.setdefault(lk.net, set()).add(key)
 
         welded: set[str] = set()
@@ -1041,13 +1441,47 @@ class PourLinkCloser:
         # Issue #6412: banned routes are skipped per variant inside
         # ``_route_links`` -- a withdrawn plane join must leave the link's
         # nearest-island join eligible -- so only welded links drop out here.
-        pending = [lk for lk in links if not ({lk.a.pad_key, lk.b.pad_key} & welded)]
+        pending = [
+            lk
+            for lk in links
+            if not ({lk.a.pad_key, lk.b.pad_key} & welded)
+            and not (on_dropped(lk.a) or on_dropped(lk.b))
+        ]
         if pending and self.route_links:
             self._route_links(pcb_path, pending, attempt, banned)
 
         if attempt.applied and self.refill is not None:
             self.refill(pcb_path)
         return attempt
+
+    def withdraw(
+        self, pcb_path: Path, before: bytes, footprints: Mapping[str, Sequence[Capsule]]
+    ) -> int:
+        """Remove just ``footprints``' copper from the attempted board (Issue #6671).
+
+        The rest of the attempt stays on the board, which is refilled.  See
+        :func:`withdraw_copper`; returns how many vias / segments went.
+        """
+        removed = withdraw_copper(pcb_path, before, (c for cs in footprints.values() for c in cs))
+        if removed and self.refill is not None:
+            self.refill(pcb_path)
+        return removed
+
+    def stranded_points(
+        self, pcb_path: Path, links: Sequence[OracleLink]
+    ) -> list[tuple[str, float, float]]:
+        """``(net, x, y)`` of the located items ``links`` leave stranded (Issue #6671).
+
+        The canonical pad of each stranded cluster (:meth:`_cluster_links`),
+        else KiCad's own located endpoints; zone ends are outline corners
+        and are skipped.  Used to find kept copper that fenced them in.
+        """
+        links = canonical_links(links)
+        if self.canonical_clusters:
+            links = self._cluster_links(pcb_path, links, ClosureAttempt())
+        return [
+            (lk.net, end.x, end.y) for lk in links for end in (lk.a, lk.b) if end.kind != "zone"
+        ]
 
     # -- canonical clusters (Issue #5934) ---------------------------------------
 

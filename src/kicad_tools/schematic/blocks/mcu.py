@@ -3,6 +3,7 @@
 import contextlib
 from typing import TYPE_CHECKING
 
+from ._pins import diode_pin_position
 from .base import CircuitBlock
 
 if TYPE_CHECKING:
@@ -473,8 +474,8 @@ class ResetButton(CircuitBlock):
             self.components["TVS"] = self.tvs
 
             # Get TVS pin positions
-            tvs_anode = self.tvs.pin_position("A")
-            tvs_cathode = self.tvs.pin_position("K")
+            tvs_anode = diode_pin_position(self.tvs, "A")
+            tvs_cathode = diode_pin_position(self.tvs, "K")
 
             # Wire TVS anode to reset node
             sch.add_wire(
@@ -1150,8 +1151,9 @@ def create_gpio_pull_resistor(
     Returns:
         The underlying :class:`BootModeSelector` instance with no button.
         ``ports[pin_name]`` is the GPIO side, ``ports[rail]`` is the rail
-        side. Standard ``ports["VCC"]`` / ``ports["GND"]`` aliases also
-        remain available for compatibility.
+        side. The standard alias for the pulled-to rail (``ports["GND"]``
+        for a pull-down, ``ports["VCC"]`` for a pull-up) also remains
+        available; the opposite-rail alias is not exposed.
 
     Raises:
         ValueError: If ``pull_type`` is not one of ``{"up", "down"}`` or
@@ -1198,10 +1200,13 @@ def create_gpio_pull_resistor(
     if pin_name != "BOOT":
         block.ports[pin_name] = block.ports["BOOT"]
 
-    # Expose the rail side under the caller's rail name. We don't coerce
-    # custom rail names to "VCC"/"GND" — both aliases stay populated so
-    # connect_to_rails still works for the standard cases. For non-standard
-    # rails (e.g., "+3.3V") the caller wires the port manually.
+    # Drop the alias for the *opposite* rail: it sits at a fixed offset that
+    # lands on no pin or wire, so only real connection points remain (#7507).
+    # Then expose the rail side under the caller's rail name. We don't coerce
+    # custom rail names to "VCC"/"GND"; for non-standard rails (e.g., "+3.3V")
+    # the caller wires the port manually.
+    block.ports.pop("VCC" if pull_type == "down" else "GND", None)
+
     if pull_type == "down":
         # Resistor's far end is at the GND rail port.
         if rail not in ("GND",):

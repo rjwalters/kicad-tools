@@ -40,22 +40,11 @@ ABSOLUTE_HOST_PATH = re.compile(r'"(?:/home/|/Users/|/private/var/|/tmp/|[A-Z]:\
 # Shrink-only: remove an entry when its board's evidence is re-issued.
 KNOWN_OFFENDERS = frozenset(
     {
-        "boards/00-simple-led/output/drc_report.json",
-        "boards/03-usb-joystick/output/drc_report.json",
-        "boards/03-usb-joystick/output/manufacturing/check-report.json",
         "boards/03-usb-joystick/output/manufacturing/native-clearance-qualification/factory-check.json",
         "boards/03-usb-joystick/output/manufacturing/native-clearance-qualification/final-board-manufacturing-check.json",
         "boards/04-stm32-devboard/output/check-report.json",
-        "boards/04-stm32-devboard/output/drc_report.json",
-        "boards/04-stm32-devboard/output/manufacturing/check-report.json",
-        "boards/04-stm32-devboard/output/readiness/kct-check.json",
-        "boards/05-bldc-motor-controller/output/manufacturing/check-report.json",
-        "boards/05-bldc-motor-controller/output/manufacturing/kct-check.json",
-        "boards/05-bldc-motor-controller/output/readiness/kct-check.json",
         "boards/06-diffpair-test/output/manufacturing/check-report.json",
         "boards/06-diffpair-test/output/readiness/kct-check.json",
-        "boards/07-matchgroup-test/output/manufacturing/check-report.json",
-        "boards/07-matchgroup-test/output/readiness/kct-check.json",
         "boards/09-usbc-pd-power/output/manufacturer-check.json",
         "boards/09-usbc-pd-power/output/net-status.json",
     }

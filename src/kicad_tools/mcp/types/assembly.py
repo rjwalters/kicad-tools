@@ -147,48 +147,25 @@ class PnPExportResult:
 
 
 @dataclass
-class CostEstimate:
-    """Estimated manufacturing costs.
-
-    Attributes:
-        pcb_cost_usd: Estimated PCB fabrication cost in USD
-        assembly_cost_usd: Estimated assembly labor cost in USD
-        parts_cost_usd: Estimated component parts cost in USD
-        total_usd: Total estimated cost in USD
-        notes: Additional notes about the estimate
-    """
-
-    pcb_cost_usd: float | None = None
-    assembly_cost_usd: float | None = None
-    parts_cost_usd: float | None = None
-    total_usd: float | None = None
-    notes: list[str] = field(default_factory=list)
-
-    def to_dict(self) -> dict:
-        """Convert to dictionary for JSON serialization."""
-        return {
-            "pcb_cost_usd": self.pcb_cost_usd,
-            "assembly_cost_usd": self.assembly_cost_usd,
-            "parts_cost_usd": self.parts_cost_usd,
-            "total_usd": self.total_usd,
-            "notes": self.notes,
-        }
-
-
-@dataclass
 class AssemblyExportResult:
     """Result of a complete assembly package export.
 
     Attributes:
         success: Whether the export completed successfully
         output_dir: Directory containing all exported files
-        manufacturer: Target manufacturer (jlcpcb, pcbway, seeed, generic)
+        manufacturer: Target manufacturer / tier id (any registry id, e.g.
+            ``jlcpcb-tier1``, or ``generic``) actually used for the export
+        manufacturer_source: Where ``manufacturer`` came from: ``"cli"`` (the
+            caller passed it), ``"sidecar"`` / ``"project_kct"`` (resolved
+            like ``kct check``) or ``"default"``; ``None`` if not resolved
         gerbers: Gerber export results if included
         bom: BOM export results if included
         pnp: Pick-and-place export results if included
-        zip_file: Path to combined zip archive ready for upload
+        zip_file: Path to combined zip archive ready for upload (``None``
+            whenever the export was refused or failed)
+        preflight: ``kct export`` preflight results, one
+            ``{name, status, message, details}`` dict per check
         warnings: Any warnings encountered during export
-        cost_estimate: Optional cost estimate for manufacturing
         error: Error message if success is False
     """
 
@@ -199,9 +176,10 @@ class AssemblyExportResult:
     bom: BOMExportResult | None = None
     pnp: PnPExportResult | None = None
     zip_file: str | None = None
+    preflight: list[dict] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
-    cost_estimate: CostEstimate | None = None
     error: str | None = None
+    manufacturer_source: str | None = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
@@ -209,11 +187,12 @@ class AssemblyExportResult:
             "success": self.success,
             "output_dir": self.output_dir,
             "manufacturer": self.manufacturer,
+            "manufacturer_source": self.manufacturer_source,
             "gerbers": self.gerbers.to_dict() if self.gerbers else None,
             "bom": self.bom.to_dict() if self.bom else None,
             "pnp": self.pnp.to_dict() if self.pnp else None,
             "zip_file": self.zip_file,
+            "preflight": self.preflight,
             "warnings": self.warnings,
-            "cost_estimate": self.cost_estimate.to_dict() if self.cost_estimate else None,
             "error": self.error,
         }

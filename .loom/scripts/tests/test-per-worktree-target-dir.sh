@@ -71,17 +71,14 @@ LIB_SH="$SCRIPTS_DIR/lib/cargo-target-dir.sh"
 source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
 loom_test_require_daemon_bin "$SCRIPTS_DIR" "cargo-target-dir"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
+# An ambient CARGO_TARGET_DIR overrides the fixtures' own target-dir redirects
+# (.cargo/config.toml, fake build output); cases that test the ambient variable
+# set it inline per command (#10703).
+unset CARGO_TARGET_DIR
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 YELLOW='\033[1;33m'
-NC='\033[0m'
 
-TESTS_RUN=0
-TESTS_PASSED=0
-TESTS_FAILED=0
-
-pass() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1)); echo -e "  ${GREEN}PASS${NC}: $1"; }
-fail() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1)); echo -e "  ${RED}FAIL${NC}: $1"; }
 skip() { echo -e "  ${YELLOW}SKIP${NC}: $1"; }
 
 for required in "$WORKTREE_SH" "$LIB_SH"; do

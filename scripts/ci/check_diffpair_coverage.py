@@ -7,8 +7,10 @@ This script is the second pillar of the diff-pair CI strategy.  Its sibling
 **routing algorithm itself** by re-routing a board from scratch and
 asserting:
 
-  1. The post-route DRC error count is within the per-board allowlist
-     (same semantic as ``check_routed_drc.py``).
+  1. Every blocking post-route DRC finding is listed by identity in the
+     board's allowance (Issue #7367), every listed entry still fires, and
+     the count of blocking findings outside the allowance is within the
+     per-board allowlist (absent = 0, the fixture's value).
   2. Each of the three diff-pair DRC rules was actually exercised by the
      check (i.e., the per-rule counter is > 0).  Without this assertion
      a regression that disables diff-pair detection (e.g., flipping
@@ -85,7 +87,19 @@ from typing import NamedTuple
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from board_recipe_artifacts import recipe_baseline_key, recipe_output_dir  # noqa: E402
+from board_recipe_artifacts import (  # noqa: E402
+    measure_signal_reach,  # shared with check_matchgroup_coverage (#7319)
+    recipe_baseline_key,
+    recipe_output_dir,
+)
+from identity_allowance import (  # noqa: E402
+    Allowance,
+    error_identities,
+    format_stale,
+    stale_entries,
+    unallowed_findings,
+    unlisted_findings,
+)
 
 # --- shared with check_routed_drc.py ------------------------------------------
 
@@ -103,85 +117,119 @@ DIFFPAIR_RULE_IDS: tuple[str, ...] = (
     "diffpair_routing_continuity",
 )
 
-# ---------------------------------------------------------------------------
-# Issue #3828 -- documented diff-pair violation BASELINE (per routed PCB).
+# Repo-relative key of board 06's synthetic regression fixture.  Its re-route
+# lands in the git-ignored ``regression-output/``, which
+# ``recipe_baseline_key`` canonicalises back to this key.
+DIFFPAIR_FIXTURE_KEY = "boards/06-diffpair-test/regression-fixture/diffpair_test_routed.kicad_pcb"
+
+# Issue #7312 -- declared ``target_diff_impedance`` is now judged on coupled
+# segments (#7293).  The model is right and the fixture's copper is what
+# misses: the routed coupled gap is several times the solved
+# ``intra_pair_clearance`` in regression-fixture/net_class_map.json.  The
+# fixture is a frozen historical witness whose pairs already fail
+# skew, so the pairs never get squeezed to the solved gap; the committed
+# ``output/`` board has no impedance finding.
 #
-# The diff-pair length-skew / routing-continuity rules are now ACTIVE in this
-# gate (the sidecar is threaded into ``kct check`` and the per-rule
-# error-violation counts are asserted), but board 06 ships a routed artifact
-# that STILL has unresolved coupled diff-pair errors: the coupled router
-# converges 0/9 pairs, so the committed PCB reports
-# ``diffpair_length_skew: 9`` + ``diffpair_routing_continuity: 9`` = 18
-# diff-pair errors (the single-ended fallback measurements -- see the long
-# board-06 narrative in ``.github/routed-drc-tolerance.yml`` around L900-963).
+# Issue #7349: the recipe now runs the #7344 gap-tightening pass
+# (``Autorouter.apply_diffpair_gap_tightening``, after the optimiser / nudge /
+# overlap-repair passes).  A squeeze is committed only when the pair's
+# ``kct check`` skew stays at or below its pre-pass value.  On the
+# CI-equivalent seed-42 re-route that takes 5 ``impedance`` errors on 4 nets
+# to 3 on 3 nets (USB3_TX2+ cleared).  A ``--skip-route`` run on the
+# COMMITTED PCB reports a different set; do not key the allowance from it.
+# Issue #7296: with the single-ended mask-dam floor (``min_via_pad_edge_gap``)
+# the CI seed-42 re-route changes board 06's single-ended ordering, which moves
+# the residual impedance set to USB3_TX2- alone (USB3_RX1+/- now clear) and
+# leaves USB2_D+/USB2_D- 0.091 mm over its uncoupled-length limit (12.791 vs
+# 12.700 mm).  The floor is the intended behaviour; the USB2_D pair needs to
+# route coupled, tracked in #7401.  kicad-cli flags USB2_D too, so it is not a
+# kct artefact; kct's figure for it is not KiCad's to the micron (a known
+# divergence on board 06's router copper, Issue #7565).
 #
-# Routing those pairs within skew/continuity tolerance is the known-hard
-# coupled-diff-pair routing problem tracked in #3540-#3544 (exit clause (a)
-# of the board-06 allowlist).  Rather than fake-pass it with a coverage-only
-# assertion (the bug this issue fixes) OR block CI on a pre-existing,
-# separately-tracked routing-quality defect, the gate asserts the per-rule
-# error count does not EXCEED a LOUD, explicitly-documented baseline.
+# Issue #7367 -- the ``diffpair_length_skew`` pairs, keyed by pair, not by a
+# count.  Until #7367 the gate let every skew/continuity finding through by
+# rule and bounded them only with ``DIFFPAIR_VIOLATION_BASELINE`` (18) and the
+# ``.github/routed-drc-tolerance.yml`` total (18), so up to 7 continuity
+# findings, or a new pair in place of a fixed one, passed both.  The pairs
+# below are the ones the seed-42 re-route measures over ``max_skew_mm``: all 9
+# declared pairs (they route single-ended, so the legs differ).  Fixing them
+# is tracked in #7548 (coupling-preserving tuning in general is #6447).
+DIFFPAIR_SKEW_TRACKER = 7548
 #
-# DEFAULT IS 0 (strict).  A board appears here ONLY with a tracking
-# reference; the gate FAILS the moment any diff-pair rule fires MORE than its
-# documented baseline -- so a regression beyond 18 on board 06, or ANY new
-# diff-pair error on a board not listed here, is caught.  When the coupled
-# router finally converges these pairs, drop the entry (or lower it) and the
-# gate tightens automatically.
-#
-# !!! RE-ROUTE vs COMMITTED (Issue #3828 doctor pass, June 21 2026) !!!
-# This baseline is the DIFF-PAIR-ONLY slice and is INDEPENDENT of the total
-# error-count allowlist floor (.github/routed-drc-tolerance.yml).
-# The final pre-redesign floor was ratcheted to 18 by #4019, verified on
-# runs 29075253404/29072031350/29070816533: 9 skew + 9 continuity, no other errors.
-# Historical larger floors are not applicable. The active LVDS release has
-# no allowance; only the isolated synthetic witness retains this baseline.
-#
-# diffpair_uncoupled_length (Issue #6554): the synthetic board's single-ended
-# fallback leaves USB2_D with an uncoupled length over its 12.7 mm USB2_HS
-# limit.  kicad-cli 10.0.6 flags it too (14.194 mm on the CI-regenerated
-# board, seed 42), so it is not a kct artefact; kct's probe-derived model reads
-# 13.437 mm there, a known divergence tracked by Issue #7565 (both exceed the
-# limit).  It is a consequence of the same unconverged coupled
-# routing as the skew/continuity entries, so it shares this baseline; the
-# total allowlist floor (.github/routed-drc-tolerance.yml) still caps the sum.
-DIFFPAIR_VIOLATION_BASELINE: dict[str, int] = {
-    "boards/06-diffpair-test/regression-fixture/diffpair_test_routed.kicad_pcb": 18,
+# Allowed by identity, not by count (#7359, #7270 Q3 ruling): only these
+# identities may carry the listed errors, a listed identity that stops firing
+# makes its entry stale and fails the gate, and an allowed finding does not
+# count against the (now strict 0) routed-DRC total.  Deleting the impedance
+# entry is #7349's job, the uncoupled one #7401's.
+DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
+    ("impedance", "USB3_TX2-"): 7349,
+    ("diffpair_uncoupled_length", "USB2_D+/USB2_D-"): 7401,
+    # Seed-42 re-route, ``e1c361478`` (2026-10-20): skew vs max_skew_mm.
+    ("diffpair_length_skew", "MIPI_CLK+/MIPI_CLK-"): DIFFPAIR_SKEW_TRACKER,  # 1.311 / 0.300
+    ("diffpair_length_skew", "MIPI_D0+/MIPI_D0-"): DIFFPAIR_SKEW_TRACKER,  # 2.320 / 0.300
+    ("diffpair_length_skew", "PCIE_RX+/PCIE_RX-"): DIFFPAIR_SKEW_TRACKER,  # 1.693 / 0.500
+    ("diffpair_length_skew", "PCIE_TX+/PCIE_TX-"): DIFFPAIR_SKEW_TRACKER,  # 2.244 / 0.500
+    ("diffpair_length_skew", "USB2_D+/USB2_D-"): DIFFPAIR_SKEW_TRACKER,  # 3.327 / 1.270
+    ("diffpair_length_skew", "USB3_RX1+/USB3_RX1-"): DIFFPAIR_SKEW_TRACKER,  # 0.529 / 0.500
+    ("diffpair_length_skew", "USB3_RX2+/USB3_RX2-"): DIFFPAIR_SKEW_TRACKER,  # 3.329 / 0.500
+    ("diffpair_length_skew", "USB3_TX1+/USB3_TX1-"): DIFFPAIR_SKEW_TRACKER,  # 2.173 / 0.500
+    ("diffpair_length_skew", "USB3_TX2+/USB3_TX2-"): DIFFPAIR_SKEW_TRACKER,  # 2.764 / 0.500
+}
+
+#: Every board key that carries an identity allowance (Issue #7367).  A key
+#: absent here has no allowance at all: every blocking finding counts.
+DIFFPAIR_ALLOWANCES: dict[str, Allowance] = {
+    DIFFPAIR_FIXTURE_KEY: DIFFPAIR_FIXTURE_ALLOWED_FINDINGS,
 }
 
 
-def unexpected_baseline_errors(key: str, errors: dict[str, int]) -> dict[str, int]:
-    """Pair improvements cannot hide a new physical error within the total 18."""
-    if key not in DIFFPAIR_VIOLATION_BASELINE:
-        return {}
-    expected = {"diffpair_length_skew", "diffpair_routing_continuity", "diffpair_uncoupled_length"}
-    return {rule: count for rule, count in errors.items() if count and rule not in expected}
+def _is_advisory(rule: str) -> bool:
+    """``connectivity`` and friends are reported but never block (Issue #4008)."""
+    from kicad_tools.validate.checker import DRCChecker
+
+    return DRCChecker.is_advisory_rule(rule)
 
 
-def check_zero_violations(
-    error_violations_by_rule: dict[str, int],
-    baseline: int,
-    required_rule_ids: tuple[str, ...] = DIFFPAIR_RULE_IDS,
-) -> list[str]:
-    """Return human-readable failure strings for rules over the baseline.
+def unexpected_baseline_errors(
+    key: str,
+    errors: dict[str, int],
+    identities: dict[str, set[str]] | None = None,
+) -> dict[str, int]:
+    """Blocking findings on an allowance key that no entry covers, per rule.
 
-    Issue #3828: the gate must CATCH diff-pair skew/continuity regressions,
-    which the old coverage>=1 assertion never did.  A rule whose
-    error-severity violation count exceeds ``baseline`` produces a failure
-    string; an empty return means every diff-pair rule is at or under the
-    documented baseline.  ``baseline`` is the TOTAL allowed across the
-    diff-pair rules combined (matching the documented per-board count); the
-    sum of all diff-pair error violations is compared against it so a board
-    cannot trade one rule's regression against another's improvement.
+    ``identities`` maps rule -> identities carrying an error
+    (``error_identities``).  Every blocking rule is judged by identity
+    (Issue #7367: skew and continuity are no longer let through by name);
+    without ``identities`` nothing is trusted, so every finding counts as
+    unexpected.  A key with no allowance returns ``{}``: there the strict-0
+    total already fails on any blocking finding.
     """
-    total = sum(error_violations_by_rule.get(rid, 0) for rid in required_rule_ids)
-    if total <= baseline:
-        return []
-    detail = ", ".join(f"{rid}={error_violations_by_rule.get(rid, 0)}" for rid in required_rule_ids)
-    return [
-        f"diff-pair error-severity violations ({total}) EXCEED the documented "
-        f"baseline ({baseline}): {detail}"
-    ]
+    allowance = DIFFPAIR_ALLOWANCES.get(key)
+    if allowance is None:
+        return {}
+    unexpected: dict[str, int] = {}
+    for rule, count in errors.items():
+        if not count or _is_advisory(rule):
+            continue
+        if identities is not None:
+            count = len(unlisted_findings(allowance, rule, identities.get(rule, set())))
+        if count:
+            unexpected[rule] = count
+    return unexpected
+
+
+def stale_allowances(key: str, identities: dict[str, set[str]]) -> list[tuple[str, str, int]]:
+    """Listed findings that no longer occur on the baselined board."""
+    return stale_entries(DIFFPAIR_ALLOWANCES.get(key, {}), identities)
+
+
+def unallowed_blocking(key: str, violations: list[dict]) -> list[tuple[str, str]]:
+    """Blocking findings ``key``'s allowance does not cover (Issue #7367).
+
+    This, not the raw blocking count, is what the routed-DRC total is
+    compared to: an identity-allowed finding never uses up budget.
+    """
+    return unallowed_findings(DIFFPAIR_ALLOWANCES.get(key, {}), violations, advisory=_is_advisory)
 
 
 def load_allowlist(allowlist_path: Path) -> dict[str, int]:
@@ -449,37 +497,6 @@ from net_class_map_resolver import (  # noqa: E402
 )
 
 
-def measure_signal_reach(pcb_path: Path, pour_nets: set[str]) -> tuple[int, int, list[str]]:
-    """Measure routed-signal-net reach on a routed PCB.
-
-    Issue #3413 phase 5: the gate previously asserted only the DRC error
-    count + rule-exercise, so a reach regression (e.g. 18/21 with 3
-    connectivity errors) stayed green as long as the error count fit
-    under the allowlist floor.  This helper counts COMPLETE signal nets
-    per :class:`~kicad_tools.analysis.net_status.NetStatusAnalyzer` --
-    the same per-net completeness model the connectivity DRC rule uses.
-
-    Pour nets are excluded: their connectivity is plane/stitching-based
-    and is gated separately (the board recipe's copper-union audit;
-    see boards/06-diffpair-test/generate_design.py step 11).
-
-    Args:
-        pcb_path: Routed PCB to measure.
-        pour_nets: Net names excluded from the signal universe (the
-            board module's ``POUR_NETS``).
-
-    Returns:
-        ``(complete_count, signal_total, incomplete_names)``.
-    """
-    from kicad_tools.analysis.net_status import NetStatusAnalyzer
-
-    result = NetStatusAnalyzer(pcb_path).analyze()
-    signal = [n for n in result.nets if n.net_name and n.net_name not in pour_nets]
-    complete = [n for n in signal if n.status == "complete"]
-    incomplete_names = sorted(n.net_name for n in signal if n.status != "complete")
-    return len(complete), len(signal), incomplete_names
-
-
 def measure_pour_connectivity(recipe_mod, pcb_path: Path, pour_nets: set[str]) -> list[str]:
     """Run the board recipe's copper-union pour audit on a routed PCB.
 
@@ -617,7 +634,10 @@ def _measure_skew_data_from_pcb(
 
 
 def count_errors_via_kct_check(
-    pcb_path: Path, sidecar: Path | None = None
+    pcb_path: Path,
+    sidecar: Path | None = None,
+    *,
+    error_violations: list[dict] | None = None,
 ) -> tuple[int, dict[str, int]]:
     """Count errors via ``kct check --mfr jlcpcb --errors-only --format json``.
 
@@ -691,6 +711,8 @@ def count_errors_via_kct_check(
         rid = v.get("rule_id")
         if isinstance(rid, str):
             per_rule_errors[rid] = per_rule_errors.get(rid, 0) + 1
+        if error_violations is not None:
+            error_violations.append(v)
     return errors, per_rule_errors
 
 
@@ -870,6 +892,7 @@ def check_board(
     #      -- the only way to exercise the diff-pair rules whose
     #      engagement is gated on router context.  Also returns per-rule
     #      error-violation counts for the zero-violation assertion.
+    error_violations: list[dict] = []
     try:
         with resolve_net_class_map_sidecar(routed_pcb) as sidecar:
             if sidecar is None:
@@ -884,7 +907,9 @@ def check_board(
                     "#3828).",
                 )
                 return 1
-            error_count, per_rule_errors = count_errors_via_kct_check(routed_pcb, sidecar)
+            error_count, per_rule_errors = count_errors_via_kct_check(
+                routed_pcb, sidecar, error_violations=error_violations
+            )
     except RuntimeError as e:
         annotate_error(str(routed_pcb), f"kct check failed: {e}")
         return 1
@@ -894,22 +919,18 @@ def check_board(
         annotate_error(str(routed_pcb), f"Rule-coverage probe failed: {e}")
         return 1
 
-    # Issue #3828: the zero-violation assertion measures the SAME
-    # diff-pair error counts the allowlist sees (from the kct check JSON),
-    # not the in-process coverage probe (which double-counts the length-skew
-    # rule via its second measured pass).
+    # Diagnostic only: the diff-pair error counts from the kct check JSON
+    # (the in-process coverage probe double-counts the length-skew rule via
+    # its second measured pass).  Issue #7367: they are judged by identity
+    # below, never against a count.
     diffpair_error_violations = {rid: per_rule_errors.get(rid, 0) for rid in DIFFPAIR_RULE_IDS}
-    baseline = DIFFPAIR_VIOLATION_BASELINE.get(lookup_key, 0)
 
     print(f"\n[diffpair-coverage] Board: {board_dir.name}")
     print(f"[diffpair-coverage] Routed PCB: {routed_pcb}")
     print(f"[diffpair-coverage] DRC error count: {error_count} (allowed: {allowed})")
     print(f"[diffpair-coverage] All error rules: {per_rule_errors}")
     print(f"[diffpair-coverage] rules_checked_by_rule: {rules_by_rule}")
-    print(
-        f"[diffpair-coverage] diff-pair error violations: "
-        f"{diffpair_error_violations} (baseline: {baseline})"
-    )
+    print(f"[diffpair-coverage] diff-pair error violations: {diffpair_error_violations}")
 
     failed = False
 
@@ -992,67 +1013,69 @@ def check_board(
     else:
         print(f"[diffpair-coverage] OK: all {len(DIFFPAIR_RULE_IDS)} diff-pair rules exercised.")
 
-    # Issue #3828: zero-violation assertion.  Distinct from coverage>=1
-    # (a rule that RAN) and from the allowlist (total error count): each
-    # diff-pair rule's ERROR-severity violation count must not exceed the
-    # documented per-board baseline (default 0).  This is the assertion the
-    # old gate lacked -- it could confirm a rule ran but never that the rule
-    # found zero (or no NEW) violations.  Without it, the 18 hidden
-    # diff-pair errors on board 06 passed silently.
-    violation_failures = check_zero_violations(diffpair_error_violations, baseline)
-    if violation_failures:
-        msg = (
-            f"Diff-pair VIOLATION regression on {routed_pcb}: "
-            f"{'; '.join(violation_failures)}.  These are real coupled "
-            "diff-pair skew/continuity defects measured WITH the net-class "
-            "sidecar (the rules are now ACTIVE, Issue #3828).  Either fix the "
-            "routing so the pairs meet skew/continuity tolerance, or -- if "
-            "this is an accepted, separately-tracked routing-quality baseline "
-            "-- raise DIFFPAIR_VIOLATION_BASELINE for this PCB in "
-            "scripts/ci/check_diffpair_coverage.py with a tracking reference. "
-            "Do NOT silently widen it: the point of this gate is to catch "
-            "regressions beyond the documented baseline."
-        )
-        annotate_error(str(routed_pcb), msg)
-        failed = True
-    else:
-        if baseline == 0:
-            print("[diffpair-coverage] OK: 0 diff-pair error violations (strict).")
-        else:
-            total = sum(diffpair_error_violations.get(rid, 0) for rid in DIFFPAIR_RULE_IDS)
-            print(
-                f"[diffpair-coverage] OK: {total} diff-pair error violation(s) "
-                f"within documented baseline {baseline}."
-            )
-
-    unexpected = unexpected_baseline_errors(lookup_key, per_rule_errors)
+    # Issue #3828 / #7367: zero-violation assertion, by identity.  Every
+    # blocking finding -- diff-pair skew and continuity included -- is either
+    # a NAMED entry in DIFFPAIR_FIXTURE_ALLOWED_FINDINGS (with its open
+    # tracker) or a failure.  The old per-rule count (18) let a new pair, or
+    # up to 7 continuity findings, hide behind the known ones.
+    identities = error_identities(error_violations)
+    unexpected = unexpected_baseline_errors(lookup_key, per_rule_errors, identities)
     if unexpected:
-        annotate_error(str(routed_pcb), f"Errors outside historical pair baseline: {unexpected}")
+        allowance = DIFFPAIR_ALLOWANCES.get(lookup_key, {})
+        detail = "; ".join(
+            f"{rule} on {', '.join(unlisted_findings(allowance, rule, identities.get(rule, set())))}"
+            for rule in sorted(unexpected)
+        )
+        annotate_error(
+            str(routed_pcb),
+            f"Errors outside the identity allowance: {unexpected} ({detail}).  These are "
+            "real defects measured WITH the net-class sidecar.  Fix them, or -- for an "
+            "accepted, separately-tracked defect -- list the identity with its OPEN "
+            "tracking issue in DIFFPAIR_FIXTURE_ALLOWED_FINDINGS.  Never allow by count.",
+        )
+        failed = True
+    # An allowance entry that no longer fires fails the gate (on the full
+    # re-route and on the E2E job's regenerated bundle alike), so fixing a
+    # finding forces its entry out.  It is never just a warning.
+    stale = stale_allowances(lookup_key, identities)
+    if stale:
+        annotate_error(str(routed_pcb), f"Stale identity allowance: {format_stale(stale)}")
         failed = True
 
-    # AC #1 (allowlist semantic): error count must be <= allowed.
-    if error_count > allowed:
+    # AC #1 (allowlist semantic), Issue #7367: the blocking findings NOT
+    # covered by the identity allowance must be <= allowed (absent = 0).
+    # Identity-allowed findings never consume this budget.
+    unallowed = unallowed_blocking(lookup_key, error_violations)
+    print(
+        f"[diffpair-coverage] Unallowed blocking findings: {len(unallowed)} "
+        f"(allowed: {allowed}) {unallowed or ''}"
+    )
+    if len(unallowed) > allowed:
         if allowed == 0:
             msg = (
-                f"DRC errors detected on re-routed {routed_pcb}: {error_count} "
-                f"error(s).  Boards NOT in .github/routed-drc-tolerance.yml must "
-                "report 0 errors.  Fix the routing regression or add an explicit "
-                "allowlist entry with reviewer sign-off."
+                f"DRC errors detected on re-routed {routed_pcb}: {len(unallowed)} "
+                f"blocking error(s) outside the identity allowance: {unallowed}.  "
+                "Boards NOT in .github/routed-drc-tolerance.yml must report 0 such "
+                "errors.  Fix the routing regression; do not add a count."
             )
         else:
             msg = (
-                f"DRC regression on re-routed {routed_pcb}: {error_count} "
-                f"error(s) exceeds allowlist value {allowed} in "
-                ".github/routed-drc-tolerance.yml.  Either fix the new "
-                "violations or (if intentional) raise the allowlist value."
+                f"DRC regression on re-routed {routed_pcb}: {len(unallowed)} "
+                f"unallowed error(s) exceeds allowlist value {allowed} in "
+                f".github/routed-drc-tolerance.yml: {unallowed}."
             )
         annotate_error(str(routed_pcb), msg)
         failed = True
+    elif allowed == 0:
+        print(
+            f"[diffpair-coverage] OK: 0 unallowed errors (strict gate; "
+            f"{error_count - len(unallowed)} identity-allowed)."
+        )
     else:
-        if allowed == 0:
-            print("[diffpair-coverage] OK: 0 errors (strict gate).")
-        else:
-            print(f"[diffpair-coverage] OK: {error_count} errors (within allowlist max {allowed}).")
+        print(
+            f"[diffpair-coverage] OK: {len(unallowed)} unallowed errors "
+            f"(within allowlist max {allowed})."
+        )
 
     return 2 if failed else 0
 

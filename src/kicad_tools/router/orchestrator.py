@@ -2040,6 +2040,8 @@ class RoutingOrchestrator:
                 via_count=via_count,
                 layer_changes=via_count,
             ),
+            # Issue #6875: a coarsened routing pitch is reported, not silent.
+            warnings=[w for w in [getattr(adaptive_result, "grid_warning", None)] if w],
         )
 
     def _route_subgrid_adaptive(self, net: str | int, pads: list[Pad] | None) -> RoutingResult:

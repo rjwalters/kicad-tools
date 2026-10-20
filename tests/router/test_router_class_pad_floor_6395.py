@@ -223,22 +223,26 @@ def test_repair_never_moves_pair_legs() -> None:
 def test_shortfall_is_judged_by_the_kernel_not_the_pad_rectangle() -> None:
     """A diagonal track off a round pad's corner: real DRC passes it.
 
-    The pre-save check models the pad as its full square and reads less gap
-    there, so the repair tries to satisfy that model first, but it only ever
-    counts (and must clear) what the exact kernel -- and KiCad -- measure.
+    Issue #6718: ``validate_routes`` measures pads with the same exact
+    clearance kernel the repair uses, so the repair no longer carries a
+    second, rectangle-based "strict" mode to keep the pre-save check quiet.
+    Both see the real 0.21 mm gap, which clears the 0.2 mm Power class.
     """
-    from kicad_tools.router.lattice.class_pad_repair import _pad_gap
+    from kicad_tools.router import io as router_io
+    from kicad_tools.router.lattice import class_pad_repair
+
+    assert not hasattr(class_pad_repair, "_pad_gap")
 
     pad = Pad(x=0.0, y=0.0, width=1.7, height=1.7, net=0, net_name="GND", ref="J4", pin="6")
     pad.shape = "circle"
     # A 45-degree track whose edge sits 0.21 mm off the circle.
     off = (0.85 + 0.21 + TRACE_W / 2) / 2**0.5
     seg = _seg(off - 1.0, off + 1.0, off + 1.0, off - 1.0)
-    shape = segment_shape(seg)
-    kernel = _pad_gap(seg, shape, pad, strict=False)
-    strict = _pad_gap(seg, shape, pad, strict=True)
+    kernel = copper_gap(segment_shape(seg), pad_shape(pad))
     assert kernel == pytest.approx(0.21, abs=1e-3)
-    assert strict < POWER < kernel
+    assert kernel > POWER
+    # validate_routes no longer models the pad as its bounding rectangle.
+    assert not hasattr(router_io, "_segment_to_aabb_distance")
 
 
 # ---------------------------------------------------------------------------
@@ -525,7 +529,7 @@ def test_single_ended_route_avoids_a_slot_the_repair_cannot_clear() -> None:
     assert stats.lattice_builds == 2  # one targeted growth round, no more
 
 
-def test_uncoupled_fallback_pair_leg_avoids_the_slot() -> None:
+def _slot_pair():
     from kicad_tools.router.lattice.coupled import CoupledConnection
 
     def pad(x: float, y: float, net: int, name: str, ref: str) -> Pad:
@@ -546,9 +550,33 @@ def test_uncoupled_fallback_pair_leg_avoids_the_slot() -> None:
         net_class=None,
         pitch=1.0,
     )
+    return pf, pc
+
+
+def test_uncoupled_fallback_pair_leg_avoids_the_slot(monkeypatch) -> None:
+    # Pre-#6703 (partner-blind) legs reach the slot; the grown keep-out round
+    # moves them out of it.
+    def blind(self, pc, **kw):
+        return self._partner_blind_legs(pc, **kw), True
+
+    monkeypatch.setattr(LatticePathfinder, "_partner_aware_legs", blind)
+    pf, pc = _slot_pair()
     routes, stats = pf.route_netset([], coupled=[pc], uncoupled_fallback=True)
     assert pf.pair_outcomes[pc.key].startswith("uncoupled-fallback:")
     assert stats.lattice_builds == 2
+    legs = [k for k in routes if isinstance(k, tuple) and k[1:] in (("P",), ("N",))]
+    assert len(legs) == 2
+    assert _left(pf, routes) == 0
+
+
+def test_partner_aware_fallback_legs_still_clear_the_slot() -> None:
+    # Issue #6703: the partner-aware flush keeps its own legs only for a
+    # material skew gain (PR #6735 review); dodging a class-pad shortfall
+    # alone is left to the growth round, which still clears the slot.
+    pf, pc = _slot_pair()
+    routes, stats = pf.route_netset([], coupled=[pc], uncoupled_fallback=True)
+    assert pf.pair_outcomes[pc.key].startswith("uncoupled-fallback:")
+    assert stats.lattice_builds <= 2
     legs = [k for k in routes if isinstance(k, tuple) and k[1:] in (("P",), ("N",))]
     assert len(legs) == 2
     assert _left(pf, routes) == 0

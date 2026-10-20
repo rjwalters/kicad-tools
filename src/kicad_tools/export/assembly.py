@@ -18,6 +18,7 @@ from .bom_formats import (
     BOMExportConfig,
     apply_existing_lcsc_assignments,
     export_bom,
+    get_bom_formatter,
     read_existing_lcsc_assignments,
 )
 from .bom_spec_overlay import (
@@ -30,7 +31,10 @@ from .gerber import MANUFACTURER_PRESETS, GerberConfig, GerberExporter
 from .pnp import (
     PlacementData,
     PnPExportConfig,
+    _aux_origin_of,
+    count_rotation_corrections,
     export_pnp,
+    extract_placements,
     extract_tht_exclusions,
     get_pnp_formatter,
 )
@@ -90,12 +94,26 @@ class AssemblyPackageResult:
     gerber_path: Path | None = None
     spec_overlay: SpecOverlayReport | None = None
     lcsc_enrichment: EnrichmentReport | None = None
+    rotation_corrections_applied: int = 0
+    """Number of CPL rows whose rotation was shifted by a manufacturer
+    per-footprint correction (issue #7107).  0 when the manufacturer
+    profile has no corrections."""
     tht_excluded: list[PlacementData] = field(default_factory=list)
     """Through-hole components excluded from the CPL by the THT filter
     (issue #3539).  These are on the board and in the BOM but absent
     from the SMT pick-and-place file, so the assembler must hand-solder
     them.  Empty when the effective PnP config has ``exclude_tht=False``
     or the board has no THT parts."""
+    bom_component_count: int = 0
+    """Component instances written to the BOM (after DNP/virtual filtering)."""
+    bom_unique_parts: int = 0
+    """Distinct (value, footprint, LCSC) part groups in the BOM."""
+    bom_missing_lcsc: list[str] = field(default_factory=list)
+    """References written to the BOM with no LCSC part number."""
+    pnp_placement_count: int = 0
+    """Rows written to the CPL."""
+    pnp_layers: list[str] = field(default_factory=list)
+    """Sides with CPL placements (``"top"`` / ``"bottom"``)."""
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -494,6 +512,17 @@ class AssemblyPackage:
         # Generate BOM
         bom_config = self.config.bom_config or BOMExportConfig()
         bom_csv = export_bom(items, self.fab_family, bom_config)
+        if result is not None:
+            # Issue #7260: record the BOM's facts from the items the
+            # formatter writes, so callers never re-parse the CSV.
+            written = get_bom_formatter(self.fab_family, bom_config).filter_items(items)
+            result.bom_component_count = len(written)
+            result.bom_unique_parts = len(
+                {(i.value, i.footprint, getattr(i, "lcsc", "") or "") for i in written}
+            )
+            result.bom_missing_lcsc = sorted(
+                i.reference for i in written if not (getattr(i, "lcsc", "") or "").strip()
+            )
 
         # Write to file
         filename = self.config.bom_filename.format(manufacturer=self.fab_family)
@@ -528,27 +557,56 @@ class AssemblyPackage:
         rotation_corrections = self._get_rotation_corrections()
 
         # Generate CPL – pass None when no explicit config so that the
-        # formatter can apply its own defaults (e.g. JLCPCB exclude_tht=True).
+        # formatter can apply its own defaults (a fab-specific exclude_tht default).
+        # The CPL must share the Gerbers' frame, so take use_aux_origin from
+        # the same preset the package plots with (OSH Park: False) unless
+        # the caller supplied an explicit pnp_config.
+        pnp_config = self.config.pnp_config
+        if pnp_config is None and self.fab_family in MANUFACTURER_PRESETS:
+            use_aux = MANUFACTURER_PRESETS[self.fab_family].config.use_aux_origin
+            if not use_aux:
+                pnp_config = PnPExportConfig(use_aux_origin=False)
+        aux_origin = _aux_origin_of(pcb.setup)
         pnp_csv = export_pnp(
             footprints,
             self.fab_family,
-            self.config.pnp_config,
+            pnp_config,
             rotation_corrections=rotation_corrections,
+            aux_origin=aux_origin,
         )
 
         # Record the THT hand-solder set excluded from the CPL.  Use the
         # formatter's *effective* config so manufacturer defaults
-        # (JLCPCB: exclude_tht=True) are honoured when no explicit
+        # (fab-specific exclude_tht) are honoured when no explicit
         # pnp_config was supplied.
         if result is not None:
-            effective_config = get_pnp_formatter(self.fab_family, self.config.pnp_config).config
-            result.tht_excluded = extract_tht_exclusions(footprints, effective_config)
+            result.rotation_corrections_applied = count_rotation_corrections(
+                footprints,
+                self.fab_family,
+                pnp_config,
+                rotation_corrections=rotation_corrections,
+            )
+            effective_config = get_pnp_formatter(self.fab_family, pnp_config).config
+            result.tht_excluded = extract_tht_exclusions(
+                footprints, effective_config, aux_origin=aux_origin
+            )
             if result.tht_excluded:
                 logger.info(
                     "CPL excludes %d through-hole component(s) (hand-solder): %s",
                     len(result.tht_excluded),
                     ", ".join(p.reference for p in result.tht_excluded),
                 )
+            # Issue #7260: the CPL rows' facts, from the same placement
+            # filters export_pnp applies (callers never re-parse the CSV).
+            formatter = get_pnp_formatter(self.fab_family, pnp_config, rotation_corrections)
+            placements = formatter.filter_placements(
+                extract_placements(footprints, formatter.config, aux_origin)
+            )
+            result.pnp_placement_count = len(placements)
+            sides = {p.layer for p in placements}
+            result.pnp_layers = [
+                side for side, layer in (("top", "F.Cu"), ("bottom", "B.Cu")) if layer in sides
+            ]
 
         # Write to file
         filename = self.config.pnp_filename.format(manufacturer=self.fab_family)

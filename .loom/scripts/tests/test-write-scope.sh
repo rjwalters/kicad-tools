@@ -59,7 +59,7 @@ mk_daemon() { # <name> <body>
 }
 mk_daemon daemon-old 'echo "error: unrecognized subcommand '\''may-write'\''" >&2; exit 2'
 mk_daemon daemon-deny 'echo "the credential in use cannot write to me/solo (repository role \`pull\`)" >&2; exit 1'
-mk_daemon daemon-allow '[[ "${2:-}" == verdict-reconcile ]] && { echo "LOOM-VERDICT-RECONCILE STABLE"; exit 0; }; echo "me/widgets"; exit 0'
+mk_daemon daemon-allow '[[ "${1:-} ${2:-}" == "forge comment" ]] && { echo "issue comment $3 --repo ${5:-}" >> "$GH_LOG"; exit 0; }; [[ "${2:-}" == verdict-reconcile ]] && { echo "LOOM-VERDICT-RECONCILE STABLE"; exit 0; }; echo "me/widgets"; exit 0'
 mk_daemon daemon-silent 'exit 0'
 NO_DAEMON="$WORK/no-such-loom-daemon"
 
@@ -124,7 +124,7 @@ check "forge_gh_comment_rl_safe refuses the upstream repo" 1 "$RC"
 if grep -q "comment" "$GH_LOG"; then fail "the wrapper made no comment call" "$(cat "$GH_LOG")"; else pass "the wrapper made no comment call"; fi
 
 : > "$GH_LOG"
-OUT="$(cd "$FORK" && LOOM_DAEMON_BIN="$STUB/daemon-allow" bash "$SCRIPTS_DIR/post-verdict.sh" 7 changes-requested \
+OUT="$(cd "$FORK" && LOOM_DAEMON_BIN="$STUB/daemon-allow" LOOM_DAEMON_SELF_BIN="$STUB/daemon-allow" bash "$SCRIPTS_DIR/post-verdict.sh" 7 changes-requested \
   0123456789abcdef0123456789abcdef01234567 --body "needs work" 2>&1)"; RC=$?
 check "an allowed post-verdict.sh succeeds" 0 "$RC"
 contains "and names the vetted repo on the write" "$(cat "$GH_LOG")" "issue comment 7 --repo me/widgets"

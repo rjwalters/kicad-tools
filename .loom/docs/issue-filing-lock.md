@@ -146,7 +146,8 @@ applies to its own TTLs.
 
 Env-only, and identical on both halves (a knob with an independent Bash-side
 reader stays env-only rather than honoring `.loom/config.json` on one path and
-silently ignoring it on the other — the `LOOM_PER_WORKTREE_GB` precedent).
+silently ignoring it on the other — the rule `LOOM_PER_WORKTREE_GB` followed
+while the daemon still read it, before #12406).
 
 | Variable | Default | Meaning |
 |---|---|---|

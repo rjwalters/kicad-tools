@@ -801,6 +801,9 @@ pr_state=$(gh pr view "$pr_number" --json state,mergedAt --jq '.state')
   blocked**, regardless of its labels (`has_superseding_block`, #7267) — a PR
   in that state cannot currently land no matter what
 - If issue was blocked for non-dependency reasons → Check comments for context
+- **PR-side (#10937)**: a standing Champion hold (`loom-daemon champion-hold
+  classify` → `state=champion-hold`) is a human evidence gate: never unblock it
+  because a recorded `Blocked by` closed
 - **PR-side (#8925)**: `pr_has_superseding_block` true → keep blocked, even if
   every declared blocker closed; a `loom:blocked` that is a policy hold, not a
   dependency wait (an operator/quarantine call) → leave it, do not write a
@@ -1038,6 +1041,23 @@ work_log_has_pr() {
 work_log_has_issue() {
   grep -qE "^- \*\*Issue #${1}\*\* " "$DOCS_WT/WORK_LOG.md" 2>/dev/null
 }
+
+# Lookback-versus-rotation-floor invariant (#12634, slice 2 of #12589). The two
+# presence checks above read ONLY the active `$DOCS_WT/WORK_LOG.md`, and
+# `update_work_log()` re-queries the last `WORK_LOG_LOOKBACK_DAYS` days of
+# merged PRs / closed issues every tick. Rotation (Step 2b) moves whole-day
+# sections into `work_log/WORK_LOG_YYYY-MM.md`, where these checks cannot see
+# them. That is safe ONLY while the rotation cutoff is older than the lookback:
+# every candidate the query can return then still has its entry in the active
+# file. If the lookback grows (or the cutoff shrinks) past that, an archived
+# entry is re-appended as a duplicate. Rather than also grepping the archives
+# on every tick (more I/O, and it would hide the drift instead of failing
+# safe), `rotate_work_log()` asserts the invariant and SKIPS rotation with a
+# logged warning when it does not hold. `update_work_log()` derives `since`
+# from WORK_LOG_LOOKBACK_DAYS, so the assertion tracks the real lookback.
+WORK_LOG_LOOKBACK_DAYS=30
+WORK_LOG_ROTATE_OLDER_THAN_DAYS=60   # `work-docs archive` default; the verb itself refuses < 45
+WORK_LOG_ROTATE_MARGIN_DAYS=15       # required headroom of the cutoff over the lookback
 ```
 
 Read them from `$DOCS_WT` (a fresh checkout of `origin/<default-branch>`), not
@@ -1305,8 +1325,8 @@ _work_log_search_total_count() {
   # `predicate` (#6144) generalizes this beyond the issue-side-only original:
   # it takes the search predicate as a second, optional argument — defaults
   # to `is:issue is:closed` (the original, issue-side behavior, unchanged for
-  # every existing caller) so `fetch_closed_issues_complete()` below needs no
-  # changes. `fetch_merged_prs_complete()` passes `is:pr is:merged` instead —
+  # every existing caller) so `fetch_closed_issues_complete()` needs no
+  # changes. `_fetch_complete pr` passes `is:pr is:merged` instead —
   # GitHub's search API unifies issues and PRs under the same `search/issues`
   # endpoint, so no separate endpoint or `_pr` companion function is needed,
   # only a different predicate string.
@@ -1324,21 +1344,51 @@ _work_log_search_total_count() {
     --jq '.total_count' 2>/dev/null || echo "-1"
 }
 
-fetch_closed_issues_complete() {
-  # Fetch EVERY closed issue in [start, end) — end empty means open-ended,
+_fetch_complete() {
+  # Fetch EVERY item of <kind> in [start, end) — end empty means open-ended,
   # ">=start" — without truncation, no matter how large the window's true
   # volume is. `depth` only guards a degenerate/malformed window from
   # recursing forever; it is never expected to bind in normal operation.
-  local start="$1" end="$2" depth="${3:-0}" safety_cap=1000
+  #
+  # One mechanism, two kinds (#6097 issue side, #6144 PR side — the PR side
+  # was first written as a line-for-line copy). `fetch_closed_issues_complete`
+  # and `fetch_merged_prs_complete` below are thin wrappers; a fix to the
+  # bisection, the BSD/GNU `date` fallbacks or the depth cap is made here once.
+  #
+  #   kind=issue: closed:<range>, predicate `is:issue is:closed`,
+  #               `gh issue list --state closed`, fields number,title,closedAt
+  #   kind=pr:    merged:<range>, predicate `is:pr is:merged`,
+  #               `gh pr list --state merged`, fields
+  #               number,title,mergedAt,headRefName
+  #
+  # `headRefName` MUST stay in the PR field list — jq cannot filter on a field
+  # gh was not asked to return, and `.headRefName` would silently be null
+  # (update_work_log()'s `$GUIDE_DOCS_PR_EXCLUDE` filter depends on it).
+  local kind="$1" start="$2" end="$3" depth="${4:-0}" safety_cap=1000
+  local date_field predicate gh_noun gh_state json_fields label issue_ref
+  case "$kind" in
+    issue)
+      date_field="closed"; predicate="is:issue is:closed"; gh_noun="issue"
+      gh_state="closed"; json_fields="number,title,closedAt"
+      label="closed-issue"; issue_ref="#6097" ;;
+    pr)
+      date_field="merged"; predicate="is:pr is:merged"; gh_noun="pr"
+      gh_state="merged"; json_fields="number,title,mergedAt,headRefName"
+      label="merged-PR"; issue_ref="#6144" ;;
+    *)
+      echo "_fetch_complete: unknown kind '$kind' (expected issue|pr)" >&2
+      return 1 ;;
+  esac
+
   local search_range
   if [ -n "$end" ]; then
-    search_range="closed:${start}..${end}"
+    search_range="${date_field}:${start}..${end}"
   else
-    search_range="closed:>=${start}"
+    search_range="${date_field}:>=${start}"
   fi
 
   local true_count
-  true_count=$(_work_log_search_total_count "$search_range")
+  true_count=$(_work_log_search_total_count "$search_range" "$predicate")
 
   if [ "$true_count" -gt "$safety_cap" ] 2>/dev/null && [ "$depth" -lt 10 ]; then
     # This window alone would truncate a single bounded fetch no matter how
@@ -1352,8 +1402,8 @@ fetch_closed_issues_complete() {
       local mid_epoch mid_date left right
       mid_epoch=$(( (start_epoch + end_epoch) / 2 ))
       mid_date=$(date -u -d "@$mid_epoch" +%Y-%m-%d 2>/dev/null || date -u -r "$mid_epoch" +%Y-%m-%d)
-      left=$(fetch_closed_issues_complete "$start" "$mid_date" $((depth + 1)))
-      right=$(fetch_closed_issues_complete "$mid_date" "$end" $((depth + 1)))
+      left=$(_fetch_complete "$kind" "$start" "$mid_date" $((depth + 1)))
+      right=$(_fetch_complete "$kind" "$mid_date" "$end" $((depth + 1)))
       # Merge via process substitution, NOT `--argjson` — a wide window's
       # halves can each be hundreds of KB of JSON, and passing that through
       # `--argjson`'s command-line argument blows past the OS `ARG_MAX` and
@@ -1365,13 +1415,13 @@ fetch_closed_issues_complete() {
     fi
     # Already down to a single day and still over the cap (or the depth cap
     # was hit first): fall through to the plain fetch below and let the
-    # self-check warn — a >1000-closed-in-one-day volume is implausible but
-    # must not fail silently if it ever happens.
+    # self-check warn — a >1000-in-one-day volume is implausible but must not
+    # fail silently if it ever happens.
   fi
 
   local batch fetched_count
-  batch=$("$GH_READ" issue list --state closed --search "$search_range" --limit "$safety_cap" \
-    --json number,title,closedAt)
+  batch=$("$GH_READ" "$gh_noun" list --state "$gh_state" --search "$search_range" --limit "$safety_cap" \
+    --json "$json_fields")
   fetched_count=$(printf '%s\n' "$batch" | jq 'length')
 
   # #6097 AC2 self-check: compare the fetch against the search API's own
@@ -1379,10 +1429,14 @@ fetch_closed_issues_complete() {
   # unambiguous evidence of truncation. Silent when total_count itself was
   # unavailable (-1) — that is "unknown", not "confirmed truncated".
   if [ "$true_count" -ge 0 ] 2>/dev/null && [ "$fetched_count" -ne "$true_count" ]; then
-    echo "WARNING: closed-issue fetch for window [$start, ${end:-now}) returned $fetched_count of $true_count (search API total_count) -- possible truncation, see #6097." >&2
+    echo "WARNING: $label fetch for window [$start, ${end:-now}) returned $fetched_count of $true_count (search API total_count) -- possible truncation, see $issue_ref." >&2
   fi
 
   printf '%s\n' "$batch"
+}
+
+fetch_closed_issues_complete() {
+  _fetch_complete issue "$@"
 }
 
 # #6144 BUG, DO NOT REINTRODUCE: the PR-side candidate fetch used to end with
@@ -1392,73 +1446,10 @@ fetch_closed_issues_complete() {
 # from "the window legitimately merged exactly 1000 PRs". This repo's actual
 # 30-day merged-PR count (1348, verified 2026-08-13 via `gh api search/issues`
 # total_count) exceeded the cap for real, silently dropping 348 PRs the exact
-# same way #6097 hit on the issue side. `fetch_merged_prs_complete()` below is
-# the same bisection mechanism as `fetch_closed_issues_complete()` above,
-# parameterized for `merged:`/`mergedAt` instead of `closed:`/`closedAt` (and
-# `is:pr is:merged` instead of `is:issue is:closed` for the total_count
-# predicate) — see that function's header comment for the full rationale.
+# same way #6097 hit on the issue side. This wrapper routes through the same
+# `_fetch_complete` bisection as `fetch_closed_issues_complete()`.
 fetch_merged_prs_complete() {
-  # Fetch EVERY merged PR in [start, end) — end empty means open-ended,
-  # ">=start" — without truncation, no matter how large the window's true
-  # volume is. `depth` only guards a degenerate/malformed window from
-  # recursing forever; it is never expected to bind in normal operation.
-  local start="$1" end="$2" depth="${3:-0}" safety_cap=1000
-  local search_range
-  if [ -n "$end" ]; then
-    search_range="merged:${start}..${end}"
-  else
-    search_range="merged:>=${start}"
-  fi
-
-  local true_count
-  true_count=$(_work_log_search_total_count "$search_range" "is:pr is:merged")
-
-  if [ "$true_count" -gt "$safety_cap" ] 2>/dev/null && [ "$depth" -lt 10 ]; then
-    # This window alone would truncate a single bounded fetch no matter how
-    # large `--limit` is set — bisect by date and recurse on each half.
-    local end_resolved start_epoch end_epoch
-    end_resolved="${end:-$(date -u +%Y-%m-%d)}"
-    start_epoch=$(date -u -d "$start" +%s 2>/dev/null || date -u -j -f %Y-%m-%d "$start" +%s)
-    end_epoch=$(date -u -d "$end_resolved" +%s 2>/dev/null || date -u -j -f %Y-%m-%d "$end_resolved" +%s)
-
-    if [ $(( (end_epoch - start_epoch) / 86400 )) -ge 2 ]; then
-      local mid_epoch mid_date left right
-      mid_epoch=$(( (start_epoch + end_epoch) / 2 ))
-      mid_date=$(date -u -d "@$mid_epoch" +%Y-%m-%d 2>/dev/null || date -u -r "$mid_epoch" +%Y-%m-%d)
-      left=$(fetch_merged_prs_complete "$start" "$mid_date" $((depth + 1)))
-      right=$(fetch_merged_prs_complete "$mid_date" "$end" $((depth + 1)))
-      # Merge via process substitution, NOT `--argjson` — a wide window's
-      # halves can each be hundreds of KB of JSON, and passing that through
-      # `--argjson`'s command-line argument blows past the OS `ARG_MAX` and
-      # fails with "Argument list too long" (#6097).
-      jq -c -s '.[0] + .[1] | unique_by(.number)' \
-        <(printf '%s\n' "$left") <(printf '%s\n' "$right")
-      return 0
-    fi
-    # Already down to a single day and still over the cap (or the depth cap
-    # was hit first): fall through to the plain fetch below and let the
-    # self-check warn — a >1000-merged-in-one-day volume is implausible but
-    # must not fail silently if it ever happens.
-  fi
-
-  local batch fetched_count
-  # `headRefName` MUST stay in the --json field list — jq cannot filter on a
-  # field gh was not asked to return, and `.headRefName` would silently be
-  # null (update_work_log()'s `$GUIDE_DOCS_PR_EXCLUDE` filter depends on it).
-  batch=$("$GH_READ" pr list --state merged --search "$search_range" --limit "$safety_cap" \
-    --json number,title,mergedAt,headRefName)
-  fetched_count=$(printf '%s\n' "$batch" | jq 'length')
-
-  # #6144 self-check (mirrors the #6097 AC2 self-check): compare the fetch
-  # against the search API's own total_count for this EXACT window, not
-  # against `--limit`/a hardcoded count. A mismatch is unambiguous evidence of
-  # truncation. Silent when total_count itself was unavailable (-1) — that is
-  # "unknown", not "confirmed truncated".
-  if [ "$true_count" -ge 0 ] 2>/dev/null && [ "$fetched_count" -ne "$true_count" ]; then
-    echo "WARNING: merged-PR fetch for window [$start, ${end:-now}) returned $fetched_count of $true_count (search API total_count) -- possible truncation, see #6144." >&2
-  fi
-
-  printf '%s\n' "$batch"
+  _fetch_complete pr "$@"
 }
 
 update_work_log() {
@@ -1487,7 +1478,7 @@ update_work_log() {
   # `--limit 50` on closed issues can push an out-of-order closure out of the
   # query too.
   local since
-  since=$(date -u -d '30 days ago' +%Y-%m-%d 2>/dev/null || date -u -v-30d +%Y-%m-%d)
+  since=$(date -u -d "${WORK_LOG_LOOKBACK_DAYS} days ago" +%Y-%m-%d 2>/dev/null || date -u -v-"${WORK_LOG_LOOKBACK_DAYS}"d +%Y-%m-%d)
 
   # Get merged-PR candidates in the window, minus this phase's own docs PRs.
   #
@@ -1689,6 +1680,81 @@ update_work_log() {
 - **Issue #1770** (closed): Stale heartbeat messages from previous phase
 ```
 
+### Step 2b: Rotate WORK_LOG.md Into Archives (#12634)
+
+Keeps the active `WORK_LOG.md` short by running `loom-daemon work-docs archive`
+(the content-preserving move verb; layout and eligibility floor in
+`.loom/docs/work-docs-archive.md`) against `$DOCS_WT`. Rotation rides the same
+bundled docs PR as everything else: it never opens a PR of its own.
+
+```bash
+# Exact archive pattern from the layout doc. Staged by `create_docs_pr()` one
+# file at a time; NEVER widen it to `work_log/` or `git add -A`.
+WORK_LOG_ARCHIVE_GLOB='work_log/WORK_LOG_[0-9][0-9][0-9][0-9]-[0-9][0-9].md'
+
+# $1 = 1 when update_work_log() wrote entries this tick (it returned 0), else 0.
+# Returns 0 only when it moved sections; every other path leaves $DOCS_WT as it was.
+rotate_work_log() {
+  local wrote="${1:-0}" report moved
+
+  # Fail-safe invariant (see the note above work_log_has_pr()): the cutoff must
+  # stay older than the lookback by the margin, or archived entries would be
+  # re-appended by update_work_log(). Skip loudly, never rotate.
+  if [ "$WORK_LOG_ROTATE_OLDER_THAN_DAYS" -lt $(( WORK_LOG_LOOKBACK_DAYS + WORK_LOG_ROTATE_MARGIN_DAYS )) ]; then
+    echo "WARNING: WORK_LOG rotation skipped: cutoff ${WORK_LOG_ROTATE_OLDER_THAN_DAYS}d is not at least ${WORK_LOG_ROTATE_MARGIN_DAYS}d older than the ${WORK_LOG_LOOKBACK_DAYS}d lookback (would re-append archived entries)." >&2
+    return 1
+  fi
+
+  # Dry run first: it writes nothing, so a tick with nothing eligible cannot
+  # produce a diff. A verb failure (or an installed daemon without `work-docs`)
+  # skips rotation; it never blocks the rest of Document Maintenance.
+  report="$(loom-daemon work-docs archive --root "$DOCS_WT" \
+    --older-than-days "$WORK_LOG_ROTATE_OLDER_THAN_DAYS" --dry-run 2>&1)" || {
+    echo "WARNING: WORK_LOG rotation skipped: dry run failed: $report" >&2
+    return 1
+  }
+  moved="$(printf '%s\n' "$report" | sed -n 's/^dry run: \([0-9][0-9]*\) sections.*/\1/p')"
+  [ "${moved:-0}" -gt 0 ] || return 1
+
+  # Trigger: rotate only when this tick already writes WORK_LOG, or when at
+  # least one whole month is past the floor. The dry run counts sections, not
+  # months, so approximate "a whole month" as >= 28 sections (one per day).
+  if [ "$wrote" != "1" ] && [ "$moved" -lt 28 ]; then
+    echo "WORK_LOG rotation deferred: $moved eligible section(s), and this tick writes no WORK_LOG entries."
+    return 1
+  fi
+
+  loom-daemon work-docs archive --root "$DOCS_WT" \
+    --older-than-days "$WORK_LOG_ROTATE_OLDER_THAN_DAYS" || {
+    echo "WARNING: WORK_LOG rotation failed; discarding its partial changes." >&2
+    git -C "$DOCS_WT" checkout -- WORK_LOG.md 2>/dev/null
+    return 1
+  }
+
+  # Conservation check before anything can be staged. Non-zero aborts rotation.
+  if ! loom-daemon work-docs check --root "$DOCS_WT"; then
+    echo "WARNING: WORK_LOG conservation check failed after rotation; discarding it." >&2
+    git -C "$DOCS_WT" checkout -- WORK_LOG.md 2>/dev/null
+    git -C "$DOCS_WT" clean -fdq -- work_log 2>/dev/null
+    return 1
+  fi
+  return 0
+}
+```
+
+Call it after `update_work_log()`, passing `1` when that function returned 0
+and `0` otherwise. Its result does not change whether the tick proceeds: the
+debounce (#6133), the `$GUIDE_DOCS_PR_EXCLUDE` self-loop filter and the
+docs-guide lock are untouched, and `create_docs_pr()` still opens no PR when
+nothing differs from `origin`.
+
+**Interrupted ticks need no special handling.** Rotation is repeatable (a second
+run is a byte-identical no-op) and `docs-worktree.sh` resets `$DOCS_WT` to a
+clean `origin/<default-branch>` checkout every tick (`reset --hard`, `clean -fd`).
+A tick that rotated but never opened its PR therefore leaves nothing behind;
+the next tick recomputes the same rotation from the committed documents. No
+gitignored sidecar holds any state.
+
 ### Step 3: Update WORK_PLAN.md
 
 Regenerate the roadmap from current GitHub label state. Only rewrite if labels
@@ -1699,6 +1765,8 @@ The generated region of `WORK_PLAN.md` is delimited by
 `<!-- guide:plan-body:start -->` / `<!-- guide:plan-body:end -->`. **Everything
 between those markers is machine-generated and is overwritten wholesale; nothing
 else in the file is touched.**
+
+The generated region is never archived (`defaults/docs/work-docs-archive.md`, "WORK_PLAN").
 
 **#5930, DO NOT put a hand-written narrative section outside the markers.**
 The "Operator Attention: Merge-Risk-Hold Pileup" call-out used to live above
@@ -2161,6 +2229,15 @@ create_docs_pr() {
   # is what `git -C "$DOCS_WT"` makes them).
   git -C "$DOCS_WT" add WORK_LOG.md WORK_PLAN.md README.md
 
+  # Archive files (#12634): staged by EXACT pattern, one file at a time -- never
+  # `git add -A` or the `work_log/` directory, so an unrelated file placed there
+  # is not swept into the docs PR.
+  local archive_file
+  for archive_file in "$DOCS_WT"/$WORK_LOG_ARCHIVE_GLOB; do
+    [ -f "$archive_file" ] || continue
+    git -C "$DOCS_WT" add -- "work_log/${archive_file##*/}"
+  done
+
   # Snapshot which of the three files actually changed, for the telemetry
   # record below (issue #6136) — captured now, before the `diff --cached`
   # check below consumes the staged diff.
@@ -2319,6 +2396,8 @@ Document Maintenance Phase
   │       this phase may write (guards deny the main checkout)
   ├─ Update "$DOCS_WT/WORK_LOG.md" (append new entries; this phase's OWN
   │    docs PRs are filtered out — see the #5454 note in Step 2)
+  ├─ Rotate "$DOCS_WT/WORK_LOG.md" into work_log/ archives (#12634; only when
+  │    this tick writes WORK_LOG or a whole month is eligible; guard + check)
   ├─ Update "$DOCS_WT/WORK_PLAN.md" (regenerate if labels changed)
   ├─ Check "$DOCS_WT/README.md" staleness (only if architecture changed)
   ├─ If any changes:

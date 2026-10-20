@@ -50,6 +50,58 @@
 #       run — see the fleet-marker guard below).
 #       With --yes: stop them; add --delete to terminate (disk goes with it).
 #       --force overrides the fleet-marker guard described below, same as `up`.
+#       With REPO_REMOTE_MARKET=spot, `down --yes` without --delete is refused
+#       (exit 2) before any cloud call — see "AWS market" below.
+#
+#   repo-remote prune|--prune [--yes] [--json] [aws|gcp]   Garbage-collect stale
+#       SSH aliases (#628). Lists the `Host repo-remote-*` blocks in
+#       REPO_REMOTE_SSH_CONFIG (default ~/.ssh/config) whose box no longer
+#       exists at the configured provider/region -- the block's HostName matches
+#       no live instance's public IP or id, and its alias is not
+#       repo-remote-<tag> for a live instance's repo-remote tag -- and, with
+#       --yes, removes them plus their known_hosts entries (`ssh-keygen -R
+#       <HostName>`). Dry run by default. Fails CLOSED: if the provider lookup
+#       errors or returns anything unparseable (exit 4), nothing is removed. A
+#       block it cannot judge (multi-pattern Host line, no HostName) and every
+#       block that is not `Host repo-remote-*` are never touched. The removal
+#       uses the same lock, same-directory temp file, `ssh -G` parse check and
+#       atomic mv as the alias writer. It judges only the configured
+#       provider/region, so run the dry run first when you use several.
+#       `down --yes --delete` removes the terminated box's alias and
+#       known_hosts entry itself; a stop-only `down --yes` keeps both.
+#
+# Naming (#628): <name> is the directory name of the PRIMARY checkout (the
+# parent of `git rev-parse --git-common-dir`), so a main checkout and every
+# linked worktree of one repo resolve the same alias, repo-remote=<name> tag
+# and SSH ingress marker. Outside a `.git`-dir checkout (bare repo, no git) it
+# falls back to the basename of the git toplevel / cwd. A box tagged with a
+# worktree directory name by an earlier version is no longer found by tag;
+# pin it with REPO_REMOTE_INSTANCE_ID or re-tag it repo-remote=<name>.
+#
+#   repo-remote attach|--attach [--container|--host] [--command <cmd>] [aws|gcp]
+#       Open a session on THIS repo's existing instance, carrying a freshly
+#       resolved GitHub credential (repo#565). It is the credential-aware
+#       connect AND reconnect entry point: every attach resolves the
+#       credential again, so re-running it after a short-lived token expires
+#       gives the new session a new token while reusing the same instance and
+#       container (nothing is provisioned, started, or stopped; no cloud
+#       mutation at all). Order, each step gating the next:
+#         1. validate config (transport, gateway, repo name) — no network;
+#         2. open ONE SSH master connection over repo-remote-<name> and verify
+#            the host identity over it exactly like `verify` (exit 6 on a
+#            mismatch or an unverifiable host — fails closed);
+#         3. only then resolve the credential (run GitHub's device flow for
+#            a per-user token, or REPO_REMOTE_GH_TOKEN_CMD, or — break-glass
+#            only — read the static REPO_REMOTE_GH_TOKEN) — exit 7 if it
+#            fails, with NO fallback to any other source;
+#         4. open the session over that same verified master connection, with
+#            the token carried as an SSH environment value (never argv), and
+#            land in the dev container (`docker exec`) when it is running,
+#            else in ~/<repo> on the host. --container / --host force one;
+#            --command runs <cmd> non-interactively instead of a login shell.
+#       Processes already running on the VM keep the environment they started
+#       with; only the new attachment sees the replacement token.
+#       See "GitHub credentials on the VM" below.
 #
 # Config: two layers, shared first then repo (repo overrides), matching the
 # skill exactly:
@@ -78,6 +130,15 @@
 # read/write still happens (warn-then-proceed); the fix is to move the per-repo
 # settings out of the tree and set REPO_REMOTE_ENV_FILE. The primary checkout
 # is unaffected (no warning).
+#
+# Box name override (#664): the box identity (instance tag repo-remote=<name>,
+# SSH alias repo-remote-<name>, security-group names, SSH-ingress marker) is
+# normally the primary checkout's directory name. Set REPO_REMOTE_NAME=<name>
+# (environment, shared remote.env, or the per-repo env file) to target a
+# different box from the same checkout, e.g. a separate big-RAM "fit" box next
+# to the build/test box, each with its own remote-run lock. Allowed characters:
+# [A-Za-z0-9._-]; anything else exits 2 before any cloud call. Empty/unset
+# leaves the derived name unchanged.
 #
 # Cost gate (repo#52 — the highest-cost-of-being-wrong element): `up` (with or
 # without --yes) REQUIRES the provider, that provider's credentials, and
@@ -138,21 +199,178 @@
 # session expected to survive a stop/start: it makes the expectation explicit
 # rather than re-derived from a tag that a fleet host can also be wearing.
 #
+# AWS root volume (repo#559): the root EBS volume is launched EXPLICITLY typed,
+# never left to the AMI default (gp2, whose 3 IOPS/GiB baseline — 150 IOPS at
+# 50 GiB — leaves sustained builds/tests stalled in disk wait once its burst
+# credits drain). Settings, all AWS-only, resolved through the same two config
+# layers as everything else:
+#   REPO_REMOTE_DISK_GB            root volume size in GiB (default 50)
+#   REPO_REMOTE_VOLUME_TYPE        gp3 (default) | gp2
+#   REPO_REMOTE_VOLUME_IOPS        gp3 only; default 3000 (the gp3 baseline)
+#   REPO_REMOTE_VOLUME_THROUGHPUT  gp3 only, MiB/s; default 125 (the baseline)
+# They are validated BEFORE any cloud call (exit 2): an unsupported type, a
+# non-positive-integer value, IOPS/throughput set alongside gp2, or a gp3 value
+# outside AWS's documented limits (IOPS 3000-80000 and <= 500 per GiB;
+# throughput 125-2000 MiB/s and <= 0.25 MiB/s per provisioned IOPS) is refused.
+# On REUSE, `up` inspects the instance's actual root volume and, if it is gp2,
+# prints a stderr advisory with the copyable `aws ec2 modify-volume` command and
+# the `ec2:ModifyVolume` permission it needs. It never runs that command, and a
+# failed inspection is a notice, never a failed `up`.
+#
+# AWS transport (repo#564): how `up`/`verify` reach the box, AWS-only, resolved
+# through the same two config layers:
+#   REPO_REMOTE_TRANSPORT          ssh (default) | ssm
+#   REPO_REMOTE_INSTANCE_PROFILE   optional IAM instance profile NAME, passed to
+#                                  run-instances as --iam-instance-profile
+#                                  Name=<name> on a fresh launch. A profile alone
+#                                  never changes the transport.
+# ssh (default) is the behavior described above: a public IP, a per-caller /32
+# tcp/22 rule, and an alias whose HostName is that IP. ssm reaches the box over
+# AWS Systems Manager Session Manager instead: the alias's HostName is the
+# instance ID and a ProxyCommand runs `aws ssm start-session --region <region>
+# --target %h --document-name AWS-StartSSHSession --parameters portNumber=22`.
+# SSH user/key authentication is unchanged; readiness, the host-identity probe,
+# interactive ssh, and rsync all go through that alias. Under ssm:
+#   * a FRESH launch requires REPO_REMOTE_INSTANCE_PROFILE (exit 2 before any
+#     mutation otherwise) and gets a tool-owned security group tagged
+#     repo-remote-ssm=<name> with NO inbound rule. An explicit
+#     REPO_REMOTE_SECURITY_GROUP, or a previously created SSM group, that has
+#     any inbound rule is refused (exit 2) — its rules are never deleted.
+#   * no ingress is authorized or revoked, no current-IP lookup is made, and no
+#     public IP is polled — on create OR reuse. A reused instance's existing
+#     exposure is reported, never "fixed", and a reused instance without an
+#     instance profile gets a warning (a role is never attached automatically).
+#   * the local `session-manager-plugin` must be installed (exit 2 before any
+#     cloud call otherwise; REPO_REMOTE_SSM_PLUGIN overrides the binary name).
+#   * the readiness probe retries the agent-registration delay
+#     (TargetNotConnected) within REPO_REMOTE_SSH_READY_TIMEOUT, fails at once on
+#     an access denial or a missing plugin, and never falls back to direct SSH.
+# Invalid values (an unknown transport, ssm or a profile with GCP, a malformed
+# profile name, a region that is not a plain AWS region code) exit 2 before any
+# cloud call. The `up` JSON gains additive "transport", "connect_target" (the
+# alias HostName: IP or instance ID) and "instance_profile" fields; under ssm
+# "public_ip" is "" because none is looked up.
+#
+# AWS market (repo#616): which EC2 purchasing option a FRESH launch uses,
+# AWS-only, resolved through the same two config layers:
+#   REPO_REMOTE_MARKET   on-demand (default) | spot — exactly those values.
+# on-demand (or unset) changes nothing: no market flags are passed. spot adds,
+# to the SAME single run-instances call, the two argv elements
+#   --instance-market-options MarketType=spot,SpotOptions={SpotInstanceType=one-time,InstanceInterruptionBehavior=terminate}
+#   --instance-initiated-shutdown-behavior terminate
+# so a Spot interruption AND the idle guard's `shutdown -h` both TERMINATE the
+# box (root volume included); it is never stopped and never restarted. Hence,
+# with spot configured:
+#   * `up` never starts a stopped instance (pinned or tag-discovered) — exit 2
+#     with guidance, before start-instances is called. A running instance is
+#     still reused; a pinned instance that is already terminated (or
+#     shutting-down) is treated as gone and a fresh one is launched.
+#   * `down --yes` without --delete is refused (exit 2) before any cloud call;
+#     `down --yes --delete` terminates as usual (fleet-marker guard included).
+#   * a capacity or price rejection is a hard failure (exit 4). There is no
+#     retry, no fallback to on-demand, and no other instance type: run-instances
+#     is still called EXACTLY ONCE.
+# Any other value, or spot with GCP, exits 2 before any cloud call. The plan,
+# `up` and `down` JSON gain an additive "market" field. The estimated cost
+# stays the on-demand rate (also the default Spot maximum price), so for Spot
+# it is an upper bound; Spot price and capacity are never guaranteed.
+#
+# GitHub credentials on the VM (repo#565): `attach` is the only subcommand
+# that touches a dev-session credential; `up` (dry run or --yes), `status`,
+# `verify` and `down` never run the token command or send a token anywhere.
+# attach REQUIRES a credential (repo#627): with no source configured it exits
+# 7 instead of opening an unauthenticated session.
+# Settings, resolved through the same two config layers (repo wins);
+# precedence device > command > static:
+#   REPO_REMOTE_GH_APP_CLIENT_ID  REQUIRED PATH. The public client ID of a
+#                              GitHub App with Device Flow enabled. Each attach
+#                              runs GitHub's OAuth device flow LOCALLY: it
+#                              prints a verification URL and a one-time code on
+#                              stderr, waits (honoring interval / slow_down, at
+#                              most expires_in, capped at 15 min) while the
+#                              person running attach approves it in a browser,
+#                              and delivers the resulting GitHub App USER access
+#                              token (that person's own account, limited to the
+#                              App's permissions, expiring after about 8 hours).
+#                              No client secret and no refresh token; re-run
+#                              attach to refresh. The device code reaches curl
+#                              on stdin only, never argv. Declined, expired,
+#                              timed out, unreachable or malformed: exit 7.
+#   REPO_REMOTE_GH_TOKEN_CMD   A command run LOCALLY by
+#                              `bash -c` (stdin </dev/null) whose stdout is the
+#                              token, e.g. a GitHub App installation-token
+#                              minter. Used when no client ID is set; when
+#                              non-empty it takes precedence over
+#                              REPO_REMOTE_GH_TOKEN. It runs with this
+#                              process's environment and the operator's own
+#                              trust (the config files are already sourced as
+#                              shell); it may use local credentials, which are
+#                              never transmitted — only its stdout is. Fails
+#                              closed (exit 7, nothing sent, no static-token
+#                              fallback) on a non-zero exit, empty output,
+#                              more than one line, or any whitespace/control
+#                              character in the token. Its stdout and stderr
+#                              are never displayed.
+#   REPO_REMOTE_GH_TOKEN       a static token (legacy). REFUSED (exit 2, before
+#                              connecting) unless REPO_REMOTE_ALLOW_STATIC_GH_TOKEN=1
+#                              is also set — whatever else is configured, so a
+#                              shared remote.env cannot quietly keep a shared
+#                              PAT. With the opt-out it is delivered the same
+#                              way, with a prominent warning on every attach
+#                              that the session runs as one shared, long-lived
+#                              identity. Never written anywhere.
+#   REPO_REMOTE_ALLOW_STATIC_GH_TOKEN  `1` = break-glass opt-out for the above.
+#   REPO_REMOTE_GH_API_HOST    optional API gateway hostname (bare DNS name, no
+#                              scheme/port/path; github.com and *.github.com
+#                              refused). The gateway must serve the GitHub
+#                              Enterprise Server API layout over HTTPS with a
+#                              certificate the VM trusts (gh offers no
+#                              verification bypass). The session then gets
+#                              GH_HOST=<gw>, GH_REPO=<gw>/<owner>/<repo> (from
+#                              this checkout's github.com origin) and the token
+#                              as GH_ENTERPRISE_TOKEN, with GH_TOKEN emptied —
+#                              gh would otherwise talk to github.com directly.
+#                              git keeps its github.com remote and authenticates
+#                              there with the same token. Invalid values exit 2
+#                              before anything connects.
+# Delivery: the token travels as the SSH environment value
+# LC_REPO_REMOTE_GH_TOKEN (SendEnv; Ubuntu's stock sshd has `AcceptEnv LANG
+# LC_*`) on a session multiplexed over the verified master connection. The
+# remote bootstrap unsets that variable and exports the token only into the
+# process it starts: `docker exec -e GH_TOKEN` (name only — exec environment
+# is not part of the container's persisted configuration) or the host login
+# shell. git is pointed at it through GIT_CONFIG_* environment entries that
+# reset any configured github.com credential helper (so no `store` helper can
+# persist it) and add one that reads the variable by NAME. Nothing is written
+# to remote.env, the per-repo config, the SSH config, or the VM's disk; no
+# `gh auth login`, no stored git credential.
+# Before the session starts, the VM runs `gh api user --jq .login` where the
+# session will run and prints "acting as GitHub user <login>" (repo#627); a
+# failed lookup is a warning, never a refusal.
+#
 # Exit codes:
 #   0  success (including a dry-run plan)
 #   2  missing / invalid required config (the cost gate; loud failure) — also
+#      the REPO_REMOTE_MARKET=spot lifecycle refusals (restarting a stopped
+#      instance, `down --yes` without --delete; repo#616) — also
 #      the SSH-ingress fail-closed refusals: current-IP detection failed and no
 #      REPO_REMOTE_SSH_CIDR was pinned, or the pinned CIDR is wider than
 #      REPO_REMOTE_SSH_MIN_PREFIX without REPO_REMOTE_ALLOW_WORLD_SSH=1
 #      (repo#487)
 #   3  provider authentication failed
-#   4  cloud operation failed
+#   4  cloud operation failed (for `prune`: the provider lookup failed and
+#      nothing was removed)
 #   5  refused to act (reuse via `up`, stop/terminate via `down`) on a
 #      fleet-marked instance (pass --force to override)
 #   6  host-identity verification failed — the host reachable at the SSH alias
 #      is not the instance this repo expects, or its identity could not be
 #      established (NOT overridable with --force)
+#   7  `attach` could not resolve the dev-session credential: none is
+#      configured, the device flow was declined, expired, timed out or failed,
+#      or REPO_REMOTE_GH_TOKEN_CMD failed or printed a malformed token. Nothing
+#      was sent to the VM and no other source was used instead.
 #   64 usage error
+# (`attach` otherwise exits with the remote session's own status.)
 #
 # Testability hooks (honored so the suite can exercise the full contract against
 # mocked cloud CLIs without touching real infrastructure or a real ~/.ssh):
@@ -170,6 +388,12 @@
 #                                      see "SSH alias lock" below, repo#213)
 #   REPO_REMOTE_SSH_LOCK_POLL_INTERVAL seconds between lock-acquisition
 #                                      retries (default 1)
+#   REPO_REMOTE_CALLER                 stable id that tags this host/operator's
+#                                      own tcp/22 rules (Description marker), so
+#                                      a second caller's `up` on a shared box
+#                                      never revokes this one's rule and locks
+#                                      it out (default: short hostname;
+#                                      rjwalters/loom#11616)
 #   REPO_REMOTE_SSH_READY_TIMEOUT      total seconds the end-of-run SSH
 #                                      reachability probe waits for a
 #                                      still-booting guest before failing
@@ -190,6 +414,13 @@
 #                                      /etc/repo-remote-instance-id; repo#458)
 #   REPO_REMOTE_VERIFY_SSH_TIMEOUT     ConnectTimeout for the single
 #                                      host-identity probe session (default 10)
+#   REPO_REMOTE_SSM_PLUGIN             name/path of the Session Manager plugin
+#                                      the ssm-transport preflight looks for
+#                                      (default session-manager-plugin)
+#   REPO_REMOTE_ATTACH_CTL_BASE        parent directory for `attach`'s private
+#                                      (mode 700) SSH control-socket directory
+#                                      (default /tmp — short, because a unix
+#                                      socket path is limited to ~104 bytes)
 #
 set -uo pipefail
 
@@ -201,7 +432,10 @@ JSON_OUT=false   # --json
 YES=false        # --yes
 FORCE=false      # --force (override the fleet-marker guard)
 DELETE=false     # --down --delete
-ACTION=""        # up | down | status
+ATTACH_MODE=auto       # attach: auto | container | host (repo#565)
+ATTACH_COMMAND=""      # attach --command <cmd>
+ATTACH_HAS_COMMAND=false
+ACTION=""        # up | down | status | verify | attach | prune
 PROVIDER_ARG=""  # aws | gcp (positional override)
 
 # ── JSON emission (no jq dependency for output; values are controlled) ──────
@@ -264,6 +498,23 @@ is_linked_worktree() {
   [[ "$gitdir" != "$commondir" ]]
 }
 
+# primary_checkout_name -- the directory name of the PRIMARY checkout (#628):
+# the parent of `git rev-parse --git-common-dir`, resolved physically. The
+# primary checkout and every linked worktree share one common dir, so they all
+# get the same name -- and therefore the same repo-remote-<name> alias,
+# repo-remote=<name> instance tag and SSH ingress marker. Prints nothing and
+# returns 1 when the common dir is not a directory literally named `.git`
+# (bare repo, submodule, no git), so the caller falls back to the
+# --show-toplevel basename.
+primary_checkout_name() {
+  local commondir
+  commondir="$(git rev-parse --git-common-dir 2>/dev/null)" || return 1
+  [[ -n "$commondir" ]] || return 1
+  commondir="$(cd "$commondir" 2>/dev/null && pwd -P)" || return 1
+  [[ "$(basename "$commondir")" == .git ]] || return 1
+  basename "$(dirname "$commondir")"
+}
+
 # warn_worktree_env <read|write> -- repo#538: loud warning when an in-tree
 # <git-root>/.env is about to be read or written from inside a linked worktree.
 # Callers gate on IN_LINKED_WORKTREE + !REPO_ENV_OVERRIDDEN; this only prints.
@@ -292,6 +543,11 @@ resolve_paths() {
 }
 
 load_config() {
+  # Config files hold secrets (cloud keys, REPO_REMOTE_GH_TOKEN): sourcing them
+  # under `bash -x` would print every assignment, so tracing is suspended here
+  # (repo#565) and restored afterwards.
+  local _x=""
+  [[ $- == *x* ]] && { _x=1; set +x; }
   set -a
   # shellcheck disable=SC1090
   [[ -f "$SHARED_ENV" ]] && . "$SHARED_ENV"
@@ -308,6 +564,8 @@ load_config() {
   # shellcheck disable=SC1090
   [[ -n "$REPO_ENV" && -f "$REPO_ENV" ]] && . "$REPO_ENV"
   set +a
+  [[ -n "$_x" ]] && set -x
+  return 0
 }
 
 # ── effective settings ──────────────────────────────────────────────────────
@@ -316,6 +574,9 @@ NAME=""
 INSTANCE_TYPE=""
 INSTANCE_ID=""
 DISK_GB=""
+VOLUME_TYPE=""       # AWS only: root EBS volume type, gp3 (default) | gp2 (repo#559)
+VOLUME_IOPS=""       # AWS only, gp3 only: provisioned IOPS (default 3000)
+VOLUME_THROUGHPUT="" # AWS only, gp3 only: provisioned throughput, MiB/s (default 125)
 IMAGE=""
 GPU_ACCEL=""       # GCP accelerator string, e.g. nvidia-l4:1
 IDLE_MIN=""
@@ -325,6 +586,9 @@ FLEET_TAG_VALUE="" # required value for that key ("" = any non-empty value)
 SSH_CIDR=""        # AWS only: pinned SSH-ingress CIDR override (see aws_resolve_ssh_cidr)
 SSH_MIN_PREFIX=""  # AWS only: narrowest IPv4 prefix length accepted for SSH ingress (default 32)
 ALLOW_WORLD_SSH="" # AWS only: "1" opts in to an SSH-ingress CIDR wider than SSH_MIN_PREFIX
+TRANSPORT=""        # AWS only: ssh (default) | ssm (repo#564)
+INSTANCE_PROFILE="" # AWS only: IAM instance profile name for a fresh launch
+MARKET=""           # AWS only: on-demand (default) | spot (repo#616)
 REGION=""
 COST_HOURLY=""
 COST_APPROX=false
@@ -456,7 +720,20 @@ resolve_settings() {
   # lower-case the provider
   PROVIDER="$(printf '%s' "$PROVIDER" | tr '[:upper:]' '[:lower:]')"
 
-  NAME="$(basename "${GIT_ROOT:-$PWD}")"
+  # REPO_REMOTE_NAME (#664) overrides the derived box name; empty/unset keeps
+  # the primary-checkout / basename behavior. Validated before any cloud call.
+  # REPO_DIR is always the checkout's directory name (where the repo lives on
+  # the VM, ~/<REPO_DIR>); only NAME, the box identity, is overridable.
+  REPO_DIR="$(primary_checkout_name || true)"
+  [[ -n "$REPO_DIR" ]] || REPO_DIR="$(basename "${GIT_ROOT:-$PWD}")"
+  if [[ -n "${REPO_REMOTE_NAME:-}" ]]; then
+    [[ "$REPO_REMOTE_NAME" =~ ^[A-Za-z0-9._-]+$ ]] \
+      || die 2 "invalid REPO_REMOTE_NAME '${REPO_REMOTE_NAME}': use only letters, digits, '.', '_' and '-'"
+    NAME="$REPO_REMOTE_NAME"
+  else
+    NAME="$REPO_DIR"
+  fi
+  CALLER="$(repo_remote_caller)"
 
   INSTANCE_TYPE="${REPO_REMOTE_INSTANCE_TYPE:-}"
   INSTANCE_ID="${REPO_REMOTE_INSTANCE_ID:-}"
@@ -465,6 +742,13 @@ resolve_settings() {
 
   # Non-cost-relevant fields DO fall back to defaults (matches the prose command).
   DISK_GB="${REPO_REMOTE_DISK_GB:-50}"
+  # AWS root-volume type and performance (repo#559). The type is lower-cased
+  # and defaulted here; IOPS/throughput stay exactly as configured (possibly
+  # empty) so validate_aws_volume_config() can tell "explicitly set alongside
+  # gp2" apart from "unset", and it fills in the gp3 defaults itself.
+  VOLUME_TYPE="$(printf '%s' "${REPO_REMOTE_VOLUME_TYPE:-gp3}" | tr '[:upper:]' '[:lower:]')"
+  VOLUME_IOPS="${REPO_REMOTE_VOLUME_IOPS:-}"
+  VOLUME_THROUGHPUT="${REPO_REMOTE_VOLUME_THROUGHPUT:-}"
   IDLE_MIN="${REPO_REMOTE_IDLE_SHUTDOWN_MIN:-120}"
   # Idle-exit marker contract (see commands/repo/remote.md). A daemon-managed
   # host (e.g. one running loom-daemon) may write this file on clean idle-exit;
@@ -490,6 +774,20 @@ resolve_settings() {
   # REPO_REMOTE_ALLOW_WORLD_SSH=1.
   SSH_MIN_PREFIX="${REPO_REMOTE_SSH_MIN_PREFIX:-32}"
   ALLOW_WORLD_SSH="${REPO_REMOTE_ALLOW_WORLD_SSH:-0}"
+
+  # Transport + instance profile (repo#564). Validated, before any cloud call,
+  # by validate_transport_config().
+  TRANSPORT="$(printf '%s' "${REPO_REMOTE_TRANSPORT:-ssh}" | tr '[:upper:]' '[:lower:]')"
+  INSTANCE_PROFILE="${REPO_REMOTE_INSTANCE_PROFILE:-}"
+
+  # Purchasing option (repo#616). Taken verbatim — validate_market_config()
+  # accepts exactly "on-demand" or "spot" — so a typo can never be normalized
+  # into a billable mode. Unset or empty means the historical default.
+  MARKET="${REPO_REMOTE_MARKET:-on-demand}"
+
+  # Dev-session GitHub credential (repo#565). Only the SOURCE is decided here;
+  # nothing is run or read beyond the config values themselves.
+  resolve_gh_credential_config
 
   case "$PROVIDER" in
     aws) REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}" ;;
@@ -537,6 +835,189 @@ require_cost_config() {
     log "set them in ${SHARED_ENV} (shared) or ${REPO_ENV:-<git-root>/.env or REPO_REMOTE_ENV_FILE} (per-repo), or run /repo:remote --configure."
     exit 2
   fi
+}
+
+# ── AWS root-volume configuration (repo#559) ────────────────────────────────
+# Limits below are AWS's documented EBS values (Amazon EBS User Guide,
+# "General Purpose SSD volumes", checked 2026-10-05): gp3 = 1 GiB-64 TiB,
+# 3,000 IOPS / 125 MiB/s baseline included, provisionable up to 80,000 IOPS at
+# <= 500 IOPS per GiB and up to 2,000 MiB/s at <= 0.25 MiB/s per provisioned
+# IOPS; gp2 = 1 GiB-16 TiB with performance derived from size (3 IOPS/GiB), so
+# it takes no IOPS/throughput parameters at all. AWS has raised these ceilings
+# before; if they move again, update the constants rather than the logic.
+GP3_MIN_IOPS=3000
+GP3_MAX_IOPS=80000
+GP3_MAX_IOPS_PER_GIB=500
+GP3_MIN_THROUGHPUT=125
+GP3_MAX_THROUGHPUT=2000
+GP3_MAX_GIB=65536
+GP2_MAX_GIB=16384
+
+is_positive_int() {  # <value> -> 0 for a plain positive decimal integer
+  # Capped at 9 digits so the arithmetic below can never overflow.
+  [[ "$1" =~ ^[1-9][0-9]{0,8}$ ]]
+}
+
+# Validate (and default) the AWS root-volume settings. Runs for every AWS `up`
+# — dry run included — BEFORE any cloud call, so a bad value fails loudly
+# (exit 2) without spending or mutating anything. GCP never reaches this.
+validate_aws_volume_config() {
+  local -a bad=()
+  is_positive_int "$DISK_GB" \
+    || bad+=("REPO_REMOTE_DISK_GB='${DISK_GB}' must be a positive whole number of GiB")
+
+  case "$VOLUME_TYPE" in
+    gp3)
+      VOLUME_IOPS="${VOLUME_IOPS:-$GP3_MIN_IOPS}"
+      VOLUME_THROUGHPUT="${VOLUME_THROUGHPUT:-$GP3_MIN_THROUGHPUT}"
+      local iops_ok=false tp_ok=false
+      if ! is_positive_int "$VOLUME_IOPS"; then
+        bad+=("REPO_REMOTE_VOLUME_IOPS='${VOLUME_IOPS}' must be a positive whole number")
+      elif (( VOLUME_IOPS < GP3_MIN_IOPS || VOLUME_IOPS > GP3_MAX_IOPS )); then
+        bad+=("REPO_REMOTE_VOLUME_IOPS=${VOLUME_IOPS} is outside the gp3 range ${GP3_MIN_IOPS}-${GP3_MAX_IOPS}")
+      else
+        iops_ok=true
+      fi
+      if ! is_positive_int "$VOLUME_THROUGHPUT"; then
+        bad+=("REPO_REMOTE_VOLUME_THROUGHPUT='${VOLUME_THROUGHPUT}' must be a positive whole number of MiB/s")
+      elif (( VOLUME_THROUGHPUT < GP3_MIN_THROUGHPUT || VOLUME_THROUGHPUT > GP3_MAX_THROUGHPUT )); then
+        bad+=("REPO_REMOTE_VOLUME_THROUGHPUT=${VOLUME_THROUGHPUT} is outside the gp3 range ${GP3_MIN_THROUGHPUT}-${GP3_MAX_THROUGHPUT} MiB/s")
+      else
+        tp_ok=true
+      fi
+      if is_positive_int "$DISK_GB"; then
+        (( DISK_GB > GP3_MAX_GIB )) \
+          && bad+=("REPO_REMOTE_DISK_GB=${DISK_GB} exceeds the gp3 maximum of ${GP3_MAX_GIB} GiB")
+        # The 3,000 IOPS baseline is included at every size; only IOPS
+        # provisioned ABOVE it are bound by the per-GiB ratio.
+        if [[ "$iops_ok" == true ]] && (( VOLUME_IOPS > GP3_MIN_IOPS && VOLUME_IOPS > DISK_GB * GP3_MAX_IOPS_PER_GIB )); then
+          bad+=("REPO_REMOTE_VOLUME_IOPS=${VOLUME_IOPS} exceeds ${GP3_MAX_IOPS_PER_GIB} IOPS per GiB for a ${DISK_GB} GiB gp3 volume (max $(( DISK_GB * GP3_MAX_IOPS_PER_GIB ))); raise REPO_REMOTE_DISK_GB or lower the IOPS")
+        fi
+      fi
+      # 0.25 MiB/s per provisioned IOPS  <=>  throughput * 4 <= IOPS.
+      if [[ "$iops_ok" == true && "$tp_ok" == true ]] && (( VOLUME_THROUGHPUT * 4 > VOLUME_IOPS )); then
+        bad+=("REPO_REMOTE_VOLUME_THROUGHPUT=${VOLUME_THROUGHPUT} exceeds 0.25 MiB/s per provisioned IOPS (REPO_REMOTE_VOLUME_IOPS=${VOLUME_IOPS} allows at most $(( VOLUME_IOPS / 4 )) MiB/s)")
+      fi
+      ;;
+    gp2)
+      # gp2 performance is a function of size; AWS rejects Iops/Throughput on
+      # it. Refuse rather than silently drop a setting the operator asked for.
+      [[ -z "$VOLUME_IOPS" ]] \
+        || bad+=("REPO_REMOTE_VOLUME_IOPS is set but REPO_REMOTE_VOLUME_TYPE=gp2 does not accept provisioned IOPS (unset it, or use gp3)")
+      [[ -z "$VOLUME_THROUGHPUT" ]] \
+        || bad+=("REPO_REMOTE_VOLUME_THROUGHPUT is set but REPO_REMOTE_VOLUME_TYPE=gp2 does not accept provisioned throughput (unset it, or use gp3)")
+      if is_positive_int "$DISK_GB" && (( DISK_GB > GP2_MAX_GIB )); then
+        bad+=("REPO_REMOTE_DISK_GB=${DISK_GB} exceeds the gp2 maximum of ${GP2_MAX_GIB} GiB")
+      fi
+      ;;
+    *)
+      bad+=("REPO_REMOTE_VOLUME_TYPE='${VOLUME_TYPE}' is not supported (expected gp3 or gp2)")
+      ;;
+  esac
+
+  if [[ ${#bad[@]} -gt 0 ]]; then
+    local b
+    log "cannot proceed — invalid AWS root-volume config (nothing was created or changed):"
+    for b in "${bad[@]}"; do log "  - $b"; done
+    log "see 'AWS root volume' in commands/repo/remote.md for supported values."
+    exit 2
+  fi
+}
+
+# The --block-device-mappings value for the root volume. Type-aware: gp3 gets
+# its explicit IOPS/throughput, gp2 gets neither (AWS rejects them there).
+aws_root_block_device_mapping() {
+  local ebs="VolumeSize=${DISK_GB},VolumeType=${VOLUME_TYPE}"
+  if [[ "$VOLUME_TYPE" == gp3 ]]; then
+    ebs+=",Iops=${VOLUME_IOPS},Throughput=${VOLUME_THROUGHPUT}"
+  fi
+  printf 'DeviceName=/dev/sda1,Ebs={%s}' "$ebs"
+}
+
+# ── transport configuration (repo#564) ──────────────────────────────────────
+# Every value that ends up inside a generated SSH config line (and, for ssm,
+# inside a ProxyCommand that ssh hands to a shell) is matched against a strict
+# allow-list here, so a config value can never add an SSH directive or a shell
+# command. Runs for `up` (dry run included) and `verify` BEFORE any cloud call.
+is_aws_region() { [[ "$1" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]{1,2}$ ]]; }
+# IAM instance-profile names: 1-128 of [A-Za-z0-9+=,.@_-] (IAM naming rules).
+is_instance_profile_name() { [[ "$1" =~ ^[A-Za-z0-9+=,.@_-]{1,128}$ ]]; }
+# EC2 instance ids are i-<hex>; letters beyond hex are tolerated (still no
+# shell or ssh-config metacharacters) so fixtures can use readable ids.
+is_instance_id() { [[ "$1" =~ ^i-[A-Za-z0-9]{1,32}$ ]]; }
+
+validate_transport_config() {
+  local -a bad=()
+  case "$TRANSPORT" in
+    ssh|ssm) : ;;
+    *) bad+=("REPO_REMOTE_TRANSPORT='${TRANSPORT}' is not supported (expected ssh or ssm)") ;;
+  esac
+  if [[ "$PROVIDER" != aws ]]; then
+    [[ "$TRANSPORT" == ssm ]] \
+      && bad+=("REPO_REMOTE_TRANSPORT=ssm is AWS-only (provider is '${PROVIDER}'); GCP uses OS Login / IAP instead")
+    [[ -n "$INSTANCE_PROFILE" ]] \
+      && bad+=("REPO_REMOTE_INSTANCE_PROFILE is AWS-only (provider is '${PROVIDER}'); unset it")
+  fi
+  if [[ -n "$INSTANCE_PROFILE" ]] && ! is_instance_profile_name "$INSTANCE_PROFILE"; then
+    bad+=("REPO_REMOTE_INSTANCE_PROFILE='${INSTANCE_PROFILE}' is not a valid IAM instance profile NAME (1-128 of A-Z a-z 0-9 + = , . @ _ -; pass the name, not an ARN)")
+  fi
+  if [[ "$TRANSPORT" == ssm && "$PROVIDER" == aws ]]; then
+    [[ -z "$REGION" ]] || is_aws_region "$REGION" \
+      || bad+=("AWS_REGION='${REGION}' is not a plain AWS region code (e.g. us-west-2); it is written into the SSM ProxyCommand, so nothing else is accepted")
+  fi
+  local user="${REPO_REMOTE_SSH_USER:-ubuntu}"
+  [[ "$user" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$ ]] \
+    || bad+=("REPO_REMOTE_SSH_USER='${user}' is not a plain user name (letters, digits, . _ -)")
+  local key="${REPO_REMOTE_SSH_KEY:-~/.ssh/id_ed25519}"
+  [[ "$key" != *$'\n'* && "$key" != *$'\r'* ]] \
+    || bad+=("REPO_REMOTE_SSH_KEY contains a line break; it is written into the SSH config as one IdentityFile line")
+
+  if [[ ${#bad[@]} -gt 0 ]]; then
+    local b
+    log "cannot proceed — invalid transport config (nothing was created or changed):"
+    for b in "${bad[@]}"; do log "  - $b"; done
+    log "see 'AWS transport: direct SSH or SSM Session Manager' in commands/repo/remote.md."
+    exit 2
+  fi
+}
+
+# ── purchasing option (repo#616) ────────────────────────────────────────────
+# Runs for `up` (dry run included) and `down` BEFORE any cloud call. Exactly
+# two spellings are accepted; anything else — including a differently-cased
+# "Spot" — is refused rather than guessed at, because the value decides what
+# kind of capacity is bought.
+validate_market_config() {
+  case "$MARKET" in
+    on-demand) : ;;
+    spot)
+      [[ "$PROVIDER" == aws ]] \
+        || die 2 "REPO_REMOTE_MARKET=spot is AWS-only (provider is '${PROVIDER}'); unset it or set REPO_REMOTE_MARKET=on-demand. Nothing was created or changed."
+      ;;
+    *)
+      die 2 "REPO_REMOTE_MARKET='${MARKET}' is not supported (expected exactly 'on-demand' (the default) or 'spot'). Nothing was created or changed. See 'AWS market: on-demand or Spot' in commands/repo/remote.md."
+      ;;
+  esac
+}
+
+is_spot() { [[ "$PROVIDER" == aws && "$MARKET" == spot ]]; }
+
+# The lifecycle refusal shared by both stopped-instance reuse paths in aws_up:
+# a one-time Spot launch is terminated, never stopped, so a stopped box is not
+# one this configuration can manage. Dies BEFORE start-instances is called.
+spot_refuse_stopped_reuse() {  # <instance-id> <state> <how-it-was-resolved>
+  local iid="$1" state="$2" how="$3"
+  die 2 "REPO_REMOTE_MARKET=spot never restarts a stopped instance, but ${how} ${iid} is ${state}. A one-time Spot instance is terminated (not stopped) on interruption and on idle shutdown, so this box is not one the Spot configuration manages, and nothing was started or created. Either set REPO_REMOTE_MARKET=on-demand (or unset it) to restart this instance as before, or terminate it with 'repo-remote down --yes --delete' and re-run 'repo-remote up --yes' to launch a fresh Spot instance."
+}
+
+# The local half of the SSM prerequisites: the AWS CLI's Session Manager
+# plugin. Checked before any cloud call. The remote half (instance profile,
+# running agent, a network path to the regional SSM endpoints, the caller's
+# ssm:StartSession grant) cannot be proved locally; the readiness probe reports
+# those distinctly.
+ssm_plugin_present() { command -v "${REPO_REMOTE_SSM_PLUGIN:-session-manager-plugin}" >/dev/null 2>&1; }
+ssm_preflight() {
+  ssm_plugin_present && return 0
+  die 2 "REPO_REMOTE_TRANSPORT=ssm needs the AWS CLI Session Manager plugin ('${REPO_REMOTE_SSM_PLUGIN:-session-manager-plugin}' is not on PATH). Install it (AWS docs: \"Install the Session Manager plugin for the AWS CLI\"), or set REPO_REMOTE_TRANSPORT=ssh. Nothing was created or changed."
 }
 
 # ── the fleet-marker guard (reuse discovery, repo#164) ──────────────────────
@@ -774,14 +1255,18 @@ EOF
 # start, or otherwise touch a cloud resource.
 REMOTE_HOST_IDENTITY=""
 REMOTE_HOST_IDENTITY_ERR=""
+SSH_MUX_OPTS=()
 remote_host_identity() {  # <alias>
   local alias="$1" script out rc errf
   REMOTE_HOST_IDENTITY=""
   REMOTE_HOST_IDENTITY_ERR=""
   script="$(host_identity_probe)"
   errf="$(mktemp)"
+  # SSH_MUX_OPTS (repo#565) is set only by `attach`, which runs this probe over
+  # the SAME master connection the credential is later delivered on.
   out="$(ssh -o ConnectTimeout="$REPO_REMOTE_VERIFY_SSH_TIMEOUT" -o BatchMode=yes \
-             -o StrictHostKeyChecking=accept-new "$alias" 'sh -s' <<<"$script" 2>"$errf")"
+             -o StrictHostKeyChecking=accept-new \
+             ${SSH_MUX_OPTS[@]+"${SSH_MUX_OPTS[@]}"} "$alias" 'sh -s' <<<"$script" 2>"$errf")"
   rc=$?
   REMOTE_HOST_IDENTITY_ERR="$(cat "$errf" 2>/dev/null)"
   rm -f "$errf"
@@ -1204,12 +1689,27 @@ aws_die_no_ssh_cidr() {
   die 2 "could not detect the current IP via ${REPO_REMOTE_IP_ECHO_URL:-https://checkip.amazonaws.com}, so there is no address to authorize SSH ingress from. Refusing to fall back to 0.0.0.0/0. Set REPO_REMOTE_SSH_CIDR to the address you connect from (e.g. REPO_REMOTE_SSH_CIDR=203.0.113.7/32) and re-run."
 }
 
+# A stable per-CALLER id. The owner marker below includes it so each host (or
+# operator) only ever reclaims ITS OWN earlier /32 — never a peer's. Without
+# this, two hosts that both `up` the same repo's box share one marker, and the
+# second host's run revokes the first's rule and locks it out (rjwalters/loom#11616:
+# a builder host's `up` on a shared repo-remote box revoked volt's SSH rule).
+# Override with REPO_REMOTE_CALLER; default is the short hostname. Sanitised to
+# the Description charset, and `:` (the marker delimiter) is never emitted.
+repo_remote_caller() {
+  local c="${REPO_REMOTE_CALLER:-$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo host)}"
+  printf '%s' "$c" | tr -c 'A-Za-z0-9_.-' '-' | cut -c1-40
+}
+
 # Every tcp/22 rule this tooling writes carries a Description marked with this
 # prefix (repo#487), so an audit can trace each rule to its owner and so the
-# refresh below knows which rules are ITS OWN and may be replaced. A rule
-# without this marker was added by somebody else and is never touched.
-ssh_rule_marker_prefix() { printf 'repo-remote:%s:' "$NAME"; }
-ssh_rule_description()   { printf 'repo-remote:%s:%s' "$NAME" "$(date -u +%Y-%m-%d)"; }
+# refresh below knows which rules are ITS OWN and may be replaced. The marker is
+# per repo-name AND per caller (repo#487, rjwalters/loom#11616), so one host
+# never reclaims another host's rule. A rule without this exact marker — a
+# peer's, an operator's hand-added rule, or an old pre-caller-marker rule — was
+# added by somebody else and is never touched (it is left in place, not revoked).
+ssh_rule_marker_prefix() { printf 'repo-remote:%s:%s:' "$NAME" "$CALLER"; }
+ssh_rule_description()   { printf 'repo-remote:%s:%s:%s' "$NAME" "$CALLER" "$(date -u +%Y-%m-%d)"; }
 
 # Idempotently authorize tcp/22 from the resolved CIDR, labelled with the
 # owner marker. A duplicate rule on a reused security group is success, not an
@@ -1269,6 +1769,22 @@ aws_revoke_stale_ssh_ingress() {  # <sg-id> <keep-cidr>
       log "revoked this tooling's stale SSH ingress rule on ${sg} (tcp/22 from ${cidr}) — superseded by ${keep}"
     fi
   done < <(aws_tool_owned_ssh_cidrs "$sg")
+}
+
+# Legacy (pre-per-caller) rules carry `repo-remote:<name>:<YYYY-MM-DD>` and no
+# longer match any caller's prefix, so they are never auto-revoked (the owner is
+# unknown). Surface them in one NOTICE so the leftover exposure is visible.
+aws_notice_legacy_ssh_ingress() {  # <sg-id>
+  local sg="$1" legacy legacy_len
+  # Legacy shape is exactly repo-remote:<name>:<YYYY-MM-DD>. JMESPath has no
+  # regex or arithmetic, so pin the total length: a per-caller rule whose
+  # caller id starts with "20" is longer and must not match.
+  legacy_len=$(( ${#NAME} + 13 + 10 ))
+  legacy="$(aws ec2 describe-security-groups --group-ids "$sg" \
+    --query "SecurityGroups[0].IpPermissions[?ToPort==\`22\`].IpRanges[] | [?Description != null && starts_with(Description, 'repo-remote:${NAME}:20') && length(Description) == \`${legacy_len}\`].CidrIp" \
+    --output text 2>/dev/null | tr '[:space:]' ' ' | sed -E 's/(^| )None( |$)/ /g; s/^ +| +$//g')" || true
+  [[ -n "$legacy" ]] || return 0
+  log "NOTICE: legacy-format SSH ingress rule(s) on ${sg} (tcp/22 from: ${legacy}) are no longer revoked automatically. If stale, revoke by hand with: aws ec2 revoke-security-group-ingress --group-id ${sg} --protocol tcp --port 22 --cidr <cidr>"
 }
 
 # Post-authorize verification — this is what would have caught the reported
@@ -1357,8 +1873,197 @@ aws_refresh_ssh_ingress() {  # [--no-create]
   # Replace, don't accumulate: drop this tooling's own earlier /32s first
   # (repo#487), then authorize the address actually in use now.
   aws_revoke_stale_ssh_ingress "$RESOLVED_SG" "$RESOLVED_SSH_CIDR"
+  aws_notice_legacy_ssh_ingress "$RESOLVED_SG"
   aws_authorize_ssh_ingress "$RESOLVED_SG" "$RESOLVED_SSH_CIDR"
   aws_verify_ssh_ingress "$RESOLVED_SG"
+}
+
+# ── AWS: zero-inbound security group for the ssm transport (repo#564) ──────
+# Session Manager needs no inbound port at all, so an ssm launch gets a group
+# with an EMPTY inbound permission set. That group is deliberately a different
+# tool-owned group from the direct-SSH one: it carries the tag
+# repo-remote-ssm=<name> (not repo-remote=<name>), so neither transport's
+# lookup can pick up the other's group — a fresh ssm launch must never land in
+# the direct-SSH group's open tcp/22 while reporting a zero-ingress box.
+
+# aws_sg_ingress_count <sg-id> -- echoes the number of inbound permission
+# entries on the group; returns non-zero (echoing nothing) when the group
+# cannot be inspected.
+aws_sg_ingress_count() {
+  local out rc
+  out="$(aws ec2 describe-security-groups --group-ids "$1" \
+    --query 'length(SecurityGroups[0].IpPermissions)' --output text 2>/dev/null)"; rc=$?
+  out="$(printf '%s' "$out" | tr -d '[:space:]')"
+  [[ $rc -eq 0 && "$out" =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "$out"
+}
+
+aws_find_tagged_ssm_sg() {
+  aws ec2 describe-security-groups \
+    --filters "Name=tag:repo-remote-ssm,Values=${NAME}" \
+    --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null \
+    | grep -v '^None' || true
+}
+
+# Refuse (exit 2) an existing group that admits anything inbound. Its rules
+# are the operator's (or an earlier run's) and are never deleted here.
+aws_require_empty_ingress() {  # <sg-id> <how-it-was-resolved>
+  local sg="$1" how="$2" n
+  n="$(aws_sg_ingress_count "$sg")" \
+    || die 4 "could not inspect the inbound rules of security group ${sg} (${how}); an ssm launch must prove its group admits nothing inbound before run-instances. Check ec2:DescribeSecurityGroups."
+  [[ "$n" == 0 ]] && return 0
+  die 2 "refusing to launch with REPO_REMOTE_TRANSPORT=ssm into security group ${sg} (${how}): it has ${n} inbound rule(s), and an ssm box is promised a group with NO inbound rule. Its rules were left untouched (this tool never deletes them). Unset REPO_REMOTE_SECURITY_GROUP to get a tool-owned empty group, point it at an empty group, or remove the rules yourself after reviewing them: aws ec2 describe-security-groups --group-ids ${sg}"
+}
+
+# Resolve-or-create the zero-inbound group into RESOLVED_SG.
+aws_resolve_or_create_ssm_sg() {
+  local sg="${REPO_REMOTE_SECURITY_GROUP:-}"
+  if [[ -n "$sg" ]]; then
+    aws_require_empty_ingress "$sg" "REPO_REMOTE_SECURITY_GROUP"
+    RESOLVED_SG="$sg"
+    return 0
+  fi
+  sg="$(aws_find_tagged_ssm_sg)"
+  if [[ -n "$sg" ]]; then
+    aws_require_empty_ingress "$sg" "tagged repo-remote-ssm=${NAME}"
+    RESOLVED_SG="$sg"
+    log "reusing existing zero-inbound security group ${sg} (tagged repo-remote-ssm=${NAME})"
+    return 0
+  fi
+  local out rc
+  out="$(aws ec2 create-security-group \
+    --group-name "repo-remote-ssm-${NAME}" \
+    --description "repo-remote: SSM Session Manager only, no inbound, for ${NAME}" \
+    --tag-specifications "ResourceType=security-group,Tags=[{Key=repo-remote-ssm,Value=${NAME}}]" \
+    --query 'GroupId' --output text 2>&1)"; rc=$?
+  if [[ $rc -ne 0 || -z "$out" || "$out" == "None" ]]; then
+    die 4 "aws ec2 create-security-group failed: ${out:-unknown error}"
+  fi
+  RESOLVED_SG="$out"
+  log "created zero-inbound security group ${RESOLVED_SG} (tagged repo-remote-ssm=${NAME})"
+  # A new group starts with no inbound rule; prove it before spending money.
+  aws_require_empty_ingress "$RESOLVED_SG" "just created"
+}
+
+# Reused instance under ssm: report, never change. Any inbound rule on the
+# instance's own groups predates this run (e.g. a direct-SSH /32 from when the
+# box was launched with REPO_REMOTE_TRANSPORT=ssh); switching transport does not
+# remove it, and this says so instead of implying otherwise. Also warns when no
+# instance profile is attached — the most common reason a reused box never
+# registers with SSM — without attaching one. Best effort: an inspection
+# failure is a NOTICE, never a failed `up`.
+aws_ssm_reuse_notices() {  # <instance-id>
+  local iid="$1" out rc sg n
+  out="$(aws ec2 describe-instances --instance-ids "$iid" \
+    --query 'Reservations[0].Instances[0].IamInstanceProfile.Arn' --output text 2>/dev/null)"; rc=$?
+  out="$(printf '%s' "$out" | tr -d '[:space:]')"
+  if [[ $rc -ne 0 ]]; then
+    log "NOTICE: could not read the instance profile of reused instance ${iid}; if SSM never connects, check it has one with AmazonSSMManagedInstanceCore."
+  elif [[ -z "$out" || "$out" == None ]]; then
+    log "WARNING: reused instance ${iid} has NO IAM instance profile attached, so its SSM agent most likely cannot register and the ssm transport will time out (TargetNotConnected). This run does not attach one. Attach a profile whose role has AmazonSSMManagedInstanceCore yourself: aws ec2 associate-iam-instance-profile --instance-id ${iid} --iam-instance-profile Name=<profile> --region ${REGION}"
+  fi
+
+  out="$(aws ec2 describe-instances --instance-ids "$iid" \
+    --query 'Reservations[0].Instances[0].SecurityGroups[].GroupId' --output text 2>/dev/null)"; rc=$?
+  if [[ $rc -ne 0 ]]; then
+    log "NOTICE: could not list the security groups of reused instance ${iid}, so any existing inbound exposure was not reported."
+    return 0
+  fi
+  for sg in $out; do
+    [[ "$sg" == None ]] && continue
+    if ! n="$(aws_sg_ingress_count "$sg")"; then
+      log "NOTICE: could not inspect the inbound rules of ${sg} (attached to reused instance ${iid})."
+      continue
+    fi
+    if [[ "$n" != 0 ]]; then
+      log "NOTICE: security group ${sg} on reused instance ${iid} still has ${n} inbound rule(s) (e.g. a tcp/22 rule from a direct-SSH launch). The ssm transport does not need them, and this run did NOT remove or change them. Review and revoke them yourself if they are no longer wanted: aws ec2 describe-security-groups --group-ids ${sg} --region ${REGION}"
+    fi
+  done
+  return 0
+}
+
+# ── reused-instance root-volume advisory (repo#559) ─────────────────────────
+# An instance created before repo#559 (or by hand) may still have a gp2 root
+# volume. `up` cannot fix that at launch time — the box already exists — so on
+# REUSE it looks the actual root volume up and, if it is gp2, prints the
+# operator-run conversion command. It NEVER runs modify-volume itself: changing
+# a volume is the operator's decision and needs a permission (ec2:ModifyVolume)
+# this tooling does not otherwise require.
+#
+# Strictly best effort and stderr-only: every failure (API error, permission
+# denial, no root mapping, empty/"None" answers) ends in a NOTICE and a return
+# 0, never a failed `up`, and never a guessed volume id. The root volume is
+# found by matching the instance's RootDeviceName against its
+# BlockDeviceMappings — never "the first attached volume" — and the EC2 device
+# name (/dev/sda1) is used as reported, not the guest's NVMe name.
+aws_root_volume_advisory() {  # <instance-id>
+  local iid="$1" root_dev mappings vol vtype errf rc err
+  local how="to check it yourself: aws ec2 describe-instances --instance-ids ${iid} --region ${REGION} --query 'Reservations[0].Instances[0].[RootDeviceName,BlockDeviceMappings]' (needs ec2:DescribeInstances), then aws ec2 describe-volumes --volume-ids <root-volume-id> --region ${REGION} --query 'Volumes[0].VolumeType' (needs ec2:DescribeVolumes)."
+  local unknown="NOTICE: could not determine the root volume type of reused instance ${iid}, so the gp2 -> gp3 check was skipped (this does not affect the run)"
+
+  # Configured gp2 on purpose: an existing gp2 root is what was asked for.
+  [[ "$VOLUME_TYPE" == gp3 ]] || return 0
+
+  errf="$(mktemp)"
+  root_dev="$(aws ec2 describe-instances --instance-ids "$iid" \
+    --query 'Reservations[0].Instances[0].RootDeviceName' --output text 2>"$errf")"; rc=$?
+  err="$(head -n1 "$errf" 2>/dev/null)"
+  if [[ $rc -ne 0 ]]; then
+    rm -f "$errf"
+    log "${unknown}: describe-instances failed (exit ${rc}${err:+: ${err}}). ${how}"
+    return 0
+  fi
+  root_dev="$(printf '%s' "$root_dev" | tr -d '[:space:]')"
+  if [[ -z "$root_dev" || "$root_dev" == None ]]; then
+    rm -f "$errf"
+    log "${unknown}: the instance reports no RootDeviceName. ${how}"
+    return 0
+  fi
+
+  mappings="$(aws ec2 describe-instances --instance-ids "$iid" \
+    --query 'Reservations[0].Instances[0].BlockDeviceMappings[].[DeviceName,Ebs.VolumeId]' \
+    --output text 2>"$errf")"; rc=$?
+  err="$(head -n1 "$errf" 2>/dev/null)"
+  if [[ $rc -ne 0 ]]; then
+    rm -f "$errf"
+    log "${unknown}: describe-instances (block device mappings) failed (exit ${rc}${err:+: ${err}}). ${how}"
+    return 0
+  fi
+  vol="$(printf '%s\n' "$mappings" | awk -v d="$root_dev" '$1 == d { print $2; exit }')"
+  if [[ ! "$vol" =~ ^vol-[0-9a-zA-Z]+$ ]]; then
+    rm -f "$errf"
+    log "${unknown}: no EBS volume is attached at its root device ${root_dev}. ${how}"
+    return 0
+  fi
+
+  vtype="$(aws ec2 describe-volumes --volume-ids "$vol" \
+    --query 'Volumes[0].VolumeType' --output text 2>"$errf")"; rc=$?
+  err="$(head -n1 "$errf" 2>/dev/null)"
+  rm -f "$errf"
+  if [[ $rc -ne 0 ]]; then
+    log "${unknown}: describe-volumes on root volume ${vol} failed (exit ${rc}${err:+: ${err}}) — reading a volume's type needs the ec2:DescribeVolumes permission. ${how}"
+    return 0
+  fi
+  vtype="$(printf '%s' "$vtype" | tr -d '[:space:]')"
+  if [[ -z "$vtype" || "$vtype" == None ]]; then
+    log "${unknown}: describe-volumes returned no type for root volume ${vol}. ${how}"
+    return 0
+  fi
+
+  [[ "$vtype" == gp2 ]] || return 0
+
+  local cmd="aws ec2 modify-volume --volume-id ${vol} --volume-type gp3 --region ${REGION}"
+  if [[ "$VOLUME_IOPS" != "$GP3_MIN_IOPS" || "$VOLUME_THROUGHPUT" != "$GP3_MIN_THROUGHPUT" ]]; then
+    cmd+=" --iops ${VOLUME_IOPS} --throughput ${VOLUME_THROUGHPUT}"
+  fi
+  # One notice, several lines, same "repo-remote:" prefix as log(); the command
+  # sits alone on its line so it can be copied verbatim.
+  {
+    printf '%s\n' "repo-remote: WARNING: root volume ${vol} of reused instance ${iid} (region ${REGION}) is gp2. gp2's baseline is 3 IOPS per GiB (150 IOPS at 50 GiB); sustained builds/tests drain its burst credits and the box then crawls in disk wait. gp3 has a flat 3,000 IOPS / 125 MiB/s baseline with no burst credits. This run did NOT change the volume. To convert it (online, no stop or detach needed on current-generation instances), run:"
+    printf '%s\n' "repo-remote:   ${cmd}"
+    printf '%s\n' "repo-remote: That call needs the IAM permission ec2:ModifyVolume — request it if your AWS user is denied. A volume can be modified at most 4 times per rolling 24 hours; track progress with: aws ec2 describe-volumes-modifications --volume-ids ${vol} --region ${REGION}"
+  } >&2
+  return 0
 }
 
 # Belt-and-suspenders SSH access (repo#177): append the resolved public key to
@@ -1404,13 +2109,26 @@ aws_userdata() {  # <pubkey-line>
 CREATED_ID=""
 aws_create() {
   local ami key udfile errfile iid rc err attached
+
+  # repo#564: an ssm launch without an instance profile would boot a box whose
+  # agent cannot register — unreachable by design. Refuse before ANY mutation
+  # (the key-pair import and security-group creation below included).
+  if [[ "$TRANSPORT" == ssm && -z "$INSTANCE_PROFILE" ]]; then
+    die 2 "REPO_REMOTE_TRANSPORT=ssm needs REPO_REMOTE_INSTANCE_PROFILE for a fresh launch: an instance profile whose role has the AmazonSSMManagedInstanceCore policy, so the SSM agent can register. Nothing was created. Set REPO_REMOTE_INSTANCE_PROFILE=<profile-name> (the caller also needs iam:PassRole on its role), or set REPO_REMOTE_TRANSPORT=ssh."
+  fi
+
   aws_resolve_image; ami="$RESOLVED_AMI"
   aws_resolve_keypair; key="$RESOLVED_KEY_NAME"
 
-  # Resolve-or-create the security group and prove it actually allows SSH
-  # BEFORE spending money on run-instances (repo#176). The reuse paths in
-  # aws_up() run the same chain (repo#451).
-  aws_refresh_ssh_ingress                               # sets RESOLVED_SG
+  if [[ "$TRANSPORT" == ssm ]]; then
+    # repo#564: zero-inbound group; no ingress authorization, no IP lookup.
+    aws_resolve_or_create_ssm_sg                        # sets RESOLVED_SG
+  else
+    # Resolve-or-create the security group and prove it actually allows SSH
+    # BEFORE spending money on run-instances (repo#176). The reuse paths in
+    # aws_up() run the same chain (repo#451).
+    aws_refresh_ssh_ingress                             # sets RESOLVED_SG
+  fi
 
   udfile="$(mktemp)"; aws_userdata "$RESOLVED_PUB_KEY_LINE" >"$udfile"
   errfile="$(mktemp)"
@@ -1418,7 +2136,8 @@ aws_create() {
   local -a args=(ec2 run-instances
     --image-id "$ami"
     --instance-type "$INSTANCE_TYPE"
-    --block-device-mappings "DeviceName=/dev/sda1,Ebs={VolumeSize=${DISK_GB}}"
+    # Explicit type (repo#559): left unset, EC2 uses the AMI default — gp2.
+    --block-device-mappings "$(aws_root_block_device_mapping)"
     --security-group-ids "$RESOLVED_SG"
     --tag-specifications "ResourceType=instance,Tags=[{Key=repo-remote,Value=${NAME}}]"
     # NOTE (repo#177): `--user-data` here takes `file://<path>` at LAUNCH time.
@@ -1432,20 +2151,56 @@ aws_create() {
     # exists to prevent (repo#177); aws_resolve_keypair() above either
     # resolves one or dies loudly, so $key is never empty here.
     --key-name "$key"
+    # IMDS hardening (repo#562): pin the instance metadata options at LAUNCH,
+    # where they take precedence over AMI and account defaults, so a box never
+    # depends on the image for them (Ubuntu 22.04 AMIs default to IMDSv1). The
+    # host-side readers in our user-data and identity probe already request a
+    # token first; hop limit 1 is enough because nothing here reads IMDS from
+    # inside a bridged container. A launch AWS rejects stays a hard failure —
+    # never retried with weaker settings.
+    --metadata-options "HttpTokens=required,HttpPutResponseHopLimit=1,HttpEndpoint=enabled"
     --query 'Instances[0].InstanceId' --output text)
+  # repo#564: attach the configured instance profile on either transport. The
+  # caller needs iam:PassRole on its role; AWS rejects the launch otherwise,
+  # and that rejection is surfaced below like any other.
+  [[ -n "$INSTANCE_PROFILE" ]] && args+=(--iam-instance-profile "Name=${INSTANCE_PROFILE}")
+  # repo#616: one-time Spot, terminated on interruption AND on an
+  # instance-initiated shutdown (the idle guard), so the box is never left
+  # stopped. Each structured value is ONE argv element. On-demand (the
+  # default) passes neither flag, exactly as before.
+  if is_spot; then
+    args+=(--instance-market-options "MarketType=spot,SpotOptions={SpotInstanceType=one-time,InstanceInterruptionBehavior=terminate}"
+           --instance-initiated-shutdown-behavior terminate)
+  fi
 
+  # EXACTLY ONE launch attempt, on every market: no retry, no fallback to
+  # on-demand, no other instance type (repo#616 keeps this invariant).
   iid="$(aws "${args[@]}" 2>"$errfile")"; rc=$?
   err="$(cat "$errfile" 2>/dev/null)"
   rm -f "$udfile" "$errfile"
 
   if [[ $rc -ne 0 || -z "$iid" || "$iid" == "None" ]]; then
     # Surface the quota-exceeded case with the exact remediation (remote.md).
+    if is_spot && printf '%s' "$err" | grep -qE 'InsufficientInstanceCapacity|InsufficientCapacity|MaxSpotInstanceCountExceeded|SpotMaxPriceTooLow|VcpuLimitExceeded'; then
+      local hint="Spot capacity, price and quota are not guaranteed"
+      if printf '%s' "$err" | grep -qE 'MaxSpotInstanceCountExceeded|VcpuLimitExceeded'; then
+        if [[ "$IS_GPU" == true ]]; then
+          hint="the Spot vCPU quota is exhausted: request more at Service Quotas -> EC2 -> 'All G and VT Spot Instance Requests' (quota code L-3819A6DF)"
+        else
+          hint="the Spot vCPU quota is exhausted: request more at Service Quotas -> EC2 -> 'All Standard (A, C, D, H, I, M, R, T, Z) Spot Instance Requests' (quota code L-34B43A08)"
+        fi
+      fi
+      die 4 "aws ec2 run-instances rejected the Spot launch of ${INSTANCE_TYPE} (REPO_REMOTE_MARKET=spot): ${err}. ${hint}. Nothing was retried — not as on-demand and not as another instance type. Retry later, pick another REPO_REMOTE_INSTANCE_TYPE or region, or set REPO_REMOTE_MARKET=on-demand if your spending policy allows it."
+    fi
     if printf '%s' "$err" | grep -q 'VcpuLimitExceeded'; then
       if [[ "$IS_GPU" == true ]]; then
         die 4 "AWS GPU vCPU quota is 0 by default (VcpuLimitExceeded). Request a limit >= this type's vCPUs at Service Quotas -> EC2 -> quota code L-DB2E81BA, then retry."
       else
         die 4 "AWS standard vCPU quota exceeded (VcpuLimitExceeded). Request a limit >= this type's vCPUs at Service Quotas -> EC2 -> quota code L-1216C47A (Running On-Demand Standard instances), then retry."
       fi
+    fi
+    if [[ -n "$INSTANCE_PROFILE" ]] && printf '%s' "$err" | grep -qiE 'iam:PassRole|IamInstanceProfile|instance profile'; then
+      die 4 "aws ec2 run-instances rejected the instance profile '${INSTANCE_PROFILE}' (REPO_REMOTE_INSTANCE_PROFILE): ${err}. Check that the profile exists in this account and that the caller has iam:PassRole on its role (condition iam:PassedToService = ec2.amazonaws.com). Nothing was launched."
     fi
     die 4 "aws ec2 run-instances failed: ${err:-unknown error}"
   fi
@@ -1495,8 +2250,34 @@ ssh_error_is_boot_in_progress() {  # <ssh-stderr>
     'Connection refused|Operation timed out|Connection timed out|No route to host|Connection reset|Connection closed by remote host|Network is unreachable|Host is unreachable'
 }
 
-aws_check_reachability() {  # <ssh-alias> <ip>
-  local alias="$1" ip="$2"
+# ssm_error_class <ssh-stderr> (repo#564) -- classify a failed probe over the
+# SSM ProxyCommand. The proxy's own error lands on ssh's stderr ahead of ssh's
+# generic "Connection closed" line, so the specific causes are matched FIRST:
+#   denied      the caller lacks ssm:StartSession (or the document) — hard fail
+#   plugin      the local Session Manager plugin is missing — hard fail
+#   registering TargetNotConnected: the agent has not registered yet — retry
+#   other       anything else — hard fail (never burn the window on it)
+ssm_error_class() {  # <ssh-stderr>
+  local e="$1"
+  if printf '%s' "$e" | grep -Eq 'AccessDenied|not authorized to perform|UnauthorizedOperation'; then
+    printf 'denied'
+  elif printf '%s' "$e" | grep -Eqi 'SessionManagerPlugin is not found|session-manager-plugin.*not found'; then
+    printf 'plugin'
+  elif printf '%s' "$e" | grep -Eq 'TargetNotConnected|is not connected'; then
+    printf 'registering'
+  else
+    printf 'other'
+  fi
+}
+
+# The remote SSM prerequisites, named in every ssm readiness failure so the
+# operator gets the whole checklist rather than one guess.
+ssm_prereq_hint() {
+  printf '%s' "SSM prerequisites: the instance has an instance profile whose role carries AmazonSSMManagedInstanceCore; its SSM agent is running (preinstalled on Ubuntu AMIs) with outbound HTTPS to the regional ssm, ssmmessages and ec2messages endpoints (or VPC endpoints for them); the caller may call ssm:StartSession on the instance and on the AWS-StartSSHSession document; the local session-manager-plugin is installed."
+}
+
+aws_check_reachability() {  # <ssh-alias> <target> [ssm]
+  local alias="$1" ip="$2" via="${3:-ssh}"
   if [[ -z "$ip" ]]; then
     log "no public IP resolved yet; skipping the end-of-run SSH reachability check"
     return 0
@@ -1504,7 +2285,43 @@ aws_check_reachability() {  # <ssh-alias> <ip>
 
   local started; started="$(date +%s)"
   local deadline=$(( started + REPO_REMOTE_SSH_READY_TIMEOUT ))
-  local attempts=0 err=""
+  local attempts=0 err="" cls=""
+
+  if [[ "$via" == ssm ]]; then
+    # repo#564: same bounded budget, same probe, through the SSM alias. There
+    # is NO fallback to direct SSH on any failure.
+    while true; do
+      attempts=$(( attempts + 1 ))
+      if err="$(ssh -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=accept-new "$alias" true 2>&1 >/dev/null)"; then
+        if (( attempts > 1 )); then
+          log "SSH-over-SSM reachability check passed (${alias} -> ${ip}) after ${attempts} attempts / $(( $(date +%s) - started ))s of readiness wait"
+        else
+          log "SSH-over-SSM reachability check passed (${alias} -> ${ip})"
+        fi
+        return 0
+      fi
+      cls="$(ssm_error_class "$err")"
+      case "$cls" in
+        denied)
+          die 4 "SSH-over-SSM failed for ${alias} (${ip}): access denied by AWS — the caller needs ssm:StartSession on this instance and on the AWS-StartSSHSession document. Not retrying and not falling back to direct SSH. Error: ${err}" ;;
+        plugin)
+          die 4 "SSH-over-SSM failed for ${alias} (${ip}): the AWS CLI could not find the Session Manager plugin. Install session-manager-plugin. Not falling back to direct SSH. Error: ${err}" ;;
+        other)
+          # A not-listening-yet sshd behind a registered agent looks like the
+          # direct-SSH boot case; anything else (Permission denied, a bad key)
+          # cannot be fixed by waiting.
+          if ! ssh_error_is_boot_in_progress "$err" || printf '%s' "$err" | grep -q 'An error occurred'; then
+            die 4 "SSH-over-SSM failed for ${alias} (${ip}) and the failure does not look like an agent that is still registering, so waiting longer will not help: ${err:-(ssh produced no error output)}. Check REPO_REMOTE_SSH_KEY and REPO_REMOTE_SSH_USER. $(ssm_prereq_hint) Not falling back to direct SSH."
+          fi
+          ;;
+      esac
+      if [[ $(date +%s) -ge $deadline ]]; then
+        die 4 "SSH-over-SSM did not become ready for ${alias} (${ip}) within ${REPO_REMOTE_SSH_READY_TIMEOUT}s (${attempts} attempt(s)); last error: ${err:-(none)}. The instance id was already recorded, so the box is not orphaned. $(ssm_prereq_hint) An agent can take a minute or more to register after boot: raise REPO_REMOTE_SSH_READY_TIMEOUT, or retry: ssh ${alias}. Not falling back to direct SSH."
+      fi
+      log "SSM target not ready yet on ${alias} (attempt ${attempts}: ${err:-no error output}); retrying in ${REPO_REMOTE_SSH_READY_POLL_INTERVAL}s (up to ${REPO_REMOTE_SSH_READY_TIMEOUT}s total)"
+      sleep "$REPO_REMOTE_SSH_READY_POLL_INTERVAL"
+    done
+  fi
 
   while true; do
     attempts=$(( attempts + 1 ))
@@ -1531,6 +2348,8 @@ aws_check_reachability() {  # <ssh-alias> <ip>
 }
 
 aws_up() {
+  # repo#564: the local SSM prerequisite is checked before any cloud call.
+  [[ "$TRANSPORT" == ssm ]] && ssm_preflight
   aws_authenticate
   local iid="" state="" reused=false
 
@@ -1542,6 +2361,17 @@ aws_up() {
     if [[ "$state" != missing ]]; then
       fleet_marker_gate "$INSTANCE_ID" "$(aws_fleet_marker "$INSTANCE_ID")" tag
     fi
+    # repo#616: under a Spot configuration a stopped pin is refused (never
+    # started), and a pin that Spot interruption or the idle guard has already
+    # terminated is simply gone -- launch a fresh one. On-demand is unchanged.
+    if is_spot; then
+      case "$state" in
+        stopped|stopping) spot_refuse_stopped_reuse "$INSTANCE_ID" "$state" "pinned REPO_REMOTE_INSTANCE_ID" ;;
+        terminated|shutting-down)
+          log "pinned REPO_REMOTE_INSTANCE_ID=$INSTANCE_ID is ${state} (a Spot instance is terminated on interruption and idle shutdown); creating a fresh instance."
+          state=spot-gone ;;
+      esac
+    fi
     case "$state" in
       running)          iid="$INSTANCE_ID"; reused=true ;;
       stopped|stopping) aws ec2 start-instances --instance-ids "$INSTANCE_ID" >/dev/null 2>&1 \
@@ -1549,6 +2379,7 @@ aws_up() {
                         iid="$INSTANCE_ID"; reused=true ;;
       missing)          log "pinned REPO_REMOTE_INSTANCE_ID=$INSTANCE_ID no longer exists; creating a fresh instance."
                         INSTANCE_ID="" ;;
+      spot-gone)        INSTANCE_ID="" ;;   # repo#616, logged above
       *)                iid="$INSTANCE_ID"; reused=true ;;
     esac
   fi
@@ -1563,6 +2394,7 @@ aws_up() {
       fleet_marker_gate "$iid" "$(aws_fleet_marker "$iid")" tag
       reused=true
       if [[ "$state" == stopped || "$state" == stopping ]]; then
+        is_spot && spot_refuse_stopped_reuse "$iid" "$state" "the instance tagged repo-remote=${NAME},"
         aws ec2 start-instances --instance-ids "$iid" >/dev/null 2>&1 \
           || die 4 "failed to start reused instance $iid"
       fi
@@ -1582,10 +2414,40 @@ aws_up() {
     # still be able to refuse a run before it touches any cloud resource.
     # --no-create: never conjure a group for a host that is already attached to
     # one (see aws_refresh_ssh_ingress).
-    aws_refresh_ssh_ingress --no-create
+    if [[ "$TRANSPORT" == ssm ]]; then
+      # repo#564: ssm needs no inbound rule, so the direct-SSH refresh (and its
+      # current-IP lookup) is skipped ENTIRELY; existing exposure and a missing
+      # instance profile are reported, never changed.
+      aws_ssm_reuse_notices "$iid"
+    else
+      aws_refresh_ssh_ingress --no-create
+    fi
+    # repo#559: a reused box keeps whatever root volume it was born with; flag
+    # a gp2 one (advice only, stderr only, never fatal, never modifies it).
+    aws_root_volume_advisory "$iid"
   fi
 
   aws ec2 wait instance-running --instance-ids "$iid" >/dev/null 2>&1 || true
+
+  if [[ "$TRANSPORT" == ssm ]]; then
+    # repo#564: the connection target is the instance ID, not an IP — no public
+    # IP is polled, and its absence is not a warning. The id is persisted
+    # BEFORE the readiness probe can die, exactly as on the ssh path.
+    is_instance_id "$iid" \
+      || die 4 "unexpected instance id '${iid}' from AWS; refusing to write it into an SSM ProxyCommand alias"
+    writeback_instance_id "$iid"
+    local alias
+    if ! alias="$(write_ssh_alias "$iid" "$REGION")"; then
+      die 4 "SSH alias write for ${alias} was rejected (see error above); the SSH config was left untouched. The instance id ${iid} was recorded. Not falling back to direct SSH."
+    fi
+    aws_check_reachability "$alias" "$iid" ssm
+    verify_host_identity "$alias" "$iid" "this run's resolved instance" advisory
+    if [[ -n "$HOST_ID_OBSERVED" ]]; then
+      log "host identity verified: ${alias} reaches ${HOST_ID_OBSERVED}"
+    fi
+    emit_up_result "$iid" "" "$alias" "$reused" "$iid"
+    return 0
+  fi
   # Bounded poll rather than a single query (repo#451): a just-restarted
   # instance's NEW public IP is not always propagated by the time `wait
   # instance-running` returns, and an empty value here silently leaves the
@@ -1634,7 +2496,7 @@ aws_up() {
     log "WARNING: no public IP resolved, so ${alias} was not refreshed and its host identity could not be verified -- whatever HostName it still carries is from a previous session and may now resolve to an unrelated instance. Re-run 'repo-remote up --yes' once the IP is available, then 'repo-remote verify', before using it."
   fi
 
-  emit_up_result "$iid" "$ip" "$alias" "$reused"
+  emit_up_result "$iid" "$ip" "$alias" "$reused" "$ip"
 }
 
 # `verify` (repo#458): resolve the instance id this repo EXPECTS at the alias,
@@ -1643,24 +2505,33 @@ aws_up() {
 # recommending the pin: verification stays cheap enough to run before every
 # session, and the expectation is explicit rather than re-derived from a tag
 # that some other host may also be wearing.
-aws_verify() {
-  local expected="" src=""
+#
+# aws_expected_identity sets EXPECTED_ID / EXPECTED_SRC (globals, so the die
+# propagates); shared by `verify` and `attach` (repo#565), which must agree on
+# what "this repo's instance" means.
+EXPECTED_ID=""
+EXPECTED_SRC=""
+aws_expected_identity() {
+  EXPECTED_ID=""; EXPECTED_SRC=""
   if [[ -n "$INSTANCE_ID" ]]; then
-    expected="$INSTANCE_ID"
-    src="pinned REPO_REMOTE_INSTANCE_ID"
+    EXPECTED_ID="$INSTANCE_ID"
+    EXPECTED_SRC="pinned REPO_REMOTE_INSTANCE_ID"
   else
     aws_authenticate
     local found; found="$(aws_find_tagged)"
     if [[ -n "$found" ]]; then
-      expected="$(printf '%s' "$found" | awk '{print $1}')"
-      src="discovered via the repo-remote=${NAME} tag"
+      EXPECTED_ID="$(printf '%s' "$found" | awk '{print $1}')"
+      EXPECTED_SRC="discovered via the repo-remote=${NAME} tag"
     fi
   fi
-  [[ -n "$expected" ]] || die 2 "nothing to verify against: REPO_REMOTE_INSTANCE_ID is not set and no instance is tagged repo-remote=${NAME}. Pin REPO_REMOTE_INSTANCE_ID in ${REPO_ENV:-<git-root>/.env or REPO_REMOTE_ENV_FILE} (the recommended configuration for any session that outlives a stop/start), or run 'repo-remote up --yes' to provision one."
+  [[ -n "$EXPECTED_ID" ]] || die 2 "nothing to verify against: REPO_REMOTE_INSTANCE_ID is not set and no instance is tagged repo-remote=${NAME}. Pin REPO_REMOTE_INSTANCE_ID in ${REPO_ENV:-<git-root>/.env or REPO_REMOTE_ENV_FILE} (the recommended configuration for any session that outlives a stop/start), or run 'repo-remote up --yes' to provision one."
+}
 
+aws_verify() {
+  aws_expected_identity
   local alias="repo-remote-${NAME}"
-  verify_host_identity "$alias" "$expected" "$src" strict
-  emit_verify_result "$alias" "$expected" "$HOST_ID_OBSERVED" "$src"
+  verify_host_identity "$alias" "$EXPECTED_ID" "$EXPECTED_SRC" strict
+  emit_verify_result "$alias" "$EXPECTED_ID" "$HOST_ID_OBSERVED" "$EXPECTED_SRC"
 }
 
 aws_status() {
@@ -1674,6 +2545,12 @@ aws_status() {
 }
 
 aws_down() {
+  # repo#616: a Spot-configured box is terminated, never stopped, so a
+  # stop-only teardown would misrepresent the lifecycle. Refuse BEFORE any
+  # cloud call (stop-instances included); the dry run and --delete proceed.
+  if is_spot && [[ "$YES" == true && "$DELETE" != true ]]; then
+    die 2 "REPO_REMOTE_MARKET=spot: 'down --yes' would STOP the instance, but a one-time Spot instance cannot be stopped and later restarted -- this configuration terminates rather than stops (on interruption and on idle shutdown alike), and 'up' never restarts a stopped box. Nothing was stopped. Run 'repo-remote down --yes --delete' to terminate it (its disk goes with it), or set REPO_REMOTE_MARKET=on-demand to manage an on-demand instance."
+  fi
   aws_authenticate
   local ids
   if [[ -n "$INSTANCE_ID" ]]; then
@@ -1723,6 +2600,7 @@ aws_down() {
     # shellcheck disable=SC2086
     aws ec2 terminate-instances --instance-ids $ids >/dev/null 2>&1 \
       || die 4 "aws ec2 terminate-instances failed for: $ids"
+    remove_ssh_alias "repo-remote-${NAME}"
     emit_down_result "$ids" "terminated"
   else
     # shellcheck disable=SC2086
@@ -1789,18 +2667,21 @@ gcp_status() {
 # NAME (what the metadata server's instance/name key reports), and gcp_up()
 # derives that name deterministically as repo-remote-<name> — so, unlike AWS,
 # there is nothing to discover and no cloud call is ever needed here.
-gcp_verify() {
-  local expected src
+gcp_expected_identity() {
   if [[ -n "$INSTANCE_ID" ]]; then
-    expected="$INSTANCE_ID"
-    src="pinned REPO_REMOTE_INSTANCE_ID"
+    EXPECTED_ID="$INSTANCE_ID"
+    EXPECTED_SRC="pinned REPO_REMOTE_INSTANCE_ID"
   else
-    expected="repo-remote-${NAME}"
-    src="the instance name derived from this repo"
+    EXPECTED_ID="repo-remote-${NAME}"
+    EXPECTED_SRC="the instance name derived from this repo"
   fi
+}
+
+gcp_verify() {
+  gcp_expected_identity
   local alias="repo-remote-${NAME}"
-  verify_host_identity "$alias" "$expected" "$src" strict
-  emit_verify_result "$alias" "$expected" "$HOST_ID_OBSERVED" "$src"
+  verify_host_identity "$alias" "$EXPECTED_ID" "$EXPECTED_SRC" strict
+  emit_verify_result "$alias" "$EXPECTED_ID" "$HOST_ID_OBSERVED" "$EXPECTED_SRC"
 }
 
 gcp_down() {
@@ -1827,6 +2708,7 @@ gcp_down() {
   if [[ "$DELETE" == true ]]; then
     gcloud compute instances delete "$vm" --zone "$REGION" --quiet >/dev/null 2>&1 \
       || die 4 "gcloud compute instances delete failed for $vm"
+    remove_ssh_alias "repo-remote-${NAME}"
     emit_down_result "$vm" "terminated"
   else
     gcloud compute instances stop "$vm" --zone "$REGION" --quiet >/dev/null 2>&1 \
@@ -1948,8 +2830,16 @@ release_ssh_alias_lock() {  # <cfg>
 # Honors REPO_REMOTE_SSH_CONFIG (default ~/.ssh/config) so tests never touch a
 # real config. Echoes the alias name. Returns non-zero (without touching
 # $cfg) if the generated stanza fails validation -- see below.
-write_ssh_alias() {  # <ip>
-  local ip="$1" alias="repo-remote-${NAME}"
+#
+# repo#564: with a second argument (an AWS region) the alias is written for the
+# ssm transport — <ip> is then an instance ID used as HostName, and a
+# ProxyCommand opens the connection through `aws ssm start-session`. Both
+# values are allow-list validated first (they reach a shell via ProxyCommand);
+# a rejected value returns non-zero WITHOUT touching $cfg. Rewriting an alias
+# replaces its whole block, so switching transport in either direction drops
+# the previous HostName/ProxyCommand lines and leaves other Host blocks alone.
+write_ssh_alias() {  # <ip | instance-id> [ssm-region]
+  local ip="$1" ssm_region="${2:-}" alias="repo-remote-${NAME}"
   local cfg="${REPO_REMOTE_SSH_CONFIG:-$HOME/.ssh/config}"
   local key="${REPO_REMOTE_SSH_KEY:-~/.ssh/id_ed25519}"
   local user="${REPO_REMOTE_SSH_USER:-ubuntu}"
@@ -1970,6 +2860,22 @@ write_ssh_alias() {  # <ip>
     return 0
   fi
   ip="$ip_trimmed"
+
+  # Config-line hygiene for every transport: none of these may smuggle in a
+  # second SSH directive (repo#564).
+  if [[ ! "$user" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$ || "$key" == *$'\n'* || "$key" == *$'\r'* \
+        || "$ip" =~ [[:space:]] ]]; then
+    log "refusing to write SSH alias '${alias}': REPO_REMOTE_SSH_USER, REPO_REMOTE_SSH_KEY or the host value contains characters that are not allowed in a single SSH config line -- leaving ${cfg} untouched"
+    printf '%s' "$alias"
+    return 1
+  fi
+  if [[ -n "$ssm_region" ]]; then
+    if ! is_instance_id "$ip" || ! is_aws_region "$ssm_region"; then
+      log "refusing to write SSM SSH alias '${alias}': instance id '${ip}' or region '${ssm_region}' failed validation -- leaving ${cfg} untouched"
+      printf '%s' "$alias"
+      return 1
+    fi
+  fi
 
   mkdir -p "$(dirname "$cfg")" 2>/dev/null || true
   acquire_ssh_alias_lock "$cfg"
@@ -1995,6 +2901,9 @@ write_ssh_alias() {  # <ip>
     printf '    HostName %s\n' "$ip"
     printf '    User %s\n' "$user"
     printf '    IdentityFile %s\n' "$key"
+    if [[ -n "$ssm_region" ]]; then
+      printf '    ProxyCommand aws ssm start-session --region %s --target %%h --document-name AWS-StartSSHSession --parameters portNumber=22\n' "$ssm_region"
+    fi
   } >>"$tmp"
 
   # Validate the WRITTEN temp file is actually parseable before it ever
@@ -2016,6 +2925,726 @@ write_ssh_alias() {  # <ip>
   chmod 600 "$cfg" 2>/dev/null || true
   release_ssh_alias_lock "$cfg"
   printf '%s' "$alias"
+}
+
+# ── alias removal + prune (#628) ────────────────────────────────────────────
+# ssh_alias_hostname <cfg> <alias> -- the first HostName of the single-pattern
+# "Host <alias>" block in <cfg>; empty when there is no such block.
+ssh_alias_hostname() {  # <cfg> <alias>
+  [[ -f "$1" ]] || return 0
+  awk -v a="$2" '
+    /^[[:space:]]*(Host|Match)[[:space:]]/ { inb = ($1 == "Host" && NF == 2 && $2 == a); next }
+    inb && tolower($1) == "hostname" {print $2; exit}
+  ' "$1"
+}
+
+# strip_ssh_alias_blocks <cfg> <out> <alias>... -- copy <cfg> to <out> without
+# the single-pattern "Host <alias>" blocks named (a block ends at the next Host
+# or Match line). Every other byte is preserved. Header lines are matched on
+# fields ($1 == "Host", NF == 2), exactly like prune's scanner, so an indented
+# or trailing-space header is both reported and actually stripped.
+strip_ssh_alias_blocks() {  # <cfg> <out> <alias>...
+  local cfg="$1" out="$2"; shift 2
+  local list; list="$(printf '%s\n' "$@")"
+  awk -v list="$list" '
+    BEGIN { n = split(list, l, "\n"); for (i = 1; i <= n; i++) drop[l[i]] = 1 }
+    /^[[:space:]]*(Host|Match)[[:space:]]/ { skip = ($1 == "Host" && NF == 2 && ($2 in drop)) }
+    skip { next }
+    { print }
+  ' "$cfg" >"$out"
+}
+
+# remove_ssh_alias_blocks <alias>... -- remove the named Host blocks from
+# REPO_REMOTE_SSH_CONFIG under the same lock, same-directory temp file, `ssh -G`
+# parse check and atomic mv as write_ssh_alias, then `ssh-keygen -R` each
+# removed HostName (unless a surviving block still uses it). Only
+# `repo-remote-*` aliases are ever accepted. Returns non-zero, leaving the
+# config untouched, if the result would not parse.
+remove_ssh_alias_blocks() {  # <alias>...
+  local cfg="${REPO_REMOTE_SSH_CONFIG:-$HOME/.ssh/config}" a
+  for a in "$@"; do
+    if [[ "$a" != repo-remote-* || ! "$a" =~ ^[A-Za-z0-9._-]+$ ]]; then
+      log "refusing to remove non repo-remote alias '${a}'"
+      return 1
+    fi
+  done
+  [[ -f "$cfg" ]] || return 0
+  acquire_ssh_alias_lock "$cfg"
+  local tmp hosts="" h
+  tmp="$(mktemp "$(dirname "$cfg")/.ssh_config.XXXXXX")"
+  for a in "$@"; do
+    h="$(ssh_alias_hostname "$cfg" "$a")"
+    [[ -n "$h" ]] && hosts+="${h}"$'\n'
+  done
+  strip_ssh_alias_blocks "$cfg" "$tmp" "$@"
+  if cmp -s "$cfg" "$tmp"; then
+    rm -f "$tmp"; release_ssh_alias_lock "$cfg"; return 0
+  fi
+  if ! ssh -G -F "$tmp" repo-remote-prune-check >/dev/null 2>&1; then
+    log "SSH config would not parse after removing the alias block(s) -- leaving ${cfg} untouched"
+    rm -f "$tmp"; release_ssh_alias_lock "$cfg"
+    return 1
+  fi
+  chmod --reference="$cfg" "$tmp" 2>/dev/null || chmod 600 "$tmp" 2>/dev/null || true
+  mv "$tmp" "$cfg"
+  release_ssh_alias_lock "$cfg"
+  while IFS= read -r h; do
+    [[ -n "$h" ]] || continue
+    # Keep the entry if a surviving block still points at the same host.
+    if grep -Eiq "^[[:space:]]*HostName[[:space:]]+${h//./\\.}[[:space:]]*$" "$cfg" 2>/dev/null; then
+      continue
+    fi
+    ssh-keygen -R "$h" >/dev/null 2>&1 || true
+  done <<<"$hosts"
+  return 0
+}
+
+# remove_ssh_alias <alias> -- the post-terminate cleanup used by down --delete.
+# The box is already gone, so a failure here is a warning, never an error.
+remove_ssh_alias() {  # <alias>
+  local cfg="${REPO_REMOTE_SSH_CONFIG:-$HOME/.ssh/config}"
+  [[ -f "$cfg" ]] || return 0
+  [[ -n "$(awk -v a="$1" '$1 == "Host" && NF == 2 && $2 == a {print "y"; exit}' "$cfg")" ]] || return 0
+  if remove_ssh_alias_blocks "$1"; then
+    log "removed SSH alias ${1} (and its known_hosts entry) from ${cfg}"
+  else
+    log "WARNING: could not remove SSH alias ${1} from ${cfg}; run 'repo-remote prune' later"
+  fi
+}
+
+# prune_live_rows -- one "<id>\t<public-ip|None>\t<repo-remote tag|None>" row per
+# instance that still exists at the provider (any non-terminated state).
+# Fails (non-zero) on a lookup error or on any row it cannot parse, so prune
+# fails CLOSED rather than judging aliases against a partial picture.
+prune_live_rows() {
+  local out line tab=$'\t' row_re
+  row_re="^i-[A-Za-z0-9]+${tab}[^${tab}]+${tab}[^${tab}]+\$"
+  if [[ "$PROVIDER" == aws ]]; then
+    out="$(aws ec2 describe-instances \
+      --filters "Name=tag-key,Values=repo-remote" \
+                "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+      --query "Reservations[].Instances[].[InstanceId,PublicIpAddress,Tags[?Key=='repo-remote']|[0].Value]" \
+      --output text 2>/dev/null)" || return 1
+    out="$(printf '%s\n' "$out" | tr -s '[:blank:]' '\t')"
+    while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      [[ "$line" =~ $row_re ]] || return 1
+    done <<<"$out"
+  else
+    out="$(gcloud compute instances list --filter='labels.repo-remote:*' \
+      --format='csv[no-heading](name,networkInterfaces[0].accessConfigs[0].natIP,labels.repo-remote)' 2>/dev/null)" \
+      || return 1
+    local n ip tag
+    out="$(while IFS=, read -r n ip tag; do
+      [[ -z "$n" ]] && continue
+      printf '%s\t%s\t%s\n' "$n" "${ip:-None}" "${tag:-None}"
+    done <<<"$out")"
+  fi
+  printf '%s\n' "$out"
+}
+
+# prune_aliases -- `repo-remote prune [--yes] [--json]`. Remove the
+# `Host repo-remote-*` blocks in REPO_REMOTE_SSH_CONFIG whose box no longer
+# exists at the configured provider/region, plus their known_hosts entries.
+# A block is KEPT when its HostName matches a live instance's public IP or id,
+# or its alias is repo-remote-<tag> for a live instance's repo-remote tag (a
+# stopped box's recorded IP is stale by design), or when it cannot be judged
+# (multi-pattern Host line, unusual characters, no HostName). Dry run by default.
+prune_aliases() {
+  local cfg="${REPO_REMOTE_SSH_CONFIG:-$HOME/.ssh/config}" rows
+  if [[ "$PROVIDER" == aws ]]; then aws_authenticate; else gcp_authenticate; fi
+  rows="$(prune_live_rows)" \
+    || die 4 "could not list the live ${PROVIDER} instances; nothing was removed (prune fails closed). Check credentials/region and retry."
+  local -a stale=() stale_hosts=() kept=()
+  local alias host id ip tag live
+  if [[ -f "$cfg" ]]; then
+    while IFS=$'\t' read -r alias host; do
+      [[ -n "$alias" ]] || continue
+      if [[ -z "$host" || ! "$host" =~ ^[A-Za-z0-9._:-]+$ ]]; then
+        kept+=("$alias"); continue
+      fi
+      live=false
+      while IFS=$'\t' read -r id ip tag; do
+        [[ -n "$id" ]] || continue
+        if [[ "$host" == "$id" || "$host" == "$ip" || "$alias" == "repo-remote-${tag}" || "$alias" == "$id" ]]; then
+          live=true; break
+        fi
+      done <<<"$rows"
+      if [[ "$live" == true ]]; then kept+=("$alias"); else stale+=("$alias"); stale_hosts+=("$host"); fi
+    done < <(awk '
+      /^[[:space:]]*(Host|Match)[[:space:]]/ {
+        if (alias != "") print alias "\t" host
+        alias = ""; host = ""
+        if ($1 == "Host" && NF == 2 && $2 ~ /^repo-remote-[A-Za-z0-9._-]+$/) alias = $2
+        next
+      }
+      alias != "" && host == "" && tolower($1) == "hostname" { host = $2 }
+      END { if (alias != "") print alias "\t" host }
+    ' "$cfg")
+  fi
+
+  local removed=false
+  if [[ "$YES" == true && ${#stale[@]} -gt 0 ]]; then
+    remove_ssh_alias_blocks "${stale[@]}" || die 4 "failed to remove the stale aliases from ${cfg}"
+    removed=true
+  fi
+
+  local disp=dry-run
+  [[ "$YES" == true ]] && disp=removed
+  if [[ "$JSON_OUT" == true ]]; then
+    local first=true a
+    printf '{"action":"prune","provider":"%s","disposition":"%s","stale":[' "$(json_escape "$PROVIDER")" "$disp"
+    for a in ${stale[@]+"${stale[@]}"}; do
+      [[ "$first" == true ]] && first=false || printf ','
+      printf '"%s"' "$(json_escape "$a")"
+    done
+    printf '],"kept":%s}\n' "${#kept[@]}"
+  elif [[ ${#stale[@]} -eq 0 ]]; then
+    log "no stale repo-remote-* aliases in ${cfg}"
+  else
+    local i
+    for i in "${!stale[@]}"; do
+      if [[ "$removed" == true ]]; then
+        log "removed stale alias ${stale[$i]} (HostName ${stale_hosts[$i]})"
+      else
+        log "stale alias ${stale[$i]} (HostName ${stale_hosts[$i]}) -- would remove"
+      fi
+    done
+    [[ "$removed" == true ]] || log "DRY RUN -- ${#stale[@]} stale alias(es) in ${cfg} (pass --yes to remove them and their known_hosts entries)"
+  fi
+}
+
+# ── dev-session GitHub credential + attach (repo#565) ───────────────────────
+# See "GitHub credentials on the VM" in the header block for the contract. The
+# shape, in one line: verify the host, THEN resolve the credential, THEN hand
+# it over as data on the connection that was just verified — never in argv, a
+# command string, a log line, a config file, or anything on the VM's disk.
+GH_TOKEN_CMD=""        # REPO_REMOTE_GH_TOKEN_CMD — run ONLY by attach
+GH_TOKEN_STATIC=""     # REPO_REMOTE_GH_TOKEN, held in an unexported variable
+GH_APP_CLIENT_ID=""    # REPO_REMOTE_GH_APP_CLIENT_ID — the GitHub App's public client ID (repo#627)
+GH_STATIC_ALLOWED=false  # REPO_REMOTE_ALLOW_STATIC_GH_TOKEN=1 (break-glass opt-out, repo#627)
+GH_STATIC_REFUSED=false  # a static token is configured WITHOUT the opt-out: attach refuses (exit 2)
+GH_CRED_SOURCE="none"  # device | command | static | none
+GH_API_HOST=""         # REPO_REMOTE_GH_API_HOST (optional gateway)
+GH_GATEWAY_REPO=""     # <owner>/<repo> for GH_REPO in gateway mode
+GH_SESSION_TOKEN=""    # the resolved token; set only inside attach's untraced window
+ATTACH_CTL_DIR=""      # private dir holding attach's SSH control socket
+# The SSH environment name the token travels under. LC_* because that is what
+# a stock Ubuntu sshd accepts (`AcceptEnv LANG LC_*`); the remote bootstrap
+# unsets it before starting anything.
+RR_TOKEN_ENV=LC_REPO_REMOTE_GH_TOKEN
+# GitHub's device-flow endpoints (repo#627). Fixed on purpose: there is no
+# override, so a config value can never redirect the flow (and the device
+# code) somewhere else. The suite drives them with a mock `curl` on PATH.
+GH_DEVICE_CODE_URL="https://github.com/login/device/code"
+GH_DEVICE_TOKEN_URL="https://github.com/login/oauth/access_token"
+GH_DEVICE_GRANT="urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code"
+GH_DEVICE_MAX_WAIT=900   # upper bound on the wait, whatever expires_in says
+
+# Decide the credential SOURCE from config. Runs for every subcommand (it is
+# part of resolve_settings) and therefore must never execute or read anything
+# beyond the config values. Precedence (repo#627): a non-empty
+# REPO_REMOTE_GH_APP_CLIENT_ID (device flow, a per-user token) wins over a
+# non-empty REPO_REMOTE_GH_TOKEN_CMD, which wins over the static
+# REPO_REMOTE_GH_TOKEN -- and the static token is a source ONLY with
+# REPO_REMOTE_ALLOW_STATIC_GH_TOKEN=1; without it, a configured static token
+# makes attach refuse (GH_STATIC_REFUSED). The usual layer rule (per-repo file
+# over shared file) decides each value first, so a per-repo
+# `REPO_REMOTE_GH_TOKEN_CMD=` (empty) switches a shared command off.
+resolve_gh_credential_config() {
+  local _x=""
+  [[ $- == *x* ]] && { _x=1; set +x; }
+  GH_TOKEN_CMD="${REPO_REMOTE_GH_TOKEN_CMD:-}"
+  GH_TOKEN_STATIC="${REPO_REMOTE_GH_TOKEN:-}"
+  GH_APP_CLIENT_ID="${REPO_REMOTE_GH_APP_CLIENT_ID:-}"
+  GH_API_HOST="${REPO_REMOTE_GH_API_HOST:-}"
+  GH_STATIC_ALLOWED=false
+  [[ "${REPO_REMOTE_ALLOW_STATIC_GH_TOKEN:-}" == 1 ]] && GH_STATIC_ALLOWED=true
+  GH_STATIC_REFUSED=false
+  [[ -n "$GH_TOKEN_STATIC" && "$GH_STATIC_ALLOWED" != true ]] && GH_STATIC_REFUSED=true
+  # load_config sources the layers under `set -a`, which EXPORTS every value:
+  # left alone, the static token would be inherited by every child process
+  # (aws, curl, ssh, the token command itself). Keep both shell-local.
+  export -n REPO_REMOTE_GH_TOKEN REPO_REMOTE_GH_TOKEN_CMD 2>/dev/null || true
+  if [[ -n "$GH_APP_CLIENT_ID" ]]; then
+    GH_CRED_SOURCE="device"
+  elif [[ -n "$GH_TOKEN_CMD" ]]; then
+    GH_CRED_SOURCE="command"
+  elif [[ -n "$GH_TOKEN_STATIC" && "$GH_STATIC_ALLOWED" == true ]]; then
+    GH_CRED_SOURCE="static"
+  else
+    GH_CRED_SOURCE="none"
+  fi
+  [[ -n "$_x" ]] && set -x
+  return 0
+}
+
+# validate_gh_credential_config -- attach's pre-connection credential checks
+# (repo#627). Nothing has connected and nothing has been run when this fails.
+validate_gh_credential_config() {
+  local _x=""
+  [[ $- == *x* ]] && { _x=1; set +x; }
+  if [[ "$GH_STATIC_REFUSED" == true ]]; then
+    die 2 "REPO_REMOTE_GH_TOKEN is set, but a static token is no longer accepted: it makes every session act on GitHub as one shared, long-lived identity. Replace it with the per-user device flow -- set REPO_REMOTE_GH_APP_CLIENT_ID to the GitHub App's client ID and remove REPO_REMOTE_GH_TOKEN (a per-repo 'REPO_REMOTE_GH_TOKEN=' clears a shared one). Break-glass only: REPO_REMOTE_ALLOW_STATIC_GH_TOKEN=1 keeps using it. Nothing was connected or sent. See 'GitHub credentials on the VM' in commands/repo/remote.md."
+  fi
+  if [[ -n "$GH_APP_CLIENT_ID" ]] && ! [[ "$GH_APP_CLIENT_ID" =~ ^[A-Za-z0-9._-]{1,128}$ ]]; then
+    die 2 "REPO_REMOTE_GH_APP_CLIENT_ID is not a GitHub App client ID (expected letters, digits, '.', '_' or '-', e.g. Iv23li...). Nothing was connected or sent."
+  fi
+  if [[ "$GH_CRED_SOURCE" == static ]]; then
+    local why
+    why="$(gh_token_problem "$GH_TOKEN_STATIC")"
+    [[ -z "$why" ]] || die 2 "REPO_REMOTE_GH_TOKEN is not a usable token (${why}); nothing was connected or sent."
+  fi
+  if [[ "$GH_CRED_SOURCE" == none ]]; then
+    die 7 "no GitHub credential is configured, and attach no longer opens an unauthenticated session. Set REPO_REMOTE_GH_APP_CLIENT_ID to the GitHub App's client ID (in remote.env or the per-repo config): each attach then runs GitHub's device flow, you approve it in a browser, and the session acts as YOUR GitHub account for about 8 hours. Nothing was connected or sent. See 'GitHub credentials on the VM' in commands/repo/remote.md."
+  fi
+  [[ -n "$_x" ]] && set -x
+  return 0
+}
+
+# gh_token_problem <value> -- prints why <value> is not a usable single token,
+# or nothing when it is. NEVER prints the value itself.
+gh_token_problem() {
+  local v="$1"
+  if [[ -z "$v" ]]; then
+    printf 'it is empty'
+  elif [[ "$v" == *$'\n'* || "$v" == *$'\r'* ]]; then
+    printf 'it is more than one line'
+  elif ! [[ "$v" =~ ^[[:graph:]]+$ ]]; then
+    printf 'it contains whitespace or control characters'
+  elif (( ${#v} > 4096 )); then
+    printf 'it is longer than 4096 characters'
+  fi
+}
+
+# A gateway is a bare DNS name with at least one dot: no scheme, port, path,
+# user info, or whitespace. Ports are refused because nothing here has
+# verified gh's handling of host:port; https on 443 is the tested shape.
+is_gateway_hostname() {
+  [[ "$1" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]]
+}
+
+# origin_github_repo -- echoes <owner>/<repo> of this checkout's github.com
+# origin, or returns 1. Used only in gateway mode (GH_REPO needs it).
+origin_github_repo() {
+  local url path
+  url="$(git -C "${GIT_ROOT:-.}" remote get-url origin 2>/dev/null)" || return 1
+  case "$url" in
+    https://github.com/*)   path="${url#https://github.com/}" ;;
+    git@github.com:*)       path="${url#git@github.com:}" ;;
+    ssh://git@github.com/*) path="${url#ssh://git@github.com/}" ;;
+    *) return 1 ;;
+  esac
+  path="${path%/}"
+  path="${path%.git}"
+  [[ "$path" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || return 1
+  printf '%s' "$path"
+}
+
+# The gateway contract (evidence: gh 2.102.0 with GH_DEBUG=api against an
+# unresolvable host — see "GitHub API gateway" in remote.md):
+#   * GH_HOST alone does NOT route a github.com clone: gh refuses ("none of the
+#     git remotes ... correspond to the GH_HOST environment variable");
+#   * GH_REPO=<gw>/<owner>/<repo> routes `gh issue`/`gh pr` to
+#     https://<gw>/api/graphql, but `gh api` follows GH_HOST, not GH_REPO —
+#     so both are set;
+#   * a non-github.com host is sent GH_ENTERPRISE_TOKEN, never GH_TOKEN.
+# Anything outside that shape is refused here, before any connection.
+validate_gh_gateway_config() {
+  [[ -n "$GH_API_HOST" ]] || return 0
+  local h="$GH_API_HOST" lower why=""
+  lower="$(printf '%s' "$h" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$h" == *://* ]]; then
+    why="give a bare hostname, not a URL (the scheme is always https; plain http is not supported)"
+  elif ! is_gateway_hostname "$h"; then
+    why="it is not a bare DNS hostname (no port, path, user, or whitespace; at least one dot)"
+  elif [[ "$lower" == github.com || "$lower" == *.github.com ]]; then
+    why="github.com is not a gateway; unset REPO_REMOTE_GH_API_HOST to talk to GitHub directly"
+  elif ! GH_GATEWAY_REPO="$(origin_github_repo)"; then
+    why="gateway mode routes gh with GH_REPO=<gateway>/<owner>/<repo>, so this checkout's origin must be a github.com repository (https://github.com/<owner>/<repo> or git@github.com:<owner>/<repo>)"
+  fi
+  [[ -z "$why" ]] && return 0
+  die 2 "REPO_REMOTE_GH_API_HOST='${h}' is not supported: ${why}. Nothing was connected and no credential was resolved. See 'GitHub API gateway' in commands/repo/remote.md."
+}
+
+# ── device flow (repo#627) ──────────────────────────────────────────────────
+# JSON is read without jq/python: only flat fields GitHub controls are needed,
+# matched with bash's own regex engine (no subprocess ever sees a value). A
+# string value holding a quote or a backslash is deliberately NOT matched, so
+# it reads as absent and the response is rejected as malformed.
+JV=""
+json_get_str() {  # <json> <key> -> JV = the string value, or ""
+  JV=""
+  local re='"'"$2"'"[[:space:]]*:[[:space:]]*"([^"\]*)"'
+  [[ "$1" =~ $re ]] && JV="${BASH_REMATCH[1]}"
+  # shellcheck disable=SC2050  # deliberate: a fresh match drops the captured value from BASH_REMATCH
+  [[ x =~ x ]]
+  return 0
+}
+json_get_num() {  # <json> <key> -> JV = the non-negative integer value, or ""
+  JV=""
+  local re='"'"$2"'"[[:space:]]*:[[:space:]]*([0-9]{1,9})([^0-9]|$)'
+  [[ "$1" =~ $re ]] && JV="${BASH_REMATCH[1]}"
+  # shellcheck disable=SC2050  # deliberate, as above
+  [[ x =~ x ]]
+  return 0
+}
+json_is_object() { [[ "$1" =~ ^[[:space:]]*\{.*\}[[:space:]]*$ ]]; }
+# An OAuth error code is shown to the operator only when it has the shape of
+# one; anything else from the response body is never displayed.
+gh_device_error_name() {  # <code>
+  if [[ "$1" =~ ^[a-z_]{1,64}$ ]]; then printf '%s' "$1"; else printf 'an unrecognized error'; fi
+}
+
+# gh_device_flow -- obtain a GitHub App USER access token for the person
+# running attach, through GitHub's OAuth device flow, into GH_SESSION_TOKEN.
+# Called only from resolve_gh_session_token (untraced window, after the host
+# identity is verified). Every failure is exit 7 with nothing sent to the VM
+# and no fallback to any other source. Hygiene:
+#   * the client ID is public and is the only value in curl's argv;
+#   * the device code (a bearer secret for the poll) and the returned token
+#     reach curl on STDIN through a pipe from the printf builtin, and are read
+#     back with bash regexes -- never argv, never a file, never printed;
+#   * response bodies are never displayed (only a validated error code).
+gh_device_flow() {
+  local body rc dcode ucode uri interval expires elapsed=0 start="$SECONDS" err new tok
+  body="$(curl -sS --proto '=https' --max-time 30 -X POST -H 'Accept: application/json' \
+            --data "client_id=${GH_APP_CLIENT_ID}" "$GH_DEVICE_CODE_URL" </dev/null 2>/dev/null)"
+  rc=$?
+  if (( rc != 0 )); then
+    die 7 "could not reach GitHub to start the device flow (curl exit ${rc}); no credential was resolved and nothing was sent to the VM."
+  fi
+  if ! json_is_object "$body"; then
+    body=""
+    die 7 "GitHub's device-code response was not JSON; check that REPO_REMOTE_GH_APP_CLIENT_ID is the App's client ID and that the App has Device Flow enabled. Nothing was sent to the VM."
+  fi
+  json_get_str "$body" error; err="$JV"
+  if [[ -n "$err" ]]; then
+    body=""
+    die 7 "GitHub refused to start the device flow ($(gh_device_error_name "$err")); check REPO_REMOTE_GH_APP_CLIENT_ID and that the App has Device Flow enabled in its settings. Nothing was sent to the VM."
+  fi
+  json_get_str "$body" device_code;      dcode="$JV"
+  json_get_str "$body" user_code;        ucode="$JV"
+  json_get_str "$body" verification_uri; uri="$JV"
+  json_get_num "$body" interval;         interval=$(( 10#${JV:-5} ))
+  json_get_num "$body" expires_in;       expires=$(( 10#${JV:-$GH_DEVICE_MAX_WAIT} ))
+  body=""
+  if ! [[ "$dcode" =~ ^[A-Za-z0-9_-]{1,255}$ && "$ucode" =~ ^[A-Za-z0-9-]{1,32}$ \
+          && "$uri" =~ ^https://github\.com/[A-Za-z0-9/._-]*$ ]]; then
+    dcode=""
+    die 7 "GitHub's device-code response is missing or has a malformed device_code, user_code or verification_uri; nothing was sent to the VM."
+  fi
+  (( interval < 1 )) && interval=1
+  (( interval > 120 )) && interval=120
+  (( expires > GH_DEVICE_MAX_WAIT )) && expires=$GH_DEVICE_MAX_WAIT
+  log "GitHub sign-in for this session (device flow; the session will act as YOUR GitHub account):"
+  log "  1. open   ${uri}"
+  log "  2. enter  ${ucode}"
+  log "  Waiting up to $(( (expires + 59) / 60 )) min for you to authorize the App (Ctrl-C cancels; the verified SSH connection stays open meanwhile)."
+  while :; do
+    if (( elapsed + interval > expires || SECONDS - start >= expires )); then
+      dcode=""
+      die 7 "timed out after about $(( (expires + 59) / 60 )) min waiting for the device flow to be authorized; nothing was sent to the VM. Run attach again for a new code."
+    fi
+    sleep "$interval"
+    elapsed=$(( elapsed + interval ))
+    body="$(printf 'client_id=%s&device_code=%s&grant_type=%s' "$GH_APP_CLIENT_ID" "$dcode" "$GH_DEVICE_GRANT" \
+              | curl -sS --proto '=https' --max-time 30 -X POST -H 'Accept: application/json' \
+                  --data @- "$GH_DEVICE_TOKEN_URL" 2>/dev/null)"
+    rc=$?
+    if (( rc != 0 )); then
+      body=""; dcode=""
+      die 7 "lost contact with GitHub while waiting for the device flow (curl exit ${rc}); nothing was sent to the VM. Run attach again."
+    fi
+    if ! json_is_object "$body"; then
+      body=""; dcode=""
+      die 7 "GitHub's token response was not JSON; nothing was sent to the VM. Run attach again."
+    fi
+    json_get_str "$body" access_token; tok="$JV"
+    json_get_str "$body" error;        err="$JV"
+    json_get_num "$body" interval;     new="${JV:+$(( 10#$JV ))}"
+    body=""; JV=""
+    [[ -n "$tok" ]] && break
+    case "$err" in
+      authorization_pending) ;;
+      slow_down)
+        # GitHub: add 5 seconds to the interval (it also returns the new one).
+        interval=$(( interval + 5 ))
+        [[ -n "$new" ]] && (( new > interval && new <= 120 )) && interval="$new"
+        ;;
+      expired_token)
+        dcode=""
+        die 7 "the device code expired before it was authorized; nothing was sent to the VM. Run attach again for a new code." ;;
+      access_denied)
+        dcode=""
+        die 7 "the device-flow authorization was declined at GitHub; no credential was resolved and nothing was sent to the VM." ;;
+      "")
+        dcode=""
+        die 7 "GitHub's token response held neither an access token nor an error; nothing was sent to the VM." ;;
+      *)
+        dcode=""
+        die 7 "GitHub ended the device flow with $(gh_device_error_name "$err"); nothing was sent to the VM. Run attach again." ;;
+    esac
+  done
+  dcode=""
+  local why
+  why="$(gh_token_problem "$tok")"
+  if [[ -n "$why" ]]; then
+    tok=""
+    die 7 "the device flow returned an unusable token (${why}); nothing was sent to the VM."
+  fi
+  GH_SESSION_TOKEN="$tok"
+  tok=""
+  log "GitHub credential: a per-user GitHub App token from the device flow (it expires after about 8 hours; run attach again to get a new one)."
+}
+
+# Resolve the session credential into GH_SESSION_TOKEN. Called ONLY by
+# attach_session, after the host identity is verified, with xtrace disabled.
+# Fails closed: a failed device flow or a failed/malformed command result is
+# exit 7 and NEVER falls back to another source. The command's stdout/stderr
+# are never displayed. `none` never reaches here (attach refused it already).
+resolve_gh_session_token() {
+  GH_SESSION_TOKEN=""
+  local out="" rc why
+  if [[ -n "$GH_TOKEN_STATIC" && "$GH_CRED_SOURCE" != static ]]; then
+    log "NOTICE: the static REPO_REMOTE_GH_TOKEN is ignored because a higher-precedence source is configured (it is never used as a fallback)."
+  fi
+  case "$GH_CRED_SOURCE" in
+    device)
+      if [[ -n "$GH_TOKEN_CMD" ]]; then
+        log "NOTICE: REPO_REMOTE_GH_APP_CLIENT_ID is set, so REPO_REMOTE_GH_TOKEN_CMD is not run (the device flow takes precedence)."
+      fi
+      gh_device_flow
+      ;;
+    command)
+      out="$("${BASH:-bash}" -c "$GH_TOKEN_CMD" </dev/null 2>/dev/null)"
+      rc=$?
+      if (( rc != 0 )); then
+        out=""
+        die 7 "REPO_REMOTE_GH_TOKEN_CMD exited ${rc}: no credential was resolved, nothing was sent to the VM, and no other source was used instead. The command's output is never displayed (it may carry credential material); run it yourself to debug."
+      fi
+      why="$(gh_token_problem "$out")"
+      if [[ -n "$why" ]]; then
+        out=""
+        die 7 "REPO_REMOTE_GH_TOKEN_CMD succeeded but its output is not a usable token (${why}); it must print exactly one line holding the token. Nothing was sent to the VM, and no other source was used instead."
+      fi
+      GH_SESSION_TOKEN="$out"
+      out=""
+      log "GitHub credential: minted for this session by REPO_REMOTE_GH_TOKEN_CMD."
+      ;;
+    static)
+      GH_SESSION_TOKEN="$GH_TOKEN_STATIC"
+      log "WARNING: ========================================================================"
+      log "WARNING: this session uses the static REPO_REMOTE_GH_TOKEN (REPO_REMOTE_ALLOW_STATIC_GH_TOKEN=1)."
+      log "WARNING: everything it does on GitHub runs as ONE shared, long-lived identity -- the"
+      log "WARNING: token's owner -- not as you. Set REPO_REMOTE_GH_APP_CLIENT_ID (per-user device"
+      log "WARNING: flow) and remove the static token; see 'GitHub credentials on the VM' in remote.md."
+      log "WARNING: ========================================================================"
+      ;;
+    *)
+      die 7 "no GitHub credential is configured; nothing was sent to the VM."
+      ;;
+  esac
+}
+
+# sq <string> -- <string> as one POSIX single-quoted word.
+sq() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+# attach_bootstrap <with-credential:0|1> -- the POSIX sh program run on the VM
+# for one attachment. It carries NO secret: the token arrives separately, as
+# the ${RR_TOKEN_ENV} SSH environment value, and is read here by name.
+attach_bootstrap() {
+  local cred="$1" tty=1
+  [[ "$ATTACH_HAS_COMMAND" == true ]] && tty=0
+  printf '%s\n' "# repo-remote attach bootstrap (repo#565): generated; carries no secret."
+  printf 'rr_name=%s\n'    "$(sq "$NAME")"
+  printf 'rr_dir=%s\n'     "$(sq "${REPO_DIR:-$NAME}")"
+  printf 'rr_mode=%s\n'    "$(sq "$ATTACH_MODE")"
+  printf 'rr_tty=%s\n'     "$tty"
+  printf 'rr_cmd=%s\n'     "$(sq "$ATTACH_COMMAND")"
+  printf 'rr_cred=%s\n'    "$cred"
+  printf 'rr_gw=%s\n'      "$(sq "$GH_API_HOST")"
+  printf 'rr_gw_repo=%s\n' "$(sq "$GH_GATEWAY_REPO")"
+  cat <<'EOF'
+rr_t="${LC_REPO_REMOTE_GH_TOKEN-}"
+unset LC_REPO_REMOTE_GH_TOKEN
+rr_envs=""
+if [ "$rr_cred" = 1 ]; then
+  if [ -z "$rr_t" ]; then
+    echo "repo-remote: ERROR: the session credential did not arrive on the VM. Its SSH server must accept LC_* environment values ('AcceptEnv LANG LC_*', the Ubuntu default). Not opening a session without it." >&2
+    exit 97
+  fi
+  if [ -n "$rr_gw" ]; then
+    # Gateway mode: gh sends GH_ENTERPRISE_TOKEN to a non-github.com host and
+    # needs GH_HOST (gh api) plus GH_REPO (gh issue/pr) to route there. GH_TOKEN
+    # is emptied so nothing reaches github.com's API directly.
+    GH_ENTERPRISE_TOKEN="$rr_t"; GH_HOST="$rr_gw"; GH_REPO="$rr_gw/$rr_gw_repo"; GH_TOKEN=
+    export GH_ENTERPRISE_TOKEN GH_HOST GH_REPO GH_TOKEN
+    rr_var=GH_ENTERPRISE_TOKEN
+    rr_envs="GH_ENTERPRISE_TOKEN GH_HOST GH_REPO"
+  else
+    GH_TOKEN="$rr_t"; export GH_TOKEN
+    rr_var=GH_TOKEN
+    rr_envs="GH_TOKEN"
+  fi
+  # git keeps its own remote. An EMPTY helper value clears every credential
+  # helper configured so far for github.com (so a `store` helper can never
+  # write the token to disk); the one added after it reads the token from the
+  # environment by NAME when git asks, and ignores store/erase.
+  GIT_CONFIG_COUNT=2
+  GIT_CONFIG_KEY_0=credential.https://github.com.helper
+  GIT_CONFIG_VALUE_0=
+  GIT_CONFIG_KEY_1=credential.https://github.com.helper
+  GIT_CONFIG_VALUE_1="!f() { test \"\$1\" = get || return 0; echo username=x-access-token; echo \"password=\$$rr_var\"; }; f"
+  export GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_KEY_1 GIT_CONFIG_VALUE_1
+  rr_envs="$rr_envs GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_KEY_1 GIT_CONFIG_VALUE_1"
+fi
+unset rr_t
+rr_ctr="repo-remote-$rr_name"
+rr_use_ctr=0
+if [ "$rr_mode" != host ] && command -v docker >/dev/null 2>&1 \
+   && [ "$(docker inspect -f '{{.State.Running}}' "$rr_ctr" 2>/dev/null)" = true ]; then
+  rr_use_ctr=1
+fi
+if [ "$rr_mode" = container ] && [ "$rr_use_ctr" != 1 ]; then
+  echo "repo-remote: ERROR: --container was given, but the dev container '$rr_ctr' is not running on this host." >&2
+  exit 98
+fi
+# repo#627: say which GitHub account this session acts as, asked from where the
+# session will run (the container, else the host). Best effort: the token was
+# already checked when it was issued, so a failed lookup warns and the session
+# still opens. Only a value shaped like a GitHub login is ever printed.
+if [ "$rr_cred" = 1 ]; then
+  rr_who=""
+  if [ "$rr_use_ctr" = 1 ]; then
+    set -- docker exec -i
+    for rr_v in $rr_envs; do set -- "$@" -e "$rr_v"; done
+    if [ -n "$rr_gw" ]; then set -- "$@" -e GH_TOKEN=; fi
+    rr_who="$("$@" "$rr_ctr" gh api user --jq .login </dev/null 2>/dev/null)"
+  elif command -v gh >/dev/null 2>&1; then
+    rr_who="$(gh api user --jq .login </dev/null 2>/dev/null)"
+  fi
+  case "$rr_who" in
+    ''|*[!A-Za-z0-9-]*)
+      echo "repo-remote: WARNING: could not confirm which GitHub account this session acts as ('gh api user' failed, or gh is not installed where the session runs; an App installation token has no user, so this is expected with one). Opening the session anyway." >&2 ;;
+    *)
+      echo "repo-remote: acting as GitHub user $rr_who" >&2 ;;
+  esac
+  unset rr_who
+fi
+if [ "$rr_use_ctr" = 1 ]; then
+  if docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$rr_ctr" 2>/dev/null | grep -q '^GH_TOKEN='; then
+    echo "repo-remote: WARNING: container '$rr_ctr' was created with GH_TOKEN in its configuration, which Docker stores on the VM's disk. This session overrides it; recreate the container without '-e GH_TOKEN' to remove the stored copy." >&2
+  fi
+  # `-e NAME` passes the value from this process's environment: the token is
+  # never in docker's argv, and exec environment is not part of the
+  # container's persisted configuration.
+  set -- docker exec
+  if [ "$rr_tty" = 1 ]; then set -- "$@" -it; else set -- "$@" -i; fi
+  set -- "$@" -w /work
+  for rr_v in $rr_envs; do set -- "$@" -e "$rr_v"; done
+  if [ "$rr_cred" = 1 ]; then
+    set -- "$@" -e GIT_CONFIG_VALUE_0=
+    if [ -n "$rr_gw" ]; then set -- "$@" -e GH_TOKEN=; fi
+  fi
+  set -- "$@" "$rr_ctr"
+  if [ "$rr_tty" = 1 ]; then exec "$@" bash -l; fi
+  exec "$@" bash -lc "$rr_cmd"
+fi
+cd "$HOME/$rr_dir" 2>/dev/null || cd "$HOME" || exit 98
+if [ "$rr_tty" = 1 ]; then exec "${SHELL:-/bin/sh}" -l; fi
+exec "${SHELL:-/bin/sh}" -lc "$rr_cmd"
+EOF
+}
+
+attach_cleanup() {
+  [[ -n "$ATTACH_CTL_DIR" ]] || return 0
+  ssh -o ControlPath="$ATTACH_CTL_DIR/cm" -O exit "repo-remote-${NAME}" >/dev/null 2>&1 || true
+  rm -rf "$ATTACH_CTL_DIR" 2>/dev/null || true
+  ATTACH_CTL_DIR=""
+}
+
+# `attach` (repo#565). Returns the remote session's exit status.
+attach_session() {
+  local alias="repo-remote-${NAME}"
+
+  # 1. Config only — nothing has connected and nothing has been run yet.
+  [[ "$NAME" =~ ^[A-Za-z0-9._-]+$ ]] \
+    || die 2 "the repo name '${NAME}' contains characters attach will not put into a remote command (allowed: letters, digits, . _ -)"
+  validate_transport_config
+  [[ "$PROVIDER" == aws && "$TRANSPORT" == ssm ]] && ssm_preflight
+  validate_gh_credential_config
+  validate_gh_gateway_config
+  case "$PROVIDER" in
+    aws) aws_expected_identity ;;
+    gcp) gcp_expected_identity ;;
+  esac
+
+  # 2. One master connection; the identity probe and the session both ride it,
+  #    so the credential goes to exactly the host that was verified.
+  local base="${REPO_REMOTE_ATTACH_CTL_BASE:-/tmp}"
+  ATTACH_CTL_DIR="$(mktemp -d "${base%/}/rr-attach.XXXXXX" 2>/dev/null)" \
+    || die 4 "could not create a private SSH control directory under ${base} (set REPO_REMOTE_ATTACH_CTL_BASE)"
+  chmod 700 "$ATTACH_CTL_DIR"
+  trap attach_cleanup EXIT
+  trap 'exit 130' INT TERM HUP
+  local ctl="$ATTACH_CTL_DIR/cm" errf merr
+  errf="$(mktemp)"
+  # The master must itself carry the SendEnv pattern: a session multiplexed
+  # over a master without it arrives with the variable EMPTY (observed with
+  # OpenSSH 10.3). Its own environment never holds the token.
+  if ! env -u "$RR_TOKEN_ENV" ssh -o ControlMaster=yes -o ControlPath="$ctl" -o ControlPersist=yes \
+        -o ConnectTimeout="$REPO_REMOTE_VERIFY_SSH_TIMEOUT" -o BatchMode=yes \
+        -o StrictHostKeyChecking=accept-new -o SendEnv="$RR_TOKEN_ENV" \
+        -f -N "$alias" </dev/null 2>"$errf"; then
+    merr="$(cat "$errf" 2>/dev/null)"; rm -f "$errf"
+    printf '%s\n' "repo-remote: ERROR: could not open an SSH connection over alias '${alias}' to verify the host." >&2
+    log "  expected instance: ${EXPECTED_ID} (${EXPECTED_SRC})"
+    log "  reason: ${merr:-(ssh produced no error output)}"
+    log "  Failing closed: the host identity could not be established, so no credential was resolved or sent. Re-run 'repo-remote up --yes' if the instance was stopped, then attach again."
+    exit 6
+  fi
+  rm -f "$errf"
+  SSH_MUX_OPTS=(-o ControlPath="$ctl" -o ControlMaster=no)
+  verify_host_identity "$alias" "$EXPECTED_ID" "$EXPECTED_SRC" strict
+  log "host identity verified: ${alias} reaches ${HOST_ID_OBSERVED} (${EXPECTED_SRC})"
+
+  # 3. Credential — tracing off for the whole window the token is in memory.
+  local had_x=false
+  case "$-" in *x*) had_x=true; set +x ;; esac
+  resolve_gh_session_token
+  if ! ssh "${SSH_MUX_OPTS[@]}" -O check "$alias" >/dev/null 2>&1; then
+    GH_SESSION_TOKEN=""
+    die 6 "the verified SSH connection to ${alias} closed before the session started; no credential was sent. Run attach again."
+  fi
+
+  # 4. The session, over the verified master. StrictHostKeyChecking=yes is the
+  #    backstop: were the master gone, a fresh connection must still present
+  #    the host key recorded when the identity was verified.
+  local -a args=()
+  if [[ "$ATTACH_HAS_COMMAND" == true ]]; then args+=(-T); else args+=(-t); fi
+  args+=("${SSH_MUX_OPTS[@]}" -o StrictHostKeyChecking=yes -o BatchMode=yes)
+  local cred=0 remote rc
+  [[ -n "$GH_SESSION_TOKEN" ]] && cred=1
+  # /bin/sh runs the bootstrap whatever the login shell is.
+  remote="exec /bin/sh -c $(sq "$(attach_bootstrap "$cred")")"
+  if [[ "$cred" == 1 ]]; then
+    # The token is in ssh's ENVIRONMENT only; SendEnv carries it as data.
+    LC_REPO_REMOTE_GH_TOKEN="$GH_SESSION_TOKEN" \
+      ssh "${args[@]}" -o SendEnv="$RR_TOKEN_ENV" "$alias" "$remote"
+    rc=$?
+  else
+    env -u "$RR_TOKEN_ENV" ssh "${args[@]}" "$alias" "$remote"
+    rc=$?
+  fi
+  GH_SESSION_TOKEN=""
+  [[ "$had_x" == true ]] && set -x
+  case "$rc" in
+    97) log "the credential handoff failed on the VM (see the error above); nothing else was started." ;;
+  esac
+  return "$rc"
 }
 
 # ── result emitters ─────────────────────────────────────────────────────────
@@ -2042,9 +3671,28 @@ emit_plan() {  # dry-run plan (no cloud mutation)
     printf '"instance_type":"%s",' "$(json_escape "$INSTANCE_TYPE")"
     printf '"region":"%s",' "$(json_escape "$REGION")"
     printf '"disk_gb":%s,' "$DISK_GB"
+    if [[ "$PROVIDER" == aws ]]; then
+      printf '"volume_type":"%s",' "$(json_escape "$VOLUME_TYPE")"
+      if [[ "$VOLUME_TYPE" == gp3 ]]; then
+        printf '"volume_iops":%s,"volume_throughput_mibps":%s,' "$VOLUME_IOPS" "$VOLUME_THROUGHPUT"
+      else
+        printf '"volume_iops":null,"volume_throughput_mibps":null,'
+      fi
+      # repo#564 (additive): which transport a run would use, and the profile a
+      # fresh launch would attach ("" = none).
+      printf '"transport":"%s",' "$(json_escape "$TRANSPORT")"
+      printf '"instance_profile":"%s",' "$(json_escape "$INSTANCE_PROFILE")"
+    fi
+    # repo#616 (additive): the purchasing option a fresh launch would use,
+    # "on-demand" | "spot", so automation can tell them apart before spending.
+    printf '"market":"%s",' "$(json_escape "$MARKET")"
     printf '"gpu":%s,' "$IS_GPU"
     printf '"idle_shutdown_min":%s,' "$IDLE_MIN"
     printf '"ssh_alias":"repo-remote-%s",' "$(json_escape "$NAME")"
+    # repo#565 (additive): where `attach` would get the GitHub credential —
+    # "device" (repo#627) | "command" | "static" | "none". Reported, never
+    # resolved: a dry run neither runs the command nor starts the device flow.
+    printf '"gh_credential_source":"%s",' "$(json_escape "$GH_CRED_SOURCE")"
     printf '"estimated_hourly_cost_usd":%s,' "$COST_HOURLY"
     printf '"estimated_cost_approximate":%s,' "$COST_APPROX"
     printf '"estimated_cost_basis":"%s"' "$(json_escape "$COST_BASIS")"
@@ -2054,15 +3702,50 @@ emit_plan() {  # dry-run plan (no cloud mutation)
     log "  provider:            $PROVIDER"
     log "  instance type:       $INSTANCE_TYPE$([[ "$IS_GPU" == true ]] && echo ' (GPU)')"
     log "  region/zone:         $REGION"
-    log "  disk:                ${DISK_GB} GB"
-    log "  idle shutdown:       ${IDLE_MIN} min"
-    log "  est. hourly cost:    \$${COST_HOURLY}/hr$(cost_note_human)"
+    if [[ "$PROVIDER" == aws && "$VOLUME_TYPE" == gp3 ]]; then
+      log "  disk:                ${DISK_GB} GB gp3 (${VOLUME_IOPS} IOPS, ${VOLUME_THROUGHPUT} MiB/s)"
+    elif [[ "$PROVIDER" == aws ]]; then
+      log "  disk:                ${DISK_GB} GB ${VOLUME_TYPE}"
+    else
+      log "  disk:                ${DISK_GB} GB"
+    fi
+    log "  idle shutdown:      ${IDLE_MIN} min"
+    if is_spot; then
+      log "  market:              spot (one-time; TERMINATED, never stopped, on interruption or idle shutdown; a stopped box is never restarted; price and capacity are not guaranteed)"
+      log "  est. hourly cost:    \$${COST_HOURLY}/hr$(cost_note_human) — the on-demand rate, an upper bound for Spot (the default Spot maximum price)"
+    else
+      log "  market:              on-demand"
+      log "  est. hourly cost:    \$${COST_HOURLY}/hr$(cost_note_human)"
+    fi
     log "  ssh alias:           repo-remote-${NAME}"
+    case "$GH_CRED_SOURCE" in
+      device)  log "  gh credential:       per-user GitHub App token via the device flow, run by each attach (not run in a dry run)" ;;
+      command) log "  gh credential:       minted per attach by REPO_REMOTE_GH_TOKEN_CMD (not run in a dry run)" ;;
+      static)  log "  gh credential:       static REPO_REMOTE_GH_TOKEN (REPO_REMOTE_ALLOW_STATIC_GH_TOKEN=1): a shared, long-lived identity" ;;
+      *)       log "  gh credential:       none -- attach will refuse; set REPO_REMOTE_GH_APP_CLIENT_ID (device flow)" ;;
+    esac
+    if [[ "$GH_STATIC_REFUSED" == true ]]; then
+      log "  NOTE: REPO_REMOTE_GH_TOKEN is set without REPO_REMOTE_ALLOW_STATIC_GH_TOKEN=1; attach will refuse until it is removed (use REPO_REMOTE_GH_APP_CLIENT_ID)."
+    fi
+    if [[ "$PROVIDER" == aws ]]; then
+      if [[ "$TRANSPORT" == ssm ]]; then
+        log "  transport:           ssm (SSH over SSM Session Manager to the instance ID; zero-inbound security group, no public IP needed)"
+      else
+        log "  transport:           ssh (direct SSH to the public IP; tcp/22 from your address only)"
+      fi
+      log "  instance profile:    ${INSTANCE_PROFILE:-(none)}"
+      if [[ "$TRANSPORT" == ssm && -z "$INSTANCE_PROFILE" ]]; then
+        log "  NOTE: a FRESH ssm launch requires REPO_REMOTE_INSTANCE_PROFILE and would be refused; reusing an existing instance does not."
+      fi
+      if [[ "$TRANSPORT" == ssm ]] && ! ssm_plugin_present; then
+        log "  NOTE: session-manager-plugin is not on PATH; 'up --yes' would be refused until it is installed."
+      fi
+    fi
   fi
 }
 
-emit_up_result() {  # <id> <ip> <alias> <reused>
-  local id="$1" ip="$2" alias="$3" reused="$4"
+emit_up_result() {  # <id> <ip> <alias> <reused> [connect-target]
+  local id="$1" ip="$2" alias="$3" reused="$4" target="${5-$2}"
   if [[ "$JSON_OUT" == true ]]; then
     printf '{'
     printf '"action":"up",'
@@ -2071,8 +3754,18 @@ emit_up_result() {  # <id> <ip> <alias> <reused>
     printf '"instance_id":"%s",' "$(json_escape "$id")"
     printf '"public_ip":"%s",' "$(json_escape "$ip")"
     printf '"ssh_alias":"%s",' "$(json_escape "$alias")"
+    if [[ "$PROVIDER" == aws ]]; then
+      # repo#564 (additive): the transport, the alias HostName it resolves to
+      # (public IP for ssh, instance ID for ssm), and the configured profile.
+      printf '"transport":"%s",' "$(json_escape "$TRANSPORT")"
+      printf '"connect_target":"%s",' "$(json_escape "$target")"
+      printf '"instance_profile":"%s",' "$(json_escape "$INSTANCE_PROFILE")"
+    fi
     printf '"instance_type":"%s",' "$(json_escape "$INSTANCE_TYPE")"
     printf '"region":"%s",' "$(json_escape "$REGION")"
+    # repo#616 (additive): the CONFIGURED purchasing option. On reuse this is
+    # the configuration, not an inspection of the existing instance.
+    printf '"market":"%s",' "$(json_escape "$MARKET")"
     printf '"gpu":%s,' "$IS_GPU"
     printf '"idle_shutdown_min":%s,' "$IDLE_MIN"
     printf '"reused":%s,' "$reused"
@@ -2081,10 +3774,20 @@ emit_up_result() {  # <id> <ip> <alias> <reused>
     printf '"estimated_cost_basis":"%s"' "$(json_escape "$COST_BASIS")"
     printf '}\n'
   else
-    log "$([[ "$reused" == true ]] && echo reused || echo created) instance $id (${INSTANCE_TYPE}) @ ${ip:-<no public ip>}"
+    if [[ "$PROVIDER" == aws && "$TRANSPORT" == ssm ]]; then
+      log "$([[ "$reused" == true ]] && echo reused || echo created) instance $id (${INSTANCE_TYPE}) via SSM Session Manager (region ${REGION})"
+    else
+      log "$([[ "$reused" == true ]] && echo reused || echo created) instance $id (${INSTANCE_TYPE}) @ ${ip:-<no public ip>}"
+    fi
     log "  ssh alias:        $alias"
+    log "  attach:           repo-remote attach   (verifies the host, then opens a session with a fresh GitHub credential)"
     log "  est. hourly cost: \$${COST_HOURLY}/hr$(cost_note_human)"
-    log "  teardown:         repo-remote down --yes   (or /repo:remote --down)"
+    if is_spot; then
+      log "  market:           spot (terminated on interruption or idle shutdown; never stopped or restarted)"
+      log "  teardown:         repo-remote down --yes --delete   (Spot terminates; a stop-only down is refused)"
+    else
+      log "  teardown:         repo-remote down --yes   (or /repo:remote --down)"
+    fi
   fi
 }
 
@@ -2145,8 +3848,9 @@ emit_down_result() {  # <ids> <disposition: noop|dry-run|stopped|terminated> [fl
   # --force) if the caller re-ran with --yes.
   local ids="$1" disp="$2" marked="${3:-}"
   if [[ "$JSON_OUT" == true ]]; then
-    printf '{"action":"down","provider":"%s","name":"%s","disposition":"%s","instances":[' \
-      "$(json_escape "$PROVIDER")" "$(json_escape "$NAME")" "$(json_escape "$disp")"
+    # "market" (repo#616, additive): the configured purchasing option.
+    printf '{"action":"down","provider":"%s","name":"%s","disposition":"%s","market":"%s","instances":[' \
+      "$(json_escape "$PROVIDER")" "$(json_escape "$NAME")" "$(json_escape "$disp")" "$(json_escape "$MARKET")"
     local first=true id
     for id in $ids; do
       [[ "$first" == true ]] && first=false || printf ','
@@ -2163,7 +3867,10 @@ emit_down_result() {  # <ids> <disposition: noop|dry-run|stopped|terminated> [fl
     case "$disp" in
       noop)     log "no instances tagged repo-remote=${NAME} to stop" ;;
       dry-run)  log "DRY RUN — would stop$([[ "$DELETE" == true ]] && echo /terminate): $ids (pass --yes to act)"
-                [[ -n "$marked" ]] && log "  NOTE: fleet-marked (would be refused without --force): $marked" ;;
+                [[ -n "$marked" ]] && log "  NOTE: fleet-marked (would be refused without --force): $marked"
+                if is_spot && [[ "$DELETE" != true ]]; then
+                  log "  NOTE: REPO_REMOTE_MARKET=spot — 'down --yes' (stop) would be refused; use 'down --yes --delete' to terminate."
+                fi ;;
       stopped)  log "stopped: $ids" ;;
       terminated) log "terminated (disks removed): $ids" ;;
     esac
@@ -2179,12 +3886,21 @@ usage() {
 }
 
 parse_args() {
+  local attach_flag=false
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      up|status|down|verify) [[ -z "$ACTION" ]] && ACTION="$1" || die 64 "multiple actions given ($ACTION, $1)" ;;
+      up|status|down|verify|attach|prune) [[ -z "$ACTION" ]] && ACTION="$1" || die 64 "multiple actions given ($ACTION, $1)" ;;
       --status)       ACTION="status" ;;
       --down)         ACTION="down" ;;
       --verify)       ACTION="verify" ;;
+      --attach)       ACTION="attach" ;;
+      --prune)        ACTION="prune" ;;
+      --container)    [[ "$ATTACH_MODE" == host ]] && die 64 "--container and --host are mutually exclusive"
+                      ATTACH_MODE=container; attach_flag=true ;;
+      --host)         [[ "$ATTACH_MODE" == container ]] && die 64 "--container and --host are mutually exclusive"
+                      ATTACH_MODE=host; attach_flag=true ;;
+      --command)      [[ $# -ge 2 ]] || die 64 "--command needs a command string"
+                      ATTACH_COMMAND="$2"; ATTACH_HAS_COMMAND=true; attach_flag=true; shift ;;
       --yes|-y)       YES=true ;;
       --force)        FORCE=true ;;
       --json)         JSON_OUT=true ;;
@@ -2195,7 +3911,13 @@ parse_args() {
     esac
     shift
   done
-  [[ -n "$ACTION" ]] || die 64 "no action given (expected: up | status | verify | down; see --help)"
+  [[ -n "$ACTION" ]] || die 64 "no action given (expected: up | status | verify | down | attach | prune; see --help)"
+  if [[ "$attach_flag" == true && "$ACTION" != attach ]]; then
+    die 64 "--container, --host and --command apply only to attach"
+  fi
+  if [[ "$ACTION" == attach && "$JSON_OUT" == true ]]; then
+    die 64 "attach opens a session; it has no --json output"
+  fi
 }
 
 # ── main ────────────────────────────────────────────────────────────────────
@@ -2208,6 +3930,13 @@ main() {
   case "$ACTION" in
     up)
       require_cost_config
+      # repo#559: validate the root-volume settings before the plan or any
+      # cloud call, so a bad value never reaches run-instances.
+      [[ "$PROVIDER" == aws ]] && validate_aws_volume_config
+      # repo#564: transport/profile values are validated just as early.
+      validate_transport_config
+      # repo#616: the purchasing option, before the plan or any cloud call.
+      validate_market_config
       if [[ "$YES" != true ]]; then
         emit_plan          # dry-run: the plan (with cost) is shown, nothing spent
         exit 0
@@ -2230,14 +3959,40 @@ main() {
       # No cost gate: `verify` spends nothing and mutates nothing — it opens one
       # SSH session and compares strings (repo#458).
       [[ -n "$PROVIDER" ]] || die 2 "REPO_REMOTE_PROVIDER (or an aws|gcp argument) is required for verify"
+      # repo#564: an ssm alias needs the local plugin; say so plainly rather
+      # than as an opaque probe failure.
+      validate_transport_config
+      [[ "$PROVIDER" == aws && "$TRANSPORT" == ssm ]] && ssm_preflight
       case "$PROVIDER" in
         aws) aws_verify ;;
         gcp) gcp_verify ;;
         *)   die 2 "unknown provider '$PROVIDER'" ;;
       esac
       ;;
+    attach)
+      # No cost gate and no cloud mutation: attach reaches an EXISTING
+      # instance (repo#565). It verifies the host before resolving any
+      # credential, so the token command never runs for the wrong box.
+      [[ -n "$PROVIDER" ]] || die 2 "REPO_REMOTE_PROVIDER (or an aws|gcp argument) is required for attach"
+      case "$PROVIDER" in
+        aws|gcp) attach_session; exit $? ;;
+        *)       die 2 "unknown provider '$PROVIDER'" ;;
+      esac
+      ;;
+    prune)
+      # No cost gate: prune spends nothing and touches only the local SSH
+      # config (and known_hosts) -- see prune_aliases (#628).
+      [[ -n "$PROVIDER" ]] || die 2 "REPO_REMOTE_PROVIDER (or an aws|gcp argument) is required for prune"
+      case "$PROVIDER" in
+        aws|gcp) prune_aliases ;;
+        *)       die 2 "unknown provider '$PROVIDER'" ;;
+      esac
+      ;;
     down)
       [[ -n "$PROVIDER" ]] || die 2 "REPO_REMOTE_PROVIDER (or an aws|gcp argument) is required for down"
+      # repo#616: the market decides whether a stop-only teardown is allowed,
+      # so an invalid value fails here, before any cloud call.
+      case "$PROVIDER" in aws|gcp) validate_market_config ;; esac
       case "$PROVIDER" in
         aws) aws_down ;;
         gcp) gcp_down ;;

@@ -74,6 +74,20 @@ def _routed_pcb(board: str) -> Path:
     return REPO_ROOT / "boards" / board / _BOARDS[board]
 
 
+#: Board 03's routed copper as committed before #6394 (PCB only, no sidecars).
+#: Its USB-C GND vias sit in pads, so it is clean at jlcpcb-tier1 and fails
+#: ``via_in_pad`` at the base tier -- the #3920 split-brain witness.  #6394
+#: re-derived the shipped board from a fresh lattice route that has no in-pad
+#: vias (clean at both tiers), so the witness is kept here as a fixture.
+SPLIT_BRAIN_WITNESS = (
+    REPO_ROOT
+    / "tests"
+    / "fixtures"
+    / "board03_pre6394_split_brain"
+    / "usb_joystick_routed.kicad_pcb"
+)
+
+
 def _pcb_rel(board: str) -> str:
     return f"boards/{board}/{_BOARDS[board]}"
 
@@ -265,7 +279,7 @@ def test_committed_pcb_within_gate_at_declared_tier(board: str, tmp_path: Path) 
 
 
 def test_board_03_reproduces_split_brain_at_base_tier() -> None:
-    """Negative control: board-03 PCB is NOT clean at the base jlcpcb tier.
+    """Negative control: board-03 copper is NOT clean at the base jlcpcb tier.
 
     Reproduces the original 0-vs-4 disagreement (issue #3920): the same
     committed copper that is clean at jlcpcb-tier1 reports ``via_in_pad``
@@ -275,9 +289,10 @@ def test_board_03_reproduces_split_brain_at_base_tier() -> None:
     the two tiers no longer differ on this board and the guard above is
     vacuous.
     """
-    pcb = _routed_pcb("03-usb-joystick")
-    if not pcb.exists():
-        pytest.skip(f"committed routed PCB not present: {pcb}")
+    # Issue #6394: the shipped board 03 no longer uses in-pad vias, so the
+    # witness is its pre-#6394 copper (see SPLIT_BRAIN_WITNESS).
+    pcb = SPLIT_BRAIN_WITNESS
+    assert pcb.exists(), f"split-brain witness fixture missing: {pcb}"
 
     report = _run_check(pcb, "jlcpcb")
     error_rules = {v["rule_id"] for v in report["violations"] if v["severity"] == "error"}
@@ -316,9 +331,9 @@ def test_explicit_base_tier_overrides_sidecar_via_real_cli(tmp_path: Path) -> No
     If the dispatcher ever drops an explicit base-tier flag again, the second
     assertion fails with ``manufacturer == 'jlcpcb-tier1'`` / ``errors == 0``.
     """
-    src_pcb = _routed_pcb("03-usb-joystick")
-    if not src_pcb.exists():
-        pytest.skip(f"committed routed PCB not present: {src_pcb}")
+    # Issue #6394: pre-#6394 board-03 copper, the in-pad-via witness.
+    src_pcb = SPLIT_BRAIN_WITNESS
+    assert src_pcb.exists(), f"split-brain witness fixture missing: {src_pcb}"
 
     # Stage the copper in an isolated dir with a tier1 fab-profile sidecar so
     # the auto-resolution precedence (sidecar → project.kct → default) has a

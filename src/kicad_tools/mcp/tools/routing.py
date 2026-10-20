@@ -123,6 +123,31 @@ def get_unrouted_nets(
     )
 
 
+def _resolve_output_path(pcb_path: str, output_path: str | None) -> str:
+    """Return where route_net saves: ``<stem>_routed.kicad_pcb`` by default."""
+    if output_path:
+        return output_path
+    p = Path(pcb_path)
+    return str(p.with_name(f"{p.stem}_routed{p.suffix}"))
+
+
+def _merge_collinear_segments(router, net_number: int, routes: list) -> list:
+    """Merge collinear grid-step segments, returning ``net_number``'s routes.
+
+    Issue #7120: see :func:`merge_collinear_routes`.  Any failure falls back
+    to ``routes``.
+    """
+    import copy
+
+    from kicad_tools.router.optimizer.merge import merge_collinear_routes
+
+    original_routes = copy.deepcopy(routes)
+    if not merge_collinear_routes(router):
+        return original_routes
+    optimized = [r for r in router.routes if r.net == net_number]
+    return optimized or routes
+
+
 def route_net(
     pcb_path: str,
     net_name: str,
@@ -133,13 +158,16 @@ def route_net(
     """Route a specific net.
 
     Attempts to route all unconnected pads on the specified net using
-    the autorouter. The result can be saved to a new file or overwrite
-    the original.
+    the autorouter. The result is saved to a new file by default; the
+    original is overwritten only if ``output_path`` equals ``pcb_path``.
 
     Args:
         pcb_path: Absolute path to .kicad_pcb file
         net_name: Name of the net to route (e.g., "GND", "SPI_CLK")
-        output_path: Path for output file. If None, overwrites the original.
+        output_path: Path for output file. If None, writes
+                     ``<stem>_routed.kicad_pcb`` next to the input and leaves
+                     the input untouched. Pass ``output_path == pcb_path``
+                     to overwrite the input explicitly.
         strategy: Routing strategy to use:
                   - "auto": Automatically choose best strategy
                   - "shortest": Minimize trace length
@@ -203,7 +231,7 @@ def route_net(
             trace_length_mm=_measure_existing_trace_length(pcb, net_number),
             vias_used=_count_vias_on_net(pcb, net_number),
             layers_used=_get_layers_used(pcb, net_number),
-            output_path=output_path or pcb_path,
+            output_path=None,  # nothing written on this early return
             suggestions=["Net is already fully routed"],
         )
 
@@ -261,6 +289,16 @@ def route_net(
         origin_y=min_y,
         rules=design_rules,
     )
+    # Issue #6875: the #972 adaptive cap may route a large board on a coarser
+    # pitch than the board's rules ask for.  Report the grid actually used
+    # (``grid``) and say so in ``warnings`` rather than only in a log line.
+    grid_report = router.grid_report()
+    if grid_report["coarsened"]:
+        clearance_warnings.append(
+            f"Routed on a {grid_report['used_mm']:.4g}mm grid, not the requested "
+            f"{grid_report['requested_mm']:.4g}mm: {grid_report['coarsened_reason']} "
+            "(Issue #6875)"
+        )
 
     # Collect pads for the specific net, grouped by component
     from kicad_tools.router.layers import Layer
@@ -299,7 +337,7 @@ def route_net(
                 # Check if through-hole
                 is_through_hole = "*.Cu" in (pad.layers or [])
 
-                from kicad_tools.router.io import _schema_pad_shape
+                from kicad_tools.router.io import _schema_pad_rratio, _schema_pad_shape
 
                 pad_info = {
                     "number": pad.number,
@@ -318,6 +356,7 @@ def route_net(
                     # obstacle models need for a correct rotated-pad AABB.
                     "rotation": pad.rotation,
                     "shape": _schema_pad_shape(pad, fp.reference),
+                    "roundrect_rratio": _schema_pad_rratio(pad),
                 }
                 component_pads[fp.reference].append(pad_info)
                 net_pads.append(pad_info)
@@ -325,11 +364,12 @@ def route_net(
     if len(net_pads) < 2:
         return RouteNetResult(
             warnings=clearance_warnings,
+            grid=grid_report,
             success=True,
             net_name=net_name,
             routed_connections=0,
             total_connections=0,
-            output_path=output_path or pcb_path,
+            output_path=None,  # nothing written on this early return
             suggestions=["Net has fewer than 2 pads, no routing needed"],
         )
 
@@ -343,11 +383,14 @@ def route_net(
     except Exception as e:
         return RouteNetResult(
             warnings=clearance_warnings,
+            grid=grid_report,
             success=False,
             net_name=net_name,
             error_message=f"Routing failed: {e}",
             suggestions=_generate_suggestions(net_status, net_pads, pcb),
         )
+
+    routes = _merge_collinear_segments(router, net_number, routes)
 
     # Calculate results
     if routes:
@@ -365,23 +408,30 @@ def route_net(
 
             vias_count += len(route.vias)
 
-        # Merge the routed traces into the PCB
+        # Merge the routed traces into the PCB.
+        #
+        # Issue #7114: ``merge_routes_into_pcb`` is text-in/text-out -- it
+        # takes the board file text and the routes as an S-expression string
+        # (the same path ``project.py`` and ``placement_feedback`` use).  The
+        # previous call passed a PCB object, Route objects and width/via
+        # kwargs that never existed, so it always raised ``TypeError`` and
+        # ``route_net`` could never save.  Each emitted segment/via already
+        # carries the width / diameter / drill the router used (taken from
+        # ``design_rules``), so nothing has to be passed separately.
         try:
-            merge_routes_into_pcb(
-                pcb,
-                routes,
-                net_map={net_name: net_number},
-                trace_width=design_rules.trace_width,
-                via_diameter=design_rules.via_diameter,
-                via_drill=design_rules.via_drill,
-            )
+            # Issue #4416 dialect parity: a KiCad-10 name-only board keeps its
+            # ``(net "NAME")`` copper form.
+            name_only = bool(getattr(pcb, "_net_name_only_dialect", False))
+            route_sexp = "\n\t".join(route.to_sexp(name_only=name_only) for route in routes)
+            merged_text = merge_routes_into_pcb(pcb_text, route_sexp)
 
             # Save the result
-            save_path = output_path or pcb_path
-            pcb.save(save_path)
+            save_path = _resolve_output_path(pcb_path, output_path)
+            Path(save_path).write_text(merged_text)
 
             return RouteNetResult(
                 warnings=clearance_warnings,
+                grid=grid_report,
                 success=True,
                 net_name=net_name,
                 routed_connections=len(routes),
@@ -394,6 +444,7 @@ def route_net(
         except Exception as e:
             return RouteNetResult(
                 warnings=clearance_warnings,
+                grid=grid_report,
                 success=False,
                 net_name=net_name,
                 routed_connections=len(routes),
@@ -405,6 +456,7 @@ def route_net(
         # Routing failed
         return RouteNetResult(
             warnings=clearance_warnings,
+            grid=grid_report,
             success=False,
             net_name=net_name,
             total_connections=max(0, len(net_pads) - 1),
@@ -1049,7 +1101,18 @@ def _persist_routing_result_to_pcb(pcb: PCB, result, net_name: str) -> tuple[int
             # it was written -- and drilled -- as a through via).  Every
             # other router via is drilled through the whole stack, whatever
             # logical layer pair it carries in memory.
+            #
+            # Issue #6678: an imported KiCad ``blind`` / ``buried`` via
+            # (``Via.span_type``, #6662) is drilled only through its declared
+            # span.  Pass its declared keyword explicitly so it is preserved
+            # instead of widened to a through via.  ``via_type=None`` would
+            # also write the right keyword, but through ``add_via``'s
+            # derivation path, which logs a WARNING (meant for writers that
+            # *invent* a partial span) advising ``via_type='through'`` -- the
+            # very bug this fixes.
             is_micro = bool(getattr(via, "is_micro", False))
+            span_type = getattr(via, "span_type", None)
+            via_type = "micro" if is_micro else (span_type or "through")
             added_via = pcb.add_via(
                 x=float(via.x),
                 y=float(via.y),
@@ -1057,7 +1120,7 @@ def _persist_routing_result_to_pcb(pcb: PCB, result, net_name: str) -> tuple[int
                 drill=float(getattr(via, "drill", 0.3)),
                 layers=layer_pair,
                 net=net_name,
-                via_type="micro" if is_micro else "through",
+                via_type=via_type,
             )
             if added_via is not None:
                 vias_written += 1
@@ -1211,7 +1274,7 @@ def _build_pads_for_net(
 
             is_through_hole = "*.Cu" in pad_layers
 
-            from kicad_tools.router.io import _schema_pad_shape
+            from kicad_tools.router.io import _schema_pad_rratio, _schema_pad_shape
 
             pads.append(
                 RouterPad(
@@ -1230,6 +1293,7 @@ def _build_pads_for_net(
                     # in ``_build_router_pads``-style dict above (#4910).
                     rotation=pad.rotation,
                     shape=_schema_pad_shape(pad, fp.reference),
+                    roundrect_rratio=_schema_pad_rratio(pad),
                 )
             )
 
@@ -1376,7 +1440,11 @@ def _generate_suggestions(net_status, net_pads: list[dict], pcb: PCB) -> list[st
 
     # General suggestions
     suggestions.append("Try adjusting layer_preference parameter")
-    suggestions.append("Manual routing may be required for complex paths")
+    # Issue #6672: point at automation, never at hand-routing.
+    suggestions.append(
+        "Diagnose the blocker with `kct net-status --why`; if the router still "
+        "cannot complete the net, file it as a router-gap issue"
+    )
 
     return suggestions
 

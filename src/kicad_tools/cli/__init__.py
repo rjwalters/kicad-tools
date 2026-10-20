@@ -47,12 +47,13 @@ from kicad_tools.config import Config
 from kicad_tools.exceptions import KiCadToolsError
 from kicad_tools.units import get_unit_formatter, set_current_formatter
 
-from .parser import create_parser
+from .parser import PASSTHROUGH_SUBCOMMANDS, create_parser, passthrough_main
 from .utils import format_error, print_error
 
 __all__ = [
     "main",
     "normalize_argv",
+    "split_passthrough_argv",
     "symbols_main",
     "nets_main",
     "erc_main",
@@ -75,26 +76,106 @@ def normalize_argv(argv: list[str]) -> list[str]:
     argv = list(argv)  # Make a copy to avoid mutating the original
     # Handle erc backwards compatibility: kct erc <file> -> kct erc parse <file>
     # Insert "parse" subcommand if the first arg after "erc" isn't a known subcommand
-    if len(argv) >= 2 and argv[0] == "erc" and argv[1] not in ("parse", "explain", "-h", "--help"):
-        argv.insert(1, "parse")
+    i = _command_index(argv)
+    if (
+        i + 1 < len(argv)
+        and argv[i] == "erc"
+        and argv[i + 1] not in ("parse", "explain", "-h", "--help")
+    ):
+        argv.insert(i + 1, "parse")
     return argv
+
+
+# Top-level options (``create_parser``) that may precede a subcommand.  Used
+# only to find where a passthrough subcommand starts; the prefix itself is
+# still parsed (and validated) by the real top-level parser.
+_GLOBAL_FLAGS = ("--verbose", "--quiet")
+_GLOBAL_VALUE_FLAGS = ("--units",)
+
+
+def _global_flag_arity(token: str) -> int | None:
+    """Tokens a leading global option consumes, or ``None`` if *token* is not one."""
+    if token.startswith("-") and not token.startswith("--"):
+        # Short options: only ``-q`` exists, possibly repeated (``-qq``).
+        return 1 if len(token) > 1 and set(token[1:]) == {"q"} else None
+    name, eq, _ = token.partition("=")
+    if len(name) < 3:
+        return None
+    # argparse accepts unique prefixes (``--verb``); mirror that, counting
+    # ``--version``/``--help`` so an ambiguous prefix is left to argparse.
+    matches = [
+        f
+        for f in (*_GLOBAL_FLAGS, *_GLOBAL_VALUE_FLAGS, "--version", "--help")
+        if f.startswith(name)
+    ]
+    if len(matches) != 1 or matches[0] in ("--version", "--help"):
+        return None
+    if matches[0] in _GLOBAL_VALUE_FLAGS:
+        return 1 if eq else 2
+    return None if eq else 1
+
+
+def _command_index(argv: list[str]) -> int:
+    """Index of the first token after any leading global options."""
+    i = 0
+    while i < len(argv):
+        arity = _global_flag_arity(argv[i])
+        if arity is None:
+            break
+        i += arity
+    return i
+
+
+def split_passthrough_argv(argv: list[str]) -> tuple[list[str], str, list[str]] | None:
+    """Split ``kct`` argv aimed at a passthrough subcommand (issue #7017).
+
+    Returns ``(global_prefix, subcommand, sub_argv)`` when *argv* is leading
+    global options followed by a :data:`~.parser.PASSTHROUGH_SUBCOMMANDS`
+    name (``route``), else ``None``.  ``sub_argv`` is everything after the
+    subcommand, untouched, so the owning parser sees exactly what was typed.
+    A ``nargs=REMAINDER`` subparser cannot do this: it lets the top-level
+    parser steal leading ``--flag value`` pairs and ``--help``.
+    """
+    i = _command_index(argv)
+    if i < len(argv) and argv[i] in PASSTHROUGH_SUBCOMMANDS:
+        return argv[:i], argv[i], argv[i + 1 :]
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for kicad-tools CLI."""
+    # Windows consoles/pipes default to cp1252, which cannot encode characters
+    # such as the "Δ" in help text; degrade instead of crashing (Issue #6894).
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
+
     parser = create_parser()
 
     # Handle footprint generate specially - it has its own subcommand parser
     if argv is None:
         argv = sys.argv[1:]
-    if len(argv) >= 2 and argv[0] == "footprint" and argv[1] == "generate":
+    # Leading global options are skipped so ``kct -q footprint generate`` works.
+    i = _command_index(argv)
+    if argv[i : i + 2] == ["footprint", "generate"]:
         from .footprint_generate import main as generate_main
 
-        return generate_main(argv[2:]) or 0
+        parser.parse_args(argv[:i])  # validate/apply the global prefix
+        return generate_main(argv[i + 2 :]) or 0
 
-    args = parser.parse_args(normalize_argv(argv))
+    # Passthrough subcommands (``kct route``) own their whole argv: parse only
+    # the leading global options here and hand the rest over verbatim.
+    passthrough = split_passthrough_argv(argv)
+    if passthrough is not None:
+        prefix, command, sub_argv = passthrough
+        args = parser.parse_args(prefix)
+        if args.global_quiet and not ({"-q", "--quiet"} & set(sub_argv)):
+            sub_argv = [*sub_argv, "--quiet"]
+    else:
+        args = parser.parse_args(normalize_argv(argv))
+        command = args.command
 
-    if not args.command:
+    if not command:
         parser.print_help()
         return 0
 
@@ -108,6 +189,8 @@ def main(argv: list[str] | None = None) -> int:
     set_current_formatter(formatter)
 
     try:
+        if passthrough is not None:
+            return passthrough_main(command)(sub_argv)
         return _dispatch_command(args)
     except KeyboardInterrupt:
         print("\nInterrupted", file=sys.stderr)
@@ -198,15 +281,29 @@ def _dispatch_command(args) -> int:
             # Parse subcommand (default behavior)
             from .erc_cmd import main as erc_cmd
 
-            sub_argv = [args.report]
+            sub_argv = [args.report] if args.report else []
             if args.format != "table":
                 sub_argv.extend(["--format", args.format])
             if args.errors_only:
                 sub_argv.append("--errors-only")
+            if args.erc_strict:
+                sub_argv.append("--strict")
             if args.filter_type:
                 sub_argv.extend(["--type", args.filter_type])
             if args.sheet:
                 sub_argv.extend(["--sheet", args.sheet])
+            if args.erc_by_sheet:
+                sub_argv.append("--by-sheet")
+            if args.erc_verbose:
+                sub_argv.append("--verbose")
+            if args.erc_filter_config:
+                sub_argv.extend(["--filter-config", args.erc_filter_config])
+            if args.erc_keep_report:
+                sub_argv.append("--keep-report")
+            if args.erc_output:
+                sub_argv.extend(["--output", args.erc_output])
+            if args.erc_list_types:
+                sub_argv.append("--list-types")
             return erc_cmd(sub_argv)
 
         else:
@@ -233,6 +330,30 @@ def _dispatch_command(args) -> int:
             sub_argv.extend(["--mfr", args.mfr])
         if args.layers != 2:
             sub_argv.extend(["--layers", str(args.layers)])
+        # Issue #6898: forward the run-DRC options the standalone kicad-drc has.
+        if args.strict:
+            sub_argv.append("--strict")
+        # Issue #7077: opt out of the NOT RUN parity -> exit 2 gate.
+        if getattr(args, "allow_incomplete", False):
+            sub_argv.append("--allow-incomplete")
+        # Issue #7096: opt out of failing on unconnected items.
+        if getattr(args, "ignore_unconnected", False):
+            sub_argv.append("--ignore-unconnected")
+        # Issue #7147: explicit parity schematic.
+        if getattr(args, "schematic", None):
+            sub_argv.extend(["--schematic", str(args.schematic)])
+        if args.category:
+            sub_argv.extend(["--category", args.category])
+        if args.verbose:
+            sub_argv.append("--verbose")
+        if args.suggest:
+            sub_argv.append("--suggest")
+        if args.filter_config:
+            sub_argv.extend(["--filter-config", str(args.filter_config)])
+        if args.keep_report:
+            sub_argv.append("--keep-report")
+        if args.output:
+            sub_argv.extend(["--output", str(args.output)])
         # Issue #4691: forward --waivers to the inner parser (a flag added only
         # to the outer parser never reaches drc_cmd -- the #3159 drift trap).
         if getattr(args, "waivers", None):
@@ -318,15 +439,15 @@ def _dispatch_command(args) -> int:
     elif args.command == "stitch":
         return _run_stitch_command(args)
 
-    elif args.command == "route":
-        from .commands.routing import run_route_command
-
-        return run_route_command(args)
-
     elif args.command == "route-auto":
         from .commands.routing import run_route_auto_command
 
         return run_route_auto_command(args)
+
+    elif args.command == "retune-lengths":
+        from .commands.routing import run_retune_lengths_command
+
+        return run_retune_lengths_command(args)
 
     elif args.command == "reason":
         from .commands.reasoning import run_reason_command
@@ -866,6 +987,10 @@ def _run_screenshot_command(args) -> int:
         sub_argv.append("--bw")
     if hasattr(args, "screenshot_theme") and args.screenshot_theme:
         sub_argv.extend(["--theme", args.screenshot_theme])
+    if getattr(args, "screenshot_baseline_save", None):
+        sub_argv.extend(["--baseline-save", args.screenshot_baseline_save])
+    if getattr(args, "screenshot_baseline_compare", None):
+        sub_argv.extend(["--baseline-compare", args.screenshot_baseline_compare])
     # Machine output (#4674): forward the canonical flag to the inner parser.
     if getattr(args, "format", "text") != "text":
         sub_argv.extend(["--format", args.format])
@@ -933,6 +1058,10 @@ def _run_export_command(args) -> int:
 
     sub_argv = [args.export_pcb]
 
+    # Issue #6881: --stackup-id was defined by export_cmd but never forwarded.
+    if getattr(args, "export_stackup_id", None):
+        sub_argv.extend(["--stackup-id", args.export_stackup_id])
+
     # Issue #6169: an unflagged --mfr defaults from project.kct target_fab
     # (looked up next to the board, or in the project directory when given).
     from kicad_tools.manufacturers.resolve import resolve_cli_manufacturer
@@ -958,12 +1087,21 @@ def _run_export_command(args) -> int:
         sub_argv.append("--no-project-zip")
     if getattr(args, "export_no_auto_lcsc", False):
         sub_argv.append("--no-auto-lcsc")
+    if getattr(args, "export_no_spec", False):
+        sub_argv.append("--no-spec")
+    if getattr(args, "export_no_merge_lcsc", False):
+        sub_argv.append("--no-merge-lcsc")
     if getattr(args, "export_skip_preflight", False):
         sub_argv.append("--skip-preflight")
     if getattr(args, "export_skip_drc_floor", False):
         sub_argv.append("--skip-drc-floor")
     if getattr(args, "export_strict_preflight", False):
         sub_argv.append("--strict-preflight")
+    export_assembly_tier = getattr(args, "export_assembly_tier", "auto")
+    if export_assembly_tier and export_assembly_tier != "auto":
+        sub_argv.extend(["--assembly-tier", export_assembly_tier])
+    if getattr(args, "export_allow_unbuildable_bom", False):
+        sub_argv.append("--allow-unbuildable-bom")
     if getattr(args, "export_skip_drc", False):
         sub_argv.append("--skip-drc")
     if getattr(args, "export_skip_erc", False):
@@ -978,6 +1116,9 @@ def _run_export_command(args) -> int:
         sub_argv.append("--keep-build-artifacts")
     if getattr(args, "export_keep_gerber_files", False):
         sub_argv.append("--keep-gerber-files")
+    bom_source = getattr(args, "export_bom_source", "schematic")
+    if bom_source and bom_source != "schematic":
+        sub_argv.extend(["--bom-source", bom_source])
     for layer in getattr(args, "export_vscore_layer", None) or []:
         sub_argv.extend(["--vscore-layer", layer])
     if getattr(args, "export_include_tht", False):

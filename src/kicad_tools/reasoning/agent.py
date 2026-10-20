@@ -435,7 +435,7 @@ class PCBReasoningAgent:
         # Run DRC
         drc_output = Path(tempfile.mktemp(suffix=".rpt"))
         try:
-            subprocess.run(
+            proc = subprocess.run(
                 [
                     kicad_cli,
                     "pcb",
@@ -450,7 +450,9 @@ class PCBReasoningAgent:
                 timeout=60,
             )
 
-            if drc_output.exists():
+            # Issue #6724: a kicad-cli killed by a signal may leave a partial
+            # report; treat it as "DRC check failed", never as a result.
+            if proc.returncode >= 0 and drc_output.exists() and drc_output.stat().st_size > 0:
                 report = DRCReport.load(drc_output)
                 self.update_violations(report)
                 return report

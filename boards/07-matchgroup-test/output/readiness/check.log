@@ -1,21 +1,22 @@
 WARNING: path_ampacity is INACTIVE without --current-paths and will silently pass. No sidecar was found at any of:
-  /private/tmp/claude-501/b6404/build1/validation/checked.current_paths.json
-  /private/tmp/claude-501/b6404/build1/validation/current_paths.json
-  /private/tmp/claude-501/b6404/build1/validation/output/checked.current_paths.json
-  /private/tmp/claude-501/b6404/build1/validation/output/current_paths.json
-  /private/tmp/claude-501/b6404/build1/output/checked.current_paths.json
-  /private/tmp/claude-501/b6404/build1/output/current_paths.json
+  /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-7241/tmp/b07build/validation/checked.current_paths.json
+  /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-7241/tmp/b07build/validation/current_paths.json
+  /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-7241/tmp/b07build/validation/output/checked.current_paths.json
+  /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-7241/tmp/b07build/validation/output/current_paths.json
+  /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-7241/tmp/b07build/output/checked.current_paths.json
+  /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-7241/tmp/b07build/output/current_paths.json
 Pass one explicitly with --current-paths, or place it at one of the paths above, to validate declared branch current paths.
 {
-  "file": "/private/tmp/claude-501/b6404/build1/validation/checked.kicad_pcb",
+  "file": "tmp/b07build/validation/checked.kicad_pcb",
   "manufacturer": "jlcpcb",
+  "pcb_sha256": "ae86ebe3111122a90415bb08d38caca86a2ab40edc4d90c1aa5d3186c99b6b58",
   "layers": 6,
   "summary": {
     "errors": 0,
     "warnings": 0,
-    "infos": 4,
+    "infos": 7,
     "waived": 0,
-    "rules_checked": 68,
+    "rules_checked": 78,
     "rules_checked_by_rule": {
       "connectivity": 1,
       "copper_sliver": 1,
@@ -33,24 +34,93 @@ Pass one explicitly with --current-paths, or place it at one of the paths above,
       "netclass_via_drill": 1,
       "netclass_annular_ring": 1,
       "sch_field_offset": 1,
-      "sch_field_overlap": 1
+      "sch_field_overlap": 1,
+      "spec_conformance_dimensions": 1,
+      "spec_conformance_layers": 1,
+      "spec_conformance_min_trace": 1,
+      "spec_conformance_min_via": 1,
+      "spec_conformance_min_drill": 1,
+      "spec_conformance_target_fab": 1
     },
     "passed": true,
     "stale_waivers": 0,
-    "coverage_checked": 31,
-    "coverage_skipped": 5,
+    "coverage_checked": 34,
+    "coverage_skipped": 7,
     "coverage_unknown": [],
     "coverage_blocking_unknown": []
   },
   "violations": [
     {
+      "rule_id": "connector_edge_distance",
+      "type": "unknown",
+      "severity": "info",
+      "message": "J1 (Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical): 3.23mm from nearest board edge",
+      "location": [
+        103.5,
+        75.0
+      ],
+      "layer": "F.Cu",
+      "actual_value": 3.2299999999999995,
+      "required_value": null,
+      "items": [
+        "J1"
+      ],
+      "nets": [],
+      "status": "info",
+      "waived": false,
+      "key": "connector_edge_distance|J1||F.Cu",
+      "evidence_hash": "ev2:5217f485d76520e5"
+    },
+    {
+      "rule_id": "connector_edge_distance",
+      "type": "unknown",
+      "severity": "info",
+      "message": "J2 (Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical): 3.23mm from nearest board edge",
+      "location": [
+        103.5,
+        110.0
+      ],
+      "layer": "F.Cu",
+      "actual_value": 3.2299999999999995,
+      "required_value": null,
+      "items": [
+        "J2"
+      ],
+      "nets": [],
+      "status": "info",
+      "waived": false,
+      "key": "connector_edge_distance|J2||F.Cu",
+      "evidence_hash": "ev2:097c94ba8e2c8dfa"
+    },
+    {
+      "rule_id": "connector_edge_distance",
+      "type": "unknown",
+      "severity": "info",
+      "message": "J3 (Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical): 3.23mm from nearest board edge",
+      "location": [
+        103.5,
+        133.0
+      ],
+      "layer": "F.Cu",
+      "actual_value": 3.2299999999999995,
+      "required_value": null,
+      "items": [
+        "J3"
+      ],
+      "nets": [],
+      "status": "info",
+      "waived": false,
+      "key": "connector_edge_distance|J3||F.Cu",
+      "evidence_hash": "ev2:e4e464a579b643f0"
+    },
+    {
       "rule_id": "match_group_length_skew",
       "type": "match_group_length_skew",
       "severity": "info",
-      "message": "Match group 'SDRAM_ADDRESS' (14 members) length-skew 4.370 mm within tolerance 5.000 mm",
+      "message": "Match group 'SDRAM_ADDRESS' (14 members) length-skew 2.452 mm within tolerance 5.000 mm",
       "location": null,
       "layer": null,
-      "actual_value": 4.3699,
+      "actual_value": 2.4517,
       "required_value": 5.0,
       "items": [
         "SDRAM_ADDRESS"
@@ -59,16 +129,16 @@ Pass one explicitly with --current-paths, or place it at one of the paths above,
       "status": "info",
       "waived": false,
       "key": "match_group_length_skew|SDRAM_ADDRESS||",
-      "evidence_hash": "ev2:9aa98f994de9b3ba"
+      "evidence_hash": "ev2:1cd8eb904fabe169"
     },
     {
       "rule_id": "match_group_length_skew",
       "type": "match_group_length_skew",
       "severity": "info",
-      "message": "Match group 'SDRAM_BYTE0' (9 members) length-skew 2.732 mm within tolerance 5.000 mm",
+      "message": "Match group 'SDRAM_BYTE0' (9 members) length-skew 0.104 mm within tolerance 5.000 mm",
       "location": null,
       "layer": null,
-      "actual_value": 2.7321,
+      "actual_value": 0.1037,
       "required_value": 5.0,
       "items": [
         "SDRAM_BYTE0"
@@ -77,16 +147,16 @@ Pass one explicitly with --current-paths, or place it at one of the paths above,
       "status": "info",
       "waived": false,
       "key": "match_group_length_skew|SDRAM_BYTE0||",
-      "evidence_hash": "ev2:7c828e12d39d0cc9"
+      "evidence_hash": "ev2:46e2542923d01026"
     },
     {
       "rule_id": "match_group_length_skew",
       "type": "match_group_length_skew",
       "severity": "info",
-      "message": "Match group 'SDRAM_BYTE1' (9 members) length-skew 2.817 mm within tolerance 5.000 mm",
+      "message": "Match group 'SDRAM_BYTE1' (9 members) length-skew 2.842 mm within tolerance 5.000 mm",
       "location": null,
       "layer": null,
-      "actual_value": 2.8165,
+      "actual_value": 2.8415,
       "required_value": 5.0,
       "items": [
         "SDRAM_BYTE1"
@@ -95,16 +165,16 @@ Pass one explicitly with --current-paths, or place it at one of the paths above,
       "status": "info",
       "waived": false,
       "key": "match_group_length_skew|SDRAM_BYTE1||",
-      "evidence_hash": "ev2:629e72ef7d59a0c7"
+      "evidence_hash": "ev2:daf3952efb450c5b"
     },
     {
       "rule_id": "match_group_length_skew",
       "type": "match_group_length_skew",
       "severity": "info",
-      "message": "Match group 'SDRAM_COMMAND' (6 members) length-skew 3.273 mm within tolerance 5.000 mm",
+      "message": "Match group 'SDRAM_COMMAND' (6 members) length-skew 0.949 mm within tolerance 5.000 mm",
       "location": null,
       "layer": null,
-      "actual_value": 3.2734,
+      "actual_value": 0.9494,
       "required_value": 5.0,
       "items": [
         "SDRAM_COMMAND"
@@ -113,14 +183,14 @@ Pass one explicitly with --current-paths, or place it at one of the paths above,
       "status": "info",
       "waived": false,
       "key": "match_group_length_skew|SDRAM_COMMAND||",
-      "evidence_hash": "ev2:8ef9d930ad7013fa"
+      "evidence_hash": "ev2:b690ac97df137fac"
     }
   ],
   "mask_copper_assessments": [],
   "meta_checks": {
     "drc": {
       "status": "PASSED",
-      "detail": "68 rules checked, 0 error(s), 0 warning(s)"
+      "detail": "78 rules checked, 0 error(s), 0 warning(s)"
     },
     "erc": {
       "status": "PASSED",
@@ -217,6 +287,12 @@ Pass one explicitly with --current-paths, or place it at one of the paths above,
       "reason": null,
       "blocking": true
     },
+    "diffpair_uncoupled_length": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
     "dimensions": {
       "status": "checked",
       "state": "checked",
@@ -307,6 +383,12 @@ Pass one explicitly with --current-paths, or place it at one of the paths above,
       "reason": null,
       "blocking": false
     },
+    "routing_policy": {
+      "status": "skipped:no_declared_policies",
+      "state": "skipped",
+      "reason": "no_declared_policies",
+      "blocking": true
+    },
     "sch_fields": {
       "status": "checked",
       "state": "checked",
@@ -337,7 +419,25 @@ Pass one explicitly with --current-paths, or place it at one of the paths above,
       "reason": null,
       "blocking": true
     },
+    "spec_conformance": {
+      "status": "skipped:no_project_kct",
+      "state": "skipped",
+      "reason": "no_project_kct",
+      "blocking": false
+    },
+    "thermal_asymmetry": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
     "via_in_pad": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "via_type": {
       "status": "checked",
       "state": "checked",
       "reason": null,
@@ -373,6 +473,8 @@ Pass one explicitly with --current-paths, or place it at one of the paths above,
       "reason": null,
       "blocking": true
     }
-  }
-}DRC-constraint sidecars updated: /private/tmp/claude-501/b6404/build1/validation/checked.kicad_pro, /private/tmp/claude-501/b6404/build1/validation/checked.kicad_dru
+  },
+  "verdict": "incomplete",
+  "exit_code": 2
+}DRC-constraint sidecars updated: /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-7241/tmp/b07build/validation/checked.kicad_pro, /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-7241/tmp/b07build/validation/checked.kicad_dru
 

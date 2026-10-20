@@ -1,6 +1,6 @@
 # ATtiny85 charlieplex board, revision B
 
-This revision replaces the synthetic MCU with an ATtiny85-20PU, adds regulated power input, reset pullup, decoupling, and the standard six-pin AVR ISP programming interface. Nineteen components fit on the existing 50 × 55 mm two-layer outline. The LEDs and passives are SMT; U1, J1 and J2 are hand-soldered through-hole parts.
+This revision replaces the synthetic MCU with an ATtiny85-20PU, adds regulated power input, reset pullup, decoupling, and the standard six-pin AVR ISP programming interface. Nineteen components fit on the existing 50 × 55 mm two-layer outline. The LEDs and passives are SMT; U1, J1 and J2 are through-hole parts, listed in the JLCPCB CPL since issue #7239 (see the note below).
 
 Supply **regulated 3.3–5.0 V** to J1 pin 1, with ground on pin 2. There is no regulator or reverse-polarity protection. Use either J1 or a programmer that supplies target power; do not connect independent power sources simultaneously. ISP pin 2 is directly connected to the board supply, so a separately powered programmer must use it only as target-voltage sense.
 
@@ -44,5 +44,22 @@ The prebuilt `firmware/charlieplex.hex` is built from `main.c` with AVR GCC 7.3.
 | J2 | BOOMELE 2.54-2*3P | [C65114](https://www.lcsc.com/product-detail/C65114.html) | 2×3 male, 2.54 mm |
 
 Electrical basis: [Microchip ATtiny25/45/85 datasheet](https://ww1.microchip.com/downloads/en/DeviceDoc/Atmel-2586-AVR-8-bit-Microcontroller-ATtiny25-ATtiny45-ATtiny85_Datasheet.pdf), especially pin configurations, clock system, electrical characteristics, and section 20.5 serial programming. Supplier identities and packages checked 2026-09-09. Stock and assembler eligibility can change.
+
+## Through-hole parts in the JLCPCB BOM/CPL — 2026-10-18 (issue #7239)
+
+JLCPCB's PCBA capability page
+(https://jlcpcb.com/capabilities/pcb-assembly-capabilities, fetched
+2026-10-18) lists both Economic and Standard PCBA as "SMT/Thru-hole", so by
+operator decision (issue #7239) `kct export --mfr jlcpcb` no longer excludes
+through-hole parts. The package's `cpl_jlcpcb.csv` now also lists the
+through-hole parts U1 (ATtiny85-20PU, PDIP-8), J1 (2-pin header) and J2 (2×3
+ISP header) for JLCPCB assembly; `bom_jlcpcb.csv` is unchanged (it already
+listed them). Statements elsewhere that these parts are hand-soldered or
+absent from the CPL describe the earlier package and are superseded.
+
+**Procurement must review these through-hole rows** (part identity, JLCPCB
+through-hole assembly eligibility and stock, and placement orientation)
+before ordering assembly. This note records the export change only: it is
+not a re-review, and no new supplier lookup or stock check was performed.
 
 All schematic and PCB generators call `hardware_design.py`; pin assignments and LED topology come from `design_spec.py`. Physical pad geometry comes from the installed KiCad standard libraries. The routed output increases silkscreen strokes to 0.15 mm and applies the reviewed escape-via corrections in `finalize_routing.py`. Generate into a separate directory and validate ERC, label/copper LVS and native DRC before replacing published outputs.

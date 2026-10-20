@@ -17,9 +17,13 @@ unchanged and the emitted legs pass the #3907 ``Segment`` 45-degree choke
 untouched.  Copper is geometric -- :class:`CommittedCopper` and DRC do not
 care that offset vertices sit off-node.
 
-**v1 pair agents are planar** (``allow_vias=False``): a pair that cannot
+**The fat pair search is planar** (``allow_vias=False``): a pair that cannot
 complete a coupled run on one layer DECLINES honestly, with a per-pair
-reason, and never ships a short (#3906 discipline).  The coupled agent
+reason, and never ships a short (#3906 discipline).  Issue #6444 adds one
+retry for a run whose planar search is exhausted: fan-via terminal gateways
+(:mod:`.gateway`) move the run to another layer -- each net fans out to one
+through via per end on its pad layer, and the same planar search couples the
+run between the via pairs on the gateway layer.  The coupled agent
 itself never splits; issue #6373 added an opt-in (``route_netset(...,
 uncoupled_fallback=True)``, always on from the autorouter) that then routes
 the declined pair's main run as two ordinary single-ended legs, reported as
@@ -29,13 +33,40 @@ This module holds the pure-geometry / model-query halves of the feature so
 :mod:`.pathfinder` only gains a thin fat-agent branch and
 :mod:`.obstacles` stays untouched (issue #4271 threads per-class widths
 through those files in parallel).
+
+Issue #6837 (epic #6441 slice 2c-i) moved the engine-free pair planning --
+the chain builders (:func:`choose_pair_chain`, :func:`choose_pair_tap_chain`,
+:class:`PairChain`) and the equivalent-pin tie planner
+(:func:`plan_equivalent_pin_tie`, :class:`PlannedTie`) -- to
+:mod:`kicad_tools.router.pairplan`.  They are re-exported here as deprecated
+aliases so in-flight callers keep working; new code should import them from
+``router.pairplan``.  The re-exports go away with P6 (#6448).
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from ..pairplan.chain import (  # noqa: F401 -- deprecated re-exports (#6837)
+    Couple,
+    PairChain,
+    _couple_mid,
+    _farthest_couples,
+    _greedy_couples,
+    _pair_chain,
+    choose_pair_chain,
+    choose_pair_endpoints,
+    choose_pair_tap_chain,
+)
+from ..pairplan.tie import (  # noqa: F401 -- deprecated re-exports (#6837)
+    _TIE_WIDTH_STEP,
+    MAX_TIE_STUB_MM,
+    PlannedTie,
+    _tie_pad_gap,
+    plan_equivalent_pin_tie,
+)
 from . import kernel_adapter as ka
 from .geometry import (
     Pt,
@@ -47,6 +78,8 @@ from .geometry import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from ..primitives import Pad
     from .obstacles import CommittedCopper, LatticeKeepoutMask, LatticeObstacleModel
 
@@ -304,6 +337,41 @@ def merge_collinear_points(points: list[Pt]) -> list[Pt]:
     return out
 
 
+def trim_end_reversals(points: list[Pt]) -> list[Pt]:
+    """Trim a collinear overshoot-and-return at either end of a polyline.
+
+    The lattice search can reach a node beyond the goal anchor and append a
+    goal stub that returns along the same line, leaving a 180-degree
+    reversal on the last (or first) edge.  :func:`offset_polyline` cannot
+    offset that, so replace the two reversing steps ``a -> b -> p`` with the
+    single step ``a -> p`` (``p`` lies on segment ``a``-``b``).  When ``p``
+    coincides with ``a`` the whole out-and-back spur is dropped.
+
+    Only the first and last two steps are considered: a reversal in the
+    middle of the path is a genuine defect and must still decline.  The
+    caller re-verifies the trimmed centerline like any other.
+    """
+    pts = merge_collinear_points(points)
+
+    def trim_tail(seq: list[Pt]) -> list[Pt]:
+        while len(seq) >= 3:
+            a, b, p = seq[-3], seq[-2], seq[-1]
+            d1 = (b[0] - a[0], b[1] - a[1])
+            d2 = (p[0] - b[0], p[1] - b[1])
+            cross = d1[0] * d2[1] - d1[1] * d2[0]
+            dot = d1[0] * d2[0] + d1[1] * d2[1]
+            if abs(cross) > _EPS or dot >= 0.0 or dist(b, p) > dist(a, b) + _EPS:
+                break
+            # p is on segment a-b: drop the overshoot vertex b (and p too
+            # when it lands back on a, so the spur vanishes entirely).
+            seq = seq[:-2] if dist(a, p) <= _EPS else [*seq[:-2], p]
+        return seq
+
+    pts = trim_tail(pts)
+    pts = trim_tail(pts[::-1])[::-1]
+    return merge_collinear_points(pts)
+
+
 def offset_polyline(points: list[Pt], offset: float) -> list[Pt] | None:
     """Offset ``points`` perpendicular by ``offset`` (left of travel > 0).
 
@@ -453,227 +521,117 @@ def seg_rect_dist(a: Pt, b: Pt, rect: Rect) -> float:
     )
 
 
-Couple = tuple[int, int]
-"""A ``(p_index, n_index)`` P/N pad couple (indices into the input lists)."""
-
-
-def _greedy_couples(pads_p: list[Pad], pads_n: list[Pad]) -> list[Couple]:
-    """Couple each P pad with its nearest unclaimed N pad, nearest first."""
-    cands = sorted(
-        (dist((p.x, p.y), (n.x, n.y)), i, j)
-        for i, p in enumerate(pads_p)
-        for j, n in enumerate(pads_n)
-    )
-    couples: list[Couple] = []
-    used_p: set[int] = set()
-    used_n: set[int] = set()
-    for _d, i, j in cands:
-        if i in used_p or j in used_n:
+def _seg_rect_entry(a: Pt, b: Pt, rect: Rect) -> float | None:
+    """Smallest ``t`` in ``[0, 1]`` where ``a + t (b - a)`` is inside ``rect``."""
+    x0, y0, x1, y1 = rect
+    t0, t1 = 0.0, 1.0
+    for p, q, lo, hi in ((a[0], b[0], x0, x1), (a[1], b[1], y0, y1)):
+        d = q - p
+        if abs(d) <= _EPS:
+            if p < lo - _EPS or p > hi + _EPS:
+                return None
             continue
-        couples.append((i, j))
-        used_p.add(i)
-        used_n.add(j)
-    return couples
+        ta, tb = (lo - p) / d, (hi - p) / d
+        if ta > tb:
+            ta, tb = tb, ta
+        t0, t1 = max(t0, ta), min(t1, tb)
+        if t0 > t1:
+            return None
+    return t0
 
 
-def _couple_mid(pads_p: list[Pad], pads_n: list[Pad], c: Couple) -> Pt:
-    p, n = pads_p[c[0]], pads_n[c[1]]
-    return ((p.x + n.x) / 2.0, (p.y + n.y) / 2.0)
+#: Shapes whose copper the kernel's pad builder models exactly.
+_CLIP_SHAPES = frozenset({"rect", "roundrect", "circle", "oval", "obround"})
+
+#: How far inside the copper a clipped leg end must sit (mm).  A cut landing
+#: on the outline itself (a box corner that happens to touch a circle) is
+#: refused, so a float round-off can never turn it into an open circuit.
+_MIN_END_DEPTH = 0.01
 
 
-def _farthest_couples(
-    pads_p: list[Pad], pads_n: list[Pad], couples: list[Couple]
-) -> tuple[int, int]:
-    """Indices into ``couples`` of the two couples whose midpoints are farthest apart."""
-    best: tuple[float, int, int] | None = None
-    for x in range(len(couples)):
-        for y in range(x + 1, len(couples)):
-            d = dist(
-                _couple_mid(pads_p, pads_n, couples[x]), _couple_mid(pads_p, pads_n, couples[y])
-            )
-            if best is None or d > best[0]:
-                best = (d, x, y)
-    assert best is not None
-    return best[1], best[2]
+def _entry_in_copper(entry: Pt, pad: Pad) -> bool:
+    """True when ``entry`` lies inside ``pad``'s real copper (issue #6959).
 
+    "Inside" means at least :data:`_MIN_END_DEPTH` in from the outline.
 
-def choose_pair_endpoints(
-    pads_p: list[Pad], pads_n: list[Pad]
-) -> tuple[tuple[int, int], tuple[int, int]] | None:
-    """Pick the pair's main-run endpoints by proximity pairing.
-
-    Greedily couples each P pad with its nearest unclaimed N pad, then
-    returns the two couples whose midpoints are farthest apart as
-    ``((ip_a, in_a), (ip_b, in_b))`` index tuples into the input lists.
-    Returns ``None`` when fewer than two couples exist (degenerate pad
-    topology -- the pair cannot form a coupled main run).
-
-    These two couples are also the ENDS of :func:`choose_pair_chain`.
+    The cut is computed on the pad's axis-aligned bounding box, which holds
+    area with no copper for a circle, an oval or a rounded corner.  This test
+    uses the clearance kernel's pad builder, which models the real outline:
+    a rotated rectangle, a disc, a stadium, or a roundrect whose corner radius
+    is ``roundrect_rratio * min(width, height)``.  One difference from
+    :func:`~kicad_tools.router.clearance_shapes.pad_shape`: a roundrect with
+    no file ratio is measured here at KiCad's largest ratio (0.5), not as its
+    full rectangle.  The full rectangle is the safe choice for a clearance
+    test and the unsafe one for a containment test, because it would accept
+    a point in a corner that may hold no copper.  Shapes the builder does not
+    model exactly (``custom``, ``trapezoid``, ...) never contain the point.
     """
-    if not pads_p or not pads_n:
-        return None
-    couples = _greedy_couples(pads_p, pads_n)
-    if len(couples) < 2:
-        return None
-    x, y = _farthest_couples(pads_p, pads_n, couples)
-    return couples[x], couples[y]
+    from ..clearance_shapes import pad_kernel_params
+    from .kernel_adapter import gap, pad_outline, site
+
+    if pad.shape not in _CLIP_SHAPES:
+        return False
+    if pad.shape == "roundrect" and getattr(pad, "roundrect_rratio", None) is None:
+        shape, rratio = "roundrect", 0.5
+    else:
+        shape, rratio = pad_kernel_params(pad)
+    # Shrink the pad by the margin on every side and test plain membership
+    # (the kernel's point distance is 0 anywhere inside, so it has no depth
+    # to compare).  For a roundrect the shrunk pad keeps the same ratio, so
+    # its corners come out slightly rounder than a true inset: it stays
+    # inside the true inset, which is the safe direction.
+    m = 2.0 * _MIN_END_DEPTH
+    kpad = pad_outline(shape, pad.width - m, pad.height - m, rratio, pad.rotation, (pad.x, pad.y))
+    return gap(kpad, site(entry, 0.0)) <= 1e-9
 
 
-@dataclass(frozen=True)
-class PairChain:
-    """A diff pair's signal path as an ordered chain of couples (#6378).
+def clip_to_pad_entry(points: list[Pt], pad: Pad, trace_w: float) -> list[Pt]:
+    """Trim the pad-end tail of ``points`` where the track enters ``pad``.
 
-    Attributes:
-        segments: Coupled runs ``(couple_from, couple_to)`` in chain order,
-            end A first.  Exactly one segment (the farthest-apart trunk)
-            when the pair passes through no interior part.
-        hops: ``(entry_couple, exit_couple)`` inside each interior part
-            that has distinct entry and exit couples -- routed as two
-            ordinary single-ended connections (P hop, N hop), never as a
-            coupled attempt.
+    ``points`` ends at the pad (its last point is the pad position).  The
+    polyline is cut at the first point, walking from the far end, that lies
+    inside the pad rectangle inset by ``trace_w / 2`` along its travel axis --
+    the track end is then inside the pad copper and the in-pad tail (and any dogleg
+    within it) is dropped (issue #6959).  An axis no wider than the trace
+    keeps the pad's full extent.  Returned unchanged when neither axis can
+    inset (``vpad`` gateway pads have zero size), when the far end is
+    already inside the pad, or when no entry exists.
     """
+    from ..primitives import pad_half_extents
 
-    segments: list[tuple[Couple, Couple]]
-    hops: list[tuple[Couple, Couple]]
-
-
-def choose_pair_chain(pads_p: list[Pad], pads_n: list[Pad]) -> PairChain | None:
-    """Order a pair's couples along its signal path (issue #6378).
-
-    Couples are formed and the two ENDS chosen exactly as
-    :func:`choose_pair_endpoints` does (greedy nearest P/N, then the
-    farthest-apart couples).  Couples are then grouped by footprint (the
-    ref of both pads).  A couple whose P and N sit on different refs (one
-    test point per net, or the two nets running through two different
-    parts) never forms a part: it stays off the chain and is routed as an
-    extra, as before.  An *interior part* is a same-ref group holding neither end couple
-    whose couple-midpoint centroid projects strictly between the ends
-    (``0 < t < 1`` along the end-to-end axis).  Interior parts are visited
-    in projection order; each is entered at its couple nearest the previous
-    chain node and left at its couple nearest the next one (the next
-    part's centroid, or the far end).  A part with a single couple (a
-    termination resistor tapping the pair, board 06 LVDS) or whose entry
-    and exit coincide is not a pass-through and stays on the trunk.
-
-    Board 03 USB_D: J1.B6/B7 -> U2.3/U2.1 (segment), U2.3/U2.1 ->
-    U2.4/U2.6 (hop through the pass-through ESD part), U2.4/U2.6 ->
-    R4.1/R3.1 (segment) -- instead of a J1 -> R trunk that has to cross
-    U2's own pads.  Couples on an end part other than the end couple (the
-    second row of a USB-C receptacle) and parts outside the end span stay
-    off the chain: the caller routes them as extras, as before.
-
-    With no interior part the result is the single farthest-apart trunk,
-    identical to :func:`choose_pair_endpoints`.  Returns ``None`` when
-    fewer than two couples exist.
-    """
-    return _pair_chain(pads_p, pads_n, split_at_taps=False)
-
-
-def choose_pair_tap_chain(pads_p: list[Pad], pads_n: list[Pad]) -> PairChain | None:
-    """The pair's chain split at its tap parts too (issue #6535).
-
-    :func:`choose_pair_chain` keeps a tap -- a part holding a single couple,
-    such as a termination resistor straddling P and N (board 06 LVDS R1..R4)
-    -- on the single trunk.  When that trunk declines with ``pair-no-path``
-    (the tap's own P/N pads straddle the straight corridor, and every pad is
-    an obstacle to the fat agent), the caller may retry the pair as this
-    chain: each tap becomes a chain node, so the pair runs IC -> tap -> IC
-    and every segment ends *at* the tap's couple instead of having to get
-    past it.  A tap contributes no hop (entry == exit); pass-through parts
-    are chained exactly as :func:`choose_pair_chain` chains them.
-
-    Returns ``None`` when the result would not differ from
-    :func:`choose_pair_chain` (no tap part lies between the ends), so a
-    caller never retries the same chain.
-    """
-    chain = _pair_chain(pads_p, pads_n, split_at_taps=True)
-    if chain is None or chain == _pair_chain(pads_p, pads_n, split_at_taps=False):
-        return None
-    return chain
-
-
-def _pair_chain(pads_p: list[Pad], pads_n: list[Pad], *, split_at_taps: bool) -> PairChain | None:
-    """Shared body of :func:`choose_pair_chain` / :func:`choose_pair_tap_chain`."""
-    if not pads_p or not pads_n:
-        return None
-    couples = _greedy_couples(pads_p, pads_n)
-    if len(couples) < 2:
-        return None
-    ix, iy = _farthest_couples(pads_p, pads_n, couples)
-    end_a, end_b = couples[ix], couples[iy]
-    trunk = PairChain(segments=[(end_a, end_b)], hops=[])
-
-    def group(c: Couple) -> object:
-        ref_p, ref_n = pads_p[c[0]].ref, pads_n[c[1]].ref
-        if ref_p and ref_p == ref_n:
-            return ("ref", ref_p)
-        return ("couple", c)
-
-    g_a, g_b = group(end_a), group(end_b)
-    if g_a == g_b:
-        return trunk
-    groups: dict[object, list[Couple]] = {}
-    for c in couples:
-        g = group(c)
-        # Only a same-ref group is a part the pair passes through.  A couple
-        # whose P and N pads sit on different refs (one test point per net,
-        # or D+ and D- running through two different parts) is not a part:
-        # it stays an extra, exactly as before #6378.
-        if g in (g_a, g_b) or g[0] != "ref":  # type: ignore[index]
+    # A non-cardinal residual rotation makes the AABB far larger than the
+    # copper, so a cut on it can land off the pad (an open circuit): keep
+    # the unclipped leg to the pad centre.
+    if pad.rotation % 90.0 > _EPS and 90.0 - pad.rotation % 90.0 > _EPS:
+        return points
+    half_w, half_h = pad_half_extents(pad)
+    inset = trace_w / 2.0
+    # The track end is inset only along the segment's travel axis: a leg
+    # running alongside the pad's edge region (inside the copper, outside the
+    # all-round inset) must still be cut at the pad's far edge.
+    ix = inset if half_w - inset > _EPS else 0.0
+    iy = inset if half_h - inset > _EPS else 0.0
+    if (ix == 0.0 and iy == 0.0) or len(points) < 2:
+        return points
+    x0, y0, x1, y1 = pad.x - half_w, pad.y - half_h, pad.x + half_w, pad.y + half_h
+    if pt_in_rect(points[0], (x0 + ix, y0 + iy, x1 - ix, y1 - iy)):
+        return points
+    for i, (a, b) in enumerate(zip(points, points[1:], strict=False)):
+        if abs(b[0] - a[0]) >= abs(b[1] - a[1]):
+            rect = (x0 + ix, y0, x1 - ix, y1)
+        else:
+            rect = (x0, y0 + iy, x1, y1 - iy)
+        t = _seg_rect_entry(a, b, rect)
+        if t is None:
             continue
-        groups.setdefault(g, []).append(c)
-    # A tap (one couple on the part: a termination resistor straddling P and N)
-    # has no distinct entry and exit -- the trunk passes it on a clear axis, so
-    # it stays on the trunk.  Only a part with two or more couples is a
-    # pass-through the signal enters on one side and leaves on the other.
-    if not split_at_taps:
-        groups = {g: m for g, m in groups.items() if len(m) >= 2}
-    if not groups:
-        return trunk
-
-    m_a = _couple_mid(pads_p, pads_n, end_a)
-    m_b = _couple_mid(pads_p, pads_n, end_b)
-    ax, ay = m_b[0] - m_a[0], m_b[1] - m_a[1]
-    len2 = ax * ax + ay * ay
-    if len2 <= _EPS:
-        return trunk
-    interior: list[tuple[float, Pt, list[Couple]]] = []
-    for members in groups.values():
-        mids = [_couple_mid(pads_p, pads_n, c) for c in members]
-        cx = sum(m[0] for m in mids) / len(mids)
-        cy = sum(m[1] for m in mids) / len(mids)
-        t = ((cx - m_a[0]) * ax + (cy - m_a[1]) * ay) / len2
-        if 0.0 < t < 1.0:
-            interior.append((t, (cx, cy), members))
-    if not interior:
-        return trunk
-    interior.sort(key=lambda e: e[0])
-
-    def nearest(members: list[Couple], to: Pt) -> Couple:
-        return min(members, key=lambda c: (dist(_couple_mid(pads_p, pads_n, c), to), c))
-
-    segments: list[tuple[Couple, Couple]] = []
-    hops: list[tuple[Couple, Couple]] = []
-    prev = end_a
-    for k, (_t, _centroid, members) in enumerate(interior):
-        nxt = interior[k + 1][1] if k + 1 < len(interior) else m_b
-        entry = nearest(members, _couple_mid(pads_p, pads_n, prev))
-        exit_ = nearest(members, nxt)
-        if exit_ == entry:
-            if not split_at_taps:
-                continue  # no distinct exit: a tap, not a pass-through
-            # Issue #6535: a tap is a chain node with no hop -- the segment
-            # before it ends at its couple and the next one starts there.
-            segments.append((prev, entry))
-            prev = entry
-            continue
-        segments.append((prev, entry))
-        hops.append((entry, exit_))
-        prev = exit_
-    if not segments:
-        return trunk
-    segments.append((prev, end_b))
-    return PairChain(segments=segments, hops=hops)
+        entry = (a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]))
+        if not _entry_in_copper(entry, pad):
+            return points
+        clipped = [*points[: i + 1], entry]
+        if sum(dist(u, v) for u, v in zip(clipped, clipped[1:], strict=False)) <= _EPS:
+            return points
+        return clipped
+    return points
 
 
 def relocate_pair_anchor(
@@ -720,7 +678,7 @@ def relocate_pair_anchor(
     ``max_shift`` (the caller keeps the midpoint and the pair declines or
     falls back exactly as before).
     """
-    from ..quantize import dogleg_points
+    from ..pairplan.attach import anchor_shift_candidates, dogleg_attach_candidates
 
     mid = ((pad_p.x + pad_n.x) / 2.0, (pad_p.y + pad_n.y) / 2.0)
     if any(
@@ -728,14 +686,6 @@ def relocate_pair_anchor(
         for layer in layers
     ):
         return None
-    ux, uy = pad_p.x - pad_n.x, pad_p.y - pad_n.y
-    axis_len = (ux * ux + uy * uy) ** 0.5
-    if axis_len <= _EPS:
-        return None
-    ux, uy = ux / axis_len, uy / axis_len
-    nx, ny = -uy, ux  # perpendicular to the P-N axis
-    if (toward[0] - mid[0]) * nx + (toward[1] - mid[1]) * ny < 0:
-        nx, ny = -nx, -ny
 
     def seg_ok(pad: Pad, a: Pt, b: Pt, layer: int) -> bool:
         if dist(a, b) <= _EPS:
@@ -745,18 +695,14 @@ def relocate_pair_anchor(
         return not (keepouts and keepouts.segment_blocked(a, b, layer, pad.net, trace_half))
 
     def attach_clear(pad: Pad, target: Pt, layer: int) -> bool:
-        for axis_first in (False, True):
-            poly = dogleg_points(pad.x, pad.y, target[0], target[1], axis_first=axis_first)
+        for poly in dogleg_attach_candidates((pad.x, pad.y), target):
             if all(seg_ok(pad, a, b, layer) for a, b in zip(poly, poly[1:], strict=False)):
                 return True
         return False
 
-    steps = int(max_shift / step + 0.5)
-    for k in range(1, steps + 1):
-        shift = k * step
-        anchor = (mid[0] + nx * shift, mid[1] + ny * shift)
-        end_p = (anchor[0] + ux * half_pitch, anchor[1] + uy * half_pitch)
-        end_n = (anchor[0] - ux * half_pitch, anchor[1] - uy * half_pitch)
+    for anchor, end_p, end_n in anchor_shift_candidates(
+        pad_p, pad_n, toward, half_pitch=half_pitch, step=step, max_shift=max_shift
+    ):
         for layer in layers:
             if pads_block_point_grown(
                 obstacles, anchor, layer, pair_nets, half_pitch, exempt=exempt
@@ -770,3 +716,73 @@ def relocate_pair_anchor(
             if attach_clear(pad_p, end_p, layer) and attach_clear(pad_n, end_n, layer):
                 return anchor
     return None
+
+
+def sandwiched_pad_escape_sites(
+    obstacles: LatticeObstacleModel,
+    pad_p: Pad,
+    pad_n: Pad,
+    toward: Pt,
+    *,
+    pair_nets: set[int],
+    routed_nets: set[int] | frozenset[int],
+    via_radius: float,
+    clearance_for: Callable[[int], float],
+) -> list[tuple[Pad, Pt]]:
+    """Via sites for routed pads sealed in by a coupled pair's start (#6697).
+
+    When a pair segment starts at two pads of one part that straddle a
+    foreign pad (board 03 U2: VBUS U2.5 between D+ U2.4 and D- U2.6), the
+    P/N midpoint lies on that pad and :func:`relocate_pair_anchor` slides
+    the fat centerline's endpoint just past its outer edge.  The pair start
+    then caps the pad's only outward exit; its sides are the pair pads, and
+    its inner end faces the part body.  A pour net used to get a #6401 via
+    site there, which pushed the anchor further out.  A *routed* net (board
+    03 VBUS since #6599) has none, so it was stranded.
+
+    Returns ``(pad, site)`` for each single-layer pad of a ``routed_nets`` net
+    (not a pair net) whose copper contains the P/N midpoint: ``site`` is a
+    via centre just off the pad's outer edge on the side facing ``toward``
+    (the same side the anchor slides to).  A site is kept only when that via
+    clears every other-net pad (any layer: the barrel spans the stack) by
+    ``clearance_for(net)``.
+    """
+    mid = ((pad_p.x + pad_n.x) / 2.0, (pad_p.y + pad_n.y) / 2.0)
+    ux, uy = pad_p.x - pad_n.x, pad_p.y - pad_n.y
+    axis_len = math.hypot(ux, uy)
+    if axis_len <= _EPS:
+        return []
+    nx, ny = -uy / axis_len, ux / axis_len
+    if (toward[0] - mid[0]) * nx + (toward[1] - mid[1]) * ny < 0:
+        nx, ny = -nx, -ny
+    from ..pairplan.attach import sandwich_via_site
+    from ..primitives import pad_half_extents
+
+    def box_gap(other: Pad, pt: Pt) -> float:
+        hw, hh = pad_half_extents(other)
+        return math.hypot(max(abs(pt[0] - other.x) - hw, 0.0), max(abs(pt[1] - other.y) - hh, 0.0))
+
+    out: list[tuple[Pad, Pt]] = []
+    for idx in obstacles.pads_near(mid[0], mid[1], mid[0], mid[1]):
+        pad = obstacles.pads[idx]
+        if not pad.net or pad.net in pair_nets or pad.net not in routed_nets:
+            continue
+        if len(obstacles.pad_layer_indices[idx]) != 1:
+            continue  # a through-hole pad already has its own barrel
+        if box_gap(pad, mid) > _EPS:
+            continue  # the midpoint is not on this pad's copper
+        hw, hh = pad_half_extents(pad)
+        # Support distance of the pad box along the outward normal.
+        reach = abs(nx) * hw + abs(ny) * hh
+        site = sandwich_via_site(pad, (nx, ny), via_radius, reach)
+        need = via_radius + clearance_for(pad.net)
+        span = need + 3.0
+        if any(
+            obstacles.pads[j].net != pad.net and box_gap(obstacles.pads[j], site) < need - 1e-6
+            for j in obstacles.pads_near(
+                site[0] - span, site[1] - span, site[0] + span, site[1] + span
+            )
+        ):
+            continue
+        out.append((pad, site))
+    return out

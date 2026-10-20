@@ -84,6 +84,16 @@ JOB_LEVEL_FILTER = (
 )
 
 
+# `heavy-default-branch-suite` fires when a workflow that runs on PRs AND on
+# default-branch pushes costs at least this many runner-minutes per day on the
+# default branch (job-minutes of original push attempts, see main_stats).
+DEFAULT_HEAVY_MAIN_MINUTES_PER_DAY = 300.0
+# Default-branch runs whose jobs are fetched to measure the per-run cost.
+MAIN_JOBS_SAMPLE = 10
+# Findings whose estimate includes avoided default-branch runs. They describe
+# overlapping populations, so aggregation takes the largest, never the sum.
+DEFAULT_BRANCH_MEASURES = ("default-branch-overlap", "heavy-default-branch")
+
 class YamlError(Exception):
     pass
 
@@ -661,6 +671,15 @@ def _key_text(value):
     return _text(value)
 
 
+def _key_has_version(key):
+    """True if the cache key embeds a resolved tool version (step output or literal)."""
+    if re.search(r"steps\.[\w-]+\.outputs\.[\w-]*version[\w-]*", key, re.I):
+        return True
+    if re.search(r"(?<![\w.])v?\d+\.\d+(\.\d+)?(?![\w.])", re.sub(r"\$\{\{.*?\}\}", "", key)):
+        return True
+    return False
+
+
 def _cache_findings(wf):
     out = []
     for jid, job in wf.jobs.items():
@@ -682,7 +701,7 @@ def _cache_findings(wf):
                            "cache and evicts useful ones)" if restore else ""),
                         "Key on the inputs instead: `${{ runner.os }}-<tool>-${{ hashFiles('<lockfile>') }}`"
                         " with a `restore-keys:` prefix fallback.", job=jid))
-                elif "hashFiles(" not in key:
+                elif "hashFiles(" not in key and not _key_has_version(key):
                     out.append(finding(
                         "cache-key-no-lockfile-hash", "high", "cache", wf,
                         f"cache key `{key}` has no `hashFiles(...)` of a lockfile, so it never "
@@ -695,12 +714,20 @@ def _cache_findings(wf):
                         "cache has no `restore-keys:` fallback, so every lockfile change is a full "
                         "cold miss", "Add `restore-keys: ${{ runner.os }}-<tool>-`.", job=jid))
                 if has_matrix and "matrix." not in key:
+                    varies = any("matrix." in json.dumps(
+                        {k: v for k, v in o.items() if k in ("run", "with", "env", "if")},
+                        default=str) for o in steps if o is not step)
                     out.append(finding(
-                        "cache-matrix-key-collision", "medium", "cache", wf,
+                        "cache-matrix-key-collision", "medium" if varies else "info", "cache", wf,
                         "matrix job caches under a key with no `matrix.*` component — matrix legs "
-                        "race to save and restore each other's (wrong) caches",
+                        "race to save and restore each other's (wrong) caches" if varies else
+                        "matrix job caches under a key with no `matrix.*` component, but no other "
+                        "step references `matrix.*`, so the cached content is likely identical "
+                        "across legs (shared cache is probably intentional)",
                         "Include the distinguishing matrix values (e.g. `${{ matrix.os }}`, "
-                        "`${{ matrix.node }}`) in the key.", job=jid))
+                        "`${{ matrix.node }}`) in the key." if varies else
+                        "No action unless the legs install different content; then add "
+                        "`matrix.*` to the key.", job=jid))
             if "swatinem/rust-cache" in uses:
                 job_caches = True
         out += _toolchain_cache_findings(wf, jid, steps, job_caches)
@@ -762,45 +789,188 @@ def _cancel_value(conc):
     return None
 
 
+def _group_of(conc):
+    if isinstance(conc, dict):
+        group = conc.get("group")
+        return None if group is None else str(group)
+    if isinstance(conc, str):
+        return conc
+    return None
+
+
 def _pushes_default_branch(wf, default_branch):
+    """Can a push to the default branch trigger this workflow?
+
+    Honors `branches` / `branches-ignore` patterns (negations included) and
+    tag-only filters. `paths` filters are ignored: a path-filtered workflow
+    still runs on some default-branch pushes.
+    """
     if "push" not in wf.on:
         return False
-    branches = wf.on["push"].get("branches")
-    if branches is None:
-        return wf.on["push"].get("tags") is None or wf.on["push"].get("branches-ignore") is not None
-    return filter_matches(_as_list(branches), default_branch)
+    push = wf.on["push"]
+    branches, ignore = push.get("branches"), push.get("branches-ignore")
+    if branches is not None:
+        return filter_matches(_as_list(branches), default_branch)
+    if ignore is not None:
+        return not filter_matches(_as_list(ignore), default_branch)
+    return push.get("tags") is None
+
+
+def _expr_inner(value):
+    m = re.fullmatch(r"\s*\$\{\{(.*)\}\}\s*", value, re.S)
+    return (m.group(1) if m else value).strip()
+
+
+def eval_cancel_for_default_push(value, default_branch):
+    """Evaluate `cancel-in-progress` for a push to the default branch.
+
+    True / False when statically decidable, None when it is not (an arbitrary
+    expression is never treated as safely PR-scoped).
+    """
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    expr = _expr_inner(str(value))
+    if expr.lower() in ("true", "false"):
+        return expr.lower() == "true"
+    m = re.fullmatch(r"github\.event_name\s*(==|!=)\s*'([\w-]+)'", expr)
+    if m:
+        return (m.group(2) == "push") == (m.group(1) == "==")
+    m = re.fullmatch(r"github\.ref\s*(==|!=)\s*'([^']*)'", expr)
+    if m:
+        return (m.group(2) == f"refs/heads/{default_branch}") == (m.group(1) == "==")
+    m = re.fullmatch(r"github\.ref_name\s*(==|!=)\s*'([^']*)'", expr)
+    if m:
+        return (m.group(2) == default_branch) == (m.group(1) == "==")
+    return None
+
+
+def classify_group(group):
+    """Return (kind, distinguishes_workflows) for a concurrency group string.
+
+    kind: literal | ref | unique | uncertain | missing. `unique` means a
+    per-run value (sha/run id) so the group never queues anything.
+    """
+    if not group or not group.strip():
+        return "missing", False
+    exprs = re.findall(r"\$\{\{(.*?)\}\}", group, re.S)
+    literal = re.sub(r"\$\{\{.*?\}\}", "", group, flags=re.S)
+    has_literal = bool(re.sub(r"[\s\-_/:.]", "", literal))
+    if not exprs:
+        return "literal", True
+    text = " ".join(exprs)
+    distinct = has_literal or bool(re.search(r"github\.(workflow|job)\b", text))
+    if re.search(r"github\.(sha|run_id|run_number|run_attempt)\b", text):
+        return "unique", distinct
+    if re.search(r"github\.(ref|ref_name|head_ref)\b", text):
+        return "ref", distinct
+    return "uncertain", distinct
+
+
+def _concurrency_blocks(wf):
+    blocks = []
+    if wf.doc.get("concurrency") is not None:
+        blocks.append((None, wf.doc["concurrency"]))
+    for jid, job in wf.jobs.items():
+        if job.get("concurrency") is not None:
+            blocks.append((jid, job["concurrency"]))
+    return blocks
+
+
+def _default_branch_findings(wf, default_branch, has_pr):
+    """Checks for workflows a push to the default branch can trigger.
+
+    Separate from the PR checks: a push-only workflow has no PRs to supersede,
+    but a queue of merges (or a cancelled started run) is still a cost/verdict
+    problem on the default branch.
+    """
+    out = []
+    covered = wf.doc.get("concurrency") is not None or \
+        all(job.get("concurrency") is not None for job in wf.jobs.values())
+    if not covered and not has_pr:
+        out.append(finding(
+            "missing-default-branch-concurrency", "medium", "wasted-runs", wf,
+            f"runs on pushes to `{default_branch}` with no `concurrency:` group — every merge "
+            "queues a full run, even when newer merges have already landed",
+            "Add at workflow level (one running, the newest waiting, nothing started is "
+            "cancelled):\n"
+            "concurrency:\n"
+            "  group: ${{ github.workflow }}-${{ github.ref }}\n"
+            "  cancel-in-progress: false\n"
+            "A deploy should also resolve the newest verified commit when it starts and refuse "
+            "a rollback (see the deploy guidance in optimize-ci.md).",
+            measure="default-branch-overlap"))
+    for jid, conc in _concurrency_blocks(wf):
+        scope = f"job `{jid}` " if jid else ""
+        kind, distinct = classify_group(_group_of(conc))
+        if kind == "unique":
+            out.append(finding(
+                "unsafe-default-branch-group", "medium", "wasted-runs", wf,
+                f"{scope}concurrency group embeds a per-run value (sha / run id), so it is unique "
+                f"per run and never queues or supersedes `{default_branch}` runs",
+                "Scope the group to the ref and the workflow: "
+                "`${{ github.workflow }}-${{ github.ref }}`.", job=jid))
+        elif kind == "ref" and not distinct:
+            out.append(finding(
+                "unsafe-default-branch-group", "medium", "wasted-runs", wf,
+                f"{scope}concurrency group is only the ref, so every workflow on that ref shares "
+                "one group and queues (or cancels) the others",
+                "Prefix the workflow: `${{ github.workflow }}-${{ github.ref }}`.", job=jid))
+        elif kind == "uncertain":
+            out.append(finding(
+                "uncertain-default-branch-group", "low", "wasted-runs", wf,
+                f"{scope}concurrency group is an expression that cannot be evaluated statically; "
+                f"whether `{default_branch}` runs are isolated per ref and per workflow is unverified",
+                "Check by hand that the group resolves to a ref-scoped, workflow-distinct string.",
+                job=jid))
+        verdict = eval_cancel_for_default_push(_cancel_value(conc), default_branch)
+        if verdict is True:
+            out.append(finding(
+                "cancel-on-default-branch", "medium", "wasted-runs", wf,
+                f"{scope}`cancel-in-progress: true` also cancels `{default_branch}` pushes — a burst "
+                f"of merges can leave intermediate `{default_branch}` commits with no completed run "
+                "(a `cancelled` run is no verdict)",
+                "Scope cancellation to PRs: "
+                "`cancel-in-progress: ${{ github.event_name == 'pull_request' }}` "
+                "(or `false` on a push-only workflow).", job=jid, measure="default-branch-cancelled"))
+        elif verdict is None:
+            out.append(finding(
+                "uncertain-default-branch-cancel", "low", "wasted-runs", wf,
+                f"{scope}`cancel-in-progress` is an expression that cannot be evaluated statically; "
+                f"it may cancel started `{default_branch}` runs",
+                "Check by hand, or use "
+                "`${{ github.event_name == 'pull_request' }}`, which is false on pushes.", job=jid))
+    return out
 
 
 def _wasted_run_findings(wf, default_branch):
     out = []
-    if not wf.pr_events or not wf.jobs:
+    if not wf.jobs:
         return out
-    wf_conc = wf.doc.get("concurrency")
-    job_concs = [job.get("concurrency") for job in wf.jobs.values()]
-    if wf_conc is None and not all(c is not None for c in job_concs):
-        out.append(finding(
-            "missing-concurrency", "medium", "wasted-runs", wf,
-            "no `concurrency:` group — every push to a PR leaves the superseded run burning minutes",
-            "Add at workflow level (cancels superseded PR runs; never cancels default-branch "
-            "pushes):\n" + RECOMMENDED_CONCURRENCY, measure="superseded-pr-runs"))
-    elif wf_conc is not None:
-        cancel = _cancel_value(wf_conc)
-        if cancel is None or cancel is False:
+    if wf.pr_events:
+        wf_conc = wf.doc.get("concurrency")
+        job_concs = [job.get("concurrency") for job in wf.jobs.values()]
+        if wf_conc is None and not all(c is not None for c in job_concs):
             out.append(finding(
-                "concurrency-no-cancel", "medium", "wasted-runs", wf,
-                "`concurrency:` group without `cancel-in-progress` — superseded PR runs queue "
-                "instead of being cancelled",
-                "Set `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`.",
-                measure="superseded-pr-runs"))
-        elif cancel is True and _pushes_default_branch(wf, default_branch):
-            out.append(finding(
-                "cancel-on-default-branch", "medium", "wasted-runs", wf,
-                f"`cancel-in-progress: true` also cancels `{default_branch}` pushes — a burst of "
-                f"merges can leave intermediate `{default_branch}` commits with no completed run",
-                "Scope cancellation to PRs: "
-                "`cancel-in-progress: ${{ github.event_name == 'pull_request' }}`."))
+                "missing-concurrency", "medium", "wasted-runs", wf,
+                "no `concurrency:` group — every push to a PR leaves the superseded run burning minutes",
+                "Add at workflow level (cancels superseded PR runs; never cancels default-branch "
+                "pushes):\n" + RECOMMENDED_CONCURRENCY, measure="superseded-pr-runs"))
+        elif wf_conc is not None:
+            cancel = _cancel_value(wf_conc)
+            if cancel is None or cancel is False:
+                out.append(finding(
+                    "concurrency-no-cancel", "medium", "wasted-runs", wf,
+                    "`concurrency:` group without `cancel-in-progress` — superseded PR runs queue "
+                    "instead of being cancelled",
+                    "Set `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`.",
+                    measure="superseded-pr-runs"))
+    if _pushes_default_branch(wf, default_branch):
+        out += _default_branch_findings(wf, default_branch, bool(wf.pr_events))
     push = wf.on.get("push")
-    if push is not None and all(push.get(k) is None for k in ("branches", "branches-ignore", "tags")):
+    if wf.pr_events and push is not None and \
+            all(push.get(k) is None for k in ("branches", "branches-ignore", "tags")):
         out.append(finding(
             "duplicate-push-pr", "medium", "wasted-runs", wf,
             "triggers on `push` to every branch AND `pull_request` — each commit on a "
@@ -926,26 +1096,221 @@ def _minutes(start, end):
     return max((e - s).total_seconds() / 60.0, 0.0) if s and e else 0.0
 
 
-def gather_history(gh, repo, max_runs=100, days=30, jobs_sample=5, pr_sample=30):
-    """Recent runs, per-workflow runner-minutes, and per-PR changed files."""
-    since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
-    runs, page = [], 1
-    while len(runs) < max_runs:
-        data = gh.api(f"repos/{repo}/actions/runs?per_page={min(100, max_runs)}&page={page}"
+def _run_path(run):
+    return (run.get("path") or "").split("@", 1)[0]
+
+
+def _row(run):
+    """Normalize a run for timeline math; None when timestamps are missing."""
+    created = _ts(run.get("created_at"))
+    start = _ts(run.get("run_started_at")) or created
+    end = _ts(run.get("updated_at"))
+    if not created or not start or not end or end < start:
+        return None
+    return {"id": run.get("id"), "created": created, "start": start, "end": end,
+            "conclusion": run.get("conclusion"),
+            "wall": (end - start).total_seconds() / 60.0}
+
+
+def observed_overlap(rows):
+    """Runs whose start precedes the end of an earlier run (strict: touching
+    timestamps are not overlap). A diagnostic only: it is NOT the number of
+    runs a one-running/one-pending queue would avoid."""
+    count, latest_end = 0, None
+    for r in sorted(rows, key=lambda r: (r["start"], str(r["id"]))):
+        if latest_end is not None and r["start"] < latest_end:
+            count += 1
+        latest_end = r["end"] if latest_end is None else max(latest_end, r["end"])
+    return count
+
+
+def replay_queue(rows):
+    """Replay arrivals through GitHub's concurrency queue (no cancel-in-progress).
+
+    The documented contract: per group at most one run is running and one is
+    pending; a newer arrival replaces the pending run, which is cancelled. A
+    lone arrival during an active run waits and still executes. Arrivals are
+    `created_at`, ordered by (time, id) so simultaneous arrivals are
+    deterministic; durations are each run's measured wall time. A run arriving
+    exactly when the running one ends finds the group free.
+    Returns (executed, superseded run ids).
+    """
+    arrivals = sorted(rows, key=lambda r: (r["created"], str(r["id"])))
+    running_end, pending, executed, superseded = None, None, 0, []
+
+    def settle(until):
+        nonlocal running_end, pending, executed
+        while running_end is not None and (until is None or running_end <= until):
+            if pending is None:
+                running_end = None
+                return
+            executed += 1
+            running_end = running_end + timedelta(minutes=pending["wall"])
+            pending = None
+
+    for r in arrivals:
+        settle(r["created"])
+        if running_end is None:
+            executed += 1
+            running_end = r["created"] + timedelta(minutes=r["wall"])
+        else:
+            if pending is not None:
+                superseded.append(pending["id"])
+            pending = r
+    # Drain: the still-pending run executes after the running one.
+    if pending is not None:
+        executed += 1
+    return executed, superseded
+
+
+def bucket_estimate(rows, per_run, hours):
+    """Counterfactual: run once per occupied fixed-UTC bucket on its newest commit."""
+    size = 3600 * hours
+    occupied = len({int(r["created"].timestamp()) // size for r in rows})
+    baseline = len(rows) * per_run
+    est = occupied * per_run
+    return {"bucketHours": hours, "occupiedBuckets": occupied, "baselineRuns": len(rows),
+            "perRunMinutes": round(per_run, 2), "baselineMinutes": round(baseline, 1),
+            "estimatedMinutes": round(est, 1), "savedMinutes": round(baseline - est, 1),
+            "savedPct": round(100.0 * (baseline - est) / baseline, 1) if baseline else 0.0,
+            "kind": "counterfactual estimate, not observed savings"}
+
+
+def main_stats(gh, repo, wf_runs, branch, main_sample=MAIN_JOBS_SAMPLE):
+    """Default-branch evidence for one workflow.
+
+    Population: `event == push`, `head_branch == branch`, original attempt only
+    (`run_attempt` 1 or absent); reruns are counted and excluded. Runs lacking a
+    created/updated timestamp are excluded and counted. Cancelled and skipped
+    runs stay in the arrival timeline (they arrived) but not in the cost
+    population: a cancelled run's duration is truncated.
+    """
+    push = [r for r in wf_runs if r.get("event") == "push" and r.get("head_branch") == branch]
+    originals = [r for r in push if (r.get("run_attempt") or 1) == 1]
+    pairs = [(r, _row(r)) for r in originals]
+    timed = [(r, row) for r, row in pairs if row]
+    rows = [row for _, row in timed]
+    eligible = [(r, row) for r, row in timed if row["conclusion"] not in ("cancelled", "skipped", None)]
+    stats = {"pushRuns": len(push), "originalRuns": len(originals),
+             "rerunAttempts": len(push) - len(originals),
+             "missingTimestamps": len(originals) - len(timed),
+             "cancelledRuns": sum(1 for row in rows if row["conclusion"] == "cancelled"),
+             "eligibleRuns": len(eligible)}
+    sampled, job_total = 0, 0.0
+    for r, _ in sorted(eligible, key=lambda t: t[1]["created"], reverse=True)[:main_sample]:
+        try:
+            jobs = (gh.api(f"repos/{repo}/actions/runs/{r['id']}/jobs?per_page=100") or {}).get("jobs") or []
+        except ApiError:
+            continue
+        if not jobs:
+            continue
+        sampled += 1
+        job_total += sum(_minutes(j.get("started_at"), j.get("completed_at")) for j in jobs)
+    if sampled:
+        per_run, basis = job_total / sampled, "job-minutes"
+    elif eligible:
+        per_run, basis = sum(row["wall"] for _, row in eligible) / len(eligible), "wall-time"
+    else:
+        per_run, basis = None, None
+    stats.update({"costBasis": basis, "sampledJobRuns": sampled,
+                  "perRunMinutes": None if per_run is None else round(per_run, 2),
+                  "observedOverlap": observed_overlap(rows)})
+    executed, superseded = replay_queue(rows) if rows else (0, [])
+    stats["replay"] = {"arrivals": len(rows), "executed": executed, "superseded": len(superseded),
+                       "estMinutesSaved": None if per_run is None else round(len(superseded) * per_run, 1)}
+    elig_rows = [row for _, row in eligible]
+    if per_run is not None and elig_rows:
+        stats["batching"] = {"hourly": bucket_estimate(elig_rows, per_run, 1),
+                             "threeHourly": bucket_estimate(elig_rows, per_run, 3)}
+    else:
+        stats["batching"] = None
+    return stats
+
+
+def _percentile(values, pct):
+    """Nearest-rank percentile of a non-empty list."""
+    ordered = sorted(values)
+    idx = max(int(-(-pct * len(ordered) // 100)) - 1, 0)
+    return ordered[min(idx, len(ordered) - 1)]
+
+
+def _list_runs(gh, repo, endpoint, cap, since):
+    """Completed runs from one runs-listing endpoint, newest first, up to `cap`.
+
+    Returns (runs, total_count): total_count is the API's count of completed
+    runs in the window, so it can exceed len(runs) when the cap bites.
+    """
+    runs, page, total = [], 1, None
+    per_page = min(100, cap)
+    while len(runs) < cap:
+        data = gh.api(f"{endpoint}?per_page={per_page}&page={page}&status=completed"
                       f"&created=%3E%3D{since}") or {}
         batch = data.get("workflow_runs") or []
+        if total is None and isinstance(data.get("total_count"), int):
+            total = data["total_count"]
         runs += batch
-        if len(batch) < min(100, max_runs):
+        if len(batch) < per_page:
             break
         page += 1
-    runs = [r for r in runs[:max_runs] if r.get("status") == "completed"]
+    runs = runs[:cap]
+    return runs, (total if total is not None and total >= len(runs) else len(runs))
+
+
+def _span_days(rs, default):
+    created = sorted(t for t in (_ts(r.get("created_at")) for r in rs) if t)
+    if len(created) > 1:
+        return max((created[-1] - created[0]).total_seconds() / 86400.0, 1.0)
+    return float(default)
+
+
+def gather_history(gh, repo, max_runs=100, days=30, jobs_sample=20, pr_sample=30,
+                   default_branch=None, main_sample=MAIN_JOBS_SAMPLE, workflows=None):
+    """Recent runs, per-workflow runner-minutes, default-branch stats, per-PR changed files.
+
+    With `workflows`, up to `max_runs` completed runs are sampled PER WORKFLOW
+    (so a cheap, bursty workflow cannot crowd out an expensive one) and each
+    workflow's true run count for the window (`total_count`) is recorded so
+    estimates can be scaled. Without it (or if no per-workflow listing is
+    readable) it falls back to one repo-wide listing capped at `max_runs`.
+    """
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+    runs, totals, caps = [], {}, {}
+    for wf in workflows or []:
+        path = getattr(wf, "path", "")
+        if getattr(wf, "error", None) or not path:
+            continue
+        try:
+            wf_runs, total = _list_runs(
+                gh, repo, f"repos/{repo}/actions/workflows/{Path(path).name}/runs", max_runs, since)
+        except ApiError:
+            continue
+        wf_runs = [r for r in wf_runs if r.get("status") == "completed"]
+        for r in wf_runs:
+            r.setdefault("path", path)
+        runs += wf_runs
+        totals[path] = max(total, len(wf_runs))
+        caps[path] = totals[path] > len(wf_runs)
+    per_wf_mode = bool(totals)
+    if not per_wf_mode:
+        runs, _ = _list_runs(gh, repo, f"repos/{repo}/actions/runs", max_runs, since)
+        capped = len(runs) >= max_runs
+        runs = [r for r in runs if r.get("status") == "completed"]
+    else:
+        capped = any(caps.values())
+    # A capped sample covers only the newest part of the window: measure the
+    # span it really covers instead of presenting it as the full window.
+    window_days = float(days)
+    if capped and not per_wf_mode:
+        window_days = _span_days(runs, days)
     by_path = {}
     for run in runs:
-        by_path.setdefault(run.get("path", "").split("@", 1)[0], []).append(run)
+        by_path.setdefault(_run_path(run), []).append(run)
     per_workflow = {}
     for path, wf_runs in by_path.items():
         sampled, job_minutes = 0, {}
         total_sample = 0.0
+        total_runs = totals.get(path, len(wf_runs)) if per_wf_mode else len(wf_runs)
+        wf_capped = caps.get(path, False) if per_wf_mode else False
         for run in wf_runs[:jobs_sample]:
             try:
                 jobs = (gh.api(f"repos/{repo}/actions/runs/{run['id']}/jobs?per_page=100") or {}).get("jobs") or []
@@ -963,9 +1328,16 @@ def gather_history(gh, repo, max_runs=100, days=30, jobs_sample=5, pr_sample=30)
             per_run = sum(walls) / len(walls) if walls else 0.0
         per_workflow[path] = {
             "runs": len(wf_runs),
+            "totalRuns": total_runs,
+            "sampleCapped": wf_capped,
+            "scale": round(total_runs / len(wf_runs), 4) if wf_runs else 1.0,
+            "windowDays": round(_span_days(wf_runs, days), 2) if wf_capped else float(days),
             "avgRunnerMinutesPerRun": round(per_run, 2),
-            "totalRunnerMinutes": round(per_run * len(wf_runs), 1),
+            "totalRunnerMinutes": round(per_run * total_runs, 1),
             "jobs": {k: round(sum(v) / len(v), 2) for k, v in sorted(job_minutes.items())},
+            "jobSpread": {k: {"n": len(v), "median": round(_percentile(v, 50), 2),
+                              "p90": round(_percentile(v, 90), 2)}
+                          for k, v in sorted(job_minutes.items())},
             "sampledRuns": sampled,
         }
     # A run's `pull_requests` array is emptied once its PR merges and the
@@ -995,8 +1367,17 @@ def gather_history(gh, repo, max_runs=100, days=30, jobs_sample=5, pr_sample=30)
             pr_files[number] = [f.get("filename", "") for f in files]
         except ApiError:
             continue
+    main = {}
+    if default_branch:
+        for path, wf_runs in by_path.items():
+            stats = main_stats(gh, repo, wf_runs, default_branch, main_sample)
+            if stats["pushRuns"]:
+                main[path] = stats
     return {"since": since, "runs": runs, "perWorkflow": per_workflow, "prFiles": pr_files,
-            "prSampled": len(pr_files), "prSeen": len(pr_numbers)}
+            "prSampled": len(pr_files), "prSeen": len(pr_numbers), "defaultBranch": default_branch,
+            "main": main, "sampleCapped": capped, "windowDays": round(window_days, 2),
+            "requestedDays": days, "maxRuns": max_runs,
+            "perWorkflowSampling": per_wf_mode}
 
 
 def estimate(findings, history):
@@ -1008,9 +1389,10 @@ def estimate(findings, history):
         if not stats:
             if f["measure"]:
                 f["estNote"] = "no runs of this workflow in the window"
-                if f["measure"] != "job-minutes":
+                if f["measure"] not in ("job-minutes", "default-branch-cancelled"):
                     f["estMinutesSaved"] = 0.0
             continue
+        main = (history.get("main") or {}).get(f["workflow"])
         per_run = stats["avgRunnerMinutesPerRun"]
         runs = [r for r in history["runs"] if r.get("path", "").split("@", 1)[0] == f["workflow"]]
         if f["measure"] == "doc-only-pr-runs":
@@ -1044,14 +1426,141 @@ def estimate(findings, history):
                     count += 1
             f["estMinutesSaved"] = round(saved, 1)
             f["estNote"] = f"{count} PR run(s) kept running after a newer push to the same branch"
+            if f["id"] == "missing-concurrency" and main and main["replay"]["estMinutesSaved"] is not None:
+                # Disjoint population (default-branch push runs): safe to add.
+                f["estDefaultBranchMinutes"] = main["replay"]["estMinutesSaved"]
+                f["estMinutesSaved"] = round(saved + main["replay"]["estMinutesSaved"], 1)
+                f["estNote"] += "; " + _main_note(main, history)
         elif f["measure"] == "duplicate-push-runs":
             pr_shas = {r.get("head_sha") for r in runs if r.get("event") == "pull_request"}
             dup = [r for r in runs if r.get("event") == "push" and r.get("head_sha") in pr_shas]
             f["estMinutesSaved"] = round(len(dup) * per_run, 1)
             f["estNote"] = f"{len(dup)} push run(s) duplicated a pull_request run of the same commit"
+        elif f["measure"] == "default-branch-overlap":
+            if not main:
+                f["estMinutesSaved"] = None
+                f["estNote"] = "no default-branch push runs of this workflow in the sample: not measured"
+            else:
+                f["estMinutesSaved"] = main["replay"]["estMinutesSaved"]
+                f["estDefaultBranchMinutes"] = main["replay"]["estMinutesSaved"]
+                f["estNote"] = _main_note(main, history)
+        elif f["measure"] == "default-branch-cancelled":
+            if main:
+                f["estNote"] = (f"{main['cancelledRuns']} of {main['originalRuns']} default-branch push "
+                                "run(s) in the sample were cancelled (no verdict)")
         elif f["measure"] == "job-minutes":
             f["estNote"] = (f"not measured (cache hit/miss needs job logs); workflow averages "
                             f"{per_run} runner-min/run over {stats['runs']} runs")
+        scale = stats.get("scale", 1.0)
+        if scale > 1.0 and f["measure"] in ("doc-only-pr-runs", "superseded-pr-runs",
+                                            "duplicate-push-runs", "default-branch-overlap"):
+            for key in ("estMinutesSaved", "estDefaultBranchMinutes"):
+                if f.get(key) is not None:
+                    f[key] = round(f[key] * scale, 1)
+            f["estNote"] = (f.get("estNote") or "") + (
+                f"; scaled x{scale:g} from a sample of {stats['runs']} to the window's "
+                f"{stats['totalRuns']} runs")
+
+
+def _sample_note(history):
+    if history.get("perWorkflowSampling"):
+        capped = [Path(p).name for p, w in (history.get("perWorkflow") or {}).items()
+                  if w.get("sampleCapped")]
+        if capped:
+            return (f"per-workflow sample capped at {history.get('maxRuns')} runs for "
+                    f"{', '.join(capped)}: rates use each sample's own span")
+        return f"full {history.get('requestedDays')}-day window (every run sampled)"
+    if history.get("sampleCapped"):
+        return (f"sample capped at {history.get('maxRuns')} runs: covers ~{history.get('windowDays')} "
+                f"of the {history.get('requestedDays')} requested days, so totals are over that span only")
+    return f"full {history.get('windowDays')}-day window"
+
+
+def _main_note(main, history):
+    """Observed overlap and the replay estimate, labeled separately."""
+    rp = main["replay"]
+    cost = ("not measured" if main["perRunMinutes"] is None else
+            f"{main['perRunMinutes']} {main['costBasis']}/run"
+            + (" (wall-time fallback, not job-minutes)" if main["costBasis"] == "wall-time" else ""))
+    est = "not measured" if rp["estMinutesSaved"] is None else f"~{rp['estMinutesSaved']} min"
+    return (f"observed: {main['observedOverlap']} of {rp['arrivals']} default-branch push run(s) started "
+            f"while an earlier run was still running (diagnostic, not runs avoided); replay of "
+            f"one-running/one-pending queue: {rp['superseded']} superseded, {est} avoidable "
+            f"(a lone arrival during a run still executes); cost {cost}; "
+            f"{main['cancelledRuns']} already cancelled, {main['rerunAttempts']} rerun attempt(s) and "
+            f"{main['missingTimestamps']} run(s) with missing timestamps excluded; {_sample_note(history)}")
+
+
+def heavy_findings(workflows, history, default_branch, threshold=DEFAULT_HEAVY_MAIN_MINUTES_PER_DAY):
+    """Report-only `heavy-default-branch-suite` findings (a decision, never auto-applied)."""
+    out = []
+    if not history:
+        return out
+    for wf in workflows:
+        if wf.error or not wf.jobs or not wf.pr_events or not _pushes_default_branch(wf, default_branch):
+            continue
+        main = (history.get("main") or {}).get(wf.path)
+        if not main or not main.get("batching"):
+            continue
+        wf_stats = (history.get("perWorkflow") or {}).get(wf.path) or {}
+        days = (wf_stats.get("windowDays") if history.get("perWorkflowSampling") else None) \
+            or history.get("windowDays") or history.get("requestedDays") or 1.0
+        daily = main["eligibleRuns"] * main["perRunMinutes"] / days
+        if daily < threshold:
+            continue
+        hourly, three = main["batching"]["hourly"], main["batching"]["threeHourly"]
+        basis = main["costBasis"]
+        f = finding(
+            "heavy-default-branch-suite", "low", "wasted-runs", wf,
+            f"runs on PRs and again on every `{default_branch}` push: ~{round(daily, 1)} "
+            f"runner-min/day on `{default_branch}` ({main['eligibleRuns']} runs at "
+            f"{main['perRunMinutes']} {basis}/run) against a threshold of {threshold} "
+            "runner-min/day",
+            "DECISION, not a cleanup (never part of --apply): add `schedule:` + `workflow_dispatch:` "
+            f"and run on the newest `{default_branch}` commit, skipping when that commit already has "
+            "a success for THIS workflow; keep the concurrency stanza and the PR trigger and "
+            "required checks. Trade-off: a post-merge break is found up to one window later and the "
+            "bisect range spans every merge in that window. PR and post-merge runs may not be "
+            "equivalent (trigger/path filters differ). A deploy must resolve the newest verified "
+            "commit when it starts, not trust the triggering SHA, and refuse a rollback.",
+            measure="heavy-default-branch")
+        f["reportOnly"] = True
+        f["applyEligible"] = False
+        f["alternatives"] = {"hourly": hourly, "threeHourly": three}
+        f["estMinutesSaved"] = hourly["savedMinutes"]
+        f["estDefaultBranchMinutes"] = hourly["savedMinutes"]
+        f["estNote"] = (
+            f"counterfactual (not observed), fixed UTC buckets over {main['eligibleRuns']} eligible "
+            f"run(s), exclusive alternatives: hourly {hourly['occupiedBuckets']} bucket(s) -> "
+            f"~{hourly['estimatedMinutes']} of {hourly['baselineMinutes']} min "
+            f"(saves ~{hourly['savedMinutes']}, {hourly['savedPct']}%); every 3 h "
+            f"{three['occupiedBuckets']} bucket(s) -> ~{three['estimatedMinutes']} min "
+            f"(saves ~{three['savedMinutes']}, {three['savedPct']}%). Ranking uses the hourly "
+            f"figure; do not add the alternatives. cost basis {basis}"
+            + (" (wall-time fallback, not job-minutes)" if basis == "wall-time" else "")
+            + f"; {main['cancelledRuns']} cancelled, {main['rerunAttempts']} rerun attempt(s), "
+            f"{main['missingTimestamps']} missing-timestamp run(s) excluded; {_sample_note(history)}")
+        out.append(f)
+    return out
+
+
+def summarize(findings):
+    """Canonical aggregate. Default-branch savings of one workflow overlap (the
+    queue stanza and batching avoid the same runs; hourly and 3 h are exclusive),
+    so each workflow contributes its largest default-branch figure once."""
+    other, db = 0.0, {}
+    for f in findings:
+        est = f.get("estMinutesSaved")
+        if est is None:
+            continue
+        part = f.get("estDefaultBranchMinutes") or 0.0
+        other += est - part
+        if part:
+            db[f["workflow"]] = max(db.get(f["workflow"], 0.0), part)
+    return {"estMinutesSavedTotal": round(other + sum(db.values()), 1),
+            "critical": sum(1 for f in findings if f["severity"] == "critical"),
+            "note": "sum of per-finding estimates, except default-branch savings: one largest "
+                    "figure per workflow; hourly/3 h alternatives are exclusive"}
 
 
 def rank(findings):
@@ -1077,6 +1586,7 @@ def build_report(workflows, findings, required_info, history_info, repo=None, de
         "workflows": [{"file": w.path, "name": w.name, "triggers": sorted(w.on),
                        "jobs": sorted(w.jobs), "parseError": w.error} for w in workflows],
         "findings": rank(findings),
+        "summary": summarize(findings),
     }
 
 
@@ -1103,6 +1613,24 @@ def render_text(report):
     if h["state"] == "measured":
         lines.append(f"Run history: {h['runs']} completed runs since {h['since']}; "
                      f"PR file lists for {h['prSampled']}/{h['prSeen']} PRs (minutes are over this window)")
+        if h.get("perWorkflowSampling"):
+            lines.append(f"Per-workflow sampling (up to {h.get('maxRuns')} completed runs each); "
+                         "estimates are scaled to each workflow's true run count:")
+            for path, w in sorted((h.get("perWorkflow") or {}).items()):
+                tag = "  CAPPED" if w.get("sampleCapped") else ""
+                lines.append(f"  {Path(path).name}: sampled {w['runs']} of {w['totalRuns']} runs{tag}; "
+                             f"~{w['avgRunnerMinutesPerRun']} runner-min/run, "
+                             f"~{w['totalRunnerMinutes']} runner-min total")
+                for name, sp in (w.get("jobSpread") or {}).items():
+                    lines.append(f"      job {name}: median {sp['median']} / p90 {sp['p90']} min "
+                                 f"(n={sp['n']})")
+            if h.get("sampleCapped"):
+                lines.append("Sample CAPPED for at least one workflow: its true run count exceeds the "
+                             "sample (raise --runs for a bigger sample)")
+        elif h.get("sampleCapped"):
+            lines.append(f"Sample CAPPED at {h.get('maxRuns')} runs: covers ~{h.get('windowDays')} of "
+                         f"{h.get('requestedDays')} requested days; per-day figures use that span "
+                         "(raise --runs for a fuller window)")
     else:
         lines.append(f"Run history: not measured ({h.get('reason', 'unavailable')})")
     lines.append("")
@@ -1120,6 +1648,11 @@ def render_text(report):
             lines.append(f"    evidence: {f['estNote']}")
         for i, rec in enumerate(f["recommendation"].splitlines()):
             lines.append(("    fix: " if i == 0 else "         ") + rec)
+    lines.append("")
+    summ = report.get("summary") or {}
+    lines.append(f"Estimated total: ~{summ.get('estMinutesSavedTotal', 0)} min over the sampled "
+                 "window (default-branch savings counted once per workflow; hourly and 3 h "
+                 "batching are alternatives, not additive)")
     return "\n".join(lines) + "\n"
 
 
@@ -1162,12 +1695,21 @@ def run_report(args, gh=None):
     history_info = {"state": "not measured", "reason": "--no-history"}
     if not args.no_history and workflows:
         try:
-            hist = gather_history(gh, repo, args.runs, args.days)
+            hist = gather_history(gh, repo, args.runs, args.days, default_branch=branch,
+                                  workflows=workflows)
             if hist["runs"]:
-                estimate(findings, hist)
+                threshold = getattr(args, "heavy_main_minutes_per_day", None)
+                if threshold is None:
+                    threshold = DEFAULT_HEAVY_MAIN_MINUTES_PER_DAY
+                findings += heavy_findings(workflows, hist, branch, threshold)
+                estimate([f for f in findings if f["measure"] != "heavy-default-branch"], hist)
                 history_info = {"state": "measured", "since": hist["since"], "runs": len(hist["runs"]),
                                 "prSampled": hist["prSampled"], "prSeen": hist["prSeen"],
-                                "perWorkflow": hist["perWorkflow"]}
+                                "perWorkflow": hist["perWorkflow"], "defaultBranchRuns": hist["main"],
+                                "sampleCapped": hist["sampleCapped"], "windowDays": hist["windowDays"],
+                                "requestedDays": hist["requestedDays"], "maxRuns": hist["maxRuns"],
+                                "perWorkflowSampling": hist["perWorkflowSampling"],
+                                "heavyThresholdMinutesPerDay": threshold}
             else:
                 history_info = {"state": "not measured", "reason": f"no completed runs since {hist['since']}"}
         except ApiError as exc:
@@ -1193,8 +1735,12 @@ def main(argv=None):
     rep.add_argument("--remote", action="store_true",
                      help="read workflows via the contents API instead of a local checkout")
     rep.add_argument("--default-branch")
-    rep.add_argument("--runs", type=int, default=100, help="max recent runs to sample")
+    rep.add_argument("--runs", type=int, default=100, help="max completed runs to sample PER WORKFLOW (repo-wide fallback if per-workflow listing is unreadable)")
     rep.add_argument("--days", type=int, default=30, help="history window in days")
+    rep.add_argument("--heavy-main-minutes-per-day", type=float,
+                     default=DEFAULT_HEAVY_MAIN_MINUTES_PER_DAY,
+                     help="runner-minutes/day on the default branch above which a workflow that also "
+                          f"runs on PRs is reported as heavy (default {DEFAULT_HEAVY_MAIN_MINUTES_PER_DAY:g})")
     rep.add_argument("--no-history", action="store_true")
     rep.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)

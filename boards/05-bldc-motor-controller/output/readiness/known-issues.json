@@ -1,0 +1,10 @@
+{
+  "known_issues": [
+    {
+      "issue": 7209,
+      "kind": "advisory",
+      "summary": "PHASE_A inner copper is sized for 1 oz; the order must request 1 oz inner copper (JLCPCB's default is 0.5 oz), and manufacturing/manifest.json does not yet record ordered_copper",
+      "recorded": "2026-10-18"
+    }
+  ]
+}

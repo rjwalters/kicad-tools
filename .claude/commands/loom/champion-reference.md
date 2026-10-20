@@ -145,6 +145,14 @@ if it were. In the incident behind #6883 the fix was wrong, its regression test
 fabricated the source payload the fix assumed, and the bug survived the close
 undetected until a human asked why the item still had not appeared.
 
+**Per-repo switch (#12703)**: optional config key `champion.outOfBandAcGate`
+(boolean; absent = `true`, today's behaviour), resolved through the daemon's
+config tiers (`loom-daemon config get champion.outOfBandAcGate --json`), so
+fleet-gitops can set it for one repo. Only an explicit `false` turns the gate
+off: Step 4 then skips the classifier and never adds `loom:operator` for an
+out-of-band criterion. Absent, unreadable or non-boolean values keep it on.
+First use case: 2AMLogic/loom-ui, whose live site is where testing happens.
+
 **Handling**: `champion-pr-merge.md` → Step 4 → "Out-of-Band Acceptance-Criteria
 Gate" runs `./.loom/scripts/classify-ac-verification.sh --issue <N> --pr <PR>
 --head-sha <head>` for every linked issue before confirming or forcing its close:
@@ -280,7 +288,7 @@ gh pr view "$PR_NUMBER" --comments
 # aggregate updatedAt, which Champion's own comment would bump (see #4966).
 VERDICT_MARKER="<!-- champion:proposal-verdict:body-$BODY_HASH -->"
 
-# Concurrency: claim before evaluating, staleness-aware (LOOM_STALE_EVALUATING_MINUTES, default 15m).
+# Concurrency: claim before evaluating, staleness-aware (LOOM_STALE_EVALUATING_MINUTES, default 45m).
 gh issue edit <number> --add-label "loom:evaluating"
 ```
 
@@ -294,9 +302,9 @@ gh issue edit <number> --add-label "loom:evaluating"
 | Issue already carries `loom:evaluating` and the claim is older than `LOOM_STALE_EVALUATING_MINUTES` | **Stale claim — a prior Champion pass likely died mid-evaluation** | Reclaim (`--add-label "loom:evaluating"` again) then evaluate normally. |
 | ≥2 prior "NEEDS REVISION" comments exist, the issue is not already `loom:operator`, and the recurring findings are **not** dependency-only and **not** all `premise-false` | **N=2 threshold reached** | Escalate instead of posting a third+ near-identical rejection: comment with `<!-- champion:proposal-escalated -->` and add `loom:operator` (Champion routes, a human decides — the proposal label stays, nothing is closed). |
 | ≥2 prior "NEEDS REVISION" comments, and **every** recurring finding is tagged `premise-false` (a cited path/line-range/repo-state claim, re-verified false against `origin/main` — on the **resolved** path and with **positive** evidence; an inconclusive re-run escalates instead, #8593) | **N=2 threshold reached, but no human decision is needed (#7657)** | **Close, do not escalate.** Comment with `<!-- champion:premise-false-closed:<main-sha> -->` naming the re-run check(s), then `gh issue close --reason "not planned"`. No `loom:operator`. A mixed finding set still escalates via the row above. |
-| ≥2 prior rejections but **every** recurring finding names a dependency *and* cites an open, non-cycle issue/PR | **Timing finding, not a merits finding (#5664)** | **Block — do not escalate** (#11860). `--check-defer` returns `DEFER`; `park-record apply` on the open blockers. `release-stale-blocked` lifts it when they close. |
+| ≥2 prior rejections but **every** recurring finding names a dependency *and* cites an open, non-cycle issue/PR | **Timing finding, not a merits finding (#5664)** | **Block — do not escalate** (#11860). `--check-defer` returns `DEFER`; `park-record apply` on the open blockers. It stays blocked until lifted once they close (nothing lifts it automatically since #11301). |
 | Same, but every recorded blocker has since **closed** | **Stale verdict (#5664)** | `--check-defer` returns `REEVALUATE`; re-run the 8 criteria instead of escalating on a finding that no longer holds. |
-| Dependency-only finding at the bound, blocker still open | **Park, never escalate (#5664, #11861)** | `park-record apply --blocked-by <open blockers>` adds `loom:blocked` + one record per blocker (#11860); `release-stale-blocked` lifts it when they close and the next pass re-evaluates (`REEVALUATE`). Pass 0's un-escalation of old `loom:operator` escalations is retired: `labels migrate --holds` moved them. |
+| Dependency-only finding at the bound, blocker still open | **Park, never escalate (#5664, #11861)** | `park-record apply --blocked-by <open blockers>` adds `loom:blocked` + one record per blocker (#11860); once they close and it is lifted (nothing lifts it automatically since #11301), the next pass re-evaluates (`REEVALUATE`). Pass 0's un-escalation of old `loom:operator` escalations is retired: `labels migrate --holds` moved them. |
 | Blocker is still **open**, but the issue declares a `## Startable Subset` — a part of its work stated to be independent of that blocker | **Sub-issue granularity carve-out ("recurred after closure", #5664)** | Criterion 2 does not fail on this dependency; promote (Step 3) scoped to the declared subset, directing the Builder to `Part of #<issue>` and leaving the remainder for a later pass. An escalation parked on `loom:operator` before #11861 is the migration's (`labels migrate --holds`). |
 | Fewer than 2 prior rejections | **Revise** | Post the "NEEDS REVISION" comment with `VERDICT_MARKER` and the revise marker; in one edit drop `loom:curated` and `loom:evaluating`, add `loom:triage` (#11860). |
 
@@ -503,8 +511,10 @@ per-repo class instead of a hardcoded, always-safe one.
   entries in the array. No config, or an empty array, is a full no-op.
 - **Criteria #1/#3/#4/#5/#6 still run independently.** A standing
   authorization only ever waives criterion #2's four-axis judgment for a
-  matching PR — nothing else. A PR that matches a class but fails, say, the
-  critical-file check (#3) or CI (#6) still does not merge.
+  matching PR — nothing else, **except** criterion #3 for a class that
+  opts in with `"coversCriticalFiles": true` (#12528, below). A PR that
+  matches a class but fails, say, the critical-file check (#3) on a class
+  without that flag, or CI (#6), still does not merge.
 
 **Decision**:
 - Full changed-file list matches an authorized class's patterns and every
@@ -520,6 +530,47 @@ that does not cleanly match an authorized class. It gives an operator a way
 to retire a whole class of recurring, already-decided merge-risk judgments
 without weakening review for anything outside that class, addressing the
 monotonically-growing held-PR backlog documented in #6848.
+
+**Covering critical files (#12528)**: a class may add
+`"coversCriticalFiles": true`, `"excludeFilePatterns": [...]` (globs) and
+`"forbiddenDiffPatterns": [...]` (jq `test()` regexes over every added/removed line). Criterion
+#3 then runs the class check before it emits FAIL. Worked examples, class
+`ci-steps` = `filePatterns: [".github/workflows/*.yml"]`, `coversCriticalFiles: true`,
+`excludeFilePatterns: [".github/workflows/*publish*", "*release*", "*deploy*"]`,
+`forbiddenDiffPatterns: ["^\\s*permissions:", "id-token", "secrets\\.", "pull_request_target"]`,
+`conditions: ["judgeApproval", "greenCi"]`:
+
+| PR | Result |
+|---|---|
+| `.github/workflows/ci.yml`, one added `run:` step, Judge-approved, CI green | #3 **PASS**, rationale names `ci-steps`; no hold |
+| `ci.yml` plus `Cargo.toml` | `Cargo.toml` is outside the class: **FAIL**, today's hold |
+| `.github/workflows/publish.yml` | excluded file: **FAIL**, hold |
+| `ci.yml` adding a `permissions:` block | forbidden diff line: **FAIL**, hold |
+| `ci.yml`, but the files API returns no patch for it | unreadable diff: **FAIL**, hold |
+| `ci.yml`, CI red or pending | `greenCi` does not hold: **FAIL**, hold |
+| same class without `coversCriticalFiles` | #3 unchanged: **FAIL**, hold |
+| `defaults/hooks/guard-x.sh` under a class that lists it with the flag | kept set: **FAIL**, hold |
+
+The kept set (irreversible migrations, the merge gate itself, credential/token
+selection, guard hooks, installers/updaters that rewrite installed files on
+roll) is never satisfiable by a class. Revertability is red only for a one-way
+effect that happens on merge or roll, not for one an operator later triggers
+by hand. Absent `coversCriticalFiles`, nothing changes.
+
+**Critical files only (#12648)**: `"criticalFilesOnly": true` narrows a class
+to the critical-file hits. Its `filePatterns`, `excludeFilePatterns` and
+`forbiddenDiffPatterns` are applied to the files criterion #3 flags (and each
+one's `previous_filename`) and nothing else; the kept set still covers every
+changed file. It waives criterion #3 only and is never eligible for criterion
+#2. Class `ci-only` = `ci-steps` above with `criticalFilesOnly: true`:
+
+| PR | Result |
+|---|---|
+| `.github/workflows/ci.yml` plus `docs/guide.md`, Judge-approved, CI green | #3 **PASS** under `ci-only`, naming `ci.yml`; criterion #2 still judges the whole PR on the four axes and may hold it |
+| same PR, `ci.yml` adds a `permissions:` block | forbidden line in a critical file: #3 **FAIL**, hold |
+| `ci.yml` plus `defaults/scripts/install-loom.sh` | kept set: #3 **FAIL**, hold |
+| `src/ci.yml` renamed to `.github/workflows/ci.yml` | the previous name is outside the class: #3 **FAIL**, hold |
+| `docs/guide.md` alone | no critical-file hit: the class does not apply, #3 passes on its own |
 
 **Action** (single authoritative policy — implemented in
 `champion-pr-merge.md` → "Safety Criteria → 2. Merge-Risk Judgment →
@@ -617,7 +668,7 @@ EXISTING=$(gh issue list --search "Follow-on from PR #$PR_NUMBER" --limit 500)
 | Doctor-cycle-capped PR (`loom:blocked` + `loom:changes-requested`) | Three-way on forward progress | Distinct new defects → grant a cycle (remove `loom:blocked` only); same-defect/ambiguous → keep parked with rationale; approach not viable → add `loom:operator`, recommend closing (never close it) |
 | Proposal already recorded as dependency-deferred | Dependency-Defer Fast Path (run FIRST) | `--check-defer` still `DEFER` → block on the open blockers (#11860); `REEVALUATE` → fall through to the Idempotency check |
 | Unrevised proposal re-entering the queue every cycle | Idempotency marker + `PRIOR_REJECTIONS` bound | Every evaluation ends in a verdict (#11860): an unchanged body goes straight to Step 4's bound (title+body hash marker, never `updatedAt`); revise → `loom:triage`; at the bound a final/disposition Curator round, then a ranked decision; `loom:evaluating` prevents double evaluation |
-| Proposal whose only recurring finding is an open, non-cycle dependency | Dependency-timing gate (`classify-dependency-block.sh --check-defer`) | **Block, never escalate** — `release-stale-blocked` lifts it when the blocker closes; blocker already closed → re-evaluate rather than escalate on a stale finding (#5664) |
+| Proposal whose only recurring finding is an open, non-cycle dependency | Dependency-timing gate (`classify-dependency-block.sh --check-defer`) | **Block, never escalate** — it stays blocked until lifted once the blocker closes (nothing lifts it automatically since #11301); blocker already closed → re-evaluate rather than escalate on a stale finding (#5664) |
 | Proposal (parked or not) whose blocker is still open but that declares a `## Startable Subset` covering only part of its scope | Sub-issue granularity carve-out ("recurred after closure", #5664) | Criterion 2's dependency finding does not fail the whole issue; promote scoped to the declared subset (`Part of #<issue>`) — `detect-startable-subset.sh` |
 | Test-only changes | Allow | Standard criteria apply |
 | Human holds PR (removes `loom:pr`) | Skip | Not a merge candidate without `loom:pr` |

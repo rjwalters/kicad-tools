@@ -503,22 +503,27 @@ fi
 # OpenAI model IDs is epic #4167 Phase 4. Until then LOOM_MODEL is forwarded
 # verbatim and the adapter's static default is "whatever the profile already
 # chose", which is the operator's own selection.
-CODEX_DEFAULT_MODEL="${LOOM_CODEX_MODEL:-}"
+#
+# `model@effort` rung grammar (#8387): split on the first `@`. Only the base is
+# ever forwarded as `-m`; the suffix is the LOWEST-priority effort source,
+# routed below as `-c model_reasoning_effort=` (explicit -c > --effort >
+# LOOM_EFFORT > suffix). Empty base -> falls through to the next source;
+# empty suffix -> no effort. An explicit `-m foo@high` in args is left unchanged.
+MODEL_SUFFIX_EFFORT=""; _m_base=""
+[[ "$HAS_MODEL_ARG" == "true" ]] || for _m_src in LOOM_MODEL LOOM_CODEX_MODEL; do
+    _m_val="${!_m_src:-}"; _m_base="${_m_val%%@*}"; MODEL_SUFFIX_EFFORT="${_m_base:+${_m_val:${#_m_base}+1}}"
+    [[ "$_m_val" != *@* ]] || log_info "spawn-codex: split $_m_src='$_m_val' -> model=${_m_base:-<empty; ignored, falls through to the default-model path>} effort=${MODEL_SUFFIX_EFFORT:-none} (lowest-precedence effort source)"
+    [[ -z "$_m_base" ]] || break
+done
 EFFECTIVE_MODEL=""
 if [[ "$HAS_MODEL_ARG" == "true" ]]; then
-    if [[ -n "${LOOM_MODEL:-}" ]]; then
-        log_info "spawn-codex: explicit -m/--model in args wins over LOOM_MODEL='$LOOM_MODEL'"
-    fi
+    [[ -z "${LOOM_MODEL:-}" ]] || log_info "spawn-codex: explicit -m/--model in args wins over LOOM_MODEL='$LOOM_MODEL'"
     EFFECTIVE_MODEL="$EXPLICIT_MODEL"
     log_info "spawn-codex: model=${EXPLICIT_MODEL:-default} (from -m/--model arg)"
-elif [[ -n "${LOOM_MODEL:-}" ]]; then
-    EFFECTIVE_MODEL="$LOOM_MODEL"
-    PASSTHROUGH_ARGS+=(-m "$LOOM_MODEL")
-    log_info "spawn-codex: model=$LOOM_MODEL (from LOOM_MODEL)"
-elif [[ -n "$CODEX_DEFAULT_MODEL" ]]; then
-    EFFECTIVE_MODEL="$CODEX_DEFAULT_MODEL"
-    PASSTHROUGH_ARGS+=(-m "$CODEX_DEFAULT_MODEL")
-    log_info "spawn-codex: model=$CODEX_DEFAULT_MODEL (from LOOM_CODEX_MODEL adapter default)"
+elif [[ -n "$_m_base" ]]; then
+    EFFECTIVE_MODEL="$_m_base"
+    PASSTHROUGH_ARGS+=(-m "$_m_base")
+    log_info "spawn-codex: model=$_m_base (from $_m_src)"
 else
     log_info "spawn-codex: model=default"
 fi
@@ -557,18 +562,20 @@ fi
 # --- Effort selection ---
 # `codex exec` has no `--effort` flag; the equivalent knob is the
 # `model_reasoning_effort` config key. Mirrors the model precedence: an explicit
-# `-c model_reasoning_effort=` in the passthrough args wins, then LOOM_EFFORT,
-# then nothing (no override emitted, CLI default preserved).
+# `-c model_reasoning_effort=` in the passthrough args wins, then --effort, then
+# LOOM_EFFORT, then a `model@effort` suffix (#8387), then nothing (no override
+# emitted, CLI default preserved).
 if [[ "$HAS_EFFORT_OVERRIDE" == "true" ]]; then
-    if [[ -n "${LOOM_EFFORT:-}" ]]; then
-        log_info "spawn-codex: explicit -c model_reasoning_effort= wins over LOOM_EFFORT='$LOOM_EFFORT'"
-    fi
+    [[ -z "${LOOM_EFFORT:-}" ]] || log_info "spawn-codex: explicit -c model_reasoning_effort= wins over LOOM_EFFORT='$LOOM_EFFORT'"
 elif [[ -n "$GENERIC_EFFORT" ]]; then
     PASSTHROUGH_ARGS+=(-c "model_reasoning_effort=$GENERIC_EFFORT")
     log_info "spawn-codex: effort=$GENERIC_EFFORT (from --effort)"
 elif [[ -n "${LOOM_EFFORT:-}" ]]; then
     PASSTHROUGH_ARGS+=(-c "model_reasoning_effort=$LOOM_EFFORT")
     log_info "spawn-codex: effort=$LOOM_EFFORT (from LOOM_EFFORT)"
+elif [[ -n "$MODEL_SUFFIX_EFFORT" ]]; then
+    PASSTHROUGH_ARGS+=(-c "model_reasoning_effort=$MODEL_SUFFIX_EFFORT")
+    log_info "spawn-codex: effort=$MODEL_SUFFIX_EFFORT (from model@effort suffix)"
 fi
 
 # --- Sandbox mapping (SAFETY-CRITICAL; see header + guardrail-parity-codex.md) ---
@@ -1140,7 +1147,7 @@ if [[ "$CODEX_SESSION_EXEC" == "true" ]]; then
     # provider credentials are deliberately NOT forwarded — the container
     # owns its own CODEX_HOME (ADR-0017 Decision 1).
     CODEX_INVOKE=("${LOOM_DAEMON_SELF_BIN:-loom-daemon}" session-exec host --container "$CODEX_SESSION_CONTAINER" --workdir "$PWD" --env "LOOM_WORKSPACE=$WORKSPACE" --env CARGO_INCREMENTAL=0 ${SESSION_EXTRA_ENV[@]+"${SESSION_EXTRA_ENV[@]}"} --owner-pid "$PPID")
-    for _v in LOOM_ROLE LOOM_RUNTIME LOOM_TERMINAL_ID LOOM_SWEEP_ID LOOM_WORKTREE_PATH LOOM_WORKTREE_ROOT LOOM_PROJECT_ROOT LOOM_SWEEP_CLAIM_OWNED LOOM_ACCOUNT_NAME LOOM_ACCOUNT_PROVIDER LOOM_DAEMON_ITEM_ID LOOM_ROLL_PAUSE_DIR LOOM_ROLL_PAUSE_BIN CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG; do [[ -n "${!_v:-}" ]] && CODEX_INVOKE+=(--env "$_v=${!_v}"); done
+    for _v in LOOM_ROLE LOOM_RUNTIME LOOM_TERMINAL_ID LOOM_SWEEP_ID LOOM_WORKTREE_PATH LOOM_WORKTREE_ROOT LOOM_PROJECT_ROOT LOOM_SWEEP_CLAIM_OWNED LOOM_ACCOUNT_NAME LOOM_ACCOUNT_PROVIDER LOOM_DAEMON_ITEM_ID LOOM_HOST_ID LOOM_LEASE_HOST_ID LOOM_ROLE_PR_LEASE_FILE LOOM_PICK_JOURNAL LOOM_ROLL_PAUSE_DIR LOOM_ROLL_PAUSE_BIN CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG; do [[ -n "${!_v:-}" ]] && CODEX_INVOKE+=(--env "$_v=${!_v}"); done
     CODEX_INVOKE+=(--)
 fi
 CODEX_INVOKE+=(codex ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"})
@@ -1169,9 +1176,10 @@ fi
 # --- Dispatch ---
 # Interactive runs (no prompt) and an explicit LOOM_CODEX_NO_CAPTURE keep a
 # plain pid-preserving `exec`. Note stdin is NOT redirected in the interactive
-# case — an operator at the keyboard needs it.
+# case — an operator at the keyboard needs it. A prompt run with
+# LOOM_CODEX_NO_CAPTURE is headless, so it gets /dev/null like the capture path.
 if [[ "$HAS_PROMPT" != "true" || -n "${LOOM_CODEX_NO_CAPTURE:-}" ]]; then
-    echo "# LOOM_CLI_START runtime=codex" >&2
+    echo "# LOOM_CLI_START runtime=codex" >&2; [[ "$HAS_PROMPT" == "true" ]] && exec </dev/null
     exec "${CODEX_INVOKE[@]}"
 fi
 

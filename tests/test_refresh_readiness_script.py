@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
 import sys
 import zipfile
 from pathlib import Path
@@ -83,7 +84,7 @@ def test_metric_regression_publishes_nothing(mod, tmp_path, monkeypatch):
     )
     clean_erc = json.dumps({"sheets": [{"violations": []}], "date": "now"}).encode()
     monkeypatch.setattr(mod, "native_erc", lambda *a, **k: clean_erc)
-    monkeypatch.setattr(mod, "gate_native_drc", lambda *a: 0)
+    monkeypatch.setattr(mod, "gate_native_drc", lambda *a: (0, b"{}"))
     monkeypatch.setattr(mod, "gate_kct_check", lambda *a: (True, 0))
     monkeypatch.setattr(mod, "gate_net_status", lambda *a: 97.3)  # one net lost
     monkeypatch.setattr(mod, "gate_sync", lambda *a: None)
@@ -159,7 +160,7 @@ def _hooked_board(mod, tmp_path, monkeypatch, warnings: int) -> Path:
         raise AssertionError("kct check ran although the board has a check hook")
 
     monkeypatch.setattr(mod, "gate_kct_check", generic_check_must_not_run)
-    monkeypatch.setattr(mod, "gate_native_drc", lambda *a: 0)
+    monkeypatch.setattr(mod, "gate_native_drc", lambda *a: (0, b"{}"))
     monkeypatch.setattr(mod, "gate_net_status", lambda *a: 100.0)
     monkeypatch.setattr(mod, "gate_sync", lambda *a: None)
     return board
@@ -207,3 +208,295 @@ def test_board04_uses_its_own_manufacturing_check(mod):
     board = mod.REPO_ROOT / "boards" / "04-stm32-devboard"
     assert (board / cfg.check_script).is_file()
     assert (board / cfg.routed_pcb).is_file() and (board / cfg.schematic).is_file()
+
+
+# --------------------------------------------------------------------------- Issue #7261
+def _warned_report(*pads: str, rule: str = "thermal_asymmetry") -> dict:
+    meta = {k: {"status": "PASSED"} for k in ("drc", "erc", "lvs", "manifest")}
+    violations = [
+        {"rule_id": rule, "severity": "warning", "items": [pad.rpartition("-")[0], pad]}
+        for pad in pads
+    ]
+    summary = {"errors": 0, "warnings": len(violations)}
+    return {"summary": summary, "meta_checks": meta, "violations": violations}
+
+
+_C10 = ("thermal_asymmetry", "C10", "C10-2")
+_C11 = ("thermal_asymmetry", "C11", "C11-2")
+
+
+def test_known_issue_allowance_tolerates_exactly_the_recorded_warnings(mod):
+    allowance = {_C10: 7220, _C11: 7220}
+    assert mod.check_report_verdict(_warned_report("C10-2", "C11-2"), "x", allowance)
+    for report in (
+        _warned_report("C10-2", "C11-2", "C12-2"),  # an extra, unlisted finding
+        _warned_report("C10-2", "C12-2"),  # swapped identity, unchanged count
+        _warned_report("C10-2"),  # C11-2 no longer fires: stale entry
+        _warned_report("C10-2", "C11-2", "C11-2"),  # a listed identity repeated
+        _warned_report("C10-2", "C11-2", rule="via_at_pad_edge"),  # same pads, other rule
+    ):
+        with pytest.raises(mod.GateFailure):
+            mod.check_report_verdict(report, "x", allowance)
+    mismatched = _warned_report("C10-2")
+    mismatched["summary"]["warnings"] = 2  # summary disagrees with findings
+    with pytest.raises(mod.GateFailure):
+        mod.check_report_verdict(mismatched, "x", {_C10: 7220})
+
+
+def test_allowance_comes_from_the_boards_recorded_known_issues(mod, tmp_path):
+    board = tmp_path / "board"
+    (board / "output").mkdir(parents=True)
+    entry = {
+        "issue": 7220,
+        "kind": "advisory",
+        "summary": "s",
+        "recorded": "2026-10-18",
+        "warnings": [{"rule": "thermal_asymmetry", "ref": "C10", "pad": "C10-2"}],
+    }
+    (board / "output" / "readiness.json").write_text(json.dumps({"known_issues": [entry]}))
+    assert mod.known_issue_allowance(board) == {_C10: 7220}
+    (board / "output" / "readiness.json").write_text(json.dumps({}))
+    assert mod.known_issue_allowance(board) == {}
+
+
+_NO_REFRESH_CONFIG = {"03-usb-joystick"}
+
+
+def test_every_demo_board_has_a_refresh_config(mod):
+    boards = sorted(p.name for p in (mod.REPO_ROOT / "boards").glob("0[0-7]-*") if p.is_dir())
+    assert len(boards) == 8
+    assert not _NO_REFRESH_CONFIG & set(mod.BOARDS)  # stale exemption
+    boards = [b for b in boards if b not in _NO_REFRESH_CONFIG]
+    for name in boards:
+        cfg = mod.BOARDS[name]
+        board = mod.REPO_ROOT / "boards" / name
+        assert (board / cfg.routed_pcb).is_file(), name
+        assert (board / cfg.schematic).is_file(), name
+        for archive, _ in cfg.archives:
+            assert (board / archive).is_file(), (name, archive)
+        for job in cfg.erc:
+            assert (board / job.directory / job.schematic).is_file(), (name, job.key)
+
+
+def test_outer_archive_members_resolve_against_committed_tree(mod, tmp_path):
+    """Rebuilding ``output/manufacturing.zip`` finds every member (needs no KiCad).
+
+    Boards 00-02 prefix members with ``manufacturing/``; a search root that
+    ignores that refused them all (Issue #7273 review).
+    """
+
+    for name, cfg in mod.BOARDS.items():
+        board = mod.REPO_ROOT / "boards" / name
+        if not (board / "output" / "manufacturing.zip").is_file():
+            continue
+        staged = tmp_path / name
+        shutil.copytree(board / "output", staged / "output")
+        mod.rebuild_archive(
+            staged / "output" / "manufacturing.zip", [staged / s for s in cfg.bundle_search]
+        )
+
+
+# ---------------------------------------------------------------- known issues (#7323)
+CHECKED_AT = "2026-10-18T00:00:00+00:00"
+ADVISORY = "7220:one-sided thermal:advisory"
+
+
+def _evidence(board: Path) -> Path:
+    return board / "output" / "readiness" / "known-issues.json"
+
+
+def test_known_issue_flag_binds_the_evidence_file_into_inputs(mod, tmp_path, monkeypatch):
+    board = _hooked_board(mod, tmp_path, monkeypatch, warnings=0)
+    published = mod.refresh(board, CHECKED_AT, known_issue=[ADVISORY])
+
+    assert "output/readiness/known-issues.json" in published
+    report = json.loads((board / "output" / "readiness.json").read_text())
+    assert [e["issue"] for e in report["known_issues"]] == [7220]
+    assert json.loads(_evidence(board).read_text()) == {"known_issues": report["known_issues"]}
+    assert report["inputs"]["output/readiness/known-issues.json"] == mod.sha256(_evidence(board))
+
+
+def test_known_issue_naming_an_identity_that_no_longer_fires_refuses_as_stale(
+    mod, tmp_path, monkeypatch
+):
+    board = _hooked_board(mod, tmp_path, monkeypatch, warnings=0)
+    with pytest.raises(mod.GateFailure):
+        mod.refresh(
+            board, CHECKED_AT, known_issue=["7220:thermal:advisory:thermal_asymmetry@C10-2"]
+        )
+
+
+def test_resolve_known_issue_flag_drops_entry_file_and_binding(mod, tmp_path, monkeypatch):
+    board = _hooked_board(mod, tmp_path, monkeypatch, warnings=0)
+    mod.refresh(board, CHECKED_AT, known_issue=["7220:thermal:advisory"])
+    assert _evidence(board).is_file()
+
+    published = mod.refresh(board, CHECKED_AT, resolve_known_issue=["#7220"])
+
+    assert "output/readiness/known-issues.json (removed)" in published
+    report = json.loads((board / "output" / "readiness.json").read_text())
+    assert "known_issues" not in report
+    assert "output/readiness/known-issues.json" not in report["inputs"]
+    assert not _evidence(board).exists()
+
+
+def test_resolving_an_unrecorded_issue_publishes_nothing(mod, tmp_path, monkeypatch):
+    board = _hooked_board(mod, tmp_path, monkeypatch, warnings=0)
+    before = {p: p.read_bytes() for p in board.rglob("*") if p.is_file()}
+    with pytest.raises(mod.GateFailure, match="not recorded on this board"):
+        mod.refresh(board, CHECKED_AT, resolve_known_issue=["7220"])
+    assert {p: p.read_bytes() for p in board.rglob("*") if p.is_file()} == before
+
+
+def test_dry_run_with_known_issue_leaves_the_board_untouched(mod, tmp_path, monkeypatch):
+    board = _hooked_board(mod, tmp_path, monkeypatch, warnings=0)
+    before = {p: p.read_bytes() for p in board.rglob("*") if p.is_file()}
+    mod.refresh(board, CHECKED_AT, dry_run=True, known_issue=["7220:thermal:advisory"])
+    assert {p: p.read_bytes() for p in board.rglob("*") if p.is_file()} == before
+
+
+# ---------------------------------------------------------------------------
+# Issue #7337: saved copper must equal an independent refill.
+# ---------------------------------------------------------------------------
+
+
+def _fill_board(tmp_path: Path):
+    board = tmp_path / "board"
+    (board / "output").mkdir(parents=True)
+    (board / "output" / "x_routed.kicad_pcb").write_text("(kicad_pcb)")
+    return board
+
+
+@pytest.mark.parametrize("refilled_f", [1438.71334, 1457.428272])
+def test_gate_fill_identity_refuses_a_divergent_saved_fill(mod, tmp_path, monkeypatch, refilled_f):
+    from kicad_tools.cli import readiness_cmd
+
+    board = _fill_board(tmp_path)
+    cfg = mod.BoardConfig(
+        routed_pcb="output/x_routed.kicad_pcb",
+        schematic="output/x.kicad_sch",
+        tier="jlcpcb",
+        erc=(),
+    )
+    real_engines = readiness_cmd.Engines
+    monkeypatch.setattr(
+        readiness_cmd,
+        "Engines",
+        lambda: real_engines(
+            refill=lambda pcb: readiness_cmd.EngineRun(ok=True),
+            fill_areas=lambda pcb: (
+                {"F.Cu": 1438.71334} if "fill-refilled" not in pcb.parts else {"F.Cu": refilled_f}
+            ),
+        ),
+    )
+    if refilled_f == 1438.71334:
+        assert mod.gate_fill_identity(board, cfg) == {}
+    else:
+        with pytest.raises(mod.GateFailure, match=r"F\.Cu 18\.714932 mm\^2"):
+            mod.gate_fill_identity(board, cfg)
+
+
+def test_native_drc_gate_runs_the_fill_identity_gate(mod, tmp_path, monkeypatch):
+    """A clean refilled DRC alone no longer certifies the saved fill."""
+    board = _fill_board(tmp_path)
+    cfg = mod.BoardConfig(
+        routed_pcb="output/x_routed.kicad_pcb",
+        schematic="output/x.kicad_sch",
+        tier="jlcpcb",
+        erc=(),
+    )
+
+    def fake_drc(cmd, **_):
+        Path(cmd[cmd.index("--output") + 1]).write_text(
+            json.dumps({"violations": [], "unconnected_items": []})
+        )
+
+    def divergent(*_):
+        raise mod.GateFailure("saved copper differs from an independent refill: F.Cu 1 mm^2")
+
+    monkeypatch.setattr(mod, "run", fake_drc)
+    monkeypatch.setattr(mod, "gate_fill_identity", divergent)
+    with pytest.raises(mod.GateFailure, match="independent refill"):
+        mod.gate_native_drc(board, cfg)
+
+
+# --------------------------------------------------------------------------- Issue #7283
+def test_drc_report_copies_are_written_and_recorded_in_report_sources(mod, tmp_path, monkeypatch):
+    board = _fake_board(tmp_path)
+    (board / "output" / "drc_report.json").write_text("{}")
+    (board / "output" / "manufacturing" / "native-drc.json").write_text("{}")
+    import kicad_tools.cli.board_readiness as board_readiness
+
+    monkeypatch.setattr(
+        board_readiness, "read_readiness", lambda _b: {"status": "ready", "blockers": []}
+    )
+    targets = ("output/drc_report.json", "output/manufacturing/native-drc.json")
+    monkeypatch.setitem(
+        mod.BOARDS,
+        board.name,
+        mod.BoardConfig(
+            routed_pcb="output/board_routed.kicad_pcb",
+            schematic="output/board.kicad_sch",
+            tier="jlcpcb",
+            erc=(),
+            archives=(),
+            drc_targets=targets,
+        ),
+    )
+    staged_report = b'{"violations": [], "unconnected_items": []}'
+    monkeypatch.setattr(mod, "gate_native_drc", lambda *a: (0, staged_report))
+    monkeypatch.setattr(mod, "gate_kct_check", lambda *a: (True, 0))
+    monkeypatch.setattr(mod, "gate_net_status", lambda *a: 100.0)
+    monkeypatch.setattr(mod, "gate_sync", lambda *a: None)
+
+    mod.refresh(board, "2026-10-18T00:00:00+00:00")
+
+    pcb_sha = mod.sha256(board / "output" / "board_routed.kicad_pcb")
+    report = json.loads((board / "output" / "readiness.json").read_text())
+    assert report["report_sources"] == dict.fromkeys(targets, pcb_sha)
+    for target in targets:
+        assert (board / target).read_bytes() == staged_report
+
+
+def test_demo_boards_with_drc_provenance_target_the_report_binding_reads(mod):
+    for name in ("05-bldc-motor-controller", "06-diffpair-test", "07-matchgroup-test"):
+        assert "output/drc_report.json" in mod.BOARDS[name].drc_targets
+
+
+def test_board04_drc_targets_cover_its_bound_native_drc_evidence(mod):
+    """Board 04's native-drc.json copies have a producer (Issue #7435).
+
+    The pintype annotator stopped writing them (#7409); without ``drc_targets``
+    no refresh rewrites the copies that ``readiness.json`` hash-binds.
+    """
+    board = SCRIPT.parent.parent.parent / "boards" / "04-stm32-devboard"
+    inputs = json.loads((board / "output" / "readiness.json").read_text())["inputs"]
+    bound = {name for name in inputs if name.endswith("native-drc.json")}
+    assert bound
+    assert bound <= set(mod.BOARDS["04-stm32-devboard"].drc_targets)
+
+
+# ------------------------------------------------------------ repin_staged (#7353)
+def test_repin_staged_gates_and_publishes_a_staged_copy(mod, tmp_path, monkeypatch):
+    """``repin_staged`` re-pins a caller-staged copy; ``after_manifest`` runs between re-hashes."""
+    board = _hooked_board(mod, tmp_path, monkeypatch, warnings=0)
+    cfg = mod.BOARDS[board.name]
+    staged = tmp_path / "staged" / board.name
+    shutil.copytree(board, staged)
+    rehashes: list[str] = []
+    monkeypatch.setattr(mod, "load_refresher", lambda *a: lambda mfg: rehashes.append("hash"))
+
+    def after_manifest() -> None:
+        rehashes.append("after")
+
+    published = mod.repin_staged(
+        board, staged, cfg, CHECKED_AT, dry_run=True, after_manifest=after_manifest
+    )
+
+    assert rehashes == ["hash", "after", "hash"]
+    assert "output/readiness.json" in published
+    assert (
+        json.loads((staged / "output" / "readiness.json").read_text())["checked_at"] == CHECKED_AT
+    )
+    # dry_run: the committed board is untouched
+    assert json.loads((board / "output" / "readiness.json").read_text())["checked_at"] != CHECKED_AT

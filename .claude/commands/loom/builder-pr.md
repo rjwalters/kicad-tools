@@ -269,7 +269,7 @@ Local verification:
 - [ ] Fast-tier pre-flight passes (`loom-daemon preflight --issue N`); CI runs the suite
 - [ ] Formatter + linter run on changed files (see "Format and Lint Changed Files" below) — a format-only CI failure is a guaranteed Judge rejection
 - [ ] Commits are signed off if required (`commit.signoff: true` or a DCO requirement — `git commit --signoff`; see "DCO sign-off" above)
-- [ ] Relevant tests pass. Production shell changed and CI runs `shell-budget --check`? After the final commit, `loom-daemon shell-budget --check --base <PR base, default origin/main>`: nonzero = this branch's own growth (never pre-existing); no review until counted shell is cut or moved to the daemon and a rerun exits 0. Comments, follow-up issues or arbitrary trailers are not permission
+- [ ] Relevant tests pass
 - [ ] Diff adds/moves a direct forge caller? Rebase onto the landing base; no `defaults/forge/manifest.toml` there = no inventory command. Else declare it under its `[[operation.callers]]` (`defaults/forge/README.md`; a move must drop the old path, which no command flags), then run `loom-daemon forge-inventory validate --manifest-dir defaults/forge` and `gate --manifest-dir defaults/forge --baseline defaults/forge/call-bypass-baseline.toml` (bare forms read the binary's embedded copy). Nonzero blocks review, even if pre-existing: fix, rerun; never add baseline debt or weaken the gate.
 - [ ] Each criterion has explicit verification
 - [ ] Ran the "defaults/ Version-Bearing-Files Gate" block below (not just read it) — exited 0 (version-bearing files bump at merge, #7743).
@@ -379,6 +379,17 @@ Local verification:
 - [ ] Formatter run on changed files (no remaining diff / `--check` passes)
 - [ ] Linter run on changed files (0 errors)
 ```
+
+**Stack on a conflicting PR (conflict stacking, #12759).** After your last commit and **before** the pre-PR gate below (replaying commits makes a new `HEAD`, and `create-pr.sh` refuses an ungated one), ask which open PR, if any, your finished work conflicts with:
+
+```bash
+# BASE = the `--base` you gave `worktree.sh` (the `--depends-on` / `--auto-stack` parent branch, e.g. feature/issue-<parent>); empty after a plain `worktree.sh N`.
+BASE="<that --base value, or empty>"
+out=$(loom-daemon stack-parent --issue N --base "${BASE:-}") || out="STACK-PARENT none reason=error"
+echo "$out"
+```
+
+`none` (or any non-zero exit) means open flat, as always. On `pr=<P> branch=<B> head=<H> fork=<F> depth=<D>`: `git fetch origin <B>` then `git rebase --onto <H> <F>`. **Never** a bare `git rebase origin/<B>`: that would also replay default-branch commits P's branch lacks. Resolve conflicts (these are your own unpushed commits) and re-run the issue's tests, then open with `create-pr.sh --base <B>` and put `Stacked on #<P> (conflict stacking, depth <D>)` in the PR body. If you cannot resolve the replay: `git rebase --abort` and open flat. The verb answers `none` when stacking is off, when you were given a non-default base (`--depends-on` / `--auto-stack` win), and when `origin/feature/issue-N` already exists.
 
 **Pre-PR gate (pre-flight, #10476, #11690).** With `buildGate` set, run `loom-daemon preflight --issue N` before `create-pr.sh`. It runs the **fast tier** (compile + smoke, never the suite) and never defers on load. Exit 1 = failed: fix the tail, commit, re-run (max `preflightMaxAttempts`). Exit 4 (`preflight_unresolved`) = stop, NO PR (claim released). Exit 5 = a hung compile timed out (claim kept): re-run; at the timeout cap, NO PR. `create-pr.sh` refuses (exit 7) an ungated HEAD. Then open the PR without waiting for CI.
 
@@ -740,6 +751,7 @@ Loom-Issue: rjwalters/loom#123
   `owner/repo` slug is **required** (a bare `Loom-Issue: #123` does not parse). **Required on
   every PR whose body does not close its issue**; optional on a `Closes #N` PR, whose closing
   reference already carries the link. Only the **final** PR uses `Closes #N`.
+  This trailer is a coordination link Loom reads back; keep writing it.
 
 **Write both as PLAIN TEXT — never in backticks (#8796).** A trailer inside an inline code span
 (or a fenced block) is **silently ignored** — merge-pr.sh blanks code spans before matching,
@@ -753,7 +765,7 @@ Part of #123              <- declaration: parsed, the label reset fires on merge
 
 **Both the PR body and the commit messages must carry the same reference.** GitHub harvests closing keywords from the PR body and the merge commit's subject (this repo merges with merge commits, #9105). Prefer `Part of #N`.
 
-If a `Part of #N` remainder needs a human, add `<!-- loom:remainder-hold reason="..." -->` to the issue body before merge (parks it `loom:operator`; see label-state-machine.md).
+If a `Part of #N` remainder needs a human's hands or a ruling (not merely a cross-repo or time-gated wait), add `<!-- loom:remainder-hold reason="..." -->` to the issue body before merge (parks it `loom:operator`; see label-state-machine.md). A cross-repo or time-gated remainder gets a park record instead: see the "Cross-repo or time-gated leftover" row in label-state-machine.md "Routing to a human".
 
 #### A stray closing keyword ANYWHERE in the body defeats `Part of #N` (#4569)
 

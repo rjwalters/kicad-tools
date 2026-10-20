@@ -2,6 +2,7 @@
 
 from typing import TYPE_CHECKING
 
+from .._pins import diode_pin_position
 from ..base import CircuitBlock
 
 if TYPE_CHECKING:
@@ -112,7 +113,11 @@ class CANTransceiver(CircuitBlock):
             },
         },
         "TJA1050": {
-            "symbol": "Interface_CAN_LIN:TJA1050",
+            # KiCad 10 dropped the discontinued TJA1050.  The TJA1051T is
+            # NXP's pin-compatible successor (TXD/GND/VCC/RXD/CANL/CANH on
+            # the same pins); the TJA1050's silent-mode pin 8 stays unused
+            # here, so no STBY port is exposed (issue #7399).
+            "symbol": "Interface_CAN_LIN:TJA1051T",
             "voltage": 5.0,
             "has_stby": False,
             "pins": {
@@ -257,15 +262,15 @@ class CANTransceiver(CircuitBlock):
             tvs_idx += 1
 
             # Wire CANH to TVS
-            tvs_h_anode = self.tvs_canh.pin_position("A")
-            tvs_h_cathode = self.tvs_canh.pin_position("K")
+            tvs_h_anode = diode_pin_position(self.tvs_canh, "A")
+            tvs_h_cathode = diode_pin_position(self.tvs_canh, "K")
             sch.add_wire(xcvr_canh, tvs_h_anode)
 
             # TVS cathode goes to ground (clamp)
             sch.add_wire(tvs_h_cathode, (tvs_h_cathode[0], xcvr_vss[1]))
 
-            # CANH output is after TVS
-            canh_output = (tvs_h_anode[0] + 5, tvs_h_anode[1])
+            # CANH output is the TVS anode (a real pin end the bus wire lands on)
+            canh_output = tvs_h_anode
 
             # TVS for CANL
             tvs_l_ref = f"D{tvs_ref_start + tvs_idx}"
@@ -277,15 +282,15 @@ class CANTransceiver(CircuitBlock):
             tvs_idx += 1
 
             # Wire CANL to TVS
-            tvs_l_anode = self.tvs_canl.pin_position("A")
-            tvs_l_cathode = self.tvs_canl.pin_position("K")
+            tvs_l_anode = diode_pin_position(self.tvs_canl, "A")
+            tvs_l_cathode = diode_pin_position(self.tvs_canl, "K")
             sch.add_wire(xcvr_canl, tvs_l_anode)
 
             # TVS cathode goes to ground
             sch.add_wire(tvs_l_cathode, (tvs_l_cathode[0], xcvr_vss[1]))
 
-            # CANL output is after TVS
-            canl_output = (tvs_l_anode[0] + 5, tvs_l_anode[1])
+            # CANL output is the TVS anode (a real pin end the bus wire lands on)
+            canl_output = tvs_l_anode
 
         # Add termination
         r_idx = 0

@@ -36,8 +36,9 @@ from __future__ import annotations
 import logging
 import math
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from ..cost.suggest import (
     ComponentType,
@@ -47,6 +48,8 @@ from ..cost.suggest import (
 
 if TYPE_CHECKING:
     from ..parts.cache import PartsCache
+    from ..parts.jlcparts_catalog import JlcpartsCatalog
+    from ..parts.models import Part
 
 logger = logging.getLogger(__name__)
 
@@ -602,6 +605,430 @@ def check_lcsc_against_cache(
         return None
     if part is None:
         return None
+    # No IC check here: enrichment (bom_enrich/bom_formats) relies on this
+    # function's chip-only package policy (issue #7166).
+    return _compare_part(part, requested_value, reference, footprint, None, check_ic=False)
+
+
+# ---------------------------------------------------------------------------
+# IC pin-count / package-family validation (issue #7166).
+#
+# Preflight-only.  ``find_package_mismatch`` above stays chip-only because
+# BOM enrichment (``bom_enrich.py``) uses it to reject candidates; widening
+# it would change which parts enrichment picks for fleet boards.
+# ---------------------------------------------------------------------------
+
+# Each regex below maps a whole family *group* to one key: naming differs
+# between KiCad footprints and LCSC ``encapStandard`` strings (``TQFP-44``
+# vs ``QFP-44(10x10)``, ``SOT-23-5`` vs ``SOT-25-5``, ``DIP-8`` vs
+# ``PDIP-8``, ``HVSSOP-8`` vs ``MSOP-8-EP``), and members of a group
+# compare as equivalent.  Group keys: SOT23, SOT223, SO, QFP, QFN, DIP.
+_SOT223_RE = re.compile(r"^SOT-?223(?:-(\d+))?(?![0-9])")
+# SOT-23 / SOT-25 / SOT-26 with optional -N and a trailing L (``SOT-23-6L``).
+_SOT23_RE = re.compile(r"^SOT-?(23|25|26)(?![0-9])(?:-(\d+)L?)?(?![0-9])")
+_SOT23_DEFAULT_PINS = {"23": 3, "25": 5, "26": 6}
+_SO_RE = re.compile(
+    r"^(HTSSOP|HVSSOP|VSSOP|TSSOP|MSOP|SSOP|SOIC|SOP|SO|TSOP(?:-?II)?)-?(\d+)(?![0-9])"
+)
+_QFP_RE = re.compile(r"^(HTQFP|LQFP|TQFP|QFP)-?(\d+)(?![0-9])")
+_QFN_RE = re.compile(r"^([A-Z]{0,2}QFN|[A-Z]{0,2}DFN)-?(\d+)(?![0-9])")
+_DIP_RE = re.compile(r"^(PDIP|SPDIP|DIP)-?(\d+)(?![0-9])")
+# Body size: ``(10x10)`` on LCSC strings, ``_10x10mm`` on KiCad footprints.
+_BODY_RE = re.compile(r"[(_-](\d+(?:\.\d+)?)X(\d+(?:\.\d+)?)(?:MM)?(?:\)|_|$|-)")
+# Exposed pad / tab markers in a footprint name or part package string.
+_EP_MARKER_RE = re.compile(r"(?<![A-Z])EP|POWERPAD|THERMAL|TAB")
+
+BODY_TOLERANCE_MM = 0.25
+PITCH_TOLERANCE_MM = 0.05
+
+# Explicit pitch token in a KiCad footprint name (``..._P1.27mm``).
+_PITCH_RE = re.compile(r"_P(\d+(?:\.\d+)?)MM")
+# Lead pitch implied by the SO family name (issue #7180).  SSOP / TSOP are
+# deliberately absent: their pitch varies (0.65/0.635/0.5 mm), so without an
+# explicit ``_P`` token the pitch is unknown and never compared.
+_SO_FAMILY_PITCH_MM = {
+    "SOIC": 1.27,
+    "SOP": 1.27,
+    "SO": 1.27,
+    "TSSOP": 0.65,
+    "HTSSOP": 0.65,
+    "MSOP": 0.65,
+    "VSSOP": 0.65,
+    "HVSSOP": 0.65,
+}
+
+
+# Pitches at or below this are the "fine" class (TSSOP/MSOP/VSSOP: 0.65 / 0.5 mm).
+_FINE_PITCH_MAX_MM = 0.65 + PITCH_TOLERANCE_MM
+
+
+def _pitches_conflict(a: IcPackage, b: IcPackage) -> bool:
+    """True when two SO packages' lead pitches provably disagree.
+
+    Two explicit ``_P`` tokens are compared exactly.  A family-name-derived
+    pitch is only a class hint (LCSC strings such as ``MSOP-10`` never state
+    pitch and real parts come in 0.5 mm as well as 0.65 mm), so then only the
+    coarse (1.27 mm) vs fine (<= 0.65 mm) class is compared.
+    """
+    assert a.pitch is not None and b.pitch is not None
+    if a.pitch_explicit and b.pitch_explicit:
+        return abs(a.pitch - b.pitch) > PITCH_TOLERANCE_MM
+    return (a.pitch <= _FINE_PITCH_MAX_MM) != (b.pitch <= _FINE_PITCH_MAX_MM)
+
+
+@dataclass(frozen=True)
+class IcPackage:
+    """A recognized IC package: family, signal pin count, optional body."""
+
+    family: str  # group key: SOT23 | SOT223 | SO | QFP | QFN | DIP
+    pins: int
+    body: tuple[float, float] | None = None
+    exposed_pad: bool = False
+    pitch: float | None = None  # lead pitch in mm; SO group only, None = unknown
+    pitch_explicit: bool = False  # True when read from a ``_P`` token, not the family name
+
+
+def parse_ic_package(text: str) -> IcPackage | None:
+    """Parse an IC package family and pin count from a package/footprint name.
+
+    Accepts LCSC ``encapStandard`` strings (``SOT-25-5``, ``QFP-44(10x10)``,
+    ``HTSSOP-28``, ``MSOP-8-EP``, ``TSOP-54-10.2mm``, ``PDIP-8``) and KiCad
+    footprint names with or without the library prefix
+    (``Package_SO:SOIC-8_3.9x4.9mm_P1.27mm``, ``SOT-223-3_TabPin2``).
+
+    Returns ``None`` for anything that is not a recognized IC family
+    (connectors, switches, crystals, chip passives, ``SMD-4P``...), which
+    callers treat as "cannot validate".
+    """
+    if not text:
+        return None
+    name = text.rsplit(":", 1)[-1].strip().upper().replace(" ", "")
+    if not name:
+        return None
+    exposed = bool(_EP_MARKER_RE.search(name))
+
+    m = _SOT223_RE.match(name)
+    if m is not None:
+        pins = int(m.group(1)) if m.group(1) else 3
+        return IcPackage("SOT223", pins, None, True)  # the tab is an extra pad
+
+    m = _SOT23_RE.match(name)
+    if m is not None:
+        pins = int(m.group(2)) if m.group(2) else _SOT23_DEFAULT_PINS[m.group(1)]
+        return IcPackage("SOT23", pins, None, exposed)
+
+    m = _SO_RE.match(name)
+    if m is not None:
+        family = m.group(1)
+        pitch_m = _PITCH_RE.search(name, m.end())
+        pitch = float(pitch_m.group(1)) if pitch_m else _SO_FAMILY_PITCH_MM.get(family)
+        return IcPackage(
+            "SO",
+            int(m.group(2)),
+            None,
+            exposed or family in ("HTSSOP", "HVSSOP"),
+            pitch,
+            pitch_m is not None,
+        )
+
+    for regex, family in ((_QFP_RE, "QFP"), (_QFN_RE, "QFN")):
+        m = regex.match(name)
+        if m is not None:
+            body_m = _BODY_RE.search(name, m.end())
+            body = (float(body_m.group(1)), float(body_m.group(2))) if body_m else None
+            return IcPackage(family, int(m.group(2)), body, exposed or family == "QFN")
+
+    m = _DIP_RE.match(name)
+    if m is not None:
+        return IcPackage("DIP", int(m.group(2)), None, exposed)
+
+    return None
+
+
+def _numeric_pad_count(pad_numbers: Iterable[str]) -> int:
+    """Count distinct numeric pad numbers.
+
+    Drops ``MP`` mounting pads, unnumbered paste/thermal-via pads and
+    duplicates (a SOT-223 tab numbered ``2`` like pin 2).
+    """
+    return len({str(n).strip() for n in pad_numbers if str(n).strip().isdigit()})
+
+
+def find_ic_package_mismatch(
+    footprint_name: str,
+    pad_numbers: Iterable[str] | None,
+    part_package: str,
+) -> PackageMismatch | None:
+    """Compare an IC part's package family/pin count with its footprint.
+
+    Preflight-only companion of :func:`find_package_mismatch` (issue #7166).
+
+    - The part side must parse to a recognized IC family
+      (:func:`parse_ic_package`); otherwise the check cannot validate and
+      accepts.
+    - When ``pad_numbers`` are known (the PCB footprint's pads), the part's
+      pin count must equal the number of distinct numeric pads, or that
+      count minus one when the extra pad is an exposed pad / tab (marked in
+      the footprint name or implied by the part package).
+    - When the footprint name also parses, the families must belong to the
+      same group, the pin counts must agree (if no pads were supplied), SO
+      lead pitches must not conflict when both are known (SOIC 1.27 mm vs
+      TSSOP/MSOP -- issue #7180; a pitch implied only by the family name
+      is compared as coarse vs fine class, never 0.65 vs 0.5 mm), and QFP/QFN bodies must agree within :data:`BODY_TOLERANCE_MM` when both
+      sides state one.
+
+    Returns:
+        A :class:`PackageMismatch` describing the disagreement, or ``None``
+        (match OR cannot validate).
+    """
+    part = parse_ic_package(part_package)
+    if part is None:
+        return None
+    footprint = parse_ic_package(footprint_name)
+    fp_label = footprint_name.rsplit(":", 1)[-1] if footprint_name else "(unnamed footprint)"
+
+    def mismatch(source: str) -> PackageMismatch:
+        return PackageMismatch(
+            requested_package=fp_label,
+            candidate_package=part_package,
+            candidate_source=source,
+        )
+
+    if footprint is not None and footprint.family != part.family:
+        return mismatch(f"package family {part.family} vs footprint family {footprint.family}")
+
+    if pad_numbers is not None:
+        count = _numeric_pad_count(pad_numbers)
+        if count:
+            # The footprint name may mark an EP even when its family is
+            # unparseable (``TI_PWP0028C_EP3.4x9.7..._ThermalVias``).
+            exposed = part.exposed_pad or bool(_EP_MARKER_RE.search(fp_label.upper()))
+            if part.pins != count and not (exposed and part.pins == count - 1):
+                return mismatch(f"pin count {part.pins} vs {count} footprint pads")
+    elif footprint is not None and footprint.pins != part.pins:
+        return mismatch(f"pin count {part.pins} vs footprint {footprint.pins}")
+
+    if (
+        footprint is not None
+        and part.family == "SO"
+        and part.pitch is not None
+        and footprint.pitch is not None
+        and _pitches_conflict(part, footprint)
+    ):
+        return mismatch(f"pitch {part.pitch:g}mm vs footprint {footprint.pitch:g}mm")
+
+    if (
+        footprint is not None
+        and part.family in ("QFP", "QFN")
+        and part.body is not None
+        and footprint.body is not None
+    ):
+        if any(
+            abs(a - b) > BODY_TOLERANCE_MM for a, b in zip(part.body, footprint.body, strict=True)
+        ):
+            return mismatch(
+                f"body {part.body[0]:g}x{part.body[1]:g}mm vs footprint "
+                f"{footprint.body[0]:g}x{footprint.body[1]:g}mm"
+            )
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Pin-header row x pin count (issue #7446).
+# ---------------------------------------------------------------------------
+
+_HEADER_FP_RE = re.compile(r"PIN(?:HEADER|SOCKET)_(\d+)X(\d+)")
+# ``NxM`` / ``N*M`` / ``NxMP`` -- never a pitch/dimension (``2.54mm``, ``5.84mm``).
+_HEADER_SHAPE_RE = re.compile(r"(?<![\d.])(\d+)\s*[xX*]\s*(\d+)P?(?![\d.]|\s*mm)")
+# Single-token total pin count in an MPN: ``PZ254V-11-08P`` (not ``-2PZZ``).
+_HEADER_MPN_COUNT_RE = re.compile(r"-(\d{1,3})P(?![A-Za-z0-9])")
+# Total pin count in description prose: ``Pin Header 2 Position``,
+# ``Connector Header 5 position``, ``8 Pin``, ``8-pin``.  The ``(?<![\d.])``
+# guard keeps pitch digits (``2.54``) from being read as a count.
+_HEADER_PROSE_COUNT_RE = re.compile(
+    r"(?<![\d.])(\d{1,3})\s*-?\s*(?:positions?|pins?)(?![A-Za-z])", re.IGNORECASE
+)
+
+
+def _stated_header_counts(
+    part_description: str, part_mfr: str
+) -> tuple[set[int], set[tuple[int, int]]]:
+    """Every pin count and ``NxM`` shape an LCSC record states, in any form.
+
+    Collects all ``NxM`` / ``N*M`` shapes (description and MPN), every
+    ``-NNP`` MPN suffix, and every ``N Position`` / ``N Pin`` / ``N-pin``
+    description phrase.  Returns ``(totals, shapes)``; shapes are stored
+    sorted, so ``1x8`` and ``8x1`` are the same shape.
+    """
+    totals: set[int] = set()
+    shapes: set[tuple[int, int]] = set()
+    for text in (part_description, part_mfr):
+        for m in _HEADER_SHAPE_RE.finditer(text or ""):
+            rows, cols = int(m.group(1)), int(m.group(2))
+            if rows and cols:
+                totals.add(rows * cols)
+                shapes.add((min(rows, cols), max(rows, cols)))
+    totals.update(int(n) for n in _HEADER_MPN_COUNT_RE.findall(part_mfr or ""))
+    totals.update(int(n) for n in _HEADER_PROSE_COUNT_RE.findall(part_description or ""))
+    totals.discard(0)
+    return totals, shapes
+
+
+def _part_header_count(
+    part_description: str, part_mfr: str
+) -> tuple[int, tuple[int, int] | None] | None:
+    """Return ``(total pins, (rows, cols) or None)`` stated by an LCSC record.
+
+    Every form the record states is collected (:func:`_stated_header_counts`):
+    an ``NxM`` shape (description or MPN), a ``-NNP`` MPN suffix, and
+    ``N Position`` / ``N Pin`` / ``N-pin`` description prose.  The last two
+    give a total only, with no shape, so ``PZ254V-12-08P`` (2x4) on a
+    ``1x08`` footprint passes on total; a ``2x4P`` in the description would
+    still catch it.  A record whose forms disagree -- two different totals
+    (``1x3 header 2 Pin``, or an MPN ``-02P`` against ``8 Pin`` prose) or
+    two different shapes with the same total -- is ambiguous and yields
+    ``None`` (issue #7446): no form may silently win over another.
+    """
+    totals, shapes = _stated_header_counts(part_description, part_mfr)
+    if len(totals) != 1 or len(shapes) > 1:
+        return None
+    return totals.pop(), (shapes.pop() if shapes else None)
+
+
+def _header_footprint_label(footprint_name: str) -> str | None:
+    """The ``PinHeader_RxC`` / ``PinSocket_RxC`` footprint label, else ``None``."""
+    fp_label = footprint_name.rsplit(":", 1)[-1] if footprint_name else ""
+    return fp_label if _HEADER_FP_RE.search(fp_label.upper()) else None
+
+
+def header_pin_count_problem(
+    footprint_name: str, part_description: str = "", part_mfr: str = ""
+) -> str | None:
+    """Why a header/socket footprint's part cannot be pin-checked, else ``None``.
+
+    :data:`UNVERIFIED_HEADER_CONFLICT` when the record states pin counts or
+    shapes that disagree with each other, :data:`UNVERIFIED_HEADER_COUNT`
+    when it states none.  ``None`` for a non-header footprint or a record
+    with one consistent count.
+    """
+    if _header_footprint_label(footprint_name) is None:
+        return None
+    if _part_header_count(part_description, part_mfr) is not None:
+        return None
+    totals, shapes = _stated_header_counts(part_description, part_mfr)
+    if len(totals) > 1 or len(shapes) > 1:
+        return UNVERIFIED_HEADER_CONFLICT
+    return UNVERIFIED_HEADER_COUNT
+
+
+def header_pin_count_unreadable(
+    footprint_name: str, part_description: str = "", part_mfr: str = ""
+) -> bool:
+    """True when a header/socket footprint's part states no usable pin count.
+
+    :func:`find_header_pin_mismatch` returns ``None`` both for "counts agree"
+    and for "cannot read a count"; this tells the two apart so callers can
+    report the latter as ``unverified`` rather than ``match`` (issue #7446).
+    A record stating conflicting counts is unreadable too.
+    """
+    return header_pin_count_problem(footprint_name, part_description, part_mfr) is not None
+
+
+def find_header_pin_mismatch(
+    footprint_name: str,
+    pad_numbers: Iterable[str] | None,
+    part_package: str,
+    part_description: str = "",
+    part_mfr: str = "",
+) -> PackageMismatch | None:
+    """Compare a pin header/socket's stated pin count with its footprint.
+
+    Preflight-only companion of :func:`find_ic_package_mismatch` (issue
+    #7446): the IC guard ignores connectors, so a 1x2 header on a
+    ``PinHeader_1x08`` footprint passed on pitch alone.
+
+    The footprint must be named ``PinHeader_RxC`` / ``PinSocket_RxC`` and the
+    part must state a count (``NxM`` in the description/MPN, a ``-NNP`` MPN
+    suffix meaning total pins, or ``N Position`` / ``N Pin`` prose -- see
+    :func:`_part_header_count`).  A mismatch is a different total, a different
+    ``NxM`` shape, or a numeric pad count that differs from the part's total.
+    Anything unparseable returns ``None`` (cannot validate); use
+    :func:`header_pin_count_unreadable` to tell that apart from agreement.
+    """
+    fp_label = footprint_name.rsplit(":", 1)[-1] if footprint_name else ""
+    fm = _HEADER_FP_RE.search(fp_label.upper())
+    if fm is None:
+        return None
+    stated = _part_header_count(part_description, part_mfr)
+    if stated is None:
+        return None
+    total, shape = stated
+    fp_rows, fp_cols = int(fm.group(1)), int(fm.group(2))
+
+    def mismatch(source: str) -> PackageMismatch:
+        return PackageMismatch(
+            requested_package=fp_label,
+            candidate_package=part_package,
+            candidate_source=source,
+        )
+
+    if total != fp_rows * fp_cols or (
+        shape is not None and shape != (min(fp_rows, fp_cols), max(fp_rows, fp_cols))
+    ):
+        label = f"{shape[0]}x{shape[1]}" if shape else str(total)
+        return mismatch(f"pin count {label} vs footprint {fp_rows}x{fp_cols:02d}")
+    if pad_numbers is not None:
+        count = _numeric_pad_count(pad_numbers)
+        if count and count != total:
+            return mismatch(f"pin count {total} vs {count} footprint pads")
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Tri-state assignment verdict (issue #7166).
+# ---------------------------------------------------------------------------
+
+VerdictStatus = Literal["match", "mismatch", "unverified"]
+
+
+@dataclass(frozen=True)
+class LcscVerdict:
+    """Outcome of validating one LCSC assignment.
+
+    ``match``: the part is known (parts cache or offline catalog) and nothing
+    we can compare disagrees.  ``mismatch``: a known part clearly disagrees
+    (``mismatch`` set).  ``unverified``: the check that matters could not be
+    run -- distinct from ``match``.  ``reason`` says why: the part is in
+    neither source (:data:`UNVERIFIED_NOT_FOUND`, ``source`` is ``None``), or
+    it is known but sits on a pin header/socket footprint and states no
+    readable pin count (:data:`UNVERIFIED_HEADER_COUNT`, issue #7446), so a
+    2-pin part on an 8-pin header cannot be ruled out.
+    """
+
+    status: VerdictStatus
+    source: str | None = None  # "parts cache" | "offline catalog"
+    mismatch: LcscMismatch | None = None
+    reason: str | None = None
+
+
+UNVERIFIED_NOT_FOUND = "not in parts cache or offline catalog"
+UNVERIFIED_HEADER_COUNT = "pin count not stated by part"
+UNVERIFIED_HEADER_CONFLICT = "conflicting pin counts stated by part"
+#: Reasons meaning "known header/socket part, pin count not verifiable".
+#: Deterministic facts about the part record (not the cache), so
+#: ``--strict-preflight`` fails on them (issue #7446).
+UNVERIFIED_HEADER_REASONS = frozenset({UNVERIFIED_HEADER_COUNT, UNVERIFIED_HEADER_CONFLICT})
+
+
+def _compare_part(
+    part: Part,
+    requested_value: str,
+    reference: str,
+    footprint: str,
+    pad_numbers: Iterable[str] | None,
+    *,
+    check_ic: bool,
+) -> LcscMismatch | None:
     mismatch: LcscMismatch | None = find_value_mismatch(
         requested_value,
         reference,
@@ -617,4 +1044,69 @@ def check_lcsc_against_cache(
             part_description=part.description,
             part_mfr=part.mfr_part,
         )
+    if mismatch is None and check_ic and (footprint or pad_numbers is not None):
+        mismatch = find_ic_package_mismatch(footprint, pad_numbers, part.package)
+        if mismatch is None:
+            mismatch = find_header_pin_mismatch(
+                footprint, pad_numbers, part.package, part.description, part.mfr_part
+            )
     return mismatch
+
+
+def verify_lcsc_assignment(
+    cache: PartsCache | None,
+    catalog: JlcpartsCatalog | None,
+    lcsc_part: str,
+    requested_value: str,
+    reference: str,
+    *,
+    footprint: str = "",
+    pad_numbers: Iterable[str] | None = None,
+) -> LcscVerdict:
+    """Validate an LCSC assignment, distinguishing "unknown" from "agrees".
+
+    Read-only: looks the part up in the parts cache (ignoring expiry), then
+    in the offline jlcparts catalog when the cache misses or its record has
+    no ``package``.  Never writes to the cache and never touches the
+    network.  Besides the value and chip-package checks of
+    :func:`check_lcsc_against_cache`, runs :func:`find_ic_package_mismatch`.
+    """
+    if not lcsc_part:
+        return LcscVerdict("unverified", reason=UNVERIFIED_NOT_FOUND)
+
+    candidates: list[tuple[Part, str]] = []
+    if cache is not None:
+        try:
+            cached = cache.get(lcsc_part, ignore_expiry=True)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("Parts cache lookup failed for %s: %s", lcsc_part, e)
+            cached = None
+        if cached is not None:
+            candidates.append((cached, "parts cache"))
+    if catalog is not None and (not candidates or not candidates[0][0].package):
+        try:
+            listed = catalog.lookup(lcsc_part) if catalog.available else None
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("Offline catalog lookup failed for %s: %s", lcsc_part, e)
+            listed = None
+        if listed is not None:
+            candidates.append((listed, "offline catalog"))
+
+    if not candidates:
+        return LcscVerdict("unverified", reason=UNVERIFIED_NOT_FOUND)
+
+    for part, source in candidates:
+        mismatch = _compare_part(
+            part, requested_value, reference, footprint, pad_numbers, check_ic=True
+        )
+        if mismatch is not None:
+            return LcscVerdict("mismatch", source, mismatch)
+    # A header/socket footprint whose part states no readable pin count was
+    # never pin-checked: report it, never a bare ``match`` (issue #7446).
+    problems = [
+        header_pin_count_problem(footprint, part.description, part.mfr_part)
+        for part, _ in candidates
+    ]
+    if all(problems):
+        return LcscVerdict("unverified", candidates[-1][1], reason=problems[-1])
+    return LcscVerdict("match", candidates[-1][1])

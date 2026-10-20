@@ -61,9 +61,6 @@ a bash-4 survey inflated its at-risk list from 8 files to 13 by matching comment
 that said `bash 3.2: no mapfile`, and a review reported "the fix didn't remove
 them" after matching the new comment's own prose.
 
-See also [file-size-policy.md](https://github.com/rjwalters/loom/blob/main/.loom/docs/file-size-policy.md) → "Mechanical refactors" (repo-local to
-the loom source repo) for the same rule stated as policy for Loom's own source.
-
 ## 2. A push or other mutation: re-read the ref
 
 **When**: after `git push`, a label edit, a comment post, a file write from a

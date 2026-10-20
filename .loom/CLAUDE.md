@@ -251,9 +251,9 @@ readily as a dispatched one; only Curator may be skipped.
    all-clear (`--help` has it). A hand-claim is not exempt.
 1. Find issue: `gh issue list --label="loom:issue"`
 2. Claim: `gh issue edit 42 --remove-label "loom:issue" --add-label "loom:building"`, then
-   lease it: `loom-daemon lease ensure 42 --watch-pid "${LOOM_AGENT_SESSION_PID:-${CLAUDE_PID:-$PPID}}"`.
+   lease it: `loom-daemon lease ensure 42 --watch-pid "${LOOM_AGENT_SESSION_PID:-${CLAUDE_PID:-$PPID}}"` (the process doing the work, never a subagent's inherited `$PPID`).
    Step 3's `worktree.sh` does this itself; a lane NOT using it MUST call `lease ensure`
-   directly — a leaseless claim is invisible to other lanes and gets reclaimed (#9453)
+   directly — a leaseless claim is invisible to other lanes and gets reclaimed (#9453); `lease release 42` hands it back (#12103)
 3. Create worktree: `./.loom/scripts/worktree.sh 42 && cd .loom/worktrees/issue-42`
 4. Implement, test, commit
 5. Create PR: `git push -u origin feature/issue-42 &&

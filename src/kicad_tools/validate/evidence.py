@@ -45,6 +45,8 @@ from collections import Counter
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
+from kicad_tools.core.geometry import point_to_segment_distance as _point_segment_distance
+
 if TYPE_CHECKING:
     from kicad_tools.schema.pcb import PCB
 
@@ -124,6 +126,7 @@ GLOBAL_NET_EVIDENCE_RULES = frozenset(
         "match_group_length_skew",
         "net_undeclared",
         "path_ampacity",
+        "routing_policy",
         "single_pad_net",
         "track_dangling",
         "via_dangling",
@@ -345,15 +348,6 @@ def _net_pads(pcb: PCB) -> dict[str, list[_NetPad]]:
 def _point_rect_distance(x: float, y: float, hx: float, hy: float) -> float:
     """Distance from ``(x, y)`` to the solid rectangle ``[-hx, hx] x [-hy, hy]``."""
     return math.hypot(max(abs(x) - hx, 0.0), max(abs(y) - hy, 0.0))
-
-
-def _point_segment_distance(
-    px: float, py: float, ax: float, ay: float, bx: float, by: float
-) -> float:
-    dx, dy = bx - ax, by - ay
-    length2 = dx * dx + dy * dy
-    t = 0.0 if length2 == 0.0 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / length2))
-    return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
 
 
 def _segment_hits_rect(ax: float, ay: float, bx: float, by: float, hx: float, hy: float) -> bool:

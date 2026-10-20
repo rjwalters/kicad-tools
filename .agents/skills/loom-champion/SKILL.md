@@ -38,7 +38,7 @@ You are the human's avatar in the autonomous workflow - a trusted decision-maker
 
 **Arguments**: `$ARGUMENTS`
 
-`--pr N`, `--issue N` or `--non-item`: follow `champion-targeted.md` instead of "Finding Work". No arguments: the batch pass below, unchanged.
+`--pr N`, `--issue N` or `--non-item`: follow `champion-targeted.md` instead of "Finding Work". A Champion lease held by your own `$LOOM_SWEEP_ID` (a daemon step pre-takes it) is yours, not a concurrent claim, as `LEASE_ALREADY_HELD` is in `builder.md`; `--issue N` still adds `loom:evaluating` itself. No arguments: the batch pass below, unchanged.
 
 ---
 
@@ -67,19 +67,19 @@ Runs every pass, whether or not PRs remain ("Autonomous Operation" below,
 fresh claim from a concurrent Champion evaluation, #4954), and the holds
 `loom:operator`, `loom:blocked` and `loom:frozen` — each is already a terminal
 state (#5163). `loom:blocked` is no longer "outside Champion's promotion
-authority": it is Champion's own block verdict, re-evaluated once
-`release-stale-blocked` lifts it (#11860). Also exclude `loom:issue` and
+authority": it is Champion's own block verdict, re-evaluated once lifted
+(#11860, #11301). Also exclude `loom:issue` and
 `loom:building` (why: the note below the query, #5285). Every evaluation ends in
 a verdict (promote, revise to `loom:triage`, block, escalate), so nothing
-evaluated is re-discovered here. `title`/`body` feed `champion-issue-promo.md`'s
-body-hash idempotency check (the issue's aggregate `updatedAt` is deliberately
-NOT used for it, #4966):
+evaluated is re-discovered here. The listing is one REST read (see "Discovery
+reads are REST" below); `champion-issue-promo.md`'s body-hash idempotency check
+reads the issue's own title and body (never its aggregate `updatedAt`, #4966):
 
 > **`loom:operator` is excluded and never examined (#11861).** It is a no-op
 > for every role; only a human removes it. A dependency-only finding never
 > lands there: it is a `loom:blocked` park (`park-record apply
-> --blocked-by`, #11860), which the daemon's stale-blocked release pass lifts
-> when the blocker closes, so the issue matches this query again. (Pass 0's
+> --blocked-by`, #11860); once lifted (#11301), the issue matches this query
+> again. (Pass 0's
 > un-escalation of such holds is retired.) **Any hold you apply** follows
 > `.loom/docs/label-state-machine.md` → "Routing to a human" (#10001).
 
@@ -87,7 +87,7 @@ NOT used for it, #4966):
 > `champion-issue-promo.md` → "Pass 0b: Stale `loom:evaluating` Claim Re-Scan"
 > runs immediately after Pass 0, before this discovery query, and removes the
 > label from any issue whose claim has gone stale (the labeled event's age
-> exceeds `LOOM_STALE_EVALUATING_MINUTES`, default 15 — a prior Champion pass
+> exceeds `LOOM_STALE_EVALUATING_MINUTES`, default 45 — a prior Champion pass
 > that died mid-evaluation without writing a verdict). Those issues then match
 > the query below in the same pass. Without that scan, a stale claim would be
 > permanent: the only actor that could notice the claim was abandoned is the
@@ -101,14 +101,26 @@ NOT used for it, #4966):
 ```bash
 # Level, then oldest first (#11103); holds: champion-common.md "Hold set"
 HOLDS=$(loom-daemon labels list --property hold --with-retired 2>/dev/null || printf 'loom:blocked\nloom:operator\nloom:frozen'); export HOLDS
-gh issue list \
-  --label="loom:curated" \
-  --state=open \
-  --limit=500 \
-  --json number,title,body,labels,comments,createdAt \
-  --jq '($ENV.HOLDS | split("\n")) as $h | sort_by([([.labels[].name] | if index("loom:very-important") then 0 elif index("loom:important") then 1 else 2 end), .createdAt]) | .[] | select([.labels[].name] | any(IN("loom:evaluating","loom:issue","loom:building") or IN($h[])) | not) |
+gh api --paginate "repos/{owner}/{repo}/issues?labels=loom:curated&state=open&per_page=100" \
+  | jq -rs '($ENV.HOLDS | split("\n")) as $h | add | map(select(.pull_request | not)) | sort_by([([.labels[].name] | if index("loom:very-important") then 0 elif index("loom:important") then 1 else 2 end), .created_at]) | .[] | select([.labels[].name] | any(IN("loom:evaluating","loom:issue","loom:building") or IN($h[])) | not) | select((.body // "") | gsub("```[\\s\\S]*?```"; "") | test("(^|\n)<!-- loom:tracker -->[ \\t\\r]*(\n|$)") | not) |
   "#\(.number) \(.title)"'
 ```
+
+> **Discovery reads are REST (#12242).** Every listing in "Finding Work" is
+> one `gh api --paginate` read of the REST `issues?labels=` endpoint (100 rows
+> a page), never `gh issue list` / `gh pr list` and never with comments: those
+> are GraphQL, and one listing per queue per pass made Champion the largest
+> GraphQL spender outside the daemon. The endpoint returns issues and PRs
+> alike, so an issue listing drops `.pull_request` rows and a PR listing keeps
+> only them. Per-item reads (comments, body, CI) belong to the item's own
+> evaluation, never to discovery.
+
+> **`<!-- loom:tracker -->` is skipped here too (#10886).** A living tracker or
+> governance hub is never a finite Builder deliverable, so it is not a promotion
+> candidate and must never reach the N=2 rejection escalation. The marker must
+> be a line by itself in the issue body (not inside a code fence or a quote), so
+> discovery needs no extra read. Remove the marker and the issue is evaluated
+> normally. See `label-state-machine.md` → "Tracker marker".
 
 > **Why the `loom:issue`/`loom:building` exclusion is required**: promotion
 > adds `loom:issue` (later `loom:building`) but never removes the proposal
@@ -121,19 +133,17 @@ If found, **read and follow instructions in `.claude/commands/loom/champion-issu
 
 If no curated issues need promotion, check for well-formed proposals, with
 Priority 2's exclusions (see its note on why `loom:issue`/`loom:building` are
-required) and `title`/`body` fetch:
+required) and its REST listing. Also exclude `loom:curated`: a curated
+proposal is Priority 2's (a `--issue` step's under step dispatch), and the
+`--non-item` pass, which runs this query, must never evaluate one (#11922):
 
 ```bash
 # Architect proposals, Hermit proposals, Auditor bug reports
 HOLDS=$(loom-daemon labels list --property hold --with-retired 2>/dev/null || printf 'loom:blocked\nloom:operator\nloom:frozen'); export HOLDS
 for P in architect hermit auditor; do
-gh issue list \
-  --label="loom:$P" \
-  --state=open \
-  --limit=500 \
-  --json number,title,body,labels,comments,createdAt \
-  --jq '($ENV.HOLDS | split("\n")) as $h | sort_by([([.labels[].name] | if index("loom:very-important") then 0 elif index("loom:important") then 1 else 2 end), .createdAt]) | .[] | select([.labels[].name] | any(IN("loom:evaluating","loom:issue","loom:building") or IN($h[])) | not) |
-  "#\(.number) \(.title) ['"$P"']"'
+gh api --paginate "repos/{owner}/{repo}/issues?labels=loom:$P&state=open&per_page=100" \
+  | jq -rs --arg p "$P" '($ENV.HOLDS | split("\n")) as $h | add | map(select(.pull_request | not)) | sort_by([([.labels[].name] | if index("loom:very-important") then 0 elif index("loom:important") then 1 else 2 end), .created_at]) | .[] | select([.labels[].name] | any(IN("loom:evaluating","loom:issue","loom:building","loom:curated") or IN($h[])) | not) |
+  "#\(.number) \(.title) [\($p)]"'
 done
 ```
 
@@ -143,16 +153,14 @@ If found, **read and follow instructions in `.claude/commands/loom/champion-issu
 
 ### Priority 4: Epic Proposals Ready to Evaluate
 
-If no individual proposals need promotion, check for epic proposals:
+If no individual proposals need promotion, check for epic proposals (a
+`loom:curated` epic stays in this query: step dispatch never draws an epic
+for `--issue`, so under `--non-item` this is its only owner, #11922):
 
 ```bash
 # Epic proposals, highest priority level first (#11103)
-gh issue list \
-  --label="loom:epic" \
-  --state=open \
-  --limit=500 \
-  --json number,title,body,labels,comments \
-  --jq 'sort_by([.labels[].name] | if index("loom:very-important") then 0 elif index("loom:important") then 1 else 2 end) | .[] | select(any(.labels[]?.name; . == "loom:frozen") | not) | "#\(.number) \(.title) [epic]"'
+gh api --paginate "repos/{owner}/{repo}/issues?labels=loom:epic&state=open&per_page=100" \
+  | jq -rs 'add | map(select(.pull_request | not)) | sort_by([.labels[].name] | if index("loom:very-important") then 0 elif index("loom:important") then 1 else 2 end) | .[] | select(any(.labels[]?.name; . == "loom:frozen") | not) | "#\(.number) \(.title) [epic]"'
 ```
 
 If found, **read and follow instructions in `.claude/commands/loom/champion-epic.md`**. Epics have their own evaluation criteria focused on structure and phase decomposition.
@@ -162,14 +170,9 @@ If found, **read and follow instructions in `.claude/commands/loom/champion-epic
 If no epics need evaluation, check for PRs parked at the Doctor-cycle cap (`sweep.max_doctor_cycles` exhausted — `loom:blocked` **and** `loom:changes-requested`). Nothing else in the pipeline ever reconsiders this state, so without this pass it is terminal for automation:
 
 ```bash
-# gh ANDs repeated --label values, so this returns exactly the parked set.
-gh pr list \
-  --label="loom:blocked" \
-  --label="loom:changes-requested" \
-  --state=open \
-  --limit=500 \
-  --json number,title,updatedAt,labels \
-  --jq '.[] | select(any(.labels[]?.name; . == "loom:frozen") | not) | "#\(.number) \(.title)"'
+# REST ANDs comma-joined labels, so this returns exactly the parked set (PR rows only).
+gh api --paginate "repos/{owner}/{repo}/issues?labels=loom:blocked,loom:changes-requested&state=open&per_page=100" \
+  | jq -rs 'add | .[] | select(.pull_request) | select(any(.labels[]?.name; . == "loom:frozen") | not) | "#\(.number) \(.title)"'
 ```
 
 Ignore any that also carry `loom:operator` (already routed to a human). If found, **read and follow instructions in `.claude/commands/loom/champion-pr-merge.md` → "Capped-PR Recovery Pass"**: read the full rejection history, apply the forward-progress test, and either grant one more Doctor→Judge cycle (remove `loom:blocked` only), keep the PR parked, or recommend closure to the operator — always with a rationale comment. This pass never merges or closes (Champion's only close authority is the proposal "premise-false close gate", `champion-issue-promo.md` Step 4, #7657 — never a PR).
@@ -186,7 +189,7 @@ If no queues have work, report "No work for Champion" and stop.
 
 ## Follow-on Issue Creation
 
-After a merge, `champion-pr-merge.md` Step 5.5 turns added `TODO:`/`FIXME:`/`HACK:`/`XXX:`/`FUTURE:` lines, deferred-scope sections ("Follow-on Work", "Out of Scope", "Deferred", "Phase 2") and "not blocking" review notes into one `loom:triage` issue (Curator admission first, #11820): always for a critical pattern or a follow-on section, else at 3+ TODOs. It skips a duplicate "Follow-on from PR #N". Edge cases: `champion-reference.md` Edge Case 14.
+After a merge, `champion-pr-merge.md` Step 5.5 turns added `TODO:`/`FIXME:`/`HACK:`/`XXX:`/`FUTURE:` lines, deferred-scope sections ("Follow-on Work", "Deferred", "Phase 2"; not "Out of Scope", a deliberate exclusion) and "not blocking" review notes into one `loom:triage` issue (Curator admission first, #11820): always for a critical pattern or a follow-on section, else at 3+ TODOs. It skips a duplicate "Follow-on from PR #N". Edge cases: `champion-reference.md` Edge Case 14.
 
 ---
 

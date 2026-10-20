@@ -11,7 +11,8 @@ R2 of issue #3474.  It is three stages:
    A* so the route is reproducible regardless of machine load --
    replaced the former wall-clock ``--per-net-timeout 60``),
    jlcpcb-tier1, cpp backend, seed 42, auto-fix, placement feedback,
-   ``PYTHONHASHSEED=0``.
+   ``PYTHONHASHSEED=0``, and ``--allow-offboard`` (issue #6666, see
+   "Fixture defect" below).
 2. **Completion passes** (``complete_unfinished_nets``) -- every net
    left partially routed (1/N-pad stranding, the #3470-class signature)
    or unrouted (budget-starved tail) is stripped of stranded stubs and
@@ -34,6 +35,19 @@ Usage::
 
     PYTHONHASHSEED=0 uv run python scripts/route_chorus.py \
         [--pcb PATH] [--output PATH] [--skip-main-pass] [--seed 42]
+
+Fixture defect (issue #6666)
+----------------------------
+The v21 fixture's ``J2`` (RPi 2x20 header at y=101.98 on a 63 mm board) and
+``J4`` (1x05 header, pads 4/5 left of x=118) have PADS outside Edge.Cuts; KiCad
+``pcb drc`` reports ``copper_edge_clearance`` on them too.  Since #4187 the
+placement gate rejects them (OFF_BOARD ERROR) and, since #5413, their 31 nets
+are skipped as placement-invalid, so the recipe WITHOUT ``--allow-offboard``
+routes 0/37 attempted nets.  The historical 30/51 (#3899, ``006e5e586``) was
+routed on this same invalid placement before that gate existed; it is NOT
+reproducible on main.  ``--allow-offboard`` is passed here only so the recipe
+keeps measuring the router on all 51 nets until a chorus v22 fixture moves
+J2/J4 inside the outline -- it is not a manufacturable configuration.
 
 Exit code 0 when every signal net is fully routed (the
 ``feedback_manufacturable_means_100pct`` bar), 1 otherwise.  Either way
@@ -126,6 +140,8 @@ PINNED_RECIPE_FLAGS = [
 #:   auto-layers --starting/max 4:      22/51 (2 rungs)
 #:   --layers 4, 1 rung, --per-net-timeout 60: 33/51 (65%, May-10 parity)
 #:   THIS RECIPE (--deterministic-budget):     30/51 main pass, reproducible
+#:     (historical: measured at 006e5e586 before the #4187 OFF_BOARD gate;
+#:     not reproducible on main -- see the issue #6666 block below)
 #:
 #: Wave-11 M2/M3 re-measurement (issue #3883, 2026-07-02, this branch).
 #: With the #3881 per-net iteration cap in place, all four variants of the
@@ -152,6 +168,23 @@ PINNED_RECIPE_FLAGS = [
 #: flags remain available on the CLI (see --joint-region-resolve / line
 #: ~271, --placement-nudge / line ~285) for future geometry work but do
 #: not graduate into the production recipe as of this measurement.
+#:
+#: Issue #6666 re-measurement (2026-10-14, kct main + #6666 fix, chorus
+#: ``3883176``, cpp, seed 42, ``PYTHONHASHSEED=0``, ``--no-cache``):
+#:
+#:   main pass argv                         | strict | shorts | exit
+#:   ---------------------------------------+--------+--------+-----
+#:   R2 without --allow-offboard            | 0/37 attempted (31 nets placement-invalid)
+#:   R2 + --allow-offboard (THIS RECIPE)    | 29/51  | 18     | 124
+#:
+#: Before the #6666 fix the ``--allow-offboard`` row exited 1 at escape: the
+#: adaptive multi-resolution branch's Phase 1 escaped 0/14 pads of U8 and
+#: hard-failed.  ``kct route`` now previews that Phase 1 and falls back to the
+#: dense-package escape pre-phase (``Escape routes: U8 10 / J2 32 / U5 22``).
+#: The 29/51 is NOT reproducible run-to-run: the stage deadline fires before
+#: the iteration backstop.  The 18 routing-caused shorts and the exit 124
+#: (deadline during partial-save) are tracked separately; neither is caused by
+#: the escape/adaptive selection.
 R2_RECIPE_FLAGS = [
     "--manufacturer",
     "jlcpcb-tier1",
@@ -184,6 +217,11 @@ R2_RECIPE_FLAGS = [
     "2",
     "--timeout",
     "1200",
+    # Issue #6666: the v21 fixture's J2/J4 pads sit outside Edge.Cuts (a real
+    # fixture defect, see the module docstring).  Without this flag the
+    # #4187/#5413 placement gate skips their 31 nets.  Remove once chorus ships
+    # a fixture with J2/J4 inside the outline.
+    "--allow-offboard",
 ]
 
 
@@ -352,6 +390,9 @@ def main() -> int:
         # per-net cutoff on every rescue subprocess in favour of the
         # fixed iteration backstop (#3538).
         deterministic_budget=True,
+        # Issue #6666: completion/rescue passes route the same off-board
+        # J2/J4 nets as the main pass, so they need the same opt-in.
+        extra_args=("--allow-offboard",),
     )
 
     # Stage 2: batch completion passes.  All unfinished nets route

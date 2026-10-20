@@ -3930,7 +3930,7 @@ def test_equal_via_signatures_cancel_the_skew_rule_via_term(thickness, blind_bur
 
 
 def test_unequal_via_signatures_are_exactly_the_measured_board06_skew():
-    """0 vias vs 2 through-vias on a 1.6 mm 4-layer board = 3.2 mm of skew."""
+    """0 vias vs 2 through-vias on a 1.6 mm 4-layer board = 3.16 mm of skew (KiCad stackup span, #6725)."""
     from kicad_tools.router.diffpair_length import DiffPairLengthTracker
     from kicad_tools.router.diffpair_routing import _route_via_signature
 
@@ -3943,7 +3943,7 @@ def test_unequal_via_signatures_are_exactly_the_measured_board06_skew():
     skew = DiffPairLengthTracker._measure_route(
         shadow_leg, 1.6, 4, blind_buried_supported=False
     ) - DiffPairLengthTracker._measure_route(guide_leg, 1.6, 4, blind_buried_supported=False)
-    assert abs(skew - 3.2) < 1e-9
+    assert abs(skew - 3.16) < 1e-9
 
 
 def test_via_signature_tolerates_an_odd_via_count_without_crashing():
@@ -4475,6 +4475,16 @@ def _spy_shadow_entry(monkeypatch, shadow_enabled: bool) -> list[str]:
     dpr = router._diffpair
     assert dpr.enable_shadow_construction is False, "the default must stay OFF"
     dpr.enable_shadow_construction = shadow_enabled
+
+    # Issue #7374: the shadow branch is only reached when the single-ended
+    # guide probe returns copper.  The real probe is a wall-clock-bounded A*
+    # search that can come back empty on a loaded worker, which made the
+    # positive control flaky.  A fixed guide (as the ``test_shadow_claim_*``
+    # tests use) leaves the ``enable_shadow_construction`` gate as the only
+    # thing that can keep the spy from firing.
+    guide = _coupled_routes_for_pair(pair, p_end_x=25.0, n_end_x=25.0)[0]
+    assert guide.segments, "the stubbed guide must carry copper"
+    monkeypatch.setattr(dpr, "_single_ended_guide_route", lambda *a, **k: guide)
 
     calls: list[str] = []
     monkeypatch.setattr(

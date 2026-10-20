@@ -39,6 +39,11 @@ class ERCStatus:
     skipped: bool = False
     details: str = ""
     report_path: Path | None = None
+    # True when ERC was requested and a schematic exists, but kicad-cli could
+    # not be found or timed out, so the schematic was never checked (issue
+    # #7083).  Distinct from ``skipped`` (user opt-out / nothing to check):
+    # a could-not-verify ERC caps the verdict at WARNING and renders NOT RUN.
+    could_not_verify: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -47,6 +52,7 @@ class ERCStatus:
             "blocking_error_count": self.blocking_error_count,
             "passed": self.passed,
             "skipped": self.skipped,
+            "could_not_verify": self.could_not_verify,
             "details": self.details,
         }
 
@@ -118,6 +124,9 @@ class SyncStatus:
     passed: bool = True
     skipped: bool = False
     details: str = ""
+    # True when the Reconciler crashed (e.g. an unparseable schematic), so
+    # drift was never measured (issue #7083).  Caps the verdict at WARNING.
+    could_not_verify: bool = False
     # Up to ~10 example refs per axis (for surfacing in reports). Kept
     # small so JSON manifest does not balloon for boards with hundreds
     # of mismatches.
@@ -134,6 +143,7 @@ class SyncStatus:
             "footprint_mismatch_count": self.footprint_mismatch_count,
             "passed": self.passed,
             "skipped": self.skipped,
+            "could_not_verify": self.could_not_verify,
             "details": self.details,
             "schematic_only_refs": list(self.schematic_only_refs),
             "pcb_only_refs": list(self.pcb_only_refs),
@@ -282,6 +292,9 @@ class IsolationStatus:
     required_clearance_mm: float | None = None
     standard: str | None = None
     standard_edition: str | None = None
+    # Insulation type the standard-derived requirement assumed (issue #7082);
+    # None when no --hv-standard was supplied.
+    insulation: str | None = None
     failing_pairs: list[dict] = field(default_factory=list)
     details: str = ""
     # Full engine census dict (CreepageReport.to_dict()) -- kept verbatim so
@@ -305,6 +318,7 @@ class IsolationStatus:
             "required_clearance_mm": self.required_clearance_mm,
             "standard": self.standard,
             "standard_edition": self.standard_edition,
+            "insulation": self.insulation,
             "failing_pairs": [dict(p) for p in self.failing_pairs],
             "details": self.details,
             "report": self.report,
@@ -322,6 +336,8 @@ def check_isolation(
     hv_working_voltage: float | None = None,
     hv_pollution_degree: int | None = None,
     hv_material_group: str = "IIIa",
+    hv_overvoltage_category: str = "II",
+    hv_insulation: str = "basic",
 ) -> IsolationStatus:
     """Standalone HV creepage/clearance isolation check (issue #4333, phase 3).
 
@@ -339,8 +355,14 @@ def check_isolation(
     The returned status gates a verdict: a resolved below-standard pair ->
     hard FAIL; HV present but not gateable (no threshold / shapely absent /
     lookup error) -> WARNING; no HV nets -> inert (``checked=False``).
+
+    ``hv_insulation`` (``basic`` / ``supplementary`` / ``reinforced``, default
+    ``basic``) selects the insulation rule for the derived creepage and
+    clearance (issue #7082).
     """
     status = IsolationStatus(standard=hv_standard)
+    if hv_standard is not None:
+        status.insulation = hv_insulation
 
     # Parse the net-class-map sidecar with the SAME block ``kct check``'s
     # DRC rules use so HV selection agrees with the diff-pair DRC rules
@@ -440,7 +462,6 @@ def check_isolation(
     clearance_prov: dict | None = None
     if hv_standard is not None:
         from kicad_tools.creepage.standards import (
-            RMS_TO_PEAK,
             StandardLookupError,
             get_standard,
         )
@@ -458,10 +479,15 @@ def check_isolation(
                 float(hv_working_voltage),
                 int(hv_pollution_degree),
                 hv_material_group,
+                hv_insulation,
             )
-            peak_voltage = float(hv_working_voltage) * RMS_TO_PEAK
+            # Clearance = max(F.2 at the F.1 rated impulse voltage, F.8 at the
+            # steady-state peak, PD floor) -- issue #7057.
             required_clearance_mm, clearance_prov = std.required_clearance(
-                peak_voltage, int(hv_pollution_degree)
+                float(hv_working_voltage),
+                int(hv_pollution_degree),
+                hv_overvoltage_category,
+                hv_insulation,
             )
             status.standard_edition = std.edition
         except StandardLookupError as e:
@@ -488,6 +514,8 @@ def check_isolation(
             material_group=(hv_material_group if hv_standard is not None else None),
             creepage_provenance=creepage_prov,
             clearance_provenance=clearance_prov,
+            overvoltage_category=hv_overvoltage_category,
+            insulation=hv_insulation,
         )
     except Exception as e:
         # A genuine census crash must NOT be coerced into a clean PASS.
@@ -692,6 +720,16 @@ class AuditResult:
         if self.drc.passed and not self.drc.geometric_drc_ran:
             return AuditVerdict.WARNING
 
+        # Un-run ERC / sync gate (issue #7083): the same #3825/#3832 policy,
+        # applied to ERC (kicad-cli not found or timed out) and to the sync
+        # drift check (Reconciler crashed).  An engine that never checked the
+        # design cannot certify it READY, but this is WARNING rather than
+        # NOT_READY so backend-less CI does not regress to red.  An explicit
+        # --skip-erc or a missing schematic sets ``skipped`` instead and is
+        # deliberately not affected.
+        if self.erc.could_not_verify or self.sync.could_not_verify:
+            return AuditVerdict.WARNING
+
         # HV / isolation soft gate (issue #4333): HV nets are present but the
         # path could NOT be authoritatively gated -- either no requirement was
         # specified (no --hv-min / --hv-standard) or the census could not be
@@ -782,6 +820,9 @@ class ManufacturingAudit:
         hv_working_voltage: float | None = None,
         hv_pollution_degree: int | None = None,
         hv_material_group: str = "IIIa",
+        hv_overvoltage_category: str = "II",
+        hv_insulation: str = "basic",
+        schematic_path: str | Path | None = None,
     ):
         """Initialize the audit.
 
@@ -810,6 +851,15 @@ class ManufacturingAudit:
             hv_working_voltage: RMS working voltage (V) for standard derivation.
             hv_pollution_degree: IEC pollution degree (1/2/3) for derivation.
             hv_material_group: Insulation material group (default ``IIIa``).
+            hv_overvoltage_category: IEC 60664-1 overvoltage category
+                (``I``-``IV``, default ``II``) selecting the Table F.1 rated
+                impulse voltage for the derived clearance (issue #7057).
+            hv_insulation: Insulation type (``basic`` / ``supplementary`` /
+                ``reinforced``, default ``basic``) for the derived
+                creepage and clearance (issue #7082).
+            schematic_path: Explicit schematic for ``.kicad_pcb`` input, used
+                instead of auto-resolution (issue #7153).  Ignored for
+                ``.kicad_pro`` input.
         """
         self.path = Path(project_or_pcb)
         self.manufacturer = manufacturer
@@ -828,6 +878,8 @@ class ManufacturingAudit:
         self.hv_working_voltage = hv_working_voltage
         self.hv_pollution_degree = hv_pollution_degree
         self.hv_material_group = hv_material_group
+        self.hv_overvoltage_category = hv_overvoltage_category
+        self.hv_insulation = hv_insulation
 
         # Resolve paths
         if self.path.suffix == ".kicad_pro":
@@ -844,8 +896,23 @@ class ManufacturingAudit:
         elif self.path.suffix == ".kicad_pcb":
             self.project_path = None
             self.pcb_path = self.path
-            self.schematic_path = self.path.with_suffix(".kicad_sch")
-            self.skip_erc = True  # Skip ERC for PCB-only
+            # Issue #7136: resolve the schematic the same way ``kct check``
+            # and the ``.kicad_pro`` branch do (project.kct, then the
+            # stage-stripped sibling, so ``board_routed.kicad_pcb`` finds
+            # ``board.kicad_sch``).  Do NOT force ``skip_erc`` here: a PCB
+            # input used to render ``[OK] ERC: PASS -- skipped by user
+            # request`` without ERC ever running.  ``self.skip_erc`` now
+            # reflects only the caller's ``--skip-erc`` / ``skip_erc=True``.
+            from kicad_tools.sync.discover import resolve_schematic_for_pcb
+
+            if schematic_path is not None and Path(schematic_path).exists():
+                # Issue #7153: an explicit schematic (e.g. the one the export
+                # already holds) wins over auto-resolution.
+                self.schematic_path = Path(schematic_path)
+            else:
+                self.schematic_path = resolve_schematic_for_pcb(self.path) or self.path.with_suffix(
+                    ".kicad_sch"
+                )
         else:
             raise ValueError(f"Expected .kicad_pro or .kicad_pcb file, got: {self.path}")
 
@@ -990,14 +1057,21 @@ class ManufacturingAudit:
         )
 
         # Run checks
-        if not self.skip_erc and self.schematic_path.exists():
+        if self.skip_erc:
+            result.erc.skipped = True
+            result.erc.details = "ERC skipped by user request"
+        elif self.schematic_path.exists():
             result.erc = self._check_erc()
         else:
-            result.erc.skipped = True
-            if self.skip_erc:
-                result.erc.details = "ERC skipped by user request"
-            else:
-                result.erc.details = "ERC skipped (no schematic provided)"
+            # Issue #7136: ERC was not skipped by the caller but there is no
+            # schematic to check.  That verifies nothing, so it is NOT RUN
+            # (the #7089 convention: ``could_not_verify`` caps the verdict at
+            # WARNING and renders ``[!!] ERC ...: NOT RUN``), never a PASS.
+            result.erc.could_not_verify = True
+            result.erc.passed = False
+            result.erc.skipped = False
+            result.erc.blocking_error_count = 0
+            result.erc.details = f"no schematic found for {self.pcb_path.name}"
 
         if self.pcb_path.exists():
             pcb = self._load_pcb()
@@ -1034,17 +1108,37 @@ class ManufacturingAudit:
         """Run ERC on schematic."""
         status = ERCStatus()
 
+        def _not_run(reason: str) -> ERCStatus:
+            # Issue #7083: ERC was requested but never checked the schematic.
+            # Not a pass (the old ``passed=True`` gave a false READY) and not
+            # a blocking failure (backend-less CI must not go red): flag it so
+            # the verdict caps at WARNING and the table/report show NOT RUN.
+            status.could_not_verify = True
+            status.passed = False
+            status.skipped = False
+            status.blocking_error_count = 0
+            status.details = reason
+            return status
+
         try:
-            # Try to run kicad-cli erc
+            # Resolve kicad-cli the same way geometric DRC does, so ERC and
+            # DRC agree on whether it exists (issue #7083: a bare "kicad-cli"
+            # missed the default macOS install, which is not on PATH).
+            from kicad_tools.cli.runner import find_kicad_cli, kicad_cli_unavailable_reason
+
+            kicad_cli = find_kicad_cli()
+            if kicad_cli is None:
+                return _not_run(kicad_cli_unavailable_reason())
+
             import tempfile
 
             with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
                 report_path = Path(f.name)
 
             try:
-                subprocess.run(
+                proc = subprocess.run(
                     [
-                        "kicad-cli",
+                        str(kicad_cli),
                         "sch",
                         "erc",
                         str(self.schematic_path),
@@ -1057,6 +1151,21 @@ class ManufacturingAudit:
                     timeout=60,
                     check=False,
                 )
+
+                # Issue #6724: the report file above is pre-created empty, and
+                # an empty file parses as a clean ERC.  A kicad-cli killed by a
+                # signal (e.g. the OOM killer) or one that wrote nothing did
+                # not check the schematic: fail loud via the handler below.
+                if proc.returncode < 0 or (
+                    report_path.exists() and report_path.stat().st_size == 0
+                ):
+                    from kicad_tools.drc.geometric import describe_returncode
+
+                    raise RuntimeError(
+                        describe_returncode(proc.returncode)
+                        if proc.returncode < 0
+                        else f"kicad-cli wrote an empty ERC report (exit {proc.returncode})"
+                    )
 
                 if report_path.exists():
                     from kicad_tools.erc import ERCReport
@@ -1094,12 +1203,10 @@ class ManufacturingAudit:
                         status.details = ", ".join(t.value for t in blocking_types)
                     status.report_path = report_path
             except FileNotFoundError:
-                # kicad-cli not installed
-                status.details = "kicad-cli not found (skipped)"
-                status.passed = True  # Don't fail if we can't check
+                # kicad-cli vanished between lookup and exec.
+                return _not_run(f"kicad-cli not found at {kicad_cli}")
             except subprocess.TimeoutExpired:
-                status.details = "ERC timed out"
-                status.passed = False
+                return _not_run("ERC timed out after 60s")
 
         except Exception as e:
             # A genuine ERC checker crash must NOT be coerced into a clean
@@ -1254,7 +1361,8 @@ class ManufacturingAudit:
 
         Counts are *additive* on top of the ``--mfr`` engine's tally:
         ``error_count`` / ``blocking_count`` grow by the kicad-cli error
-        count, and each kicad-cli violation type is recorded in
+        count plus its error-severity ``unconnected_items`` (Issue #7188),
+        and each kicad-cli violation type is recorded in
         ``violations_by_type`` under a ``kicad-cli:`` namespace so it is
         clearly attributed to the geometric engine and never collides with
         a ``--mfr`` rule_id.
@@ -1292,21 +1400,32 @@ class ManufacturingAudit:
         # The geometric engine ran -- the verdict is now authoritative.
         status.geometric_drc_ran = True
 
-        if result.error_count > 0:
-            status.error_count += result.error_count
-            status.blocking_count += result.error_count
+        # Issue #7188: kicad-cli's error-severity ``unconnected_items`` are
+        # blocking too.  ``result.error_count`` is geometric-only (#4498), so
+        # fold them in explicitly.  run_geometric_drc refills zones first
+        # (#3969), so these opens are measured after the pour and are
+        # authoritative -- unlike the kct-native ``connectivity`` rule, which
+        # stays advisory here (#3044).
+        opens = sum(1 for v in result.unconnected_items if v.is_error)
+        fold = result.error_count + opens
+        if fold > 0:
+            status.error_count += fold
+            status.blocking_count += fold
             status.passed = status.blocking_count == 0
 
             # Record per-type counts under a kicad-cli namespace so the
             # report's by-type table makes the engine explicit and the
             # geometric types never collide with --mfr rule_ids.
+            cli_by_type = dict(result.by_type)
+            if opens:
+                cli_by_type["unconnected_items"] = cli_by_type.get("unconnected_items", 0) + opens
             by_type = status.violations_by_type
-            for type_str, count in result.by_type.items():
+            for type_str, count in cli_by_type.items():
                 key = f"kicad-cli:{type_str}"
                 by_type[key] = by_type.get(key, 0) + count
             status.violations_by_type = by_type
 
-            top = result.top_types(3)
+            top = sorted(cli_by_type.items(), key=lambda x: -x[1])[:3]
             cli_detail = "kicad-cli: " + ", ".join(f"{t} ({c})" for t, c in top)
             status.details = f"{status.details}; {cli_detail}" if status.details else cli_detail
 
@@ -1467,6 +1586,8 @@ class ManufacturingAudit:
             hv_working_voltage=self.hv_working_voltage,
             hv_pollution_degree=self.hv_pollution_degree,
             hv_material_group=self.hv_material_group,
+            hv_overvoltage_category=self.hv_overvoltage_category,
+            hv_insulation=self.hv_insulation,
         )
 
     def _check_compatibility(self, pcb: PCB) -> ManufacturerCompatibility:
@@ -1658,8 +1779,13 @@ class ManufacturingAudit:
                 status.details = "Schematic and PCB are in sync"
 
         except Exception as e:
-            logger.debug(f"Sync drift check skipped: {e}")
-            status.skipped = True
+            # Issue #7083: a crashed sync check measured nothing.  It is not
+            # a quiet skip (``skipped`` means "nothing to check") -- flag it
+            # so the verdict caps at WARNING and the table shows NOT RUN.
+            logger.warning(f"Sync drift check failed: {e}")
+            status.could_not_verify = True
+            status.passed = False
+            status.skipped = False
             status.details = f"Sync check failed: {e}"
 
         return status
@@ -1715,6 +1841,18 @@ class ManufacturingAudit:
         # board.  Value/footprint mismatches and PCB-only orphans are
         # priority 2 (important).
         sync = result.sync
+        if sync.could_not_verify:
+            items.append(
+                ActionItem(
+                    priority=2,
+                    description=(
+                        "Schematic <-> PCB sync check could not run"
+                        + (f" ({sync.details})" if sync.details else "")
+                    ),
+                    command=f"kct sync --analyze {self.pcb_path}",
+                )
+            )
+
         if sync.schematic_only_count > 0:
             refs = ", ".join(sync.schematic_only_refs[:10])
             suffix = (
@@ -1783,6 +1921,26 @@ class ManufacturingAudit:
                 )
             )
 
+        # ERC requested but never ran (issue #7083)
+        if result.erc.could_not_verify:
+            items.append(
+                ActionItem(
+                    priority=2,
+                    description=(
+                        "ERC could not run -- schematic not checked"
+                        + (f" ({result.erc.details})" if result.erc.details else "")
+                    ),
+                    # No schematic on disk (issue #7136): there is nothing
+                    # to hand kicad-cli, so don't suggest a command that
+                    # would fail on a missing file.
+                    command=(
+                        f"kicad-cli sch erc {self.schematic_path}"
+                        if self.schematic_path.exists()
+                        else None
+                    ),
+                )
+            )
+
         # Blocking ERC errors (electrical issues)
         if result.erc.blocking_error_count > 0:
             items.append(
@@ -1821,15 +1979,16 @@ class ManufacturingAudit:
             if result.connectivity.has_zones:
                 # Board has zone definitions — connectivity is advisory.
                 # Zone fills may resolve the incomplete nets once refilled
-                # in KiCad.
+                # (issue #7083: point at the automated refill, not KiCad).
                 items.append(
                     ActionItem(
                         priority=3,
                         description=(
-                            f"Verify zone fill in KiCad: {result.connectivity.incomplete_nets}"
-                            " nets appear incomplete but may be connected via zone fills"
+                            f"Refill zones to verify {result.connectivity.incomplete_nets}"
+                            " nets that appear incomplete but may be connected via zone"
+                            " fills, then re-run kct audit"
                         ),
-                        command=None,
+                        command=f"kct zones fill {self.pcb_path}",
                     )
                 )
             else:
@@ -1861,10 +2020,11 @@ class ManufacturingAudit:
                 ActionItem(
                     priority=3,
                     description=(
-                        f"Verify zone fill in KiCad for"
-                        f" {result.connectivity.zone_connected_nets} zone-connected nets"
+                        f"Refill zones to verify"
+                        f" {result.connectivity.zone_connected_nets} zone-connected nets,"
+                        " then re-run kct audit"
                     ),
-                    command=None,
+                    command=f"kct zones fill {self.pcb_path}",
                 )
             )
 

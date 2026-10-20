@@ -212,7 +212,7 @@ def test_running_job_fails() -> None:
 
 
 def test_unrelated_red_job_is_ignored_by_main_gate() -> None:
-    jobs = _green_jobs() + [_job("Board 05 Routing Regression (blocking <= 7)", "failure")]
+    jobs = _green_jobs() + [_job("Board 05 Routing Regression (blocking == 0)", "failure")]
     assert rp.evaluate_jobs(jobs) == []
 
 
@@ -230,6 +230,19 @@ def test_newest_run_filters_event() -> None:
     ]
     assert rp.newest_run(runs, "push")["id"] == 1
     assert rp.newest_run([], "push") is None
+
+
+def test_newest_run_accepts_an_event_set() -> None:
+    """Issue #5986: main is verified by schedule / workflow_dispatch runs."""
+    runs = [
+        {"id": 1, "event": "push", "created_at": "2026-09-28T08:00:00Z"},
+        {"id": 2, "event": "schedule", "created_at": "2026-09-28T09:00:00Z"},
+        {"id": 3, "event": "workflow_dispatch", "created_at": "2026-09-28T10:00:00Z"},
+        {"id": 4, "event": "pull_request", "created_at": "2026-09-28T11:00:00Z"},
+    ]
+    assert rp.newest_run(runs, rp.MAIN_CI_EVENTS)["id"] == 3
+    assert rp.newest_run(runs[:2], rp.MAIN_CI_EVENTS)["id"] == 2
+    assert rp.newest_run(runs[3:], rp.MAIN_CI_EVENTS) is None
 
 
 def test_wait_for_polls_until_settled_and_bounds() -> None:
@@ -344,8 +357,10 @@ def test_workflow_shape() -> None:
     triggers = wf[True]  # PyYAML parses the bare `on:` key as True
     assert triggers["schedule"] == [{"cron": "0 14 * * *"}]
     assert set(triggers["workflow_dispatch"]["inputs"]) == {"level", "dry_run"}
-    assert wf["permissions"]["actions"] == "read"
-    assert "write" not in wf["permissions"].values()  # writes go through the App token
+    # actions: write only for the one ci.yml workflow_dispatch (#5986); every
+    # other write goes through the App token.
+    assert wf["permissions"]["actions"] == "write"
+    assert [k for k, v in wf["permissions"].items() if v == "write"] == ["actions"]
     assert wf["concurrency"]["cancel-in-progress"] is False
     steps = wf["jobs"]["release-pr"]["steps"]
     token = next(s for s in steps if s.get("id") == "app-token")
@@ -529,17 +544,38 @@ def test_build_release_tree(repo: Path) -> None:
 
 
 class FakeForge(rp.Forge):
-    def __init__(self, *, ci: str = "green", pr_checks: str = "green", open_prs=None) -> None:
+    def __init__(
+        self,
+        *,
+        ci: str = "green",
+        pr_checks: str = "green",
+        open_prs=None,
+        ci_event: str = "schedule",
+        main_run: bool = True,
+        dispatch_fails: bool = False,
+    ) -> None:
         super().__init__("o/r", write_token="app-token")
         self.ci = ci
         self.pr_checks = pr_checks
         self.open_prs = open_prs or []
         self.calls: list[tuple] = []
+        self.ci_event = ci_event
+        self.main_run = main_run  # False: no main run on the SHA until dispatched
+        self.dispatch_fails = dispatch_fails
+        self.dispatched = 0  # kept out of `calls`: tests pin calls == [...] exactly
+
+    def dispatch_ci(self) -> None:
+        if self.dispatch_fails:
+            raise rp.ReleaseError("gh api POST dispatches failed: 403")
+        self.dispatched += 1
+        self.main_run, self.ci_event = True, "workflow_dispatch"
 
     def runs_for_sha(self, sha: str, workflow: str | None = None) -> list[dict[str, Any]]:
         if workflow:  # main CI
+            if not self.main_run:
+                return [{"id": 9, "event": "pull_request", "status": "completed"}]
             status = "in_progress" if self.ci == "pending" else "completed"
-            return [{"id": 1, "event": "push", "status": status, "created_at": "t"}]
+            return [{"id": 1, "event": self.ci_event, "status": status, "created_at": "t"}]
         status = "in_progress" if self.pr_checks == "pending" else "completed"
         return [
             {
@@ -795,6 +831,64 @@ def test_forge_writes_use_release_token_and_reads_do_not() -> None:
         rp.Forge("o/r", runner=runner).comment(1, "x")
 
 
+@pytest.mark.parametrize("event", ["push", "schedule", "workflow_dispatch"])
+def test_main_ci_state_counts_every_main_event(event: str) -> None:
+    assert rp.main_ci_state(FakeForge(ci_event=event), "f" * 40) == ("green", [])
+
+
+def test_main_ci_state_ignores_pull_request_runs() -> None:
+    state, reasons = rp.main_ci_state(FakeForge(main_run=False), "f" * 40)
+    assert state == "pending" and "no CI main run" in reasons[0]
+
+
+def test_request_main_ci_dispatches_only_when_the_sha_has_no_main_run() -> None:
+    """Issue #5986: main CI is hourly on the newest main, so a release SHA may
+    never get a scheduled run; the gate requests one instead of timing out."""
+    present = FakeForge()
+    assert rp.request_main_ci(present, "f" * 40) == []
+    assert present.dispatched == 0
+
+    missing = FakeForge(main_run=False)
+    notes = rp.request_main_ci(missing, "f" * 40)
+    assert missing.dispatched == 1 and "dispatched" in notes[0]
+    assert rp.main_ci_state(missing, "f" * 40) == ("green", [])
+
+
+def test_request_main_ci_dispatch_failure_is_not_fatal() -> None:
+    forge = FakeForge(main_run=False, dispatch_fails=True)
+    notes = rp.request_main_ci(forge, "f" * 40)
+    assert "dispatch failed" in notes[0]
+    assert rp.main_ci_state(forge, "f" * 40)[0] == "pending"
+
+
+def test_run_dispatches_ci_then_releases(repo: Path, quiet_checks) -> None:
+    _merge_pr(repo, 12, "fix: y", {"changelog.d/40.fixed.md": "- y (Issue #40)."})
+    forge = FakeForge(main_run=False)
+    outcome = _run(repo, forge)
+    assert outcome.code == 0, outcome.summary
+    assert forge.dispatched == 1
+    assert "merge_pr" in [c[0] for c in forge.calls]
+
+
+def test_forge_dispatch_ci_uses_the_read_token() -> None:
+    seen: list[dict[str, Any]] = []
+
+    def runner(cmd, *, input, capture_output, text, check, env):
+        seen.append({"cmd": cmd, "input": input, "token": env.get("GH_TOKEN")})
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    os.environ.pop("GH_TOKEN", None)
+    rp.Forge("o/r", write_token="app", runner=runner).dispatch_ci()
+    assert seen[0]["cmd"][3:] == [
+        "POST",
+        "repos/o/r/actions/workflows/ci.yml/dispatches",
+        "--input",
+        "-",
+    ]
+    assert json.loads(seen[0]["input"]) == {"ref": "main"}
+    assert seen[0]["token"] is None  # GITHUB_TOKEN from the environment, not the App
+
+
 def test_tracking_issue_find_or_create() -> None:
     created: list[dict[str, Any]] = []
 
@@ -839,3 +933,76 @@ def test_cli_plan_json_against_this_repo() -> None:
     assert proc.returncode == 0, proc.stderr
     data = json.loads(proc.stdout)
     assert set(data) >= {"tag", "merged_prs", "level", "version", "stop", "section"}
+
+
+# --- body budget (Issue #7561) ------------------------------------------------------
+
+
+def _big_plan(section: str, n_prs: int = 485) -> Any:
+    plan = rp.Plan(
+        sha="c" * 40,
+        tag="v0.23.0",
+        current="0.23.0",
+        prs=list(range(7000, 7000 + n_prs)),
+        first_parent=[],
+        fragments=[],
+        has_content=True,
+    )
+    plan.decision = rp.LevelDecision(level="minor", reasons=["added fragments"])
+    plan.version = "0.24.0"
+    plan.section = section
+    return plan
+
+
+def _section(n_bullets: int) -> str:
+    bullet = "- **Thing {i}** (Issue #{i}). " + "word " * 100 + "\n  continued line.\n"
+    entries = "\n".join(bullet.format(i=i) for i in range(n_bullets))
+    return f"## [0.24.0] - 2026-10-19\n\n### Added\n\n{entries}"
+
+
+def test_huge_section_body_fits_with_marker_and_pointer() -> None:
+    section = _section(400)
+    assert len(section) > 200_000
+    body = rp.pr_body(_big_plan(section), rp.GateResult(notes=["main CI green"]))
+    assert len(body) <= rp.BODY_BUDGET < rp.GITHUB_BODY_LIMIT
+    assert body.startswith(rp.AUTO_MARKER)
+    assert "**Level: minor**" in body and "main CI green" in body
+    url = "https://github.com/rjwalters/kicad-tools/blob/release/v0.24.0/CHANGELOG.md"
+    assert url in body
+    assert "485 PRs" in body and "#7000," not in body
+    # Cut at a bullet boundary: the last kept bullet is complete.
+    kept = body.split("---\n\n", 1)[1].split("\n\n_Section truncated")[0]
+    assert kept.rstrip().endswith("continued line.")
+    assert "## [0.24.0]" in kept
+
+
+def test_small_section_body_is_unchanged() -> None:
+    section = _section(3)
+    body = rp.pr_body(_big_plan(section, n_prs=3), rp.GateResult())
+    assert body.endswith("---\n\n" + section)
+    assert "#7000, #7001, #7002" in body
+    assert "truncated" not in body
+
+
+def test_fit_body_clips_long_comments_at_a_line() -> None:
+    long = "\n".join(f"- problem {i}" for i in range(20_000))
+    clipped = rp.fit_body(long)
+    assert len(clipped) <= rp.BODY_BUDGET
+    assert "truncated" in clipped
+    assert rp.fit_body("short") == "short"
+
+
+def test_forge_writes_are_held_to_the_budget() -> None:
+    sent: list[dict[str, Any]] = []
+
+    class Capture(rp.Forge):
+        def api(self, path: str, *, method: str = "GET", body: Any = None, write: bool = False):
+            sent.append(body)
+            return {"number": 1}
+
+    forge = Capture("o/r")
+    huge = "x\n" * 100_000
+    forge.create_pr("release/v0.24.0", "t", huge)
+    forge.edit_pr(1, "t", huge)
+    forge.comment(1, huge)
+    assert all(len(b["body"]) <= rp.BODY_BUDGET for b in sent)

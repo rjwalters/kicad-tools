@@ -2,7 +2,7 @@ Manufacturing package for simple_led_routed.kicad_pcb
 
 Fabrication tier : jlcpcb
 Mode             : assembly
-Generated        : 2026-10-13T23:27:55.454718+00:00
+Generated        : 2026-10-19T20:30:00Z
 
 Assembly package: BOM and CPL are included.
 
@@ -31,7 +31,7 @@ Contents
 
 Hand-solder / through-hole items
 --------------------------------
-  The following parts are EXCLUDED from the SMT CPL and must be hand-soldered:
+  The following through-hole parts are INCLUDED in the CPL and BOM for fab assembly (flag for procurement review):
   D1, J1
 
 Warning review (per rule)

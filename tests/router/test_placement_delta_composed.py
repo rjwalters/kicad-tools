@@ -33,6 +33,7 @@ import pytest
 
 from kicad_tools.router import PlacementDelta, PlacementDeltaFeedbackLoop
 from kicad_tools.schema.pcb import PCB
+from tests.route_cli import route_args
 
 # Reuse the Phase-1/2 fixtures verbatim.
 from tests.router.test_placement_delta import _facing_rows_bundle_board, _load
@@ -534,20 +535,17 @@ class _StubRouter:
 
 class TestCliPlacementDeltaWiring:
     def test_flag_parses(self):
-        from kicad_tools.cli.parser import create_parser
-
-        parser = create_parser()
-        args = parser.parse_args(["route", "b.kicad_pcb", "--placement-delta-feedback-budget", "2"])
+        args = route_args(["b.kicad_pcb", "--placement-delta-feedback-budget", "2"])
         # Issue #5890 (Epic #5511 Phase 3): the toggle is tri-state and the
         # default is the AUTO sentinel ``None`` -- "decide from the routing
         # plan's feasibility verdict" -- not a hard-coded opt-in ``False``.
         # ``tests/test_placement_delta_auto_gate_5890.py`` owns the gate itself.
         assert args.placement_delta_feedback is None
-        args = parser.parse_args(["route", "b.kicad_pcb", "--placement-delta-feedback"])
+        args = route_args(["b.kicad_pcb", "--placement-delta-feedback"])
         assert args.placement_delta_feedback is True
         assert args.placement_delta_feedback_budget == 3
-        args = parser.parse_args(
-            ["route", "b.kicad_pcb", "--placement-delta-feedback", "--no-placement-delta-feedback"]
+        args = route_args(
+            ["b.kicad_pcb", "--placement-delta-feedback", "--no-placement-delta-feedback"]
         )
         assert args.placement_delta_feedback is False
 

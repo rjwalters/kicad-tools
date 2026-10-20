@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from kicad_tools.core.geometry import point_in_polygon as _core_point_in_polygon
+
 from ..violations import DRCResults, DRCViolation
 from .base import DRCRule
 from .edge import EdgeClearanceRule
@@ -18,32 +20,13 @@ if TYPE_CHECKING:
 
 
 def point_in_polygon(x: float, y: float, polygon: list[tuple[float, float]]) -> bool:
-    """Test if a point is inside a polygon using ray casting.
+    """Test if a point is inside a polygon; the boundary counts as inside.
 
-    Casts a ray from the point in the +X direction and counts the number
-    of polygon edge crossings.  An odd count means inside.
-
-    A point exactly on the boundary is treated as inside (consistent
-    with the convention that boundary footprints are acceptable).
-
-    Args:
-        x: X coordinate to test.
-        y: Y coordinate to test.
-        polygon: Ordered list of (x, y) vertices forming the polygon.
-
-    Returns:
-        True if the point is inside (or on the boundary of) the polygon.
+    Thin wrapper over :func:`kicad_tools.core.geometry.point_in_polygon`
+    with ``boundary_inside=True`` (a footprint origin exactly on any board
+    edge or vertex is acceptable; issue #7224).
     """
-    n = len(polygon)
-    inside = False
-    j = n - 1
-    for i in range(n):
-        xi, yi = polygon[i]
-        xj, yj = polygon[j]
-        if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
-            inside = not inside
-        j = i
-    return inside
+    return _core_point_in_polygon(x, y, polygon, boundary_inside=True)
 
 
 class FootprintOutsideBoardRule(DRCRule):

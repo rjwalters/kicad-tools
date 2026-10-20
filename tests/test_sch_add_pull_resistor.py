@@ -13,12 +13,12 @@ import pytest
 from kicad_tools.cli.sch_add_pull_resistor import (
     _check_wire_path_crossings,
     _segments_intersect,
-    _snap,
 )
 from kicad_tools.cli.sch_add_pull_resistor import (
     main as add_pull_main,
 )
 from kicad_tools.schema import Schematic
+from kicad_tools.schematic.grid import snap_to_grid
 
 # ---------------------------------------------------------------------------
 # Minimal schematic with an IC symbol (2-pin for simplicity) and Device:R + power:GND
@@ -111,16 +111,16 @@ def _write_sch(tmp_path: Path, content: str = SCHEMATIC_WITH_IC) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# _snap
+# snap_to_grid
 # ---------------------------------------------------------------------------
 
 
 class TestSnap:
     def test_snap_on_grid(self):
-        assert _snap(5.08) == pytest.approx(5.08, abs=0.01)
+        assert snap_to_grid(5.08) == pytest.approx(5.08, abs=0.01)
 
     def test_snap_off_grid(self):
-        assert _snap(5.0) == pytest.approx(5.08, abs=0.02)
+        assert snap_to_grid(5.0) == pytest.approx(5.08, abs=0.02)
 
 
 # ---------------------------------------------------------------------------

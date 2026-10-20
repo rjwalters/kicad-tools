@@ -7,6 +7,8 @@
 (rule "Via Drill - OSHPark"
   (condition "A.Type == 'via' && A.Via_Type != 'Micro'")
   (constraint hole_size (min 0.254mm)))
+(rule "Max Hole Size - OSHPark"
+  (constraint hole_size (max 6.35mm)))
 (rule "Via Diameter - OSHPark"
   (condition "A.Type == 'via' && A.Via_Type != 'Micro'")
   (constraint via_diameter (min 0.508mm)))
@@ -19,8 +21,8 @@
   (condition "(A.Type == 'via' || A.Type == 'pad') && B.Layer == 'Edge.Cuts'")
   (constraint physical_hole_clearance (min 0.381mm)))
 (rule "Silkscreen Width - OSHPark"
-  (condition "A.Type == 'text' && A.Layer == 'F.Silkscreen'")
+  (condition "A.Type == 'text' && (A.Layer == 'F.Silkscreen' || A.Layer == 'B.Silkscreen')")
   (constraint text_thickness (min 0.127mm)))
 (rule "Silkscreen Height - OSHPark"
-  (condition "A.Type == 'text' && A.Layer == 'F.Silkscreen'")
+  (condition "A.Type == 'text' && (A.Layer == 'F.Silkscreen' || A.Layer == 'B.Silkscreen')")
   (constraint text_height (min 0.762mm)))

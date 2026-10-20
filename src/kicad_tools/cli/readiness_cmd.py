@@ -58,6 +58,22 @@ from typing import Any
 
 from .board_readiness import read_readiness
 from .format_options import FORMAT_JSON, add_format_flag, emit_json, stdout_to_stderr_when
+from .kicad_toolchain import (
+    KiCadEnvironmentError,
+    canonical_drc_report,
+    evidence_toolchain,
+    require_library_environment,
+)
+from .known_issues import (
+    KNOWN_ISSUES_FILENAME,
+    KnownIssueError,
+    defects,
+    error_identity,
+    known_error_allowance,
+    merge_known_issues,
+    parse_known_issue,
+    validate_known_issues,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,12 +83,17 @@ __all__ = [
     "EngineFingerprint",
     "EngineRun",
     "Engines",
+    "FillComparison",
+    "FillRefillUnavailable",
     "ReadinessOptions",
     "ReadinessResult",
     "build_report",
+    "compare_fill_areas",
     "main",
+    "require_saved_fill_matches_refill",
     "resolve_options",
     "run_readiness",
+    "saved_vs_refilled",
 ]
 
 SCHEMA_VERSION = 1
@@ -97,6 +118,12 @@ ASSEMBLY_AFFECTING_RULES = frozenset(
         "silkscreen_line_width",
         "silk_edge_clearance",
         "silk_overlap",
+        "silkscreen_text_height",
+        "silkscreen_text_thickness",
+        "silk_ref_obscured",
+        # Issue #7204: a footprint with no courtyard was never tested for
+        # overlap, which is a pick-and-place risk until someone looks.
+        "courtyard_missing",
     }
 )
 
@@ -260,6 +287,10 @@ def _run_native_drc(pcb: Path, report_path: Path) -> EngineRun:
                 or not isinstance(entry.get("items"), list)
             ):
                 raise ValueError("native DRC report contains a malformed finding")
+        # Issue #6962: a missing library table is an environment error, never
+        # evidence; and kicad-cli's finding order is not stable between runs.
+        require_library_environment(data, source=f"native DRC of {pcb.name}")
+        raw.write_text(json.dumps(canonical_drc_report(data), indent=4, ensure_ascii=False) + "\n")
         report = DRCReport.load(raw)
         errors = [v for v in report.violations if v.is_error]
         by_type: dict[str, int] = {}
@@ -269,11 +300,15 @@ def _run_native_drc(pcb: Path, report_path: Path) -> EngineRun:
         for violation in errors:
             by_type[violation.type_str] = by_type.get(violation.type_str, 0) + 1
         opens = report.unconnected_item_count
-        if opens:
-            by_type["unconnected_items"] = opens
+        # Issue #7188: the gate counts only *error*-severity opens, via the
+        # shared ``DRCReport.blocking_count``; ``unconnected_count`` keeps
+        # meaning every open (informational, evidence schema unchanged).
+        error_opens = sum(1 for v in report.unconnected_items if v.is_error)
+        if error_opens:
+            by_type["unconnected_items"] = error_opens
         payload.update(
             ran=True,
-            error_count=len(errors) + opens,
+            error_count=report.blocking_count,
             by_type=by_type,
             all_by_type=all_by_type,
             unconnected_count=opens,
@@ -281,6 +316,10 @@ def _run_native_drc(pcb: Path, report_path: Path) -> EngineRun:
             note=None,
         )
         result = EngineRun(True)
+    except KiCadEnvironmentError:
+        raw.unlink(missing_ok=True)
+        report_path.unlink(missing_ok=True)
+        raise
     except Exception as exc:
         payload["note"] = str(exc)
         result = EngineRun(False, str(exc))
@@ -337,12 +376,28 @@ def _run_kicad_cli(args: Sequence[str], output: Path) -> EngineRun:
     if binary is None:
         return EngineRun(ok=False, detail="kicad-cli not found on PATH")
     output.parent.mkdir(parents=True, exist_ok=True)
+    # Issue #6724: an artefact left by an earlier run must not pass for this
+    # run's output when kicad-cli fails or is killed.
+    output.unlink(missing_ok=True)
     try:
         completed = subprocess.run(
             [str(binary), *args], capture_output=True, text=True, timeout=600, check=False
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return EngineRun(ok=False, detail=f"kicad-cli failed: {exc}")
+    if completed.returncode != 0:
+        # None of these invocations passes ``--exit-code-violations``, so a
+        # non-zero status (a load failure, or a signal kill such as the OOM
+        # killer, which may leave a truncated file) means no usable output.
+        from kicad_tools.drc.geometric import describe_returncode
+
+        detail = (completed.stderr or completed.stdout or "").strip().splitlines()
+        return EngineRun(
+            ok=False,
+            detail=describe_returncode(completed.returncode)
+            + (f": {detail[-1]}" if detail else ""),
+            returncode=completed.returncode,
+        )
     if not output.is_file() or output.stat().st_size == 0:
         detail = (completed.stderr or completed.stdout or "").strip().splitlines()
         return EngineRun(
@@ -413,6 +468,18 @@ def _through_hole_refs(pcb: Path) -> set[str]:
     return {
         fp.reference for fp in board.footprints if fp.reference and is_through_hole_footprint(fp)
     }
+
+
+def _fab_excludes_tht(manufacturer: str) -> bool:
+    """True when the fab family's CPL auto-excludes THT parts (hand-solder set).
+
+    JLCPCB offers THT assembly (issue #7239), so this is False for it; the
+    answer comes from the same set the export preflight consults, so the
+    readiness gates cannot desync from the CPL that actually ships.
+    """
+    from kicad_tools.export.preflight import PreflightChecker
+
+    return PreflightChecker.fab_excludes_tht(manufacturer)
 
 
 def _net_metrics(pcb: Path) -> dict[str, Any]:
@@ -750,6 +817,10 @@ class ReadinessOptions:
     output_dir: Path
     evidence_dir: Path
     ack_warnings: frozenset[str] = frozenset()
+    # Known open issues recorded on the board (Issue #7261): the board's
+    # current list carried forward, plus ``--known-issue``, minus
+    # ``--resolve-known-issue``.  Any ``defect`` keeps the board from ready.
+    known_issues: tuple[dict[str, Any], ...] = ()
     include_tht: bool = False
     archive: bool = True
     net_class_map: Path | None = None
@@ -768,6 +839,9 @@ class ReadinessOptions:
     # symbol/footprint libraries) may be collected from.  ``None`` keeps the
     # historical boundary (``board_dir``).
     project_root: Path | None = None
+    # Timestamp recorded as ``checked_at`` (and as every native DRC report's
+    # ``date``, Issue #6962).  ``None`` means "now", fixed once per run.
+    checked_at: str | None = None
 
     @property
     def root(self) -> Path:
@@ -898,6 +972,12 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
 
     ack = frozenset(rule.strip() for rule in (args.ack_warnings or "").split(",") if rule.strip())
 
+    checked_at = getattr(args, "checked_at", None)
+    try:
+        known_issues = _resolve_known_issues(board_dir, args, checked_at)
+    except KnownIssueError as exc:
+        return None, str(exc)
+
     return (
         ReadinessOptions(
             board_dir=board_dir,
@@ -909,6 +989,7 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
             output_dir=output_dir,
             evidence_dir=evidence_dir,
             ack_warnings=ack,
+            known_issues=tuple(known_issues),
             include_tht=bool(args.include_tht),
             archive=not args.no_archive,
             net_class_map=net_class_map,
@@ -921,9 +1002,50 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
             fill_tolerance_mm2=float(args.fill_tolerance),
             operation="generate" if args.generate else "verify",
             project_root=project_root,
+            checked_at=checked_at,
         ),
         None,
     )
+
+
+def _resolve_known_issues(
+    board_dir: Path, args: argparse.Namespace, checked_at: str | None
+) -> list[dict[str, Any]]:
+    """The board's recorded issues, updated by ``--known-issue`` / ``--resolve-known-issue``.
+
+    Entries already recorded in ``output/readiness.json`` are carried forward:
+    regenerating evidence must not silently drop a disclosure.  Only naming an
+    issue in ``--resolve-known-issue`` removes it.  Offline and format-only.
+    """
+    if checked_at:
+        try:
+            recorded = datetime.fromisoformat(checked_at.replace("Z", "+00:00")).date()
+        except ValueError:
+            raise KnownIssueError(f"--checked-at is not an ISO timestamp: {checked_at}") from None
+    else:
+        recorded = datetime.now(timezone.utc).date()
+    added = [
+        parse_known_issue(spec, recorded.isoformat())
+        for spec in (getattr(args, "known_issue", None) or [])
+    ]
+    resolved: list[int] = []
+    for value in getattr(args, "resolve_known_issue", None) or []:
+        text = str(value).strip().lstrip("#")
+        if not text.isdigit() or int(text) < 1:
+            raise KnownIssueError(f"--resolve-known-issue {value!r}: expected an issue number")
+        resolved.append(int(text))
+    previous: list[dict[str, Any]] = []
+    report = board_dir / "output" / _REPORT_NAME
+    if report.is_file():
+        try:
+            recorded_list = json.loads(report.read_text()).get("known_issues")
+        except (OSError, ValueError, AttributeError):
+            recorded_list = None
+        try:
+            previous = validate_known_issues(recorded_list)
+        except KnownIssueError as exc:
+            raise KnownIssueError(f"{report} records malformed known_issues: {exc}") from None
+    return merge_known_issues(previous, added, resolved)
 
 
 def _discover_tier(board_dir: Path, pcb: Path) -> str | None:
@@ -934,10 +1056,16 @@ def _discover_tier(board_dir: Path, pcb: Path) -> str | None:
         return tier
     spec = board_dir / "project.kct"
     if spec.is_file():
-        for line in spec.read_text().splitlines():
-            stripped = line.strip()
-            if stripped.startswith("manufacturer") and "=" in stripped:
-                return stripped.split("=", 1)[1].strip().strip("\"'") or None
+        try:
+            from kicad_tools.spec import load_spec
+
+            requirements = load_spec(spec).requirements
+        except Exception:
+            return None
+        manufacturing = requirements.manufacturing if requirements is not None else None
+        fab = manufacturing.target_fab if manufacturing is not None else None
+        if isinstance(fab, str) and fab:
+            return fab
     return None
 
 
@@ -990,6 +1118,141 @@ def _copy_fill_context(pcb: Path, destination: Path) -> Path:
     return destination / pcb.name
 
 
+@dataclass(frozen=True)
+class FillComparison:
+    """Saved copper measured against an independent native refill (Issue #7356)."""
+
+    saved_areas: dict[str, float]
+    refilled_areas: dict[str, float]
+    deltas: dict[str, float]
+    #: Layers present on one side only (the copper inventory changed).
+    missing_layers: list[str]
+    #: Layers whose delta exceeds the tolerance.
+    divergent: dict[str, float]
+
+    @property
+    def diverges(self) -> bool:
+        return bool(self.divergent or self.missing_layers)
+
+    def describe(self) -> str:
+        detail = ", ".join(f"{k} {v:.6f} mm^2" for k, v in self.divergent.items())
+        if self.missing_layers:
+            detail += f"; changed layer inventory: {', '.join(self.missing_layers)}"
+        return detail
+
+
+class FillRefillUnavailable(RuntimeError):
+    """The independent refill did not run, so nothing was compared."""
+
+    def __init__(self, detail: str, returncode: int | None = None):
+        super().__init__(detail)
+        self.detail = detail
+        self.returncode = returncode
+
+
+def compare_fill_areas(
+    saved: dict[str, float],
+    refilled: dict[str, float],
+    tolerance: float = DEFAULT_FILL_TOLERANCE_MM2,
+) -> FillComparison:
+    """The one saved-vs-refilled verdict rule (pure; no I/O)."""
+    if not math.isfinite(tolerance) or tolerance < 0:
+        raise ValueError("fill tolerance must be finite and nonnegative")
+    deltas = {
+        layer: abs(saved.get(layer, 0.0) - refilled.get(layer, 0.0))
+        for layer in sorted(set(saved) | set(refilled))
+    }
+    return FillComparison(
+        saved_areas=saved,
+        refilled_areas=refilled,
+        deltas=deltas,
+        missing_layers=sorted(set(saved) ^ set(refilled)),
+        divergent={
+            k: v
+            for k, v in deltas.items()
+            if v > tolerance and not math.isclose(v, tolerance, rel_tol=1e-12, abs_tol=0.0)
+        },
+    )
+
+
+def saved_vs_refilled(
+    pcb: Path,
+    tolerance: float = DEFAULT_FILL_TOLERANCE_MM2,
+    *,
+    engines: Engines | None = None,
+    snapshot_dir: Path | None = None,
+    evidence: dict[str, Any] | None = None,
+    label: Callable[[Path], str] = str,
+) -> FillComparison:
+    """Compare *pcb*'s saved copper with an independent native refill of a copy.
+
+    *pcb* is never modified.  With *snapshot_dir* the saved and refilled
+    copies (and their native context) are kept there as ``fill-saved/`` and
+    ``fill-refilled/``; otherwise a temporary directory is used.  *evidence*,
+    when given, is filled in step by step (paths rendered through *label*) so a
+    caller keeps the partial record if a later step raises.
+
+    Raises ``FillRefillUnavailable`` when the refill did not run and
+    ``ValueError`` for a malformed tolerance or measurement; callers must treat
+    either as a refusal, never as agreement.
+    """
+    engines = engines or Engines()
+    evidence = evidence if evidence is not None else {}
+    if not math.isfinite(tolerance) or tolerance < 0:
+        raise ValueError("fill tolerance must be finite and nonnegative")
+    with tempfile.TemporaryDirectory(prefix="saved-vs-refilled-") as tmp:
+        root = snapshot_dir if snapshot_dir is not None else Path(tmp)
+        # Clear only this check's diagnostic snapshots, never release content.
+        for name in ("fill-saved", "fill-refilled"):
+            if (root / name).exists():
+                shutil.rmtree(root / name)
+        saved = _copy_fill_context(pcb, root / "fill-saved")
+        refilled = _copy_fill_context(saved, root / "fill-refilled")
+        saved_areas = _fill_measurements(saved, engines)
+        evidence.update(
+            {
+                "saved_sha256": _sha256_file(saved),
+                "saved_areas_mm2": saved_areas,
+                "saved_pcb": label(saved),
+                "refilled_pcb": label(refilled),
+                "context_sha256": {
+                    path.relative_to(saved.parent).as_posix(): _sha256_file(path)
+                    for path in sorted(saved.parent.rglob("*"))
+                    if path.is_file() and not _is_transient_local(path.relative_to(saved.parent))
+                },
+            }
+        )
+        run = engines.refill(refilled)
+        evidence["refill_returncode"] = run.returncode
+        if not run.ok or run.returncode != 0:
+            raise FillRefillUnavailable(run.detail, run.returncode)
+        refilled_areas = _fill_measurements(refilled, engines)
+        result = compare_fill_areas(saved_areas, refilled_areas, tolerance)
+        evidence.update(
+            {
+                "refilled_sha256": _sha256_file(refilled),
+                "refilled_areas_mm2": refilled_areas,
+                "deltas_mm2": result.deltas,
+                "changed_layer_inventory": result.missing_layers,
+            }
+        )
+        return result
+
+
+def require_saved_fill_matches_refill(
+    pcb: Path, tolerance: float = DEFAULT_FILL_TOLERANCE_MM2, *, engines: Engines | None = None
+) -> FillComparison:
+    """``saved_vs_refilled`` that raises ``RuntimeError`` on any divergence.
+
+    The refusal every board producer script shares: a fill that does not
+    reproduce under an independent refill must not be published (Issue #7337).
+    """
+    result = saved_vs_refilled(pcb, tolerance, engines=engines)
+    if result.diverges:
+        raise RuntimeError(f"saved copper differs from an independent refill: {result.describe()}")
+    return result
+
+
 def _gate_refill(options: ReadinessOptions, engines: Engines) -> CheckOutcome:
     """Measure saved copper against an independent native refill without publishing it.
 
@@ -1005,64 +1268,16 @@ def _gate_refill(options: ReadinessOptions, engines: Engines) -> CheckOutcome:
         "tolerance_mm2": options.fill_tolerance_mm2,
     }
     try:
-        if not math.isfinite(options.fill_tolerance_mm2) or options.fill_tolerance_mm2 < 0:
-            raise ValueError("fill tolerance must be finite and nonnegative")
-        # Clear only this gate's diagnostic snapshots, never release content.
-        for name in ("fill-saved", "fill-refilled"):
-            directory = options.evidence_dir / name
-            if directory.exists():
-                shutil.rmtree(directory)
-        saved = _copy_fill_context(options.pcb, options.evidence_dir / "fill-saved")
-        refilled = _copy_fill_context(saved, options.evidence_dir / "fill-refilled")
-        saved_areas = _fill_measurements(saved, engines)
-        evidence.update(
-            {
-                "saved_sha256": _sha256_file(saved),
-                "saved_areas_mm2": saved_areas,
-                "saved_pcb": _rel(options, saved),
-                "refilled_pcb": _rel(options, refilled),
-                "context_sha256": {
-                    path.relative_to(saved.parent).as_posix(): _sha256_file(path)
-                    for path in sorted(saved.parent.rglob("*"))
-                    if path.is_file() and not _is_transient_local(path.relative_to(saved.parent))
-                },
-            }
+        result = saved_vs_refilled(
+            options.pcb,
+            options.fill_tolerance_mm2,
+            engines=engines,
+            snapshot_dir=options.evidence_dir,
+            evidence=evidence,
+            label=lambda path: _rel(options, path),
         )
-        run = engines.refill(refilled)
-        evidence["refill_returncode"] = run.returncode
-        if not run.ok or run.returncode != 0:
-            evidence["error"] = run.detail
-            return CheckOutcome(
-                name="zone_fill",
-                status=NOT_RUN,
-                evidence=evidence_rel,
-                detail=f"Independent zone refill did not run: {run.detail}",
-                blockers=[f"Independent zone refill unavailable ({run.detail})."],
-            )
-        refilled_areas = _fill_measurements(refilled, engines)
-        deltas = {
-            layer: abs(saved_areas.get(layer, 0.0) - refilled_areas.get(layer, 0.0))
-            for layer in sorted(set(saved_areas) | set(refilled_areas))
-        }
-        missing_layers = sorted(set(saved_areas) ^ set(refilled_areas))
-        evidence.update(
-            {
-                "refilled_sha256": _sha256_file(refilled),
-                "refilled_areas_mm2": refilled_areas,
-                "deltas_mm2": deltas,
-                "changed_layer_inventory": missing_layers,
-            }
-        )
-        divergent = {
-            k: v
-            for k, v in deltas.items()
-            if v > options.fill_tolerance_mm2
-            and not math.isclose(v, options.fill_tolerance_mm2, rel_tol=1e-12, abs_tol=0.0)
-        }
-        if divergent or missing_layers:
-            detail = ", ".join(f"{k} {v:.6f} mm^2" for k, v in divergent.items())
-            if missing_layers:
-                detail += f"; changed layer inventory: {', '.join(missing_layers)}"
+        if result.diverges:
+            detail = result.describe()
             return CheckOutcome(
                 name="zone_fill",
                 status=FAILED,
@@ -1074,7 +1289,16 @@ def _gate_refill(options: ReadinessOptions, engines: Engines) -> CheckOutcome:
             name="zone_fill",
             status=PASSED,
             evidence=evidence_rel,
-            detail=f"Saved copper area agrees with an independent refill on {len(deltas)} layer(s).",
+            detail=f"Saved copper area agrees with an independent refill on {len(result.deltas)} layer(s).",
+        )
+    except FillRefillUnavailable as exc:
+        evidence["error"] = exc.detail
+        return CheckOutcome(
+            name="zone_fill",
+            status=NOT_RUN,
+            evidence=evidence_rel,
+            detail=f"Independent zone refill did not run: {exc.detail}",
+            blockers=[f"Independent zone refill unavailable ({exc.detail})."],
         )
     except Exception as exc:
         evidence["error"] = str(exc)
@@ -1115,6 +1339,73 @@ def _format_warning_table(counts: dict[str, int]) -> str:
     if not counts:
         return "none"
     return ", ".join(f"{rule}={count}" for rule, count in counts.items())
+
+
+def _violation_error_key(violation: dict) -> tuple[Any, ...] | None:
+    """``(rule, x_mm, y_mm)`` or ``(rule, item)`` for an error violation, else ``None``.
+
+    A violation with a board location is keyed by it.  One with none (a
+    ``netclass_*`` rule) is keyed by its single named item; anything else has
+    no usable identity.
+    """
+    rule = str(violation.get("rule_id") or "unknown")
+    location = violation.get("location")
+    if isinstance(location, (list, tuple)) and len(location) == 2:
+        if all(type(c) in (int, float) and math.isfinite(c) for c in location):
+            identity = error_identity(rule, location[0], location[1])
+            return (identity["rule"], identity["at"][0], identity["at"][1])
+        return None
+    items = violation.get("items")
+    if location is None and isinstance(items, list) and len(items) == 1:
+        if isinstance(items[0], str) and items[0] and items[0] == items[0].strip():
+            return (rule, items[0])
+    return None
+
+
+def _describe_error_key(key: tuple[Any, ...]) -> str:
+    if len(key) == 2:
+        return f"{key[0]} on {key[1]}"
+    return f"{key[0]} at {key[1]:.2f}/{key[2]:.2f}"
+
+
+def _unaccepted_errors(report: dict, allowance: dict[tuple[Any, ...], int]) -> list[str] | None:
+    """Error identities that differ from the recorded allowance, or ``None``.
+
+    The report's error violations are matched against the listed identities as
+    a set (Issue #7355).  ``None`` means "no exact waiver applies": either
+    there is no allowance, or the report's errors cannot be fully attributed
+    (the summary count disagrees with the listed violations).  ``[]`` is an
+    exact match; otherwise each entry names an unlisted error, a repeated
+    identity, an error with no usable location, or a stale listed identity.
+    """
+    if not allowance:
+        return None
+    errors = [
+        v
+        for v in report.get("violations", [])
+        if isinstance(v, dict) and v.get("severity") == "error"
+    ]
+    raw_summary = report.get("summary")
+    summary = raw_summary if isinstance(raw_summary, dict) else {}
+    if len(errors) != int(summary.get("errors", 0) or 0):
+        return None
+    problems: list[str] = []
+    seen: set[tuple[Any, ...]] = set()
+    for violation in errors:
+        key = _violation_error_key(violation)
+        if key is None:
+            problems.append(f"{violation.get('rule_id') or 'unknown'} (no usable location)")
+            continue
+        if key not in allowance:
+            problems.append(f"{_describe_error_key(key)} (not recorded)")
+        elif key in seen:
+            problems.append(f"{_describe_error_key(key)} (repeated)")
+        seen.add(key)
+    problems.extend(
+        f"{_describe_error_key(k)} (recorded for #{allowance[k]}, no longer fires)"
+        for k in sorted(set(allowance) - seen, key=lambda k: (len(k), *map(str, k)))
+    )
+    return problems
 
 
 def _blocking_unknown_coverage(report: dict) -> list[str]:
@@ -1195,6 +1486,36 @@ def _gate_kct_check(options: ReadinessOptions, engines: Engines) -> tuple[CheckO
     not_run = sorted(name for name, status in gating.items() if status == "NOT RUN")
     deferred = " Manifest verification is deferred to the artifacts gate."
 
+    # Issue #7355: an ``exception`` known issue may account for an exact set of
+    # errors (an approved deviation the generic tier cannot model).  Only an
+    # exact match waives them -- and the FAILED drc/erc roll-up they cause.
+    allowance = known_error_allowance(options.known_issues)
+    mismatch = _unaccepted_errors(report, allowance)
+    waived_errors = 0
+    if errors and mismatch == [] and not not_run:
+        waived_errors, errors = errors, 0
+        # The listed violations are ``kct check``'s own DRC findings, so the
+        # allowance accounts for the DRC roll-up only; a FAILED ERC (or any
+        # other sub-check) stays blocking.
+        failed = [name for name in failed if name != "drc"]
+    elif mismatch:  # also a stale allowance naming a rule that no longer fires
+        table_err = "; ".join(mismatch)
+        return (
+            CheckOutcome(
+                name="kct_check",
+                status=FAILED,
+                detail=(
+                    f"{errors} electrical/manufacturing error(s) do not match the recorded "
+                    f"exception identities: {table_err}; warning counts: {table}."
+                ),
+                evidence=evidence_rel,
+                blockers=[
+                    f"kct check reports {errors} error(s); unaccepted error(s): {table_err}."
+                ],
+            ),
+            report,
+        )
+
     if errors or failed:
         named = ", ".join(failed) or "none"
         return (
@@ -1272,8 +1593,13 @@ def _gate_kct_check(options: ReadinessOptions, engines: Engines) -> tuple[CheckO
             name="kct_check",
             status=PASSED,
             detail=(
-                f"0 electrical/manufacturing errors; DRC and ERC sub-checks passed; "
-                f"warning counts: {table}.{deferred}"
+                (
+                    "0 electrical/manufacturing errors; DRC and ERC sub-checks passed; "
+                    if not waived_errors
+                    else f"{waived_errors} error(s) accepted exactly by the recorded exception "
+                    "allowance; no other errors; "
+                )
+                + f"warning counts: {table}.{deferred}"
             ),
             evidence=evidence_rel,
         ),
@@ -1281,11 +1607,36 @@ def _gate_kct_check(options: ReadinessOptions, engines: Engines) -> tuple[CheckO
     )
 
 
+def _normalize_report_date(raw: Path, options: ReadinessOptions) -> None:
+    """Stamp a raw kicad-cli report with the run's ``checked_at`` (Issue #6962).
+
+    kicad-cli writes its wall-clock time; the run's own timestamp makes two runs
+    with the same ``--checked-at`` byte-identical.
+    """
+    data = _read_json(raw)
+    if "date" not in data or options.checked_at is None:
+        return
+    raw.write_text(
+        json.dumps(
+            canonical_drc_report(data, date=options.checked_at), indent=4, ensure_ascii=False
+        )
+        + "\n"
+    )
+
+
 def _gate_native_drc(options: ReadinessOptions, engines: Engines) -> tuple[CheckOutcome, dict]:
     """Gate 2 — the mandatory independent native check of saved candidate copper."""
     report_path = options.evidence_dir / "native-drc.json"
     report_path.parent.mkdir(parents=True, exist_ok=True)
+    # Issue #7277: ``build_report`` stamps every native-drc*.json present in
+    # the evidence dir into ``report_sources`` as produced from this PCB.
+    # Clear both before the run so a report left by an earlier run (e.g. one
+    # whose native DRC did not execute this time) is never stamped with the
+    # current PCB hash -- only what this engine run wrote survives.
+    report_path.unlink(missing_ok=True)
+    report_path.with_name(report_path.stem + "-raw.json").unlink(missing_ok=True)
     run = engines.native_drc(options.pcb, report_path)
+    _normalize_report_date(report_path.with_name(report_path.stem + "-raw.json"), options)
     evidence_rel = _rel(options, report_path)
     payload = _read_json(report_path)
     if not run.ok or not payload.get("ran"):
@@ -1623,7 +1974,7 @@ def _write_full_manifest(options: ReadinessOptions, warning_counts: dict[str, in
         {
             "version": manifest.get("version", "1.0"),
             "producer": "kct readiness",
-            "generated_at": _iso_now(),
+            "generated_at": options.checked_at or _iso_now(),
             "manufacturer": options.manufacturer,
             "mode": options.mode,
             "files": files,
@@ -1841,6 +2192,7 @@ def _write_readme(
     options: ReadinessOptions,
     warning_counts: dict[str, int],
     tht_refs: Sequence[str],
+    tht_assembled: Sequence[str] = (),
 ) -> Path:
     """Gate 7 — the human-facing bundle index."""
     lines = [
@@ -1848,7 +2200,7 @@ def _write_readme(
         "",
         f"Fabrication tier : {options.manufacturer}",
         f"Mode             : {options.mode}",
-        f"Generated        : {_iso_now()}",
+        f"Generated        : {options.checked_at or _iso_now()}",
         "",
     ]
     if options.assembly:
@@ -1867,6 +2219,12 @@ def _write_readme(
             "  The following parts are EXCLUDED from the SMT CPL and must be hand-soldered:"
         )
         lines.append(f"  {', '.join(tht_refs)}")
+    elif tht_assembled:
+        lines.append(
+            "  The following through-hole parts are INCLUDED in the CPL and BOM "
+            "for fab assembly (flag for procurement review):"
+        )
+        lines.append(f"  {', '.join(tht_assembled)}")
     else:
         lines.append("  none (every placed part is SMT)")
 
@@ -1890,9 +2248,12 @@ def _write_readme(
             "explicitly acknowledged via --ack-warnings."
         )
     lines.extend(["", "Accepted-risk waivers", "---------------------"])
-    lines.append(
-        "  no accepted-risk waivers" if not acked else f"  see the {len(acked)} line(s) above"
-    )
+    if acked:
+        lines.append(f"  see the {len(acked)} line(s) above")
+    for entry in options.known_issues:
+        lines.append(f"  #{entry['issue']} [{entry['kind']}] {entry['summary']}")
+    if not acked and not options.known_issues:
+        lines.append("  no accepted-risk waivers")
     lines.append("")
 
     readme = options.output_dir / "README.txt"
@@ -1976,6 +2337,7 @@ def _gate_artifacts(
     engines: Engines,
     warning_counts: dict[str, int],
     tht_refs: Sequence[str],
+    tht_assembled: Sequence[str] = (),
 ) -> CheckOutcome:
     """Gate 3/5/6/7/8 — export, drawings, README, full manifest, provenance."""
     from kicad_tools.export.manufacturing import verify_manifest
@@ -2031,7 +2393,7 @@ def _gate_artifacts(
             problems.append(f"board package extras failed: {exc}")
 
     # Gate 7 — README, written before the manifest so it is checksummed.
-    readme = _write_readme(options, warning_counts, tht_refs)
+    readme = _write_readme(options, warning_counts, tht_refs, tht_assembled)
     if readme_extra:
         readme.write_text(readme.read_text() + "\n".join(["", *readme_extra, ""]))
 
@@ -2077,7 +2439,12 @@ def _read_csv_rows(path: Path) -> tuple[list[str], list[list[str]]]:
     return rows[0], rows[1:]
 
 
-def _gate_bom(options: ReadinessOptions, engines: Engines, tht_refs: Sequence[str]) -> CheckOutcome:
+def _gate_bom(
+    options: ReadinessOptions,
+    engines: Engines,
+    tht_refs: Sequence[str],
+    tht_assembled: Sequence[str] = (),
+) -> CheckOutcome:
     """Gate 4 — procurement identity (assembly) / explicit no-claim (pcb_only)."""
     if not options.assembly:
         return CheckOutcome(
@@ -2236,15 +2603,74 @@ def _gate_bom(options: ReadinessOptions, engines: Engines, tht_refs: Sequence[st
             ],
         )
 
+    # The bundle's own preflight recorded whether each assigned LCSC part
+    # matches its row's value/package (issue #7166).  Export runs with
+    # strict_preflight off, so a FAIL there only became an export warning;
+    # this gate is where it must block.  Reading the recorded result keeps
+    # the blocker named and works the same in attempt and --verify modes.
+    part_check = next(
+        (
+            entry
+            for entry in _read_json(options.output_dir / "manifest.json").get("preflight") or []
+            if isinstance(entry, dict) and entry.get("name") == "bom_lcsc_values"
+        ),
+        None,
+    )
+    if part_check is None:
+        return CheckOutcome(
+            name="bom",
+            status=NOT_RUN,
+            detail="The bundle manifest records no bom_lcsc_values preflight result.",
+            blockers=[
+                "LCSC part/package check did not run; refusing to call procurement "
+                "identities verified"
+            ],
+        )
+    part_status = str(part_check.get("status", "")).upper()
+    part_message = str(part_check.get("message", "")).strip()
+    part_details = str(part_check.get("details", "") or "").strip()
+    if part_status == "FAIL":
+        # A strict-preflight header row whose pin count is not verifiable
+        # (issue #7446) is not known to mismatch: don't say it does.
+        problem = (
+            "Assigned pin header/socket part states no verifiable pin count"
+            if "pin count not verifiable" in part_message
+            else "Assigned LCSC part does not match the BOM row's value/package"
+        )
+        return CheckOutcome(
+            name="bom",
+            status=FAILED,
+            detail=f"LCSC part check FAIL: {part_message}",
+            blockers=[f"{problem}: {part_details or part_message}"],
+        )
+    if part_status not in ("OK", "WARN"):
+        return CheckOutcome(
+            name="bom",
+            status=NOT_RUN,
+            detail=f"LCSC part check reported unexpected status {part_status or '(none)'}.",
+            blockers=[
+                "LCSC part/package check did not run; refusing to call procurement "
+                "identities verified"
+            ],
+        )
+
     tht_note = (
         f"SMT CPL excludes {len(tht_refs)} manual through-hole component(s)."
         if tht_refs
+        else f"CPL includes {len(tht_assembled)} through-hole component(s) for fab assembly."
+        if tht_assembled
         else "every placed part is SMT."
     )
+    # Keep the WARN's refs and reasons (e.g. ``J1 -> C999999 (pin count not
+    # stated by part)``, issue #7446), not just its summary message.
+    warn_details = f" [{part_details}]" if part_status == "WARN" and part_details else ""
     return CheckOutcome(
         name="bom",
         status=PASSED,
-        detail=(f"{len(rows)} BOM line(s) carry verified procurement identities; {tht_note}"),
+        detail=(
+            f"{len(rows)} BOM line(s) carry procurement identifiers; part check "
+            f"{part_status}: {part_message}{warn_details}; {tht_note}"
+        ),
     )
 
 
@@ -2360,15 +2786,27 @@ def build_report(
         if missing:
             blockers.append(f"Required checks did not pass: {', '.join(missing)}.")
 
+    # Issue #7261: an open known defect means the board fails its own spec,
+    # whatever the automated checks say.  Exceptions/advisories keep ready.
+    known_defects = defects(options.known_issues)
+    if known_defects:
+        status = STATUS_BLOCKED
+        blockers.extend(
+            f"known defect #{entry['issue']}: {entry['summary']}" for entry in known_defects
+        )
+
     report: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
-        "checked_at": _iso_now(),
+        "checked_at": options.checked_at or _iso_now(),
         "mode": options.mode,
         "status": status,
         "blockers": blockers,
         "checks": [check.to_dict() for check in checks],
         "engine": fingerprint.to_dict(),
+        "manufacturer": options.manufacturer,
     }
+    if options.known_issues:
+        report["known_issues"] = [dict(entry) for entry in options.known_issues]
 
     evidence = {check.name: check.evidence for check in checks if check.evidence}
     if evidence:
@@ -2384,6 +2822,21 @@ def build_report(
             raise ValueError(f"extra readiness input is not a board file: {path}")
         hashed.add(resolved)
     report["inputs"] = {_rel(options, path): _sha256_file(path) for path in sorted(hashed)}
+    # Issue #7277: record which source bytes each report readiness itself
+    # produced was computed from, so report binding can tell "produced for
+    # this PCB" from merely "pinned beside it".
+    if options.pcb.is_file():
+        pcb_sha = _sha256_file(options.pcb)
+        produced = {
+            _rel(options, path): pcb_sha
+            for path in (
+                options.evidence_dir / "native-drc.json",
+                options.evidence_dir / "native-drc-raw.json",
+            )
+            if path.is_file()
+        }
+        if produced:
+            report["report_sources"] = produced
     external = _external_dependencies(options)
     if external:
         # Hash the exact collected out-of-directory dependencies (Issue #5813).
@@ -2555,6 +3008,8 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
     PCB, native context, instructions, manifest, nested ZIP and outer archive.
     """
     engines = engines or Engines()
+    if options.checked_at is None:
+        options = replace(options, checked_at=_iso_now())
     original = options.board_dir.resolve()
     project_root = options.root
     try:
@@ -2633,6 +3088,10 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
             report_path.parent.mkdir(parents=True, exist_ok=True)
             report_path.write_text(json.dumps(report, indent=2) + "\n")
             return replace(result, report_path=report_path)
+        except KiCadEnvironmentError:
+            # Issue #6962: the environment, not the board, failed -- write no
+            # evidence at all, not even a blocked diagnostic receipt.
+            raise
         except Exception as exc:
             if "staged" in locals() and staged.evidence_dir.exists():
                 shutil.copytree(staged.evidence_dir, diagnostics, dirs_exist_ok=True)
@@ -2727,8 +3186,14 @@ def _run_readiness_candidate(
         logger.warning("could not determine through-hole parts: %s", exc)
         tht_refs = []
 
-    checks.append(_gate_artifacts(options, engines, warning_counts, tht_refs))
-    checks.append(_gate_bom(options, engines, tht_refs))
+    # Only a fab whose CPL auto-excludes THT has a hand-solder set; elsewhere
+    # (JLCPCB, issue #7239) THT parts are placed by the fab and listed as such.
+    if _fab_excludes_tht(options.manufacturer):
+        tht_assembled: list[str] = []
+    else:
+        tht_assembled, tht_refs = tht_refs, []
+    checks.append(_gate_artifacts(options, engines, warning_counts, tht_refs, tht_assembled))
+    checks.append(_gate_bom(options, engines, tht_refs, tht_assembled))
     if engines.extra_checks is not None:
         try:
             checks.extend(engines.extra_checks(options))
@@ -2779,6 +3244,7 @@ def _run_readiness_candidate(
         recipe=options.recipe,
     )
 
+    _write_known_issues_evidence(options)
     extra_inputs = list(engines.extra_inputs(options)) if engines.extra_inputs else []
     report = build_report(options, checks, metrics, fingerprint, extra_inputs=extra_inputs)
     report_path = options.board_dir / "output" / _REPORT_NAME
@@ -2800,6 +3266,22 @@ def _run_readiness_candidate(
     return ReadinessResult(report=report, report_path=report_path, exit_code=exit_code)
 
 
+def _write_known_issues_evidence(options: ReadinessOptions) -> None:
+    """Bind ``known_issues`` into the hashed evidence (Issue #7261).
+
+    ``readiness.json`` is not itself hashed, so the list is also written to
+    ``<evidence>/known-issues.json``, which ``inputs`` hashes and
+    ``read_readiness()`` compares against the report.  No entries, no file.
+    """
+    path = options.evidence_dir / KNOWN_ISSUES_FILENAME
+    if options.known_issues:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"known_issues": [dict(entry) for entry in options.known_issues]}
+        path.write_text(json.dumps(payload, indent=2) + "\n")
+    elif path.exists():
+        path.unlink()
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -2813,6 +3295,11 @@ def _print_report(result: ReadinessResult, options: ReadinessOptions) -> None:
     print()
     for check in report["checks"]:
         print(f"  [{check['status']:>8s}] {check['name']}: {check['detail']}")
+    if report.get("known_issues"):
+        print()
+        print(f"  {len(report['known_issues'])} known issue(s):")
+        for entry in report["known_issues"]:
+            print(f"    - #{entry['issue']} [{entry['kind']}] {entry['summary']}")
     if report["blockers"]:
         print()
         print(f"  {len(report['blockers'])} blocker(s):")
@@ -2905,9 +3392,30 @@ def add_readiness_arguments(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
+        "--known-issue",
+        dest="known_issue",
+        action="append",
+        default=[],
+        metavar="N:SUMMARY:KIND",
+        help=(
+            "Record an open issue against the board (repeatable). KIND is defect, "
+            "exception or advisory; an open defect makes the board not ready. "
+            "Append :rule@pad[,rule@pad] (e.g. via_at_pad_edge@R3-2) to name the exact "
+            "kct check warning findings it accounts for. Recorded issues are carried forward until resolved."
+        ),
+    )
+    parser.add_argument(
+        "--resolve-known-issue",
+        dest="resolve_known_issue",
+        action="append",
+        default=[],
+        metavar="N",
+        help="Drop a recorded known issue (repeatable), e.g. once its fix has landed.",
+    )
+    parser.add_argument(
         "--include-tht",
         action="store_true",
-        help="Accept through-hole parts in the CPL (they are excluded by default)",
+        help="Accept through-hole parts in the CPL (only SMT-only fabs exclude them by default)",
     )
     parser.add_argument(
         "--no-archive",
@@ -2972,6 +3480,16 @@ def add_readiness_arguments(parser: argparse.ArgumentParser) -> None:
             f"saved-vs-refilled equivalence check (default: {DEFAULT_FILL_TOLERANCE_MM2})"
         ),
     )
+    parser.add_argument(
+        "--checked-at",
+        dest="checked_at",
+        default=None,
+        metavar="ISO",
+        help=(
+            "Timestamp to record as checked_at and as each native DRC report's date "
+            "(default: now). Fix it to reproduce evidence byte-for-byte."
+        ),
+    )
     add_format_flag(parser)
 
 
@@ -3003,8 +3521,29 @@ def run_from_args(args: argparse.Namespace, engines: Engines | None = None) -> i
             print(f"error: {error}", file=sys.stderr)
         return 2
 
-    with stdout_to_stderr_when(as_json):
-        result = run_readiness(options, engines)
+    try:
+        with stdout_to_stderr_when(as_json):
+            if engines is None:
+                # Issue #6962: production engines run on the pinned toolchain
+                # (isolated library tables, qualified kicad-cli version).
+                with evidence_toolchain(mounts=[options.root]):
+                    result = run_readiness(options, engines)
+            else:
+                result = run_readiness(options, engines)
+    except KiCadEnvironmentError as exc:
+        error = f"KiCad environment refused; no evidence written: {exc}"
+        if as_json:
+            emit_json(
+                {
+                    "command": "readiness",
+                    "success": False,
+                    "error": error,
+                    "status": STATUS_UNVERIFIED,
+                }
+            )
+        else:
+            print(f"error: {error}", file=sys.stderr)
+        return 2
 
     if as_json:
         emit_json(

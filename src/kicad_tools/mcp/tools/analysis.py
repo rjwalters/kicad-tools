@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from kicad_tools.analysis.net_status import NetStatusAnalyzer
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.exceptions import ParseError
+from kicad_tools.manufacturers import get_all_manufacturer_names
 from kicad_tools.mcp.types import (
     AffectedItem,
     BoardAnalysis,
@@ -42,8 +43,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Supported manufacturer presets for DRC
-MANUFACTURER_PRESETS = ("jlcpcb", "oshpark", "pcbway", "seeed")
+# Supported manufacturer presets for DRC: every registry id/alias (#7276), the
+# same set ``kct check --mfr`` accepts, so tier ids such as ``jlcpcb-tier1`` work.
+MANUFACTURER_PRESETS = tuple(get_all_manufacturer_names())
 
 
 def analyze_board(pcb_path: str) -> BoardAnalysis:
@@ -831,26 +833,39 @@ def get_drc_violations(
     pcb_path: str,
     rules: str | None = None,
     severity_filter: Literal["all", "error", "warning"] = "all",
-    layers: int = 4,
+    *,
+    allow_incomplete: bool = False,
+    schematic_path: str | None = None,
 ) -> DRCResult:
-    """Run design rule check on PCB and return violations.
+    """Run ``kct check``'s design rule check on a PCB and return violations.
 
-    Validates a PCB design against manufacturer-specific design rules
-    and returns detailed violation information with locations and
-    fix suggestions.
+    Applies exactly the rule set ``kct check`` uses (Issue #7260): the layer
+    count resolved from the board, the stackup copper weights, the
+    ``.kicad_pro`` authored minimum clearance, the reviewed fabrication-floor
+    override, the net-class-map / current-path / waiver sidecars and the
+    path-dependent rules.  The verdict and exit code come from the same
+    :func:`~kicad_tools.cli.check_cmd.evaluate_check_verdict` that
+    ``kct check --format json`` reports, including the ERC + LVS + manifest
+    meta rollup -- so a board whose ERC cannot run (no kicad-cli, no
+    schematic) is ``incomplete``, not ``pass``, unless ``allow_incomplete``.
 
     Args:
         pcb_path: Absolute path to .kicad_pcb file
-        rules: Manufacturer preset ("jlcpcb", "oshpark", "pcbway", "seeed")
-               or path to custom rules file. Defaults to "jlcpcb".
-        severity_filter: Filter by severity level:
+        rules: Manufacturer preset ("jlcpcb", "oshpark", "pcbway", "seeed").
+               ``None`` resolves it like ``kct check`` (``fab_profile.json``
+               > ``project.kct`` > ``jlcpcb``).
+        severity_filter: Which violations to *return* (a view filter; the
+                        verdict is always computed from every violation):
                         "all" - return all violations
                         "error" - return only errors
                         "warning" - return only warnings
-        layers: Number of PCB layers (2, 4, 6, etc.)
+        allow_incomplete: Like ``kct check --allow-incomplete``: an
+            ``incomplete`` verdict exits 0 (``passed`` stays false).
+        schematic_path: Explicit ``.kicad_sch`` for the ERC/LVS meta rollup
+            (default: discovered next to the PCB, as ``kct check`` does).
 
     Returns:
-        DRCResult with violations, summary, and pass/fail status
+        DRCResult with violations, summary, and the ``kct check`` verdict
 
     Raises:
         FileNotFoundError: If PCB file doesn't exist
@@ -874,27 +889,35 @@ def get_drc_violations(
     if path.suffix != ".kicad_pcb":
         raise ParseError(f"Invalid file extension: {path.suffix} (expected .kicad_pcb)")
 
-    # Determine manufacturer
-    manufacturer = rules or "jlcpcb"
-    if manufacturer in MANUFACTURER_PRESETS:
-        pass  # Use as-is
-    elif Path(manufacturer).exists():
-        # Custom rules file - not yet supported
-        raise NotImplementedError("Custom rules files not yet supported")
-    else:
-        available = ", ".join(MANUFACTURER_PRESETS)
-        raise ValueError(f"Unknown manufacturer preset: {manufacturer!r}. Available: {available}")
+    # Validate an explicit manufacturer; ``None`` is resolved by the shared
+    # rule-set builder exactly like ``kct check``.
+    if rules is not None:
+        if rules.lower() in MANUFACTURER_PRESETS:
+            pass  # Use as-is
+        elif Path(rules).exists():
+            # Custom rules file - not yet supported
+            raise NotImplementedError("Custom rules files not yet supported")
+        else:
+            available = ", ".join(MANUFACTURER_PRESETS)
+            raise ValueError(f"Unknown manufacturer preset: {rules!r}. Available: {available}")
 
-    # Load PCB
-    pcb = PCB.load(str(path))
+    from kicad_tools.cli.check_cmd import (
+        build_check_rule_set,
+        evaluate_check_verdict,
+        run_check_rule_set,
+    )
 
-    # Run DRC
-    from kicad_tools.validate import DRCChecker
+    rule_set = build_check_rule_set(path, manufacturer=rules)
+    results = run_check_rule_set(rule_set)
+    check_verdict = evaluate_check_verdict(
+        path,
+        results,
+        schematic=schematic_path,
+        allow_incomplete=allow_incomplete,
+    )
 
-    checker = DRCChecker(pcb, manufacturer=manufacturer, layers=layers)
-    results = checker.check_all()
-
-    # Convert violations to MCP format
+    # Convert violations to MCP format.  ``severity_filter`` is a view over
+    # the unfiltered results; the verdict above never sees it (#7230).
     violations: list[DRCViolation] = []
     type_counts: Counter[str] = Counter()
 
@@ -910,14 +933,17 @@ def get_drc_violations(
         type_counts[v.rule_id] += 1
 
     return DRCResult(
-        passed=results.passed,
+        passed=check_verdict.verdict == "pass",
         violation_count=len(violations),
         error_count=results.error_count if severity_filter != "warning" else 0,
         warning_count=results.warning_count if severity_filter != "error" else 0,
         violations=violations,
         summary_by_type=dict(type_counts),
-        manufacturer=manufacturer,
-        layers=layers,
+        manufacturer=rule_set.manufacturer,
+        layers=rule_set.layers,
+        verdict=check_verdict.verdict,
+        exit_code=check_verdict.exit_code,
+        notes=list(rule_set.notes),
     )
 
 

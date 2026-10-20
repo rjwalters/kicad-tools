@@ -393,10 +393,12 @@ public:
     double authored_pair_floor(int net_a, int net_b) const;
     // Exact pad copper for the authored gate (``clearance_shapes.pad_shape``'s
     // inputs, in double precision) plus the pad's own item-level floor.  Call
-    // ``rebuild_authored_index`` after a batch of these.
+    // ``rebuild_authored_index`` after a batch of these.  ``shape`` / ``rratio``
+    // are the EFFECTIVE kernel inputs (``clearance_shapes.pad_kernel_params``):
+    // the file's roundrect ratio, or ``rect`` when it is unknown (#6718).
     void set_pad_authored(size_t index, const std::string& shape, double width,
                           double height, double rotation, double x, double y,
-                          double drill, double item_floor);
+                          double drill, double item_floor, double rratio);
     void rebuild_authored_index();
     bool authored_active() const { return authored_index_ != nullptr; }
     // True when the candidate trace / through-via owned by ``net`` keeps every
@@ -729,6 +731,13 @@ private:
     GeometryBins route_via_bins_;
     static void index_route_geometry(GeometryBins& bins, size_t index,
                                      float minx, float miny, float maxx, float maxy);
+    // The sorted, de-duplicated indices one bin set holds under a world box --
+    // each half of ``route_geometry_candidates``.  Issue #5617: callers that
+    // only consult one kind (``trace_stored_vias_clear`` reads vias alone) ask
+    // for that half instead of paying for the other's gather + sort.
+    static std::vector<size_t> gather_route_geometry(const GeometryBins& bins,
+                                                     float minx, float miny,
+                                                     float maxx, float maxy);
 
     // Issue #6243: authored per-net minima.  ``authored_index_`` is null
     // while the gate is dormant; otherwise it buckets every pad and stored
@@ -738,6 +747,7 @@ private:
         bool set = false;
         std::string shape;
         double width = 0, height = 0, rotation = 0, x = 0, y = 0, drill = 0, floor = 0;
+        double rratio = 0.25;
     };
     struct AuthoredIndex;
     std::unordered_map<int, double> net_floors_;

@@ -1,7 +1,6 @@
 """Tests for kicad_tools.erc module."""
 
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -10,10 +9,6 @@ from kicad_tools.erc import (
     ERCReport,
     ERCViolationType,
     Severity,
-)
-from kicad_tools.erc.cross_sheet import (
-    _extract_power_net_name,
-    filter_cross_sheet_power_violations,
 )
 
 
@@ -308,114 +303,132 @@ class TestERCTypeDescriptions:
         assert ERC_TYPE_DESCRIPTIONS["label_dangling"] == "Label not connected"
 
 
-class TestExtractPowerNetName:
-    """Tests for _extract_power_net_name helper."""
-
-    def test_extract_from_item_with_type(self):
-        """Extract net name from 'Pin VCC (power_in) of U1' format."""
-        items = [{"description": "Pin VCC (power_in) of U1"}]
-        assert _extract_power_net_name("Power pin not driven", items) == "VCC"
-
-    def test_extract_from_item_without_type(self):
-        """Extract net name from 'Pin +3V3 of U3' format."""
-        items = [{"description": "Pin +3V3 of U3"}]
-        assert _extract_power_net_name("Power pin not driven", items) == "+3V3"
-
-    def test_extract_from_description_fallback(self):
-        """Extract net name from top-level description when items empty."""
-        assert _extract_power_net_name("Pin GND not driven") == "GND"
-
-    def test_returns_none_for_unparseable(self):
-        """Return None when no pin name can be extracted."""
-        assert _extract_power_net_name("Some random text") is None
-        assert _extract_power_net_name("Some random text", []) is None
-
-    def test_prefers_power_in_match(self):
-        """When (power_in) qualifier is present, prefer that match."""
-        items = [{"description": "Pin +3.3V (power_in) of U3"}]
-        assert _extract_power_net_name("", items) == "+3.3V"
+# ---------------------------------------------------------------------------
+# Issue #7094: view filters (--errors-only/--type/--sheet) must not read as a
+# clean board -- the exit code is computed before them.
+# ---------------------------------------------------------------------------
 
 
-class TestFilterCrossSheetPowerViolations:
-    """Tests for filter_cross_sheet_power_violations."""
+def _write_erc_report(path: Path, severity: str = "error") -> Path:
+    import json as _json
 
-    def _make_violation(self, vtype: str, net_name: str) -> dict:
-        """Create a synthetic violation dict."""
-        return {
-            "type": vtype,
-            "severity": "error",
-            "description": "Power input pin not driven by any power output",
-            "items": [{"description": f"Pin {net_name} (power_in) of U1"}],
-        }
-
-    @patch("kicad_tools.erc.cross_sheet.build_power_driver_inventory")
-    def test_suppresses_driven_net(self, mock_inventory):
-        """Violation for a net with a driver on another sheet is suppressed."""
-        mock_inventory.return_value = {"+3V3", "GND", "VCC"}
-
-        violations = [
-            self._make_violation("power_pin_not_driven", "VCC"),
-            {"type": "pin_not_connected", "description": "other"},
-        ]
-
-        result = filter_cross_sheet_power_violations(violations, "/fake/path")
-        assert len(result) == 1
-        assert result[0]["type"] == "pin_not_connected"
-
-    @patch("kicad_tools.erc.cross_sheet.build_power_driver_inventory")
-    def test_preserves_undriven_net(self, mock_inventory):
-        """Violation for a net with NO driver anywhere is preserved (true positive)."""
-        mock_inventory.return_value = {"GND"}  # VCC is NOT driven
-
-        violations = [
-            self._make_violation("power_pin_not_driven", "VCC"),
-        ]
-
-        result = filter_cross_sheet_power_violations(violations, "/fake/path")
-        assert len(result) == 1
-        assert result[0]["type"] == "power_pin_not_driven"
-
-    @patch("kicad_tools.erc.cross_sheet.build_power_driver_inventory")
-    def test_preserves_unparseable_violation(self, mock_inventory):
-        """Violation with unparseable description is preserved to be safe."""
-        mock_inventory.return_value = {"+3V3"}
-
-        violations = [
+    data = {
+        "source": "board.kicad_sch",
+        "kicad_version": "10.0.6",
+        "coordinate_units": "mm",
+        "sheets": [
             {
-                "type": "power_pin_not_driven",
-                "severity": "error",
-                "description": "Some generic message",
-                "items": [],
+                "path": "/",
+                "uuid_path": "/",
+                "violations": [
+                    {
+                        "type": "pin_not_connected",
+                        "severity": severity,
+                        "description": "Pin not connected",
+                        "pos": {"x": 10.0, "y": 10.0},
+                        "items": [{"description": "Pin 1 of R1"}],
+                        "excluded": False,
+                    }
+                ],
             },
-        ]
+            {"path": "/power/", "uuid_path": "/abcd/", "violations": []},
+        ],
+    }
+    path.write_text(_json.dumps(data))
+    return path
 
-        result = filter_cross_sheet_power_violations(violations, "/fake/path")
-        assert len(result) == 1
 
-    def test_skips_traversal_when_no_target_violations(self):
-        """No hierarchy traversal if no power_pin_not_driven violations exist."""
-        violations = [
-            {"type": "pin_not_connected", "description": "other"},
-        ]
+class TestERCViewFiltersExitCode:
+    """``kct erc`` view filters are display-only for the verdict (#7094)."""
 
-        # Should return immediately without calling build_power_driver_inventory
-        result = filter_cross_sheet_power_violations(violations, "/nonexistent/path")
-        assert len(result) == 1
+    @pytest.fixture
+    def error_report(self, tmp_path: Path) -> Path:
+        return _write_erc_report(tmp_path / "erc.json")
 
-    @patch("kicad_tools.erc.cross_sheet.build_power_driver_inventory")
-    def test_other_types_pass_through(self, mock_inventory):
-        """Non-power violations pass through unchanged."""
-        mock_inventory.return_value = {"+3V3"}
+    @pytest.fixture
+    def warning_report(self, tmp_path: Path) -> Path:
+        return _write_erc_report(tmp_path / "erc_warn.json", severity="warning")
 
-        violations = [
-            {"type": "label_dangling", "description": "Label issue"},
-            {"type": "pin_not_connected", "description": "Pin issue"},
-            self._make_violation("power_pin_not_driven", "+3V3"),
-        ]
+    def test_unfiltered_fails(self, error_report: Path, capsys):
+        from kicad_tools.cli.erc_cmd import main
 
-        result = filter_cross_sheet_power_violations(violations, "/fake/path")
-        assert len(result) == 2
-        types = [v["type"] for v in result]
-        assert "label_dangling" in types
-        assert "pin_not_connected" in types
-        assert "power_pin_not_driven" not in types
+        assert main([str(error_report)]) == 1
+        assert "ERC FAILED" in capsys.readouterr().out
+
+    @pytest.mark.parametrize(
+        "filter_args", [["--sheet", "/power"], ["--type", "label"]], ids=["sheet", "type"]
+    )
+    def test_filter_hiding_errors_table(self, error_report: Path, capsys, filter_args):
+        from kicad_tools.cli.erc_cmd import main
+
+        assert main([str(error_report), *filter_args]) == 1
+        out = capsys.readouterr().out
+        assert "ERC PASSED" not in out
+        assert "No ERC violations found" not in out
+        assert "No violations match the filter (1 hidden: 1 error(s), 0 warning(s))" in out
+        assert "ERC FAILED" in out
+
+    @pytest.mark.parametrize(
+        "filter_args", [["--sheet", "/power"], ["--type", "label"]], ids=["sheet", "type"]
+    )
+    def test_filter_hiding_errors_summary(self, error_report: Path, capsys, filter_args):
+        from kicad_tools.cli.erc_cmd import main
+
+        assert main([str(error_report), "--format", "summary", *filter_args]) == 1
+        out = capsys.readouterr().out
+        assert "No ERC violations found" not in out
+        assert "No violations match the filter (1 hidden: 1 error(s), 0 warning(s))" in out
+
+    @pytest.mark.parametrize(
+        "filter_args", [["--sheet", "/power"], ["--type", "label"]], ids=["sheet", "type"]
+    )
+    def test_filter_hiding_errors_json(self, error_report: Path, capsys, filter_args):
+        import json as _json
+
+        from kicad_tools.cli.erc_cmd import main
+
+        assert main([str(error_report), "--format", "json", *filter_args]) == 1
+        data = _json.loads(capsys.readouterr().out)
+        assert data["summary"]["errors"] == 0
+        assert data["summary"]["hidden_by_view_filter"] == {"errors": 1, "warnings": 0}
+        assert data["violations"] == []
+
+    def test_errors_only_on_warnings_report(self, warning_report: Path, capsys):
+        from kicad_tools.cli.erc_cmd import main
+
+        # Warnings do not fail, so exit 0 is right -- but the output must say
+        # a warning was hidden rather than "ERC PASSED - No violations found".
+        assert main([str(warning_report), "--errors-only"]) == 0
+        out = capsys.readouterr().out
+        assert "ERC PASSED" not in out
+        assert "No violations match the filter (1 hidden: 0 error(s), 1 warning(s))" in out
+
+    def test_filter_matching_everything_unchanged(self, error_report: Path, capsys):
+        import json as _json
+
+        from kicad_tools.cli.erc_cmd import main
+
+        assert main([str(error_report), "--format", "json", "--sheet", "/"]) == 1
+        data = _json.loads(capsys.readouterr().out)
+        assert data["summary"]["errors"] == 1
+        assert "hidden_by_view_filter" not in data["summary"]
+
+    def test_explain_type_filter_exit_code(self, error_report: Path, capsys):
+        from kicad_tools.cli.erc_explain_cmd import main
+
+        assert main([str(error_report)]) == 1
+        capsys.readouterr()
+        assert main([str(error_report), "--type", "label"]) == 1
+        out = capsys.readouterr().out
+        assert "No ERC violations to explain." not in out
+        assert "No violations match the filter (1 hidden: 1 error(s), 0 warning(s))" in out
+
+    def test_explain_type_filter_json(self, error_report: Path, capsys):
+        import json as _json
+
+        from kicad_tools.cli.erc_explain_cmd import main
+
+        assert main([str(error_report), "--type", "label", "--format", "json"]) == 1
+        data = _json.loads(capsys.readouterr().out)
+        assert data["explanations"] == []
+        assert data["summary"]["hidden_by_view_filter"] == {"errors": 1, "warnings": 0}

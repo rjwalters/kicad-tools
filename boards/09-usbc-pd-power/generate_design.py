@@ -943,11 +943,11 @@ def generate(output: Path) -> dict:
             sch.add_wire((px, py), end)
             sch.add_label(part.pins[pin.number], *end)
         if part.ref == "L1":
-            fp = pcb.add_footprint_from_file(inductor, part.ref, *part.xy, value=part.value)
+            fp = pcb.add_footprint_from_file(
+                inductor, part.ref, *part.xy, value=part.value, library_id=part.footprint
+            )
         else:
             fp = pcb.add_footprint(part.footprint, part.ref, *part.xy, value=part.value)
-        fp.name = part.footprint
-        fp._sexp_node.set_value(0, part.footprint)
         actual = {p.number for p in fp.pads if p.number}
         assert actual == known, (part.ref, "symbol/land-pattern mismatch", actual ^ known)
         for pad in fp.pads:

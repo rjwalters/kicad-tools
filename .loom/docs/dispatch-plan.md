@@ -49,7 +49,7 @@ together.
   (`loom-daemon/src/work_finder/step_item.rs`): `curator`,
   `curator_keep_or_close`, `champion_promote`, `champion_reevaluate`,
   `builder`, `judge`, `doctor`, `champion_merge`,
-  `champion_hold_reevaluate`.
+  `champion_hold_reevaluate`, `champion_triage`.
 - **An absent `step` is `builder`.** Every plan published before step
   dispatch was a Builder plan, so an older host's row folds into the same
   item as a newer host's explicit `builder` row. A host that does not set
@@ -61,15 +61,14 @@ together.
 - Each merged item carries its resolved `step`; every observation under it
   (the primary and `others`) is that host's row unchanged.
 
-Today no producer sets `step`: the host-local plan is still a Builder plan,
-so every row folds as `builder` and the merge behaves exactly as it did
-before the field. The step-dispatch producer sets it once it ships behind
-`autonomous.workFinder.stepDispatch`.
+The work finder's step tick sets `step` on every row it publishes: each
+row is one drawn `(item, step)` (`step_dispatch/tick.rs`, #11909).
 
-The dashboard port (`mergeFleetQueue`, below) has not been ported to the
-`step` key yet: its pinned copy of the fixture predates the two step cases,
-and it still folds by `repo#issue` alone. While no producer sets `step` the
-two agree; the port has to land before step dispatch publishes `step` rows.
+The dashboard port (`mergeFleetQueue`, below) folds by the same
+`repo#issue` + `step` key and breaks the final ordering tie on `step`, as
+the Rust merge does. The fixture's last case pins
+that tie-break: one host, one issue at two steps, the same state and
+position.
 
 ### 2. Pick the primary
 
@@ -148,14 +147,20 @@ it:
 - `2AMLogic/loom-ui:web/src/workQueue.ts` — `mergeFleetQueue`, over the per-host
   `queue.snapshot` records the fleet backend stores.
 
-They are pinned to the same JSON fixture,
-`loom-daemon/tests/fixtures/dispatch-plan-merge.json`, which
-`loom-daemon/src/work_finder/dispatch_plan_merge_tests.rs` reads with
-`include_str!` and `loom-ui:web/test/workQueue.test.ts` pins a copy of. Neither
-side owns the fixture: a change to the rule has to change the fixture, and
-that fails the *other* language's test until it is ported too. (The same
-cross-language fixture pattern as
-`loom-daemon/tests/fixtures/sweep-identity.json`.)
+They are pinned to the same JSON fixture, kept as two identical copies:
+
+- `loom-daemon/tests/fixtures/dispatch-plan-merge.json`, which
+  `loom-daemon/src/work_finder/dispatch_plan_merge_tests.rs` reads with
+  `include_str!`;
+- the dashboard's TypeScript twin keeps its own copy beside its
+  `mergeFleetQueue` test. That port carries the full merge rule, `step`
+  included; before it, the port folded by `repo#issue` alone and pinned no
+  fixture.
+
+The two copies must stay byte-identical. Neither side owns the fixture: a
+change to the rule changes it in both repos, and fails the *other*
+language's test until it is ported too. (The same cross-language fixture
+pattern as `loom-daemon/tests/fixtures/sweep-identity.json`.)
 
 **To change the rule**: edit the fixture case that pins the behaviour, then
 make both implementations agree with it, then update this document. Do not

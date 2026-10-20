@@ -23,11 +23,13 @@ from __future__ import annotations
 import inspect
 from unittest.mock import patch
 
+import pytest
+
 from kicad_tools.router.core import Autorouter
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.match_group_length import MatchGroup, MatchGroupSource
 from kicad_tools.router.match_group_tuning import TuneResult
-from kicad_tools.router.primitives import Route, Segment
+from kicad_tools.router.primitives import Route, Segment, Via
 from kicad_tools.router.rules import NetClassRouting
 
 # =============================================================================
@@ -370,11 +372,13 @@ class TestSignatureDriftPrevention:
         sig = inspect.signature(Autorouter.apply_match_group_tuning)
         param_names = [name for name in sig.parameters if name != "self"]
         # AC8: parameter names asserted exactly.
-        assert param_names == ["detected_groups", "verbose"], (
+        assert param_names == ["detected_groups", "verbose", "engage"], (
             f"apply_match_group_tuning signature drift: {param_names}"
         )
         # `verbose` must default to True (mirrors the diff-pair sibling).
         assert sig.parameters["verbose"].default is True
+        # Issue #6674: the default keeps the --length-match-groups policy.
+        assert sig.parameters["engage"].default == "length_critical"
         # `detected_groups` is positional-or-keyword with no default.
         assert sig.parameters["detected_groups"].default is inspect.Parameter.empty
 
@@ -640,8 +644,10 @@ class TestViaInclusiveStackupThreading:
         # The manufacturer profile's board thickness (default 1.6 mm for the
         # synthesized adapter) must reach the tuner so via drilled length is
         # compensable.
-        assert "board_thickness_mm" in captured
-        assert captured["board_thickness_mm"] == 1.6
+        # Issue #6725: the tuner measures through the shared kicad-cli-exact
+        # model (board stackup + pad copper), not a thickness figure.
+        model = captured["length_model"]
+        assert model.stackup.span("F.Cu", "B.Cu") == pytest.approx(1.58)
         # The copper-layer count must match the tracker's (bare autorouter
         # with no layer_stack defaults to 2).
         assert captured["num_copper_layers"] == 2
@@ -698,3 +704,166 @@ class TestViaInclusiveStackupThreading:
         )
         # A0 gained real copper meander (~1.6 mm), it has no via of its own.
         assert LengthTracker.calculate_route_length(tuned_a0) > 31.0
+
+
+# =============================================================================
+# Issue #6968: preserved copper counts toward each member's length
+# =============================================================================
+
+
+def _seg(net_id: int, name: str, x1: float, x2: float, y: float) -> Segment:
+    return Segment(x1=x1, y1=y, x2=x2, y2=y, width=0.2, layer=Layer.F_CU, net=net_id, net_name=name)
+
+
+def _preserved_router(*, stub_net: bool) -> tuple[Autorouter, MatchGroup, Route]:
+    """DQ0 routed 22mm; DQ1 routed 10mm plus an 8mm preserved escape stub.
+
+    ``stub_net=True`` registers DQ1 as a stub net (``_stub_terminals``, #4170),
+    so the writer re-emits its preserved stub next to the fresh route --
+    exactly board 07's input SDRAM escapes under ``--preserve-existing``.
+    """
+    ar = Autorouter(width=80.0, height=80.0)
+    ar.net_names = {1: "DQ0", 2: "DQ1"}
+    ar.routes = [
+        _straight_route(1, "DQ0", 22.0, y=0.0),
+        Route(net=2, net_name="DQ1", segments=[_seg(2, "DQ1", 8.0, 18.0, 20.0)]),
+    ]
+    stub = Route(net=2, net_name="DQ1", segments=[_seg(2, "DQ1", 0.0, 8.0, 20.0)])
+    ar.existing_routes = [stub]
+    if stub_net:
+        ar._stub_terminals = {2: object()}
+    nc = NetClassRouting(
+        name="DDR",
+        length_critical=True,
+        length_match_group="DDR",
+        length_match_tolerance_mm=0.5,
+    )
+    ar.net_class_map = {"DQ0": nc, "DQ1": nc}
+    group = MatchGroup(
+        name="DDR", net_ids=[1, 2], tolerance=0.5, source=MatchGroupSource.LEGACY_API
+    )
+    return ar, group, stub
+
+
+class TestPreservedCopperMeasured:
+    def test_stub_counts_toward_member_length(self):
+        ar, group, _stub = _preserved_router(stub_net=True)
+        results = ar.apply_match_group_tuning(detected_groups=[group], verbose=False)
+        _route, res = results["DDR"][2]
+        # 10mm routed + 8mm preserved stub, not the routed 10mm alone.
+        assert res.length_before_mm == pytest.approx(18.0, abs=0.05)
+
+    def test_stub_is_never_edited_or_republished(self):
+        ar, group, stub = _preserved_router(stub_net=True)
+        stub_seg = stub.segments[0]
+        before = (stub_seg.x1, stub_seg.y1, stub_seg.x2, stub_seg.y2)
+        results = ar.apply_match_group_tuning(detected_groups=[group], verbose=False)
+        assert results["DDR"][2][1].reason == "tuned"
+        assert ar.existing_routes == [stub]
+        assert stub.segments == [stub_seg]
+        assert (stub_seg.x1, stub_seg.y1, stub_seg.x2, stub_seg.y2) == before
+        published = [s for r in ar.routes for s in r.segments]
+        assert all(s is not stub_seg for s in published)
+        assert all(r is not stub for r in ar.routes)
+
+    def test_rerouted_net_drops_preserved_copper_like_the_writer(self):
+        """A freshly routed non-stub net does not re-emit its preserved copper
+        (``_finalize_routes``), so the tuner must not count it either."""
+        ar, group, _stub = _preserved_router(stub_net=False)
+        results = ar.apply_match_group_tuning(detected_groups=[group], verbose=False)
+        assert results["DDR"][2][1].length_before_mm == pytest.approx(10.0, abs=0.05)
+
+    def test_wholly_preserved_member_is_measured_not_unrouted(self):
+        ar, group, _stub = _preserved_router(stub_net=True)
+        full = _straight_route(1, "DQ0", 22.0, y=0.0)
+        ar.routes = [r for r in ar.routes if r.net != 1]
+        ar.existing_routes.append(full)
+        results = ar.apply_match_group_tuning(detected_groups=[group], verbose=False)
+        assert results["DDR"][1][1].reason != "unrouted"
+        assert results["DDR"][2][1].length_before_mm == pytest.approx(18.0, abs=0.05)
+        assert all(r.net != 1 for r in ar.routes)
+        assert full.segments[0].x2 == 22.0
+
+
+# =============================================================================
+# Issue #7159: foreign preserved copper is a clearance obstacle
+# =============================================================================
+
+
+def _foreign_via_router(*, via_y: float | None) -> tuple[Autorouter, MatchGroup, Route | None]:
+    """DQ0 22mm, DQ1 10mm at y=20 (needs ~12mm of meander); optional foreign
+    preserved via (net 3, not in the group) beside DQ1's host segment."""
+    ar = Autorouter(width=80.0, height=80.0)
+    ar.net_names = {1: "DQ0", 2: "DQ1", 3: "GND"}
+    ar.routes = [
+        _straight_route(1, "DQ0", 22.0, y=0.0),
+        Route(net=2, net_name="DQ1", segments=[_seg(2, "DQ1", 0.0, 10.0, 20.0)]),
+    ]
+    foreign = None
+    if via_y is not None:
+        foreign = Route(
+            net=3,
+            net_name="GND",
+            vias=[
+                Via(
+                    x=5.0,
+                    y=via_y,
+                    drill=0.3,
+                    diameter=0.6,
+                    layers=(Layer.F_CU, Layer.B_CU),
+                    net=3,
+                    net_name="GND",
+                )
+            ],
+        )
+        ar.existing_routes = [foreign]
+    nc = NetClassRouting(
+        name="DDR",
+        length_critical=True,
+        length_match_group="DDR",
+        length_match_tolerance_mm=0.5,
+    )
+    ar.net_class_map = {"DQ0": nc, "DQ1": nc}
+    group = MatchGroup(
+        name="DDR", net_ids=[1, 2], tolerance=0.5, source=MatchGroupSource.LEGACY_API
+    )
+    return ar, group, foreign
+
+
+def _min_gap_to_via(ar: Autorouter, via: Via) -> float:
+    from kicad_tools.router.clearance_kernel import copper_gap
+    from kicad_tools.router.clearance_shapes import segment_shape, via_shape
+
+    return min(
+        copper_gap(segment_shape(s), via_shape(via))
+        for r in ar.routes
+        if r.net == 2
+        for s in r.segments
+    )
+
+
+class TestForeignPreservedCopperClearance:
+    def test_meander_keeps_clearance_from_foreign_preserved_via(self):
+        # Control: with no obstacle the meander happily passes within the
+        # via clearance of (5.0, 20.8), so the test below is not vacuous.
+        probe_ar, group, _ = _foreign_via_router(via_y=None)
+        probe_ar.apply_match_group_tuning(detected_groups=[group], verbose=False)
+        probe_via = Via(
+            x=5.0,
+            y=20.8,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=3,
+        )
+        floor = probe_ar.rules.via_clearance
+        assert _min_gap_to_via(probe_ar, probe_via) < floor
+
+        ar, group, foreign = _foreign_via_router(via_y=20.8)
+        results = ar.apply_match_group_tuning(detected_groups=[group], verbose=False)
+        via = foreign.vias[0]
+        assert _min_gap_to_via(ar, via) + 1e-9 >= floor
+        # The fixed foreign copper is never edited or republished.
+        assert ar.existing_routes == [foreign]
+        assert all(r.net != 3 for r in ar.routes)
+        assert 3 not in results["DDR"]

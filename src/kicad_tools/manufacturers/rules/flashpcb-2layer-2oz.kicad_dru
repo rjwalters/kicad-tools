@@ -7,6 +7,8 @@
 (rule "Via Drill - FlashPCB"
   (condition "A.Type == 'via' && A.Via_Type != 'Micro'")
   (constraint hole_size (min 0.2mm)))
+(rule "Max Hole Size - FlashPCB"
+  (constraint hole_size (max 6.35mm)))
 (rule "Via Diameter - FlashPCB"
   (condition "A.Type == 'via' && A.Via_Type != 'Micro'")
   (constraint via_diameter (min 0.86mm)))
@@ -19,8 +21,8 @@
   (condition "(A.Type == 'via' || A.Type == 'pad') && B.Layer == 'Edge.Cuts'")
   (constraint physical_hole_clearance (min 1.0mm)))
 (rule "Silkscreen Width - FlashPCB"
-  (condition "A.Type == 'text' && A.Layer == 'F.Silkscreen'")
+  (condition "A.Type == 'text' && (A.Layer == 'F.Silkscreen' || A.Layer == 'B.Silkscreen')")
   (constraint text_thickness (min 0.08mm)))
 (rule "Silkscreen Height - FlashPCB"
-  (condition "A.Type == 'text' && A.Layer == 'F.Silkscreen'")
+  (condition "A.Type == 'text' && (A.Layer == 'F.Silkscreen' || A.Layer == 'B.Silkscreen')")
   (constraint text_height (min 0.8mm)))

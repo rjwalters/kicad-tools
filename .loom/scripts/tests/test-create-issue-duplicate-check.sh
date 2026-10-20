@@ -61,13 +61,11 @@ SCRIPTS_DIR="$(cd "$TEST_DIR/.." && pwd)"
 # shellcheck source=lib/require-daemon-bin.sh
 source "$TEST_DIR/lib/require-daemon-bin.sh"
 loom_test_require_daemon_bin "$SCRIPTS_DIR" "duplicate-scan"
-# #9548: filing vets its repo first (`forge may-write`); that decision is not
-# what this suite tests (test-write-scope.sh does), so the fixture repos are
-# allowed and every other verb still reaches the pinned binary.
-WS_STUB_DIR="$(mktemp -d)"
-# shellcheck source=lib/write-scope-stub.sh
-source "$TEST_DIR/lib/write-scope-stub.sh"
-write_scope_allow_all "$WS_STUB_DIR"
+# #9548: filing vets its repo first (`loom_write_repo`, answered by the pinned
+# daemon). The fixture checkouts are registered below (write-scope-fixture.sh)
+# so the real gate admits them.
+# shellcheck source=lib/write-scope-fixture.sh
+source "$TEST_DIR/lib/write-scope-fixture.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -221,18 +219,32 @@ exit 1
 STUB
 chmod +x "$FAKE_BIN/loom-daemon"
 
+# Write-scope fixtures (#9548). Every filing runs from $FIXTURE_WS, a checkout
+# registered as example/repo (the repo the stub gh files into). Case 8 files
+# across repos (--repo example/other), which the real gate admits only when
+# example/other is the origin of a REGISTERED WORKSPACE: $FIXTURE_OTHER is that
+# workspace, in an isolated registry (never the host's ~/.loom/workspaces.json).
+# The second registration chains onto the first, so the one LOOM_GH_BIN answers
+# the permission probe for both repos and hands everything else to the stub gh.
+FIXTURE_WS="$WORK/ws"
+FIXTURE_OTHER="$WORK/other"
+WRITE_SCOPE_INNER_GH="$FAKE_BIN/gh" write_scope_register "$FIXTURE_WS" example/repo
+write_scope_register "$FIXTURE_OTHER" example/other
+write_scope_workspaces "$WORK/workspaces.json" "$FIXTURE_OTHER"
+
 DUP_CALLS="$WORK/dup-calls.log"
 GH_CREATES="$WORK/gh-creates.log"
 DAEMON_ARGS="$WORK/daemon-args.log"
 
 # run_create [env assignments handled by caller] <args...>
-# Always: github forge forced, filing lock disabled (covered by
+# Always: run from $FIXTURE_WS, github forge forced, filing lock disabled (covered by
 # test-filing-lock.sh), stub gh first on PATH, logs reset.
 run_create() {
     : > "$DUP_CALLS"
     : > "$GH_CREATES"
     : > "$DAEMON_ARGS"
     OUT="$(
+        cd "$FIXTURE_WS" &&
         PATH="$FAKE_BIN:$PATH" \
         LOOM_FORGE_TYPE=github \
         LOOM_FILING_LOCK=0 \
@@ -499,6 +511,7 @@ echo "--- no exit path is silent ---"
 run_create_split() {
     : > "$GH_CREATES"
     STDOUT="$(
+        cd "$FIXTURE_WS" &&
         PATH="$FAKE_BIN:$PATH" \
         LOOM_FORGE_TYPE=github \
         LOOM_FILING_LOCK=0 \

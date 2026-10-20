@@ -39,6 +39,15 @@ class ManufacturerCheck:
         """Check if this violation is within manufacturer limits."""
         return self.result in (CheckResult.PASS, CheckResult.WARNING)
 
+    @property
+    def is_not_checked(self) -> bool:
+        """True when kct could not judge this violation against fab limits.
+
+        Issue #7170: such a violation is neither compatible nor incompatible;
+        it keeps kicad-cli's own severity and is counted separately.
+        """
+        return self.result == CheckResult.UNKNOWN
+
     def __str__(self) -> str:
         if self.manufacturer_limit is not None and self.actual_value is not None:
             return (
@@ -48,12 +57,39 @@ class ManufacturerCheck:
         return f"{self.result.value.upper()}: {self.message}"
 
 
+#: ViolationTypes that :func:`_check_violation` judges against a fab limit
+#: (Issue #7170).  Every other type comes back as a ``not_checked`` UNKNOWN
+#: result.  ``tests/test_drc_mfr_not_checked_7170.py`` asserts that no
+#: kicad-cli type string meant for one of these branches parses as UNKNOWN,
+#: which is how the ``annular_width`` branch went dead.
+MANUFACTURER_CHECKED_TYPES: frozenset[ViolationType] = frozenset(
+    {
+        ViolationType.CLEARANCE,
+        ViolationType.CLEARANCE_SEGMENT_VIA,
+        ViolationType.TRACK_WIDTH,
+        ViolationType.COPPER_EDGE_CLEARANCE,
+        ViolationType.VIA_ANNULAR_WIDTH,
+        ViolationType.DRILL_HOLE_TOO_SMALL,
+        ViolationType.HOLE_TO_HOLE_CLEARANCE,
+        ViolationType.DIMENSION_VIA_DIAMETER,
+        ViolationType.SOLDER_MASK_BRIDGE,
+        ViolationType.UNCONNECTED_ITEMS,
+        ViolationType.SHORTING_ITEMS,
+    }
+)
+
+#: ``rule_name`` of the fallback result for a violation kct cannot judge.
+NOT_CHECKED_RULE = "not_checked"
+
+
 def check_manufacturer_rules(
     report: DRCReport,
     manufacturer_id: str,
     layers: int = 2,
     copper_oz: float = 1.0,
     progress_callback: ProgressCallback | None = None,
+    *,
+    include_unconnected: bool = False,
 ) -> list[ManufacturerCheck]:
     """Check DRC violations against manufacturer design rules.
 
@@ -65,12 +101,25 @@ def check_manufacturer_rules(
         progress_callback: Optional callback for progress reporting.
             Signature: (progress: float, message: str, cancelable: bool) -> bool
             Returns False to cancel, True to continue.
+        include_unconnected: Also judge the error-severity entries of
+            ``report.unconnected_items`` (KiCad JSON opens, #4498).  They get
+            the same ``CheckResult.FAIL`` / ``rule_name="connection"`` result
+            a text ``.rpt`` open (which lives in ``violations``) already gets
+            (Issue #7188).  Off by default so ``kct drc --mfr``, which lists
+            opens in its own section, is unchanged.
 
     Returns:
-        List of check results for each relevant violation
+        Exactly one check result per input violation (Issue #7170).  A
+        violation kct has no fab-limit check for is returned as
+        ``CheckResult.UNKNOWN`` with ``rule_name == "not_checked"`` rather
+        than dropped, so callers can count what was never judged.
     """
     # Import here to avoid circular dependency
     from kicad_tools.manufacturers import get_profile
+
+    violations = list(report.violations)
+    if include_unconnected:
+        violations.extend(v for v in report.unconnected_items if v.is_error)
 
     try:
         profile = get_profile(manufacturer_id)
@@ -84,12 +133,11 @@ def check_manufacturer_rules(
                 manufacturer_id=manufacturer_id,
                 rule_name="unknown",
             )
-            for v in report.violations
+            for v in violations
         ]
 
     rules = profile.get_design_rules(layers=layers, copper_oz=copper_oz)
     results: list[ManufacturerCheck] = []
-    violations = list(report.violations)
     total = len(violations)
 
     for i, violation in enumerate(violations):
@@ -100,8 +148,22 @@ def check_manufacturer_rules(
                 break  # Cancelled
 
         check = _check_violation(violation, profile.id, profile.name, rules)
-        if check:
-            results.append(check)
+        if check is None:
+            # Issue #7170: never drop a violation.  An unjudged finding is
+            # reported as not checked, keeping kicad-cli's type and severity.
+            check = ManufacturerCheck(
+                violation=violation,
+                result=CheckResult.UNKNOWN,
+                message=(
+                    f"{violation.type_str or violation.type.value} "
+                    f"({violation.severity.value}): not checked against "
+                    f"{profile.name} limits"
+                ),
+                manufacturer_id=profile.id,
+                rule_name=NOT_CHECKED_RULE,
+                actual_value=violation.actual_value_mm,
+            )
+        results.append(check)
 
     # Final progress report
     if progress_callback is not None:
@@ -118,8 +180,11 @@ def _check_violation(
 ) -> ManufacturerCheck | None:
     """Check a single violation against manufacturer rules."""
 
-    # Clearance violations
-    if violation.type == ViolationType.CLEARANCE:
+    # Clearance violations.  The report parser refines kicad-cli's
+    # ``clearance`` between a track and a via to CLEARANCE_SEGMENT_VIA
+    # (``_infer_segment_via_type``); it is still copper-to-copper, so judge it
+    # here rather than let it fall through to not checked (Issue #7170).
+    if violation.type in (ViolationType.CLEARANCE, ViolationType.CLEARANCE_SEGMENT_VIA):
         if violation.actual_value_mm is not None:
             result = (
                 CheckResult.PASS
@@ -223,22 +288,33 @@ def _check_violation(
             manufacturer_limit=rules.min_annular_ring_mm,
         )
 
-    # Drill hole too small
+    # Hole size out of range (kicad-cli ``drill_out_of_range``).  KiCad
+    # raises it for both a too-small and a too-large hole, so judge both
+    # bounds (Issue #7170): below the fab's minimum drill or above its
+    # maximum hole diameter is a FAIL.
     if violation.type == ViolationType.DRILL_HOLE_TOO_SMALL:
+        max_hole = getattr(rules, "max_hole_diameter_mm", None)
         if violation.actual_value_mm is not None:
-            result = (
-                CheckResult.PASS
-                if violation.actual_value_mm >= rules.min_via_drill_mm
-                else CheckResult.FAIL
-            )
+            actual = violation.actual_value_mm
+            too_large = max_hole is not None and actual > max_hole
+            too_small = actual < rules.min_via_drill_mm
+            result = CheckResult.FAIL if (too_small or too_large) else CheckResult.PASS
+            if too_large:
+                message = f"Drill {actual:.3f}mm vs {manufacturer_name} max {max_hole:.2f}mm"
+                rule_name = "max_hole_diameter"
+                limit = max_hole
+            else:
+                message = f"Drill {actual:.3f}mm vs {manufacturer_name} min {rules.min_via_drill_mm:.2f}mm"
+                rule_name = "min_via_drill"
+                limit = rules.min_via_drill_mm
             return ManufacturerCheck(
                 violation=violation,
                 result=result,
-                message=f"Drill {violation.actual_value_mm:.3f}mm vs {manufacturer_name} min {rules.min_via_drill_mm:.2f}mm",
+                message=message,
                 manufacturer_id=manufacturer_id,
-                rule_name="min_via_drill",
-                manufacturer_limit=rules.min_via_drill_mm,
-                actual_value=violation.actual_value_mm,
+                rule_name=rule_name,
+                manufacturer_limit=limit,
+                actual_value=actual,
             )
         return ManufacturerCheck(
             violation=violation,
@@ -247,6 +323,29 @@ def _check_violation(
             manufacturer_id=manufacturer_id,
             rule_name="min_via_drill",
             manufacturer_limit=rules.min_via_drill_mm,
+        )
+
+    # Hole-to-hole web (kicad-cli ``hole_to_hole``, kct
+    # ``hole_to_hole_clearance``).  Issue #7170.
+    if violation.type == ViolationType.HOLE_TO_HOLE_CLEARANCE:
+        return _min_floor_check(
+            violation,
+            manufacturer_id,
+            label="Hole-to-hole",
+            manufacturer_name=manufacturer_name,
+            limit=rules.min_hole_to_hole_mm,
+            rule_name="min_hole_to_hole",
+        )
+
+    # Via pad diameter (kicad-cli ``via_diameter``).  Issue #7170.
+    if violation.type == ViolationType.DIMENSION_VIA_DIAMETER:
+        return _min_floor_check(
+            violation,
+            manufacturer_id,
+            label="Via diameter",
+            manufacturer_name=manufacturer_name,
+            limit=rules.min_via_diameter_mm,
+            rule_name="min_via_diameter",
         )
 
     # Pad-to-pad clearance: same-component violations are inherent to the
@@ -327,8 +426,45 @@ def _check_violation(
     return None
 
 
+def _min_floor_check(
+    violation: DRCViolation,
+    manufacturer_id: str,
+    *,
+    label: str,
+    manufacturer_name: str,
+    limit: float,
+    rule_name: str,
+) -> ManufacturerCheck:
+    """Judge ``violation.actual_value_mm`` against a fab minimum ``limit``."""
+    if violation.actual_value_mm is not None:
+        result = CheckResult.PASS if violation.actual_value_mm >= limit else CheckResult.FAIL
+        return ManufacturerCheck(
+            violation=violation,
+            result=result,
+            message=(
+                f"{label} {violation.actual_value_mm:.4f}mm vs {manufacturer_name} min {limit:.3f}mm"
+            ),
+            manufacturer_id=manufacturer_id,
+            rule_name=rule_name,
+            manufacturer_limit=limit,
+            actual_value=violation.actual_value_mm,
+        )
+    return ManufacturerCheck(
+        violation=violation,
+        result=CheckResult.WARNING,
+        message=f"{label} violation - {manufacturer_name} requires {limit:.3f}mm minimum",
+        manufacturer_id=manufacturer_id,
+        rule_name=rule_name,
+        manufacturer_limit=limit,
+    )
+
+
 def summarize_checks(checks: list[ManufacturerCheck]) -> dict:
-    """Summarize manufacturer check results."""
+    """Summarize manufacturer check results.
+
+    ``unknown`` and its alias ``not_checked`` count results kct could not
+    judge against the fab's limits (Issue #7170).
+    """
     results = {
         "total": len(checks),
         "pass": sum(1 for c in checks if c.result == CheckResult.PASS),
@@ -337,11 +473,12 @@ def summarize_checks(checks: list[ManufacturerCheck]) -> dict:
         "unknown": sum(1 for c in checks if c.result == CheckResult.UNKNOWN),
     }
     results["compatible"] = results["pass"] + results["warning"]
+    results["not_checked"] = results["unknown"]
     results["by_rule"] = {}
 
     for check in checks:
         if check.rule_name not in results["by_rule"]:
-            results["by_rule"][check.rule_name] = {"pass": 0, "fail": 0, "warning": 0}
+            results["by_rule"][check.rule_name] = {r.value: 0 for r in CheckResult}
         results["by_rule"][check.rule_name][check.result.value] += 1
 
     return results

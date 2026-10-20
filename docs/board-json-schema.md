@@ -167,6 +167,16 @@ project ZIP, outer archive and existing gallery report remain unchanged.
 Missing, stale or incomplete packages fail verification; this mode does not
 repair or regenerate them.
 
+The verification receipt is a per-run diagnostic, not committed evidence
+(Issue #7536). Its `engine` block names the verifying checkout (`commit`,
+`dirty`, `source_digest`), and its BOM detail depends on the host's parts
+cache, so the same board verified at another commit or on another host gives a
+different receipt. The repository gitignores `boards/*/output/readiness-verification/`.
+The one exception is board 03, which promotes its receipt into
+`output/readiness.json` and hash-binds the evidence copies under that directory;
+those bound copies stay tracked, and `kct readiness --verify` rewrites them
+byte-for-byte (`tests/test_readiness_verification_receipts_7536.py`).
+
 `--generate` explicitly requests generic package generation. It prepares and
 checks an isolated candidate, then publishes only if every gate passes. A
 failed attempt leaves the previous release intact and writes diagnostics under
@@ -200,6 +210,60 @@ package and `output/manufacturing.zip` are final. Verification reports remain
 separate from that gallery report. `ready` requires all applicable gates to
 pass; other results are `blocked` or `unverified` with named blockers and a
 nonzero exit. There is no flag that declares a partial run ready.
+
+### Known issues and fabrication tier (Issue #7261)
+
+A report can only vouch for the checks it ran. Open issues a person has found
+and filed are recorded in two optional, additive fields:
+
+```json
+{
+  "manufacturer": "jlcpcb-tier1",
+  "known_issues": [
+    {"issue": 7220, "kind": "advisory", "summary": "One-sided thermal connection on C10/C11 ...",
+     "recorded": "2026-10-18", "warnings": [{"rule": "thermal_asymmetry", "ref": "C10", "pad": "C10-2"}]},
+    {"issue": 7250, "kind": "defect", "summary": "USB pair 71.6 ohm vs the 90 ohm spec ...",
+     "recorded": "2026-10-18"}
+  ]
+}
+```
+
+* `manufacturer` is the fabrication tier the evidence was produced for.
+* `known_issues` entries have `issue` (positive integer), `kind`, `summary`
+  (non-empty, trimmed), `recorded` (ISO date) and an optional `warnings`
+  list of `{rule, ref, pad}` identities (Issue #7389): the exact `kct check`
+  warning findings the issue accounts for, as `kicad_tools.validate.known_warnings.warning_key`
+  yields them. Identities are sorted by `(rule, ref, pad)`, unique across the
+  whole list; the old `{rule: count}` form is rejected.
+  Entries are unique and sorted by `issue`; no other keys are allowed.
+* `kind` is `defect` (the board fails its own spec), `exception` (an approved
+  deviation) or `advisory` (a disclosed risk or ordering requirement). **Any
+  `defect` makes `status` `blocked`**, with a `known defect #N: summary`
+  blocker. A `ready` report that lists a defect is invalid. Exceptions and
+  advisories keep `ready`.
+* The list is hash-bound: the producer writes the same list to
+  `known-issues.json` in its evidence directory (`output/readiness/` or
+  `output/readiness-verification/`) and hashes that file into `inputs`. A list
+  that is unbound, or that differs from that file, makes the report
+  `unverified`.
+
+`kct readiness --known-issue N:summary:kind[:rule@pad,...]` (repeatable)
+records an entry; the summary may contain `:`. Recorded entries carry forward
+on later runs, keeping their `recorded` date, until
+`--resolve-known-issue N` drops them. Validation is format-only and offline.
+`--generate` writes each entry into the bundle README's "Accepted-risk
+waivers" section as `#N [kind] summary`. `kct fleet status` shows `YES*` and a
+`known: #N,#M` cell for exceptions and advisories, and `NO (known defect #N)`
+for a defect. The site labels a ready board "Assembly ready · 2 known issues"
+and lists the issues with links.
+
+Board scripts that tolerate known `kct check` warnings should read the
+allowance from these entries (`kicad_tools.cli.known_issues.known_warning_allowance`)
+rather than keep their own list; `scripts/boards/refresh_readiness.py` gates
+`kct check` warnings against exactly that allowance, as a set: an unlisted
+finding blocks (even at an unchanged count), and a listed identity that no
+longer fires is stale and blocks until the record drops it. It carries the list
+forward when it re-pins a board.
 
 ### Engine fingerprint
 

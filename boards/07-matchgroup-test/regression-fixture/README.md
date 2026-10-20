@@ -139,7 +139,8 @@ rules).
 Per the curator note on issue #2724, the initial DRC error count is
 empirical: route the board, count errors, add ~20% headroom, then
 record in `.github/routed-drc-tolerance.yml`.  Phase 3N (#2726) will
-tighten iteratively as upstream router improvements land.
+tighten iteratively as upstream router improvements land.  (#7367
+replaced that count with an identity allowance; see "CI Gate" below.)
 
 ## Current targeted repair (2026-09-09)
 
@@ -300,6 +301,21 @@ refills, reports and command logs. It also supports an already-correct input
 without further width edits. The current script was verified from the original
 fixture; the contact-loss negative test separately proves that a narrower
 track losing a real connection is rejected.
+
+### ADDR_BUS retune (2026-10-18, #6730)
+
+`kct retune-lengths --group ADDR_BUS` re-applied the existing match-group tuner
+to the saved fixture (only `A4` and `A6` changed; all other nets, vias and
+pads are unchanged). ADDR_BUS skew went from **1.0998 mm to 0.0169 mm** (limit
+0.5 mm), measured by `kct check` and by `kicad-cli` per-net lengths
+(`test_addr_bus_lengths_match_kicad_cli`). The new meanders sit on In1.Cu, so the
+zones were refilled with `kct zones fill`; without the refill the stale GND fill
+reports six `clearance_segment_zone` errors. Error signatures are otherwise those
+of the previous fixture minus the ADDR_BUS skew finding (`diffpair_length_skew` 5,
+`via_in_pad` 5, `connectivity` 4). The census is now `(849, 12)` and the PCB
+SHA256 is `fdbb69fd1cae5ee76a6a66788feebfed3490f090652df75fdbf04e864f3df83e`.
+The input hash and per-net before/after lengths were recorded by the retuner's
+provenance record. Earlier sections describe the pre-retune bytes.
 
 ### Placement-delta feedback (#4468, epic #3438 Phase 3)
 
@@ -676,13 +692,19 @@ The gate is a sibling of the `diffpair-routing-regression` job (board
 
 1. Re-routes board 07 from scratch with
    `python boards/07-matchgroup-test/generate_design.py --step route --seed 42`.
-2. Asserts the resulting DRC error count is within the per-board
-   allowlist in `.github/routed-drc-tolerance.yml` (currently 8:
-   4x `diffpair_length_skew` + 4x `diffpair_routing_continuity`;
-   ratcheted 35 -> 14 -> 9 -> 8 -- see the board-07 comment block in
-   the yml.  Per the #4008 unified-counter change, both gate arms
-   compare the identical advisory-filtered *blocking* count).
-   <!-- kct:doc-pin drc-tolerance boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb = 8 -->
+2. Asserts every blocking DRC finding is listed **by identity** (rule +
+   pair, net or match group, each with an open tracking issue) in
+   `MATCHGROUP_FIXTURE_ALLOWED_FINDINGS` / `MATCHGROUP_ALLOWED_GROUPS` in
+   `scripts/ci/check_matchgroup_coverage.py`, and that every listed entry
+   still fires (a fixed finding fails the gate as stale until its entry
+   is deleted).  The board has no entry in
+   `.github/routed-drc-tolerance.yml`, so the count of blocking findings
+   *outside* the allowance must be 0
+   ([#7367](https://github.com/rjwalters/kicad-tools/issues/7367); the
+   old count, ratcheted 35 -> 14 -> 9 -> 8, let a new finding hide
+   behind a fixed one).  Advisory `connectivity` is not blocking; reach
+   is gated by item 4.
+   <!-- kct:doc-pin drc-tolerance boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb = 0 -->
    The claim above is machine-checked by `kct check --only doc_drift`
    (issue #4540): ratcheting the yml without updating this README
    trips `doc_drift_stale_pin`.
@@ -693,6 +715,53 @@ The gate is a sibling of the `diffpair-routing-regression` job (board
    breaks `derive_group_skew_data` or unwires `length_match_group`
    from the net classes) would silently produce a 0-violation report
    and hide the defect.
+4. Asserts signal reach (Issue #7319): at least `REQUIRED_SIGNAL_REACH`
+   (30) of the 31 non-pour nets are complete per `NetStatusAnalyzer`,
+   the same counter board 06's gate uses.  Below it the gate exits 2 and
+   names the open nets.  The committed 27/31 routed artifact in this
+   directory is below the contract on purpose; it is the witness that
+   the assertion bites (`--skip-route` against it fails).
+
+### Re-route reach (seed 42, Issue #7319)
+
+The gate's seed-42 re-route reaches **30/31** (`TMDS_D0_N` open) with 0
+placement-delta probes.  #7163 briefly dropped it to 29/31: the DDR strobe
+pair carried no impedance target, so the router synthesized 100 ohm from
+the validator's `.*_[PN]$` default and re-solved the DQS **width** at the
+0.1016 mm manufacturer gap floor -- 0.175 mm under the #7163 field solve
+(0.225 mm before it).  DQ0 went open and a `U2 mirror` probe tripled the
+gate's wall time.  `DDR_DQS` now declares the 100 ohm target and is sized
+like MIPI/HDMI (0.225 mm held, 0.135 mm gap, 99.7 ohm).  Measured
+back-to-back on one host (C++ backend, `PYTHONHASHSEED=42`):
+
+| run | iteration-0 | final | probes | channel phase | gate wall |
+|---|---|---|---|---|---|
+| `bd3c8fb10` (pre-#7163) | 30/31 | 30/31 | 0 | 507 s | 992 s |
+| DQS sized (#7319) | 30/31 | 30/31 | 0 | 358 s | 702 s |
+
+#### Blocking reason for `TMDS_D0_N` (Issue #7554, re-measured on 30/31)
+
+Re-measured on the 30/31 layout (`main` @ `fd8a974cd`, C++ backend,
+`PYTHONHASHSEED=42`, `generate_design.py <dir> --step all --seed 42`).
+The negotiated router's access-loss witness names the cause:
+
+```
+TMDS_D0_N sealed in at iteration[1]: U4.B2 has no legal exit, closed by
+TMDS_D1_P, TMDS_D2_P, U4.A2, U4.B1, U4.B3, U4.C2
+```
+
+Targeted rip-up (`TMDS_D0_P`, `TMDS_D1_P/N`, `TMDS_D2_P/N`) and two
+relief-rescue rounds resolved 0/1: the victims cannot be re-landed.  The
+pad is enclosed by neighbouring BGA pads plus the committed escapes of two
+other TMDS legs, so the open is escape-bound (a 1:1 trade), not
+budget-starved.  No router knob closes it; it needs a placement change or
+joint TMDS escape-corridor allocation (#3673), tracked in #7557.  The run
+was cut at a 600 s wall-clock cap, after the witness, so no final reach
+figure was taken; the 30/31 figure above is unchanged.
+
+The committed `net_class_map.json` here still describes the committed
+routed artifact (DQS 0.150/0.100, MIPI/HDMI gap 0.100); it is regenerated
+with that artifact under #6730 / #7283, not by the gate.
 
 ### Interpreting a failure
 
@@ -705,10 +774,18 @@ The gate is a sibling of the `diffpair-routing-regression` job (board
   See `src/kicad_tools/validate/match_group_skew.py` and
   `src/kicad_tools/validate/rules/match_group_length_skew.py` for
   the engagement conditions.
-- **`DRC regression on re-routed ...`** -- the routing algorithm
-  produced more errors than the allowlist value.  Fix the router
-  regression OR (with reviewer sign-off) raise the allowlist value
-  in the same PR.
+- **`Reach regression on re-routed ...`** -- fewer signal nets
+  complete than `REQUIRED_SIGNAL_REACH` in `generate_design.py`.  The
+  message names the open nets.  Measure which routing input changed
+  (class geometry in the sidecar, per-net copper widths) before
+  lowering the contract.
+- **`Errors outside the identity allowance`** / **`DRC errors
+  detected on re-routed ...`** -- the routing algorithm produced a
+  finding on a rule/identity the allowance does not list.  Fix the
+  router regression; an accepted, separately-tracked defect is listed
+  by identity with its open tracker, never by count.
+- **`Stale identity allowance`** -- a listed finding no longer fires:
+  delete its entry.
 - **Job times out (> 10 min)** -- routing wall-clock crept above
   the budget.  File a follow-up to move the gate to a nightly
   schedule per Epic #2661's runtime guidance.

@@ -28,6 +28,15 @@ two-net boards (``tests/test_diffpair_uncoupled_length_6443.py``):
   degree skew already makes both traces uncoupled.  There is **no distance
   limit** unless a ``diff_pair_gap (max ..)`` constraint is present, and kct
   emits only ``(min ..)``.  Two parallel traces 10 mm apart are coupled.
+* **Tuning patterns are left out** (Issue #7521, operator ruling Q16).
+  Tracks listed as ``members`` of a KiCad ``(generated ... (type
+  tuning_pattern))`` object are dropped from the measure on both sides: they
+  are not uncoupled copper of their own net, and the other net does not
+  couple to them.  So the partner's copper opposite a skew bump, now beside
+  nothing, *does* count.  Measured on kicad-cli 10.0.6 with a 45-degree bump
+  on N (excursion 0.4 mm over a 1.8 mm base line) and min-only gap rules:
+  1.1314 mm as plain copper (the bump's diagonals), 1.8 mm as a pattern
+  (the P span opposite it).
 * **Via barrels are not counted.**  A via is not track length: a pair whose
   vias sit side by side loses nothing, and offset vias cost only the
   track copper that no longer has a partner beside it.
@@ -195,6 +204,10 @@ class PairMeasure:
     #: Empty when the net has no terminal on the board.
     p_terminals: tuple[TerminalFigure, ...] = ()
     n_terminals: tuple[TerminalFigure, ...] = ()
+    #: Track copper (mm) owned by KiCad tuning patterns (Issue #7521), left
+    #: out of the uncoupled figures.
+    p_pattern_mm: float = 0.0
+    n_pattern_mm: float = 0.0
 
     @property
     def uncoupled_mm(self) -> float:
@@ -778,20 +791,25 @@ def measure_per_terminal(
     copper: Copper | None = None,
     own_leads: bool = True,
     partner_name: str = "",
+    excluded: list[bool] | None = None,
 ) -> tuple[TerminalFigure, ...]:
     """Per-terminal uncoupled figures of one net (Issue #6615).
 
     The uncoupled spans of ``own`` minus every terminal's gather-ignore
     region, charged to terminals by :func:`_attribute`.  Empty without
-    terminals.
+    terminals.  ``excluded[i]`` marks ``own[i]`` as tuning-pattern copper
+    (Issue #7521): it still connects the net's graph but counts nothing.
     """
     terminals = net_terminals(pcb, own_name, gather_ignore)
     if not terminals:
         return ()
     regions = [t.region for t in terminals if t.region is not None]
     coupled = _coupled_spans(own, partner, copper, own_leads, own_name, partner_name)
-    counted = []
-    for s, cs in zip(own, coupled, strict=True):
+    counted: list[list[Interval]] = []
+    for i, (s, cs) in enumerate(zip(own, coupled, strict=True)):
+        if excluded is not None and excluded[i]:
+            counted.append([])
+            continue
         spans = uncoupled_intervals(s, cs)
         if spans and regions:
             inside = [iv for r in regions for iv in _inside_intervals(s, r)]
@@ -812,6 +830,24 @@ def net_component_counts(pcb: PCB) -> dict[str, int]:
     return {name: len(r) for name, r in refs.items()}
 
 
+def net_track_mm(pcb: PCB, net_id: int) -> float:
+    """Straight-track copper (mm) on ``net_id`` -- the figure ``routed`` reads.
+
+    A pair is measured (``PairMeasure.routed``) only when this is positive
+    for both nets.  Issue #6820: ``routing_policy`` uses it to defer a pair's
+    via cap to this rule only when this rule will actually evaluate the pair.
+    """
+    return sum(
+        math.hypot(s.end[0] - s.start[0], s.end[1] - s.start[1])
+        for s in pcb.segments_in_net(net_id)
+    )
+
+
+def pair_is_measured(pcb: PCB, p_id: int, n_id: int) -> bool:
+    """True when :meth:`DiffPairUncoupledLengthRule.check` evaluates the pair."""
+    return net_track_mm(pcb, p_id) > 0.0 and net_track_mm(pcb, n_id) > 0.0
+
+
 def measure_pair(
     pcb: PCB,
     p_id: int,
@@ -820,37 +856,61 @@ def measure_pair(
     n_name: str,
     components: dict[str, int] | None = None,
     gather_ignore: str | float = GATHER_IGNORE_DEFAULT,
+    pattern_members: frozenset[str] | None = None,
 ) -> PairMeasure:
     """Measure one pair on ``pcb`` the way KiCad's ``diff_pair_uncoupled`` does.
 
     Also measures the kct-only per-terminal figures (Issue #6615) with the
     given ``gather_ignore`` region; they do not change the KiCad figure.
+
+    Issue #7521: tracks owned by a KiCad tuning pattern (``pattern_members``,
+    read from the board when ``None``) are left out of both nets' uncoupled
+    figures and out of the partner copper the other net couples to.
     """
+    if pattern_members is None:
+        pattern_members = board_pattern_members(pcb)
     p_segs: list[Segment] = []
     n_segs: list[Segment] = []
-    for net_id, bucket in ((p_id, p_segs), (n_id, n_segs)):
+    p_bump: list[bool] = []
+    n_bump: list[bool] = []
+    for net_id, bucket, bump in ((p_id, p_segs, p_bump), (n_id, n_segs, n_bump)):
         for s in pcb.segments_in_net(net_id):
             bucket.append((s.start[0], s.start[1], s.end[0], s.end[1], s.layer, s.width))
+            bump.append(bool(s.uuid) and s.uuid in pattern_members)
     copper = _board_copper(pcb)
+    # Issue #7521: tuning-pattern members (skew bumps) are out of the measure
+    # on both sides, as pinned kicad-cli 10.0.6 does.
+    p_meas = [seg for seg, b in zip(p_segs, p_bump, strict=True) if not b]
+    n_meas = [seg for seg, b in zip(n_segs, n_bump, strict=True) if not b]
     comps = components if components is not None else net_component_counts(pcb)
     return PairMeasure(
         p_name=p_name,
         n_name=n_name,
         p_routed_mm=sum(_length(s) for s in p_segs),
         n_routed_mm=sum(_length(s) for s in n_segs),
-        p_uncoupled_mm=measure_uncoupled(p_segs, n_segs, copper, True, p_name, n_name),
-        n_uncoupled_mm=measure_uncoupled(n_segs, p_segs, copper, False, n_name, p_name),
+        p_uncoupled_mm=measure_uncoupled(p_meas, n_meas, copper, True, p_name, n_name),
+        n_uncoupled_mm=measure_uncoupled(n_meas, p_meas, copper, False, n_name, p_name),
         vias_p=sum(1 for _ in pcb.vias_in_net(p_id)),
         vias_n=sum(1 for _ in pcb.vias_in_net(n_id)),
         components_p=comps.get(p_name, 0),
         components_n=comps.get(n_name, 0),
         p_terminals=measure_per_terminal(
-            pcb, p_segs, n_segs, p_id, p_name, gather_ignore, copper, True, n_name
+            pcb, p_segs, n_meas, p_id, p_name, gather_ignore, copper, True, n_name, p_bump
         ),
         n_terminals=measure_per_terminal(
-            pcb, n_segs, p_segs, n_id, n_name, gather_ignore, copper, False, p_name
+            pcb, n_segs, p_meas, n_id, n_name, gather_ignore, copper, False, p_name, n_bump
         ),
+        p_pattern_mm=sum(_length(seg) for seg, b in zip(p_segs, p_bump, strict=True) if b),
+        n_pattern_mm=sum(_length(seg) for seg, b in zip(n_segs, n_bump, strict=True) if b),
     )
+
+
+def board_pattern_members(pcb: PCB) -> frozenset[str]:
+    """Uuids of the tracks owned by a KiCad tuning pattern on ``pcb`` (Issue #7521)."""
+    from kicad_tools.router.tuning_pattern import tuning_pattern_member_uuids
+
+    root = getattr(pcb, "_sexp", None)
+    return frozenset() if root is None else tuning_pattern_member_uuids(root)
 
 
 def uncoupled_limit(limits: PairThresholds, components: int) -> tuple[float | None, str | None]:
@@ -939,13 +999,16 @@ class DiffPairUncoupledLengthRule(DRCRule):
             return results
         names = {n.number: n.name for n in pcb.nets.values() if n.name}
         comps = net_component_counts(pcb)
+        members = board_pattern_members(pcb)
         for a, b in sorted(self._engaged):
             na, nb = names.get(a), names.get(b)
             if not na or not nb:
                 continue
             limits = self._limits.get((a, b))
             gather = getattr(limits, "gather_ignore", GATHER_IGNORE_DEFAULT)
-            measure = measure_pair(pcb, a, b, na, nb, comps, gather_ignore=gather)
+            measure = measure_pair(
+                pcb, a, b, na, nb, comps, gather_ignore=gather, pattern_members=members
+            )
             if not measure.routed:
                 continue  # unrouted pair: no copper, no uncoupled number
             results.rules_checked += 1
@@ -1032,6 +1095,9 @@ class DiffPairUncoupledLengthRule(DRCRule):
             f"uncoupled length {m.uncoupled_mm:.3f} mm "
             f"(P {m.p_uncoupled_mm:.3f}, N {m.n_uncoupled_mm:.3f})"
         )
+        pattern_mm = m.p_pattern_mm + m.n_pattern_mm
+        if pattern_mm > 0.0:
+            detail += f", {pattern_mm:.3f} mm of tuning-pattern copper excluded"
         if m.uncoupled_mm > limit + UNCOUPLED_EPSILON_MM:
             assert limits is not None
             results.add(

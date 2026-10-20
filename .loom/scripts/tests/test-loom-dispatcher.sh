@@ -46,16 +46,7 @@ XDG_STATE_HOME="$(mktemp -d)"; export XDG_STATE_HOME
 DAEMON_STUB_DIR="$(mktemp -d)"
 for _s in loom-daemon node npm; do printf '#!/usr/bin/env bash\nexit 0\n' > "$DAEMON_STUB_DIR/$_s"; chmod +x "$DAEMON_STUB_DIR/$_s"; done
 WITH_DAEMON_PATH="$DAEMON_STUB_DIR:$PATH"
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-NC='\033[0m'
-
-TESTS_RUN=0
-TESTS_PASSED=0
-TESTS_FAILED=0
-
-pass() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1)); echo -e "  ${GREEN}PASS${NC}: $1"; }
-fail() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1)); echo -e "  ${RED}FAIL${NC}: $1"; }
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
 assert_contains() {
     if [[ "$1" == *"$2"* ]]; then pass "$3"; else fail "$3 (missing substring: '$2' in: $1)"; fi
@@ -256,6 +247,32 @@ set -e 2>/dev/null || true
 assert_eq "$rc" "0" "'loom update --check' exits 0"
 assert_contains "$out" "read-only mode" "'update --check' skips the bundle refresh (read-only)"
 assert_contains "$out" "STUB_UPDATE args=[--check]" "'update --check' still delegates with --check"
+
+echo "Test 5d: 'update --help' / '-h' run no sync/provision/bundle refresh (#12558)"
+CHK3=$(make_checkout)
+# Stale bundle: src/ file newer than dist/index.js, so a non-read-only update
+# WOULD invoke npm. A recording npm stub proves it is never called for help.
+mkdir -p "$CHK3/mcp-loom/dist" "$CHK3/mcp-loom/src"
+: > "$CHK3/mcp-loom/dist/index.js"
+touch -d '2 hours ago' "$CHK3/mcp-loom/dist/index.js"
+: > "$CHK3/mcp-loom/src/index.ts"
+NPM_STUB_DIR=$(mktemp -d)
+NPM_LOG="$NPM_STUB_DIR/npm.calls"
+printf '#!/usr/bin/env bash\necho "$*" >> "%s"\nexit 1\n' "$NPM_LOG" > "$NPM_STUB_DIR/npm"
+chmod +x "$NPM_STUB_DIR/npm"
+bundle_mtime_before="$(stat -c %Y "$CHK3/mcp-loom/dist/index.js")"
+for helpflag in --help -h; do
+    set +e
+    out=$(LOOM_HOME="$CHK3" PATH="$NPM_STUB_DIR:$WITH_DAEMON_PATH" bash "$DISPATCHER" update "$helpflag" 2>&1)
+    rc=$?
+    set -e 2>/dev/null || true
+    assert_eq "$rc" "0" "'loom update $helpflag' exits 0"
+    assert_contains "$out" "STUB_UPDATE args=[$helpflag]" "'update $helpflag' delegates to the updater's usage"
+    assert_not_contains "$out" "refreshing the user-scoped mcp-loom bundle" "'update $helpflag' does not refresh the bundle"
+    assert_not_contains "$out" "read-only mode" "'update $helpflag' prints no read-only banner"
+done
+assert_eq "$([[ -e "$NPM_LOG" ]] && echo called || echo none)" "none" "'update --help' never invoked npm"
+assert_eq "$(stat -c %Y "$CHK3/mcp-loom/dist/index.js")" "$bundle_mtime_before" "'update --help' left dist/index.js untouched"
 
 # ── AC5: config resolution through the Phase 2 tier resolver ─────────────────
 if command -v jq >/dev/null 2>&1; then
@@ -772,6 +789,14 @@ out=$(HOME="$H" LOOM_HOME="$CK" PATH="$NODAEMON_PATH" bash "$CK/scripts/loom" up
 assert_contains "$out" "not main" "non-main: warning names the reason"
 assert_eq "$(git -C "$CK" rev-parse HEAD)" "$before_head" "non-main: HEAD unchanged"
 assert_eq "$(git -C "$CK" symbolic-ref --short HEAD)" "topic" "non-main: branch unchanged"
+
+echo "Test 27b: an untracked machine config tier does not block the fast-forward"
+CK=$(make_synced_checkout); H=$(mktemp -d); advance_origin "$CK"
+mkdir -p "$CK/config"; echo '{}' > "$CK/config/defaults.json"
+out=$(HOME="$H" LOOM_HOME="$CK" PATH="$NODAEMON_PATH" bash "$CK/scripts/loom" update 2>&1)
+assert_contains "$out" "fast-forwarded" "untracked config/ only: checkout is fast-forwarded"
+assert_eq "$(git -C "$CK" rev-parse HEAD)" "$(git -C "$CK" rev-parse origin/main)" "untracked config/ only: HEAD == origin/main"
+assert_eq "$(cat "$CK/config/defaults.json")" "{}" "untracked config/ only: the config file is preserved"
 
 echo "Test 28: 'update --check' / '--dry-run' neither provision nor ff-sync (#10238)"
 CK=$(make_synced_checkout); H=$(mktemp -d); advance_origin "$CK"; before_head="$(git -C "$CK" rev-parse HEAD)"

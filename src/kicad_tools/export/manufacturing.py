@@ -7,6 +7,7 @@ KiCad project ZIP, and a manifest with SHA256 checksums.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import logging
@@ -24,7 +25,12 @@ from kicad_tools.parts.lcsc import LCSCDependencyMissingError
 from kicad_tools.sexp import parse_file
 
 from .assembly import AssemblyConfig, AssemblyPackage, AssemblyPackageResult
-from .preflight import PreflightChecker, PreflightConfig, PreflightResult
+from .preflight import (
+    PreflightChecker,
+    PreflightConfig,
+    PreflightResult,
+    report_source_mismatch,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -112,11 +118,27 @@ class ManufacturingResult:
     # human-readable ordering instructions travel with the bundle rather
     # than requiring per-board hand-typed prose.
     fabrication_process: dict | None = None
+    # Issue #7209: outer/inner copper weight the order requests, derived from the
+    # board stackup (see ``preflight.resolve_ordered_copper``).
+    ordered_copper: dict | None = None
 
     @property
     def success(self) -> bool:
         """Check if generation was successful (no errors)."""
         return len(self.errors) == 0
+
+    def bundle_relpath(self, path: Path) -> str:
+        """Return ``path`` relative to the bundle root, for display.
+
+        The Gerber archive lives at ``gerbers/gerbers.zip``; printing only
+        ``path.name`` told the reader to look for a top-level
+        ``gerbers.zip`` that does not exist (issue #7153).  Falls back to
+        the bare file name for a path outside :attr:`output_dir`.
+        """
+        try:
+            return Path(path).resolve().relative_to(Path(self.output_dir).resolve()).as_posix()
+        except ValueError:
+            return Path(path).name
 
     @property
     def all_files(self) -> list[Path]:
@@ -152,7 +174,7 @@ class ManufacturingResult:
             if self.assembly_result.pnp_path:
                 lines.append(f"  CPL: {self.assembly_result.pnp_path.name}")
             if self.assembly_result.gerber_path:
-                lines.append(f"  Gerbers: {self.assembly_result.gerber_path.name}")
+                lines.append(f"  Gerbers: {self.bundle_relpath(self.assembly_result.gerber_path)}")
         if self.report_path:
             lines.append(f"  Report: {self.report_path.name}")
         if self.image_paths:
@@ -395,6 +417,9 @@ def _build_manifest(
     if result.fabrication_process is not None:
         manifest["fabrication_process"] = result.fabrication_process
 
+    if result.ordered_copper is not None:
+        manifest["ordered_copper"] = result.ordered_copper
+
     return manifest
 
 
@@ -505,6 +530,7 @@ class ManufacturingPackage:
         # actual layer/copper configuration, so the manifest and README
         # steps below can bind it into the bundle.
         self._resolve_fabrication_process(result)
+        self._resolve_ordered_copper(result)
 
         # Step 0: Pre-flight validation
         preflight_cfg = self.config.preflight
@@ -712,9 +738,12 @@ class ManufacturingPackage:
 
         Reads any pre-existing DRC report next to the source PCB (or the
         explicit ``drc_report_path`` from the preflight config) and appends
-        an error to ``result`` when it contains SHORTING_ITEMS or other
-        connectivity-error violations.  Because ``ManufacturingResult.success``
-        is ``len(errors) == 0``, appending an error causes ``export()`` to
+        an error to ``result`` when it contains error-severity net shorts
+        (SHORTING_ITEMS) or unconnected items (opens, read through
+        ``DRCReport.connectivity_items()``; issue #7091).  A report recorded
+        for a different PCB is treated like a missing report (warning only),
+        except under ``--strict-preflight`` where it blocks export.  Because
+        ``ManufacturingResult.success`` is ``len(errors) == 0``, appending an error causes ``export()`` to
         return a non-success result and skip writing output files.
 
         This gate runs even when ``preflight.skip_all`` (``--skip-preflight``)
@@ -756,16 +785,17 @@ class ManufacturingPackage:
         if report_path is None:
             return
 
-        # Surface a stale-report note: if the resolved DRC report predates the
-        # PCB, its verdict may not reflect the current board. The floor still
-        # blocks on a stale FAIL (staleness in the blocking direction is the
-        # safe side); this warning just explains a potentially spurious block.
         try:
-            if report_path.stat().st_mtime < self.pcb_path.stat().st_mtime:
+            if report_path.stat().st_size == 0:
+                # DRC was attempted but wrote nothing -- most likely kicad-cli
+                # was killed (e.g. OOM) before it produced a report. An empty
+                # file parses as 0 violations, so it must not read as clean.
                 logger.warning(
-                    f"DRC report {report_path.name} is older than the PCB; "
-                    "safety-floor verdict may be stale."
+                    f"DRC report {report_path.name} is empty (0 bytes); kicad-cli "
+                    "was likely killed before writing it. The safety floor cannot "
+                    "verify connectivity -- re-run DRC."
                 )
+                return
         except OSError:
             pass
 
@@ -774,26 +804,64 @@ class ManufacturingPackage:
             from ..drc.violation import ViolationType
 
             report = DRCReport.load(report_path)
-            connectivity_errors = [
-                v
-                for v in report.errors
-                if v.type in (ViolationType.SHORTING_ITEMS, ViolationType.UNCONNECTED_ITEMS)
-            ]
+            # Shorts arrive through the geometric ``violations`` collection.
+            shorts = [v for v in report.errors if v.type == ViolationType.SHORTING_ITEMS]
+            # Opens: since #4498 KiCad's ``unconnected_items`` live in a
+            # separate collection that ``report.errors`` never contains, so
+            # read them through the connectivity accessor (issue #7091).
+            # Only error-severity (non-waived) items block.
+            opens = report.connectivity_errors()
         except Exception as e:
             # If we can't read the report, don't block -- prefer a
             # false-negative over breaking boards that never ran DRC.
             logger.warning(f"DRC safety floor could not read {report_path}: {e}")
             return
 
-        if connectivity_errors:
-            short_count = sum(
-                1 for v in connectivity_errors if v.type == ViolationType.SHORTING_ITEMS
-            )
+        # Issue #7091: a report generated for a different PCB (e.g. the
+        # ``*_routed`` sibling's report sitting next to the unrouted board)
+        # is no evidence for this board.  Treat it like a missing report:
+        # warn, but do not block (same false-negative policy as above).
+        other = report_source_mismatch(report.pcb_name, self.pcb_path)
+        if other is not None:
             msg = (
-                f"Safety floor: {len(connectivity_errors)} connectivity error(s) "
-                f"({short_count} net short(s)) in DRC report ({report_path.name}); "
-                "export blocked. Fix the shorts, or pass --skip-drc-floor to "
-                "override (only for known-safe workarounds)."
+                f"DRC report {report_path.name} is for {other}, not "
+                f"{self.pcb_path.name}; the safety floor cannot verify this "
+                "board's connectivity -- re-run DRC on it."
+            )
+            if self.config.strict_preflight:
+                msg = f"Safety floor (strict): {msg}"
+                result.errors.append(msg)
+                logger.error(msg)
+            else:
+                logger.warning(msg)
+                result.warnings.append(msg)
+            return
+
+        # Issue #7190: note a report that is not bound to the PCB's current
+        # content (mtimes are meaningless after a git checkout, so this uses
+        # the report's recorded pcb_sha256 / readiness co-binding instead).
+        # Log only: the floor still blocks on a stale FAIL (staleness in the
+        # blocking direction is the safe side); this explains a potentially
+        # spurious block.  Preflight's ``_check_drc`` keeps an unbound report
+        # from ever *passing* the board.
+        if explicit is None:
+            from ..drc.report_binding import BindingStatus, binding_status
+
+            binding = binding_status(report_path, self.pcb_path, report.pcb_sha256)
+            if binding is not BindingStatus.BOUND:
+                logger.warning(
+                    f"DRC report {report_path.name} is not bound to the PCB's current "
+                    f"content ({binding.value}); safety-floor verdict may be stale."
+                )
+
+        if shorts or opens:
+            total = len(shorts) + len(opens)
+            msg = (
+                f"Safety floor: {total} connectivity error(s) "
+                f"({len(shorts)} net short(s), {len(opens)} unconnected item(s)) "
+                f"in DRC report ({report_path.name}); export blocked. Fix the "
+                "shorts/opens, or pass --skip-drc-floor to override (only for "
+                "known-safe workarounds)."
             )
             result.errors.append(msg)
             logger.error(msg)
@@ -801,6 +869,8 @@ class ManufacturingPackage:
     def _run_preflight(self) -> list[PreflightResult]:
         """Run pre-flight validation checks."""
         preflight_cfg = self.config.preflight or PreflightConfig()
+        if self.config.strict_preflight and not preflight_cfg.strict_report_source:
+            preflight_cfg = dataclasses.replace(preflight_cfg, strict_report_source=True)
 
         # Pass explicit THT exclusion setting when the user provided a PnP config
         exclude_tht = None
@@ -913,6 +983,25 @@ class ManufacturingPackage:
             return
 
         result.drc_constraint_paths = written
+
+    def _resolve_ordered_copper(self, result: ManufacturingResult) -> None:
+        """Record the outer/inner copper weight the order requests (#7209).
+
+        Taken from the board stackup (matched against the fab profile), not a
+        constant.  Best-effort: failures leave ``result.ordered_copper`` unset.
+        """
+        try:
+            from ..schema.pcb import PCB
+            from .preflight import resolve_ordered_copper
+
+            info = resolve_ordered_copper(PCB.load(str(self.pcb_path)), self.manufacturer)
+            if info["ordered_outer_oz"] is not None:
+                if self.manufacturer.startswith("jlcpcb"):
+                    info["source"] = "https://jlcpcb.com/help/article/jlcpcb-copper-weight"
+                    info["source_verified"] = "2026-10-18"
+                result.ordered_copper = info
+        except Exception as e:
+            logger.debug("Could not resolve ordered copper: %s", e)
 
     def _resolve_fabrication_process(self, result: ManufacturingResult) -> None:
         """Resolve the profile's declared via-in-pad process for this board (#5009).
@@ -1034,6 +1123,7 @@ class ManufacturingPackage:
             from ..report.generator import ReportGenerator
             from ..report.models import ReportData
             from ..report.net_class_map import resolve_committed_net_class_map
+            from ..report.utils import find_schematic
         except ImportError:
             logger.warning(
                 "Report generation skipped: required dependency not installed (e.g. jinja2)"
@@ -1061,6 +1151,7 @@ class ManufacturingPackage:
                 pcb_path=self.pcb_path,
                 manufacturer=self.manufacturer,
                 net_class_map_path=net_class_map_path,
+                schematic_path=self.schematic_path or find_schematic(self.pcb_path),
             )
             collector.collect_all(data_dir)
 
@@ -1546,11 +1637,14 @@ class ManufacturingPackage:
             "bom": ("BOM (Bill of Materials)", "Component list for PCB assembly ordering"),
             "pnp": (
                 "CPL (Component Placement List)",
-                "Pick-and-place coordinates for SMT assembly",
+                "Pick-and-place coordinates for SMT/THT assembly",
             ),
             "gerber": (
                 "Gerber files",
-                "PCB fabrication data (copper layers, silkscreen, solder mask, drill)",
+                (
+                    "PCB fabrication data (copper layers, silkscreen, solder mask,"
+                    " solder paste (stencil) where the preset plots it, drill)"
+                ),
             ),
             "report": ("Design report", "Manufacturing readiness report with DRC/ERC results"),
             "images": (
@@ -1585,7 +1679,7 @@ class ManufacturingPackage:
                 lines.append("")
             if result.assembly_result.gerber_path:
                 desc = file_descriptions["gerber"]
-                lines.append(f"  {result.assembly_result.gerber_path.name}")
+                lines.append(f"  {result.bundle_relpath(result.assembly_result.gerber_path)}")
                 lines.append(f"    {desc[0]}: {desc[1]}")
                 lines.append("")
 
@@ -1626,6 +1720,18 @@ class ManufacturingPackage:
                 lines.append(f"  {instructions}")
             else:
                 lines.append(f"  Process: {result.fabrication_process.get('name', '(unnamed)')}")
+            lines.append("")
+
+        if result.ordered_copper:
+            oc = result.ordered_copper
+            lines.append("Copper weight to order:")
+            lines.append("-" * 23)
+            lines.append(
+                f"  Outer {oc['ordered_outer_oz']:g} oz / inner {oc['ordered_inner_oz']:g} oz "
+                f"({oc['layers']} layers; board stackup: {oc['status']})"
+            )
+            if oc.get("source"):
+                lines.append(f"  Source: {oc['source']} (verified {oc['source_verified']})")
             lines.append("")
 
         readme_path = out_dir / "README.txt"

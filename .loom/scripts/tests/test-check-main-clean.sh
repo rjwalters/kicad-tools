@@ -50,13 +50,12 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# #9548: this suite's subject vets its write target (`forge may-write`)
-# first; that decision is not what this suite tests (test-write-scope.sh does),
-# and without this the outcome would depend on the host's loom-daemon.
-WS_STUB_DIR="$(mktemp -d)"
-# shellcheck source=lib/write-scope-stub.sh
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/write-scope-stub.sh"
-write_scope_allow_all "$WS_STUB_DIR"
+# #9548: the breadcrumb comment is vetted (`loom_write_repo`). The cases that
+# drive it through `gh` (35, 38, 44) run from a sandbox registered as
+# owner/repo (write_scope_register, inside their subshell); every other sandbox
+# has no origin, so the real gate refuses its comment and no `gh` is reached.
+# shellcheck source=lib/write-scope-fixture.sh
+source "$SCRIPT_DIR/lib/write-scope-fixture.sh"
 HELPERS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SCRIPT="$HELPERS_DIR/check-main-clean.sh"
 # #11075: --quarantine asks `loom-daemon stashes build-trees` which cargo build
@@ -841,7 +840,7 @@ echo "def leaked(): return 1" > "$REPO/leaked_module.py"
 GHDIR=$(mktemp -d)
 make_gh_shim "$GHDIR" success
 
-out=$( cd "$REPO" && PATH="$GHDIR:$PATH" "$SCRIPT" --baseline "$SNAP" --quarantine \
+out=$( write_scope_register "$REPO" owner/repo && cd "$REPO" && PATH="$GHDIR:$PATH" "$SCRIPT" --baseline "$SNAP" --quarantine \
         --label "run=RUNID-COMMENT issue=9001" 2>&1 ); RC=$?
 
 GH_ARGS=$(cat "$GHDIR/gh-args" 2>/dev/null || echo "")
@@ -912,7 +911,7 @@ printf 'original tracked content\ncontaminating edit\n' > "$REPO/tracked_source.
 GHDIR=$(mktemp -d)
 make_gh_shim "$GHDIR" fail
 
-out=$( cd "$REPO" && PATH="$GHDIR:$PATH" "$SCRIPT" --baseline "$SNAP" --quarantine \
+out=$( write_scope_register "$REPO" owner/repo && cd "$REPO" && PATH="$GHDIR:$PATH" "$SCRIPT" --baseline "$SNAP" --quarantine \
         --label "run=RUNID-GHFAIL issue=9003" 2>&1 ); RC=$?
 
 if [[ "$RC" -eq 4 ]] \
@@ -1028,7 +1027,7 @@ printf 'original tracked content\ncontaminating edit\n' > "$REPO/tracked_source.
 GHDIR=$(mktemp -d)
 make_gh_shim "$GHDIR" success
 
-out1=$( cd "$REPO" && PATH="$GHDIR:$PATH" "$SCRIPT" --baseline "$SNAP" --quarantine \
+out1=$( write_scope_register "$REPO" owner/repo && cd "$REPO" && PATH="$GHDIR:$PATH" "$SCRIPT" --baseline "$SNAP" --quarantine \
         --label "run=RUNID-HOSTLEAK1 issue=9005" 2>&1 ); RC1=$?
 BODY1=$(cat "$GHDIR/gh-body" 2>/dev/null || echo "")
 
@@ -1037,7 +1036,7 @@ RAW_HOST=$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo "")
 # Run a second quarantine (fresh contamination) to confirm the redacted
 # identifier is stable across invocations on the same host.
 printf 'original tracked content\nsecond contaminating edit\n' > "$REPO/tracked_source.py"
-out2=$( cd "$REPO" && PATH="$GHDIR:$PATH" "$SCRIPT" --baseline "$SNAP" --quarantine \
+out2=$( write_scope_register "$REPO" owner/repo && cd "$REPO" && PATH="$GHDIR:$PATH" "$SCRIPT" --baseline "$SNAP" --quarantine \
         --label "run=RUNID-HOSTLEAK2 issue=9005" 2>&1 ); RC2=$?
 BODY2=$(cat "$GHDIR/gh-body" 2>/dev/null || echo "")
 

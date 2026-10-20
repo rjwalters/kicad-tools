@@ -7,10 +7,10 @@ Provides unified commands for symbol and footprint library operations:
     kct lib list [--symbols|--footprints]  - List available libraries
     kct lib symbol-info <lib> <name>    - Show symbol details
     kct lib footprint-info <lib> <name> - Show footprint details
-    kct lib create-symbol-lib <path>    - Create new symbol library (NYI)
-    kct lib create-footprint-lib <path> - Create new footprint library (NYI)
-    kct lib generate-footprint <lib> <type> [options]  - Generate parametric footprint (NYI)
-    kct lib export <path> [--format]    - Export to JSON (NYI)
+    kct lib create-symbol-lib <path> [--force]     - Create new symbol library
+    kct lib create-footprint-lib <path> [--force]  - Create new footprint library (.pretty)
+    kct lib generate-footprint <lib> <type> [options]  - Generate parametric footprint
+    kct lib export <path> [--format]    - Export to JSON
 """
 
 from __future__ import annotations
@@ -276,98 +276,195 @@ def _find_footprint(library: str, footprint_name: str) -> Path | None:
     return None
 
 
-#: Exit code the three placeholder ``lib`` commands return ("not implemented").
-_NOT_IMPLEMENTED_EXIT = 2
-
-
-def _report_not_implemented(
-    command: str,
-    tracking_issue: int,
-    output_format: str,
-    **fields: Any,
-) -> int:
-    """Report an unimplemented ``lib`` command in the requested format.
-
-    The three placeholder commands have no work to do, so their whole
-    contract is *"not implemented, tracked by issue N"*.  Under
-    ``--format json`` (#4674) that has to be a document rather than prose,
-    otherwise a caller cannot distinguish "unimplemented" from a crash
-    without scraping stderr.  The exit code is unchanged in both modes.
-    """
-    url = f"https://github.com/rjwalters/kicad-tools/issues/{tracking_issue}"
+def _fail(command: str, message: str, output_format: str, **fields: Any) -> int:
+    """Report a runtime/validation failure (exit 1) in the requested format."""
     if output_format == "json":
         payload: dict[str, Any] = {
             "command": command,
-            "implemented": False,
-            "error": f"{command} is not yet implemented",
-            "tracking_issue": url,
+            "implemented": True,
             "success": False,
+            "error": message,
         }
         payload.update(fields)
         emit_json(payload)
-        return _NOT_IMPLEMENTED_EXIT
-
-    print(f"Error: {command} is not yet implemented.", file=sys.stderr)
-    print(f"This feature requires: {url}")
-    return _NOT_IMPLEMENTED_EXIT
+    else:
+        print(f"Error: {message}", file=sys.stderr)
+    return 1
 
 
-def create_symbol_library(path: str, output_format: str = "text") -> int:
-    """Create a new empty symbol library.
+def _succeed(command: str, text: str, output_format: str, **fields: Any) -> int:
+    """Report success (exit 0) in the requested format."""
+    if output_format == "json":
+        payload: dict[str, Any] = {"command": command, "implemented": True, "success": True}
+        payload.update(fields)
+        emit_json(payload)
+    else:
+        print(text)
+    return 0
 
-    Note: This feature requires issue #85 (Add symbol library creation and save support).
+
+def _load_footprint_library(path: Path, output_format: str):
+    """Load a ``.pretty`` directory; parse warnings never touch JSON stdout."""
+    import contextlib
+
+    from kicad_tools.pcb.footprints import FootprintLibrary
+
+    if output_format == "json":
+        with contextlib.redirect_stdout(sys.stderr):
+            return FootprintLibrary.load(path)
+    return FootprintLibrary.load(path)
+
+
+def create_symbol_library(path: str, output_format: str = "text", force: bool = False) -> int:
+    """Create a new empty symbol library (``.kicad_sym``).
 
     Args:
-        path: Path for the new .kicad_sym file
+        path: Path for the new .kicad_sym file (suffix appended if missing)
         output_format: ``"text"`` (prose) or ``"json"`` (single document)
+        force: Overwrite an existing file
 
     Returns:
-        Exit code (2 for "not implemented")
+        Exit code (0 success, 1 failure)
     """
-    return _report_not_implemented("create-symbol-lib", 85, output_format, path=path)
+    cmd = "create-symbol-lib"
+    target = Path(path)
+    if not target.suffix:
+        target = target.with_suffix(".kicad_sym")
+
+    if target.exists() and not force:
+        return _fail(
+            cmd,
+            f"{target} already exists (use --force to overwrite)",
+            output_format,
+            path=str(target),
+        )
+    if target.is_dir():
+        return _fail(cmd, f"{target} is a directory", output_format, path=str(target))
+
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        lib = SymbolLibrary.create(str(target))
+        lib.save()
+        loaded = SymbolLibrary.load(str(target))
+    except Exception as e:
+        return _fail(cmd, f"could not create {target}: {e}", output_format, path=str(target))
+
+    return _succeed(
+        cmd,
+        f"Created symbol library: {target}",
+        output_format,
+        path=str(target),
+        symbol_count=len(loaded.symbols),
+    )
 
 
-def create_footprint_library(path: str, output_format: str = "text") -> int:
-    """Create a new empty footprint library.
+def create_footprint_library(path: str, output_format: str = "text", force: bool = False) -> int:
+    """Create a new empty footprint library (``.pretty`` directory).
 
-    Note: This feature requires issue #87 (Add FootprintLibrary class).
+    ``--force`` never deletes anything: it only permits reusing a non-empty
+    directory that already holds ``.kicad_mod`` files.
 
     Args:
-        path: Path for the new .pretty directory
+        path: Path for the new .pretty directory (suffix appended if missing)
         output_format: ``"text"`` (prose) or ``"json"`` (single document)
+        force: Allow an existing non-empty directory holding .kicad_mod files
 
     Returns:
-        Exit code (2 for "not implemented")
+        Exit code (0 success, 1 failure)
     """
-    return _report_not_implemented("create-footprint-lib", 87, output_format, path=path)
+    cmd = "create-footprint-lib"
+    target = Path(path)
+    if target.suffix != ".pretty":
+        target = target.with_name(target.name + ".pretty")
+
+    if target.exists() and not target.is_dir():
+        return _fail(
+            cmd, f"{target} exists and is not a directory", output_format, path=str(target)
+        )
+    if target.is_dir() and any(target.iterdir()):
+        if not (force and any(target.glob("*.kicad_mod"))):
+            hint = "" if force else " (--force only reuses directories that hold .kicad_mod files)"
+            return _fail(
+                cmd,
+                f"{target} already exists and is not empty{hint}",
+                output_format,
+                path=str(target),
+            )
+
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        library = _load_footprint_library(target, output_format)
+    except Exception as e:
+        return _fail(cmd, f"could not create {target}: {e}", output_format, path=str(target))
+
+    count = len(library.footprints)
+    return _succeed(
+        cmd,
+        f"Created footprint library: {target} ({count} footprint{'s' if count != 1 else ''})",
+        output_format,
+        path=str(target),
+        footprint_count=count,
+    )
 
 
 def generate_footprint(
     library: str,
     footprint_type: str,
     output_format: str = "text",
+    force: bool = False,
     **kwargs,
 ) -> int:
-    """Generate a parametric footprint.
+    """Generate a parametric footprint into a ``.pretty`` library.
 
-    Note: This feature requires issue #88 (Add footprint creation and save support).
+    Uses :func:`kicad_tools.cli.footprint_generate.build_footprint`, the same
+    function behind ``kct footprint generate``.
 
     Args:
-        library: Target library path
-        footprint_type: Footprint type (soic, qfp, chip, etc.)
+        library: Target .pretty directory (created if missing)
+        footprint_type: Footprint type (soic, qfp, qfn, chip, sot)
         output_format: ``"text"`` (prose) or ``"json"`` (single document)
-        **kwargs: Type-specific options (pins, pitch, body-width, etc.)
+        force: Overwrite an existing footprint file of the same name
+        **kwargs: Generator parameters (pins, pitch, body_width, ...)
 
     Returns:
-        Exit code (2 for "not implemented")
+        Exit code (0 success, 1 failure)
     """
-    return _report_not_implemented(
-        "generate-footprint",
-        88,
+    from kicad_tools.cli.footprint_generate import build_footprint
+
+    cmd = "generate-footprint"
+    params = {key: value for key, value in sorted(kwargs.items()) if value is not None}
+    base: dict[str, Any] = {"library": library, "type": footprint_type, "parameters": params}
+
+    try:
+        fp = build_footprint(footprint_type, params)
+    except ValueError as e:
+        return _fail(cmd, str(e), output_format, **base)
+
+    lib_path = Path(library)
+    if lib_path.suffix != ".pretty":
+        lib_path = lib_path.with_name(lib_path.name + ".pretty")
+    base["library"] = str(lib_path)
+    out = lib_path / f"{fp.name}.kicad_mod"
+    base["name"] = fp.name
+    base["path"] = str(out)
+
+    if lib_path.exists() and not lib_path.is_dir():
+        return _fail(cmd, f"{lib_path} exists and is not a directory", output_format, **base)
+    if out.exists() and not force:
+        return _fail(cmd, f"{out} already exists (use --force to overwrite)", output_format, **base)
+
+    try:
+        lib_path.mkdir(parents=True, exist_ok=True)
+        fp.save(out)
+    except Exception as e:
+        return _fail(cmd, f"could not write {out}: {e}", output_format, **base)
+
+    return _succeed(
+        cmd,
+        f"Generated footprint: {out} ({len(fp.pads)} pads)",
         output_format,
-        library=library,
-        type=footprint_type,
-        parameters={key: value for key, value in sorted(kwargs.items()) if value is not None},
+        pad_count=len(fp.pads),
+        **base,
     )
 
 
@@ -533,38 +630,57 @@ def main(argv: list[str] | None = None) -> int:
     )
     footprint_info_parser.add_argument("--pads", action="store_true", help="Show pad details")
 
-    # lib create-symbol-lib (placeholder)
+    # lib create-symbol-lib
     create_sym_parser = subparsers.add_parser(
         "create-symbol-lib",
-        help="Create new symbol library (not yet implemented)",
+        help="Create a new empty symbol library (.kicad_sym)",
     )
     create_sym_parser.add_argument("path", help="Path for new .kicad_sym file")
+    create_sym_parser.add_argument(
+        "--force", action="store_true", help="Overwrite an existing file"
+    )
     add_format_flag(create_sym_parser)
 
-    # lib create-footprint-lib (placeholder)
+    # lib create-footprint-lib
     create_fp_parser = subparsers.add_parser(
         "create-footprint-lib",
-        help="Create new footprint library (not yet implemented)",
+        help="Create a new empty footprint library (.pretty directory)",
     )
     create_fp_parser.add_argument("path", help="Path for new .pretty directory")
+    create_fp_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Reuse a non-empty directory that already holds .kicad_mod files (never deletes)",
+    )
     add_format_flag(create_fp_parser)
 
-    # lib generate-footprint (placeholder)
+    # lib generate-footprint
     generate_parser = subparsers.add_parser(
         "generate-footprint",
-        help="Generate parametric footprint (not yet implemented)",
+        help="Generate a parametric footprint into a .pretty library "
+        "(same generators as 'kct footprint generate')",
     )
-    generate_parser.add_argument("library", help="Target library path")
+    generate_parser.add_argument("library", help="Target .pretty directory (created if missing)")
     generate_parser.add_argument(
         "type",
-        choices=["soic", "qfp", "qfn", "dfn", "chip", "sot"],
+        choices=["soic", "qfp", "qfn", "chip", "sot"],
         help="Footprint type",
     )
-    generate_parser.add_argument("--pins", type=int, help="Number of pins")
+    generate_parser.add_argument("--pins", type=int, help="Number of pins (soic/qfp/qfn)")
     generate_parser.add_argument("--pitch", type=float, help="Pin pitch in mm")
-    generate_parser.add_argument("--body-width", type=float, help="Body width in mm")
-    generate_parser.add_argument("--body-size", type=float, help="Body size (square) in mm")
-    generate_parser.add_argument("--prefix", help="Footprint name prefix")
+    generate_parser.add_argument("--body-width", type=float, help="Body width in mm (soic)")
+    generate_parser.add_argument("--body-length", type=float, help="Body length in mm (soic)")
+    generate_parser.add_argument(
+        "--body-size", type=float, help="Body size (square) in mm (qfp/qfn)"
+    )
+    generate_parser.add_argument("--exposed-pad", type=float, help="Exposed pad size in mm (qfn)")
+    generate_parser.add_argument("--size", help="Imperial size code, e.g. 0402 (chip)")
+    generate_parser.add_argument("--variant", help="Package variant, e.g. SOT-23 (sot)")
+    generate_parser.add_argument("--prefix", help="Component prefix, e.g. R (chip)")
+    generate_parser.add_argument("--name", help="Custom footprint name")
+    generate_parser.add_argument(
+        "--force", action="store_true", help="Overwrite an existing footprint of the same name"
+    )
     add_format_flag(generate_parser)
 
     # lib export
@@ -632,21 +748,27 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     elif args.lib_command == "create-symbol-lib":
-        return create_symbol_library(args.path, args.format)
+        return create_symbol_library(args.path, args.format, args.force)
 
     elif args.lib_command == "create-footprint-lib":
-        return create_footprint_library(args.path, args.format)
+        return create_footprint_library(args.path, args.format, args.force)
 
     elif args.lib_command == "generate-footprint":
         return generate_footprint(
             args.library,
             args.type,
             args.format,
+            args.force,
             pins=args.pins,
             pitch=args.pitch,
             body_width=args.body_width,
+            body_length=args.body_length,
             body_size=args.body_size,
+            exposed_pad=args.exposed_pad,
+            size=args.size,
+            variant=args.variant,
             prefix=args.prefix,
+            name=args.name,
         )
 
     elif args.lib_command == "export":

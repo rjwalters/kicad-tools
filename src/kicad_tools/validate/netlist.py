@@ -44,7 +44,8 @@ class SyncIssue:
 
     Attributes:
         severity: Either "error" or "warning"
-        category: Issue category (missing_on_pcb, orphaned_on_pcb, net_mismatch, pin_mismatch)
+        category: Issue category (missing_on_pcb, orphaned_on_pcb, net_mismatch,
+            pin_mismatch, value_mismatch, footprint_mismatch)
         message: Human-readable description of the issue
         suggestion: Actionable fix suggestion
         reference: Component reference involved (e.g., "R5", "C12")
@@ -66,7 +67,14 @@ class SyncIssue:
         """Validate severity and category values."""
         if self.severity not in ("error", "warning"):
             raise ValueError(f"severity must be 'error' or 'warning', got {self.severity!r}")
-        valid_categories = ("missing_on_pcb", "orphaned_on_pcb", "net_mismatch", "pin_mismatch")
+        valid_categories = (
+            "missing_on_pcb",
+            "orphaned_on_pcb",
+            "net_mismatch",
+            "pin_mismatch",
+            "value_mismatch",
+            "footprint_mismatch",
+        )
         if self.category not in valid_categories:
             raise ValueError(f"category must be one of {valid_categories}, got {self.category!r}")
 
@@ -151,6 +159,16 @@ class SyncResult:
         """Pin-to-pad mapping issues."""
         return [i for i in self.issues if i.category == "pin_mismatch"]
 
+    @property
+    def value_mismatches(self) -> list[SyncIssue]:
+        """Different component values between schematic and PCB."""
+        return [i for i in self.issues if i.category == "value_mismatch"]
+
+    @property
+    def footprint_mismatches(self) -> list[SyncIssue]:
+        """Footprint lib IDs that differ between schematic and PCB."""
+        return [i for i in self.issues if i.category == "footprint_mismatch"]
+
     def __iter__(self):
         """Iterate over all issues."""
         return iter(self.issues)
@@ -189,6 +207,10 @@ class SyncResult:
             parts.append(f"  Net mismatches: {len(self.net_mismatches)}")
         if self.pin_mismatches:
             parts.append(f"  Pin mismatches: {len(self.pin_mismatches)}")
+        if self.value_mismatches:
+            parts.append(f"  Value mismatches: {len(self.value_mismatches)}")
+        if self.footprint_mismatches:
+            parts.append(f"  Footprint mismatches: {len(self.footprint_mismatches)}")
 
         return "\n".join(parts)
 
@@ -291,6 +313,8 @@ class NetlistValidator:
     - Pads on a different net than their schematic pin (compared by
       connectivity, so net renaming alone is not drift)
     - PCB nets carrying another schematic net's name (swapped net names)
+    - Footprint lib IDs that differ from the symbol's ``Footprint`` field,
+      library nickname included (Issue #7213)
 
     Example:
         >>> validator = NetlistValidator("project.kicad_sch", "project.kicad_pcb")
@@ -353,6 +377,9 @@ class NetlistValidator:
 
         # Check component synchronization (missing/orphaned)
         self._check_components(result)
+
+        # Check component values (schematic value vs PCB footprint value)
+        self._check_values(result)
 
         # Check net synchronization
         self._check_nets(result)
@@ -467,6 +494,104 @@ class NetlistValidator:
                 )
             )
 
+        self._check_footprint_ids(sch_refs, pcb_refs, result)
+
+    def _check_footprint_ids(
+        self,
+        sch_refs: dict[str, dict],
+        pcb_refs: dict[str, dict],
+        result: SyncResult,
+    ) -> None:
+        """Compare each placed footprint's lib ID with its symbol's.
+
+        The library nickname is part of the lib ID: kicad-cli's parity check
+        reports ``Capacitor_SMD:X`` vs ``X`` as ``footprint_symbol_mismatch``,
+        so this check no longer strips it (Issue #7213). A different package
+        or a different nickname is an error; a PCB (or schematic) side that
+        lacks the nickname entirely is the same package and only a warning.
+        """
+        from kicad_tools.footprints.library_path import compare_footprint_lib_ids
+
+        for ref in sorted(set(sch_refs) & set(pcb_refs)):
+            sch_fp = sch_refs[ref].get("footprint") or ""
+            pcb_fp = pcb_refs[ref].get("footprint") or ""
+            if not sch_fp or not pcb_fp:
+                continue
+            relation = compare_footprint_lib_ids(sch_fp, pcb_fp)
+            if relation == "match":
+                continue
+            if relation == "nickname_missing":
+                result.add(
+                    SyncIssue(
+                        severity="warning",
+                        category="footprint_mismatch",
+                        message=(
+                            f"{ref} footprint library nickname missing: "
+                            f"schematic {sch_fp}, PCB {pcb_fp}"
+                        ),
+                        suggestion=(
+                            f"Write the full lib ID {sch_fp if ':' in sch_fp else pcb_fp} "
+                            "on both sides (same package)"
+                        ),
+                        reference=ref,
+                    )
+                )
+                continue
+            result.add(
+                SyncIssue(
+                    severity="error",
+                    category="footprint_mismatch",
+                    message=f"{ref} footprint differs: schematic {sch_fp}, PCB {pcb_fp}",
+                    suggestion=f"Update {ref} on the PCB to {sch_fp} (or fix the schematic)",
+                    reference=ref,
+                )
+            )
+
+    def _check_values(self, result: SyncResult) -> None:
+        """Flag components whose value differs between schematic and PCB.
+
+        Only references present on both sides are compared, and a pair is
+        skipped when either value is empty or ``~`` (issue #7150).  Values are
+        compared with the reconciler's ``_values_equivalent`` so case,
+        whitespace, SI-magnitude and rating-suffix differences are not
+        flagged, matching what ``kct sync --apply`` would act on.  Schematic values
+        come from :meth:`_collect_schematic_refs`, so hierarchical
+        sub-sheets are covered.
+
+        Args:
+            result: SyncResult to add issues to
+        """
+        from kicad_tools.sync.reconciler import _values_equivalent
+
+        sch_refs = self._collect_schematic_refs()
+        for fp in self.pcb.footprints:
+            ref = fp.reference
+            if not ref or ref.startswith("#") or ref not in sch_refs:
+                continue
+            sch_value = (sch_refs[ref].get("value") or "").strip()
+            pcb_value = (fp.value or "").strip()
+            # "~" is KiCad's placeholder for "no value": treat it as empty.
+            if sch_value == "~":
+                sch_value = ""
+            if pcb_value == "~":
+                pcb_value = ""
+            if sch_value and pcb_value and not _values_equivalent(sch_value, pcb_value, ref):
+                result.add(
+                    SyncIssue(
+                        severity="error",
+                        category="value_mismatch",
+                        message=(
+                            f'{ref} value mismatch: schematic has "{sch_value}", '
+                            f'PCB has "{pcb_value}"'
+                        ),
+                        suggestion=(
+                            f"Update the {ref} value so both agree, or run "
+                            "`kct sync --apply` to copy the schematic value to the PCB"
+                        ),
+                        reference=ref,
+                    )
+                )
+
     def _check_nets(self, result: SyncResult) -> None:
         """Check net names and per-pad net connectivity.
 
@@ -484,27 +609,26 @@ class NetlistValidator:
         "not connected" and normalize to ``None``.  Non-plated holes are
         skipped: they carry no copper and can never be on a net.
         """
+        from kicad_tools.schema.pcb import iter_copper_pads
+
         pcb_pad_nets: dict[tuple[str, str], str | None] = {}
-        for fp in self.pcb.footprints:
+        for fp, pad in iter_copper_pads(self.pcb):
             ref = fp.reference
-            if not ref or ref.startswith("#"):
+            if not ref or ref.startswith("#") or not pad.number:
                 continue
-            for pad in fp.pads:
-                if pad.type == "np_thru_hole" or not pad.number:
-                    continue
-                name: str | None = pad.net_name or None
-                if (
-                    name is not None
-                    and name.startswith(f"unconnected-({ref}-")
-                    and name.endswith(f"-Pad{pad.number})")
-                ):
-                    name = None
-                key = (ref, pad.number)
-                # A footprint may repeat a pad number (e.g. a thermal pad
-                # split into several copper shapes).  Keep any real binding
-                # rather than letting an unbound duplicate erase it.
-                if name is not None or key not in pcb_pad_nets:
-                    pcb_pad_nets[key] = name
+            name: str | None = pad.net_name or None
+            if (
+                name is not None
+                and name.startswith(f"unconnected-({ref}-")
+                and name.endswith(f"-Pad{pad.number})")
+            ):
+                name = None
+            key = (ref, pad.number)
+            # A footprint may repeat a pad number (e.g. a thermal pad
+            # split into several copper shapes).  Keep any real binding
+            # rather than letting an unbound duplicate erase it.
+            if name is not None or key not in pcb_pad_nets:
+                pcb_pad_nets[key] = name
         return pcb_pad_nets
 
     def _schematic_pin_nets(self) -> dict[tuple[str, str], str | None] | None:

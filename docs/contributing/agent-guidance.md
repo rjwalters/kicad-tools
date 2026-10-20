@@ -77,6 +77,25 @@ suspect the auto-detection missed something (e.g. a touched build flag).
 
 See `README.md` "Fresh worktree checklist" for the full setup sequence.
 
+## Native evidence: produce it on the pinned KiCad toolchain
+
+Committed native DRC/ERC evidence (`readiness-verification/**`,
+`readiness.json`, `native-drc*.json`) must not depend on the host's KiCad
+config or release (issue #6962). Producers (`kct readiness`,
+`scripts/boards/*.py`) run kicad-cli with a scratch `KICAD_CONFIG_HOME` holding
+the pinned tables in `src/kicad_tools/data/kicad-config/10.0/`, and **refuse**
+(exit 2, nothing written) a kicad-cli other than CI's image release, or a DRC
+report with `lib_footprint_issues`. On a Mac with Homebrew KiCad, route
+through the pinned image instead of fighting the refusal:
+
+```bash
+KCT_KICAD_DOCKER=1 uv run python -m kicad_tools.cli.kicad_toolchain --check
+KCT_KICAD_DOCKER=1 uv run kct readiness boards/<board> --verify --checked-at <ISO>
+```
+
+Never "fix" a `lib_footprint_issues` refusal by ignoring the rule in a
+`.kicad_pro`; it means the environment, not the board, was checked.
+
 ## Type checks: distrust a local mypy error outside your diff
 
 `.mypy_cache/` is gitignored, so it survives `git reset --hard`,

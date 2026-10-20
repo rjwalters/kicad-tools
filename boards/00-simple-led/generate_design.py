@@ -47,6 +47,30 @@ def generate_uuid() -> str:
     return _PCB_UUIDS()
 
 
+# F.CrtYd courtyard UUIDs come from their own sequence (Issue #7204) so adding
+# the courtyards does not shift any pre-existing item's UUID.
+_CRTYD_UUIDS = UuidSequence("boards/00-simple-led/simple_led.kicad_pcb:courtyard")
+
+# F.Fab body UUIDs (Issue #7211) likewise get their own sequence.
+_FAB_UUIDS = UuidSequence("boards/00-simple-led/simple_led.kicad_pcb:fab")
+
+
+def courtyard_rect(x0: float, y0: float, x1: float, y1: float) -> str:
+    """An ``F.CrtYd`` rectangle in footprint-local coordinates (Issue #7204).
+
+    Each footprint's courtyard is the union of the stock KiCad 10 library
+    courtyard (translated into this generator's pad frame) and the pad
+    extents plus the 0.25 mm IPC-7351B nominal courtyard excess, rounded
+    outward to 0.01 mm.  Without it ``kct check`` and kicad-cli had no
+    outline to test, so courtyard overlap was never evaluated on this board.
+    """
+    return (
+        f"    (fp_rect (start {x0:.2f} {y0:.2f}) (end {x1:.2f} {y1:.2f}) "
+        f'(stroke (width 0.05) (type solid)) (fill no) (layer "F.CrtYd") '
+        f'(uuid "{_CRTYD_UUIDS()}"))'
+    )
+
+
 def create_led_schematic(output_dir: Path) -> Path:
     """
     Create a simple LED schematic.
@@ -246,6 +270,8 @@ def create_led_pcb(output_dir: Path) -> Path:
     print("Creating Simple LED PCB...")
     print("=" * 60)
     _PCB_UUIDS.reset()
+    _CRTYD_UUIDS.reset()
+    _FAB_UUIDS.reset()
 
     # Board dimensions (mm)
     BOARD_WIDTH = 25.0
@@ -357,6 +383,10 @@ def create_led_pcb(output_dir: Path) -> Path:
         pin2_num = NETS[pin2_net]
         pitch = 2.54 / 2
 
+        # Courtyard (Issue #7204): stock KiCad 10 F.CrtYd is x +-1.77,
+        # y -1.77..4.32 with pad 1 at y=0; pad 1 sits at y=-1.27 here, so the
+        # stock box becomes y -3.04..3.05.  It already contains the pads
+        # plus 0.25 mm (x +-1.10, y +-2.37).
         return f"""  (footprint "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical"
     (layer "F.Cu")
     (uuid "{generate_uuid()}")
@@ -367,6 +397,7 @@ def create_led_pcb(output_dir: Path) -> Path:
     (fp_text value "PWR" (at 0 4) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
+{courtyard_rect(-1.77, -3.04, 1.77, 3.05)}
     (pad "1" thru_hole rect (at 0 {-pitch:.3f}) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net {pin1_num} "{pin1_net}"))
     (pad "2" thru_hole oval (at 0 {pitch:.3f}) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net {pin2_num} "{pin2_net}"))
   )"""
@@ -380,6 +411,9 @@ def create_led_pcb(output_dir: Path) -> Path:
         pin2_num = NETS[pin2_net]
         pad_offset = 1.0
 
+        # Courtyard (Issue #7204): stock KiCad 10 F.CrtYd is x +-1.68,
+        # y +-0.95, but these hand-made pads reach x +-1.5, so pad extent
+        # + 0.25 mm widens x to +-1.75 (y stays at the stock +-0.95).
         return f"""  (footprint "Resistor_SMD:R_0805_2012Metric"
     (layer "F.Cu")
     (uuid "{generate_uuid()}")
@@ -390,6 +424,7 @@ def create_led_pcb(output_dir: Path) -> Path:
     (fp_text value "{value}" (at 0 1.5) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
+{courtyard_rect(-1.75, -0.95, 1.75, 0.95)}
     (pad "1" smd roundrect (at {-pad_offset} 0 0) (size 1.0 1.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {pin1_num} "{pin1_net}"))
     (pad "2" smd roundrect (at {pad_offset} 0 0) (size 1.0 1.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {pin2_num} "{pin2_net}"))
   )"""
@@ -440,6 +475,27 @@ def create_led_pcb(output_dir: Path) -> Path:
             for (x0, y0), (x1, y1) in zip(outline[:-1], outline[1:], strict=True)
         )
 
+        # Courtyard (Issue #7204): stock KiCad 10 F.CrtYd is x -1.94..4.49,
+        # y +-3.21 with pad 1 at x=0; pad 1 sits at x=-1.27 here, so the
+        # stock box becomes x -3.21..3.22.  It already contains the pads
+        # plus 0.25 mm (x +-2.42, y +-1.15).
+        # F.Fab body (Issue #7211): stock KiCad 10 outline (r = 2.5 mm circle
+        # centred on the body plus the flat closed by an arc), shifted -1.27 mm
+        # like the rest of the footprint.  Without it ``package_body_polygon``
+        # falls back to the courtyard and ``pin1_marker_obscured`` tests the
+        # silk against that box instead of the real 5 mm LED body.
+        fab_stroke = "(stroke (width 0.1) (type solid))"
+        fab = "\n".join(
+            [
+                "    (fp_line (start -2.5 -1.469694) (end -2.5 1.469694) "
+                f'{fab_stroke} (layer "F.Fab") (uuid "{_FAB_UUIDS()}"))',
+                "    (fp_arc (start -2.5 -1.469694) (mid 2.9 0) (end -2.5 1.469694) "
+                f'{fab_stroke} (layer "F.Fab") (uuid "{_FAB_UUIDS()}"))',
+                "    (fp_circle (center 0 0) (end 2.5 0) "
+                f'{fab_stroke} (fill no) (layer "F.Fab") (uuid "{_FAB_UUIDS()}"))',
+            ]
+        )
+
         return f"""  (footprint "LED_THT:LED_D5.0mm"
     (layer "F.Cu")
     (uuid "{generate_uuid()}")
@@ -451,6 +507,8 @@ def create_led_pcb(output_dir: Path) -> Path:
       (effects (font (size 1 1) (thickness 0.15)))
     )
 {silk}
+{fab}
+{courtyard_rect(-3.21, -3.21, 3.22, 3.21)}
     (pad "1" thru_hole rect (at {-pitch:.3f} 0 0) (size 1.8 1.8) (drill 0.9) (layers "*.Cu" "*.Mask") (net {cathode_num} "{cathode_net}"))
     (pad "2" thru_hole circle (at {pitch:.3f} 0 0) (size 1.8 1.8) (drill 0.9) (layers "*.Cu" "*.Mask") (net {anode_num} "{anode_net}"))
   )"""
@@ -629,6 +687,34 @@ def _rewrite_led_anode_route(pcb_path: Path, net_name: str) -> None:
 
     pcb_path.write_text(doc.to_string() + "\n")
     print(f"   LED_ANODE: deterministic route, {len(points) - 1} segment(s)")
+
+
+# Declared supply currents from project.kct (A), mapped onto nets (Issue #7206).
+# VCC is a pour-only net (no track copper to measure), so only LED_ANODE can be checked.
+AMPACITY_TARGETS_A = {"LED_ANODE": 0.01}
+
+
+def declare_ampacity_targets(output_dir: Path) -> None:
+    """Declare the spec's supply currents as ``target_ampacity`` (Issue #7206).
+
+    project.kct declares these currents; kct never infers which net carries
+    them, so the net-class-map sidecar must map them or ``kct check`` reports
+    ``ampacity: unknown``.
+    """
+    import json
+
+    # Issue #7539: runs right after route_pcb, before anything else is
+    # guaranteed to have created output_dir (a stubbed or partial route never
+    # writes the routed PCB), so create it rather than masking the
+    # route_success fast-fail gate's message with an ENOENT.
+    output_dir.mkdir(parents=True, exist_ok=True)
+    sidecar = output_dir / "net_class_map.json"
+    data = json.loads(sidecar.read_text()) if sidecar.exists() else {}
+    for net, amps in AMPACITY_TARGETS_A.items():
+        entry = data.setdefault(net, {"name": "Power", "priority": 1, "trace_width": 0.25})
+        entry["target_ampacity"] = amps
+    sidecar.write_text(json.dumps(data, indent=2))
+    print(f"   Declared target_ampacity on {', '.join(AMPACITY_TARGETS_A)}: {sidecar}")
 
 
 def route_pcb(input_path: Path, output_path: Path) -> bool:
@@ -1025,6 +1111,7 @@ def main() -> int:
         # Step 5: Route PCB
         routed_path = output_dir / "simple_led_routed.kicad_pcb"
         route_success = route_pcb(pcb_path, routed_path)
+        declare_ampacity_targets(output_dir)
 
         # Step 5.5: route_success fast-fail gate (#4066, mirrors board 03's
         # ``route_success`` gate after ``route_pcb`` in

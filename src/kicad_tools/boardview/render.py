@@ -55,6 +55,9 @@ __all__ = [
 #: Longest image side, in pixels (same value as ``mcp.tools.screenshot``).
 MAX_VISION_API_PX = 1568
 MIN_SIZE_PX = 320
+#: Smallest acceptable length, in pixels, of the board's longer drawn side.
+#: Below this the image is a caption with no readable board.
+MIN_BOARD_PX = 128
 
 VIEWS = ("overview", "net", "layers", "crop", "list")
 
@@ -534,29 +537,28 @@ def _plan(
 ) -> tuple[int, int, float, list[str]]:
     """Figure size in pixels, scale, and the wrapped title.
 
-    The title band's height depends on the figure width (wrapping) and the
-    figure width can depend on the band's height, so settle it by trying
-    successively taller bands.
+    The caption is wrapped to the widest the figure may ever be (``max_px``),
+    not to the figure's own width: the width follows from the title band's
+    height, so wrapping to it made a narrow figure wrap to more lines, a
+    taller band and a narrower figure, until the caption crowded the board
+    out (issue #7115).  The figure is widened to hold the wrapped caption.
     """
     w_mm, h_mm = box[2] - box[0], box[3] - box[1]
     m_top = _M_TOP_PANEL if panel_titles else _M_TOP_PLAIN
     chrome_w = cols * (_M_LEFT + _M_RIGHT)
-    plan: tuple[int, int, float, list[str]] | None = None
-    for n_lines in range(1, 40):
-        band = 10 + _TITLE_LINE_PX * n_lines
-        chrome_h = band + rows * (m_top + _M_BOTTOM)
-        ppm = min((max_px - chrome_w) / (cols * w_mm), (max_px - chrome_h) / (rows * h_mm))
-        if ppm <= 0:
-            break
-        fig_w = math.floor(chrome_w + cols * w_mm * ppm)
-        fig_h = math.floor(chrome_h + rows * h_mm * ppm)
-        lines = _wrap(paragraphs, int((fig_w - 16) / _TITLE_CHAR_PX))
-        plan = (fig_w, fig_h, ppm, lines)
-        if len(lines) <= n_lines:
-            break
-    if plan is None:
-        raise ValueError(f"window {w_mm:g} x {h_mm:g} mm cannot be drawn in {max_px} px")
-    return plan
+    lines = _wrap(paragraphs, int((max_px - 16) / _TITLE_CHAR_PX))
+    band = 10 + _TITLE_LINE_PX * len(lines)
+    chrome_h = band + rows * (m_top + _M_BOTTOM)
+    ppm = min((max_px - chrome_w) / (cols * w_mm), (max_px - chrome_h) / (rows * h_mm))
+    if ppm <= 0:
+        raise ValueError(
+            f"window {w_mm:g} x {h_mm:g} mm cannot be drawn in {max_px} px; raise max_size_px"
+        )
+    fig_w = math.floor(chrome_w + cols * w_mm * ppm)
+    caption_w = math.ceil(max(len(line) for line in lines) * _TITLE_CHAR_PX) + 16
+    fig_w = max(fig_w, min(max_px, caption_w))
+    fig_h = math.floor(chrome_h + rows * h_mm * ppm)
+    return fig_w, fig_h, ppm, lines
 
 
 @dataclass
@@ -589,6 +591,12 @@ def _render(
     titled = any(panel.title for panel in panels)
     fig_w, fig_h, ppm, lines = _plan(box, rows, cols, max_px, paragraphs, titled)
     w_mm, h_mm = box[2] - box[0], box[3] - box[1]
+    if max(w_mm, h_mm) * ppm < MIN_BOARD_PX:
+        raise ValueError(
+            f"max_size_px={max_px} leaves too little room for the board once the "
+            f"caption is drawn (longer side would be {max(w_mm, h_mm) * ppm:.0f} px, "
+            f"need at least {MIN_BOARD_PX}); raise max_size_px"
+        )
     m_top = _M_TOP_PANEL if titled else _M_TOP_PLAIN
     band = fig_h - rows * (m_top + _M_BOTTOM + h_mm * ppm)
 

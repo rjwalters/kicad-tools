@@ -101,6 +101,11 @@ helper takes the lease; the launched Builder still claims the issue exactly as
 a Task subagent does and its own `worktree.sh N` reuses the directory. A helper
 refusal, or an unreadable pre-launch PR snapshot, exits 78 before launch.
 
+`--base` above fixes the base at worktree time. Conflict stacking (#12759) picks
+a base later, at PR time: the Builder runs `loom-daemon stack-parent` after
+committing and, when its work conflicts with an open Loom PR, replays onto that
+PR and passes `create-pr.sh --base <branch>`. An explicit `--base` wins.
+
 ### Waiting for `worker run` (long phases, #11285)
 
 A phase can outlast the Bash tool's 120s default / 600s maximum, so a direct

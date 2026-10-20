@@ -49,7 +49,8 @@ def run_creepage_command(args) -> int:
         voltage_map_from_dict,
     )
     from kicad_tools.creepage.standards import (
-        RMS_TO_PEAK,
+        DEFAULT_INSULATION,
+        DEFAULT_OVERVOLTAGE_CATEGORY,
         StandardLookupError,
         get_standard,
     )
@@ -123,6 +124,10 @@ def run_creepage_command(args) -> int:
     working_voltage = getattr(args, "working_voltage", None)
     pollution_degree = getattr(args, "pollution_degree", None)
     material_group = getattr(args, "material_group", "IIIa")
+    overvoltage_category = (
+        getattr(args, "overvoltage_category", None) or DEFAULT_OVERVOLTAGE_CATEGORY
+    )
+    insulation = getattr(args, "insulation", None) or DEFAULT_INSULATION
 
     if standard_id is not None:
         if voltage_map is None:
@@ -150,11 +155,15 @@ def run_creepage_command(args) -> int:
                 # (working_voltage / pollution_degree were validated non-None above.)
                 assert working_voltage is not None and pollution_degree is not None
                 required_creepage_mm, creepage_prov = std.required_creepage(
-                    float(working_voltage), int(pollution_degree), material_group
+                    float(working_voltage), int(pollution_degree), material_group, insulation
                 )
-                peak_voltage = float(working_voltage) * RMS_TO_PEAK
+                # Clearance = max(F.2 at the F.1 rated impulse voltage, F.8 at
+                # the steady-state peak, PD floor) -- issue #7057.
                 required_clearance_mm, clearance_prov = std.required_clearance(
-                    peak_voltage, int(pollution_degree)
+                    float(working_voltage),
+                    int(pollution_degree),
+                    overvoltage_category,
+                    insulation,
                 )
         except StandardLookupError as e:
             # Safety-critical: fail LOUD, never emit a guessed number.
@@ -221,6 +230,8 @@ def run_creepage_command(args) -> int:
             voltage_map=voltage_map,
             standard_obj=std if voltage_map is not None else None,
             edge_voltage=edge_voltage,
+            overvoltage_category=overvoltage_category,
+            insulation=insulation,
         )
     except StandardLookupError as e:
         # A per-pair |ΔV| out of the table's range (map mode): fail LOUD, never
@@ -434,6 +445,7 @@ def _render_table_standard(report: CreepageReport, *, guard_triggered: bool = Fa
     print(f"HV creepage/clearance census  (net-class '{report.net_class}')")
     print(f"Board: {report.board}")
     print(f"Standard: {std_name} {report.standard_edition}  (--standard {report.standard})")
+    print(f"Insulation: {report.insulation}  (--insulation; assumed for the derived requirement)")
     if report.uses_voltage_map:
         # Per-net voltage mode (#4371): the requirement is derived per pair from
         # |ΔV|, so there is no single working voltage / derived requirement.
@@ -456,10 +468,14 @@ def _render_table_standard(report: CreepageReport, *, guard_triggered: bool = Fa
             f"Material group: {report.material_group}"
         )
         if report.required_creepage_mm is not None:
+            creep_factor = cp.get("insulation_factor", 1.0)
+            creep_note = (
+                f", x{creep_factor:g} {cp.get('insulation')}" if creep_factor != 1.0 else ""
+            )
             print(
                 f"Derived required creepage: {report.required_creepage_mm:.3f} mm  "
                 f"[{cp.get('table_id', '?')}, {cp.get('voltage_row_used_v', '?')} V row, "
-                f"step-up]"
+                f"step-up{creep_note}]"
             )
         if report.required_clearance_mm is not None:
             print(
@@ -467,6 +483,31 @@ def _render_table_standard(report: CreepageReport, *, guard_triggered: bool = Fa
                 f"[{clp.get('table_id', '?')}, {clp.get('governing_component', '?')}, "
                 f"altitude {clp.get('altitude_assumption', '?')}]"
             )
+            if "impulse_withstand_voltage_v" in clp:
+                u_imp = clp["impulse_withstand_voltage_v"]
+                u_req = clp.get("required_impulse_voltage_v", u_imp)
+                # Reinforced insulation (issue #7082) keys Table F.2 on the next
+                # preferred-series impulse voltage; show the step explicitly.
+                step_note = f"; reinforced step-up -> {u_req:.0f} V" if u_req != u_imp else ""
+                peak_v = clp.get("peak_voltage_v", 0.0)
+                steady_factor = clp.get("steady_state_factor", 1.0)
+                steady_v = clp.get("steady_state_voltage_v", peak_v)
+                steady_desc = (
+                    f"{steady_factor:g} x {peak_v:.0f} = {steady_v:.0f} V peak"
+                    if steady_factor != 1.0
+                    else f"{peak_v:.0f} V peak"
+                )
+                print(
+                    f"  Overvoltage category {clp.get('overvoltage_category', '?')}: "
+                    f"rated impulse {u_imp:.0f} V "
+                    f"({clp.get('impulse_table_id', '?')}{step_note}) -> "
+                    f"{clp.get('impulse_clearance_mm', 0.0):.3f} mm; steady-state "
+                    f"{steady_desc} "
+                    f"({clp.get('steady_state_table_id', '?')}) -> "
+                    f"{clp.get('steady_state_clearance_mm', 0.0):.3f} mm; "
+                    f"PD floor {clp.get('pd_floor_mm', 0.0):.3f} mm; "
+                    f"{clp.get('insulation', 'basic')} insulation"
+                )
     if report.min_mm is not None:
         print(f"Manual override (--min): {report.min_mm:.3f} mm  (stricter governs)")
     print(f"HV nets ({len(report.hv_nets)}): {', '.join(report.hv_nets)}")

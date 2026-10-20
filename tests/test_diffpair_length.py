@@ -202,7 +202,7 @@ class TestViaLengthPolicy:
     def test_via_traversal_includes_drilled_length_when_thickness_supplied(self):
         # 2-layer 1.6 mm board, P traverses F.Cu -> B.Cu via.
         # Expected via length = 1.6 * |5 - 0| / (2 - 1) = 1.6 mm.
-        # Two F.Cu segments totalling 10 mm + 1.6 mm via = 11.6 mm.
+        # Two segments totalling 10 mm + 1.58 mm via (Issue #6725) = 11.58 mm.
         dp = _make_detected_pair(p_id=1, n_id=2)
         p_route = Route(
             net=1,
@@ -223,7 +223,7 @@ class TestViaLengthPolicy:
                 )
             ],
         )
-        n_route = _make_straight_route(2, "USB_D-", 11.6)
+        n_route = _make_straight_route(2, "USB_D-", 11.58)
 
         tracker = DiffPairLengthTracker()
         tracker.record_routes([p_route, n_route], [dp], board_thickness_mm=1.6, num_copper_layers=2)
@@ -231,8 +231,8 @@ class TestViaLengthPolicy:
         lengths = tracker.get_pair_lengths(dp)
         assert lengths is not None
         l_p, l_n = lengths
-        assert abs(l_p - 11.6) < 1e-9
-        assert abs(l_n - 11.6) < 1e-9
+        assert abs(l_p - 11.58) < 1e-9
+        assert abs(l_n - 11.58) < 1e-9
         # Skew should be ~0 because we sized n_route to match.
         assert abs(tracker.get_skew(dp)) < 1e-9
 
@@ -299,7 +299,7 @@ class TestViaLengthPolicy:
             ],
         )
         # N is segments only, same total: 10 mm + via_length.
-        expected_via_mm = 1.6 * 1 / 3  # ~0.5333
+        expected_via_mm = 0.5325  # Issue #6725: F.Cu full + 0.48 + In1 half
         n_route = _make_straight_route(2, "USB_D-", 10.0 + expected_via_mm)
 
         tracker = DiffPairLengthTracker()
@@ -579,9 +579,9 @@ class TestUpdateDiffpairSkewProductionPath:
         dp = _make_detected_pair(p_id=1, n_id=2)
         tracker = router.update_diffpair_skew([dp], board_thickness_mm=1.6, num_copper_layers=2)
 
-        # P = 10 mm segments + 1.6 mm via = 11.6 mm; N = 10 mm.
-        # Skew = 1.6 mm.
-        assert abs(tracker.get_skew(dp) - 1.6) < 1e-9
+        # P = 10 mm segments + 1.58 mm via (KiCad default stackup, Issue
+        # #6725) = 11.58 mm; N = 10 mm.  Skew = 1.58 mm.
+        assert abs(tracker.get_skew(dp) - 1.58) < 1e-9
 
 
 # =============================================================================

@@ -40,6 +40,18 @@
 # The wrapper and the permission cache (LOOM_WRITE_SCOPE_CACHE_DIR) live in the
 # fixture's git dir, so its working tree stays clean,
 # and GH_REPO / LOOM_REPO are unset, since either would retarget gh.
+# LOOM_INSTALLATION_SNAPSHOT=0 makes the probe ask the wrapper, not a host's
+# cached GitHub App installation snapshot (which never lists a fixture repo, so
+# on an App-credentialed host every fixture would be refused). The gate itself
+# still runs; only that host-wide cache is bypassed.
+#
+# An explicit --repo naming another repository is admitted only when that
+# repository is the origin of a REGISTERED WORKSPACE (the daemon's registry;
+# the shell fallback never admits it). write_scope_workspaces writes an
+# isolated registry naming registered checkouts, never the host's:
+#
+#   write_scope_register "$OTHER" example/other
+#   write_scope_workspaces "$TMP/workspaces.json" "$OTHER"
 
 write_scope_register() {
   local dir="${1:?write_scope_register: checkout dir required}"
@@ -82,7 +94,24 @@ EOF
   chmod +x "$aux/gh"
   export LOOM_GH_BIN="$aux/gh"
   export LOOM_WRITE_SCOPE_CACHE_DIR="$aux/cache"
+  export LOOM_INSTALLATION_SNAPSHOT=0
   unset GH_REPO LOOM_REPO
+}
+
+# write_scope_workspaces <registry.json> <checkout>...: an isolated workspace
+# registry (LOOM_WORKSPACES_PATH) whose workspaces are the given checkouts.
+write_scope_workspaces() {
+  local file="${1:?write_scope_workspaces: registry file required}" sep="" d
+  shift
+  {
+    printf '{"version":1,"workspaces":['
+    for d in "$@"; do
+      printf '%s{"root":"%s"}' "$sep" "$(cd "$d" && pwd -P)"
+      sep=","
+    done
+    printf ']}\n'
+  } > "$file"
+  export LOOM_WORKSPACES_PATH="$file"
 }
 
 # write_scope_stub_verb_snippet: the `forge may-write` arm for a stub

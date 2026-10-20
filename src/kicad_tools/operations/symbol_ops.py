@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from kicad_tools.core.schematic_uuids import UuidMinter
+from kicad_tools.operations.wire_primitives import find_wires_at_point_with_index
 from kicad_tools.sexp import SExp, parse_string, serialize_sexp
 
 
@@ -385,27 +386,7 @@ def _find_wires_at_point(
     Returns a list of ``(wire_sexp, endpoint_index)`` tuples where
     *endpoint_index* is 0 for the start or 1 for the end of the wire.
     """
-    target_x, target_y = point
-    matching: list[tuple[SExp, int]] = []
-
-    for wire_sexp in sexp.find_all("wire"):
-        pts_node = wire_sexp.find("pts")
-        if not pts_node:
-            continue
-
-        xy_nodes = pts_node.find_all("xy")
-        if len(xy_nodes) < 2:
-            continue
-
-        for idx, xy in enumerate(xy_nodes):
-            x = xy.get_float(0) or 0.0
-            y = xy.get_float(1) or 0.0
-
-            if abs(x - target_x) <= tolerance and abs(y - target_y) <= tolerance:
-                matching.append((wire_sexp, idx))
-                break  # Don't add the same wire twice for both endpoints
-
-    return matching
+    return find_wires_at_point_with_index(sexp, point, tolerance)
 
 
 def _find_lib_symbol_sexp(sexp: SExp, lib_id: str) -> SExp | None:

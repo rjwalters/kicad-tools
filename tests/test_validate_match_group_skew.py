@@ -145,6 +145,34 @@ def _make_ddr_pcb(
 # ---------------------------------------------------------------------------
 
 
+def _members_with_via_at_midpoint(
+    names: dict[int, str], via_nets: set[int]
+) -> tuple[list[_StubSegment], list[_StubVia]]:
+    """A 10 mm F.Cu track per member; ``via_nets`` members change to B.Cu
+    through a via at the midpoint (same 10 mm of copper).
+
+    Issue #6725: kicad-cli charges a via only the span its tracks use, so a
+    via must actually join two layers to add length.
+    """
+    segs: list[_StubSegment] = []
+    vias: list[_StubVia] = []
+    for nid, name in names.items():
+        y = float(nid)
+        if nid in via_nets:
+            segs.append(_StubSegment(start=(0.0, y), end=(5.0, y), net_number=nid, net_name=name))
+            segs.append(
+                _StubSegment(
+                    start=(5.0, y), end=(10.0, y), layer="B.Cu", net_number=nid, net_name=name
+                )
+            )
+            vias.append(
+                _StubVia(position=(5.0, y), layers=["F.Cu", "B.Cu"], net_number=nid, net_name=name)
+            )
+        else:
+            segs.append(_StubSegment(start=(0.0, y), end=(10.0, y), net_number=nid, net_name=name))
+    return segs, vias
+
+
 class TestDeriveGroupSkewDataNoOp:
     """Standalone-CLI graceful no-op paths."""
 
@@ -659,7 +687,7 @@ class TestGroupSkewDataMatchesRouter:
     def _build_both_forms(
         self,
         *,
-        net_segments: dict[int, list[tuple[tuple[float, float], tuple[float, float]]]],
+        net_segments: dict[int, list[tuple]],
         net_vias_layers: dict[int, list[list[str]]] | None = None,
         net_names_map: dict[int, str] | None = None,
     ) -> tuple[_StubPCB, list[Route]]:
@@ -679,11 +707,12 @@ class TestGroupSkewDataMatchesRouter:
 
         pcb_segments: list[_StubSegment] = []
         for nid, segs in net_segments.items():
-            for start, end in segs:
+            for start, end, *layer in segs:
                 pcb_segments.append(
                     _StubSegment(
                         start=start,
                         end=end,
+                        layer=layer[0] if layer else "F.Cu",
                         net_number=nid,
                         net_name=net_names_map[nid],
                     )
@@ -722,11 +751,11 @@ class TestGroupSkewDataMatchesRouter:
                         x2=end[0],
                         y2=end[1],
                         width=0.2,
-                        layer=Layer.F_CU,
+                        layer=_layer_lookup[layer[0] if layer else "F.Cu"],
                         net=nid,
                         net_name=net_names_map[nid],
                     )
-                    for start, end in segs
+                    for start, end, *layer in segs
                 ],
                 vias=[
                     Via(
@@ -842,7 +871,9 @@ class TestGroupSkewDataMatchesRouter:
         names = {nid: f"DQ{i}" for i, nid in enumerate(net_ids)}
         pcb, routes = self._build_both_forms(
             net_segments={
-                10: [((0.0, 0.0), (10.0, 0.0))],
+                # DQ0 changes layer at the origin via (a via whose tracks use
+                # one layer only is a zero-height stub to kicad-cli, #6725).
+                10: [((-5.0, 0.0), (0.0, 0.0), "B.Cu"), ((0.0, 0.0), (5.0, 0.0))],
                 11: [((0.0, 1.0), (10.0, 1.0))],
                 12: [((0.0, 2.0), (10.0, 2.0))],
                 13: [((0.0, 3.0), (10.0, 3.0))],
@@ -878,8 +909,9 @@ class TestGroupSkewDataMatchesRouter:
             "via-traversing drift-prevention: PCB-side via length formula "
             "must produce the same result as router-side"
         )
-        # Sanity: DQ0 has +1.6mm via length -> skew = 1.6.
-        assert abs(rederived_skews["DDR_DATA"] - 1.6) < 1e-9
+        # Sanity: DQ0 has +1.58 mm via length (KiCad default stackup F.Cu->B.Cu
+        # span on a 1.6 mm board, Issue #6725) -> skew = 1.58.
+        assert abs(rederived_skews["DDR_DATA"] - 1.58) < 1e-9
 
 
 # ---------------------------------------------------------------------------
@@ -909,16 +941,7 @@ class TestDeriveGroupSkewViaContribution:
         for nid, name in names.items():
             nets[nid] = _StubNet(nid, name)
 
-        segs = [
-            _StubSegment(
-                start=(0.0, float(nid)),
-                end=(10.0, float(nid)),
-                net_number=nid,
-                net_name=names[nid],
-            )
-            for nid in names
-        ]
-        vias = [_StubVia(layers=["F.Cu", "B.Cu"], net_number=10, net_name="DQ0")]
+        segs, vias = _members_with_via_at_midpoint(names, via_nets={10})
         return _StubPCB(_nets=nets, _segments=segs, _vias=vias)
 
     def test_via_length_included_when_thickness_supplied(self):
@@ -945,10 +968,10 @@ class TestDeriveGroupSkewViaContribution:
             "via-inclusive skew regression (Issue #3915): a member with an "
             "extra full-stack via must contribute its drilled length to the skew"
         )
-        assert abs(skew_data["DDR_DATA"] - 1.6) < 1e-9
+        assert abs(skew_data["DDR_DATA"] - 1.58) < 1e-9
 
-    def test_via_length_ignored_when_thickness_none(self):
-        """Pre-fix behaviour: ``board_thickness_mm=None`` -> via contributes 0.0."""
+    def test_via_length_comes_from_board_stackup_when_thickness_none(self):
+        """Issue #6725: the stackup is the board's own, so no thickness arg is needed."""
         from kicad_tools.router.rules import NetClassRouting
         from kicad_tools.validate.match_group_skew import derive_group_skew_data
 
@@ -956,12 +979,11 @@ class TestDeriveGroupSkewViaContribution:
         net_class_map = {"DQ0": nc, "DQ1": nc, "DQ2": nc, "DQ3": nc}
 
         pcb = self._pcb_with_extra_via()
-        # board_thickness_mm defaults to None -> via-blind.
         skew_data, _, _ = derive_group_skew_data(pcb, net_class_map)
 
         assert "DDR_DATA" in skew_data
-        # All copper lengths equal; via is invisible without thickness.
-        assert skew_data["DDR_DATA"] == 0.0
+        # All copper lengths equal; the via adds KiCad's default F.Cu->B.Cu span.
+        assert abs(skew_data["DDR_DATA"] - 1.58) < 1e-9
 
 
 class TestCheckerThreadsBoardThickness:
@@ -977,20 +999,8 @@ class TestCheckerThreadsBoardThickness:
         names = {10: "DQ0", 11: "DQ1", 12: "DQ2", 13: "DQ3"}
         for nid, name in names.items():
             nets[nid] = _StubNet(nid, name)
-        segs = [
-            _StubSegment(
-                start=(0.0, float(nid)),
-                end=(10.0, float(nid)),
-                net_number=nid,
-                net_name=names[nid],
-            )
-            for nid in names
-        ]
         # DQ0 and DQ2 each carry one extra full-stack via.
-        vias = [
-            _StubVia(layers=["F.Cu", "B.Cu"], net_number=10, net_name="DQ0"),
-            _StubVia(layers=["F.Cu", "B.Cu"], net_number=12, net_name="DQ2"),
-        ]
+        segs, vias = _members_with_via_at_midpoint(names, via_nets={10, 12})
         return _StubPCB(_nets=nets, _segments=segs, _vias=vias)
 
     def test_via_skew_fires_on_four_layer_board(self):
@@ -1043,7 +1053,8 @@ class TestCheckerThreadsBoardThickness:
             pcb, net_class_map, board_thickness_mm=1.6, num_copper_layers=4
         )
 
-        assert skew_blind["DDR_DATA"] == 0.0
+        # Issue #6725: both callsites read the stackup from the board.
+        assert abs(skew_blind["DDR_DATA"] - 1.58) < 1e-9
         assert skew_seen["DDR_DATA"] > 1.5
 
 

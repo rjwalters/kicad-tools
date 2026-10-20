@@ -7,6 +7,8 @@
 (rule "Via Drill - Seeed Fusion"
   (condition "A.Type == 'via' && A.Via_Type != 'Micro'")
   (constraint hole_size (min 0.3mm)))
+(rule "Max Hole Size - Seeed Fusion"
+  (constraint hole_size (max 6.3mm)))
 (rule "Via Diameter - Seeed Fusion"
   (condition "A.Type == 'via' && A.Via_Type != 'Micro'")
   (constraint via_diameter (min 0.6mm)))
@@ -19,8 +21,8 @@
   (condition "(A.Type == 'via' || A.Type == 'pad') && B.Layer == 'Edge.Cuts'")
   (constraint physical_hole_clearance (min 0.5mm)))
 (rule "Silkscreen Width - Seeed Fusion"
-  (condition "A.Type == 'text' && A.Layer == 'F.Silkscreen'")
+  (condition "A.Type == 'text' && (A.Layer == 'F.Silkscreen' || A.Layer == 'B.Silkscreen')")
   (constraint text_thickness (min 0.15mm)))
 (rule "Silkscreen Height - Seeed Fusion"
-  (condition "A.Type == 'text' && A.Layer == 'F.Silkscreen'")
+  (condition "A.Type == 'text' && (A.Layer == 'F.Silkscreen' || A.Layer == 'B.Silkscreen')")
   (constraint text_height (min 0.8mm)))

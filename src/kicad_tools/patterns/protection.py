@@ -23,6 +23,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from kicad_tools.intent import Constraint, InterfaceCategory
+from kicad_tools.physics.ampacity import width_for_current
 
 from .constraints import (
     ConstraintPlacementRule,
@@ -237,6 +238,7 @@ class OvercurrentProtection(IntentPattern):
         topology: Literal["fuse", "ptc", "efuse"],
         max_current: float,
         trip_current: float | None = None,
+        copper_oz: float = 1.0,
     ) -> None:
         """Initialize overcurrent protection pattern.
 
@@ -247,6 +249,8 @@ class OvercurrentProtection(IntentPattern):
                 - "efuse": Electronic fuse IC
             max_current: Maximum continuous current in Amps.
             trip_current: Trip/blow current in Amps. If None, defaults to 2x max_current.
+            copper_oz: Outer copper weight in oz/ft^2 used to size current-carrying
+                traces via IPC-2221 (default 1 oz).
 
         Raises:
             ValueError: If topology is invalid or currents are non-positive.
@@ -259,6 +263,9 @@ class OvercurrentProtection(IntentPattern):
 
         self._topology = topology
         self._max_current = max_current
+        if copper_oz <= 0:
+            raise ValueError(f"copper_oz must be positive, got {copper_oz}")
+        self._copper_oz = copper_oz
         self._trip_current = trip_current or (max_current * 2)
 
     @property
@@ -344,8 +351,8 @@ class OvercurrentProtection(IntentPattern):
             List of routing rules for protection traces.
         """
         # Calculate minimum trace width for current
-        # Rule of thumb: 1 oz copper, ~0.3mm per Amp for 10C rise
-        min_width_mm = max(0.3, self._max_current * 0.3)
+        # IPC-2221 external layer, 10C rise (floor at 0.3mm)
+        min_width_mm = max(0.3, width_for_current(self._max_current, self._copper_oz))
 
         rules = [
             ConstraintRoutingRule(
@@ -417,7 +424,7 @@ class OvercurrentProtection(IntentPattern):
         constraints = []
         source = f"pattern:{self.name}"
 
-        min_width_mm = max(0.3, self._max_current * 0.3)
+        min_width_mm = max(0.3, width_for_current(self._max_current, self._copper_oz))
 
         constraints.append(
             Constraint(
@@ -457,6 +464,7 @@ class ReversePolarityProtection(IntentPattern):
         self,
         topology: Literal["diode", "pfet", "ideal_diode"],
         max_current: float,
+        copper_oz: float = 1.0,
     ) -> None:
         """Initialize reverse polarity protection pattern.
 
@@ -466,6 +474,8 @@ class ReversePolarityProtection(IntentPattern):
                 - "pfet": P-channel MOSFET (low drop, ~50mV)
                 - "ideal_diode": Controller IC (lowest drop, ~20mV)
             max_current: Maximum current in Amps.
+            copper_oz: Outer copper weight in oz/ft^2 used to size current-carrying
+                traces via IPC-2221 (default 1 oz).
 
         Raises:
             ValueError: If topology is invalid or current is non-positive.
@@ -478,6 +488,9 @@ class ReversePolarityProtection(IntentPattern):
 
         self._topology = topology
         self._max_current = max_current
+        if copper_oz <= 0:
+            raise ValueError(f"copper_oz must be positive, got {copper_oz}")
+        self._copper_oz = copper_oz
 
     @property
     def name(self) -> str:
@@ -563,7 +576,7 @@ class ReversePolarityProtection(IntentPattern):
         Returns:
             List of routing rules for protection traces.
         """
-        min_width_mm = max(0.3, self._max_current * 0.3)
+        min_width_mm = max(0.3, width_for_current(self._max_current, self._copper_oz))
 
         rules = [
             ConstraintRoutingRule(
@@ -626,7 +639,7 @@ class ReversePolarityProtection(IntentPattern):
         constraints = []
         source = f"pattern:{self.name}"
 
-        min_width_mm = max(0.3, self._max_current * 0.3)
+        min_width_mm = max(0.3, width_for_current(self._max_current, self._copper_oz))
 
         constraints.append(
             Constraint(

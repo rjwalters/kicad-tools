@@ -13,9 +13,6 @@ Example:
 
 from .cross_sheet import (
     check_cross_sheet_duplicates,
-    filter_cross_sheet_global_labels,
-    filter_cross_sheet_global_labels_objs,
-    filter_cross_sheet_power_violations,
     reattribute_wire_dangling_violations,
 )
 from .report import (
@@ -48,8 +45,5 @@ __all__ = [
     "parse_text_report",
     # Cross-sheet checks
     "check_cross_sheet_duplicates",
-    "filter_cross_sheet_global_labels",
-    "filter_cross_sheet_global_labels_objs",
-    "filter_cross_sheet_power_violations",
     "reattribute_wire_dangling_violations",
 ]

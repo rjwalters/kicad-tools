@@ -7,13 +7,16 @@ Complete reference for the `kct` (kicad-tools) command-line interface.
 ## Global Options
 
 ```bash
-kct [--help] [--version] <command> [options]
+kct [--help] [--version] [--verbose] [-q] [--units {mm,mils}] <command> [options]
 ```
 
 | Option | Description |
 |--------|-------------|
 | `--help`, `-h` | Show help message |
-| `--version`, `-V` | Show version number |
+| `--version` | Show version number |
+| `--verbose` | Show full stack traces on errors |
+| `--quiet`, `-q` | Suppress progress output (for scripting) |
+| `--units {mm,mils}` | Unit system for output; overrides config and env var |
 
 ---
 
@@ -67,6 +70,7 @@ kct [--help] [--version] <command> [options]
 | | `datasheet` | Datasheet search and PDF parsing |
 | **PCB Operations** | `route` | Autoroute a PCB |
 | | `route-auto` | Route a net with smart strategy selection |
+| | `retune-lengths` | Length-tune selected match groups / diff pairs on an already-routed PCB |
 | | `zones` | Add copper pour zones |
 | | `placement` | Detect and fix placement conflicts |
 | | `optimize-placement` | CMA-ES placement optimizer (anchor-aware) |
@@ -80,6 +84,7 @@ kct [--help] [--version] <command> [options]
 | **Advanced Analysis** | `analyze` | PCB analysis (congestion, thermal, signal integrity) |
 | | `board-metrics` | Emit a normalized `board.json` per board |
 | | `benchmark` | Run routing benchmarks and regression tests |
+| | `bench` | Run external DeepPCB-comparable board benchmarks (`bench external`; report schema in [benchmark-external-report-schema.md](../benchmark-external-report-schema.md)) |
 | | `calibrate` | Calibrate routing performance settings |
 | **Reporting** | `render` | Render per-board 2D SVGs + 3D PNGs |
 | | `screenshot` | Capture a PNG of a KiCad board or schematic |
@@ -156,22 +161,41 @@ kct sch <subcommand> <schematic> [options]
 | Subcommand | Description |
 |------------|-------------|
 | `summary` | Show schematic summary |
-| `symbols` | List symbols with details |
+| `info` | Show symbol details |
 | `labels` | List all labels |
 | `wires` | List wire segments |
 | `hierarchy` | Show sheet hierarchy |
 | `validate` | Validate schematic structure |
-| `pin-positions` | Get symbol pin positions |
-| `check-connections` | Check for unconnected pins |
-| `find-unconnected` | Find unconnected nets |
+| `pins` | Show symbol pin positions |
+| `connections` | Check pin connections using library positions |
+| `unconnected` | Find unconnected pins and issues |
 | `tidy` | Autoplace Reference/Value fields (headless; `--refs`, `--threshold`, `--dry-run`, cosmetic-only) |
 
 **Examples:**
 ```bash
 kct sch summary project.kicad_sch
 kct sch hierarchy project.kicad_sch --format json
-kct sch find-unconnected project.kicad_sch
+kct sch unconnected project.kicad_sch
 ```
+
+#### `sch validate`
+
+```bash
+kct sch validate <schematic> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--format` | Output format (`text` or `json`) |
+| `--lib-path` | Directory of `.kicad_sym` files used as a fallback for symbols missing from the schematic's embedded `lib_symbols` (embedded symbols stay authoritative); repeatable |
+| `--strict` | Exit 1 on any warning (errors and checks not run already exit 1) |
+| `--quiet`, `-q` | Only show errors |
+| `--skip` | Skip a validation check category (e.g. `swd_routing`, `i2c_pullups`); repeatable |
+
+Exit codes: `0` pass; `1` errors, a requested check that did not run, warnings
+with `--strict`, or the tool could not run. `--format json` carries top-level
+`verdict` (`pass`|`fail`|`incomplete`) and `exit_code` (#7230). See
+[Sign-off exit codes](#sign-off-exit-codes).
 
 ---
 
@@ -185,8 +209,8 @@ kct pcb <subcommand> <pcb_file> [options]
 
 | Subcommand | Description |
 |------------|-------------|
-| `query` | Query footprints and tracks |
-| `modify` | Modify PCB elements |
+| `summary`, `footprints`, `nets`, `traces`, `stackup`, `zones` | Query the board (run `kct pcb --help` for the full subcommand list) |
+| `move-footprint`, `remove-footprint` | Modify footprints by reference designator |
 | `add-zone` | Add a copper pour zone |
 | `add-3d-models` | Patch missing `(model ...)` refs; `--refresh` rewrites existing refs through the current tier chain (see [LCSC 3D models guide](../guides/lcsc-3d-models.md)) |
 | `diff` | Geometric diff of two boards: which tracks, vias, pads, zones and outline changed (see below) |
@@ -204,8 +228,8 @@ explicit `-o <path>` to write a side file and leave the input untouched.
 
 **Examples:**
 ```bash
-kct pcb query board.kicad_pcb --footprints
-kct pcb query board.kicad_pcb --tracks --net GND
+kct pcb footprints board.kicad_pcb
+kct pcb traces board.kicad_pcb --layer F.Cu
 kct pcb add-zone board.kicad_pcb --net GND --layer B.Cu     # modifies board.kicad_pcb in place
 kct pcb add-zone board.kicad_pcb --net +3.3V --layer In2.Cu # accumulates onto the GND zone
 kct pcb add-zone board.kicad_pcb --net GND --layer B.Cu -o with_zones.kicad_pcb  # side file
@@ -275,18 +299,33 @@ not touch board X's copper".
 
 ### `erc`
 
-Parse and analyze ERC (Electrical Rule Check) reports.
+Run ERC on a schematic (via kicad-cli) or parse an existing ERC report.
 
 ```bash
-kct erc <report> [options]
+kct erc <schematic.kicad_sch | report.json | report.rpt> [options]
 ```
+
+Every violation kicad-cli reports (minus KiCad exclusions) counts toward the
+exit code; the only suppression is an explicit `--filter-config`, which is
+disclosed as `Filtered:` / `summary.filtered` (Issue #7161).
 
 | Option | Description |
 |--------|-------------|
-| `--format {table,json}` | Output format (default: table) |
-| `--errors-only` | Show only errors, not warnings |
-| `--type TYPE` | Filter by error type |
-| `--sheet SHEET` | Filter by sheet name |
+| `--format {table,json,summary}` | Output format (default: table) |
+| `--errors-only` | Show only errors, not warnings (view only) |
+| `--strict` | Exit 2 when only warnings are found |
+| `--type`, `-t TYPE` | Filter by error type (view only) |
+| `--sheet SHEET` | Filter by sheet name (view only) |
+| `--by-sheet` | Group violations by sheet |
+| `--verbose`, `-v` | Show detailed violation information |
+| `--filter-config FILE` | TOML `[[erc.filters]]` rules to suppress or reclassify violations |
+| `--output`, `-o FILE` | Save the kicad-cli ERC report to this path |
+| `--keep-report` | Keep the temporary ERC report |
+| `--list-types` | List known ERC violation types and exit |
+
+Exit codes: `0` no errors, `1` errors (or failure), `2` warnings with `--strict`.
+`--format json` carries top-level `verdict` (`pass`|`fail`) and `exit_code`
+(the process exit code, #7230). See [Sign-off exit codes](#sign-off-exit-codes).
 
 **Examples:**
 ```bash
@@ -299,22 +338,88 @@ kct erc project.erc --type "unconnected"
 
 ### `drc`
 
-Parse DRC reports with optional manufacturer rule comparison.
+Run DRC on a PCB or parse a DRC report, with optional manufacturer rule comparison.
 
 ```bash
-kct drc <report> [options]
+kct drc <report|board.kicad_pcb> [options]
 ```
 
 | Option | Description |
 |--------|-------------|
-| `--format {table,json}` | Output format (default: table) |
-| `--errors-only` | Show only errors |
-| `--type TYPE` | Filter by violation type |
-| `--net NET` | Filter by net name |
-| `--mfr {jlcpcb,oshpark,pcbway,seeed}` | Apply manufacturer rules |
-| `--layers N` | Number of layers (default: 2) |
-| `--compare` | Compare manufacturer rules |
+| `--format {table,json,summary}` | Output format (default: table) |
+| `--errors-only` | Show only errors (view only; the exit code reflects all findings, #7230) |
+| `--strict` | Exit 2 when warnings are present (exit-code contract, #6898) |
+| `--allow-incomplete` | Exit 0 instead of 2 when schematic parity did NOT RUN (#7077); same meaning as `kct check --allow-incomplete` |
+| `--type TYPE`, `-t` | Filter by violation type (partial match; view only, the exit code reflects all findings) |
+| `--net NET` | Filter by net name (view only; the exit code reflects all findings) |
+| `--category`, `-c {placement,routing,manufacturing,connectivity,cosmetic}` | Filter by root-cause category (view only; the exit code reflects all findings) |
+| `--mfr`, `-m {jlcpcb,oshpark,pcbway,seeed}` | Apply manufacturer rules |
+| `--layers N`, `-l` | Number of layers (default: 2) |
+| `--verbose`, `-v` | Show detailed violation information |
+| `--suggest`, `-s` | Show fix suggestions for each violation |
+| `--filter-config PATH` | TOML file with `[[drc.filters]]` rules to suppress or reclassify violations |
+| `--keep-report` | Keep the DRC report file after running a PCB |
+| `--output PATH`, `-o` | Save the DRC report to this path |
 | `--waivers PATH` | Path to a `.kct_waivers.json` sidecar (schema v2 — the same file `kct check --waivers` reads) waiving cross-gate findings by KiCad rule type + component-ref set (#4691). Auto-discovered next to the input when omitted. Not applied in `--mfr` mode |
+
+The standalone `kicad-drc` also has `--rules` and `--compare`; they are
+deprecated (a stderr pointer is printed) in favour of `kct mfr rules` and
+`kct mfr compare`, and are intentionally not on `kct drc` (#6898).
+
+**Schematic parity (#7077)**
+
+`kct drc board.kicad_pcb` runs kicad-cli with `--schematic-parity` and prints
+one status line, also in `summary`, `--mfr` and `kicad-drc-summary` output:
+
+- `Schematic parity: PASSED` — parity ran and found nothing unwaived.
+- `Schematic parity: FAILED (N issue(s))` — findings listed in a
+  `SCHEMATIC PARITY` section, kept out of the geometric violation counts.
+- `Schematic parity: NOT RUN (<reason>)` — kicad-cli could not fetch the
+  schematic netlist (no schematic next to the board, or one that is not fully
+  annotated), or a `.json`/`.rpt` report has no parity findings: an empty
+  `schematic_parity` array cannot tell "clean" from "never ran".
+
+Exit codes: error-severity parity findings exit 1; warning-severity ones exit
+2 under `--strict`; NOT RUN exits 2 (the verdict reads `DRC INCOMPLETE`, never
+`DRC PASSED`) unless `--allow-incomplete` is given. Errors take precedence.
+`--mfr` uses the same exit gate (#7170, see below). `--format json` (plain
+and `--mfr`) carries top-level `verdict` (`pass`|`fail`|`incomplete`) and
+`exit_code` (the process exit code, #7230); under `--allow-incomplete` a NOT
+RUN parity is `verdict: "incomplete"` with `exit_code: 0`. It also adds a
+`schematic_parity` object (`status`, `checked`, `reason`, `error_count`,
+`warning_count`, `issues`), a derived `schematic_parity_checked` alias, and
+`parity_errors`/`parity_warnings` in `summary`. Waiver entries match parity
+findings the same way they match DRC findings.
+
+**Manufacturer check (`--mfr`, #7170)**
+
+`--mfr <fab>` gives every kicad-cli violation exactly one verdict:
+
+- **compatible** — the fab's limit is met (e.g. a board rule stricter than the
+  fab's); the kicad-cli finding is cleared.
+- **incompatible** — the measured value breaches the fab's limit
+  (`clearance`, `track_width`, `copper_edge_clearance`, `annular_width`,
+  `via_diameter`, `hole_to_hole`, `drill_out_of_range` min *and* max,
+  `solder_mask_bridge`; `shorting_items` always fails). Blocking whatever
+  kicad-cli's severity was.
+- **not checked** — kct has no fab-limit check for the type (`hole_clearance`,
+  `via_dangling`, `courtyards_overlap`, `silk_*`, …). Listed in a
+  `NOT CHECKED against <fab> limits: N (errors E, warnings W)` section with a
+  per-type breakdown; kicad-cli's severity stands.
+
+The summary line reads `Compatible: a, Incompatible: b, Not checked: c`
+(`a + b + c` = every violation). Exit codes are the plain-mode ones: 1 when any
+incompatible or not-checked error (or parity error) remains; 2 for warnings
+under `--strict`, or when schematic parity did NOT RUN without
+`--allow-incomplete` (so `kct drc report.json --mfr X` exits 2 unless
+`--allow-incomplete`, like plain `kct drc report.json`); else 0.
+`--mfr --format json` prints `{manufacturer, layers, source, summary: {total,
+checked, compatible, incompatible, not_checked, not_checked_errors,
+not_checked_warnings, not_checked_by_type, parity_errors, parity_warnings},
+checks: [{type_str, severity, result, rule_name, message, violation_message,
+manufacturer_limit, actual_value}], schematic_parity, schematic_parity_checked,
+verdict, exit_code}`; `checked + not_checked == total`. Other `--format` values print
+the table.
 
 **Waivers (`--waivers`, #4691)**
 
@@ -358,9 +463,10 @@ The `kicad-cli pcb drc` cross-gate reads the same schema-v2 sidecar as
 **Examples:**
 ```bash
 kct drc board.drc
-kct drc board.kicad_pcb --mfr jlcpcb
-kct drc board-drc.json --waivers .kct_waivers.json   # 0 unwaived errors gate
-kct drc --compare  # Show all manufacturer rules
+kct drc board.kicad_pcb --mfr jlcpcb              # exit 1 on any fab breach or not-checked error
+kct drc board-drc.json --mfr jlcpcb --format json --allow-incomplete
+kct drc board-drc.json --waivers .kct_waivers.json --allow-incomplete   # 0 unwaived errors gate
+kct mfr compare  # Show all manufacturer rules side by side
 ```
 
 ---
@@ -373,6 +479,16 @@ Pure Python DRC (no kicad-cli required).
 kct check <pcb_file> [options]
 ```
 
+`kct check --format json` carries top-level `verdict` (`pass`|`fail`|`incomplete`)
+and `exit_code` (the process exit code). `summary.passed` is DRC-only: it can be
+`true` while `verdict` is `incomplete` (#7230).
+
+Exit codes: `0` pass (or `incomplete` with `--allow-incomplete`); `2` the check
+ran and the board fails (DRC errors, warnings with `--strict`, an ERC/LVS/manifest
+sub-check FAILED) or is incomplete (a sub-check NOT RUN); `1` the tool could not
+run (file not found, parse error, usage error). `--drc-only` has no incomplete
+state. See [Sign-off exit codes](#sign-off-exit-codes).
+
 | Option | Description |
 |--------|-------------|
 | `--format {table,json,summary}` | Output format |
@@ -380,6 +496,7 @@ kct check <pcb_file> [options]
 | `--refill-zones` | Refill zone fills in-place via `kicad-cli pcb drc --refill-zones --save-board` before checking (mutates the board file; kills stale-fill clearance false positives, #4113) |
 | `--waivers PATH` | Path to a general `.kct_waivers.json` sidecar (schema v2) waiving findings for any rule (#4417). Auto-discovered next to the board when omitted |
 | `--courtyard-waivers PATH` | Path to a `.courtyard_waivers.json` sidecar waiving specific courtyard-overlap pairs (#4137). Auto-discovered next to the board when omitted |
+| `--require-routing-policy` | Opt-in gate for the `routing_policy` category (#6044): every sensitive net class in the net-class map (`length_critical`, `noise_sensitive`, `length_match_group` or `diffpair_partner` set; pour nets exempt) whose routed nets declare neither `max_vias_per_net` nor `length_constraint.max_length` is an error. Needs a net-class map; without one, or with `routing_policy` deselected, the command exits 1 with a usage error. See [Routing policies](../guides/drc-and-validation.md#cli-routing-policies-routing_policy) |
 | `--max-fragment-fraction F` | Opt-in routing-quality gate (#4651): fail (exit 2) when the share of copper segments shorter than 0.25 mm exceeds `F` (0.0–1.0; equal passes). Default: unset (advisory metrics only) |
 | `--max-staircase-fraction F` | Opt-in routing-quality gate (#4651): fail (exit 2) when the share of short H/V staircase steps exceeds `F` (0.0–1.0; equal passes). Default: unset (advisory metrics only) |
 
@@ -399,10 +516,52 @@ Validate schematic-to-PCB synchronization.
 kct validate --sync <schematic> <pcb>
 ```
 
+`--errors-only` is a view filter: the exit code (1 on errors, 2 on warnings
+with `--strict`) reflects all findings, and the hidden counts are reported in
+`summary.hidden_by_view_filter` (#7230).
+
+Exit codes: `0` in sync (warnings allowed without `--strict`), `1` errors (or
+the tool could not run), `2` warnings with `--strict`. `--format json` carries
+top-level `verdict` (`pass`|`fail`) and `exit_code` (#7230). See
+[Sign-off exit codes](#sign-off-exit-codes).
+
 **Examples:**
 ```bash
 kct validate --sync project.kicad_sch board.kicad_pcb
 ```
+
+---
+
+### `audit`
+
+Manufacturing readiness audit: ERC, DRC (internal engine plus kicad-cli
+geometric DRC), schematic-PCB sync, connectivity, manufacturer compatibility,
+HV isolation and a cost estimate, rolled up into one verdict.
+
+```bash
+kct audit <project.kicad_pro | board.kicad_pcb> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--format {table,json,summary}` | Output format (default: table) |
+| `--mfr`, `-m MFR` | Target manufacturer (default: the board's `project.kct` `target_fab`, else `jlcpcb`) |
+| `--layers N`, `-l` | Layer count (auto-detected by default) |
+| `--copper OZ`, `-c` | Copper weight in oz (default: 1.0) |
+| `--quantity N`, `-q` | Quantity for the cost estimate (default: 5) |
+| `--skip-erc` | Skip ERC (PCB-only audits) |
+| `--pcb PATH` | Override the auto-detected PCB path |
+| `--strict` | Exit 2 on a `warning` verdict |
+| `--net-class-map PATH` | Net-class sidecar (enables the diff-pair DRC rules) |
+| `--hv-*` | HV isolation (creepage/clearance) audit; see `kct audit --help` |
+
+The verdict is `ready`, `warning` (review recommended, including a gate that
+could not verify) or `not_ready`. Exit codes: `0` `ready` (or `warning` without
+`--strict`); `2` `not_ready`, or `warning` with `--strict`; `1` the tool could
+not run (file not found, wrong file type, audit crash). `--format json` keeps
+the top-level `verdict` (`ready`|`warning`|`not_ready`) and adds `gate_verdict`
+(`pass`|`fail`) and `exit_code`, the process exit code (#7230). See
+[Sign-off exit codes](#sign-off-exit-codes).
 
 ---
 
@@ -444,15 +603,20 @@ kct mfr <subcommand> [options]
 
 | Subcommand | Description |
 |------------|-------------|
+| `list` | List available manufacturers |
+| `info` | Show manufacturer details |
 | `rules` | Show manufacturer design rules |
-| `compare` | Compare multiple manufacturers |
-| `dru` | Generate KiCad DRU file |
+| `compare` | Compare all manufacturers side by side |
+| `apply-rules` | Apply manufacturer design rules to project/PCB |
+| `validate` | Validate PCB against manufacturer rules with the kct DRC engine (no kicad-cli; `kct drc --mfr` is the kicad-cli path) |
+| `export-dru` | Export manufacturer rules as a KiCad DRU file |
+| `import-dru` | Parse and display a KiCad design rules file |
 
 **Examples:**
 ```bash
 kct mfr rules jlcpcb
-kct mfr compare jlcpcb oshpark
-kct mfr dru jlcpcb -o jlcpcb.dru
+kct mfr compare --layers 4
+kct mfr export-dru jlcpcb -o jlcpcb.dru
 ```
 
 ---
@@ -476,9 +640,11 @@ usage: kicad-tools fleet status [-h] [--boards-dir FLEET_BOARDS_DIR]
 | `--include-stale` | (Reserved) treat stale artifacts as not shippable |
 | `--pattern GLOB` | Glob to identify the routed PCB inside `output/` (default: `*_routed.kicad_pcb`) |
 
-Each board is scored on net completion, DRC status, and presence of the
-required manufacturing artifacts (gerbers, BOM, CPL). A board is "ship-ready"
-when every gate is green; otherwise the row lists the first blocker. The
+Each board is scored on net completion, DRC status, presence of the
+required manufacturing artifacts (gerbers, BOM, CPL), and open known defects
+recorded in `output/readiness.json` (a `known defect #N` blocker; ready boards
+with only disclosed exceptions/advisories show `YES*` / `known: #N`). A board
+is "ship-ready" when every gate is green; otherwise the row lists the first blocker. The
 table view summarises one board per line; `--format json` emits the full
 per-board breakdown for downstream tooling.
 
@@ -530,7 +696,9 @@ kct readiness <board-dir|board.kicad_pcb> [options]
 | `--project-root DIR` | Ancestor of the board directory that bounds where out-of-directory dependencies (a schematic hierarchy, sibling `symbols/` libraries referenced as `${KIPRJMOD}/../...`) may be collected from. Only referenced files are staged, hashed (`external_inputs` in `readiness.json`) and archived, root-relative, in `kicad_project.zip`; anything outside it, missing, symlink-escaping or a whole ancestor directory is refused. |
 | `--net-class-map PATH` | Net-class map sidecar (auto-discovered by default) |
 | `--ack-warnings RULES` | Comma-separated `rule_id`s whose assembly-affecting warnings are explicitly accepted |
-| `--include-tht` | Accept through-hole parts in the CPL (excluded by default) |
+| `--known-issue N:SUMMARY:KIND` | Record an open issue (repeatable; KIND `defect`, `exception` or `advisory`, optional `:rule@pad,...` warning-identity allowance, e.g. `:via_at_pad_edge@R3-2`; `!rule@x/y` names one `kct check` error (rule + location in mm, recorded as `{rule, at: [x, y]}` rounded to 0.01) an `exception` accounts for, and the report's errors must match the listed identities exactly, Issue #7355). An open defect makes the board `blocked`; recorded issues carry forward (Issue #7261) |
+| `--resolve-known-issue N` | Drop a recorded known issue (repeatable) |
+| `--include-tht` | Accept through-hole parts in the CPL (excluded by default only for SMT-only fabs; JLCPCB includes them) |
 | `--no-archive` | Skip building `output/manufacturing.zip` |
 | `--hv-net-class NAME` | Net-class name identifying high-voltage nets (default: `HV`) |
 | `--hv-min MM` | Manual required creepage distance in mm (phase-1; stricter of this and `--hv-standard` governs) |
@@ -553,6 +721,10 @@ named `blockers`. **The command exits non-zero for anything other than `ready`
 and has no flag that produces `ready` on a partial run** — a gate that cannot
 run is a blocker, not a waiver.
 
+Exit codes: `0` `ready`; `1` `blocked` or `unverified`; `2` the command could
+not run at all (bad arguments, or the KiCad environment was refused and no
+evidence was written). See [Sign-off exit codes](#sign-off-exit-codes).
+
 `--verify` and `--generate` are mutually exclusive; `--verify` is the default.
 **A bare `kct readiness <board>` verifies an already-generated package — it
 never writes gerbers, BOM/CPL or the manifest.** Pass `--generate` explicitly
@@ -570,6 +742,34 @@ declares an `HV` net class) runs the same measured creepage/clearance audit
 (`kicad_tools.audit.check_isolation`) against the checked PCB — a description
 of the requirement is recorded in the report but can never by itself produce
 `passed`; only a thresholded census bound to that PCB and net-class-map can.
+
+**Derived clearance (IEC 60664-1, issue #7057).** With `--standard` /
+`--hv-standard`, the required clearance is
+`max(Table F.2[U_imp], Table F.8[V_rms x sqrt(2)], pollution-degree floor)`
+for basic insulation, case A, altitude <= 2000 m. `U_imp` is the Table F.1
+rated impulse withstand voltage for the working voltage (taken as the
+line-to-neutral rated voltage, stepped up to the 50/100/150/300/600/1000 V
+row) and the overvoltage category, set with
+`kct creepage --overvoltage-category {I,II,III,IV}` or
+`kct audit --hv-overvoltage-category {I,II,III,IV}` (default `II`, equipment
+fed from the fixed mains installation). For example 230 V at OVC II gives
+`U_imp` = 2500 V and 1.5 mm with basic insulation; OVC I 0.5 mm, III 3.0 mm,
+IV 5.5 mm. The `kct readiness` HV gate always uses the default `II`. Creepage
+is IEC 60664-1:2020 Table F.5 (Table F.4 in the 2007 edition).
+
+**Insulation type (issue #7082).** `kct creepage --insulation
+{basic,supplementary,reinforced}` / `kct audit --hv-insulation ...` select the
+insulation the barrier must provide; the **default is `basic`** (unchanged
+behaviour); reinforced is an explicit opt-in for the mains-to-SELV case.
+Reinforced clearance steps `U_imp` up one value of the
+Table F.1 preferred series (330, 500, 800, 1500, 2500, 4000, 6000, 8000,
+12000 V) before the Table F.2 lookup (clause 5.2.5), so 230 V at OVC II needs
+`U_imp` = 4000 V and **3.0 mm**; reinforced creepage is twice the basic
+Table F.5 value (clause 6.2). Supplementary insulation uses the basic values.
+A `U_imp` already at 12000 V has no next step and fails loud. Both CLIs print
+the insulation type they assumed, and provenance records it with the rule
+applied (the reinforced rules are marked UNVERIFIED against a controlled copy
+of the standard). The `kct readiness` HV gate uses the default `basic`.
 
 **Examples:**
 ```bash
@@ -772,15 +972,41 @@ kct lib <subcommand> [options]
 
 | Subcommand | Description |
 |------------|-------------|
-| `list` | List symbols in a library |
-| `info` | Show symbol details |
-| `create` | Create a new symbol |
+| `list` | List available KiCad libraries |
+| `symbols` | List symbols in a `.kicad_sym` library |
+| `footprints` | List footprints in a `.pretty` library directory |
+| `footprint` | Show details of a footprint file (`.kicad_mod`) |
+| `symbol-info` | Show details of a symbol by name |
+| `footprint-info` | Show details of a footprint by name |
+| `create-symbol-lib` | Create a new empty `.kicad_sym` library |
+| `create-footprint-lib` | Create a new empty `.pretty` library directory |
+| `generate-footprint` | Generate a parametric footprint into a `.pretty` library |
+| `export` | Export library to JSON |
+| `purge` | List unused symbols/footprints in project-local libraries |
 
 **Examples:**
 ```bash
-kct lib list Device.kicad_sym
-kct lib info Device.kicad_sym R
+kct lib symbols Device.kicad_sym
+kct lib symbol-info Device.kicad_sym R
+
+kct lib create-symbol-lib MyParts.kicad_sym
+kct lib create-footprint-lib MyParts.pretty
+kct lib generate-footprint MyParts.pretty soic --pins 8
+kct lib generate-footprint MyParts.pretty chip --size 0402 --prefix R --format json
 ```
+
+**Authoring commands** (`create-symbol-lib`, `create-footprint-lib`,
+`generate-footprint`) all accept `--format text|json` (JSON: one document with
+`command`, `implemented`, `success` plus `path` and either `symbol_count`,
+`footprint_count`, or `name`/`pad_count`/`parameters`). Exit codes: `0`
+success, `1` runtime/validation failure (target exists without `--force`,
+unwritable path, missing/invalid parameters), `2` usage error.
+
+| Subcommand | Behaviour |
+|------------|-----------|
+| `create-symbol-lib <path> [--force]` | Appends `.kicad_sym` if no suffix; refuses an existing file without `--force`. |
+| `create-footprint-lib <path> [--force]` | Appends `.pretty`; an empty existing directory is fine; a non-empty one is refused. `--force` only permits reusing a directory that already holds `.kicad_mod` files and never deletes anything. |
+| `generate-footprint <lib> <type> [options] [--name N] [--force]` | `type` is `soic`, `qfp`, `qfn`, `chip` or `sot`; creates the `.pretty` directory if missing and writes `<lib>/<name>.kicad_mod`. Options: `--pins`, `--pitch`, `--body-width`, `--body-length`, `--body-size`, `--exposed-pad`, `--size`, `--variant`, `--prefix`. Uses the same generator function as `kct footprint generate`. Refuses to overwrite a footprint of the same name without `--force`. |
 
 ---
 
@@ -795,8 +1021,9 @@ kct footprint <subcommand> [options]
 | Subcommand | Description |
 |------------|-------------|
 | `generate` | Generate parametric footprints |
-| `validate` | Validate footprint pad spacing |
-| `fix` | Fix footprint issues |
+
+Pad-spacing validation and repair live in the top-level
+`kct validate-footprints` and `kct fix-footprints` commands.
 
 ```bash
 kct footprint generate <type> [options]
@@ -807,17 +1034,16 @@ kct footprint generate <type> [options]
 | `soic` | SOIC packages |
 | `qfp` | QFP packages |
 | `qfn` | QFN packages |
-| `dfn` | DFN packages |
-| `bga` | BGA packages |
 | `chip` | Chip resistors/capacitors |
 | `sot` | SOT packages |
 | `dip` | DIP packages |
+| `pin-header` | Pin headers |
 
 **Examples:**
 ```bash
 kct footprint generate soic --pins 8 --pitch 1.27
-kct footprint generate qfn --pins 24 --size 4x4
-kct footprint validate MyLib.kicad_mod
+kct footprint generate qfn --pins 24 --body-size 4
+kct footprint generate --list
 ```
 
 ---
@@ -834,15 +1060,33 @@ kct parts <subcommand> [options]
 |------------|-------------|
 | `search` | Search for parts |
 | `lookup` | Get part details by LCSC number |
-| `check` | Check part availability |
+| `availability` | Check BOM part availability on LCSC for a schematic |
+| `import` | Import a part's symbol/footprint from its datasheet into a library |
+| `suggest` | Suggest LCSC part numbers for components without them |
+| `cache` | Cache management (`stats`, `clear`, `clear-expired`) |
 | `sync-catalog` | Download the jlcparts dataset (~620 MB) into the cache dir for fully-offline lookups (#4117) |
 
 **Examples:**
 ```bash
 kct parts search "STM32F103"
 kct parts lookup C8734
-kct parts check C8734 --quantity 100
+kct parts availability project.kicad_sch --quantity 100
+kct parts import STM32F103C8T6 --library my.kicad_sym --dry-run
 ```
+
+#### `parts import`
+
+| Option | Description |
+|--------|-------------|
+| `--library`, `-l` | Output symbol library (`.kicad_sym`); required |
+| `--symbol-lib` | Alias for `--library` |
+| `--footprint-lib` | Project footprint library (`.pretty` directory) |
+| `--package`, `-p` | Specific package variant (e.g. `LQFP48`) |
+| `--layout` | Pin layout style: `functional` (default), `physical` or `simple` |
+| `--dry-run` | Preview what would be imported without making changes |
+| `--interactive`, `-i` | Deprecated: not implemented; ignored |
+| `--overwrite` | Overwrite existing symbols |
+| `--format` | Output format (`text` or `json`) |
 
 ---
 
@@ -858,13 +1102,14 @@ kct datasheet <subcommand> [options]
 |------------|-------------|
 | `search` | Search for datasheets |
 | `download` | Download a datasheet |
-| `parse` | Extract pin info from PDF |
+| `convert` | Convert PDF to markdown |
+| `extract-images`, `extract-tables` | Extract images / tables from a PDF |
 
 **Examples:**
 ```bash
 kct datasheet search "ATmega328P"
 kct datasheet download "ATmega328P" -o atmega328p.pdf
-kct datasheet parse atmega328p.pdf --pins
+kct datasheet convert atmega328p.pdf -o atmega328p.md
 ```
 
 ---
@@ -1345,6 +1590,68 @@ kct route board.kicad_pcb --lint-gate --seed 7 -o routed.kicad_pcb
 
 ---
 
+### `retune-lengths`
+
+Apply the existing match-group and diff-pair skew tuners to **named** groups of
+a board that is already routed, keeping the reviewed and hand-made copper
+around them (Issue #6885). It is an adapter over `tune_match_group_v2` /
+`tune_diff_pair_skew`, not a router: the board is never rerouted.
+
+```bash
+kct retune-lengths board.kicad_pcb -o board.retuned.kicad_pcb \
+    --net-class-map output/net_class_map.json \
+    --group ADDR_BUS --diffpair USB_D+ USB_D- [--timeout 300] [--provenance p.json]
+```
+
+| Flag | Meaning |
+|------|---------|
+| `-o, --output` | Required. Must differ from the input and must not exist (it is never overwritten) |
+| `--net-class-map` | Required. The sidecar `kct check` reads; groups, pairs and tolerances come only from here |
+| `--group NAME` | Declared `length_match_group` to tune; repeatable |
+| `--diffpair POS NEG` | Detected diff pair, as its two net names; repeatable |
+| `--timeout SEC` | Wall-clock budget for the tuning step (default 300) |
+| `--provenance PATH` | Provenance JSON (default `<output>.retune.json`); must not exist |
+
+At least one `--group` or `--diffpair` is required; there is no whole-board
+fallback.
+
+**Supported input.** A routed `.kicad_pcb` with copper layers, a
+`(general (thickness ..))` or `(setup (stackup ..))`, straight `(segment ..)`
+copper on the selected nets (a selected net carrying `(arc ..)` copper is
+refused), and a net-class map that declares the selected groups or pairs.
+
+**Limits.** Each target is tuned to exactly the limit `kct check` enforces
+(`resolve_group_tolerance_mm` for groups, `resolve_pair_thresholds` for pairs);
+nothing is inferred or loosened. A diff pair reports its gate (`tolerance_mm`)
+and its tighter stretch target (`stretch_target_mm`) as two separate numbers.
+
+**Guarantees.**
+
+- The input is only read. The output is written atomically, and only after
+  every selected target is **re-measured on the written board** with the
+  checker's own functions and found within its limit; tuner success alone is
+  never trusted.
+- Only `(segment ..)`/`(via ..)` blocks of the selected nets change. Unchanged
+  selected blocks keep their original text (uuid, `locked`). Unselected nets are
+  fixed obstacles the meanders must clear. With the selected nets' copper
+  removed, the output must equal the input byte for byte, otherwise the run
+  fails with `scope_violation`.
+- New copper uses seeded uuids, so the same input and settings give identical
+  output bytes.
+- A provenance record holds input/output SHA-256, selected groups, tool
+  version, settings, per-net before/after lengths and the changed-net list.
+
+**Failure modes** (exit 1, no output file, input unchanged; `--format json` adds
+a `code`): `no_selection`, `unknown_group`, `unknown_diffpair`,
+`ambiguous_group`, `missing_rules`, `missing_stackup`, `unsupported_pcb`,
+`no_geometry`, `unmeasurable`, `output_is_input`, `output_exists`, `timeout`,
+`unattainable` (a target stayed outside its limit), `scope_violation`. A
+selection already within its limits succeeds as `already_satisfied` with an
+output identical to the input.
+
+A successful run is **not** a board sign-off: still run `kct check`,
+`kicad-cli pcb drc --refill-zones` and the LVS/manufacturing gates on the output.
+
 ### `zones`
 
 Add copper pour zones.
@@ -1412,13 +1719,13 @@ kct placement <subcommand> <pcb_file> [options]
 |------------|-------------|
 | `check` | Check for placement conflicts |
 | `optimize` | Optimize component placement |
-| `suggestions` | Get placement suggestions |
+| `suggest` | Generate placement suggestions with rationale |
 
 **Examples:**
 ```bash
 kct placement check board.kicad_pcb
 kct placement optimize board.kicad_pcb -o optimized.kicad_pcb
-kct placement suggestions board.kicad_pcb --format json
+kct placement suggest board.kicad_pcb --format json
 ```
 
 ---
@@ -1538,8 +1845,20 @@ kct optimize-traces <pcb_file> [options]
 
 | Option | Description |
 |--------|-------------|
-| `--output`, `-o` | Output file |
-| `--length-match` | Enable length matching |
+| `--output`, `-o` | Output file (default: modify in place) |
+| `--net` | Only optimize traces matching this net pattern |
+| `--no-merge` | Disable collinear merging |
+| `--no-zigzag` | Disable zigzag elimination |
+| `--no-45` | Disable 45-degree corners |
+| `--chamfer-size` | 45-degree chamfer size in mm (default: 0.5) |
+| `--verbose`, `-v` | Print a per-net table (segments and length before/after, `(rolled back)` marker) after the summary |
+| `--dry-run` | Show results without writing |
+| `--quiet`, `-q` | Suppress progress output |
+| `--drc-aware` | Roll back per-net optimizations that increase DRC violations (requires `--mfr`) |
+| `--mfr` | Target manufacturer for DRC rules (e.g. `jlcpcb`, `oshpark`); required with `--drc-aware` |
+| `--layers` | Number of copper layers for DRC checks (default: 2) |
+| `--copper` | Copper weight in oz for DRC checks (default: 1.0) |
+| `--format` | Output format (`text` or `json`); JSON shape in [machine-output.md](machine-output.md) |
 
 ---
 
@@ -1579,8 +1898,9 @@ kct mcp serve [options]
 
 | Option | Description |
 |--------|-------------|
-| `--http` | Use HTTP transport instead of stdio |
-| `--port PORT` | HTTP port (default: 8080) |
+| `--transport {stdio,http}`, `-t` | Transport mode (default: stdio) |
+| `--host HOST` | Host address for HTTP mode (default: localhost) |
+| `--port PORT`, `-p` | HTTP port (default: 8080) |
 
 **Examples:**
 ```bash
@@ -1588,7 +1908,7 @@ kct mcp serve [options]
 kct mcp serve
 
 # Start HTTP server
-kct mcp serve --http --port 8080
+kct mcp serve --transport http --port 8080
 ```
 
 See [MCP Documentation](../mcp/README.md) for configuration details.
@@ -1882,6 +2202,7 @@ kct estimate cost <pcb_file> [options]
 | `--format {table,json}` | Output format |
 | `--mfr {jlcpcb,pcbway,oshpark,seeed}` | Manufacturer |
 | `--quantity N` | Board quantity |
+| `--bom FILE` | Component BOM: a `.csv` (columns such as `Reference`/`Designator`, `Value`/`Comment`, `Footprint`/`Package`, `LCSC`, `MPN`) or a `.kicad_sch` schematic. An unreadable or empty CSV exits 1; notices go to stderr so `--format json` stdout stays one document. |
 
 ---
 
@@ -1976,21 +2297,58 @@ machine output to new commands.
 
 ## Exit Codes
 
-### Default (most commands)
+### Default (non-sign-off commands)
 
 | Code | Meaning |
 |------|---------|
 | 0 | Success |
 | 1 | Error (invalid input, file not found, etc.) |
-| 2 | Invalid arguments |
+| 2 | Invalid arguments (argparse usage error; true for every command) |
 | 130 | Interrupted (Ctrl+C) |
+
+Sign-off commands also use `2` (and some `1`) for findings, so the default
+table does not apply to them; see the next section.
+
+### Sign-off exit codes
+
+The commands that judge a board keep **two numbering ladders** (operator
+decision on #7230, option 1): the `drc` family returns `1` for "board has
+errors", while `check`/`audit` return `2` and keep `1` for "the tool could not
+run". View and format flags (`--net`, `--type`, `--category`, `--sheet`,
+`--errors-only`, `--format`) never change the exit code (#7230). Rather than
+mapping numbers per command, pipelines should read the top-level JSON
+`verdict` (`pass`|`fail`|`incomplete`; `gate_verdict` for `kct audit`, whose
+`verdict` is its own `ready`|`warning`|`not_ready`) and `exit_code`, which
+come from the same call that decides the process exit.
+
+The ladders live in `EXIT_LADDERS` in
+[`src/kicad_tools/cli/_gate.py`](../../src/kicad_tools/cli/_gate.py)
+(`gate_exit_code`); `tests/test_gate_exit_code_7230.py` checks this table
+against it.
+
+| Command | Ladder | Errors | Warnings with `--strict` | Check not run | Tool could not run |
+|---------|--------|--------|--------------------------|---------------|--------------------|
+| `kct drc` (plain and `--mfr`) | `drc` | 1 | 2 | 2 (schematic parity NOT RUN; 0 with `--allow-incomplete`) | 1 |
+| `kct erc` | `drc` | 1 | 2 | — | 1 |
+| `kct validate --sync` | `drc` | 1 | 2 | — | 1 |
+| `kct sch validate` | `sch` | 1 | 1 | 1 (a requested check did not run) | 1 |
+| `kct check` (meta rollup and `--drc-only`) | `check` | 2 | 2 | 2 (a sub-check NOT RUN; 0 with `--allow-incomplete`; none under `--drc-only`) | 1 |
+| `kct audit` | `check` | 2 | 2 | — (a could-not-verify gate reads as `warning`: 0, or 2 with `--strict`) | 1 |
+| `kct readiness` | — | 1 (`blocked`) | — | 1 (`unverified`) | 2 |
+| `kct fleet status` | — | 2 (any board not ship-ready, or no boards found) | — | — | — |
+
+Errors take precedence over warnings, and warnings under `--strict` over a
+check that did not run. Warnings without `--strict` always exit 0. `readiness`
+and `fleet` are not on `gate_exit_code` and keep their own numbering.
 
 ### `kct route` ladder
 
 The router exposes a finer-grained ladder so CI can tell partial routing
 apart from clean routing with DRC issues. Source of truth: the `exit codes:`
-epilog in [`src/kicad_tools/cli/route_cmd.py`](../../src/kicad_tools/cli/route_cmd.py),
-expanded by the `# Exit codes:` comment block — both live in `_main_impl`
+epilog in [`src/kicad_tools/cli/route_exit_codes_help.py`](../../src/kicad_tools/cli/route_exit_codes_help.py)
+(the epilog of `route_cmd._route_parser`, the only `kct route` parser, so
+`kct route --help` prints it), expanded by the
+`# Exit codes:` comment block in `route_cmd.py`'s `_main_impl`
 (`main` is a thin wrapper around it).
 
 | Code | Meaning |
@@ -2003,6 +2361,7 @@ expanded by the `# Exit codes:` comment block — both live in `_main_impl`
 | 5 | Interrupted by SIGINT with partial results saved (file on disk is valid) |
 | 8 | `--complete`: one or more previously-unconnected links remain unroutable (issue #4477) |
 | 9 | A pre-route gate fired — **detailed routing was not started**. Two opt-in gates share this code and the stderr prefix says which: `[crosstail-gate]` — `--census-advisory-gate`'s replayed crossing-tail census (`--census-advisory <report.json>`) predicts an inert crossover lattice, refused before any router or component loading, so nothing at all was spent (issue #4799; see [crosstail-census-report](crosstail-census-report.md#turning-the-prediction-into-a-gate)); `[plan-gate]` — `--plan-gate` found `overflow_report.feasible` false, refused after the report-only plan stage (board loaded, plan under 5 s) but before any detailed routing, and overridable with `--force` (issue #5510 Phase 1c; see [`routing-plan.md`](routing-plan.md)). For both, the fix layer is placement / escape planning / stackup, not the router. Neither is ever returned without its flag. |
+| 10 | **UNVERIFIED** — the run would have exited 0 (completion threshold met, no failure found), but the post-route DRC and/or the stranded-pour check (issue #5785) did not complete: the hard `--timeout` could not cover it, or kicad-cli crashed, was killed or hit its per-call DRC timeout (issue #6724). The board is saved but **not verified**: run `kct check <board> --mfr <manufacturer>` before manufacturing. Only ever replaces exit 0 — a run with a known failure keeps its own code. A stranded-pour check skipped under `--allow-stranded-pour-pads` does not count. `--format json` reports `summary.verdict` as `"unverified"` (issue #6273). |
 
 > **Consumer note (issues #4588 / #4607).** `kct build` and `kct pipeline`
 > forward `--voltage-map` (plus `--creepage-standard`, `--pollution-degree`,

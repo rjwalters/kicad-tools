@@ -12,8 +12,23 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from kicad_tools.manufacturers import get_all_manufacturer_names
+
+if TYPE_CHECKING:
+    from kicad_tools.export.manufacturing import ManufacturingConfig
+
+# Single source for ``--stackup-id`` (Issue #6881): both this standalone parser
+# and the unified ``kct export`` subparser in ``cli/parser.py`` read these, so
+# the two can no longer drift. Each ID must be accepted by
+# ``Stackup.jlcpcb_named`` (asserted in tests/test_export_cmd.py); kept as
+# literals here because importing ``kicad_tools.physics`` would pull the whole
+# physics package into CLI start-up.
+STACKUP_ID_CHOICES: tuple[str, ...] = ("JLC04161H-3313", "JLC04161H-7628")
+STACKUP_ID_HELP = (
+    "Verify this factory construction against actual PCB layers and bundle ordering metadata"
+)
 
 
 def _find_pcb_for_export(directory: Path) -> Path | None:
@@ -45,8 +60,13 @@ def _find_pcb_for_export(directory: Path) -> Path | None:
     return pcb_files[0]
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Entry point for the kct export command."""
+def build_parser() -> argparse.ArgumentParser:
+    """Build the standalone ``kct export`` argument parser.
+
+    The unified ``kct`` parser (``cli/parser.py::_add_export_parser``) mirrors
+    every option defined here; tests/test_export_cmd.py enforces that parity
+    (Issue #6881).
+    """
     parser = argparse.ArgumentParser(
         prog="kct export",
         description="Generate a complete manufacturing package.",
@@ -57,8 +77,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--stackup-id",
-        choices=["JLC04161H-3313", "JLC04161H-7628"],
-        help="Verify this factory construction against actual PCB layers and bundle ordering metadata",
+        choices=list(STACKUP_ID_CHOICES),
+        help=STACKUP_ID_HELP,
     )
     parser.add_argument(
         "--mfr",
@@ -159,7 +179,8 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help=(
             "Disable the connectivity safety floor that blocks export on net "
-            "shorts found in a pre-existing DRC report. Only for known-safe "
+            "shorts or unconnected items found in a pre-existing DRC report. "
+            "Only for known-safe "
             "workarounds -- shipping a shorted board is never safe."
         ),
     )
@@ -167,6 +188,17 @@ def main(argv: list[str] | None = None) -> int:
         "--strict-preflight",
         action="store_true",
         help="Block export when preflight checks fail (for CI; default: export proceeds with warnings)",
+    )
+    parser.add_argument(
+        "--assembly-tier",
+        default="auto",
+        choices=["auto", "economic", "standard"],
+        help=(
+            "PCBA service tier preflight judges package/pitch limits against "
+            "(Issue #7204): 'auto' (default) reports the cheapest tier the board "
+            "fits; 'economic'/'standard' select a JLCPCB tier. Ignored by fabs "
+            "with a single assembly service"
+        ),
     )
     parser.add_argument(
         "--allow-unbuildable-bom",
@@ -221,7 +253,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--include-tht",
         action="store_true",
-        help="Include through-hole components in CPL (they are excluded by default for JLCPCB)",
+        help="Include through-hole components in CPL (only needed for fabs whose CPL excludes them by default; JLCPCB includes them)",
     )
     parser.add_argument(
         "--format",
@@ -231,19 +263,108 @@ def main(argv: list[str] | None = None) -> int:
         help="Output format (default: text)",
     )
 
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Entry point for the kct export command."""
+    args = build_parser().parse_args(argv)
     return run_export(args)
+
+
+def build_manufacturing_config(
+    *,
+    output_dir: Path,
+    stackup_id: str | None = None,
+    include_bom: bool = True,
+    include_pnp: bool = True,
+    include_gerbers: bool = True,
+    include_report: bool = True,
+    include_project_zip: bool = True,
+    auto_lcsc: bool = True,
+    no_spec: bool = False,
+    merge_lcsc: bool = True,
+    bom_source: str = "schematic",
+    skip_preflight: bool = False,
+    skip_drc: bool = False,
+    skip_erc: bool = False,
+    skip_drc_floor: bool = False,
+    drc_report_path: str | None = None,
+    erc_report_path: str | None = None,
+    assembly_tier: str = "auto",
+    strict_preflight: bool = False,
+    allow_unbuildable_bom: bool = False,
+    include_tht: bool = False,
+    keep_gerber_files: bool = False,
+    vscore_layers: list[str] | None = None,
+    keep_versions: bool = False,
+    keep_build_artifacts: bool = False,
+) -> ManufacturingConfig:
+    """Build the ``PreflightConfig`` + ``ManufacturingConfig`` ``kct export`` uses.
+
+    Shared by :func:`run_export` and the MCP ``export_assembly`` tool (Issue
+    #7260) so both run the same preflight, strict-mode, unbuildable-BOM and
+    DRC-safety-floor gates.  Every default matches the ``kct export`` flag
+    default.
+    """
+    from kicad_tools.export.manufacturing import ManufacturingConfig
+    from kicad_tools.export.preflight import PreflightConfig
+
+    preflight_cfg = PreflightConfig(
+        skip_all=skip_preflight,
+        skip_drc=skip_drc,
+        skip_erc=skip_erc,
+        skip_drc_floor=skip_drc_floor,
+        drc_report_path=drc_report_path,
+        erc_report_path=erc_report_path,
+        assembly_tier=assembly_tier or "auto",
+    )
+
+    # Build PnP configuration when --include-tht is specified
+    pnp_config = None
+    if include_tht:
+        from kicad_tools.export.pnp import PnPExportConfig
+
+        pnp_config = PnPExportConfig(exclude_tht=False)
+
+    # Build Gerber configuration when --keep-gerber-files is specified
+    gerber_config = None
+    vscore = list(vscore_layers or [])
+    if keep_gerber_files or vscore:
+        from kicad_tools.export.gerber import GerberConfig
+
+        gerber_config = GerberConfig(
+            clean_after_zip=not keep_gerber_files,
+            vscore_layers=vscore,
+        )
+
+    return ManufacturingConfig(
+        stackup_id=stackup_id,
+        output_dir=output_dir,
+        include_bom=include_bom,
+        include_pnp=include_pnp,
+        include_gerbers=include_gerbers,
+        include_report=include_report,
+        include_project_zip=include_project_zip,
+        auto_lcsc=auto_lcsc,
+        no_spec=no_spec,
+        merge_lcsc=merge_lcsc,
+        bom_source=bom_source,
+        preflight=preflight_cfg,
+        strict_preflight=strict_preflight,
+        block_on_unbuildable_bom=not allow_unbuildable_bom,
+        pnp_config=pnp_config,
+        gerber_config=gerber_config,
+        latest_report_only=not keep_versions,
+        keep_build_artifacts=keep_build_artifacts,
+    )
 
 
 def run_export(args: argparse.Namespace) -> int:
     """Execute the export command with parsed arguments."""
     import json
 
-    from kicad_tools.export.manufacturing import (
-        ManufacturingConfig,
-        ManufacturingPackage,
-    )
-    from kicad_tools.export.preflight import PreflightConfig
+    from kicad_tools.export.manufacturing import ManufacturingPackage
 
     input_path = Path(args.pcb).resolve()
 
@@ -274,54 +395,31 @@ def run_export(args: argparse.Namespace) -> int:
     # Determine output directory
     output_dir = Path(args.output) if args.output else pcb_path.parent / "manufacturing"
 
-    # Build preflight configuration
-    preflight_cfg = PreflightConfig(
-        skip_all=getattr(args, "skip_preflight", False),
-        skip_drc=getattr(args, "skip_drc", False),
-        skip_erc=getattr(args, "skip_erc", False),
-        skip_drc_floor=getattr(args, "skip_drc_floor", False),
-        drc_report_path=getattr(args, "drc_report", None),
-        erc_report_path=getattr(args, "erc_report", None),
-    )
-
-    # Build PnP configuration when --include-tht is specified
-    pnp_config = None
-    if getattr(args, "include_tht", False):
-        from kicad_tools.export.pnp import PnPExportConfig
-
-        pnp_config = PnPExportConfig(exclude_tht=False)
-
-    # Build Gerber configuration when --keep-gerber-files is specified
-    gerber_config = None
-    vscore_layers = list(getattr(args, "vscore_layer", None) or [])
-    if getattr(args, "keep_gerber_files", False) or vscore_layers:
-        from kicad_tools.export.gerber import GerberConfig
-
-        gerber_config = GerberConfig(
-            clean_after_zip=not getattr(args, "keep_gerber_files", False),
-            vscore_layers=vscore_layers,
-        )
-
-    # Build configuration
-    auto_lcsc = args.auto_lcsc and not args.no_auto_lcsc
-    config = ManufacturingConfig(
-        stackup_id=getattr(args, "stackup_id", None),
+    config = build_manufacturing_config(
         output_dir=output_dir,
+        stackup_id=getattr(args, "stackup_id", None),
         include_bom=not args.no_bom,
         include_pnp=not args.no_cpl,
         include_gerbers=not args.no_gerbers,
         include_report=not args.no_report,
         include_project_zip=not args.no_project_zip,
-        auto_lcsc=auto_lcsc,
+        auto_lcsc=args.auto_lcsc and not args.no_auto_lcsc,
         no_spec=getattr(args, "no_spec", False),
         merge_lcsc=not getattr(args, "no_merge_lcsc", False),
         bom_source=getattr(args, "bom_source", "schematic"),
-        preflight=preflight_cfg,
+        skip_preflight=getattr(args, "skip_preflight", False),
+        skip_drc=getattr(args, "skip_drc", False),
+        skip_erc=getattr(args, "skip_erc", False),
+        skip_drc_floor=getattr(args, "skip_drc_floor", False),
+        drc_report_path=getattr(args, "drc_report", None),
+        erc_report_path=getattr(args, "erc_report", None),
+        assembly_tier=getattr(args, "assembly_tier", "auto") or "auto",
         strict_preflight=getattr(args, "strict_preflight", False),
-        block_on_unbuildable_bom=not getattr(args, "allow_unbuildable_bom", False),
-        pnp_config=pnp_config,
-        gerber_config=gerber_config,
-        latest_report_only=not getattr(args, "keep_versions", False),
+        allow_unbuildable_bom=getattr(args, "allow_unbuildable_bom", False),
+        include_tht=getattr(args, "include_tht", False),
+        keep_gerber_files=getattr(args, "keep_gerber_files", False),
+        vscore_layers=list(getattr(args, "vscore_layer", None) or []),
+        keep_versions=getattr(args, "keep_versions", False),
         keep_build_artifacts=getattr(args, "keep_build_artifacts", False),
     )
 
@@ -396,7 +494,8 @@ def run_export(args: argparse.Namespace) -> int:
             if result.assembly_result.pnp_path:
                 print(f"  [ok] CPL: {result.assembly_result.pnp_path.name}")
             if result.assembly_result.gerber_path:
-                print(f"  [ok] Gerbers: {result.assembly_result.gerber_path.name}")
+                gerber_rel = result.bundle_relpath(result.assembly_result.gerber_path)
+                print(f"  [ok] Gerbers: {gerber_rel}")
             # Report spec overlay results
             if result.assembly_result.spec_overlay:
                 overlay = result.assembly_result.spec_overlay

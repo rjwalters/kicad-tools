@@ -108,12 +108,23 @@ _rj_b64_decode() {
         printf '%s' "$data" | base64 -D 2>/dev/null
 }
 
-# _rj_realpath <path>
+# _rj_realpath <absolute-path>
 #
 # Best-effort canonicalization: every symlink in every component resolved.
-# Prints the resolved path, or the input unchanged when THIS host cannot
-# resolve it (the path does not exist here, or neither `readlink -f` nor
-# `realpath` is available). Never fails, never prints nothing.
+# Prints the resolved path; never fails, never prints nothing.
+#
+# INVARIANT (#12045): it never returns the input spelling for a path that is
+# itself a symlink, even when the link's target does not exist on this host.
+# Only a NON-symlink path this host cannot resolve comes back as given (minus
+# one trailing slash, which the caller strips too).
+#
+# `readlink -f` / `realpath` are trusted only on exit 0. BSD `readlink -f`
+# exits 1 on a dangling link and prints a TRUNCATED prefix (`/run` for a link
+# to `/run/podman/podman.sock`), and GNU fails too once the target's PARENT is
+# missing — so when both fail, the link chain is followed by hand with plain
+# `readlink` (at most 40 hops), canonicalizing each hop's parent directory
+# with `cd -P` when it exists. The refusal patterns then see the real target's
+# name (`*/podman.sock`), on macOS and Linux alike.
 #
 # Only the EXECUTOR host's answer is meaningful — it is the host whose docker
 # daemon resolves a bind mount's source — which is why the mount checks that
@@ -121,16 +132,16 @@ _rj_b64_decode() {
 # executor-side. The client's pre-flight copy simply cannot resolve a path it
 # cannot see, and falls back to the literal path there by design.
 _rj_realpath() {
-    local p="$1" r=""
-    if r="$(readlink -f -- "$p" 2>/dev/null)" && [[ -n "$r" ]]; then
-        printf '%s' "$r"
-        return 0
-    fi
-    if r="$(realpath -- "$p" 2>/dev/null)" && [[ -n "$r" ]]; then
-        printf '%s' "$r"
-        return 0
-    fi
-    printf '%s' "$p"
+    local p="${1%/}" r="" n=0
+    # Exit 0 only: a failing BSD `readlink -f` still prints a truncated prefix.
+    r="$(readlink -f -- "$1" 2>/dev/null)" || r="$(realpath -- "$1" 2>/dev/null)" || r=""
+    [[ -n "$r" ]] && { printf '%s' "$r"; return 0; }
+    while [[ -L "$p" ]] && ((n++ < 40)) && r="$(readlink -- "$p" 2>/dev/null)" && [[ -n "$r" ]]; do
+        [[ "$r" == /* ]] || r="${p%/*}/$r"
+        p="${r%/}"
+        r="$(cd -P -- "${p%/*}/" 2>/dev/null && pwd -P)" && p="${r%/}/${p##*/}"
+    done
+    printf '%s' "${p:-/}"
 }
 
 # loom_job_spec_defaults <spec-json>
@@ -362,7 +373,9 @@ loom_job_validate_spec() {
         # that survives to here means a genuine symlink.
         spelled="${path%/}"
         real="$(_rj_realpath "$path")"
-        [[ "$real" == "$spelled" ]] && real=""
+        # A path that is itself a link is never cleared, even when it resolves
+        # to its own spelling (a self-referential `x -> x` loop, #12045).
+        [[ "$real" == "$spelled" && ! -L "$spelled" ]] && real=""
         refused=""
         if [[ -n "$real" ]]; then
             errors+=("mount path \"$path\" is a symlink to \"$real\": the executor's docker daemon binds the RESOLVED path, so a link would break this seam's path-parity guarantee and could smuggle a refused path past the checks below — pass \"$real\" explicitly instead")

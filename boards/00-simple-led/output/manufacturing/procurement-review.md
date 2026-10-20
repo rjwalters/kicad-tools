@@ -13,6 +13,35 @@ agree on the following corrected selections and assembly treatment.
 | D1 | 333-2SURD/S530-A3 | C87271 | 5 mm through-hole LED; hand-solder, excluded from SMT CPL |
 | J1 | ZX-PZ2.54-1-2PZZ | C7501260 | 2-pin 2.54 mm through-hole header; hand-solder, excluded from SMT CPL |
 
+## CPL frame refresh — 2026-10-18
+
+Re-issuing this package for issue #7204 (every board-00 footprint now carries
+an `F.CrtYd` courtyard; copper and pads are unchanged) regenerated
+`cpl_jlcpcb.csv` in the Gerber/drill frame introduced by issue #7059 (no aux
+origin on this board, so X is sheet-absolute and Y is negated). Only the
+`Mid X`/`Mid Y` columns changed: R1 `12.5,8` → `148.5,-85.5` mm, the same
+footprint position (board origin `136,77.5` mm) expressed in the new frame.
+`Designator`, `Val`, `Package`, `Rotation` and `Layer` are byte-identical to
+the CPL reviewed above, and `bom_jlcpcb.csv` is unchanged. The identity table
+above therefore still applies. No new supplier lookup or stock check was
+performed.
+
+## Through-hole parts now in the JLCPCB BOM/CPL — 2026-10-18 (issue #7239)
+
+JLCPCB's PCBA capability page
+(https://jlcpcb.com/capabilities/pcb-assembly-capabilities, fetched
+2026-10-18) lists both Economic and Standard PCBA as "SMT/Thru-hole", so by
+operator decision (issue #7239) `kct export --mfr jlcpcb` no longer excludes
+through-hole parts. This package's `cpl_jlcpcb.csv` now also lists the
+through-hole parts D1 (5 mm LED) and J1 (2-pin header) for JLCPCB assembly; `bom_jlcpcb.csv` is unchanged (it already listed D1 and J1).
+Any statement above that these parts are hand-soldered or excluded
+from the CPL describes the earlier package and is superseded for them.
+
+**Procurement must review these through-hole rows** (part identity, JLCPCB
+through-hole assembly eligibility and stock, and placement orientation)
+before ordering assembly. This note records the export change only: it is
+not a re-review, and no new supplier lookup or stock check was performed.
+
 ## Fleet audit context
 
 The source corrections and redesigns were integrated in commit

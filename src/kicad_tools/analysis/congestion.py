@@ -478,7 +478,8 @@ class CongestionAnalyzer:
         if report.unrouted_connections > 0:
             suggestions.append(
                 f"{report.unrouted_connections} unrouted connection(s) in this area; "
-                "may need manual routing or component repositioning"
+                "try `kct placement optimize` to spread components, or re-run "
+                "`kct route` with more layers (--layers 4)"
             )
 
         # Suggest specific net routing if there are many nets
