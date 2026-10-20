@@ -130,7 +130,6 @@
   },
   "partial": {
     "layer_escalation": {
-      "_note": "#7377 B4: no failed_nets.json despite --export-failed-nets",
       "exit_code": 2,
       "copper": {
         "present": true,
@@ -155,6 +154,7 @@
       ],
       "files": [
         "fab_profile.json",
+        "failed_nets.json",
         "net_class_map.json",
         "out.access_witness.json",
         "out.kicad_dru",
@@ -166,7 +166,6 @@
       ]
     },
     "rule_relaxation": {
-      "_note": "#7377 B4: no failed_nets.json despite --export-failed-nets",
       "exit_code": 2,
       "copper": {
         "present": true,
@@ -190,6 +189,7 @@
       ],
       "files": [
         "fab_profile.json",
+        "failed_nets.json",
         "net_class_map.json",
         "out.access_witness.json",
         "out.kicad_dru",
@@ -201,7 +201,6 @@
       ]
     },
     "combined": {
-      "_note": "#7377 B4: no failed_nets.json despite --export-failed-nets",
       "exit_code": 2,
       "copper": {
         "present": true,
@@ -226,6 +225,7 @@
       ],
       "files": [
         "fab_profile.json",
+        "failed_nets.json",
         "net_class_map.json",
         "out.access_witness.json",
         "out.kicad_dru",

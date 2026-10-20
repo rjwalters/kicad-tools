@@ -53,21 +53,16 @@ the copper digests; regenerate on the branch and say why in the PR::
 
     uv run python tests/test_route_entry_path_goldens.py --update
 
-Known divergences pinned here (#7377 curator re-curation, B1-B4)
-----------------------------------------------------------------
-These are bugs, deliberately *not* fixed by the harness PR.  Each is pinned by
-an ``xfail(strict=True)`` test, so the PR that fixes one sees an XPASS and
-must remove the marker (and, for B4, regenerate the named golden entries).
+Divergences fixed by #7377 step 2 (curator re-curation, B1-B4)
+--------------------------------------------------------------
+These used to be ``xfail(strict=True)`` bugs; the tests below now assert the fix.
 
-* B1 ``--stitch-power-planes`` runs only on the single-attempt path.
-* B2 ``--progressive-clearance`` is only honoured on the single-attempt path;
-  the escalation paths ignore it silently.
-* B3 ``--bus-routing`` likewise (and the ``Bus: enabled`` banner is
-  single-path only).
-* B4 ``--export-failed-nets`` writes nothing on the three escalation paths,
-  while the default path's own PARTIAL advice tells the user to pass it.
-  Visible in the ``partial`` goldens: ``failed_nets.json`` is in ``files``
-  for ``single_attempt`` only.
+* B1 ``--stitch-power-planes`` runs on every tail (``_run_post_save_stitching``).
+* B2 ``--progressive-clearance`` and B3 ``--bus-routing`` are strategy
+  selectors only the single-attempt path honours; the escalation paths now warn
+  on stderr (``_warn_escalation_flags_ignored``) instead of ignoring them silently.
+* B4 ``--export-failed-nets`` writes ``failed_nets.json`` on every tail; visible
+  in the ``partial`` goldens' ``files``.
 
 Also visible in the goldens (curator item D7, undecided): the
 ``out_partial.*`` snapshot is written only by the single-attempt path.
@@ -356,15 +351,11 @@ def test_adaptive_rules_with_explicit_layers_is_a_usage_error(tmp_path: Path) ->
 
 
 # ---------------------------------------------------------------------------
-# Known divergences (#7377 B1-B4): strict xfails, flip when fixed
+# Former divergences (#7377 B1-B4): now fixed or warned
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("path_key", ESCALATION_PATHS)
-@pytest.mark.xfail(
-    strict=True,
-    reason="#7377 B4: --export-failed-nets writes nothing on the escalation paths",
-)
 def test_export_failed_nets_written_on_escalation_paths(path_key: str) -> None:
     """Reads the committed ``partial`` goldens (no routing).  The run passed
     ``--export-failed-nets <out>/failed_nets.json`` and failed net ``/D``."""
@@ -374,7 +365,7 @@ def test_export_failed_nets_written_on_escalation_paths(path_key: str) -> None:
 
 
 def test_export_failed_nets_written_on_single_attempt_path() -> None:
-    """Control for the B4 xfail: the single-attempt golden has the file."""
+    """Control: the single-attempt golden has the file."""
     entry = _load_goldens()["partial"]["single_attempt"]
     assert entry["exit_code"] == 2
     assert "failed_nets.json" in entry["files"]
@@ -405,7 +396,7 @@ _SINGLE_ONLY_FLAGS = {
 @requires_cpp
 @pytest.mark.parametrize("case", sorted(_SINGLE_ONLY_FLAGS))
 def test_single_only_flag_acts_on_single_attempt_path(case: str, tmp_path: Path) -> None:
-    """Control for the B1-B3 xfails: on ``--no-auto-layers`` the flag is honoured."""
+    """Control for B1-B3: on ``--no-auto-layers`` the flag is honoured."""
     flag, single_evidence, _ = _SINGLE_ONLY_FLAGS[case]
     rc, text, _ = run_route("routable", "single_attempt", tmp_path, flag)
     assert rc == 0, text[-3000:]
@@ -414,13 +405,6 @@ def test_single_only_flag_acts_on_single_attempt_path(case: str, tmp_path: Path)
 
 @requires_cpp
 @pytest.mark.parametrize("case", sorted(_SINGLE_ONLY_FLAGS))
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "#7377 B1-B3: --stitch-power-planes / --progressive-clearance / --bus-routing "
-        "are silently ignored on the default (layer-escalation) path"
-    ),
-)
 def test_single_only_flag_acts_or_warns_on_default_path(case: str, tmp_path: Path) -> None:
     flag, _, default_evidence = _SINGLE_ONLY_FLAGS[case]
     rc, text, _ = run_route("routable", "layer_escalation", tmp_path, flag)
@@ -434,9 +418,6 @@ def test_single_only_flag_acts_or_warns_on_default_path(case: str, tmp_path: Pat
 # ---------------------------------------------------------------------------
 
 _NOTES = {
-    ("partial", "layer_escalation"): "#7377 B4: no failed_nets.json despite --export-failed-nets",
-    ("partial", "rule_relaxation"): "#7377 B4: no failed_nets.json despite --export-failed-nets",
-    ("partial", "combined"): "#7377 B4: no failed_nets.json despite --export-failed-nets",
     ("partial", "single_attempt"): (
         "#7377 D7: only path writing the out_partial.* snapshot (undecided)"
     ),
