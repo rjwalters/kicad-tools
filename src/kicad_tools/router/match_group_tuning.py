@@ -314,7 +314,8 @@ def _pair_leg_bounds(
     further above its lane than that: a lane matched to the target then
     carries that trace ``lane_ceiling_mm + (L_trace - L_lane)`` and lane
     matching (the length rule for pairs) needs that much.  The tuner never
-    adds overshoot to a trace; it keeps the excess the routed skew gave it.
+    increases a trace's excess over its own lane; it keeps the excess the
+    routed skew gave it.
     ``len_p0`` / ``len_n0`` are the pair's lengths before any tuning.
     """
     if leg_ceiling_mm is None:
