@@ -35,6 +35,10 @@ from ..parts.jlcpcb_api import (
     JLCQuotaError,
 )
 from ..parts.models import Part
+from ._fsutil import is_link as _is_link
+from ._fsutil import open_nofollow as _open_nofollow
+from ._fsutil import posix_dir_flags as _posix_dir_flags
+from ._fsutil import supports_dir_fd as _supports_dir_fd
 from .bom_formats import JLCPCBBOMFormatter
 from .pnp import JLCPCBPnPFormatter
 
@@ -136,10 +140,11 @@ def _paths(values: Sequence[str]) -> list[str]:
 
 def _root_fd(root: Path) -> int:
     """Open every absolute directory component without following symlinks."""
-    fd = os.open(root.anchor, os.O_RDONLY | os.O_DIRECTORY)
+    o_directory, o_nofollow = _posix_dir_flags()
+    fd = os.open(root.anchor, os.O_RDONLY | o_directory)
     try:
         for part in root.parts[1:]:
-            nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            nxt = os.open(part, os.O_RDONLY | o_directory | o_nofollow, dir_fd=fd)
             os.close(fd)
             fd = nxt
         return fd
@@ -151,12 +156,13 @@ def _root_fd(root: Path) -> int:
 def _root(path: Path) -> Path:
     # abspath canonicalizes '.' and '..'; _root_fd rejects symlink ancestors.
     root = Path(os.path.abspath(path))
-    if not hasattr(os, "O_DIRECTORY"):
-        # Windows has no O_DIRECTORY/dir_fd: validate with lstat-style checks.
+    if not _supports_dir_fd():
+        # Windows has no O_DIRECTORY/dir_fd: validate with lstat-style checks
+        # (_is_link also refuses directory junctions).
         current = Path(root.anchor)
         for part in root.parts[1:]:
             current = current / part
-            if os.path.islink(current) or not os.path.isdir(current):
+            if _is_link(current) or not os.path.isdir(current):
                 raise SubmissionError("Root must be an existing directory without symlinks")
         return root
     fd = _root_fd(root)
@@ -171,13 +177,13 @@ def _identity(info: os.stat_result) -> tuple[int, ...]:
 def _read_portable(root: Path, name: str) -> _Snapshot:
     """``_read`` for platforms without ``O_DIRECTORY``/``dir_fd`` (Windows).
 
-    Walks the path with ``islink`` checks instead of descriptor-relative opens;
+    Walks the path with ``_is_link`` checks (symlinks and junctions) instead of descriptor-relative opens;
     not atomic against concurrent swaps, but the best that platform offers.
     """
     current = root
     for part in name.split("/"):
         current = current / part
-        if os.path.islink(current):
+        if _is_link(current):
             raise SubmissionError("Input missing, inaccessible, or symlinked")
     try:
         with open(current, "rb") as stream:
@@ -195,17 +201,18 @@ def _read_portable(root: Path, name: str) -> _Snapshot:
 
 def _read(root: Path, name: str) -> _Snapshot:
     name = _path(name)
-    if not hasattr(os, "O_DIRECTORY"):
+    if not _supports_dir_fd():
         return _read_portable(root, name)
+    o_directory, o_nofollow = _posix_dir_flags()
     fd = _root_fd(root)
     file_fd = None
     try:
         parts = name.split("/")
         for part in parts[:-1]:
-            nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            nxt = os.open(part, os.O_RDONLY | o_directory | o_nofollow, dir_fd=fd)
             os.close(fd)
             fd = nxt
-        file_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+        file_fd = os.open(parts[-1], os.O_RDONLY | o_nofollow | os.O_NONBLOCK, dir_fd=fd)
         before = os.fstat(file_fd)
         if not stat.S_ISREG(before.st_mode):
             raise SubmissionError("Input must be a regular file")
@@ -231,7 +238,7 @@ def _inventory_portable(root: Path, expected: set[str], directories: set[str]) -
         with os.scandir(directory) as entries:
             for entry in entries:
                 name = _path(prefix + entry.name)
-                if entry.is_symlink():
+                if entry.is_symlink() or _is_link(entry.path):
                     raise SubmissionError("Bundle contains a symlink")
                 if entry.is_dir(follow_symlinks=False):
                     if name not in directories:
@@ -259,9 +266,11 @@ def _inventory(root: Path, expected: set[str]) -> None:
         for parent in PurePosixPath(name).parents
         if str(parent) != "."
     }
-    if not hasattr(os, "O_DIRECTORY"):
+    if not _supports_dir_fd():
         _inventory_portable(root, expected, directories)
         return
+
+    o_directory, o_nofollow = _posix_dir_flags()
 
     def walk(fd: int, prefix: str) -> None:
         with os.scandir(fd) as entries:
@@ -272,9 +281,7 @@ def _inventory(root: Path, expected: set[str]) -> None:
                 if entry.is_dir(follow_symlinks=False):
                     if name not in directories:
                         raise SubmissionError("Unexpected bundle directory")
-                    child = os.open(
-                        entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd
-                    )
+                    child = os.open(entry.name, os.O_RDONLY | o_directory | o_nofollow, dir_fd=fd)
                     try:
                         walk(child, name + "/")
                     finally:
@@ -577,7 +584,7 @@ def prepare_submission(
     # Exclusive cooperative lock protects two callers publishing the same path.
     lock = parent / ("." + destination.name + ".prepare-lock")
     try:
-        lock_fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+        lock_fd = _open_nofollow(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     except OSError as exc:
         raise SubmissionError("Destination publication is already claimed") from exc
     stage: Path | None = None
@@ -861,7 +868,7 @@ def refresh_inventory(
 
     lock = parent / ("." + destination.name + ".snapshot-lock")
     try:
-        lock_fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+        lock_fd = _open_nofollow(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     except OSError as exc:
         raise SubmissionError("Destination publication is already claimed") from exc
     try:

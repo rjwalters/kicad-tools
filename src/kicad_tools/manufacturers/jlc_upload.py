@@ -71,7 +71,6 @@ selects a receipt.
 from __future__ import annotations
 
 import contextlib
-import errno
 import hashlib
 import os
 import re
@@ -82,6 +81,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
+from ..export._fsutil import fsync_dir as _fsync_dir
+from ..export._fsutil import open_nofollow as _open_nofollow
 from ..export.submission_plan import (
     SubmissionPlan,
     _digest,
@@ -1112,30 +1113,6 @@ def _check_response_identity(
 # --------------------------------------------------------------------------
 # Upload
 # --------------------------------------------------------------------------
-
-
-def _open_nofollow(path: Path, flags: int, mode: int = 0o777) -> int:
-    """``os.open`` that refuses a symlinked final component.
-
-    ``O_NOFOLLOW`` does not exist on Windows; there, fall back to an ``lstat``
-    check before opening (not atomic, but the best that platform offers).
-    """
-    nofollow = getattr(os, "O_NOFOLLOW", 0)
-    if not nofollow and os.path.islink(path):
-        raise OSError(errno.ELOOP, "refusing to follow symlink", str(path))
-    return os.open(path, flags | nofollow, mode)
-
-
-def _fsync_dir(path: Path) -> None:
-    """fsync a directory so a new entry is durable; a no-op where unsupported."""
-    directory = getattr(os, "O_DIRECTORY", 0)
-    if not directory:
-        return  # Windows cannot open a directory fd for fsync
-    dir_fd = os.open(path, os.O_RDONLY | directory)
-    try:
-        os.fsync(dir_fd)
-    finally:
-        os.close(dir_fd)
 
 
 @contextlib.contextmanager
