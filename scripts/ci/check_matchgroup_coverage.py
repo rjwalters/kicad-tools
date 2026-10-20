@@ -178,9 +178,11 @@ MATCHGROUP_FIXTURE_KEY = (
 # the exact groups that may fire, so a DIFFERENT group failing (e.g. ADDR_BUS
 # regressing) still trips the gate.  On the full-reroute path (the Match-Group
 # Routing Regression CI job) an allowed group that no longer fires is STALE
-# and fails the gate, so fixing a group forces its entry to be deleted.  The
-# ``--skip-route`` path checks a bundle the gate did not route itself, so
-# there the allowance is an upper bound only (``enforce_stale=False``).
+# and fails the gate, so fixing a group forces its entry to be deleted.  On
+# ``--skip-route`` the group allowance stays an upper bound only
+# (``enforce_stale=False``, unchanged by #7367): the committed fixture gates
+# DDR/HDMI out as partially routed.  Staleness of the identity entries in
+# MATCHGROUP_FIXTURE_ALLOWED_FINDINGS is enforced on both paths.
 #
 # REMOVAL: delete an entry once its group meets its length-match tolerance
 # (tracked in the issue it cites).
