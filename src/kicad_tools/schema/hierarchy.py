@@ -6,10 +6,13 @@ Represents sheet hierarchy and connections between sheets.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from kicad_tools.sexp import SExp, parse_string
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -175,7 +178,7 @@ class HierarchyNode:
     """
 
     name: str
-    path: str  # Full path to schematic file
+    path: str  # Absolute, resolved path to the schematic file
     uuid: str
     children: list[HierarchyNode] = field(default_factory=list)
     sheets: list[SheetInstance] = field(default_factory=list)  # Sheet instances in this schematic
@@ -267,30 +270,41 @@ class HierarchyBuilder:
         Build the hierarchy tree starting from the root schematic.
 
         Args:
-            root_schematic: Path to the root .kicad_sch file
+            root_schematic: Path to the root .kicad_sch file. A relative
+                path is taken relative to the current working directory;
+                nothing else in the tree depends on the working directory.
 
         Returns:
-            Root HierarchyNode of the hierarchy tree
+            Root HierarchyNode of the hierarchy tree. Every node's ``path``
+            is an absolute, resolved path.
         """
-        root_path = Path(root_schematic)
+        root_path = Path(root_schematic).resolve()
         self.base_path = root_path.parent
 
-        return self._load_schematic(str(root_path), "Root", None)
+        return self._load_schematic(str(root_path), "Root", None, base_dir=root_path.parent)
 
     def _load_schematic(
         self,
         path: str,
         name: str,
         parent: HierarchyNode | None,
+        *,
+        base_dir: Path | None = None,
     ) -> HierarchyNode:
-        """Load a schematic and recursively load its children."""
-        full_path = Path(path)
-        # Only join with base_path if the path doesn't already exist
-        # (handles both absolute paths and paths that are already valid from CWD)
-        if not full_path.exists() and not full_path.is_absolute():
-            full_path = self.base_path / path
+        """Load a schematic and recursively load its children.
 
-        # Check for circular references
+        ``path`` is the sheet's file name as written in the containing sheet.
+        A relative name is resolved against ``base_dir``, the folder of the
+        sheet file that contains the sheet symbol (KiCad's rule). It is never
+        resolved against the working directory (issue #7614).
+        """
+        if base_dir is None:
+            base_dir = self.base_path
+        p = Path(path)
+        full_path = (p if p.is_absolute() else base_dir / p).resolve()
+
+        # Already loaded (repeated sheet or circular reference). The key is
+        # the resolved absolute path, so both spellings of one file dedupe.
         path_str = str(full_path)
         if path_str in self.loaded_files:
             # Return a reference to the existing node (but with different parent)
@@ -309,9 +323,17 @@ class HierarchyBuilder:
         try:
             text = full_path.read_text()
             sexp = parse_string(text)
-        except Exception:
+        except Exception as exc:
             if parent is None and self.strict_root:
                 raise
+            if parent is not None:
+                logger.warning(
+                    "Sub-sheet %r (file %r) could not be loaded from %s: %s",
+                    name,
+                    path,
+                    path_str,
+                    exc,
+                )
             # Return empty node if file can't be loaded
             return HierarchyNode(
                 name=name,
@@ -352,12 +374,13 @@ class HierarchyBuilder:
 
         self.loaded_files[path_str] = node
 
-        # Recursively load children
+        # Recursively load children, relative to this sheet's own folder
         for sheet in sheets:
             child = self._load_schematic(
                 sheet.filename,
                 sheet.name,
                 node,
+                base_dir=full_path.parent,
             )
             node.children.append(child)
 
