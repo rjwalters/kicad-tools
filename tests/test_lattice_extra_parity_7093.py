@@ -15,6 +15,10 @@ layer changes.
 
 from __future__ import annotations
 
+import pytest
+
+from kicad_tools.router.core import Autorouter
+from kicad_tools.router.diffpair import DifferentialPairConfig
 from kicad_tools.router.lattice.coupled import CoupledConnection
 from kicad_tools.router.lattice.pathfinder import (
     LatticePathfinder,
@@ -219,3 +223,104 @@ def test_no_fitting_extra_keeps_the_copper_and_says_so() -> None:
     assert routes[(1, 0)] is p_route and routes[(2, 0)] is n_route
     assert "0/2" in pf.extra_parity_log[(1, 2)]
     assert pf.extra_parity_log[(1, 2)].endswith("kept")
+
+
+def test_a_passed_deadline_keeps_the_copper_and_says_so() -> None:
+    pf = _pf(_N_WALL)
+    p_route = _route(pf, _P_EXTRA)
+    n_route = _route(pf, _N_EXTRA, p_route)
+    routes: dict[object, Route] = {(1, 0): p_route, (2, 0): n_route}
+
+    pf._extra_parity_pass(routes, [_P_EXTRA, _N_EXTRA], [_pc()], deadline=0.0)
+
+    assert routes[(1, 0)] is p_route and routes[(2, 0)] is n_route
+    note = pf.extra_parity_log[(1, 2)]
+    assert "0/2" in note and "deadline reached" in note and note.endswith("kept")
+
+
+# -- end to end: the pass fires inside real lattice routing -------------------
+
+
+def _board_pad(pin: str, x: float, y: float, net: int, name: str, **kw) -> dict:
+    return {
+        "number": pin,
+        "x": x,
+        "y": y,
+        "width": kw.get("width", 0.5),
+        "height": kw.get("height", 0.5),
+        "net": net,
+        "net_name": name,
+    }
+
+
+def _usb_board() -> Autorouter:
+    """A coupled U1 -> U2 run plus one extra J1 pad per net, on two layers.
+
+    The pair's main run (y = 6.5 / 7.5) is planar on F.Cu.  Each net has one
+    extra pad on J1, attached to U2 by a single-ended connection: D+'s goes
+    north over open board, D-'s goes south across ``W1``, a foreign F.Cu bar
+    spanning the whole board width.  Negotiation therefore leaves D+'s extra
+    planar and drops D-'s through B.Cu: 0 / 2 vias.
+    """
+    rules = DesignRules(trace_width=0.2, trace_clearance=0.15, grid_resolution=0.1)
+    router = Autorouter(
+        width=30.0,
+        height=14.0,
+        rules=rules,
+        net_class_map={"USB_D+": _HS, "USB_D-": _HS},
+        strategy="lattice",
+    )
+    router.add_component(
+        "U1", [_board_pad("1", 3.0, 6.5, 1, "USB_D+"), _board_pad("2", 3.0, 7.5, 2, "USB_D-")]
+    )
+    router.add_component(
+        "U2", [_board_pad("1", 20.0, 6.5, 1, "USB_D+"), _board_pad("2", 20.0, 7.5, 2, "USB_D-")]
+    )
+    router.add_component(
+        "J1", [_board_pad("A6", 20.0, 1.5, 1, "USB_D+"), _board_pad("A7", 20.0, 12.5, 2, "USB_D-")]
+    )
+    router.add_component("W1", [_board_pad("1", 15.0, 10.0, 9, "WALL", width=30.0, height=0.6)])
+    return router
+
+
+def _route_board(extra_parity: bool) -> tuple[Autorouter, LatticePathfinder]:
+    router = _usb_board()
+    pf = router._ensure_lattice_pathfinder()
+    pf.extra_parity = extra_parity
+    router.route_all_with_diffpairs(
+        DifferentialPairConfig(enabled=True),
+        non_diffpair_strategy=lambda: router.route_all(timeout=120),
+    )
+    return router, pf
+
+
+def _committed_vias(router: Autorouter) -> tuple[int, int]:
+    return tuple(  # type: ignore[return-value]
+        sum(len(r.vias) for r in router.routes if r.net == net) for net in (1, 2)
+    )
+
+
+@pytest.mark.timeout(300)
+def test_routing_a_board_runs_the_pass_and_commits_equal_vias(capsys) -> None:
+    router, pf = _route_board(extra_parity=True)
+    out = capsys.readouterr().out
+
+    assert router._lattice_pair_outcomes == {"USB_D": "coupled"}
+    for net in (1, 2):
+        assert sum(1 for r in router.routes if r.net == net and r.segments) == 2
+    # The emitted copper: D+'s extra took D-'s F -> B -> F hop.
+    assert _committed_vias(router) == (2, 2)
+    note = pf.extra_parity_log[(1, 2)]
+    assert "vias 0/2 -> 2/2" in note and "J1.A6->U2.1" in note
+    assert f"Diff-pair extra parity (lattice) {note}" in out
+
+
+@pytest.mark.timeout(300)
+def test_routing_the_same_board_with_the_pass_off_leaves_the_pair_unequal(capsys) -> None:
+    router, pf = _route_board(extra_parity=False)
+    out = capsys.readouterr().out
+
+    assert router._lattice_pair_outcomes == {"USB_D": "coupled"}
+    assert _committed_vias(router) == (0, 2)
+    assert not pf.extra_parity_log
+    assert "Diff-pair extra parity (lattice)" not in out

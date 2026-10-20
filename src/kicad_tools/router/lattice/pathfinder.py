@@ -4572,6 +4572,7 @@ class LatticePathfinder:
         routes: dict[object, Route],
         connections: list[Connection],
         coupled: list[CoupledConnection],
+        deadline: float | None = None,
     ) -> None:
         """Match a pair's extra-pad attachments' via counts in place (#7093).
 
@@ -4603,6 +4604,11 @@ class LatticePathfinder:
         cross, so ``USB2_D+`` copying the ``USB2_D-`` hop comes back planar
         (the pads' launch radii touch) and ``USB2_D-`` has no planar way past
         ``USB2_D+``.
+
+        ``deadline`` (``time.monotonic()``) is re-checked before every
+        search: once it passes, the pair being searched and every later one
+        keep their copper (logged), so the pass never overruns the run's
+        budget.
         """
         if not self.extra_parity or not coupled:
             return
@@ -4624,6 +4630,10 @@ class LatticePathfinder:
                     totals[route.net] += len(route.vias)
             if totals[p_net] == totals[n_net]:
                 continue
+            # A pair net's extra-pad attachment is keyed ``(net, seq)`` by
+            # ``Autorouter._lattice_netset_connections``; hop / segment keys
+            # of coupled nets have three or more parts.  Revisit this filter
+            # if that keying ever changes.
             extras: dict[int, list[Connection]] = {p_net: [], n_net: []}
             for key, conn in by_key.items():
                 if (
@@ -4637,7 +4647,9 @@ class LatticePathfinder:
             if not extras[p_net] or not extras[n_net]:
                 continue
             before = (totals[p_net], totals[n_net])
+            names = f"{pc.pad_p_a.net_name}/{pc.pad_n_a.net_name}"
             best: tuple[float, Connection, Route] | None = None
+            timed_out = False
             for moved_net, kept_net in ((p_net, n_net), (n_net, p_net)):
                 for moved in extras[moved_net]:
                     old = routes[moved[0]]
@@ -4650,6 +4662,9 @@ class LatticePathfinder:
                         mirror = self._extra_mirror(kept_route, kept[1], kept[2])
                         if mirror is None:
                             continue
+                        if deadline is not None and time.monotonic() >= deadline:
+                            timed_out = True
+                            break
                         if committed is None:
                             # Every other route of the board, at its own class.
                             committed = self._fresh_committed()
@@ -4672,7 +4687,16 @@ class LatticePathfinder:
                             continue
                         if best is None or length < best[0] - 1e-9:
                             best = (length, moved, res.route)
-            names = f"{pc.pad_p_a.net_name}/{pc.pad_n_a.net_name}"
+                    if timed_out:
+                        break
+                if timed_out:
+                    break
+            if timed_out:
+                self.extra_parity_log[(p_net, n_net)] = (
+                    f"{names} vias {before[0]}/{before[1]}: deadline reached before "
+                    "every extra-pad attachment was tried; kept"
+                )
+                return
             if best is None:
                 self.extra_parity_log[(p_net, n_net)] = (
                     f"{names} vias {before[0]}/{before[1]}: no extra-pad attachment "
@@ -5765,7 +5789,7 @@ class LatticePathfinder:
         if not result[1].deadline_hit and (deadline is None or time.monotonic() < deadline):
             self._hybrid_parity_pass(result[0], connections, coupled)
         if not result[1].deadline_hit and (deadline is None or time.monotonic() < deadline):
-            self._extra_parity_pass(result[0], connections, coupled)
+            self._extra_parity_pass(result[0], connections, coupled, deadline=deadline)
         self._hybrid_parity_ctx = []
         return result
 
