@@ -193,6 +193,15 @@ boards/*/regression-output/
 # KiCad editor/session state is not part of a board release.
 boards/**/*.kicad_prl
 
+# `kct readiness --verify` diagnostics (Issue #7536).  The receipt records the
+# verifying engine (checkout commit, dirty flag, source digest) and BOM text
+# that depends on the host's parts cache, so it cannot be committed as a
+# reproducible file.  Board 03 promotes its receipt into output/readiness.json
+# and hash-binds the evidence copies here; only those bound copies are tracked.
+boards/*/output/readiness-verification/
+!boards/03-usb-joystick/output/readiness-verification/
+boards/03-usb-joystick/output/readiness-verification/readiness.json
+
 # Node (root package.json has npm scripts; site/ has its own .gitignore)
 node_modules/
 .squad/
