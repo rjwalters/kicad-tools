@@ -515,6 +515,55 @@ class TestPourNetsResolveToTheirMappedClass:
         gap = min(copper_gap(segment_shape(s), via_shape(gnd.vias[0])) for s in segs)
         assert gap + 1e-9 >= 0.175, f"meander {gap:.3f} mm from a GND (AUX 0.175 mm) via"
 
+    def test_meander_keeps_aux_clearance_from_a_neutralised_gnd_pad(self):
+        """A pour pad is neutralised to net 0 but is still a GND pad in the
+        output board, so it is held to AUX (0.175 mm) -- not to the Default
+        class that ``net_clearance_mm[0]`` carries for real no-net copper."""
+        from kicad_tools.router.clearance_shapes import copper_gap, pad_shape, segment_shape
+
+        def tune(ar: Autorouter) -> list[Segment]:
+            group = MatchGroup(
+                name="BUS", net_ids=[1, 2], tolerance=0.1, source=MatchGroupSource.LEGACY_API
+            )
+            ar.apply_match_group_tuning(
+                detected_groups=[group], verbose=False, engage="length_critical"
+            )
+            return next(r for r in ar.routes if r.net == 2).segments
+
+        meander = tune(_board07_like())
+        assert len(meander) > 1, "the group must meander without the pad"
+        outer = max(meander, key=lambda s: max(abs(s.y1 - 10.0), abs(s.y2 - 10.0)))
+        sign = 1.0 if max(outer.y1, outer.y2) - 10.0 > 0 else -1.0
+        y_edge = max(outer.y1, outer.y2) if sign > 0 else min(outer.y1, outer.y2)
+        # Pad edge 0.16 mm beyond the meander's copper edge: clears Default
+        # (0.15 mm), violates AUX (0.175 mm).
+        ar = _board07_like()
+        pad = Pad(
+            x=(outer.x1 + outer.x2) / 2,
+            y=y_edge + sign * (0.1 + 0.16 + 0.25),
+            width=0.5,
+            height=0.5,
+            net=0,
+            net_name="GND",
+            layer=outer.layer,
+            ref="C1",
+            pin="2",
+        )
+        ar.pads = {("C1", "2"): pad}
+        segs = tune(ar)
+        gap = min(copper_gap(segment_shape(s), pad_shape(pad)) for s in segs)
+        assert gap + 1e-9 >= 0.175, f"meander {gap:.3f} mm from a neutralised GND (AUX) pad"
+
+    def test_pad_floor_map_covers_only_named_net_zero_pads(self, monkeypatch):
+        """A neutralised GND pad gets its AUX floor; unnamed no-net copper
+        gets none and stays Default."""
+        ar = _board07_like()
+        gnd = Pad(x=1.0, y=1.0, width=0.5, height=0.5, net=0, net_name="GND", ref="C1", pin="2")
+        nc = Pad(x=2.0, y=2.0, width=0.5, height=0.5, net=0, net_name="", ref="X1", pin="1")
+        ar.pads = {("C1", "2"): gnd, ("X1", "1"): nc}
+        floors = _captured_floors(ar, monkeypatch)["pad_floor_mm"]
+        assert floors == {id(gnd): pytest.approx(0.175)}
+
     def test_gnd_with_no_floor_entry_still_resolves_to_aux(self, monkeypatch):
         """The exact board 07 shape the Judge measured: GND is AUX 0.175 in
         the class map, absent from ``net_names``, its pads on net 0, its

@@ -21254,6 +21254,21 @@ class Autorouter:
             _c = max(_c, float(_authored_floors.get(_nid, 0.0) or 0.0))
             net_clearance_mm[_nid] = _c if _c > 0.0 else _default_class_mm
 
+        # Issue #7594: a neutralised pour / auto-skipped pad sits on net 0
+        # (Default above) but keeps its net name and still reads as that
+        # net's copper in the output board, so it is held to the class of
+        # its retained name -- and to its own authored floor -- exactly as
+        # ``_pad_class_clearances`` and ``authored_clearance`` resolve it.
+        # Keyed per pad because net 0 cannot carry one class for all of them.
+        # Copper with neither a name nor an authored floor stays Default.
+        pad_floor_mm: dict[int, float] = {}
+        for _pad in self.pads.values():
+            _pf = float(getattr(_pad, "authored_clearance", 0.0) or 0.0)
+            if not _pad.net:
+                _pf = max(_pf, self._net_class_clearance_mm(0, getattr(_pad, "net_name", "") or ""))
+            if _pf > 0.0:
+                pad_floor_mm[id(_pad)] = _pf
+
         if engage not in ("length_critical", "checker_limit"):
             raise ValueError(f"unknown match-group engage policy: {engage!r}")
 
@@ -21270,6 +21285,7 @@ class Autorouter:
             group_via_clearance_mm = via_clearance_mm
             group_pad_clearance_mm = pad_clearance_mm
             group_net_clearance_mm: dict[int, float] | None = None
+            group_pad_floor_mm: dict[int, float] | None = None
 
             net_class = self._resolve_net_class_for_group(group)
             if net_class is not None:
@@ -21296,6 +21312,7 @@ class Autorouter:
                 # The relaxed floor is this group's half of the rule only;
                 # KiCad holds each neighbour to max(own, neighbour class).
                 group_net_clearance_mm = net_clearance_mm
+                group_pad_floor_mm = pad_floor_mm
                 tolerance_mm = net_class.effective_length_match_tolerance(0.5)
                 # Issue #6443: floored like the routed gap.
                 intra_pair_clearance_mm = self._pair_gap_mm(net_class)
@@ -21398,6 +21415,7 @@ class Autorouter:
                     pads_by_net=pads_by_net,
                     pad_clearance_mm=group_pad_clearance_mm,
                     net_clearance_mm=group_net_clearance_mm,
+                    pad_floor_mm=group_pad_floor_mm,
                     board_thickness_mm=board_thickness_mm,
                     num_copper_layers=num_layers,
                     blind_buried_supported=blind_buried_supported,
