@@ -8979,6 +8979,10 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
             net_class_map=_pour_closer_net_class_map(router, args),
             # Issue #6401: weld at the via sites reserved before routing.
             preferred_sites=_reserved_plane_via_sites(args),
+            # Issue #7602: weld vias keep the router's mask-dam floor (#7322).
+            pad_edge_gap=float(
+                getattr(getattr(router, "rules", None), "min_via_pad_edge_gap", 0.0) or 0.0
+            ),
         )
         if not quiet:
             print("\n--- KiCad Oracle Completion (pour nets) ---")
