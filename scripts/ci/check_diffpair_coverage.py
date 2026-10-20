@@ -142,10 +142,13 @@ DIFFPAIR_FIXTURE_KEY = "boards/06-diffpair-test/regression-fixture/diffpair_test
 # the residual impedance set to USB3_TX2- alone (USB3_RX1+/- now clear) and
 # leaves USB2_D+/USB2_D- 0.091 mm over its uncoupled-length limit (12.791 vs
 # 12.700 mm).  The floor is the intended behaviour; the USB2_D pair needs to
-# route coupled, tracked in #7401.  kicad-cli flags USB2_D too, so it is not a
-# kct artefact; kct's figure for it is not KiCad's to the micron (a known
-# divergence on board 06's router copper, Issue #7565).
-# Issue #7575: that residual USB3_TX2- finding was a false positive.  Its
+# route coupled, tracked in #7401.
+# Issue #7491: USB2_D now routes coupled (the pose search measures its
+# partner's pads exactly), at 4.422 / 5.178 mm uncoupled (P / N), so that identity is
+# gone, but its skew (1.896 mm vs 1.000) is now over, so it moves to the skew
+# block below; USB3_RX1 now measures 0.411 mm skew against its 0.500 limit, so
+# its skew identity is gone too.
+# Issue #7575: the residual USB3_TX2- finding was a false positive.  Its
 # judged segment, the 21.65 mm F.Cu run (31.5, 23.15)->(53.15, 23.15), had one
 # partner piece in the coupling window: a 0.02 mm TX2+ stub inside U2.F2's own
 # pad, at a 0.335 mm gap (the TX2+ trunk is 0.975 mm away, a breakout).  The
@@ -157,22 +160,23 @@ DIFFPAIR_FIXTURE_KEY = "boards/06-diffpair-test/regression-fixture/diffpair_test
 # rule and bounded them only with ``DIFFPAIR_VIOLATION_BASELINE`` (18) and the
 # ``.github/routed-drc-tolerance.yml`` total (18), so up to 7 continuity
 # findings, or a new pair in place of a fixed one, passed both.  The pairs
-# below are the ones the seed-42 re-route measures over ``max_skew_mm`` (they
-# route single-ended, so the legs differ).  All 9 declared pairs started here;
-# the recipe's final skew-tuning pass (#7548) cleared four, and fusing the
-# pair legs' grid-step segments before it (#7548) cleared four more.  The last
-# is tracked in #7548 (coupling-preserving tuning in general is #6447).
+# below are the ones the seed-42 re-route measures over ``max_skew_mm``.  All 9
+# declared pairs started here; the recipe's final skew-tuning pass (#7548)
+# cleared four, and fusing the pair legs' grid-step segments before it (#7548)
+# cleared four more (MIPI_CLK, PCIE_RX and USB3_RX2 now measure 0.287, 0.450
+# and 0.450 mm).  Two remain, tracked in #7548: MIPI_D0 and USB2_D.  The
+# tuner's post-insertion intra-pair clearance check rolls back both
+# (coupling-preserving tuning in general is #6447).
 DIFFPAIR_SKEW_TRACKER = 7548
 #
 # Allowed by identity, not by count (#7359, #7270 Q3 ruling): only these
 # identities may carry the listed errors, a listed identity that stops firing
 # makes its entry stale and fails the gate, and an allowed finding does not
-# count against the (now strict 0) routed-DRC total.  Deleting the uncoupled
-# entry is #7401's job.
+# count against the (now strict 0) routed-DRC total.
 DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
-    ("diffpair_uncoupled_length", "USB2_D+/USB2_D-"): 7401,
-    # Seed-42 re-route, ``e1c361478`` (2026-10-20): skew vs max_skew_mm.
+    # Seed-42 re-route, PR #7570 / #7491 (2026-10-20): skew vs max_skew_mm.
     ("diffpair_length_skew", "MIPI_D0+/MIPI_D0-"): DIFFPAIR_SKEW_TRACKER,  # 2.320 / 0.300
+    ("diffpair_length_skew", "USB2_D+/USB2_D-"): DIFFPAIR_SKEW_TRACKER,  # 1.896 / 1.000
 }
 
 #: Every board key that carries an identity allowance (Issue #7367).  A key

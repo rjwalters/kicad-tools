@@ -664,9 +664,12 @@ public:
     // spatial bucket index, so it is cheap enough for the A* inner loop.
     // Used to resolve ``GridCell::pad_cell`` cells: a cell blocked only by
     // pad copper/clearance is passable exactly when the real geometry is.
+    // Issue #7491 (#7401): ``only_net`` >= 0 restricts the check to that
+    // net's pads -- the coupled pose search measures its PARTNER's pads
+    // exactly with it, since the raster halo under-reads them.
     bool pad_geometry_clear(
         float ax, float ay, float bx, float by, int layer, int net,
-        float half_width, float clearance) const;
+        float half_width, float clearance, int only_net = -1) const;
 
     // Issue #6375: validate_route()'s segment-vs-pad verdict for ONE pad --
     // the single implementation both the post-route validator and the A*

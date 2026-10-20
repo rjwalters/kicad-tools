@@ -111,7 +111,11 @@ logger = logging.getLogger(__name__)
 # v61 (Issue #7296): ``DesignRules.min_via_pad_edge_gap`` + the coupled
 # pathfinder's mask-dam refusal; v62: the same floor in the single-ended A*'s
 # via check.  A v61 .so lets single-ended vias into the dam zone.
-_REQUIRED_CPP_BUILD_VERSION = 62
+# v63 (Issue #7491): the coupled pose search's rail gate measures the partner
+# net's pads exactly (``Grid3D.pad_geometry_clear(..., only_net=)``).  A v62
+# .so lets a pose trunk thread a sub-pitch gap between partner pads that the
+# finished-copper check then refuses (``derived-rails-blocked``).
+_REQUIRED_CPP_BUILD_VERSION = 63
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
