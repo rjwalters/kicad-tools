@@ -653,6 +653,15 @@ void Grid3D::index_pad_bucket(size_t index) {
 }
 
 
+// Issue #7569: see the declaration.
+void Grid3D::set_pad_class_clearances(const std::vector<float>& clearances) {
+    pad_bucket_max_class_ = 0.0f;
+    for (size_t i = 0; i < pads_.size(); ++i) {
+        pads_[i].class_clearance = i < clearances.size() ? clearances[i] : 0.0f;
+        pad_bucket_max_class_ = std::max(pad_bucket_max_class_, pads_[i].class_clearance);
+    }
+}
+
 // -----------------------------------------------------------------------
 // Issue #6243: authored per-net clearance minima
 // -----------------------------------------------------------------------
@@ -1065,6 +1074,7 @@ void Grid3D::clear_validation_data() {
     pads_.clear();
     pad_buckets_.clear();  // Issue #6315
     pad_bucket_max_override_ = 0.0f;
+    pad_bucket_max_class_ = 0.0f;  // Issue #7569
     authored_pad_specs_.clear();
     clear_component_holes();
     stored_segments_.clear();
@@ -1316,7 +1326,7 @@ bool Grid3D::pad_geometry_clear(
     float ax, float ay, float bx, float by, int layer, int net,
     float half_width, float clearance) const {
     const float reach = half_width + std::max({clearance, pad_bucket_max_override_,
-                                               max_pairwise_clearance_});
+                                               pad_bucket_max_class_, max_pairwise_clearance_});
     const int qx1 = static_cast<int>(std::floor((std::min(ax, bx) - reach) / PAD_BUCKET_MM));
     const int qx2 = static_cast<int>(std::floor((std::max(ax, bx) + reach) / PAD_BUCKET_MM));
     const int qy1 = static_cast<int>(std::floor((std::min(ay, by) - reach) / PAD_BUCKET_MM));
@@ -1331,7 +1341,8 @@ bool Grid3D::pad_geometry_clear(
                 const auto& pad = pads_[i];
                 if (pad.net == net && net != 0) continue;  // own copper
                 if (pad.layer_idx != -1 && pad.layer_idx != layer) continue;
-                float required = std::max(clearance, pad.clearance_override);
+                float required = std::max({clearance, pad.clearance_override,
+                                             pad.class_clearance});
                 const float pair = pairwise_required_clearance(net, pad.net);
                 if (pair > required) required = pair;
                 float center_dist;

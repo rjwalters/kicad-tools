@@ -810,6 +810,11 @@ struct PadInfo {
     float via_clearance_override = 0.0f; // Component trace floor (Python backstop)
     bool via_carveout_eligible = false;
     bool is_circular = false;  // Explicit circle shape; other pads use rectangles (#5229)
+    // Issue #7569: the pad's own net-class clearance (0 = no class; the board
+    // clearance governs).  The pair rule is max(own class, pad's class), so
+    // the exact pad test (``pad_geometry_clear``) holds a step to this value
+    // instead of the board-wide largest class.
+    float class_clearance = 0.0f;
 };
 
 // Stored segment for validation (Issue #2439)

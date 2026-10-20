@@ -742,3 +742,38 @@ def test_the_board_edge_counts_as_a_fixed_flank() -> None:
     U2.1's +x escape, the left of U2.L1's -x one."""
     sides = _static_sides(_row_with_gnd_pin4(y0=0.45))
     assert sides == {"U2.1": frozenset({-1}), "U2.L1": frozenset({1})}
+
+
+def test_reserve_skipped_plane_vias_serves_explicit_power_pours_7569(tmp_path) -> None:
+    """Opt-in: explicit ``--skip-nets`` power pours are reserved; ground is not."""
+    from kicad_tools.cli.route_cmd import _apply_plane_via_reservation
+
+    pcb = tmp_path / "board.kicad_pcb"
+    pcb.write_text("(kicad_pcb)")
+    calls: list[list[str]] = []
+
+    def fake_reserve(router, nets, **_kw):
+        calls.append(list(nets))
+        return SimpleNamespace(sites=[], unreserved=[])
+
+    plane_nets = ["+1V2", "+1V8", "GND", "SIG"]
+
+    def run(**kw):
+        args = Namespace(_auto_skipped_net_names=[], skip_nets="GND,+1V2,+1V8", **kw)
+        with (
+            patch("kicad_tools.cli.stitch_cmd.find_all_plane_nets", return_value=plane_nets),
+            patch("kicad_tools.core.sexp_file.load_pcb", return_value=None),
+            patch(
+                "kicad_tools.router.plane_via_sites.reserve_router_plane_via_sites",
+                fake_reserve,
+            ),
+        ):
+            _apply_plane_via_reservation(object(), args, pcb, quiet=True)
+
+    run()  # default: explicit skips are not auto-skipped -> nothing reserved
+    assert calls == []
+    run(reserve_skipped_plane_vias=True)
+    assert calls == [["+1V2", "+1V8"]]
+    calls.clear()
+    run(reserve_skipped_plane_vias=True, _route_only_nets=["SIG"])  # inverted skip set
+    assert calls == []

@@ -161,7 +161,10 @@ DIFFPAIR_SKEW_TRACKER = 7548
 # entry is #7349's job, the uncoupled one #7401's.
 DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
     ("impedance", "USB3_TX2-"): 7349,
-    ("diffpair_uncoupled_length", "USB2_D+/USB2_D-"): 7401,
+    # Issue #7569: the per-pad class clearance in the native pad test lets
+    # USB2_D route within its uncoupled-length limit (#7401's entry is gone),
+    # and the seed-42 re-route then reports an impedance error on USB2_D-.
+    ("impedance", "USB2_D-"): 7583,
     # Seed-42 re-route, ``e1c361478`` (2026-10-20): skew vs max_skew_mm.
     ("diffpair_length_skew", "MIPI_CLK+/MIPI_CLK-"): DIFFPAIR_SKEW_TRACKER,  # 1.311 / 0.300
     ("diffpair_length_skew", "MIPI_D0+/MIPI_D0-"): DIFFPAIR_SKEW_TRACKER,  # 2.320 / 0.300
