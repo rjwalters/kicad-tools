@@ -18785,7 +18785,11 @@ def _route_parser() -> argparse.ArgumentParser:
             "also does NOT remove all sources of variance -- wall-clock "
             "escape budgets (e.g. --timeout) can still terminate early on a "
             "loaded machine; for fully reproducible CI runs combine --seed "
-            "with a generous --timeout."
+            "with a generous --timeout. With --route-engine lattice, --seed "
+            "does not change the copper: the lattice negotiation draws no "
+            "random numbers, so every seed routes the same tracks and vias "
+            "and only the UUIDs differ. A lattice seed sweep is therefore a "
+            "single sample, not a spread (Issue #7580)."
         ),
     )
     parser.add_argument(
@@ -20652,6 +20656,13 @@ def _run_main_impl(args, parser, argv) -> int:
         random.seed(args.seed)
         if not getattr(args, "quiet", False):
             print(f"[seed] Seeded global random with --seed {args.seed}")
+            # Issue #7580: the lattice engine draws no random numbers, so a
+            # seed sweep on it is one sample repeated, not a spread.
+            if _resolve_route_engine(args) == "lattice":
+                print(
+                    "[seed] Note: --route-engine lattice is deterministic; "
+                    "--seed changes only UUIDs, not the routed copper"
+                )
 
     # Issue #3538: normalize --deterministic-budget BEFORE any wall-clock
     # deadline is stamped or any inner router routine reads per_net_timeout /
