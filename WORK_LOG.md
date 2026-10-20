@@ -15,6 +15,9 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-20
 
+- **Issue #7645** (closed): main: 4 test_lattice_extra_parity_7093 tests fail after dc78dac
+- **PR #7646**: test(router): close the corridor under the extra-parity wall fixture
+- **PR #7651**: chore(deps): Bump vite from 8.2.1 to 8.3.4 in /site
 - **Issue #7583** (closed): board 06: impedance finding on USB2_D- once the native pad test applies per-pad classes (follow-up to #7569)
 - **PR #7601**: fix(router): measure foreign pads at true width in coupled pair legs
 - **PR #7635**: fix: accept KiCad 6 Sheet file/Sheet name spellings in all sheet walkers
