@@ -1,0 +1,13 @@
+(kicad_pcb
+	(version 20260206)
+	(generator "pcbnew")
+	(generator_version "10.0")
+	(general (thickness 1.6) (legacy_teardrops no))
+	(paper "A4")
+	(layers (0 "F.Cu" signal) (2 "B.Cu" signal) (25 "Edge.Cuts" user))
+	(setup (pad_to_mask_clearance 0))
+	(segment (start 0 0) (end 20 0) (width 0.2) (layer "F.Cu") (net "T_P") (uuid "db5893fa-d95e-5551-b9cd-061164fd273a"))
+	(segment (start 0 2) (end 16 2) (width 0.2) (layer "F.Cu") (net "T_N") (uuid "5c9d5476-5f11-5e2b-adb7-4b7540ceb3e9"))
+	(segment (start 5 1.0) (end 5 2.0) (width 0.2) (layer "F.Cu") (net "T_N") (uuid "0540c9c9-cf3f-5060-9d6d-cac412eb9f4a"))
+	(gr_rect (start -5 -10) (end 60 20) (stroke (width 0.1) (type default)) (fill no) (layer "Edge.Cuts") (uuid "33cd882d-7240-5bdd-bbd6-858b5a80148b"))
+)

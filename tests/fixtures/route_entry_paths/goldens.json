@@ -1,0 +1,282 @@
+{
+  "routable": {
+    "layer_escalation": {
+      "exit_code": 0,
+      "copper": {
+        "present": true,
+        "segments": 5,
+        "vias": 2,
+        "arcs": 0,
+        "sha256": "f693f832109afb258f8269df2a9811d28fcd4f3ba4d04f3c026658cfe6d66677"
+      },
+      "headers": [
+        "Auto-selecting grid resolution",
+        "KiCad PCB Autorouter - Layer Escalation Mode",
+        "Attempt 1: 2 layers (2-Layer)",
+        "Negotiated Congestion Routing",
+        "LAYER ESCALATION SUMMARY",
+        "Optimizing traces",
+        "Results",
+        "Saving routed PCB",
+        "Output Connectivity Verification",
+        "DRC Validation"
+      ],
+      "files": [
+        "fab_profile.json",
+        "net_class_map.json",
+        "out.access_witness.json",
+        "out.kicad_dru",
+        "out.kicad_pcb",
+        "out.kicad_pro",
+        "out.route.json",
+        "out.routing_plan.json"
+      ]
+    },
+    "rule_relaxation": {
+      "exit_code": 0,
+      "copper": {
+        "present": true,
+        "segments": 5,
+        "vias": 2,
+        "arcs": 0,
+        "sha256": "f693f832109afb258f8269df2a9811d28fcd4f3ba4d04f3c026658cfe6d66677"
+      },
+      "headers": [
+        "Auto-selecting grid resolution",
+        "KiCad PCB Autorouter - Adaptive Rules Mode",
+        "Negotiated Congestion Routing",
+        "ADAPTIVE RULES SUMMARY",
+        "Optimizing traces",
+        "Results",
+        "Saving routed PCB",
+        "Output Connectivity Verification",
+        "DRC Validation"
+      ],
+      "files": [
+        "fab_profile.json",
+        "net_class_map.json",
+        "out.access_witness.json",
+        "out.kicad_dru",
+        "out.kicad_pcb",
+        "out.kicad_pro",
+        "out.route.json",
+        "out.routing_plan.json"
+      ]
+    },
+    "combined": {
+      "exit_code": 0,
+      "copper": {
+        "present": true,
+        "segments": 5,
+        "vias": 2,
+        "arcs": 0,
+        "sha256": "f693f832109afb258f8269df2a9811d28fcd4f3ba4d04f3c026658cfe6d66677"
+      },
+      "headers": [
+        "Auto-selecting grid resolution",
+        "KiCad PCB Autorouter - Combined Escalation Mode",
+        "Negotiated Congestion Routing",
+        "SEARCH MATRIX RESULTS",
+        "COMBINED ESCALATION SUMMARY",
+        "Optimizing traces",
+        "Results",
+        "Saving routed PCB",
+        "Output Connectivity Verification",
+        "DRC Validation"
+      ],
+      "files": [
+        "fab_profile.json",
+        "net_class_map.json",
+        "out.access_witness.json",
+        "out.kicad_dru",
+        "out.kicad_pcb",
+        "out.kicad_pro",
+        "out.route.json",
+        "out.routing_plan.json"
+      ]
+    },
+    "single_attempt": {
+      "exit_code": 0,
+      "copper": {
+        "present": true,
+        "segments": 5,
+        "vias": 2,
+        "arcs": 0,
+        "sha256": "f693f832109afb258f8269df2a9811d28fcd4f3ba4d04f3c026658cfe6d66677"
+      },
+      "headers": [
+        "Auto-selecting grid resolution",
+        "KiCad PCB Autorouter",
+        "Loading PCB",
+        "Routing (negotiated)",
+        "Negotiated Congestion Routing",
+        "Optimizing traces",
+        "Results",
+        "Saving routed PCB",
+        "Output Connectivity Verification",
+        "DRC Validation"
+      ],
+      "files": [
+        "fab_profile.json",
+        "net_class_map.json",
+        "out.access_witness.json",
+        "out.kicad_dru",
+        "out.kicad_pcb",
+        "out.kicad_pro",
+        "out.route.json",
+        "out.routing_plan.json"
+      ]
+    }
+  },
+  "partial": {
+    "layer_escalation": {
+      "_note": "#7377 B4: no failed_nets.json despite --export-failed-nets",
+      "exit_code": 2,
+      "copper": {
+        "present": true,
+        "segments": 11,
+        "vias": 4,
+        "arcs": 0,
+        "sha256": "d5d2e22103dab1b587e0270ef4466cd629548d156350ef023fd460c026dd239b"
+      },
+      "headers": [
+        "Auto-selecting grid resolution",
+        "KiCad PCB Autorouter - Layer Escalation Mode",
+        "Attempt 1: 2 layers (2-Layer)",
+        "Negotiated Congestion Routing",
+        "Negotiated Routing Complete",
+        "LAYER ESCALATION SUMMARY",
+        "Optimizing traces",
+        "Results",
+        "Saving routed PCB",
+        "Output Connectivity Verification",
+        "DRC Validation",
+        "Routing Suggestions"
+      ],
+      "files": [
+        "fab_profile.json",
+        "net_class_map.json",
+        "out.access_witness.json",
+        "out.kicad_dru",
+        "out.kicad_pcb",
+        "out.kicad_pro",
+        "out.route.json",
+        "out.routing_plan.json",
+        "out.search_failures.json"
+      ]
+    },
+    "rule_relaxation": {
+      "_note": "#7377 B4: no failed_nets.json despite --export-failed-nets",
+      "exit_code": 2,
+      "copper": {
+        "present": true,
+        "segments": 11,
+        "vias": 4,
+        "arcs": 0,
+        "sha256": "d5d2e22103dab1b587e0270ef4466cd629548d156350ef023fd460c026dd239b"
+      },
+      "headers": [
+        "Auto-selecting grid resolution",
+        "KiCad PCB Autorouter - Adaptive Rules Mode",
+        "Negotiated Congestion Routing",
+        "Negotiated Routing Complete",
+        "ADAPTIVE RULES SUMMARY",
+        "Optimizing traces",
+        "Results",
+        "Saving routed PCB",
+        "Output Connectivity Verification",
+        "DRC Validation",
+        "Routing Suggestions"
+      ],
+      "files": [
+        "fab_profile.json",
+        "net_class_map.json",
+        "out.access_witness.json",
+        "out.kicad_dru",
+        "out.kicad_pcb",
+        "out.kicad_pro",
+        "out.route.json",
+        "out.routing_plan.json",
+        "out.search_failures.json"
+      ]
+    },
+    "combined": {
+      "_note": "#7377 B4: no failed_nets.json despite --export-failed-nets",
+      "exit_code": 2,
+      "copper": {
+        "present": true,
+        "segments": 11,
+        "vias": 4,
+        "arcs": 0,
+        "sha256": "d5d2e22103dab1b587e0270ef4466cd629548d156350ef023fd460c026dd239b"
+      },
+      "headers": [
+        "Auto-selecting grid resolution",
+        "KiCad PCB Autorouter - Combined Escalation Mode",
+        "Negotiated Congestion Routing",
+        "Negotiated Routing Complete",
+        "SEARCH MATRIX RESULTS",
+        "COMBINED ESCALATION SUMMARY",
+        "Optimizing traces",
+        "Results",
+        "Saving routed PCB",
+        "Output Connectivity Verification",
+        "DRC Validation",
+        "Routing Suggestions"
+      ],
+      "files": [
+        "fab_profile.json",
+        "net_class_map.json",
+        "out.access_witness.json",
+        "out.kicad_dru",
+        "out.kicad_pcb",
+        "out.kicad_pro",
+        "out.route.json",
+        "out.routing_plan.json",
+        "out.search_failures.json"
+      ]
+    },
+    "single_attempt": {
+      "_note": "#7377 D7: only path writing the out_partial.* snapshot (undecided)",
+      "exit_code": 2,
+      "copper": {
+        "present": true,
+        "segments": 11,
+        "vias": 4,
+        "arcs": 0,
+        "sha256": "d5d2e22103dab1b587e0270ef4466cd629548d156350ef023fd460c026dd239b"
+      },
+      "headers": [
+        "Auto-selecting grid resolution",
+        "KiCad PCB Autorouter",
+        "Loading PCB",
+        "Routing (negotiated)",
+        "Negotiated Congestion Routing",
+        "Negotiated Routing Complete",
+        "Optimizing traces",
+        "Results",
+        "Saving routed PCB",
+        "Output Connectivity Verification",
+        "DRC Validation",
+        "Routing Suggestions"
+      ],
+      "files": [
+        "fab_profile.json",
+        "failed_nets.json",
+        "net_class_map.json",
+        "out.access_witness.json",
+        "out.kicad_dru",
+        "out.kicad_pcb",
+        "out.kicad_pro",
+        "out.route.json",
+        "out.routing_plan.json",
+        "out.search_failures.json",
+        "out_partial.access_witness.json",
+        "out_partial.kicad_pcb",
+        "out_partial.route.json",
+        "out_partial.routing_plan.json",
+        "out_partial.search_failures.json"
+      ]
+    }
+  }
+}

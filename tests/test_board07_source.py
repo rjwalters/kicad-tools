@@ -20,6 +20,8 @@ def test_reviewed_physical_source_matches_fresh_circuit(tmp_path):
         assert 1 in rule["avoid_layers"] and 4 in rule["avoid_layers"]
         if rule.get("length_match_group"):
             assert rule["trace_width"] == 0.18
+            # Issue #7423: the published map tunes the SDRAM groups at route time.
+            assert rule["length_critical"] is True
     assert (
         json.loads((tmp_path / "sdram_constraints.json").read_text())["stackup"]
         == "JLC06161H-2116A"

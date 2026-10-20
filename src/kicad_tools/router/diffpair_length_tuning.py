@@ -181,16 +181,21 @@ MAX_INSERTS_PER_PAIR: int = 3
 # while the residual ~0.45 mm skew is itself still within tolerance.
 SERPENTINE_TARGET_HEADROOM_FRACTION: float = 0.9
 
-# Issue #7546: corner chamfer (in trace widths) at which a bump written as
-# plain copper reads the same in kct and kicad-cli.
-# Pinned kicad-cli 10.0.6 leaves a square loop's flat top uncoupled while kct
-# couples it, so the engines disagree on a plain square bump.  Measured on
-# 0.1, 0.2 and 0.3 mm traces, the engines agree from a chamfer of exactly
-# half a width up (0.09 mm on a 0.2 mm trace still disagrees).  0.55 width
-# keeps a margin well above the 0.1 um coordinate quantum while costing each
-# loop only ~1.3 widths of added length.  Every chamfer is also uncoupled
-# copper on both legs (45-degree runs couple to nothing), so a larger
-# chamfer reads worse in both engines.
+# Issue #7546: corner chamfer (in trace widths) of the skew tuner's
+# plain-copper fallback bumps.
+# kct and pinned kicad-cli 10.0.6 read the same uncoupled length for a plain
+# bump of any chamfer, square included (Issue #7565 closed the square-loop
+# divergence #7546 was first written against).  The half-width floor is
+# where a chamfer starts to *pay*: below it a chamfered bump reads more
+# uncoupled than a square one, and from it up less on thin traces.  On a
+# 0.127 mm pair with 0.5 mm skew the plain figure is 0.90 mm square, 1.10 mm
+# at 0.4 widths, 0.75 mm at 0.5 and 0.78 mm at 0.55, in both engines.  There
+# a square plain bump reads the same as the square tuning pattern, so it
+# would add no fallback option.  0.55 width keeps a margin well above the
+# 0.1 um coordinate quantum while costing each loop only ~1.3 widths of
+# added length.  Every chamfer is also uncoupled copper on both legs
+# (45-degree runs couple to nothing), so a larger chamfer reads worse in
+# both engines.
 SKEW_BUMP_CHAMFER_WIDTHS: float = 0.55
 
 
@@ -284,8 +289,9 @@ def tune_diff_pair_skew(
             writes its bumps as KiCad tuning patterns, and on 06b/06rf/07rf
             chamfered patterned bumps read 0.5-3.4 mm *more* uncoupled in
             pinned kicad-cli (a longer base line uncouples more partner
-            copper).  :data:`SKEW_BUMP_CHAMFER_WIDTHS` is the value at which
-            kct and kicad-cli agree on a bump written as *plain* copper.
+            copper).  :data:`SKEW_BUMP_CHAMFER_WIDTHS` is the chamfer the
+            plain-copper fallback uses, where a plain bump starts to read
+            less uncoupled than a square one.
 
     Returns:
         ``(p_route, n_route, result)`` where ``p_route`` and ``n_route`` are
@@ -535,16 +541,18 @@ def tune_diff_pair_skew(
             # Issue #7521: the figure leaves tuning-pattern copper out on both
             # sides, exactly as kicad-cli 10.0.6 does, so a pattern uncouples
             # the partner span opposite the bump.  A bump whose pattern form
-            # fails is rejected outright.  It is NOT retried as plain copper:
-            # the trombone's perpendicular legs are the known meander case
-            # where kct under-reads KiCad (flat tops coupled in kct, uncoupled
-            # in KiCad), so a plain bump could pass here and fail kicad-cli.
+            # fails is not retried as *square* plain copper: since Issue
+            # #7565 kct reads a square plain bump exactly as kicad-cli does,
+            # but on the tuner's square bumps that figure equals the square
+            # pattern's (0.127 and 0.2 mm pairs, Issue #7593), so the retry
+            # would add nothing there.
             #
             # Issue #7546: once every pattern option has failed, the same
             # placements are retried as *chamfered* plain copper
-            # (:data:`SKEW_BUMP_CHAMFER_WIDTHS`, amplitude >= one width), the
-            # shape kct and kicad-cli measure identically.  A bump is then
-            # committed plain only when its honest figure passes in both.  On
+            # (:data:`SKEW_BUMP_CHAMFER_WIDTHS`, amplitude >= one width), which
+            # reads less uncoupled than the square loop on thin traces (in
+            # both engines; kct and kicad-cli measure plain bumps the same).
+            # A bump is then committed plain only when that figure passes.  On
             # thin traces it can (0.127 mm, skew 0.5: pattern 0.90 mm, plain
             # chamfered 0.78 mm); on 0.2 mm traces the square pattern is
             # always at least as good.
@@ -776,8 +784,9 @@ def _pattern_then_plain_options(
     First every :func:`_placement_options` placement as a tuning pattern
     (``base_config``'s loops).  When the uncoupled guard is active
     (``guarded``) the same search follows as plain copper with chamfered
-    corners, which kct and pinned kicad-cli 10.0.6 measure identically; the
-    caller only pulls it once every pattern option was rejected.
+    corners, which read less uncoupled than square loops on thin traces (kct
+    and pinned kicad-cli 10.0.6 measure plain bumps identically); the caller
+    only pulls it once every pattern option was rejected.
     """
     for route, serp in _placement_options(base_config=base_config, **placement_kwargs):
         yield route, serp, True
@@ -794,9 +803,10 @@ def _pattern_then_plain_options(
 def _min_chamfered_amplitude(config: SerpentineConfig, width: float) -> float:
     """Smallest amplitude a chamfered bump may have (Issue #7546).
 
-    Pinned kicad-cli 10.0.6 agrees with kct on a chamfered loop only when its
-    corner chamfer is at least half a trace width, which needs an amplitude of
-    at least one width (the chamfer is clamped to half the amplitude).  A
+    A chamfered loop reads less uncoupled than a square one only when its
+    corner chamfer is at least half a trace width (in kct and pinned kicad-cli
+    10.0.6 alike), which needs an amplitude of at least one width (the
+    chamfer is clamped to half the amplitude).  A
     smaller need is met by a one-width bump instead: it adds
     ``2 * width * (sqrt(2) - 1)`` and the skew lands inside the tolerance
     window on the other side.  ``0`` for square loops.

@@ -17,6 +17,7 @@ Tests cover:
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from unittest.mock import patch
 
@@ -25,7 +26,26 @@ import pytest
 from kicad_tools.report.collector import SCHEMA_VERSION, ReportDataCollector
 
 FIXTURES = Path(__file__).parent / "fixtures"
-PROJECT_FIXTURES = FIXTURES / "projects"
+_CHECKED_IN_PROJECTS = FIXTURES / "projects"
+# Rebound per test to a tmp copy by ``_tmp_project_fixtures`` below.
+PROJECT_FIXTURES = _CHECKED_IN_PROJECTS
+
+
+@pytest.fixture(autouse=True)
+def _tmp_project_fixtures(tmp_path, monkeypatch):
+    """Point ``PROJECT_FIXTURES`` at a per-test copy of ``test_project.*``.
+
+    The collectors run kicad-cli on the board, and kicad-cli writes a
+    ``test_project.kicad_prl`` beside its input. On the checked-in file that
+    sidecar lands in tests/fixtures/projects/, where it raced
+    ``test_mcp_tool_smoke``'s fixture-integrity hash under xdist (#7588).
+    """
+    copy_dir = tmp_path / "projects"
+    copy_dir.mkdir()
+    for src in _CHECKED_IN_PROJECTS.glob("test_project.kicad_*"):
+        if src.suffix != ".kicad_prl":
+            shutil.copy2(src, copy_dir / src.name)
+    monkeypatch.setitem(globals(), "PROJECT_FIXTURES", copy_dir)
 
 
 # ---------------------------------------------------------------------------

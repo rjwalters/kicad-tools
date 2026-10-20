@@ -228,10 +228,27 @@ def _no_network(monkeypatch):
 
 
 def _fixture_hashes() -> dict[str, str]:
+    """Hash every file under the fixture folder, so a new file is caught too.
+
+    Nothing is excluded: a tool (or any other test) that writes beside the
+    checked-in fixtures -- a ``.bak``, a kicad-cli ``.kicad_prl`` sidecar --
+    is a bug to fix by working on a ``tmp_path`` copy, not noise to filter.
+    #7588 was exactly that: ``test_pcb_manufacturing_export``'s gerber tests
+    ran kicad-cli on the checked-in board and it wrote ``test_project.kicad_prl``
+    here mid-run on another xdist worker.
+    """
     return {
-        p.name: hashlib.sha256(p.read_bytes()).hexdigest()
-        for p in sorted(FIXTURES.glob("test_project.*"))
+        str(p.relative_to(FIXTURES)): hashlib.sha256(p.read_bytes()).hexdigest()
+        for p in sorted(FIXTURES.rglob("*"))
+        if p.is_file()
     }
+
+
+def _describe_fixture_diff(before: dict[str, str], after: dict[str, str]) -> str:
+    added = sorted(set(after) - set(before))
+    removed = sorted(set(before) - set(after))
+    changed = sorted(n for n in set(before) & set(after) if before[n] != after[n])
+    return f"added={added} removed={removed} changed={changed}"
 
 
 def _need_kicad_cli() -> None:
@@ -271,4 +288,7 @@ def test_tool_smoke(name, tmp_path):
         assert result.get("success", True) is True and not result.get("error"), (
             f"{name} failed: {result.get('error')!r}"
         )
-    assert _fixture_hashes() == before, f"{name} modified the checked-in fixtures"
+    after = _fixture_hashes()
+    assert after == before, (
+        f"{name} modified the checked-in fixtures: {_describe_fixture_diff(before, after)}"
+    )

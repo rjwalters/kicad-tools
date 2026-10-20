@@ -255,7 +255,6 @@ issue** — the v0.10.0 set is intentionally frozen.
 | `daemon.roll.manifest.unreadable` | Pause-and-roll resume (#10832) | `{path, outcome, detail, running_version}` (`outcome`: `corrupt`, `unknown-version`; nothing is resumed, restart recovery takes every item) |
 | `daemon.roll.health_failed` | Pause-and-roll resume (#10832) | `{manifest_id, reason, running_version, to_version, failures}` (health did not hold during probation; nothing is resumed until it does) |
 | `daemon.roll.paused.resumed` | Pause-and-roll resume (#10832) | `{manifest_id, phase, from_version, to_version, trigger, running_version, resumed_on, items, resumed, completed, requeued_by_reason, recovered, residue_reaped, health_failures, verify_probation_secs, resume_budget_secs, probation_secs, resume_secs, pause_to_resume_secs, max_age_secs}` (`resumed_on`: `target` or `rollback`) |
-| `forge.event`               | `forge_events.rs` feed consumer (#8765) | `{source: "forge-event-feed", host_id, count, first_seq, last_seq, types}` |
 | `operator_priority.escalation` | Fleet alert (#10164; the star-liveness publisher, #9321, was removed by #11104) | `{slug, issue, key, kind, stage, text, url, host, inherited_from?, resolved}` |
 
 The four `epic.issue.{N}.*` topics were authorized by **#3873** (epic #3842
@@ -280,19 +279,9 @@ roll now pauses its agents and restarts, and narrates that here. See
 They ride the same in-memory bus as the sweep topics and are tailable via
 `subscribe_to_events` / `tail_event_bus`.
 
-The `forge.event` topic was authorized by **#8767** (epic #8764) for the forge
-event-plane feed consumer. Publisher: `loom-daemon/src/forge_events.rs`
-(#8765) — one `Event::Generic` per non-empty verified feed page. Payload:
-`{source: "forge-event-feed", host_id: string, count: u64, first_seq: u64,
-last_seq: u64, types: string[]}`, `types` being the page's event-type names
-sorted and deduplicated. The payload is a **routing hint only, never decision
-input** — it carries counts, sequence bounds and event-type names but no forge
-state, so a consumer that wants state re-reads the forge through its normal
-rate-limited clients and must be idempotent under the per-page dedup contract
-(a prompt may arrive with the events themselves absent from the bus — the
-on-disk journal is the copy, the prompt is a "check now"). Invariant source:
-`docs/adr/0021-forge-event-plane.md` (ADR-0021); implementation:
-`loom-daemon/src/forge_events.rs`.
+The `forge.event` topic (#8767) has no publisher or subscriber since the
+2026-10-19 ruling (#12809) removed the dashboard event-feed client and its
+early-tick consumers.
 
 The `operator_priority.escalation` topic was authorized by **#9321** (the
 delivery half of #9244/#9301). Its first publisher, the star-liveness pass,
@@ -307,8 +296,8 @@ clears). Consumer: the Safehouse narration sink, which renders it as a
 **`Generic`-topic rule.** A `Generic` topic is allowed only while it (a) is
 listed in this inventory, (b) carries a `source` field naming its producing
 subsystem on every payload, and (c) never triggers a write to external state
-without a forge-verified re-read in the consumer. `forge.event` satisfies all
-three; every future prompt topic must too.
+without a forge-verified re-read in the consumer. Every prompt topic must
+satisfy all three.
 
 The four `sweep.issue.{N}.*` payloads gained an additive **`repo`** field in
 **#3929** (`(repo, issue)`-aware sweep visibility, phase c of #3926). The bus is
@@ -6102,7 +6091,7 @@ knobs not yet audited here.
 |------------|--------------|---------|-------|
 | `autonomous.model` | *(per-dispatch `dispatch_sweep` `model` param)* | `sonnet` | Model pinned on **every** daemon-dispatched child (work-finder, epic supervisor, and `dispatch_sweep` when its `model` param is absent). See below (#3944) |
 | `autonomous.workFinder.enabled` | `LOOM_WORK_FINDER` | `false` | Master on/off for the finder loop. **Restart required** — read once, before the loop is spawned; flipping it in config alone does not start/stop an already-running daemon's loop (#5963) |
-| `autonomous.workFinder.intervalSecs` | `LOOM_WORK_FINDER_INTERVAL_SECS` | `60` | Zero/invalid → default. **Restart required** — it also seeds the forge-event poll gate's base cadence and the armed early-tick registration, which a ticker-only re-arm would leave stale (#12090 follow-up) |
+| `autonomous.workFinder.intervalSecs` | `LOOM_WORK_FINDER_INTERVAL_SECS` | `60` | Zero/invalid → default. **Restart required** — the ticker is built once at startup with this period (#12090 follow-up) |
 | `autonomous.workFinder.maxConcurrent` | `LOOM_WORK_FINDER_MAX_CONCURRENT` | `3` | The per-machine **sweep-dispatch** admission knob since #4512, and the only sweep cap since #12406 — **it bounds sweeps only; role-runner agents are admitted outside it and carry their own `autonomous.roleRunner.maxConcurrent` ceiling (#6102)** — an operator ceiling, not a fixed target, tuned empirically from `loom-daemon calibrate` / `status`. Per-machine **and workload-dependent** (#4903): ~10+ on an 8-core API-bound (software) worker, but **2–3** on the same 8 cores running analog/simulation sweeps. **Hot-applies (#9060)** — re-read every multi-workspace tick, so a config edit takes effect on the next tick without a restart; the transition is logged once (`work_finder: configured_max A -> B (source=config)`). The **env override is restart-only** (process environment is fixed at launch) and, while set, shadows config — the daemon logs `maxConcurrent=N is IGNORED` when that happens. The startup log line names the resolved value and its layer, `source=env`/`config`/`default` (#6203). See [Sizing `maxConcurrent`](#sizing-maxconcurrent-per-machine-and-per-workload-4512-4903) below |
 | `autonomous.workFinder.buildBackoff.enabled` | *(config only)* | `true` | Build back-off on review + merge debt (#9410), per repo (#10624). While a repo's is engaged, no new issue build is admitted in that repo whatever its priority; only a verified red-main fix bypasses it. Reads the role runner's demand ledger, so it is inert with the role runner off. `false` → pre-#9410 admission. Non-bool → default. **Live**. See [Build back-off on review and merge debt](#build-back-off-on-review-and-merge-debt-9410) |
 | `autonomous.workFinder.buildBackoff.high` | *(config only)* | `40` | Engage a repo's back-off when **its own** `review + changes + merge` debt is **strictly above** this (#10624). Zero, negative or non-integer → default. **Live** |
@@ -8169,8 +8158,7 @@ pass, on the captain.
 >
 > **A dead captain means no intake anywhere.** Unlabelled issues wait until it
 > is back. The signals are `intake-reconcile` missing from the captain's
-> `host.health.armed_singleton_jobs` and the completed-pass heartbeat (below)
-> going stale in the singleton-output watchdog.
+> `host.health.armed_singleton_jobs`.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -8224,42 +8212,6 @@ captain that dispatches nothing still runs it:
 - **Rate-limit breaker**: no pass while it is open, and the pass stops between
   repos if it opens. A failed or shed listing is not reported to it.
 
-**The completed-pass heartbeat (#10924).** A healthy pass that labels nothing
-emits no forge output, so a watcher could not tell a quiet fleet from a
-stopped reconciler. After every pass the captain folds the outcome into
-`<root>/.loom/state/intake-reconcile/last-pass.json` on the captain
-(`intake_reconcile::singleton::PassHeartbeat`): the record carries the pass's
-counts and outcome, and `last_completed_at` — the timestamp the watchdog ages —
-advances **only** when the pass completed its intended scan (every registered
-repo walked, every listing read). A pass that was stopped early by the
-rate-limit breaker, or shed or failed a listing, is recorded but keeps the
-previous stamp, so it can never masquerade as successful output. Label
-outcomes (a denied write scope, races, reverts, cap leftovers) do not block
-the stamp: the pass retries them next pass by design. A captain with no
-registered repos returns before any scan, so its stamp ages the same way: an
-empty roster surfaces as stale, not as a quiet healthy fleet.
-
-The heartbeat is the `fleet_outputs::SINGLETON_OUTPUTS` row for job
-`intake-reconcile` (record kind `intake-reconcile.pass`, gated on
-`fleet.intakeReconcile.singleton`): a stamp older than twice the *default*
-pass cadence — the row is built from the built-in 300 s constant, so its
-deadline is fixed at 600 s; overriding `LOOM_INTAKE_RECONCILE_INTERVAL_SECS`
-does not move it, and an interval above 600 s would trip the row on every
-quiet gap once the source is wired — or no stamp at all, is a Critical
-`output-missing:` condition once the in-daemon `fleet_alert` output source is
-wired (follow-up slice). The file is local to
-the captain, like the other on-host health records; the cross-host detector
-for a captain that is down entirely is `intake-reconcile` missing from its
-`host.health.armed_singleton_jobs`.
-
-**Rollout signal.** After deploying, confirm on the captain that
-`last_completed_at` in the heartbeat file advances on every pass even when
-nothing was labelled:
-
-```bash
-cat .loom/state/intake-reconcile/last-pass.json   # last_completed_at is fresh
-```
-
 In the forge-call ledger the pass is `intake.list_open`, `intake.recheck`,
 `intake.add_triage` and `intake.remove_triage`; with the singleton on, only
 the captain books them.
@@ -8283,9 +8235,8 @@ label: the write is idempotent and each is preceded by a re-read.
    variable is removed.
 4. Confirm: the captain lists `intake-reconcile` in
    `host.health.armed_singleton_jobs`, logs the covered slugs you expect,
-   is the only host whose `loom-daemon forge calls --by caller` books
-   `intake.*` rows, and its `.loom/state/intake-reconcile/last-pass.json`
-   shows a fresh `last_completed_at` on every pass (#10924).
+   and is the only host whose `loom-daemon forge calls --by caller` books
+   `intake.*` rows.
 5. Remove `LOOM_INTAKE_RECONCILE=0` from the other hosts. They stay off because
    the key, not the environment, now stands them down. A host still on an older
    daemon must keep the variable until it is upgraded.

@@ -32,28 +32,28 @@ How KiCad measures, and so how kct does (pinned on kicad-cli 10.0.6 by
 
 ### How pairs are formed
 
-Issue #6554. kct's pairing rule is inferred **only from black-box kicad-cli
-probes** (input boards and output figures); it matches every committed board:
+Issues #6554 and #7565. kct's pairing rule is inferred **only from black-box
+kicad-cli probes** (input boards and output figures, no KiCad source); the full
+spec, with every claim tied to a probe board and the figure it produced, is
+[`docs/research/diffpair-primitive-pairing-spec.md`](../../research/diffpair-primitive-pairing-spec.md).
+It matches every committed board.
 
 * Each parallel same-layer P/N segment pair couples over its overlap, and the
   pairs are **summed**, not unioned (a net can read negative; kct clamps at 0).
 * A pair does **not** couple when other copper (any net's track, a via or a
   pad, at any distance) crosses the line between the traces at the **start of
-  their overlap**; copper overlapping either trace, or starting later, does not.
+  their overlap**, unless that copper **covers one end of the line** (the point
+  on either trace's centre line). Copper that merely touches a trace somewhere
+  else still blocks.
 * "Start" follows the **P trace's stored direction** (P stored 20 → 0 anchors
-  at x = 20). A trace wholly inside a pad of its own net is not paired.
+  at x = 20). A trace with both ends inside a pad of its own net is not paired;
+  on a pad's edge a point counts as inside on the left and bottom edge and
+  outside on the right and top edge.
 
 ### Known divergences
 
-* **Board 06's regression fixture:** kct reads 4 of 9 pairs 0.07 to 0.21 mm
-  below kicad-cli (USB2_D 8.423 vs 8.573 mm), and three probes with copper
-  touching a trace or a pad edge differ (strict xfails in the 6443 test). A
-  pair that close to its limit can pass kct and fail kicad-cli. Issue #7565.
-* **Third-net copper overlapping a pair trace** (a short) is not modelled; kct
-  models every pad as its (rotated) rectangle. **Arcs** are not measured.
-* **Meanders as plain copper:** KiCad can read a router trombone higher than
-  kct (`tests/test_uncoupled_tuning_pattern_7521.py`), so the skew tuner writes
-  every bump as a tuning pattern, which both engines measure alike.
+* **Not modelled**: other-net copper on a pair trace (a short) and **arcs**.
+  Pads are rotated rectangles, so roundrect edge ties differ (spec section H).
 
 ### The per-terminal figure (kct-only)
 
