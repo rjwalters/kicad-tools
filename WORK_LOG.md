@@ -15,6 +15,51 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-20
 
+- **PR #7599**: test(route): golden harness for kct route's four entry paths (#7377)
+- **PR #7598**: docs(router): drop the closed square-meander divergence from #7546's rationale
+- **PR #7571**: fix(router): verify lattice pair legs at their true width against other nets' copper
+- **PR #7585**: fix(board06): length-match diff pairs with the checker-limit skew tuner
+- **PR #7589**: test: run kicad-cli on tmp fixture copies; smoke hash names fixture diffs
+- **PR #7579**: feat(router): drained-frontier exit for bidirectional A*, opt-in bidirectional Python fallback (#6527)
+- **PR #7595**: chore(loom): resync installed Loom to v0.19.1196
+- **PR #7592**: fix(router): hold match-group meanders to the tuned net's own class; enable board 07 length matching
+- **PR #7590**: fix: pair diff-pair primitives by probe-end coverage, matching kicad-cli
+- **PR #7574**: fix(router): reserve plane-via sites for pour-only 2-pad parts
+- **PR #7587**: fix(router): report hybrid pair-rule failures with blockers; document lattice --seed (#7586)
+- **PR #7572**: feat(router): sourced per-class intra-pair skew limits (Q16)
+- **PR #6661**: fix(diffpair): reproduce KiCad's primitive pairing in uncoupled length
+- **PR #7581**: docs(research): audit clearance-kernel epic acceptance against existing evidence
+- **PR #7564**: feat(router): chamfered trombone corners and an honest plain fallback (#7546)
+- **PR #7568**: chore(schematic): declare paper attribute on SchematicIOMixin for mypy
+- **PR #7555**: ci: tighten board 07 known-opens set to TMDS_D0_N
+- **PR #7563**: fix(release): mint a fresh App token before each writing release phase
+- **PR #7566**: chore(tooling): update loom 0.19.1193→0.19.1194
+- **PR #7556**: ci: key the board 06/07 synthetic-fixture DRC gates by identity (#7367)
+- **PR #7562**: chore(release): keep release PR body under GitHub's 65,536-char limit
+- **PR #7551**: fix(router): via-parity pass for lattice diff-pair extra-pad attachments
+- **PR #7558**: docs(board07): record TMDS_D0_N blocking reason on the 30/31 layout
+- **PR #7461**: fix(router): re-fit match-group meander amplitude so a member never ends past the target
+- **PR #7533**: chore(release): close changelog gaps for #7402 and #7472
+- **PR #7553**: ci: tighten board 05 blocking-net gate from <= 7 to == 0
+- **Issue #7593** (closed): ci: pinned kicad-cli meander-divergence tests fail on main (test_chamfered_bumps_7546, test_uncoupled_tuning_pattern_7521)
+- **Issue #7543** (closed): router: coupled search places pair vias too close to neighbouring pairs once exact pad outlines open corridors (blocks #7517)
+- **Issue #7588** (closed): Flaky: test_mcp_tool_smoke[export_assembly] 'modified the checked-in fixtures' (release PR #7582)
+- **Issue #6527** (closed): router: Router.route_bidirectional has no production caller; wire it into the Python fallback and measure, or remove it
+- **Issue #7423** (closed): Board 07: enable route-time length matching in the committed map after #7397 (no-worse re-measure; #5798 Q4 ruling)
+- **Issue #7565** (closed): Black-box spec: KiCad diff-pair primitive pairing from kicad-cli probes only
+- **Issue #7586** (closed): router: hybrid pair-rule failure reporting + lattice --seed docs (#7580 items 2, 4)
+- **Issue #6554** (closed): diffpair: reproduce KiCad's diff_pair_uncoupled primitive pairing exactly (kct is a lower bound)
+- **Issue #7577** (closed): Audit clearance-kernel epic acceptance against delivered evidence
+- **Issue #7567** (closed): Type Check gate fails on main: io_mixin.py "Cannot determine type of paper" [has-type]
+- **Issue #7093** (closed): router: differential pair gets unequal via counts when a leg falls back to uncoupled routing (board 03 USB_D 2 vs 3; blocks #6394)
+- **Issue #7552** (closed): Board 07 E2E: exact known-opens set (5 nets) fails now that the recipe leaves only TMDS_D0_N open; blocks BOARD_07_CI_ENABLED
+- **Issue #7559** (closed): release-pr.yml: App token expires during the ~1h CI wait, so the gate fails with 401 after CI goes green
+- **Issue #7367** (closed): Key the board 06/07 synthetic-fixture DRC gates by identity: drop routed-drc-tolerance 18/8 and DIFFPAIR_VIOLATION_BASELINE (unblocks BOARD_07_CI_ENABLED; extends #7359)
+- **Issue #5508** (closed): Epic: pad-access invariant — no committed route may strand an unrouted pad
+- **Issue #7561** (closed): release_plan.py: release PR body exceeds GitHub's 65,536-char limit (422), so v0.24.0 PR can't open
+- **Issue #7554** (closed): Board 07 seed-42 re-route: TMDS_D0_N open (30/31)
+- **Issue #7532** (closed): Release gate: add changelog fragment for #7402 and mark #7472 internal (unblock v0.24.0)
+- **Issue #7547** (closed): CI: tighten board 05 blocking-net gate from <= 7 to 0 (or identity-keyed)
 - **PR #7544**: fix(boards): stop committing kct readiness --verify receipts
 - **PR #7542**: feat(check): leave KiCad tuning patterns out of the uncoupled measure (#7521)
 - **PR #7541**: fix: create output dir before ampacity sidecar write; update resolver no-sidecar premise (Closes #7539)
@@ -2587,3 +2632,7 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 ## 2026-10-15 — v0.23.0 release cut
 
 - v0.23.0 release PR opened by hand (manual fallback in RELEASING.md; `AUTO_RELEASE` is unset, so the daily workflow only dry-runs). 451 changelog fragments assembled; release-gate gaps closed in #6752.
+
+## 2026-10-20 — v0.24.0 release cut
+
+- v0.24.0 release PR opened by the automated daily release workflow (`release-pr.yml`, #5776); PRs merged since the previous tag: #7563, #7566, #7556, #7562, #7551, #7558, #7461, #7533, #7553, #7549, #7542, #7530, #7541, #7544, #7540, #7538, #7516, #7537, #7535, #7514, #7531, #7525, #7500, #7524, #7522, #7527, #7528, #7502, #7494, #7515, #7504, #7526, #7513, #7512, #7511, #7523, #7495, #7496, #7499, #7506, #7497, #7476, #7490, #7505, #7493, #7501, #7492, #7457, #7469, #7488, #7486, #7465, #7439, #7477, #7455, #7473, #7470, #7474, #7462, #7471, #7459, #7466, #7451, #7460, #7452, #7438, #7458, #7428, #7456, #7448, #7432, #7454, #7308, #7443, #7450, #7447, #7449, #7444, #7442, #7430, #7434, #7429, #7426, #7436, #7417, #7424, #7431, #7427, #7421, #7419, #7420, #7418, #7406, #7361, #7416, #7350, #7413, #7415, #7414, #7394, #7408, #7412, #7396, #7411, #7407, #7395, #7404, #7400, #7405, #7364, #7397, #7403, #7388, #7398, #7379, #7288, #7340, #7387, #7381, #7371, #7366, #7386, #7382, #7378, #7380, #7375, #7363, #7376, #7360, #7373, #7372, #7370, #7369, #7343, #7354, #7352, #7347, #7346, #7345, #7324, #7341, #7338, #7334, #7285, #7331, #7336, #7289, #7326, #7328, #7330, #7317, #7286, #7329, #7316, #7321, #7318, #7315, #7287, #7306, #7314, #7310, #7313, #7311, #7242, #7302, #7304, #7303, #7307, #7291, #7305, #7282, #7280, #7281, #7301, #7297, #7251, #7245, #7290, #7279, #7274, #7254, #7278, #7271, #7267, #7266, #7265, #7263, #7255, #7248, #7264, #7259, #7252, #7235, #7243, #7249, #7247, #7154, #7191, #7244, #7157, #7238, #7232, #7221, #7231, #7236, #7229, #7217, #7215, #7218, #7234, #7233, #7222, #7226, #7163, #7194, #7225, #7203, #7216, #7219, #7196, #7202, #7212, #7208, #7205, #7207, #7201, #7179, #7195, #7197, #7171, #7189, #7187, #7162, #7182, #7177, #7142, #7174, #7172, #7183, #7184, #7181, #7133, #7160, #7176, #7173, #7137, #6838, #7165, #7168, #7167, #7081, #7156, #7158, #7145, #7151, #7152, #7149, #7146, #7135, #7140, #7134, #7103, #7143, #7144, #7139, #7122, #7131, #7117, #7130, #7128, #7127, #7108, #7125, #7109, #7119, #7104, #7101, #7118, #7113, #7086, #6874, #6900, #7112, #7110, #7090, #7100, #7095, #7102, #7105, #7098, #7055, #7092, #7097, #7089, #7068, #7052, #7088, #7050, #7087, #7085, #7054, #7069, #7061, #7074, #7073, #7049, #7067, #7066, #7015, #7044, #7048, #7032, #7039, #7020, #7040, #7037, #7027, #7036, #7035, #7041, #7007, #7031, #7034, #7030, #7038, #7016, #7021, #7013, #7010, #7018, #7000, #7006, #7005, #6999, #6998, #7002, #7001, #6993, #6992, #6995, #6978, #6972, #6990, #6991, #6988, #6987, #6980, #6981, #6977, #6976, #6974, #6967, #6973, #6971, #6966, #6965, #6964, #6961, #6953, #6952, #6949, #6951, #6955, #6950, #6944, #6942, #6943, #6940, #6939, #6937, #6938, #6936, #6933, #6934, #6931, #6910, #6928, #6926, #6927, #6891, #6921, #6917, #6925, #6918, #6907, #6924, #6905, #6922, #6923, #6919, #6920, #6916, #6909, #6902, #6904, #6901, #6888, #6903, #6884, #6906, #6890, #6886, #6865, #6892, #6880, #6877, #6887, #6879, #6882, #6867, #6868, #6872, #6871, #6870, #6869, #6864, #6764, #6231, #6863, #6861, #6856, #6849, #6859, #6854, #6855, #6851, #6848, #6845, #6843, #6846, #6844, #6841, #6825, #6827, #6833, #6832, #6830, #6831, #6821, #6817, #6818, #6819, #6828, #6811, #6814, #6301, #6813, #6803, #6794, #6808, #6806, #6299, #6302, #6809, #6804, #6797, #6801, #6796, #6793, #6791, #6790, #6789, #6785, #6787, #6783, #6782, #6774, #6777, #6779, #6735, #6776, #6762, #6769, #6729, #6746, #6754, #6768, #6747, #6751, #6767, #6771, #6758, #6745, #6757, #6760, #6734.

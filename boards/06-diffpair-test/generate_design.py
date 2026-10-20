@@ -4039,6 +4039,22 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     except Exception as exc:  # pragma: no cover - degrade gracefully
         print(f"   WARNING: pair-overlap repair skipped: {exc}")
 
+    # Issue #7548: several pair legs are hundreds of 0.05 mm grid-step
+    # segments, which neither the gap tightening below nor the skew tuner
+    # (6d) can use: a run needs one segment of a few mm to host a squeeze or
+    # a trombone.  Fuse each straight same-width chain first; the copper and
+    # the length are unchanged.  Only chains of 5 mm or more: ``kct check``
+    # exempts segments under 1 mm from its impedance rule as breakout, so
+    # fusing a breakout stub would make it a judged one.
+    from kicad_tools.router.optimizer.merge import merge_collinear_same_width
+
+    fused = merge_collinear_same_width(
+        router,
+        {r.net_name for r in router.routes if r.net_name and r.net_name[-1] in "+-"},
+        min_chain_mm=5.0,
+    )
+    print(f"\n6b2. Fused {fused} collinear same-width segment(s) on pair nets (#7548)")
+
     # Issue #7349 (follow-up to #7344): the coupled pre-pass leaves the pair
     # trunks at the breakout pitch.  Squeeze each declared pair's parallel run
     # to the impedance-solved gap.  This runs AFTER the optimiser, nudge and
