@@ -311,3 +311,51 @@ class TestNetZeroAndUnclassifiedNeighbours:
         segs = next(r for r in ar.routes if r.net == 2).segments
         gap = min(copper_gap(segment_shape(s), pad_shape(pad)) for s in segs)
         assert gap + 1e-9 >= 0.2
+
+
+class TestCandidateOwnClassFloor:
+    """Issue #7423: KiCad's pairwise rule is max(class(candidate),
+    class(neighbour)).  The pass floors are the router-global rule, which the
+    caller only relaxes toward the group's class, so on board 07 (global
+    0.15 mm, SDRAM classes 0.175 mm) a DQ15 meander passed the gate 0.154 mm
+    from a GND via whose net resolved to the 0.15 mm Default -- and failed
+    ``kct check``'s ``netclass_clearance_copper`` (SDRAM_BYTE1 0.175 mm)."""
+
+    @staticmethod
+    def _ok_vs_via(centre_y: float, net_clearance_mm: dict[int, float] | None) -> bool:
+        # 0.5 mm via (board 07's GND stitching via) beside the 0.2 mm meander:
+        # edge gap = centre_y - 0.1 (half track) - 0.25 (via radius).
+        via = Via(
+            x=5.0,
+            y=centre_y,
+            drill=0.3,
+            diameter=0.5,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=NEIGHBOUR_NET,
+            net_name=f"N{NEIGHBOUR_NET}",
+        )
+        return _post_insertion_clearance_ok_group(
+            new_segments=_MEANDER,
+            candidate_net_id=GROUP_NET,
+            group_net_ids={GROUP_NET},
+            routes_by_net={NEIGHBOUR_NET: Route(net=NEIGHBOUR_NET, net_name="N9", vias=[via])},
+            intra_group_clearance_mm=0.15,
+            via_clearance_mm=0.15,
+            net_clearance_mm=net_clearance_mm,
+        )
+
+    def test_own_stricter_class_rejects_via_inside_it(self):
+        classes = {GROUP_NET: 0.175, NEIGHBOUR_NET: 0.15}
+        # 0.154 mm gap (the board 07 finding): inside the candidate's 0.175 mm class.
+        assert not self._ok_vs_via(0.504, classes)
+        # 0.18 mm gap clears both classes.
+        assert self._ok_vs_via(0.53, classes)
+
+    def test_own_class_applies_to_neighbour_tracks(self):
+        # 0.16 mm track gap: above the 0.15 mm floor and the neighbour's class,
+        # below the candidate's own 0.175 mm class.
+        assert not _ok_vs_neighbour_track(0.36, 0.15, {GROUP_NET: 0.175, NEIGHBOUR_NET: 0.15})
+        assert _ok_vs_neighbour_track(0.36, 0.15, {GROUP_NET: 0.15, NEIGHBOUR_NET: 0.15})
+
+    def test_without_a_class_map_the_single_threshold_is_kept(self):
+        assert self._ok_vs_via(0.504, None)
