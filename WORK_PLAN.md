@@ -2,7 +2,7 @@
 
 Prioritized roadmap generated from current GitHub label state. Maintained by the Guide triage agent.
 
-*Last updated: 2026-10-19*
+*Last updated: 2026-10-20*
 
 ---
 
@@ -26,7 +26,6 @@ _None._
 - **#6858**: router: coupled pre-pass should keep the better of the joint-search and pose-centreline candidates (compare-and-keep; unblocks #6835)
 - **#7269**: board 07 MIPI_DAT0: recover 0.038 mm skew lost to compare-and-keep (blocks #6858)
 - **#7401**: router: board 06 USB2_D+ uncoupled 12.791 > 12.700 mm after v62 pad-edge floor reorders the single-ended fallback
-- **#7608**: release_tag.py finalize: GitHub Release body exceeds 125k-char limit (422), so v0.24.0 Release not created
 
 ## Ready
 
@@ -47,20 +46,21 @@ Issues currently being built (`loom:building`).
 - **#7580**: router: finish diff-pair via-count parity (continuation of #7093)
 - **#7597**: lattice: verify pair legs at true width against foreign pads too (#7571 follow-up)
 - **#7602**: stitcher: post-route pour stitching places a GND via 0.02 mm from U2-29's exposed-pad mask (board 05, --reserve-pour-only-passives)
-- **#7608**: release_tag.py finalize: GitHub Release body exceeds 125k-char limit (422), so v0.24.0 Release not created
 - **#7612**: Board 07 fixture: 4 diff pairs fail skew with no_suitable_segment (TMDS_D2, MIPI_DAT1, MIPI_DAT0, MIPI_CLK)
+- **#7614**: `schema.hierarchy.build_hierarchy` resolves sub-sheet files against the process working directory, then the root's directory, never the parent sheet's directory (wrong sheet read, nested sheets dropped silently)
+- **#7615**: Schematic BOM lists power symbols and PWR_FLAGs from a project symbol library (`#U0101`, `#FLG...`): `is_power_symbol` ignores the library symbol's `(power)` flag and `#` references
+- **#7616**: Schematic BOM (`extract_bom`, `kct bom`) lists the first placement's references for every placement of a repeated sheet, so the other placements' parts are missing; `build_hierarchy` also drops the subtree under a repeated sheet
+- **#7617**: Schematic hierarchy walkers read only the `Sheetfile` property; with KiCad 6's `Sheet file` / `Sheet name` keys the sub-sheets are silently dropped (BOM, `sch set-*`, annotation, netlist)
 - **#7626**: test flake: test_route_entry_path_goldens partial/* drift on Test job
-- **#7632**: Q31 probe: does KiCad's tuning-pattern exclusion cover the partner leg beside a skew bump?
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#7584**: fix(router): native pad test applies each pad's own net-class clearance
-- **#7601**: fix(router): measure foreign pads at true width in coupled pair legs
+- **#7591**: feat: gate diff-pair skew bumps on excursion, jog width and source proximity
 - **#7604**: fix(route): apply pad-edge floor to oracle pour-link weld vias
-- **#7609**: fix: truncate GitHub Release body to stay under the 125k-char limit
 - **#7628**: fix: tune board 07's four skewed diff pairs and stop the skew gate vetoing inherited near-misses
+- **#7629**: test(route): name the differing field in entry-path golden drift failures
 - **#7631**: fix(route): run stitching, failed-net export and parity summary on every tail
 
 ## Approved (Awaiting Merge)
@@ -68,8 +68,8 @@ PRs waiting on Judge (`loom:review-requested`).
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
 - **#7517**: fix(router): judge lattice pad keep-outs against the true pad outline
+- **#7584**: fix(router): native pad test applies each pad's own net-class clearance
 - **#7623**: fix(router): skew tuner measures quantized length and seats a taller loop at a host's end
-- **#7633**: test: black-box probes of KiCad tuning-pattern partner exclusion (Q31)
 
 ## Proposed
 
@@ -106,6 +106,10 @@ Issues carrying `loom:curated`.
 - **#7602**: stitcher: post-route pour stitching places a GND via 0.02 mm from U2-29's exposed-pad mask (board 05, --reserve-pour-only-passives) *(curated)*
 - **#7611**: Board 07 fixture: DDR_DATA_BYTE_0 and MIPI_CSI_LANES group length skew over tolerance *(curated)*
 - **#7612**: Board 07 fixture: 4 diff pairs fail skew with no_suitable_segment (TMDS_D2, MIPI_DAT1, MIPI_DAT0, MIPI_CLK) *(curated)*
+- **#7614**: `schema.hierarchy.build_hierarchy` resolves sub-sheet files against the process working directory, then the root's directory, never the parent sheet's directory (wrong sheet read, nested sheets dropped silently) *(curated)*
+- **#7615**: Schematic BOM lists power symbols and PWR_FLAGs from a project symbol library (`#U0101`, `#FLG...`): `is_power_symbol` ignores the library symbol's `(power)` flag and `#` references *(curated)*
+- **#7616**: Schematic BOM (`extract_bom`, `kct bom`) lists the first placement's references for every placement of a repeated sheet, so the other placements' parts are missing; `build_hierarchy` also drops the subtree under a repeated sheet *(curated)*
+- **#7617**: Schematic hierarchy walkers read only the `Sheetfile` property; with KiCad 6's `Sheet file` / `Sheet name` keys the sub-sheets are silently dropped (BOM, `sch set-*`, annotation, netlist) *(curated)*
 - **#7619**: Board 07 fixture: DQS and TMDS_D1 diff pairs routed with unequal via counts (N leg +2 vias), causing multi-mm skew *(curated)*
 - **#7626**: test flake: test_route_entry_path_goldens partial/* drift on Test job *(curated)*
 
@@ -133,12 +137,12 @@ Issues carrying `loom:curated`.
 |------|-------|
 | Operator merge-risk holds | 0 |
 | Very important | 1 |
-| Important | 4 |
+| Important | 3 |
 | Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 13 |
-| PRs awaiting review | 6 |
+| In Progress (`loom:building`) | 15 |
+| PRs awaiting review | 5 |
 | Approved PRs awaiting merge | 3 |
-| Curated | 33 |
+| Curated | 37 |
 | Architect / Hermit proposals | 5 |
 | Active epics | 7 |
 <!-- guide:plan-body:end -->
