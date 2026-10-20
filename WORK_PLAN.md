@@ -11,8 +11,7 @@ Prioritized roadmap generated from current GitHub label state. Maintained by the
 
 Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a human merge decision is missing.
 
-- **#7576**: fix(router): re-route crossing lattice diff-pair extras jointly for via parity
-- **#7582**: chore(release): v0.24.0
+_None._
 
 ## Very Important
 
@@ -27,41 +26,50 @@ Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a h
 - **#6858**: router: coupled pre-pass should keep the better of the joint-search and pose-centreline candidates (compare-and-keep; unblocks #6835)
 - **#7269**: board 07 MIPI_DAT0: recover 0.038 mm skew lost to compare-and-keep (blocks #6858)
 - **#7401**: router: board 06 USB2_D+ uncoupled 12.791 > 12.700 mm after v62 pad-edge floor reorders the single-ended fallback
+- **#7608**: release_tag.py finalize: GitHub Release body exceeds 125k-char limit (422), so v0.24.0 Release not created
 
 ## Ready
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-- **#7377**: route: collapse the 4 copy-pasted post-route tails into one pipeline -- --length-match-diffpairs, --stitch-power-planes, --progressive-clearance, --bus-routing silently no-op on the default --auto-layers path
-- **#7580**: router: finish diff-pair via-count parity (continuation of #7093)
+_None._
 
 ## In Progress
 
 Issues currently being built (`loom:building`).
 
-- **#7491**: router: C++ search finds no USB3_RX1- path on board 06 once USB2_D routes coupled (blocks #7401)
+- **#5240**: CI runtime: reduce measured Test, Board06 E2E and diff-pair regression job medians
+- **#7377**: route: collapse the 4 copy-pasted post-route tails into one pipeline -- --length-match-diffpairs, --stitch-power-planes, --progressive-clearance, --bus-routing silently no-op on the default --auto-layers path
 - **#7503**: Lattice router: pad-clearance check uses a square around pads, not the true (rounded/rotated) outline, so legal via/track points are rejected (board 03 VBUS, #7463)
 - **#7521**: Diff-pair skew compensation per best practice (Q16): exclude tuning bumps from uncoupled metric, emit KiCad tuning patterns, geometry gates, sourced per-class skew limits
 - **#7548**: Board 06 synthetic fixture: 9 diff pairs over max skew on the seed-42 re-route (identity-allowed in check_diffpair_coverage.py)
 - **#7569**: C++ exact pad test holds every pad to the board's widest class clearance (Python applies the pair rule)
-- **#7575**: kct check impedance rule judges a 0.1 mm pad-escape stub as a coupled diff-pair run
-- **#7594**: Match-group tuner resolves power nets to Default class instead of their mapped class (AUX)
+- **#7580**: router: finish diff-pair via-count parity (continuation of #7093)
 - **#7597**: lattice: verify pair legs at true width against foreign pads too (#7571 follow-up)
+- **#7602**: stitcher: post-route pour stitching places a GND via 0.02 mm from U2-29's exposed-pad mask (board 05, --reserve-pour-only-passives)
+- **#7608**: release_tag.py finalize: GitHub Release body exceeds 125k-char limit (422), so v0.24.0 Release not created
+- **#7612**: Board 07 fixture: 4 diff pairs fail skew with no_suitable_segment (TMDS_D2, MIPI_DAT1, MIPI_DAT0, MIPI_CLK)
+- **#7626**: test flake: test_route_entry_path_goldens partial/* drift on Test job
+- **#7632**: Q31 probe: does KiCad's tuning-pattern exclusion cover the partner leg beside a skew bump?
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#7596**: fix: tuner neighbour clearance honours authored net-class floors
-- **#7600**: fix(board06): fuse pair-leg grid steps so the skew tuner can host a trombone
+- **#7584**: fix(router): native pad test applies each pad's own net-class clearance
 - **#7601**: fix(router): measure foreign pads at true width in coupled pair legs
+- **#7604**: fix(route): apply pad-edge floor to oracle pour-link weld vias
+- **#7609**: fix: truncate GitHub Release body to stay under the 125k-char limit
+- **#7628**: fix: tune board 07's four skewed diff pairs and stop the skew gate vetoing inherited near-misses
+- **#7631**: fix(route): run stitching, failed-net export and parity summary on every tail
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-- **#7576**: fix(router): re-route crossing lattice diff-pair extras jointly for via parity
-- **#7582**: chore(release): v0.24.0
+- **#7517**: fix(router): judge lattice pad keep-outs against the true pad outline
+- **#7623**: fix(router): skew tuner measures quantized length and seats a taller loop at a host's end
+- **#7633**: test: black-box probes of KiCad tuning-pattern partner exclusion (Q31)
 
 ## Proposed
 
@@ -89,15 +97,17 @@ Issues carrying `loom:curated`.
 - **#7518**: DSN export: verify a Specctra router doesn't double-flip back-side padstack layers (deferred from #7481 / #7496) *(curated)*
 - **#7521**: Diff-pair skew compensation per best practice (Q16): exclude tuning bumps from uncoupled metric, emit KiCad tuning patterns, geometry gates, sourced per-class skew limits *(curated)*
 - **#7548**: Board 06 synthetic fixture: 9 diff pairs over max skew on the seed-42 re-route (identity-allowed in check_diffpair_coverage.py) *(curated)*
-- **#7550**: Board 07 synthetic fixture: 6 diff pairs + 2 match groups over skew tolerance on the seed-42 re-route (identity-allowed in check_matchgroup_coverage.py) *(curated)*
 - **#7557**: Board 07: TMDS_D0_N pad U4.B2 has no legal exit; needs placement rework or joint TMDS escape-corridor allocation (#3673) *(curated)*
 - **#7569**: C++ exact pad test holds every pad to the board's widest class clearance (Python applies the pair rule) *(curated)*
 - **#7573**: router: board 05 +5V/GND pour completeness depends on where nTRIP lands (C10 stitch sites unreserved) *(curated)*
-- **#7575**: kct check impedance rule judges a 0.1 mm pad-escape stub as a coupled diff-pair run *(curated)*
 - **#7580**: router: finish diff-pair via-count parity (continuation of #7093) *(curated)*
 - **#7583**: board 06: impedance finding on USB2_D- once the native pad test applies per-pad classes (follow-up to #7569) *(curated)*
-- **#7594**: Match-group tuner resolves power nets to Default class instead of their mapped class (AUX) *(curated)*
 - **#7597**: lattice: verify pair legs at true width against foreign pads too (#7571 follow-up) *(curated)*
+- **#7602**: stitcher: post-route pour stitching places a GND via 0.02 mm from U2-29's exposed-pad mask (board 05, --reserve-pour-only-passives) *(curated)*
+- **#7611**: Board 07 fixture: DDR_DATA_BYTE_0 and MIPI_CSI_LANES group length skew over tolerance *(curated)*
+- **#7612**: Board 07 fixture: 4 diff pairs fail skew with no_suitable_segment (TMDS_D2, MIPI_DAT1, MIPI_DAT0, MIPI_CLK) *(curated)*
+- **#7619**: Board 07 fixture: DQS and TMDS_D1 diff pairs routed with unequal via counts (N leg +2 vias), causing multi-mm skew *(curated)*
+- **#7626**: test flake: test_route_entry_path_goldens partial/* drift on Test job *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -121,14 +131,14 @@ Issues carrying `loom:curated`.
 
 | Bucket | Count |
 |------|-------|
-| Operator merge-risk holds | 2 |
+| Operator merge-risk holds | 0 |
 | Very important | 1 |
-| Important | 3 |
-| Ready (`loom:issue`) | 2 |
-| In Progress (`loom:building`) | 8 |
-| PRs awaiting review | 3 |
-| Approved PRs awaiting merge | 2 |
-| Curated | 31 |
+| Important | 4 |
+| Ready (`loom:issue`) | 0 |
+| In Progress (`loom:building`) | 13 |
+| PRs awaiting review | 6 |
+| Approved PRs awaiting merge | 3 |
+| Curated | 33 |
 | Architect / Hermit proposals | 5 |
 | Active epics | 7 |
 <!-- guide:plan-body:end -->
