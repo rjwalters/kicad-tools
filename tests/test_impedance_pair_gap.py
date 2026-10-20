@@ -80,3 +80,23 @@ def test_partner_run_at_least_as_long_as_width_is_judged():
         _seg("USB_D-", 10.6, width=0.25, x1=10.0, x2=10.25),
     ]
     assert _check(_rule(300.0), segs)
+
+
+def test_fragmented_partner_run_is_still_judged():
+    # A 5 mm run whose partner is split into 0.2 mm (sub-width) pieces is a
+    # coupled run: the union of the pieces, not each piece, is measured.
+    segs = [_seg("USB_D+", 10.0, width=0.25, x1=10.0, x2=15.0)]
+    x = 10.0
+    while x < 15.0 - 1e-9:
+        segs.append(_seg("USB_D-", 10.6, width=0.25, x1=x, x2=round(x + 0.2, 6)))
+        x = round(x + 0.2, 6)
+    assert _check(_rule(300.0), segs)
+
+
+def test_j1_b7_style_stub_is_not_a_coupled_run():
+    # Pad-centre stub of 0.1 mm beside a long breakout segment.
+    segs = [
+        _seg("USB_D+", 57.2, width=0.25, x1=112.0, x2=116.0),
+        _seg("USB_D-", 57.55, width=0.25, x1=112.9, x2=113.0),
+    ]
+    assert not _check(_rule(300.0), segs)
