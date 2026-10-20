@@ -2847,12 +2847,13 @@ class LatticePathfinder:
         if dist((pad.x, pad.y), target) <= 1e-9:
             return [(pad.x, pad.y)]
         blocker = ""
+        pad_extra = self._pair_leg_pad_extra(committed, half, clearance)
         for poly in dogleg_attach_candidates((pad.x, pad.y), target):
             ok = True
             for a, b in zip(poly, poly[1:], strict=False):
                 if dist(a, b) <= 1e-9:
                     continue
-                if pads_block_segment_grown(self.obstacles, a, b, layer, pair_nets, 0.0):
+                if pads_block_segment_grown(self.obstacles, a, b, layer, pair_nets, pad_extra):
                     blocker = "pad"
                     ok = False
                     break
@@ -2877,6 +2878,22 @@ class LatticePathfinder:
         # ``pair-pad-attach`` decline says which check fired, and on what.
         self._attach_blocker = f"{pad.ref}.{pad.pin} on layer {layer}: {blocker}"
         return None
+
+    def _pair_leg_pad_extra(
+        self, committed: CommittedCopper, half: float, clearance: float | None
+    ) -> float:
+        """Growth of the static pad keep-outs for a leg of true ``half``/class (#7597).
+
+        The pad rects are sized for a board-default track (``agent_radius``),
+        so a wider or higher-clearance pair leg needs them grown by the
+        difference -- the same surcharge the single-ended legs use.  Pad
+        classes above the board default are already folded into the rects.
+        ``half <= 0`` (legacy callers) adds nothing.
+        """
+        if half <= 0.0:
+            return 0.0
+        clr = committed.clearance if clearance is None else clearance
+        return max(0.0, half + clr - self._agent_radius)
 
     @staticmethod
     def _pair_leg_clear(
@@ -3194,10 +3211,14 @@ class LatticePathfinder:
                 # copper -- measured as a board-default track, board 06rf's
                 # 0.275 mm USB3_RX1+ leg shipped 0.126 mm from USB3_TX1+'s
                 # gateway via (0.150 required).
+                leg_pad_extra = self._pair_leg_pad_extra(committed, trace_w / 2.0, leg_clr)
                 for a, b in zip(full, full[1:], strict=False):
                     if dist(a, b) <= 1e-9:
                         continue
-                    if pads_block_segment_grown(self.obstacles, a, b, layer, pair_nets, 0.0):
+                    # Issue #7597: foreign pads at the leg's TRUE width/class.
+                    if pads_block_segment_grown(
+                        self.obstacles, a, b, layer, pair_nets, leg_pad_extra
+                    ):
                         return None, "pair-leg-blocked"
                     if not committed.seg_clear(a, b, layer, net):
                         return None, "pair-leg-blocked"

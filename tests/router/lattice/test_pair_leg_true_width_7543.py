@@ -67,28 +67,31 @@ def test_attach_accepts_via_clear_at_true_width() -> None:
     assert out is not None
 
 
-def test_attach_foreign_pad_check_is_unchanged() -> None:
-    # KNOWN GAP (deferred, not a principled exclusion): foreign pads keep the
-    # static-mask check with no width surcharge, so a wide-class leg is still
-    # under-measured against other nets' pads by trace_w/2 - default/2
-    # (0.0375 mm on 06rf USB3).  The post-route gate and kicad-cli DRC still
-    # see it.  This pins today's behaviour: a pad 0.126 mm from the wide leg's
-    # edge is beyond the board-default keep-out, so it still attaches.
-    edge = 5.0 + _USB3_HALF + 0.126
-    foreign = Pad(
-        x=3.0,
-        y=edge + 0.2,
-        width=0.4,
-        height=0.4,
-        net=7,
-        net_name="USB3_TX1+",
-        layer=Layer.F_CU,
-        ref="U2",
-        pin="B2",
-    )
-    pf, pad = _board([foreign])
-    committed = pf._fresh_committed()
-    assert pf._pair_attach(pad, (4.0, 5.0), 0, 1, {1, 2}, committed, _USB3_HALF, 0.15) is not None
+def test_attach_rejects_foreign_pad_inside_true_width_clearance() -> None:
+    # Issue #7597 (was the #7543 known gap): a pad 0.126 mm from the wide
+    # leg's edge is beyond the board-default keep-out but inside the 0.150 mm
+    # class clearance, so the attach must now decline it -- and still accept
+    # one that is clear at the true width.
+    def attach(gap: float):
+        foreign = Pad(
+            x=3.0,
+            y=5.0 + _USB3_HALF + gap + 0.2,
+            width=0.4,
+            height=0.4,
+            net=7,
+            net_name="USB3_TX1+",
+            layer=Layer.F_CU,
+            ref="U2",
+            pin="B2",
+        )
+        pf, pad = _board([foreign])
+        committed = pf._fresh_committed()
+        return pf, pf._pair_attach(pad, (4.0, 5.0), 0, 1, {1, 2}, committed, _USB3_HALF, 0.15)
+
+    pf, out = attach(0.126)
+    assert out is None
+    assert "pad" in pf._attach_blocker
+    assert attach(0.16)[1] is not None
 
 
 def test_class_clearance_raises_the_attach_requirement() -> None:
@@ -150,3 +153,37 @@ def test_emitted_pair_legs_keep_true_width_clearance_to_foreign_via(
             assert gap >= 0.15 - 1e-6, (
                 f"leg edge {gap:.3f} mm from the foreign via (0.150 required)"
             )
+
+
+@pytest.mark.parametrize("pad_at", [(3.8, 4.85), (3.8, 6.15)])
+def test_emitted_pair_legs_keep_true_width_clearance_to_foreign_pad(
+    pad_at: tuple[float, float],
+) -> None:
+    # Issue #7597: the finish() leg loop measures foreign PADS at the leg's
+    # true width and class too.  Without the surcharge these fixtures ship a
+    # 0.275 mm leg 0.125 mm from the pad (0.150 required); with it the pair
+    # re-routes clear or declines.  Asserts the emitted copper's edge gap, so
+    # a legitimate re-route still passes.
+    foreign = Pad(
+        x=pad_at[0],
+        y=pad_at[1],
+        width=0.4,
+        height=0.4,
+        net=7,
+        net_name="OTHER",
+        layer=Layer.F_CU,
+        ref="U2",
+        pin="1",
+    )
+    pf, pc = _pair_board([foreign])
+    pc = replace(pc, net_class=_WIDE, pitch=0.375)
+    pf.build()
+    res, _reason = pf._route_pair_impl(pc, committed=pf._fresh_committed(), history={}, present=1.0)
+    if res is None:
+        # A decline (pair-leg-blocked) ships no copper, so nothing to violate.
+        return
+    for route in res.routes:
+        for seg in route.segments:
+            d = seg_seg_dist(pad_at, pad_at, (seg.x1, seg.y1), (seg.x2, seg.y2))
+            gap = d - 0.2 - seg.width / 2.0  # square 0.4 mm pad
+            assert gap >= 0.15 - 1e-6, f"leg edge {gap:.3f} mm from the foreign pad"
