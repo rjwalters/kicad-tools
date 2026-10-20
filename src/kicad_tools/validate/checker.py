@@ -133,6 +133,7 @@ class DRCChecker:
         strict_connectivity: bool = True,
         copper_oz_outer: float | None = None,
         copper_oz_inner: float | None = None,
+        declared_spec_currents: list[str] | None = None,
         current_path_specs: Sequence[CurrentPathSpec] | None = None,
         mask_copper_request: MaskCopperRequest | None = None,
         physical_copper_gap_mm: float | None = None,
@@ -259,8 +260,14 @@ class DRCChecker:
         self.copper_oz = copper_oz
         self.suppress_library = suppress_library
         self.net_class_map = net_class_map
+        # Issue #7206: currents the project spec declares (labels only); drives
+        # ``ampacity: unknown`` coverage when no net carries ``target_ampacity``.
+        self.declared_spec_currents = list(declared_spec_currents or [])
         # Set by :meth:`check_impedance`; read by ``kct check`` coverage.
         self.impedance_unmeasured_pairs: list[tuple[str, str]] = []
+        # Issue #7206 (F3): declared nets whose copper pour could not be
+        # rated by ``check_ampacity`` -- ``{net: reason}`` for coverage.
+        self.ampacity_unmeasured_nets: dict[str, str] = {}
         # Issue #6044: ``routing_policy`` options.  ``require_routing_policy``
         # makes a sensitive net class with no declared policy an error
         # (``kct check --require-routing-policy``).  With
@@ -531,6 +538,9 @@ class DRCChecker:
         "silkscreen_text_height": CATEGORY_ADVISORY,
         "silkscreen_text_thickness": CATEGORY_ADVISORY,
         "silk_ref_obscured": CATEGORY_ADVISORY,
+        # Missing courtyard (Issue #7204): an assembly-review warning (a
+        # missing input to the overlap check), not a fab-blocking defect.
+        "courtyard_missing": CATEGORY_ADVISORY,
         # ---- Manufacturing DRC: fab-blocking copper/clearance/hole/
         #      edge/mask/drill/geometry. -----------------------------
         "clearance": CATEGORY_MANUFACTURING,
@@ -853,7 +863,8 @@ class DRCChecker:
         A courtyard that cannot be resolved to a polygon emits an ``info``
         finding rather than being silently skipped, and a waiver naming a
         component absent from the board emits an ``info`` "unused waiver"
-        finding (Issue #4137).
+        finding (Issue #4137).  A non-exempt footprint with no courtyard at
+        all emits a ``courtyard_missing`` warning (Issue #7204).
 
         Returns:
             DRCResults containing ``courtyards_overlap`` findings (error or
@@ -1217,7 +1228,9 @@ class DRCChecker:
 
         specs = derive_ampacity_specs(self.net_class_map)
         rule = AmpacityRule(specs=specs)
-        return self._absolutize(rule.check(self.pcb, self.design_rules))
+        results = rule.check(self.pcb, self.design_rules)
+        self.ampacity_unmeasured_nets = dict(rule.unmeasured_pour_nets)
+        return self._absolutize(results)
 
     def check_path_ampacity(self) -> DRCResults:
         """Check declared branch-specific current paths (Issue #4980/#5124).

@@ -180,6 +180,23 @@ def dogleg_points(
     return [(x1, y1), mid, (x2, y2)]
 
 
+def dogleg_length_extra_mm(
+    x1: float, y1: float, x2: float, y2: float, *, tol_deg: float = ANGLE_TOL_DEG
+) -> float:
+    """Length a :func:`dogleg_points` replacement adds over the straight chord.
+
+    ``0.0`` for an already-aligned segment.  The two doglegs of a chord
+    (default and ``axis_first``) have the same length, so this is exact
+    whichever variant :func:`quantize_pcb_file` picks.
+    """
+    dx = x2 - x1
+    dy = y2 - y1
+    if is_45_aligned(dx, dy, tol_deg):
+        return 0.0
+    adx, ady = abs(dx), abs(dy)
+    return max(adx, ady) + (math.sqrt(2.0) - 1.0) * min(adx, ady) - math.hypot(dx, dy)
+
+
 # ---------------------------------------------------------------------------
 # By-construction emission choke point (issue #3907)
 # ---------------------------------------------------------------------------

@@ -6,8 +6,10 @@
 # now discovers open CHILD PRs based on the parent branch via a LIVE forge query
 # (`gh pr list --base <parent>`, never the daemon registry) and, per child:
 #   - Safe   (child issue NOT loom:building): invokes reconcile-stack.sh.
-#   - Unsafe (child issue still loom:building): skips the rebase and posts a
-#     deferred-reconciliation comment on the child PR instead.
+#   - Unsafe (child issue still loom:building AND its lease is live or
+#     unreadable, #12759): skips the rebase and posts a deferred-reconciliation
+#     comment on the child PR instead. A loom:building child with no live lease
+#     is reconciled like a safe one.
 # The whole step is best-effort and must never fail the parent merge, and it is
 # a no-op for non-feature/issue-N parent branches and non-GitHub forges.
 #
@@ -162,6 +164,13 @@ if [[ "$1" == "api" ]]; then
       for _a in "$@"; do [[ "$_prev" == "--input" ]] && _in="$_a"; _prev="$_a"; done
       _rest="${path#repos/}"; _repo="${_rest%%/issues/*}"
       _num="${_rest#*/issues/}"; _num="${_num%%/*}"
+      # #12759: a comments GET (no --input) is the lease read on a loom:building
+      # child's issue. Empty output = no live lease; a comments-N.fail fixture
+      # makes the read fail, which must keep the child deferred.
+      if [[ -z "$_in" ]]; then
+        [[ -f "$STUB_DIR_FROM_ENV/comments-$_num.fail" ]] && exit 1
+        exit 0
+      fi
       echo "issue comment $_num --repo $_repo --body $(jq -r .body "$_in" 2>/dev/null)" >> "$STUB_DIR_FROM_ENV/gh-calls.log"
       exit 0
       ;;
@@ -315,18 +324,28 @@ assert_contains "$(read_recon)" "reconcile-stack.sh 501 feature/issue-100" \
   "Safe child #501 (issue #201 not building) -> reconcile-stack.sh 501 feature/issue-100"
 assert_eq "" "$(read_gh_log)" "Safe child -> no deferred-reconciliation comment"
 
-# T3: unsafe child (issue still loom:building) -> comment posted on the child PR;
-# reconcile-stack.sh NOT invoked.
+# T3: loom:building child with NO live lease (#12759) -> the label is only a
+# claim; no Builder is on the branch, so reconcile-stack.sh IS invoked and no
+# deferral comment is posted.
 reset_logs
 PR_BRANCH="feature/issue-100"
 write_prlist "feature/issue-100" '[{"number":502,"headRefName":"feature/issue-202"}]'
 _auto_reconcile_stacked_children
-assert_eq "" "$(read_recon)" "Unsafe child #502 (issue #202 building) -> reconcile-stack.sh NOT invoked"
-# Since #4856 the comment is posted through forge_gh_comment_rl_safe, whose
-# happy path is `gh issue comment <pr> --repo <nwo> --body ...` (the REST
-# comments endpoint it falls back to is shared by issues and PRs, so the wrapper
-# uses one CLI verb for both) — assert on that shape, not the pre-#4856
-# `gh pr comment` literal.
+assert_contains "$(read_recon)" "reconcile-stack.sh 502 feature/issue-100" \
+  "building child #502 (issue #202, no live lease) -> reconcile-stack.sh invoked (#12759)"
+assert_eq "" "$(read_gh_log)" "building child with no live lease -> no deferred-reconciliation comment"
+
+# T3b: loom:building child whose lease read FAILS -> unknown is never free:
+# deferred, reconcile-stack.sh NOT invoked. Since #4856 the comment is posted
+# through forge_gh_comment_rl_safe, whose happy path is
+# `gh issue comment <pr> --repo <nwo> --body ...`.
+reset_logs
+touch "$STUB_DIR/comments-202.fail"
+PR_BRANCH="feature/issue-100"
+write_prlist "feature/issue-100" '[{"number":502,"headRefName":"feature/issue-202"}]'
+_auto_reconcile_stacked_children
+rm -f "$STUB_DIR/comments-202.fail"
+assert_eq "" "$(read_recon)" "Unsafe child #502 (issue #202 building, lease unreadable) -> reconcile-stack.sh NOT invoked"
 assert_contains "$(read_gh_log)" "issue comment 502 --repo owner/repo" \
   "Unsafe child -> deferred-reconciliation comment posted on PR #502"
 
@@ -363,10 +382,12 @@ unset LOOM_TEST_RECON_EXIT
 
 # T7: multiple children, mixed safe/unsafe -> each handled independently.
 reset_logs
+touch "$STUB_DIR/comments-202.fail"   # #12759: unreadable lease keeps #502 deferred
 PR_BRANCH="feature/issue-100"
 write_prlist "feature/issue-100" \
   '[{"number":501,"headRefName":"feature/issue-201"},{"number":502,"headRefName":"feature/issue-202"}]'
 _auto_reconcile_stacked_children
+rm -f "$STUB_DIR/comments-202.fail"
 assert_contains "$(read_recon)" "reconcile-stack.sh 501 feature/issue-100" \
   "Mixed set: safe child #501 reconciled"
 assert_not_contains "$(read_recon)" "502" \
@@ -493,12 +514,15 @@ assert_contains "$(read_recon)" "reconcile-stack.sh 601 feature/harness-ops-350"
 assert_eq "" "$(read_gh_log)" "harness-ops safe child (issue #201 not building) -> no deferred comment"
 
 # T16: a feature/harness-ops-<N> CHILD whose issue is loom:building is
-# recognized as claimed and deferred, not rebased out from under a live Builder.
+# recognized as claimed; with an unreadable lease it is deferred, not rebased
+# out from under a possibly-live Builder.
 reset_logs
+touch "$STUB_DIR/comments-202.fail"
 PR_BRANCH="feature/harness-ops-350"
 write_prlist "feature/harness-ops-350" '[{"number":602,"headRefName":"feature/harness-ops-202"}]'
 _auto_reconcile_stacked_children
-assert_eq "" "$(read_recon)" "harness-ops child #602 (issue #202 building) -> reconcile-stack.sh NOT invoked"
+rm -f "$STUB_DIR/comments-202.fail"
+assert_eq "" "$(read_recon)" "harness-ops child #602 (issue #202 building, lease unreadable) -> reconcile-stack.sh NOT invoked"
 assert_contains "$(read_gh_log)" "issue comment 602 --repo owner/repo" \
   "harness-ops building child -> deferred-reconciliation comment posted on PR #602"
 

@@ -57,9 +57,13 @@ Measured experiments on `kct route`; several record negative results.
 | [Nogood cache](kct-route-nogood-cache-experiment.md) | Validity-aware nogood cache for negotiated retries |
 | [Phase profile](kct-route-phase-profile.md) | Where `kct route` time goes on boards 02 and 03 |
 | [GPU / batched routing design](gpu-routing-design.md) | Profile-first GPU routing go/no-go: don't build (Amdahl ceilings below 2x) |
+| [Pad-access expansion reassessment](pad-access-expansion-reassessment.md) | Epic #5508 Phase 4 (lattice/mesh) gate: defer |
 | [Rip-up](kct-route-ripup-experiment.md) | KRT-style sequential N+1 rip-up: no gain |
 | [Expand, route, shrink](expand-route-shrink-experiment.md) | Routing an expanded placement then shrinking it back |
 | [Diff-pair bench, phase 0](diffpair-bench-phase0.md) | Diff-pair benchmark baseline |
+| [Diff-pair primitive pairing spec](diffpair-primitive-pairing-spec.md) | Black-box, probe-only spec of how kicad-cli pairs P/N primitives into coupled length (Issue #7565) |
+| [Tuning-pattern uncoupled exclusion](kicad-tuning-pattern-uncoupled-exclusion.md) | Black-box probes: a KiCad tuning pattern drops the bump from the uncoupled figure but not the partner beside it, unless that partner span is a member too (Issue #7632, Q31) |
+| [Diff-pair skew compensation](diffpair-skew-compensation.md) | Sourced skew limits and uncoupled-length budgets for the diff-pair skew fixer |
 | [Bundle crossing report](bundle-crossing-report.md) | Measured hit and false-alarm counts |
 | [Pad-budget via footprint](pad-budget-via-footprint-6415.md) | Via-footprint charging on board 05 |
 | [kct check vs kicad-cli lengths](kicad-length-bench-6725.md) | Per-net length and pair skew comparison |
@@ -81,5 +85,15 @@ Measured experiments on `kct route`; several record negative results.
 | [Grid pad shape](grid-pad-shape.md) | Router pad shape coverage |
 | [Router pad rotation audit](router-pad-rotation-audit.md) | Router pad rotation consumer audit |
 | [MCP clearance and grid audit](mcp-clearance-grid-audit.md) | MCP clearance and router grid audit |
+| [Clearance-kernel acceptance audit](clearance-kernel-acceptance-audit.md) | Epic #5509 criterion-to-evidence reconciliation (#7577) |
 | [Connectivity contact paths](connectivity-contact-paths-5133.md) | Existing physical contact paths in the Board06 extractor |
 | [Copper LVS zone suppression](copper-lvs-zone-suppression.md) | Independent Board05 evidence |
+
+## Adding a note
+
+1. Add `docs/research/<topic>.md` and date it; say how each source was obtained.
+2. Add one line (title plus a one-sentence summary) to the matching table above.
+   `tests/test_docs_reachability.py` fails if a note is not listed here.
+3. If the note evaluates a neighbouring project, also add or update its entry in
+   the ecosystem registry (`src/kicad_tools/ecosystem/data/projects.toml`, then
+   `uv run python scripts/ecosystem_render.py --write`).

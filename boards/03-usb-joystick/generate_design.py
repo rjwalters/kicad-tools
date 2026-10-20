@@ -789,6 +789,10 @@ def route_pcb(input_path: Path, output_path: Path, *, use_saved_plan: bool = Tru
     # uncoupled-length limit (USB2_FS: 6.35 mm x components on the net) and
     # by routing_plan.usb_geometry (>=4 mm common run, <=16 mm copper,
     # <=2.5 mm skew).
+    # Issue #7206: project.kct declares 100 mA (USB_C current_max, input.current);
+    # kct never infers which net carries it, so map it onto the supply nets.
+    for net in ["VCC", "VBUS"]:
+        net_class_map[net] = _dc_replace(net_class_map[net], target_ampacity=0.1)
     sidecar_path = output_path.parent / "net_class_map.json"
     sidecar_path.write_text(_json.dumps(net_class_map_to_dict(net_class_map), indent=2))
     print(f"   Wrote net-class-map sidecar: {sidecar_path}")

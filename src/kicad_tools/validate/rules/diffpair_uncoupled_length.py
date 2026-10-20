@@ -28,14 +28,28 @@ two-net boards (``tests/test_diffpair_uncoupled_length_6443.py``):
   degree skew already makes both traces uncoupled.  There is **no distance
   limit** unless a ``diff_pair_gap (max ..)`` constraint is present, and kct
   emits only ``(min ..)``.  Two parallel traces 10 mm apart are coupled.
+* **Tuning patterns are left out** (Issue #7521, operator ruling Q16).
+  Tracks listed as ``members`` of a KiCad ``(generated ... (type
+  tuning_pattern))`` object are dropped from the measure on both sides: they
+  are not uncoupled copper of their own net, and the other net does not
+  couple to them.  So the partner's copper opposite a skew bump, now beside
+  nothing, *does* count.  Measured on kicad-cli 10.0.6 with a 45-degree bump
+  on N (excursion 0.4 mm over a 1.8 mm base line) and min-only gap rules:
+  1.1314 mm as plain copper (the bump's diagonals), 1.8 mm as a pattern
+  (the P span opposite it).
 * **Via barrels are not counted.**  A via is not track length: a pair whose
   vias sit side by side loses nothing, and offset vias cost only the
   track copper that no longer has a partner beside it.
 
 :func:`measure_uncoupled` reproduces exactly that, so kct and kicad-cli agree
-on pass/fail per pair; the known divergence (arcs are not measured, and
-KiCad's number is known to misreport on meanders) is listed in
-``docs/guides/diff-pairs/08-uncoupled-length.md``.
+on pass/fail per pair; the known divergences (arcs are not measured, other-net
+copper overlapping a pair trace and non-rect pad edges are not modelled) are
+listed in ``docs/guides/diff-pairs/08-uncoupled-length.md``.
+
+Which primitives pair (Issues #6554, #7565) is written down, claim by claim with
+the probe board and kicad-cli figure behind each, in
+``docs/research/diffpair-primitive-pairing-spec.md``.  It comes from kicad-cli
+probes alone; no KiCad source was consulted.
 
 The limit
 =========
@@ -90,8 +104,9 @@ from __future__ import annotations
 
 import heapq
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from ..violations import DRCResults, DRCViolation
 from .base import DRCRule
@@ -105,6 +120,9 @@ if TYPE_CHECKING:
 #: parallel.  Measured on kicad-cli 10.0.6: 0.005 degrees couples, 0.02 does not.
 KICAD_PARALLEL_TOLERANCE_DEG = 0.01
 _SIN_TOL = math.sin(math.radians(KICAD_PARALLEL_TOLERANCE_DEG))
+
+#: Copper closer than this to a trace's edge counts as touching it (mm).
+_TOUCH_EPS = 1e-6
 
 #: Float-comparison slack (mm) on a limit, as the sibling skew rule has.
 UNCOUPLED_EPSILON_MM = 1e-6
@@ -140,7 +158,35 @@ def is_per_terminal_finding(v: DRCViolation) -> bool:
     return v.rule_id == "diffpair_uncoupled_length" and PER_TERMINAL_PHRASE in v.message
 
 
-Segment = tuple[float, float, float, float, str]  # x1, y1, x2, y2, layer
+#: ``(x1, y1, x2, y2, layer)``, optionally followed by the track width (needed
+#: only to decide whether other copper stands between two traces).
+Segment = tuple[float, float, float, float, str] | tuple[float, float, float, float, str, float]
+#: ``(x1, y1, x2, y2, width, layer or None)``: a track (layer set) or a via (``None``:
+#: all layers, a zero-length segment) that may stand between a pair's traces.
+Obstacle = tuple[float, float, float, float, float, str | None]
+
+
+class PadRect(NamedTuple):
+    """A pad as a rotated rectangle in board coordinates."""
+
+    cx: float
+    cy: float
+    hx: float  # half extents along the pad's own axes
+    hy: float
+    cos: float
+    sin: float
+    layers: frozenset[str]
+    net: str
+
+
+@dataclass(frozen=True)
+class Copper:
+    """The board copper a pair's traces may be separated by (see :func:`measure_uncoupled`)."""
+
+    tracks: Sequence[Obstacle] = ()
+    pads: Sequence[PadRect] = ()
+
+
 #: ``(footprint reference, uncoupled mm charged to it, region source)``.
 TerminalFigure = tuple[str, float, str]
 
@@ -163,6 +209,10 @@ class PairMeasure:
     #: Empty when the net has no terminal on the board.
     p_terminals: tuple[TerminalFigure, ...] = ()
     n_terminals: tuple[TerminalFigure, ...] = ()
+    #: Track copper (mm) owned by KiCad tuning patterns (Issue #7521), left
+    #: out of the uncoupled figures.
+    p_pattern_mm: float = 0.0
+    n_pattern_mm: float = 0.0
 
     @property
     def uncoupled_mm(self) -> float:
@@ -210,25 +260,294 @@ def _coupled_interval(own: Segment, other: Segment) -> tuple[float, float] | Non
     return (start, end) if end > start else None
 
 
-def _coupled_length(own: list[Segment], partner: list[Segment]) -> float:
-    """Length of ``own`` that runs beside ``partner`` copper (union per segment)."""
-    total = 0.0
-    for seg in own:
-        spans = sorted(s for s in (_coupled_interval(seg, p) for p in partner) if s)
-        covered = 0.0
-        cursor = 0.0
-        for start, end in spans:
-            start = max(start, cursor)
-            if end > start:
-                covered += end - start
-                cursor = end
-        total += covered
-    return total
+def _seg_dist(
+    p1: tuple[float, float],
+    p2: tuple[float, float],
+    q1: tuple[float, float],
+    q2: tuple[float, float],
+) -> float:
+    """Minimum distance between segments ``p1-p2`` and ``q1-q2`` (either may be a point)."""
+
+    def point_seg(p: tuple[float, float], a: tuple[float, float], b: tuple[float, float]) -> float:
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        d2 = dx * dx + dy * dy
+        t = 0.0 if d2 <= 0.0 else max(0.0, min(1.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / d2))
+        return math.hypot(p[0] - (a[0] + t * dx), p[1] - (a[1] + t * dy))
+
+    def orient(a: tuple[float, float], b: tuple[float, float], c: tuple[float, float]) -> float:
+        return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+
+    d1, d2 = orient(p1, p2, q1), orient(p1, p2, q2)
+    d3, d4 = orient(q1, q2, p1), orient(q1, q2, p2)
+    if d1 * d2 < 0.0 and d3 * d4 < 0.0:
+        return 0.0  # proper crossing
+    return min(
+        point_seg(p1, q1, q2),
+        point_seg(p2, q1, q2),
+        point_seg(q1, p1, p2),
+        point_seg(q2, p1, p2),
+    )
 
 
-def measure_uncoupled(own: list[Segment], partner: list[Segment]) -> float:
-    """Uncoupled length (mm) of ``own`` against ``partner``: KiCad's per-net figure."""
-    return max(0.0, sum(_length(s) for s in own) - _coupled_length(own, partner))
+def _width(seg: Segment) -> float:
+    return float(seg[5]) if len(seg) > 5 else 0.0
+
+
+def _pad_local(pad: PadRect, x: float, y: float) -> tuple[float, float]:
+    """``(x, y)`` in the pad's own axes (KiCad's negated-angle convention)."""
+    dx, dy = x - pad.cx, y - pad.cy
+    return dx * pad.cos - dy * pad.sin, dx * pad.sin + dy * pad.cos
+
+
+def _pad_on_layer(pad: PadRect, layer: str) -> bool:
+    return layer in pad.layers or "*.Cu" in pad.layers
+
+
+def _pad_seg_dist(pad: PadRect, p: tuple[float, float], q: tuple[float, float]) -> float:
+    """Distance from segment ``p-q`` to the pad rectangle (0 when they intersect)."""
+    x1, y1 = _pad_local(pad, *p)
+    x2, y2 = _pad_local(pad, *q)
+    hx, hy = pad.hx, pad.hy
+    # Liang-Barsky clip of the segment against the box.
+    t0, t1 = 0.0, 1.0
+    dx, dy = x2 - x1, y2 - y1
+    for pk, qk in ((-dx, x1 + hx), (dx, hx - x1), (-dy, y1 + hy), (dy, hy - y1)):
+        if pk == 0.0:
+            if qk < 0.0:
+                break
+        else:
+            r = qk / pk
+            if pk < 0.0:
+                t0 = max(t0, r)
+            else:
+                t1 = min(t1, r)
+            if t0 > t1:
+                break
+    else:
+        return 0.0
+
+    def to_box(x: float, y: float) -> float:
+        return math.hypot(max(abs(x) - hx, 0.0), max(abs(y) - hy, 0.0))
+
+    corners = [(sx * hx, sy * hy) for sx in (-1, 1) for sy in (-1, 1)]
+    return min(
+        to_box(x1, y1),
+        to_box(x2, y2),
+        *(_seg_dist((x1, y1), (x2, y2), c, c) for c in corners),
+    )
+
+
+def _buried(seg: Segment, net: str, pads: Sequence[PadRect]) -> bool:
+    """True when both ends of ``seg`` lie inside one pad of its own net.
+
+    A stub that is nothing but pad copper is not a trace KiCad pairs.
+    """
+    for pad in pads:
+        if pad.net != net or not _pad_on_layer(pad, seg[4]):
+            continue
+        if _pad_contains(pad, seg[0], seg[1]) and _pad_contains(pad, seg[2], seg[3]):
+            return True
+    return False
+
+
+def _pad_contains(pad: PadRect, x: float, y: float) -> bool:
+    """True when ``(x, y)`` is inside the pad, with kicad-cli's rule for its edges.
+
+    Measured on kicad-cli 10.0.6 with a probe end placed on each edge of a
+    1 x 1 mm rect pad (spec group E): a point on the left or bottom edge (min x,
+    max y) is inside, one on the right or top edge (max x, min y) is outside.
+    That is a crossing-number test over the pad's corners in board axes, the
+    ray cast towards +x and the y interval half-open as ``(lo, hi]``.
+    Coordinates are snapped to nanometres so a shared edge compares equal.
+    """
+
+    def snap(v: float) -> int:
+        return round(v * 1e6)
+
+    corners = [
+        (
+            snap(pad.cx + sx * pad.hx * pad.cos + sy * pad.hy * pad.sin),
+            snap(pad.cy - sx * pad.hx * pad.sin + sy * pad.hy * pad.cos),
+        )
+        for sx, sy in ((-1, -1), (1, -1), (1, 1), (-1, 1))
+    ]
+    px, py = snap(x), snap(y)
+    inside = False
+    for (ax, ay), (bx, by) in zip(corners, corners[1:] + corners[:1], strict=True):
+        if (ay >= py) != (by >= py) and px < ax + (py - ay) * (bx - ax) / (by - ay):
+            inside = not inside
+    return inside
+
+
+def _track_contains(ob: Obstacle, x: float, y: float) -> bool:
+    """True when ``(x, y)`` lies in the copper of track/via ``ob`` (edge included)."""
+    c1, c2 = (ob[0], ob[1]), (ob[2], ob[3])
+    return _seg_dist(c1, c2, (x, y), (x, y)) <= ob[4] / 2.0 + _TOUCH_EPS
+
+
+def _blocked(a: Segment, b: Segment, t0: float, copper: Copper) -> bool:
+    """True when copper intervenes between ``a`` and ``b`` where their overlap starts.
+
+    The probe runs from ``a``'s centreline, ``t0`` mm from its start, straight
+    across to ``b``'s centreline.  Any other primitive on the layer (a track of
+    either net or a third net, a via, a pad) whose copper reaches the probe
+    blocks the pairing -- except copper that covers one END of the probe, the
+    point on ``a``'s or ``b``'s centreline: that is the same conductor as the
+    trace, not something standing between them.  It is the end that decides,
+    not whether the copper touches the trace somewhere else (spec group B).
+    """
+    lo = math.hypot(a[2] - a[0], a[3] - a[1])
+    ux, uy = (a[2] - a[0]) / lo, (a[3] - a[1]) / lo
+    pa = (a[0] + ux * t0, a[1] + uy * t0)
+    bx, by = b[2] - b[0], b[3] - b[1]
+    lb = math.hypot(bx, by)
+    vx, vy = bx / lb, by / lb
+    k = (pa[0] - b[0]) * vx + (pa[1] - b[1]) * vy
+    pb = (b[0] + vx * k, b[1] + vy * k)
+    if math.hypot(pb[0] - pa[0], pb[1] - pa[1]) <= _TOUCH_EPS:
+        return False
+    minx, maxx = min(pa[0], pb[0]), max(pa[0], pb[0])
+    miny, maxy = min(pa[1], pb[1]), max(pa[1], pb[1])
+    for ob in copper.tracks:
+        if ob[5] is not None and ob[5] != a[4]:
+            continue
+        r = ob[4] / 2.0
+        if (
+            max(ob[0], ob[2]) + r < minx
+            or min(ob[0], ob[2]) - r > maxx
+            or max(ob[1], ob[3]) + r < miny
+            or min(ob[1], ob[3]) - r > maxy
+        ):
+            continue
+        if _track_contains(ob, *pa) or _track_contains(ob, *pb):
+            continue
+        if _seg_dist((ob[0], ob[1]), (ob[2], ob[3]), pa, pb) < r - _TOUCH_EPS:
+            return True
+    for pad in copper.pads:
+        if not _pad_on_layer(pad, a[4]):
+            continue
+        reach = math.hypot(pad.hx, pad.hy)
+        if (
+            pad.cx + reach < minx
+            or pad.cx - reach > maxx
+            or pad.cy + reach < miny
+            or pad.cy - reach > maxy
+        ):
+            continue
+        if _pad_contains(pad, *pa) or _pad_contains(pad, *pb):
+            continue
+        if _pad_seg_dist(pad, pa, pb) <= _TOUCH_EPS:
+            return True
+    return False
+
+
+def _coupled_spans(
+    own: Sequence[Segment],
+    partner: Sequence[Segment],
+    copper: Copper | None = None,
+    own_leads: bool = True,
+    own_net: str = "",
+    partner_net: str = "",
+) -> list[list[tuple[float, float]]]:
+    """Per ``own`` segment, the spans (from its start) that couple to some partner.
+
+    One span per unblocked parallel ``own``/``partner`` pair.  A stub buried
+    in its own pad has no spans.  ``own_leads`` says whose stored direction
+    fixes where a pair's overlap "starts" for the blocking probe (the P net's,
+    in KiCad).  This is the single pairing rule behind both the total
+    (:func:`measure_uncoupled`) and the per-terminal figure.
+    """
+    pads = copper.pads if copper else ()
+    partner_live = [s for s in partner if not (pads and _buried(s, partner_net, pads))]
+    out: list[list[tuple[float, float]]] = []
+    for a in own:
+        spans: list[tuple[float, float]] = []
+        if not (pads and _buried(a, own_net, pads)):
+            for b in partner_live:
+                span = _coupled_interval(a, b)
+                if span is None:
+                    continue
+                if copper:
+                    if own_leads:
+                        t0 = span[0]
+                    else:
+                        # b leads: its start is a's low end when the two run the
+                        # same way, a's high end when they run opposite ways.
+                        same = (a[2] - a[0]) * (b[2] - b[0]) + (a[3] - a[1]) * (b[3] - b[1]) > 0.0
+                        t0 = span[0] if same else span[1]
+                    if _blocked(a, b, t0, copper):
+                        continue
+                spans.append(span)
+        out.append(spans)
+    return out
+
+
+def _coupled_length(
+    own: Sequence[Segment],
+    partner: Sequence[Segment],
+    copper: Copper | None = None,
+    own_leads: bool = True,
+    own_net: str = "",
+    partner_net: str = "",
+) -> float:
+    """Sum, over unblocked parallel ``own``/``partner`` pairs, of their overlap.
+
+    Pairs are summed, not unioned: two partners beside the same stretch both
+    count, as in KiCad (which can report a negative uncoupled length).
+    """
+    return sum(
+        b - a
+        for spans in _coupled_spans(own, partner, copper, own_leads, own_net, partner_net)
+        for a, b in spans
+    )
+
+
+def measure_uncoupled(
+    own: Sequence[Segment],
+    partner: Sequence[Segment],
+    copper: Copper | None = None,
+    own_leads: bool = True,
+    own_net: str = "",
+    partner_net: str = "",
+) -> float:
+    """Uncoupled length (mm) of ``own`` against ``partner``: KiCad's per-net figure.
+
+    ``copper`` is the rest of the board's copper (see :class:`Copper`); without
+    it every parallel overlap couples.  ``own_net`` / ``partner_net`` name the
+    nets of the two lists so a trace buried in its own pad can be recognised.
+    """
+    coupled = _coupled_length(own, partner, copper, own_leads, own_net, partner_net)
+    return max(0.0, sum(_length(s) for s in own) - coupled)
+
+
+def _board_copper(pcb: PCB) -> Copper:
+    """Every track, via and pad of ``pcb`` as pairing obstacles."""
+    from kicad_tools.core.geometry import rotate_pad_offset
+
+    tracks: list[Obstacle] = [
+        (s.start[0], s.start[1], s.end[0], s.end[1], s.width, s.layer) for s in pcb.segments
+    ]
+    tracks += [
+        (v.position[0], v.position[1], v.position[0], v.position[1], v.size, None) for v in pcb.vias
+    ]
+    pads: list[PadRect] = []
+    for fp in pcb.footprints:
+        for pad in fp.pads:
+            ox, oy = rotate_pad_offset(pad.position[0], pad.position[1], fp.rotation)
+            ang = math.radians(pad.rotation)
+            pads.append(
+                PadRect(
+                    fp.position[0] + ox,
+                    fp.position[1] + oy,
+                    pad.size[0] / 2.0,
+                    pad.size[1] / 2.0,
+                    math.cos(ang),
+                    math.sin(ang),
+                    frozenset(pad.layers),
+                    pad.net_name or "",
+                )
+            )
+    return Copper(tracks, pads)
 
 
 # -- per-terminal figure (Issue #6615) ----------------------------------------
@@ -255,14 +574,14 @@ def _subtract(base: list[Interval], cut: list[Interval]) -> list[Interval]:
     return [(a, b) for a, b in out if b - a > 1e-9]
 
 
-def uncoupled_intervals(own: Segment, partner: list[Segment]) -> list[Interval]:
-    """Spans of ``own`` (distance from its start) beside no ``partner`` copper.
+def uncoupled_intervals(own: Segment, coupled: Sequence[Interval]) -> list[Interval]:
+    """Spans of ``own`` (distance from its start) outside the ``coupled`` spans.
 
-    The complement of :func:`_coupled_interval`'s union, so the spans of a
-    segment always sum to its share of :func:`measure_uncoupled`.
+    ``coupled`` come from :func:`_coupled_spans`, the pairing behind
+    :func:`measure_uncoupled`.  Overlapping partners are unioned here, so the
+    spans sum to at least that segment's share of the total (which sums pairs).
     """
-    coupled = [s for s in (_coupled_interval(own, p) for p in partner) if s]
-    return _subtract([(0.0, _length(own))], coupled)
+    return _subtract([(0.0, _length(own))], list(coupled))
 
 
 @dataclass(frozen=True)
@@ -501,20 +820,29 @@ def measure_per_terminal(
     own_id: int,
     own_name: str,
     gather_ignore: str | float = GATHER_IGNORE_DEFAULT,
+    copper: Copper | None = None,
+    own_leads: bool = True,
+    partner_name: str = "",
+    excluded: list[bool] | None = None,
 ) -> tuple[TerminalFigure, ...]:
     """Per-terminal uncoupled figures of one net (Issue #6615).
 
     The uncoupled spans of ``own`` minus every terminal's gather-ignore
     region, charged to terminals by :func:`_attribute`.  Empty without
-    terminals.
+    terminals.  ``excluded[i]`` marks ``own[i]`` as tuning-pattern copper
+    (Issue #7521): it still connects the net's graph but counts nothing.
     """
     terminals = net_terminals(pcb, own_name, gather_ignore)
     if not terminals:
         return ()
     regions = [t.region for t in terminals if t.region is not None]
-    counted = []
-    for s in own:
-        spans = uncoupled_intervals(s, partner)
+    coupled = _coupled_spans(own, partner, copper, own_leads, own_name, partner_name)
+    counted: list[list[Interval]] = []
+    for i, (s, cs) in enumerate(zip(own, coupled, strict=True)):
+        if excluded is not None and excluded[i]:
+            counted.append([])
+            continue
+        spans = uncoupled_intervals(s, cs)
         if spans and regions:
             inside = [iv for r in regions for iv in _inside_intervals(s, r)]
             spans = _subtract(spans, inside)
@@ -560,32 +888,61 @@ def measure_pair(
     n_name: str,
     components: dict[str, int] | None = None,
     gather_ignore: str | float = GATHER_IGNORE_DEFAULT,
+    pattern_members: frozenset[str] | None = None,
 ) -> PairMeasure:
     """Measure one pair on ``pcb`` the way KiCad's ``diff_pair_uncoupled`` does.
 
     Also measures the kct-only per-terminal figures (Issue #6615) with the
     given ``gather_ignore`` region; they do not change the KiCad figure.
+
+    Issue #7521: tracks owned by a KiCad tuning pattern (``pattern_members``,
+    read from the board when ``None``) are left out of both nets' uncoupled
+    figures and out of the partner copper the other net couples to.
     """
+    if pattern_members is None:
+        pattern_members = board_pattern_members(pcb)
     p_segs: list[Segment] = []
     n_segs: list[Segment] = []
-    for net_id, bucket in ((p_id, p_segs), (n_id, n_segs)):
+    p_bump: list[bool] = []
+    n_bump: list[bool] = []
+    for net_id, bucket, bump in ((p_id, p_segs, p_bump), (n_id, n_segs, n_bump)):
         for s in pcb.segments_in_net(net_id):
-            bucket.append((s.start[0], s.start[1], s.end[0], s.end[1], s.layer))
+            bucket.append((s.start[0], s.start[1], s.end[0], s.end[1], s.layer, s.width))
+            bump.append(bool(s.uuid) and s.uuid in pattern_members)
+    copper = _board_copper(pcb)
+    # Issue #7521: tuning-pattern members (skew bumps) are out of the measure
+    # on both sides, as pinned kicad-cli 10.0.6 does.
+    p_meas = [seg for seg, b in zip(p_segs, p_bump, strict=True) if not b]
+    n_meas = [seg for seg, b in zip(n_segs, n_bump, strict=True) if not b]
     comps = components if components is not None else net_component_counts(pcb)
     return PairMeasure(
         p_name=p_name,
         n_name=n_name,
         p_routed_mm=sum(_length(s) for s in p_segs),
         n_routed_mm=sum(_length(s) for s in n_segs),
-        p_uncoupled_mm=measure_uncoupled(p_segs, n_segs),
-        n_uncoupled_mm=measure_uncoupled(n_segs, p_segs),
+        p_uncoupled_mm=measure_uncoupled(p_meas, n_meas, copper, True, p_name, n_name),
+        n_uncoupled_mm=measure_uncoupled(n_meas, p_meas, copper, False, n_name, p_name),
         vias_p=sum(1 for _ in pcb.vias_in_net(p_id)),
         vias_n=sum(1 for _ in pcb.vias_in_net(n_id)),
         components_p=comps.get(p_name, 0),
         components_n=comps.get(n_name, 0),
-        p_terminals=measure_per_terminal(pcb, p_segs, n_segs, p_id, p_name, gather_ignore),
-        n_terminals=measure_per_terminal(pcb, n_segs, p_segs, n_id, n_name, gather_ignore),
+        p_terminals=measure_per_terminal(
+            pcb, p_segs, n_meas, p_id, p_name, gather_ignore, copper, True, n_name, p_bump
+        ),
+        n_terminals=measure_per_terminal(
+            pcb, n_segs, p_meas, n_id, n_name, gather_ignore, copper, False, p_name, n_bump
+        ),
+        p_pattern_mm=sum(_length(seg) for seg, b in zip(p_segs, p_bump, strict=True) if b),
+        n_pattern_mm=sum(_length(seg) for seg, b in zip(n_segs, n_bump, strict=True) if b),
     )
+
+
+def board_pattern_members(pcb: PCB) -> frozenset[str]:
+    """Uuids of the tracks owned by a KiCad tuning pattern on ``pcb`` (Issue #7521)."""
+    from kicad_tools.router.tuning_pattern import tuning_pattern_member_uuids
+
+    root = getattr(pcb, "_sexp", None)
+    return frozenset() if root is None else tuning_pattern_member_uuids(root)
 
 
 def uncoupled_limit(limits: PairThresholds, components: int) -> tuple[float | None, str | None]:
@@ -674,13 +1031,16 @@ class DiffPairUncoupledLengthRule(DRCRule):
             return results
         names = {n.number: n.name for n in pcb.nets.values() if n.name}
         comps = net_component_counts(pcb)
+        members = board_pattern_members(pcb)
         for a, b in sorted(self._engaged):
             na, nb = names.get(a), names.get(b)
             if not na or not nb:
                 continue
             limits = self._limits.get((a, b))
             gather = getattr(limits, "gather_ignore", GATHER_IGNORE_DEFAULT)
-            measure = measure_pair(pcb, a, b, na, nb, comps, gather_ignore=gather)
+            measure = measure_pair(
+                pcb, a, b, na, nb, comps, gather_ignore=gather, pattern_members=members
+            )
             if not measure.routed:
                 continue  # unrouted pair: no copper, no uncoupled number
             results.rules_checked += 1
@@ -767,6 +1127,9 @@ class DiffPairUncoupledLengthRule(DRCRule):
             f"uncoupled length {m.uncoupled_mm:.3f} mm "
             f"(P {m.p_uncoupled_mm:.3f}, N {m.n_uncoupled_mm:.3f})"
         )
+        pattern_mm = m.p_pattern_mm + m.n_pattern_mm
+        if pattern_mm > 0.0:
+            detail += f", {pattern_mm:.3f} mm of tuning-pattern copper excluded"
         if m.uncoupled_mm > limit + UNCOUPLED_EPSILON_MM:
             assert limits is not None
             results.add(

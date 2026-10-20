@@ -122,6 +122,33 @@ def run_erc(sch_path: Path) -> bool:
         return True
 
 
+# Declared supply currents from project.kct (A), mapped onto nets (Issue #7206).
+AMPACITY_TARGETS_A = {"VCC": 0.1}
+
+
+def declare_ampacity_targets(output_dir: Path) -> None:
+    """Declare the spec's supply currents as ``target_ampacity`` (Issue #7206).
+
+    project.kct declares these currents; kct never infers which net carries
+    them, so the net-class-map sidecar must map them or ``kct check`` reports
+    ``ampacity: unknown``.
+    """
+    import json
+
+    # Issue #7539: runs right after route_pcb, before anything else is
+    # guaranteed to have created output_dir (a stubbed or partial route never
+    # writes the routed PCB), so create it rather than masking the
+    # route_success fast-fail gate's message with an ENOENT.
+    output_dir.mkdir(parents=True, exist_ok=True)
+    sidecar = output_dir / "net_class_map.json"
+    data = json.loads(sidecar.read_text()) if sidecar.exists() else {}
+    for net, amps in AMPACITY_TARGETS_A.items():
+        entry = data.setdefault(net, {"name": "Power", "priority": 1, "trace_width": 0.25})
+        entry["target_ampacity"] = amps
+    sidecar.write_text(json.dumps(data, indent=2))
+    print(f"   Declared target_ampacity on {', '.join(AMPACITY_TARGETS_A)}: {sidecar}")
+
+
 def route_pcb(input_path: Path, output_path: Path) -> bool:
     """Route all twelve physical nets, apply reviewed escapes, require native DRC.
 
@@ -365,6 +392,7 @@ def main() -> int:
         # Step 5: Route PCB
         routed_path = output_dir / "charlieplex_3x3_routed.kicad_pcb"
         route_success = route_pcb(pcb_path, routed_path)
+        declare_ampacity_targets(output_dir)
 
         # Finalization can reject physical DRC failures as well as incomplete
         # routing. Preserve the actual preceding diagnostic instead of assuming

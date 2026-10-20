@@ -123,25 +123,17 @@ def _declares_ampacity(net_class_map: Any) -> bool:
     return any(getattr(nc, "target_ampacity", None) is not None for nc in net_class_map.values())
 
 
-def zone_only_ampacity_nets(checker: DRCChecker) -> list[str]:
-    """Nets with a declared current, a copper pour, and no routed track copper.
+def ampacity_pour_unknown(unmeasured: dict[str, str]) -> Coverage:
+    """``ampacity`` coverage when declared nets' pours could not be rated.
 
-    ``AmpacityRule`` measures track segments only, so such a net is carried
-    entirely by a pour and nothing about it was measured (Issue #7210).
+    ``AmpacityRule`` rates a net carried by a copper pour from the pour's
+    narrowest neck between the net's pads (Issue #7206, F3).  When no
+    defensible estimate exists -- no committed fill, fewer than two pads,
+    copper that does not join the pads -- the net was never measured, so
+    zero findings is not a pass (Issue #7210).
     """
-    from .ampacity_specs import derive_ampacity_specs
-
-    declared = derive_ampacity_specs(getattr(checker, "net_class_map", None))
-    if not declared:
-        return []
-    pcb = checker.pcb
-    tracked = {s.net_name for s in getattr(pcb, "segments", []) or [] if s.net_name}
-    poured = {
-        z.net_name
-        for z in getattr(pcb, "zones", []) or []
-        if z.net_name and getattr(z, "keepout", None) is None
-    }
-    return sorted(n for n in declared if n in poured and n not in tracked)
+    detail = "; ".join(f"{net}: {why}" for net, why in sorted(unmeasured.items()))
+    return unknown("ampacity", f"pour not measurable ({detail})")
 
 
 def _unfilled_pour_zones(checker: DRCChecker) -> int:
@@ -166,6 +158,24 @@ def _diff_pair_candidates(checker: DRCChecker) -> int:
         return 0
 
 
+def _unevaluated_courtyards(checker: DRCChecker) -> tuple[int, int]:
+    """``(N, M)``: non-exempt footprints whose courtyard overlap cannot be evaluated.
+
+    N counts footprints with no courtyard geometry plus those whose outline
+    does not resolve to a polygon; M is every non-exempt footprint (Issue #7204).
+    """
+    from kicad_tools._shapely import require_shapely
+    from kicad_tools.geometry.courtyard import unevaluated_courtyards
+
+    require_shapely("courtyard-overlap coverage")
+    from shapely.geometry import Polygon  # type: ignore[import-untyped]
+
+    missing, unresolved, total = unevaluated_courtyards(
+        list(getattr(checker.pcb, "footprints", []) or []), Polygon
+    )
+    return len(missing) + len(unresolved), total
+
+
 def precheck(
     category: str,
     checker: DRCChecker,
@@ -184,11 +194,16 @@ def precheck(
     ncm = getattr(checker, "net_class_map", None)
 
     if category == "ampacity" and not _declares_ampacity(ncm):
+        # Issue #7206: a spec that declares a current but maps it onto no net
+        # was never checked against it -- unknown, not a vacuous skip.
+        declared = getattr(checker, "declared_spec_currents", None) or []
+        if declared:
+            return unknown(
+                category,
+                f"needs_input:target_ampacity (project.kct declares {len(declared)} "
+                "current requirement(s))",
+            )
         return skipped(category, "no_declared_targets")
-    if category == "ampacity":
-        zone_only = zone_only_ampacity_nets(checker)
-        if zone_only:
-            return unknown(category, f"zone-only, not measured ({', '.join(zone_only)})")
     if category == "path_ampacity" and not getattr(checker, "current_path_specs", None):
         return skipped(category, "no_declared_current_paths")
     if (
@@ -219,6 +234,12 @@ def precheck(
         unfilled = _unfilled_pour_zones(checker)
         if unfilled:
             return unknown(category, f"zone_fills_absent ({unfilled} unfilled zone(s))")
+    if category == "courtyard_overlap":
+        # Issue #7204: a footprint with no resolvable courtyard was never
+        # tested against its neighbours, so zero overlaps is not a pass.
+        unevaluated, total = _unevaluated_courtyards(checker)
+        if unevaluated:
+            return unknown(category, f"no_courtyard_geometry ({unevaluated} of {total} footprints)")
     if category == "sch_fields":
         if drc_only:
             return skipped(category, "drc_only")

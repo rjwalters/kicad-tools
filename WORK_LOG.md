@@ -13,8 +13,171 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-10-20
+
+- **PR #7601**: fix(router): measure foreign pads at true width in coupled pair legs
+- **PR #7635**: fix: accept KiCad 6 Sheet file/Sheet name spellings in all sheet walkers
+- **PR #7631**: fix(route): run stitching, failed-net export and parity summary on every tail
+- **PR #7629**: test(route): name the differing field in entry-path golden drift failures
+- **Issue #7597** (closed): lattice: verify pair legs at true width against foreign pads too (#7571 follow-up)
+- **Issue #7617** (closed): Schematic hierarchy walkers read only the `Sheetfile` property; with KiCad 6's `Sheet file` / `Sheet name` keys the sub-sheets are silently dropped (BOM, `sch set-*`, annotation, netlist)
+- **Issue #7626** (closed): test flake: test_route_entry_path_goldens partial/* drift on Test job
+- **PR #7638**: fix(bom): drop (power)-flagged symbols and filter virtual parts in every format
+- **PR #7623**: fix(router): skew tuner measures quantized length and seats a taller loop at a host's end
+- **PR #7604**: fix(route): apply pad-edge floor to oracle pour-link weld vias
+- **PR #7584**: fix(router): native pad test applies each pad's own net-class clearance
+- **PR #7517**: fix(router): judge lattice pad keep-outs against the true pad outline
+- **Issue #7618** (closed): router: keep coupled-pair J1 pad-to-via escape legs off the wrong-gap coupling window (06rf impedance, from PR #7517)
+- **Issue #7615** (closed): Schematic BOM lists power symbols and PWR_FLAGs from a project symbol library
+- **Issue #7602** (closed): stitcher: post-route pour stitching places a GND via 0.02 mm from U2-29's exposed-pad mask (board 05)
+- **Issue #7569** (closed): C++ exact pad test holds every pad to the board's widest class clearance (Python applies the pair rule)
+- **Issue #7503** (closed): Lattice router: pad-clearance check uses a square around pads, not the true outline (board 03 VBUS, #7463)
+- **PR #7609**: fix: truncate GitHub Release body to stay under the 125k-char limit
+- **Issue #7608** (closed): release_tag.py finalize: GitHub Release body exceeds 125k-char limit (422), so v0.24.0 Release not created
+- **PR #7633**: test: black-box probes of KiCad tuning-pattern partner exclusion (Q31)
+- **Issue #7632** (closed): Q31 probe: does KiCad's tuning-pattern exclusion cover the partner leg beside a skew bump?
+- **PR #7622**: test: key partial route-entry goldens by CPU architecture
+- **PR #7570**: fix(router): pose search measures partner pads; board 06 USB3_RX1 keeps its corridor (#7491)
+- **Issue #7621** (closed): test: route entry-path goldens (partial-*) drift on Linux CI; every PR Test job red since #7599
+- **PR #7620**: chore: re-point DQS and TMDS_D1 skew allowances to via-imbalance tracker
+- **Issue #7613** (closed): Board 07 fixture: DQS and TMDS_D1 diff-pair skew declined by gap tightening (declined:skew)
+- **PR #7607**: ci: raise Test job timeout to 120 min (stopgap for #5240)
+- **PR #7606**: fix: stop merge_collinear_same_width fusing collinear fold-backs
+- **PR #7596**: fix: tuner neighbour clearance honours authored net-class floors
+- **PR #7578**: fix(impedance): ignore sub-width partner overlaps as coupled runs
+- **PR #7576**: fix(router): re-route crossing lattice diff-pair extras jointly for via parity
+- **Issue #7605** (closed): merge_collinear_same_width fuses a collinear fold-back and loses copper (#7600 follow-up)
+- **Issue #7594** (closed): Match-group tuner resolves power nets to Default class instead of their mapped class (AUX)
+- **Issue #7575** (closed): kct check impedance rule judges a 0.1 mm pad-escape stub as a coupled diff-pair run
+- **PR #7582**: chore(release): v0.24.0
+- **PR #7600**: fix(board06): fuse pair-leg grid steps so the skew tuner can host a trombone
+- **PR #7599**: test(route): golden harness for kct route's four entry paths (#7377)
+- **PR #7598**: docs(router): drop the closed square-meander divergence from #7546's rationale
+- **PR #7571**: fix(router): verify lattice pair legs at their true width against other nets' copper
+- **PR #7585**: fix(board06): length-match diff pairs with the checker-limit skew tuner
+- **PR #7589**: test: run kicad-cli on tmp fixture copies; smoke hash names fixture diffs
+- **PR #7579**: feat(router): drained-frontier exit for bidirectional A*, opt-in bidirectional Python fallback (#6527)
+- **PR #7595**: chore(loom): resync installed Loom to v0.19.1196
+- **PR #7592**: fix(router): hold match-group meanders to the tuned net's own class; enable board 07 length matching
+- **PR #7590**: fix: pair diff-pair primitives by probe-end coverage, matching kicad-cli
+- **PR #7574**: fix(router): reserve plane-via sites for pour-only 2-pad parts
+- **PR #7587**: fix(router): report hybrid pair-rule failures with blockers; document lattice --seed (#7586)
+- **PR #7572**: feat(router): sourced per-class intra-pair skew limits (Q16)
+- **PR #6661**: fix(diffpair): reproduce KiCad's primitive pairing in uncoupled length
+- **PR #7581**: docs(research): audit clearance-kernel epic acceptance against existing evidence
+- **PR #7564**: feat(router): chamfered trombone corners and an honest plain fallback (#7546)
+- **PR #7568**: chore(schematic): declare paper attribute on SchematicIOMixin for mypy
+- **PR #7555**: ci: tighten board 07 known-opens set to TMDS_D0_N
+- **PR #7563**: fix(release): mint a fresh App token before each writing release phase
+- **PR #7566**: chore(tooling): update loom 0.19.1193→0.19.1194
+- **PR #7556**: ci: key the board 06/07 synthetic-fixture DRC gates by identity (#7367)
+- **PR #7562**: chore(release): keep release PR body under GitHub's 65,536-char limit
+- **PR #7551**: fix(router): via-parity pass for lattice diff-pair extra-pad attachments
+- **PR #7558**: docs(board07): record TMDS_D0_N blocking reason on the 30/31 layout
+- **PR #7461**: fix(router): re-fit match-group meander amplitude so a member never ends past the target
+- **PR #7533**: chore(release): close changelog gaps for #7402 and #7472
+- **PR #7553**: ci: tighten board 05 blocking-net gate from <= 7 to == 0
+- **Issue #7593** (closed): ci: pinned kicad-cli meander-divergence tests fail on main (test_chamfered_bumps_7546, test_uncoupled_tuning_pattern_7521)
+- **Issue #7543** (closed): router: coupled search places pair vias too close to neighbouring pairs once exact pad outlines open corridors (blocks #7517)
+- **Issue #7588** (closed): Flaky: test_mcp_tool_smoke[export_assembly] 'modified the checked-in fixtures' (release PR #7582)
+- **Issue #6527** (closed): router: Router.route_bidirectional has no production caller; wire it into the Python fallback and measure, or remove it
+- **Issue #7423** (closed): Board 07: enable route-time length matching in the committed map after #7397 (no-worse re-measure; #5798 Q4 ruling)
+- **Issue #7565** (closed): Black-box spec: KiCad diff-pair primitive pairing from kicad-cli probes only
+- **Issue #7586** (closed): router: hybrid pair-rule failure reporting + lattice --seed docs (#7580 items 2, 4)
+- **Issue #6554** (closed): diffpair: reproduce KiCad's diff_pair_uncoupled primitive pairing exactly (kct is a lower bound)
+- **Issue #7577** (closed): Audit clearance-kernel epic acceptance against delivered evidence
+- **Issue #7567** (closed): Type Check gate fails on main: io_mixin.py "Cannot determine type of paper" [has-type]
+- **Issue #7093** (closed): router: differential pair gets unequal via counts when a leg falls back to uncoupled routing (board 03 USB_D 2 vs 3; blocks #6394)
+- **Issue #7552** (closed): Board 07 E2E: exact known-opens set (5 nets) fails now that the recipe leaves only TMDS_D0_N open; blocks BOARD_07_CI_ENABLED
+- **Issue #7559** (closed): release-pr.yml: App token expires during the ~1h CI wait, so the gate fails with 401 after CI goes green
+- **Issue #7367** (closed): Key the board 06/07 synthetic-fixture DRC gates by identity: drop routed-drc-tolerance 18/8 and DIFFPAIR_VIOLATION_BASELINE (unblocks BOARD_07_CI_ENABLED; extends #7359)
+- **Issue #5508** (closed): Epic: pad-access invariant — no committed route may strand an unrouted pad
+- **Issue #7561** (closed): release_plan.py: release PR body exceeds GitHub's 65,536-char limit (422), so v0.24.0 PR can't open
+- **Issue #7554** (closed): Board 07 seed-42 re-route: TMDS_D0_N open (30/31)
+- **Issue #7532** (closed): Release gate: add changelog fragment for #7402 and mark #7472 internal (unblock v0.24.0)
+- **Issue #7547** (closed): CI: tighten board 05 blocking-net gate from <= 7 to 0 (or identity-keyed)
+- **PR #7544**: fix(boards): stop committing kct readiness --verify receipts
+- **PR #7542**: feat(check): leave KiCad tuning patterns out of the uncoupled measure (#7521)
+- **PR #7541**: fix: create output dir before ampacity sidecar write; update resolver no-sidecar premise (Closes #7539)
+- **PR #7540**: chore(loom): resync installed Loom to v0.19.1193
+- **PR #7538**: docs: reassess pad-access expansion and recommend deferring lattice/mesh port
+- **PR #7537**: fix(boards): make refresh_readiness a fixed point on unchanged evidence
+- **PR #7530**: fix: guard POSIX-only O_NOFOLLOW/O_DIRECTORY in JLC upload ledger
+- **PR #7516**: fix: snap schematic block ports to the grid so off-grid origins stay wired
+- **Issue #7539** (closed): main red after #7500: net_class_map.json sidecars break resolver test and board partial-route fast-fail tests (blocks v0.24.0)
+- **Issue #7536** (closed): kct readiness --verify receipts (readiness-verification/**) don't reproduce: environment-dependent provenance/BOM fields, stale on board 00
+- **Issue #7534** (closed): [Epic #5508] Reassess pad-access expansion against current failures and product value
+- **Issue #7529** (closed): JLC upload ledger uses POSIX-only os.O_DIRECTORY / O_NOFOLLOW; AttributeError on Windows (found in #7527 review)
+- **Issue #7510** (closed): Schematic blocks: ports misplaced at off-grid origins (grid-snap mismatch)
+- **Issue #7402** (closed): Schematic blocks: phantom/off-pin ports and broken defaults found by the real-symbol smoke test (#7399 follow-up)
+- **Issue #7384** (closed): Committed board evidence doesn't reproduce: refresh_readiness --dry-run (pinned 10.0.6, committed checked_at) rewrites files on 6 of 7 boards
+- **Issue #7026** (closed): board 03: fresh class-clean lattice route is not complete under the recipe's tier-1 zone fill (3 GND opens)
+
 ### 2026-10-19
 
+- **PR #7535**: feat(router): write diff-pair skew bumps as KiCad tuning patterns (#7521)
+- **PR #7531**: chore(loom): resync installed Loom to v0.19.1191
+- **PR #7527**: fix: fsync atomic-write tmp files through a writable handle (Windows PCB.save EBADF)
+- **PR #7525**: fix(dsn): export circle, oval, rotated and custom pad copper as real shapes
+- **PR #7524**: fix: skip pad net_name unpersisted-edit check for number-only net nodes
+- **PR #7522**: docs: add diff-pair skew compensation note and enforce research index coverage
+- **PR #7515**: fix(board03): keep fresh-route tracks off C11.2's lower thermal spoke
+- **PR #7514**: fix: make JTAG header, UCC27211 driver and USB ESD blocks build with defaults
+- **PR #7513**: fix: anchor schematic block ports to real pins/wires, drop phantom aliases
+- **PR #7504**: fix: point board 03 via-in-pad exception at its open follow-up issue
+- **PR #7502**: fix(router): gap-tightening never worsens pair skew or uncoupled length
+- **PR #7500**: feat(check): declared spec currents make ampacity coverage unknown until mapped to nets
+- **PR #7494**: fix: detect versioned Windows KiCad 9/10 installs
+- **Issue #7520** (closed): docs/research: add diff-pair skew-compensation note and a README index for all research notes
+- **Issue #7519** (closed): PCB.save() falsely refuses an unedited board whose pads use nameless numbered nets (net N)
+- **Issue #7508** (closed): Schematic blocks: fix DebugHeader jtag and UCC27211 defaults, wire USB ESD TVS
+- **Issue #7507** (closed): Schematic blocks: fix phantom ports in CAN ESD, I2CPullups, gpio pull resistor, BackToBackFETPair
+- **Issue #7498** (closed): board 03: fresh native-clearance lattice plan replays LVS-clean but leaves one starved_thermal on C11.2 (GND, F.Cu)
+- **Issue #7484** (closed): DSN export: `custom` pads are written as their anchor rectangle only (primitives ignored); round, oval and rotated pads also collapse to an axis-aligned rectangle
+- **Issue #7480** (closed): Windows: `find_kicad_cli()` and `detect_kicad_library_path()` only probe KiCad 7.0/8.0 install paths, so KiCad 9 and 10 are not found
+- **Issue #7478** (closed): `atomic_write_text` fsyncs a read-only handle: every `PCB.save` fails on Windows with `OSError: [Errno 9]` (0.22.0, 0.23.0)
+- **Issue #7206** (closed): Spec-declared currents never reach the ampacity gate: board 05 motor phase necked to 0.2 mm passes check, audit and readiness
+- **PR #7512**: fix: anchor GateDriverBlock ports to real driver pins
+- **Issue #7509** (closed): Schematic blocks: GateDriverBlock ports match no pin and add no wires
+- **PR #7511**: fix: clamp BarrelJackInput P-FET Vgs with a gate resistor and Zener
+- **Issue #7489** (closed): BarrelJackInput: 12 V default exceeds the Si2301 P-FET's gate-source rating (gate tied straight to ground)
+- **PR #7495**: fix: polygonize Edge.Cuts into a valid DSN boundary with cutout keepouts
+- **Issue #7482** (closed): DSN export: board boundary is built from Edge.Cuts `gr_line` endpoints in file order, giving a self-intersecting outline (and arcs, circles and polygons are ignored)
+- **PR #7499**: fix: write pad geometry through to the S-expression tree and refuse unpersisted edits on save
+- **Issue #7479** (closed): `Pad.size` / `Pad.drill` assignments are not written back: `PCB.save()` silently keeps the old values
+- **PR #7497**: fix: export NPTH holes as DSN image keepouts and drop non-copper pads
+- **Issue #7483** (closed): DSN export: `np_thru_hole` pads fall into the SMD branch and are written as a square pad on layer `*.Cu`; Freerouting rejects the layer, so mounting holes are no obstacle
+- **PR #7496**: fix(export): place DSN pins on their KiCad pads for rotated and back-side parts
+- **Issue #7481** (closed): DSN export: pins of ±90° footprints and of back-side footprints land in the wrong place in Freerouting (y not negated, rotation sense not converted)
+- **PR #7476**: fix: surface pair via-parity failures in kct route and align the audit with kct check
+- **Issue #7425** (closed): Surface pair via-parity failures in kct route summary/JSON; align audit pair set with kct check (#7421 follow-up, #7093 AC1)
+- **PR #7490**: fix(blocks): reverse-polarity P-FET drain on the input; VoltageDividerSense over VoltageDivider
+- **Issue #7399** (closed): Schematic blocks: 10 stock factories fail on real KiCad 10 libs (stale symbol IDs, fictional mock pins); add a real-symbol smoke test
+- **PR #7493**: fix: number DSN structure layers by stack order
+- **Issue #7485** (closed): DSN export writes `(property (index 0))` for every layer instead of the layer's stack position
+- **PR #7501**: fix(boards): include THT rows in board 04/06 JLCPCB packages; retire board 04 manual BOM
+- **Issue #7268** (closed): Regenerate JLCPCB packages of boards 02-07 with THT rows (follow-up to #7239)
+- **PR #7457**: fix: widen board 03 usb_geometry launch window for via-in-pad launches
+- **PR #7469**: fix(check): add board 04 courtyards (Y1 moved to clear C2) and flag courtyard-less footprints as courtyard_missing
+- **Issue #7084** (closed): router: routing board 03 under jlcpcb-tier1 collapses the USB_D In2.Cu common run to 1.4 mm (arm C under jlcpcb keeps 4.1 mm)
+- **Issue #7204** (closed): DFA false-PASS: courtyard check silently skips courtyard-less footprints (boards 00/01/04 signed off with 0 courtyards) and AssemblyCapabilities is never enforced (board 07 double-sided CPL unflagged)
+- **PR #7486**: fix(boards): refresh board 05 report via its producer, keep reviewed net-class rules
+- **PR #7465**: fix: delete stale board 04 native-drc.json and check for unbound DRC reports
+- **PR #7439**: fix(export): place THT parts at pad-bbox centre in JLCPCB CPL
+- **Issue #7464** (closed): Stale unbound native-drc.json copies in boards/*/output/ (board 04 top-level dated 2026-09-10); delete or bind
+- **Issue #7433** (closed): JLCPCB CPL exports THT pin headers at pin 1 instead of body centre (~8.9 mm off on 1x8); affects boards 02-07 THT rows
+- **Issue #7391** (closed): Board 05: refresh report.md/pdf via its producer (still says THT parts excluded from CPL; #7241/#7383 follow-up)
+- **PR #7455**: fix(readiness): give board 04 drc_targets so refresh re-pins its native-drc.json
+- **Issue #7435** (closed): refresh_readiness: board 04 has no drc_targets, so nothing re-pins its native-drc.json
+- **PR #7473**: ci: restore import-not-found nanobind entry in mypy baseline
+- **Issue #7472** (closed): main red: mypy-baseline.txt dropped the nanobind import-not-found line, failing test_baseline_keeps_both_nanobind_signatures
+- **PR #7470**: fix: measure escape-via mask-dam distance in the pad's rotated frame
+- **Issue #7467** (closed): Router escape mask-dam gate ignores residual pad rotation
+- **PR #7462**: fix(router): equal vias for crossed lattice fallback diff-pair legs (#7093)
+- **Issue #7322** (closed): Stitcher and pour-repair/escape via placement ignore the mask-dam floor (follow-up to #7296)
+- **PR #7459**: fix: keep stitch and escape vias out of the SMD mask-dam zone
+- **PR #7452**: build(deps-dev): Bump cmake from 4.4.3 to 4.4.4
+- **PR #7451**: build(deps): Bump the uv-minor-patch group across 1 directory with 4 updates
 - **PR #7438**: refactor(boards): run board 03 readiness receipt in-process via readiness_cmd.main
 - **PR #7428**: fix(blocks): wire OpAmpBlock and multi-channel ESD array to real pins
 - **Issue #7410** (closed): Gate regenerate_boards_03_04_6076.py's board-03 readiness.json promotion (#7358 allowlist)
@@ -2505,3 +2668,7 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 ## 2026-10-15 — v0.23.0 release cut
 
 - v0.23.0 release PR opened by hand (manual fallback in RELEASING.md; `AUTO_RELEASE` is unset, so the daily workflow only dry-runs). 451 changelog fragments assembled; release-gate gaps closed in #6752.
+
+## 2026-10-20 — v0.24.0 release cut
+
+- v0.24.0 release PR opened by the automated daily release workflow (`release-pr.yml`, #5776); PRs merged since the previous tag: #7563, #7566, #7556, #7562, #7551, #7558, #7461, #7533, #7553, #7549, #7542, #7530, #7541, #7544, #7540, #7538, #7516, #7537, #7535, #7514, #7531, #7525, #7500, #7524, #7522, #7527, #7528, #7502, #7494, #7515, #7504, #7526, #7513, #7512, #7511, #7523, #7495, #7496, #7499, #7506, #7497, #7476, #7490, #7505, #7493, #7501, #7492, #7457, #7469, #7488, #7486, #7465, #7439, #7477, #7455, #7473, #7470, #7474, #7462, #7471, #7459, #7466, #7451, #7460, #7452, #7438, #7458, #7428, #7456, #7448, #7432, #7454, #7308, #7443, #7450, #7447, #7449, #7444, #7442, #7430, #7434, #7429, #7426, #7436, #7417, #7424, #7431, #7427, #7421, #7419, #7420, #7418, #7406, #7361, #7416, #7350, #7413, #7415, #7414, #7394, #7408, #7412, #7396, #7411, #7407, #7395, #7404, #7400, #7405, #7364, #7397, #7403, #7388, #7398, #7379, #7288, #7340, #7387, #7381, #7371, #7366, #7386, #7382, #7378, #7380, #7375, #7363, #7376, #7360, #7373, #7372, #7370, #7369, #7343, #7354, #7352, #7347, #7346, #7345, #7324, #7341, #7338, #7334, #7285, #7331, #7336, #7289, #7326, #7328, #7330, #7317, #7286, #7329, #7316, #7321, #7318, #7315, #7287, #7306, #7314, #7310, #7313, #7311, #7242, #7302, #7304, #7303, #7307, #7291, #7305, #7282, #7280, #7281, #7301, #7297, #7251, #7245, #7290, #7279, #7274, #7254, #7278, #7271, #7267, #7266, #7265, #7263, #7255, #7248, #7264, #7259, #7252, #7235, #7243, #7249, #7247, #7154, #7191, #7244, #7157, #7238, #7232, #7221, #7231, #7236, #7229, #7217, #7215, #7218, #7234, #7233, #7222, #7226, #7163, #7194, #7225, #7203, #7216, #7219, #7196, #7202, #7212, #7208, #7205, #7207, #7201, #7179, #7195, #7197, #7171, #7189, #7187, #7162, #7182, #7177, #7142, #7174, #7172, #7183, #7184, #7181, #7133, #7160, #7176, #7173, #7137, #6838, #7165, #7168, #7167, #7081, #7156, #7158, #7145, #7151, #7152, #7149, #7146, #7135, #7140, #7134, #7103, #7143, #7144, #7139, #7122, #7131, #7117, #7130, #7128, #7127, #7108, #7125, #7109, #7119, #7104, #7101, #7118, #7113, #7086, #6874, #6900, #7112, #7110, #7090, #7100, #7095, #7102, #7105, #7098, #7055, #7092, #7097, #7089, #7068, #7052, #7088, #7050, #7087, #7085, #7054, #7069, #7061, #7074, #7073, #7049, #7067, #7066, #7015, #7044, #7048, #7032, #7039, #7020, #7040, #7037, #7027, #7036, #7035, #7041, #7007, #7031, #7034, #7030, #7038, #7016, #7021, #7013, #7010, #7018, #7000, #7006, #7005, #6999, #6998, #7002, #7001, #6993, #6992, #6995, #6978, #6972, #6990, #6991, #6988, #6987, #6980, #6981, #6977, #6976, #6974, #6967, #6973, #6971, #6966, #6965, #6964, #6961, #6953, #6952, #6949, #6951, #6955, #6950, #6944, #6942, #6943, #6940, #6939, #6937, #6938, #6936, #6933, #6934, #6931, #6910, #6928, #6926, #6927, #6891, #6921, #6917, #6925, #6918, #6907, #6924, #6905, #6922, #6923, #6919, #6920, #6916, #6909, #6902, #6904, #6901, #6888, #6903, #6884, #6906, #6890, #6886, #6865, #6892, #6880, #6877, #6887, #6879, #6882, #6867, #6868, #6872, #6871, #6870, #6869, #6864, #6764, #6231, #6863, #6861, #6856, #6849, #6859, #6854, #6855, #6851, #6848, #6845, #6843, #6846, #6844, #6841, #6825, #6827, #6833, #6832, #6830, #6831, #6821, #6817, #6818, #6819, #6828, #6811, #6814, #6301, #6813, #6803, #6794, #6808, #6806, #6299, #6302, #6809, #6804, #6797, #6801, #6796, #6793, #6791, #6790, #6789, #6785, #6787, #6783, #6782, #6774, #6777, #6779, #6735, #6776, #6762, #6769, #6729, #6746, #6754, #6768, #6747, #6751, #6767, #6771, #6758, #6745, #6757, #6760, #6734.

@@ -13,7 +13,7 @@ C7,100nF,Capacitor_SMD:C_0603_1608Metric,155.5000mm,-88.5000mm,0.0,Top
 C8,15pF,Capacitor_SMD:C_0603_1608Metric,131.5000mm,-87.5000mm,0.0,Top
 C9,15pF,Capacitor_SMD:C_0603_1608Metric,131.5000mm,-83.5000mm,0.0,Top
 F1,350mA,Fuse:Fuse_1206_3216Metric,157.5000mm,-67.5000mm,0.0,Top
-J1,USB4085-GF-A,Connector_USB:USB_C_Receptacle_GCT_USB4085,149.4750mm,-63.3000mm,180.0,Top
+J1,USB4085-GF-A,Connector_USB:USB_C_Receptacle_GCT_USB4085,146.5000mm,-60.8700mm,180.0,Top
 J2,Joystick 5V X Y SW,Connector_JST:JST_PH_S5B-PH-SM4-TB_1x05-1MP_P2.00mm_Horizontal,123.5000mm,-99.5000mm,180.0,Top
 J3,AVR ISP,Joystick:Samtec_TSM-103-01-T-DV,163.5000mm,-75.5000mm,0.0,Top
 R1,5.1k,Resistor_SMD:R_0603_1608Metric,138.5000mm,-66.5000mm,90.0,Top

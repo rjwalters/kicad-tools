@@ -681,7 +681,10 @@ def segment_via_counts(
 #: Why a segment's unequal vias could not be avoided, by segment status.
 _VIA_MISMATCH_CAUSE = {
     "uncoupled-fallback": "no fallback candidate had via parity",
-    "hybrid": "the hybrid's single-ended legs found no via-equal pair",
+    "hybrid": (
+        "the hybrid's single-ended legs found no via-equal pair no worse on skew "
+        "and length (see the hybrid parity line)"
+    ),
 }
 
 
@@ -712,7 +715,7 @@ def pair_via_mismatch_warnings(
         span = f"{pc.pad_p_a.ref}.{pc.pad_p_a.pin}->{pc.pad_p_b.ref}.{pc.pad_p_b.pin}"
         lines.append(
             f"  WARNING: diff pair {pc.pair_name} {span} legs have unequal via "
-            f"counts (P={got[0]}, N={got[1]}); {cause}"
+            f"counts (P={got[0]}, N={got[1]}); pair-rule failure: {cause}"
         )
     return lines
 
@@ -5572,6 +5575,12 @@ class Autorouter:
                             f"  Diff-pair hybrid parity (lattice) {pc.pair_name} {label}: "
                             f"{parity_note}"
                         )
+            # Issue #7093: the post-route via-parity pass on extra-pad
+            # attachments (one line per pair it was offered to).
+            extra_log = getattr(pf, "extra_parity_log", {}) or {}
+            for note in extra_log.values():
+                if isinstance(note, str):
+                    print(f"  Diff-pair extra parity (lattice) {note}")
             self._print_pair_threshold_report()
             # Issue #6373: a pair routed by the uncoupled fallback is a
             # diff-pair WARNING (coupling / skew not guaranteed), not an open
@@ -8537,7 +8546,7 @@ class Autorouter:
                     board_thickness_mm=None,
                     num_copper_layers=None,
                 )
-            self._audit_pair_via_parity(detected_pairs, synth_routing, net_to_class)
+            self._audit_pair_via_parity()
         except ImportError:
             # diffpair_detection module unavailable -- silently skip the
             # diff-pair block but continue to the match-group block.
@@ -8577,30 +8586,63 @@ class Autorouter:
             num_copper_layers=None,
         )
 
-    def _audit_pair_via_parity(
-        self,
-        detected_pairs: list,
-        synth_routing: dict,
-        net_to_class: dict[str, str],
-    ) -> None:
+    def _pair_via_parity_copper(self) -> list[Route]:
+        """The copper ``kct check`` sees on the written board, for the parity audit.
+
+        Mirrors ``_finalize_routes`` (``cli/route_cmd.py``): preserved copper of
+        a net re-routed this run is dropped ("the freshly-routed copper wins"),
+        except for ``_stub_terminals`` nets whose outside stub is kept.  A
+        route present in both lists is counted once (dedupe by ``id()``).
+        """
+        routed_net_ids = {r.net for r in self.routes} - set(
+            getattr(self, "_stub_terminals", None) or {}
+        )
+        copper: list[Route] = []
+        seen: set[int] = set()
+        for route in [
+            *self.routes,
+            *(r for r in self.existing_routes if r.net not in routed_net_ids),
+        ]:
+            if id(route) not in seen:
+                seen.add(id(route))
+                copper.append(route)
+        return copper
+
+    def _audit_pair_via_parity(self) -> None:
         """Report every engaged pair committed with unequal via counts (#7093).
 
         Engine-agnostic backstop behind every ``route_all_*`` entry point (it
         runs in :meth:`_finalize_routing`).  The pairs are the ones ``kct
-        check`` engages -- detected, and opted in by their net class
-        (:func:`~.diffpair.should_engage_coupled`) -- and the counts are every
-        via on each net, as the checker's ``unequal via counts`` finding
-        counts them.  The router keeps the counts equal where it can (coupled
-        and gateway outcomes by construction, the lattice fallback by ranking
-        and mirrored legs); where it could not -- a lattice fallback or hybrid
-        leg, the grid engine's independent fallback, a pair deferred to the
-        single-ended main loop -- the result is a pair-rule failure, recorded
-        in :attr:`pair_via_parity_failures` and printed, never silent.  A pair
-        the lattice's per-segment report already named is not printed twice.
+        check`` engages -- detected through :func:`~.diffpair_detection.
+        build_synth_routing` (so a class whose per-net variants disagree picks
+        the same pairs the checker does, #7425) and opted in by their net
+        class (:func:`~.diffpair.should_engage_coupled`).  The counts are every
+        via on each net -- the routes committed this run plus the copper kept
+        by ``--preserve-existing`` / ``--nets`` -- as the checker counts them
+        on the written board.  The router keeps the counts equal where it can
+        (coupled and gateway outcomes by construction, the lattice fallback by
+        ranking and mirrored legs); where it could not -- a lattice fallback
+        or hybrid leg, the grid engine's independent fallback, a pair deferred
+        to the single-ended main loop -- the result is a pair-rule failure,
+        recorded in :attr:`pair_via_parity_failures` and printed, never
+        silent.  A pair the lattice's per-segment report already named is not
+        printed twice.
         """
         from .diffpair import should_engage_coupled
+        from .diffpair_detection import build_synth_routing, detect_diff_pairs
         from .pair_via_parity import audit_pair_via_parity
 
+        synth_routing, net_to_class = build_synth_routing(self.net_class_map)
+        try:
+            detected_pairs = detect_diff_pairs(
+                self.net_names,
+                net_class_routing=synth_routing,
+                net_to_class=net_to_class,
+                kicad_groups=getattr(self, "kicad_diff_pair_groups", None),
+            )
+        except Exception:
+            # Defensive: detection failure must not break routing.
+            detected_pairs = []
         pairs: list[tuple[int, str, int, str]] = []
         for dp in detected_pairs:
             pair = dp.pair
@@ -8610,7 +8652,7 @@ class Autorouter:
             if engaged:
                 pos, neg = pair.positive, pair.negative
                 pairs.append((pos.net_id, pos.net_name, neg.net_id, neg.net_name))
-        failures = audit_pair_via_parity(self.routes, pairs)
+        failures = audit_pair_via_parity(self._pair_via_parity_copper(), pairs)
         self.pair_via_parity_failures = failures
         names = {name: net for net, name in self.net_names.items()}
         warned: set[frozenset[int | None]] = getattr(self, "_lattice_via_warned_nets", set())
@@ -20470,6 +20512,7 @@ class Autorouter:
         verbose: bool = True,
         *,
         engage: str = "length_critical",
+        quantized_lengths: bool = False,
     ) -> dict[tuple[str, str], DiffPairTuneResult]:
         """Apply per-pair length-match (skew) tuning to detected diff pairs.
 
@@ -20499,6 +20542,12 @@ class Autorouter:
                 against that same ``skew_mm``, regardless of
                 ``length_critical``.  A pair whose limit resolves to a
                 warning is declined with ``reason="skew_limit_not_enforced"``.
+            quantized_lengths: Issue #7548.  Measure ``"checker_skew_limit"``
+                skew on the copper the 45-degree quantization pass will
+                leave (:func:`~.quantize.quantize_pcb_file` replaces each
+                off-angle segment with a longer dogleg), for recipes that
+                quantize the written board after tuning.  Without it a leg
+                full of off-angle segments grows past the tuned figure.
 
         Returns:
             ``{(p_net_name, n_net_name): DiffPairTuneResult}`` for each
@@ -20539,6 +20588,8 @@ class Autorouter:
         route_length = None
         if engage == "checker_skew_limit":
             route_length = self._checker_route_length(num_layers)
+            if quantized_lengths:
+                route_length = self._quantized_route_length(route_length)
 
         # Issue #6795: component count per net, for the uncoupled-length limit.
         net_components: dict[str, int] = {}
@@ -20959,6 +21010,18 @@ class Autorouter:
         return measure
 
     @staticmethod
+    def _quantized_route_length(measure: Callable[[Route], float]) -> Callable[[Route], float]:
+        """``measure`` plus the length the 45-degree quantizer adds (Issue #7548)."""
+        from .quantize import dogleg_length_extra_mm
+
+        def quantized(route: Route) -> float:
+            return measure(route) + sum(
+                dogleg_length_extra_mm(s.x1, s.y1, s.x2, s.y2) for s in route.segments
+            )
+
+        return quantized
+
+    @staticmethod
     def _declined_skew_result(
         dp,
         routes_by_net: dict[int, Route],
@@ -21175,15 +21238,57 @@ class Autorouter:
         # net (unrouted ones included) gets an entry.
         net_clearance_mm: dict[int, float] = {}
         _clearance_names: dict[int, str] = {}
+        # Issue #7594: names are resolved from the routes first.  Pour /
+        # auto-skipped nets (board 07's GND, +3V3, +3V3_A, ...) are absent
+        # from ``net_names`` and their pads are neutralised to net 0, so the
+        # only carrier of their name is their preserved Route.  Without it
+        # those ids fell to the 0.15 mm Default class although the class map
+        # puts them in AUX (0.175 mm), which ``kct check`` and kicad-cli
+        # enforce.
+        for _rid, _route in routes_by_net.items():
+            if _rid and _route.net_name:
+                _clearance_names.setdefault(_rid, _route.net_name)
         for _pad in self.pads.values():
-            _clearance_names.setdefault(_pad.net, getattr(_pad, "net_name", "") or "")
+            # Net 0 is no-net copper and always takes the Default class.  A
+            # neutralised pour pad still carries its old name ("GND"), so
+            # taking net 0's name from whichever such pad iterates first
+            # would make its class depend on pad order.
+            if _pad.net:
+                _clearance_names.setdefault(_pad.net, getattr(_pad, "net_name", "") or "")
+        _clearance_names.setdefault(0, "")
         _default_class = (getattr(self, "net_class_map", None) or {}).get("Default")
         _default_class_mm = float(getattr(_default_class, "clearance", 0.0) or 0.0)
         if _default_class_mm <= 0.0:
             _default_class_mm = float(self.rules.trace_clearance)
+        # Issue #7594: a net whose class is declared only in the project's
+        # ``.kicad_pro`` (e.g. GND/+3V3 in AUX) has no ``net_class_map`` entry,
+        # but the loader stores its class clearance in
+        # ``rules.net_clearance_floors`` -- the value ``kct check`` and
+        # kicad-cli use.  Take the larger so the tuner never falls back to
+        # Default for a net the authored source holds to a stricter class.
+        _authored_floors = getattr(self.rules, "net_clearance_floors", None) or {}
         for _nid in set(self.net_names) | set(routes_by_net) | set(_clearance_names):
+            if not _nid:
+                net_clearance_mm[_nid] = _default_class_mm
+                continue
             _c = self._net_class_clearance_mm(_nid, _clearance_names.get(_nid, ""))
+            _c = max(_c, float(_authored_floors.get(_nid, 0.0) or 0.0))
             net_clearance_mm[_nid] = _c if _c > 0.0 else _default_class_mm
+
+        # Issue #7594: a neutralised pour / auto-skipped pad sits on net 0
+        # (Default above) but keeps its net name and still reads as that
+        # net's copper in the output board, so it is held to the class of
+        # its retained name -- and to its own authored floor -- exactly as
+        # ``_pad_class_clearances`` and ``authored_clearance`` resolve it.
+        # Keyed per pad because net 0 cannot carry one class for all of them.
+        # Copper with neither a name nor an authored floor stays Default.
+        pad_floor_mm: dict[int, float] = {}
+        for _pad in self.pads.values():
+            _pf = float(getattr(_pad, "authored_clearance", 0.0) or 0.0)
+            if not _pad.net:
+                _pf = max(_pf, self._net_class_clearance_mm(0, getattr(_pad, "net_name", "") or ""))
+            if _pf > 0.0:
+                pad_floor_mm[id(_pad)] = _pf
 
         if engage not in ("length_critical", "checker_limit"):
             raise ValueError(f"unknown match-group engage policy: {engage!r}")
@@ -21201,6 +21306,7 @@ class Autorouter:
             group_via_clearance_mm = via_clearance_mm
             group_pad_clearance_mm = pad_clearance_mm
             group_net_clearance_mm: dict[int, float] | None = None
+            group_pad_floor_mm: dict[int, float] | None = None
 
             net_class = self._resolve_net_class_for_group(group)
             if net_class is not None:
@@ -21227,6 +21333,7 @@ class Autorouter:
                 # The relaxed floor is this group's half of the rule only;
                 # KiCad holds each neighbour to max(own, neighbour class).
                 group_net_clearance_mm = net_clearance_mm
+                group_pad_floor_mm = pad_floor_mm
                 tolerance_mm = net_class.effective_length_match_tolerance(0.5)
                 # Issue #6443: floored like the routed gap.
                 intra_pair_clearance_mm = self._pair_gap_mm(net_class)
@@ -21329,6 +21436,7 @@ class Autorouter:
                     pads_by_net=pads_by_net,
                     pad_clearance_mm=group_pad_clearance_mm,
                     net_clearance_mm=group_net_clearance_mm,
+                    pad_floor_mm=group_pad_floor_mm,
                     board_thickness_mm=board_thickness_mm,
                     num_copper_layers=num_layers,
                     blind_buried_supported=blind_buried_supported,

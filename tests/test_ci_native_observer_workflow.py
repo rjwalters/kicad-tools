@@ -35,7 +35,11 @@ def test_opt_in_and_resources_and_artifact_retention():
     # The fork-routing predicate and its split 45/90 budget (#5747) are gone
     # with the self-hosted branch they selected.
     assert JOB["runs-on"] == "ubuntu-latest"
-    assert JOB["timeout-minutes"] == 75
+    # #5240 stopgap (operator ruling Q28 = 1): 75 -> 120 until sharding lands.
+    assert JOB["timeout-minutes"] == 120
+    # The 80%-of-limit warning step must read the same limit (#7327).
+    budget = {s.get("name"): s for s in JOB["steps"]}["Report job time budget"]
+    assert int(budget["env"]["TIMEOUT_MINUTES"]) == JOB["timeout-minutes"]
     # #5682: the KiCad image is pinned by digest at the workflow level.
     # container.image cannot reference the env context (GitHub allows only
     # github/inputs/matrix/needs/strategy/vars there), so the kicad_pin

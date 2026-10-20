@@ -182,12 +182,12 @@ def test_ring_fixture_declines_planar_and_gateway_then_couples_as_hybrid() -> No
 
 def test_declared_budget_below_the_shortest_leg_declines_to_the_fallback() -> None:
     pf, pc, _balls = _board()
-    pf.pair_gateway_limits[pc.key] = (5.0, None)  # shortest feasible legs are ~6.5 mm
+    pf.pair_gateway_limits[pc.key] = (4.0, None)  # shortest feasible legs are ~4.6 mm
     routes, _stats = _route(pf, pc)
     assert pf.pair_outcomes[pc.key].startswith("uncoupled-fallback:"), pf.pair_hybrid_log
     log = pf.pair_hybrid_log[pc.key]
     # Names the terminal, the shortest legs found and the cap.
-    assert "U1.1" in log and "shortest legs found" in log and "cap 5.0 mm, declared" in log
+    assert "U1.1" in log and "shortest legs found" in log and "cap 4.0 mm, declared" in log
     # No hybrid copper: nothing runs coupled at the pitch.
     assert _coupled_trunk_mm(routes, pc.key) == 0.0
 

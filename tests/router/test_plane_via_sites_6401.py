@@ -139,6 +139,66 @@ def test_two_terminal_parts_and_through_hole_pads_are_not_served() -> None:
     assert skipped == {"C1.1": "footprint has 2 pad(s)"}
 
 
+def test_two_terminal_part_with_every_pad_on_a_pour_net_is_served_when_opted_in() -> None:
+    """Board 05's C10 (+5V / GND): no signal pin to cost, so it is reserved (#7573)."""
+    pads = [
+        _pad("C10", "1", 10.0, 10.0, 5, "+5V"),
+        _pad("C10", "2", 12.0, 10.0, 0, PLANE),
+        _pad("R1", "1", 20.0, 10.0, 0, PLANE),
+        _pad("R1", "2", 22.0, 10.0, 7, "SIG"),
+    ]
+    selected, skipped = select_plane_via_pads(pads, [PLANE, "+5V"], min_pour_footprint_pads=2)
+    assert sorted(f"{p.ref}.{p.pin}" for p in selected) == ["C10.1", "C10.2"]
+    assert skipped == {"R1.1": "footprint has 2 pad(s)"}
+
+
+def test_two_terminal_pour_only_part_is_skipped_by_default() -> None:
+    pads = [
+        _pad("C10", "1", 10.0, 10.0, 5, "+5V"),
+        _pad("C10", "2", 12.0, 10.0, 0, PLANE),
+    ]
+    selected, skipped = select_plane_via_pads(pads, [PLANE, "+5V"])
+    assert selected == []
+    assert set(skipped) == {"C10.1", "C10.2"}
+
+
+def test_reserve_pour_only_passives_flag_survives_main_cli_dispatch(tmp_path) -> None:
+    path = tmp_path / "board.kicad_pcb"
+    path.write_text("(kicad_pcb)")
+    route_args([str(path), "--reserve-pour-only-passives"])
+    with patch("kicad_tools.cli.route_cmd.main", return_value=0) as main:
+        cli_main(["route", str(path), "--reserve-pour-only-passives"])
+    assert "--reserve-pour-only-passives" in main.call_args.args[0]
+
+
+def test_apply_passes_pour_only_threshold_only_when_opted_in(tmp_path) -> None:
+    from kicad_tools.cli.route_cmd import _apply_plane_via_reservation
+
+    pcb = tmp_path / "b.kicad_pcb"
+    pcb.write_text("(kicad_pcb)")
+    seen: list[object] = []
+
+    def fake_reserve(router, nets, **kw):
+        seen.append(kw.get("min_pour_footprint_pads"))
+        return SimpleNamespace(sites=[], unreserved=[])
+
+    with (
+        patch("kicad_tools.cli.stitch_cmd.find_all_plane_nets", return_value=["GND"]),
+        patch("kicad_tools.core.sexp_file.load_pcb", return_value=None),
+        patch("kicad_tools.router.plane_via_sites.reserve_router_plane_via_sites", fake_reserve),
+    ):
+        _apply_plane_via_reservation(
+            object(), Namespace(_auto_skipped_net_names=["GND"]), pcb, quiet=True
+        )
+        _apply_plane_via_reservation(
+            object(),
+            Namespace(_auto_skipped_net_names=["GND"], reserve_pour_only_passives=True),
+            pcb,
+            quiet=True,
+        )
+    assert seen == [None, 2]
+
+
 # ---------------------------------------------------------------------------
 # 2. Exact-geometry planner on a 0.5 mm-pitch pin row.
 # ---------------------------------------------------------------------------
@@ -323,6 +383,29 @@ def test_router_entry_point_uses_the_strongest_clearance_and_stores_areas() -> N
     assert result.rules.exact_pads
     assert [s.pads for s in result.sites] == [("U2.5",)]
     assert len(router._plane_via_keepout_areas) == 2
+
+
+def _cap_beside_signal_grid() -> RoutingGrid:
+    """A +5V/GND cap (pour-only) beside a signal resistor, plus a multi-pad IC."""
+    grid = RoutingGrid(width=20, height=20, rules=_ROUTER_RULES, layer_stack=LayerStack.two_layer())
+    grid.add_pad(_pad("C10", "1", 10.0, 10.0, 5, "+5V"))
+    grid.add_pad(_pad("C10", "2", 12.0, 10.0, 0, PLANE))
+    grid.add_pad(_pad("R1", "1", 10.0, 14.0, 0, PLANE))
+    grid.add_pad(_pad("R1", "2", 12.0, 14.0, 7, "SIG"))
+    return grid
+
+
+def test_router_entry_point_serves_pour_only_caps_only_when_opted_in() -> None:
+    nets = [PLANE, "+5V"]
+    off = reserve_router_plane_via_sites(_fake_router(_cap_beside_signal_grid()), nets)
+    assert off.sites == []
+
+    router = _fake_router(_cap_beside_signal_grid())
+    on = reserve_router_plane_via_sites(router, nets, min_pour_footprint_pads=2)
+    served = sorted(pad for site in on.sites for pad in site.pads)
+    assert served  # the cap's pads are planned, not skipped
+    assert set(served) | set(on.unreserved) == {"C10.1", "C10.2"}
+    assert len(router._plane_via_keepout_areas) == 2 * len(on.sites)
 
 
 def test_lattice_mask_merges_reserved_sites_with_rule_areas() -> None:
@@ -742,3 +825,38 @@ def test_the_board_edge_counts_as_a_fixed_flank() -> None:
     U2.1's +x escape, the left of U2.L1's -x one."""
     sides = _static_sides(_row_with_gnd_pin4(y0=0.45))
     assert sides == {"U2.1": frozenset({-1}), "U2.L1": frozenset({1})}
+
+
+def test_reserve_skipped_plane_vias_serves_explicit_power_pours_7569(tmp_path) -> None:
+    """Opt-in: explicit ``--skip-nets`` power pours are reserved; ground is not."""
+    from kicad_tools.cli.route_cmd import _apply_plane_via_reservation
+
+    pcb = tmp_path / "board.kicad_pcb"
+    pcb.write_text("(kicad_pcb)")
+    calls: list[list[str]] = []
+
+    def fake_reserve(router, nets, **_kw):
+        calls.append(list(nets))
+        return SimpleNamespace(sites=[], unreserved=[])
+
+    plane_nets = ["+1V2", "+1V8", "GND", "SIG"]
+
+    def run(**kw):
+        args = Namespace(_auto_skipped_net_names=[], skip_nets="GND,+1V2,+1V8", **kw)
+        with (
+            patch("kicad_tools.cli.stitch_cmd.find_all_plane_nets", return_value=plane_nets),
+            patch("kicad_tools.core.sexp_file.load_pcb", return_value=None),
+            patch(
+                "kicad_tools.router.plane_via_sites.reserve_router_plane_via_sites",
+                fake_reserve,
+            ),
+        ):
+            _apply_plane_via_reservation(object(), args, pcb, quiet=True)
+
+    run()  # default: explicit skips are not auto-skipped -> nothing reserved
+    assert calls == []
+    run(reserve_skipped_plane_vias=True)
+    assert calls == [["+1V2", "+1V8"]]
+    calls.clear()
+    run(reserve_skipped_plane_vias=True, _route_only_nets=["SIG"])  # inverted skip set
+    assert calls == []

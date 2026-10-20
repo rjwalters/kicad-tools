@@ -111,7 +111,14 @@ logger = logging.getLogger(__name__)
 # v61 (Issue #7296): ``DesignRules.min_via_pad_edge_gap`` + the coupled
 # pathfinder's mask-dam refusal; v62: the same floor in the single-ended A*'s
 # via check.  A v61 .so lets single-ended vias into the dam zone.
-_REQUIRED_CPP_BUILD_VERSION = 62
+# v63 (Issue #7491): the coupled pose search's rail gate measures the partner
+# net's pads exactly (``Grid3D.pad_geometry_clear(..., only_net=)``).  A v62
+# .so lets a pose trunk thread a sub-pitch gap between partner pads that the
+# finished-copper check then refuses (``derived-rails-blocked``).
+# v64 (Issue #7569): ``Grid3D.set_pad_class_clearances`` + the
+# ``PadInfo::class_clearance`` field -- the exact pad test holds each pad to
+# its own net class.  A v63 .so keeps the board-wide largest-class floor.
+_REQUIRED_CPP_BUILD_VERSION = 64
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
@@ -1365,6 +1372,38 @@ class CppPathfinder:
     # mechanisms.  Flip to True if/when waypoints are ported to
     # ``cpp/src/pathfinder.cpp``.
     supports_waypoint_injection: bool = False
+
+    def _sync_pad_class_clearances(self) -> bool:
+        """Push each pad's own net-class clearance to the native pad test (#7569).
+
+        The pair rule is ``max(own class, pad's class)`` (Python #6389, DRC).
+        A pad's class is resolved from ``pad.net_name`` so a pour pad
+        neutralised to net 0 keeps its class.  Returns False on a stale
+        extension without the setter.  Cached on the inputs that feed it.
+        """
+        if not hasattr(self._grid._impl, "set_pad_class_clearances"):
+            return False
+        py_grid = self._grid._py_grid
+        if py_grid is None:
+            # No Python grid to resolve pad net names from: the caller keeps
+            # the board-wide largest-class floor.
+            return False
+        pads = py_grid._pads
+        key = (
+            id(self._net_class_map),
+            len(pads),
+            len(self._net_class_map),
+            self._rules.trace_clearance,
+        )
+        if getattr(self, "_pad_class_key", None) == key:
+            return True
+        values = []
+        for pad in pads:
+            net_class = self._net_class_map.get(pad.net_name) if pad.net_name else None
+            values.append(float(getattr(net_class, "clearance", 0.0) or 0.0) if net_class else 0.0)
+        self._grid._impl.set_pad_class_clearances(values)
+        self._pad_class_key = key
+        return True
 
     def __init__(
         self,
@@ -2675,19 +2714,22 @@ class CppPathfinder:
                     max(self._rules.via_clearance, own_floor),
                 )
             if hasattr(self._impl, "set_search_pad_clearance_floor"):
-                # Issue #6315: the exact pad test resolving pad clearance
-                # cells cannot tell a pad's net class, and the pair rule is
-                # max(own class, pad's class) -- hold it to the largest
-                # class clearance on the board (never looser than the disc).
-                self._impl.set_search_pad_clearance_floor(
-                    max(
-                        [self._rules.trace_clearance]
-                        + [
-                            float(getattr(nc, "clearance", 0.0) or 0.0)
-                            for nc in (self._net_class_map or {}).values()
-                        ]
+                # Issue #6315: the exact pad test must hold a pad to the pair
+                # rule max(own class, pad's class).  With per-pad classes
+                # pushed (#7569) the floor is 0; a stale .so without that
+                # setter falls back to the largest class on the board.
+                if self._sync_pad_class_clearances():
+                    self._impl.set_search_pad_clearance_floor(0.0)
+                else:
+                    self._impl.set_search_pad_clearance_floor(
+                        max(
+                            [self._rules.trace_clearance]
+                            + [
+                                float(getattr(nc, "clearance", 0.0) or 0.0)
+                                for nc in (self._net_class_map or {}).values()
+                            ]
+                        )
                     )
-                )
             if hasattr(self._impl, "set_search_own_pad_gate"):
                 # Issue #6375: steps on this net's own pad copper/halo are
                 # held to the validator's own seg-vs-pad verdict -- with the
@@ -4451,22 +4493,43 @@ class CppPathfinder:
         t0 = time.monotonic()
         # Python Router.route() does not accept start_layers/end_layers;
         # it derives layer information internally from pad attributes.
-        # Issue #6527: opt-in bidirectional A* for the fallback (default off).
-        _fallback_route = (
-            self._py_router.route_auto
-            if getattr(self._py_router.rules, "fallback_bidirectional", False) is True
-            else self._py_router.route
+        # Issue #6527: bidirectional A* (one-way retry on failure) for the
+        # fallback, on by default; ``--no-fallback-bidirectional`` restores
+        # the one-way search.
+        _py_rules = self._py_router.rules
+        # Diff-pair legs and match-group members stay on the one-way search:
+        # the bidirectional path perturbs their length/impedance symmetry
+        # (board 07 TMDS lanes regress under it).
+        _nc = net_class
+        if _nc is None:
+            _nc = self._py_router._get_net_class(net_name)
+        _length_constrained = _nc is not None and (
+            getattr(_nc, "diffpair_partner", None) is not None
+            or getattr(_nc, "length_match_group", None) is not None
         )
-        route = _fallback_route(
-            start,
-            end,
-            net_class=net_class,
-            negotiated_mode=negotiated_mode,
-            present_cost_factor=present_cost_factor,
-            weight=weight,
-            per_net_timeout=per_net_timeout,
-            extra_goal_cells=extra_goal_cells,
-        )
+        if getattr(_py_rules, "fallback_bidirectional", False) is True and not _length_constrained:
+            route = self._py_router.route_auto(
+                start,
+                end,
+                net_class=net_class,
+                negotiated_mode=negotiated_mode,
+                present_cost_factor=present_cost_factor,
+                weight=weight,
+                per_net_timeout=per_net_timeout,
+                extra_goal_cells=extra_goal_cells,
+                threshold=getattr(_py_rules, "fallback_bidirectional_threshold", 0),
+            )
+        else:
+            route = self._py_router.route(
+                start,
+                end,
+                net_class=net_class,
+                negotiated_mode=negotiated_mode,
+                present_cost_factor=present_cost_factor,
+                weight=weight,
+                per_net_timeout=per_net_timeout,
+                extra_goal_cells=extra_goal_cells,
+            )
         dt = time.monotonic() - t0
 
         # Issue #6329: the fallback is iteration-bounded under a tuned cap,

@@ -664,9 +664,18 @@ public:
     // spatial bucket index, so it is cheap enough for the A* inner loop.
     // Used to resolve ``GridCell::pad_cell`` cells: a cell blocked only by
     // pad copper/clearance is passable exactly when the real geometry is.
+    // Issue #7491 (#7401): ``only_net`` >= 0 restricts the check to that
+    // net's pads -- the coupled pose search measures its PARTNER's pads
+    // exactly with it, since the raster halo under-reads them.
     bool pad_geometry_clear(
         float ax, float ay, float bx, float by, int layer, int net,
-        float half_width, float clearance) const;
+        float half_width, float clearance, int only_net = -1) const;
+
+    // Issue #7569: per-pad net-class clearance, indexed by ``add_pad`` order.
+    // ``pad_geometry_clear`` then holds a step to ``max(clearance, override,
+    // pad class)`` -- the pair rule the Python search (#6389) and DRC apply.
+    // Entries past ``pads_.size()`` are ignored; missing entries are 0.
+    void set_pad_class_clearances(const std::vector<float>& clearances);
 
     // Issue #6375: validate_route()'s segment-vs-pad verdict for ONE pad --
     // the single implementation both the post-route validator and the A*
@@ -762,6 +771,7 @@ private:
     // ``pad_geometry_clear`` (key: packed bucket coordinates).
     std::unordered_map<int64_t, std::vector<uint32_t>> pad_buckets_;
     float pad_bucket_max_override_ = 0.0f;
+    float pad_bucket_max_class_ = 0.0f;  // Issue #7569
     void index_pad_bucket(size_t index);
 
     // Geometric validation storage (Issue #2439)

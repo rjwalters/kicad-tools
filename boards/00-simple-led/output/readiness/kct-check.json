@@ -35,8 +35,8 @@
     },
     "passed": true,
     "stale_waivers": 0,
-    "coverage_checked": 30,
-    "coverage_skipped": 10,
+    "coverage_checked": 35,
+    "coverage_skipped": 5,
     "coverage_unknown": [
       "spec_conformance"
     ],
@@ -107,9 +107,9 @@
   },
   "coverage": {
     "ampacity": {
-      "status": "skipped:no_declared_targets",
-      "state": "skipped",
-      "reason": "no_declared_targets",
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
       "blocking": true
     },
     "clearance": {
@@ -155,21 +155,21 @@
       "blocking": true
     },
     "diffpair_length_skew": {
-      "status": "skipped:no_diff_pairs_detected",
-      "state": "skipped",
-      "reason": "no_diff_pairs_detected",
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
       "blocking": true
     },
     "diffpair_routing_continuity": {
-      "status": "skipped:no_diff_pairs_detected",
-      "state": "skipped",
-      "reason": "no_diff_pairs_detected",
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
       "blocking": true
     },
     "diffpair_uncoupled_length": {
-      "status": "skipped:no_diff_pairs_detected",
-      "state": "skipped",
-      "reason": "no_diff_pairs_detected",
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
       "blocking": true
     },
     "dimensions": {
@@ -209,9 +209,9 @@
       "blocking": true
     },
     "match_group_length_skew": {
-      "status": "skipped:no_net_class_map",
-      "state": "skipped",
-      "reason": "no_net_class_map",
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
       "blocking": true
     },
     "netclass_clearance_copper": {

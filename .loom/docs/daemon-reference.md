@@ -255,7 +255,6 @@ issue** — the v0.10.0 set is intentionally frozen.
 | `daemon.roll.manifest.unreadable` | Pause-and-roll resume (#10832) | `{path, outcome, detail, running_version}` (`outcome`: `corrupt`, `unknown-version`; nothing is resumed, restart recovery takes every item) |
 | `daemon.roll.health_failed` | Pause-and-roll resume (#10832) | `{manifest_id, reason, running_version, to_version, failures}` (health did not hold during probation; nothing is resumed until it does) |
 | `daemon.roll.paused.resumed` | Pause-and-roll resume (#10832) | `{manifest_id, phase, from_version, to_version, trigger, running_version, resumed_on, items, resumed, completed, requeued_by_reason, recovered, residue_reaped, health_failures, verify_probation_secs, resume_budget_secs, probation_secs, resume_secs, pause_to_resume_secs, max_age_secs}` (`resumed_on`: `target` or `rollback`) |
-| `forge.event`               | `forge_events.rs` feed consumer (#8765) | `{source: "forge-event-feed", host_id, count, first_seq, last_seq, types}` |
 | `operator_priority.escalation` | Fleet alert (#10164; the star-liveness publisher, #9321, was removed by #11104) | `{slug, issue, key, kind, stage, text, url, host, inherited_from?, resolved}` |
 
 The four `epic.issue.{N}.*` topics were authorized by **#3873** (epic #3842
@@ -280,19 +279,9 @@ roll now pauses its agents and restarts, and narrates that here. See
 They ride the same in-memory bus as the sweep topics and are tailable via
 `subscribe_to_events` / `tail_event_bus`.
 
-The `forge.event` topic was authorized by **#8767** (epic #8764) for the forge
-event-plane feed consumer. Publisher: `loom-daemon/src/forge_events.rs`
-(#8765) — one `Event::Generic` per non-empty verified feed page. Payload:
-`{source: "forge-event-feed", host_id: string, count: u64, first_seq: u64,
-last_seq: u64, types: string[]}`, `types` being the page's event-type names
-sorted and deduplicated. The payload is a **routing hint only, never decision
-input** — it carries counts, sequence bounds and event-type names but no forge
-state, so a consumer that wants state re-reads the forge through its normal
-rate-limited clients and must be idempotent under the per-page dedup contract
-(a prompt may arrive with the events themselves absent from the bus — the
-on-disk journal is the copy, the prompt is a "check now"). Invariant source:
-`docs/adr/0021-forge-event-plane.md` (ADR-0021); implementation:
-`loom-daemon/src/forge_events.rs`.
+The `forge.event` topic (#8767) has no publisher or subscriber since the
+2026-10-19 ruling (#12809) removed the dashboard event-feed client and its
+early-tick consumers.
 
 The `operator_priority.escalation` topic was authorized by **#9321** (the
 delivery half of #9244/#9301). Its first publisher, the star-liveness pass,
@@ -307,8 +296,8 @@ clears). Consumer: the Safehouse narration sink, which renders it as a
 **`Generic`-topic rule.** A `Generic` topic is allowed only while it (a) is
 listed in this inventory, (b) carries a `source` field naming its producing
 subsystem on every payload, and (c) never triggers a write to external state
-without a forge-verified re-read in the consumer. `forge.event` satisfies all
-three; every future prompt topic must too.
+without a forge-verified re-read in the consumer. Every prompt topic must
+satisfy all three.
 
 The four `sweep.issue.{N}.*` payloads gained an additive **`repo`** field in
 **#3929** (`(repo, issue)`-aware sweep visibility, phase c of #3926). The bus is
@@ -4336,6 +4325,56 @@ open `loom:review-requested` and `loom:merge-conflict` PRs.
 | `loom:blocked` / `loom:operator` / `loom:frozen` | Never touched. |
 | `loom:reviewing` / `loom:treating` | Left to the agent in flight. |
 
+#### Orphaned stacked children (parent closed unmerged, #12760)
+
+`merge-pr.sh` reconciles stacked children when a parent **merges**. A parent
+PR **closed without merging** produces no merge event, so its children kept a
+base branch that will never reach the default branch.
+`claim_reconciliation::orphan_stack` runs on the same tick, after the
+review-conflict, merge-sequence and CI-gate passes, on the same shared open-PR
+listing.
+
+| Property | Behavior |
+|----------|----------|
+| Kill switch | `LOOM_ORPHAN_STACK_RECONCILE` (`0`/`false`/`no`/`off` disables), nested inside `LOOM_STALE_CLAIM_RECONCILE`. Defaults **ON**. One host per workspace runs it (the role-runner shard). |
+| Discovery | An open PR whose base is a stackable Loom branch (`feature/issue-<N>`, `feature/harness-ops-<N>`) that is not the head of any open PR. Only those cost a read: `GET pulls?head=<owner>:<base>&state=closed`, newest match. `merged_at == null` ⇒ orphan; a merged parent is left to the merged-parent path. |
+| Gates | Hold labels (`loom:blocked`/`loom:operator`/`loom:frozen` …) and `loom:reviewing`/`loom:treating` are skipped; so is a child whose **issue lease** is fresh or unreadable (not `loom:building`, which a Builder's issue keeps while its PR is open). |
+| Ownership | Only a **Loom branch in this repository** is rewritten: the head must match the same exact `feature/issue-<N>` / `feature/harness-ops-<N>` family, not be the default branch, and have `head.repo` equal to this repository. A PR whose head *is* the default branch is skipped before any read. A human's or fork's head is flagged (never pushed), so later ticks cost no fetch. An unreadable repository identity is a skip. The cascade applies the same rule. |
+| Rebase repos | Replay `<closed parent head>..<child head>` onto the fetched default-branch tip in a scratch worktree (`.loom/worktrees/orphan-restack-pr-<N>`, removed afterwards; the primary checkout is never switched). The parent head is fetched via `refs/pull/<N>/head`, so a deleted parent branch does not matter. The parent head must be an **ancestor** of the child head (`merge-base --is-ancestor`): a parent amended or force-pushed after the child branched would otherwise have its old commits replayed onto the default branch, so that child is flagged, never rewritten (`reconcile_stack`'s `ParentAncestry` refusal). `forge rebase-guard` must not block; the remote head must still be the listed head; the push is `--force-with-lease=refs/heads/<child>:<listed head>`. Only then is the base retargeted (`PATCH pulls/<N> base=<default>`) and a report comment posted. PRs stacked on the child are replayed onto its new head the same way, with the same ancestry check (old child head ⊑ grandchild head; base unchanged). |
+| Merge repos | No rewrite and **no retarget** (the closed parent's commits never reached the default branch, so a retarget would carry them into the PR): flagged instead. The comment gives no force-push recipe: it says the fix needs a rewrite that #10771 forbids and that Doctor opens a **replacement PR** (below, #12767). |
+| Flag | Conflict, refusal (the closed parent's PR record has no head, or `refs/pull/<N>/head` fetched without it; a rewritten parent; a rebase-guard block), a non-Loom head, or merge mode: `loom:merge-conflict` plus one comment carrying `<!-- loom:orphan-stack flagged parent=<N> head=<sha> -->` and how to finish by hand (rebase mode: the exact commands). Nothing more happens until the child's head moves. |
+| Idempotency | A retargeted child's base is the default branch, so discovery no longer matches it. |
+| Unknowns | A failed read, fetch (including the closed parent's head) or push, or a remote head that moved since the listing, is a skip for this tick, never a write. |
+
+**Replacement PRs for a flagged merge-mode orphan (#12767).** Doctor is the
+consumer of the merge-mode flag: its Finding Work scan lists PRs with
+`loom:merge-conflict` and a trusted `<!-- loom:orphan-stack flagged … -->`
+comment, and `orphan-stack-replacement.md` is the recipe. The git half is
+`loom-daemon orphan-replace` (`verify`, `create`, `close-check`, `replaced-by`;
+exit 0 done, 1 refused with nothing pushed, 2 transient):
+
+- **Boundary.** The closed parent's head (fetched via `refs/pull/<N>/head`) must be
+  an **ancestor** of the child's head, and `parent..child` must be non-empty
+  and hold no merge commit. Anything else is a refusal (`PARENT_NOT_ANCESTOR`,
+  `MISSING_HEAD`, `EMPTY_RANGE`, `MERGE_IN_RANGE`, `BAD_SHA`); Doctor comments the reason and
+  leaves the flag.
+- **Replacement.** `create` replays only that range onto the freshly fetched
+  default-branch tip in a scratch worktree and pushes the NEW branch
+  `orphan-replace/pr-<child>` without force. A conflict (`CONFLICT`) means the
+  change likely depends on the rejected parent: Doctor investigates and adapts,
+  or parks it; nothing is auto-resolved. A retry reuses the branch when it holds
+  exactly the range (`BRANCH_TAKEN` otherwise).
+- **No inherited verdict.** The replacement PR is opened with
+  `loom:review-requested` only: fresh Judge pass, fresh CI.
+- **Close.** The original is closed only after the replacement exists and both
+  link comments are posted (the original's ends with
+  `<!-- loom:orphan-stack replaced by=<N> -->`, which makes a retry idempotent), and
+  never while open PRs are based on its branch (`close-check` prints
+  `BLOCKED_BY_DESCENDANTS`). Its branch is never rewritten or deleted.
+- **Activation gate.** `stacking.onConflict.enabled` stays **off fleet-wide**
+  until this path is qualified on a real orphan (the fixtures cover the
+  refusals and the replay, not a live run). That qualification is out of band.
+
 ### Startup capacity seed: adopting live survivors (#6262)
 
 The passes above answer "is this *dead* claim reclaimable?". The mirror-image
@@ -4494,6 +4533,29 @@ unknown base, old binary) keeps the branch with a warning naming the manual
 remedy. It is independent of the #9259 reconcile defer and is not bypassed by
 `--allow-stacked-children`. Repos with `delete_branch_on_merge=true` are
 unaffected by the script, but GitHub's own flow retargets there.
+
+### Conflict stacking config (`stacking.onConflict`, #12758)
+
+The switch and depth cap for conflict stacking (epic #12757): when a new PR
+would conflict with an open PR, it is built on that PR's branch instead of on
+`main`. This entry covers only the config key. The behaviour that reads it is
+#12759.
+
+| Config key | Env override | Default | Meaning |
+|---|---|---|---|
+| `stacking.onConflict.enabled` | *(config only)* | `false` | Stack a conflicting PR on the open PR it conflicts with. A non-bool value is ignored: the default applies and a `WARN` names the key |
+| `stacking.onConflict.maxDepth` | *(config only)* | `3` | Deepest stack allowed; past it the next conflicting PR goes flat against `main`. `0` is valid and means never stack. Negative, non-integer, string, or over `u32` values are ignored the same way. `3` is a starting guess, not a measured value |
+
+Read with `resolve_effective_config` + `get_path`
+(`loom_daemon::stacking_config::stacking_on_conflict(main_root)`), so every
+config tier applies, and from the **main clone** root, not a Builder worktree.
+Each field falls back on its own: a bad `maxDepth` keeps a valid `enabled`. The
+code default is off, so a host outside the fleet sees no change. The fleet
+default (on) is set in fleet-gitops `config.defaults`, which reaches each host
+as the machine defaults tier. A per-repo override goes in that repo's fleet
+`config:` entry, which reaches the host as `.loom-local/fleet-repo.json`
+(#11738) and beats the repo's committed `.loom/config.json`. There is no env
+override and no other per-repo mechanism.
 
 ## Epic supervisor (#3842)
 
@@ -6029,7 +6091,7 @@ knobs not yet audited here.
 |------------|--------------|---------|-------|
 | `autonomous.model` | *(per-dispatch `dispatch_sweep` `model` param)* | `sonnet` | Model pinned on **every** daemon-dispatched child (work-finder, epic supervisor, and `dispatch_sweep` when its `model` param is absent). See below (#3944) |
 | `autonomous.workFinder.enabled` | `LOOM_WORK_FINDER` | `false` | Master on/off for the finder loop. **Restart required** — read once, before the loop is spawned; flipping it in config alone does not start/stop an already-running daemon's loop (#5963) |
-| `autonomous.workFinder.intervalSecs` | `LOOM_WORK_FINDER_INTERVAL_SECS` | `60` | Zero/invalid → default. **Restart required** — it also seeds the forge-event poll gate's base cadence and the armed early-tick registration, which a ticker-only re-arm would leave stale (#12090 follow-up) |
+| `autonomous.workFinder.intervalSecs` | `LOOM_WORK_FINDER_INTERVAL_SECS` | `60` | Zero/invalid → default. **Restart required** — the ticker is built once at startup with this period (#12090 follow-up) |
 | `autonomous.workFinder.maxConcurrent` | `LOOM_WORK_FINDER_MAX_CONCURRENT` | `3` | The per-machine **sweep-dispatch** admission knob since #4512, and the only sweep cap since #12406 — **it bounds sweeps only; role-runner agents are admitted outside it and carry their own `autonomous.roleRunner.maxConcurrent` ceiling (#6102)** — an operator ceiling, not a fixed target, tuned empirically from `loom-daemon calibrate` / `status`. Per-machine **and workload-dependent** (#4903): ~10+ on an 8-core API-bound (software) worker, but **2–3** on the same 8 cores running analog/simulation sweeps. **Hot-applies (#9060)** — re-read every multi-workspace tick, so a config edit takes effect on the next tick without a restart; the transition is logged once (`work_finder: configured_max A -> B (source=config)`). The **env override is restart-only** (process environment is fixed at launch) and, while set, shadows config — the daemon logs `maxConcurrent=N is IGNORED` when that happens. The startup log line names the resolved value and its layer, `source=env`/`config`/`default` (#6203). See [Sizing `maxConcurrent`](#sizing-maxconcurrent-per-machine-and-per-workload-4512-4903) below |
 | `autonomous.workFinder.buildBackoff.enabled` | *(config only)* | `true` | Build back-off on review + merge debt (#9410), per repo (#10624). While a repo's is engaged, no new issue build is admitted in that repo whatever its priority; only a verified red-main fix bypasses it. Reads the role runner's demand ledger, so it is inert with the role runner off. `false` → pre-#9410 admission. Non-bool → default. **Live**. See [Build back-off on review and merge debt](#build-back-off-on-review-and-merge-debt-9410) |
 | `autonomous.workFinder.buildBackoff.high` | *(config only)* | `40` | Engage a repo's back-off when **its own** `review + changes + merge` debt is **strictly above** this (#10624). Zero, negative or non-integer → default. **Live** |
@@ -6210,8 +6272,8 @@ What now catches it without the check:
   start.
 - **The daemon says so at startup.** A daemon whose config enables the work
   finder but whose environment switches it off logs `work_finder: OFF on a host
-  whose config enables it` at **ERROR**, opens a critical loom-ui alert (rule
-  `work_finder_forced_off`, resolved by the next start that runs the work
+  whose config enables it` at **ERROR**, opens a critical alert (an
+  `alert.transition` record, rule `work_finder_forced_off`, resolved by the next start that runs the work
   finder), and reports `work_finder.forced_off: true` on its `daemon.start`
   telemetry record, so `topic = daemon.start` in SigNoz shows every host's
   startup verdict. A host that turns the work finder off in config (a captain)
@@ -8096,8 +8158,7 @@ pass, on the captain.
 >
 > **A dead captain means no intake anywhere.** Unlabelled issues wait until it
 > is back. The signals are `intake-reconcile` missing from the captain's
-> `host.health.armed_singleton_jobs` and the completed-pass heartbeat (below)
-> going stale in the singleton-output watchdog.
+> `host.health.armed_singleton_jobs`.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -8151,42 +8212,6 @@ captain that dispatches nothing still runs it:
 - **Rate-limit breaker**: no pass while it is open, and the pass stops between
   repos if it opens. A failed or shed listing is not reported to it.
 
-**The completed-pass heartbeat (#10924).** A healthy pass that labels nothing
-emits no forge output, so a watcher could not tell a quiet fleet from a
-stopped reconciler. After every pass the captain folds the outcome into
-`<root>/.loom/state/intake-reconcile/last-pass.json` on the captain
-(`intake_reconcile::singleton::PassHeartbeat`): the record carries the pass's
-counts and outcome, and `last_completed_at` — the timestamp the watchdog ages —
-advances **only** when the pass completed its intended scan (every registered
-repo walked, every listing read). A pass that was stopped early by the
-rate-limit breaker, or shed or failed a listing, is recorded but keeps the
-previous stamp, so it can never masquerade as successful output. Label
-outcomes (a denied write scope, races, reverts, cap leftovers) do not block
-the stamp: the pass retries them next pass by design. A captain with no
-registered repos returns before any scan, so its stamp ages the same way: an
-empty roster surfaces as stale, not as a quiet healthy fleet.
-
-The heartbeat is the `fleet_outputs::SINGLETON_OUTPUTS` row for job
-`intake-reconcile` (record kind `intake-reconcile.pass`, gated on
-`fleet.intakeReconcile.singleton`): a stamp older than twice the *default*
-pass cadence — the row is built from the built-in 300 s constant, so its
-deadline is fixed at 600 s; overriding `LOOM_INTAKE_RECONCILE_INTERVAL_SECS`
-does not move it, and an interval above 600 s would trip the row on every
-quiet gap once the source is wired — or no stamp at all, is a Critical
-`output-missing:` condition once the in-daemon `fleet_alert` output source is
-wired (follow-up slice). The file is local to
-the captain, like the other on-host health records; the cross-host detector
-for a captain that is down entirely is `intake-reconcile` missing from its
-`host.health.armed_singleton_jobs`.
-
-**Rollout signal.** After deploying, confirm on the captain that
-`last_completed_at` in the heartbeat file advances on every pass even when
-nothing was labelled:
-
-```bash
-cat .loom/state/intake-reconcile/last-pass.json   # last_completed_at is fresh
-```
-
 In the forge-call ledger the pass is `intake.list_open`, `intake.recheck`,
 `intake.add_triage` and `intake.remove_triage`; with the singleton on, only
 the captain books them.
@@ -8210,9 +8235,8 @@ label: the write is idempotent and each is preceded by a re-read.
    variable is removed.
 4. Confirm: the captain lists `intake-reconcile` in
    `host.health.armed_singleton_jobs`, logs the covered slugs you expect,
-   is the only host whose `loom-daemon forge calls --by caller` books
-   `intake.*` rows, and its `.loom/state/intake-reconcile/last-pass.json`
-   shows a fresh `last_completed_at` on every pass (#10924).
+   and is the only host whose `loom-daemon forge calls --by caller` books
+   `intake.*` rows.
 5. Remove `LOOM_INTAKE_RECONCILE=0` from the other hosts. They stay off because
    the key, not the environment, now stands them down. A host still on an older
    daemon must keep the variable until it is upgraded.
@@ -9269,6 +9293,16 @@ path](troubleshooting.md#never-launch-a-service-from-a-build-output-path-6127).
 | `LOOM_DEEP_CLEAN` | `autonomous.worktreeReaper.deepClean.enabled` | env > config > default | `true` (on) |
 | `LOOM_DEEP_CLEAN_FREE_GB` | `autonomous.worktreeReaper.deepClean.freeGb` | env > config > `diskWarnFreeGb` | `20` |
 | `LOOM_DEEP_CLEAN_MIN_INTERVAL_SECS` | `autonomous.worktreeReaper.deepClean.minIntervalSecs` | env > config > default | `21600` (6h) |
+
+**Opting a checkout out (`clean.keepBuildArtifacts`).** When the primary
+checkout is itself a runtime dependency (e.g. other agents' MCP configs load its
+`node_modules/…/dist` by absolute path), set `"clean": {"keepBuildArtifacts":
+true}` in `.loom/config.json` (boolean, default `false`; resolved through the
+normal fleet/repo tiers). Both `clean --deep` and this pass share one engine
+that then keeps every existing `target/` / `node_modules/` — the CLI prints
+`SKIPPED <name>/ kept (keepBuildArtifacts, <size>)`, the pass logs a `warn`,
+and `status --json` `deep_clean[].last_kept` names what was left. Worktree
+artifact reclaim is unaffected.
 
 **Observability.** `loom-daemon status` prints an `artifact reclaim (deep, per
 repo)` block — when a pass last fired, what it

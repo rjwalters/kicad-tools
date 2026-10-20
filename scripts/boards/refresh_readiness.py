@@ -53,11 +53,18 @@ Usage (from the repository root, KiCad 10 ``kicad-cli`` on PATH)::
         boards/05-bldc-motor-controller --checked-at 2026-10-09T00:05:00+00:00
 
 ``--checked-at`` is explicit so that two runs produce the same report.
-KiCad stamps every ERC JSON with its own run date, so ERC reports, and the
-archives, manifest and readiness file that hash them, differ between runs
-only by that date.  For a byte-for-byte audit, ``--save-erc DIR`` keeps the
-ERC reports and ``--reuse-erc DIR`` replays them.  ``--dry-run`` runs every
-gate and publishes nothing.
+The refresh is a fixed point on unchanged evidence (Issue #7384): re-running it
+with the committed ``checked_at`` publishes nothing.  Two things used to break
+that.  KiCad stamps every ERC/DRC JSON with its own run ``date``; a fresh report
+whose content differs from the committed copy only by that field keeps the
+committed bytes (``settle_report``), so the date records when the findings were
+last produced.  And an archive whose members all keep their bytes keeps its
+committed bytes (``rebuild_archive``), whichever producer last wrote its zip
+metadata; an archive with any changed member is rewritten deterministically.
+``--save-erc DIR`` keeps the ERC reports and ``--reuse-erc DIR`` replays them.
+``--dry-run`` runs every gate and publishes nothing; the native test
+``tests/test_board_evidence_reproduces_7384.py`` asserts it lists no file for
+any board.
 """
 
 from __future__ import annotations
@@ -150,10 +157,16 @@ BOARDS: dict[str, BoardConfig] = {
     # ``kct check --mfr jlcpcb-tier1`` reports its reviewed vias as errors.
     # The schematic is re-checked by native ERC (no report copies are
     # rewritten: its committed reports also carry a Linux-container run).
+    # Its native DRC evidence is owned here (Issue #7435): the pintype
+    # annotator no longer writes it (Issue #7409).
     "04-stm32-devboard": BoardConfig(
         routed_pcb="output/stm32_devboard_routed.kicad_pcb",
         schematic="output/stm32_devboard.kicad_sch",
         tier="jlcpcb-tier1",
+        drc_targets=(
+            "output/readiness/native-drc.json",
+            "output/manufacturing/native-drc.json",
+        ),
         erc=(ErcJob("04-native-erc.json", "output", "stm32_devboard.kicad_sch", ()),),
         check_script="check_manufacturing.py",
         mirrors=(("output/manufacturing/design-source", "."),),
@@ -296,7 +309,15 @@ def write_deterministic_zip(archive: Path, members: dict[str, bytes]) -> None:
 
 
 def rebuild_archive(archive: Path, search: list[Path]) -> list[str]:
-    """Refill ``archive``'s existing members from the first matching current file."""
+    """Refill ``archive``'s existing members from the first matching current file.
+
+    Returns the members whose content changed.  When none did, the archive is
+    left byte-for-byte as it is (Issue #7384): its committed bytes may come
+    from another deterministic writer (``kct readiness``, the bundle exporter)
+    with different zip metadata, and re-encoding identical members would make
+    every refresh rewrite the archive, the manifest that hashes it and the
+    outer bundle.  Otherwise it is rewritten with ``write_deterministic_zip``.
+    """
     with zipfile.ZipFile(archive) as existing:
         old = {name: existing.read(name) for name in existing.namelist() if not name.endswith("/")}
     members: dict[str, bytes] = {}
@@ -308,8 +329,10 @@ def rebuild_archive(archive: Path, search: list[Path]) -> list[str]:
                 break
         else:
             raise GateFailure(f"{archive.name}: no current file for member {name}")
-    write_deterministic_zip(archive, members)
-    return sorted(name for name in members if members[name] != old[name])
+    changed = sorted(name for name in members if members[name] != old[name])
+    if changed:
+        write_deterministic_zip(archive, members)
+    return changed
 
 
 def refresh_manifest_files(destination: Path) -> None:
@@ -325,6 +348,37 @@ def refresh_manifest_files(destination: Path) -> None:
         if p.is_file() and p.name != "manifest.json"
     }
     path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+
+#: The one field of a ``kicad-cli`` ERC/DRC JSON report that records when it
+#: ran rather than what it found.
+KICAD_REPORT_RUN_FIELD = "date"
+
+
+def settle_report(target: Path, fresh: bytes) -> bytes:
+    """Write ``fresh`` to ``target`` unless the existing report says the same (Issue #7384).
+
+    ``kicad-cli`` stamps each ERC/DRC JSON with its run ``date``, so two runs
+    over the same design never match byte-for-byte.  When ``target`` already
+    holds a report equal to ``fresh`` in every field but that one, its bytes are
+    kept; any other difference (a finding, the KiCad version, the source, the
+    layout) writes ``fresh``.  Returns the bytes now in ``target``.
+    """
+    if target.is_file():
+        current = target.read_bytes()
+        try:
+            old, new = json.loads(current), json.loads(fresh)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            old = new = None
+        if (
+            isinstance(old, dict)
+            and isinstance(new, dict)
+            and {k: v for k, v in old.items() if k != KICAD_REPORT_RUN_FIELD}
+            == {k: v for k, v in new.items() if k != KICAD_REPORT_RUN_FIELD}
+        ):
+            return current
+    target.write_bytes(fresh)
+    return fresh
 
 
 def load_refresher(board: Path, spec: str | None):
@@ -713,14 +767,14 @@ def repin_staged(
     for job in cfg.erc:
         data = native_erc(staged, job, reuse_erc, save_erc)
         for target in job.targets:
-            (staged / target).write_bytes(data)
+            settle_report(staged / target, data)
         log(f"  native ERC {job.schematic}: 0 violations -> {len(job.targets)} report copies")
 
     # Issue #7283: run before the mirrors, archives and manifest, which
     # hash the report copies written here.
     drc_errors, drc_raw = gate_native_drc(staged, cfg)
     for target in cfg.drc_targets:
-        (staged / target).write_bytes(drc_raw)
+        settle_report(staged / target, drc_raw)
     if cfg.drc_targets:
         log(f"  native DRC report -> {len(cfg.drc_targets)} report copies")
 
@@ -776,6 +830,11 @@ def repin_staged(
         # from, so report binding sees provenance and not just co-pinning.
         pcb_sha = sha256(staged / cfg.routed_pcb)
         report.setdefault("report_sources", {}).update(dict.fromkeys(cfg.drc_targets, pcb_sha))
+    # ``read_readiness`` requires every output rule sidecar to be an input; a
+    # sidecar added since the report was issued (Issue #7206) is bound here.
+    for p in (staged / "output").iterdir():
+        if p.is_file() and p.name.endswith("net_class_map.json"):
+            report["inputs"].setdefault(p.relative_to(staged).as_posix(), "")
     for name in report["inputs"]:
         report["inputs"][name] = sha256(staged / name)
     report["checked_at"] = checked_at

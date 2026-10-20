@@ -33,6 +33,7 @@ If no output directory is specified, files are written to ./output/.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import subprocess
 import sys
@@ -158,7 +159,7 @@ def usb2_net_class() -> NetClassRouting:
         target_diff_impedance=90.0,  # Phase 3K: USB 2.0 90 Ohm diff
         impedance_tolerance_percent=15.0,
         # Issue #6443: no explicit skew.  The class declares high-speed USB2
-        # and takes the protocol default, 1.27 mm (TI SPRAAR7J App. A).  The
+        # and takes the protocol default, 1.0 mm (Q16 judgement value).  The
         # 3.0 mm it used to set had no source.
         pair_protocol="USB2_HS",
         length_critical=True,
@@ -276,6 +277,15 @@ def build_net_class_map() -> dict[str, NetClassRouting]:
     """
     usb2 = usb2_net_class()
     usb3 = usb3_net_class()
+    # Issue #7491: USB3_TX1 routes after the other J1 USB3 pairs.  Once
+    # USB2_D routes coupled (the pose search's partner-pad check), all 13 J1
+    # siblings are bumped to the front of the negotiated tier (#2482), which
+    # re-sorts them by priority and ignores ``_forced_net_order``, so a class
+    # priority is the only order knob.  At equal priority TX1 claimed the
+    # In1 corridor under J1's B row that USB3_RX1 used, and RX1 lost its
+    # route (seed 42: RX1 uncoupled 10.3/10.8 -> 14.7/18.3 mm).  Same class
+    # otherwise: only the routing order changes.
+    usb3_tx1 = dataclasses.replace(usb3, priority=3)
     pcie = pcie_net_class()
     mipi = mipi_net_class()
     sideband = sideband_net_class()
@@ -285,8 +295,8 @@ def build_net_class_map() -> dict[str, NetClassRouting]:
         "USB2_D+": usb2,
         "USB2_D-": usb2,
         # USB 3.0 (4 pairs)
-        "USB3_TX1+": usb3,
-        "USB3_TX1-": usb3,
+        "USB3_TX1+": usb3_tx1,
+        "USB3_TX1-": usb3_tx1,
         "USB3_RX1+": usb3,
         "USB3_RX1-": usb3,
         "USB3_TX2+": usb3,
@@ -1503,7 +1513,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                 project = pcb_path.with_suffix(".kicad_pro")
                 if not project.exists():
                     project = pcb_path.parent / "diffpair_test.kicad_pro"
-                escape_rules = EscapeRules.from_project(project)
+                escape_rules = EscapeRules.from_project(project, pad_edge_gap=_mask_dam_floor())
                 for pad_name in comp_pads:
                     escape = find_escape(
                         pad_center[pad_name],
@@ -1740,6 +1750,13 @@ def _connector_profile(points, neck_width, trunk_width, neck_length=0.75):
             legs.append((a, b, trunk_width))
         remaining = max(0.0, remaining - length)
     return legs
+
+
+def _mask_dam_floor() -> float:
+    """The fab's solder-mask dam (mm): the via-vs-SMD-pad-edge floor (#7322)."""
+    from kicad_tools.manufacturers import get_profile
+
+    return float(get_profile("jlcpcb").get_design_rules(layers=4).min_solder_mask_dam_mm)
 
 
 def _relocate_pad_edge_vias(pcb_path: Path) -> int:
@@ -2292,7 +2309,7 @@ def _legalize_signal_vias(pcb_path: Path) -> int:
                 project = pcb_path.with_suffix(".kicad_pro")
                 if not project.exists():
                     project = pcb_path.parent / "diffpair_test.kicad_pro"
-                rules = EscapeRules.from_project(project)
+                rules = EscapeRules.from_project(project, pad_edge_gap=_mask_dam_floor())
                 drill = max(rules.drill, v["drill"])
                 rules = replace(
                     rules,
@@ -4032,6 +4049,22 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     except Exception as exc:  # pragma: no cover - degrade gracefully
         print(f"   WARNING: pair-overlap repair skipped: {exc}")
 
+    # Issue #7548: several pair legs are hundreds of 0.05 mm grid-step
+    # segments, which neither the gap tightening below nor the skew tuner
+    # (6d) can use: a run needs one segment of a few mm to host a squeeze or
+    # a trombone.  Fuse each straight same-width chain first; the copper and
+    # the length are unchanged.  Only chains of 5 mm or more: ``kct check``
+    # exempts segments under 1 mm from its impedance rule as breakout, so
+    # fusing a breakout stub would make it a judged one.
+    from kicad_tools.router.optimizer.merge import merge_collinear_same_width
+
+    fused = merge_collinear_same_width(
+        router,
+        {r.net_name for r in router.routes if r.net_name and r.net_name[-1] in "+-"},
+        min_chain_mm=5.0,
+    )
+    print(f"\n6b2. Fused {fused} collinear same-width segment(s) on pair nets (#7548)")
+
     # Issue #7349 (follow-up to #7344): the coupled pre-pass leaves the pair
     # trunks at the breakout pitch.  Squeeze each declared pair's parallel run
     # to the impedance-solved gap.  This runs AFTER the optimiser, nudge and
@@ -4040,6 +4073,28 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # and impedance, and a declined pair keeps its copper unchanged.
     print("\n6c. Diff-pair gap tightening (#7344)...")
     router.apply_diffpair_gap_tightening()
+
+    # Issue #7548: the pairs route single-ended, so their legs differ in length
+    # and every declared pair exceeds the ``max_skew_mm`` that ``kct check``
+    # enforces.  Run the checker-limit skew tuner last, so it measures (and
+    # adds serpentine length to) the copper that actually gets judged.  Each
+    # insertion is clearance-checked with a byte-for-byte rollback, and the
+    # tuner never touches the longer leg.  Step 12 quantizes off-angle copper
+    # afterwards (each such segment becomes a longer dogleg), so the tuner
+    # measures the quantized length: MIPI_D0-'s 19-degree teeth grow 1.3 mm.
+    print("\n6d. Diff-pair skew tuning (#7548)...")
+    from kicad_tools.router.diffpair_detection import build_synth_routing, detect_diff_pairs
+
+    class_routing, net_to_class = build_synth_routing(getattr(router, "net_class_map", None) or {})
+    skew_pairs = detect_diff_pairs(
+        net_names=router.net_names,
+        net_class_routing=class_routing or None,
+        net_to_class=net_to_class or None,
+    )
+    for (p_name, n_name), tune in router.apply_diffpair_length_tuning(
+        skew_pairs, verbose=False, engage="checker_skew_limit", quantized_lengths=True
+    ).items():
+        print(f"   {p_name}/{n_name}: {tune.reason} {tune.message}")
 
     stats = router.get_statistics()
     print(

@@ -132,6 +132,72 @@ def _unit(v: Pt) -> Pt | None:
     return (v[0] / n, v[1] / n)
 
 
+#: Issue #7503: the impedance rule's coupling predicate, mirrored (not
+#: imported, so ``router`` keeps no module-level ``validate`` dependency;
+#: ``tests/router/lattice/test_gateway_fan_coupling_7503.py`` pins both to
+#: ``validate.rules.impedance``).  Two same-layer partner pieces within
+#: this edge-to-edge window that are parallel to within this sine and
+#: overlap along their length are judged as a coupled run at that gap.
+FAN_COUPLING_WINDOW_MM = 0.5
+FAN_PARALLEL_SIN_TOLERANCE = 0.1
+
+#: A fan run whose centreline spacing is within this of the pair pitch IS
+#: the coupled geometry (the body's own gap), not a wrong-gap run.
+FAN_AT_PITCH_TOL_MM = 0.01
+
+
+def fans_couple_off_pitch(
+    fan_p: list[Pt] | tuple[Pt, ...],
+    fan_n: list[Pt] | tuple[Pt, ...],
+    *,
+    half: float,
+    pitch: float,
+) -> bool:
+    """Whether two fan legs run side by side at a gap other than the pair's.
+
+    Issue #7503: on board 06rf the USB3 TX1/RX2 gateways at J1 fanned both
+    nets diagonally from pads one pad pitch (1.0 mm) apart, so the two 45
+    degree legs ran parallel 0.707 mm apart centre to centre -- a 0.432 mm
+    edge gap for 0.5-1.2 mm, about 112 ohm against the 90 ohm target.  The
+    impedance rule judges any parallel, overlapping partner run inside its
+    coupling window, so such a fan is real copper at the wrong gap.
+
+    A pair of fan legs is rejected when some segment of one is parallel to
+    a segment of the other (:data:`FAN_PARALLEL_SIN_TOLERANCE`), the two
+    overlap along their length, their edge gap is inside
+    :data:`FAN_COUPLING_WINDOW_MM`, and their centreline spacing is not the
+    pair ``pitch``.  Legs that split apart (a centred fan into a via pair
+    wider than the window, a fan straight off a row whose pitch already
+    exceeds the window) or that run AT the pitch are kept.  Any positive
+    overlap counts, which is never looser than the rule (it judges any
+    overlap, or one at least a trace width long once #7575 lands).
+    """
+    width = 2.0 * half
+    for a, b in zip(fan_p, fan_p[1:], strict=False):
+        length = dist(a, b)
+        if length <= 1e-9:
+            continue
+        ux, uy = (b[0] - a[0]) / length, (b[1] - a[1]) / length
+        for c, d in zip(fan_n, fan_n[1:], strict=False):
+            olen = dist(c, d)
+            if olen <= 1e-9:
+                continue
+            if abs(ux * (d[1] - c[1]) - uy * (d[0] - c[0])) / olen > FAN_PARALLEL_SIN_TOLERANCE:
+                continue
+            t1 = (c[0] - a[0]) * ux + (c[1] - a[1]) * uy
+            t2 = (d[0] - a[0]) * ux + (d[1] - a[1]) * uy
+            if min(max(t1, t2), length) - max(min(t1, t2), 0.0) <= 1e-6:
+                continue
+            mx, my = (c[0] + d[0]) / 2.0, (c[1] + d[1]) / 2.0
+            centre = abs((mx - a[0]) * uy - (my - a[1]) * ux)
+            gap = centre - width
+            if gap <= 0.0 or gap > FAN_COUPLING_WINDOW_MM + 1e-9:
+                continue
+            if abs(centre - pitch) > FAN_AT_PITCH_TOL_MM:
+                return True
+    return False
+
+
 def propose_gateway_sites(
     pad_p: Pt,
     pad_n: Pt,

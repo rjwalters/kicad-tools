@@ -7,6 +7,2720 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-10-20
+
+### Upgrade notes / behaviour changes
+
+- **`--edge-clearance 0` no longer permits copper across `Edge.Cuts`**
+  (Issue #6043). `edge_clearance=0` (and an unresolved `None`) used to turn the
+  board-edge keepout off. It now means "no margin beyond not touching the
+  cut": the router keeps every trace and via off the outline and interior
+  cutouts by a small physical floor (half the widest trace or via plus half a
+  grid cell). There is no opt-out. Pads that sit on or very near the outline
+  (edge connectors, castellations) now get a thin keepout ring when no clearance
+  is configured; set a positive `--edge-clearance` if you need a specific value.
+
+- **Crashed kicad-cli DRC runs now fail gates that used to pass** (Issue #6724).
+  These results used to read as clean and now fail. A `kct route` whose
+  post-route kicad-cli DRC crashed or was killed fails the DRC gate even
+  without `--strict-drc`. A route whose first pour-oracle DRC did not
+  complete exits `10` (unverified) instead of `0`. That includes a first
+  oracle DRC that times out (the default per-call budget is 120 s), not only
+  a crash. The recipe pipeline gate fails the DRC leg even with
+  `require_drc=False`, which still excuses only a missing kicad-cli. If you
+  start seeing these, read the reason: a signal kill (`SIGKILL (out of
+  memory?)`) usually means too many Docker DRC containers at once, so run
+  DRC one board at a time; an "unsupported option" (kicad-cli printed
+  `Unknown argument: <opt>`) means your kicad-cli is too old for an option
+  kct passed; exit 3 ("could not load the board") usually means the board
+  was saved by a newer KiCad than your kicad-cli, so upgrade KiCad. Any
+  other exit status is reported as-is, with kicad-cli's stderr.
+- **KiCad 8/9: geometric DRC now actually runs, without zone refill**
+  (Issue #6724). Before, kct passed KiCad 10's `--refill-zones` to every
+  kicad-cli; KiCad 8/9 rejected it and the rejected run read as a clean
+  DRC. Now KiCad 8/9 run the check without `--refill-zones`, so `kct route`,
+  `kct audit`, the recipe gate and benchmark metrics may report geometric
+  violations that were previously hidden. KiCad 10+ behaves as before
+  (zones are refilled before checking).
+
+- **`diffpair_length_skew` and `match_group_length_skew` numbers shift** (Issue #6725). Via length now follows the board stackup and the layers each via connects on, and pad/via entry geometry is trimmed, so reported skews change by a few hundredths of a millimetre per via (more where a via declared F.Cu/B.Cu only carries tracks on an inner layer). Pairs and groups can newly fail or newly pass; boards routed with an earlier kct may need `kct route` re-run to be retuned against the new measure.
+- **A via connected on only one layer no longer adds length in `kct check`** (Issue #6725). kicad-cli gives a via no height when the tracks ending in it (and any pad overlapping it: a surface pad's own layers, a through-hole pad's footprint side) use only one copper layer. `diffpair_length_skew` and `match_group_length_skew` now do the same on the written board, and no longer charge the via's declared span. A pair or group whose skew came from such a stub via can newly pass, or newly fail. The router's tuners still charge the declared span, because one routed fragment of a net may not show the via's other layer.
+
+- **Large boards routed with a fine `--grid` on the Python backend now use
+  that grid** (Issue #6741). A run that was silently coarsened to ~500k cells
+  now allocates the full requested grid (e.g. 6.05M cells for 195 x 155 mm at
+  0.1 mm) and is correspondingly slower and larger in memory. Build the C++
+  backend (`kct build-native`), or pass a coarser `--grid` that still satisfies
+  your clearance, if the run is too slow.
+
+- **New kicad-cli DRC failure reasons** (Issue #6775). Scripts that match
+  `GeometricDRCResult.reason` should know that exit 3 (board failed to load)
+  is now `kicad_cli_load_failed`. Every other non-zero, non-signal exit is
+  now `kicad_cli_exit_error`. Both used to be `kicad_cli_crash`, which now
+  means only a signal kill or an exception. All three are still failures
+  (`GeometricDRCResult.failed`), so gates behave as before.
+
+- **`kct route` holds coupled P/N traces to the pair gap, not the class
+  clearance** (Issue #6810). For a coupled class whose pair gap is *larger*
+  than its clearance, the pre-save check can now fail on P/N traces closer
+  than the pair gap -- the copper `kct check` (`diffpair_clearance_intra`) and
+  kicad-cli (`diff_pair_gap`) already reject.
+
+- **`kct route --differential-pairs` can spend longer on pairs it cannot
+  couple** (Issue #6835). Without `--diffpair-per-pair-timeout`, the coupled
+  search's only bound is its iteration budget, which is now 1,400,000 per pair
+  instead of 40,000 (`PCIE_TX`, `PCIE_RX` and `LVDS<n>` pairs keep 40,000). A pair that
+  fails both phases can take on the order of 15-20 s instead of about 0.5 s.
+  Set `KCT_COUPLED_FLAGOFF_MAX_ITERS=40000` to restore the old cap for every
+  pair, or pass `--diffpair-per-pair-timeout` to bound each pair by wall clock.
+
+- **`kct route --grid <value>` now refuses grids past a per-backend cell
+  ceiling** (Issue #6875). Since #6741 an explicit grid is never coarsened,
+  so a very fine grid on a large board could allocate until the machine ran
+  out of memory. An explicit grid needing more than 20,000,000 cells on the
+  Python backend, or 100,000,000 on the C++ backend (counted at the largest
+  layer count the run would try), now exits 1 before routing with an error
+  naming the cell count and suggesting `kct build-native`, the finest
+  `--grid` that fits, or `--grid auto`. Pass `--force` to route at the
+  requested pitch anyway. `--grid auto` is unaffected, and no committed
+  board recipe comes near either limit (the largest, board 09's
+  `--grid 0.05` investigation, is 15.6M cells at 6 layers).
+
+- **MCP clients must not send undeclared arguments** (Issue #6914). `tools/call`
+  requests carrying keys that are not in a tool's `inputSchema` now return a
+  validation error; remove the extra keys.
+
+- **`kct pcb import-ses` can now fail on an edited board** (Issue #6915). If
+  the board changed after `export-dsn`, re-export and re-route, or pass
+  `--allow-stale`. Boards with no sidecar still import, with a warning.
+
+- **Evidence producers refuse an unqualified KiCad environment** (Issue #6962).
+  `kct readiness` and the `scripts/boards/` producers now exit 2 and write no
+  evidence when kicad-cli is not the pinned image's release (10.0.6) -- e.g.
+  Homebrew KiCad 10.0.7 -- or when native DRC reports any
+  `lib_footprint_issues` finding; both used to be recorded silently. Re-run
+  with `KCT_KICAD_DOCKER=1` to route kicad-cli through CI's pinned image.
+  `scripts/ci/init_kicad_libraries.py` no longer writes into your KiCad
+  config: it populates an isolated config home and exports it (to
+  `$GITHUB_ENV` in CI, or via `eval "$(python3 scripts/ci/init_kicad_libraries.py --shell)"`).
+
+- **Code that called a removed router method must switch to the remaining
+  API** (Issue #6984).
+  - `ViaRules.standard_6layer()`: build the rules by hand with
+    `ViaRules(through_via=ViaDefinition(ViaType.THROUGH, drill_mm=0.3,
+    annular_ring_mm=0.15, start_layer=0, end_layer=5, name="Through"))`.
+  - Corridor helpers: use the remaining `RoutingGrid` corridor methods,
+    `set_corridor_preference`, `clear_all_corridor_preferences` and
+    `get_corridor_cost`. There is no per-net clear any more: clear them all
+    and re-apply the corridors you want to keep. If you need to know which
+    nets have a corridor, record that yourself when you call
+    `set_corridor_preference`.
+  - `LayerStack.get_layers_adjacent_to_plane` and
+    `get_layers_with_reference_plane`: iterate `LayerStack.layers` and
+    filter on `layer_type == LayerType.PLANE`, `plane_net`, `is_routable`
+    and `reference_plane`.
+  - `Router.set_via_cache_enabled`: the via-validity cache is now always
+    on, with no off switch. `Router.clear_via_cache()` still clears it.
+
+- **Rebuild the native router; re-routes may differ** (Issue #6994). The C++
+  router's `BUILD_VERSION` is now 60, so run `kct build-native` after
+  upgrading (a v59 extension is rejected and routing falls back to the slower
+  Python path). Native A\* search radii shrink by one cell where float noise
+  used to inflate them (e.g. Default rules on 0.1 / 0.05 / 0.025 mm grids) and
+  rip-up considers one more ring of blocking nets, so re-routing an existing
+  board can produce different copper.
+
+- **`KiCadPCBExporter.generate()`, `.write()` and `.generate_trace_segments()`
+  are removed** (Issue #7022). They wrote a whole board from a string template
+  with footprints that had no pads, so the result could not be routed, checked
+  or manufactured. Create the board from the schematic instead (`kct
+  create-pcb` or schematic-to-PCB sync), then apply the layout to it with
+  `layout.apply_to_pcb("board.kicad_pcb", "board_placed.kicad_pcb",
+  net_map={...})`. `update_pcb_placements` keeps its signature, now logs a
+  warning naming layout refs that are not on the board, and reports the number
+  of footprints it actually moved.
+- **`LEDBlock` places its LED at rotation 180 inside the block** (Issue #7022),
+  so `export_placements()` reports the LED footprint's rotation 180 degrees
+  different from before. Boards laid out with the old orientation shorted the
+  LED's anode to its cathode trace.
+
+- **`PCB.export_gerbers(..., create_zip=False)` on a preset now returns a
+  directory** (Issue #7023). With no `create_zip` argument the jlcpcb, pcbway
+  and oshpark presets still return a ready-to-upload zip; code that passed
+  `create_zip=False` and relied on the zip it got anyway should drop the
+  argument. `include_drill=False` and `layers=[...]` passed to a preset now
+  take effect.
+
+- **`kct bom` and `kct sch summary|validate|preflight|hierarchy` exit non-zero on a missing/unparseable schematic** (Issue #7028).
+  Scripts that relied on exit 0 for a bad schematic path will now fail; fix the
+  path or handle the error.
+
+- **`Project.create` boards differ on disk** (Issue #7047). The outline is now
+  four `gr_line` segments instead of one `gr_rect`; the `Cmts.User`,
+  `Eco1/2.User`, `Margin` and `User.1`-`User.9` layers and the explicit
+  stackup are no longer pre-declared; the root board `uuid` is gone; a
+  `title_block` is added; and the file is tab-indented. Scripts that place
+  items on those layers must add the layer first, and scripts that look for a
+  `gr_rect` outline should use `PCB.get_board_outline()`.
+
+- **`--batch-routing` is deprecated** (Issue #7051). Scripts passing it now get a warning on stderr (and a `DeprecationWarning`); remove the flag, routing output is identical. `Autorouter.route_all_negotiated(batch_routing=...)` is accepted but ignored. The `BatchPathfinder`, `BatchRouteRequest`, `BatchRouteResult`, `batch_heuristic_gpu` and `compute_batch_costs_gpu` import paths from `kicad_tools.acceleration.kernels` are gone. GPU/batched routing was evaluated in #7053 (`docs/research/gpu-routing-design.md`) and is not worth building now.
+
+- `kct placement align --axis row --reference left|right` (and `--axis column
+  --reference top|bottom`) now exits non-zero with an error instead of
+  silently centering; use row: center/top/bottom, column: center/left/right.
+  Reported move counts may be lower than before. Library callers:
+  `align_components` and ROW/COLUMN constraints raise `ValueError` for
+  mismatched references (Issue #7056).
+
+- **Derived HV clearances rise for working voltages above about 50 V**
+  (Issue #7057). `kct creepage --standard`, `kct audit --hv-standard` and the
+  `kct readiness` HV isolation gate now derive clearance from the rated impulse
+  voltage, so for example 120 V needs 0.5 mm and 230 V needs 1.5 mm at the
+  default overvoltage category II (both were 0.2 mm). Layouts that passed
+  before can newly fail. Circuits that are not directly mains-connected, or
+  that sit behind transient protection, can pass
+  `--overvoltage-category I` / `--hv-overvoltage-category I`; fixed-installation
+  equipment should pass `III` or `IV`. 48 V and below is unchanged.
+
+- **Creepage around slots now reads shorter** (Issue #7058). Both former
+  over-estimates are fixed, so `kct creepage` / `kct audit` HV checks can newly
+  fail on boards that previously passed. Slots narrower than dimension X
+  (PD2: 1.0 mm, used when no pollution degree is given) no longer add creepage.
+  Re-run HV checks and review any newly failing pair.
+
+- **Regenerate previously exported CPL files** (Issue #7059). CPL coordinates now use
+  the Gerbers' frame (aux origin, Y up), so every row changes, including the sign of Y
+  on boards without an aux origin. Remove any manual offsets applied on the assembler
+  side to compensate for the old frame.
+
+- **Differential-pair impedance numbers change** (Issue #7060). The
+  edge-coupled model now reports the physically solved Zdiff, which is lower
+  than before for tightly coupled pairs (about 5 % to 20 % at gaps near the
+  trace width). Expect:
+  - impedance-targeted diff pairs to route at different widths and gaps
+    (tight pairs: narrower traces to reach the true target);
+  - `kct check` impedance findings and `kct impedance diffpair` output to
+    change;
+  - previously routed impedance-controlled boards to be flagged out of
+    tolerance where they were sized with the old, optimistic model.
+  Re-run `kct impedance diffpair` for your geometry and re-size if needed.
+
+- **`kct parts import -i/--interactive` is deprecated** (Issue #7065). It was
+  never implemented; it is now ignored with a one-line stderr warning. Remove
+  it from scripts.
+
+- **`kct impedance` CPWG results change** (Issue #7075). CPWG Z0 and
+  geometries synthesised by `cpwg_geometry_for_impedance` differ from earlier
+  releases, and microstrip/CPWG loss figures are 2-3x lower. Re-run any CPWG
+  impedance targets; out-of-range geometry now raises `ValueError`.
+
+- **Single-ended microstrip impedance, delay and loss numbers change**
+  (Issue #7076). Re-check anything pinned to the old values:
+  - Router widths auto-resolved from `target_single_impedance` grow about 4-5 %
+    (e.g. 50 Ω on `Stackup.jlcpcb_4layer()` F.Cu: 0.387 → 0.403 mm).
+  - The impedance validator reports 2-5 % higher Z0 on existing copper, so a
+    tight tolerance can newly fail (e.g. 0.18 mm traces on board 07 go from
+    51.72 to 53.64 Ω).
+  - εeff falls 5-7 %, so microstrip delay drops 2.5-3.7 % per mm (board 07:
+    5.934 → 5.716 ps/mm) and the loss estimate drops too (16.9 → 15.4 dB/m).
+    Delay-to-length conversions for length matching change accordingly.
+  Diff pairs with an explicit gap use the coupled solver and are unaffected.
+
+- **`kct drc` can newly exit 1 or 2 on schematic parity** (Issue #7077).
+  Scripts that gate on its exit code should check what changed:
+  - **NOT RUN exits 2.** A board with no schematic next to it, or one that is
+    not fully annotated, now exits 2 (incomplete, as `kct check` does). So
+    does `kct drc <report>.json`/`.rpt` when the report has no parity
+    findings: an empty `schematic_parity` array cannot tell "clean" from
+    "never ran". Pass `--allow-incomplete` (same name and meaning as
+    `kct check --allow-incomplete`) to get exit 0 back.
+  - **Parity findings gate by severity.** Error-severity findings exit 1;
+    warning-severity findings exit 2 under `--strict`. Waive reviewed ones in
+    `.kct_waivers.json`.
+  - `--mfr` mode uses the same gate (Issue #7170), and `kicad-drc-summary`
+    keeps its exit code (only its verdict text changes).
+
+- **`estimate_pcb` / `kct estimate` now raise `ValueError` for layer counts above the pricing table's maximum** (Issue #7080), instead of silently pricing them as 2-layer. ENIG and other finish totals drop for quantities above 1.
+
+- **`kct audit` verdict on hosts without kicad-cli** (Issue #7083). A board
+  whose ERC could not run (kicad-cli not installed, or ERC timed out after
+  60 s) or whose schematic <-> PCB sync check crashed now gets
+  `REVIEW WARNINGS` / `"verdict": "warning"` instead of
+  `READY FOR MANUFACTURING`, so `kct audit --strict` now exits 2 in those
+  cases (without `--strict` it still exits 0). Install kicad-cli, or pass
+  `--skip-erc` to opt out of ERC explicitly; `--skip-erc` and boards with no
+  schematic are unchanged.
+
+- **`kct export` now refuses boards whose DRC report lists unconnected items**
+  (Issue #7091). The connectivity safety floor blocks on error-severity opens
+  as well as net shorts, even with `--skip-preflight`; route the board, or pass
+  `--skip-drc-floor` for a known-safe workaround. A DRC (or ERC) report
+  generated for a different PCB (or schematic) no longer counts as a clean
+  check: preflight shows `WARN` and the floor only warns, so re-run DRC on the
+  board you are exporting (or pass `--drc-report`) to get a real verdict.
+  Under `--strict-preflight` such a mismatched report is a hard `FAIL`: the
+  export is blocked and nothing is written until DRC/ERC is re-run for the
+  board being exported.
+
+- **`kct validate --lvs --min-confidence`, filtered `kct erc` / `kct erc
+  explain`, and `kct sch validate` without a working kicad-cli can now exit
+  non-zero** (Issue #7094). These used to exit `0` while real problems were
+  hidden or unchecked. `--min-confidence` and the ERC `--errors-only` /
+  `--type` / `--sheet` filters are display-only now, so a hidden error still
+  fails the run; use `--filter-config` ignore rules for deliberate
+  suppression. `kct sch validate` exits `1` with `passed: false` when ERC did
+  not run; pass `--skip erc` to opt out of ERC explicitly.
+
+- **`kct drc` can newly fail** (Issue #7096). Boards with unrouted nets that
+  previously printed `DRC PASSED` now exit 1. Pass `--ignore-unconnected` to keep
+  the old clearance-only verdict.
+
+- **Re-check boards placed with `kct placement optimize` since #3812
+  (2026-06-20)** (Issue #7106). On a board whose Edge.Cuts outline does not
+  start at (0, 0), `kct placement optimize`, `refine`, `suggest`, `snap` and the
+  MCP placement sessions could save most parts outside the board while
+  reporting success. Run `kct placement check` (or `kct check`) on any such
+  board. If parts lie off the board, restore the pre-optimization file, or
+  re-run `kct placement optimize` with this release.
+
+- **MCP `route_net` no longer overwrites the input board by default** (Issue #7111).
+  Omitting `output_path` now writes `<stem>_routed.kicad_pcb` next to the input.
+  Pass `output_path` equal to `pcb_path` to restore the old in-place behaviour.
+
+- **Regenerate `.kicad_dru` files written by `kct init`** (Issue #7116). They began
+  with `;` comment lines, which KiCad does not treat as comments: KiCad silently
+  ignored the entire file and DRC fell back to board-setup defaults. Re-run
+  `kct init` (or delete the `.kicad_dru` and re-run) to get a file KiCad loads.
+
+- **`create_checkpoint` no longer accepts `score` or `drc_violation_count`;
+  context tools reject unknown session IDs** (Issue #7121). Both values are
+  now taken from the live session. The seven context tools return
+  `Session not found` for any ID that `start_session` did not issue (or that
+  has been committed, rolled back or expired) instead of auto-creating a
+  context. Callers that passed those parameters should drop them.
+
+- **`kct audit` / `kct report` on a `.kicad_pcb` now run ERC, and the sign-off
+  skills use new gate commands** (Issue #7136).
+  - `kct audit` and `kct report` on a `.kicad_pcb` now run `kicad-cli sch erc`
+    against the resolved schematic. That is slower and needs kicad-cli (a
+    missing kicad-cli is ERC NOT RUN, WARNING).
+  - An audit of a `.kicad_pcb` with no schematic beside it is now WARNING
+    (ERC NOT RUN) instead of READY, so `kct audit --strict` exits 2. Pass
+    `--skip-erc` if a PCB-only audit is intended.
+  - Agents following `/kct:manufacturing-readiness` or `/kct:tapeout` run new
+    gate commands: `kct check --output <dir>/check-report.json` judged by a
+    `jq` rule, `kicad-cli pcb drc --refill-zones --severity-error
+    --exit-code-violations --format json` into `<pcb-dir>/drc_report.json`,
+    and `kct export --drc-report <pcb-dir>/drc_report.json`. The gates need
+    `jq`. Never use `kct check --allow-incomplete` for sign-off.
+
+- **`kct validate --sync` can newly exit 1 on a value mismatch** (Issue #7150).
+  Fix the schematic or PCB value so they agree, or run `kct sync --apply` to
+  copy the schematic value onto the PCB.
+
+- **JLCPCB bundles gain paste Gerbers; strict exports check the DRC
+  report's manufacturer** (Issue #7153). `kct export --mfr jlcpcb` now puts
+  `<board>-F_Paste.gtp` (and `<board>-B_Paste.gbp` when the board has a
+  `B.Paste` layer) in `gerbers/gerbers.zip`; scripts that assert an exact
+  Gerber file list need updating. `--strict-preflight` exports now FAIL when
+  the auto-discovered or `--drc-report` DRC report was generated for a
+  different manufacturer or capability tier than the run. Re-run
+  `kct check --mfr <run's mfr>` to refresh the report, or export with the
+  `--mfr` the report was built for.
+
+- **`kct erc` / `kct sch validate` can newly report `isolated_pin_label` /
+  `single_global_label` findings on hierarchical designs** (Issue #7161).
+  They are exactly the findings `kicad-cli sch erc` reports for the same
+  schematic, which the removed name-count filter used to hide. They are
+  warnings by default (exit 0); a project that raises `isolated_pin_label` to
+  `error` in its `.kicad_pro` now fails, as kicad-cli does. Fix the label (or
+  waive it with `--filter-config`, which is counted as `Filtered:`). The
+  Python helpers `filter_cross_sheet_global_labels`,
+  `filter_cross_sheet_global_labels_objs` and
+  `filter_cross_sheet_power_violations` are removed from `kicad_tools.erc`.
+
+- **`kct readiness` can newly fail or NOT RUN the `bom` gate** (Issue #7166).
+  The gate fails when the bundle's `bom_lcsc_values` preflight result is FAIL.
+  It reports NOT RUN when the bundle manifest has no such result, for example
+  a bundle exported before this release; regenerate the bundle with
+  `kct readiness --generate`. `kct export --strict-preflight` can newly fail
+  on IC package-family or pin-count mismatches between an assigned LCSC part
+  and its footprint. `bom_lcsc_values` now reports WARN instead of OK when an
+  assigned part is in neither the parts cache nor the offline catalog. That
+  WARN never blocks export, not even under `--strict-preflight`, and never
+  blocks readiness.
+
+- **`kct drc --mfr` can newly exit 1 or 2** (Issue #7170). It now uses the
+  same exit gate as plain `kct drc`, reversing #7077's separate 0/1 rule for
+  `--mfr`. It exits 1 on any fab-limit breach (including the newly judged
+  `hole_to_hole`, `via_diameter` and too-large `drill_out_of_range`) and on
+  any error-severity violation kct cannot judge against the fab's limits
+  (*not checked*). It exits 2 on warnings under `--strict`, and when schematic
+  parity did NOT RUN unless `--allow-incomplete` is passed, so
+  `kct drc report.json --mfr <fab>` on a saved report now needs
+  `--allow-incomplete` to exit 0, as plain `kct drc report.json` already did.
+  `Project.check_drc()` / `check_manufacturer_rules()` now also return
+  `CheckResult.UNKNOWN` entries (`rule_name == "not_checked"`), which are not
+  `is_compatible`. kicad-cli's `hole_clearance` now parses as
+  `drill_clearance` (it was `clearance`), so `--type`/`--category` filters and
+  `kct fix-drc` see it as a drill finding. `--mfr --format json` output is new.
+  The Python helper `filter_phantom_wire_violations` is removed from
+  `kicad_tools.erc.cross_sheet`.
+
+- **`bom_lcsc_values` can newly FAIL** (Issue #7180). Wrong-package LCSC numbers assigned in a `.kct` `bom_entries` block, and coarse-vs-fine SO pitch mismatches (SOIC/SOP/SO at 1.27 mm against TSSOP/MSOP/VSSOP at 0.65 mm or finer), are now caught by preflight and block the readiness `bom` gate. LCSC package strings never state pitch, so when the pitch comes only from the family name the check compares the 1.27 mm vs fine class only; fine-vs-fine (0.65 vs 0.5 mm) never fails. Fix the assignment; do not suppress the check.
+
+- **DRC gates that can newly fail** (Issue #7188).
+  - `kicad-drc-summary` can newly exit 1: on unrouted boards (error-severity
+    `unconnected_items`), and for any kicad-cli error-severity type the
+    severity table did not mark blocking -- e.g. `hole_clearance`, or
+    `solder_mask_bridge` / `silk_*` when the project's severities say error
+    and `--fab` does not reclassify them.
+  - `kct mfr validate` can newly exit 1 (clearance and connectivity are now
+    checked), and its `--format json` `violations` come from `DRCChecker`:
+    each entry keeps `type` / `detail` and adds `severity` and `rule_id`; a
+    new `warnings` list has the same shape; `ok` is true exactly when there
+    are no errors. Warnings never fail. The "design meets manufacturer
+    requirements" line is gone.
+  - `kct audit` / `kct readiness`: an audit whose kicad-cli run reports
+    error-severity opens after the zone refill now fails its DRC row.
+    Readiness no longer counts *warning*-severity opens toward
+    `native_drc.error_count`; `unconnected_count` still counts every open.
+  - `kct mfr validate --layers` now defaults to auto-detection from the
+    board's copper layers (as `kct check` does) instead of 2; an explicit
+    `--layers N` still overrides. Boards that previously got 2-layer rules
+    (boards 03, 05 and 06: 4-layer; board 07: 6-layer) are now judged against their real
+    layer count. Keepout zones (pour-fragment cutouts) are no longer
+    reported for their placeholder zone clearance of 0.
+
+- **Auto-discovered `drc_report.json` / `erc_report.json` must be
+  content-bound to count as a pass** (Issue #7190). A report beside the board
+  that records no `pcb_sha256`/`schematic_sha256` (and is not pinned with the
+  board in `output/readiness.json`) now shows as a preflight WARN instead of
+  `OK`/`DRC passed`; one whose recorded hash no longer matches the file now
+  FAILs `kct export --strict-preflight`. Re-run `kct check --output
+  drc_report.json` (or `kct build`) after changing the board, or pass the
+  report explicitly with `--drc-report`/`--erc-report`.
+
+- **`.kicad_dru` keepout rules now depend on the kicad-cli release** (Issue #7198).
+  On KiCad >= 10.0.6, kct stops writing the `# BEGIN kct keepout rules` block
+  and removes an existing one, so committed sidecars change when regenerated.
+  Keepout findings on vias, pads, footprints and zone fills now appear only
+  under KiCad's native type, not the kct rule name: update any
+  `.kct_waivers.json` entry or `--type` filter keyed on the old name.
+  A sidecar written on 10.0.6 and checked by an older kicad-cli no longer
+  enforces keepouts. Regenerate it on that release or upgrade to 10.0.6.
+
+- **Double-sided JLCPCB exports now WARN, and an impossible package pitch
+  now FAILs `--strict-preflight`** (Issue #7204). Boards with bottom-side
+  parts get a `bottom_side_in_cpl` WARN; this never blocks an export. Parts
+  that need JLCPCB Standard PCBA (0201/01005 chips, 0.35 mm IC pitch, BGA
+  pitch under 0.5 mm) get an `assembly_package_limits` WARN under the default
+  `--assembly-tier auto`. Pass `--assembly-tier standard` to judge against
+  Standard instead. A part beyond every tier the fab offers (for example a
+  0.25 mm-pitch BGA at JLCPCB) is a FAIL and blocks `--strict-preflight`.
+  The JLCPCB assembly profile values also changed to match the published
+  limits: `min_bga_pitch_mm` is 0.3 (was 0.4) on `profile.assembly`, which is
+  the Standard tier.
+
+- **Boards whose footprints lack courtyards no longer pass `kct readiness`**
+  (Issue #7204). `kct check` now emits a `courtyard_missing` warning for each
+  such footprint, and `courtyard_missing` is an assembly-affecting rule, so
+  `kct readiness --assembly` needs `--ack-warnings courtyard_missing`. The
+  `courtyard_overlap` coverage behind the warnings is a blocking `unknown`,
+  which `--ack-warnings` cannot clear, so readiness and `/kct:tapeout` refuse
+  sign-off until the gap is fixed. Fix: give each footprint an `F.CrtYd`
+  outline (the stock KiCad library one, or pad extent + 0.25 mm), or, for a
+  part with no body, set `(attr ... allow_missing_courtyard)`.
+
+- **Protection patterns require wider current-carrying traces** (Issue #7206).
+  `OvercurrentProtection` / `ReversePolarityProtection` minimum widths now
+  follow IPC-2221 (3 A: 0.90 -> 1.37 mm; 10 A: 3.0 -> 7.19 mm on 1 oz), so
+  existing copper sized by the old rule can violate the pattern's routing
+  constraint. Widen the traces, or pass the board's real `copper_oz=`.
+
+- **A `project.kct` that declares a current now needs `target_ampacity`** (Issue #7206).
+  Add `target_ampacity` (amperes, continuous) to the net classes that carry it in
+  your net-class map (`net_class_map.json`); otherwise `kct check` and
+  `kct readiness` report a blocking `ampacity: unknown`. kct never infers which
+  net carries a spec current.
+
+- **Pours on nets with `target_ampacity` are now measured and can fail** (Issue #7206).
+  A copper pour whose narrowest neck between the net's pads is under the
+  IPC-2221 width for the declared current is an `ampacity` error. That includes
+  a thermal spoke narrower than that width into any one pad or via, whatever
+  the length of its gap. Parallel spokes are not added together. Widen the
+  spokes or the neck, or connect the pad solidly. The rating is conservative
+  about pour copper, but it does not rate via barrels: a pour that hands its
+  current to another layer through a small via is not flagged for it. The
+  pour reads `ampacity: unknown:pour not measurable (<net>: <reason>)` when:
+  - a zone of the net has no committed fill (refill the zones and save);
+  - the net has fewer than two copper pads;
+  - a pad's copper outline cannot be modelled;
+  - the fills lie on no board copper layer;
+  - an internal layer has no copper weight (`inner_copper_oz <= 0`);
+  - the copper does not join all the net's pads;
+  - shapely is not installed.
+
+- **New `stackup_copper` preflight FAIL blocks `kct export --strict-preflight`**
+  (Issue #7209). A board whose stackup declares copper the fab profile does not
+  offer (e.g. 3 oz inner on JLCPCB) now fails `stackup_copper`. Default exports
+  still write the package and list the failure as a warning. Align the stackup
+  with an orderable build.
+
+- **Pour-only rails with a declared current now block sign-off** (Issue #7210). A net with a declared `target_ampacity` that is carried only by a copper pour (no track segments) used to read `ampacity: checked`; it now reports `ampacity: unknown:zone-only, not measured`. `ampacity` is a blocking category, so `kct readiness` and tapeout refuse to sign off while it is `unknown`. Route a track that carries the current, or remove the current declaration for that net, to clear it.
+
+- **`kct validate --sync` can newly fail on footprint lib-ID drift** (Issue #7213). A placed footprint whose package or `Library:` nickname differs from its symbol's `Footprint` field is now a `footprint_mismatch` error (exit 1). Fix the PCB (or schematic) so both name the same `Library:Footprint`. A footprint missing the nickname on one side only is reported as a warning and does not fail the check.
+  `kct sync` uses the same comparison: a placed footprint whose nickname
+  differs from the schematic's (e.g. `Capacitor_SMD:X` vs `Resistor_SMD:X`)
+  now produces an `update_footprint` action, so review the plan before `--apply`.
+
+- **`kct check` reports new warnings on many existing boards** (Issue #7220).
+  `thermal_asymmetry` and `via_at_pad_edge` run by default. On the committed
+  fleet they report: 00: 1, 01: 1, 03: 6 (C10, C11, and J1 A1/A12/B1/B12) and
+  04: 9 `thermal_asymmetry`; 02: 2, 05: 3 and 06: 17 `via_at_pad_edge`. Plain
+  `kct check` exit codes and `kct readiness` verdicts are unchanged: both are
+  warnings in the advisory bucket, and neither is an assembly-affecting
+  warning-review rule. A pipeline that fails on *any* warning (`--strict`, or
+  a script that checks `summary.warnings == 0`) will now fail. That includes
+  board 05's `redesign/build.py`, which refuses a rebuild until its three
+  pad-edge vias are moved, and board 04's reviewed
+  `check_manufacturing.py`, whose DRC leg now reads "0 errors, 9 warnings"
+  until the fill repair stops forcing those terminals solid. Fix the copper.
+  Use `--skip thermal_asymmetry` or a `.kct_waivers.json` entry only after a
+  review. Direct `ViaInPadRule()` callers are unaffected: the edge warning is
+  opt-in there (`report_pad_edge=True`), and `kct check` turns it on.
+
+- **`kct readiness` can now block on silkscreen text height, text thickness and
+  obscured reference designators** (Issue #7228). `silkscreen_text_height`,
+  `silkscreen_text_thickness` and `silk_ref_obscured` join the
+  assembly-affecting warnings, so a board that has any of them needs
+  `--ack-warnings <rule>` or a fix (`kct place-silk-refs` for obscured
+  references). The committed example boards report none of them.
+
+- **Filtered `kct drc` / `kct validate --sync` runs can newly fail** (Issue #7230).
+  `kct drc --net X` (and `--type`/`--category`/`--errors-only`) can now exit 1,
+  and `kct validate --sync --errors-only --strict` can now exit 2, where they
+  previously exited 0. CI that relied on a filtered run passing must filter
+  the output itself or fix the findings.
+- **Read `verdict`, not the exit number, across sign-off commands** (Issue #7230).
+  The two exit ladders stay: `kct drc`/`erc`/`validate --sync`/`sch validate`
+  exit 1 for a board with errors, `kct check`/`audit` exit 2 and keep 1 for
+  "the tool could not run". A pipeline that compares numbers across commands
+  should read the JSON `verdict` (`gate_verdict` for `kct audit`) instead.
+  JSON consumers that reject unknown keys must accept the new top-level
+  `verdict`, `exit_code` and `gate_verdict` keys.
+
+- **Regenerate JLCPCB packages for boards with through-hole parts** (Issue #7239).
+  The JLCPCB CPL and BOM content changes for every board that has THT parts
+  (headers, connectors, DIP/TO packages): those rows are now assembled by the
+  fab. Re-run `kct export --mfr jlcpcb` / `kct readiness`, and send the new
+  BOM/CPL through procurement review before ordering.
+  `kct readiness` can now block such a package: a THT BOM line with no LCSC
+  part number fails the `bom` gate, as does a THT part still listed in a
+  `manual-assembly-bom.csv`. Assign a JLCPCB-sourceable part or drop it from
+  the manual BOM.
+
+- **A declared `target_diff_impedance` can now fail `kct check`** (Issues #7250, #7293). A coupled segment more than 20 % off its declared differential target is an `impedance` error. A matched diff pair with no judged segment (unrouted partner, or no run inside the coupling window) now reports `impedance: unknown:diff_pair_unmeasurable` in the coverage map instead of `checked`.
+- **`kct check` can now fail on a `project.kct` mismatch** (Issue #7292). A board whose outline differs from
+  `requirements.mechanical.dimensions`, or whose copper-layer count differs from
+  `requirements.manufacturing.layers.preferred` (or exceeds `layers.max`), now reports `Overall: FAILED`.
+  Fix the spec or the board; run `kct check --skip spec_conformance` to defer.
+
+- **MCP `get_drc_violations` and `export_assembly` can newly fail** (Issue #7260).
+  `get_drc_violations` can now return `passed: false` on boards it used to
+  pass: 2-layer boards are checked against 2-layer fab limits, and `passed`
+  is `kct check`'s verdict, so a board whose ERC/LVS cannot run (no
+  kicad-cli, no schematic) is `verdict: "incomplete"` (pass
+  `allow_incomplete: true` for `exit_code: 0`). Its `layers` parameter is
+  removed (the count comes from the board), and an omitted `manufacturer`
+  resolves like `kct check` (`fab_profile.json` > `project.kct` > `jlcpcb`).
+  `export_assembly` now runs preflight and refuses on any `FAIL` by default;
+  pass `strict_preflight: false` to downgrade non-blocking FAILs to warnings.
+  Like `kct export`, it now writes sibling `<board>.kicad_pro` /
+  `<board>.kicad_dru` next to the source PCB.
+
+- **An open known defect now makes a board not ready** (Issue #7261). Board 03
+  (USB joystick) records defect #7250 (USB pair 71.6 ohm vs the 90 ohm spec)
+  and reads `blocked` / "Needs work" until that is fixed, so `kct fleet status`
+  reports one fewer ship-ready board. `read_readiness()` and the gallery now
+  reject a `ready` report that lists a defect, or a `known_issues` list that
+  differs from its hashed `known-issues.json` evidence. `kct readiness` carries
+  a board's recorded issues forward; pass `--resolve-known-issue N` to drop one.
+
+- **Re-run `kct readiness` / `kct check --output` for reports bound only by readiness
+  co-pinning** (Issue #7277). Such reports now read as unbound (a WARN, never a pass) until
+  readiness records `report_sources` for them or they carry their own `pcb_sha256`.
+  ERC reports of multi-sheet schematics must be regenerated; flat ones are unaffected.
+
+- **Re-running the zone fill can change generated copper** (Issue #7295). Pads that were previously forced solid may now carry a per-pad `thermal_width`/`thermal_gap` override instead. Re-fill boards on the pinned KiCad toolchain (`KCT_KICAD_DOCKER=1`) and re-pin readiness evidence; committed boards are unchanged until regenerated.
+
+- **Rebuild the native router extension** (Issue #7296): run `uv run kct build-native`. Routing with a manufacturer set now
+  keeps vias at least `min_solder_mask_dam_mm` (0.1 mm on JLCPCB) off SMD pad copper, so some routes differ;
+  pass `DesignRules(min_via_pad_edge_gap=0.0)` to restore the old behaviour.
+
+- **`--length-match-diffpairs` is no longer a silent no-op under
+  `--auto-layers`** (Issue #7377). Runs that pass `--differential-pairs
+  --length-match-diffpairs` without `--layers N` / `--no-auto-layers`, or
+  `--route-engine lattice --differential-pairs` on the auto-layers,
+  `--adaptive-rules`, `--auto-mfr-tier` or `--auto-pcb-size` paths, now get
+  diff-pair skew tuning: serpentine meanders on the shorter leg, so the routed
+  copper differs from earlier releases. This is what `--no-auto-layers` /
+  `--layers N` runs already did. Drop `--length-match-diffpairs` to keep the
+  old grid output; the lattice auto-tune has no separate off switch.
+
+- **Rule writers no longer lower stricter authored rules** (Issue #7385).
+  `kct mfr apply-rules <x.kicad_pro>`, `kicad-fab-rules apply` and `kct init`
+  on an existing project now keep any authored minimum or netclass value
+  that is stricter than the manufacturer profile. Before, these commands
+  could be used to relax a project to the profile; they now keep the
+  stricter value and list what they kept. To replace a project's rules with
+  the profile on purpose, set the project text variable
+  `KCT_PRESERVE_BOARD_RULES=0`. This is the same escape hatch `kct route` has
+  used since #6191. Any relaxation the policy still permits (a
+  template-signature `Default` netclass relaxed to the profile, or anything
+  under `KCT_PRESERVE_BOARD_RULES=0`) is printed and reported as
+  `relaxed_by_policy` in the `--format json` `rule_merge` payload. These
+  writers still leave `rule_severities` alone: an authored
+  `isolated_copper: error` or `lib_footprint_mismatch: error` is never
+  downgraded by them (only `kct route` applies the #6191 non-blocking
+  severities). They do write the profile's micro-via floors
+  (`min_via_annular_width` 0.05 mm when the project has none); the
+  `apply-rules` header now names that floor next to the standard-via
+  annular ring.
+
+- **`known_issues` `warnings: {rule: count}` is rejected** (Issue #7389). Record the
+  exact findings as `{rule, ref, pad}` identities (`--known-issue
+  N:summary:kind:rule@pad,...`) and regenerate the hashed `known-issues.json`.
+
+- **Schematic block behaviour changes from Issue #7399.** Re-check any
+  schematic generated with these blocks:
+  - `ReversePolarityBlock(topology="pfet")`, `BarrelJackInput` and
+    `BatteryInput` now connect the input to the P-FET **drain** and the output
+    to its **source**, so a regenerated netlist swaps those two pins.
+  - `ESDProtectionBlock(channels=N)` with N >= 2 raises `ValueError` when N is
+    more than the ESD array has (2 for the default `USBLC6-2SC6`). Before,
+    N was quietly capped at 4 and the extra channels got ports on no pin.
+  - `VoltageDividerSense`'s `y` is now the top of R1, as in `VoltageDivider`.
+    Before, it was the R1/R2 junction. A `ratio` of 1 or less now raises
+    `ValueError`; before, it built a 0-ohm or negative top resistor.
+
+- **`--strict-preflight` fails on header parts whose pin count is not verifiable**
+  (Issue #7446). Under strict preflight, a BOM row on a `PinHeader_RxC` /
+  `PinSocket_RxC` footprint whose LCSC part record is known but states no pin count,
+  or states conflicting ones, now fails `bom_lcsc_values` ("pin count not
+  verifiable"). Without `--strict-preflight` it stays a warning. Parts missing from
+  the parts cache and offline catalog still only warn, even under strict. To clear
+  the failure, assign a part whose record states its pin count.
+
+- **`PCB.save()` can now raise `ValueError`** (Issue #7479). Directly assigning `Pad.number/type/net_name/uuid/pintype/pinfunction`, `Footprint.name/reference/value/description/tags/uuid`, mutating `Footprint.properties`, or appending to `Footprint.pads` on a loaded board never reached the saved file; `save()` now refuses (and writes nothing) instead of dropping the edit, naming each `ref/pad.field`. Use `update_footprint_reference()`, `update_footprint_value()` or `assign_net_to_footprint_pad()`. Edits that stay in memory and are never saved are unaffected.
+
+- `USBConnector` ESD protection now places `Power_Protection:USBLC6-2SC6` (was
+  `Device:D_TVS`); custom `esd_tvs_symbol` values must use USBLC6-2SC6 pin numbering.
+  `UCC27211GateDriver`'s default `driver_symbol` is now `Driver_FET:LM5109AMA`.
+  The default is a schematic-level stand-in with different pin numbers than the UCC27211
+  and emits a `UserWarning`; pass `driver_symbol=` for any board that will be fabricated.
+
+### Fixed
+
+- **The trace optimizer no longer joins Kelvin sense branches** (Issue
+  #5398). The router builds a current-sense net as a star of separate
+  branches that meet only on the shunt pad, but the post-route optimizer
+  checked collisions against other nets only. A chamfered corner or a
+  straightened staircase could run one branch over a sibling of the same net
+  away from the shunt, which KiCad DRC cannot see. A rewrite that touches
+  same-net copper the route did not already touch (a sibling branch or
+  another terminal's pad) is now rejected, and that route keeps its routed
+  geometry. The log reports `Kelvin branch isolation: N route(s) kept
+  pre-optimization geometry`. On the board 05 DRV8301 stress fixture this had
+  merged ISENSE_A+'s U3.32 branch into the U3.25 branch about 6 mm from the
+  R12 shunt pad.
+
+- **`kct retune-lengths` tunes boards saved by KiCad 10** (Issue #5798). On a
+  board whose copper names its net (`(net "DQ0")`, KiCad 10's format) the
+  routing loader filed every track under net 0. The tuner then saw every
+  member of every selected group as unrouted, changed nothing, and reported
+  the group as `unattainable`. Board 07's routed artifact is such a board.
+  Loaded copper is now matched to its net by name before tuning.
+- **Match-group tuning keeps a member's earlier meanders when a later attempt
+  fails** (Issue #5798). When a later attempt found no host segment, or hit
+  the group's insert ceiling partway through a member, the tuner reset that
+  member to its original route. That discarded meanders that had already
+  passed DRC and been counted against the group budget. On board 07,
+  SDRAM_ADDRESS's two shortest members lost their meanders this way, so the
+  group spread stayed at 52.44 mm and the whole group was rolled back. It now
+  improves to 41.69 mm and the meanders are kept (the group is still over its
+  5.0 mm limit, so `kct retune-lengths` still writes nothing for it).
+- **`kct route` no longer reports shorts against input copper it does not
+  write** (Issue #5798). With `--preserve-existing`, a net the run re-routes
+  drops its old input copper from the output. The post-route short check
+  still tested routed copper against that dropped copper, so a board that
+  kicad-cli passes with 0 errors could exit with `ROUTING FAILED: cross-net
+  copper shorts`. Board 07 with `--length-match-groups` reported 19 such
+  shorts, all at dropped SDRAM escape-stub vias. The check now uses only the
+  input copper the output carries.
+- **Match-group tuning spends its insert ceiling on the shortest members
+  first** (Issue #5798). The tuner visited group members in declaration order,
+  so on a large group the 16-insert ceiling could run out before the members
+  that needed the most length were tried (board 07's SDRAM_ADDRESS BA0/BA1).
+  Members are now visited by descending length deficit. The limits themselves
+  are unchanged, and results are still reported in declaration order.
+- **Match-group tuning lets a member at its insert cap use the group's unused
+  ceiling** (Issue #5798). In groups of more than four members each member
+  gets at most 2 meanders, even when the group's 16-insert ceiling is far from
+  spent. On board 07's complete route SDRAM_BYTE0 stopped at 5.80 mm (limit
+  5.0) with DQ6 at its cap 0.8 mm short and 4 ceiling inserts unused. After
+  the first pass, a member that stopped at its cap now gets one more insert
+  from the leftover ceiling, largest remaining deficit first. `kct
+  retune-lengths --group SDRAM_BYTE0` now reaches 4.89 mm and writes the board
+  (kicad-cli 10.0.6: 0 errors, as for the input). An explicit
+  `max_inserts_per_member` is still a hard cap, and a group whose ceiling is
+  spent, such as SDRAM_ADDRESS, is unchanged.
+
+- **Demo boards 04-07 carry schematic pad pin types** (Issue #6025). The
+  board 04, 05, 06 and 07 generators now call `annotate_pcb_file_pintypes`
+  right after writing the unrouted PCB, so every committed unrouted and
+  routed `.kicad_pcb` (and board 07's `readiness/checked.kicad_pcb`) carries
+  `(pinfunction ...)`/`(pintype ...)` and `kct detect-mistakes` can use
+  pin-type rail evidence on them. Copper is unchanged; readiness reports
+  were re-pinned by each board's producer.
+
+- **The router no longer lays copper across interior `Edge.Cuts` cuts when no
+  edge clearance is set** (Issue #6043). With `edge_clearance=None` and no
+  known manufacturer, or with `edge_clearance=0` / `--edge-clearance 0`, the
+  grid used to block nothing, so a trace could run straight through a board
+  window, cutout or round hole. The grid now always gets a physical keepout
+  floor in those cases: the widest trace or via half-width on the board plus
+  half a diagonal grid cell. It is reinstalled on trial resets, parallel
+  workers and both fine-grid retries, and works on the Python and native
+  backends. `validate_routes` now also reports copper overlapping a cut as an
+  `edge` violation when no clearance is set. Positive clearances are
+  unchanged.
+
+- **Board 05 MOSFET symbols now match the TO-220 footprint pad names** (Issue #6290).
+  Q1-Q6 use a project-local `board05_custom:Q_NMOS_GDS` symbol (G=1, D=2, S=3) so
+  schematic pin numbers equal the footprint's pad names; LVS reports 0 pad-name
+  mismatches (previously 36) without any relaxation of the comparator.
+
+- **Board 03's committed copper meets its own router net classes** (Issue #6394). `routing-plan.json` and `usb_joystick_routed.kicad_pcb` are re-derived from a fresh lattice route (`kct route --route-engine lattice --differential-pairs --native-zone-clearance`, committed net-class map, routed under `jlcpcb` and verified under `jlcpcb-tier1`). This replaces the hand-repaired plan whose 13 `Power` 0.2 mm violations both DRC engines reported. Board 03 now has 0 errors in `kct check --mfr jlcpcb-tier1` and in kicad-cli 10.0.6 DRC (`--all-track-errors --refill-zones`), passes `usb_geometry()` (common In2.Cu run 4.10 mm, D+/D- 15.72 mm, skew 0, MCU launches 3.80 / 3.65 mm), and its readiness receipt is `ready`. Its `.github/routed-drc-tolerance.yml` allowance is removed. The recipe now declares the router's net classes in the routed sidecars itself (`router_net_classes=`), and `route_demo.py` stitches, applies the tier-1 sidecars and fills before checking, as the recipe does, so its native DRC no longer reports starved thermals the shipped fill does not have. One warning remains: USB_D+ / USB_D- have 2 / 3 vias (#7093).
+
+- **Board 01's committed readiness evidence is fresh again** (Issue #6404).
+  `boards/release_package.py` now runs the `package_release.py` producers on the
+  pinned KiCad toolchain (they bypassed it because they pass custom engines),
+  and board 01's package and `readiness.json` were regenerated so
+  `read_readiness()` validates every board.
+
+- **Lattice diff pairs no longer seal in a routed pad between their own start pads** (Issue #6697).
+  When a coupled segment starts at two pads of one part that straddle a foreign pad (board 03:
+  VBUS U2.5 between USB_D+ U2.4 and USB_D- U2.6), the relocated pair anchor started the coupled
+  run right on that pad's only exit. Pour nets used to get a #6401 via site there; since #6599
+  VBUS is routed, so U2.5 was stranded (1 kicad-cli unconnected item, negotiation stuck at the
+  12-round cap). The router now reserves an escape via site for such a routed, single-layer pad
+  on the nearest legal lattice node off its outer edge (log: `Pair escape via site (#6697)`).
+  The pair routes around it and the pad's net drops its via there. Board 03 under the lattice
+  protocol (seeds 42 and 43) now converges in 2 rounds, 27/27 nets, with 0 `kct check` errors and
+  0 kicad-cli errors or unconnected items, and both USB_D U2.4->R4.1 and USB_MCU_D stay coupled.
+
+- **Lattice diff-pair ties no longer tie one net of a pair alone** (Issue #6697).
+  The #6698 same-part far-row tie was all or nothing only when both nets had a
+  tie candidate: if just one net had one, that net was tied and its partner
+  routed single-ended, attaching P and N by different mechanisms (board 06rf
+  USB2_D uncoupled length 8.677 -> 12.951 mm). Now neither net is tied and the
+  router logs `Diff-pair ties P/N: not used (partner net has no tie candidate)`.
+
+- **Lattice uncoupled diff-pair fallback legs now route partner-aware**
+  (Issue #6703). When a pair's coupled search declines, its two single-ended
+  legs no longer route as unrelated nets: each leg order is tried, the second
+  leg is pulled toward the first leg's corridor, and each foreign pad is kept
+  at its own class while the legs are searched (so no class-pad shortfall gets
+  a pair net demoted). The partner-aware legs are kept only when they cut the
+  flush's summed skew by at least 0.25 mm and the remaining fallback pairs
+  still route as well behind them; otherwise the previous legs stay. Board
+  07rf TMDS_D0/D1 raw skew drops from 7.213/8.393 mm to 0.642/1.824 mm and all
+  three TMDS pairs pass `kct check`'s 0.075 mm skew limit with one meander
+  each. Boards with fallback pairs route slower (07rf: about 2x; 06rf: about
+  1.35x); at most four fallback pairs per pass are weighed, and the routing
+  deadline stops the extra searches.
+
+- **A killed or failed kicad-cli no longer reads as a clean DRC** (Issue #6724).
+  `run_geometric_drc` used to pre-create its report and ignore kicad-cli's exit
+  status. A kicad-cli killed by the OOM killer left an empty file that parsed
+  as 0 violations, so `kct route`'s pour oracle printed `0 -> 0 (converged)` on
+  boards KiCad calls unconnected. Now a signal kill or an unexpected exit
+  status gives `reason=kicad_cli_crash`, and a missing, empty or truncated
+  report gives `kicad_cli_no_report`. Neither result counts as a clean run,
+  and the note names the signal (`SIGKILL (out of memory?)`). The same fix
+  covers `kct drc` / `run_drc`, the zone refill/fill-via-DRC paths (a killed
+  `--save-board` restores the board), `kct audit`'s ERC, `kct sch validate`'s
+  ERC, netlist export, `kct readiness` exports and `kct export` preflight
+  (an empty DRC/ERC report is a WARN).
+- **Geometric DRC now actually runs on KiCad 8/9** (Issue #6724).
+  `run_geometric_drc` always passed `--refill-zones`, which only KiCad 10's
+  `kicad-cli pcb drc` has. KiCad 8/9 rejected the command line (exit 1, no
+  report), and that read as a clean DRC, so the geometric DRC never ran there.
+  The flag is now passed only when the installed kicad-cli supports it (a
+  memoised `--help` probe), in `run_geometric_drc`, `run_drc` / `kct drc`
+  and the connectivity refill cross-check. A command line kicad-cli does
+  reject is reported as `reason=kicad_cli_unsupported_option`, naming the
+  option and saying a newer KiCad is needed, instead of as a crash.
+- **The `--refill-zones` capability probe only caches a definitive answer**
+  (Issue #6724). A killed, failed or timed-out `kicad-cli pcb drc --help`
+  (30 s cap) is no longer remembered as "no refill support"; the geometric
+  DRC then passes `--refill-zones` and lets kicad-cli's own rejection
+  decide, so a KiCad 10 run never silently skips the zone refill.
+
+- **`kct check` and the skew tuners measure net length exactly as kicad-cli does** (Issue #6725). `diffpair_length_skew`, `match_group_length_skew` and the router's pair (#6664) and match-group (#6675) tuners now share one function, `router/kicad_length.py`. A via is charged KiCad's stackup height between the layers it actually connects (outer copper full, inner end copper half, solder mask excluded; from the board's `(setup (stackup))`, else KiCad's default for `(general (thickness))` and the copper layer count) instead of the manufacturer profile's full board thickness. Track chains entering a pad or via are clipped at the copper boundary and the in-copper part is replaced by a straight line to the centre. On the test fixtures, per-net lengths agree with kicad-cli to about a micron, so the tuners now measure skew the way kicad-cli measures it. `board_thickness_mm` and `blind_buried_supported` no longer enter the measurement.
+
+- **Net length now matches kicad-cli on track junctions, pass-through pads and off-centre via ends** (Issue #6725). A bench comparison against kicad-cli 10.0.6 on boards 03, 06b, 06rf and 07rf found up to 0.57 mm of disagreement on a single net that the first kicad-length model missed. kct now groups track segments into unbranched runs the way kicad-cli does, so a track that passes through a pad centre is no longer clipped at that pad. A run that ends anywhere inside a via's copper is now clipped at the via and run straight to its centre. A via's span now comes from the layers where a track ends inside it, or where a pad overlaps it. A surface pad adds its own layers, and a through-hole pad adds only its footprint's side. A track that only passes through the via adds nothing. Where a via sits inside a pad that a run ends in, the via trim comes first and the in-via stretch is no longer removed twice. A via connected on only one layer gets zero height on the written board, as in kicad-cli. Every diff-pair net on the four bench boards now agrees with kicad-cli to within 0.1 µm.
+
+- **Board 07 ADDR_BUS skew brought inside 0.5 mm** (Issue #6730). The committed
+  board 07 regression fixture was re-tuned in place with `kct retune-lengths`
+  (ADDR_BUS 1.0998 -> 0.0169 mm; kicad-cli agrees) and the relaxed test pins
+  were tightened. Board 03 USB_D is unchanged: its 1.32 mm skew is inside the
+  2.5 mm gate, and reaching 0.5 mm would break the `usb_geometry()` bounds.
+
+- **Board 07 pour repair holds its copper off foreign pads at the net-class
+  clearance** (Issue #6736). The step-7 pour-connectivity repair checked its
+  offset vias, pad stubs and bridge legs against a flat 0.15 mm and measured
+  foreign pads by their circumscribed circle, so a 45-degree `+1V2` bridge leg
+  shipped 0.1913 mm from U1.24 (GND) against KiCad's 0.2 mm Power rule. It now
+  resolves `max(0.15, class(P), class(N))` per neighbour net and measures pads
+  with their true shape through the shared clearance kernel. Board 07's
+  kicad-cli `clearance` count is back to 0.
+
+- **`kct route` no longer crashes on Windows** (Issue #6739). The
+  `KCT_RSS_TRACE` peak-RSS tracer imported the Unix-only `resource` module
+  at load time, so every `kct route` run on Windows failed with
+  `ModuleNotFoundError: No module named 'resource'`. The import is now
+  optional; without it the tracer reports 0 bytes instead of crashing. The
+  native-DRC failure advice also no longer assumes `signal.SIGKILL` exists.
+
+- **`kct route` no longer mistakes `(pad ` inside a footprint description for a
+  pad** (Issue #6740). The router's pad-block scan now skips quoted strings, so
+  a footprint such as `(descr "Heatsink pins (pad 4, net HS) are 25.4 mm
+  apart.")` loads with only its real pads instead of failing with
+  "Unsupported routing geometry 'HS' for pad J1.4,".
+
+- **`kct route --grid` is no longer silently coarsened on large boards**
+  (Issue #6741). The Autorouter's internal adaptive cell cap (Issue #972)
+  replaced the requested pitch with a coarser one once a board exceeded
+  ~500k cells on the Python backend, without a message and after the
+  `Grid resolution ... exceeds clearance` check had passed the requested
+  value -- a 195 x 155 mm board at `--grid 0.1` routed at ~0.35 mm
+  (`Grid: 561x446x2 = 500,412 cells`). Boards loaded through `kct route`
+  (`load_pcb_for_routing`) now route on exactly the pitch that was checked,
+  explicit or auto-selected, matching `--max-cells`'s documented "no effect
+  when --grid is an explicit value". Direct `Autorouter(...)` library callers
+  keep the adaptive cap, which now logs a warning naming both pitches and
+  can be disabled with `adaptive_grid=False`.
+
+- **Killed `kicad-cli` no longer reads as a successful render/SVG export** (Issue #6742). `run_pcb_export_svg`, `run_pcb_render`, the MCP PCB/schematic screenshot exports and the report schematic figures now fail on any non-zero exit status (including signal kills such as OOM `-9`) even when a truncated file was left behind. The export safety floor also warns when the DRC report is zero bytes instead of silently treating it as clean.
+
+- **Board 06 pour repair holds its copper off foreign copper at the net-class
+  clearance** (Issue #6748). The step-7 pour-connectivity repair checked its
+  offset vias, pad stubs and bridge legs against a flat 0.15 mm and measured
+  foreign pads by their circumscribed circle, so repair copper on a
+  Power-class pour net (`GND`, `+3V3`, `+1V8`, `+1V2`, `VBUS_USB`) shipped
+  inside the 0.2 mm Power clearance (three sites at 0.162-0.193 mm on a fresh
+  regen). It now resolves `max(0.15, class(P), class(N))` per neighbour net,
+  measures pads with their true shape through the shared clearance kernel,
+  widens the segment prefilter margin to the largest pair clearance, and
+  accepts an off-45-degree chord only when both dogleg variants step 12's
+  quantizer may ship also clear. Port of board 07's #6736 fix.
+
+- **Fleet-router comparability gate no longer counts fab-only DRU rules as DSN losses** (Issue #6756). Silk, text, annular, edge and hole rules are recorded under `not_routing_rules`, and a class-scoped clearance is covered by its emitted DSN class block.
+
+- **A wide net no longer seals its fine-pitch neighbours' exits** (Issue #6761).
+  On a pad column whose pitch is narrower than a via of its own nets (board
+  05's U2: 0.65 mm pitch, 0.6/0.8 mm vias), a connection that starts or ends
+  on that column now keeps its trace out of every other-net pad lane of the
+  column and drops no via into one, so it leaves the column straight (or
+  changes layer in its own lane) before it turns. Before, PHASE_C's 45-degree
+  F.Cu diagonal and 0.8 mm via across U2.10/U2.11 left one exit for two pads,
+  and GND_SENSE U2.10 or VM U2.11 stranded. The fences are hard but never
+  lose a connection: a search they make impossible is retried once without
+  them. Board 05 (grid, 4 layers, seed 42 and 7) routes 32/33 signal nets
+  instead of 31/33, with U2.9..U2.12 all connected and no kicad-cli DRC
+  violations. `KCT_DISABLE_ESCAPE_FENCES=1` restores the previous search.
+  Native backend build version 57.
+
+- **Board 06 routed `.kicad_pro` now declares the recipe's net classes** (Issue #6763). The
+  diffpair-test recipe passes `build_net_class_map()` to `write_drc_constraints` after routing
+  (as `kct route` does), so `kicad-cli pcb drc` enforces the `Power` 0.2 mm clearance the
+  router used.
+
+- **A rejected `--refill-zones` is retried, and a skipped refill is a WARNING**
+  (Issue #6775). When the `kicad-cli pcb drc --help` probe was killed or
+  timed out, kct passed `--refill-zones` anyway, and KiCad 8/9 rejected it
+  with `Unknown argument: --refill-zones`. The DRC then failed as
+  `kicad_cli_unsupported_option`. Now the DRC is re-run once without the
+  flag, and that answer is remembered for the process. Whenever a requested
+  refill is not passed, kct logs a WARNING that zone fills may be stale;
+  before, this was logged only at INFO. One shared `run_kicad_drc_command()`
+  now drives `run_geometric_drc`, `run_drc` / `kct drc` and the
+  connectivity refill cross-check, so `kct drc` and the connectivity check
+  no longer drop the flag when the probe's answer is unknown.
+- **kicad-cli DRC failures are classified by cause** (Issue #6775). Exit 3
+  is `reason=kicad_cli_load_failed` ("could not load the board", possibly a
+  newer KiCad file format). Any other non-zero exit, including a plain
+  exit 1 such as `cannot open display`, is `reason=kicad_cli_exit_error`, and
+  the note quotes kicad-cli's stderr. `kct route` prints separate advice
+  for each cause: upgrade KiCad for an unsupported option or a load failure,
+  check memory only after a SIGKILL, and otherwise read kicad-cli's own
+  output. `kct drc` also names a rejected option instead of reporting a bare
+  "status 1".
+
+- **The skew tuners now measure each net in the order `kct check` and kicad-cli read it** (Issue #6778). Where three or more track ends meet, kicad-cli's line merge depends on the order the tracks are listed in the file. The router's pair (#6664) and match-group (#6675) tuners measured in route order, while the routed file's order came from content-derived UUIDs (#6052), which is effectively random per net. On 07rf the group tuner logged `DDR_DATA_BYTE_0` at 0.000 mm while `kct check` failed it at 0.284 mm: one 0.2 x 0.2 mm stub inside a via on `DM0`. `kct route` still gives router copper content-derived UUIDs, but each net now takes its UUIDs in a fixed geometric order, so the net appears in that order in the routed file and after any KiCad save. The tuners sort a route the same way and measure its coordinates as written (4 decimals). Routed boards get the same UUIDs as before, assigned to different tracks, and their copper order changes; the copper itself does not.
+
+- **Length tuners measure vias in back-side through-hole pads like `kct check`**
+  (Issue #6780). Router pads now carry their footprint's copper side
+  (`Pad.side`), so the per-Route length model applies kicad-cli's
+  footprint-side rule for through-hole pads, and a via inside a through-hole
+  pad is measured as a stub in both forms. Previously the pair and group
+  tuners charged such a via the full F.Cu-B.Cu height, and could converge on
+  a skew target that `kct check` and kicad-cli reject.
+
+- **DSN export carries `min_copper_edge_clearance`; fleet audit recognises implied `diff_pair_gap`** (Issue #6784). The exported `(boundary ...)` is inset by the project's copper-to-edge clearance, and pads already in the band are listed as omissions. `dsn_audit` counts a `diff_pair_gap` no greater than the pair nets' class clearance as carried, and records `Native zone clearance` / `SMD Pad Clearance` as not-routing.
+
+- **Diff-pair skew tuner no longer overshoots or gives up on the first blocked placement** (Issue #6788). `tune_diff_pair_skew` sizes multi-loop trombones exactly (a 5.3 mm skew used to add 6 mm and overshoot), never counts a zero-length serpentine as an insert, and on a clearance rejection retries a centred meander, the reverse side, a smaller amplitude and up to 3 ranked hosts before rolling back.
+
+- **Diff-pair and match-group skew tuners no longer double-count a shared via** (Issue #6792).
+  The tuners measure a net held as several `Route` fragments by merging them,
+  and every fragment that met at a via carried it, so its span was charged once
+  per copy. Route-form length now counts each via once: two fragments on
+  In1.Cu/In2.Cu sharing a via inside a through-hole pad (1.6 mm, 4 layers)
+  measure 9.0475 mm, the whole-net kicad-cli value, instead of 10.095 mm
+  (+1.05 mm), and the tuners converge on the length `kct check` reports.
+
+- **Diff-pair skew tuner no longer trades a skew error for an uncoupled-length error** (Issue #6795).
+  On the lattice checker-limit path a meander that would push the pair over its
+  `max_uncoupled_total_mm` limit is rejected; `overshoot` now has its own count in the
+  `kct route` `Summary:` lines, failure messages are printed, and an overshoot revert reports
+  `inserts_applied == 0`.
+
+- **Kelvin nets tie neighbouring duplicate pins before the star** (Issue
+  #6799). Two same-net pins of one package with no room for a trace between
+  them (board 05's DRV8313 PGND pins U2.6 and U2.7, 0.65 mm pitch) are now
+  joined pad-to-pad and routed to the shunt as one branch. Before, each pin
+  got its own isolated branch, U2.7's branch sealed U2.6's exit, and U2.6
+  stayed unconnected. Resistor pads and pins with room for a trace between
+  them keep their own branch. Board 05 now routes 33/33 signal nets.
+  The rule looks only at geometry, so an adjacent force pin and sense input
+  of one package on the same sense-named net are tied too; give such a
+  sense input its own net or a net tie at the shunt.
+
+- **Fleet-router `dsn_audit` no longer counts class-scoped clearances on empty classes as losses** (Issue #6800). A clearance rule whose named net classes have no member nets under the frozen project is now reported under `not_routing`, since `kicad-cli` applies it to no net.
+
+- **`kct route` no longer fails its pre-save clearance check on coupled
+  diff-pair copper laid at its own pair gap** (Issue #6810). The router's
+  self-check held the P and N traces of a coupled pair to the net-class
+  clearance instead of the pair gap, so board 06rf (class `MIPI`: clearance
+  0.15 mm, pair gap 0.1016 mm) exited 3 on 53 false segment violations while
+  `kct check` and kicad-cli both passed. P-to-N traces of a pair the router
+  coupled-routes are now held to the same floored pair gap the exported
+  `diff_pair_gap` rule and `kct check` use. Pads, vias, other nets and
+  `+`/`-` pairs the router does not couple (e.g. Kelvin `ISENSE+`/`ISENSE-`)
+  keep the full clearance, and P/N copper below the gap is still reported.
+
+- **`kct fleet status` no longer reports false "0 nets in PCB" schematic drift** (Issue #6815). The drift check now reads pad nets through the schema parser shared with `kct validate --sync`, so KiCad 10 name-only `(net "VCC")` boards (02, 04-07) pass. Boards that declare their PCB under `project.kct` `artifacts` (e.g. 09) are now discovered, and boards with no output (e.g. 08) are listed in a `skipped` footer and JSON array with a reason.
+
+- **A hand-written net-class-map `length_constraint` without `net_id` no
+  longer crashes `kct check`** (Issue #6820). Every net-class-map consumer
+  (`kct check`, `kct route`, `kct creepage`, `kct zones`, `kct audit`) now
+  reports a clean error naming the map file and the entry instead of a
+  `KeyError` traceback. Also, `routing_policy` now checks the via cap of a
+  half-routed differential pair itself; it was handed to
+  `diffpair_uncoupled_length`, which skips pairs without track on both nets,
+  so the cap was silently never evaluated.
+
+- **Mesh engine and parallel routing no longer cross interior Edge.Cuts
+  cutouts** (Issue #6822). `kct route --route-engine mesh` built its navmesh
+  from the outline's bounding box only, so board windows, cutouts and round
+  holes were never holes and a net could be routed straight across one, at any
+  edge clearance. Each interior Edge.Cuts loop is now a navmesh hole, and every
+  mesh leg and via keeps the edge clearance from it, or the #6043 physical
+  floor when no clearance is set. The thread-safe grid that parallel routing
+  rebuilds now reinstalls the board-edge keepout, so parallel routing can no
+  longer cross the board edge or a cutout. Grid-engine output is unchanged.
+
+- **Stitch pad-to-via stubs are always 45-degree-legal** (Issue #6823).
+  `run_stitch` -- behind `kct stitch` and `kct route`'s pour-link closer --
+  joined a pad to a via site a few hundredths of a mm off its axis with one
+  straight stub 1-2 degrees off the 0/45/90/135 set, which
+  `routing_plan.save_plan()` rejects (board 03's VCC and GND welds).  Such a
+  site is now reached through a dogleg whose legs are clearance-checked
+  (both dogleg variants are tried), the extended-escape polar fallback
+  doglegs its 22.5-degree bearings, and the shared writer
+  (`add_trace_to_pcb` / `trace_to_track_segments`) doglegs any remaining
+  off-angle leg.
+
+- **`--matrix` layer assignment no longer overwrites an authored
+  `preferred_layers`** (Issue #6824). A net class that names its own preferred
+  layers keeps them; the automatic matrix hint only fills classes with none.
+
+- **Board 03 route harnesses and the determinism smoke now load the committed net-class map** (Issue #6829).
+  The research route harnesses and `board_route_determinism_smoke.sh` pass the board's declared
+  `--net-class-map` instead of silently falling back to the generic 0.5 mm skew default; a declared
+  map that is missing on disk now raises `FileNotFoundError`.
+
+- **Lattice fan-via gateway follow-ups** (Issue #6834). A discarded tap-chain retry or rejected pad-growth attempt no longer leaves its gateway diagnostics in the route log, and a chained pair's gateway via limit now counts vias already used on the pair's other segments.
+
+- **Lattice diff pairs couple under a dual-row SMD connector's facing row**
+  (Issue #6836). When a pair's matching pins sit behind the opposite-polarity
+  row of an SMD USB-C receptacle, the fan-via gateway retry now also tries
+  "pass-under" combinations: the coupled body reaches the gateway vias from
+  the pad side, under both rows, on a layer those pads do not own. They are
+  tried only after every existing gateway combination has declined, so pairs
+  that already couple keep their copper. On bench board 06rf, USB2_D now
+  couples on B.Cu instead of falling back to uncoupled legs.
+
+- **Lattice diff pairs retry a centerline turn that sits inside a partner pad row** (Issue #6839).
+  When the emitted offset leg broke the partner-pad clearance floor, the pair used to fall back
+  to uncoupled with no retry. The search is now re-run (bounded) without the stubs through the
+  offending turn; board 06b LVDS1 now couples 2/2 on seeds 42 and 43.
+
+- **Coupled diff-pair search keeps clear of the partner's vias** (Issue #6840).
+  The joint P/N search measured a partner via as an ordinary trace cell at
+  trace-to-trace spacing on one layer, so a rail could run past or into its
+  partner's barrel; the commit gate then rejected the whole coupled route
+  (Board07 MIPI_DAT0/1 and TMDS_D0/1/2). Each rail now keeps the trace-to-via
+  clearance from every partner via on every layer, and a layer change keeps
+  both new barrels clear of the partner's copper. The rejection log no longer
+  prints `worst=+nanmm` under the wrong check name: it reports the real
+  overlap, e.g. `N via vs P segment on B.Cu, gap -0.0315mm`. `kct route` also
+  no longer lets the trace optimizer reshape a committed coupled pair, which
+  had moved 06rf MIPI_D0's N rail onto another row (20.1 mm uncoupled), and
+  a coupled via drop at the pair's own SMD pads now honours the
+  manufacturer's via-in-pad capability (it used to bypass it, e.g. two
+  `via_in_pad` errors on 06rf MIPI_CLK under `--mfr jlcpcb`).
+  Native router build version 59.
+
+- **Polarity-swap via move honours via-in-pad and tracks each rail's via**
+  (Issue #6847). `CoupledPathfinder(allow_swap_via=True)` (library-only; `kct
+  route` keeps it off) could still drill a swap via into an SMD pad under a
+  manufacturer without a via-in-pad process, e.g. `--mfr jlcpcb`; it now takes
+  the same gate as the plain coupled layer change. The search also filed each
+  rail's swap via at the partner's cell, so the #6840 partner-via clearance
+  measured each rail against its own barrel; vias are now recorded where each
+  rail drills them.
+
+- **Coupled diff-pair routing no longer puts signal on reserved plane
+  layers** (Issue #6857). The joint P/N search (C++ and Python) now honours
+  `DesignRules.allowed_layers` (`--reserve-plane-layers`, on by default) and
+  per-net hard `avoid_layers` (ampacity classes, `--strict-layers`), as the
+  single-ended router already did. Board07's MIPI_DAT0 at a 700k coupled
+  budget previously committed 4 P and 6 N segments on the In1.Cu GND plane;
+  it now commits coupled on F.Cu/B.Cu.
+
+- **Coupled diff-pair routing keeps the better of the joint-search and pose-centreline candidates** (Issue #6858). A successful joint search no longer displaces a better pose-centreline trunk (06rf MIPI_CLK/MIPI_D0 at a raised coupled budget); both candidates pass the same copper gates and the lower uncoupled length, then skew, then via count wins, with ties kept on the joint result. A `[coupled-select]` log line records each comparison.
+
+- **Coupled diff-pair search declines a pair whose SMD pad sits on a
+  forbidden layer** (Issue #6860). When `allowed_layers` or a net class's
+  hard `avoid_layers` (ampacity classes, `--strict-layers`) forbid the layer
+  of an SMD start or end pad, or leave no layer at all, the coupled search
+  now declines the pair the way the single-ended router declines such a net,
+  instead of routing it on the forbidden pad layer. The pose-centreline
+  trunk is skipped for such a pair and itself refuses a forbidden pad layer.
+  The pair takes the usual declined-pair fallback, and a `[coupled-declined]`
+  line gives the reason.
+  Default settings are unaffected.
+
+- **Diff-pair ties no longer put copper on reserved plane layers** (Issue
+  #6866). The lattice tie step that joins a connector's equivalent pins
+  (#6698) now plans ties only on layers the pair may use: those in
+  `DesignRules.allowed_layers` (`--reserve-plane-layers`, on by default) and
+  outside either net's hard `avoid_layers` (ampacity classes,
+  `--strict-layers`). It shares one filter with the coupled search (#6857).
+  When no permitted layer fits, the pair keeps its usual connections and the
+  log says `has no permitted tie layer`. On board 03 the 1.70 mm USB_D- tie
+  moves from the In1.Cu GND plane to B.Cu.
+
+- **Footprint text such as `(footprint X)` or `(zone ...)` in a quoted
+  `descr` or `tags` no longer breaks routing or zone removal** (Issue #6873).
+  `kct route` split boards into footprints with a regex, so a `descr` or
+  `tags` string mentioning `(footprint ...)` or `(module ...)` crashed
+  `load_pcb_for_routing` with `zip() argument 2 is shorter than argument 1`.
+  It now slices each footprint at the parser's own offsets. Auto-pour zone
+  removal, the zone-fill presence checks, the post-route connectivity check,
+  the placement fixer and the `.kicad_mod` pad reader also skip tokens inside
+  quoted strings, honouring escaped quotes. Before, a string such as
+  `"pour (zone keepout, see note"` left every real zone after it in place.
+
+- **Routing paths report the grid pitch they actually used** (Issue #6875).
+  `kct route --format json` gains a `grid` object (`requested_mm`, `used_mm`,
+  `cols`/`rows`/`layers`/`cells`, `selection` explicit-or-auto, `coarsened`
+  and `coarsened_reason`), and the text `Grid:` line now names the pitch and
+  how it was chosen (`Grid: 0.1mm pitch (explicit), 251x201x2 = 100,902
+  cells`). The routing paths that keep the #972 adaptive cell cap no longer
+  coarsen with only a log warning: `route_pcb` returns the grid in
+  `stats["grid"]`, `AdaptiveAutorouter` in `RoutingResult.grid` /
+  `grid_warning` (copied into `kct route-auto`'s per-net `warnings`), and the
+  MCP `route_net` tool in a new `grid` field plus a `warnings` entry. Both
+  `route_pcb` and `AdaptiveAutorouter` accept `adaptive_grid=False` to route
+  on exactly the requested pitch.
+
+- **`kct export --stackup-id` is accepted again** (Issue #6881). The unified
+  `kct` parser never declared the flag that `docs/guides/stackup-presets.md`
+  documents, so `kct export board.kicad_pcb --stackup-id JLC04161H-3313` was
+  rejected before reaching the stackup verification step. The flag is now
+  declared and forwarded, with its choices and help read from the same
+  constant as the standalone export parser. `--no-spec`, `--no-merge-lcsc`,
+  `--allow-unbuildable-bom` and `--bom-source` were missing the same way and
+  are now accepted too. A parity test fails if the two parsers drift again.
+
+- **Lattice diff pairs honour a non-pad `preferred_layers` entry** (Issue #6883). A coupled pair whose class prefers a legal layer none of its pads share (e.g. an `allow_plane_layers` inner layer) now tries its gateway before a planar pad-layer run commits; a declined gateway falls back to the planar run as before.
+
+- **`kct optimize-traces` no longer joins Kelvin sense branches** (Issue
+  #6889). The #5398 gate covered only the optimizer inside `kct route`;
+  `kct optimize-traces` rewrote an already-routed board with no Kelvin check,
+  so a chamfer could still run one ISENSE branch over a sibling, or onto a
+  sibling terminal's pad, away from the shunt. It now reads the board's
+  Kelvin nets from its pads, optimizes each branch on its own and keeps any
+  branch whose rewrite would touch another, printing the same `Kelvin branch
+  isolation` line. Both paths also reject a rewrite that pushes contact the
+  router already made further from the shunt pad. Boards with no sense-named
+  net are processed exactly as before.
+
+- **`kct` runs on Windows consoles** (Issue #6894). Help output no longer
+  crashes with `UnicodeEncodeError` under cp1252 stdout, and `kct interactive`
+  works without `readline`. A new advisory `Windows Smoke` CI job imports
+  every router/cli module on `windows-latest`.
+
+- **`kct check --only/--skip` help lists every valid category** (Issue #6896). The top-level `kct check --help` previously named 4 of ~39; it is now generated from `CHECK_CATEGORIES`.
+
+- **`kct drc` accepts the run-DRC options `kicad-drc` has** (Issue #6898).
+  `--strict`, `--category/-c`, `--verbose/-v`, `--suggest/-s`, `--filter-config`,
+  `--keep-report`, `--output/-o` and the `-t/-m/-l` aliases are now accepted and
+  forwarded, so `kct drc board.kicad_pcb --strict` exits 2 on warnings. The
+  standalone `kicad-drc --rules` / `--compare` print a deprecation pointer to
+  `kct mfr rules` / `kct mfr compare`.
+
+- **Board bundles no longer ship broken relative markdown links** (Issue #6899). A shared helper, `scripts/boards/_bundle_links.py`, rebases links in markdown copied into `output/manufacturing/` when the target is in the bundle and demotes them to plain text when it is not. The board 03/04 `design-source/README.md` copies are fixed, the board 07 `procurement-review.md` link now points at the shipped `firmware/source/README.md`, and a test walks every bundle for broken links.
+
+- **MCP tools no longer report success when nothing was checked** (Issue #6913).
+  `validate_assembly_bom` reports `assembly_ready: false` for an empty BOM,
+  `validate_pattern` fails a decoupling pattern with no capacitors, and
+  `export_gerbers` / `export_assembly` fail when no copper Gerber was produced
+  and `export_gerbers` no longer lists stale files from earlier runs.
+
+- **Lattice route log keeps a gateway-first decline reason** (Issue #6932). A
+  diff pair whose gateway attempt declined and then routed planar now prints its
+  `Diff-pair gateway (lattice) ... gateway declined (...)` line instead of
+  suppressing it.
+
+- **Fleet-router benchmark drift check scoped to the selected boards** (Issue #6941).
+  `benchmarks/external/fleet_routers/run.py run --boards ...` now only fails the
+  frozen-manifest drift gate for the boards it was asked to run; drift on
+  unselected boards no longer blocks the run. `verify` still checks every board.
+
+- **Board 03's committed readiness evidence is current again** (Issue #6945). `readiness.json`
+  and `readiness-verification/` were regenerated with `kct readiness --verify` after #6876
+  changed `net_class_map.json` and the routed `.kicad_dru`, and the bundled `kicad_project.zip`
+  was rebuilt. A new test checks every board's recorded input hashes against the tree.
+
+- **`kct drc/check/audit/reason/repair-clearance --mfr` accept the advertised aliases** (Issue #6946). The standalone parsers now take the same alias set as the unified `kct` parser (`jlc`, `osh`, `seeedstudio`, ...) and normalize it to the canonical manufacturer ID, instead of failing with `invalid choice`.
+
+- **`kct route --grid` ceiling error gives only advice that works** (Issue #6948).
+  It no longer suggests building the C++ backend when the grid is over the C++
+  limit as well. It also no longer suggests a coarser `--grid` that the
+  grid-coarser-than-clearance check would then refuse.
+
+- **Lattice diff pairs can take their gateway through their own reservations**
+  (Issue #6956). A pour-pad via site (#6401) inside a declared pair's gateway
+  envelope at the pair's own footprint, and every pair escape via site the
+  pair causes (#6697), now exempt the pair's two nets and still block every
+  other net. Board 03's `USB_D[1]` (U2.4 -> R4.1) now couples through In2.Cu,
+  and `usb_geometry()` passes the common run, length and skew checks. A
+  gateway decline line now counts every combination's reason per group and
+  names the pad-attach blockers, not just the last combination's.
+
+- **Lattice router no longer drills a route's own vias under the hole-to-hole
+  floor** (Issue #6957). The lattice A* checked a new via only against
+  committed copper, so one path could hop F.Cu -> B.Cu -> F.Cu with its two
+  vias 0.566 mm apart (board 03 VBUS: 0.266 mm hole gap against 0.5 mm). The
+  search now rejects a via closer than `via_drill + min_hole_to_hole` to any
+  earlier via on its own path (the grid engines' #6464 / #6473 check), and the
+  per-net self-DRC gate declines such a route instead of shipping it.
+
+- **Lattice diff-pair search no longer declines `pair-offset-degenerate` on an end overshoot** (Issue #6958). A fat centreline that overshoots the goal anchor and doubles back along its own last (or first) edge is now trimmed to the anchor before offsetting; mid-path reversals still decline.
+
+- **Lattice coupled-pair legs end at their pad's copper, not the pad centre** (Issue #6959). Board 03's `USB_MCU_D+`/`USB_MCU_D-` launches drop from 4.328 mm to 3.804 / 3.649 mm (with #6977's pair gateway reservation exemptions), under the 4.0 mm `usb_geometry()` bound. Only coupled-pair copper changes; gateway via-pads are not clipped.
+
+- **Diff-pair shadow constructor pre-screens partner vias at the real trace/via floor** (Issue #6963).
+  The opt-in coupled shadow constructor (`enable_shadow_construction`, e.g.
+  board 06's `KCT_BOARD06_SHADOW=1`) sized its via-vs-partner keep-outs,
+  escape-channel seal penalty and lateral shadow-via offset with
+  `trace_clearance`, while the exact gate behind them enforces
+  `max(trace_clearance, via_clearance)`. When `via_clearance` is the larger
+  value, candidates the pre-screen admitted were rejected later, sometimes
+  declining a whole shadow side. All four sites now share one helper with the
+  gate's floor. The default routing path is unchanged.
+
+- **`kct route --length-match-groups` runs on the default layer-escalation
+  path** (Issue #6968). The default `--auto-layers` flow, and the rule-relaxation
+  and combined escalation flows, now run the match-group tuner. Before this fix
+  only `--no-auto-layers` runs reached it, and the flag did nothing silently.
+  When every detected group's net class has `length_critical: false`, the run
+  now says so on stderr, even under `--quiet`, and still prints each group's
+  measured skew. Under `--preserve-existing`, the tuner counts a member's
+  preserved copper that is written to the output (for example input escape
+  stubs) toward that net's length. That copper is never edited.
+
+- **`kct route --preserve-existing` keeps net ownership of KiCad-10 name-only copper** (Issue #6970). Existing segments and vias written as `(net "NAME")` with no numeric header were loaded under net 0, foreign to every real net; they now load under their real net id.
+
+- **Lattice diff-pair search no longer overshoots an end anchor and returns along the end stub** (Issue #6975). The trim from #6958 turned those centrelines into guaranteed `pair-polarity-twist` declines, because the trimmed end runs the opposite way to the one its stub was picked for. The parity-filtered pair search now rejects a goal arrival that doubles back onto its stub, a start node that leaves back along its stub, and a goal arrival that loops through its own goal node. On boards 03, 06rf and 07rf no centreline needs trimming any more, and the 34 trim-induced twists are gone. Board 06rf's `PCIE_RX` now couples on its pad layer instead of through a B.Cu gateway, which removes two vias per net.
+
+- **Match-group meanders are checked pairwise against each neighbour's net class** (Issue #6979).
+  The tuner used to clamp a group's relaxed clearance up to the strictest class on the whole board,
+  so one 0.2 mm net anywhere cancelled the relaxation. Each neighbouring track, via and pad is now
+  held to `max(group floor, that net's class clearance)`, pads on unrouted nets included. Net-0 and
+  unclassified copper is held to the Default class clearance (or the board clearance rule when no
+  Default class is declared), so a meander can no longer sit 0.17 mm from a no-net pad under a
+  0.2 mm Default class. The diff-pair partner stays held to the intra-pair gap.
+
+- **`kct route` runs pour auto-skip, auto-pour and the plane-via reservation on
+  KiCad-10 name-only boards** (Issue #6989). The pour stage read nets only
+  from `(net N "NAME")`, so on a board written as `(net "NAME")` with no net
+  table it found no nets. Zoned pour nets were not auto-skipped, missing pours
+  were neither created nor reported, and the #6401 plane-via reservation was
+  skipped. Routed copper then differed from the same board in the numbered
+  dialect. The stage now resolves nets with the routing loader's mapping, new
+  pours on such a board are written as `(net "NAME")`, and the post-fill check
+  no longer warns "Net format corruption detected" for a board that is
+  name-only by design. Output on numbered boards is unchanged.
+
+- **A routing-cache hit no longer returns different copper than the fresh
+  route** (Issue #7003). The cache dropped which differential pairs the
+  coupled pre-pass had committed, so the trace optimizer rewrote pair rails on
+  a hit that it leaves untouched on a fresh route (board 06b: 284 vs 242
+  items). The set is now stored in the entry and replayed; `CACHE_VERSION` is
+  bumped so older entries are re-routed once.
+
+- **`kct sch` wire commands agree on endpoint coincidence** (Issue #7009).
+  `remove-wire`, `remove-component` and `disconnect` now bucket endpoints at
+  micron resolution by rounding, like `cleanup-wires`, instead of truncating
+  at 0.1 mm, so `12.69999` and `12.7` are no longer treated as different
+  points. `--tolerance` still means the same distance in mm.
+
+- **The routing cache no longer replays copper from a different C++ router
+  build** (Issue #7014). Cache entries are now keyed on the loaded native
+  router `BUILD_VERSION` (the value `kct build-native --check` reports, or
+  `none` when routing falls back to Python), so a cache hit after a C++
+  rebuild no longer silently skips the new router's behaviour. Existing
+  cache entries are invalidated once. `PYTHONHASHSEED` is not part of the
+  key: routing boards 01 and 06b under two hash seeds gave identical copper.
+
+- **In-process `kct route` keeps explicit `--clearance` / `--manufacturer`
+  defaults** (Issue #7017). `kct route` used to parse its flags with a
+  separate outer parser and rebuild the router's argv flag by flag, dropping
+  any value equal to the default. To keep an explicit `--clearance 0.15` or
+  `--manufacturer jlcpcb` (#4875) it sniffed `sys.argv`, which an in-process
+  `kicad_tools.cli.main([...])` call never fills, so both values were lost and
+  the router took them from the board's own rules. `kct route` now hands
+  everything after `route` to the router unchanged, so what you type is what
+  runs. `kct route --help` now prints the router's own help, so it lists every
+  flag the router accepts, including diagnostics and experimental switches
+  that were reachable only through `python -m kicad_tools.cli.route_cmd`.
+  Global `--verbose`, `-q`/`--quiet` and `--units` before `route` work as
+  before.
+
+- **PCB block pad geometry: the `SOT-23-5` / `SOT-23` fallback pad tables and
+  `LEDBlock`'s cathode trace** (Issue #7022). The built-in fallback pad tables
+  in `kicad_tools.pcb.placement` (used when `kicad_footprint_reader` is not
+  installed) were rotated 90 degrees from the KiCad library, so `LDOBlock`
+  traces ended on the wrong pins. They now match KiCad 10's
+  `Package_TO_SOT_SMD`. `LEDBlock` now turns the LED 180 degrees inside the
+  block so its cathode faces the resistor. Before, the cathode-to-resistor
+  trace ran straight through the anode pad.
+
+- **`PCB.export_gerbers` honours `layers`, `include_drill` and `create_zip` for
+  the jlcpcb, pcbway and oshpark presets** (Issue #7023). The preset path used
+  to drop all three: `create_zip=False` still returned a zip, `include_drill=False`
+  still exported drill files, and an explicit layer list never reached
+  kicad-cli. The preset now supplies the defaults and explicit arguments
+  override it; a layer list without `Edge.Cuts` logs a warning.
+  `GerberExporter.export_for_manufacturer` gains matching keyword-only
+  `layers`, `generate_drill` and `create_zip` overrides. `PCB.export_gerbers_zip`
+  no longer wraps a nested `gerbers.zip` inside its archive and now honours
+  `include_drill`.
+
+- **Board-03 experiment row routes under `jlcpcb-tier1`** (Issue #7026). The
+  `expand_route_experiment.py` 03 row now passes `--manufacturer jlcpcb-tier1`,
+  matching the sidecars the board-03 recipe fills with, so a captured plan's
+  pour links are judged against the recipe's fill.
+
+- **`kct bom` and `kct sch summary|validate|preflight|hierarchy` fail on a missing or unparseable schematic** (Issue #7028).
+  A nonexistent or empty root `.kicad_sch` used to exit 0 (an empty BOM, a
+  fallback summary, or per-check warnings); it now exits 1 with an error on
+  stderr. Failing sub-sheets are still skipped.
+
+- **Board-03 `save_plan()` stores net names, not per-board net ids** (Issue #7033). Copper
+  `(net N)` refs are rewritten to `(net "NAME")` on capture, unknown ids raise `ValueError`,
+  and `apply_plan()` rejects a plan holding numeric net ids instead of failing with a bare
+  `KeyError` or binding copper to the wrong net.
+
+- **`PCBBlock` placed at 90/270 degrees now lands its traces on the pads**
+  (Issue #7046). Block ports, component positions, internal traces, block
+  vias and `ComponentPlacement.pad_position(..., block_rotation=...)` now
+  rotate in KiCad's footprint convention (the same transform as the exported
+  footprint angle), instead of the opposite sign, which put block traces up to
+  a pad pitch off their pads. Rotations 0 and 180 are unchanged.
+
+- **`kct placement align --tolerance` is now honoured** (Issue #7056). Parts
+  already within tolerance of the target line are left untouched, and
+  `aligned` / "Aligned N components" report parts actually moved;
+  `distribute` and reference alignment counts likewise.
+
+- **IEC 60664-1 clearance is now keyed on the rated impulse voltage, not the
+  working-voltage peak** (Issue #7057). `kct creepage --standard` and
+  `kct audit --hv-standard` looked the steady-state peak working voltage up in
+  Table F.2, which is keyed on impulse withstand voltage, so 230 V mains got
+  0.2 mm where basic insulation at overvoltage category II needs 1.5 mm. The
+  required clearance is now the larger of Table F.2 at the Table F.1 rated
+  impulse voltage (from the working voltage and the new
+  `--overvoltage-category` / `--hv-overvoltage-category`, default `II`) and
+  Table F.8 at the steady-state peak, floored by pollution degree. Table F.2's
+  non-standard 3200 V and 6300 V rows are gone (now 3000 V and 6000 V), the
+  PD2 / group II / 80 V creepage cell is 0.95 mm (was 0.9), and the creepage
+  table is cited as IEC 60664-1:2020 Table F.5. `--standard iec62368` shares
+  the same tables and is corrected too.
+
+- **`kct creepage` no longer overstates creepage around board slots** (Issue #7058).
+  The detour search is no longer pinned to the straight-line nearest-point pair
+  (it is now seeded from both shapes, so it is the true shortest surface path),
+  and cutouts narrower than IEC 60664-1 dimension X (PD1 0.25 / PD2 1.0 /
+  PD3 1.5 mm) are bridged instead of followed. The X table is unverified against
+  the paywalled standard text. The report records `dimension_x_mm`.
+
+- **CPL coordinates now match the package's Gerbers** (Issue #7059). Pick-and-place
+  files were written in the board-relative, Y-down frame (and `pcb_path` subtracted a
+  sheet-absolute aux origin from them), so bottom-side and off-centre parts landed in
+  the wrong place. `kct export` and `PCB.export_placement` now emit the frame of
+  `kicad-cli pcb export pos --use-drill-file-origin` (aux origin, Y up); OSH Park uses
+  the origin-less frame like its Gerbers.
+
+- **Edge-coupled differential impedance now comes from a field solve, not an
+  empirical coupling factor** (Issue #7060). `CoupledLines` took the
+  single-ended Z0 and applied a fitted `kc = exp(-a*s/h)*(1-exp(-b*w/h))`
+  with silent clamps, which overstated Zdiff of tight pairs by 12 % to 24 %
+  with real copper (+11.7 % at board 06's USB2 geometry). Edge-coupled
+  stripline and microstrip now solve the two-conductor quasi-static problem
+  by boundary elements (even and odd mode, finite copper thickness, offset
+  stripline, dielectric interface for microstrip), the `kc` factors and the
+  `[20, 200]` / `[15, 180]` ohm clamps are gone, and
+  `TransmissionLine.differential_microstrip` delegates to the same model so
+  only one coupled-microstrip model remains. Results agree with Cohn
+  (stripline) and Kirschning & Jansen (microstrip) within 1 % at zero
+  thickness and with independent finite-difference solutions within 2 % at
+  35 um copper.
+
+- **Stock `LDOBlock` now applies cleanly to a real board** (Issue #7062). Its
+  caps are turned 270 degrees so pad 1 faces VIN/VOUT, GND leaves pin 2 as a
+  dogleg under the package, and the VIN/VOUT/GND ports sit on block copper.
+  `PCBLayout.apply_to_pcb` no longer refuses (or skips) the block's own copper.
+
+- **Board 04 schematic is ERC-clean under KiCad 10.0.7** (Issue #7063). Power
+  nets (`+5V`, `+3.3V`, `GND`) are now named with global labels instead of
+  local labels that shared a name with the power symbols
+  (`same_local_global_label`); schematic and readiness evidence re-pinned on
+  the pinned 10.0.6 toolchain.
+
+- **Four CLI flags that were documented but dead now work** (Issue #7065).
+  `kct parts import` is reachable from the top-level `kct parts` (it was only
+  available via `python -m kicad_tools.cli.parts_cmd`). `kct sch validate`
+  gains `--lib-path DIR` and `--skip CHECK` (both repeatable); `--lib-path`
+  now actually resolves symbols missing from the embedded `lib_symbols` for the
+  pin-aware `orphan_label`, `wire_stub` and pin/pad-count checks (embedded
+  symbols stay authoritative). `kct optimize-traces --verbose` prints one row
+  per net, and `--format json` adds `stats.per_net`. The
+  `optim.fom.check_hard_constraints` docstring now says `manufacturer` is
+  reserved and unused.
+
+- **`docs/reference/cli.md` matches the real parser for `optimize-traces`, `parts` and `sch validate`** (Issue #7070). The never-implemented `optimize-traces --length-match` is gone, the `parts import`/`suggest`/`cache` subcommands and the `sch validate` options are documented, `stats.per_net` is documented in `machine-output.md`, `optimize-traces -v` now has help text, and `tests/test_cli_docs_drift.py` guards these sections against parser drift.
+
+- **`kct impedance` CPWG impedance and dielectric loss corrected** (Issue #7075).
+  Coplanar-waveguide-with-ground Z0 now uses the conductor-backed closed form
+  (Ghione & Naldi) instead of a `sinh` modulus that over-stated it by 50-230 %;
+  microstrip and CPWG dielectric attenuation drops by a factor of `eps_eff`
+  (Pozar eq. 3.198). Degenerate geometry raises `ValueError` instead of
+  returning 50 Ω, and the balanced CPWG solver no longer returns micron-scale
+  geometries.
+
+- **Microstrip Z0 and εeff now include the Hammerstad-Jensen 1980
+  finite-thickness terms** (Issue #7076). `TransmissionLine.microstrip` read
+  0.4-5.4 % low in Z0 for real copper weights and over-read the effective
+  permittivity by 5-7 %; it now agrees with a 2-D field solve to within 0.35 %.
+  Computed impedances, `width_for_impedance` suggestions, propagation delay and
+  the loss estimate all shift (see the upgrade note).
+
+- **`kct drc` reports schematic parity as PASSED, FAILED or NOT RUN**
+  (Issue #7077). kicad-cli's `schematic_parity` findings used to be dropped,
+  and a board whose schematic was missing or not fully annotated (kicad-cli
+  skips parity, exits 0 and writes an empty list) read as parity-clean.
+  `DRCReport` now parses the findings into `DRCReport.schematic_parity` with
+  their kicad-cli severities, and `kct drc` (table, summary, `--mfr`) and
+  `kicad-drc-summary` print one `Schematic parity: PASSED | FAILED (N
+  issue(s)) | NOT RUN (<reason>)` line from one shared helper. A NOT RUN
+  parity never prints `DRC PASSED`; the verdict says `DRC INCOMPLETE`.
+  `--format json` gains a `schematic_parity` object (`status`, `checked`,
+  `reason`, `error_count`, `warning_count`, `issues`), a derived
+  `schematic_parity_checked` alias, and `parity_errors`/`parity_warnings` in
+  `summary`. `.kct_waivers.json` entries also match parity findings.
+
+- **Silkscreen width/height DRC rules now cover B.Silkscreen** (Issue #7078).
+  The generated `Silkscreen Width` and `Silkscreen Height` custom rules only
+  matched `F.Silkscreen`, so undersized bottom-side text passed against the
+  fabricator minima. All shipped `manufacturers/rules/*.kicad_dru` files are
+  regenerated.
+
+- **`ImpedanceRule` judges diff pairs at the routed gap** (Issue #7079). The pair
+  Zdiff now uses the measured edge-to-edge spacing to the partner net instead of a
+  hard-coded 0.15 mm. Traces with no measurable partner gap, or whose solver call
+  fails, are no longer judged against silent 100 / 50 Ω fallbacks, and pair
+  violations no longer carry a bogus "requires 0.000mm" hint.
+
+- **Cost estimator no longer prices unlisted layer counts as 2-layer or multiplies the per-order finish fee by quantity** (Issue #7080). Layer counts missing from the pricing table (e.g. 3) are priced at the next listed count up; the surface finish fee is charged once per order.
+
+- **`kct audit` / `kct report` no longer say READY when ERC or the sync check never ran** (Issue #7083).
+  ERC now finds kicad-cli the same way DRC does (`find_kicad_cli()`), so a
+  standard macOS install that is not on PATH actually runs ERC instead of
+  reporting `PASS / kicad-cli not found (skipped)`. When kicad-cli really is
+  unavailable, ERC times out, or the schematic/PCB sync check crashes, the
+  check is shown as `NOT RUN` (table, `--format json` via a new
+  `could_not_verify` field, and `kct report`'s ERC status), an action item
+  explains why, and the verdict is capped at `REVIEW WARNINGS`. The
+  zone-fill action items now point at `kct zones fill <pcb>` instead of a
+  manual KiCad step.
+
+- **`kct export` no longer ships unrouted boards** (Issue #7091). The
+  connectivity safety floor and the DRC preflight now count KiCad's
+  `unconnected_items` (opens), which since #4498 sit outside the report's
+  `errors` and were never read. A board with error-severity opens is refused
+  by the floor (`N connectivity error(s) (S net short(s), O unconnected
+  item(s))`) and FAILs preflight (`DRC has 0 error(s), 36 unconnected
+  item(s)`), so `--strict-preflight` blocks it; waived and warning-severity
+  opens still pass. A DRC report recorded for a different PCB (such as the
+  `*_routed` sibling's `drc_report.json` next to the unrouted board) is no
+  longer read as a clean DRC: preflight reports `WARN DRC report is for <x>,
+  not <y>` and the floor warns instead of passing silently. ERC preflight
+  applies the same check against the schematic.
+
+- **Lattice fallback diff pairs prefer equal P/N via counts** (Issue #7093). The
+  uncoupled-fallback leg-pair selection and flush score now rank via-count
+  parity after routed legs and class-pad shortfalls, before skew (board 06rf's
+  USB3_RX1 goes from 2/4 to 2/2 vias, skew 2.557 to 0.507 mm). A segment that
+  still commits with unequal vias now prints a per-segment `WARNING` in the
+  lattice diff-pair report, including on partially-coupled pairs. When every
+  candidate is asymmetric, the fallback now also re-searches each leg on its
+  partner's layer sequence (a matching layer change, or none), so a via-parity
+  candidate exists to rank: a fresh board 03 route gives USB_D 3/3 vias instead
+  of 2/3. A second mirrored round re-routes each parity hit's partner under
+  the mirrored leg; it replaces the first-round pick only when no worse on both
+  skew and length, so neither is traded for the other. Board 03's
+  committed copper is not re-derived yet: USB_D+
+  (16.07 mm) is still over the board's 16 mm bound, and the MCU launch is over
+  its 4 mm bound (#7256).
+
+- **Crossed lattice fallback diff-pair legs get equal via counts**
+  (Issue #7093). A fallback pair whose pads swap sides (board 03's USB_D
+  J1.A6->U2.3) has to cross itself, so one leg changes layer. Two things
+  kept it at unequal vias. First, a via-equal candidate that the #7284 gate
+  rejects for its skew or length no longer stops the mirrored partner-leg
+  search from running. Second, when the exact mirror still finds no
+  acceptable via-equal pair, a partner that changes layer once is also
+  copied from or to another copper layer (for example B.Cu -> F.Cu instead
+  of In2.Cu -> F.Cu), so the copy can cross under its partner instead of
+  going round it. Board 03 under `--manufacturer jlcpcb-tier1` routes USB_D
+  with 3/3 vias instead of 3/2, at 15.780 / 15.851 mm (skew 0.071 mm, was
+  0.195 mm). Under `--mfr jlcpcb` it gives 3/3 vias at 15.432 / 15.432 mm,
+  which is now inside the 16 mm bound (it was 16.022 mm). Routed copper on
+  06b, 06rf and 07rf is unchanged.
+
+- **Lattice diff pairs now try to match via counts on extra-pad attachments**
+  (Issue #7093). A pair's extra same-net pads, such as a USB-C receptacle's
+  second A/B row, are attached by single-ended connections. Until now nothing
+  kept P and N on the same layer changes there, so a pair whose coupled run
+  had equal vias could still commit unequal totals. After the board is
+  routed, a pair with unequal totals and extras on both nets has one extra
+  re-searched against the finished copper, copying the other extra's layer
+  changes. The new copy is kept only if it makes the totals equal and is no
+  longer than the longer of the two extras plus 0.5 mm. No other copper
+  moves, and the pass stops (keeping the copper) once the run's deadline
+  passes. The outcome is logged as a `Diff-pair extra parity (lattice)` line.
+  To copy an `a -> b -> a` hop onto a planar extra, the lattice search gains
+  a *crossing* layer mirror: it lays copper off the hop layer only within
+  1.5 mm of either pad, so the copy cannot come back planar. On the current
+  benches (03, 06b, 06rf, 07rf) no committed copper changes: board 06rf's
+  `USB2_D` (2 / 4) is not fixed, because its two J1 extras cross each other,
+  and the log line now says that no attachment fit.
+
+- **Unequal diff-pair via counts are always reported as a pair-rule failure**
+  (Issue #7093). Every `route_all_*` run now checks each engaged pair's routed
+  copper and prints a `WARNING: diff pair P/N committed with unequal via
+  counts ... pair-rule failure` line, also kept in
+  `Autorouter.pair_via_parity_failures`. Before this, the grid engine's
+  independent fallback and pairs left to the single-ended main loop reported
+  nothing. The lattice's per-segment warning now counts the legs that were
+  actually committed, not the fallback's own record. This adds hybrid segments,
+  and a discarded tap-chain, gateway-offer or gateway-rollback retry can no
+  longer hide or invent a mismatch.
+
+- **Three validators no longer read clean when they didn't check** (Issue #7094).
+  `kct validate --lvs --min-confidence` now filters only what is displayed:
+  a below-threshold mismatch (e.g. `R1` renamed to `R9` on the PCB) still
+  makes the result non-clean and the exit code non-zero, and the output says
+  `N match(es) below --min-confidence X hidden` (JSON:
+  `hidden_below_min_confidence`). `kct erc` and `kct erc explain` compute the
+  exit code before the `--errors-only` / `--type` / `--sheet` view filters
+  (after exclusions and `--filter-config`), and print `No violations match the
+  filter (N hidden: E error(s), W warning(s))` instead of `ERC PASSED - No
+  violations found` (JSON: `summary.hidden_by_view_filter`). `kct sch validate`
+  reports an ERC that could not run (kicad-cli missing, timed out, killed, or no
+  report) as `INCOMPLETE: erc not run (<reason>)` under a new `checks_not_run`
+  list, sets `passed: false`, and no longer lists `erc` under "Checks run".
+
+- **`kct drc` no longer passes an unrouted board** (Issue #7096). Error-severity
+  unconnected items (missing connections) from kicad-cli reports now count toward
+  the verdict and exit code in table, summary, `--mfr` and `--format json` modes;
+  the JSON `summary` (and `--mfr --format json`) carries an explicit `unconnected`
+  count, and `.kct_waivers.json` `unconnected_items` entries waive them for
+  KiCad JSON reports as they already did for `.rpt` text reports.
+
+- **`PlacementSession.query_move` now reports real deltas** (Issue #7099). The
+  "before" snapshot was taken after the hypothetical move, so `score_delta` was
+  always `0.0` and `new_violations` / `resolved_violations` always empty. This
+  made MCP `query_move` / `apply_move`, `find_best_position` (always `[]`),
+  `query_swap`, `query_alignment` and `kct placement refine query` return false
+  answers. `query_swap` also no longer crashes on unhashable violations once a
+  swap produces any.
+
+- **`kct placement optimize` no longer saves parts off the board on boards
+  with a non-zero origin** (Issue #7106). Since #3812 the placement optimizer
+  compared origin-relative part positions against an absolute board outline.
+  On any board whose Edge.Cuts does not start at (0, 0), `kct placement
+  optimize`, `refine`, `suggest`, `snap` and the MCP placement sessions
+  clamped parts into the wrong rectangle and **wrote them outside the real
+  board edge while still reporting success** (16 of 17 parts on the
+  `04-stm32-devboard` example, 44 of 47 on `09-usbc-pd-power`). In-board parts
+  were also flagged as boundary violations, which skewed session scores. The
+  outline from both the Shapely and the legacy Edge.Cuts paths, KiCad keepout
+  zones (`--auto-keepout`), the no-Shapely board-edge keepout and
+  `get_board_edges` now all use the origin-relative frame that part positions
+  use.
+
+- **`query_move` routing impact and `export_assembly` fields now report computed values** (Issue #7107).
+  `routing_impact.crossing_changes` is the real before/after inter-net crossing delta and
+  `estimated_length_change_mm` is the change in per-net pin-MST length (it previously summed
+  centre distances over star springs, with wrong sign/magnitude). `pnp.rotation_corrections`
+  now counts the CPL rows actually rotated by the manufacturer table instead of always `0`.
+
+- **MCP docs match the server; `get_drc_violations` is now a registered tool** (Issue #7111).
+  `docs/mcp/tools.md` documented a DRC tool the server never registered
+  (`Unknown tool`); it is now registered (`manufacturer` maps to `rules=`,
+  plus `severity_filter`). `analyze_board` is documented under its real name
+  `board_summary`, `board_inspect` is documented, and the `route_net`,
+  `get_unrouted_nets`, `measure_clearance`, `placement_suggestions` and DRC
+  parameters/responses now match the server. A new `tests/test_mcp_tools_doc.py`
+  keeps tool names and parameter tables in sync.
+
+- **MCP `route_net` now saves the routed net** (Issue #7114). Since the tool
+  was added it called `merge_routes_into_pcb` with a signature that never
+  existed, so every successful route ended in `TypeError` and
+  `success: false`. It now merges the router's S-expression into the board
+  text and writes it to the resolved output path (`<stem>_routed.kicad_pcb`
+  by default), with the trace width and via sizes the router used.
+
+- **Three MCP tools no longer fail or mislead** (Issue #7115). `placement_suggestions`
+  now works (it raised `ImportError` on every call) and returns ranked suggestions
+  from the same engine as `kct placement suggest`; its never-implemented `strategy`
+  parameter is removed. `export_gerbers` and `export_assembly` count copper layers
+  inside `gerbers.zip`, so the default `zip_output=true` no longer reports a false
+  "no copper-layer Gerber files" failure. `board_view` wraps its caption to
+  `max_size_px` (400 px now draws the board) and returns `success: false` telling the
+  caller to raise `max_size_px` instead of a caption-only image.
+
+- **`kct init` writes the same `.kicad_dru` rules as `generate_dru`** (Issue #7116).
+  The hand-written template mapped silkscreen width to `silk_clearance`, hole-to-edge
+  to `hole_to_hole` and solder-mask dam to `physical_clearance`; it now uses
+  `text_thickness`/`text_height` and `physical_hole_clearance`, with via rules
+  scoped to vias, and drops the unsupported mask-dam rule.
+  The `;` header comments (invalid in KiCad DRU; KiCad silently ignored the whole file)
+  are now `#`. The old `hole_size (max ...)` rule (6.3 mm for JLCPCB) is not emitted by
+  `generate_dru` and is not restored here.
+
+- **MCP `route_net` merges collinear segments before saving** (Issue #7120).
+  A straight run is now one segment instead of one per grid step, matching
+  `kct route`; an optimizer failure falls back to the raw routes.
+
+- **MCP session tools now share one session store, and `restore_checkpoint`
+  really restores** (Issue #7121). `start_session` and the seven context tools
+  (`record_decision`, `get_decision_history`, `annotate_decision`,
+  `get_session_context`, `create_checkpoint`, `restore_checkpoint`,
+  `get_session_summary`) used to keep separate stores, so
+  `get_session_context` failed right after `start_session`, `pcb_path` and
+  intents were empty, and unknown session IDs were silently accepted. The
+  context now lives on the placement session and closes with it.
+  `create_checkpoint` captures the live positions, score, violation counts and
+  move depth; `restore_checkpoint` undoes or re-applies moves and reports
+  success only when positions match the snapshot. `PlacementSession.undo()`
+  also re-syncs the incremental DRC engine, so DRC counts no longer go stale
+  after an undo.
+
+- **Hierarchical placement fallback no longer mixes coordinate frames** (Issue #7124). `place_hierarchical_from_pcb` now shifts the raw Edge.Cuts outline into the origin-relative frame when the Shapely path is unavailable, so offset boards keep parts inside the real outline.
+
+- **`kct -q footprint generate` and `kct --verbose erc <report>` no longer fail** (Issue #7126). The
+  `footprint generate` and `erc <file>` argv shims now skip leading global options
+  (`--verbose`, `-q`, `--units`) before looking for the command, as `kct route` does.
+
+- **`kct audit` runs ERC on a `.kicad_pcb`, and the sign-off skills refuse
+  bad boards** (Issue #7136). `kct audit <board>.kicad_pcb` used to force an
+  ERC skip and print `[OK] ERC: PASS -- skipped by user request` without
+  running anything. It now resolves the schematic the way `kct check` does
+  (`board_routed.kicad_pcb` finds `board.kicad_sch`) and runs
+  `kicad-cli sch erc`; with no schematic it reports ERC **NOT RUN** and the
+  verdict caps at WARNING. "Skipped by user request" now appears only with
+  `--skip-erc`. The `/kct:manufacturing-readiness` and `/kct:tapeout` gates are
+  now exact command blocks whose exit code is the verdict: Gate 1 judges
+  `kct check`'s JSON report (any NOT RUN other than Manifest refuses),
+  Gate 2 runs `kicad-cli pcb drc --exit-code-violations` and requires
+  0 error violations and 0 unconnected items, and Gate 3 passes that report
+  to `kct export --drc-report`. Unrouted, clearance-violating and
+  schematic-less boards are refused instead of signed off.
+
+- **`Project.route()` saves merged copper** (Issue #7138). Collinear
+  per-grid-cell segments are now merged into straight runs before the board
+  is written, matching `kct route` and the MCP `route_net` path. The merge is
+  one shared helper, `merge_collinear_routes`; `RoutingResult` segment and
+  length totals reflect the merged copper.
+
+- **`kct drc` waiver application tolerates report-like objects without `schematic_parity`** (Issue #7141). Fixes an `AttributeError` regression from #7077 in `apply_waivers_to_report`.
+
+- **`kct drc` schematic parity now runs on `<base>_routed.kicad_pcb` boards**
+  (Issue #7147). kicad-cli only reads `<pcb-stem>.kicad_sch`, so parity was
+  NOT RUN (exit 2) on every fleet board. `kct drc` now resolves the board's
+  schematic (`project.kct`, then `<base>.kicad_sch` with `_routed` etc.
+  stripped) and runs kicad-cli on a temporary copy of the board folder with
+  that schematic staged under the board's name; the board folder is never
+  written (no stray `.kicad_prl`). New `--schematic PATH` override, the JSON
+  `schematic_parity.schematic` field records the schematic used, and NOT RUN
+  now names the real cause (no schematic found, several candidates, or a
+  schematic kicad-cli could not netlist).
+
+- **`kct optimize-placement` no longer ignores `gr_rect` board outlines without Shapely** (Issue #7148). The no-Shapely fallback now uses the shared Edge.Cuts reader (`gr_rect`, `gr_poly`, `gr_line`, `gr_arc`) instead of a footprints+10 mm box that could place parts off-board (board 04). A board with no outline at all now warns loudly on stderr, and the new `--require-outline` flag makes it an error.
+
+- **Board 04 J1 value is consistent** (Issue #7150). The PCB footprint value is
+  now `SWD-6`, matching the schematic, instead of `SWD`.
+
+- **`kct export` bundles agree with themselves** (Issue #7153). JLCPCB
+  Gerbers now include the `F_Paste`/`B_Paste` stencil layers that JLCPCB's
+  KiCad 7/8 Gerber guides list, so an SMT-assembly bundle no longer ships a
+  CPL with nothing to cut a stencil from (a paste layer missing from the
+  board's layer table is still not plotted). Preflight now reads the
+  manufacturer/tier a `kct check` DRC report was generated for and WARNs
+  when it differs from the run's `--mfr` (`jlcpcb-tier1` vs `jlcpcb` counts
+  as different), instead of reporting "DRC OK" beside a report that says
+  FAIL. The design report's DRC Status names the `--mfr` rule set and shows
+  the kct and kicad-cli error counts on separate rows, noting that one
+  defect can be reported by both engines. `README.txt` and the console now
+  name the Gerber archive by its real path, `gerbers/gerbers.zip`.
+
+- **Export report ERC runs against the export's schematic** (Issue #7153).
+  `ReportDataCollector` and `ManufacturingAudit` accept an explicit
+  `schematic_path`, and `kct export` passes the schematic it already holds, so
+  the report's ERC section no longer reads SKIPPED when the schematic is not
+  auto-discoverable from the PCB path. An explicit `skip_erc` still skips.
+
+- **`extract_board_outline` no longer returns an Edge.Cuts cutout as the board outline** (Issue #7155). When several closed contours exist (`gr_rect`, `gr_poly`, chained `gr_line`/`gr_arc`), the largest-area one is returned instead of the first by element type.
+
+- **Route-time match-group tuner now clears preserved copper on other nets** (Issue #7159). Under `--preserve-existing`, vias and tracks of preserved nets outside the tuned groups are treated as fixed clearance obstacles, so meanders no longer land on them (board 07 DRC regression). Lengths and published routes are unchanged.
+
+- **`kct erc` no longer reports PASS on designs kicad-cli fails** (Issue #7161).
+  A cross-sheet heuristic dropped every `isolated_pin_label` /
+  `single_global_label` finding whose label name appeared on two or more
+  sheets, without checking whether the net reached a second pin: a two-sheet
+  design where kicad-cli 10.0.6 reports 3 errors printed `ERC PASSED` and
+  exited 0, with no `Filtered:` disclosure. `kct erc` and `kct sch validate`
+  now keep every finding kicad-cli reports, so running on a schematic agrees
+  with parsing kicad-cli's own report. The inert sibling filter for
+  `power_pin_not_driven` (it never matched KiCad 10's item format) is gone
+  too; KiCad 10 already aggregates global labels and power drivers across the
+  hierarchy. `kct erc` also now accepts the options `kicad-erc` documents
+  (`--strict`, `--by-sheet`, `-v`, `--filter-config`, `--output`,
+  `--keep-report`, `--list-types`) instead of failing with
+  `unrecognized arguments`.
+
+- **Coupled-microstrip field solve no longer reads 0.5-2.5 % high at 1 oz copper** (Issue #7164). The gap and
+  strip panels in `physics/coupled_microstrip.py` now resolve the interface charge next to the strip edges, so
+  the single-ended limit is within 0.5 % of independent finite-difference solves and Z0e converges in gap.
+  Zdiff/Zcommon for edge-coupled pairs shift down by up to ~1 %.
+
+- **`kct readiness` no longer calls unchecked or mismatched LCSC parts
+  "verified"** (Issue #7166). The `bom` gate now reads the bundle's
+  `bom_lcsc_values` preflight result. A recorded FAIL blocks the gate and
+  names the mismatched ref and LCSC number. The gate detail relays that
+  check's message instead of the old "carry verified procurement identities".
+  The `bom_lcsc_values` preflight now looks parts up in the offline jlcparts
+  catalog when the parts cache misses. It never writes to the cache. It also
+  compares IC package family and pin count against the PCB footprint's pads, so
+  a SOT-25-5 regulator on a SOT-23-6 footprint fails. Parts found in neither
+  source are listed as unverifiable instead of being counted as checked.
+  `kct parts sync-catalog` refuses a truncated download instead of installing a
+  partial catalog. It also warns when long-lived JLCPCB basic parts are missing
+  from the catalog: the `--format json` output gains `count` and
+  `coverage_warning` fields.
+
+- **`kct parts lookup` works again anonymously** (Issue #7169). The lookup now
+  queries the `selectSmtComponentList` endpoint by LCSC code and requires an
+  exact `componentCode` match, replacing the `selectSmtComponentDetail`
+  endpoint that returns HTTP 404. Unused `LCSC_API_BASE`/`PART_LOOKUP_URL`
+  constants are removed.
+
+- **`kct drc --mfr` no longer drops violations it cannot judge** (Issue #7170).
+  Every kicad-cli violation now gets one verdict: compatible, incompatible, or
+  *not checked* (listed in a `NOT CHECKED against <fab> limits` section with a
+  per-type count, kicad-cli's severity kept). Before, an unhandled type
+  vanished and the run printed `All 0 checked violations are compatible!` and
+  exited 0 even on kicad-cli errors. kicad-cli's `annular_width`,
+  `hole_to_hole` and `via_diameter` are now judged against the fab's annular
+  ring, hole-to-hole and via-diameter floors (they all parsed as `unknown`),
+  `drill_out_of_range` checks the fab's maximum hole as well as its minimum
+  drill, and `hole_clearance` is no longer judged against the copper-to-copper
+  floor. `--mfr --format json` is honoured. `Project.check_drc()` returns one
+  entry per violation, and `summarize_checks` no longer raises
+  `KeyError: 'unknown'`. `.rpt` reports read the severity on
+  `Local override; <severity>` lines instead of defaulting to error.
+  `kct sch validate` loses the dead phantom `wire_dangling` filter, which
+  matched nothing on KiCad 10 and would have hidden real floating wires.
+
+- **Package guard now covers `.kct`-assigned parts and SO pitch** (Issue #7180). Preflight's `bom_lcsc_values` applies the project `.kct` BOM overlay before validating, so a wrong-package part assigned only in the spec (boards 00/01/02/06) no longer reads "No assigned LCSC parts to validate". The SO family check also compares lead pitch: SOIC/SO (1.27 mm) vs TSSOP/MSOP/VSSOP (0.65 mm) is now a mismatch; SOIC-8/SO-8 and SOT-23-5/SOT-25 aliases still match.
+
+- **One definition of "blocking DRC findings" across the DRC entry points**
+  (Issue #7188). `DRCReport` gains `connectivity_errors()`, `blocking_items()`
+  and `blocking_count` (error-severity geometric violations plus
+  error-severity KiCad JSON opens); `error_count` / `passed` keep their
+  geometric-only meaning (#4498). `kicad-drc-summary` now honours kicad-cli's
+  own severity -- an error-severity entry is BLOCKING even when the type
+  table would say WARNING (e.g. `hole_clearance`) -- and folds JSON
+  `unconnected_items` into the summary, so an unrouted board no longer reads
+  `WARNINGS`, exit 0. `kct mfr validate` runs the kct DRC engine
+  (`DRCChecker`, as `kct check --mfr`) instead of a width/via walker, so it
+  catches clearance and connectivity errors; it keeps the pad-drill and
+  zone-clearance-setting checks and still needs no kicad-cli.
+  `Project.check_drc()` returns error-severity opens from a JSON report as
+  FAIL `connection` checks, as it already did for `.rpt` reports. The
+  `kct audit` DRC row counts kicad-cli's error-severity opens (measured after
+  the zone refill) as `kicad-cli:unconnected_items`.
+
+- **Board 01 ships its project symbol library** (Issue #7190). The voltage
+  divider's `output/sym-lib-table` and `kicad_tools_pwr.kicad_sym` (the `VIN`
+  power symbol), which its recipe always wrote but were never committed, are
+  now committed and packaged in `kicad_project.zip`. Native ERC on the pinned
+  toolchain drops from 1 `lib_symbol_issues` warning to 0/0. The re-issued
+  package also carries the CPL in the #7059 Gerber frame.
+
+- **`kct export --strict-preflight` no longer passes a board on a stale
+  `drc_report.json`** (Issue #7190). Auto-discovered DRC/ERC reports beside
+  the board must now be bound to its content: `kct check --output` records
+  `pcb_sha256`, `kct build`'s ERC step records `schematic_sha256`, and a
+  report pinned together with the PCB/schematic in the board's
+  `output/readiness.json` also counts. An unbound report can still fail a
+  board but never pass it: a hash mismatch is WARN (FAIL under
+  `--strict-preflight`), an unhashed clean report is WARN, and `kct fleet
+  status` treats an unbound clean report as missing (`-`, JSON `unbound`).
+  The export safety floor's stale-report note now uses the hash instead of
+  mtimes, and boards 00/02's producer-less committed `drc_report.json` /
+  `erc_report.json` snapshots were removed.
+
+- **Oscillation escape no longer leaves failed-strategy copper on the C++ grid, and the full-reorder strategy can run** (Issue #7192).
+  A rolled-back escape strategy inside the corridor-reservation window now flushes its discarded
+  C++ unmarks, so the next strategy no longer routes around phantom copper. Each escape strategy
+  gets its own reroute allowance (full reorder: `max(cap, routable nets)`), instead of one shared
+  pool that left the full reorder permanently cut short, and a trailing net with fewer than two
+  pads no longer marks a finished strategy as cut. Still counted in attempts, so
+  `--deterministic-budget --seed N` stays byte-identical.
+
+- **`kct drc` / `kct check` no longer double-report a track through a keepout on KiCad ≥ 10.0.6** (Issue #7198). Native DRC enforces every keepout kind itself from 10.0.6, so kct stops emitting its `intersectsArea` keepout rules (and removes a stale block) on that release; older or undetectable `kicad-cli` versions keep the rules unchanged.
+
+- **Committed demo-board CPLs for boards 02 and 03 are now in the Gerber/drill frame** (Issue #7199). Their `cpl_jlcpcb.csv` still used the pre-#7059 frame, which would misplace every part at a fab. Both packages were regenerated on the pinned KiCad 10.0.6 toolchain, a new fleet test (`tests/test_fleet_cpl_frame.py`) checks every committed CPL against its routed PCB, and `refresh_bundles_6404.py` now accepts a coordinate-only CPL change that matches the PCB frame. Boards 05 and 07 remain tracked in #7241.
+
+- **Boards 04 and 06 JLCPCB CPLs now carry the JLC rotation profile and the
+  #7059 coordinate frame** (Issue #7200). D1/U1/U2 (04) were shipped at 0° and
+  are now 180/180/270; all eight SOIC-8 parts U1–U8 (06) are now 270. Orientation
+  is recorded as pending human review in each `procurement-review.md`.
+
+- **Boards 00 and 01 now carry real `F.CrtYd` courtyards** (Issue #7204).
+  Their hand-written footprints had no courtyard, so both `kct check` and
+  kicad-cli reported `courtyard_overlap` as checked while evaluating zero
+  outlines. Every footprint now gets the stock KiCad 10 courtyard, shifted
+  into the generator's pad frame and widened to the pad extent + 0.25 mm
+  (IPC-7351B) where needed. Copper is byte-identical; both packages and
+  `readiness.json` were re-issued on the pinned toolchain with 0
+  `courtyards_overlap`. Board 00's re-issued package carries the CPL in the
+  #7059 Gerber frame.
+
+- **Board 04 now carries real `F.CrtYd` courtyards, and its crystal moved
+  1 mm to clear one** (Issue #7204). Its 17 hand-written footprints had no
+  courtyard, so courtyard overlap was never evaluated before the board was
+  signed off. Each now gets the stock KiCad 10.0.6 courtyard in the
+  generator's pad frame, widened to pad extent + 0.25 mm where needed; the
+  LQFP-48 keeps the stock stepped outline and the HC49 crystal its stadium.
+  That exposed a real overlap: Y1's courtyard covered C2's by 1.46 mm^2, so
+  Y1 moved from x=+22 to x=+23 mm (0.22 mm gap). Its two OSC stubs were extended to
+  the new pads; no other copper moved. J1 gained the stock `F.Fab` body so
+  the pin-1 check sees its L mark. The package and `readiness.json` were
+  re-issued on the pinned toolchain with 0 `courtyards_overlap` in both
+  engines.
+
+- **`kct check` no longer passes footprints that have no courtyard**
+  (Issue #7204). The courtyard-overlap rule used to skip a footprint with no
+  `F.CrtYd`/`B.CrtYd` geometry and still report `courtyard_overlap` as
+  `checked`, so boards could be signed off with zero courtyard pairs
+  evaluated (KiCad's own `missing_courtyard` rule defaults to ignore). Each
+  such footprint now gets a `courtyard_missing` warning, and coverage reports
+  `courtyard_overlap` as the blocking
+  `unknown:no_courtyard_geometry (N of M footprints)`; N also counts outlines
+  that do not resolve to a polygon. Footprints with the
+  `allow_missing_courtyard` or `board_only` attr, footprints with no pads,
+  and the `MountingHole:`, `Fiducial:` and `NetTie:` libraries are exempt.
+  DNP parts are not.
+
+- **Width calculators now agree with the IPC-2221 reference** (Issue #7206).
+  `SeeedFusion4Layer.power_trace_width` fed milliamps into the amps formula
+  (1000 mA returned 4061 mm); it now delegates to `width_for_current`
+  (0.300 mm). `OvercurrentProtection` and `ReversePolarityProtection` replace
+  `max(0.3, I * 0.3)` with IPC-2221 widths (3 A: 0.90 -> 1.37 mm; 10 A: 3.0 -> 7.19 mm)
+  and gain a `copper_oz` argument (default 1 oz).
+
+- **Spec-declared currents now reach the ampacity gate** (Issue #7206). When
+  `project.kct` declares a current (`intent.interfaces[].current_max`,
+  `requirements.electrical.input.current`, `outputs[].current_max`, or any other
+  `requirements.electrical` key containing `current`, such as `motor_current`)
+  and no net class carries `target_ampacity`, `kct check` reports
+  `ampacity: unknown:needs_input:target_ampacity` (blocking) instead of
+  `skipped:no_declared_targets`, so `kct readiness` refuses. Boards 00, 02, 03,
+  04 and 05 now declare `target_ampacity` on their supply/motor nets; board 05
+  also publishes its net-class map to `output/` and raises the motor-power
+  `neck_trace_width` from 0.2 to 0.3 mm.
+
+- **`kct check` rates copper pours that carry a declared current** (Issue #7206).
+  A net with `target_ampacity` that flows through a copper pour, alone or
+  together with tracks, is now rated by the pour's narrowest neck between the
+  net's pads. The probe width is the IPC-2221 width the track check would
+  require on that layer. Inside the pour, the fill eroded by half that width
+  must still connect. Into each pad, via or track, a flat-faced probe that
+  wide must fit against the item's edge. So a thermal spoke narrower than the
+  required width fails however short its gap is. A pad smaller than the
+  required width, fed by copper that is wide enough, is not capped at the pad's
+  size. The estimate is conservative about copper: every pad must be reached
+  at full width, parallel spokes are not added together, and an oblique
+  approach reads narrower, never wider. It does not rate via barrels, the same
+  as for tracks. A neck under the required width is an `ampacity` error.
+  Without a defensible estimate the result is a blocking
+  `ampacity: unknown:pour not measurable (<net>: <reason>)`, replacing the
+  earlier `unknown (zone-only, not measured)`. Board 04's pour-only `+5V`
+  (neck 0.300 mm, needs 0.116 mm) and `+3.3V` (0.318 mm, needs 0.057 mm) now
+  verify `ready`.
+
+- **`kct export` preflight reconciles stackup copper with the fab order** (Issue #7209). New `stackup_copper` check fails when the board stackup's outer/inner copper weight is not a build the fab profile provides; `manifest.json` (`ordered_copper`) and `README.txt` now state the outer/inner oz actually ordered, derived from the stackup. JLCPCB profiles gain the 1 oz-inner option (4-layer, plus 6-layer on `jlcpcb`).
+
+- **Ampacity checks no longer pass vacuously** (Issue #7210). `path_ampacity` now
+  resolves board 05's PHASE_A/B/C paths (a track ending 0.35 µm off a via centre
+  was never joined to the via), and a net carried only by a copper pour with a
+  declared current reports `ampacity: unknown:zone-only, not measured` (blocking)
+  instead of `checked`.
+
+- **Board 00's LED footprint now carries its stock `F.Fab` body** (Issue #7211).
+  `generate_led` emits the 5 mm body outline, so `pin1_marker_obscured` tests
+  the silk against the real LED instead of the courtyard stand-in and the
+  spurious D1 warning clears. Copper is unchanged.
+
+- **`PCB.add_footprint` keeps the `Library:Footprint` lib ID** (Issue #7213). Footprints added via add_footprint / kct sync / pcb sync-netlist no longer drop the library nickname, clearing kicad-cli `footprint_symbol_mismatch` parity warnings. `add_footprint_from_file` gains an optional `library_id`, and the sync reconciler now treats a nickname drift (`Capacitor_SMD:X` vs `Resistor_SMD:X`) as a real footprint mismatch. `kct validate --sync` now compares footprint lib IDs too: a different package or library nickname is a `footprint_mismatch` error, and a nickname present on only one side is a warning.
+
+- **`kct detect-mistakes` tombstoning and via-in-pad checks reuse the `kct
+  check` rules** (Issue #7220). The thermal-imbalance tombstoning finding
+  counted any same-net zone on any layer, so it flagged passives next to an
+  inner-layer plane they never touch (17 on board 05, 9 on board 07) and missed
+  terminals forced solid in an outer-layer pour (00 R1, 01 R2, nine on 04). It
+  now reports exactly the `thermal_asymmetry` passives. "Via in SMD pad" now
+  delegates to the `via_in_pad` rule, which applies footprint rotation; the old
+  copy did not, and falsely flagged board 07 C12.1.
+
+- **`footprint_outside_board` no longer errors for a footprint origin exactly on the top or right board edge** (Issue #7224). The rule's point-in-polygon helper documented "boundary is inside" but used a half-open ray cast, so an origin on the top/right edge (or the max/max corner) failed sign-off while the same origin on the bottom/left edge passed. It now uses the shared, boundary-inclusive `core.geometry.point_in_polygon`; an origin 1 um outside still errors.
+
+- **Assembly-tier preflight now fails 008004 chips and no longer treats LFCSP as BGA** (Issue #7227). `R_008004_0201Metric` is parsed and fails on every JLCPCB tier instead of passing silently; LFCSP footprints are judged by pin pitch like QFN; the report's bottom-side count comment now notes it includes through-hole parts the JLCPCB CPL drops.
+
+- **Board 03 reference designators no longer print under their own parts**
+  (Issue #7228). J2, SW1, SW2, SW4, SW5 and U1 had their refdes inside the
+  part body, so it would be hidden after assembly. They now sit just outside
+  the body, placed by `kct place-silk-refs` and stored in the board's
+  `routing-plan.json` so a regeneration keeps them. SW5's two native
+  `silk_overlap` warnings are gone. Copper and drill files are unchanged. The
+  rebuilt package also brings board 03's CPL into the Gerber/drill frame
+  (#7059); only the Mid X/Mid Y columns change.
+
+- **`kct check` detects three more silkscreen defects** (Issue #7228). New
+  advisory `silkscreen_text_thickness` (visible silk text thinner than the
+  fab's minimum stroke) and `silk_ref_obscured` (a hidden reference
+  designator, or one that lies entirely inside its own component body);
+  `silk_edge_clearance` now also flags silk text lying wholly outside the
+  board outline. All are warnings; `kct check` exit codes are unchanged.
+
+- **`kct drc` and `kct validate --sync` exit codes ignore view filters** (Issue #7230). `--net`, `--type`, `--category` and `--errors-only` no longer turn a board with errors into exit 0; hidden findings are disclosed in `summary.hidden_by_view_filter`. `kct check --format json` gains top-level `verdict` and `exit_code`.
+
+- **`kct drc` no longer reports parity PASSED when no schematic resolves** (Issue #7237). `run_drc` now skips `--schematic-parity` and reports parity NOT RUN directly when no (or an ambiguous) schematic is found, instead of relying on kicad-cli printing `Failed to fetch schematic netlist`.
+
+- **Board 05 and 07 pick-and-place files are in the Gerber/drill frame**
+  (Issue #7241). Their committed `cpl_jlcpcb.csv` still used the pre-#7059
+  frame, so a fab loading them would have placed every part wrongly. Both are
+  regenerated on the pinned KiCad 10.0.6 image and now also list the
+  through-hole parts JLCPCB assembles (#7239): J1-J5/RV1 on board 05, J1-J3 on
+  board 07, whose `manual-assembly-bom.csv` is retired. Board 07's routed
+  `.kicad_dru` sidecar gains the exporter's `Max Hole Size` rule and
+  `B.Silkscreen` text rules (both stricter); copper is unchanged.
+
+- **`kct mfr validate` no longer flags zone clearance settings that a larger
+  rule overrides** (Issue #7246). A zone's `connect_pads` clearance is now
+  compared as `max(setting, declared board/netclass/DRU clearance)`, so board
+  04's `clearance 0.100` zones under a 0.127 mm rule no longer error. Zones
+  whose effective clearance is below the fab minimum still do.
+
+- **Board `project.kct` specs now validate, and `kct readiness` reads the fab tier from the spec** (Issue #7250). Boards 01/02/05 carry a real `production` phase, boards 00/05 use canonical `mechanical.dimensions`, board 04 declares its deliberate `min_trace: 0.127mm` and board 06 `target_fab: jlcpcb-tier1`. `_discover_tier` now reads `target_fab` through `load_spec` instead of scanning for a TOML-style `manufacturer =` line. Readiness evidence for boards 00, 01, 02, 04, 05 and 06 is re-pinned (spec hash only; no native result changed).
+- **`kct check` now evaluates differential-pair impedance on coupled segments** (Issues #7250, #7293). Pair context (declared `diffpair_partner`, else name-based detection) now reaches `ImpedanceRule`, so diff-only specs are judged instead of skipped. Only segments whose measured gap is within the 0.5 mm coupling window are judged; breakouts are left to `diffpair_uncoupled_length`. Built-in diff defaults (USB 90 Ω, LVDS 100 Ω, `_P/_N`, `+/-`) still apply when a net-class map is present, capped at `warning`.
+- **Board 03 USB pairs now meet 90 Ω differential** (Issue #7294). The In2.Cu
+  `USB_D±` common run is narrowed from 0.30 mm to 0.22 mm (centrelines kept,
+  gap 0.23 mm; 71.6 Ω → 89.0 Ω under `CoupledLines`), and
+  `target_diff_impedance: 90` is declared on all four USB nets, so `kct check`
+  now judges them at error level.
+
+- **Main-red lint/baseline fixes after #7220 PR1** (Issue #7253). Internal: manufacturer-propagation lint annotation for the synthetic via-in-pad rules and a bounded `thermal_asymmetry` allowance in the board 03 baseline test.
+
+- **`kct route` cache now invalidates on code changes** (Issue #7258). The cache
+  version tag carries a fingerprint of the `kicad_tools` source and the loaded
+  router extension, so router edits no longer replay stale copper and
+  `--no-cache` is not needed after them.
+
+- **MCP sign-off tools use the CLI's gates** (Issue #7260). `get_drc_violations`
+  now runs `kct check`'s rule set (layer count from the board instead of a
+  hard-coded 4, stackup copper, fabrication-floor override, waiver and
+  net-class sidecars) and returns `kct check`'s `verdict` / `exit_code`,
+  including the ERC + LVS + manifest rollup. `export_assembly` now runs
+  `kct export`'s pipeline: the DRC safety floor, every preflight check
+  (returned as `preflight`), the unbuildable-BOM block and a new
+  `strict_preflight` parameter; a refused export writes no BOM, CPL or upload
+  zip. `validate_assembly_bom` gains an optional `pcb_path` and reports the
+  `bom_lcsc_values` value/package check.
+
+- **Boards 04 and 06 JLCPCB packages list their through-hole parts for fab
+  assembly** (Issue #7268). Board 04's `bom_jlcpcb.csv`/`cpl_jlcpcb.csv` now
+  include Y1 (C114147) and J1 (C37208) and equal a fresh `kct export --mfr
+  jlcpcb`; its `manual-assembly-bom.csv` is retired. Neither board's design
+  report says the through-hole parts are excluded from the pick-and-place file
+  any more, and each package has a dated procurement-review note.
+
+- **Board 03 `thermal_asymmetry` allowance is now pad-specific** (Issue #7270).
+  The baseline test no longer accepts any 6 findings; only the six classified
+  pads (C10-2, C11-2, J1 A1/A12/B1/B12) are allowed, so a new asymmetry fails.
+
+- **`refresh_readiness.py` covers boards 00-02** (Issue #7273). Boards 00, 01 and 02 gained refresh configs, gated on the warning allowance their recorded `known_issues` declare (#7261). `BoardConfig.bundle_search` lets those `kct readiness` packages, whose `manufacturing.zip` members are prefixed `manufacturing/`, rebuild their outer archive.
+
+- **Board 03 ships with balanced thermal reliefs** (Issue #7275). The recipe
+  now writes explicit per-pad thermal reliefs on C10-2, C11-2 and J1
+  A1/A12/B1/B12 before the zone fill, and JOY_Y_RAW runs 0.3 mm lower under
+  C11 so its GND pad gets a second spoke. The six `thermal_asymmetry`
+  findings are gone, pinned native DRC still reports 0 `starved_thermal`,
+  and the board 03 test no longer carries an allowance for them.
+
+- **MCP `export_assembly`, `export_gerbers` and `get_drc_violations` accept the registry's manufacturer/tier ids** (Issue #7276). `jlcpcb-tier1` (and every other `kct export --mfr` id) now works, with the enum sourced from the manufacturer registry. `export_assembly` defaults an omitted `manufacturer` to the board's `project.kct` `target_fab` and reports it as `manufacturer` / `manufacturer_source`, so boards 03/04 export under the strict provenance check, which is unchanged.
+
+- **DRC/ERC report binding is no longer fooled by a stale report** (Issue #7277). The
+  `readiness.json` fallback now requires a `report_sources` record that the report was
+  produced from the current PCB (co-pinning alone no longer binds), and ERC binding
+  digests the whole schematic hierarchy, so a sub-sheet edit unbinds the report.
+
+- **`refresh_readiness.py` now writes the DRC report and records `report_sources`** (Issue #7283). For boards 05, 06 and 07 the producer rewrites `output/drc_report.json` (and the identical `native-drc.json` copies on 06/07) from its one pinned-toolchain DRC run, ahead of the archives and manifest, and records `report_sources` so the report binds to its PCB again after #7277.
+
+- **Lattice fallback diff pairs no longer trade unbounded skew or length for
+  via parity** (Issue #7284). A fallback leg-pair candidate with equal P/N via
+  counts now wins on vias only when, against the best unequal-via candidate,
+  it adds at most 0.5 mm of skew and 0.5 mm to its longer leg and stays within
+  the pair's skew budget (net class, else declared protocol, else 0.5 mm).
+  Otherwise skew and length decide. Board 03 under `jlcpcb-tier1` is back to
+  USB_D- 15.94 mm and 0.54 mm skew, where the mirrored legs of #7093 had made
+  it 20.09 mm and 4.57 mm.
+
+- **Router no longer drops vias in the mask-dam zone beside SMD pads; boards 02, 05, 06 cleared of `via_at_pad_edge`** (Issue #7296). New
+  `DesignRules.min_via_pad_edge_gap` (defaults to the manufacturer's `min_solder_mask_dam_mm`) makes both the coupled
+  diff-pair search and the single-ended A* refuse a via whose drill edge is closer than that to an SMD pad's copper, in
+  the Python and C++ (`ROUTER_CPP_BUILD_VERSION` 62) pathfinders, even where the fab allows via-in-pad. New
+  `relocate_pad_edge_vias` (also `kct fix-vias --relocate-pad-edge`) slides offenders the stitcher and pour repair still
+  place clear; boards 02 and 06 run it in their recipes. It moved 2 vias on board 02, 3 on board 05 and 17 on board 06
+  (0 `via_at_pad_edge` left), with evidence re-pinned. The pass keeps each move clear of the
+  project's netclass clearances (the same per-pair requirement `netclass_clearance_copper` checks,
+  e.g. the router's 0.2 mm `Power` class), not just the fab floor, and leaves a differential-pair
+  leg's via in place rather than uncouple the pair.
+- **`kct stitch` checks each via where it is written** (Issue #7296). Candidates were validated
+  unrounded and then saved at 0.01 mm, so a stitch via could land a few micrometres inside the
+  clearance it passed (board 06: a GND via at 0.197 mm from a track under a 0.2 mm class).
+
+- **Board 04/05 release gates accept only their exact known #7220 warnings**
+  (Issue #7298). `boards/04-stm32-devboard/check_manufacturing.py` and
+  `boards/05-bldc-motor-controller/redesign/build.py` no longer fail on the
+  nine board-04 `thermal_asymmetry` (pad 1 of C1-C3, C12-C16, R1; #7295) and
+  three board-05 `via_at_pad_edge` (R11-1, R9-1, D1-1; #7296) findings. The
+  allowance is keyed by exact rule, ref and pad (new
+  `kicad_tools.validate.known_warnings`); any other warning, a repeat or any
+  error still fails, and no other board's threshold changes.
+
+- **Starved-pad thermal repair no longer stalls after KiCad re-saves the board** (Issue #7309). Per-pad overrides are now read back as `thermal_bridge_width` as well as `thermal_width`, so a pad that stays starved narrows again and finally goes solid, with no duplicate tokens. Solids from isolated-island remediation are now logged.
+
+- **Board 07's seed-42 re-route routes DQ0 again, and the Match-Group gate
+  now enforces reach** (Issue #7319). The DDR strobe pair (`DQS_P`/`DQS_N`)
+  gets an explicit 100 ohm target sized like the MIPI and HDMI pairs
+  (0.225 mm width held, 0.135 mm gap solved). Before this, the router
+  synthesized the target from the validator's `_P`/`_N` default and
+  re-solved the width at the 0.1016 mm gap floor, which narrowed DQS to
+  0.175 mm after #7163 and lost DQ0 (30/31 to 29/31) at about three times
+  the gate wall time. `scripts/ci/check_matchgroup_coverage.py` now reads
+  the recipe's `REQUIRED_SIGNAL_REACH = 30` and fails (exit 2, naming the
+  open nets) below it. It uses the same reach counter as board 06's gate.
+
+- **Match-Group gate no longer false-fails `spec_conformance_layers`** (Issue #7320). A regression fixture/output folder never adopts the parent board's `project.kct`, and the recipe helper now copies the fixture's own `.kct` into the gate output.
+
+- **`kct stitch` and the escape producers keep vias out of the SMD mask-dam zone** (Issue #7322). Stitch candidates (default, `--thermal`, `--blanket`) now consult the same `via_drill_at_pad_edge` predicate as the router (#7296), with the `--mfr` profile's `min_solder_mask_dam_mm` as the floor, so they no longer produce `via_at_pad_edge` findings. The router's escape-via gate and board 06's pour-escape search apply it too; `relocate_pad_edge_vias` stays as a safety net.
+
+- **Readiness `known_issues` follow-ups** (Issue #7323). `scripts/boards/refresh_readiness.py`
+  accepts `--known-issue` / `--resolve-known-issue` (same syntax as `kct readiness`) and keeps
+  `readiness.json` and the hash-bound `known-issues.json` consistent. `read_readiness()` and the
+  site validator now reject a `known-issues.json` in the evidence folder that `inputs` does not
+  list, so dropping both the binding and the list no longer verifies as ready.
+
+- **Board 07 Match-Group gate tolerates the known `impedance` findings** (Issue #7332). `unexpected_baseline_errors` now caps `impedance` at 4 (MIPI_DAT1 and TMDS_D1 pairs, routed gap well above the solved 0.100 mm); a fifth still fails.
+
+- **Board 05 package export no longer hard-codes 36 CPL rows** (Issue #7333). `package.py` now checks the CPL against the placed footprints (42 since #7242 added through-hole parts), and board 04/05 readiness evidence is regenerated on the pinned toolchain.
+
+- **`kct readiness --verify` no longer blocks ready boards on their committed
+  known-issues file; board 04's saved fill matches a refill again** (Issue
+  #7337). The orphaned `known-issues.json` check (#7323) now scans only the
+  record's own evidence folder(s), so `--verify`'s
+  `output/readiness-verification/` record no longer reports the committed
+  `output/readiness/known-issues.json` as orphaned (boards 02 and 05 verify
+  ready again); an unlisted file inside the record's own folder is still
+  refused, in `kct` and in the site loader. Board 04's zone fills are re-saved
+  from a native kicad-cli refill (the #7317 fill carried kct's foreign-pad
+  carve, ~28 mm^2 short of a refill), keeping `thermal_asymmetry` at 0, and
+  `scripts/boards/refresh_readiness.py` now refuses a board whose saved copper
+  differs from an independent refill.
+
+- **Board 07's bundle producer works again after the `gate_native_drc` tuple change** (Issue #7348).
+  `refresh_bundles_6404.py` now unpacks `(errors, raw)`, writes the pinned-toolchain DRC report to the
+  board's `drc_targets` before the archives and manifest hash them, and records `report_sources`,
+  matching `refresh_readiness.py`.
+
+- **`kct readiness` honours an `exception` known issue's exact error identities** (Issue #7355). An
+  `exception` entry may carry `errors: [{"rule", "at": [x_mm, y_mm]}, ...]` (the same structured identity shape
+  as the `warnings` allowance; `--known-issue N:summary:exception:!rule@x/y,...`), with `at` the violation's
+  location in mm rounded to 0.01. An identity may be listed by only one issue. The `kct_check` gate waives the
+  DRC roll-up only when the report's errors match those identities as a set: an unlisted or repeated error, an
+  error with no location, or a listed identity that no longer fires still blocks, and a failed ERC still blocks.
+  `defect` and `advisory` entries reject `errors`; the site validator mirrors the format.
+
+- **Lattice diff-pair gateways keep the shortest workable combination
+  and refuse pass-under polarity crossings** (Issue #7362). The fan-via
+  gateway retry used to accept the first combination that routed, ranked
+  only by fan length. It now compares up to 4 workable combinations per
+  group (`against`, then pass-under) and keeps the shortest by P+N route
+  length, with ties going to the earlier try. A pass-under combination
+  that puts P on opposite sides of the segment at its two ends is rejected
+  before it is routed, because its body could only reach the vias by
+  doubling back past them. `against` crossings are kept: 06rf PCIE_TX and
+  07rf DQS couple through one. Board 03's fresh USB_D route (seed 42,
+  `jlcpcb-tier1`) goes from 18.32/19.80 mm back to 15.66/15.85 mm. That is
+  inside the 16 mm bound, and the #7324 90 ohm width is kept. The
+  `J1.A6->U2.3` leg falls back to uncoupled again, as it did before #7324.
+  The gateway log line now reports `picked #k of n workable (r routed, p
+  pruned)` with per-net lengths.
+
+- **`kct route --length-match-diffpairs` now runs on the default
+  `--auto-layers` path** (Issue #7377). The diff-pair skew tuner was only
+  called from the single-attempt tail, so a plain `kct route
+  --differential-pairs --length-match-diffpairs` (and the #6664 lattice skew
+  auto-tune under `--route-engine lattice --differential-pairs`) went through
+  layer escalation, accepted the flag and tuned nothing, with no warning. The
+  four post-route tails (layer escalation, rule relaxation, combined
+  escalation, single attempt) now share one `_run_post_route_pipeline`, so
+  every post-route pass runs on every path. Output without those flags is
+  unchanged.
+
+- **`kct init` no longer overwrites an existing `.kicad_dru`, and dropping a
+  stale keepout block is reported** (Issue #7383). Re-running `kct init` on a
+  project merges the manufacturer floors into the fab-floors managed block and
+  keeps hand-written rules and the keepout, creepage and native zone-clearance
+  blocks. A file only an earlier `kct init` wrote is still replaced. When `kct
+  export`, `kct route`, `kct check --emit-drc-constraints` or `kct mfr
+  apply-rules` removes the `kct keepout` block because kicad-cli >= 10.0.6
+  enforces keepout rule areas natively (Issue #7198), it now prints a note
+  saying so. Before, the block disappeared silently.
+
+- **Re-running `refresh_readiness.py` on unchanged board evidence is a no-op** (Issue #7384).
+  With the committed `checked_at` on the pinned toolchain, `--dry-run` listed 4-12 files on
+  boards 00, 01, 02, 04, 05, 06 and 07, although nothing had changed. KiCad's run `date` in
+  ERC/DRC JSON and re-encoded zip metadata caused it, and the hashes in the manifest,
+  bundle and `readiness.json` carried it on. A report that differs only by `date` now keeps
+  its committed bytes, and so does an archive whose members are unchanged. The nightly native
+  test `test_board_evidence_reproduces_7384.py` asserts an empty dry-run for every board.
+
+- **`kct mfr apply-rules`, `kicad-fab-rules apply` and `kct init` no longer
+  loosen authored `.kicad_pro` rules** (Issue #7385). Applied to an existing
+  project, all three used to overwrite every minimum with the profile value,
+  so an authored `min_clearance 0.2` became `0.127` on jlcpcb. `kct mfr
+  apply-rules` and `kct init --design-type` also replaced the whole `Default`
+  netclass, which reset an authored `diff_pair_gap 0.12` to `0.25`. They now
+  use the same #6191 stricter-wins merge as `kct route` and `kct check
+  --emit-drc-constraints`. Each one lists the stricter authored values it
+  kept. A rewrite that would still loosen a rule is refused, and nothing is
+  written. `add_netclass_definition` now merges into an existing netclass
+  rather than replacing it. The new
+  `kicad_tools.core.rule_loosening.rule_loosenings(before, after, allow=...)`
+  reports lowered minima, downgraded severities, new DRC exclusions and
+  dropped netclasses, keys and patterns.
+
+- **Board 05's manufacturing report lists the through-hole parts as
+  fab-assembled** (Issue #7391). `report.md`/`report.pdf` no longer say
+  J1-J5 and RV1 are excluded from the CPL, matching the 42-placement CPL
+  shipped since #7242, and `HARDWARE.md` no longer says to hand-solder them.
+  The board's producer (`redesign/build.py`) now declares the router's net
+  classes in the routed sidecars, so a regeneration keeps the seven
+  `Reviewed clearance - <class>` rules instead of dropping them to the
+  0.1016 mm fab floor. It also runs on the pinned KiCad evidence toolchain.
+
+- **`kct init -t <type>` no longer writes netclass values below the fab minimum** (Issue #7392).
+  `apply_design_template()` now takes the manufacturer `DesignRules` and clamps
+  track width, clearance, via diameter/drill and diff-pair width/gap up to the floor,
+  covering `Default` and every template netclass (e.g. oshpark/seeed `Default`
+  clearance 0.15 → 0.1524, flashpcb via diameter).
+
+- **Stock `MCUBlock` and `OscillatorBlock` copper no longer shorts foreign pads** (Issue #7393). Both
+  blocks now apply cleanly through strict `PCBLayout.apply_to_pcb`; the TSSOP-20, 4-pin oscillator and
+  0603 capacitor fallback pad tables were corrected to the KiCad 10 footprints.
+
+- **Stock schematic blocks build against the KiCad 10 symbol libraries**
+  (Issue #7399). The USB connectors, the TJA1050 CAN transceiver, the
+  CurrentSenseShunt amplifier, BarrelJackInput, the P-FET input and
+  reverse-polarity blocks, ThermalCutoffBlock and every block that places a
+  `Device:D_TVS` raised `SymbolNotFoundError` or `PinNotFoundError` with their
+  default arguments. They now use the current library symbols:
+  `USB_C_Receptacle_USB2.0_16P`, `USB_B_Micro`, `USB_B_Mini`, `TJA1051T` (the
+  TJA1050's pin-compatible successor), `INA240A1D`, `Device:Q_PMOS`, and
+  `Device:Fuse` for the thermal cutoff, since KiCad 10 has no TCO symbol. Pin
+  lookups now use the real names: barrel-jack pins 1/2, TVS `A1`/`A2`, and the
+  INA240 `+`/`-`/`V+` plus its unnamed output. Affected blocks: the USB
+  connectors, the CAN ESD path, ResetButton ESD and ESDProtectionBlock.
+  The new `tests/test_blocks_real_symbols.py` builds every exported block on
+  the real libraries and checks that each port lands on a pin or wire. Defects
+  that remain are marked as strict xfails.
+
+- **Reverse-polarity P-FETs in the stock blocks now block a reversed input**
+  (Issue #7399). `ReversePolarityBlock(topology="pfet")`,
+  `create_reverse_polarity_pfet`, and the P-FET paths of `BarrelJackInput`,
+  `create_12v_barrel_jack`, `BatteryInput` and `create_lipo_battery` put the
+  input on the FET's source. That leaves the body diode conducting from the
+  load back into a reversed supply. The input now goes to the drain and the
+  source feeds the load. The `BarrelJackInput` and `BatteryInput` gate tie now
+  reaches the ground pin; before, it ended on an empty point and the gate
+  floated. Their `protection="none"` variants now wire the input to the filter
+  capacitor, which was left unconnected before. Their `protection="diode"`
+  variants place the diode with its anode toward the input. All of these
+  blocks now route with orthogonal wires instead of diagonal ones.
+
+- **Every stock schematic block passes the real-symbol smoke test** (Issue #7402).
+  A new smoke test builds each exported `kicad_tools.schematic.blocks` factory
+  with its default arguments against the KiCad 10 libraries and checks that its
+  ports land on a real pin end or wire. All of them now pass (#7507, #7508,
+  #7509, #7510).
+
+- **Match-group tuner no longer overshoots the group maximum** (Issue #7423). A
+  meander committed on a host that is not 8-direction aligned could end a few
+  microns past the target and raise the group's maximum length; the amplitude is
+  now re-fitted from the measured length so a tuned member never ends past it.
+  A candidate the refit cannot bring under the target is now rejected
+  (`reason="overshoot"`), and the per-bump fallback books each bump's measured
+  added length instead of `2 * amplitude`.
+  The guards measure the route as the PCB writer emits it (coordinates rounded
+  to 4 dp, which is what `kct check` reads) as well as in memory, and compare it
+  against the reference as written too, so an off-angle reference that rounds
+  shorter still bounds the member. A refit aims 0.2 µm under the target so the
+  rounded copper cannot land past it.
+  The same written-copper bound now covers pair lanes and mixed groups: a lane
+  is capped at the reference lane as written, `(W(p) + W(n)) / 2`, on the
+  mirrored, centreline and per-leg strategies (a candidate past it is re-fitted
+  or rejected), and no trace is lengthened past the reference's longest written
+  trace beyond the excess its own routed skew already gave it. A mixed group
+  whose longest member is a scalar now caps its scalars at that scalar as
+  written.
+
+- **`kct route` reports pair via-parity failures** (Issue #7425, Part of #7093). Engaged diff pairs committed with unequal P/N via counts are now listed in the end-of-run summary and under `pair_via_parity_failures` in the `--format json` report (absent when clean); exit status is unchanged. The audit now picks pairs the way `kct check` does (`build_synth_routing`) and counts copper kept by `--preserve-existing` / `--nets`.
+
+- **JLCPCB CPL places through-hole parts at their pad-bbox centre** (Issue #7433).
+  Mid X / Mid Y is the component centroid per JLCPCB, but pin headers and
+  other THT footprints put the KiCad origin on pin 1 (about 8.9 mm off on a
+  1x8 header). Through-hole rows now use the pad bounding-box centre,
+  rotation-aware; SMD rows are unchanged. Boards 02, 03, 05, 06 and 07 CPLs
+  and their pinned evidence were regenerated.
+
+- **`refresh_readiness.py` re-pins board 04's native DRC evidence** (Issue
+  #7435). Board 04's refresh config now names
+  `output/readiness/native-drc.json` and `output/manufacturing/native-drc.json`
+  as `drc_targets`, so the pinned-toolchain refresh rewrites them and records
+  them in `readiness.json` `report_sources`. Before this, nothing regenerated
+  them once the pintype annotator stopped writing them (Issue #7409). Board 04
+  is re-pinned on KiCad 10.0.6; only the report dates changed.
+
+- **LCSC package guard now compares pin-header pin counts** (Issue #7446). Preflight and
+  `verify_lcsc_assignment` report a `mismatch` when a pin header/socket part's stated
+  `NxM`, `-NNP`, or `N Position` / `N Pin` count disagrees with the `PinHeader_RxC`
+  footprint name or its pad count (e.g. a 1x2 header on a 1x8 footprint). A header part
+  whose record states no readable pin count, or states conflicting counts (`1x3 header
+  2 Pin`), is reported `unverified` with a reason and surfaces as a `bom_lcsc_values`
+  preflight warning, never as a pass. `kct readiness` now keeps the warning's references
+  and reasons in its `bom` gate detail.
+
+- **Stale unbound `native-drc.json` removed from board 04** (Issue #7464).
+  Deleted the unread top-level `boards/04-stm32-devboard/output/native-drc.json`
+  (dated 2026-09-10) and added a test that fails when a tracked
+  `native-drc*.json` under `boards/*/output/` is neither bound by
+  `readiness.json` nor a `refresh_readiness` `drc_targets` entry.
+
+- **Escape-via mask-dam gate honours non-cardinal pad rotation** (Issue #7467).
+  `EscapeRouter._via_in_pad_edge_zone` now measures drill-to-pad distance in the
+  pad's rotated frame, so a 45-degree SMD pad no longer admits drill sites inside
+  its dam or refuses sites outside it.
+
+- **`PCB.save` and every other atomic file write work on Windows again**
+  (Issue #7478). The shared `atomic_write_text` helper fsynced its `.tmp`
+  file through a read-only handle. Windows `os.fsync` (`_commit` ->
+  `FlushFileBuffers`) needs write access, so every board, schematic, project,
+  footprint and design-rule save raised `OSError: [Errno 9] Bad file
+  descriptor` and left `<file>.tmp` behind (the original file was untouched).
+  The helper, the transaction rollback restore, and `kct route`'s final and
+  interrupted (`_partial`) saves now fsync a handle opened for writing. Broken
+  since v0.22.0.
+
+- **`Pad` geometry edits now survive `PCB.save()`** (Issue #7479). Assigning `size`, `drill`, `drill_size`, `drill_offset`, `shape`, `roundrect_rratio`, `solder_mask_margin` or `zone_connect` on a loaded pad writes through to its S-expression node (missing nodes are created, `None` removes the optional ones); `pad.drill = x` on an oval-drill pad raises `ValueError` pointing at `drill_size`. Previously these edits read back correctly but were silently dropped from the saved file. `PCB.save()` also stops silently dropping direct edits to the identity/net fields (see the upgrade note).
+
+- **Windows KiCad 9/10 installs are now auto-detected** (Issue #7480).
+  `find_kicad_cli()` and `detect_kicad_library_path()` enumerate the versioned
+  `KiCad/<major>.0` directories under Program Files (newest first) instead of
+  probing only 7.0/8.0.
+
+- **`kct pcb export-dsn` places pins on their KiCad pads** (Issue #7481). Footprint angles are now written in the Specctra sense and back-side footprints get their own x-mirrored image, so ±90° and back-side parts no longer land rotated or mirrored in Freerouting-style readers.
+
+- **DSN export builds a valid board boundary from any Edge.Cuts outline** (Issue #7482).
+  Out-of-order `gr_line`s, `gr_poly`, `gr_circle` and `gr_arc` outlines are now
+  polygonized into one closed `(boundary ...)`; inner loops (e.g. a second `gr_rect`)
+  become `keepout`s on every copper layer instead of replacing the board, even when the
+  cutout is larger than the copper around it (ring and frame boards). The
+  `min_copper_edge_clearance` inset now also grows those cutout keepouts, and pads inside
+  the band around a cutout are listed. Open outlines and footprint-embedded Edge.Cuts
+  graphics are listed in `omissions`.
+
+- **`kct pcb export-dsn` no longer emits NPTH holes and non-copper pads as pins** (Issue #7483). Mounting holes become image keepouts (circle, or path for oval drills) on every copper layer; paste-only and mask-only pads are dropped, so every layer named in a `(shape ...)` is now declared in `(structure ...)`.
+
+- **`kct pcb export-dsn` exports real pad shapes** (Issue #7484). Custom pads become the convex hull of their anchor and primitives (they were exported as the tiny anchor, under-representing copper), pads rotated within their footprint keep their rotation (polygon at non-right angles), and circle/oval pads become `circle`/`path` shapes. Non-rectangular padstack names now carry a short geometry hash, so equal-size pads of different shape no longer share a padstack.
+
+- **DSN export numbers copper layers by stack order** (Issue #7485). Every
+  `(layer ...)` in the exported `(structure ...)` carried `(index 0)`; it now
+  carries `(index N)` following the board's copper stack order.
+
+- **`BarrelJackInput` P-FET gate is clamped to the Si2301's Vgs rating** (Issue #7489).
+  The default `protection="pfet"` branch now returns the gate to the sleeve through a
+  10k `R_GATE` and adds a 5.1 V Zener `D_GATE` (cathode on the source, anode on the
+  gate), so a 12 V jack no longer drives Vgs past the ±8 V maximum. `BatteryInput`
+  and the `diode`/`none` protections are unchanged.
+
+- **Board 03 fresh lattice plan no longer starves C11.2's thermal spoke** (Issue #7498). The
+  `pairs` harness row stages a track/via keepout under C11.2's lower spoke, and the plan
+  fingerprint ignores rule areas, so a fresh plan replays with native DRC and `Overall: PASS`.
+
+- **Schematic blocks no longer expose phantom ports** (Issue #7507). The CAN
+  ESD `CANH`/`CANL` ports now sit on the TVS anode pin, `BackToBackFETPair.SOURCE`
+  is grid-snapped onto its wire end, and `I2CPullups` (without filter caps) and
+  `create_gpio_pull_resistor` no longer expose an unconnected `GND` / opposite-rail alias.
+
+- **Schematic blocks build with default arguments on KiCad 10 libraries** (Issue #7508).
+  `DebugHeader(interface="jtag")` now defaults to 20 pins, `UCC27211GateDriver` defaults
+  to the shipped `Driver_FET:LM5109AMA` schematic-level stand-in
+  (different pin numbers, warns, not for fabrication; pass `driver_symbol=` for a real
+  UCC27211), and `USBConnector(esd_protection=True)` now wires a `USBLC6-2SC6` array
+  to D+/D-/GND/VBUS instead of leaving an orphaned `Device:D_TVS`.
+
+- **`GateDriverBlock` ports now land on real driver pins** (Issue #7509). `VCC`/`GND`/`GATE_*` (and `BOOT_*`/`PWM_*` on the half-bridge IR2110) resolve to the driver IC's pin ends instead of fixed offsets; `BOOT_*` aliases the bootstrap cap on the DRV8308, which has no per-phase PWM or bootstrap pins, so those ports are no longer emitted.
+
+- **Schematic block ports follow the grid at off-grid origins** (Issue #7510). `CircuitBlock.ports` now snaps positions to the schematic's own grid (`Schematic(grid=...)`) whenever the schematic snaps symbols and wires (`SnapMode.AUTO` or `STRICT`), so ports land on their wire ends instead of missing them by the snap distance; a port already on a placed pin or wire end is kept, since the schematic never moves pins. `snap_to_grid` is now idempotent on grids whose points need more than 2 decimals (e.g. 0.635 mm), so an already-placed pin no longer re-snaps 0.01 mm off the wire drawn to it. Block schematic output on the default 1.27 mm grid is unchanged; only port values that previously missed their wire/pin by up to 0.8 mm move.
+
+- **`PCB.save()` no longer refuses an unedited board with `(net N)` pads** (Issue #7519).
+  The #7479 unpersisted-edit check compared `pad.net_name` even when the pad's net node
+  carries no name atom, so loading and saving third-party or hand-written boards raised.
+
+- **JLC submission, review and upload no longer crash on Windows** (Issue #7529).
+  `prepare_submission`, `refresh_inventory`, `submit_review`,
+  `render_review_page` and the `UploadLedger` / upload lock no longer touch the
+  POSIX-only `os.O_NOFOLLOW` / `os.O_DIRECTORY` flags or `dir_fd` opens directly.
+  Where those flags are missing, the code now refuses symlinks and directory
+  junctions with `lstat`-style checks and skips the directory fsync. POSIX
+  behaviour is unchanged.
+
+- **`kct readiness --verify` no longer rewrites committed board files** (Issue #7536).
+  The verification receipt under `output/readiness-verification/` names the verifying
+  checkout (commit, dirty flag, source digest), and its BOM text depends on the host's
+  parts cache. So every verify run rewrote the receipts committed for boards 00, 03 and 06,
+  and board 00's copies were already stale. Those receipts are now untracked and
+  gitignored. Only board 03's hash-bound evidence copies stay tracked, and a native test
+  checks that `--verify` reproduces them byte-for-byte.
+
+- **Board 00/02/04 recipes report a partial route again** (Issue #7539).
+  The #7206 `target_ampacity` sidecar writer now creates the output
+  directory, so the route fast-fail gate's "partial route" /
+  "routing/finalization failed" message is no longer masked by an ENOENT on
+  `net_class_map.json`. Board 02/04 readiness evidence re-pinned on the
+  pinned KiCad toolchain.
+
+- **Release automation no longer fails with a 401 after a long CI wait** (Issue #7559). `release-pr.yml` now runs the gate, release-PR open, checks wait and merge as separate `release_plan.py run --phase …` steps and mints a fresh GitHub App token before each step that writes, instead of reusing one token that expires after an hour.
+
+### Added
+
+- **`kct check` enforces per-net routing policies** (Issue #6044). New
+  `routing_policy` category holds a net to the `max_vias_per_net` and
+  `length_constraint.max_length` its net-class-map entry declares, for
+  single-ended nets as well as pairs (pair via caps stay with
+  `diffpair_uncoupled_length`, so they are not reported twice). Length is
+  total routed copper from `measure_pcb_net`; a net with track arcs gets an
+  "unmeasured" warning instead of a pass. Opt-in `--require-routing-policy`
+  fails sensitive classes (`length_critical`, `noise_sensitive`,
+  `length_match_group`, `diffpair_partner`) that declare no policy. Limits
+  apply only where declared, so existing maps are unaffected.
+
+- **Lattice diff pairs can now couple on another layer through fan-via
+  gateways** (Issue #6444). When a pair segment's planar coupled search is
+  exhausted on its pads' layer (`pair-no-path*`, `pair-leg-keepout`), the
+  lattice engine retries it once: each net fans out to one through via per
+  end, and the unchanged pair agent couples the run between the via pairs on
+  another routable layer. P and N always get equal via counts, the fans are
+  held to the protocol's per-terminal uncoupled budget and via limit, and a
+  run that couples today keeps exactly the same copper. The route log names
+  every gateway (layer, heading, setback, fan lengths, vias) and the
+  candidate count per terminal. 2-layer and plane-reserved boards with no
+  other legal layer decline cleanly with `pair-gateway-*` diagnostics.
+
+- **Lattice diff pairs: a one-ended hybrid couples what can couple** (Issue
+  #6446). A pair segment the planar search and the fan-via gateway both decline
+  gets a deferred third retry: a coupled trunk runs from the easy end to a trunk
+  start on a setback ladder outside the hard terminal's pad field, and each net
+  reaches the start through its own single-ended leg. The outcome is
+  `hybrid:<ref>.<pin>` (counted apart from `coupled`, a `Diff pairs (lattice)
+  hybrid: N` line, a `Diff-pair hybrid (lattice)` log line naming the trunk,
+  legs and cap, and a `Pairs hybrid` bench column). Legs are capped at the
+  declared `max_uncoupled_per_terminal_mm`, else a 25 mm engine search bound; an
+  over-budget hybrid is never emitted. Board 07rf's `TMDS_D0` goes from
+  67.6 mm uncoupled to a 27 mm coupled trunk with 19.5 mm of legs.
+
+- **Net classes can opt in to reserved plane layers** (Issue #6876). New
+  `allow_plane_layers` net-class field (KiCad names or grid indices in the
+  `--net-class-map` sidecar) lets one class route on named layers that
+  `--reserve-plane-layers` keeps every other class off. The grid, C++,
+  lattice and mesh engines, the diff-pair coupled search and the tie step
+  all honour it (both nets of a pair must opt in), hard `avoid_layers` still
+  wins, and the reference-plane warning no longer reports the opted-in
+  `(net, layer)` pairs. Classes without the field route exactly as before.
+  Board 03's `USB_D+`/`USB_D-` opt in to In2.Cu.
+
+- **`kct retune-lengths` length-tunes selected groups on an already-routed board** (Issue #6885, part of #6730). Runs the existing match-group and diff-pair skew tuners on named `--group` / `--diffpair` targets, preserves all other copper, and writes a distinct output plus a provenance record only when every target is re-measured within the limit `kct check` enforces. A failure, timeout or unattainable target writes nothing and leaves the input unchanged.
+
+- **`kct screenshot --baseline-save/--baseline-compare` for visual regression** (Issue #6912).
+  `--baseline-save DIR` stores the render plus a sidecar recording the renderer
+  (kicad-cli and cairosvg versions) and render options; `--baseline-compare DIR`
+  re-renders and reports `drift_fraction`, `changed_pixels`, `total_pixels` and
+  `status` as JSON. A baseline from a different renderer or options yields
+  `renderer_mismatch` (no drift number, non-zero exit) instead of a silent compare.
+
+- **`kct pcb import-ses` refuses a stale Freerouting session** (Issue #6915).
+  `export-dsn` now writes `<pcb>.dsn-revision.json` (SHA-256 of the board);
+  import compares it and fails if the board was edited since. `--allow-stale`
+  overrides; `--format json` reports `revision` as `verified`, `unverified`
+  or `stale-overridden`.
+
+- **Evolutionary placement can seed its population from the bottom-up placer** (Issue #6985). New `EvolutionaryConfig.seed_bottom_up` (default off) adds one `place_hierarchical` individual to the initial GA population.
+
+- **`PCBLayout` block layouts apply to a real board** (Issue #7022).
+  `layout.apply_to_pcb(source, output, net_map=...)` (or
+  `KiCadPCBExporter(layout, net_map=...).apply(source, output)`) moves the
+  block footprints already on an existing `.kicad_pcb` to their layout
+  placements and writes the block traces, inter-block traces and vias as copper
+  on the board's existing nets, with deterministic UUIDs and no duplicate copper
+  on re-apply. `net_map` maps block net names such as `VOUT` to board names
+  such as `+3V3`. Strict by default: a missing or duplicate ref, a route with
+  no net, an unknown net or a non-copper layer raises one `LayoutApplyError`
+  listing every problem, and nothing is written; `strict=False` skips those
+  items with a warning. New `PCBLayout.export_vias()`. Copper is also checked
+  against the board's real pad shapes (at their new positions) and its
+  `.kicad_pro` / `.kicad_dru` clearance: a trace end that lands on no pad,
+  track or via of its own net, or any trace or via too close to a pad, track or
+  via of another net, is refused, so the bridge does not write shorts or open
+  ends.
+
+- **`kct route --native-zone-clearance`** (Issue #7026). Opt-in flag that writes
+  the native zone-clearance DRU block (`zone clearance + min_thickness / 2`)
+  before the post-route fill, so the fill and pour-link oracle judge the carve
+  a `run_fill_zones(native_clearance=True)` recipe ships. The board-03
+  experiment row passes it.
+
+- **Placement-session moves now warn when they cluster heat sources** (Issue #7045). `query_move` / `apply_move` predictions include a `thermal` warning when moving a regulator, MOSFET, LED or power resistor within 10 mm of other heat sources raises the cluster's `ThermalAnalyzer` severity to WARM or worse; `query_move` recommendations add `WARNING: Heat sources clustering`.
+
+- **`PCBLayout.route()` takes `waypoints` and stubs `internal_pad` ports** (Issue #7064).
+  `route(..., waypoints=[Point, ...])` emits a start → waypoints → end polyline and
+  returns the segment list (default `None` still returns the single trace). A port
+  with `internal_pad` also gets a short pad → port stub on the route's net, so
+  neither end floats; a missing pad raises `KeyError`.
+
+- **`kct creepage --insulation` / `kct audit --hv-insulation` opt in to
+  supplementary or reinforced insulation** (Issue #7082). The default stays
+  `basic`, so results are unchanged unless the flag is passed. Reinforced steps
+  the IEC 60664-1 Table F.1 rated impulse voltage up one preferred-series value
+  before the Table F.2 clearance lookup (clause 5.2.5) and doubles the Table F.5
+  creepage (clause 6.2), so 230 V at OVC II needs 3.0 mm clearance instead of
+  1.5 mm. Supplementary uses the basic values. Both commands print the assumed
+  insulation type, and JSON provenance records it with the rule applied; the
+  reinforced rules are marked UNVERIFIED against a controlled copy of the
+  standard. Applies to `--standard iec60664` and `iec62368` and to the
+  `--voltage-map` per-pair path. Engineering aid, NOT a certification.
+
+- **Generated `.kicad_dru` files now enforce the manufacturer's maximum drill** (Issue #7132). `generate_dru()` emits an unconditional `Max Hole Size - <MFR>` rule, so `kicad-cli pcb drc` reports `drill_out_of_range` for vias and PTH/NPTH pads above `max_hole_diameter_mm`.
+
+- **`kct validate --sync` compares component values** (Issue #7150). New
+  `value_mismatch` category (severity `error`) for refs present on both
+  sides with differing non-empty values; shown as `VALUE MISMATCHES` in the
+  table and as `summary.value_mismatches` in JSON.
+
+- **`kct lib create-symbol-lib`, `create-footprint-lib` and `generate-footprint` now work** (Issue #7175). They create a real `.kicad_sym` / `.pretty` library and write generator footprints (`soic qfp qfn chip sot`, the same function as `kct footprint generate`) into it, with `--force`, `--format json` and exit code 1 on failure instead of the old "not yet implemented" exit 2. `kct estimate cost --bom bom.csv` now actually loads the CSV (shared `load_bom_csv` in `kicad_tools.schema.bom`); an unreadable or empty CSV exits 1 with the error on stderr, so `--format json` stdout stays one valid document.
+
+- **`kct export` preflight checks the board against the fab's PCBA service
+  tier** (Issue #7204). The JLCPCB profile now models both of its assembly
+  services, Economic and Standard, with limits taken from JLCPCB's assembly
+  capability page. Two new preflight rows use them. `bottom_side_in_cpl`
+  WARNs when parts are placed on the bottom side and names the service needed
+  (JLCPCB Standard PCBA: double-sided, edge rails + fiducials, >=4-day build).
+  If the board is smaller than 70x70 mm it also says to panelize.
+  `assembly_package_limits` compares chip package size and IC/BGA pin pitch
+  (read from the KiCad lib id) against the selected tier. It WARNs when only a
+  costlier tier can place a part and FAILs only when no tier at that fab can.
+  The new `--assembly-tier {auto,economic,standard}` flag (default `auto`)
+  picks the tier to judge against. `kct mfr info` lists the tiers, and the
+  design report's Assembly Notes gain a "Bottom-side parts" line.
+
+- **`kct check` flags thermal asymmetry and via drills at SMD pad edges**
+  (Issue #7220). New `thermal_asymmetry` category, on by default: a 2-pad SMD
+  R/C/L whose one terminal is connected solid to its own-layer zone fill while
+  the other reaches copper only through a thermal relief or a trace
+  (tombstoning risk), and a PTH pin connected solid to fill on two or more
+  layers (barrel-fill risk; exposed-pad thermal vias are exempt). It reads the
+  committed fill geometry and the effective connect mode (the pad's
+  `(zone_connect N)` override, now parsed as `Pad.zone_connect`, then the
+  zone's `connect_pads`). The `via_in_pad` category gains a `via_at_pad_edge`
+  finding: a same-net drill that misses the pad copper but sits closer than the
+  profile's `min_solder_mask_dam_mm` (JLCPCB 0.1 mm) to the pad's mask
+  aperture (copper grown by the pad's `solder_mask_margin`, else the board's
+  `pad_to_mask_clearance`). Both are advisory-quality warnings and appear in
+  `kct readiness`'s per-rule warning table without blocking it.
+
+- **Every sign-off command reports `verdict` and `exit_code` in JSON** (Issue #7230).
+  `kct drc` (plain and `--mfr`), `kct erc`, `kct validate --sync` and
+  `kct sch validate` `--format json` gain top-level `verdict`
+  (`pass`|`fail`|`incomplete`) and `exit_code`, computed by the same
+  `gate_exit_code()` call that decides the process exit, like `kct check`.
+  `kct audit` keeps its `verdict` (`ready`|`warning`|`not_ready`) and adds
+  `gate_verdict` (`pass`|`fail`) and `exit_code`. No exit code changes; the
+  per-command numbering is documented in the new "Sign-off exit codes" table
+  in `docs/reference/cli.md`, and `kct audit` gets its own reference section.
+
+- **`kct check` compares `project.kct` requirements to the routed board** (Issue #7292, PR-B of #7250). New
+  `spec_conformance` category: a board outline that differs from `mechanical.dimensions` (±0.1 mm), or a
+  copper-layer count that differs from `manufacturing.layers.preferred` or exceeds `layers.max`, is an
+  error; a routed trace width, via diameter or via drill below `min_trace` / `min_via` / `min_drill`, or a
+  `target_fab` that differs from the resolved tier, is a warning. Requirement keys nothing reads (schema-unknown
+  keys, `electrical.signals`, `min_space`) report the category `unknown:unread_spec_keys:<paths>`; with no
+  `project.kct` it reports `skipped:no_project_kct`. The category is not blocking-on-unknown.
+
+- **`kct readiness --known-issue` records open issues in `readiness.json`** (Issue #7261).
+  `--known-issue N:summary:kind[:rule=count,...]` (kind `defect`, `exception` or
+  `advisory`) writes a hash-bound `known_issues` list, plus the fabrication
+  tier as `manufacturer`. Entries carry forward until `--resolve-known-issue N`.
+  An open `defect` makes the board `blocked`; exceptions and advisories are
+  listed under the bundle README's "Accepted-risk waivers" and keep it ready.
+  `kct fleet status` shows `YES*` with a `known: #N` cell (or
+  `NO (known defect #N)`), and the gallery labels boards "Assembly ready · N
+  known issues" with links. Boards 00–05 now record their issues (#7220,
+  #6269, #7209, #7250).
+  `scripts/boards/refresh_readiness.py` now tolerates exactly the `kct check`
+  warnings a board's `known_issues` record (`:rule=count`), so the record
+  that discloses an issue is also the one that accepts its warnings; boards 04
+  and 05 are re-pinned through it again.
+
+- **`kct route --tighten-diffpair-gap` squeezes uncoupled diff-pair trunks
+  into their impedance band** (Issue #7344). An opt-in post-route pass (also
+  `Autorouter.apply_diffpair_gap_tightening()`) for pairs whose class
+  declares `target_diff_impedance`. Parallel P/N runs whose coupled Zdiff is
+  above the tolerance band are moved symmetrically toward each other, to the
+  gap at which `kct check`'s own coupled model hits the target (never below
+  the pair's floored intra-pair gap). The moved section is joined to the
+  original copper with 45-degree jogs, so skew is unchanged. Each edit is
+  checked for foreign clearance, pad connectivity, skew and impedance, and is
+  skipped on any failure. The pass prints one line per pair: `tightened`,
+  `in_band` or `declined:<reason>`. Off by default; without the flag,
+  routing output is unchanged.
+
+- **Diff-pair skew bumps are written as KiCad tuning patterns** (Issue #7521).
+  When the post-route skew tuner (`kct route --length-match-diffpairs`, and
+  the lattice auto-engage path) commits a bump, the routed board now also
+  gets a KiCad 10 `(generated ...)` tuning-pattern object
+  (`tuning_mode "diff_pair_skew"`). It owns the bump's off-line segments, so
+  KiCad can tell deliberate skew compensation from an accidental uncoupled
+  run. On pinned kicad-cli 10.0.6 the owned segments drop out of the
+  diff-pair uncoupled-length total and the gap-out-of-range check. The
+  partner leg opposite the bump still counts. The copper is unchanged, and
+  `kct check` figures are unchanged too (excluding bumps from kct's own
+  metric is a later step of #7521).
+
+### Changed
+
+- **`kct route` exit code 10 (UNVERIFIED) is now documented** (Issue #6291). The `kct route --help` epilog (now one shared source for the outer and worker parsers), `docs/reference/cli.md` and `docs/reference/machine-output.md` list the code a run exits with when the final DRC or stranded-pour check did not complete (`--timeout` ran out, or kicad-cli crashed, was killed or timed out, Issue #6724), and the `"unverified"` JSON verdict.
+
+- **Board 07 gains a nightly copper-safety DRC ratchet** (Issue #6738). A new
+  `board-07-copper-safety-drc` job in the scheduled Slow Tests workflow
+  regenerates board 07, runs kicad-cli DRC, and fails when
+  `clearance`/`shorting_items`/`tracks_crossing`/`hole_clearance`/
+  `copper_edge_clearance` errors exceed `.github/copper-safety-drc-floor.yml`
+  (floor 1), or when the floor file's last change raised the floor. Runs off
+  the PR path, so PR CI time is unchanged.
+
+- **Lattice router honours a net class's `preferred_layers`** (Issue #6824).
+  Planar copper on a non-preferred layer pays a soft surcharge, and a coupled
+  pair whose class prefers a layer its pads cannot reach planar (SMD pads on
+  F.Cu, preference In2.Cu) now tries the fan-via gateway on that layer before
+  the planar attempt, falling back to planar if it declines. Classes with no
+  preference route unchanged. Board 03's fresh USB_D route now uses In2.Cu but
+  does not yet meet `usb_geometry()`'s common-run and length bounds.
+
+- **Lattice diff pairs: a trunk held back for a tap chain now gets its gateway retry if the tap chain does not serve it** (Issue #6842). A single trunk with a #6535 tap-chain alternative was skipped by the #6444 fan-via gateway retry even when the tap retry never ran (e.g. `pair-leg-keepout`) or was discarded, leaving it with neither. After the tap retry the router now re-negotiates once with the skip lifted for those trunks and keeps the result only when the offered pairs couple strictly more without costing another pair a coupled segment, an unrouted connection or a class-pad shortfall. Boards where this fires may see new fan-via copper on those pairs.
+
+- **`CoupledPathfinder` no longer accepts `allow_swap_via`** (Issue #6853). The swap-via polarity-crossover move was unsound (both rails emitted coincident copper on one shared layer) and had been disabled in production since #3508; polarity swaps use the via-free asymmetric-arc move. Library callers passing `allow_swap_via=` must drop the argument.
+
+- **MCP tool schemas now reject unknown arguments** (Issue #6914). `_make_params`
+  sets `additionalProperties: false`, so a misspelled argument fails validation
+  instead of being silently dropped. A new CI test also fails when a schema
+  property is never read by its handler.
+
+- **Lattice gateway `pair-pad-attach` declines name their blocker** (Issue #6935). The
+  `gateway declined (...pad-attach)` route-log line now ends with the pad, layer and
+  check that rejected the last dogleg (e.g. `keepout plane-via-site:GND:U2.2`).
+
+- **Native evidence no longer depends on the host's KiCad library config**
+  (Issue #6962). `kct readiness`, `scripts/boards/refresh_readiness.py`, the
+  `scripts/boards/regenerate_*` scripts and every KiCad CI job now run
+  kicad-cli with a scratch `KICAD_CONFIG_HOME` holding pinned copies of the
+  stock `fp-lib-table`/`sym-lib-table` (`src/kicad_tools/data/kicad-config/10.0/`),
+  so a missing global table can no longer add `lib_footprint_issues` warnings
+  (board 03 had gained 37). kct's Docker fallback (`KCT_KICAD_DOCKER=1`) now
+  defaults to CI's pinned image digest instead of the floating
+  `kicad/kicad:10.0` tag and mounts the same tables. Native DRC reports are
+  written with a stable finding order, and the new `kct readiness
+  --checked-at ISO` fixes both `checked_at` and each report's `date`, so two
+  runs on the same toolchain produce byte-identical evidence. Check the
+  toolchain with `python -m kicad_tools.cli.kicad_toolchain --check`.
+
+- **Match-group tuning keeps partial progress and honours net-class clearances** (Issue #6969). In
+  `checker_limit` mode a group whose spread improved but is still over its limit now keeps its
+  DRC-clean meanders, reported as `improved_still_over_limit` (never as achieved); only a group
+  that did not improve is rolled back. The tuner's post-insertion clearance check no longer uses
+  the global 0.200 mm for every neighbour: each neighbouring track, via and pad is held to the
+  larger of the group's and that neighbour's net-class clearance (never below the
+  manufacturer/authored floor), the same pairwise rule KiCad applies (Issue #6979).
+
+- **Seven unused public router methods removed** (Issue #6984). Nothing in
+  kicad-tools called them: `Router.set_via_cache_enabled`,
+  `RoutingGrid.clear_corridor_preference`,
+  `RoutingGrid.has_corridor_preference`,
+  `RoutingGrid.get_corridor_statistics`,
+  `LayerStack.get_layers_adjacent_to_plane`,
+  `LayerStack.get_layers_with_reference_plane` and
+  `ViaRules.standard_6layer`. Routing output is unchanged.
+
+- **Native A\* and rip-up search radii now match the Python router**
+  (Issue #6994). Every A\* search radius -- the native trace / via / partner
+  radii, the rip-up victim scan (`find_blocking_nets`) and
+  `CoupledPathfinder` -- now uses the one exact-ceiling rule the Python router
+  already used (Issue #864), through `search_radius_cells` in Python and its
+  native twin in C++. A bare `ceil` used to add a phantom cell on float-noise
+  inputs (`DesignRules()` on a 0.1 mm grid searched 4 cells, not 3), and the
+  rip-up scan rounded to nearest and missed nets in the outer ring that had
+  blocked the route (2 cells instead of 3 on a 0.127 mm grid). Routing output
+  can change on 0.1 / 0.05 / 0.025 mm grids.
+
+- **Removed the unused `kicad_tools.drc.fixer` module** (Issue #6996). `DRCFixer`, `TraceInfo` and `ViaInfo` (a destructive trace-deleting repairer, never exported or wired in) are gone; `ClearanceRepairer` / `kct fix-drc` is the supported non-destructive path.
+
+- **Match-group tuner places meander bumps one at a time when a whole trombone is rejected** (Issue #7043). Single-ended nets whose trombone conflicts with foreign copper now keep the loops that fit (amplitude searched down to 0.2 mm, opposite side tried, spill onto further straight runs) instead of rolling back entirely. Diff-pair meanders are unchanged.
+
+- **`Project.create` builds its `.kicad_pcb` via `PCB.create`** (Issue #7047).
+  The hand-written 70-line board template is gone, so `Project.create("x")`
+  and `kct create-pcb` now write the same blank board (origin stays at (0,0),
+  2 copper layers, byte-stable output).
+
+- **Unwired GPU batch-routing kernel removed; `--batch-routing` is now a no-op** (Issue #7051). `acceleration/kernels/routing.py` (`BatchPathfinder`, placeholder `compute_batch_costs_gpu`) was never called by the router, and the flag only printed "GPU-accelerated". `--high-performance` no longer implies batch routing but keeps its other effects. Routed output is unchanged. Genuine GPU/batched routing was evaluated in #7053 (`docs/research/gpu-routing-design.md`): not worth building now.
+
+- **`kct route --region-parallel` now says when it is ignored** (Issue #7072).
+  The flag only reaches the plain negotiated path; on the escape pre-phase,
+  two-phase, multi-resolution, progressive-clearance and basic/monte-carlo/
+  evolutionary paths (including the layer/rule/combined escalation ladders) a
+  single `warning: --region-parallel ignored: ...` line is printed to stderr
+  per run. The help text and router docstrings no longer promise a 2-4x
+  speedup: region workers serialize on the grid lock and the GIL. Routed
+  output is unchanged.
+
+- **Board 03's USB_D common-run gate counts via-in-pad launches**
+  (Issue #7084). `routing_plan.usb_geometry()` measures the In2.Cu coupled
+  run inside y = 13..16.8 mm, which clipped both ends of a `jlcpcb-tier1`
+  route whose via-in-pad launches sit in the ESD and termination lands
+  (y = 11.737 / 17.419 mm). A window edge now moves out to a USB_D via only
+  when that via sits inside its net's ESD or termination land, so the tier-1
+  run measures via to via (5.13 mm against the 4.0 mm bound) while the
+  committed `jlcpcb` board still measures 4.10 mm. The exception is tied to
+  #7084 and expires on 2027-04-19. The 4.0 mm coupled bound and the length,
+  skew and MCU-launch bounds are unchanged.
+
+- **Lattice hybrid diff-pair legs are offered a via-equal leg after the
+  run** (Issue #7093). When the two single-ended legs of a #6446 hybrid
+  (coupled trunk plus per-net legs) change layers a different number of
+  times, the finished board now offers each leg its partner's layer sequence
+  (the mirrored search the uncoupled fallback already used). Every other
+  route stays a hard obstacle, so only that pair's copper can change. The
+  replacement is kept only when it passes the hybrid's leg-budget, pad-class
+  and junction checks and is no worse on both skew and length. The route
+  log gives the outcome per pair on a `Diff-pair hybrid parity (lattice)`
+  line. On the bench boards nothing is replaced yet. Board 06rf's USB3_RX2
+  (2/0 vias) only has a via-equal leg that is over the leg budget, and board
+  07rf's TMDS_D2 (0/2) only has one that adds 0.58 mm of skew. Routed copper
+  is identical to before on 06b, 06rf and 07rf, on both engines.
+
+- **Removed never-populated `new_congestion_areas` and `export_assembly.cost_estimate`** (Issue #7107).
+  `RoutingImpact.new_congestion_areas` (and its `to_dict` key) and the MCP `CostEstimate` type /
+  `AssemblyExportResult.cost_estimate` field always held an empty/`null` placeholder and are gone.
+
+- **JLCPCB CPL and BOM now include through-hole parts** (Issue #7239). JLCPCB's
+  assembly capability page (fetched 2026-10-18) lists "(SMT/Thru-hole)" for both
+  Economic and Standard PCBA, so `kct export --mfr jlcpcb` (and `jlcpcb-tier1`)
+  no longer auto-exclude THT from the CPL or list them as hand-solder items.
+  `--include-tht` stays valid for fabs whose CPL still excludes THT by default.
+  `kct readiness` lists THT parts as fab-assembled rather than hand-soldered.
+
+- **Fill repair narrows thermal spokes before forcing solid pad connections** (Issue #7295). `zones/fill_clearance.py` now walks a per-pad `(thermal_width W) (thermal_gap G)` ladder (zone values down to 0.2 mm floors) in both the size heuristic and the `starved_thermal` readback, and only falls back to `(zone_connect 2)` when no rung fits. Both terminals of a 2-pad passive share one rung, and each remaining solid override is logged with footprint, pad and reason. Reduces `thermal_asymmetry` (tombstoning risk) findings.
+
+- **Boards 06/07 recipes tighten diff-pair gaps** (Issue #7349). Board 07's `kct route` now passes `--tighten-diffpair-gap` and board 06 calls `apply_diffpair_gap_tightening()` after its repair passes. The pass's skew gate now measures the `kct check` (kicad-cli) length and bounds every squeeze against the pair's skew before the pass, so repeated squeezes can no longer make a pair's skew worse. Seed-42 re-route: board 06's `impedance` allowance is reduced from USB3_RX1+/-, USB3_TX2+/- to USB3_RX1+/-, USB3_TX2- (5 -> 3 errors, USB3_RX1+ skew 4.123 -> 3.808 mm); board 07's allowance is unchanged (MIPI_DAT1, TMDS_D1 still out of band; MIPI_DAT1 skew 1.440 -> 1.021 mm).
+- **Gap-tightening log names why a leftover run was declined** (Issue #7349). `GapTighteningResult.format_line()` now lists each declined run's `declined:<reason>` under a partly tightened pair. Board 07's `regression-fixture/net_class_map.json` is regenerated through `build_net_class_map()` (keeps the `swap_group` entries), so it carries DQS's `target_diff_impedance` and the current pair clearances.
+- **Gap tightening never gives back skew and never grows uncoupled length** (Issue #7349). Each squeeze is now bounded by the best `kct check` skew the pass has already reached, not the pair's pre-pass skew, so a later run cannot undo an earlier run's gain. When the symmetric/single-rail ladder declines a run, the pass tries unequal `balanced_*` splits (a little more on the shorter rail). These are committed only if the pair's combined P+N uncoupled length (as `diffpair_routing_continuity` measures it) does not grow and its coupled fraction does not fall below the class threshold. A squeeze no longer leaves a remainder that is written as a `zero_length_segment`, and a declined run's log line lists every squeeze tried with its reason. Seed-42 re-route: boards 06 and 07 are unchanged from the previous release. Board 07's MIPI_DAT1 and TMDS_D1 trunks sit inside the coupling window, so tightening them would add uncoupled jogs, and their four `impedance` allowance entries stay.
+
+- **`kct readiness --verify` now confirms board 04 as ready** (Issue #7355). An `exception` known issue's
+  `errors` allowance also accepts a location-less `{"rule", "item"}` identity (for `netclass_*` errors that name
+  only a net class; `--known-issue ...:!rule@kind~name`, stored as `item: "kind:name"`), alongside the located
+  `{"rule", "at"}` form. Board 04's #6269 exception now lists its 24 paid-drill via errors, re-pinned on the
+  pinned toolchain, so the verifier and the committed producer agree. An unlisted, repeated or stale identity
+  still blocks.
+
+- **Every board producer refuses a saved fill that diverges from an independent refill** (Issue #7356). `readiness_cmd.saved_vs_refilled` is now the single saved-vs-refilled rule behind `kct readiness`'s `zone_fill` gate, `refresh_readiness.py`, and the board 03/04 regeneration scripts; the latter previously only recorded the deltas.
+
+- **Synthetic-board CI gates allow known impedance findings by net, not by count** (Issue #7359). The board 06 and board 07 coverage gates now list each tolerated `impedance` error by its net plus a tracking issue, and fail when a listed finding stops occurring, so a different new finding can no longer hide behind a known one.
+
+- **Board 07 copper-safety DRC floor lowered to 0** (Issue #7367). The
+  `board-07-fresh-regen` floor in `.github/copper-safety-drc-floor.yml` was
+  left at 1 after its tracker #6736 closed, leaving one slot open for any
+  unrelated clearance or short finding.
+
+- **`known_issues` warning allowances are keyed by identity, not count** (Issue #7389).
+  `warnings` is now a sorted list of `{rule, ref, pad}` identities (`--known-issue
+  N:summary:kind:rule@pad,...`); a different warning of the same rule can no
+  longer hide behind a known one, and an identity that stops firing is flagged as
+  stale. Boards 02, 03 and 05 are migrated.
+
+- **`OpAmpBlock` now wires its parts; multi-channel `ESDProtectionBlock` anchors its ports** (Issue #7399).
+  The op-amp buffer / non-inverting / inverting topologies add the feedback,
+  input and supply wires, place the TL072 power unit (unit 2 gets no-connects)
+  and anchor `IN/OUT/VCC/GND` on real pins.
+  `ESDProtectionBlock(channels>=2)` anchors `IN*/OUT*/GND/VCC` on the array's
+  pins and raises `ValueError` when `channels` exceeds what the part provides
+  (previously silently capped at 4).
+
+- **`VoltageDividerSense` is now a ratio-sized `VoltageDivider`** (Issue
+  #7399). It subclasses `VoltageDivider`, so it builds exactly what
+  `VoltageDivider` builds and gains its ratio helpers (`get_ratio`,
+  `get_output_voltage`) and optional `filter_cap=`. It still picks R2 = 10k
+  and R1 = 10k * (ratio - 1), and still exposes `r1`/`r2` and the `R1`/`R2`
+  component keys. `create_voltage_sense` returns it as before.
+
+- **Board 06 headers J1–J3 are now LCSC-stocked parts JLCPCB assembles** (Issue #7422).
+  The Samtec TSW-102/108 headers are replaced by XFCN PZ254V-11-02P (C492401) and
+  PZ254V-11-08P (C492407), straight 2.54 mm male headers. J1–J3 are in the JLCPCB
+  BOM/CPL and `manual-assembly-bom.csv` is retired. Copper and footprints are
+  unchanged. Procurement must review the through-hole rows before ordering.
+
+- **Board 03's USB_D via-in-pad window exception now tracks #7487**
+  (Issue #7487). `USB_VIA_IN_PAD_EXCEPTION_ISSUE` points at the open
+  follow-up instead of the closed #7084. The `jlcpcb-tier1` route still
+  lands the USB_D launch vias inside the ESD and termination lands, so the
+  exception stays until it is re-ruled or removed by its 2027-04-19 expiry.
+
+- **`kct check` leaves KiCad tuning patterns out of the diff-pair
+  uncoupled length, as kicad-cli 10.0.6 does** (Issue #7521, operator ruling
+  Q16). `diffpair_uncoupled_length` drops tracks owned by a
+  `(generated ... (type tuning_pattern))` object on both sides of the pair.
+  The partner's copper opposite a skew bump therefore still counts, and the
+  finding names how much pattern copper it excluded. Under the min-only gap
+  rules kct writes, a pattern can read higher than the same bump as plain
+  copper (1.8 mm vs 1.13 mm for a 45-degree bump on a 1.8 mm base). The
+  router's skew tuner judges each bump's pattern form with this measure
+  against the uncoupled limit. A bump that would break the limit and make
+  the pair worse is rejected, never committed as plain copper. So what the
+  tuner commits reads the same in kct and pinned kicad-cli. Pairs whose only
+  bumps would raise the figure now keep their skew error, where they were
+  tuned before. Boards without patterns are measured as before.
+
+### Performance
+
+- **Coupled diff-pair search no longer floods its endpoint zones** (Issue #6826).
+  Near the start and goal pads the joint search now allows the pair's spacing
+  to stray from the target by that end's own pad-pitch difference plus one
+  cell, instead of by the whole (deliberately oversized) zone radius. On
+  Board07's TMDS_D1 replay the search needs 213,996 iterations instead of
+  402,163 (an empty grid needs 48,031 instead of 89,057), and a full Board07
+  `--differential-pairs` route now couples MIPI_CLK (1 of 7 pairs, was 0).
+  Zone radii, target spacing, the spacing floor and the via gates are
+  unchanged. Requires rebuilding the native router (`kct build-native`).
+
+- **Flag-off coupled diff-pair search gets a 1,400,000-iteration budget**
+  (Issue #6835). When no per-pair budget is configured, the coupled search
+  now gets 1,400,000 iterations per pair instead of 40,000 (700,000 guaranteed
+  per phase), per the operator ruling of 2026-10-18. This fixes 06rf USB3_RX1.
+  Pairs named `PCIE_TX`, `PCIE_RX` and `LVDS<n>` (matched by name, so any
+  board's `LVDS<n>` pairs, not only 06b's) are exempt and keep the 40,000
+  budget: the larger budget worsens their skew, and coupling `PCIE_RX` alone
+  regresses `PCIE_TX`. The table is
+  `COUPLED_FLAGOFF_PAIR_BUDGET_EXCEPTIONS` in `router/diffpair_routing.py`.
+  Explicit budgets (board configs, the re-route gate) are unaffected.
+
+- **Negotiated oscillation escape no longer burns most of a run on failed strategies** (Issue #7071).
+  Each escape strategy is now a transaction: when it fails, its routes and grid usage are
+  restored, so the next strategy starts from the iteration's real state, and
+  `escape_local_minimum` returns the live grid overflow instead of a stale value. The escape is
+  capped at 1x the median per-iteration net reroutes (counted in reroute attempts, not seconds, so
+  `--deterministic-budget --seed N` output stays byte-identical). Board 02's default route drops
+  from about 130 s to about 85 s on a shared host with an identical emitted result. Each escape
+  also prints one `Escape: ...` summary line that survives the #3942 buffering.
+
 ## [0.23.0] - 2026-10-15
 
 ### Summary
@@ -10879,6 +13593,7 @@ All blocks feature:
 - Python 3.10+
 - numpy >= 1.20
 
+[0.24.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.24.0
 [0.23.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.23.0
 [0.22.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.22.0
 [0.21.1]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.21.1

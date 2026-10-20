@@ -158,7 +158,12 @@ def pads_block_segment_grown(
     exempt: frozenset[int] | None = None,
 ) -> bool:
     """True if segment ``a-b`` enters any foreign pad keep-out on ``layer``
-    after growing the keep-out rects by ``extra``.
+    after growing the keep-out by ``extra``.
+
+    The keep-out is the pad's true outline (issue #7503) grown by
+    ``agent_radius + max(pad_extra, pad_class_extra) + extra`` -- see
+    :meth:`LatticeObstacleModel.pad_keepout_hit`; the grown rectangle is
+    only the broad phase.
 
     This is the ``segment_blocked`` pattern from :mod:`.obstacles` with the
     fat-agent twists: the inflated pad rects are grown by the pair
@@ -182,7 +187,11 @@ def pads_block_segment_grown(
             continue
         r = obstacles.pad_rects[idx]
         grown: Rect = (r[0] - extra, r[1] - extra, r[2] + extra, r[3] + extra)
-        if seg_rect_intersect(a, b, grown):
+        # Issue #7503: the grown rectangle is only the broad phase; the
+        # decision is the pad's TRUE outline (with its net-class reach), the
+        # same test the single-ended legs use, so pair and single-ended
+        # legs agree about which pad-corner corridors are legal.
+        if seg_rect_intersect(a, b, grown) and obstacles.pad_keepout_hit(idx, a, b, extra):
             return True
     return False
 
@@ -208,7 +217,8 @@ def pads_block_point_grown(
             continue
         r = obstacles.pad_rects[idx]
         grown: Rect = (r[0] - extra, r[1] - extra, r[2] + extra, r[3] + extra)
-        if pt_in_rect(point, grown):
+        # Issue #7503: rectangle broad phase, exact-outline decision.
+        if pt_in_rect(point, grown) and obstacles.pad_keepout_hit(idx, point, point, extra):
             return True
     return False
 

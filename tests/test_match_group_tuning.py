@@ -19,12 +19,14 @@ This module verifies the curator-specified mitigations of
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from kicad_tools.router.diffpair_length_tuning import MAX_INSERTS_PER_PAIR
 from kicad_tools.router.layers import Layer
+from kicad_tools.router.length import LengthTracker
 from kicad_tools.router.match_group_length import MatchGroup, MatchGroupSource
 from kicad_tools.router.match_group_tuning import (
     AMPLITUDE_BACKOFF_FACTORS,
@@ -3641,6 +3643,193 @@ class TestExactFitAmplitude:
         )
 
 
+class TestNoOvershootPastGroupMaximum:
+    """Issue #7423: a tuned member must never end past the group target.
+
+    On a host that is not 8-direction aligned the trombone's snapped frame and
+    exit dogleg change the forward travel, so the added length differs from the
+    requested one by microns and the member used to raise the group maximum.
+    """
+
+    @staticmethod
+    def _run(host_dy: float, refits: int, monkeypatch):
+        import math
+
+        from kicad_tools.router import match_group_tuning as mgt
+        from kicad_tools.router.length import LengthTracker
+
+        monkeypatch.setattr(mgt, "MAX_OVERSHOOT_REFITS", refits)
+        host = Route(
+            net=1,
+            net_name="D0",
+            segments=[
+                Segment(
+                    x1=0.0,
+                    y1=0.0,
+                    x2=12.0,
+                    y2=host_dy,
+                    width=0.2,
+                    layer=Layer.F_CU,
+                    net=1,
+                    net_name="D0",
+                )
+            ],
+        )
+        target = math.hypot(12.0, host_dy) + 1.3
+        group = _ddr_group(net_ids=[1, 2], tolerance=0.1)
+        routes = {1: host, 2: _straight_route(2, "D1", target, y=10.0)}
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            config=SerpentineConfig(amplitude=1.0, gap_factor=2.0),
+        )
+        return LengthTracker.calculate_route_length(results[1][0]) - target
+
+    def test_off_angle_host_does_not_overshoot(self, monkeypatch):
+        excess = self._run(0.7, refits=3, monkeypatch=monkeypatch)
+        assert excess <= 1e-8, f"member ended {excess * 1000:.4f}um past the target"
+
+    @pytest.mark.parametrize("angle_deg", [0.0, 5.0, 13.0, 22.5, 30.0, 58.0, 75.0, 89.0])
+    @pytest.mark.parametrize("shortfall", [0.3, 1.3])
+    def test_member_never_ends_past_target_on_any_host_angle(
+        self, angle_deg, shortfall, monkeypatch
+    ):
+        """Whatever the refit manages, the committed route is never past target."""
+        import math
+
+        from kicad_tools.router.length import LengthTracker
+
+        host_len = 20.0
+        a = math.radians(angle_deg)
+        host = Route(
+            net=1,
+            net_name="D0",
+            segments=[
+                Segment(
+                    x1=0.0,
+                    y1=0.0,
+                    x2=host_len * math.cos(a),
+                    y2=host_len * math.sin(a),
+                    width=0.2,
+                    layer=Layer.F_CU,
+                    net=1,
+                    net_name="D0",
+                )
+            ],
+        )
+        target = host_len + shortfall
+        group = _ddr_group(net_ids=[1, 2], tolerance=0.1)
+        routes = {1: host, 2: _straight_route(2, "D1", target, y=30.0)}
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            config=SerpentineConfig(amplitude=0.15, gap_factor=2.0),
+        )
+        excess = LengthTracker.calculate_route_length(results[1][0]) - target
+        assert excess <= 1e-6, f"member ended {excess:.6f}mm past the target"
+
+    @pytest.mark.parametrize("angle_deg", [0.0, 3.3, 13.0, 22.5, 45.0, 58.0])
+    @pytest.mark.parametrize("need", [0.3, 0.9, 2.0])
+    def test_per_bump_fallback_never_passes_the_need(self, angle_deg, need):
+        import math
+
+        from kicad_tools.router.length import LengthTracker
+        from kicad_tools.router.match_group_tuning import _place_bumps_per_host
+
+        a = math.radians(angle_deg)
+        host = Route(
+            net=1,
+            net_name="D0",
+            segments=[
+                Segment(
+                    x1=0.0,
+                    y1=0.0,
+                    x2=12.0 * math.cos(a),
+                    y2=12.0 * math.sin(a),
+                    width=0.2,
+                    layer=Layer.F_CU,
+                    net=1,
+                    net_name="D0",
+                )
+            ],
+        )
+        before = LengthTracker.calculate_route_length(host)
+        placed = _place_bumps_per_host(
+            host,
+            length_needed=need,
+            tolerance_mm=0.1,
+            base_config=SerpentineConfig(amplitude=1.0, gap_factor=2.0),
+            host_floor=1.0,
+            fixed_segment_ids=None,
+            other_group_routes={},
+            check=lambda segs: None,
+        )
+        if placed is None:
+            return
+        added = LengthTracker.calculate_route_length(placed) - before
+        assert added <= need + 1e-6, f"per-bump added {added:.6f}mm for a need of {need}mm"
+
+    def test_per_bump_result_past_target_is_rejected(self, monkeypatch):
+        """The per-bump fallback is gated on the measured route, not its own booking.
+
+        Force the whole-trombone attempts to fail and make the fallback return a
+        route that ends past the target; the member must be left untouched.
+        """
+        from kicad_tools.router import match_group_tuning as mgt
+        from kicad_tools.router.length import LengthTracker
+
+        def fail_trombone(self, *args, **kwargs):
+            from kicad_tools.router.optimizer.serpentine import SerpentineResult
+
+            return SerpentineResult(success=False, message="forced")
+
+        def overshooting_bumps(route, **kwargs):
+            seg = route.segments[0]
+            extra = Segment(
+                x1=seg.x2,
+                y1=seg.y2,
+                x2=seg.x2 + 5.0,
+                y2=seg.y2,
+                width=seg.width,
+                layer=seg.layer,
+                net=seg.net,
+                net_name=seg.net_name,
+            )
+            return Route(net=route.net, net_name=route.net_name, segments=[*route.segments, extra])
+
+        monkeypatch.setattr(mgt.SerpentineGenerator, "generate_trombone", fail_trombone)
+        monkeypatch.setattr(mgt, "_place_bumps_per_host", overshooting_bumps)
+        host = _straight_route(1, "D0", 12.0, y=0.0)
+        target = 13.0
+        group = _ddr_group(net_ids=[1, 2], tolerance=0.1)
+        routes = {1: host, 2: _straight_route(2, "D1", target, y=10.0)}
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            config=SerpentineConfig(amplitude=1.0, gap_factor=2.0),
+        )
+        route, result = results[1]
+        assert LengthTracker.calculate_route_length(route) - target <= 1e-8
+        assert result.inserts_applied == 0
+        assert result.reason == "overshoot"
+
+    def test_without_refit_the_overshooting_candidate_is_rejected(self, monkeypatch):
+        """With the refit off the raw trombone overshoots, so the guard rejects it.
+
+        The member is left short rather than committed past the target; the
+        refit is what lets the same host land inside the tolerance.
+        """
+        without_refit = self._run(0.7, refits=0, monkeypatch=monkeypatch)
+        assert -0.5 < without_refit < -0.1  # rejected: still short, never past
+        assert self._run(0.7, refits=3, monkeypatch=monkeypatch) > -0.1
+
+
 # =============================================================================
 # Via-count imbalance (Issue #3931)
 # =============================================================================
@@ -3806,4 +3995,497 @@ class TestViaCountImbalance:
         assert skew <= 0.5, (
             f"via-inclusive group skew should converge within tolerance, "
             f"got {skew:.4f}mm; totals={ {k: round(v, 3) for k, v in totals.items()} }"
+        )
+
+
+def _written_length(route: Route) -> float:
+    """Planar length of ``route`` as ``Segment.to_sexp`` writes it (4 dp)."""
+    import math
+    import re
+
+    total = 0.0
+    for seg in route.segments:
+        text = seg.to_sexp()
+        x1, y1 = map(float, re.search(r"\(start ([-\d.]+) ([-\d.]+)\)", text).groups())
+        x2, y2 = map(float, re.search(r"\(end ([-\d.]+) ([-\d.]+)\)", text).groups())
+        total += math.hypot(x2 - x1, y2 - y1)
+    return total
+
+
+class TestNoOvershootAsWritten:
+    """Issue #7423: ``kct check`` reads the 4 dp written copper, so the guard
+    must hold on the rounded geometry, not only on the in-memory floats."""
+
+    @staticmethod
+    def _host(angle_deg: float, length: float) -> Route:
+        import math
+
+        a = math.radians(angle_deg)
+        return Route(
+            net=1,
+            net_name="D0",
+            segments=[
+                Segment(
+                    x1=0.0,
+                    y1=0.0,
+                    x2=length * math.cos(a),
+                    y2=length * math.sin(a),
+                    width=0.2,
+                    layer=Layer.F_CU,
+                    net=1,
+                    net_name="D0",
+                )
+            ],
+        )
+
+    @pytest.mark.parametrize("angle_deg", [0.0, 3.3, 22.5, 45.0, 67.5, 90.0])
+    @pytest.mark.parametrize("need", [0.3, 0.7, 1.3, 2.0])
+    @pytest.mark.parametrize("amplitude", [0.15, 0.4, 1.0])
+    def test_refit_path_written_length_never_past_target(self, angle_deg, need, amplitude):
+        import math
+
+        host = self._host(angle_deg, 20.0)
+        # Reference member is a straight run at exactly the written target.
+        target = round(_written_length(host) + need, 4)
+        group = _ddr_group(net_ids=[1, 2], tolerance=0.1)
+        routes = {1: host, 2: _straight_route(2, "D1", target, y=30.0)}
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            config=SerpentineConfig(amplitude=amplitude, gap_factor=2.0),
+        )
+        excess = _written_length(results[1][0]) - _written_length(routes[2])
+        assert excess <= 1e-9, f"written member {excess * 1000:.3f}um past the target"
+        assert math.isfinite(excess)
+
+    @pytest.mark.parametrize("angle_deg", [0.0, 3.3, 22.5, 45.0, 67.5, 90.0])
+    @pytest.mark.parametrize("need", [0.3, 0.7, 1.3, 2.0])
+    @pytest.mark.parametrize("amplitude", [0.15, 0.4, 1.0])
+    def test_per_bump_path_written_length_never_past_need(self, angle_deg, need, amplitude):
+        from kicad_tools.router.match_group_tuning import _place_bumps_per_host
+
+        host = self._host(angle_deg, 12.0)
+        before = _written_length(host)
+        placed = _place_bumps_per_host(
+            host,
+            length_needed=need,
+            tolerance_mm=0.1,
+            base_config=SerpentineConfig(amplitude=amplitude, gap_factor=2.0),
+            host_floor=1.0,
+            fixed_segment_ids=None,
+            other_group_routes={},
+            check=lambda segs: None,
+        )
+        if placed is None:
+            return
+        # The written placement must not end past the written target, with
+        # no tolerance: the old head ended up to 0.32 um past it.
+        written_target = before + need
+        excess = _written_length(placed) - written_target
+        assert _written_length(placed) <= written_target, (
+            f"written bump placement {excess * 1e6:.3f}nm past the written target"
+        )
+
+    @staticmethod
+    def _off_angle_reference(length: float, angle_deg: float) -> Route:
+        """A ``length`` mm reference at ``angle_deg`` whose 4 dp written copper
+        is SHORTER than its in-memory length (the start x is chosen from a
+        fixed set of sub-grid offsets to make it round short)."""
+        import math
+
+        a = math.radians(angle_deg)
+
+        def build(x0: float) -> Route:
+            return Route(
+                net=2,
+                net_name="D1",
+                segments=[
+                    Segment(
+                        x1=x0,
+                        y1=-40.0,
+                        x2=x0 + length * math.cos(a),
+                        y2=-40.0 + length * math.sin(a),
+                        width=0.2,
+                        layer=Layer.F_CU,
+                        net=2,
+                        net_name="D1",
+                    )
+                ],
+            )
+
+        candidates = [build(-40.0 - k * 1e-5) for k in range(10)]
+        return min(
+            candidates, key=lambda r: _written_length(r) - LengthTracker.calculate_route_length(r)
+        )
+
+    @pytest.mark.parametrize("host_angle", [0.0, 45.0, 90.0])
+    @pytest.mark.parametrize("ref_angle", [22.5, 31.1])
+    @pytest.mark.parametrize("need", [0.3, 0.9, 2.0])
+    @pytest.mark.parametrize("amplitude", [0.15, 0.5, 1.0])
+    def test_refit_path_never_past_off_angle_reference_as_written(
+        self, host_angle, ref_angle, need, amplitude
+    ):
+        """Issue #7423: ``kct check`` compares against the reference AS
+        WRITTEN.  An off-angle reference that rounds shorter must still bound
+        the tuned member in the file (the old head ended 40 nm past it)."""
+        host = self._host(host_angle, 6.0)
+        ref = self._off_angle_reference(
+            LengthTracker.calculate_route_length(host) + need, ref_angle
+        )
+        # Precondition: the reference really does round shorter when written.
+        assert _written_length(ref) < LengthTracker.calculate_route_length(ref) - 1e-5
+        group = _ddr_group(net_ids=[1, 2], tolerance=0.1)
+        routes = {1: host, 2: ref}
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            config=SerpentineConfig(amplitude=amplitude, gap_factor=2.0),
+        )
+        tuned, result = results[1]
+        assert result.inserts_applied >= 1, result.message
+        excess = _written_length(tuned) - _written_length(ref)
+        assert _written_length(tuned) <= _written_length(ref), (
+            f"written member {excess * 1e6:.3f}nm past the written reference"
+        )
+
+
+def _seg_route(net_id: int, x0: float, y0: float, length: float, angle_deg: float) -> Route:
+    """One straight ``length`` mm segment from ``(x0, y0)`` at ``angle_deg``."""
+    import math
+
+    a = math.radians(angle_deg)
+    return Route(
+        net=net_id,
+        net_name=f"N{net_id}",
+        segments=[
+            Segment(
+                x1=x0,
+                y1=y0,
+                x2=x0 + length * math.cos(a),
+                y2=y0 + length * math.sin(a),
+                width=0.2,
+                layer=Layer.F_CU,
+                net=net_id,
+                net_name=f"N{net_id}",
+            )
+        ],
+    )
+
+
+def _short_rounding_reference(net_id: int, length: float, angle_deg: float) -> Route:
+    """An off-angle reference whose 4 dp written copper rounds SHORTER than
+    its in-memory length (start x picked from fixed sub-grid offsets)."""
+    candidates = [_seg_route(net_id, -40.0 - k * 1e-5, -40.0, length, angle_deg) for k in range(10)]
+    return min(
+        candidates, key=lambda r: _written_length(r) - LengthTracker.calculate_route_length(r)
+    )
+
+
+def _off_angle_reference_pair(length: float, angle_deg: float, dx: float) -> tuple[Route, Route]:
+    """Reference pair (nets 1, 2) at ``angle_deg``, 0.3 mm pitch, shifted by
+    a sub-grid ``dx`` so its written lane rounds differently from memory."""
+    import math
+
+    a = math.radians(angle_deg)
+    nx, ny = -math.sin(a) * 0.3, math.cos(a) * 0.3
+    return (
+        _seg_route(1, -40.0 + dx, -40.0, length, angle_deg),
+        _seg_route(2, -40.0 + dx + nx, -40.0 + ny, length, angle_deg),
+    )
+
+
+#: Float-summation tie slack (1 fm); see :func:`_assert_pair_not_past_reference`.
+_SUM_ULP_MM = 1e-12
+
+
+def _assert_pair_not_past_reference(
+    tuned_p: Route, tuned_n: Route, ref_p: Route, ref_n: Route
+) -> None:
+    """Q8 on written geometry: the tuned lane may not end past the reference
+    lane, and no tuned trace past the reference's longest trace.
+
+    The only slack is ``_SUM_ULP_MM``: the same written decimals can sum to
+    floats one ulp apart (8.9 vs 8.899999999999999), which is a tie, not an
+    overshoot -- the smallest real overshoot on the old head was ~1 nm."""
+    lane = (_written_length(tuned_p) + _written_length(tuned_n)) / 2.0
+    ref_lane = (_written_length(ref_p) + _written_length(ref_n)) / 2.0
+    assert lane <= ref_lane + _SUM_ULP_MM, (
+        f"written lane {(lane - ref_lane) * 1e6:.3f}nm past the written reference lane"
+    )
+    longest = max(_written_length(tuned_p), _written_length(tuned_n))
+    ref_longest = max(_written_length(ref_p), _written_length(ref_n))
+    assert longest <= ref_longest + _SUM_ULP_MM, (
+        f"written trace {(longest - ref_longest) * 1e6:.3f}nm past the longest "
+        "written reference trace"
+    )
+
+
+class TestNoOvershootAsWrittenMixedAndPairGroups:
+    """Issue #7423 (Q8): a member never ends past the target, measured on the
+    written copper -- for a mixed group whose default reference is a scalar,
+    and for pair lanes on every strategy (mirrored, centreline, per-leg)."""
+
+    @pytest.mark.parametrize("host_angle", [0.0, 45.0, 90.0])
+    @pytest.mark.parametrize("ref_angle", [22.5, 31.1])
+    @pytest.mark.parametrize("need", [0.3, 0.9, 2.0])
+    @pytest.mark.parametrize("amplitude", [0.15, 0.5, 1.0])
+    def test_mixed_group_default_scalar_reference_not_past_as_written(
+        self, host_angle, ref_angle, need, amplitude
+    ):
+        """No declared reference; the longest member is a scalar.  The
+        scalar sub-pass must still cap at that scalar's written length (the
+        old head dropped the source and ended up to 69.5 nm past it)."""
+        host = _seg_route(1, 0.0, 0.0, 6.0, host_angle)
+        ref = _short_rounding_reference(2, 6.0 + need, ref_angle)
+        assert _written_length(ref) < LengthTracker.calculate_route_length(ref) - 1e-5
+        group = MatchGroup(
+            name="G",
+            net_ids=[1, 2],
+            pair_ids=[(3, 4)],
+            tolerance=0.1,
+            reference_net_id=None,
+            source=MatchGroupSource.LEGACY_API,
+        )
+        routes = {
+            1: host,
+            2: ref,
+            3: _straight_route(3, "N3", 3.0, y=20.0),
+            4: _straight_route(4, "N4", 3.0, y=20.3),
+        }
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            config=SerpentineConfig(amplitude=amplitude, gap_factor=2.0),
+            diff_pair_partners={3: 4, 4: 3},
+            intra_pair_clearance_mm=0.1,
+        )
+        tuned, result = results[1]
+        assert result.inserts_applied >= 1, result.message
+        excess = _written_length(tuned) - _written_length(ref)
+        assert _written_length(tuned) <= _written_length(ref), (
+            f"written member {excess * 1e6:.3f}nm past the written reference"
+        )
+
+    @pytest.mark.parametrize("host_angle", [0.0, 90.0])
+    @pytest.mark.parametrize("ref_angle", [22.5, 31.1])
+    @pytest.mark.parametrize("need", [0.3, 0.9, 2.0])
+    @pytest.mark.parametrize("amplitude", [0.15, 0.5])
+    @pytest.mark.parametrize("dx", [0.0, 3.7e-5, 7.4e-5])
+    def test_pair_lane_not_past_written_reference_lane(
+        self, host_angle, ref_angle, need, amplitude, dx
+    ):
+        """Production pair path (``pair_fallbacks``): a coupled pair tuned by
+        centreline meanders against an off-angle reference pair (the old
+        head ended up to 38.2 nm past the written reference lane)."""
+        import math
+
+        ref_p, ref_n = _off_angle_reference_pair(8.0 + need, ref_angle, dx)
+        h = math.radians(host_angle)
+        hx, hy = -math.sin(h) * 0.3, math.cos(h) * 0.3
+        group = MatchGroup(
+            name="G",
+            net_ids=[],
+            pair_ids=[(1, 2), (3, 4)],
+            tolerance=0.1,
+            reference_net_id=None,
+            source=MatchGroupSource.LEGACY_API,
+        )
+        routes = {
+            1: ref_p,
+            2: ref_n,
+            3: _seg_route(3, 0.0, 0.0, 8.0, host_angle),
+            4: _seg_route(4, hx, hy, 8.0, host_angle),
+        }
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            intra_pair_clearance_mm=0.1,
+            config=SerpentineConfig(amplitude=amplitude, gap_factor=2.0),
+            diff_pair_partners={1: 2, 2: 1, 3: 4, 4: 3},
+            pair_fallbacks=True,
+        )
+        assert results[3][1].inserts_applied >= 1, results[3][1].message
+        _assert_pair_not_past_reference(results[3][0], results[4][0], ref_p, ref_n)
+
+    @pytest.mark.parametrize("ref_angle", [22.5, 31.1])
+    @pytest.mark.parametrize("need", [0.3, 0.9, 2.0])
+    @pytest.mark.parametrize("amplitude", [0.15, 0.5])
+    @pytest.mark.parametrize("dx", [0.0, 3.7e-5, 7.4e-5])
+    @pytest.mark.parametrize("skew", [0.0, 0.2])
+    def test_per_leg_tuning_not_past_written_reference(self, ref_angle, need, amplitude, dx, skew):
+        """Per-leg strategy: legs at right angles have neither a mirror host
+        nor a coupled span, so each leg is tuned single-ended (the old head
+        ended up to 38.2 nm past the written reference lane)."""
+        ref_p, ref_n = _off_angle_reference_pair(8.0 + need, ref_angle, dx)
+        group = MatchGroup(
+            name="G",
+            net_ids=[],
+            pair_ids=[(1, 2), (3, 4)],
+            tolerance=0.1,
+            reference_net_id=None,
+            source=MatchGroupSource.LEGACY_API,
+        )
+        routes = {
+            1: ref_p,
+            2: ref_n,
+            3: _seg_route(3, 0.0, 0.0, 8.0 + skew, 0.0),
+            4: _seg_route(4, -3.0, 2.0, 8.0 - skew, 90.0),
+        }
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            intra_pair_clearance_mm=0.1,
+            config=SerpentineConfig(amplitude=amplitude, gap_factor=2.0),
+            diff_pair_partners={1: 2, 2: 1, 3: 4, 4: 3},
+            pair_fallbacks=True,
+            pair_skew_limits_mm={(3, 4): 1.0},
+        )
+        assert results[3][1].reason == "tuned", results[3][1].message
+        _assert_pair_not_past_reference(results[3][0], results[4][0], ref_p, ref_n)
+
+    @pytest.mark.parametrize("pair_fallbacks", [False, True])
+    @pytest.mark.parametrize("ref_length", [8.30004, 8.70004, 8.90004, 9.30003, 10.00004])
+    @pytest.mark.parametrize("amplitude", [0.15, 0.3, 0.5])
+    def test_mirrored_pair_lane_not_past_written_reference(
+        self, pair_fallbacks, ref_length, amplitude
+    ):
+        """Mirrored meander (both modes): the reference pair ends 40 nm past
+        a 4 dp grid point, so it is written shorter; the mirrored N side
+        snaps to the 0.01 mm grid (the old head ended up to 10.1 um past)."""
+        group = MatchGroup(
+            name="G",
+            net_ids=[],
+            pair_ids=[(10, 11), (20, 21)],
+            tolerance=0.05,
+            source=MatchGroupSource.LEGACY_API,
+        )
+        routes = {
+            10: _straight_route(10, "P0", 8.0, y=0.0),
+            11: _straight_route(11, "N0", 8.0, y=0.5),
+            20: _straight_route(20, "P1", ref_length, y=2.5),
+            21: _straight_route(21, "N1", ref_length, y=3.0),
+        }
+        ref_p, ref_n = routes[20], routes[21]
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            intra_pair_clearance_mm=0.1,
+            config=SerpentineConfig(amplitude=amplitude, gap_factor=2.0),
+            pair_fallbacks=pair_fallbacks,
+        )
+        assert results[10][1].inserts_applied >= 1, results[10][1].message
+        _assert_pair_not_past_reference(results[10][0], results[11][0], ref_p, ref_n)
+
+
+class TestBoard07RealGeometryNeverPastReference:
+    """Issue #7423 carry-over (judge of PR #7461, finding 3): board 07 ended a
+    tuned member past the group reference (SDRAM_ADDRESS A8, 0.068 um past
+    A5) while every synthetic overshoot test passed.  This pins the real
+    copper: the SDRAM_BYTE1 tuner input from a seed-42 07m route with
+    ``length_critical`` on, reduced to DQ14 and its UDQM reference (no
+    foreign copper is needed to reproduce it).  The old head committed the
+    refit candidate when the refit loop gave up, ending DQ14 118.5 nm past
+    UDQM; the measured-route guard rejects that candidate instead."""
+
+    FIXTURE = Path(__file__).parent / "fixtures" / "board07_byte1_dq14_overshoot.json"
+
+    @classmethod
+    def _load(cls):
+        import json
+
+        from kicad_tools.router.kicad_length import KicadLengthModel, KicadStackup, LPad
+        from kicad_tools.router.primitives import Via
+
+        data = json.loads(cls.FIXTURE.read_text())
+        routes: dict[int, Route] = {}
+        pads: dict[int, list[LPad]] = {}
+        ids: dict[str, int] = {}
+        for name, net in data["nets"].items():
+            nid = net["net"]
+            ids[name] = nid
+            routes[nid] = Route(
+                net=nid,
+                net_name=name,
+                segments=[
+                    Segment(
+                        x1=x1,
+                        y1=y1,
+                        x2=x2,
+                        y2=y2,
+                        width=w,
+                        layer=Layer[layer],
+                        net=nid,
+                        net_name=name,
+                    )
+                    for x1, y1, x2, y2, w, layer in net["segments"]
+                ],
+                vias=[
+                    Via(
+                        x=x,
+                        y=y,
+                        drill=drill,
+                        diameter=dia,
+                        layers=(Layer[a], Layer[b]),
+                        net=nid,
+                        net_name=name,
+                        is_micro=micro,
+                    )
+                    for x, y, drill, dia, a, b, micro in net["vias"]
+                ],
+            )
+            pads[nid] = [
+                LPad(**{**p, "layers": frozenset(p["layers"]) if p["layers"] else None})
+                for p in net["pads"]
+            ]
+        model = KicadLengthModel(KicadStackup([tuple(s) for s in data["stackup"]]), pads)
+        return data, routes, ids, model
+
+    def test_dq14_never_ends_past_udqm_on_written_copper(self):
+        from kicad_tools.router.match_group_length import MatchGroupTracker
+
+        data, routes, ids, model = self._load()
+        dq14, udqm = ids["DQ14"], ids["UDQM"]
+        n_layers = data["num_copper_layers"]
+
+        def length(route: Route) -> float:
+            # The kicad-cli measure on the 4 dp written copper (segments and
+            # vias), i.e. exactly what ``kct check`` reads back from the file.
+            return MatchGroupTracker._measure_route_total(route, None, n_layers, length_model=model)
+
+        ref_length = length(routes[udqm])
+        # Precondition: DQ14 is far enough short of UDQM to need a meander.
+        assert ref_length - length(routes[dq14]) > data["tolerance_mm"]
+
+        group = MatchGroup(
+            name="SDRAM_BYTE1",
+            net_ids=[dq14, udqm],
+            tolerance=data["tolerance_mm"],
+            source=MatchGroupSource.EXPLICIT,
+        )
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=data["tolerance_mm"],
+            intra_group_clearance_mm=data["intra_group_clearance_mm"],
+            num_copper_layers=n_layers,
+            length_model=model,
+        )
+        tuned, result = results[dq14]
+        assert result.inserts_applied >= 1, result.message
+        excess = length(tuned) - ref_length
+        # Zero tolerance: the issue's bar is "never past the group target".
+        assert excess <= 0.0, (
+            f"DQ14 tuned {excess * 1e6:.3f} nm past the UDQM reference ({result.reason})"
         )

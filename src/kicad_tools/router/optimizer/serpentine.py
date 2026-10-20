@@ -70,6 +70,52 @@ class SerpentineConfig:
     # Issue #2648 (Epic #2556 Phase 3I): diff-pair-aware side selector.
     side: Literal["auto", "outer", "inner"] = "auto"
     outer_normal_hint: tuple[float, float] | None = None
+    # Issue #7546: 45-degree chamfer at each of a loop's four corners, as a
+    # multiple of the trace width (clamped to half the amplitude, where the
+    # leg becomes one straight 45-degree run).  ``0`` (default) is the
+    # original square U loop.  kct and pinned kicad-cli 10.0.6 read the same
+    # uncoupled length for plain bumps of any chamfer (Issue #7565 closed the
+    # square-loop divergence).  From half a trace width up a chamfered bump
+    # reads *less* uncoupled than a square one in both engines on thin
+    # traces; below that it reads more.  The skew tuner's plain-copper
+    # fallback uses ``SKEW_BUMP_CHAMFER_WIDTHS`` (0.55).
+    corner_chamfer_widths: float = 0.0
+
+    def chamfer_mm(self, width: float, amplitude: float | None = None) -> float:
+        """The corner chamfer (mm) of a loop of ``amplitude`` on a ``width`` trace."""
+        a = self.amplitude if amplitude is None else amplitude
+        if self.corner_chamfer_widths <= 0.0:
+            return 0.0
+        return min(self.corner_chamfer_widths * width, a / 2.0)
+
+    def loop_length_added(self, width: float, amplitude: float | None = None) -> float:
+        """Copper one loop adds over the host length it occupies (mm)."""
+        a = self.amplitude if amplitude is None else amplitude
+        c = self.chamfer_mm(width, a)
+        if c <= 0.0:
+            return 2 * a
+        # Two legs, each chamfer + rise + chamfer, minus the 4c they advance.
+        return 2.0 * (2.0 * c * math.sqrt(2.0) + (a - 2.0 * c)) - 4.0 * c
+
+    def loop_forward(self, width: float, amplitude: float | None = None) -> float:
+        """Host length one loop occupies, flat top and connector included (mm)."""
+        gap = self.min_spacing * self.gap_factor
+        c = self.chamfer_mm(width, amplitude)
+        if c <= 0.0:
+            return gap * 2
+        return 2.0 * gap + 4.0 * c
+
+    def amplitude_for(self, width: float, added: float) -> float:
+        """The amplitude whose loop adds ``added`` mm (inverse of loop_length_added)."""
+        if self.corner_chamfer_widths <= 0.0:
+            return added / 2.0
+        c = self.corner_chamfer_widths * width
+        k = 8.0 - 4.0 * math.sqrt(2.0)  # 2A - k*c for A >= 2c
+        a = (added + k * c) / 2.0
+        if a >= 2.0 * c:
+            return a
+        # Below 2c the leg is a single 45-degree run: adds 2A(sqrt(2) - 1).
+        return added / (2.0 * (math.sqrt(2.0) - 1.0))
 
 
 @dataclass
@@ -312,7 +358,10 @@ class SerpentineGenerator:
         # Added length per loop: 2 * amplitude + gap - gap = 2 * amplitude
         # But we also need the connecting segments, so:
         # per_loop_length = 2 * amplitude (the vertical parts)
-        length_per_loop = 2 * amplitude
+        # Issue #7546: corner chamfers shorten what a loop adds.
+        length_per_loop = self.config.loop_length_added(segment.width, amplitude)
+        loop_forward = self.config.loop_forward(segment.width, amplitude)
+        chamfer = self.config.chamfer_mm(segment.width, amplitude)
         num_loops = int(math.ceil(target_length_add / length_per_loop))
         num_loops = min(num_loops, self.config.max_iterations)
 
@@ -324,10 +373,10 @@ class SerpentineGenerator:
             )
 
         # Check if we have enough segment length for the loops
-        total_forward = num_loops * gap * 2 + gap  # Entry + loops + exit
+        total_forward = num_loops * loop_forward + gap  # Entry + loops + exit
         if total_forward > length * 0.9:  # Leave 10% margin
             # Reduce loops to fit
-            num_loops = int((length * 0.9 - gap) / (2 * gap))
+            num_loops = int((length * 0.9 - gap) / loop_forward)
             if num_loops <= 0:
                 return SerpentineResult(
                     success=False,
@@ -361,23 +410,57 @@ class SerpentineGenerator:
         # Alternate direction for each loop (gated by config -- Issue #2648).
         direction = initial_direction  # Start sign (chosen per config.side)
 
+        def emit_leg(sense: int) -> None:
+            """A chamfered leg (Issue #7546): 45-degree chamfer, rise, chamfer.
+
+            ``sense`` +1 climbs away from the host line, -1 returns to it.
+            Every piece advances along the host only in its chamfers.
+            """
+            nonlocal current_x, current_y
+            rise = amplitude - 2.0 * chamfer
+            if rise <= 1e-12:  # chamfer = amplitude / 2: one straight 45 run
+                steps = [(2.0 * chamfer, 2.0 * chamfer)]
+            else:
+                steps = [(chamfer, chamfer), (0.0, rise), (chamfer, chamfer)]
+            for along, up in steps:
+                if along <= 0.0 and up <= 1e-12:
+                    continue
+                nx = current_x + ux * along + px * up * direction * sense
+                ny = current_y + uy * along + py * up * direction * sense
+                new_segments.append(
+                    Segment(
+                        x1=current_x,
+                        y1=current_y,
+                        x2=nx,
+                        y2=ny,
+                        width=segment.width,
+                        layer=segment.layer,
+                        net=segment.net,
+                        net_name=segment.net_name,
+                    )
+                )
+                current_x, current_y = nx, ny
+
         for loop in range(num_loops):
             # 1. Go perpendicular (up or down)
-            next_x = current_x + px * amplitude * direction
-            next_y = current_y + py * amplitude * direction
-            new_segments.append(
-                Segment(
-                    x1=current_x,
-                    y1=current_y,
-                    x2=next_x,
-                    y2=next_y,
-                    width=segment.width,
-                    layer=segment.layer,
-                    net=segment.net,
-                    net_name=segment.net_name,
+            if chamfer > 0.0:
+                emit_leg(+1)
+            else:
+                next_x = current_x + px * amplitude * direction
+                next_y = current_y + py * amplitude * direction
+                new_segments.append(
+                    Segment(
+                        x1=current_x,
+                        y1=current_y,
+                        x2=next_x,
+                        y2=next_y,
+                        width=segment.width,
+                        layer=segment.layer,
+                        net=segment.net,
+                        net_name=segment.net_name,
+                    )
                 )
-            )
-            current_x, current_y = next_x, next_y
+                current_x, current_y = next_x, next_y
 
             # 2. Go forward (along original direction)
             next_x = current_x + ux * gap
@@ -397,21 +480,24 @@ class SerpentineGenerator:
             current_x, current_y = next_x, next_y
 
             # 3. Go perpendicular back (down or up)
-            next_x = current_x - px * amplitude * direction
-            next_y = current_y - py * amplitude * direction
-            new_segments.append(
-                Segment(
-                    x1=current_x,
-                    y1=current_y,
-                    x2=next_x,
-                    y2=next_y,
-                    width=segment.width,
-                    layer=segment.layer,
-                    net=segment.net,
-                    net_name=segment.net_name,
+            if chamfer > 0.0:
+                emit_leg(-1)
+            else:
+                next_x = current_x - px * amplitude * direction
+                next_y = current_y - py * amplitude * direction
+                new_segments.append(
+                    Segment(
+                        x1=current_x,
+                        y1=current_y,
+                        x2=next_x,
+                        y2=next_y,
+                        width=segment.width,
+                        layer=segment.layer,
+                        net=segment.net,
+                        net_name=segment.net_name,
+                    )
                 )
-            )
-            current_x, current_y = next_x, next_y
+                current_x, current_y = next_x, next_y
 
             # 4. Go forward again (short connection to next loop)
             if loop < num_loops - 1:

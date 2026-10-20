@@ -73,16 +73,7 @@ CHAMPION_EPIC_STANDDOWN="$ROLE_DIR/champion-epic-standdown.md"
 RESERVED_TOKEN='champion:epic-verdict:body-'
 UMBRELLA_TOKEN='champion:epic-tracking-umbrella:body-'
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-NC='\033[0m'
-
-TESTS_RUN=0
-TESTS_PASSED=0
-TESTS_FAILED=0
-
-pass() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1)); echo -e "  ${GREEN}PASS${NC}: $1"; }
-fail() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1)); echo -e "  ${RED}FAIL${NC}: $1"; }
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
 # Emit "<section heading>|<line number>|<line text>" for every line that POSTS
 # the reserved marker -- i.e. a line carrying the marker token (literal or via

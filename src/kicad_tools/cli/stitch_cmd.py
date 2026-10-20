@@ -1068,7 +1068,9 @@ def find_smd_pad_bboxes_on_nets(
     return bboxes
 
 
-def find_all_pad_bboxes(sexp: SExp, exclude_nets: set[int] | None = None) -> list[PadBBox]:
+def find_all_pad_bboxes(
+    sexp: SExp, exclude_nets: set[int] | None = None, smd_only: bool = False
+) -> list[PadBBox]:
     """Return AABBs for ALL pads, optionally excluding specific nets.
 
     Issue #3433: rectangle-aware clearance source for the straight
@@ -1090,6 +1092,8 @@ def find_all_pad_bboxes(sexp: SExp, exclude_nets: set[int] | None = None) -> lis
     Args:
         sexp: PCB S-expression.
         exclude_nets: Net numbers to exclude (e.g., the stitched nets).
+        smd_only: Keep only ``smd`` pads (Issue #7322: the mask-dam zone
+            applies to SMD pads, not through-hole annuli).
 
     Issue #6683: each entry also carries the pad ``shape`` and its
     unrotated bounding radius ``max(w, h) / 2`` as sixth and seventh
@@ -1131,6 +1135,8 @@ def find_all_pad_bboxes(sexp: SExp, exclude_nets: set[int] | None = None) -> lis
             # Issue #5785: a net-less copper pad is still an obstacle.
             net_num = _obstacle_pad_net_num(pad, name_to_num)
             if net_num is None or net_num in exclude_nets:
+                continue
+            if smd_only and pad.get_string(1) != "smd":
                 continue
 
             pad_at = pad.find_child("at")
@@ -1365,6 +1371,50 @@ def _pad_conflict(
         if _pad_copper_gap(x1, y1, x2, y2, bbox) < required - 1e-6:
             return True
     return False
+
+
+class PadEdgeGuard:
+    """Mask-dam zone test for stitch via sites (Issue #7322).
+
+    Holds the AABBs of every SMD pad (any net) and the fab's mask-dam
+    ``floor_mm``.  :meth:`blocks` is True when a drill at ``(x, y)`` would sit
+    in the dam zone of one -- the same
+    :func:`~kicad_tools.router.via_in_pad_eligibility.via_drill_at_pad_edge`
+    predicate the router's A* uses (#7296), fed the shape-aware copper gap of
+    :func:`_pad_copper_gap`.  Reports ``via_at_pad_edge`` in ``kct check``.
+    A floor <= 0 disables it.
+    """
+
+    def __init__(self, smd_pad_bboxes: list[PadBBox], floor_mm: float) -> None:
+        self.floor_mm = float(floor_mm or 0.0)
+        self.bboxes = smd_pad_bboxes if self.floor_mm > 0.0 else []
+
+    def blocks(self, x: float, y: float, drill_mm: float) -> bool:
+        if not self.bboxes or drill_mm <= 0.0:
+            return False
+        from kicad_tools.router.via_in_pad_eligibility import via_drill_at_pad_edge
+
+        reach = drill_mm / 2.0 + self.floor_mm
+        for bbox in self.bboxes:
+            # Cheap reject: farther than the zone from the pad's bounding box.
+            if (
+                x < bbox[0] - reach
+                or x > bbox[2] + reach
+                or y < bbox[1] - reach
+                or y > bbox[3] + reach
+            ):
+                continue
+            gap = _pad_copper_gap(x, y, x, y, bbox)
+            if via_drill_at_pad_edge(gap, drill_mm, self.floor_mm):
+                return True
+        return False
+
+
+def build_pad_edge_guard(sexp: SExp, floor_mm: float) -> PadEdgeGuard | None:
+    """A :class:`PadEdgeGuard` over the board's SMD pads; ``None`` when off."""
+    if not floor_mm or floor_mm <= 0.0:
+        return None
+    return PadEdgeGuard(find_all_pad_bboxes(sexp, smd_only=True), floor_mm)
 
 
 def _via_drill_overlaps_pad_bbox(
@@ -2304,6 +2354,7 @@ def calculate_via_stub(
     other_net_track_index: TrackSpatialIndex[TrackSegment] | None = None,
     preferred_positions: Sequence[tuple[float, float]] = (),
     dogleg_variants: Sequence[bool] = (False, True),
+    pad_edge_guard: PadEdgeGuard | None = None,
 ) -> tuple[float, float, tuple[float, float] | None] | None:
     """Calculate a valid via placement position near the pad.
 
@@ -2538,6 +2589,10 @@ def calculate_via_stub(
             if conflict:
                 continue
 
+            # Issue #7322: mask-dam zone of any SMD pad (``via_at_pad_edge``).
+            if pad_edge_guard is not None and pad_edge_guard.blocks(via_x, via_y, via_drill):
+                continue
+
             # Issue #3855: drill hole-to-hole guard.  The checks above use
             # COPPER geometry; they do not enforce the fab's drill-to-drill
             # minimum.  A stitch via dropped within ``min_hole_to_hole``
@@ -2753,6 +2808,7 @@ def calculate_dogleg_via_position(
     same_net_fill_layer: str | None = None,
     other_net_track_index: TrackSpatialIndex[TrackSegment] | None = None,
     other_net_pad_bboxes: list[PadBBox] | None = None,
+    pad_edge_guard: PadEdgeGuard | None = None,
 ) -> tuple[float, float, float, float] | None:
     """Calculate a dog-leg (L-shaped) via placement for fine-pitch components.
 
@@ -2981,6 +3037,12 @@ def calculate_dogleg_via_position(
                         via_radius + clearance + hole_extra,
                         other_net_pads,
                         other_net_pad_bboxes,
+                    ):
+                        continue
+
+                    # Issue #7322: mask-dam zone of any SMD pad.
+                    if pad_edge_guard is not None and pad_edge_guard.blocks(
+                        via_x, via_y, via_drill
                     ):
                         continue
 
@@ -3228,6 +3290,7 @@ def calculate_extended_escape_position(
     same_net_fill_layer: str | None = None,
     other_net_track_index: TrackSpatialIndex[TrackSegment] | None = None,
     other_net_pad_bboxes: list[PadBBox] | None = None,
+    pad_edge_guard: PadEdgeGuard | None = None,
 ) -> tuple[float, float, list[tuple[float, float]]] | None:
     """Calculate an extended escape route for pads in dense IC pin fields.
 
@@ -3398,6 +3461,10 @@ def calculate_extended_escape_position(
             other_net_pads,
             other_net_pad_bboxes,
         ):
+            return False
+
+        # Issue #7322: mask-dam zone of any SMD pad (``via_at_pad_edge``).
+        if pad_edge_guard is not None and pad_edge_guard.blocks(vx, vy, via_drill):
             return False
 
         # Issue #4177: drill hole-to-hole guard.  The checks above use
@@ -5096,6 +5163,7 @@ def run_thermal_stitch(
     target_layer: str | None = None,
     dry_run: bool = False,
     min_hole_to_hole: float = MIN_HOLE_TO_HOLE_CLEARANCE,
+    pad_edge_gap: float = 0.0,
 ) -> StitchResult:
     """Place thermal vias under / around MOSFET heat-sink pads.
 
@@ -5172,6 +5240,8 @@ def run_thermal_stitch(
     other_net_tracks = find_all_track_segments(sexp, exclude_nets=target_net_nums)
     other_net_vias = find_all_board_vias(sexp, exclude_nets=target_net_nums)
     other_net_pads = find_all_pads(sexp, exclude_nets=target_net_nums)
+    # Issue #7322: mask-dam zone guard shared by every via-site check.
+    pad_edge_guard = build_pad_edge_guard(sexp, pad_edge_gap)
     other_net_filled_polys = find_all_filled_polygons(sexp, exclude_nets=target_net_nums)
     # Issue #4432: same-net zone FILL geometry for the fill-containment gate.
     same_net_filled_polys = find_same_net_filled_polygons(sexp, target_net_nums)
@@ -5358,6 +5428,10 @@ def run_thermal_stitch(
             ):
                 continue
 
+            # Issue #7322: mask-dam zone of any SMD pad.
+            if pad_edge_guard is not None and pad_edge_guard.blocks(vx, vy, drill):
+                continue
+
             # Must land on same-net copper with proper margin.
             #
             # Issue #4432: prefer the refilled FILL geometry over the zone
@@ -5427,6 +5501,7 @@ def run_blanket_stitch(
     target_layer: str | None = None,
     dry_run: bool = False,
     min_hole_to_hole: float = MIN_HOLE_TO_HOLE_CLEARANCE,
+    pad_edge_gap: float = 0.0,
 ) -> StitchResult:
     """Run blanket (grid-based) stitching on a PCB.
 
@@ -5466,6 +5541,8 @@ def run_blanket_stitch(
     other_net_tracks = find_all_track_segments(sexp, exclude_nets=target_net_nums)
     other_net_vias = find_all_board_vias(sexp, exclude_nets=target_net_nums)
     other_net_pads = find_all_pads(sexp, exclude_nets=target_net_nums)
+    # Issue #7322: mask-dam zone guard shared by every via-site check.
+    pad_edge_guard = build_pad_edge_guard(sexp, pad_edge_gap)
     other_net_filled_polys = find_all_filled_polygons(sexp, exclude_nets=target_net_nums)
     # Issue #4432: same-net zone FILL geometry.  Blanket vias are seeded from
     # the fill (not the zone outline) so grid points never land in a keepout
@@ -5607,6 +5684,10 @@ def run_blanket_stitch(
                     hole_to_copper_clearance=KICAD_HOLE_TO_COPPER_CLEARANCE,
                     min_hole_to_hole=min_hole_to_hole,
                 ):
+                    continue
+
+                # Issue #7322: mask-dam zone of any SMD pad.
+                if pad_edge_guard is not None and pad_edge_guard.blocks(gx, gy, drill):
                     continue
 
                 # Check against same-net pads (avoid placing via on a pad)
@@ -5758,6 +5839,7 @@ def run_stitch(
     preferred_sites: Mapping[str, Sequence[tuple[float, float]]] | None = None,
     avoid_sites: Mapping[str, Sequence[tuple[float, float]]] | None = None,
     min_hole_to_hole: float = MIN_HOLE_TO_HOLE_CLEARANCE,
+    pad_edge_gap: float = 0.0,
 ) -> StitchResult:
     """Run the stitching operation on a PCB.
 
@@ -5912,6 +5994,8 @@ def run_stitch(
     other_net_tracks = find_all_track_segments(sexp, exclude_nets=net_numbers)
     other_net_vias = find_all_board_vias(sexp, exclude_nets=net_numbers)
     other_net_pads = find_all_pads(sexp, exclude_nets=net_numbers)
+    # Issue #7322: mask-dam zone guard shared by every via-site check.
+    pad_edge_guard = build_pad_edge_guard(sexp, pad_edge_gap)
     # Issue #5785: a caller that refills afterwards lets foreign fills yield.
     other_net_filled_polys = (
         [] if foreign_fills_yield else find_all_filled_polygons(sexp, exclude_nets=net_numbers)
@@ -6093,6 +6177,7 @@ def run_stitch(
             same_net_filled_polygons=fill_gate,
             same_net_fill_layer=terminus_layer,
             other_net_track_index=eff_track_index,
+            pad_edge_guard=pad_edge_guard,
             # Issue #6401: the site ``kct route`` reserved for this pad.
             preferred_positions=(preferred_sites or {}).get(
                 f"{pad.reference}.{pad.pad_number}", ()
@@ -6129,6 +6214,7 @@ def run_stitch(
                 same_net_filled_polygons=fill_gate,
                 same_net_fill_layer=terminus_layer,
                 other_net_track_index=eff_track_index,
+                pad_edge_guard=pad_edge_guard,
             )
 
             if dogleg_pos is None:
@@ -6153,6 +6239,7 @@ def run_stitch(
                     same_net_filled_polygons=fill_gate,
                     same_net_fill_layer=terminus_layer,
                     other_net_track_index=eff_track_index,
+                    pad_edge_guard=pad_edge_guard,
                 )
 
                 if extended_pos is None:
@@ -6177,6 +6264,7 @@ def run_stitch(
                             same_net_filled_polygons=fill_gate,
                             same_net_fill_layer=terminus_layer,
                             other_net_track_index=eff_track_index,
+                            pad_edge_guard=pad_edge_guard,
                         )
                         micro_pos, micro_corner_pos = _split_via_stub(micro_stub)
                         if micro_corner_pos is not None:
@@ -6201,6 +6289,7 @@ def run_stitch(
                                 same_net_filled_polygons=fill_gate,
                                 same_net_fill_layer=terminus_layer,
                                 other_net_track_index=eff_track_index,
+                                pad_edge_guard=pad_edge_guard,
                             )
                             if micro_dogleg is not None:
                                 # Use micro dogleg
@@ -6224,6 +6313,7 @@ def run_stitch(
                                 same_net_filled_polygons=fill_gate,
                                 same_net_fill_layer=terminus_layer,
                                 other_net_track_index=eff_track_index,
+                                pad_edge_guard=pad_edge_guard,
                             )
                             if micro_extended is not None:
                                 return (None, None, micro_extended, True)
@@ -7506,10 +7596,16 @@ def _run_main(args: argparse.Namespace, as_json: bool) -> tuple[int, dict | None
     drill = args.drill
     manufacturer: dict | None = None
     min_h2h = MIN_HOLE_TO_HOLE_CLEARANCE
+    # Issue #7322: the fab's mask-dam floor, the same value the router reads
+    # for ``DesignRules.min_via_pad_edge_gap``; 0 (off) without ``--mfr``.
+    pad_edge_gap = 0.0
     if args.mfr is not None:
         try:
             detected_layers = _count_copper_layers(pcb_path)
             min_h2h = _resolve_mfr_min_hole_to_hole(args.mfr, detected_layers, args.copper)
+            pad_edge_gap = float(
+                _resolve_mfr_rules(args.mfr, detected_layers, args.copper).min_solder_mask_dam_mm
+            )
             mfr_via_size, mfr_drill = _resolve_mfr_via_dimensions(
                 args.mfr, detected_layers, args.copper
             )
@@ -7611,6 +7707,7 @@ def _run_main(args: argparse.Namespace, as_json: bool) -> tuple[int, dict | None
                 target_layer=args.target_layer,
                 dry_run=args.dry_run,
                 min_hole_to_hole=min_h2h,
+                pad_edge_gap=pad_edge_gap,
             )
         elif args.blanket:
             result = run_blanket_stitch(
@@ -7623,6 +7720,7 @@ def _run_main(args: argparse.Namespace, as_json: bool) -> tuple[int, dict | None
                 target_layer=args.target_layer,
                 dry_run=args.dry_run,
                 min_hole_to_hole=min_h2h,
+                pad_edge_gap=pad_edge_gap,
             )
         else:
             result = run_stitch(
@@ -7641,6 +7739,7 @@ def _run_main(args: argparse.Namespace, as_json: bool) -> tuple[int, dict | None
                 micro_via_drill=args.micro_via_drill,
                 avoid_pad_overlap=args.avoid_pad_overlap,
                 min_hole_to_hole=min_h2h,
+                pad_edge_gap=pad_edge_gap,
             )
 
         if not as_json:

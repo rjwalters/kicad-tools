@@ -57,8 +57,9 @@ class BOMFormatter(ABC):
         """Filter items based on config.
 
         Always drops virtual items -- power symbols (``power:GND``,
-        ``kicad_tools_pwr:VIN`` synthesized rails, and any ``#PWR``
-        reference) and explicit "exclude from BOM" symbols (``in_bom=
+        ``kicad_tools_pwr:VIN`` synthesized rails, any library symbol
+        carrying KiCad's ``(power)`` flag, and any ``#`` reference such as
+        ``#PWR``/``#FLG``; see #7615) and explicit "exclude from BOM" symbols (``in_bom=
         False``). These are schematic-only labels that don't represent
         a placed footprint, so they must not appear in the BOM CSV or
         the JLCPCB pre-flight will (correctly) flag a BOM/PCB mismatch.

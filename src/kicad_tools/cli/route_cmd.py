@@ -1738,7 +1738,7 @@ def _write_routed_pcb(
     tmp_path.write_text(output_content)
     # fsync the file so a crash between write and rename does not leave
     # a partial-content tmp file masquerading as the routed PCB.
-    with open(tmp_path, "rb") as f:
+    with open(tmp_path, "r+b") as f:
         os.fsync(f.fileno())
     os.replace(tmp_path, output_path)
     from .route_receipt import record_publication
@@ -3957,7 +3957,7 @@ def _save_partial_results() -> bool:
             # ``<path>.write_text(<content variable>)`` shape.
             tmp_path = save_path.with_suffix(save_path.suffix + ".tmp")
             tmp_path.write_text(output_content)
-            with open(tmp_path, "rb") as f:
+            with open(tmp_path, "r+b") as f:
                 os.fsync(f.fileno())
             os.replace(tmp_path, save_path)
             from .route_receipt import record_publication
@@ -7774,6 +7774,27 @@ def _apply_plane_via_reservation(
     if getattr(args, "no_plane_via_reservation", False):
         return
     names = set(getattr(args, "_auto_skipped_net_names", None) or ())
+    # Issue #7569 (opt-in ``--reserve-skipped-plane-vias``): a power pour named
+    # in an explicit ``--skip-nets`` is not "auto-skipped"
+    # (``auto_skip_pour_nets`` reports only nets it added), yet it is
+    # connected after routing exactly the same way and needs the same via
+    # site.  Board 07's tighter DDR routing took the only site beside U1.36
+    # (+1V2) without it.  Ground nets stay out (their pads have many stitching
+    # sites, and reserving one per pad reshaped board 07's +1V8 pour);
+    # ``--nets`` route-only mode inverts ``skip_nets`` into every
+    # non-requested net, so it is not pour intent and is left alone.
+    if (
+        getattr(args, "reserve_skipped_plane_vias", False)
+        and not getattr(args, "_route_only_nets", None)
+        and getattr(args, "skip_nets", None)
+    ):
+        from kicad_tools.cli.stitch_cmd import _is_ground_net
+
+        names |= {
+            n
+            for n in (s.strip() for s in str(args.skip_nets).split(","))
+            if n and not _is_ground_net(n)
+        }
     if not names:
         return
     disposition = getattr(args, "_placement_disposition", None)
@@ -7800,6 +7821,10 @@ def _apply_plane_via_reservation(
             # Issue #6589: keep foreign vias / plane-layer tracks outside the
             # pour's fill pullback, so the pour still covers each site.
             plane_fills=plane_fills_from_pcb(pcb, nets),
+            # Issue #7573: opt-in -- also serve pour-only 2-pad parts.
+            min_pour_footprint_pads=(
+                2 if getattr(args, "reserve_pour_only_passives", False) else None
+            ),
         )
     except Exception as exc:  # advisory: never fail a route over a reservation
         logger.warning("Plane-via reservation skipped: %s", exc)
@@ -8494,6 +8519,22 @@ def _audited_trace_copper(router: "Autorouter", *, id_to_name=None) -> "list[Rou
     return routed + _preserved_trace_copper(router, routed=routed, id_to_name=id_to_name)
 
 
+def _print_pair_via_parity_summary(router: "Autorouter", *, quiet: bool = False) -> None:
+    """Print the end-of-run ``Pair Via-Parity Failures`` block (#7425, #7093 AC1)."""
+    failures = getattr(router, "pair_via_parity_failures", None)
+    if not failures or quiet:
+        return
+    print(f"\n--- Pair Via-Parity Failures ({len(failures)}) ---")
+    for f in failures:
+        print(
+            f"  {f.p_name}/{f.n_name}: {f.p_name} {f.vias_p} via(s), {f.n_name} {f.vias_n} via(s)"
+        )
+    print(
+        "  (reported only; exit status unchanged. `kct check` flags these as "
+        "diffpair_uncoupled_length)"
+    )
+
+
 def _preserved_trace_copper(
     router: "Autorouter", *, routed: "list[Route]", id_to_name=None
 ) -> "list[Route]":
@@ -8959,6 +9000,10 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
             net_class_map=_pour_closer_net_class_map(router, args),
             # Issue #6401: weld at the via sites reserved before routing.
             preferred_sites=_reserved_plane_via_sites(args),
+            # Issue #7602: weld vias keep the router's mask-dam floor (#7322).
+            pad_edge_gap=float(
+                getattr(getattr(router, "rules", None), "min_via_pad_edge_gap", 0.0) or 0.0
+            ),
         )
         if not quiet:
             print("\n--- KiCad Oracle Completion (pour nets) ---")
@@ -12344,6 +12389,10 @@ def route_with_layer_escalation(
         quiet=quiet,
     )
 
+    # Issue #7377: --stitch-power-planes runs on every tail, after the save
+    # and before the zone fill (same position as the single-attempt path).
+    _run_post_save_stitching(args, output_path, quiet=quiet)
+
     # Fill copper-pour zones now that traces exist (issue #2516).
     # Must run BEFORE DRC so the DRC sees filled zones rather than bare
     # zone outlines and does not flag zone-to-trace clearance against
@@ -12520,6 +12569,16 @@ def route_with_layer_escalation(
         # ``nets_routed`` / ``nets_to_route`` / ``overflow`` to construct
         # ``RoutingResultMetrics`` and call ``decide_escalation``.
         args._last_layer_result = final_result
+
+    # Issue #7377: pair via-parity summary + --export-failed-nets on every tail.
+    _run_post_verdict_reports(
+        args,
+        final_result.router,
+        final_result.net_map,
+        all_nets_routed=final_result.nets_routed == final_result.nets_to_route,
+        nets_to_route_ids=_final_multi_pad_ids,
+        quiet=quiet,
+    )
 
     # Issue #6376: post-save connectivity failure exits 6 in every flow
     # (any disconnect under --strict; a counted-connected net without it).
@@ -13309,6 +13368,10 @@ def route_with_rule_relaxation(
         quiet=quiet,
     )
 
+    # Issue #7377: --stitch-power-planes runs on every tail, after the save
+    # and before the zone fill (same position as the single-attempt path).
+    _run_post_save_stitching(args, output_path, quiet=quiet)
+
     # Fill copper-pour zones now that traces exist (issue #2516).
     if final_result.nets_routed > 0:
         _fill_zones_after_route(output_path, quiet=quiet, router=final_result.router, args=args)
@@ -13466,6 +13529,16 @@ def route_with_rule_relaxation(
                 # Issue #4979: inherited-only findings (any newly created
                 # ones already replaced the banner above).
                 _print_layer_intent_addendum(_layer_intent)
+
+    # Issue #7377: pair via-parity summary + --export-failed-nets on every tail.
+    _run_post_verdict_reports(
+        args,
+        final_result.router,
+        final_result.net_map,
+        all_nets_routed=final_result.nets_routed == final_result.nets_to_route,
+        nets_to_route_ids=_final_multi_pad_ids,
+        quiet=quiet,
+    )
 
     # Issue #6376: post-save connectivity failure exits 6 in every flow
     # (any disconnect under --strict; a counted-connected net without it).
@@ -15845,6 +15918,10 @@ def route_with_combined_escalation(
         quiet=quiet,
     )
 
+    # Issue #7377: --stitch-power-planes runs on every tail, after the save
+    # and before the zone fill (same position as the single-attempt path).
+    _run_post_save_stitching(args, output_path, quiet=quiet)
+
     # Fill copper-pour zones now that traces exist (issue #2516).
     if final_result.nets_routed > 0:
         _fill_zones_after_route(output_path, quiet=quiet, router=final_result.router, args=args)
@@ -16009,6 +16086,16 @@ def route_with_combined_escalation(
                 # Issue #4979: inherited-only findings (any newly created
                 # ones already replaced the banner above).
                 _print_layer_intent_addendum(_layer_intent)
+
+    # Issue #7377: pair via-parity summary + --export-failed-nets on every tail.
+    _run_post_verdict_reports(
+        args,
+        final_result.router,
+        final_result.net_map,
+        all_nets_routed=final_result.nets_routed == final_result.nets_to_route,
+        nets_to_route_ids=_final_multi_pad_ids,
+        quiet=quiet,
+    )
 
     # Issue #6376: post-save connectivity failure exits 6 in every flow
     # (any disconnect under --strict; a counted-connected net without it).
@@ -16234,6 +16321,131 @@ def _warn_region_parallel_ignored(args, path: str) -> None:
         f"warning: --region-parallel ignored: the {path} path does not support region parallelism",
         file=sys.stderr,
         flush=True,
+    )
+
+
+def _warn_escalation_flags_ignored(args) -> None:
+    """Warn once per run that strategy-selecting flags are ignored by the escalation ladders (#7377).
+
+    ``--progressive-clearance`` and ``--bus-routing`` pick the routing
+    *strategy*, and only the single-attempt path has the branch that honours
+    them.  The escalation ladders (layer / rule-relaxation / combined, and the
+    mfr-tier and size wrappers around them) never read either flag, so without
+    this warning the run silently behaves as if it was not passed.  Stderr, so
+    ``--format json`` stdout is untouched; guarded by a flag on ``args`` so the
+    wrappers' repeated ladder entries do not repeat it.
+    """
+    if getattr(args, "_escalation_flags_warned", False):
+        return
+    ignored = [
+        flag
+        for flag, attr in (
+            ("--progressive-clearance", "progressive_clearance"),
+            ("--bus-routing", "bus_routing"),
+        )
+        if getattr(args, attr, False)
+    ]
+    if not ignored:
+        return
+    with contextlib.suppress(AttributeError):  # frozen namespace
+        args._escalation_flags_warned = True
+    print(
+        f"warning: {', '.join(ignored)} ignored: the escalation ladders "
+        "(--auto-layers / --adaptive-rules / --auto-mfr-tier / --auto-pcb-size) "
+        "do not support it; re-run with --no-auto-layers to use it",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _run_post_save_stitching(args, output_path: Path, *, quiet: bool = False):
+    """Run ``--stitch-power-planes`` on the saved board; shared by every tail (#7377).
+
+    Must run after the routed board is saved and verified, and before the
+    copper-pour zone fill so the fill and DRC see the stitching vias.  Returns
+    the ``run_stitch`` result, or ``None`` when the flag is off, ``--dry-run``
+    is set, or the board has no plane nets.
+    """
+    if not getattr(args, "stitch_power_planes", False) or args.dry_run:
+        return None
+
+    from kicad_tools.cli.stitch_cmd import find_all_plane_nets, run_stitch
+    from kicad_tools.core.sexp_file import load_pcb as load_stitch_pcb
+
+    if not quiet:
+        print("\n--- Stitching Power Planes ---")
+
+    # Load the saved PCB to find plane nets
+    plane_nets = find_all_plane_nets(load_stitch_pcb(output_path))
+    if not plane_nets:
+        if not quiet:
+            print("  No power plane nets found (no zones with assigned nets)")
+        return None
+
+    net_names = list(plane_nets.keys())
+    if not quiet:
+        print(f"  Found {len(net_names)} power plane nets: {', '.join(sorted(net_names))}")
+
+    stitch_result = run_stitch(
+        pcb_path=output_path,
+        net_names=net_names,
+        via_size=args.via_diameter,  # Use same via size as routing
+        drill=args.via_drill,
+        clearance=args.clearance,
+        dry_run=False,
+    )
+
+    if not quiet:
+        if stitch_result.vias_added:
+            print(f"  Added {len(stitch_result.vias_added)} stitching vias")
+        else:
+            print("  No stitching vias needed (all pads already connected)")
+    return stitch_result
+
+
+def _export_failed_nets_if_requested(
+    args,
+    router: "Autorouter",
+    net_map: dict[str, int],
+    *,
+    all_nets_routed: bool,
+    nets_to_route_ids: set[int] | None,
+    quiet: bool = False,
+) -> None:
+    """Write the ``--export-failed-nets`` file when requested and nets failed (#7377)."""
+    if getattr(args, "export_failed_nets", None) and not all_nets_routed:
+        _export_failed_nets(
+            router,
+            net_map,
+            args.export_failed_nets,
+            quiet=quiet,
+            nets_to_route_ids=nets_to_route_ids,
+        )
+
+
+def _run_post_verdict_reports(
+    args,
+    router: "Autorouter",
+    net_map: dict[str, int],
+    *,
+    all_nets_routed: bool,
+    nets_to_route_ids: set[int] | None,
+    quiet: bool = False,
+) -> None:
+    """End-of-run report steps every ``kct route`` tail shares (#7377).
+
+    The pair via-parity summary (#7425) and ``--export-failed-nets``.  Before
+    #7377 both were wired into the single-attempt tail only, so the default
+    ``--auto-layers`` path silently dropped them.
+    """
+    _print_pair_via_parity_summary(router, quiet=quiet)
+    _export_failed_nets_if_requested(
+        args,
+        router,
+        net_map,
+        all_nets_routed=all_nets_routed,
+        nets_to_route_ids=nets_to_route_ids,
+        quiet=quiet,
     )
 
 
@@ -18503,6 +18715,27 @@ def _route_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--reserve-skipped-plane-vias",
+        action="store_true",
+        help=(
+            "Also hold the pre-route via-site reservation (Issue #6401) for "
+            "the non-ground pour nets named in --skip-nets.  By default only "
+            "nets kct route auto-skips are served, so a board that lists its "
+            "pours explicitly gets no reservation (Issue #7569)."
+        ),
+    )
+    parser.add_argument(
+        "--reserve-pour-only-passives",
+        action="store_true",
+        help=(
+            "Also hold a via site for pour-only 2-pad parts (e.g. a +5V/GND "
+            "decoupling cap) in the pre-route plane-via reservation (Issue "
+            "#7573).  OFF by default: it enlarges the hard keep-out on every "
+            "board whose caps sit between two served pours.  Has no effect "
+            "with --no-plane-via-reservation."
+        ),
+    )
+    parser.add_argument(
         "--no-pad-access-invariant",
         action="store_true",
         help=(
@@ -18769,7 +19002,11 @@ def _route_parser() -> argparse.ArgumentParser:
             "also does NOT remove all sources of variance -- wall-clock "
             "escape budgets (e.g. --timeout) can still terminate early on a "
             "loaded machine; for fully reproducible CI runs combine --seed "
-            "with a generous --timeout."
+            "with a generous --timeout. With --route-engine lattice, --seed "
+            "does not change the copper: the lattice negotiation draws no "
+            "random numbers, so every seed routes the same tracks and vias "
+            "and only the UUIDs differ. A lattice seed sweep is therefore a "
+            "single sample, not a spread (Issue #7580)."
         ),
     )
     parser.add_argument(
@@ -19283,13 +19520,13 @@ def _route_parser() -> argparse.ArgumentParser:
     # Issue #4433: opt-in HARD per-net avoid_layers.
     parser.add_argument(
         "--fallback-bidirectional",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=False,
         help=(
-            "Issue #6527 (experimental, default off): let the C++ backend's "
-            "Python fallback use route_auto (bidirectional A* for paths of "
-            ">= bidirectional_threshold cells, one-way retry sharing one "
-            "deadline) instead of the one-way route()."
+            "Issue #6527 (default off): let the C++ backend's Python fallback "
+            "use route_auto (bidirectional A* with a one-way retry sharing one "
+            "deadline) instead of the one-way route().  Diff-pair legs and "
+            "match-group members always stay one-way."
         ),
     )
     parser.add_argument(
@@ -20636,6 +20873,13 @@ def _run_main_impl(args, parser, argv) -> int:
         random.seed(args.seed)
         if not getattr(args, "quiet", False):
             print(f"[seed] Seeded global random with --seed {args.seed}")
+            # Issue #7580: the lattice engine draws no random numbers, so a
+            # seed sweep on it is one sample repeated, not a spread.
+            if _resolve_route_engine(args) == "lattice":
+                print(
+                    "[seed] Note: --route-engine lattice is deterministic; "
+                    "--seed changes only UUIDs, not the routed copper"
+                )
 
     # Issue #3538: normalize --deterministic-budget BEFORE any wall-clock
     # deadline is stamped or any inner router routine reads per_net_timeout /
@@ -21353,6 +21597,14 @@ def _run_main_impl(args, parser, argv) -> int:
     # Per Q4: auto-load project.kct EscalationPolicy + envelope_hard +
     # mounting_hole_group when a project.kct sits next to the PCB.
     _analyze_dry_run = bool(args.dry_run and args.analyze)
+    if not _analyze_dry_run and (
+        getattr(args, "auto_pcb_size", False)
+        or getattr(args, "auto_mfr_tier", False)
+        or args.auto_layers
+        or args.adaptive_rules
+    ):
+        # Issue #7377: strategy flags the escalation ladders never read.
+        _warn_escalation_flags_ignored(args)
     if getattr(args, "auto_pcb_size", False) and not _analyze_dry_run:
         # Q5 enforcement: --auto-pcb-size implies --auto-layers unless
         # the user explicitly passed --no-auto-layers.
@@ -23086,6 +23338,13 @@ def _run_main_impl(args, parser, argv) -> int:
             "bundles."
         )
 
+    # Issue #7425 (#7093 AC1): engaged diff pairs the router committed with
+    # unequal P/N via counts -- the same pairs ``kct check`` reports as
+    # ``diffpair_uncoupled_length`` "unequal via counts".  Reported only: the
+    # exit status is unchanged (the JSON report carries the same list under
+    # ``pair_via_parity_failures``).
+    _print_pair_via_parity_summary(router, quiet=quiet)
+
     # Report nets that needed clearance relaxation (--progressive-clearance mode)
     if relaxed_nets_report and not quiet:
         original_clearance = rules.trace_clearance
@@ -23270,41 +23529,7 @@ def _run_main_impl(args, parser, argv) -> int:
     output_verification_regressed = output_verification.regressed
 
     # Run power plane stitching if requested
-    stitch_result = None
-    if getattr(args, "stitch_power_planes", False) and not args.dry_run:
-        from kicad_tools.cli.stitch_cmd import find_all_plane_nets, run_stitch
-
-        if not quiet:
-            print("\n--- Stitching Power Planes ---")
-
-        # Load the saved PCB to find plane nets
-        from kicad_tools.core.sexp_file import load_pcb as load_stitch_pcb
-
-        stitch_sexp = load_stitch_pcb(output_path)
-        plane_nets = find_all_plane_nets(stitch_sexp)
-
-        if plane_nets:
-            net_names = list(plane_nets.keys())
-            if not quiet:
-                print(f"  Found {len(net_names)} power plane nets: {', '.join(sorted(net_names))}")
-
-            stitch_result = run_stitch(
-                pcb_path=output_path,
-                net_names=net_names,
-                via_size=args.via_diameter,  # Use same via size as routing
-                drill=args.via_drill,
-                clearance=args.clearance,
-                dry_run=False,
-            )
-
-            if not quiet:
-                if stitch_result.vias_added:
-                    print(f"  Added {len(stitch_result.vias_added)} stitching vias")
-                else:
-                    print("  No stitching vias needed (all pads already connected)")
-        else:
-            if not quiet:
-                print("  No power plane nets found (no zones with assigned nets)")
+    _run_post_save_stitching(args, output_path, quiet=quiet)
 
     # Fill copper-pour zones now that traces (and any stitching vias)
     # are in place (issue #2516).  Must run BEFORE DRC so the DRC sees
@@ -23672,14 +23897,14 @@ def _run_main_impl(args, parser, argv) -> int:
             )
 
     # Export failed nets to file if requested
-    if getattr(args, "export_failed_nets", None) and not all_nets_routed:
-        _export_failed_nets(
-            router,
-            net_map,
-            args.export_failed_nets,
-            quiet=quiet,
-            nets_to_route_ids=multi_pad_net_ids,
-        )
+    _export_failed_nets_if_requested(
+        args,
+        router,
+        net_map,
+        all_nets_routed=all_nets_routed,
+        nets_to_route_ids=multi_pad_net_ids,
+        quiet=quiet,
+    )
 
     # Issue #4477 (epic #4465, Phase 4): ``--complete`` blocking-copper
     # reporting.  Built from *pcb_path* -- the resolved working board -- so

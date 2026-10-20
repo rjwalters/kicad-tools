@@ -21,10 +21,10 @@ Cases that still fail are pinned with ``xfail(strict=True)`` citing the
 defect, so fixing a block makes its case XPASS -- which fails the run until
 the marker is removed.
 
-Every case uses an on-grid origin.  Blocks compute port coordinates from the
-raw ``(x, y)`` while symbols and wires snap to the 1.27 mm grid, so an
-off-grid origin misplaces ports in many blocks by the snap distance (tracked
-in #7402); that is a separate defect from the per-block ones checked here.
+``test_block_builds_on_real_symbols`` uses an on-grid origin;
+``test_block_ports_stay_anchored_at_off_grid_origin`` repeats every case at
+off-grid origins, where ports must follow the grid-snapped symbols and wires
+(issue #7510).
 
 The module skips when no KiCad 10 symbol library is installed.  CI's ``Test``
 job runs inside the KiCad 10 container (#3436), which ships them; locally set
@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import inspect
 import re
+import sys
 import warnings
 from collections.abc import Callable
 from typing import Any
@@ -44,7 +45,7 @@ import pytest
 import kicad_tools.schematic.blocks as B
 from kicad_tools.schematic.grid import get_symbol_search_paths
 from kicad_tools.schematic.models import symbol as symbol_module
-from kicad_tools.schematic.models.schematic import Schematic
+from kicad_tools.schematic.models.schematic import Schematic, SnapMode
 
 
 def _kicad10_symbols_skip_reason() -> str | None:
@@ -75,6 +76,15 @@ pytestmark = pytest.mark.skipif(_SKIP_REASON is not None, reason=_SKIP_REASON or
 
 # On the 1.27 mm schematic grid (80 * 1.27).
 X = Y = 101.6
+
+# Off-grid origins: 100.0 snaps down to 99.06, 100.6 snaps up to 100.33.
+OFF_GRID_ORIGINS = [(100.0, 100.0), (100.6, 100.6)]
+
+# Non-default schematic grids with an origin on each.  0.635 at 159 * 0.635
+# is off the default 1.27 mm grid, so ports must follow ``Schematic.grid``,
+# not 1.27 mm.  On 2.54 the 1.27 mm-pitch pins sit off the grid, so ports
+# read from a pin must stay on it rather than snap away.
+NON_DEFAULT_GRIDS = [(0.635, 100.965), (2.54, 101.6)]
 
 # Pin names some blocks *probe* for and handle the absence of -- the
 # regulator blocks' alias chains (VIN/VI/IN, VOUT/VO/OUT, OUT/SW/VOUT,
@@ -107,40 +117,6 @@ def _xfail(reason: str, raises: type[BaseException] | None = None) -> pytest.Mar
 
 
 # -- Known defects -----------------------------------------------------------
-
-CAN_ESD = _xfail(
-    "#7402: CANTransceiver ESD path puts CANH/CANL ports at tvs_anode.x + 5, "
-    "past the TVS pin and off any wire",
-    AssertionError,
-)
-GATE_DRIVER = _xfail(
-    "#7402: GateDriverBlock adds no wires; VCC/GND/BOOT_*/GATE_*/PWM_* are "
-    "fixed offsets matching no driver pin",
-    AssertionError,
-)
-B2B_SOURCE = _xfail(
-    "#7402: BackToBackFETPair SOURCE port sits at an off-grid Kelvin midpoint "
-    "and misses its grid-snapped wire end",
-    AssertionError,
-)
-I2C_GND = _xfail(
-    "#7402: I2CPullups without filter caps exposes a phantom 'virtual GND point'",
-    AssertionError,
-)
-GPIO_PULL_RAIL = _xfail(
-    "#7402: create_gpio_pull_resistor without a button exposes a phantom "
-    "opposite-rail alias (VCC for a pull-down, GND for a pull-up)",
-    AssertionError,
-)
-JTAG_DEFAULT = _xfail(
-    "#7402: DebugHeader(interface='jtag') rejects its own default pins=10",
-    ValueError,
-)
-UCC27211_LIB = _xfail(
-    "#7402: UCC27211GateDriver's default symbol softstart_custom:UCC27211 is "
-    "in a board-local library not shipped in this repo",
-)
-
 
 # -- Cases -------------------------------------------------------------------
 #
@@ -270,7 +246,6 @@ case(
     "CANTransceiver[esd]",
     "CANTransceiver",
     lambda s: B.CANTransceiver(s, X, Y, esd_protection=True),
-    CAN_ESD,
 )
 case(
     "CANTransceiver[termination]",
@@ -284,7 +259,7 @@ case(
 )
 for _factory in ("mcp2551", "sn65hvd230", "tja1050"):
     _name = f"create_can_transceiver_{_factory}"
-    case(_name, _name, lambda s, n=_name: getattr(B, n)(s, X, Y), CAN_ESD)
+    case(_name, _name, lambda s, n=_name: getattr(B, n)(s, X, Y))
     case(
         f"{_name}[no_esd]",
         _name,
@@ -297,7 +272,6 @@ case(
     "DebugHeader[jtag]",
     "DebugHeader",
     lambda s: B.DebugHeader(s, X, Y, interface="jtag"),
-    JTAG_DEFAULT,
 )
 case(
     "DebugHeader[jtag,20]",
@@ -343,13 +317,12 @@ case("create_usb_type_c", "create_usb_type_c", lambda s: B.create_usb_type_c(s, 
 case("create_usb_micro_b", "create_usb_micro_b", lambda s: B.create_usb_micro_b(s, X, Y))
 
 # Interface: I2C, joystick
-case("I2CPullups", "I2CPullups", lambda s: B.I2CPullups(s, X, Y), I2C_GND)
+case("I2CPullups", "I2CPullups", lambda s: B.I2CPullups(s, X, Y))
 for _speed in ("standard", "fast", "fast_plus"):
     case(
         f"create_i2c_pullups[{_speed}]",
         "create_i2c_pullups",
         lambda s, sp=_speed: B.create_i2c_pullups(s, X, Y, speed=sp),
-        I2C_GND,
     )
 case(
     "create_i2c_pullups[filter]",
@@ -383,13 +356,11 @@ case(
     "create_gpio_pull_resistor[down]",
     "create_gpio_pull_resistor",
     lambda s: B.create_gpio_pull_resistor(s, X, Y),
-    GPIO_PULL_RAIL,
 )
 case(
     "create_gpio_pull_resistor[up]",
     "create_gpio_pull_resistor",
     lambda s: B.create_gpio_pull_resistor(s, X, Y, pull_type="up", rail="VCC"),
-    GPIO_PULL_RAIL,
 )
 
 # Motor control
@@ -406,7 +377,6 @@ for _driver in ("3-phase", "half-bridge"):
         f"GateDriverBlock[{_driver}]",
         "GateDriverBlock",
         lambda s, d=_driver: B.GateDriverBlock(s, X, Y, driver_type=d),
-        GATE_DRIVER,
     )
 case(
     "GateDriveResistorArray", "GateDriveResistorArray", lambda s: B.GateDriveResistorArray(s, X, Y)
@@ -416,12 +386,11 @@ case(
     "BootstrapCapacitorArray",
     lambda s: B.BootstrapCapacitorArray(s, X, Y),
 )
-case("BackToBackFETPair", "BackToBackFETPair", lambda s: B.BackToBackFETPair(s, X, Y), B2B_SOURCE)
+case("BackToBackFETPair", "BackToBackFETPair", lambda s: B.BackToBackFETPair(s, X, Y))
 case(
     "UCC27211GateDriver",
     "UCC27211GateDriver",
     lambda s: B.UCC27211GateDriver(s, X, Y),
-    UCC27211_LIB,
 )
 case("create_half_bridge", "create_half_bridge", lambda s: B.create_half_bridge(s, X, Y))
 case(
@@ -586,11 +555,13 @@ def pin_misses(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str, str]]:
 # -- Tests -------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(("export", "factory"), _CASES)
-def test_block_builds_on_real_symbols(
-    export: str, factory: Factory, pin_misses: list[tuple[str, str, str]]
+def _build_and_find_floating_ports(
+    export: str,
+    factory: Factory,
+    pin_misses: list[tuple[str, str, str]],
+    **sch_kwargs: Any,
 ) -> None:
-    sch = Schematic(title=f"real-symbol smoke: {export}")
+    sch = Schematic(title=f"real-symbol smoke: {export}", **sch_kwargs)
     with warnings.catch_warnings():
         # Wire-collision UserWarnings are layout advice, not build failures.
         warnings.simplefilter("ignore", UserWarning)
@@ -610,6 +581,59 @@ def test_block_builds_on_real_symbols(
         f"(symbols: {[(s.reference, s.symbol_def.lib_id) for s in sch.symbols]}, "
         f"wires: {len(sch.wires)})"
     )
+
+
+@pytest.mark.parametrize(("export", "factory"), _CASES)
+def test_block_builds_on_real_symbols(
+    export: str, factory: Factory, pin_misses: list[tuple[str, str, str]]
+) -> None:
+    _build_and_find_floating_ports(export, factory, pin_misses)
+
+
+@pytest.mark.parametrize("origin", OFF_GRID_ORIGINS, ids=lambda o: f"{o[0]},{o[1]}")
+@pytest.mark.parametrize(("export", "factory"), _CASES)
+def test_block_ports_stay_anchored_at_off_grid_origin(
+    export: str,
+    factory: Factory,
+    origin: tuple[float, float],
+    pin_misses: list[tuple[str, str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ports must follow the grid-snapped symbols and wires (issue #7510)."""
+    monkeypatch.setattr(sys.modules[__name__], "X", origin[0])
+    monkeypatch.setattr(sys.modules[__name__], "Y", origin[1])
+    _build_and_find_floating_ports(export, factory, pin_misses)
+
+
+@pytest.mark.parametrize(("grid", "origin"), NON_DEFAULT_GRIDS, ids=lambda v: str(v))
+@pytest.mark.parametrize(("export", "factory"), _CASES)
+def test_block_ports_follow_non_default_schematic_grid(
+    export: str,
+    factory: Factory,
+    grid: float,
+    origin: float,
+    pin_misses: list[tuple[str, str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ports snap to ``Schematic(grid=...)``, as symbols and wires do (#7510)."""
+    monkeypatch.setattr(sys.modules[__name__], "X", origin)
+    monkeypatch.setattr(sys.modules[__name__], "Y", origin)
+    _build_and_find_floating_ports(export, factory, pin_misses, grid=grid)
+
+
+@pytest.mark.parametrize("origin", OFF_GRID_ORIGINS, ids=lambda o: f"{o[0]},{o[1]}")
+@pytest.mark.parametrize(("export", "factory"), _CASES)
+def test_block_ports_stay_anchored_in_strict_snap_mode(
+    export: str,
+    factory: Factory,
+    origin: tuple[float, float],
+    pin_misses: list[tuple[str, str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """STRICT snaps symbols and wires like AUTO, so ports must follow (#7510)."""
+    monkeypatch.setattr(sys.modules[__name__], "X", origin[0])
+    monkeypatch.setattr(sys.modules[__name__], "Y", origin[1])
+    _build_and_find_floating_ports(export, factory, pin_misses, snap_mode=SnapMode.STRICT)
 
 
 def test_every_export_has_a_case() -> None:
@@ -764,3 +788,204 @@ def test_esd_array_rejects_more_channels_than_the_part_has(channels: int) -> Non
     """USBLC6-2SC6 has two channels; asking for more must raise, not invent ports."""
     with pytest.raises(ValueError, match="2 ESD channel"):
         B.ESDProtectionBlock(Schematic(title="esd"), X, Y, channels=channels)
+
+
+def _pin_nets(sch: Schematic) -> tuple[dict[tuple[float, float], int], dict[str, int]]:
+    """``_nets`` plus a ``"REF.PIN" -> net`` map over every placed pin."""
+    nets = _nets(sch)
+    pins = {
+        f"{sym.reference}.{pin.number}": nets[_pt(sym.pin_position(pin.number))]
+        for sym in sch.symbols
+        for pin in _placed_pins(sym)
+    }
+    return nets, pins
+
+
+def _net_at(sch: Schematic, nets: dict[tuple[float, float], int], p: tuple[float, float]) -> int:
+    """Net of point ``p``: a wire endpoint or pin, or a tap in a wire's span."""
+    p = _pt(p)
+    if p in nets:
+        return nets[p]
+    for w in sch.wires:
+        a, b = _pt((w.x1, w.y1)), _pt((w.x2, w.y2))
+        if _on_segment(p, a, b):
+            return nets[a]
+    raise AssertionError(f"{p} is on no pin or wire")
+
+
+def _pin_number(sym: Any, name: str) -> str:
+    return next(p.number for p in sym.symbol_def.pins if p.name == name)
+
+
+# (factory, input port, output port).  Each places Q1 as a high-side P-FET.
+_REVERSE_PFET_CASES = [
+    pytest.param(
+        lambda s: B.ReversePolarityBlock(s, X, Y), "VIN", "VOUT", id="ReversePolarityBlock"
+    ),
+    pytest.param(
+        lambda s: B.create_reverse_polarity_pfet(s, X, Y),
+        "VIN",
+        "VOUT",
+        id="create_reverse_polarity_pfet",
+    ),
+    pytest.param(lambda s: B.BarrelJackInput(s, X, Y), "VIN", "VOUT", id="BarrelJackInput"),
+    pytest.param(
+        lambda s: B.create_12v_barrel_jack(s, X, Y), "VIN", "VOUT", id="create_12v_barrel_jack"
+    ),
+    pytest.param(lambda s: B.BatteryInput(s, X, Y), "VBAT_IN", "VBAT", id="BatteryInput"),
+    pytest.param(
+        lambda s: B.create_lipo_battery(s, X, Y), "VBAT_IN", "VBAT", id="create_lipo_battery"
+    ),
+]
+
+
+@pytest.mark.parametrize(("factory", "vin", "vout"), _REVERSE_PFET_CASES)
+def test_reverse_polarity_pfet_takes_the_input_on_its_drain(
+    factory: Factory, vin: str, vout: str
+) -> None:
+    """Drain on the input, source on the load, gate to ground (issue #7399).
+
+    The body diode (anode = drain) must conduct from the input toward the
+    load; with the source on the input it conducts from the load back into a
+    reversed supply and the block protects nothing.
+    """
+    sch = Schematic(title="reverse-polarity P-FET orientation")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        block = factory(sch)
+    nets, pins = _pin_nets(sch)
+    port = lambda name: _net_at(sch, nets, block.ports[name])  # noqa: E731
+    q = next(s for s in sch.symbols if s.reference == "Q1")
+    d, s_, g = (f"Q1.{_pin_number(q, n)}" for n in ("D", "S", "G"))
+
+    assert pins[d] == port(vin), "the input must land on the P-FET drain"
+    assert pins[s_] == port(vout), "the protected output must come from the source"
+    assert len({port(vin), port(vout), port("GND")}) == 3
+    gate_net = pins[g]
+    gate_r = next((k for k in ("R_gate", "R_GATE") if k in block.components), None)
+    if gate_r:
+        r_gate = block.components[gate_r].reference
+        assert gate_net == pins[f"{r_gate}.1"]
+        assert pins[f"{r_gate}.2"] == port("GND")
+    else:
+        assert gate_net == port("GND"), "the gate must be tied to ground"
+    if "C_FILT" in block.components:
+        assert pins[f"{block.components['C_FILT'].reference}.1"] == port(vout)
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        pytest.param(lambda s: B.BarrelJackInput(s, X, Y), id="BarrelJackInput"),
+        pytest.param(lambda s: B.create_12v_barrel_jack(s, X, Y), id="create_12v_barrel_jack"),
+    ],
+)
+def test_barrel_jack_pfet_clamps_vgs_with_a_zener(factory: Factory) -> None:
+    """R_GATE returns the gate to the sleeve; D_GATE clamps G-S (issue #7489)."""
+    sch = Schematic(title="barrel jack gate clamp")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        block = factory(sch)
+    nets, pins = _pin_nets(sch)
+    port = lambda name: _net_at(sch, nets, block.ports[name])  # noqa: E731
+    q = block.components["Q"]
+    gate, source = pins[f"Q1.{_pin_number(q, 'G')}"], pins[f"Q1.{_pin_number(q, 'S')}"]
+    r, d = block.components["R_GATE"], block.components["D_GATE"]
+    ref_r, ref_d = r.reference, d.reference
+
+    assert gate != source, "the gate must not be shorted to the source"
+    assert pins[f"{ref_d}.{_pin_number(d, 'K')}"] == source, "Zener cathode on the source"
+    assert pins[f"{ref_d}.{_pin_number(d, 'A')}"] == gate, "Zener anode on the gate"
+    assert pins[f"{ref_r}.1"] == gate
+    assert pins[f"{ref_r}.2"] == port("GND"), "gate resistor returns to the sleeve"
+    assert gate != port("GND"), "the gate may no longer be tied straight to the sleeve"
+
+
+@pytest.mark.parametrize("protection", ["diode", "none"])
+@pytest.mark.parametrize(
+    ("make", "vin", "vout"),
+    [
+        pytest.param(B.BarrelJackInput, "VIN", "VOUT", id="BarrelJackInput"),
+        pytest.param(B.BatteryInput, "VBAT_IN", "VBAT", id="BatteryInput"),
+    ],
+)
+def test_power_input_feeds_its_filter_cap(make: Any, vin: str, vout: str, protection: str) -> None:
+    """The input reaches the filter cap through the diode, or directly with no protection."""
+    sch = Schematic(title=f"power input: {protection}")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        block = make(sch, X, Y, protection=protection)
+    nets, pins = _pin_nets(sch)
+    port = lambda name: _net_at(sch, nets, block.ports[name])  # noqa: E731
+    cap = block.components["C_FILT"].reference
+
+    assert pins["J1.1"] == port(vin)
+    assert pins[f"{cap}.1"] == port(vout)
+    if protection == "none":
+        assert port(vin) == port(vout), "unprotected input must feed the filter cap"
+    else:
+        diode = block.components["D"]
+        anode = pins[f"D1.{_pin_number(diode, 'A')}"]
+        cathode = pins[f"D1.{_pin_number(diode, 'K')}"]
+        assert (anode, cathode) == (port(vin), port(vout))
+        assert anode != cathode
+
+
+@pytest.mark.parametrize("filter_cap", [None, "100nF"])
+def test_voltage_divider_sense_is_a_voltage_divider(filter_cap: str | None) -> None:
+    """``VoltageDividerSense`` is the ratio-sized ``VoltageDivider`` (issue #7399 step 4)."""
+    sch = Schematic(title="voltage divider sense")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        block = B.VoltageDividerSense(sch, X, Y, ratio=11.0, filter_cap=filter_cap)
+    assert isinstance(block, B.VoltageDivider)
+    assert (block.r1.value, block.r2.value) == ("100.0k", "10k")
+    assert block.get_ratio() == pytest.approx(1 / 11)
+
+    nets, pins = _pin_nets(sch)
+    port = lambda name: _net_at(sch, nets, block.ports[name])  # noqa: E731
+    assert pins["R1.1"] == port("VIN")
+    assert pins["R1.2"] == pins["R2.1"] == port("VOUT")
+    assert pins["R2.2"] == port("GND")
+    assert len({port("VIN"), port("VOUT"), port("GND")}) == 3
+    if filter_cap is not None:
+        assert (pins["C1.1"], pins["C1.2"]) == (port("VOUT"), port("GND"))
+
+
+def test_create_voltage_sense_sizes_the_divider_from_the_adc_range() -> None:
+    block = B.create_voltage_sense(Schematic(title="sense"), X, Y, max_voltage=33.0, adc_ref=3.3)
+    assert isinstance(block, B.VoltageDivider)
+    assert block.get_output_voltage(33.0) == pytest.approx(3.3)
+
+
+@pytest.mark.parametrize("ratio", [1.0, 0.5])
+def test_voltage_divider_sense_rejects_a_ratio_that_cannot_divide(ratio: float) -> None:
+    with pytest.raises(ValueError, match="ratio must be > 1"):
+        B.VoltageDividerSense(Schematic(title="sense"), X, Y, ratio=ratio)
+
+
+@pytest.mark.parametrize("connector_type", sorted(B.USBConnector.CONNECTOR_CONFIGS))
+def test_usb_esd_array_is_wired_to_the_connector(connector_type: str) -> None:
+    """Every ESD array pin touches a wire, and D+/D-/VBUS/GND stay distinct nets.
+
+    The port check cannot catch an orphaned TVS: D+/D- ports lie on wires that
+    never reach a TVS pin (#7508).
+    """
+    sch = Schematic(title=f"usb esd: {connector_type}")
+    block = B.USBConnector(sch, X, Y, connector_type=connector_type)
+    tvs = block.components["TVS_ESD"]
+    assert tvs.symbol_def.name.startswith("USBLC6-2SC6")
+    nets, pins = _pin_nets(sch)
+    conn = block.components["CONN"]
+    ends = {_pt((w.x1, w.y1)) for w in sch.wires} | {_pt((w.x2, w.y2)) for w in sch.wires}
+    for pin in _placed_pins(tvs):
+        assert _pt(tvs.pin_position(pin.number)) in ends, f"TVS pin {pin.number} touches no wire"
+
+    ref = tvs.reference
+    pin_net = lambda sym, name: nets[_pt(sym.pin_position(_pin_number(sym, name)))]  # noqa: E731
+    dp, dm = pin_net(conn, "D+"), pin_net(conn, "D-")
+    assert {dp, dm} == {pins[f"{ref}.1"], pins[f"{ref}.3"]}
+    assert dp != dm
+    assert pins[f"{ref}.2"] == pin_net(conn, "GND")
+    assert pins[f"{ref}.5"] == pin_net(conn, "VBUS")
+    assert len({dp, dm, pins[f"{ref}.2"], pins[f"{ref}.5"]}) == 4

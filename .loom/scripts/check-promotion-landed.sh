@@ -252,6 +252,16 @@ if HELD="$(jq -r --arg h "$("${LOOM_DAEMON_BIN:-loom-daemon}" labels list --prop
   exit 0
 fi
 
+# Author gate (#10827): a backstop promotion is still an automatic one, so an
+# issue whose author is not trusted (or cannot be verified) is left as it is —
+# a trusted maintainer adopts it by hand. Fail closed: only TRUSTED proceeds.
+GATE_OUT="$("${LOOM_DAEMON_BIN:-loom-daemon}" forge promotion-author --number "$ISSUE" --repo "$WRITE_REPO" 2>"$GH_STDERR")" || GATE_OUT="UNKNOWN the author check failed: $(tr '\n' ' ' <"$GH_STDERR")"
+GATE="$(head -n1 <<<"$GATE_OUT")"
+if [[ "$GATE" != "TRUSTED" ]]; then
+  emit "ALREADY_ESCALATED" "$REASON; not completed: author gate says $GATE (#10827) — a trusted maintainer must adopt it by applying loom:issue"
+  exit 0
+fi
+
 # Complete the promotion: add loom:issue. Since #11512 the verdict names no
 # tier label, so there is nothing to recover from its text.
 if ! gh issue edit "$ISSUE" --repo "$WRITE_REPO" --add-label "loom:issue" >/dev/null 2>"$GH_STDERR"; then

@@ -543,6 +543,13 @@ evaluate the board. Examples:
 - Diff-pair skew or continuity with `needs_input:net_class_map` on a board
   with diff-pair-named nets.
 - `netclass_floor` or `netclass_clearance_copper` with an unreadable `.kicad_pro`.
+- `courtyard_overlap` with `no_courtyard_geometry (N of M footprints)`: N
+  footprints have no `F.CrtYd`/`B.CrtYd` outline (each also gets a
+  `courtyard_missing` warning) or one that does not resolve to a polygon, so
+  their overlaps were never tested. Add the courtyards, or set
+  `(attr ... allow_missing_courtyard)` on a part with no body. Footprints with
+  no pads, `board_only` footprints and the `MountingHole:`, `Fiducial:` and
+  `NetTie:` libraries are exempt (Issue #7204).
 
 `skipped` means the check did not apply, for example because nothing was
 declared to verify or it was deselected. The table output prints every
