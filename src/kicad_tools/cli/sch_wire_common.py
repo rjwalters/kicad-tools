@@ -21,6 +21,7 @@ import uuid as uuid_mod
 from collections.abc import Callable
 from pathlib import Path
 
+from kicad_tools.core.sheet_properties import SHEET_FILE_KEY_RE
 from kicad_tools.operations.wire_primitives import (
     find_wires_at_point_with_index,
     iter_wire_endpoint_matches,
@@ -205,7 +206,7 @@ def _find_subsheet_files(text: str, schematic_dir: Path) -> list[Path]:
     Looks for (sheet ... (property "Sheetfile" "filename.kicad_sch" ...)) blocks.
     """
     subsheets = []
-    pattern = re.compile(r'\(property "Sheetfile" "([^"]+)"')
+    pattern = re.compile(rf'\(property "{SHEET_FILE_KEY_RE}" "([^"]+)"')
     for match in pattern.finditer(text):
         subsheet_path = schematic_dir / match.group(1)
         if subsheet_path.exists():

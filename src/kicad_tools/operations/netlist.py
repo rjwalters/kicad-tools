@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from kicad_tools.cli.runner import find_kicad_cli
+from kicad_tools.core.sheet_properties import SHEET_FILE_KEYS, SHEET_NAME_KEYS
 from kicad_tools.sexp import SExp, parse_string
 
 logger = logging.getLogger(__name__)
@@ -518,11 +519,11 @@ def _get_sheet_entries(sch_path: Path) -> list[_SheetEntry]:
             # uses to build hierarchical net names (issue #5809).
             for prop in child.find_all("property"):
                 prop_name = prop.get_string(0)
-                if prop_name == "Sheetfile":
+                if prop_name in SHEET_FILE_KEYS:
                     fname = prop.get_string(1)
                     if fname:
                         filename = fname
-                elif prop_name == "Sheetname":
+                elif prop_name in SHEET_NAME_KEYS:
                     sname = prop.get_string(1)
                     if sname:
                         sheetname = sname
@@ -545,7 +546,13 @@ def _get_sheet_entries(sch_path: Path) -> list[_SheetEntry]:
                     else:
                         pin_positions.append((sheet_x, sheet_y))
 
-            if filename:
+            if not filename:
+                logger.warning(
+                    "Sheet %r in %s has no file property (Sheetfile / Sheet file); skipping",
+                    sheetname,
+                    sch_path,
+                )
+            else:
                 entries.append(
                     _SheetEntry(
                         filename=filename,

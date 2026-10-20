@@ -509,6 +509,32 @@ def test_finalize_creates_release_with_changelog_notes(tagged) -> None:
     assert "wheel and sdist present" in outcome.summary
 
 
+def test_fit_release_notes_truncates_oversized_section_with_link() -> None:
+    notes = "".join(f"- **entry {i}** " + "x" * 190 + "\n" for i in range(1000))
+    assert len(notes) > 190_000
+    body = rt.fit_release_notes(notes, "v0.24.0", "o/r")
+    assert len(body) <= rt.RELEASE_BODY_BUDGET < rt.RELEASE_BODY_LIMIT
+    assert "https://github.com/o/r/blob/v0.24.0/CHANGELOG.md" in body
+    assert body.startswith("- **entry 0**")
+    kept = body.split("\n\n_Notes truncated")[0].splitlines()
+    assert all(ln.endswith("x" * 190) for ln in kept)  # no bullet split mid-way
+
+
+def test_fit_release_notes_small_section_is_unchanged() -> None:
+    notes = "### Summary\n\n- one\n- two\n"
+    assert rt.fit_release_notes(notes, "v0.2.0", "o/r") == notes
+
+
+def test_finalize_oversized_notes_are_truncated(tagged, monkeypatch) -> None:
+    repo, sha = tagged
+    big = "- " + "y" * 200_000 + "\n- tail\n"
+    monkeypatch.setattr(rt, "release_notes", lambda _t, _v: big)
+    forge = FakeForge()
+    assert _finalize(repo, sha, forge).code == 0
+    ((_, _, notes),) = forge.calls
+    assert len(notes) <= rt.RELEASE_BODY_BUDGET and "blob/v0.2.0/CHANGELOG.md" in notes
+
+
 def test_finalize_existing_release_is_not_recreated(tagged) -> None:
     repo, sha = tagged
     forge = FakeForge(exists=True)

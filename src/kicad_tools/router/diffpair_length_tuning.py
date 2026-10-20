@@ -749,7 +749,8 @@ def _pair_uncoupled_mm(a: Route, b: Route) -> float:
 MAX_HOST_CANDIDATES: int = 3
 
 #: Amplitude back-off ladder applied to ``SerpentineConfig.amplitude`` when a
-#: placement is rejected (same ladder the match-group tuner uses).
+#: placement is rejected (same ladder the match-group tuner uses).  No factor
+#: above 1: a taller loop pushes the bump out past 1x the pair gap (Q27).
 AMPLITUDE_LADDER: tuple[float, ...] = (1.0, 0.5, 0.25)
 
 
@@ -863,14 +864,21 @@ def _placement_options(
     from .match_group_tuning import _centered_sub_host, _rank_candidate_segments
     from .primitives import Route
 
-    def config_for(amplitude: float, hint: tuple[float, float], width: float) -> SerpentineConfig:
+    def config_for(
+        amplitude: float,
+        hint: tuple[float, float],
+        width: float,
+        min_segment_length: float | None = None,
+    ) -> SerpentineConfig:
         # Issue #7521 (AC3): loop spacing wide enough for 3x-width jogs.
         spaced = jog_spaced(base_config, width)
         return SerpentineConfig(
             style=base_config.style,
             amplitude=amplitude,
             min_spacing=spaced.min_spacing,
-            min_segment_length=base_config.min_segment_length,
+            min_segment_length=(
+                base_config.min_segment_length if min_segment_length is None else min_segment_length
+            ),
             gap_factor=base_config.gap_factor,
             max_iterations=base_config.max_iterations,
             side="outer",
@@ -918,10 +926,14 @@ def _placement_options(
     for host_no, (idx, host) in enumerate(hosts):
         base_hint = first_hint if host_no == 0 else _outer_normal_hint(host, longer_route)
         sides = [base_hint, (-base_hint[0], -base_hint[1])]
-        for centred in (False, True):
+        # Anchors: ``None`` is the start-anchored host; 0.5 centres the
+        # trombone and 1.0 seats it at the host's far end, which clears a
+        # neighbour that only runs alongside the first part of the host
+        # (Issue #7548: MIPI_RST ends 2.2 mm before MIPI_D0+'s corner).
+        for anchor in (None, 0.5, 1.0):
             for hint in sides:
                 for factor in AMPLITUDE_LADDER:
-                    if host_no == 0 and not centred and hint == first_hint and factor == 1.0:
+                    if host_no == 0 and anchor is None and hint == first_hint and factor == 1.0:
                         continue  # already yielded as the first option
                     loops, amp = exact_fit_amplitude(
                         length_needed, base_config.amplitude * factor, base_config, host.width
@@ -930,20 +942,25 @@ def _placement_options(
                     lead_in: list[Segment] = []
                     lead_out: list[Segment] = []
                     sub_host = host
-                    if centred:
+                    # The end-anchored trombone is cut to just the length its
+                    # loops need (no ``min_segment_length`` floor) so it sits
+                    # as close to the host's end as a loop can (Issue #7548).
+                    tight = anchor == 1.0
+                    if anchor is not None:
                         sub_host, lead_in, lead_out = _centered_sub_host(
                             host,
                             loops=loops,
                             gap_mm=jog_spaced(base_config, host.width).min_spacing
                             * base_config.gap_factor,
-                            min_length_mm=base_config.min_segment_length,
+                            min_length_mm=0.0 if tight else base_config.min_segment_length,
                             chamfer_mm=base_config.chamfer_mm(host.width, amp),
+                            anchor=anchor,
                         )
                         if sub_host is host:
                             continue  # no slack: same as start-anchored
-                    serp = SerpentineGenerator(config_for(amp, hint, host.width)).generate_trombone(
-                        sub_host, length_needed
-                    )
+                    serp = SerpentineGenerator(
+                        config_for(amp, hint, host.width, 0.0 if tight else None)
+                    ).generate_trombone(sub_host, length_needed)
                     if serp.success:
                         serp.new_segments = lead_in + serp.new_segments + lead_out
                     yield (
