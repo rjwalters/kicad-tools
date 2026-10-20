@@ -523,8 +523,28 @@ class TestRouteAutoFallbackPlumbing:
 
         return mk(5.0, 5.0), mk(x2, 5.0)
 
-    def test_flag_default_off(self):
-        assert DesignRules().fallback_bidirectional is False
+    def test_fallback_default_is_bidirectional_for_every_request(self):
+        rules = DesignRules()
+        assert rules.fallback_bidirectional is True
+        assert rules.fallback_bidirectional_threshold == 0
+        # The generic route_auto threshold is unchanged.
+        assert rules.bidirectional_threshold == 1000
+
+    def test_threshold_argument_overrides_the_rule(self, monkeypatch):
+        router = self._make(10000)
+        a, b = self._pads()
+        called = []
+        orig = router.route_bidirectional
+
+        def spy(*args, **kwargs):
+            called.append(1)
+            return orig(*args, **kwargs)
+
+        monkeypatch.setattr(router, "route_bidirectional", spy)
+        assert router.route_auto(a, b) is not None
+        assert called == [], "rules threshold 10000 keeps this request one-way"
+        assert router.route_auto(a, b, threshold=0) is not None
+        assert called == [1], "threshold=0 sends it bidirectional"
 
     def test_steiner_goals_never_ignored(self, monkeypatch):
         """With extra goals the bidirectional half declines; one-way gets them."""
@@ -560,9 +580,9 @@ class TestRouteAutoFallbackPlumbing:
         router = self._make(10)
         a, b = self._pads()
         grid = router.grid
-        # Issue #6750: route_bidirectional only reports exhaustion once BOTH
-        # frontiers are empty, so the drain covers every cell reachable from
-        # either pad.  A single wall across the board left the whole 500x400x2
+        # Issue #6750: exhaustion means a drained frontier (since #6527 one
+        # drained side ends the search), so the drain covers every cell
+        # reachable from a pad.  A single wall across the board left the whole 500x400x2
         # grid reachable (~50s on CI against a 60s timeout).  Instead confine
         # each pad to a small pocket (+/-2 mm) on every layer: the pockets are
         # disjoint, so the search still drains and fails, but cheaply.
@@ -594,6 +614,47 @@ class TestRouteAutoFallbackPlumbing:
                     grid.grid[layer][gy][gx].blocked = False
         assert router.route_bidirectional(a, b) is not None
         assert router.last_route_exhausted is False
+
+    def test_one_drained_frontier_ends_the_search(self, monkeypatch):
+        """Issue #6527: a drained frontier with no meeting point fails fast.
+
+        Only the start pad is boxed in, so the forward frontier drains after
+        a few thousand cells while the backward one could still flood the
+        whole open board.  Before the drain exit it did (board 05: 100-120 s
+        per failing request); now the search stops when the pocket drains,
+        reports the exhaustion, and ``route_auto`` still retries one-way.
+        """
+        router = self._make(10)
+        a, b = self._pads()
+        grid = router.grid
+        cx, cy = grid.world_to_grid(a.x, a.y)
+        for layer in range(grid.num_layers):
+            for gy in range(grid.rows):
+                for gx in range(grid.cols):
+                    inside = cx - 20 <= gx <= cx + 20 and cy - 20 <= gy <= cy + 20
+                    on_rim = inside and (abs(gx - cx) == 20 or abs(gy - cy) == 20)
+                    if on_rim:
+                        grid.grid[layer][gy][gx].blocked = True
+        expansions = []
+        orig = router._expand_bidirectional_neighbors
+
+        def count(*args, **kwargs):
+            expansions.append(1)
+            return orig(*args, **kwargs)
+
+        monkeypatch.setattr(router, "_expand_bidirectional_neighbors", count)
+        assert router.route_bidirectional(a, b) is None
+        assert router.last_route_exhausted is True
+        assert router.last_route_deadline_hit is False
+        pocket_cells = 41 * 41 * grid.num_layers
+        # Two frontiers alternate, so the survivor expands about as many cells
+        # as the pocket holds -- not the ~400k cells of the open board.
+        assert len(expansions) <= 3 * pocket_cells
+
+        one_way = []
+        monkeypatch.setattr(router, "route", lambda *a, **k: one_way.append(1) or None)
+        assert router.route_auto(a, b) is None
+        assert one_way == [1], "a failed bidirectional attempt must retry one-way"
 
     def test_deadline_hit_in_bidirectional_half(self, monkeypatch):
         """Expired budget: the bidirectional half hits the deadline; no retry."""

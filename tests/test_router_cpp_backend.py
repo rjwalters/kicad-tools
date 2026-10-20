@@ -1221,6 +1221,9 @@ class TestCppPathfinderPythonFallback:
 
         rules = DesignRules()
         rules.grid_resolution = 0.127
+        # One-way dispatch under test; the default (bidirectional) path is
+        # covered by test_fallback_default_dispatches_route_auto (#6527).
+        rules.fallback_bidirectional = False
         grid = RoutingGrid(
             width=10.0,
             height=10.0,
@@ -1273,7 +1276,7 @@ class TestCppPathfinderPythonFallback:
         return _FailingImpl(net=net)
 
     @staticmethod
-    def _make_pf(from_routing_grid=True):
+    def _make_pf(from_routing_grid=True, fallback_bidirectional=False):
         from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
         from kicad_tools.router.grid import RoutingGrid
         from kicad_tools.router.layers import LayerStack
@@ -1281,6 +1284,9 @@ class TestCppPathfinderPythonFallback:
 
         rules = DesignRules()
         rules.grid_resolution = 0.127
+        # These tests stub ``Router.route``: pin the one-way dispatch unless a
+        # test asks for the default bidirectional one (Issue #6527).
+        rules.fallback_bidirectional = fallback_bidirectional
         if from_routing_grid:
             grid = RoutingGrid(
                 width=10.0,
@@ -1303,6 +1309,39 @@ class TestCppPathfinderPythonFallback:
         )
         end = Pad(x=8.0, y=8.0, width=0.5, height=0.5, layer=Layer.F_CU, net=net, net_name=net_name)
         return start, end
+
+    def test_fallback_default_dispatches_route_auto(self):
+        """Issue #6527: by default the fallback runs ``route_auto`` with the
+        fallback threshold, forwarding the deadline and Steiner goals."""
+        if not is_cpp_available():
+            pytest.skip("C++ backend not available")
+
+        from unittest import mock
+
+        from kicad_tools.router.primitives import Route
+        from kicad_tools.router.rules import DesignRules
+
+        assert DesignRules().fallback_bidirectional is True
+        pf = self._make_pf(fallback_bidirectional=True)
+        start, end = self._pads()
+        fake = self._make_failing_impl()
+        fallback_route = Route(net=1, net_name="N1")
+        with (
+            mock.patch.object(pf, "_impl", fake),
+            mock.patch(
+                "kicad_tools.router.pathfinder.Router.route_auto", return_value=fallback_route
+            ) as py_auto,
+            mock.patch("kicad_tools.router.pathfinder.Router.route") as py_route,
+        ):
+            result = pf.route(start, end)
+
+        py_auto.assert_called_once()
+        py_route.assert_not_called()
+        kwargs = py_auto.call_args.kwargs
+        assert kwargs["threshold"] == 0
+        assert "per_net_timeout" in kwargs and "extra_goal_cells" in kwargs
+        assert result is fallback_route
+        assert pf.fallback_stats["fallback_count"] == 1
 
     def test_fallback_none_result_not_counted(self):
         """A Python fallback that finds no route returns None and is not counted.
