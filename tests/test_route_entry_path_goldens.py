@@ -103,7 +103,19 @@ GOLDENS_PATH = FIXTURE_DIR / "goldens.json"
 
 #: Flags shared by every run.  ``--backend cpp`` pins the engine the goldens
 #: were generated with; the test skips when it is not built.
-COMMON_ARGS = ("--seed", "1", "--deterministic-budget", "--no-cache", "--backend", "cpp")
+#: ``--checkpoint-interval 0`` takes wall-clock time out of the observation:
+#: with the default 30 s a slow run archives an extra
+#: ``out_checkpoint_unverified_<rand>.kicad_pcb`` and ``files`` differs (#7621).
+COMMON_ARGS = (
+    "--seed",
+    "1",
+    "--deterministic-budget",
+    "--no-cache",
+    "--backend",
+    "cpp",
+    "--checkpoint-interval",
+    "0",
+)
 
 ENTRY_PATHS: dict[str, tuple[str, ...]] = {
     "layer_escalation": (),
