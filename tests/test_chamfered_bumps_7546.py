@@ -308,19 +308,23 @@ class TestPlainBumpsAgreeWithPinnedKicadCli:
         pcb = _write(root, f"tuned_{n_end}", [_plain(p_out), _plain(n_out)])
         assert _kct(pcb) == pytest.approx(_kicad(cli, pcb), abs=1e-3)
 
-    def test_square_bump_is_the_divergence_chamfers_remove(self, pinned_cli):
-        """The pre-#7546 square loop: kicad-cli reads its flat tops as uncoupled."""
+    def test_square_bump_agrees(self, pinned_cli):
+        """The pre-#7546 square loop: both engines read its flat tops as uncoupled.
+
+        kct used to read it lower than kicad-cli; Issue #7565 closed that
+        (``docs/research/diffpair-primitive-pairing-spec.md``, group B).
+        """
         cli, root = pinned_cli
         p = _straight(1, "D_P", Y_P, 125.0)
         pcb = _write(root, "square", [p, _bump(0.2, 0.6, 0.8, 0.0)])
-        assert _kct(pcb) < _kicad(cli, pcb) - 0.1
+        assert _kct(pcb) == pytest.approx(_kicad(cli, pcb), abs=1e-3)
 
-    def test_chamfer_below_half_a_width_still_diverges(self, pinned_cli):
-        """Why the floor is half a width: 0.4 widths (0.08 mm) is not enough."""
+    def test_thin_chamfer_agrees(self, pinned_cli):
+        """A chamfer of 0.4 widths (0.08 mm) reads the same in both engines too."""
         cli, root = pinned_cli
         p = _straight(1, "D_P", Y_P, 125.0)
         pcb = _write(root, "thin_chamfer", [p, _bump(0.2, 0.6, 0.8, 0.4)])
-        assert _kct(pcb) < _kicad(cli, pcb) - 0.1
+        assert _kct(pcb) == pytest.approx(_kicad(cli, pcb), abs=1e-3)
 
 
 class TestBindingLimitFallsBackToChamferedPlainCopper:

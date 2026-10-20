@@ -42,9 +42,14 @@ two-net boards (``tests/test_diffpair_uncoupled_length_6443.py``):
   track copper that no longer has a partner beside it.
 
 :func:`measure_uncoupled` reproduces exactly that, so kct and kicad-cli agree
-on pass/fail per pair; the known divergence (arcs are not measured, and
-KiCad's number is known to misreport on meanders) is listed in
-``docs/guides/diff-pairs/08-uncoupled-length.md``.
+on pass/fail per pair; the known divergences (arcs are not measured, other-net
+copper overlapping a pair trace and non-rect pad edges are not modelled) are
+listed in ``docs/guides/diff-pairs/08-uncoupled-length.md``.
+
+Which primitives pair (Issues #6554, #7565) is written down, claim by claim with
+the probe board and kicad-cli figure behind each, in
+``docs/research/diffpair-primitive-pairing-spec.md``.  It comes from kicad-cli
+probes alone; no KiCad source was consulted.
 
 The limit
 =========
@@ -340,12 +345,44 @@ def _buried(seg: Segment, net: str, pads: Sequence[PadRect]) -> bool:
     for pad in pads:
         if pad.net != net or not _pad_on_layer(pad, seg[4]):
             continue
-        if all(
-            abs(lx) < pad.hx - _TOUCH_EPS and abs(ly) < pad.hy - _TOUCH_EPS
-            for lx, ly in (_pad_local(pad, seg[0], seg[1]), _pad_local(pad, seg[2], seg[3]))
-        ):
+        if _pad_contains(pad, seg[0], seg[1]) and _pad_contains(pad, seg[2], seg[3]):
             return True
     return False
+
+
+def _pad_contains(pad: PadRect, x: float, y: float) -> bool:
+    """True when ``(x, y)`` is inside the pad, with kicad-cli's rule for its edges.
+
+    Measured on kicad-cli 10.0.6 with a probe end placed on each edge of a
+    1 x 1 mm rect pad (spec group E): a point on the left or bottom edge (min x,
+    max y) is inside, one on the right or top edge (max x, min y) is outside.
+    That is a crossing-number test over the pad's corners in board axes, the
+    ray cast towards +x and the y interval half-open as ``(lo, hi]``.
+    Coordinates are snapped to nanometres so a shared edge compares equal.
+    """
+
+    def snap(v: float) -> int:
+        return round(v * 1e6)
+
+    corners = [
+        (
+            snap(pad.cx + sx * pad.hx * pad.cos + sy * pad.hy * pad.sin),
+            snap(pad.cy - sx * pad.hx * pad.sin + sy * pad.hy * pad.cos),
+        )
+        for sx, sy in ((-1, -1), (1, -1), (1, 1), (-1, 1))
+    ]
+    px, py = snap(x), snap(y)
+    inside = False
+    for (ax, ay), (bx, by) in zip(corners, corners[1:] + corners[:1], strict=True):
+        if (ay >= py) != (by >= py) and px < ax + (py - ay) * (bx - ax) / (by - ay):
+            inside = not inside
+    return inside
+
+
+def _track_contains(ob: Obstacle, x: float, y: float) -> bool:
+    """True when ``(x, y)`` lies in the copper of track/via ``ob`` (edge included)."""
+    c1, c2 = (ob[0], ob[1]), (ob[2], ob[3])
+    return _seg_dist(c1, c2, (x, y), (x, y)) <= ob[4] / 2.0 + _TOUCH_EPS
 
 
 def _blocked(a: Segment, b: Segment, t0: float, copper: Copper) -> bool:
@@ -354,8 +391,10 @@ def _blocked(a: Segment, b: Segment, t0: float, copper: Copper) -> bool:
     The probe runs from ``a``'s centreline, ``t0`` mm from its start, straight
     across to ``b``'s centreline.  Any other primitive on the layer (a track of
     either net or a third net, a via, a pad) whose copper reaches the probe
-    blocks the pairing -- except copper that overlaps ``a`` or ``b`` themselves,
-    which is part of the same conductor, not something standing between them.
+    blocks the pairing -- except copper that covers one END of the probe, the
+    point on ``a``'s or ``b``'s centreline: that is the same conductor as the
+    trace, not something standing between them.  It is the end that decides,
+    not whether the copper touches the trace somewhere else (spec group B).
     """
     lo = math.hypot(a[2] - a[0], a[3] - a[1])
     ux, uy = (a[2] - a[0]) / lo, (a[3] - a[1]) / lo
@@ -369,8 +408,6 @@ def _blocked(a: Segment, b: Segment, t0: float, copper: Copper) -> bool:
         return False
     minx, maxx = min(pa[0], pb[0]), max(pa[0], pb[0])
     miny, maxy = min(pa[1], pb[1]), max(pa[1], pb[1])
-    wa, wb = _width(a), _width(b)
-    a1, a2, b1, b2 = (a[0], a[1]), (a[2], a[3]), (b[0], b[1]), (b[2], b[3])
     for ob in copper.tracks:
         if ob[5] is not None and ob[5] != a[4]:
             continue
@@ -382,12 +419,9 @@ def _blocked(a: Segment, b: Segment, t0: float, copper: Copper) -> bool:
             or min(ob[1], ob[3]) - r > maxy
         ):
             continue
-        c1, c2 = (ob[0], ob[1]), (ob[2], ob[3])
-        if _seg_dist(c1, c2, a1, a2) < r + wa / 2.0 - _TOUCH_EPS:
+        if _track_contains(ob, *pa) or _track_contains(ob, *pb):
             continue
-        if _seg_dist(c1, c2, b1, b2) < r + wb / 2.0 - _TOUCH_EPS:
-            continue
-        if _seg_dist(c1, c2, pa, pb) < r - _TOUCH_EPS:
+        if _seg_dist((ob[0], ob[1]), (ob[2], ob[3]), pa, pb) < r - _TOUCH_EPS:
             return True
     for pad in copper.pads:
         if not _pad_on_layer(pad, a[4]):
@@ -400,9 +434,7 @@ def _blocked(a: Segment, b: Segment, t0: float, copper: Copper) -> bool:
             or pad.cy - reach > maxy
         ):
             continue
-        if _pad_seg_dist(pad, a1, a2) < wa / 2.0 - _TOUCH_EPS:
-            continue
-        if _pad_seg_dist(pad, b1, b2) < wb / 2.0 - _TOUCH_EPS:
+        if _pad_contains(pad, *pa) or _pad_contains(pad, *pb):
             continue
         if _pad_seg_dist(pad, pa, pb) <= _TOUCH_EPS:
             return True

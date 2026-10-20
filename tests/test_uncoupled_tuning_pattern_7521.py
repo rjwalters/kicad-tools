@@ -189,20 +189,18 @@ class TestAgreesWithPinnedKicadCli:
         assert kicad > 0.0
         assert _kct(pcb).uncoupled_mm == pytest.approx(kicad, abs=1e-3)
 
-    def test_plain_trombone_is_the_known_meander_divergence(self, pinned_cli):
-        """Pre-existing, documented divergence: not caused by tuning patterns.
+    def test_plain_trombone_agrees(self, pinned_cli):
+        """The tuner's trombone as *plain* copper reads the same in both engines.
 
-        As *plain* copper, the tuner's trombone (perpendicular legs) has its
-        flat tops counted uncoupled by kicad-cli 10.0.6 but coupled by kct
-        (``docs/guides/diff-pairs/08-uncoupled-length.md``: "KiCad's
-        ``diff_pair_uncoupled`` is known to misreport on meanders").  Written
-        as a tuning pattern the same bump is out of both measures and the two
-        engines agree (``test_same_figure[tuned-True]``).
+        Until Issue #7565 kct read it lower: the trombone's legs join the trace
+        they leave, and kct took copper touching a trace anywhere as the same
+        conductor, where kicad-cli decides at the pairing probe's ends
+        (``docs/research/diffpair-primitive-pairing-spec.md``, group B).
         """
         cli, root = pinned_cli
         p, n = _tuned_pair()
         pcb = _write(root, "tuned_plain", [p, _plain(n)])
-        assert _kct(pcb).uncoupled_mm < _kicad_figure(cli, pcb) - 0.1
+        assert _kct(pcb).uncoupled_mm == pytest.approx(_kicad_figure(cli, pcb), abs=1e-3)
 
 
 class TestGuardedTunerAgreesWithPinnedKicadCli:
