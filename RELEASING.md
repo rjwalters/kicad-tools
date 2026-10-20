@@ -142,6 +142,17 @@ The manual path still works and takes precedence: while a hand-opened
   `GITHUB_TOKEN` push or PR would not trigger it, and this repo doesn't let
   `GITHUB_TOKEN` open PRs anyway. The App has no `actions` read, so CI status
   is read with the workflow's `GITHUB_TOKEN` (`actions: read`).
+- **Token lifetime:** an App installation token expires one hour after it is
+  minted, but the gate waits up to 90 min for main CI and the merge step up to
+  150 min for the release PR's checks. The workflow therefore runs
+  `release_plan.py run --phase gate|report-gate|open|wait|finish` as separate
+  steps and mints a fresh token immediately before each step that writes
+  (report a red gate, push + open the PR, merge). The two waits use only
+  `GITHUB_TOKEN` reads, and `actions/checkout` persists no App credential: the
+  `open` step installs the fresh token as the push credential. A test in
+  `tests/test_release_plan.py` fails if a token-using step follows a wait without
+  a newer mint (#7559). Without `--phase`, `run` does everything in one process
+  with one token; use it only locally (`--mode dry-run`).
 
 Preview locally with no network writes:
 

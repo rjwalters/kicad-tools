@@ -1981,6 +1981,7 @@ def _centered_sub_host(
     loops: int,
     gap_mm: float,
     min_length_mm: float,
+    chamfer_mm: float = 0.0,
 ) -> tuple[Segment, list[Segment], list[Segment]]:
     """Split ``segment`` so a ``loops``-loop trombone sits in its middle.
 
@@ -1989,12 +1990,17 @@ def _centered_sub_host(
     ``sub_host`` is just long enough for the trombone generator to fit
     ``loops`` loops (its own 90% margin included), never shorter than
     ``min_length_mm``.  When the host has no slack the segment is returned
-    unchanged with empty leads.
+    unchanged with empty leads.  ``chamfer_mm`` is the corner chamfer of a
+    chamfered trombone (Issue #7546), whose loops are ``4 * chamfer_mm``
+    longer.
     """
     from .primitives import Segment as _Segment
 
     length = math.hypot(segment.x2 - segment.x1, segment.y2 - segment.y1)
     needed = ((2 * loops + 1) * gap_mm) / 0.9 + 1e-6
+    if chamfer_mm > 0.0:
+        # Issue #7546: each chamfered loop also spends 4 chamfers of host.
+        needed = ((2 * loops + 1) * gap_mm + 4 * loops * chamfer_mm) / 0.9 + 1e-6
     sub_length = max(needed, min_length_mm)
     if length <= 0.0 or sub_length >= length - 1e-6:
         return segment, [], []
