@@ -47,6 +47,15 @@ different copper).
 
 Updating the goldens
 --------------------
+The ``partial`` board's copper digest is architecture-dependent (#7621): the
+same topology lands with 0.1 mm-shifted jogs on arm64 (macOS) versus x86_64
+(Linux CI), so ``partial.*.copper.sha256`` is a ``{arch: sha256}`` mapping and
+the test compares against the host's entry.  ``--update`` rewrites only the
+host's key; CI's digest must come from the pinned x86_64 image, e.g. on a Mac
+``docker run --platform linux/amd64`` the image in ``.github/workflows/ci.yml``
+(``KICAD_IMAGE``), ``uv run kct build-native``, then ``--update``.  ``routable``
+digests are identical on both architectures and stay plain strings.
+
 A later #7377 PR must keep every golden identical, or change only the entries
 its PR description names as intended.  Unrelated router changes can also move
 the copper digests; regenerate on the branch and say why in the PR::
@@ -79,6 +88,7 @@ import contextlib
 import hashlib
 import io
 import json
+import platform
 import re
 import shutil
 import sys
@@ -93,7 +103,19 @@ GOLDENS_PATH = FIXTURE_DIR / "goldens.json"
 
 #: Flags shared by every run.  ``--backend cpp`` pins the engine the goldens
 #: were generated with; the test skips when it is not built.
-COMMON_ARGS = ("--seed", "1", "--deterministic-budget", "--no-cache", "--backend", "cpp")
+#: ``--checkpoint-interval 0`` takes wall-clock time out of the observation:
+#: with the default 30 s a slow run archives an extra
+#: ``out_checkpoint_unverified_<rand>.kicad_pcb`` and ``files`` differs (#7621).
+COMMON_ARGS = (
+    "--seed",
+    "1",
+    "--deterministic-budget",
+    "--no-cache",
+    "--backend",
+    "cpp",
+    "--checkpoint-interval",
+    "0",
+)
 
 ENTRY_PATHS: dict[str, tuple[str, ...]] = {
     "layer_escalation": (),
@@ -302,6 +324,25 @@ def _strip_notes(entry: dict) -> dict:
     return {k: v for k, v in entry.items() if not k.startswith("_")}
 
 
+# Boards whose copper digest depends on the host CPU architecture (#7621).
+ARCH_DEPENDENT_BOARDS = frozenset({"partial"})
+
+
+def _host_arch() -> str:
+    machine = platform.machine().lower()
+    return {"aarch64": "arm64", "amd64": "x86_64"}.get(machine, machine)
+
+
+def _resolve_for_host(golden: dict) -> dict:
+    """Collapse a per-architecture ``copper.sha256`` mapping to the host's digest."""
+    sha = golden.get("copper", {}).get("sha256")
+    if not isinstance(sha, dict):
+        return golden
+    arch = _host_arch()
+    resolved = sha.get(arch, f"<no golden for host arch {arch!r}; have {sorted(sha)}>")
+    return golden | {"copper": golden["copper"] | {"sha256": resolved}}
+
+
 # ---------------------------------------------------------------------------
 # The golden test
 # ---------------------------------------------------------------------------
@@ -328,7 +369,7 @@ def test_entry_path_matches_golden(board: str, path_key: str, tmp_path: Path) ->
             "headers"
         ]
 
-    assert observed == _strip_notes(golden), (
+    assert observed == _strip_notes(_resolve_for_host(golden)), (
         f"kct route {board}/{path_key} drifted from tests/fixtures/route_entry_paths/"
         "goldens.json.  If the change is intended, regenerate with "
         "`uv run python tests/test_route_entry_path_goldens.py --update` and name the "
@@ -444,6 +485,7 @@ _NOTES = {
 
 
 def regenerate() -> dict:
+    existing = _load_goldens() if GOLDENS_PATH.exists() else {}
     goldens: dict = {}
     for board in BOARDS:
         goldens[board] = {}
@@ -451,6 +493,12 @@ def regenerate() -> dict:
             with tempfile.TemporaryDirectory(prefix="route-golden-") as tmp:
                 entry = observe(board, path_key, Path(tmp))
             note = _NOTES.get((board, path_key))
+            if board in ARCH_DEPENDENT_BOARDS:
+                # Keep the other architectures' digests; replace only this host's.
+                prior = existing.get(board, {}).get(path_key, {}).get("copper", {}).get("sha256")
+                by_arch = dict(prior) if isinstance(prior, dict) else {}
+                by_arch[_host_arch()] = entry["copper"]["sha256"]
+                entry["copper"] = entry["copper"] | {"sha256": dict(sorted(by_arch.items()))}
             goldens[board][path_key] = ({"_note": note} if note else {}) | entry
             print(f"{board}/{path_key}: rc={entry['exit_code']} {entry['copper']}", file=sys.stderr)
     return goldens
