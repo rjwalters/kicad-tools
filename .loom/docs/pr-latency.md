@@ -25,8 +25,8 @@ answers *"what took long to **ship**?"* from the telemetry stream, and its own
 > telemetry stream starts at `sweep.started`; nothing in it carries the forge's
 > `created_at` for the issue, nor the times a label moved.
 
-There is **no durable label-transition store** anywhere in Loom. `forge_events`
-is a read-only wake signal, not a history. So every figure here is derived
+There is **no durable label-transition store** anywhere in Loom. no wake signal
+is a history. So every figure here is derived
 **live** from the forge's own `issues/<n>/timeline` on each run — the same shape
 `claim_reconciliation` already uses to decide verdict staleness. Building a
 transitions store first would have been a materially larger change than
