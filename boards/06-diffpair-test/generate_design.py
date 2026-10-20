@@ -159,7 +159,7 @@ def usb2_net_class() -> NetClassRouting:
         target_diff_impedance=90.0,  # Phase 3K: USB 2.0 90 Ohm diff
         impedance_tolerance_percent=15.0,
         # Issue #6443: no explicit skew.  The class declares high-speed USB2
-        # and takes the protocol default, 1.27 mm (TI SPRAAR7J App. A).  The
+        # and takes the protocol default, 1.0 mm (Q16 judgement value).  The
         # 3.0 mm it used to set had no source.
         pair_protocol="USB2_HS",
         length_critical=True,
