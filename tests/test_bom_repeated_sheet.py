@@ -76,3 +76,16 @@ def test_further_units_of_one_annotated_part_collapse(tmp_path):
     path = tmp_path / "multi_unit.kicad_sch"
     path.write_text(edited)
     assert len(extract_bom(str(path)).items) == base - 1
+
+
+def test_unparseable_subsheet_is_skipped_not_fatal(tmp_path):
+    """A corrupt child sheet drops out of the BOM; the rest still lists."""
+    import shutil
+
+    src = Path(__file__).parent / "fixtures" / "hierarchical"
+    dst = tmp_path / "hier"
+    shutil.copytree(src, dst)
+    good = {i.reference for i in extract_bom(str(dst / "root.kicad_sch")).items}
+    (dst / "sub_b.kicad_sch").write_text("(kicad_sch (version 2023 (garbage")
+    refs = {i.reference for i in extract_bom(str(dst / "root.kicad_sch")).items}
+    assert refs and refs < good

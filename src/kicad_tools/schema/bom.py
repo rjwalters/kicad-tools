@@ -388,10 +388,11 @@ def extract_bom_hierarchical(root_schematic: str) -> BOM:
     from ..lvs.board_lvs import _instance_reference_map, _walk_hierarchy_schematics
 
     # The root sheet must load: a missing or unparseable root is an error,
-    # not an empty BOM. Only failing sub-sheets are skipped.
+    # not an empty BOM. Only failing sub-sheets are skipped (with their
+    # subtree) by the walker.
     Schematic.load(root_schematic)
 
-    visits = list(_walk_hierarchy_schematics(Path(root_schematic)))
+    visits = list(_walk_hierarchy_schematics(Path(root_schematic), skip_unloadable=True))
     placements: dict[Path, int] = {}
     for visit in visits:
         key = visit.source.resolve()
@@ -399,11 +400,8 @@ def extract_bom_hierarchical(root_schematic: str) -> BOM:
 
     all_items: list[BOMItem] = []
     for visit in visits:
-        try:
-            sch = Schematic.load(str(visit.source))
-        except Exception:
-            # Skip sub-sheets that can't be loaded
-            continue
+        # The walker yields its own Schematic model; BOM needs this module's.
+        sch = Schematic.load(str(visit.source))
         # Only a re-placed sheet file needs per-placement renaming.
         renames = _instance_reference_map(visit) if placements[visit.source.resolve()] > 1 else {}
         power_by_key: dict[str, bool] = {}
