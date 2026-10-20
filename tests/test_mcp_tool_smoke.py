@@ -227,19 +227,21 @@ def _no_network(monkeypatch):
     monkeypatch.setattr(socket.socket, "connect_ex", blocked)
 
 
-# The only fixture files ``Fixtures`` copies and tools may read. Hashing a glob
-# would also pick up sidecars other workers or KiCad create (e.g. a gitignored
-# ``test_project.kicad_prl``) and flake under xdist (#7588).
-_FIXTURE_EXTS = ("kicad_pcb", "kicad_sch", "kicad_pro")
-
-
 def _fixture_hashes() -> dict[str, str]:
-    hashes: dict[str, str] = {}
-    for ext in _FIXTURE_EXTS:
-        p = FIXTURES / f"test_project.{ext}"
-        if p.is_file():
-            hashes[p.name] = hashlib.sha256(p.read_bytes()).hexdigest()
-    return hashes
+    """Hash every file under the fixture folder, so a new file is caught too.
+
+    Nothing is excluded: a tool (or any other test) that writes beside the
+    checked-in fixtures -- a ``.bak``, a kicad-cli ``.kicad_prl`` sidecar --
+    is a bug to fix by working on a ``tmp_path`` copy, not noise to filter.
+    #7588 was exactly that: ``test_pcb_manufacturing_export``'s gerber tests
+    ran kicad-cli on the checked-in board and it wrote ``test_project.kicad_prl``
+    here mid-run on another xdist worker.
+    """
+    return {
+        str(p.relative_to(FIXTURES)): hashlib.sha256(p.read_bytes()).hexdigest()
+        for p in sorted(FIXTURES.rglob("*"))
+        if p.is_file()
+    }
 
 
 def _describe_fixture_diff(before: dict[str, str], after: dict[str, str]) -> str:
