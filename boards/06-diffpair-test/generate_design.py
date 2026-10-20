@@ -4069,7 +4069,9 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # enforces.  Run the checker-limit skew tuner last, so it measures (and
     # adds serpentine length to) the copper that actually gets judged.  Each
     # insertion is clearance-checked with a byte-for-byte rollback, and the
-    # tuner never touches the longer leg.
+    # tuner never touches the longer leg.  Step 12 quantizes off-angle copper
+    # afterwards (each such segment becomes a longer dogleg), so the tuner
+    # measures the quantized length: MIPI_D0-'s 19-degree teeth grow 1.3 mm.
     print("\n6d. Diff-pair skew tuning (#7548)...")
     from kicad_tools.router.diffpair_detection import build_synth_routing, detect_diff_pairs
 
@@ -4080,7 +4082,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         net_to_class=net_to_class or None,
     )
     for (p_name, n_name), tune in router.apply_diffpair_length_tuning(
-        skew_pairs, verbose=False, engage="checker_skew_limit"
+        skew_pairs, verbose=False, engage="checker_skew_limit", quantized_lengths=True
     ).items():
         print(f"   {p_name}/{n_name}: {tune.reason} {tune.message}")
 

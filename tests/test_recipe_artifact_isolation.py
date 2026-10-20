@@ -47,7 +47,7 @@ def test_pair_improvement_cannot_hide_new_physical_error():
     identity = load("identity_allowance")
     key = "boards/06-diffpair-test/regression-fixture/diffpair_test_routed.kicad_pcb"
     found = [_v(rule, ident) for rule, ident in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS]
-    fixed = next(v for v in found if v["rule_id"] == "diffpair_length_skew")
+    fixed = next(v for v in found if v["rule_id"] == "diffpair_uncoupled_length")
     found.remove(fixed)
     found += [_v("via_in_pad", "USB3_TX1+"), _v("diffpair_length_skew", "NEW+/NEW-")]
     errors: dict[str, int] = {}
