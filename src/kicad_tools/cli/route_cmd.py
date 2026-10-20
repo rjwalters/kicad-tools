@@ -7774,6 +7774,27 @@ def _apply_plane_via_reservation(
     if getattr(args, "no_plane_via_reservation", False):
         return
     names = set(getattr(args, "_auto_skipped_net_names", None) or ())
+    # Issue #7569 (opt-in ``--reserve-skipped-plane-vias``): a power pour named
+    # in an explicit ``--skip-nets`` is not "auto-skipped"
+    # (``auto_skip_pour_nets`` reports only nets it added), yet it is
+    # connected after routing exactly the same way and needs the same via
+    # site.  Board 07's tighter DDR routing took the only site beside U1.36
+    # (+1V2) without it.  Ground nets stay out (their pads have many stitching
+    # sites, and reserving one per pad reshaped board 07's +1V8 pour);
+    # ``--nets`` route-only mode inverts ``skip_nets`` into every
+    # non-requested net, so it is not pour intent and is left alone.
+    if (
+        getattr(args, "reserve_skipped_plane_vias", False)
+        and not getattr(args, "_route_only_nets", None)
+        and getattr(args, "skip_nets", None)
+    ):
+        from kicad_tools.cli.stitch_cmd import _is_ground_net
+
+        names |= {
+            n
+            for n in (s.strip() for s in str(args.skip_nets).split(","))
+            if n and not _is_ground_net(n)
+        }
     if not names:
         return
     disposition = getattr(args, "_placement_disposition", None)
@@ -8979,6 +9000,10 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
             net_class_map=_pour_closer_net_class_map(router, args),
             # Issue #6401: weld at the via sites reserved before routing.
             preferred_sites=_reserved_plane_via_sites(args),
+            # Issue #7602: weld vias keep the router's mask-dam floor (#7322).
+            pad_edge_gap=float(
+                getattr(getattr(router, "rules", None), "min_via_pad_edge_gap", 0.0) or 0.0
+            ),
         )
         if not quiet:
             print("\n--- KiCad Oracle Completion (pour nets) ---")
@@ -18520,6 +18545,16 @@ def _route_parser() -> argparse.ArgumentParser:
             "its stub held free, so the post-route stitch/oracle pass can "
             "still connect it to its plane.  Pass this flag to restore "
             "pre-#6401 behaviour."
+        ),
+    )
+    parser.add_argument(
+        "--reserve-skipped-plane-vias",
+        action="store_true",
+        help=(
+            "Also hold the pre-route via-site reservation (Issue #6401) for "
+            "the non-ground pour nets named in --skip-nets.  By default only "
+            "nets kct route auto-skips are served, so a board that lists its "
+            "pours explicitly gets no reservation (Issue #7569)."
         ),
     )
     parser.add_argument(

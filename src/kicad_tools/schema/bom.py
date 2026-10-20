@@ -10,7 +10,10 @@ import csv
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from kicad_tools.sexp import SExp
+
 from .schematic import Schematic
+from .symbol import SymbolInstance
 
 
 @dataclass
@@ -29,6 +32,10 @@ class BOMItem:
     dnp: bool = False
     in_bom: bool = True
     on_board: bool = True
+    # True when the symbol's library definition carries KiCad's ``(power)``
+    # flag (bare, ``local`` or ``global``), read from the schematic's
+    # embedded ``lib_symbols`` (#7615).
+    is_power: bool = False
 
     # Additional properties from schematic
     properties: dict[str, str] = field(default_factory=dict)
@@ -37,16 +44,22 @@ class BOMItem:
     def is_power_symbol(self) -> bool:
         """Check if this is a power symbol (not a real component).
 
-        Covers KiCad's stock ``power:`` library and kicad-tools'
-        synthesized ``kicad_tools_pwr:`` library (used by
-        ``Schematic.add_pwr_symbol`` for non-stock rails like ``VIN``,
-        ``VMOTOR``, etc. — see #3291). Also recognizes the legacy
-        ``#PWR`` reference prefix as a fallback when a power symbol is
-        loaded from a file whose ``lib_id`` was stripped or rewritten.
+        KiCad's source of truth is the ``(power)`` flag on the library
+        symbol, so any symbol whose embedded ``lib_symbols`` entry carries
+        it counts, whatever its library is called -- project-library power
+        symbols and PWR_FLAGs included (#7615). Also covers KiCad's stock
+        ``power:`` library and kicad-tools' synthesized
+        ``kicad_tools_pwr:`` library (used by ``Schematic.add_pwr_symbol``
+        for non-stock rails like ``VIN``, ``VMOTOR``, etc. — see #3291).
+        As a fallback for files whose ``lib_symbols`` entry is missing, a
+        reference starting with ``#`` (KiCad's virtual-designator
+        convention: ``#PWR``, ``#FLG``, ...) also marks it virtual.
         """
-        if self.lib_id.startswith("power:") or self.lib_id.startswith("kicad_tools_pwr:"):
+        if self.is_power:
             return True
-        return bool(self.reference) and self.reference.startswith("#PWR")
+        if self.lib_id.startswith(("power:", "kicad_tools_pwr:")):
+            return True
+        return bool(self.reference) and self.reference.startswith("#")
 
     @property
     def is_virtual(self) -> bool:
@@ -229,15 +242,82 @@ class BOM:
         return BOM(items=filtered, source=self.source)
 
 
-def _bom_item_from_symbol(sym, reference: str) -> BOMItem | None:
+def _has_power_flag(lib_sym: SExp) -> bool:
+    """True when *lib_sym* has a direct ``(power ...)`` child."""
+    return any(not child.is_atom and child.name == "power" for child in lib_sym.children)
+
+
+def _direct_child(node: SExp, name: str) -> SExp | None:
+    """Return *node*'s first direct (non-descendant) child called *name*."""
+    return next((c for c in node.children if not c.is_atom and c.name == name), None)
+
+
+def _is_power_lib_symbol(schematic: Schematic, key: str, *, max_depth: int = 10) -> bool:
+    """True when the embedded ``lib_symbols`` entry *key* is a power symbol.
+
+    A definition counts when it carries a direct ``(power)`` child (bare,
+    ``local`` or ``global``) or ``(extends "Base")`` a definition that
+    does, resolved within the same embedded ``lib_symbols`` (#7615).
+    Returns ``False`` when *key* has no embedded definition; callers fall
+    back to the ``#`` reference convention for that case.
+    """
+    name = key
+    definition = schematic.get_lib_symbol(name)
+    for _ in range(max_depth):
+        if definition is None:
+            return False
+        if _direct_child(definition, "power") is not None:
+            return True
+        ext = _direct_child(definition, "extends")
+        base = ext.get_string(0) if ext is not None else None
+        if not base:
+            return False
+        # ``extends`` names the base without a library prefix; the base is
+        # embedded under the derived symbol's library (or, rarely, bare).
+        lib_prefix = name.split(":", 1)[0] + ":" if ":" in name else ""
+        name = f"{lib_prefix}{base}"
+        definition = schematic.get_lib_symbol(name)
+        if definition is None and lib_prefix:
+            name = base
+            definition = schematic.get_lib_symbol(name)
+    return False
+
+
+def _lib_symbol_key(sym: SymbolInstance) -> str:
+    """Key of *sym*'s embedded library definition.
+
+    KiCad keys ``lib_symbols`` by the placed symbol's ``(lib_name ...)``
+    when present (a locally modified copy), otherwise by its ``lib_id``.
+    """
+    sexp = sym._sexp
+    if sexp is not None:
+        lib_name = _direct_child(sexp, "lib_name")
+        if lib_name is not None and (value := lib_name.get_string(0)):
+            return value
+    return sym.lib_id
+
+
+def _bom_item_from_symbol(
+    sym,
+    reference: str,
+    schematic: Schematic,
+    power_by_key: dict[str, bool],
+) -> BOMItem | None:
     """Convert one placed symbol to a :class:`BOMItem` (``None`` for power symbols).
 
     ``reference`` is the designator of this *placement*, which differs from
     ``sym.reference`` when the symbol's sheet file is placed more than once.
+    ``schematic`` is the sheet the symbol lives on: its embedded ``lib_symbols``
+    decide ``is_power`` (#7615). ``power_by_key`` caches one walk per library
+    key and must not be shared across schematics.
     """
     # Skip power symbols
     if sym.lib_id.startswith("power:"):
         return None
+
+    key = _lib_symbol_key(sym)
+    if key not in power_by_key:
+        power_by_key[key] = _is_power_lib_symbol(schematic, key)
 
     item = BOMItem(
         reference=reference,
@@ -248,6 +328,7 @@ def _bom_item_from_symbol(sym, reference: str) -> BOMItem | None:
         dnp=sym.dnp,
         in_bom=sym.in_bom,
         on_board=sym.on_board,
+        is_power=power_by_key[key],
     )
 
     # Extract additional properties
@@ -272,9 +353,11 @@ def _bom_item_from_symbol(sym, reference: str) -> BOMItem | None:
 def extract_bom_from_schematic(schematic: Schematic) -> list[BOMItem]:
     """Extract BOM items from a single schematic."""
     items = []
+    # One ``get_lib_symbol`` walk per distinct library key, not per placement.
+    power_by_key: dict[str, bool] = {}
 
     for sym in schematic.symbols:
-        item = _bom_item_from_symbol(sym, sym.reference)
+        item = _bom_item_from_symbol(sym, sym.reference, schematic, power_by_key)
         if item is not None:
             items.append(item)
 
@@ -323,13 +406,17 @@ def extract_bom_hierarchical(root_schematic: str) -> BOM:
             continue
         # Only a re-placed sheet file needs per-placement renaming.
         renames = _instance_reference_map(visit) if placements[visit.source.resolve()] > 1 else {}
-        seen: set[str] = set()
+        power_by_key: dict[str, bool] = {}
+        first_unit: dict[str, int] = {}
         for sym in sch.symbols:
             ref = renames.get(sym.reference, sym.reference)
-            if ref and ref in seen:
-                continue  # further unit of an already-listed multi-unit part
-            seen.add(ref)
-            item = _bom_item_from_symbol(sym, ref)
+            # Collapse only a further *unit* of an annotated multi-unit part.
+            # Unannotated parts all share ``R?`` and each is its own line.
+            if ref and not ref.endswith("?"):
+                if ref in first_unit and sym.unit != first_unit[ref]:
+                    continue
+                first_unit.setdefault(ref, sym.unit)
+            item = _bom_item_from_symbol(sym, ref, sch, power_by_key)
             if item is not None:
                 all_items.append(item)
 

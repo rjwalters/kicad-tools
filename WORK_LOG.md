@@ -15,6 +15,10 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-20
 
+- **PR #7609**: fix: truncate GitHub Release body to stay under the 125k-char limit
+- **Issue #7608** (closed): release_tag.py finalize: GitHub Release body exceeds 125k-char limit (422), so v0.24.0 Release not created
+- **PR #7633**: test: black-box probes of KiCad tuning-pattern partner exclusion (Q31)
+- **Issue #7632** (closed): Q31 probe: does KiCad's tuning-pattern exclusion cover the partner leg beside a skew bump?
 - **PR #7622**: test: key partial route-entry goldens by CPU architecture
 - **PR #7570**: fix(router): pose search measures partner pads; board 06 USB3_RX1 keeps its corridor (#7491)
 - **Issue #7621** (closed): test: route entry-path goldens (partial-*) drift on Linux CI; every PR Test job red since #7599

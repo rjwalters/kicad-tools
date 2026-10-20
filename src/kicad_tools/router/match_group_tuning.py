@@ -1988,6 +1988,7 @@ def _centered_sub_host(
     gap_mm: float,
     min_length_mm: float,
     chamfer_mm: float = 0.0,
+    anchor: float = 0.5,
 ) -> tuple[Segment, list[Segment], list[Segment]]:
     """Split ``segment`` so a ``loops``-loop trombone sits in its middle.
 
@@ -1998,7 +1999,9 @@ def _centered_sub_host(
     ``min_length_mm``.  When the host has no slack the segment is returned
     unchanged with empty leads.  ``chamfer_mm`` is the corner chamfer of a
     chamfered trombone (Issue #7546), whose loops are ``4 * chamfer_mm``
-    longer.
+    longer.  ``anchor`` is the fraction of the host's slack left before the
+    trombone: ``0.5`` centres it, ``1.0`` seats it at the segment's second
+    endpoint (Issue #7548), and an empty lead is omitted.
     """
     from .primitives import Segment as _Segment
 
@@ -2012,7 +2015,7 @@ def _centered_sub_host(
         return segment, [], []
     ux = (segment.x2 - segment.x1) / length
     uy = (segment.y2 - segment.y1) / length
-    offset = (length - sub_length) / 2.0
+    offset = (length - sub_length) * anchor
     ax, ay = segment.x1 + ux * offset, segment.y1 + uy * offset
     bx, by = ax + ux * sub_length, ay + uy * sub_length
 
@@ -2028,11 +2031,11 @@ def _centered_sub_host(
             net_name=segment.net_name,
         )
 
-    return (
-        piece(ax, ay, bx, by),
-        [piece(segment.x1, segment.y1, ax, ay)],
-        [piece(bx, by, segment.x2, segment.y2)],
+    lead_in = [piece(segment.x1, segment.y1, ax, ay)] if offset > 1e-6 else []
+    lead_out = (
+        [piece(bx, by, segment.x2, segment.y2)] if length - offset - sub_length > 1e-6 else []
     )
+    return piece(ax, ay, bx, by), lead_in, lead_out
 
 
 # ---------------------------------------------------------------------------

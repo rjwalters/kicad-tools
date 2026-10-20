@@ -32,3 +32,47 @@ def test_singly_placed_sheets_unchanged():
     assert {i.reference for i in root_only} <= {i.reference for i in bom.items}
     refs = [i.reference for i in bom.items]
     assert len(refs) == len(set(refs))
+
+
+_UNNAMED_NET = Path(__file__).parent / "fixtures" / "unnamed_net_lvs" / "unnamed_net.kicad_sch"
+
+
+def _rewrite(tmp_path: Path, *edits: tuple[str, str]) -> Path:
+    text = _UNNAMED_NET.read_text()
+    for old, new in edits:
+        assert old in text
+        text = text.replace(old, new)
+    out = tmp_path / "rewritten.kicad_sch"
+    out.write_text(text)
+    return out
+
+
+def test_unannotated_parts_are_not_collapsed(tmp_path):
+    """Parts still referenced ``R?`` are distinct lines (Judge blocker 2)."""
+    base = len(extract_bom(str(_UNNAMED_NET)).items)
+    path = _rewrite(
+        tmp_path,
+        ('(property "Reference" "R1"', '(property "Reference" "R?"'),
+        ('(property "Reference" "R2"', '(property "Reference" "R?"'),
+        ('(property "Reference" "R3"', '(property "Reference" "R?"'),
+    )
+    assert len(extract_bom(str(path)).items) == base
+
+
+def test_further_units_of_one_annotated_part_collapse(tmp_path):
+    """Two units sharing an annotated reference yield a single BOM line."""
+    base = len(extract_bom(str(_UNNAMED_NET)).items)
+    text = _UNNAMED_NET.read_text()
+    # Turn R2 into unit 2 of R1: same reference, different unit.
+    r2_start = text.index('(property "Reference" "R2"')
+    unit_at = text.rindex("(unit 1)", 0, r2_start)
+    edited = (
+        text[:unit_at]
+        + "(unit 2)"
+        + text[unit_at + len("(unit 1)") :].replace(
+            '(property "Reference" "R2"', '(property "Reference" "R1"', 1
+        )
+    )
+    path = tmp_path / "multi_unit.kicad_sch"
+    path.write_text(edited)
+    assert len(extract_bom(str(path)).items) == base - 1

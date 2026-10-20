@@ -18,7 +18,9 @@ def fixture(*, crowded=False):
     sibling = Pad(4.825, 5, 1.025, 1.4, 2, "LV", ref="R1", pin="2", shape="roundrect")
     pads = [root, sibling]
     if crowded:
-        pads.append(Pad(1.175, 5, 1.025, 1.4, 3, "OTHER", ref="R2", pin="1"))
+        # Close enough that the 2.0 mm neck cannot clear this pad's TRUE corner
+        # (keep-outs follow the real pad outline, not its bounding square, #7503).
+        pads.append(Pad(1.7, 5, 1.025, 1.4, 3, "OTHER", ref="R2", pin="1"))
     pf = LatticePathfinder(
         [(0, 0), (9, 0), (9, 10), (0, 10)],
         pads,

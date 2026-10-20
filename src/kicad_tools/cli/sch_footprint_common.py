@@ -64,7 +64,10 @@ def should_skip_symbol(
 
 
 # Power/virtual library prefixes treated as footprint-less by design.
-# Kept in lock-step with ``BOMItem.is_power_symbol`` (schema/bom.py).
+# Mirrors the prefix rule of ``BOMItem.is_power_symbol`` (schema/bom.py).
+# Since #7615 the BOM predicate also reads the library ``(power)`` flag and
+# treats any ``#`` reference as virtual; this copy has not followed yet
+# (follow-up: #7637).
 _POWER_LIB_PREFIXES = ("power:", "kicad_tools_pwr:")
 
 
