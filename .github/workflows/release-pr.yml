@@ -4,7 +4,7 @@ name: Release PR
 #
 # All decisions live in scripts/release_plan.py (unit-tested in
 # tests/test_release_plan.py); this file only resolves the mode, mints the
-# App token and calls it. One run:
+# App token and calls it, one `--phase` per step. One run:
 #   - exits quietly when no PR merged since the latest v* tag (or nothing
 #     user-visible is waiting in changelog.d/ / [Unreleased]);
 #   - gates on the exact origin/main SHA: the newest CI main run's release-topic
@@ -14,6 +14,12 @@ name: Release PR
 #   - in `on` mode opens/updates ONE release/vX.Y.Z PR, waits (bounded) for its
 #     own checks, and merges it through the API. A red gate or red PR checks
 #     are reported on the "Automated release status" issue; nothing releases.
+#
+# Token lifetime (#7559): a GitHub App installation token expires after 1 h, but
+# the gate wait (main CI) and the PR-checks wait each run up to ~2 h. So the
+# job is phased and each App-token step mints its own token right before it
+# writes; the waits (gate, wait) use GITHUB_TOKEN reads only. A test pins that
+# no token-using step follows a wait without a fresh mint in between.
 #
 # Kill switch: repo variable AUTO_RELEASE = on | off | dry-run
 # (unset -> dry-run, so a fresh install only reports).
@@ -75,29 +81,18 @@ jobs:
           echo "AUTO_RELEASE='${AUTO_RELEASE:-}' -> mode=$mode"
           if [ "$mode" = off ]; then echo "AUTO_RELEASE=off: nothing to do" >> "$GITHUB_STEP_SUMMARY"; fi
 
-      - name: Mint loom-fleet-dispatch App token
-        id: app-token
-        if: steps.mode.outputs.mode == 'on'
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          app-id: ${{ secrets.LOOM_FLEET_DISPATCH_APP_ID }}
-          private-key: ${{ secrets.LOOM_FLEET_DISPATCH_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: ${{ github.event.repository.name }}
-          permission-contents: write
-          permission-pull-requests: write
-          permission-issues: write
-
-      # Full history + tags: the plan walks <latest v* tag>..origin/main. The
-      # persisted credential is the App token in `on` mode so `git push` of the
-      # release branch triggers ci.yml.
+      # Full history + tags: the plan walks <latest v* tag>..origin/main. Read-only
+      # GITHUB_TOKEN credential; the push in the `open` phase gets its own fresh
+      # App credential (below), since a token minted now would expire during the
+      # gate wait.
       - uses: actions/checkout@v7
         if: steps.mode.outputs.mode != 'off'
         with:
           ref: main
           fetch-depth: 0
           fetch-tags: true
-          token: ${{ steps.app-token.outputs.token || github.token }}
+          token: ${{ github.token }}
+          persist-credentials: false
 
       - uses: actions/setup-python@v7
         if: steps.mode.outputs.mode != 'off'
@@ -114,23 +109,104 @@ jobs:
           # Match ci.yml: keep the pre-v5 no-cache behavior.
           enable-cache: false
 
-      - name: Configure git identity (App bot)
-        if: steps.mode.outputs.mode == 'on'
+      # Phase 1: plan + gate. Waits up to 90 min for main CI. GITHUB_TOKEN only.
+      - name: Plan and gate (waits for main CI)
+        id: gate
+        if: steps.mode.outputs.mode != 'off'
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          GH_TOKEN: ${{ github.token }}
+          MODE: ${{ steps.mode.outputs.mode }}
+          LEVEL: ${{ inputs.level || 'auto' }}
+        run: |
+          python scripts/release_plan.py run --phase gate --state "$RUNNER_TEMP/release-state.json" \
+            --mode "$MODE" --level "$LEVEL"
+
+      # Phase 1b: a red gate is reported with a token minted just now.
+      - name: Mint App token (report red gate)
+        id: app-token-report
+        if: steps.mode.outputs.mode == 'on' && steps.gate.outputs.outcome == 'red'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.LOOM_FLEET_DISPATCH_APP_ID }}
+          private-key: ${{ secrets.LOOM_FLEET_DISPATCH_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-issues: write
+
+      - name: Report red gate
+        if: steps.mode.outputs.mode == 'on' && steps.gate.outputs.outcome == 'red'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TOKEN: ${{ steps.app-token-report.outputs.token }}
+        run: |
+          python scripts/release_plan.py run --phase report-gate --state "$RUNNER_TEMP/release-state.json" --mode on
+
+      # Phase 2: open / update the release PR. Fresh token, also used for the push.
+      - name: Mint App token (open release PR)
+        id: app-token-open
+        if: steps.mode.outputs.mode == 'on' && steps.gate.outputs.outcome == 'green'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.LOOM_FLEET_DISPATCH_APP_ID }}
+          private-key: ${{ secrets.LOOM_FLEET_DISPATCH_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+
+      - name: Configure git identity and push credential (App bot)
+        if: steps.mode.outputs.mode == 'on' && steps.gate.outputs.outcome == 'green'
+        env:
+          GH_TOKEN: ${{ steps.app-token-open.outputs.token }}
+          APP_SLUG: ${{ steps.app-token-open.outputs.app-slug }}
         run: |
           bot_login="${APP_SLUG}[bot]"
           bot_id="$(gh api "users/$bot_login" --jq '.id')"
           git config user.name "$bot_login"
           git config user.email "${bot_id}+${bot_login}@users.noreply.github.com"
+          # What actions/checkout would persist, but for the fresh token, so the
+          # release-branch push triggers ci.yml (a GITHUB_TOKEN push would not).
+          basic="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$basic"
+          git config --local http.https://github.com/.extraheader "AUTHORIZATION: basic $basic"
 
-      - name: Plan, gate and open / merge the release PR
-        if: steps.mode.outputs.mode != 'off'
+      - name: Open or update the release PR
+        id: open
+        if: steps.mode.outputs.mode == 'on' && steps.gate.outputs.outcome == 'green'
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TOKEN: ${{ steps.app-token.outputs.token }}
-          MODE: ${{ steps.mode.outputs.mode }}
-          LEVEL: ${{ inputs.level || 'auto' }}
+          RELEASE_TOKEN: ${{ steps.app-token-open.outputs.token }}
         run: |
-          python scripts/release_plan.py run --mode "$MODE" --level "$LEVEL"
+          python scripts/release_plan.py run --phase open --state "$RUNNER_TEMP/release-state.json" --mode on
+
+      # Phase 3: wait up to 150 min for the release PR's checks. GITHUB_TOKEN only.
+      - name: Wait for the release PR's checks
+        id: wait
+        if: steps.mode.outputs.mode == 'on' && steps.gate.outputs.outcome == 'green'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/release_plan.py run --phase wait --state "$RUNNER_TEMP/release-state.json" --mode on
+
+      # Phase 4: merge (or report), under a token minted after the wait.
+      - name: Mint App token (merge release PR)
+        id: app-token-merge
+        if: steps.mode.outputs.mode == 'on' && steps.gate.outputs.outcome == 'green'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.LOOM_FLEET_DISPATCH_APP_ID }}
+          private-key: ${{ secrets.LOOM_FLEET_DISPATCH_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+
+      - name: Merge the release PR
+        if: steps.mode.outputs.mode == 'on' && steps.gate.outputs.outcome == 'green'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TOKEN: ${{ steps.app-token-merge.outputs.token }}
+        run: |
+          python scripts/release_plan.py run --phase finish --state "$RUNNER_TEMP/release-state.json" --mode on

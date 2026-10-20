@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -363,13 +364,54 @@ def test_workflow_shape() -> None:
     assert [k for k, v in wf["permissions"].items() if v == "write"] == ["actions"]
     assert wf["concurrency"]["cancel-in-progress"] is False
     steps = wf["jobs"]["release-pr"]["steps"]
-    token = next(s for s in steps if s.get("id") == "app-token")
-    assert token["uses"].startswith("actions/create-github-app-token@")
-    assert len(token["uses"].split("@")[1].split()[0]) == 40  # pinned by SHA
-    assert "LOOM_FLEET_DISPATCH_APP_ID" in token["with"]["app-id"]
+    mints = [
+        s for s in steps if str(s.get("uses", "")).startswith("actions/create-github-app-token@")
+    ]
+    assert mints
+    for token in mints:
+        assert len(token["uses"].split("@")[1].split()[0]) == 40  # pinned by SHA
+        assert "LOOM_FLEET_DISPATCH_APP_ID" in token["with"]["app-id"]
+        assert "'on'" in token["if"]  # dry-run / off mint no App token
     final = steps[-1]
     assert final["env"]["GH_TOKEN"] == "${{ github.token }}"
-    assert "app-token" in final["env"]["RELEASE_TOKEN"]
+    assert "app-token-merge" in final["env"]["RELEASE_TOKEN"]
+
+
+def test_workflow_remints_the_app_token_after_every_wait() -> None:
+    """#7559: an App installation token dies after 1 h and the main-CI and PR-checks
+    waits each outlast that.  Every step using an App token must read a mint step that
+    runs *after* the latest preceding wait phase."""
+    steps = _workflow()["jobs"]["release-pr"]["steps"]
+    waits = [
+        i for i, s in enumerate(steps) if re.search(r"--phase (gate|wait)\b", s.get("run", ""))
+    ]
+    assert len(waits) == 2
+    mint_index = {
+        s["id"]: i for i, s in enumerate(steps) if "create-github-app-token@" in str(s.get("uses"))
+    }
+    users = 0
+    for i, step in enumerate(steps):
+        text = yaml.safe_dump({k: v for k, v in step.items() if k != "uses"})
+        refs = set(re.findall(r"steps\.([\w-]+)\.outputs\.(?:token|app-slug)", text))
+        for ref in refs:
+            users += 1
+            assert ref in mint_index and mint_index[ref] < i, (step.get("name"), ref)
+            last_wait = max((w for w in waits if w < i), default=-1)
+            assert mint_index[ref] > last_wait, f"{step.get('name')}: token minted before a wait"
+    assert users >= 4
+    # The waits themselves use only GITHUB_TOKEN reads.
+    for w in waits:
+        assert "RELEASE_TOKEN" not in steps[w].get("env", {})
+
+
+def test_workflow_checkout_persists_no_stale_app_credential() -> None:
+    checkout = next(
+        s
+        for s in _workflow()["jobs"]["release-pr"]["steps"]
+        if "actions/checkout" in str(s.get("uses"))
+    )
+    assert checkout["with"]["persist-credentials"] is False
+    assert "app-token" not in checkout["with"]["token"]
 
 
 # --- git fixtures -----------------------------------------------------------------
@@ -933,3 +975,110 @@ def test_cli_plan_json_against_this_repo() -> None:
     assert proc.returncode == 0, proc.stderr
     data = json.loads(proc.stdout)
     assert set(data) >= {"tag", "merged_prs", "level", "version", "stop", "section"}
+
+
+def test_phased_run_matches_single_process_run(repo: Path, quiet_checks, tmp_path: Path) -> None:
+    """The workflow's per-phase steps, joined by the state file, do what run() does."""
+    _merge_pr(repo, 12, "fix: y", {"changelog.d/40.fixed.md": "- y (Issue #40)."})
+    state_file = tmp_path / "state.json"
+    forge = FakeForge()
+    git = rp.Git(repo)
+    state = rp.RunState("on", "test", "auto", "2026-09-29")
+    rp.phase_gate(state, git=git, forge=forge, ref="origin/main", wait_ci=0, sleep=lambda _s: None)
+    assert state.outcome == "green"
+    state.save(state_file)
+    state = rp.RunState.load(state_file)
+    assert rp.phase_open(state, git=git, forge=forge).code == 0
+    state.save(state_file)
+    state = rp.RunState.load(state_file)
+    rp.phase_wait(state, forge=forge, wait_pr=0, sleep=lambda _s: None)
+    state.save(state_file)
+    state = rp.RunState.load(state_file)
+    assert rp.phase_finish(state, forge, 0).code == 0
+    kinds = [c[0] for c in forge.calls]
+    assert kinds == ["create_pr", "merge_pr"]
+
+
+def test_phased_red_gate_reports(repo: Path, quiet_checks) -> None:
+    _merge_pr(repo, 12, "fix: y", {"changelog.d/40.fixed.md": "- y (Issue #40)."})
+    forge = FakeForge(ci="red")
+    state = rp.RunState("on", "test", "auto", "2026-09-29")
+    rp.phase_gate(
+        state, git=rp.Git(repo), forge=forge, ref="origin/main", wait_ci=0, sleep=lambda _s: None
+    )
+    assert state.outcome == "red"
+    assert rp.phase_report_gate(state, forge).code == 1
+    assert [c[0] for c in forge.calls] == ["report"]
+
+
+# --- body budget (Issue #7561) ------------------------------------------------------
+
+
+def _big_plan(section: str, n_prs: int = 485) -> Any:
+    plan = rp.Plan(
+        sha="c" * 40,
+        tag="v0.23.0",
+        current="0.23.0",
+        prs=list(range(7000, 7000 + n_prs)),
+        first_parent=[],
+        fragments=[],
+        has_content=True,
+    )
+    plan.decision = rp.LevelDecision(level="minor", reasons=["added fragments"])
+    plan.version = "0.24.0"
+    plan.section = section
+    return plan
+
+
+def _section(n_bullets: int) -> str:
+    bullet = "- **Thing {i}** (Issue #{i}). " + "word " * 100 + "\n  continued line.\n"
+    entries = "\n".join(bullet.format(i=i) for i in range(n_bullets))
+    return f"## [0.24.0] - 2026-10-19\n\n### Added\n\n{entries}"
+
+
+def test_huge_section_body_fits_with_marker_and_pointer() -> None:
+    section = _section(400)
+    assert len(section) > 200_000
+    body = rp.pr_body(_big_plan(section), rp.GateResult(notes=["main CI green"]))
+    assert len(body) <= rp.BODY_BUDGET < rp.GITHUB_BODY_LIMIT
+    assert body.startswith(rp.AUTO_MARKER)
+    assert "**Level: minor**" in body and "main CI green" in body
+    url = "https://github.com/rjwalters/kicad-tools/blob/release/v0.24.0/CHANGELOG.md"
+    assert url in body
+    assert "485 PRs" in body and "#7000," not in body
+    # Cut at a bullet boundary: the last kept bullet is complete.
+    kept = body.split("---\n\n", 1)[1].split("\n\n_Section truncated")[0]
+    assert kept.rstrip().endswith("continued line.")
+    assert "## [0.24.0]" in kept
+
+
+def test_small_section_body_is_unchanged() -> None:
+    section = _section(3)
+    body = rp.pr_body(_big_plan(section, n_prs=3), rp.GateResult())
+    assert body.endswith("---\n\n" + section)
+    assert "#7000, #7001, #7002" in body
+    assert "truncated" not in body
+
+
+def test_fit_body_clips_long_comments_at_a_line() -> None:
+    long = "\n".join(f"- problem {i}" for i in range(20_000))
+    clipped = rp.fit_body(long)
+    assert len(clipped) <= rp.BODY_BUDGET
+    assert "truncated" in clipped
+    assert rp.fit_body("short") == "short"
+
+
+def test_forge_writes_are_held_to_the_budget() -> None:
+    sent: list[dict[str, Any]] = []
+
+    class Capture(rp.Forge):
+        def api(self, path: str, *, method: str = "GET", body: Any = None, write: bool = False):
+            sent.append(body)
+            return {"number": 1}
+
+    forge = Capture("o/r")
+    huge = "x\n" * 100_000
+    forge.create_pr("release/v0.24.0", "t", huge)
+    forge.edit_pr(1, "t", huge)
+    forge.comment(1, huge)
+    assert all(len(b["body"]) <= rp.BODY_BUDGET for b in sent)

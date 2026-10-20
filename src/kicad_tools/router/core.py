@@ -681,7 +681,10 @@ def segment_via_counts(
 #: Why a segment's unequal vias could not be avoided, by segment status.
 _VIA_MISMATCH_CAUSE = {
     "uncoupled-fallback": "no fallback candidate had via parity",
-    "hybrid": "the hybrid's single-ended legs found no via-equal pair",
+    "hybrid": (
+        "the hybrid's single-ended legs found no via-equal pair no worse on skew "
+        "and length (see the hybrid parity line)"
+    ),
 }
 
 
@@ -712,7 +715,7 @@ def pair_via_mismatch_warnings(
         span = f"{pc.pad_p_a.ref}.{pc.pad_p_a.pin}->{pc.pad_p_b.ref}.{pc.pad_p_b.pin}"
         lines.append(
             f"  WARNING: diff pair {pc.pair_name} {span} legs have unequal via "
-            f"counts (P={got[0]}, N={got[1]}); {cause}"
+            f"counts (P={got[0]}, N={got[1]}); pair-rule failure: {cause}"
         )
     return lines
 
@@ -5572,6 +5575,12 @@ class Autorouter:
                             f"  Diff-pair hybrid parity (lattice) {pc.pair_name} {label}: "
                             f"{parity_note}"
                         )
+            # Issue #7093: the post-route via-parity pass on extra-pad
+            # attachments (one line per pair it was offered to).
+            extra_log = getattr(pf, "extra_parity_log", {}) or {}
+            for note in extra_log.values():
+                if isinstance(note, str):
+                    print(f"  Diff-pair extra parity (lattice) {note}")
             self._print_pair_threshold_report()
             # Issue #6373: a pair routed by the uncoupled fallback is a
             # diff-pair WARNING (coupling / skew not guaranteed), not an open

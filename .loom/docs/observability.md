@@ -1275,7 +1275,7 @@ transition.
 |---|---|---|
 | `fleet.<condition>` (`dispatch-halted`, `roles-persistent`, `output-missing`; `star-backlog` retired by #11510, `capacity-limited` by #12406) | `fleet_alert` | condition started (and each reminder) / cleared |
 | `daemon.down` (critical) | the watchdog, a separate process | recovery exhausted / any tick ending the outage |
-| `watchdog.peer-coord-degraded` (critical) | the watchdog | coordination degraded / green |
+| `watchdog.peer-coord-degraded` (critical) | the watchdog (see note below) | coordination degraded / green |
 | `safehouse.unreachable` (critical) | narration sink state | unreachable over 5 minutes / reconnected |
 | `fleet.floor-unsatisfiable` | `auto_update` | the floor ERROR line / floor met |
 | `fleet.floor-malformed` | fleet-sync pass | `loom_min_version` malformed / a valid (or no) floor |
@@ -1288,6 +1288,14 @@ transition.
 | `version.config-rejected` | pause roll | `pauseRoll.*` tuning rejected / accepted (each roll and each start) |
 | `llm-monitor.stale` | llm-monitor `ranking.json` | older than 30 minutes (or unreadable) on two reads 5 minutes apart / fresh (no file: nothing) |
 | `install.<invariant>` (key = workspace root) | `install_self_check`, when enabled | violation standing after the tick / gone, or the check off |
+
+**Peer-coordination visibility tradeoff (#12818).** The watchdog's peer-claim
+coordination check no longer files, comments on, reopens or closes any GitHub
+issue; it reports to the watchdog log (`DIVERGENCE` / `[OK]`) and to the
+`watchdog.peer-coord-degraded` alert above. GitHub notifications were removed
+ahead of verified SigNoz visibility of this signal, which #12167 tracks
+separately; that export is neither claimed nor required by this change. Legacy
+`.watchdog-peer-coord-escalated` / `-cooldown` files are never read or written.
 
 `tokens-zero-healthy` is not sent: loom-ui derives `provider-pool-exhausted`
 from the daemon's pool gauge itself. Each transition is offered to the OTLP

@@ -120,6 +120,11 @@ The manual path still works and takes precedence: while a hand-opened
       full `uv lock` rewrites hundreds of marker lines across uv versions;
       `uv lock --check` is re-run on the result;
     - a WORK_LOG entry.
+  - Body: the level, its reasons, the gate notes, the merged PRs and the
+    section. Every body the workflow posts stays under 60,000 characters
+    (GitHub rejects more than 65,536 with a 422, #7561). A long release lists
+    a PR count instead of every number, and its section is cut at a bullet
+    with a link to the full `CHANGELOG.md` on `release/vX.Y.Z`.
   - At most one is open at a time. The same version is force-pushed and
     edited in place. A new version supersedes the old PR, which is closed and
     its branch deleted.
@@ -137,6 +142,17 @@ The manual path still works and takes precedence: while a hand-opened
   `GITHUB_TOKEN` push or PR would not trigger it, and this repo doesn't let
   `GITHUB_TOKEN` open PRs anyway. The App has no `actions` read, so CI status
   is read with the workflow's `GITHUB_TOKEN` (`actions: read`).
+- **Token lifetime:** an App installation token expires one hour after it is
+  minted, but the gate waits up to 90 min for main CI and the merge step up to
+  150 min for the release PR's checks. The workflow therefore runs
+  `release_plan.py run --phase gate|report-gate|open|wait|finish` as separate
+  steps and mints a fresh token immediately before each step that writes
+  (report a red gate, push + open the PR, merge). The two waits use only
+  `GITHUB_TOKEN` reads, and `actions/checkout` persists no App credential: the
+  `open` step installs the fresh token as the push credential. A test in
+  `tests/test_release_plan.py` fails if a token-using step follows a wait without
+  a newer mint (#7559). Without `--phase`, `run` does everything in one process
+  with one token; use it only locally (`--mode dry-run`).
 
 Preview locally with no network writes:
 

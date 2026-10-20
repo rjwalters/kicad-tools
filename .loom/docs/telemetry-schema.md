@@ -1805,6 +1805,7 @@ Every other name is a **`Gauge`**:
 | `loom.queue.host_shard` (`shard_count`, #12827) | shard index | every work-finder tick whose dispatch plan has sharding configured and this host's index known; absent otherwise (never a `0` for "unsharded") |
 | `loom.dispatch.idle_slots` | count | every work-finder tick with an occupancy reading |
 | `loom.dispatch.busy_slots` (`role`), `loom.dispatch.role_max_concurrent`, `loom.dispatch.role_idle_slots` | count | every work-finder tick |
+| `loom.dispatch.running_oldest_age_sec` (`role`, `pool="step"`), `loom.dispatch.running_by_age` (`role`, `pool="step"`, `age`), #12873 | seconds, count | every work-finder tick (default 60 s) once a registry has published its steps; the oldest age only for a role with a live step |
 
 `loom.queue.issues` (Issue #8852, phase 2) is the ready-queue depth. It has
 one point per queue disposition, labelled `state` (`running`, `ready`,
@@ -1892,6 +1893,8 @@ resource `host.id`), never labelled by issue:
 | `loom.dispatch.busy_slots` | `Gauge` | `{slot}` | `role` ∈ `sweep`, or a role-runner role (`champion`, `curator`, `judge`, `doctor`, `auditor`, `hermit`, `guide`, `architect`, or a configured role) | busy agent slots at the end of a tick (#11847). `sweep` is the tick's issue-sweep occupancy, the reading `idle_slots` comes from, so `busy_slots{role="sweep"} + idle_slots = max_concurrent` (more only while occupancy is over the cap). Each role is the role-runner agents in flight for it, all repos and lanes; every built-in role reports, `0` included |
 | `loom.dispatch.role_max_concurrent` | `Gauge` | `{slot}` | — | the role-runner agent ceiling: the largest `autonomous.roleRunner.maxConcurrent` (env tier first) among the tick's repos with the role runner enabled, `0` when none is |
 | `loom.dispatch.role_idle_slots` | `Gauge` | `{slot}` | — | `role_max_concurrent − Σ busy_slots{role≠"sweep"}`, floored at `0`. The host's agent capacity is `max_concurrent + role_max_concurrent` = `Σ busy_slots + idle_slots + role_idle_slots` |
+| `loom.dispatch.running_oldest_age_sec` | `Gauge` | `s` | `role` (a step role name), `pool="step"` | seconds since the oldest live step of that role started (its registry entry's `started_at`), at the tick (#12873). **No point** for a role with no live step (never `0`). A roll-resumed step's age restarts at the resume. Issue sweeps (`role="sweep"`) and role-runner agents have no age series |
+| `loom.dispatch.running_by_age` | `Gauge` | `{slot}` | `role` (a step role name), `pool="step"`, `age` ∈ `lt_15m`, `15m_1h`, `1h_4h`, `ge_4h` | live steps per running-age bucket (#12873); each edge is an exclusive upper bound (a step exactly 15 min old is `15m_1h`). Every step role × bucket reports, `0` included, once any registry has published (the `busy_slots{pool="step"}` rule), so `Σ_age running_by_age{role}` = `busy_slots{role, pool="step"}`. A start ahead of the host clock reads age `0`. At most 5 roles × 5 series per host |
 
 Forge label-stage dwell (`loom.forge.stage_dwell`, `loom.forge.stage_items`)
 is no longer exported (#12316): dwell is a consumer's computation over the
@@ -2099,7 +2102,7 @@ spawn attempts:
 | `loom.dispatch.merge_deferred` | Merge steps (`champion_merge`, `champion_hold_reevaluate`) held back because their repo had a Champion merge in flight, this host's, a peer's, or one this tick spawned (#12494). They leave the pool before the draw, so they cost no draw and no pass; before #12494 they were `merge_in_flight` passes (count) |
 | `loom.dispatch.passes` | Passes by reason as comma-joined `reason=count` pairs in reason order (`claim_lost=3,backstop_hold=1`). The reasons are an open set, so they share one value; absent when nothing passed |
 | `loom.dispatch.budget` | The slots the tick could fill: its free slots (count) |
-| `loom.dispatch.stop` | Why the draw loop stopped, a closed set: `filled` (every free slot was filled), `no_slots`, `pool_drained` (nothing left to draw), `pass_limit` (the tick's 32 passes were spent), `slot_draws` (a slot gave up after 8 draws), `spawn_hold` (see `loom.dispatch.spawn_hold`), `captain_cap` (the fleet-dispatch captain refused a claim with `cap`, so every repo left the draw, #12450), `weight_overflow` |
+| `loom.dispatch.stop` | Why the draw loop stopped, a closed set: `filled` (every free slot was filled), `no_slots`, `pool_drained` (nothing left to draw), `pass_limit` (the tick's 32 passes were spent), `slot_draws` (a slot gave up after 8 draws), `spawn_hold` (see `loom.dispatch.spawn_hold`), `captain_cap` (the fleet-dispatch captain refused a claim with `cap`, so every repo left the draw, #12450; only an older captain sends `cap`, since #12864 the captain applies no capacity limit), `weight_overflow` |
 
 A `claim_lost` refusal (a peer claimed the item first) is still counted in
 `loom.dispatch.passes`, but the first 16 in a tick spend neither the tick's
@@ -2276,6 +2279,28 @@ GitHub rate limit (Issue #10022):
 | `loom.fleet_dispatch.refusals` | `Sum` (delta) | `{claim}`; labels `kind` (`claim` / `refuse`), `reason` | claims the captain refused, by reason (`held` / `grace` / `not_eligible` / `cap`, and `no_progress_cooldown` for a refusal by a no-progress hold, #12541; the wire reason is `cooldown`, #12551), and workers' `refuse` calls, by token (#12449) |
 | `loom.fleet_dispatch.expired` | `Sum` (delta) | `{assignment}`; label `kind` (`assignment` / `hold`) | captain rows that reached their TTL: a granted or live row nobody renewed, released or refused, or a `claim_lost` hold that ran out (#12449) |
 | `loom.fleet_dispatch.claim_lost_after_grant` | `Sum` (delta) | `{claim}` | grants whose worker then lost the forge order (`refuse` with `claim_lost`): the split-brain and attended-claim measure (#12449) |
+| `loom.fleet_dispatch.rows` | `Gauge` | `{row}`; labels `host`, `state` ∈ `granted` / `live`; or `state="held"` with no `host` | the captain's assignment rows, read from its table after expiry on every server sweep (every 15 s, #12873). Per worker host, for every host that has a row **or** a fresh heartbeat, `0` included; a host that stopped heartbeating keeps its `rows` points while its rows last (they are the stale claims). Held rows have no host, so `held` is one fleet-wide point, `0` included. `rows{host, state="live"}` − `live_reported{host}` is a host's stale-claim count |
+| `loom.fleet_dispatch.free_slots_reported` | `Gauge` | `{slot}`; label `host` | the `free_slots` of the host's last heartbeat (#12873) |
+| `loom.fleet_dispatch.live_reported` | `Gauge` | `{step}`; label `host` | how many steps the host's last heartbeat listed (#12873) |
+| `loom.fleet_dispatch.oldest_live_age_sec` | `Gauge` | `s`; label `host` | seconds since the earliest `started_at` in the host's last heartbeat, on the captain's wall clock (#12873). **No point** when that heartbeat carried no `started_at` (an older worker, or nothing live). Cross-host clock skew (NTP, seconds) is negligible at minute scale; a start ahead of the captain reads `0` |
+
+The three `*_reported` / `oldest_live_age_sec` gauges are emitted only for a
+host whose last heartbeat is within `HEARTBEAT_FRESH` (120 s, four missed
+30 s heartbeats). A roster host that never heartbeated, or whose last
+heartbeat is stale, gets **no** reported point, never a `0`: the captain's
+table never forgets a host, so without the bound a dead host would export a
+frozen `free_slots` forever. `host` is the caller's roster host id
+(identified by the server, never worker-supplied text), so the captain adds
+at most roster hosts × 5 + 1 series. None of these gauges depends on a
+capacity check (the captain applies none, #12864), and the captain needs no
+work finder to emit them: they ride the server's sweep task.
+
+The heartbeat's `LiveStep` carries an optional `started_at` (RFC 3339 UTC,
+the worker registry entry's `started_at`; #12873), serde `default` and
+omitted when absent. It is additive in both directions: a new captain reads
+an older worker's step as `None` (so no `oldest_live_age_sec` for it), and an
+older captain ignores the field (the wire contract has no
+`deny_unknown_fields`).
 
 `resource` ∈ `core`, `graphql` (`search` too on a bucket point). On an
 ambient-login host's points `account` is the validated `gh` login, else
