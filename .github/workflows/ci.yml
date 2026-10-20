@@ -2747,27 +2747,20 @@ jobs:
     # Because of that divergence there was no validation path for board-05
     # routing work (#3775, #3766) -- this job provides one by regenerating +
     # re-routing board 05 INSIDE the CI container and hard-asserting
-    # blocking_incomplete_count <= 7.
+    # blocking_incomplete_count == 0.
     #
-    # PHASE 5 LOWERED THE FRESH-REGEN FLOOR FROM 9-10 TO 6; THRESHOLD IS NOW 7
-    # (issue #4479).  The committed on-disk artifact is hand-verified at 0
-    # blocking (PR #4003, DRC-clean + LVS-clean), but that gold board is NOT
-    # reproducible from a fully-unattended regen yet.  A fresh full re-route
-    # inside CI (timeout raised to 90 min so it runs to completion) MEASURED
-    # blocking_incomplete_count = 6 on commit 2de4089a, with Phase 5's
-    # Kelvin-star rooting + batch-completion + rescue-revival wiring active
-    # (PR #4527 / #4532; CI run 30666373355).  The residual cohort is
-    # ISENSE_A-, ISENSE_B-, ISENSE_C-, PHASE_A, PHASE_B, PHASE_C.  That is a
-    # large win over the pre-Phase-5 floor of 9-10 (nondeterministic run-to-run
-    # per #3836), though still short of the committed artifact's 0.
-    # --max-blocking is therefore set to 7 -- one net of safety margin above the
-    # measured CI ceiling of 6, the same "+1 above the observed ceiling"
-    # methodology the previous loose bound of 11 (10 + 1) used -- so the gate
-    # locks in Phase 5's gain (11 -> 7) while tolerating the historical
-    # run-to-run nondeterminism.  The gate stays a hard assertion (no
-    # continue-on-error) and still catches GROSS regressions (> 7).  Tighten
-    # further toward 0 as #4548 (escape-corridor reservation, targeting the
-    # PHASE_A/B/C south-escape congestion) and the ISENSE -leg follow-up land.
+    # THE GATE IS ZERO (issue #7547).  A fresh CI regen of board 05 measured
+    # blocking_incomplete_count = 0 (blocking nets: none) in every main run
+    # that reached the gate from 2026-10-18 to 2026-10-19 -- 12 runs, e.g.
+    # 39137057066, 39201331009, 39313274747, 39339125038 (four runs on
+    # 2026-10-18 failed in the regen step and never reached the gate).  The
+    # previous bound of 7 (one net above the Phase-5 CI ceiling of 6, issue
+    # #4479; ISENSE_A-/B-/C-, PHASE_A/B/C on commit 2de4089a, CI run
+    # 30666373355) would have hidden up to 7 regressions, so it is gone: ANY
+    # blocking incomplete net now fails the job.  If a net must be tolerated
+    # again, list it by name with an open tracker (identity-keyed, see
+    # scripts/ci/identity_allowance.py, #7359) -- do not restore a bare count.
+    # The gate is a hard assertion (no continue-on-error).
     #
     # Unlike boards 00-03/06/07, board 05 has NO committed output/lvs.json on
     # origin/main, so the --lvs-only e2e asserter is not reusable.  The
@@ -2776,12 +2769,10 @@ jobs:
     # NetStatusAnalyzer.blocking_incomplete_count (which mirrors the
     # check_routed_drc advisory/plane-residual filtering).
     #
-    # The --max-blocking threshold defaults to 7 (one net above the
-    # Phase-5-measured CI ceiling of 6) and is a CLI arg so #4548 / the ISENSE
-    # -leg follow-up can tighten it toward 0 as they land.  <= 7 catches GROSS
-    # regressions without flaking on board-05's historical nondeterminism.
+    # The --max-blocking threshold defaults to 0 (issue #7547) and is passed
+    # explicitly below.
     #
-    # Pre-Phase-5 history (why the bound was 11 before):
+    # Pre-#7547 history (the bound was 11, then 7 after Phase 5, #4479):
     # Issue #3836: the wall-clock re-route was nondeterministic at 9-10 blocking
     # (observed main=9, PR #3835 branch=10 twice, identical router code); a
     # default of 9 sat exactly on the boundary and red-lighted unrelated PRs, so
@@ -2818,11 +2809,11 @@ jobs:
     # is set generously to 90 min to let the full route + rescue loop + gate
     # run to completion and emit a REAL blocking-net count.  With the timeout
     # raised, the run completed and MEASURED 6 blocking nets with Phase 5 active
-    # (down from the pre-Phase-5 9-10), so the gate is set to <= 7 to clear the
-    # measured ceiling without flaking -- see the floor note above.  This is
+    # (down from the pre-Phase-5 9-10); current main measures 0, so the gate
+    # is == 0 -- see the floor note above.  This is
     # intentionally higher than every other job (next-highest is the 45-min
     # Test job) because no other job runs the board-05 rescue loop from clean.
-    name: Board 05 Routing Regression (blocking <= 7)
+    name: Board 05 Routing Regression (blocking == 0)
     needs: [changes, kicad_pin]
     # Issue #5743 item 4 (operator ruling 2026-10-17): main verification
     # runs only -- boards 01-05 do not run on pull requests; boards 00
@@ -2878,23 +2869,18 @@ jobs:
             /tmp/board05-ci || true
           test -f /tmp/board05-ci/bldc_controller_routed.kicad_pcb
 
-      - name: Assert blocking-net baseline (<= 7, Phase-5 measured + 1 margin)
-        # Hard gate: fails the job (exit 2) if blocking_incomplete_count > 7.
-        # 7 is one net above the Phase-5-measured CI ceiling of 6 (issue #4479):
-        # board-05's CI re-route reaches 6 blocking (ISENSE_A-/B-/C-, PHASE_A/B/C)
-        # with Phase 5 active and diverges from the committed 0-blocking artifact
-        # (PR #4003).  The threshold uses the same "+1 above the observed
-        # ceiling" methodology the pre-Phase-5 bound of 11 (10 + 1) used, so it
-        # locks in Phase 5's gain while tolerating board-05's historical
-        # run-to-run nondeterminism.  The gate still catches GROSS regressions
-        # (> 7).  Tighten toward 0 as #4548 (escape-corridor reservation) and the
-        # ISENSE -leg follow-up land.  A LOCAL macOS run would report more
-        # blocking nets -- the documented host-vs-CI divergence (#3822), not a
-        # job defect.  No continue-on-error: this stays a hard gate.
+      - name: Assert blocking-net baseline (== 0)
+        # Hard gate: fails the job (exit 2) if blocking_incomplete_count > 0.
+        # Every main run that reached this step on 2026-10-18..19 measured 0
+        # (issue #7547), matching the committed 0-blocking artifact (PR #4003),
+        # so the old Phase-5 bound of 7 (#4479) is retired.  A LOCAL macOS run
+        # may report blocking nets -- the documented host-vs-CI divergence
+        # (#3822), not a job defect.  No continue-on-error: this stays a hard
+        # gate.
         run: |
           set -euo pipefail
           uv run python scripts/ci/check_board_05_blocking.py \
-            --max-blocking 7 \
+            --max-blocking 0 \
             /tmp/board05-ci/bldc_controller_routed.kicad_pcb
 
   board-04-end-to-end:
