@@ -57,10 +57,12 @@ zero-disagreement gate above -- so the ledger widens nothing for groups 6-10.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 
 from tests.conformance.adapters.grid_cpp import GridCppAdapter
-from tests.conformance.oracle import kicad_cli_available
+from tests.conformance.oracle import OracleResult, kicad_cli_available, run_oracle
 from tests.conformance.report import MIGRATED_GROUPS
 
 requires_kicad_cli = pytest.mark.skipif(not kicad_cli_available(), reason="kicad-cli not installed")
@@ -100,6 +102,51 @@ def requires_adapter(adapter: object) -> pytest.MarkDecorator:
         not available,
         reason=f"adapter {name} is unavailable here (run `uv run kct build-native`)",
     )
+
+
+CorpusOracle = Callable[..., OracleResult]
+"""``corpus_oracle(seed, refill=...)``: the cached kicad-cli measurement."""
+
+
+@pytest.fixture(scope="session")
+def corpus_oracle(tmp_path_factory: pytest.TempPathFactory) -> CorpusOracle:
+    """kicad-cli's measurement of one generated corpus case, once per session.
+
+    ``generate_case(seed)`` is deterministic (``test_determinism.py``), so the
+    board written for a seed is the same board for every item that asks about
+    it, and kicad-cli's verdicts on it are the same verdicts.  Before this
+    cache (Issue #5240) every ``(adapter, seed)`` item of
+    ``test_corpus.test_adapter_agrees_with_kicad_cli`` wrote that board again
+    and launched its own kicad-cli over it: 60 DRC processes for three distinct
+    boards, ~220 s of the CI Test job's serial conformance step.
+
+    Only the measurement is shared.  Each item still builds its own case and
+    asks its own consumer, and each still asserts against the full result.
+    The re-measurement property the per-item runs implied -- kicad-cli gives
+    the same answer twice -- is asserted directly, from independent runs, by
+    ``test_corpus.test_report_regenerates_byte_identically``, which does not
+    use this cache.
+
+    A failed measurement is not cached: the exception propagates and the next
+    item measures again, exactly as before.  Results are frozen dataclasses,
+    and the boards they point at live in a session temp directory that no
+    test writes to.
+    """
+    from tests.conformance.board import write_case
+    from tests.conformance.generator import generate_case
+
+    results: dict[tuple[int, bool], OracleResult] = {}
+
+    def measure(seed: int, *, refill: bool) -> OracleResult:
+        key = (seed, refill)
+        if key not in results:
+            state = "refilled" if refill else "asis"
+            directory = tmp_path_factory.mktemp(f"corpus-seed{seed}-{state}")
+            board = write_case(generate_case(seed), directory)
+            results[key] = run_oracle(board.pcb_path, refill=refill, work_dir=directory)
+        return results[key]
+
+    return measure
 
 
 CONSUMER_XFAIL_REASON = "consumer verdict is report-only until that consumer's epic phase (#5509)"
