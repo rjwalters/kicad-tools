@@ -21217,8 +21217,24 @@ class Autorouter:
         # net (unrouted ones included) gets an entry.
         net_clearance_mm: dict[int, float] = {}
         _clearance_names: dict[int, str] = {}
+        # Issue #7594: names are resolved from the routes first.  Pour /
+        # auto-skipped nets (board 07's GND, +3V3, +3V3_A, ...) are absent
+        # from ``net_names`` and their pads are neutralised to net 0, so the
+        # only carrier of their name is their preserved Route.  Without it
+        # those ids fell to the 0.15 mm Default class although the class map
+        # puts them in AUX (0.175 mm), which ``kct check`` and kicad-cli
+        # enforce.
+        for _rid, _route in routes_by_net.items():
+            if _rid and _route.net_name:
+                _clearance_names.setdefault(_rid, _route.net_name)
         for _pad in self.pads.values():
-            _clearance_names.setdefault(_pad.net, getattr(_pad, "net_name", "") or "")
+            # Net 0 is no-net copper and always takes the Default class.  A
+            # neutralised pour pad still carries its old name ("GND"), so
+            # taking net 0's name from whichever such pad iterates first
+            # would make its class depend on pad order.
+            if _pad.net:
+                _clearance_names.setdefault(_pad.net, getattr(_pad, "net_name", "") or "")
+        _clearance_names.setdefault(0, "")
         _default_class = (getattr(self, "net_class_map", None) or {}).get("Default")
         _default_class_mm = float(getattr(_default_class, "clearance", 0.0) or 0.0)
         if _default_class_mm <= 0.0:
@@ -21231,6 +21247,9 @@ class Autorouter:
         # Default for a net the authored source holds to a stricter class.
         _authored_floors = getattr(self.rules, "net_clearance_floors", None) or {}
         for _nid in set(self.net_names) | set(routes_by_net) | set(_clearance_names):
+            if not _nid:
+                net_clearance_mm[_nid] = _default_class_mm
+                continue
             _c = self._net_class_clearance_mm(_nid, _clearance_names.get(_nid, ""))
             _c = max(_c, float(_authored_floors.get(_nid, 0.0) or 0.0))
             net_clearance_mm[_nid] = _c if _c > 0.0 else _default_class_mm
