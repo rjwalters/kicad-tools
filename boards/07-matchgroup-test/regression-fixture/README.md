@@ -732,6 +732,26 @@ back-to-back on one host (C++ backend, `PYTHONHASHSEED=42`):
 | `bd3c8fb10` (pre-#7163) | 30/31 | 30/31 | 0 | 507 s | 992 s |
 | DQS sized (#7319) | 30/31 | 30/31 | 0 | 358 s | 702 s |
 
+#### Blocking reason for `TMDS_D0_N` (Issue #7554, re-measured on 30/31)
+
+Re-measured on the 30/31 layout (`main` @ `fd8a974cd`, C++ backend,
+`PYTHONHASHSEED=42`, `generate_design.py <dir> --step all --seed 42`).
+The negotiated router's access-loss witness names the cause:
+
+```
+TMDS_D0_N sealed in at iteration[1]: U4.B2 has no legal exit, closed by
+TMDS_D1_P, TMDS_D2_P, U4.A2, U4.B1, U4.B3, U4.C2
+```
+
+Targeted rip-up (`TMDS_D0_P`, `TMDS_D1_P/N`, `TMDS_D2_P/N`) and two
+relief-rescue rounds resolved 0/1: the victims cannot be re-landed.  The
+pad is enclosed by neighbouring BGA pads plus the committed escapes of two
+other TMDS legs, so the open is escape-bound (a 1:1 trade), not
+budget-starved.  No router knob closes it; it needs a placement change or
+joint TMDS escape-corridor allocation (#3673), tracked in #7557.  The run
+was cut at a 600 s wall-clock cap, after the witness, so no final reach
+figure was taken; the 30/31 figure above is unchanged.
+
 The committed `net_class_map.json` here still describes the committed
 routed artifact (DQS 0.150/0.100, MIPI/HDMI gap 0.100); it is regenerated
 with that artifact under #6730 / #7283, not by the gate.
