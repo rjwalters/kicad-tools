@@ -15,6 +15,11 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-20
 
+- **PR #7622**: test: key partial route-entry goldens by CPU architecture
+- **PR #7570**: fix(router): pose search measures partner pads; board 06 USB3_RX1 keeps its corridor (#7491)
+- **Issue #7621** (closed): test: route entry-path goldens (partial-*) drift on Linux CI; every PR Test job red since #7599
+- **PR #7620**: chore: re-point DQS and TMDS_D1 skew allowances to via-imbalance tracker
+- **Issue #7613** (closed): Board 07 fixture: DQS and TMDS_D1 diff-pair skew declined by gap tightening (declined:skew)
 - **PR #7607**: ci: raise Test job timeout to 120 min (stopgap for #5240)
 - **PR #7606**: fix: stop merge_collinear_same_width fusing collinear fold-backs
 - **PR #7596**: fix: tuner neighbour clearance honours authored net-class floors
