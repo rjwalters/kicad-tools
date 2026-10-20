@@ -61,6 +61,7 @@ Measured experiments on `kct route`; several record negative results.
 | [Rip-up](kct-route-ripup-experiment.md) | KRT-style sequential N+1 rip-up: no gain |
 | [Expand, route, shrink](expand-route-shrink-experiment.md) | Routing an expanded placement then shrinking it back |
 | [Diff-pair bench, phase 0](diffpair-bench-phase0.md) | Diff-pair benchmark baseline |
+| [Diff-pair primitive pairing spec](diffpair-primitive-pairing-spec.md) | Black-box, probe-only spec of how kicad-cli pairs P/N primitives into coupled length (Issue #7565) |
 | [Diff-pair skew compensation](diffpair-skew-compensation.md) | Sourced skew limits and uncoupled-length budgets for the diff-pair skew fixer |
 | [Bundle crossing report](bundle-crossing-report.md) | Measured hit and false-alarm counts |
 | [Pad-budget via footprint](pad-budget-via-footprint-6415.md) | Via-footprint charging on board 05 |

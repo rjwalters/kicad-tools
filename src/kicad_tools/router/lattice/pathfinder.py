@@ -2827,12 +2827,19 @@ class LatticePathfinder:
         pair_nets: set[int],
         committed: CommittedCopper,
         half: float = 0.0,
+        clearance: float | None = None,
     ) -> list[Pt] | None:
         """Dogleg from the exact pad position to an emitted leg endpoint.
 
-        Ordinary single-trace clearance (``extra = 0``) but with BOTH pair
-        nets as "self" -- the attach necessarily runs between the pair's own
-        pads.  Returns the accepted polyline (pad first) or ``None``.
+        Ordinary single-trace clearance but with BOTH pair nets as "self" --
+        the attach necessarily runs between the pair's own pads.  Returns the
+        accepted polyline (pad first) or ``None``.
+
+        Issue #7543: committed copper of nets OUTSIDE the pair is also judged
+        at the leg's TRUE half-width ``half`` and class ``clearance``
+        (:meth:`_pair_leg_clear`).  Measured only as a board-default track, a
+        wide pair class (board 06rf's 0.275 mm USB3) could attach 0.0375 mm
+        closer to a neighbouring pair's via than its copper allowed.
         """
         from ..pairplan.attach import dogleg_attach_candidates
         from .coupled import pads_block_segment_grown
@@ -2849,7 +2856,9 @@ class LatticePathfinder:
                     blocker = "pad"
                     ok = False
                     break
-                if not committed.seg_clear(a, b, layer, net):
+                if not committed.seg_clear(a, b, layer, net) or not self._pair_leg_clear(
+                    committed, a, b, layer, pair_nets, half, clearance
+                ):
                     blocker = "committed-copper"
                     ok = False
                     break
@@ -2868,6 +2877,39 @@ class LatticePathfinder:
         # ``pair-pad-attach`` decline says which check fired, and on what.
         self._attach_blocker = f"{pad.ref}.{pad.pin} on layer {layer}: {blocker}"
         return None
+
+    @staticmethod
+    def _pair_leg_clear(
+        committed: CommittedCopper,
+        a: Pt,
+        b: Pt,
+        layer: int,
+        pair_nets: set[int],
+        half: float,
+        clearance: float | None,
+    ) -> bool:
+        """Leg ``a-b`` clears OTHER nets' committed copper at its true width (#7543).
+
+        The ordinary ``committed.seg_clear(a, b, layer, net)`` gate measures a
+        coupled leg as a board-default track, so a wider pair class shipped
+        too close to a neighbouring pair's via (board 06rf: a 0.275 mm
+        USB3_RX1+ leg 0.126 mm from USB3_TX1+'s gateway via, 0.150 required).
+        This adds the true-width check against every net outside the pair:
+        the grown predicate's centreline is the board-default half-width, so
+        the surcharge is the width difference plus any class clearance above
+        the base.  The pair's own partner copper (gateway via, fan) stays
+        with the ordinary gate -- it is held to the intra-pair gap, not the
+        net clearance.  ``half <= 0`` (legacy callers) adds nothing.
+        """
+        if half <= 0.0:
+            return True
+        from .coupled import committed_seg_clear_grown
+
+        clr = committed.clearance if clearance is None else clearance
+        surcharge = max(0.0, half - committed.trace_half) + max(0.0, clr - committed.clearance)
+        if surcharge <= 0.0:
+            return True
+        return committed_seg_clear_grown(committed, a, b, layer, pair_nets, surcharge)
 
     def _emit_leg(
         self, net: int, net_name: str, points: list[Pt], layer_idx: int, trace_w: float
@@ -3126,13 +3168,14 @@ class LatticePathfinder:
                 (net_p, pc.pad_p_a, pc.pad_p_b, leg_p),
                 (net_n, pc.pad_n_a, pc.pad_n_b, leg_n),
             ):
+                leg_clr = self._conn_geometry(pc.net_class, net)[1]
                 attach_a = self._pair_attach(
-                    pad_a, leg[0], layer, net, pair_nets, committed, trace_w / 2.0
+                    pad_a, leg[0], layer, net, pair_nets, committed, trace_w / 2.0, leg_clr
                 )
                 if attach_a is None:
                     return None, "pair-pad-attach"
                 attach_b = self._pair_attach(
-                    pad_b, leg[-1], layer, net, pair_nets, committed, trace_w / 2.0
+                    pad_b, leg[-1], layer, net, pair_nets, committed, trace_w / 2.0, leg_clr
                 )
                 if attach_b is None:
                     return None, "pair-pad-attach"
@@ -3146,13 +3189,21 @@ class LatticePathfinder:
                 # static masks (pair pads are "self") + committed copper at
                 # NORMAL single-trace clearance.  The fat centerline
                 # guarantees the parallel body; this catches miter pokes at
-                # sharp turns and the attach doglegs.
+                # sharp turns and the attach doglegs.  Issue #7543: at the
+                # leg's TRUE width and class against other nets' committed
+                # copper -- measured as a board-default track, board 06rf's
+                # 0.275 mm USB3_RX1+ leg shipped 0.126 mm from USB3_TX1+'s
+                # gateway via (0.150 required).
                 for a, b in zip(full, full[1:], strict=False):
                     if dist(a, b) <= 1e-9:
                         continue
                     if pads_block_segment_grown(self.obstacles, a, b, layer, pair_nets, 0.0):
                         return None, "pair-leg-blocked"
                     if not committed.seg_clear(a, b, layer, net):
+                        return None, "pair-leg-blocked"
+                    if not self._pair_leg_clear(
+                        committed, a, b, layer, pair_nets, trace_w / 2.0, leg_clr
+                    ):
                         return None, "pair-leg-blocked"
                     # Issue #4507: the fat centerline SEARCH deliberately skips
                     # HV pairwise widening (see ``coupled.committed_seg_clear_

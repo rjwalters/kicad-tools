@@ -4058,6 +4058,26 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     print("\n6c. Diff-pair gap tightening (#7344)...")
     router.apply_diffpair_gap_tightening()
 
+    # Issue #7548: the pairs route single-ended, so their legs differ in length
+    # and every declared pair exceeds the ``max_skew_mm`` that ``kct check``
+    # enforces.  Run the checker-limit skew tuner last, so it measures (and
+    # adds serpentine length to) the copper that actually gets judged.  Each
+    # insertion is clearance-checked with a byte-for-byte rollback, and the
+    # tuner never touches the longer leg.
+    print("\n6d. Diff-pair skew tuning (#7548)...")
+    from kicad_tools.router.diffpair_detection import build_synth_routing, detect_diff_pairs
+
+    class_routing, net_to_class = build_synth_routing(getattr(router, "net_class_map", None) or {})
+    skew_pairs = detect_diff_pairs(
+        net_names=router.net_names,
+        net_class_routing=class_routing or None,
+        net_to_class=net_to_class or None,
+    )
+    for (p_name, n_name), tune in router.apply_diffpair_length_tuning(
+        skew_pairs, verbose=False, engage="checker_skew_limit"
+    ).items():
+        print(f"   {p_name}/{n_name}: {tune.reason} {tune.message}")
+
     stats = router.get_statistics()
     print(
         f"\n7. Final: {stats['routes']} routes / {stats['segments']} segments / {stats['vias']} vias"

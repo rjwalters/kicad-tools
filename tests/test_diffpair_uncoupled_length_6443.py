@@ -350,27 +350,29 @@ PINNED.update(
     }
 )
 
-#: Black-box kicad-cli probes (inputs and KiCad's figures only) that kct's
-#: probe-derived model does not yet reproduce.  KiCad's figure is checked on
-#: its own; kct's is a strict xfail until the black-box spec of Issue #7565
-#: lands.  kct reads 4.0 on each of these.
-DIVERGENT = {
-    "touching_partner_mid_run": (
-        [P20, _NB, seg((0, 1.0), (3, 2.0), "T_N")],
-        20.0,
-        "an N stub joined to N1 mid-run, crossing between the traces",
-    ),
-    "third_net_touching_partner": (
-        [P20, _NB, seg((0, 1.0), (3, 2.0), "X")],
-        20.0,
-        "the same stub on a third net",
-    ),
-    "pad_top_edge": (
-        [P20, _NB, pad((0, 0.5), "T_P", (1.0, 1.0), shape="rect")],
-        20.0,
-        "P runs along the top edge of its own rect pad",
-    ),
-}
+# Issue #7565: probes that pinned a divergence until the black-box spec
+# (docs/research/diffpair-primitive-pairing-spec.md) was written.  Copper that
+# merely touches a trace elsewhere is still an obstruction at the probe, and a
+# pad whose edge lies on the P trace's centreline does not cover the probe's end.
+PINNED.update(
+    {
+        "touching_partner_mid_run": (
+            [P20, _NB, seg((0, 1.0), (3, 2.0), "T_N")],
+            20.0,
+            "an N stub joined to N1 mid-run, crossing between the traces",
+        ),
+        "third_net_touching_partner": (
+            [P20, _NB, seg((0, 1.0), (3, 2.0), "X")],
+            20.0,
+            "the same stub on a third net",
+        ),
+        "pad_top_edge": (
+            [P20, _NB, pad((0, 0.5), "T_P", (1.0, 1.0), shape="rect")],
+            20.0,
+            "P runs along the top edge of its own rect pad",
+        ),
+    }
+)
 
 
 @pytest.mark.parametrize("case", sorted(PINNED))
@@ -380,24 +382,6 @@ def test_kct_measures_uncoupled_length_as_kicad_does(case, tmp_path) -> None:
     assert kct_uncoupled(pcb) == pytest.approx(expected, abs=1e-3)
     # ... and KiCad reports the same figure.
     assert kicad_uncoupled(_kicad_cli(), pcb) == pytest.approx(expected, abs=1e-3)
-
-
-@pytest.mark.parametrize("case", sorted(DIVERGENT))
-def test_kicad_figure_on_divergent_probe(case, tmp_path) -> None:
-    """KiCad's own figure on the probes kct does not yet match (pinned measurement)."""
-    items, expected, _why = DIVERGENT[case]
-    pcb = write_board(tmp_path / "t.kicad_pcb", items)
-    assert kicad_uncoupled(_kicad_cli(), pcb) == pytest.approx(expected, abs=1e-3)
-
-
-@pytest.mark.xfail(
-    strict=True, reason="Issue #7565: known divergence from kicad-cli pending a black-box spec"
-)
-@pytest.mark.parametrize("case", sorted(DIVERGENT))
-def test_kct_matches_kicad_on_divergent_probe(case, tmp_path) -> None:
-    items, expected, _why = DIVERGENT[case]
-    pcb = write_board(tmp_path / "t.kicad_pcb", items)
-    assert kct_uncoupled(pcb) == pytest.approx(expected, abs=1e-3)
 
 
 def test_measure_uncoupled_is_exact_for_collinear_overlap() -> None:
@@ -824,22 +808,9 @@ FIXTURE_06_KICAD = {
     "MIPI_CLK": 24.0083,
     "MIPI_D0": 22.4092,
 }
-#: Pairs where kct's probe-derived model reads differently (kct: USB2_D 8.423,
-#: USB3_RX1 49.422, USB3_TX2 4.068, MIPI_D0 22.197 mm).  Known divergence,
-#: tracked by Issue #7565.
-FIXTURE_06_DIVERGENT = frozenset({"USB2_D", "USB3_RX1", "USB3_TX2", "MIPI_D0"})
-_DIVERGES = pytest.mark.xfail(
-    strict=True, reason="Issue #7565: known divergence from kicad-cli pending a black-box spec"
-)
 
 
-@pytest.mark.parametrize(
-    "base",
-    [
-        pytest.param(b, marks=_DIVERGES) if b in FIXTURE_06_DIVERGENT else b
-        for b in FIXTURE_06_KICAD
-    ],
-)
+@pytest.mark.parametrize("base", list(FIXTURE_06_KICAD))
 def test_kct_equals_kicad_on_board_06_regression_fixture(base) -> None:
     """kct's figure against KiCad's on each pair of the board-06 fixture (Issue #6554)."""
     pcb = PCB.load(str(REPO / FIXTURE_06))

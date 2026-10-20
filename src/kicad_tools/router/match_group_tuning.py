@@ -2406,10 +2406,10 @@ def _post_insertion_clearance_detail_group(
         net_clearance_mm: Optional ``{net_id: class_clearance_mm}`` map
             (Issue #6969).  When supplied, every foreign item in passes
             1, 2, 3 and 5 is held to the pairwise KiCad rule
-            ``max(pass floor, neighbour's class clearance)`` instead of the
-            pass floor alone, so a group whose own class is looser than a
-            neighbour's class cannot place copper inside the neighbour's
-            clearance.  The candidate's diff-pair partner is exempt (it is
+            ``max(pass floor, candidate's class, neighbour's class)``
+            instead of the pass floor alone, so neither side's class
+            minimum can be undercut (Issue #7423 added the candidate's own
+            class).  The candidate's diff-pair partner is exempt (it is
             held to ``intra_pair_clearance_mm`` by pass 4).  ``None`` keeps
             the single-threshold behaviour.
 
@@ -2421,13 +2421,22 @@ def _post_insertion_clearance_detail_group(
     from .clearance_shapes import copper_gap, pad_shape, segment_shape, via_shape
 
     partner_net_id = (diff_pair_partners or {}).get(candidate_net_id)
+    # Issue #7423: the candidate's own class is half of KiCad's pairwise rule.
+    # The pass floors come from the router-global rule, which the caller only
+    # ever relaxes toward the group's class (never raises), so on a board whose
+    # global rule (0.15 mm) is below the group's class (0.175 mm) a meander
+    # could land 0.154 mm from a foreign via whose net resolved to the global
+    # rule -- inside the candidate's own class minimum that ``kct check`` and
+    # kicad-cli enforce (board 07 DQ15 vs a GND via).
+    own_class_mm = (net_clearance_mm or {}).get(candidate_net_id, 0.0)
 
     def _floor(base_mm: float, other_net_id: int | None) -> float:
         # Issue #6969: KiCad holds two items to the larger of their two
-        # class clearances; ``base_mm`` is already this group's floor.
+        # class clearances, max(class(candidate), class(other)); ``base_mm``
+        # is the pass floor.
         if not net_clearance_mm or other_net_id is None or other_net_id == partner_net_id:
             return base_mm
-        return max(base_mm, net_clearance_mm.get(other_net_id, 0.0))
+        return max(base_mm, own_class_mm, net_clearance_mm.get(other_net_id, 0.0))
 
     # Pass 1: intra-group.  Every other group member.
     for other_id in group_net_ids:

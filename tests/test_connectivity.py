@@ -1,5 +1,6 @@
 """Tests for net connectivity validation."""
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -228,7 +229,9 @@ BOARD05_PARITY_MIN_KICAD = (10, 0, 2)
         ),
     ],
 )
-def test_native_fleet_relationship_parity(relative_board: str, expected: int) -> None:
+def test_native_fleet_relationship_parity(
+    relative_board: str, expected: int, tmp_path: Path
+) -> None:
     """The native-gated path reproduces committed board03/05 relationships."""
     from kicad_tools.cli.runner import find_kicad_cli
 
@@ -244,7 +247,16 @@ def test_native_fleet_relationship_parity(relative_board: str, expected: int) ->
                 "KiCad < 10.0.2 reports one extra zone_island relationship "
                 "on board 05 (58 vs 57); CI's 10.0.6 matches (#6101, #5993)"
             )
-    board = Path(__file__).parents[1] / relative_board
+    src = Path(__file__).parents[1] / relative_board
+    # Validate a tmp copy (with its project/rules sidecars): kicad-cli writes
+    # a .kicad_prl beside its input, which must never land in tests/fixtures/
+    # (#7588).
+    board = tmp_path / src.name
+    shutil.copy(src, board)
+    for suffix in (".kicad_pro", ".kicad_dru"):
+        sidecar = src.with_suffix(suffix)
+        if sidecar.exists():
+            shutil.copy(sidecar, board.with_suffix(suffix))
     result = ConnectivityValidator(board).validate(reconcile_native=True)
 
     assert len(result.issues) == expected
