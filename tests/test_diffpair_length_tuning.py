@@ -1131,6 +1131,73 @@ class TestUncoupledGuardAndOvershootRevert:
         assert n_out is n
         assert max(self._figures(p_out, n_out)) <= 10.0
 
+    def test_untagged_fold_guard_reads_kicads_figure(self):
+        """The guard reads kicad-cli's figure on a plain (untagged) fold (#6554).
+
+        Same geometry as the test above: five 4.88 mm P legs 0.3 mm apart, N
+        straight 25 mm at y = -1, no tuning-pattern tags.  Pinned kicad-cli
+        10.0.6 (``kicad/kicad:10.0``) reads 20.72 mm: the nearer legs stand
+        between N and the farther ones.  A guard that ignored the pair's own
+        copper read 1.20 mm (every leg coupled), so this fails without it.
+        """
+        from kicad_tools.router.diffpair_length_tuning import _pair_uncoupled_mm
+
+        folded = self._folded_route(1, "USB_D+", y=0.0, legs=5, leg_mm=4.88)
+        n = _straight_route(2, "USB_D-", 25.0, y=-1.0)
+        assert all(s.tuning_pattern is None for s in folded.segments)
+        assert _pair_uncoupled_mm(folded, n) == pytest.approx(20.72, abs=1e-3)
+        assert _pair_uncoupled_mm(n, folded) == pytest.approx(20.72, abs=1e-3)
+
+    def test_coupled_candidate_metrics_reads_kicads_figure(self):
+        """#6858's candidate selector scores plain routes with the same figure."""
+        from kicad_tools.router.diffpair_routing import _coupled_candidate_metrics
+
+        folded = self._folded_route(1, "USB_D+", y=0.0, legs=5, leg_mm=4.88)
+        n = _straight_route(2, "USB_D-", 25.0, y=-1.0)
+        uncoupled, _skew, vias = _coupled_candidate_metrics(folded, n)
+        assert uncoupled == pytest.approx(20.72, abs=1e-3)
+        assert vias == 0
+
+    def test_untagged_fold_is_refused_by_guard(self):
+        """The guard refuses the fold on the pair's own copper, not on #7521 tags.
+
+        ``skew_bump_pattern`` is patched to ``None`` so no candidate is tagged
+        as tuning-pattern copper and the #7521 exclusion cannot reject the
+        fold.  Only the pair-copper pairing (20.72 mm > 10 mm) refuses it; a
+        guard without it read 1.20 mm and accepted the fold.
+        """
+        from kicad_tools.router.optimizer.serpentine import SerpentineResult
+
+        p = _straight_route(1, "USB_D+", 20.0, y=0.0)
+        n = _straight_route(2, "USB_D-", 25.0, y=-1.0)
+        folded = self._folded_route(1, "USB_D+", y=0.0, legs=5, leg_mm=4.88)
+
+        def fold(self, route, _target):
+            return folded, SerpentineResult(success=True, new_segments=list(folded.segments))
+
+        with (
+            patch.object(SerpentineGenerator, "add_serpentine", fold),
+            patch(
+                "kicad_tools.router.diffpair_length_tuning.skew_bump_pattern",
+                return_value=None,
+            ),
+        ):
+            p_out, n_out, result = tune_diff_pair_skew(
+                _make_pair(),
+                {1: p, 2: n},
+                tolerance_mm=1.0,
+                intra_pair_clearance_mm=0.1,
+                max_uncoupled_mm=10.0,
+            )
+        assert all(s.tuning_pattern is None for s in folded.segments)
+        # The fold is refused; a later placement (the regular trombone) is
+        # used instead, and it keeps the pair within the limit.
+        assert p_out is not folded
+        assert n_out is n
+        assert result.reason == "tuned"
+        assert all(s.tuning_pattern is None for s in p_out.segments)
+        assert max(self._figures(p_out, n_out)) <= 10.0
+
     def test_none_or_generous_limit_matches_unguarded_result(self):
         def run(**kw):
             p = _straight_route(1, "USB_D+", 20.0, y=0.0)
