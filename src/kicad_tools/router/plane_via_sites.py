@@ -909,6 +909,7 @@ def select_plane_via_pads(
     nets: Iterable[str],
     *,
     min_footprint_pads: int = 3,
+    min_pour_footprint_pads: int = 2,
     tolerance: float = 0.05,
 ) -> tuple[list[Pad], dict[str, str]]:
     """Pick the plane-net SMD pads a pre-route reservation should serve (#6401).
@@ -930,6 +931,12 @@ def select_plane_via_pads(
             the signal pins too).
         nets: Plane-net names whose pads may be served.
         min_footprint_pads: Smallest footprint (pad count) considered.
+        min_pour_footprint_pads: Smallest footprint considered when *every*
+            pad of it is an SMD pad of one of ``nets`` (a pour-only part such
+            as a +5V/GND decoupling cap, #7573).  Such a part has no signal
+            pin whose route the reservation could cost, yet signal copper
+            elsewhere can still take its only stitch sites.  Signal-carrying
+            small footprints stay skipped at ``min_footprint_pads``.
         tolerance: Perimeter tolerance in mm.
 
     Returns:
@@ -951,7 +958,11 @@ def select_plane_via_pads(
             continue
         # Distinct pad positions: a footprint may repeat a pad number.
         positions = {(round(p.x, 4), round(p.y, 4)) for p in body}
-        if len(positions) < min_footprint_pads:
+        pour_only = all(p.net_name in wanted and not p.through_hole for p in body)
+        min_pads = (
+            min(min_footprint_pads, min_pour_footprint_pads) if pour_only else min_footprint_pads
+        )
+        if len(positions) < min_pads:
             for p in candidates:
                 skipped[_pad_name(p)] = f"footprint has {len(positions)} pad(s)"
             continue

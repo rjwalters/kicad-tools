@@ -139,6 +139,29 @@ def test_two_terminal_parts_and_through_hole_pads_are_not_served() -> None:
     assert skipped == {"C1.1": "footprint has 2 pad(s)"}
 
 
+def test_two_terminal_part_with_every_pad_on_a_pour_net_is_served() -> None:
+    """Board 05's C10 (+5V / GND): no signal pin to cost, so it is reserved (#7573)."""
+    pads = [
+        _pad("C10", "1", 10.0, 10.0, 5, "+5V"),
+        _pad("C10", "2", 12.0, 10.0, 0, PLANE),
+        _pad("R1", "1", 20.0, 10.0, 0, PLANE),
+        _pad("R1", "2", 22.0, 10.0, 7, "SIG"),
+    ]
+    selected, skipped = select_plane_via_pads(pads, [PLANE, "+5V"])
+    assert sorted(f"{p.ref}.{p.pin}" for p in selected) == ["C10.1", "C10.2"]
+    assert skipped == {"R1.1": "footprint has 2 pad(s)"}
+
+
+def test_two_terminal_pour_only_part_threshold_is_overridable() -> None:
+    pads = [
+        _pad("C10", "1", 10.0, 10.0, 5, "+5V"),
+        _pad("C10", "2", 12.0, 10.0, 0, PLANE),
+    ]
+    selected, skipped = select_plane_via_pads(pads, [PLANE, "+5V"], min_pour_footprint_pads=3)
+    assert selected == []
+    assert set(skipped) == {"C10.1", "C10.2"}
+
+
 # ---------------------------------------------------------------------------
 # 2. Exact-geometry planner on a 0.5 mm-pitch pin row.
 # ---------------------------------------------------------------------------
