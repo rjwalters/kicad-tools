@@ -85,6 +85,25 @@ class TestSnapToGrid:
         result = snap_to_grid(1.5)
         assert result == round(result, 2)
 
+    def test_snap_is_idempotent_on_fine_grid(self):
+        """A stored 0.635-grid point does not re-snap to its neighbour (#7510).
+
+        Odd multiples of 0.635 need 3 decimals (120.015), so the stored point
+        is a 2-decimal rounding of it; snapping that again must not move it.
+        """
+        for k in range(-400, 400):
+            stored = snap_to_grid(k * 0.635, grid=0.635)
+            assert snap_to_grid(stored, grid=0.635) == stored
+        assert snap_to_grid(120.01, grid=0.635) == 120.01
+        assert snap_to_grid(120.3, grid=0.635) in (120.01, 120.02)
+
+    def test_snap_unchanged_on_two_decimal_grids(self):
+        """Grids exact at 2 decimals snap exactly as ``round(k*grid, 2)``."""
+        for grid in (2.54, 1.27, 0.5, 0.25, 0.1):
+            for i in range(-2000, 2000):
+                v = i * 0.037
+                assert snap_to_grid(v, grid) == round(round(v / grid) * grid, 2)
+
 
 class TestSnapPoint:
     """Tests for snap_point() function."""
