@@ -212,7 +212,7 @@ def test_running_job_fails() -> None:
 
 
 def test_unrelated_red_job_is_ignored_by_main_gate() -> None:
-    jobs = _green_jobs() + [_job("Board 05 Routing Regression (blocking <= 7)", "failure")]
+    jobs = _green_jobs() + [_job("Board 05 Routing Regression (blocking == 0)", "failure")]
     assert rp.evaluate_jobs(jobs) == []
 
 
