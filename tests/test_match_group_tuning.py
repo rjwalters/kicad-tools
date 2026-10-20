@@ -19,6 +19,7 @@ This module verifies the curator-specified mitigations of
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -4386,3 +4387,105 @@ class TestNoOvershootAsWrittenMixedAndPairGroups:
         )
         assert results[10][1].inserts_applied >= 1, results[10][1].message
         _assert_pair_not_past_reference(results[10][0], results[11][0], ref_p, ref_n)
+
+
+class TestBoard07RealGeometryNeverPastReference:
+    """Issue #7423 carry-over (judge of PR #7461, finding 3): board 07 ended a
+    tuned member past the group reference (SDRAM_ADDRESS A8, 0.068 um past
+    A5) while every synthetic overshoot test passed.  This pins the real
+    copper: the SDRAM_BYTE1 tuner input from a seed-42 07m route with
+    ``length_critical`` on, reduced to DQ14 and its UDQM reference (no
+    foreign copper is needed to reproduce it).  The old head committed the
+    refit candidate when the refit loop gave up, ending DQ14 118.5 nm past
+    UDQM; the measured-route guard rejects that candidate instead."""
+
+    FIXTURE = Path(__file__).parent / "fixtures" / "board07_byte1_dq14_overshoot.json"
+
+    @classmethod
+    def _load(cls):
+        import json
+
+        from kicad_tools.router.kicad_length import KicadLengthModel, KicadStackup, LPad
+        from kicad_tools.router.primitives import Via
+
+        data = json.loads(cls.FIXTURE.read_text())
+        routes: dict[int, Route] = {}
+        pads: dict[int, list[LPad]] = {}
+        ids: dict[str, int] = {}
+        for name, net in data["nets"].items():
+            nid = net["net"]
+            ids[name] = nid
+            routes[nid] = Route(
+                net=nid,
+                net_name=name,
+                segments=[
+                    Segment(
+                        x1=x1,
+                        y1=y1,
+                        x2=x2,
+                        y2=y2,
+                        width=w,
+                        layer=Layer[layer],
+                        net=nid,
+                        net_name=name,
+                    )
+                    for x1, y1, x2, y2, w, layer in net["segments"]
+                ],
+                vias=[
+                    Via(
+                        x=x,
+                        y=y,
+                        drill=drill,
+                        diameter=dia,
+                        layers=(Layer[a], Layer[b]),
+                        net=nid,
+                        net_name=name,
+                        is_micro=micro,
+                    )
+                    for x, y, drill, dia, a, b, micro in net["vias"]
+                ],
+            )
+            pads[nid] = [
+                LPad(**{**p, "layers": frozenset(p["layers"]) if p["layers"] else None})
+                for p in net["pads"]
+            ]
+        model = KicadLengthModel(KicadStackup([tuple(s) for s in data["stackup"]]), pads)
+        return data, routes, ids, model
+
+    def test_dq14_never_ends_past_udqm_on_written_copper(self):
+        from kicad_tools.router.match_group_length import MatchGroupTracker
+
+        data, routes, ids, model = self._load()
+        dq14, udqm = ids["DQ14"], ids["UDQM"]
+        n_layers = data["num_copper_layers"]
+
+        def length(route: Route) -> float:
+            # The kicad-cli measure on the 4 dp written copper (segments and
+            # vias), i.e. exactly what ``kct check`` reads back from the file.
+            return MatchGroupTracker._measure_route_total(route, None, n_layers, length_model=model)
+
+        ref_length = length(routes[udqm])
+        # Precondition: DQ14 is far enough short of UDQM to need a meander.
+        assert ref_length - length(routes[dq14]) > data["tolerance_mm"]
+
+        group = MatchGroup(
+            name="SDRAM_BYTE1",
+            net_ids=[dq14, udqm],
+            tolerance=data["tolerance_mm"],
+            source=MatchGroupSource.EXPLICIT,
+        )
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=data["tolerance_mm"],
+            intra_group_clearance_mm=data["intra_group_clearance_mm"],
+            num_copper_layers=n_layers,
+            length_model=model,
+        )
+        tuned, result = results[dq14]
+        assert result.inserts_applied >= 1, result.message
+        excess = length(tuned) - ref_length
+        # Zero tolerance: the issue's bar is "never past the group target".
+        assert excess <= 0.0, (
+            f"DQ14 tuned {excess * 1e6:.3f} nm past the UDQM reference ({result.reason})"
+        )

@@ -61,6 +61,7 @@ Measured experiments on `kct route`; several record negative results.
 | [Rip-up](kct-route-ripup-experiment.md) | KRT-style sequential N+1 rip-up: no gain |
 | [Expand, route, shrink](expand-route-shrink-experiment.md) | Routing an expanded placement then shrinking it back |
 | [Diff-pair bench, phase 0](diffpair-bench-phase0.md) | Diff-pair benchmark baseline |
+| [Diff-pair primitive pairing spec](diffpair-primitive-pairing-spec.md) | Black-box, probe-only spec of how kicad-cli pairs P/N primitives into coupled length (Issue #7565) |
 | [Diff-pair skew compensation](diffpair-skew-compensation.md) | Sourced skew limits and uncoupled-length budgets for the diff-pair skew fixer |
 | [Bundle crossing report](bundle-crossing-report.md) | Measured hit and false-alarm counts |
 | [Pad-budget via footprint](pad-budget-via-footprint-6415.md) | Via-footprint charging on board 05 |
@@ -83,6 +84,7 @@ Measured experiments on `kct route`; several record negative results.
 | [Grid pad shape](grid-pad-shape.md) | Router pad shape coverage |
 | [Router pad rotation audit](router-pad-rotation-audit.md) | Router pad rotation consumer audit |
 | [MCP clearance and grid audit](mcp-clearance-grid-audit.md) | MCP clearance and router grid audit |
+| [Clearance-kernel acceptance audit](clearance-kernel-acceptance-audit.md) | Epic #5509 criterion-to-evidence reconciliation (#7577) |
 | [Connectivity contact paths](connectivity-contact-paths-5133.md) | Existing physical contact paths in the Board06 extractor |
 | [Copper LVS zone suppression](copper-lvs-zone-suppression.md) | Independent Board05 evidence |
 

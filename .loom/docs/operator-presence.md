@@ -41,3 +41,5 @@ An earlier design merged three `presence-beat.sh` hook entries and
 leaving everything else alone (including an explicit
 `LOOM_OPERATOR_PRESENCE=0`). It takes effect per host on its next resync (see
 [fleet-config-lifecycle](fleet-config-lifecycle.md): landed is not effective).
+
+For the open question of how a signal could be derived from existing Worker data, see [the operator-activity-signal design](https://github.com/rjwalters/loom/blob/main/docs/design/operator-activity-signal.md) (#12870).

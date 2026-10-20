@@ -451,10 +451,16 @@ class DesignRules:
     # see :meth:`NetClassRouting.hard_avoided_layer_indices`.
     strict_layers: bool = False
 
-    # Issue #6527: when True, the C++ backend's Python fallback calls
-    # ``Router.route_auto`` (bidirectional A* for long paths, one-way retry
-    # sharing one deadline) instead of ``Router.route``.  Default off.
+    # Issue #6527: when True (opt-in, default off), the C++ backend's Python
+    # fallback calls ``Router.route_auto`` -- bidirectional A* with a one-way
+    # retry sharing one deadline -- instead of the one-way ``Router.route``.
+    # ``fallback_bidirectional_threshold`` is the Manhattan distance (grid
+    # cells) from which a fallback request goes bidirectional; 0 means every
+    # request without Steiner goals (those always run one-way).  Board 05's
+    # fallback requests are 319-470 cells, under the generic 1000-cell
+    # ``bidirectional_threshold``, which is why that threshold never engaged.
     fallback_bidirectional: bool = False
+    fallback_bidirectional_threshold: int = 0
 
     # Bidirectional A* configuration (Issue #964)
     # Enable parallel frontier exploration for large paths

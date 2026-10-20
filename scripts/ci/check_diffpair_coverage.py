@@ -142,7 +142,9 @@ DIFFPAIR_FIXTURE_KEY = "boards/06-diffpair-test/regression-fixture/diffpair_test
 # the residual impedance set to USB3_TX2- alone (USB3_RX1+/- now clear) and
 # leaves USB2_D+/USB2_D- 0.091 mm over its uncoupled-length limit (12.791 vs
 # 12.700 mm).  The floor is the intended behaviour; the USB2_D pair needs to
-# route coupled, tracked in #7401.
+# route coupled, tracked in #7401.  kicad-cli flags USB2_D too, so it is not a
+# kct artefact; kct's figure for it is not KiCad's to the micron (a known
+# divergence on board 06's router copper, Issue #7565).
 #
 # Issue #7367 -- the ``diffpair_length_skew`` pairs, keyed by pair, not by a
 # count.  Until #7367 the gate let every skew/continuity finding through by
@@ -167,7 +169,7 @@ DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
     ("diffpair_length_skew", "MIPI_D0+/MIPI_D0-"): DIFFPAIR_SKEW_TRACKER,  # 2.320 / 0.300
     ("diffpair_length_skew", "PCIE_RX+/PCIE_RX-"): DIFFPAIR_SKEW_TRACKER,  # 1.693 / 0.500
     ("diffpair_length_skew", "PCIE_TX+/PCIE_TX-"): DIFFPAIR_SKEW_TRACKER,  # 2.244 / 0.500
-    ("diffpair_length_skew", "USB2_D+/USB2_D-"): DIFFPAIR_SKEW_TRACKER,  # 3.327 / 1.270
+    ("diffpair_length_skew", "USB2_D+/USB2_D-"): DIFFPAIR_SKEW_TRACKER,  # 3.327 / 1.000
     ("diffpair_length_skew", "USB3_RX1+/USB3_RX1-"): DIFFPAIR_SKEW_TRACKER,  # 0.529 / 0.500
     ("diffpair_length_skew", "USB3_RX2+/USB3_RX2-"): DIFFPAIR_SKEW_TRACKER,  # 3.329 / 0.500
     ("diffpair_length_skew", "USB3_TX1+/USB3_TX1-"): DIFFPAIR_SKEW_TRACKER,  # 2.173 / 0.500
