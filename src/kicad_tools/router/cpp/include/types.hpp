@@ -348,7 +348,10 @@ namespace router {
 // (``CoupledPathfinder::rail_segment_clear``) measures the partner net's pads
 // exactly (``Grid3D::pad_geometry_clear``'s new ``only_net``).  Coupled
 // routing output changes, so a v62 .so must be rejected.
-constexpr int ROUTER_CPP_BUILD_VERSION = 63;
+// v64 (Issue #7569): Grid3D.set_pad_class_clearances + PadInfo::class_clearance
+// -- the exact pad test holds each pad to its own net-class clearance.  A v63
+// .so keeps the board-wide largest-class floor, so it must be rejected.
+constexpr int ROUTER_CPP_BUILD_VERSION = 64;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
@@ -814,6 +817,11 @@ struct PadInfo {
     float via_clearance_override = 0.0f; // Component trace floor (Python backstop)
     bool via_carveout_eligible = false;
     bool is_circular = false;  // Explicit circle shape; other pads use rectangles (#5229)
+    // Issue #7569: the pad's own net-class clearance (0 = no class; the board
+    // clearance governs).  The pair rule is max(own class, pad's class), so
+    // the exact pad test (``pad_geometry_clear``) holds a step to this value
+    // instead of the board-wide largest class.
+    float class_clearance = 0.0f;
 };
 
 // Stored segment for validation (Issue #2439)
