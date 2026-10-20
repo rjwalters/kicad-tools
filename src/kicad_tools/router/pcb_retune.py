@@ -686,7 +686,10 @@ def retune_pcb(
                 )
         if selection.pairs:
             pair_results = router.apply_diffpair_length_tuning(
-                selection.pairs, verbose=False, engage="checker_skew_limit"
+                selection.pairs,
+                verbose=False,
+                engage="checker_skew_limit",
+                allow_inherited_near_miss=True,
             )
             for (p_name, n_name), res in pair_results.items():
                 tuner_reasons[_target_key("diffpair", f"{p_name}/{n_name}")] = res.reason

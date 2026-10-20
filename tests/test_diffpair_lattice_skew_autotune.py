@@ -232,6 +232,12 @@ def test_auto_path_bump_may_inherit_the_host_segments_existing_near_miss():
         segments=[Segment(0.0, -0.037, 20.0, -0.037, width, Layer.F_CU, net=1, net_name=P_NAME)],
     )
     ok = ar._skew_tune_foreign_clearance_ok(
+        {r.net: r for r in ar.routes},
+        partner_of={1: 2, 2: 1},
+        intra_pair_clearance_mm=0.15,
+        allow_inherited_near_miss=True,
+    )
+    strict = ar._skew_tune_foreign_clearance_ok(
         {r.net: r for r in ar.routes}, partner_of={1: 2, 2: 1}, intra_pair_clearance_mm=0.15
     )
     on_host = Segment(5.0, -0.037, 15.0, -0.037, width, Layer.F_CU, net=1, net_name=P_NAME)
@@ -242,6 +248,8 @@ def test_auto_path_bump_may_inherit_the_host_segments_existing_near_miss():
     assert ok([leg_away], 1) is True
     assert ok([closer], 1) is True
     assert ok([nearer], 1) is False
+    # Off by default: the shared (board 06) path still rejects the inherited gap.
+    assert strict([on_host], 1) is False
 
 
 def test_auto_path_measures_skew_with_via_barrels_like_the_checker():
