@@ -514,9 +514,21 @@ class WorkableCombo:
         """P+N route length (mm)."""
         return self.length_p + self.length_n
 
+    @property
+    def matched(self) -> float:
+        """P+N plus intra-pair skew, i.e. twice the longer net (mm, #7463).
+
+        The length a pair has to budget once its shorter net is tuned up to
+        the longer one.  Board 03 arm C: a 15.005 mm combination with
+        0.595 mm skew (D- 16.075 mm, over USB_D's 16 mm bound) used to beat
+        a 15.032 mm one with none.  Never below :attr:`score`, so
+        :func:`combo_length_floor` still bounds it from below.
+        """
+        return self.score + abs(self.length_p - self.length_n)
+
     def key(self) -> tuple[int, float, int]:
-        """Deterministic sort key: sealed count, score (to 1 um), try order."""
-        return (self.sealed, round(self.score, 3), self.order)
+        """Deterministic sort key: sealed count, matched length (to 1 um), try order."""
+        return (self.sealed, round(self.matched, 3), self.order)
 
 
 def best_workable(combos: list[WorkableCombo]) -> WorkableCombo | None:
@@ -530,7 +542,8 @@ def combo_length_floor(end_a: tuple[Pt, Pt], end_b: tuple[Pt, Pt], fans: float) 
     ``fans`` is the summed fan length of both nets at both ends; each net
     then needs at least the straight distance between its own launch
     points.  A combination whose floor already exceeds the best workable
-    score is skipped without routing it.
+    key length (:attr:`WorkableCombo.matched`, never below P+N) is skipped
+    without routing it.
     """
     (pa, na), (pb, nb) = end_a, end_b
     return fans + dist(pa, pb) + dist(na, nb)
