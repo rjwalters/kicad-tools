@@ -383,6 +383,60 @@ class _HybridParityCtx:
 #: Bounded retries of a pair search after a ``pair-partner-pad`` decline (#6839).
 _PARTNER_PAD_RETRIES = 4
 
+#: Issue #7597: perpendicular shifts (mm, tried smallest first, both signs)
+#: of ONE interior centerline segment after a ``pair-leg-blocked`` decline.
+#: The lattice can only place a coupled body on its node rows, which may sit
+#: a few microns too close to a foreign pad's own class clearance although
+#: the corridor holds a legal envelope (board 06 USB2_D: the D- leg 0.187 mm
+#: from J1.B8/B9/B12, 0.200 mm class, in a 1.4 mm gap between the J1 rows).
+_PAIR_NUDGE_STEPS = (0.025, 0.05, 0.1, 0.15, 0.2)
+
+
+def _shift_centerline_segment(points: list[Pt], i: int, delta: float) -> list[Pt] | None:
+    """Shift segment ``points[i]-points[i+1]`` sideways by ``delta`` (#7597).
+
+    The segment's line moves ``delta`` along its left normal and its two
+    vertices are re-intersected with the (unmoved) lines of the neighbouring
+    segments, so every direction in the polyline is preserved -- an
+    octilinear centerline stays octilinear.  Only interior segments move
+    (``1 <= i <= len - 3``): both end vertices sit on the pair-midpoint
+    stubs.  ``None`` when a neighbour is parallel (no intersection) or when
+    the shift would reverse or collapse any of the three affected segments.
+    """
+    n = len(points)
+    if not 1 <= i <= n - 3:
+        return None
+    a, b = points[i], points[i + 1]
+    seg_len = dist(a, b)
+    if seg_len <= 1e-9:
+        return None
+    ux, uy = (b[0] - a[0]) / seg_len, (b[1] - a[1]) / seg_len
+    ox, oy = -uy * delta, ux * delta
+    sa = (a[0] + ox, a[1] + oy)
+
+    def meet(p: Pt, q: Pt) -> Pt | None:
+        # Intersection of line p-q with the shifted line through sa (dir u).
+        dx, dy = q[0] - p[0], q[1] - p[1]
+        den = dx * uy - dy * ux
+        if abs(den) <= 1e-9:
+            return None
+        t = ((sa[0] - p[0]) * uy - (sa[1] - p[1]) * ux) / den
+        return (p[0] + t * dx, p[1] + t * dy)
+
+    na = meet(points[i - 1], a)
+    nb = meet(b, points[i + 2])
+    if na is None or nb is None:
+        return None
+    out = list(points)
+    out[i], out[i + 1] = na, nb
+    for j in (i - 1, i, i + 1):
+        old_d = (points[j + 1][0] - points[j][0], points[j + 1][1] - points[j][1])
+        new_d = (out[j + 1][0] - out[j][0], out[j + 1][1] - out[j][1])
+        if math.hypot(*new_d) <= 1e-6 or old_d[0] * new_d[0] + old_d[1] * new_d[1] <= 0.0:
+            return None
+    return out
+
+
 #: Issue #6975: in a parity-filtered pair search, a lattice step and the end
 #: stub it joins "reverse" when the cosine of their angle is below this --
 #: i.e. the path doubles back along (nearly) the same line.  Only a straight
@@ -2855,6 +2909,12 @@ class LatticePathfinder:
         (:meth:`_pair_leg_clear`).  Measured only as a board-default track, a
         wide pair class (board 06rf's 0.275 mm USB3) could attach 0.0375 mm
         closer to a neighbouring pair's via than its copper allowed.
+
+        Issue #7597: foreign pads are held the same way -- the static pad
+        rects grown to the leg's true width/class, plus each pad's OWN class
+        clearance.  ``half <= 0`` is the legacy board-default probe and skips
+        both (no width to measure); every production caller passes the leg's
+        real half-width.
         """
         from ..pairplan.attach import dogleg_attach_candidates
         from .coupled import pads_block_segment_grown
@@ -3213,16 +3273,29 @@ class LatticePathfinder:
         # next to that end)`` of the last ``pair-partner-pad`` decline.
         partner_fail: list[tuple[bool, Pt]] = []
 
-        def finish(result: _RouteResult) -> tuple[_PairResult | None, str]:
-            """Offset emission + verification of one fat centerline."""
+        def finish(
+            result: _RouteResult, nudged: list[Pt] | None = None
+        ) -> tuple[_PairResult | None, str]:
+            """Offset emission + verification of one fat centerline.
+
+            ``nudged`` (issue #7597) replaces the searched centerline with a
+            sideways-shifted copy (:func:`_shift_centerline_segment`).  It
+            left the fat search's envelope, so it is additionally held to the
+            board-edge boundary here; every other check below re-verifies the
+            emitted legs from scratch anyway.
+            """
             partner_fail.clear()
             if len(result.runs) != 1 or result.via_points:
                 return None, "pair-not-planar"  # defensive: vias are off
 
             layer, raw_pts, _widths = result.runs[0]
-            center = trim_end_reversals(raw_pts)
+            center = trim_end_reversals(raw_pts) if nudged is None else nudged
             if len(center) < 2:
                 return None, "pair-degenerate-centerline"
+            if nudged is not None:
+                for a, b in zip(center, center[1:], strict=False):
+                    if not self._escape_boundary.segment_clear(a, b, trace_w / 2.0 + half_pitch):
+                        return None, "pair-leg-blocked"
             plus = offset_polyline(center, +half_pitch)
             minus = offset_polyline(center, -half_pitch)
             if plus is None or minus is None:
@@ -3368,6 +3441,33 @@ class LatticePathfinder:
             runs = [(net, layer, full) for net, _nn, full in legs]
             return _PairResult(routes=routes, runs=runs, resources=result.resources), "ok"
 
+        def nudge(result: _RouteResult) -> _PairResult | None:
+            """Issue #7597: retry a ``pair-leg-blocked`` centerline shifted sideways.
+
+            The coupled body can only follow lattice node rows, and a row can
+            run a few microns inside a foreign pad's OWN class clearance (the
+            finish gate's true-width check) while the corridor around it has
+            room to spare.  Shift one interior segment at a time by
+            :data:`_PAIR_NUDGE_STEPS` (smallest first, both sides) and run the
+            unchanged finish gate on each candidate; the first that passes
+            ships.  Bounded: ``segments x 2 x len(steps)`` finish calls, and
+            only after a decline.  A centerline that needs two segments moved
+            still declines honestly.
+            """
+            if len(result.runs) != 1 or result.via_points:
+                return None
+            center = trim_end_reversals(result.runs[0][1])
+            for step in _PAIR_NUDGE_STEPS:
+                for i in range(1, len(center) - 2):
+                    for delta in (step, -step):
+                        shifted = _shift_centerline_segment(center, i, delta)
+                        if shifted is None:
+                            continue
+                        pres, _why = finish(result, shifted)
+                        if pres is not None:
+                            return pres
+            return None
+
         # Attempt each consistent parity through the FULL pipeline: a parity
         # whose shortest path emits degenerate/blocked legs must not doom the
         # pair when the other parity works.
@@ -3419,6 +3519,10 @@ class LatticePathfinder:
                 pres, finish_reason = finish(result)
                 if pres is not None:
                     return pres, "ok"
+                if finish_reason == "pair-leg-blocked":
+                    pres = nudge(result)
+                    if pres is not None:
+                        return pres, "ok"
                 reason = finish_reason
                 if finish_reason != "pair-partner-pad" or not partner_fail:
                     break
