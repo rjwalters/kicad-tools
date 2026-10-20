@@ -145,19 +145,22 @@ DIFFPAIR_FIXTURE_KEY = "boards/06-diffpair-test/regression-fixture/diffpair_test
 # route coupled, tracked in #7401.
 # Issue #7491: USB2_D now routes coupled (the pose search measures its
 # partner's pads exactly), at 4.422 / 5.178 mm uncoupled (P / N), so that identity is
-# gone; USB3_RX1 now measures 0.411 mm skew against its 0.500 limit, so its
-# skew identity is gone too.
+# gone, but its skew (1.896 mm vs 1.000) is now over, so it moves to the skew
+# block below; USB3_RX1 now measures 0.411 mm skew against its 0.500 limit, so
+# its skew identity is gone too.
 #
 # Issue #7367 -- the ``diffpair_length_skew`` pairs, keyed by pair, not by a
 # count.  Until #7367 the gate let every skew/continuity finding through by
 # rule and bounded them only with ``DIFFPAIR_VIOLATION_BASELINE`` (18) and the
 # ``.github/routed-drc-tolerance.yml`` total (18), so up to 7 continuity
 # findings, or a new pair in place of a fixed one, passed both.  The pairs
-# below are the ones the seed-42 re-route measures over ``max_skew_mm`` (most
-# route single-ended, so the legs differ; USB2_D routes coupled and only its skew
-# is over).  All 9 declared pairs started here; the recipe's final skew-tuning
-# pass (#7548) clears some, and the rest are tracked in #7548 (coupling-preserving
-# tuning in general is #6447).
+# below are the ones the seed-42 re-route measures over ``max_skew_mm``.  All 9
+# declared pairs started here; the recipe's final skew-tuning pass (#7548)
+# cleared four, and fusing the pair legs' grid-step segments before it (#7548)
+# cleared four more (MIPI_CLK, PCIE_RX and USB3_RX2 now measure 0.287, 0.450
+# and 0.450 mm).  Two remain, tracked in #7548: MIPI_D0 and USB2_D.  The
+# tuner's post-insertion intra-pair clearance check rolls back both
+# (coupling-preserving tuning in general is #6447).
 DIFFPAIR_SKEW_TRACKER = 7548
 #
 # Allowed by identity, not by count (#7359, #7270 Q3 ruling): only these
@@ -168,11 +171,8 @@ DIFFPAIR_SKEW_TRACKER = 7548
 DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
     ("impedance", "USB3_TX2-"): 7349,
     # Seed-42 re-route, PR #7570 / #7491 (2026-10-20): skew vs max_skew_mm.
-    ("diffpair_length_skew", "MIPI_CLK+/MIPI_CLK-"): DIFFPAIR_SKEW_TRACKER,  # 1.311 / 0.300
     ("diffpair_length_skew", "MIPI_D0+/MIPI_D0-"): DIFFPAIR_SKEW_TRACKER,  # 2.320 / 0.300
-    ("diffpair_length_skew", "PCIE_RX+/PCIE_RX-"): DIFFPAIR_SKEW_TRACKER,  # 1.693 / 0.500
     ("diffpair_length_skew", "USB2_D+/USB2_D-"): DIFFPAIR_SKEW_TRACKER,  # 1.896 / 1.000
-    ("diffpair_length_skew", "USB3_RX2+/USB3_RX2-"): DIFFPAIR_SKEW_TRACKER,  # 3.329 / 0.500
 }
 
 #: Every board key that carries an identity allowance (Issue #7367).  A key
