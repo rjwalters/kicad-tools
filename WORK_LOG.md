@@ -15,6 +15,23 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-20
 
+- **PR #7601**: fix(router): measure foreign pads at true width in coupled pair legs
+- **PR #7635**: fix: accept KiCad 6 Sheet file/Sheet name spellings in all sheet walkers
+- **PR #7631**: fix(route): run stitching, failed-net export and parity summary on every tail
+- **PR #7629**: test(route): name the differing field in entry-path golden drift failures
+- **Issue #7597** (closed): lattice: verify pair legs at true width against foreign pads too (#7571 follow-up)
+- **Issue #7617** (closed): Schematic hierarchy walkers read only the `Sheetfile` property; with KiCad 6's `Sheet file` / `Sheet name` keys the sub-sheets are silently dropped (BOM, `sch set-*`, annotation, netlist)
+- **Issue #7626** (closed): test flake: test_route_entry_path_goldens partial/* drift on Test job
+- **PR #7638**: fix(bom): drop (power)-flagged symbols and filter virtual parts in every format
+- **PR #7623**: fix(router): skew tuner measures quantized length and seats a taller loop at a host's end
+- **PR #7604**: fix(route): apply pad-edge floor to oracle pour-link weld vias
+- **PR #7584**: fix(router): native pad test applies each pad's own net-class clearance
+- **PR #7517**: fix(router): judge lattice pad keep-outs against the true pad outline
+- **Issue #7618** (closed): router: keep coupled-pair J1 pad-to-via escape legs off the wrong-gap coupling window (06rf impedance, from PR #7517)
+- **Issue #7615** (closed): Schematic BOM lists power symbols and PWR_FLAGs from a project symbol library
+- **Issue #7602** (closed): stitcher: post-route pour stitching places a GND via 0.02 mm from U2-29's exposed-pad mask (board 05)
+- **Issue #7569** (closed): C++ exact pad test holds every pad to the board's widest class clearance (Python applies the pair rule)
+- **Issue #7503** (closed): Lattice router: pad-clearance check uses a square around pads, not the true outline (board 03 VBUS, #7463)
 - **PR #7609**: fix: truncate GitHub Release body to stay under the 125k-char limit
 - **Issue #7608** (closed): release_tag.py finalize: GitHub Release body exceeds 125k-char limit (422), so v0.24.0 Release not created
 - **PR #7633**: test: black-box probes of KiCad tuning-pattern partner exclusion (Q31)
