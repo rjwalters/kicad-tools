@@ -414,11 +414,6 @@ def _find_child_node(hierarchy: HierarchyNode, action: SyncAction) -> HierarchyN
                 parent_node = node
                 break
 
-    if parent_node is not None:
-        for child in parent_node.children:
-            if child.name == action.sheet_name:
-                return child
-
     file_path = Path(action.file_path)
     if file_path.is_absolute():
         target = _resolved(file_path)
@@ -428,6 +423,13 @@ def _find_child_node(hierarchy: HierarchyNode, action: SyncAction) -> HierarchyN
         target = _resolved(Path(action.parent_file).parent / file_path)
     else:
         target = None
+
+    # Sibling sheets may share a name while pointing at different files, so
+    # the name alone is not identity: the child's file must match too.
+    if parent_node is not None and target is not None:
+        for child in parent_node.children:
+            if child.name == action.sheet_name and child.path and _resolved(child.path) == target:
+                return child
 
     if target is not None:
         for node in nodes:

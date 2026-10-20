@@ -403,3 +403,53 @@ class TestAddLabelsSubfolderChild:
         sda = [r for r in results if r.action.name == "SDA"]
         assert len(sda) == 1
         assert sda[0].success is True, sda[0].message
+
+
+class TestAddLabelsSameNamedSiblings:
+    """Issue #7614 review: sibling sheets sharing a name must not be conflated.
+
+    Two sheets named ``X`` point at ``a.kicad_sch`` and ``sub/b.kicad_sch``.
+    The child must be identified by name *and* file, so each file gets exactly
+    one label rather than one getting a duplicate and the other none.
+    """
+
+    @pytest.fixture
+    def sibling_project(self, tmp_path: Path) -> Path:
+        fixtures = Path(__file__).parent / "fixtures" / "hierarchical"
+        proj = tmp_path / "proj"
+        (proj / "sub").mkdir(parents=True)
+        parent = (fixtures / "parent_with_pins.kicad_sch").read_text()
+        start = parent.index("\t(sheet\n")
+        block = parent[start : parent.rindex(")")]
+        block = block.replace('"ChildWithLabels"', '"X"')
+        first = block.replace('"child_with_hlabels.kicad_sch"', '"a.kicad_sch"')
+        second = (
+            block.replace('"child_with_hlabels.kicad_sch"', '"sub/b.kicad_sch"')
+            .replace("sheet-child-pins-uuid", "sheet-child-pins-uuid-2")
+            .replace("sheet-pin-sda-uuid", "sheet-pin-sda-uuid-2")
+            .replace("(at 130 30)", "(at 130 80)")
+            .replace("(at 130 29 0)", "(at 130 79 0)")
+            .replace("(at 130 61 0)", "(at 130 111 0)")
+            .replace("(at 130 40 180)", "(at 130 90 180)")
+        )
+        (proj / "parent.kicad_sch").write_text(parent[:start] + first + second + ")\n")
+        child = (fixtures / "child_with_hlabels.kicad_sch").read_text()
+        assert 'hierarchical_label "SDA"' in child
+        stripped = child.replace('hierarchical_label "SDA"', 'hierarchical_label "XYZ"')
+        (proj / "a.kicad_sch").write_text(stripped)
+        (proj / "sub" / "b.kicad_sch").write_text(stripped)
+        return proj / "parent.kicad_sch"
+
+    def test_each_same_named_sibling_gets_one_label(
+        self, sibling_project: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.chdir(sibling_project.parent.parent)
+        results = execute_add_labels("proj/parent.kicad_sch", dry_run=False)
+
+        sda = [r for r in results if r.action.name == "SDA"]
+        assert len(sda) == 2
+        assert all(r.success for r in sda), [r.message for r in sda]
+        a = (sibling_project.parent / "a.kicad_sch").read_text()
+        b = (sibling_project.parent / "sub" / "b.kicad_sch").read_text()
+        assert a.count('hierarchical_label "SDA"') == 1
+        assert b.count('hierarchical_label "SDA"') == 1
