@@ -26,6 +26,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from kicad_tools.core.sheet_properties import SHEET_NAME_KEY_RE
+
 
 @dataclass
 class SignalChange:
@@ -183,7 +185,7 @@ def _find_parent_sheet(text: str, position: int) -> str:
     sheet_text = text[last_sheet.start() : position]
 
     # Extract Sheetname from properties
-    name_match = re.search(r'\(property\s+"Sheetname"\s+"([^"]+)"', sheet_text)
+    name_match = re.search(rf'\(property\s+"{SHEET_NAME_KEY_RE}"\s+"([^"]+)"', sheet_text)
     if name_match:
         return name_match.group(1)
 

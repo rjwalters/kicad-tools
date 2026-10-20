@@ -15,6 +15,13 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-20
 
+- **PR #7601**: fix(router): measure foreign pads at true width in coupled pair legs
+- **PR #7635**: fix: accept KiCad 6 Sheet file/Sheet name spellings in all sheet walkers
+- **PR #7631**: fix(route): run stitching, failed-net export and parity summary on every tail
+- **PR #7629**: test(route): name the differing field in entry-path golden drift failures
+- **Issue #7597** (closed): lattice: verify pair legs at true width against foreign pads too (#7571 follow-up)
+- **Issue #7617** (closed): Schematic hierarchy walkers read only the `Sheetfile` property; with KiCad 6's `Sheet file` / `Sheet name` keys the sub-sheets are silently dropped (BOM, `sch set-*`, annotation, netlist)
+- **Issue #7626** (closed): test flake: test_route_entry_path_goldens partial/* drift on Test job
 - **PR #7638**: fix(bom): drop (power)-flagged symbols and filter virtual parts in every format
 - **PR #7623**: fix(router): skew tuner measures quantized length and seats a taller loop at a host's end
 - **PR #7604**: fix(route): apply pad-edge floor to oracle pour-link weld vias

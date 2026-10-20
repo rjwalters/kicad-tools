@@ -10,6 +10,7 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from kicad_tools.core.sheet_properties import SHEET_FILE_KEYS, SHEET_NAME_KEYS
 from kicad_tools.sexp import SExp, parse_string
 
 logger = logging.getLogger(__name__)
@@ -146,9 +147,9 @@ class SheetInstance:
         for prop in sexp.find_all("property"):
             prop_name = prop.get_string(0)
             prop_value = prop.get_string(1) or ""
-            if prop_name == "Sheetname":
+            if prop_name in SHEET_NAME_KEYS:
                 name = prop_value
-            elif prop_name == "Sheetfile":
+            elif prop_name in SHEET_FILE_KEYS:
                 filename = prop_value
 
         # Parse pins
@@ -376,6 +377,13 @@ class HierarchyBuilder:
 
         # Recursively load children, relative to this sheet's own folder
         for sheet in sheets:
+            if not sheet.filename:
+                logger.warning(
+                    "Sheet %r in %s has no file property (Sheetfile / Sheet file); skipping",
+                    sheet.name,
+                    path_str,
+                )
+                continue
             child = self._load_schematic(
                 sheet.filename,
                 sheet.name,

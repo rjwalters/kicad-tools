@@ -26,6 +26,7 @@ _None._
 - **#6858**: router: coupled pre-pass should keep the better of the joint-search and pose-centreline candidates (compare-and-keep; unblocks #6835)
 - **#7269**: board 07 MIPI_DAT0: recover 0.038 mm skew lost to compare-and-keep (blocks #6858)
 - **#7401**: router: board 06 USB2_D+ uncoupled 12.791 > 12.700 mm after v62 pad-edge floor reorders the single-ended fallback
+- **#7491**: router: C++ search finds no USB3_RX1- path on board 06 once USB2_D routes coupled (blocks #7401)
 
 ## Ready
 
@@ -39,37 +40,29 @@ Issues currently being built (`loom:building`).
 
 - **#5240**: CI runtime: reduce measured Test, Board06 E2E and diff-pair regression job medians
 - **#7377**: route: collapse the 4 copy-pasted post-route tails into one pipeline -- --length-match-diffpairs, --stitch-power-planes, --progressive-clearance, --bus-routing silently no-op on the default --auto-layers path
-- **#7503**: Lattice router: pad-clearance check uses a square around pads, not the true (rounded/rotated) outline, so legal via/track points are rejected (board 03 VBUS, #7463)
 - **#7521**: Diff-pair skew compensation per best practice (Q16): exclude tuning bumps from uncoupled metric, emit KiCad tuning patterns, geometry gates, sourced per-class skew limits
 - **#7548**: Board 06 synthetic fixture: 9 diff pairs over max skew on the seed-42 re-route (identity-allowed in check_diffpair_coverage.py)
-- **#7569**: C++ exact pad test holds every pad to the board's widest class clearance (Python applies the pair rule)
-- **#7580**: router: finish diff-pair via-count parity (continuation of #7093)
-- **#7597**: lattice: verify pair legs at true width against foreign pads too (#7571 follow-up)
-- **#7602**: stitcher: post-route pour stitching places a GND via 0.02 mm from U2-29's exposed-pad mask (board 05, --reserve-pour-only-passives)
 - **#7612**: Board 07 fixture: 4 diff pairs fail skew with no_suitable_segment (TMDS_D2, MIPI_DAT1, MIPI_DAT0, MIPI_CLK)
 - **#7614**: `schema.hierarchy.build_hierarchy` resolves sub-sheet files against the process working directory, then the root's directory, never the parent sheet's directory (wrong sheet read, nested sheets dropped silently)
-- **#7615**: Schematic BOM lists power symbols and PWR_FLAGs from a project symbol library (`#U0101`, `#FLG...`): `is_power_symbol` ignores the library symbol's `(power)` flag and `#` references
 - **#7616**: Schematic BOM (`extract_bom`, `kct bom`) lists the first placement's references for every placement of a repeated sheet, so the other placements' parts are missing; `build_hierarchy` also drops the subtree under a repeated sheet
-- **#7617**: Schematic hierarchy walkers read only the `Sheetfile` property; with KiCad 6's `Sheet file` / `Sheet name` keys the sub-sheets are silently dropped (BOM, `sch set-*`, annotation, netlist)
-- **#7626**: test flake: test_route_entry_path_goldens partial/* drift on Test job
+- **#7637**: Unify schematic power-symbol predicates with BOMItem.is_power_symbol's (power)-flag rule
+- **#7645**: main: 4 test_lattice_extra_parity_7093 tests fail after dc78dac
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#7591**: feat: gate diff-pair skew bumps on excursion, jog width and source proximity
-- **#7604**: fix(route): apply pad-edge floor to oracle pour-link weld vias
-- **#7628**: fix: tune board 07's four skewed diff pairs and stop the skew gate vetoing inherited near-misses
-- **#7629**: test(route): name the differing field in entry-path golden drift failures
-- **#7631**: fix(route): run stitching, failed-net export and parity summary on every tail
+- **#7639**: fix: list each placement of a repeated sheet in the BOM
+- **#7642**: fix: share one library-flag power-symbol predicate across BOM, footprint gate, parser and fix-annotation
+- **#7643**: fix(schema): resolve sub-sheets against the containing sheet's folder (#7614)
+- **#7644**: refactor(route): build route_all_negotiated kwargs once for all seven call sites
+- **#7646**: test(router): close the corridor under the extra-parity wall fixture
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-- **#7517**: fix(router): judge lattice pad keep-outs against the true pad outline
-- **#7584**: fix(router): native pad test applies each pad's own net-class clearance
-- **#7623**: fix(router): skew tuner measures quantized length and seats a taller loop at a host's end
+_None._
 
 ## Proposed
 
@@ -90,28 +83,25 @@ Issues carrying `loom:curated`.
 - **#7256**: board 03: after #7163 a fresh arm C route fails usb_geometry (MCU launch 4.138/4.284 > 4 mm; USB width 0.30 -> 0.275) *(curated)*
 - **#7269**: board 07 MIPI_DAT0: recover 0.038 mm skew lost to compare-and-keep (blocks #6858) *(curated)*
 - **#7349**: Boards 06/07: enable diff-pair gap tightening on seed-42 re-routes and drop the impedance caps (#7344 PR 2) *(curated)*
+- **#7377**: route: collapse the 4 copy-pasted post-route tails into one pipeline -- --length-match-diffpairs, --stitch-power-planes, --progressive-clearance, --bus-routing silently no-op on the default --auto-layers path *(curated)*
 - **#7401**: router: board 06 USB2_D+ uncoupled 12.791 > 12.700 mm after v62 pad-edge floor reorders the single-ended fallback *(curated)*
 - **#7487**: Re-rule or remove board 03 usb_geometry via-in-pad window exception by 2027-04-19 (#7457 / #7084 Q10) *(curated)*
 - **#7491**: router: C++ search finds no USB3_RX1- path on board 06 once USB2_D routes coupled (blocks #7401) *(curated)*
-- **#7503**: Lattice router: pad-clearance check uses a square around pads, not the true (rounded/rotated) outline, so legal via/track points are rejected (board 03 VBUS, #7463) *(curated)*
 - **#7518**: DSN export: verify a Specctra router doesn't double-flip back-side padstack layers (deferred from #7481 / #7496) *(curated)*
 - **#7521**: Diff-pair skew compensation per best practice (Q16): exclude tuning bumps from uncoupled metric, emit KiCad tuning patterns, geometry gates, sourced per-class skew limits *(curated)*
 - **#7548**: Board 06 synthetic fixture: 9 diff pairs over max skew on the seed-42 re-route (identity-allowed in check_diffpair_coverage.py) *(curated)*
 - **#7557**: Board 07: TMDS_D0_N pad U4.B2 has no legal exit; needs placement rework or joint TMDS escape-corridor allocation (#3673) *(curated)*
-- **#7569**: C++ exact pad test holds every pad to the board's widest class clearance (Python applies the pair rule) *(curated)*
 - **#7573**: router: board 05 +5V/GND pour completeness depends on where nTRIP lands (C10 stitch sites unreserved) *(curated)*
 - **#7580**: router: finish diff-pair via-count parity (continuation of #7093) *(curated)*
 - **#7583**: board 06: impedance finding on USB2_D- once the native pad test applies per-pad classes (follow-up to #7569) *(curated)*
-- **#7597**: lattice: verify pair legs at true width against foreign pads too (#7571 follow-up) *(curated)*
-- **#7602**: stitcher: post-route pour stitching places a GND via 0.02 mm from U2-29's exposed-pad mask (board 05, --reserve-pour-only-passives) *(curated)*
 - **#7611**: Board 07 fixture: DDR_DATA_BYTE_0 and MIPI_CSI_LANES group length skew over tolerance *(curated)*
 - **#7612**: Board 07 fixture: 4 diff pairs fail skew with no_suitable_segment (TMDS_D2, MIPI_DAT1, MIPI_DAT0, MIPI_CLK) *(curated)*
 - **#7614**: `schema.hierarchy.build_hierarchy` resolves sub-sheet files against the process working directory, then the root's directory, never the parent sheet's directory (wrong sheet read, nested sheets dropped silently) *(curated)*
-- **#7615**: Schematic BOM lists power symbols and PWR_FLAGs from a project symbol library (`#U0101`, `#FLG...`): `is_power_symbol` ignores the library symbol's `(power)` flag and `#` references *(curated)*
 - **#7616**: Schematic BOM (`extract_bom`, `kct bom`) lists the first placement's references for every placement of a repeated sheet, so the other placements' parts are missing; `build_hierarchy` also drops the subtree under a repeated sheet *(curated)*
-- **#7617**: Schematic hierarchy walkers read only the `Sheetfile` property; with KiCad 6's `Sheet file` / `Sheet name` keys the sub-sheets are silently dropped (BOM, `sch set-*`, annotation, netlist) *(curated)*
 - **#7619**: Board 07 fixture: DQS and TMDS_D1 diff pairs routed with unequal via counts (N leg +2 vias), causing multi-mm skew *(curated)*
-- **#7626**: test flake: test_route_entry_path_goldens partial/* drift on Test job *(curated)*
+- **#7624**: router: recover 06rf USB3_RX1/RX2 coupling at J1 after #7517 corridor competition (Q29 tracked regression) *(curated)*
+- **#7637**: Unify schematic power-symbol predicates with BOMItem.is_power_symbol's (power)-flag rule *(curated)*
+- **#7645**: main: 4 test_lattice_extra_parity_7093 tests fail after dc78dac *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -137,12 +127,12 @@ Issues carrying `loom:curated`.
 |------|-------|
 | Operator merge-risk holds | 0 |
 | Very important | 1 |
-| Important | 3 |
+| Important | 4 |
 | Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 15 |
+| In Progress (`loom:building`) | 9 |
 | PRs awaiting review | 5 |
-| Approved PRs awaiting merge | 3 |
-| Curated | 37 |
+| Approved PRs awaiting merge | 0 |
+| Curated | 34 |
 | Architect / Hermit proposals | 5 |
 | Active epics | 7 |
 <!-- guide:plan-body:end -->
