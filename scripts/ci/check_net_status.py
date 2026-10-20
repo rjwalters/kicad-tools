@@ -57,7 +57,7 @@ by this script.
 ``--known-open-nets NET[,NET...]``
 ----------------------------------
 Board 07 ("matchgroup-test") routes PARTIAL by design: 1
-unroutable net (#7554 / #3438 / #4012: ``TMDS_D0_N``; measured 2026-10-20,
+unroutable net (#7557 / #3438 / #4012: ``TMDS_D0_N``; measured 2026-10-20,
 seed 42).  Passing it via ``--known-open-nets`` excludes THEIR unconnected pads from
 the gated count while still failing on an unconnected pad appearing on ANY
 OTHER net -- so a *different* net silently going open is still caught (tighter

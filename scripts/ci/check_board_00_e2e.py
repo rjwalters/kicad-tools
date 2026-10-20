@@ -57,8 +57,8 @@ board uses ``--lvs-not-run``/``--lvs-vacuous``, but the modes stay for
 future PCB-first fixtures.)
 
 ``--lvs-known-opens NET[,NET...]`` mode (#4012, board 07): for a *wired*
-fixture schematic on a board that routes PARTIAL by design (5
-seed-invariant unroutable nets, #3438).  Asserts ``lvs.json`` is present
+fixture schematic on a board that routes PARTIAL by design (1
+unroutable net, TMDS_D0_N, #7557/#3438).  Asserts ``lvs.json`` is present
 and honestly dirty: ``clean: false``, NOT vacuous, ONLY ``kind="open"``
 copper mismatches on exactly the named nets, an empty label-mismatch
 list, and ``board.json`` carrying ``lvs_clean: false``.  Any short, any
@@ -231,7 +231,7 @@ def assert_lvs_known_opens(lvs_path: Path, expected_nets: set[str]) -> str | Non
     """Assert ``lvs.json`` carries EXACTLY the expected known opens (#4012).
 
     For wired-schematic boards that route PARTIAL by design (board 07: 1
-    unroutable net, TMDS_D0_N, #7554/#3438).  Expected shape:
+    unroutable net, TMDS_D0_N, #7557/#3438).  Expected shape:
 
     * ``clean: false`` (the opens are real evidence, not vacuity);
     * NOT vacuous (``copper_vacuous`` false/absent, bound pads > 0);

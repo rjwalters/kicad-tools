@@ -334,7 +334,7 @@ def test_default_mode_rejects_vacuous_clean_true_lvs_json(tmp_path: Path) -> Non
 # --- --lvs-known-opens mode (#4012, board 07) --------------------------------
 #
 # Wired fixture schematic on a partial-by-design board (board 07: 1
-# unroutable net, #7554/#3438): lvs.json is honestly DIRTY with exactly that
+# unroutable net, #7557/#3438): lvs.json is honestly DIRTY with exactly that
 # open, and board.json renders lvs_clean=false.
 
 _B07_OPENS = ["TMDS_D0_N"]

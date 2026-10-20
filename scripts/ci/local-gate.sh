@@ -376,7 +376,8 @@ job_board_06_end_to_end() {
 }
 
 job_board_07_end_to_end() {
-  # Sole known open: TMDS_D0_N (#7554, under epic #3438); must match ci.yml.
+  # Sole known open: TMDS_D0_N (#7557, measured in #7554, under epic
+  # #3438); must match ci.yml.
   local known_opens="TMDS_D0_N"
   uv run kct build-native
   rm -rf /tmp/board07-ci

@@ -313,7 +313,7 @@ def test_default_mode_rejects_vacuous_as_dirty(tmp_path: Path) -> None:
 # --- --expect-opens mode (#4012, board 07) ----------------------------------
 #
 # Known-opens contract for wired-schematic boards that route PARTIAL by
-# design (board 07: 1 unroutable net, TMDS_D0_N, #7554/#3438).  The gate
+# design (board 07: 1 unroutable net, TMDS_D0_N, #7557/#3438).  The gate
 # passes ONLY when the result carries kind='open' mismatches on exactly the
 # named net set -- clean=true, a short, a vacuous verdict, an unexpected
 # open, or a missing expected open all trip it.

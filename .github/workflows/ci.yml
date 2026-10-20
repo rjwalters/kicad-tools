@@ -2543,7 +2543,8 @@ jobs:
     # board 07 ("matchgroup-test").  The fixture schematic is now FULLY
     # WIRED (#4012: 244/244 pads bound), so the copper comparator carries
     # real evidence -- and board 07 routes PARTIAL by design (1
-    # unroutable net, TMDS_D0_N, tracked in #7554 under epic #3438;
+    # unroutable net, TMDS_D0_N, tracked in #7557 -- measured in #7554 --
+    # under epic #3438;
     # DQ3, DQ4, MIPI_DAT0_N and TMDS_D1_N route as of 2026-10-20, origin/main
     # e1c361478, seed 42), so the HONEST verdict is ``clean: false``
     # with exactly that 1 open.  (Before #4012 the schematic bound 0
@@ -2576,7 +2577,7 @@ jobs:
     # ``matchgroup-routing-regression`` job.  Board 07 carries allowlisted
     # DRC residuals (.github/routed-drc-tolerance.yml) and routes PARTIAL
     # by design, so no Overall: PASSED / status:ok / drc_violations:0
-    # assertions apply.  If #7554 / #3438 ever makes TMDS_D0_N routable, graduate
+    # assertions apply.  If #7557 / #3438 ever makes TMDS_D0_N routable, graduate
     # this job to --lvs-only + a plain copper-clean assertion.
     # Advisory until a repo admin adds it to branch protection.
     name: Board 07 End-to-End (LVS known opens)
@@ -2628,7 +2629,7 @@ jobs:
 
       - name: Regenerate board 07 from recipe (--step all, clean tmp directory)
         # PARTIAL routing is expected on this board (1 unroutable net,
-        # TMDS_D0_N, #7554 / #3438), so the recipe exits non-zero -- tolerate
+        # TMDS_D0_N, #7557 / #3438), so the recipe exits non-zero -- tolerate
         # it (|| true).
         # The recipe emits lvs.json with the honest clean=false / 1-open
         # verdict (#4012, require_clean=False because the opens are
@@ -2648,7 +2649,7 @@ jobs:
         # the recipe) on the REGENERATED schematic + routed PCB.  Board 07's
         # schematic is fully wired (#4012: 244/244 pads bound) and the board
         # routes PARTIAL by design, so the honest verdict is exactly the 1
-        # known open (TMDS_D0_N, #7554 under #3438): --expect-opens asserts
+        # known open (TMDS_D0_N, #7557 under #3438): --expect-opens asserts
         # that set and nothing else.  A copper short, a NEW open, a vacuous
         # verdict (the schematic regressed to unwired), or TMDS_D0_N becoming
         # routable all fail the gate.  Entrypoint from #3838.
@@ -2684,7 +2685,7 @@ jobs:
       - name: Assert plane-net completion (known opens tolerated, #4531)
         # Raw total_unconnected_pads gate (scripts/ci/check_net_status.py).
         # Board 07 routes PARTIAL by design: 1 unroutable net, TMDS_D0_N
-        # (#7554 / #3438 / #4012). --known-open-nets excludes THAT net's pads
+        # (#7557 / #3438 / #4012). --known-open-nets excludes THAT net's pads
         # from the gated count while still failing on an unconnected pad on
         # any OTHER net -- so a DIFFERENT net silently going open is still
         # caught (tighter than raising --max-unconnected to its pad
@@ -2698,7 +2699,7 @@ jobs:
       - name: Assert artifacts + honest known-opens LVS state (#4012)
         # --lvs-known-opens: lvs.json must be present, clean=false, NOT
         # vacuous, with ONLY kind='open' copper mismatches on exactly the
-        # unroutable net TMDS_D0_N (#7554 / #3438) and an empty
+        # unroutable net TMDS_D0_N (#7557 / #3438) and an empty
         # label-mismatch list; board.json must carry the honest
         # lvs_clean=false (gallery: "LVS: 1 mismatch").  No
         # status/drc_violations assertions (allowlisted DRC residuals ->

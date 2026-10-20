@@ -2882,7 +2882,7 @@ def main() -> int:
             # all 244 pins, PIN_NETS mirroring generate_pcb.py
             # pad-for-pad), so the copper comparator binds 244/244 pads
             # and carries real evidence.  Board 07 routes PARTIAL by
-            # design -- 1 unroutable net (#7554 / #3438: TMDS_D0_N; the other
+            # design -- 1 unroutable net (#7557 / #3438: TMDS_D0_N; the other
             # four former opens route as of 2026-10-20) -- so copper-LVS
             # reports exactly that 1 open and ``lvs.json`` carries the honest
             # ``clean=false`` verdict (label comparator: clean; it is run
@@ -2910,7 +2910,7 @@ def main() -> int:
             if not copper_clean:
                 print(
                     "[lvs] copper-LVS is dirty -- EXPECTED on this "
-                    "partial-by-design board (#7554 / #3438 known open: "
+                    "partial-by-design board (#7557 / #3438 known open: "
                     "TMDS_D0_N).  lvs.json carries "
                     "the honest clean=false verdict; board-metrics "
                     "downgrades status to 'partial'.  The CI e2e job "
@@ -2934,7 +2934,7 @@ def main() -> int:
             # issue eliminates.
             #
             # Board 07 is PARTIAL BY DESIGN: 1 unroutable net
-            # (#7554 / #3438: TMDS_D0_N).  The gate
+            # (#7557 / #3438: TMDS_D0_N).  The gate
             # reflects that PARTIAL state HONESTLY rather than papering over
             # it:
             #   * ``route_ok=route_success`` -- ``kct route`` exits non-zero
