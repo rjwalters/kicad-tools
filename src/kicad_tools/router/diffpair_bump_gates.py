@@ -1,7 +1,9 @@
 """Geometry gates for diff-pair skew-compensation bumps (issue #7521, AC3).
 
 Operator ruling Q16 (best-practice intra-pair skew compensation) bounds where
-and how large a skew bump may be:
+and how large a skew bump may be.  Sources are cited in
+``docs/research/diffpair-skew-compensation.md``: [N1][T] for excursion and
+jog, [T][R1] for proximity:
 
 * **Excursion** at most :data:`MAX_EXCURSION_GAPS` x the nominal pair gap, so
   the bump stays inside the pair's own coupling envelope.
@@ -40,6 +42,8 @@ MIN_JOG_WIDTHS: float = 3.0
 MAX_SOURCE_DISTANCE_MM: float = 15.0
 
 #: A partner via this close to the host's run is a mismatch source on it.
+#: Judgement value (not from the source notes), in the style of the
+#: *Judgement:* entries of ``docs/research/diffpair-skew-compensation.md``.
 PARTNER_VIA_REACH_MM: float = 2.0
 
 _EPS_MM = 1e-6
@@ -120,7 +124,17 @@ def bump_gate_violation(
     # Proximity to a mismatch source within the host's via-delimited run.
     anchors = _section_anchors(host_route, partner_route, host_idx)
     if anchors:
-        points = [(s.x1, s.y1) for s in new_segments] + [(new_segments[-1].x2, new_segments[-1].y2)]
+        # The bump's own copper only: the lead-in and lead-out span the whole
+        # host segment, so their ends sit on the host line at its endpoints
+        # and would make a bump mid-host look close to a source.
+        points = [
+            (x, y)
+            for s in new_segments
+            for x, y in ((s.x1, s.y1), (s.x2, s.y2))
+            if abs(offset(x, y)) > _EPS_MM
+        ]
+        if not points:
+            return None
         nearest = min(math.hypot(px - qx, py - qy) for px, py in points for qx, qy in anchors)
         if nearest > MAX_SOURCE_DISTANCE_MM + _EPS_MM:
             return (

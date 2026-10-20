@@ -99,6 +99,18 @@ class TestProximity:
         message = _violation(_bump(30.0, 0.2, 0.6))
         assert message is not None and "mismatch source" in message
 
+    def test_lead_in_and_lead_out_do_not_count_as_the_bump(self):
+        """Leads that span the host put no copper near the run ends (review #7591)."""
+        bump = [
+            _seg(0, 0, 40, 0),
+            _seg(40, 0, 40, 0.2),
+            _seg(40, 0.2, 40.6, 0.2),
+            _seg(40.6, 0.2, 40.6, 0),
+            _seg(40.6, 0, 60, 0),
+        ]
+        message = _violation(bump)
+        assert message is not None and "mismatch source" in message
+
     def test_partner_via_on_the_run_is_a_source(self):
         partner = _partner(
             [
@@ -215,8 +227,8 @@ def test_tuned_bumps_obey_the_gates(chamfer):
     )
 
 
-def test_bump_beyond_fifteen_mm_of_every_source_is_refused():
-    """A 60 mm run whose only hosts lie mid-run cannot take the bump."""
+def test_bump_on_an_end_segment_stays_near_a_run_end():
+    """Hosts at the run ends take the bump, and the bump stays near the ends."""
     p = Route(
         net=1,
         net_name="D+",
@@ -234,3 +246,27 @@ def test_bump_beyond_fifteen_mm_of_every_source_is_refused():
         if s.y1 != 0.0 or s.y2 != 0.0:
             assert min(abs(s.x1 - 0), abs(s.x1 - 60)) <= MAX_SOURCE_DISTANCE_MM + 1e-6
     assert result.skew_after_mm <= result.skew_before_mm
+
+
+def test_mid_run_longest_host_with_far_bump_is_not_tuned():
+    """Longest host [20, 70] would put the loops at x~20.6, 20.6 mm from any end.
+
+    Its lead-out ends 5 mm from the run end at 75, which used to let the gate
+    pass.  The loops, not the leads, must be within 15 mm of a source.
+    """
+    p = Route(
+        net=1,
+        net_name="D+",
+        segments=[_seg(0, 0, 20, 0), _seg(20, 0, 70, 0), _seg(70, 0, 75, 0)],
+    )
+    n = Route(net=2, net_name="D-", segments=[_seg(0, -0.35, 76, -0.35, 2, "D-")])
+    p_out, _n, _result = tune_diff_pair_skew(
+        _pair(),
+        {1: p, 2: n},
+        tolerance_mm=0.15,
+        intra_pair_clearance_mm=GAP,
+    )
+    for s in p_out.segments:
+        for x, y in ((s.x1, s.y1), (s.x2, s.y2)):
+            if abs(y) > 1e-9:
+                assert min(x, 75 - x) <= MAX_SOURCE_DISTANCE_MM + 1e-6
