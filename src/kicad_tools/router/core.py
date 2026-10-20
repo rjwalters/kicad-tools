@@ -21223,8 +21223,16 @@ class Autorouter:
         _default_class_mm = float(getattr(_default_class, "clearance", 0.0) or 0.0)
         if _default_class_mm <= 0.0:
             _default_class_mm = float(self.rules.trace_clearance)
+        # Issue #7594: a net whose class is declared only in the project's
+        # ``.kicad_pro`` (e.g. GND/+3V3 in AUX) has no ``net_class_map`` entry,
+        # but the loader stores its class clearance in
+        # ``rules.net_clearance_floors`` -- the value ``kct check`` and
+        # kicad-cli use.  Take the larger so the tuner never falls back to
+        # Default for a net the authored source holds to a stricter class.
+        _authored_floors = getattr(self.rules, "net_clearance_floors", None) or {}
         for _nid in set(self.net_names) | set(routes_by_net) | set(_clearance_names):
             _c = self._net_class_clearance_mm(_nid, _clearance_names.get(_nid, ""))
+            _c = max(_c, float(_authored_floors.get(_nid, 0.0) or 0.0))
             net_clearance_mm[_nid] = _c if _c > 0.0 else _default_class_mm
 
         if engage not in ("length_critical", "checker_limit"):

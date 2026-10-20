@@ -226,6 +226,23 @@ class TestApplyMatchGroupTuningFloors:
         assert kw["via_clearance_mm"] == pytest.approx(0.175)
         assert kw["net_clearance_mm"][7] == pytest.approx(0.19)
 
+    def test_authored_only_class_reaches_the_tuner(self, monkeypatch):
+        # Issue #7594: a net classed only in the project (.kicad_pro) has no
+        # net_class_map entry; its authored floor must set the neighbour
+        # floor instead of the Default fallback.
+        ar = _autorouter(group_clearance=0.175, neighbour_clearance=None)
+        ar.net_class_map["Default"] = NetClassRouting(name="Default", clearance=0.15)
+        ar.net_names[7] = "GND"
+        ar.pads = {
+            ("U9", "1"): Pad(
+                x=40.0, y=40.0, width=0.3, height=0.3, net=7, net_name="GND", ref="U9", pin="1"
+            )
+        }
+        ar.rules.net_clearance_floors = {7: 0.175}
+        kw = _captured_floors(ar, monkeypatch)
+        assert kw["net_clearance_mm"][7] == pytest.approx(0.175)
+        assert kw["net_clearance_mm"][NEIGHBOUR_NET] == pytest.approx(0.15)
+
     def test_classless_group_keeps_single_threshold(self, monkeypatch):
         ar = _autorouter(group_clearance=0.175)
         ar.net_class_map = {}
