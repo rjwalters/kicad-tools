@@ -8,7 +8,7 @@ Each source is tagged **[read]** (primary text read directly) or **[snip]** (num
 1. **KiCad upstream already excludes tuning patterns from the uncoupled total.** A KiCad developer confirmed on the forum (June 2026) that counting meanders as uncoupled "was indeed a bug", fixed by commit `7afb67fb` "pcbnew: exclude tuning patterns from diff-pair uncoupled length total" [K3]. Our "combined uncoupled length may not grow" rule therefore copies behaviour that KiCad itself treats as a bug. Caveat: the exclusion applies to KiCad *tuning-pattern objects*. Bumps our router emits as plain track segments will still count in kicad-cli DRC.
 2. **Every vendor that addresses placement says to compensate near the mismatch source, segment by segment.** That is the bend or pad end, and each via-delimited segment is matched on its own (TI [TI1][TI2], NXP/Philips [N1], Renesas [R1], Toradex [T], Cadence [C1], Altium blog [A2]). Altium's tool docs are the outlier: static phase matching may go "anywhere along the length of the shorter net" [A1].
 3. **No standard defines a "max uncoupled length".** It appears only as vendor breakout rules. Examples: PCIe pin/ball entry ≤45 mil [N1], PCIe breakout ≤250 mil [R1], and "compensate within 15 mm of the bend; don't propagate asynchronously >15 mm" [T]. KiCad ships no default and reports nothing until a custom rule is set [K1][K2].
-4. **Bump geometry has a consensus.** Excursion of ≤2× the nominal pair gap (S1 < 2S) [N1][T]. Each jog ≥3× trace width (15 mil at W = 5 mil) [N1][T]. TI's worked example is W = 6, A = 8 mil → B ≥ 16 mil, C ≥ 18 mil [TI2]. Small offsets under-deliver: current "scoots" around a shallow bulge, and bulges can't reliably correct skews below about 1 ps [S1].
+4. **Bump geometry has a consensus.** Inside the bump the trace spacing S1 must stay below 2× the spacing S of the unbumped pair: AN10373 says the maximum distance between traces in a serpentine section "should be less than two times the distance between traces in a non-serpentine section" [N1][T]. The bump's push-out beyond the nominal gap is therefore **less than 1× the gap** (operator ruling Q27 on #7521); an earlier version of this note misquoted the rule as "excursion ≤ 2× gap". Each jog ≥3× trace width (15 mil at W = 5 mil) [N1][T]. TI's worked example is W = 6, A = 8 mil → B ≥ 16 mil, C ≥ 18 mil [TI2]. Small offsets under-deliver: current "scoots" around a shallow bulge, and bulges can't reliably correct skews below about 1 ps [S1].
 
 ## 1. Technique
 
@@ -63,7 +63,7 @@ All limits below are intra-pair (P vs N) unless noted. Time limits are converted
 **Uncoupled-length rule (replaces "may not grow")**
 
 1. **Exclude skew-compensation bumps from the uncoupled metric,** matching KiCad's own fix [K3]. Gate the bumps with geometry rules instead:
-   - excursion ≤ 2 × nominal gap [N1][T];
+   - excursion < 1 × nominal gap, strictly (S1 < 2S, with S1 the spacing inside the bump) [N1][T];
    - each jog ≥ 3 × W [N1][T];
    - the bump lies within 15 mm of the mismatch source and in the same via-delimited segment [T][R1];
    - the result reduces |skew| to within the class limit.

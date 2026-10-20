@@ -1,6 +1,6 @@
 """AC3 geometry gates for diff-pair skew bumps (issue #7521).
 
-Excursion at most 2x the pair gap, jogs at least 3x the trace width, and the
+Excursion strictly below 1x the pair gap (operator ruling Q27), jogs at least 3x the trace width, and the
 bump within 15 mm of a mismatch source in the same via-delimited run.
 """
 
@@ -29,6 +29,8 @@ from kicad_tools.router.primitives import Route, Segment, Via
 
 W = 0.2
 GAP = 0.15
+#: A compliant excursion: strictly below one gap.
+AMP = 0.9 * GAP
 
 
 def _seg(x1, y1, x2, y2, net=1, name="D+", layer=Layer.F_CU):
@@ -63,29 +65,33 @@ def _violation(bump, host=None, partner=None):
 
 
 class TestExcursion:
-    def test_within_twice_the_gap_passes(self):
-        assert _violation(_bump(2.0, 2 * GAP, 0.6)) is None
+    def test_below_the_gap_passes(self):
+        assert _violation(_bump(2.0, 0.99 * GAP, 0.6)) is None
 
-    def test_beyond_twice_the_gap_is_rejected(self):
-        assert "excursion" in _violation(_bump(2.0, 2 * GAP + 0.05, 0.6))
+    def test_exactly_the_gap_is_rejected(self):
+        """S1 < 2S is strict: a push-out of one full gap (S1 = 2S) fails."""
+        assert "excursion" in _violation(_bump(2.0, GAP, 0.6))
+
+    def test_beyond_the_gap_is_rejected(self):
+        assert "excursion" in _violation(_bump(2.0, GAP + 0.05, 0.6))
 
 
 class TestJog:
     def test_three_widths_passes(self):
-        assert _violation(_bump(2.0, 0.2, 3 * W)) is None
+        assert _violation(_bump(2.0, AMP, 3 * W)) is None
 
     def test_shorter_flat_top_is_rejected(self):
-        assert "jog" in _violation(_bump(2.0, 0.2, 3 * W - 0.05))
+        assert "jog" in _violation(_bump(2.0, AMP, 3 * W - 0.05))
 
     def test_between_loop_connector_is_a_jog_too(self):
-        bump = _bump(2.0, 0.2, 0.6)
+        bump = _bump(2.0, AMP, 0.6)
         # Splice a second loop after a 0.3 mm connector on the host line.
         x = bump[3].x2
         bump[4:] = [
             _seg(x, 0, x + 0.3, 0),
-            _seg(x + 0.3, 0, x + 0.3, 0.2),
-            _seg(x + 0.3, 0.2, x + 0.9, 0.2),
-            _seg(x + 0.9, 0.2, x + 0.9, 0),
+            _seg(x + 0.3, 0, x + 0.3, AMP),
+            _seg(x + 0.3, AMP, x + 0.9, AMP),
+            _seg(x + 0.9, AMP, x + 0.9, 0),
             _seg(x + 0.9, 0, x + 1.9, 0),
         ]
         assert "jog" in _violation(bump)
@@ -93,19 +99,19 @@ class TestJog:
 
 class TestProximity:
     def test_bump_near_the_run_end_passes(self):
-        assert _violation(_bump(3.0, 0.2, 0.6)) is None
+        assert _violation(_bump(3.0, AMP, 0.6)) is None
 
     def test_bump_far_from_every_source_is_rejected(self):
-        message = _violation(_bump(30.0, 0.2, 0.6))
+        message = _violation(_bump(30.0, AMP, 0.6))
         assert message is not None and "mismatch source" in message
 
     def test_lead_in_and_lead_out_do_not_count_as_the_bump(self):
         """Leads that span the host put no copper near the run ends (review #7591)."""
         bump = [
             _seg(0, 0, 40, 0),
-            _seg(40, 0, 40, 0.2),
-            _seg(40, 0.2, 40.6, 0.2),
-            _seg(40.6, 0.2, 40.6, 0),
+            _seg(40, 0, 40, AMP),
+            _seg(40, AMP, 40.6, AMP),
+            _seg(40.6, AMP, 40.6, 0),
             _seg(40.6, 0, 60, 0),
         ]
         message = _violation(bump)
@@ -125,7 +131,7 @@ class TestProximity:
                 )
             ]
         )
-        assert _violation(_bump(30.0, 0.2, 0.6), partner=partner) is None
+        assert _violation(_bump(30.0, AMP, 0.6), partner=partner) is None
 
     def test_a_via_splits_the_run(self):
         """Host segments past a via belong to the next run, with their own ends."""
@@ -152,9 +158,9 @@ class TestProximity:
             _seg(x + 40, y, x2 + 40, y2, layer=Layer.B_CU)
             for x, y, x2, y2 in (
                 (2, 0, 3, 0),
-                (3, 0, 3, 0.2),
-                (3, 0.2, 3.6, 0.2),
-                (3.6, 0.2, 3.6, 0),
+                (3, 0, 3, AMP),
+                (3, AMP, 3.6, AMP),
+                (3.6, AMP, 3.6, 0),
                 (3.6, 0, 4.6, 0),
             )
         ]
@@ -215,7 +221,9 @@ def test_tuned_bumps_obey_the_gates(chamfer):
     assert result.inserts_applied >= 1
     assert result.skew_after_mm < 1.5  # the bump closed some of the 1.5 mm skew
     offsets = [abs(v) for s in p_out.segments for v in (s.y1, s.y2)]
-    assert max(offsets) <= 2 * GAP + 1e-6
+    assert max(offsets) < GAP
+    # Operator ruling Q32: compliant bumps are plain copper, never a pattern.
+    assert all(s.tuning_pattern is None for s in p_out.segments)
     for s in p_out.segments:
         if math.isclose(s.y1, s.y2, abs_tol=1e-9) and s.y1 != 0.0:
             assert math.hypot(s.x2 - s.x1, s.y2 - s.y1) >= 3 * s.width - 1e-6

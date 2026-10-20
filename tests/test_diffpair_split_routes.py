@@ -34,7 +34,7 @@ def setup(shorter=1, *, native=False, escape_length=1, split=False):
     ar = Autorouter(width=60, height=40, force_python=not native)
     ar.net_names = {1: "USB_D+", 2: "USB_D-"}
     for net, y in [(1, 10), (2, 20)]:
-        end = 5 + escape_length + (9 if net == shorter else 13)
+        end = 5 + escape_length + (12 if net == shorter else 13)
         boundary = 5 + escape_length
         ar.routes.append(fragment(net, 5, boundary, y, True))
         if split:
@@ -130,7 +130,7 @@ def test_earlier_foreign_fragment_rejects_and_retains_original_objects():
     ar, pairs = setup()
     # The shorter half bulges away from the partner at y=20, toward y<10.  The
     # placement search (#6788) also tries the reverse side, so block that too.
-    # Bumps are capped at twice the pair gap (#7521), so the blockers sit close.
+    # Bumps stay below the pair gap (#7521), so the blockers sit close.
     ar.routes.extend([fragment(9, 5, 20, 9.7), fragment(9, 5, 20, 10.3), fragment(9, 2, 3, 35)])
     for route in ar.routes[-3:]:
         ar._mark_route(route)
@@ -140,7 +140,7 @@ def test_earlier_foreign_fragment_rejects_and_retains_original_objects():
     assert result.reason == "post_insertion_drc_violation"
     assert all(a is b for a, b in zip(original, ar.routes, strict=True))
     assert [(r.segments, r.vias) for r in ar.routes] == geometry
-    assert result.skew_after_mm == pytest.approx(4)
+    assert result.skew_after_mm == pytest.approx(1)
 
 
 @pytest.mark.parametrize("reverse", [False, True])
@@ -173,7 +173,7 @@ def test_untuned_fragments_keep_identity_and_complete_tracker(disabled):
         ar.net_class_map = {"USB_D+": NetClassRouting(name="No tuning", length_critical=False)}
     else:
         # Trim the longer channel to the same complete-net length.
-        ar.routes[-1].segments[0].x2 -= 4
+        ar.routes[-1].segments[0].x2 -= 1
         ar.restore_route_snapshot(ar.routes)
     original = list(ar.routes)
     result = ar.apply_diffpair_length_tuning(pairs, verbose=False)[("USB_D+", "USB_D-")]

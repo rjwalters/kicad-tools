@@ -61,9 +61,9 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from .diffpair_bump_gates import (
+    bump_amplitude_cap_mm,
     bump_gate_violation,
     jog_spaced,
-    max_excursion_mm,
     replaced_index,
 )
 from .optimizer.geometry import segment_length
@@ -169,6 +169,11 @@ class DiffPairTuneResult:
 # default amplitude, while keeping the worst case bounded for unreachable
 # targets (very large skew on a congested board).
 MAX_INSERTS_PER_PAIR: int = 3
+
+# Issue #7521: the excursion cap (below 1x the pair gap) shrinks each bump, so
+# the default budget grows with it, up to this multiple of
+# :data:`MAX_INSERTS_PER_PAIR`.
+MAX_INSERT_BUDGET_SCALE: int = 4
 
 # Fraction of the skew tolerance to deliberately leave un-closed when
 # sizing the trombone (issue #3543).  Closing 100% of the gap aims the
@@ -402,13 +407,18 @@ def tune_diff_pair_skew(
     base_config = dataclasses.replace(
         config or SerpentineConfig(), corner_chamfer_widths=corner_chamfer_widths
     )
-    # Issue #7521 (AC3): a bump never strays more than 2x the pair gap, so cap
-    # the loop amplitude there and let the generator add loops instead.
-    if intra_pair_clearance_mm > 0.0:
-        base_config = dataclasses.replace(
-            base_config,
-            amplitude=min(base_config.amplitude, max_excursion_mm(intra_pair_clearance_mm)),
-        )
+    # Issue #7521 (AC3, operator ruling Q27): a bump stays strictly under 1x
+    # the pair gap, so cap the loop amplitude there and let the generator add
+    # loops instead.  Each insert then adds less, so the default cascade
+    # budget scales with the cap (an explicit ``max_inserts`` is honoured).
+    gated = intra_pair_clearance_mm > 0.0
+    if gated:
+        capped = min(base_config.amplitude, bump_amplitude_cap_mm(intra_pair_clearance_mm))
+        if max_inserts == MAX_INSERTS_PER_PAIR and capped < base_config.amplitude:
+            max_inserts *= min(
+                MAX_INSERT_BUDGET_SCALE, max(1, round(base_config.amplitude / capped))
+            )
+        base_config = dataclasses.replace(base_config, amplitude=capped)
 
     result = DiffPairTuneResult(skew_before_mm=skew)
     current_shorter = shorter_route
@@ -488,7 +498,7 @@ def tune_diff_pair_skew(
             "measure": measure,
         }
         for cand_route, cand_serp, as_pattern in _pattern_then_plain_options(
-            base_config, max_uncoupled_mm is not None, placement_kwargs
+            base_config, max_uncoupled_mm is not None, placement_kwargs, plain_only=gated
         ):
             result.serpentine_results.append(cand_serp)
             if not cand_serp.success:
@@ -510,10 +520,12 @@ def tune_diff_pair_skew(
             if gate_violation is not None:
                 generator_failure = gate_violation
                 continue
-            # Issue #7521: the bump is written as a KiCad tuning pattern, so
-            # tag it before the uncoupled guard measures the candidate (the
-            # measure leaves pattern copper out, as kicad-cli 10.0.6 does).
-            # Only the segments that leave the host line are members.
+            # Issue #7521: a pattern-form candidate (ungated tuning only) is
+            # tagged before the uncoupled guard measures it (the measure
+            # leaves pattern copper out, as kicad-cli 10.0.6 does).  Gated
+            # bumps (operator ruling Q32) are chamfered plain copper, so the
+            # guard counts their legs honestly.  Only the segments that leave
+            # the host line are members.
             for seg in cand_serp.new_segments:
                 seg.tuning_pattern = None
             cand_bump = (
@@ -777,9 +789,18 @@ def exact_fit_amplitude(
 
 
 def _pattern_then_plain_options(
-    base_config: SerpentineConfig, guarded: bool, placement_kwargs: dict[str, Any]
+    base_config: SerpentineConfig,
+    guarded: bool,
+    placement_kwargs: dict[str, Any],
+    *,
+    plain_only: bool = False,
 ) -> Iterator[tuple[Route, SerpentineResult, bool]]:
     """Yield ``(route, serpentine, as_pattern)`` placements (Issue #7546).
+
+    ``plain_only`` (Issue #7521, operator ruling Q32) skips the tuning-pattern
+    options: the gated bumps are 45-degree-chamfered plain copper, which
+    KiCad's uncoupled figure counts as just the bump's two legs, so nothing is
+    excluded by labelling copper as a pattern.
 
     First every :func:`_placement_options` placement as a tuning pattern
     (``base_config``'s loops).  When the uncoupled guard is active
@@ -788,9 +809,10 @@ def _pattern_then_plain_options(
     and pinned kicad-cli 10.0.6 measure plain bumps identically); the caller
     only pulls it once every pattern option was rejected.
     """
-    for route, serp in _placement_options(base_config=base_config, **placement_kwargs):
-        yield route, serp, True
-    if not guarded:
+    if not plain_only:
+        for route, serp in _placement_options(base_config=base_config, **placement_kwargs):
+            yield route, serp, True
+    if not guarded and not plain_only:
         return
     plain_config = dataclasses.replace(
         base_config,
@@ -811,7 +833,8 @@ def _min_chamfered_amplitude(config: SerpentineConfig, width: float) -> float:
     ``2 * width * (sqrt(2) - 1)`` and the skew lands inside the tolerance
     window on the other side.  ``0`` for square loops.
     """
-    return width if config.corner_chamfer_widths > 0.0 else 0.0
+    # Issue #7521: never above the (excursion-capped) amplitude itself.
+    return min(width, config.amplitude) if config.corner_chamfer_widths > 0.0 else 0.0
 
 
 def _placement_options(
@@ -1186,6 +1209,7 @@ def _empty_route(net_id: int, net_name: str) -> Route:
 # Re-export for ``from kicad_tools.router.diffpair_length_tuning import *``.
 __all__ = [
     "MAX_INSERTS_PER_PAIR",
+    "MAX_INSERT_BUDGET_SCALE",
     "SERPENTINE_TARGET_HEADROOM_FRACTION",
     "DiffPairTuneResult",
     "tune_diff_pair_skew",

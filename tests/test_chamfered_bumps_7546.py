@@ -149,16 +149,18 @@ class TestChamferedGeometry:
         chamfer = SKEW_BUMP_CHAMFER_WIDTHS * 0.2
         assert all(abs(s.x2 - s.x1) >= chamfer - 1e-6 for s in diagonal)
 
-    def test_skew_tuner_default_is_square(self):
-        """Off by default: the tuner's bumps are tuning patterns, and a chamfered
-        pattern reads more uncoupled in kicad-cli (longer base line)."""
+    def test_skew_tuner_bumps_are_chamfered_plain_copper(self):
+        """Operator ruling Q32 (#7521): the gated tuner commits 45-degree-chamfered
+        plain copper, never a tuning pattern, so KiCad's uncoupled figure counts
+        just the bump's legs and nothing is excluded by labelling."""
         p = _straight(1, "D_P", Y_P, 130.0)
         n = _straight(2, "D_N", Y_P + 0.45, 128.0)
         _p, n_out, result = tune_diff_pair_skew(
             _pair(), {1: p, 2: n}, tolerance_mm=0.127, intra_pair_clearance_mm=GAP
         )
         assert result.reason == "tuned"
-        assert all(abs(s.x2 - s.x1) < 1e-9 or abs(s.y2 - s.y1) < 1e-9 for s in n_out.segments)
+        assert all(s.tuning_pattern is None for s in n_out.segments)
+        assert any(abs(s.x2 - s.x1) > 1e-9 and abs(s.y2 - s.y1) > 1e-9 for s in n_out.segments)
 
     def test_small_need_is_met_with_a_one_width_bump(self):
         p = _straight(1, "D_P", Y_P, 130.0)
@@ -350,50 +352,24 @@ class TestBindingLimitFallsBackToChamferedPlainCopper:
         )
         return p, n, p_out, n_out, result
 
-    def test_pattern_is_preferred_when_it_passes(self):
-        # The square pattern reads 3.2 mm (loop spacing is 3x the width, #7521 AC3).
-        *_, n_out, result = self._tune(0.2, 128.0, 3.5)
+    def test_bump_is_plain_even_when_a_pattern_form_would_pass(self):
+        # A generous limit: the old pattern-first search would have committed a
+        # tuning pattern here.  Q32 emits chamfered plain copper regardless.
+        *_, n_out, result = self._tune(0.2, 128.0, 8.0)
         assert result.reason == "tuned"
-        assert any(s.tuning_pattern is not None for s in n_out.segments)
+        assert all(s.tuning_pattern is None for s in n_out.segments)
 
-    def test_unguarded_tuning_never_falls_back(self):
+    def test_unguarded_tuning_is_plain_too(self):
         *_, n_out, result = self._tune(0.127, 129.5, None)
         assert result.reason == "tuned"
-        assert any(s.tuning_pattern is not None for s in n_out.segments)
+        assert all(s.tuning_pattern is None for s in n_out.segments)
 
-    @pytest.mark.parametrize("n_end", [129.5, 129.2])
-    def test_half_width_floor_is_where_chamfers_beat_square(self, tmp_path, n_end):
-        """Issue #7593: why the fallback is chamfered, now that kct and
-        kicad-cli agree on square plain bumps too (agreement is pinned in
-        :class:`TestPlainBumpsAgreeWithPinnedKicadCli`).  On a 0.127 mm pair a
-        chamfer under half a width reads more uncoupled than the square loop,
-        and the fallback's chamfer reads less, which is what lets it pass the
-        0.8 / 1.1 mm limits of ``test_thin_trace_pair_is_tuned_plain_...``.
-        """
-
-        def plain_figure(chamfer: float) -> float:
-            p = _straight(1, "D_P", Y_P, 130.0, 0.127)
-            n = _straight(2, "D_N", Y_P + 0.127 + GAP, n_end, 0.127)
-            p_out, n_out, result = tune_diff_pair_skew(
-                _pair(),
-                {1: p, 2: n},
-                tolerance_mm=0.127,
-                intra_pair_clearance_mm=GAP,
-                corner_chamfer_widths=chamfer,
-            )
-            assert result.reason == "tuned"
-            return _kct(_write(tmp_path, f"floor_{chamfer}", [_plain(p_out), _plain(n_out)]))
-
-        square = plain_figure(0.0)
-        assert plain_figure(0.4) > square + 0.1
-        assert plain_figure(SKEW_BUMP_CHAMFER_WIDTHS) < square - 0.1
-
-    @pytest.mark.parametrize(("n_end", "limit"), [(129.5, 0.8), (129.2, 1.1)])
+    @pytest.mark.parametrize(("n_end", "limit"), [(129.5, 1.1), (129.2, 1.7)])
     def test_thin_trace_pair_is_tuned_plain_and_engines_agree(self, pinned_cli, n_end, limit):
         cli, root = pinned_cli
         p, n, p_out, n_out, result = self._tune(0.127, n_end, limit)
         assert result.reason == "tuned" and result.skew_after_mm <= 0.127
-        # The square pattern form failed (0.90 / 1.20 mm); this is plain copper.
+        # Plain copper (Q32); the capped bumps read 1.06 / 1.64 mm in both engines.
         assert all(s.tuning_pattern is None for s in n_out.segments)
         diagonal = [
             s for s in n_out.segments if abs(s.x2 - s.x1) > 1e-9 and abs(s.y2 - s.y1) > 1e-9

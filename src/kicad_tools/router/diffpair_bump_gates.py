@@ -5,8 +5,10 @@ and how large a skew bump may be.  Sources are cited in
 ``docs/research/diffpair-skew-compensation.md``: [N1][T] for excursion and
 jog, [T][R1] for proximity:
 
-* **Excursion** at most :data:`MAX_EXCURSION_GAPS` x the nominal pair gap, so
-  the bump stays inside the pair's own coupling envelope.
+* **Excursion** strictly below :data:`MAX_EXCURSION_GAPS` x the nominal pair
+  gap (operator ruling Q27: AN10373's S1 < 2S, with S1 the leg spacing inside
+  the bump, bounds the push-out at less than one gap), so the bump stays
+  inside the pair's own coupling envelope.
 * **Jog** (a run of the bump parallel to its host line) at least
   :data:`MIN_JOG_WIDTHS` x the trace width, so no loop is a sub-width stub.
 * **Proximity**: the bump sits within :data:`MAX_SOURCE_DISTANCE_MM` of a
@@ -32,8 +34,13 @@ if TYPE_CHECKING:
     from .optimizer.serpentine import SerpentineConfig
     from .primitives import Route, Segment
 
-#: Largest bump excursion, in nominal pair gaps (edge to edge).
-MAX_EXCURSION_GAPS: float = 2.0
+#: Excursion limit, in nominal pair gaps (edge to edge).  The cap is strict:
+#: a bump must stay *below* it (S1 < 2S, operator ruling Q27).
+MAX_EXCURSION_GAPS: float = 1.0
+
+#: The generator sizes bumps to this fraction of the limit, so a bump the
+#: tuner builds sits strictly under the strict cap.
+EXCURSION_HEADROOM: float = 0.99
 
 #: Smallest jog (flat run parallel to the host line), in trace widths.
 MIN_JOG_WIDTHS: float = 3.0
@@ -64,8 +71,17 @@ def jog_spaced(config: SerpentineConfig, width: float) -> SerpentineConfig:
 
 
 def max_excursion_mm(nominal_gap_mm: float) -> float:
-    """The excursion cap for a pair whose edge-to-edge gap is ``nominal_gap_mm``."""
+    """The excursion limit for a pair whose edge-to-edge gap is ``nominal_gap_mm``.
+
+    A bump must stay strictly below it; see :func:`bump_amplitude_cap_mm` for
+    the amplitude the generator is given.
+    """
     return MAX_EXCURSION_GAPS * nominal_gap_mm
+
+
+def bump_amplitude_cap_mm(nominal_gap_mm: float) -> float:
+    """Largest loop amplitude the generator may use for ``nominal_gap_mm``."""
+    return EXCURSION_HEADROOM * max_excursion_mm(nominal_gap_mm)
 
 
 def bump_gate_violation(
@@ -104,9 +120,9 @@ def bump_gate_violation(
     excursion = max(
         abs(offset(x, y)) for s in new_segments for x, y in ((s.x1, s.y1), (s.x2, s.y2))
     )
-    if limit > 0.0 and excursion > limit + _EPS_MM:
+    if limit > 0.0 and excursion >= limit - _EPS_MM:
         return (
-            f"bump excursion {excursion:.3f} mm exceeds {MAX_EXCURSION_GAPS:g}x the "
+            f"bump excursion {excursion:.3f} mm is not below {MAX_EXCURSION_GAPS:g}x the "
             f"pair gap ({limit:.3f} mm)"
         )
 
