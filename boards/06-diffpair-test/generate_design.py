@@ -33,6 +33,7 @@ If no output directory is specified, files are written to ./output/.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import subprocess
 import sys
@@ -276,6 +277,15 @@ def build_net_class_map() -> dict[str, NetClassRouting]:
     """
     usb2 = usb2_net_class()
     usb3 = usb3_net_class()
+    # Issue #7491: USB3_TX1 routes after the other J1 USB3 pairs.  Once
+    # USB2_D routes coupled (the pose search's partner-pad check), all 13 J1
+    # siblings are bumped to the front of the negotiated tier (#2482), which
+    # re-sorts them by priority and ignores ``_forced_net_order``, so a class
+    # priority is the only order knob.  At equal priority TX1 claimed the
+    # In1 corridor under J1's B row that USB3_RX1 used, and RX1 lost its
+    # route (seed 42: RX1 uncoupled 10.3/10.8 -> 14.7/18.3 mm).  Same class
+    # otherwise: only the routing order changes.
+    usb3_tx1 = dataclasses.replace(usb3, priority=3)
     pcie = pcie_net_class()
     mipi = mipi_net_class()
     sideband = sideband_net_class()
@@ -285,8 +295,8 @@ def build_net_class_map() -> dict[str, NetClassRouting]:
         "USB2_D+": usb2,
         "USB2_D-": usb2,
         # USB 3.0 (4 pairs)
-        "USB3_TX1+": usb3,
-        "USB3_TX1-": usb3,
+        "USB3_TX1+": usb3_tx1,
+        "USB3_TX1-": usb3_tx1,
         "USB3_RX1+": usb3,
         "USB3_RX1-": usb3,
         "USB3_TX2+": usb3,
@@ -4038,6 +4048,22 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
             print("   No physically-overlapping pair sides detected")
     except Exception as exc:  # pragma: no cover - degrade gracefully
         print(f"   WARNING: pair-overlap repair skipped: {exc}")
+
+    # Issue #7548: several pair legs are hundreds of 0.05 mm grid-step
+    # segments, which neither the gap tightening below nor the skew tuner
+    # (6d) can use: a run needs one segment of a few mm to host a squeeze or
+    # a trombone.  Fuse each straight same-width chain first; the copper and
+    # the length are unchanged.  Only chains of 5 mm or more: ``kct check``
+    # exempts segments under 1 mm from its impedance rule as breakout, so
+    # fusing a breakout stub would make it a judged one.
+    from kicad_tools.router.optimizer.merge import merge_collinear_same_width
+
+    fused = merge_collinear_same_width(
+        router,
+        {r.net_name for r in router.routes if r.net_name and r.net_name[-1] in "+-"},
+        min_chain_mm=5.0,
+    )
+    print(f"\n6b2. Fused {fused} collinear same-width segment(s) on pair nets (#7548)")
 
     # Issue #7349 (follow-up to #7344): the coupled pre-pass leaves the pair
     # trunks at the breakout pitch.  Squeeze each declared pair's parallel run

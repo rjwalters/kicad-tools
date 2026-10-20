@@ -571,7 +571,9 @@ class ImpedanceRule(DRCRule):
                 if length == 0.0:
                     continue
                 ux, uy = (x2 - x1) / length, (y2 - y1) / length
-                best: float | None = None
+                # (lo, hi, gap) of each parallel partner piece in the window.
+                runs: list[tuple[float, float, float]] = []
+                min_width = trace["width_mm"]
                 for other in partner_traces:
                     if other["layer"] != trace["layer"]:
                         continue
@@ -588,17 +590,36 @@ class ImpedanceRule(DRCRule):
                     # Longitudinal overlap of the partner on this segment.
                     t1 = (ox1 - x1) * ux + (oy1 - y1) * uy
                     t2 = (ox2 - x1) * ux + (oy2 - y1) * uy
-                    if min(max(t1, t2), length) <= max(min(t1, t2), 0.0):
+                    lo, hi = max(min(t1, t2), 0.0), min(max(t1, t2), length)
+                    if hi <= lo:
                         continue
                     mx, my = (ox1 + ox2) / 2, (oy1 + oy2) / 2
                     centre = abs((mx - x1) * uy - (my - y1) * ux)
                     gap = centre - trace["width_mm"] / 2 - other["width_mm"] / 2
-                    if gap > 0 and (best is None or gap < best):
-                        best = gap
-                # Beyond the coupling window the run is a breakout, not a
-                # coupled segment: leave it unjudged (Issue #7293).
-                if best is not None and best <= DEFAULT_COUPLING_WINDOW_MM:
-                    trace["intra_pair_clearance_mm"] = best
+                    # Beyond the coupling window the run is a breakout, not a
+                    # coupled segment: leave it unjudged (Issue #7293).
+                    if 0 < gap <= DEFAULT_COUPLING_WINDOW_MM:
+                        runs.append((lo, hi, gap))
+                        min_width = max(min_width, other["width_mm"])
+                if not runs:
+                    continue
+                # Router output is fragmented into grid-step pieces, so the
+                # coupled length is the union of the partner pieces' intervals,
+                # not any single piece's overlap.  A union shorter than the
+                # trace is wide is a pad escape stub, not a coupled run; a long
+                # run with a fragmented partner stays judged (Issue #7575).
+                runs.sort()
+                coupled = 0.0
+                cur_lo, cur_hi = runs[0][0], runs[0][1]
+                for lo, hi, _ in runs[1:]:
+                    if lo > cur_hi:
+                        coupled += cur_hi - cur_lo
+                        cur_lo, cur_hi = lo, hi
+                    else:
+                        cur_hi = max(cur_hi, hi)
+                coupled += cur_hi - cur_lo
+                if coupled >= min_width:
+                    trace["intra_pair_clearance_mm"] = min(g for _, _, g in runs)
 
     @staticmethod
     def _collect_current_sense_nets(pcb: PCB) -> set[str]:
