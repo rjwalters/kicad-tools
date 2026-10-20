@@ -614,6 +614,7 @@ def tune_match_group_v2(
     pads_by_net: dict[int, list[Pad]] | None = None,
     pad_clearance_mm: float | None = None,
     net_clearance_mm: dict[int, float] | None = None,
+    pad_floor_mm: dict[int, float] | None = None,
     board_thickness_mm: float | None = None,
     num_copper_layers: int = 4,
     blind_buried_supported: bool = True,
@@ -858,6 +859,7 @@ def tune_match_group_v2(
             pads_by_net=pads_by_net,
             pad_clearance_mm=pad_clearance_mm,
             net_clearance_mm=net_clearance_mm,
+            pad_floor_mm=pad_floor_mm,
             board_thickness_mm=board_thickness_mm,
             num_copper_layers=num_copper_layers,
             blind_buried_supported=blind_buried_supported,
@@ -880,6 +882,7 @@ def tune_match_group_v2(
         pads_by_net=pads_by_net,
         pad_clearance_mm=pad_clearance_mm,
         net_clearance_mm=net_clearance_mm,
+        pad_floor_mm=pad_floor_mm,
         board_thickness_mm=board_thickness_mm,
         num_copper_layers=num_copper_layers,
         blind_buried_supported=blind_buried_supported,
@@ -904,6 +907,7 @@ def _tune_match_group_single_ended(
     pads_by_net: dict[int, list[Pad]] | None = None,
     pad_clearance_mm: float | None = None,
     net_clearance_mm: dict[int, float] | None = None,
+    pad_floor_mm: dict[int, float] | None = None,
     board_thickness_mm: float | None = None,
     num_copper_layers: int = 4,
     blind_buried_supported: bool = True,
@@ -1638,6 +1642,7 @@ def _tune_match_group_single_ended(
                         foreign_pads=foreign_pads,
                         pad_clearance_mm=pad_clearance_mm,
                         net_clearance_mm=net_clearance_mm,
+                        pad_floor_mm=pad_floor_mm,
                     )
                     if drc_detail is not None:
                         last_failure_reason = "post_insertion_drc_violation"
@@ -1682,6 +1687,7 @@ def _tune_match_group_single_ended(
                         foreign_pads=foreign_pads,
                         pad_clearance_mm=pad_clearance_mm,
                         net_clearance_mm=net_clearance_mm,
+                        pad_floor_mm=pad_floor_mm,
                     )
 
                 bumped_route = _place_bumps_per_host(
@@ -2247,6 +2253,7 @@ def _post_insertion_clearance_ok_group(
     foreign_pads: list[Pad] | None = None,
     pad_clearance_mm: float | None = None,
     net_clearance_mm: dict[int, float] | None = None,
+    pad_floor_mm: dict[int, float] | None = None,
 ) -> bool:
     """Boolean wrapper around :func:`_post_insertion_clearance_detail_group`.
 
@@ -2266,6 +2273,7 @@ def _post_insertion_clearance_ok_group(
             foreign_pads=foreign_pads,
             pad_clearance_mm=pad_clearance_mm,
             net_clearance_mm=net_clearance_mm,
+            pad_floor_mm=pad_floor_mm,
         )
         is None
     )
@@ -2284,6 +2292,7 @@ def _post_insertion_clearance_detail_group(
     foreign_pads: list[Pad] | None = None,
     pad_clearance_mm: float | None = None,
     net_clearance_mm: dict[int, float] | None = None,
+    pad_floor_mm: dict[int, float] | None = None,
 ) -> str | None:
     """Return ``None`` if the proposed serpentine segments are DRC-safe,
     else a human-readable description of the FIRST violation found.
@@ -2406,12 +2415,19 @@ def _post_insertion_clearance_detail_group(
         net_clearance_mm: Optional ``{net_id: class_clearance_mm}`` map
             (Issue #6969).  When supplied, every foreign item in passes
             1, 2, 3 and 5 is held to the pairwise KiCad rule
-            ``max(pass floor, neighbour's class clearance)`` instead of the
-            pass floor alone, so a group whose own class is looser than a
-            neighbour's class cannot place copper inside the neighbour's
-            clearance.  The candidate's diff-pair partner is exempt (it is
+            ``max(pass floor, candidate's class, neighbour's class)``
+            instead of the pass floor alone, so neither side's class
+            minimum can be undercut (Issue #7423 added the candidate's own
+            class).  The candidate's diff-pair partner is exempt (it is
             held to ``intra_pair_clearance_mm`` by pass 4).  ``None`` keeps
             the single-threshold behaviour.
+        pad_floor_mm: Optional ``{id(pad): class_clearance_mm}`` map
+            (Issue #7594) for pass 5.  A pour / auto-skipped pad is
+            neutralised to net 0 but keeps its net name, so
+            ``net_clearance_mm[0]`` (Default) would under-state the class
+            ``kct check`` and kicad-cli hold it to.  An entry here is the
+            pad's own class floor and is applied on top of the net-id
+            lookup.
 
     Returns:
         ``None`` if no clearance violation is introduced; otherwise a
@@ -2421,13 +2437,22 @@ def _post_insertion_clearance_detail_group(
     from .clearance_shapes import copper_gap, pad_shape, segment_shape, via_shape
 
     partner_net_id = (diff_pair_partners or {}).get(candidate_net_id)
+    # Issue #7423: the candidate's own class is half of KiCad's pairwise rule.
+    # The pass floors come from the router-global rule, which the caller only
+    # ever relaxes toward the group's class (never raises), so on a board whose
+    # global rule (0.15 mm) is below the group's class (0.175 mm) a meander
+    # could land 0.154 mm from a foreign via whose net resolved to the global
+    # rule -- inside the candidate's own class minimum that ``kct check`` and
+    # kicad-cli enforce (board 07 DQ15 vs a GND via).
+    own_class_mm = (net_clearance_mm or {}).get(candidate_net_id, 0.0)
 
     def _floor(base_mm: float, other_net_id: int | None) -> float:
         # Issue #6969: KiCad holds two items to the larger of their two
-        # class clearances; ``base_mm`` is already this group's floor.
+        # class clearances, max(class(candidate), class(other)); ``base_mm``
+        # is the pass floor.
         if not net_clearance_mm or other_net_id is None or other_net_id == partner_net_id:
             return base_mm
-        return max(base_mm, net_clearance_mm.get(other_net_id, 0.0))
+        return max(base_mm, own_class_mm, net_clearance_mm.get(other_net_id, 0.0))
 
     # Pass 1: intra-group.  Every other group member.
     for other_id in group_net_ids:
@@ -2556,6 +2581,8 @@ def _post_insertion_clearance_detail_group(
             pad_through_hole = getattr(pad, "through_hole", False)
             pad_shape_ = pad_shape(pad)
             pad_floor = _floor(pad_clearance_mm, getattr(pad, "net", None))
+            if pad_floor_mm:
+                pad_floor = max(pad_floor, pad_floor_mm.get(id(pad), 0.0))
             for new_seg in new_segments:
                 if not pad_through_hole and pad.layer != new_seg.layer:
                     continue
@@ -3048,6 +3075,7 @@ def _post_insertion_clearance_detail_pair_group(
     pads_by_net: dict[int, list[Pad]] | None = None,
     pad_clearance_mm: float | None = None,
     net_clearance_mm: dict[int, float] | None = None,
+    pad_floor_mm: dict[int, float] | None = None,
     candidate_p_route: Route | None = None,
     candidate_n_route: Route | None = None,
 ) -> str | None:
@@ -3139,6 +3167,7 @@ def _post_insertion_clearance_detail_pair_group(
             foreign_pads=foreign_pads,
             pad_clearance_mm=pad_clearance_mm,
             net_clearance_mm=net_clearance_mm,
+            pad_floor_mm=pad_floor_mm,
         )
         if detail is not None:
             return detail
@@ -3245,6 +3274,7 @@ def _tune_pair_lane_with_fallbacks(
     pads_by_net: dict[int, list[Pad]] | None,
     pad_clearance_mm: float | None,
     net_clearance_mm: dict[int, float] | None = None,
+    pad_floor_mm: dict[int, float] | None = None,
     board_thickness_mm: float | None,
     num_copper_layers: int,
     blind_buried_supported: bool,
@@ -3336,6 +3366,7 @@ def _tune_pair_lane_with_fallbacks(
             pads_by_net=pads_by_net,
             pad_clearance_mm=pad_clearance_mm,
             net_clearance_mm=net_clearance_mm,
+            pad_floor_mm=pad_floor_mm,
             candidate_p_route=cand_p,
             candidate_n_route=cand_n,
         )
@@ -3616,6 +3647,7 @@ def _tune_pair_lane_with_fallbacks(
             pads_by_net=pads_by_net,
             pad_clearance_mm=pad_clearance_mm,
             net_clearance_mm=net_clearance_mm,
+            pad_floor_mm=pad_floor_mm,
             board_thickness_mm=board_thickness_mm,
             num_copper_layers=num_copper_layers,
             blind_buried_supported=blind_buried_supported,
@@ -3683,6 +3715,7 @@ def _tune_pair_legs_single_ended(
     pads_by_net: dict[int, list[Pad]] | None,
     pad_clearance_mm: float | None,
     net_clearance_mm: dict[int, float] | None = None,
+    pad_floor_mm: dict[int, float] | None = None,
     board_thickness_mm: float | None,
     num_copper_layers: int,
     blind_buried_supported: bool,
@@ -3771,6 +3804,7 @@ def _tune_pair_legs_single_ended(
             pads_by_net=pads_by_net,
             pad_clearance_mm=pad_clearance_mm,
             net_clearance_mm=net_clearance_mm,
+            pad_floor_mm=pad_floor_mm,
             board_thickness_mm=board_thickness_mm,
             num_copper_layers=num_copper_layers,
             blind_buried_supported=blind_buried_supported,
@@ -3830,6 +3864,7 @@ def _tune_match_group_of_pairs(
     pads_by_net: dict[int, list[Pad]] | None = None,
     pad_clearance_mm: float | None = None,
     net_clearance_mm: dict[int, float] | None = None,
+    pad_floor_mm: dict[int, float] | None = None,
     board_thickness_mm: float | None = None,
     num_copper_layers: int = 4,
     blind_buried_supported: bool = True,
@@ -4163,6 +4198,7 @@ def _tune_match_group_of_pairs(
                 pads_by_net=pads_by_net,
                 pad_clearance_mm=pad_clearance_mm,
                 net_clearance_mm=net_clearance_mm,
+                pad_floor_mm=pad_floor_mm,
                 board_thickness_mm=board_thickness_mm,
                 num_copper_layers=num_copper_layers,
                 blind_buried_supported=blind_buried_supported,
@@ -4403,6 +4439,7 @@ def _tune_match_group_of_pairs(
                 pads_by_net=pads_by_net,
                 pad_clearance_mm=pad_clearance_mm,
                 net_clearance_mm=net_clearance_mm,
+                pad_floor_mm=pad_floor_mm,
                 candidate_p_route=candidate_p_route,
                 candidate_n_route=candidate_n_route,
             )
@@ -4516,6 +4553,7 @@ def _tune_match_group_of_pairs(
             pads_by_net=pads_by_net,
             pad_clearance_mm=pad_clearance_mm,
             net_clearance_mm=net_clearance_mm,
+            pad_floor_mm=pad_floor_mm,
             board_thickness_mm=board_thickness_mm,
             num_copper_layers=num_copper_layers,
             blind_buried_supported=blind_buried_supported,

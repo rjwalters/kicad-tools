@@ -4489,22 +4489,43 @@ class CppPathfinder:
         t0 = time.monotonic()
         # Python Router.route() does not accept start_layers/end_layers;
         # it derives layer information internally from pad attributes.
-        # Issue #6527: opt-in bidirectional A* for the fallback (default off).
-        _fallback_route = (
-            self._py_router.route_auto
-            if getattr(self._py_router.rules, "fallback_bidirectional", False) is True
-            else self._py_router.route
+        # Issue #6527: bidirectional A* (one-way retry on failure) for the
+        # fallback, on by default; ``--no-fallback-bidirectional`` restores
+        # the one-way search.
+        _py_rules = self._py_router.rules
+        # Diff-pair legs and match-group members stay on the one-way search:
+        # the bidirectional path perturbs their length/impedance symmetry
+        # (board 07 TMDS lanes regress under it).
+        _nc = net_class
+        if _nc is None:
+            _nc = self._py_router._get_net_class(net_name)
+        _length_constrained = _nc is not None and (
+            getattr(_nc, "diffpair_partner", None) is not None
+            or getattr(_nc, "length_match_group", None) is not None
         )
-        route = _fallback_route(
-            start,
-            end,
-            net_class=net_class,
-            negotiated_mode=negotiated_mode,
-            present_cost_factor=present_cost_factor,
-            weight=weight,
-            per_net_timeout=per_net_timeout,
-            extra_goal_cells=extra_goal_cells,
-        )
+        if getattr(_py_rules, "fallback_bidirectional", False) is True and not _length_constrained:
+            route = self._py_router.route_auto(
+                start,
+                end,
+                net_class=net_class,
+                negotiated_mode=negotiated_mode,
+                present_cost_factor=present_cost_factor,
+                weight=weight,
+                per_net_timeout=per_net_timeout,
+                extra_goal_cells=extra_goal_cells,
+                threshold=getattr(_py_rules, "fallback_bidirectional_threshold", 0),
+            )
+        else:
+            route = self._py_router.route(
+                start,
+                end,
+                net_class=net_class,
+                negotiated_mode=negotiated_mode,
+                present_cost_factor=present_cost_factor,
+                weight=weight,
+                per_net_timeout=per_net_timeout,
+                extra_goal_cells=extra_goal_cells,
+            )
         dt = time.monotonic() - t0
 
         # Issue #6329: the fallback is iteration-bounded under a tuned cap,

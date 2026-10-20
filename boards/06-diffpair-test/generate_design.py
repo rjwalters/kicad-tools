@@ -4039,6 +4039,22 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     except Exception as exc:  # pragma: no cover - degrade gracefully
         print(f"   WARNING: pair-overlap repair skipped: {exc}")
 
+    # Issue #7548: several pair legs are hundreds of 0.05 mm grid-step
+    # segments, which neither the gap tightening below nor the skew tuner
+    # (6d) can use: a run needs one segment of a few mm to host a squeeze or
+    # a trombone.  Fuse each straight same-width chain first; the copper and
+    # the length are unchanged.  Only chains of 5 mm or more: ``kct check``
+    # exempts segments under 1 mm from its impedance rule as breakout, so
+    # fusing a breakout stub would make it a judged one.
+    from kicad_tools.router.optimizer.merge import merge_collinear_same_width
+
+    fused = merge_collinear_same_width(
+        router,
+        {r.net_name for r in router.routes if r.net_name and r.net_name[-1] in "+-"},
+        min_chain_mm=5.0,
+    )
+    print(f"\n6b2. Fused {fused} collinear same-width segment(s) on pair nets (#7548)")
+
     # Issue #7349 (follow-up to #7344): the coupled pre-pass leaves the pair
     # trunks at the breakout pitch.  Squeeze each declared pair's parallel run
     # to the impedance-solved gap.  This runs AFTER the optimiser, nudge and
@@ -4047,6 +4063,26 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # and impedance, and a declined pair keeps its copper unchanged.
     print("\n6c. Diff-pair gap tightening (#7344)...")
     router.apply_diffpair_gap_tightening()
+
+    # Issue #7548: the pairs route single-ended, so their legs differ in length
+    # and every declared pair exceeds the ``max_skew_mm`` that ``kct check``
+    # enforces.  Run the checker-limit skew tuner last, so it measures (and
+    # adds serpentine length to) the copper that actually gets judged.  Each
+    # insertion is clearance-checked with a byte-for-byte rollback, and the
+    # tuner never touches the longer leg.
+    print("\n6d. Diff-pair skew tuning (#7548)...")
+    from kicad_tools.router.diffpair_detection import build_synth_routing, detect_diff_pairs
+
+    class_routing, net_to_class = build_synth_routing(getattr(router, "net_class_map", None) or {})
+    skew_pairs = detect_diff_pairs(
+        net_names=router.net_names,
+        net_class_routing=class_routing or None,
+        net_to_class=net_to_class or None,
+    )
+    for (p_name, n_name), tune in router.apply_diffpair_length_tuning(
+        skew_pairs, verbose=False, engage="checker_skew_limit"
+    ).items():
+        print(f"   {p_name}/{n_name}: {tune.reason} {tune.message}")
 
     stats = router.get_statistics()
     print(

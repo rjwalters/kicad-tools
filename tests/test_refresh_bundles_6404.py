@@ -253,17 +253,29 @@ def test_board07_evidence_kept_when_current(mod, tmp_path):
     assert mod.stage_board07_evidence(board, cfg, build) == []
 
 
-def test_board07_validate_fills_under_the_published_router_classes(mod):
-    """``validate.py`` declares the same router classes as the #6390 sidecar script."""
+def test_board07_validate_fills_under_the_published_router_classes(mod, tmp_path):
+    """``validate.py`` declares the same router classes as the #6390 sidecar script.
+
+    ``validate.check`` reads the class map ``build_source.py`` publishes: the
+    authored fixture's copy with route-time length matching turned on (Issue
+    #7423), so the expected map is derived through that same recipe step.
+    """
+    real_design = REPO / "boards/07-matchgroup-test/real_design"
     spec = importlib.util.spec_from_file_location(
-        "board07_validate_6404", REPO / "boards/07-matchgroup-test/real_design/validate.py"
+        "board07_validate_6404", real_design / "validate.py"
     )
     validate = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(validate)
-    pcb = REPO / "boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb"
-    ours = validate.router_net_classes(
-        pcb, REPO / "boards/07-matchgroup-test/real_design/authored-source/net_class_map.json"
+    spec = importlib.util.spec_from_file_location(
+        "board07_build_source_6404", real_design / "build_source.py"
     )
+    build_source = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(build_source)
+    published = tmp_path / "net_class_map.json"
+    shutil.copyfile(real_design / "authored-source/net_class_map.json", published)
+    build_source.enable_length_matching(published)
+    pcb = REPO / "boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb"
+    ours = validate.router_net_classes(pcb, published)
     theirs = mod.netclasses.router_net_class_map(pcb)
     assert {k: v.name for k, v in ours.items()} == {k: v.name for k, v in theirs.items()}
     assert ours == theirs

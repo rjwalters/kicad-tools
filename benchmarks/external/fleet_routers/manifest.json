@@ -320,7 +320,7 @@
       "stem": "matchgroup_test",
       "input": {
         "path": "boards/07-matchgroup-test/output/matchgroup_test.kicad_pcb",
-        "sha256": "d13e663fa64f0d1e6bec05a5fa5fb25cc9201266ac064adf8d93d81d6501b7e0"
+        "sha256": "6c3495fffa239d06ba9d2b0d5d04cfef59fd492ace1ae29816872e61e7005670"
       },
       "input_copper": {
         "segments": 3742,
@@ -335,7 +335,7 @@
       },
       "dru": {
         "path": "boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_dru",
-        "sha256": "4b7ed2eb30f225d6c18d7f4c8275a1cca926c338860d63fe23e39a714efa2cde",
+        "sha256": "93011b4981b5ce61aac093cdec9210878300c92d909fc079e5e26b02bf6bbc9e",
         "provenance": "kct-managed fab floors",
         "note": "sibling of the committed routed reference; manufacturer rules, not router tuning"
       },
@@ -346,7 +346,7 @@
       "routing_sidecars": [
         {
           "path": "boards/07-matchgroup-test/output/net_class_map.json",
-          "sha256": "585f0a4f1611d7582fdbe257465fde740d31ad7badec1dd6982bcca9cb4b3c28"
+          "sha256": "357b41543fff3deb3a4547cee3f0c9e3210068062ce6cae6fdf354d28f63f9a2"
         },
         {
           "path": "boards/07-matchgroup-test/output/sdram_constraints.json",

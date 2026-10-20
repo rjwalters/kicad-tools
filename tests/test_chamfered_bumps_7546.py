@@ -1,14 +1,19 @@
 """Chamfered trombone bumps: kct and pinned kicad-cli agree (Issue #7546).
 
-A square trombone loop's flat top is coupled to the partner in kct's
-uncoupled-length model but uncoupled in pinned kicad-cli 10.0.6, so the two
-engines disagree on a plain square bump (a real skew bump read 2.0 mm in kct
-and 2.8 mm in kicad-cli, #7542).  Measured black-box on 0.1, 0.2 and 0.3 mm
-traces, the engines agree once each corner carries a 45-degree chamfer of at
-least half a trace width.  ``SerpentineConfig.corner_chamfer_widths`` adds
-those chamfers.  The diff-pair skew tuner takes them opt-in
-(``corner_chamfer_widths=SKEW_BUMP_CHAMFER_WIDTHS``, 0.55) and then never
-sizes a chamfered bump below one trace width of amplitude.
+When #7546 landed, a square trombone loop's flat top was coupled to the
+partner in kct's uncoupled-length model but uncoupled in pinned kicad-cli
+10.0.6 (a real skew bump read 2.0 mm in kct and 2.8 mm in kicad-cli, #7542),
+and the engines agreed only once each corner carried a 45-degree chamfer of
+at least half a trace width.  Issue #7565 closed that divergence: kct now
+reads plain bumps of any chamfer, square included, as kicad-cli does
+(Issue #7593 converted the divergence tests here into agreement tests).
+
+The half-width floor still matters, for a different reason: below it a
+chamfered bump reads *more* uncoupled than a square one, from it up *less*
+on thin traces, in both engines.  ``SerpentineConfig.corner_chamfer_widths``
+adds the chamfers.  The diff-pair skew tuner uses them for its plain-copper
+fallback (``SKEW_BUMP_CHAMFER_WIDTHS``, 0.55) and then never sizes a
+chamfered bump below one trace width of amplitude.
 
 The pinned class runs in CI's KiCad 10.0.6 image (locally
 ``KCT_KICAD_DOCKER=1``) and skips elsewhere.
@@ -308,19 +313,23 @@ class TestPlainBumpsAgreeWithPinnedKicadCli:
         pcb = _write(root, f"tuned_{n_end}", [_plain(p_out), _plain(n_out)])
         assert _kct(pcb) == pytest.approx(_kicad(cli, pcb), abs=1e-3)
 
-    def test_square_bump_is_the_divergence_chamfers_remove(self, pinned_cli):
-        """The pre-#7546 square loop: kicad-cli reads its flat tops as uncoupled."""
+    def test_square_bump_agrees(self, pinned_cli):
+        """The pre-#7546 square loop: both engines read its flat tops as uncoupled.
+
+        kct used to read it lower than kicad-cli; Issue #7565 closed that
+        (``docs/research/diffpair-primitive-pairing-spec.md``, group B).
+        """
         cli, root = pinned_cli
         p = _straight(1, "D_P", Y_P, 125.0)
         pcb = _write(root, "square", [p, _bump(0.2, 0.6, 0.8, 0.0)])
-        assert _kct(pcb) < _kicad(cli, pcb) - 0.1
+        assert _kct(pcb) == pytest.approx(_kicad(cli, pcb), abs=1e-3)
 
-    def test_chamfer_below_half_a_width_still_diverges(self, pinned_cli):
-        """Why the floor is half a width: 0.4 widths (0.08 mm) is not enough."""
+    def test_thin_chamfer_agrees(self, pinned_cli):
+        """A chamfer of 0.4 widths (0.08 mm) reads the same in both engines too."""
         cli, root = pinned_cli
         p = _straight(1, "D_P", Y_P, 125.0)
         pcb = _write(root, "thin_chamfer", [p, _bump(0.2, 0.6, 0.8, 0.4)])
-        assert _kct(pcb) < _kicad(cli, pcb) - 0.1
+        assert _kct(pcb) == pytest.approx(_kicad(cli, pcb), abs=1e-3)
 
 
 class TestBindingLimitFallsBackToChamferedPlainCopper:
@@ -350,6 +359,33 @@ class TestBindingLimitFallsBackToChamferedPlainCopper:
         *_, n_out, result = self._tune(0.127, 129.5, None)
         assert result.reason == "tuned"
         assert any(s.tuning_pattern is not None for s in n_out.segments)
+
+    @pytest.mark.parametrize("n_end", [129.5, 129.0])
+    def test_half_width_floor_is_where_chamfers_beat_square(self, tmp_path, n_end):
+        """Issue #7593: why the fallback is chamfered, now that kct and
+        kicad-cli agree on square plain bumps too (agreement is pinned in
+        :class:`TestPlainBumpsAgreeWithPinnedKicadCli`).  On a 0.127 mm pair a
+        chamfer under half a width reads more uncoupled than the square loop,
+        and the fallback's chamfer reads less, which is what lets it pass the
+        0.8 / 1.3 mm limits of ``test_thin_trace_pair_is_tuned_plain_...``.
+        """
+
+        def plain_figure(chamfer: float) -> float:
+            p = _straight(1, "D_P", Y_P, 130.0, 0.127)
+            n = _straight(2, "D_N", Y_P + 0.127 + GAP, n_end, 0.127)
+            p_out, n_out, result = tune_diff_pair_skew(
+                _pair(),
+                {1: p, 2: n},
+                tolerance_mm=0.127,
+                intra_pair_clearance_mm=GAP,
+                corner_chamfer_widths=chamfer,
+            )
+            assert result.reason == "tuned"
+            return _kct(_write(tmp_path, f"floor_{chamfer}", [_plain(p_out), _plain(n_out)]))
+
+        square = plain_figure(0.0)
+        assert plain_figure(0.4) > square + 0.1
+        assert plain_figure(SKEW_BUMP_CHAMFER_WIDTHS) < square - 0.1
 
     @pytest.mark.parametrize(("n_end", "limit"), [(129.5, 0.8), (129.0, 1.3)])
     def test_thin_trace_pair_is_tuned_plain_and_engines_agree(self, pinned_cli, n_end, limit):

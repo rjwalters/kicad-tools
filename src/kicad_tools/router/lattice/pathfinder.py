@@ -69,7 +69,7 @@ from ..quantize import dogleg_points
 from ..rules import DesignRules, layer_permitted
 from .coupled import CoupledConnection
 from .escape_plan import EscapeChoice, chosen_stub, foreign_reservations, plan_tapered_escapes
-from .geometry import Pt, Rect, dist, pt_in_rect, seg_seg_dist
+from .geometry import Pt, Rect, dist, pt_in_rect, seg_pt_dist, seg_seg_dist
 from .guide import PartnerGuide
 from .history import PhysicalHistory
 from .kernel_adapter import LATTICE_CLEARANCE_EPSILON_MM
@@ -264,6 +264,21 @@ def _crossing_mirror(start: int, end: int, layers: frozenset[int]) -> LayerMirro
 
 
 @dataclass(frozen=True)
+class _JointExtras:
+    """A joint re-route of one P and one N extra (issue #7093).
+
+    ``moves`` is ``((P extra, new route), (N extra, new route))``,
+    ``lengths`` their pair-length-measure lengths in the same order, and
+    ``skew_before`` / ``skew_after`` the pair's summed-length skew (mm).
+    """
+
+    moves: tuple[tuple[Connection, Route], tuple[Connection, Route]]
+    lengths: tuple[float, float]
+    skew_before: float
+    skew_after: float
+
+
+@dataclass(frozen=True)
 class PadGrowthRound:
     """One #6489 grown-keep-out re-negotiation attempt, for the log (issue #6670).
 
@@ -358,6 +373,11 @@ class _HybridParityCtx:
     vias_used: int
     half: float
     clr: float
+    # Issue #7580: the best via-equal leg pair :meth:`~LatticePathfinder.
+    # _hybrid_parity_pick` found and REJECTED (it was worse on skew or on
+    # length than the pick), as ``(vias, (skew, total))``.  ``None`` when no
+    # via-equal leg pair passed the hybrid's gates at all.
+    rejected: tuple[tuple[int, int], tuple[float, float]] | None = None
 
 
 #: Bounded retries of a pair search after a ``pair-partner-pad`` decline (#6839).
@@ -2822,12 +2842,19 @@ class LatticePathfinder:
         pair_nets: set[int],
         committed: CommittedCopper,
         half: float = 0.0,
+        clearance: float | None = None,
     ) -> list[Pt] | None:
         """Dogleg from the exact pad position to an emitted leg endpoint.
 
-        Ordinary single-trace clearance (``extra = 0``) but with BOTH pair
-        nets as "self" -- the attach necessarily runs between the pair's own
-        pads.  Returns the accepted polyline (pad first) or ``None``.
+        Ordinary single-trace clearance but with BOTH pair nets as "self" --
+        the attach necessarily runs between the pair's own pads.  Returns the
+        accepted polyline (pad first) or ``None``.
+
+        Issue #7543: committed copper of nets OUTSIDE the pair is also judged
+        at the leg's TRUE half-width ``half`` and class ``clearance``
+        (:meth:`_pair_leg_clear`).  Measured only as a board-default track, a
+        wide pair class (board 06rf's 0.275 mm USB3) could attach 0.0375 mm
+        closer to a neighbouring pair's via than its copper allowed.
         """
         from ..pairplan.attach import dogleg_attach_candidates
         from .coupled import pads_block_segment_grown
@@ -2844,7 +2871,9 @@ class LatticePathfinder:
                     blocker = "pad"
                     ok = False
                     break
-                if not committed.seg_clear(a, b, layer, net):
+                if not committed.seg_clear(a, b, layer, net) or not self._pair_leg_clear(
+                    committed, a, b, layer, pair_nets, half, clearance
+                ):
                     blocker = "committed-copper"
                     ok = False
                     break
@@ -2863,6 +2892,39 @@ class LatticePathfinder:
         # ``pair-pad-attach`` decline says which check fired, and on what.
         self._attach_blocker = f"{pad.ref}.{pad.pin} on layer {layer}: {blocker}"
         return None
+
+    @staticmethod
+    def _pair_leg_clear(
+        committed: CommittedCopper,
+        a: Pt,
+        b: Pt,
+        layer: int,
+        pair_nets: set[int],
+        half: float,
+        clearance: float | None,
+    ) -> bool:
+        """Leg ``a-b`` clears OTHER nets' committed copper at its true width (#7543).
+
+        The ordinary ``committed.seg_clear(a, b, layer, net)`` gate measures a
+        coupled leg as a board-default track, so a wider pair class shipped
+        too close to a neighbouring pair's via (board 06rf: a 0.275 mm
+        USB3_RX1+ leg 0.126 mm from USB3_TX1+'s gateway via, 0.150 required).
+        This adds the true-width check against every net outside the pair:
+        the grown predicate's centreline is the board-default half-width, so
+        the surcharge is the width difference plus any class clearance above
+        the base.  The pair's own partner copper (gateway via, fan) stays
+        with the ordinary gate -- it is held to the intra-pair gap, not the
+        net clearance.  ``half <= 0`` (legacy callers) adds nothing.
+        """
+        if half <= 0.0:
+            return True
+        from .coupled import committed_seg_clear_grown
+
+        clr = committed.clearance if clearance is None else clearance
+        surcharge = max(0.0, half - committed.trace_half) + max(0.0, clr - committed.clearance)
+        if surcharge <= 0.0:
+            return True
+        return committed_seg_clear_grown(committed, a, b, layer, pair_nets, surcharge)
 
     def _emit_leg(
         self, net: int, net_name: str, points: list[Pt], layer_idx: int, trace_w: float
@@ -3121,13 +3183,14 @@ class LatticePathfinder:
                 (net_p, pc.pad_p_a, pc.pad_p_b, leg_p),
                 (net_n, pc.pad_n_a, pc.pad_n_b, leg_n),
             ):
+                leg_clr = self._conn_geometry(pc.net_class, net)[1]
                 attach_a = self._pair_attach(
-                    pad_a, leg[0], layer, net, pair_nets, committed, trace_w / 2.0
+                    pad_a, leg[0], layer, net, pair_nets, committed, trace_w / 2.0, leg_clr
                 )
                 if attach_a is None:
                     return None, "pair-pad-attach"
                 attach_b = self._pair_attach(
-                    pad_b, leg[-1], layer, net, pair_nets, committed, trace_w / 2.0
+                    pad_b, leg[-1], layer, net, pair_nets, committed, trace_w / 2.0, leg_clr
                 )
                 if attach_b is None:
                     return None, "pair-pad-attach"
@@ -3141,13 +3204,21 @@ class LatticePathfinder:
                 # static masks (pair pads are "self") + committed copper at
                 # NORMAL single-trace clearance.  The fat centerline
                 # guarantees the parallel body; this catches miter pokes at
-                # sharp turns and the attach doglegs.
+                # sharp turns and the attach doglegs.  Issue #7543: at the
+                # leg's TRUE width and class against other nets' committed
+                # copper -- measured as a board-default track, board 06rf's
+                # 0.275 mm USB3_RX1+ leg shipped 0.126 mm from USB3_TX1+'s
+                # gateway via (0.150 required).
                 for a, b in zip(full, full[1:], strict=False):
                     if dist(a, b) <= 1e-9:
                         continue
                     if pads_block_segment_grown(self.obstacles, a, b, layer, pair_nets, 0.0):
                         return None, "pair-leg-blocked"
                     if not committed.seg_clear(a, b, layer, net):
+                        return None, "pair-leg-blocked"
+                    if not self._pair_leg_clear(
+                        committed, a, b, layer, pair_nets, trace_w / 2.0, leg_clr
+                    ):
                         return None, "pair-leg-blocked"
                     # Issue #4507: the fat centerline SEARCH deliberately skips
                     # HV pairwise widening (see ``coupled.committed_seg_clear_
@@ -4410,44 +4481,50 @@ class LatticePathfinder:
         )
         return pres, why, lens, trunk_mm
 
-    def _hybrid_parity_pick(
+    def _hybrid_rank(self, res: _PairResult) -> tuple[float, float]:
+        """``(skew, total)`` of a hybrid result, rounded to 1 um (#7093)."""
+        measure = self.pair_length_measure or _default_pair_length
+        lp, ln = (measure(r) for r in res.routes)
+        return (round(abs(lp - ln), 3), round(lp + ln, 3))
+
+    def _hybrid_parity_candidates(
         self,
         ctx: _HybridParityCtx,
         *,
         committed: CommittedCopper,
-    ) -> tuple[_PairResult, str, tuple[float, float] | None]:
-        """The via-equal replacement of a recorded hybrid pick, if any (#7093).
+    ) -> list[tuple[str, _PairResult, tuple[float, float]]]:
+        """Every via-equal leg pair of ``ctx`` that passes the hybrid's gates.
 
-        Offers each leg the partner's layer sequence (the #7255 mirrored
-        search, :meth:`_hybrid_parity_legs`) against ``committed`` and keeps
-        a via-equal result only when it passes every :meth:`_hybrid_result`
-        gate and is no worse than the pick on skew AND on length,
-        element-wise.  Returns ``(result, "ok-mirrored", leg lengths)`` for a
-        replacement, else ``(ctx.pres, "ok", None)``.
+        ``(kind, result, leg lengths)`` per candidate, in search order:
+        ``"mirrored"`` -- one leg re-searched on its partner's layer sequence
+        (:meth:`_hybrid_parity_legs`, issue #7093) -- then ``"joint"`` -- both
+        legs lifted and re-searched together (:meth:`_hybrid_joint_legs`,
+        issue #7580).  Each was checked by :meth:`_hybrid_result` (leg
+        budget, via limit, pad classes, junction).  Nothing is committed.
         """
-        measure = self.pair_length_measure or _default_pair_length
-
-        def rank(res: _PairResult) -> tuple[float, float]:
-            lp, ln = (measure(r) for r in res.routes)
-            return (round(abs(lp - ln), 3), round(lp + ln, 3))
-
         (hard_p, _vp), (hard_n, _vn) = ctx.items["P"], ctx.items["N"]
-        pres, why, lens = ctx.pres, "ok", None
-        best = rank(pres)
-        for alt in self._hybrid_parity_legs(
-            ctx.pc,
-            items=ctx.items,
-            trunk=ctx.trunk,
-            legs=ctx.legs,
-            committed=committed,
-            history=PhysicalHistory(),
-            present=1.0,
-            escape_plan=ctx.escape_plan,
-            strict=ctx.strict,
-            floor=ctx.floor,
-            half=ctx.half,
-            clr=ctx.clr,
-        ):
+        alternatives: list[tuple[str, dict[str, _RouteResult]]] = [
+            ("mirrored", alt)
+            for alt in self._hybrid_parity_legs(
+                ctx.pc,
+                items=ctx.items,
+                trunk=ctx.trunk,
+                legs=ctx.legs,
+                committed=committed,
+                history=PhysicalHistory(),
+                present=1.0,
+                escape_plan=ctx.escape_plan,
+                strict=ctx.strict,
+                floor=ctx.floor,
+                half=ctx.half,
+                clr=ctx.clr,
+            )
+        ]
+        alternatives.extend(
+            ("joint", alt) for alt in self._hybrid_joint_legs(ctx, committed=committed)
+        )
+        out: list[tuple[str, _PairResult, tuple[float, float]]] = []
+        for kind, alt in alternatives:
             apres, _awhy, alens = self._hybrid_result(
                 ctx.pc,
                 hard_p,
@@ -4461,12 +4538,202 @@ class LatticePathfinder:
                 half=ctx.half,
                 clr=ctx.clr,
             )
-            if apres is None:
-                continue
-            r_alt = rank(apres)
-            if all(a <= b for a, b in zip(r_alt, best, strict=True)):
-                pres, why, lens, best = apres, "ok-mirrored", alens, r_alt
+            if apres is not None:
+                out.append((kind, apres, alens))
+        return out
+
+    def _hybrid_parity_pick(
+        self,
+        ctx: _HybridParityCtx,
+        *,
+        committed: CommittedCopper,
+    ) -> tuple[_PairResult, str, tuple[float, float] | None]:
+        """The via-equal replacement of a recorded hybrid pick, if any (#7093).
+
+        Offers the via-equal leg pairs of :meth:`_hybrid_parity_candidates`
+        (one leg mirrored on its partner's layer sequence, then both legs
+        lifted and re-searched together, #7580) against ``committed`` and
+        keeps one only when it is no worse than the pick on skew AND on
+        length, element-wise.  Returns ``(result, "ok-mirrored" | "ok-joint",
+        leg lengths)`` for a replacement, else ``(ctx.pres, "ok", None)``.
+        The best via-equal pair that was rejected is recorded on
+        ``ctx.rejected`` for the pair-rule failure report.
+        """
+        pres, why, lens = ctx.pres, "ok", None
+        pick = best = self._hybrid_rank(ctx.pres)
+        best_vias = -1
+        ctx.rejected = None
+        for kind, apres, alens in self._hybrid_parity_candidates(ctx, committed=committed):
+            r_alt = self._hybrid_rank(apres)
+            n_vias = len(apres.routes[0].vias)
+            # A tie with the replacement already chosen keeps the one with
+            # fewer layer changes (#7580: a joint pair hopping both legs never
+            # displaces an equally good mirrored pair with fewer vias).
+            if all(a <= b for a, b in zip(r_alt, best, strict=True)) and (
+                best_vias < 0 or r_alt != best or n_vias < best_vias
+            ):
+                pres, why, lens, best = apres, f"ok-{kind}", alens, r_alt
+                best_vias = n_vias
+            elif not all(a <= b for a, b in zip(r_alt, pick, strict=True)):
+                vias = (len(apres.routes[0].vias), len(apres.routes[1].vias))
+                if ctx.rejected is None or r_alt < ctx.rejected[1]:
+                    ctx.rejected = (vias, r_alt)
         return pres, why, lens
+
+    def _hybrid_joint_legs(
+        self,
+        ctx: _HybridParityCtx,
+        *,
+        committed: CommittedCopper,
+    ) -> list[dict[str, _RouteResult]]:
+        """Via-equal leg pairs with BOTH hybrid legs re-searched (issue #7580).
+
+        :meth:`_hybrid_parity_legs` moves one leg and keeps its partner as
+        committed copper, so it can never find a topology in which both legs
+        change: board 06rf's ``USB3_RX2`` N leg copying P's F->B->F hop came
+        back 24.0 mm against P's unmoved B.Cu copper.  Here both legs are
+        lifted.  The first leg is searched against the trunk alone under
+        each plan -- unconstrained, planar on its pad layer, and a crossing
+        hop (:func:`_crossing_mirror`) on every other layer either pick leg
+        already uses -- and the second leg is then searched against it on
+        the first leg's layer sequence (exact, then crossing), guided by its
+        corridor and unguided on a miss.  Both orders are tried.  Only pairs
+        with equal via counts that end on their trunk sites are returned;
+        the caller re-checks and ranks them.  Nothing is committed.
+        """
+        pc = ctx.pc
+        conns: dict[str, Connection] = {
+            pol: ((pc.key, pol), real, virt, pc.net_class)
+            for pol, (real, virt) in ctx.items.items()
+        }
+        kw: dict[str, Any] = {
+            "committed": committed,
+            "history": PhysicalHistory(),
+            "present": 1.0,
+            "escape_plan": ctx.escape_plan,
+        }
+
+        def ends_on_site(pol: str, res: _RouteResult | None) -> bool:
+            if res is None:
+                return False
+            virt = ctx.items[pol][1]
+            end = res.runs[-1][1][-1] if res.runs and res.runs[-1][1] else None
+            return end is not None and dist(end, (virt.x, virt.y)) <= 1e-6
+
+        if set(ctx.legs) != {"P", "N"}:
+            return []
+        used: set[int] = set()
+        for leg in ctx.legs.values():
+            used.update(_layer_sequence(leg))
+        out: list[dict[str, _RouteResult]] = []
+        for first, second in (("P", "N"), ("N", "P")):
+            start = self._route_end_layer(ctx.legs[first].route, ctx.items[first][0])
+            if start is None:
+                continue
+            plans: list[LayerMirror | None] = [
+                None,
+                LayerMirror(start, start, frozenset({start}), True),
+            ]
+            for other in sorted(used - {start}):
+                plans.append(_crossing_mirror(start, start, frozenset({start, other})))
+            for plan in plans:
+                mark = committed.begin_trial()
+                try:
+                    for net, run_layer, pts in ctx.trunk.runs:
+                        committed.add_run(run_layer, pts, net, ctx.half, ctx.clr)
+                    lead, _why = self._search_hybrid_leg(
+                        conns[first], ctx.strict, ctx.floor, mirror=plan, **kw
+                    )
+                    if lead is None or not ends_on_site(first, lead):
+                        continue
+                    self._commit_single(conns[first], lead, {}, committed)
+                    seq = _layer_sequence(lead)
+                    mirrors = [_mirror_of(lead)]
+                    if len(seq) > 1:
+                        mirrors.append(_crossing_mirror(seq[0], seq[-1], frozenset(seq)))
+                    guide = self._partner_guide(lead, pc)
+                    for mirror in mirrors:
+                        if mirror is None:
+                            continue
+                        res, _why = self._search_hybrid_leg(
+                            conns[second], ctx.strict, ctx.floor, guide=guide, mirror=mirror, **kw
+                        )
+                        if not ends_on_site(second, res):
+                            res, _why = self._search_hybrid_leg(
+                                conns[second], ctx.strict, ctx.floor, mirror=mirror, **kw
+                            )
+                        if res is None or not ends_on_site(second, res):
+                            continue
+                        if len(res.route.vias) != len(lead.route.vias):
+                            continue
+                        out.append({first: lead, second: res})
+                finally:
+                    committed.rollback_trial(mark)
+        return out
+
+    def _hybrid_parity_blockers(
+        self,
+        ctx: _HybridParityCtx,
+        *,
+        committed: CommittedCopper,
+        net_names: Mapping[int, str],
+    ) -> tuple[tuple[int, int], tuple[float, float], list[str]] | None:
+        """Why no via-equal leg pair fits the finished board (issue #7580).
+
+        Re-runs :meth:`_hybrid_parity_candidates` against the trunk ALONE
+        (a fresh model: no other net's copper) and takes the best via-equal
+        leg pair that is no worse than the pick on skew and on length.
+        Returns ``(vias, (skew, total), blocking nets)`` -- the nets whose
+        copper on the finished board (``committed``) that pair's legs would
+        violate -- or ``None`` when even the trunk alone leaves no such pair
+        (the topology does not exist; nothing on the board is in the way).
+        Diagnostic only: nothing is committed or replaced.
+        """
+        pick = self._hybrid_rank(ctx.pres)
+        best: tuple[tuple[float, float], _PairResult] | None = None
+        for _kind, apres, _lens in self._hybrid_parity_candidates(
+            ctx, committed=self._fresh_committed()
+        ):
+            rank = self._hybrid_rank(apres)
+            if all(a <= b for a, b in zip(rank, pick, strict=True)) and (
+                best is None or rank < best[0]
+            ):
+                best = (rank, apres)
+        if best is None:
+            return None
+        rank, pres = best
+        own = {r.net for r in pres.routes}
+        hits: set[int] = set()
+        for net, layer, pts in pres.runs:
+            for a, b in zip(pts, pts[1:], strict=False):
+                if dist(a, b) <= 1e-9:
+                    continue
+                for c, d, cnet, hw, iclr in committed.copper[layer].query_seg(
+                    a, b, pad=ctx.half + max(ctx.clr, 0.0) + 1.0
+                ):
+                    if cnet in own:
+                        continue
+                    if seg_seg_dist(a, b, c, d) - ctx.half - hw < max(ctx.clr, iclr) - 1e-6:
+                        hits.add(cnet)
+                for point, vnet, vclr in committed.vias:
+                    if vnet in own:
+                        continue
+                    gap = seg_pt_dist(a, b, point) - ctx.half - committed.via_radius
+                    if gap < max(ctx.clr, vclr) - 1e-6:
+                        hits.add(vnet)
+        for net, point in pres.vias:
+            for layer in range(committed.num_layers):
+                for c, d, cnet, hw, iclr in committed.copper[layer].query_seg(
+                    point, point, pad=committed.via_radius + max(ctx.clr, 0.0) + 1.0
+                ):
+                    if cnet in own:
+                        continue
+                    gap = seg_pt_dist(c, d, point) - hw - committed.via_radius
+                    if gap < max(ctx.clr, iclr) - 1e-6:
+                        hits.add(cnet)
+        names = sorted(net_names.get(n, f"net {n}") for n in hits)
+        vias = (len(pres.routes[0].vias), len(pres.routes[1].vias))
+        return vias, rank, names
 
     def _hybrid_parity_pass(
         self,
@@ -4481,10 +4748,17 @@ class LatticePathfinder:
         pick recorded by :meth:`_try_hybrid_start` whose copper is still the
         pair's emitted copper (identity: a rolled-back or superseded pass
         never matches), every OTHER route is committed as a hard obstacle at
-        its own class clearance and :meth:`_hybrid_parity_pick` may swap one
-        leg for a via-equal mirrored one.  Only that pair's two routes can
-        change, so no other pair's vias, no routed count and no class-pad
-        repair can move -- the board-level guarantee board 06rf needed.
+        its own class clearance and :meth:`_hybrid_parity_pick` may swap the
+        legs for a via-equal pair (one leg mirrored, or both re-searched
+        together, #7580).  Only that pair's two routes can change, so no
+        other pair's vias, no routed count and no class-pad repair can move
+        -- the board-level guarantee board 06rf needed.
+
+        Issue #7580: when no via-equal pair fits, the pick is kept and the
+        log names it a pair-rule failure, with the best via-equal pair that
+        was rejected (and by how much) and, when a via-equal pair that is no
+        worse fits against the trunk alone, the nets whose copper is in its
+        way (:meth:`_hybrid_parity_blockers`).
         """
         ctxs, self._hybrid_parity_ctx = self._hybrid_parity_ctx, []
         if not self.hybrid_parity or not ctxs:
@@ -4493,6 +4767,7 @@ class LatticePathfinder:
         for pc in coupled:
             for pol in ("P", "N"):
                 classes[(pc.key, pol)] = pc.net_class
+        net_names = {r.net: r.net_name for r in routes.values() if r.net_name}
         for ctx in ctxs:
             key = ctx.pc.key
             own = ((key, "P"), (key, "N"))
@@ -4508,19 +4783,53 @@ class LatticePathfinder:
                 self._commit_route_copper(route, classes.get(rkey), committed)
             before = tuple(len(r.vias) for r in ctx.pres.routes)
             pres, why, lens = self._hybrid_parity_pick(ctx, committed=committed)
-            if why != "ok-mirrored" or lens is None:
-                self.hybrid_parity_log[key] = (
-                    f"vias P/N={before[0]}/{before[1]}: no via-equal mirrored leg fits "
-                    "the finished board without more skew or length; kept"
+            if why not in ("ok-mirrored", "ok-joint") or lens is None:
+                self.hybrid_parity_log[key] = self._hybrid_parity_failure_note(
+                    ctx, before, committed=committed, net_names=net_names
                 )
                 continue
             routes[own[0]], routes[own[1]] = pres.routes[0], pres.routes[1]
             after = tuple(len(r.vias) for r in pres.routes)
+            how = (
+                "a leg mirrored"
+                if why == "ok-mirrored"
+                else "both legs re-searched together (#7580)"
+            )
             self.hybrid_parity_log[key] = (
-                f"vias P/N={before[0]}/{before[1]} -> {after[0]}/{after[1]}: a leg "
-                f"mirrored for via parity against the finished board, legs P/N="
+                f"vias P/N={before[0]}/{before[1]} -> {after[0]}/{after[1]}: {how} "
+                f"for via parity against the finished board, legs P/N="
                 f"{lens[0]:.1f}/{lens[1]:.1f} mm; no other copper moved"
             )
+
+    def _hybrid_parity_failure_note(
+        self,
+        ctx: _HybridParityCtx,
+        before: tuple[int, ...],
+        *,
+        committed: CommittedCopper,
+        net_names: Mapping[int, str],
+    ) -> str:
+        """The log line of a hybrid kept with unequal vias (issue #7580)."""
+        skew, total = self._hybrid_rank(ctx.pres)
+        note = (
+            f"vias P/N={before[0]}/{before[1]}: pair-rule failure, kept: no via-equal "
+            "leg pair fits the finished board without more skew or length"
+        )
+        if ctx.rejected is not None:
+            (rv_p, rv_n), (r_skew, r_total) = ctx.rejected
+            note += (
+                f" (best rejected: vias {rv_p}/{rv_n}, skew {r_skew:.2f} mm vs "
+                f"{skew:.2f} mm, length {r_total:.2f} mm vs {total:.2f} mm)"
+            )
+        blockers = self._hybrid_parity_blockers(ctx, committed=committed, net_names=net_names)
+        if blockers is None:
+            return note + "; none exists against the trunk alone either"
+        (bv_p, bv_n), (b_skew, b_total), names = blockers
+        where = ", ".join(names) if names else "no single net's copper (search constraints)"
+        return note + (
+            f"; against the trunk alone vias {bv_p}/{bv_n} fit at skew {b_skew:.2f} mm, "
+            f"length {b_total:.2f} mm, blocked on the finished board by: {where}"
+        )
 
     def _route_end_layer(self, route: Route, pad: Pad) -> int | None:
         """The copper layer ``route`` meets ``pad`` on (issue #7093).
@@ -4598,12 +4907,15 @@ class LatticePathfinder:
 
         Among those the shortest wins; ties keep the earlier.  Only that one
         extra's copper can change, so no other route, routed count or pair
-        moves.  A pair with no fitting extra keeps its copper (logged in
-        :attr:`extra_parity_log`) and is still reported by the end-of-run
-        via audit.  Board 06rf's ``USB2_D`` is such a pair: its two J1 extras
-        cross, so ``USB2_D+`` copying the ``USB2_D-`` hop comes back planar
-        (the pads' launch radii touch) and ``USB2_D-`` has no planar way past
-        ``USB2_D+``.
+        moves.  When no single extra fits, one P and one N extra are
+        re-routed together (:meth:`_joint_extra_parity`): board 06rf's
+        ``USB2_D`` J1 extras cross, so ``USB2_D+`` copying the ``USB2_D-``
+        hop comes back planar (the pads' launch radii touch) and ``USB2_D-``
+        has no planar way past ``USB2_D+``, but with both lifted ``USB2_D-``
+        goes straight and ``USB2_D+`` round its far pad.  Then only those two
+        extras' copper can change.  A pair with no fitting extra either way
+        keeps its copper (logged in :attr:`extra_parity_log`) and is still
+        reported by the end-of-run via audit.
 
         ``deadline`` (``time.monotonic()``) is re-checked before every
         search: once it passes, the pair being searched and every later one
@@ -4691,16 +5003,46 @@ class LatticePathfinder:
                         break
                 if timed_out:
                     break
+            joint: _JointExtras | None = None
+            if best is None and not timed_out:
+                joint, timed_out = self._joint_extra_parity(
+                    routes,
+                    classes,
+                    extras[p_net],
+                    extras[n_net],
+                    totals,
+                    (p_net, n_net),
+                    measure,
+                    deadline,
+                )
             if timed_out:
                 self.extra_parity_log[(p_net, n_net)] = (
                     f"{names} vias {before[0]}/{before[1]}: deadline reached before "
                     "every extra-pad attachment was tried; kept"
                 )
                 return
+            if joint is not None:
+                for conn, route in joint.moves:
+                    routes[conn[0]] = route
+                after = {p_net: 0, n_net: 0}
+                for r in routes.values():
+                    if r.net in after:
+                        after[r.net] += len(r.vias)
+                legs = ", ".join(
+                    f"{c[2].ref}.{c[2].pin}->{c[1].ref}.{c[1].pin} ({length:.2f} mm)"
+                    for (c, _r), length in zip(joint.moves, joint.lengths, strict=True)
+                )
+                self.extra_parity_log[(p_net, n_net)] = (
+                    f"{names} vias {before[0]}/{before[1]} -> {after[p_net]}/{after[n_net]}: "
+                    f"extras {legs} re-routed jointly, skew {joint.skew_before:.2f} -> "
+                    f"{joint.skew_after:.2f} mm; no other copper moved"
+                )
+                continue
             if best is None:
                 self.extra_parity_log[(p_net, n_net)] = (
                     f"{names} vias {before[0]}/{before[1]}: no extra-pad attachment "
-                    "could copy its partner's layer changes on the finished board; kept"
+                    "could copy its partner's layer changes on the finished board, "
+                    "alone or re-routed jointly with its partner's; kept"
                 )
                 continue
             length, moved, route = best
@@ -4715,6 +5057,154 @@ class LatticePathfinder:
                 f"re-routed on its partner's layer changes ({length:.2f} mm); "
                 "no other copper moved"
             )
+
+    def _joint_extra_mirrors(
+        self, own: Connection, routes: dict[object, Route], partner: Connection
+    ) -> list[LayerMirror | None]:
+        """Layer plans a jointly re-routed extra is searched under (#7093).
+
+        ``None`` (a free search), planar on its pads' layer when both its
+        pads meet its route on one layer, its own route's layer changes and
+        its partner extra's (:meth:`_extra_mirror`).  Duplicates dropped,
+        order kept.
+        """
+        route = routes[own[0]]
+        out: list[LayerMirror | None] = [None]
+        a = self._route_end_layer(route, own[1])
+        b = self._route_end_layer(route, own[2])
+        if a is not None and a == b:
+            out.append(LayerMirror(a, a, frozenset({a}), True))
+        for mirror in (
+            self._extra_mirror(route, own[1], own[2]),
+            self._extra_mirror(routes[partner[0]], partner[1], partner[2]),
+        ):
+            if mirror is not None and mirror not in out:
+                out.append(mirror)
+        return out
+
+    def _joint_extra_parity(
+        self,
+        routes: dict[object, Route],
+        classes: dict[object, object | None],
+        p_extras: list[Connection],
+        n_extras: list[Connection],
+        totals: dict[int, int],
+        nets: tuple[int, int],
+        measure: Callable[[Route], float],
+        deadline: float | None,
+    ) -> tuple[_JointExtras | None, bool]:
+        """Re-route one P extra and one N extra together for via parity (#7093).
+
+        The fallback of :meth:`_extra_parity_pass` when no single extra can
+        copy its partner's layer changes.  On board 06rf the ``USB2_D`` J1
+        extras cross in an X: ``USB2_D-`` drops through B.Cu under the planar
+        ``USB2_D+`` (2 / 4 vias), ``USB2_D+`` cannot add a hop past
+        ``USB2_D-``'s B.Cu copper and ``USB2_D-`` has no planar way past
+        ``USB2_D+``.  With BOTH lifted, one can take the straight planar way
+        and the other a planar way round its partner's far pad -- an option
+        neither single re-route can see.
+
+        For every (P extra, N extra), both orders, and each layer plan of
+        :meth:`_joint_extra_mirrors`: the first extra is searched against
+        every other route of the board (the two lifted ones excluded), then
+        the second against those routes plus the first's new copper.  Both
+        searches pass :meth:`_search_single`'s self-DRC gate.  A result is
+        kept only when
+
+        * the two nets' via totals come out equal,
+        * each new extra is no longer than the longer of the two extras it
+          replaces, plus :data:`_PARITY_LENGTH_TOLERANCE_MM` (pair length
+          measure),
+        * and the pair's skew (each net's summed route length) is not worse.
+
+        The shortest total wins; ties keep the earlier.  Returns ``(choice
+        or None, timed_out)``; ``deadline`` is re-checked before every search.
+        """
+        p_net, n_net = nets
+
+        def skew(replaced: dict[object, Route]) -> float:
+            sums = {p_net: 0.0, n_net: 0.0}
+            for rkey, route in routes.items():
+                route = replaced.get(rkey, route)
+                if route.net in sums:
+                    sums[route.net] += measure(route)
+            return abs(sums[p_net] - sums[n_net])
+
+        skew_before = skew({})
+        best: _JointExtras | None = None
+        for p_conn in p_extras:
+            for n_conn in n_extras:
+                lifted = (p_conn[0], n_conn[0])
+                old = {p_conn[0]: routes[p_conn[0]], n_conn[0]: routes[n_conn[0]]}
+                bound = max(measure(r) for r in old.values()) + _PARITY_LENGTH_TOLERANCE_MM
+                plans = {
+                    p_conn[0]: self._joint_extra_mirrors(p_conn, routes, n_conn),
+                    n_conn[0]: self._joint_extra_mirrors(n_conn, routes, p_conn),
+                }
+                # Via totals of each net without the two lifted extras.
+                rest = {
+                    p_net: totals[p_net] - len(old[p_conn[0]].vias),
+                    n_net: totals[n_net] - len(old[n_conn[0]].vias),
+                }
+                base: CommittedCopper | None = None
+                for first, second in ((p_conn, n_conn), (n_conn, p_conn)):
+                    for m1 in plans[first[0]]:
+                        if deadline is not None and time.monotonic() >= deadline:
+                            return None, True
+                        if base is None:
+                            base = self._fresh_committed()
+                            for rkey, route in routes.items():
+                                if rkey not in lifted:
+                                    self._commit_route_copper(route, classes.get(rkey), base)
+                        r1, _why = self._search_single(
+                            first,
+                            committed=base,
+                            history=PhysicalHistory(),
+                            present=1.0,
+                            escape_plan={},
+                            mirror=m1,
+                        )
+                        if r1 is None:
+                            continue
+                        len1 = measure(r1.route)
+                        if len1 > bound + 1e-9:
+                            continue
+                        under = self._fresh_committed()
+                        for rkey, route in routes.items():
+                            if rkey not in lifted:
+                                self._commit_route_copper(route, classes.get(rkey), under)
+                        self._commit_route_copper(r1.route, classes.get(first[0]), under)
+                        first_net = first[1].net
+                        second_net = second[1].net
+                        need = rest[first_net] + len(r1.route.vias) - rest[second_net]
+                        if need < 0:
+                            continue
+                        for m2 in plans[second[0]]:
+                            if deadline is not None and time.monotonic() >= deadline:
+                                return None, True
+                            r2, _why = self._search_single(
+                                second,
+                                committed=under,
+                                history=PhysicalHistory(),
+                                present=1.0,
+                                escape_plan={},
+                                mirror=m2,
+                            )
+                            if r2 is None or len(r2.route.vias) != need:
+                                continue
+                            len2 = measure(r2.route)
+                            if len2 > bound + 1e-9:
+                                continue
+                            after = skew({first[0]: r1.route, second[0]: r2.route})
+                            if after > skew_before + 1e-9:
+                                continue
+                            moves = ((first, r1.route), (second, r2.route))
+                            if p_conn is not first:
+                                moves = (moves[1], moves[0])
+                            lengths = (len1, len2) if p_conn is first else (len2, len1)
+                            if best is None or sum(lengths) < sum(best.lengths) - 1e-9:
+                                best = _JointExtras(moves, lengths, skew_before, after)
+        return best, False
 
     def _commit_route_copper(
         self, route: Route, net_class: object | None, committed: CommittedCopper

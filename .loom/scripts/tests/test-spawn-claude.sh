@@ -1330,7 +1330,7 @@ trap 'rm -rf "$TEST_WS" "$STUB_DIR" "$CPU_DIR"' EXIT
 
 cat > "$CPU_DIR/claude" <<'STUB'
 #!/usr/bin/env bash
-echo "stub-claude budget=${LOOM_SWEEP_CPU_BUDGET_CORES:-unset}"
+echo "stub-claude budget=${LOOM_SWEEP_CPU_BUDGET_CORES:-unset} inflight=${LOOM_SWEEP_CPU_INFLIGHT:-unset}"
 STUB
 chmod +x "$CPU_DIR/claude"
 
@@ -1380,6 +1380,8 @@ assert_contains "CPU budget = 6 core(s) of 8 (reserved 2)" "$output" \
     "spawn-claude computes budget = total - reserved(2) with no env/config set (#5111)"
 assert_contains "stub-claude budget=6" "$output" \
     "spawn-claude exports LOOM_SWEEP_CPU_BUDGET_CORES to the child (#5111)"
+assert_contains "stub-claude budget=6 inflight=1" "$output" \
+    "spawn-claude exports the in-flight divisor as LOOM_SWEEP_CPU_INFLIGHT (#12884)"
 assert_contains "advisory-only" "$output" \
     "spawn-claude logs advisory-only when no systemd --user manager is reachable (#5111)"
 
@@ -1607,6 +1609,8 @@ output=$(LOOM_WORKSPACE="$TEST_WS" LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$CPU_DIR:
     "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
 assert_contains "stub-claude budget=2" "$output" \
     "3 concurrent sweeps get 2 cores each — 6 total, not 18 (the #5979 incident)"
+assert_contains "stub-claude budget=2 inflight=3" "$output" \
+    "the child sees the in-flight count the budget was divided by (#12884)"
 
 # Test: more concurrent sweeps than usable cores still clamps to 1, never 0.
 output=$(LOOM_WORKSPACE="$TEST_WS" LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$CPU_DIR:$PATH" \
@@ -1630,6 +1634,7 @@ assert_contains "CPUQuota=200%" "$(cat "$SYSTEMD_RUN_LOG")" \
 # sweep independently claims the whole `total - reserved` budget.
 output=$(LOOM_WORKSPACE="$TEST_WS" LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$CPU_DIR:$PATH" \
     env -u LOOM_SYSTEMD_FORCE LOOM_SWEEP_INFLIGHT_SWEEPS=3 LOOM_SWEEP_SHARED_CPU_BUDGET=0 \
+    LOOM_SWEEP_CPU_INFLIGHT=9 \
     "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
 assert_contains "CPU budget = 6 core(s) of 8 (reserved 2)" "$output" \
     "LOOM_SWEEP_SHARED_CPU_BUDGET=0 restores the undivided pre-#5979 budget"
@@ -1637,6 +1642,8 @@ assert_contains "host-wide sharing disabled" "$output" \
     "the disabled state is logged, not silent (#5979)"
 assert_contains "stub-claude budget=6" "$output" \
     "the child sees the undivided budget when sharing is disabled (#5979)"
+assert_contains "stub-claude budget=6 inflight=unset" "$output" \
+    "unshared, no in-flight count is exported and a parent's value does not leak (#12884)"
 
 # Test: the `autonomous.spawnSharedCpuBudget` config knob, and the env var
 # winning over it — same precedence chain as every other spawn knob.
@@ -1688,7 +1695,7 @@ assert_eq "" "$(cat "$SYSTEMD_RUN_LOG")" \
 # subcommand (spawn-claude.sh's own token selection) to the real binary.
 cat > "$CPU_DIR/claude" <<'STUB'
 #!/usr/bin/env bash
-echo "stub-claude budget=${LOOM_SWEEP_CPU_BUDGET_CORES:-unset}"
+echo "stub-claude budget=${LOOM_SWEEP_CPU_BUDGET_CORES:-unset} inflight=${LOOM_SWEEP_CPU_INFLIGHT:-unset}"
 STUB
 chmod +x "$CPU_DIR/claude"
 

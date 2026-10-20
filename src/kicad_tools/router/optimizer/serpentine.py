@@ -73,10 +73,12 @@ class SerpentineConfig:
     # Issue #7546: 45-degree chamfer at each of a loop's four corners, as a
     # multiple of the trace width (clamped to half the amplitude, where the
     # leg becomes one straight 45-degree run).  ``0`` (default) is the
-    # original square U loop.  Pinned kicad-cli 10.0.6 leaves the flat top of
-    # a square loop uncoupled while kct couples it, so the two engines
-    # disagree on a plain square bump's uncoupled length; from a chamfer of
-    # half a trace width up they agree.  The diff-pair skew tuner uses 1.0.
+    # original square U loop.  kct and pinned kicad-cli 10.0.6 read the same
+    # uncoupled length for plain bumps of any chamfer (Issue #7565 closed the
+    # square-loop divergence).  From half a trace width up a chamfered bump
+    # reads *less* uncoupled than a square one in both engines on thin
+    # traces; below that it reads more.  The skew tuner's plain-copper
+    # fallback uses ``SKEW_BUMP_CHAMFER_WIDTHS`` (0.55).
     corner_chamfer_widths: float = 0.0
 
     def chamfer_mm(self, width: float, amplitude: float | None = None) -> float:
