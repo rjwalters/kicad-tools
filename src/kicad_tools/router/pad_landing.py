@@ -38,9 +38,6 @@ Known asymmetries (not covered by this module):
 * The Python A* multiplies the whole step, landing charge included, by the
   net-class ``cost_mult``; the native loops apply no such multiplier, as for
   every other step cost.
-* ``Router.route_bidirectional`` (Python, no caller outside
-  ``pathfinder.py``) does not apply the landing cost; only the one-way
-  Python loop and the two native loops do.
 """
 
 from __future__ import annotations

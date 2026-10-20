@@ -3873,8 +3873,7 @@ class Autorouter:
         from foreign-net VIAs.
 
         Background: ``pathfinder.Router._validate_route_clearance`` is
-        called pre-commit at :meth:`pathfinder._reconstruct_route` and
-        :meth:`pathfinder.route_bidirectional`.  It walks
+        called pre-commit at :meth:`pathfinder._reconstruct_route`.  It walks
         ``self.grid.routes`` for foreign vias via
         :meth:`Grid.validate_segment_clearance` -- but that only sees
         vias already committed at the moment the segment validates.

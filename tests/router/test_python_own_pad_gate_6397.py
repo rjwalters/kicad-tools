@@ -1,13 +1,12 @@
-"""Issue #6397: the #6375 own-pad step gate in the pure-Python BIDIRECTIONAL A*.
+"""Issue #6397: the #6375 own-pad step gate in the pure-Python A*.
 
 #6375 holds every planar step of the C++ A* that touches the routing net's own
 static pad copper / halo to the validator's segment-vs-pad verdict.  #6398
-ported the gate to the one-way Python loop (``Router._route_impl``).  The
-second Python loop, ``Router.route_bidirectional`` /
-``_expand_bidirectional_neighbors``, still admitted those steps unchecked: on
-the #6375 fixture every meeting point it found was built on a pad exit that
-crowds the NC neighbour, ``_reconstruct_bidirectional_route`` rejected it, and
-the search returned no route at all.
+ported the gate to the one-way Python loop (``Router._route_impl``); #6397
+ported it to the bidirectional loop, which #6527 later removed (no
+production caller; board 05 never engaged it).  What stays here is the gate's
+inputs, its step verdicts against the C++ gate and the validator, and the
+end-to-end Python search on the #6375 fixture.
 
 Also here: the Python half of Issue #6473 -- the within-path via hole-to-hole
 check the C++ A* got in #6464 (``Pathfinder::own_path_vias_clear``).
@@ -15,7 +14,6 @@ check the C++ A* got in #6464 (``Pathfinder::own_path_vias_clear``).
 
 from __future__ import annotations
 
-import itertools
 import math
 
 import pytest
@@ -23,7 +21,6 @@ import pytest
 from kicad_tools.router.core import Autorouter
 from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder, is_cpp_available
 from kicad_tools.router.grid import RoutingGrid
-from kicad_tools.router.heuristics import HeuristicContext
 from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.pathfinder import AStarNode, Router
 from kicad_tools.router.primitives import Pad, Segment, Via
@@ -117,56 +114,6 @@ class _Twin:
             exclude_refs=refs,
         )[0]
 
-    def expand(self, cell: tuple[int, int], *, backward: bool, own_gate) -> set[tuple[int, int]]:
-        """Planar neighbours ``_expand_bidirectional_neighbors`` pushes from ``cell``."""
-        router = self.router
-        source, target = (self.end, self.start) if backward else (self.start, self.end)
-        goal_gx, goal_gy = self.grid.world_to_grid(target.x, target.y)
-        context = HeuristicContext(
-            goal_x=goal_gx,
-            goal_y=goal_gy,
-            goal_layer=0,
-            rules=self.rules,
-            cost_multiplier=1.0,
-            diagonal_routing=True,
-            get_congestion=self.grid.get_congestion,
-            get_congestion_cost=router._get_congestion_cost,
-        )
-        nodes: dict[tuple[int, int, int], AStarNode] = {}
-        router._expand_bidirectional_neighbors(
-            AStarNode(0.0, 0.0, cell[0], cell[1], 0),
-            [],
-            set(),
-            {},
-            nodes,
-            context,
-            source,
-            [0],
-            [0],
-            router._get_pad_metal_bounds(source, TRACE),
-            router._get_pad_metal_bounds(target, TRACE),
-            False,
-            1.0,
-            1.0,
-            seq_counter=itertools.count(),
-            own_gate=own_gate,
-        )
-        return {(x, y) for (x, y, layer) in nodes if layer == 0}
-
-    def gate_rejections(self, own_gate, *, backward: bool) -> list[tuple[int, int, int, int]]:
-        """Steps the expansion admits with the gate off and refuses with it on."""
-        rejected = []
-        for cell in sorted({(gx1, gy1) for gx1, gy1, _gx2, _gy2 in self.steps}):
-            off = self.expand(cell, backward=backward, own_gate=None)
-            on = self.expand(cell, backward=backward, own_gate=own_gate)
-            assert on <= off, "the gate may only remove neighbours"
-            rejected.extend((cell[0], cell[1], nx, ny) for nx, ny in sorted(off - on))
-        return rejected
-
-
-def _in_box(box: tuple[int, int, int, int], gx: int, gy: int) -> bool:
-    return box[0] <= gx <= box[2] and box[1] <= gy <= box[3]
-
 
 # ---------------------------------------------------------------------------
 # The per-search inputs
@@ -255,69 +202,6 @@ def test_step_verdict_matches_cpp_and_the_validator(rotated, relaxed, width) -> 
         assert rejected, "the window must contain steps the gate rejects"
 
 
-@requires_cpp
-@pytest.mark.parametrize("rotated", [False, True], ids=["vertical", "rotated"])
-@pytest.mark.parametrize("backward", [False, True], ids=["forward", "backward"])
-def test_bidirectional_expansion_matches_the_cpp_gate(rotated, backward) -> None:
-    """The steps the bidirectional expansion drops are exactly the C++ gate's.
-
-    For every planar step the ungated expansion admits: it is refused with
-    the gate on if and only if it is outside both metal boxes, touches an
-    own-pad cell on either end, and ``Pathfinder::own_pad_step_clear`` says
-    the swept segment is too close to a pad.  Steps on the rule to float
-    noise get the same verdict on both sides (#6509).
-    """
-    twin = _Twin(rotated)
-    router = twin.router
-    pathfinder = twin.cpp_pathfinder()
-    exclude, clamp = pathfinder._carveout_ref_hashes(twin.grid, twin.start, twin.end)
-    refs, width = router._own_pad_gate_inputs(twin.start, twin.end)
-    pathfinder._impl.set_search_own_pad_gate(exclude, clamp, width)
-    boxes = [router._get_pad_metal_bounds(p, TRACE) for p in (twin.start, twin.end)]
-
-    expected = []
-    for cell in sorted({(gx1, gy1) for gx1, gy1, _gx2, _gy2 in twin.steps}):
-        for nx, ny in sorted(twin.expand(cell, backward=backward, own_gate=None)):
-            if any(_in_box(box, nx, ny) for box in boxes):
-                continue
-            if not (router._own_pad_cell(nx, ny, 0, NET) or router._own_pad_cell(*cell, 0, NET)):
-                continue
-            if not pathfinder._impl.own_pad_step_clear(*cell, nx, ny, 0, NET, width):
-                expected.append((*cell, nx, ny))
-
-    actual = twin.gate_rejections((refs, width, {}), backward=backward)
-    assert expected, "the window must contain steps the C++ gate rejects"
-    assert set(actual) == set(expected), sorted(set(actual) ^ set(expected))[:5]
-
-
-# ---------------------------------------------------------------------------
-# Never stricter than the validator
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("rotated", "nc_rotation"),
-    [
-        pytest.param(False, 0.0, id="vertical"),
-        pytest.param(True, 0.0, id="rotated-row"),
-        pytest.param(False, 20.0, id="skewed-nc-pads"),
-    ],
-)
-@pytest.mark.parametrize("backward", [False, True], ids=["forward", "backward"])
-def test_gate_never_rejects_a_step_the_validator_accepts(rotated, nc_rotation, backward) -> None:
-    """Every step the bidirectional gate drops fails ``validate_segment_clearance``.
-
-    Checked at the gate's (narrowest) width, so it also holds for the wider
-    widths reconstruction emits away from a neck-down.
-    """
-    twin = _Twin(rotated, nc_rotation=nc_rotation)
-    refs, width = twin.router._own_pad_gate_inputs(twin.start, twin.end)
-    rejected = twin.gate_rejections((refs, width, {}), backward=backward)
-    assert rejected, "the window must contain steps the gate rejects"
-    stricter = [step for step in rejected if twin.validator(step, width, refs)]
-    assert not stricter, stricter[:5]
-
-
 def test_gate_is_off_for_legacy_callers_and_relief_probes(monkeypatch) -> None:
     """``own_gate=None`` (relief probes: the validator's own skip, #3438) asks nothing."""
     twin = _Twin(False)
@@ -330,10 +214,10 @@ def test_gate_is_off_for_legacy_callers_and_relief_probes(monkeypatch) -> None:
 
     monkeypatch.setattr(twin.router, "_own_pad_step_clear", _spy)
     twin.router.set_relief_mode(True)
-    twin.router.route_bidirectional(twin.start, twin.end)
+    twin.router.route(twin.start, twin.end)
     assert calls == []
     twin.router.set_relief_mode(False)
-    twin.router.route_bidirectional(twin.start, twin.end)
+    twin.router.route(twin.start, twin.end)
     assert calls
 
 
@@ -363,7 +247,7 @@ def _python_autorouter(rotated: bool, target: tuple[float, float]) -> Autorouter
     return ar
 
 
-def _route_with_spy(ar: Autorouter, monkeypatch, method: str):
+def _route_with_spy(ar: Autorouter, monkeypatch):
     router = ar.router
     verdicts: list[bool] = []
     original = router._validate_route_clearance
@@ -376,35 +260,22 @@ def _route_with_spy(ar: Autorouter, monkeypatch, method: str):
     monkeypatch.setattr(router, "_validate_route_clearance", _spy)
     start = next(p for p in ar.pads.values() if p.ref == "U2" and p.net == NET)
     end = next(p for p in ar.pads.values() if p.ref == "J2")
-    return getattr(router, method)(start, end), verdicts
+    return router.route(start, end), verdicts
 
 
-@pytest.mark.parametrize("method", ["route_bidirectional", "route"])
 @pytest.mark.parametrize(("rotated", "target"), CASES)
 def test_python_search_returns_no_validator_rejected_candidate(
-    rotated, target, method, monkeypatch
+    rotated, target, monkeypatch
 ) -> None:
     """A start tail that crowds the NC neighbour never reaches the validator."""
     ar = _python_autorouter(rotated, target)
-    route, verdicts = _route_with_spy(ar, monkeypatch, method)
+    route, verdicts = _route_with_spy(ar, monkeypatch)
     assert route is not None, "SIG did not route"
     assert verdicts == [True], "a candidate was built and then rejected"
     foreign = [p for p in ar.pads.values() if p.net != NET]
     for seg in route.segments:
         for pad in foreign:
             assert _pad_gap(pad, seg) >= CLEARANCE - 1e-3
-
-
-@pytest.mark.parametrize(("rotated", "target"), CASES)
-def test_ungated_bidirectional_search_loses_the_net(rotated, target, monkeypatch) -> None:
-    """Keeps the fixture honest: with the gate neutralised the only meeting
-    point is rejected by the validator and the bidirectional search has no
-    route (it cannot resume past a rejected goal the way ``route`` does)."""
-    ar = _python_autorouter(rotated, target)
-    monkeypatch.setattr(ar.router, "_own_pad_step_clear", lambda *a, **k: True)
-    route, verdicts = _route_with_spy(ar, monkeypatch, "route_bidirectional")
-    assert route is None
-    assert verdicts == [False]
 
 
 # ---------------------------------------------------------------------------
@@ -449,8 +320,7 @@ def _walled_router() -> tuple[Router, list[Pad], DesignRules]:
     return Router(grid, rules), pads, rules
 
 
-@pytest.mark.parametrize("method", ["route", "route_bidirectional"])
-def test_python_search_spaces_its_own_vias(method, monkeypatch) -> None:
+def test_python_search_spaces_its_own_vias(monkeypatch) -> None:
     router, pads, rules = _walled_router()
     verdicts: list[bool] = []
     original = router._validate_route_clearance
@@ -461,7 +331,7 @@ def test_python_search_spaces_its_own_vias(method, monkeypatch) -> None:
         return ok
 
     monkeypatch.setattr(router, "_validate_route_clearance", _spy)
-    route = getattr(router, method)(pads[0], pads[1])
+    route = router.route(pads[0], pads[1])
     assert route is not None
     assert verdicts == [True], "a candidate was built and then rejected"
     assert len(route.vias) == 2
@@ -612,8 +482,7 @@ def test_via_anc_walk_visits_every_via_on_the_path() -> None:
     assert _walk_vias_by_anc(first_via) == [first_via]
 
 
-@pytest.mark.parametrize("method", ["route", "route_bidirectional"])
-def test_python_search_leaves_no_cyclic_node_garbage(method) -> None:
+def test_python_search_leaves_no_cyclic_node_garbage() -> None:
     """With the cyclic GC off, no ``AStarNode`` outlives the search (Issue #6526).
 
     The search on this fixture places two vias.  When via nodes referenced
@@ -627,7 +496,7 @@ def test_python_search_leaves_no_cyclic_node_garbage(method) -> None:
     was_enabled = gc.isenabled()
     gc.disable()
     try:
-        route = getattr(router, method)(pads[0], pads[1])
+        route = router.route(pads[0], pads[1])
         assert route is not None and len(route.vias) == 2
         del route
         alive = sum(1 for obj in gc.get_objects() if isinstance(obj, AStarNode))

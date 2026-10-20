@@ -160,7 +160,6 @@ class TestAStarLayerUtilizationCost:
             via_diameter=0.6,
             grid_resolution=0.5,
             cost_layer_utilization=5.0,
-            bidirectional_search=False,
         )
 
     @pytest.fixture
@@ -172,7 +171,6 @@ class TestAStarLayerUtilizationCost:
             via_diameter=0.6,
             grid_resolution=0.5,
             cost_layer_utilization=0.0,
-            bidirectional_search=False,
         )
 
     def _make_grid_and_router(self, rules):
@@ -332,7 +330,6 @@ class TestTwoLayerNoRegression:
             via_diameter=0.6,
             grid_resolution=0.5,
             cost_layer_utilization=5.0,
-            bidirectional_search=False,
         )
 
     @pytest.fixture
@@ -394,104 +391,6 @@ class TestTwoLayerNoRegression:
         assert abs(router._layer_fill_ratios[0] - router._layer_fill_ratios[1]) < 0.01
 
 
-class TestBidirectionalParity:
-    """Test that bidirectional A* also includes utilization cost."""
-
-    @pytest.fixture
-    def rules(self):
-        return DesignRules(
-            trace_width=0.2,
-            trace_clearance=0.15,
-            via_drill=0.3,
-            via_diameter=0.6,
-            grid_resolution=0.5,
-            cost_layer_utilization=5.0,
-            bidirectional_search=True,
-            bidirectional_threshold=10,
-        )
-
-    @pytest.fixture
-    def grid(self, rules):
-        return RoutingGrid(
-            width=30.0,
-            height=30.0,
-            rules=rules,
-            layer_stack=LayerStack.two_layer(),
-        )
-
-    @pytest.fixture
-    def router(self, grid, rules):
-        return Router(grid=grid, rules=rules)
-
-    def test_bidirectional_route_with_utilization(self, router):
-        """Bidirectional A* should work with utilization cost enabled."""
-        pad1 = Pad(
-            x=2.0,
-            y=2.0,
-            width=0.5,
-            height=0.5,
-            net=1,
-            net_name="NET1",
-            layer=Layer.F_CU,
-            through_hole=False,
-            drill=0,
-        )
-        pad2 = Pad(
-            x=28.0,
-            y=28.0,
-            width=0.5,
-            height=0.5,
-            net=1,
-            net_name="NET1",
-            layer=Layer.F_CU,
-            through_hole=False,
-            drill=0,
-        )
-
-        route = router.route_bidirectional(pad1, pad2)
-        assert route is not None
-        assert len(route.segments) > 0
-
-    def test_bidirectional_with_heavy_utilization(self, router):
-        """Bidirectional A* should handle heavy utilization gracefully."""
-        grid = router.grid
-
-        # Fill layer 0 partially
-        rows, cols = grid.rows, grid.cols
-        for y in range(rows // 2):
-            for x in range(cols):
-                grid._usage_count[0, y, x] = 1
-
-        router.update_layer_fill_ratios()
-        assert router._layer_fill_ratios[0] > 0.0
-
-        pad1 = Pad(
-            x=2.0,
-            y=2.0,
-            width=0.5,
-            height=0.5,
-            net=1,
-            net_name="NET1",
-            layer=Layer.F_CU,
-            through_hole=True,
-            drill=0.3,
-        )
-        pad2 = Pad(
-            x=28.0,
-            y=28.0,
-            width=0.5,
-            height=0.5,
-            net=1,
-            net_name="NET1",
-            layer=Layer.F_CU,
-            through_hole=True,
-            drill=0.3,
-        )
-
-        route = router.route_bidirectional(pad1, pad2)
-        assert route is not None
-
-
 class TestAllowedLayerConstraint:
     """Test that utilization cost does not cause failures with layer constraints."""
 
@@ -505,7 +404,6 @@ class TestAllowedLayerConstraint:
             grid_resolution=0.5,
             cost_layer_utilization=5.0,
             allowed_layers=["F.Cu"],
-            bidirectional_search=False,
         )
 
     @pytest.fixture

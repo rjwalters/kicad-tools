@@ -67,9 +67,8 @@ def test_python_unknown_and_static_cells_stay_blocked():
     assert router._is_trace_blocked(55, 56, 2, 1, False, radius=2)
 
 
-@pytest.mark.parametrize("method", ["route", "route_bidirectional"])
 @pytest.mark.parametrize("sharing", [False, True])
-def test_python_search_routes_through_legal_halo(method, sharing):
+def test_python_search_routes_through_legal_halo(sharing):
     from kicad_tools.router.primitives import Pad
 
     grid, router = _context()
@@ -77,7 +76,7 @@ def test_python_search_routes_through_legal_halo(method, sharing):
     layer = router._grid_layer_object(2)
     start = Pad(x=a[0], y=a[1], width=0.1, height=0.1, layer=layer, net=1, net_name="N1")
     end = Pad(x=b[0], y=b[1], width=0.1, height=0.1, layer=layer, net=1, net_name="N1")
-    result = getattr(router, method)(start, end, negotiated_mode=sharing)
+    result = router.route(start, end, negotiated_mode=sharing)
     assert result is not None
     assert result.segments
     assert all(grid.validate_segment_clearance(s, 1)[0] for s in result.segments)

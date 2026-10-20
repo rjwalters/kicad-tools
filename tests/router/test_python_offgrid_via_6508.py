@@ -77,11 +77,10 @@ def test_ripped_neighbour_leaves_via_halo_intact(offset):
             assert grid._net[layer, gy + dy, gx + dx] == 2
 
 
-@pytest.mark.parametrize("method", ["route", "route_bidirectional"])
 @pytest.mark.parametrize("trace_dy", [-0.3, -0.4])
-def test_python_search_never_builds_a_rejected_candidate(method, trace_dy):
+def test_python_search_never_builds_a_rejected_candidate(trace_dy):
     grid, router, start, end, rejected, _ = _build((0.03, 0.02), trace_dy)
-    result = getattr(router, method)(start, end)
+    result = router.route(start, end)
     assert not rejected
     assert result is not None
     assert all(grid.validate_segment_clearance(s, 1)[0] for s in result.segments)

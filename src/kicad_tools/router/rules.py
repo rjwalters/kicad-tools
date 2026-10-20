@@ -451,16 +451,7 @@ class DesignRules:
     # see :meth:`NetClassRouting.hard_avoided_layer_indices`.
     strict_layers: bool = False
 
-    # Issue #6527: when True, the C++ backend's Python fallback calls
-    # ``Router.route_auto`` (bidirectional A* for long paths, one-way retry
-    # sharing one deadline) instead of ``Router.route``.  Default off.
-    fallback_bidirectional: bool = False
-
-    # Bidirectional A* configuration (Issue #964)
-    # Enable parallel frontier exploration for large paths
-    bidirectional_search: bool = True  # Enable bidirectional A* by default
-    bidirectional_threshold: int = 1000  # Min grid cells to enable bidirectional
-    parallel_workers: int = 2  # Number of parallel workers (typically 2 for bidi)
+    parallel_workers: int = 2  # Number of parallel workers
 
     # Via placement optimization (Issue #1019)
     # Controls via placement to avoid blocking adjacent nets near fine-pitch ICs

@@ -372,51 +372,6 @@ class TestIntraIcNetClassWidth:
         assert routes[0].segments[0].width == 0.2  # default width
 
 
-class TestBidirectionalPerNetClearance:
-    """Issue #1692: Bidirectional A* uses per-net-class radius."""
-
-    def test_bidirectional_uses_per_net_clearance_radius(self):
-        """Verify route_bidirectional() passes per-net radius to _is_trace_blocked."""
-        rules = DesignRules(trace_width=0.2, trace_clearance=0.2, grid_resolution=0.5)
-        net_class_map = {"+5V": NET_CLASS_POWER}
-        grid = RoutingGrid(20, 20, rules)
-        router = Router(grid, rules, net_class_map=net_class_map)
-
-        pad1 = Pad(
-            ref="C1",
-            pin="1",
-            x=2.0,
-            y=5.0,
-            width=1.0,
-            height=1.0,
-            layer=Layer.F_CU,
-            net=1,
-            net_name="+5V",
-        )
-        pad2 = Pad(
-            ref="C2",
-            pin="1",
-            x=15.0,
-            y=5.0,
-            width=1.0,
-            height=1.0,
-            layer=Layer.F_CU,
-            net=1,
-            net_name="+5V",
-        )
-
-        grid.add_pad(pad1)
-        grid.add_pad(pad2)
-
-        # Bidirectional routing should succeed and use POWER width
-        route = router.route_bidirectional(pad1, pad2)
-        assert route is not None, "Bidirectional routing should succeed for POWER net"
-        for seg in route.segments:
-            assert seg.width == 0.5, (
-                f"Bidirectional segment width should be 0.5mm (POWER class), got {seg.width}mm"
-            )
-
-
 class TestViaBlockingPerNetClass:
     """Issue #1692: _is_via_blocked supports per-net radius override."""
 
