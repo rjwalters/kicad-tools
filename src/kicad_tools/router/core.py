@@ -20513,6 +20513,7 @@ class Autorouter:
         *,
         engage: str = "length_critical",
         allow_inherited_near_miss: bool = False,
+        quantized_lengths: bool = False,
     ) -> dict[tuple[str, str], DiffPairTuneResult]:
         """Apply per-pair length-match (skew) tuning to detected diff pairs.
 
@@ -20548,6 +20549,12 @@ class Autorouter:
                 nearer a foreign pad, via or track than the pair's own route
                 already does.  Off by default -- the strict gate keeps
                 admitting nothing under the class clearance.
+            quantized_lengths: Issue #7548.  Measure ``"checker_skew_limit"``
+                skew on the copper the 45-degree quantization pass will
+                leave (:func:`~.quantize.quantize_pcb_file` replaces each
+                off-angle segment with a longer dogleg), for recipes that
+                quantize the written board after tuning.  Without it a leg
+                full of off-angle segments grows past the tuned figure.
 
         Returns:
             ``{(p_net_name, n_net_name): DiffPairTuneResult}`` for each
@@ -20588,6 +20595,8 @@ class Autorouter:
         route_length = None
         if engage == "checker_skew_limit":
             route_length = self._checker_route_length(num_layers)
+            if quantized_lengths:
+                route_length = self._quantized_route_length(route_length)
 
         # Issue #6795: component count per net, for the uncoupled-length limit.
         net_components: dict[str, int] = {}
@@ -21065,6 +21074,18 @@ class Autorouter:
             return model.route_length(route)
 
         return measure
+
+    @staticmethod
+    def _quantized_route_length(measure: Callable[[Route], float]) -> Callable[[Route], float]:
+        """``measure`` plus the length the 45-degree quantizer adds (Issue #7548)."""
+        from .quantize import dogleg_length_extra_mm
+
+        def quantized(route: Route) -> float:
+            return measure(route) + sum(
+                dogleg_length_extra_mm(s.x1, s.y1, s.x2, s.y2) for s in route.segments
+            )
+
+        return quantized
 
     @staticmethod
     def _declined_skew_result(

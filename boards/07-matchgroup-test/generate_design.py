@@ -2315,6 +2315,10 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         "--deterministic-budget",
         "--skip-nets",
         ",".join(skip_nets),
+        # Issue #7569: --skip-nets names the pours explicitly, so none count as
+        # auto-skipped; hold a via site for the +1V2/+1V8 pad pins anyway or
+        # tight DDR routing takes the only site beside U1.36.
+        "--reserve-skipped-plane-vias",
         "--net-class-map",
         str(sidecar_path),
         # Issue #7349 (follow-up to #7344): the pairs route single-ended

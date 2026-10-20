@@ -589,7 +589,12 @@ class TestBoardEdgeIsNeverPadOnly:
 CORRIDOR_GAP = 0.55
 
 
-def _corridor(net_class_clearance: float | None = None, hole=None):
+def _corridor(
+    net_class_clearance: float | None = None,
+    hole=None,
+    own_class_clearance: float | None = None,
+    pad_class_clearance: float | None = None,
+):
     """Route net N straight through the gap; returns (route_found, gap cell)."""
     from kicad_tools.router.cpp_backend import CppPathfinder
 
@@ -606,6 +611,14 @@ def _corridor(net_class_clearance: float | None = None, hole=None):
     ncm = {}
     if net_class_clearance is not None:
         ncm["B"] = NetClassRouting(name="Wide", trace_width=0.2, clearance=net_class_clearance)
+    if pad_class_clearance is not None:
+        # Issue #7569: both corridor pads carry this class.
+        for name in ("A", "B"):
+            ncm[name] = NetClassRouting(
+                name="PadClass", trace_width=0.2, clearance=pad_class_clearance
+            )
+    if own_class_clearance is not None:
+        ncm["N"] = NetClassRouting(name="Own", trace_width=0.2, clearance=own_class_clearance)
     pf = CppPathfinder(cpp, rules, diagonal_routing=True, net_class_map=ncm)
     pf.set_routable_layers([0])
     # Judge the native verdict alone: the Python fallback A* is a different
@@ -627,11 +640,21 @@ class TestExactPadStepRules:
         assert routed
 
     def test_net_class_floor_rejects_a_step_legal_only_at_the_net_clearance(self) -> None:
-        """(c) Another net class demands 0.2 mm.  The pair rule is
-        max(own, pad's class) and the pad's class is unknown natively, so the
-        board-wide floor (0.2 mm) applies: 0.175 mm is rejected."""
+        """(c) Pad B's net class demands 0.2 mm.  The pair rule is
+        max(own, pad's class), and since #7569 the native test knows each
+        pad's class: 0.175 mm from a 0.2 mm-class pad is rejected."""
         assert _corridor(net_class_clearance=0.15)[0]
         assert not _corridor(net_class_clearance=0.2)[0]
+
+    def test_wide_own_class_rejects_step_past_narrow_class_pad(self) -> None:
+        """Issue #7569, the MAX side of the pair rule: a 0.2 mm-class track
+        passing 0.15 mm-class pads at 0.175 mm is refused.  With the board-wide
+        floor gone, only the own-class clearance (``pad_step_clear`` via
+        ``set_search_fill_clearances``) keeps this side; a pad test that took
+        the pad's class alone would accept the step."""
+        assert _corridor(pad_class_clearance=0.15)[0]
+        assert _corridor(pad_class_clearance=0.15, own_class_clearance=0.15)[0]
+        assert not _corridor(pad_class_clearance=0.15, own_class_clearance=0.2)[0]
 
     def test_step_within_the_hole_guard_is_not_resolved(self) -> None:
         """(e) A component hole (an NPTH slot) the disc never sees sits

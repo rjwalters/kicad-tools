@@ -126,8 +126,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.validate:
         return run_validation(bom, args.quantity, args.format)
 
-    # Apply filters
-    items = list(bom.items)
+    # Apply filters. Virtual parts (power symbols, PWR_FLAGs, ``in_bom no``)
+    # are dropped first so that no writer -- table, csv, json or jlcpcb --
+    # ever sees them (#7615).
+    items = [i for i in bom.items if not i.is_virtual]
 
     # Exclude patterns
     for pattern in args.exclude:
@@ -145,21 +147,25 @@ def main(argv: list[str] | None = None) -> int:
     else:
         items.sort(key=lambda i: (i.reference[0] if i.reference else "", i.reference))
 
-    # Group if requested
-    if args.group:
-        items = group_items(items)
-
     # Check availability if requested
     if args.check_availability:
         return check_availability(bom, args.quantity, args.format)
+
+    # JLCPCB groups by value/footprint/LCSC itself, so it takes the
+    # filtered, ungrouped list (and so honours --exclude / --include-dnp).
+    if args.format == "jlcpcb":
+        output_jlcpcb(items)
+        return 0
+
+    # Group if requested
+    if args.group:
+        items = group_items(items)
 
     # Output
     if args.format == "csv":
         output_csv(items, args.group)
     elif args.format == "json":
         output_json(items, args.group)
-    elif args.format == "jlcpcb":
-        output_jlcpcb(bom)
     else:
         output_table(items, args.group)
 
@@ -299,8 +305,12 @@ def output_json(items, grouped: bool) -> None:
     print(json.dumps(data, indent=2))
 
 
-def output_jlcpcb(bom: BOM) -> None:
+def output_jlcpcb(items: list[BOMItem]) -> None:
     """Output BOM in JLCPCB assembly format.
+
+    *items* is the already-filtered list ``main`` hands every writer:
+    virtual parts removed, ``--exclude`` applied and DNP parts dropped
+    unless ``--include-dnp`` was given.
 
     JLCPCB format:
     - Comment: Component value
@@ -308,12 +318,11 @@ def output_jlcpcb(bom: BOM) -> None:
     - Footprint: Package/footprint name
     - LCSC Part #: LCSC part number for ordering
     """
-    from ..export.bom_formats import JLCPCBBOMFormatter
+    from ..export.bom_formats import BOMExportConfig, JLCPCBBOMFormatter
 
-    # Filter out virtual components and DNP
-    items = [item for item in bom.items if not item.is_virtual and not item.dnp]
-
-    formatter = JLCPCBBOMFormatter()
+    # DNP filtering already happened in ``main``; don't drop DNP parts a
+    # second time when the user asked for them with --include-dnp.
+    formatter = JLCPCBBOMFormatter(BOMExportConfig(include_dnp=True))
     print(formatter.format(items), end="")
 
 

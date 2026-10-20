@@ -46,13 +46,13 @@ from __future__ import annotations
 import heapq
 import math
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..layers import LayerStack
-from ..pairplan.gateway import Gateway, GatewaySite
+from ..pairplan.gateway import Gateway, GatewaySite, fans_couple_off_pitch
 from ..pairplan.gateway import gateway_anchor_point as _gateway_anchor
 from ..pairplan.outcome import (
     EXHAUSTED_SEARCH_REASONS,  # noqa: F401 -- re-exported (core, tests)
@@ -383,6 +383,60 @@ class _HybridParityCtx:
 #: Bounded retries of a pair search after a ``pair-partner-pad`` decline (#6839).
 _PARTNER_PAD_RETRIES = 4
 
+#: Issue #7597: perpendicular shifts (mm, tried smallest first, both signs)
+#: of ONE interior centerline segment after a ``pair-leg-blocked`` decline.
+#: The lattice can only place a coupled body on its node rows, which may sit
+#: a few microns too close to a foreign pad's own class clearance although
+#: the corridor holds a legal envelope (board 06 USB2_D: the D- leg 0.187 mm
+#: from J1.B8/B9/B12, 0.200 mm class, in a 1.4 mm gap between the J1 rows).
+_PAIR_NUDGE_STEPS = (0.025, 0.05, 0.1, 0.15, 0.2)
+
+
+def _shift_centerline_segment(points: list[Pt], i: int, delta: float) -> list[Pt] | None:
+    """Shift segment ``points[i]-points[i+1]`` sideways by ``delta`` (#7597).
+
+    The segment's line moves ``delta`` along its left normal and its two
+    vertices are re-intersected with the (unmoved) lines of the neighbouring
+    segments, so every direction in the polyline is preserved -- an
+    octilinear centerline stays octilinear.  Only interior segments move
+    (``1 <= i <= len - 3``): both end vertices sit on the pair-midpoint
+    stubs.  ``None`` when a neighbour is parallel (no intersection) or when
+    the shift would reverse or collapse any of the three affected segments.
+    """
+    n = len(points)
+    if not 1 <= i <= n - 3:
+        return None
+    a, b = points[i], points[i + 1]
+    seg_len = dist(a, b)
+    if seg_len <= 1e-9:
+        return None
+    ux, uy = (b[0] - a[0]) / seg_len, (b[1] - a[1]) / seg_len
+    ox, oy = -uy * delta, ux * delta
+    sa = (a[0] + ox, a[1] + oy)
+
+    def meet(p: Pt, q: Pt) -> Pt | None:
+        # Intersection of line p-q with the shifted line through sa (dir u).
+        dx, dy = q[0] - p[0], q[1] - p[1]
+        den = dx * uy - dy * ux
+        if abs(den) <= 1e-9:
+            return None
+        t = ((sa[0] - p[0]) * uy - (sa[1] - p[1]) * ux) / den
+        return (p[0] + t * dx, p[1] + t * dy)
+
+    na = meet(points[i - 1], a)
+    nb = meet(b, points[i + 2])
+    if na is None or nb is None:
+        return None
+    out = list(points)
+    out[i], out[i + 1] = na, nb
+    for j in (i - 1, i, i + 1):
+        old_d = (points[j + 1][0] - points[j][0], points[j + 1][1] - points[j][1])
+        new_d = (out[j + 1][0] - out[j][0], out[j + 1][1] - out[j][1])
+        if math.hypot(*new_d) <= 1e-6 or old_d[0] * new_d[0] + old_d[1] * new_d[1] <= 0.0:
+            return None
+    return out
+
+
 #: Issue #6975: in a parity-filtered pair search, a lattice step and the end
 #: stub it joins "reverse" when the cosine of their angle is below this --
 #: i.e. the path doubles back along (nearly) the same line.  Only a straight
@@ -699,13 +753,20 @@ class LatticePathfinder:
     def set_pad_class_clearances(self, values: list[float] | None) -> None:
         """Install (or clear) the per-pad net-class clearances (#6395).
 
-        ``values`` aligns with :attr:`pads`.  The search model does not read
-        them -- see :mod:`.class_pad_repair` for why the pair is enforced on
-        the negotiated copper instead -- so this never rebuilds the lattice.
+        ``values`` aligns with :attr:`pads`.  The search's keep-out rectangles
+        do not read them -- see :mod:`.class_pad_repair` for why the pair is
+        enforced on the negotiated copper instead -- but the exact-outline pad
+        test inside those rectangles does (issue #7503).  A change of values
+        after the static model was built rebuilds the pad masks only (never
+        the lattice); re-installing the same values is a no-op.
         """
         if values is not None and len(values) != len(self.pads):
             raise ValueError("pad_class_clearances must align with pads")
-        self.pad_class_clearances = list(values) if values is not None else None
+        new = list(values) if values is not None else None
+        changed = new != self.pad_class_clearances
+        self.pad_class_clearances = new
+        if changed and self._lattice is not None and self._obstacles is not None:
+            self._obstacles = self._make_obstacles(self._lattice)
 
     def set_keepouts(self, keepouts: LatticeKeepoutMask | None) -> None:
         """Install (or clear) the keepout rule-area mask (#4605).
@@ -771,15 +832,40 @@ class LatticePathfinder:
             return self._lattice
         self.lattice_builds += 1
         self._lattice = OctilinearLattice(self._bbox, self._refine_regions(), coarse=self.coarse)
-        self._obstacles = LatticeObstacleModel(
-            self._lattice,
+        self._obstacles = self._make_obstacles(self._lattice)
+        return self._lattice
+
+    def _make_obstacles(self, lattice: OctilinearLattice) -> LatticeObstacleModel:
+        return LatticeObstacleModel(
+            lattice,
             self.pads,
             [self._pad_layer_indices(p) for p in self.pads],
             self.num_layers,
             self._agent_radius,
             pad_extra=self._authored_pad_extra(),
+            pad_class_extra=self._class_outline_extra(),
         )
-        return self._lattice
+
+    def _class_outline_extra(self) -> list[float] | None:
+        """Per-pad class requirement above the base clearance (issue #7503).
+
+        The pad side of the KiCad pair rule (``pad_class_requirements``: pad
+        class, authored floor, base) minus the base clearance baked into the
+        agent radius.  It tightens only the exact-outline pad test, inside the
+        unchanged keep-out rectangle, so a point diagonal to a rounded corner
+        is released only when it clears the pad's class -- the gap the old
+        bounding square hid.  ``None`` when no pad classes are installed.
+        """
+        if self.pad_class_clearances is None:
+            return None
+        from .class_pad_repair import pad_class_requirements
+
+        reqs = pad_class_requirements(self)
+        if reqs is None:
+            return None
+        base = self.rules.trace_clearance
+        out = [max(0.0, r - base) for r in reqs]
+        return out if any(v > 0.0 for v in out) else None
 
     @property
     def obstacles(self) -> LatticeObstacleModel:
@@ -1833,7 +1919,7 @@ class LatticePathfinder:
                 continue
             rect = obstacles.pad_rects[idx]
             grown = (rect[0] - grow, rect[1] - grow, rect[2] + grow, rect[3] + grow)
-            if pt_in_rect(point, grown):
+            if pt_in_rect(point, grown) and obstacles.pad_keepout_hit(idx, point, point, grow):
                 return False
         # Issue #4602: a through-via must additionally keep the PAIR (HV)
         # requirement from foreign pads on every layer (``layer=None``) --
@@ -2855,6 +2941,12 @@ class LatticePathfinder:
         (:meth:`_pair_leg_clear`).  Measured only as a board-default track, a
         wide pair class (board 06rf's 0.275 mm USB3) could attach 0.0375 mm
         closer to a neighbouring pair's via than its copper allowed.
+
+        Issue #7597: foreign pads are held the same way -- the static pad
+        rects grown to the leg's true width/class, plus each pad's OWN class
+        clearance.  ``half <= 0`` is the legacy board-default probe and skips
+        both (no width to measure); every production caller passes the leg's
+        real half-width.
         """
         from ..pairplan.attach import dogleg_attach_candidates
         from .coupled import pads_block_segment_grown
@@ -2862,12 +2954,18 @@ class LatticePathfinder:
         if dist((pad.x, pad.y), target) <= 1e-9:
             return [(pad.x, pad.y)]
         blocker = ""
+        pad_extra = self._pair_leg_pad_extra(committed, half, clearance)
+        reqs = self._pair_pad_reqs() if half > 0.0 else None
         for poly in dogleg_attach_candidates((pad.x, pad.y), target):
             ok = True
             for a, b in zip(poly, poly[1:], strict=False):
                 if dist(a, b) <= 1e-9:
                     continue
-                if pads_block_segment_grown(self.obstacles, a, b, layer, pair_nets, 0.0):
+                if pads_block_segment_grown(self.obstacles, a, b, layer, pair_nets, pad_extra):
+                    blocker = "pad"
+                    ok = False
+                    break
+                if not self._pair_pad_class_clear(a, b, layer, net, pair_nets, half, reqs):
                     blocker = "pad"
                     ok = False
                     break
@@ -2892,6 +2990,54 @@ class LatticePathfinder:
         # ``pair-pad-attach`` decline says which check fired, and on what.
         self._attach_blocker = f"{pad.ref}.{pad.pin} on layer {layer}: {blocker}"
         return None
+
+    def _pair_leg_pad_extra(
+        self, committed: CommittedCopper, half: float, clearance: float | None
+    ) -> float:
+        """Growth of the static pad keep-outs for a leg of true ``half``/class (#7597).
+
+        The pad rects are sized for a board-default track (``agent_radius``),
+        so a wider or higher-clearance pair leg needs them grown by the
+        difference -- the same surcharge the single-ended legs use.  Only
+        designer-authored floors and #6489 growth are folded into the rects;
+        router net-class pad clearances are NOT (#6449) and are enforced by
+        :meth:`_pair_pad_class_clear`, because ``class_pad_repair`` never
+        moves pair legs.  Together the grown rect (leg side) and that check
+        (pad side) give ``max(leg class, pad class)``.  With a designer floor
+        the reach stacks ``pad_floor - base`` on top of ``leg_clr`` rather
+        than taking the max -- conservative, like the single-ended path.
+        ``half <= 0`` (legacy callers) adds nothing.
+        """
+        if half <= 0.0:
+            return 0.0
+        clr = committed.clearance if clearance is None else clearance
+        return max(0.0, half + clr - self._agent_radius)
+
+    def _pair_pad_class_clear(
+        self,
+        a: Pt,
+        b: Pt,
+        layer: int,
+        net: int,
+        pair_nets: set[int],
+        half: float,
+        reqs: list[float] | None,
+    ) -> bool:
+        """Leg ``a-b`` keeps every foreign pad's OWN net-class clearance (#7597).
+
+        Pair-owned copper is never moved by ``class_pad_repair``, so the pad
+        side of the rule is held up front, exactly as the gateway paths do.
+        Both pair nets are exempt: partner pads stay with the intra-pair gate.
+        """
+        return self._gateway_pad_class_clear(a, b, layer, net, half, reqs, pair_nets)
+
+    def _pair_pad_reqs(self) -> list[float] | None:
+        """Per-pad class requirements, or ``None`` when no classes are installed."""
+        if self.pad_class_clearances is None:
+            return None
+        from .class_pad_repair import pad_class_requirements
+
+        return pad_class_requirements(self)
 
     @staticmethod
     def _pair_leg_clear(
@@ -3159,16 +3305,29 @@ class LatticePathfinder:
         # next to that end)`` of the last ``pair-partner-pad`` decline.
         partner_fail: list[tuple[bool, Pt]] = []
 
-        def finish(result: _RouteResult) -> tuple[_PairResult | None, str]:
-            """Offset emission + verification of one fat centerline."""
+        def finish(
+            result: _RouteResult, nudged: list[Pt] | None = None
+        ) -> tuple[_PairResult | None, str]:
+            """Offset emission + verification of one fat centerline.
+
+            ``nudged`` (issue #7597) replaces the searched centerline with a
+            sideways-shifted copy (:func:`_shift_centerline_segment`).  It
+            left the fat search's envelope, so it is additionally held to the
+            board-edge boundary here; every other check below re-verifies the
+            emitted legs from scratch anyway.
+            """
             partner_fail.clear()
             if len(result.runs) != 1 or result.via_points:
                 return None, "pair-not-planar"  # defensive: vias are off
 
             layer, raw_pts, _widths = result.runs[0]
-            center = trim_end_reversals(raw_pts)
+            center = trim_end_reversals(raw_pts) if nudged is None else nudged
             if len(center) < 2:
                 return None, "pair-degenerate-centerline"
+            if nudged is not None:
+                for a, b in zip(center, center[1:], strict=False):
+                    if not self._escape_boundary.segment_clear(a, b, trace_w / 2.0 + half_pitch):
+                        return None, "pair-leg-blocked"
             plus = offset_polyline(center, +half_pitch)
             minus = offset_polyline(center, -half_pitch)
             if plus is None or minus is None:
@@ -3209,10 +3368,19 @@ class LatticePathfinder:
                 # copper -- measured as a board-default track, board 06rf's
                 # 0.275 mm USB3_RX1+ leg shipped 0.126 mm from USB3_TX1+'s
                 # gateway via (0.150 required).
+                leg_pad_extra = self._pair_leg_pad_extra(committed, trace_w / 2.0, leg_clr)
+                pad_reqs = self._pair_pad_reqs()
                 for a, b in zip(full, full[1:], strict=False):
                     if dist(a, b) <= 1e-9:
                         continue
-                    if pads_block_segment_grown(self.obstacles, a, b, layer, pair_nets, 0.0):
+                    # Issue #7597: foreign pads at the leg's TRUE width/class.
+                    if pads_block_segment_grown(
+                        self.obstacles, a, b, layer, pair_nets, leg_pad_extra
+                    ):
+                        return None, "pair-leg-blocked"
+                    if not self._pair_pad_class_clear(
+                        a, b, layer, net, pair_nets, trace_w / 2.0, pad_reqs
+                    ):
                         return None, "pair-leg-blocked"
                     if not committed.seg_clear(a, b, layer, net):
                         return None, "pair-leg-blocked"
@@ -3305,6 +3473,33 @@ class LatticePathfinder:
             runs = [(net, layer, full) for net, _nn, full in legs]
             return _PairResult(routes=routes, runs=runs, resources=result.resources), "ok"
 
+        def nudge(result: _RouteResult) -> _PairResult | None:
+            """Issue #7597: retry a ``pair-leg-blocked`` centerline shifted sideways.
+
+            The coupled body can only follow lattice node rows, and a row can
+            run a few microns inside a foreign pad's OWN class clearance (the
+            finish gate's true-width check) while the corridor around it has
+            room to spare.  Shift one interior segment at a time by
+            :data:`_PAIR_NUDGE_STEPS` (smallest first, both sides) and run the
+            unchanged finish gate on each candidate; the first that passes
+            ships.  Bounded: ``segments x 2 x len(steps)`` finish calls, and
+            only after a decline.  A centerline that needs two segments moved
+            still declines honestly.
+            """
+            if len(result.runs) != 1 or result.via_points:
+                return None
+            center = trim_end_reversals(result.runs[0][1])
+            for step in _PAIR_NUDGE_STEPS:
+                for i in range(1, len(center) - 2):
+                    for delta in (step, -step):
+                        shifted = _shift_centerline_segment(center, i, delta)
+                        if shifted is None:
+                            continue
+                        pres, _why = finish(result, shifted)
+                        if pres is not None:
+                            return pres
+            return None
+
         # Attempt each consistent parity through the FULL pipeline: a parity
         # whose shortest path emits degenerate/blocked legs must not doom the
         # pair when the other parity works.
@@ -3356,6 +3551,10 @@ class LatticePathfinder:
                 pres, finish_reason = finish(result)
                 if pres is not None:
                     return pres, "ok"
+                if finish_reason == "pair-leg-blocked":
+                    pres = nudge(result)
+                    if pres is not None:
+                        return pres, "ok"
                 reason = finish_reason
                 if finish_reason != "pair-partner-pad" or not partner_fail:
                     break
@@ -3370,7 +3569,14 @@ class LatticePathfinder:
     # -- fan-via terminal gateways (issue #6444) --------------------------------
 
     def _gateway_pad_class_clear(
-        self, a: Pt, b: Pt, layer: int | None, net: int, half: float, reqs: list[float] | None
+        self,
+        a: Pt,
+        b: Pt,
+        layer: int | None,
+        net: int,
+        half: float,
+        reqs: list[float] | None,
+        skip_nets: set[int] | None = None,
     ) -> bool:
         """True when ``a-b`` keeps every other-net pad's OWN class clearance.
 
@@ -3379,23 +3585,22 @@ class LatticePathfinder:
         which the post-route class-pad repair enforces only on single-ended
         copper.  Gateway copper is pair-owned and never moved, so it is held
         to the pad class here.  ``layer=None`` probes every layer (a via).
+        ``skip_nets`` replaces the single ``net`` exemption (a coupled pair
+        exempts both of its nets; the partner pads stay with the intra-pair
+        gate).
         """
         if reqs is None:
             return True
-        from .coupled import seg_rect_dist
-
         reach = half + max(reqs, default=0.0) + 0.5
         x0, x1 = min(a[0], b[0]) - reach, max(a[0], b[0]) + reach
         y0, y1 = min(a[1], b[1]) - reach, max(a[1], b[1]) + reach
         for idx in self.obstacles.pads_near(x0, y0, x1, y1):
             pad = self.pads[idx]
-            if pad.net == net:
+            if pad.net == net or (skip_nets is not None and pad.net in skip_nets):
                 continue
             if layer is not None and layer not in self.obstacles.pad_layer_indices[idx]:
                 continue
-            hw, hh = pad_half_extents(pad)
-            rect = (pad.x - hw, pad.y - hh, pad.x + hw, pad.y + hh)
-            if seg_rect_dist(a, b, rect) < half + reqs[idx] - 1e-6:
+            if self.obstacles.pad_centerline_gap(idx, a, b) < half + reqs[idx] - 1e-6:
                 return False
         return True
 
@@ -3452,6 +3657,7 @@ class LatticePathfinder:
         clr: float,
         committed: CommittedCopper,
         reqs: list[float] | None,
+        pitch: float | None = None,
     ) -> tuple[list[Pt], list[Pt]] | None:
         """Legality oracle for one gateway site (``gateway.enumerate_gateways``).
 
@@ -3459,8 +3665,11 @@ class LatticePathfinder:
         commit: P via, then N via (the via-to-via gap to P's), then P's fan
         (clear of N's via), then N's fan (clear of P's via and fan).  Via
         legality is :meth:`_via_ok_at` -- the negotiated-via rule, including
-        the fab tier's via-in-pad gate -- plus the pad class floor.  Returns
-        the two fan polylines, or ``None``.
+        the fab tier's via-in-pad gate -- plus the pad class floor.  With the
+        pair ``pitch``, the two legs must also not run side by side inside
+        the impedance rule's coupling window at another gap (issue #7503,
+        :func:`~kicad_tools.router.pairplan.gateway.fans_couple_off_pitch`).
+        Returns the two fan polylines, or ``None``.
         """
         via_r = self.rules.via_diameter / 2.0
         body = self._gateway_body_box(pad_p.ref)
@@ -3476,21 +3685,49 @@ class LatticePathfinder:
                 if not self._gateway_pad_class_clear(via, via, None, net, via_r, reqs):
                     return None
                 committed.add_via(via, net, clr)
-            fans: list[list[Pt]] = []
-            for pad, via in ((pad_p, site.via_p), (pad_n, site.via_n)):
-                accepted: list[Pt] | None = None
-                for axis_first in (False, True):
-                    poly = dogleg_points(pad.x, pad.y, via[0], via[1], axis_first=axis_first)
-                    if self._gateway_fan_ok(poly, pad_layer, pad.net, half, clr, committed, reqs):
-                        accepted = poly
-                        break
-                if accepted is None:
+            # Issue #7503: the two legs must not run side by side inside the
+            # impedance rule's coupling window at a gap other than the pair's
+            # (``fans_couple_off_pitch``).  Only that rejection moves on to
+            # the next dogleg; a fan that is simply illegal declines the site
+            # exactly as before, so no new gateway shape is admitted.
+            for fan_p in self._gateway_fan_options(
+                pad_p, site.via_p, pad_layer, half, clr, committed, reqs
+            ):
+                inner = committed.begin_trial()
+                coupled = False
+                try:
+                    committed.add_run(pad_layer, fan_p, pad_p.net, half, clr)
+                    for fan_n in self._gateway_fan_options(
+                        pad_n, site.via_n, pad_layer, half, clr, committed, reqs
+                    ):
+                        if pitch is None or not fans_couple_off_pitch(
+                            fan_p, fan_n, half=half, pitch=pitch
+                        ):
+                            return fan_p, fan_n
+                        coupled = True
+                finally:
+                    committed.rollback_trial(inner)
+                if not coupled:
                     return None
-                committed.add_run(pad_layer, accepted, pad.net, half, clr)
-                fans.append(accepted)
-            return fans[0], fans[1]
+            return None
         finally:
             committed.rollback_trial(mark)
+
+    def _gateway_fan_options(
+        self,
+        pad: Pad,
+        via: Pt,
+        pad_layer: int,
+        half: float,
+        clr: float,
+        committed: CommittedCopper,
+        reqs: list[float] | None,
+    ) -> Iterator[list[Pt]]:
+        """The legal pad -> via doglegs of one gateway fan, in try order."""
+        for axis_first in (False, True):
+            poly = dogleg_points(pad.x, pad.y, via[0], via[1], axis_first=axis_first)
+            if self._gateway_fan_ok(poly, pad_layer, pad.net, half, clr, committed, reqs):
+                yield poly
 
     def _gateway_body_box(self, ref: str | None) -> Rect | None:
         """Between-rows box a gateway via must stay OUT of, for part ``ref``.
@@ -3673,7 +3910,7 @@ class LatticePathfinder:
                     pad_layer: int = pad_layer,
                 ) -> tuple[list[Pt], list[Pt]] | None:
                     return self._gateway_site_fans(
-                        site, pad_p, pad_n, pad_layer, half, clr, committed, reqs
+                        site, pad_p, pad_n, pad_layer, half, clr, committed, reqs, pc.pitch
                     )
 
                 found, legal = enumerate_gateways(
@@ -3863,7 +4100,7 @@ class LatticePathfinder:
                     set(self._pad_layer_indices(pad_p)) & set(self._pad_layer_indices(pad_n))
                 )
                 fans = self._gateway_site_fans(
-                    g.site, pad_p, pad_n, pad_layer, half, clr, committed, reqs
+                    g.site, pad_p, pad_n, pad_layer, half, clr, committed, reqs, pc.pitch
                 )
                 if fans is None or (tuple(fans[0]), tuple(fans[1])) != (g.fan_p, g.fan_n):
                     return None, "pair-gateway-conflict"
