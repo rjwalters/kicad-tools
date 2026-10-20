@@ -19,7 +19,7 @@
 - [3b-2. Every daemon must export OTLP: `otlp_export` (Issue #11353)](#3b-2-every-daemon-must-export-otlp-otlp_export-issue-11353)
 - [3c. Operational signals from daemon loops (Issue #8860)](#3c-operational-signals-from-daemon-loops-issue-8860)
 - [3d. Agent telemetry relay (Issue #10964)](#3d-agent-telemetry-relay-issue-10964)
-- [3e. Alerts on loom-ui's Alerts page (Issue #11295)](#3e-alerts-on-loom-uis-alerts-page-issue-11295)
+- [3e. Alerts as `alert.transition` telemetry (Issues #11295, #12806)](#3e-alerts-as-alerttransition-telemetry-issues-11295-12806)
 - [4. The backend: deploy your own Cloudflare Worker](#4-the-backend-deploy-your-own-cloudflare-worker)
 - [5. Authenticated vs. public: two views, one redaction policy](#5-authenticated-vs-public-two-views-one-redaction-policy)
 - [5b. Doc-maintenance throughput (Guide, local-only, issue #6136)](#5b-doc-maintenance-throughput-guide-local-only-issue-6136)
@@ -1256,17 +1256,20 @@ A session that outlives the daemon that launched it (a sweep adopted after a
 restart) keeps a stale address and exports nothing until it is relaunched —
 unless something else now holds that address, as above.
 
-## 3e. Alerts on loom-ui's Alerts page (Issue #11295)
+## 3e. Alerts as `alert.transition` telemetry (Issues #11295, #12806)
 
-loom-ui is the alert hub for every repo. With the native ingest export
-configured (section 1), the daemon also posts its alerts to
-`POST {loom-ui}/api/alerts/external` (2AMLogic/loom-ui
-`docs/alerts/external.md`) — same ingest key, same host id as `source`, URL
-derived from `observability.endpoint` by replacing its `/ingest` path. No
-ingest config means the output is off. `LOOM_LOOM_UI_ALERTS=0` turns it off
-on a host that exports telemetry; `LOOM_LOOM_UI_ALERTS_URL` overrides the URL.
-The host id must be in loom-ui's `ALERTS_EXTERNAL_HOSTS` (else 403, logged
-and dropped).
+Every daemon alert is an `alert.transition` OTLP log record, emitted through
+the daemon's own OTLP exporter like every other fact (record reference:
+[`telemetry-schema.md` → `alert.transition`](telemetry-schema.md#alerttransition)).
+loom-ui reads them from SigNoz for its Alerts page (2AMLogic/loom-ui
+`docs/alerts/external.md` § "As telemetry (shadow)" is the schema). The daemon
+never calls the dashboard: before #12806 it POSTed these alerts to loom-ui's
+`/api/alerts/external` with the host ingest key, with the URL derived from the
+`/ingest` exporter config; that path and its `LOOM_LOOM_UI_ALERTS` /
+`LOOM_LOOM_UI_ALERTS_URL` settings are gone. No OTLP exporter means the output
+is off. `alert.source` is this host's id (the Resource's `host.id`), the rule
+and key are below, and `alert.observed_at` is when the daemon observed the
+transition.
 
 | Rule | From | Open / resolved |
 |---|---|---|
@@ -1287,21 +1290,28 @@ and dropped).
 | `install.<invariant>` (key = workspace root) | `install_self_check`, when enabled | violation standing after the tick / gone, or the check off |
 
 `tokens-zero-healthy` is not sent: loom-ui derives `provider-pool-exhausted`
-from the daemon's pool gauge itself. Delivery is a bounded FIFO drained by one
-task (open always before resolved): a 2xx is done, any other 4xx except 429 is
-dropped and logged, 429 / 5xx / network errors back off (5 s doubling to
-15 min, at most 20 tries). The watchdog posts synchronously (10 s bound) and
-keeps a `<sentinel>.loom-ui` record so an unanswered post retries next tick.
+from the daemon's pool gauge itself. Each transition is offered to the OTLP
+exporters' durable queue at once, in order (open always before resolved).
+While an alert holds, its `open` is re-sent every 6 hours (the schema asks for
+at least every 12, since loom-ui closes an incident unobserved for 24). The
+watchdog, a separate one-shot process that runs while the daemon is down,
+writes its record durably into its own OTLP queue
+(`.loom/logs/watchdog-alerts-ops-queue.N.jsonl` under the marker's
+`repo_root`, exported with that workspace's observability config), flushes it
+within 10 s, and keeps a `<sentinel>.alert` record of an exported `open`, so an
+unexported one retries next tick and a held one is re-sent every 6 hours.
 
 Level-triggered sources keep the incidents they hold open in
-`~/.loom/loom-ui-alerts/<scope>.json`, so a restarted daemon resolves one
+`~/.loom/loom-ui-alerts/<scope>.json` (the pre-#12806 directory name, kept so
+an upgraded daemon finds them), so a restarted daemon resolves one
 the previous process opened once it finds the condition gone, and keeps one
-open while its failure count (process memory) builds up again; a daemon
-that finds the output off removes those files. The single-key
-watches (safehouse, breaker, llm-monitor) send one `resolved` on their first
-healthy sample instead. Alerts raised before the output starts (credential
-preflight, the fleet-sync startup pass) wait in the outbox. llm-monitor's
-quota step-change alert is not in `ranking.json` yet, so it is not sent.
+open (and its heartbeat going) while its failure count (process memory)
+builds up again; a daemon that finds the output off removes those files. The
+single-key watches (safehouse, breaker, llm-monitor) send one `resolved` on
+their first healthy sample instead. Alerts raised before the output starts
+(credential preflight, the fleet-sync startup pass) are held (at most 256) and
+go out once the exporters are up. llm-monitor's quota step-change alert is not
+in `ranking.json` yet, so it is not sent.
 
 `fleet_alert` only runs when `autonomous.fleetAlert.enabled` is on (off by
 default here); the fleet defaults (fleet-gitops) are where to enable it.

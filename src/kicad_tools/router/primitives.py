@@ -18,8 +18,12 @@ import random
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from .layers import Layer
+
+if TYPE_CHECKING:
+    from .tuning_pattern import TuningPattern
 
 # Issue #3272: Deterministic UUID mode.  When :func:`enable_deterministic_uuids`
 # is called the per-element UUID emitted by :meth:`Segment.to_sexp` and
@@ -356,6 +360,10 @@ class Segment:
     layer: Layer
     net: int = 0
     net_name: str = ""
+    # Issue #7521: the KiCad tuning pattern (skew-compensation bump) that owns
+    # this segment, if any.  :meth:`Route.to_sexp` writes one ``(generated
+    # ...)`` block per pattern naming its segments.  Not part of equality.
+    tuning_pattern: "TuningPattern | None" = field(default=None, compare=False, repr=False)
 
     @property
     def start(self) -> tuple[float, float]:
@@ -367,8 +375,11 @@ class Segment:
         """Return the end point as a tuple (x2, y2)."""
         return (self.x2, self.y2)
 
-    def to_sexp(self, name_only: bool = False) -> str:
+    def to_sexp(self, name_only: bool = False, *, uuid: str | None = None) -> str:
         """Generate KiCad S-expression.
+
+        Issue #7521: ``uuid`` pins the emitted uuid (a tuning pattern names
+        its member segments by uuid); ``None`` mints a fresh one.
 
         Issue #4416: when ``name_only`` is True and :attr:`net_name` is
         known, the net reference is emitted as ``(net "name")`` to match a
@@ -416,7 +427,7 @@ class Segment:
 \t\t(end {self.x2:.4f} {self.y2:.4f})
 \t\t(width {_fmt(self.width)})
 \t\t(layer "{self.layer.kicad_name}")
-\t\t(uuid "{_make_uuid()}")
+\t\t(uuid "{uuid or _make_uuid()}")
 \t\t(net {net_ref})
 \t)"""
 
@@ -448,12 +459,26 @@ class Route:
         Issue #4416: ``name_only`` is threaded to every segment/via emitter
         so a route appended to a KiCad-10 name-based board keeps that
         board's ``(net "name")`` dialect.
+
+        Issue #7521: segments tagged with a tuning pattern
+        (``Segment.tuning_pattern``) are followed by one KiCad ``(generated
+        ...)`` tuning-pattern block per pattern, whose ``members`` are the
+        uuids just written for exactly those segments.
         """
         parts = []
+        patterns: dict[int, tuple[TuningPattern, list[str]]] = {}
         for seg in self.segments:
-            parts.append(seg.to_sexp(name_only=name_only))
+            pattern = seg.tuning_pattern
+            if pattern is None:
+                parts.append(seg.to_sexp(name_only=name_only))
+                continue
+            seg_uuid = _make_uuid()
+            parts.append(seg.to_sexp(name_only=name_only, uuid=seg_uuid))
+            patterns.setdefault(id(pattern), (pattern, []))[1].append(seg_uuid)
         for via in self.vias:
             parts.append(via.to_sexp(name_only=name_only))
+        for pattern, members in patterns.values():
+            parts.append(pattern.to_sexp(members, _make_uuid()))
         return "\n\t".join(parts)
 
     def copy_geometry(self) -> "Route":
