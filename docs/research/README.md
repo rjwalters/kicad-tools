@@ -62,6 +62,7 @@ Measured experiments on `kct route`; several record negative results.
 | [Expand, route, shrink](expand-route-shrink-experiment.md) | Routing an expanded placement then shrinking it back |
 | [Diff-pair bench, phase 0](diffpair-bench-phase0.md) | Diff-pair benchmark baseline |
 | [Diff-pair primitive pairing spec](diffpair-primitive-pairing-spec.md) | Black-box, probe-only spec of how kicad-cli pairs P/N primitives into coupled length (Issue #7565) |
+| [Tuning-pattern uncoupled exclusion](kicad-tuning-pattern-uncoupled-exclusion.md) | Black-box probes: a KiCad tuning pattern drops the bump from the uncoupled figure but not the partner beside it, unless that partner span is a member too (Issue #7632, Q31) |
 | [Diff-pair skew compensation](diffpair-skew-compensation.md) | Sourced skew limits and uncoupled-length budgets for the diff-pair skew fixer |
 | [Bundle crossing report](bundle-crossing-report.md) | Measured hit and false-alarm counts |
 | [Pad-budget via footprint](pad-budget-via-footprint-6415.md) | Via-footprint charging on board 05 |
