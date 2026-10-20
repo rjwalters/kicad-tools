@@ -1830,7 +1830,9 @@ def retune_pair_skew(routed_path: Path, sidecar_path: Path) -> list[str]:
         except RetuneError as exc:
             print(f"   not tuned ({exc})")
             return []
-        os.replace(out, routed_path)
+        # shutil.move, not os.replace: scratch (/tmp) and the output dir can be
+        # different filesystems on CI (EXDEV).
+        shutil.move(str(out), str(routed_path))
     for t in report.targets:
         print(
             f"   {t.name}: skew {t.before_skew_mm:.3f} -> {t.after_skew_mm:.3f} mm "
