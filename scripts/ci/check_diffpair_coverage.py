@@ -164,9 +164,11 @@ DIFFPAIR_FIXTURE_KEY = "boards/06-diffpair-test/regression-fixture/diffpair_test
 # declared pairs started here; the recipe's final skew-tuning pass (#7548)
 # cleared four, and fusing the pair legs' grid-step segments before it (#7548)
 # cleared four more (MIPI_CLK, PCIE_RX and USB3_RX2 now measure 0.287, 0.450
-# and 0.450 mm).  Two remain, tracked in #7548: MIPI_D0 and USB2_D.  The
-# tuner's post-insertion intra-pair clearance check rolls back both
-# (coupling-preserving tuning in general is #6447).
+# and 0.450 mm).  USB2_D (1.896 mm after #7491 coupled it) now tunes within
+# its 1.000 mm budget on the quantized-length / end-anchored tuner (#7548), so
+# its entry is gone.  One remains, tracked in #7548: MIPI_D0.  The tuner's
+# post-insertion intra-pair clearance check rolls it back (coupling-preserving
+# tuning in general is #6447).
 DIFFPAIR_SKEW_TRACKER = 7548
 #
 # Allowed by identity, not by count (#7359, #7270 Q3 ruling): only these
@@ -176,7 +178,6 @@ DIFFPAIR_SKEW_TRACKER = 7548
 DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
     # Seed-42 re-route, PR #7570 / #7491 (2026-10-20): skew vs max_skew_mm.
     ("diffpair_length_skew", "MIPI_D0+/MIPI_D0-"): DIFFPAIR_SKEW_TRACKER,  # 2.320 / 0.300
-    ("diffpair_length_skew", "USB2_D+/USB2_D-"): DIFFPAIR_SKEW_TRACKER,  # 1.896 / 1.000
 }
 
 #: Every board key that carries an identity allowance (Issue #7367).  A key
