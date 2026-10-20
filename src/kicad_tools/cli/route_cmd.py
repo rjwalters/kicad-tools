@@ -19318,13 +19318,13 @@ def _route_parser() -> argparse.ArgumentParser:
     # Issue #4433: opt-in HARD per-net avoid_layers.
     parser.add_argument(
         "--fallback-bidirectional",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=False,
         help=(
-            "Issue #6527 (experimental, default off): let the C++ backend's "
-            "Python fallback use route_auto (bidirectional A* for paths of "
-            ">= bidirectional_threshold cells, one-way retry sharing one "
-            "deadline) instead of the one-way route()."
+            "Issue #6527 (default off): let the C++ backend's Python fallback "
+            "use route_auto (bidirectional A* with a one-way retry sharing one "
+            "deadline) instead of the one-way route().  Diff-pair legs and "
+            "match-group members always stay one-way."
         ),
     )
     parser.add_argument(

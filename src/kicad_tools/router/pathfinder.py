@@ -6716,6 +6716,19 @@ class Router:
                         own_gate=own_gate,
                     )
 
+            # Issue #6527: one drained frontier without a meeting point ends
+            # the search.  Every cell that frontier can reach is closed, so the
+            # other frontier can only meet it by reaching one of those cells,
+            # which (steps being symmetric) would already have let the drained
+            # side reach the other pad.  Running the survivor on to its own
+            # drain or the iteration cap cost board 05's three failing
+            # PWM_C / EN_B / EN_C requests 100-120 s each (vs ~1 s with this
+            # exit, same routed copper).  ``route_auto`` retries one-way, so a
+            # search the step asymmetries (own-pad gate, pad-exit rules) would
+            # have rescued is still searched.
+            if meeting_point is None and (not forward_open or not backward_open):
+                break
+
             # Early termination: if we have a meeting point and both queues
             # have higher f-scores than the best path, we're done
             if meeting_point is not None:
@@ -6734,8 +6747,10 @@ class Router:
                 end,
             )
 
-        # Issue #6527: only drained frontiers prove unreachability (#6098).
-        self.last_route_exhausted = not forward_open and not backward_open and not bidi_deadline_hit
+        # Issue #6527: a drained frontier proves unreachability (#6098), as a
+        # drained open set does in ``_route_impl``; a deadline or the
+        # iteration cap does not.
+        self.last_route_exhausted = not (forward_open and backward_open) and not bidi_deadline_hit
         return None
 
     def _expand_bidirectional_neighbors(
@@ -7290,6 +7305,7 @@ class Router:
         weight: float = 1.0,
         per_net_timeout: float | None = None,
         extra_goal_cells: set[tuple[int, int, int]] | None = None,
+        threshold: int | None = None,
     ) -> Route | None:
         """Route using automatic algorithm selection.
 
@@ -7313,6 +7329,11 @@ class Router:
             weight: A* weight factor
             per_net_timeout: Optional shared wall-clock budget in seconds
             extra_goal_cells: Optional Steiner tree goal cells
+            threshold: Manhattan distance (grid cells) from which the
+                bidirectional search runs; ``None`` uses
+                ``rules.bidirectional_threshold``.  The C++ backend's Python
+                fallback passes ``rules.fallback_bidirectional_threshold``
+                (Issue #6527).
 
         Returns:
             Route if path found, None otherwise
@@ -7336,7 +7357,9 @@ class Router:
 
         remaining = per_net_timeout
         # Use bidirectional for paths exceeding threshold (and no Steiner goals)
-        if manhattan_dist >= self.rules.bidirectional_threshold and not extra_goal_cells:
+        if threshold is None:
+            threshold = self.rules.bidirectional_threshold
+        if manhattan_dist >= threshold and not extra_goal_cells:
             t0 = time.monotonic()
             result = self.route_bidirectional(
                 start,
