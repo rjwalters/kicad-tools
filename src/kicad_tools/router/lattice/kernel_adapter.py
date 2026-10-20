@@ -56,9 +56,11 @@ from .geometry import Pt
 
 __all__ = [
     "LATTICE_CLEARANCE_EPSILON_MM",
+    "KPad",
     "LatticeProbe",
     "gap",
     "outline_edge",
+    "pad_outline",
     "satisfies",
     "site",
     "trace",

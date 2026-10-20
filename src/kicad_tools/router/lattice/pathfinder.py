@@ -46,13 +46,13 @@ from __future__ import annotations
 import heapq
 import math
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..layers import LayerStack
-from ..pairplan.gateway import Gateway, GatewaySite
+from ..pairplan.gateway import Gateway, GatewaySite, fans_couple_off_pitch
 from ..pairplan.gateway import gateway_anchor_point as _gateway_anchor
 from ..pairplan.outcome import (
     EXHAUSTED_SEARCH_REASONS,  # noqa: F401 -- re-exported (core, tests)
@@ -699,13 +699,20 @@ class LatticePathfinder:
     def set_pad_class_clearances(self, values: list[float] | None) -> None:
         """Install (or clear) the per-pad net-class clearances (#6395).
 
-        ``values`` aligns with :attr:`pads`.  The search model does not read
-        them -- see :mod:`.class_pad_repair` for why the pair is enforced on
-        the negotiated copper instead -- so this never rebuilds the lattice.
+        ``values`` aligns with :attr:`pads`.  The search's keep-out rectangles
+        do not read them -- see :mod:`.class_pad_repair` for why the pair is
+        enforced on the negotiated copper instead -- but the exact-outline pad
+        test inside those rectangles does (issue #7503).  A change of values
+        after the static model was built rebuilds the pad masks only (never
+        the lattice); re-installing the same values is a no-op.
         """
         if values is not None and len(values) != len(self.pads):
             raise ValueError("pad_class_clearances must align with pads")
-        self.pad_class_clearances = list(values) if values is not None else None
+        new = list(values) if values is not None else None
+        changed = new != self.pad_class_clearances
+        self.pad_class_clearances = new
+        if changed and self._lattice is not None and self._obstacles is not None:
+            self._obstacles = self._make_obstacles(self._lattice)
 
     def set_keepouts(self, keepouts: LatticeKeepoutMask | None) -> None:
         """Install (or clear) the keepout rule-area mask (#4605).
@@ -771,15 +778,40 @@ class LatticePathfinder:
             return self._lattice
         self.lattice_builds += 1
         self._lattice = OctilinearLattice(self._bbox, self._refine_regions(), coarse=self.coarse)
-        self._obstacles = LatticeObstacleModel(
-            self._lattice,
+        self._obstacles = self._make_obstacles(self._lattice)
+        return self._lattice
+
+    def _make_obstacles(self, lattice: OctilinearLattice) -> LatticeObstacleModel:
+        return LatticeObstacleModel(
+            lattice,
             self.pads,
             [self._pad_layer_indices(p) for p in self.pads],
             self.num_layers,
             self._agent_radius,
             pad_extra=self._authored_pad_extra(),
+            pad_class_extra=self._class_outline_extra(),
         )
-        return self._lattice
+
+    def _class_outline_extra(self) -> list[float] | None:
+        """Per-pad class requirement above the base clearance (issue #7503).
+
+        The pad side of the KiCad pair rule (``pad_class_requirements``: pad
+        class, authored floor, base) minus the base clearance baked into the
+        agent radius.  It tightens only the exact-outline pad test, inside the
+        unchanged keep-out rectangle, so a point diagonal to a rounded corner
+        is released only when it clears the pad's class -- the gap the old
+        bounding square hid.  ``None`` when no pad classes are installed.
+        """
+        if self.pad_class_clearances is None:
+            return None
+        from .class_pad_repair import pad_class_requirements
+
+        reqs = pad_class_requirements(self)
+        if reqs is None:
+            return None
+        base = self.rules.trace_clearance
+        out = [max(0.0, r - base) for r in reqs]
+        return out if any(v > 0.0 for v in out) else None
 
     @property
     def obstacles(self) -> LatticeObstacleModel:
@@ -1833,7 +1865,7 @@ class LatticePathfinder:
                 continue
             rect = obstacles.pad_rects[idx]
             grown = (rect[0] - grow, rect[1] - grow, rect[2] + grow, rect[3] + grow)
-            if pt_in_rect(point, grown):
+            if pt_in_rect(point, grown) and obstacles.pad_keepout_hit(idx, point, point, grow):
                 return False
         # Issue #4602: a through-via must additionally keep the PAIR (HV)
         # requirement from foreign pads on every layer (``layer=None``) --
@@ -3382,8 +3414,6 @@ class LatticePathfinder:
         """
         if reqs is None:
             return True
-        from .coupled import seg_rect_dist
-
         reach = half + max(reqs, default=0.0) + 0.5
         x0, x1 = min(a[0], b[0]) - reach, max(a[0], b[0]) + reach
         y0, y1 = min(a[1], b[1]) - reach, max(a[1], b[1]) + reach
@@ -3393,9 +3423,7 @@ class LatticePathfinder:
                 continue
             if layer is not None and layer not in self.obstacles.pad_layer_indices[idx]:
                 continue
-            hw, hh = pad_half_extents(pad)
-            rect = (pad.x - hw, pad.y - hh, pad.x + hw, pad.y + hh)
-            if seg_rect_dist(a, b, rect) < half + reqs[idx] - 1e-6:
+            if self.obstacles.pad_centerline_gap(idx, a, b) < half + reqs[idx] - 1e-6:
                 return False
         return True
 
@@ -3452,6 +3480,7 @@ class LatticePathfinder:
         clr: float,
         committed: CommittedCopper,
         reqs: list[float] | None,
+        pitch: float | None = None,
     ) -> tuple[list[Pt], list[Pt]] | None:
         """Legality oracle for one gateway site (``gateway.enumerate_gateways``).
 
@@ -3459,8 +3488,11 @@ class LatticePathfinder:
         commit: P via, then N via (the via-to-via gap to P's), then P's fan
         (clear of N's via), then N's fan (clear of P's via and fan).  Via
         legality is :meth:`_via_ok_at` -- the negotiated-via rule, including
-        the fab tier's via-in-pad gate -- plus the pad class floor.  Returns
-        the two fan polylines, or ``None``.
+        the fab tier's via-in-pad gate -- plus the pad class floor.  With the
+        pair ``pitch``, the two legs must also not run side by side inside
+        the impedance rule's coupling window at another gap (issue #7503,
+        :func:`~kicad_tools.router.pairplan.gateway.fans_couple_off_pitch`).
+        Returns the two fan polylines, or ``None``.
         """
         via_r = self.rules.via_diameter / 2.0
         body = self._gateway_body_box(pad_p.ref)
@@ -3476,21 +3508,49 @@ class LatticePathfinder:
                 if not self._gateway_pad_class_clear(via, via, None, net, via_r, reqs):
                     return None
                 committed.add_via(via, net, clr)
-            fans: list[list[Pt]] = []
-            for pad, via in ((pad_p, site.via_p), (pad_n, site.via_n)):
-                accepted: list[Pt] | None = None
-                for axis_first in (False, True):
-                    poly = dogleg_points(pad.x, pad.y, via[0], via[1], axis_first=axis_first)
-                    if self._gateway_fan_ok(poly, pad_layer, pad.net, half, clr, committed, reqs):
-                        accepted = poly
-                        break
-                if accepted is None:
+            # Issue #7503: the two legs must not run side by side inside the
+            # impedance rule's coupling window at a gap other than the pair's
+            # (``fans_couple_off_pitch``).  Only that rejection moves on to
+            # the next dogleg; a fan that is simply illegal declines the site
+            # exactly as before, so no new gateway shape is admitted.
+            for fan_p in self._gateway_fan_options(
+                pad_p, site.via_p, pad_layer, half, clr, committed, reqs
+            ):
+                inner = committed.begin_trial()
+                coupled = False
+                try:
+                    committed.add_run(pad_layer, fan_p, pad_p.net, half, clr)
+                    for fan_n in self._gateway_fan_options(
+                        pad_n, site.via_n, pad_layer, half, clr, committed, reqs
+                    ):
+                        if pitch is None or not fans_couple_off_pitch(
+                            fan_p, fan_n, half=half, pitch=pitch
+                        ):
+                            return fan_p, fan_n
+                        coupled = True
+                finally:
+                    committed.rollback_trial(inner)
+                if not coupled:
                     return None
-                committed.add_run(pad_layer, accepted, pad.net, half, clr)
-                fans.append(accepted)
-            return fans[0], fans[1]
+            return None
         finally:
             committed.rollback_trial(mark)
+
+    def _gateway_fan_options(
+        self,
+        pad: Pad,
+        via: Pt,
+        pad_layer: int,
+        half: float,
+        clr: float,
+        committed: CommittedCopper,
+        reqs: list[float] | None,
+    ) -> Iterator[list[Pt]]:
+        """The legal pad -> via doglegs of one gateway fan, in try order."""
+        for axis_first in (False, True):
+            poly = dogleg_points(pad.x, pad.y, via[0], via[1], axis_first=axis_first)
+            if self._gateway_fan_ok(poly, pad_layer, pad.net, half, clr, committed, reqs):
+                yield poly
 
     def _gateway_body_box(self, ref: str | None) -> Rect | None:
         """Between-rows box a gateway via must stay OUT of, for part ``ref``.
@@ -3673,7 +3733,7 @@ class LatticePathfinder:
                     pad_layer: int = pad_layer,
                 ) -> tuple[list[Pt], list[Pt]] | None:
                     return self._gateway_site_fans(
-                        site, pad_p, pad_n, pad_layer, half, clr, committed, reqs
+                        site, pad_p, pad_n, pad_layer, half, clr, committed, reqs, pc.pitch
                     )
 
                 found, legal = enumerate_gateways(
@@ -3863,7 +3923,7 @@ class LatticePathfinder:
                     set(self._pad_layer_indices(pad_p)) & set(self._pad_layer_indices(pad_n))
                 )
                 fans = self._gateway_site_fans(
-                    g.site, pad_p, pad_n, pad_layer, half, clr, committed, reqs
+                    g.site, pad_p, pad_n, pad_layer, half, clr, committed, reqs, pc.pitch
                 )
                 if fans is None or (tuple(fans[0]), tuple(fans[1])) != (g.fan_p, g.fan_n):
                     return None, "pair-gateway-conflict"
