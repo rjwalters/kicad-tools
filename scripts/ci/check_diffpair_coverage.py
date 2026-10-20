@@ -142,7 +142,9 @@ DIFFPAIR_FIXTURE_KEY = "boards/06-diffpair-test/regression-fixture/diffpair_test
 # the residual impedance set to USB3_TX2- alone (USB3_RX1+/- now clear) and
 # leaves USB2_D+/USB2_D- 0.091 mm over its uncoupled-length limit (12.791 vs
 # 12.700 mm).  The floor is the intended behaviour; the USB2_D pair needs to
-# route coupled, tracked in #7401.
+# route coupled, tracked in #7401.  kicad-cli flags USB2_D too, so it is not a
+# kct artefact; kct's figure for it is not KiCad's to the micron (a known
+# divergence on board 06's router copper, Issue #7565).
 #
 # Issue #7367 -- the ``diffpair_length_skew`` pairs, keyed by pair, not by a
 # count.  Until #7367 the gate let every skew/continuity finding through by
