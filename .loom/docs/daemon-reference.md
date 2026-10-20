@@ -6283,8 +6283,8 @@ What now catches it without the check:
   start.
 - **The daemon says so at startup.** A daemon whose config enables the work
   finder but whose environment switches it off logs `work_finder: OFF on a host
-  whose config enables it` at **ERROR**, opens a critical loom-ui alert (rule
-  `work_finder_forced_off`, resolved by the next start that runs the work
+  whose config enables it` at **ERROR**, opens a critical alert (an
+  `alert.transition` record, rule `work_finder_forced_off`, resolved by the next start that runs the work
   finder), and reports `work_finder.forced_off: true` on its `daemon.start`
   telemetry record, so `topic = daemon.start` in SigNoz shows every host's
   startup verdict. A host that turns the work finder off in config (a captain)

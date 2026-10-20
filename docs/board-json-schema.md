@@ -167,6 +167,16 @@ project ZIP, outer archive and existing gallery report remain unchanged.
 Missing, stale or incomplete packages fail verification; this mode does not
 repair or regenerate them.
 
+The verification receipt is a per-run diagnostic, not committed evidence
+(Issue #7536). Its `engine` block names the verifying checkout (`commit`,
+`dirty`, `source_digest`), and its BOM detail depends on the host's parts
+cache, so the same board verified at another commit or on another host gives a
+different receipt. The repository gitignores `boards/*/output/readiness-verification/`.
+The one exception is board 03, which promotes its receipt into
+`output/readiness.json` and hash-binds the evidence copies under that directory;
+those bound copies stay tracked, and `kct readiness --verify` rewrites them
+byte-for-byte (`tests/test_readiness_verification_receipts_7536.py`).
+
 `--generate` explicitly requests generic package generation. It prepares and
 checks an isolated candidate, then publishes only if every gate passes. A
 failed attempt leaves the previous release intact and writes diagnostics under

@@ -77,8 +77,19 @@ def snap_to_grid(value: float, grid: float = DEFAULT_GRID) -> float:
 
     Returns:
         Snapped coordinate value, rounded to 2 decimal places
+
+    Coordinates are stored at 0.01 mm resolution, so on a grid whose points
+    need more decimals (e.g. 0.635 mm: 120.015) the stored grid point is the
+    2-decimal rounding of the exact one.  A value that is already such a
+    stored point is returned unchanged, keeping snapping idempotent: a pin at
+    120.01 must not re-snap to 120.02 and miss the wire drawn to it
+    (issue #7510).  Points of grids like 1.27, 2.54, 0.25 or 0.1 mm are exact
+    at 2 decimals, so for them this changes nothing.
     """
     snapped = round(value / grid) * grid
+    stored = round(value, 2)
+    if abs(value - stored) < 1e-9 and abs(stored - snapped) <= 0.005 + 1e-9:
+        return stored
     return round(snapped, 2)
 
 

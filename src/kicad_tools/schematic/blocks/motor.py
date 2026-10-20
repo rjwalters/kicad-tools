@@ -3,7 +3,7 @@
 import warnings
 from typing import TYPE_CHECKING
 
-from ..grid import snap_point
+from ..grid import DEFAULT_GRID, snap_point
 from ._pins import first_pin_position, output_pin_position
 from ._stub_helpers import _emit_pin_net_stub
 from .base import CircuitBlock
@@ -1849,8 +1849,12 @@ class BackToBackFETPair(CircuitBlock):
 
         # The wire ends snap to the schematic grid, but the midpoint of two
         # source pins is generally off-grid.  Snap the exposed port the same
-        # way so it lands on the wire end instead of missing it (#7507).
-        kelvin_port = snap_point(kelvin_port)
+        # way (to ``sch.grid``, #7510) so it lands on the wire end instead of
+        # missing it (#7507).
+        grid = getattr(sch, "grid", DEFAULT_GRID)
+        kelvin_port = snap_point(
+            kelvin_port, grid if isinstance(grid, (int, float)) else DEFAULT_GRID
+        )
 
         # Optional Kelvin label
         if kelvin_label is not None:

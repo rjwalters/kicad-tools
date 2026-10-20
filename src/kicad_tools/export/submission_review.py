@@ -63,6 +63,7 @@ from .submission_plan import (
     _inventory,
     _json,
     _load_json,
+    _open_nofollow,
     _path,
     _paths,
     _read,
@@ -223,7 +224,7 @@ def submit_review(
 
     lock = parent / ("." + destination.name + ".review-lock")
     try:
-        lock_fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+        lock_fd = _open_nofollow(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     except OSError as exc:
         raise ReviewError("Destination publication is already claimed") from exc
     try:
@@ -473,7 +474,7 @@ def render_review_page(
 
     lock = parent / ("." + destination.name + ".page-lock")
     try:
-        lock_fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+        lock_fd = _open_nofollow(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     except OSError as exc:
         raise ReviewError("Destination publication is already claimed") from exc
     stage: Path | None = None

@@ -50,8 +50,8 @@
     "kicad_tools_version": "0.23.0",
     "dirty": true,
     "manufacturer": "jlcpcb-tier1",
-    "commit": "2771ae5ebcb032037d86f58efbf0d3c5ddfe96a0",
-    "source_digest": "d34a55c20f384a648ba6ace827ba515311fecf04981001df5750ae7645770aac",
+    "commit": "b6c3f42ad04ba59a30e7a443ac13c1ee6a1c8aa0",
+    "source_digest": "3b9ca254cf04d20a73a7a8ebab4f6bff3a3e1e2f522733913ef0bb8d332782b4",
     "kicad_cli_version": "10.0.6",
     "rules_digest": "83203df1a4fb03d0c65545b18101d56917c87eab667234b3657e62c362b1c2a1"
   },
@@ -192,6 +192,6 @@
   "supplemental_factory_evidence": {
     "source_commit": "63813f418c55b68f53a31aaa6c80037563c6d5bf",
     "report": "output/manufacturing/check-report.json",
-    "binding_note": "Additive bindings for exact-source factory/process inputs. Original corrected verifier receipt preserved in output/readiness-verification/readiness.json. Verdict and all verifier checks are unchanged."
+    "binding_note": "Additive bindings for exact-source factory/process inputs. This file is the kct readiness --verify receipt plus these bindings; the receipt itself (output/readiness-verification/readiness.json) is a local diagnostic and is not committed (Issue #7536). Verdict and all verifier checks are unchanged."
   }
 }

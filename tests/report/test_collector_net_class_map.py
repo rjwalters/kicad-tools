@@ -9,7 +9,8 @@
 These tests assert:
 
 * ``resolve_committed_net_class_map`` returns the committed sidecar for
-  boards 02/03/06/07 and ``None`` for the no-sidecar boards (00/01/04/05).
+  boards 00/02/03/04/05/06/07 and ``None`` for a no-sidecar board (01).
+  Boards 00/04/05 gained sidecars in #7206 to declare ``target_ampacity``.
 * ``ReportDataCollector`` forwards ``net_class_map_path`` so the DRC snapshot
   evaluates the sidecar-gated families (board 07: passed=False, blocking > 0).
 * A no-sidecar board keeps the graceful no-op behavior (no exception, no
@@ -32,8 +33,7 @@ from kicad_tools.report.net_class_map import (
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 BOARD_07_PCB = REPO_ROOT / "boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb"
-BOARD_04_PCB = REPO_ROOT / "boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb"
-BOARD_05_PCB = REPO_ROOT / "boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb"
+BOARD_01_PCB = REPO_ROOT / "boards/01-voltage-divider/output/voltage_divider_routed.kicad_pcb"
 
 # Sidecar-gated rule families that no-op without a net_class_map (#2684, #4008).
 GATED_RULE_FAMILIES = {
@@ -62,10 +62,22 @@ def _collect_drc(pcb_path: Path, sidecar: Path | None, tmp_path: Path) -> dict:
 
 @pytest.mark.parametrize(
     "board_dir",
-    ["02-charlieplex-led", "03-usb-joystick", "06-diffpair-test", "07-matchgroup-test"],
+    [
+        "00-simple-led",
+        "02-charlieplex-led",
+        "03-usb-joystick",
+        "04-stm32-devboard",
+        "05-bldc-motor-controller",
+        "06-diffpair-test",
+        "07-matchgroup-test",
+    ],
 )
 def test_resolver_finds_committed_sidecar(board_dir: str) -> None:
-    """Boards 02/03/06/07 all commit a net_class_map.json sidecar."""
+    """These boards all commit a net_class_map.json sidecar.
+
+    00/04/05 joined in #7206: their sidecars map project.kct's declared
+    supply currents onto nets as ``target_ampacity``.
+    """
     output = REPO_ROOT / "boards" / board_dir / "output"
     routed = next(output.glob("*_routed.kicad_pcb"), None)
     if routed is None:
@@ -81,12 +93,7 @@ def test_resolver_finds_committed_sidecar(board_dir: str) -> None:
 
 @pytest.mark.parametrize(
     "board_dir",
-    [
-        "00-simple-led",
-        "01-voltage-divider",
-        "04-stm32-devboard",
-        "05-bldc-motor-controller",
-    ],
+    ["01-voltage-divider"],
 )
 def test_resolver_returns_none_without_sidecar(board_dir: str) -> None:
     """No-sidecar boards resolve to None (graceful no-op contract, AC 4)."""
@@ -99,6 +106,11 @@ def test_resolver_returns_none_without_sidecar(board_dir: str) -> None:
     if routed is None:
         pytest.skip(f"{board_dir} has no PCB checked in")
 
+    # Guard the premise itself (#7539): if this board gains a sidecar, move
+    # it to the committed-sidecar list instead of letting this test go red.
+    assert not (routed.parent / SIDECAR_FILENAME).exists(), (
+        f"{board_dir} now commits {SIDECAR_FILENAME}; pick a no-sidecar board"
+    )
     assert resolve_committed_net_class_map(routed) is None
 
 
@@ -187,7 +199,7 @@ def test_board_07_no_op_without_sidecar(tmp_path: Path) -> None:
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("pcb_path", [BOARD_04_PCB, BOARD_05_PCB])
+@pytest.mark.parametrize("pcb_path", [BOARD_01_PCB])
 def test_no_sidecar_board_graceful(pcb_path: Path, tmp_path: Path) -> None:
     """A board with no committed sidecar produces a DRC snapshot with no
     sidecar-gated families and no exception (AC 4, regression)."""
