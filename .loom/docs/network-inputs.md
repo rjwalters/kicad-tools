@@ -79,7 +79,7 @@ rg -n 'Command::new\("curl"\)' loom-daemon/src -g '!*tests*'
 rg -ln 'reqwest::Client|Client::builder' loom-daemon/src -g '!*tests*'
 # observability/exporter.rs, observability/ops/quota/zai.rs, signoz_read.rs,
 # forge_events.rs, jev_merge_risk.rs, worker_spawn/egress_proxy/server.rs,
-# loom_ui_alerts/ (via observability/request_headers.rs), observability/otlp/
+# observability/otlp/
 
 # Sweep 6: no HTTP framework, no other HTTP client crate
 rg -n 'axum|ureq|isahc|hyper' loom-daemon/Cargo.toml        # no hits
@@ -152,7 +152,7 @@ holds.
 | `/ingest` `host_id` echo | `observability/exporter.rs` `check_host_identity` | The only field of the ack still parsed. A mismatch logs one WARN and sets `HostIdStatus`, shown in `loom-daemon status` / `health` (`observability_host_id_mismatch`). It never changes the export result or any dispatch decision. Goes away with the `https` exporter (#11712) |
 | OTLP exporter and its responses | `observability/otlp/{mod,transport}.rs` | Response policy keeps counts (`rejectedLogRecords` etc.) for loss accounting; receiver text is never copied. Telemetry delivery only |
 | Native `/ingest` batch and `queue.snapshot` | `observability/{exporter,queue_snapshot,sender}.rs` | Outbound telemetry |
-| loom-ui alerts | `loom_ui_alerts/` (`post`, `post_blocking`, `outbox`), `fleet_sync/loom_ui.rs`, `safehouse/loom_ui_watch.rs` | `POST {loom-ui}/api/alerts/external`. A 2xx is delivered, other 4xx are dropped and logged, 429/5xx are retried with backoff. The response never reaches a decision. Off with `LOOM_LOOM_UI_ALERTS=0` or without ingest config |
+| Alerts (`alert.transition`) | `alerts/` (`post`), `watchdog/loom_ui.rs`, `observability/standalone_ops.rs` (`deliver`) | Outbound telemetry only (#12806): OTLP log records through the OTLP exporter above (the watchdog through its own durable queue). Nothing is read back; the daemon no longer calls loom-ui's `/api/alerts/external` |
 | Safehouse narration (outbound) | `safehouse.rs` `spawn_sink` | Sweep lifecycle sent to the room. Failures degrade to a `warn!`; "Loom never blocks a sweep on safehouse". Removal is #11112; the inbound half is rows 9-10 |
 | SigNoz reads | `signoz_read.rs`, `telemetry_replay*.rs`, `cli/telemetry_replay.rs`, `config_resolver.rs` (endpoint resolve only) | `POST /v1/query` to the telemetry reader, driven only by the `telemetry-replay` CLI. No daemon loop calls it |
 | Z.ai quota | `observability/ops/quota/zai.rs`, `observability/collector/zai_accounts.rs` | `GET api.z.ai/.../quota/limit`, cached per seat; the result becomes `tokens.snapshot` account rows and pool gauges. Unknown stays unknown, never `0` |
