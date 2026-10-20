@@ -32,7 +32,7 @@ _None._
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-_None._
+- **#7491**: router: C++ search finds no USB3_RX1- path on board 06 once USB2_D routes coupled (blocks #7401)
 
 ## In Progress
 
@@ -52,11 +52,11 @@ Issues currently being built (`loom:building`).
 
 PRs waiting on Judge (`loom:review-requested`).
 
+- **#7628**: fix: tune board 07's four skewed diff pairs and stop the skew gate vetoing inherited near-misses
 - **#7639**: fix: list each placement of a repeated sheet in the BOM
-- **#7642**: fix: share one library-flag power-symbol predicate across BOM, footprint gate, parser and fix-annotation
 - **#7643**: fix(schema): resolve sub-sheets against the containing sheet's folder (#7614)
-- **#7644**: refactor(route): build route_all_negotiated kwargs once for all seven call sites
 - **#7646**: test(router): close the corridor under the extra-parity wall fixture
+- **#7653**: chore(deps): Bump certifi from 2025.11.12 to 2026.10.19
 
 ## Approved (Awaiting Merge)
 
@@ -93,7 +93,6 @@ Issues carrying `loom:curated`.
 - **#7557**: Board 07: TMDS_D0_N pad U4.B2 has no legal exit; needs placement rework or joint TMDS escape-corridor allocation (#3673) *(curated)*
 - **#7573**: router: board 05 +5V/GND pour completeness depends on where nTRIP lands (C10 stitch sites unreserved) *(curated)*
 - **#7580**: router: finish diff-pair via-count parity (continuation of #7093) *(curated)*
-- **#7583**: board 06: impedance finding on USB2_D- once the native pad test applies per-pad classes (follow-up to #7569) *(curated)*
 - **#7611**: Board 07 fixture: DDR_DATA_BYTE_0 and MIPI_CSI_LANES group length skew over tolerance *(curated)*
 - **#7612**: Board 07 fixture: 4 diff pairs fail skew with no_suitable_segment (TMDS_D2, MIPI_DAT1, MIPI_DAT0, MIPI_CLK) *(curated)*
 - **#7614**: `schema.hierarchy.build_hierarchy` resolves sub-sheet files against the process working directory, then the root's directory, never the parent sheet's directory (wrong sheet read, nested sheets dropped silently) *(curated)*
@@ -128,11 +127,11 @@ Issues carrying `loom:curated`.
 | Operator merge-risk holds | 0 |
 | Very important | 1 |
 | Important | 4 |
-| Ready (`loom:issue`) | 0 |
+| Ready (`loom:issue`) | 1 |
 | In Progress (`loom:building`) | 9 |
 | PRs awaiting review | 5 |
 | Approved PRs awaiting merge | 0 |
-| Curated | 34 |
+| Curated | 33 |
 | Architect / Hermit proposals | 5 |
 | Active epics | 7 |
 <!-- guide:plan-body:end -->
