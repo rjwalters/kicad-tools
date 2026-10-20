@@ -139,7 +139,8 @@ rules).
 Per the curator note on issue #2724, the initial DRC error count is
 empirical: route the board, count errors, add ~20% headroom, then
 record in `.github/routed-drc-tolerance.yml`.  Phase 3N (#2726) will
-tighten iteratively as upstream router improvements land.
+tighten iteratively as upstream router improvements land.  (#7367
+replaced that count with an identity allowance; see "CI Gate" below.)
 
 ## Current targeted repair (2026-09-09)
 
@@ -691,13 +692,19 @@ The gate is a sibling of the `diffpair-routing-regression` job (board
 
 1. Re-routes board 07 from scratch with
    `python boards/07-matchgroup-test/generate_design.py --step route --seed 42`.
-2. Asserts the resulting DRC error count is within the per-board
-   allowlist in `.github/routed-drc-tolerance.yml` (currently 8:
-   4x `diffpair_length_skew` + 4x `diffpair_routing_continuity`;
-   ratcheted 35 -> 14 -> 9 -> 8 -- see the board-07 comment block in
-   the yml.  Per the #4008 unified-counter change, both gate arms
-   compare the identical advisory-filtered *blocking* count).
-   <!-- kct:doc-pin drc-tolerance boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb = 8 -->
+2. Asserts every blocking DRC finding is listed **by identity** (rule +
+   pair, net or match group, each with an open tracking issue) in
+   `MATCHGROUP_FIXTURE_ALLOWED_FINDINGS` / `MATCHGROUP_ALLOWED_GROUPS` in
+   `scripts/ci/check_matchgroup_coverage.py`, and that every listed entry
+   still fires (a fixed finding fails the gate as stale until its entry
+   is deleted).  The board has no entry in
+   `.github/routed-drc-tolerance.yml`, so the count of blocking findings
+   *outside* the allowance must be 0
+   ([#7367](https://github.com/rjwalters/kicad-tools/issues/7367); the
+   old count, ratcheted 35 -> 14 -> 9 -> 8, let a new finding hide
+   behind a fixed one).  Advisory `connectivity` is not blocking; reach
+   is gated by item 4.
+   <!-- kct:doc-pin drc-tolerance boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb = 0 -->
    The claim above is machine-checked by `kct check --only doc_drift`
    (issue #4540): ratcheting the yml without updating this README
    trips `doc_drift_stale_pin`.
@@ -772,10 +779,13 @@ with that artifact under #6730 / #7283, not by the gate.
   message names the open nets.  Measure which routing input changed
   (class geometry in the sidecar, per-net copper widths) before
   lowering the contract.
-- **`DRC regression on re-routed ...`** -- the routing algorithm
-  produced more errors than the allowlist value.  Fix the router
-  regression OR (with reviewer sign-off) raise the allowlist value
-  in the same PR.
+- **`Errors outside the identity allowance`** / **`DRC errors
+  detected on re-routed ...`** -- the routing algorithm produced a
+  finding on a rule/identity the allowance does not list.  Fix the
+  router regression; an accepted, separately-tracked defect is listed
+  by identity with its open tracker, never by count.
+- **`Stale identity allowance`** -- a listed finding no longer fires:
+  delete its entry.
 - **Job times out (> 10 min)** -- routing wall-clock crept above
   the budget.  File a follow-up to move the gate to a nightly
   schedule per Epic #2661's runtime guidance.
