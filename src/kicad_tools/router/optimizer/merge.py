@@ -163,14 +163,23 @@ def merge_collinear_same_width(
 
 
 def _chain_is_straight(chain, tolerance_mm: float) -> bool:
-    """True when every joint of ``chain`` lies on the line first-start -> last-end."""
+    """True when every joint of ``chain`` lies on the line first-start -> last-end.
+
+    Joints must also advance monotonically along that line, strictly between
+    the chain's start and end: a collinear fold-back would otherwise fuse and
+    drop the copper it doubles back over (Issue #7605).
+    """
     first, last = chain[0], chain[-1]
     dx, dy = last.x2 - first.x1, last.y2 - first.y1
     span = math.hypot(dx, dy)
     if span == 0:
         return False
-    return all(
-        abs((s.x2 - first.x1) * dy - (s.y2 - first.y1) * dx) / span <= tolerance_mm
-        and (s.x2 - first.x1) * dx + (s.y2 - first.y1) * dy > 0
-        for s in chain[:-1]
-    )
+    prev_dot = 0.0
+    for s in chain[:-1]:
+        if abs((s.x2 - first.x1) * dy - (s.y2 - first.y1) * dx) / span > tolerance_mm:
+            return False
+        dot = (s.x2 - first.x1) * dx + (s.y2 - first.y1) * dy
+        if dot <= 0 or dot >= span * span or dot < prev_dot:
+            return False
+        prev_dot = dot
+    return True

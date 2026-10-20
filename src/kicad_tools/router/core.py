@@ -21238,15 +21238,57 @@ class Autorouter:
         # net (unrouted ones included) gets an entry.
         net_clearance_mm: dict[int, float] = {}
         _clearance_names: dict[int, str] = {}
+        # Issue #7594: names are resolved from the routes first.  Pour /
+        # auto-skipped nets (board 07's GND, +3V3, +3V3_A, ...) are absent
+        # from ``net_names`` and their pads are neutralised to net 0, so the
+        # only carrier of their name is their preserved Route.  Without it
+        # those ids fell to the 0.15 mm Default class although the class map
+        # puts them in AUX (0.175 mm), which ``kct check`` and kicad-cli
+        # enforce.
+        for _rid, _route in routes_by_net.items():
+            if _rid and _route.net_name:
+                _clearance_names.setdefault(_rid, _route.net_name)
         for _pad in self.pads.values():
-            _clearance_names.setdefault(_pad.net, getattr(_pad, "net_name", "") or "")
+            # Net 0 is no-net copper and always takes the Default class.  A
+            # neutralised pour pad still carries its old name ("GND"), so
+            # taking net 0's name from whichever such pad iterates first
+            # would make its class depend on pad order.
+            if _pad.net:
+                _clearance_names.setdefault(_pad.net, getattr(_pad, "net_name", "") or "")
+        _clearance_names.setdefault(0, "")
         _default_class = (getattr(self, "net_class_map", None) or {}).get("Default")
         _default_class_mm = float(getattr(_default_class, "clearance", 0.0) or 0.0)
         if _default_class_mm <= 0.0:
             _default_class_mm = float(self.rules.trace_clearance)
+        # Issue #7594: a net whose class is declared only in the project's
+        # ``.kicad_pro`` (e.g. GND/+3V3 in AUX) has no ``net_class_map`` entry,
+        # but the loader stores its class clearance in
+        # ``rules.net_clearance_floors`` -- the value ``kct check`` and
+        # kicad-cli use.  Take the larger so the tuner never falls back to
+        # Default for a net the authored source holds to a stricter class.
+        _authored_floors = getattr(self.rules, "net_clearance_floors", None) or {}
         for _nid in set(self.net_names) | set(routes_by_net) | set(_clearance_names):
+            if not _nid:
+                net_clearance_mm[_nid] = _default_class_mm
+                continue
             _c = self._net_class_clearance_mm(_nid, _clearance_names.get(_nid, ""))
+            _c = max(_c, float(_authored_floors.get(_nid, 0.0) or 0.0))
             net_clearance_mm[_nid] = _c if _c > 0.0 else _default_class_mm
+
+        # Issue #7594: a neutralised pour / auto-skipped pad sits on net 0
+        # (Default above) but keeps its net name and still reads as that
+        # net's copper in the output board, so it is held to the class of
+        # its retained name -- and to its own authored floor -- exactly as
+        # ``_pad_class_clearances`` and ``authored_clearance`` resolve it.
+        # Keyed per pad because net 0 cannot carry one class for all of them.
+        # Copper with neither a name nor an authored floor stays Default.
+        pad_floor_mm: dict[int, float] = {}
+        for _pad in self.pads.values():
+            _pf = float(getattr(_pad, "authored_clearance", 0.0) or 0.0)
+            if not _pad.net:
+                _pf = max(_pf, self._net_class_clearance_mm(0, getattr(_pad, "net_name", "") or ""))
+            if _pf > 0.0:
+                pad_floor_mm[id(_pad)] = _pf
 
         if engage not in ("length_critical", "checker_limit"):
             raise ValueError(f"unknown match-group engage policy: {engage!r}")
@@ -21264,6 +21306,7 @@ class Autorouter:
             group_via_clearance_mm = via_clearance_mm
             group_pad_clearance_mm = pad_clearance_mm
             group_net_clearance_mm: dict[int, float] | None = None
+            group_pad_floor_mm: dict[int, float] | None = None
 
             net_class = self._resolve_net_class_for_group(group)
             if net_class is not None:
@@ -21290,6 +21333,7 @@ class Autorouter:
                 # The relaxed floor is this group's half of the rule only;
                 # KiCad holds each neighbour to max(own, neighbour class).
                 group_net_clearance_mm = net_clearance_mm
+                group_pad_floor_mm = pad_floor_mm
                 tolerance_mm = net_class.effective_length_match_tolerance(0.5)
                 # Issue #6443: floored like the routed gap.
                 intra_pair_clearance_mm = self._pair_gap_mm(net_class)
@@ -21392,6 +21436,7 @@ class Autorouter:
                     pads_by_net=pads_by_net,
                     pad_clearance_mm=group_pad_clearance_mm,
                     net_clearance_mm=group_net_clearance_mm,
+                    pad_floor_mm=group_pad_floor_mm,
                     board_thickness_mm=board_thickness_mm,
                     num_copper_layers=num_layers,
                     blind_buried_supported=blind_buried_supported,
