@@ -703,6 +703,11 @@ def declare_ampacity_targets(output_dir: Path) -> None:
     """
     import json
 
+    # Issue #7539: runs right after route_pcb, before anything else is
+    # guaranteed to have created output_dir (a stubbed or partial route never
+    # writes the routed PCB), so create it rather than masking the
+    # route_success fast-fail gate's message with an ENOENT.
+    output_dir.mkdir(parents=True, exist_ok=True)
     sidecar = output_dir / "net_class_map.json"
     data = json.loads(sidecar.read_text()) if sidecar.exists() else {}
     for net, amps in AMPACITY_TARGETS_A.items():
