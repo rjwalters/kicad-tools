@@ -178,6 +178,11 @@ _FallbackLegs = dict[str, tuple["_RouteResult | None", str]]
 # :attr:`LatticePathfinder.pair_length_measure` (a standard 1.6 mm board).
 _DEFAULT_VIA_LENGTH_MM = 1.6
 
+#: How far from its start / end pad a crossing :class:`LayerMirror` leg may
+#: still lay copper on its end layer (issue #7093): room to escape the pad
+#: and reach a via site, never a planar way between the two pads.
+_CROSSING_LAUNCH_MM = 1.5
+
 
 def _default_pair_length(route: Route) -> float:
     """Track length plus one board thickness per (through) via, in mm."""
@@ -200,12 +205,22 @@ class LayerMirror:
     * ``layers``: the only layers the leg may lay copper on (a via may still
       step over any other layer -- every lattice via is a through via);
     * ``planar``: the partner never changes layer, so neither may this leg.
+    * ``crossing``: the leg lays copper on ``layers`` only, except within
+      :data:`_CROSSING_LAUNCH_MM` of its start or end pad, and a via lands
+      back on a layer outside ``layers`` only within that radius of the end
+      pad.  ``LayerMirror`` otherwise bounds layers, not via counts: a mirror
+      of an ``a -> b -> a`` partner over ``{a, b}`` comes back planar on
+      ``a`` whenever ``a`` has a way through.
+      ``LayerMirror(a, a, {b}, False, crossing=True)`` changes layer at least
+      twice unless the two pads' launch radii touch (the caller still checks
+      the via count).
     """
 
     start: int
     end: int
     layers: frozenset[int]
     planar: bool
+    crossing: bool = False
 
 
 def _layer_sequence(result: _RouteResult) -> tuple[int, ...]:
@@ -231,6 +246,21 @@ def _mirror_of(result: _RouteResult) -> LayerMirror | None:
     if not seq:
         return None
     return LayerMirror(seq[0], seq[-1], frozenset(seq), len(seq) == 1)
+
+
+def _crossing_mirror(start: int, end: int, layers: frozenset[int]) -> LayerMirror | None:
+    """The crossing :class:`LayerMirror` of an ``a -> ... -> a`` leg (#7093).
+
+    ``None`` unless the leg starts and ends on one layer and lays copper on
+    some other layer: the copy then leaves ``a`` by a via near its start pad,
+    runs on the other layers and comes back to ``a`` by a via near its end
+    pad -- not the planar route an exact mirror over ``{a, b}`` falls back to
+    whenever ``a`` has a way through.
+    """
+    body = frozenset(layers - {start})
+    if start != end or not body:
+        return None
+    return LayerMirror(start, end, body, False, crossing=True)
 
 
 @dataclass(frozen=True)
@@ -579,6 +609,14 @@ class LatticePathfinder:
         self.hybrid_parity: bool = True
         self._hybrid_parity_ctx: list[_HybridParityCtx] = []
         self.hybrid_parity_log: dict[object, str] = {}
+        # Issue #7093: a pair whose two nets end with unequal via counts
+        # because of their single-ended EXTRA-pad attachments (a USB-C
+        # receptacle's crossing A/B rows) is offered a mirrored extra by
+        # :meth:`_extra_parity_pass` once the board is finished.  Outcome per
+        # ``(P net, N net)`` in ``extra_parity_log``; ``extra_parity`` False
+        # skips the pass (copper exactly as before).
+        self.extra_parity: bool = True
+        self.extra_parity_log: dict[tuple[int, int], str] = {}
         # Issue #4355: immovable copper from NON-listed nets (the preserved
         # ``router.existing_routes``), pre-processed into per-segment seed
         # tuples ``(layer_idx, a, b, net, half_width, clearance)`` plus via
@@ -2251,6 +2289,17 @@ class LatticePathfinder:
         def h(key: NodeKey) -> float:
             return dist(lattice.node_point(key), end_pt)
 
+        start_pt = (start.x, start.y)
+
+        def near_end(key: NodeKey) -> bool:
+            """Within a crossing mirror's launch radius of the end pad (#7093)."""
+            return dist(lattice.node_point(key), end_pt) <= _CROSSING_LAUNCH_MM + 1e-9
+
+        def crossing_launch(key: NodeKey) -> bool:
+            """Within a crossing mirror's launch radius of either pad (#7093)."""
+            pt = lattice.node_point(key)
+            return min(dist(pt, start_pt), dist(pt, end_pt)) <= _CROSSING_LAUNCH_MM + 1e-9
+
         g_score: dict[_State, float] = {}
         came: dict[_State, tuple[_State, str]] = {}
         # Issue #6957: the via sites already on each state's best path, as a
@@ -2329,7 +2378,12 @@ class LatticePathfinder:
                     came[_GOAL] = (state, "arrive")
                     heapq.heappush(heap, (total, counter, _GOAL))
                     counter += 1
+            # Issue #7093: a crossing mirror lays copper off its layers only
+            # to launch from / land at its pads.
+            launch_only = mirror is not None and mirror.crossing and layer not in mirror.layers
             for nbr, elen in lattice.adj.get(key, ()):
+                if launch_only and not crossing_launch(nbr):
+                    continue
                 step_dir: Pt | None = None
                 if parity_ends:
                     step_dir = _unit_step(lattice.node_point(key), lattice.node_point(nbr))
@@ -2459,7 +2513,14 @@ class LatticePathfinder:
                         # a 4-layer board instead of being stranded on the one
                         # outer layer its pads escaped onto.
                         while 0 <= nl < self.num_layers and (
-                            nl in hard_avoided or (mirror is not None and nl not in mirror.layers)
+                            nl in hard_avoided
+                            or (
+                                mirror is not None
+                                and nl not in mirror.layers
+                                # A crossing mirror lands back on its end
+                                # layer near its end pad only (issue #7093).
+                                and not (mirror.crossing and near_end(key))
+                            )
                         ):
                             if nl not in hard_avoided:
                                 # Issue #7093: a mirrored leg steps over a
@@ -4461,6 +4522,176 @@ class LatticePathfinder:
                 f"{lens[0]:.1f}/{lens[1]:.1f} mm; no other copper moved"
             )
 
+    def _route_end_layer(self, route: Route, pad: Pad) -> int | None:
+        """The copper layer ``route`` meets ``pad`` on (issue #7093).
+
+        The layer of the segment end nearest the pad centre; ``None`` for a
+        route without segments.
+        """
+        best: tuple[float, int] | None = None
+        for seg in route.segments:
+            try:
+                layer = self.layer_stack.layer_enum_to_index(seg.layer)
+            except Exception:
+                continue
+            for x, y in ((seg.x1, seg.y1), (seg.x2, seg.y2)):
+                d = math.hypot(x - pad.x, y - pad.y)
+                if best is None or d < best[0] - 1e-12:
+                    best = (d, layer)
+        return None if best is None else best[1]
+
+    def _extra_mirror(self, route: Route, start: Pad, end: Pad) -> LayerMirror | None:
+        """The :class:`LayerMirror` that copies an extra's layer changes (#7093).
+
+        No via: planar on its one layer.  Vias between two pads on the same
+        layer: the crossing mirror (:func:`_crossing_mirror`), since an exact
+        one over ``{a, b}`` would come back planar wherever ``a`` has a way
+        through.  Otherwise the plain start/end/layers mirror.  The caller
+        still checks the via count of what comes back.
+        """
+        a = self._route_end_layer(route, start)
+        b = self._route_end_layer(route, end)
+        if a is None or b is None:
+            return None
+        layers: set[int] = set()
+        for seg in route.segments:
+            if math.hypot(seg.x2 - seg.x1, seg.y2 - seg.y1) <= 1e-9:
+                continue
+            try:
+                layers.add(self.layer_stack.layer_enum_to_index(seg.layer))
+            except Exception:
+                continue
+        if not route.vias:
+            return LayerMirror(a, a, frozenset({a}), True) if a == b else None
+        if a == b:
+            return _crossing_mirror(a, b, frozenset(layers))
+        return LayerMirror(a, b, frozenset(layers | {a, b}), False)
+
+    def _extra_parity_pass(
+        self,
+        routes: dict[object, Route],
+        connections: list[Connection],
+        coupled: list[CoupledConnection],
+    ) -> None:
+        """Match a pair's extra-pad attachments' via counts in place (#7093).
+
+        An engaged pair's extra same-net pads (a USB-C receptacle's second
+        A/B row) are attached by single-ended connections, so nothing kept P
+        and N on the same layer changes there: on board 06rf the ``USB2_D``
+        rows cross under J1 and only ``USB2_D-`` dropped through B.Cu,
+        leaving the pair at 2 / 4 vias although its coupled run is 2 / 2.
+
+        Runs once, after the hybrid parity pass.  For each pair whose two
+        nets' routed via totals differ and that has extras on BOTH nets,
+        every (moved extra, kept extra) of opposite nets is tried in turn:
+        the moved extra is re-searched against every other route of the
+        board (hard obstacles at their own class clearance) under the kept
+        extra's layer changes (:meth:`_extra_mirror`; the crossing form for
+        an ``a -> b -> a`` extra).  A result is kept only when it
+
+        * makes the two nets' via totals equal,
+        * passes the search's own self-DRC gate (:meth:`_search_single`),
+        * and is no longer than the longer of the extra it replaces and the
+          kept extra, plus :data:`_PARITY_LENGTH_TOLERANCE_MM` (pair length
+          measure).
+
+        Among those the shortest wins; ties keep the earlier.  Only that one
+        extra's copper can change, so no other route, routed count or pair
+        moves.  A pair with no fitting extra keeps its copper (logged in
+        :attr:`extra_parity_log`) and is still reported by the end-of-run
+        via audit.  Board 06rf's ``USB2_D`` is such a pair: its two J1 extras
+        cross, so ``USB2_D+`` copying the ``USB2_D-`` hop comes back planar
+        (the pads' launch radii touch) and ``USB2_D-`` has no planar way past
+        ``USB2_D+``.
+        """
+        if not self.extra_parity or not coupled:
+            return
+        measure = self.pair_length_measure or _default_pair_length
+        classes: dict[object, object | None] = {c[0]: c[3] for c in connections}
+        for pc in coupled:
+            for pol in ("P", "N"):
+                classes[(pc.key, pol)] = pc.net_class
+        by_key = {c[0]: c for c in connections}
+        seen: set[tuple[int, int]] = set()
+        for pc in coupled:
+            p_net, n_net = pc.pad_p_a.net, pc.pad_n_a.net
+            if p_net is None or n_net is None or (p_net, n_net) in seen:
+                continue
+            seen.add((p_net, n_net))
+            totals = {p_net: 0, n_net: 0}
+            for route in routes.values():
+                if route.net in totals:
+                    totals[route.net] += len(route.vias)
+            if totals[p_net] == totals[n_net]:
+                continue
+            extras: dict[int, list[Connection]] = {p_net: [], n_net: []}
+            for key, conn in by_key.items():
+                if (
+                    isinstance(key, tuple)
+                    and len(key) == 2
+                    and key[0] in extras
+                    and isinstance(key[1], int)
+                    and key in routes
+                ):
+                    extras[key[0]].append(conn)
+            if not extras[p_net] or not extras[n_net]:
+                continue
+            before = (totals[p_net], totals[n_net])
+            best: tuple[float, Connection, Route] | None = None
+            for moved_net, kept_net in ((p_net, n_net), (n_net, p_net)):
+                for moved in extras[moved_net]:
+                    old = routes[moved[0]]
+                    need = totals[kept_net] - (totals[moved_net] - len(old.vias))
+                    if need < 0 or need == len(old.vias):
+                        continue
+                    committed: CommittedCopper | None = None
+                    for kept in extras[kept_net]:
+                        kept_route = routes[kept[0]]
+                        mirror = self._extra_mirror(kept_route, kept[1], kept[2])
+                        if mirror is None:
+                            continue
+                        if committed is None:
+                            # Every other route of the board, at its own class.
+                            committed = self._fresh_committed()
+                            for rkey, route in routes.items():
+                                if rkey != moved[0]:
+                                    self._commit_route_copper(route, classes.get(rkey), committed)
+                        res, _why = self._search_single(
+                            moved,
+                            committed=committed,
+                            history=PhysicalHistory(),
+                            present=1.0,
+                            escape_plan={},
+                            mirror=mirror,
+                        )
+                        if res is None or len(res.route.vias) != need:
+                            continue
+                        length = measure(res.route)
+                        bound = max(measure(old), measure(kept_route))
+                        if length > bound + _PARITY_LENGTH_TOLERANCE_MM + 1e-9:
+                            continue
+                        if best is None or length < best[0] - 1e-9:
+                            best = (length, moved, res.route)
+            names = f"{pc.pad_p_a.net_name}/{pc.pad_n_a.net_name}"
+            if best is None:
+                self.extra_parity_log[(p_net, n_net)] = (
+                    f"{names} vias {before[0]}/{before[1]}: no extra-pad attachment "
+                    "could copy its partner's layer changes on the finished board; kept"
+                )
+                continue
+            length, moved, route = best
+            routes[moved[0]] = route
+            after = {p_net: 0, n_net: 0}
+            for r in routes.values():
+                if r.net in after:
+                    after[r.net] += len(r.vias)
+            self.extra_parity_log[(p_net, n_net)] = (
+                f"{names} vias {before[0]}/{before[1]} -> {after[p_net]}/{after[n_net]}: "
+                f"extra {moved[2].ref}.{moved[2].pin}->{moved[1].ref}.{moved[1].pin} "
+                f"re-routed on its partner's layer changes ({length:.2f} mm); "
+                "no other copper moved"
+            )
+
     def _commit_route_copper(
         self, route: Route, net_class: object | None, committed: CommittedCopper
     ) -> None:
@@ -5527,10 +5758,14 @@ class LatticePathfinder:
         """
         self._hybrid_parity_ctx = []
         self.hybrid_parity_log = {}
+        self.extra_parity_log = {}
         result = self._route_netset_gateways(connections, **kwargs)
         deadline = kwargs.get("deadline")
+        coupled = list(kwargs.get("coupled") or [])
         if not result[1].deadline_hit and (deadline is None or time.monotonic() < deadline):
-            self._hybrid_parity_pass(result[0], connections, list(kwargs.get("coupled") or []))
+            self._hybrid_parity_pass(result[0], connections, coupled)
+        if not result[1].deadline_hit and (deadline is None or time.monotonic() < deadline):
+            self._extra_parity_pass(result[0], connections, coupled)
         self._hybrid_parity_ctx = []
         return result
 
