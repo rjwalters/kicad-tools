@@ -227,11 +227,26 @@ def _no_network(monkeypatch):
     monkeypatch.setattr(socket.socket, "connect_ex", blocked)
 
 
+# The only fixture files ``Fixtures`` copies and tools may read. Hashing a glob
+# would also pick up sidecars other workers or KiCad create (e.g. a gitignored
+# ``test_project.kicad_prl``) and flake under xdist (#7588).
+_FIXTURE_EXTS = ("kicad_pcb", "kicad_sch", "kicad_pro")
+
+
 def _fixture_hashes() -> dict[str, str]:
-    return {
-        p.name: hashlib.sha256(p.read_bytes()).hexdigest()
-        for p in sorted(FIXTURES.glob("test_project.*"))
-    }
+    hashes: dict[str, str] = {}
+    for ext in _FIXTURE_EXTS:
+        p = FIXTURES / f"test_project.{ext}"
+        if p.is_file():
+            hashes[p.name] = hashlib.sha256(p.read_bytes()).hexdigest()
+    return hashes
+
+
+def _describe_fixture_diff(before: dict[str, str], after: dict[str, str]) -> str:
+    added = sorted(set(after) - set(before))
+    removed = sorted(set(before) - set(after))
+    changed = sorted(n for n in set(before) & set(after) if before[n] != after[n])
+    return f"added={added} removed={removed} changed={changed}"
 
 
 def _need_kicad_cli() -> None:
@@ -271,4 +286,7 @@ def test_tool_smoke(name, tmp_path):
         assert result.get("success", True) is True and not result.get("error"), (
             f"{name} failed: {result.get('error')!r}"
         )
-    assert _fixture_hashes() == before, f"{name} modified the checked-in fixtures"
+    after = _fixture_hashes()
+    assert after == before, (
+        f"{name} modified the checked-in fixtures: {_describe_fixture_diff(before, after)}"
+    )
