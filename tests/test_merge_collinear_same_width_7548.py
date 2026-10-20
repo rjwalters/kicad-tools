@@ -90,3 +90,37 @@ def test_only_listed_nets_and_never_escape_routes():
     assert len(a.segments) == 1
     assert len(b.segments) == 50
     assert len(esc.segments) == 50
+
+
+def _total_length(route):
+    return sum(((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2) ** 0.5 for s in route.segments)
+
+
+def test_keeps_a_collinear_fold_back_and_its_copper_issue_7605():
+    route = _route([_seg(0, 0, 1, 0), _seg(1, 0, 2, 0), _seg(2, 0, 1.5, 0)])
+    merge_collinear_same_width(_router(route))
+    assert len(route.segments) > 1
+    assert abs(_total_length(route) - 2.5) < 1e-9
+
+
+def test_keeps_a_mid_chain_fold_back_issue_7605():
+    route = _route([_seg(0, 0, 2, 0), _seg(2, 0, 1, 0), _seg(1, 0, 3, 0)])
+    merge_collinear_same_width(_router(route))
+    assert len(route.segments) > 1
+    assert abs(_total_length(route) - 5.0) < 1e-9
+
+
+def test_fused_length_equals_input_length_for_collinear_chains_issue_7605():
+    import random
+
+    rng = random.Random(7605)
+    for _ in range(200):
+        x, segs = 0.0, []
+        for _ in range(rng.randint(2, 8)):
+            nx = x + rng.choice([-1.0, -0.5, 0.5, 1.0, 2.0])
+            segs.append(_seg(x, 0.0, nx, 0.0))
+            x = nx
+        route = _route(segs)
+        before = _total_length(route)
+        merge_collinear_same_width(_router(route))
+        assert abs(_total_length(route) - before) < 1e-9
