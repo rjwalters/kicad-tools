@@ -46,13 +46,13 @@ from __future__ import annotations
 import heapq
 import math
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..layers import LayerStack
-from ..pairplan.gateway import Gateway, GatewaySite
+from ..pairplan.gateway import Gateway, GatewaySite, fans_couple_off_pitch
 from ..pairplan.gateway import gateway_anchor_point as _gateway_anchor
 from ..pairplan.outcome import (
     EXHAUSTED_SEARCH_REASONS,  # noqa: F401 -- re-exported (core, tests)
@@ -3465,6 +3465,7 @@ class LatticePathfinder:
         clr: float,
         committed: CommittedCopper,
         reqs: list[float] | None,
+        pitch: float | None = None,
     ) -> tuple[list[Pt], list[Pt]] | None:
         """Legality oracle for one gateway site (``gateway.enumerate_gateways``).
 
@@ -3472,8 +3473,11 @@ class LatticePathfinder:
         commit: P via, then N via (the via-to-via gap to P's), then P's fan
         (clear of N's via), then N's fan (clear of P's via and fan).  Via
         legality is :meth:`_via_ok_at` -- the negotiated-via rule, including
-        the fab tier's via-in-pad gate -- plus the pad class floor.  Returns
-        the two fan polylines, or ``None``.
+        the fab tier's via-in-pad gate -- plus the pad class floor.  With the
+        pair ``pitch``, the two legs must also not run side by side inside
+        the impedance rule's coupling window at another gap (issue #7503,
+        :func:`~kicad_tools.router.pairplan.gateway.fans_couple_off_pitch`).
+        Returns the two fan polylines, or ``None``.
         """
         via_r = self.rules.via_diameter / 2.0
         body = self._gateway_body_box(pad_p.ref)
@@ -3489,21 +3493,49 @@ class LatticePathfinder:
                 if not self._gateway_pad_class_clear(via, via, None, net, via_r, reqs):
                     return None
                 committed.add_via(via, net, clr)
-            fans: list[list[Pt]] = []
-            for pad, via in ((pad_p, site.via_p), (pad_n, site.via_n)):
-                accepted: list[Pt] | None = None
-                for axis_first in (False, True):
-                    poly = dogleg_points(pad.x, pad.y, via[0], via[1], axis_first=axis_first)
-                    if self._gateway_fan_ok(poly, pad_layer, pad.net, half, clr, committed, reqs):
-                        accepted = poly
-                        break
-                if accepted is None:
+            # Issue #7503: the two legs must not run side by side inside the
+            # impedance rule's coupling window at a gap other than the pair's
+            # (``fans_couple_off_pitch``).  Only that rejection moves on to
+            # the next dogleg; a fan that is simply illegal declines the site
+            # exactly as before, so no new gateway shape is admitted.
+            for fan_p in self._gateway_fan_options(
+                pad_p, site.via_p, pad_layer, half, clr, committed, reqs
+            ):
+                inner = committed.begin_trial()
+                coupled = False
+                try:
+                    committed.add_run(pad_layer, fan_p, pad_p.net, half, clr)
+                    for fan_n in self._gateway_fan_options(
+                        pad_n, site.via_n, pad_layer, half, clr, committed, reqs
+                    ):
+                        if pitch is None or not fans_couple_off_pitch(
+                            fan_p, fan_n, half=half, pitch=pitch
+                        ):
+                            return fan_p, fan_n
+                        coupled = True
+                finally:
+                    committed.rollback_trial(inner)
+                if not coupled:
                     return None
-                committed.add_run(pad_layer, accepted, pad.net, half, clr)
-                fans.append(accepted)
-            return fans[0], fans[1]
+            return None
         finally:
             committed.rollback_trial(mark)
+
+    def _gateway_fan_options(
+        self,
+        pad: Pad,
+        via: Pt,
+        pad_layer: int,
+        half: float,
+        clr: float,
+        committed: CommittedCopper,
+        reqs: list[float] | None,
+    ) -> Iterator[list[Pt]]:
+        """The legal pad -> via doglegs of one gateway fan, in try order."""
+        for axis_first in (False, True):
+            poly = dogleg_points(pad.x, pad.y, via[0], via[1], axis_first=axis_first)
+            if self._gateway_fan_ok(poly, pad_layer, pad.net, half, clr, committed, reqs):
+                yield poly
 
     def _gateway_body_box(self, ref: str | None) -> Rect | None:
         """Between-rows box a gateway via must stay OUT of, for part ``ref``.
@@ -3686,7 +3718,7 @@ class LatticePathfinder:
                     pad_layer: int = pad_layer,
                 ) -> tuple[list[Pt], list[Pt]] | None:
                     return self._gateway_site_fans(
-                        site, pad_p, pad_n, pad_layer, half, clr, committed, reqs
+                        site, pad_p, pad_n, pad_layer, half, clr, committed, reqs, pc.pitch
                     )
 
                 found, legal = enumerate_gateways(
@@ -3876,7 +3908,7 @@ class LatticePathfinder:
                     set(self._pad_layer_indices(pad_p)) & set(self._pad_layer_indices(pad_n))
                 )
                 fans = self._gateway_site_fans(
-                    g.site, pad_p, pad_n, pad_layer, half, clr, committed, reqs
+                    g.site, pad_p, pad_n, pad_layer, half, clr, committed, reqs, pc.pitch
                 )
                 if fans is None or (tuple(fans[0]), tuple(fans[1])) != (g.fan_p, g.fan_n):
                     return None, "pair-gateway-conflict"
