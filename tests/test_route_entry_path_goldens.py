@@ -302,6 +302,35 @@ def _strip_notes(entry: dict) -> dict:
     return {k: v for k, v in entry.items() if not k.startswith("_")}
 
 
+def field_diff(observed: dict, golden: dict) -> str:
+    """One line per differing leaf, so a drift names its field (issue #7626).
+
+    ``copper`` is compared per sub-key (``sha256`` alone differing with equal
+    counts means same topology, different coordinates); ``headers`` and
+    ``files`` report what was added/missing rather than dumping both lists.
+    """
+    lines: list[str] = []
+    for key in sorted(set(observed) | set(golden)):
+        got, want = observed.get(key), golden.get(key)
+        if got == want:
+            continue
+        if isinstance(got, dict) and isinstance(want, dict):
+            for sub in sorted(set(got) | set(want)):
+                if got.get(sub) != want.get(sub):
+                    lines.append(
+                        f"  {key}.{sub}: golden={want.get(sub)!r} observed={got.get(sub)!r}"
+                    )
+        elif isinstance(got, list) and isinstance(want, list):
+            lines.append(
+                f"  {key}: missing={[x for x in want if x not in got]} "
+                f"unexpected={[x for x in got if x not in want]}"
+                + ("" if set(got) != set(want) else " (same members, different order)")
+            )
+        else:
+            lines.append(f"  {key}: golden={want!r} observed={got!r}")
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # The golden test
 # ---------------------------------------------------------------------------
@@ -330,11 +359,23 @@ def test_entry_path_matches_golden(board: str, path_key: str, tmp_path: Path) ->
 
     assert observed == _strip_notes(golden), (
         f"kct route {board}/{path_key} drifted from tests/fixtures/route_entry_paths/"
-        "goldens.json.  If the change is intended, regenerate with "
+        f"goldens.json.  Differing fields:\n{field_diff(observed, _strip_notes(golden))}\n"
+        "If the change is intended, regenerate with "
         "`uv run python tests/test_route_entry_path_goldens.py --update` and name the "
         "changed entries in the PR description (issue #7377).\n"
         f"observed: {json.dumps(observed, indent=1)}"
     )
+
+
+def test_field_diff_names_each_differing_field() -> None:
+    golden = {"exit_code": 2, "copper": {"segments": 11, "sha256": "a"}, "files": ["x", "y"]}
+    observed = {"exit_code": 2, "copper": {"segments": 11, "sha256": "b"}, "files": ["x", "z"]}
+    out = field_diff(observed, golden)
+    assert "copper.sha256: golden='a' observed='b'" in out
+    assert "copper.segments" not in out
+    assert "exit_code" not in out
+    assert "files: missing=['y'] unexpected=['z']" in out
+    assert field_diff(golden, golden) == ""
 
 
 def test_goldens_cover_every_case() -> None:
