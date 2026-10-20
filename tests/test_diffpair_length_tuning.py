@@ -1026,13 +1026,17 @@ class TestUncoupledGuardAndOvershootRevert:
                 )
         return Route(net=net_id, net_name=name, segments=segs)
 
-    def test_pair_already_over_by_long_half_is_still_tuned(self):
-        """Judge repro: the meander leaves the checker's figure unchanged, so it is allowed.
+    def test_pair_already_over_by_long_half_is_refused(self):
+        """Issue #7521: under KiCad's figure the meander makes the pair worse.
 
         P 20 mm / N 25 mm: the pair is already 5.0 mm uncoupled (all on N)
-        against a 4.0 mm limit.  The meander takes P to ~4.55 mm, under N's
-        5.0, so ``max(P, N)`` -- the uncoupled verdict -- does not move.  The
-        skew error gets fixed instead of being kept for nothing.
+        against a 4.0 mm limit.  Before #7521 the guard measured the meander as
+        plain copper (``max(P 4.55, N 5.0) = 5.0``, unchanged) and allowed it.
+        But pinned kicad-cli 10.0.6 reads that plain trombone as 6.2 mm (its
+        flat tops do not couple N), and reads the tuning-pattern form as 6.2 mm
+        too, which kct now matches.  The bump would take the pair from 5.0 to
+        6.2 mm in both engines, so the guard refuses it: the skew stays
+        unfixed rather than trading it for a larger uncoupled error.
         """
         p = _straight_route(1, "USB_D+", 20.0, y=0.0)
         n = _straight_route(2, "USB_D-", 25.0, y=5.0)
@@ -1045,12 +1049,12 @@ class TestUncoupledGuardAndOvershootRevert:
             intra_pair_clearance_mm=0.1,
             max_uncoupled_mm=4.0,
         )
-        assert result.reason == "tuned"
-        assert result.skew_after_mm <= 0.5
+        assert result.success is False
+        assert result.inserts_applied == 0
+        assert "uncoupled length exceeds limit" in result.message
+        assert p_out is p and p_out.segments is p.segments
         assert n_out is n
-        after = self._figures(p_out, n_out)
-        assert after[0] > 4.0  # P alone is over: a P-only guard would have refused
-        assert max(after) == pytest.approx(before)  # verdict unchanged
+        assert all(s.tuning_pattern is None for s in p_out.segments)
 
     def test_meander_pushing_pair_over_limit_is_rejected(self):
         """A meander that takes the pair figure over the limit, and up, is refused."""

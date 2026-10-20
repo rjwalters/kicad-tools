@@ -81,6 +81,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
+from ..export._fsutil import fsync_dir as _fsync_dir
+from ..export._fsutil import open_nofollow as _open_nofollow
 from ..export.submission_plan import (
     SubmissionPlan,
     _digest,
@@ -569,21 +571,17 @@ class UploadLedger:
         parent = _root(ledger.path.parent)
         _path(ledger.path.name)
         try:
-            fd = os.open(ledger.path, os.O_CREAT | os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+            fd = _open_nofollow(ledger.path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
         except OSError as exc:
             raise LedgerError("Upload ledger is missing, inaccessible, or symlinked") from exc
         os.close(fd)
-        dir_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
+        _fsync_dir(parent)
         return ledger
 
     def _append(self, core: Mapping[str, Any]) -> None:
         line = _json(dict(core))
         try:
-            fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW)
+            fd = _open_nofollow(self.path, os.O_WRONLY | os.O_APPEND)
         except OSError as exc:
             raise LedgerError("Upload ledger is missing, inaccessible, or symlinked") from exc
         try:
@@ -1130,7 +1128,7 @@ def _upload_lock(ledger: UploadLedger) -> Iterator[None]:
     """
     lock = ledger.path.parent / ("." + ledger.path.name + ".upload-lock")
     try:
-        lock_fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+        lock_fd = _open_nofollow(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     except OSError as exc:
         raise UploadBlockedError(
             "Another upload is already in progress for this ledger (or a previous"

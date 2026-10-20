@@ -28,6 +28,7 @@ How KiCad measures, and so how kct does (pinned on kicad-cli 10.0.6 by
 | What is coupled? | The projected overlap of same-layer segments that are parallel (anti-parallel too) to within about 0.01°. 0.02° is already uncoupled. |
 | Distance limit? | None, unless a `diff_pair_gap (max ..)` is present. kct emits only `(min ..)`, so two parallel runs 10 mm apart are coupled. |
 | Via barrels? | Not counted. Vias that sit side by side cost nothing; offset vias cost only the track copper left without a partner. |
+| Tuning patterns? | Tracks that are `members` of a `(generated ... (type tuning_pattern))` object are dropped on **both** sides: they are not uncoupled copper of their own net, and the other net does not couple to them. So the partner's copper opposite a skew bump still counts (Issue #7521, operator ruling Q16). Under the min-only gap rules kct writes, a pattern can therefore read *higher* than the same bump as plain copper: a 45-degree bump with a 1.8 mm base reads 1.13 mm plain and 1.8 mm as a pattern, in both engines. |
 
 ### Known divergences
 
@@ -40,9 +41,14 @@ How KiCad measures, and so how kct does (pinned on kicad-cli 10.0.6 by
   fail kicad-cli. `test_known_divergence_kct_never_exceeds_kicad_on_committed_copper`
   pins the gap. Every committed pair is far below its limit in both engines.
 * **Arcs** are not measured by kct.
-* **Meanders:** KiCad's `diff_pair_uncoupled` is known to misreport on them. No
-  committed board has one; the first fixture belongs to the length-tuning phase
-  (#6447).
+* **Meanders as plain copper:** on kicad-cli 10.0.6 a bump with 45-degree
+  legs agrees with kct, but the router's perpendicular-leg trombone has its
+  flat tops counted as uncoupled by KiCad and as coupled by kct, so KiCad
+  reads higher (`tests/test_uncoupled_tuning_pattern_7521.py`). The skew tuner
+  therefore writes every bump it commits as a tuning pattern, which both
+  engines measure alike. Under a limit, a bump whose pattern form breaks it
+  and worsens the pair is rejected, never retried as plain copper, so it
+  keeps its skew error rather than gaining an uncoupled one.
 
 ### The per-terminal figure (kct-only)
 
