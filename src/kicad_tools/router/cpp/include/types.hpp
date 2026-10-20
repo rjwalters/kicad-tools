@@ -344,7 +344,11 @@ namespace router {
 // ``router_cpp.search_radius_cells`` binding, so a v59 .so must be rejected.
 // v61: ``DesignRules::min_via_pad_edge_gap`` + coupled pad-edge refusal (#7296).
 // v62: the same floor in the single-ended A*'s via check (#7296).
-constexpr int ROUTER_CPP_BUILD_VERSION = 62;
+// v63 (Issue #7491): the coupled pose search's rail gate
+// (``CoupledPathfinder::rail_segment_clear``) measures the partner net's pads
+// exactly (``Grid3D::pad_geometry_clear``'s new ``only_net``).  Coupled
+// routing output changes, so a v62 .so must be rejected.
+constexpr int ROUTER_CPP_BUILD_VERSION = 63;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor

@@ -51,6 +51,8 @@ BOARD06_KEY = "boards/06-diffpair-test/regression-fixture/diffpair_test_routed.k
 # gap-tightening pass (#7349) and the #7296 mask-dam floor, not of the committed
 # PCB: the gate judges the re-route.
 BOARD06_IMPEDANCE_NETS = {"USB3_TX2-"}
+# Issue #7491: USB2_D routes coupled, so it no longer carries the #7401
+# uncoupled-length identity -- no pair may exceed its uncoupled limit.
 BOARD06_UNCOUPLED_PAIR = "USB2_D+/USB2_D-"
 
 
@@ -61,41 +63,39 @@ def test_board06_impedance_allowance_is_keyed_by_net_with_issue():
     assert {n for (r, n) in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS if r == "impedance"} == (
         BOARD06_IMPEDANCE_NETS
     )
-    assert {
+    assert not {
         n for (r, n) in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS if r == "diffpair_uncoupled_length"
-    } == {BOARD06_UNCOUPLED_PAIR}
-    assert set(gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS.values()) == {7312, 7401}
+    }
+    assert set(gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS.values()) == {7312}
 
 
 def test_board06_listed_impedance_findings_pass():
     gate = load("check_diffpair_coverage")
-    found = {
-        "impedance": set(BOARD06_IMPEDANCE_NETS),
-        "diffpair_uncoupled_length": {BOARD06_UNCOUPLED_PAIR},
-    }
-    errors = {"impedance": 1, "diffpair_uncoupled_length": 1}
+    found = {"impedance": set(BOARD06_IMPEDANCE_NETS)}
+    errors = {"impedance": 1}
     assert gate.unexpected_baseline_errors(BOARD06_KEY, errors, found) == {}
     assert gate.stale_allowances(BOARD06_KEY, found) == []
 
 
-def test_board06_new_uncoupled_pair_fails():
-    """Only USB2_D (#7401) may exceed the uncoupled limit; another pair is new."""
+def test_board06_uncoupled_pair_fails():
+    """Issue #7491: with USB2_D coupled, no pair may exceed its uncoupled limit.
+
+    ``diffpair_uncoupled_length`` has no allowance entry left, so every such
+    finding is unexpected -- USB2_D's included, should it regress.
+    """
     gate = load("check_diffpair_coverage")
     found = {"diffpair_uncoupled_length": {BOARD06_UNCOUPLED_PAIR, "USB3_RX1+/USB3_RX1-"}}
     errors = {"diffpair_uncoupled_length": 2}
     assert gate.unexpected_baseline_errors(BOARD06_KEY, errors, found) == {
-        "diffpair_uncoupled_length": 1
+        "diffpair_uncoupled_length": 2
     }
 
 
 def test_board06_new_impedance_net_fails():
     """USB3_TX2+ was cleared by #7349: it cannot fail again unnoticed (#7270 Q3)."""
     gate = load("check_diffpair_coverage")
-    found = {
-        "impedance": set(BOARD06_IMPEDANCE_NETS) | {"USB3_TX2+"},
-        "diffpair_uncoupled_length": {BOARD06_UNCOUPLED_PAIR},
-    }
-    errors = {"impedance": 2, "diffpair_uncoupled_length": 1}
+    found = {"impedance": set(BOARD06_IMPEDANCE_NETS) | {"USB3_TX2+"}}
+    errors = {"impedance": 2}
     assert gate.unexpected_baseline_errors(BOARD06_KEY, errors, found) == {"impedance": 1}
     assert gate.stale_allowances(BOARD06_KEY, found) == []
 
@@ -103,20 +103,20 @@ def test_board06_new_impedance_net_fails():
 def test_board06_fixed_impedance_finding_makes_allowance_stale():
     """Issue #7349: once USB3_TX2 tightens fully the entry must be deleted."""
     gate = load("check_diffpair_coverage")
-    found = {"diffpair_uncoupled_length": {BOARD06_UNCOUPLED_PAIR}}
-    errors = {"diffpair_uncoupled_length": 1}
-    assert gate.unexpected_baseline_errors(BOARD06_KEY, errors, found) == {}
+    found: dict[str, set[str]] = {}
+    assert gate.unexpected_baseline_errors(BOARD06_KEY, {}, found) == {}
     assert gate.stale_allowances(BOARD06_KEY, found) == [("impedance", "USB3_TX2-", 7312)]
     assert "#7312" in gate.format_stale(gate.stale_allowances(BOARD06_KEY, found))
 
 
-def test_board06_fixed_uncoupled_finding_makes_allowance_stale():
-    """Issue #7401: once USB2_D routes coupled its entry must be deleted."""
+def test_board06_uncoupled_allowance_is_gone():
+    """Issue #7491: USB2_D routes coupled, so its #7401 entry was deleted."""
     gate = load("check_diffpair_coverage")
+    assert ("diffpair_uncoupled_length", BOARD06_UNCOUPLED_PAIR) not in (
+        gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS
+    )
     found = {"impedance": set(BOARD06_IMPEDANCE_NETS)}
-    assert gate.stale_allowances(BOARD06_KEY, found) == [
-        ("diffpair_uncoupled_length", BOARD06_UNCOUPLED_PAIR, 7401)
-    ]
+    assert gate.stale_allowances(BOARD06_KEY, found) == []
 
 
 def test_board06_impedance_without_identities_is_not_trusted():

@@ -177,12 +177,14 @@ DIFFPAIR_VIOLATION_BASELINE: dict[str, int] = {
 # 12.700 mm).  The floor is the intended behaviour; the USB2_D pair needs to
 # route coupled, tracked in #7401.  The limit and the 18-error pair baseline are
 # NOT raised: this is one identity, deleted when #7401 lands.
+# Issue #7491: USB2_D now routes coupled (the pose search measures its
+# partner's pads exactly), at 3.608 / 4.653 mm uncoupled, so that identity is
+# gone.
 # Allowed by identity, not by count (#7359, #7270 Q3 ruling): only these nets
 # may carry the listed errors, and a listed net that stops failing makes
 # its entry stale and fails the gate.  Deleting an entry is the whole of #7349.
 DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
     ("impedance", "USB3_TX2-"): 7312,
-    ("diffpair_uncoupled_length", "USB2_D+/USB2_D-"): 7401,
 }
 
 
