@@ -7,7 +7,7 @@ defaults rather than physical optima — adjust to your stackup.
 Prefer declaring `pair_protocol` over a literal skew: the limit then comes
 from the sourced table in [07-protocol-defaults.md](07-protocol-defaults.md).
 
-## USB 2.0 — 90 Ω diff; 2.5 mm skew (full speed), 1.27 mm (high speed)
+## USB 2.0 — 90 Ω diff; 2.5 mm skew (full speed), 1.0 mm (high speed)
 
 This recipe used to set `skew_tolerance_mm=3.0`, which had no source.
 
@@ -27,7 +27,7 @@ usb2_fs = NetClassRouting(
 assert usb2_fs.effective_intra_pair_clearance() == 0.125
 assert usb2_fs.effective_skew_tolerance() == 2.5
 usb2_hs = NetClassRouting(name="USB2_HS", pair_protocol="USB2_HS")
-assert usb2_hs.effective_skew_tolerance() == 1.27
+assert usb2_hs.effective_skew_tolerance() == 1.0
 ```
 
 ## USB 3.0 SuperSpeed (5 Gbps per lane) — 90 Ω diff, tight skew

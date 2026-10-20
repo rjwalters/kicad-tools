@@ -53,6 +53,20 @@ _TI_BREAKOUT = "TI SPRAAR7J §3.3 (breakout within 0.25 in of the package)"
 #: row borrows its via count and breakout distance, and its source strings say
 #: so: piece (b) will turn these into limits on full-speed pairs.
 _HS_GUIDANCE_ON_FS = "; high-speed guidance, applied to full speed"
+#: Q16 skew limits (Issue #7521); the research note lists every source key.
+_Q16_NOTE = "docs/research/diffpair-skew-compensation.md"
+_SKEW_5MIL = (
+    f"5 mil intra-pair skew: TI, Philips/NXP AN10373, Renesas; Toradex 0.15 mm ({_Q16_NOTE} §2)"
+)
+_SKEW_USB2_HS = (
+    "judgement: rounded down from TI 50 mil (1.27 mm) and Toradex 1.1 mm "
+    f"({_Q16_NOTE} §2, Q16 ruling on #6858)"
+)
+_SKEW_MIPI = f"Toradex <1 ps (0.15 mm); AMD Versal +-2 ps incl. package ({_Q16_NOTE} §2)"
+_SKEW_DDR = (
+    "judgement: length proxy (~1 ps) for Intel DDR4 <1 ps and NXP LPDDR4 1 ps, "
+    f"ignores package delay ({_Q16_NOTE} §2)"
+)
 _TI_APP_A_ON_FS = _TI_APP_A + _HS_GUIDANCE_ON_FS
 _TI_BREAKOUT_ON_FS = _TI_BREAKOUT + _HS_GUIDANCE_ON_FS
 
@@ -63,12 +77,14 @@ class PairProtocol(Enum):
     USB2_FS = "USB2_FS"  # 12 Mbit/s
     USB2_HS = "USB2_HS"  # 480 Mbit/s
     USB3_SS = "USB3_SS"
+    SATA = "SATA"
     LVDS = "LVDS"
     PCIE_G1 = "PCIE_G1"
     PCIE_G2_PLUS = "PCIE_G2_PLUS"
     MIPI_DPHY = "MIPI_DPHY"
     ETHERNET = "ETHERNET"
     HDMI_TMDS = "HDMI_TMDS"
+    DDR_DQS_CK = "DDR_DQS_CK"  # DDR4/LPDDR4 strobe and clock pairs
     CUSTOM = "CUSTOM"
 
 
@@ -118,7 +134,8 @@ _P = PairProtocol
 
 #: The single source of protocol defaults.  Values and sources are the epic
 #: #6441 table plus the 2026-10-13 maintainer decisions on #6443 (USB2_FS skew
-#: 2.5 mm, USB2_HS skew 1.27 mm).  Gap / width values are the former
+#: 2.5 mm).  The Q16 ruling (Issue #7521) replaced the other skew limits and
+#: set USB2_HS to 1.0 mm.  Gap / width values are the former
 #: ``DifferentialPairRules.for_type`` numbers; none of them has a source.
 PROTOCOL_DEFAULTS: dict[PairProtocol, ProtocolDefaults] = {
     _P.USB2_FS: ProtocolDefaults(
@@ -133,7 +150,7 @@ PROTOCOL_DEFAULTS: dict[PairProtocol, ProtocolDefaults] = {
     ),
     _P.USB2_HS: ProtocolDefaults(
         protocol=_P.USB2_HS,
-        max_skew_mm=Sourced(1.27, _TI_APP_A + " (50 mil)"),
+        max_skew_mm=Sourced(1.0, _SKEW_USB2_HS),
         max_uncoupled_per_terminal_mm=Sourced(6.35, _TI_BREAKOUT),
         max_vias_per_net=Sourced(4, _TI_APP_A),
         gap_mm=_uncited(0.2),
@@ -143,10 +160,14 @@ PROTOCOL_DEFAULTS: dict[PairProtocol, ProtocolDefaults] = {
     ),
     _P.USB3_SS: ProtocolDefaults(
         protocol=_P.USB3_SS,
-        max_skew_mm=_uncited(0.1),
+        max_skew_mm=Sourced(0.127, _SKEW_5MIL),
         gap_mm=_uncited(0.15),
         trace_width_mm=_uncited(0.2),
         diff_impedance_ohm=_uncited(90.0),
+    ),
+    _P.SATA: ProtocolDefaults(
+        protocol=_P.SATA,
+        max_skew_mm=Sourced(0.127, _SKEW_5MIL),
     ),
     _P.LVDS: ProtocolDefaults(
         protocol=_P.LVDS,
@@ -157,14 +178,16 @@ PROTOCOL_DEFAULTS: dict[PairProtocol, ProtocolDefaults] = {
     ),
     _P.PCIE_G1: ProtocolDefaults(
         protocol=_P.PCIE_G1,
-        max_skew_mm=_uncited(0.127),
+        max_skew_mm=Sourced(0.127, _SKEW_5MIL),
         diff_impedance_ohm=_uncited(85.0),
     ),
-    # No value has been proposed for Gen 2+; the generic skew default applies.
-    _P.PCIE_G2_PLUS: ProtocolDefaults(protocol=_P.PCIE_G2_PLUS),
+    _P.PCIE_G2_PLUS: ProtocolDefaults(
+        protocol=_P.PCIE_G2_PLUS,
+        max_skew_mm=Sourced(0.127, _SKEW_5MIL),
+    ),
     _P.MIPI_DPHY: ProtocolDefaults(
         protocol=_P.MIPI_DPHY,
-        max_skew_mm=_uncited(0.038),
+        max_skew_mm=Sourced(0.15, _SKEW_MIPI),
         diff_impedance_ohm=_uncited(100.0),
     ),
     _P.ETHERNET: ProtocolDefaults(
@@ -176,10 +199,14 @@ PROTOCOL_DEFAULTS: dict[PairProtocol, ProtocolDefaults] = {
     ),
     _P.HDMI_TMDS: ProtocolDefaults(
         protocol=_P.HDMI_TMDS,
-        max_skew_mm=_uncited(0.5),
+        max_skew_mm=Sourced(0.127, _SKEW_5MIL),
         gap_mm=_uncited(0.15),
         trace_width_mm=_uncited(0.2),
         diff_impedance_ohm=_uncited(100.0),
+    ),
+    _P.DDR_DQS_CK: ProtocolDefaults(
+        protocol=_P.DDR_DQS_CK,
+        max_skew_mm=Sourced(0.15, _SKEW_DDR),
     ),
     # CUSTOM carries no skew: a pair of unknown protocol gets the generic default.
     _P.CUSTOM: ProtocolDefaults(
