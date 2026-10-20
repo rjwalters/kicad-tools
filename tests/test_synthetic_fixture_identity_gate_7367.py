@@ -240,20 +240,23 @@ class TestBoard06:
         assert gate.unallowed_blocking(BOARD06_KEY, found) == []
 
     def test_seven_continuity_findings_fail_within_old_baseline(self):
-        """(d) the 7 free slots under the old 18: every one is now a failure."""
+        """(d) the free slots under the old 18: every one is now a failure."""
         gate = self.gate()
         found = self.measured()
         pairs = sorted(
             i for r, i in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS if r == "diffpair_length_skew"
         )
+        # As many continuity findings as there are listed skew pairs (#7548
+        # shrinks that list as pairs are fixed); never more than the 7 free slots.
         extra = [violation("diffpair_routing_continuity", p) for p in pairs[:7]]
+        assert extra
         found += extra
         assert len(found) <= 18
         ids = identities_of(found)
         assert gate.unexpected_baseline_errors(BOARD06_KEY, rule_counts(found), ids) == {
-            "diffpair_routing_continuity": 7
+            "diffpair_routing_continuity": len(extra)
         }
-        assert len(gate.unallowed_blocking(BOARD06_KEY, found)) == 7
+        assert len(gate.unallowed_blocking(BOARD06_KEY, found)) == len(extra)
 
     def test_fixed_skew_pair_is_stale(self):
         gate = self.gate()

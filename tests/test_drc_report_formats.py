@@ -563,6 +563,7 @@ class TestKicadCliDrcLiveSmoke:
 
     def test_live_output_matches_pinned_schema(self, tmp_path):
         """Live `kicad-cli pcb drc --format json` still emits the pinned keys."""
+        import shutil
         import subprocess
 
         kicad_cli = self._kicad_cli()
@@ -571,6 +572,10 @@ class TestKicadCliDrcLiveSmoke:
         if not _GOLDEN_SOURCE_BOARD.exists():
             pytest.skip(f"source board missing: {_GOLDEN_SOURCE_BOARD}")
 
+        # DRC a tmp copy: kicad-cli writes a .kicad_prl beside its input,
+        # which must never land in tests/fixtures/ (#7588).
+        board = tmp_path / _GOLDEN_SOURCE_BOARD.name
+        shutil.copy2(_GOLDEN_SOURCE_BOARD, board)
         out = tmp_path / "live_drc.json"
         subprocess.run(
             [
@@ -583,7 +588,7 @@ class TestKicadCliDrcLiveSmoke:
                 "mm",
                 "--output",
                 str(out),
-                str(_GOLDEN_SOURCE_BOARD),
+                str(board),
             ],
             capture_output=True,
             timeout=120,

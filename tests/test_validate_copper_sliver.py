@@ -24,6 +24,7 @@ Covers the acceptance scenarios from the issue:
 from __future__ import annotations
 
 import math
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -528,7 +529,7 @@ REPO_ROOT = Path(__file__).parent.parent
 
 
 @pytest.mark.integration
-def test_positive_control_matches_native_copper_sliver_count():
+def test_positive_control_matches_native_copper_sliver_count(tmp_path: Path):
     """Every warning in the native positive control remains detected internally."""
     from kicad_tools.cli.runner import find_kicad_cli
     from kicad_tools.drc.geometric import run_geometric_drc
@@ -537,7 +538,11 @@ def test_positive_control_matches_native_copper_sliver_count():
     if cli is None:
         pytest.skip("kicad-cli not installed")
 
-    native = run_geometric_drc(POSITIVE_FIXTURE, kicad_cli=cli)
+    # kicad-cli writes a .kicad_prl beside its input; keep it out of
+    # tests/fixtures/ by running on a tmp copy (#7588).
+    board = tmp_path / POSITIVE_FIXTURE.name
+    shutil.copy2(POSITIVE_FIXTURE, board)
+    native = run_geometric_drc(board, kicad_cli=cli)
     internal = CopperSliverRule().check(PCB.load(POSITIVE_FIXTURE), _make_design_rules())
     internal_count = sum(v.rule_id == "copper_sliver" for v in internal.violations)
 
