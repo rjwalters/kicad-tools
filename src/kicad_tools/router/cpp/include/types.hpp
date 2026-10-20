@@ -344,7 +344,9 @@ namespace router {
 // ``router_cpp.search_radius_cells`` binding, so a v59 .so must be rejected.
 // v61: ``DesignRules::min_via_pad_edge_gap`` + coupled pad-edge refusal (#7296).
 // v62: the same floor in the single-ended A*'s via check (#7296).
-constexpr int ROUTER_CPP_BUILD_VERSION = 62;
+// v63 (Issue #7569): Grid3D.set_pad_class_clearances + PadInfo::class_clearance
+// -- the exact pad test holds each pad to its own net-class clearance.
+constexpr int ROUTER_CPP_BUILD_VERSION = 63;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor

@@ -55,3 +55,13 @@ def test_no_class_keeps_caller_clearance() -> None:
     assert not _clear(impl, clearance=0.2)
     impl.set_pad_class_clearances([])  # shorter list -> 0 for missing pads
     assert not _clear(impl, clearance=0.2)
+
+
+def test_wide_own_class_refused_next_to_narrow_class_pad() -> None:
+    """The MAX side: a 0.2 mm-class track (the caller's clearance) next to a
+    0.15 mm-class pad at a 0.18 mm gap is refused -- required is
+    max(own class, pad's class) = 0.2, not the pad's class alone."""
+    impl = _grid()
+    impl.set_pad_class_clearances([0.15])
+    assert not _clear(impl, clearance=0.2)
+    assert _clear(impl, clearance=0.15)
