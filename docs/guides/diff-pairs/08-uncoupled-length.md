@@ -41,18 +41,14 @@ How KiCad measures, and so how kct does (pinned on kicad-cli 10.0.6 by
   fail kicad-cli. `test_known_divergence_kct_never_exceeds_kicad_on_committed_copper`
   pins the gap. Every committed pair is far below its limit in both engines.
 * **Arcs** are not measured by kct.
-* **Meanders as plain copper:** KiCad's `diff_pair_uncoupled` is known to
-  misreport on them. On kicad-cli 10.0.6, a bump with 45-degree legs agrees
-  with kct. A trombone with perpendicular legs, which is the router's
-  serpentine, has its flat tops counted as uncoupled by KiCad and as coupled
-  by kct, so KiCad reads higher. `tests/test_uncoupled_tuning_pattern_7521.py`
-  pins this. The router's skew tuner therefore never emits a plain trombone.
-  It writes every bump it commits as a tuning pattern, which both engines
-  measure the same way. With an uncoupled limit set, a bump whose pattern
-  form breaks the limit, and is worse than the pair was before, is
-  rejected. It is not retried as plain copper. So a pair whose only bumps
-  would raise KiCad's figure keeps its skew error rather than gaining an
-  uncoupled one.
+* **Meanders as plain copper:** on kicad-cli 10.0.6 a bump with 45-degree
+  legs agrees with kct, but the router's perpendicular-leg trombone has its
+  flat tops counted as uncoupled by KiCad and as coupled by kct, so KiCad
+  reads higher (`tests/test_uncoupled_tuning_pattern_7521.py`). The skew tuner
+  therefore writes every bump it commits as a tuning pattern, which both
+  engines measure alike. Under a limit, a bump whose pattern form breaks it
+  and worsens the pair is rejected, never retried as plain copper, so it
+  keeps its skew error rather than gaining an uncoupled one.
 
 ### The per-terminal figure (kct-only)
 
