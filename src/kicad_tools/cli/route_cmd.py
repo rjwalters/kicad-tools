@@ -7800,6 +7800,10 @@ def _apply_plane_via_reservation(
             # Issue #6589: keep foreign vias / plane-layer tracks outside the
             # pour's fill pullback, so the pour still covers each site.
             plane_fills=plane_fills_from_pcb(pcb, nets),
+            # Issue #7573: opt-in -- also serve pour-only 2-pad parts.
+            min_pour_footprint_pads=(
+                2 if getattr(args, "reserve_pour_only_passives", False) else None
+            ),
         )
     except Exception as exc:  # advisory: never fail a route over a reservation
         logger.warning("Plane-via reservation skipped: %s", exc)
@@ -18516,6 +18520,17 @@ def _route_parser() -> argparse.ArgumentParser:
             "its stub held free, so the post-route stitch/oracle pass can "
             "still connect it to its plane.  Pass this flag to restore "
             "pre-#6401 behaviour."
+        ),
+    )
+    parser.add_argument(
+        "--reserve-pour-only-passives",
+        action="store_true",
+        help=(
+            "Also hold a via site for pour-only 2-pad parts (e.g. a +5V/GND "
+            "decoupling cap) in the pre-route plane-via reservation (Issue "
+            "#7573).  OFF by default: it enlarges the hard keep-out on every "
+            "board whose caps sit between two served pours.  Has no effect "
+            "with --no-plane-via-reservation."
         ),
     )
     parser.add_argument(
