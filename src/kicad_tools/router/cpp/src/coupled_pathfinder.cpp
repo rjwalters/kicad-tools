@@ -1200,6 +1200,19 @@ bool CoupledPathfinder::rail_segment_clear(double sx, double sy, double ex, doub
         if (is_trace_blocked(cx, cy, layer, net, prev_cx, prev_cy)) return false;
         prev_cx = cx; prev_cy = cy;
     }
+    // Issue #7491 (#7401): the raster halo sees a pad only to ~0.05 mm past
+    // its edge, and ``rail_clear_world`` measures stored route copper, not
+    // pads -- so a rail threading a sub-pitch gap between two of the
+    // PARTNER's pads passed this gate and was then refused by the
+    // finished-copper check (``derived-rails-blocked``).  Measure the
+    // partner's pads exactly here so the search and verification agree.
+    if (partner_net > 0 &&
+        !grid_.pad_geometry_clear(static_cast<float>(sx), static_cast<float>(sy),
+                                  static_cast<float>(ex), static_cast<float>(ey),
+                                  layer, net, static_cast<float>(half), 0.0f,
+                                  partner_net)) {
+        return false;
+    }
     return rail_clear_world(sx, sy, ex, ey, layer, net, partner_net, half, gap, false);
 }
 

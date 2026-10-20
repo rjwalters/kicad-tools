@@ -33,6 +33,7 @@ If no output directory is specified, files are written to ./output/.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import subprocess
 import sys
@@ -276,6 +277,15 @@ def build_net_class_map() -> dict[str, NetClassRouting]:
     """
     usb2 = usb2_net_class()
     usb3 = usb3_net_class()
+    # Issue #7491: USB3_TX1 routes after the other J1 USB3 pairs.  Once
+    # USB2_D routes coupled (the pose search's partner-pad check), all 13 J1
+    # siblings are bumped to the front of the negotiated tier (#2482), which
+    # re-sorts them by priority and ignores ``_forced_net_order``, so a class
+    # priority is the only order knob.  At equal priority TX1 claimed the
+    # In1 corridor under J1's B row that USB3_RX1 used, and RX1 lost its
+    # route (seed 42: RX1 uncoupled 10.3/10.8 -> 14.7/18.3 mm).  Same class
+    # otherwise: only the routing order changes.
+    usb3_tx1 = dataclasses.replace(usb3, priority=3)
     pcie = pcie_net_class()
     mipi = mipi_net_class()
     sideband = sideband_net_class()
@@ -285,8 +295,8 @@ def build_net_class_map() -> dict[str, NetClassRouting]:
         "USB2_D+": usb2,
         "USB2_D-": usb2,
         # USB 3.0 (4 pairs)
-        "USB3_TX1+": usb3,
-        "USB3_TX1-": usb3,
+        "USB3_TX1+": usb3_tx1,
+        "USB3_TX1-": usb3_tx1,
         "USB3_RX1+": usb3,
         "USB3_RX1-": usb3,
         "USB3_TX2+": usb3,

@@ -299,7 +299,7 @@ NB_MODULE(router_cpp, m) {
         // resolve pad-derived cells in the A*.
         .def("pad_geometry_clear", &Grid3D::pad_geometry_clear,
              "ax"_a, "ay"_a, "bx"_a, "by"_a, "layer"_a, "net"_a,
-             "half_width"_a, "clearance"_a)
+             "half_width"_a, "clearance"_a, "only_net"_a = -1)
         // Issue #6375: validate_route()'s seg-vs-pad verdict over the pads
         // the bucket index places within reach -- the function the A*
         // own-pad step gate calls (search/validator parity surface).
