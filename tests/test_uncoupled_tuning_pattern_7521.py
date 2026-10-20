@@ -203,3 +203,54 @@ class TestAgreesWithPinnedKicadCli:
         p, n = _tuned_pair()
         pcb = _write(root, "tuned_plain", [p, _plain(n)])
         assert _kct(pcb).uncoupled_mm < _kicad_figure(cli, pcb) - 0.1
+
+
+class TestGuardedTunerAgreesWithPinnedKicadCli:
+    """Issue #7521: with a binding uncoupled limit, what the tuner commits
+    reads the same in kct and kicad-cli (no plain-copper fallback)."""
+
+    @pytest.mark.parametrize(
+        ("n_end", "limit"),
+        [(128.0, 2.5), (128.0, 2.1), (129.5, 0.8)],
+        ids=["skew2-limit2.5", "skew2-limit2.1", "skew0.5-limit0.8"],
+    )
+    def test_committed_result_agrees(self, pinned_cli, n_end, limit):
+        cli, root = pinned_cli
+        p = _straight(1, "D_P", Y_P, 130.0)
+        n = _straight(2, "D_N", Y_N, n_end)
+        before = _pair_uncoupled_mm(p, n)
+        p_out, n_out, result = tune_diff_pair_skew(
+            _pair(),
+            {1: p, 2: n},
+            tolerance_mm=0.127,
+            intra_pair_clearance_mm=GAP,
+            config=SerpentineConfig(amplitude=0.6),
+            max_uncoupled_mm=limit,
+        )
+        pcb = _write(root, f"guarded_{n_end}_{limit}", [p_out, n_out])
+        kct = _kct(pcb).uncoupled_mm
+        kicad = _kicad_figure(cli, pcb)
+        assert kct == pytest.approx(kicad, abs=1e-3)
+        # The #6795 rule, judged by KiCad's own figure: within the limit, or
+        # no worse than before the insert.
+        assert kicad <= limit + 1e-3 or kicad <= before + 1e-3
+        # Every committed bump is a pattern; none was demoted to plain copper.
+        bump = [s for s in n_out.segments if s.tuning_pattern is not None]
+        assert bool(bump) == bool(result.inserts_applied)
+
+    def test_over_long_pair_is_refused_in_both_engines(self, pinned_cli):
+        """P 20 / N 25 mm, 5 mm apart: any bump on P takes KiCad's figure 5.0 -> 6.2."""
+        cli, root = pinned_cli
+        p = _straight(1, "D_P", 100.0, 120.0)
+        n = _straight(2, "D_N", 105.0, 125.0)
+        p_out, n_out, result = tune_diff_pair_skew(
+            _pair(),
+            {1: p, 2: n},
+            tolerance_mm=0.5,
+            intra_pair_clearance_mm=0.1,
+            max_uncoupled_mm=4.0,
+        )
+        assert result.inserts_applied == 0
+        pcb = _write(root, "over_long", [p_out, n_out])
+        assert _kct(pcb).uncoupled_mm == pytest.approx(_kicad_figure(cli, pcb), abs=1e-3)
+        assert _kicad_figure(cli, pcb) == pytest.approx(5.0, abs=1e-3)

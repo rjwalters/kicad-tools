@@ -40,8 +40,10 @@ What pinned kicad-cli 10.0.6 does with one (measured, Issue #7521)
   min-only gap rules (all kct writes) that can exceed the plain bump's own
   figure: a 45-degree bump with a 1.8 mm base reads 1.13 mm as plain copper
   and 1.8 mm as a pattern.  ``kct check`` measures the same way (operator
-  ruling Q16), and the skew tuner falls back to plain copper when the
-  pattern form would break the uncoupled limit.  Only the segments that
+  ruling Q16).  The skew tuner judges each bump's pattern form against the
+  uncoupled limit and rejects one that fails; it never commits the bump as
+  plain copper instead, because kct under-reads KiCad on plain
+  perpendicular-leg trombones.  Only the segments that
   leave the host line are members: making the coupled lead-in and lead-out
   runs members too would uncouple the partner opposite them as well.
 

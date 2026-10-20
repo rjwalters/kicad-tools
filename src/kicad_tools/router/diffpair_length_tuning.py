@@ -310,6 +310,8 @@ def tune_diff_pair_skew(
             result,
         )
 
+    from kicad_tools.validate.rules.diffpair_uncoupled_length import UNCOUPLED_EPSILON_MM
+
     from .length import LengthTracker  # avoid cycle
 
     measure = route_length or LengthTracker.calculate_route_length
@@ -468,29 +470,23 @@ def tune_diff_pair_skew(
             # long as the uncoupled figure does not grow.
             #
             # Issue #7521: the figure leaves tuning-pattern copper out on both
-            # sides, so a pattern uncouples the partner span opposite the bump
-            # (kicad-cli 10.0.6 does the same).  When that pushes the pair
-            # over, the same bump as plain copper -- the pre-#7521 output,
-            # measured the same honest way -- is tried before giving up, so
-            # emitting patterns never costs a fix main would have made.
+            # sides, exactly as kicad-cli 10.0.6 does, so a pattern uncouples
+            # the partner span opposite the bump.  A bump whose pattern form
+            # fails is rejected outright.  It is NOT retried as plain copper:
+            # the trombone's perpendicular legs are the known meander case
+            # where kct under-reads KiCad (flat tops coupled in kct, uncoupled
+            # in KiCad), so a plain bump could pass here and fail kicad-cli.
             if max_uncoupled_mm is not None:
-                if pre_insert_figure is None:
-                    pre_insert_figure = _pair_uncoupled_mm(current_shorter, longer_route)
                 cand_figure = _pair_uncoupled_mm(cand_route, longer_route)
-                if not _uncoupled_ok(cand_figure, pre_insert_figure, max_uncoupled_mm):
-                    if cand_bump is not None:
-                        for seg in cand_bump[1]:
-                            seg.tuning_pattern = None
-                        plain_figure = _pair_uncoupled_mm(cand_route, longer_route)
-                        if _uncoupled_ok(plain_figure, pre_insert_figure, max_uncoupled_mm):
-                            cand_bump = None  # commit the bump as plain copper
-                            cand_figure = plain_figure
-                if not _uncoupled_ok(cand_figure, pre_insert_figure, max_uncoupled_mm):
-                    generator_failure = (
-                        f"uncoupled length exceeds limit ({cand_figure:.3f} mm > "
-                        f"{max_uncoupled_mm:.3f} mm, was {pre_insert_figure:.3f} mm)"
-                    )
-                    continue
+                if cand_figure > max_uncoupled_mm + UNCOUPLED_EPSILON_MM:
+                    if pre_insert_figure is None:
+                        pre_insert_figure = _pair_uncoupled_mm(current_shorter, longer_route)
+                    if cand_figure > pre_insert_figure + UNCOUPLED_EPSILON_MM:
+                        generator_failure = (
+                            f"uncoupled length exceeds limit ({cand_figure:.3f} mm > "
+                            f"{max_uncoupled_mm:.3f} mm, was {pre_insert_figure:.3f} mm)"
+                        )
+                        continue
             # Post-insertion DRC self-check.  The candidate route's new
             # segments must not violate intra-pair clearance against the
             # partner OR collide with any other routed net's segments.
@@ -601,13 +597,6 @@ def _checker_segments(segments: list[Segment]) -> list[tuple[float, float, float
     out, as ``kct check`` and pinned kicad-cli 10.0.6 leave it out.
     """
     return [(s.x1, s.y1, s.x2, s.y2, str(s.layer)) for s in segments if s.tuning_pattern is None]
-
-
-def _uncoupled_ok(figure: float, before: float, limit: float) -> bool:
-    """The #6795 guard: within ``limit``, or no worse than ``before``."""
-    from kicad_tools.validate.rules.diffpair_uncoupled_length import UNCOUPLED_EPSILON_MM
-
-    return figure <= limit + UNCOUPLED_EPSILON_MM or figure <= before + UNCOUPLED_EPSILON_MM
 
 
 def _pair_uncoupled_mm(a: Route, b: Route) -> float:
