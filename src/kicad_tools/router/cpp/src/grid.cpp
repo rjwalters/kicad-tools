@@ -1314,7 +1314,7 @@ bool Grid3D::edge_foreign_pad_clear(
 
 bool Grid3D::pad_geometry_clear(
     float ax, float ay, float bx, float by, int layer, int net,
-    float half_width, float clearance) const {
+    float half_width, float clearance, int only_net) const {
     const float reach = half_width + std::max({clearance, pad_bucket_max_override_,
                                                max_pairwise_clearance_});
     const int qx1 = static_cast<int>(std::floor((std::min(ax, bx) - reach) / PAD_BUCKET_MM));
@@ -1330,6 +1330,7 @@ bool Grid3D::pad_geometry_clear(
             for (uint32_t i : it->second) {
                 const auto& pad = pads_[i];
                 if (pad.net == net && net != 0) continue;  // own copper
+                if (only_net >= 0 && pad.net != only_net) continue;  // #7491
                 if (pad.layer_idx != -1 && pad.layer_idx != layer) continue;
                 float required = std::max(clearance, pad.clearance_override);
                 const float pair = pairwise_required_clearance(net, pad.net);
