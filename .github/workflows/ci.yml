@@ -428,12 +428,18 @@ jobs:
     # the real tail is longer than measured, and a killed run leaves no
     # pytest summary. The final "Report job time budget" step warns at 80%
     # of the limit (and writes the slowest tests to the step summary) so
-    # creep shows up on the PR that causes it. The limit is NOT raised here:
-    # the operator decision stands that sharding or further cutting the job
-    # is #5240, not a bigger timeout. 75 still sits below the 90 of
-    # `Test (extended)`. A hung test is bounded by pytest's own --timeout=60
-    # long before this fires; this ceiling only guards a whole-job stall.
-    timeout-minutes: 75
+    # creep shows up on the PR that causes it.
+    #
+    # Raised 75 -> 120 on 2026-10-20 as a STOPGAP (operator ruling Q28 = 1 on
+    # #5240): runs were being cancelled at ~1h15m in `Run tests` with zero
+    # failures (e.g. run 39384875895, 39404353472), forcing hour-long
+    # re-runs on every PR. Sharding/streamlining the job is still the real
+    # fix and stays open on #5240; do not treat 120 as headroom to spend.
+    # Keep TIMEOUT_MINUTES in "Report job time budget" equal to this value
+    # (tests/test_ci_native_observer_workflow.py enforces it). A hung test is
+    # bounded by pytest's own --timeout=60 long before this fires; this
+    # ceiling only guards a whole-job stall.
+    timeout-minutes: 120
     # Issue #3436: run inside the official KiCad 10 container (same image
     # as the kicad-cli-smoke job; see its comment for why apt+PPA installs
     # are NOT used). The container provides what dozens of tests need and
@@ -697,7 +703,7 @@ jobs:
         # timeout-minutes so creep is visible before a bare timeout kill.
         if: ${{ always() }}
         env:
-          TIMEOUT_MINUTES: "75"
+          TIMEOUT_MINUTES: "120"
         run: |
           now=$(date +%s)
           start="${KCT_JOB_START:-$now}"
