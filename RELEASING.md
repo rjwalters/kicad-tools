@@ -120,6 +120,11 @@ The manual path still works and takes precedence: while a hand-opened
       full `uv lock` rewrites hundreds of marker lines across uv versions;
       `uv lock --check` is re-run on the result;
     - a WORK_LOG entry.
+  - Body: the level, its reasons, the gate notes, the merged PRs and the
+    section. Every body the workflow posts stays under 60,000 characters
+    (GitHub rejects more than 65,536 with a 422, #7561). A long release lists
+    a PR count instead of every number, and its section is cut at a bullet
+    with a link to the full `CHANGELOG.md` on `release/vX.Y.Z`.
   - At most one is open at a time. The same version is force-pushed and
     edited in place. A new version supersedes the old PR, which is closed and
     its branch deleted.

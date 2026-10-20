@@ -14,7 +14,7 @@ entry is a plain deletion (#7349 does that once the router defect is fixed).
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 Allowance = dict[tuple[str, str], int]
@@ -50,6 +50,33 @@ def stale_entries(allowance: Allowance, found: dict[str, set[str]]) -> list[tupl
         for (rule, ident), issue in allowance.items()
         if ident not in found.get(rule, set())
     )
+
+
+def unallowed_findings(
+    allowance: Allowance,
+    violations: Iterable[Any],
+    *,
+    advisory: Callable[[str], bool] = lambda _rule: False,
+) -> list[tuple[str, str]]:
+    """Blocking error findings no allowance entry covers: ``(rule, identity)``.
+
+    Issue #7367: this is the number the routed-DRC total is compared to, so a
+    finding that is allowed by identity never uses up budget, and every other
+    blocking finding counts, whatever its rule.  One entry per violation
+    record; ``advisory`` rules (``connectivity``) are not blocking and are
+    left out.
+    """
+    out: list[tuple[str, str]] = []
+    for v in violations:
+        if not isinstance(v, dict) or v.get("severity") != "error":
+            continue
+        rule = v.get("rule_id")
+        if not isinstance(rule, str) or advisory(rule):
+            continue
+        ident = violation_identity(v)
+        if (rule, ident) not in allowance:
+            out.append((rule, ident))
+    return sorted(out)
 
 
 def format_stale(stale: list[tuple[str, str, int]]) -> str:

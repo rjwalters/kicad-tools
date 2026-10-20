@@ -5,37 +5,29 @@
 # output/ never inherits these allowances.
 # Evidence: docs/demo-readiness-2026-09-09.md and each output/readiness.json.
 # Additions require a tracking issue and explicit review of the regression.
-tolerances:
-  # Restore the final pre-redesign baseline, not obsolete historical maxima.
-  # Provenance: d95b6eff^:.github/routed-drc-tolerance.yml lines 1113-1140;
-  # #4019 ratcheted to 18 after runs 29075253404/29072031350/29070816533.
-  # Exactly 9 skew + 9 continuity; new via-in-pad errors must be repaired.
-  # PR #5152 added a different-net SMD pad/pad factory floor (0.15mm) and this
-  # entry was briefly ratcheted 18 -> 20 to absorb 2 new `clearance_pad_pad`
-  # errors it raised here.  That ratchet is REVERTED: the 2 errors were
-  # `U3-24 <-> U3-36` and `U3-25 <-> U3-37`, both pairs of pads on the SAME
-  # footprint (an LQFP-48), measuring 0.1414mm == 0.1 * sqrt(2) -- the diagonal
-  # gap between adjacent pad rows at 0.5mm pitch.  That is vendor-fixed package
-  # geometry: no re-route or placement change can widen it, and JLCPCB
-  # fabricates fine-pitch QFP/QFN routinely, so the floor must not apply there.
-  # The floor is now scoped to pads of DIFFERENT footprints (a placement limit,
-  # which is what it actually expresses) -- see
-  # `validate.rules.clearance.CopperElement.source_footprint`.  The count is
-  # back to exactly 9 skew + 9 continuity.
-  boards/06-diffpair-test/regression-fixture/diffpair_test_routed.kicad_pcb: 18
-  # Provenance: same historical file lines 1754-1763; #4007 ratcheted 9 -> 8
-  # after via-aware ADDR_BUS tuning. Four pair-skew +four continuity errors.
-  boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb: 8
-  # Issue #6390 declared the router's own net classes (Power, Clock,
-  # HighCurrentSignal, ...) in the routed sidecars, so `kct check` holds
-  # the committed copper to them.  Releases that sat below their own
-  # classes were re-derived rather than allowed: board 05's 27 were repaired
-  # in #6395, and board 03's 13 x Power 0.2 mm in #6394 (its plan re-derived
-  # from a class-clean lattice route); both entries are removed.
-  # Board 07's active release (42 x SDRAM_* / AUX 0.175 mm, #6396) gets NO
-  # entry: active releases never carry an allowance
-  # (tests/test_recipe_artifact_isolation.py), so its strict-0 gate fails
-  # visibly on the next PR that touches that PCB until #6396 lands.
+# Issue #7367: the board 06/07 synthetic regression fixtures
+# (boards/0{6,7}-*/regression-fixture/*_routed.kicad_pcb) have NO entry, so
+# they resolve to the strict 0 like every other key.  Their known residual
+# findings are allowed by IDENTITY, each with an open tracking issue, in
+# scripts/ci/check_diffpair_coverage.py (DIFFPAIR_FIXTURE_ALLOWED_FINDINGS)
+# and scripts/ci/check_matchgroup_coverage.py
+# (MATCHGROUP_FIXTURE_ALLOWED_FINDINGS, MATCHGROUP_ALLOWED_GROUPS).  The
+# total those gates compare to 0 counts only blocking findings outside that
+# allowance, and an entry that stops firing fails the gate as stale.  The
+# old counts (board 06: 18, ratcheted by #4019; board 07: 8, by #4007) let a
+# different finding hide behind a known one (#7270 Q3 ruling); never
+# re-add a count here for them.
+# Issue #6390 declared the router's own net classes (Power, Clock,
+# HighCurrentSignal, ...) in the routed sidecars, so `kct check` holds
+# the committed copper to them.  Releases that sat below their own
+# classes were re-derived rather than allowed: board 05's 27 were repaired
+# in #6395, and board 03's 13 x Power 0.2 mm in #6394 (its plan re-derived
+# from a class-clean lattice route); both entries are removed.
+# Board 07's active release (42 x SDRAM_* / AUX 0.175 mm, #6396) gets NO
+# entry: active releases never carry an allowance
+# (tests/test_recipe_artifact_isolation.py), so its strict-0 gate fails
+# visibly on the next PR that touches that PCB until #6396 lands.
+tolerances: {}
 
 # Preserve the fabrication processes selected by the reviewed real designs.
 manufacturers:
