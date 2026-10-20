@@ -65,6 +65,15 @@ from .optimizer.serpentine import (
     SerpentineGenerator,
     SerpentineResult,
 )
+from .tuning_pattern import (
+    STATUS_TOO_LONG,
+    STATUS_TOO_SHORT,
+    STATUS_TUNED,
+    TuningPattern,
+    retag,
+    skew_bump_pattern,
+    tag_skew_bump,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -356,6 +365,8 @@ def tune_diff_pair_skew(
     result = DiffPairTuneResult(skew_before_mm=skew)
     current_shorter = shorter_route
     current_skew = skew
+    # Committed bumps and their tuning patterns (issue #7521).
+    bumps: list[tuple[list[Segment], TuningPattern]] = []
 
     # Cascade loop.  Each iteration: compute outer normal, attempt one
     # trombone, run the self-check, commit or reject.
@@ -496,6 +507,20 @@ def tune_diff_pair_skew(
         # Commit this attempt's new route and re-measure skew.
         current_shorter = candidate_route
         result.inserts_applied += 1
+        # Issue #7521: the bump is written as a KiCad tuning pattern.  Only
+        # the segments that leave the host line are members.
+        for seg in cand_serp.new_segments:
+            seg.tuning_pattern = None
+        bump = skew_bump_pattern(
+            cand_serp.new_segments,
+            longer_route,
+            diff_pair_gap=intra_pair_clearance_mm,
+            min_spacing=base_config.min_spacing * base_config.gap_factor,
+            tolerance_mm=tolerance_mm,
+        )
+        if bump is not None:
+            tag_skew_bump(bump[1], bump[0])
+            bumps.append((bump[1], bump[0]))
         new_shorter_length = measure(current_shorter)
         current_skew = (
             abs(new_shorter_length - target_length)
@@ -523,6 +548,20 @@ def tune_diff_pair_skew(
     result.skew_after_mm = (
         abs(target_length - measure(current_shorter)) if result.inserts_applied > 0 else skew
     )
+
+    # Issue #7521: record the pair's final state on the bumps' patterns
+    # (``last_status``), the way KiCad reports a saved pattern.
+    if result.inserts_applied > 0 and bumps:
+        final_shorter = measure(current_shorter)
+        if abs(target_length - final_shorter) <= tolerance_mm:
+            status = STATUS_TUNED
+        elif final_shorter < target_length:
+            status = STATUS_TOO_SHORT
+        else:
+            status = STATUS_TOO_LONG
+        for members, pattern in bumps:
+            if pattern.last_status != status:
+                retag(members, pattern, last_status=status)
 
     # Assemble return values, restoring P/N polarity ordering.  The
     # longer route is ALWAYS returned by the same reference the caller

@@ -57,6 +57,7 @@ Measured experiments on `kct route`; several record negative results.
 | [Nogood cache](kct-route-nogood-cache-experiment.md) | Validity-aware nogood cache for negotiated retries |
 | [Phase profile](kct-route-phase-profile.md) | Where `kct route` time goes on boards 02 and 03 |
 | [GPU / batched routing design](gpu-routing-design.md) | Profile-first GPU routing go/no-go: don't build (Amdahl ceilings below 2x) |
+| [Pad-access expansion reassessment](pad-access-expansion-reassessment.md) | Epic #5508 Phase 4 (lattice/mesh) gate: defer |
 | [Rip-up](kct-route-ripup-experiment.md) | KRT-style sequential N+1 rip-up: no gain |
 | [Expand, route, shrink](expand-route-shrink-experiment.md) | Routing an expanded placement then shrinking it back |
 | [Diff-pair bench, phase 0](diffpair-bench-phase0.md) | Diff-pair benchmark baseline |
