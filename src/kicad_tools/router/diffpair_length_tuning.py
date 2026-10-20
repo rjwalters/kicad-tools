@@ -60,6 +60,12 @@ import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from .diffpair_bump_gates import (
+    bump_gate_violation,
+    jog_spaced,
+    max_excursion_mm,
+    replaced_index,
+)
 from .optimizer.geometry import segment_length
 from .optimizer.serpentine import (
     SerpentineConfig,
@@ -390,6 +396,13 @@ def tune_diff_pair_skew(
     base_config = dataclasses.replace(
         config or SerpentineConfig(), corner_chamfer_widths=corner_chamfer_widths
     )
+    # Issue #7521 (AC3): a bump never strays more than 2x the pair gap, so cap
+    # the loop amplitude there and let the generator add loops instead.
+    if intra_pair_clearance_mm > 0.0:
+        base_config = dataclasses.replace(
+            base_config,
+            amplitude=min(base_config.amplitude, max_excursion_mm(intra_pair_clearance_mm)),
+        )
 
     result = DiffPairTuneResult(skew_before_mm=skew)
     current_shorter = shorter_route
@@ -423,7 +436,10 @@ def tune_diff_pair_skew(
                 f"No segment long enough for a trombone on net {shorter_id} "
                 f"(skew={current_skew:.4f}mm > tol={tolerance_mm:.4f}mm)"
             )
-            current_shorter = original_shorter_route
+            # Inserts committed by earlier attempts stay (issue #6788); with
+            # none committed the original route comes back by reference.
+            if result.inserts_applied == 0:
+                current_shorter = original_shorter_route
             break
         seg_idx, insertion_segment = best
 
@@ -475,6 +491,18 @@ def tune_diff_pair_skew(
             # An option that adds no copper is not an insert (issue #6788).
             if measure(cand_route) - measure(current_shorter) <= 1e-9:
                 generator_failure = "serpentine added no length"
+                continue
+            # Issue #7521 (AC3): excursion, jog and mismatch-source proximity.
+            # Measured on the generated geometry, chamfered or square.
+            gate_violation = bump_gate_violation(
+                cand_serp.new_segments,
+                current_shorter,
+                replaced_index(current_shorter, cand_route),
+                longer_route,
+                nominal_gap_mm=intra_pair_clearance_mm,
+            )
+            if gate_violation is not None:
+                generator_failure = gate_violation
                 continue
             # Issue #7521: the bump is written as a KiCad tuning pattern, so
             # tag it before the uncoupled guard measures the candidate (the
@@ -802,13 +830,13 @@ def _placement_options(
     from .match_group_tuning import _centered_sub_host, _rank_candidate_segments
     from .primitives import Route
 
-    gap_mm = base_config.min_spacing * base_config.gap_factor
-
-    def config_for(amplitude: float, hint: tuple[float, float]) -> SerpentineConfig:
+    def config_for(amplitude: float, hint: tuple[float, float], width: float) -> SerpentineConfig:
+        # Issue #7521 (AC3): loop spacing wide enough for 3x-width jogs.
+        spaced = jog_spaced(base_config, width)
         return SerpentineConfig(
             style=base_config.style,
             amplitude=amplitude,
-            min_spacing=base_config.min_spacing,
+            min_spacing=spaced.min_spacing,
             min_segment_length=base_config.min_segment_length,
             gap_factor=base_config.gap_factor,
             max_iterations=base_config.max_iterations,
@@ -822,7 +850,7 @@ def _placement_options(
         length_needed, base_config.amplitude, base_config, first_host[1].width
     )
     amplitude = max(amplitude, _min_chamfered_amplitude(base_config, first_host[1].width))
-    generator = SerpentineGenerator(config_for(amplitude, first_hint))
+    generator = SerpentineGenerator(config_for(amplitude, first_hint, first_host[1].width))
     seg_idx, host = first_host
     if fixed_segment_ids:
         serp = generator.generate_trombone(host, length_needed)
@@ -873,13 +901,14 @@ def _placement_options(
                         sub_host, lead_in, lead_out = _centered_sub_host(
                             host,
                             loops=loops,
-                            gap_mm=gap_mm,
+                            gap_mm=jog_spaced(base_config, host.width).min_spacing
+                            * base_config.gap_factor,
                             min_length_mm=base_config.min_segment_length,
                             chamfer_mm=base_config.chamfer_mm(host.width, amp),
                         )
                         if sub_host is host:
                             continue  # no slack: same as start-anchored
-                    serp = SerpentineGenerator(config_for(amp, hint)).generate_trombone(
+                    serp = SerpentineGenerator(config_for(amp, hint, host.width)).generate_trombone(
                         sub_host, length_needed
                     )
                     if serp.success:

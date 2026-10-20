@@ -411,14 +411,14 @@ class TestPostInsertionRollback:
         neighbor = Route(
             net=3,
             net_name="VCC",
-            segments=[Segment(0.0, -0.5, 10.0, -0.5, 0.2, Layer.F_CU, net=3, net_name="VCC")],
+            segments=[Segment(0.0, -0.3, 10.0, -0.3, 0.2, Layer.F_CU, net=3, net_name="VCC")],
         )
         # Issue #6788: the tuner now also tries the reverse side, so block
         # the +y side (toward the partner) the same way.
         neighbor_inner = Route(
             net=4,
             net_name="VCC2",
-            segments=[Segment(0.0, 0.5, 10.0, 0.5, 0.2, Layer.F_CU, net=4, net_name="VCC2")],
+            segments=[Segment(0.0, 0.3, 10.0, 0.3, 0.2, Layer.F_CU, net=4, net_name="VCC2")],
         )
         routes = {1: p, 2: n, 3: neighbor, 4: neighbor_inner}
         original_p = p
@@ -960,7 +960,7 @@ class TestExactFitAndPlacementSearch:
 
         with patch.object(SerpentineGenerator, "add_serpentine", noop):
             _p, _n, result = tune_diff_pair_skew(
-                _make_pair(), {1: p, 2: n}, tolerance_mm=0.5, intra_pair_clearance_mm=0.1
+                _make_pair(), {1: p, 2: n}, tolerance_mm=0.5, intra_pair_clearance_mm=0.5
             )
         assert result.success is True
         assert result.inserts_applied == 1
@@ -999,6 +999,15 @@ class TestExactFitAndPlacementSearch:
 
 
 class TestUncoupledGuardAndOvershootRevert:
+    @pytest.fixture(autouse=True)
+    def _isolate_uncoupled_guard(self):
+        """Judge the uncoupled guard alone: the hand-built folds here break the
+        issue #7521 AC3 geometry gates, which have their own tests."""
+        with patch(
+            "kicad_tools.router.diffpair_length_tuning.bump_gate_violation", return_value=None
+        ):
+            yield
+
     @staticmethod
     def _figures(p: Route, n: Route) -> tuple[float, float]:
         """``(uncoupled(P), uncoupled(N))`` exactly as ``kct check`` measures them."""
@@ -1113,7 +1122,7 @@ class TestUncoupledGuardAndOvershootRevert:
                     _make_pair(),
                     {1: p, 2: n},
                     tolerance_mm=1.0,
-                    intra_pair_clearance_mm=0.1,
+                    intra_pair_clearance_mm=0.5,
                     max_uncoupled_mm=limit,
                 )
 
@@ -1186,7 +1195,7 @@ class TestUncoupledGuardAndOvershootRevert:
                 _make_pair(),
                 {1: p, 2: n},
                 tolerance_mm=1.0,
-                intra_pair_clearance_mm=0.1,
+                intra_pair_clearance_mm=0.5,
                 max_uncoupled_mm=10.0,
             )
         assert all(s.tuning_pattern is None for s in folded.segments)

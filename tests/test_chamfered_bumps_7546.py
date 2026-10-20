@@ -342,7 +342,8 @@ class TestBindingLimitFallsBackToChamferedPlainCopper:
         return p, n, p_out, n_out, result
 
     def test_pattern_is_preferred_when_it_passes(self):
-        *_, n_out, result = self._tune(0.2, 128.0, 2.5)  # square pattern reads 2.4 mm
+        # The square pattern reads 3.2 mm (loop spacing is 3x the width, #7521 AC3).
+        *_, n_out, result = self._tune(0.2, 128.0, 3.5)
         assert result.reason == "tuned"
         assert any(s.tuning_pattern is not None for s in n_out.segments)
 
@@ -351,12 +352,12 @@ class TestBindingLimitFallsBackToChamferedPlainCopper:
         assert result.reason == "tuned"
         assert any(s.tuning_pattern is not None for s in n_out.segments)
 
-    @pytest.mark.parametrize(("n_end", "limit"), [(129.5, 0.8), (129.0, 1.3)])
+    @pytest.mark.parametrize(("n_end", "limit"), [(129.5, 0.8), (129.2, 1.1)])
     def test_thin_trace_pair_is_tuned_plain_and_engines_agree(self, pinned_cli, n_end, limit):
         cli, root = pinned_cli
         p, n, p_out, n_out, result = self._tune(0.127, n_end, limit)
         assert result.reason == "tuned" and result.skew_after_mm <= 0.127
-        # The square pattern form failed (0.90 / 1.40 mm); this is plain copper.
+        # The square pattern form failed (0.90 / 1.20 mm); this is plain copper.
         assert all(s.tuning_pattern is None for s in n_out.segments)
         diagonal = [
             s for s in n_out.segments if abs(s.x2 - s.x1) > 1e-9 and abs(s.y2 - s.y1) > 1e-9
