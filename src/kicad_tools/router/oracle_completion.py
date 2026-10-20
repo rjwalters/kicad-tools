@@ -1368,6 +1368,10 @@ class PourLinkCloser:
     #: route`` reserved for pour pads before signal routing.  The weld tries
     #: them first; ``None`` leaves it unchanged.
     preferred_sites: Mapping[str, Sequence[tuple[float, float]]] | None = None
+    #: Issue #7602: ``run_stitch``'s ``pad_edge_gap`` -- the mask-dam floor a weld
+    #: via keeps from every SMD pad (the router's ``min_via_pad_edge_gap``).
+    #: ``0`` disables the guard.
+    pad_edge_gap: float = 0.0
 
     # -- net-class clearance (Issue #6374) ----------------------------------------
 
@@ -1808,6 +1812,7 @@ class PourLinkCloser:
                 strict_drill_overlap=True,
                 preferred_sites=self.preferred_sites,
                 avoid_sites=avoid or None,
+                pad_edge_gap=self.pad_edge_gap,
             )
 
         force: frozenset[str] = frozenset()
