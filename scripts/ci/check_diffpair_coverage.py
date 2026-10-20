@@ -154,7 +154,8 @@ DIFFPAIR_FIXTURE_KEY = "boards/06-diffpair-test/regression-fixture/diffpair_test
 # ``.github/routed-drc-tolerance.yml`` total (18), so up to 7 continuity
 # findings, or a new pair in place of a fixed one, passed both.  The pairs
 # below are the ones the seed-42 re-route measures over ``max_skew_mm``: 8 of the 9
-# declared pairs (they route single-ended, so the legs differ).  Fixing them
+# declared pairs (most route single-ended, so the legs differ; USB2_D routes
+# coupled and only its skew is over).  Fixing them
 # is tracked in #7548 (coupling-preserving tuning in general is #6447).
 DIFFPAIR_SKEW_TRACKER = 7548
 #
@@ -165,14 +166,14 @@ DIFFPAIR_SKEW_TRACKER = 7548
 # entry is #7349's job.
 DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
     ("impedance", "USB3_TX2-"): 7349,
-    # Seed-42 re-route, ``e1c361478`` (2026-10-20): skew vs max_skew_mm.
+    # Seed-42 re-route, PR #7570 / #7491 (2026-10-20): skew vs max_skew_mm.
     ("diffpair_length_skew", "MIPI_CLK+/MIPI_CLK-"): DIFFPAIR_SKEW_TRACKER,  # 1.311 / 0.300
     ("diffpair_length_skew", "MIPI_D0+/MIPI_D0-"): DIFFPAIR_SKEW_TRACKER,  # 2.320 / 0.300
     ("diffpair_length_skew", "PCIE_RX+/PCIE_RX-"): DIFFPAIR_SKEW_TRACKER,  # 1.693 / 0.500
     ("diffpair_length_skew", "PCIE_TX+/PCIE_TX-"): DIFFPAIR_SKEW_TRACKER,  # 2.244 / 0.500
-    ("diffpair_length_skew", "USB2_D+/USB2_D-"): DIFFPAIR_SKEW_TRACKER,  # 3.327 / 1.270
+    ("diffpair_length_skew", "USB2_D+/USB2_D-"): DIFFPAIR_SKEW_TRACKER,  # 1.896 / 1.270
     ("diffpair_length_skew", "USB3_RX2+/USB3_RX2-"): DIFFPAIR_SKEW_TRACKER,  # 3.329 / 0.500
-    ("diffpair_length_skew", "USB3_TX1+/USB3_TX1-"): DIFFPAIR_SKEW_TRACKER,  # 2.173 / 0.500
+    ("diffpair_length_skew", "USB3_TX1+/USB3_TX1-"): DIFFPAIR_SKEW_TRACKER,  # 2.465 / 0.500
     ("diffpair_length_skew", "USB3_TX2+/USB3_TX2-"): DIFFPAIR_SKEW_TRACKER,  # 2.764 / 0.500
 }
 
