@@ -588,7 +588,10 @@ class ImpedanceRule(DRCRule):
                     # Longitudinal overlap of the partner on this segment.
                     t1 = (ox1 - x1) * ux + (oy1 - y1) * uy
                     t2 = (ox2 - x1) * ux + (oy2 - y1) * uy
-                    if min(max(t1, t2), length) <= max(min(t1, t2), 0.0):
+                    overlap = min(max(t1, t2), length) - max(min(t1, t2), 0.0)
+                    # An overlap shorter than the trace is wide is a pad
+                    # escape stub, not a coupled run (Issue #7575).
+                    if overlap < max(trace["width_mm"], other["width_mm"]):
                         continue
                     mx, my = (ox1 + ox2) / 2, (oy1 + oy2) / 2
                     centre = abs((mx - x1) * uy - (my - y1) * ux)

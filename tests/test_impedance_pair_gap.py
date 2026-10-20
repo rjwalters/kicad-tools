@@ -61,3 +61,22 @@ def test_partner_on_other_layer_is_not_judged():
 def test_zero_width_single_ended_is_not_passed_as_50_ohm():
     rule = ImpedanceRule(specs=[NetImpedanceSpec(r"CLK", target_z0=50.0)], stackup=STACKUP)
     assert not _check(rule, [_seg("CLK", 5.0, width=0.0)])
+
+
+def test_pad_escape_stub_overlap_is_not_a_coupled_run():
+    # 1.6 mm breakout segment with a 0.1 mm partner stub beside it at a
+    # 0.35 mm gap: the overlap is shorter than the trace is wide (Issue #7575).
+    segs = [
+        _seg("USB_D+", 10.0, width=0.25, x1=10.0, x2=11.6),
+        _seg("USB_D-", 10.6, width=0.25, x1=10.0, x2=10.1),
+    ]
+    assert not _check(_rule(300.0), segs)
+
+
+def test_partner_run_at_least_as_long_as_width_is_judged():
+    # Same geometry, partner run exactly as long as the trace is wide.
+    segs = [
+        _seg("USB_D+", 10.0, width=0.25, x1=10.0, x2=11.6),
+        _seg("USB_D-", 10.6, width=0.25, x1=10.0, x2=10.25),
+    ]
+    assert _check(_rule(300.0), segs)
