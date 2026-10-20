@@ -83,6 +83,27 @@ def apply_library_ids(pcb: Path, schematic: Path) -> int:
     return len(edits)
 
 
+def enable_length_matching(net_class_map: Path) -> int:
+    """Turn route-time length matching on in the published class map (issue #7423).
+
+    The operator ruled (#5798 Q4/Q8) that board 07's SDRAM match groups tune
+    at route time, i.e. ``length_critical: true`` on every net that declares a
+    ``length_match_group`` -- without it ``kct route --length-match-groups``
+    leaves every group ``not_length_critical``.  The authored fixture's map is
+    hash-bound and immutable, so the flag is set on the copy this recipe
+    publishes, like the stackup it stamps into ``sdram_constraints.json``.
+    Returns the number of nets turned on.
+    """
+    rules = json.loads(net_class_map.read_text())
+    count = 0
+    for rule in rules.values():
+        if rule.get("length_match_group"):
+            rule["length_critical"] = True
+            count += 1
+    net_class_map.write_text(json.dumps(rules, indent=2) + "\n")
+    return count
+
+
 def build(output: Path) -> dict:
     fixture = ROOT / "authored-source"
     manifest = json.loads((fixture / "manifest.json").read_text())
@@ -116,6 +137,7 @@ def build(output: Path) -> dict:
                 shutil.copy2(path, output / path.name)
         for name in manifest["sha256"]:
             shutil.copy2(fixture / name, output / name)
+        enable_length_matching(output / "net_class_map.json")
         # Issue #6025: the authored fixture is hash-bound and immutable, so the
         # schematic pin names/types are carried onto the pads of the copy,
         # the first unrouted PCB this recipe writes.
