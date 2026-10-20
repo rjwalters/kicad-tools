@@ -61,9 +61,13 @@ _P_A = _pad(3.0, 2.0, 1, "D+", "J1", pin="A6")
 _P_B = _pad(15.0, 2.0, 1, "D+", "J1", pin="B6")
 _N_A = _pad(3.0, 8.0, 2, "D-", "J1", pin="A7")
 _N_B = _pad(15.0, 8.0, 2, "D-", "J1", pin="B7")
-#: An F.Cu wall from just above P's row to the top edge: with P's extra laid
-#: first, N can only pass the wall by dropping through B.Cu (2 vias).
-_N_WALL = _pad(9.0, 7.3, 9, "WALL", "W1", width=0.6, height=9.4)
+#: An F.Cu wall from P's row (y = 2) to the top edge: with P's extra laid
+#: first, N can only pass the wall by dropping through B.Cu (2 vias).  The
+#: wall's foot must sit low enough that no corridor is left between it and
+#: P's detour along y = 1.6: with the foot at y = 2.6 a 0.4 mm corridor stayed
+#: open once the keep-out followed the true pad outline, so a diagonal could
+#: slip past the foot's corner (issue #7645, after #7503).
+_N_WALL = _pad(9.0, 7.0, 9, "WALL", "W1", width=0.6, height=10.0)
 
 _P_EXTRA = ((1, 0), _P_A, _P_B, _HS)
 _N_EXTRA = ((2, 0), _N_A, _N_B, _HS)
