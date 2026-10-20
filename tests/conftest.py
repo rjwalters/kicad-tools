@@ -23,6 +23,14 @@ EXTERNAL_BOARDS_ENV_VAR = "KICAD_TOOLS_EXTERNAL_BOARDS_DIR"
 # ``KCT_NATIVE_MAX_CONCURRENCY`` is set; idempotent with the package import.
 install_from_environment()
 
+# Issue #5240: each test ``kicad-cli pcb drc`` loads only the footprint
+# libraries its board names, not all 155 in the pinned table (~5 CPU-s a
+# launch). Same lookups, same report; see tests/kicad_fp_table_subset.py.
+# KCT_TEST_FULL_FP_LIB_TABLE=1 turns it off.
+from tests.kicad_fp_table_subset import install as _install_fp_table_subset  # noqa: E402
+
+_install_fp_table_subset()
+
 
 @contextmanager
 def preserved_cpp_import_state():
