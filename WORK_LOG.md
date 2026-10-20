@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-20
 
+- **PR #7582**: chore(release): v0.24.0
+- **PR #7600**: fix(board06): fuse pair-leg grid steps so the skew tuner can host a trombone
 - **PR #7599**: test(route): golden harness for kct route's four entry paths (#7377)
 - **PR #7598**: docs(router): drop the closed square-meander divergence from #7546's rationale
 - **PR #7571**: fix(router): verify lattice pair legs at their true width against other nets' copper
