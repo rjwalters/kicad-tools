@@ -80,6 +80,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
     from typing import Any
 
+    from kicad_tools.validate.rules.diffpair_uncoupled_length import Copper
+
     from .diffpair_detection import DetectedPair
     from .grid import RoutingGrid
     from .primitives import Route, Segment
@@ -632,13 +634,41 @@ def tune_diff_pair_skew(
         return current_shorter, n_route, result
 
 
-def _checker_segments(segments: list[Segment]) -> list[tuple[float, float, float, float, str]]:
-    """Segments as the ``(x1, y1, x2, y2, layer)`` tuples the uncoupled-length rule reads.
+def _checker_segments(
+    segments: list[Segment],
+) -> list[tuple[float, float, float, float, str, float]]:
+    """Segments as the ``(x1, y1, x2, y2, layer, width)`` tuples the uncoupled-length rule reads.
 
     Issue #7521: tuning-pattern copper (``Segment.tuning_pattern``) is left
     out, as ``kct check`` and pinned kicad-cli 10.0.6 leave it out.
     """
-    return [(s.x1, s.y1, s.x2, s.y2, str(s.layer)) for s in segments if s.tuning_pattern is None]
+    return [
+        (s.x1, s.y1, s.x2, s.y2, str(s.layer), s.width)
+        for s in segments
+        if s.tuning_pattern is None
+    ]
+
+
+def _pair_copper(a: Route, b: Route) -> Copper:
+    """The pair's own tracks and vias as pairing obstacles (Issue #6554).
+
+    ``kct check`` lets other copper stand between two parallel runs
+    (``Copper``); in a candidate meander that copper is mostly the pair's own
+    folded legs.  Pads and third-net copper are not in a ``Route``, so the
+    guard sees only the pair.  Tuning-pattern copper is still copper here,
+    as it is on the board.
+    """
+    from kicad_tools.validate.rules.diffpair_uncoupled_length import Copper
+
+    tracks: list[tuple[float, float, float, float, float, str | None]] = [
+        (s.x1, s.y1, s.x2, s.y2, s.width, str(s.layer)) for r in (a, b) for s in r.segments
+    ]
+    tracks += [(v.x, v.y, v.x, v.y, v.diameter, None) for r in (a, b) for v in r.vias]
+    return Copper(tracks, ())
+
+
+def _is_n_name(name: str) -> bool:
+    return name.endswith(("-", "_N", "_n", "N"))
 
 
 def _pair_uncoupled_mm(a: Route, b: Route) -> float:
@@ -647,13 +677,20 @@ def _pair_uncoupled_mm(a: Route, b: Route) -> float:
     ``diffpair_uncoupled_length`` fails a pair on ``max(uncoupled(P),
     uncoupled(N))``, each half measured against the other, so this is
     symmetric in its arguments.  Tuning-pattern copper is excluded on both
-    sides (issue #7521).
+    sides (issue #7521).  The pair's own copper may stand between two
+    parallel runs, as in ``kct check`` (issue #6554); P's stored direction
+    anchors the probe, so ``a`` leads unless it is the N net.
     """
     from kicad_tools.validate.rules.diffpair_uncoupled_length import measure_uncoupled
 
     sa = _checker_segments(a.segments)
     sb = _checker_segments(b.segments)
-    return max(measure_uncoupled(sa, sb), measure_uncoupled(sb, sa))
+    copper = _pair_copper(a, b)
+    a_leads = not (_is_n_name(a.net_name) and not _is_n_name(b.net_name))
+    return max(
+        measure_uncoupled(sa, sb, copper, a_leads, a.net_name, b.net_name),
+        measure_uncoupled(sb, sa, copper, not a_leads, b.net_name, a.net_name),
+    )
 
 
 # ---------------------------------------------------------------------------

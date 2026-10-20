@@ -60,6 +60,17 @@ def via(at, net):
     )
 
 
+def pad(at, net, size=(0.8, 0.95), ref="R1", shape="roundrect"):
+    rratio = "(roundrect_rratio 0.25) " if shape == "roundrect" else ""
+    return (
+        f'\t(footprint "X" (layer "F.Cu") (at {at[0]} {at[1]}) (uuid "{uuid.uuid4()}")\n'
+        f'\t\t(property "Reference" "{ref}" (at 0 0) (layer "F.SilkS") (uuid "{uuid.uuid4()}"))\n'
+        f'\t\t(pad "1" smd {shape} (at 0 0) (size {size[0]} {size[1]}) '
+        f'(layers "F.Cu" "F.Mask" "F.Paste") {rratio}(net "{net}") '
+        f'(uuid "{uuid.uuid4()}")))\n'
+    )
+
+
 def write_board(path: Path, items: list[str], dru: str = "") -> Path:
     edge = (
         "\t(gr_rect (start -5 -10) (end 60 20) (stroke (width 0.1) (type default)) "
@@ -187,6 +198,181 @@ PINNED = {
 }
 
 
+# Issue #6554: KiCad pairs primitives, it does not take every parallel overlap.
+# Measured on kicad-cli 10.0.6 (Docker kicad/kicad:10.0); the rule inferred:
+#
+# * a P trace and an N trace couple over their overlap when they run parallel on
+#   one layer; the coupled lengths of all such pairs are SUMMED (two partners
+#   beside the same stretch both count, so a net can read negative);
+# * a pair does not couple at all when other copper stands between the two
+#   traces where their overlap starts -- a probe across the gap, at the overlap
+#   end that lies at the START of the P trace as stored in the file (N and
+#   third-net traces, vias and pads all block, at any distance);
+# * copper that overlaps either trace of the pair (same conductor) does not block;
+# * a trace lying wholly inside a pad of its own net does not couple.
+_NB = seg((0, 2), (16, 2), "T_N")  # N1: 0..16 at y=2, beside the 20 mm P trace
+#: Pad half-size and gap used by the buried-stub cases (a 0.26 mm trace pair).
+_GAP = 1.65
+
+
+def _w(a, b, y, net, width=0.26):
+    return seg((a, y), (b, y), net, width=width)
+
+
+PINNED.update(
+    {
+        "intervening_at_start": (
+            [P20, _NB, seg((0, 0.4), (5, 0.4), "T_N")],
+            16.0,
+            "N2 0..5 stands between P and N1 at the overlap start: N1 uncoupled",
+        ),
+        "intervening_mid": (
+            [P20, _NB, seg((3, 0.4), (8, 0.4), "T_N")],
+            0.0,
+            "N2 3..8 is clear of the overlap start: everything couples (sum 21 > 20)",
+        ),
+        "intervening_far_from_p": (
+            [P20, _NB, seg((0, 1.0), (5, 1.0), "T_N")],
+            16.0,
+            "the blocker's distance does not matter",
+        ),
+        "beyond_partner_does_not_block": (
+            [P20, _NB, seg((0, 3), (5, 3), "T_N")],
+            5.0,
+            "N2 on the far side of N1 is not between: N2 itself is unpaired",
+        ),
+        "intervening_touches_partner": (
+            [P20, _NB, seg((0, 1.9), (5, 1.9), "T_N")],
+            0.0,
+            "copper overlapping N1 is the same conductor, not an obstruction",
+        ),
+        "intervening_edge_touch_blocks": (
+            [P20, _NB, seg((0, 1.8), (5, 1.8), "T_N")],
+            16.0,
+            "edge contact without overlap still stands between",
+        ),
+        "intervener_just_clear": (
+            [P20, _NB, seg((0.1, 0.4), (5.1, 0.4), "T_N")],
+            0.0,
+            "its round cap only reaches the overlap start line (tangent)",
+        ),
+        "intervener_cap_reaches": (
+            [P20, _NB, seg((0.09, 0.4), (5.09, 0.4), "T_N")],
+            16.0,
+            "its round cap crosses the overlap start line",
+        ),
+        "intervener_other_layer": (
+            [P20, _NB, seg((0, 0.4), (5, 0.4), "T_N", "B.Cu")],
+            5.0,
+            "an other-layer trace is not between (and is itself unpaired)",
+        ),
+        "intervener_third_net": (
+            [P20, _NB, seg((0, 1.0), (5, 1.0), "X")],
+            20.0,
+            "a third net blocks too: nothing couples",
+        ),
+        "intervener_same_net_as_p": (
+            [P20, _NB, seg((0, 1.0), (5, 1.0), "T_P")],
+            20.0,
+            "a P stub between blocks P/N1; the stub pairs with N1 instead",
+        ),
+        "intervener_via": (
+            [P20, _NB, via((0, 1.0), "X")],
+            20.0,
+            "a via is an obstruction",
+        ),
+        "overlap_start_not_trace_start": (
+            [P20, seg((2, 2), (16, 2), "T_N"), seg((2, 0.4), (7, 0.4), "T_N")],
+            15.0,
+            "the probe stands at the START OF THE OVERLAP (x=2), not the trace",
+        ),
+        "overlap_start_clear": (
+            [P20, seg((2, 2), (16, 2), "T_N"), seg((4, 0.4), (9, 0.4), "T_N")],
+            1.0,
+            "N2 4..9 does not reach x=2: N1 couples (14 + 5 > 20)",
+        ),
+        "anchor_p_reversed_start_side": (
+            [seg((20, 0), (0, 0), "T_P"), _NB, seg((0, 0.4), (5, 0.4), "T_N")],
+            0.0,
+            "P stored 20->0: its start is the x=16 end, so N2 0..5 is clear",
+        ),
+        "anchor_p_reversed_blocks": (
+            [seg((20, 0), (0, 0), "T_P"), _NB, seg((15, 0.4), (20, 0.4), "T_N")],
+            16.0,
+            "P stored 20->0: N2 15..20 covers the start of the overlap",
+        ),
+        "anchor_p_forward_end_side": (
+            [P20, _NB, seg((15, 0.4), (20, 0.4), "T_N")],
+            0.0,
+            "P stored 0->20: the far end is not anchored",
+        ),
+        "anchor_ignores_n_direction": (
+            [P20, seg((16, 2), (0, 2), "T_N"), seg((0, 0.4), (5, 0.4), "T_N")],
+            16.0,
+            "N's stored direction is irrelevant, P's decides",
+        ),
+        "anchor_ignores_intervener_direction": (
+            [P20, _NB, seg((5, 0.4), (0, 0.4), "T_N")],
+            16.0,
+            "the blocker's stored direction is irrelevant too",
+        ),
+        "stub_buried_in_pad": (
+            [
+                _w(57.8, 58, 0, "T_P"),
+                _w(57.8, 58, _GAP, "T_N"),
+                pad((58, 0), "T_P"),
+                pad((58, _GAP), "T_N", ref="R2"),
+            ],
+            0.2,
+            "a stub wholly inside its own pad does not couple",
+        ),
+        "stub_longer_than_pad": (
+            [
+                _w(57.8, 59, 0, "T_P"),
+                _w(57.8, 59, _GAP, "T_N"),
+                pad((58, 0), "T_P"),
+                pad((58, _GAP), "T_N", ref="R2"),
+            ],
+            0.0,
+            "a trace that leaves its pad couples (a pad of the pair never blocks)",
+        ),
+        "foreign_pad_between": (
+            [_w(0, 20, 0, "T_P"), _w(0, 20, _GAP, "T_N"), pad((0.3, 0.8), "X", (0.8, 0.5))],
+            20.0,
+            "a third-net pad standing between the traces blocks",
+        ),
+        # Black-box probe (Issue #6554): kct already agrees with kicad-cli here.
+        "pad_bottom_edge_is_inside": (
+            [P20, _NB, pad((0, 1.5), "T_N", (1.0, 1.0), ref="R2", shape="rect")],
+            4.0,
+            "N starts on the bottom edge of its own rect pad: kicad-cli reads 4.0",
+        ),
+    }
+)
+
+#: Black-box kicad-cli probes (inputs and KiCad's figures only) that kct's
+#: probe-derived model does not yet reproduce.  KiCad's figure is checked on
+#: its own; kct's is a strict xfail until the black-box spec of Issue #7565
+#: lands.  kct reads 4.0 on each of these.
+DIVERGENT = {
+    "touching_partner_mid_run": (
+        [P20, _NB, seg((0, 1.0), (3, 2.0), "T_N")],
+        20.0,
+        "an N stub joined to N1 mid-run, crossing between the traces",
+    ),
+    "third_net_touching_partner": (
+        [P20, _NB, seg((0, 1.0), (3, 2.0), "X")],
+        20.0,
+        "the same stub on a third net",
+    ),
+    "pad_top_edge": (
+        [P20, _NB, pad((0, 0.5), "T_P", (1.0, 1.0), shape="rect")],
+        20.0,
+        "P runs along the top edge of its own rect pad",
+    ),
+}
+
+
 @pytest.mark.parametrize("case", sorted(PINNED))
 def test_kct_measures_uncoupled_length_as_kicad_does(case, tmp_path) -> None:
     items, expected, _why = PINNED[case]
@@ -194,6 +380,24 @@ def test_kct_measures_uncoupled_length_as_kicad_does(case, tmp_path) -> None:
     assert kct_uncoupled(pcb) == pytest.approx(expected, abs=1e-3)
     # ... and KiCad reports the same figure.
     assert kicad_uncoupled(_kicad_cli(), pcb) == pytest.approx(expected, abs=1e-3)
+
+
+@pytest.mark.parametrize("case", sorted(DIVERGENT))
+def test_kicad_figure_on_divergent_probe(case, tmp_path) -> None:
+    """KiCad's own figure on the probes kct does not yet match (pinned measurement)."""
+    items, expected, _why = DIVERGENT[case]
+    pcb = write_board(tmp_path / "t.kicad_pcb", items)
+    assert kicad_uncoupled(_kicad_cli(), pcb) == pytest.approx(expected, abs=1e-3)
+
+
+@pytest.mark.xfail(
+    strict=True, reason="Issue #7565: known divergence from kicad-cli pending a black-box spec"
+)
+@pytest.mark.parametrize("case", sorted(DIVERGENT))
+def test_kct_matches_kicad_on_divergent_probe(case, tmp_path) -> None:
+    items, expected, _why = DIVERGENT[case]
+    pcb = write_board(tmp_path / "t.kicad_pcb", items)
+    assert kct_uncoupled(pcb) == pytest.approx(expected, abs=1e-3)
 
 
 def test_measure_uncoupled_is_exact_for_collinear_overlap() -> None:
@@ -554,24 +758,26 @@ def test_committed_boards_are_clean_in_both_engines_for_every_pair_rule(
         assert without_exception(pcb_rel, flagged) == []
 
 
-def test_known_divergence_kct_never_exceeds_kicad_on_committed_copper(tmp_path) -> None:
-    """kct's uncoupled figure is a lower bound of KiCad's on the committed boards.
+def test_kct_equals_kicad_on_committed_copper(tmp_path) -> None:
+    """kct's uncoupled figure equals KiCad's on every committed diff pair (Issue #6554).
 
-    KiCad pairs primitives in a way kct does not reproduce (it will not couple
-    two parallel runs that have a nearer non-parallel neighbour), so its figure
-    is larger: 10.087 / 1.055 mm for board 03's USB_D / USB_MCU_D and 1.541 mm
-    for each board 06 LVDS pair, against kct's 7.212 / 1.055 / 1.216 mm (board
-    03 re-derived from a fresh lattice route in #6394; kicad-cli 10.0.6).  The
-    documented gap (docs/guides/diff-pairs/08-uncoupled-length.md) is bounded here, so
-    a change that widens it is noticed.
+    These are the real-copper cases the synthetic PINNED probes were distilled
+    from: board 03's USB_D / USB_MCU_D and each board 06 LVDS pair.  KiCad
+    reads 10.087 / 1.055 mm and 1.541 mm (board 03 re-derived from a fresh
+    lattice route in #6394; kicad-cli 10.0.6); the projection-overlap model
+    the black-box probes replaced read 7.212 / 1.055 / 1.216 mm, because it
+    coupled the short stubs buried in pads that KiCad does not pair.
     """
     exe = _kicad_cli()
     import shutil
 
     expected = {
-        "USB_D": (10.0870, 7.2120),
-        "USB_MCU_D": (1.0550, 1.0550),
-        "LVDS1": (1.5412, 1.2162),
+        "USB_D": 10.0870,
+        "USB_MCU_D": 1.0550,
+        "LVDS1": 1.5412,
+        "LVDS2": 1.5412,
+        "LVDS3": 1.5412,
+        "LVDS4": 1.5412,
     }
     for pcb_rel, _ in COMMITTED:
         src = REPO / pcb_rel
@@ -593,18 +799,75 @@ def test_known_divergence_kct_never_exceeds_kicad_on_committed_copper(tmp_path) 
             seen[tuple(sorted(nets))] = actual
         pcb = PCB.load(str(work))
         ids = {n.name: n.number for n in pcb.nets.values()}
-        for base, (kicad_mm, kct_mm) in expected.items():
+        for base, kicad_mm in expected.items():
             for p, n in ((f"{base}+", f"{base}-"), (f"{base}_P", f"{base}_N")):
                 if p not in ids or n not in ids:
                     continue
                 mine = measure_pair(pcb, ids[p], ids[n], p, n).uncoupled_mm
-                assert mine == pytest.approx(kct_mm, abs=1e-3)
                 theirs = seen[tuple(sorted((p, n)))]
                 assert theirs == pytest.approx(kicad_mm, abs=1e-3)
-                # kicad-cli prints its figure to 4 decimals (0.1 um), so a pair
-                # both engines measure alike (board 03's USB_MCU_D: 1.0550055 vs
-                # 1.0550) is compared within that print rounding only (#6394).
-                assert mine <= theirs + 0.00005 and theirs <= mine + 3.0
+                assert mine == pytest.approx(theirs, abs=1e-3)
+
+
+#: Board 06's synthetic regression fixture: real router copper with grid-step
+#: diagonals, pads at trace ends and pairs left uncoupled.  KiCad's figures, read
+#: off kicad-cli 10.0.6 (Issue #6554, black-box measurement).
+FIXTURE_06 = "boards/06-diffpair-test/regression-fixture/diffpair_test_routed.kicad_pcb"
+FIXTURE_06_KICAD = {
+    "USB2_D": 8.5727,
+    "USB3_TX1": 35.4495,
+    "USB3_RX1": 49.5276,
+    "USB3_TX2": 4.1385,
+    "USB3_RX2": 32.1650,
+    "PCIE_TX": 7.4169,
+    "PCIE_RX": 6.2083,
+    "MIPI_CLK": 24.0083,
+    "MIPI_D0": 22.4092,
+}
+#: Pairs where kct's probe-derived model reads differently (kct: USB2_D 8.423,
+#: USB3_RX1 49.422, USB3_TX2 4.068, MIPI_D0 22.197 mm).  Known divergence,
+#: tracked by Issue #7565.
+FIXTURE_06_DIVERGENT = frozenset({"USB2_D", "USB3_RX1", "USB3_TX2", "MIPI_D0"})
+_DIVERGES = pytest.mark.xfail(
+    strict=True, reason="Issue #7565: known divergence from kicad-cli pending a black-box spec"
+)
+
+
+@pytest.mark.parametrize(
+    "base",
+    [
+        pytest.param(b, marks=_DIVERGES) if b in FIXTURE_06_DIVERGENT else b
+        for b in FIXTURE_06_KICAD
+    ],
+)
+def test_kct_equals_kicad_on_board_06_regression_fixture(base) -> None:
+    """kct's figure against KiCad's on each pair of the board-06 fixture (Issue #6554)."""
+    pcb = PCB.load(str(REPO / FIXTURE_06))
+    ids = {n.name: n.number for n in pcb.nets.values()}
+    mine = measure_pair(pcb, ids[f"{base}+"], ids[f"{base}-"], f"{base}+", f"{base}-")
+    assert mine.uncoupled_mm == pytest.approx(FIXTURE_06_KICAD[base], abs=1e-3)
+
+
+def test_board_06_regression_fixture_figures_are_kicads(tmp_path) -> None:
+    """The pinned fixture figures are what kicad-cli itself reports."""
+    exe = _kicad_cli()
+    import shutil
+
+    src = REPO / FIXTURE_06
+    work = tmp_path / src.name
+    for suffix in (".kicad_pcb", ".kicad_pro"):
+        shutil.copyfile(src.with_suffix(suffix), work.with_suffix(suffix))
+    work.with_suffix(".kicad_dru").write_text(
+        '(version 1)\n(rule "u"\n (condition "A.inDiffPair(\'*\')")\n'
+        " (constraint diff_pair_uncoupled (max 0.01mm)))\n"
+    )
+    seen = {}
+    for v in kicad_report(exe, work):
+        if v["type"] == "diff_pair_uncoupled_length_too_long":
+            nets = {i["description"].rsplit("[", 1)[-1].split("]", 1)[0] for i in v["items"]}
+            base = min(nets)[:-1]
+            seen[base] = float(v["description"].rsplit("actual", 1)[1].split("mm")[0])
+    assert seen == pytest.approx(FIXTURE_06_KICAD, abs=1e-3)
 
 
 def test_limit_only_block_has_no_gap_header() -> None:
