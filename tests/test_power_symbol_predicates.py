@@ -114,3 +114,78 @@ def test_extends_chain_and_missing_entry():
     assert is_power_symbol("p:Missing", "#FLG01", lookup=lookup)
     assert not is_power_symbol("p:Missing", "R1", lookup=lookup)
     assert is_power_symbol("power:GND", "")
+
+
+# --- PWR_FLAG from a project library keeps its rails distinct (#7637) ------
+
+FLAG_LIB_IDS = ("power:PWR_FLAG", "myproj:PWR_FLAG")
+
+
+def _flag_variant(tmp_path, lib_id: str):
+    """Both placed power symbols become ``lib_id`` flags whose Value is
+    ``PWR_FLAG``, exactly as KiCad writes a placed flag. One sits on R10.2,
+    the other on R12.2: two different rails."""
+    path = _variant(tmp_path, lib_id=lib_id, ref_prefix="#FLG")
+    text = path.read_text()
+    assert text.count('(property "Value" "GND"') == 2
+    path.write_text(text.replace('(property "Value" "GND"', '(property "Value" "PWR_FLAG"'))
+    return path
+
+
+@pytest.mark.parametrize("lib_id", FLAG_LIB_IDS)
+def test_power_flag_any_library_has_no_net_name(tmp_path, lib_id):
+    sch = ParserSchematic.load(_flag_variant(tmp_path, lib_id))
+    assert len(sch.power_symbols) == 2
+    for pwr in sch.power_symbols:
+        assert pwr.value_text == "PWR_FLAG"
+        assert pwr.is_power_flag
+        assert pwr.net_name is None
+
+
+@pytest.mark.parametrize("lib_id", FLAG_LIB_IDS)
+def test_power_flag_any_library_does_not_merge_rails(tmp_path, lib_id):
+    """A project-library flag must not become a global ``PWR_FLAG`` net that
+    merges every flagged rail (the regression the shared predicate exposed)."""
+    nets = ParserSchematic.load(_flag_variant(tmp_path, lib_id)).extract_netlist()
+    assert "PWR_FLAG" not in nets
+    owner = {str(pin): name for name, pins in nets.items() for pin in pins}
+    assert owner.get("R10.2") is not None
+    assert owner.get("R12.2") is not None
+    assert owner["R10.2"] != owner["R12.2"]
+
+
+def test_is_power_flag_matches_symbol_name_only():
+    def flag(lib_id: str) -> bool:
+        return PowerSymbol(lib_id=lib_id, x=0, y=0).is_power_flag
+
+    assert flag("power:PWR_FLAG")
+    assert flag("PWR_FLAG")
+    assert flag("myproj:PWR_FLAG")
+    assert not flag("power:GND")
+    assert not flag("myproj:PWR_FLAG_ALT")
+
+
+# --- ``#`` reference only decides when no library entry exists -------------
+
+
+def test_hash_reference_with_non_power_library_entry_is_not_power(tmp_path):
+    """A ``#``-referenced graphic symbol (``#LOGO1``) whose embedded entry
+    has no ``(power)`` flag stays an ordinary symbol in the parser."""
+    path = _variant(tmp_path, lib_id="Graphic:Logo", ref_prefix="#LOGO", power_token=None)
+    sch = ParserSchematic.load(path)
+    assert sch.power_symbols == []
+    assert {"#LOGO01", "#LOGO02"} <= {s.reference for s in sch.symbols}
+
+
+def test_hash_reference_without_library_entry_is_power(tmp_path):
+    path = _variant(tmp_path, lib_id="myproj:GND", ref_prefix="#PWR", lib_entry="drop")
+    assert len(ParserSchematic.load(path).power_symbols) == 2
+
+
+def test_hash_rule_needs_missing_entry():
+    doc = parse_string('(lib_symbols (symbol "Graphic:Logo"))')
+    lookup = lookup_from_nodes(doc.find_all("symbol"))
+    assert not is_power_symbol("Graphic:Logo", "#LOGO1", lookup=lookup)
+    assert is_power_symbol("Graphic:Missing", "#LOGO1", lookup=lookup)
+    # No lookup: presence is unknown, the ``#`` convention still applies.
+    assert is_power_symbol("Graphic:Logo", "#LOGO1")

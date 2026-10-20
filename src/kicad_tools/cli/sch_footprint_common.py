@@ -70,8 +70,9 @@ def _is_power_symbol(sym: Any, sch: Schematic | None = None) -> bool:
     predicate :attr:`kicad_tools.schema.bom.BOMItem.is_power_symbol` uses:
     the library ``(power)`` flag read from *sch*'s embedded ``lib_symbols``
     (so a project-library ``PWR_FLAG`` counts, #7637), the stock ``power:``
-    / ``kicad_tools_pwr:`` prefixes, and any ``#`` reference. Without *sch*
-    only the prefix and reference rules apply.
+    / ``kicad_tools_pwr:`` prefixes, and a ``#`` reference when the symbol
+    has no embedded definition. Without *sch* only the prefix and reference
+    rules apply.
     """
     return is_power_symbol(
         getattr(sym, "lib_id", "") or "",

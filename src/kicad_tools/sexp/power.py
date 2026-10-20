@@ -103,12 +103,23 @@ def is_power_symbol(
        libraries (the documented fallback when no embedded definition is
        available, e.g. before a symbol has been placed);
     3. its reference starts with ``#`` (KiCad's virtual-designator
-       convention: ``#PWR``, ``#FLG``, ...).
+       convention: ``#PWR``, ``#FLG``, ...) -- but only when no embedded
+       definition is known to contradict it. When *lookup* is supplied and
+       resolves the symbol to a definition *without* the ``(power)`` flag,
+       the library is authoritative and the ``#`` rule does not apply, so a
+       ``#``-referenced graphic symbol such as ``#LOGO1`` stays an ordinary
+       symbol. With only a precomputed *flagged* (no *lookup*) the entry's
+       presence is unknown and the ``#`` rule still applies.
     """
+    has_entry = False
     if flagged is None and lookup is not None:
-        flagged = is_power_lib_symbol(lookup, lib_symbol_key(placed, lib_id))
+        key = lib_symbol_key(placed, lib_id)
+        flagged = is_power_lib_symbol(lookup, key)
+        has_entry = lookup(key) is not None
     if flagged:
         return True
     if lib_id.startswith(POWER_LIB_PREFIXES):
         return True
+    if has_entry:
+        return False
     return reference.startswith("#")

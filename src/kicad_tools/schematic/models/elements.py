@@ -368,8 +368,16 @@ class PowerSymbol:
 
     @property
     def is_power_flag(self) -> bool:
-        """Whether this symbol declares an external driver without naming a net."""
-        return self.lib_id in {"power:PWR_FLAG", "PWR_FLAG"}
+        """Whether this symbol declares an external driver without naming a net.
+
+        Matched by symbol name in *any* library (``power:PWR_FLAG``, a bare
+        ``PWR_FLAG``, or a project-library copy such as ``myproj:PWR_FLAG``),
+        since the parser routes library-flagged power symbols from any
+        library here (#7637). Otherwise a project-library flag would report
+        its Value ``"PWR_FLAG"`` as a global net name and merge every flagged
+        rail into one ``PWR_FLAG`` net.
+        """
+        return self.lib_id.rsplit(":", 1)[-1] == "PWR_FLAG"
 
     @property
     def net_name(self) -> str | None:
@@ -493,8 +501,10 @@ class PowerSymbol:
         Delegates to the shared :func:`kicad_tools.sexp.power.is_power_symbol`
         (#7637): the library ``(power)`` flag looked up in *lib_symbols* (the
         schematic's embedded ``lib_symbols`` by name), the stock ``power:`` /
-        ``kicad_tools_pwr:`` prefixes, or a ``#`` reference designator. When
-        *lib_symbols* is omitted only the prefix and reference rules apply.
+        ``kicad_tools_pwr:`` prefixes, or a ``#`` reference designator when
+        the symbol has no embedded definition (so a non-power ``#LOGO1``
+        stays an ordinary symbol). When *lib_symbols* is omitted only the
+        prefix and reference rules apply.
         """
         lib_id_node = node.get("lib_id")
         lib_id = str(lib_id_node.get_first_atom()) if lib_id_node else ""
