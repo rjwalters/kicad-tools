@@ -30,6 +30,7 @@ from pathlib import Path
 
 from kicad_tools.cli.modify_schematic import create_backup
 from kicad_tools.cli.sch_wire_common import _collect_schematic_files
+from kicad_tools.core.sheet_properties import SHEET_FILE_KEY_RE
 
 # Prefixes for power/flag symbols that should be excluded from renumbering
 # by default.  When ``include_power=True`` is passed, ``#PWR`` and ``#FLG``
@@ -331,7 +332,7 @@ def _detect_project_info(
     }
 
     sheet_pattern = re.compile(
-        r'\(sheet\b.*?\(uuid "([^"]+)"\).*?\(property "Sheetfile" "([^"]+)".*?\)',
+        rf'\(sheet\b.*?\(uuid "([^"]+)"\).*?\(property "{SHEET_FILE_KEY_RE}" "([^"]+)".*?\)',
         re.DOTALL,
     )
     for m in sheet_pattern.finditer(root_text):
