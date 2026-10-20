@@ -395,6 +395,17 @@ Local verification:
 - [ ] Linter run on changed files (0 errors)
 ```
 
+**Stack on a conflicting PR (conflict stacking, #12759).** After your last commit and **before** the pre-PR gate below (replaying commits makes a new `HEAD`, and `create-pr.sh` refuses an ungated one), ask which open PR, if any, your finished work conflicts with:
+
+```bash
+# BASE = the `--base` you gave `worktree.sh` (the `--depends-on` / `--auto-stack` parent branch, e.g. feature/issue-<parent>); empty after a plain `worktree.sh N`.
+BASE="<that --base value, or empty>"
+out=$(loom-daemon stack-parent --issue N --base "${BASE:-}") || out="STACK-PARENT none reason=error"
+echo "$out"
+```
+
+`none` (or any non-zero exit) means open flat, as always. On `pr=<P> branch=<B> head=<H> fork=<F> depth=<D>`: `git fetch origin <B>` then `git rebase --onto <H> <F>`. **Never** a bare `git rebase origin/<B>`: that would also replay default-branch commits P's branch lacks. Resolve conflicts (these are your own unpushed commits) and re-run the issue's tests, then open with `create-pr.sh --base <B>` and put `Stacked on #<P> (conflict stacking, depth <D>)` in the PR body. If you cannot resolve the replay: `git rebase --abort` and open flat. The verb answers `none` when stacking is off, when you were given a non-default base (`--depends-on` / `--auto-stack` win), and when `origin/feature/issue-N` already exists.
+
 **Pre-PR gate (pre-flight, #10476, #11690).** With `buildGate` set, run `loom-daemon preflight --issue N` before `create-pr.sh`. It runs the **fast tier** (compile + smoke, never the suite) and never defers on load. Exit 1 = failed: fix the tail, commit, re-run (max `preflightMaxAttempts`). Exit 4 (`preflight_unresolved`) = stop, NO PR (claim released). Exit 5 = a hung compile timed out (claim kept): re-run; at the timeout cap, NO PR. `create-pr.sh` refuses (exit 7) an ungated HEAD. Then open the PR without waiting for CI.
 
 ### Language-Specific Verification

@@ -681,7 +681,10 @@ def segment_via_counts(
 #: Why a segment's unequal vias could not be avoided, by segment status.
 _VIA_MISMATCH_CAUSE = {
     "uncoupled-fallback": "no fallback candidate had via parity",
-    "hybrid": "the hybrid's single-ended legs found no via-equal pair",
+    "hybrid": (
+        "the hybrid's single-ended legs found no via-equal pair no worse on skew "
+        "and length (see the hybrid parity line)"
+    ),
 }
 
 
@@ -712,7 +715,7 @@ def pair_via_mismatch_warnings(
         span = f"{pc.pad_p_a.ref}.{pc.pad_p_a.pin}->{pc.pad_p_b.ref}.{pc.pad_p_b.pin}"
         lines.append(
             f"  WARNING: diff pair {pc.pair_name} {span} legs have unequal via "
-            f"counts (P={got[0]}, N={got[1]}); {cause}"
+            f"counts (P={got[0]}, N={got[1]}); pair-rule failure: {cause}"
         )
     return lines
 
@@ -5572,6 +5575,12 @@ class Autorouter:
                             f"  Diff-pair hybrid parity (lattice) {pc.pair_name} {label}: "
                             f"{parity_note}"
                         )
+            # Issue #7093: the post-route via-parity pass on extra-pad
+            # attachments (one line per pair it was offered to).
+            extra_log = getattr(pf, "extra_parity_log", {}) or {}
+            for note in extra_log.values():
+                if isinstance(note, str):
+                    print(f"  Diff-pair extra parity (lattice) {note}")
             self._print_pair_threshold_report()
             # Issue #6373: a pair routed by the uncoupled fallback is a
             # diff-pair WARNING (coupling / skew not guaranteed), not an open
@@ -8537,7 +8546,7 @@ class Autorouter:
                     board_thickness_mm=None,
                     num_copper_layers=None,
                 )
-            self._audit_pair_via_parity(detected_pairs, synth_routing, net_to_class)
+            self._audit_pair_via_parity()
         except ImportError:
             # diffpair_detection module unavailable -- silently skip the
             # diff-pair block but continue to the match-group block.
@@ -8577,30 +8586,63 @@ class Autorouter:
             num_copper_layers=None,
         )
 
-    def _audit_pair_via_parity(
-        self,
-        detected_pairs: list,
-        synth_routing: dict,
-        net_to_class: dict[str, str],
-    ) -> None:
+    def _pair_via_parity_copper(self) -> list[Route]:
+        """The copper ``kct check`` sees on the written board, for the parity audit.
+
+        Mirrors ``_finalize_routes`` (``cli/route_cmd.py``): preserved copper of
+        a net re-routed this run is dropped ("the freshly-routed copper wins"),
+        except for ``_stub_terminals`` nets whose outside stub is kept.  A
+        route present in both lists is counted once (dedupe by ``id()``).
+        """
+        routed_net_ids = {r.net for r in self.routes} - set(
+            getattr(self, "_stub_terminals", None) or {}
+        )
+        copper: list[Route] = []
+        seen: set[int] = set()
+        for route in [
+            *self.routes,
+            *(r for r in self.existing_routes if r.net not in routed_net_ids),
+        ]:
+            if id(route) not in seen:
+                seen.add(id(route))
+                copper.append(route)
+        return copper
+
+    def _audit_pair_via_parity(self) -> None:
         """Report every engaged pair committed with unequal via counts (#7093).
 
         Engine-agnostic backstop behind every ``route_all_*`` entry point (it
         runs in :meth:`_finalize_routing`).  The pairs are the ones ``kct
-        check`` engages -- detected, and opted in by their net class
-        (:func:`~.diffpair.should_engage_coupled`) -- and the counts are every
-        via on each net, as the checker's ``unequal via counts`` finding
-        counts them.  The router keeps the counts equal where it can (coupled
-        and gateway outcomes by construction, the lattice fallback by ranking
-        and mirrored legs); where it could not -- a lattice fallback or hybrid
-        leg, the grid engine's independent fallback, a pair deferred to the
-        single-ended main loop -- the result is a pair-rule failure, recorded
-        in :attr:`pair_via_parity_failures` and printed, never silent.  A pair
-        the lattice's per-segment report already named is not printed twice.
+        check`` engages -- detected through :func:`~.diffpair_detection.
+        build_synth_routing` (so a class whose per-net variants disagree picks
+        the same pairs the checker does, #7425) and opted in by their net
+        class (:func:`~.diffpair.should_engage_coupled`).  The counts are every
+        via on each net -- the routes committed this run plus the copper kept
+        by ``--preserve-existing`` / ``--nets`` -- as the checker counts them
+        on the written board.  The router keeps the counts equal where it can
+        (coupled and gateway outcomes by construction, the lattice fallback by
+        ranking and mirrored legs); where it could not -- a lattice fallback
+        or hybrid leg, the grid engine's independent fallback, a pair deferred
+        to the single-ended main loop -- the result is a pair-rule failure,
+        recorded in :attr:`pair_via_parity_failures` and printed, never
+        silent.  A pair the lattice's per-segment report already named is not
+        printed twice.
         """
         from .diffpair import should_engage_coupled
+        from .diffpair_detection import build_synth_routing, detect_diff_pairs
         from .pair_via_parity import audit_pair_via_parity
 
+        synth_routing, net_to_class = build_synth_routing(self.net_class_map)
+        try:
+            detected_pairs = detect_diff_pairs(
+                self.net_names,
+                net_class_routing=synth_routing,
+                net_to_class=net_to_class,
+                kicad_groups=getattr(self, "kicad_diff_pair_groups", None),
+            )
+        except Exception:
+            # Defensive: detection failure must not break routing.
+            detected_pairs = []
         pairs: list[tuple[int, str, int, str]] = []
         for dp in detected_pairs:
             pair = dp.pair
@@ -8610,7 +8652,7 @@ class Autorouter:
             if engaged:
                 pos, neg = pair.positive, pair.negative
                 pairs.append((pos.net_id, pos.net_name, neg.net_id, neg.net_name))
-        failures = audit_pair_via_parity(self.routes, pairs)
+        failures = audit_pair_via_parity(self._pair_via_parity_copper(), pairs)
         self.pair_via_parity_failures = failures
         names = {name: net for net, name in self.net_names.items()}
         warned: set[frozenset[int | None]] = getattr(self, "_lattice_via_warned_nets", set())

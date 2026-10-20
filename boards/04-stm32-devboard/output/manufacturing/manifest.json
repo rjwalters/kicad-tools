@@ -9,8 +9,8 @@
       "size": 3223
     },
     "README.txt": {
-      "sha256": "c65c96a1dc4fe7e0792a1c6e77782cf2a125198a746cd8e9a1db25f9c4ea90f8",
-      "size": 985
+      "sha256": "f7076deaed04f9d1fbc8b0fb3e3a05f391ffee03dc663090afefa8e5cdc1c905",
+      "size": 1057
     },
     "assembly-back.pdf": {
       "sha256": "2aeb374beef2e29c3ef4af69be17deb69c77a3c4e1c60e06e445403ebcc55359",
@@ -21,16 +21,16 @@
       "size": 55162
     },
     "bom_jlcpcb.csv": {
-      "sha256": "1694b28f805d0dfec355c5bc5334cf9ba21a15b685b7d7f3709a34f88715d4e5",
-      "size": 526
+      "sha256": "22f4f6e0ae921146268a6a0c94e0267283a7a8d64f24d90be807bb449873b27f",
+      "size": 640
     },
     "check-report.json": {
       "sha256": "2d81759080d2cd0b45d439568fe07b9b8f75f6ef7e8cc88897e5b157a9fa718f",
       "size": 2317
     },
     "cpl_jlcpcb.csv": {
-      "sha256": "d3844687fa28afae77462e26f9e783d66d6e4d76d169ba3cdd93416f2357cd56",
-      "size": 1141
+      "sha256": "5b6854e3efb25a771146c01fdf51dfff148bf7fc6079d582842f14bcfd2bda20",
+      "size": 1310
     },
     "design-source/DESIGN_REVIEW.md": {
       "sha256": "08076e07ddfe0d9ee014e870c1d21d0fd0b756a9df27947f47336e2222dbe6b4",
@@ -45,8 +45,8 @@
       "size": 3394
     },
     "design-source/generate_design.py": {
-      "sha256": "2ee6ba82424a68983a456a473c10e8f958e345817d2e6d2fd552257d4ee2a196",
-      "size": 125632
+      "sha256": "130729adaa4b9dad65d2db8613a520c3364f998e9a7108d490180b59d572a2f6",
+      "size": 126919
     },
     "design-source/manufacturing_process.py": {
       "sha256": "2c78e0029318595d5b53a64f5dac60edf82a4028ecc6279022d1edad46fd62bd",
@@ -96,16 +96,12 @@
       "sha256": "43ca6ea9c01589f8b87347cd4ecd8126f637cc88f29f15a06914ed988638eae1",
       "size": 72506
     },
-    "manual-assembly-bom.csv": {
-      "sha256": "0d1620494f1492c9a57ccf7d29840d0643984cd23bdb2969e0d0ea660a4839a1",
-      "size": 168
-    },
     "manufacturing-requirements.json": {
       "sha256": "52ef1e5957c569c120a43b82a63c9dff8d3bf5dee2392e473e2e73f20b8fb199",
       "size": 323
     },
     "native-drc.json": {
-      "sha256": "5d38297c5896000c16ee723e3a9bc114521bc45eafba58bbecf3bc0150e351c4",
+      "sha256": "98b3e1eea2d868b39295d98fe7d9cc52e971a4e399010b203ca3380e6dc71bf4",
       "size": 1213
     },
     "native-erc-linux.json": {
@@ -117,16 +113,16 @@
       "size": 987
     },
     "procurement-review.md": {
-      "sha256": "61cf3ee36370eeaee39cd44130f83481da4d980672d2072163c5de61ca1bbaef",
-      "size": 2360
+      "sha256": "53636d4836b8bd3f1df3e9a1169c02985b65be1d3e678190cc489fbe01e05bbd",
+      "size": 3329
     },
     "report.md": {
-      "sha256": "ab87ea2ed6ff7b3005a9ac65bb3d55a24ef1047fcb515f46304b99ae190f917c",
-      "size": 4667
+      "sha256": "2ac1352131fa3f8e086f378c7c92d8681080414031b6357541c8092dc89909ac",
+      "size": 4317
     },
     "report.pdf": {
-      "sha256": "4ffc10dd629ae44f592640c37b000795e5dbc377c00e6bd33bf309edb341e384",
-      "size": 1204713
+      "sha256": "c62a4519808e04ee81ac08ea22858355249bff2723e3babf667970ec5bd59ae1",
+      "size": 1210717
     }
   },
   "board": {
@@ -173,7 +169,7 @@
     {
       "name": "tht_in_cpl",
       "status": "OK",
-      "message": "2 through-hole component(s) excluded from CPL",
+      "message": "2 through-hole component(s) included in CPL",
       "details": "THT references: J1, Y1"
     },
     {
@@ -195,7 +191,7 @@
     {
       "name": "bom_cpl_match",
       "status": "OK",
-      "message": "BOM and CPL references match (15 components, 2 THT excluded)"
+      "message": "BOM and CPL references match (17 components)"
     },
     {
       "name": "drc",
@@ -210,10 +206,6 @@
     }
   ],
   "mode": "assembly",
-  "manual_assembly": [
-    "J1 SWD header",
-    "Y1 HC49 crystal"
-  ],
   "manufacturing_requirements": {
     "layers": 2,
     "via_type": "through",

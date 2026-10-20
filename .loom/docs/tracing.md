@@ -317,6 +317,25 @@ unplanned crash stays `process_lost`. A resumed role run carries
 `loom.resumed_from` = that item id. Failure-rate queries and the role-failures
 watch should exclude `interrupted_by_roll`.
 
+A run a lost EC2 host ended (#12876) closes as
+`loom.result=interrupted_by_host_loss`, unset status, with
+`loom.host.loss_cause` = `spot_reclaim` (IMDS `spot/instance-action`) or
+`rebalance` (`events/recommendations/rebalance`). On an EC2 host (DMI vendor
+Amazon; any other host runs no watcher and makes no IMDS request) the daemon
+polls both endpoints about every 5 s while sweeps are in flight, and on the
+first notice of each kind: closes every in-flight sweep span that way, sends the
+captain a `release` with outcome `host_lost` for each assignment (the row ends
+at once, no hold is armed, instead of expiring at its TTL), and emits one
+`loom.host.interruption_notice` span (instant, own root). A non-spot EC2 host
+answers 404 on both and emits nothing. Its attributes: `loom.host.id`,
+`loom.host.instance_type`, `loom.host.loss_cause`,
+`loom.host.interruption.kind`, `loom.host.interruption.notice_time` (RFC 3339;
+for a spot reclaim, when the daemon first saw it), `loom.host.interruption.action_time`
+(spot reclaim only), `loom.host.in_flight_sweeps` (comma-separated sweep ids),
+`loom.host.interruption.sweeps_closed` and `loom.host.assignments_released`.
+Failure-rate queries should exclude `interrupted_by_host_loss` too. Moving the
+work to another host is #6704.
+
 A step's `loom.sweep` root (`loom.sweep_id=step-<role>-<item>-…`, #12253) is
 closed by the step's own end, when the reaper, a cancel or startup sees the
 session exit: `loom.result` is the same `success`/`failure` its

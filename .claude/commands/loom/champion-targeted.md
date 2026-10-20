@@ -31,6 +31,24 @@ When the step held a PR lease, release it with the same word before that line:
 `loom-daemon lease pr release N --role champion --step champion_merge --watch-pid "${LOOM_AGENT_SESSION_PID:-${CLAUDE_PID:-$PPID}}" --outcome <outcome>`
 (#12616: the released lease records it, `outcome=none` if you pass none).
 
+**A `--pr` step that does not merge names its gate (#12715).** On `skipped` and
+`requeued`, add `reason=<gate>` to **both** the `CHAMPION-STEP` line and the
+release (`--reason <gate>`), from this closed list, so the lease comment and
+`pass.verdict` say why instead of guessing:
+
+| `reason=` | Stopped at |
+|---|---|
+| `facts_unread` | "0. PR facts" could not be read (or comments unauthenticated) |
+| `janitor_rc3` | Verdict-State Janitor Part 1 (`champion-hold classify`) exit 3: a foreign park or a failed read |
+| `verdict_rc11` | Verdict-State Janitor Part 2 (`verdict-staleness-guard.sh`) exit 11: UNVERIFIABLE approval |
+| `ci_pending` | CI checks were still running when you read them (say it only if that is what you saw) |
+| `mergeable_unknown` | `mergeable` read `UNKNOWN` (GitHub still computing) |
+| `pin_missing` | Step 3 printed `CHAMPION-PIN-MISSING` |
+| `merge_rc<N>` | `merge-pr.sh` exited `N` (3, 4, 5, 7 or 9) |
+
+Anything else is recorded as `unspecified`; never write `ci_pending` as a
+default.
+
 ## `--pr N`: one merge decision
 
 1. **Kind probe, eligibility and the pin file.** One plain (uncached) REST
@@ -82,7 +100,8 @@ When the step held a PR lease, release it with the same word before that line:
 | `merged` | Step 3 printed `CHAMPION-MERGE-OUTCOME pr=N rc=0` |
 | `held` | Champion's hold (`loom:blocked`) binds (Health Pass ran), or Janitor Part 1 / Step 3 exit 10 (`CHAMPION-HOLD-SKIP`) skipped a park |
 | `rejected` | A criterion failed and the PR Rejection Workflow ran (Janitor, stale route, CI) |
-| `requeued` | Exit 3, 4, 5, 7, 9 (`CHAMPION-PIN-MISSING`): not merged, still approved, no "Merge Failed" |
+| `skipped` | A stop **before Step 2** (facts unread, Janitor exit 3 / 11, `mergeable` UNKNOWN): nothing evaluated far enough to merge, no writes. Carries `reason=` |
+| `requeued` | A Step 3 exit 3, 4, 5, 7, 9 (`CHAMPION-PIN-MISSING`): not merged, still approved, no "Merge Failed". Carries `reason=` (`merge_rc<N>`, `pin_missing`, or `ci_pending` when CI was running) |
 | `head-moved` | `merge-pr.sh` exit **8**: the head is no longer `EVALUATED_SHA`. Not a failure: post no "Merge Failed", leave the labels; the next step evaluates the new head |
 | `failed` | Exit 1 (Error Handling's "Merge Failed" comment), or no `CHAMPION-MERGE-OUTCOME` line (its "No exit code at all") |
 | `not-eligible` | Step 1 |

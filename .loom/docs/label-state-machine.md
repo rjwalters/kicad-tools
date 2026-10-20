@@ -216,7 +216,7 @@ the migration table in `priority-model.md`.
 |---|---|---|
 | Champion (PR merge) | Posts a merge-risk hold (`champion:merge-risk-hold`) because a safety axis is red (criterion #2) | `loom:blocked` (#11861) — `champion-pr-merge.md`, "Hold behavior" |
 | Champion (PR merge) | Posts a critical-file hold (`champion:critical-file-hold`) because criterion #3 matched a critical-file pattern | `loom:blocked` (#11861) — `champion-critical-file-hold.md` |
-| Champion (issue close) | Holds a merged PR's linked **issue** open because one of its acceptance criteria needs out-of-band verification and no `loom:ac-verified` marker attests it | `loom:operator` (#6883) — `champion-pr-merge.md`, Step 4 |
+| Champion (issue close) | Holds a merged PR's linked **issue** open because one of its acceptance criteria needs out-of-band verification and no `loom:ac-verified` marker attests it | `loom:operator` (#6883) — `champion-pr-merge.md`, Step 4; per-repo off switch `champion.outOfBandAcGate=false` (#12703, first use: 2AMLogic/loom-ui) |
 | Champion (promotion) | A proposal's only recurring finding is an open dependency | `loom:blocked` + one park record per blocker (#11860, #11861) — Step 4 `park-record apply --blocked-by` |
 | Curator / Builder / Doctor / Judge | Encounters work that needs a ruling or a human's hands | `loom:operator` (#11795) — "Routing to a human" above |
 | Human | Applies the label directly to any issue or PR | Always available |
@@ -332,6 +332,24 @@ A human clears it: by performing the step, posting a comment ending
 criterion that was never really out-of-band. There is no automated release,
 deliberately: the PR that would re-evaluate it is already merged, and "a human
 must observe something in the world" cannot be discharged by an engine re-read.
+
+### The author gate on promotion (#10827)
+
+Champion's content criteria say nothing about who wrote the issue. So before any
+**automatic** `loom:issue` write (Champion's Step 3b and the
+`check-promotion-landed.sh --apply` backstop) it asks
+`loom-daemon forge promotion-author --number N`, which judges the issue **author**
+with the same predicate as [`comment-trust.md`](comment-trust.md) (repo insider, a
+fleet App, this daemon, `forge.trustedCommenters`, the fleet admin roster), with
+no second trust table. Only `TRUSTED` promotes. An `UNTRUSTED` author, or an
+`UNKNOWN` one (the issue could not be read), leaves the issue at `loom:curated`
+with one comment (keyed on `<!-- loom:promotion-author-gate -->`, so retries do not
+repeat it). Unreadable evidence never counts as trust.
+
+Adoption is a trusted maintainer applying `loom:issue` by hand, or re-filing the
+issue; an automated Champion verdict alone is not adoption. Trusted authors see no
+change. This is admission control for external submissions, not protection against
+a compromised trusted agent, and it adds no signed decisions or keys.
 
 ## Current implementation
 

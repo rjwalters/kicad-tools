@@ -22,6 +22,7 @@ Covers:
 
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 from unittest.mock import patch
@@ -180,3 +181,164 @@ class TestHardenedWritersAreAtomic:
         save_project(data, dest)
         assert json.loads(dest.read_text()) == data
         assert not dest.with_suffix(dest.suffix + ".tmp").exists()
+
+
+# ---------------------------------------------------------------------------
+# Issue #7478: fsync must use a handle opened for writing
+# ---------------------------------------------------------------------------
+#
+# On Windows, CPython's ``os.fsync`` calls the CRT ``_commit()``, which calls
+# ``FlushFileBuffers``; that needs write access, so fsyncing a handle opened
+# ``"rb"`` raises ``OSError(EBADF)``. Every ``PCB.save`` failed there, leaving
+# ``<file>.tmp`` behind. POSIX ``fsync`` accepts a read-only fd, so these tests
+# emulate the Windows behaviour by wrapping ``os.fsync`` to reject an fd whose
+# access mode is ``O_RDONLY``. They fail on the pre-fix code on any platform
+# with ``fcntl``; the Windows CI smoke job covers the real platform.
+
+_SRC_ROOT = Path(__file__).resolve().parent.parent / "src" / "kicad_tools"
+
+
+def _windows_like_fsync(monkeypatch: pytest.MonkeyPatch, module_os_path: str) -> list[int]:
+    """Patch ``<module>.os.fsync`` to raise EBADF on a read-only fd.
+
+    Returns a list that records every fd that was fsynced successfully, so a
+    test can assert the fsync actually happened (not just that it was skipped).
+    """
+    fcntl = pytest.importorskip("fcntl")
+    import errno
+    import os as _os
+
+    real_fsync = _os.fsync
+    synced: list[int] = []
+
+    def fsync(fd: int) -> None:
+        if fcntl.fcntl(fd, fcntl.F_GETFL) & _os.O_ACCMODE == _os.O_RDONLY:
+            raise OSError(errno.EBADF, "Bad file descriptor (emulated Windows _commit)")
+        real_fsync(fd)
+        synced.append(fd)
+
+    monkeypatch.setattr(f"{module_os_path}.os.fsync", fsync)
+    return synced
+
+
+class TestFsyncUsesWritableHandle:
+    def test_atomic_write_text_under_windows_fsync(self, tmp_path: Path, monkeypatch):
+        synced = _windows_like_fsync(monkeypatch, "kicad_tools.core.atomic_write")
+        dest = tmp_path / "x.kicad_pcb"
+        atomic_write_text(dest, "x")
+        assert dest.read_text() == "x"
+        assert not (tmp_path / "x.kicad_pcb.tmp").exists()
+        assert synced, "atomic_write_text must still fsync the tmp file"
+
+    def test_atomic_write_text_preserves_bytes(self, tmp_path: Path, monkeypatch):
+        """Opening ``r+b`` for the fsync must not truncate or alter the
+        bytes ``write_text`` produced (newline/encoding branches)."""
+        _windows_like_fsync(monkeypatch, "kicad_tools.core.atomic_write")
+        dest = tmp_path / "x.kicad_pcb"
+        atomic_write_text(dest, "a\nbµ\n", newline="")
+        assert dest.read_bytes() == "a\nbµ\n".encode()
+
+    def test_pcb_load_save_roundtrip_under_windows_fsync(self, tmp_path: Path, monkeypatch):
+        from kicad_tools.schema.pcb import PCB
+
+        _windows_like_fsync(monkeypatch, "kicad_tools.core.atomic_write")
+        src = tmp_path / "board.kicad_pcb"
+        src.write_text(_MINIMAL_PCB)
+        pcb = PCB.load(src)
+        pcb.save(src)
+        assert "kicad_pcb" in src.read_text()
+        assert not src.with_suffix(src.suffix + ".tmp").exists()
+        PCB.load(src)
+
+    def test_transaction_restore_under_windows_fsync(self, tmp_path: Path, monkeypatch):
+        from kicad_tools.transaction import board_transaction
+
+        synced = _windows_like_fsync(monkeypatch, "kicad_tools.transaction")
+        board = tmp_path / "board.kicad_pcb"
+        board.write_bytes(b"original")
+        with board_transaction(board, keep_failed=False) as txn:
+            board.write_bytes(b"mutated")
+            txn.rollback()
+        assert board.read_bytes() == b"original"
+        assert not list(tmp_path.glob("*.tmp"))
+        assert synced
+
+    def test_write_routed_pcb_under_windows_fsync(self, tmp_path: Path, monkeypatch):
+        from kicad_tools.cli import route_cmd
+
+        synced = _windows_like_fsync(monkeypatch, "kicad_tools.cli.route_cmd")
+        monkeypatch.setenv("KCT_KICAD_LOCK_POLICY", "ignore")
+        source = tmp_path / "source.kicad_pcb"
+        source.write_text("(kicad_pcb (version 20240108))")
+        output = tmp_path / "routed.kicad_pcb"
+        assert route_cmd._write_routed_pcb(source, output, "") == output
+        assert "kicad_pcb" in output.read_text()
+        assert not output.with_suffix(output.suffix + ".tmp").exists()
+        assert synced
+
+    def test_save_partial_results_under_windows_fsync(self, tmp_path: Path, monkeypatch):
+        from types import SimpleNamespace
+
+        from kicad_tools.cli import route_cmd
+
+        synced = _windows_like_fsync(monkeypatch, "kicad_tools.cli.route_cmd")
+        monkeypatch.setenv("KCT_KICAD_LOCK_POLICY", "ignore")
+        source = tmp_path / "source.kicad_pcb"
+        source.write_text("(kicad_pcb (version 20240108))")
+        output = tmp_path / "routed.kicad_pcb"
+        router = SimpleNamespace(routes=[1], to_sexp=lambda **kwargs: "(segment (width 0.2))")
+        monkeypatch.setattr(
+            route_cmd,
+            "_interrupt_state",
+            {"router": router, "output_path": output, "pcb_path": source, "quiet": True},
+        )
+        assert route_cmd._save_partial_results() is True
+        partial = output.with_stem("routed_partial")
+        assert "segment" in partial.read_text()
+        assert not partial.with_suffix(partial.suffix + ".tmp").exists()
+        assert synced
+
+
+def _is_fsync_call(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "fsync"
+    )
+
+
+def _open_mode(call: ast.Call) -> str | None:
+    """Literal mode of an ``open(...)`` call, ``"r"`` if omitted, else None."""
+    if not (isinstance(call.func, ast.Name) and call.func.id == "open"):
+        return None
+    mode_node: ast.expr | None = call.args[1] if len(call.args) > 1 else None
+    for kw in call.keywords:
+        if kw.arg == "mode":
+            mode_node = kw.value
+    if mode_node is None:
+        return "r"
+    if isinstance(mode_node, ast.Constant) and isinstance(mode_node.value, str):
+        return mode_node.value
+    return None
+
+
+def test_no_read_only_open_feeds_fsync_in_src():
+    """Structural guard (issue #7478): no ``with open(..., "rb")`` (or any
+    read-only mode) block in ``src/`` contains an ``fsync`` call."""
+    offenders: list[str] = []
+    for py in sorted(_SRC_ROOT.rglob("*.py")):
+        tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.With, ast.AsyncWith)):
+                continue
+            if not any(_is_fsync_call(n) for stmt in node.body for n in ast.walk(stmt)):
+                continue
+            for item in node.items:
+                expr = item.context_expr
+                if not isinstance(expr, ast.Call):
+                    continue
+                mode = _open_mode(expr)
+                if mode is not None and not any(c in mode for c in "wax+"):
+                    rel = py.relative_to(_SRC_ROOT.parent.parent)
+                    offenders.append(f"{rel}:{node.lineno} open(..., {mode!r})")
+    assert not offenders, "fsync on a read-only handle fails on Windows: " + ", ".join(offenders)

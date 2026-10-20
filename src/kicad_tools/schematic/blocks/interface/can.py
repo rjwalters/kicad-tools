@@ -269,8 +269,8 @@ class CANTransceiver(CircuitBlock):
             # TVS cathode goes to ground (clamp)
             sch.add_wire(tvs_h_cathode, (tvs_h_cathode[0], xcvr_vss[1]))
 
-            # CANH output is after TVS
-            canh_output = (tvs_h_anode[0] + 5, tvs_h_anode[1])
+            # CANH output is the TVS anode (a real pin end the bus wire lands on)
+            canh_output = tvs_h_anode
 
             # TVS for CANL
             tvs_l_ref = f"D{tvs_ref_start + tvs_idx}"
@@ -289,8 +289,8 @@ class CANTransceiver(CircuitBlock):
             # TVS cathode goes to ground
             sch.add_wire(tvs_l_cathode, (tvs_l_cathode[0], xcvr_vss[1]))
 
-            # CANL output is after TVS
-            canl_output = (tvs_l_anode[0] + 5, tvs_l_anode[1])
+            # CANL output is the TVS anode (a real pin end the bus wire lands on)
+            canl_output = tvs_l_anode
 
         # Add termination
         r_idx = 0

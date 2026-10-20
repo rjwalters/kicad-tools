@@ -158,7 +158,7 @@ def usb2_net_class() -> NetClassRouting:
         target_diff_impedance=90.0,  # Phase 3K: USB 2.0 90 Ohm diff
         impedance_tolerance_percent=15.0,
         # Issue #6443: no explicit skew.  The class declares high-speed USB2
-        # and takes the protocol default, 1.27 mm (TI SPRAAR7J App. A).  The
+        # and takes the protocol default, 1.0 mm (Q16 judgement value).  The
         # 3.0 mm it used to set had no source.
         pair_protocol="USB2_HS",
         length_critical=True,
@@ -4047,6 +4047,26 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # and impedance, and a declined pair keeps its copper unchanged.
     print("\n6c. Diff-pair gap tightening (#7344)...")
     router.apply_diffpair_gap_tightening()
+
+    # Issue #7548: the pairs route single-ended, so their legs differ in length
+    # and every declared pair exceeds the ``max_skew_mm`` that ``kct check``
+    # enforces.  Run the checker-limit skew tuner last, so it measures (and
+    # adds serpentine length to) the copper that actually gets judged.  Each
+    # insertion is clearance-checked with a byte-for-byte rollback, and the
+    # tuner never touches the longer leg.
+    print("\n6d. Diff-pair skew tuning (#7548)...")
+    from kicad_tools.router.diffpair_detection import build_synth_routing, detect_diff_pairs
+
+    class_routing, net_to_class = build_synth_routing(getattr(router, "net_class_map", None) or {})
+    skew_pairs = detect_diff_pairs(
+        net_names=router.net_names,
+        net_class_routing=class_routing or None,
+        net_to_class=net_to_class or None,
+    )
+    for (p_name, n_name), tune in router.apply_diffpair_length_tuning(
+        skew_pairs, verbose=False, engage="checker_skew_limit"
+    ).items():
+        print(f"   {p_name}/{n_name}: {tune.reason} {tune.message}")
 
     stats = router.get_statistics()
     print(

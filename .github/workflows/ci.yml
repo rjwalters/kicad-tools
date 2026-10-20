@@ -897,8 +897,9 @@ jobs:
     # Issue #6894: nothing else in CI runs on Windows, so an unguarded
     # Unix-only import (resource, fcntl, signal.SIGKILL, os.fork, ...) at
     # module level would break `kct` there unnoticed, as #6739 did. This job
-    # only installs, runs the CLI help, and imports every router/cli module;
-    # it does not run the test suite. Advisory: not a required check.
+    # only installs, runs the CLI help, imports every router/cli module, and
+    # (issue #7478) does one real atomic write + PCB.save; it does not run the
+    # test suite. Advisory: not a required check.
     name: Windows Smoke
     needs: [changes, kicad_pin]
     # Issue #7327: main runs (schedule/workflow_dispatch) gate on
@@ -970,6 +971,35 @@ jobs:
               print(f"::error::import failed: {name}")
               print(tb)
           sys.exit(1 if failures else 0)
+          PY
+
+      # Issue #7478: atomic_write_text fsynced a read-only handle, which
+      # Windows rejects (EBADF), so every PCB.save failed there while imports
+      # and --help stayed green. POSIX tests can only emulate that; this step
+      # does a real write on the Windows runner.
+      - name: Real atomic write and PCB save
+        shell: bash
+        run: |
+          uv run python - <<'PY'
+          import tempfile
+          from pathlib import Path
+
+          from kicad_tools.core.atomic_write import atomic_write_text
+          from kicad_tools.schema.pcb import PCB
+
+          d = Path(tempfile.mkdtemp())
+          p = d / "x.kicad_pcb"
+          atomic_write_text(p, "x")
+          assert p.read_text() == "x", p.read_text()
+          assert not (d / "x.kicad_pcb.tmp").exists(), sorted(d.iterdir())
+
+          b = d / "board.kicad_pcb"
+          b.write_text('(kicad_pcb\n  (version 20240108)\n  (generator "test")\n)\n')
+          PCB.load(b).save(b)
+          assert "kicad_pcb" in b.read_text()
+          assert not (d / "board.kicad_pcb.tmp").exists(), sorted(d.iterdir())
+          PCB.load(b)
+          print("atomic write + PCB.save OK:", sorted(x.name for x in d.iterdir()))
           PY
 
   kicad-cli-smoke:
@@ -1200,8 +1230,10 @@ jobs:
     #
     # Original rationale (Issue #2660 / Epic #2556 Phase 4N): re-route board 06
     # (the diff-pair testbench) from scratch on every run and verify that
-    #   (a) the resulting DRC error count is within the allowlist baseline
-    #       in .github/routed-drc-tolerance.yml; AND
+    #   (a) every blocking DRC finding is listed by identity (rule + pair/net,
+    #       open tracker) in the gate script and every listed entry still
+    #       fires; the count outside that allowance must be 0 (#7367; no
+    #       entry in .github/routed-drc-tolerance.yml); AND
     #   (b) each of the three diff-pair DRC rules
     #       (diffpair_clearance_intra, diffpair_routing_continuity,
     #       diffpair_length_skew) was actually exercised against an engaged
@@ -1508,8 +1540,10 @@ jobs:
     # Issue #2726 / Epic #2661 Phase 3N: re-route board 07 (the
     # N-trace match-group testbench, #2724 Phase 3L) from scratch on
     # every PR and verify that
-    #   (a) the resulting DRC error count is within the allowlist baseline
-    #       in .github/routed-drc-tolerance.yml; AND
+    #   (a) every blocking DRC finding is listed by identity (rule + pair/net,
+    #       open tracker) in the gate script and every listed entry still
+    #       fires; the count outside that allowance must be 0 (#7367; no
+    #       entry in .github/routed-drc-tolerance.yml); AND
     #   (b) the match_group_length_skew DRC rule (#2702, Phase 2G; producer
     #       wiring #2710 Phase 2.5G) was actually exercised against a
     #       declared group -- i.e., the per-rule counter in the DRC
@@ -2330,9 +2364,9 @@ jobs:
     #
     # This job does NOT replace the ``diffpair-routing-regression`` job
     # (which keeps its allowlist-based DRC coverage gate on the ``--step
-    # route`` re-route).  Board 06 carries allowlisted DRC *quality*
-    # residuals (.github/routed-drc-tolerance.yml: diff-pair length-skew /
-    # continuity measurements), so ``--lvs-only`` skips the ``status:ok``
+    # route`` re-route).  Board 06 carries identity-allowed DRC *quality*
+    # residuals (check_diffpair_coverage.py DIFFPAIR_FIXTURE_ALLOWED_FINDINGS:
+    # diff-pair length-skew pairs, #7367), so ``--lvs-only`` skips the ``status:ok``
     # / ``drc_violations:0`` assertions -- but all 21 nets route to
     # completion, which is exactly what the copper-LVS clean assertion
     # proves (no opens, no shorts).
@@ -2512,27 +2546,30 @@ jobs:
     # Issue #3779 (LVS honestly dirty per #4012): end-to-end gate for
     # board 07 ("matchgroup-test").  The fixture schematic is now FULLY
     # WIRED (#4012: 244/244 pads bound), so the copper comparator carries
-    # real evidence -- and board 07 routes PARTIAL by design (5
-    # seed-invariant unroutable nets, #3438: DQ3, DQ4, MIPI_DAT0_N,
-    # TMDS_D0_N, TMDS_D1_N), so the HONEST verdict is ``clean: false``
-    # with exactly those 5 opens.  (Before #4012 the schematic bound 0
+    # real evidence -- and board 07 routes PARTIAL by design (1
+    # unroutable net, TMDS_D0_N, tracked in #7557 -- measured in #7554 --
+    # under epic #3438;
+    # DQ3, DQ4, MIPI_DAT0_N and TMDS_D1_N route as of 2026-10-20, origin/main
+    # e1c361478, seed 42), so the HONEST verdict is ``clean: false``
+    # with exactly that 1 open.  (Before #4012 the schematic bound 0
     # pins and the #4006 vacuity guard masked these real opens behind a
     # "LVS not run" verdict; before #4006, a zero-evidence ``clean=true``
     # masked them entirely.)  The recipe emits ``lvs.json`` with
     # ``require_clean=False`` (the opens are expected); this job asserts
     # the exact known-opens contract:
     #
-    # * ``check_copper_lvs.py --expect-opens DQ3,...`` on a fresh
-    #   out-of-process re-check: ONLY kind='open', on EXACTLY those 5
-    #   nets -- a short, a new open, or a net becoming routable all fail;
-    # * ``check_board_00_e2e.py --lvs-known-opens DQ3,...``: lvs.json
-    #   carries the same 5 opens (label leg clean) and board.json renders
-    #   the honest ``lvs_clean: false`` (gallery: "LVS: 5 mismatches",
+    # * ``check_copper_lvs.py --expect-opens TMDS_D0_N`` on a fresh
+    #   out-of-process re-check: ONLY kind='open', on EXACTLY that 1
+    #   net -- a short, a new open, or a net becoming routable all fail;
+    # * ``check_board_00_e2e.py --lvs-known-opens TMDS_D0_N``: lvs.json
+    #   carries the same 1 open (label leg clean) and board.json renders
+    #   the honest ``lvs_clean: false`` (gallery: "LVS: 1 mismatch",
     #   status 'partial').
     #
     # Issue #4468 (epic #3438 Phase 3) added the classifier-driven
     # placement-delta feedback loop to this board's route step and
-    # measured it: the set is UNCHANGED at these 5.  The loop does find a
+    # measured it: the set was UNCHANGED at 5 then (since shrunk to
+    # TMDS_D0_N, #7552).  The loop does find a
     # reach-improving move (a 2 mm translate of U3 closes MIPI_DAT0_N,
     # 26/31 -> 27/31) but refuses it because it also raises the router's
     # clearance-violation count -- see boards/07-matchgroup-test/README.md
@@ -2541,10 +2578,10 @@ jobs:
     # it to absorb one.
     #
     # NEW, ADDITIVE gate -- does NOT replace the
-    # ``matchgroup-routing-regression`` job.  Board 07 carries allowlisted
-    # DRC residuals (.github/routed-drc-tolerance.yml) and routes PARTIAL
+    # ``matchgroup-routing-regression`` job.  Board 07 carries identity-allowed
+    # DRC residuals (check_matchgroup_coverage.py, #7367) and routes PARTIAL
     # by design, so no Overall: PASSED / status:ok / drc_violations:0
-    # assertions apply.  If #3438 ever makes the 5 nets routable, graduate
+    # assertions apply.  If #7557 / #3438 ever makes TMDS_D0_N routable, graduate
     # this job to --lvs-only + a plain copper-clean assertion.
     # Advisory until a repo admin adds it to branch protection.
     name: Board 07 End-to-End (LVS known opens)
@@ -2595,9 +2632,10 @@ jobs:
         run: uv run kct build-native
 
       - name: Regenerate board 07 from recipe (--step all, clean tmp directory)
-        # PARTIAL routing is expected on this board (5 unroutable nets,
-        # #3438), so the recipe exits non-zero -- tolerate it (|| true).
-        # The recipe emits lvs.json with the honest clean=false / 5-opens
+        # PARTIAL routing is expected on this board (1 unroutable net,
+        # TMDS_D0_N, #7557 / #3438), so the recipe exits non-zero -- tolerate
+        # it (|| true).
+        # The recipe emits lvs.json with the honest clean=false / 1-open
         # verdict (#4012, require_clean=False because the opens are
         # expected).  The asserters below are the gate.
         run: |
@@ -2614,11 +2652,11 @@ jobs:
         # Re-run compare_copper_netlist in a process the CI job controls (NOT
         # the recipe) on the REGENERATED schematic + routed PCB.  Board 07's
         # schematic is fully wired (#4012: 244/244 pads bound) and the board
-        # routes PARTIAL by design, so the honest verdict is exactly the 5
-        # seed-invariant opens (#3438): --expect-opens asserts that set and
-        # nothing else.  A copper short, a NEW open, a vacuous verdict (the
-        # schematic regressed to unwired), or one of the 5 becoming routable
-        # all fail the gate.  Entrypoint from #3838.
+        # routes PARTIAL by design, so the honest verdict is exactly the 1
+        # known open (TMDS_D0_N, #7557 under #3438): --expect-opens asserts
+        # that set and nothing else.  A copper short, a NEW open, a vacuous
+        # verdict (the schematic regressed to unwired), or TMDS_D0_N becoming
+        # routable all fail the gate.  Entrypoint from #3838.
         run: |
           set -euo pipefail
           uv run python -m kicad_tools.lvs.copper_lvs \
@@ -2626,7 +2664,7 @@ jobs:
             /tmp/board07-ci/matchgroup_test_routed.kicad_pcb \
             > /tmp/board07-copper.json
           uv run python scripts/ci/check_copper_lvs.py \
-            --expect-opens "DQ3,DQ4,MIPI_DAT0_N,TMDS_D0_N,TMDS_D1_N" \
+            --expect-opens "TMDS_D0_N" \
             /tmp/board07-copper.json
 
       - name: Independent synthetic routing gate (matching PCB and sidecars)
@@ -2650,31 +2688,31 @@ jobs:
 
       - name: Assert plane-net completion (known opens tolerated, #4531)
         # Raw total_unconnected_pads gate (scripts/ci/check_net_status.py).
-        # Board 07 routes PARTIAL by design: 5 seed-invariant unroutable
-        # nets (#3438/#4012). --known-open-nets excludes THOSE nets' pads
+        # Board 07 routes PARTIAL by design: 1 unroutable net, TMDS_D0_N
+        # (#7557 / #3438 / #4012). --known-open-nets excludes THAT net's pads
         # from the gated count while still failing on an unconnected pad on
         # any OTHER net -- so a DIFFERENT net silently going open is still
-        # caught (tighter than raising --max-unconnected to their pad
+        # caught (tighter than raising --max-unconnected to its pad
         # count). The set mirrors the --lvs-known-opens above.
         run: |
           set -euo pipefail
           uv run python scripts/ci/check_net_status.py \
-            --known-open-nets "DQ3,DQ4,MIPI_DAT0_N,TMDS_D0_N,TMDS_D1_N" \
+            --known-open-nets "TMDS_D0_N" \
             /tmp/board07-ci/matchgroup_test_routed.kicad_pcb
 
       - name: Assert artifacts + honest known-opens LVS state (#4012)
         # --lvs-known-opens: lvs.json must be present, clean=false, NOT
         # vacuous, with ONLY kind='open' copper mismatches on exactly the
-        # 5 seed-invariant unroutable nets (#3438) and an empty
+        # unroutable net TMDS_D0_N (#7557 / #3438) and an empty
         # label-mismatch list; board.json must carry the honest
-        # lvs_clean=false (gallery: "LVS: 5 mismatches").  No
+        # lvs_clean=false (gallery: "LVS: 1 mismatch").  No
         # status/drc_violations assertions (allowlisted DRC residuals ->
         # status='partial').
         run: |
           set -euo pipefail
           uv run python scripts/ci/check_board_00_e2e.py \
             --stem matchgroup_test \
-            --lvs-known-opens "DQ3,DQ4,MIPI_DAT0_N,TMDS_D0_N,TMDS_D1_N" \
+            --lvs-known-opens "TMDS_D0_N" \
             /tmp/board07-staging/07-matchgroup-test
 
       - name: Collect failed routing bundle (diagnostic reproduction, #5067)
@@ -2713,27 +2751,20 @@ jobs:
     # Because of that divergence there was no validation path for board-05
     # routing work (#3775, #3766) -- this job provides one by regenerating +
     # re-routing board 05 INSIDE the CI container and hard-asserting
-    # blocking_incomplete_count <= 7.
+    # blocking_incomplete_count == 0.
     #
-    # PHASE 5 LOWERED THE FRESH-REGEN FLOOR FROM 9-10 TO 6; THRESHOLD IS NOW 7
-    # (issue #4479).  The committed on-disk artifact is hand-verified at 0
-    # blocking (PR #4003, DRC-clean + LVS-clean), but that gold board is NOT
-    # reproducible from a fully-unattended regen yet.  A fresh full re-route
-    # inside CI (timeout raised to 90 min so it runs to completion) MEASURED
-    # blocking_incomplete_count = 6 on commit 2de4089a, with Phase 5's
-    # Kelvin-star rooting + batch-completion + rescue-revival wiring active
-    # (PR #4527 / #4532; CI run 30666373355).  The residual cohort is
-    # ISENSE_A-, ISENSE_B-, ISENSE_C-, PHASE_A, PHASE_B, PHASE_C.  That is a
-    # large win over the pre-Phase-5 floor of 9-10 (nondeterministic run-to-run
-    # per #3836), though still short of the committed artifact's 0.
-    # --max-blocking is therefore set to 7 -- one net of safety margin above the
-    # measured CI ceiling of 6, the same "+1 above the observed ceiling"
-    # methodology the previous loose bound of 11 (10 + 1) used -- so the gate
-    # locks in Phase 5's gain (11 -> 7) while tolerating the historical
-    # run-to-run nondeterminism.  The gate stays a hard assertion (no
-    # continue-on-error) and still catches GROSS regressions (> 7).  Tighten
-    # further toward 0 as #4548 (escape-corridor reservation, targeting the
-    # PHASE_A/B/C south-escape congestion) and the ISENSE -leg follow-up land.
+    # THE GATE IS ZERO (issue #7547).  A fresh CI regen of board 05 measured
+    # blocking_incomplete_count = 0 (blocking nets: none) in every main run
+    # that reached the gate from 2026-10-18 to 2026-10-19 -- 12 runs, e.g.
+    # 39137057066, 39201331009, 39313274747, 39339125038 (four runs on
+    # 2026-10-18 failed in the regen step and never reached the gate).  The
+    # previous bound of 7 (one net above the Phase-5 CI ceiling of 6, issue
+    # #4479; ISENSE_A-/B-/C-, PHASE_A/B/C on commit 2de4089a, CI run
+    # 30666373355) would have hidden up to 7 regressions, so it is gone: ANY
+    # blocking incomplete net now fails the job.  If a net must be tolerated
+    # again, list it by name with an open tracker (identity-keyed, see
+    # scripts/ci/identity_allowance.py, #7359) -- do not restore a bare count.
+    # The gate is a hard assertion (no continue-on-error).
     #
     # Unlike boards 00-03/06/07, board 05 has NO committed output/lvs.json on
     # origin/main, so the --lvs-only e2e asserter is not reusable.  The
@@ -2742,12 +2773,10 @@ jobs:
     # NetStatusAnalyzer.blocking_incomplete_count (which mirrors the
     # check_routed_drc advisory/plane-residual filtering).
     #
-    # The --max-blocking threshold defaults to 7 (one net above the
-    # Phase-5-measured CI ceiling of 6) and is a CLI arg so #4548 / the ISENSE
-    # -leg follow-up can tighten it toward 0 as they land.  <= 7 catches GROSS
-    # regressions without flaking on board-05's historical nondeterminism.
+    # The --max-blocking threshold defaults to 0 (issue #7547) and is passed
+    # explicitly below.
     #
-    # Pre-Phase-5 history (why the bound was 11 before):
+    # Pre-#7547 history (the bound was 11, then 7 after Phase 5, #4479):
     # Issue #3836: the wall-clock re-route was nondeterministic at 9-10 blocking
     # (observed main=9, PR #3835 branch=10 twice, identical router code); a
     # default of 9 sat exactly on the boundary and red-lighted unrelated PRs, so
@@ -2784,11 +2813,11 @@ jobs:
     # is set generously to 90 min to let the full route + rescue loop + gate
     # run to completion and emit a REAL blocking-net count.  With the timeout
     # raised, the run completed and MEASURED 6 blocking nets with Phase 5 active
-    # (down from the pre-Phase-5 9-10), so the gate is set to <= 7 to clear the
-    # measured ceiling without flaking -- see the floor note above.  This is
+    # (down from the pre-Phase-5 9-10); current main measures 0, so the gate
+    # is == 0 -- see the floor note above.  This is
     # intentionally higher than every other job (next-highest is the 45-min
     # Test job) because no other job runs the board-05 rescue loop from clean.
-    name: Board 05 Routing Regression (blocking <= 7)
+    name: Board 05 Routing Regression (blocking == 0)
     needs: [changes, kicad_pin]
     # Issue #5743 item 4 (operator ruling 2026-10-17): main verification
     # runs only -- boards 01-05 do not run on pull requests; boards 00
@@ -2844,23 +2873,18 @@ jobs:
             /tmp/board05-ci || true
           test -f /tmp/board05-ci/bldc_controller_routed.kicad_pcb
 
-      - name: Assert blocking-net baseline (<= 7, Phase-5 measured + 1 margin)
-        # Hard gate: fails the job (exit 2) if blocking_incomplete_count > 7.
-        # 7 is one net above the Phase-5-measured CI ceiling of 6 (issue #4479):
-        # board-05's CI re-route reaches 6 blocking (ISENSE_A-/B-/C-, PHASE_A/B/C)
-        # with Phase 5 active and diverges from the committed 0-blocking artifact
-        # (PR #4003).  The threshold uses the same "+1 above the observed
-        # ceiling" methodology the pre-Phase-5 bound of 11 (10 + 1) used, so it
-        # locks in Phase 5's gain while tolerating board-05's historical
-        # run-to-run nondeterminism.  The gate still catches GROSS regressions
-        # (> 7).  Tighten toward 0 as #4548 (escape-corridor reservation) and the
-        # ISENSE -leg follow-up land.  A LOCAL macOS run would report more
-        # blocking nets -- the documented host-vs-CI divergence (#3822), not a
-        # job defect.  No continue-on-error: this stays a hard gate.
+      - name: Assert blocking-net baseline (== 0)
+        # Hard gate: fails the job (exit 2) if blocking_incomplete_count > 0.
+        # Every main run that reached this step on 2026-10-18..19 measured 0
+        # (issue #7547), matching the committed 0-blocking artifact (PR #4003),
+        # so the old Phase-5 bound of 7 (#4479) is retired.  A LOCAL macOS run
+        # may report blocking nets -- the documented host-vs-CI divergence
+        # (#3822), not a job defect.  No continue-on-error: this stays a hard
+        # gate.
         run: |
           set -euo pipefail
           uv run python scripts/ci/check_board_05_blocking.py \
-            --max-blocking 7 \
+            --max-blocking 0 \
             /tmp/board05-ci/bldc_controller_routed.kicad_pcb
 
   board-04-end-to-end:

@@ -1738,7 +1738,7 @@ def _write_routed_pcb(
     tmp_path.write_text(output_content)
     # fsync the file so a crash between write and rename does not leave
     # a partial-content tmp file masquerading as the routed PCB.
-    with open(tmp_path, "rb") as f:
+    with open(tmp_path, "r+b") as f:
         os.fsync(f.fileno())
     os.replace(tmp_path, output_path)
     from .route_receipt import record_publication
@@ -3957,7 +3957,7 @@ def _save_partial_results() -> bool:
             # ``<path>.write_text(<content variable>)`` shape.
             tmp_path = save_path.with_suffix(save_path.suffix + ".tmp")
             tmp_path.write_text(output_content)
-            with open(tmp_path, "rb") as f:
+            with open(tmp_path, "r+b") as f:
                 os.fsync(f.fileno())
             os.replace(tmp_path, save_path)
             from .route_receipt import record_publication
@@ -7800,6 +7800,10 @@ def _apply_plane_via_reservation(
             # Issue #6589: keep foreign vias / plane-layer tracks outside the
             # pour's fill pullback, so the pour still covers each site.
             plane_fills=plane_fills_from_pcb(pcb, nets),
+            # Issue #7573: opt-in -- also serve pour-only 2-pad parts.
+            min_pour_footprint_pads=(
+                2 if getattr(args, "reserve_pour_only_passives", False) else None
+            ),
         )
     except Exception as exc:  # advisory: never fail a route over a reservation
         logger.warning("Plane-via reservation skipped: %s", exc)
@@ -8492,6 +8496,22 @@ def _audited_trace_copper(router: "Autorouter", *, id_to_name=None) -> "list[Rou
     """
     routed = list(getattr(router, "routes", None) or [])
     return routed + _preserved_trace_copper(router, routed=routed, id_to_name=id_to_name)
+
+
+def _print_pair_via_parity_summary(router: "Autorouter", *, quiet: bool = False) -> None:
+    """Print the end-of-run ``Pair Via-Parity Failures`` block (#7425, #7093 AC1)."""
+    failures = getattr(router, "pair_via_parity_failures", None)
+    if not failures or quiet:
+        return
+    print(f"\n--- Pair Via-Parity Failures ({len(failures)}) ---")
+    for f in failures:
+        print(
+            f"  {f.p_name}/{f.n_name}: {f.p_name} {f.vias_p} via(s), {f.n_name} {f.vias_n} via(s)"
+        )
+    print(
+        "  (reported only; exit status unchanged. `kct check` flags these as "
+        "diffpair_uncoupled_length)"
+    )
 
 
 def _preserved_trace_copper(
@@ -18503,6 +18523,17 @@ def _route_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--reserve-pour-only-passives",
+        action="store_true",
+        help=(
+            "Also hold a via site for pour-only 2-pad parts (e.g. a +5V/GND "
+            "decoupling cap) in the pre-route plane-via reservation (Issue "
+            "#7573).  OFF by default: it enlarges the hard keep-out on every "
+            "board whose caps sit between two served pours.  Has no effect "
+            "with --no-plane-via-reservation."
+        ),
+    )
+    parser.add_argument(
         "--no-pad-access-invariant",
         action="store_true",
         help=(
@@ -18769,7 +18800,11 @@ def _route_parser() -> argparse.ArgumentParser:
             "also does NOT remove all sources of variance -- wall-clock "
             "escape budgets (e.g. --timeout) can still terminate early on a "
             "loaded machine; for fully reproducible CI runs combine --seed "
-            "with a generous --timeout."
+            "with a generous --timeout. With --route-engine lattice, --seed "
+            "does not change the copper: the lattice negotiation draws no "
+            "random numbers, so every seed routes the same tracks and vias "
+            "and only the UUIDs differ. A lattice seed sweep is therefore a "
+            "single sample, not a spread (Issue #7580)."
         ),
     )
     parser.add_argument(
@@ -19283,13 +19318,13 @@ def _route_parser() -> argparse.ArgumentParser:
     # Issue #4433: opt-in HARD per-net avoid_layers.
     parser.add_argument(
         "--fallback-bidirectional",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=False,
         help=(
-            "Issue #6527 (experimental, default off): let the C++ backend's "
-            "Python fallback use route_auto (bidirectional A* for paths of "
-            ">= bidirectional_threshold cells, one-way retry sharing one "
-            "deadline) instead of the one-way route()."
+            "Issue #6527 (default off): let the C++ backend's Python fallback "
+            "use route_auto (bidirectional A* with a one-way retry sharing one "
+            "deadline) instead of the one-way route().  Diff-pair legs and "
+            "match-group members always stay one-way."
         ),
     )
     parser.add_argument(
@@ -20636,6 +20671,13 @@ def _run_main_impl(args, parser, argv) -> int:
         random.seed(args.seed)
         if not getattr(args, "quiet", False):
             print(f"[seed] Seeded global random with --seed {args.seed}")
+            # Issue #7580: the lattice engine draws no random numbers, so a
+            # seed sweep on it is one sample repeated, not a spread.
+            if _resolve_route_engine(args) == "lattice":
+                print(
+                    "[seed] Note: --route-engine lattice is deterministic; "
+                    "--seed changes only UUIDs, not the routed copper"
+                )
 
     # Issue #3538: normalize --deterministic-budget BEFORE any wall-clock
     # deadline is stamped or any inner router routine reads per_net_timeout /
@@ -23085,6 +23127,13 @@ def _run_main_impl(args, parser, argv) -> int:
             "`kct check` results if this board is dense with matched-length "
             "bundles."
         )
+
+    # Issue #7425 (#7093 AC1): engaged diff pairs the router committed with
+    # unequal P/N via counts -- the same pairs ``kct check`` reports as
+    # ``diffpair_uncoupled_length`` "unequal via counts".  Reported only: the
+    # exit status is unchanged (the JSON report carries the same list under
+    # ``pair_via_parity_failures``).
+    _print_pair_via_parity_summary(router, quiet=quiet)
 
     # Report nets that needed clearance relaxation (--progressive-clearance mode)
     if relaxed_nets_report and not quiet:

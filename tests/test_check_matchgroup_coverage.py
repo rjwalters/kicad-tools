@@ -60,31 +60,8 @@ def _load_board_recipe_module():
 # ---------------------------------------------------------------------------
 
 
-class TestCheckZeroViolations:
-    """The gate must FAIL when match_group_length_skew fires beyond its
-    documented baseline -- even when the total error count fits the (large)
-    allowlist floor.  This is the assertion the old gate lacked."""
-
-    def test_zero_violations_strict_baseline_passes(self):
-        mod = _load_helper_module()
-        assert mod.check_zero_violations({"match_group_length_skew": 0}, baseline=0) == []
-
-    def test_nonzero_violations_strict_baseline_fails(self):
-        mod = _load_helper_module()
-        failures = mod.check_zero_violations({"match_group_length_skew": 5}, baseline=0)
-        assert len(failures) == 1
-        assert "match_group_length_skew=5" in failures[0]
-
-    def test_regression_under_large_allowlist_floor_still_fails(self):
-        """The exact blindness #3828 closes: board 07's 120-error allowlist
-        floor would absorb a few new skew errors, but the zero-violation
-        assertion (independent of the allowlist) still fails."""
-        mod = _load_helper_module()
-        assert mod.check_zero_violations({"match_group_length_skew": 3}, baseline=0)
-
-    def test_at_documented_baseline_passes(self):
-        mod = _load_helper_module()
-        assert mod.check_zero_violations({"match_group_length_skew": 4}, baseline=4) == []
+class TestBoard07Allowance:
+    """Issue #3828 / #7339 / #7367: the allowance names identities, never a count."""
 
     def test_board_07_allowance_is_keyed_to_named_groups(self):
         """Board 07's allowance names its groups (Issue #7339, #7270 Q3).
@@ -99,15 +76,20 @@ class TestCheckZeroViolations:
         key = "boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb"
         assert set(mod.MATCHGROUP_ALLOWED_GROUPS[key]) == {"MIPI_CSI_LANES", "DDR_DATA_BYTE_0"}
         assert not hasattr(mod, "MATCHGROUP_VIOLATION_BASELINE")
+        assert not hasattr(mod, "check_zero_violations")
 
     def test_fixture_impedance_allowance_kept(self):
-        """#7347's impedance allowance survives the group rework (net-keyed, #7359)."""
+        """#7347's impedance allowance survives the group rework (net-keyed, #7359);
+        #7367 adds the skew pairs by pair."""
         mod = _load_helper_module()
-        assert {rule for rule, _ in mod.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS} == {"impedance"}
+        assert {rule for rule, _ in mod.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS} == {
+            "impedance",
+            "diffpair_length_skew",
+        }
 
 
 class TestCheckGroupAllowances:
-    ALLOWED = {"MIPI_CSI_LANES": "#3916", "DDR_DATA_BYTE_0": "#7339"}
+    ALLOWED = {"MIPI_CSI_LANES": 7550, "DDR_DATA_BYTE_0": 7550}
 
     def test_exactly_the_allowed_groups_pass(self):
         mod = _load_helper_module()
@@ -436,7 +418,7 @@ class TestUnexpectedBaselineErrors:
         mod = _load_helper_module()
         found = {"impedance": set(self.NETS)}
         assert mod.unexpected_baseline_errors(self.KEY, {"impedance": 4}, found) == {}
-        assert mod.stale_allowances(self.KEY, found) == []
+        assert [s for s in mod.stale_allowances(self.KEY, found) if s[0] == "impedance"] == []
 
     def test_unlisted_impedance_net_reported_within_old_cap(self):
         mod = _load_helper_module()
@@ -447,7 +429,8 @@ class TestUnexpectedBaselineErrors:
         mod = _load_helper_module()
         found = {"impedance": self.NETS - {"TMDS_D1_P"}}
         assert mod.unexpected_baseline_errors(self.KEY, {"impedance": 3}, found) == {}
-        assert mod.stale_allowances(self.KEY, found) == [("impedance", "TMDS_D1_P", 7332)]
+        stale = [s for s in mod.stale_allowances(self.KEY, found) if s[0] == "impedance"]
+        assert stale == [("impedance", "TMDS_D1_P", 7349)]
 
     def test_cap_constant_removed(self):
         assert not hasattr(_load_helper_module(), "MATCHGROUP_FIXTURE_RULE_CAPS")

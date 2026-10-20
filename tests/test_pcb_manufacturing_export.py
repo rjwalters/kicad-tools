@@ -1,5 +1,6 @@
 """Tests for PCB manufacturing export methods."""
 
+import shutil
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -753,9 +754,23 @@ class TestFlattenLatestReportPdf:
 
 # Fixtures
 @pytest.fixture
-def test_project_pcb():
-    """Path to test project PCB fixture."""
-    fixture_path = Path(__file__).parent / "fixtures" / "projects" / "test_project.kicad_pcb"
+def test_project_pcb(tmp_path):
+    """Path to a per-test copy of the test project PCB fixture.
+
+    Never hand out the checked-in file: kicad-cli writes a
+    ``test_project.kicad_prl`` sidecar next to the board it exports, which
+    under xdist raced ``test_mcp_tool_smoke``'s fixture-integrity hash (#7588).
+    The whole project (pcb/sch/pro) is copied so kicad-cli sees the same
+    project context it would beside the original.
+    """
+    src_dir = Path(__file__).parent / "fixtures" / "projects"
+    fixture_path = src_dir / "test_project.kicad_pcb"
     if not fixture_path.exists():
         pytest.skip(f"Test fixture not found: {fixture_path}")
-    return str(fixture_path)
+    project_dir = tmp_path / "test_project"
+    project_dir.mkdir()
+    for ext in ("kicad_pcb", "kicad_sch", "kicad_pro"):
+        src = src_dir / f"test_project.{ext}"
+        if src.exists():
+            shutil.copy2(src, project_dir / src.name)
+    return str(project_dir / "test_project.kicad_pcb")

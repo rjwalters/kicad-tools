@@ -29,8 +29,8 @@
       "size": 3356
     },
     "design-source.zip": {
-      "sha256": "af25266ce7dfd56b76f8b5e0893cbd7c1d5f6f32e45a2cd3d5fb1c2e284082bb",
-      "size": 1091414
+      "sha256": "47cb475f2bccb67cb0a994f7f53cd40f8cbe220847f3a76f413c8040771a0955",
+      "size": 1091778
     },
     "engineering/README.md": {
       "sha256": "539341a88badbaaebf417c584ca02b0405d7f9bd26f89bbddc6ae1f2c2d15dd0",
@@ -217,8 +217,8 @@
       "size": 396501
     },
     "kicad_project.zip": {
-      "sha256": "5d80ee9fe67c73d288ea00ce9241a1e7d704732f4097a651b06d336b36e9acbc",
-      "size": 453978
+      "sha256": "6241d5b17e4fef38d45cc70d774e8b33b4ddcfaea6aa6d49a4c3e074c6245cd2",
+      "size": 453984
     },
     "lvs.json": {
       "sha256": "590e87395d997669151b91020f3a030c33cd470fb216132160e7144ff711fc4d",

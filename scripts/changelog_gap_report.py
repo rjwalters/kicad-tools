@@ -173,6 +173,7 @@ INTERNAL_ISSUES: dict[int, str] = {
     5790: "KRT comparison research script + write-up (scripts/research, docs/research); no shipped surface",
     5973: "vendored Loom post-worktree hook timeout parsing; orchestration tooling only",
     6170: "test-only: call _py_grid_state_stamp as an instance method after #6152; dev tests",
+    7472: "mypy baseline nanobind signature restore after a --update drop; repo CI only",
 }
 
 #: Commits (by SHA prefix) that carry a user-visible-looking subject, resolve to no

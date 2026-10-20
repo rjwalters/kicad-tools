@@ -108,7 +108,7 @@ class DebugHeader(CircuitBlock):
         x: float,
         y: float,
         interface: str = "swd",
-        pins: int = 10,
+        pins: int | None = None,
         series_resistors: bool = False,
         resistor_value: str = "10R",
         ref: str = "J1",
@@ -126,7 +126,8 @@ class DebugHeader(CircuitBlock):
             x: X coordinate of header
             y: Y coordinate of header center
             interface: Debug interface type: "swd", "jtag", or "tag-connect"
-            pins: Number of pins (6 or 10 for SWD/Tag-Connect, 20 for JTAG)
+            pins: Number of pins (6 or 10 for SWD/Tag-Connect, 20 for JTAG).
+                Defaults per interface: 10 for SWD/Tag-Connect, 20 for JTAG.
             series_resistors: If True, add series resistors for protection
             resistor_value: Value for series resistors (default 10R)
             ref: Header reference designator
@@ -152,6 +153,8 @@ class DebugHeader(CircuitBlock):
         """
         super().__init__(sch, x, y)
         self.interface = interface.lower()
+        if pins is None:
+            pins = 20 if self.interface == "jtag" else 10
         self.pins = pins
         self.series_resistors = series_resistors
 

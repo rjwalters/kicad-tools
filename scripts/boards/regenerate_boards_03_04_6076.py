@@ -279,9 +279,10 @@ def board03_receipt(base_commit: str, checked_at: str | None, known: tuple[str, 
         "source_commit": base_commit,
         "report": "output/manufacturing/check-report.json",
         "binding_note": (
-            "Additive bindings for exact-source factory/process inputs. Original corrected "
-            "verifier receipt preserved in output/readiness-verification/readiness.json. "
-            "Verdict and all verifier checks are unchanged."
+            "Additive bindings for exact-source factory/process inputs. This file is the "
+            "kct readiness --verify receipt plus these bindings; the receipt itself "
+            "(output/readiness-verification/readiness.json) is a local diagnostic and is "
+            "not committed (Issue #7536). Verdict and all verifier checks are unchanged."
         ),
     }
     (out / "readiness.json").write_text(json.dumps(receipt, indent=2) + "\n")

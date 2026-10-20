@@ -195,7 +195,7 @@ class TestDifferentialPairRules:
         assert rules.spacing == 0.15
         # Issue #6443: the protocol table's USB3_SS value (was 0.5 in the
         # private for_type table, 0.1 in the recipe guide).
-        assert rules.max_length_delta == 0.1
+        assert rules.max_length_delta == 0.127  # Q16 limit (Issue #7521)
         assert rules.impedance == 90.0
 
     def test_ethernet_rules(self):
@@ -209,7 +209,7 @@ class TestDifferentialPairRules:
         """Test HDMI differential pair rules."""
         rules = DifferentialPairRules.for_pair_type(DifferentialPairType.HDMI)
         assert rules.spacing == 0.15
-        assert rules.max_length_delta == 0.5
+        assert rules.max_length_delta == 0.127  # Q16 limit (Issue #7521)
         assert rules.impedance == 100.0
 
     def test_lvds_rules(self):

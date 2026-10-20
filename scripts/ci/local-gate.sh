@@ -376,7 +376,9 @@ job_board_06_end_to_end() {
 }
 
 job_board_07_end_to_end() {
-  local known_opens="DQ3,DQ4,MIPI_DAT0_N,TMDS_D0_N,TMDS_D1_N"
+  # Sole known open: TMDS_D0_N (#7557, measured in #7554, under epic
+  # #3438); must match ci.yml.
+  local known_opens="TMDS_D0_N"
   uv run kct build-native
   rm -rf /tmp/board07-ci
   mkdir -p /tmp/board07-ci
@@ -416,7 +418,7 @@ job_board_05_routing_regression() {
     /tmp/board05-ci || true
   test -f /tmp/board05-ci/bldc_controller_routed.kicad_pcb
   uv run python scripts/ci/check_board_05_blocking.py \
-    --max-blocking 7 \
+    --max-blocking 0 \
     /tmp/board05-ci/bldc_controller_routed.kicad_pcb
 }
 

@@ -952,6 +952,20 @@ def get_routing_diagnostics_json(
             result_dict["failure_breakdown"]["placement_invalid"] = len(blocked)
     if partially_connected:
         result_dict["partially_connected"] = partially_connected
+    # Issue #7425 (#7093 AC1): engaged diff pairs committed with unequal via
+    # counts.  ABSENT (not empty) when there are none, so a clean board's JSON
+    # is unchanged; reporting only -- it does not change the exit status.
+    parity_failures = getattr(router, "pair_via_parity_failures", None)
+    if parity_failures:
+        result_dict["pair_via_parity_failures"] = [
+            {
+                "p_net": f.p_name,
+                "n_net": f.n_name,
+                "vias_p": f.vias_p,
+                "vias_n": f.vias_n,
+            }
+            for f in parity_failures
+        ]
     if routing_plan is not None:
         # Issue #5519 (Epic #5510, Phase 1): report-only RoutingPlan
         # summary.  Absent (not null) when no plan was built -- the key

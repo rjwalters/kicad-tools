@@ -1,8 +1,8 @@
 ---
 title: "diffpair_test_routed"
 subtitle: "Design Report"
-author: "kicad-tools 0.20.0"
-date: "Rev 1 | 2026-09-10 | jlcpcb-tier1"
+author: "kicad-tools 0.23.0"
+date: "Rev 1 | 2026-10-19 | jlcpcb-tier1"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -20,7 +20,7 @@ header-includes:
 | Layers | 4 copper (F.Cu, In1.Cu, In2.Cu, B.Cu) |
 | Footprints | 36 (33 SMD, 3 THT, 0 other) |
 | Nets | 18 |
-| Traces | 196 segments |
+| Traces | 214 segments |
 | Vias | 63 |
 | Board Size | 90.0 x 70.0 mm |
 
@@ -42,20 +42,6 @@ header-includes:
 
 Four-channel LVDS link demonstrator
 
-### Power Architecture
-
-**Power Rails**: PWR_FLAG
-
-## Hand-Solder (THT) Components
-
-The following 3 through-hole components are **excluded from the SMT pick-and-place file** and must be hand-soldered (or wave/selective-soldered) after SMT assembly. They appear in the BOM for sourcing.
-
-| Value | Package | Qty | References |
-|-------|---------|-----|------------|
-| 3.3V regulated input | PinHeader_1x02_P2.54mm_Vertical | 1 | J1 |
-| IN1-4 / GND | PinHeader_1x08_P2.54mm_Vertical | 1 | J2 |
-| OUT1-4 / GND | PinHeader_1x08_P2.54mm_Vertical | 1 | J3 |
-
 ## ERC Status
 
 | Metric | Count |
@@ -63,8 +49,7 @@ The following 3 through-hole components are **excluded from the SMT pick-and-pla
 | Errors | 0 |
 | Warnings | 0 |
 
-**Status**: SKIPPED -- ERC skipped by user request
-
+**Status**: PASS
 
 \newpage
 
@@ -133,15 +118,18 @@ The following 3 through-hole components are **excluded from the SMT pick-and-pla
 
 \newpage
 
-## DRC Status
+## DRC Status (`--mfr jlcpcb-tier1` rules)
 
 | Metric | Count |
 |--------|-------|
 | Errors | 0 |
+| Errors: kct (`--mfr jlcpcb-tier1` rules) | 0 |
+| Errors: kicad-cli (geometric) | 0 |
 | Warnings | 0 |
 | Blocking | 0 |
 
 **Status**: PASS
+
 
 
 \newpage
@@ -152,7 +140,7 @@ The following 3 through-hole components are **excluded from the SMT pick-and-pla
 
 ### Action Items
 
-- **[OPTIONAL]** Verify zone fill in KiCad for 2 zone-connected nets
+- **[OPTIONAL]** Refill zones to verify 2 zone-connected nets, then re-run kct audit
 
 
 \newpage

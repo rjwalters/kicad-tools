@@ -145,6 +145,14 @@ if it were. In the incident behind #6883 the fix was wrong, its regression test
 fabricated the source payload the fix assumed, and the bug survived the close
 undetected until a human asked why the item still had not appeared.
 
+**Per-repo switch (#12703)**: optional config key `champion.outOfBandAcGate`
+(boolean; absent = `true`, today's behaviour), resolved through the daemon's
+config tiers (`loom-daemon config get champion.outOfBandAcGate --json`), so
+fleet-gitops can set it for one repo. Only an explicit `false` turns the gate
+off: Step 4 then skips the classifier and never adds `loom:operator` for an
+out-of-band criterion. Absent, unreadable or non-boolean values keep it on.
+First use case: 2AMLogic/loom-ui, whose live site is where testing happens.
+
 **Handling**: `champion-pr-merge.md` → Step 4 → "Out-of-Band Acceptance-Criteria
 Gate" runs `./.loom/scripts/classify-ac-verification.sh --issue <N> --pr <PR>
 --head-sha <head>` for every linked issue before confirming or forcing its close:

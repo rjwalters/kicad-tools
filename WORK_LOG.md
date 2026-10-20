@@ -13,8 +13,73 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-10-20
+
+- **PR #7544**: fix(boards): stop committing kct readiness --verify receipts
+- **PR #7542**: feat(check): leave KiCad tuning patterns out of the uncoupled measure (#7521)
+- **PR #7541**: fix: create output dir before ampacity sidecar write; update resolver no-sidecar premise (Closes #7539)
+- **PR #7540**: chore(loom): resync installed Loom to v0.19.1193
+- **PR #7538**: docs: reassess pad-access expansion and recommend deferring lattice/mesh port
+- **PR #7537**: fix(boards): make refresh_readiness a fixed point on unchanged evidence
+- **PR #7530**: fix: guard POSIX-only O_NOFOLLOW/O_DIRECTORY in JLC upload ledger
+- **PR #7516**: fix: snap schematic block ports to the grid so off-grid origins stay wired
+- **Issue #7539** (closed): main red after #7500: net_class_map.json sidecars break resolver test and board partial-route fast-fail tests (blocks v0.24.0)
+- **Issue #7536** (closed): kct readiness --verify receipts (readiness-verification/**) don't reproduce: environment-dependent provenance/BOM fields, stale on board 00
+- **Issue #7534** (closed): [Epic #5508] Reassess pad-access expansion against current failures and product value
+- **Issue #7529** (closed): JLC upload ledger uses POSIX-only os.O_DIRECTORY / O_NOFOLLOW; AttributeError on Windows (found in #7527 review)
+- **Issue #7510** (closed): Schematic blocks: ports misplaced at off-grid origins (grid-snap mismatch)
+- **Issue #7402** (closed): Schematic blocks: phantom/off-pin ports and broken defaults found by the real-symbol smoke test (#7399 follow-up)
+- **Issue #7384** (closed): Committed board evidence doesn't reproduce: refresh_readiness --dry-run (pinned 10.0.6, committed checked_at) rewrites files on 6 of 7 boards
+- **Issue #7026** (closed): board 03: fresh class-clean lattice route is not complete under the recipe's tier-1 zone fill (3 GND opens)
+
 ### 2026-10-19
 
+- **PR #7535**: feat(router): write diff-pair skew bumps as KiCad tuning patterns (#7521)
+- **PR #7531**: chore(loom): resync installed Loom to v0.19.1191
+- **PR #7527**: fix: fsync atomic-write tmp files through a writable handle (Windows PCB.save EBADF)
+- **PR #7525**: fix(dsn): export circle, oval, rotated and custom pad copper as real shapes
+- **PR #7524**: fix: skip pad net_name unpersisted-edit check for number-only net nodes
+- **PR #7522**: docs: add diff-pair skew compensation note and enforce research index coverage
+- **PR #7515**: fix(board03): keep fresh-route tracks off C11.2's lower thermal spoke
+- **PR #7514**: fix: make JTAG header, UCC27211 driver and USB ESD blocks build with defaults
+- **PR #7513**: fix: anchor schematic block ports to real pins/wires, drop phantom aliases
+- **PR #7504**: fix: point board 03 via-in-pad exception at its open follow-up issue
+- **PR #7502**: fix(router): gap-tightening never worsens pair skew or uncoupled length
+- **PR #7500**: feat(check): declared spec currents make ampacity coverage unknown until mapped to nets
+- **PR #7494**: fix: detect versioned Windows KiCad 9/10 installs
+- **Issue #7520** (closed): docs/research: add diff-pair skew-compensation note and a README index for all research notes
+- **Issue #7519** (closed): PCB.save() falsely refuses an unedited board whose pads use nameless numbered nets (net N)
+- **Issue #7508** (closed): Schematic blocks: fix DebugHeader jtag and UCC27211 defaults, wire USB ESD TVS
+- **Issue #7507** (closed): Schematic blocks: fix phantom ports in CAN ESD, I2CPullups, gpio pull resistor, BackToBackFETPair
+- **Issue #7498** (closed): board 03: fresh native-clearance lattice plan replays LVS-clean but leaves one starved_thermal on C11.2 (GND, F.Cu)
+- **Issue #7484** (closed): DSN export: `custom` pads are written as their anchor rectangle only (primitives ignored); round, oval and rotated pads also collapse to an axis-aligned rectangle
+- **Issue #7480** (closed): Windows: `find_kicad_cli()` and `detect_kicad_library_path()` only probe KiCad 7.0/8.0 install paths, so KiCad 9 and 10 are not found
+- **Issue #7478** (closed): `atomic_write_text` fsyncs a read-only handle: every `PCB.save` fails on Windows with `OSError: [Errno 9]` (0.22.0, 0.23.0)
+- **Issue #7206** (closed): Spec-declared currents never reach the ampacity gate: board 05 motor phase necked to 0.2 mm passes check, audit and readiness
+- **PR #7512**: fix: anchor GateDriverBlock ports to real driver pins
+- **Issue #7509** (closed): Schematic blocks: GateDriverBlock ports match no pin and add no wires
+- **PR #7511**: fix: clamp BarrelJackInput P-FET Vgs with a gate resistor and Zener
+- **Issue #7489** (closed): BarrelJackInput: 12 V default exceeds the Si2301 P-FET's gate-source rating (gate tied straight to ground)
+- **PR #7495**: fix: polygonize Edge.Cuts into a valid DSN boundary with cutout keepouts
+- **Issue #7482** (closed): DSN export: board boundary is built from Edge.Cuts `gr_line` endpoints in file order, giving a self-intersecting outline (and arcs, circles and polygons are ignored)
+- **PR #7499**: fix: write pad geometry through to the S-expression tree and refuse unpersisted edits on save
+- **Issue #7479** (closed): `Pad.size` / `Pad.drill` assignments are not written back: `PCB.save()` silently keeps the old values
+- **PR #7497**: fix: export NPTH holes as DSN image keepouts and drop non-copper pads
+- **Issue #7483** (closed): DSN export: `np_thru_hole` pads fall into the SMD branch and are written as a square pad on layer `*.Cu`; Freerouting rejects the layer, so mounting holes are no obstacle
+- **PR #7496**: fix(export): place DSN pins on their KiCad pads for rotated and back-side parts
+- **Issue #7481** (closed): DSN export: pins of ±90° footprints and of back-side footprints land in the wrong place in Freerouting (y not negated, rotation sense not converted)
+- **PR #7476**: fix: surface pair via-parity failures in kct route and align the audit with kct check
+- **Issue #7425** (closed): Surface pair via-parity failures in kct route summary/JSON; align audit pair set with kct check (#7421 follow-up, #7093 AC1)
+- **PR #7490**: fix(blocks): reverse-polarity P-FET drain on the input; VoltageDividerSense over VoltageDivider
+- **Issue #7399** (closed): Schematic blocks: 10 stock factories fail on real KiCad 10 libs (stale symbol IDs, fictional mock pins); add a real-symbol smoke test
+- **PR #7493**: fix: number DSN structure layers by stack order
+- **Issue #7485** (closed): DSN export writes `(property (index 0))` for every layer instead of the layer's stack position
+- **PR #7501**: fix(boards): include THT rows in board 04/06 JLCPCB packages; retire board 04 manual BOM
+- **Issue #7268** (closed): Regenerate JLCPCB packages of boards 02-07 with THT rows (follow-up to #7239)
+- **PR #7457**: fix: widen board 03 usb_geometry launch window for via-in-pad launches
+- **PR #7469**: fix(check): add board 04 courtyards (Y1 moved to clear C2) and flag courtyard-less footprints as courtyard_missing
+- **Issue #7084** (closed): router: routing board 03 under jlcpcb-tier1 collapses the USB_D In2.Cu common run to 1.4 mm (arm C under jlcpcb keeps 4.1 mm)
+- **Issue #7204** (closed): DFA false-PASS: courtyard check silently skips courtyard-less footprints (boards 00/01/04 signed off with 0 courtyards) and AssemblyCapabilities is never enforced (board 07 double-sided CPL unflagged)
 - **PR #7486**: fix(boards): refresh board 05 report via its producer, keep reviewed net-class rules
 - **PR #7465**: fix: delete stale board 04 native-drc.json and check for unbound DRC reports
 - **PR #7439**: fix(export): place THT parts at pad-bbox centre in JLCPCB CPL

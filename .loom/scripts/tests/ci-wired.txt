@@ -54,6 +54,7 @@ test-champion-held-pr-health-pass.sh
 test-champion-issue-promo-escalation-respects-human-hold.sh
 test-champion-markerless-park.sh
 test-champion-merge-queue-step-no-fallthrough.sh
+test-champion-out-of-band-ac-gate-switch.sh
 test-champion-pr-merge-hold-release.sh
 test-champion-pr-merge-negation-guard.sh
 test-champion-post-claim-recheck.sh
@@ -125,6 +126,7 @@ test-guide-operator-hold-exclude.sh
 test-guide-plan-body-stable-sort.sh
 test-guide-pool-pressure-defer.sh
 test-guide-superseding-block-merge-state.sh
+test-guide-work-log-rotation.sh
 test-guide-unblock-merged-blocker.sh
 test-guide-work-log-debounce.sh
 test-guide-work-log-issue-out-of-order.sh
@@ -148,7 +150,6 @@ test-install-stash-scope.sh
 test-install-sync-labels.sh
 test-jq-reserved-word-args.sh
 test-judge-fallback-cap.sh
-test-judge-fanout-experiment.sh
 test-judge-payload-drop-guard.sh
 test-judge-spec-reconcile.sh
 test-judge-tdd-merge-base.sh

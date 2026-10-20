@@ -1,7 +1,9 @@
 """Motor control circuit blocks: half-bridges, gate drivers, current sensing."""
 
+import warnings
 from typing import TYPE_CHECKING
 
+from ..grid import DEFAULT_GRID, snap_point
 from ._pins import first_pin_position, output_pin_position
 from ._stub_helpers import _emit_pin_net_stub
 from .base import CircuitBlock
@@ -929,6 +931,31 @@ class BootstrapCapacitorArray(CircuitBlock):
                 sch.add_label(phase_nets[i], stub_x, stub_y, rotation=0)
 
 
+# Named block port -> real pin name, per default driver symbol.  Phase-scoped
+# ports (``*_A/_B/_C``) are skipped for phases the driver type does not have.
+_GATE_DRIVER_PORT_PINS: dict[str, dict[str, str]] = {
+    "Driver_Motor:DRV8308": {
+        "VCC": "VM",
+        "GND": "GND",
+        "GATE_HS_A": "UHSG",
+        "GATE_LS_A": "ULSG",
+        "GATE_HS_B": "VHSG",
+        "GATE_LS_B": "VLSG",
+        "GATE_HS_C": "WHSG",
+        "GATE_LS_C": "WLSG",
+    },
+    "Driver_FET:IR2110": {
+        "VCC": "VCC",
+        "GND": "COM",
+        "BOOT_A": "VB",
+        "GATE_HS_A": "HO",
+        "GATE_LS_A": "LO",
+        "PWM_H_A": "HIN",
+        "PWM_L_A": "LIN",
+    },
+}
+
+
 class GateDriverBlock(CircuitBlock):
     """
     Gate driver IC block with bootstrap capacitors.
@@ -1125,20 +1152,29 @@ class GateDriverBlock(CircuitBlock):
             self.bypass_caps.append(cap)
             self.components[f"C_BYPASS{i + 1}"] = cap
 
-        # Define placeholder ports (positions relative to driver center)
-        # These would be updated with actual pin positions from the symbol
-        self.ports = {
-            "VCC": (x, y - 20),
-            "GND": (x, y + 20),
-        }
-
-        for i, label in enumerate(phase_labels):
-            offset = (i - 1) * 15  # Spread ports horizontally
-            self.ports[f"BOOT_{label}"] = (x + offset - 30, y - 10)
-            self.ports[f"GATE_HS_{label}"] = (x + offset + 30, y - 5)
-            self.ports[f"GATE_LS_{label}"] = (x + offset + 30, y + 5)
-            self.ports[f"PWM_H_{label}"] = (x + offset - 30, y + 5)
-            self.ports[f"PWM_L_{label}"] = (x + offset - 30, y + 10)
+        # Expose named ports at the driver IC's real pin ends so each one
+        # lands on a pin (issue #7509).  Ports with no counterpart pin on
+        # the part (e.g. DRV8308 has no per-phase PWM inputs) are omitted
+        # rather than parked at an arbitrary offset that matches nothing.
+        self.ports = {}
+        port_pins = _GATE_DRIVER_PORT_PINS.get(driver_symbol)
+        if port_pins is None:
+            # Unknown custom symbol: pin names cannot be guessed, so keep the
+            # historical placeholder offsets relative to the driver center.
+            self.ports = {"VCC": (x, y - 20), "GND": (x, y + 20)}
+            for i, label in enumerate(phase_labels):
+                offset = (i - 1) * 15  # Spread ports horizontally
+                self.ports[f"BOOT_{label}"] = (x + offset - 30, y - 10)
+                self.ports[f"GATE_HS_{label}"] = (x + offset + 30, y - 5)
+                self.ports[f"GATE_LS_{label}"] = (x + offset + 30, y + 5)
+                self.ports[f"PWM_H_{label}"] = (x + offset - 30, y + 5)
+                self.ports[f"PWM_L_{label}"] = (x + offset - 30, y + 10)
+        else:
+            for port_name, pin_name in port_pins.items():
+                suffix = port_name.rsplit("_", 1)[-1]
+                if suffix in ("A", "B", "C") and suffix not in phase_labels:
+                    continue
+                self.ports[port_name] = self.driver.pin_position(pin_name)
 
         # Re-expose bootstrap-array ports so callers can wire HIGH_<label>
         # / PHASE_<label> to BST_<label> / PHASE_<label> nets.
@@ -1147,6 +1183,11 @@ class GateDriverBlock(CircuitBlock):
                 # Avoid clobbering driver ports if names ever collide
                 if name not in self.ports:
                     self.ports[name] = pos
+            # Parts without bootstrap pins (charge-pump drivers such as the
+            # DRV8308) have no real BOOT_<label> pin; the bootstrap cap's
+            # high side is that node, so alias it instead of leaving it off.
+            for label in phase_labels:
+                self.ports.setdefault(f"BOOT_{label}", self.ports[f"HIGH_{label}"])
 
         # Optional pin-net labels.  KiCad's label-only connectivity requires
         # the label coordinate to lie on a wire endpoint or segment; without
@@ -1806,6 +1847,15 @@ class BackToBackFETPair(CircuitBlock):
         else:
             kelvin_port = kelvin_node
 
+        # The wire ends snap to the schematic grid, but the midpoint of two
+        # source pins is generally off-grid.  Snap the exposed port the same
+        # way (to ``sch.grid``, #7510) so it lands on the wire end instead of
+        # missing it (#7507).
+        grid = getattr(sch, "grid", DEFAULT_GRID)
+        kelvin_port = snap_point(
+            kelvin_port, grid if isinstance(grid, (int, float)) else DEFAULT_GRID
+        )
+
         # Optional Kelvin label
         if kelvin_label is not None:
             sch.add_label(kelvin_label, kelvin_port[0], kelvin_port[1])
@@ -1896,6 +1946,23 @@ class UCC27211GateDriver(CircuitBlock):
     PEAK_DRIVE_A = 4.0
     DVDT_IMMUNITY_V_PER_NS = 50
 
+    # KiCad 10 ships no UCC27211; LM5109AMA is a half-bridge driver in the
+    # stock Driver_FET library with the same functions.  It is a
+    # schematic-level stand-in only: its pin *numbers* differ from the project
+    # UCC27211 symbol (``_CUSTOM_PIN_NUMBERS``), so pad assignment is wrong for
+    # a real UCC27211.  Not for fabrication.
+    DEFAULT_DRIVER_SYMBOL = "Driver_FET:LM5109AMA"
+    _CUSTOM_PIN_NUMBERS = {
+        "HB": "1",
+        "HO": "2",
+        "HS": "3",
+        "VDD": "4",
+        "HI": "5",
+        "LI": "6",
+        "VSS": "7",
+        "LO": "8",
+    }
+
     def __init__(
         self,
         sch: "Schematic",
@@ -1913,7 +1980,7 @@ class UCC27211GateDriver(CircuitBlock):
         bootstrap_cap_value: str = "100nF",
         vcc_bulk_cap_value: str = "10uF",
         vcc_bypass_cap_value: str = "100nF",
-        driver_symbol: str = "softstart_custom:UCC27211",
+        driver_symbol: str | None = None,
         driver_footprint: str = "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
         cap_ref_prefix: str = "C",
         cap_ref_start: int = 1,
@@ -1944,15 +2011,33 @@ class UCC27211GateDriver(CircuitBlock):
             bootstrap_cap_value: Bootstrap capacitor value (HB ↔ HS).
             vcc_bulk_cap_value: VDD bulk decoupling capacitor.
             vcc_bypass_cap_value: VDD high-frequency bypass capacitor.
-            driver_symbol: KiCad lib_id for the UCC27211 symbol.  The
-                default ``softstart_custom:UCC27211`` requires the
-                schematic to have its ``local_symbol_libs`` pointed at
-                ``boards/external/softstart/symbols/softstart_custom.kicad_sym``.
+            driver_symbol: KiCad lib_id for the UCC27211 symbol.  ``None``
+                (default) uses the shipped ``Driver_FET:LM5109AMA`` as a
+                schematic-level stand-in so the block builds without a
+                board-local library.  Its pin numbering differs from the
+                UCC27211, so a ``UserWarning`` is emitted and the result must
+                not be used for fabrication; ``driver_symbol=`` is required
+                for a board with a real UCC27211.  Pass ``softstart_custom:UCC27211`` to
+                use the project symbol from ``local_symbol_libs`` (pointed at
+                ``boards/external/softstart/symbols/softstart_custom.kicad_sym``).
+                Pins resolve by name (VDD, VSS, ...), falling back to the
+                custom symbol's pin numbers.
             driver_footprint: SOIC-8 footprint for the IC.
             cap_ref_prefix: Reference prefix for the three caps.
             cap_ref_start: Starting cap reference number.
         """
         super().__init__(sch, x, y)
+
+        if driver_symbol is None:
+            driver_symbol = self.DEFAULT_DRIVER_SYMBOL
+            warnings.warn(
+                f"UCC27211GateDriver is using the stand-in symbol {driver_symbol}; "
+                "its pin numbers differ from the UCC27211, so netlist/PCB pad "
+                "assignment is wrong for a real part. Pass driver_symbol= for "
+                "fabrication.",
+                UserWarning,
+                stacklevel=2,
+            )
 
         # Place the driver IC
         self.driver = sch.add_symbol(
@@ -1966,14 +2051,23 @@ class UCC27211GateDriver(CircuitBlock):
         self.components = {"U_DRV": self.driver}
 
         # Get IC pin positions
-        vdd = self.driver.pin_position("4")  # VDD
-        vss = self.driver.pin_position("7")  # VSS (Kelvin ref)
-        li = self.driver.pin_position("6")
-        hi = self.driver.pin_position("5")
-        lo = self.driver.pin_position("8")
-        ho = self.driver.pin_position("2")
-        hb = self.driver.pin_position("1")
-        hs = self.driver.pin_position("3")
+        def _pin(name: str) -> tuple[float, float]:
+            """Resolve by pin name; fall back to the custom symbol's number."""
+            pins = getattr(getattr(self.driver, "symbol_def", None), "pins", None)
+            key = self._CUSTOM_PIN_NUMBERS[name]
+            if isinstance(pins, list) and any(p.name == name for p in pins):
+                key = name
+            pos: tuple[float, float] = self.driver.pin_position(key)
+            return pos
+
+        vdd = _pin("VDD")
+        vss = _pin("VSS")  # Kelvin ref
+        li = _pin("LI")
+        hi = _pin("HI")
+        lo = _pin("LO")
+        ho = _pin("HO")
+        hb = _pin("HB")
+        hs = _pin("HS")
 
         # Bootstrap capacitor between HB and HS (right side of IC)
         c_boot_ref = f"{cap_ref_prefix}{cap_ref_start}"

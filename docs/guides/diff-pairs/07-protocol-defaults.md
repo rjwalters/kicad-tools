@@ -18,14 +18,16 @@ or the tag `uncited`.
 | `pair_protocol` | Max skew | Uncoupled per terminal | Vias per net | Source |
 |---|---|---|---|---|
 | `USB2_FS` (12 Mbit/s) | 2.5 mm | 6.35 mm | 4 | Renesas, *Guidelines for Full-Speed USB2.0 Board Design*, Table 2 (skew); TI SPRAAR7J §3.3 and App. A (uncoupled length and vias: high-speed guidance, applied to full speed) |
-| `USB2_HS` (480 Mbit/s) | 1.27 mm | 6.35 mm | 4 | TI SPRAAR7J App. A (50 mil) and §3.3 |
-| `USB3_SS` | 0.1 mm | none | none | uncited |
+| `USB2_HS` (480 Mbit/s) | 1.0 mm | 6.35 mm | 4 | Skew: Q16 judgement, rounded down from TI 50 mil / Toradex 1.1 mm; uncoupled length and vias: TI SPRAAR7J App. A and §3.3 |
+| `USB3_SS` | 0.127 mm | none | none | 5 mil: TI, Philips/NXP, Renesas; Toradex 0.15 mm |
+| `SATA` | 0.127 mm | none | none | as `USB3_SS` |
 | `LVDS` | 0.5 mm | none | none | uncited |
-| `PCIE_G1` | 0.127 mm | none | none | uncited |
-| `PCIE_G2_PLUS` | generic | none | none | no value proposed |
-| `MIPI_DPHY` | 0.038 mm | none | none | uncited |
+| `PCIE_G1` | 0.127 mm | none | none | as `USB3_SS` |
+| `PCIE_G2_PLUS` | 0.127 mm | none | none | as `USB3_SS` |
+| `MIPI_DPHY` | 0.15 mm | none | none | Toradex <1 ps; AMD Versal ±2 ps incl. package |
 | `ETHERNET` | 2.0 mm | none | none | uncited |
-| `HDMI_TMDS` | 0.5 mm | none | none | uncited |
+| `HDMI_TMDS` | 0.127 mm | none | none | as `USB3_SS` |
+| `DDR_DQS_CK` | 0.15 mm | none | none | Q16 judgement: length proxy for ~1 ps (Intel DDR4, NXP LPDDR4) |
 | `CUSTOM`, or no protocol | 0.5 mm | none | none | generic default |
 
 The table also carries a gap, a trace width and an impedance per protocol.
@@ -36,7 +38,7 @@ deprecated shim over the same table.
 
 A `diffpair_length_skew` finding is:
 
-- an **error** when the limit is cited (the two USB2 rows) or explicit
+- an **error** when the limit is cited (every row but `LVDS`, `ETHERNET`) or explicit
   (`skew_tolerance_mm` set on the class);
 - a **warning** when the limit is an `uncited` table value. A number nobody
   has sourced does not block a board;

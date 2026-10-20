@@ -155,6 +155,10 @@ class Board:
     #: ``True`` for rows that only make sense under ``pairs`` (they carry
     #: copper the ``route`` scaler would tear off its pads, or need a strip).
     pair_bench_only: bool = False
+    #: Track/via keepout rule areas written into the staged routing input (not
+    #: into the committed board): ``(name, layers, ((x, y), ...))`` in board
+    #: file coordinates. Copper pours stay allowed. ``pairs`` only (Issue #7498).
+    route_keepouts: tuple[tuple[str, tuple[str, ...], tuple[tuple[float, float], ...]], ...] = ()
 
 
 # The chorus fixture lives in a sibling repository. ``boards/external`` is a
@@ -201,6 +205,20 @@ BOARDS: dict[str, Board] = {
         # own map does not, and a map-less route holds it to the generic
         # 0.5 mm skew default instead of USB2_FS (Issue #6829).
         net_class_map="boards/03-usb-joystick/output/net_class_map.json",
+        # Issue #7498: C11.2 (GND, 131.275/92.5, 0.9 x 0.95 mm) needs its lower
+        # thermal spoke to reach pour.  A track at y=93.5 under the pad leaves
+        # only ~0.1 mm of pour between the pad and the track after the 0.3 mm
+        # native carve, so the fill starves the spoke (``starved_thermal``).
+        # Keep F.Cu tracks/vias off the strip from the pad's lower edge to
+        # y=93.65; the reviewed plan's JOY_Y_RAW run at y=93.8 (edge 93.7)
+        # stays outside it.
+        route_keepouts=(
+            (
+                "c11_pad2_spoke_7498",
+                ("F.Cu",),
+                ((130.825, 92.975), (131.725, 92.975), (131.725, 93.65), (130.825, 93.65)),
+            ),
+        ),
     ),
     # Diff-pair benchmark rows (Issue #6442; ``pairs`` subcommand only).
     # 06b: the committed LVDS board with every ``LVDS<n>_[PN]`` track and via
