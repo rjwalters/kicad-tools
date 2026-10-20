@@ -374,7 +374,8 @@ other PR; nothing special is needed from you.
   `-m "not slow and not ci_extended"`, plus dedicated steps for Board 05, the
   native mask/stitch/zone gates and the clearance conformance corpus.
   Expect it to take roughly 30-60 minutes (it is the last check to finish);
-  its job timeout is 75 minutes. Exact measurements are recorded in the
+  its job timeout is 120 minutes (a stopgap raise from 75; sharding is
+  tracked in #5240). Exact measurements are recorded in the
   comment on the `test` job in `.github/workflows/ci.yml`.
 - **Only after merge or on the nightly schedule**: `Test (extended)` runs the
   tests in `tests/ci_extended.txt` (the slow tail, each 3 s or more), and
