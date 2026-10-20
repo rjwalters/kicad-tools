@@ -2848,12 +2848,17 @@ class LatticePathfinder:
             return [(pad.x, pad.y)]
         blocker = ""
         pad_extra = self._pair_leg_pad_extra(committed, half, clearance)
+        reqs = self._pair_pad_reqs() if half > 0.0 else None
         for poly in dogleg_attach_candidates((pad.x, pad.y), target):
             ok = True
             for a, b in zip(poly, poly[1:], strict=False):
                 if dist(a, b) <= 1e-9:
                     continue
                 if pads_block_segment_grown(self.obstacles, a, b, layer, pair_nets, pad_extra):
+                    blocker = "pad"
+                    ok = False
+                    break
+                if not self._pair_pad_class_clear(a, b, layer, net, pair_nets, half, reqs):
                     blocker = "pad"
                     ok = False
                     break
@@ -2886,14 +2891,46 @@ class LatticePathfinder:
 
         The pad rects are sized for a board-default track (``agent_radius``),
         so a wider or higher-clearance pair leg needs them grown by the
-        difference -- the same surcharge the single-ended legs use.  Pad
-        classes above the board default are already folded into the rects.
+        difference -- the same surcharge the single-ended legs use.  Only
+        designer-authored floors and #6489 growth are folded into the rects;
+        router net-class pad clearances are NOT (#6449) and are enforced by
+        :meth:`_pair_pad_class_clear`, because ``class_pad_repair`` never
+        moves pair legs.  Together the grown rect (leg side) and that check
+        (pad side) give ``max(leg class, pad class)``.  With a designer floor
+        the reach stacks ``pad_floor - base`` on top of ``leg_clr`` rather
+        than taking the max -- conservative, like the single-ended path.
         ``half <= 0`` (legacy callers) adds nothing.
         """
         if half <= 0.0:
             return 0.0
         clr = committed.clearance if clearance is None else clearance
         return max(0.0, half + clr - self._agent_radius)
+
+    def _pair_pad_class_clear(
+        self,
+        a: Pt,
+        b: Pt,
+        layer: int,
+        net: int,
+        pair_nets: set[int],
+        half: float,
+        reqs: list[float] | None,
+    ) -> bool:
+        """Leg ``a-b`` keeps every foreign pad's OWN net-class clearance (#7597).
+
+        Pair-owned copper is never moved by ``class_pad_repair``, so the pad
+        side of the rule is held up front, exactly as the gateway paths do.
+        Both pair nets are exempt: partner pads stay with the intra-pair gate.
+        """
+        return self._gateway_pad_class_clear(a, b, layer, net, half, reqs, pair_nets)
+
+    def _pair_pad_reqs(self) -> list[float] | None:
+        """Per-pad class requirements, or ``None`` when no classes are installed."""
+        if self.pad_class_clearances is None:
+            return None
+        from .class_pad_repair import pad_class_requirements
+
+        return pad_class_requirements(self)
 
     @staticmethod
     def _pair_leg_clear(
@@ -3212,12 +3249,17 @@ class LatticePathfinder:
                 # 0.275 mm USB3_RX1+ leg shipped 0.126 mm from USB3_TX1+'s
                 # gateway via (0.150 required).
                 leg_pad_extra = self._pair_leg_pad_extra(committed, trace_w / 2.0, leg_clr)
+                pad_reqs = self._pair_pad_reqs()
                 for a, b in zip(full, full[1:], strict=False):
                     if dist(a, b) <= 1e-9:
                         continue
                     # Issue #7597: foreign pads at the leg's TRUE width/class.
                     if pads_block_segment_grown(
                         self.obstacles, a, b, layer, pair_nets, leg_pad_extra
+                    ):
+                        return None, "pair-leg-blocked"
+                    if not self._pair_pad_class_clear(
+                        a, b, layer, net, pair_nets, trace_w / 2.0, pad_reqs
                     ):
                         return None, "pair-leg-blocked"
                     if not committed.seg_clear(a, b, layer, net):
@@ -3376,7 +3418,14 @@ class LatticePathfinder:
     # -- fan-via terminal gateways (issue #6444) --------------------------------
 
     def _gateway_pad_class_clear(
-        self, a: Pt, b: Pt, layer: int | None, net: int, half: float, reqs: list[float] | None
+        self,
+        a: Pt,
+        b: Pt,
+        layer: int | None,
+        net: int,
+        half: float,
+        reqs: list[float] | None,
+        skip_nets: set[int] | None = None,
     ) -> bool:
         """True when ``a-b`` keeps every other-net pad's OWN class clearance.
 
@@ -3385,6 +3434,9 @@ class LatticePathfinder:
         which the post-route class-pad repair enforces only on single-ended
         copper.  Gateway copper is pair-owned and never moved, so it is held
         to the pad class here.  ``layer=None`` probes every layer (a via).
+        ``skip_nets`` replaces the single ``net`` exemption (a coupled pair
+        exempts both of its nets; the partner pads stay with the intra-pair
+        gate).
         """
         if reqs is None:
             return True
@@ -3395,7 +3447,7 @@ class LatticePathfinder:
         y0, y1 = min(a[1], b[1]) - reach, max(a[1], b[1]) + reach
         for idx in self.obstacles.pads_near(x0, y0, x1, y1):
             pad = self.pads[idx]
-            if pad.net == net:
+            if pad.net == net or (skip_nets is not None and pad.net in skip_nets):
                 continue
             if layer is not None and layer not in self.obstacles.pad_layer_indices[idx]:
                 continue

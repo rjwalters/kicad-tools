@@ -13,6 +13,7 @@ from dataclasses import replace
 
 import pytest
 
+from kicad_tools.router.lattice.coupled import seg_rect_dist
 from kicad_tools.router.lattice.geometry import seg_seg_dist
 from kicad_tools.router.lattice.pathfinder import LatticePathfinder
 from kicad_tools.router.layers import Layer, LayerStack
@@ -184,6 +185,63 @@ def test_emitted_pair_legs_keep_true_width_clearance_to_foreign_pad(
         return
     for route in res.routes:
         for seg in route.segments:
-            d = seg_seg_dist(pad_at, pad_at, (seg.x1, seg.y1), (seg.x2, seg.y2))
-            gap = d - 0.2 - seg.width / 2.0  # square 0.4 mm pad
+            rect = (pad_at[0] - 0.2, pad_at[1] - 0.2, pad_at[0] + 0.2, pad_at[1] + 0.2)
+            gap = seg_rect_dist((seg.x1, seg.y1), (seg.x2, seg.y2), rect) - seg.width / 2.0
             assert gap >= 0.15 - 1e-6, f"leg edge {gap:.3f} mm from the foreign pad"
+
+
+@pytest.mark.parametrize("pad_y", [4.80, 4.75, 6.25])
+def test_emitted_pair_legs_keep_the_foreign_pads_own_class_clearance(pad_y: float) -> None:
+    # Issue #7597 review: a foreign pad whose router net class (0.25 mm) is
+    # above the leg's (0.15 mm) must be held to ``max(leg, pad class)``.  The
+    # static pad rects deliberately omit router pad classes (#6449) and
+    # ``class_pad_repair`` never moves pair legs, so without the
+    # ``_pair_pad_class_clear`` call these fixtures ship legs 0.175-0.225 mm
+    # from the pad.  A decline ships no copper, so it also passes.
+    foreign = Pad(
+        x=3.8,
+        y=pad_y,
+        width=0.4,
+        height=0.4,
+        net=7,
+        net_name="OTHER",
+        layer=Layer.F_CU,
+        ref="U2",
+        pin="1",
+    )
+    pf, pc = _pair_board([foreign])
+    pc = replace(pc, net_class=_WIDE, pitch=0.375)
+    pf.build()
+    pf.set_pad_class_clearances([0.25 if p.net == 7 else 0.15 for p in pf.pads])
+    res, _reason = pf._route_pair_impl(pc, committed=pf._fresh_committed(), history={}, present=1.0)
+    if res is None:
+        return
+    rect = (3.6, pad_y - 0.2, 4.0, pad_y + 0.2)
+    for route in res.routes:
+        for seg in route.segments:
+            gap = seg_rect_dist((seg.x1, seg.y1), (seg.x2, seg.y2), rect) - seg.width / 2.0
+            assert gap >= 0.25 - 1e-6, (
+                f"leg edge {gap:.3f} mm from the foreign pad (0.250 required)"
+            )
+
+
+def test_attach_rejects_foreign_pad_inside_its_own_class_clearance() -> None:
+    # The attach holds the pad side too: a pad 0.2 mm from the wide leg's edge
+    # clears the leg's 0.150 mm class but not its own 0.25 mm class.
+    foreign = Pad(
+        x=3.0,
+        y=5.0 + _USB3_HALF + 0.2 + 0.2,
+        width=0.4,
+        height=0.4,
+        net=7,
+        net_name="OTHER",
+        layer=Layer.F_CU,
+        ref="U2",
+        pin="B2",
+    )
+    pf, pad = _board([foreign])
+    committed = pf._fresh_committed()
+    assert pf._pair_attach(pad, (4.0, 5.0), 0, 1, {1, 2}, committed, _USB3_HALF, 0.15) is not None
+    pf.set_pad_class_clearances([0.25 if p.net == 7 else 0.15 for p in pf.pads])
+    assert pf._pair_attach(pad, (4.0, 5.0), 0, 1, {1, 2}, committed, _USB3_HALF, 0.15) is None
+    assert "pad" in pf._attach_blocker
