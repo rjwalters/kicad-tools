@@ -17,6 +17,7 @@ import json
 import os
 import sys
 from collections import defaultdict
+from pathlib import Path
 
 from kicad_tools.cli.sch_connectivity import (
     Coord,
@@ -281,6 +282,22 @@ def output_table(pin_map: dict[str, dict]) -> None:
             print(f"  {pin_num:<6} {pin['name']:<20} {pin['type']:<15} {pos_str:<22} {net_str}")
 
 
+def _sheet_match_path(node_path: str | None, root_dir: Path) -> str:
+    """Return the part of a sheet's file path that ``--sheet`` may match.
+
+    That is the path relative to the root sheet's folder (POSIX separators),
+    or just the file name for a sheet outside that folder. Folders above the
+    project (for example the project directory itself) are never included.
+    """
+    if not node_path:
+        return ""
+    path = Path(node_path)
+    try:
+        return path.resolve().relative_to(root_dir).as_posix()
+    except (ValueError, OSError):
+        return path.name
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Show resolved pin-to-net assignments for schematic symbols",
@@ -289,7 +306,13 @@ def main(argv=None):
     )
     parser.add_argument("schematic", help="Path to .kicad_sch file")
     parser.add_argument("--ref", help="Filter by symbol reference (e.g., U1)")
-    parser.add_argument("--sheet", help="Restrict to a specific sheet (name or path substring)")
+    parser.add_argument(
+        "--sheet",
+        help=(
+            "Restrict to a specific sheet: substring of the sheet name or of its "
+            "file path relative to the root schematic's folder"
+        ),
+    )
     parser.add_argument(
         "--format", choices=["table", "json"], default="json", help="Output format (default: json)"
     )
@@ -306,12 +329,16 @@ def main(argv=None):
 
     # Iterate all sheets, merging pin maps
     pin_map: dict[str, dict] = {}
+    root_dir = Path(hierarchy.path or args.schematic).resolve().parent
     for node in hierarchy.all_nodes():
-        # Apply --sheet filter: skip nodes whose name or path don't match
+        # Apply --sheet filter: skip nodes whose name or path don't match.
+        # node.path is absolute (issue #7614), so match against the path
+        # relative to the root sheet's folder; otherwise a filter would
+        # match a parent folder such as the project directory.
         if args.sheet:
             sheet_filter = args.sheet.lower()
             node_name = (node.name or "").lower()
-            node_path = (node.path or "").lower()
+            node_path = _sheet_match_path(node.path, root_dir).lower()
             if sheet_filter not in node_name and sheet_filter not in node_path:
                 continue
 

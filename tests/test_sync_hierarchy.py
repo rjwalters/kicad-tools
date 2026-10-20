@@ -346,3 +346,60 @@ class TestSyncResult:
 
         assert result.success is False
         assert "Failed" in result.message
+
+
+class TestAddLabelsSubfolderChild:
+    """Issue #7614: a child sheet in a subfolder, with a relative root path.
+
+    ``HierarchyNode.path`` is absolute, so the child must be found against
+    the parent sheet's folder, not ``Path(root).parent / file`` (which stays
+    relative and never matches an absolute node path).
+    """
+
+    @pytest.fixture
+    def subfolder_project(self, tmp_path: Path) -> Path:
+        fixtures = Path(__file__).parent / "fixtures" / "hierarchical"
+        proj = tmp_path / "proj"
+        (proj / "sub").mkdir(parents=True)
+        parent = (fixtures / "parent_with_pins.kicad_sch").read_text()
+        assert '"child_with_hlabels.kicad_sch"' in parent
+        (proj / "parent.kicad_sch").write_text(
+            parent.replace('"child_with_hlabels.kicad_sch"', '"sub/child.kicad_sch"')
+        )
+        child = (fixtures / "child_with_hlabels.kicad_sch").read_text()
+        assert 'hierarchical_label "SDA"' in child
+        # Drop the child's SDA label so the parent's SDA pin needs one.
+        (proj / "sub" / "child.kicad_sch").write_text(
+            child.replace('hierarchical_label "SDA"', 'hierarchical_label "XYZ"')
+        )
+        return proj / "parent.kicad_sch"
+
+    def test_relative_root_finds_subfolder_child(
+        self, subfolder_project: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.chdir(subfolder_project.parent.parent)
+        results = execute_add_labels("proj/parent.kicad_sch", dry_run=True)
+
+        sda = [r for r in results if r.action.name == "SDA"]
+        assert len(sda) == 1
+        assert sda[0].success is True, sda[0].message
+        assert "Would add label 'SDA'" in sda[0].message
+
+    def test_relative_root_adds_label_to_subfolder_child(
+        self, subfolder_project: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.chdir(subfolder_project.parent.parent)
+        results = execute_add_labels("proj/parent.kicad_sch", dry_run=False)
+
+        sda = [r for r in results if r.action.name == "SDA"]
+        assert len(sda) == 1
+        assert sda[0].success is True, sda[0].message
+        child = subfolder_project.parent / "sub" / "child.kicad_sch"
+        assert 'hierarchical_label "SDA"' in child.read_text()
+
+    def test_absolute_root_finds_subfolder_child(self, subfolder_project: Path):
+        results = execute_add_labels(str(subfolder_project), dry_run=True)
+
+        sda = [r for r in results if r.action.name == "SDA"]
+        assert len(sda) == 1
+        assert sda[0].success is True, sda[0].message
