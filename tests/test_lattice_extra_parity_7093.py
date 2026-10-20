@@ -324,3 +324,131 @@ def test_routing_the_same_board_with_the_pass_off_leaves_the_pair_unequal(capsys
     assert _committed_vias(router) == (0, 2)
     assert not pf.extra_parity_log
     assert "Diff-pair extra parity (lattice)" not in out
+
+
+# -- joint re-route: two extras that cross in an X ----------------------------
+
+
+def _x_board() -> Autorouter:
+    """A USB-C-style X: each net's extra crosses the other's under J1.
+
+    The coupled U1 -> J1 run lands on the A row (A6 = D+, A7 = D-).  The
+    extras join each A pad to the B pad of the same net one row down, and
+    the B row is swapped (B6 = D+ under A7, B7 = D- under A6), so the two
+    extras cross like board 06rf's ``USB2_D`` J1 extras.  ``W1``, a foreign
+    F.Cu bar just right of B6, shuts the planar way round B6.
+
+    Negotiation lays D+'s extra straight across, so D-'s drops through B.Cu
+    (0 / 2 vias).  Neither extra can be fixed alone: D+ copying D-'s
+    F -> B -> F hop comes back planar (the pads' launch radii touch), and
+    D- has no planar way past D+.  Re-routed together, D- goes straight and
+    D+ goes round B7: 0 / 0.
+    """
+    rules = DesignRules(trace_width=0.2, trace_clearance=0.15, grid_resolution=0.1)
+    router = Autorouter(
+        width=30.0,
+        height=14.0,
+        rules=rules,
+        net_class_map={"USB_D+": _HS, "USB_D-": _HS},
+        strategy="lattice",
+    )
+    router.add_component(
+        "U1", [_board_pad("1", 3.0, 6.5, 1, "USB_D+"), _board_pad("2", 3.0, 7.5, 2, "USB_D-")]
+    )
+    usb = {"width": 0.3, "height": 0.8}
+    router.add_component(
+        "J1",
+        [
+            _board_pad("A6", 20.0, 6.0, 1, "USB_D+", **usb),
+            _board_pad("A7", 21.0, 6.0, 2, "USB_D-", **usb),
+            _board_pad("B6", 21.0, 8.0, 1, "USB_D+", **usb),
+            _board_pad("B7", 20.0, 8.0, 2, "USB_D-", **usb),
+        ],
+    )
+    router.add_component("W1", [_board_pad("1", 21.8, 7.0, 9, "WALL", width=0.4, height=14.0)])
+    return router
+
+
+def _route_x_board(extra_parity: bool) -> tuple[Autorouter, LatticePathfinder]:
+    router = _x_board()
+    pf = router._ensure_lattice_pathfinder()
+    pf.extra_parity = extra_parity
+    router.route_all_with_diffpairs(
+        DifferentialPairConfig(enabled=True),
+        non_diffpair_strategy=lambda: router.route_all(timeout=120),
+    )
+    return router, pf
+
+
+def _extra_lengths(router: Autorouter, pf: LatticePathfinder) -> dict[int, float]:
+    """Pair-length-measure length of each net's J1 A-row -> B-row extra."""
+    measure = pf.pair_length_measure
+    assert measure is not None
+    out: dict[int, float] = {}
+    for route in router.routes:
+        ends = [(s.x1, s.y1) for s in route.segments] + [(s.x2, s.y2) for s in route.segments]
+        if route.segments and all(x > 19.0 for x, _y in ends):
+            assert route.net not in out
+            out[route.net] = measure(route)
+    assert set(out) == {1, 2}
+    return out
+
+
+def _net_skew(router: Autorouter, pf: LatticePathfinder) -> float:
+    measure = pf.pair_length_measure
+    assert measure is not None
+    p = sum(measure(r) for r in router.routes if r.net == 1)
+    n = sum(measure(r) for r in router.routes if r.net == 2)
+    return abs(p - n)
+
+
+@pytest.mark.timeout(300)
+def test_crossing_extras_are_re_routed_jointly_to_equal_vias(capsys) -> None:
+    from kicad_tools.router.io import validate_routes
+
+    off, off_pf = _route_x_board(extra_parity=False)
+    capsys.readouterr()
+    router, pf = _route_x_board(extra_parity=True)
+    out = capsys.readouterr().out
+
+    assert router._lattice_pair_outcomes == {"USB_D": "coupled"}
+    assert _committed_vias(off) == (0, 2)
+    # Both extras moved, and the pair's via totals now match.
+    assert _committed_vias(router) == (0, 0)
+    note = pf.extra_parity_log[(1, 2)]
+    assert "vias 0/2 -> 0/0" in note and "re-routed jointly" in note
+    assert "J1.B6->J1.A6" in note and "J1.B7->J1.A7" in note
+    assert f"Diff-pair extra parity (lattice) {note}" in out
+    # The router's own clearance check passes on the committed copper.
+    assert validate_routes(router) == []
+    # No new extra is longer than the longer original + 0.5 mm, and the
+    # pair's skew did not get worse.
+    before, after = _extra_lengths(off, off_pf), _extra_lengths(router, pf)
+    bound = max(before.values()) + 0.5
+    assert all(length <= bound + 1e-9 for length in after.values())
+    assert _net_skew(router, pf) <= _net_skew(off, off_pf) + 1e-9
+
+
+@pytest.mark.timeout(300)
+def test_crossing_extras_stay_unequal_with_the_pass_off(capsys) -> None:
+    router, pf = _route_x_board(extra_parity=False)
+    out = capsys.readouterr().out
+
+    assert router._lattice_pair_outcomes == {"USB_D": "coupled"}
+    assert _committed_vias(router) == (0, 2)
+    assert not pf.extra_parity_log
+    assert "Diff-pair extra parity (lattice)" not in out
+
+
+@pytest.mark.timeout(300)
+def test_crossing_extras_cannot_be_fixed_one_at_a_time(monkeypatch) -> None:
+    # Without the joint step the single-extra search finds nothing on this
+    # board: the pass logs the pair as kept at 0 / 2.
+    monkeypatch.setattr(
+        LatticePathfinder, "_joint_extra_parity", lambda self, *a, **k: (None, False)
+    )
+    router, pf = _route_x_board(extra_parity=True)
+
+    assert _committed_vias(router) == (0, 2)
+    note = pf.extra_parity_log[(1, 2)]
+    assert "0/2" in note and "re-routed jointly with its partner's; kept" in note
