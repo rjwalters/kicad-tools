@@ -230,8 +230,8 @@ def assert_lvs_vacuous(lvs_path: Path) -> str | None:
 def assert_lvs_known_opens(lvs_path: Path, expected_nets: set[str]) -> str | None:
     """Assert ``lvs.json`` carries EXACTLY the expected known opens (#4012).
 
-    For wired-schematic boards that route PARTIAL by design (board 07: 5
-    seed-invariant unroutable nets, #3438).  Expected shape:
+    For wired-schematic boards that route PARTIAL by design (board 07: 1
+    unroutable net, TMDS_D0_N, #7554/#3438).  Expected shape:
 
     * ``clean: false`` (the opens are real evidence, not vacuity);
     * NOT vacuous (``copper_vacuous`` false/absent, bound pads > 0);
