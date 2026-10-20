@@ -1009,3 +1009,76 @@ def test_phased_red_gate_reports(repo: Path, quiet_checks) -> None:
     assert state.outcome == "red"
     assert rp.phase_report_gate(state, forge).code == 1
     assert [c[0] for c in forge.calls] == ["report"]
+
+
+# --- body budget (Issue #7561) ------------------------------------------------------
+
+
+def _big_plan(section: str, n_prs: int = 485) -> Any:
+    plan = rp.Plan(
+        sha="c" * 40,
+        tag="v0.23.0",
+        current="0.23.0",
+        prs=list(range(7000, 7000 + n_prs)),
+        first_parent=[],
+        fragments=[],
+        has_content=True,
+    )
+    plan.decision = rp.LevelDecision(level="minor", reasons=["added fragments"])
+    plan.version = "0.24.0"
+    plan.section = section
+    return plan
+
+
+def _section(n_bullets: int) -> str:
+    bullet = "- **Thing {i}** (Issue #{i}). " + "word " * 100 + "\n  continued line.\n"
+    entries = "\n".join(bullet.format(i=i) for i in range(n_bullets))
+    return f"## [0.24.0] - 2026-10-19\n\n### Added\n\n{entries}"
+
+
+def test_huge_section_body_fits_with_marker_and_pointer() -> None:
+    section = _section(400)
+    assert len(section) > 200_000
+    body = rp.pr_body(_big_plan(section), rp.GateResult(notes=["main CI green"]))
+    assert len(body) <= rp.BODY_BUDGET < rp.GITHUB_BODY_LIMIT
+    assert body.startswith(rp.AUTO_MARKER)
+    assert "**Level: minor**" in body and "main CI green" in body
+    url = "https://github.com/rjwalters/kicad-tools/blob/release/v0.24.0/CHANGELOG.md"
+    assert url in body
+    assert "485 PRs" in body and "#7000," not in body
+    # Cut at a bullet boundary: the last kept bullet is complete.
+    kept = body.split("---\n\n", 1)[1].split("\n\n_Section truncated")[0]
+    assert kept.rstrip().endswith("continued line.")
+    assert "## [0.24.0]" in kept
+
+
+def test_small_section_body_is_unchanged() -> None:
+    section = _section(3)
+    body = rp.pr_body(_big_plan(section, n_prs=3), rp.GateResult())
+    assert body.endswith("---\n\n" + section)
+    assert "#7000, #7001, #7002" in body
+    assert "truncated" not in body
+
+
+def test_fit_body_clips_long_comments_at_a_line() -> None:
+    long = "\n".join(f"- problem {i}" for i in range(20_000))
+    clipped = rp.fit_body(long)
+    assert len(clipped) <= rp.BODY_BUDGET
+    assert "truncated" in clipped
+    assert rp.fit_body("short") == "short"
+
+
+def test_forge_writes_are_held_to_the_budget() -> None:
+    sent: list[dict[str, Any]] = []
+
+    class Capture(rp.Forge):
+        def api(self, path: str, *, method: str = "GET", body: Any = None, write: bool = False):
+            sent.append(body)
+            return {"number": 1}
+
+    forge = Capture("o/r")
+    huge = "x\n" * 100_000
+    forge.create_pr("release/v0.24.0", "t", huge)
+    forge.edit_pr(1, "t", huge)
+    forge.comment(1, huge)
+    assert all(len(b["body"]) <= rp.BODY_BUDGET for b in sent)

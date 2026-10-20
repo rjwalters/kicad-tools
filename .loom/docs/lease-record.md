@@ -452,7 +452,11 @@ EITHER leg holds:
    (genuinely **renewed**, not merely created) and still within the
    reclamation TTL (`LOOM_LEASE_TTL_MINUTES`, default 15 — the same window
    the #6286 reclamation gate and `sweep-lease-fence.sh` use) — Issue
-   **#8840**.
+   **#8840**. A never-renewed record (`updated_at == created_at`) is also
+   admitted while it is younger than `FIRST_RENEWAL_WINDOW_SECS` (360s: the
+   renewer's 300s cadence plus grace), because the renewer sleeps first and a
+   live lease is otherwise invisible from 90s to its first renewal — Issue
+   **#12825**. Older never-renewed records stay excluded.
 
 Leg 2 exists because **a lease is renewed in place**: `sweep-lease-renew.sh`
 PATCHes the same comment, so a live owner's `created_at` stays frozen at the

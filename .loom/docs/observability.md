@@ -181,7 +181,8 @@ See [execution traces](tracing.md) for persisted trace identity, correlated logs
 completed-span export, and bounded shutdown.
 
 Every OTLP request, on all three signals (traces, logs, metrics), carries one
-resource per emitting host with exactly these attributes:
+resource per emitting host with these identity attributes, followed by the
+host-shape attributes in the next table:
 
 | Resource attribute | Value |
 |---|---|
@@ -192,6 +193,28 @@ resource per emitting host with exactly these attributes:
 | `service.version` | the reporting daemon's version (a `host.health` record's `daemon_version`, else the exporting build's) |
 | `loom.daemon.revision` | the exporting build's full git SHA (`unknown` for a tarball build) — the same value every span carries (#11197) |
 | `loom.fleet.config_sha` | the fleet-gitops commit whose rendered config tiers are **on disk on this host right now**: a 40-hex SHA, `unknown` (a fleet host where no applied commit is established yet, e.g. during a startup-pass timeout), or `none` (no fleet store, `fleet.repo` unset). Never empty, never omitted (#11197) |
+
+**Host shape (#12874).** The emitting host's static shape, so a sweep or phase
+span resolves to its host's size with no join against the
+`loom.host.logical_cpus` gauge:
+
+| Resource attribute | Value |
+|---|---|
+| `host.cpu.count` | logical CPU count (int) — the same source as the `loom.host.logical_cpus` gauge. Always present |
+| `loom.host.mem_total_bytes` | total physical memory in bytes (int; `/proc/meminfo` `MemTotal`, macOS `hw.memsize`). **Absent** when unmeasurable, never `0` |
+| `host.arch` | OTel semconv architecture: `amd64`, `arm64`, else Rust's raw `std::env::consts::ARCH`. Always present |
+| `host.type` | the EC2 instance type (e.g. `c7i.2xlarge`) on Linux once the IMDS probe succeeds; a Mac's `sysctl hw.model` (e.g. `Mac14,6`); absent elsewhere |
+| `cloud.provider`, `cloud.region` | `aws` and the instance's region, from the same IMDS probe; absent on a Mac or any non-EC2 host |
+
+CPU count, RAM, arch and Mac model are read once per process and cached. The
+instance type comes from a single AWS IMDSv2 probe (`PUT /latest/api/token`,
+then `meta-data/instance-type` and `meta-data/placement/region`) spawned at
+telemetry startup on Linux. It bypasses any `HTTP(S)_PROXY`, has a 1 s total
+budget, never retries and is never awaited — so startup is not delayed, and
+batches exported before it lands (or on a host where IMDS is unreachable)
+simply lack `host.type`/`cloud.*`. `eta.stage_outcome` records carry the
+*observing* host's shape, not the executing host's; join through the
+executing `host.id` on `sweep.*` records for that.
 
 `host.name` has one source, the same string as `host.id`: the daemon's host
 identity, which is the operator-assigned `$LOOM_HOST_ID` when it is set and
@@ -1160,13 +1183,14 @@ hash of it, and it is never logged or forwarded.
 | `service.name` | the harness — `claude-code` |
 | `service.instance.id`, `host.id`, `host.name` (whatever host attributes the daemon's own telemetry carries) | this daemon's host identity |
 | `loom.daemon.revision`, `loom.fleet.config_sha` | the relaying build's revision and the host's applied fleet-config SHA (#11197), with the daemon's value — sender-supplied copies are scrubbed with every other `loom.*` key |
+| `host.cpu.count`, `loom.host.mem_total_bytes`, `host.arch`, `host.type`, `cloud.provider`, `cloud.region` | this daemon's host shape (#12874), as on its own telemetry |
 | `loom.runtime`, `loom.session.kind` (`sweep`/`role`), `loom.session.launch` (`daemon`) | from the launch |
 | `loom.repo` | the workspace's forge `owner/name`; absent until resolved, never a directory name |
 | `loom.issue`, `loom.role`, `loom.sweep_id` | the issue, role and sweep (or role-tick execution) id the session was launched for, when it has one |
 | `loom.daemon.version`, `loom.relay.redaction` | the relaying build, and the redaction policy applied |
 
 Whatever the sender put under `service.name`, `service.namespace`,
-`service.instance.id`, `host.*` or `loom.*` — in any letter case — is
+`service.instance.id`, `host.*`, `cloud.*` or `loom.*` — in any letter case — is
 discarded, on the resource and on every scope, record, data point, span, span
 event, link and nested map, so a record-level attribute cannot shadow the
 bound one. Other resource attributes the CLI reports about itself
@@ -1275,7 +1299,7 @@ transition.
 |---|---|---|
 | `fleet.<condition>` (`dispatch-halted`, `roles-persistent`, `output-missing`; `star-backlog` retired by #11510, `capacity-limited` by #12406) | `fleet_alert` | condition started (and each reminder) / cleared |
 | `daemon.down` (critical) | the watchdog, a separate process | recovery exhausted / any tick ending the outage |
-| `watchdog.peer-coord-degraded` (critical) | the watchdog | coordination degraded / green |
+| `watchdog.peer-coord-degraded` (critical) | the watchdog (see note below) | coordination degraded / green |
 | `safehouse.unreachable` (critical) | narration sink state | unreachable over 5 minutes / reconnected |
 | `fleet.floor-unsatisfiable` | `auto_update` | the floor ERROR line / floor met |
 | `fleet.floor-malformed` | fleet-sync pass | `loom_min_version` malformed / a valid (or no) floor |
@@ -1288,6 +1312,14 @@ transition.
 | `version.config-rejected` | pause roll | `pauseRoll.*` tuning rejected / accepted (each roll and each start) |
 | `llm-monitor.stale` | llm-monitor `ranking.json` | older than 30 minutes (or unreadable) on two reads 5 minutes apart / fresh (no file: nothing) |
 | `install.<invariant>` (key = workspace root) | `install_self_check`, when enabled | violation standing after the tick / gone, or the check off |
+
+**Peer-coordination visibility tradeoff (#12818).** The watchdog's peer-claim
+coordination check no longer files, comments on, reopens or closes any GitHub
+issue; it reports to the watchdog log (`DIVERGENCE` / `[OK]`) and to the
+`watchdog.peer-coord-degraded` alert above. GitHub notifications were removed
+ahead of verified SigNoz visibility of this signal, which #12167 tracks
+separately; that export is neither claimed nor required by this change. Legacy
+`.watchdog-peer-coord-escalated` / `-cooldown` files are never read or written.
 
 `tokens-zero-healthy` is not sent: loom-ui derives `provider-pool-exhausted`
 from the daemon's pool gauge itself. Each transition is offered to the OTLP

@@ -109,6 +109,10 @@ RELEASE_BRANCH_PREFIX = "release/v"
 TRACKING_ISSUE_TITLE = "Automated release status"
 #: Marks a PR body as opened by this workflow (a hand-opened release PR lacks it).
 AUTO_MARKER = "<!-- kct-auto-release -->"
+#: GitHub rejects a PR/issue/comment body over 65,536 characters with a 422
+#: (Issue #7561); every body this script posts is held to this budget.
+GITHUB_BODY_LIMIT = 65_536
+BODY_BUDGET = 60_000
 CI_WORKFLOW_FILE = "ci.yml"
 #: ``ci.yml`` events that verify main itself (Issue #5986): the hourly / nightly
 #: schedule and workflow_dispatch.  ``push`` is kept so runs from before the
@@ -632,7 +636,7 @@ class Forge:
         created: dict[str, Any] = self.api(
             "{repo}/pulls",
             method="POST",
-            body={"head": head, "base": BASE_BRANCH, "title": title, "body": body},
+            body={"head": head, "base": BASE_BRANCH, "title": title, "body": fit_body(body)},
             write=True,
         )
         return created
@@ -641,7 +645,7 @@ class Forge:
         self.api(
             f"{{repo}}/pulls/{number}",
             method="PATCH",
-            body={"title": title, "body": body},
+            body={"title": title, "body": fit_body(body)},
             write=True,
         )
 
@@ -678,7 +682,10 @@ class Forge:
 
     def comment(self, number: int, body: str) -> None:
         self.api(
-            f"{{repo}}/issues/{number}/comments", method="POST", body={"body": body}, write=True
+            f"{{repo}}/issues/{number}/comments",
+            method="POST",
+            body={"body": fit_body(body)},
+            write=True,
         )
 
     def tracking_issue(self) -> int:
@@ -951,22 +958,89 @@ def pr_title(version: str) -> str:
     return f"chore(release): v{version}"
 
 
-def pr_body(plan: Plan, gate: GateResult) -> str:
+def _is_cut_point(line: str) -> bool:
+    """A line that starts a bullet or a heading -- a safe place to cut a section."""
+    return line.startswith(("- ", "* ", "#"))
+
+
+def truncate_section(section: str, budget: int, pointer: str) -> str:
+    """``section`` if it fits in ``budget``, else a bullet-boundary prefix + ``pointer``.
+
+    The cut never splits a bullet: it lands just before a line that starts a
+    bullet or heading.  The result (prefix + pointer) is at most ``budget``.
+    """
+    if len(section) <= budget:
+        return section
+    room = budget - len(pointer)
+    lines = section.splitlines(keepends=True)
+    kept, size = 0, 0
+    for i, line in enumerate(lines):
+        if size + len(line) > room:
+            break
+        size += len(line)
+        if i + 1 < len(lines) and _is_cut_point(lines[i + 1]):
+            kept = i + 1
+    return "".join(lines[:kept]).rstrip("\n") + "\n\n" + pointer
+
+
+def fit_body(body: str, budget: int = BODY_BUDGET) -> str:
+    """Last-resort clip for any body posted to GitHub (comments, issues, PRs).
+
+    Cuts at a line boundary and says so; :func:`pr_body` already fits, so this
+    only fires on unexpectedly long gate reports.
+    """
+    if len(body) <= budget:
+        return body
+    note = f"\n\n_(truncated: {len(body):,} characters exceeded the {budget:,} budget)_"
+    head = body[: budget - len(note)]
+    if "\n" in head:
+        head = head[: head.rindex("\n")]
+    return head + note
+
+
+def changelog_url(version: str, slug: str = DEFAULT_REPO_SLUG) -> str:
+    return f"https://github.com/{slug}/blob/{release_branch_name(version)}/CHANGELOG.md"
+
+
+def pr_body(
+    plan: Plan, gate: GateResult, budget: int = BODY_BUDGET, slug: str = DEFAULT_REPO_SLUG
+) -> str:
+    """The release PR body, at most ``budget`` characters (Issue #7561).
+
+    The fixed header (marker, level, reasons, gate notes) is never cut.  If the
+    whole thing does not fit, the PR list is shortened to a count and then the
+    CHANGELOG section is cut at a bullet boundary, with a link to the full
+    section on the release branch.
+    """
     assert plan.decision is not None
+    assert plan.version is not None
     reasons = "\n".join(f"- {r}" for r in plan.decision.reasons)
-    prs = ", ".join(f"#{n}" for n in plan.prs)
-    return (
-        f"{AUTO_MARKER}\n"
-        f"Automated release **v{plan.version}** from `{plan.sha}` "
-        f"(`.github/workflows/release-pr.yml`, #5776).\n\n"
-        f"**Level: {plan.decision.level}**\n{reasons}\n\n"
-        f"PRs merged since {plan.tag}: {prs}\n\n"
-        f"Gate: {'; '.join(gate.notes) or 'green'}; changelog gap report empty; "
-        f"`uv lock --check` passed.\n\n"
-        "The workflow merges this PR once its own checks are green. The tag and "
-        "PyPI publish follow on merge (Phase 3, #5777).\n\n"
-        f"---\n\n{plan.section}"
+
+    def header(prs: str) -> str:
+        return (
+            f"{AUTO_MARKER}\n"
+            f"Automated release **v{plan.version}** from `{plan.sha}` "
+            f"(`.github/workflows/release-pr.yml`, #5776).\n\n"
+            f"**Level: {plan.decision.level}**\n{reasons}\n\n"
+            f"PRs merged since {plan.tag}: {prs}\n\n"
+            f"Gate: {'; '.join(gate.notes) or 'green'}; changelog gap report empty; "
+            f"`uv lock --check` passed.\n\n"
+            "The workflow merges this PR once its own checks are green. The tag and "
+            "PyPI publish follow on merge (Phase 3, #5777).\n\n"
+            "---\n\n"
+        )
+
+    full = header(", ".join(f"#{n}" for n in plan.prs))
+    if len(full) + len(plan.section) <= budget:
+        return full + plan.section
+    url = changelog_url(plan.version, slug)
+    short = header(f"{len(plan.prs)} PRs; see the [full CHANGELOG section]({url})")
+    pointer = (
+        f"_Section truncated to fit GitHub's {GITHUB_BODY_LIMIT:,}-character body limit; "
+        f"the full v{plan.version} section is in [`CHANGELOG.md` on "
+        f"`{release_branch_name(plan.version)}`]({url})._\n"
     )
+    return short + truncate_section(plan.section, budget - len(short), pointer)
 
 
 @dataclass
@@ -1003,7 +1077,7 @@ def open_or_update_release_pr(
     git("push", "--force", "origin", f"HEAD:refs/heads/{branch}")
     head_sha = git.rev_parse("HEAD")
 
-    title, body = pr_title(plan.version), pr_body(plan, gate)
+    title, body = pr_title(plan.version), pr_body(plan, gate, slug=forge.slug)
     same = [p for p in existing if p["head"]["ref"] == branch]
     stale = [p for p in existing if p["head"]["ref"] != branch]
     if same:
