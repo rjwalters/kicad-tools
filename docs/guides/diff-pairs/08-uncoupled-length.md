@@ -52,9 +52,8 @@ It matches every committed board.
 
 ### Known divergences
 
-* **Other-net copper overlapping a pair trace** (a short) is not modelled; kct
-  models every pad as its (rotated) rectangle, so a roundrect pad's edge ties
-  differ from KiCad's (spec section H). **Arcs** are not measured.
+* **Not modelled**: other-net copper on a pair trace (a short) and **arcs**.
+  Pads are rotated rectangles, so roundrect edge ties differ (spec section H).
 
 ### The per-terminal figure (kct-only)
 
