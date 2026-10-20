@@ -139,9 +139,10 @@ DIFFPAIR_RULE_IDS: tuple[str, ...] = (
 #
 # diffpair_uncoupled_length (Issue #6554): the synthetic board's single-ended
 # fallback leaves USB2_D with an uncoupled length over its 12.7 mm USB2_HS
-# limit.  kct reproduces KiCad's primitive pairing, so this is KiCad's own
-# figure, not a kct artefact: on a regenerated board kct 14.9267 mm vs
-# kicad-cli 14.9266 mm.  It is a consequence of the same unconverged coupled
+# limit.  kicad-cli 10.0.6 flags it too (14.194 mm on the CI-regenerated
+# board, seed 42), so it is not a kct artefact; kct's probe-derived model reads
+# 13.437 mm there, a known divergence tracked by Issue #7565 (both exceed the
+# limit).  It is a consequence of the same unconverged coupled
 # routing as the skew/continuity entries, so it shares this baseline; the
 # total allowlist floor (.github/routed-drc-tolerance.yml) still caps the sum.
 DIFFPAIR_VIOLATION_BASELINE: dict[str, int] = {
