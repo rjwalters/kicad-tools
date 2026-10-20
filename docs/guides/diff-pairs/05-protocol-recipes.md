@@ -42,12 +42,12 @@ usb3 = NetClassRouting(
     intra_pair_clearance=0.075,
     target_diff_impedance=90.0,
     impedance_tolerance_percent=10.0,
-    skew_tolerance_mm=0.1,
+    pair_protocol="USB3_SS",  # 0.127 mm (Q16, sourced)
     coupled_routing=True,
     diffpair_partner="USB3_RX_N",
 )
 assert usb3.effective_intra_pair_clearance() == 0.075
-assert usb3.effective_skew_tolerance() == 0.1
+assert usb3.effective_skew_tolerance() == 0.127
 ```
 
 ## PCIe Gen 1 (2.5 GT/s) — 85 Ω diff, ±5 mil (≈0.127 mm) skew
@@ -68,7 +68,7 @@ pcie = NetClassRouting(
 assert pcie.effective_skew_tolerance() == 0.127
 ```
 
-## MIPI D-PHY (HS Data / Clock Lane) — 100 Ω diff, ±1.5 mil (≈0.038 mm) skew
+## MIPI D-PHY (HS Data / Clock Lane) — 100 Ω diff, 0.15 mm skew (Q16)
 
 ```python
 from kicad_tools.router.rules import NetClassRouting
@@ -79,12 +79,12 @@ mipi = NetClassRouting(
     clearance=0.15,
     intra_pair_clearance=0.075,
     target_diff_impedance=100.0,
-    skew_tolerance_mm=0.038,
+    pair_protocol="MIPI_DPHY",  # 0.15 mm (Q16, sourced)
     coupled_routing=True,
     diffpair_partner="MIPI_DATA0_N",
 )
 assert mipi.effective_intra_pair_clearance() == 0.075
-assert mipi.effective_skew_tolerance() == 0.038
+assert mipi.effective_skew_tolerance() == 0.15
 ```
 
 ## Notes
