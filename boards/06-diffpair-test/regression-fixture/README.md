@@ -129,7 +129,8 @@ kct check output/diffpair_test_routed.kicad_pcb --mfr jlcpcb --errors-only
 mitigation strategy, this board was scaffolded with PCIe / MIPI pairs
 declared but DRC tolerated at "non-strict" while #2648 was pending.
 Both dependencies have since landed; the remaining tolerated residual is
-the 18-error diff-pair quality block documented under "CI Gate" below.
+the identity-keyed diff-pair quality block documented under "CI Gate"
+below.
 
 ## Measuring Changes: Regen Determinism (#4536)
 
@@ -278,11 +279,12 @@ total DRC error count, the `diffpair_clearance_intra` count, and reach
 of guesswork.
 
 **If you ran with the default (shadow-OFF), you are not in either
-mode.** Expect the committed / CI floor instead: **18 DRC errors**
-(9 `diffpair_length_skew` + 9 `diffpair_routing_continuity`, the value
-pinned for this board in `.github/routed-drc-tolerance.yml`) at **21 of
-21** reach --- the shadow-OFF reach recorded in the same recipe
-comments.  A default-config run landing on those numbers is the expected
+mode.** Expect the CI seed-42 re-route instead: **11 blocking DRC
+errors**, every one listed by identity in
+`DIFFPAIR_FIXTURE_ALLOWED_FINDINGS` (`scripts/ci/check_diffpair_coverage.py`,
+#7367: 9 `diffpair_length_skew` pairs, 1 `diffpair_uncoupled_length`,
+1 `impedance`), at **21 of 21** reach --- the shadow-OFF reach recorded
+in the same recipe comments.  A default-config run landing on those numbers is the expected
 result, not an unrecognized third mode.
 
 ### Measurement convention
@@ -457,16 +459,19 @@ The job:
 2. Loads the freshly-routed PCB, constructs the per-protocol
    `NetClassRouting` map from `build_net_class_map()`, and runs
    `DRCChecker` with `--mfr jlcpcb`.
-3. Asserts the DRC **error count** is within the per-board allowlist in
-   `.github/routed-drc-tolerance.yml` (currently 18: 9x
-   `diffpair_length_skew` + 9x `diffpair_routing_continuity` per
-   [#3540](https://github.com/rjwalters/kicad-tools/issues/3540)-[#3544](https://github.com/rjwalters/kicad-tools/issues/3544),
-   floor ratcheted 24 -> 18 by
-   [#4019](https://github.com/rjwalters/kicad-tools/issues/4019) with all
-   three gated paths --- committed-artifact `routed-pcb-drc-check`,
-   seed-42 Diff-Pair Routing Regression, and the Board 06 E2E fresh
-   regen --- agreeing at 18).
-   <!-- kct:doc-pin drc-tolerance boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb = 18 -->
+3. Asserts every blocking DRC finding is listed **by identity** (rule +
+   pair or net, each with an open tracking issue) in
+   `DIFFPAIR_FIXTURE_ALLOWED_FINDINGS` in
+   `scripts/ci/check_diffpair_coverage.py`, and that every listed entry
+   still fires (a fixed finding fails the gate as stale until its entry
+   is deleted).  The board has no entry in
+   `.github/routed-drc-tolerance.yml`, so the count of blocking findings
+   *outside* the allowance must be 0
+   ([#7367](https://github.com/rjwalters/kicad-tools/issues/7367); the
+   old count of 18, ratcheted by
+   [#4019](https://github.com/rjwalters/kicad-tools/issues/4019), let a
+   new finding hide behind a fixed one).
+   <!-- kct:doc-pin drc-tolerance boards/06-diffpair-test/regression-fixture/diffpair_test_routed.kicad_pcb = 0 -->
    The claim above is machine-checked by `kct check --only doc_drift`
    (issue #4540): ratcheting the yml without updating this README
    trips `doc_drift_stale_pin`.
@@ -481,17 +486,18 @@ The job:
    detection (e.g. flipping `coupled_routing` back to `False` on the
    net classes).  Without this assertion a regression that produces 0
    diff-pair violations because no rule ran would slip through the
-   allowlist check.
+   identity check.
 
 ### Interpreting a failure
 
 | Failure mode                                                | Likely cause                                                      |
 |-------------------------------------------------------------|-------------------------------------------------------------------|
 | `Diff-pair rule(s) NOT exercised`                           | Detection broken: `coupled_routing` flag flipped, suffix detection broken, or the routed PCB has no matching pair traces. |
-| `DRC regression: <N> error(s) exceeds allowlist value 18`   | The router introduced new DRC errors beyond the documented #3540-#3544 baseline (9x skew + 9x continuity, #4019 ratchet).  Bisect against the routing algorithm. |
+| `Errors outside the identity allowance`                     | The router introduced a finding on a rule/pair that `DIFFPAIR_FIXTURE_ALLOWED_FINDINGS` does not list.  Bisect against the routing algorithm. |
+| `Stale identity allowance`                                  | A listed finding no longer fires: delete its entry (and close or update the tracker it cites). |
 | Re-route step fails with non-zero exit                      | Routing algorithm regression (board hangs or crashes during `route_all`).  Reproduce locally with `--seed 42`. |
 
-### Tightening the allowlist
+### Tightening the allowance
 
 The original prerequisites ---
 [#2672](https://github.com/rjwalters/kicad-tools/issues/2672)
@@ -499,15 +505,12 @@ The original prerequisites ---
 [#2677](https://github.com/rjwalters/kicad-tools/issues/2677) (BGA
 partner-via escape) --- are both **closed**, and their error classes are
 gone from the gate.  The floor was ratcheted 24 -> 18 by
-[#4019](https://github.com/rjwalters/kicad-tools/issues/4019); the
-current residual is exactly the diff-pair quality block (9x
-`diffpair_length_skew` + 9x `diffpair_routing_continuity`,
-[#3540](https://github.com/rjwalters/kicad-tools/issues/3540)-[#3544](https://github.com/rjwalters/kicad-tools/issues/3544)).
-That residual must clear before the board 06 entry in
-`.github/routed-drc-tolerance.yml` can shrink further.  Eventually the
-entry should be **removed** entirely (per the YAML's "absence == strict
-0 errors" convention) once the board routes cleanly under JLCPCB tier-1
-rules.
+[#4019](https://github.com/rjwalters/kicad-tools/issues/4019) and then
+replaced by the identity allowance
+([#7367](https://github.com/rjwalters/kicad-tools/issues/7367)).  Each
+entry is deleted when its finding is fixed --- the stale check forces
+it --- until the list is empty and the board routes cleanly under
+JLCPCB tier-1 rules.
 
 ## Out of Scope
 

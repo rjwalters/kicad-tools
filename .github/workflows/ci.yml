@@ -1230,8 +1230,10 @@ jobs:
     #
     # Original rationale (Issue #2660 / Epic #2556 Phase 4N): re-route board 06
     # (the diff-pair testbench) from scratch on every run and verify that
-    #   (a) the resulting DRC error count is within the allowlist baseline
-    #       in .github/routed-drc-tolerance.yml; AND
+    #   (a) every blocking DRC finding is listed by identity (rule + pair/net,
+    #       open tracker) in the gate script and every listed entry still
+    #       fires; the count outside that allowance must be 0 (#7367; no
+    #       entry in .github/routed-drc-tolerance.yml); AND
     #   (b) each of the three diff-pair DRC rules
     #       (diffpair_clearance_intra, diffpair_routing_continuity,
     #       diffpair_length_skew) was actually exercised against an engaged
@@ -1538,8 +1540,10 @@ jobs:
     # Issue #2726 / Epic #2661 Phase 3N: re-route board 07 (the
     # N-trace match-group testbench, #2724 Phase 3L) from scratch on
     # every PR and verify that
-    #   (a) the resulting DRC error count is within the allowlist baseline
-    #       in .github/routed-drc-tolerance.yml; AND
+    #   (a) every blocking DRC finding is listed by identity (rule + pair/net,
+    #       open tracker) in the gate script and every listed entry still
+    #       fires; the count outside that allowance must be 0 (#7367; no
+    #       entry in .github/routed-drc-tolerance.yml); AND
     #   (b) the match_group_length_skew DRC rule (#2702, Phase 2G; producer
     #       wiring #2710 Phase 2.5G) was actually exercised against a
     #       declared group -- i.e., the per-rule counter in the DRC
@@ -2360,9 +2364,9 @@ jobs:
     #
     # This job does NOT replace the ``diffpair-routing-regression`` job
     # (which keeps its allowlist-based DRC coverage gate on the ``--step
-    # route`` re-route).  Board 06 carries allowlisted DRC *quality*
-    # residuals (.github/routed-drc-tolerance.yml: diff-pair length-skew /
-    # continuity measurements), so ``--lvs-only`` skips the ``status:ok``
+    # route`` re-route).  Board 06 carries identity-allowed DRC *quality*
+    # residuals (check_diffpair_coverage.py DIFFPAIR_FIXTURE_ALLOWED_FINDINGS:
+    # diff-pair length-skew pairs, #7367), so ``--lvs-only`` skips the ``status:ok``
     # / ``drc_violations:0`` assertions -- but all 21 nets route to
     # completion, which is exactly what the copper-LVS clean assertion
     # proves (no opens, no shorts).
@@ -2574,8 +2578,8 @@ jobs:
     # it to absorb one.
     #
     # NEW, ADDITIVE gate -- does NOT replace the
-    # ``matchgroup-routing-regression`` job.  Board 07 carries allowlisted
-    # DRC residuals (.github/routed-drc-tolerance.yml) and routes PARTIAL
+    # ``matchgroup-routing-regression`` job.  Board 07 carries identity-allowed
+    # DRC residuals (check_matchgroup_coverage.py, #7367) and routes PARTIAL
     # by design, so no Overall: PASSED / status:ok / drc_violations:0
     # assertions apply.  If #7557 / #3438 ever makes TMDS_D0_N routable, graduate
     # this job to --lvs-only + a plain copper-clean assertion.
