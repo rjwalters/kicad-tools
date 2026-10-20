@@ -415,9 +415,14 @@ if [[ "${LOOM_SWEEP_CPU_QUOTA:-1}" != "0" ]]; then
     # on its side.
     export LOOM_SWEEP_CPU_BUDGET_CORES="$_cpu_budget_cores"
     if [[ "$_cpu_shared" == "1" ]]; then
+        # #12884: the sweep count the budget was divided by, for the phase
+        # spans. Only a shared budget measured it; unshared, `1` is a
+        # placeholder, so the key is unset (no parent value leaks through).
+        export LOOM_SWEEP_CPU_INFLIGHT="$_cpu_inflight"
         log_info "spawn-claude: CPU budget = ${_cpu_budget_cores} core(s) of ${_cpu_total_cores} (reserved ${_cpu_reserved}) divided across ${_cpu_inflight} in-flight sweep(s) on this host — exported as LOOM_SWEEP_CPU_BUDGET_CORES (issues #5111/#5979)"
     else
         log_info "spawn-claude: CPU budget = ${_cpu_budget_cores} core(s) of ${_cpu_total_cores} (reserved ${_cpu_reserved}) — host-wide sharing disabled (LOOM_SWEEP_SHARED_CPU_BUDGET=0, #5979) — exported as LOOM_SWEEP_CPU_BUDGET_CORES (issue #5111)"
+        unset LOOM_SWEEP_CPU_INFLIGHT
     fi
 
     _systemd_user_lib="${_script_dir}/lib/systemd-user.sh"

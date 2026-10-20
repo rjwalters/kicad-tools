@@ -181,7 +181,8 @@ See [execution traces](tracing.md) for persisted trace identity, correlated logs
 completed-span export, and bounded shutdown.
 
 Every OTLP request, on all three signals (traces, logs, metrics), carries one
-resource per emitting host with exactly these attributes:
+resource per emitting host with these identity attributes, followed by the
+host-shape attributes in the next table:
 
 | Resource attribute | Value |
 |---|---|
@@ -192,6 +193,41 @@ resource per emitting host with exactly these attributes:
 | `service.version` | the reporting daemon's version (a `host.health` record's `daemon_version`, else the exporting build's) |
 | `loom.daemon.revision` | the exporting build's full git SHA (`unknown` for a tarball build) — the same value every span carries (#11197) |
 | `loom.fleet.config_sha` | the fleet-gitops commit whose rendered config tiers are **on disk on this host right now**: a 40-hex SHA, `unknown` (a fleet host where no applied commit is established yet, e.g. during a startup-pass timeout), or `none` (no fleet store, `fleet.repo` unset). Never empty, never omitted (#11197) |
+
+**Host shape (#12874).** The emitting host's static shape, so a sweep or phase
+span resolves to its host's size with no join against the
+`loom.host.logical_cpus` gauge:
+
+| Resource attribute | Value |
+|---|---|
+| `host.cpu.count` | logical CPU count (int) — the same source as the `loom.host.logical_cpus` gauge. Always present |
+| `loom.host.mem_total_bytes` | total physical memory in bytes (int; `/proc/meminfo` `MemTotal`, macOS `hw.memsize`). **Absent** when unmeasurable, never `0` |
+| `host.arch` | OTel semconv architecture: `amd64`, `arm64`, else Rust's raw `std::env::consts::ARCH`. Always present |
+| `host.type` | the EC2 instance type (e.g. `c7i.2xlarge`) on Linux once the IMDS probe succeeds; a Mac's `sysctl hw.model` (e.g. `Mac14,6`); absent elsewhere |
+| `cloud.provider`, `cloud.region` | `aws` and the instance's region, from the same IMDS probe; absent on a Mac or any non-EC2 host |
+
+CPU count, RAM, arch and Mac model are read once per process and cached. The
+instance type comes from a single AWS IMDSv2 probe (`PUT /latest/api/token`,
+then `meta-data/instance-type` and `meta-data/placement/region`) spawned at
+telemetry startup on Linux. It bypasses any `HTTP(S)_PROXY`, has a 1 s total
+budget, never retries and is never awaited — so startup is not delayed, and
+batches exported before it lands (or on a host where IMDS is unreachable)
+simply lack `host.type`/`cloud.*`. `eta.stage_outcome` records carry the
+*observing* host's shape, not the executing host's; join through the
+executing `host.id` on `sweep.*` records for that.
+
+**Host load on sweep/phase spans (#12884).** `loom.sweep` and every
+`loom.phase` span carry the `lifecycle::host_attributes()` sample, including
+`loom.host.logical_cpus` and `loom.host.loadavg_1m`, at open and again at
+close. A close overwrites a same-named key, so the plain
+`loom.host.loadavg_1m` / `loom.host.load_per_core` on an exported span are the
+**close-time** sample; the open-time sample is kept under
+`loom.host.start.loadavg_1m` / `loom.host.start.load_per_core`, which no close
+re-stamps. Phase spans opened inside a `spawn-claude.sh` child (the checkpoint
+sites) also carry `loom.host.cpu_budget_cores` and `loom.host.sweeps_in_flight`
+— the CPU quota and the in-flight sweep count it was divided by. Each key is
+absent when unknown, never zero-filled: `sweeps_in_flight` is absent when the
+budget was not shared across sweeps (`LOOM_SWEEP_SHARED_CPU_BUDGET=0`).
 
 `host.name` has one source, the same string as `host.id`: the daemon's host
 identity, which is the operator-assigned `$LOOM_HOST_ID` when it is set and
@@ -669,14 +705,6 @@ Import it with `POST /api/v1/rules` or paste its query into a new ClickHouse
 alert. The rule's shape has not yet been tested against a live SigNoz. Standing queries are in
 `defaults/observability/signoz/queue-dwell.sql`.
 
-**Fleet singleton outputs (#10916).** The in-daemon `fleet_alert` path
-(#10924) judges the registered one-host fleet outputs (`ci.run`, the captain
-gauges, and the intake-reconcile completed-pass heartbeat
-`.loom/state/intake-reconcile/last-pass.json`) against
-`fleet_outputs::SINGLETON_OUTPUTS`. The SigNoz
-cross-host alert that watched the ETA singletons was removed with the ETA
-subsystem (#11098).
-
 **Subscription quota utilization (#9005).** The per-account `tokens.snapshot`
 gauges carry both Claude limit windows: `loom.tokens.usage_fraction` (5-hour)
 and `loom.tokens.usage_fraction_weekly` (rolling 7-day, from the
@@ -715,6 +743,20 @@ it reaching zero, #10888): `loom.merge.redate_prs{state}`
 `host.health` cadence, with no forge call. A non-zero `stuck` series is a
 merge-chain head that `main` keeps moving under. Details are in
 [`telemetry-schema.md`](telemetry-schema.md#metricpoints).
+
+**Retried fleet dispatches (#12875).** When the fleet-dispatch captain
+grants an item and step again after an earlier assignment of the same repo,
+item and step ended, the worker's `loom.dispatch.step` span carries
+`loom.dispatch.attempt` (earlier assignments that ended),
+`loom.dispatch.prev_assignment_id` (the earlier step's `loom.assignment.id`)
+and `loom.dispatch.prev_end` (`released`, `expired`, or `host_lost` when the
+worker released it because its host was lost to a spot interruption, #12876). A first or renewed grant carries none. Each
+expired assignment also gets a captain `loom.fleet_dispatch.call` span with
+endpoint `expire`, result `expired`, reason `lease_expired`, naming the host,
+item, step and assignment id, so expiries are attributable per host and item.
+The captain keeps the lineage in memory, bounded to 4096 steps and 24 h; a
+captain restart resets `attempt`. Keys:
+[`telemetry-schema.md`](telemetry-schema.md).
 
 **Per-issue dispatch disposition (#9222).** `loom.dispatch.admission` only
 covers candidates that reached a `dispatch()` attempt — a candidate filtered
@@ -1160,13 +1202,14 @@ hash of it, and it is never logged or forwarded.
 | `service.name` | the harness — `claude-code` |
 | `service.instance.id`, `host.id`, `host.name` (whatever host attributes the daemon's own telemetry carries) | this daemon's host identity |
 | `loom.daemon.revision`, `loom.fleet.config_sha` | the relaying build's revision and the host's applied fleet-config SHA (#11197), with the daemon's value — sender-supplied copies are scrubbed with every other `loom.*` key |
+| `host.cpu.count`, `loom.host.mem_total_bytes`, `host.arch`, `host.type`, `cloud.provider`, `cloud.region` | this daemon's host shape (#12874), as on its own telemetry |
 | `loom.runtime`, `loom.session.kind` (`sweep`/`role`), `loom.session.launch` (`daemon`) | from the launch |
 | `loom.repo` | the workspace's forge `owner/name`; absent until resolved, never a directory name |
 | `loom.issue`, `loom.role`, `loom.sweep_id` | the issue, role and sweep (or role-tick execution) id the session was launched for, when it has one |
 | `loom.daemon.version`, `loom.relay.redaction` | the relaying build, and the redaction policy applied |
 
 Whatever the sender put under `service.name`, `service.namespace`,
-`service.instance.id`, `host.*` or `loom.*` — in any letter case — is
+`service.instance.id`, `host.*`, `cloud.*` or `loom.*` — in any letter case — is
 discarded, on the resource and on every scope, record, data point, span, span
 event, link and nested map, so a record-level attribute cannot shadow the
 bound one. Other resource attributes the CLI reports about itself
