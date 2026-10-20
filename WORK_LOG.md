@@ -15,6 +15,20 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-20
 
+- **PR #7638**: fix(bom): drop (power)-flagged symbols and filter virtual parts in every format
+- **PR #7623**: fix(router): skew tuner measures quantized length and seats a taller loop at a host's end
+- **PR #7604**: fix(route): apply pad-edge floor to oracle pour-link weld vias
+- **PR #7584**: fix(router): native pad test applies each pad's own net-class clearance
+- **PR #7517**: fix(router): judge lattice pad keep-outs against the true pad outline
+- **Issue #7618** (closed): router: keep coupled-pair J1 pad-to-via escape legs off the wrong-gap coupling window (06rf impedance, from PR #7517)
+- **Issue #7615** (closed): Schematic BOM lists power symbols and PWR_FLAGs from a project symbol library
+- **Issue #7602** (closed): stitcher: post-route pour stitching places a GND via 0.02 mm from U2-29's exposed-pad mask (board 05)
+- **Issue #7569** (closed): C++ exact pad test holds every pad to the board's widest class clearance (Python applies the pair rule)
+- **Issue #7503** (closed): Lattice router: pad-clearance check uses a square around pads, not the true outline (board 03 VBUS, #7463)
+- **PR #7609**: fix: truncate GitHub Release body to stay under the 125k-char limit
+- **Issue #7608** (closed): release_tag.py finalize: GitHub Release body exceeds 125k-char limit (422), so v0.24.0 Release not created
+- **PR #7633**: test: black-box probes of KiCad tuning-pattern partner exclusion (Q31)
+- **Issue #7632** (closed): Q31 probe: does KiCad's tuning-pattern exclusion cover the partner leg beside a skew bump?
 - **PR #7622**: test: key partial route-entry goldens by CPU architecture
 - **PR #7570**: fix(router): pose search measures partner pads; board 06 USB3_RX1 keeps its corridor (#7491)
 - **Issue #7621** (closed): test: route entry-path goldens (partial-*) drift on Linux CI; every PR Test job red since #7599
