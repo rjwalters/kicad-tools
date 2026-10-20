@@ -15,6 +15,18 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-20
 
+- **PR #7620**: chore: re-point DQS and TMDS_D1 skew allowances to via-imbalance tracker
+- **Issue #7613** (closed): Board 07 fixture: DQS and TMDS_D1 diff-pair skew declined by gap tightening (declined:skew)
+- **PR #7607**: ci: raise Test job timeout to 120 min (stopgap for #5240)
+- **PR #7606**: fix: stop merge_collinear_same_width fusing collinear fold-backs
+- **PR #7596**: fix: tuner neighbour clearance honours authored net-class floors
+- **PR #7578**: fix(impedance): ignore sub-width partner overlaps as coupled runs
+- **PR #7576**: fix(router): re-route crossing lattice diff-pair extras jointly for via parity
+- **Issue #7605** (closed): merge_collinear_same_width fuses a collinear fold-back and loses copper (#7600 follow-up)
+- **Issue #7594** (closed): Match-group tuner resolves power nets to Default class instead of their mapped class (AUX)
+- **Issue #7575** (closed): kct check impedance rule judges a 0.1 mm pad-escape stub as a coupled diff-pair run
+- **PR #7582**: chore(release): v0.24.0
+- **PR #7600**: fix(board06): fuse pair-leg grid steps so the skew tuner can host a trombone
 - **PR #7599**: test(route): golden harness for kct route's four entry paths (#7377)
 - **PR #7598**: docs(router): drop the closed square-meander divergence from #7546's rationale
 - **PR #7571**: fix(router): verify lattice pair legs at their true width against other nets' copper
