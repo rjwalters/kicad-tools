@@ -23,9 +23,9 @@ KiCad itself) need no library setup.
 ``PIN_NETS`` below is the schematic-side source of truth and mirrors the
 per-pad net assignment in ``generate_pcb.py`` — the copper-LVS step in
 ``generate_design.py`` is what keeps the two in lock-step.  Note board 07
-routes PARTIAL by design (5 seed-invariant unroutable nets, #3438:
-DQ3 / DQ4 / MIPI_DAT0_N / TMDS_D0_N / TMDS_D1_N), so with a wired
-schematic copper-LVS HONESTLY reports those 5 as opens.
+routes PARTIAL by design (1 unroutable net, #7557 / #3438:
+TMDS_D0_N), so with a wired schematic copper-LVS HONESTLY reports
+that net as an open.
 
 Usage:
     python generate_schematic.py [output_file]
