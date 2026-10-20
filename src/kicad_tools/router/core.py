@@ -20792,6 +20792,25 @@ class Autorouter:
         pitches = self.component_pitches
         class_clearance = self._net_class_clearance_mm
 
+        def no_closer(seg: Any, net: int, gap: float, measure: Callable[[Any], float]) -> bool:
+            """The bump leaves ``seg`` no nearer a foreign object than the route was.
+
+            Issue #7612: a trombone hangs off its host segment, so the leg that
+            joins it inherits whatever gap the host already had to a neighbour
+            (a lane routed 0.156 mm off its sibling against a 0.2 mm limit).
+            That near-miss is not the bump's doing and the bump cannot cure it;
+            only a bump that makes it worse is rejected.  ``measure`` returns
+            the gap from one of the net's pre-tune segments to the same object.
+            """
+            route = routes_by_net.get(net)
+            if route is None:
+                return False
+            floor = min(
+                (measure(o) for o in route.segments if o.layer == seg.layer),
+                default=float("inf"),
+            )
+            return gap + 1e-9 >= floor
+
         def ok(new_segments: list[Any], net: int) -> bool:
             own = max(base, class_clearance(net))
             partner = partner_of.get(net)
@@ -20824,7 +20843,14 @@ class Autorouter:
                         )
                     )
                     gap = pad_segment_edge_clearance(pad, seg.x1, seg.y1, seg.x2, seg.y2, half)
-                    if gap + 1e-9 < required:
+                    if gap + 1e-9 < required and not no_closer(
+                        seg,
+                        net,
+                        gap,
+                        lambda o, pad=pad: pad_segment_edge_clearance(
+                            pad, o.x1, o.y1, o.x2, o.y2, o.width / 2
+                        ),
+                    ):
                         return False
                 for other_net, route in routes_by_net.items():
                     if other_net == net:
@@ -20839,7 +20865,16 @@ class Autorouter:
                         dist = point_to_segment_distance(
                             via.x, via.y, seg.x1, seg.y1, seg.x2, seg.y2
                         )
-                        if dist - half - radius + 1e-9 < required:
+                        if dist - half - radius + 1e-9 < required and not no_closer(
+                            seg,
+                            net,
+                            dist - half - radius,
+                            lambda o, via=via, radius=radius: (
+                                point_to_segment_distance(via.x, via.y, o.x1, o.y1, o.x2, o.y2)
+                                - o.width / 2
+                                - radius
+                            ),
+                        ):
                             return False
                     for other in route.segments:
                         if other.layer != seg.layer:
@@ -20864,7 +20899,23 @@ class Autorouter:
                             other.y2,
                             other.width,
                         )
-                        if gap + 1e-9 < required:
+                        if gap + 1e-9 < required and not no_closer(
+                            seg,
+                            net,
+                            gap,
+                            lambda o, other=other: segment_clearance(
+                                o.x1,
+                                o.y1,
+                                o.x2,
+                                o.y2,
+                                o.width,
+                                other.x1,
+                                other.y1,
+                                other.x2,
+                                other.y2,
+                                other.width,
+                            ),
+                        ):
                             return False
             return True
 

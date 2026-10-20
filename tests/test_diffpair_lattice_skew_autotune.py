@@ -208,6 +208,42 @@ def test_auto_path_bump_respects_foreign_pad_class_clearance():
     assert ok([far], 1) is True
 
 
+def test_auto_path_bump_may_inherit_the_host_segments_existing_near_miss():
+    """Issue #7612: a bump is not vetoed for a gap its host already had.
+
+    Board 07's MIPI_DAT0 host runs 0.156 mm off its sibling against a 0.2 mm
+    limit; every trombone leg joins that line, so the gate rejected all of
+    them.  It now rejects only a bump that sits nearer the object than the
+    route already does.
+    """
+    from kicad_tools.router.primitives import Pad
+
+    nc = NetClassRouting(name="LVDS", length_critical=False, skew_tolerance_mm=0.1)
+    ar = _router(nc)
+    ar.net_names[3] = "+5V"
+    ar.net_class_map["+5V"] = NetClassRouting(name="Power", clearance=0.2)
+    pad = Pad(x=10.0, y=-0.5, width=0.4, height=0.4, net=3, net_name="+5V", ref="C1", pin="1")
+    ar.grid._pads = [pad]
+    width = 0.2
+    # The pair's P half already runs 0.163 mm from the pad (edge at y=-0.3).
+    ar.routes[0] = Route(
+        net=1,
+        net_name=P_NAME,
+        segments=[Segment(0.0, -0.037, 20.0, -0.037, width, Layer.F_CU, net=1, net_name=P_NAME)],
+    )
+    ok = ar._skew_tune_foreign_clearance_ok(
+        {r.net: r for r in ar.routes}, partner_of={1: 2, 2: 1}, intra_pair_clearance_mm=0.15
+    )
+    on_host = Segment(5.0, -0.037, 15.0, -0.037, width, Layer.F_CU, net=1, net_name=P_NAME)
+    leg_away = Segment(8.0, -0.037, 8.0, 0.1, width, Layer.F_CU, net=1, net_name=P_NAME)
+    closer = Segment(5.0, -0.0, 15.0, 0.0, width, Layer.F_CU, net=1, net_name=P_NAME)
+    nearer = Segment(5.0, -0.1, 15.0, -0.1, width, Layer.F_CU, net=1, net_name=P_NAME)
+    assert ok([on_host], 1) is True
+    assert ok([leg_away], 1) is True
+    assert ok([closer], 1) is True
+    assert ok([nearer], 1) is False
+
+
 def test_auto_path_measures_skew_with_via_barrels_like_the_checker():
     """07rf regression guard: the checker counts drilled via length.
 

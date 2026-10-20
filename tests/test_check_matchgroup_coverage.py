@@ -88,6 +88,27 @@ class TestBoard07Allowance:
         }
 
 
+class TestBoard07SkewRetune:
+    """Issue #7612: the pairs the recipe length-tunes carry no skew allowance."""
+
+    def test_retuned_pairs_have_no_skew_allowance(self):
+        mod = _load_helper_module()
+        recipe = _load_board_recipe_module()
+        assert recipe.SKEW_RETUNE_PAIRS, "the recipe must name the pairs it tunes"
+        allowed = {
+            ident
+            for rule, ident in mod.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS
+            if rule == "diffpair_length_skew"
+        }
+        for p_net, n_net in recipe.SKEW_RETUNE_PAIRS:
+            assert "/".join(sorted((p_net, n_net))) not in allowed
+
+    def test_retuned_pairs_are_declared_pairs(self):
+        recipe = _load_board_recipe_module()
+        for p_net, n_net in recipe.SKEW_RETUNE_PAIRS:
+            assert recipe.generate_pcb.DIFFPAIRS[p_net] == n_net
+
+
 class TestCheckGroupAllowances:
     ALLOWED = {"MIPI_CSI_LANES": 7550, "DDR_DATA_BYTE_0": 7550}
 
@@ -412,23 +433,23 @@ class TestMatchgroupJobContainer:
 class TestUnexpectedBaselineErrors:
     KEY = "boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb"
 
-    NETS = {"MIPI_DAT1_N", "MIPI_DAT1_P", "TMDS_D1_N", "TMDS_D1_P"}
+    NETS = {"TMDS_D1_N", "TMDS_D1_P"}
 
     def test_listed_impedance_nets_tolerated(self):
         mod = _load_helper_module()
         found = {"impedance": set(self.NETS)}
-        assert mod.unexpected_baseline_errors(self.KEY, {"impedance": 4}, found) == {}
+        assert mod.unexpected_baseline_errors(self.KEY, {"impedance": 2}, found) == {}
         assert [s for s in mod.stale_allowances(self.KEY, found) if s[0] == "impedance"] == []
 
     def test_unlisted_impedance_net_reported_within_old_cap(self):
         mod = _load_helper_module()
-        found = {"impedance": {"MIPI_DAT1_N", "MIPI_DAT1_P", "TMDS_D1_N", "DDR_DQS0_P"}}
-        assert mod.unexpected_baseline_errors(self.KEY, {"impedance": 4}, found) == {"impedance": 1}
+        found = {"impedance": {"TMDS_D1_N", "TMDS_D1_P", "DDR_DQS0_P"}}
+        assert mod.unexpected_baseline_errors(self.KEY, {"impedance": 3}, found) == {"impedance": 1}
 
     def test_fixed_listed_finding_is_stale(self):
         mod = _load_helper_module()
         found = {"impedance": self.NETS - {"TMDS_D1_P"}}
-        assert mod.unexpected_baseline_errors(self.KEY, {"impedance": 3}, found) == {}
+        assert mod.unexpected_baseline_errors(self.KEY, {"impedance": 1}, found) == {}
         stale = [s for s in mod.stale_allowances(self.KEY, found) if s[0] == "impedance"]
         assert stale == [("impedance", "TMDS_D1_P", 7349)]
 

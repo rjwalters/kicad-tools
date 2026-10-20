@@ -1784,6 +1784,61 @@ def copy_project_sidecars(source_pcb: Path, frame_pcb: Path) -> list[Path]:
     return written
 
 
+# Issue #7612: the pairs route single-ended (no ``--differential-pairs``, see
+# ``route_pcb``), so ``kct route`` never runs the per-pair skew tuner and each
+# of these four is left with whatever length the two halves happened to get
+# (0.730 / 1.021 / 4.060 / 4.854 mm against 0.05-0.075 mm).  Their halves run
+# loosely coupled, so the group tuner finds no span-matched host either
+# (``no_suitable_segment``).  The audited single-sided tuner needs neither:
+# it lengthens the shorter half alone.  The other skewed pairs (DQS, TMDS_D1)
+# are not listed -- they stay with their own trackers.
+SKEW_RETUNE_PAIRS: tuple[tuple[str, str], ...] = (
+    ("TMDS_D2_P", "TMDS_D2_N"),
+    ("MIPI_DAT1_P", "MIPI_DAT1_N"),
+    ("MIPI_DAT0_P", "MIPI_DAT0_N"),
+    ("MIPI_CLK_P", "MIPI_CLK_N"),
+)
+
+
+def retune_pair_skew(routed_path: Path, sidecar_path: Path) -> list[str]:
+    """Length-tune :data:`SKEW_RETUNE_PAIRS` in place on the routed board.
+
+    All pairs go through ONE ``retune_pcb`` call: it seeds its uuid generator
+    per call, so a second call on the same board re-mints the first call's
+    uuids and the duplicates make the checker merge one pair's bump into
+    another net.  ``retune_pcb`` is all-or-nothing, and the result is swapped
+    in only when every pair reached the limit ``kct check`` enforces; when one
+    cannot, the board is left as routed and the DRC gate reports the skews.
+    Returns the ``"P/N"`` names that were tuned (empty when nothing changed).
+    """
+    import tempfile
+
+    from kicad_tools.router.pcb_retune import RetuneError, retune_pcb
+    from kicad_tools.router.rules import net_class_map_from_path
+
+    net_class_map = net_class_map_from_path(sidecar_path, pcb_path=routed_path)
+    with tempfile.TemporaryDirectory(prefix="kct-board07-retune-") as scratch:
+        out = Path(scratch) / routed_path.name
+        try:
+            report = retune_pcb(
+                routed_path,
+                out,
+                diffpairs=list(SKEW_RETUNE_PAIRS),
+                net_class_map=net_class_map,
+                provenance_path=Path(scratch) / "retune.json",
+            )
+        except RetuneError as exc:
+            print(f"   not tuned ({exc})")
+            return []
+        os.replace(out, routed_path)
+    for t in report.targets:
+        print(
+            f"   {t.name}: skew {t.before_skew_mm:.3f} -> {t.after_skew_mm:.3f} mm "
+            f"(limit {t.tolerance_mm:g} mm)"
+        )
+    return [t.name for t in report.targets]
+
+
 def route_pcb(input_path: Path, output_path: Path) -> bool:
     """Route the PCB by invoking ``kct route`` with the proven flag recipe.
 
@@ -2647,6 +2702,20 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         "   POUR CONNECTIVITY (plain native refill): "
         + ("PASS" if native_stable else "FAIL (see above)")
     )
+
+    # Issue #7612: lengthen the shorter half of the four pairs the router
+    # leaves skewed.  Last on purpose: ``retune_pcb`` splices copper into the
+    # finished board (it was written for one, and it measures the shipped
+    # frame), so the bump copper is never post-processed by the stitching,
+    # repair or translation legs above.  The bumps are F.Cu copper beside pour
+    # zones, so the recipe's fill and the pour audit run again afterwards.
+    print("\n11. Tuning diff-pair skew (Issue #7612)...")
+    if retune_pair_skew(output_path, sidecar_path):
+        refill = subprocess.run(fill_argv, capture_output=True, text=True)
+        if refill.returncode != 0:
+            print(f"   WARNING: re-fill after skew tuning failed (rc={refill.returncode})")
+        retuned_ok = _audit_pour_report(output_path, skip_nets, "[post-retune]")
+        print("   POUR CONNECTIVITY (after skew tuning): " + ("PASS" if retuned_ok else "FAIL"))
 
     return success
 
