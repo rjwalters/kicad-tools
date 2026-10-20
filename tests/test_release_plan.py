@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -363,13 +364,54 @@ def test_workflow_shape() -> None:
     assert [k for k, v in wf["permissions"].items() if v == "write"] == ["actions"]
     assert wf["concurrency"]["cancel-in-progress"] is False
     steps = wf["jobs"]["release-pr"]["steps"]
-    token = next(s for s in steps if s.get("id") == "app-token")
-    assert token["uses"].startswith("actions/create-github-app-token@")
-    assert len(token["uses"].split("@")[1].split()[0]) == 40  # pinned by SHA
-    assert "LOOM_FLEET_DISPATCH_APP_ID" in token["with"]["app-id"]
+    mints = [
+        s for s in steps if str(s.get("uses", "")).startswith("actions/create-github-app-token@")
+    ]
+    assert mints
+    for token in mints:
+        assert len(token["uses"].split("@")[1].split()[0]) == 40  # pinned by SHA
+        assert "LOOM_FLEET_DISPATCH_APP_ID" in token["with"]["app-id"]
+        assert "'on'" in token["if"]  # dry-run / off mint no App token
     final = steps[-1]
     assert final["env"]["GH_TOKEN"] == "${{ github.token }}"
-    assert "app-token" in final["env"]["RELEASE_TOKEN"]
+    assert "app-token-merge" in final["env"]["RELEASE_TOKEN"]
+
+
+def test_workflow_remints_the_app_token_after_every_wait() -> None:
+    """#7559: an App installation token dies after 1 h and the main-CI and PR-checks
+    waits each outlast that.  Every step using an App token must read a mint step that
+    runs *after* the latest preceding wait phase."""
+    steps = _workflow()["jobs"]["release-pr"]["steps"]
+    waits = [
+        i for i, s in enumerate(steps) if re.search(r"--phase (gate|wait)\b", s.get("run", ""))
+    ]
+    assert len(waits) == 2
+    mint_index = {
+        s["id"]: i for i, s in enumerate(steps) if "create-github-app-token@" in str(s.get("uses"))
+    }
+    users = 0
+    for i, step in enumerate(steps):
+        text = yaml.safe_dump({k: v for k, v in step.items() if k != "uses"})
+        refs = set(re.findall(r"steps\.([\w-]+)\.outputs\.(?:token|app-slug)", text))
+        for ref in refs:
+            users += 1
+            assert ref in mint_index and mint_index[ref] < i, (step.get("name"), ref)
+            last_wait = max((w for w in waits if w < i), default=-1)
+            assert mint_index[ref] > last_wait, f"{step.get('name')}: token minted before a wait"
+    assert users >= 4
+    # The waits themselves use only GITHUB_TOKEN reads.
+    for w in waits:
+        assert "RELEASE_TOKEN" not in steps[w].get("env", {})
+
+
+def test_workflow_checkout_persists_no_stale_app_credential() -> None:
+    checkout = next(
+        s
+        for s in _workflow()["jobs"]["release-pr"]["steps"]
+        if "actions/checkout" in str(s.get("uses"))
+    )
+    assert checkout["with"]["persist-credentials"] is False
+    assert "app-token" not in checkout["with"]["token"]
 
 
 # --- git fixtures -----------------------------------------------------------------
@@ -933,3 +975,37 @@ def test_cli_plan_json_against_this_repo() -> None:
     assert proc.returncode == 0, proc.stderr
     data = json.loads(proc.stdout)
     assert set(data) >= {"tag", "merged_prs", "level", "version", "stop", "section"}
+
+
+def test_phased_run_matches_single_process_run(repo: Path, quiet_checks, tmp_path: Path) -> None:
+    """The workflow's per-phase steps, joined by the state file, do what run() does."""
+    _merge_pr(repo, 12, "fix: y", {"changelog.d/40.fixed.md": "- y (Issue #40)."})
+    state_file = tmp_path / "state.json"
+    forge = FakeForge()
+    git = rp.Git(repo)
+    state = rp.RunState("on", "test", "auto", "2026-09-29")
+    rp.phase_gate(state, git=git, forge=forge, ref="origin/main", wait_ci=0, sleep=lambda _s: None)
+    assert state.outcome == "green"
+    state.save(state_file)
+    state = rp.RunState.load(state_file)
+    assert rp.phase_open(state, git=git, forge=forge).code == 0
+    state.save(state_file)
+    state = rp.RunState.load(state_file)
+    rp.phase_wait(state, forge=forge, wait_pr=0, sleep=lambda _s: None)
+    state.save(state_file)
+    state = rp.RunState.load(state_file)
+    assert rp.phase_finish(state, forge, 0).code == 0
+    kinds = [c[0] for c in forge.calls]
+    assert kinds == ["create_pr", "merge_pr"]
+
+
+def test_phased_red_gate_reports(repo: Path, quiet_checks) -> None:
+    _merge_pr(repo, 12, "fix: y", {"changelog.d/40.fixed.md": "- y (Issue #40)."})
+    forge = FakeForge(ci="red")
+    state = rp.RunState("on", "test", "auto", "2026-09-29")
+    rp.phase_gate(
+        state, git=rp.Git(repo), forge=forge, ref="origin/main", wait_ci=0, sleep=lambda _s: None
+    )
+    assert state.outcome == "red"
+    assert rp.phase_report_gate(state, forge).code == 1
+    assert [c[0] for c in forge.calls] == ["report"]

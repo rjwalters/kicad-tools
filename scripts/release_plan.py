@@ -51,8 +51,11 @@ plus the one ``workflow_dispatch`` of ``ci.yml`` the gate may request).
 Writes (PR create/edit/close/merge, branch delete, tracking-issue comments)
 use ``RELEASE_TOKEN`` -- the loom-fleet-dispatch App token, so the push and PR
 trigger ``ci.yml`` (a ``GITHUB_TOKEN`` push/PR would not; curator note §3).
-The ``git push`` itself uses the credentials ``actions/checkout`` persisted,
-which the workflow sets to the App token.
+The ``git push`` itself uses a credential the workflow installs from the App
+token minted for the ``open`` phase.  An installation token lives one hour, so
+the workflow runs ``run --phase gate|report-gate|open|wait|finish`` as separate
+steps (state in ``--state``), minting a fresh token before each writing phase;
+the two waits (``gate``, ``wait``) use ``GH_TOKEN`` reads only (#7559).
 
 Interface for Phase 3 (#5777)
 -----------------------------
@@ -90,7 +93,7 @@ import tempfile
 import time
 import urllib.parse
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -133,6 +136,7 @@ RELEASE_JOBS: tuple[str, ...] = (
 NOT_RED = frozenset({"success", "skipped", "neutral"})
 
 MODES = ("on", "off", "dry-run")
+PHASES = ("all", "gate", "report-gate", "open", "wait", "finish")
 LEVELS = ("patch", "minor", "major")
 
 _VERSION = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
@@ -1016,6 +1020,128 @@ def open_or_update_release_pr(
     return number, head_sha
 
 
+@dataclass
+class RunState:
+    """What one phase hands to the next (JSON file between workflow steps).
+
+    The App installation token lives one hour, but the gate wait and the PR-checks
+    wait are each up to ~2 h.  The workflow therefore runs the phases as separate
+    steps and mints a fresh token right before each one that writes (#7559); this
+    is everything those steps need from each other.
+    """
+
+    mode: str
+    mode_note: str
+    level: str | None = None
+    date: str = ""
+    outcome: str = ""  # gate phase: noop | red | green
+    sha: str = ""
+    version: str = ""
+    notes: list[str] = field(default_factory=list)
+    problems: list[str] = field(default_factory=list)
+    number: int = 0
+    head_sha: str = ""
+    checks: str = ""  # wait phase: green | red | pending
+    reasons: list[str] = field(default_factory=list)
+    out: list[str] = field(default_factory=list)
+
+    def save(self, path: Path) -> None:
+        path.write_text(json.dumps(asdict(self)), encoding="utf-8")
+
+    @classmethod
+    def load(cls, path: Path) -> RunState:
+        return cls(**json.loads(path.read_text(encoding="utf-8")))
+
+
+def phase_gate(
+    state: RunState,
+    *,
+    git: Git,
+    forge: Forge,
+    ref: str,
+    wait_ci: float,
+    interval: float = 60,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Mode, plan and gate.  Reads only (``GITHUB_TOKEN``); sets ``state.outcome``."""
+    state.out.append(f"mode: {state.mode} ({state.mode_note})")
+    if state.mode == "off":
+        state.outcome = "noop"
+        state.out.append("AUTO_RELEASE=off: nothing to do")
+        return
+    state.date = state.date or _dt.datetime.now(_dt.timezone.utc).date().isoformat()
+    plan = make_plan(git, ref, state.level, state.date)
+    state.sha, state.version = plan.sha, plan.version or ""
+    state.out.append(render_plan(plan))
+    if plan.stop:
+        state.outcome = "noop"
+        return
+    gate = evaluate_gate(forge, plan, git.repo, wait_ci, interval, sleep)
+    state.notes, state.problems = gate.notes, gate.problems
+    if not gate.ok:
+        state.outcome = "red"
+        problems = "\n".join(f"- {p}" for p in gate.problems)
+        state.out += ["", "GATE RED -- no release today:", problems]
+        return
+    state.outcome = "green"
+    state.out += ["", "gate: green", *(f"  {n}" for n in gate.notes)]
+
+
+def phase_report_gate(state: RunState, forge: Forge) -> Outcome:
+    """Comment a red gate on the tracking issue (write token, ``on`` mode)."""
+    problems = "\n".join(f"- {p}" for p in state.problems)
+    forge.report(
+        f"Skipped release v{state.version} on `{state.sha[:12]}` ({state.date}): the gate "
+        f"is red.\n\n{problems}"
+    )
+    return Outcome(1, "\n".join(state.out))
+
+
+def phase_open(state: RunState, *, git: Git, forge: Forge) -> Outcome:
+    """Build, push and open / update the release PR (write token, push credential)."""
+    # Re-plan from the gated SHA: deterministic for a fixed SHA, level and date.
+    plan = make_plan(git, state.sha, state.level, state.date)
+    gate = GateResult(problems=state.problems, notes=state.notes)
+    try:
+        state.number, state.head_sha = open_or_update_release_pr(forge, git, plan, gate, state.date)
+    except ReleaseError as exc:
+        forge.report(f"Skipped release v{state.version} ({state.date}): {exc}")
+        state.out.append(f"skipped: {exc}")
+        return Outcome(1, "\n".join(state.out))
+    state.out.append(f"release PR #{state.number} at {state.head_sha[:12]}")
+    return Outcome(0, "\n".join(state.out))
+
+
+def phase_wait(
+    state: RunState,
+    *,
+    forge: Forge,
+    wait_pr: float,
+    interval: float = 60,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Wait for the release PR's own checks.  Reads only (``GITHUB_TOKEN``)."""
+    state.checks, state.reasons = wait_for(
+        lambda: pr_checks_state(forge, state.head_sha), wait_pr, interval, sleep
+    )
+
+
+def phase_finish(state: RunState, forge: Forge, wait_pr: float) -> Outcome:
+    """Merge the release PR, or report why not (write token)."""
+    number = state.number
+    if state.checks != "green":
+        why = "red" if state.checks == "red" else f"not finished after {int(wait_pr)}s"
+        listed = "\n".join(f"- {r}" for r in state.reasons)
+        forge.report(
+            f"Release PR #{number} (v{state.version}) left open: checks {why}.\n\n{listed}"
+        )
+        state.out += [f"release PR #{number} checks {why}; left open", listed]
+        return Outcome(1, "\n".join(state.out))
+    forge.merge_pr(number, state.head_sha, f"{pr_title(state.version)} (#{number})")
+    state.out.append(f"merged release PR #{number}")
+    return Outcome(0, "\n".join(state.out))
+
+
 def run(
     *,
     mode: str,
@@ -1030,51 +1156,26 @@ def run(
     date: str | None = None,
     ref: str = f"origin/{BASE_BRANCH}",
 ) -> Outcome:
-    out = [f"mode: {mode} ({mode_note})"]
-    if mode == "off":
-        return Outcome(0, "\n".join(out + ["AUTO_RELEASE=off: nothing to do"]))
-
-    date = date or _dt.datetime.now(_dt.timezone.utc).date().isoformat()
-    plan = make_plan(git, ref, level, date)
-    out.append(render_plan(plan))
-    if plan.stop:
-        return Outcome(0, "\n".join(out))
-
-    gate = evaluate_gate(forge, plan, git.repo, wait_ci, interval, sleep)
-    if not gate.ok:
-        problems = "\n".join(f"- {p}" for p in gate.problems)
-        out += ["", "GATE RED -- no release today:", problems]
-        if mode != "on":
-            return Outcome(0, "\n".join(out))
-        forge.report(
-            f"Skipped release v{plan.version} on `{plan.sha[:12]}` ({date}): the gate "
-            f"is red.\n\n{problems}"
-        )
-        return Outcome(1, "\n".join(out))
-    out += ["", "gate: green", *(f"  {n}" for n in gate.notes)]
-
+    """All phases in one process (local use, tests).  Uses one write token throughout,
+    so it is only safe where the waits stay under its lifetime; the workflow runs the
+    phases as separate steps instead (``--phase``)."""
+    state = RunState(mode, mode_note, level, date or "")
+    phase_gate(
+        state, git=git, forge=forge, ref=ref, wait_ci=wait_ci, interval=interval, sleep=sleep
+    )
+    summary = "\n".join(state.out)
+    if state.outcome == "noop":
+        return Outcome(0, summary)
+    if state.outcome == "red":
+        return phase_report_gate(state, forge) if mode == "on" else Outcome(0, summary)
     if mode == "dry-run":
-        out.append(f"dry-run: would open/update PR `{release_branch_name(plan.version or '')}`")
-        return Outcome(0, "\n".join(out))
-
-    try:
-        number, head_sha = open_or_update_release_pr(forge, git, plan, gate, date)
-    except ReleaseError as exc:
-        forge.report(f"Skipped release v{plan.version} ({date}): {exc}")
-        out.append(f"skipped: {exc}")
-        return Outcome(1, "\n".join(out))
-    out.append(f"release PR #{number} at {head_sha[:12]}")
-
-    state, reasons = wait_for(lambda: pr_checks_state(forge, head_sha), wait_pr, interval, sleep)
-    if state != "green":
-        why = "red" if state == "red" else f"not finished after {int(wait_pr)}s"
-        listed = "\n".join(f"- {r}" for r in reasons)
-        forge.report(f"Release PR #{number} (v{plan.version}) left open: checks {why}.\n\n{listed}")
-        out += [f"release PR #{number} checks {why}; left open", listed]
-        return Outcome(1, "\n".join(out))
-    forge.merge_pr(number, head_sha, f"{pr_title(plan.version or '')} (#{number})")
-    out.append(f"merged release PR #{number}")
-    return Outcome(0, "\n".join(out))
+        state.out.append(f"dry-run: would open/update PR `{release_branch_name(state.version)}`")
+        return Outcome(0, "\n".join(state.out))
+    opened = phase_open(state, git=git, forge=forge)
+    if opened.code:
+        return opened
+    phase_wait(state, forge=forge, wait_pr=wait_pr, interval=interval, sleep=sleep)
+    return phase_finish(state, forge, wait_pr)
 
 
 # --- CLI ------------------------------------------------------------------------
@@ -1085,6 +1186,42 @@ def _write_summary(text: str) -> None:
     if path:
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(f"## Automated release\n\n```\n{text}\n```\n")
+
+
+def run_phase(args: argparse.Namespace, git: Git, forge: Forge, mode: str, note: str) -> Outcome:
+    """One workflow step: load the state, run the phase, save the state."""
+    if args.phase == "gate":
+        state = RunState(mode, note, args.level, args.date or "")
+        phase_gate(
+            state,
+            git=git,
+            forge=forge,
+            ref=args.ref,
+            wait_ci=args.wait_ci,
+            interval=args.interval,
+        )
+        if state.outcome == "green" and mode == "dry-run":
+            state.out.append(
+                f"dry-run: would open/update PR `{release_branch_name(state.version)}`"
+            )
+        outcome = Outcome(0, "\n".join(state.out))
+    else:
+        state = RunState.load(args.state)
+        if args.phase == "report-gate":
+            outcome = phase_report_gate(state, forge)
+        elif args.phase == "open":
+            outcome = phase_open(state, git=git, forge=forge)
+        elif args.phase == "wait":
+            phase_wait(state, forge=forge, wait_pr=args.wait_pr, interval=args.interval)
+            outcome = Outcome(0, f"release PR #{state.number} checks: {state.checks}")
+        else:
+            outcome = phase_finish(state, forge, args.wait_pr)
+    state.save(args.state)
+    out_path = os.environ.get("GITHUB_OUTPUT")
+    if out_path and args.phase == "gate":
+        with open(out_path, "a", encoding="utf-8") as fh:
+            fh.write(f"outcome={state.outcome}\n")
+    return outcome
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1107,6 +1244,14 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("--wait-ci", type=float, default=5400, help="seconds (default 90 min)")
     p_run.add_argument("--wait-pr", type=float, default=9000, help="seconds (default 150 min)")
     p_run.add_argument("--interval", type=float, default=60)
+    p_run.add_argument(
+        "--phase",
+        choices=PHASES,
+        default="all",
+        help="run one phase (the workflow mints a fresh App token before each write phase, "
+        "#7559); needs --state to carry results between phases",
+    )
+    p_run.add_argument("--state", type=Path, help="JSON file handed between --phase runs")
     args = parser.parse_args(argv)
 
     git = Git(REPO_ROOT)
@@ -1124,18 +1269,23 @@ def main(argv: list[str] | None = None) -> int:
         else:
             mode, note = resolve_mode(os.environ.get("AUTO_RELEASE"), args.dispatch_dry_run)
         forge = Forge(args.repo, write_token=os.environ.get("RELEASE_TOKEN") or None)
-        outcome = run(
-            mode=mode,
-            mode_note=note,
-            git=git,
-            forge=forge,
-            level=args.level,
-            wait_ci=args.wait_ci,
-            wait_pr=args.wait_pr,
-            interval=args.interval,
-            date=args.date,
-            ref=args.ref,
-        )
+        if args.phase == "all":
+            outcome = run(
+                mode=mode,
+                mode_note=note,
+                git=git,
+                forge=forge,
+                level=args.level,
+                wait_ci=args.wait_ci,
+                wait_pr=args.wait_pr,
+                interval=args.interval,
+                date=args.date,
+                ref=args.ref,
+            )
+        else:
+            if args.state is None:
+                parser.error("--phase needs --state")
+            outcome = run_phase(args, git, forge, mode, note)
     except (ReleaseError, changelog_assemble.FragmentError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         _write_summary(f"error: {exc}")
