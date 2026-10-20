@@ -137,7 +137,10 @@
         "segments": 11,
         "vias": 4,
         "arcs": 0,
-        "sha256": "d5d2e22103dab1b587e0270ef4466cd629548d156350ef023fd460c026dd239b"
+        "sha256": {
+          "arm64": "d5d2e22103dab1b587e0270ef4466cd629548d156350ef023fd460c026dd239b",
+          "x86_64": "89a3320571cef16e5c0acb1ca638d1d4409b21d23394a1474f740fd5006f57dd"
+        }
       },
       "headers": [
         "Auto-selecting grid resolution",
@@ -173,7 +176,10 @@
         "segments": 11,
         "vias": 4,
         "arcs": 0,
-        "sha256": "d5d2e22103dab1b587e0270ef4466cd629548d156350ef023fd460c026dd239b"
+        "sha256": {
+          "arm64": "d5d2e22103dab1b587e0270ef4466cd629548d156350ef023fd460c026dd239b",
+          "x86_64": "89a3320571cef16e5c0acb1ca638d1d4409b21d23394a1474f740fd5006f57dd"
+        }
       },
       "headers": [
         "Auto-selecting grid resolution",
@@ -208,7 +214,10 @@
         "segments": 11,
         "vias": 4,
         "arcs": 0,
-        "sha256": "d5d2e22103dab1b587e0270ef4466cd629548d156350ef023fd460c026dd239b"
+        "sha256": {
+          "arm64": "d5d2e22103dab1b587e0270ef4466cd629548d156350ef023fd460c026dd239b",
+          "x86_64": "89a3320571cef16e5c0acb1ca638d1d4409b21d23394a1474f740fd5006f57dd"
+        }
       },
       "headers": [
         "Auto-selecting grid resolution",
@@ -244,7 +253,10 @@
         "segments": 11,
         "vias": 4,
         "arcs": 0,
-        "sha256": "d5d2e22103dab1b587e0270ef4466cd629548d156350ef023fd460c026dd239b"
+        "sha256": {
+          "arm64": "d5d2e22103dab1b587e0270ef4466cd629548d156350ef023fd460c026dd239b",
+          "x86_64": "89a3320571cef16e5c0acb1ca638d1d4409b21d23394a1474f740fd5006f57dd"
+        }
       },
       "headers": [
         "Auto-selecting grid resolution",

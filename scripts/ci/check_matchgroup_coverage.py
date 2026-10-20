@@ -621,11 +621,13 @@ MATCHGROUP_FIXTURE_ALLOWED_FINDINGS: Allowance = {
     ("impedance", "TMDS_D1_N"): 7349,
     ("impedance", "TMDS_D1_P"): 7349,
     # skew vs max_skew_mm, mm
-    ("diffpair_length_skew", "DQS_N/DQS_P"): MATCHGROUP_SKEW_TRACKER,  # 5.562 / 0.050
+    # DQS and TMDS_D1 are routed with unequal via counts (P 0, N 2); gap
+    # tightening's ``declined:skew`` is correct (Issue #7613), tracked in #7619.
+    ("diffpair_length_skew", "DQS_N/DQS_P"): 7619,  # 5.562 / 0.050
     ("diffpair_length_skew", "MIPI_CLK_N/MIPI_CLK_P"): MATCHGROUP_SKEW_TRACKER,  # 4.854 / 0.050
     ("diffpair_length_skew", "MIPI_DAT0_N/MIPI_DAT0_P"): MATCHGROUP_SKEW_TRACKER,  # 4.060 / 0.050
     ("diffpair_length_skew", "MIPI_DAT1_N/MIPI_DAT1_P"): MATCHGROUP_SKEW_TRACKER,  # 1.021 / 0.050
-    ("diffpair_length_skew", "TMDS_D1_N/TMDS_D1_P"): MATCHGROUP_SKEW_TRACKER,  # 4.968 / 0.075
+    ("diffpair_length_skew", "TMDS_D1_N/TMDS_D1_P"): 7619,  # 4.968 / 0.075
     ("diffpair_length_skew", "TMDS_D2_N/TMDS_D2_P"): MATCHGROUP_SKEW_TRACKER,  # 0.730 / 0.075
 }
 
