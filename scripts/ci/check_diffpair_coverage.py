@@ -169,7 +169,7 @@ DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
     ("diffpair_length_skew", "MIPI_D0+/MIPI_D0-"): DIFFPAIR_SKEW_TRACKER,  # 2.320 / 0.300
     ("diffpair_length_skew", "PCIE_RX+/PCIE_RX-"): DIFFPAIR_SKEW_TRACKER,  # 1.693 / 0.500
     ("diffpair_length_skew", "PCIE_TX+/PCIE_TX-"): DIFFPAIR_SKEW_TRACKER,  # 2.244 / 0.500
-    ("diffpair_length_skew", "USB2_D+/USB2_D-"): DIFFPAIR_SKEW_TRACKER,  # 3.327 / 1.270
+    ("diffpair_length_skew", "USB2_D+/USB2_D-"): DIFFPAIR_SKEW_TRACKER,  # 3.327 / 1.000
     ("diffpair_length_skew", "USB3_RX1+/USB3_RX1-"): DIFFPAIR_SKEW_TRACKER,  # 0.529 / 0.500
     ("diffpair_length_skew", "USB3_RX2+/USB3_RX2-"): DIFFPAIR_SKEW_TRACKER,  # 3.329 / 0.500
     ("diffpair_length_skew", "USB3_TX1+/USB3_TX1-"): DIFFPAIR_SKEW_TRACKER,  # 2.173 / 0.500

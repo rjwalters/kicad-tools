@@ -71,8 +71,8 @@ def test_the_cited_values():
     hs = PROTOCOL_DEFAULTS[PairProtocol.USB2_HS]
     assert (fs.max_skew_mm.value, fs.max_skew_mm.cited) == (2.5, True)
     assert "Renesas" in fs.max_skew_mm.source
-    assert (hs.max_skew_mm.value, hs.max_skew_mm.cited) == (1.27, True)
-    assert "TI SPRAAR7J" in hs.max_skew_mm.source
+    assert (hs.max_skew_mm.value, hs.max_skew_mm.cited) == (1.0, True)
+    assert "TI" in hs.max_skew_mm.source  # Q16 rounds TI 50 mil down
     for row in (fs, hs):
         assert row.max_uncoupled_per_terminal_mm.value == 6.35
         assert "TI SPRAAR7J" in row.max_uncoupled_per_terminal_mm.source
@@ -84,14 +84,24 @@ def test_the_cited_values():
         assert "applied to full speed" not in own.source
 
 
-def test_only_the_usb2_rows_are_cited_today():
+def test_cited_skew_rows():
     """A new citation should be a deliberate edit, with this test updated."""
     cited = {
         p.name
         for p, row in PROTOCOL_DEFAULTS.items()
         if row.max_skew_mm is not None and row.max_skew_mm.cited
     }
-    assert cited == {"USB2_FS", "USB2_HS"}
+    assert cited == {
+        "USB2_FS",
+        "USB2_HS",
+        "USB3_SS",
+        "SATA",
+        "PCIE_G1",
+        "PCIE_G2_PLUS",
+        "MIPI_DPHY",
+        "HDMI_TMDS",
+        "DDR_DQS_CK",
+    }
 
 
 def test_generic_default_matches_the_rule_default():
@@ -139,7 +149,7 @@ def test_internal_callers_do_not_trip_the_deprecation():
         assert (
             DifferentialPairRules.for_pair_type(DifferentialPairType.USB2).max_length_delta == 2.5
         )
-        assert DifferentialPairRules.from_protocol("USB2_HS").max_length_delta == 1.27
+        assert DifferentialPairRules.from_protocol("USB2_HS").max_length_delta == 1.0
         # A row with no gap/width of its own borrows the CUSTOM row's.
         assert DifferentialPairRules.from_protocol("PCIE_G1").spacing == 0.2
 
@@ -177,18 +187,18 @@ def test_class_field_beats_protocol_beats_generic():
 
 
 def test_uncited_protocol_limit_is_a_warning():
-    got = _resolve(pair_protocol="USB3_SS")
+    got = _resolve(pair_protocol="LVDS")
     assert (got.skew_mm, got.skew_source, got.skew_severity) == (
-        0.1,
-        "protocol:USB3_SS (uncited)",
+        0.5,
+        "protocol:LVDS (uncited)",
         "warning",
     )
     # ... until the class states the number itself.
-    assert _resolve(pair_protocol="USB3_SS", skew_tolerance_mm=0.1).skew_severity == "error"
+    assert _resolve(pair_protocol="LVDS", skew_tolerance_mm=0.5).skew_severity == "error"
 
 
 def test_protocol_without_a_skew_value_gets_the_generic_default():
-    for name in ("PCIE_G2_PLUS", "CUSTOM"):
+    for name in ("CUSTOM",):
         got = _resolve(pair_protocol=name)
         assert (got.skew_mm, got.skew_source, got.protocol) == (0.5, "default:generic", name)
 
@@ -293,13 +303,13 @@ def test_skew_over_a_cited_limit_is_an_error():
 
 
 def test_skew_over_an_uncited_limit_is_a_warning():
-    finding = _skew_finding(0.3, pair_protocol="USB3_SS")
+    finding = _skew_finding(0.7, pair_protocol="LVDS")
     assert finding.severity == "warning"
-    assert finding.message.endswith("[protocol:USB3_SS (uncited)]")
+    assert finding.message.endswith("[protocol:LVDS (uncited)]")
 
 
 def test_skew_over_an_explicit_or_generic_limit_is_an_error():
-    assert _skew_finding(0.3, pair_protocol="USB3_SS", skew_tolerance_mm=0.1).severity == "error"
+    assert _skew_finding(0.3, pair_protocol="LVDS", skew_tolerance_mm=0.1).severity == "error"
     generic = _skew_finding(0.6)
     assert generic.severity == "error"
     assert generic.message.endswith("[default:generic]")
@@ -307,8 +317,8 @@ def test_skew_over_an_explicit_or_generic_limit_is_an_error():
 
 def test_skew_within_the_limit_has_no_finding():
     assert _skew_finding(2.4, pair_protocol="USB2_FS") is None
-    assert _skew_finding(1.2, pair_protocol="USB2_HS") is None
-    assert _skew_finding(1.3, pair_protocol="USB2_HS").severity == "error"
+    assert _skew_finding(0.9, pair_protocol="USB2_HS") is None
+    assert _skew_finding(1.1, pair_protocol="USB2_HS").severity == "error"
 
 
 def test_rule_without_maps_keeps_its_old_message_and_severity():
@@ -363,8 +373,8 @@ def test_board06_usb2_takes_the_high_speed_default():
     ncm = _load_map(BOARDS / "06-diffpair-test" / "regression-fixture" / "net_class_map.json")
     assert ncm["USB2_D+"].skew_tolerance_mm is None  # the uncited 3.0 mm is gone
     usb2 = resolve_pair_thresholds(ncm, "USB2_D+", "USB2_D-")
-    assert (usb2.skew_mm, usb2.protocol, usb2.skew_severity) == (1.27, "USB2_HS", "error")
-    assert "TI SPRAAR7J" in usb2.skew_source
+    assert (usb2.skew_mm, usb2.protocol, usb2.skew_severity) == (1.0, "USB2_HS", "error")
+    assert "TI" in usb2.skew_source
     # Every other class keeps its explicit number.
     for p, n, mm, protocol in (
         ("USB3_TX1+", "USB3_TX1-", 0.5, "USB3_SS"),

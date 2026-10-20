@@ -1139,7 +1139,7 @@ Common flags (the full surface lives in `kct route --help`):
 | `--min-completion FLOAT` | Minimum completion ratio for success (default: 0.95) |
 | `--timeout SEC` / `--per-net-timeout SEC` | Hard total invocation / per-net wall-clock caps |
 | `--search-timeout SEC` | Per-search-stage allocation inside `--timeout` (default: `--timeout`) |
-| `--seed N` | Seed Python `random` for reproducible routing (#2589) |
+| `--seed N` | Seed Python `random` for reproducible routing (#2589). No effect on `--route-engine lattice` copper, which is deterministic; only UUIDs change (#7580) |
 | `--auto-fix` / `--auto-fix-passes N` | Run `kct fix-drc` after routing on DRC failure |
 | `--skip-drc` | Skip post-route DRC validation |
 | `--no-routing-plan` | Skip the report-only routing-plan stage (on by default; see [`routing-plan.md`](routing-plan.md)) |
