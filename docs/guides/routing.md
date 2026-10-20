@@ -905,6 +905,13 @@ What `--seed` does *not* cover:
   within a budget) intermediate result. For fully reproducible CI runs, combine `--seed` with
   a generous `--timeout`.
 - The C++ backend (`--backend cpp`): already deterministic for a given input grid.
+- The lattice engine (`--route-engine lattice`). Its negotiation draws no random
+  numbers, so every seed routes the same copper; only the UUIDs change (issue
+  #7580). Measured on `main` at `8425fa1f8`: boards 03 and 06b routed with
+  `--seed 1` and `--seed 2` gave identical tracks and vias. A lattice seed sweep
+  is one sample repeated, not a spread. Sweep the board or the routing
+  parameters instead. `kct route` prints a `[seed] Note:` line when you pass
+  `--seed` with the lattice engine.
 
 ---
 

@@ -55,6 +55,7 @@ Out of scope for Phase 3I:
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -76,7 +77,10 @@ from .tuning_pattern import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
+    from typing import Any
+
+    from kicad_tools.validate.rules.diffpair_uncoupled_length import Copper
 
     from .diffpair_detection import DetectedPair
     from .grid import RoutingGrid
@@ -171,6 +175,18 @@ MAX_INSERTS_PER_PAIR: int = 3
 # while the residual ~0.45 mm skew is itself still within tolerance.
 SERPENTINE_TARGET_HEADROOM_FRACTION: float = 0.9
 
+# Issue #7546: corner chamfer (in trace widths) at which a bump written as
+# plain copper reads the same in kct and kicad-cli.
+# Pinned kicad-cli 10.0.6 leaves a square loop's flat top uncoupled while kct
+# couples it, so the engines disagree on a plain square bump.  Measured on
+# 0.1, 0.2 and 0.3 mm traces, the engines agree from a chamfer of exactly
+# half a width up (0.09 mm on a 0.2 mm trace still disagrees).  0.55 width
+# keeps a margin well above the 0.1 um coordinate quantum while costing each
+# loop only ~1.3 widths of added length.  Every chamfer is also uncoupled
+# copper on both legs (45-degree runs couple to nothing), so a larger
+# chamfer reads worse in both engines.
+SKEW_BUMP_CHAMFER_WIDTHS: float = 0.55
+
 
 def tune_diff_pair_skew(
     pair: DetectedPair,
@@ -187,6 +203,7 @@ def tune_diff_pair_skew(
     extra_clearance_ok: Callable[[list[Segment], int], bool] | None = None,
     route_length: Callable[[Route], float] | None = None,
     max_uncoupled_mm: float | None = None,
+    corner_chamfer_widths: float = 0.0,
 ) -> tuple[Route, Route, DiffPairTuneResult]:
     """Tune the skew of a detected diff pair by serpentining the shorter half.
 
@@ -254,6 +271,15 @@ def tune_diff_pair_skew(
             state.  A pair already over the limit may still be tuned so long
             as the meander does not grow its uncoupled figure.
             ``None`` (default) applies no guard.
+        corner_chamfer_widths: Issue #7546.  45-degree corner chamfer of the
+            inserted trombones, in trace widths (see
+            :attr:`SerpentineConfig.corner_chamfer_widths`); overrides
+            ``config``.  ``0`` (default) keeps the square loops: the tuner
+            writes its bumps as KiCad tuning patterns, and on 06b/06rf/07rf
+            chamfered patterned bumps read 0.5-3.4 mm *more* uncoupled in
+            pinned kicad-cli (a longer base line uncouples more partner
+            copper).  :data:`SKEW_BUMP_CHAMFER_WIDTHS` is the value at which
+            kct and kicad-cli agree on a bump written as *plain* copper.
 
     Returns:
         ``(p_route, n_route, result)`` where ``p_route`` and ``n_route`` are
@@ -360,7 +386,10 @@ def tune_diff_pair_skew(
     original_shorter_route = shorter_route
     original_shorter_segments = shorter_route.segments
 
-    base_config = config or SerpentineConfig()
+    # Issue #7546: optional chamfered corners (off by default).
+    base_config = dataclasses.replace(
+        config or SerpentineConfig(), corner_chamfer_widths=corner_chamfer_widths
+    )
 
     result = DiffPairTuneResult(skew_before_mm=skew)
     current_shorter = shorter_route
@@ -423,19 +452,21 @@ def tune_diff_pair_skew(
         drc_rejected = False
         generator_failure = ""
         pre_insert_figure: float | None = None  # computed on first need (#6795)
-        for cand_route, cand_serp in _placement_options(
-            base_config=base_config,
-            current_shorter=current_shorter,
-            first_host=(seg_idx, insertion_segment),
-            first_hint=hint,
-            longer_route=longer_route,
-            length_needed=length_needed,
-            grid=grid,
-            prefer_reserved_slack=prefer_reserved_slack,
-            shorter_id=shorter_id,
-            fixed_segment_ids=fixed_segment_ids,
-            serpentine_target=serpentine_target,
-            measure=measure,
+        placement_kwargs = {
+            "current_shorter": current_shorter,
+            "first_host": (seg_idx, insertion_segment),
+            "first_hint": hint,
+            "longer_route": longer_route,
+            "length_needed": length_needed,
+            "grid": grid,
+            "prefer_reserved_slack": prefer_reserved_slack,
+            "shorter_id": shorter_id,
+            "fixed_segment_ids": fixed_segment_ids,
+            "serpentine_target": serpentine_target,
+            "measure": measure,
+        }
+        for cand_route, cand_serp, as_pattern in _pattern_then_plain_options(
+            base_config, max_uncoupled_mm is not None, placement_kwargs
         ):
             result.serpentine_results.append(cand_serp)
             if not cand_serp.success:
@@ -451,12 +482,16 @@ def tune_diff_pair_skew(
             # Only the segments that leave the host line are members.
             for seg in cand_serp.new_segments:
                 seg.tuning_pattern = None
-            cand_bump = skew_bump_pattern(
-                cand_serp.new_segments,
-                longer_route,
-                diff_pair_gap=intra_pair_clearance_mm,
-                min_spacing=base_config.min_spacing * base_config.gap_factor,
-                tolerance_mm=tolerance_mm,
+            cand_bump = (
+                skew_bump_pattern(
+                    cand_serp.new_segments,
+                    longer_route,
+                    diff_pair_gap=intra_pair_clearance_mm,
+                    min_spacing=base_config.min_spacing * base_config.gap_factor,
+                    tolerance_mm=tolerance_mm,
+                )
+                if as_pattern
+                else None
             )
             if cand_bump is not None:
                 tag_skew_bump(cand_bump[1], cand_bump[0])
@@ -476,6 +511,15 @@ def tune_diff_pair_skew(
             # the trombone's perpendicular legs are the known meander case
             # where kct under-reads KiCad (flat tops coupled in kct, uncoupled
             # in KiCad), so a plain bump could pass here and fail kicad-cli.
+            #
+            # Issue #7546: once every pattern option has failed, the same
+            # placements are retried as *chamfered* plain copper
+            # (:data:`SKEW_BUMP_CHAMFER_WIDTHS`, amplitude >= one width), the
+            # shape kct and kicad-cli measure identically.  A bump is then
+            # committed plain only when its honest figure passes in both.  On
+            # thin traces it can (0.127 mm, skew 0.5: pattern 0.90 mm, plain
+            # chamfered 0.78 mm); on 0.2 mm traces the square pattern is
+            # always at least as good.
             if max_uncoupled_mm is not None:
                 cand_figure = _pair_uncoupled_mm(cand_route, longer_route)
                 if cand_figure > max_uncoupled_mm + UNCOUPLED_EPSILON_MM:
@@ -590,13 +634,41 @@ def tune_diff_pair_skew(
         return current_shorter, n_route, result
 
 
-def _checker_segments(segments: list[Segment]) -> list[tuple[float, float, float, float, str]]:
-    """Segments as the ``(x1, y1, x2, y2, layer)`` tuples the uncoupled-length rule reads.
+def _checker_segments(
+    segments: list[Segment],
+) -> list[tuple[float, float, float, float, str, float]]:
+    """Segments as the ``(x1, y1, x2, y2, layer, width)`` tuples the uncoupled-length rule reads.
 
     Issue #7521: tuning-pattern copper (``Segment.tuning_pattern``) is left
     out, as ``kct check`` and pinned kicad-cli 10.0.6 leave it out.
     """
-    return [(s.x1, s.y1, s.x2, s.y2, str(s.layer)) for s in segments if s.tuning_pattern is None]
+    return [
+        (s.x1, s.y1, s.x2, s.y2, str(s.layer), s.width)
+        for s in segments
+        if s.tuning_pattern is None
+    ]
+
+
+def _pair_copper(a: Route, b: Route) -> Copper:
+    """The pair's own tracks and vias as pairing obstacles (Issue #6554).
+
+    ``kct check`` lets other copper stand between two parallel runs
+    (``Copper``); in a candidate meander that copper is mostly the pair's own
+    folded legs.  Pads and third-net copper are not in a ``Route``, so the
+    guard sees only the pair.  Tuning-pattern copper is still copper here,
+    as it is on the board.
+    """
+    from kicad_tools.validate.rules.diffpair_uncoupled_length import Copper
+
+    tracks: list[tuple[float, float, float, float, float, str | None]] = [
+        (s.x1, s.y1, s.x2, s.y2, s.width, str(s.layer)) for r in (a, b) for s in r.segments
+    ]
+    tracks += [(v.x, v.y, v.x, v.y, v.diameter, None) for r in (a, b) for v in r.vias]
+    return Copper(tracks, ())
+
+
+def _is_n_name(name: str) -> bool:
+    return name.endswith(("-", "_N", "_n", "N"))
 
 
 def _pair_uncoupled_mm(a: Route, b: Route) -> float:
@@ -605,13 +677,20 @@ def _pair_uncoupled_mm(a: Route, b: Route) -> float:
     ``diffpair_uncoupled_length`` fails a pair on ``max(uncoupled(P),
     uncoupled(N))``, each half measured against the other, so this is
     symmetric in its arguments.  Tuning-pattern copper is excluded on both
-    sides (issue #7521).
+    sides (issue #7521).  The pair's own copper may stand between two
+    parallel runs, as in ``kct check`` (issue #6554); P's stored direction
+    anchors the probe, so ``a`` leads unless it is the N net.
     """
     from kicad_tools.validate.rules.diffpair_uncoupled_length import measure_uncoupled
 
     sa = _checker_segments(a.segments)
     sb = _checker_segments(b.segments)
-    return max(measure_uncoupled(sa, sb), measure_uncoupled(sb, sa))
+    copper = _pair_copper(a, b)
+    a_leads = not (_is_n_name(a.net_name) and not _is_n_name(b.net_name))
+    return max(
+        measure_uncoupled(sa, sb, copper, a_leads, a.net_name, b.net_name),
+        measure_uncoupled(sb, sa, copper, not a_leads, b.net_name, a.net_name),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -626,8 +705,17 @@ MAX_HOST_CANDIDATES: int = 3
 AMPLITUDE_LADDER: tuple[float, ...] = (1.0, 0.5, 0.25)
 
 
-def exact_fit_amplitude(length_needed: float, max_amplitude: float) -> tuple[int, float]:
+def exact_fit_amplitude(
+    length_needed: float,
+    max_amplitude: float,
+    config: SerpentineConfig | None = None,
+    width: float = 0.0,
+) -> tuple[int, float]:
     """Return ``(loops, amplitude)`` adding exactly ``length_needed`` mm.
+
+    Issue #7546: with a ``config`` whose loops have corner chamfers, the
+    loop length model is :meth:`SerpentineConfig.loop_length_added` for a
+    ``width`` trace instead of ``2 * amplitude``.
 
     A trombone loop adds ``2 * amplitude``.  The loop count is the fewest
     whose loops at ``max_amplitude`` cover the need, and the amplitude is then
@@ -635,10 +723,57 @@ def exact_fit_amplitude(length_needed: float, max_amplitude: float) -> tuple[int
     pre-#6788 sizing (``need / 2``) bit for bit; multi-loop sizing is nudged
     up by 1e-9 so ``ceil`` in the generator lands on the same loop count.
     """
+    if config is not None and config.corner_chamfer_widths > 0.0:
+        # Issue #7546: chamfered loops add less; size them with the same
+        # model the generator uses.
+        per_loop = config.loop_length_added(width, max_amplitude)
+        loops = max(1, math.ceil(length_needed / per_loop))
+        if loops == 1:
+            # Nudged like the multi-loop case so float rounding in the
+            # inverse never makes the generator's ``ceil`` add a loop.
+            fit = config.amplitude_for(width, length_needed) * (1.0 + 1e-9)
+            return 1, min(max_amplitude, fit)
+        return loops, config.amplitude_for(width, length_needed / loops) * (1.0 + 1e-9)
     loops = max(1, math.ceil(length_needed / (2.0 * max_amplitude)))
     if loops == 1:
         return 1, min(max_amplitude, length_needed / 2.0)
     return loops, length_needed / (2.0 * loops) * (1.0 + 1e-9)
+
+
+def _pattern_then_plain_options(
+    base_config: SerpentineConfig, guarded: bool, placement_kwargs: dict[str, Any]
+) -> Iterator[tuple[Route, SerpentineResult, bool]]:
+    """Yield ``(route, serpentine, as_pattern)`` placements (Issue #7546).
+
+    First every :func:`_placement_options` placement as a tuning pattern
+    (``base_config``'s loops).  When the uncoupled guard is active
+    (``guarded``) the same search follows as plain copper with chamfered
+    corners, which kct and pinned kicad-cli 10.0.6 measure identically; the
+    caller only pulls it once every pattern option was rejected.
+    """
+    for route, serp in _placement_options(base_config=base_config, **placement_kwargs):
+        yield route, serp, True
+    if not guarded:
+        return
+    plain_config = dataclasses.replace(
+        base_config,
+        corner_chamfer_widths=max(base_config.corner_chamfer_widths, SKEW_BUMP_CHAMFER_WIDTHS),
+    )
+    for route, serp in _placement_options(base_config=plain_config, **placement_kwargs):
+        yield route, serp, False
+
+
+def _min_chamfered_amplitude(config: SerpentineConfig, width: float) -> float:
+    """Smallest amplitude a chamfered bump may have (Issue #7546).
+
+    Pinned kicad-cli 10.0.6 agrees with kct on a chamfered loop only when its
+    corner chamfer is at least half a trace width, which needs an amplitude of
+    at least one width (the chamfer is clamped to half the amplitude).  A
+    smaller need is met by a one-width bump instead: it adds
+    ``2 * width * (sqrt(2) - 1)`` and the skew lands inside the tolerance
+    window on the other side.  ``0`` for square loops.
+    """
+    return width if config.corner_chamfer_widths > 0.0 else 0.0
 
 
 def _placement_options(
@@ -679,10 +814,14 @@ def _placement_options(
             max_iterations=base_config.max_iterations,
             side="outer",
             outer_normal_hint=hint,
+            corner_chamfer_widths=base_config.corner_chamfer_widths,
         )
 
     # First option: identical to the original attempt apart from sizing.
-    _, amplitude = exact_fit_amplitude(length_needed, base_config.amplitude)
+    _, amplitude = exact_fit_amplitude(
+        length_needed, base_config.amplitude, base_config, first_host[1].width
+    )
+    amplitude = max(amplitude, _min_chamfered_amplitude(base_config, first_host[1].width))
     generator = SerpentineGenerator(config_for(amplitude, first_hint))
     seg_idx, host = first_host
     if fixed_segment_ids:
@@ -723,7 +862,10 @@ def _placement_options(
                 for factor in AMPLITUDE_LADDER:
                     if host_no == 0 and not centred and hint == first_hint and factor == 1.0:
                         continue  # already yielded as the first option
-                    loops, amp = exact_fit_amplitude(length_needed, base_config.amplitude * factor)
+                    loops, amp = exact_fit_amplitude(
+                        length_needed, base_config.amplitude * factor, base_config, host.width
+                    )
+                    amp = max(amp, _min_chamfered_amplitude(base_config, host.width))
                     lead_in: list[Segment] = []
                     lead_out: list[Segment] = []
                     sub_host = host
@@ -733,6 +875,7 @@ def _placement_options(
                             loops=loops,
                             gap_mm=gap_mm,
                             min_length_mm=base_config.min_segment_length,
+                            chamfer_mm=base_config.chamfer_mm(host.width, amp),
                         )
                         if sub_host is host:
                             continue  # no slack: same as start-anchored

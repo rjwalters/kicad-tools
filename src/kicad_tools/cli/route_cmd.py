@@ -7800,6 +7800,10 @@ def _apply_plane_via_reservation(
             # Issue #6589: keep foreign vias / plane-layer tracks outside the
             # pour's fill pullback, so the pour still covers each site.
             plane_fills=plane_fills_from_pcb(pcb, nets),
+            # Issue #7573: opt-in -- also serve pour-only 2-pad parts.
+            min_pour_footprint_pads=(
+                2 if getattr(args, "reserve_pour_only_passives", False) else None
+            ),
         )
     except Exception as exc:  # advisory: never fail a route over a reservation
         logger.warning("Plane-via reservation skipped: %s", exc)
@@ -18519,6 +18523,17 @@ def _route_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--reserve-pour-only-passives",
+        action="store_true",
+        help=(
+            "Also hold a via site for pour-only 2-pad parts (e.g. a +5V/GND "
+            "decoupling cap) in the pre-route plane-via reservation (Issue "
+            "#7573).  OFF by default: it enlarges the hard keep-out on every "
+            "board whose caps sit between two served pours.  Has no effect "
+            "with --no-plane-via-reservation."
+        ),
+    )
+    parser.add_argument(
         "--no-pad-access-invariant",
         action="store_true",
         help=(
@@ -18785,7 +18800,11 @@ def _route_parser() -> argparse.ArgumentParser:
             "also does NOT remove all sources of variance -- wall-clock "
             "escape budgets (e.g. --timeout) can still terminate early on a "
             "loaded machine; for fully reproducible CI runs combine --seed "
-            "with a generous --timeout."
+            "with a generous --timeout. With --route-engine lattice, --seed "
+            "does not change the copper: the lattice negotiation draws no "
+            "random numbers, so every seed routes the same tracks and vias "
+            "and only the UUIDs differ. A lattice seed sweep is therefore a "
+            "single sample, not a spread (Issue #7580)."
         ),
     )
     parser.add_argument(
@@ -20652,6 +20671,13 @@ def _run_main_impl(args, parser, argv) -> int:
         random.seed(args.seed)
         if not getattr(args, "quiet", False):
             print(f"[seed] Seeded global random with --seed {args.seed}")
+            # Issue #7580: the lattice engine draws no random numbers, so a
+            # seed sweep on it is one sample repeated, not a spread.
+            if _resolve_route_engine(args) == "lattice":
+                print(
+                    "[seed] Note: --route-engine lattice is deterministic; "
+                    "--seed changes only UUIDs, not the routed copper"
+                )
 
     # Issue #3538: normalize --deterministic-budget BEFORE any wall-clock
     # deadline is stamped or any inner router routine reads per_net_timeout /
