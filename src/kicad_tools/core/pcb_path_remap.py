@@ -36,6 +36,8 @@ from pathlib import Path
 
 from kicad_tools.sexp import SExp, parse_file, parse_string
 
+from .sheet_properties import sheet_file
+
 __all__ = [
     "PathRemapError",
     "PathRemapResult",
@@ -82,13 +84,6 @@ def _first_atom(node: SExp | None) -> str | None:
 def _symbol_reference(sym: SExp) -> str | None:
     for prop in sym.find_children("property"):
         if prop.get_string(0) == "Reference":
-            return prop.get_string(1)
-    return None
-
-
-def _sheet_file(sheet: SExp) -> str | None:
-    for prop in sheet.find_children("property"):
-        if prop.get_string(0) in ("Sheetfile", "Sheet file"):
             return prop.get_string(1)
     return None
 
@@ -145,7 +140,7 @@ def schematic_instance_paths(sch_path: str | Path) -> tuple[str, dict[str, tuple
                 if root_uuid and (inst_path == prefix or inst_path.startswith(prefix + "/")):
                     record(full[len(prefix) :], (ref, unit))
         for sheet in doc.find_children("sheet"):
-            name = _sheet_file(sheet)
+            name = sheet_file(sheet)
             if not name:
                 continue
             child = path.parent / name
