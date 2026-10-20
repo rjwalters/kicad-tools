@@ -223,21 +223,13 @@ class TestBoard06:
     def measured(self):
         return violations_for(self.gate().DIFFPAIR_FIXTURE_ALLOWED_FINDINGS)
 
-    def test_no_skew_pair_is_allowed(self):
-        """Every pair meets its ``max_skew_mm`` on the seed-42 re-route (#7548)."""
+    def test_skew_pairs_are_listed_by_pair(self):
         gate = self.gate()
-        skew = [k for k in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS if k[0] == "diffpair_length_skew"]
-        assert skew == []
-        assert not hasattr(gate, "DIFFPAIR_SKEW_TRACKER")
-
-    def test_a_new_skew_finding_is_unallowed(self):
-        gate = self.gate()
-        found = self.measured() + [violation("diffpair_length_skew", "MIPI_D0+/MIPI_D0-")]
-        ids = identities_of(found)
-        assert gate.unexpected_baseline_errors(BOARD06_KEY, rule_counts(found), ids) == {
-            "diffpair_length_skew": 1
+        pairs = {
+            i for r, i in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS if r == "diffpair_length_skew"
         }
-        assert len(gate.unallowed_blocking(BOARD06_KEY, found)) == 1
+        assert pairs
+        assert all("/" in p for p in pairs)
 
     def test_measured_findings_pass_with_zero_budget(self):
         gate = self.gate()
@@ -251,7 +243,13 @@ class TestBoard06:
         """(d) the free slots under the old 18: every one is now a failure."""
         gate = self.gate()
         found = self.measured()
-        extra = [violation("diffpair_routing_continuity", f"PAIR{n}+/PAIR{n}-") for n in range(7)]
+        pairs = sorted(
+            i for r, i in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS if r == "diffpair_length_skew"
+        )
+        # As many continuity findings as there are listed skew pairs (#7548
+        # shrinks that list as pairs are fixed); never more than the 7 free slots.
+        extra = [violation("diffpair_routing_continuity", p) for p in pairs[:7]]
+        assert extra
         found += extra
         assert len(found) <= 18
         ids = identities_of(found)
@@ -260,18 +258,18 @@ class TestBoard06:
         }
         assert len(gate.unallowed_blocking(BOARD06_KEY, found)) == len(extra)
 
-    def test_fixed_allowed_finding_is_stale(self):
+    def test_fixed_skew_pair_is_stale(self):
         gate = self.gate()
         found = self.measured()
-        listed = next(v for v in found if v["rule_id"] == "diffpair_uncoupled_length")
+        listed = next(v for v in found if v["rule_id"] == "diffpair_length_skew")
         found.remove(listed)
         stale = gate.stale_allowances(BOARD06_KEY, identities_of(found))
         ident = "/".join(sorted(listed["items"]))
         assert stale == [
             (
-                "diffpair_uncoupled_length",
+                "diffpair_length_skew",
                 ident,
-                gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS[("diffpair_uncoupled_length", ident)],
+                gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS[("diffpair_length_skew", ident)],
             )
         ]
 

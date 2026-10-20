@@ -60,9 +60,8 @@ def test_centred_is_unchanged():
     assert lead_in[0].x2 - 0.0 == pytest.approx(16.0 - lead_out[0].x1)
 
 
-def test_taller_loops_are_tried_last():
-    assert AMPLITUDE_LADDER[:3] == (1.0, 0.5, 0.25)
-    assert max(AMPLITUDE_LADDER) > 1.0
+def test_no_taller_loops_are_tried():
+    assert AMPLITUDE_LADDER == (1.0, 0.5, 0.25)
 
 
 def test_quantized_route_length_adds_the_dogleg_growth():

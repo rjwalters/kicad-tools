@@ -709,11 +709,9 @@ def _pair_uncoupled_mm(a: Route, b: Route) -> float:
 MAX_HOST_CANDIDATES: int = 3
 
 #: Amplitude back-off ladder applied to ``SerpentineConfig.amplitude`` when a
-#: placement is rejected (same ladder the match-group tuner uses).  The
-#: factors above 1 come last (Issue #7548): one tall loop needs less host
-#: length than several short ones, which is what fits a host whose only free
-#: stretch is a couple of mm at its end.
-AMPLITUDE_LADDER: tuple[float, ...] = (1.0, 0.5, 0.25, 2.0, 4.0)
+#: placement is rejected (same ladder the match-group tuner uses).  No factor
+#: above 1: a taller loop pushes the bump out past 1x the pair gap (Q27).
+AMPLITUDE_LADDER: tuple[float, ...] = (1.0, 0.5, 0.25)
 
 
 def exact_fit_amplitude(
@@ -879,7 +877,6 @@ def _placement_options(
         # neighbour that only runs alongside the first part of the host
         # (Issue #7548: MIPI_RST ends 2.2 mm before MIPI_D0+'s corner).
         for anchor in (None, 0.5, 1.0):
-            centred = anchor is not None
             for hint in sides:
                 for factor in AMPLITUDE_LADDER:
                     if host_no == 0 and anchor is None and hint == first_hint and factor == 1.0:
@@ -895,7 +892,7 @@ def _placement_options(
                     # loops need (no ``min_segment_length`` floor) so it sits
                     # as close to the host's end as a loop can (Issue #7548).
                     tight = anchor == 1.0
-                    if centred:
+                    if anchor is not None:
                         sub_host, lead_in, lead_out = _centered_sub_host(
                             host,
                             loops=loops,
