@@ -1640,6 +1640,23 @@ Update the line in place if present, else append it. Report the edit.
 
 ### 5. Get the repo onto the instance
 
+**Resolve the code identity first**, before any clone or rsync, so the box can
+record exactly what it was given. `git rev-parse HEAD` works on a detached HEAD
+and with no `origin`, so neither case needs special handling:
+
+```bash
+SHA=$(git rev-parse HEAD)
+DIRTY=$(git status --porcelain --untracked-files=no | grep -q . && echo true || echo false)
+```
+
+`DIRTY` covers tracked changes only; untracked and gitignored files never count.
+
+**Opt-in clean run.** If the user asked for a clean run (for example "run this
+clean" or "refuse a dirty tree"), and `DIRTY` is `true`, stop step 5 here: tell
+the user which tracked files differ from `HEAD` and do not rsync anything. By
+default, with no such request, a dirty tree is **not** refused: step 5 keeps
+syncing uncommitted work as before.
+
 - **Repo has an `origin` remote:** clone on the VM and check out the current
   branch. For a private GitHub repo, run the clone through `attach` so it is
   authenticated by a freshly resolved session token and nothing is stored:
@@ -1657,6 +1674,20 @@ rsync -az --delete \
   --filter=':- .gitignore' --exclude '.git/' \
   ./ repo-remote-<name>:~/<repo-name>/
 ```
+
+**Then record the identity on the box, after the rsync.** `rsync --delete`
+removes any file on the box that is not in the local tree, so a marker written
+earlier would be deleted. Write `~/<repo-name>/.repo-remote-sha` with the SHA
+and the dirty flag:
+
+```bash
+repo-remote attach --host --command "printf 'sha: %s\ndirty: %s\n' $SHA $DIRTY > ~/<repo-name>/.repo-remote-sha"
+```
+
+**Report the recorded SHA and the dirty flag to the user** (for example
+`recorded sha 1a2b3c4 dirty: false`). A job on the box can read
+`.repo-remote-sha` to know which commit, and whether uncommitted tracked
+changes, it ran against.
 
 Always target the SSH alias `repo-remote-<name>`, not a raw IP. The alias
 carries the user, key, and on `REPO_REMOTE_TRANSPORT=ssm` the SSM
