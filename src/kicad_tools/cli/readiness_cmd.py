@@ -2089,7 +2089,33 @@ def _project_dependencies(
                         "location in the library table instead."
                     )
             files.update(members)
+    files.update(_kiprjmod_model_bodies(pcb, real_root, boundary, explicit_root))
     return sorted(files)
+
+
+def _kiprjmod_model_bodies(
+    pcb: Path, real_root: Path, boundary: Path, explicit_root: bool
+) -> set[Path]:
+    """Existing ``${KIPRJMOD}``-relative 3D bodies the PCB's ``(model ...)`` nodes reference.
+
+    They travel in ``kicad_project.zip`` like the local footprint library, so a
+    bundled board opens with its bodies (Issue #7685).  A target that is absent
+    is not an inventory error: ``model_coverage`` already reports it.
+    """
+    bodies: set[Path] = set()
+    for uri in re.findall(r'\(model\s+"(\$\{KIPRJMOD\}[^"\n]*)"', pcb.read_text(errors="replace")):
+        body = Path(os.path.normpath(uri.replace("${KIPRJMOD}", str(real_root))))
+        if not body.is_file():
+            continue
+        if not body.resolve().is_relative_to(boundary):
+            raise ValueError(_outside_root_message(uri, "dependency", explicit_root))
+        if body.resolve() != body:
+            raise ValueError(
+                f"Ambiguous project dependency path: {uri} reaches {body} through "
+                f"a symlink to {body.resolve()}; reference the real file location instead."
+            )
+        bodies.add(body)
+    return bodies
 
 
 def _required_sources(options: ReadinessOptions) -> list[Path]:

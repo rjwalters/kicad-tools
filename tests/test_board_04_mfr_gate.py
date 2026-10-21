@@ -84,8 +84,14 @@ def test_board_04_reviewed_process_is_strictly_clean(board_04_mfr_check: dict) -
     assert report["fabrication_overrides"]["via_type"] == "through"
     assert report["fabrication_overrides"]["via_in_pad"] is False
     assert not [v for v in report["violations"] if v["rule_id"] == "connectivity"]
-    # Issue #7682: host-dependent 3D coverage is deselected (until #7683).
-    assert not [v for v in report["violations"] if v["rule_id"] == "model_coverage"]
+    # Issue #7685: 3D coverage is default-on.  The board is fully covered, so it
+    # raises no warning on any host; a host with no model library (the
+    # ``no_model_library`` run) only adds the informational "not evaluated" line.
+    assert not [
+        v
+        for v in report["violations"]
+        if v["rule_id"] == "model_coverage" and v["severity"] != "info"
+    ]
 
 
 def test_board_04_mfr_gate_flags_uninitialized_kicad_libraries(tmp_path: Path) -> None:

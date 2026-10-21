@@ -2084,8 +2084,18 @@ def test_model_insertion_leaves_drc_json_identical(tmp_path):
 
     before = tmp_path / "before.kicad_pcb"
     after = tmp_path / "after.kicad_pcb"
-    shutil.copy(src, before)
-    shutil.copy(src, after)
+    # Board 00 carries its model refs since #7685; strip them so the insertion
+    # under test has something to do.
+    from kicad_tools.pcb.models3d import _model_node_spans, iter_footprint_blocks
+
+    text = src.read_text()
+    for block in reversed(iter_footprint_blocks(text)):
+        body = text[block.start : block.end + 1]
+        for a, b in reversed(_model_node_spans(body)):
+            body = body[:a] + body[b:]
+        text = text[: block.start] + body + text[block.end + 1 :]
+    before.write_text(text)
+    shutil.copy(before, after)
     report = add_model_refs(
         after,
         library_paths=LibraryPaths(footprints_path=root, source="config"),

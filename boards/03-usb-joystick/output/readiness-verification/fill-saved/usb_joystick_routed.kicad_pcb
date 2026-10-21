@@ -642,7 +642,7 @@
 			(uuid "3fe95cc0-9b54-521c-b2aa-ebf96494056f")
 		)
 		(embedded_fonts no)
-		(model "${KICAD10_3DMODEL_DIR}/Connector_JST.3dshapes/JST_PH_S5B-PH-SM4-TB_1x05-1MP_P2.00mm_Horizontal.step" (offset (xyz 0 0 0))
+		(model "${KIPRJMOD}/3dshapes/JST_PH_S5B-PH-SM4-TB.wrl" (offset (xyz 0 0 0))
 			(scale (xyz 1 1 1)
 			)
 			(rotate (xyz 0 0 0)
