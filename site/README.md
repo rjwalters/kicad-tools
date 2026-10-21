@@ -44,6 +44,11 @@ layout, focus order or KiCanvas viewer behavior.
 assets separately, run `npm --prefix site run copy-renders`. `site/dist/` and
 `site/public/boards/` are generated and ignored by git.
 
+Board renders (`output/renders/`, `output/manufacturing/renders/`) are derived
+presentation artifacts, not readiness evidence: `kct readiness` does not hash
+them into `readiness.json` `inputs`, so the deploy's `kct render boards/` step
+cannot make committed readiness evidence stale (Issue #7678).
+
 ## Pages and content ownership
 
 - `src/pages/index.astro`: capability introduction, documentation entry points
