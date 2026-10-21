@@ -15,11 +15,14 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-21
 
+- **PR #7724**: feat: fetch pinned, sha256-verified KiCad 3D model subset (kct models sync)
 - **PR #7725**: feat(pcb): LCSC 3D models at catalog scale with per-user opt-in guards
 - **PR #7723**: fix: escape KiCad strings in sch set-footprint/set-value and S-expression writers (#7648)
 - **PR #7722**: chore(tooling): update Repo Skills 0.24.3→0.24.7
 - **PR #7720**: test(board03): pin the arm C route's USB_D via parity end to end
 - **PR #7718**: fix(board03): re-derive copper from the arm C route and retire the USB_D via-count exception
+- **Issue #7683** (closed): Pinned 3D model set for the pinned KiCad toolchain (`kicad-packages3D` by tag and digest)
+- **Issue #7624** (closed): router: recover 06rf USB3_RX1/RX2 coupling at J1 after #7517 corridor competition (Q29 tracked regression)
 - **Issue #7686** (closed): LCSC/JLCPCB model pipeline at catalog scale: BOM-driven C-numbers, content pinning, auto-registered transforms, terms-respecting fetch
 - **Issue #7666** (closed): site: gallery shows stale or raw board identity: unchecked board.json age, PCB file stems as titles, and board 07 still titled "DRAFT"
 - **Issue #7648** (closed): `sch_set_footprint` corrupts sheets (footprint used as a `re.sub` template, unescaped, universal-newline round trip); S-expression writers emit raw `\r`; `Footprint.to_sexp` escapes nothing
