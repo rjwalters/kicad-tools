@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "checked_at": "2026-10-19T21:00:00+00:00",
+  "checked_at": "2026-10-21T02:00:00+00:00",
   "mode": "assembly",
   "status": "ready",
   "blockers": [],
@@ -85,10 +85,6 @@
     "assembled-demo/pad-drill-repairs.json": "90d31ee83a27a40355b5ba069914888f267d5375906b3eadd2880b456ef0282e",
     "output/manufacturing/fill-consistency.json": "6aea658a7d30a148c08b041c382b38c562024696eda159f25addb85c3d45b944",
     "output/manufacturing/design-source.zip": "e97af70d790f1f701fe725b0bff302c490c32d57b2c8f4314b74a27fc971986b",
-    "output/renders/pcb-back.svg": "ae2d1befdbd791ff8c8fde5390e53e212b594ffb92b1e5afc53bd44f41906636",
-    "output/renders/3d-back.png": "6438a1106ab1511b22481f4bbbb8586173f4eca5f636b4313131aada2aa6a94d",
-    "output/renders/pcb-front.svg": "a1f4864e51252d2a119d178aa1c116a1a11fb9752efe86edbc2855b928f8e656",
-    "output/renders/3d-front.png": "8c60c059cfdcc8af5a9510140abdb957672425abfa211dd9d6c80d5ef94b0aed",
     "output/manufacturing/lvs.json": "8a44e465f8db5c6f95b19b46257bd87290819ef27e8b68a85cbf490bd0f47a68",
     "output/manufacturing/native-erc.json": "7880a74abd2c1ff9aefec24d29d8d28a6a59b8e569b96c5b3c332ecfc19f5e6c",
     "output/manufacturing/schematic.pdf": "b16b940914d761df70f6af9310ba7c0bb8441130d4a848bce54336325dae80e8",
