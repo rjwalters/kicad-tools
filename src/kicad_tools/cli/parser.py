@@ -2726,8 +2726,9 @@ def _add_pcb_parser(subparsers) -> None:
     pcb_add_models.add_argument(
         "--lcsc-models",
         dest="lcsc_models",
-        help="Path to an lcsc_models.json sidecar mapping lib_id -> LCSC "
-        "C-number, enabling the LCSC/EasyEDA fetch-on-demand tier. Bodies are "
+        help="Optional lcsc_models.json OVERRIDE of the lib_id -> LCSC C-numbers "
+        "that are otherwise resolved from the board's BOM / procurement review "
+        "(stale sidecar entries are reported). Bodies are "
         "resolved from a cache dir (${KCT_LCSC_3D_DIR}, default "
         "~/.cache/kicad-tools/lcsc-3d/) and emitted as portable "
         "${KCT_LCSC_3D_DIR}/C#####.step refs. An entry may also use the object "
@@ -2738,7 +2739,28 @@ def _add_pcb_parser(subparsers) -> None:
         "--fetch-lcsc",
         action="store_true",
         help="Fetch missing LCSC STEP bodies from EasyEDA on a cache miss "
-        "(default: cache-only, no network; also enabled by KCT_LCSC_FETCH=1)",
+        "(default: cache-only, no network; also enabled by KCT_LCSC_FETCH=1). "
+        "Per-user and opt-in: fetched models stay in your local cache and must "
+        "never be committed or shipped. Capped per run (KCT_LCSC_MAX_FETCHES, "
+        "default 25) and rate-limited (KCT_LCSC_FETCH_INTERVAL seconds)",
+    )
+    pcb_add_models.add_argument(
+        "--no-lcsc-bom",
+        dest="lcsc_from_bom",
+        action="store_false",
+        default=True,
+        help="Do not derive LCSC C-numbers from the board's BOM / procurement "
+        "review / footprint properties (use only --lcsc-models)",
+    )
+    pcb_add_models.add_argument(
+        "--bom",
+        help="BOM CSV to resolve LCSC C-numbers from (default: assembly-bom.csv "
+        "next to the PCB or in its parent directory)",
+    )
+    pcb_add_models.add_argument(
+        "--procurement",
+        help="procurement-review.json mapping MPN -> LCSC C-number (default: "
+        "discovered next to the PCB or in its parent directory)",
     )
     pcb_add_models.add_argument(
         "--format",
@@ -3249,7 +3271,7 @@ def _add_pcb_parser(subparsers) -> None:
         help="Classify every footprint's 3D model coverage",
         description="Classify every footprint (not just every model ref) as "
         "resolved, embedded, dangling, no_ref, unresolved_var, hidden_only, "
-        "lcsc_cache_miss, placeholder or exempt, under an explicit resolution "
+        "lcsc_cache_miss, lcsc_content_changed, placeholder or exempt, under an explicit resolution "
         "environment. A report: exits 0 regardless of coverage.",
     )
     pcb_model_audit.add_argument("pcb", help="Path to .kicad_pcb file")

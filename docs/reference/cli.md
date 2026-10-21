@@ -213,7 +213,7 @@ kct pcb <subcommand> <pcb_file> [options]
 | `move-footprint`, `remove-footprint` | Modify footprints by reference designator |
 | `add-zone` | Add a copper pour zone |
 | `add-3d-models` | Patch missing `(model ...)` refs; `--refresh` rewrites existing refs through the current tier chain (see [LCSC 3D models guide](../guides/lcsc-3d-models.md)) |
-| `model-audit` | Classify every footprint's 3D model coverage (`resolved`, `embedded`, `dangling`, `no_ref`, `unresolved_var`, `hidden_only`, `lcsc_cache_miss`, `placeholder`, `exempt`); `--env host\|pinned`, `--model-dir DIR`, `--format json`. A report: exits 0 regardless of coverage (see [3D model coverage](../guides/lcsc-3d-models.md#3d-model-coverage-audit)) |
+| `model-audit` | Classify every footprint's 3D model coverage (`resolved`, `embedded`, `dangling`, `no_ref`, `unresolved_var`, `hidden_only`, `lcsc_cache_miss`, `lcsc_content_changed`, `placeholder`, `exempt`); `--env host\|pinned`, `--model-dir DIR`, `--format json`. A report: exits 0 regardless of coverage (see [3D model coverage](../guides/lcsc-3d-models.md#3d-model-coverage-audit)) |
 | `diff` | Geometric diff of two boards: which tracks, vias, pads, zones and outline changed (see below) |
 
 **`add-zone` output-path behavior:** `-o`/`--output` is optional and

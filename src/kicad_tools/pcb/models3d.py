@@ -76,6 +76,7 @@ from kicad_tools.pcb.model_substitutions import substitute_lib_id
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from kicad_tools.pcb.lcsc_models import LcscModelEntry
+    from kicad_tools.pcb.lcsc_registration import RegistrationResult
 
 # The LCSC sidecar mapping accepted by the tier-4 resolver.  A bare ``str``
 # value (a plain ``lib_id -> C-number`` dict) stays valid for callers written
@@ -593,6 +594,11 @@ class ResolvedModels:
     """Set (with empty *models*) when every installed-library candidate
     carried only model refs whose file does not exist; holds the library's
     own ref so the report can name what needs sourcing."""
+    register: Callable[[str], tuple[list[str] | None, RegistrationResult | None]] | None = None
+    """LCSC tier only (issue #7686): called with the target footprint's text,
+    returns ``(models, result)`` -- *models* replace the identity block when the
+    EasyEDA-pad registration was accepted (``None`` otherwise), *result* is the
+    fit (``None`` when no fit was possible)."""
 
 
 # A resolver maps a lib id to its resolved models.  For backward
@@ -700,6 +706,7 @@ def make_library_resolver(
     lcsc_cache_dir: Path | None = None,
     lcsc_log: dict[str, str] | None = None,
     lcsc_transform_log: dict[str, str] | None = None,
+    lcsc_issues: dict[str, str] | None = None,
     lcsc_warn: Callable[[str], None] | None = None,
     allow_dangling: bool = False,
     model_dir: Path | None = None,
@@ -764,6 +771,9 @@ def make_library_resolver(
         lcsc_transform_log: Optional dict populated with ``lib_id ->
             description`` for every LCSC body that received a non-identity
             per-part transform, naming the source of each field.
+        lcsc_issues: Optional dict populated with ``lib_id -> message`` for every
+            LCSC body whose cached sha256 no longer matches its pin
+            (``lcsc_content_changed``); such a body is never used.
         lcsc_warn: Optional ``callable(str)`` invoked on a fetch failure.
         allow_dangling: Skip the existence check and accept a library ref
             whose STEP file is absent (the KLC F9.3 behaviour).  Default off.
@@ -802,6 +812,31 @@ def make_library_resolver(
 
         return find_kicad_3dmodel_dir()
 
+    def _lcsc_registrar(
+        lcsc_id: str,
+    ) -> Callable[[str], tuple[list[str] | None, RegistrationResult | None]] | None:
+        """Pad-registration callback for a cached body with no authored transform.
+
+        Needs the EasyEDA footprint pads captured in the cache metadata at
+        fetch time; returns ``None`` (identity stays) when there are none.
+        """
+        from kicad_tools.pcb.lcsc_models import read_cache_meta, synthesize_model_block
+        from kicad_tools.pcb.lcsc_registration import EasyEdaPad, register_pads
+
+        meta = read_cache_meta(lcsc_id, lcsc_cache_dir)
+        if meta is None or not meta.pads:
+            return None
+        easy_pads = [EasyEdaPad(number=n, x=x, y=y) for n, x, y in meta.pads]
+
+        def _register(body: str) -> tuple[list[str] | None, RegistrationResult | None]:
+            result = register_pads(easy_pads, _pad_positions(body))
+            if result is None or not result.accepted:
+                return None, result
+            block = synthesize_model_block(lcsc_id, rotate=result.rotate, offset=result.offset)
+            return [block], result
+
+        return _register
+
     def _resolve_lcsc(lib_id: str) -> ResolvedModels | None:
         """Tier 4: LCSC/EasyEDA fetch-on-demand.  Returns None when the lib id
         has no mapping, or the STEP is neither cached nor fetchable."""
@@ -830,11 +865,19 @@ def make_library_resolver(
             sidecar_rotate = None
             sidecar_offset = None
 
+        pinned_sha = entry.sha256 if isinstance(entry, LcscModelEntry) else None
+
+        def _on_issue(kind: str, message: str) -> None:
+            if lcsc_issues is not None and kind == "lcsc_content_changed":
+                lcsc_issues[lib_id] = message
+
         step_path = resolve_lcsc_step(
             lcsc_id,
             cache_dir=lcsc_cache_dir,
             fetch=lcsc_fetch,
             warn=lcsc_warn,
+            expected_sha256=pinned_sha,
+            on_issue=_on_issue,
         )
         if step_path is None:
             # Skip-on-miss: report unresolved rather than emitting a ref to a
@@ -855,6 +898,9 @@ def make_library_resolver(
                 rotate_from_sidecar=sidecar_rotate is not None,
                 offset_from_sidecar=sidecar_offset is not None,
             )
+        register = None
+        if rotate is None and offset is None:
+            register = _lcsc_registrar(lcsc_id)
         # Origin-authored body: explicit (0, 0) source anchor so the shared
         # offset math shifts by the full target pad centroid.  ``source_orientation``
         # is deliberately left ``None`` -- there is no source footprint to
@@ -865,6 +911,7 @@ def make_library_resolver(
         return ResolvedModels(
             models=[synthesize_model_block(lcsc_id, rotate=rotate, offset=offset)],
             source_anchor=(0.0, 0.0),
+            register=register,
         )
 
     def resolve(lib_id: str) -> ResolvedModels | None:
@@ -951,6 +998,17 @@ class ModelPatchReport:
     lcsc_transforms: dict[str, str] = field(default_factory=dict)
     """Lib ids whose LCSC body received a non-identity per-part transform
     (``lib_id -> human-readable summary naming each field's source``)."""
+    lcsc_registration: dict[str, str] = field(default_factory=dict)
+    """Lib ids whose LCSC body transform was **derived** by registering the
+    EasyEDA pad geometry onto the footprint pads (``lib_id -> summary with the
+    fit residual``, issue #7686)."""
+    lcsc_needs_calibration: dict[str, str] = field(default_factory=dict)
+    """Lib ids where that registration's residual was too high to accept: the
+    identity (or packaged) transform was kept and a human must calibrate."""
+    lcsc_content_changed: dict[str, str] = field(default_factory=dict)
+    """Lib ids whose cached LCSC body no longer matches its sha256 pin
+    (``lib_id -> message``).  Nothing was inserted for them: a changed body is
+    reported, never silently re-pointed at (issue #7686)."""
 
     @property
     def changed(self) -> bool:
@@ -999,6 +1057,13 @@ def add_model_refs_to_text(
             models = resolved.models
             source_anchor = resolved.source_anchor
             source_orientation = resolved.source_orientation
+            if resolved.register is not None and models:
+                derived_models, fit = resolved.register(body)
+                if fit is not None and derived_models is not None:
+                    models = derived_models
+                    report.lcsc_registration[block.lib_id] = fit.describe()
+                elif fit is not None:
+                    report.lcsc_needs_calibration[block.lib_id] = fit.describe()
             if resolved.dangling is not None and not models:
                 report.dangling_in_library[block.lib_id] = resolved.dangling
         else:
@@ -1139,6 +1204,7 @@ def add_model_refs(
     substitution_log: dict[str, str] = {}
     lcsc_log: dict[str, str] = {}
     lcsc_transform_log: dict[str, str] = {}
+    lcsc_issue_log: dict[str, str] = {}
     if resolver is None:
         resolver = make_library_resolver(
             library_paths,
@@ -1151,6 +1217,7 @@ def add_model_refs(
             lcsc_cache_dir=lcsc_cache_dir,
             lcsc_log=lcsc_log,
             lcsc_transform_log=lcsc_transform_log,
+            lcsc_issues=lcsc_issue_log,
             lcsc_warn=lcsc_warn,
             allow_dangling=allow_dangling,
         )
@@ -1168,6 +1235,7 @@ def add_model_refs(
     report.lcsc_transforms = {
         lib_id: desc for lib_id, desc in lcsc_transform_log.items() if lib_id in applied
     }
+    report.lcsc_content_changed = dict(lcsc_issue_log)
     if report.changed and not dry_run:
         dest = Path(output_path) if output_path is not None else pcb_path
         dest.write_text(new_text)
@@ -1195,7 +1263,8 @@ def ensure_models(
 
     Args:
         pcb_path: PCB file to patch in place.
-        sidecar: Optional ``lcsc_models.json`` enabling the LCSC tier.
+        sidecar: Optional ``lcsc_models.json`` override of the BOM-derived
+            LCSC C-numbers.
         library_paths: Optional explicit KiCad library location.
         **kwargs: Forwarded to :func:`add_model_refs` (``refresh``,
             ``allow_dangling``, ``dry_run``, ...).
@@ -1205,10 +1274,13 @@ def ensure_models(
         available there is nothing to resolve, so an empty report is returned
         and the file is untouched (a recipe must not fail on such a host).
     """
-    from kicad_tools.pcb.lcsc_models import fetch_enabled, load_lcsc_mapping
+    from kicad_tools.pcb.lcsc_bom import build_lcsc_mapping
+    from kicad_tools.pcb.lcsc_models import fetch_enabled
 
     paths = library_paths if library_paths is not None else detect_kicad_library_path()
-    lcsc_mapping = load_lcsc_mapping(Path(sidecar)) if sidecar is not None else None
+    # C-numbers come from the board's BOM / procurement data; the sidecar (if
+    # any) is an override only (issue #7686).
+    lcsc_mapping = build_lcsc_mapping(Path(pcb_path), sidecar=sidecar).mapping or None
     if not paths.found and lcsc_mapping is None:
         return ModelPatchReport()
     kwargs.setdefault("lcsc_fetch", fetch_enabled(False))

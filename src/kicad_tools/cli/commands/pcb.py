@@ -1175,6 +1175,9 @@ def _run_add_3d_models_command(args, pcb_path: Path) -> int:
         refresh=getattr(args, "refresh", False),
         allow_dangling=getattr(args, "allow_dangling", False),
         output_format=getattr(args, "format", "text"),
+        lcsc_from_bom=getattr(args, "lcsc_from_bom", True),
+        bom=Path(args.bom) if getattr(args, "bom", None) else None,
+        procurement=Path(args.procurement) if getattr(args, "procurement", None) else None,
     )
 
 

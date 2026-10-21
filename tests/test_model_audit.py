@@ -330,3 +330,28 @@ def test_top_level_kct_check_forwards_3d_models_flag(tmp_path, models):
     assert _coverage_rules(json.loads(report.read_text())) == ["model_coverage"]
     kct_main(["check", str(pcb), "--format", "json", "--output", str(report)])
     assert _coverage_rules(json.loads(report.read_text())) == []
+
+
+def test_lcsc_content_changed_class(tmp_path, models):
+    """A cached LCSC body whose sha256 differs from its fetch-time pin (#7686)."""
+    import hashlib
+
+    lcsc = tmp_path / "lcsc"
+    lcsc.mkdir()
+    body = b"ISO-10303-21; original"
+    (lcsc / "C12345.step").write_bytes(b"ISO-10303-21; changed upstream")
+    (lcsc / "C12345.meta.json").write_text(
+        json.dumps({"lcsc": "C12345", "sha256": hashlib.sha256(body).hexdigest(), "source": "lcsc"})
+    )
+    (lcsc / "C777.step").write_bytes(body)
+    (lcsc / "C777.meta.json").write_text(
+        json.dumps({"lcsc": "C777", "sha256": hashlib.sha256(body).hexdigest(), "source": "lcsc"})
+    )
+    pcb = _write(
+        tmp_path,
+        _fp("R1", body='(model "${KCT_LCSC_3D_DIR}/C12345.step")'),
+        _fp("R2", body='(model "${KCT_LCSC_3D_DIR}/C777.step")'),
+    )
+    classes = _classes(pcb)
+    assert classes == {"R1": "lcsc_content_changed", "R2": "resolved"}
+    assert "lcsc_content_changed" in model_audit.CLASSES

@@ -50,6 +50,19 @@ from kicad_tools.pcb.models3d import (
     make_library_resolver,
 )
 
+
+@pytest.fixture(autouse=True)
+def _fresh_fetch_budget(monkeypatch):
+    """Reset the per-run fetch cap and disable the inter-fetch delay (#7686)."""
+    from kicad_tools.pcb import lcsc_models as _lm
+
+    monkeypatch.setenv(_lm.FETCH_INTERVAL_ENV_VAR, "0")
+    monkeypatch.delenv(_lm.MAX_FETCHES_ENV_VAR, raising=False)
+    _lm.reset_fetch_budget()
+    yield
+    _lm.reset_fetch_budget()
+
+
 # --------------------------------------------------------------------------
 # Fixtures: a mocked EasyEDA component-info body + fake STEP bytes
 # --------------------------------------------------------------------------
@@ -1264,3 +1277,168 @@ class TestRenderEnv:
         env = runner._render_env(None)
         assert env is not None
         assert env[DEFAULT_CACHE_ENV_VAR] == str(lcsc_cache_dir())
+
+
+# --------------------------------------------------------------------------
+# Issue #7686: cache metadata, content pinning, fetch policy (operator Q44)
+# --------------------------------------------------------------------------
+
+
+def _fake_http(url):
+    return COMPONENT_INFO if "components" in url else FAKE_STEP
+
+
+class TestFetchPolicy:
+    def test_fetch_writes_meta_with_source_lcsc(self, tmp_path):
+        from kicad_tools.pcb import lcsc_models
+
+        with mock.patch.object(lcsc_models, "_http_get", _fake_http):
+            path = resolve_lcsc_step("C50950", cache_dir=tmp_path, fetch=True)
+        assert path is not None
+        meta = lcsc_models.read_cache_meta("C50950", tmp_path)
+        assert meta is not None
+        assert meta.source == "lcsc"
+        assert meta.model_uuid == FAKE_UUID
+        assert meta.sha256 == lcsc_models.sha256_hex(FAKE_STEP)
+
+    def test_terms_notice_printed_once_per_cache(self, tmp_path, capsys):
+        from kicad_tools.pcb import lcsc_models
+
+        with mock.patch.object(lcsc_models, "_http_get", _fake_http):
+            resolve_lcsc_step("C1", cache_dir=tmp_path, fetch=True)
+            resolve_lcsc_step("C2", cache_dir=tmp_path, fetch=True)
+        err = capsys.readouterr().err
+        assert err.count("easyeda.com/legal") == 1
+        assert "never commit" in err
+
+    def test_no_notice_without_fetch(self, tmp_path, capsys):
+        resolve_lcsc_step("C1", cache_dir=tmp_path, fetch=False)
+        assert capsys.readouterr().err == ""
+
+    def test_per_run_fetch_cap(self, tmp_path, monkeypatch):
+        from kicad_tools.pcb import lcsc_models
+
+        monkeypatch.setenv(lcsc_models.MAX_FETCHES_ENV_VAR, "2")
+        warnings: list[str] = []
+        with mock.patch.object(lcsc_models, "_http_get", _fake_http):
+            results = [
+                resolve_lcsc_step(f"C{n}", cache_dir=tmp_path, fetch=True, warn=warnings.append)
+                for n in (1, 2, 3)
+            ]
+        assert [r is not None for r in results] == [True, True, False]
+        assert any("fetch cap reached" in w and "C3" in w for w in warnings)
+        assert not (tmp_path / "C3.step").exists()
+
+    def test_cached_hit_does_not_consume_budget(self, tmp_path, monkeypatch):
+        from kicad_tools.pcb import lcsc_models
+
+        monkeypatch.setenv(lcsc_models.MAX_FETCHES_ENV_VAR, "1")
+        (tmp_path / "C9.step").write_bytes(FAKE_STEP)
+        with mock.patch.object(lcsc_models, "_http_get", _fake_http):
+            assert resolve_lcsc_step("C9", cache_dir=tmp_path, fetch=True) is not None
+            assert resolve_lcsc_step("C8", cache_dir=tmp_path, fetch=True) is not None
+
+    def test_rate_limit_sleeps_between_fetches(self, tmp_path, monkeypatch):
+        from kicad_tools.pcb import lcsc_models
+
+        monkeypatch.setenv(lcsc_models.FETCH_INTERVAL_ENV_VAR, "5")
+        with (
+            mock.patch.object(lcsc_models, "_http_get", _fake_http),
+            mock.patch.object(lcsc_models.time, "sleep") as sleep,
+        ):
+            resolve_lcsc_step("C1", cache_dir=tmp_path, fetch=True)
+            sleep.assert_not_called()
+            resolve_lcsc_step("C2", cache_dir=tmp_path, fetch=True)
+        sleep.assert_called_once()
+        assert 0 < sleep.call_args.args[0] <= 5
+
+    def test_refuses_to_write_cache_inside_a_git_work_tree(self, tmp_path):
+        from kicad_tools.pcb import lcsc_models
+
+        (tmp_path / ".git").mkdir()
+        cache = tmp_path / "boards" / "cache"
+        warnings: list[str] = []
+        with mock.patch.object(lcsc_models, "_http_get", _fake_http) as http:
+            result = resolve_lcsc_step("C1", cache_dir=cache, fetch=True, warn=warnings.append)
+        assert result is None
+        assert any("inside a git work tree" in w for w in warnings)
+        assert not cache.exists()
+        assert http is not None
+
+
+class TestContentPinning:
+    def _seed(self, tmp_path):
+        from kicad_tools.pcb import lcsc_models
+
+        with mock.patch.object(lcsc_models, "_http_get", _fake_http):
+            return resolve_lcsc_step("C50950", cache_dir=tmp_path, fetch=True)
+
+    def test_unchanged_cache_resolves(self, tmp_path):
+        self._seed(tmp_path)
+        issues: list[tuple[str, str]] = []
+        path = resolve_lcsc_step(
+            "C50950", cache_dir=tmp_path, on_issue=lambda k, m: issues.append((k, m))
+        )
+        assert path is not None and issues == []
+
+    def test_tampered_cache_reports_lcsc_content_changed(self, tmp_path):
+        self._seed(tmp_path)
+        (tmp_path / "C50950.step").write_bytes(FAKE_STEP + b"changed upstream")
+        issues: list[tuple[str, str]] = []
+        path = resolve_lcsc_step(
+            "C50950", cache_dir=tmp_path, on_issue=lambda k, m: issues.append((k, m))
+        )
+        assert path is None
+        assert issues and issues[0][0] == "lcsc_content_changed"
+
+    def test_explicit_pin_mismatch_is_reported(self, tmp_path):
+        (tmp_path / "C7.step").write_bytes(FAKE_STEP)
+        issues: list[tuple[str, str]] = []
+        path = resolve_lcsc_step(
+            "C7",
+            cache_dir=tmp_path,
+            expected_sha256="0" * 64,
+            on_issue=lambda k, m: issues.append((k, m)),
+        )
+        assert path is None and issues[0][0] == "lcsc_content_changed"
+
+    def test_explicit_pin_match_resolves_without_meta(self, tmp_path):
+        from kicad_tools.pcb import lcsc_models
+
+        (tmp_path / "C7.step").write_bytes(FAKE_STEP)
+        digest = lcsc_models.sha256_hex(FAKE_STEP)
+        assert resolve_lcsc_step("C7", cache_dir=tmp_path, expected_sha256=digest) is not None
+
+    def test_sidecar_sha256_parsed_and_validated(self, tmp_path):
+        good = tmp_path / "ok.json"
+        good.write_text(json.dumps({"A:B": {"lcsc": "C1", "sha256": "AB" * 32}}))
+        assert load_lcsc_mapping(good)["A:B"].sha256 == "ab" * 32
+        bad = tmp_path / "bad.json"
+        bad.write_text(json.dumps({"A:B": {"lcsc": "C1", "sha256": "xyz"}}))
+        with pytest.raises(ValueError, match="sha256"):
+            load_lcsc_mapping(bad)
+
+
+class TestContentChangedInPatchReport:
+    def test_pin_mismatch_is_reported_and_ref_not_inserted(self, tmp_path):
+        from kicad_tools.pcb.models3d import add_model_refs
+
+        cache = tmp_path / "cache"
+        cache.mkdir()
+        (cache / "C50950.step").write_bytes(FAKE_STEP)
+        pcb = tmp_path / "b.kicad_pcb"
+        pcb.write_text(
+            '(kicad_pcb\n  (footprint "Mod:Joy" (layer "F.Cu") (property "Reference" "J1")\n'
+            '  (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu"))))'
+        )
+        mapping = {"Mod:Joy": LcscModelEntry(lcsc="C50950", sha256="0" * 64)}
+        report = add_model_refs(
+            pcb,
+            library_paths=_empty_library(tmp_path),
+            lcsc_mapping=mapping,
+            lcsc_cache_dir=cache,
+        )
+        assert "Mod:Joy" in report.lcsc_content_changed
+        assert "lcsc_content_changed" in report.lcsc_content_changed["Mod:Joy"]
+        assert report.lcsc_matches == {}
+        assert "(model" not in pcb.read_text()
