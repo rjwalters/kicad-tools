@@ -586,6 +586,18 @@ class IterationMetrics:
         """
         return self.sort_key < other.sort_key
 
+    def made_progress_over(self, other: IterationMetrics) -> bool:
+        """Return True if ``self`` beats ``other`` on a real metric.
+
+        Same ordering as :meth:`is_better_than` minus the trailing
+        ``-iteration`` tie-break.  That tie-break lets a later iteration
+        replace an equal-scoring best snapshot, but an identical result is
+        not progress: counting it as such resets the ``best_stall_patience``
+        counter every iteration, so a plateaued loop (e.g. an unroutable
+        net re-failing each pass) never early-stops (Issue #7659).
+        """
+        return self.sort_key[:-1] < other.sort_key[:-1]
+
 
 # Re-export for backward compatibility
 __all__ = [
@@ -13567,12 +13579,16 @@ class Autorouter:
             iteration_trajectory.append(metrics)
 
             improved = metrics.is_better_than(best_metrics)
+            # Issue #7659: a tie replaces the best snapshot (later iteration
+            # wins) but must not reset the patience counter.
+            made_progress = metrics.made_progress_over(best_metrics)
             if improved:
                 best_metrics = metrics
                 best_routed_count = routed_now
                 best_routes = copy.deepcopy(list(self.routes))
                 best_net_routes = copy.deepcopy(net_routes)
                 best_iteration = iter_index
+            if made_progress:
                 # Issue #3101: reset patience counter on strict improvement.
                 best_stall_count = 0
             else:
