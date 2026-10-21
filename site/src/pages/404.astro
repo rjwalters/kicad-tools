@@ -1,0 +1,34 @@
+---
+// Not-found page (issue #7667). Astro emits `dist/404.html`, which Cloudflare
+// Pages serves with HTTP 404 for any unknown path instead of falling back to
+// the homepage with status 200.
+import SiteHeader from "../components/Header.astro";
+import SiteFooter from "../components/Footer.astro";
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>Page not found — kicad-tools</title>
+  </head>
+  <body>
+    <SiteHeader />
+    <main id="main-content" tabindex="-1">
+      <header class="page-header">
+        <p class="eyebrow">404</p>
+        <h1>Page not found</h1>
+        <p class="tagline">
+          That page or file does not exist, or it has moved. Try one of these instead.
+        </p>
+        <div class="hero-links">
+          <a class="primary-link" href="/">Browse the gallery</a>
+          <a href="/benchmarks">Routing status</a>
+        </div>
+      </header>
+    </main>
+    <SiteFooter />
+  </body>
+</html>
