@@ -178,8 +178,11 @@ def validate_hierarchy(
     # Build hierarchy
     root = build_hierarchy(root_schematic, strict_root=True)
 
-    # Validate each node
-    for node in root.all_nodes():
+    # Validate each sheet *file* once. A repeated sheet's placements share
+    # the same sheet symbols and labels, so validating every placement would
+    # report (and let sync-hierarchy fix) each mismatch once per placement
+    # (issue #7616).
+    for node in root.unique_file_nodes():
         if specific_sheet and Path(node.path).name != specific_sheet:
             continue
 

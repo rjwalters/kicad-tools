@@ -63,6 +63,7 @@ cd "$REPO_ROOT"
 # Order matches ci.yml declaration order.
 # ---------------------------------------------------------------------------
 CHEAP_JOBS=(
+  site
   lint
   typecheck
   test
@@ -111,6 +112,17 @@ SKIP_RC=75
 # Commands mirror the corresponding ci.yml job's run steps (checkout /
 # uv-install / container boilerplate excluded).
 # ---------------------------------------------------------------------------
+
+job_site() {
+  # Mirrors ci.yml's `site` job (Issue #7665). SKIP, never a silent PASS,
+  # when node tooling is absent.
+  command -v npm >/dev/null 2>&1 || { echo "npm not found; skipping site job" >&2; return "$SKIP_RC"; }
+  npm --prefix site ci --no-audit --no-fund
+  npm --prefix site test
+  npm --prefix site run check
+  npm --prefix site run build
+  npm --prefix site run check-links
+}
 
 job_lint() {
   uv run ruff format . --check

@@ -2701,6 +2701,20 @@ def _rel(options: ReadinessOptions, path: Path) -> str:
     return path.resolve().relative_to(options.board_dir.resolve()).as_posix()
 
 
+def _is_render_artifact(rel: Path) -> bool:
+    """True for ``kct render`` output under ``output/`` or ``output/manufacturing/``.
+
+    Renders are derived presentation artifacts: the verdict depends on the PCB,
+    rules and DRC/ERC reports, and a picture of the board proves nothing the PCB
+    hash does not.  ``scripts/deploy-site.sh`` re-renders them, so fingerprinting
+    them made every deploy invalidate committed evidence (Issue #7678).
+    """
+    parts = rel.parts
+    return (len(parts) >= 3 and parts[:2] == ("output", "renders")) or (
+        len(parts) >= 4 and parts[:3] == ("output", "manufacturing", "renders")
+    )
+
+
 def _hashable_inputs(options: ReadinessOptions) -> list[Path]:
     """Every file whose bytes the verdict depends on.
 
@@ -2755,6 +2769,7 @@ def _hashable_inputs(options: ReadinessOptions) -> list[Path]:
         if p.is_relative_to(root)
         and p.name != _REPORT_NAME
         and not _is_transient_local(p.relative_to(root))
+        and not _is_render_artifact(p.relative_to(root))
     )
 
 

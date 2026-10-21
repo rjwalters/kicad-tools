@@ -24,6 +24,7 @@ It validates saved readiness evidence using file content hashes.
 | `cost`                  | `report.md` → `## Cost Estimate` block | omitted if section absent |
 | `renders`               | `output/renders/*.{svg,png}` (2D plots are `.svg`, 3D renders are `.png`; from `kct render`, #3675) | only existing files |
 | `manufacturing_package` | `output/manufacturing/kicad_project.zip` | omitted if absent |
+| `title`                 | `output/*.kicad_sch` → `(title_block (title ...))` (#7666) | human heading; omitted if absent |
 | `manifest_generated_at` | `manifest.json` → `generated_at`      | ISO-8601 string |
 | `lvs_clean`             | `output/lvs.json` → `clean`           | omitted when `lvs.json` is absent (#3748, #3749) |
 | `lvs_mismatches`        | `output/lvs.json` → `len(mismatches)` | omitted when `lvs.json` is absent (#3748, #3749) |
@@ -78,6 +79,7 @@ It validates saved readiness evidence using file content hashes.
 | `cost`                  | object  | no       | `{ per_board_usd?, batch_qty?, batch_total_usd? }` |
 | `renders`               | object  | no       | Map of render id → path relative to `board.json` |
 | `manufacturing_package` | string  | no       | Path to downloadable `kicad_project.zip` |
+| `title`                 | string  | no       | Human title from the schematic title block; site headings prefer it over `name` |
 | `manifest_generated_at` | string  | no       | Manifest build timestamp (ISO-8601) |
 | `lvs_clean`             | boolean | no       | `true` iff `output/lvs.json` reports `clean: true`. Omitted when `lvs.json` is absent (board has not run LVS yet). |
 | `lvs_mismatches`        | integer | no       | Count of mismatches recorded in `output/lvs.json`. Omitted when `lvs.json` is absent. |

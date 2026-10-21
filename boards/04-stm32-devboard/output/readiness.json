@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "checked_at": "2026-10-19T23:30:00+00:00",
+  "checked_at": "2026-10-21T02:00:00+00:00",
   "mode": "assembly",
   "status": "ready",
   "blockers": [],
@@ -81,10 +81,6 @@
     "output/readiness/kct-check.json": "2d81759080d2cd0b45d439568fe07b9b8f75f6ef7e8cc88897e5b157a9fa718f",
     "output/readiness/native-drc.json": "98b3e1eea2d868b39295d98fe7d9cc52e971a4e399010b203ca3380e6dc71bf4",
     "output/readiness/native-erc.json": "a63705556bc9c62121b86b9ba175962761eddaf7107211dc068c4acba96251ff",
-    "output/renders/3d-back.png": "7b86cc868f8427f05c80261393689c368e436fd1dd98a6df491c2ee6fa5d6149",
-    "output/renders/3d-front.png": "425cc490539056c912db455d1acc6e78816ef61cf85b362d8752493344cb9539",
-    "output/renders/pcb-back.svg": "4007c853242d0d83ee1f609c8c5e7a372805de9c78f7fed5ef215bdbecb6dccb",
-    "output/renders/pcb-front.svg": "ea8a124b3edd79f0151293d7ff77f7990be1f354d27a20099d9c51f40e4c9380",
     "output/stm32_devboard.kicad_pcb": "37cefe182750db36980bb2d3431ddfbef2843f3c4c76e8055f44ae0dd12c56bb",
     "output/stm32_devboard.kicad_pro": "13e8bbe652a672ea673545b4cbb8f0bbf85f3e58999f58d395527833fa665354",
     "output/stm32_devboard.kicad_sch": "fd5812ca646fbe6912fbcfbe2a0d6ed8c6b53014587e45eddad74472d0e5db17",
