@@ -3861,10 +3861,10 @@ def legacy_main() -> int:
         drc_success = run_drc(routed_path)
 
         # Step 10: Generate manufacturing bundle (Issue #3096 AC).
-        # The export step is informational here -- failure does not
-        # change the script's exit code, but the artifacts under
-        # output/manufacturing/ satisfy the M-E milestone's "first mfg
-        # bundle produced" criterion.
+        # The artifacts under output/manufacturing/ satisfy the M-E
+        # milestone's "first mfg bundle produced" criterion.  Since
+        # issue #7740 the export verdict feeds the shared gate below as
+        # ``export_ok``: a failed export fails the gate and exits 1.
         mfg_success = generate_manufacturing(routed_path, output_dir)
 
         # Issue #3912: derive BOTH the SUMMARY and the exit code from one
