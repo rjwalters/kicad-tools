@@ -636,6 +636,15 @@ tick and get 24h; activity-driven or failure-only kinds are `None` (never flagge
 kind with no row defaults to 24h. A host with no `otlp` exporter reports
 `no_exporter` with no `kinds`, and no error.
 
+Over OTLP (Issue #12905) each kind's `last_export_at` rides the `host.health` gauge
+`loom.host.kind_last_export_seconds{kind}` (unix seconds), so a consumer can refuse an
+`as_of` past a host's coverage. A kind with no export yet has no data point (absent,
+never zero), and a host with no `otlp_export` emits none. Caveats: the value is in
+memory, so after a restart it means "since process start"; and it is a delivery-coverage
+bound ("this host delivered kind K through T"), not proof the producer ran, because
+activity-driven kinds have no silence threshold. `host.health` and `host.export` give the
+host-level bound. `kind` is already on the collector's datapoint allowlist.
+
 ```json
 { "observability": {
     "otlp_required": false,
@@ -769,9 +778,9 @@ once as a terminal `left_queue` record when it leaves a repo whose listing
 succeeded. Sampled from the collector's periodic pass (the same cadence as
 `queue.snapshot`), never the tick loop, so a disposition lasting less than one
 collector interval can be missed; a 10-minute-or-longer lookback still always
-contains the current state of every queued issue. Cardinality is bounded: at
-most 256 rows become spans per sample (`loom.queue.disposition_rows_dropped{reason="truncated"}`
-counts the rest), and a row whose repo root never resolved to a forge slug is
+contains the current state of every queued issue. Every queued row becomes a
+span (no volume cap: a cap would make which items carry facts depend on
+iteration order), and a row whose repo root never resolved to a forge slug is
 dropped and counted as `reason="unresolved"` rather than exported with a local
 path. `loom.dispatch.admission` also gained `loom.repo`/`loom.repo.visibility`
 in the same change, so `loom.issue` is no longer ambiguous on a multi-repo
@@ -891,10 +900,8 @@ same facts per call (#10343): `github.http.{status,not_modified,requests,source}
 (`unknown` when `gh` gave no HTTP evidence — never guessed),
 `github.billing` (`ok`|`not_modified`|`rate_limited`|`secondary_limited`|`error`|`not_sent`) and
 the bucket join keys `github.{resource,account,cred_owner,role}`. Since
-#10752 a span also carries `github.repo`, a write carries `github.number`, and
-a call made by a daemon pass inside its caller scope carries `github.caller`
-(for example `stale_blocked_release`, the retired `loom:blocked` release
-pass, #11301). Since #11407
+#10752 a span also carries `github.repo`, and a write carries `github.number`.
+Since #11407
 every span also names the endpoint: `github.route` (a template such as
 `/repos/{owner}/{repo}/pulls/{n}`, from the same finite table as gh-shim's
 `github.api.route`), `http.request.method`, and `github.command` (`pr view`

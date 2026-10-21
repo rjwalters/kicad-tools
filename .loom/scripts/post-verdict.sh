@@ -103,6 +103,9 @@
 #
 #   PATH may be "-" to read the body from stdin.
 #
+#   Aliases (exact, lowercase): `approve` -> approved, `request-changes` ->
+#   changes-requested. Anything else is rejected (exit 2).
+#
 #   --reviews-reconciled TEXT   Explicit disposition of the outstanding formal
 #       reviews / inline threads that check-review-feedback.sh reported. Must
 #       cite every blocking review id it named. Ignored for
@@ -116,10 +119,14 @@
 #   --review-started RFC3339   Approvals only (#12614): when this review began
 #       (capture `date -u +%Y-%m-%dT%H:%M:%SZ` when you claim the PR). The gate
 #       refuses the approval when a trusted human comment on the PR or a linked
-#       issue is newer, or a linked issue body no longer matches its
-#       --issue-body-sha; the refusal (exit 7) names the comment or issue. Re-review
-#       against the current spec, then retry with a fresh value. Absent: no such
-#       check, and the gate warns.
+#       issue is newer, a human edited a linked issue body after it, or a body
+#       no longer matches its --issue-body-sha; the refusal (exit 7) names the
+#       comment or edit. The gate's start is the dispatch epoch in $LOOM_SWEEP_ID
+#       (or the PR's judge lease); this value can only move it earlier (#12714),
+#       so a retry in the same dispatch is refused again: re-review against the
+#       current spec and either end without a verdict (a fresh dispatch approves)
+#       or post changes-requested. With no start resolvable at all (no epoch, no
+#       lease, no flag) the approval is refused.
 #
 #   --issue-body-sha N=HASH   (repeatable) Issue N's body as you reviewed it:
 #       `printf %s "$(gh api repos/OWNER/REPO/issues/N --jq .body)" | sha256sum | cut -d' ' -f1`.
@@ -159,7 +166,10 @@
 set -uo pipefail
 
 usage() {
-  sed -n '2,145p' "${BASH_SOURCE[0]:-$0}" | sed 's/^# \{0,1\}//'
+  # Print the whole leading comment block (line 2 to the first non-comment
+  # line). A hard-coded line range fell behind the header and cut --help off
+  # mid-sentence at exit code 8 (#12692).
+  awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "${BASH_SOURCE[0]:-$0}"
 }
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
@@ -176,6 +186,12 @@ PR="$1"
 VERDICT="$2"
 SHA="$3"
 shift 3
+
+# Accept the natural imperatives; everything downstream sees canonical values.
+case "$VERDICT" in
+  approve) VERDICT="approved" ;;
+  request-changes) VERDICT="changes-requested" ;;
+esac
 
 BODY=""
 BODY_FILE=""
@@ -525,7 +541,6 @@ fi
 # the build that merges #10684; no version floor is declared for them, because the
 # capability probe above checks them on the resolved binary. Roll loom-daemon
 # before (or with) these scripts: until then, verdicts take the legacy path.
-[[ "$VERDICT" == "approved" && -z "$REVIEW_STARTED" ]] && echo "post-verdict.sh: WARNING — no --review-started, so an operator comment or issue rescope made during this review is not checked (#12614)" >&2
 VG_RC=0; VG_OUT="$("${LOOM_DAEMON_BIN:-loom-daemon}" forge verdict-gate "$PR" --repo "$REPO" --verdict "$VERDICT" --sha "$SHA" --overrules-prior "$OVERRULE" ${REVIEW_STARTED:+--review-started "$REVIEW_STARTED"} ${ISSUE_HASHES[@]+"${ISSUE_HASHES[@]/#/--issue-body-sha=}"} 2>&1)" || VG_RC=$?  # set -e is on (forge-helpers.sh)
 case "$VG_RC:$VG_OUT" in
   "0:LOOM-VERDICT-GATE PROCEED"*) forge_gh_comment_rl_safe "$REPO" "$PR" "$FULL_BODY" 1 || exit 1 ;;

@@ -7,6 +7,7 @@
 | [`2026-09-12/`](2026-09-12/) | External benchmark attempts (issue #5297): STRF, PocketBeagle, BeagleConnect Freedom |
 | [`2026-09-15/`](2026-09-15/) | BeagleConnect Freedom preserved partial routing (issue #5348) |
 | [`2026-10-15-pcbworld-d3a/`](2026-10-15-pcbworld-d3a/) | PCBWorld D3-A baseline (issue #6332): **not run** (no KiCad 9 / PCBWorld engine on the host); seed-variation evidence + exact rerun command |
+| [`2026-10-21/`](2026-10-21/) | Re-run of the four published cases from the `external-bench.yml` workflow (issue #7669, run 39539832212): PocketBeagle fails with a new layer error, BeagleConnect Freedom 131/460, STRF 44/98 both protocols |
 
 The sections below describe the original top-level files (issue #4942).
 

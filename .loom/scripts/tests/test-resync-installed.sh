@@ -2744,7 +2744,7 @@ echo "Test group 28b: forge label check -- drift found, real run fixes it (#6716
 REPO="$(make_fixture)"
 add_labels_stub "$REPO"
 STUB_LOG="$WORKDIR/stub28b.log"; : > "$STUB_LOG"
-OUT="$(cd "$REPO" && STUB_LOG="$STUB_LOG" LOOM_TEST_LABELS_CHECK_RC=3 LOOM_TEST_LABELS_SYNC_RC=0 bash "$SCRIPT" 2>&1)"
+OUT="$(cd "$REPO" && STUB_LOG="$STUB_LOG" LOOM_TEST_LABELS_CHECK_RC=3 LOOM_TEST_LABELS_SYNC_RC=0 bash "$SCRIPT" --sync-labels 2>&1)"
 RC=$?
 if [[ $RC -eq 0 ]] && grep -qi "drift detected" <<<"$OUT" && grep -qi "updated.*forge labels" <<<"$OUT"; then
     pass "(#6716) drift is reported and then fixed on a real run"
@@ -2757,18 +2757,48 @@ else
     fail "(#6716) unexpected sync-labels.sh invocation shape for drift-then-fix: $(cat "$STUB_LOG")"
 fi
 
+echo "Test group 28b2: forge label write is opt-in -- no --sync-labels -> check only, no forge write (#10770)"
+REPO="$(make_fixture)"
+add_labels_stub "$REPO"
+STUB_LOG="$WORKDIR/stub28b2.log"; : > "$STUB_LOG"
+OUT="$(cd "$REPO" && STUB_LOG="$STUB_LOG" LOOM_TEST_LABELS_CHECK_RC=3 LOOM_TEST_LABELS_SYNC_RC=0 bash "$SCRIPT" 2>&1)"
+RC=$?
+if [[ $RC -eq 0 ]] && grep -qi "drift detected" <<<"$OUT" && grep -q "sync-labels.sh" <<<"$OUT" && ! grep -qi "updated.*forge labels" <<<"$OUT"; then
+    pass "(#10770) drift without opt-in is reported with the apply command, not applied"
+else
+    fail "(#10770) no-opt-in drift output wrong (rc=$RC); out=$OUT"
+fi
+if [[ "$(wc -l < "$STUB_LOG")" -eq 1 ]] && grep -q -- '--check' "$STUB_LOG"; then
+    pass "(#10770) no opt-in -> mutating sync-labels.sh never invoked"
+else
+    fail "(#10770) mutating sync-labels.sh ran without opt-in: $(cat "$STUB_LOG")"
+fi
+: > "$STUB_LOG"
+OUT="$(cd "$REPO" && STUB_LOG="$STUB_LOG" LOOM_RESYNC_SYNC_LABELS=1 LOOM_TEST_LABELS_CHECK_RC=3 LOOM_TEST_LABELS_SYNC_RC=0 bash "$SCRIPT" 2>&1)"
+if [[ "$(wc -l < "$STUB_LOG")" -eq 2 ]] && grep -qi "updated.*forge labels" <<<"$OUT"; then
+    pass "(#10770) LOOM_RESYNC_SYNC_LABELS=1 opts in like --sync-labels"
+else
+    fail "(#10770) env opt-in did not apply labels: $(cat "$STUB_LOG"); out=$OUT"
+fi
+
 echo "Test group 28c: forge label check -- drift found, --dry-run previews without fixing (#6716)"
 REPO="$(make_fixture)"
 add_labels_stub "$REPO"
 STUB_LOG="$WORKDIR/stub28c.log"; : > "$STUB_LOG"
 OUT="$(cd "$REPO" && STUB_LOG="$STUB_LOG" LOOM_TEST_LABELS_CHECK_RC=3 bash "$SCRIPT" --dry-run 2>&1)"
-if grep -qi "drift detected" <<<"$OUT" && grep -qi "would run.*sync-labels.sh" <<<"$OUT"; then
-    pass "(#6716) --dry-run previews the label fix instead of applying it"
+if grep -qi "drift detected" <<<"$OUT" && grep -qi "would NOT write to the forge without.*--sync-labels" <<<"$OUT"; then
+    pass "(#6716, #10770) --dry-run previews the label fix and says the forge write is opt-in"
 else
     fail "(#6716) --dry-run did not preview the label fix as expected; out=$OUT"
 fi
 if [[ "$(wc -l < "$STUB_LOG")" -eq 1 ]] && grep -q -- '--check' "$STUB_LOG"; then
     pass "(#6716) --dry-run calls sync-labels.sh only once (--check), never the mutating path"
+    OUT="$(cd "$REPO" && STUB_LOG="$STUB_LOG" LOOM_TEST_LABELS_CHECK_RC=3 bash "$SCRIPT" --dry-run --sync-labels 2>&1)"
+    if grep -qi "would run.*sync-labels.sh" <<<"$OUT" && grep -qi "forge" <<<"$OUT"; then
+        pass "(#10770) --dry-run --sync-labels names the forge write it would perform"
+    else
+        fail "(#10770) --dry-run --sync-labels did not flag a forge write: $OUT"
+    fi
 else
     fail "(#6716) --dry-run made an unexpected sync-labels.sh call: $(cat "$STUB_LOG")"
 fi
@@ -2777,7 +2807,7 @@ echo "Test group 28d: forge label check -- the fix itself fails -> loud warning,
 REPO="$(make_fixture)"
 add_labels_stub "$REPO"
 STUB_LOG="$WORKDIR/stub28d.log"; : > "$STUB_LOG"
-OUT="$(cd "$REPO" && STUB_LOG="$STUB_LOG" LOOM_TEST_LABELS_CHECK_RC=3 LOOM_TEST_LABELS_SYNC_RC=1 bash "$SCRIPT" 2>&1)"
+OUT="$(cd "$REPO" && STUB_LOG="$STUB_LOG" LOOM_TEST_LABELS_CHECK_RC=3 LOOM_TEST_LABELS_SYNC_RC=1 bash "$SCRIPT" --sync-labels 2>&1)"
 RC=$?
 if [[ $RC -eq 0 ]] && grep -qi "could not fully apply" <<<"$OUT"; then
     pass "(#6716) a failed label fix is a loud warning, not a resync-wide failure"

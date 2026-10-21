@@ -1,0 +1,5 @@
+C++ backend: available (version 1.0.0)
+  build version: 64 (required: 64)
+  extension: router_cpp.cpython-312-x86_64-linux-gnu.so
+Placement backend: available (version 2.1.0)
+DRC backend: available (version 1.0.0)

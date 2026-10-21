@@ -340,7 +340,8 @@ A step's `loom.sweep` root (`loom.sweep_id=step-<role>-<item>-…`, #12253) is
 closed by the step's own end, when the reaper, a cancel or startup sees the
 session exit: `loom.result` is the same `success`/`failure` its
 `role_tick.outcome` reports, with `loom.role`, the step's model and effort,
-`loom.exit_code` when known, and on a failure a `loom.failure_class` of
+`loom.exit_code` when known, `loom.story_points` when the item is sized
+(#12957), and on a failure a `loom.failure_class` of
 `timeout-ceiling`, `cancelled`, `step-outcome-failed` (the session's
 `LOOM_STEP_OUTCOME class=failed`), `exit-<code>` or `exit-unobserved`. A step a
 roll stopped closes as `interrupted_by_roll`. Orphan recovery leaves a step's

@@ -365,6 +365,9 @@ to skip Champion's own check.
 # shared — a divergence between the two copies is a visible drift, not a
 # silent gap; see test-docs-only-fast-path.sh which pins both).
 DOCS_FAST_PATH_ALLOWLIST=("WORK_LOG.md" "WORK_PLAN.md" "README.md")
+# Archive files (#12636): ONLY the month-rotated archives, month 01-12, one
+# directory deep. Never a directory or *.md allowance.
+DOCS_FAST_PATH_ARCHIVE_RE='^(work_log/WORK_LOG|work_plan/WORK_PLAN)_[0-9]{4}-(0[1-9]|1[0-2])\.md$'
 
 docs_only_fast_path_check() {
   local file matched
@@ -379,6 +382,9 @@ docs_only_fast_path_check() {
         break
       fi
     done
+    if [ "$matched" -ne 1 ] && [[ "$file" =~ $DOCS_FAST_PATH_ARCHIVE_RE ]]; then
+      matched=1
+    fi
     if [ "$matched" -ne 1 ]; then
       echo "NOT ELIGIBLE: $file"
       return 0
@@ -730,7 +736,7 @@ standing_auth_eval() {
     local UNKNOWN_CONDITION=0 cond
     while IFS= read -r cond; do
       case "$cond" in
-        judgeApproval | greenCi) ;;
+        judgeApproval | greenCi | authorIsDependabot | noMajorBump) ;;
         *) UNKNOWN_CONDITION=1 ;;
       esac
     done <<<"$CONDITIONS"
@@ -840,6 +846,32 @@ standing_auth_eval() {
             { [ -n "$FAILING" ] || [ -n "$PENDING" ]; } && CONDITIONS_HOLD=0
           fi
           ;;
+        authorIsDependabot)
+          # (#12948) The PR author's forge login, read live from the PR
+          # object -- never a comment, title or label claim. A failed or
+          # empty read fails closed. Only the exact bot login qualifies;
+          # `user.type` must also be Bot, so a human account cannot match by
+          # name alone.
+          PR_AUTHOR=$(gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER" --jq '[.user.login, .user.type] | join(" ")' 2>/dev/null) || PR_AUTHOR=""
+          [ "$PR_AUTHOR" = "dependabot[bot] Bot" ] || CONDITIONS_HOLD=0
+          ;;
+        noMajorBump)
+          # (#12948) Opt-out of semver majors. Reads the version move from
+          # the PR title Dependabot writes ("Bump X from A to B"); a major
+          # is a change of the first component (of the second, for 0.x). A
+          # title that does not parse (group bump, hand-edited title) fails
+          # closed: it is held, not assumed minor.
+          PR_TITLE=$(gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER" --jq '.title' 2>/dev/null) || PR_TITLE=""
+          if [[ "$PR_TITLE" =~ [Bb]ump\ .*\ from\ v?([0-9]+)\.?([0-9]*)[^\ ]*\ to\ v?([0-9]+)\.?([0-9]*) ]]; then
+            if [ "${BASH_REMATCH[1]}" != "${BASH_REMATCH[3]}" ]; then
+              CONDITIONS_HOLD=0
+            elif [ "${BASH_REMATCH[1]}" = "0" ] && [ "${BASH_REMATCH[2]}" != "${BASH_REMATCH[4]}" ]; then
+              CONDITIONS_HOLD=0
+            fi
+          else
+            CONDITIONS_HOLD=0
+          fi
+          ;;
       esac
     done <<<"$CONDITIONS"
 
@@ -881,7 +913,8 @@ to a CI workflow is not red on blast radius *because it is a workflow* when
   publish, release, deploy or merge in its name (case-insensitive);
 - every workflow file has a non-empty patch, and no added or removed workflow
   line matches, case-insensitively, the words `permissions`, `secrets`,
-  `publish`, `release`, `deploy` or `merge`, or `id-token`,
+  `publish`, `release`, `deploy` or `merge` (the last four ignore YAML
+  comments), or `id-token`,
   `pull_request_target`, `workflow_run`, `github.token`, `GITHUB_TOKEN`;
 - the PR carries `loom:pr` (criterion #1 has already checked that the approval
   is for this head) and CI is green right now, with at least one passing
@@ -897,7 +930,7 @@ is red.
 # Reads PR_NUMBER, LABELS, KEPT_SET_PATTERNS, read_ci_checks. Always reads the
 # PR's files afresh and checks the list is complete (count == changed_files).
 ci_workflow_blast_eval() {
-  local WF_FILES CHANGED_COUNT f lf pattern LINES_JSON rx rc
+  local WF_FILES CHANGED_COUNT f lf pattern LINES_JSON NOCOMMENT_JSON SCAN_JSON rx rc
   WF_BLAST=red
   WF_BLAST_REASON=""
   [ "${#KEPT_SET_PATTERNS[@]}" -gt 0 ] 2>/dev/null || { WF_BLAST_REASON="kept set not loaded"; return 0; }
@@ -936,9 +969,19 @@ ci_workflow_blast_eval() {
     [.[] | select(((.filename | ascii_downcase) | startswith(".github/workflows/")) or (((.previous_filename // "") | ascii_downcase) | startswith(".github/workflows/")))]
     | if all(.[]; ((.patch // "") | length) > 0) then [.[].patch | split("\n")[] | select(test("^[+-]")) | .[1:]] else error("no patch") end' 2>/dev/null) \
     || { WF_BLAST_REASON="a workflow file has no readable patch"; return 0; }
+  # The publish/release/deploy/merge words skip YAML comments (#12934): a
+  # whole-line comment is dropped; a trailing ` #...` is cut only on a line with
+  # no quote at all, so `echo "#release"` and any line not parsed safely stay
+  # scanned whole. Every other regex scans the raw lines.
+  NOCOMMENT_JSON=$(printf '%s' "$LINES_JSON" | jq -c '
+    [.[] | select(test("^\\s*#") | not)
+         | if test("[\"\u0027]") then . elif test("\\s#") then sub("\\s#.*$"; "") else . end]' 2>/dev/null) \
+    || { WF_BLAST_REASON="workflow lines unparseable"; return 0; }
   for rx in '\bpermissions\b' '\bsecrets\b' 'id-token' 'pull_request_target' 'workflow_run' \
     'github\.token' 'github_token' '\b(publish|release|deploy|merge)\b'; do
-    printf '%s' "$LINES_JSON" | jq -e --arg rx "$rx" 'any(.[]; test($rx; "i"))' >/dev/null 2>&1
+    SCAN_JSON=$LINES_JSON
+    case "$rx" in *publish*) SCAN_JSON=$NOCOMMENT_JSON ;; esac
+    printf '%s' "$SCAN_JSON" | jq -e --arg rx "$rx" 'any(.[]; test($rx; "i"))' >/dev/null 2>&1
     rc=$?
     # rc 1 = no such line; 0 = a hit; anything else = an error. Only 1 passes.
     [ "$rc" -eq 1 ] || { WF_BLAST_REASON="a workflow line matches '$rx'"; return 0; }
@@ -1029,6 +1072,28 @@ PR_JSON=$(cat "$(git rev-parse --git-common-dir)/loom-champion-facts-pr-$PR_NUMB
 HOLD_BODY=$(jq -r --arg m "$HOLD_MARKER" \
   '[.comments[] | select(.body | startswith($m))] | last | .body // ""' <<<"$PR_JSON")
 
+# ONE definition of "an operator release instruction", shared by release paths
+# (b) and (f) so the two can never drift (#12594). **Instruction-shaped
+# phrasing, mechanically enforced**: the trigger phrase must OPEN the comment's
+# leading clause (the first sentence of its first line, minus an optional
+# "@mention " / "please " courtesy prefix), and that clause must not be a
+# question. A plain substring match is not good enough — it reads "please do
+# NOT merge anyway", "do not clear the hold yet" and "is it ok to merge?" as
+# release signals, i.e. it releases the hold on the very comments where a human
+# just reinforced it. Anchoring is what rules those out: any negation or
+# interrogative lead-in ("do not", "don't", "never", "can we", "should I")
+# necessarily sits *before* the phrase, so the phrase is no longer the leading
+# clause. Prepended to a jq program: `jq "$RELEASE_DEFS"'<program>'`.
+RELEASE_DEFS='
+  def lead: sub("^[[:space:]]+"; "") | split("\n")[0]
+    | match("^[^.?!]*[.?!]?").string
+    | sub("^@[A-Za-z0-9_-]+[[:space:]]+"; "")
+    | sub("^please[[:space:]]*,?[[:space:]]*"; ""; "i");
+  def is_release_instruction: lead as $l
+    | ($l | test("\\?[[:space:]]*$") | not)
+    and ($l | test("^(clear|clearing|cleared|lift|lifting|lifted|override|overriding)([[:space:]]+(this[[:space:]]+|the[[:space:]]+)?hold\\b|[[:space:]]*[:,.—-]|[[:space:]]*$)|^merge[[:space:]]+(it[[:space:]]+)?anyway\\b|^ok[[:space:]]+to[[:space:]]+merge\\b|^proceed[[:space:]]+with[[:space:]]+(the[[:space:]]+)?merge\\b"; "i"));
+'
+
 if [ -z "$HOLD_BODY" ]; then
   PRIOR_HOLD=false          # never held — today's behavior, unchanged
   HOLD_AT=""; HOLD_HEAD=""; RELEASE_REASON=""; HOLD_OVERRIDE=false
@@ -1053,36 +1118,16 @@ else
     HOLD_OVERRIDE=true
   fi
 
-  # (b) An operator comment posted AFTER the hold that explicitly clears it.
-  #     **Instruction-shaped phrasing, mechanically enforced**: the trigger
-  #     phrase must OPEN the comment's leading clause (its first sentence), and
-  #     that clause must not be a question. A plain substring match is not good
-  #     enough — it reads "please do NOT merge anyway", "do not clear the hold
-  #     yet" and "is it ok to merge?" as release signals, i.e. it releases the
-  #     hold on the very comments where a human just reinforced it. Anchoring is
-  #     what rules those out: any negation or interrogative lead-in ("do not",
-  #     "don't", "never", "can we", "should I") necessarily sits *before* the
-  #     phrase, so the phrase is no longer the leading clause. Never a
-  #     Champion-authored comment either — Champion must not release its own hold.
+  # (b) An operator comment posted AFTER the hold that explicitly clears it:
+  #     an `is_release_instruction` comment (the shared RELEASE_DEFS above —
+  #     anchored trigger phrase, not a question). Never a Champion-authored
+  #     comment either — Champion must not release its own hold.
   if [ -z "$RELEASE_REASON" ]; then
-    CLEARED=$(jq -r --arg at "$HOLD_AT" '
+    CLEARED=$(jq -r --arg at "$HOLD_AT" "$RELEASE_DEFS"'
       [ .comments[]
         | select(.createdAt > $at)
         | select((.body | test("champion:|Automated by Champion role")) | not)
-        | . as $c
-        # Leading clause = first sentence of the first line (up to the first
-        # . ? or !), minus an optional "@mention " / "please " courtesy prefix.
-        | ( $c.body
-            | sub("^[[:space:]]+"; "")
-            | split("\n")[0]
-            | match("^[^.?!]*[.?!]?").string
-            | sub("^@[A-Za-z0-9_-]+[[:space:]]+"; "")
-            | sub("^please[[:space:]]*,?[[:space:]]*"; ""; "i") ) as $lead
-        # Interrogative mood is a question, not an instruction.
-        | select($lead | test("\\?[[:space:]]*$") | not)
-        # Trigger phrase anchored at the start of that clause.
-        | select($lead | test("^(clear|clearing|cleared|lift|lifting|lifted|override|overriding)([[:space:]]+(this[[:space:]]+|the[[:space:]]+)?hold\\b|[[:space:]]*[:,.—-]|[[:space:]]*$)|^merge[[:space:]]+(it[[:space:]]+)?anyway\\b|^ok[[:space:]]+to[[:space:]]+merge\\b|^proceed[[:space:]]+with[[:space:]]+(the[[:space:]]+)?merge\\b"; "i"))
-        | $c
+        | select(.body | is_release_instruction)
       ] | last
       | if . == null then "" else "\(.author.login) at \(.createdAt): \(.body | split("\n")[0])" end' <<<"$PR_JSON")
     if [ -n "$CLEARED" ]; then
@@ -1149,13 +1194,92 @@ else
   fi
 fi
 
+# (f) Operator-named release condition (#12594). A trusted comment opening with
+#     `<!-- loom:release-condition -->` (the condition text follows, on that
+#     line or the next) binds like a hold until a LATER comment closes it.
+#     Latest condition wins (an amendment replaces it; a closing comment older
+#     than the newest condition does not close it). It needs no prior hold
+#     marker, and it overrides release paths (b)-(e) — a new head, a Judge
+#     re-review, a label removal or an unrelated clearing comment must not drop
+#     an operator's condition — but NOT `loom:auto-merge-ok` (a), the explicit
+#     human override. Champion never decides a condition is met.
+#
+#     What CLOSES it: a trusted comment after the condition, by a person — an
+#     App-spelled author (`x[bot]`) never counts, so an unattended fleet role
+#     cannot record an operator's condition as met — not Champion-authored, that
+#     either
+#       - opens with `<!-- loom:release-condition-met -->`, or
+#       - is a release instruction (RELEASE_DEFS: `clear the hold — …`,
+#         `override: …`, `ok to merge — …`) whose body CITES the condition
+#         (the word "condition" anywhere in it). That is the operator's own
+#         form — "the hold may be cleared by a comment beginning `clear the
+#         hold —` that cites it" — and the same phrase the daemon redraws a
+#         held-at-head PR on (#12901). A `clear the hold` that does not cite
+#         the condition releases only the merge-risk hold, which (f) then
+#         re-imposes (the condition stays open, and is named in the notice).
+#     The Champion exclusions differ by direction, on purpose: a CONDITION is
+#     ignored only when Champion signed it (`*Automated by Champion role*`) —
+#     the broad `champion:` test would void an operator's condition that
+#     quotes a marker name, which fails open; a CLOSING comment is ignored on
+#     the broad test, which fails closed.
+COND_AT=$(jq -r '
+  [ .comments[]
+    | select((.body | test("Automated by Champion role")) | not)
+    | select(.body | startswith("<!-- loom:release-condition -->")) ] | last | .createdAt // ""' <<<"$PR_JSON")
+OPEN_CONDITION=false; COND_TEXT=""
+if [ -n "$COND_AT" ]; then
+  COND_MET=$(jq -r --arg at "$COND_AT" "$RELEASE_DEFS"'
+    [ .comments[]
+      | select(.createdAt > $at)
+      | select(((.author.login // "") | endswith("[bot]")) | not)
+      | select((.body | test("champion:|Automated by Champion role")) | not)
+      | select(.body | startswith("<!-- loom:release-condition-met -->")
+                      or (is_release_instruction and test("\\bcondition"; "i"))) ] | length' <<<"$PR_JSON")
+  if [ "$COND_MET" -eq 0 ]; then
+    OPEN_CONDITION=true
+    COND_TEXT=$(jq -r --arg at "$COND_AT" '
+      [ .comments[] | select(.createdAt == $at)
+        | select(.body | startswith("<!-- loom:release-condition -->")) ] | last | .body
+      | ltrimstr("<!-- loom:release-condition -->") | split("\n")
+      | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(length > 0)) | .[0:3] | join(" ")' <<<"$PR_JSON")
+  fi
+fi
+# The label is read here, not through HOLD_OVERRIDE: with no hold marker (a)
+# never ran, and `loom:auto-merge-ok` must override a condition either way.
+if [ "$OPEN_CONDITION" = true ] \
+   && ! jq -e '[.labels[].name] | any(. == "loom:auto-merge-ok")' >/dev/null <<<"$PR_JSON"; then
+  PRIOR_HOLD=true
+  RELEASE_REASON=""
+  MANUAL_RELEASE_SINCE_HOLD=false   # a human label removal does not satisfy the condition
+  LABEL_REPAIR=false                # the condition, not Champion's marker, is the hold
+else
+  OPEN_CONDITION=false              # closed, or overridden by the label: the rows below apply as usual
+fi
+
 if [ "$PRIOR_HOLD" = true ] && [ -z "$RELEASE_REASON" ]; then
   MERGE_BLOCKED_BY_HOLD=true
+  if [ "$OPEN_CONDITION" = true ]; then
+    # Name the condition once per condition comment (idempotent: the marker
+    # carries the condition's createdAt, so an amendment posts a new notice).
+    COND_MARKER="<!-- champion:release-condition-hold cond=$COND_AT -->"
+    if ! jq -e --arg m "$COND_MARKER" '[.comments[].body] | any(startswith($m))' >/dev/null <<<"$PR_JSON"; then
+      ./.loom/scripts/post-comment.sh "$PR_NUMBER" --pr --body "$COND_MARKER
+**Champion: Holding for an Operator Release Condition**
+
+Not merging: an operator-named release condition is still open — $COND_TEXT
+
+It survives new pushes, re-reviews, label removal and clearing comments that do not cite it. A person (not a fleet App) closes it with a comment that opens \`clear the hold — <evidence>\` and names the release condition it meets, or with one that opens with \`<!-- loom:release-condition-met -->\` followed by the evidence. \`loom:auto-merge-ok\` still overrides. Champion never decides a condition is met.
+
+---
+*Automated by Champion role*" >/dev/null 2>&1 || true
+    fi
+    echo "STICKY HOLD: #$PR_NUMBER has an open operator release condition ($COND_TEXT) — not merging"
+  fi
   # Label missing, no removal on record: restore it, so a sticky-held PR
   # never reads as plain approved and stays in the census (#11416).
   [ "$LABEL_REPAIR" = true ] && loom-daemon park-record apply --pr "$PR_NUMBER" \
     --reason "champion merge-risk hold" --by champion >/dev/null 2>&1 || true
-  echo "STICKY HOLD: #$PR_NUMBER was held at $HOLD_AT and nothing has changed since — not merging"
+  [ "$OPEN_CONDITION" = true ] || echo "STICKY HOLD: #$PR_NUMBER was held at $HOLD_AT and nothing has changed since — not merging"
   # Post NOTHING (the hold notice is already on the PR — see Hold behavior's
   # idempotency guard) and do NOT merge this PR this pass, whatever the axes say.
   #
@@ -1173,6 +1297,7 @@ fi
 |---|---|
 | `PRIOR_HOLD=false` | Judge the four axes normally. No behavior change from before #4742. |
 | `PRIOR_HOLD=true`, no `RELEASE_REASON` | **HOLD the merge, silently.** The PR is not merged this pass regardless of how the axes read this tick, and no comment is posted (anti-spam guard already covers it). It is **not** skipped, though: `MERGE_BLOCKED_BY_HOLD=true` routes it to the **Held-PR Health Pass** (#6720), which still evaluates criteria #4/#5/#6. |
+| `OPEN_CONDITION=true` (#12594), no `loom:auto-merge-ok` | **HOLD the merge** whatever (b)-(e) and the axes say — `PRIOR_HOLD=true`, `RELEASE_REASON=""`, `MERGE_BLOCKED_BY_HOLD=true`, even with no hold marker on the PR. The notice names the condition (once per condition comment). Closed only by a later trusted comment from a person (never an `x[bot]` author, never Champion) that opens with `<!-- loom:release-condition-met -->`, or that is a release instruction (`clear the hold — …`, `override: …`, `ok to merge — …`) citing the condition (the word "condition" in its body); then the rows below apply as usual. A clearing comment that does not cite it releases nothing: the condition is the hold. |
 | `PRIOR_HOLD=true`, released by `loom:auto-merge-ok` (`HOLD_OVERRIDE=true`) | Criterion #2 **PASS** by override — the axes are not re-scored. Continue to #3. Step 2's reversal block is **mandatory**. |
 | `PRIOR_HOLD=true`, released by (b), (c), (d), or (e) | Re-judge the four axes normally. Now green -> **PASS**, continue to #3, and Step 2's reversal block is **mandatory**. Still red **and** `MANUAL_RELEASE_SINCE_HOLD=true` **and** the concern is byte-identical to the prior hold's bullet -> **PASS** the same way: a human released exactly that concern (#11416); "Hold behavior"'s first branch executes it (no notice, no label). When your concern *is* the one on record, copy the prior bullet verbatim; write a new bullet only for a concern it does not name. Still red otherwise -> the hold persists: `MERGE_BLOCKED_BY_HOLD=true`, "Hold behavior" below, then the **Held-PR Health Pass**. |
 
@@ -1186,7 +1311,13 @@ the *same* diff on a *different* read.
 containing `champion:` or `*Automated by Champion role*`. A hold is released by a
 human/Judge signal or by the code moving — never by Champion talking to itself.
 That exclusion is also what keeps Champion's own rejection/janitor comments from
-tripping release path (b) or (d).
+tripping release path (b) or (d). Path (f) applies it to the comment that
+*closes* a condition (fail-closed), but only the `*Automated by Champion role*`
+signature to the comment that *opens* one: a condition an operator wrote is not
+voided because it quotes `champion:merge-risk-hold` (that would fail open). A
+condition is also closed only by a person's comment — an App-spelled author
+(`x[bot]`, how `forge trusted-comments --gh-shape` spells the fleet's own
+Apps) is trusted to hold, never to record an operator's condition as met.
 
 **Edge cases the precheck already covers** (no extra handling needed):
 
@@ -1280,9 +1411,25 @@ else
   # it instead of looping on a concern they were never shown.
   if [ "$MANUAL_RELEASE_SINCE_HOLD" != true ] && [ "$("$GH_READ" pr view "$PR_NUMBER" --json comments --jq "[.comments[].body] | any(startswith(\"$HOLD_MARKER\"))")" = "true" ]; then
     echo "Merge-risk hold already posted for #$PR_NUMBER — hold stands, no comment"
+    # #12933: the daemon drew this hold because the standing-authorization
+    # digest moved (or a legacy record has none). The hold stands, so record
+    # the current digest ONCE at this head — the daemon reads the LAST trusted
+    # `champion:hold-state` record — or every later tick redraws it, the no-op
+    # loop #12901 removed. Not a notice (no $HOLD_MARKER) and not a release
+    # phrase, so the hold on record and the state machine are unchanged.
+    HOLD_AUTH=$(loom-daemon config get champion.standingAuthorizations --digest 2>/dev/null)
+    RECORDED_AUTH=$(jq -r '[.comments[].body | capture("<!-- champion:hold-state head=[0-9a-f]+(?: auth=(?<a>[0-9a-f]+))?")] | last | .a // ""' <<<"$PR_JSON")
+    if [ -n "$HOLD_AUTH" ] && [ "$RECORDED_AUTH" != "$HOLD_AUTH" ]; then
+      ./.loom/scripts/post-comment.sh "$PR_NUMBER" --pr --body "<!-- champion:hold-state head=$HEAD_SHA auth=$HOLD_AUTH -->
+**Champion: hold re-read under changed standing authorizations (#12933)** — re-evaluated at this head; the hold notice above still applies. The digest is recorded so this re-read happens once per policy change."
+    fi
   else
+    # Standing-authorization digest (#12933): a later change to
+    # `champion.standingAuthorizations` differs from it and re-reads this hold once.
+    HOLD_AUTH=$(loom-daemon config get champion.standingAuthorizations --digest 2>/dev/null)
+    HOLD_AUTH_FIELD=""; [ -n "$HOLD_AUTH" ] && HOLD_AUTH_FIELD=" auth=$HOLD_AUTH"
     ./.loom/scripts/post-comment.sh "$PR_NUMBER" --pr --body "$HOLD_MARKER
-<!-- champion:hold-state head=$HEAD_SHA -->
+<!-- champion:hold-state head=$HEAD_SHA${HOLD_AUTH_FIELD} -->
 **Champion: Holding for Human Merge**
 
 Judge-approved and passing the mechanical safety criteria, but not
@@ -2262,7 +2409,15 @@ EOF
 # reversal-comment pass. merge-pr.sh refuses loom:pr + loom:blocked (#8112),
 # so the label must be off before Step 3. The park record stays in the body.
 if [ -n "$HOLD_REVERSAL_BLOCK" ]; then
-  gh pr edit "$PR_NUMBER" --remove-label "loom:blocked" 2>/dev/null || true
+  if gh pr edit "$PR_NUMBER" --remove-label "loom:blocked" 2>/dev/null; then
+    RELEASE_FAILED=""
+  else
+    RELEASE_FAILED="--failed"
+  fi
+  # #12665: journal the release as a `hold.transition` (no forge write; a no-op
+  # outside a role tick). $HOLD_AT is the hold's own timestamp from the precheck.
+  loom-daemon park-record released --pr "$PR_NUMBER" --entered-at "${HOLD_AT:-}" \
+    $RELEASE_FAILED >/dev/null 2>&1 || true
 fi
 "$GH_READ" --clear-cache   # your own write must not be masked by your own cache
 ```
@@ -2341,6 +2496,38 @@ echo "CHAMPION-MERGE-OUTCOME pr=$PR_NUMBER rc=$MERGE_RC"
 outcome is **unknown**: neither failure nor re-queue. Never infer `MERGE_RC`;
 re-read the PR (a killed call may have merged and lost only its report), then
 go to "No exit code at all" in "Error Handling".
+
+### Step 3.5: Rebase conflicting Dependabot siblings (#12948)
+
+Only after Step 3 printed `CHAMPION-MERGE-OUTCOME ... rc=0` for a PR authored by
+`dependabot[bot]`. Sibling bumps in one repo conflict on the lockfile once the
+first merges; Dependabot rebases on request. Comment `@dependabot rebase` once
+on each open Dependabot PR that now reports a conflict. Nothing else: do not
+touch labels, do not push, do not merge them here. They re-enter the ordinary
+evaluation when they come back green. If `main` goes red after a Dependabot
+merge, that is Auditor or Builder work (revert or fix forward); it is not a
+reason to pre-hold the next bump.
+
+```bash
+PR_NUMBER=$1
+AUTHOR=$(gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER" --jq '[.user.login, .user.type] | join(" ")' 2>/dev/null)
+if [ "$AUTHOR" = "dependabot[bot] Bot" ]; then
+  gh api "repos/{owner}/{repo}/pulls?state=open&per_page=100" --paginate \
+    --jq '.[] | select(.user.login == "dependabot[bot]" and .user.type == "Bot") | .number' 2>/dev/null |
+  while read -r SIB; do
+    [ "$SIB" = "$PR_NUMBER" ] && continue
+    # `mergeable` is computed lazily: null = not yet known, so skip it this pass.
+    [ "$(gh api "repos/{owner}/{repo}/pulls/$SIB" --jq '.mergeable' 2>/dev/null)" = "false" ] || continue
+    MARK="<!-- champion:dependabot-rebase pr=$SIB after=$PR_NUMBER -->"
+    gh api "repos/{owner}/{repo}/issues/$SIB/comments" --paginate --jq '.[].body' 2>/dev/null | grep -qF "$MARK" && continue
+    ./.loom/scripts/post-comment.sh "$SIB" --pr --body "@dependabot rebase
+
+Champion: #$PR_NUMBER merged and this bump now conflicts. Requesting a rebase.
+
+$MARK"
+  done
+fi
+```
 
 ### Step 4: Verify Issue Auto-Close
 

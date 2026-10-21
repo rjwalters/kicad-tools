@@ -300,6 +300,7 @@ tests/install/test-daemon-build-otlp-probe.sh
 tests/install/test-daemon-build-shortcut.sh
 tests/install/test-dry-run-preview-manifest.sh
 tests/install/test-forge-detect.sh
+tests/install/test-gitattributes-in-install-worktree.sh
 tests/install/test-git-repo-detection.sh
 tests/install/test-hooks-preserve.sh
 tests/install/test-initial-commit-credential-exclusion.sh
@@ -341,3 +342,6 @@ test-spawn-claude-memory-max.sh
 # #11863: prompt-lint that targeted Judge/Curator/Builder invocations repeat
 # discovery gates before the first write. Hermetic: reads files only.
 test-targeted-role-invocation.sh
+# #10574: prompt-lint that Judge/Doctor CI-wait recipes agree (snapshot vs
+# bounded wait, unknown required contexts). Hermetic: reads files only.
+test-ci-wait-prompt-consistency.sh

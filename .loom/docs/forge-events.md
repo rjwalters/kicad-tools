@@ -104,6 +104,31 @@ from its last listing in between; a gateway reserve refusal ends the tick's
 discovery without tripping the rate-limit breaker; and there is no writer
 tier. Claim, label-transition and merge reads never read the snapshot.
 
+#### Standalone Loom (#12312)
+
+One daemon outside any fleet, on GitHub or Gitea, is a first-class mode and
+the default. With no `forge.mirror` block the chain is `[gh]`: the **direct
+backend** lists each served repo once per tick with the installation's own
+credential. There is no mirror request, no gateway request, no fleet config
+and no second App. The tick span says `loom.discovery.tier = gh`, or `none`
+when no repo could be read, and a failed listing serves the last-good copy
+for `LAST_GOOD_TTL`.
+
+The backend is forge-neutral at the interface and forge-specific underneath.
+GitHub is one `/issues` walk (it includes PRs) plus `/pulls`. Gitea is
+`/issues?type=issues` and `/issues?type=pulls` plus `/pulls?state=open`,
+paged by `limit=50`. The draw needs number, kind, state, labels and a PR's
+head SHA; a field a forge cannot give is `None` (`labels_at`, sub-issue and
+blocked-by counts, `author_association`, the check summary) and the
+classifier tolerates it. The landed pre-filter's GraphQL stays GitHub-only.
+A response without an `ETag` is never cached, so it is never a stale hit.
+
+On the fleet the same backend is the `gateway` and `gh` tiers. The fleet's
+`gh` tier runs in an isolated `gh` environment (its own `GH_CONFIG_DIR`,
+`LOOM_DISCOVERY_GH_CONFIG_DIR`, default `~/.loom/discovery-gh`, with every
+token variable removed), so it never borrows an App profile and fails closed
+on a host that has not logged in there.
+
 ### 2. Change stream
 
 While a mirror is live, the daemon pulls `GET /v1/changes?repos=…&after=…`

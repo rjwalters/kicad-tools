@@ -1,15 +1,15 @@
 WARNING: path_ampacity is INACTIVE without --current-paths and will silently pass. No sidecar was found at any of:
-  /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-7241/tmp/b07build/validation/checked.current_paths.json
-  /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-7241/tmp/b07build/validation/current_paths.json
-  /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-7241/tmp/b07build/validation/output/checked.current_paths.json
-  /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-7241/tmp/b07build/validation/output/current_paths.json
-  /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-7241/tmp/b07build/output/checked.current_paths.json
-  /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-7241/tmp/b07build/output/current_paths.json
+  /tmp/b07d/validation/checked.current_paths.json
+  /tmp/b07d/validation/current_paths.json
+  /tmp/b07d/validation/output/checked.current_paths.json
+  /tmp/b07d/validation/output/current_paths.json
+  /tmp/b07d/output/checked.current_paths.json
+  /tmp/b07d/output/current_paths.json
 Pass one explicitly with --current-paths, or place it at one of the paths above, to validate declared branch current paths.
 {
-  "file": "tmp/b07build/validation/checked.kicad_pcb",
+  "file": "checked.kicad_pcb",
   "manufacturer": "jlcpcb",
-  "pcb_sha256": "ae86ebe3111122a90415bb08d38caca86a2ab40edc4d90c1aa5d3186c99b6b58",
+  "pcb_sha256": "47e077d26764b4abb4ba9595ddcea4e36817829186f497741b271906bc132a0b",
   "layers": 6,
   "summary": {
     "errors": 0,
@@ -476,5 +476,5 @@ Pass one explicitly with --current-paths, or place it at one of the paths above,
   },
   "verdict": "incomplete",
   "exit_code": 2
-}DRC-constraint sidecars updated: /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-7241/tmp/b07build/validation/checked.kicad_pro, /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-7241/tmp/b07build/validation/checked.kicad_dru
+}DRC-constraint sidecars updated: /tmp/b07d/validation/checked.kicad_pro, /tmp/b07d/validation/checked.kicad_dru
 
