@@ -269,6 +269,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_net_status_parser(subparsers)
     _add_fleet_parser(subparsers)
     _add_ecosystem_parser(subparsers)
+    _add_models_parser(subparsers)
     _add_skills_parser(subparsers)
     _add_agent_guide_parser(subparsers)
     _add_render_parser(subparsers)
@@ -3280,7 +3281,7 @@ def _add_pcb_parser(subparsers) -> None:
         choices=["host", "pinned"],
         default="host",
         help="Resolution environment: this machine's render env (host) or the "
-        "pinned toolchain image (pinned; no model set yet, so nothing resolves)",
+        "pinned toolchain image with the model subset from `kct models sync` (pinned)",
     )
     pcb_model_audit.add_argument(
         "--model-dir",
@@ -9494,6 +9495,37 @@ def _add_export_parser(subparsers) -> None:
         choices=["text", "json"],
         help="Output format for preflight results (default: text)",
     )
+
+
+def _add_models_parser(subparsers) -> None:
+    """Add the ``models`` parent-subaction parser (Issue #7683)."""
+    from .format_options import add_format_flag
+
+    models_parser = subparsers.add_parser(
+        "models",
+        help="Manage the pinned subset of KiCad's stock 3D models",
+        description=(
+            "Fetch and verify the pinned, sha256-checked subset of the KiCad "
+            "3D model library that the pinned toolchain resolves "
+            "${KICAD10_3DMODEL_DIR} against."
+        ),
+    )
+    models_subparsers = models_parser.add_subparsers(dest="models_command", help="Models commands")
+    models_sync = models_subparsers.add_parser(
+        "sync",
+        help="Download and verify the pinned model subset",
+    )
+    models_sync.add_argument(
+        "--sparse",
+        action="store_true",
+        help="Fetch only the manifest's files (the only mode; accepted for clarity)",
+    )
+    add_format_flag(models_sync, dest="models_format")
+    models_status = models_subparsers.add_parser(
+        "status",
+        help="Report whether the local cache holds the full verified subset",
+    )
+    add_format_flag(models_status, dest="models_format")
 
 
 def _add_ecosystem_parser(subparsers) -> None:

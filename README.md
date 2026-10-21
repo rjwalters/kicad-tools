@@ -728,6 +728,11 @@ uv run ruff format .
 
 #### Fresh worktree checklist
 
+> Pinned renders and `kct pcb model-audit --env pinned` also need the
+> checksum-verified KiCad 3D model subset: run `uv run kct models sync --sparse`
+> once (about 14 MB; cached under `~/.cache/kicad-tools/kicad-3dmodels/`). Without
+> it they report `pinned model set not synced`; nothing else breaks.
+
 1. **Sync the lock-pinned dev environment first**:
 
    ```bash
