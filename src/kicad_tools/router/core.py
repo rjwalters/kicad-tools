@@ -5081,6 +5081,9 @@ class Autorouter:
         changed = False
         for pc in coupled:
             nets = frozenset({pc.pad_p_a.net, pc.pad_n_a.net})
+            # Issue #7463: record only the nets this exemption ADDS -- a pair
+            # net that is itself a site's sealed net was exempt already.
+            before = {a.name: a.exempt for a in areas}
             names: list[str] = []
             for pad_p, pad_n in ((pc.pad_p_a, pc.pad_n_a), (pc.pad_p_b, pc.pad_n_b)):
                 areas, hit = exempt_pair_in_gateway_envelope(
@@ -5092,13 +5095,15 @@ class Autorouter:
                     areas[idx] = replace(area, exempt=area.exempt | nets)
                     names.append(area.name)
             for name in dict.fromkeys(names):
-                added[name] = added.get(name, frozenset()) | nets
+                added[name] = added.get(name, frozenset()) | (nets - before.get(name, frozenset()))
                 changed = True
                 print(
                     f"  Pair reservation exemption (#6956): {name} lies in "
                     f"{pc.pair_name}'s gateway envelope; exempts the pair's nets"
                 )
         self._lattice_pair_exempt_added = added
+        # Issue #7463: the gateway ranking reads each site as reserved.
+        pf.pair_exempt_added = dict(added)
         if changed:
             pf.set_keepouts(LatticeKeepoutMask(tuple(areas)))
 
@@ -5243,6 +5248,7 @@ class Autorouter:
             pf.set_keepouts(self._lattice_keepouts_with_plane_via_sites())
             # Issue #6956: a fresh mask carries no pair-net exemptions.
             self._lattice_pair_exempt_added = {}
+            pf.pair_exempt_added = {}
 
         coupled, connections = self._lattice_netset_connections()
 

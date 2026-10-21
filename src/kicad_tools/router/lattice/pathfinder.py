@@ -726,6 +726,9 @@ class LatticePathfinder:
         # rule areas) keeps every predicate on its pre-#4605 path
         # byte-for-byte.
         self._keepouts: LatticeKeepoutMask | None = None
+        # Issue #7463: the #6956 pair-net exemptions the router added to each
+        # keepout area (by area name), so a site can be read as reserved.
+        self.pair_exempt_added: dict[str, frozenset[int]] = {}
         # Issue #6935: why the last ``_pair_attach`` found no dogleg.
         self._attach_blocker = ""
         from ..fixed_copper import FixedFillObstacles
@@ -3826,6 +3829,7 @@ class LatticePathfinder:
         """
         from ..pairplan.gateway import (
             MAX_WORKABLE_GATEWAY_COMBOS,
+            MAX_WORKABLE_SEALED_GATEWAY_COMBOS,
             GatewayCombo,
             WorkableCombo,
             combo_length_floor,
@@ -3864,6 +3868,13 @@ class LatticePathfinder:
         ends = (
             (pc.pad_p_a, pc.pad_n_a, pc.mid_b),
             (pc.pad_p_b, pc.pad_n_b, pc.mid_a),
+        )
+        # Issue #7463: the layers a pad sandwiched between the pair's pads
+        # can leave on (the pair's own pad layers).
+        pad_layers = frozenset(
+            layer
+            for pad in (pc.pad_p_a, pc.pad_n_a, pc.pad_p_b, pc.pad_n_b)
+            for layer in self._pad_layer_indices(pad)
         )
         notes: list[str] = []
         reason = "pair-gateway-no-candidates"
@@ -3975,7 +3986,12 @@ class LatticePathfinder:
             tried = 0
             pruned = 0
             for order, (layer, lname, gated, combo) in enumerate(candidates):
-                if workable >= MAX_WORKABLE_GATEWAY_COMBOS:
+                # Issue #7463: a best that still seals a neighbour's escape
+                # site keeps the search going, up to the sealed-extra cap.
+                cap = MAX_WORKABLE_GATEWAY_COMBOS
+                if best is not None and best[0].sealed:
+                    cap = MAX_WORKABLE_SEALED_GATEWAY_COMBOS
+                if workable >= cap:
                     break
                 if deadline is not None and time.monotonic() >= deadline:
                     if best is not None:
@@ -3995,7 +4011,7 @@ class LatticePathfinder:
                 if best is not None:
                     fans = sum(g.fan_len_p + g.fan_len_n for g in (ga, gb) if g is not None)
                     floor = combo_length_floor(end_a, end_b, fans)
-                    if round(floor, 3) >= best[0].key()[0]:
+                    if best[0].sealed == 0 and round(floor, 3) >= best[0].key()[1]:
                         pruned += 1
                         continue
                 tried += 1
@@ -4024,7 +4040,12 @@ class LatticePathfinder:
                     lengths[0 if net == pc.pad_p_a.net else 1] += sum(
                         dist(a, b) for a, b in zip(poly, poly[1:], strict=False)
                     )
-                scored = WorkableCombo(order, lengths[0], lengths[1])
+                scored = WorkableCombo(
+                    order,
+                    lengths[0],
+                    lengths[1],
+                    self._escape_sites_sealed(pres, half, pad_layers),
+                )
                 if best is None or scored.key() < best[0].key():
                     desc = []
                     for tag, g, thr in (("A", ga, through[0]), ("B", gb, through[1])):
@@ -4055,6 +4076,59 @@ class LatticePathfinder:
             declined += f"; {summary}"
         self.pair_gateway_log[pc.key] = declined
         return None, reason
+
+    def _escape_sites_sealed(
+        self, pres: _PairResult, half: float, pad_layers: frozenset[int] | None = None
+    ) -> int:
+        """Pair vias / tracks inside another net's #6697 escape site (#7463).
+
+        #6956 exempts a declared pair from the escape sites reserved in its
+        gateway envelope, so a gateway may legally land its vias on the exit
+        of a routed pad sandwiched between the pair's own pads (board 03 VBUS
+        U2.5: USB_D's In2.Cu gateway vias sit on its reserved via site).  The
+        pair then closes the pad in and the net can never leave it
+        (``decline[no-path-keepout-constrained]``).  This counts those hits
+        so :class:`~..pairplan.gateway.WorkableCombo` can rank a combination
+        that leaves every site open ahead of one that does not.
+
+        Only copper that can close the sealed pad's exit counts: a via (its
+        barrel takes the site on every layer) or a track on ``pad_layers``,
+        the pair's own pad layers, which the sandwiched pad shares.  The
+        coupled body on the gateway layer may cross the site: it costs the
+        sealed net its via there, not its pad-layer exit (board 03: VBUS
+        U2.5 leaves on F.Cu between the pair's parallel gateway vias, under
+        USB_D's In2.Cu body).  ``None`` counts tracks on every layer.
+
+        Each piece of copper is tested with its own net against the site as
+        reserved, i.e. with the #6956 pair exemption
+        (:attr:`pair_exempt_added`) taken back out: the site still applies to
+        every net but the sealed one, so a pair net's copper in that net's
+        own escape site is not counted.
+        """
+        mask = self._keepouts
+        if mask is None:
+            return 0
+        added = self.pair_exempt_added
+        sites = LatticeKeepoutMask(
+            tuple(
+                replace(a, exempt=a.exempt - added[a.name]) if a.name in added else a
+                for a in mask.areas
+                if a.name.startswith("pair-escape-via:")
+            )
+        )
+        if not sites:
+            return 0
+        via_radius = float(self.rules.via_diameter) / 2.0
+        hits = sum(1 for net, at in pres.vias if sites.via_blocked(at, net, via_radius))
+        for net, layer, poly in pres.runs:
+            if pad_layers is not None and layer not in pad_layers:
+                continue
+            hits += sum(
+                1
+                for a, b in zip(poly, poly[1:], strict=False)
+                if sites.segment_blocked(a, b, layer, net, half)
+            )
+        return hits
 
     @staticmethod
     def _gateway_launch(g: Gateway | None, pad_p: Pad, pad_n: Pad) -> tuple[Pt, Pt]:
