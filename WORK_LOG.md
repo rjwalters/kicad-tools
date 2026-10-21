@@ -15,6 +15,7 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-21
 
+- **Issue #7186** (closed): kct post-route DRC reports 33 shorts on routed board 07m where pinned kicad-cli reports 0 (engine disagreement)
 - **PR #7744**: fix: gate board recipes on manufacturing export result
 - **Issue #7740** (closed): board generators report Overall: PASS and exit 0 when the manufacturing-bundle export fails
 - **PR #7739**: test(board00): assert the manufacturing bundle exists before kct check
