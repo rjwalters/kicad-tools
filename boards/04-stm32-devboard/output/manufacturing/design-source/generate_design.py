@@ -2587,6 +2587,7 @@ def main() -> int:
             route_allowance=0,
             lvs_ok=copper_clean,
             rule_allowances={},
+            export_ok=mfr_success,
         )
 
         # Summary
@@ -2610,7 +2611,6 @@ def main() -> int:
         print(f"  Power-pad tie: {'SUCCESS' if tie_success else 'FAIL'}")
         print(f"  Hole-to-hole relocate: {'SUCCESS' if drill_clearance_success else 'FAIL'}")
         print(f"  Zone fill: {'SUCCESS' if fill_success else 'FAIL'}")
-        print(f"  Manufacturing bundle: {'WRITTEN' if mfr_success else 'FAILED'}")
         print("\nBoard description:")
         print("  - U1: MCP1825S-3302E/DB LDO (5V to 3.3V)")
         print("  - U2: STM32F103C8T6 MCU (LQFP-48, 0.5mm pitch)")
