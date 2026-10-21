@@ -1527,7 +1527,7 @@ import EasyEDA models via a library instead of our own fetch code.\
 name = "kicad-library-tools"
 slug = "kicad/libraries/kicad-library-tools"
 repo_url = "https://gitlab.com/kicad/libraries/kicad-library-tools"
-vcs = "github"
+vcs = "gitlab"
 category = "3d-models"
 relation = "upstream"
 verdict = "complementary"
