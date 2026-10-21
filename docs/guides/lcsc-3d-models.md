@@ -279,3 +279,9 @@ The EasyEDA client is a ~50-line in-repo, stdlib-only (`urllib` + `json`)
 two-call fetch (`.../api/products/{lcsc_id}/components` → extract the 3D-model
 uuid → `https://modules.easyeda.com/.../{uuid}` → raw STEP bytes). No
 `easyeda2kicad` dependency is added.
+
+## See also
+
+- [3D model coverage research note](../research/3d-model-coverage.md): measured
+  per-board 3D body coverage on the host and pinned CI toolchains, model
+  licensing findings, and how coverage interacts with the render checks.

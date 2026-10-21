@@ -23,6 +23,11 @@ npm --prefix site run check-links -- --external
 npm --prefix site run preview -- --host 127.0.0.1
 ```
 
+CI (the `Site` job in `.github/workflows/ci.yml`) runs `ci`, `test`, `check`,
+`build` and `check-links` (without `--external`) on every PR that touches
+`site/`, the benchmark results, board readiness files or the board JSON schema
+doc, including Dependabot `/site` bumps.
+
 The preview serves the production build. Check the printed URL, then inspect
 home, `/benchmarks/`, a board with assets and a development board such as
 `/09-usbc-pd-power/`. Test narrow mobile and desktop widths, the first-Tab skip
@@ -43,6 +48,11 @@ layout, focus order or KiCanvas viewer behavior.
 `predev` and `prebuild` run `scripts/copy-renders.mjs` automatically. To stage
 assets separately, run `npm --prefix site run copy-renders`. `site/dist/` and
 `site/public/boards/` are generated and ignored by git.
+
+Board renders (`output/renders/`, `output/manufacturing/renders/`) are derived
+presentation artifacts, not readiness evidence: `kct readiness` does not hash
+them into `readiness.json` `inputs`, so the deploy's `kct render boards/` step
+cannot make committed readiness evidence stale (Issue #7678).
 
 ## Pages and content ownership
 
@@ -153,6 +163,12 @@ or CI auto-deploy. Use one publication owner for a coordinated release. In
 particular, #5318 demonstrated why updating only Board05's viewer would leave
 its stale PCB in the downloadable project. Verify viewer, renders and packages
 as one set.
+
+Between publishes, the weekly warn-only workflow
+[`site-drift.yml`](../.github/workflows/site-drift.yml) (also runnable locally
+as `python3 scripts/ci/site_drift.py`) reports when the live footer version,
+board readiness/evidence dates or PCB/package hashes differ from this
+checkout. Run it after every publish; it should report no drift.
 
 The deployment workflow requires `uv`, Node/npm and authenticated `wrangler`
 (or its `npx` fallback). `kicad-cli` is optional for the script, but required

@@ -15,6 +15,13 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-21
 
+- **PR #7672**: ci: add warn-only weekly live-site drift check
+- **Issue #7664** (closed): site: detect when kicad-tools.org falls behind main (weekly drift check + release-checklist step)
+- **PR #7677**: fix: show schematic title in gallery headings and flag stale board.json
+- **PR #7692**: docs: commit the 3D model coverage research note and index it
+- **Issue #7691** (closed): docs: commit the 3D model coverage research note and index it
+- **PR #7676**: fix: refresh routing-status page context and silence companion-file loader warnings
+- **Issue #7668** (closed): site: refresh routing-status page text and bind reviewed context to the 2026-09-15 BeagleConnect run
 - **PR #7673**: feat(site): expand homepage capability cards and test README anchors
 - **PR #7674**: fix: add 404 page so missing site paths return 404 instead of the homepage
 - **PR #7653**: chore(deps): Bump certifi from 2025.11.12 to 2026.10.19

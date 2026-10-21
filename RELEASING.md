@@ -66,6 +66,11 @@ and each obeys the same kill switch.
 | 2. Tag the release PR head (merge's 2nd parent, on `main`) | `release-tag.yml` (every push to `main`) | `scripts/release_tag.py tag` (`tests/test_release_tag.py`) |
 | 3. Publish to PyPI | `publish.yml` (on the `v*` tag, **unchanged**) | — |
 | 4. GitHub Release + PyPI check | `release-finalize.yml` (when publish completes) | `scripts/release_tag.py finalize` |
+| 5. Publish kicad-tools.org (**manual**, #7664) | `./scripts/deploy-site.sh` | see `site/README.md` "Publish and verify public bytes" |
+
+The site is **not** published by any workflow (no Cloudflare credentials in
+GitHub), so releases ship without it unless stage 5 is done by hand. The weekly
+`site-drift.yml` workflow warns when the live site lags the latest tag.
 
 **Kill switch:** the repo variable `AUTO_RELEASE` is `on`, `off` or `dry-run`;
 **unset means `dry-run`**. `off` stops every stage, including tagging.
@@ -490,3 +495,6 @@ above; no runner infrastructure is maintained for this repo.
 - [ ] Annotated tag `vX.Y.Z` created on the **release PR's head as merged into `main`** (the merge's second parent).
 - [ ] `git push origin vX.Y.Z` — `publish.yml` builds the tagged commit and
       publishes to PyPI.
+- [ ] Publish kicad-tools.org: follow `site/README.md` "Publish and verify
+      public bytes", then dispatch `site-drift.yml` (or run
+      `python3 scripts/ci/site_drift.py`) and confirm it reports no drift.
