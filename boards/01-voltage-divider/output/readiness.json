@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "checked_at": "2026-10-18T22:00:00+00:00",
+  "checked_at": "2026-10-21T13:12:37.383785+00:00",
   "mode": "assembly",
   "status": "ready",
   "blockers": [],
@@ -43,15 +43,15 @@
     {
       "name": "bom",
       "status": "passed",
-      "detail": "3 BOM line(s) carry procurement identifiers; part check OK: 4 of 4 assigned item(s) verified against offline catalog and parts cache; no LCSC value/package mismatches; CPL includes 2 through-hole component(s) for fab assembly."
+      "detail": "3 BOM line(s) carry procurement identifiers; part check WARN: 0 of 4 assigned item(s) verified (no source); 4 unverifiable (not in parts cache or offline catalog) [unverified: J1 -> C7501260, R1 -> C17414, R2 -> C17414, J2 -> C7501260]; CPL includes 2 through-hole component(s) for fab assembly."
     }
   ],
   "engine": {
-    "kicad_tools_version": "0.23.0",
+    "kicad_tools_version": "0.24.0",
     "dirty": true,
     "manufacturer": "jlcpcb",
-    "commit": "fcd5987ef0272b8dbccabc8987a889c78f3c2834",
-    "source_digest": "cbced68c002b1db9994df467975a93df9b5c916e43f15b87707b798f92255a79",
+    "commit": "3ba8f17f3cb219db6e2555d72bfe8dcf452827b5",
+    "source_digest": "3808d4238ecd3ebbc9c88485899674e11d5d9c267d2f0fa9f6023a60c97577ef",
     "kicad_cli_version": "10.0.6",
     "rules_digest": "e2191ef3eeb863f7ff985cc236541e924c9a62795cc62d3bae0df611707e6769"
   },
@@ -70,13 +70,13 @@
   },
   "inputs": {
     "output/kicad_tools_pwr.kicad_sym": "71eaf0c4ab5fa98844ee534f95f71e523589558236f7c6723b361ab1b9caa911",
-    "output/manufacturing/README.txt": "b3c8cce1e8086a38c45bbac0ba105a2ee01d15555e1963b237d1c5fe7282d1c3",
-    "output/manufacturing/assembly-back.pdf": "10106887e448f25b8f3dfc141ce915707e9fe07d22e8ce7f5af1dc0684de6c87",
-    "output/manufacturing/assembly-front.pdf": "35e58edebf8117f044b86f89e37431bdc834ad467a3e2fb1650648a8ac956777",
+    "output/manufacturing/README.txt": "f27b5184f87e6942e2162a8237873a96e1de553e77b21a1fbd69afb4acc2765d",
+    "output/manufacturing/assembly-back.pdf": "3ca300f7e7d21c5367608471042878af46c7f1a675d41ea147793ed1f8883d28",
+    "output/manufacturing/assembly-front.pdf": "414e4736f07be883c800e597889016267c0fa16873032cc910c8f3c522af31bc",
     "output/manufacturing/bom_jlcpcb.csv": "9f279e0b3cbe583b95b3b7af202a91f6825e67e4451e7ae3b438b7d42d12efdd",
-    "output/manufacturing/check-report.json": "9a2cf31d7ad1750c71184da8e8ab17c647ae64d28153a8a2f7dbe63fad349c10",
+    "output/manufacturing/check-report.json": "1871b8a1e4d2ff5ba9f4395c951a99ec36064c79a3804da622b7536f6d535c80",
     "output/manufacturing/cpl_jlcpcb.csv": "847457252c291c9086804931f5016de06f78dc1aa1020d4a0068bc98ddd89c36",
-    "output/manufacturing/gerbers/gerbers.zip": "34f94ba8b02ee49390f1150a8d5b1df3cc789d23f742655b7d8c3e1b6b32c001",
+    "output/manufacturing/gerbers/gerbers.zip": "c12ceeaaa67adccca0df02145afc9847293e5c5b7fdf8a978ef1360b17f827b1",
     "output/manufacturing/images/assembly.png": "1cadbdcde2169e08438f00dc4faeddd06cc7f1d39447fa15710e93afda7308ea",
     "output/manufacturing/images/layer_B_Cu.png": "59fc411a2d5f6dab59d05e0f5f731708ac293ef22eb9249005cfef9d8f89cd9c",
     "output/manufacturing/images/layer_F_Cu.png": "9232bbd85a7a3447ad2067120c44361fd9ae95890c51c8e92f098e1dac8c988b",
@@ -85,13 +85,13 @@
     "output/manufacturing/images/pcb_front.png": "2d23067f74d0008a74139654171bebbb867c98f8db1348e01f43bc499a6ad519",
     "output/manufacturing/images/schematic_voltage_divider.png": "02421af6d6d8fcfc31b5d5d4ddbb02bba24ae16635caccd9e9c90b4acb05e10b",
     "output/manufacturing/kicad_project.zip": "ea4856e580f093e47d5d3eea5d2db07ec9119cf3a7e1762bd2120bf6b3a8d63b",
-    "output/manufacturing/manifest.json": "241fa2aa74060bed2d7bfc3b0dbaa878a4714d82704305630089fbc8f47851a6",
+    "output/manufacturing/manifest.json": "f239d68f20d2de0a0b3fbef265d33b7c704aebbeb671d8b1b13504c927b561fd",
     "output/manufacturing/native-drc.json": "e8e05aac0968fd03ab3410b2f8efcdefa0ba3b4225a5cc91023db72296668072",
     "output/manufacturing/procurement-review.md": "7bf87f6f618aed07a81f2e01bb00cb72a6c32c853ce2f1f3f8bee5ed1e848ebd",
-    "output/manufacturing/report.md": "e391de90b14da0bcb07fa7ec99c4ef934e4917266c5b7bb8bc6582854ac1735d",
-    "output/manufacturing/report.pdf": "be3ff7f0745f7ea2f42dbe2c6ed882321a0650139dfcfc3851664d7cecf74b6b",
-    "output/manufacturing/schematic.pdf": "750f942a4aaf20e10db2f1d72fe43b548b1f31ea979b933b10ab6f9c635091be",
-    "output/manufacturing.zip": "4001dec7c763fb899843b45b3677e61a4288fa982371519ef1f8148a2239b718",
+    "output/manufacturing/report.md": "2516aeea83191d46853e1a9653f529bafbfb51666797b3091aeed7a0393f2c99",
+    "output/manufacturing/report.pdf": "42319538ce0e5a1ba2ca14f602c1df0fbb4a81fb754034c0ef45e77a8af1a2b5",
+    "output/manufacturing/schematic.pdf": "8af759e9a1709d9c4eb8750eb33128857871e70430fa65102235cf599c8b04a4",
+    "output/manufacturing.zip": "d9f2d0074c7acb9cfab030dd565053207ede093b1d2a3a0e6997eb4a8d0d063c",
     "output/readiness/fill-consistency.json": "90b42a4a9ae865d88a551272d934d834cf7edea1e4cdce73e758467f9999c80d",
     "output/readiness/fill-refilled/sym-lib-table": "05eec8c92281801842dde8ed3dd6ff5192bbc64e25e053a3294f63c50bb0149c",
     "output/readiness/fill-refilled/voltage_divider.kicad_pro": "d729bd613d8798b7b1b3acf39d153f8447342e393587afff543b1c21a3e3f5c9",
@@ -103,10 +103,10 @@
     "output/readiness/fill-saved/voltage_divider_routed.kicad_dru": "d9816b36c04dc038b445b0d44943e1bd879c7a69f00b12a496de346e23ed70e0",
     "output/readiness/fill-saved/voltage_divider_routed.kicad_pcb": "9a42943ac4b05d748ddfad96940c7363592fefec69ca65319a739ebbef530045",
     "output/readiness/fill-saved/voltage_divider_routed.kicad_pro": "ed1b123046a7d2ee89193a0cd0b8ab62575a4b9eca35e555e42f530b1c73f092",
-    "output/readiness/kct-check.json": "9a2cf31d7ad1750c71184da8e8ab17c647ae64d28153a8a2f7dbe63fad349c10",
-    "output/readiness/native-drc-raw.json": "88745dc01f6a03bb899caaf5084b593b894d8f68f816cbe40c9b9c1c7b153de9",
+    "output/readiness/kct-check.json": "1871b8a1e4d2ff5ba9f4395c951a99ec36064c79a3804da622b7536f6d535c80",
+    "output/readiness/native-drc-raw.json": "e61cda82a75670a3c4c4f4a47f3f534c43ac1c0bcdda66ff7d25a8c8e28a992d",
     "output/readiness/native-drc.json": "e8e05aac0968fd03ab3410b2f8efcdefa0ba3b4225a5cc91023db72296668072",
-    "output/readiness/refilled-native/native-drc-raw.json": "88745dc01f6a03bb899caaf5084b593b894d8f68f816cbe40c9b9c1c7b153de9",
+    "output/readiness/refilled-native/native-drc-raw.json": "e61cda82a75670a3c4c4f4a47f3f534c43ac1c0bcdda66ff7d25a8c8e28a992d",
     "output/readiness/refilled-native/native-drc.json": "e8e05aac0968fd03ab3410b2f8efcdefa0ba3b4225a5cc91023db72296668072",
     "output/sym-lib-table": "05eec8c92281801842dde8ed3dd6ff5192bbc64e25e053a3294f63c50bb0149c",
     "output/voltage_divider.kicad_pro": "d729bd613d8798b7b1b3acf39d153f8447342e393587afff543b1c21a3e3f5c9",
@@ -115,5 +115,9 @@
     "output/voltage_divider_routed.kicad_pcb": "9a42943ac4b05d748ddfad96940c7363592fefec69ca65319a739ebbef530045",
     "output/voltage_divider_routed.kicad_pro": "ed1b123046a7d2ee89193a0cd0b8ab62575a4b9eca35e555e42f530b1c73f092",
     "project.kct": "b4aad17d636f37da049fdc9c0939a40f091a8d61a9b6f75c624ba62cee8486c4"
+  },
+  "report_sources": {
+    "output/readiness/native-drc.json": "9a42943ac4b05d748ddfad96940c7363592fefec69ca65319a739ebbef530045",
+    "output/readiness/native-drc-raw.json": "9a42943ac4b05d748ddfad96940c7363592fefec69ca65319a739ebbef530045"
   }
 }

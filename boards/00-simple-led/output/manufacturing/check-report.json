@@ -35,7 +35,7 @@
     },
     "passed": true,
     "stale_waivers": 0,
-    "coverage_checked": 35,
+    "coverage_checked": 36,
     "coverage_skipped": 5,
     "coverage_unknown": [
       "spec_conformance"
@@ -213,6 +213,12 @@
       "state": "checked",
       "reason": null,
       "blocking": true
+    },
+    "model_coverage": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
     },
     "netclass_clearance_copper": {
       "status": "checked",
