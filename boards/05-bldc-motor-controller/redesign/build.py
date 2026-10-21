@@ -11,7 +11,6 @@ from pathlib import Path
 from hardware import ROOT, generate
 from routing import apply_routing
 
-from kicad_tools.cli.check_categories import gate_skip_argv
 from kicad_tools.validate.known_warnings import unaccepted_report_warnings
 
 #: Issue #7298: no warning is accepted.  #7296 (the router refuses pad-edge
@@ -99,7 +98,6 @@ def build(output):
         + [
             "check",
             str(routed),
-            *gate_skip_argv(),  # host-dependent model_coverage, #7683/#7685
             "--mfr",
             "jlcpcb",
             "--emit-dru",
@@ -177,7 +175,6 @@ def build(output):
         + [
             "check",
             str(routed),
-            *gate_skip_argv(),  # host-dependent model_coverage, #7683/#7685
             "--mfr",
             "jlcpcb",
             "--format",

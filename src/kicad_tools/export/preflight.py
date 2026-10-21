@@ -1735,14 +1735,7 @@ class PreflightChecker:
             mfr_mismatch = self._drc_report_manufacturer_mismatch(report)
 
             error_count = report.error_count
-            # Issue #7682: a ``kct check`` report's ``model_coverage``
-            # findings depend on the host's 3D library, not the board, so
-            # they never turn the DRC leg WARN (until #7683/#7685).
-            from ..cli.check_categories import GATE_DEFERRED_CATEGORIES
-
-            warning_count = sum(
-                1 for v in report.warnings if v.type_str not in GATE_DEFERRED_CATEGORIES
-            )
+            warning_count = report.warning_count
             # Issue #7091: since #4498 KiCad's ``unconnected_items`` (opens)
             # live outside ``violations``/``error_count``; count the
             # error-severity ones explicitly so an unrouted board FAILs.

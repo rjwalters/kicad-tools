@@ -7,8 +7,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-from kicad_tools.cli.check_categories import gate_skip_argv
-
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -61,7 +59,6 @@ def main():
             "kicad_tools.cli",
             "check",
             str(routed),
-            *gate_skip_argv(),  # host-dependent model_coverage, #7683/#7685
             "--emit-dru",
             "--format",
             "json",
@@ -97,7 +94,6 @@ def main():
             "kicad_tools.cli",
             "check",
             str(routed),
-            *gate_skip_argv(),  # host-dependent model_coverage, #7683/#7685
             "--format",
             "json",
             "--output",

@@ -220,8 +220,13 @@ this machine, so the totals depend on the KiCad model library installed there
 **Surfaces.**
 
 - `kct pcb model-audit <pcb> [--env host|pinned] [--model-dir DIR] [--format json]`
-- `kct check --only model_coverage`: one *warning* per non-exempt uncovered
-  footprint (message carries reference, `lib_id`, class and path).
+- `kct check --3d-models` (or `--only model_coverage`): one *warning* per
+  non-exempt uncovered footprint (message carries reference, `lib_id`, class
+  and path), or a single *info* finding ("3D coverage not evaluated") when the
+  host has no model library. The category is **opt-in**: plain `kct check`,
+  `--strict`, board gates, `kct readiness` and `run_drc` do not run it until a
+  pinned model set lands (#7683/#7685), because its result depends on the
+  host's KiCad 3D library.
 - `kct render`: boards with uncovered footprints report `partial` with a reason
   per footprint (`model_check.uncovered_models`) instead of `passed`; exit code
   is unchanged.

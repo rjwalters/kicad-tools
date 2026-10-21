@@ -9,7 +9,6 @@ from pathlib import Path
 
 from manufacturing_process import OPTIONS, make_checker
 
-from kicad_tools.cli.check_categories import gate_skip_set
 from kicad_tools.cli.check_cmd import (
     SubCheckResult,
     run_meta_checks,
@@ -50,8 +49,7 @@ def check(pcb_path, report_path):
     pcb_path, report_path = Path(pcb_path), Path(report_path)
     checker = make_checker(pcb_path)
     sch = pcb_path.parent / "stm32_devboard.kicad_sch"
-    # ``gate_skip_set()``: model_coverage is host-dependent until #7683/#7685.
-    results = run_selected_checks(checker, None, gate_skip_set(), sch_path=sch, pcb_path=pcb_path)
+    results = run_selected_checks(checker, None, set(), sch_path=sch, pcb_path=pcb_path)
     # Apply the committed .kct_waivers.json sidecar exactly as ``kct check``
     # does (post-check step).  A malformed committed sidecar is a hard error
     # here: this is a reviewed release gate, not a best-effort CLI run.

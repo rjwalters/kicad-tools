@@ -43,7 +43,10 @@ from kicad_tools.analysis.routing_quality import (
     evaluate_routing_quality_thresholds,
     routing_quality_gate_dict,
 )
-from kicad_tools.cli.check_categories import CHECK_CATEGORIES  # noqa: F401  (re-exported, #6896)
+from kicad_tools.cli.check_categories import (
+    CHECK_CATEGORIES,  # noqa: F401  (re-exported, #6896)
+    DEFERRED_OPT_IN_CATEGORIES,
+)
 from kicad_tools.cli.copper_weight import add_check_copper_argument, parse_copper_weight_arg
 from kicad_tools.manufacturers import (
     get_all_manufacturer_names,
@@ -1361,6 +1364,19 @@ def main(argv: list[str] | None = None) -> int:
         help="Exit with error code 2 on warnings",
     )
     parser.add_argument(
+        "--3d-models",
+        dest="models_3d",
+        action="store_true",
+        help=(
+            "Also run the opt-in model_coverage category (issue #7682): one "
+            "advisory warning per footprint with no or a missing 3D model, or a "
+            "single info finding when this host has no model library. Off by "
+            "default until a pinned model set lands (#7683/#7685), because the "
+            "result depends on the host's KiCad 3D library. Same as adding "
+            "model_coverage to --only."
+        ),
+    )
+    parser.add_argument(
         "--strict-connectivity",
         dest="strict_connectivity",
         action="store_true",
@@ -2422,6 +2438,7 @@ def main(argv: list[str] | None = None) -> int:
         layers=layers,
         coverage=coverage,
         drc_only=getattr(args, "drc_only", False),
+        opt_in={"model_coverage"} if getattr(args, "models_3d", False) else frozenset(),
     )
 
     # Issue #5946: bind every finding to a hash of its local evidence (its
@@ -3169,18 +3186,12 @@ def run_check_rule_set(rule_set: CheckRuleSet) -> DRCResults:
 
     Same dispatch as the CLI (:func:`run_selected_checks`, so the
     path-dependent rules run), with the board's waivers applied afterwards.
-    Its callers (the MCP ``run_drc`` verdict, ``kct fix-drc``) gate on the
-    result, so the host-dependent categories in
-    :data:`~kicad_tools.cli.check_categories.GATE_DEFERRED_CATEGORIES` are
-    deselected (issue #7682, until #7683/#7685).
     """
-    from kicad_tools.cli.check_categories import gate_skip_set
-
     sch_path = _resolve_check_schematic(None, rule_set.project_pcb_path)
     results = run_selected_checks(
         rule_set.checker,
         None,
-        gate_skip_set(),
+        set(),
         pad_grid_auto_derive=True,
         sch_path=sch_path,
         pcb_path=rule_set.project_pcb_path,
@@ -3205,6 +3216,7 @@ def run_selected_checks(
     layers: int | None = None,
     coverage: dict | None = None,
     drc_only: bool = False,
+    opt_in: set[str] | frozenset[str] = frozenset(),
 ) -> DRCResults:
     """Run the selected DRC checks based on filters.
 
@@ -3249,6 +3261,11 @@ def run_selected_checks(
             what they report.
         drc_only: Whether ``--drc-only`` is in effect (reported as the
             ``sch_fields`` skip reason).
+        opt_in: Categories from
+            :data:`~kicad_tools.cli.check_categories.DEFERRED_OPT_IN_CATEGORIES`
+            to run even though ``only_set`` is ``None`` (``kct check
+            --3d-models``, issue #7682).  An explicit ``--only`` naming the
+            category also runs it.
     """
     from kicad_tools.validate import coverage as cov
 
@@ -3347,10 +3364,10 @@ def run_selected_checks(
     #   "not evaluated" instead of N per-footprint defects;
     # * every other gap -- ``no_ref`` above all, which is the same on every
     #   host -- is a real defect of the board and stays a per-footprint
-    #   ``warning`` (advisory bucket: plain ``kct check`` still passes, only
-    #   ``--strict`` fails).  Zero-warning gates and evidence producers
-    #   deselect the whole category until #7683/#7685 (see
-    #   ``check_categories.GATE_DEFERRED_CATEGORIES``).
+    #   ``warning`` (advisory bucket: ``kct check --3d-models`` still
+    #   passes, only adding ``--strict`` fails).  The whole category is
+    #   opt-in until #7683/#7685 (see
+    #   ``check_categories.DEFERRED_OPT_IN_CATEGORIES``).
     def _model_coverage_check() -> DRCResults:
         if pcb_path is None:
             return DRCResults()
@@ -3452,6 +3469,15 @@ def run_selected_checks(
         # verdict of an existing board or of gates that count warnings.
         if category == "width_consistency" and only_set is None:
             cov_map[category] = cov.skipped(category, "opt_in:--only")
+            continue
+
+        # Issue #7682: host-dependent categories (``model_coverage``) are out
+        # of the default set until #7683/#7685 -- the ONE place that deferral
+        # lives, so gates, ``kct readiness`` evidence, ``run_drc`` and
+        # ``--strict`` exit codes stay machine-independent with no caller
+        # naming it.  ``--only model_coverage`` or ``--3d-models`` opts in.
+        if category in DEFERRED_OPT_IN_CATEGORIES and only_set is None and category not in opt_in:
+            cov_map[category] = cov.skipped(category, "opt_in:--3d-models")
             continue
 
         # Skip if --only specified and this category not in it

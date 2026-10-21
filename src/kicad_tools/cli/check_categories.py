@@ -50,31 +50,22 @@ CHECK_CATEGORIES = [
     "zones",
 ]
 
-#: Categories that zero-warning gates and committed-evidence producers
-#: deselect for now (issue #7682).  ``model_coverage`` resolves models against
-#: the *host's* KiCad 3D library, and neither the CI runner nor the pinned
-#: toolchain image ships one yet, so its findings would make a board's verdict
-#: and its recorded evidence depend on the machine (CLAUDE.md, #6962).  Plain
-#: ``kct check`` still runs it as an advisory.
+#: Categories that are NOT in the default ``kct check`` set (issue #7682) and
+#: run only when asked for: ``--only <category>`` or, for ``model_coverage``,
+#: ``kct check --3d-models``.  ``model_coverage`` resolves models against the
+#: *host's* KiCad 3D library, and neither the CI runner nor the pinned
+#: toolchain image ships one yet, so running it by default would make every
+#: verdict built on ``kct check`` -- ``--strict`` exit codes, board gates,
+#: ``kct readiness`` evidence, ``run_drc``/``kct fix-drc`` -- depend on the
+#: machine (CLAUDE.md, #6962).  The single place the deferral lives is
+#: :func:`kicad_tools.cli.check_cmd.run_selected_checks`, so no board's hashed
+#: gate script has to name it.  ``kct render``, ``kct pcb model-audit`` and
+#: ``kct fleet status`` still report coverage.
 #:
 #: Expires with #7683 (a pinned model set) and #7685 (every board at 100% on
 #: it): ``tests/test_model_audit.py`` fails as soon as
 #: ``kicad_tools.pcb.model_audit.PINNED_MODEL_DIR`` is set while this set still
-#: names ``model_coverage``, so the deferral is removed deliberately rather than
-#: lingering.  Never add a category here to hide a host-independent defect.
-GATE_DEFERRED_CATEGORIES: frozenset[str] = frozenset({"model_coverage"})
-
-
-def gate_skip_set(skip: set[str] | frozenset[str] = frozenset()) -> set[str]:
-    """*skip* plus :data:`GATE_DEFERRED_CATEGORIES` (for ``run_selected_checks``)."""
-    return set(skip) | GATE_DEFERRED_CATEGORIES
-
-
-def gate_skip_argv(skip: set[str] | frozenset[str] = frozenset()) -> list[str]:
-    """``kct check`` argv that deselects :data:`GATE_DEFERRED_CATEGORIES` (+ *skip*).
-
-    ``--skip`` is a single comma-separated value (last one wins), so callers
-    that also skip their own categories must pass them here.
-    """
-    names = sorted(gate_skip_set(skip))
-    return ["--skip", ",".join(names)] if names else []
+#: names ``model_coverage``, so the category is made default-on (and board
+#: evidence re-recorded) deliberately rather than the deferral lingering.
+#: Never add a category here to hide a host-independent defect.
+DEFERRED_OPT_IN_CATEGORIES: frozenset[str] = frozenset({"model_coverage"})

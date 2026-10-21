@@ -566,15 +566,12 @@ def known_issue_allowance(board: Path) -> dict[tuple[str, str, str], int]:
 
 
 def gate_kct_check(board: Path, cfg: BoardConfig) -> tuple[bool, int]:
-    from kicad_tools.cli.check_categories import gate_skip_argv
-
     with tempfile.TemporaryDirectory(prefix="refresh-readiness-check-") as tmp:
         report = Path(tmp) / "check.json"
         run(
             kct(
                 "check",
                 str(board / cfg.routed_pcb),
-                *gate_skip_argv(),  # host-dependent model_coverage, #7683/#7685
                 "--mfr",
                 cfg.tier,
                 "--format",

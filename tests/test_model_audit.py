@@ -252,21 +252,65 @@ def test_check_collapses_missing_library_into_one_info(tmp_path, models, monkeyp
     assert not info.is_warning
 
 
-def test_gate_deferral_expires_with_pinned_model_set():
-    """Gates deselect ``model_coverage`` only until #7683 pins a model set.
+def test_opt_in_deferral_expires_with_pinned_model_set():
+    """``model_coverage`` stays out of the default set only until #7683.
 
-    When ``PINNED_MODEL_DIR`` is set this fails: remove ``model_coverage``
-    from ``GATE_DEFERRED_CATEGORIES`` (and re-record board evidence) then.
+    When ``PINNED_MODEL_DIR`` is set this fails: drop ``model_coverage`` from
+    ``DEFERRED_OPT_IN_CATEGORIES`` (making it default-on) and re-record board
+    evidence then (#7683/#7685).
     """
-    from kicad_tools.cli.check_categories import (
-        CHECK_CATEGORIES,
-        GATE_DEFERRED_CATEGORIES,
-        gate_skip_argv,
-        gate_skip_set,
-    )
+    from kicad_tools.cli.check_categories import CHECK_CATEGORIES, DEFERRED_OPT_IN_CATEGORIES
 
-    assert model_audit.PINNED_MODEL_DIR is None, "#7683 landed: drop the #7682 gate deferral"
-    assert {"model_coverage"} == GATE_DEFERRED_CATEGORIES
-    assert set(CHECK_CATEGORIES) >= GATE_DEFERRED_CATEGORIES
-    assert gate_skip_set({"pad_grid"}) == {"pad_grid", "model_coverage"}
-    assert gate_skip_argv({"pad_grid"}) == ["--skip", "model_coverage,pad_grid"]
+    assert model_audit.PINNED_MODEL_DIR is None, "#7683 landed: drop the #7682 opt-in deferral"
+    assert {"model_coverage"} == DEFERRED_OPT_IN_CATEGORIES
+    assert set(CHECK_CATEGORIES) >= DEFERRED_OPT_IN_CATEGORIES
+
+
+def test_default_category_set_excludes_model_coverage(tmp_path, models):
+    """The deferral lives in ``run_selected_checks``: every default caller
+    (``kct check``, ``run_check_rule_set``, ``kct readiness``) skips it."""
+    from unittest.mock import MagicMock
+
+    from kicad_tools.cli.check_cmd import run_selected_checks
+
+    pcb = _write(tmp_path, _fp("U1"))
+    coverage: dict = {}
+    only = {"model_coverage"}
+    for only_set, opt_in, expected in [
+        (None, frozenset(), []),
+        (None, {"model_coverage"}, [("warning", ("U1",))]),
+        (only, frozenset(), [("warning", ("U1",))]),
+    ]:
+        results = run_selected_checks(
+            MagicMock(), only_set, set(), pcb_path=pcb, opt_in=opt_in, coverage=coverage
+        )
+        found = [(v.severity, v.items) for v in results.violations if v.rule_id == "model_coverage"]
+        assert found == expected, (only_set, opt_in)
+        if only_set is None and not opt_in:
+            assert coverage["model_coverage"].reason == "opt_in:--3d-models"
+
+
+def _check_cli(pcb: Path, *extra: str) -> tuple[int, dict]:
+    from kicad_tools.cli import check_cmd
+
+    report = pcb.with_suffix(".check.json")
+    code = check_cmd.main([str(pcb), "--format", "json", "--output", str(report), *extra])
+    return code, json.loads(report.read_text())
+
+
+def _coverage_rules(report: dict) -> list[str]:
+    return [v["rule_id"] for v in report["violations"] if v["rule_id"] == "model_coverage"]
+
+
+def test_check_cli_strict_unchanged_by_default_and_opt_in_flag(tmp_path, models):
+    """Plain ``kct check --strict`` never sees ``model_coverage``;
+    ``--3d-models`` / ``--only model_coverage`` opt in (issue #7682)."""
+    pcb = _write(tmp_path, _fp("U1"))
+    _, default = _check_cli(pcb, "--strict")
+    assert _coverage_rules(default) == []
+    _, flagged = _check_cli(pcb, "--3d-models")
+    assert _coverage_rules(flagged) == ["model_coverage"]
+    _, only = _check_cli(pcb, "--only", "model_coverage")
+    assert _coverage_rules(only) == ["model_coverage"]
+    code, strict = _check_cli(pcb, "--only", "model_coverage", "--strict")
+    assert code == 2 and _coverage_rules(strict) == ["model_coverage"]

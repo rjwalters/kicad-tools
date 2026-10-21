@@ -430,13 +430,6 @@ class LintGate:
         from .check_cmd import _discover_net_class_map_sidecar
 
         flags = list(self.check_flags)
-        # Issue #7682: ``model_coverage`` resolves models against the host's
-        # 3D library, and a board staged into a scratch dir can lose its
-        # ``${KIPRJMOD}`` models, so it could "introduce" warnings routing
-        # never touched.  Deselected until #7683/#7685.
-        from .check_categories import gate_skip_argv
-
-        flags += gate_skip_argv()
         if "--net-class-map" not in flags:
             ncm = _discover_net_class_map_sidecar(self.source)
             flags += ["--net-class-map", str(ncm.resolve())] if ncm else ["--no-net-class-map"]
