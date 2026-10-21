@@ -76,6 +76,12 @@ WELD_MOVES = [
     ("C3.2", "GND", (15.58, 16.72), (15.58, 16.83)),
     ("C10.2", "GND", (19.58, 15.28), (19.58, 15.17)),
     ("C11.2", "GND", (25.58, 16.72), (25.58, 16.83)),
+    # Issue #7602 gave the oracle pour welds the router's mask-dam floor, which
+    # seats the C10.2 / C11.2 welds on the pad corner (0.160 mm from the land,
+    # drill edge 0.085 mm) instead of at the edge midpoint; move each 0.02 mm
+    # north so the drill clears the land by the 0.10 mm this process needs.
+    ("C10.2", "GND", (19.49, 15.19), (19.49, 15.17)),
+    ("C11.2", "GND", (25.49, 15.19), (25.49, 15.17)),
     ("C12.2", "GND", (26.58, 32.72), (26.58, 32.83)),
     ("C13.2", "GND", (31.58, 32.72), (31.58, 32.83)),
     ("C14.2", "GND", (36.58, 32.72), (36.58, 32.83)),
