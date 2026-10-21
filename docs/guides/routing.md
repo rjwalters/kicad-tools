@@ -470,6 +470,12 @@ layers, and only as a last resort climb to `jlcpcb-tier1` for via-in-pad. If
 you also pass `--adaptive-rules`, trace width / clearance are relaxed within
 the chosen tier's floor before either ladder advances.
 
+### Opt-in flags
+
+Many `kct route` features are opt-in and change nothing unless passed. Which
+ones are candidates to become defaults, and which are candidates for removal,
+is tracked in [Opt-in `kct route` flags](../reference/route-opt-in-flags.md).
+
 ---
 
 ## Differential Pairs

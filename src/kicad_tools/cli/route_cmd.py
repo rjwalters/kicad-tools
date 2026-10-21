@@ -23771,6 +23771,15 @@ def _run_main_impl(args, parser, argv) -> int:
         )
 
     # Save partial results on clean partial exit (not just SIGINT)
+    # Issue #7657 (D7): this clean-partial-exit ``_partial`` snapshot stays
+    # single-attempt-only on purpose, not moved into a shared post-route helper.
+    # The escalation tails (layer / rule-relaxation / combined) route several
+    # attempts and write the best one to ``-o``; a mid-ladder attempt's
+    # snapshot would sit beside that result as a second, lower-quality board
+    # and may differ from what ``-o`` holds.  They still save ``_partial`` on a
+    # deadline or Ctrl+C through the interrupt state (#6322), which is the case
+    # where no ``-o`` board exists.  Revisit only with a ladder-level owner for
+    # "which attempt's partial is canonical".
     if not all_nets_routed and not args.dry_run and router.routes:
         partial_saved = _save_partial_results()
         if partial_saved and not quiet:
