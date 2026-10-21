@@ -406,9 +406,7 @@ def test_attach_local_models_ignores_missing_manifest_or_body(tmp_path):
 def test_attach_local_models_covers_every_footprint_with_the_lib_id(tmp_path):
     from kicad_tools.pcb.models3d import attach_local_models
 
-    pcb = _write(
-        tmp_path, _fp("L1", lib_id="L:X"), _fp("R1"), _fp("L2", lib_id="L:X"), extra="\n"
-    )
+    pcb = _write(tmp_path, _fp("L1", lib_id="L:X"), _fp("R1"), _fp("L2", lib_id="L:X"), extra="\n")
     shapes = tmp_path / "3dshapes"
     shapes.mkdir()
     (shapes / "X.wrl").write_text("#VRML V2.0 utf8\n")
@@ -422,9 +420,7 @@ def test_attach_local_models_covers_every_footprint_with_the_lib_id(tmp_path):
     assert attach_local_models(pcb) == []  # idempotent, even with a repeat
 
 
-def test_check_report_bytes_do_not_depend_on_a_model_library(
-    tmp_path, monkeypatch, capsys
-):
+def test_check_report_bytes_do_not_depend_on_a_model_library(tmp_path, monkeypatch, capsys):
     """Committed evidence must be identical with and without a 3D model library."""
     from kicad_tools.cli.check_cmd import main
 
