@@ -85,26 +85,40 @@ const hasPcbFor = (slug: string): boolean =>
           <li>
             <h3>Inspect and automate</h3>
             <p>Read KiCad design data and build repeatable workflows with Python
-              or an AI agent.</p>
+              or an AI agent. Agent skills install for Claude Code, Codex CLI
+              and opencode; MCP registration is a separate
+              <code>kct mcp setup --client</code> step per harness.</p>
+            <code>kct skills install --harness codex</code>
             <a href="https://github.com/rjwalters/kicad-tools#python-api">Python examples</a>
             <a href="https://github.com/rjwalters/kicad-tools#mcp-server-for-ai-agents">MCP setup</a>
+            <a href="https://github.com/rjwalters/kicad-tools#using-kicad-tools-from-claude-code-codex-and-opencode">Claude Code, Codex and opencode</a>
+            <a href="https://github.com/rjwalters/kicad-tools#agent-skills-kct-namespace">Agent skills</a>
           </li>
           <li>
             <h3>Place and route</h3>
             <p>Generate layouts and route connections with configurable design
               rules. Automated routing is experimental; inspect connectivity and
-              clearance results for each design.</p>
+              clearance results for each design. Differential-pair skew and
+              match-group length tuning are available, and
+              <code>kct retune-lengths</code> re-tunes an already routed board.</p>
             <a href="https://github.com/rjwalters/kicad-tools#pcb-autorouter">Routing example</a>
             <a href="/benchmarks">Recorded external-board attempts</a>
+            <a href="https://github.com/rjwalters/kicad-tools#cli-commands">Length-tuning commands</a>
           </li>
           <li>
             <h3>Check the design</h3>
             <p>Run geometric checks, electrical-rating analysis and high-voltage
               creepage audits. These checks support design review; they do not
-              certify hardware or establish manufacturing readiness.</p>
+              certify hardware. <code>kct readiness</code> records sign-off
+              evidence (with known issues) per board, and sign-off commands
+              report <code>verdict</code> and <code>exit_code</code> in JSON.
+              The gallery shows each board's own evidence; a passing check is
+              not a fabrication guarantee.</p>
             <code>kct check board.kicad_pcb --mfr jlcpcb</code>
             <a href="https://github.com/rjwalters/kicad-tools#pure-python-drc">Design-check examples</a>
             <a href="https://github.com/rjwalters/kicad-tools#cli-commands">Analysis and repair commands</a>
+            <a href="https://github.com/rjwalters/kicad-tools#agent-skills-kct-namespace">Sign-off skills</a>
+            <a href="#demo-boards">Board evidence in the gallery</a>
           </li>
         </ul>
       </section>
