@@ -402,3 +402,12 @@ See also: [`label-state-machine.md`](label-state-machine.md) for where
 `loom:blocked` sits relative to `loom:operator`/`loom:frozen`, and
 [`lease-record.md`](lease-record.md) for the sibling HTML-comment-marker
 convention this format's shape was co-designed with.
+
+## `park-record released` (#12665)
+
+`loom-daemon park-record released --pr N [--entered-at TS] [--failed]` writes
+nothing to the forge. Champion calls it after removing a merge-risk hold's
+`loom:blocked`, to journal the release as a `hold.transition` `remove`
+([`telemetry-schema.md`](telemetry-schema.md#holdtransition--a-hold-label-applied-to-or-removed-from-a-pr)).
+A Champion `park-record apply` journals the matching `add` itself, only when
+the label was not already on the PR.

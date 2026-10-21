@@ -695,7 +695,7 @@ gh pr edit 588 --remove-label "loom:treating" --add-label "loom:review-requested
      ./.loom/scripts/rebase-stacked-children.sh feature/issue-<N>
      ```
      It rebases open child PRs that went stale onto your new tip (safe children auto-rebase with a *pinned* force-with-lease; a child whose issue is still `loom:building` gets a deferred-reconciliation comment). No-op without stacked children, and **best-effort** — a failure (conflict, non-GitHub forge) never fails your own work; carry on to step 10. `--dry-run` previews.
-10. **Verify CI remotely**: after push, `loom-daemon forge wait-checks <number> --timeout 20` (GREEN/NONE = pass; else CI Assessment Step 5)
+10. **Verify CI remotely**: after push, `loom-daemon forge wait-checks <number> --timeout 20` (GREEN/NONE = pass). Not green and not RED (pending, head moved, unknown required contexts): do not wait; hand back to Judge in step 11 and report CI as pending (see "CRITICAL: Never End Your Turn on a Background CI Monitor", path 1). RED: CI Assessment. Only an invocation that explicitly requires the settled result uses the bounded foreground wait (path 2)
 11. **Signal completion and unclaim** (run the lease fence and the Verdict-Time CAS Recheck — see below — immediately before this write; abort/stand down instead if either finds your claim lost or the PR already moved; then `lease pr release`):
     - Remove `loom:changes-requested` and `loom:treating` labels
     - Add `loom:review-requested` label (green badge)
@@ -1105,8 +1105,12 @@ shellcheck scripts/*.sh # Shell scripts (if applicable)
 # Push fixes
 git push
 
-# Verify ALL checks pass (ETag'd, backed-off wait; see "CI has not settled" below)
-loom-daemon forge wait-checks <PR_NUMBER> --timeout 1200
+# Snapshot (ETag'd). Pending is NOT a reason to wait: hand back to Judge
+# (see "CI has not settled" below, path 1).
+loom-daemon forge wait-checks <PR_NUMBER> --timeout 20
+
+# Only when the invocation explicitly requires the settled result (path 2):
+# loom-daemon forge wait-checks <PR_NUMBER> --timeout 1200
 
 # If any still failing, repeat assessment (but should be rare now)
 ```
@@ -1128,6 +1132,8 @@ This rule is about *when your own turn may end*, not about *whether someone else
 
 1. **You have made the fix and pushed it: hand back to Judge instead of waiting.** This is the correct default. Verifying the final CI verdict is **Judge's** gate — complete the `loom:changes-requested` → `loom:review-requested` transition, state in your PR comment that CI was still running at hand-off, and finish your turn. A later Judge pass re-evaluates once CI settles.
 2. **Single-PR / manual invocation where a settled result is expected before your turn ends: block-poll in the foreground.** Run `loom-daemon forge wait-checks` **inside this same turn** in the foreground (bounded by `--timeout`). It returns control to you before you write your final message; nothing about it depends on a future turn.
+
+An unreadable required-context lookup leaves the result *unknown*, never green: treat it as unsettled (hand back to Judge, report CI as unknown).
 
 **Use `loom-daemon forge wait-checks`, not a `gh pr checks` loop.** It is ETag'd and settles the empty-rollup trap (#6169). Branch on the first **stdout** line (never the exit code; keep stderr separate, it carries the RED detail). For a snapshot use `--timeout 20` (`0` reads a no-checks repo as TIMEOUT). 
 
