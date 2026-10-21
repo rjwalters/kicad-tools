@@ -1051,6 +1051,8 @@ def _run_render_command(args) -> int:
     render_args = _argparse.Namespace(
         path=args.render_path,
         no_3d=getattr(args, "render_no_3d", False),
+        models=getattr(args, "render_models", None),
+        allow_incomplete_models=getattr(args, "render_allow_incomplete_models", False),
         format=getattr(args, "render_format", "text"),
         output=getattr(args, "render_output", None),
     )

@@ -124,6 +124,9 @@ RENDER_FILES = {
     "3d_back": "renders/3d-back.png",
 }
 
+# 3D model coverage summary written by `kct render` (#7689), relative to output/.
+MODEL_COVERAGE_FILE = "renders/model-coverage.json"
+
 # --- report.md field regexes (machine-generated, stable format) -------------
 _LAYERS_RE = re.compile(r"\|\s*Layers\s*\|\s*(\d+)\s*copper", re.IGNORECASE)
 _BOARD_SIZE_RE = re.compile(r"\|\s*Board Size\s*\|\s*([\d.]+)\s*x\s*([\d.]+)\s*mm", re.IGNORECASE)
@@ -691,6 +694,16 @@ def _attach_render_paths(metrics: dict, output_dir: Path) -> None:
             renders[field] = rel_path
     if renders:
         metrics["renders"] = renders
+    coverage_path = output_dir / MODEL_COVERAGE_FILE
+    if coverage_path.is_file():
+        try:
+            coverage = json.loads(coverage_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if isinstance(coverage, dict):
+            metrics["model_coverage"] = {
+                key: coverage.get(key) for key in ("env", "covered", "total", "percent")
+            }
 
 
 def emit_board_json(board_dir: Path, output_path: Path | None = None) -> Path:

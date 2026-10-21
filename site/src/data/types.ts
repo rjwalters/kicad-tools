@@ -100,6 +100,13 @@ export interface Board {
   cost?: CostEstimate;
   /** Map of render id → path relative to the board.json location. */
   renders?: Record<string, string>;
+  /** 3D model coverage from `kct render` (#7689); `percent` is null when nothing is non-exempt. */
+  model_coverage?: {
+    env?: string;
+    covered?: number;
+    total?: number;
+    percent?: number | null;
+  };
   manufacturing_package?: string;
   manifest_generated_at?: string;
   /** Fresh report validated against current source and manufacturing hashes. */

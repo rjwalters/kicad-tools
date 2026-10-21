@@ -158,6 +158,10 @@ if (board.board_size_mm !== undefined) {
     value: `${board.board_size_mm.width} × ${board.board_size_mm.height} mm`,
   });
 }
+if (board.model_coverage && typeof board.model_coverage.percent === "number") {
+  const { covered, total, percent } = board.model_coverage;
+  rows.push({ label: "3D model coverage", value: `${percent}% (${covered}/${total})` });
+}
 if (board.part_count !== undefined) {
   rows.push({ label: "Parts", value: `${board.part_count}` });
 }

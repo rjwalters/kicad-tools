@@ -276,25 +276,48 @@ else
   # Prefer 3D (2D + 3D) unless --no-3d.  The 3D pass (kicad-cli pcb render)
   # needs a display, so wrap it in xvfb-run when available to give it a virtual
   # framebuffer on headless machines.
+  #
+  # `kct render` audits 3D model coverage against the pinned model set (when
+  # synced via `kct models sync`, else the host's; Issue #7689) and exits
+  # non-zero on any non-exempt footprint without a body.  That is a publish
+  # gate, not a display problem: it aborts the deploy instead of falling back
+  # to 2D.  Any other 3D failure still falls back to 2D-only below.
   if [ "${NO_3D}" -eq 0 ]; then
+    render_json="$(mktemp)"
+    render_cmd=(uv run kct render boards/ --format json)
     if command -v xvfb-run >/dev/null 2>&1; then
-      if xvfb-run --auto-servernum --server-args="-screen 0 1280x1024x24" \
-           uv run kct render boards/; then
-        info "Renders complete (2D + 3D, under xvfb)."
-        rendered=1
-      else
-        warn "3D render failed under xvfb; falling back to 2D-only."
-      fi
-    else
-      # No xvfb: try 3D directly (works if a real display is present); on
-      # failure we fall through to the 2D-only path below.
-      if uv run kct render boards/; then
-        info "Renders complete (2D + 3D)."
-        rendered=1
-      else
-        warn "3D render failed (no xvfb / no display); falling back to 2D-only."
-      fi
+      render_cmd=(xvfb-run --auto-servernum --server-args="-screen 0 1280x1024x24" "${render_cmd[@]}")
     fi
+    if "${render_cmd[@]}" >"${render_json}"; then
+      info "Renders complete (2D + 3D)."
+      rendered=1
+    else
+      incomplete="$(python3 -I - "${render_json}" <<'PY'
+import json, sys
+
+try:
+    boards = json.load(open(sys.argv[1]))["boards"]
+except (OSError, ValueError, KeyError):
+    sys.exit(0)
+for b in boards:
+    check = b.get("model_check", {})
+    if check.get("status") != "failed":
+        continue
+    pct = (check.get("coverage") or {}).get("percent")
+    print(f"  {b['board']}: coverage {pct}%")
+    for m in check.get("unresolved_models", []) + check.get("uncovered_models", []):
+        print(f"    {m.get('reference')}: {m.get('reason')}")
+PY
+)"
+      rm -f "${render_json}"
+      if [ -n "${incomplete}" ]; then
+        printf '%s\n' "${incomplete}" >&2
+        err "Incomplete 3D model coverage; refusing to publish. Sync the pinned set (kct models sync) or fix the boards."
+        exit 1
+      fi
+      warn "3D render failed; falling back to 2D-only."
+    fi
+    rm -f "${render_json}"
   fi
 
   # 2D-only path: requested via --no-3d, or used as the fallback when 3D failed.
