@@ -287,7 +287,11 @@ def test_default_category_set_excludes_model_coverage(tmp_path, models):
         found = [(v.severity, v.items) for v in results.violations if v.rule_id == "model_coverage"]
         assert found == expected, (only_set, opt_in)
         if only_set is None and not opt_in:
-            assert coverage["model_coverage"].reason == "opt_in:--3d-models"
+            # Invisible by default, so default reports match pre-#7682 bytes.
+            assert "model_coverage" not in coverage
+        else:
+            assert coverage["model_coverage"].state == "checked"
+        coverage.clear()
 
 
 def _check_cli(pcb: Path, *extra: str) -> tuple[int, dict]:

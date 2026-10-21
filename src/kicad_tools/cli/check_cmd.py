@@ -3476,8 +3476,9 @@ def run_selected_checks(
         # lives, so gates, ``kct readiness`` evidence, ``run_drc`` and
         # ``--strict`` exit codes stay machine-independent with no caller
         # naming it.  ``--only model_coverage`` or ``--3d-models`` opts in.
+        # No coverage entry either: a default report (and so committed
+        # ``kct readiness`` evidence) stays byte-identical to before #7682.
         if category in DEFERRED_OPT_IN_CATEGORIES and only_set is None and category not in opt_in:
-            cov_map[category] = cov.skipped(category, "opt_in:--3d-models")
             continue
 
         # Skip if --only specified and this category not in it
