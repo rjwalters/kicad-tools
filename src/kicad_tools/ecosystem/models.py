@@ -47,6 +47,7 @@ CATEGORIES: frozenset[str] = frozenset(
         "fabrication",
         "bindings",
         "benchmark",
+        "3d-models",
     }
 )
 
@@ -68,6 +69,7 @@ CATEGORY_HEADINGS: dict[str, str] = {
     "fabrication": "Fabrication and CI",
     "bindings": "KiCad bindings",
     "benchmark": "Benchmarks and evaluation protocols",
+    "3d-models": "3D model tooling",
 }
 
 #: How the project sits relative to kicad-tools in a pipeline.

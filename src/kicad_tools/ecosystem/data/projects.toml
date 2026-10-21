@@ -1476,6 +1476,122 @@ reasoning, its Task 1 is a ready baseline (the circuit-skills harness \
 already runs it). A LICENSE would allow using the questions directly.\
 """
 
+# ----------------------------------------------------------------- 3d models
+
+[projects.easyeda2kicad]
+name = "easyeda2kicad"
+slug = "uPesy/easyeda2kicad.py"
+repo_url = "https://github.com/uPesy/easyeda2kicad.py"
+vcs = "github"
+category = "3d-models"
+relation = "reference"
+verdict = "ideas-adopted"
+license = "AGPL-3.0"
+license_compat = "copyleft-ideas-only"
+language = "Python"
+last_verified = "2026-10-21"
+research_docs = ["docs/research/3d-model-coverage.md"]
+summary = """
+EasyEDA/LCSC to KiCad converter (symbol, footprint, 3D model), v1.0.1 \
+at our read. AGPL-3.0: ideas only, never copy code. We took its \
+*documented* 3D flow as a design input (model uuid from the footprint \
+SVGNODE; OBJ from `modules.easyeda.com/3dmodel/{uuid}` converted to WRL; \
+STEP passed through from the same bucket).\
+"""
+
+[projects.jlc2kicadlib]
+name = "JLC2KiCadLib"
+slug = "TousstNicolas/JLC2KiCad_lib"
+repo_url = "https://github.com/TousstNicolas/JLC2KiCad_lib"
+vcs = "github"
+category = "3d-models"
+relation = "reference"
+verdict = "watch"
+license = "MIT"
+license_compat = "mit-clean"
+language = "Python"
+last_verified = "2026-10-21"
+research_docs = ["docs/research/3d-model-coverage.md"]
+summary = """
+generates KiCad symbols, footprints and STEP/WRL models from EasyEDA \
+(v1.3.2, maintenance-only). MIT, so code may move with attribution, but \
+its licence does not grant any rights to the EasyEDA/LCSC content it \
+fetches.\
+"""
+reeval_trigger = """
+Re-evaluate if the epic #7690 JLCPCB-catalog pipeline decides to \
+import EasyEDA models via a library instead of our own fetch code.\
+"""
+
+[projects.kicad-library-tools]
+name = "kicad-library-tools"
+slug = "kicad/libraries/kicad-library-tools"
+repo_url = "https://gitlab.com/kicad/libraries/kicad-library-tools"
+vcs = "github"
+category = "3d-models"
+relation = "upstream"
+verdict = "complementary"
+# Some files are MIT/LGPL, but the project as a whole is GPL-3.0-or-later.
+license = "GPL-3.0-or-later"
+license_compat = "copyleft-ideas-only"
+language = "Python (CadQuery)"
+last_verified = "2026-10-21"
+research_docs = ["docs/research/3d-model-coverage.md"]
+summary = """
+headless CadQuery generators for KiCad's official 3D packages (DIP, \
+chip R/C/L, diodes, crystals, connectors, QFN/QFP/BGA, terminal blocks). \
+Successor to the archived kicad-packages3D-generator. GPL-3.0-or-later: \
+**run as an external tool only, never import or vendor**.\
+"""
+
+[projects.kicadstepupmod]
+name = "kicadStepUpMod"
+slug = "easyw/kicadStepUpMod"
+repo_url = "https://github.com/easyw/kicadStepUpMod"
+vcs = "github"
+category = "3d-models"
+relation = "reference"
+verdict = "watch"
+# The README says AGPLv3 but no LICENSE file is committed, so `license` is
+# "NONE" per the registry rules. We treat it as AGPL (ideas only) regardless.
+license = "NONE"
+license_compat = "copyleft-ideas-only"
+language = "Python (FreeCAD)"
+last_verified = "2026-10-21"
+research_docs = ["docs/research/3d-model-coverage.md"]
+summary = """
+FreeCAD workbench for aligning 3D models to footprints, the manual \
+analogue of our transform calibration. The README claims AGPLv3 but no \
+LICENSE file is committed (hence `license = "NONE"`); ideas only either way.\
+"""
+reeval_trigger = """
+Re-evaluate if upstream commits a LICENSE file, or if our transform \
+calibration needs a second reference for model-to-footprint alignment.\
+"""
+
+[projects.cq-electronics]
+name = "cq-electronics"
+slug = "sethfischer/cq-electronics"
+repo_url = "https://github.com/sethfischer/cq-electronics"
+vcs = "github"
+category = "3d-models"
+relation = "reference"
+verdict = "watch"
+license = "MIT"
+license_compat = "mit-clean"
+language = "Python (CadQuery)"
+last_verified = "2026-10-21"
+research_docs = ["docs/research/3d-model-coverage.md"]
+summary = """
+small CadQuery set of electronic-component parts (v0.2.0). MIT, so it \
+is a candidate source of parametric bodies for our own 3D pipeline.\
+"""
+reeval_trigger = """
+Re-evaluate when the 3D pipeline starts generating parametric bodies, \
+to decide whether to depend on it.\
+"""
+
+
 # ---------------------------------------------------------------- positioning
 #
 # Where kicad-tools sits, as data rather than prose repeated in three places.
