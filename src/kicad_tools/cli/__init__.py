@@ -1096,6 +1096,8 @@ def _run_export_command(args) -> int:
         sub_argv.append("--no-auto-lcsc")
     if getattr(args, "export_no_spec", False):
         sub_argv.append("--no-spec")
+    if getattr(args, "export_spec", None):
+        sub_argv.extend(["--spec", args.export_spec])
     if getattr(args, "export_no_merge_lcsc", False):
         sub_argv.append("--no-merge-lcsc")
     if getattr(args, "export_skip_preflight", False):

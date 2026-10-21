@@ -2724,6 +2724,8 @@ def export_manufacturing_bundle(routed_path: Path, output_dir: Path) -> bool:
         # pre-existing drc_report.json next to the routed PCB contains net
         # shorts, export still aborts non-zero.  Cosmetic-check skipping is
         # safe here; shipping a shorted board is not.
+        "--spec",
+        str(Path(__file__).resolve().parent / "project.kct"),
         "--skip-preflight",
     ]
     print(f"\n   Command: {' '.join(cmd)}")

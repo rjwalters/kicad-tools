@@ -1181,6 +1181,7 @@ _EXPORT_PASS_THROUGH_CASES = {
     "keep_gerber_files": (["--keep-gerber-files"], True),
     "no_auto_lcsc": (["--no-auto-lcsc"], True),
     "no_spec": (["--no-spec"], True),
+    "spec": (["--spec", "project.kct"], "project.kct"),
     "no_merge_lcsc": (["--no-merge-lcsc"], True),
     "skip_preflight": (["--skip-preflight"], True),
     "skip_drc_floor": (["--skip-drc-floor"], True),

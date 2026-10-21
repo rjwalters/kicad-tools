@@ -310,3 +310,73 @@ class TestBoard00SimpleLed:
             f"kct check exited {proc.returncode} (expected 0 -- DRC clean).\n"
             f"stdout (last 2000 chars):\n{proc.stdout[-2000:]}"
         )
+
+
+class TestBoard00OfflineBomDeterminism:
+    """Issue #7741 -- the LCSC column must not depend on network or host.
+
+    ``kct export`` finds the ``project.kct`` BOM spec by walking up from the
+    PCB directory, which misses it for any output dir outside the project
+    tree.  The generator now passes ``--spec`` explicitly; this pins that the
+    spec alone (no live API, no enrichment cache) fills every LCSC number.
+    """
+
+    @staticmethod
+    def _export_bom(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *extra: str) -> list[str]:
+        import shutil
+
+        from kicad_tools.cli import export_cmd
+
+        src = BOARD_DIR / "output"
+        work = tmp_path / "out"
+        work.mkdir()
+        for name in ("simple_led.kicad_sch", "simple_led_routed.kicad_pcb"):
+            shutil.copy(src / name, work / name)
+
+        def _no_api(*args, **kwargs):
+            raise AssertionError("LCSC auto-matching must not run when the spec pins every part")
+
+        monkeypatch.setattr("kicad_tools.export.assembly.enrich_bom_lcsc", _no_api)
+        rc = export_cmd.main(
+            [
+                str(work / "simple_led_routed.kicad_pcb"),
+                "--output",
+                str(work / "manufacturing"),
+                "--mfr",
+                "jlcpcb",
+                "--skip-preflight",
+                "--no-gerbers",
+                "--no-cpl",
+                "--no-report",
+                "--no-project-zip",
+                *extra,
+            ]
+        )
+        assert rc == 0
+        return (work / "manufacturing" / "bom_jlcpcb.csv").read_text().splitlines()
+
+    def test_spec_flag_fills_lcsc_outside_project_tree(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        lines = self._export_bom(tmp_path, monkeypatch, "--spec", str(BOARD_DIR / "project.kct"))
+        committed = (BOARD_DIR / "output" / "manufacturing" / "bom_jlcpcb.csv").read_text()
+        assert "\n".join(lines) == committed.rstrip("\n")
+        assert all(line.rsplit(",", 1)[-1].strip() for line in lines[1:])
+
+    def test_missing_spec_file_errors(self, tmp_path: Path) -> None:
+        from kicad_tools.cli import export_cmd
+
+        rc = export_cmd.main(
+            [
+                str(BOARD_DIR / "output" / "simple_led_routed.kicad_pcb"),
+                "--output",
+                str(tmp_path / "m"),
+                "--spec",
+                str(tmp_path / "nope.kct"),
+            ]
+        )
+        assert rc == 1
+
+    def test_generator_passes_spec_to_export(self) -> None:
+        text = GENERATOR.read_text()
+        assert '"--spec"' in text and '"project.kct"' in text
