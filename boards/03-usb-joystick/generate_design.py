@@ -31,6 +31,7 @@ from pathlib import Path
 from kicad_tools.core.project_file import create_minimal_project, save_project
 from kicad_tools.dev import warn_if_stale
 from kicad_tools.lvs import write_lvs_report
+from kicad_tools.pcb.models3d import attach_local_models
 from kicad_tools.recipes.gate import evaluate_pipeline_gate
 from kicad_tools.recipes.precondition import require_spec
 
@@ -994,9 +995,11 @@ def export_manufacturing_bundle(routed_path: Path, output_dir: Path) -> bool:
 
     # The editable project must resolve its custom ISP footprint and rules
     # after extraction, without relying on this checkout's library table.
+    # Its ``${KIPRJMOD}/3dshapes`` bodies (issue #7685) travel the same way.
     with zipfile.ZipFile(mfg_dir / "kicad_project.zip", "a", zipfile.ZIP_DEFLATED) as archive:
         additions = [routed_path.with_suffix(".kicad_dru"), output_dir / "fp-lib-table"]
         additions.extend(sorted((output_dir / "footprints").rglob("*.kicad_mod")))
+        additions.extend(sorted((output_dir / "3dshapes").glob("*.wrl")))
         # The exporter already archives the board's sibling .kicad_dru; a
         # second member of the same name is a duplicate file identity that
         # readiness provenance rejects (Issue #6076 regeneration).
@@ -1127,6 +1130,10 @@ def main() -> int:
 
         # Step 4: Create PCB
         pcb_path = create_usb_joystick_pcb(output_dir)
+
+        # Step 4.05: project-local 3D body for J2, whose stock STEP does not
+        # exist upstream (issue #7685); a no-op without output/3dshapes.
+        attach_local_models(pcb_path)
 
         # Step 4.5: Create copper-pour zones for GND and VCC so the
         # power-net pads land on filled copper instead of being stranded

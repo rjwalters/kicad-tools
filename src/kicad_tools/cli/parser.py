@@ -956,8 +956,8 @@ def _add_check_parser(subparsers) -> None:
         "--3d-models",
         dest="models_3d",
         action="store_true",
-        help="Also run the opt-in model_coverage category (issue #7682; "
-        "off by default until #7683/#7685 because it depends on the host's 3D library)",
+        help="Run the model_coverage category (issue #7682); default-on since #7685, "
+        "so this flag is a no-op kept for compatibility",
     )
     check_parser.add_argument(
         "--strict-connectivity",

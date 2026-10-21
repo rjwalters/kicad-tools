@@ -292,6 +292,24 @@ class TestBoard00SimpleLed:
         This is the user-visible DRC failure from #3148 ("Net 'GND'/'VCC'
         is partially routed: 1 of 2 pads stranded").
         """
+        # Issue #7738: a full ``kct check`` also runs a Manifest leg, which
+        # needs the bundle the generator's ``kct export`` step writes; with
+        # no bundle it reports ``Overall: INCOMPLETE`` and exits 2.  The
+        # generator still exits 0 when that export fails (the bundle is not
+        # part of its ERC/DRC/LVS gate).  The usual cause is a venv synced
+        # without the ``dev`` extra: ``kct export`` aborts when the optional
+        # ``requests`` dependency (``parts`` extra) is missing (#4104).
+        # Assert the precondition first so that failure names the export
+        # step instead of reading as a board 00 DRC regression.
+        manifest = routed_pcb.parent / "manufacturing" / "manifest.json"
+        assert manifest.exists(), (
+            "generate_design.py wrote no manufacturing bundle "
+            f"({manifest} is missing), so `kct check` cannot pass its "
+            "Manifest leg.  The usual cause is the environment, not board "
+            "00: `kct export` aborts when the 'parts' extra ('requests') is "
+            "missing.  If so, re-sync with "
+            "`uv sync --frozen --extra dev`, which CI and the worktree hook use."
+        )
         proc = subprocess.run(
             [sys.executable, "-m", "kicad_tools.cli", "check", str(routed_pcb)],
             capture_output=True,

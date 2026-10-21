@@ -45,8 +45,6 @@ KNOWN_OFFENDERS = frozenset(
         "boards/04-stm32-devboard/output/check-report.json",
         "boards/06-diffpair-test/output/manufacturing/check-report.json",
         "boards/06-diffpair-test/output/readiness/kct-check.json",
-        "boards/09-usbc-pd-power/output/manufacturer-check.json",
-        "boards/09-usbc-pd-power/output/net-status.json",
     }
 )
 
