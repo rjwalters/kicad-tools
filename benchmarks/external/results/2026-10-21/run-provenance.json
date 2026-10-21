@@ -1,0 +1,14 @@
+{
+  "record_type": "external_benchmark_run_provenance",
+  "record_version": 1,
+  "run_date_utc": "2026-10-21",
+  "recorded_at": "2026-10-21T04:45:16Z",
+  "tool_commit": "a802bab41ac5e43ea72e228eec83106a522347d3",
+  "ref": "refs/heads/main",
+  "workflow_run_id": "39539832212",
+  "kicad_image": "kicad/kicad@sha256:18693567392b80da435f9fa952ce3a3e534c66eb5a6033f5b9c80aa3b19dd3ec",
+  "kicad_cli": "10.0.6",
+  "python": "3.12.15",
+  "native_check": "C++ backend: available (version 1.0.0)\n  build version: 64 (required: 64)\n  extension: router_cpp.cpython-312-x86_64-linux-gnu.so\nPlacement backend: available (version 2.1.0)\nDRC backend: available (version 1.0.0)",
+  "seed": 42
+}
