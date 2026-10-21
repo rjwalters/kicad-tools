@@ -785,6 +785,26 @@ def route_pcb(input_path: Path, output_path: Path, *, use_saved_plan: bool = Tru
         net_class_map[net] = _dc_replace(
             net_class_map[net], allow_plane_layers=[in2], preferred_layers=[in2]
         )
+    # Issue #7256: pin each pair's width for the layer it runs on, so a fresh
+    # route and the committed plan carry the same copper width.  Declaring
+    # ``target_diff_impedance`` (#7294) leaves the router's impedance sizing
+    # dormant on the CLI path (no stackup is passed, and explicit targets are
+    # not synthesis candidates, #2967), so the router lays ``trace_width`` as
+    # given.  The resolver would also size every pair for F.Cu only.
+    # Zdiff below is ``CoupledLines`` on this stackup at the 0.15 mm
+    # intra-pair gap; the declared band is 90 ohm +-10 % (81-99 ohm):
+    #   * USB_MCU_D+/- (F.Cu MCU launch, microstrip): 0.25 mm -> 93.2 ohm.
+    #     The 0.20 mm default gives 101.7 ohm, outside the band.  0.275 mm
+    #     (89.6 ohm) and 0.30 mm (86.3 ohm) are also in band, but on the arm C
+    #     route (seed 42) their launches detour past the 4 mm
+    #     ``usb_geometry()`` bound (4.190 and 4.047 mm); 0.25 mm keeps them at
+    #     3.936 / 3.798 mm.  The 4 mm bound stays (operator ruling on #7256).
+    #   * USB_D+/- (In2.Cu common run, stripline): 0.20 mm -> 83.9 ohm.
+    #     Wider In2.Cu copper leaves the band (0.22 mm -> 81.0 ohm).
+    for net in ["USB_MCU_D+", "USB_MCU_D-"]:
+        net_class_map[net] = _dc_replace(net_class_map[net], trace_width=0.25)
+    for net in ["USB_D+", "USB_D-"]:
+        net_class_map[net] = _dc_replace(net_class_map[net], trace_width=0.20)
     # Issue #6443: no ``coupled_continuity_threshold`` override.  Continuity
     # is info-only now; the short USB-C/ESD branches are bounded by the
     # uncoupled-length limit (USB2_FS: 6.35 mm x components on the net) and
