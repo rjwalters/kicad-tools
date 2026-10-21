@@ -298,7 +298,7 @@ def test_nudged_centerline_rescues_a_pair_a_hair_inside_a_pad_class(monkeypatch)
     # 0.187 mm from J1.B8/B9/B12 (0.200 mm class) although the corridor had
     # room.  Here the body row puts the N leg 0.18 mm from a 0.25 mm-class
     # pad.  Without the sideways nudge the pair declines; with it the body
-    # shifts 0.1 mm and ships clear of the class, still at exactly the pitch.
+    # shifts 0.1 mm and ships clear of the class, still at the pitch (plus the serialization margin).
     from kicad_tools.router.lattice import pathfinder as pfm
     from tests.router.lattice.test_coupled_pairs import _PITCH, _pad
 
@@ -325,4 +325,4 @@ def test_nudged_centerline_rescues_a_pair_a_hair_inside_a_pad_class(monkeypatch)
         for a in res.routes[0].segments
         for b in res.routes[1].segments
     )
-    assert sep == pytest.approx(_PITCH, abs=1e-6)
+    assert sep == pytest.approx(_PITCH + pfm._PAIR_SERIALIZATION_MARGIN_MM, abs=1e-6)
