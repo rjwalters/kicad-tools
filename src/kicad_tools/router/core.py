@@ -13764,6 +13764,7 @@ class Autorouter:
                         demotable_connected=current_demotable,
                     )
                     if current_metrics.is_better_than(best_metrics):
+                        prior_best_metrics = best_metrics
                         best_metrics = current_metrics
                         best_routed_count = current_routed
                         best_routes = copy.deepcopy(list(self.routes))
@@ -13776,7 +13777,11 @@ class Autorouter:
                         # after _capture_iteration_end recorded the metric).
                         # Reset the patience counter so the loop gives the
                         # rip-up phase fresh budget to keep improving.
-                        best_stall_count = 0
+                        # Issue #7659: only on a real metric gain -- a tie
+                        # that wins on the ``-iteration`` tie-break is not
+                        # progress.
+                        if current_metrics.made_progress_over(prior_best_metrics):
+                            best_stall_count = 0
 
                         # Issue #2808: fire checkpoint hook from the iteration-top
                         # snapshot site too, not just _capture_iteration_end --
