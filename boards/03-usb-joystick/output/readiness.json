@@ -47,11 +47,11 @@
     }
   ],
   "engine": {
-    "kicad_tools_version": "0.23.0",
+    "kicad_tools_version": "0.24.0",
     "dirty": true,
     "manufacturer": "jlcpcb-tier1",
-    "commit": "b6c3f42ad04ba59a30e7a443ac13c1ee6a1c8aa0",
-    "source_digest": "3b9ca254cf04d20a73a7a8ebab4f6bff3a3e1e2f522733913ef0bb8d332782b4",
+    "commit": "a974bb905367ea260e7a1311104b980fff25f479",
+    "source_digest": "4ff4511a5fe1106badd752345f99e03a7b23f088a05717346277494832cd40f9",
     "kicad_cli_version": "10.0.6",
     "rules_digest": "83203df1a4fb03d0c65545b18101d56917c87eab667234b3657e62c362b1c2a1"
   },
@@ -167,7 +167,7 @@
     "output/readiness-verification/fill-saved/usb_joystick_routed.kicad_dru": "4c2e4794a17955e1bb3bcf5920621e79a19a2f07793bd346bd24ff9c7baf52ff",
     "output/readiness-verification/fill-saved/usb_joystick_routed.kicad_pcb": "e87aedb5f5cf2d4a132e7029deb0707de299494014fdcb657b77a83025a6d7f6",
     "output/readiness-verification/fill-saved/usb_joystick_routed.kicad_pro": "e1b779bc9454f7e182c9f507a78162bc3e5b96e7cb9fc9231fb9bbabc046db00",
-    "output/readiness-verification/kct-check.json": "00465a10d009bb9df605e605f550e59921be4c7519e7b49547ffc671c63c812e",
+    "output/readiness-verification/kct-check.json": "bef0f59dee64d72bca1dc941b8a79edad58a98e36e351939cd8772f6bd4fea03",
     "output/readiness-verification/native-drc-raw.json": "6b62c3fff91c861f6581b73f1b0a7dcd64bdaffe9eee47677a9d1be9b9fd650a",
     "output/readiness-verification/native-drc.json": "214ac46776cddd59353832e02bc930441ba603112ec6ee789cec49a8b4bd3c3e",
     "output/readiness-verification/refilled-native/native-drc-raw.json": "6b62c3fff91c861f6581b73f1b0a7dcd64bdaffe9eee47677a9d1be9b9fd650a",
