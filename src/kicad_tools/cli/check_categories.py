@@ -27,6 +27,7 @@ CHECK_CATEGORIES = [
     "impedance",
     "isolated_copper",
     "match_group_length_skew",
+    "model_coverage",
     "netclass_clearance_copper",
     "netclass_floor",
     "netlist",

@@ -3329,6 +3329,29 @@ def run_selected_checks(
 
         return check_spec_conformance(checker.pcb, pcb_path, getattr(checker, "manufacturer", None))
 
+    # Issue #7682: 3D model coverage (one warning per non-exempt footprint with
+    # no usable model).  CLI-level closure because it needs the PCB *path*; NOT
+    # a ``DRCChecker`` method.  Resolves against the host render environment.
+    def _model_coverage_check() -> DRCResults:
+        if pcb_path is None:
+            return DRCResults()
+        from kicad_tools.pcb.model_audit import audit_pcb_models
+
+        results = DRCResults()
+        for gap in audit_pcb_models(pcb_path, env="host").gaps:
+            results.add(
+                DRCViolation(
+                    rule_id="model_coverage",
+                    severity="warning",
+                    message=(
+                        f"{gap.reference} ({gap.lib_id}): {gap.klass}: {gap.reason}"
+                        + (f" [path: {gap.path}]" if gap.path else "")
+                    ),
+                    items=(gap.reference,),
+                )
+            )
+        return results
+
     # Map of category to check method.  This dict MUST stay a superset
     # of the methods invoked by ``DRCChecker.check_all`` (i.e., every
     # name in ``DRCChecker.CHECK_ALL_METHODS`` must be referenced as a
@@ -3357,6 +3380,7 @@ def run_selected_checks(
         "impedance": checker.check_impedance,
         "isolated_copper": checker.check_isolated_copper,
         "match_group_length_skew": checker.check_match_group_length_skew,
+        "model_coverage": _model_coverage_check,
         "routing_policy": checker.check_routing_policy,
         "netclass_clearance_copper": _netclass_clearance_copper_check,
         "netclass_floor": _netclass_floor_check,

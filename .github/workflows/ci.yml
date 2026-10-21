@@ -1223,6 +1223,37 @@ jobs:
             "$KICAD_IMAGE" \
             bash scripts/ci/run_native_routed_drc.sh "${args[@]}"
 
+  model-coverage-report:
+    # Issue #7682: fleet 3D model coverage REPORT, never a gate.  Audits every
+    # board's PCB under the host and pinned resolution environments and uploads
+    # model-coverage.json.  `continue-on-error` keeps a failure here from ever
+    # failing the build; do not add this job to any required check.
+    name: 3D Model Coverage Report
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "latest"
+          enable-cache: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Write model-coverage.json
+        run: uv run python scripts/ci/model_coverage_report.py -o model-coverage.json
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: model-coverage
+          path: model-coverage.json
+
   diffpair-routing-regression:
     # Issue #5743 (operator ruling 2026-10-02): this job runs on main
     # verification runs only (since #5986: the hourly/nightly schedule and

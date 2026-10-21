@@ -186,6 +186,55 @@ on what the render showed); `tests/test_lcsc_models.py` walks the table and
 structural gate: an uncalibrated guess cannot land green, so the only way into
 the table is a human who actually rendered.
 
+## 3D model coverage audit
+
+`kct pcb model-audit <pcb>` (issue #7682) classifies **every footprint**, not
+just every `(model ...)` ref, so a footprint with no model can no longer hide
+behind "0 models checked". One classifier
+(`kicad_tools/pcb/model_audit.py`) backs every surface below.
+
+| Class | Meaning | Covered? |
+|---|---|---|
+| `resolved` | an enabled model ref resolves to a file | yes |
+| `embedded` | `kicad-embed://` ref whose name exists in `embedded_files` with data | yes |
+| `dangling` | the ref names a missing file (or an embedded name with no data) | no |
+| `no_ref` | the footprint has no `(model ...)` at all | no |
+| `unresolved_var` | a `${VAR}` in the path is not defined in the environment | no |
+| `hidden_only` | every model on the footprint is hidden | no |
+| `lcsc_cache_miss` | the ref points into the LCSC cache (`KCT_LCSC_3D_DIR`, `C<digits>.step`) but the file is not cached | no |
+| `placeholder` | resolves, but the file name is a stand-in (`placeholder`, `dummy`, `generic`, `proxy`) | no |
+| `exempt` | no 3D body expected; excluded from the denominator | n/a |
+
+**Exempt list** (data in `model_audit.py`: `EXEMPT_ATTRS`, `EXEMPT_LIB_PATTERNS`):
+footprints with a `board_only` or `exclude_from_bom` attribute, and the
+`MountingHole`, `NetTie`, `TestPoint` and `Fiducial` library families.
+
+**Resolution environments.** `--env host` (default) is what `kct render` sees on
+this machine, so the totals depend on the KiCad model library installed there
+(the audited reference numbers were measured against KiCad 10.0.x).
+`--env pinned` is the pinned toolchain image; it has no model set yet
+(issue #7683), so every library ref reads `dangling` and only
+`${KIPRJMOD}`-relative and embedded models resolve. `--model-dir DIR` maps every
+`KICADn_3DMODEL_DIR` variable to `DIR`.
+
+**Surfaces.**
+
+- `kct pcb model-audit <pcb> [--env host|pinned] [--model-dir DIR] [--format json]`
+- `kct check --only model_coverage`: one *warning* per non-exempt uncovered
+  footprint (message carries reference, `lib_id`, class and path).
+- `kct render`: boards with uncovered footprints report `partial` with a reason
+  per footprint (`model_check.uncovered_models`) instead of `passed`; exit code
+  is unchanged.
+- `kct fleet status`: a `3D` column (`covered/total`, host environment).
+  Informational; never a ship-ready blocker.
+- CI: the non-blocking `3D Model Coverage Report` job uploads
+  `model-coverage.json` (host and pinned summaries, gaps and suspects per board).
+
+**Wrong-body heuristic.** When the model file name implies a pin grid
+(`..._1x04_P2.54mm`) whose pin count differs from the footprint's pad count, the
+entry is reported as a `suspect` (still counted as covered), e.g. a `PinHeader_1x05`
+footprint carrying a 1x04 model.
+
 ## Cache and environment variables
 
 - **`KCT_LCSC_3D_DIR`** — the on-disk STEP cache directory. Default:

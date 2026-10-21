@@ -610,6 +610,24 @@ class TestMissingModelDiagnostics:
         assert pcb.read_text() == source
         assert captured.err == ""
 
+    def test_bare_footprints_are_partial_with_a_reason_each(self, tmp_path, fake_kicad, capsys):
+        # Issue #7682: footprints with no (model ...) used to pass with 0 checked.
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(
+            '(kicad_pcb (footprint "R:R" (property "Reference" "R1"))'
+            ' (footprint "R:R" (property "Reference" "R2"))'
+            ' (footprint "MountingHole:MH" (property "Reference" "H1")))'
+        )
+        assert render_main([str(pcb), "--format", "json"]) == 0
+        result = json.loads(capsys.readouterr().out)["boards"][0]
+        check = result["model_check"]
+        assert result["status"] == "partial"
+        assert check["status"] == "partial"
+        assert check["coverage"]["covered"] == 0 and check["coverage"]["total"] == 2
+        assert [m["reference"] for m in check["uncovered_models"]] == ["R1", "R2"]
+        assert all(m["class"] == "no_ref" for m in check["uncovered_models"])
+        assert len([e for e in result["errors"] if "no_ref" in e]) == 2
+
     def test_text_names_component_and_model(self, tmp_path, fake_kicad, capsys):
         pcb = tmp_path / "board.kicad_pcb"
         pcb.write_text(
