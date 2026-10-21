@@ -15,6 +15,10 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-21
 
+- **PR #7739**: test(board00): assert the manufacturing bundle exists before kct check
+- **PR #7736**: feat(check): default-on model_coverage with full demo-board 3D coverage
+- **Issue #7738** (closed): main: test_board_00_simple_led::test_no_connectivity_errors fails
+- **Issue #7685** (closed): Bring every demo board to 100% 3D model coverage on the pinned model set
 - **PR #7734**: ci: add host-vs-pinned render model coverage parity check
 - **PR #7726**: feat: price net signed turning in the coupled lattice pair search
 - **PR #7730**: fix: emit lattice pair legs wider than pitch to survive 4-decimal serialization
