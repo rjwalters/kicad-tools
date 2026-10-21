@@ -1368,12 +1368,10 @@ def main(argv: list[str] | None = None) -> int:
         dest="models_3d",
         action="store_true",
         help=(
-            "Also run the opt-in model_coverage category (issue #7682): one "
-            "advisory warning per footprint with no or a missing 3D model, or a "
-            "single info finding when this host has no model library. Off by "
-            "default until a pinned model set lands (#7683/#7685), because the "
-            "result depends on the host's KiCad 3D library. Same as adding "
-            "model_coverage to --only."
+            "Run the model_coverage category (issue #7682): one advisory "
+            "warning per footprint with no or a missing 3D model, or a single "
+            "info finding when this host has no model library. Default-on "
+            "since #7683, so this flag is kept for compatibility."
         ),
     )
     parser.add_argument(
@@ -3358,16 +3356,15 @@ def run_selected_checks(
     #
     # * a gap caused by an absent model library (the variable is undefined or
     #   names a missing directory -- the CI runner and the pinned toolchain
-    #   ship none until #7683) is the *environment's* gap, not the board's.
+    #   ship none; ``kct models sync`` provides the pinned subset, #7683) is the *environment's* gap, not the board's.
     #   All of them collapse into ONE ``info`` finding per library variable,
     #   which never counts as a warning, so a host without a library reads
     #   "not evaluated" instead of N per-footprint defects;
     # * every other gap -- ``no_ref`` above all, which is the same on every
     #   host -- is a real defect of the board and stays a per-footprint
     #   ``warning`` (advisory bucket: ``kct check --3d-models`` still
-    #   passes, only adding ``--strict`` fails).  The whole category is
-    #   opt-in until #7683/#7685 (see
-    #   ``check_categories.DEFERRED_OPT_IN_CATEGORIES``).
+    #   passes, only adding ``--strict`` fails).  Default-on since #7683
+    #   (``check_categories.DEFERRED_OPT_IN_CATEGORIES`` is empty).
     def _model_coverage_check() -> DRCResults:
         if pcb_path is None:
             return DRCResults()
@@ -3396,8 +3393,8 @@ def run_selected_checks(
                     severity="info",
                     message=(
                         f"3D coverage not evaluated for {len(entries)} footprint(s): "
-                        f"no model library at ${{{root}}} on this host (the pinned "
-                        "toolchain ships none; see #7683)"
+                        f"no model library at ${{{root}}} on this host (run "
+                        "`kct models sync` for the pinned subset; see #7683)"
                     ),
                     items=tuple(sorted(e.reference for e in entries)),
                 )
@@ -3471,13 +3468,12 @@ def run_selected_checks(
             cov_map[category] = cov.skipped(category, "opt_in:--only")
             continue
 
-        # Issue #7682: host-dependent categories (``model_coverage``) are out
-        # of the default set until #7683/#7685 -- the ONE place that deferral
-        # lives, so gates, ``kct readiness`` evidence, ``run_drc`` and
-        # ``--strict`` exit codes stay machine-independent with no caller
-        # naming it.  ``--only model_coverage`` or ``--3d-models`` opts in.
-        # No coverage entry either: a default report (and so committed
-        # ``kct readiness`` evidence) stays byte-identical to before #7682.
+        # Issue #7682: host-dependent categories listed in
+        # ``DEFERRED_OPT_IN_CATEGORIES`` are out of the default set -- the ONE
+        # place that deferral lives, so gates, ``kct readiness`` evidence,
+        # ``run_drc`` and ``--strict`` exit codes stay machine-independent with
+        # no caller naming it.  ``--only <category>`` opts in.  The set has
+        # been empty since #7683 (``model_coverage`` is default-on).
         if category in DEFERRED_OPT_IN_CATEGORIES and only_set is None and category not in opt_in:
             continue
 

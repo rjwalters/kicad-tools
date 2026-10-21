@@ -212,21 +212,24 @@ footprints with a `board_only` or `exclude_from_bom` attribute, and the
 **Resolution environments.** `--env host` (default) is what `kct render` sees on
 this machine, so the totals depend on the KiCad model library installed there
 (the audited reference numbers were measured against KiCad 10.0.x).
-`--env pinned` is the pinned toolchain image; it has no model set yet
-(issue #7683), so every library ref reads `dangling` and only
-`${KIPRJMOD}`-relative and embedded models resolve. `--model-dir DIR` maps every
+`--env pinned` is the pinned toolchain image plus the checksum-verified subset of
+KiCad's stock 3D library that `kct models sync` fetches (issue #7683, see
+below). Until that is synced it prints `pinned model set not synced`, every
+library ref reads `dangling` and only `${KIPRJMOD}`-relative and embedded models
+resolve. `--model-dir DIR` maps every
 `KICADn_3DMODEL_DIR` variable to `DIR`.
 
 **Surfaces.**
 
 - `kct pcb model-audit <pcb> [--env host|pinned] [--model-dir DIR] [--format json]`
-- `kct check --3d-models` (or `--only model_coverage`): one *warning* per
-  non-exempt uncovered footprint (message carries reference, `lib_id`, class
-  and path), or a single *info* finding ("3D coverage not evaluated") when the
-  host has no model library. The category is **opt-in**: plain `kct check`,
-  `--strict`, board gates, `kct readiness` and `run_drc` do not run it until a
-  pinned model set lands (#7683/#7685), because its result depends on the
-  host's KiCad 3D library.
+- `kct models sync --sparse` / `kct models status`: fetch / check the pinned
+  model subset (below).
+- `kct check` (category `model_coverage`, also `--only model_coverage`): one
+  *warning* per non-exempt uncovered footprint (message carries reference,
+  `lib_id`, class and path), or a single *info* finding ("3D coverage not
+  evaluated") when the host has no model library. **Default-on since #7683**
+  (`--3d-models` is kept as a no-op for compatibility), so `--strict` now fails
+  on a board whose footprints lack a resolvable model.
 - `kct render`: boards with uncovered footprints report `partial` with a reason
   per footprint (`model_check.uncovered_models`) instead of `passed`; exit code
   is unchanged.
@@ -234,6 +237,20 @@ this machine, so the totals depend on the KiCad model library installed there
   Informational; never a ship-ready blocker.
 - CI: the non-blocking `3D Model Coverage Report` job uploads
   `model-coverage.json` (host and pinned summaries, gaps and suspects per board).
+
+**Pinned model subset (`kct models sync`).** The pinned toolchain image ships no
+3D models, so the fleet fetches only the files its boards reference, from
+`kicad-packages3D` at tag `10.0.6` (equal to the pinned image's KiCad version; a
+test fails on drift), and verifies each against the sha256 in
+`src/kicad_tools/data/kicad-3dmodels/manifest.json`. The cache is
+`~/.cache/kicad-tools/kicad-3dmodels/<tag>/` (override with
+`KCT_KICAD_3DMODEL_CACHE`); a second `sync` makes no network calls, and a digest
+mismatch deletes the file and exits non-zero. `--env pinned` and the Docker
+`kicad-cli` shim (`KCT_KICAD_DOCKER=1`) use the cache only when every manifest
+file verifies. Regenerate the manifest with
+`uv run python scripts/update_3dmodel_manifest.py` when a board references a new
+stock model. The models are CC-BY-SA-4.0 with the KiCad design exception; the
+manifest ships with `ATTRIBUTION.md`, which `sync` copies next to the cache.
 
 **Wrong-body heuristic.** When the model file name implies a pin grid
 (`..._1x04_P2.54mm`) whose pin count differs from the footprint's pad count, the

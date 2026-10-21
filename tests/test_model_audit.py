@@ -252,23 +252,18 @@ def test_check_collapses_missing_library_into_one_info(tmp_path, models, monkeyp
     assert not info.is_warning
 
 
-def test_opt_in_deferral_expires_with_pinned_model_set():
-    """``model_coverage`` stays out of the default set only until #7683.
-
-    When ``PINNED_MODEL_DIR`` is set this fails: drop ``model_coverage`` from
-    ``DEFERRED_OPT_IN_CATEGORIES`` (making it default-on) and re-record board
-    evidence then (#7683/#7685).
-    """
+def test_model_coverage_is_default_on_since_pinned_model_set():
+    """#7683 shipped the pinned model subset, so the #7682 deferral is gone."""
     from kicad_tools.cli.check_categories import CHECK_CATEGORIES, DEFERRED_OPT_IN_CATEGORIES
 
-    assert model_audit.PINNED_MODEL_DIR is None, "#7683 landed: drop the #7682 opt-in deferral"
-    assert {"model_coverage"} == DEFERRED_OPT_IN_CATEGORIES
-    assert set(CHECK_CATEGORIES) >= DEFERRED_OPT_IN_CATEGORIES
+    assert frozenset() == DEFERRED_OPT_IN_CATEGORIES
+    assert "model_coverage" in CHECK_CATEGORIES
 
 
-def test_default_category_set_excludes_model_coverage(tmp_path, models):
-    """The deferral lives in ``run_selected_checks``: every default caller
-    (``kct check``, ``run_check_rule_set``, ``kct readiness``) skips it."""
+def test_default_category_set_includes_model_coverage(tmp_path, models):
+    """Default-on since #7683: every default caller (``kct check``,
+    ``run_check_rule_set``, ``kct readiness``) runs it; ``opt_in`` and
+    ``--only`` stay accepted."""
     from unittest.mock import MagicMock
 
     from kicad_tools.cli.check_cmd import run_selected_checks
@@ -277,7 +272,7 @@ def test_default_category_set_excludes_model_coverage(tmp_path, models):
     coverage: dict = {}
     only = {"model_coverage"}
     for only_set, opt_in, expected in [
-        (None, frozenset(), []),
+        (None, frozenset(), [("warning", ("U1",))]),
         (None, {"model_coverage"}, [("warning", ("U1",))]),
         (only, frozenset(), [("warning", ("U1",))]),
     ]:
@@ -286,11 +281,7 @@ def test_default_category_set_excludes_model_coverage(tmp_path, models):
         )
         found = [(v.severity, v.items) for v in results.violations if v.rule_id == "model_coverage"]
         assert found == expected, (only_set, opt_in)
-        if only_set is None and not opt_in:
-            # Invisible by default, so default reports match pre-#7682 bytes.
-            assert "model_coverage" not in coverage
-        else:
-            assert coverage["model_coverage"].state == "checked"
+        assert coverage["model_coverage"].state == "checked"
         coverage.clear()
 
 
@@ -306,12 +297,13 @@ def _coverage_rules(report: dict) -> list[str]:
     return [v["rule_id"] for v in report["violations"] if v["rule_id"] == "model_coverage"]
 
 
-def test_check_cli_strict_unchanged_by_default_and_opt_in_flag(tmp_path, models):
-    """Plain ``kct check --strict`` never sees ``model_coverage``;
-    ``--3d-models`` / ``--only model_coverage`` opt in (issue #7682)."""
+def test_check_cli_default_runs_model_coverage_and_flags_stay_accepted(tmp_path, models):
+    """Plain ``kct check`` runs ``model_coverage`` (default-on since #7683), so
+    ``--strict`` fails on a bare footprint; ``--3d-models`` / ``--only
+    model_coverage`` remain accepted (issue #7682)."""
     pcb = _write(tmp_path, _fp("U1"))
-    _, default = _check_cli(pcb, "--strict")
-    assert _coverage_rules(default) == []
+    code, default = _check_cli(pcb, "--strict")
+    assert code == 2 and _coverage_rules(default) == ["model_coverage"]
     _, flagged = _check_cli(pcb, "--3d-models")
     assert _coverage_rules(flagged) == ["model_coverage"]
     _, only = _check_cli(pcb, "--only", "model_coverage")
@@ -329,4 +321,4 @@ def test_top_level_kct_check_forwards_3d_models_flag(tmp_path, models):
     kct_main(["check", str(pcb), "--3d-models", "--format", "json", "--output", str(report)])
     assert _coverage_rules(json.loads(report.read_text())) == ["model_coverage"]
     kct_main(["check", str(pcb), "--format", "json", "--output", str(report)])
-    assert _coverage_rules(json.loads(report.read_text())) == []
+    assert _coverage_rules(json.loads(report.read_text())) == ["model_coverage"]

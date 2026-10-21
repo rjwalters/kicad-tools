@@ -1758,9 +1758,10 @@ def _run_edit_outline_command(args, pcb_path: Path) -> int:
 
 def _run_model_audit_command(args, pcb_path: Path) -> int:
     """Handle the 'pcb model-audit' command (issue #7682)."""
-    from kicad_tools.pcb.model_audit import audit_pcb_models
+    from kicad_tools.pcb.model_audit import audit_pcb_models, resolve_pinned_model_dir
 
     model_dir = Path(args.model_dir) if getattr(args, "model_dir", None) else None
+    not_synced = model_dir is None and args.env == "pinned" and resolve_pinned_model_dir() is None
     try:
         report = audit_pcb_models(pcb_path, env=args.env, model_dir=model_dir)
     except Exception as e:
@@ -1771,6 +1772,8 @@ def _run_model_audit_command(args, pcb_path: Path) -> int:
         print(json.dumps(report.to_dict(), indent=2))
         return 0
 
+    if not_synced:
+        print("pinned model set not synced (run `kct models sync`)")
     pct = "n/a" if report.percent is None else f"{report.percent:g}%"
     print(f"3D model coverage ({report.env}): {report.covered}/{report.total} ({pct})")
     counts = {k: v for k, v in report.counts().items() if v}
