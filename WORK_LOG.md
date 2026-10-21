@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-21
 
+- **PR #7744**: fix: gate board recipes on manufacturing export result
+- **Issue #7740** (closed): board generators report Overall: PASS and exit 0 when the manufacturing-bundle export fails
 - **PR #7739**: test(board00): assert the manufacturing bundle exists before kct check
 - **PR #7736**: feat(check): default-on model_coverage with full demo-board 3D coverage
 - **Issue #7738** (closed): main: test_board_00_simple_led::test_no_connectivity_errors fails
