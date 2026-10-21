@@ -1214,7 +1214,8 @@ def ensure_models(
 
     Args:
         pcb_path: PCB file to patch in place.
-        sidecar: Optional ``lcsc_models.json`` enabling the LCSC tier.
+        sidecar: Optional ``lcsc_models.json`` override of the BOM-derived
+            LCSC C-numbers.
         library_paths: Optional explicit KiCad library location.
         **kwargs: Forwarded to :func:`add_model_refs` (``refresh``,
             ``allow_dangling``, ``dry_run``, ...).
@@ -1224,10 +1225,13 @@ def ensure_models(
         available there is nothing to resolve, so an empty report is returned
         and the file is untouched (a recipe must not fail on such a host).
     """
-    from kicad_tools.pcb.lcsc_models import fetch_enabled, load_lcsc_mapping
+    from kicad_tools.pcb.lcsc_bom import build_lcsc_mapping
+    from kicad_tools.pcb.lcsc_models import fetch_enabled
 
     paths = library_paths if library_paths is not None else detect_kicad_library_path()
-    lcsc_mapping = load_lcsc_mapping(Path(sidecar)) if sidecar is not None else None
+    # C-numbers come from the board's BOM / procurement data; the sidecar (if
+    # any) is an override only (issue #7686).
+    lcsc_mapping = build_lcsc_mapping(Path(pcb_path), sidecar=sidecar).mapping or None
     if not paths.found and lcsc_mapping is None:
         return ModelPatchReport()
     kwargs.setdefault("lcsc_fetch", fetch_enabled(False))
