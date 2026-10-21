@@ -1,8 +1,8 @@
 ---
 title: "matchgroup_test_routed"
 subtitle: "Design Report"
-author: "kicad-tools 0.23.0"
-date: "Rev 1 | 2026-10-19 | jlcpcb"
+author: "kicad-tools 0.24.0"
+date: "Rev 1 | 2026-10-21 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -48,7 +48,7 @@ header-includes:
 
 ### Theory of Operation
 
-Board 07 real SDRAM memory test — DRAFT
+Board 07 real SDRAM memory test
 
 ### Communication Interfaces
 

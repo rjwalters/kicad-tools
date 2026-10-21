@@ -31,6 +31,9 @@
 #      checkout (`${LOOM_HOME:-$HOME/.local/share/loom}/defaults/hooks/`) is
 #      reported as DEGRADED, not BROKEN — it still runs, from the machine copy,
 #      exactly as `hook-wiring.sh`'s rung 4 arranges.
+#   4. When `guard-destructive.sh` is wired, its sibling engine
+#      `guard-destructive-generic.sh` is readable (the dispatcher `exec bash`es
+#      it). Missing with no Repo Skills guard to cover is BROKEN (#8570).
 #
 # A repo that is NOT a Loom workspace (no `.loom/` directory and no
 # `.loom-project/project.json`) is a clean no-op: reported as "not a Loom
@@ -176,6 +179,23 @@ run_check() {
         rc=2
     done <<< "$names"
 
+    # The generic engine is a sibling the guard-destructive.sh dispatcher
+    # `exec bash`es, not a wired hook, so the loop above never sees it (#8570).
+    # Without it (and without a Repo Skills guard) the dispatcher fails open.
+    if grep -qx 'guard-destructive.sh' <<< "$names"; then
+        local hooks_dir="$root/.loom/hooks"
+        [[ -f "$hooks_dir/guard-destructive.sh" ]] || hooks_dir="$machine_hooks"
+        if [[ ! -r "$hooks_dir/guard-destructive-generic.sh" ]]; then
+            if [[ -f "$root/.claude/skills/repo/hooks/guard-destructive.sh" \
+                || -f "$HOME/.claude/skills/repo/hooks/guard-destructive.sh" ]]; then
+                say "  ${YELLOW}degraded${NC}  guard-destructive-generic.sh — no bundled fallback engine at $hooks_dir; only the Repo Skills guard decides"
+            else
+                problem "  ${RED}NO ENGINE${NC}  guard-destructive-generic.sh — missing or unreadable at $hooks_dir and no Repo Skills guard found, so guard-destructive.sh fails open. Repair: re-run scripts/install-loom.sh"
+                rc=2
+            fi
+        fi
+    fi
+
     if [[ "$rc" -eq 0 ]]; then
         say "check-guards-installed: ${GREEN}OK${NC} — every hook wired in $settings is runnable."
     else
@@ -215,6 +235,7 @@ self_test() {
   }
 }
 JSON
+        printf '#!/bin/sh\nexit 0\n' > "$1/.loom/hooks/guard-destructive-generic.sh"
     }
 
     # 1. Not a Loom workspace -> clean no-op.
@@ -249,8 +270,22 @@ JSON
     # 6. Missing per-repo copy but present machine-level -> degraded, passes.
     mkdir -p "$tmp/machine/defaults/hooks"
     printf '#!/bin/sh\nexit 0\n' > "$tmp/machine/defaults/hooks/guard-destructive.sh"
+    printf '#!/bin/sh\nexit 0\n' > "$tmp/machine/defaults/hooks/guard-destructive-generic.sh"
     ( QUIET=1; LOOM_HOME="$tmp/machine"; run_check "$tmp/missing" >/dev/null 2>&1 )
     _expect "machine-level fallback is degraded, not broken" 0 $?
+
+    # 7. Dispatcher wired and present, but its generic engine is gone -> fail.
+    _fixture "$tmp/noengine"
+    printf '#!/bin/sh\nexit 0\n' > "$tmp/noengine/.loom/hooks/guard-destructive.sh"
+    chmod +x "$tmp/noengine/.loom/hooks/guard-destructive.sh"
+    rm -f "$tmp/noengine/.loom/hooks/guard-destructive-generic.sh"
+    ( QUIET=1; HOME="$tmp/nohome"; LOOM_HOME="$tmp/no-such-checkout"; run_check "$tmp/noengine" >/dev/null 2>&1 )
+    _expect "missing generic engine fails" 2 $?
+
+    # 8. ...with the engine present it passes again.
+    printf '#!/bin/sh\nexit 0\n' > "$tmp/noengine/.loom/hooks/guard-destructive-generic.sh"
+    ( QUIET=1; HOME="$tmp/nohome"; LOOM_HOME="$tmp/no-such-checkout"; run_check "$tmp/noengine" >/dev/null 2>&1 )
+    _expect "present generic engine passes" 0 $?
 
     printf 'check-guards-installed --self-test: %d passed, %d failed\n' "$pass" "$fail"
     [[ "$fail" -eq 0 ]]

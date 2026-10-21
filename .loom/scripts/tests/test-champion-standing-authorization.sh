@@ -120,7 +120,7 @@ class_entry_valid() {
     while IFS= read -r cond; do
         [ -z "$cond" ] && continue
         case "$cond" in
-            judgeApproval | greenCi) ;;
+            judgeApproval | greenCi | authorIsDependabot | noMajorBump) ;;
             *)
                 echo "INVALID: unrecognized condition '$cond'"
                 return 0
@@ -297,6 +297,18 @@ stub_gh() {
             --jq) is_jq=1 ;;
         esac
     done
+    if [ "$is_count" -eq 1 ] && printf '%s' "$*" | grep -qF '.user.login'; then
+        # authorIsDependabot's read; unset STUB_AUTHOR = the read fails.
+        [ -n "${STUB_AUTHOR:-}" ] || return 1
+        printf '%s\n' "$STUB_AUTHOR"
+        return 0
+    fi
+    if [ "$is_count" -eq 1 ] && [ "$is_jq" -eq 1 ] && [ "${*: -1}" = ".title" ]; then
+        # noMajorBump's read; unset STUB_TITLE = the read fails.
+        [ -n "${STUB_TITLE:-}" ] || return 1
+        printf '%s\n' "$STUB_TITLE"
+        return 0
+    fi
     if [ "$is_count" -eq 1 ]; then
         [ "${API_COUNT:-}" = "FAIL" ] && return 1
         if [ -n "${API_COUNT:-}" ]; then echo "$API_COUNT"; else printf '%s' "$STUB_API" | jq -s 'add | length'; fi
@@ -755,6 +767,53 @@ assert_doc_contains "$CHAMPION_REF_MD" \
 assert_doc_contains "$CHAMPION_REF_MD" \
     "#6850" \
     "champion-reference.md's decision matrix references #6850"
+
+echo
+echo "--- #12948: Dependabot class (authorIsDependabot / noMajorBump) ---"
+
+DEP_CLASS='{"champion":{"standingAuthorizations":[{"id":"dependabot-bumps","filePatterns":["package.json","package-lock.json","Cargo.toml","Cargo.lock"],"conditions":["authorIsDependabot","judgeApproval","greenCi"],"coversCriticalFiles":true}]}}'
+DEP_NOMAJOR='{"champion":{"standingAuthorizations":[{"id":"dependabot-bumps","filePatterns":["package.json","package-lock.json"],"conditions":["authorIsDependabot","noMajorBump","judgeApproval","greenCi"],"coversCriticalFiles":true}]}}'
+DEPFILES="$(printf 'package.json\npackage-lock.json')"
+
+out="$(STUB_AUTHOR='dependabot[bot] Bot' run_eval critical "$DEP_CLASS" "$DEPFILES" AUTO green "loom:pr")"
+assert_eq "ELIGIBLE:dependabot-bumps" "$out" "Dependabot manifest+lockfile bump, approved + green: criterion #3 passes"
+
+out="$(STUB_AUTHOR='someone User' run_eval critical "$DEP_CLASS" "$DEPFILES" AUTO green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "a human PR with the same manifest diff is held"
+
+out="$(STUB_AUTHOR='dependabot[bot] User' run_eval critical "$DEP_CLASS" "$DEPFILES" AUTO green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "a human account named dependabot[bot] (type User) is held"
+
+out="$(STUB_AUTHOR='' run_eval critical "$DEP_CLASS" "$DEPFILES" AUTO green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "a missing or unreadable author fails closed"
+
+out="$(STUB_AUTHOR='dependabot[bot] Bot' run_eval critical "$DEP_CLASS" "$(printf 'package.json\nsrc/index.js')" AUTO green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "a Dependabot PR touching a non-manifest file is held"
+
+out="$(STUB_AUTHOR='dependabot[bot] Bot' run_eval critical "$DEP_CLASS" "$DEPFILES" AUTO red "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "a Dependabot bump with red CI is held"
+
+out="$(STUB_AUTHOR='dependabot[bot] Bot' run_eval critical "$DEP_CLASS" "$DEPFILES" AUTO green "loom:review-requested")"
+assert_eq "NOT ELIGIBLE:" "$out" "a Dependabot bump without Judge approval is held"
+
+out="$(STUB_AUTHOR='dependabot[bot] Bot' STUB_TITLE='Bump vitest from 4.0.1 to 4.1.0' run_eval critical "$DEP_NOMAJOR" "$DEPFILES" AUTO green "loom:pr")"
+assert_eq "ELIGIBLE:dependabot-bumps" "$out" "noMajorBump: a minor bump still merges"
+
+out="$(STUB_AUTHOR='dependabot[bot] Bot' STUB_TITLE='Bump vitest from 4.1.0 to 5.0.0' run_eval critical "$DEP_NOMAJOR" "$DEPFILES" AUTO green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "noMajorBump: an opted-out major is held"
+
+out="$(STUB_AUTHOR='dependabot[bot] Bot' STUB_TITLE='Bump sha2 from 0.10.9 to 0.11.0' run_eval critical "$DEP_NOMAJOR" "$DEPFILES" AUTO green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "noMajorBump: a 0.x minor move counts as major and is held"
+
+out="$(STUB_AUTHOR='dependabot[bot] Bot' STUB_TITLE='Bump the npm-minor-patch group with 3 updates' run_eval critical "$DEP_NOMAJOR" "$DEPFILES" AUTO green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "noMajorBump: an unparseable (group) title fails closed"
+
+out="$(STUB_AUTHOR='dependabot[bot] Bot' STUB_TITLE='Bump vitest from 4.0.1 to 5.0.0' run_eval critical "$DEP_CLASS" "$DEPFILES" AUTO green "loom:pr")"
+assert_eq "ELIGIBLE:dependabot-bumps" "$out" "without noMajorBump, majors merge by default"
+
+assert_doc_contains "$CHAMPION_MD" "### Step 3.5: Rebase conflicting Dependabot siblings (#12948)" "champion-pr-merge.md ships the sibling-rebase step"
+assert_doc_contains "$CHAMPION_MD" "@dependabot rebase" "sibling-rebase step comments @dependabot rebase"
+assert_doc_contains "$CHAMPION_REF_MD" "authorIsDependabot" "champion-reference.md documents the Dependabot condition"
 
 echo
 echo "--- Resolved effective config (#12591) ---"

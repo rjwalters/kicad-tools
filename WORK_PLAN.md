@@ -30,7 +30,7 @@ _None._
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-- **#7699**: schema: root sheet UUID in HierarchyBuilder._load_schematic uses recursive find("uuid"); a root without a top-level uuid picks up a nested one
+- **#7669**: bench: re-run PocketBeagle and STRF (zero-touch + tuned) after the #4945/#5302 fixes and add a dispatchable external-bench workflow
 
 ## In Progress
 
@@ -40,23 +40,16 @@ Issues currently being built (`loom:building`).
 - **#7580**: router: finish diff-pair via-count parity (continuation of #7093)
 - **#7612**: Board 07 fixture: 4 diff pairs fail skew with no_suitable_segment (TMDS_D2, MIPI_DAT1, MIPI_DAT0, MIPI_CLK)
 - **#7659**: test flake: test_route_entry_path_goldens partial-rule_relaxation times out (C++ gives up on /D, Python fallback >60 s) — follow-up to #7626
-- **#7665**: ci: build and test site/ in CI: site-only PRs and Dependabot bumps merge without running vitest, astro check or the build
-- **#7669**: bench: re-run PocketBeagle and STRF (zero-touch + tuned) after the #4945/#5302 fixes and add a dispatchable external-bench workflow
 - **#7675**: Board 07: remove DRAFT from titles and re-issue readiness
 - **#7682**: 3D coverage audit: count footprints, not refs, in `kct check`, `kct render` and `kct fleet status`
-- **#7684**: Model insertion that cannot regress: existence-checked `add-3d-models` tiers, generators own their models, and a regeneration guard
 - **#7694**: chore: add ecosystem registry entries for the 3D-model neighbours
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#7660**: fix(router): stop counting tied iterations as progress for patience
-- **#7671**: ci: run site test/check/build/check-links on site-relevant PRs
-- **#7681**: fix(boards): drop DRAFT from board 07 titles and re-issue readiness
-- **#7693**: feat: existence-check 3D model refs and add ensure_models for generators
 - **#7695**: feat: audit 3D model coverage per footprint with shared classifier
-- **#7698**: ci: add dispatch-only external benchmark re-run workflow
+- **#7697**: chore: register 3D-model neighbours in the ecosystem registry
 
 ## Approved (Awaiting Merge)
 
@@ -98,15 +91,12 @@ Issues carrying `loom:curated`.
 - **#7649**: router: source-side diff-pair skew avoidance; retire the Q35 2× interim bump excursion *(curated)*
 - **#7650**: board 03: recover USB_D common-run and MCU-launch margin given up to route VBUS U2.5 (#7475) *(curated)*
 - **#7659**: test flake: test_route_entry_path_goldens partial-rule_relaxation times out (C++ gives up on /D, Python fallback >60 s) — follow-up to #7626 *(curated)*
-- **#7665**: ci: build and test site/ in CI: site-only PRs and Dependabot bumps merge without running vitest, astro check or the build *(curated)*
 - **#7666**: site: gallery shows stale or raw board identity: unchecked board.json age, PCB file stems as titles, and board 07 still titled "DRAFT" *(curated)*
 - **#7669**: bench: re-run PocketBeagle and STRF (zero-touch + tuned) after the #4945/#5302 fixes and add a dispatchable external-bench workflow *(curated)*
 - **#7675**: Board 07: remove DRAFT from titles and re-issue readiness *(curated)*
 - **#7682**: 3D coverage audit: count footprints, not refs, in `kct check`, `kct render` and `kct fleet status` *(curated)*
-- **#7684**: Model insertion that cannot regress: existence-checked `add-3d-models` tiers, generators own their models, and a regeneration guard *(curated)*
 - **#7690**: Epic: full 3D model coverage, from demo boards to the JLCPCB catalog, reproducible on the pinned toolchain *(curated)*
 - **#7694**: chore: add ecosystem registry entries for the 3D-model neighbours *(curated)*
-- **#7699**: schema: root sheet UUID in HierarchyBuilder._load_schematic uses recursive find("uuid"); a root without a top-level uuid picks up a nested one *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -134,10 +124,10 @@ Issues carrying `loom:curated`.
 | Very important | 1 |
 | Important | 2 |
 | Ready (`loom:issue`) | 1 |
-| In Progress (`loom:building`) | 10 |
-| PRs awaiting review | 6 |
+| In Progress (`loom:building`) | 7 |
+| PRs awaiting review | 2 |
 | Approved PRs awaiting merge | 0 |
-| Curated | 39 |
+| Curated | 36 |
 | Architect / Hermit proposals | 5 |
 | Active epics | 7 |
 <!-- guide:plan-body:end -->

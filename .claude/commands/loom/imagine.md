@@ -388,6 +388,8 @@ Entries are grouped by date, newest first. Each entry references the merged PR o
 
 <!-- Maintained automatically by the Guide triage agent. Manual edits are fine but may be overwritten. -->
 
+## Archives
+
 ### {{TODAY_DATE}}
 
 - **Project bootstrapped** with Loom orchestration

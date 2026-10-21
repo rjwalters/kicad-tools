@@ -88,6 +88,9 @@ assert_doc_lacks() {
 # match this mirror.
 # =====================================================================
 DOCS_FAST_PATH_ALLOWLIST=("WORK_LOG.md" "WORK_PLAN.md" "README.md")
+# Archive files (#12636): ONLY the month-rotated archives, month 01-12, one
+# directory deep. Never a directory or *.md allowance.
+DOCS_FAST_PATH_ARCHIVE_RE='^(work_log/WORK_LOG|work_plan/WORK_PLAN)_[0-9]{4}-(0[1-9]|1[0-2])\.md$'
 
 docs_only_fast_path_check() {
     # Reads a newline-separated file list on stdin. Echoes "ELIGIBLE" if
@@ -105,6 +108,9 @@ docs_only_fast_path_check() {
                 break
             fi
         done
+        if [ "$matched" -ne 1 ] && [[ "$file" =~ $DOCS_FAST_PATH_ARCHIVE_RE ]]; then
+            matched=1
+        fi
         if [ "$matched" -ne 1 ]; then
             echo "NOT ELIGIBLE: $file"
             return 0
@@ -185,6 +191,45 @@ echo "--- docs_only_fast_path_check: smuggling can't be won by a mislabeled/mark
 out="$(printf 'WORK_LOG.md.bak\n' | docs_only_fast_path_check)"
 assert_eq "NOT ELIGIBLE: WORK_LOG.md.bak" "$out" \
     "a file merely containing the allowlisted name as a substring is rejected"
+
+echo
+echo "--- docs_only_fast_path_check: month-rotated archive files (#12636) ---"
+
+out="$(printf 'WORK_LOG.md\nwork_log/WORK_LOG_2026-08.md\n' | docs_only_fast_path_check)"
+assert_eq "ELIGIBLE" "$out" "WORK_LOG.md plus a correctly named WORK_LOG archive is eligible"
+
+out="$(printf 'WORK_PLAN.md\nwork_plan/WORK_PLAN_2026-12.md\n' | docs_only_fast_path_check)"
+assert_eq "ELIGIBLE" "$out" "WORK_PLAN.md plus a correctly named WORK_PLAN archive is eligible"
+
+for bad in 'work_log/notes.md' 'docs/work_log/WORK_LOG_2026-08.md' \
+    'work_log/WORK_LOG_2026-13.md' 'work_log/WORK_LOG_2026-00.md' \
+    'work_log/WORK_LOG_2026-8.md' 'work_log/WORK_LOG_2026-08.md.bak' \
+    'work_log/sub/WORK_LOG_2026-08.md' 'work_plan/WORK_LOG_2026-08.md' \
+    'work_log/WORK_PLAN_2026-08.md' 'work_log.md' 'work_log/'; do
+    out="$(printf 'WORK_LOG.md\n%s\n' "$bad" | docs_only_fast_path_check)"
+    assert_eq "NOT ELIGIBLE: $bad" "$out" "off-pattern path '$bad' stays ineligible"
+done
+
+out="$(printf 'work_log/WORK_LOG_2026-08.md\nsrc/main.rs\n' | docs_only_fast_path_check)"
+assert_eq "NOT ELIGIBLE: src/main.rs" "$out" "an archive file mixed with a non-docs file is ineligible"
+
+echo
+echo "--- Judge and Champion allowlist + archive pattern are byte-identical (#12636) ---"
+
+fast_path_block() {
+    # Allowlist, archive regex and function body, up to the closing brace.
+    awk '/^DOCS_FAST_PATH_ALLOWLIST=/{p=1} p{print} p && /^}$/{exit}' "$1" \
+        | grep -v '^[[:space:]]*#'
+}
+JUDGE_BLOCK="$(fast_path_block "$JUDGE_MD")"
+CHAMPION_BLOCK="$(fast_path_block "$CHAMPION_MD")"
+assert_eq "$JUDGE_BLOCK" "$CHAMPION_BLOCK" \
+    "judge.md and champion-pr-merge.md allowlist+check code is identical (comments aside)"
+
+ARCHIVE_RE_LINE="DOCS_FAST_PATH_ARCHIVE_RE='^(work_log/WORK_LOG|work_plan/WORK_PLAN)_[0-9]{4}-(0[1-9]|1[0-2])\\.md\$'"
+assert_doc_contains "$JUDGE_MD" "$ARCHIVE_RE_LINE" "judge.md pins the narrow archive regex"
+assert_doc_contains "$CHAMPION_MD" "$ARCHIVE_RE_LINE" "champion-pr-merge.md pins the narrow archive regex"
+assert_doc_contains "$0" "$ARCHIVE_RE_LINE" "this suite's mirror uses the same archive regex"
 
 echo
 echo "--- Doc pins: judge.md ships the mechanical, marker-independent eligibility check ---"
