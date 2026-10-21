@@ -189,3 +189,14 @@ def test_sheet_used_twice_is_parsed_once(tmp_path: Path, monkeypatch) -> None:
     assert list(builder.loaded_files).count(sub_b_path) == 1
     # root + sub_b + empty; the missing sheet is never parsed.
     assert len(calls) == 3
+
+
+def test_root_without_toplevel_uuid_does_not_adopt_nested_uuid(project: Path) -> None:
+    """A file lacking its own `(uuid ...)` must not pick up a nested element's."""
+    root_file = project / "root.kicad_sch"
+    _rewrite(root_file, '\t(uuid "root-uuid-0001")\n', "")
+
+    root = build_hierarchy(str(root_file))
+
+    assert root.uuid == ""
+    assert root.instance_path == ""
