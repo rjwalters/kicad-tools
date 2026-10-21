@@ -71,6 +71,13 @@ FORBIDDEN_HANDROLLED_SNIPPETS = [
     "bundle: {'PASS'",  # the "bundle written == board clean" conflation
 ]
 
+# Standalone scripts that also run ``kct export`` and must gate on it
+# (issue #7746): board 02's route demo and board 05's archived DRV8301 recipe.
+EXPORT_GATED_SCRIPTS = [
+    "boards/02-charlieplex-led/route_demo.py",
+    "boards/05-bldc-motor-controller/legacy_drv8301/design.py",
+]
+
 
 def _clean_drc() -> GeometricDRCResult:
     return GeometricDRCResult(ran=True, error_count=0, by_type={})
@@ -120,6 +127,18 @@ def test_every_exporting_recipe_passes_export_ok(rel: str) -> None:
     source = (REPO_ROOT / rel).read_text()
     assert "export_ok=" in source, f"{rel} does not gate on its export verdict (#7740)"
     assert "'WRITTEN' if" not in source
+
+
+@pytest.mark.parametrize("rel", EXPORT_GATED_SCRIPTS)
+def test_standalone_scripts_derive_verdict_from_gate(rel: str) -> None:
+    source = (REPO_ROOT / rel).read_text()
+    assert source.count("evaluate_pipeline_gate(") == 1
+    assert "export_ok=mfg_success" in source
+    assert "for line in gate.summary_lines():" in source
+    assert "gate.passed" in source
+    # No parallel hand-rolled export verdict beside the gate's MFG line.
+    assert "'WRITTEN' if" not in source
+    assert "'FRESH' if" not in source
 
 
 # --------------------------------------------------------------------------
