@@ -3092,6 +3092,23 @@ def _run_step_export(ctx: BuildContext, console: Console) -> BuildResult:
             ),
         )
 
+    # Generators own their 3D models (#7684): re-run the existence-checked
+    # model ladder so a regenerated board never exports without bodies.
+    # Non-fatal -- a missing model is a render/STEP-export quality issue.
+    try:
+        from kicad_tools.pcb.models3d import ensure_models
+
+        model_report = ensure_models(pcb_to_export)
+        if not ctx.quiet and model_report.dangling_in_library:
+            console.print(
+                "  [yellow]3D models: library ref(s) point at missing files, skipped: "
+                + ", ".join(sorted(model_report.dangling_in_library))
+                + "[/yellow]"
+            )
+    except Exception as e:  # noqa: BLE001
+        if not ctx.quiet:
+            console.print(f"  [yellow]3D model step skipped: {e}[/yellow]")
+
     if not ctx.quiet:
         console.print(f"  Exporting manufacturing package for {pcb_to_export.name}...")
 

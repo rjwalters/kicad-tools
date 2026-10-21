@@ -1169,6 +1169,7 @@ def _run_add_3d_models_command(args, pcb_path: Path) -> int:
         fetch_lcsc=getattr(args, "fetch_lcsc", False),
         dry_run=getattr(args, "dry_run", False),
         refresh=getattr(args, "refresh", False),
+        allow_dangling=getattr(args, "allow_dangling", False),
         output_format=getattr(args, "format", "text"),
     )
 

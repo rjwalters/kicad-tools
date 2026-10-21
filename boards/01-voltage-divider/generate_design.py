@@ -26,6 +26,7 @@ from kicad_tools.dev import warn_if_stale
 from kicad_tools.lvs import write_lvs_report
 from kicad_tools.operations.pintype import annotate_pcb_file_pintypes
 from kicad_tools.pcb.center_sheet import centered_origin
+from kicad_tools.pcb.models3d import ensure_models
 from kicad_tools.recipes.gate import evaluate_pipeline_gate
 from kicad_tools.recipes.precondition import require_spec
 from kicad_tools.schematic.models.schematic import Schematic
@@ -857,6 +858,10 @@ def main() -> int:
 
         # Step 4: Create PCB
         pcb_path = create_voltage_divider_pcb(output_dir)
+
+        # Step 4.05: 3D bodies survive regeneration (issue #7684).  Pure
+        # text insertion of existence-checked ``(model ...)`` refs.
+        ensure_models(pcb_path)
 
         # Step 4.1: Copy schematic pin names/electrical types onto the pads
         # (issues #5985, #6025), as KiCad's "Update PCB from Schematic" does.
