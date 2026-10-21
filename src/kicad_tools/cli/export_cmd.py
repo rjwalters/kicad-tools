@@ -165,7 +165,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Use this .kct project spec for BOM enrichment instead of walking up "
-            "from the PCB directory (needed when exporting outside the project tree)"
+            "from the PCB directory (needed when exporting outside the project tree). "
+            "--no-spec takes precedence; a missing PATH is still an error"
         ),
     )
     parser.add_argument(

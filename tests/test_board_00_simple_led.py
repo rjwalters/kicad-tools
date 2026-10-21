@@ -340,7 +340,12 @@ class TestBoard00OfflineBomDeterminism:
     """
 
     @staticmethod
-    def _export_bom(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *extra: str) -> list[str]:
+    def _export_bom(
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *extra: str,
+        calls: list[tuple[set[str], set[str]]] | None = None,
+    ) -> list[str]:
         import shutil
 
         from kicad_tools.cli import export_cmd
@@ -351,10 +356,15 @@ class TestBoard00OfflineBomDeterminism:
         for name in ("simple_led.kicad_sch", "simple_led_routed.kicad_pcb"):
             shutil.copy(src / name, work / name)
 
-        def _no_api(*args, **kwargs):
-            raise AssertionError("LCSC auto-matching must not run when the spec pins every part")
+        def _offline_api(items, *args, spec_refs=frozenset(), **kwargs):
+            # Simulate a host with no LCSC API access: auto-matching is
+            # still invoked (with the spec-resolved refs exempt), but it can
+            # contribute nothing.  ``assembly`` downgrades this to a warning.
+            if calls is not None:
+                calls.append(({item.reference for item in items}, set(spec_refs)))
+            raise ConnectionError("simulated offline host: LCSC API unreachable")
 
-        monkeypatch.setattr("kicad_tools.export.assembly.enrich_bom_lcsc", _no_api)
+        monkeypatch.setattr("kicad_tools.export.assembly.enrich_bom_lcsc", _offline_api)
         rc = export_cmd.main(
             [
                 str(work / "simple_led_routed.kicad_pcb"),
@@ -376,10 +386,29 @@ class TestBoard00OfflineBomDeterminism:
     def test_spec_flag_fills_lcsc_outside_project_tree(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        lines = self._export_bom(tmp_path, monkeypatch, "--spec", str(BOARD_DIR / "project.kct"))
+        calls: list[tuple[set[str], set[str]]] = []
+        lines = self._export_bom(
+            tmp_path, monkeypatch, "--spec", str(BOARD_DIR / "project.kct"), calls=calls
+        )
         committed = (BOARD_DIR / "output" / "manufacturing" / "bom_jlcpcb.csv").read_text()
         assert "\n".join(lines) == committed.rstrip("\n")
         assert all(line.rsplit(",", 1)[-1].strip() for line in lines[1:])
+        # Every BOM item was resolved by the spec, so none was left for the
+        # (offline) API to match -- the LCSC column comes from the spec alone.
+        assert calls, "auto-matching stage was not reached"
+        for refs, spec_refs in calls:
+            assert refs <= spec_refs, f"not spec-resolved: {sorted(refs - spec_refs)}"
+
+    def test_no_spec_overrides_spec_flag(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # ``--no-spec`` wins over ``--spec``: no overlay, so offline the LCSC
+        # column stays blank for every part.
+        lines = self._export_bom(
+            tmp_path, monkeypatch, "--spec", str(BOARD_DIR / "project.kct"), "--no-spec"
+        )
+        assert len(lines) > 1
+        assert not any(line.rsplit(",", 1)[-1].strip() for line in lines[1:])
 
     def test_missing_spec_file_errors(self, tmp_path: Path) -> None:
         from kicad_tools.cli import export_cmd

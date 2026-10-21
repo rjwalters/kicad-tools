@@ -9384,7 +9384,10 @@ def _add_export_parser(subparsers) -> None:
         dest="export_spec",
         metavar="PATH",
         default=None,
-        help="Use this .kct project spec for BOM enrichment instead of walking up from the PCB directory",
+        help=(
+            "Use this .kct project spec for BOM enrichment instead of walking up from the "
+            "PCB directory (--no-spec takes precedence; a missing PATH is still an error)"
+        ),
     )
     export_parser.add_argument(
         "--no-merge-lcsc",
