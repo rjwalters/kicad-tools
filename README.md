@@ -948,6 +948,11 @@ weekly.
 
 - **[OmniLayout / OmniRouting](https://omnieda.com)** (no `LICENSE` committed) -- **Ideas adopted.** A published routing benchmark and leaderboard. We adopted its *metric vocabulary and evaluation protocol* -- the sharpest external definition of "routed well" we have found -- and declined the dataset and tooling: no license grant on the data, and the evaluation harness is unpublished. Our evaluation: [docs/research/omnilayout-recon.md](docs/research/omnilayout-recon.md).
 
+### 3D model tooling
+
+- **[easyeda2kicad](https://github.com/uPesy/easyeda2kicad.py)** (AGPL-3.0, Python, 1714★) -- **Ideas adopted.** EasyEDA/LCSC to KiCad converter (symbol, footprint, 3D model), v1.0.1 at our read. AGPL-3.0: ideas only, never copy code. We took its *documented* 3D flow as a design input (model uuid from the footprint SVGNODE; OBJ from `modules.easyeda.com/3dmodel/{uuid}` converted to WRL; STEP passed through from the same bucket). Our evaluation: [docs/research/3d-model-coverage.md](docs/research/3d-model-coverage.md).
+- **[kicad-library-tools](https://gitlab.com/kicad/libraries/kicad-library-tools)** (GPL-3.0-or-later, Python (CadQuery), 80★) -- headless CadQuery generators for KiCad's official 3D packages (DIP, chip R/C/L, diodes, crystals, connectors, QFN/QFP/BGA, terminal blocks). Successor to the archived kicad-packages3D-generator. GPL-3.0-or-later: **run as an external tool only, never import or vendor**. Our evaluation: [docs/research/3d-model-coverage.md](docs/research/3d-model-coverage.md).
+
 ### Watching
 
 Recorded in the registry with a re-evaluation trigger, deliberately not featured above yet:
@@ -979,6 +984,9 @@ Recorded in the registry with a re-evaluation trigger, deliberately not featured
 - **[PCBWorld](https://github.com/LGAI-Research/PCBWorld)** (BSD-3-Clause, Python, 25★) -- a Gymnasium environment around KiCad's push-and-shove router, scored by KiCad's own DRC (arXiv:2607.05915). It ships synthetic sets D1/D2 and a recipe to rebuild D3: 679 PCBench boards converted to KiCad 9, keeping their human reference copper. Its headline metric, Clean Pass (fully connected and 0 error-level DRC), matches our bar. Published Clean Pass on D3-A / D3-B (best-of-5): Freerouting 0.80 / 0.78, KiCadRoutingTools 0.74 / 0.20. The most direct public leaderboard for `kct route`.
 - **[PCBSchemaGen v2](https://github.com/HZou9/PCBSchemaGen_v2)** (MIT, Python, 12★) -- 227 schematic-synthesis tasks (62 hand-written, 165 from public schematics) with a deterministic 5-layer verifier that needs no LLM: ERC invariants, pin-role compatibility, per-IC connection templates, topology motifs and power rules. Tasks are scored as SKiDL designs. A ready-made eval for our schematic generation.
 - **[PCB-Bench](https://github.com/digailab/PCB-Bench)** (no `LICENSE` committed, Python, 49★) -- an ICLR 2026 benchmark of LLM knowledge about PCB placement and routing: about 3,700 text questions, about 500 image-and-text questions, and 174 OSHWHub designs to describe from screenshots. It measures what a model knows about layout, not what a tool produces, so it bears on our agent-facing docs rather than on `kct route`. No LICENSE, so ideas only.
+- **[JLC2KiCadLib](https://github.com/TousstNicolas/JLC2KiCad_lib)** (MIT, Python, 488★) -- generates KiCad symbols, footprints and STEP/WRL models from EasyEDA (v1.3.2, maintenance-only). MIT, so code may move with attribution, but its licence does not grant any rights to the EasyEDA/LCSC content it fetches. Our evaluation: [docs/research/3d-model-coverage.md](docs/research/3d-model-coverage.md).
+- **[kicadStepUpMod](https://github.com/easyw/kicadStepUpMod)** (no `LICENSE` committed, Python (FreeCAD), 696★) -- FreeCAD workbench for aligning 3D models to footprints, the manual analogue of our transform calibration. The README claims AGPLv3 but no LICENSE file is committed (hence `license = "NONE"`); ideas only either way. Our evaluation: [docs/research/3d-model-coverage.md](docs/research/3d-model-coverage.md).
+- **[cq-electronics](https://github.com/sethfischer/cq-electronics)** (MIT, Python (CadQuery), 20★) -- small CadQuery set of electronic-component parts (v0.2.0). MIT, so it is a candidate source of parametric bodies for our own 3D pipeline. Our evaluation: [docs/research/3d-model-coverage.md](docs/research/3d-model-coverage.md).
 
 <!-- END kct:ecosystem -->
 
