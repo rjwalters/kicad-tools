@@ -306,7 +306,7 @@ section for the full carve-out list).
     --body "Issues found that need addressing before approval..."
 ```
 
-**Stale-Read Gate (#12614).** A review is a statement about the spec as you read it. If the operator comments on the PR or the linked issue, or rewrites the issue body, while you review, your approval is against a stale read (PR #12512 / #12509: approved the old design after the operator said it was rescoped). So capture `REVIEW_STARTED` (UTC, RFC 3339) before reading the PR or issue, and the sha256 of each linked issue body as you read it, and give both to every `approved` call: `--review-started "$REVIEW_STARTED" --issue-body-sha "N=$HASH"`. `verdict-gate` then refuses (exit 7, nothing posted, naming the comment or issue) when a trusted human comment on the PR or a linked issue is newer than `REVIEW_STARTED`, or a body no longer hashes to what you reviewed. Remedy: read what changed, re-review against the **current** spec, capture a fresh `REVIEW_STARTED` and hashes, and retry. Bot and Loom-marker comments never trigger it; `changes-requested` is never refused by it. A missing `--review-started` skips the check with a warning, so never omit it on an approval.
+**Stale-Read Gate (#12614).** A review is a statement about the spec as you read it. If the operator comments on the PR or the linked issue, or rewrites the issue body, while you review, your approval is against a stale read (PR #12512 / #12509: approved the old design after the operator said it was rescoped). So capture `REVIEW_STARTED` (UTC, RFC 3339) before reading the PR or issue, and the sha256 of each linked issue body as you read it, and give both to every `approved` call: `--review-started "$REVIEW_STARTED" --issue-body-sha "N=$HASH"`. `verdict-gate` then refuses (exit 7, nothing posted, naming the comment or issue) when a trusted human comment on the PR or a linked issue is newer than `REVIEW_STARTED`, or a body no longer hashes to what you reviewed. Bot and Loom-marker comments never trigger it; `changes-requested` is never refused by it. The gate takes the real start from the dispatch epoch in `$LOOM_SWEEP_ID` (or the PR's judge lease) and uses your `--review-started` only if it is *earlier*, so a late value cannot hide anything; it also refuses when a human edited a linked issue's body after the start (named in the refusal), and follows `Part of` / `Contributes to` links as well as `Closes`. Remedy: read what changed and re-review against the **current** spec. Because the start is the dispatch time, **a retry in this same dispatch is refused again** (a fresh `REVIEW_STARTED` cannot move it later): if the PR still meets the current spec, end without a verdict — the next Judge dispatch starts after the change and approves; if it no longer does, post `changes-requested`. Only a manual run with no dispatch epoch and no lease can retry with a fresh `REVIEW_STARTED`. An approval with no resolvable start (no dispatch epoch, no lease, no flag) is refused, so still pass `--review-started` on a manual run.
 
 **`post-verdict.sh` applies the verdict label itself (#10581)** and verifies it: approve leaves `loom:pr` and strips `loom:changes-requested`, `loom:ci-failure`, `loom:reviewing`, `loom:review-requested`; changes-requested leaves `loom:changes-requested` and strips `loom:pr`, `loom:reviewing`, `loom:review-requested`. A trailing `&& gh pr edit` in older examples below is redundant but harmless **only because `post-verdict.sh` ran first and stamped the marker**; never add `loom:pr` with a bare `gh pr edit` as the approval itself (#12136). Add only companions (`loom:ci-failure`, `loom:merge-conflict`) yourself. The label is the PRIMARY deliverable — the sweep validates labels, not comments — so **exit 8** (comment posted, labels did not hold) means run the printed repair command now. **Exit 7**, no approval stands: a human commented or the issue was rescoped since `REVIEW_STARTED` (Stale-Read Gate: re-review, do not just re-run), `loom:ci-failure` is on the PR, another verdict at this same head is changes-requested (do not approve over it without a new push; `--overrules-prior "<why each point no longer blocks>"` only when you verified every point), the PR state was unreadable, or a concurrent changes-requested from another host won (labels flipped). A same-head repeat within 10 minutes is deduped: stand down.
 
@@ -1349,6 +1349,8 @@ Branch on the first stdout line:
 - ⏳ `-TIMEOUT` / `-HEAD-MOVED` - Pending (see "When CI is Pending")
 - `-ERROR` or no sentinel (Gitea / older binary) - run `gh pr checks <PR_NUMBER>` once
 
+**Unknown is never green.** If the required-context lookup fails (rate limit, 403/429, unreadable branch protection), `wait-checks` reports `-TIMEOUT … (required-contexts-unknown)` or `-ERROR`: the result is *unknown*, not passing. It cannot authorize approval; treat it as pending ("When CI is Pending") and never approve on a guess. The reader and its REST fallback are unchanged.
+
 **Step 2: Verify merge state**
 
 ```bash
@@ -1384,10 +1386,10 @@ If checks are still running, **do not block on them or approve on a guess**: in 
 2. **Release your claim** — remove `loom:reviewing`; release the lease with `--skip-reason ci-pending` (below).
 3. **Skip and continue the batch** — next PR; a later tick re-evaluates this one once CI settles.
 
-**Pending-CI skip check.** `loom-daemon forge wait-checks <PR_NUMBER> --timeout 0` is a single ETag'd poll (no wait) that also handles the empty-rollup trap (#6169). Branch on the first **stdout** line:
+**Pending-CI skip check.** Reuse Step 1's snapshot: `loom-daemon forge wait-checks <PR_NUMBER> --timeout 20` is a short ETag'd poll that also handles the empty-rollup trap (#6169); `--timeout 0` would read a no-checks repo as `TIMEOUT` and skip a PR that has nothing to wait for. Branch on the first **stdout** line:
 
 ```bash
-first="$(loom-daemon forge wait-checks <PR_NUMBER> --timeout 0 2>/dev/null | head -n1)"
+first="$(loom-daemon forge wait-checks <PR_NUMBER> --timeout 20 2>/dev/null | head -n1)"
 case "$first" in
   LOOM-CHECKS-TIMEOUT*)   # still pending: release and skip; PR stays loom:review-requested
     gh pr comment <number> --body "CI still running; skipping until it settles."
@@ -1672,11 +1674,15 @@ ineligible; only the repo-root file qualifies):
 
 ```bash
 # Docs-only fast path (#6134): eligible ONLY if every changed file is EXACTLY
-# one of these three root-level filenames. This is the same allowlist
+# one of these three root-level filenames, or a month-rotated archive (#12636,
+# DOCS_FAST_PATH_ARCHIVE_RE below). This is the same allowlist
 # Champion's criterion #2 re-derives independently (see champion-pr-merge.md)
 # — the two checks are mirrored, not shared, so a change to one without the
 # other is a visible drift, not a silent gap.
 DOCS_FAST_PATH_ALLOWLIST=("WORK_LOG.md" "WORK_PLAN.md" "README.md")
+# Archive files (#12636): ONLY the month-rotated archives, month 01-12, one
+# directory deep. Never a directory or *.md allowance.
+DOCS_FAST_PATH_ARCHIVE_RE='^(work_log/WORK_LOG|work_plan/WORK_PLAN)_[0-9]{4}-(0[1-9]|1[0-2])\.md$'
 
 docs_only_fast_path_check() {
   # Reads a newline-separated file list on stdin. Echoes "ELIGIBLE" if every
@@ -1695,6 +1701,9 @@ docs_only_fast_path_check() {
         break
       fi
     done
+    if [ "$matched" -ne 1 ] && [[ "$file" =~ $DOCS_FAST_PATH_ARCHIVE_RE ]]; then
+      matched=1
+    fi
     if [ "$matched" -ne 1 ]; then
       echo "NOT ELIGIBLE: $file"
       return 0

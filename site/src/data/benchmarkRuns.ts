@@ -2,7 +2,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { benchmarksResultsDir, loadBenchmarkFile } from "./loadBenchmarks.ts";
+import { benchmarksResultsDir, COMPANION_FILES, loadBenchmarkFile } from "./loadBenchmarks.ts";
 import type { BenchmarkReport } from "./benchmarkTypes.ts";
 import { contextForReport, type RunContext } from "./benchmarkContext.ts";
 
@@ -22,8 +22,8 @@ export function loadBenchmarkRuns(root = benchmarksResultsDir()): BenchmarkRun[]
   for (const directory of collections) {
     if (!directory.isDirectory() || !/^\d{4}-\d{2}-\d{2}$/.test(directory.name)) continue;
     for (const file of readdirSync(join(root, directory.name), { withFileTypes: true })) {
-      // Provenance manifests are companions, not route reports. Ignore symlinks.
-      if (!file.isFile() || !file.name.endsWith(".json") || file.name === "run-provenance.json") continue;
+      // Provenance and inspection files are companions, not route reports. Ignore symlinks.
+      if (!file.isFile() || !file.name.endsWith(".json") || COMPANION_FILES.has(file.name)) continue;
       const path = join(root, directory.name, file.name);
       const report = loadBenchmarkFile(path);
       if (report) {

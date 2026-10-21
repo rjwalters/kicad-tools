@@ -559,6 +559,11 @@ def _dispatch_command(args) -> int:
 
         return run_fleet_command(args)
 
+    elif args.command == "models":
+        from .commands.models import run_models_command
+
+        return run_models_command(args)
+
     elif args.command == "ecosystem":
         from .commands.ecosystem import run_ecosystem_command
 
@@ -1046,6 +1051,8 @@ def _run_render_command(args) -> int:
     render_args = _argparse.Namespace(
         path=args.render_path,
         no_3d=getattr(args, "render_no_3d", False),
+        models=getattr(args, "render_models", None),
+        allow_incomplete_models=getattr(args, "render_allow_incomplete_models", False),
         format=getattr(args, "render_format", "text"),
         output=getattr(args, "render_output", None),
     )
@@ -1089,6 +1096,8 @@ def _run_export_command(args) -> int:
         sub_argv.append("--no-auto-lcsc")
     if getattr(args, "export_no_spec", False):
         sub_argv.append("--no-spec")
+    if getattr(args, "export_spec", None):
+        sub_argv.extend(["--spec", args.export_spec])
     if getattr(args, "export_no_merge_lcsc", False):
         sub_argv.append("--no-merge-lcsc")
     if getattr(args, "export_skip_preflight", False):

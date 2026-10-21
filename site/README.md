@@ -23,6 +23,11 @@ npm --prefix site run check-links -- --external
 npm --prefix site run preview -- --host 127.0.0.1
 ```
 
+CI (the `Site` job in `.github/workflows/ci.yml`) runs `ci`, `test`, `check`,
+`build` and `check-links` (without `--external`) on every PR that touches
+`site/`, the benchmark results, board readiness files or the board JSON schema
+doc, including Dependabot `/site` bumps.
+
 The preview serves the production build. Check the printed URL, then inspect
 home, `/benchmarks/`, a board with assets and a development board such as
 `/09-usbc-pd-power/`. Test narrow mobile and desktop widths, the first-Tab skip
@@ -44,6 +49,11 @@ layout, focus order or KiCanvas viewer behavior.
 assets separately, run `npm --prefix site run copy-renders`. `site/dist/` and
 `site/public/boards/` are generated and ignored by git.
 
+Board renders (`output/renders/`, `output/manufacturing/renders/`) are derived
+presentation artifacts, not readiness evidence: `kct readiness` does not hash
+them into `readiness.json` `inputs`, so the deploy's `kct render boards/` step
+cannot make committed readiness evidence stale (Issue #7678).
+
 ## Pages and content ownership
 
 - `src/pages/index.astro`: capability introduction, documentation entry points
@@ -60,11 +70,13 @@ assets separately, run `npm --prefix site run copy-renders`. `site/dist/` and
   dated routing attempts above the preserved historical archive.
 
 The primary navigation says **Routing status** and retains `/benchmarks/` for
-existing links. The September 12, 2026 collection includes actual partial
-router outputs, so it is useful engineering evidence, but it does not support
-competitive performance claims. Two other cases measured fallback inputs;
-STRF has a negative connectivity delta and its declared tuned run did not
-apply the intended rules. Keep these limitations beside the results. The
+existing links. The dated collections (September 12 and September 15, 2026)
+include actual partial router outputs, so they are useful engineering evidence,
+but they do not support competitive performance claims. Some cases measured
+fallback inputs; STRF has a negative connectivity delta and its declared tuned
+run did not apply the intended rules. Reviewed context is bound to each
+report's SHA-256 in `src/data/benchmarkContext.ts`, with a per-collection
+runtime note, and wording about issues must say when they have closed. Keep these limitations beside the results. The
 label describes the page's purpose without promising successful routing.
 
 Project version comes from `pyproject.toml`; no manual version badge update is
@@ -151,6 +163,12 @@ or CI auto-deploy. Use one publication owner for a coordinated release. In
 particular, #5318 demonstrated why updating only Board05's viewer would leave
 its stale PCB in the downloadable project. Verify viewer, renders and packages
 as one set.
+
+Between publishes, the weekly warn-only workflow
+[`site-drift.yml`](../.github/workflows/site-drift.yml) (also runnable locally
+as `python3 scripts/ci/site_drift.py`) reports when the live footer version,
+board readiness/evidence dates or PCB/package hashes differ from this
+checkout. Run it after every publish; it should report no drift.
 
 The deployment workflow requires `uv`, Node/npm and authenticated `wrangler`
 (or its `npx` fallback). `kicad-cli` is optional for the script, but required

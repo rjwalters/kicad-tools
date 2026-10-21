@@ -292,6 +292,24 @@ class TestBoard00SimpleLed:
         This is the user-visible DRC failure from #3148 ("Net 'GND'/'VCC'
         is partially routed: 1 of 2 pads stranded").
         """
+        # Issue #7738: a full ``kct check`` also runs a Manifest leg, which
+        # needs the bundle the generator's ``kct export`` step writes; with
+        # no bundle it reports ``Overall: INCOMPLETE`` and exits 2.  The
+        # generator still exits 0 when that export fails (the bundle is not
+        # part of its ERC/DRC/LVS gate).  The usual cause is a venv synced
+        # without the ``dev`` extra: ``kct export`` aborts when the optional
+        # ``requests`` dependency (``parts`` extra) is missing (#4104).
+        # Assert the precondition first so that failure names the export
+        # step instead of reading as a board 00 DRC regression.
+        manifest = routed_pcb.parent / "manufacturing" / "manifest.json"
+        assert manifest.exists(), (
+            "generate_design.py wrote no manufacturing bundle "
+            f"({manifest} is missing), so `kct check` cannot pass its "
+            "Manifest leg.  The usual cause is the environment, not board "
+            "00: `kct export` aborts when the 'parts' extra ('requests') is "
+            "missing.  If so, re-sync with "
+            "`uv sync --frozen --extra dev`, which CI and the worktree hook use."
+        )
         proc = subprocess.run(
             [sys.executable, "-m", "kicad_tools.cli", "check", str(routed_pcb)],
             capture_output=True,
@@ -310,3 +328,102 @@ class TestBoard00SimpleLed:
             f"kct check exited {proc.returncode} (expected 0 -- DRC clean).\n"
             f"stdout (last 2000 chars):\n{proc.stdout[-2000:]}"
         )
+
+
+class TestBoard00OfflineBomDeterminism:
+    """Issue #7741 -- the LCSC column must not depend on network or host.
+
+    ``kct export`` finds the ``project.kct`` BOM spec by walking up from the
+    PCB directory, which misses it for any output dir outside the project
+    tree.  The generator now passes ``--spec`` explicitly; this pins that the
+    spec alone (no live API, no enrichment cache) fills every LCSC number.
+    """
+
+    @staticmethod
+    def _export_bom(
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *extra: str,
+        calls: list[tuple[set[str], set[str]]] | None = None,
+    ) -> list[str]:
+        import shutil
+
+        from kicad_tools.cli import export_cmd
+
+        src = BOARD_DIR / "output"
+        work = tmp_path / "out"
+        work.mkdir()
+        for name in ("simple_led.kicad_sch", "simple_led_routed.kicad_pcb"):
+            shutil.copy(src / name, work / name)
+
+        def _offline_api(items, *args, spec_refs=frozenset(), **kwargs):
+            # Simulate a host with no LCSC API access: auto-matching is
+            # still invoked (with the spec-resolved refs exempt), but it can
+            # contribute nothing.  ``assembly`` downgrades this to a warning.
+            if calls is not None:
+                calls.append(({item.reference for item in items}, set(spec_refs)))
+            raise ConnectionError("simulated offline host: LCSC API unreachable")
+
+        monkeypatch.setattr("kicad_tools.export.assembly.enrich_bom_lcsc", _offline_api)
+        rc = export_cmd.main(
+            [
+                str(work / "simple_led_routed.kicad_pcb"),
+                "--output",
+                str(work / "manufacturing"),
+                "--mfr",
+                "jlcpcb",
+                "--skip-preflight",
+                "--no-gerbers",
+                "--no-cpl",
+                "--no-report",
+                "--no-project-zip",
+                *extra,
+            ]
+        )
+        assert rc == 0
+        return (work / "manufacturing" / "bom_jlcpcb.csv").read_text().splitlines()
+
+    def test_spec_flag_fills_lcsc_outside_project_tree(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[tuple[set[str], set[str]]] = []
+        lines = self._export_bom(
+            tmp_path, monkeypatch, "--spec", str(BOARD_DIR / "project.kct"), calls=calls
+        )
+        committed = (BOARD_DIR / "output" / "manufacturing" / "bom_jlcpcb.csv").read_text()
+        assert "\n".join(lines) == committed.rstrip("\n")
+        assert all(line.rsplit(",", 1)[-1].strip() for line in lines[1:])
+        # Every BOM item was resolved by the spec, so none was left for the
+        # (offline) API to match -- the LCSC column comes from the spec alone.
+        assert calls, "auto-matching stage was not reached"
+        for refs, spec_refs in calls:
+            assert refs <= spec_refs, f"not spec-resolved: {sorted(refs - spec_refs)}"
+
+    def test_no_spec_overrides_spec_flag(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # ``--no-spec`` wins over ``--spec``: no overlay, so offline the LCSC
+        # column stays blank for every part.
+        lines = self._export_bom(
+            tmp_path, monkeypatch, "--spec", str(BOARD_DIR / "project.kct"), "--no-spec"
+        )
+        assert len(lines) > 1
+        assert not any(line.rsplit(",", 1)[-1].strip() for line in lines[1:])
+
+    def test_missing_spec_file_errors(self, tmp_path: Path) -> None:
+        from kicad_tools.cli import export_cmd
+
+        rc = export_cmd.main(
+            [
+                str(BOARD_DIR / "output" / "simple_led_routed.kicad_pcb"),
+                "--output",
+                str(tmp_path / "m"),
+                "--spec",
+                str(tmp_path / "nope.kct"),
+            ]
+        )
+        assert rc == 1
+
+    def test_generator_passes_spec_to_export(self) -> None:
+        text = GENERATOR.read_text()
+        assert '"--spec"' in text and '"project.kct"' in text

@@ -131,6 +131,20 @@ patch=$(printf '@@ -1,2 +1 @@\n x\n-  permissions:')
 assert_eq red "$(run "[$(entry .github/workflows/ci.yml "$patch")]" green "loom:pr")" "removed 'permissions:' -> red"
 patch=$(printf '@@ -1,2 +1,2 @@\n permissions:\n-  x: 1\n+  x: 2')
 assert_eq green "$(run "[$(entry .github/workflows/ci.yml "$patch")]" green "loom:pr")" "'permissions:' only in context -> green"
+echo "YAML comments (#12934)"
+# shellcheck disable=SC2016  # literal workflow text
+for line in '# release the lock' '  # deploy notes' '# publish later' '    # merge queue' '  timeout-minutes: 45 # was merge-gated'; do
+    patch=$(printf '@@ -1 +1,2 @@\n x\n+%s' "$line")
+    assert_eq green "$(run "[$(entry .github/workflows/ci.yml "$patch")]" green "loom:pr")" "added comment '$line' -> green"
+done
+patch=$(printf '@@ -1,2 +1 @@\n x\n-  # release note')
+assert_eq green "$(run "[$(entry .github/workflows/ci.yml "$patch")]" green "loom:pr")" "removed comment line -> green"
+# shellcheck disable=SC2016  # literal workflow text
+for line in '      - run: npm publish # ok' '      - run: echo "#release"' "      - run: echo '#deploy'" '      - run: foo#release' \
+    '# permissions: write-all' '  # secrets.PAT' '  x: 1 # id-token'; do
+    patch=$(printf '@@ -1 +1,2 @@\n x\n+%s' "$line")
+    assert_eq red "$(run "[$(entry .github/workflows/ci.yml "$patch")]" green "loom:pr")" "added '$line' -> red"
+done
 NOPATCH='{"filename":".github/workflows/ci.yml"}'
 assert_eq red "$(run "[$NOPATCH]" green "loom:pr")" "workflow file without a patch -> red"
 assert_eq red "$(run '[{"filename":".github/workflows/ci.yml","patch":""}]' green "loom:pr")" "empty patch string -> red"

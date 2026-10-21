@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import uuid
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ from pathlib import Path
 from kicad_tools.core.sheet_properties import SHEET_NAME_KEYS
 from kicad_tools.schema.hierarchy import (
     HierarchicalLabelInfo,
+    HierarchyNode,
     build_hierarchy,
 )
 from kicad_tools.schema.hierarchy_validation import (
@@ -387,6 +389,60 @@ def find_orphan_pins(root_schematic: str) -> list[SyncAction]:
     return actions
 
 
+def _resolved(path: str | Path) -> Path:
+    """Return ``path`` as an absolute, resolved path (best effort)."""
+    try:
+        return Path(path).resolve()
+    except OSError:
+        return Path(os.path.abspath(path))
+
+
+def _find_child_node(hierarchy: HierarchyNode, action: SyncAction) -> HierarchyNode | None:
+    """Find the hierarchy node of the child sheet an ``add_label`` action targets.
+
+    ``action.file_path`` is the sheet's file name as written in the parent
+    sheet, so it is relative to the *parent sheet's* folder, and
+    ``action.parent_file`` is the parent's ``HierarchyNode.path`` (absolute
+    since issue #7614). Match by node identity first: the parent node, then
+    its child for this sheet instance. Fall back to comparing resolved paths
+    against the parent's folder, never against the root's folder or the
+    working directory.
+    """
+    nodes = hierarchy.all_nodes()
+
+    parent_node = None
+    if action.parent_file:
+        parent_resolved = _resolved(action.parent_file)
+        for node in nodes:
+            if node.path and _resolved(node.path) == parent_resolved:
+                parent_node = node
+                break
+
+    file_path = Path(action.file_path)
+    if file_path.is_absolute():
+        target = _resolved(file_path)
+    elif parent_node is not None and parent_node.path:
+        target = _resolved(Path(parent_node.path).parent / file_path)
+    elif action.parent_file:
+        target = _resolved(Path(action.parent_file).parent / file_path)
+    else:
+        target = None
+
+    # Sibling sheets may share a name while pointing at different files, so
+    # the name alone is not identity: the child's file must match too.
+    if parent_node is not None and target is not None:
+        for child in parent_node.children:
+            if child.name == action.sheet_name and child.path and _resolved(child.path) == target:
+                return child
+
+    if target is not None:
+        for node in nodes:
+            if node.path and _resolved(node.path) == target:
+                return node
+
+    return None
+
+
 def execute_add_labels(
     root_schematic: str,
     dry_run: bool = False,
@@ -401,25 +457,17 @@ def execute_add_labels(
 
     # Build hierarchy to get label positions
     hierarchy = build_hierarchy(root_schematic)
+    # (child file, label name) pairs already handled: two placements of one
+    # sheet file each report the same missing label, but the file needs it
+    # added only once (issue #7616).
+    handled: set[tuple[Path, str]] = set()
 
     for action in actions:
         if action.action_type != "add_label":
             continue
 
         # Find the child node to get existing labels and page size
-        child_node = None
-        for node in hierarchy.all_nodes():
-            if Path(node.path).name == action.file_path or node.path == action.file_path:
-                child_node = node
-                break
-
-        if not child_node:
-            # Try resolving relative path
-            child_path = Path(root_schematic).parent / action.file_path
-            for node in hierarchy.all_nodes():
-                if Path(node.path) == child_path:
-                    child_node = node
-                    break
+        child_node = _find_child_node(hierarchy, action)
 
         if not child_node:
             results.append(
@@ -430,6 +478,11 @@ def execute_add_labels(
                 )
             )
             continue
+
+        key = (_resolved(child_node.path), action.name)
+        if key in handled:
+            continue
+        handled.add(key)
 
         # Get page size
         child_path = Path(child_node.path)

@@ -2,7 +2,7 @@
 
 Routing board 03 under its own fab tier used to look like it lost the coupled
 USB_D common run on In2.Cu: ``routing_plan.usb_geometry()`` measured 1.414 mm
-(bound 4.0 mm) against 4.100 mm under plain ``jlcpcb``.
+(bound 4.0 mm) against 4.071 mm under plain ``jlcpcb``.
 
 The router is not what lost it.  The only difference between the two profiles
 is ``via_in_pad_supported``; with it on, the lattice drops the launch vias into
@@ -16,7 +16,7 @@ y = 13..16.8 window, which the tier-1 launch clips at both ends.  Forcing
 The operator then ruled (2026-10-19, Q10 = 1) to keep that window and move
 an edge out only to a USB_D via that sits inside the ESD or termination land
 (``routing_plan.usb_common_run_window``), so the tier-1 run counts via to via
-while plain ``jlcpcb`` still measures 4.100 mm.  The route below must also
+while plain ``jlcpcb`` still measures 4.071 mm.  The route below must also
 pass ``usb_geometry()`` itself.
 
 This pin measures the corridor, not the plan-tuned window, so it holds the

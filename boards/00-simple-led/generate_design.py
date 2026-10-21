@@ -28,6 +28,7 @@ from kicad_tools.dev import warn_if_stale
 from kicad_tools.lvs import write_lvs_report
 from kicad_tools.operations.pintype import annotate_pcb_file_pintypes
 from kicad_tools.pcb.center_sheet import centered_origin
+from kicad_tools.pcb.models3d import ensure_models
 from kicad_tools.recipes.gate import evaluate_pipeline_gate
 from kicad_tools.recipes.precondition import require_spec
 from kicad_tools.schematic.models.schematic import Schematic
@@ -1027,6 +1028,8 @@ def export_manufacturing_bundle(routed_path: Path, output_dir: Path) -> bool:
         str(mfg_dir),
         "--mfr",
         "jlcpcb",
+        "--spec",
+        str(Path(__file__).resolve().parent / "project.kct"),
         "--skip-preflight",
     ]
     print(f"\n   Command: {' '.join(cmd)}")
@@ -1098,6 +1101,10 @@ def main() -> int:
 
         # Step 4: Create PCB
         pcb_path = create_led_pcb(output_dir)
+
+        # Step 4.05: 3D bodies survive regeneration (issue #7684).  Pure
+        # text insertion of existence-checked ``(model ...)`` refs.
+        ensure_models(pcb_path)
 
         # Step 4.1: Copy schematic pin names/electrical types onto the pads
         # (issues #5985, #6025), as KiCad's "Update PCB from Schematic" does.
@@ -1176,6 +1183,7 @@ def main() -> int:
             route_ok=route_success,
             route_allowance=0,
             lvs_ok=lvs_success,
+            export_ok=mfg_success,
             supplemental_drc_ok=drc_success,
             supplemental_reason=(
                 "kct check reported error-level DRC findings (see DRC output above)"
@@ -1196,11 +1204,6 @@ def main() -> int:
         print(f"  ERC: {'PASS' if erc_success else 'FAIL'}")
         for line in gate.summary_lines():
             print(line)
-        # #3912: mfg_success means ``kct export`` WROTE a bundle (exit 0),
-        # NOT that the board is DRC-clean -- board cleanliness is the
-        # ``DRC``/``Overall`` verdict above.  Label "WRITTEN" so PASS is
-        # never mistaken for a DRC pass.
-        print(f"  MFG bundle: {'WRITTEN' if mfg_success else 'FAILED'}")
         print("\nCircuit description:")
         print("  - J1: 2-pin power input (VCC, GND)")
         print("  - R1: 330 ohm current limiter")

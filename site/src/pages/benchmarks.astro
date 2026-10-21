@@ -158,6 +158,9 @@ const FAILURE_NOTES: Record<string, { issue: string; url: string; summary: strin
           <strong>{deepPcbReferenceFor(c.board)?.name ?? c.board} · {c.protocol}: not tested in the dated collection</strong>
           {" "}— no committed report is available. This is an evidence gap, not a routing failure or success.
         </li>)}</ul>}
+        <p class="pending-runs">The PCBWorld D3-A baseline (<code>kct bench external --suite pcbworld</code>,
+          <a href={`${REPO}/blob/main/benchmarks/external/results/2026-10-15-pcbworld-d3a/README.md`} target="_blank" rel="noopener noreferrer">2026-10-15</a>)
+          is <strong>not run</strong>: no D3-A board has been routed or scored. This is an evidence gap, not a result.</p>
         <p>Vendor references appear only in the separate historical section below.
           Matching board revisions, protocols and metric definitions have not been established for a competitive comparison.</p>
       </section>
@@ -197,8 +200,8 @@ const FAILURE_NOTES: Record<string, { issue: string; url: string; summary: strin
           checkout — see <a href={EPIC_URL} target="_blank" rel="noopener noreferrer"
             >Epic #4932</a
           > for the original benchmark harness design and{" "}
-          <a href={RELABEL_EPIC_URL} target="_blank" rel="noopener noreferrer">Epic #5278</a> for
-          the ongoing work to re-run and correctly report these boards.
+          <a href={RELABEL_EPIC_URL} target="_blank" rel="noopener noreferrer">Epic #5278</a>
+          (closed 2026-09-12), which re-labeled this snapshot. Re-run results appear in the dated routing attempts above.
         </p>
         {
           noOutputReports.length > 0 && (

@@ -27,6 +27,16 @@ import { fileURLToPath } from "node:url";
 import { BENCHMARK_SCHEMA_VERSION } from "./benchmarkTypes.ts";
 import type { BenchmarkReport } from "./benchmarkTypes.ts";
 
+/**
+ * Companion files that sit beside reports in results directories but are not
+ * reports themselves. Skipped silently so real malformed reports stay audible.
+ */
+export const COMPANION_FILES: ReadonlySet<string> = new Set([
+  "run-provenance.json",
+  "provenance.json",
+  "acceptance-inspection.json",
+]);
+
 /** Directory of this module when executed unbundled (Node ESM, vitest). */
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 
@@ -129,7 +139,7 @@ export function loadBenchmarks(root: string = benchmarksResultsDir()): Benchmark
 
   const reports: BenchmarkReport[] = [];
   for (const entry of readdirSync(root).sort()) {
-    if (!entry.endsWith(".json")) continue;
+    if (!entry.endsWith(".json") || COMPANION_FILES.has(entry)) continue;
     const report = loadBenchmarkFile(join(root, entry));
     if (report) reports.push(report);
   }

@@ -118,6 +118,12 @@ class PipelineGateResult:
             more unconnected items, ``isolated_copper`` or ``copper_sliver``
             than a fresh refill.  ``False`` means a fragmented saved fill;
             it fails ``drc_ok``.  ``None`` when the leg was not evaluated.
+        export_ok: ``True``/``False`` for the manufacturing-bundle export
+            verdict (``kct export``), or ``None`` when export was not run
+            (e.g. a ``--step`` sub-run).  A failed export is a gate FAIL
+            (exit 1), not a distinct INCOMPLETE status: it reuses the one
+            existing exit-code scheme so CI wrappers learn nothing new
+            (issue #7740).  ``None`` never fails, matching ``lvs_ok``.
         reasons: human-readable explanations for every failing / skipped
             leg, suitable for printing under the SUMMARY.
     """
@@ -133,6 +139,7 @@ class PipelineGateResult:
     drc_top_types: list[tuple[str, int]] = field(default_factory=list)
     supplemental_drc_ok: bool | None = None
     saved_fill_ok: bool | None = None
+    export_ok: bool | None = None
     reasons: list[str] = field(default_factory=list)
 
     @property
@@ -141,9 +148,15 @@ class PipelineGateResult:
 
         ``lvs_ok is not False`` treats ``None`` (LVS not run) as
         non-blocking, so an LVS-not-run board is not failed by the gate,
-        while a genuine LVS failure (``False``) is.
+        while a genuine LVS failure (``False``) is.  ``export_ok`` follows
+        the same rule (issue #7740).
         """
-        return self.route_ok and self.drc_ok and (self.lvs_ok is not False)
+        return (
+            self.route_ok
+            and self.drc_ok
+            and (self.lvs_ok is not False)
+            and (self.export_ok is not False)
+        )
 
     def exit_code(self) -> int:
         """Process exit code derived from :attr:`passed` (0 pass / 1 fail)."""
@@ -167,6 +180,12 @@ class PipelineGateResult:
             return "n/a"
         return "PASS" if self.lvs_ok else "FAIL"
 
+    def export_status(self) -> str:
+        """``"WRITTEN"``/``"FAILED"``/``"n/a"`` for the ``MFG bundle:`` line."""
+        if self.export_ok is None:
+            return "n/a"
+        return "WRITTEN" if self.export_ok else "FAILED"
+
     def summary_lines(self) -> list[str]:
         """Render the canonical ``Results:`` block for the recipe SUMMARY.
 
@@ -178,6 +197,7 @@ class PipelineGateResult:
             f"  Routing: {self.route_status()}",
             f"  DRC:     {self.drc_status()}",
             f"  LVS:     {self.lvs_status()}",
+            f"  MFG bundle: {self.export_status()}",
             f"  Overall: {self.overall_status()}",
         ]
         for reason in self.reasons:
@@ -193,6 +213,7 @@ def evaluate_pipeline_gate(
     route_ok: bool | None = None,
     route_allowance: int = 0,
     lvs_ok: bool | None = None,
+    export_ok: bool | None = None,
     advisory_types: Collection[str] = DEFAULT_ADVISORY_DRC_TYPES,
     rule_allowances: Mapping[str, int] | None = None,
     supplemental_drc_ok: bool | None = None,
@@ -229,6 +250,9 @@ def evaluate_pipeline_gate(
             fully routed).  Only meaningful with the counts path.
         lvs_ok: Copper-LVS verdict, or ``None`` when LVS was not run for
             this board (``None`` does not fail the gate).
+        export_ok: Manufacturing-bundle export verdict (``kct export``), or
+            ``None`` when export was not run.  ``False`` fails the gate
+            (issue #7740); ``None`` never does.
         advisory_types: kicad-cli error ``type`` strings excluded from the
             geometric blocking count (defaults to
             :data:`DEFAULT_ADVISORY_DRC_TYPES`).
@@ -373,6 +397,10 @@ def evaluate_pipeline_gate(
     if lvs_ok is False:
         reasons.append("copper-LVS failed (short/open vs schematic)")
 
+    # ---- Export leg (Issue #7740) ----------------------------------------
+    if export_ok is False:
+        reasons.append("manufacturing bundle export failed")
+
     return PipelineGateResult(
         route_ok=route_ok_final,
         drc_ok=drc_ok,
@@ -385,5 +413,6 @@ def evaluate_pipeline_gate(
         drc_top_types=drc.top_types(),
         supplemental_drc_ok=supplemental_drc_ok,
         saved_fill_ok=saved_fill_ok,
+        export_ok=export_ok,
         reasons=reasons,
     )

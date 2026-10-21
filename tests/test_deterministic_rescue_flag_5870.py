@@ -49,6 +49,7 @@ import pytest
 from kicad_tools.cli import route_cmd
 from kicad_tools.cli.route_cmd import (
     _deterministic_rescue_kwargs,
+    _negotiated_kwargs,
     _normalize_deterministic_budget,
     _route_parser,
 )
@@ -125,7 +126,15 @@ def test_every_routing_call_site_threads_the_opt_in():
             if kw.arg is None
             and isinstance(kw.value, ast.Call)
             and isinstance(kw.value.func, ast.Name)
-            and kw.value.func.id == "_deterministic_rescue_kwargs"
+            and (
+                kw.value.func.id == "_deterministic_rescue_kwargs"
+                # Issue #7377: ``_negotiated_kwargs`` embeds the rescue splat for
+                # ``route_all_negotiated`` (pinned by the helper tests below).
+                or (
+                    kw.value.func.id == "_negotiated_kwargs"
+                    and call.func.attr == "route_all_negotiated"
+                )
+            )
         ]
         if not splats:
             missing.append(f"line {call.lineno}: router.{call.func.attr}(...)")
@@ -133,6 +142,18 @@ def test_every_routing_call_site_threads_the_opt_in():
         "routing call site(s) do not forward --deterministic-rescue "
         "(add **_deterministic_rescue_kwargs(args)):\n" + "\n".join(missing)
     )
+
+
+def test_negotiated_kwargs_helper_threads_the_opt_in():
+    """The shared builder behind every ``route_all_negotiated`` site carries the flag."""
+    off = _negotiated_kwargs(SimpleNamespace(iterations=5), timeout=None, checkpoint_callback=None)
+    on = _negotiated_kwargs(
+        SimpleNamespace(iterations=5, deterministic_rescue=True),
+        timeout=None,
+        checkpoint_callback=None,
+    )
+    assert "deterministic_rescue" not in off
+    assert on["deterministic_rescue"] is True
 
 
 def _budget_args(**overrides) -> SimpleNamespace:

@@ -1885,3 +1885,42 @@ class TestHierarchyTraversal:
         data = json.loads(capsys.readouterr().out)
         assert "R3" in data
         assert "R4" in data
+
+
+class TestSheetFilterIgnoresParentFolders:
+    """Issue #7614: ``HierarchyNode.path`` is absolute, so ``--sheet`` must
+    match only the sheet name or the path relative to the root's folder,
+    never a folder above the project."""
+
+    @pytest.fixture
+    def project_root(self, tmp_path: Path) -> Path:
+        import shutil
+
+        src = Path(__file__).parent / "fixtures" / "hierarchical"
+        proj = tmp_path / "myboard_project"
+        proj.mkdir()
+        for name in ("root.kicad_sch", "sub_a.kicad_sch", "sub_b.kicad_sch", "nested.kicad_sch"):
+            shutil.copy(src / name, proj / name)
+        return proj / "root.kicad_sch"
+
+    def test_project_folder_name_matches_nothing(self, project_root: Path, capsys):
+        rc = pin_map_main([str(project_root), "--sheet", "myboard_project", "--format", "json"])
+        assert rc == 0
+        assert json.loads(capsys.readouterr().out) == {}
+
+    def test_relative_root_project_folder_name_matches_nothing(
+        self, project_root: Path, capsys, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.chdir(project_root.parent.parent)
+        rc = pin_map_main(
+            ["myboard_project/root.kicad_sch", "--sheet", "myboard", "--format", "json"]
+        )
+        assert rc == 0
+        assert json.loads(capsys.readouterr().out) == {}
+
+    def test_file_name_filter_still_matches(self, project_root: Path, capsys):
+        rc = pin_map_main([str(project_root), "--sheet", "sub_b", "--format", "json"])
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        assert "R3" in data and "R4" in data
+        assert "R1" not in data and "R2" not in data and "C2" not in data

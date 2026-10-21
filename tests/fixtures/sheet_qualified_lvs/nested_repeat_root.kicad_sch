@@ -1,0 +1,54 @@
+(kicad_sch
+	(version 20231120)
+	(generator "kicadtools_test")
+	(generator_version "8.0")
+	(uuid "76160001-0000-4000-8000-000000007616")
+	(paper "A4")
+	(lib_symbols
+	)
+	(sheet
+		(at 50 30) (size 30 20)
+		(stroke (width 0.1524) (type solid))
+		(fill (color 255 255 194 1.0))
+		(uuid "76160002-0000-4000-8000-000000007616")
+		(property "Sheetname" "MID_A"
+			(at 50 29 0)
+			(effects (font (size 1.27 1.27)) (justify left bottom))
+		)
+		(property "Sheetfile" "nested_repeat_mid.kicad_sch"
+			(at 50 51 0)
+			(effects (font (size 1.27 1.27)) (justify left top) hide)
+		)
+		(pin "SIG" input
+			(at 50 35 180)
+			(effects (font (size 1.27 1.27)) (justify left))
+			(uuid "76160004-0000-4000-8000-000000007616")
+		)
+	)
+	(sheet
+		(at 140 30) (size 30 20)
+		(stroke (width 0.1524) (type solid))
+		(fill (color 255 255 194 1.0))
+		(uuid "76160003-0000-4000-8000-000000007616")
+		(property "Sheetname" "MID_B"
+			(at 140 29 0)
+			(effects (font (size 1.27 1.27)) (justify left bottom))
+		)
+		(property "Sheetfile" "nested_repeat_mid.kicad_sch"
+			(at 140 51 0)
+			(effects (font (size 1.27 1.27)) (justify left top) hide)
+		)
+		(pin "SIG" input
+			(at 140 35 180)
+			(effects (font (size 1.27 1.27)) (justify left))
+			(uuid "76160005-0000-4000-8000-000000007616")
+		)
+	)
+	(sheet_instances
+		(path "/" (page "1"))
+		(path "/76160002-0000-4000-8000-000000007616" (page "2"))
+		(path "/76160002-0000-4000-8000-000000007616/76160011-0000-4000-8000-000000007616" (page "3"))
+		(path "/76160003-0000-4000-8000-000000007616" (page "4"))
+		(path "/76160003-0000-4000-8000-000000007616/76160011-0000-4000-8000-000000007616" (page "5"))
+	)
+)

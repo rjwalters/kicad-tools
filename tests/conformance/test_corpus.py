@@ -41,9 +41,10 @@ marker and no ``xfail``.
 One test item per ``(seed, adapter)``, never a loop over seeds inside one
 item: the CI ``test`` job runs ``--timeout=60``, and a batched item would both
 risk the reaper and report one failure for the whole corpus instead of naming
-the seed that broke.  The smoke corpus is deliberately tiny -- each item costs
-a kicad-cli process -- while the published table is measured out-of-band over
-seeds 0-199 by ``python -m tests.conformance.report``.
+the seed that broke.  The smoke corpus is deliberately tiny -- each *seed*
+costs a kicad-cli process, measured once and shared by every adapter's item
+through ``conftest.corpus_oracle`` -- while the published table is measured
+out-of-band over seeds 0-199 by ``python -m tests.conformance.report``.
 """
 
 from __future__ import annotations
@@ -54,21 +55,22 @@ import pytest
 
 from tests.conformance.adapters import BOARD_EDGE, ConsumerAdapter, Verdict
 from tests.conformance.adapters.kernel import KERNEL_GROUP
-from tests.conformance.board import write_case
 from tests.conformance.conftest import (
+    CorpusOracle,
     assert_migrated_group_agrees,
     item_group,
     requires_adapter,
     requires_kicad_cli,
 )
 from tests.conformance.generator import PairKind, generate_case
-from tests.conformance.oracle import run_oracle
 from tests.conformance.report import ADAPTERS, MIGRATED_GROUPS, QUANTISED_GROUPS, main
 
 _ADAPTERS_BY_GROUP = {adapter.group: adapter for adapter in ADAPTERS}
 
 # Kept smaller than ``test_corpus_truth.CI_SEEDS``: this module multiplies its
-# seeds by every wired adapter, and every item launches its own kicad-cli.
+# seeds by every wired adapter.  The kicad-cli measurement is per seed, not per
+# item (``conftest.corpus_oracle``), but each seed still adds one item per
+# adapter.
 CI_SEEDS = (0, 1, 2)
 
 # The Epic #5509 section-1 groups with no adapter, whose reasons are recorded
@@ -269,7 +271,9 @@ def _consumer_verdicts(adapter: ConsumerAdapter, case) -> set[frozenset[str]]:
 @pytest.mark.consumer
 @pytest.mark.parametrize("seed", CI_SEEDS)
 @pytest.mark.parametrize("adapter", _ADAPTER_PARAMS)
-def test_adapter_agrees_with_kicad_cli(adapter: ConsumerAdapter, seed: int, tmp_path: Path) -> None:
+def test_adapter_agrees_with_kicad_cli(
+    adapter: ConsumerAdapter, seed: int, corpus_oracle: CorpusOracle
+) -> None:
     """One consumer, one seed, against ground truth.
 
     Compared on pair identity only -- *did this model flag this pair at all?*
@@ -297,8 +301,7 @@ def test_adapter_agrees_with_kicad_cli(adapter: ConsumerAdapter, seed: int, tmp_
     :func:`test_zone_pairs_are_measured_on_a_refilled_run` covers them.
     """
     case = generate_case(seed)
-    board = write_case(case, tmp_path)
-    result = run_oracle(board.pcb_path, refill=False, work_dir=tmp_path)
+    result = corpus_oracle(seed, refill=False)
 
     truth = {v.nets for v in result.without_zones()}
     consumer = _consumer_verdicts(adapter, case)
@@ -330,9 +333,9 @@ def test_adapter_agrees_with_kicad_cli(adapter: ConsumerAdapter, seed: int, tmp_
         # single seed carries one: group 6 sees only static placement copper
         # (``pad-seg`` / ``pad-via``) and seed 2 places no pad pair at all.
         # Requiring *every* seed to contribute would force CI_SEEDS to grow --
-        # a kicad-cli process per seed per adapter -- to say something the
-        # union already says.  Counting pairs needs no oracle, so this stays
-        # cheap.
+        # a kicad-cli process per seed and an item per seed per adapter -- to
+        # say something the union already says.  Counting pairs needs no
+        # oracle, so this stays cheap.
         elsewhere = sum(
             1
             for other in CI_SEEDS
@@ -378,7 +381,7 @@ ZONE_PAIR_SEEDS = (7, 22)
 @requires_kicad_cli
 @pytest.mark.consumer
 @pytest.mark.parametrize("seed", ZONE_PAIR_SEEDS)
-def test_zone_pairs_are_measured_on_a_refilled_run(seed: int, tmp_path: Path) -> None:
+def test_zone_pairs_are_measured_on_a_refilled_run(seed: int, corpus_oracle: CorpusOracle) -> None:
     """The zone half of the table, exercised end to end on one seed per kind.
 
     Everything the report does differently for a zone pair is here: the oracle
@@ -395,8 +398,7 @@ def test_zone_pairs_are_measured_on_a_refilled_run(seed: int, tmp_path: Path) ->
     zone_pairs = [p for p in case.pairs if p.kind in PairKind.ZONE]
     assert zone_pairs, f"seed {seed} no longer carries a zone pair -- re-pin ZONE_PAIR_SEEDS"
 
-    board = write_case(case, tmp_path)
-    result = run_oracle(board.pcb_path, refill=True, work_dir=tmp_path)
+    result = corpus_oracle(seed, refill=True)
     truth = {v.nets for v in result.verdicts if v.zone}
 
     findings: list[str] = []
@@ -434,7 +436,7 @@ def test_zone_pairs_are_measured_on_a_refilled_run(seed: int, tmp_path: Path) ->
 
 @requires_kicad_cli
 @pytest.mark.parametrize("seed", CI_SEEDS)
-def test_kernel_agrees_with_kicad_cli(seed: int, tmp_path: Path) -> None:
+def test_kernel_agrees_with_kicad_cli(seed: int, corpus_oracle: CorpusOracle) -> None:
     """The Phase 1b kernel, against ground truth, with **no** ``xfail``.
 
     Every consumer row above is deliberately non-strict-xfailed: a measured
@@ -458,8 +460,7 @@ def test_kernel_agrees_with_kicad_cli(seed: int, tmp_path: Path) -> None:
     """
     kernel = _ADAPTERS_BY_GROUP[KERNEL_GROUP]
     case = generate_case(seed)
-    board = write_case(case, tmp_path)
-    result = run_oracle(board.pcb_path, refill=False, work_dir=tmp_path)
+    result = corpus_oracle(seed, refill=False)
 
     truth = {v.nets for v in result.without_zones()}
     verdicts = {v.nets for v in kernel.verdicts(case)}

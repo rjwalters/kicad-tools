@@ -17,7 +17,7 @@ _None._
 
 `loom:very-important` (one counts per workspace); every stage takes these first.
 
-- **#7580**: router: finish diff-pair via-count parity (continuation of #7093)
+_None._
 
 ## Important
 
@@ -25,44 +25,39 @@ _None._
 
 - **#6858**: router: coupled pre-pass should keep the better of the joint-search and pose-centreline candidates (compare-and-keep; unblocks #6835)
 - **#7269**: board 07 MIPI_DAT0: recover 0.038 mm skew lost to compare-and-keep (blocks #6858)
-- **#7401**: router: board 06 USB2_D+ uncoupled 12.791 > 12.700 mm after v62 pad-edge floor reorders the single-ended fallback
-- **#7491**: router: C++ search finds no USB3_RX1- path on board 06 once USB2_D routes coupled (blocks #7401)
+- **#7738**: main: test_board_00_simple_led::test_no_connectivity_errors fails
 
 ## Ready
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-- **#7491**: router: C++ search finds no USB3_RX1- path on board 06 once USB2_D routes coupled (blocks #7401)
+_None._
 
 ## In Progress
 
 Issues currently being built (`loom:building`).
 
-- **#5240**: CI runtime: reduce measured Test, Board06 E2E and diff-pair regression job medians
-- **#7377**: route: collapse the 4 copy-pasted post-route tails into one pipeline -- --length-match-diffpairs, --stitch-power-planes, --progressive-clearance, --bus-routing silently no-op on the default --auto-layers path
 - **#7521**: Diff-pair skew compensation per best practice (Q16): exclude tuning bumps from uncoupled metric, emit KiCad tuning patterns, geometry gates, sourced per-class skew limits
-- **#7548**: Board 06 synthetic fixture: 9 diff pairs over max skew on the seed-42 re-route (identity-allowed in check_diffpair_coverage.py)
 - **#7612**: Board 07 fixture: 4 diff pairs fail skew with no_suitable_segment (TMDS_D2, MIPI_DAT1, MIPI_DAT0, MIPI_CLK)
-- **#7614**: `schema.hierarchy.build_hierarchy` resolves sub-sheet files against the process working directory, then the root's directory, never the parent sheet's directory (wrong sheet read, nested sheets dropped silently)
-- **#7616**: Schematic BOM (`extract_bom`, `kct bom`) lists the first placement's references for every placement of a repeated sheet, so the other placements' parts are missing; `build_hierarchy` also drops the subtree under a repeated sheet
-- **#7637**: Unify schematic power-symbol predicates with BOMItem.is_power_symbol's (power)-flag rule
-- **#7645**: main: 4 test_lattice_extra_parity_7093 tests fail after dc78dac
+- **#7685**: Bring every demo board to 100% 3D model coverage on the pinned model set
+- **#7721**: router: turn-aware lattice A* — price signed turning so diff pairs avoid same-direction U-turns (source-side skew, #7649)
+- **#7738**: main: test_board_00_simple_led::test_no_connectivity_errors fails
+- **#7740**: board generators report Overall: PASS and exit 0 when the manufacturing-bundle export fails
+- **#7741**: regenerated BOM LCSC column depends on the host (empty when the LCSC API returns 403), unlike the committed bundle
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#7628**: fix: tune board 07's four skewed diff pairs and stop the skew gate vetoing inherited near-misses
-- **#7639**: fix: list each placement of a repeated sheet in the BOM
-- **#7643**: fix(schema): resolve sub-sheets against the containing sheet's folder (#7614)
-- **#7646**: test(router): close the corridor under the extra-parity wall fixture
-- **#7653**: chore(deps): Bump certifi from 2025.11.12 to 2026.10.19
+- **#7739**: test(board00): assert the manufacturing bundle exists before kct check
+- **#7742**: feat: add kct export --spec and pass project.kct from board generators
+- **#7744**: fix: gate board recipes on manufacturing export result
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-_None._
+- **#7736**: feat(check): default-on model_coverage with full demo-board 3D coverage
 
 ## Proposed
 
@@ -83,24 +78,25 @@ Issues carrying `loom:curated`.
 - **#7256**: board 03: after #7163 a fresh arm C route fails usb_geometry (MCU launch 4.138/4.284 > 4 mm; USB width 0.30 -> 0.275) *(curated)*
 - **#7269**: board 07 MIPI_DAT0: recover 0.038 mm skew lost to compare-and-keep (blocks #6858) *(curated)*
 - **#7349**: Boards 06/07: enable diff-pair gap tightening on seed-42 re-routes and drop the impedance caps (#7344 PR 2) *(curated)*
-- **#7377**: route: collapse the 4 copy-pasted post-route tails into one pipeline -- --length-match-diffpairs, --stitch-power-planes, --progressive-clearance, --bus-routing silently no-op on the default --auto-layers path *(curated)*
-- **#7401**: router: board 06 USB2_D+ uncoupled 12.791 > 12.700 mm after v62 pad-edge floor reorders the single-ended fallback *(curated)*
 - **#7487**: Re-rule or remove board 03 usb_geometry via-in-pad window exception by 2027-04-19 (#7457 / #7084 Q10) *(curated)*
-- **#7491**: router: C++ search finds no USB3_RX1- path on board 06 once USB2_D routes coupled (blocks #7401) *(curated)*
 - **#7518**: DSN export: verify a Specctra router doesn't double-flip back-side padstack layers (deferred from #7481 / #7496) *(curated)*
 - **#7521**: Diff-pair skew compensation per best practice (Q16): exclude tuning bumps from uncoupled metric, emit KiCad tuning patterns, geometry gates, sourced per-class skew limits *(curated)*
 - **#7548**: Board 06 synthetic fixture: 9 diff pairs over max skew on the seed-42 re-route (identity-allowed in check_diffpair_coverage.py) *(curated)*
 - **#7557**: Board 07: TMDS_D0_N pad U4.B2 has no legal exit; needs placement rework or joint TMDS escape-corridor allocation (#3673) *(curated)*
 - **#7573**: router: board 05 +5V/GND pour completeness depends on where nTRIP lands (C10 stitch sites unreserved) *(curated)*
-- **#7580**: router: finish diff-pair via-count parity (continuation of #7093) *(curated)*
 - **#7611**: Board 07 fixture: DDR_DATA_BYTE_0 and MIPI_CSI_LANES group length skew over tolerance *(curated)*
 - **#7612**: Board 07 fixture: 4 diff pairs fail skew with no_suitable_segment (TMDS_D2, MIPI_DAT1, MIPI_DAT0, MIPI_CLK) *(curated)*
-- **#7614**: `schema.hierarchy.build_hierarchy` resolves sub-sheet files against the process working directory, then the root's directory, never the parent sheet's directory (wrong sheet read, nested sheets dropped silently) *(curated)*
-- **#7616**: Schematic BOM (`extract_bom`, `kct bom`) lists the first placement's references for every placement of a repeated sheet, so the other placements' parts are missing; `build_hierarchy` also drops the subtree under a repeated sheet *(curated)*
 - **#7619**: Board 07 fixture: DQS and TMDS_D1 diff pairs routed with unequal via counts (N leg +2 vias), causing multi-mm skew *(curated)*
-- **#7624**: router: recover 06rf USB3_RX1/RX2 coupling at J1 after #7517 corridor competition (Q29 tracked regression) *(curated)*
-- **#7637**: Unify schematic power-symbol predicates with BOMItem.is_power_symbol's (power)-flag rule *(curated)*
-- **#7645**: main: 4 test_lattice_extra_parity_7093 tests fail after dc78dac *(curated)*
+- **#7649**: router: source-side diff-pair skew avoidance; retire the Q35 2× interim bump excursion *(curated)*
+- **#7650**: board 03: recover USB_D common-run and MCU-launch margin given up to route VBUS U2.5 (#7475) *(curated)*
+- **#7669**: bench: re-run PocketBeagle and STRF (zero-touch + tuned) after the #4945/#5302 fixes and add a dispatchable external-bench workflow *(curated)*
+- **#7685**: Bring every demo board to 100% 3D model coverage on the pinned model set *(curated)*
+- **#7690**: Epic: full 3D model coverage, from demo boards to the JLCPCB catalog, reproducible on the pinned toolchain *(curated)*
+- **#7716**: router: Python-fallback A* inside relief rescue is load-dependent on board 07 (1,024 expansions in ~420 s) *(curated)*
+- **#7721**: router: turn-aware lattice A* — price signed turning so diff pairs avoid same-direction U-turns (source-side skew, #7649) *(curated)*
+- **#7738**: main: test_board_00_simple_led::test_no_connectivity_errors fails *(curated)*
+- **#7740**: board generators report Overall: PASS and exit 0 when the manufacturing-bundle export fails *(curated)*
+- **#7741**: regenerated BOM LCSC column depends on the host (empty when the LCSC API returns 403), unlike the committed bundle *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -125,13 +121,13 @@ Issues carrying `loom:curated`.
 | Bucket | Count |
 |------|-------|
 | Operator merge-risk holds | 0 |
-| Very important | 1 |
-| Important | 4 |
-| Ready (`loom:issue`) | 1 |
-| In Progress (`loom:building`) | 9 |
-| PRs awaiting review | 5 |
-| Approved PRs awaiting merge | 0 |
-| Curated | 33 |
+| Very important | 0 |
+| Important | 3 |
+| Ready (`loom:issue`) | 0 |
+| In Progress (`loom:building`) | 7 |
+| PRs awaiting review | 3 |
+| Approved PRs awaiting merge | 1 |
+| Curated | 34 |
 | Architect / Hermit proposals | 5 |
 | Active epics | 7 |
 <!-- guide:plan-body:end -->

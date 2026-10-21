@@ -39,6 +39,31 @@ from pathlib import Path
 from typing import Any
 
 
+def escape_string(value: str) -> str:
+    r"""Escape ``value`` for use inside a KiCad double-quoted string.
+
+    Mirrors KiCad's ``OUTPUTFORMATTER::Quotes``: backslash, double quote,
+    LF and CR become ``\\``, ``\"``, ``\n`` and ``\r``.  The result has
+    no surrounding quotes; see :func:`quote_string`.
+
+    KiCad reads its files line by line, so a raw LF -- or a CR that a later
+    universal-newline writer turns into one -- inside a quoted string can
+    make it drop a hierarchical sub-sheet without an error (issue #7648).
+    This is the one escaper every writer that emits a quoted KiCad string by
+    hand should call.
+    """
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r")
+
+
+def quote_string(value: str) -> str:
+    r"""Return ``value`` as a KiCad double-quoted string literal.
+
+    ``quote_string('Lib:FP"x')`` == ``'"Lib:FP\\"x"'``.  Parsing the result
+    with :func:`parse_string` gives back exactly ``value``.
+    """
+    return f'"{escape_string(value)}"'
+
+
 class SExp:
     """
     S-expression node representing a KiCad element.
@@ -595,8 +620,8 @@ class SExp:
             else:
                 needs_quote = self._originally_quoted or self._needs_quoting(self.value)
             if needs_quote:
-                escaped = self.value.replace("\\", "\\\\").replace('"', '\\"')
-                escaped = escaped.replace("\n", "\\n").replace("\t", "\\t")
+                # \t is escaped too (historical; KiCad's Quotes leaves it).
+                escaped = escape_string(self.value).replace("\t", "\\t")
                 return f'"{escaped}"'
             return self.value
         # For numbers, use original string if available (for round-trip preservation)
@@ -1755,6 +1780,29 @@ def normalize_chamfer(node: SExp) -> SExp:
     return node
 
 
+def read_text_exact(path: str | Path) -> str:
+    """Read a KiCad text file as UTF-8 *without* newline translation.
+
+    ``Path.read_text`` uses universal newlines, which turns a raw CR inside
+    a quoted string into LF -- and a raw LF inside a string makes KiCad drop
+    a hierarchical sub-sheet (issue #7648).  Reading with ``newline=""``
+    keeps every byte, so a read/modify/write cycle changes only what it
+    meant to change.
+    """
+    with open(path, encoding="utf-8", newline="") as fh:
+        return fh.read()
+
+
+def write_text_exact(path: str | Path, text: str) -> None:
+    """Write ``text`` as UTF-8 *without* newline translation.
+
+    The counterpart of :func:`read_text_exact`: no LF -> CRLF conversion on
+    Windows and no rewriting of line endings the text already carries.
+    """
+    with open(path, "w", encoding="utf-8", newline="") as fh:
+        fh.write(text)
+
+
 def parse_file(path: str | Path, track_positions: bool = False) -> SExp:
     """Parse an S-expression file.
 
@@ -1765,7 +1813,7 @@ def parse_file(path: str | Path, track_positions: bool = False) -> SExp:
     Returns:
         The parsed SExp tree
     """
-    text = Path(path).read_text(encoding="utf-8")
+    text = read_text_exact(path)
     return Parser(text, track_positions=track_positions).parse()
 
 
@@ -1800,7 +1848,7 @@ class Document:
         save_path = Path(path) if path else self.path
         if save_path is None:
             raise ValueError("No path specified for save")
-        save_path.write_text(self.root.to_string(), encoding="utf-8")
+        write_text_exact(save_path, self.root.to_string())
 
     def find(self, name: str, **attrs) -> SExp | None:
         """Find first element matching name and attributes."""

@@ -60,7 +60,9 @@ Used by ``kct pcb add-3d-models``.
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Mapping
+import os
+import re
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -74,6 +76,7 @@ from kicad_tools.pcb.model_substitutions import substitute_lib_id
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from kicad_tools.pcb.lcsc_models import LcscModelEntry
+    from kicad_tools.pcb.lcsc_registration import RegistrationResult
 
 # The LCSC sidecar mapping accepted by the tier-4 resolver.  A bare ``str``
 # value (a plain ``lib_id -> C-number`` dict) stays valid for callers written
@@ -87,12 +90,17 @@ __all__ = [
     "FootprintBlock",
     "LcscMapping",
     "ModelPatchReport",
+    "LOCAL_MODELS_MANIFEST",
     "ResolvedModels",
     "add_model_refs",
     "add_model_refs_to_text",
+    "attach_local_models",
+    "compare_model_coverage",
+    "ensure_models",
     "extract_model_blocks",
     "iter_footprint_blocks",
     "make_library_resolver",
+    "model_coverage",
 ]
 
 
@@ -584,6 +592,15 @@ class ResolvedModels:
     models: list[str]
     source_anchor: tuple[float, float] | None = None
     source_orientation: float | None = None
+    dangling: str | None = None
+    """Set (with empty *models*) when every installed-library candidate
+    carried only model refs whose file does not exist; holds the library's
+    own ref so the report can name what needs sourcing."""
+    register: Callable[[str], tuple[list[str] | None, RegistrationResult | None]] | None = None
+    """LCSC tier only (issue #7686): called with the target footprint's text,
+    returns ``(models, result)`` -- *models* replace the identity block when the
+    EasyEDA-pad registration was accepted (``None`` otherwise), *result* is the
+    fit (``None`` when no fit was possible)."""
 
 
 # A resolver maps a lib id to its resolved models.  For backward
@@ -592,8 +609,8 @@ class ResolvedModels:
 Resolver = Callable[[str], "ResolvedModels | list[str] | None"]
 
 
-def _find_variant_mod(paths: LibraryPaths, library: str, name: str) -> Path | None:
-    """Find a same-library name variant of a footprint (visual fallback).
+def _variant_mods(paths: LibraryPaths, library: str, name: str) -> list[Path]:
+    """All same-library name variants of a footprint, best first.
 
     KiCad library footprints often exist only as suffixed variants of a
     family name (e.g. ``QFN-24-1EP_4x4mm_P0.5mm`` ships as
@@ -602,18 +619,58 @@ def _find_variant_mod(paths: LibraryPaths, library: str, name: str) -> Path | No
     exact name is missing we accept a footprint in the same library whose
     name extends the requested one at a ``_`` or ``-`` boundary.
 
-    Deterministic choice: plain variants beat ``ThermalVias`` specials,
+    Deterministic order: plain variants beat ``ThermalVias`` specials,
     then shortest name, then lexicographic.
     """
     lib_dir = paths.get_library_path(library)
     if lib_dir is None:
-        return None
+        return []
     prefixes = (name + "_", name + "-")
     candidates = [p for p in lib_dir.glob("*.kicad_mod") if p.stem.startswith(prefixes)]
-    if not candidates:
-        return None
     candidates.sort(key=lambda p: ("ThermalVias" in p.stem, len(p.stem), p.stem))
-    return candidates[0]
+    return candidates
+
+
+def _find_variant_mod(paths: LibraryPaths, library: str, name: str) -> Path | None:
+    """Best same-library name variant of a footprint (see :func:`_variant_mods`)."""
+    candidates = _variant_mods(paths, library, name)
+    return candidates[0] if candidates else None
+
+
+_MODEL_REF_RE = re.compile(r'\(model\s+(?:"((?:[^"\\]|\\.)*)"|([^\s()]+))')
+_KICAD_MODEL_VAR_RE = re.compile(r"\$\{(KICAD\d*_3DMODEL_DIR)\}")
+
+
+def _model_ref_path(model_block: str) -> str | None:
+    """The file reference of a ``(model "ref" ...)`` node, or None."""
+    m = _MODEL_REF_RE.match(model_block.lstrip())
+    if m is None:
+        return None
+    return m.group(1) if m.group(1) is not None else m.group(2)
+
+
+def _model_ref_missing(model_block: str, model_dir: Path | None) -> bool:
+    """True only when the node's file is *verifiably* absent.
+
+    ``${KICADn_3DMODEL_DIR}`` is expanded exactly as ``kct render`` does: the
+    process environment first, then *model_dir* (the discovered KiCad model
+    directory).  A ref that cannot be expanded (no model dir known, an
+    unrelated variable, a relative path) is unverifiable and never counts as
+    dangling, so hosts without KiCad's 3D models keep the pre-#7684 behaviour.
+    """
+    ref = _model_ref_path(model_block)
+    if not ref:
+        return False
+    match = _KICAD_MODEL_VAR_RE.search(ref)
+    if match is not None:
+        env_val = os.environ.get(match.group(1))
+        base = Path(env_val) if env_val and Path(env_val).is_dir() else model_dir
+        if base is None:
+            return False
+        ref = ref.replace(match.group(0), str(base))
+    if "${" in ref or not os.path.isabs(ref):
+        return False
+    return not Path(ref).exists()
 
 
 def _describe_lcsc_transform(
@@ -651,7 +708,10 @@ def make_library_resolver(
     lcsc_cache_dir: Path | None = None,
     lcsc_log: dict[str, str] | None = None,
     lcsc_transform_log: dict[str, str] | None = None,
+    lcsc_issues: dict[str, str] | None = None,
     lcsc_warn: Callable[[str], None] | None = None,
+    allow_dangling: bool = False,
+    model_dir: Path | None = None,
 ) -> Resolver:
     """Build a resolver that reads model refs from installed KiCad libraries.
 
@@ -661,7 +721,10 @@ def make_library_resolver(
     found and ``[]`` when it exists but carries no model reference.
     Results are cached per lib id.
 
-    Resolution tiers (first hit wins):
+    Resolution tiers (first hit whose model file exists wins).  A tier-1..3
+    candidate whose ``(model ...)`` refs all point at files that do not exist
+    (see :func:`_model_ref_missing`) falls through to the next candidate, and
+    is reported via ``ResolvedModels.dangling`` if nothing better is found:
 
     1. **Exact** installed footprint for ``library:name``.
     2. **Same-library variant** (``_find_variant_mod``) — a suffixed name in
@@ -710,29 +773,30 @@ def make_library_resolver(
         lcsc_transform_log: Optional dict populated with ``lib_id ->
             description`` for every LCSC body that received a non-identity
             per-part transform, naming the source of each field.
+        lcsc_issues: Optional dict populated with ``lib_id -> message`` for every
+            LCSC body whose cached sha256 no longer matches its pin
+            (``lcsc_content_changed``); such a body is never used.
         lcsc_warn: Optional ``callable(str)`` invoked on a fetch failure.
+        allow_dangling: Skip the existence check and accept a library ref
+            whose STEP file is absent (the KLC F9.3 behaviour).  Default off.
+        model_dir: KiCad 3D model directory used to expand
+            ``${KICADn_3DMODEL_DIR}`` (default: discovered the way
+            ``kct render`` does).
     """
     paths = library_paths if library_paths is not None else detect_kicad_library_path()
     cache: dict[str, ResolvedModels | None] = {}
 
-    def _lookup_mod(lib_id: str) -> tuple[Path | None, str | None]:
-        """Return (mod path, substitute lib id) for *lib_id*, or (None, None).
-
-        The second element is set only when the match came from the
-        cross-library substitution table.
-        """
+    def _candidates(lib_id: str) -> Iterator[tuple[Path, str | None, str | None]]:
+        """Yield ``(mod path, variant stem, substitute lib id)`` in tier order."""
         library, name = parse_library_id(lib_id)
         if not library:
-            return None, None
+            return
         mod_path = paths.get_footprint_file(library, name, fallback_search=False)
         if mod_path is not None:
-            return mod_path, None
+            yield mod_path, None, None
         if allow_variants:
-            mod_path = _find_variant_mod(paths, library, name)
-            if mod_path is not None:
-                if variant_log is not None:
-                    variant_log[lib_id] = mod_path.stem
-                return mod_path, None
+            for variant in _variant_mods(paths, library, name):
+                yield variant, variant.stem, None
         if allow_substitutions:
             sub_id = substitute_lib_id(lib_id)
             if sub_id is not None:
@@ -740,8 +804,40 @@ def make_library_resolver(
                 if sub_lib:
                     mod_path = paths.get_footprint_file(sub_lib, sub_name, fallback_search=False)
                     if mod_path is not None:
-                        return mod_path, sub_id
-        return None, None
+                        yield mod_path, None, sub_id
+
+    def _model_search_dir() -> Path | None:
+        if model_dir is not None:
+            return model_dir
+        # Lazy: the CLI runner is heavy and only needed for the existence check.
+        from kicad_tools.cli.runner import find_kicad_3dmodel_dir
+
+        return find_kicad_3dmodel_dir()
+
+    def _lcsc_registrar(
+        lcsc_id: str,
+    ) -> Callable[[str], tuple[list[str] | None, RegistrationResult | None]] | None:
+        """Pad-registration callback for a cached body with no authored transform.
+
+        Needs the EasyEDA footprint pads captured in the cache metadata at
+        fetch time; returns ``None`` (identity stays) when there are none.
+        """
+        from kicad_tools.pcb.lcsc_models import read_cache_meta, synthesize_model_block
+        from kicad_tools.pcb.lcsc_registration import EasyEdaPad, register_pads
+
+        meta = read_cache_meta(lcsc_id, lcsc_cache_dir)
+        if meta is None or not meta.pads:
+            return None
+        easy_pads = [EasyEdaPad(number=n, x=x, y=y) for n, x, y in meta.pads]
+
+        def _register(body: str) -> tuple[list[str] | None, RegistrationResult | None]:
+            result = register_pads(easy_pads, _pad_positions(body))
+            if result is None or not result.accepted:
+                return None, result
+            block = synthesize_model_block(lcsc_id, rotate=result.rotate, offset=result.offset)
+            return [block], result
+
+        return _register
 
     def _resolve_lcsc(lib_id: str) -> ResolvedModels | None:
         """Tier 4: LCSC/EasyEDA fetch-on-demand.  Returns None when the lib id
@@ -771,11 +867,19 @@ def make_library_resolver(
             sidecar_rotate = None
             sidecar_offset = None
 
+        pinned_sha = entry.sha256 if isinstance(entry, LcscModelEntry) else None
+
+        def _on_issue(kind: str, message: str) -> None:
+            if lcsc_issues is not None and kind == "lcsc_content_changed":
+                lcsc_issues[lib_id] = message
+
         step_path = resolve_lcsc_step(
             lcsc_id,
             cache_dir=lcsc_cache_dir,
             fetch=lcsc_fetch,
             warn=lcsc_warn,
+            expected_sha256=pinned_sha,
+            on_issue=_on_issue,
         )
         if step_path is None:
             # Skip-on-miss: report unresolved rather than emitting a ref to a
@@ -796,6 +900,9 @@ def make_library_resolver(
                 rotate_from_sidecar=sidecar_rotate is not None,
                 offset_from_sidecar=sidecar_offset is not None,
             )
+        register = None
+        if rotate is None and offset is None:
+            register = _lcsc_registrar(lcsc_id)
         # Origin-authored body: explicit (0, 0) source anchor so the shared
         # offset math shifts by the full target pad centroid.  ``source_orientation``
         # is deliberately left ``None`` -- there is no source footprint to
@@ -806,29 +913,43 @@ def make_library_resolver(
         return ResolvedModels(
             models=[synthesize_model_block(lcsc_id, rotate=rotate, offset=offset)],
             source_anchor=(0.0, 0.0),
+            register=register,
         )
 
     def resolve(lib_id: str) -> ResolvedModels | None:
         if lib_id in cache:
             return cache[lib_id]
         result: ResolvedModels | None = None
+        dangling: str | None = None
         if paths.found:
-            mod_path, sub_id = _lookup_mod(lib_id)
-            if mod_path is not None:
+            search_dir = None if allow_dangling else _model_search_dir()
+            for mod_path, variant_stem, sub_id in _candidates(lib_id):
                 try:
                     mod_text = mod_path.read_text()
                 except OSError:
-                    result = None
-                else:
-                    result = ResolvedModels(
-                        models=extract_model_blocks(mod_text),
-                        source_anchor=_pad_anchor(mod_text),
-                        source_orientation=_pad_field_orientation(mod_text),
-                    )
-                    if sub_id is not None and substitution_log is not None:
-                        substitution_log[lib_id] = sub_id
+                    continue
+                models = extract_model_blocks(mod_text)
+                if models and not allow_dangling:
+                    live = [m for m in models if not _model_ref_missing(m, search_dir)]
+                    if not live:
+                        if dangling is None:
+                            dangling = _model_ref_path(models[0])
+                        continue
+                    models = live
+                result = ResolvedModels(
+                    models=models,
+                    source_anchor=_pad_anchor(mod_text),
+                    source_orientation=_pad_field_orientation(mod_text),
+                )
+                if variant_stem is not None and variant_log is not None:
+                    variant_log[lib_id] = variant_stem
+                if sub_id is not None and substitution_log is not None:
+                    substitution_log[lib_id] = sub_id
+                break
         if result is None:
             result = _resolve_lcsc(lib_id)
+        if result is None and dangling is not None:
+            result = ResolvedModels(models=[], dangling=dangling)
         cache[lib_id] = result
         return result
 
@@ -863,6 +984,10 @@ class ModelPatchReport:
     """Lib ids skipped: not found in the installed KiCad libraries."""
     no_model_in_library: list[str] = field(default_factory=list)
     """Lib ids skipped: library footprint exists but has no model ref."""
+    dangling_in_library: dict[str, str] = field(default_factory=dict)
+    """Lib ids skipped because every library candidate's model file is absent
+    (``lib_id -> the library's own ref``); nothing was inserted.  Under
+    ``refresh`` the footprint's existing ref is kept and listed here too."""
     variant_matches: dict[str, str] = field(default_factory=dict)
     """Lib ids whose model came from a same-library name variant
     (``lib_id -> matched footprint name``)."""
@@ -875,6 +1000,17 @@ class ModelPatchReport:
     lcsc_transforms: dict[str, str] = field(default_factory=dict)
     """Lib ids whose LCSC body received a non-identity per-part transform
     (``lib_id -> human-readable summary naming each field's source``)."""
+    lcsc_registration: dict[str, str] = field(default_factory=dict)
+    """Lib ids whose LCSC body transform was **derived** by registering the
+    EasyEDA pad geometry onto the footprint pads (``lib_id -> summary with the
+    fit residual``, issue #7686)."""
+    lcsc_needs_calibration: dict[str, str] = field(default_factory=dict)
+    """Lib ids where that registration's residual was too high to accept: the
+    identity (or packaged) transform was kept and a human must calibrate."""
+    lcsc_content_changed: dict[str, str] = field(default_factory=dict)
+    """Lib ids whose cached LCSC body no longer matches its sha256 pin
+    (``lib_id -> message``).  Nothing was inserted for them: a changed body is
+    reported, never silently re-pointed at (issue #7686)."""
 
     @property
     def changed(self) -> bool:
@@ -923,6 +1059,15 @@ def add_model_refs_to_text(
             models = resolved.models
             source_anchor = resolved.source_anchor
             source_orientation = resolved.source_orientation
+            if resolved.register is not None and models:
+                derived_models, fit = resolved.register(body)
+                if fit is not None and derived_models is not None:
+                    models = derived_models
+                    report.lcsc_registration[block.lib_id] = fit.describe()
+                elif fit is not None:
+                    report.lcsc_needs_calibration[block.lib_id] = fit.describe()
+            if resolved.dangling is not None and not models:
+                report.dangling_in_library[block.lib_id] = resolved.dangling
         else:
             models = resolved
             source_anchor = None
@@ -930,7 +1075,7 @@ def add_model_refs_to_text(
         if not models:
             if has_model:
                 report.refresh_kept.append(block.lib_id)
-            else:
+            elif block.lib_id not in report.dangling_in_library:
                 report.no_model_in_library.append(block.lib_id)
             continue
         # Orientation-convention rotation: a target footprint whose pad field
@@ -1011,6 +1156,7 @@ def add_model_refs(
     lcsc_warn: Callable[[str], None] | None = None,
     dry_run: bool = False,
     refresh: bool = False,
+    allow_dangling: bool = False,
 ) -> ModelPatchReport:
     """Patch missing 3D model refs into a ``.kicad_pcb`` file.
 
@@ -1046,6 +1192,10 @@ def add_model_refs(
             cannot re-resolve keep their existing nodes byte-for-byte
             (reported in ``refresh_kept``).  Default: insert-only (existing
             nodes are never touched).
+        allow_dangling: Insert a library ref even when its STEP file does not
+            exist (KLC F9.3 behaviour).  Default off: such refs are reported
+            in ``dangling_in_library`` and nothing is inserted.  Ignored when
+            *resolver* is supplied.
 
     Returns:
         ModelPatchReport describing what was (or would be) inserted.
@@ -1056,6 +1206,7 @@ def add_model_refs(
     substitution_log: dict[str, str] = {}
     lcsc_log: dict[str, str] = {}
     lcsc_transform_log: dict[str, str] = {}
+    lcsc_issue_log: dict[str, str] = {}
     if resolver is None:
         resolver = make_library_resolver(
             library_paths,
@@ -1068,7 +1219,9 @@ def add_model_refs(
             lcsc_cache_dir=lcsc_cache_dir,
             lcsc_log=lcsc_log,
             lcsc_transform_log=lcsc_transform_log,
+            lcsc_issues=lcsc_issue_log,
             lcsc_warn=lcsc_warn,
+            allow_dangling=allow_dangling,
         )
     new_text, report = add_model_refs_to_text(text, resolver, refresh=refresh)
     # Only surface variants/substitutions that actually got patched in
@@ -1084,7 +1237,159 @@ def add_model_refs(
     report.lcsc_transforms = {
         lib_id: desc for lib_id, desc in lcsc_transform_log.items() if lib_id in applied
     }
+    report.lcsc_content_changed = dict(lcsc_issue_log)
     if report.changed and not dry_run:
         dest = Path(output_path) if output_path is not None else pcb_path
         dest.write_text(new_text)
     return report
+
+
+# --------------------------------------------------------------------------
+# Generator-owned models (#7684 Part B)
+# --------------------------------------------------------------------------
+
+
+def ensure_models(
+    pcb_path: Path | str,
+    *,
+    sidecar: Path | str | None = None,
+    library_paths: LibraryPaths | None = None,
+    **kwargs: object,
+) -> ModelPatchReport:
+    """Run the ``add_model_refs`` ladder on a freshly generated PCB, in place.
+
+    The one-line call board recipes, ``kct build`` and ``kct pipeline`` make
+    after placement and before export so a regeneration never silently drops
+    ``(model ...)`` nodes.  Defaults match ``kct pcb add-3d-models``:
+    insert-only, existence-checked, cache-only LCSC tier.
+
+    Args:
+        pcb_path: PCB file to patch in place.
+        sidecar: Optional ``lcsc_models.json`` override of the BOM-derived
+            LCSC C-numbers.
+        library_paths: Optional explicit KiCad library location.
+        **kwargs: Forwarded to :func:`add_model_refs` (``refresh``,
+            ``allow_dangling``, ``dry_run``, ...).
+
+    Returns:
+        The patch report.  When neither the KiCad libraries nor a sidecar are
+        available there is nothing to resolve, so an empty report is returned
+        and the file is untouched (a recipe must not fail on such a host).
+    """
+    from kicad_tools.pcb.lcsc_bom import build_lcsc_mapping
+    from kicad_tools.pcb.lcsc_models import fetch_enabled
+
+    paths = library_paths if library_paths is not None else detect_kicad_library_path()
+    # C-numbers come from the board's BOM / procurement data; the sidecar (if
+    # any) is an override only (issue #7686).
+    lcsc_mapping = build_lcsc_mapping(Path(pcb_path), sidecar=sidecar).mapping or None
+    if not paths.found and lcsc_mapping is None:
+        report = ModelPatchReport()
+    else:
+        kwargs.setdefault("lcsc_fetch", fetch_enabled(False))
+        report = add_model_refs(
+            pcb_path,
+            library_paths=paths,
+            lcsc_mapping=lcsc_mapping,
+            **kwargs,  # type: ignore[arg-type]
+        )
+    attach_local_models(pcb_path)
+    return report
+
+
+#: Manifest next to a board's project-local bodies: ``{lib_id: file name}``.
+LOCAL_MODELS_MANIFEST = "3dshapes/local_models.json"
+
+
+def attach_local_models(pcb_path: Path | str) -> list[str]:
+    """Attach the board's project-local bodies (source tier 2, issue #7685).
+
+    ``<pcb dir>/3dshapes/local_models.json`` maps a footprint ``lib_id`` to a
+    body file in the same directory.  Each matching footprint gets one
+    ``${KIPRJMOD}/3dshapes/<file>`` model node with an identity transform (the
+    body is authored in the footprint's frame), replacing any other model node
+    on it -- typically the dangling stock ref the library footprint carries.
+    Idempotent; a missing manifest or a missing body file is a no-op for that
+    entry (never a dangling ref).
+
+    Returns:
+        Lib ids that were changed.
+    """
+    import json
+
+    pcb_path = Path(pcb_path)
+    manifest = pcb_path.parent / LOCAL_MODELS_MANIFEST
+    if not manifest.is_file():
+        return []
+    mapping: dict[str, str] = json.loads(manifest.read_text())
+    text = pcb_path.read_text()
+    changed: list[str] = []
+    for lib_id, filename in mapping.items():
+        if not (manifest.parent / filename).is_file():
+            continue
+        ref = f"${{KIPRJMOD}}/3dshapes/{filename}"
+        # last block first: an insertion only shifts offsets after its own block
+        touched = False
+        for block in reversed(list(iter_footprint_blocks(text))):
+            if block.lib_id != lib_id:
+                continue
+            body = text[block.start : block.end + 1]
+            if f'(model "{ref}"' in body:
+                continue
+            for a, b in reversed(_model_node_spans(body)):
+                body = body[:a] + body[b:]
+            t = block.indent + "\t\t"
+            node = (
+                f'{block.indent}\t(model "{ref}"\n'
+                f"{t}(offset\n{t}\t(xyz 0 0 0)\n{t})\n"
+                f"{t}(scale\n{t}\t(xyz 1 1 1)\n{t})\n"
+                f"{t}(rotate\n{t}\t(xyz 0 0 0)\n{t})\n"
+                f"{block.indent}\t)\n"
+            )
+            close_line = body.rfind("\n") + 1
+            body = body[:close_line] + node + body[close_line:]
+            text = text[: block.start] + body + text[block.end + 1 :]
+            touched = True
+        if touched:
+            changed.append(lib_id)
+    if changed:
+        pcb_path.write_text(text)
+    return changed
+
+
+_REFERENCE_RE = re.compile(
+    r'\((?:property\s+"Reference"|fp_text\s+reference)\s+"((?:[^"\\]|\\.)*)"'
+)
+
+
+def model_coverage(pcb_text: str) -> dict[str, int]:
+    """Count ``(model ...)`` nodes per footprint, keyed by reference designator.
+
+    Footprints without a readable reference fall back to ``lib_id#<index>``.
+    """
+    coverage: dict[str, int] = {}
+    for index, block in enumerate(iter_footprint_blocks(pcb_text)):
+        body = pcb_text[block.start : block.end + 1]
+        match = _REFERENCE_RE.search(body)
+        key = match.group(1) if match else f"{block.lib_id}#{index}"
+        coverage[key] = len(_model_node_spans(body))
+    return coverage
+
+
+def compare_model_coverage(
+    committed_text: str, regenerated_text: str
+) -> dict[str, tuple[int, int]]:
+    """Footprints whose model count dropped between two versions of a board.
+
+    Returns ``{reference: (committed_count, regenerated_count)}`` for every
+    footprint present in *committed_text* whose regenerated count is lower
+    (a footprint missing from the regeneration counts as 0).  Empty means the
+    regeneration kept all model coverage -- the regeneration-guard predicate.
+    """
+    before = model_coverage(committed_text)
+    after = model_coverage(regenerated_text)
+    return {
+        ref: (count, after.get(ref, 0))
+        for ref, count in before.items()
+        if after.get(ref, 0) < count
+    }

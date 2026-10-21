@@ -37,6 +37,7 @@ from kicad_tools.dev import warn_if_stale
 from kicad_tools.lvs import write_lvs_report
 from kicad_tools.operations.pintype import annotate_pcb_file_pintypes
 from kicad_tools.pcb.center_sheet import centered_origin
+from kicad_tools.pcb.models3d import ensure_models
 from kicad_tools.recipes.gate import evaluate_pipeline_gate
 from kicad_tools.recipes.precondition import require_spec
 from kicad_tools.schematic.blocks import (
@@ -2402,6 +2403,11 @@ def main() -> int:
         # Step 4: Create PCB
         pcb_path = create_stm32_pcb(output_dir)
 
+        # Step 4.05: 3D bodies survive regeneration (issues #7684, #7685).
+        # Pure text insertion of existence-checked ``(model ...)`` refs, so the
+        # unrouted board carries the same bodies as the routed one.
+        ensure_models(pcb_path)
+
         # Step 4.1: Copy schematic pin names/electrical types onto the pads
         # (issue #5985), as KiCad's "Update PCB from Schematic" does.  The
         # router merges tracks into this text, so the routed PCB inherits the
@@ -2581,6 +2587,7 @@ def main() -> int:
             route_allowance=0,
             lvs_ok=copper_clean,
             rule_allowances={},
+            export_ok=mfr_success,
         )
 
         # Summary
@@ -2604,7 +2611,6 @@ def main() -> int:
         print(f"  Power-pad tie: {'SUCCESS' if tie_success else 'FAIL'}")
         print(f"  Hole-to-hole relocate: {'SUCCESS' if drill_clearance_success else 'FAIL'}")
         print(f"  Zone fill: {'SUCCESS' if fill_success else 'FAIL'}")
-        print(f"  Manufacturing bundle: {'WRITTEN' if mfr_success else 'FAILED'}")
         print("\nBoard description:")
         print("  - U1: MCP1825S-3302E/DB LDO (5V to 3.3V)")
         print("  - U2: STM32F103C8T6 MCU (LQFP-48, 0.5mm pitch)")

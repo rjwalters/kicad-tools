@@ -88,6 +88,7 @@ Measured experiments on `kct route`; several record negative results.
 | [Clearance-kernel acceptance audit](clearance-kernel-acceptance-audit.md) | Epic #5509 criterion-to-evidence reconciliation (#7577) |
 | [Connectivity contact paths](connectivity-contact-paths-5133.md) | Existing physical contact paths in the Board06 extractor |
 | [Copper LVS zone suppression](copper-lvs-zone-suppression.md) | Independent Board05 evidence |
+| [3D model coverage](3d-model-coverage.md) | Per-board 3D body coverage, model licensing and gate interactions, plus the plan for the JLCPCB catalog |
 
 ## Adding a note
 

@@ -60,6 +60,8 @@ from kicad_tools.cli.sch_repair_instances import (
     _scan_symbol_children,
 )
 from kicad_tools.cli.sch_wire_common import _collect_schematic_files
+from kicad_tools.sexp import parse_string
+from kicad_tools.sexp.power import is_power_lib_symbol, is_power_symbol, lookup_from_nodes
 
 # Whitespace token for regex: matches one or more tabs or spaces
 _WS = r"[ \t]+"
@@ -76,8 +78,16 @@ _POWER_PREFIX = "#PWR"
 
 
 def _is_power_symbol(sym: dict) -> bool:
-    """Return True if *sym* is a KiCad power/flag symbol."""
-    return str(sym.get("lib_id", "")).startswith("power:")
+    """Return True if *sym* is a KiCad power/flag symbol.
+
+    Uses the shared :func:`kicad_tools.sexp.power.is_power_symbol` with the
+    library ``(power)`` flag precomputed by :func:`_extract_all_symbols` under
+    ``"is_power"`` (#7637), so project-library power symbols and PWR_FLAGs
+    count. A dict without that key falls back to the stock-prefix rule. The
+    reference is deliberately not consulted: this predicate selects the
+    symbols whose ``#`` references are *about to be repaired*.
+    """
+    return is_power_symbol(str(sym.get("lib_id", "")), flagged=sym.get("is_power"))
 
 
 def _is_flag_symbol(sym: dict) -> bool:
@@ -620,6 +630,14 @@ def _extract_all_symbols(text: str, project_name: str) -> list[dict]:
     """
     symbols: list[dict] = []
     ref_pattern = re.compile(r'\(property "Reference" "([^"]+)"')
+    lib_name_pattern = re.compile(r'\(lib_name "([^"]+)"\)')
+    # Read-only parse for the embedded ``lib_symbols`` ``(power)`` flags; the
+    # text itself is still edited in place so formatting is preserved.
+    lib_symbols_node = parse_string(text).get("lib_symbols")
+    lookup = lookup_from_nodes(
+        lib_symbols_node.find_all("symbol") if lib_symbols_node is not None else []
+    )
+    power_by_key: dict[str, bool] = {}
     start_pattern = re.compile(
         r"(?:^|\n)(" + _WS + r")\(symbol\n" + _WS + r'\(lib_id "([^"]+)"\)',
         re.DOTALL,
@@ -662,6 +680,11 @@ def _extract_all_symbols(text: str, project_name: str) -> list[dict]:
 
         prefix, number, unit_suffix = _parse_reference(ref)
 
+        lib_name_match = lib_name_pattern.search(block)
+        key = lib_name_match.group(1) if lib_name_match else lib_id
+        if key not in power_by_key:
+            power_by_key[key] = is_power_lib_symbol(lookup, key)
+
         symbols.append(
             {
                 "reference": ref,
@@ -669,6 +692,7 @@ def _extract_all_symbols(text: str, project_name: str) -> list[dict]:
                 "number": number,
                 "unit_suffix": unit_suffix,
                 "lib_id": lib_id,
+                "is_power": power_by_key[key],
                 "uuid": sym_uuid,
                 "has_project_instance": has_project,
                 "has_wrong_project": has_wrong_project,

@@ -6,7 +6,7 @@ y = 12.638 / 16.890 under plain ``jlcpcb``.  The fixed y = 13..16.8 window
 clipped both tier-1 ends, so the gate measured a coupled In2.Cu run far
 shorter than the one the router laid.  The operator ruled (2026-10-19,
 Q10 = 1) to widen the window *only* for vias inside the ESD / termination
-lands: plain ``jlcpcb`` measures exactly as before (4.100 mm).  The 4.0 mm
+lands: plain ``jlcpcb`` measures exactly as before (4.071 mm).  The 4.0 mm
 coupled bound, the length and skew bounds and the MCU-launch limit are
 unchanged.
 """
@@ -226,7 +226,7 @@ def test_committed_jlcpcb_board_measures_as_before(routing_plan):
     pcb = PCB.load(ROUTED)
     assert routing_plan.usb_common_run_window(pcb) == routing_plan.USB_COMMON_RUN_WINDOW
     geometry = routing_plan.usb_geometry(ROUTED)
-    assert geometry["common_coupled_mm"] == pytest.approx(4.100, abs=0.001)
+    assert geometry["common_coupled_mm"] == pytest.approx(4.071, abs=0.001)
     assert geometry["branch_skew_mm"] == pytest.approx(0.0, abs=0.001)
     assert max(geometry["lengths_mm"].values()) <= 16.0
 

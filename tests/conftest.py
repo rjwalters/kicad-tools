@@ -23,6 +23,14 @@ EXTERNAL_BOARDS_ENV_VAR = "KICAD_TOOLS_EXTERNAL_BOARDS_DIR"
 # ``KCT_NATIVE_MAX_CONCURRENCY`` is set; idempotent with the package import.
 install_from_environment()
 
+# Issue #5240: each test ``kicad-cli pcb drc`` loads only the footprint
+# libraries its board names, not all 155 in the pinned table (~5 CPU-s a
+# launch). Same lookups, same report; see tests/kicad_fp_table_subset.py.
+# KCT_TEST_FULL_FP_LIB_TABLE=1 turns it off.
+from tests.kicad_fp_table_subset import install as _install_fp_table_subset  # noqa: E402
+
+_install_fp_table_subset()
+
 
 @contextmanager
 def preserved_cpp_import_state():
@@ -465,6 +473,8 @@ DRC_CLEAN_PCB = """(kicad_pcb
       (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
     (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64)
       (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "+3.3V"))
+    (model "${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0402_1005Metric.step"
+      (offset (xyz 0 0 0)) (scale (xyz 1 1 1)) (rotate (xyz 0 0 0)))
   )
   (footprint "TestPoint:TestPoint_Pad_1.0x1.0mm"
     (layer "F.Cu")

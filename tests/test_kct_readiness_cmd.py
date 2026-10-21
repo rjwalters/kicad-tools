@@ -1662,3 +1662,41 @@ class TestRequireSavedFillMatchesRefill:
         assert issubclass(FillRefillUnavailable, RuntimeError)
         with pytest.raises(FillRefillUnavailable, match="no kicad-cli"):
             require_saved_fill_matches_refill(pcb, engines=fake)
+
+
+def test_bundled_pcb_never_references_a_kiprjmod_model_missing_from_the_archive(tmp_path):
+    """A ``${KIPRJMOD}`` 3D body travels in kicad_project.zip (Issue #7685)."""
+    from kicad_tools.cli.readiness_cmd import ReadinessOptions
+
+    board = make_board(tmp_path)
+    output = board / "output"
+    pcb = output / PCB_NAME
+    (output / "3dshapes").mkdir()
+    body = output / "3dshapes" / "J2.wrl"
+    body.write_text("#VRML V2.0 utf8\n")
+    pcb.write_text(
+        '(kicad_pcb (footprint "J2" (model "${KIPRJMOD}/3dshapes/J2.wrl")) '
+        '(footprint "R1" (model "${KIPRJMOD}/3dshapes/absent.wrl")))\n'
+    )
+    manufacturing = output / "manufacturing"
+    manufacturing.mkdir()
+    with zipfile.ZipFile(manufacturing / "kicad_project.zip", "w") as zf:
+        zf.writestr(pcb.name, pcb.read_bytes())
+    options = ReadinessOptions(
+        board_dir=board,
+        pcb=pcb,
+        schematic=None,
+        project=None,
+        manufacturer="jlcpcb",
+        mode="pcb_only",
+        output_dir=manufacturing,
+        evidence_dir=output / "readiness",
+    )
+
+    assert any("3dshapes/J2.wrl" in p for p in readiness_cmd._verify_project_provenance(options))
+    readiness_cmd._normalize_project_archive(options)
+
+    assert readiness_cmd._verify_project_provenance(options) == []
+    with zipfile.ZipFile(manufacturing / "kicad_project.zip") as zf:
+        assert zf.read("3dshapes/J2.wrl") == body.read_bytes()
+        assert "3dshapes/absent.wrl" not in zf.namelist()

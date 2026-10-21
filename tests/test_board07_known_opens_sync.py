@@ -1,11 +1,12 @@
-"""Board 07 known-open set must be identical in every CI copy (#7552).
+"""Board 07 carries no known opens in any CI copy (#7552, #7557).
 
-The same net list is spelled out in the ``board-07-end-to-end`` job's three
-gates in ``.github/workflows/ci.yml`` (``--expect-opens``,
-``--known-open-nets``, ``--lvs-known-opens``) and in ``known_opens`` in
-``scripts/ci/local-gate.sh``.  Nothing else ties them together, so a partial
-edit would leave the local gate and CI disagreeing.  This test pins them to
-one set.
+Until #7557 the ``board-07-end-to-end`` job's three gates in
+``.github/workflows/ci.yml`` (``--expect-opens``, ``--known-open-nets``,
+``--lvs-known-opens``) and ``known_opens`` in ``scripts/ci/local-gate.sh``
+spelled out one known-open set, ``{TMDS_D0_N}``.  #7557 moved U4's TMDS balls
+to its J2-facing column and the seed-42 re-route reaches 31/31, so both copies
+graduated to plain LVS-clean gates.  This test keeps them there: a known-open
+flag reappearing in either copy must be a deliberate edit here.
 """
 
 from __future__ import annotations
@@ -17,44 +18,38 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 CI_YML = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 LOCAL_GATE = REPO_ROOT / "scripts" / "ci" / "local-gate.sh"
 
-CI_FLAGS = ("--expect-opens", "--known-open-nets", "--lvs-known-opens")
+KNOWN_OPEN_FLAGS = ("--expect-opens", "--known-open-nets", "--lvs-known-opens")
 
 
 def _board07_job_text() -> str:
     text = CI_YML.read_text()
-    start = text.index("name: Board 07 End-to-End (LVS known opens)")
+    start = text.index("name: Board 07 End-to-End (LVS clean)")
     nxt = re.search(r"^  [A-Za-z0-9_-]+:\s*$", text[start:], re.MULTILINE)
     return text[start : start + nxt.start()] if nxt else text[start:]
 
 
-def _as_set(csv: str) -> set[str]:
-    return {n.strip() for n in csv.split(",") if n.strip()}
-
-
-def _ci_sets() -> dict[str, set[str]]:
-    job = _board07_job_text()
-    found: dict[str, set[str]] = {}
-    for flag in CI_FLAGS:
-        m = re.search(rf'{re.escape(flag)}\s+"([^"]*)"', job)
-        assert m, f"{flag} not found in the board 07 end-to-end job"
-        found[flag] = _as_set(m.group(1))
-    return found
-
-
-def _local_gate_set() -> set[str]:
+def _local_gate_job_text() -> str:
     text = LOCAL_GATE.read_text()
     start = text.index("job_board_07_end_to_end()")
-    m = re.search(r'local known_opens="([^"]*)"', text[start:])
-    assert m, "known_opens not found in job_board_07_end_to_end"
-    return _as_set(m.group(1))
+    end = text.index("\n}\n", start)
+    return text[start:end]
 
 
-def test_board07_known_opens_identical_across_ci_and_local_gate() -> None:
-    sets = {**_ci_sets(), "local-gate.sh known_opens": _local_gate_set()}
-    distinct = {frozenset(v) for v in sets.values()}
-    assert len(distinct) == 1, f"board 07 known-open sets drifted: {sets}"
+def _commands(text: str) -> str:
+    """Drop comment lines so prose that mentions a flag does not count."""
+    return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
 
 
-def test_board07_known_opens_is_sole_tmdsd0n() -> None:
-    # Tighten-only (#7552): widening this set must be a deliberate edit here.
-    assert _local_gate_set() == {"TMDS_D0_N"}
+def test_board07_ci_job_has_no_known_opens() -> None:
+    job = _commands(_board07_job_text())
+    present = [flag for flag in KNOWN_OPEN_FLAGS if flag in job]
+    assert not present, f"board 07 end-to-end job re-grew known-open flags: {present}"
+    assert "--lvs-only" in job
+
+
+def test_board07_local_gate_has_no_known_opens() -> None:
+    job = _commands(_local_gate_job_text())
+    present = [flag for flag in KNOWN_OPEN_FLAGS if flag in job]
+    assert not present, f"local-gate board 07 job re-grew known-open flags: {present}"
+    assert "known_opens" not in job
+    assert "--lvs-only" in job

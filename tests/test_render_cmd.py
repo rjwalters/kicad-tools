@@ -14,6 +14,7 @@ import pytest
 
 from kicad_tools.cli import render_cmd
 from kicad_tools.cli.render_cmd import (
+    COVERAGE_FILE,
     RENDER_OUTPUTS,
     _discover_boards,
     _parse_version,
@@ -146,7 +147,9 @@ class TestOutputPathContract:
         for fname in RENDER_OUTPUTS.values():
             assert (renders / fname).exists(), f"missing {fname}"
         # Exactly the four contracted files, nothing else.
-        assert sorted(p.name for p in renders.iterdir()) == sorted(RENDER_OUTPUTS.values())
+        assert sorted(p.name for p in renders.iterdir()) == sorted(
+            [*RENDER_OUTPUTS.values(), COVERAGE_FILE]
+        )
 
     def test_filenames_are_exactly_the_contract(self):
         assert RENDER_OUTPUTS == {
@@ -484,7 +487,9 @@ class TestFilePathMode:
         renders = tmp_path / "renders"
         for fname in RENDER_OUTPUTS.values():
             assert (renders / fname).exists(), f"missing {fname}"
-        assert sorted(p.name for p in renders.iterdir()) == sorted(RENDER_OUTPUTS.values())
+        assert sorted(p.name for p in renders.iterdir()) == sorted(
+            [*RENDER_OUTPUTS.values(), COVERAGE_FILE]
+        )
         # The exact PCB file passed was rendered (no discovery).
         assert {call[0] for call in fake_kicad["svg"]} == {pcb}
 
@@ -610,6 +615,70 @@ class TestMissingModelDiagnostics:
         assert pcb.read_text() == source
         assert captured.err == ""
 
+    def test_bare_footprints_are_partial_with_a_reason_each(self, tmp_path, fake_kicad, capsys):
+        # Issue #7682: footprints with no (model ...) used to pass with 0 checked.
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(
+            '(kicad_pcb (footprint "R:R" (property "Reference" "R1"))'
+            ' (footprint "R:R" (property "Reference" "R2"))'
+            ' (footprint "MountingHole:MH" (property "Reference" "H1")))'
+        )
+        assert render_main([str(pcb), "--format", "json"]) == 1
+        result = json.loads(capsys.readouterr().out)["boards"][0]
+        check = result["model_check"]
+        assert result["status"] == "partial"
+        assert check["status"] == "failed"
+        assert check["coverage"]["covered"] == 0 and check["coverage"]["total"] == 2
+        assert [m["reference"] for m in check["uncovered_models"]] == ["R1", "R2"]
+        assert all(m["class"] == "no_ref" for m in check["uncovered_models"])
+        assert len([e for e in result["errors"] if "no_ref" in e]) == 2
+
+    def test_allow_incomplete_models_downgrades_to_warning(self, tmp_path, fake_kicad, capsys):
+        # Issue #7689: exploratory runs keep the images and exit 0; coverage
+        # is still reported.
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text('(kicad_pcb (footprint "R:R" (property "Reference" "R1")))')
+        args = [str(pcb), "--allow-incomplete-models", "--format", "json"]
+        assert render_main(args) == 0
+        check = json.loads(capsys.readouterr().out)["boards"][0]["model_check"]
+        assert check["status"] == "allowed_incomplete"
+        assert check["coverage"]["percent"] == 0.0
+
+    def test_exempt_footprints_do_not_fail(self, tmp_path, fake_kicad, capsys):
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text('(kicad_pcb (footprint "MountingHole:MH" (property "Reference" "H1")))')
+        assert render_main([str(pcb), "--format", "json"]) == 0
+        check = json.loads(capsys.readouterr().out)["boards"][0]["model_check"]
+        assert check["status"] == "passed"
+
+    def test_coverage_summary_written_next_to_renders(self, tmp_path, fake_kicad, capsys):
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text('(kicad_pcb (footprint "R:R" (property "Reference" "R1")))')
+        render_main([str(pcb), "--allow-incomplete-models", "--format", "json"])
+        summary = json.loads((tmp_path / "renders" / "model-coverage.json").read_text())
+        assert summary["total"] == 1 and summary["covered"] == 0
+
+    def test_models_flag_selects_audit_environment(self, tmp_path, fake_kicad, monkeypatch, capsys):
+        seen: list[str] = []
+        real = render_cmd.audit_pcb_models
+
+        def spy(pcb_path, *, env, **kwargs):
+            seen.append(env)
+            return real(pcb_path, env="host", **kwargs)
+
+        monkeypatch.setattr(render_cmd, "audit_pcb_models", spy)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text('(kicad_pcb (footprint "MountingHole:MH" (property "Reference" "H1")))')
+        render_main([str(pcb), "--models", "pinned", "--format", "json"])
+        render_main([str(pcb), "--models", "host", "--format", "json"])
+        assert seen == ["pinned", "host"]
+
+    def test_default_models_follow_pinned_sync(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(render_cmd, "resolve_pinned_model_dir", lambda: None)
+        assert render_cmd.default_model_set() == "host"
+        monkeypatch.setattr(render_cmd, "resolve_pinned_model_dir", lambda: tmp_path)
+        assert render_cmd.default_model_set() == "pinned"
+
     def test_text_names_component_and_model(self, tmp_path, fake_kicad, capsys):
         pcb = tmp_path / "board.kicad_pcb"
         pcb.write_text(
@@ -696,3 +765,29 @@ class TestMissingModelDiagnostics:
         missing = runner.inspect_pcb_models(pcb)["unresolved_models"]
         assert missing[0]["reason"] == "model file not found"
         assert missing[0]["resolved_path"] == str(tmp_path / "absent/part.step")
+
+
+class TestBoardMetricsCoverage:
+    def test_model_coverage_attached_from_render_summary(self, tmp_path):
+        # Issue #7689: board.json carries the coverage `kct render` recorded.
+        from kicad_tools.cli.board_metrics_cmd import _attach_render_paths
+
+        (tmp_path / "renders").mkdir()
+        (tmp_path / "renders" / "model-coverage.json").write_text(
+            json.dumps({"env": "pinned", "covered": 3, "total": 4, "percent": 75.0, "counts": {}})
+        )
+        metrics: dict = {}
+        _attach_render_paths(metrics, tmp_path)
+        assert metrics["model_coverage"] == {
+            "env": "pinned",
+            "covered": 3,
+            "total": 4,
+            "percent": 75.0,
+        }
+
+    def test_no_summary_means_no_field(self, tmp_path):
+        from kicad_tools.cli.board_metrics_cmd import _attach_render_paths
+
+        metrics: dict = {}
+        _attach_render_paths(metrics, tmp_path)
+        assert "model_coverage" not in metrics

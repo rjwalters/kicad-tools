@@ -109,15 +109,16 @@ def _board_03_checker(with_map, usb_width=None):
 @pytest.mark.skipif(not BOARD_03.exists(), reason="board 03 artifact missing")
 @pytest.mark.parametrize("with_map", [False, True])
 def test_checker_judges_board_03_usb_pair_on_both_branches(with_map):
-    # Since #7324 board 03's In2.Cu USB pair is 0.22 mm with a declared 90 ohm
-    # target (~89 ohm), i.e. in band: judged (not unmeasured) with no findings.
+    # Board 03's In2.Cu USB pair is 0.20 mm at a 0.15 mm gap (the #7713 arm C
+    # re-derive; #7324 had hand-narrowed it to 0.22 mm) with a declared 90 ohm
+    # target, i.e. in band: judged (not unmeasured) with no findings.
     checker = _board_03_checker(with_map)
     assert checker.check_impedance().violations == []
     assert checker.impedance_unmeasured_pairs == []
 
     # Off-target witness so the in-band result is not vacuous: the same board
     # with a much wider pair must be judged and flagged on both branches.
-    off = _board_03_checker(with_map, usb_width=0.40)
+    off = _board_03_checker(with_map, usb_width=0.12)
     found = off.check_impedance().violations
     assert {i for v in found for i in v.items} == {"USB_D+", "USB_D-"}
     assert {v.severity for v in found} == {"warning"}

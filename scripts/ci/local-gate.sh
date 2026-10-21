@@ -63,12 +63,14 @@ cd "$REPO_ROOT"
 # Order matches ci.yml declaration order.
 # ---------------------------------------------------------------------------
 CHEAP_JOBS=(
+  site
   lint
   typecheck
   test
   cpp-build-check
   kicad-cli-smoke
   routed-pcb-drc-check
+  model-coverage-report
 )
 
 LONG_JOBS=(
@@ -87,9 +89,11 @@ LONG_JOBS=(
 
 # Advisory in CI: these jobs run on every PR but their failure does not
 # block the merge button (see the branch-protection notes at ci.yml's
-# diffpair-routing-regression / matchgroup-routing-regression jobs).
+# diffpair-routing-regression / matchgroup-routing-regression jobs; the
+# model-coverage-report job is `continue-on-error`, issue #7682).
 # Mirrored here: they report FAIL but never flip the gate's exit code.
 ADVISORY_JOBS=(
+  model-coverage-report
   diffpair-routing-regression
   matchgroup-routing-regression
 )
@@ -111,6 +115,17 @@ SKIP_RC=75
 # Commands mirror the corresponding ci.yml job's run steps (checkout /
 # uv-install / container boilerplate excluded).
 # ---------------------------------------------------------------------------
+
+job_site() {
+  # Mirrors ci.yml's `site` job (Issue #7665). SKIP, never a silent PASS,
+  # when node tooling is absent.
+  command -v npm >/dev/null 2>&1 || { echo "npm not found; skipping site job" >&2; return "$SKIP_RC"; }
+  npm --prefix site ci --no-audit --no-fund
+  npm --prefix site test
+  npm --prefix site run check
+  npm --prefix site run build
+  npm --prefix site run check-links
+}
 
 job_lint() {
   uv run ruff format . --check
@@ -204,6 +219,15 @@ job_routed_pcb_drc_check() {
   echo "Modified routed PCBs:"
   printf '  %s\n' "${files[@]}"
   uv run python scripts/ci/check_routed_drc.py "${files[@]}"
+}
+
+# Issue #7682: a REPORT, never a gate (`continue-on-error` in CI, advisory
+# here).  Writes the fleet 3D model coverage JSON to a scratch path so a local
+# run never leaves a file in the tree.
+job_model_coverage_report() {
+  local out
+  out="$(mktemp -t model-coverage-XXXXXX).json"
+  uv run python scripts/ci/model_coverage_report.py -o "$out"
 }
 
 job_diffpair_routing_regression() {
@@ -376,9 +400,8 @@ job_board_06_end_to_end() {
 }
 
 job_board_07_end_to_end() {
-  # Sole known open: TMDS_D0_N (#7557, measured in #7554, under epic
-  # #3438); must match ci.yml.
-  local known_opens="TMDS_D0_N"
+  # No known opens since #7557 (all 31 signal nets route); must match
+  # ci.yml's board-07-end-to-end job.
   uv run kct build-native
   rm -rf /tmp/board07-ci
   mkdir -p /tmp/board07-ci
@@ -392,7 +415,6 @@ job_board_07_end_to_end() {
     /tmp/board07-ci/matchgroup_test_routed.kicad_pcb \
     > /tmp/board07-copper.json
   uv run python scripts/ci/check_copper_lvs.py \
-    --expect-opens "$known_opens" \
     /tmp/board07-copper.json
   _check_drc_over_committed_path \
     /tmp/board07-ci/matchgroup_test_routed.kicad_pcb \
@@ -402,11 +424,10 @@ job_board_07_end_to_end() {
   cp -r /tmp/board07-ci/. /tmp/board07-staging/07-matchgroup-test/output/
   uv run kct board-metrics /tmp/board07-staging/07-matchgroup-test
   uv run python scripts/ci/check_net_status.py \
-    --known-open-nets "$known_opens" \
     /tmp/board07-ci/matchgroup_test_routed.kicad_pcb
   uv run python scripts/ci/check_board_00_e2e.py \
     --stem matchgroup_test \
-    --lvs-known-opens "$known_opens" \
+    --lvs-only \
     /tmp/board07-staging/07-matchgroup-test
 }
 

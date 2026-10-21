@@ -341,11 +341,14 @@ EOF
 # never invoked with `-k`) and, only when $4 (<kickstart_new_pid>) is given,
 # overwrites the state file with it — simulating a kickstart-triggered
 # relaunch; when $4 is omitted, `kickstart` is a no-op (a kickstart that also
-# fails to bring the job up).
+# fails to bring the job up). Optional $5 (<on_call>, #12776): the 1-based
+# kickstart call that is the first to move the pid (default 1), so a test can
+# make the fallback kickstart fail and the kickstart after a restore succeed.
 write_fake_launchd_pid_bin() {
-    local bin_dir="$1" log="$2" state_file="$3" kickstart_new_pid="${4:-}"
+    local bin_dir="$1" log="$2" state_file="$3" kickstart_new_pid="${4:-}" on_call="${5:-1}"
     mkdir -p "$bin_dir"
     : > "$log"
+    : > "${state_file}.ks"
     cat > "$bin_dir/launchctl" <<EOF
 #!/usr/bin/env bash
 echo "\$*" >> "${log}"
@@ -361,7 +364,8 @@ case "\${1:-}" in
     echo "	last exit status = 0"
     exit 0 ;;
   kickstart)
-    if [[ -n "${kickstart_new_pid}" ]]; then
+    echo x >> "${state_file}.ks"
+    if [[ -n "${kickstart_new_pid}" && "\$(wc -l < "${state_file}.ks")" -ge ${on_call} ]]; then
       echo "${kickstart_new_pid}" > "${state_file}"
     fi
     exit 0 ;;
@@ -2509,7 +2513,20 @@ out36=$( cd "$W36" && PATH="$LD_BIN36:$TEST_PATH" LOOM_DAEMON_LAUNCHD=1 \
     bash "$UPDATE_SCRIPT" 2>&1 )
 rc27=$?
 kill "$OLD_PID27" 2>/dev/null || true
-assert_eq "7" "$rc27" "no relaunch even after kickstart -> exit 7 (never a silent half-update, #4232 case c)"
+# #12776: the candidate was published over a live binary, so the failed start
+# is now followed by ONE restore + ONE restart. Neither moves the pid here, so
+# the outcome is exit 10 (restore failed), not the old bare exit 7.
+assert_eq "10" "$rc27" "no relaunch even after kickstart, and the restored binary does not come up either -> exit 10 (#12776)"
+assert_eq "2" "$(wc -l < "$STATE36.ks" | tr -d ' ')" "exactly one restore restart: the fallback kickstart plus one more, never a loop (#12776)"
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -qi 'deadbee' <<<"$("$INSTALLED36" --version)" && [[ -e "$INSTALLED36.previous" ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} exit 10 leaves the previous binary at the destination and keeps <dest>.previous"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} exit 10 leaves the previous binary at the destination and keeps <dest>.previous"
+    echo "  output: $out36"
+fi
 TESTS_RUN=$((TESTS_RUN + 1))
 if grep -qi 'FAILED' <<<"$out36" && grep -qi 'kickstart' <<<"$out36"; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
@@ -2535,6 +2552,97 @@ if grep -q -- '-k' "$W36/launchctl.log" 2>/dev/null; then
 else
     TESTS_PASSED=$((TESTS_PASSED + 1))
     echo -e "${GREEN}✓${NC} exhausted kickstart fallback was still never invoked with -k"
+fi
+
+# ============================================================
+# 36b. #12776: the candidate never starts, the restore puts the previous binary
+#      back, and the ONE restart onto it works -> exit 9 (the update did NOT
+#      take: never 0), dest holds the previous bytes, <dest>.previous is kept.
+#      The fallback kickstart (call 1) is a no-op; the post-restore kickstart
+#      (call 2) moves the pid.
+# ============================================================
+W36B="$BASE_WORKDIR/w36b"
+new_fixture "$W36B"
+INSTALLED36B="$W36B/installed/loom-daemon"
+mkdir -p "$W36B/installed"
+RESTART_MARKER36B="$W36B/restart-invoked"
+write_fake_daemon_restart "$INSTALLED36B" "deadbee" "$RESTART_MARKER36B" 0
+NEW_FAKE36B="$W36B/new-fake-daemon"
+HEAD36B="$(cd "$W36B" && git rev-parse --short HEAD)"
+write_fake_daemon_restart "$NEW_FAKE36B" "$HEAD36B" "$RESTART_MARKER36B" 0
+sleep 60 >/dev/null 2>&1 &
+OLD_PID36B=$!
+bg_proc_track "$OLD_PID36B"
+sleep 60 >/dev/null 2>&1 &
+RESTORED_PID36B=$!
+bg_proc_track "$RESTORED_PID36B"
+STATE36B="$W36B/launchd-pid-state"
+echo "$OLD_PID36B" > "$STATE36B"
+LD_BIN36B="$W36B/launchd-bin"
+write_fake_launchd_pid_bin "$LD_BIN36B" "$W36B/launchctl.log" "$STATE36B" "$RESTORED_PID36B" 2
+out36b=$( cd "$W36B" && PATH="$LD_BIN36B:$TEST_PATH" LOOM_DAEMON_LAUNCHD=1 \
+    LOOM_DAEMON_BIN="$INSTALLED36B" NEW_FAKE_BIN_SRC="$NEW_FAKE36B" \
+    LOOM_DAEMON_RESTART_POLL_SECS=1 LOOM_DAEMON_RESTART_POLL_INTERVAL=0.2 \
+    LOOM_DAEMON_RESTART_KICKSTART_POLL_SECS=1 \
+    bash "$UPDATE_SCRIPT" 2>&1 )
+rc36b=$?
+kill "$OLD_PID36B" "$RESTORED_PID36B" 2>/dev/null || true
+assert_eq "9" "$rc36b" "candidate never starts, restored binary does -> exit 9, not 0 (#12776)"
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -qi 'deadbee' <<<"$("$INSTALLED36B" --version)" \
+    && grep -qi 'deadbee' <<<"$("$INSTALLED36B.previous" --version)" \
+    && grep -q 'UPDATE FAILED' <<<"$out36b"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} exit 9: dest holds the previous bytes, <dest>.previous is kept, output says the update failed"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} exit 9: dest holds the previous bytes, <dest>.previous is kept, output says the update failed"
+    echo "  output: $out36b"
+fi
+
+# ============================================================
+# 36c. #12776: the retained backup is corrupt when the restore would run ->
+#      the restore REFUSES (no destructive guess): exit 7 unchanged, a line
+#      naming the failed precondition, dest still the candidate, the corrupt
+#      file untouched. The corruption is injected by the candidate's own
+#      `restart` handler, i.e. after the install and before the failed start.
+# ============================================================
+W36C="$BASE_WORKDIR/w36c"
+new_fixture "$W36C"
+INSTALLED36C="$W36C/installed/loom-daemon"
+mkdir -p "$W36C/installed"
+RESTART_MARKER36C="$W36C/restart-invoked"
+write_fake_daemon_restart "$INSTALLED36C" "deadbee" "$RESTART_MARKER36C" 0
+NEW_FAKE36C="$W36C/new-fake-daemon"
+HEAD36C="$(cd "$W36C" && git rev-parse --short HEAD)"
+write_fake_daemon_restart "$NEW_FAKE36C" "$HEAD36C" "$RESTART_MARKER36C" 0
+sed "s|^    echo \"restart\" >> |    printf corrupt > \"${INSTALLED36C}.previous\"\n&|" "$NEW_FAKE36C" > "$NEW_FAKE36C.tmp" \
+    && mv "$NEW_FAKE36C.tmp" "$NEW_FAKE36C" && chmod +x "$NEW_FAKE36C"
+sleep 60 >/dev/null 2>&1 &
+OLD_PID36C=$!
+bg_proc_track "$OLD_PID36C"
+STATE36C="$W36C/launchd-pid-state"
+echo "$OLD_PID36C" > "$STATE36C"
+LD_BIN36C="$W36C/launchd-bin"
+write_fake_launchd_pid_bin "$LD_BIN36C" "$W36C/launchctl.log" "$STATE36C"
+out36c=$( cd "$W36C" && PATH="$LD_BIN36C:$TEST_PATH" LOOM_DAEMON_LAUNCHD=1 \
+    LOOM_DAEMON_BIN="$INSTALLED36C" NEW_FAKE_BIN_SRC="$NEW_FAKE36C" \
+    LOOM_DAEMON_RESTART_POLL_SECS=1 LOOM_DAEMON_RESTART_POLL_INTERVAL=0.2 \
+    LOOM_DAEMON_RESTART_KICKSTART_POLL_SECS=1 \
+    bash "$UPDATE_SCRIPT" 2>&1 )
+rc36c=$?
+kill "$OLD_PID36C" 2>/dev/null || true
+assert_eq "7" "$rc36c" "corrupt <dest>.previous -> restore refused, exit 7 unchanged (#12776)"
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -q 'Not restoring the previous binary' <<<"$out36c" \
+    && grep -qi "$HEAD36C" <<<"$("$INSTALLED36C" --version)" \
+    && [[ "$(cat "$INSTALLED36C.previous")" == "corrupt" ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} refused restore names the precondition and writes nothing"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} refused restore names the precondition and writes nothing"
+    echo "  output: $out36c"
 fi
 
 # ============================================================
@@ -3096,7 +3204,8 @@ out55=$( cd "$W55" && PATH="$SD_BIN55:$TEST_PATH" LOOM_SYSTEMD_FORCE=1 LOOM_DAEM
     LOOM_DAEMON_RESTART_KICKSTART_POLL_SECS=1 \
     bash "$UPDATE_SCRIPT" 2>&1 )
 rc55=$?
-assert_eq "7" "$rc55" "no relaunch even after reset-failed+start -> exit 7 (never a silent half-update, #4950 case c)"
+# #12776: the published candidate is restored once; the restored binary does not come up either -> 10.
+assert_eq "10" "$rc55" "no relaunch even after reset-failed+start, restored binary also down -> exit 10 (was 7 before #12776, #4950 case c)"
 TESTS_RUN=$((TESTS_RUN + 1))
 if grep -qi 'FAILED' <<<"$out55" && grep -qi 'reset-failed' <<<"$out55"; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
@@ -3161,7 +3270,7 @@ out56=$( cd "$W56" && PATH="$SD_BIN56:$TEST_PATH" LOOM_SYSTEMD_FORCE=1 LOOM_DAEM
     LOOM_DAEMON_STOP_SETTLE_SECS=1 LOOM_DAEMON_RESTART_KICKSTART_POLL_SECS=1 \
     bash "$UPDATE_SCRIPT" 2>&1 )
 rc56=$?
-assert_eq "7" "$rc56" "transitional stall never recovers -> exit 7 after attempted self-heal (#5119)"
+assert_eq "10" "$rc56" "transitional stall never recovers, restored binary also down -> exit 10 after attempted self-heal (was 7 before #12776, #5119)"
 TESTS_RUN=$((TESTS_RUN + 1))
 if grep -q -- 'reset-failed' "$SD_LOG56" 2>/dev/null; then
     TESTS_PASSED=$((TESTS_PASSED + 1))

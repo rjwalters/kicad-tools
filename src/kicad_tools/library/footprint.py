@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Literal
 
 from kicad_tools.core.version import KICAD_BOARD_FORMAT_VERSION
+from kicad_tools.sexp import quote_string, write_text_exact
 from kicad_tools.utils import ensure_parent_dir
 
 
@@ -30,14 +31,14 @@ class Pad:
 
     def to_sexp(self) -> str:
         """Convert to KiCad S-expression format."""
-        lines = [f'\t(pad "{self.name}" {self.pad_type} {self.shape}']
+        lines = [f"\t(pad {quote_string(self.name)} {self.pad_type} {self.shape}"]
         lines.append(f"\t\t(at {_fmt(self.x)} {_fmt(self.y)})")
         lines.append(f"\t\t(size {_fmt(self.width)} {_fmt(self.height)})")
 
         if self.drill is not None:
             lines.append(f"\t\t(drill {_fmt(self.drill)})")
 
-        layers_str = " ".join(f'"{layer}"' for layer in self.layers)
+        layers_str = " ".join(quote_string(layer) for layer in self.layers)
         lines.append(f"\t\t(layers {layers_str})")
 
         if self.shape == "roundrect":
@@ -67,7 +68,7 @@ class GraphicLine:
 \t\t\t(width {self.width})
 \t\t\t(type solid)
 \t\t)
-\t\t(layer "{self.layer}")
+\t\t(layer {quote_string(self.layer)})
 \t)"""
 
 
@@ -94,7 +95,7 @@ class GraphicRect:
 \t\t\t(type solid)
 \t\t)
 \t\t(fill {fill_str})
-\t\t(layer "{self.layer}")
+\t\t(layer {quote_string(self.layer)})
 \t)"""
 
 
@@ -121,7 +122,7 @@ class GraphicCircle:
 \t\t\t(type solid)
 \t\t)
 \t\t(fill {fill_str})
-\t\t(layer "{self.layer}")
+\t\t(layer {quote_string(self.layer)})
 \t)"""
 
 
@@ -148,7 +149,7 @@ class GraphicArc:
 \t\t\t(width {self.width})
 \t\t\t(type solid)
 \t\t)
-\t\t(layer "{self.layer}")
+\t\t(layer {quote_string(self.layer)})
 \t)"""
 
 
@@ -168,9 +169,9 @@ class GraphicText:
     def to_sexp(self) -> str:
         """Convert to KiCad S-expression format."""
         hide_str = " hide" if self.hide else ""
-        return f"""\t(fp_text {self.text_type} "{self.text}"
+        return f"""\t(fp_text {self.text_type} {quote_string(self.text)}
 \t\t(at {_fmt(self.x)} {_fmt(self.y)})
-\t\t(layer "{self.layer}"{hide_str})
+\t\t(layer {quote_string(self.layer)}{hide_str})
 \t\t(effects
 \t\t\t(font
 \t\t\t\t(size {self.font_size} {self.font_size})
@@ -318,17 +319,17 @@ class Footprint:
 
     def to_sexp(self) -> str:
         """Convert footprint to KiCad S-expression format."""
-        lines = [f'(footprint "{self.name}"']
+        lines = [f"(footprint {quote_string(self.name)}"]
         lines.append(f"\t(version {KICAD_BOARD_FORMAT_VERSION})")
         lines.append('\t(generator "kicad_tools")')
         lines.append('\t(layer "F.Cu")')
 
         if self.description:
-            lines.append(f'\t(descr "{self.description}")')
+            lines.append(f"\t(descr {quote_string(self.description)})")
 
         if self.tags:
             tags_str = " ".join(self.tags)
-            lines.append(f'\t(tags "{tags_str}")')
+            lines.append(f"\t(tags {quote_string(tags_str)})")
 
         # Reference and Value properties (always present)
         ref_y = self._get_ref_position()
@@ -343,7 +344,7 @@ class Footprint:
         lines.append("\t\t)")
         lines.append("\t)")
 
-        lines.append(f'\t(property "Value" "{self.name}"')
+        lines.append(f'\t(property "Value" {quote_string(self.name)}')
         lines.append(f"\t\t(at 0 {_fmt(-ref_y)} 0)")
         lines.append('\t\t(layer "F.Fab")')
         lines.append("\t\t(effects")
@@ -379,7 +380,7 @@ class Footprint:
     def save(self, filepath: str | Path) -> None:
         """Save footprint to a .kicad_mod file."""
         filepath = Path(filepath)
-        ensure_parent_dir(filepath).write_text(self.to_sexp())
+        write_text_exact(ensure_parent_dir(filepath), self.to_sexp())
 
 
 def _fmt(val: float) -> str:

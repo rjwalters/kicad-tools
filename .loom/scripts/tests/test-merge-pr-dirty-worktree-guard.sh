@@ -91,59 +91,22 @@ assert_grep() {
 # --- Test 1: source retains the #5031 dirty-worktree guard ---
 echo "Test 1: merge-pr.sh source retains the #5031 dirty-worktree data-loss guard"
 
-assert_grep 'data-loss guard, #5031' "$MERGE_PR" \
-    "_remove_loom_worktree warns with the #5031 data-loss-guard message"
-assert_grep 'git -C "\$worktree_path" status --porcelain' "$MERGE_PR" \
-    "_remove_loom_worktree inspects the worktree's porcelain status before removal"
-assert_grep 'Refusing to remove worktree at \$worktree_path' "$MERGE_PR" \
-    "_remove_loom_worktree refuses removal when uncommitted changes are present"
-# The refusal must sit BEFORE the actual removal, not after.
-retired "the line-order check against the literal 'git -C \"\$REPO_ROOT\" worktree remove \"\$worktree_path\" --force' call" \
-    "the dirty-worktree refusal precedes the force-remove" \
-    "the #8191 worktree-teardown slice moved the force-remove into loom-daemon (src/merge_pr/worktree_teardown.rs), so that literal no longer exists in merge-pr.sh and its grep finds nothing" \
-    "the same ordering check, re-anchored on the call that now performs the removal ('_mp_worktree worktree-teardown', immediately below), plus Tests 2-4 below (dirty worktrees refused and surviving, behavioural, unchanged)"
-guard_line="$(grep -n 'Refusing to remove worktree at \$worktree_path' "$MERGE_PR" | head -1 | cut -d: -f1 || true)"
-remove_line="$(grep -n '_mp_worktree worktree-teardown' "$MERGE_PR" | head -1 | cut -d: -f1 || true)"
-if [[ -n "$guard_line" && -n "$remove_line" && "$guard_line" -lt "$remove_line" ]]; then
-    pass "the dirty-worktree refusal precedes the force-remove call (merge-pr worktree-teardown)"
-else
-    fail "guard must precede force-remove (guard@$guard_line remove@$remove_line)"
-fi
+RUST_DIR="$(cd "$SCRIPTS_DIR/../.." && pwd)/loom-daemon/src/merge_pr"
+retired "the three greps over _remove_loom_worktree's source (#5031 message, 'git -C \$worktree_path status --porcelain', 'Refusing to remove worktree at \$worktree_path') and the guard-line < remove-line ordering check" \
+    "the dirty-worktree refusal exists, reads git's porcelain status, and precedes the force-remove" \
+    "#8191 orchestrator slice 1 moved _remove_loom_worktree into loom-daemon (merge_pr/post_merge_cleanup.rs, in-process), so merge-pr.sh no longer contains those lines and no grep of it can pass; ordering is now code order in one Rust function, not text order in a 600-line shell block" \
+    "Tests 2-9 below (REAL verb, real git repos: dirty worktrees refused and surviving; the guard's message names the branch and the files), post_merge_cleanup/tests.rs::uncommitted_work_refuses_the_removal_and_names_the_remediation (teardown and ledger never called when dirty; the branch delete still runs) and ::loom_runtime_markers_alone_do_not_block_removal, and the grep below that pins where the git status read lives"
+assert_grep 'git_stdout\(&\["-C", path, "status", "--porcelain"\]\)' "$RUST_DIR/post_merge_cleanup.rs" \
+    "the orchestrator inspects the worktree's porcelain status before removal"
+assert_grep 'dirty_guard::assess' "$RUST_DIR/post_merge_cleanup.rs" \
+    "the orchestrator refuses removal through the #5031 dirty_guard::assess decision"
 # Cross-reference note so triage doesn't re-conflate #5031 / #4463 / #4146.
-assert_grep '#4463' "$MERGE_PR" "source documents the distinction from #4463 (same-host lock ownership)"
-assert_grep '#4146' "$MERGE_PR" "source documents the interaction with #4146 (cross-host collision measurement)"
+assert_grep '#4463' "$RUST_DIR/post_merge_cleanup.rs" "source documents the distinction from #4463 (same-host lock ownership)"
+assert_grep '#4146' "$RUST_DIR/post_merge_cleanup.rs" "source documents the interaction with #4146 (cross-host collision measurement)"
 
-# --- Extract the ACTUAL function bodies from the live source (no drift) ---
-extract_fn() {
-    local name="$1" file="$2"
-    awk -v fn="$name" '
-      $0 ~ "^"fn"\\(\\) \\{" { grab=1 }
-      grab { print }
-      grab && /^}/ { exit }
-    ' "$file"
-}
-
-# Harness: stub the logging helpers and REPO_ROOT, then eval the real bodies.
-info()    { echo "INFO: $*"; }
-warning() { echo "WARN: $*"; }
-success() { echo "OK: $*"; }
-error()   { echo "ERROR: $*" >&2; return 1; }
-
-# #8191 slice: the porcelain lookups below shell out through _mp_worktree, so it
-# is extracted with them — without it they die with "_mp_worktree: command not
-# found" under `set -e`.
-eval "$(extract_fn _mp_worktree           "$MERGE_PR")"
-eval "$(extract_fn _primary_worktree_path "$MERGE_PR")"
-eval "$(extract_fn _worktree_branch_for   "$MERGE_PR")"
-# #7812: _maybe_delete_local_branch's `-d` -> `-D` safety check is now the
-# shared `branch_landed` primitive — a real library, so it is SOURCED here
-# rather than extracted. Offline: these cases exercise merge-pr.sh's local
-# branch logic, not the forge rung, and the suite must stay hermetic.
-export LOOM_BRANCH_LANDED_OFFLINE=1
-# shellcheck source=../lib/branch-landed.sh
-source "$(dirname "$MERGE_PR")/lib/branch-landed.sh"
-eval "$(extract_fn _maybe_delete_local_branch "$MERGE_PR")"
-eval "$(extract_fn _remove_loom_worktree  "$MERGE_PR")"
+# shellcheck source=lib/post-merge-cleanup-harness.sh
+source "$SCRIPT_DIR/lib/post-merge-cleanup-harness.sh"
+pmc_load "$MERGE_PR"
 
 # --- Build a real git repo with a secondary Loom-managed worktree ---
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/loom-merge-dirty-guard.XXXXXX")"
@@ -164,10 +127,13 @@ git -C "$PRIMARY" branch -M main
 # shellcheck disable=SC2034
 REPO_ROOT="$PRIMARY"
 
-# Helper: create a fresh secondary Loom-managed worktree on feature/issue-N.
+# Helper: create a fresh Loom-managed worktree at the CONVENTION path
+# (<repo>/.loom/worktrees/issue-N) on feature/issue-N — where post-merge
+# cleanup looks for it (N must be numeric: the strict feature/issue-<N> rule).
 make_worktree() { # <name> -> echoes the worktree path
     local name="$1"
-    local wt="$TMP_ROOT/wt-$name"
+    local wt="$PRIMARY/.loom/worktrees/issue-$name"
+    mkdir -p "$PRIMARY/.loom/worktrees"
     git -C "$PRIMARY" worktree add -q -b "feature/issue-$name" "$wt" >/dev/null 2>&1
     touch "$wt/.loom-managed"   # the sentinel worktree.sh drops
     echo "$wt"
@@ -177,12 +143,12 @@ make_worktree() { # <name> -> echoes the worktree path
 echo ""
 echo "Test 2: dirty worktree with an uncommitted tracked change is NOT removed"
 
-WT_A="$(make_worktree 5001a)"
+WT_A="$(make_worktree 500101)"
 # Simulate the live sibling builder mid-edit: modify a tracked file, no commit.
 echo "in-flight edit that must not be lost" >> "$WT_A/README.md"
 
 set +e
-out_a="$(_remove_loom_worktree "$WT_A" 2>&1)"
+out_a="$(pmc_run_issue "${WT_A##*issue-}" 2>&1)"
 rc_a=$?
 set -e
 
@@ -198,7 +164,7 @@ else
 fi
 
 # The warning should name the colliding branch so the message is actionable.
-if [[ "$out_a" == *"feature/issue-5001a"* ]]; then
+if [[ "$out_a" == *"feature/issue-500101"* ]]; then
     pass "(a) refusal warning names the colliding branch"
 else
     fail "(a) refusal warning should name the branch; out: $out_a"
@@ -208,11 +174,11 @@ fi
 echo ""
 echo "Test 3: dirty worktree with a new untracked source file is NOT removed"
 
-WT_B="$(make_worktree 5001b)"
+WT_B="$(make_worktree 500102)"
 echo "brand new uncommitted module" > "$WT_B/new_module.py"
 
 set +e
-out_b="$(_remove_loom_worktree "$WT_B" 2>&1)"
+out_b="$(pmc_run_issue "${WT_B##*issue-}" 2>&1)"
 rc_b=$?
 set -e
 
@@ -229,10 +195,10 @@ fi
 echo ""
 echo "Test 4: control — a clean Loom-managed worktree is still removed"
 
-WT_C="$(make_worktree 5001c)"   # only the untracked .loom-managed marker
+WT_C="$(make_worktree 500103)"   # only the untracked .loom-managed marker
 
 set +e
-out_c="$(_remove_loom_worktree "$WT_C" 2>&1)"
+out_c="$(pmc_run_issue "${WT_C##*issue-}" 2>&1)"
 rc_c=$?
 set -e
 
@@ -249,14 +215,14 @@ fi
 echo ""
 echo "Test 5: worktree dirtied ONLY by Loom's own runtime markers is still removed"
 
-WT_D="$(make_worktree 5001d)"
+WT_D="$(make_worktree 500104)"
 # Drop the full spread of Loom runtime markers — none represent user work.
 touch "$WT_D/.loom-in-use" "$WT_D/.loom-checkpoint" "$WT_D/.no-changes-needed"
 mkdir -p "$WT_D/.snapshots"
-echo "patch" > "$WT_D/.snapshots/issue-5001d-123.patch"
+echo "patch" > "$WT_D/.snapshots/issue-500104-123.patch"
 
 set +e
-out_d="$(_remove_loom_worktree "$WT_D" 2>&1)"
+out_d="$(pmc_run_issue "${WT_D##*issue-}" 2>&1)"
 rc_d=$?
 set -e
 
@@ -274,12 +240,12 @@ fi
 echo ""
 echo "Test 6: dirty worktree whose ONLY dirt is a lockfile-style artifact is refused, but without the cross-host-dispatch hypothesis"
 
-WT_E="$(make_worktree 5658a)"
+WT_E="$(make_worktree 565801)"
 echo "regenerated-by-routine-install" >"$WT_E/some-lib-lock.json"
 git -C "$WT_E" add some-lib-lock.json >/dev/null 2>&1 || true
 
 set +e
-out_e="$(_remove_loom_worktree "$WT_E" 2>&1)"
+out_e="$(pmc_run_issue "${WT_E##*issue-}" 2>&1)"
 rc_e=$?
 set -e
 
@@ -299,11 +265,11 @@ fi
 echo ""
 echo "Test 7: dirty worktree with a tracked source-file change is refused, names the file, and still offers the cross-host-dispatch hypothesis"
 
-WT_F="$(make_worktree 5658b)"
+WT_F="$(make_worktree 565802)"
 echo "real in-flight edit" >>"$WT_F/README.md"
 
 set +e
-out_f="$(_remove_loom_worktree "$WT_F" 2>&1)"
+out_f="$(pmc_run_issue "${WT_F##*issue-}" 2>&1)"
 rc_f=$?
 set -e
 
@@ -322,11 +288,11 @@ fi
 echo ""
 echo "Test 8: dirty worktree with an untracked non-artifact file is refused, names the file, and still offers the cross-host-dispatch hypothesis"
 
-WT_G="$(make_worktree 5658c)"
+WT_G="$(make_worktree 565803)"
 echo "brand new uncommitted module" >"$WT_G/new_module.py"
 
 set +e
-out_g="$(_remove_loom_worktree "$WT_G" 2>&1)"
+out_g="$(pmc_run_issue "${WT_G##*issue-}" 2>&1)"
 rc_g=$?
 set -e
 
@@ -345,12 +311,12 @@ fi
 echo ""
 echo "Test 9: mixed dirt (lockfile artifact + real source edit) still offers the cross-host-dispatch hypothesis"
 
-WT_H="$(make_worktree 5658d)"
+WT_H="$(make_worktree 565804)"
 echo "regenerated-by-routine-install" >"$WT_H/package-lock.json"
 echo "real in-flight edit" >>"$WT_H/README.md"
 
 set +e
-out_h="$(_remove_loom_worktree "$WT_H" 2>&1)"
+out_h="$(pmc_run_issue "${WT_H##*issue-}" 2>&1)"
 rc_h=$?
 set -e
 
@@ -365,7 +331,7 @@ else
     fail "(h) expected refuse+name-files+hypothesis for mixed dirt; rc=$rc_h, out: $out_h"
 fi
 
-# --- Test 10 (i/j): the guard FAILS CLOSED when it cannot run at all (#8191) ---
+# --- Test 10 (i/j): cleanup FAILS CLOSED when the verb cannot run at all (#8191) ---
 #
 # The three decisions above are now `loom-daemon merge-pr dirty-guard`, so this
 # path has a new failure mode the shell implementation could not have: the verb
@@ -379,16 +345,15 @@ echo ""
 echo "Test 10: a dirty-guard that cannot answer refuses the force-remove (fail-closed), even on a CLEAN worktree"
 
 # (i) the binary does not exist at all — an un-rolled host, the #8285 case.
-WT_I="$(make_worktree 8191a)"   # clean: only the untracked .loom-managed marker
+WT_I="$(make_worktree 819101)"   # clean: only the untracked .loom-managed marker
 
 set +e
-out_i="$(LOOM_DAEMON_BIN="$TMP_ROOT/no-such-loom-daemon" _remove_loom_worktree "$WT_I" 2>&1)"
+out_i="$(LOOM_DAEMON_SELF_BIN="$TMP_ROOT/no-such-loom-daemon" pmc_run_issue "${WT_I##*issue-}" 2>&1)"
 rc_i=$?
 set -e
 
 if [[ $rc_i -eq 0 ]] \
-    && [[ "$out_i" == *"Refusing to remove worktree"* ]] \
-    && [[ "$out_i" == *"could not run"* ]] \
+    && [[ "$out_i" == *"did not run"* ]] \
     && [[ "$out_i" != *"Removing worktree"* ]] \
     && [[ -d "$WT_I" ]]; then
     pass "(i) an unresolvable loom-daemon refuses the removal instead of force-removing on no evidence"
@@ -406,16 +371,15 @@ exit 0
 MUTE
 chmod +x "$TMP_ROOT/mute-daemon"
 
-WT_J="$(make_worktree 8191b)"   # clean, same as (i)
+WT_J="$(make_worktree 819102)"   # clean, same as (i)
 
 set +e
-out_j="$(LOOM_DAEMON_BIN="$TMP_ROOT/mute-daemon" _remove_loom_worktree "$WT_J" 2>&1)"
+out_j="$(LOOM_DAEMON_SELF_BIN="$TMP_ROOT/mute-daemon" pmc_run_issue "${WT_J##*issue-}" 2>&1)"
 rc_j=$?
 set -e
 
 if [[ $rc_j -eq 0 ]] \
-    && [[ "$out_j" == *"Refusing to remove worktree"* ]] \
-    && [[ "$out_j" == *"could not run"* ]] \
+    && [[ "$out_j" == *"did not run"* ]] \
     && [[ "$out_j" != *"Removing worktree"* ]] \
     && [[ -d "$WT_J" ]]; then
     pass "(j) exit 0 without the clean sentinel is not consent — the removal is still refused"

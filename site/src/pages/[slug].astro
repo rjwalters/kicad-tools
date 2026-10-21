@@ -17,7 +17,7 @@
 import { join, resolve } from "node:path";
 import { existsSync } from "node:fs";
 import { loadBoards, boardsDir, discoverBoardDirs } from "../data/loadBoards.ts";
-import { displayStatus, displayStatusLabel, knownIssueHref } from "../data/boardStatus.ts";
+import { displayStatus, displayStatusLabel, knownIssueHref, boardDisplayName } from "../data/boardStatus.ts";
 import type { Board } from "../data/types.ts";
 import RenderGallery from "../components/RenderGallery.astro";
 import ReadinessProgress from "../components/ReadinessProgress.astro";
@@ -120,7 +120,7 @@ const { board, hasPrimary, hasFullPackage, extras, hasPcb } = Astro.props as Det
 // deployed static site. Only set when `hasPcb` so we never emit a broken embed.
 const pcbHref = `/boards/${board.slug}/board.kicad_pcb`;
 
-const displayName = board.name ?? board.slug;
+const displayName = boardDisplayName(board);
 const isBuilt = board.status !== "no_artifacts";
 
 // Displayed badge derived from BOTH status and drc_violations so a board with
@@ -157,6 +157,10 @@ if (board.board_size_mm !== undefined) {
     label: "Board Size",
     value: `${board.board_size_mm.width} × ${board.board_size_mm.height} mm`,
   });
+}
+if (board.model_coverage && typeof board.model_coverage.percent === "number") {
+  const { covered, total, percent } = board.model_coverage;
+  rows.push({ label: "3D model coverage", value: `${percent}% (${covered}/${total})` });
 }
 if (board.part_count !== undefined) {
   rows.push({ label: "Parts", value: `${board.part_count}` });

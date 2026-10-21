@@ -124,6 +124,9 @@ RENDER_FILES = {
     "3d_back": "renders/3d-back.png",
 }
 
+# 3D model coverage summary written by `kct render` (#7689), relative to output/.
+MODEL_COVERAGE_FILE = "renders/model-coverage.json"
+
 # --- report.md field regexes (machine-generated, stable format) -------------
 _LAYERS_RE = re.compile(r"\|\s*Layers\s*\|\s*(\d+)\s*copper", re.IGNORECASE)
 _BOARD_SIZE_RE = re.compile(r"\|\s*Board Size\s*\|\s*([\d.]+)\s*x\s*([\d.]+)\s*mm", re.IGNORECASE)
@@ -280,6 +283,26 @@ def _parse_lvs(lvs_path: Path, slug: str) -> dict:
             len(data.get("mismatches") or []) + len(data.get("copper_mismatches") or [])
         ),
     }
+
+
+_SCH_TITLE_RE = re.compile(r'\(title_block\s*\(title\s+"((?:[^"\\]|\\.)*)"')
+
+
+def _read_schematic_title(output_dir: Path, slug: str) -> str | None:
+    """Return the human title from the schematic title block, if any (#7666).
+
+    The PCB file stem (``simple_led_routed``) is not a presentable heading; the
+    schematic's ``(title_block (title ...))`` is.
+    """
+    for sch in sorted(output_dir.glob("*.kicad_sch")):
+        try:
+            match = _SCH_TITLE_RE.search(sch.read_text(errors="replace"))
+        except OSError as exc:
+            logger.warning("board %s: could not read %s (%s)", slug, sch.name, exc)
+            continue
+        if match and match.group(1).strip():
+            return match.group(1).replace('\\"', '"').strip()
+    return None
 
 
 def _parse_manifest(manifest_path: Path, slug: str) -> dict:
@@ -586,6 +609,9 @@ def extract_board_metrics(board_dir: Path) -> dict:
     output_dir = board_dir / "output"
     mfg_dir = output_dir / "manufacturing"
     metrics["readiness"] = read_readiness(board_dir)
+    title = _read_schematic_title(output_dir, slug)
+    if title:
+        metrics["title"] = title
 
     if not mfg_dir.is_dir():
         # Development metadata is independent of manufacturing export.
@@ -668,6 +694,16 @@ def _attach_render_paths(metrics: dict, output_dir: Path) -> None:
             renders[field] = rel_path
     if renders:
         metrics["renders"] = renders
+    coverage_path = output_dir / MODEL_COVERAGE_FILE
+    if coverage_path.is_file():
+        try:
+            coverage = json.loads(coverage_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if isinstance(coverage, dict):
+            metrics["model_coverage"] = {
+                key: coverage.get(key) for key in ("env", "covered", "total", "percent")
+            }
 
 
 def emit_board_json(board_dir: Path, output_path: Path | None = None) -> Path:

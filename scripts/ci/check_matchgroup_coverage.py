@@ -174,6 +174,8 @@ MATCHGROUP_FIXTURE_KEY = (
 # groups checkable; MIPI_CSI_LANES is the one pair-only group whose skew
 # survives (7.039 mm vs 0.050 mm).  Issue #7339: DDR_DATA_BYTE_0 fires once
 # DQ0 routes (#7331): 16.717 mm vs 0.100 mm.  Both are tracked in #7550.
+# Issue #7557: HDMI_TMDS_LANES becomes measurable once TMDS_D0_N routes (U4's
+# TMDS balls moved to its J2-facing column): 7.723 mm vs 0.075 mm, also #7550.
 #
 # Per the operator ruling in #7270 (Q3) the allowance is NOT a count: it names
 # the exact groups that may fire, so a DIFFERENT group failing (e.g. ADDR_BUS
@@ -191,6 +193,7 @@ MATCHGROUP_ALLOWED_GROUPS: dict[str, dict[str, int]] = {
     MATCHGROUP_FIXTURE_KEY: {
         "MIPI_CSI_LANES": MATCHGROUP_SKEW_TRACKER,
         "DDR_DATA_BYTE_0": MATCHGROUP_SKEW_TRACKER,
+        "HDMI_TMDS_LANES": MATCHGROUP_SKEW_TRACKER,
     },
 }
 
@@ -607,6 +610,9 @@ def count_errors_via_kct_check(
 # Issue #7612: the MIPI_DAT1 impedance entries stay.  The author's re-route
 # tightened MIPI_DAT1 2/2 runs, but CI's re-route tightens 1/2
 # (``no_suitable_segment`` on the second), so the findings persist there.
+# Issue #7557: once TMDS_D0_N routes (U4's TMDS balls on its J2-facing
+# column) the TMDS_D0 pair's F.Cu run reads 125.2 ohm too -- the same
+# defect, so it joins the #7349 entries (6 in total).
 #
 # Issue #7367 -- the ``diffpair_length_skew`` pairs, keyed by pair, not by a
 # count.  Until #7367 the gate let every skew/continuity finding through by
@@ -626,11 +632,17 @@ MATCHGROUP_FIXTURE_ALLOWED_FINDINGS: Allowance = {
     ("impedance", "MIPI_DAT1_P"): 7349,
     ("impedance", "TMDS_D1_N"): 7349,
     ("impedance", "TMDS_D1_P"): 7349,
+    ("impedance", "TMDS_D0_N"): 7349,  # Issue #7557: routes now
+    ("impedance", "TMDS_D0_P"): 7349,
     # skew vs max_skew_mm, mm
-    # DQS and TMDS_D1 are routed with unequal via counts (P 0, N 2); gap
-    # tightening's ``declined:skew`` is correct (Issue #7613), tracked in #7619.
+    # DQS is routed with unequal via counts (P 0, N 2); gap tightening's
+    # ``declined:skew`` is correct (Issue #7613), tracked in #7619.  Since
+    # issue #7557 moved U4's TMDS balls to its J2-facing column, TMDS_D0
+    # (newly routed) carries the via imbalance instead (P 2, N 0) and TMDS_D1
+    # no longer does (its skew fell 4.968 -> 1.584 mm, now plain #7550).
     ("diffpair_length_skew", "DQS_N/DQS_P"): 7619,  # 5.562 / 0.050
-    ("diffpair_length_skew", "TMDS_D1_N/TMDS_D1_P"): 7619,  # 4.968 / 0.075
+    ("diffpair_length_skew", "TMDS_D0_N/TMDS_D0_P"): 7619,  # 4.149 / 0.075
+    ("diffpair_length_skew", "TMDS_D1_N/TMDS_D1_P"): MATCHGROUP_SKEW_TRACKER,  # 1.584 / 0.075
 }
 
 #: Every board key that carries an identity allowance (Issue #7367).  A key

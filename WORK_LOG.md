@@ -13,8 +13,97 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-10-21
+
+- **PR #7751**: fix(board07): move U4 TMDS balls to the J2-facing column so TMDS_D0_N routes
+- **Issue #7557** (closed): Board 07: TMDS_D0_N pad U4.B2 has no legal exit; needs placement rework or joint TMDS escape-corridor allocation (#3673)
+- **PR #7749**: fix(boards): gate board 02 route_demo and board 05 legacy recipe on kct export
+- **Issue #7746** (closed): Gate route_demo.py (board 02) and legacy_drv8301/design.py (board 05) exports through the shared pipeline gate
+- **Issue #7186** (closed): kct post-route DRC reports 33 shorts on routed board 07m where pinned kicad-cli reports 0 (engine disagreement)
+- **PR #7744**: fix: gate board recipes on manufacturing export result
+- **Issue #7740** (closed): board generators report Overall: PASS and exit 0 when the manufacturing-bundle export fails
+- **PR #7739**: test(board00): assert the manufacturing bundle exists before kct check
+- **PR #7736**: feat(check): default-on model_coverage with full demo-board 3D coverage
+- **Issue #7738** (closed): main: test_board_00_simple_led::test_no_connectivity_errors fails
+- **Issue #7685** (closed): Bring every demo board to 100% 3D model coverage on the pinned model set
+- **PR #7734**: ci: add host-vs-pinned render model coverage parity check
+- **PR #7726**: feat: price net signed turning in the coupled lattice pair search
+- **PR #7730**: fix: emit lattice pair legs wider than pitch to survive 4-decimal serialization
+- **Issue #7729** (closed): 06rf lattice bench: kct check reports 12 diffpair_clearance_intra on the seed-42 route (revision expected at most 4)
+- **PR #7732**: feat: gate kct render and deploy-site on 3D model coverage
+- **PR #7724**: feat: fetch pinned, sha256-verified KiCad 3D model subset (kct models sync)
+- **PR #7725**: feat(pcb): LCSC 3D models at catalog scale with per-user opt-in guards
+- **PR #7723**: fix: escape KiCad strings in sch set-footprint/set-value and S-expression writers (#7648)
+- **PR #7722**: chore(tooling): update Repo Skills 0.24.3→0.24.7
+- **PR #7720**: test(board03): pin the arm C route's USB_D via parity end to end
+- **PR #7718**: fix(board03): re-derive copper from the arm C route and retire the USB_D via-count exception
+- **Issue #7683** (closed): Pinned 3D model set for the pinned KiCad toolchain (`kicad-packages3D` by tag and digest)
+- **Issue #7624** (closed): router: recover 06rf USB3_RX1/RX2 coupling at J1 after #7517 corridor competition (Q29 tracked regression)
+- **Issue #7686** (closed): LCSC/JLCPCB model pipeline at catalog scale: BOM-driven C-numbers, content pinning, auto-registered transforms, terms-respecting fetch
+- **Issue #7666** (closed): site: gallery shows stale or raw board identity: unchecked board.json age, PCB file stems as titles, and board 07 still titled "DRAFT"
+- **Issue #7648** (closed): `sch_set_footprint` corrupts sheets (footprint used as a `re.sub` template, unescaped, universal-newline round trip); S-expression writers emit raw `\r`; `Footprint.to_sexp` escapes nothing
+- **Issue #7713** (closed): board 03: re-derive the committed copper from the arm C route and retire the #7108 USB_D via-count exception
+- **Issue #7580** (closed): router: finish diff-pair via-count parity (continuation of #7093)
+- **PR #7712**: fix(zones): skip auto-pour on boards with legacy-named copper layers
+- **PR #7707**: fix(board04): move corner-seated C10.2/C11.2 GND welds clear of SMT lands
+- **PR #7697**: chore: register 3D-model neighbours in the ecosystem registry
+- **Issue #7708** (closed): bug: pocketbeagle zero-touch route raises 'Layer In1.Cu is not available' with empty declared layers; beagleconnect_freedom ends below input connectivity
+- **Issue #7704** (closed): main red: Slow Tests — test_board_04_drill_clearance_regen fails (manufacturing-requirements.json missing in temp dir) since 2026-10-20T20:04Z
+- **Issue #7694** (closed): chore: add ecosystem registry entries for the 3D-model neighbours
+- **PR #7715**: docs(board07): audit wall-clock limits under deterministic-budget
+- **PR #7714**: fix(route): name schema-2 migration step and surface load error on total failure
+- **PR #7709**: feat: add 2026-10-21 external benchmark collection from the workflow run
+- **PR #7706**: chore(board03): re-issue kct-check evidence for the re-landed #6554 pairing
+- **PR #7695**: feat: audit 3D model coverage per footprint with shared classifier
+- **PR #7693**: feat: existence-check 3D model refs and add ensure_models for generators
+- **PR #7681**: fix(boards): drop DRAFT from board 07 titles and re-issue readiness
+- **PR #7660**: fix(router): stop counting tied iterations as progress for patience
+- **Issue #7711** (closed): route: accept or migrate schema-2 net_settings instead of aborting every layer attempt
+- **Issue #7710** (closed): board 07 match-group CI gate is load-sensitive: wall-clock budgets survive --deterministic-budget and reach sits exactly at the required 30/31
+- **Issue #7705** (closed): main red: Slow Tests — board 03 readiness --verify rewrites committed readiness-verification/kct-check.json (diff-pair figures drifted)
+- **Issue #7684** (closed): Model insertion that cannot regress: existence-checked `add-3d-models` tiers, generators own their models, and a regeneration guard
+- **Issue #7682** (closed): 3D coverage audit: count footprints, not refs, in `kct check`, `kct render` and `kct fleet status`
+- **Issue #7675** (closed): Board 07: remove DRAFT from titles and re-issue readiness
+- **Issue #7663** (closed): site: publish main to kicad-tools.org: live site is v0.20.0 from 2026-09-12
+- **Issue #7659** (closed): test flake: test_route_entry_path_goldens partial-rule_relaxation times out — follow-up to #7626
+- **PR #7701**: fix: read only top-level uuid when loading schematic hierarchy
+- **Issue #7699** (closed): schema: root sheet UUID in HierarchyBuilder._load_schematic uses recursive find("uuid"); a root without a top-level uuid picks up a nested one
+- **PR #7698**: ci: add dispatch-only external benchmark re-run workflow
+- **PR #7671**: ci: run site test/check/build/check-links on site-relevant PRs
+- **Issue #7665** (closed): ci: build and test site/ in CI: site-only PRs and Dependabot bumps merge without running vitest, astro check or the build
+- **PR #7680**: fix(readiness): stop fingerprinting board renders as evidence
+- **Issue #7678** (closed): site: deploy-site.sh re-renders committed board images, invalidating readiness evidence: 5 ship-ready boards publish as "Readiness unverified"
+- **PR #7661**: fix(schema): give every placement of a repeated sheet its full subtree (#7616)
+- **Issue #7616** (closed): Schematic BOM (`extract_bom`, `kct bom`) lists the first placement's references for every placement of a repeated sheet, so the other placements' parts are missing; `build_hierarchy` also drops the subtree under a repeated sheet
+- **PR #7672**: ci: add warn-only weekly live-site drift check
+- **Issue #7664** (closed): site: detect when kicad-tools.org falls behind main (weekly drift check + release-checklist step)
+- **PR #7677**: fix: show schematic title in gallery headings and flag stale board.json
+- **PR #7692**: docs: commit the 3D model coverage research note and index it
+- **Issue #7691** (closed): docs: commit the 3D model coverage research note and index it
+- **PR #7676**: fix: refresh routing-status page context and silence companion-file loader warnings
+- **Issue #7668** (closed): site: refresh routing-status page text and bind reviewed context to the 2026-09-15 BeagleConnect run
+- **PR #7673**: feat(site): expand homepage capability cards and test README anchors
+- **PR #7674**: fix: add 404 page so missing site paths return 404 instead of the homepage
+- **PR #7653**: chore(deps): Bump certifi from 2025.11.12 to 2026.10.19
+- **PR #7658**: docs: add opt-in route flag graduation rule and entry-path warning tests
+- **Issue #7670** (closed): site: refresh homepage capabilities for v0.21–v0.24: sign-off/readiness, agent skills across harnesses, lattice diff-pair and length tuning
+- **Issue #7667** (closed): site: add a real 404 page: unknown URLs return the homepage with HTTP 200
+- **Issue #7401** (closed): router: board 06 USB2_D+ uncoupled 12.791 > 12.700 mm after v62 pad-edge floor reorders the single-ended fallback
+- **Issue #7657** (closed): route: opt-in flag graduation doc and step-2 leftovers (follow-up to #7377)
+- **PR #7475**: fix(router): rank gateway combos that leave a neighbour's escape via site open first
+- **Issue #7491** (closed): router: C++ search finds no USB3_RX1- path on board 06 once USB2_D routes coupled (blocks #7401)
+- **Issue #7463** (closed): board 03 arm C: VBUS U2.5 left unconnected (keepout-constrained escape next to USB_D U2 pads); last gate before re-deriving board 03 under #7093
+- **Issue #7377** (closed): route: collapse the 4 copy-pasted post-route tails into one pipeline -- --length-match-diffpairs, --stitch-power-planes, --progressive-clearance, --bus-routing silently no-op on the default --auto-layers path
+- **PR #7644**: refactor(route): build route_all_negotiated kwargs once for all seven call sites
+- **PR #7643**: fix(schema): resolve sub-sheets against the containing sheet's folder (#7614)
+- **Issue #7614** (closed): `schema.hierarchy.build_hierarchy` resolves sub-sheet files against the process working directory, then the root's directory, never the parent sheet's directory (wrong sheet read, nested sheets dropped silently)
+
 ### 2026-10-20
 
+- **PR #7642**: fix: share one library-flag power-symbol predicate across BOM, footprint gate, parser and fix-annotation
+- **PR #7640**: test: cut each test DRC's fp-lib-table to its board's libraries; measure conformance seeds once
+- **PR #7639**: fix: list each placement of a repeated sheet in the BOM
+- **Issue #7637** (closed): Unify schematic power-symbol predicates with BOMItem.is_power_symbol's (power)-flag rule
 - **Issue #7645** (closed): main: 4 test_lattice_extra_parity_7093 tests fail after dc78dac
 - **PR #7646**: test(router): close the corridor under the extra-parity wall fixture
 - **PR #7651**: chore(deps): Bump vite from 8.2.1 to 8.3.4 in /site

@@ -79,3 +79,8 @@ export function displayStatusExplanation(board: Board): string {
 export function knownIssueHref(issue: number): string {
   return `https://github.com/rjwalters/kicad-tools/issues/${issue}`;
 }
+
+/** Heading text for cards and detail pages: human title, else file stem, else slug (#7666). */
+export function boardDisplayName(board: Pick<Board, "title" | "name" | "slug">): string {
+  return board.title?.trim() || board.name || board.slug;
+}

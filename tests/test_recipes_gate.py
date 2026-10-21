@@ -199,6 +199,29 @@ class TestLvsLeg:
 
 
 # --------------------------------------------------------------------------
+# Export leg (issue #7740)
+# --------------------------------------------------------------------------
+class TestExportLeg:
+    def test_export_false_fails_gate(self):
+        res = evaluate_pipeline_gate(PCB, route_ok=True, export_ok=False, _drc_result=_clean_drc())
+        assert res.passed is False
+        assert res.exit_code() == 1
+        lines = res.summary_lines()
+        assert "  Overall: FAIL" in lines
+        assert "  MFG bundle: FAILED" in lines
+        assert any("manufacturing bundle export failed" in r for r in res.reasons)
+
+    @pytest.mark.parametrize("export_ok,status", [(None, "n/a"), (True, "WRITTEN")])
+    def test_export_none_or_true_does_not_fail(self, export_ok, status):
+        res = evaluate_pipeline_gate(
+            PCB, route_ok=True, export_ok=export_ok, _drc_result=_clean_drc()
+        )
+        assert res.passed is True
+        assert res.exit_code() == 0
+        assert f"  MFG bundle: {status}" in res.summary_lines()
+
+
+# --------------------------------------------------------------------------
 # Divergence guard: SUMMARY and exit code cannot disagree
 # --------------------------------------------------------------------------
 class TestDivergenceGuard:

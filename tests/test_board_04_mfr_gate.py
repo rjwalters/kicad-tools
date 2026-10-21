@@ -40,9 +40,20 @@ def _warnings(report: dict) -> list[tuple[str, str]]:
     )
 
 
-@pytest.fixture(scope="module")
-def board_04_mfr_check(tmp_path_factory) -> dict:
+#: Issue #7682: the gate must not depend on the host's 3D model library.  The
+#: CI runner and the pinned toolchain image ship none (#7683), so the gate is
+#: also run with every model variable pointing nowhere -- a simulated CI host.
+_NO_MODEL_LIBRARY_ENV = {
+    f"KICAD{v}_3DMODEL_DIR": "/nonexistent/kct-7682-no-models" for v in (6, 7, 8, 9, 10)
+}
+
+
+@pytest.fixture(scope="module", params=["host", "no_model_library"])
+def board_04_mfr_check(request, tmp_path_factory) -> dict:
     report = tmp_path_factory.mktemp("board04-process") / "check.json"
+    env = None
+    if request.param == "no_model_library":
+        env = {**os.environ, **_NO_MODEL_LIBRARY_ENV}
     proc = subprocess.run(
         [
             sys.executable,
@@ -54,6 +65,7 @@ def board_04_mfr_check(tmp_path_factory) -> dict:
         text=True,
         timeout=120,
         check=False,
+        env=env,
     )
     assert proc.returncode == 0 and report.is_file(), proc.stdout + proc.stderr
     return json.loads(report.read_text())
@@ -72,6 +84,14 @@ def test_board_04_reviewed_process_is_strictly_clean(board_04_mfr_check: dict) -
     assert report["fabrication_overrides"]["via_type"] == "through"
     assert report["fabrication_overrides"]["via_in_pad"] is False
     assert not [v for v in report["violations"] if v["rule_id"] == "connectivity"]
+    # Issue #7685: 3D coverage is default-on.  The board is fully covered, so it
+    # raises no warning on any host; a host with no model library (the
+    # ``no_model_library`` run) only adds the informational "not evaluated" line.
+    assert not [
+        v
+        for v in report["violations"]
+        if v["rule_id"] == "model_coverage" and v["severity"] != "info"
+    ]
 
 
 def test_board_04_mfr_gate_flags_uninitialized_kicad_libraries(tmp_path: Path) -> None:

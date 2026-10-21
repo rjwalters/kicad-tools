@@ -402,6 +402,12 @@
 #   ./.loom/scripts/resync-installed.sh            # sync; report what changed
 #   ./.loom/scripts/resync-installed.sh --dry-run  # preview only; make no changes
 #   ./.loom/scripts/resync-installed.sh --quiet    # only report updated/skipped
+#   ./.loom/scripts/resync-installed.sh --sync-labels
+#                                                  # ALSO apply the additive forge label
+#                                                  # create/refresh (a REMOTE write, #10770).
+#                                                  # Without it a real run only reports label
+#                                                  # drift and prints this command; --dry-run
+#                                                  # lists the set it would create/refresh
 #   ./.loom/scripts/resync-installed.sh --allow-worktree
 #                                                  # permit running from a linked
 #                                                  # worktree (still writes the MAIN
@@ -433,6 +439,9 @@
 #   LOOM_RESYNC_BASE=<ref>        - same as --base <ref> (#9550). Only consulted
 #                                   in --output mode; an explicit --base wins.
 #   LOOM_RESYNC_FORCE=1           - same as --force (for non-interactive callers).
+#   LOOM_RESYNC_SYNC_LABELS=1     - same as --sync-labels (for non-interactive
+#                                   callers; the daemon's post-roll resync passes
+#                                   the flag so fleet label auto-heal, #6716, stays).
 #
 # Exit codes:
 #   0 - Success. Sync applied (or already in sync); or --dry-run found no drift.
@@ -479,6 +488,9 @@ ALLOW_WORKTREE=0
 # locally-diverged installed file (see "LOCAL-DIVERGENCE PROTECTION" above).
 FORCE=0
 [[ "${LOOM_RESYNC_FORCE:-}" == "1" ]] && FORCE=1
+# #10770: the forge label create/refresh is a remote write, so it is opt-in.
+SYNC_LABELS=0
+[[ "${LOOM_RESYNC_SYNC_LABELS:-}" == "1" ]] && SYNC_LABELS=1
 # #6106: generate a complete resync in an isolated staging worktree instead of
 # writing to the primary checkout. Empty means "not requested".
 OUTPUT_DIR="${LOOM_RESYNC_OUTPUT:-}"
@@ -502,6 +514,7 @@ while [[ $# -gt 0 ]]; do
         --quiet|-q)       QUIET=1; shift ;;
         --allow-worktree) ALLOW_WORKTREE=1; shift ;;
         --force)          FORCE=1; shift ;;
+        --sync-labels)    SYNC_LABELS=1; shift ;;
         --output)
             if [[ $# -lt 2 || -z "$2" ]]; then
                 err "--output requires a directory argument (try --help)"
@@ -594,6 +607,22 @@ fi
 if [[ -z "$REPO_ROOT" || ! -d "$REPO_ROOT/.loom" ]]; then
     err "Could not resolve the installed repo root (no .loom/ found)."
     exit 1
+fi
+
+# ---------- loom-tools / loom-daemon payload identity (#12939) ----------
+#
+# With both binaries present they must agree on the payload; two that disagree
+# are a refusal, never a pick by PATH order or mtime. Older tools than the
+# payload being installed refuse the same way. Fails open when an identity
+# cannot be read (a binary with no `capabilities` verb).
+if [[ -f "$(dirname "${BASH_SOURCE[0]}")/lib/locate-daemon-bin.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "$(dirname "${BASH_SOURCE[0]}")/lib/locate-daemon-bin.sh"
+    _pi_src=""
+    [[ -f "$REPO_ROOT/loom-daemon/src/install_compat.rs" ]] && _pi_src="$REPO_ROOT"
+    if loom_payload_identity_conflict "$REPO_ROOT" "$_pi_src"; then
+        exit 1
+    fi
 fi
 
 # ---------- refuse to run from a linked worktree (#4563) ----------
@@ -2039,6 +2068,63 @@ resync_agent_skills() {
         fi
         sync_one "$src" "$dst" "agents-skills/$rel"
     done < <(find -L "$src_dir" -type f -print0 2>/dev/null | sort -z)
+    retire_agent_skills "$src_dir" "$dst_dir"
+}
+
+# retire_agent_skills: delete-side counterpart of resync_agent_skills() (#12507),
+# matching native stage_skills() (loom-daemon/src/init/payload/surfaces.rs).
+# The walk above only visits skills defaults/ ships today, so an installed
+# `loom-<name>/SKILL.md` whose source was removed would stay discoverable
+# forever. The retired set is derived (installed minus shipped), not listed in
+# .loom-retired.list, because ownership has to be proven by the marker.
+#
+# Removes only a regular-file (non-symlink) SKILL.md that carries
+# $AGENT_SKILL_MARKER, in a `loom-*` dir with no source counterpart and no
+# .loom/resync-ignore pin; then `rmdir`s the dir if now empty (never rm -r).
+# Does nothing unless the source set is valid (at least one marker-carrying
+# loom-*/SKILL.md), so a missing/empty/unreadable source never wipes skills.
+retire_agent_skills() {
+    local src_dir="$1" dst_dir="$2"
+    [[ -d "$src_dir" && -d "$dst_dir" ]] || return 0
+
+    local s valid=0
+    for s in "$src_dir"/loom-*/SKILL.md; do
+        if [[ -f "$s" && -r "$s" ]] && grep -qF "$AGENT_SKILL_MARKER" "$s" 2>/dev/null; then
+            valid=1
+            break
+        fi
+    done
+    [[ "$valid" -eq 1 ]] || return 0
+
+    local d name dst rel
+    for d in "$dst_dir"/loom-*/; do
+        d="${d%/}"
+        [[ -d "$d" && ! -L "$d" ]] || continue
+        name="${d##*/}"
+        [[ -e "$src_dir/$name" || -L "$src_dir/$name" ]] && continue
+        dst="$d/SKILL.md"
+        [[ -f "$dst" && ! -L "$dst" ]] || continue
+        grep -qF "$AGENT_SKILL_MARKER" "$dst" 2>/dev/null || continue
+        rel="agents-skills/$name/SKILL.md"
+        if is_ignored "$rel"; then
+            note "  ${YELLOW}skipped${NC}   $rel ${YELLOW}(pinned in .loom/resync-ignore)${NC}"
+            N_SKIPPED=$((N_SKIPPED + 1))
+            continue
+        fi
+        if [[ "$DRY_RUN" -eq 1 ]]; then
+            printf '%b\n' "  ${BOLD}would remove${NC} $rel ${YELLOW}(retired generated skill, #12507)${NC}"
+            N_REMOVED=$((N_REMOVED + 1))
+            continue
+        fi
+        if rm -f "$dst" 2>/dev/null; then
+            printf '%b\n' "  ${GREEN}removed${NC}   $rel ${YELLOW}(retired generated skill, #12507)${NC}"
+            N_REMOVED=$((N_REMOVED + 1))
+            rmdir "$d" 2>/dev/null || true
+        else
+            err "failed to remove retired skill $rel"
+            record_failure "$rel"
+        fi
+    done
 }
 
 # ---------- retired payload files (#5981) ----------
@@ -3468,7 +3554,10 @@ fi
 # alongside this) is read-only: it reports every declared label that is
 # MISSING or STALE (present, wrong color/description), plus any UNKNOWN
 # EXTRA -- a live loom:-prefixed label absent from labels.yml, reported but
-# NEVER deleted. When drift is found on a real (non---dry-run) resync, this
+# NEVER deleted. The fix is a FORGE (remote) write, so it is opt-in (#10770):
+# drift is always reported, but the mutating run happens only with
+# --sync-labels / LOOM_RESYNC_SYNC_LABELS=1; otherwise the exact command is
+# printed. When opted in on a real (non---dry-run) resync, this
 # invokes the ALREADY-EXISTING mutating sync-labels.sh run to fix it --
 # additive-only (no --prune-defaults passed), so nothing is ever deleted or
 # renamed; it only creates what's missing and refreshes what's stale.
@@ -3511,9 +3600,13 @@ if [[ -f "$WRITE_ROOT/.github/labels.yml" && -x "$LABELS_SYNC_SCRIPT" ]]; then
         3)
             printf '%b\n' "${YELLOW}[resync] Forge label drift detected (.github/labels.yml vs live):${NC}"
             printf '%b\n' "$check_output" | sed 's/^/    /'
-            if [[ "$DRY_RUN" -eq 1 ]]; then
-                printf '%b\n' "  ${BOLD}would run${NC} sync-labels.sh to create the missing/refresh the stale labels (additive only, never deletes)"
+            if [[ "$DRY_RUN" -eq 1 && "$SYNC_LABELS" -eq 1 ]]; then
+                printf '%b\n' "  ${BOLD}would run${NC} sync-labels.sh (FORGE/remote write) to create the missing/refresh the stale labels listed above (additive only, never deletes)"
                 N_UPDATED=$((N_UPDATED + 1))
+            elif [[ "$DRY_RUN" -eq 1 ]]; then
+                printf '%b\n' "  ${BOLD}not applied${NC} -- a real run would NOT write to the forge without ${BOLD}--sync-labels${NC} (it would create/refresh the labels listed above, additive only)"
+            elif [[ "$SYNC_LABELS" -ne 1 ]]; then
+                printf '%b\n' "  ${BOLD}not applied${NC} -- forge label writes are opt-in; nothing was changed on the forge. apply with: ${BOLD}./.loom/scripts/sync-labels.sh${NC}  (or re-run resync with ${BOLD}--sync-labels${NC})"
             else
                 sync_output=""
                 sync_rc=0

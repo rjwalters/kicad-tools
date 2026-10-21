@@ -828,3 +828,18 @@ def test_development_invalid_outline_retains_declared_parts(development_board, t
     assert result["part_count"] == 1
     assert result["layer_count"] == 4
     assert "board_size_mm" not in result
+
+
+def test_title_read_from_schematic_title_block(tmp_path: Path):
+    """The human title comes from the schematic, not the PCB file stem (#7666)."""
+    board = _make_board(tmp_path, manifest={"board": {"name": "simple_led_routed"}})
+    (board / "output" / "simple_led.kicad_sch").write_text(
+        '(kicad_sch (title_block\n\t(title "Simple LED - Hello World")\n\t(rev "A")))'
+    )
+    m = extract_board_metrics(board)
+    assert m["title"] == "Simple LED - Hello World"
+    assert m["name"] == "simple_led_routed"
+
+
+def test_title_omitted_without_schematic(tmp_path: Path):
+    assert "title" not in extract_board_metrics(_make_board(tmp_path))

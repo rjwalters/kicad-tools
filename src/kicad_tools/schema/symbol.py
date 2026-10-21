@@ -136,6 +136,33 @@ class SymbolInstance:
             return self.properties["Value"].value
         return ""
 
+    def instance_reference(self, instance_path: str) -> str | None:
+        """Return the reference recorded for one placement, if any.
+
+        A sheet file placed more than once stores one ``(property
+        "Reference" ...)`` per symbol but the real designator of each
+        placement in its ``(instances (project ... (path "<instance path>"
+        (reference ...))))`` block. This returns the ``reference`` of the
+        ``path`` entry equal to ``instance_path`` (the KiCad instance path
+        of the sheet placement, e.g. :attr:`HierarchyNode.instance_path`),
+        or ``None`` when the symbol has no entry for that placement.
+        """
+        if not instance_path or self._sexp is None:
+            return None
+        wanted = instance_path.rstrip("/")
+        instances = self._sexp.find_child("instances")
+        if instances is None:
+            return None
+        for project in instances.find_children("project"):
+            for path_node in project.find_children("path"):
+                if (path_node.get_string(0) or "").rstrip("/") != wanted:
+                    continue
+                ref_node = path_node.find_child("reference")
+                ref = ref_node.get_string(0) if ref_node is not None else None
+                if ref:
+                    return ref
+        return None
+
     @property
     def footprint(self) -> str:
         """Get the footprint assignment."""

@@ -468,6 +468,57 @@ def test_known_issue_in_the_bundle_matches_the_readiness_refresh(mod, tmp_path, 
     ).read_bytes()
 
 
+# --------------------------------------------------------------------------- PDFs (#7675)
+def test_replot_covers_every_committed_pdf(mod):
+    """A whole-bundle re-plot rewrites every committed PDF (Issue #7675).
+
+    Board 07's title-block edit re-plotted the assembly PDFs but not
+    ``schematic.pdf``, so the bundle shipped the old title as ready.
+    """
+    for board, bundle in mod.BUNDLES.items():
+        mfg = REPO / "boards" / board / "output" / "manufacturing"
+        committed = {p.relative_to(mfg).as_posix() for p in mfg.rglob("*.pdf")}
+        if bundle.gerber_members:
+            # Board 04 re-plots only Gerber members; it ships no schematic PDF.
+            assert "schematic.pdf" not in committed and bundle.schematic_pdfs == ()
+            continue
+        replotted = {
+            *(m for m in bundle.export_members if m.endswith(".pdf")),
+            *(name for name, _ in bundle.assembly_pdfs),
+            *bundle.schematic_pdfs,
+        }
+        assert committed == replotted, board
+
+
+def test_replot_plots_schematic_pdf_from_the_published_schematic(mod, tmp_path, monkeypatch):
+    import kicad_tools.cli.readiness_cmd as readiness_cmd
+
+    staged = tmp_path / "07-matchgroup-test"
+    mfg = staged / "output" / "manufacturing"
+    mfg.mkdir(parents=True)
+    (mfg / "schematic.pdf").write_bytes(b"old")
+    cfg = mod.rr.BOARDS["07-matchgroup-test"]
+    bundle = mod.BundleConfig(
+        manufacturer="jlcpcb", export_members=(), assembly_pdfs=(), renders=None
+    )
+    calls = []
+
+    def fake_export(schematic, output):
+        calls.append(schematic)
+        output.write_bytes(b"new")
+        return readiness_cmd.EngineRun(ok=True)
+
+    monkeypatch.setattr(readiness_cmd, "_export_schematic_pdf", fake_export)
+    monkeypatch.setattr(
+        mod, "run", lambda cmd, **kw: mod.subprocess.CompletedProcess(cmd, 0, "", "")
+    )
+    (staged / cfg.routed_pcb).write_text(PCB)
+    written = mod.stage_replot(staged, cfg, bundle)
+    assert calls == [staged / cfg.schematic]
+    assert (mfg / "schematic.pdf").read_bytes() == b"new"
+    assert written == ["output/manufacturing/schematic.pdf"]
+
+
 # --------------------------------------------------------------------------- board 04 (#7357)
 def test_board04_config_reuses_the_shared_pipeline(mod):
     bundle, cfg = mod.BUNDLES["04-stm32-devboard"], mod.rr.BOARDS["04-stm32-devboard"]

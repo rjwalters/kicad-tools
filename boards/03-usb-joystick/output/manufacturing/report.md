@@ -1,8 +1,8 @@
 ---
 title: "usb_joystick_routed"
 subtitle: "Design Report"
-author: "kicad-tools 0.23.0"
-date: "Rev 1 | 2026-10-19 | jlcpcb-tier1"
+author: "kicad-tools 0.24.0"
+date: "Rev 1 | 2026-10-21 | jlcpcb-tier1"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -20,8 +20,8 @@ header-includes:
 | Layers | 4 copper (F.Cu, In1.Cu, In2.Cu, B.Cu) |
 | Footprints | 38 (37 SMD, 1 THT, 0 other) |
 | Nets | 27 |
-| Traces | 1080 segments |
-| Vias | 105 |
+| Traces | 910 segments |
+| Vias | 85 |
 | Board Size | 80.0 x 60.0 mm |
 
 ## Stackup
@@ -149,7 +149,7 @@ GPIO and ADC map is fixed to Microchip TQFP-44 pinout
 | Errors | 0 |
 | Errors: kct (`--mfr jlcpcb-tier1` rules) | 0 |
 | Errors: kicad-cli (geometric) | 0 |
-| Warnings | 15 |
+| Warnings | 14 |
 | Blocking | 0 |
 
 **Status**: PASS
@@ -160,7 +160,6 @@ GPIO and ADC map is fixed to Microchip TQFP-44 pinout
 |----------------|-------|
 | hole_to_hole_clearance | 14 |
 | diffpair_routing_continuity | 1 |
-| diffpair_uncoupled_length | 1 |
 
 
 \newpage
@@ -172,7 +171,7 @@ GPIO and ADC map is fixed to Microchip TQFP-44 pinout
 ### Action Items
 
 - **[OPTIONAL]** Refill zones to verify 2 zone-connected nets, then re-run kct audit
-- **[OPTIONAL]** Review 15 DRC warnings
+- **[OPTIONAL]** Review 14 DRC warnings
 
 
 \newpage

@@ -112,7 +112,7 @@ unrelated real SDRAM-exerciser build --- see `../real_design/`.)
 | `generate_pcb.py`                                      | Emits the unrouted PCB + holds NETS / DIFFPAIRS / match-group dicts |
 | `generate_design.py`                                   | End-to-end pipeline (schematic + PCB + route + sidecar + DRC); regenerates into `regression-output/` by default, never over the committed fixture |
 | `regression-fixture/matchgroup_test.kicad_sch`         | Generated schematic (committed)                       |
-| `regression-fixture/matchgroup_test.kicad_pcb`         | Unrouted PCB (committed)                              |
+| `regression-fixture/matchgroup_test.kicad_pcb`         | Unrouted PCB (committed; the gate's re-route input --- carries #7557's U4 TMDS ball move, see "U4 TMDS ball move" below) |
 | `regression-fixture/matchgroup_test_routed.kicad_pcb`  | Routed PCB (committed --- consumed by CI DRC gate)    |
 | `regression-fixture/net_class_map.json`                | Sidecar (Phase 3M) consumed by `kct check --net-class-map` |
 | `regression-fixture/placement_delta.json`              | Reviewed swap-group pad re-binding (#5537); replayed only via `--placement-delta` |
@@ -716,7 +716,7 @@ The gate is a sibling of the `diffpair-routing-regression` job (board
    from the net classes) would silently produce a 0-violation report
    and hide the defect.
 4. Asserts signal reach (Issue #7319): at least `REQUIRED_SIGNAL_REACH`
-   (30) of the 31 non-pour nets are complete per `NetStatusAnalyzer`,
+   (31 since #7557) of the 31 non-pour nets are complete per `NetStatusAnalyzer`,
    the same counter board 06's gate uses.  Below it the gate exits 2 and
    names the open nets.  The committed 27/31 routed artifact in this
    directory is below the contract on purpose; it is the witness that
@@ -724,7 +724,8 @@ The gate is a sibling of the `diffpair-routing-regression` job (board
 
 ### Re-route reach (seed 42, Issue #7319)
 
-The gate's seed-42 re-route reaches **30/31** (`TMDS_D0_N` open) with 0
+The gate's seed-42 re-route reaches **31/31** since #7557 (see "U4 TMDS
+ball move" below); before it, **30/31** (`TMDS_D0_N` open) with 0
 placement-delta probes.  #7163 briefly dropped it to 29/31: the DDR strobe
 pair carried no impedance target, so the router synthesized 100 ohm from
 the validator's `.*_[PN]$` default and re-solved the DQS **width** at the
@@ -758,6 +759,54 @@ budget-starved.  No router knob closes it; it needs a placement change or
 joint TMDS escape-corridor allocation (#3673), tracked in #7557.  The run
 was cut at a 600 s wall-clock cap, after the witness, so no final reach
 figure was taken; the 30/31 figure above is unchanged.
+
+#### U4 TMDS ball move (Issue #7557): 30/31 -> 31/31
+
+U4 is a synthetic BGA-49 sink, so which ball carries which TMDS leg is a
+free design choice.  The classifier offers no U4 delta for this open
+(`classify_stuck_nets_from_pcb`: `CONGESTION_SATURATED`,
+`co_oriented_bundle`, `move_part` / `accept_plateau` only, empty
+`proposed`), so the candidates were measured directly.  Each was replayed
+as a U4 `pad_map` through `generate_design.py <dir> --step all --seed 42
+--placement-delta <file>` (C++ backend, `PYTHONHASHSEED=42`, `main` @
+`b77661d2f`); the vacated row-B balls become `GND`:
+
+| U4 TMDS balls (D0_P, D0_N, D1_P, D1_N, D2_P, D2_N) | reach | result |
+|---|---|---|
+| B1..B6 (baseline, row B, one ring in) | 30/31 | `TMDS_D0_N sealed in ... U4.B2 has no legal exit` |
+| `{A2: TMDS_D0_N, B2: GND}` only (2026-10-20 builder note) | 30/31 | seal-in follows the net to `U4.A2` |
+| A1..A6 (outer row A, top edge) | 30/31 | `U4.A2 has no legal exit, closed by TMDS_D1_P, TMDS_D2_P, U4.A1, U4.A3, U4.B2`; copper-LVS also opens `+1V2` (U4.C2) and `+1V8` (U4.D2) |
+| **A1..F1 (outer column 1, J2-facing, top to bottom)** | **31/31** | copper-LVS clean, 0 unconnected; 748 segments, 28 vias, 983.52 mm |
+| G1..B1 (outer column 1, bottom to top) | 31/31 | copper-LVS clean; 757 segments, 30 vias, 985.60 mm |
+
+Column 1 faces J2 (which sits 25 mm to the left at the same y), so every
+leg leaves the package straight toward the connector without threading
+the row-A GND balls.  A1..F1 is committed (fewer vias, shorter) as a
+recipe constant in `generate_pcb.py` / `generate_schematic.py` (both
+generators, so the netlist stays consistent and CI needs no
+`--placement-delta`), and the same 11-pad re-binding is applied to
+`matchgroup_test.kicad_pcb` here so this gate's re-route sees it.  The
+committed schematic and routed PCB in this directory stay the legacy
+witness (the routed one is the 27/31 artifact item 4 relies on).
+
+Before / after on the seed-42 re-route (pinned kicad-cli 10.0.6 via
+`KCT_KICAD_DOCKER=1`; two consecutive `--step all` runs produced
+byte-identical routed PCBs):
+
+| | before (B1..B6) | after (A1..F1) |
+|---|---|---|
+| signal reach | 30/31 | 31/31 |
+| copper-LVS | 1 open (`TMDS_D0_N`) | clean |
+| native DRC (`--refill-zones`, errors) | 7 `skew_out_of_range` + 1 unconnected | 7 `skew_out_of_range` + 0 unconnected |
+| `kct check` blocking (with sidecar) | 6 pair skew, 4 impedance, 2 group skew, 1 connectivity | 7 pair skew, 6 impedance, 3 group skew |
+
+The new `kct check` findings are on the newly routed pair and the group
+it completes, in rule families already tracked: `TMDS_D0` pair skew
+(4.149 mm, P 2 vias / N 0, #7619), `TMDS_D0_P/N` impedance (125.2 ohm,
+#7349) and `HDMI_TMDS_LANES` group skew (7.723 mm, #7550).  They are
+listed by identity in `check_matchgroup_coverage.py`.  `TMDS_D1` pair
+skew fell 4.968 -> 1.584 mm (no longer via-imbalanced, re-pointed from
+#7619 to #7550); `TMDS_D2` moved 0.730 -> 0.833 mm.  No other net's findings changed.
 
 The committed `net_class_map.json` here still describes the committed
 routed artifact (DQS 0.150/0.100, MIPI/HDMI gap 0.100); it is regenerated

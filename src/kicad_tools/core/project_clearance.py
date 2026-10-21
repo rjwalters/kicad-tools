@@ -57,6 +57,25 @@ def _schema_version(settings: dict[str, Any]) -> object:
     return CURRENT_NET_SETTINGS_SCHEMA if version is None else version
 
 
+def _unsupported_schema_message(version: object) -> str:
+    """The refusal for a stated ``net_settings`` schema this module does not model.
+
+    Issue #7711: a schema-2 project (e.g. BeagleConnect Freedom) used to end
+    in a bare "Unsupported net_settings schema: 2".  Schema 2 stays fail-closed
+    -- its field layout has not been verified against the kicad-cli oracle, and
+    guessing would route with possibly weaker constraints -- but the message
+    now names the migration step.
+    """
+    message = f"Unsupported net_settings schema: {version!r} (supported: 3, 4, 5)"
+    if type(version) is int and version < 3:
+        message += (
+            "; migrate the project by opening it in KiCad and saving it "
+            "(Project Setup > Net Classes), which rewrites net_settings in the "
+            "current schema, then re-run"
+        )
+    return message
+
+
 def netclass_assignment_value(settings: dict[str, Any], class_name: str) -> str | list[str]:
     """One ``netclass_assignments`` value in the shape ``settings``' schema reads.
 
@@ -106,7 +125,7 @@ def resolve_project_clearances(
         raise ProjectClearanceError("net_settings must be an object")
     version = _schema_version(settings)
     if type(version) is not int or version not in (3, 4, 5):
-        raise ProjectClearanceError(f"Unsupported net_settings schema: {version!r}")
+        raise ProjectClearanceError(_unsupported_schema_message(version))
     classes = settings.get("classes", [])
     if not isinstance(classes, list):
         raise ProjectClearanceError("net_settings.classes must be an array")

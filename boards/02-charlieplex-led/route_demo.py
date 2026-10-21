@@ -15,6 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from kicad_tools.dev import warn_if_stale
+from kicad_tools.recipes.gate import evaluate_pipeline_gate
 
 # Warn if running source scripts with stale pipx install
 warn_if_stale()
@@ -285,25 +286,22 @@ def main():
         all_nets_routed = routed == total
         print(f"Nets routed: {routed}/{total}")
 
-    if all_nets_routed and drc_passed:
-        print("SUCCESS: All nets routed, DRC passed!")
-    elif all_nets_routed and not drc_passed:
-        print(f"WARNING: All nets routed, but {drc_errors} DRC violation(s) detected!")
-        print("  Review DRC errors before manufacturing.")
-    else:
-        if parsed is not None:
-            print(f"PARTIAL: Routed {routed}/{total} nets")
-        else:
-            print(f"PARTIAL: `kct route` exited with code {result.returncode}")
-        if not drc_passed:
-            print(f"  Additionally, {drc_errors} DRC violation(s) detected.")
-    # Issue #3264: surface mfg bundle freshness so users can see whether
-    # fleet status will report ship_ready=true.
-    print(f"MFG bundle: {'FRESH' if mfg_success else 'STALE (fleet status will block)'}")
+    # Issue #7746: one shared PipelineGateResult drives the printed verdict
+    # and the exit code (Issue #3912), including the ``kct export`` leg.
+    # ``run_drc`` (kct check) is threaded in as a supplemental DRC verdict.
+    gate = evaluate_pipeline_gate(
+        output_path,
+        route_ok=all_nets_routed,
+        route_allowance=0,
+        export_ok=mfg_success,
+        supplemental_drc_ok=drc_passed,
+        supplemental_reason=("kct check reported error-level DRC findings (see DRC output above)"),
+    )
+    for line in gate.summary_lines():
+        print(line)
     print("=" * 60)
 
-    # Return success only if all nets routed AND DRC passed.
-    return 0 if all_nets_routed and drc_passed else 1
+    return 0 if gate.passed else 1
 
 
 if __name__ == "__main__":

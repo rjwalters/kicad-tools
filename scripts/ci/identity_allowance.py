@@ -3,8 +3,8 @@
 The #7270 Q3 operator ruling: a known finding is excepted by *identity* (the
 net it sits on) plus a tracking issue number, never by a per-rule count.  A
 count lets a different new finding hide behind a known one, and leaves spare
-headroom when a listed finding is fixed.  The model is #7108's via-count
-exception (``tests/board03_via_count_exception_7093.py``).
+headroom when a listed finding is fixed.  The model was #7108's board 03
+via-count exception (retired in #7713).
 
 An allowance is ``{(rule_id, identity): tracking_issue}``.  ``identity`` is the
 sorted, ``/``-joined ``items`` (falling back to ``nets``) of one error

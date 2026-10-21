@@ -687,6 +687,10 @@ class TestRipupLoopBackstopHonored:
                 per_net_timeout=per_net_timeout,
                 adaptive=False,
                 perturbation=False,
+                # Issue #7659: tied iterations no longer reset the patience
+                # counter, so this deliberately-plateaued loop would early-stop
+                # before reaching the wall-clock backstop under test.
+                best_stall_patience=None,
             )
         return clock.now, 1000.0, clock
 
