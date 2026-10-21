@@ -364,6 +364,15 @@ class GeneratedZone:
         )
 
 
+def _declared_copper_layer_names(pcb: PCB) -> list[str]:
+    """Canonically named copper layers the board's layer table declares."""
+    return [
+        declared.name
+        for declared in pcb.layers.values()
+        if is_declared_copper_layer(declared.name, declared.type)
+    ]
+
+
 class ZoneGenerator:
     """High-level zone generator for PCB copper pours.
 
@@ -922,14 +931,7 @@ class ZoneGenerator:
 
         # Reject unknown/non-copper/disabled-on-this-board layers before
         # the zone is queued (Issue #4907).
-        validate_copper_layer(
-            layer,
-            (
-                declared.name
-                for declared in self._pcb.layers.values()
-                if is_declared_copper_layer(declared.name, declared.type)
-            ),
-        )
+        validate_copper_layer(layer, _declared_copper_layer_names(self._pcb))
 
         config = ZoneConfig(
             net=net,
@@ -2626,6 +2628,20 @@ def auto_create_zones_for_pour_nets(
         _remove_zones_for_nets(pcb_path, {name for name, _ in pour_nets})
 
     gen = ZoneGenerator.from_pcb(pcb_path, edge_clearance=edge_clearance)
+
+    # Issue #7708: a pre-KiCad-6 board spells its copper layers ``Top`` /
+    # ``VDD`` / ``Bottom``.  ``PCB.copper_layers`` counts them (type-based),
+    # so the allocator would plan ``In1.Cu`` pours that ``add_zone`` then
+    # rejects -- aborting the whole route.  Zones can only be authored on
+    # canonically named layers, so skip the pour (the nets stay routable).
+    if not _declared_copper_layer_names(gen.pcb):
+        print(
+            f"WARNING: {pcb_path}: no canonically named copper layers declared "
+            f"(legacy layer names?); skipping auto-pour for {len(pour_nets)} "
+            "net(s). Upgrade the board with 'kicad-cli pcb upgrade' to enable pours.",
+            file=sys.stderr,
+        )
+        return 0
 
     copper_layer_count = len(gen.pcb.copper_layers)
     # Issue #5590: surface zones already authored into the PCB file to

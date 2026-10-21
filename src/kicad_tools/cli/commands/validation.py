@@ -282,6 +282,9 @@ def run_check_command(args) -> int:
         sub_argv.append("--errors-only")
     if args.strict:
         sub_argv.append("--strict")
+    # Issue #7682: opt in to the host-dependent model_coverage category.
+    if getattr(args, "models_3d", False):
+        sub_argv.append("--3d-models")
     # Issue #4176 / #4673: strict (real-geometry) connectivity is now the
     # default; --strict-connectivity is a compatibility no-op but is still
     # forwarded verbatim, and --legacy-connectivity is the opt-out that

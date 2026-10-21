@@ -129,6 +129,31 @@ class TestPatienceComparatorBehavior:
         assert not worse_drc.is_better_than(best)
 
 
+class TestTieIsNotProgress:
+    """Issue #7659: an equal-scoring later iteration is not progress.
+
+    ``is_better_than`` ranks a later tie as better (so the freshest snapshot
+    is kept), but that must not reset the patience counter, or a plateaued
+    loop runs to ``max_iterations``.
+    """
+
+    def test_tie_replaces_snapshot_but_is_not_progress(self):
+        earlier = IterationMetrics(iteration=1, routed_count=3, overflow=0)
+        later = IterationMetrics(iteration=2, routed_count=3, overflow=0)
+        assert later.is_better_than(earlier)
+        assert not later.made_progress_over(earlier)
+
+    def test_real_improvement_is_progress(self):
+        earlier = IterationMetrics(iteration=1, routed_count=3, overflow=2)
+        later = IterationMetrics(iteration=2, routed_count=3, overflow=1)
+        assert later.made_progress_over(earlier)
+
+    def test_regression_is_not_progress(self):
+        earlier = IterationMetrics(iteration=1, routed_count=3, overflow=0)
+        later = IterationMetrics(iteration=2, routed_count=2, overflow=0)
+        assert not later.made_progress_over(earlier)
+
+
 class TestPatienceEarlyStopEndToEnd:
     """Drive a real Autorouter through ``route_all_negotiated`` with
     a patience value low enough that the loop must terminate before

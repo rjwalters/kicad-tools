@@ -338,6 +338,9 @@ class BoardStatus:
     blockers: list[str] = field(default_factory=list)
     # Issue #7261: open issues recorded in ``output/readiness.json``.
     known_issues: list[dict] = field(default_factory=list)
+    # Issue #7682: host-env 3D model coverage summary (report only, never a
+    # blocker); ``None`` when there is no routed PCB or the audit failed.
+    model_coverage: dict | None = None
 
     @property
     def ship_ready(self) -> bool:
@@ -354,6 +357,7 @@ class BoardStatus:
             "ship_ready": self.ship_ready,
             "blockers": list(self.blockers),
             "known_issues": [dict(entry) for entry in self.known_issues],
+            "model_coverage": self.model_coverage,
         }
 
 
@@ -1201,6 +1205,23 @@ def _compute_blockers(
     return blockers
 
 
+def _detect_model_coverage(routed_pcb: Path) -> dict | None:
+    """Host-env 3D model coverage summary for the board (Issue #7682)."""
+    from kicad_tools.pcb.model_audit import audit_pcb_models
+
+    try:
+        return audit_pcb_models(routed_pcb, env="host").summary()
+    except Exception:  # a report column must never break the survey
+        return None
+
+
+def _model_label(coverage: dict | None) -> str:
+    """Render the 3D column cell: ``covered/total``, or ``-`` when unknown."""
+    if coverage is None:
+        return "-"
+    return f"{coverage['covered']}/{coverage['total']}"
+
+
 def _survey_board(
     board_dir: Path,
     pattern: str,
@@ -1212,6 +1233,7 @@ def _survey_board(
     routing = RoutingStatus()
     mfg = ManufacturingStatus()
     drc = DRCStatus()
+    model_coverage: dict | None = None
 
     if routed_pcb is not None:
         try:
@@ -1248,6 +1270,7 @@ def _survey_board(
         ):
             mfg.stale = True
         drc = _detect_drc(routed_pcb, drc_tolerances or {})
+        model_coverage = _detect_model_coverage(routed_pcb)
 
     blockers = _compute_blockers(routing, mfg, routed_pcb, drc)
     known_issues = _detect_known_issues(board_dir)
@@ -1263,6 +1286,7 @@ def _survey_board(
         drc=drc,
         blockers=blockers,
         known_issues=known_issues,
+        model_coverage=model_coverage,
     )
 
 
@@ -1522,7 +1546,9 @@ def _format_table(
 ) -> str:
     """Format a fixed-width plain-ASCII table."""
     lines: list[str] = []
-    header = f"{'Board':<28} {'Pads':>7} {'%':>5} {'Mfr':<8} {'Stale':<6} {'DRC':>5} Ship?"
+    header = (
+        f"{'Board':<28} {'Pads':>7} {'%':>5} {'Mfr':<8} {'Stale':<6} {'DRC':>5} {'3D':>7} Ship?"
+    )
     sep = "-" * len(header)
     lines.append(header)
     lines.append(sep)
@@ -1541,6 +1567,7 @@ def _format_table(
             mfr = _mfr_letters(b.manufacturing)
             stale = _stale_label(b.manufacturing)
             drc_cell = _drc_label(b.drc)
+            model_cell = _model_label(b.model_coverage)
             if b.ship_ready:
                 # ``YES*``: ready, with disclosed exceptions/advisories.
                 ship = "YES*" if b.known_issues else "YES"
@@ -1549,7 +1576,8 @@ def _format_table(
             if b.known_issues:
                 ship = f"{ship}  {_known_label(b.known_issues)}"
             lines.append(
-                f"{b.name[:28]:<28} {pads:>7} {pct:>5} {mfr:<8} {stale:<6} {drc_cell:>5} {ship}"
+                f"{b.name[:28]:<28} {pads:>7} {pct:>5} {mfr:<8} {stale:<6} {drc_cell:>5} "
+                f"{model_cell:>7} {ship}"
             )
 
     # Footer (always uses full board list, not filtered view).

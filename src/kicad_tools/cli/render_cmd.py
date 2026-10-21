@@ -62,6 +62,7 @@ from kicad_tools.cli.runner import (
     run_pcb_export_svg,
     run_pcb_render,
 )
+from kicad_tools.pcb.model_audit import audit_pcb_models
 
 # Minimum KiCad version required for `kicad-cli pcb render`.
 MIN_RENDER_VERSION = (8, 0, 4)
@@ -185,11 +186,23 @@ def _render_pcb(
     # --- 3D ray-traced renders ---
     if do_3d:
         try:
-            result["model_check"] = inspect_pcb_models(pcb_path, kicad_cli)
+            report = audit_pcb_models(pcb_path, env="host", kicad_cli=kicad_cli)
+            result["model_check"] = inspect_pcb_models(pcb_path, kicad_cli, report=report)
             for missing in result["model_check"]["unresolved_models"]:
                 errors.append(
                     f"3D model {missing['reference']}: {missing['reason']}: {missing['model']}"
                 )
+            # Issue #7682: footprints with no usable model (no_ref, hidden_only,
+            # placeholder, ...) are invisible to the ref walk above; they make
+            # the check ``partial`` rather than ``passed``.
+            result["model_check"]["coverage"] = report.summary()
+            reported = {m["reference"] for m in result["model_check"]["unresolved_models"]}
+            gaps = [g for g in report.gaps if g.reference not in reported]
+            result["model_check"]["uncovered_models"] = [g.to_dict() for g in gaps]
+            for gap in gaps:
+                errors.append(f"3D model {gap.reference}: {gap.klass}: {gap.reason}")
+            if gaps and result["model_check"]["status"] == "passed":
+                result["model_check"]["status"] = "partial"
         except (OSError, ValueError, RuntimeError) as exc:
             result["model_check"]["status"] = "failed"
             errors.append(f"3D model inspection failed: {exc}")
