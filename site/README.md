@@ -154,6 +154,12 @@ particular, #5318 demonstrated why updating only Board05's viewer would leave
 its stale PCB in the downloadable project. Verify viewer, renders and packages
 as one set.
 
+Between publishes, the weekly warn-only workflow
+[`site-drift.yml`](../.github/workflows/site-drift.yml) (also runnable locally
+as `python3 scripts/ci/site_drift.py`) reports when the live footer version,
+board readiness/evidence dates or PCB/package hashes differ from this
+checkout. Run it after every publish; it should report no drift.
+
 The deployment workflow requires `uv`, Node/npm and authenticated `wrangler`
 (or its `npx` fallback). `kicad-cli` is optional for the script, but required
 for fresh renders. If it is absent, inspect and report the provenance of
