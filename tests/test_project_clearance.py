@@ -157,6 +157,38 @@ def test_named_classes_still_fail_explicitly_on_unsupported_schema():
         authored_netclass_clearances(data, ["USB1"])
 
 
+@pytest.mark.parametrize("version", [2, 1])
+def test_schema_2_fails_closed_naming_the_migration_step(version):
+    """Issue #7711: schema 2 is not modelled; the refusal says how to migrate."""
+    from kicad_tools.core.project_clearance import authored_netclass_clearances
+
+    data = project()
+    data["net_settings"]["meta"] = {"version": version}
+    with pytest.raises(ProjectClearanceError, match=rf"schema: {version}\b.*saving it") as exc:
+        authored_netclass_clearances(data, ["USB1"])
+    assert "open" in str(exc.value).lower()
+
+
+def test_schema_2_default_only_stays_routable():
+    from kicad_tools.core.project_clearance import authored_netclass_clearances
+
+    data = {
+        "net_settings": {
+            "meta": {"version": 2},
+            "classes": [{"name": "Default", "clearance": 0.2}],
+        }
+    }
+    assert authored_netclass_clearances(data, ["A"]) == {}
+
+
+@pytest.mark.parametrize("version", [True, "2", 2.0])
+def test_non_int_schema_versions_stay_rejected(version):
+    data = project()
+    data["net_settings"]["meta"] = {"version": version}
+    with pytest.raises(ProjectClearanceError, match="Unsupported net_settings schema"):
+        resolve_project_clearances(data, ["USB1"])
+
+
 # ---------------------------------------------------------------------------
 # Issue #6262: a project without a modellable schema STATEMENT is not an
 # unmodellable project.  Absent/null net_settings means "no authored

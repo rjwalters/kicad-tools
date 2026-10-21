@@ -53,6 +53,13 @@ MIGRATED_BOARDS = [
     "boards/07-matchgroup-test/generate_design.py",
 ]
 
+# Recipes that also run ``kct export`` and gate on it (issue #7740).
+EXPORT_GATED_BOARDS = MIGRATED_BOARDS + [
+    "boards/04-stm32-devboard/generate_design.py",
+    "boards/05-bldc-motor-controller/design.py",
+    "boards/06-diffpair-test/generate_design.py",
+]
+
 # Hand-rolled per-leg result f-strings the migration REMOVES.  Their presence
 # would mean a SUMMARY line is authored independently of the gate again -- the
 # precise way exit-code and SUMMARY drift apart (#3912).
@@ -62,6 +69,13 @@ FORBIDDEN_HANDROLLED_SNIPPETS = [
     "if drc_ok else 'FAIL",
     "if lvs_success else 'FAIL'",
     "bundle: {'PASS'",  # the "bundle written == board clean" conflation
+]
+
+# Standalone scripts that also run ``kct export`` and must gate on it
+# (issue #7746): board 02's route demo and board 05's archived DRV8301 recipe.
+EXPORT_GATED_SCRIPTS = [
+    "boards/02-charlieplex-led/route_demo.py",
+    "boards/05-bldc-motor-controller/legacy_drv8301/design.py",
 ]
 
 
@@ -100,11 +114,31 @@ class TestGateWiring:
                 "exit code cannot diverge (#3912)."
             )
 
-    def test_bundle_wording_is_written_not_pass(self, board_source: str) -> None:
-        # The manufacturing-bundle line must say WRITTEN/FAILED (bundle was
-        # produced), never PASS -- "bundle written" is not "board DRC-clean".
-        if "MFG bundle:" in board_source or "MFG:" in board_source:
-            assert "'WRITTEN'" in board_source
+    def test_export_verdict_is_a_gate_leg(self, board_source: str) -> None:
+        # Issue #7740: a failed ``kct export`` must reach the gate (FAIL,
+        # exit 1) instead of being only printed beside a green Overall.
+        assert "export_ok=" in board_source
+        # The MFG line now comes from gate.summary_lines(), never hand-rolled.
+        assert "'WRITTEN' if" not in board_source
+
+
+@pytest.mark.parametrize("rel", EXPORT_GATED_BOARDS)
+def test_every_exporting_recipe_passes_export_ok(rel: str) -> None:
+    source = (REPO_ROOT / rel).read_text()
+    assert "export_ok=" in source, f"{rel} does not gate on its export verdict (#7740)"
+    assert "'WRITTEN' if" not in source
+
+
+@pytest.mark.parametrize("rel", EXPORT_GATED_SCRIPTS)
+def test_standalone_scripts_derive_verdict_from_gate(rel: str) -> None:
+    source = (REPO_ROOT / rel).read_text()
+    assert source.count("evaluate_pipeline_gate(") == 1
+    assert "export_ok=mfg_success" in source
+    assert "for line in gate.summary_lines():" in source
+    assert "gate.passed" in source
+    # No parallel hand-rolled export verdict beside the gate's MFG line.
+    assert "'WRITTEN' if" not in source
+    assert "'FRESH' if" not in source
 
 
 # --------------------------------------------------------------------------

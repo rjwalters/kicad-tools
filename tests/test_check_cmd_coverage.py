@@ -187,8 +187,12 @@ class TestCategoryListMatchesDispatcher:
     # * ``spec_conformance`` (Issue #7292): ``project.kct`` requirements vs the
     #   board, located from the PCB *path*; the bare call leaves
     #   ``pcb_path=None``, making the closure a silent no-op.
+    # * ``model_coverage`` (Issue #7682): 3D model coverage audit.  It parses
+    #   the PCB at its *path*; the bare call leaves ``pcb_path=None``, making
+    #   the closure a silent no-op.  Not a checker method.
     NON_CHECKER_CATEGORIES = frozenset(
         {
+            "model_coverage",
             "sch_fields",
             "doc_drift",
             "netclass_floor",

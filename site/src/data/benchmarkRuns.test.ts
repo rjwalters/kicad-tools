@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -29,4 +29,20 @@ it("keeps unknown and refused timing distinct from completed routing speed", () 
  expect(attemptDuration({...report,timing:{wall_clock_s:4,valid:true,refusal_reason:null}})).toContain("unknown phase");
  expect(attemptDuration({...report,timing:{wall_clock_s:4,valid:false,refusal_reason:"backend unavailable"}})).toBe("Not reported: backend unavailable");
  expect(attemptDuration({...report,timing:{wall_clock_s:4,valid:true,refusal_reason:null,measured_phase:"timeout"}})).toBe("4.0 s — timeout phase");
+});
+it("skips companion files silently but still warns on a malformed report", () => {
+  const root = mkdtempSync(join(tmpdir(), "companions-")); roots.push(root);
+  mkdirSync(join(root, "2026-09-15"));
+  const dir = join(root, "2026-09-15");
+  writeFileSync(join(dir, "provenance.json"), JSON.stringify({ implementation_commit: "x" }));
+  writeFileSync(join(dir, "acceptance-inspection.json"), JSON.stringify({ checks: [] }));
+  writeFileSync(join(dir, "ok.zero-touch.json"), JSON.stringify(report));
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    expect(loadBenchmarkRuns(root).map(r => r.path)).toEqual(["2026-09-15/ok.zero-touch.json"]);
+    expect(warn).not.toHaveBeenCalled();
+    writeFileSync(join(dir, "bad.zero-touch.json"), JSON.stringify({ ...report, schema_version: 99 }));
+    expect(loadBenchmarkRuns(root)).toHaveLength(1);
+    expect(warn).toHaveBeenCalledTimes(1);
+  } finally { warn.mockRestore(); }
 });

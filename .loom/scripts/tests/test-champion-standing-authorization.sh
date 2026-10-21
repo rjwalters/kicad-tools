@@ -120,7 +120,7 @@ class_entry_valid() {
     while IFS= read -r cond; do
         [ -z "$cond" ] && continue
         case "$cond" in
-            judgeApproval | greenCi) ;;
+            judgeApproval | greenCi | authorIsDependabot | noMajorBump) ;;
             *)
                 echo "INVALID: unrecognized condition '$cond'"
                 return 0
@@ -263,6 +263,7 @@ run_eval() {
         FAST_PATH_FILES="$files"
         LABELS="$labels"
         STUB_API="$api"
+        rm -f "$CFG_DIR/shacount"
         gh() { stub_gh "$@"; }
         read_ci_checks() {
             NO_CHECKS=false
@@ -289,14 +290,45 @@ run_eval() {
 
 # stub_gh: the three forge reads the shipped code makes. Reads STUB_API / API_COUNT.
 stub_gh() {
-    local arg is_files=0 is_count=0 is_jq=0
+    local arg is_files=0 is_count=0 is_jq=0 is_sha=0 contents="" n
     for arg in "$@"; do
         case "$arg" in
             */pulls/1/files) is_files=1 ;;
             */pulls/1) is_count=1 ;;
+            */contents/*) contents="$arg" ;;
+            .head.sha) is_sha=1 ;;
             --jq) is_jq=1 ;;
         esac
     done
+    if [ "$is_sha" -eq 1 ]; then
+        # The Nth head-SHA read of one run: STUB_SHA_DRIFT=1 moves the head on the 2nd.
+        n=$(($(cat "$CFG_DIR/shacount" 2>/dev/null || echo 0) + 1))
+        echo "$n" >"$CFG_DIR/shacount"
+        [ "${STUB_SHA_FAIL:-}" = "1" ] && return 1
+        if [ "${STUB_SHA_DRIFT:-}" = "1" ] && [ "$n" -ge 2 ]; then echo moved999; else echo "${STUB_HEAD_SHA:-abc123}"; fi
+        return 0
+    fi
+    if [ -n "$contents" ]; then
+        # repos/{owner}/{repo}/contents/<path>?ref=<sha>: served from STUB_CONTENT_DIR at the stub head only.
+        local cpath="${contents#*/contents/}"
+        [ "${cpath##*?ref=}" = "${STUB_HEAD_SHA:-abc123}" ] || return 1
+        cpath="${cpath%%\?ref=*}"
+        [ -f "${STUB_CONTENT_DIR:-/nonexistent}/$cpath" ] || return 1
+        cat "$STUB_CONTENT_DIR/$cpath"
+        return 0
+    fi
+    if [ "$is_count" -eq 1 ] && printf '%s' "$*" | grep -qF '.user.login'; then
+        # authorIsDependabot's read; unset STUB_AUTHOR = the read fails.
+        [ -n "${STUB_AUTHOR:-}" ] || return 1
+        printf '%s\n' "$STUB_AUTHOR"
+        return 0
+    fi
+    if [ "$is_count" -eq 1 ] && [ "$is_jq" -eq 1 ] && [ "${*: -1}" = ".title" ]; then
+        # noMajorBump's read; unset STUB_TITLE = the read fails.
+        [ -n "${STUB_TITLE:-}" ] || return 1
+        printf '%s\n' "$STUB_TITLE"
+        return 0
+    fi
     if [ "$is_count" -eq 1 ]; then
         [ "${API_COUNT:-}" = "FAIL" ] && return 1
         if [ -n "${API_COUNT:-}" ]; then echo "$API_COUNT"; else printf '%s' "$STUB_API" | jq -s 'add | length'; fi
@@ -729,6 +761,102 @@ case "$out" in *"FAIL: Critical file modified: .github/workflows/loom-judge.yml"
 assert_eq "FAIL" "$r" "criterion #3 block: a kept-set workflow restores the FAIL"
 
 echo
+echo "--- #12954: privilegedContentPatterns (capability from head contents, not filename) ---"
+
+FIXTURE_DIR="$TEST_DIR/fixtures/champion-workflows"
+PRIV_RX='["secrets\\.(?!GITHUB_TOKEN\\b)","secrets:\\s*inherit","^\\s*environment:",":\\s*write\\b","write-all","id-token","pull_request_target","workflow_run","^\\s*release:","types:.*released","wrangler\\s+deploy","npm\\s+publish","gh\\s+release"]'
+cap_class() { # cap_class <privilegedContentPatterns-json|-> -> a ci class with no name excludes
+    local extra=""
+    [ "$1" = "-" ] || extra=",\"privilegedContentPatterns\":$1"
+    printf '{"champion":{"standingAuthorizations":[{"id":"ci-cap","filePatterns":[".github/workflows/*.yml"],"conditions":["judgeApproval","greenCi"],"coversCriticalFiles":true,"forbiddenDiffPatterns":["^\\\\s*permissions:","id-token","secrets\\\\.","pull_request_target"]%s}]}}' "$extra"
+}
+CAP_CLASS="$(cap_class "$PRIV_RX")"
+CONTENT_DIR="$(mktemp -d)"
+trap 'rm -f "$EVAL_SRC" "$LOADER_SRC" "$CRIT_SRC" "${BLOCK_SRC:-}"; rm -rf "$CFG_DIR" "$CONTENT_DIR"' EXIT
+
+# put_content <pr-path> <fixture-file>: serve the fixture as the head contents of <pr-path>.
+put_content() {
+    mkdir -p "$CONTENT_DIR/$(dirname "$1")"
+    cp "$FIXTURE_DIR/$2" "$CONTENT_DIR/$1"
+}
+one_file_api() { # one_file_api <path> <added-line> [status]
+    jq -n -c --arg f "$1" --arg l "$2" --arg s "${3:-modified}" '[{filename:$f, status:$s, patch:("@@ -1 +1,2 @@\n name: x\n" + $l)}]'
+}
+
+# The shared fixture set: every row runs through the shipped evaluator.
+while IFS=$'\t' read -r id pr_path fixture line expected note; do
+    case "$id" in "" | \#*) continue ;; esac
+    rm -rf "$CONTENT_DIR"; mkdir -p "$CONTENT_DIR"
+    put_content "$pr_path" "$fixture"
+    out="$(STUB_CONTENT_DIR="$CONTENT_DIR" run_eval critical "$CAP_CLASS" "$pr_path" "$(one_file_api "$pr_path" "$line")" green "loom:pr")"
+    case "$expected" in covered) want="ELIGIBLE:ci-cap" ;; *) want="NOT ELIGIBLE:" ;; esac
+    assert_eq "$want" "$out" "fixture $id ($pr_path, $fixture): $expected -- $note"
+done <"$FIXTURE_DIR/cases.tsv"
+
+# Edge cases around the content read.
+rm -rf "$CONTENT_DIR"; mkdir -p "$CONTENT_DIR"
+CI_PATH=".github/workflows/ci.yml"
+API_CI="$(one_file_api "$CI_PATH" "+    runs-on: ubuntu-24.04")"
+put_content "$CI_PATH" ci-github-token-only.yml
+export STUB_CONTENT_DIR="$CONTENT_DIR"
+
+out="$(run_eval critical "$CAP_CLASS" "$CI_PATH" "$API_CI" green "loom:pr")"
+assert_eq "ELIGIBLE:ci-cap" "$out" "negative control: GITHUB_TOKEN-only, read-only workflow is covered"
+
+out="$(run_eval critical "$CAP_CLASS" ".github/workflows/missing.yml" "$(one_file_api .github/workflows/missing.yml '+# x')" green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "content the contents API cannot serve fails closed"
+
+: >"$CONTENT_DIR/$CI_PATH"
+out="$(run_eval critical "$CAP_CLASS" "$CI_PATH" "$API_CI" green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "empty content fails closed"
+put_content "$CI_PATH" ci-github-token-only.yml
+
+out="$(run_eval critical "$CAP_CLASS" "$CI_PATH" "$(one_file_api "$CI_PATH" '+x' removed)" green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "a removed file fails closed"
+
+out="$(STUB_SHA_FAIL=1 run_eval critical "$CAP_CLASS" "$CI_PATH" "$API_CI" green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "an unreadable head SHA fails closed"
+
+out="$(STUB_SHA_DRIFT=1 run_eval critical "$CAP_CLASS" "$CI_PATH" "$API_CI" green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "a head SHA that moved while the contents were read fails closed"
+
+out="$(run_eval critical "$(cap_class '["("]')" "$CI_PATH" "$API_CI" green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "an invalid privilegedContentPatterns regex fails closed"
+
+out="$(run_eval critical "$(cap_class '"secrets"')" "$CI_PATH" "$API_CI" green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "a non-array privilegedContentPatterns is malformed and fails closed"
+
+out="$(run_eval critical "$(cap_class '[1]')" "$CI_PATH" "$API_CI" green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "a non-string privilegedContentPatterns entry is malformed and fails closed"
+
+out="$(run_eval critical "$(cap_class '[]')" "$CI_PATH" "$API_CI" green "loom:pr")"
+assert_eq "ELIGIBLE:ci-cap" "$out" "an empty privilegedContentPatterns is today's class (no content read)"
+
+# Absent key: no contents read at all, so even a privileged file is judged by the old rules.
+put_content "$CI_PATH" ci-with-cloudflare-secret.yml
+out="$(STUB_CONTENT_DIR=/nonexistent run_eval critical "$(cap_class -)" "$CI_PATH" "$API_CI" green "loom:pr")"
+assert_eq "ELIGIBLE:ci-cap" "$out" "absent privilegedContentPatterns: no content read, behavior unchanged"
+out="$(run_eval critical "$CAP_CLASS" "$CI_PATH" "$API_CI" green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "the same privileged file is held once the key is set"
+
+# Criterion #2 ('any' mode) honours the key too.
+out="$(run_eval any "$CAP_CLASS" "$CI_PATH" "$API_CI" green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "criterion #2: privileged head contents hold an ordinary class"
+put_content "$CI_PATH" ci-github-token-only.yml
+out="$(run_eval any "$CAP_CLASS" "$CI_PATH" "$API_CI" green "loom:pr")"
+assert_eq "ELIGIBLE:ci-cap" "$out" "criterion #2: unprivileged head contents are covered"
+
+# criticalFilesOnly: only the critical-file hits are read.
+CAP_CFO="${CAP_CLASS/\"coversCriticalFiles\":true/\"criticalFilesOnly\":true}"
+MIX_CAP="$(jq -n -c --arg wf "$CI_PATH" '[{filename:$wf, status:"modified", patch:"@@\n+# c"},{filename:"docs/guide.md", status:"modified", patch:"@@\n+x"}]')"
+out="$(run_eval critical "$CAP_CFO" "$(printf '%s\ndocs/guide.md' "$CI_PATH")" "$MIX_CAP" green "loom:pr")"
+assert_eq "ELIGIBLE:ci-cap" "$out" "criticalFilesOnly: the workflow is read, the docs file is not (no content for it)"
+put_content "$CI_PATH" ci-with-cloudflare-secret.yml
+out="$(run_eval critical "$CAP_CFO" "$(printf '%s\ndocs/guide.md' "$CI_PATH")" "$MIX_CAP" green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "criticalFilesOnly: a privileged workflow is held"
+unset STUB_CONTENT_DIR
+
+echo
 echo "--- Doc pins: #12528 ---"
 assert_doc_contains "$CHAMPION_MD" '`coversCriticalFiles` (#12528' "champion-pr-merge.md documents coversCriticalFiles"
 assert_doc_contains "$CHAMPION_MD" '`excludeFilePatterns` (#12528' "champion-pr-merge.md documents excludeFilePatterns"
@@ -740,6 +868,9 @@ assert_doc_contains "$PROMPT_DIR/champion-critical-file-hold.md" "A covering sta
 assert_doc_contains "$CHAMPION_MD" '`criticalFilesOnly` (#12648' "champion-pr-merge.md documents criticalFilesOnly"
 assert_doc_contains "$PROMPT_DIR/champion-critical-file-hold.md" '"criticalFilesOnly": true' "champion-critical-file-hold.md documents the criticalFilesOnly class"
 assert_doc_contains "$CHAMPION_REF_MD" "Critical files only (#12648)" "champion-reference.md documents the criticalFilesOnly class"
+assert_doc_contains "$CHAMPION_MD" '`privilegedContentPatterns` (#12954' "champion-pr-merge.md documents privilegedContentPatterns"
+assert_doc_contains "$CHAMPION_MD" "standing_auth_content_clear" "champion-pr-merge.md ships the head-contents check"
+assert_doc_contains "$CHAMPION_REF_MD" "Classify by capability, not by filename (#12954)" "champion-reference.md documents privilegedContentPatterns"
 
 echo
 echo "--- Doc pins: champion-reference.md documents the new mechanism ---"
@@ -755,6 +886,53 @@ assert_doc_contains "$CHAMPION_REF_MD" \
 assert_doc_contains "$CHAMPION_REF_MD" \
     "#6850" \
     "champion-reference.md's decision matrix references #6850"
+
+echo
+echo "--- #12948: Dependabot class (authorIsDependabot / noMajorBump) ---"
+
+DEP_CLASS='{"champion":{"standingAuthorizations":[{"id":"dependabot-bumps","filePatterns":["package.json","package-lock.json","Cargo.toml","Cargo.lock"],"conditions":["authorIsDependabot","judgeApproval","greenCi"],"coversCriticalFiles":true}]}}'
+DEP_NOMAJOR='{"champion":{"standingAuthorizations":[{"id":"dependabot-bumps","filePatterns":["package.json","package-lock.json"],"conditions":["authorIsDependabot","noMajorBump","judgeApproval","greenCi"],"coversCriticalFiles":true}]}}'
+DEPFILES="$(printf 'package.json\npackage-lock.json')"
+
+out="$(STUB_AUTHOR='dependabot[bot] Bot' run_eval critical "$DEP_CLASS" "$DEPFILES" AUTO green "loom:pr")"
+assert_eq "ELIGIBLE:dependabot-bumps" "$out" "Dependabot manifest+lockfile bump, approved + green: criterion #3 passes"
+
+out="$(STUB_AUTHOR='someone User' run_eval critical "$DEP_CLASS" "$DEPFILES" AUTO green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "a human PR with the same manifest diff is held"
+
+out="$(STUB_AUTHOR='dependabot[bot] User' run_eval critical "$DEP_CLASS" "$DEPFILES" AUTO green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "a human account named dependabot[bot] (type User) is held"
+
+out="$(STUB_AUTHOR='' run_eval critical "$DEP_CLASS" "$DEPFILES" AUTO green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "a missing or unreadable author fails closed"
+
+out="$(STUB_AUTHOR='dependabot[bot] Bot' run_eval critical "$DEP_CLASS" "$(printf 'package.json\nsrc/index.js')" AUTO green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "a Dependabot PR touching a non-manifest file is held"
+
+out="$(STUB_AUTHOR='dependabot[bot] Bot' run_eval critical "$DEP_CLASS" "$DEPFILES" AUTO red "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "a Dependabot bump with red CI is held"
+
+out="$(STUB_AUTHOR='dependabot[bot] Bot' run_eval critical "$DEP_CLASS" "$DEPFILES" AUTO green "loom:review-requested")"
+assert_eq "NOT ELIGIBLE:" "$out" "a Dependabot bump without Judge approval is held"
+
+out="$(STUB_AUTHOR='dependabot[bot] Bot' STUB_TITLE='Bump vitest from 4.0.1 to 4.1.0' run_eval critical "$DEP_NOMAJOR" "$DEPFILES" AUTO green "loom:pr")"
+assert_eq "ELIGIBLE:dependabot-bumps" "$out" "noMajorBump: a minor bump still merges"
+
+out="$(STUB_AUTHOR='dependabot[bot] Bot' STUB_TITLE='Bump vitest from 4.1.0 to 5.0.0' run_eval critical "$DEP_NOMAJOR" "$DEPFILES" AUTO green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "noMajorBump: an opted-out major is held"
+
+out="$(STUB_AUTHOR='dependabot[bot] Bot' STUB_TITLE='Bump sha2 from 0.10.9 to 0.11.0' run_eval critical "$DEP_NOMAJOR" "$DEPFILES" AUTO green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "noMajorBump: a 0.x minor move counts as major and is held"
+
+out="$(STUB_AUTHOR='dependabot[bot] Bot' STUB_TITLE='Bump the npm-minor-patch group with 3 updates' run_eval critical "$DEP_NOMAJOR" "$DEPFILES" AUTO green "loom:pr")"
+assert_eq "NOT ELIGIBLE:" "$out" "noMajorBump: an unparseable (group) title fails closed"
+
+out="$(STUB_AUTHOR='dependabot[bot] Bot' STUB_TITLE='Bump vitest from 4.0.1 to 5.0.0' run_eval critical "$DEP_CLASS" "$DEPFILES" AUTO green "loom:pr")"
+assert_eq "ELIGIBLE:dependabot-bumps" "$out" "without noMajorBump, majors merge by default"
+
+assert_doc_contains "$CHAMPION_MD" "### Step 3.5: Rebase conflicting Dependabot siblings (#12948)" "champion-pr-merge.md ships the sibling-rebase step"
+assert_doc_contains "$CHAMPION_MD" "@dependabot rebase" "sibling-rebase step comments @dependabot rebase"
+assert_doc_contains "$CHAMPION_REF_MD" "authorIsDependabot" "champion-reference.md documents the Dependabot condition"
 
 echo
 echo "--- Resolved effective config (#12591) ---"

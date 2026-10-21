@@ -32,6 +32,22 @@ from kicad_tools.pcb.models3d import (
 # Fixtures
 # --------------------------------------------------------------------------
 
+
+@pytest.fixture(autouse=True)
+def _hermetic_model_dir(monkeypatch):
+    """Keep the #7684 existence check independent of the host's KiCad install.
+
+    With no discoverable model dir a ``${KICADn_3DMODEL_DIR}`` ref is
+    unverifiable (never dangling), so the pre-existing fake-library tests are
+    unaffected; the existence tests pass an explicit ``model_dir``.
+    """
+    from kicad_tools.cli import runner
+
+    for var in runner.KICAD_3DMODEL_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(runner, "find_kicad_3dmodel_dir", lambda *a, **k: None)
+
+
 MOD_WITH_MODEL = """(footprint "R_0805_2012Metric"
 \t(version 20240108)
 \t(layer "F.Cu")
@@ -1825,3 +1841,286 @@ class TestRefreshFlagThreading:
         args, captured = self._run(monkeypatch, ["pcb", "add-3d-models", str(pcb)], pcb)
         assert args.refresh is False
         assert captured["refresh"] is False
+
+
+# --------------------------------------------------------------------------
+# Existence-checked tiers (#7684 Part A)
+# --------------------------------------------------------------------------
+
+
+def _mod_with_ref(name: str, ref: str) -> str:
+    return (
+        f'(footprint "{name}"\n\t(layer "F.Cu")\n'
+        '\t(pad "1" smd rect\n\t\t(at 0 0)\n\t\t(size 1 1)\n'
+        '\t\t(layers "F.Cu" "F.Mask" "F.Paste")\n\t)\n'
+        f'\t(model "{ref}"\n\t\t(offset\n\t\t\t(xyz 0 0 0)\n\t\t)\n'
+        "\t\t(scale\n\t\t\t(xyz 1 1 1)\n\t\t)\n"
+        "\t\t(rotate\n\t\t\t(xyz 0 0 0)\n\t\t)\n\t)\n)\n"
+    )
+
+
+_PART_PCB = (
+    '(kicad_pcb\n\t(version 20240108)\n\t(footprint "Lib:Part"\n\t\t(layer "F.Cu")\n'
+    '\t\t(at 10 10)\n\t\t(property "Reference" "U1"\n\t\t\t(at 0 0 0)\n\t\t)\n'
+    '\t\t(pad "1" smd rect\n\t\t\t(at 0 0)\n\t\t\t(size 1 1)\n'
+    '\t\t\t(layers "F.Cu" "F.Mask" "F.Paste")\n\t\t)\n\t)\n)\n'
+)
+
+
+def _dangling_setup(tmp_path: Path, *, variant_exists: bool):
+    """Library with ``Lib:Part`` whose own ref dangles, plus a ``Part_EP``
+    variant whose ref points at a real file iff *variant_exists*."""
+    models = tmp_path / "3dmodels"
+    (models / "Lib.3dshapes").mkdir(parents=True)
+    if variant_exists:
+        (models / "Lib.3dshapes" / "Part_EP.step").write_text("STEP")
+    root = tmp_path / "footprints"
+    (root / "Lib.pretty").mkdir(parents=True)
+    (root / "Lib.pretty" / "Part.kicad_mod").write_text(
+        _mod_with_ref("Part", "${KICAD10_3DMODEL_DIR}/Lib.3dshapes/Part.step")
+    )
+    (root / "Lib.pretty" / "Part_EP.kicad_mod").write_text(
+        _mod_with_ref("Part_EP", "${KICAD10_3DMODEL_DIR}/Lib.3dshapes/Part_EP.step")
+    )
+    return LibraryPaths(footprints_path=root, source="config"), models
+
+
+class TestExistenceChecked:
+    def test_missing_ref_falls_through_to_existing_variant(self, tmp_path):
+        paths, models = _dangling_setup(tmp_path, variant_exists=True)
+        pcb = tmp_path / "b.kicad_pcb"
+        pcb.write_text(_PART_PCB)
+        resolver = make_library_resolver(paths, model_dir=models)
+        new_text, report = add_model_refs_to_text(_PART_PCB, resolver)
+        assert report.patched == ["Lib:Part"]
+        assert "Part_EP.step" in new_text
+        assert "Lib.3dshapes/Part.step" not in new_text
+        assert report.dangling_in_library == {}
+
+    def test_no_existing_candidate_is_reported_and_left_bare(self, tmp_path):
+        paths, models = _dangling_setup(tmp_path, variant_exists=False)
+        resolver = make_library_resolver(paths, model_dir=models)
+        new_text, report = add_model_refs_to_text(_PART_PCB, resolver)
+        assert new_text == _PART_PCB
+        assert report.patched == []
+        assert report.no_model_in_library == []
+        assert report.dangling_in_library == {
+            "Lib:Part": "${KICAD10_3DMODEL_DIR}/Lib.3dshapes/Part.step"
+        }
+
+    def test_allow_dangling_restores_old_insert(self, tmp_path):
+        paths, models = _dangling_setup(tmp_path, variant_exists=False)
+        resolver = make_library_resolver(paths, model_dir=models, allow_dangling=True)
+        new_text, report = add_model_refs_to_text(_PART_PCB, resolver)
+        assert report.patched == ["Lib:Part"]
+        assert "Lib.3dshapes/Part.step" in new_text
+        assert report.dangling_in_library == {}
+
+    def test_unverifiable_without_model_dir_is_not_dangling(self, tmp_path):
+        paths, _ = _dangling_setup(tmp_path, variant_exists=False)
+        resolver = make_library_resolver(paths)  # autouse fixture: no model dir
+        _, report = add_model_refs_to_text(_PART_PCB, resolver)
+        assert report.patched == ["Lib:Part"]
+
+    def test_env_var_overrides_model_dir(self, tmp_path, monkeypatch):
+        paths, models = _dangling_setup(tmp_path, variant_exists=True)
+        monkeypatch.setenv("KICAD10_3DMODEL_DIR", str(models))
+        resolver = make_library_resolver(paths, model_dir=tmp_path / "elsewhere")
+        _, report = add_model_refs_to_text(_PART_PCB, resolver)
+        assert "Lib:Part" in report.patched  # variant exists under the env dir
+
+    def test_partially_dangling_keeps_only_existing_nodes(self, tmp_path):
+        models = tmp_path / "3dmodels"
+        (models / "Lib.3dshapes").mkdir(parents=True)
+        (models / "Lib.3dshapes" / "ok.step").write_text("STEP")
+        two = _mod_with_ref("Part", "${KICAD10_3DMODEL_DIR}/Lib.3dshapes/missing.step").replace(
+            "\n)\n", '\n\t(model "${KICAD10_3DMODEL_DIR}/Lib.3dshapes/ok.step"\n\t)\n)\n'
+        )
+        root = tmp_path / "footprints"
+        (root / "Lib.pretty").mkdir(parents=True)
+        (root / "Lib.pretty" / "Part.kicad_mod").write_text(two)
+        paths = LibraryPaths(footprints_path=root, source="config")
+        resolver = make_library_resolver(paths, model_dir=models)
+        new_text, report = add_model_refs_to_text(_PART_PCB, resolver)
+        assert report.patched == ["Lib:Part"]
+        assert "ok.step" in new_text and "missing.step" not in new_text
+
+    def test_refresh_rewrites_dangling_ref_when_variant_exists(self, tmp_path):
+        paths, models = _dangling_setup(tmp_path, variant_exists=True)
+        stale = _PART_PCB.replace("\t)\n)\n", '\t\t(model "stale/gone.step"\n\t\t)\n\t)\n)\n')
+        resolver = make_library_resolver(paths, model_dir=models)
+        new_text, report = add_model_refs_to_text(stale, resolver, refresh=True)
+        assert report.refreshed == ["Lib:Part"]
+        assert "stale/gone.step" not in new_text and "Part_EP.step" in new_text
+
+    def test_refresh_without_alternative_keeps_and_reports(self, tmp_path):
+        paths, models = _dangling_setup(tmp_path, variant_exists=False)
+        stale = _PART_PCB.replace("\t)\n)\n", '\t\t(model "stale/gone.step"\n\t\t)\n\t)\n)\n')
+        resolver = make_library_resolver(paths, model_dir=models)
+        new_text, report = add_model_refs_to_text(stale, resolver, refresh=True)
+        assert new_text == stale
+        assert report.refresh_kept == ["Lib:Part"]
+        assert "Lib:Part" in report.dangling_in_library
+
+    def test_add_model_refs_threads_allow_dangling(self, tmp_path, monkeypatch):
+        paths, models = _dangling_setup(tmp_path, variant_exists=False)
+        monkeypatch.setenv("KICAD10_3DMODEL_DIR", str(models))
+        pcb = tmp_path / "b.kicad_pcb"
+        pcb.write_text(_PART_PCB)
+        report = add_model_refs(pcb, library_paths=paths)
+        assert report.dangling_in_library and pcb.read_text() == _PART_PCB
+        report = add_model_refs(pcb, library_paths=paths, allow_dangling=True)
+        assert report.patched == ["Lib:Part"]
+
+    def test_pure_insertion_invariant_holds(self, tmp_path):
+        paths, models = _dangling_setup(tmp_path, variant_exists=True)
+        resolver = make_library_resolver(paths, model_dir=models)
+        new_text, _ = add_model_refs_to_text(_PART_PCB, resolver)
+        removed = [
+            line
+            for line in difflib.unified_diff(
+                _PART_PCB.splitlines(), new_text.splitlines(), lineterm="", n=0
+            )
+            if line.startswith("-") and not line.startswith("---")
+        ]
+        assert removed == []
+
+
+# --------------------------------------------------------------------------
+# Generators own their models + regeneration guard (#7684 Part B)
+# --------------------------------------------------------------------------
+
+
+class TestEnsureModelsAndGuard:
+    def test_ensure_models_patches_in_place(self, tmp_path):
+        from kicad_tools.pcb.models3d import ensure_models
+
+        paths = _make_library(tmp_path)
+        pcb = tmp_path / "b.kicad_pcb"
+        pcb.write_text(PCB_TEXT)
+        report = ensure_models(pcb, library_paths=paths)
+        assert report.patched == ["Resistor_SMD:R_0805_2012Metric"]
+        assert "R_0805_2012Metric.step" in pcb.read_text()
+
+    def test_ensure_models_without_libraries_is_noop(self, tmp_path):
+        from kicad_tools.pcb.models3d import ensure_models
+
+        pcb = tmp_path / "b.kicad_pcb"
+        pcb.write_text(PCB_TEXT)
+        report = ensure_models(
+            pcb, library_paths=LibraryPaths(footprints_path=tmp_path / "nope", source="config")
+        )
+        assert not report.changed and pcb.read_text() == PCB_TEXT
+
+    def test_model_coverage_counts_per_reference(self):
+        from kicad_tools.pcb.models3d import model_coverage
+
+        assert model_coverage(PCB_TEXT) == {
+            "R1": 0,
+            "MountingHole:MountingHole_3.2mm_M3#1": 0,
+            "Custom_Lib:Not_A_Standard_Part#2": 0,
+        }
+
+    def test_regeneration_guard_fails_on_synthetic_regen_dropping_a_model(self, tmp_path):
+        from kicad_tools.pcb.models3d import compare_model_coverage
+
+        committed = PCB_TEXT.replace(
+            "\t\t(embedded_fonts no)\n",
+            '\t\t(model "a.step"\n\t\t\t(offset (xyz 0 0 0))\n\t\t)\n\t\t(embedded_fonts no)\n',
+        )
+        assert "a.step" in committed  # fixture guard
+        # Same board regenerated without the model: coverage dropped.
+        assert compare_model_coverage(committed, PCB_TEXT) == {"R1": (1, 0)}
+        # Regenerated + ensure_models restores it: guard passes.
+        pcb = tmp_path / "regen.kicad_pcb"
+        pcb.write_text(PCB_TEXT)
+        add_model_refs(pcb, library_paths=_make_library(tmp_path))
+        assert compare_model_coverage(committed, pcb.read_text()) == {}
+
+    def test_scaffold_template_includes_ensure_models_step(self):
+        scaffold = (
+            Path(__file__).resolve().parents[1] / ".claude/commands/kct/board-recipe-scaffold.md"
+        ).read_text()
+        assert "ensure_models" in scaffold
+        assert "kicad_tools.pcb.models3d" in scaffold
+
+    @pytest.mark.parametrize("board", ["00-simple-led", "01-voltage-divider"])
+    def test_board_recipes_call_ensure_models(self, board):
+        recipe = Path(__file__).resolve().parents[1] / "boards" / board / "generate_design.py"
+        text = recipe.read_text()
+        assert "from kicad_tools.pcb.models3d import ensure_models" in text
+        assert text.index("ensure_models(pcb_path)") < text.index("route_pcb(pcb_path")
+
+
+def test_model_insertion_leaves_drc_json_identical(tmp_path):
+    """Model nodes are render metadata: DRC JSON is equal before and after.
+
+    Scratch-only comparison of two runs of the *same* host kicad-cli (no
+    evidence is committed from it), so it needs no pinned toolchain.
+    """
+    import json
+    import shutil
+    import subprocess
+
+    cli = shutil.which("kicad-cli")
+    board = Path(__file__).resolve().parents[1] / "boards/00-simple-led/output"
+    src = board / "simple_led_routed.kicad_pcb"
+    if cli is None or not src.exists():
+        pytest.skip("kicad-cli or committed board 00 PCB unavailable")
+
+    models = tmp_path / "3dmodels"
+    root = tmp_path / "footprints"
+    for lib, name in [
+        ("Resistor_SMD", "R_0805_2012Metric"),
+        ("LED_THT", "LED_D5.0mm"),
+        ("Connector_PinHeader_2.54mm", "PinHeader_1x02_P2.54mm_Vertical"),
+    ]:
+        (models / f"{lib}.3dshapes").mkdir(parents=True, exist_ok=True)
+        (models / f"{lib}.3dshapes" / f"{name}.step").write_text("STEP")
+        (root / f"{lib}.pretty").mkdir(parents=True, exist_ok=True)
+        (root / f"{lib}.pretty" / f"{name}.kicad_mod").write_text(
+            _mod_with_ref(name, f"${{KICAD10_3DMODEL_DIR}}/{lib}.3dshapes/{name}.step")
+        )
+
+    before = tmp_path / "before.kicad_pcb"
+    after = tmp_path / "after.kicad_pcb"
+    # Board 00 carries its model refs since #7685; strip them so the insertion
+    # under test has something to do.
+    from kicad_tools.pcb.models3d import _model_node_spans, iter_footprint_blocks
+
+    text = src.read_text()
+    for block in reversed(iter_footprint_blocks(text)):
+        body = text[block.start : block.end + 1]
+        for a, b in reversed(_model_node_spans(body)):
+            body = body[:a] + body[b:]
+        text = text[: block.start] + body + text[block.end + 1 :]
+    before.write_text(text)
+    shutil.copy(before, after)
+    report = add_model_refs(
+        after,
+        library_paths=LibraryPaths(footprints_path=root, source="config"),
+        resolver=make_library_resolver(
+            LibraryPaths(footprints_path=root, source="config"), model_dir=models
+        ),
+    )
+    assert report.patched, "fixture guard: nothing was inserted"
+
+    def drc(pcb: Path) -> dict:
+        out = pcb.with_suffix(".json")
+        proc = subprocess.run(
+            [cli, "pcb", "drc", "--format", "json", "--output", str(out), str(pcb)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if not out.exists():
+            pytest.skip(f"kicad-cli drc produced no report: {proc.stderr[-200:]}")
+        data = json.loads(out.read_text())
+        # kicad-cli's report order is not deterministic (even for one file run
+        # twice), so compare each list as a sorted multiset.
+        return {
+            k: sorted(json.dumps(v, sort_keys=True) for v in data.get(k) or [])
+            for k in ("violations", "unconnected_items", "schematic_parity")
+        }
+
+    assert drc(before) == drc(after)

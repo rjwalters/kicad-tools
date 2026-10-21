@@ -1,13 +1,14 @@
 {
-  "file": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-6076-regen-d/boards/09-usbc-pd-power/output/usbc_pd_power.kicad_pcb",
+  "file": "boards/09-usbc-pd-power/output/usbc_pd_power.kicad_pcb",
   "manufacturer": "jlcpcb",
+  "pcb_sha256": "587e063d8931f2b4e96619c430074f47b2649f06ca296c192ab44f3886441a9b",
   "layers": 4,
   "summary": {
     "errors": 51,
     "warnings": 147,
     "infos": 2,
     "waived": 0,
-    "rules_checked": 60,
+    "rules_checked": 70,
     "rules_checked_by_rule": {
       "connectivity": 1,
       "copper_sliver": 1,
@@ -25,12 +26,18 @@
       "netclass_via_drill": 1,
       "netclass_annular_ring": 1,
       "sch_field_offset": 1,
-      "sch_field_overlap": 1
+      "sch_field_overlap": 1,
+      "spec_conformance_dimensions": 1,
+      "spec_conformance_layers": 1,
+      "spec_conformance_min_trace": 1,
+      "spec_conformance_min_via": 1,
+      "spec_conformance_min_drill": 1,
+      "spec_conformance_target_fab": 1
     },
     "passed": false,
     "stale_waivers": 0,
-    "coverage_checked": 32,
-    "coverage_skipped": 4,
+    "coverage_checked": 37,
+    "coverage_skipped": 5,
     "coverage_unknown": [],
     "coverage_blocking_unknown": []
   },
@@ -4387,7 +4394,7 @@
   "meta_checks": {
     "drc": {
       "status": "FAILED",
-      "detail": "60 rules checked, 51 error(s), 147 warning(s)"
+      "detail": "70 rules checked, 51 error(s), 147 warning(s)"
     },
     "erc": {
       "status": "PASSED",
@@ -4484,6 +4491,12 @@
       "reason": null,
       "blocking": true
     },
+    "diffpair_uncoupled_length": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
     "dimensions": {
       "status": "checked",
       "state": "checked",
@@ -4525,6 +4538,12 @@
       "state": "checked",
       "reason": null,
       "blocking": true
+    },
+    "model_coverage": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
     },
     "netclass_clearance_copper": {
       "status": "checked",
@@ -4574,6 +4593,12 @@
       "reason": null,
       "blocking": false
     },
+    "routing_policy": {
+      "status": "skipped:no_declared_policies",
+      "state": "skipped",
+      "reason": "no_declared_policies",
+      "blocking": true
+    },
     "sch_fields": {
       "status": "checked",
       "state": "checked",
@@ -4604,7 +4629,25 @@
       "reason": null,
       "blocking": true
     },
+    "spec_conformance": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "thermal_asymmetry": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
     "via_in_pad": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "via_type": {
       "status": "checked",
       "state": "checked",
       "reason": null,
@@ -4640,5 +4683,7 @@
       "reason": null,
       "blocking": true
     }
-  }
+  },
+  "verdict": "fail",
+  "exit_code": 2
 }

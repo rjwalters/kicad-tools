@@ -1,7 +1,7 @@
 {
   "file": "output/simple_led_routed.kicad_pcb",
   "manufacturer": "jlcpcb",
-  "pcb_sha256": "fbcd0bf9044fa2309a03cbf718147f7da8136c7e29d8fcca8571d69c01699115",
+  "pcb_sha256": "ae165509b324c2191aa5c46c5423c9025b5bd630f89b30063a2644ceeccac46d",
   "layers": 2,
   "summary": {
     "errors": 0,
@@ -35,7 +35,7 @@
     },
     "passed": true,
     "stale_waivers": 0,
-    "coverage_checked": 35,
+    "coverage_checked": 36,
     "coverage_skipped": 5,
     "coverage_unknown": [
       "spec_conformance"
@@ -213,6 +213,12 @@
       "state": "checked",
       "reason": null,
       "blocking": true
+    },
+    "model_coverage": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
     },
     "netclass_clearance_copper": {
       "status": "checked",

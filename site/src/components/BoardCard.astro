@@ -13,7 +13,7 @@
  */
 import ReadinessProgress from "./ReadinessProgress.astro";
 import type { Board } from "../data/types.ts";
-import { displayStatus, displayStatusLabel } from "../data/boardStatus.ts";
+import { displayStatus, displayStatusLabel, boardDisplayName } from "../data/boardStatus.ts";
 
 interface Props {
   board: Board;
@@ -47,7 +47,7 @@ function thumbnailFor(b: Board): { src: string; isPlaceholder: boolean } {
 }
 
 const thumb = thumbnailFor(board);
-const displayName = board.name ?? board.slug;
+const displayName = boardDisplayName(board);
 const href = `/${board.slug}`;
 
 // The displayed badge is derived from BOTH status and drc_violations so a
@@ -123,6 +123,14 @@ const statusLabel = displayStatusLabel(board);
           <li class="badge">
             <span class="badge-label">Parts</span>
             <span class="badge-value">{board.part_count}</span>
+          </li>
+        )
+      }
+      {
+        typeof board.model_coverage?.percent === "number" && (
+          <li class="badge">
+            <span class="badge-label">3D models</span>
+            <span class="badge-value">{board.model_coverage.percent}%</span>
           </li>
         )
       }

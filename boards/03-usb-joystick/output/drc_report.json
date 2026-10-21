@@ -1,11 +1,11 @@
 {
   "file": "boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb",
   "manufacturer": "jlcpcb-tier1",
-  "pcb_sha256": "e87aedb5f5cf2d4a132e7029deb0707de299494014fdcb657b77a83025a6d7f6",
+  "pcb_sha256": "cc396d018ca6d6bd4dffc7796869be3fe5a27a560cb503fb55aaf8221f7f2119",
   "layers": 4,
   "summary": {
     "errors": 0,
-    "warnings": 1,
+    "warnings": 0,
     "infos": 10,
     "waived": 0,
     "rules_checked": 74,
@@ -37,7 +37,7 @@
     },
     "passed": true,
     "stale_waivers": 0,
-    "coverage_checked": 34,
+    "coverage_checked": 35,
     "coverage_skipped": 6,
     "coverage_unknown": [
       "spec_conformance"
@@ -91,10 +91,10 @@
       "rule_id": "diffpair_length_skew",
       "type": "diffpair_length_skew",
       "severity": "info",
-      "message": "Engaged differential pair USB_D+/USB_D- length-skew 1.320 mm within tolerance 2.500 mm [protocol:USB2_FS (Renesas, Guidelines for Full-Speed USB2.0 Board Design, Table 2)]",
+      "message": "Engaged differential pair USB_D+/USB_D- length-skew 0.224 mm within tolerance 2.500 mm [protocol:USB2_FS (Renesas, Guidelines for Full-Speed USB2.0 Board Design, Table 2)]",
       "location": null,
       "layer": null,
-      "actual_value": 1.3203,
+      "actual_value": 0.2243,
       "required_value": 2.5,
       "items": [],
       "nets": [
@@ -104,7 +104,7 @@
       "status": "info",
       "waived": false,
       "key": "diffpair_length_skew||USB_D+,USB_D-|",
-      "evidence_hash": "ev2:24f99b0407ad2b85"
+      "evidence_hash": "ev2:249a34ecd3788d86"
     },
     {
       "rule_id": "diffpair_length_skew",
@@ -129,10 +129,10 @@
       "rule_id": "diffpair_routing_continuity",
       "type": "diffpair_routing_continuity",
       "severity": "info",
-      "message": "Engaged differential pair USB_D+/USB_D- routing continuity 32.8% below threshold 70.0% (info only; see diffpair_uncoupled_length)",
+      "message": "Engaged differential pair USB_D+/USB_D- routing continuity 32.7% below threshold 70.0% (info only; see diffpair_uncoupled_length)",
       "location": null,
       "layer": null,
-      "actual_value": 0.328,
+      "actual_value": 0.3265,
       "required_value": 0.7,
       "items": [
         "USB_D+",
@@ -145,7 +145,7 @@
       "status": "info",
       "waived": false,
       "key": "diffpair_routing_continuity|USB_D+,USB_D-|USB_D+,USB_D-|",
-      "evidence_hash": "ev2:0b655ff0af640db1"
+      "evidence_hash": "ev2:cd7cd7a9a153fb15"
     },
     {
       "rule_id": "diffpair_routing_continuity",
@@ -170,10 +170,10 @@
       "rule_id": "diffpair_uncoupled_length",
       "type": "diffpair_uncoupled_length",
       "severity": "info",
-      "message": "Differential pair USB_D+/USB_D- uncoupled length 7.212 mm (P 7.212, N 7.212) within limit 19.050 mm = 6.35 mm x 3 components [protocol:USB2_FS (TI SPRAAR7J \u00a73.3 (breakout within 0.25 in of the package); high-speed guidance, applied to full speed)]",
+      "message": "Differential pair USB_D+/USB_D- uncoupled length 9.325 mm (P 9.325, N 9.325) within limit 19.050 mm = 6.35 mm x 3 components [protocol:USB2_FS (TI SPRAAR7J \u00a73.3 (breakout within 0.25 in of the package); high-speed guidance, applied to full speed)]",
       "location": null,
       "layer": null,
-      "actual_value": 7.212,
+      "actual_value": 9.3249,
       "required_value": 19.05,
       "items": [],
       "nets": [
@@ -183,16 +183,16 @@
       "status": "info",
       "waived": false,
       "key": "diffpair_uncoupled_length||USB_D+,USB_D-|",
-      "evidence_hash": "ev2:09acf969bc7618b7"
+      "evidence_hash": "ev2:4f292b3c09637870"
     },
     {
       "rule_id": "diffpair_uncoupled_length",
       "type": "diffpair_uncoupled_length",
       "severity": "info",
-      "message": "Differential pair USB_D+/USB_D- worst per-terminal uncoupled length 2.007 mm within limit 6.350 mm [protocol:USB2_FS (TI SPRAAR7J \u00a73.3 (breakout within 0.25 in of the package); high-speed guidance, applied to full speed)] (kct-only: KiCad has no per-terminal uncoupled check)",
+      "message": "Differential pair USB_D+/USB_D- worst per-terminal uncoupled length 1.696 mm within limit 6.350 mm [protocol:USB2_FS (TI SPRAAR7J \u00a73.3 (breakout within 0.25 in of the package); high-speed guidance, applied to full speed)] (kct-only: KiCad has no per-terminal uncoupled check)",
       "location": null,
       "layer": null,
-      "actual_value": 2.0074,
+      "actual_value": 1.6964,
       "required_value": 6.35,
       "items": [],
       "nets": [
@@ -202,29 +202,7 @@
       "status": "info",
       "waived": false,
       "key": "diffpair_uncoupled_length||USB_D+,USB_D-|",
-      "evidence_hash": "ev2:0e7fe9124864e003"
-    },
-    {
-      "rule_id": "diffpair_uncoupled_length",
-      "type": "diffpair_uncoupled_length",
-      "severity": "warning",
-      "message": "Differential pair USB_D+/USB_D- has unequal via counts (USB_D+: 2, USB_D-: 3)",
-      "location": null,
-      "layer": null,
-      "actual_value": 1.0,
-      "required_value": 0.0,
-      "items": [
-        "USB_D+",
-        "USB_D-"
-      ],
-      "nets": [
-        "USB_D+",
-        "USB_D-"
-      ],
-      "status": "warning",
-      "waived": false,
-      "key": "diffpair_uncoupled_length|USB_D+,USB_D-|USB_D+,USB_D-|",
-      "evidence_hash": "ev2:5379b5283436f44f"
+      "evidence_hash": "ev2:2ba79ad66effea18"
     },
     {
       "rule_id": "diffpair_uncoupled_length",
@@ -386,6 +364,12 @@
       "state": "checked",
       "reason": null,
       "blocking": true
+    },
+    "model_coverage": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
     },
     "netclass_clearance_copper": {
       "status": "checked",

@@ -457,11 +457,12 @@ POUR_NETS: list[str] = ["GND", "+1V2", "+1V8"]
 # Issue #7319: reach contract, board 06's #3413 phase 5 shape.  The CI gate
 # (``check_matchgroup_coverage.py``) counts the re-routed artifact's COMPLETE
 # signal nets per ``NetStatusAnalyzer`` (pour nets excluded: 34 - 3 = 31) and
-# fails (exit 2, open nets named) below this.  30 is the seed-42 reach both
-# before #7163 and with the DQS pair sized like MIPI/HDMI (TMDS_D0_N open on
-# both).  Without it the #7163 drop of DQ0 (30 -> 29) passed silently and
-# showed up only as a tripled gate wall time.
-REQUIRED_SIGNAL_REACH: int = 30
+# fails (exit 2, open nets named) below this.  31 (every signal net) since
+# issue #7557 moved U4's TMDS balls to its J2-facing outer column: before
+# that the seed-42 reach was 30 (TMDS_D0_N sealed in at U4.B2).  Without the
+# contract the #7163 drop of DQ0 (30 -> 29) passed silently and showed up
+# only as a tripled gate wall time.
+REQUIRED_SIGNAL_REACH: int = 31
 
 # Issue #3617: pour-connectivity contract.  When True, the CI gate runs
 # this recipe's shapely copper-union audit (``_audit_pour_nets``) against
@@ -2724,6 +2725,8 @@ def export_manufacturing_bundle(routed_path: Path, output_dir: Path) -> bool:
         # pre-existing drc_report.json next to the routed PCB contains net
         # shorts, export still aborts non-zero.  Cosmetic-check skipping is
         # safe here; shipping a shorted board is not.
+        "--spec",
+        str(Path(__file__).resolve().parent / "project.kct"),
         "--skip-preflight",
     ]
     print(f"\n   Command: {' '.join(cmd)}")
@@ -2880,29 +2883,21 @@ def main() -> int:
             route_success = route_pcb(pcb_path, routed_path)
             drc_ok = run_drc(routed_path)
 
-            # LVS (#3779, wired schematic #4012) -- HONESTLY DIRTY on this
-            # board.  The fixture schematic is now fully wired
-            # (generate_schematic.py emits a wire stub + global label for
-            # all 244 pins, PIN_NETS mirroring generate_pcb.py
-            # pad-for-pad), so the copper comparator binds 244/244 pads
-            # and carries real evidence.  Board 07 routes PARTIAL by
-            # design -- 1 unroutable net (#7557 / #3438: TMDS_D0_N; the other
-            # four former opens route as of 2026-10-20) -- so copper-LVS
-            # reports exactly that 1 open and ``lvs.json`` carries the honest
-            # ``clean=false`` verdict (label comparator: clean; it is run
-            # so the payload records both legs).  ``require_clean=False``
-            # (advisory) because the known open is EXPECTED here: a hard
-            # gate would abort the recipe before the manufacturing-bundle
-            # export.  ``kct board-metrics`` renders lvs_clean=false /
-            # lvs_mismatches=1 and downgrades status to 'partial' -- that
-            # is the truthful gallery state.  The board-07-end-to-end CI
-            # job regenerates into a tmp dir and asserts exactly this 1
-            # named open and nothing else (``check_copper_lvs.py
-            # --expect-opens`` + ``check_board_00_e2e.py
-            # --lvs-known-opens``), so a NEW open/short -- or TMDS_D0_N
-            # becoming routable -- fails the job and forces this comment
-            # to be updated.  This step only runs in ``--step all`` (the
-            # ``--step route`` CI branch has no schematic).
+            # LVS (#3779, wired schematic #4012).  The fixture schematic is
+            # fully wired (generate_schematic.py emits a wire stub + global
+            # label for all 244 pins, PIN_NETS mirroring generate_pcb.py
+            # pad-for-pad), so the copper comparator binds 244/244 pads and
+            # carries real evidence.  Since #7557 (U4's TMDS balls on its
+            # J2-facing column) every signal net routes on seed 42, so the
+            # honest verdict is ``clean=true``; before it, TMDS_D0_N was the
+            # one expected open.  ``require_clean=False`` keeps a dirty
+            # verdict advisory HERE so the recipe still reaches the
+            # manufacturing-bundle export and writes ``lvs.json`` for triage;
+            # the verdict gates through ``lvs_ok`` below and the
+            # board-07-end-to-end CI job (``check_copper_lvs.py`` with no
+            # known opens + ``check_board_00_e2e.py --lvs-only``).  This step
+            # only runs in ``--step all`` (the ``--step route`` CI branch has
+            # no schematic).
             copper_clean, _label_clean = write_lvs_report(
                 sch_path,
                 routed_path,
@@ -2913,14 +2908,10 @@ def main() -> int:
             )
             if not copper_clean:
                 print(
-                    "[lvs] copper-LVS is dirty -- EXPECTED on this "
-                    "partial-by-design board (#7557 / #3438 known open: "
-                    "TMDS_D0_N).  lvs.json carries "
-                    "the honest clean=false verdict; board-metrics "
-                    "downgrades status to 'partial'.  The CI e2e job "
-                    "asserts the mismatch set is EXACTLY that 1 open and "
-                    "no shorts (check_copper_lvs.py --expect-opens); see "
-                    "the summary above for what this run actually produced."
+                    "[lvs] copper-LVS is dirty -- a REGRESSION: every signal "
+                    "net routes on seed 42 since #7557.  lvs.json carries the "
+                    "clean=false verdict; see the summary above for the "
+                    "opens/shorts this run produced."
                 )
 
             # Export manufacturing bundle (#3147) so ``kct fleet status``
@@ -2937,38 +2928,35 @@ def main() -> int:
             # ``DRC:`` line -- exactly the exit-code-vs-SUMMARY drift this
             # issue eliminates.
             #
-            # Board 07 is PARTIAL BY DESIGN: 1 unroutable net
-            # (#7557 / #3438: TMDS_D0_N).  The gate
-            # reflects that PARTIAL state HONESTLY rather than papering over
-            # it:
+            # The gate reflects the board's state HONESTLY rather than
+            # papering over it:
             #   * ``route_ok=route_success`` -- ``kct route`` exits non-zero
-            #     on a partial route, so ``route_success`` is False and the
-            #     ``Routing:`` line honestly reads PARTIAL.  ``route_allowance``
-            #     is left at 0 ON PURPOSE: inflating it to swallow the known
-            #     opens would flip the ``Routing:`` line to a FALSE "SUCCESS"
-            #     (route_status() reads SUCCESS whenever route_ok is True),
-            #     which is the opposite of reflecting PARTIAL honestly.
-            #   * ``lvs_ok=None`` -- the known copper-LVS open IS the documented
-            #     #3438 plateau (``write_lvs_report(require_clean=False)``
-            #     above keeps it advisory); making it a gating leg would
-            #     FALSELY FAIL the board for being exactly at its plateau.
+            #     unless the copper is DRC-clean: since #7557 all 31 signal
+            #     nets connect on seed 42, but the skew/impedance residuals
+            #     (#7550/#7349/#7619) make it exit 3 ("connected but DRC
+            #     dirty"), so the ``Routing:`` line reads PARTIAL.
+            #     ``route_allowance`` is left at 0 ON PURPOSE: inflating it
+            #     would flip the line to a FALSE "SUCCESS" (route_status()
+            #     reads SUCCESS whenever route_ok is True).
+            #   * ``lvs_ok=copper_clean`` -- since #7557 the copper-LVS verdict
+            #     is clean, so it is a gating leg: a new open or short fails it.
             #   * ``supplemental_drc_ok=drc_ok`` -- ``run_drc``
             #     (``kct check --mfr jlcpcb``) is the only engine that sees
             #     the match-group / diffpair length-skew rule families
             #     kicad-cli cannot express, so its verdict tightens the DRC
             #     leg (the authoritative geometric ``kicad-cli --refill-zones``
             #     leg runs inside the gate).
-            # Net effect: the board honestly ends FAIL (route PARTIAL + real
+            # Net effect: the board honestly ends FAIL (route exit 3 + real
             # kct-check DRC residuals) and exits non-zero -- NOT a false exit 0
-            # for a board that is not fully routed and not DRC-clean.  The
-            # board-07-end-to-end CI job tolerates this non-zero recipe exit
-            # (`|| true`) and gates on the explicit known-opens + allowlist
-            # asserters instead.
+            # for a board that is not DRC-clean.  The board-07-end-to-end CI
+            # job tolerates this non-zero recipe exit (`|| true`) and gates on
+            # the LVS-clean + allowlist asserters instead.
             gate = evaluate_pipeline_gate(
                 routed_path,
                 route_ok=route_success,
                 route_allowance=0,
-                lvs_ok=None,
+                lvs_ok=copper_clean,
+                export_ok=mfg_ok,
                 supplemental_drc_ok=drc_ok,
                 supplemental_reason=(
                     "kct check --mfr jlcpcb reported error-level DRC findings "
@@ -2988,11 +2976,6 @@ def main() -> int:
             print("\nResults:")
             for line in gate.summary_lines():
                 print(line)
-            # #3912: mfg_ok means `kct export` wrote a bundle (exit 0), not
-            # that the board is DRC-clean.  Board DRC status is the "DRC:"
-            # line above.  Label "WRITTEN" so PASS is never mistaken for a
-            # DRC pass.
-            print(f"  MFG:     {'WRITTEN' if mfg_ok else 'FAILED (see above)'}")
 
             return gate.exit_code()
 

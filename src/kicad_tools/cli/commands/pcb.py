@@ -13,7 +13,7 @@ def run_pcb_command(args) -> int:
     if not args.pcb_command:
         print("Usage: kicad-tools pcb <command> [options] <file>")
         print(
-            "Commands: summary, footprints, nets, traces, stackup, zones, strip, reinforce, dedupe, reannotate, sync-netlist, annotate-pintypes, add-3d-models, remove-footprint, move-footprint, page-fit, center-on-sheet, lock-footprints, unlock-footprints, add-zone, snap-rotation, edit-outline, net-audit, diff, export-dsn, import-ses, current-paths-audit"
+            "Commands: summary, footprints, nets, traces, stackup, zones, strip, reinforce, dedupe, reannotate, sync-netlist, annotate-pintypes, add-3d-models, remove-footprint, move-footprint, page-fit, center-on-sheet, lock-footprints, unlock-footprints, add-zone, snap-rotation, edit-outline, net-audit, model-audit, diff, export-dsn, import-ses, current-paths-audit"
         )
         return 1
 
@@ -116,6 +116,10 @@ def run_pcb_command(args) -> int:
     # Handle net-audit command
     if args.pcb_command == "net-audit":
         return _run_net_audit_command(args, pcb_path)
+
+    # Handle model-audit command (issue #7682)
+    if args.pcb_command == "model-audit":
+        return _run_model_audit_command(args, pcb_path)
 
     # Handle export-dsn command
     if args.pcb_command == "export-dsn":
@@ -1169,7 +1173,11 @@ def _run_add_3d_models_command(args, pcb_path: Path) -> int:
         fetch_lcsc=getattr(args, "fetch_lcsc", False),
         dry_run=getattr(args, "dry_run", False),
         refresh=getattr(args, "refresh", False),
+        allow_dangling=getattr(args, "allow_dangling", False),
         output_format=getattr(args, "format", "text"),
+        lcsc_from_bom=getattr(args, "lcsc_from_bom", True),
+        bom=Path(args.bom) if getattr(args, "bom", None) else None,
+        procurement=Path(args.procurement) if getattr(args, "procurement", None) else None,
     )
 
 
@@ -1749,6 +1757,38 @@ def _run_edit_outline_command(args, pcb_path: Path) -> int:
         file=sys.stderr,
     )
     return 1
+
+
+def _run_model_audit_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb model-audit' command (issue #7682)."""
+    from kicad_tools.pcb.model_audit import audit_pcb_models, resolve_pinned_model_dir
+
+    model_dir = Path(args.model_dir) if getattr(args, "model_dir", None) else None
+    not_synced = model_dir is None and args.env == "pinned" and resolve_pinned_model_dir() is None
+    try:
+        report = audit_pcb_models(pcb_path, env=args.env, model_dir=model_dir)
+    except Exception as e:
+        print(f"Error auditing PCB: {e}", file=sys.stderr)
+        return 1
+
+    if args.format == "json":
+        doc = report.to_dict()
+        if model_dir is None and args.env == "pinned":
+            doc["synced"] = not not_synced
+        print(json.dumps(doc, indent=2))
+        return 0
+
+    if not_synced:
+        print("pinned model set not synced (run `kct models sync`)")
+    pct = "n/a" if report.percent is None else f"{report.percent:g}%"
+    print(f"3D model coverage ({report.env}): {report.covered}/{report.total} ({pct})")
+    counts = {k: v for k, v in report.counts().items() if v}
+    print("  " + ", ".join(f"{k}={v}" for k, v in counts.items()))
+    for entry in report.gaps:
+        print(f"  {entry.reference:<8} {entry.klass:<16} {entry.lib_id}  {entry.reason}")
+    for entry in report.suspects:
+        print(f"  {entry.reference:<8} suspect          {entry.lib_id}  {entry.suspect}")
+    return 0
 
 
 def _run_net_audit_command(args, pcb_path: Path) -> int:

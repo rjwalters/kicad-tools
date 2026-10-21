@@ -8,7 +8,7 @@ from kicad_tools.core.atomic_write import atomic_write_text
 from kicad_tools.core.kicad_lock import check_kicad_lock
 from kicad_tools.exceptions import FileFormatError
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
-from kicad_tools.sexp import SExp, parse_string, serialize_sexp
+from kicad_tools.sexp import SExp, parse_string, read_text_exact, serialize_sexp
 
 
 def load_schematic(path: str | Path) -> SExp:
@@ -36,7 +36,7 @@ def load_schematic(path: str | Path) -> SExp:
             ],
         )
 
-    text = path.read_text(encoding="utf-8")
+    text = read_text_exact(path)
     sexp = parse_string(text)
 
     if sexp.tag != "kicad_sch":
@@ -93,7 +93,7 @@ def load_symbol_lib(path: str | Path) -> SExp:
             ],
         )
 
-    text = path.read_text(encoding="utf-8")
+    text = read_text_exact(path)
     sexp = parse_string(text)
 
     if sexp.tag != "kicad_symbol_lib":
@@ -268,7 +268,7 @@ def load_footprint(path: str | Path) -> SExp:
             ],
         )
 
-    text = path.read_text(encoding="utf-8")
+    text = read_text_exact(path)
     sexp = parse_string(text)
 
     # KiCad 5 uses "module", KiCad 6+ uses "footprint"
@@ -339,7 +339,7 @@ def load_design_rules(path: str | Path) -> SExp:
             ],
         )
 
-    text = path.read_text(encoding="utf-8")
+    text = read_text_exact(path)
 
     # DRU files are a sequence of S-expressions, wrap in a container
     # to parse as a single tree

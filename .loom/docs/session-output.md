@@ -55,8 +55,8 @@ relaxes any of them.
    half and export the surviving prefix verbatim.
 3. **OTLP only.** The kind is declared `native: false` in the registry
    ([`telemetry/kinds.rs`](https://github.com/rjwalters/loom/blob/main/loom-daemon/src/telemetry/kinds.rs)), so the
-   native HTTPS `/ingest` backend — the managed-cloud sink — **never** receives
-   it, on any configuration. Enabling live output cannot start shipping session
+   native HTTPS `/ingest` backend — the managed-cloud sink, removed in #12813 —
+   never received it, on any configuration. Enabling live output cannot start shipping session
    text to a managed destination, and cannot add or alter an exporter: the sink
    is built only from OTLP queues that were *already* resolved. No OTLP
    exporter configured means nothing is published at all.

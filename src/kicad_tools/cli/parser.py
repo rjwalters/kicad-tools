@@ -269,6 +269,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_net_status_parser(subparsers)
     _add_fleet_parser(subparsers)
     _add_ecosystem_parser(subparsers)
+    _add_models_parser(subparsers)
     _add_skills_parser(subparsers)
     _add_agent_guide_parser(subparsers)
     _add_render_parser(subparsers)
@@ -951,6 +952,13 @@ def _add_check_parser(subparsers) -> None:
     )
     check_parser.add_argument("--errors-only", action="store_true")
     check_parser.add_argument("--strict", action="store_true", help="Exit with code 2 on warnings")
+    check_parser.add_argument(
+        "--3d-models",
+        dest="models_3d",
+        action="store_true",
+        help="Run the model_coverage category (issue #7682); default-on since #7685, "
+        "so this flag is a no-op kept for compatibility",
+    )
     check_parser.add_argument(
         "--strict-connectivity",
         dest="strict_connectivity",
@@ -2719,8 +2727,9 @@ def _add_pcb_parser(subparsers) -> None:
     pcb_add_models.add_argument(
         "--lcsc-models",
         dest="lcsc_models",
-        help="Path to an lcsc_models.json sidecar mapping lib_id -> LCSC "
-        "C-number, enabling the LCSC/EasyEDA fetch-on-demand tier. Bodies are "
+        help="Optional lcsc_models.json OVERRIDE of the lib_id -> LCSC C-numbers "
+        "that are otherwise resolved from the board's BOM / procurement review "
+        "(stale sidecar entries are reported). Bodies are "
         "resolved from a cache dir (${KCT_LCSC_3D_DIR}, default "
         "~/.cache/kicad-tools/lcsc-3d/) and emitted as portable "
         "${KCT_LCSC_3D_DIR}/C#####.step refs. An entry may also use the object "
@@ -2731,7 +2740,28 @@ def _add_pcb_parser(subparsers) -> None:
         "--fetch-lcsc",
         action="store_true",
         help="Fetch missing LCSC STEP bodies from EasyEDA on a cache miss "
-        "(default: cache-only, no network; also enabled by KCT_LCSC_FETCH=1)",
+        "(default: cache-only, no network; also enabled by KCT_LCSC_FETCH=1). "
+        "Per-user and opt-in: fetched models stay in your local cache and must "
+        "never be committed or shipped. Capped per run (KCT_LCSC_MAX_FETCHES, "
+        "default 25) and rate-limited (KCT_LCSC_FETCH_INTERVAL seconds)",
+    )
+    pcb_add_models.add_argument(
+        "--no-lcsc-bom",
+        dest="lcsc_from_bom",
+        action="store_false",
+        default=True,
+        help="Do not derive LCSC C-numbers from the board's BOM / procurement "
+        "review / footprint properties (use only --lcsc-models)",
+    )
+    pcb_add_models.add_argument(
+        "--bom",
+        help="BOM CSV to resolve LCSC C-numbers from (default: assembly-bom.csv "
+        "next to the PCB or in its parent directory)",
+    )
+    pcb_add_models.add_argument(
+        "--procurement",
+        help="procurement-review.json mapping MPN -> LCSC C-number (default: "
+        "discovered next to the PCB or in its parent directory)",
     )
     pcb_add_models.add_argument(
         "--format",
@@ -2752,6 +2782,13 @@ def _add_pcb_parser(subparsers) -> None:
         "rotation/LCSC-transform logic). Footprints that cannot be re-resolved "
         "keep their existing refs untouched. Default: insert-only — existing "
         "refs are never modified",
+    )
+    pcb_add_models.add_argument(
+        "--allow-dangling",
+        action="store_true",
+        help="Insert a library (model ...) ref even when its STEP file does not "
+        "exist (KLC F9.3 behaviour). Default: such refs are reported as "
+        "dangling_in_library and nothing is inserted",
     )
 
     # pcb remove-footprint
@@ -3227,6 +3264,35 @@ def _add_pcb_parser(subparsers) -> None:
         "--dry-run",
         action="store_true",
         help="Preview changes without modifying the PCB file",
+    )
+
+    # pcb model-audit
+    pcb_model_audit = pcb_subparsers.add_parser(
+        "model-audit",
+        help="Classify every footprint's 3D model coverage",
+        description="Classify every footprint (not just every model ref) as "
+        "resolved, embedded, dangling, no_ref, unresolved_var, hidden_only, "
+        "lcsc_cache_miss, lcsc_content_changed, placeholder or exempt, under an explicit resolution "
+        "environment. A report: exits 0 regardless of coverage.",
+    )
+    pcb_model_audit.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_model_audit.add_argument(
+        "--env",
+        choices=["host", "pinned"],
+        default="host",
+        help="Resolution environment: this machine's render env (host) or the "
+        "pinned toolchain image with the model subset from `kct models sync` (pinned)",
+    )
+    pcb_model_audit.add_argument(
+        "--model-dir",
+        dest="model_dir",
+        help="Resolve every KICADn_3DMODEL_DIR variable against this directory (overrides --env)",
+    )
+    pcb_model_audit.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for results",
     )
 
     # pcb net-audit
@@ -6910,6 +6976,22 @@ def _add_render_parser(subparsers) -> None:
         help="Skip 3D ray-traced renders (for headless CI without a display)",
     )
     render_parser.add_argument(
+        "--models",
+        dest="render_models",
+        choices=["pinned", "host"],
+        default=None,
+        help=(
+            "3D model set the coverage audit resolves against (default: pinned "
+            "when synced via `kct models sync`, else host)"
+        ),
+    )
+    render_parser.add_argument(
+        "--allow-incomplete-models",
+        dest="render_allow_incomplete_models",
+        action="store_true",
+        help="Downgrade incomplete 3D model coverage to a warning (exploratory use)",
+    )
+    render_parser.add_argument(
         "--format",
         dest="render_format",
         choices=["text", "json"],
@@ -9298,6 +9380,16 @@ def _add_export_parser(subparsers) -> None:
         help="Disable BOM enrichment from .kct project spec",
     )
     export_parser.add_argument(
+        "--spec",
+        dest="export_spec",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Use this .kct project spec for BOM enrichment instead of walking up from the "
+            "PCB directory (--no-spec takes precedence; a missing PATH is still an error)"
+        ),
+    )
+    export_parser.add_argument(
         "--no-merge-lcsc",
         dest="export_no_merge_lcsc",
         action="store_true",
@@ -9429,6 +9521,37 @@ def _add_export_parser(subparsers) -> None:
         choices=["text", "json"],
         help="Output format for preflight results (default: text)",
     )
+
+
+def _add_models_parser(subparsers) -> None:
+    """Add the ``models`` parent-subaction parser (Issue #7683)."""
+    from .format_options import add_format_flag
+
+    models_parser = subparsers.add_parser(
+        "models",
+        help="Manage the pinned subset of KiCad's stock 3D models",
+        description=(
+            "Fetch and verify the pinned, sha256-checked subset of the KiCad "
+            "3D model library that the pinned toolchain resolves "
+            "${KICAD10_3DMODEL_DIR} against."
+        ),
+    )
+    models_subparsers = models_parser.add_subparsers(dest="models_command", help="Models commands")
+    models_sync = models_subparsers.add_parser(
+        "sync",
+        help="Download and verify the pinned model subset",
+    )
+    models_sync.add_argument(
+        "--sparse",
+        action="store_true",
+        help="Fetch only the manifest's files (the only mode; accepted for clarity)",
+    )
+    add_format_flag(models_sync, dest="models_format")
+    models_status = models_subparsers.add_parser(
+        "status",
+        help="Report whether the local cache holds the full verified subset",
+    )
+    add_format_flag(models_status, dest="models_format")
 
 
 def _add_ecosystem_parser(subparsers) -> None:

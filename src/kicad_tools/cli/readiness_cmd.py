@@ -2089,7 +2089,33 @@ def _project_dependencies(
                         "location in the library table instead."
                     )
             files.update(members)
+    files.update(_kiprjmod_model_bodies(pcb, real_root, boundary, explicit_root))
     return sorted(files)
+
+
+def _kiprjmod_model_bodies(
+    pcb: Path, real_root: Path, boundary: Path, explicit_root: bool
+) -> set[Path]:
+    """Existing ``${KIPRJMOD}``-relative 3D bodies the PCB's ``(model ...)`` nodes reference.
+
+    They travel in ``kicad_project.zip`` like the local footprint library, so a
+    bundled board opens with its bodies (Issue #7685).  A target that is absent
+    is not an inventory error: ``model_coverage`` already reports it.
+    """
+    bodies: set[Path] = set()
+    for uri in re.findall(r'\(model\s+"(\$\{KIPRJMOD\}[^"\n]*)"', pcb.read_text(errors="replace")):
+        body = Path(os.path.normpath(uri.replace("${KIPRJMOD}", str(real_root))))
+        if not body.is_file():
+            continue
+        if not body.resolve().is_relative_to(boundary):
+            raise ValueError(_outside_root_message(uri, "dependency", explicit_root))
+        if body.resolve() != body:
+            raise ValueError(
+                f"Ambiguous project dependency path: {uri} reaches {body} through "
+                f"a symlink to {body.resolve()}; reference the real file location instead."
+            )
+        bodies.add(body)
+    return bodies
 
 
 def _required_sources(options: ReadinessOptions) -> list[Path]:
@@ -2701,6 +2727,20 @@ def _rel(options: ReadinessOptions, path: Path) -> str:
     return path.resolve().relative_to(options.board_dir.resolve()).as_posix()
 
 
+def _is_render_artifact(rel: Path) -> bool:
+    """True for ``kct render`` output under ``output/`` or ``output/manufacturing/``.
+
+    Renders are derived presentation artifacts: the verdict depends on the PCB,
+    rules and DRC/ERC reports, and a picture of the board proves nothing the PCB
+    hash does not.  ``scripts/deploy-site.sh`` re-renders them, so fingerprinting
+    them made every deploy invalidate committed evidence (Issue #7678).
+    """
+    parts = rel.parts
+    return (len(parts) >= 3 and parts[:2] == ("output", "renders")) or (
+        len(parts) >= 4 and parts[:3] == ("output", "manufacturing", "renders")
+    )
+
+
 def _hashable_inputs(options: ReadinessOptions) -> list[Path]:
     """Every file whose bytes the verdict depends on.
 
@@ -2755,6 +2795,7 @@ def _hashable_inputs(options: ReadinessOptions) -> list[Path]:
         if p.is_relative_to(root)
         and p.name != _REPORT_NAME
         and not _is_transient_local(p.relative_to(root))
+        and not _is_render_artifact(p.relative_to(root))
     )
 
 

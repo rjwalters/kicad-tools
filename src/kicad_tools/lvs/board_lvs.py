@@ -267,7 +267,9 @@ class _SheetVisit:
     source: Path = Path()
 
 
-def _walk_hierarchy_schematics(sch_path: Path) -> Iterator[_SheetVisit]:
+def _walk_hierarchy_schematics(
+    sch_path: Path, *, skip_unloadable: bool = False
+) -> Iterator[_SheetVisit]:
     """Yield every sheet of a hierarchy as a :class:`_SheetVisit`, root first.
 
     Follows ``(sheet ...)`` references the same way
@@ -307,6 +309,10 @@ def _walk_hierarchy_schematics(sch_path: Path) -> Iterator[_SheetVisit]:
     sub-sheet twice yield 2**N sheets) — inherent to the format, and true of
     KiCad itself — so a pathological hierarchy raises :class:`ValueError`
     rather than hanging.  Real designs are orders of magnitude below the cap.
+
+    With ``skip_unloadable=True`` a **child** sheet that fails to load is
+    dropped together with its subtree and the walk carries on; the root sheet
+    always raises.  The default keeps the strict behaviour LVS relies on.
     """
     from kicad_tools.operations.netlist import _get_sheet_entries
     from kicad_tools.schematic.models.schematic import Schematic
@@ -333,7 +339,12 @@ def _walk_hierarchy_schematics(sch_path: Path) -> Iterator[_SheetVisit]:
                 f"sheet hierarchy under {sch_path} expands to more than "
                 f"{_MAX_SHEET_VISITS} sheet placements; refusing to walk further"
             )
-        schematic = Schematic.load(str(path))
+        try:
+            schematic = Schematic.load(str(path))
+        except Exception:
+            if skip_unloadable and parent is not None:
+                return
+            raise
         if parent is None:
             uuid_path = f"/{getattr(schematic, 'sheet_uuid', '') or ''}"
         visit = _SheetVisit(

@@ -245,12 +245,30 @@ def _distinct_mounts(paths: Iterable[Path]) -> list[str]:
     return roots
 
 
+def _synced_model_dir() -> Path | None:
+    """The synced pinned 3D model subset (#7683), or ``None`` (not synced)."""
+    try:
+        from kicad_tools.pcb.models3d_pinned import pinned_model_dir
+    except ImportError:  # pragma: no cover - standalone (CI init) use
+        return None
+    return pinned_model_dir()
+
+
+def docker_model_args(model_dir: Path | None, mount_point: str | None = None) -> list[str]:
+    """``docker run`` flags exposing *model_dir* as ``${KICAD10_3DMODEL_DIR}``."""
+    if model_dir is None:
+        return []
+    target = mount_point or str(model_dir)
+    return ["-v", f"{model_dir}:{target}:ro", "-e", f"KICAD10_3DMODEL_DIR={target}"]
+
+
 def docker_kicad_cli_prefix(
     mounts: Iterable[Path],
     config_home: Path,
     *,
     image: str | None = None,
     workdir: str | None = None,
+    model_dir: Path | None = None,
 ) -> list[str]:
     """``docker run`` argv up to (and including) the image, ending at kicad-cli.
 
@@ -259,7 +277,13 @@ def docker_kicad_cli_prefix(
     with ``KICAD_CONFIG_HOME`` (and ``HOME``) pointing at *config_home*, so it
     never depends on the image user's own config -- ``--user 0:0`` and the
     default ``kicad`` user produce the same reports.
+
+    The synced 3D model subset (``kct models sync``, #7683) is mounted
+    read-only and exposed as ``KICAD10_3DMODEL_DIR`` when *model_dir* is given
+    or the cache verifies; otherwise the argv is unchanged.
     """
+    if model_dir is None:
+        model_dir = _synced_model_dir()
     home = str(Path(config_home).absolute())
     cmd = ["docker", "run", "--rm", "-i", "--platform", "linux/amd64"]
     if hasattr(os, "getuid"):
@@ -271,6 +295,7 @@ def docker_kicad_cli_prefix(
     for mount in _distinct_mounts([*requested, *resolved]):
         cmd += ["-v", f"{mount}:{mount}"]
     cmd += ["-e", f"{KICAD_CONFIG_HOME_ENV}={home}", "-e", f"HOME={home}"]
+    cmd += docker_model_args(model_dir)
     if workdir is not None:
         cmd += ["-w", workdir]
     cmd += ["--entrypoint", "kicad-cli", image or docker_image()]

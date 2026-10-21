@@ -43,7 +43,10 @@ from kicad_tools.analysis.routing_quality import (
     evaluate_routing_quality_thresholds,
     routing_quality_gate_dict,
 )
-from kicad_tools.cli.check_categories import CHECK_CATEGORIES  # noqa: F401  (re-exported, #6896)
+from kicad_tools.cli.check_categories import (
+    CHECK_CATEGORIES,  # noqa: F401  (re-exported, #6896)
+    DEFERRED_OPT_IN_CATEGORIES,
+)
 from kicad_tools.cli.copper_weight import add_check_copper_argument, parse_copper_weight_arg
 from kicad_tools.manufacturers import (
     get_all_manufacturer_names,
@@ -1361,6 +1364,17 @@ def main(argv: list[str] | None = None) -> int:
         help="Exit with error code 2 on warnings",
     )
     parser.add_argument(
+        "--3d-models",
+        dest="models_3d",
+        action="store_true",
+        help=(
+            "Run the model_coverage category (issue #7682): one advisory "
+            "warning per footprint with no or a missing 3D model, or a single "
+            "info finding when this host has no model library. Default-on "
+            "since #7685, so this flag is a no-op kept for compatibility."
+        ),
+    )
+    parser.add_argument(
         "--strict-connectivity",
         dest="strict_connectivity",
         action="store_true",
@@ -2422,6 +2436,7 @@ def main(argv: list[str] | None = None) -> int:
         layers=layers,
         coverage=coverage,
         drc_only=getattr(args, "drc_only", False),
+        opt_in={"model_coverage"} if getattr(args, "models_3d", False) else frozenset(),
     )
 
     # Issue #5946: bind every finding to a hash of its local evidence (its
@@ -3199,6 +3214,7 @@ def run_selected_checks(
     layers: int | None = None,
     coverage: dict | None = None,
     drc_only: bool = False,
+    opt_in: set[str] | frozenset[str] = frozenset(),
 ) -> DRCResults:
     """Run the selected DRC checks based on filters.
 
@@ -3243,6 +3259,11 @@ def run_selected_checks(
             what they report.
         drc_only: Whether ``--drc-only`` is in effect (reported as the
             ``sch_fields`` skip reason).
+        opt_in: Categories from
+            :data:`~kicad_tools.cli.check_categories.DEFERRED_OPT_IN_CATEGORIES`
+            to run even though ``only_set`` is ``None`` (``kct check
+            --3d-models``, issue #7682).  An explicit ``--only`` naming the
+            category also runs it.
     """
     from kicad_tools.validate import coverage as cov
 
@@ -3329,6 +3350,55 @@ def run_selected_checks(
 
         return check_spec_conformance(checker.pcb, pcb_path, getattr(checker, "manufacturer", None))
 
+    # Issue #7682: 3D model coverage.  CLI-level closure because it needs the
+    # PCB *path*; NOT a ``DRCChecker`` method.  Resolves against the host
+    # render environment, so it splits its findings by what they depend on:
+    #
+    # * a gap caused by an absent model library (the variable is undefined or
+    #   names a missing directory -- the CI runner and the pinned toolchain
+    #   ship none; ``kct models sync`` fetches the pinned subset, #7683) is
+    #   the *environment's* gap, not the board's.
+    #   All of them collapse into ONE stderr note per library variable (not a
+    #   finding, so evidence bytes are host-independent), so a host without a
+    #   library reads "not evaluated" instead of N per-footprint defects;
+    # * every other gap -- ``no_ref`` above all, which is the same on every
+    #   host -- is a real defect of the board and stays a per-footprint
+    #   ``warning`` (advisory bucket: ``kct check --3d-models`` still
+    #   passes, only adding ``--strict`` fails).  Default-on since #7685.
+    def _model_coverage_check() -> DRCResults:
+        if pcb_path is None:
+            return DRCResults()
+        from kicad_tools.pcb.model_audit import audit_pcb_models
+
+        results = DRCResults()
+        report = audit_pcb_models(pcb_path, env="host")
+        for gap in report.gaps:
+            if gap.missing_root:
+                continue
+            results.add(
+                DRCViolation(
+                    rule_id="model_coverage",
+                    severity="warning",
+                    message=(
+                        f"{gap.reference} ({gap.lib_id}): {gap.klass}: {gap.reason}"
+                        + (f" [path: {gap.path}]" if gap.path else "")
+                    ),
+                    items=(gap.reference,),
+                )
+            )
+        # The environment's gap goes to stderr, never into ``results``: a
+        # serialized finding would make committed evidence (``kct readiness``
+        # receipts, ``check-report.json``) differ byte-for-byte between a host
+        # with a model library and one without -- the pinned image has none.
+        for root, entries in sorted(report.missing_roots.items()):
+            print(
+                f"NOTE: 3D coverage not evaluated for {len(entries)} footprint(s): "
+                f"no model library at ${{{root}}} on this host (run "
+                "`kct models sync` for the pinned subset; see #7683)",
+                file=sys.stderr,
+            )
+        return results
+
     # Map of category to check method.  This dict MUST stay a superset
     # of the methods invoked by ``DRCChecker.check_all`` (i.e., every
     # name in ``DRCChecker.CHECK_ALL_METHODS`` must be referenced as a
@@ -3357,6 +3427,7 @@ def run_selected_checks(
         "impedance": checker.check_impedance,
         "isolated_copper": checker.check_isolated_copper,
         "match_group_length_skew": checker.check_match_group_length_skew,
+        "model_coverage": _model_coverage_check,
         "routing_policy": checker.check_routing_policy,
         "netclass_clearance_copper": _netclass_clearance_copper_check,
         "netclass_floor": _netclass_floor_check,
@@ -3393,6 +3464,16 @@ def run_selected_checks(
         # verdict of an existing board or of gates that count warnings.
         if category == "width_consistency" and only_set is None:
             cov_map[category] = cov.skipped(category, "opt_in:--only")
+            continue
+
+        # Issue #7682: a category named in ``DEFERRED_OPT_IN_CATEGORIES`` is out
+        # of the default set -- the ONE place that deferral lives, so gates,
+        # ``kct readiness`` evidence, ``run_drc`` and ``--strict`` exit codes
+        # stay machine-independent with no caller naming it.  The set is empty
+        # since #7685 (``model_coverage`` is default-on).  No coverage entry
+        # for a deferred category either, so a default report stays
+        # byte-identical.
+        if category in DEFERRED_OPT_IN_CATEGORIES and only_set is None and category not in opt_in:
             continue
 
         # Skip if --only specified and this category not in it

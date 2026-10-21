@@ -404,6 +404,52 @@ def _deterministic_rescue_kwargs(args) -> _RescueKwargs:
     return _RescueKwargs()
 
 
+def _negotiated_kwargs(args, *, timeout, checkpoint_callback) -> dict:
+    """Shared ``Autorouter.route_all_negotiated`` kwargs built from CLI ``args``.
+
+    Issue #7377: the four ``kct route`` entry paths (default layer escalation,
+    rule relaxation, combined escalation, single attempt) each used to spell
+    these keys out by hand at seven call sites, so a new negotiated opt-in flag
+    had to be wired seven times.  Callers pass only what differs per site: the
+    attempt ``timeout`` and the ``checkpoint_callback``.
+    """
+    return {
+        "max_iterations": args.iterations,
+        "timeout": timeout,
+        "per_net_timeout": getattr(args, "per_net_timeout", None) or None,
+        "hierarchical": getattr(args, "hierarchical", False),
+        "perturbation": getattr(args, "perturbation", True),
+        "seed": getattr(args, "seed", None),
+        "region_parallel": getattr(args, "region_parallel", False),
+        "partition_rows": getattr(args, "partition_rows", 2),
+        "partition_cols": getattr(args, "partition_cols", 2),
+        "max_parallel_workers": getattr(args, "max_parallel_workers", 4),
+        "checkpoint_callback": checkpoint_callback,
+        "use_targeted_ripup": getattr(args, "targeted_ripup", False),
+        "max_ripups_per_net": _targeted_ripup_budget(args),
+        "best_stall_patience": (getattr(args, "early_stop_patience", 2) or None),
+        **_deterministic_rescue_kwargs(args),
+    }
+
+
+# Keys of ``_negotiated_kwargs`` that a multistart trial does not forward:
+# the trial gets its own timeout / seed / per-net budget at the top level, and
+# region parallelism and the (unpicklable) checkpoint callback are not used in
+# worker processes.
+_MULTISTART_TRIAL_EXCLUDED_KEYS = frozenset(
+    {
+        "timeout",
+        "per_net_timeout",
+        "seed",
+        "region_parallel",
+        "partition_rows",
+        "partition_cols",
+        "max_parallel_workers",
+        "checkpoint_callback",
+    }
+)
+
+
 def _multistart_trial_kwargs(args) -> dict:
     """Per-trial routing kwargs for ``--strategy monte-carlo|evolutionary``.
 
@@ -420,13 +466,9 @@ def _multistart_trial_kwargs(args) -> dict:
     already run in worker processes and the callback is not picklable.
     """
     negotiated_kwargs: dict = {
-        "max_iterations": args.iterations,
-        "hierarchical": getattr(args, "hierarchical", False),
-        "perturbation": getattr(args, "perturbation", True),
-        "use_targeted_ripup": getattr(args, "targeted_ripup", False),
-        "max_ripups_per_net": _targeted_ripup_budget(args),
-        "best_stall_patience": (getattr(args, "early_stop_patience", 2) or None),
-        **_deterministic_rescue_kwargs(args),
+        key: value
+        for key, value in _negotiated_kwargs(args, timeout=None, checkpoint_callback=None).items()
+        if key not in _MULTISTART_TRIAL_EXCLUDED_KEYS
     }
     return {
         "seed": getattr(args, "seed", None),
@@ -11466,6 +11508,7 @@ def route_with_layer_escalation(
 
     best_result: LayerEscalationResult | None = None
     successful_result: LayerEscalationResult | None = None
+    last_load_error: Exception | None = None
 
     # Issue #2412: Track previous attempt metrics for early termination
     prev_nets_routed: int | None = None
@@ -11716,6 +11759,7 @@ def route_with_layer_escalation(
                     per_net_iterations=getattr(args, "per_net_iterations", 0) or 0,
                 )
         except Exception as e:
+            last_load_error = e
             if not quiet:
                 print(f"  Error loading PCB: {e}")
             continue
@@ -11863,32 +11907,9 @@ def route_with_layer_escalation(
                 # splatted into every call site here) for routes that must be
                 # load-independent; without it the kwarg is not passed at all.
                 router.route_all_negotiated(
-                    max_iterations=args.iterations,
-                    timeout=_attempt_timeout,
-                    per_net_timeout=getattr(args, "per_net_timeout", None) or None,
-                    hierarchical=getattr(args, "hierarchical", False),
-                    perturbation=getattr(args, "perturbation", True),
-                    # Issue #3039: forward --seed for deterministic routing.
-                    seed=getattr(args, "seed", None),
-                    # Issue #3054 (Phase 2 of #3045): forward region-based
-                    # parallelism opt-in.  Defaults preserve single-threaded
-                    # behaviour bit-for-bit.
-                    region_parallel=getattr(args, "region_parallel", False),
-                    partition_rows=getattr(args, "partition_rows", 2),
-                    partition_cols=getattr(args, "partition_cols", 2),
-                    max_parallel_workers=getattr(args, "max_parallel_workers", 4),
-                    # Issue #3051: forward checkpoint callback so kills
-                    # mid-loop persist the best-so-far snapshot.
-                    checkpoint_callback=_checkpoint_cb,
-                    # Issue #3438 / #3414: forward --targeted-ripup so the
-                    # pre-existing targeted rip-up path in
-                    # route_all_negotiated is CLI-reachable.
-                    use_targeted_ripup=getattr(args, "targeted_ripup", False),
-                    max_ripups_per_net=_targeted_ripup_budget(args),
-                    # Issue #3101: best-metric early-stop patience.  0
-                    # disables (matches pre-#3101 behaviour).
-                    best_stall_patience=(getattr(args, "early_stop_patience", 2) or None),
-                    **_deterministic_rescue_kwargs(args),
+                    **_negotiated_kwargs(
+                        args, timeout=_attempt_timeout, checkpoint_callback=_checkpoint_cb
+                    )
                 )
             elif args.strategy == "basic":
                 _warn_region_parallel_ignored(args, "basic strategy")
@@ -12241,7 +12262,7 @@ def route_with_layer_escalation(
                 )
     else:
         if not quiet:
-            print("Error: No routing attempts succeeded")
+            _print_no_attempts_succeeded(last_load_error)
             if last_power_stall_nets:
                 _print_power_stall_suggestions(
                     last_power_stall_nets,
@@ -12622,6 +12643,19 @@ def route_with_layer_escalation(
     return 1
 
 
+def _print_no_attempts_succeeded(last_load_error: Exception | None) -> None:
+    """Print the terminal "no attempts" error, naming the load failure behind it.
+
+    Issue #7711: every attempt can fail while loading the PCB/project (e.g. an
+    unsupported ``net_settings`` schema).  The per-attempt message scrolls
+    past, so repeat the underlying cause at the point of failure instead of
+    leaving only the generic line.
+    """
+    print("Error: No routing attempts succeeded")
+    if last_load_error is not None:
+        print(f"  Cause (every attempt failed to load the project): {last_load_error}")
+
+
 def route_with_rule_relaxation(
     pcb_path: Path,
     output_path: Path,
@@ -12767,6 +12801,7 @@ def route_with_rule_relaxation(
 
     best_result: RuleRelaxationResult | None = None
     successful_result: RuleRelaxationResult | None = None
+    last_load_error: Exception | None = None
 
     # Register signal handlers so SIGTERM/SIGINT save the best attempt so far
     _interrupt_state["output_path"] = output_path
@@ -12919,6 +12954,7 @@ def route_with_rule_relaxation(
                     stub_terminals=getattr(args, "_stub_terminals", None),
                 )
         except Exception as e:
+            last_load_error = e
             if not quiet:
                 print(f"  Error loading PCB: {e}")
             continue
@@ -13053,32 +13089,9 @@ def route_with_rule_relaxation(
                 # splatted into every call site here) for routes that must be
                 # load-independent; without it the kwarg is not passed at all.
                 router.route_all_negotiated(
-                    max_iterations=args.iterations,
-                    timeout=_attempt_timeout,
-                    per_net_timeout=getattr(args, "per_net_timeout", None) or None,
-                    hierarchical=getattr(args, "hierarchical", False),
-                    perturbation=getattr(args, "perturbation", True),
-                    # Issue #3039: forward --seed for deterministic routing.
-                    seed=getattr(args, "seed", None),
-                    # Issue #3054 (Phase 2 of #3045): forward region-based
-                    # parallelism opt-in.  Defaults preserve single-threaded
-                    # behaviour bit-for-bit.
-                    region_parallel=getattr(args, "region_parallel", False),
-                    partition_rows=getattr(args, "partition_rows", 2),
-                    partition_cols=getattr(args, "partition_cols", 2),
-                    max_parallel_workers=getattr(args, "max_parallel_workers", 4),
-                    # Issue #3051: forward checkpoint callback so kills
-                    # mid-loop persist the best-so-far snapshot.
-                    checkpoint_callback=_checkpoint_cb,
-                    # Issue #3438 / #3414: forward --targeted-ripup so the
-                    # pre-existing targeted rip-up path in
-                    # route_all_negotiated is CLI-reachable.
-                    use_targeted_ripup=getattr(args, "targeted_ripup", False),
-                    max_ripups_per_net=_targeted_ripup_budget(args),
-                    # Issue #3101: best-metric early-stop patience.  0
-                    # disables (matches pre-#3101 behaviour).
-                    best_stall_patience=(getattr(args, "early_stop_patience", 2) or None),
-                    **_deterministic_rescue_kwargs(args),
+                    **_negotiated_kwargs(
+                        args, timeout=_attempt_timeout, checkpoint_callback=_checkpoint_cb
+                    )
                 )
             elif args.strategy == "basic":
                 _warn_region_parallel_ignored(args, "basic strategy")
@@ -13224,7 +13237,7 @@ def route_with_rule_relaxation(
             )
     else:
         if not quiet:
-            print("Error: No routing attempts succeeded")
+            _print_no_attempts_succeeded(last_load_error)
         return 1
 
     # Issue #4151: engage placement-routing feedback when --placement-feedback
@@ -15232,6 +15245,7 @@ def route_with_combined_escalation(
 
     best_result: RuleRelaxationResult | None = None
     successful_result: RuleRelaxationResult | None = None
+    last_load_error: Exception | None = None
     results_matrix: dict[tuple[int, int], float] = {}  # (tier, layers) -> completion
 
     # Register signal handlers so SIGTERM/SIGINT save the best attempt so far
@@ -15429,6 +15443,7 @@ def route_with_combined_escalation(
                         stub_terminals=getattr(args, "_stub_terminals", None),
                     )
             except Exception as e:
+                last_load_error = e
                 if not quiet:
                     print(f"  Error loading PCB: {e}")
                 results_matrix[(tier.tier, layer_count)] = 0.0
@@ -15536,32 +15551,9 @@ def route_with_combined_escalation(
                     )
                 elif args.strategy == "negotiated":
                     router.route_all_negotiated(
-                        max_iterations=args.iterations,
-                        timeout=_attempt_timeout,
-                        per_net_timeout=getattr(args, "per_net_timeout", None) or None,
-                        hierarchical=getattr(args, "hierarchical", False),
-                        perturbation=getattr(args, "perturbation", True),
-                        # Issue #3039: forward --seed for deterministic routing.
-                        seed=getattr(args, "seed", None),
-                        # Issue #3054 (Phase 2 of #3045): forward region-based
-                        # parallelism opt-in.  Defaults preserve single-threaded
-                        # behaviour bit-for-bit.
-                        region_parallel=getattr(args, "region_parallel", False),
-                        partition_rows=getattr(args, "partition_rows", 2),
-                        partition_cols=getattr(args, "partition_cols", 2),
-                        max_parallel_workers=getattr(args, "max_parallel_workers", 4),
-                        # Issue #3051: forward checkpoint callback so kills
-                        # mid-loop persist the best-so-far snapshot.
-                        checkpoint_callback=_checkpoint_cb,
-                        # Issue #3438 / #3414: forward --targeted-ripup so the
-                        # pre-existing targeted rip-up path in
-                        # route_all_negotiated is CLI-reachable.
-                        use_targeted_ripup=getattr(args, "targeted_ripup", False),
-                        max_ripups_per_net=_targeted_ripup_budget(args),
-                        # Issue #3101: best-metric early-stop patience.  0
-                        # disables (matches pre-#3101 behaviour).
-                        best_stall_patience=(getattr(args, "early_stop_patience", 2) or None),
-                        **_deterministic_rescue_kwargs(args),
+                        **_negotiated_kwargs(
+                            args, timeout=_attempt_timeout, checkpoint_callback=_checkpoint_cb
+                        )
                     )
                 elif args.strategy == "basic":
                     _warn_region_parallel_ignored(args, "basic strategy")
@@ -15774,7 +15766,7 @@ def route_with_combined_escalation(
             )
     else:
         if not quiet:
-            print("Error: No routing attempts succeeded")
+            _print_no_attempts_succeeded(last_load_error)
         return 1
 
     # Issue #4151: engage placement-routing feedback when --placement-feedback
@@ -22730,33 +22722,11 @@ def _run_main_impl(args, parser, argv) -> int:
                         def _phase2_strategy():
                             if args.strategy == "negotiated":
                                 return router.route_all_negotiated(
-                                    max_iterations=args.iterations,
-                                    timeout=_budgeted_timeout(args),
-                                    per_net_timeout=getattr(args, "per_net_timeout", None) or None,
-                                    hierarchical=getattr(args, "hierarchical", False),
-                                    perturbation=getattr(args, "perturbation", True),
-                                    # Issue #3039: forward --seed for deterministic routing.
-                                    seed=getattr(args, "seed", None),
-                                    # Issue #3054 (Phase 2 of #3045): forward
-                                    # region-based parallelism opt-in.
-                                    region_parallel=getattr(args, "region_parallel", False),
-                                    partition_rows=getattr(args, "partition_rows", 2),
-                                    partition_cols=getattr(args, "partition_cols", 2),
-                                    max_parallel_workers=getattr(args, "max_parallel_workers", 4),
-                                    checkpoint_callback=_checkpoint_cb,
-                                    # Issue #3438 / #3414: forward --targeted-ripup so the
-                                    # pre-existing targeted rip-up path in
-                                    # route_all_negotiated is CLI-reachable.
-                                    use_targeted_ripup=getattr(args, "targeted_ripup", False),
-                                    max_ripups_per_net=_targeted_ripup_budget(args),
-                                    # Issue #3132: forward --early-stop-patience
-                                    # to the inner main-path negotiator call so
-                                    # the CLI flag is honored (the previous
-                                    # implementation silently defaulted to 2).
-                                    best_stall_patience=(
-                                        getattr(args, "early_stop_patience", 2) or None
-                                    ),
-                                    **_deterministic_rescue_kwargs(args),
+                                    **_negotiated_kwargs(
+                                        args,
+                                        timeout=_budgeted_timeout(args),
+                                        checkpoint_callback=_checkpoint_cb,
+                                    )
                                 )
                             _warn_region_parallel_ignored(args, "basic strategy")
                             # Issue #4697: forward the user's budgets rather than calling
@@ -22823,30 +22793,11 @@ def _run_main_impl(args, parser, argv) -> int:
                         )
                     elif args.strategy == "negotiated":
                         return router.route_all_negotiated(
-                            max_iterations=args.iterations,
-                            timeout=_budgeted_timeout(args),
-                            per_net_timeout=getattr(args, "per_net_timeout", None) or None,
-                            hierarchical=getattr(args, "hierarchical", False),
-                            perturbation=getattr(args, "perturbation", True),
-                            # Issue #3039: forward --seed for deterministic routing.
-                            seed=getattr(args, "seed", None),
-                            # Issue #3054 (Phase 2 of #3045): forward
-                            # region-based parallelism opt-in.
-                            region_parallel=getattr(args, "region_parallel", False),
-                            partition_rows=getattr(args, "partition_rows", 2),
-                            partition_cols=getattr(args, "partition_cols", 2),
-                            max_parallel_workers=getattr(args, "max_parallel_workers", 4),
-                            checkpoint_callback=_checkpoint_cb,
-                            # Issue #3438 / #3414: forward --targeted-ripup so the
-                            # pre-existing targeted rip-up path in
-                            # route_all_negotiated is CLI-reachable.
-                            use_targeted_ripup=getattr(args, "targeted_ripup", False),
-                            max_ripups_per_net=_targeted_ripup_budget(args),
-                            # Issue #3132: forward --early-stop-patience to the
-                            # inner main-path negotiator call so the CLI flag
-                            # is honored (default 2 was silently overriding it).
-                            best_stall_patience=(getattr(args, "early_stop_patience", 2) or None),
-                            **_deterministic_rescue_kwargs(args),
+                            **_negotiated_kwargs(
+                                args,
+                                timeout=_budgeted_timeout(args),
+                                checkpoint_callback=_checkpoint_cb,
+                            )
                         )
                     else:
                         _warn_region_parallel_ignored(args, "basic strategy")
@@ -22942,33 +22893,11 @@ def _run_main_impl(args, parser, argv) -> int:
                 # unsupported pad configurations fall through cleanly.
                 def _neg_strategy():
                     return router.route_all_negotiated(
-                        max_iterations=args.iterations,
-                        timeout=_budgeted_timeout(args),
-                        per_net_timeout=getattr(args, "per_net_timeout", None) or None,
-                        hierarchical=getattr(args, "hierarchical", False),
-                        perturbation=getattr(args, "perturbation", True),
-                        # Issue #3039: forward --seed for deterministic routing.
-                        seed=getattr(args, "seed", None),
-                        # Issue #3054 (Phase 2 of #3045): forward
-                        # region-based parallelism opt-in.
-                        region_parallel=getattr(args, "region_parallel", False),
-                        partition_rows=getattr(args, "partition_rows", 2),
-                        partition_cols=getattr(args, "partition_cols", 2),
-                        max_parallel_workers=getattr(args, "max_parallel_workers", 4),
-                        checkpoint_callback=_checkpoint_cb,
-                        # Issue #3438 / #3414: forward --targeted-ripup so the
-                        # pre-existing targeted rip-up path in
-                        # route_all_negotiated is CLI-reachable.
-                        use_targeted_ripup=getattr(args, "targeted_ripup", False),
-                        max_ripups_per_net=_targeted_ripup_budget(args),
-                        # Issue #3132: forward --early-stop-patience to the
-                        # inner negotiator so the CLI flag is honored.  This
-                        # is the call site board 05's
-                        # `--differential-pairs --strategy negotiated` recipe
-                        # actually hits; previously the parameter silently
-                        # defaulted to 2.
-                        best_stall_patience=(getattr(args, "early_stop_patience", 2) or None),
-                        **_deterministic_rescue_kwargs(args),
+                        **_negotiated_kwargs(
+                            args,
+                            timeout=_budgeted_timeout(args),
+                            checkpoint_callback=_checkpoint_cb,
+                        )
                     )
 
                 # Issue #3321: forward --timeout so the diff-pair
@@ -22987,31 +22916,9 @@ def _run_main_impl(args, parser, argv) -> int:
                 return result
             elif args.strategy == "negotiated":
                 return router.route_all_negotiated(
-                    max_iterations=args.iterations,
-                    timeout=_budgeted_timeout(args),
-                    per_net_timeout=getattr(args, "per_net_timeout", None) or None,
-                    hierarchical=getattr(args, "hierarchical", False),
-                    perturbation=getattr(args, "perturbation", True),
-                    # Issue #3039: forward --seed for deterministic routing.
-                    seed=getattr(args, "seed", None),
-                    # Issue #3054 (Phase 2 of #3045): forward region-based
-                    # parallelism opt-in.
-                    region_parallel=getattr(args, "region_parallel", False),
-                    partition_rows=getattr(args, "partition_rows", 2),
-                    partition_cols=getattr(args, "partition_cols", 2),
-                    max_parallel_workers=getattr(args, "max_parallel_workers", 4),
-                    checkpoint_callback=_checkpoint_cb,
-                    # Issue #3438 / #3414: forward --targeted-ripup so the
-                    # pre-existing targeted rip-up path in
-                    # route_all_negotiated is CLI-reachable.
-                    use_targeted_ripup=getattr(args, "targeted_ripup", False),
-                    max_ripups_per_net=_targeted_ripup_budget(args),
-                    # Issue #3132: forward --early-stop-patience to the inner
-                    # negotiator call so the CLI flag is honored.  Previously
-                    # the parameter silently defaulted to 2 even when the
-                    # CLI passed a higher value.
-                    best_stall_patience=(getattr(args, "early_stop_patience", 2) or None),
-                    **_deterministic_rescue_kwargs(args),
+                    **_negotiated_kwargs(
+                        args, timeout=_budgeted_timeout(args), checkpoint_callback=_checkpoint_cb
+                    )
                 )
             elif args.differential_pairs and args.strategy == "basic":
                 _warn_region_parallel_ignored(args, "basic strategy")
@@ -23883,6 +23790,15 @@ def _run_main_impl(args, parser, argv) -> int:
         )
 
     # Save partial results on clean partial exit (not just SIGINT)
+    # Issue #7657 (D7): this clean-partial-exit ``_partial`` snapshot stays
+    # single-attempt-only on purpose, not moved into a shared post-route helper.
+    # The escalation tails (layer / rule-relaxation / combined) route several
+    # attempts and write the best one to ``-o``; a mid-ladder attempt's
+    # snapshot would sit beside that result as a second, lower-quality board
+    # and may differ from what ``-o`` holds.  They still save ``_partial`` on a
+    # deadline or Ctrl+C through the interrupt state (#6322), which is the case
+    # where no ``-o`` board exists.  Revisit only with a ladder-level owner for
+    # "which attempt's partial is canonical".
     if not all_nets_routed and not args.dry_run and router.routes:
         partial_saved = _save_partial_results()
         if partial_saved and not quiet:

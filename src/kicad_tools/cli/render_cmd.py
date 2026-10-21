@@ -24,7 +24,11 @@ Before 3D rendering, referenced model files are checked using native configured
 paths, the render environment, and the PCB directory. Unresolved models identify
 their component and path in text diagnostics and JSON ``model_check``. Images
 are retained, but incomplete model coverage reports ``partial`` and exits
-nonzero. ``--no-3d`` skips this check. File availability does not validate geometry.
+nonzero unless ``--allow-incomplete-models`` is given. ``--models pinned|host``
+selects the model set the audit resolves against (default ``pinned`` once
+``kct models sync`` has populated it, else ``host``). The per-board coverage
+summary is also written to ``renders/model-coverage.json`` for the site build.
+``--no-3d`` skips this check. File availability does not validate geometry.
 
 This command only writes image files — it makes no assumptions about hosting
 or any website. Generated renders are git-ignored build artifacts.
@@ -62,6 +66,7 @@ from kicad_tools.cli.runner import (
     run_pcb_export_svg,
     run_pcb_render,
 )
+from kicad_tools.pcb.model_audit import audit_pcb_models, resolve_pinned_model_dir
 
 # Minimum KiCad version required for `kicad-cli pcb render`.
 MIN_RENDER_VERSION = (8, 0, 4)
@@ -78,6 +83,16 @@ RENDER_OUTPUTS = {
     "3d-front": "3d-front.png",
     "3d-back": "3d-back.png",
 }
+
+# Coverage summary consumed by ``kct board-metrics`` (board.json ``model_coverage``).
+COVERAGE_FILE = "model-coverage.json"
+
+MODEL_SETS = ("pinned", "host")
+
+
+def default_model_set() -> str:
+    """``pinned`` when the pinned model set is synced, else ``host``."""
+    return "pinned" if resolve_pinned_model_dir() is not None else "host"
 
 
 def _parse_version(version: str | None) -> tuple[int, int, int] | None:
@@ -142,6 +157,8 @@ def _render_pcb(
     do_3d: bool,
     kicad_cli: Path | None,
     quiet: bool,
+    models: str = "host",
+    allow_incomplete: bool = False,
 ) -> dict:
     """Write the four render artifacts for *pcb_path* into *renders_dir*.
 
@@ -185,11 +202,34 @@ def _render_pcb(
     # --- 3D ray-traced renders ---
     if do_3d:
         try:
-            result["model_check"] = inspect_pcb_models(pcb_path, kicad_cli)
+            report = audit_pcb_models(pcb_path, env=models, kicad_cli=kicad_cli)
+            result["model_check"] = inspect_pcb_models(pcb_path, kicad_cli, report=report)
             for missing in result["model_check"]["unresolved_models"]:
                 errors.append(
                     f"3D model {missing['reference']}: {missing['reason']}: {missing['model']}"
                 )
+            # Issue #7682: footprints with no usable model (no_ref, hidden_only,
+            # placeholder, ...) are invisible to the ref walk above; they make
+            # the check ``partial`` rather than ``passed``.
+            result["model_check"]["coverage"] = report.summary()
+            reported = {m["reference"] for m in result["model_check"]["unresolved_models"]}
+            gaps = [g for g in report.gaps if g.reference not in reported]
+            result["model_check"]["uncovered_models"] = [g.to_dict() for g in gaps]
+            for gap in gaps:
+                errors.append(f"3D model {gap.reference}: {gap.klass}: {gap.reason}")
+            if gaps and result["model_check"]["status"] == "passed":
+                result["model_check"]["status"] = "partial"
+            (renders_dir / COVERAGE_FILE).write_text(
+                json.dumps(report.summary(), indent=2) + "\n", encoding="utf-8"
+            )
+            # Issue #7689: incomplete coverage fails the render unless the
+            # caller opted into exploratory output.
+            incomplete = result["model_check"]["status"] in ("failed", "partial")
+            if incomplete and allow_incomplete:
+                result["model_check"]["status"] = "allowed_incomplete"
+                result["model_check"]["incomplete_allowed"] = True
+            elif result["model_check"]["status"] == "partial":
+                result["model_check"]["status"] = "failed"
         except (OSError, ValueError, RuntimeError) as exc:
             result["model_check"]["status"] = "failed"
             errors.append(f"3D model inspection failed: {exc}")
@@ -231,6 +271,8 @@ def _render_board(
     do_3d: bool,
     kicad_cli: Path | None,
     quiet: bool,
+    models: str = "host",
+    allow_incomplete: bool = False,
 ) -> dict:
     """Render a single board directory (``boards/<id>/output/`` convention).
 
@@ -261,6 +303,8 @@ def _render_board(
         do_3d=do_3d,
         kicad_cli=kicad_cli,
         quiet=quiet,
+        models=models,
+        allow_incomplete=allow_incomplete,
     )
 
 
@@ -280,6 +324,11 @@ def run_render(args: argparse.Namespace) -> int:
         return 1
 
     do_3d = not args.no_3d
+    models = getattr(args, "models", None) or default_model_set()
+    if models not in MODEL_SETS:
+        print(f"Error: --models must be one of {', '.join(MODEL_SETS)}", file=sys.stderr)
+        return 1
+    allow_incomplete = bool(getattr(args, "allow_incomplete_models", False))
 
     # Version guard for 3D rendering (`pcb render` needs KiCad 8.0.4+).
     if do_3d:
@@ -316,6 +365,8 @@ def run_render(args: argparse.Namespace) -> int:
             do_3d=do_3d,
             kicad_cli=kicad_cli,
             quiet=args.format == "json",
+            models=models,
+            allow_incomplete=allow_incomplete,
         )
         if args.format == "json":
             print(json.dumps({"boards": [result]}, indent=2))
@@ -329,7 +380,14 @@ def run_render(args: argparse.Namespace) -> int:
         return 1
 
     results = [
-        _render_board(b, do_3d=do_3d, kicad_cli=kicad_cli, quiet=args.format == "json")
+        _render_board(
+            b,
+            do_3d=do_3d,
+            kicad_cli=kicad_cli,
+            quiet=args.format == "json",
+            models=models,
+            allow_incomplete=allow_incomplete,
+        )
         for b in boards
     ]
 
@@ -371,6 +429,20 @@ def main(argv: list[str] | None = None) -> int:
         "--no-3d",
         action="store_true",
         help="Skip 3D ray-traced renders (for headless CI without a display)",
+    )
+    parser.add_argument(
+        "--models",
+        choices=MODEL_SETS,
+        default=None,
+        help=(
+            "3D model set the coverage audit resolves against (default: pinned "
+            "when synced via `kct models sync`, else host)"
+        ),
+    )
+    parser.add_argument(
+        "--allow-incomplete-models",
+        action="store_true",
+        help="Downgrade incomplete 3D model coverage to a warning (exploratory use)",
     )
     parser.add_argument(
         "--format",

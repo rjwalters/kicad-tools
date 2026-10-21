@@ -8,7 +8,7 @@
 	)
 	(paper "A4")
 	(title_block
-		(title "SDRAM six-layer draft JLC06161H-2116A")
+		(title "SDRAM six-layer JLC06161H-2116A")
 		(date "2026-09-10")
 		(rev "1.0")
 	)

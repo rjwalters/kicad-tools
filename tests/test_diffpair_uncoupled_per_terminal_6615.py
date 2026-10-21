@@ -34,7 +34,6 @@ from kicad_tools.validate.rules.diffpair_uncoupled_length import (
     is_per_terminal_finding,
     measure_pair,
 )
-from tests.board03_via_count_exception_7093 import without_exception
 
 pytest.importorskip("shapely")
 
@@ -377,8 +376,8 @@ def test_gather_ignore_defaults_to_courtyard_and_old_sidecars_load() -> None:
 
 COMMITTED = {
     "boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb": {
-        # Issue #6394: board 03 re-derived from a fresh lattice route.
-        ("USB_D+", "USB_D-"): 10.0870,
+        # Issue #6394 / #7713: board 03 re-derived from a fresh lattice route.
+        ("USB_D+", "USB_D-"): 9.3249,
         ("USB_MCU_D+", "USB_MCU_D-"): 1.0550,
     },
     "boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb": {
@@ -428,5 +427,4 @@ def test_committed_boards_stay_clean(pcb_rel, ncm_rel) -> None:
     )
     res = checker.check_diffpair_uncoupled_length()
     flagged = [v for v in res.violations if v.severity in ("error", "warning")]
-    # Board 03's USB_D via-count warning only, until #7093 lands (#6394).
-    assert without_exception(pcb_rel, flagged) == []
+    assert flagged == []

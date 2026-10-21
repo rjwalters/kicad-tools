@@ -320,7 +320,7 @@
       "stem": "matchgroup_test",
       "input": {
         "path": "boards/07-matchgroup-test/output/matchgroup_test.kicad_pcb",
-        "sha256": "6c3495fffa239d06ba9d2b0d5d04cfef59fd492ace1ae29816872e61e7005670"
+        "sha256": "51a1277daa54598f86468d173b8b73509512507c257557dfad2867421bf08bc6"
       },
       "input_copper": {
         "segments": 3742,
@@ -341,7 +341,7 @@
       },
       "schematic": {
         "path": "boards/07-matchgroup-test/output/matchgroup_test.kicad_sch",
-        "sha256": "05f2af8d5651439fb9cb5d491d8a408779ff2f36d4ee9925cc3fccea767c3546"
+        "sha256": "3abe6af683312352287866b3f33ab51f41f43a95fa58521fef0601016da469fa"
       },
       "routing_sidecars": [
         {

@@ -1,6 +1,6 @@
 /** Manufacturing badges require current readiness as well as known DRC/LVS. */
 import { describe, expect, it } from "vitest";
-import { displayStatus, displayStatusLabel, knownIssueHref } from "./boardStatus.ts";
+import { displayStatus, displayStatusLabel, knownIssueHref, boardDisplayName } from "./boardStatus.ts";
 import type { Board } from "./types.ts";
 
 function makeBoard(overrides: Partial<Board> = {}): Board {
@@ -133,5 +133,16 @@ describe("known issues (#7261)", () => {
 
   it("links each issue to the tracker", () => {
     expect(knownIssueHref(7250)).toBe("https://github.com/rjwalters/kicad-tools/issues/7250");
+  });
+});
+
+describe("boardDisplayName (#7666)", () => {
+  it("prefers the human title over the file stem and slug", () => {
+    expect(boardDisplayName({ slug: "00-simple-led", name: "simple_led_routed", title: "Simple LED - Hello World" }))
+      .toBe("Simple LED - Hello World");
+  });
+  it("falls back to name, then slug", () => {
+    expect(boardDisplayName({ slug: "s", name: "stem" })).toBe("stem");
+    expect(boardDisplayName({ slug: "s" })).toBe("s");
   });
 });

@@ -586,6 +586,18 @@ class IterationMetrics:
         """
         return self.sort_key < other.sort_key
 
+    def made_progress_over(self, other: IterationMetrics) -> bool:
+        """Return True if ``self`` beats ``other`` on a real metric.
+
+        Same ordering as :meth:`is_better_than` minus the trailing
+        ``-iteration`` tie-break.  That tie-break lets a later iteration
+        replace an equal-scoring best snapshot, but an identical result is
+        not progress: counting it as such resets the ``best_stall_patience``
+        counter every iteration, so a plateaued loop (e.g. an unroutable
+        net re-failing each pass) never early-stops (Issue #7659).
+        """
+        return self.sort_key[:-1] < other.sort_key[:-1]
+
 
 # Re-export for backward compatibility
 __all__ = [
@@ -5081,6 +5093,9 @@ class Autorouter:
         changed = False
         for pc in coupled:
             nets = frozenset({pc.pad_p_a.net, pc.pad_n_a.net})
+            # Issue #7463: record only the nets this exemption ADDS -- a pair
+            # net that is itself a site's sealed net was exempt already.
+            before = {a.name: a.exempt for a in areas}
             names: list[str] = []
             for pad_p, pad_n in ((pc.pad_p_a, pc.pad_n_a), (pc.pad_p_b, pc.pad_n_b)):
                 areas, hit = exempt_pair_in_gateway_envelope(
@@ -5092,13 +5107,15 @@ class Autorouter:
                     areas[idx] = replace(area, exempt=area.exempt | nets)
                     names.append(area.name)
             for name in dict.fromkeys(names):
-                added[name] = added.get(name, frozenset()) | nets
+                added[name] = added.get(name, frozenset()) | (nets - before.get(name, frozenset()))
                 changed = True
                 print(
                     f"  Pair reservation exemption (#6956): {name} lies in "
                     f"{pc.pair_name}'s gateway envelope; exempts the pair's nets"
                 )
         self._lattice_pair_exempt_added = added
+        # Issue #7463: the gateway ranking reads each site as reserved.
+        pf.pair_exempt_added = dict(added)
         if changed:
             pf.set_keepouts(LatticeKeepoutMask(tuple(areas)))
 
@@ -5243,6 +5260,7 @@ class Autorouter:
             pf.set_keepouts(self._lattice_keepouts_with_plane_via_sites())
             # Issue #6956: a fresh mask carries no pair-net exemptions.
             self._lattice_pair_exempt_added = {}
+            pf.pair_exempt_added = {}
 
         coupled, connections = self._lattice_netset_connections()
 
@@ -13561,12 +13579,16 @@ class Autorouter:
             iteration_trajectory.append(metrics)
 
             improved = metrics.is_better_than(best_metrics)
+            # Issue #7659: a tie replaces the best snapshot (later iteration
+            # wins) but must not reset the patience counter.
+            made_progress = metrics.made_progress_over(best_metrics)
             if improved:
                 best_metrics = metrics
                 best_routed_count = routed_now
                 best_routes = copy.deepcopy(list(self.routes))
                 best_net_routes = copy.deepcopy(net_routes)
                 best_iteration = iter_index
+            if made_progress:
                 # Issue #3101: reset patience counter on strict improvement.
                 best_stall_count = 0
             else:
@@ -13742,6 +13764,7 @@ class Autorouter:
                         demotable_connected=current_demotable,
                     )
                     if current_metrics.is_better_than(best_metrics):
+                        prior_best_metrics = best_metrics
                         best_metrics = current_metrics
                         best_routed_count = current_routed
                         best_routes = copy.deepcopy(list(self.routes))
@@ -13754,7 +13777,11 @@ class Autorouter:
                         # after _capture_iteration_end recorded the metric).
                         # Reset the patience counter so the loop gives the
                         # rip-up phase fresh budget to keep improving.
-                        best_stall_count = 0
+                        # Issue #7659: only on a real metric gain -- a tie
+                        # that wins on the ``-iteration`` tie-break is not
+                        # progress.
+                        if current_metrics.made_progress_over(prior_best_metrics):
+                            best_stall_count = 0
 
                         # Issue #2808: fire checkpoint hook from the iteration-top
                         # snapshot site too, not just _capture_iteration_end --

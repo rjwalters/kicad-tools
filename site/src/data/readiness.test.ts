@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { loadBoard } from "./loadBoards.ts";
 import { displayStatus, displayStatusLabel } from "./boardStatus.ts";
 
@@ -249,3 +249,20 @@ it.each(["ready with defect", "unbound", "edited", "bad kind", "unsorted", "bad 
     save();
     expect(displayStatus(loadBoard(root))).toBe("unverified");
   });
+
+it("warns per board and flags the record when board.json predates readiness.json (#7666)", () => {
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  const board = loadBoard(root);
+  expect(board.stale).toBe(true);
+  expect(warn).toHaveBeenCalledWith(expect.stringMatching(/\[loadBoards\] .*board\.json .*predates readiness\.json/));
+  warn.mockRestore();
+});
+it("does not warn when board.json is newer than readiness.json", () => {
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  const path = join(root, "output/board.json");
+  const data = JSON.parse(readFileSync(path, "utf8"));
+  writeFileSync(path, JSON.stringify({ ...data, generated_at: "2026-10-01T00:00:00Z" }));
+  expect(loadBoard(root).stale).toBeUndefined();
+  expect(warn).not.toHaveBeenCalled();
+  warn.mockRestore();
+});

@@ -19,6 +19,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 from kicad_tools.kicad_install import windows_kicad_base_dirs, windows_kicad_install_roots
 from kicad_tools.schema.pcb import FOOTPRINT_TAGS, _is_footprint_tag
@@ -27,7 +28,9 @@ from .kicad_toolchain import (
     KICAD_DOCKER_ENV,
     KICAD_DOCKER_IMAGE_ENV,
     PINNED_KICAD_IMAGE,
+    _synced_model_dir,
     docker_fallback_enabled,
+    docker_model_args,
     pinned_kicad_image,
     process_config_home,
 )
@@ -329,6 +332,8 @@ def _kicad_cli_candidates() -> list[Path]:
 
 #: Where :func:`build_docker_kicad_cmd` mounts the pinned config home.
 _DOCKER_CONFIG_HOME = "/kct-kicad-config"
+#: Where it mounts the synced pinned 3D model subset (#7683).
+_DOCKER_MODEL_DIR = "/kct-3dmodels"
 
 
 def build_docker_kicad_cmd(args: list[str], workdir: Path) -> list[str]:
@@ -346,6 +351,8 @@ def build_docker_kicad_cmd(args: list[str], workdir: Path) -> list[str]:
     """
     image = os.environ.get(KICAD_DOCKER_IMAGE_ENV) or pinned_kicad_image()
     config_home = process_config_home()
+    # The synced pinned 3D model subset (kct models sync, #7683), when verified.
+    model_args = docker_model_args(_synced_model_dir(), _DOCKER_MODEL_DIR)
     return [
         "docker",
         "run",
@@ -358,6 +365,7 @@ def build_docker_kicad_cmd(args: list[str], workdir: Path) -> list[str]:
         f"{config_home}:{_DOCKER_CONFIG_HOME}",
         "-e",
         f"KICAD_CONFIG_HOME={_DOCKER_CONFIG_HOME}",
+        *model_args,
         "-w",
         "/work",
         "--entrypoint",
@@ -2861,66 +2869,39 @@ def _configured_model_variables(kicad_cli: Path | None) -> dict[str, str]:
     return {key: value for key, value in variables.items() if isinstance(value, str)}
 
 
-def inspect_pcb_models(pcb_path: Path, kicad_cli: Path | None = None) -> dict:
+def inspect_pcb_models(pcb_path: Path, kicad_cli: Path | None = None, report: Any = None) -> dict:
     """Inspect enabled model references with the same environment as rendering.
 
     This verifies file resolution only, not model geometry or electrical rules.
     It never rewrites the PCB, substitutes models, or fetches missing resources.
+    The classification itself lives in :mod:`kicad_tools.pcb.model_audit`
+    (issue #7682); pass an already-computed *report* to avoid a second parse.
     """
-    from kicad_tools.sexp import parse_file
+    from kicad_tools.pcb.model_audit import audit_pcb_models
 
-    doc = parse_file(pcb_path)
-    if doc.name != "kicad_pcb":
-        raise ValueError("Expected kicad_pcb root for model inspection")
-    env = _configured_model_variables(kicad_cli)
-    env.update(_render_env(kicad_cli) or os.environ)
-    env["KIPRJMOD"] = str(pcb_path.resolve().parent)
-    variable = re.compile(r"\$\{([^}]+)\}|\$\(([^)]+)\)")
+    if report is None:
+        report = audit_pcb_models(pcb_path, env="host", kicad_cli=kicad_cli)
+    reasons = {
+        "unresolved_var": "unresolved path variable",
+        "dangling": "model file not found",
+        "lcsc_cache_miss": "model file not found",
+    }
     unresolved: list[dict] = []
-    checked = 0
-    for footprint in doc.children:
-        if not _is_footprint_tag(footprint.name):
+    for reference, raw, klass, path in report.refs:
+        if klass not in reasons:
             continue
-        reference = _get_fp_reference(footprint) or "<unknown>"
-        for model in footprint.find_all("model"):
-            hidden = model.get("hide")
-            if hidden is not None and hidden.get_first_atom() != "no":
-                continue
-            checked += 1
-            raw = str(model.get_first_atom() or "")
-            expanded = raw
-            # Bounded expansion permits nested configured variables without
-            # making cyclic/unknown variables look like resolved file paths.
-            for _ in range(8):
-                updated = variable.sub(
-                    lambda match: env.get(match.group(1) or match.group(2), match.group(0)),
-                    expanded,
-                )
-                if updated == expanded:
-                    break
-                expanded = updated
-            path = Path(expanded).expanduser()
-            if not path.is_absolute():
-                path = pcb_path.resolve().parent / path
-            reason = None
-            if not raw:
-                reason = "empty model path"
-            elif variable.search(expanded):
-                reason = "unresolved path variable"
-            elif not path.is_file():
-                reason = "model file not found"
-            if reason:
-                unresolved.append(
-                    {
-                        "reference": reference,
-                        "model": raw,
-                        "resolved_path": str(path) if not variable.search(expanded) else None,
-                        "reason": reason,
-                    }
-                )
+        reason = "empty model path" if not raw else reasons[klass]
+        unresolved.append(
+            {
+                "reference": reference,
+                "model": raw,
+                "resolved_path": path,
+                "reason": reason,
+            }
+        )
     return {
         "status": "failed" if unresolved else "passed",
-        "checked_models": checked,
+        "checked_models": len(report.refs),
         "unresolved_models": unresolved,
     }
 

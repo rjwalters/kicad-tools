@@ -35,7 +35,11 @@ def run_add_3d_models(
     fetch_lcsc: bool = False,
     dry_run: bool = False,
     refresh: bool = False,
+    allow_dangling: bool = False,
     output_format: str = "text",
+    lcsc_from_bom: bool = True,
+    bom: Path | None = None,
+    procurement: Path | None = None,
 ) -> int:
     """Patch missing 3D model refs into *pcb_path*.
 
@@ -60,20 +64,40 @@ def run_add_3d_models(
             nodes and replace them with freshly computed refs; footprints
             the tiers cannot re-resolve keep their existing nodes untouched
             (default: insert-only, existing refs are never modified).
+        allow_dangling: Insert a library ref even when its STEP file does not
+            exist (default: report it as ``dangling_in_library``, insert nothing).
         output_format: ``"text"`` or ``"json"``.
+        lcsc_from_bom: Resolve LCSC C-numbers from the board's BOM /
+            procurement review / footprint properties (default).  The
+            ``lcsc_models`` sidecar becomes an override only; stale sidecar
+            entries are reported.
+        bom: Explicit BOM CSV (default: discovered next to the PCB).
+        procurement: Explicit ``procurement-review.json`` (default: discovered).
 
     Returns:
         Exit code (0 success, 1 error).
     """
     from kicad_tools.footprints.library_path import detect_kicad_library_path
-    from kicad_tools.pcb.lcsc_models import LcscModelEntry, fetch_enabled, load_lcsc_mapping
+    from kicad_tools.pcb.lcsc_bom import BomLcscResult, build_lcsc_mapping
+    from kicad_tools.pcb.lcsc_models import LcscModelEntry, fetch_enabled
     from kicad_tools.pcb.models3d import add_model_refs
 
     lcsc_mapping: dict[str, LcscModelEntry] | None = None
-    if lcsc_models is not None:
+    bom_result = BomLcscResult()
+    stale_sidecar: dict[str, str] = {}
+    if lcsc_models is not None or lcsc_from_bom:
         try:
-            lcsc_mapping = load_lcsc_mapping(lcsc_models)
-        except ValueError as e:
+            plan = build_lcsc_mapping(
+                pcb_path,
+                sidecar=lcsc_models,
+                use_bom=lcsc_from_bom,
+                bom_csv=bom,
+                procurement=procurement,
+            )
+            lcsc_mapping = plan.mapping or None
+            bom_result = plan.bom
+            stale_sidecar = plan.stale_sidecar
+        except (ValueError, OSError) as e:
             if output_format == "json":
                 print(json.dumps({"error": str(e)}))
             else:
@@ -107,6 +131,7 @@ def run_add_3d_models(
             lcsc_warn=_warn,
             dry_run=dry_run,
             refresh=refresh,
+            allow_dangling=allow_dangling,
         )
     except Exception as e:
         if output_format == "json":
@@ -127,11 +152,21 @@ def run_add_3d_models(
         "refresh_kept": report.refresh_kept,
         "already_present": report.already_present,
         "unresolved": report.unresolved,
+        "dangling_in_library": report.dangling_in_library,
         "no_model_in_library": report.no_model_in_library,
         "variant_matches": report.variant_matches,
         "substitution_matches": report.substitution_matches,
         "lcsc_matches": report.lcsc_matches,
         "lcsc_transforms": report.lcsc_transforms,
+        "lcsc_content_changed": report.lcsc_content_changed,
+        "lcsc_registration": report.lcsc_registration,
+        "lcsc_needs_calibration": report.lcsc_needs_calibration,
+        "lcsc_from_bom": {
+            lib_id: {"lcsc": entry.lcsc, "source": bom_result.sources.get(lib_id, "")}
+            for lib_id, entry in sorted(bom_result.mapping.items())
+        },
+        "lcsc_bom_conflicts": bom_result.conflicts,
+        "lcsc_stale_sidecar": stale_sidecar,
     }
 
     if output_format == "json":
@@ -170,6 +205,26 @@ def run_add_3d_models(
             print("  Per-part LCSC transforms applied:")
             for lib_id, desc in sorted(report.lcsc_transforms.items()):
                 print(f"    {lib_id}: {desc}")
+        if report.lcsc_registration:
+            print("  LCSC transforms derived from EasyEDA pad registration:")
+            for lib_id, desc in sorted(report.lcsc_registration.items()):
+                print(f"    {lib_id}: {desc}")
+        if report.lcsc_needs_calibration:
+            print("  LCSC registration residual too high (calibrate by hand, see the guide):")
+            for lib_id, desc in sorted(report.lcsc_needs_calibration.items()):
+                print(f"    {lib_id}: {desc}")
+        if stale_sidecar:
+            print("  Stale LCSC sidecar entries (remove or fix them; the BOM is authoritative):")
+            for lib_id, why in sorted(stale_sidecar.items()):
+                print(f"    {lib_id}: {why}")
+        if bom_result.conflicts:
+            print("  LCSC C-numbers disagree across one footprint (not mapped by lib_id):")
+            for lib_id, numbers in sorted(bom_result.conflicts.items()):
+                print(f"    {lib_id}: {', '.join(numbers)}")
+        if report.lcsc_content_changed:
+            print("  LCSC cached body no longer matches its sha256 pin (lcsc_content_changed):")
+            for lib_id, message in sorted(report.lcsc_content_changed.items()):
+                print(f"    {lib_id}: {message}")
         if report.already_present:
             print(f"  Already had models: {len(report.already_present)}")
         if report.refresh_kept:
@@ -182,6 +237,10 @@ def run_add_3d_models(
                 f"  Library footprint has no model: "
                 f"{', '.join(sorted(set(report.no_model_in_library)))}"
             )
+        if report.dangling_in_library:
+            print("  Library ref points at a missing file (nothing inserted):")
+            for lib_id, ref in sorted(report.dangling_in_library.items()):
+                print(f"    {lib_id} -> {ref}")
         if report.unresolved:
             print(
                 f"  Not in installed libraries (skipped): "

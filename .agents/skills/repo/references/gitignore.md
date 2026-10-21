@@ -45,6 +45,31 @@ Flag gitignore rules that exclude things that look like real content:
 - IDE files (`.vscode/`, `.idea/`)
 - OS files (`.DS_Store`)
 
+#### Tracked files that match an ignore rule
+
+`git ls-files -ci --exclude-standard` lists tracked files that also match an
+ignore rule. That listing is **not** a reason to drop the rule. Ignore rules
+never apply to tracked files, so the tracked files are unaffected by the rule —
+re-renders or edits of them still show as modified. The rule only hides **new,
+untracked** files under that path. Dropping it surfaces those instead, dirtying
+the primary checkout (and, in a Loom-managed repo, handing a sweep's quarantine
+step a pile of files to stash away).
+
+Before recommending removal, list what the rule currently hides, using the same
+form as `ipaths()` below:
+
+```bash
+git -c core.excludesFile=/dev/null \
+  ls-files --others --ignored --exclude-standard -- <pattern>
+```
+
+- **List non-empty** → say so, naming the files, and prefer **keeping** the rule.
+  Suggest a comment above it noting that committed files there are intentional
+  and new ones need `git add -f`.
+- **List empty and every match deliberately committed** → removal may be offered,
+  but only as optional tidying, not a fix. It still goes through "Verify a
+  removal changes nothing" below.
+
 ### 2. Under-Ignored Files
 Find tracked files that are probably build artifacts:
 - `*.pyc`, `__pycache__/`

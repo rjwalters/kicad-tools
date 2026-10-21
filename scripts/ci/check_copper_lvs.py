@@ -187,7 +187,7 @@ def assert_known_opens(payload: dict[str, Any], expected_nets: set[str]) -> str 
     """Assert a copper-LVS payload reports EXACTLY the expected opens (#4012).
 
     Used for boards that route PARTIAL by design with a *wired* fixture
-    schematic (board 07: 1 unroutable net, TMDS_D0_N, #7557/#3438).  The
+    schematic (board 07 used it for TMDS_D0_N until #7557).  The
     honest expectation is ``clean: false`` with only ``kind="open"``
     mismatches whose net names are exactly ``expected_nets`` — nothing
     more (a NEW open/short is a regression), nothing less (an expected

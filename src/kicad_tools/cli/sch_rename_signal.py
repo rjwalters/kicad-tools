@@ -77,8 +77,8 @@ def find_signal_occurrences(
     # Build hierarchy to find all files and their relationships
     hierarchy = build_hierarchy(str(root_path))
 
-    # Process all nodes in hierarchy
-    for node in hierarchy.all_nodes():
+    # Process each sheet file once (a repeated sheet is one file, #7616)
+    for node in hierarchy.unique_file_nodes():
         if not node.path or not Path(node.path).exists():
             continue
 

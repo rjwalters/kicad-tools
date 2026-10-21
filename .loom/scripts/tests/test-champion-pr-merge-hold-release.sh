@@ -306,6 +306,136 @@ assert_lacks "$OUT" "POST" "idempotency guard suppresses the repeat notice"
 assert_contains "$OUT" "PARK park-record apply --pr 10280 --reason champion merge-risk hold --by champion" "label reasserted"
 echo
 
+echo "Test 13: operator release condition (#12594) — survives a new head, no prior hold marker needed"
+cond_comment() { # <marker-suffix ""|-met> <createdAt> <text> [author]
+    jq -n --arg m "<!-- loom:release-condition$1 -->" --arg t "$3" --arg at "$2" --arg who "${4:-rjwalters}" \
+        '{author: {login: $who}, body: ($m + "\n" + $t), createdAt: $at}'
+}
+COND=$(cond_comment "" "2026-10-10T09:00:00Z" "release only after predecessor #12000 merges")
+MET=$(cond_comment "-met" "2026-10-12T09:00:00Z" "predecessor merged, healthy on all hosts")
+NEWHEAD="abcdef1234567890"
+FIX_EVENTS='[]'
+FIX_PR=$(pr_json "$NEWHEAD" loom:pr loom:blocked); FIX_COMMENTS="[$HOLD_COMMENT, $COND]"
+OUT=$(run_precheck)
+assert_contains "$OUT" "BLOCKED=true PRIOR=true MANUAL=false REASON=" "new head + open condition still HOLDs"
+assert_contains "$OUT" "release only after predecessor #12000 merges" "the notice names the condition text"
+assert_contains "$OUT" "POST 10280 --pr --body" "a condition notice is posted once"
+FIX_COMMENTS="[$HOLD_COMMENT, $COND]"
+FIX_PR=$(pr_json "$NEWHEAD" loom:pr loom:blocked)
+FIX_COMMENTS=$(jq -n --argjson c "$COND" '[$c, {author: {login: "loom-fleet-dispatch"}, body: "<!-- champion:release-condition-hold cond=2026-10-10T09:00:00Z -->\nheld", createdAt: "2026-10-10T09:05:00Z"}]')
+OUT=$(run_precheck)
+assert_lacks "$OUT" "POST" "the notice is idempotent per condition comment"
+echo
+
+echo "Test 13b: condition with no hold marker, label removed by a human, judgment-release paths all fire -> still HOLD, no label write"
+FIX_PR=$(pr_json "$NEWHEAD" loom:pr); FIX_COMMENTS="[$COND]"; FIX_EVENTS=$(unlabeled_event "2026-10-11T12:00:00Z")
+OUT=$(run_precheck)
+assert_contains "$OUT" "BLOCKED=true PRIOR=true MANUAL=false" "human label removal does not satisfy the condition"
+assert_lacks "$OUT" "PARK" "no label repair for a condition hold"
+FIX_EVENTS='[]'
+echo
+
+echo "Test 13c: a later trusted -met comment closes it -> normal evaluation"
+FIX_PR=$(pr_json "$NEWHEAD" loom:pr loom:blocked); FIX_COMMENTS="[$HOLD_COMMENT, $COND, $MET]"
+OUT=$(run_precheck)
+assert_contains "$OUT" "BLOCKED=false PRIOR=true" "condition closed, the new head releases the hold as before"
+assert_contains "$OUT" "REASON=new head commit abcdef1" "release reason is the ordinary one"
+FIX_COMMENTS="[$COND, $MET]"
+OUT=$(run_precheck)
+assert_contains "$OUT" "BLOCKED=false PRIOR=false" "closed condition and no hold marker -> never held"
+echo
+
+echo "Test 13d: amended condition wins; a -met older than the newest condition does not close it"
+COND2=$(cond_comment "" "2026-10-14T09:00:00Z" "also needs a ruleset census")
+FIX_COMMENTS="[$COND, $MET, $COND2]"
+OUT=$(run_precheck)
+assert_contains "$OUT" "BLOCKED=true PRIOR=true" "condition reopened by the newer comment"
+assert_contains "$OUT" "also needs a ruleset census" "the latest condition text is quoted"
+assert_lacks "$OUT" "predecessor #12000" "the superseded text is not"
+echo
+
+echo "Test 13e: Champion-authored lookalikes are ignored (condition and -met)"
+CHAMP_COND=$(jq -n '{author: {login: "loom-fleet-dispatch"}, body: "<!-- loom:release-condition -->\nfake\n\n---\n*Automated by Champion role*", createdAt: "2026-10-10T09:00:00Z"}')
+FIX_COMMENTS="[$CHAMP_COND]"
+OUT=$(run_precheck)
+assert_contains "$OUT" "BLOCKED=false PRIOR=false" "a Champion-authored condition does not hold"
+CHAMP_MET=$(jq -n '{author: {login: "loom-fleet-dispatch"}, body: "<!-- loom:release-condition-met -->\nok\n\n*Automated by Champion role*", createdAt: "2026-10-12T09:00:00Z"}')
+FIX_COMMENTS="[$COND, $CHAMP_MET]"
+OUT=$(run_precheck)
+assert_contains "$OUT" "BLOCKED=true PRIOR=true" "a Champion-authored -met does not close the condition"
+echo
+
+echo "Test 13f: loom:auto-merge-ok still overrides an open condition"
+FIX_PR=$(pr_json "$NEWHEAD" loom:pr loom:blocked loom:auto-merge-ok); FIX_COMMENTS="[$HOLD_COMMENT, $COND]"
+OUT=$(run_precheck)
+assert_contains "$OUT" "BLOCKED=false PRIOR=true" "the explicit human override keeps its meaning"
+assert_contains "$OUT" "REASON=override: \`loom:auto-merge-ok\` applied" "release reason is the override"
+echo
+
+echo "Test 13g: the doc states the condition rule"
+assert_doc_contains '`<!-- loom:release-condition -->`' "condition marker documented"
+assert_doc_contains '`<!-- loom:release-condition-met -->`' "met marker documented"
+assert_doc_contains 'select(.body | is_release_instruction)' "path (b) reads the shared release-instruction definition"
+echo
+
+echo "Test 13h: the operator's own form — a 'clear the hold —' that cites the condition closes it; one that does not, or a reinforcement, does not"
+person_comment() { # <createdAt> <body> [author]
+    jq -n --arg at "$1" --arg b "$2" --arg who "${3:-rjwalters}" '{author: {login: $who}, body: $b, createdAt: $at}'
+}
+CLEAR_CITE=$(person_comment "2026-10-12T09:00:00Z" "clear the hold — 2026-10-20 operator ruling (rjwalters, attended session): the release condition in the ruling above is met.
+
+**Evidence**: predecessor #12000 merged in v0.19.1178; every host healthy on it.")
+CLEAR_OTHER=$(person_comment "2026-10-12T09:00:00Z" "clear the hold — the blast-radius hold is accepted; this change is revert-safe.")
+REINFORCE=$(person_comment "2026-10-12T09:00:00Z" "do not clear the hold — the condition is not met yet.")
+# Same head as the hold, so only a comment can release anything.
+FIX_PR=$(pr_json "$HOLD_HEAD" loom:pr loom:blocked); FIX_COMMENTS="[$HOLD_COMMENT, $COND, $CLEAR_CITE]"
+OUT=$(run_precheck)
+assert_contains "$OUT" "BLOCKED=false PRIOR=true" "a citing clear closes the condition and releases the hold"
+assert_contains "$OUT" "REASON=operator comment cleared the hold — rjwalters at 2026-10-12T09:00:00Z" "released on path (b)"
+FIX_COMMENTS="[$HOLD_COMMENT, $COND, $CLEAR_OTHER]"
+OUT=$(run_precheck)
+assert_contains "$OUT" "BLOCKED=true PRIOR=true MANUAL=false REASON=" "an unrelated clear releases the merge-risk hold, and the condition re-imposes it"
+assert_contains "$OUT" "release only after predecessor #12000 merges" "the notice names the still-open condition"
+FIX_COMMENTS="[$HOLD_COMMENT, $COND, $REINFORCE]"
+OUT=$(run_precheck)
+assert_contains "$OUT" "BLOCKED=true PRIOR=true" "a reinforcement is not a release"
+echo
+
+echo "Test 13i: an App-spelled author (an unattended fleet role) can neither close a condition nor cite it closed"
+BOT_MET=$(cond_comment "-met" "2026-10-12T09:00:00Z" "predecessor merged" "loom-fleet-dispatch[bot]")
+BOT_CLEAR=$(person_comment "2026-10-12T09:00:00Z" "clear the hold — the release condition is met." "2am-fleet-dispatch-rjwalters[bot]")
+FIX_COMMENTS="[$HOLD_COMMENT, $COND, $BOT_MET]"
+OUT=$(run_precheck)
+assert_contains "$OUT" "BLOCKED=true PRIOR=true" "a [bot] -met does not close the condition"
+FIX_COMMENTS="[$HOLD_COMMENT, $COND, $BOT_CLEAR]"
+OUT=$(run_precheck)
+assert_contains "$OUT" "BLOCKED=true PRIOR=true" "a [bot] citing clear does not close the condition"
+# Closing the condition is not itself a release of the merge-risk hold: at the
+# held head the ordinary rows apply (still held); a new head then releases it.
+FIX_COMMENTS="[$HOLD_COMMENT, $COND, $(cond_comment "-met" "2026-10-12T09:00:00Z" "predecessor merged" "turian")]"
+OUT=$(run_precheck)
+assert_contains "$OUT" "BLOCKED=true PRIOR=true MANUAL=false REASON=" "a person's -met closes the condition; the merge-risk hold still stands at its head"
+assert_lacks "$OUT" "POST" "no condition notice once it is closed"
+FIX_PR=$(pr_json "$NEWHEAD" loom:pr loom:blocked)
+OUT=$(run_precheck)
+assert_contains "$OUT" "REASON=new head commit abcdef1" "and the ordinary release paths apply again"
+echo
+
+echo "Test 13j: loom:auto-merge-ok overrides a condition that has no hold marker (path (a) never ran)"
+FIX_PR=$(pr_json "$NEWHEAD" loom:pr loom:auto-merge-ok); FIX_COMMENTS="[$COND]"
+OUT=$(run_precheck)
+assert_contains "$OUT" "BLOCKED=false PRIOR=false" "the label overrides, marker or not"
+assert_lacks "$OUT" "POST" "no condition notice under the override"
+echo
+
+echo "Test 13k: a condition that quotes a Champion marker name still binds, and same-line text is quoted"
+QUOTING=$(person_comment "2026-10-10T09:00:00Z" "<!-- loom:release-condition --> release after #12000 merges; the champion:merge-risk-hold above stays until then")
+FIX_PR=$(pr_json "$NEWHEAD" loom:pr loom:blocked); FIX_COMMENTS="[$HOLD_COMMENT, $QUOTING]"
+OUT=$(run_precheck)
+assert_contains "$OUT" "BLOCKED=true PRIOR=true" "quoting champion:merge-risk-hold does not void the condition"
+assert_contains "$OUT" "release after #12000 merges; the champion:merge-risk-hold above stays until then" "text on the marker line is quoted"
+echo
+
 echo "Test 12: census lists hand-released, unmerged holds (merge-risk and critical-file), not quoted markers"
 FIX_LIST=$(jq -n '[
   {number: 10280, comments: [{body: "<!-- champion:merge-risk-hold -->\nheld"}]},

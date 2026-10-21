@@ -160,6 +160,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable BOM enrichment from .kct project spec",
     )
     parser.add_argument(
+        "--spec",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Use this .kct project spec for BOM enrichment instead of walking up "
+            "from the PCB directory (needed when exporting outside the project tree). "
+            "--no-spec takes precedence; a missing PATH is still an error"
+        ),
+    )
+    parser.add_argument(
         "--no-merge-lcsc",
         action="store_true",
         help="Disable merging LCSC part numbers from an existing BOM CSV",
@@ -283,6 +293,7 @@ def build_manufacturing_config(
     include_project_zip: bool = True,
     auto_lcsc: bool = True,
     no_spec: bool = False,
+    spec_path: Path | None = None,
     merge_lcsc: bool = True,
     bom_source: str = "schematic",
     skip_preflight: bool = False,
@@ -348,6 +359,7 @@ def build_manufacturing_config(
         include_project_zip=include_project_zip,
         auto_lcsc=auto_lcsc,
         no_spec=no_spec,
+        spec_path=spec_path,
         merge_lcsc=merge_lcsc,
         bom_source=bom_source,
         preflight=preflight_cfg,
@@ -392,6 +404,12 @@ def run_export(args: argparse.Namespace) -> int:
     else:
         pcb_path = input_path
 
+    spec_arg = getattr(args, "spec", None)
+    spec_path = Path(spec_arg) if spec_arg else None
+    if spec_path is not None and not spec_path.is_file():
+        print(f"Error: Spec file not found: {spec_path}", file=sys.stderr)
+        return 1
+
     # Determine output directory
     output_dir = Path(args.output) if args.output else pcb_path.parent / "manufacturing"
 
@@ -405,6 +423,7 @@ def run_export(args: argparse.Namespace) -> int:
         include_project_zip=not args.no_project_zip,
         auto_lcsc=args.auto_lcsc and not args.no_auto_lcsc,
         no_spec=getattr(args, "no_spec", False),
+        spec_path=spec_path,
         merge_lcsc=not getattr(args, "no_merge_lcsc", False),
         bom_source=getattr(args, "bom_source", "schematic"),
         skip_preflight=getattr(args, "skip_preflight", False),

@@ -280,7 +280,9 @@ def test_all_route_all_negotiated_calls_forward_region_parallel():
             i += 1
         assert depth == 0, f"unbalanced parens around route_all_negotiated call near offset {idx}"
         body = text[idx:i]
-        if "region_parallel=" in body:
+        # Issue #7377: sites splat ``**_negotiated_kwargs(...)``, which emits
+        # ``region_parallel`` (pinned by the helper test below).
+        if "region_parallel=" in body or "**_negotiated_kwargs(" in body:
             forwarded += 1
         pos = i + 1
 
@@ -295,6 +297,23 @@ def test_all_route_all_negotiated_calls_forward_region_parallel():
         f"flag or the --region-parallel speedup applies only to a subset of "
         f"routing paths (Issue #3054)."
     )
+
+
+def test_negotiated_kwargs_helper_forwards_region_parallel():
+    """Issue #7377: the shared kwargs builder carries ``--region-parallel``."""
+    from argparse import Namespace
+
+    from kicad_tools.cli.route_cmd import _negotiated_kwargs
+
+    def build(**overrides):
+        return _negotiated_kwargs(
+            Namespace(iterations=5, **overrides), timeout=None, checkpoint_callback=None
+        )
+
+    assert build()["region_parallel"] is False
+    on = build(region_parallel=True, partition_rows=3, partition_cols=4, max_parallel_workers=2)
+    assert on["region_parallel"] is True
+    assert (on["partition_rows"], on["partition_cols"], on["max_parallel_workers"]) == (3, 4, 2)
 
 
 # ---------------------------------------------------------------------------

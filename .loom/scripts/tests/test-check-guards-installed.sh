@@ -47,6 +47,8 @@ run() { # <args...> -> sets RC/OUT/ERR
 workspace() { # <name> -> path to a Loom workspace wiring guard-destructive.sh
     local ws="$TMPROOT/$1"
     mkdir -p "$ws/.loom/hooks" "$ws/.claude"
+    # The sibling engine the dispatcher `exec bash`es (#8570); a healthy install has it.
+    printf '#!/bin/sh\nexit 0\n' > "$ws/.loom/hooks/guard-destructive-generic.sh"
     cat > "$ws/.claude/settings.json" <<'JSON'
 {
   "hooks": {
@@ -115,6 +117,21 @@ WS="$(workspace ws-missing)"
 run --root "$WS"
 assert_eq "a missing wired hook exits 2" "2" "$RC"
 assert_contains "a missing hook is reported as MISSING" "MISSING" "$ERR"
+
+# The dispatcher's generic engine is a sibling, not a wired hook (#8570).
+WS="$(workspace ws-noengine)"
+printf '#!/bin/sh\nexit 0\n' > "$WS/.loom/hooks/guard-destructive.sh"
+chmod +x "$WS/.loom/hooks/guard-destructive.sh"
+rm -f "$WS/.loom/hooks/guard-destructive-generic.sh"
+run --root "$WS"
+assert_eq "a missing generic engine with no Repo Skills guard exits 2" "2" "$RC"
+assert_contains "the missing engine is reported as NO ENGINE" "NO ENGINE" "$ERR"
+
+mkdir -p "$WS/.claude/skills/repo/hooks"
+printf '#!/bin/sh\nexit 0\n' > "$WS/.claude/skills/repo/hooks/guard-destructive.sh"
+run --root "$WS"
+assert_eq "a missing generic engine covered by a Repo Skills guard exits 0" "0" "$RC"
+assert_contains "the covered missing engine is reported as degraded" "degraded" "$OUT"
 
 PLAIN="$TMPROOT/plain"
 mkdir -p "$PLAIN"

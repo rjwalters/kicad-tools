@@ -176,11 +176,16 @@ CONTRACT_ARGV: dict[str, list[str]] = {
     "pcb snap-rotation": ["{pcb}", "--dry-run"],
     "pcb edit-outline": ["{pcb}", "--list"],
     "pcb net-audit": ["{pcb}"],
+    "pcb model-audit": ["{pcb}"],
     "pcb diff": ["{pcb}", "{pcb}"],
     "pcb export-dsn": ["{pcb}"],
     "pcb import-ses": ["{pcb}", "{dir}/missing.ses"],
     # -- lib ----------------------------------------------------------------
     "lib list": [],
+    # -- pinned 3D model subset (#7683) -------------------------------------
+    # Hermetic: HOME is scratch and KCT_KICAD_3DMODEL_CACHE is popped, so it
+    # reads an empty cache and prints one JSON document with exit 1.
+    "models status": [],
     "lib symbols": ["{fixtures}/multiunit_test.kicad_sym"],
     "lib footprints": ["{fixtures}/Test_Library.pretty"],
     "lib footprint": ["{fixtures}/Test_Library.pretty/SOT-23-5.kicad_mod"],
@@ -442,6 +447,7 @@ EXEMPT: dict[str, str] = {
     "bench external": "network: fetches external benchmark boards (multi-minute)",
     "benchmark run": "runtime: routes the benchmark corpus (multi-minute)",
     "calibrate": "runtime: CPU/GPU micro-benchmarks (machine-dependent duration)",
+    "models sync": "network: fetches the pinned kicad-packages3D subset (stubbed run in tests/test_models_sync.py)",
     "placement refine": "interactive: --format json is a stdin/stdout JSON Lines session",
 }
 
@@ -529,6 +535,8 @@ def _hermetic_env(scratch: Path) -> dict[str, str]:
     env = dict(os.environ)
     # `mcp setup` reads $CLAUDE_CONFIG_DIR/.claude.json when it is set (#6418).
     env.pop("CLAUDE_CONFIG_DIR", None)
+    # A developer's synced 3D model cache must not leak in (#7683).
+    env.pop("KCT_KICAD_3DMODEL_CACHE", None)
     home = scratch / "_home"
     home.mkdir(exist_ok=True)
     env.update(
