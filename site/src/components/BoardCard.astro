@@ -127,6 +127,14 @@ const statusLabel = displayStatusLabel(board);
         )
       }
       {
+        typeof board.model_coverage?.percent === "number" && (
+          <li class="badge">
+            <span class="badge-label">3D models</span>
+            <span class="badge-value">{board.model_coverage.percent}%</span>
+          </li>
+        )
+      }
+      {
         board.cost?.per_board_usd !== undefined && (
           <li class="badge">
             <span class="badge-label">Cost</span>

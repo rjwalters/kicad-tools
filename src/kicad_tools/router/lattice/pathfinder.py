@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import heapq
 import math
+import os
 import time
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
@@ -92,9 +93,10 @@ Connection = tuple[object, Pad, Pad, object]
 # A congestion resource: ("e", edge_key, layer) or ("v", node_key).
 Resource = tuple[object, ...]
 
-# A* state: (node_key, layer_index).
-_State = tuple[NodeKey, int]
-_GOAL: _State = (("GOAL",), -1)  # type: ignore[assignment]
+# A* state: (node_key, layer_index).  The fat (coupled-pair) search appends
+# (heading, winding) -- issue #7721 -- so the alias is variable-length.
+_State = tuple[Any, ...]
+_GOAL: _State = (("GOAL",), -1)
 
 # Issue #6957: a path's via sites as a persistent linked list, newest first.
 _ViaChain = tuple[Pt, Any] | None
@@ -445,6 +447,11 @@ def _shift_centerline_segment(points: list[Pt], i: int, delta: float) -> list[Pt
 _END_REVERSAL_COS = -1.0 + 1e-6
 
 
+# Issue #7729: extra leg-to-leg separation (mm) emitted over the pair pitch to
+# absorb the 4-decimal rounding of the board file (2 vertices x ~0.07 um).
+_PAIR_SERIALIZATION_MARGIN_MM: float = 2e-4
+
+
 def _unit_step(a: Pt, b: Pt) -> Pt | None:
     """Unit vector ``a -> b``, or ``None`` for a zero-length step."""
     length = dist(a, b)
@@ -458,6 +465,53 @@ def _reverses(d_in: Pt | None, d_out: Pt | None) -> bool:
     if d_in is None or d_out is None:
         return False
     return d_in[0] * d_out[0] + d_in[1] * d_out[1] < _END_REVERSAL_COS
+
+
+#: Issue #7721: set to ``1`` to opt the coupled-pair search into net-turning
+#: pricing (:attr:`LatticePathfinder.pair_turn_pricing`).  Off by default.
+PAIR_TURN_PRICING_ENV = "KCT_LATTICE_PAIR_TURN_PRICING"
+
+#: Issue #7721: heading value for "no heading yet" in the turn-aware fat search.
+_NO_HEADING = 8
+
+#: Issue #7721: signed winding (45-degree units) is clamped to +/- this, which
+#: bounds the turn-aware fat search to ``9 headings x (2 * clamp + 1)`` states
+#: per ``(node, layer)``.
+_WINDING_CLAMP = 4
+
+
+def _heading_index(a: Pt, b: Pt) -> int | None:
+    """Octilinear heading (0..7, 45-degree units) of ``a -> b`` (#7721)."""
+    if dist(a, b) <= 1e-9:
+        return None
+    return round(math.atan2(b[1] - a[1], b[0] - a[0]) / (math.pi / 4.0)) % 8
+
+
+def _signed_turn(h_in: int, h_out: int) -> int:
+    """Signed turn ``h_in -> h_out`` in 45-degree units, in ``[-3, 4]`` (#7721).
+
+    A straight 180-degree reversal is ``+4`` (its sign is ambiguous).
+    """
+    if h_in == _NO_HEADING or h_out == _NO_HEADING:
+        return 0
+    return ((h_out - h_in + 3) % 8) - 3
+
+
+def _poly_turning(poly: list[Pt]) -> int:
+    """Net signed turning along ``poly`` in 45-degree units (#7721).
+
+    Zero-length steps are skipped.  A reversed polyline turns by the negation.
+    """
+    total = 0
+    prev: int | None = None
+    for a, b in zip(poly, poly[1:], strict=False):
+        hd = _heading_index(a, b)
+        if hd is None:
+            continue
+        if prev is not None:
+            total += _signed_turn(prev, hd)
+        prev = hd
+    return total
 
 
 def _diverse_pair_stubs(
@@ -603,6 +657,13 @@ class LatticePathfinder:
         # candidates by skew.  The router sets the skew checker's via-inclusive
         # measure; ``None`` -> tracks plus a 1.6 mm barrel per through-via.
         self.pair_length_measure: Callable[[Route], float] | None = None
+        # Issue #7721: price net signed turning in the coupled (fat) pair
+        # search.  Experimental and OFF by default, and not yet a net win:
+        # of 20 board 06rf/07rf pairs it improves skew on 6, leaves 12
+        # unchanged and regresses 2, and with it on 07rf couples only 3 of 7
+        # pairs at about 3.5x the runtime (see PR #7726).  Default routes are
+        # unchanged unless opted in here or via the environment.
+        self.pair_turn_pricing: bool = os.environ.get(PAIR_TURN_PRICING_ENV, "").strip() == "1"
         self._shortfall_memo: dict[int, tuple[_RouteResult, int]] = {}
         # Issue #6703: raised only while a partner-aware fallback leg is
         # SEARCHED (never while it is committed) -- see
@@ -2369,6 +2430,13 @@ class LatticePathfinder:
         # reverse onto its stub, and a start node is never left back along
         # its stub.
         parity_ends = fat and stubs_override is not None
+        # Issue #7721: a coupled pair's two legs sit ``pitch`` apart, so the
+        # outer leg is longer by ``pitch x net signed turning``.  The fat
+        # search therefore carries ``(heading, winding)`` in its state and
+        # prices the net winding at the goal.  Single-net searches keep the
+        # plain ``(node, layer)`` state.
+        turn_aware = fat and extra_clearance > 0.0 and self.pair_turn_pricing
+        turn_lambda = 2.0 * extra_clearance * (math.pi / 4.0) if turn_aware else 0.0
 
         def stub_tail_dir(poly: list[Pt]) -> Pt | None:
             """Direction of the stub's last non-degenerate step (pad -> node)."""
@@ -2383,13 +2451,13 @@ class LatticePathfinder:
             length += sum(
                 copper_cost(a, b, layer, width_b) for a, b in zip(poly, poly[1:], strict=False)
             )
-            state = (key, layer)
+            state: _State = (key, layer)
             if state not in goal or length < goal[state][0]:
                 goal[state] = (length, poly)
         # Issue #6975: the travel direction the goal stub is entered with
         # (node -> pad, the reverse of its polyline's last step).
         goal_out: dict[_State, Pt | None] = {}
-        if parity_ends:
+        if parity_ends or turn_aware:
             for state, (_len, poly) in goal.items():
                 last = stub_tail_dir(poly)
                 goal_out[state] = None if last is None else (-last[0], -last[1])
@@ -2427,16 +2495,59 @@ class LatticePathfinder:
             if state not in g_score or length < g_score[state]:
                 g_score[state] = length
                 start_stub[state] = poly
-                heapq.heappush(heap, (length + h(key), counter, state))
+                if not turn_aware:
+                    heapq.heappush(heap, (length + h(key), counter, state))
+                    counter += 1
+        if turn_aware:
+            # Seed each start node with the heading its stub leaves it on.
+            seeded: dict[_State, float] = {}
+            for base in start_stub:
+                d0 = stub_tail_dir(start_stub[base])
+                hd0 = _NO_HEADING if d0 is None else _heading_index((0.0, 0.0), d0)
+                # The stub's own turning counts toward the pair's winding:
+                # stub candidates differ, and the legs follow them too.
+                wd0 = max(-_WINDING_CLAMP, min(_WINDING_CLAMP, _poly_turning(start_stub[base])))
+                st0 = (*base, _NO_HEADING if hd0 is None else hd0, wd0)
+                seeded[st0] = g_score.pop(base)
+            g_score.update(seeded)
+            for state0, g0 in seeded.items():
+                heapq.heappush(heap, (g0 + h(state0[0]), counter, state0))
                 counter += 1
 
         # Issue #6975: the travel direction each start node is reached with.
         start_in: dict[_State, Pt | None] = (
             {state: stub_tail_dir(poly) for state, poly in start_stub.items()}
-            if parity_ends
+            if parity_ends or turn_aware
             else {}
         )
 
+        goal_turning: dict[_State, int] = (
+            {state: _poly_turning(poly) for state, (_len, poly) in goal.items()}
+            if turn_aware
+            else {}
+        )
+
+        def goal_heading(base: _State) -> int:
+            """Heading the goal stub is entered with (``_NO_HEADING`` if none)."""
+            d = goal_out.get(base)
+            if d is None:
+                return _NO_HEADING
+            return round(math.atan2(d[1], d[0]) / (math.pi / 4.0)) % 8
+
+        def end_penalty(state: _State) -> float:
+            """Price of the net winding a search state arrives at the goal with."""
+            if not turn_aware:
+                return 0.0
+            hd, wd = state[2], state[3]
+            base = state[:2]
+            turn = _signed_turn(hd, goal_heading(base))
+            # The goal stub is travelled node -> pad, i.e. reversed.
+            return turn_lambda * float(abs(wd + turn - goal_turning[base]))
+
+        # Issue #7721: ``(node, layer)`` bases any turn-aware state has reached;
+        # only those can already lie on a path (cheap pre-filter for the loop
+        # check below).
+        reached: set[_State] = {state[:2] for state in g_score} if turn_aware else set()
         edge_ok: dict[tuple[EdgeKey, int], bool] = {}
         node_ok: dict[_State, bool] = {}
         via_ok: dict[NodeKey, bool] = {}
@@ -2457,7 +2568,7 @@ class LatticePathfinder:
             """
             cur: _State | None = tip
             while cur is not None:
-                if cur == node:
+                if cur[:2] == node[:2]:
                     return True
                 cur = came[cur][0] if cur in came else None
             return False
@@ -2470,18 +2581,19 @@ class LatticePathfinder:
                 else:
                     end_state = came[_GOAL][0]
                 break
-            key, layer = state
+            key, layer = state[0], state[1]
+            base = (key, layer)
             g = g_score.get(state, math.inf)
             if f > g + h(key) + 1e-9:
                 continue  # stale heap entry
             is_start = parity_ends and state not in came
-            if state in goal and (
+            if base in goal and (
                 not parity_ends
                 # A start node that is itself a goal: the two stubs meet here.
-                or (is_start and not _reverses(start_in.get(state), goal_out.get(state)))
+                or (is_start and not _reverses(start_in.get(base), goal_out.get(base)))
                 or (not is_start and came[state][1] == "via")
             ):
-                total = g + goal[state][0]
+                total = g + goal[base][0] + end_penalty(state)
                 if total < g_score.get(_GOAL, math.inf) - 1e-12:
                     g_score[_GOAL] = total
                     came[_GOAL] = (state, "arrive")
@@ -2496,8 +2608,21 @@ class LatticePathfinder:
                 step_dir: Pt | None = None
                 if parity_ends:
                     step_dir = _unit_step(lattice.node_point(key), lattice.node_point(nbr))
-                    if is_start and _reverses(start_in.get(state), step_dir):
+                    if is_start and _reverses(start_in.get(base), step_dir):
                         continue  # would double back along the start stub
+                nhd = _NO_HEADING
+                if turn_aware:
+                    hd_step = _heading_index(lattice.node_point(key), lattice.node_point(nbr))
+                    nhd = state[2] if hd_step is None else hd_step
+                    if abs(_signed_turn(state[2], nhd)) >= 3:
+                        # Issue #7721: with heading in the state a node can be
+                        # re-entered, so a 180-degree spur (or a 135-degree
+                        # hook) is no longer pruned by ``(node, layer)``
+                        # dominance.  Neither is pair copper -- the inside
+                        # leg's offset collapses (``pair-offset-degenerate``)
+                        # -- and past the winding clamp they would only
+                        # launder the winding count.
+                        continue
                 edge = (min(key, nbr), max(key, nbr))
                 ek = (edge, layer)
                 ok = edge_ok.get(ek)
@@ -2531,8 +2656,8 @@ class LatticePathfinder:
                     edge_ok[ek] = ok
                 if not ok:
                     continue
-                nstate = (nbr, layer)
-                nok = node_ok.get(nstate)
+                nbase: _State = (nbr, layer)
+                nok = node_ok.get(nbase)
                 if nok is None:
                     if fat:
                         npt = lattice.node_point(nbr)
@@ -2554,9 +2679,16 @@ class LatticePathfinder:
                         )
                         if ko_hit:
                             ko_pruned = True
-                    node_ok[nstate] = nok
+                    node_ok[nbase] = nok
                 if not nok:
                     continue
+                nstate: _State = nbase
+                if turn_aware:
+                    nwd = max(
+                        -_WINDING_CLAMP,
+                        min(_WINDING_CLAMP, state[3] + _signed_turn(state[2], nhd)),
+                    )
+                    nstate = (nbr, layer, nhd, nwd)
                 step = elen + present * history.get(("e", edge, layer), 0.0)
                 if preferred_layers and layer not in preferred_layers:
                     step += elen * _NON_PREFERRED_LAYER_SURCHARGE
@@ -2567,18 +2699,25 @@ class LatticePathfinder:
                 tentative = g + step
                 if (
                     parity_ends
-                    and nstate in goal
-                    and not _reverses(step_dir, goal_out.get(nstate))
-                    and not passes_through(state, nstate)
+                    and nbase in goal
+                    and not _reverses(step_dir, goal_out.get(nbase))
+                    and not passes_through(state, nbase)
                 ):
-                    total = tentative + goal[nstate][0]
+                    total = tentative + goal[nbase][0] + end_penalty(nstate)
                     if total < g_score.get(_GOAL, math.inf) - 1e-12:
                         g_score[_GOAL] = total
                         came[_GOAL] = (state, "arrive-edge")
                         arrive_node = nstate
                         heapq.heappush(heap, (total, counter, _GOAL))
                         counter += 1
-                if tentative < g_score.get(nstate, math.inf) - 1e-12:
+                if tentative < g_score.get(nstate, math.inf) - 1e-12 and not (
+                    # Issue #7721: winding in the state lets a path close a
+                    # loop through a node it already holds to buy back turning.
+                    # A looped centerline is never pair copper (its legs cross).
+                    turn_aware and nbase in reached and passes_through(state, nbase)
+                ):
+                    if turn_aware:
+                        reached.add(nbase)
                     g_score[nstate] = tentative
                     came[nstate] = (state, "move")
                     path_vias[nstate] = path_vias.get(state)
@@ -2648,17 +2787,18 @@ class LatticePathfinder:
                             # Ran off the stack: this direction exists only
                             # through forbidden layers.
                             continue
-                        nstate = (key, nl)
+                        nbase = (key, nl)
+                        nstate = (*nbase, *state[2:])
                         # A tapered goal reached by a via emits only its neck
                         # and the via on this layer, not a body-width segment.
                         # Keep this legality separate from the body-node cache:
                         # any later planar expansion must still clear at half.
-                        tapered_goal = nstate in goal and width_b < body_w
+                        tapered_goal = nbase in goal and width_b < body_w
                         landing_half = (
                             max(width_b, self.rules.via_diameter) / 2.0 if tapered_goal else half
                         )
                         landing_extra = max(0.0, landing_half + clr - self._agent_radius)
-                        nok = None if tapered_goal else node_ok.get(nstate)
+                        nok = None if tapered_goal else node_ok.get(nbase)
                         if nok is None:
                             kpt = lattice.node_point(key)
                             ko_hit = ko is not None and ko.segment_blocked(
@@ -2682,7 +2822,7 @@ class LatticePathfinder:
                                 and committed.node_clear(kpt, nl, net, landing_half, clr)
                             )
                             if not tapered_goal:
-                                node_ok[nstate] = nok
+                                node_ok[nbase] = nok
                         if not nok:
                             continue
                         step = self.via_cost + present * history.get(("v", key), 0.0)
@@ -2697,6 +2837,8 @@ class LatticePathfinder:
                         )
                         tentative = g + step
                         if tentative < g_score.get(nstate, math.inf) - 1e-12:
+                            if turn_aware:
+                                reached.add(nbase)
                             g_score[nstate] = tentative
                             came[nstate] = (state, "via")
                             path_vias[nstate] = (lattice.node_point(key), path_vias.get(state))
@@ -2769,7 +2911,7 @@ class LatticePathfinder:
             cur = prev
         chain.reverse()
         moves.reverse()
-        start_state = chain[0]
+        start_state = chain[0][:2]
 
         resources: set[Resource] = set()
         runs: list[tuple[int, list[Pt], list[float]]] = []
@@ -2782,7 +2924,7 @@ class LatticePathfinder:
         # segment is spaced at the width it is EMITTED at (issue #4293).
         cur_ws: list[float] = [width_a] * (len(start_poly) - 1)
         for idx in range(1, len(chain)):
-            key, layer = chain[idx]
+            key, layer = chain[idx][0], chain[idx][1]
             move = moves[idx - 1]
             if move == "via":
                 runs.append((cur_layer, cur_pts, cur_ws))
@@ -2796,7 +2938,7 @@ class LatticePathfinder:
                 resources.add(("e", (min(prev_key, key), max(prev_key, key)), layer))
                 cur_pts.append(lattice.node_point(key))
                 cur_ws.append(body_w)
-        _stub_len, stub_b_poly = goal[end_state]
+        _stub_len, stub_b_poly = goal[end_state[:2]]
         tail = list(reversed(stub_b_poly[:-1]))  # last node -> pad (exact)
         cur_pts.extend(tail)
         cur_ws.extend([width_b] * len(tail))
@@ -3331,8 +3473,14 @@ class LatticePathfinder:
                 for a, b in zip(center, center[1:], strict=False):
                     if not self._escape_boundary.segment_clear(a, b, trace_w / 2.0 + half_pitch):
                         return None, "pair-leg-blocked"
-            plus = offset_polyline(center, +half_pitch)
-            minus = offset_polyline(center, -half_pitch)
+            # Issue #7729: the board file stores 4 decimals, so a vertex can
+            # move ~0.07 um and a leg pair ~0.14 um closer than the pitch
+            # checked below (whose slop already spends the 1e-4 mm that
+            # ``kct check`` allows).  Emit the legs a hair wider so the
+            # shipped gap still meets ``pair_gap`` after serialization.
+            emit_half = half_pitch + _PAIR_SERIALIZATION_MARGIN_MM / 2.0
+            plus = offset_polyline(center, +emit_half)
+            minus = offset_polyline(center, -emit_half)
             if plus is None or minus is None:
                 return None, "pair-offset-degenerate"
             assigned = assign_polarity(plus, minus, pc.pad_p_a, pc.pad_n_a, pc.pad_p_b, pc.pad_n_b)

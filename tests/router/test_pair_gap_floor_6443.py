@@ -37,6 +37,7 @@ from kicad_tools.manufacturers.netclass_dru import (
 )
 from kicad_tools.router.board_clearance_rules import KICAD_CONSTRAINT_KEYWORDS, parse_dru
 from kicad_tools.router.lattice.geometry import seg_seg_dist
+from kicad_tools.router.lattice.pathfinder import _PAIR_SERIALIZATION_MARGIN_MM
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules, NetClassRouting
@@ -166,7 +167,10 @@ def test_lattice_floors_the_coupled_gap_at_the_authored_minimum(capsys) -> None:
 def test_lattice_gap_is_unchanged_without_an_authored_minimum(capsys) -> None:
     router, routes_p, routes_n = _route_pair(None)
     assert router._lattice_pair_outcomes == {"D": "coupled"}
-    assert _min_edge_gap(routes_p, routes_n) == pytest.approx(0.075, abs=1e-6)
+    # Legs are emitted the serialization margin wider than the gap (issue #7729).
+    assert _min_edge_gap(routes_p, routes_n) == pytest.approx(
+        0.075 + _PAIR_SERIALIZATION_MARGIN_MM, abs=1e-6
+    )
     assert "Diff-pair gap:" not in capsys.readouterr().out
 
 

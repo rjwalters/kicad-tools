@@ -6976,6 +6976,22 @@ def _add_render_parser(subparsers) -> None:
         help="Skip 3D ray-traced renders (for headless CI without a display)",
     )
     render_parser.add_argument(
+        "--models",
+        dest="render_models",
+        choices=["pinned", "host"],
+        default=None,
+        help=(
+            "3D model set the coverage audit resolves against (default: pinned "
+            "when synced via `kct models sync`, else host)"
+        ),
+    )
+    render_parser.add_argument(
+        "--allow-incomplete-models",
+        dest="render_allow_incomplete_models",
+        action="store_true",
+        help="Downgrade incomplete 3D model coverage to a warning (exploratory use)",
+    )
+    render_parser.add_argument(
         "--format",
         dest="render_format",
         choices=["text", "json"],
