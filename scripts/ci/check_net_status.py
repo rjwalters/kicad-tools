@@ -56,9 +56,9 @@ by this script.
 
 ``--known-open-nets NET[,NET...]``
 ----------------------------------
-Board 07 ("matchgroup-test") routes PARTIAL by design: 1
-unroutable net (#7557 / #3438 / #4012: ``TMDS_D0_N``; measured 2026-10-20,
-seed 42).  Passing it via ``--known-open-nets`` excludes THEIR unconnected pads from
+For a board that routes PARTIAL by design (board 07 passed ``TMDS_D0_N``
+until #7557 made every signal net route; it now passes no known opens).
+Passing a net via ``--known-open-nets`` excludes THEIR unconnected pads from
 the gated count while still failing on an unconnected pad appearing on ANY
 OTHER net -- so a *different* net silently going open is still caught (tighter
 than merely raising ``--max-unconnected`` to their pad count, which would let
@@ -363,7 +363,7 @@ def main(argv: list[str] | None = None) -> int:
         metavar="NET[,NET...]",
         help=(
             "Comma-separated net names permitted to carry unconnected pads "
-            "(e.g. board 07's sole #3438 open, TMDS_D0_N). Their pads are "
+            "(board 07 passed TMDS_D0_N until #7557). Their pads are "
             "excluded from the gated count, but an unconnected pad on any OTHER "
             "net still fails -- so a different net silently going open is still "
             "caught."

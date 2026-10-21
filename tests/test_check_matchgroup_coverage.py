@@ -68,13 +68,18 @@ class TestBoard07Allowance:
 
         Reroute path: MIPI_CSI_LANES pair-only skew (#3916) plus
         DDR_DATA_BYTE_0 (16.717 mm vs 0.100 mm tol, seed 42), which fires now
-        that DQ0 is routed (#7331).  A count would let another group be
-        absorbed in place of a known one.  Delete the DDR entry once the
-        tuner fixes it (#5798 / #6447).
+        that DQ0 is routed (#7331), plus HDMI_TMDS_LANES (7.723 mm vs
+        0.075 mm), which became measurable when TMDS_D0_N routed (#7557).  A
+        count would let another group be absorbed in place of a known one.
+        Delete an entry once the tuner fixes it (#7550).
         """
         mod = _load_helper_module()
         key = "boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb"
-        assert set(mod.MATCHGROUP_ALLOWED_GROUPS[key]) == {"MIPI_CSI_LANES", "DDR_DATA_BYTE_0"}
+        assert set(mod.MATCHGROUP_ALLOWED_GROUPS[key]) == {
+            "MIPI_CSI_LANES",
+            "DDR_DATA_BYTE_0",
+            "HDMI_TMDS_LANES",
+        }
         assert not hasattr(mod, "MATCHGROUP_VIOLATION_BASELINE")
         assert not hasattr(mod, "check_zero_violations")
 
@@ -332,11 +337,12 @@ class TestSignalReachContract:
         assert mod.measure_signal_reach is board_recipe_artifacts.measure_signal_reach
 
     def test_board_07_declares_reach_contract(self):
+        # 31/31 since #7557 moved U4's TMDS balls to its J2-facing column.
         mod = _load_board_recipe_module()
-        assert mod.REQUIRED_SIGNAL_REACH == 30
+        assert mod.REQUIRED_SIGNAL_REACH == 31
 
     def test_committed_fixture_fails_reach_contract(self, tmp_path, capsys):
-        """The committed 27/31 fixture (#6730 / #7283) is below 30: it bites."""
+        """The committed 27/31 fixture (#6730 / #7283) is below 31: it bites."""
         mod = _load_helper_module()
         recipe = _load_board_recipe_module()
         board_dir = REPO_ROOT / "boards" / "07-matchgroup-test"
@@ -412,12 +418,12 @@ class TestMatchgroupJobContainer:
 class TestUnexpectedBaselineErrors:
     KEY = "boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb"
 
-    NETS = {"MIPI_DAT1_N", "MIPI_DAT1_P", "TMDS_D1_N", "TMDS_D1_P"}
+    NETS = {"MIPI_DAT1_N", "MIPI_DAT1_P", "TMDS_D1_N", "TMDS_D1_P", "TMDS_D0_N", "TMDS_D0_P"}
 
     def test_listed_impedance_nets_tolerated(self):
         mod = _load_helper_module()
         found = {"impedance": set(self.NETS)}
-        assert mod.unexpected_baseline_errors(self.KEY, {"impedance": 4}, found) == {}
+        assert mod.unexpected_baseline_errors(self.KEY, {"impedance": 6}, found) == {}
         assert [s for s in mod.stale_allowances(self.KEY, found) if s[0] == "impedance"] == []
 
     def test_unlisted_impedance_net_reported_within_old_cap(self):
@@ -428,7 +434,7 @@ class TestUnexpectedBaselineErrors:
     def test_fixed_listed_finding_is_stale(self):
         mod = _load_helper_module()
         found = {"impedance": self.NETS - {"TMDS_D1_P"}}
-        assert mod.unexpected_baseline_errors(self.KEY, {"impedance": 3}, found) == {}
+        assert mod.unexpected_baseline_errors(self.KEY, {"impedance": 5}, found) == {}
         stale = [s for s in mod.stale_allowances(self.KEY, found) if s[0] == "impedance"]
         assert stale == [("impedance", "TMDS_D1_P", 7349)]
 
