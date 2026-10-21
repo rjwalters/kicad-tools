@@ -506,7 +506,7 @@ per-repo class instead of a hardcoded, always-safe one.
   `loom:auto-merge-ok`'s semantics or its critical-file caveat.
 - **Fail-safe on malformed config.** A class entry missing `id`,
   `filePatterns`, or `conditions`, or naming a condition outside the closed
-  vocabulary (today: `judgeApproval`, `greenCi`), is skipped — that entry
+  vocabulary (today: `judgeApproval`, `greenCi`, `authorIsDependabot`, `noMajorBump`), is skipped — that entry
   never authorizes anything, and a malformed entry never disables sibling
   entries in the array. No config, or an empty array, is a full no-op.
 - **Criteria #1/#3/#4/#5/#6 still run independently.** A standing
@@ -571,6 +571,40 @@ changed file. It waives criterion #3 only and is never eligible for criterion
 | `ci.yml` plus `defaults/scripts/install-loom.sh` | kept set: #3 **FAIL**, hold |
 | `src/ci.yml` renamed to `.github/workflows/ci.yml` | the previous name is outside the class: #3 **FAIL**, hold |
 | `docs/guide.md` alone | no critical-file hit: the class does not apply, #3 passes on its own |
+
+**Dependabot bumps merge by default (#12948)**: operator direction 2026-10-20,
+"merge Dependabot and then fix things that break". Two more conditions express
+it, so no new config block is needed:
+
+- `authorIsDependabot`: the PR object's `user.login` is `dependabot[bot]` and
+  `user.type` is `Bot`, read live from the forge. A comment, title or label
+  claim never counts; a failed or empty read fails closed.
+- `noMajorBump`: opt-out for semver majors. Reads the version move from the
+  title Dependabot writes (`Bump X from A to B`); a changed first component
+  (second for `0.x`), or a title that does not parse (group bumps), holds.
+
+Fleet-default class (set in the fleet tier, not in this repo's committed file;
+omit `noMajorBump` to merge majors, which is the default):
+
+```json
+{
+  "id": "dependabot-bumps",
+  "description": "Dependabot manifest/lockfile bumps, given Judge approval and green CI",
+  "filePatterns": ["package.json", "*/package.json", "package-lock.json", "*/package-lock.json",
+                   "pnpm-lock.yaml", "yarn.lock", "Cargo.toml", "*/Cargo.toml", "Cargo.lock",
+                   "go.mod", "go.sum", "requirements*.txt", "uv.lock", "poetry.lock"],
+  "conditions": ["authorIsDependabot", "judgeApproval", "greenCi"],
+  "coversCriticalFiles": true
+}
+```
+
+It sets no `forbiddenDiffPatterns`: that list is per class and optional, so
+version lines are not refused unless a class asks. A human PR with the same
+manifest diff fails `authorIsDependabot` (held); a Dependabot PR that also
+touches any file outside `filePatterns` is held; the kept set still applies.
+Fix forward: a red `main` after such a merge is Auditor or Builder work, not a
+reason to pre-hold. After a Dependabot merge, `champion-pr-merge.md` Step 3.5
+comments `@dependabot rebase` once on open Dependabot PRs that now conflict.
 
 **Action** (single authoritative policy — implemented in
 `champion-pr-merge.md` → "Safety Criteria → 2. Merge-Risk Judgment →

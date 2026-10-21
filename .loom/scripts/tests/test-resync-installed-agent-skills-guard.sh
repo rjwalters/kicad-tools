@@ -124,6 +124,72 @@ else
     fail "(#8673) the skip was not reported with the marker name; out=$OUT"
 fi
 
+# --- group 4: retired generated skills are removed, ownership-gated (#12507) ---
+echo "Test group 4: retired marker-carrying skills are removed; everything else is kept (#12507)"
+MARK="<!-- loom-managed-skill -->"
+REPO4="$(make_fixture)"
+S4="$REPO4/.agents/skills"
+mkdir -p "$S4/loom-foo" "$S4/loom-retired" "$S4/loom-detached" "$S4/loom-pinned" \
+         "$S4/loom-extra" "$WORKDIR/ext-target" "$S4/custom"
+cp "$REPO4/defaults/.agents/skills/loom-foo/SKILL.md" "$S4/loom-foo/SKILL.md"
+printf '%s\n%s\n' "---" "$MARK" > "$S4/loom-retired/SKILL.md"
+printf 'mine\n' > "$S4/loom-detached/SKILL.md"
+printf '%s\n%s\n' "---" "$MARK" > "$S4/loom-pinned/SKILL.md"
+printf '%s\n%s\n' "---" "$MARK" > "$S4/loom-extra/SKILL.md"
+printf 'notes\n' > "$S4/loom-extra/NOTES.md"
+printf '%s\n%s\n' "---" "$MARK" > "$S4/custom/SKILL.md"
+ln -s "$WORKDIR/ext-target" "$S4/loom-linkdir"
+printf '%s\n' "---" "$MARK" > "$WORKDIR/ext-target/SKILL.md"
+mkdir -p "$S4/loom-linkfile"
+ln -s "$S4/loom-retired/SKILL.md" "$S4/loom-linkfile/SKILL.md"
+printf 'agents-skills/loom-pinned/SKILL.md\n' > "$REPO4/.loom/resync-ignore"
+git -C "$REPO4" add -A >/dev/null 2>&1; git -C "$REPO4" commit -qm fixture >/dev/null 2>&1
+
+OUT="$(cd "$REPO4" && bash "$SCRIPT" --dry-run 2>&1)"
+if [[ -f "$S4/loom-retired/SKILL.md" ]] && grep -q "would remove.*loom-retired" <<<"$OUT"; then
+    pass "(#12507) --dry-run reports the retired skill and changes nothing"
+else
+    fail "(#12507) --dry-run behaved wrongly; out=$OUT"
+fi
+
+OUT="$(cd "$REPO4" && bash "$SCRIPT" 2>&1)"
+if [[ ! -e "$S4/loom-retired" ]]; then
+    pass "(#12507) retired marker-carrying skill and its now-empty dir are removed"
+else
+    fail "(#12507) retired skill not removed; out=$OUT"
+fi
+if [[ -f "$S4/loom-foo/SKILL.md" && -f "$S4/loom-detached/SKILL.md" && -f "$S4/loom-pinned/SKILL.md" \
+   && -f "$S4/custom/SKILL.md" && -L "$S4/loom-linkdir" && -f "$WORKDIR/ext-target/SKILL.md" \
+   && -L "$S4/loom-linkfile/SKILL.md" ]]; then
+    pass "(#12507) current, detached, pinned, non-loom-, and symlinked skills are preserved"
+else
+    fail "(#12507) a preserved skill was removed; out=$OUT"
+fi
+if [[ ! -e "$S4/loom-extra/SKILL.md" && -f "$S4/loom-extra/NOTES.md" ]]; then
+    pass "(#12507) a retired dir with extra files keeps the extra file (no rm -r)"
+else
+    fail "(#12507) retired dir with extra file handled wrongly; out=$OUT"
+fi
+OUT2="$(cd "$REPO4" && bash "$SCRIPT" 2>&1)"
+if ! grep -q "retired generated skill" <<<"$OUT2" || ! grep -E "^ +removed .*loom-retired" <<<"$OUT2" >/dev/null; then
+    pass "(#12507) a second resync does not remove anything again"
+else
+    fail "(#12507) second resync not idempotent; out=$OUT2"
+fi
+
+# invalid source: empty skills dir must not wipe installed skills
+REPO5="$(make_fixture)"
+mkdir -p "$REPO5/.agents/skills/loom-old"
+printf '%s\n%s\n' "---" "$MARK" > "$REPO5/.agents/skills/loom-old/SKILL.md"
+rm -rf "$REPO5/defaults/.agents/skills/loom-foo"
+git -C "$REPO5" add -A >/dev/null 2>&1; git -C "$REPO5" commit -qm fixture >/dev/null 2>&1
+OUT="$(cd "$REPO5" && bash "$SCRIPT" 2>&1)"
+if [[ -f "$REPO5/.agents/skills/loom-old/SKILL.md" ]]; then
+    pass "(#12507) an empty source skill set never triggers removal"
+else
+    fail "(#12507) skills removed against an empty source; out=$OUT"
+fi
+
 # --- summary ------------------------------------------------------------
 echo ""
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed"

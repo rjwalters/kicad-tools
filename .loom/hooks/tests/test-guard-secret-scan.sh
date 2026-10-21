@@ -34,6 +34,8 @@ git init -q "$REPO"
 STUB="$TMP/loom-daemon"
 cat > "$STUB" <<'STUB'
 #!/usr/bin/env bash
+# The merge check asks the lexer first (#12236); "not a merge" keeps these cases about the scanner.
+[ "${1:-}" = command-analysis ] && exit 1
 printf '%s\n' "$*" >> "$STUB_CALLS"
 case "$STUB_MODE" in
     found)

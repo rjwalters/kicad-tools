@@ -154,6 +154,19 @@ else
     fail "unexpected record.files_changed: $(jq -c '.record.files_changed' <<<"$LAST_LINE")"
 fi
 
+# Archive paths (#12636): the CSV shape slice 2's Guide PRs pass is recorded verbatim.
+RC=0
+(cd "$SANDBOX_REPO" && "$TELEMETRY_SH" record --pr 4243 --repo acme/widgets --files "WORK_LOG.md,work_log/WORK_LOG_2026-08.md" >/dev/null 2>&1) || RC=$?
+ARCHIVE_LINE="$(tail -1 "$LOG_FILE" 2>/dev/null)"
+if [[ "$RC" == "0" ]] && [[ "$(jq -c '.record.files_changed' <<<"$ARCHIVE_LINE")" == '["WORK_LOG.md","work_log/WORK_LOG_2026-08.md"]' ]]; then
+    pass "record.files_changed records archive paths verbatim (#12636)"
+else
+    fail "archive paths not recorded verbatim (rc=$RC): $(jq -c '.record.files_changed' <<<"$ARCHIVE_LINE")"
+fi
+# Drop the probe record so later window/count tests see only their own data.
+PROBE_TRIM="$(mktemp)"
+sed '$ d' "$LOG_FILE" > "$PROBE_TRIM" && mv "$PROBE_TRIM" "$LOG_FILE"
+
 if [[ -n "$(jq -r '.emitted_at_epoch' <<<"$LAST_LINE")" ]] && [[ "$(jq -r '.emitted_at_epoch | type' <<<"$LAST_LINE")" == "number" ]]; then
     pass "emitted_at_epoch is present and numeric (used for window filtering)"
 else
