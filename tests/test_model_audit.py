@@ -194,3 +194,81 @@ def test_render_reports_partial_for_bare_footprints(tmp_path, models):
     legacy = runner.inspect_pcb_models(pcb)
     # The ref walk alone still says "passed" with nothing checked.
     assert legacy == {"status": "passed", "checked_models": 0, "unresolved_models": []}
+
+
+# -- Issue #7682 follow-up: host-independent gates ---------------------------
+
+
+def _model_coverage_findings(pcb: Path) -> list:
+    from unittest.mock import MagicMock
+
+    from kicad_tools.cli.check_cmd import run_selected_checks
+
+    results = run_selected_checks(MagicMock(), {"model_coverage"}, set(), pcb_path=pcb)
+    return [v for v in results.violations if v.rule_id == "model_coverage"]
+
+
+def _no_library(monkeypatch, tmp_path) -> None:
+    for var in ("KICAD7", "KICAD8", "KICAD9", "KICAD10"):
+        monkeypatch.setenv(f"{var}_3DMODEL_DIR", str(tmp_path / "nonexistent"))
+
+
+def test_missing_library_root_is_marked(tmp_path, models, monkeypatch):
+    pcb = _write(
+        tmp_path,
+        _fp("R1", body='(model "${KICAD10_3DMODEL_DIR}/part.step")'),
+        _fp("R2", body='(model "${NOPE_DIR}/part.step")'),
+        _fp("R3", body='(model "${KICAD10_3DMODEL_DIR}/gone.step")'),
+    )
+    # Library present: R3 is a real dangling ref, R2's variable is undefined.
+    report = audit_pcb_models(pcb)
+    assert {e.reference: e.missing_root for e in report.gaps} == {"R2": "NOPE_DIR", "R3": None}
+    _no_library(monkeypatch, tmp_path)
+    report = audit_pcb_models(pcb)
+    assert {e.reference: e.missing_root for e in report.gaps} == {
+        "R1": "KICAD10_3DMODEL_DIR",
+        "R2": "NOPE_DIR",
+        "R3": "KICAD10_3DMODEL_DIR",
+    }
+    # The class is unchanged; only its cause is recorded.
+    assert _classes(pcb)["R1"] == "dangling"
+
+
+def test_check_collapses_missing_library_into_one_info(tmp_path, models, monkeypatch):
+    refs = [_fp(f"R{i}", body='(model "${KICAD10_3DMODEL_DIR}/part.step")') for i in range(5)]
+    pcb = _write(tmp_path, *refs, _fp("U1"))
+    assert [(v.severity, v.items) for v in _model_coverage_findings(pcb)] == [
+        ("warning", ("U1",))
+    ]
+    _no_library(monkeypatch, tmp_path)
+    findings = _model_coverage_findings(pcb)
+    # One informational finding for the absent library; the bare footprint
+    # (``no_ref``) is a board defect on every host and stays a warning.
+    assert sorted((v.severity, v.items) for v in findings) == [
+        ("info", ("R0", "R1", "R2", "R3", "R4")),
+        ("warning", ("U1",)),
+    ]
+    info = next(v for v in findings if v.severity == "info")
+    assert "not evaluated" in info.message and "${KICAD10_3DMODEL_DIR}" in info.message
+    assert "#7683" in info.message
+    assert not info.is_warning
+
+
+def test_gate_deferral_expires_with_pinned_model_set():
+    """Gates deselect ``model_coverage`` only until #7683 pins a model set.
+
+    When ``PINNED_MODEL_DIR`` is set this fails: remove ``model_coverage``
+    from ``GATE_DEFERRED_CATEGORIES`` (and re-record board evidence) then.
+    """
+    from kicad_tools.cli.check_categories import (
+        CHECK_CATEGORIES,
+        GATE_DEFERRED_CATEGORIES,
+        gate_skip_argv,
+        gate_skip_set,
+    )
+
+    assert model_audit.PINNED_MODEL_DIR is None, "#7683 landed: drop the #7682 gate deferral"
+    assert GATE_DEFERRED_CATEGORIES == {"model_coverage"}
+    assert GATE_DEFERRED_CATEGORIES <= set(CHECK_CATEGORIES)
+    assert gate_skip_set({"pad_grid"}) == {"pad_grid", "model_coverage"}
+    assert gate_skip_argv({"pad_grid"}) == ["--skip", "model_coverage,pad_grid"]

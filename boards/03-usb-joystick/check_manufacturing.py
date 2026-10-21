@@ -21,6 +21,7 @@ from routing_plan import (
     usb_geometry,
 )
 
+from kicad_tools.cli.check_categories import gate_skip_set
 from kicad_tools.cli.check_cmd import (
     SubCheckResult,
     run_meta_checks,
@@ -103,7 +104,10 @@ def check(pcb_path: Path, report: Path) -> dict:
     checker = make_checker(pcb_path, overrides=overrides)
     geometry = usb_geometry(pcb_path)
     schematic = pcb_path.parent / "usb_joystick.kicad_sch"
-    results = run_selected_checks(checker, None, set(), sch_path=schematic, pcb_path=pcb_path)
+    # ``gate_skip_set()``: model_coverage is host-dependent until #7683/#7685.
+    results = run_selected_checks(
+        checker, None, gate_skip_set(), sch_path=schematic, pcb_path=pcb_path
+    )
     violations = results.violations
     errors = sum(v.is_error for v in violations)
     warnings = sum(v.is_warning for v in violations)

@@ -756,8 +756,11 @@ def _run_cli_rule_set(
     ``doc_drift``, ``sch_fields``) are not in ``CHECK_ALL_METHODS``, and a
     copy of the list here would drift the next time the CLI gains one
     (issue #6420: board 05 lattice graded 0 errors here and 6
-    ``netclass_clearance_copper`` errors under ``kct check``).
+    ``netclass_clearance_copper`` errors under ``kct check``).  The
+    host-dependent ``GATE_DEFERRED_CATEGORIES`` are deselected so recorded
+    benchmark counts never depend on the host's 3D library (#7682).
     """
+    from kicad_tools.cli.check_categories import gate_skip_set
     from kicad_tools.cli.check_cmd import _resolve_check_schematic, run_selected_checks
 
     sch_path: Path | None = None
@@ -774,7 +777,7 @@ def _run_cli_rule_set(
     return run_selected_checks(
         checker,
         None,
-        set(),
+        gate_skip_set(),
         pad_grid_auto_derive=True,
         sch_path=sch_path,
         pcb_path=pcb_path,

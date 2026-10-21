@@ -49,3 +49,32 @@ CHECK_CATEGORIES = [
     "zero_length_segment",
     "zones",
 ]
+
+#: Categories that zero-warning gates and committed-evidence producers
+#: deselect for now (issue #7682).  ``model_coverage`` resolves models against
+#: the *host's* KiCad 3D library, and neither the CI runner nor the pinned
+#: toolchain image ships one yet, so its findings would make a board's verdict
+#: and its recorded evidence depend on the machine (CLAUDE.md, #6962).  Plain
+#: ``kct check`` still runs it as an advisory.
+#:
+#: Expires with #7683 (a pinned model set) and #7685 (every board at 100% on
+#: it): ``tests/test_model_audit.py`` fails as soon as
+#: ``kicad_tools.pcb.model_audit.PINNED_MODEL_DIR`` is set while this set still
+#: names ``model_coverage``, so the deferral is removed deliberately rather than
+#: lingering.  Never add a category here to hide a host-independent defect.
+GATE_DEFERRED_CATEGORIES: frozenset[str] = frozenset({"model_coverage"})
+
+
+def gate_skip_set(skip: set[str] | frozenset[str] = frozenset()) -> set[str]:
+    """*skip* plus :data:`GATE_DEFERRED_CATEGORIES` (for ``run_selected_checks``)."""
+    return set(skip) | GATE_DEFERRED_CATEGORIES
+
+
+def gate_skip_argv(skip: set[str] | frozenset[str] = frozenset()) -> list[str]:
+    """``kct check`` argv that deselects :data:`GATE_DEFERRED_CATEGORIES` (+ *skip*).
+
+    ``--skip`` is a single comma-separated value (last one wins), so callers
+    that also skip their own categories must pass them here.
+    """
+    names = sorted(gate_skip_set(skip))
+    return ["--skip", ",".join(names)] if names else []

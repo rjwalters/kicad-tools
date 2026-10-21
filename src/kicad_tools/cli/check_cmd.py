@@ -3169,12 +3169,18 @@ def run_check_rule_set(rule_set: CheckRuleSet) -> DRCResults:
 
     Same dispatch as the CLI (:func:`run_selected_checks`, so the
     path-dependent rules run), with the board's waivers applied afterwards.
+    Its callers (the MCP ``run_drc`` verdict, ``kct fix-drc``) gate on the
+    result, so the host-dependent categories in
+    :data:`~kicad_tools.cli.check_categories.GATE_DEFERRED_CATEGORIES` are
+    deselected (issue #7682, until #7683/#7685).
     """
+    from kicad_tools.cli.check_categories import gate_skip_set
+
     sch_path = _resolve_check_schematic(None, rule_set.project_pcb_path)
     results = run_selected_checks(
         rule_set.checker,
         None,
-        set(),
+        gate_skip_set(),
         pad_grid_auto_derive=True,
         sch_path=sch_path,
         pcb_path=rule_set.project_pcb_path,
@@ -3329,16 +3335,32 @@ def run_selected_checks(
 
         return check_spec_conformance(checker.pcb, pcb_path, getattr(checker, "manufacturer", None))
 
-    # Issue #7682: 3D model coverage (one warning per non-exempt footprint with
-    # no usable model).  CLI-level closure because it needs the PCB *path*; NOT
-    # a ``DRCChecker`` method.  Resolves against the host render environment.
+    # Issue #7682: 3D model coverage.  CLI-level closure because it needs the
+    # PCB *path*; NOT a ``DRCChecker`` method.  Resolves against the host
+    # render environment, so it splits its findings by what they depend on:
+    #
+    # * a gap caused by an absent model library (the variable is undefined or
+    #   names a missing directory -- the CI runner and the pinned toolchain
+    #   ship none until #7683) is the *environment's* gap, not the board's.
+    #   All of them collapse into ONE ``info`` finding per library variable,
+    #   which never counts as a warning, so a host without a library reads
+    #   "not evaluated" instead of N per-footprint defects;
+    # * every other gap -- ``no_ref`` above all, which is the same on every
+    #   host -- is a real defect of the board and stays a per-footprint
+    #   ``warning`` (advisory bucket: plain ``kct check`` still passes, only
+    #   ``--strict`` fails).  Zero-warning gates and evidence producers
+    #   deselect the whole category until #7683/#7685 (see
+    #   ``check_categories.GATE_DEFERRED_CATEGORIES``).
     def _model_coverage_check() -> DRCResults:
         if pcb_path is None:
             return DRCResults()
         from kicad_tools.pcb.model_audit import audit_pcb_models
 
         results = DRCResults()
-        for gap in audit_pcb_models(pcb_path, env="host").gaps:
+        report = audit_pcb_models(pcb_path, env="host")
+        for gap in report.gaps:
+            if gap.missing_root:
+                continue
             results.add(
                 DRCViolation(
                     rule_id="model_coverage",
@@ -3348,6 +3370,19 @@ def run_selected_checks(
                         + (f" [path: {gap.path}]" if gap.path else "")
                     ),
                     items=(gap.reference,),
+                )
+            )
+        for root, entries in sorted(report.missing_roots.items()):
+            results.add(
+                DRCViolation(
+                    rule_id="model_coverage",
+                    severity="info",
+                    message=(
+                        f"3D coverage not evaluated for {len(entries)} footprint(s): "
+                        f"no model library at ${{{root}}} on this host (the pinned "
+                        "toolchain ships none; see #7683)"
+                    ),
+                    items=tuple(sorted(e.reference for e in entries)),
                 )
             )
         return results

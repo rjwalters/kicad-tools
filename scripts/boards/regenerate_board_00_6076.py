@@ -245,6 +245,7 @@ def _kct(*args: str) -> subprocess.CompletedProcess:
 
 def measure(board: Path) -> dict:
     from kicad_tools.cli.board_readiness import read_readiness
+    from kicad_tools.cli.check_categories import gate_skip_argv
 
     bar: dict = {"readiness": read_readiness(board).get("status")}
     with tempfile.TemporaryDirectory(prefix="regen-00-bar-") as tmp:
@@ -265,7 +266,9 @@ def measure(board: Path) -> dict:
         bar["kicad_cli_unconnected"] = len(data.get("unconnected_items", []))
 
         check = Path(tmp) / "check.json"
-        _kct("check", str(routed), "--mfr", TIER, "--format", "json", "--output", str(check))
+        # model_coverage is host-dependent until #7683/#7685 (issue #7682).
+        skip = gate_skip_argv()
+        _kct("check", str(routed), *skip, "--mfr", TIER, "--format", "json", "--output", str(check))
         data = json.loads(check.read_text())
         bar["kct_check_errors"] = data["summary"]["errors"]
         bar["kct_check_warnings"] = data["summary"]["warnings"]

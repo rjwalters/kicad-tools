@@ -12,6 +12,7 @@ from pathlib import Path
 
 from engineering.calculate import calculate
 
+from kicad_tools.cli.check_categories import gate_skip_argv
 from kicad_tools.core.canonical_uuids import canonicalize_pcb_file_uuids, uuids_in_file
 from kicad_tools.lvs.board_lvs import compare_netlists
 from kicad_tools.lvs.copper_lvs import compare_copper_netlist
@@ -190,7 +191,11 @@ def check(output):
     # Record independent tool findings even while manufacturing remains blocked.
     tool_reports = {}
     for name, args in [
-        ("manufacturer-check", ["check", str(pcb), "--mfr", "jlcpcb", "--format", "json"]),
+        (
+            "manufacturer-check",
+            # model_coverage is host-dependent until #7683/#7685 (#7682).
+            ["check", str(pcb), *gate_skip_argv(), "--mfr", "jlcpcb", "--format", "json"],
+        ),
         ("net-status", ["net-status", str(pcb), "--strict", "--format", "json"]),
     ]:
         result = subprocess.run(

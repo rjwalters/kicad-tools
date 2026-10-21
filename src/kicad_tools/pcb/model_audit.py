@@ -120,6 +120,10 @@ class FootprintCoverage:
     path: str | None = None
     reason: str = ""
     suspect: str | None = None
+    #: The path variable whose model library is absent in this environment
+    #: (undefined, or naming a directory that does not exist), when that --
+    #: not the board -- is why the footprint is a gap.  ``None`` otherwise.
+    missing_root: str | None = None
 
     @property
     def covered(self) -> bool:
@@ -139,6 +143,8 @@ class FootprintCoverage:
         }
         if self.suspect:
             data["suspect"] = self.suspect
+        if self.missing_root:
+            data["missing_root"] = self.missing_root
         return data
 
 
@@ -156,6 +162,15 @@ class ModelAuditReport:
     @property
     def gaps(self) -> list[FootprintCoverage]:
         return [e for e in self.entries if e.is_gap]
+
+    @property
+    def missing_roots(self) -> dict[str, list[FootprintCoverage]]:
+        """Gaps caused by an absent model library, keyed by its variable."""
+        roots: dict[str, list[FootprintCoverage]] = {}
+        for entry in self.gaps:
+            if entry.missing_root:
+                roots.setdefault(entry.missing_root, []).append(entry)
+        return roots
 
     @property
     def suspects(self) -> list[FootprintCoverage]:
@@ -297,6 +312,28 @@ def _classify_ref(
     return "dangling", str(path), "model file not found"
 
 
+#: Gap classes an absent model library (rather than the board) can explain.
+_ROOT_SENSITIVE = frozenset({"dangling", "unresolved_var", "lcsc_cache_miss"})
+
+
+def _missing_root(raw: str, variables: Mapping[str, str]) -> str | None:
+    """First variable in *raw* whose library is absent: undefined, or not a dir.
+
+    ``KIPRJMOD`` is the board's own directory and never counts.
+    """
+    for match in _VARIABLE.finditer(raw):
+        name = match.group(1) or match.group(2)
+        if name == "KIPRJMOD":
+            continue
+        value = variables.get(name)
+        if value is None:
+            return name
+        root = Path(_expand(value, variables)).expanduser()
+        if _VARIABLE.search(str(root)) or not root.is_dir():
+            return name
+    return None
+
+
 #: Worst-first: which ref decides the class when no ref is covered.
 _GAP_PRIORITY = ("lcsc_cache_miss", "unresolved_var", "dangling", "placeholder")
 
@@ -343,7 +380,7 @@ def classify_footprint(
 
     models = footprint.find_all("model")
     ref_rows: list[tuple[str, str, str, str | None]] = []
-    verdicts: list[tuple[str, str | None, str, str]] = []
+    verdicts: list[tuple[str, str | None, str, str]] = []  # (class, path, reason, raw)
     for model in models:
         hidden = model.get("hide")
         if hidden is not None and hidden.get_first_atom() != "no":
@@ -376,6 +413,8 @@ def classify_footprint(
     assert chosen is not None
     klass, path, reason, raw = chosen
     entry = FootprintCoverage(reference, lib_id, klass, path=path or raw or None, reason=reason)
+    if klass in _ROOT_SENSITIVE:
+        entry.missing_root = _missing_root(raw, variables)
     if entry.covered:
         want = expected_pin_count(raw)
         have = _pad_count(footprint)

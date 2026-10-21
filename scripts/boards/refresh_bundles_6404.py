@@ -636,6 +636,8 @@ def stage_check_report(staged: Path, cfg: rr.BoardConfig, bundle: BundleConfig) 
 
     A board with a ``check_script`` (board 04) runs that instead, as its gate does.
     """
+    from kicad_tools.cli.check_categories import gate_skip_argv
+
     with tempfile.TemporaryDirectory(prefix="refresh-bundles-check-") as tmp:
         report = Path(tmp) / "check.json"
         if cfg.check_script is not None:
@@ -650,6 +652,7 @@ def stage_check_report(staged: Path, cfg: rr.BoardConfig, bundle: BundleConfig) 
             command = rr.kct(
                 "check",
                 cfg.routed_pcb,
+                *gate_skip_argv(),  # host-dependent model_coverage, #7683/#7685
                 "--mfr",
                 cfg.tier,
                 "--format",
