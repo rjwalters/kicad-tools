@@ -21,10 +21,12 @@ from pathlib import Path
 from kicad_tools.cli.modify_schematic import (
     create_backup,
     find_symbol_text_range,
+    parse_check,
     set_symbol_flag_text,
 )
 from kicad_tools.cli.sch_json import add_format_flag, record, run_with_json_summary
 from kicad_tools.cli.sch_wire_common import _collect_schematic_files
+from kicad_tools.sexp import read_text_exact, write_text_exact
 
 # Recognized symbol-level boolean flags
 RECOGNIZED_FLAGS = frozenset({"on_board", "in_bom", "dnp", "exclude_from_sim"})
@@ -118,7 +120,7 @@ def _run_set_symbol_property(
 
     for sch_file in all_files:
         try:
-            text = sch_file.read_text(encoding="utf-8")
+            text = read_text_exact(sch_file)
         except OSError as e:
             print(f"Error reading {sch_file}: {e}", file=sys.stderr)
             continue
@@ -160,6 +162,14 @@ def _run_set_symbol_property(
             print(f"Error: {msg}", file=sys.stderr)
             return 1
 
+        problem = parse_check(new_text)
+        if problem is not None:
+            print(
+                f"Error: not writing {sch_file}, the edited sheet fails its parse check: {problem}",
+                file=sys.stderr,
+            )
+            return 1
+
         # Write back
         if backup:
             bak = create_backup(sch_file)
@@ -167,7 +177,7 @@ def _run_set_symbol_property(
             print(f"  Backup: {bak.name}")
 
         try:
-            sch_file.write_text(new_text, encoding="utf-8")
+            write_text_exact(sch_file, new_text)
         except OSError as e:
             print(f"Error writing {sch_file}: {e}", file=sys.stderr)
             return 1
