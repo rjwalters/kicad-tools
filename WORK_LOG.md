@@ -13,8 +13,17 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-10-21
+
+- **PR #7643**: fix(schema): resolve sub-sheets against the containing sheet's folder (#7614)
+- **Issue #7614** (closed): `schema.hierarchy.build_hierarchy` resolves sub-sheet files against the process working directory, then the root's directory, never the parent sheet's directory (wrong sheet read, nested sheets dropped silently)
+
 ### 2026-10-20
 
+- **PR #7642**: fix: share one library-flag power-symbol predicate across BOM, footprint gate, parser and fix-annotation
+- **PR #7640**: test: cut each test DRC's fp-lib-table to its board's libraries; measure conformance seeds once
+- **PR #7639**: fix: list each placement of a repeated sheet in the BOM
+- **Issue #7637** (closed): Unify schematic power-symbol predicates with BOMItem.is_power_symbol's (power)-flag rule
 - **Issue #7645** (closed): main: 4 test_lattice_extra_parity_7093 tests fail after dc78dac
 - **PR #7646**: test(router): close the corridor under the extra-parity wall fixture
 - **PR #7651**: chore(deps): Bump vite from 8.2.1 to 8.3.4 in /site
