@@ -995,10 +995,10 @@ def check_duplicate_references(schematic_path: str) -> list[ValidationIssue]:
 
                     ref = sym.instance_reference(node.instance_path)
                     if ref is None:
-                        key = (node.path, sym_index)
-                        if key in fallback_seen:
+                        seen_key = (node.path, sym_index)
+                        if seen_key in fallback_seen:
                             continue
-                        fallback_seen.add(key)
+                        fallback_seen.add(seen_key)
                         ref = sym.reference
                     if not ref or ref == "?" or ref.startswith("#"):
                         continue
