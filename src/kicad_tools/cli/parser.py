@@ -9380,6 +9380,16 @@ def _add_export_parser(subparsers) -> None:
         help="Disable BOM enrichment from .kct project spec",
     )
     export_parser.add_argument(
+        "--spec",
+        dest="export_spec",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Use this .kct project spec for BOM enrichment instead of walking up from the "
+            "PCB directory (--no-spec takes precedence; a missing PATH is still an error)"
+        ),
+    )
+    export_parser.add_argument(
         "--no-merge-lcsc",
         dest="export_no_merge_lcsc",
         action="store_true",

@@ -327,6 +327,8 @@ def export_manufacturing_bundle(routed_path: Path, output_dir: Path) -> bool:
         str(mfg_dir),
         "--mfr",
         "jlcpcb",
+        "--spec",
+        str(Path(__file__).resolve().parent / "project.kct"),
         "--skip-preflight",
     ]
     print(f"\n   Command: {' '.join(cmd)}")
