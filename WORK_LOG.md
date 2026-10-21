@@ -15,6 +15,9 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-21
 
+- **PR #7730**: fix: emit lattice pair legs wider than pitch to survive 4-decimal serialization
+- **Issue #7729** (closed): 06rf lattice bench: kct check reports 12 diffpair_clearance_intra on the seed-42 route (revision expected at most 4)
+- **PR #7732**: feat: gate kct render and deploy-site on 3D model coverage
 - **PR #7724**: feat: fetch pinned, sha256-verified KiCad 3D model subset (kct models sync)
 - **PR #7725**: feat(pcb): LCSC 3D models at catalog scale with per-user opt-in guards
 - **PR #7723**: fix: escape KiCad strings in sch set-footprint/set-value and S-expression writers (#7648)
