@@ -426,6 +426,8 @@ def authored_violations(
 
 
 _EMPTY: list[Any] = []
+# Shared, never-mutated stand-in for an empty floors map (the index copies it).
+_NO_FLOORS: dict[int, float] = {}
 
 
 def grid_authored_index(grid: Any) -> AuthoredCopperIndex | None:
@@ -440,14 +442,20 @@ def grid_authored_index(grid: Any) -> AuthoredCopperIndex | None:
     the next query.
     """
     rules = getattr(grid, "rules", None)
-    floors = getattr(rules, "net_clearance_floors", None) or {}
+    # NB: never ``or {}`` -- a fresh empty dict per call changes ``id(floors)``
+    # in the key below and rebuilds the index on every query (#7716: ~0.1 s per
+    # rebuild, one per Python-A* expansion step, on a board whose floors are
+    # all item-level).
+    floors = getattr(rules, "net_clearance_floors", None)
+    if not floors:
+        floors = _NO_FLOORS
     # NB: never ``or []`` here -- a fresh empty list per call would change the
     # cache key below on every query and rebuild the index each time.
     pads = getattr(grid, "_pads", None)
     if pads is None:
         pads = _EMPTY
     if not isinstance(floors, dict):
-        floors = {}
+        floors = _NO_FLOORS
     if not floors and getattr(grid, "_authored_item_floors", False) is not True:
         return None
     routes = getattr(grid, "routes", None)
