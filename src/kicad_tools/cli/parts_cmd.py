@@ -944,7 +944,8 @@ def _apply_suggestions(schematic_path: Path, result) -> int:
     hierarchy = build_hierarchy(str(schematic_path))
     updated_count = 0
 
-    for node in hierarchy.all_nodes():
+    # One pass per sheet file: a repeated sheet is one file to edit (#7616).
+    for node in hierarchy.unique_file_nodes():
         try:
             sch = Schematic.load(node.path)
             sheet_updated = False

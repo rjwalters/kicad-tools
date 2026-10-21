@@ -15,6 +15,21 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-21
 
+- **PR #7672**: ci: add warn-only weekly live-site drift check
+- **Issue #7664** (closed): site: detect when kicad-tools.org falls behind main (weekly drift check + release-checklist step)
+- **PR #7677**: fix: show schematic title in gallery headings and flag stale board.json
+- **PR #7692**: docs: commit the 3D model coverage research note and index it
+- **Issue #7691** (closed): docs: commit the 3D model coverage research note and index it
+- **PR #7676**: fix: refresh routing-status page context and silence companion-file loader warnings
+- **Issue #7668** (closed): site: refresh routing-status page text and bind reviewed context to the 2026-09-15 BeagleConnect run
+- **PR #7673**: feat(site): expand homepage capability cards and test README anchors
+- **PR #7674**: fix: add 404 page so missing site paths return 404 instead of the homepage
+- **PR #7653**: chore(deps): Bump certifi from 2025.11.12 to 2026.10.19
+- **PR #7658**: docs: add opt-in route flag graduation rule and entry-path warning tests
+- **Issue #7670** (closed): site: refresh homepage capabilities for v0.21–v0.24: sign-off/readiness, agent skills across harnesses, lattice diff-pair and length tuning
+- **Issue #7667** (closed): site: add a real 404 page: unknown URLs return the homepage with HTTP 200
+- **Issue #7401** (closed): router: board 06 USB2_D+ uncoupled 12.791 > 12.700 mm after v62 pad-edge floor reorders the single-ended fallback
+- **Issue #7657** (closed): route: opt-in flag graduation doc and step-2 leftovers (follow-up to #7377)
 - **PR #7475**: fix(router): rank gateway combos that leave a neighbour's escape via site open first
 - **Issue #7491** (closed): router: C++ search finds no USB3_RX1- path on board 06 once USB2_D routes coupled (blocks #7401)
 - **Issue #7463** (closed): board 03 arm C: VBUS U2.5 left unconnected (keepout-constrained escape next to USB_D U2 pads); last gate before re-deriving board 03 under #7093

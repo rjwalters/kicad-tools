@@ -87,6 +87,10 @@ export interface Board {
   /** Gallery section, assigned by the loader (not from `board.json`). */
   category: BoardCategory;
   name?: string;
+  /** Human title from the schematic title block (#7666); preferred for headings. */
+  title?: string;
+  /** True when board.json predates the readiness evidence (#7666); set by the loader. */
+  stale?: boolean;
   description?: string;
   layer_count?: number;
   board_size_mm?: BoardSize;
