@@ -15,6 +15,22 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-21
 
+- **PR #7715**: docs(board07): audit wall-clock limits under deterministic-budget
+- **PR #7714**: fix(route): name schema-2 migration step and surface load error on total failure
+- **PR #7709**: feat: add 2026-10-21 external benchmark collection from the workflow run
+- **PR #7706**: chore(board03): re-issue kct-check evidence for the re-landed #6554 pairing
+- **PR #7695**: feat: audit 3D model coverage per footprint with shared classifier
+- **PR #7693**: feat: existence-check 3D model refs and add ensure_models for generators
+- **PR #7681**: fix(boards): drop DRAFT from board 07 titles and re-issue readiness
+- **PR #7660**: fix(router): stop counting tied iterations as progress for patience
+- **Issue #7711** (closed): route: accept or migrate schema-2 net_settings instead of aborting every layer attempt
+- **Issue #7710** (closed): board 07 match-group CI gate is load-sensitive: wall-clock budgets survive --deterministic-budget and reach sits exactly at the required 30/31
+- **Issue #7705** (closed): main red: Slow Tests — board 03 readiness --verify rewrites committed readiness-verification/kct-check.json (diff-pair figures drifted)
+- **Issue #7684** (closed): Model insertion that cannot regress: existence-checked `add-3d-models` tiers, generators own their models, and a regeneration guard
+- **Issue #7682** (closed): 3D coverage audit: count footprints, not refs, in `kct check`, `kct render` and `kct fleet status`
+- **Issue #7675** (closed): Board 07: remove DRAFT from titles and re-issue readiness
+- **Issue #7663** (closed): site: publish main to kicad-tools.org: live site is v0.20.0 from 2026-09-12
+- **Issue #7659** (closed): test flake: test_route_entry_path_goldens partial-rule_relaxation times out — follow-up to #7626
 - **PR #7701**: fix: read only top-level uuid when loading schematic hierarchy
 - **Issue #7699** (closed): schema: root sheet UUID in HierarchyBuilder._load_schematic uses recursive find("uuid"); a root without a top-level uuid picks up a nested one
 - **PR #7698**: ci: add dispatch-only external benchmark re-run workflow
