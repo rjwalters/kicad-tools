@@ -3412,5 +3412,12 @@ heartbeats but its work finder has not ticked for 2x its own interval.
    manual run is the way past it.
 4. Reclaim only touches Loom-managed paths. Space held by anything else (logs,
    caches, another tenant) must be freed by hand.
+   **The uv cache** (`~/.cache/uv`, 28 GB on one busy host, #12460) is such a
+   path: the daemon never prunes it, because uv is a host tool provisioned from
+   the worker spec (`infra/aws/loom-worker/` in 2AMLogic/2am), not by Loom.
+   uv has no size cap, so the bound is a periodic `uv cache prune --ci` (drops
+   pre-built wheels, keeps source-built ones; add it to the worker spec's
+   housekeeping, not to a sweep) or `UV_CACHE_DIR` pointed at a volume that can
+   fill harmlessly. `uv cache prune` alone removes only unreferenced entries.
 5. If the host keeps filling, lower its `autonomous.workFinder.maxConcurrent`
    in fleet config.

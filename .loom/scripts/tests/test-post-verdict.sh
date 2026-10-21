@@ -319,6 +319,22 @@ reset_state
 run_pv abc approved abc1234 --body "x"
 assert_eq "2" "$EXIT_CODE" "non-numeric PR number -> exit 2"
 
+# T8a: aliases normalise to the canonical verdict tokens (#12692).
+reset_state
+run_pv 110 approve abc1234 --body "x"
+assert_eq "0" "$EXIT_CODE" "alias 'approve' -> exits 0"
+assert_contains "$LAST_BODY" "<!-- loom:verdict-sha sha=abc1234 verdict=approved -->" "'approve' posts verdict=approved"
+reset_state
+run_pv 111 request-changes abc1234 --body "x"
+assert_eq "0" "$EXIT_CODE" "alias 'request-changes' -> exits 0"
+assert_contains "$LAST_BODY" "<!-- loom:verdict-sha sha=abc1234 verdict=changes-requested -->" "'request-changes' posts verdict=changes-requested"
+reset_state
+run_pv 112 bogus abc1234 --body "x"
+assert_eq "2" "$EXIT_CODE" "unknown verdict 'bogus' still -> exit 2"
+reset_state
+run_pv 113 Approve abc1234 --body "x"
+assert_eq "2" "$EXIT_CODE" "aliases are case-sensitive: 'Approve' -> exit 2"
+
 # T8: invalid verdict token -> rejected (only approved/changes-requested are
 # valid, matching verdict-staleness-guard.sh's verdict_token_for_label()).
 reset_state

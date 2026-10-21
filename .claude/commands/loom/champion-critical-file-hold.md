@@ -34,7 +34,7 @@ path; `judgeApproval` and `greenCi` holding) passes #3, so this tick receives
 `$CRITERION3_RESULT="PASS"` and writes no hold. Any open episode closes through
 the ordinary PASS row (cleared notice + remove `loom:blocked`), naming the class
 id. One file outside the class, an excluded file, a forbidden line or an
-unreadable diff restores the FAIL and this whole machine. The kept set (the
+unreadable diff restores the FAIL and this whole machine. A `dependabot-bumps` class (`authorIsDependabot`, manifest and lockfile `filePatterns`; #12948) is the fleet-default example: Dependabot's own manifest bumps pass #3, a human PR with the same diff does not. The kept set (the
 merge gate, guard hooks, credential selection, installers/updaters,
 migrations) is never satisfiable by a class.
 
@@ -69,7 +69,7 @@ matching row wins:
 | State | Action on FAIL |
 |---|---|
 | `released`, recorded head == current head | nothing at all: no label, no comment |
-| either, label present (a human put it back) | hold stands, silently |
+| either, label present (a human put it back) | hold stands, silently — except that a changed standing-authorization digest is recorded once (#12933) |
 | `held`, label absent, recorded head == current head | **respect the release**: acknowledge once, do **not** re-add the label |
 | `none` | fresh hold: notice + `loom:blocked` |
 | either, head moved but the PR's own change provably did not (#9416) | **respect, re-recorded at the new head** with the equivalence kind |
@@ -154,6 +154,18 @@ if [ "$CRITERION3_RESULT" = "FAIL" ]; then
     stands)
       # Idempotent; this and hold|rearm alone assert the hold.
       echo "Critical-file hold already posted for #$PR_NUMBER — hold stands, no comment"
+      # #12933: the daemon drew this hold because the standing-authorization
+      # digest moved (or a legacy record has none). No class covered it, so
+      # record the current digest ONCE at this head — the daemon reads the
+      # LAST trusted `champion:hold-state` record — or every later tick
+      # redraws it (the #12901 no-op loop). Not one of the three state
+      # markers, so LAST_STATE / STATE_HEAD are unchanged.
+      HOLD_AUTH=$(loom-daemon config get champion.standingAuthorizations --digest 2>/dev/null)
+      RECORDED_AUTH=$(jq -r '[.comments[].body | capture("<!-- champion:hold-state head=[0-9a-f]+(?: auth=(?<a>[0-9a-f]+))?")] | last | .a // ""' <<<"$CF_JSON")
+      if [ -n "$HOLD_AUTH" ] && [ "$RECORDED_AUTH" != "$HOLD_AUTH" ]; then
+        ./.loom/scripts/post-comment.sh "$PR_NUMBER" --pr --body "<!-- champion:hold-state head=$HEAD_SHA auth=$HOLD_AUTH -->
+**Champion: critical-file hold re-read under changed standing authorizations (#12933)** — no class covers this PR's critical-file hits; the hold notice above still applies. The digest is recorded so this re-read happens once per policy change."
+      fi
       cf_park
       ;;
     hold|rearm)
@@ -168,8 +180,12 @@ if [ "$CRITERION3_RESULT" = "FAIL" ]; then
         CF_WF_NOTE="
 Merging workflow files needs the \`workflow\` token scope: \`gh auth refresh -h github.com -s workflow\`
 "
+      # Standing-authorization digest (#12933): a later change to
+      # `champion.standingAuthorizations` differs from it and re-reads this hold once.
+      HOLD_AUTH=$(loom-daemon config get champion.standingAuthorizations --digest 2>/dev/null)
+      HOLD_AUTH_FIELD=""; [ -n "$HOLD_AUTH" ] && HOLD_AUTH_FIELD=" auth=$HOLD_AUTH"
       ./.loom/scripts/post-comment.sh "$PR_NUMBER" --pr --body "$HOLD_MARKER
-<!-- champion:hold-state head=$HEAD_SHA -->
+<!-- champion:hold-state head=$HEAD_SHA${HOLD_AUTH_FIELD} -->
 **Champion: Holding for Human Merge — Critical File**
 
 ${CF_REARM_NOTE}This PR modifies a critical file and cannot be automatically merged:
