@@ -15,6 +15,16 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-21
 
+- **PR #7725**: feat(pcb): LCSC 3D models at catalog scale with per-user opt-in guards
+- **PR #7723**: fix: escape KiCad strings in sch set-footprint/set-value and S-expression writers (#7648)
+- **PR #7722**: chore(tooling): update Repo Skills 0.24.3→0.24.7
+- **PR #7720**: test(board03): pin the arm C route's USB_D via parity end to end
+- **PR #7718**: fix(board03): re-derive copper from the arm C route and retire the USB_D via-count exception
+- **Issue #7686** (closed): LCSC/JLCPCB model pipeline at catalog scale: BOM-driven C-numbers, content pinning, auto-registered transforms, terms-respecting fetch
+- **Issue #7666** (closed): site: gallery shows stale or raw board identity: unchecked board.json age, PCB file stems as titles, and board 07 still titled "DRAFT"
+- **Issue #7648** (closed): `sch_set_footprint` corrupts sheets (footprint used as a `re.sub` template, unescaped, universal-newline round trip); S-expression writers emit raw `\r`; `Footprint.to_sexp` escapes nothing
+- **Issue #7713** (closed): board 03: re-derive the committed copper from the arm C route and retire the #7108 USB_D via-count exception
+- **Issue #7580** (closed): router: finish diff-pair via-count parity (continuation of #7093)
 - **PR #7712**: fix(zones): skip auto-pour on boards with legacy-named copper layers
 - **PR #7707**: fix(board04): move corner-seated C10.2/C11.2 GND welds clear of SMT lands
 - **PR #7697**: chore: register 3D-model neighbours in the ecosystem registry
