@@ -671,6 +671,45 @@ the worktree you are editing will silently pick up your changes on its
 *next* subprocess. Run at least two B arms before attributing any copper
 difference on this board to a diff.
 
+## Wall-clock limits under `--deterministic-budget`: audit and A/B (#7710)
+
+Measured on `15d3a0803` + `dc501a258` (2026-10-21), 16-vCPU host, native C++
+backend, `PYTHONHASHSEED=42 uv run python scripts/ci/check_matchgroup_coverage.py
+boards/07-matchgroup-test --seed 42`.
+
+| Arm | Load | Reach | Incomplete | Gate findings | Wall-clock bounds fired |
+|---|---|---|---|---|---|
+| baseline | idle (load avg ~5) | 30/31 | `TMDS_D0_N` | 12 errors, all identity-allowed | `per-net wall clock bound` (TMDS_D1_P), `stage deadline fired` |
+| baseline | 2 busy-loop procs (load avg ~11) | 30/31 | `TMDS_D0_N` | identical (`connectivity` 1, `diffpair_length_skew` 6, `impedance` 4, `match_group_length_skew` 2) | same two lines |
+| `--deterministic-rescue` added to the recipe | idle | 30/31 | `TMDS_D0_N` | identical | same two lines |
+
+**The gate is not reproducible by construction, even idle.** Every run logs
+`stage deadline fired -- run is not reproducible`. The identical outcome on the
+three arms (including under load) shows the final result is stable in practice,
+but a green gate does not prove machine independence; the 24/31 seen by the
+#7681 Doctor under heavier load (load avg 8-28) was not reproduced at load avg ~11.
+
+| Limit | Status on board 07 | Evidence |
+|---|---|---|
+| Per-net C++ A* wall clock | Replaced by 1,000,000-expansion cap | `[deterministic-budget]` banner, log line 4-5 |
+| Relief-rescue probe / re-land 10 s sub-search | Not the binding clock here | Passing `--deterministic-rescue` changed nothing in reach, findings, or fired bounds |
+| 60 s escape budget / remaining-budget per-net cap | Not shown to bind | No log line fires; switched off by `--deterministic-rescue`, which gave the same result |
+| Python-fallback A* per-net wall clock | **Binds, load-dependent** | `net TMDS_D1_P ... stopped by the per-net wall-clock deadline after 1,024 of 1,000,000 expansions` in all three arms |
+| Stage deadline (`--search-timeout 600`) | **Binds, load-dependent** | Relief rescue for `TMDS_D0_N` runs from ~180 s to ~600 s (590-653 s per arm) inside the TMDS_D1_P Python fallback, then `stage deadline fired` |
+| Post-negotiation sweep 60 s / 10 s | Not measured separately | Fires only after the stage deadline |
+
+Outcome: partial refutation. The wall-clock limits #4730/#5870 target are not what
+leaves board 07 machine-dependent; the Python fallback inside the relief rescue is.
+It reaches only 1,024 expansions in roughly 420 s, so an expansion cap does not bound
+it (cause of the slow expansions not investigated). `TMDS_D0_N` is rolled back
+in every arm ("only 3/4 displaced victim(s) re-landed"), so the 420 s buys nothing
+here. Making this load-independent needs a change to how the fallback is entered
+under a relief rescue (for example skipping it when the C++ give-up is
+`FAILURE_VIA_VIA_BLOCKED`, or a step budget on its setup), which is a router
+behaviour change that must be A/B'd on every board. No recipe or router code is
+changed by #7710; the follow-up decision is left to a separate issue. Reach threshold and
+allowances are untouched.
+
 ## Files in this directory
 
 - `README.md` -- this file.
