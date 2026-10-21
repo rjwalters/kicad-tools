@@ -32,7 +32,13 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from kicad_tools.sexp import SExp, parse_string
+from kicad_tools.sexp import (
+    SExp,
+    parse_string,
+    quote_string,
+    read_text_exact,
+    write_text_exact,
+)
 
 
 def generate_uuid() -> str:
@@ -41,6 +47,64 @@ def generate_uuid() -> str:
 
 
 # Text-based modification functions (preserve original formatting)
+
+# A KiCad double-quoted string, escapes included: ``"a\"b"`` is one string.
+_QUOTED = r'"(?:[^"\\]|\\[\s\S])*"'
+
+
+def _replace_quoted_after(block: str, prefix: str, new_value: str) -> str | None:
+    r"""Replace the first quoted string that follows regex ``prefix`` in ``block``.
+
+    ``new_value`` is plain text: it is quoted with :func:`quote_string`
+    (KiCad's escaping) and spliced in by index, so it is never read as a
+    ``re.sub`` replacement template (issue #7648 -- ``\n``, ``\g<0>`` or
+    ``\q`` in a footprint id used to be expanded or raise).
+
+    Returns the new block, or ``None`` when ``prefix`` is not found.
+    """
+    match = re.search(f"({prefix}){_QUOTED}", block)
+    if match is None:
+        return None
+    return block[: match.end(1)] + quote_string(new_value) + block[match.end() :]
+
+
+def parse_check(text: str, expected: list[tuple[str, str, str]] | None = None) -> str | None:
+    """Return why edited schematic ``text`` is unsafe to write, or ``None``.
+
+    The text editors in this module splice strings into a sheet; callers run
+    this before writing so a bad splice is reported instead of silently
+    saved (issue #7648).  ``text`` must parse as a ``(kicad_sch ...)``
+    document, and each ``(reference, property, value)`` in ``expected`` must
+    read back exactly -- a parse alone can succeed on a mangled string whose
+    stray quotes happen to pair up.
+    """
+    try:
+        root = parse_string(text)
+    except Exception as e:  # ParseError, or anything the parser trips on
+        return str(e) or type(e).__name__
+    if root.tag != "kicad_sch":
+        return f"root is ({root.tag} ...), not (kicad_sch ...)"
+    if not expected:
+        return None
+
+    # Placed symbols by reference -> {property name: value}.
+    props_by_ref: dict[str, dict[str, object]] = {}
+    for sym in root.children:
+        if sym.name != "symbol" or sym.find_child("lib_id") is None:
+            continue
+        props: dict[str, object] = {}
+        for child in sym.children:
+            atoms = child.get_atoms() if child.name == "property" else []
+            if len(atoms) >= 2:
+                props[str(atoms[0])] = atoms[1]
+        ref = props.get("Reference")
+        if isinstance(ref, str):
+            props_by_ref.setdefault(ref, props)
+    for reference, key, value in expected:
+        got = props_by_ref.get(reference, {}).get(key)
+        if got != value:
+            return f"{reference} {key} reads back as {got!r}, expected {value!r}"
+    return None
 
 
 def _find_matching_close_paren(text: str, open_pos: int) -> int:
@@ -92,7 +156,7 @@ def find_symbol_text_range(text: str, reference: str) -> tuple[int, int, dict] |
             lib_symbols_end = _find_matching_close_paren(text, lib_sym_match.start()) + 1
 
     # Find each top-level (symbol ...) block after lib_symbols using paren balancing
-    symbol_start_pattern = re.compile(r"\n(\s+)\(symbol\n")
+    symbol_start_pattern = re.compile(r"\n(\s+)\(symbol\r?\n")
 
     pos = lib_symbols_end
     while pos < len(text):
@@ -123,8 +187,8 @@ def find_symbol_text_range(text: str, reference: str) -> tuple[int, int, dict] |
             lib_id_match = re.search(r'\(lib_id "([^"]+)"\)', block)
             pos_match = re.search(r"\(at ([\d.]+) ([\d.]+)", block)
             uuid_match = re.search(r'\(uuid "([^"]+)"\)', block)
-            value_match = re.search(r'\(property "Value" "([^"]*)"', block)
-            footprint_match = re.search(r'\(property "Footprint" "([^"]*)"', block)
+            value_match = re.search(r'\(property "Value" "((?:[^"\\]|\\[\s\S])*)"', block)
+            footprint_match = re.search(r'\(property "Footprint" "((?:[^"\\]|\\[\s\S])*)"', block)
 
             info = {
                 "lib_id": lib_id_match.group(1) if lib_id_match else "",
@@ -184,10 +248,9 @@ def set_value_text(text: str, reference: str, new_value: str) -> tuple[str, bool
 
     # Replace the value property in this block (handles multi-line)
     # Match (property "Value" "..." without requiring closing paren on same line
-    value_pattern = re.compile(r'(\(property "Value" )"[^"]*"')
-    new_block = value_pattern.sub(rf'\g<1>"{new_value}"', block, count=1)
+    new_block = _replace_quoted_after(block, r'\(property "Value" ', new_value)
 
-    if new_block == block:
+    if new_block is None:
         return text, False, f"Could not find Value property on {reference}"
 
     modified = text[:start] + new_block + text[end:]
@@ -211,10 +274,9 @@ def set_footprint_text(text: str, reference: str, new_footprint: str) -> tuple[s
     old_footprint = info["footprint"]
 
     # Replace the footprint property in this block
-    footprint_pattern = re.compile(r'(\(property "Footprint" )"[^"]*"')
-    new_block = footprint_pattern.sub(rf'\g<1>"{new_footprint}"', block, count=1)
+    new_block = _replace_quoted_after(block, r'\(property "Footprint" ', new_footprint)
 
-    if new_block == block:
+    if new_block is None:
         return text, False, f"Could not find Footprint property on {reference}"
 
     modified = text[:start] + new_block + text[end:]
@@ -238,10 +300,9 @@ def set_lib_id_text(text: str, reference: str, new_lib_id: str) -> tuple[str, bo
     old_lib_id = info["lib_id"]
 
     # Replace the lib_id in this block
-    lib_id_pattern = re.compile(r'(\(lib_id )"[^"]*"')
-    new_block = lib_id_pattern.sub(rf'\1"{new_lib_id}"', block, count=1)
+    new_block = _replace_quoted_after(block, r"\(lib_id ", new_lib_id)
 
-    if new_block == block:
+    if new_block is None:
         return text, False, f"Could not find lib_id on {reference}"
 
     modified = text[:start] + new_block + text[end:]
@@ -277,7 +338,7 @@ def add_lib_symbol_text(text: str, lib_file: Path) -> tuple[str, bool, str]:
         return text, False, f"No symbols found in library: {lib_file}"
 
     # Find lib_symbols section end
-    lib_symbols_end = re.search(r"\n\t\(lib_symbols\n.*?\n\t\)", text, re.DOTALL)
+    lib_symbols_end = re.search(r"\n\t\(lib_symbols\r?\n.*?\n\t\)", text, re.DOTALL)
     if not lib_symbols_end:
         return text, False, "Schematic has no lib_symbols section"
 
@@ -337,7 +398,8 @@ def set_symbol_flag_text(
         return text, False, f"Flag '{flag_name}' not found on symbol '{reference}'"
 
     old_value = match.group(2)
-    new_block = pattern.sub(rf"\g<1>{flag_value}\3", block, count=1)
+    # Splice by index: flag_value is text, never a re.sub template (#7648).
+    new_block = block[: match.start(2)] + flag_value + block[match.end(2) :]
 
     if new_block == block:
         return (
@@ -510,7 +572,7 @@ def main():
 
     # Load schematic
     try:
-        text = args.schematic.read_text(encoding="utf-8")
+        text = read_text_exact(args.schematic)
         sexp = parse_string(text)
     except Exception as e:
         print(f"Error loading schematic: {e}")
@@ -684,9 +746,14 @@ def main():
             backup = create_backup(args.schematic)
             print(f"\nBackup: {backup.name}")
 
+        problem = parse_check(modified_text)
+        if problem is not None:
+            print(f"Error: refusing to save, edited schematic does not parse: {problem}")
+            return 1
+
         # Write modified text directly (preserves original formatting)
         try:
-            output_path.write_text(modified_text, encoding="utf-8")
+            write_text_exact(output_path, modified_text)
             print(f"Saved: {output_path.name}")
         except Exception as e:
             print(f"Error saving: {e}")

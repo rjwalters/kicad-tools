@@ -13,29 +13,89 @@ tiers (first hit wins):
    database; this tier fetches it on demand into a local cache and emits a
    portable model ref.
 
+## Policy: per-user, opt-in, never committed or shipped
+
+Operator ruling Q44 (issue #7686). EasyEDA/LCSC STEP bodies are not
+redistributable, and the [EasyEDA Terms](https://easyeda.com/legal) forbid
+automated access except as authorized by EasyEDA in writing. So:
+
+- Fetching runs **only on your own machine, when you explicitly opt in**
+  (`--fetch-lcsc` or `KCT_LCSC_FETCH=1`). It is off by default and in CI.
+- Fetched bodies live in your local cache (`${KCT_LCSC_3D_DIR}`, default
+  `~/.cache/kicad-tools/lcsc-3d/`). They are **never committed** to a repo,
+  shipped in a wheel or package, or embedded in a board, manufacturing bundle
+  or site render. Demo boards and published packages use only KiCad stock
+  models and self-generated ones.
+- The first fetch into a cache prints a terms notice. A fetch is capped per
+  run (`KCT_LCSC_MAX_FETCHES`, default 25) and rate-limited
+  (`KCT_LCSC_FETCH_INTERVAL` seconds between requests, default 1).
+- The cache refuses to be created inside a git work tree.
+- Every cache entry has a `C<n>.meta.json` with `"source": "lcsc"` so export
+  and embedding can exclude it. `tests/test_lcsc_no_commit_guard.py` fails if a
+  `*.step`/`*.stp` whose sha256 matches an LCSC cache entry (or that carries
+  `source=lcsc` metadata) is tracked under `boards/` or `src/`.
+
+Written permission from LCSC/EasyEDA for automated access and redistribution
+has been requested by the operator; if it is granted, this ruling will be
+revisited in a separate issue.
+
 ## Using the LCSC tier
 
-Provide a per-board **sidecar** mapping `lib_id -> C-number`:
+C-numbers are resolved from the **board's own data**, per footprint reference,
+first hit wins: an `LCSC`/`JLCPCB Part` footprint property, then an LCSC column
+in the BOM CSV, then the BOM row's MPN looked up in `procurement-review.json`
+(`parts[<MPN>].lcsc`). The BOM and procurement review are discovered next to
+the PCB or in its parent directory (`--bom` / `--procurement` override).
+
+```bash
+# Cache-only (no network): C-numbers come from the BOM; only cached bodies resolve.
+kct pcb add-3d-models boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb
+
+# Opt in to fetching missing STEP bodies from EasyEDA on a cache miss.
+kct pcb add-3d-models board.kicad_pcb --fetch-lcsc
+```
+
+A `lib_id` whose references carry *different* C-numbers (a shared `R_0603`
+footprint) is reported as a conflict and not mapped: a model keyed by `lib_id`
+cannot be right for all of them. Pass `--no-lcsc-bom` to use only a sidecar.
+
+### Sidecar = override only
+
+An optional per-board **sidecar** (`--lcsc-models lcsc_models.json`) overrides
+the BOM-derived map for a `lib_id`; it is no longer required. Stale entries
+(a `lib_id` not on the board, or a C-number that disagrees with the board
+data) are reported as `lcsc_stale_sidecar`.
 
 ```json
 {
-  "Module:Joystick_Analog": "C50950",
-  "Connector_PCIE:PCIE_Mini_Edge": "C123456"
+  "Connector_PCIE:PCIE_Mini_Edge": {"lcsc": "C444929", "sha256": "<64 hex digits>"}
 }
 ```
 
-Then run:
+The sidecar is **lib_id-keyed** (not reference-designator-keyed).
 
-```bash
-# Cache-only (no network): resolves only C-numbers already cached.
-kct pcb add-3d-models board.kicad_pcb --lcsc-models lcsc_models.json
+### Content pinning
 
-# Opt in to fetching missing STEP bodies from EasyEDA on a cache miss.
-kct pcb add-3d-models board.kicad_pcb --lcsc-models lcsc_models.json --fetch-lcsc
-```
+The cache stores `C<n>.step` plus `C<n>.meta.json` (sha256, fetch date,
+EasyEDA model uuid, EasyEDA footprint pads, `source`). A cached body whose
+sha256 no longer matches the digest recorded at fetch time -- or the sidecar's
+`"sha256"` pin, which wins -- is reported as **`lcsc_content_changed`** (in
+`kct pcb add-3d-models` output and as a `kct model-audit` class). It is never
+silently used or re-pointed.
 
-The sidecar is **lib_id-keyed** (not reference-designator-keyed): each synthetic
-lib id in the fleet is unique per board, so one C-number per lib id suffices.
+### Auto-registered transforms
+
+When no sidecar or packaged transform exists for a part, `add-3d-models` fits
+the EasyEDA footprint pads (stored in the cache metadata at fetch time) onto
+the KiCad footprint's pads, matched by pad number, with a 2D rigid fit
+(rotation + translation). The fit's `rotate`/`offset` are written when the
+residual is low (rms <= 0.05 mm, max <= 0.10 mm, at least half the pads
+matched), reported as `lcsc_registration` with the residual. A high residual is
+reported as `lcsc_needs_calibration` and the identity transform stays: calibrate
+that part by hand (below). Precedence: sidecar > packaged table > derived >
+identity. The idea comes from kicad-jlcpcb-tools' CPL rotation work (MIT);
+easyeda2kicad is AGPL and none of its code is used. The EasyEDA response layout
+that the pad parser reads has not been verified against the live API.
 
 ## Per-part `rotate` / `offset` transforms
 
@@ -47,14 +107,15 @@ EasyEDA bodies are authored in whatever orientation the part vendor chose. The
 identity rotation the tier emits by default is therefore a *guess*, and for many
 parts it is wrong by a quarter turn.
 
-Authored corrections come from two places, in this order (first non-`None`
+Authored corrections come from these places, in this order (first non-`None`
 wins, **merged per field** — with one guard, below):
 
 | Precedence | Source | Scope |
 |---|---|---|
 | 1 | Per-board sidecar entry in **object form** | One board — a local escape hatch |
 | 2 | Packaged table `src/kicad_tools/pcb/lcsc_model_transforms.py` | The whole fleet + every downstream consumer of the wheel |
-| 3 | Identity (`rotate (xyz 0 0 0)`, `offset (xyz 0 0 0)`) | Every part with no entry anywhere |
+| 3 | Derived by EasyEDA pad registration (see above) | Parts fetched with pad data and a low fit residual |
+| 4 | Identity (`rotate (xyz 0 0 0)`, `offset (xyz 0 0 0)`) | Every part with no entry anywhere |
 
 Merging is **per field**: a sidecar entry that overrides only `offset` still
 inherits the packaged `rotate`, and vice versa.
@@ -202,6 +263,7 @@ behind "0 models checked". One classifier
 | `unresolved_var` | a `${VAR}` in the path is not defined in the environment | no |
 | `hidden_only` | every model on the footprint is hidden | no |
 | `lcsc_cache_miss` | the ref points into the LCSC cache (`KCT_LCSC_3D_DIR`, `C<digits>.step`) but the file is not cached | no |
+| `lcsc_content_changed` | the cached LCSC body's sha256 no longer matches the digest pinned when it was fetched | no |
 | `placeholder` | resolves, but the file name is a stand-in (`placeholder`, `dummy`, `generic`, `proxy`) | no |
 | `exempt` | no 3D body expected; excluded from the denominator | n/a |
 
@@ -212,21 +274,26 @@ footprints with a `board_only` or `exclude_from_bom` attribute, and the
 **Resolution environments.** `--env host` (default) is what `kct render` sees on
 this machine, so the totals depend on the KiCad model library installed there
 (the audited reference numbers were measured against KiCad 10.0.x).
-`--env pinned` is the pinned toolchain image; it has no model set yet
-(issue #7683), so every library ref reads `dangling` and only
-`${KIPRJMOD}`-relative and embedded models resolve. `--model-dir DIR` maps every
+`--env pinned` is the pinned toolchain image plus the checksum-verified subset of
+KiCad's stock 3D library that `kct models sync` fetches (issue #7683, see
+below). Until that is synced it prints `pinned model set not synced`, every
+library ref reads `dangling` and only `${KIPRJMOD}`-relative and embedded models
+resolve. `--model-dir DIR` maps every
 `KICADn_3DMODEL_DIR` variable to `DIR`.
 
 **Surfaces.**
 
 - `kct pcb model-audit <pcb> [--env host|pinned] [--model-dir DIR] [--format json]`
+- `kct models sync --sparse` / `kct models status`: fetch / check the pinned
+  model subset (below).
 - `kct check --3d-models` (or `--only model_coverage`): one *warning* per
   non-exempt uncovered footprint (message carries reference, `lib_id`, class
   and path), or a single *info* finding ("3D coverage not evaluated") when the
   host has no model library. The category is **opt-in**: plain `kct check`,
-  `--strict`, board gates, `kct readiness` and `run_drc` do not run it until a
-  pinned model set lands (#7683/#7685), because its result depends on the
-  host's KiCad 3D library.
+  `--strict`, board gates, `kct readiness` and `run_drc` do not run it. The
+  pinned subset landed with #7683, but generated boards still carry
+  host-independent `no_ref` gaps that would fail zero-warning board gates, so
+  it becomes default-on with #7685 (every board at 100% on the pinned set).
 - `kct render`: boards with uncovered footprints report `partial` with a reason
   per footprint (`model_check.uncovered_models`) instead of `passed`; exit code
   is unchanged.
@@ -234,6 +301,24 @@ this machine, so the totals depend on the KiCad model library installed there
   Informational; never a ship-ready blocker.
 - CI: the non-blocking `3D Model Coverage Report` job uploads
   `model-coverage.json` (host and pinned summaries, gaps and suspects per board).
+
+**Pinned model subset (`kct models sync`).** The pinned toolchain image ships no
+3D models, so the fleet fetches only the files its boards reference, from
+`kicad-packages3D` at tag `10.0.6` (equal to the pinned image's KiCad version; a
+test fails on drift), and verifies each against the sha256 in
+`src/kicad_tools/data/kicad-3dmodels/manifest.json`. The cache is
+`~/.cache/kicad-tools/kicad-3dmodels/<tag>/` (override with
+`KCT_KICAD_3DMODEL_CACHE`); a second `sync` makes no network calls, and a digest
+mismatch deletes the file and exits non-zero. `--env pinned` and the Docker
+`kicad-cli` shim (`KCT_KICAD_DOCKER=1`) use the cache only when every manifest
+file verifies. Regenerate the manifest with
+`uv run python scripts/update_3dmodel_manifest.py` when a board references a new
+stock model. The models are CC-BY-SA-4.0 with the KiCad design exception; the
+manifest ships with `ATTRIBUTION.md`, which `sync` copies next to the cache.
+The subset is KiCad stock models only and is kept apart from the LCSC cache
+(Q44): the manifest loader rejects any `C<n>.step` or `lcsc/`/`easyeda/` entry,
+the two caches live in separate directories, and `--env pinned` never resolves
+`${KCT_LCSC_3D_DIR}` refs from the synced KiCad subset.
 
 **Wrong-body heuristic.** When the model file name implies a pin grid
 (`..._1x04_P2.54mm`) whose pin count differs from the footprint's pad count, the

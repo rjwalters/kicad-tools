@@ -1299,7 +1299,26 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen
 
+      - name: Cache pinned KiCad 3D model subset
+        # Issue #7683: the digest-verified subset `kct models sync` fetches
+        # (~14 MB).  Keyed on the manifest, so a tag/ref change refetches and
+        # otherwise the sync below is a zero-network no-op.
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/kct-3dmodels
+          key: kct-3dmodels-${{ hashFiles('src/kicad_tools/data/kicad-3dmodels/manifest.json') }}
+
+      - name: Sync pinned 3D model subset
+        # A gitlab.com outage must not skip the report below; it then records
+        # a "not synced" pinned summary instead.
+        continue-on-error: true
+        env:
+          KCT_KICAD_3DMODEL_CACHE: ${{ runner.temp }}/kct-3dmodels
+        run: uv run kct models sync --sparse
+
       - name: Write model-coverage.json
+        env:
+          KCT_KICAD_3DMODEL_CACHE: ${{ runner.temp }}/kct-3dmodels
         run: uv run python scripts/ci/model_coverage_report.py -o model-coverage.json
 
       - uses: actions/upload-artifact@v7

@@ -15,6 +15,25 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-21
 
+- **PR #7724**: feat: fetch pinned, sha256-verified KiCad 3D model subset (kct models sync)
+- **PR #7725**: feat(pcb): LCSC 3D models at catalog scale with per-user opt-in guards
+- **PR #7723**: fix: escape KiCad strings in sch set-footprint/set-value and S-expression writers (#7648)
+- **PR #7722**: chore(tooling): update Repo Skills 0.24.3→0.24.7
+- **PR #7720**: test(board03): pin the arm C route's USB_D via parity end to end
+- **PR #7718**: fix(board03): re-derive copper from the arm C route and retire the USB_D via-count exception
+- **Issue #7683** (closed): Pinned 3D model set for the pinned KiCad toolchain (`kicad-packages3D` by tag and digest)
+- **Issue #7624** (closed): router: recover 06rf USB3_RX1/RX2 coupling at J1 after #7517 corridor competition (Q29 tracked regression)
+- **Issue #7686** (closed): LCSC/JLCPCB model pipeline at catalog scale: BOM-driven C-numbers, content pinning, auto-registered transforms, terms-respecting fetch
+- **Issue #7666** (closed): site: gallery shows stale or raw board identity: unchecked board.json age, PCB file stems as titles, and board 07 still titled "DRAFT"
+- **Issue #7648** (closed): `sch_set_footprint` corrupts sheets (footprint used as a `re.sub` template, unescaped, universal-newline round trip); S-expression writers emit raw `\r`; `Footprint.to_sexp` escapes nothing
+- **Issue #7713** (closed): board 03: re-derive the committed copper from the arm C route and retire the #7108 USB_D via-count exception
+- **Issue #7580** (closed): router: finish diff-pair via-count parity (continuation of #7093)
+- **PR #7712**: fix(zones): skip auto-pour on boards with legacy-named copper layers
+- **PR #7707**: fix(board04): move corner-seated C10.2/C11.2 GND welds clear of SMT lands
+- **PR #7697**: chore: register 3D-model neighbours in the ecosystem registry
+- **Issue #7708** (closed): bug: pocketbeagle zero-touch route raises 'Layer In1.Cu is not available' with empty declared layers; beagleconnect_freedom ends below input connectivity
+- **Issue #7704** (closed): main red: Slow Tests — test_board_04_drill_clearance_regen fails (manufacturing-requirements.json missing in temp dir) since 2026-10-20T20:04Z
+- **Issue #7694** (closed): chore: add ecosystem registry entries for the 3D-model neighbours
 - **PR #7715**: docs(board07): audit wall-clock limits under deterministic-budget
 - **PR #7714**: fix(route): name schema-2 migration step and surface load error on total failure
 - **PR #7709**: feat: add 2026-10-21 external benchmark collection from the workflow run

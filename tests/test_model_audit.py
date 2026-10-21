@@ -253,11 +253,15 @@ def test_check_collapses_missing_library_into_one_info(tmp_path, models, monkeyp
 
 
 def test_opt_in_deferral_expires_with_pinned_model_set():
-    """``model_coverage`` stays out of the default set only until #7683.
+    """``model_coverage`` stays out of the default set until #7683/#7685.
 
     When ``PINNED_MODEL_DIR`` is set this fails: drop ``model_coverage`` from
     ``DEFERRED_OPT_IN_CATEGORIES`` (making it default-on) and re-record board
-    evidence then (#7683/#7685).
+    evidence then (#7683/#7685).  #7683 shipped the synced subset through
+    ``resolve_pinned_model_dir()`` with ``PINNED_MODEL_DIR`` left as a ``None``
+    override, and deliberately kept the deferral: fresh regens still carry
+    host-independent ``no_ref`` warnings (board 04's reviewed gate), so it
+    expires with #7685.
     """
     from kicad_tools.cli.check_categories import CHECK_CATEGORIES, DEFERRED_OPT_IN_CATEGORIES
 
@@ -330,3 +334,28 @@ def test_top_level_kct_check_forwards_3d_models_flag(tmp_path, models):
     assert _coverage_rules(json.loads(report.read_text())) == ["model_coverage"]
     kct_main(["check", str(pcb), "--format", "json", "--output", str(report)])
     assert _coverage_rules(json.loads(report.read_text())) == []
+
+
+def test_lcsc_content_changed_class(tmp_path, models):
+    """A cached LCSC body whose sha256 differs from its fetch-time pin (#7686)."""
+    import hashlib
+
+    lcsc = tmp_path / "lcsc"
+    lcsc.mkdir()
+    body = b"ISO-10303-21; original"
+    (lcsc / "C12345.step").write_bytes(b"ISO-10303-21; changed upstream")
+    (lcsc / "C12345.meta.json").write_text(
+        json.dumps({"lcsc": "C12345", "sha256": hashlib.sha256(body).hexdigest(), "source": "lcsc"})
+    )
+    (lcsc / "C777.step").write_bytes(body)
+    (lcsc / "C777.meta.json").write_text(
+        json.dumps({"lcsc": "C777", "sha256": hashlib.sha256(body).hexdigest(), "source": "lcsc"})
+    )
+    pcb = _write(
+        tmp_path,
+        _fp("R1", body='(model "${KCT_LCSC_3D_DIR}/C12345.step")'),
+        _fp("R2", body='(model "${KCT_LCSC_3D_DIR}/C777.step")'),
+    )
+    classes = _classes(pcb)
+    assert classes == {"R1": "lcsc_content_changed", "R2": "resolved"}
+    assert "lcsc_content_changed" in model_audit.CLASSES

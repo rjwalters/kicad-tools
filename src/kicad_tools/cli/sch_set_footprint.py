@@ -27,6 +27,7 @@ from kicad_tools.cli.lib_footprints import _count_pads
 from kicad_tools.cli.modify_schematic import (
     create_backup,
     find_symbol_text_range,
+    parse_check,
     set_footprint_text,
 )
 from kicad_tools.cli.sch_json import add_format_flag, record, run_with_json_summary
@@ -40,6 +41,7 @@ from kicad_tools.footprints.library_path import (
     parse_library_id,
 )
 from kicad_tools.schema import Schematic
+from kicad_tools.sexp import read_text_exact, write_text_exact
 
 
 def _load_mapping(map_path: Path) -> dict[str, str]:
@@ -279,10 +281,12 @@ def _run_set_footprint(
     total_errors = 0
     remaining = dict(mapping)
     modified_files: dict[Path, str] = {}
+    applied: dict[Path, list[tuple[str, str, str]]] = {}
 
     for sch_file in all_files:
         try:
-            text = sch_file.read_text(encoding="utf-8")
+            # newline="": a raw CR in a string must not become LF (#7648).
+            text = read_text_exact(sch_file)
         except OSError as e:
             print(f"Error reading {sch_file}: {e}", file=sys.stderr)
             total_errors += 1
@@ -309,6 +313,7 @@ def _run_set_footprint(
                 if success:
                     print(f"  {msg} (in {sch_file.name})")
                     file_modified = True
+                    applied.setdefault(sch_file, []).append((r, "Footprint", fp))
                     total_changed += 1
                     del remaining[r]
                 else:
@@ -319,13 +324,22 @@ def _run_set_footprint(
             modified_files[sch_file] = current_text
 
     # Write out modified files
+    refused = 0
     if not dry_run and modified_files:
         for sch_file, new_text in modified_files.items():
+            problem = parse_check(new_text, applied.get(sch_file))
+            if problem is not None:
+                print(
+                    f"Error: not writing {sch_file}, the edited sheet fails its parse check: {problem}",
+                    file=sys.stderr,
+                )
+                refused += 1
+                continue
             if backup:
                 bak = create_backup(sch_file)
                 print(f"  Backup: {bak.name}")
             try:
-                sch_file.write_text(new_text, encoding="utf-8")
+                write_text_exact(sch_file, new_text)
             except OSError as e:
                 print(f"Error writing {sch_file}: {e}", file=sys.stderr)
                 total_errors += 1
@@ -348,6 +362,8 @@ def _run_set_footprint(
         print(f"Warning: {len(remaining)} reference(s) not found: {', '.join(sorted(remaining))}")
         total_errors += len(remaining)
 
+    if refused:
+        return 1
     return 1 if total_errors > 0 and total_changed == 0 else 0
 
 

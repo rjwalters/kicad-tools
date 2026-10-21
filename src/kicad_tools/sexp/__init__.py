@@ -29,12 +29,16 @@ from .parser import (
     SExp,
     SExpParser,
     SExpSerializer,
+    escape_string,
     normalize_chamfer,
     parse_file,
     parse_sexp,
     parse_string,
+    quote_string,
+    read_text_exact,
     serialize_sexp,
     source_span,
+    write_text_exact,
 )
 from .scan import find_unquoted, has_unquoted, iter_unquoted
 
@@ -47,6 +51,11 @@ __all__ = [
     "parse_file",
     "parse_string",
     "source_span",
+    # KiCad string quoting and newline-exact file IO (issue #7648)
+    "escape_string",
+    "quote_string",
+    "read_text_exact",
+    "write_text_exact",
     # Token search that skips quoted strings (issue #6873)
     "find_unquoted",
     "has_unquoted",

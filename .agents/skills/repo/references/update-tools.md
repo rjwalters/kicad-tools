@@ -607,6 +607,16 @@ costs one `git diff --name-only` per candidate file:
    as a local modification, or the flag becomes noise the operator learns to
    click through.
 
+**A large `blocked` count right after an update-tools commit is usually a
+subject mismatch, not real local edits.** If the dry-run reports most Loom files
+as blocked (local-divergence guard, needs `--force`) and the last Loom update in
+this repo was committed as `chore(tooling): update loom …` (the subject earlier
+versions of this command prescribed), the guard failed to recognize that commit
+as a resync, so it read every file in it as a local fix. The upstream-diff check
+above tells the two apart: a genuinely modified file has no upstream change.
+Future Loom updates use the recognized subject (step 5); see
+rjwalters/loom#12618 for the content-based guard.
+
 Report the flagged set as its own block **before** the confirmation prompt,
 naming what would be lost:
 
@@ -878,7 +888,27 @@ Land each tool's bump as its own commit:
    # Commit-drift update (version identical on both sides): <old>→<new> would
    # read "0.9.0→0.9.0" and say nothing. Use the installed commits instead:
    #   chore(tooling): update <tool> 0.9.0 (abc1234→def5678)
+   #
+   # Loom is the exception — use its own recognized subject (see below):
+   #   MSG="chore(loom): resync installed Loom to v<new>"
    ```
+
+   **Loom's commit subject is not negotiable.** Loom's
+   `resync-installed.sh` local-divergence guard trusts an installed file only
+   when its last commit subject matches `RESYNC_COMMIT_SUBJECT_RE`, and the
+   generic `chore(tooling): update …` subject does not match. Commit a Loom
+   update with a subject that does, and every other tool keeps the generic one:
+
+   | Tool | `$MSG` |
+   |------|--------|
+   | Loom | `chore(loom): resync installed Loom to v<new>` |
+   | Repo Skills, Anvil, kicad-tools | `chore(tooling): update <tool> <old>→<new>` |
+
+   `<new>` must be a plain `X.Y.Z` — the regex is end-anchored, so nothing but
+   an optional ` (#N)` may follow it. This also covers the commit-drift case:
+   if Loom's version is identical on both sides, still emit the `v<new>` form,
+   because the regex has no sha form. (Companion issue proposing a
+   content-based guard: rjwalters/loom#12618.)
 
    **Unprotected, and already on the default branch — the original flow,
    unchanged:**
@@ -1021,7 +1051,9 @@ Land each tool's bump as its own commit:
    tree) — report and skip
 4. **Land the update, don't just stage it** — by default commit the installer's
    changes and land them on the default branch with a per-tool
-   `chore(tooling): update <tool> <old>→<new>` message. Stage **only** the paths
+   `chore(tooling): update <tool> <old>→<new>` message (Loom instead uses
+   `chore(loom): resync installed Loom to v<new>`, the subject its resync guard
+   recognizes — see step 5). Stage **only** the paths
    the installer actually changed — never fold a pre-existing dirty working tree
    into the update commit. `--no-commit` / `--stage-only` restores the old
    leave-it-uncommitted-for-review behavior.

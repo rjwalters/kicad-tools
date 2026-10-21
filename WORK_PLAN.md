@@ -17,7 +17,7 @@ _None._
 
 `loom:very-important` (one counts per workspace); every stage takes these first.
 
-- **#7580**: router: finish diff-pair via-count parity (continuation of #7093)
+_None._
 
 ## Important
 
@@ -30,26 +30,24 @@ _None._
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-- **#7669**: bench: re-run PocketBeagle and STRF (zero-touch + tuned) after the #4945/#5302 fixes and add a dispatchable external-bench workflow
+- **#7685**: Bring every demo board to 100% 3D model coverage on the pinned model set
 
 ## In Progress
 
 Issues currently being built (`loom:building`).
 
 - **#7521**: Diff-pair skew compensation per best practice (Q16): exclude tuning bumps from uncoupled metric, emit KiCad tuning patterns, geometry gates, sourced per-class skew limits
-- **#7580**: router: finish diff-pair via-count parity (continuation of #7093)
 - **#7612**: Board 07 fixture: 4 diff pairs fail skew with no_suitable_segment (TMDS_D2, MIPI_DAT1, MIPI_DAT0, MIPI_CLK)
-- **#7659**: test flake: test_route_entry_path_goldens partial-rule_relaxation times out (C++ gives up on /D, Python fallback >60 s) — follow-up to #7626
-- **#7675**: Board 07: remove DRAFT from titles and re-issue readiness
-- **#7682**: 3D coverage audit: count footprints, not refs, in `kct check`, `kct render` and `kct fleet status`
-- **#7694**: chore: add ecosystem registry entries for the 3D-model neighbours
+- **#7689**: Site and readiness renders use the pinned or embedded model set and fail on incomplete 3D coverage
+- **#7721**: router: turn-aware lattice A* — price signed turning so diff pairs avoid same-direction U-turns (source-side skew, #7649)
+- **#7729**: 06rf lattice bench: kct check reports 12 diffpair_clearance_intra on the seed-42 route (revision expected at most 4)
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#7695**: feat: audit 3D model coverage per footprint with shared classifier
-- **#7697**: chore: register 3D-model neighbours in the ecosystem registry
+- **#7730**: fix: emit lattice pair legs wider than pitch to survive 4-decimal serialization
+- **#7732**: feat: gate kct render and deploy-site on 3D model coverage
 
 ## Approved (Awaiting Merge)
 
@@ -82,21 +80,18 @@ Issues carrying `loom:curated`.
 - **#7548**: Board 06 synthetic fixture: 9 diff pairs over max skew on the seed-42 re-route (identity-allowed in check_diffpair_coverage.py) *(curated)*
 - **#7557**: Board 07: TMDS_D0_N pad U4.B2 has no legal exit; needs placement rework or joint TMDS escape-corridor allocation (#3673) *(curated)*
 - **#7573**: router: board 05 +5V/GND pour completeness depends on where nTRIP lands (C10 stitch sites unreserved) *(curated)*
-- **#7580**: router: finish diff-pair via-count parity (continuation of #7093) *(curated)*
 - **#7611**: Board 07 fixture: DDR_DATA_BYTE_0 and MIPI_CSI_LANES group length skew over tolerance *(curated)*
 - **#7612**: Board 07 fixture: 4 diff pairs fail skew with no_suitable_segment (TMDS_D2, MIPI_DAT1, MIPI_DAT0, MIPI_CLK) *(curated)*
 - **#7619**: Board 07 fixture: DQS and TMDS_D1 diff pairs routed with unequal via counts (N leg +2 vias), causing multi-mm skew *(curated)*
-- **#7624**: router: recover 06rf USB3_RX1/RX2 coupling at J1 after #7517 corridor competition (Q29 tracked regression) *(curated)*
-- **#7648**: `sch_set_footprint` corrupts sheets (footprint used as a `re.sub` template, unescaped, universal-newline round trip); S-expression writers emit raw `\r`; `Footprint.to_sexp` escapes nothing *(curated)*
 - **#7649**: router: source-side diff-pair skew avoidance; retire the Q35 2× interim bump excursion *(curated)*
 - **#7650**: board 03: recover USB_D common-run and MCU-launch margin given up to route VBUS U2.5 (#7475) *(curated)*
-- **#7659**: test flake: test_route_entry_path_goldens partial-rule_relaxation times out (C++ gives up on /D, Python fallback >60 s) — follow-up to #7626 *(curated)*
-- **#7666**: site: gallery shows stale or raw board identity: unchecked board.json age, PCB file stems as titles, and board 07 still titled "DRAFT" *(curated)*
 - **#7669**: bench: re-run PocketBeagle and STRF (zero-touch + tuned) after the #4945/#5302 fixes and add a dispatchable external-bench workflow *(curated)*
-- **#7675**: Board 07: remove DRAFT from titles and re-issue readiness *(curated)*
-- **#7682**: 3D coverage audit: count footprints, not refs, in `kct check`, `kct render` and `kct fleet status` *(curated)*
+- **#7685**: Bring every demo board to 100% 3D model coverage on the pinned model set *(curated)*
+- **#7689**: Site and readiness renders use the pinned or embedded model set and fail on incomplete 3D coverage *(curated)*
 - **#7690**: Epic: full 3D model coverage, from demo boards to the JLCPCB catalog, reproducible on the pinned toolchain *(curated)*
-- **#7694**: chore: add ecosystem registry entries for the 3D-model neighbours *(curated)*
+- **#7716**: router: Python-fallback A* inside relief rescue is load-dependent on board 07 (1,024 expansions in ~420 s) *(curated)*
+- **#7721**: router: turn-aware lattice A* — price signed turning so diff pairs avoid same-direction U-turns (source-side skew, #7649) *(curated)*
+- **#7729**: 06rf lattice bench: kct check reports 12 diffpair_clearance_intra on the seed-42 route (revision expected at most 4) *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -121,13 +116,13 @@ Issues carrying `loom:curated`.
 | Bucket | Count |
 |------|-------|
 | Operator merge-risk holds | 0 |
-| Very important | 1 |
+| Very important | 0 |
 | Important | 2 |
 | Ready (`loom:issue`) | 1 |
-| In Progress (`loom:building`) | 7 |
+| In Progress (`loom:building`) | 5 |
 | PRs awaiting review | 2 |
 | Approved PRs awaiting merge | 0 |
-| Curated | 36 |
+| Curated | 33 |
 | Architect / Hermit proposals | 5 |
 | Active epics | 7 |
 <!-- guide:plan-body:end -->
