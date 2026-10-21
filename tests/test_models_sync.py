@@ -60,6 +60,8 @@ def test_committed_manifest_is_well_formed():
     manifest = load_manifest()
     assert len(manifest) > 0
     assert len(manifest.commit) == 40
+    # The peeled commit of the annotated tag, not the tag object (125f0268...).
+    assert manifest.commit == "e62ed1fc7862da83f789bd562671b5e4b82afcdf"
     assert all(rel.endswith(".step") for rel in manifest.files)
     assert models3d_pinned.ATTRIBUTION_PATH.is_file()
 
@@ -119,6 +121,25 @@ def test_manifest_rejects_unsafe_paths(tmp_path, bad):
     path.write_text(json.dumps({"tag": "t", "commit": "c", "files": {bad: "0" * 64}}))
     with pytest.raises(models3d_pinned.ModelSyncError):
         load_manifest(path)
+
+
+@pytest.mark.parametrize(
+    "digest",
+    ["0" * 63, "0" * 65, "g" * 64, "A" * 64, " " + "0" * 63, "0" * 63 + "\n"],
+)
+def test_manifest_rejects_non_hex_digests(tmp_path, digest):
+    """Digests must be exactly 64 lowercase hex characters (sha256 hexdigest)."""
+    path = tmp_path / "m.json"
+    path.write_text(json.dumps({"tag": "t", "commit": "c", "files": {"a.step": digest}}))
+    with pytest.raises(models3d_pinned.ModelSyncError, match="digest"):
+        load_manifest(path)
+
+
+def test_manifest_accepts_lowercase_hex_digest(tmp_path):
+    path = tmp_path / "m.json"
+    good = hashlib.sha256(b"x").hexdigest()
+    path.write_text(json.dumps({"tag": "t", "commit": "c", "files": {"a.step": good}}))
+    assert load_manifest(path).files == {"a.step": good}
 
 
 @pytest.mark.parametrize(
@@ -209,6 +230,29 @@ def test_cli_pinned_audit_reports_not_synced(tmp_path, monkeypatch, capsys):
     args = Namespace(env="pinned", model_dir=None, format="text")
     assert _run_model_audit_command(args, _pcb(tmp_path)) == 0
     assert "pinned model set not synced" in capsys.readouterr().out
+
+
+def test_cli_pinned_audit_json_reports_synced_flag(tmp_path, monkeypatch, capsys):
+    from kicad_tools.cli.commands.pcb import _run_model_audit_command
+
+    cache = tmp_path / "cache"
+    monkeypatch.setenv(models3d_pinned.CACHE_ENV_VAR, str(cache))
+    manifest = _manifest({k: v for k, v in PAYLOADS.items() if k.startswith("Resistor")})
+    monkeypatch.setattr(models3d_pinned, "load_manifest", lambda path=None: manifest)
+    pcb = _pcb(tmp_path)
+    args = Namespace(env="pinned", model_dir=None, format="json")
+
+    assert _run_model_audit_command(args, pcb) == 0
+    assert json.loads(capsys.readouterr().out)["synced"] is False
+
+    sync_models(manifest, models3d_pinned.cache_dir("10.0.6"), _Fetcher())
+    assert _run_model_audit_command(args, pcb) == 0
+    assert json.loads(capsys.readouterr().out)["synced"] is True
+
+    # An explicit --model-dir bypasses the synced cache: the key is absent.
+    explicit = Namespace(env="pinned", model_dir=str(tmp_path), format="json")
+    assert _run_model_audit_command(explicit, pcb) == 0
+    assert "synced" not in json.loads(capsys.readouterr().out)
 
 
 def test_models_command_sync_and_status(tmp_path, monkeypatch, capsys):

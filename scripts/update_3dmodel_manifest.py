@@ -43,13 +43,19 @@ def collect_refs() -> list[str]:
 
 
 def upstream_commit(tag: str) -> str:
-    out = subprocess.run(
+    """Commit the *tag* points at (the peeled ``^{}`` entry for an annotated tag)."""
+    lines = subprocess.run(
         ["git", "ls-remote", UPSTREAM_GIT, f"refs/tags/{tag}^{{}}", f"refs/tags/{tag}"],
         check=True,
         capture_output=True,
         text=True,
-    ).stdout.split()
-    return out[0]
+    ).stdout.splitlines()
+    refs: dict[str, str] = {}
+    for line in lines:
+        sha, _, ref = line.partition("\t")
+        refs[ref] = sha
+    # ``refs/tags/<tag>`` alone is the tag *object* for an annotated tag.
+    return refs.get(f"refs/tags/{tag}^{{}}") or refs[f"refs/tags/{tag}"]
 
 
 def main() -> int:

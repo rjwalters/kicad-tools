@@ -1772,7 +1772,10 @@ def _run_model_audit_command(args, pcb_path: Path) -> int:
         return 1
 
     if args.format == "json":
-        print(json.dumps(report.to_dict(), indent=2))
+        doc = report.to_dict()
+        if model_dir is None and args.env == "pinned":
+            doc["synced"] = not not_synced
+        print(json.dumps(doc, indent=2))
         return 0
 
     if not_synced:

@@ -65,6 +65,8 @@ Fetcher = Callable[[str], bytes]
 #: anything under an ``lcsc``/``easyeda`` directory).  The pinned subset is
 #: KiCad's stock library only; LCSC bodies are per-user cache content that must
 #: never be fetched, cached or served as part of it (rulings Q43/Q44).
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+
 _LCSC_LIKE = re.compile(
     r"(^|/)(lcsc|lcsc-3d|easyeda)(/|$)|(^|/)C\d+\.(step|stp|wrl)$", re.IGNORECASE
 )
@@ -110,8 +112,12 @@ def load_manifest(path: Path | None = None) -> Manifest:
         raise ModelSyncError(f"cannot read 3D model manifest {path}: {exc}") from exc
     for rel, digest in files.items():
         parts = Path(rel).parts
-        if Path(rel).is_absolute() or ".." in parts or len(digest) != 64:
+        if Path(rel).is_absolute() or ".." in parts:
             raise ModelSyncError(f"malformed manifest entry: {rel!r}")
+        if not _SHA256_HEX.fullmatch(digest):
+            raise ModelSyncError(
+                f"malformed manifest digest for {rel!r}: expected 64 lowercase hex characters"
+            )
         if _LCSC_LIKE.search(Path(rel).as_posix()):
             raise ModelSyncError(
                 f"manifest entry {rel!r} looks like an LCSC/EasyEDA body; "

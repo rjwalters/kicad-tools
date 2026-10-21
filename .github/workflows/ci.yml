@@ -1309,6 +1309,9 @@ jobs:
           key: kct-3dmodels-${{ hashFiles('src/kicad_tools/data/kicad-3dmodels/manifest.json') }}
 
       - name: Sync pinned 3D model subset
+        # A gitlab.com outage must not skip the report below; it then records
+        # a "not synced" pinned summary instead.
+        continue-on-error: true
         env:
           KCT_KICAD_3DMODEL_CACHE: ${{ runner.temp }}/kct-3dmodels
         run: uv run kct models sync --sparse
