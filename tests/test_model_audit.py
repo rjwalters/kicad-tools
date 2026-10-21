@@ -252,18 +252,27 @@ def test_check_collapses_missing_library_into_one_info(tmp_path, models, monkeyp
     assert not info.is_warning
 
 
-def test_model_coverage_is_default_on_since_pinned_model_set():
-    """#7683 shipped the pinned model subset, so the #7682 deferral is gone."""
+def test_opt_in_deferral_expires_with_pinned_model_set():
+    """``model_coverage`` stays out of the default set until #7683/#7685.
+
+    When ``PINNED_MODEL_DIR`` is set this fails: drop ``model_coverage`` from
+    ``DEFERRED_OPT_IN_CATEGORIES`` (making it default-on) and re-record board
+    evidence then (#7683/#7685).  #7683 shipped the synced subset through
+    ``resolve_pinned_model_dir()`` with ``PINNED_MODEL_DIR`` left as a ``None``
+    override, and deliberately kept the deferral: fresh regens still carry
+    host-independent ``no_ref`` warnings (board 04's reviewed gate), so it
+    expires with #7685.
+    """
     from kicad_tools.cli.check_categories import CHECK_CATEGORIES, DEFERRED_OPT_IN_CATEGORIES
 
-    assert frozenset() == DEFERRED_OPT_IN_CATEGORIES
-    assert "model_coverage" in CHECK_CATEGORIES
+    assert model_audit.PINNED_MODEL_DIR is None, "#7683 landed: drop the #7682 opt-in deferral"
+    assert {"model_coverage"} == DEFERRED_OPT_IN_CATEGORIES
+    assert set(CHECK_CATEGORIES) >= DEFERRED_OPT_IN_CATEGORIES
 
 
-def test_default_category_set_includes_model_coverage(tmp_path, models):
-    """Default-on since #7683: every default caller (``kct check``,
-    ``run_check_rule_set``, ``kct readiness``) runs it; ``opt_in`` and
-    ``--only`` stay accepted."""
+def test_default_category_set_excludes_model_coverage(tmp_path, models):
+    """The deferral lives in ``run_selected_checks``: every default caller
+    (``kct check``, ``run_check_rule_set``, ``kct readiness``) skips it."""
     from unittest.mock import MagicMock
 
     from kicad_tools.cli.check_cmd import run_selected_checks
@@ -272,7 +281,7 @@ def test_default_category_set_includes_model_coverage(tmp_path, models):
     coverage: dict = {}
     only = {"model_coverage"}
     for only_set, opt_in, expected in [
-        (None, frozenset(), [("warning", ("U1",))]),
+        (None, frozenset(), []),
         (None, {"model_coverage"}, [("warning", ("U1",))]),
         (only, frozenset(), [("warning", ("U1",))]),
     ]:
@@ -281,7 +290,11 @@ def test_default_category_set_includes_model_coverage(tmp_path, models):
         )
         found = [(v.severity, v.items) for v in results.violations if v.rule_id == "model_coverage"]
         assert found == expected, (only_set, opt_in)
-        assert coverage["model_coverage"].state == "checked"
+        if only_set is None and not opt_in:
+            # Invisible by default, so default reports match pre-#7682 bytes.
+            assert "model_coverage" not in coverage
+        else:
+            assert coverage["model_coverage"].state == "checked"
         coverage.clear()
 
 
@@ -297,13 +310,12 @@ def _coverage_rules(report: dict) -> list[str]:
     return [v["rule_id"] for v in report["violations"] if v["rule_id"] == "model_coverage"]
 
 
-def test_check_cli_default_runs_model_coverage_and_flags_stay_accepted(tmp_path, models):
-    """Plain ``kct check`` runs ``model_coverage`` (default-on since #7683), so
-    ``--strict`` fails on a bare footprint; ``--3d-models`` / ``--only
-    model_coverage`` remain accepted (issue #7682)."""
+def test_check_cli_strict_unchanged_by_default_and_opt_in_flag(tmp_path, models):
+    """Plain ``kct check --strict`` never sees ``model_coverage``;
+    ``--3d-models`` / ``--only model_coverage`` opt in (issue #7682)."""
     pcb = _write(tmp_path, _fp("U1"))
-    code, default = _check_cli(pcb, "--strict")
-    assert code == 2 and _coverage_rules(default) == ["model_coverage"]
+    _, default = _check_cli(pcb, "--strict")
+    assert _coverage_rules(default) == []
     _, flagged = _check_cli(pcb, "--3d-models")
     assert _coverage_rules(flagged) == ["model_coverage"]
     _, only = _check_cli(pcb, "--only", "model_coverage")
@@ -321,4 +333,29 @@ def test_top_level_kct_check_forwards_3d_models_flag(tmp_path, models):
     kct_main(["check", str(pcb), "--3d-models", "--format", "json", "--output", str(report)])
     assert _coverage_rules(json.loads(report.read_text())) == ["model_coverage"]
     kct_main(["check", str(pcb), "--format", "json", "--output", str(report)])
-    assert _coverage_rules(json.loads(report.read_text())) == ["model_coverage"]
+    assert _coverage_rules(json.loads(report.read_text())) == []
+
+
+def test_lcsc_content_changed_class(tmp_path, models):
+    """A cached LCSC body whose sha256 differs from its fetch-time pin (#7686)."""
+    import hashlib
+
+    lcsc = tmp_path / "lcsc"
+    lcsc.mkdir()
+    body = b"ISO-10303-21; original"
+    (lcsc / "C12345.step").write_bytes(b"ISO-10303-21; changed upstream")
+    (lcsc / "C12345.meta.json").write_text(
+        json.dumps({"lcsc": "C12345", "sha256": hashlib.sha256(body).hexdigest(), "source": "lcsc"})
+    )
+    (lcsc / "C777.step").write_bytes(body)
+    (lcsc / "C777.meta.json").write_text(
+        json.dumps({"lcsc": "C777", "sha256": hashlib.sha256(body).hexdigest(), "source": "lcsc"})
+    )
+    pcb = _write(
+        tmp_path,
+        _fp("R1", body='(model "${KCT_LCSC_3D_DIR}/C12345.step")'),
+        _fp("R2", body='(model "${KCT_LCSC_3D_DIR}/C777.step")'),
+    )
+    classes = _classes(pcb)
+    assert classes == {"R1": "lcsc_content_changed", "R2": "resolved"}
+    assert "lcsc_content_changed" in model_audit.CLASSES

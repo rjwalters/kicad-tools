@@ -55,6 +55,10 @@ Run each of the following checks and compile results into a single report:
 
 ### 4. Gitignore Issues (see [[gitignore]])
 - Files that are ignored but probably shouldn't be
+- Tracked files that match an ignore rule are unaffected by it — the rule only
+  hides new untracked files, so list those before suggesting removal and prefer
+  keeping the rule; see [[gitignore]] ("Tracked files that match an ignore
+  rule"). Read-only: report the finding, don't edit.
 - Build artifacts that aren't ignored but should be
 - Redundant or stale gitignore rules — but **not** `X` + `X/` pairs unless `X`
   is verified to be a real, non-symlink directory (`[ -d "X" ] && [ ! -L "X" ]`);

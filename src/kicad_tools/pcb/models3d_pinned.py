@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import tempfile
 import urllib.error
 import urllib.parse
@@ -59,6 +60,14 @@ UPSTREAM_RAW_URL = "https://gitlab.com/kicad/libraries/kicad-packages3D/-/raw/{t
 CACHE_ENV_VAR = "KCT_KICAD_3DMODEL_CACHE"
 
 Fetcher = Callable[[str], bytes]
+
+#: Manifest paths that look like LCSC/EasyEDA content (a ``C<digits>`` body or
+#: anything under an ``lcsc``/``easyeda`` directory).  The pinned subset is
+#: KiCad's stock library only; LCSC bodies are per-user cache content that must
+#: never be fetched, cached or served as part of it (rulings Q43/Q44).
+_LCSC_LIKE = re.compile(
+    r"(^|/)(lcsc|lcsc-3d|easyeda)(/|$)|(^|/)C\d+\.(step|stp|wrl)$", re.IGNORECASE
+)
 
 
 class ModelSyncError(RuntimeError):
@@ -103,6 +112,11 @@ def load_manifest(path: Path | None = None) -> Manifest:
         parts = Path(rel).parts
         if Path(rel).is_absolute() or ".." in parts or len(digest) != 64:
             raise ModelSyncError(f"malformed manifest entry: {rel!r}")
+        if _LCSC_LIKE.search(Path(rel).as_posix()):
+            raise ModelSyncError(
+                f"manifest entry {rel!r} looks like an LCSC/EasyEDA body; "
+                "the pinned subset carries KiCad stock models only"
+            )
     return manifest
 
 

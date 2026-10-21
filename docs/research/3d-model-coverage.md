@@ -557,6 +557,37 @@ bodies are contributed by users or vendors, with no per-model license shown.
   sale, lease or other transfer") all point the same way: fetch at use
   time, never commit.
 
+### Operator ruling and implementation (#7686)
+
+Operator ruling Q44 = 1 (2026-10-21): EasyEDA/LCSC 3D models are per-user,
+opt-in and fetched at use time only, including for the existing #4072 tier.
+They are never committed, packaged or embedded. Written permission from
+LCSC/EasyEDA is an operator action; agents do not contact them. The code
+guards (cache metadata with `source=lcsc`, content pinning, terms notice,
+fetch cap and rate limit, the no-commit guard test) are described in
+[`docs/guides/lcsc-3d-models.md`](../guides/lcsc-3d-models.md).
+
+### Catalogue measurement: method and status
+
+`scripts/research/measure_3d_catalog_coverage.py` maps each in-stock
+jlcparts `package` string to a KiCad footprint with the matcher that
+`kct parts import` uses (`PartImporter._match_footprint`), then asks the
+`add-3d-models` ladder (exact, same-library variant, curated substitution)
+whether that footprint has an existing stock body. It reports the share with a
+stock body, the share that would need the LCSC tier (a footprint with no
+body), and the share with no footprint match, by Basic/Preferred vs Extended
+and by category. It is offline and read-only.
+
+**Status: not measured.** The jlcparts SQLite (`kct parts sync-catalog`, a
+large download) was not cached on the worker that implemented #7686, so no
+numbers are claimed here. The share with a *generatable* family (#7687) is also
+not measured: there is no generator registry to ask yet. Run the script on a
+host with the catalog and the pinned model set, and paste the table below.
+
+| bucket | parts | stock body | needs LCSC | no footprint match |
+|---|---|---|---|---|
+| all | not measured | not measured | not measured | not measured |
+
 ## 4. Interaction with existing gates
 
 ### DRC and `lib_footprint_issues`
@@ -673,6 +704,9 @@ The issues are drafted in the session scratchpad, not filed.
    pinned kicad-cli. Fetch it by tag and digest into a cache, and mount it
    into the Docker shim. This is a network and size decision for an
    operator: 3.2 GB in full, or a sparse per-board subset.
+   *Status:* done in #7683 (ruling Q43 = 1). `kct models sync` fetches a
+   55-file, ~14 MB subset at tag `10.0.6` against a committed sha256
+   manifest; it excludes LCSC/EasyEDA bodies, which stay per-user (#7686).
 4. **Generators own their models.** Add a shared post-generation step
    (the `add_model_refs` ladder) to the board recipe and pipeline. Add a
    regeneration guard so a regen that drops bodies fails, as board 00 and

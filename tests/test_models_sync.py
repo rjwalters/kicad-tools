@@ -121,6 +121,58 @@ def test_manifest_rejects_unsafe_paths(tmp_path, bad):
         load_manifest(path)
 
 
+@pytest.mark.parametrize(
+    "bad",
+    ["lcsc/C12345.step", "C2040.step", "Foo.3dshapes/C99.wrl", "easyeda/x.step", "lcsc-3d/a.step"],
+)
+def test_manifest_rejects_lcsc_easyeda_bodies(tmp_path, bad):
+    """The pinned subset is KiCad stock models only; LCSC bodies never enter it (#7686)."""
+    path = tmp_path / "m.json"
+    path.write_text(json.dumps({"tag": "t", "commit": "c", "files": {bad: "0" * 64}}))
+    with pytest.raises(models3d_pinned.ModelSyncError, match="LCSC"):
+        load_manifest(path)
+
+
+def test_pinned_subset_is_distinct_from_lcsc_cache(tmp_path, monkeypatch):
+    """Synced pinned files are not LCSC content and never serve an LCSC ref."""
+    from kicad_tools.pcb import lcsc_guard
+    from kicad_tools.pcb.lcsc_models import DEFAULT_CACHE_ENV_VAR, lcsc_cache_dir
+
+    monkeypatch.delenv(DEFAULT_CACHE_ENV_VAR, raising=False)
+    monkeypatch.delenv(models3d_pinned.CACHE_ENV_VAR, raising=False)
+    lcsc_default, pinned_default = lcsc_cache_dir(), models3d_pinned.cache_dir()
+    assert lcsc_default not in pinned_default.parents and lcsc_default != pinned_default
+    assert pinned_default not in lcsc_default.parents
+
+    cache = tmp_path / "pinned"
+    monkeypatch.setenv(models3d_pinned.CACHE_ENV_VAR, str(cache))
+    manifest = _manifest()
+    monkeypatch.setattr(models3d_pinned, "load_manifest", lambda path=None: manifest)
+    root = models3d_pinned.cache_dir("10.0.6")
+    sync_models(manifest, root, _Fetcher())
+
+    # An LCSC body placed inside the pinned cache must not resolve via the pinned env.
+    (root / "lcsc").mkdir()
+    (root / "lcsc" / "C12345.step").write_bytes(b"ISO-10303-21; lcsc")
+    pcb = tmp_path / "b.kicad_pcb"
+    pcb.write_text(
+        '(kicad_pcb (version 20240108) (generator "t")\n'
+        '  (footprint "Resistor_SMD:R_0603_1608Metric" (layer "F.Cu") (at 0 0)\n'
+        '    (property "Reference" "R1" (at 0 0 0) (layer "F.SilkS"))\n'
+        '    (model "${KCT_LCSC_3D_DIR}/C12345.step"))\n'
+        ")\n"
+    )
+    assert model_audit.audit_pcb_models(pcb, env="pinned").covered == 0
+
+    # The guard does not mistake pinned KiCad models for LCSC bodies.
+    lcsc = tmp_path / "lcsc-cache"
+    lcsc.mkdir()
+    (lcsc / "C777.step").write_bytes(b"ISO-10303-21; lcsc body")
+    digests = lcsc_guard.lcsc_cache_digests(lcsc)
+    pinned_files = [root / rel for rel in manifest.files]
+    assert lcsc_guard.find_lcsc_step_violations(pinned_files, digests) == []
+
+
 def _pcb(tmp_path: Path) -> Path:
     pcb = tmp_path / "b.kicad_pcb"
     pcb.write_text(
