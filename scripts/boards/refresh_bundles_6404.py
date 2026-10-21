@@ -33,8 +33,10 @@ gate passes.  Stages, in order:
 4. **Re-plot** (only when the bundle no longer binds the current routed
    project files, or with ``--force-replot``): a fresh ``kct export`` supplies
    ``gerbers/gerbers.zip`` (re-zipped deterministically), ``images/*`` and the
-   report; ``kicad-cli`` re-plots the assembly PDFs; ``kct render`` the
-   board renders.  Also re-written: the saved-fill native DRC report,
+   report; ``kicad-cli`` re-plots the assembly PDFs from the routed PCB and
+   the schematic PDF from the published schematic (Issue #7675: a title-block
+   edit left a stale ``schematic.pdf`` in the bundle, because only copper
+   artifacts were re-plotted); ``kct render`` the board renders.  Also re-written: the saved-fill native DRC report,
    ``fill-consistency.json``, ``refill-stability.json`` and the ``kct check``
    report.  The fresh export's CPL must equal the committed one, or differ only in
    ``Mid X``/``Mid Y`` by matching the routed PCB's Gerber/drill frame (#7059,
@@ -113,6 +115,10 @@ class BundleConfig:
         ("assembly-front.pdf", ("F.Cu", "F.SilkS", "Edge.Cuts")),
         ("assembly-back.pdf", ("B.Cu", "B.SilkS", "Edge.Cuts")),
     )
+    #: Bundle-relative schematic PDFs re-plotted from ``BoardConfig.schematic``
+    #: (Issue #7675).  A bundle that ships a ``schematic.pdf`` must list it here,
+    #: or a schematic edit re-pins the old drawing as ready.
+    schematic_pdfs: tuple[str, ...] = ("schematic.pdf",)
     #: Board-relative render directory re-plotted by ``kct render`` (or None).
     renders: str | None = "output/renders"
     #: Board-relative copies of the saved-fill native DRC report.  Never a path in
@@ -149,6 +155,7 @@ BUNDLES: dict[str, BundleConfig] = {
         manufacturer="jlcpcb-tier1",
         export_members=(),
         assembly_pdfs=(),
+        schematic_pdfs=(),
         renders=None,
         parity_drc_reports=(
             "output/readiness/native-drc.json",
@@ -545,8 +552,8 @@ def check_fresh_cpl(committed: bytes, fresh: bytes, routed_pcb: Path) -> None:
 
 
 def stage_replot(staged: Path, cfg: rr.BoardConfig, bundle: BundleConfig) -> list[str]:
-    """Re-plot every artifact drawn from the routed PCB's copper."""
-    from kicad_tools.cli.readiness_cmd import _export_assembly_pdf
+    """Re-plot every artifact drawn from the routed PCB's copper or the schematic."""
+    from kicad_tools.cli.readiness_cmd import _export_assembly_pdf, _export_schematic_pdf
     from kicad_tools.cli.render_cmd import _render_pcb
     from kicad_tools.cli.runner import find_kicad_cli
 
@@ -606,6 +613,13 @@ def stage_replot(staged: Path, cfg: rr.BoardConfig, bundle: BundleConfig) -> lis
                 written.append(f"output/manufacturing/{name}")
         for name, layers in bundle.assembly_pdfs:
             result = _export_assembly_pdf(routed, layers, mfg / name)
+            if not result.ok:
+                raise GateFailure(f"{name}: {result.detail}")
+            written.append(f"output/manufacturing/{name}")
+        for name in bundle.schematic_pdfs:
+            if not (mfg / name).is_file():
+                raise GateFailure(f"{name}: not part of the committed bundle; refusing to add it")
+            result = _export_schematic_pdf(staged / cfg.schematic, mfg / name)
             if not result.ok:
                 raise GateFailure(f"{name}: {result.detail}")
             written.append(f"output/manufacturing/{name}")
