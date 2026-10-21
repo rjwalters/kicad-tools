@@ -70,6 +70,7 @@ CHEAP_JOBS=(
   cpp-build-check
   kicad-cli-smoke
   routed-pcb-drc-check
+  model-coverage-report
 )
 
 LONG_JOBS=(
@@ -88,9 +89,11 @@ LONG_JOBS=(
 
 # Advisory in CI: these jobs run on every PR but their failure does not
 # block the merge button (see the branch-protection notes at ci.yml's
-# diffpair-routing-regression / matchgroup-routing-regression jobs).
+# diffpair-routing-regression / matchgroup-routing-regression jobs; the
+# model-coverage-report job is `continue-on-error`, issue #7682).
 # Mirrored here: they report FAIL but never flip the gate's exit code.
 ADVISORY_JOBS=(
+  model-coverage-report
   diffpair-routing-regression
   matchgroup-routing-regression
 )
@@ -216,6 +219,15 @@ job_routed_pcb_drc_check() {
   echo "Modified routed PCBs:"
   printf '  %s\n' "${files[@]}"
   uv run python scripts/ci/check_routed_drc.py "${files[@]}"
+}
+
+# Issue #7682: a REPORT, never a gate (`continue-on-error` in CI, advisory
+# here).  Writes the fleet 3D model coverage JSON to a scratch path so a local
+# run never leaves a file in the tree.
+job_model_coverage_report() {
+  local out
+  out="$(mktemp -t model-coverage-XXXXXX).json"
+  uv run python scripts/ci/model_coverage_report.py -o "$out"
 }
 
 job_diffpair_routing_regression() {

@@ -952,6 +952,13 @@ def _add_check_parser(subparsers) -> None:
     check_parser.add_argument("--errors-only", action="store_true")
     check_parser.add_argument("--strict", action="store_true", help="Exit with code 2 on warnings")
     check_parser.add_argument(
+        "--3d-models",
+        dest="models_3d",
+        action="store_true",
+        help="Also run the opt-in model_coverage category (issue #7682; "
+        "off by default until #7683/#7685 because it depends on the host's 3D library)",
+    )
+    check_parser.add_argument(
         "--strict-connectivity",
         dest="strict_connectivity",
         action="store_true",
@@ -3234,6 +3241,35 @@ def _add_pcb_parser(subparsers) -> None:
         "--dry-run",
         action="store_true",
         help="Preview changes without modifying the PCB file",
+    )
+
+    # pcb model-audit
+    pcb_model_audit = pcb_subparsers.add_parser(
+        "model-audit",
+        help="Classify every footprint's 3D model coverage",
+        description="Classify every footprint (not just every model ref) as "
+        "resolved, embedded, dangling, no_ref, unresolved_var, hidden_only, "
+        "lcsc_cache_miss, placeholder or exempt, under an explicit resolution "
+        "environment. A report: exits 0 regardless of coverage.",
+    )
+    pcb_model_audit.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_model_audit.add_argument(
+        "--env",
+        choices=["host", "pinned"],
+        default="host",
+        help="Resolution environment: this machine's render env (host) or the "
+        "pinned toolchain image (pinned; no model set yet, so nothing resolves)",
+    )
+    pcb_model_audit.add_argument(
+        "--model-dir",
+        dest="model_dir",
+        help="Resolve every KICADn_3DMODEL_DIR variable against this directory (overrides --env)",
+    )
+    pcb_model_audit.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for results",
     )
 
     # pcb net-audit

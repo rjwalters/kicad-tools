@@ -473,6 +473,9 @@ class DRCChecker:
         # fab-blocking defect.  Explicit entry REQUIRED -- the ``via``
         # prefix fallback would file it under Manufacturing.
         "via_under_body": CATEGORY_ADVISORY,
+        # 3D model coverage (Issue #7682): a documentation/render advisory,
+        # never fab-blocking.
+        "model_coverage": CATEGORY_ADVISORY,
         # Thermal asymmetry / via drill at pad edge (Issue #7220): soldering-
         # yield advisories (tombstoning, PTH barrel fill, via tent wicking),
         # not fab-blocking.  Explicit entries REQUIRED -- unknown ids default

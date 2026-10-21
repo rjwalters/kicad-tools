@@ -27,6 +27,7 @@ CHECK_CATEGORIES = [
     "impedance",
     "isolated_copper",
     "match_group_length_skew",
+    "model_coverage",
     "netclass_clearance_copper",
     "netclass_floor",
     "netlist",
@@ -48,3 +49,23 @@ CHECK_CATEGORIES = [
     "zero_length_segment",
     "zones",
 ]
+
+#: Categories that are NOT in the default ``kct check`` set (issue #7682) and
+#: run only when asked for: ``--only <category>`` or, for ``model_coverage``,
+#: ``kct check --3d-models``.  ``model_coverage`` resolves models against the
+#: *host's* KiCad 3D library, and neither the CI runner nor the pinned
+#: toolchain image ships one yet, so running it by default would make every
+#: verdict built on ``kct check`` -- ``--strict`` exit codes, board gates,
+#: ``kct readiness`` evidence, ``run_drc``/``kct fix-drc`` -- depend on the
+#: machine (CLAUDE.md, #6962).  The single place the deferral lives is
+#: :func:`kicad_tools.cli.check_cmd.run_selected_checks`, so no board's hashed
+#: gate script has to name it.  ``kct render``, ``kct pcb model-audit`` and
+#: ``kct fleet status`` still report coverage.
+#:
+#: Expires with #7683 (a pinned model set) and #7685 (every board at 100% on
+#: it): ``tests/test_model_audit.py`` fails as soon as
+#: ``kicad_tools.pcb.model_audit.PINNED_MODEL_DIR`` is set while this set still
+#: names ``model_coverage``, so the category is made default-on (and board
+#: evidence re-recorded) deliberately rather than the deferral lingering.
+#: Never add a category here to hide a host-independent defect.
+DEFERRED_OPT_IN_CATEGORIES: frozenset[str] = frozenset({"model_coverage"})
