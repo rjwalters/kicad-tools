@@ -282,6 +282,26 @@ def _parse_lvs(lvs_path: Path, slug: str) -> dict:
     }
 
 
+_SCH_TITLE_RE = re.compile(r'\(title_block\s*\(title\s+"((?:[^"\\]|\\.)*)"')
+
+
+def _read_schematic_title(output_dir: Path, slug: str) -> str | None:
+    """Return the human title from the schematic title block, if any (#7666).
+
+    The PCB file stem (``simple_led_routed``) is not a presentable heading; the
+    schematic's ``(title_block (title ...))`` is.
+    """
+    for sch in sorted(output_dir.glob("*.kicad_sch")):
+        try:
+            match = _SCH_TITLE_RE.search(sch.read_text(errors="replace"))
+        except OSError as exc:
+            logger.warning("board %s: could not read %s (%s)", slug, sch.name, exc)
+            continue
+        if match and match.group(1).strip():
+            return match.group(1).replace('\\"', '"').strip()
+    return None
+
+
 def _parse_manifest(manifest_path: Path, slug: str) -> dict:
     """Parse identity fields from ``manifest.json`` (board name + timestamp)."""
     out: dict = {}
@@ -586,6 +606,9 @@ def extract_board_metrics(board_dir: Path) -> dict:
     output_dir = board_dir / "output"
     mfg_dir = output_dir / "manufacturing"
     metrics["readiness"] = read_readiness(board_dir)
+    title = _read_schematic_title(output_dir, slug)
+    if title:
+        metrics["title"] = title
 
     if not mfg_dir.is_dir():
         # Development metadata is independent of manufacturing export.
