@@ -11508,6 +11508,7 @@ def route_with_layer_escalation(
 
     best_result: LayerEscalationResult | None = None
     successful_result: LayerEscalationResult | None = None
+    last_load_error: Exception | None = None
 
     # Issue #2412: Track previous attempt metrics for early termination
     prev_nets_routed: int | None = None
@@ -11758,6 +11759,7 @@ def route_with_layer_escalation(
                     per_net_iterations=getattr(args, "per_net_iterations", 0) or 0,
                 )
         except Exception as e:
+            last_load_error = e
             if not quiet:
                 print(f"  Error loading PCB: {e}")
             continue
@@ -12260,7 +12262,7 @@ def route_with_layer_escalation(
                 )
     else:
         if not quiet:
-            print("Error: No routing attempts succeeded")
+            _print_no_attempts_succeeded(last_load_error)
             if last_power_stall_nets:
                 _print_power_stall_suggestions(
                     last_power_stall_nets,
@@ -12641,6 +12643,19 @@ def route_with_layer_escalation(
     return 1
 
 
+def _print_no_attempts_succeeded(last_load_error: Exception | None) -> None:
+    """Print the terminal "no attempts" error, naming the load failure behind it.
+
+    Issue #7711: every attempt can fail while loading the PCB/project (e.g. an
+    unsupported ``net_settings`` schema).  The per-attempt message scrolls
+    past, so repeat the underlying cause at the point of failure instead of
+    leaving only the generic line.
+    """
+    print("Error: No routing attempts succeeded")
+    if last_load_error is not None:
+        print(f"  Cause (every attempt failed to load the project): {last_load_error}")
+
+
 def route_with_rule_relaxation(
     pcb_path: Path,
     output_path: Path,
@@ -12786,6 +12801,7 @@ def route_with_rule_relaxation(
 
     best_result: RuleRelaxationResult | None = None
     successful_result: RuleRelaxationResult | None = None
+    last_load_error: Exception | None = None
 
     # Register signal handlers so SIGTERM/SIGINT save the best attempt so far
     _interrupt_state["output_path"] = output_path
@@ -12938,6 +12954,7 @@ def route_with_rule_relaxation(
                     stub_terminals=getattr(args, "_stub_terminals", None),
                 )
         except Exception as e:
+            last_load_error = e
             if not quiet:
                 print(f"  Error loading PCB: {e}")
             continue
@@ -13220,7 +13237,7 @@ def route_with_rule_relaxation(
             )
     else:
         if not quiet:
-            print("Error: No routing attempts succeeded")
+            _print_no_attempts_succeeded(last_load_error)
         return 1
 
     # Issue #4151: engage placement-routing feedback when --placement-feedback
@@ -15228,6 +15245,7 @@ def route_with_combined_escalation(
 
     best_result: RuleRelaxationResult | None = None
     successful_result: RuleRelaxationResult | None = None
+    last_load_error: Exception | None = None
     results_matrix: dict[tuple[int, int], float] = {}  # (tier, layers) -> completion
 
     # Register signal handlers so SIGTERM/SIGINT save the best attempt so far
@@ -15425,6 +15443,7 @@ def route_with_combined_escalation(
                         stub_terminals=getattr(args, "_stub_terminals", None),
                     )
             except Exception as e:
+                last_load_error = e
                 if not quiet:
                     print(f"  Error loading PCB: {e}")
                 results_matrix[(tier.tier, layer_count)] = 0.0
@@ -15747,7 +15766,7 @@ def route_with_combined_escalation(
             )
     else:
         if not quiet:
-            print("Error: No routing attempts succeeded")
+            _print_no_attempts_succeeded(last_load_error)
         return 1
 
     # Issue #4151: engage placement-routing feedback when --placement-feedback
