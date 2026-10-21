@@ -445,6 +445,11 @@ def _shift_centerline_segment(points: list[Pt], i: int, delta: float) -> list[Pt
 _END_REVERSAL_COS = -1.0 + 1e-6
 
 
+# Issue #7729: extra leg-to-leg separation (mm) emitted over the pair pitch to
+# absorb the 4-decimal rounding of the board file (2 vertices x ~0.07 um).
+_PAIR_SERIALIZATION_MARGIN_MM: float = 2e-4
+
+
 def _unit_step(a: Pt, b: Pt) -> Pt | None:
     """Unit vector ``a -> b``, or ``None`` for a zero-length step."""
     length = dist(a, b)
@@ -3331,8 +3336,14 @@ class LatticePathfinder:
                 for a, b in zip(center, center[1:], strict=False):
                     if not self._escape_boundary.segment_clear(a, b, trace_w / 2.0 + half_pitch):
                         return None, "pair-leg-blocked"
-            plus = offset_polyline(center, +half_pitch)
-            minus = offset_polyline(center, -half_pitch)
+            # Issue #7729: the board file stores 4 decimals, so a vertex can
+            # move ~0.07 um and a leg pair ~0.14 um closer than the pitch
+            # checked below (whose slop already spends the 1e-4 mm that
+            # ``kct check`` allows).  Emit the legs a hair wider so the
+            # shipped gap still meets ``pair_gap`` after serialization.
+            emit_half = half_pitch + _PAIR_SERIALIZATION_MARGIN_MM / 2.0
+            plus = offset_polyline(center, +emit_half)
+            minus = offset_polyline(center, -emit_half)
             if plus is None or minus is None:
                 return None, "pair-offset-degenerate"
             assigned = assign_polarity(plus, minus, pc.pad_p_a, pc.pad_n_a, pc.pad_p_b, pc.pad_n_b)

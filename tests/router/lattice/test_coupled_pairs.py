@@ -225,14 +225,17 @@ def test_pair_routes_coupled_at_exact_pitch_with_correct_polarity() -> None:
     for pad in (pc.pad_p_a, pc.pad_p_b):
         reach = pad.width / 2.0 - _HS.trace_width / 2.0 + 1e-6
         assert any(abs(x - pad.x) <= reach and abs(y - pad.y) <= reach for x, y in ends_p)
-    # The coupled body sits at exactly the pitch: the straight mid-corridor
-    # segments of the two legs are pitch apart.
+    # The coupled body sits at the pitch plus the serialization margin
+    # (issue #7729): the straight mid-corridor segments of the two legs are
+    # that far apart, so the 4-decimal round-trip never lands under the pitch.
+    from kicad_tools.router.lattice.pathfinder import _PAIR_SERIALIZATION_MARGIN_MM
+
     min_sep = min(
         seg_seg_dist((sp.x1, sp.y1), (sp.x2, sp.y2), (sn.x1, sn.y1), (sn.x2, sn.y2))
         for sp in route_p.segments
         for sn in route_n.segments
     )
-    assert min_sep == pytest.approx(_PITCH, abs=1e-4)
+    assert min_sep == pytest.approx(_PITCH + _PAIR_SERIALIZATION_MARGIN_MM, abs=1e-4)
     # Emitted at the CLASS trace width (the pitch math depends on it).
     assert all(s.width == pytest.approx(_HS.trace_width) for s in route_p.segments)
     # Intra-pair clearance validator (engine-agnostic reuse) finds nothing.
