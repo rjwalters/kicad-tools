@@ -11,6 +11,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest
+
 ROUTE_CMD = Path(__file__).parent.parent / "src" / "kicad_tools" / "cli" / "route_cmd.py"
 
 #: attribute / getattr key -> the only functions allowed to read it
@@ -77,3 +79,53 @@ def test_every_tail_calls_shared_post_save_and_verdict_helpers() -> None:
     single = calls.get("_run_main_impl", set())
     assert "_run_post_save_stitching" in single
     assert "_export_failed_nets_if_requested" in single
+
+
+# --- Entry-path warnings (#7657) ---------------------------------------------
+#
+# ``--progressive-clearance`` / ``--bus-routing`` are honoured only by the
+# single-attempt path.  The default ``--auto-layers`` entry is covered by
+# ``test_route_entry_path_goldens.py``; these cover the two wrapper entries,
+# ``--auto-pcb-size`` and ``--auto-mfr-tier``.  The wrappers are stubbed: only
+# the warning raised before dispatch is under test, not any routing.
+
+FIXTURE_PCB = Path(__file__).parent / "fixtures" / "route_entry_paths" / "routable.kicad_pcb"
+
+
+def _run_entry(wrapper: str, entry_flag: str, extra: list[str], tmp_path: Path, capsys) -> str:
+    from unittest import mock
+
+    from kicad_tools.cli import route_cmd
+
+    argv = [str(FIXTURE_PCB), "-o", str(tmp_path / "out.kicad_pcb"), "--quiet", entry_flag, *extra]
+    with mock.patch.object(route_cmd, wrapper, return_value=0) as stub:
+        route_cmd.main(argv)
+    stub.assert_called_once()
+    return capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("wrapper", "entry_flag"),
+    [
+        ("route_with_size_escalation", "--auto-pcb-size"),
+        ("route_with_mfr_tier_escalation", "--auto-mfr-tier"),
+    ],
+)
+def test_wrapper_entry_warns_once_for_strategy_flags(wrapper, entry_flag, tmp_path, capsys) -> None:
+    err = _run_entry(
+        wrapper, entry_flag, ["--progressive-clearance", "--bus-routing"], tmp_path, capsys
+    )
+    assert err.count("ignored: the escalation ladders") == 1
+    assert "--progressive-clearance, --bus-routing ignored" in err
+
+
+@pytest.mark.parametrize(
+    ("wrapper", "entry_flag"),
+    [
+        ("route_with_size_escalation", "--auto-pcb-size"),
+        ("route_with_mfr_tier_escalation", "--auto-mfr-tier"),
+    ],
+)
+def test_wrapper_entry_silent_without_strategy_flags(wrapper, entry_flag, tmp_path, capsys) -> None:
+    err = _run_entry(wrapper, entry_flag, [], tmp_path, capsys)
+    assert "ignored: the escalation ladders" not in err
