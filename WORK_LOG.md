@@ -15,6 +15,11 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-21
 
+- **PR #7475**: fix(router): rank gateway combos that leave a neighbour's escape via site open first
+- **Issue #7491** (closed): router: C++ search finds no USB3_RX1- path on board 06 once USB2_D routes coupled (blocks #7401)
+- **Issue #7463** (closed): board 03 arm C: VBUS U2.5 left unconnected (keepout-constrained escape next to USB_D U2 pads); last gate before re-deriving board 03 under #7093
+- **Issue #7377** (closed): route: collapse the 4 copy-pasted post-route tails into one pipeline -- --length-match-diffpairs, --stitch-power-planes, --progressive-clearance, --bus-routing silently no-op on the default --auto-layers path
+- **PR #7644**: refactor(route): build route_all_negotiated kwargs once for all seven call sites
 - **PR #7643**: fix(schema): resolve sub-sheets against the containing sheet's folder (#7614)
 - **Issue #7614** (closed): `schema.hierarchy.build_hierarchy` resolves sub-sheet files against the process working directory, then the root's directory, never the parent sheet's directory (wrong sheet read, nested sheets dropped silently)
 
