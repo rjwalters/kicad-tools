@@ -25,12 +25,13 @@ _None._
 
 - **#6858**: router: coupled pre-pass should keep the better of the joint-search and pose-centreline candidates (compare-and-keep; unblocks #6835)
 - **#7269**: board 07 MIPI_DAT0: recover 0.038 mm skew lost to compare-and-keep (blocks #6858)
+- **#7738**: main: test_board_00_simple_led::test_no_connectivity_errors fails
 
 ## Ready
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-- **#7685**: Bring every demo board to 100% 3D model coverage on the pinned model set
+_None._
 
 ## In Progress
 
@@ -38,22 +39,25 @@ Issues currently being built (`loom:building`).
 
 - **#7521**: Diff-pair skew compensation per best practice (Q16): exclude tuning bumps from uncoupled metric, emit KiCad tuning patterns, geometry gates, sourced per-class skew limits
 - **#7612**: Board 07 fixture: 4 diff pairs fail skew with no_suitable_segment (TMDS_D2, MIPI_DAT1, MIPI_DAT0, MIPI_CLK)
-- **#7689**: Site and readiness renders use the pinned or embedded model set and fail on incomplete 3D coverage
+- **#7685**: Bring every demo board to 100% 3D model coverage on the pinned model set
 - **#7721**: router: turn-aware lattice A* — price signed turning so diff pairs avoid same-direction U-turns (source-side skew, #7649)
-- **#7729**: 06rf lattice bench: kct check reports 12 diffpair_clearance_intra on the seed-42 route (revision expected at most 4)
+- **#7738**: main: test_board_00_simple_led::test_no_connectivity_errors fails
+- **#7740**: board generators report Overall: PASS and exit 0 when the manufacturing-bundle export fails
+- **#7741**: regenerated BOM LCSC column depends on the host (empty when the LCSC API returns 403), unlike the committed bundle
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#7730**: fix: emit lattice pair legs wider than pitch to survive 4-decimal serialization
-- **#7732**: feat: gate kct render and deploy-site on 3D model coverage
+- **#7739**: test(board00): assert the manufacturing bundle exists before kct check
+- **#7742**: feat: add kct export --spec and pass project.kct from board generators
+- **#7744**: fix: gate board recipes on manufacturing export result
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-_None._
+- **#7736**: feat(check): default-on model_coverage with full demo-board 3D coverage
 
 ## Proposed
 
@@ -87,11 +91,12 @@ Issues carrying `loom:curated`.
 - **#7650**: board 03: recover USB_D common-run and MCU-launch margin given up to route VBUS U2.5 (#7475) *(curated)*
 - **#7669**: bench: re-run PocketBeagle and STRF (zero-touch + tuned) after the #4945/#5302 fixes and add a dispatchable external-bench workflow *(curated)*
 - **#7685**: Bring every demo board to 100% 3D model coverage on the pinned model set *(curated)*
-- **#7689**: Site and readiness renders use the pinned or embedded model set and fail on incomplete 3D coverage *(curated)*
 - **#7690**: Epic: full 3D model coverage, from demo boards to the JLCPCB catalog, reproducible on the pinned toolchain *(curated)*
 - **#7716**: router: Python-fallback A* inside relief rescue is load-dependent on board 07 (1,024 expansions in ~420 s) *(curated)*
 - **#7721**: router: turn-aware lattice A* — price signed turning so diff pairs avoid same-direction U-turns (source-side skew, #7649) *(curated)*
-- **#7729**: 06rf lattice bench: kct check reports 12 diffpair_clearance_intra on the seed-42 route (revision expected at most 4) *(curated)*
+- **#7738**: main: test_board_00_simple_led::test_no_connectivity_errors fails *(curated)*
+- **#7740**: board generators report Overall: PASS and exit 0 when the manufacturing-bundle export fails *(curated)*
+- **#7741**: regenerated BOM LCSC column depends on the host (empty when the LCSC API returns 403), unlike the committed bundle *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -117,12 +122,12 @@ Issues carrying `loom:curated`.
 |------|-------|
 | Operator merge-risk holds | 0 |
 | Very important | 0 |
-| Important | 2 |
-| Ready (`loom:issue`) | 1 |
-| In Progress (`loom:building`) | 5 |
-| PRs awaiting review | 2 |
-| Approved PRs awaiting merge | 0 |
-| Curated | 33 |
+| Important | 3 |
+| Ready (`loom:issue`) | 0 |
+| In Progress (`loom:building`) | 7 |
+| PRs awaiting review | 3 |
+| Approved PRs awaiting merge | 1 |
+| Curated | 34 |
 | Architect / Hermit proposals | 5 |
 | Active epics | 7 |
 <!-- guide:plan-body:end -->
