@@ -15,6 +15,15 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-21
 
+- **PR #7701**: fix: read only top-level uuid when loading schematic hierarchy
+- **Issue #7699** (closed): schema: root sheet UUID in HierarchyBuilder._load_schematic uses recursive find("uuid"); a root without a top-level uuid picks up a nested one
+- **PR #7698**: ci: add dispatch-only external benchmark re-run workflow
+- **PR #7671**: ci: run site test/check/build/check-links on site-relevant PRs
+- **Issue #7665** (closed): ci: build and test site/ in CI: site-only PRs and Dependabot bumps merge without running vitest, astro check or the build
+- **PR #7680**: fix(readiness): stop fingerprinting board renders as evidence
+- **Issue #7678** (closed): site: deploy-site.sh re-renders committed board images, invalidating readiness evidence: 5 ship-ready boards publish as "Readiness unverified"
+- **PR #7661**: fix(schema): give every placement of a repeated sheet its full subtree (#7616)
+- **Issue #7616** (closed): Schematic BOM (`extract_bom`, `kct bom`) lists the first placement's references for every placement of a repeated sheet, so the other placements' parts are missing; `build_hierarchy` also drops the subtree under a repeated sheet
 - **PR #7672**: ci: add warn-only weekly live-site drift check
 - **Issue #7664** (closed): site: detect when kicad-tools.org falls behind main (weekly drift check + release-checklist step)
 - **PR #7677**: fix: show schematic title in gallery headings and flag stale board.json

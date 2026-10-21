@@ -134,6 +134,27 @@ the same `--output-dir`: `<slug>.<protocol>.json` and
 `report.<protocol>.md` (e.g. `strf.tuned.json` / `report.tuned.md` vs.
 `strf.zero-touch.json` / `report.zero-touch.md`).
 
+## Re-running the published cases in CI (issue #7669)
+
+`.github/workflows/external-bench.yml` is a `workflow_dispatch`-only workflow
+that re-runs the four cases the site's `/benchmarks/` page expects
+(`pocketbeagle`, `beagleconnect_freedom`, `strf` zero-touch; `strf --tuned`)
+with `--seed 42`, inside the same pinned KiCad image as `ci.yml`, after
+`kct build-native` and a `kct build-native --check` that must report the C++
+backend (the run fails rather than record a Python-fallback timing).
+
+```bash
+gh workflow run external-bench.yml --ref <branch>
+```
+
+It never commits. It uploads an `external-bench-<run id>` artifact with the
+per-case JSON + markdown reports, `native-check.txt`, and `run-provenance.json`
+(tool commit SHA, image digest, KiCad/Python versions, seed). A routing
+failure still yields an uploaded report: results are recorded as measured,
+regressions included. To publish, download the artifact and commit it as a new
+dated directory under `results/` (leaving older collections untouched) with a
+`README.md`, then add a row to the `results/README.md` index.
+
 ## PCBWorld suite (`--suite pcbworld`, issue #6331)
 
 PCBWorld's D3 is a *generated* corpus: PCBWorld's own prep code converts
