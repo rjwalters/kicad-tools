@@ -3887,6 +3887,7 @@ def legacy_main() -> int:
             route_ok=route_success,
             route_allowance=0,
             lvs_ok=None,
+            export_ok=mfg_success,
             supplemental_drc_ok=drc_success,
             supplemental_reason=(
                 "kct check --drc-only reported error-level DRC findings (see DRC output above)"
@@ -3908,11 +3909,6 @@ def legacy_main() -> int:
         print(f"  Zones: {zones_created} zone(s) created, {zones_filled} filled")
         for line in gate.summary_lines():
             print(line)
-        # #3912: mfg_success reflects whether `kct export` wrote a bundle
-        # (exit 0), NOT whether the board is DRC-clean.  Board DRC status is
-        # reported separately above ("DRC: ...").  Label this line "written"
-        # to avoid implying the board passed DRC.
-        print(f"  Manufacturing bundle: {'WRITTEN' if mfg_success else 'FAILED'}")
         print("\nComponent summary:")
         print("  Power input: J1, F1, D1, C1-C2")
         print("  Buck (24V->5V): U1, L1, D2, C3-C4")

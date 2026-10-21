@@ -1181,6 +1181,7 @@ def main() -> int:
             route_ok=route_success,
             route_allowance=0,
             lvs_ok=lvs_success,
+            export_ok=mfg_success,
             supplemental_drc_ok=drc_success,
             supplemental_reason=(
                 "kct check reported error-level DRC findings (see DRC output above)"
@@ -1201,11 +1202,6 @@ def main() -> int:
         print(f"  ERC: {'PASS' if erc_success else 'FAIL'}")
         for line in gate.summary_lines():
             print(line)
-        # #3912: mfg_success means ``kct export`` WROTE a bundle (exit 0),
-        # NOT that the board is DRC-clean -- board cleanliness is the
-        # ``DRC``/``Overall`` verdict above.  Label "WRITTEN" so PASS is
-        # never mistaken for a DRC pass.
-        print(f"  MFG bundle: {'WRITTEN' if mfg_success else 'FAILED'}")
         print("\nCircuit description:")
         print("  - J1: 2-pin power input (VCC, GND)")
         print("  - R1: 330 ohm current limiter")
