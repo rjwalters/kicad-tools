@@ -6,9 +6,15 @@ database.  This module resolves a footprint whose only usable identity is a
 C-number to a cached ``.step`` file, fetching it on demand from EasyEDA when a
 committed per-board sidecar maps its ``lib_id`` to a C-number.
 
-**License posture.**  EasyEDA/LCSC STEP bodies are design-use-oriented and are
-**not** explicitly redistributable, so the fetched models are cached locally
-and never committed to the repo.  Committed ``.kicad_pcb`` files carry only a
+**License posture (operator ruling Q44, issue #7686).**  EasyEDA/LCSC STEP
+bodies are not redistributable and the EasyEDA Terms forbid automated access
+without written permission.  Fetching is therefore **per-user, opt-in, at use
+time only**, on the user's own machine.  Fetched models are cached locally and
+**never** committed to the repo, shipped in a wheel or package, or embedded in
+a board, manufacturing package or site render.  Every cache entry carries a
+``source=lcsc`` metadata record (``C<n>.meta.json``) so export/embedding can
+exclude it, and ``tests/test_lcsc_no_commit_guard.py`` fails if a body from the
+cache is ever tracked under ``boards/`` or ``src/``.  Committed ``.kicad_pcb`` files carry only a
 portable path-variable ``(model "${KCT_LCSC_3D_DIR}/C#####.step" ...)`` ref
 into that cache, resolved at render time (mirroring the
 ``${KICADn_3DMODEL_DIR}`` precedent).
@@ -44,20 +50,31 @@ never fails for want of a body, and CI never needs network.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
 import re
+import sys
+import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 __all__ = [
     "DEFAULT_CACHE_ENV_VAR",
     "LCSC_MODEL_PATH_VAR",
+    "LcscCacheMeta",
     "LcscModelEntry",
+    "TERMS_NOTICE",
+    "check_cache_pin",
     "fetch_enabled",
+    "read_cache_meta",
+    "reset_fetch_budget",
+    "sha256_hex",
     "load_lcsc_mapping",
     "lcsc_cache_dir",
     "resolve_lcsc_step",
@@ -77,6 +94,27 @@ LCSC_MODEL_PATH_VAR = "${KCT_LCSC_3D_DIR}"
 
 # Env var that opts fetch-on-cache-miss in.  Absent/false => cache-only.
 FETCH_ENV_VAR = "KCT_LCSC_FETCH"
+
+# Per-run fetch cap and rate limit (issue #7686).  A "run" is one process; the
+# budget is shared across every ``resolve_lcsc_step`` call in it.
+MAX_FETCHES_ENV_VAR = "KCT_LCSC_MAX_FETCHES"
+FETCH_INTERVAL_ENV_VAR = "KCT_LCSC_FETCH_INTERVAL"
+DEFAULT_MAX_FETCHES = 25
+DEFAULT_FETCH_INTERVAL_S = 1.0
+
+#: ``source`` value recorded in every cache metadata file.
+CACHE_SOURCE = "lcsc"
+
+#: Shown once, to the user, before the first fetch in a cache directory.
+TERMS_NOTICE = (
+    "LCSC/EasyEDA 3D models are fetched from EasyEDA on your own machine, at your "
+    "request. The EasyEDA Terms (https://easyeda.com/legal) grant no redistribution "
+    "right and restrict automated downloads except as authorized by EasyEDA in "
+    "writing. Fetched models stay in your local cache (%s); never commit them, ship "
+    "them in a package, or embed them in a board or manufacturing bundle. "
+    "You are responsible for complying with those Terms."
+)
+_TERMS_MARKER = ".terms-notice-shown"
 
 # EasyEDA API surface (two plain HTTP GETs).  Endpoint URLs mirror
 # ``easyeda2kicad``'s ``easyeda/easyeda_api.py`` on ``master``.  EasyEDA
@@ -163,12 +201,19 @@ class LcscModelEntry:
     lcsc: str
     rotate: Triple | None = None
     offset: Triple | None = None
+    sha256: str | None = None
+    """Pinned sha256 (lowercase hex) of the cached STEP body, or ``None``.
+
+    When set, a cache file whose digest differs is reported as
+    ``lcsc_content_changed`` and is **not** used (issue #7686).
+    """
 
 
 # Keys accepted in the sidecar's object form.  Anything else is a build error:
 # a typo'd ``"rotation"`` must not degrade to a silent, green no-op -- that is
 # precisely the failure mode the override mechanism exists to prevent.
-_ENTRY_KEYS = frozenset({"lcsc", "rotate", "offset"})
+_ENTRY_KEYS = frozenset({"lcsc", "rotate", "offset", "sha256"})
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _parse_triple(path: Path, lib_id: str, field_name: str, value: object) -> Triple:
@@ -202,6 +247,7 @@ def _parse_entry(path: Path, lib_id: str, value: object) -> LcscModelEntry:
         c_number = value
         rotate: Triple | None = None
         offset: Triple | None = None
+        sha256: str | None = None
     elif isinstance(value, dict):
         unknown = sorted(set(value) - _ENTRY_KEYS)
         if unknown:
@@ -222,6 +268,15 @@ def _parse_entry(path: Path, lib_id: str, value: object) -> LcscModelEntry:
         offset = (
             _parse_triple(path, lib_id, "offset", value["offset"]) if "offset" in value else None
         )
+        sha256 = None
+        if "sha256" in value:
+            raw_sha = value["sha256"]
+            if not isinstance(raw_sha, str) or not _SHA256_RE.match(raw_sha.lower()):
+                raise ValueError(
+                    f"LCSC sidecar {path}: 'sha256' for {lib_id!r} must be a 64-digit hex "
+                    f"string, got {raw_sha!r}"
+                )
+            sha256 = raw_sha.lower()
     else:
         raise ValueError(
             f"LCSC sidecar {path}: entry for {lib_id!r} must be a string C-number or an "
@@ -236,7 +291,7 @@ def _parse_entry(path: Path, lib_id: str, value: object) -> LcscModelEntry:
             f"LCSC sidecar {path}: invalid C-number {c_number!r} for {lib_id!r} "
             "(expected 'C' followed by digits, e.g. 'C50950')"
         )
-    return LcscModelEntry(lcsc=c_number, rotate=rotate, offset=offset)
+    return LcscModelEntry(lcsc=c_number, rotate=rotate, offset=offset, sha256=sha256)
 
 
 def load_lcsc_mapping(sidecar_path: Path | str) -> dict[str, LcscModelEntry]:
@@ -250,7 +305,11 @@ def load_lcsc_mapping(sidecar_path: Path | str) -> dict[str, LcscModelEntry]:
     * **object** -- ``{"Connector:Part": {"lcsc": "C444929", "rotate": [0, 0,
       90], "offset": [0, 0, 0]}}``, a board-local override of the packaged
       :mod:`kicad_tools.pcb.lcsc_model_transforms` table.  ``rotate`` and
-      ``offset`` are independently optional.
+      ``offset`` are independently optional, as is ``"sha256"`` (a content pin
+      for the cached STEP; a mismatch is reported as ``lcsc_content_changed``).
+
+    The sidecar is an **override only** since issue #7686: C-numbers are
+    resolved from the board BOM first (:mod:`kicad_tools.pcb.lcsc_bom`).
 
     Raises ``ValueError`` on a malformed file (not silently ignored -- a broken
     committed sidecar is a build error, distinct from a runtime network
@@ -344,7 +403,13 @@ def _parse_3d_uuid(component_info: bytes) -> str | None:
 
 
 def _fetch_lcsc_step(lcsc_id: str) -> bytes | None:
-    """Fetch raw STEP bytes for *lcsc_id* from EasyEDA, or ``None`` on failure.
+    """Fetch raw STEP bytes for *lcsc_id* from EasyEDA, or ``None`` on failure."""
+    fetched = _fetch_lcsc_step_ex(lcsc_id)
+    return None if fetched is None else fetched[0]
+
+
+def _fetch_lcsc_step_ex(lcsc_id: str) -> tuple[bytes, str] | None:
+    """Fetch ``(STEP bytes, model uuid)`` for *lcsc_id*, or ``None`` on failure.
 
     Two GETs: component-info (to extract the 3D-model uuid) then the STEP body.
     Never raises -- degrades to ``None`` on any network/parse failure.
@@ -364,7 +429,140 @@ def _fetch_lcsc_step(lcsc_id: str) -> bytes | None:
         return None
     if not step.lstrip().startswith(_STEP_MAGIC):
         return None
-    return step
+    return step, uuid
+
+
+# --------------------------------------------------------------------------
+# Cache metadata, content pinning, fetch budget
+# --------------------------------------------------------------------------
+
+
+def sha256_hex(data: bytes) -> str:
+    """Lowercase hex sha256 of *data*."""
+    return hashlib.sha256(data).hexdigest()
+
+
+@dataclass(frozen=True)
+class LcscCacheMeta:
+    """Metadata recorded next to a cached ``C<n>.step`` (``C<n>.meta.json``)."""
+
+    lcsc: str
+    sha256: str
+    fetch_date: str
+    model_uuid: str | None
+    source: str = CACHE_SOURCE
+
+
+def _meta_path(cache: Path, lcsc_id: str) -> Path:
+    return cache / f"{lcsc_id}.meta.json"
+
+
+def read_cache_meta(lcsc_id: str, cache_dir: Path | None = None) -> LcscCacheMeta | None:
+    """Return the metadata record for *lcsc_id*, or ``None`` if absent/malformed."""
+    if not _is_valid_lcsc_id(lcsc_id):
+        return None
+    cache = cache_dir if cache_dir is not None else lcsc_cache_dir()
+    try:
+        raw = json.loads(_meta_path(cache, lcsc_id).read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    digest = raw.get("sha256")
+    if not isinstance(digest, str) or not _SHA256_RE.match(digest):
+        return None
+    uuid = raw.get("model_uuid")
+    return LcscCacheMeta(
+        lcsc=lcsc_id,
+        sha256=digest,
+        fetch_date=str(raw.get("fetch_date", "")),
+        model_uuid=uuid if isinstance(uuid, str) else None,
+        source=str(raw.get("source", CACHE_SOURCE)),
+    )
+
+
+def check_cache_pin(
+    lcsc_id: str,
+    *,
+    cache_dir: Path | None = None,
+    expected_sha256: str | None = None,
+) -> tuple[bool, str | None]:
+    """Compare the cached STEP's digest against its pin.
+
+    The pin is *expected_sha256* (a sidecar/board pin) when given, else the
+    digest recorded in the cache metadata at fetch time.  Returns
+    ``(ok, message)``: ``ok`` is False -- with a human-readable message -- when
+    the file's current sha256 differs from the pin (``lcsc_content_changed``).
+    A missing file, or no pin at all, is ``(True, None)``.
+    """
+    cache = cache_dir if cache_dir is not None else lcsc_cache_dir()
+    step_path = cache / f"{lcsc_id}.step"
+    try:
+        actual = sha256_hex(step_path.read_bytes())
+    except OSError:
+        return True, None
+    if expected_sha256:
+        pin, origin = expected_sha256.lower(), "pinned sha256"
+    else:
+        meta = read_cache_meta(lcsc_id, cache)
+        if meta is None:
+            return True, None
+        pin, origin = meta.sha256, "cache metadata sha256"
+    if actual == pin:
+        return True, None
+    return False, (
+        f"lcsc_content_changed: {lcsc_id}.step sha256 {actual[:12]}... does not match the "
+        f"{origin} {pin[:12]}... (upstream body changed or cache tampered); not using it"
+    )
+
+
+_fetches_this_run = 0
+_last_fetch_at = 0.0
+
+
+def reset_fetch_budget() -> None:
+    """Reset the per-run fetch counter and rate limiter (tests, long-lived hosts)."""
+    global _fetches_this_run, _last_fetch_at
+    _fetches_this_run = 0
+    _last_fetch_at = 0.0
+
+
+def _max_fetches() -> int:
+    raw = os.environ.get(MAX_FETCHES_ENV_VAR, "").strip()
+    try:
+        return max(0, int(raw)) if raw else DEFAULT_MAX_FETCHES
+    except ValueError:
+        return DEFAULT_MAX_FETCHES
+
+
+def _fetch_interval() -> float:
+    raw = os.environ.get(FETCH_INTERVAL_ENV_VAR, "").strip()
+    try:
+        return max(0.0, float(raw)) if raw else DEFAULT_FETCH_INTERVAL_S
+    except ValueError:
+        return DEFAULT_FETCH_INTERVAL_S
+
+
+def _inside_git_worktree(path: Path) -> bool:
+    """True when *path* or any ancestor holds a ``.git`` entry."""
+    try:
+        resolved = path.expanduser().resolve()
+    except OSError:
+        return False
+    return any((p / ".git").exists() for p in (resolved, *resolved.parents))
+
+
+def _show_terms_notice(cache: Path) -> None:
+    """Print :data:`TERMS_NOTICE` once per cache directory (marker file)."""
+    marker = cache / _TERMS_MARKER
+    if marker.exists():
+        return
+    print(f"Notice: {TERMS_NOTICE % cache}", file=sys.stderr)
+    try:
+        cache.mkdir(parents=True, exist_ok=True)
+        marker.write_text(date.today().isoformat() + "\n")
+    except OSError:
+        pass
 
 
 # --------------------------------------------------------------------------
@@ -378,21 +576,40 @@ def resolve_lcsc_step(
     cache_dir: Path | None = None,
     fetch: bool = False,
     warn: object = None,
+    expected_sha256: str | None = None,
+    on_issue: Callable[[str, str], None] | None = None,
 ) -> Path | None:
     """Return the cached STEP path for *lcsc_id*, fetching on demand if enabled.
 
-    Cache hit -> returns the path with no network call.  Cache miss with
-    fetching enabled -> fetches, writes ``{lcsc_id}.step`` into *cache_dir*, and
-    returns it; a fetch failure warns (via *warn*, a ``callable(str)`` such as a
-    logger) and returns ``None``.  Cache miss with fetching disabled -> returns
-    ``None`` (no network).
+    Cache hit -> returns the path with no network call, unless its sha256 no
+    longer matches its pin (see below).  Cache miss with fetching enabled ->
+    fetches, writes ``{lcsc_id}.step`` plus ``{lcsc_id}.meta.json`` (sha256,
+    fetch date, model uuid, ``source=lcsc``) into *cache_dir*, and returns it;
+    a fetch failure warns (via *warn*, a ``callable(str)`` such as a logger) and
+    returns ``None``.  Cache miss with fetching disabled -> returns ``None`` (no
+    network).
+
+    **Content pinning.**  The cached body is compared with *expected_sha256*
+    (a sidecar/board pin) or, absent that, the digest recorded at fetch time.
+    On a mismatch the body is *not* used: the function returns ``None`` and
+    calls ``on_issue("lcsc_content_changed", message)`` -- a changed upstream
+    body is never silently re-pointed at.
+
+    **Fetch policy (operator ruling Q44).**  Fetching shows the terms notice
+    once per cache directory, honours a per-run cap
+    (``KCT_LCSC_MAX_FETCHES``, default 25) and a minimum interval between
+    requests (``KCT_LCSC_FETCH_INTERVAL``, default 1 s), and refuses to write
+    into a directory inside a git work tree (the cache is never committed).
 
     Args:
         lcsc_id: LCSC part number (e.g. ``"C50950"``).
         cache_dir: Cache directory (default: :func:`lcsc_cache_dir`).
         fetch: When True, fetch on a cache miss; when False, cache-only.
         warn: Optional ``callable(str)`` invoked on a fetch failure.
+        expected_sha256: Optional pin for the cached body.
+        on_issue: Optional ``callable(kind, message)`` for audit-class issues.
     """
+    global _fetches_this_run, _last_fetch_at
     # Defense in depth: even though ``load_lcsc_mapping`` rejects a malformed
     # C-number at the sidecar boundary, never let an unvalidated value reach the
     # filesystem or network here.  The resolver path stays never-raise, so an
@@ -404,17 +621,54 @@ def resolve_lcsc_step(
     cache = cache_dir if cache_dir is not None else lcsc_cache_dir()
     step_path = cache / f"{lcsc_id}.step"
     if step_path.is_file():
+        ok, message = check_cache_pin(lcsc_id, cache_dir=cache, expected_sha256=expected_sha256)
+        if not ok:
+            if on_issue is not None and message is not None:
+                on_issue("lcsc_content_changed", message)
+            if callable(warn) and message is not None:
+                warn(message)
+            return None
         return step_path
     if not fetch:
         return None
-    data = _fetch_lcsc_step(lcsc_id)
-    if data is None:
+    if _inside_git_worktree(cache):
+        if callable(warn):
+            warn(
+                f"LCSC cache directory {cache} is inside a git work tree; refusing to fetch "
+                f"{lcsc_id} (set {DEFAULT_CACHE_ENV_VAR} to a directory outside any repository)"
+            )
+        return None
+    cap = _max_fetches()
+    if _fetches_this_run >= cap:
+        if callable(warn):
+            warn(
+                f"LCSC fetch cap reached ({cap} per run; set {MAX_FETCHES_ENV_VAR} to change): "
+                f"not fetching {lcsc_id}"
+            )
+        return None
+    _show_terms_notice(cache)
+    wait = _last_fetch_at + _fetch_interval() - time.monotonic()
+    if _fetches_this_run and wait > 0:
+        time.sleep(wait)
+    _fetches_this_run += 1
+    _last_fetch_at = time.monotonic()
+    fetched = _fetch_lcsc_step_ex(lcsc_id)
+    if fetched is None:
         if callable(warn):
             warn(f"LCSC 3D model fetch failed for {lcsc_id} (no model inserted)")
         return None
+    data, model_uuid = fetched
+    meta = {
+        "lcsc": lcsc_id,
+        "sha256": sha256_hex(data),
+        "fetch_date": date.today().isoformat(),
+        "model_uuid": model_uuid,
+        "source": CACHE_SOURCE,
+    }
     try:
         cache.mkdir(parents=True, exist_ok=True)
         step_path.write_bytes(data)
+        _meta_path(cache, lcsc_id).write_text(json.dumps(meta, indent=2) + "\n")
     except OSError as e:
         if callable(warn):
             warn(f"LCSC 3D model cache write failed for {lcsc_id}: {e}")

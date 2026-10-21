@@ -700,6 +700,7 @@ def make_library_resolver(
     lcsc_cache_dir: Path | None = None,
     lcsc_log: dict[str, str] | None = None,
     lcsc_transform_log: dict[str, str] | None = None,
+    lcsc_issues: dict[str, str] | None = None,
     lcsc_warn: Callable[[str], None] | None = None,
     allow_dangling: bool = False,
     model_dir: Path | None = None,
@@ -764,6 +765,9 @@ def make_library_resolver(
         lcsc_transform_log: Optional dict populated with ``lib_id ->
             description`` for every LCSC body that received a non-identity
             per-part transform, naming the source of each field.
+        lcsc_issues: Optional dict populated with ``lib_id -> message`` for every
+            LCSC body whose cached sha256 no longer matches its pin
+            (``lcsc_content_changed``); such a body is never used.
         lcsc_warn: Optional ``callable(str)`` invoked on a fetch failure.
         allow_dangling: Skip the existence check and accept a library ref
             whose STEP file is absent (the KLC F9.3 behaviour).  Default off.
@@ -830,11 +834,19 @@ def make_library_resolver(
             sidecar_rotate = None
             sidecar_offset = None
 
+        pinned_sha = entry.sha256 if isinstance(entry, LcscModelEntry) else None
+
+        def _on_issue(kind: str, message: str) -> None:
+            if lcsc_issues is not None and kind == "lcsc_content_changed":
+                lcsc_issues[lib_id] = message
+
         step_path = resolve_lcsc_step(
             lcsc_id,
             cache_dir=lcsc_cache_dir,
             fetch=lcsc_fetch,
             warn=lcsc_warn,
+            expected_sha256=pinned_sha,
+            on_issue=_on_issue,
         )
         if step_path is None:
             # Skip-on-miss: report unresolved rather than emitting a ref to a
@@ -951,6 +963,10 @@ class ModelPatchReport:
     lcsc_transforms: dict[str, str] = field(default_factory=dict)
     """Lib ids whose LCSC body received a non-identity per-part transform
     (``lib_id -> human-readable summary naming each field's source``)."""
+    lcsc_content_changed: dict[str, str] = field(default_factory=dict)
+    """Lib ids whose cached LCSC body no longer matches its sha256 pin
+    (``lib_id -> message``).  Nothing was inserted for them: a changed body is
+    reported, never silently re-pointed at (issue #7686)."""
 
     @property
     def changed(self) -> bool:
@@ -1139,6 +1155,7 @@ def add_model_refs(
     substitution_log: dict[str, str] = {}
     lcsc_log: dict[str, str] = {}
     lcsc_transform_log: dict[str, str] = {}
+    lcsc_issue_log: dict[str, str] = {}
     if resolver is None:
         resolver = make_library_resolver(
             library_paths,
@@ -1151,6 +1168,7 @@ def add_model_refs(
             lcsc_cache_dir=lcsc_cache_dir,
             lcsc_log=lcsc_log,
             lcsc_transform_log=lcsc_transform_log,
+            lcsc_issues=lcsc_issue_log,
             lcsc_warn=lcsc_warn,
             allow_dangling=allow_dangling,
         )
@@ -1168,6 +1186,7 @@ def add_model_refs(
     report.lcsc_transforms = {
         lib_id: desc for lib_id, desc in lcsc_transform_log.items() if lib_id in applied
     }
+    report.lcsc_content_changed = dict(lcsc_issue_log)
     if report.changed and not dry_run:
         dest = Path(output_path) if output_path is not None else pcb_path
         dest.write_text(new_text)

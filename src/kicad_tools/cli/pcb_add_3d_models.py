@@ -137,6 +137,7 @@ def run_add_3d_models(
         "substitution_matches": report.substitution_matches,
         "lcsc_matches": report.lcsc_matches,
         "lcsc_transforms": report.lcsc_transforms,
+        "lcsc_content_changed": report.lcsc_content_changed,
     }
 
     if output_format == "json":
@@ -175,6 +176,10 @@ def run_add_3d_models(
             print("  Per-part LCSC transforms applied:")
             for lib_id, desc in sorted(report.lcsc_transforms.items()):
                 print(f"    {lib_id}: {desc}")
+        if report.lcsc_content_changed:
+            print("  LCSC cached body no longer matches its sha256 pin (lcsc_content_changed):")
+            for lib_id, message in sorted(report.lcsc_content_changed.items()):
+                print(f"    {lib_id}: {message}")
         if report.already_present:
             print(f"  Already had models: {len(report.already_present)}")
         if report.refresh_kept:

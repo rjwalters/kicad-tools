@@ -18,6 +18,9 @@ Classes
 ``hidden_only``      every model on the footprint is hidden
 ``lcsc_cache_miss``  the ref points into the LCSC STEP cache but the file is
                      not cached (``KCT_LCSC_3D_DIR`` / ``C<digits>.step``)
+``lcsc_content_changed``  the ref points at a cached LCSC STEP whose sha256 no
+                     longer matches the digest pinned when it was fetched
+                     (the upstream body changed, or the cache was altered)
 ``placeholder``      the ref resolves, but to a stand-in body (see
                      :data:`PLACEHOLDER_NAME_RE`)
 ``exempt``           no 3D body is expected (see :data:`EXEMPT_ATTRS` and
@@ -72,6 +75,7 @@ CLASSES: tuple[str, ...] = (
     "unresolved_var",
     "hidden_only",
     "lcsc_cache_miss",
+    "lcsc_content_changed",
     "placeholder",
     "exempt",
 )
@@ -304,6 +308,12 @@ def _classify_ref(
     if not path.is_absolute():
         path = pcb_dir / path
     if path.is_file():
+        if _LCSC_FILE.match(base):
+            from kicad_tools.pcb.lcsc_models import check_cache_pin
+
+            ok, message = check_cache_pin(base.rsplit(".", 1)[0].upper(), cache_dir=path.parent)
+            if not ok:
+                return "lcsc_content_changed", str(path), message or "LCSC body changed"
         if PLACEHOLDER_NAME_RE.search(base):
             return "placeholder", str(path), "model is a placeholder body"
         return "resolved", str(path), "model file found"
@@ -335,7 +345,13 @@ def _missing_root(raw: str, variables: Mapping[str, str]) -> str | None:
 
 
 #: Worst-first: which ref decides the class when no ref is covered.
-_GAP_PRIORITY = ("lcsc_cache_miss", "unresolved_var", "dangling", "placeholder")
+_GAP_PRIORITY = (
+    "lcsc_content_changed",
+    "lcsc_cache_miss",
+    "unresolved_var",
+    "dangling",
+    "placeholder",
+)
 
 
 def _is_exempt(lib_id: str, attrs: set[str]) -> bool:

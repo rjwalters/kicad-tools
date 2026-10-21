@@ -3249,7 +3249,7 @@ def _add_pcb_parser(subparsers) -> None:
         help="Classify every footprint's 3D model coverage",
         description="Classify every footprint (not just every model ref) as "
         "resolved, embedded, dangling, no_ref, unresolved_var, hidden_only, "
-        "lcsc_cache_miss, placeholder or exempt, under an explicit resolution "
+        "lcsc_cache_miss, lcsc_content_changed, placeholder or exempt, under an explicit resolution "
         "environment. A report: exits 0 regardless of coverage.",
     )
     pcb_model_audit.add_argument("pcb", help="Path to .kicad_pcb file")
