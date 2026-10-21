@@ -319,13 +319,13 @@ def generate(output: Path, sdram_rotation: int = 0, routing_clearance: float = 0
     output.mkdir(parents=True, exist_ok=True)
     parts = build_parts()
     sch = Schematic(
-        title="Board 07 real SDRAM memory test — DRAFT",
+        title="Board 07 real SDRAM memory test",
         paper="A2",
         date="2026-09-09",
         project_name="sdram_demo",
-        revision="A-draft",
+        revision="A",
     )
-    pcb = PCB.create(width=100, height=80, layers=4, title="SDRAM demo DRAFT")
+    pcb = PCB.create(width=100, height=80, layers=4, title="SDRAM demo")
     # Router loader #4978 only recognizes gr_rect. Preserve exactly the same
     # physical rectangle instead of allowing its silent65x56mm HAT fallback.
     edges = [
