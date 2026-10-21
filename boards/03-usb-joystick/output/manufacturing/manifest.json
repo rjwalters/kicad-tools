@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.24.0",
-  "generated_at": "2026-10-21T06:43:33.750823+00:00",
+  "generated_at": "2026-10-21T07:11:48.661331+00:00",
   "manufacturer": "jlcpcb-tier1",
   "files": {
     "DESIGN_REVIEW.md": {
@@ -173,8 +173,8 @@
       "size": 2192
     },
     "gerbers/gerbers.zip": {
-      "sha256": "2c075b8ab1bddd1f6c20b65436d7ff02997c0cc6651c818f7788f0afb78cd25e",
-      "size": 125183
+      "sha256": "e722e7d141c297f2e775c9ba618f0e9a4069b21daf2a679a085f7dffa86911b2",
+      "size": 125175
     },
     "images/assembly.png": {
       "sha256": "9c04d8d7cf77f5c54253103d16f97f8ef0d15613dba6ee9c4f35a5ef7d68e8c1",
@@ -213,7 +213,7 @@
       "size": 486466
     },
     "kicad_project.zip": {
-      "sha256": "508d54457fe6d5d9a7e74e4cc4a1cde2f039905dd34cbe21eed6a3dc9f9ac46a",
+      "sha256": "a5607bb146ea3527d7f3b1d3aa57e4357ca00cab444c077343f86057915d393d",
       "size": 187241
     },
     "manufacturing-requirements.json": {
@@ -317,8 +317,8 @@
       "size": 4605
     },
     "report.pdf": {
-      "sha256": "1f4ddf6365a2d323eee04ebb8014f3babf145035089daa7d592b61af663f6671",
-      "size": 3139436
+      "sha256": "a9a832a8fb64c69ea2059cd98e199cd6dc2adb9b26a283815cd486d04c82b1bd",
+      "size": 3139430
     },
     "schematic.pdf": {
       "sha256": "6fe021a9ea56eb056b2fc6dc24e3fee47c4f6555c6141a4ad1ec755b51aa0d98",
