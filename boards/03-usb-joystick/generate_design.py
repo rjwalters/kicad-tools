@@ -995,9 +995,11 @@ def export_manufacturing_bundle(routed_path: Path, output_dir: Path) -> bool:
 
     # The editable project must resolve its custom ISP footprint and rules
     # after extraction, without relying on this checkout's library table.
+    # Its ``${KIPRJMOD}/3dshapes`` bodies (issue #7685) travel the same way.
     with zipfile.ZipFile(mfg_dir / "kicad_project.zip", "a", zipfile.ZIP_DEFLATED) as archive:
         additions = [routed_path.with_suffix(".kicad_dru"), output_dir / "fp-lib-table"]
         additions.extend(sorted((output_dir / "footprints").rglob("*.kicad_mod")))
+        additions.extend(sorted((output_dir / "3dshapes").glob("*.wrl")))
         # The exporter already archives the board's sibling .kicad_dru; a
         # second member of the same name is a duplicate file identity that
         # readiness provenance rejects (Issue #6076 regeneration).
