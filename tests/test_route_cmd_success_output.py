@@ -301,7 +301,13 @@ def test_board01_escape_summary_survives_buffering(tmp_path):
     must not match the failure-wording gates.
     """
     out = tmp_path / "board01_escape.kicad_pcb"
-    proc = _route(BOARD_01, out, "--layers", "2", "--verbose", "--no-cache")
+    # Issue #7659: patience now early-stops this plateaued board (overflow 2
+    # held for 2 iterations) before oscillation detection reaches the escape
+    # stage.  This test covers the escape summary's buffering contract, not
+    # the stop policy, so disable patience to keep the escape stage in play.
+    proc = _route(
+        BOARD_01, out, "--layers", "2", "--verbose", "--no-cache", "--early-stop-patience", "0"
+    )
     output = proc.stdout + proc.stderr
 
     assert out.exists(), f"route did not write output:\n{output}"
