@@ -54,7 +54,9 @@ def test_committed_pair_width_equals_net_class_width(pcb, classes, prefix):
 def _zdiff(pcb: PCB, layer: str, width: float, gap: float) -> float:
     stackup = Stackup.from_pcb(pcb)
     cl = CoupledLines(stackup)
-    calc = cl.edge_coupled_microstrip if stackup.is_outer_layer(layer) else cl.edge_coupled_stripline
+    calc = (
+        cl.edge_coupled_microstrip if stackup.is_outer_layer(layer) else cl.edge_coupled_stripline
+    )
     return calc(width, gap, layer).zdiff
 
 

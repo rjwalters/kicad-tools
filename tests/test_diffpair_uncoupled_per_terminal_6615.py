@@ -376,9 +376,10 @@ def test_gather_ignore_defaults_to_courtyard_and_old_sidecars_load() -> None:
 
 COMMITTED = {
     "boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb": {
-        # Issue #6394 / #7713: board 03 re-derived from a fresh lattice route.
+        # Issue #6394 / #7713: board 03 re-derived from a fresh lattice route;
+        # #7256 re-derived the MCU launch at 0.25 mm.
         ("USB_D+", "USB_D-"): 9.3249,
-        ("USB_MCU_D+", "USB_MCU_D-"): 1.0550,
+        ("USB_MCU_D+", "USB_MCU_D-"): 0.9553,
     },
     "boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb": {
         (f"LVDS{i}_P", f"LVDS{i}_N"): 1.5412 for i in (1, 2, 3, 4)
