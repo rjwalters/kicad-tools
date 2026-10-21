@@ -1,0 +1,17 @@
+# Synthetic reduction of an offline plan job edited in consumer repos,
+# plus rjwalters/loom#12402.
+name: claude-bot-deploy-plan
+on:
+  pull_request:
+jobs:
+  plan:
+    name: deploy plan (offline, no credentials)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Render the plan
+        run: ./scripts/render-plan.sh --dry-run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

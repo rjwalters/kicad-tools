@@ -93,8 +93,7 @@ MERGE_PR="$SCRIPTS_DIR/merge-pr.sh"
 # shellcheck source=lib/require-daemon-bin.sh
 source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
 loom_test_require_daemon_bin "$SCRIPTS_DIR" "merge-pr" \
-    "merge-pr worktree-primary" "merge-pr worktree-branch-for" \
-    "merge-pr worktree-find-by-branch"
+    "merge-pr post-merge-cleanup" "merge-pr delete-branch"
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 YELLOW='\033[0;33m'  # retired() below
@@ -128,10 +127,15 @@ echo "Test 1: merge-pr.sh source contains the #4100 local-branch cleanup wiring"
 
 assert_grep "PR_HEAD_SHA=\\\$\\(echo \"\\\$PR_JSON\" \\| jq -r '\\.head\\.sha" "$MERGE_PR" \
     "merge-pr.sh parses PR_HEAD_SHA from the PR JSON"
-assert_grep 'expected_head_sha="\$\{2:-\}"' "$MERGE_PR" \
-    "_maybe_delete_local_branch accepts an optional expected_head_sha second arg"
-assert_grep '_maybe_delete_local_branch "\$PR_BRANCH" "\$PR_HEAD_SHA"' "$MERGE_PR" \
-    "the unified branch-delete call passes PR_HEAD_SHA (reachable outside allow_unmanaged)"
+retired \
+    "_maybe_delete_local_branch accepts an optional expected_head_sha second arg; the unified call passes PR_HEAD_SHA" \
+    "the shell literally contains 'expected_head_sha=\"\${2:-}\"' and '_maybe_delete_local_branch \"\$PR_BRANCH\" \"\$PR_HEAD_SHA\"'" \
+    "#8191 orchestrator slice 1: _maybe_delete_local_branch is gone from merge-pr.sh; the branch delete is the last step of 'merge-pr post-merge-cleanup', which is handed --head-sha" \
+    "the next assertion (the wrapper passes --head-sha \"\${PR_HEAD_SHA:-}\"), the orchestrator's own delete_branch(&i.pr_branch, &i.pr_head_sha) call (post_merge_cleanup.rs), and behavioural cases (a) and (b) below, which prove a tip match force-deletes and a mismatch is kept"
+assert_grep '[-]-head-sha "\$\{PR_HEAD_SHA:-\}"' "$MERGE_PR" \
+    "the post-merge cleanup wrapper hands the merged PR head SHA to the verb (reachable outside allow_unmanaged)"
+assert_grep 'delete_branch\(&i\.pr_branch, &i\.pr_head_sha\)' "$(cd "$SCRIPTS_DIR/../.." && pwd)/loom-daemon/src/merge_pr/post_merge_cleanup.rs" \
+    "the orchestrator's unconditional branch delete passes the merged PR head SHA"
 retired \
     "helper switches to -D (force) when the tip-match safety check passes" \
     "the shell literally contains 'delete_flag=\"-D\"'" \
@@ -143,9 +147,9 @@ refute_grep "success \"Branch '\\\$PR_BRANCH' deleted\"" "$MERGE_PR" \
     "the old ambiguous 'Branch ... deleted' (without Remote/Local) line is gone"
 assert_grep "Would delete local branch '\\\$PR_BRANCH'" "$MERGE_PR" \
     "--dry-run previews the local branch it would delete"
-assert_grep "no-cleanup-worktree.*local branch left in place" "$MERGE_PR" \
+assert_grep "no-cleanup-worktree.*local branch left in place" "$(cd "$SCRIPTS_DIR/../.." && pwd)/loom-daemon/src/merge_pr/post_merge_cleanup.rs" \
     "--no-cleanup-worktree emits an explicit skip message covering the local branch"
-assert_grep "LOOM_PRESERVE_WORKTREE=1.*local branch left in place" "$MERGE_PR" \
+assert_grep "LOOM_PRESERVE_WORKTREE=1.*local branch left in place" "$(cd "$SCRIPTS_DIR/../.." && pwd)/loom-daemon/src/merge_pr/post_merge_cleanup.rs" \
     "LOOM_PRESERVE_WORKTREE=1 emits an explicit skip message covering the local branch"
 retired \
     "checked-out refusal gets a specific message, not the generic unmerged-commits warning" \
@@ -158,44 +162,15 @@ retired \
     "#8191: that refusal is now decided and worded by loom-daemon/src/worktree_cli/branch_delete.rs, reached via 'loom-daemon merge-pr delete-branch'" \
     "branch_delete::tests::shell_delegates_rather_than_reimplementing, plus behavioral case (d) below, which still proves the default branch is refused"
 
-# --- Extract the ACTUAL function body from the live source (no drift) ---
-extract_fn() {
-    local name="$1" file="$2"
-    awk -v fn="$name" '
-      $0 ~ "^"fn"\\(\\) \\{" { grab=1 }
-      grab { print }
-      grab && /^}/ { exit }
-    ' "$file"
-}
-
-# Harness: stub the logging helpers, then eval the real function body.
-info()    { echo "INFO: $*"; }
-warning() { echo "WARN: $*"; }
-success() { echo "OK: $*"; }
-error()   { echo "ERROR: $*" >&2; return 1; }
-
-# _maybe_delete_local_branch's primary-checkout auto-cleanup path (#5015)
-# calls _find_worktree_by_branch / _is_primary_worktree_path, which in turn
-# calls _primary_worktree_path — extract all three alongside it so the real
-# auto-cleanup branch actually runs in this harness (an undefined helper
-# silently no-ops instead of erroring, which would otherwise mask the new
-# behavior rather than exercise it).
-# #8191 slice: the porcelain lookups below shell out through _mp_worktree, so it
-# is extracted with them — without it they die with "_mp_worktree: command not
-# found" under `set -e`.
-eval "$(extract_fn _mp_worktree "$MERGE_PR")"
-eval "$(extract_fn _primary_worktree_path "$MERGE_PR")"
-eval "$(extract_fn _is_primary_worktree_path "$MERGE_PR")"
-eval "$(extract_fn _find_worktree_by_branch "$MERGE_PR")"
-# #7812: the `-d` -> `-D` safety check is the shared `branch_landed`
-# primitive (also reused by the worktree-preserve decision) — a real library,
-# SOURCED here rather than extracted, so the real code path drives the
-# assertions below. Offline: this suite is about merge-pr.sh's local branch
-# logic, not the forge rung, and must stay hermetic.
-export LOOM_BRANCH_LANDED_OFFLINE=1
-# shellcheck source=../lib/branch-landed.sh
-source "$(dirname "$MERGE_PR")/lib/branch-landed.sh"
-eval "$(extract_fn _maybe_delete_local_branch "$MERGE_PR")"
+# shellcheck source=lib/post-merge-cleanup-harness.sh
+source "$SCRIPT_DIR/lib/post-merge-cleanup-harness.sh"
+pmc_load "$MERGE_PR"
+# The subject of this suite is the local-branch delete AS REACHED BY post-merge
+# cleanup (#8191 orchestrator slice 1 made it the last step of one verb). The
+# retired shell function's name is kept as a suite-local alias for the harness
+# call so every case below reads as it always did; it runs the whole cleanup, so
+# each case also covers the target-naming and discovery steps in front of it.
+_maybe_delete_local_branch() { pmc_delete_branch "$@"; }
 
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/loom-merge-local-branch.XXXXXX")"
 TMP_ROOT="$(cd "$TMP_ROOT" && pwd -P)"
@@ -221,7 +196,7 @@ DEFAULT_BRANCH_NAME="main"
 CLEANUP_PRIMARY_CHECKOUT=true
 
 echo ""
-echo "Test 2: behavioral tests of the real _maybe_delete_local_branch body"
+echo "Test 2: behavioral tests of the local-branch delete, through the real post-merge cleanup"
 
 # --- (a) tip matches expected_head_sha -> safe force-delete (-D) ---
 git -C "$REPO" checkout -q -b feature/issue-100

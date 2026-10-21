@@ -138,14 +138,10 @@ branch refs/heads/feature/issue-42"
 # --- Test 1: the live source delegates the parse -----------------------------
 echo "Test 1: merge-pr.sh delegates the porcelain parse to loom-daemon (#8191)"
 
-assert_grep '_mp_worktree worktree-find-by-branch --branch' "$MERGE_PR" \
-    "_find_worktree_by_branch delegates to 'merge-pr worktree-find-by-branch'"
-assert_grep '_mp_worktree worktree-branch-for --path' "$MERGE_PR" \
-    "_worktree_branch_for delegates to 'merge-pr worktree-branch-for'"
-assert_grep '_mp_worktree worktree-primary' "$MERGE_PR" \
-    "_primary_worktree_path delegates to 'merge-pr worktree-primary'"
-assert_grep 'git -C "\$REPO_ROOT" worktree list --porcelain' "$MERGE_PR" \
-    "the git invocation itself did NOT move — only the parse did"
+retired "the three 'merge-pr.sh delegates to _mp_worktree …' greps and the 'git invocation did not move' grep" \
+    "the post-merge cleanup reaches the porcelain parse only through the verbs Tests 2/3/5 drive, and the git call stays out of the parse" \
+    "#8191 orchestrator slice 1 moved _find_worktree_by_branch/_worktree_branch_for/_primary_worktree_path and their git call into loom-daemon (merge_pr/post_merge_cleanup.rs, in-process), so merge-pr.sh no longer contains those names and no grep of it can pass" \
+    "Tests 2/3/5 below (the real verbs, unchanged), and the behavioural tests in loom-daemon/src/merge_pr/post_merge_cleanup/tests.rs: a_discovered_user_owned_worktree_is_advice_only and a_missing_default_path_with_nothing_tracking_the_branch_says_so (discovery by branch), the_primary_checkout_is_never_removed_even_with_a_sentinel (primary lookup), the_override_path_bypasses_the_sentinel_and_deletes_its_attached_branch_with_no_sha (branch-for)"
 
 retired "the four found-flag guard greps over merge-pr.sh's awk bodies" \
     "a single matching stanza yields exactly ONE line, never a doubled '/path\\n/path' (#3671)" \

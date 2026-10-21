@@ -20,7 +20,7 @@ writing) will additionally push these records to a cloud backend.
 
 - [Scope: daemon work only (#12536)](#scope-daemon-work-only-12536)
 - [Envelope](#envelope)
-- [`/ingest` response (the bound-`host_id` echo)](#ingest-response-the-bound-host_id-echo)
+- [`/ingest` response (removed, #12813)](#ingest-response-removed-12813)
 - [`RepoVisibility` contract — private by default](#repovisibility-contract--private-by-default)
 - [Exported-facts contract (external ETA consumers, #11098)](#exported-facts-contract-external-eta-consumers-11098)
 - [Span join-facts contract (external provenance join, #11982)](#span-join-facts-contract-external-provenance-join-11982)
@@ -116,7 +116,7 @@ only on a **breaking** wire change to the record shapes below. A backend should:
 | `8` | Adds the CI family `ci.run`, `ci.job`, `ci.duration` (#8824); only those three kinds use `8`. CI spans reuse `trace.span` at `3`. | Every earlier kind's version and shape is unchanged. |
 | `9` | Adds `ci.job.log` (#8825); only job-log chunk envelopes use `9`. | Every earlier kind's version and shape is unchanged — including the phase-1 CI family at `8`, so a backend that is not ready to ingest free-text log bodies can refuse exactly this kind without losing run/job/duration telemetry. |
 | `10` | Adds `metric.points` (#8860); only those envelopes use `10`. OTLP-only — the native HTTPS exporter never sends it. The `loom.dispatch.tick` span reuses `trace.span` at `3`. | Every earlier kind's version and shape is unchanged — including `ci.job.log` at `9`. |
-| `11` | Adds `queue.snapshot` (#8852 phase 2); only those envelopes use `11`. Native-HTTPS only — the OTLP exporter never sends it (SigNoz gets the queue as `loom.queue.*` gauges in `metric.points`). | Every earlier kind's version and shape is unchanged. Workers older than phase 3 store it as an unknown kind, and `/public/*` shows it as `kind` only. |
+| `11` | Was `queue.snapshot` (#8852 phase 2), **removed in #12813**; no current daemon emits it. Retired: never reused. | Every earlier kind's version and shape is unchanged. |
 | `12` | **Every record kind added after #8921**, collectively — not one kind. `12` is `NEW_KIND_SCHEMA_VERSION` in `loom-daemon/src/telemetry/kinds.rs`, the value a new kind's registry row declares symbolically instead of claiming the next free integer. | Every earlier kind's version and shape is unchanged, exactly as for `3`–`11`. **A backend that must refuse one specific post-#8921 kind gates on the `kind` tag, not on `12`** — the tag is always unique (enforced by the `kind_registry` tests), while `12` is shared. Only a kind whose *content* is risky enough to deserve a version-level gate of its own (the `ci.job.log` free-text precedent at `9`) pins a fresh number, and then it adds its own row here. |
 
 **This table no longer grows per kind** (#8921). Versions `1`–`11` were allocated
@@ -126,48 +126,15 @@ on that one line by construction (#8915 vs #8909, 2026-09-25). Row `12` is the
 terminal row for that practice: a new kind declares
 `gate: NEW_KIND_SCHEMA_VERSION` in its registry row and appends nothing here.
 
-## `/ingest` response (the bound-`host_id` echo)
+## `/ingest` response (removed, #12813)
 
-A push is a bare JSON array of envelopes; the backend answers a **2xx with a
-JSON object**:
-
-```json
-{ "accepted": 50, "host_id": "fleet-host-abc" }
-```
-
-| Field      | Type    | Notes |
-|------------|---------|-------|
-| `accepted` | integer | How many envelopes from this batch were persisted. Whole-batch semantics: a batch is either fully accepted or rejected with a non-2xx. |
-| `host_id`  | string  | **The host id the authenticated ingest key is bound to** — i.e. the identity the batch's rows were actually filed under. Added by issue #4830. |
-
-`host_id` here is *not* echoed from the request. Every record is persisted
-under the identity bound to the presented key, never the envelope's own
-(client-supplied, opaque) `host_id` field — so this echo is what a host was
-actually recorded as, which is exactly the value that differs when the wrong
-host's key file has been installed on a machine.
-
-**How the exporter uses it.** `loom-daemon`'s exporter compares this value
-against the identity the daemon resolved for itself (`$LOOM_HOST_ID`, else
-`$HOSTNAME`, else `hostname`) and on a disagreement logs a WARN **once per
-daemon lifetime** and reports an `observability DEGRADED` section in
-`loom-daemon health`. Nothing about the export changes: the batch stays acked
-and the backend keeps filing under the key's binding, which remains
-authoritative. See `2AMLogic/loom-ui:docs/deploy-runbook.md` §8.
-
-**Compatibility.** The field is purely additive — no `schema_version` rev is
-involved (that integer versions the *record* envelope, not this response).
-Both directions are safe:
-
-- an exporter that ignores the response body behaves exactly as before;
-- a backend that does not send `host_id` (anything predating #4830) is treated
-  by the exporter as "no identity to verify" and is **silently** skipped — it
-  never produces a recurring "cannot verify" warning.
-
-**Star intents (removed, #11104).** A loom-ui backend may still append
-`operator_priority_intents` (#9244 C) to the response. The daemon ignores the
-field whatever its shape; it never fails the ack or skips the `host_id`
-check. loom-ui sets priority labels on GitHub directly. The exporter still
-reads at most 64 KiB of the response.
+The native JSON-over-HTTPS exporter pushed a bare JSON array of envelopes to a
+backend `/ingest` route and read back `{ "accepted": N, "host_id": "…" }`, whose
+`host_id` echo drove the daemon's host-identity mismatch check (#4830). The
+exporter, that check, and the `observability_host_id_mismatch` status field were
+removed in #12813: the daemon does not talk to the dashboard, and OTLP/HTTP
+success responses carry only `partial_success`. Envelope `schema_version`s are
+unchanged by the removal.
 
 ## `RepoVisibility` contract — private by default
 
@@ -216,7 +183,6 @@ cycle) is added only when loom-ui's error tracking shows it is needed.
 | [`sweep.started`](#sweepstarted) / [`sweep.phase`](#sweepphase) / [`sweep.completed`](#sweepcompleted) / [`sweep.identity`](#sweepidentity) | log, native + OTLP | `observability/collector.rs` (+ `collector/identity.rs`), `observability/queue.rs`, `observability/shutdown.rs`, `observability/backfill.rs`; `sweep.started` carries the dispatch facts (`model`, `effort`, `effort_source`, `model_source`, `runtime`, `attempt_index`, `trigger`, `previous_sweep_id`, #11280; `dispatch_origin`, #11444) from `sweep_registry/start_facts.rs` |
 | Phase spans (`trace.span`: `loom.phase`, `loom.role_attempt`) | span, OTLP only | `observability/lifecycle.rs` → `observability/otlp/traces.rs`; see [`tracing.md`](tracing.md#owned-lifecycle-instrumentation). A role tick's `loom.role_attempt` root also carries `loom.role_draw.pick`, `.attempt`, `.table_attempt`, `.layer` and optional `.model` when a `roleDraw` table decided the tick (`observability/lifecycle/role_draw.rs`, [role-draw.md](role-draw.md)); it also carries `loom.runtime`, `loom.engine` and, for a session-container run, `loom.session.container` and `loom.session.image_digest` (`observability/lifecycle/role_runtime.rs`, [observability.md](observability.md)) |
 | [`pick.decision`](#pickdecision) | log, OTLP only | `observability/pick_decision.rs` (from `role_tick_telemetry.rs` and `work_finder/tick_summary.rs`) |
-| [`queue.snapshot`](#queuesnapshot) (whole ready queue per tick) | native only | `observability/queue_snapshot.rs` |
 | `loom.queue.issues`, `loom.queue.listing_failed_repos`, `loom.queue.listing_incomplete_repos` ([`metric.points`](#metricpoints)) | metric | `observability/ops/queue.rs` |
 | `loom.queue.oldest_wait`, `loom.queue.starved[.by_reason]`, `loom.queue.dispatch_wait[.samples]` ([`metric.points`](#metricpoints)) | metric | `observability/ops/dwell.rs` |
 | [`loom.dispatch.disposition`](#loomdispatchdisposition-issue-9222-per-issue-why-is-it-waiting) rows (`loom.queue.*` attributes) and `loom.queue.disposition_rows_dropped` | span + metric, OTLP only | `observability/ops/disposition.rs` |
@@ -313,8 +279,8 @@ records (`tokens.snapshot`, `host.health`) do not.
 
 **The authoritative list of kinds is the registry**,
 `loom-daemon/src/telemetry/kinds.rs` — one row per kind carrying its wire tag,
-payload type, gate version, OTLP routing class, and whether the native HTTPS
-`/ingest` backend accepts it, plus a prose description. That file *generates* the
+payload type, gate version, OTLP routing class, and whether the removed native
+HTTPS `/ingest` backend accepted it (#12813), plus a prose description. That file *generates* the
 Rust enum and the wire tags, so it cannot drift from what a daemon emits; the
 `TELEMETRY_KINDS` constant is the same table at runtime. There is deliberately no
 second hand-maintained index of the kind set here (#8921 removed the one that
@@ -1782,8 +1748,8 @@ Field tables, the chunking contract, the scrub-class list and the
 The generic operational-metrics carrier (Issue #8860): a batch of points any
 daemon loop emits through `loom-daemon/src/observability/ops.rs`, instead of
 inventing a record kind per signal. Envelopes carry `schema_version: 10`.
-**OTLP-only** — the native HTTPS `/ingest` exporter drops it, like
-`trace.span`, so the Cloudflare backend never sees it.
+**OTLP-only** — the removed native HTTPS `/ingest` exporter dropped it, like
+`trace.span`.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -2470,133 +2436,13 @@ namespace that must be a short `[a-z0-9_-]` token (anything else is
 
 ### `queue.snapshot`
 
-The work finder's ranked ready queue as of its last tick (Issue #8852, phase
-2). The rows are the same ones `loom-daemon queue` and `status --json`'s
-`last_work_finder_tick.queue` show. They are ordered by the daemon's own
-dispatch comparator (#11508): level (`loom:very-important`, then
-`loom:important`, then none), then oldest `createdAt`, then issue number.
-`tier:*` labels do not affect the order.
-Envelopes carry `schema_version: 11`. **Native-HTTPS only**: the OTLP
-exporter never receives it (the mirror of `metric.points`).
-
-The collector samples it on the `host.health` interval, and **only when the
-work finder has ticked since the previous snapshot**. A stalled work finder
-therefore shows up as an ageing `tick_at` and never as a re-stamped copy of
-an old queue. No snapshot at all means the work finder has not ticked in this
-daemon process or is disabled.
-
-| Field | Type | Notes |
-|---|---|---|
-| `tick_at` | RFC 3339 | when the described tick completed — the freshness stamp |
-| `max_concurrent` | integer | the concurrency cap that tick ran under |
-| `seen` | integer | ready issues the tick listed |
-| `counts` | object | `running` / `ready` / `blocked` over **every** row, including dropped ones; `blocked` includes the `labelled_blocked` rows |
-| `listing_failed` | array, optional | `{repo, visibility}` for each repo whose ready listing failed; its backlog is absent (incomplete, not empty) |
-| `listing_failed_unresolved` | integer | failed-listing workspaces whose slug could not be resolved |
-| `listing_incomplete` | array, optional | `{repo, visibility}` for each repo whose ready listing came back partial (#11139: a later page failed, the page cap, a mid-walk change); some of its rows are present, but not all, so a missing row is not evidence the issue left the queue |
-| `listing_incomplete_unresolved` | integer, optional | partial-listing workspaces whose slug could not be resolved; omitted when `0` |
-| `rows[]` | array | ranked rows (below), at most 200 |
-| `unresolved_rows` | integer | rows dropped because their workspace's forge slug could not be resolved |
-| `rows_truncated` | integer | rows dropped by the 200-row cap |
-| `plan` | object, optional | the tick's dispatch plan block (Issue #9288, below). Absent from older daemons |
-| `operator_priority_landing[]` | array, optional | **removed (#11104)**: the star-liveness landing rows (#9244 C). Only an older daemon sends it |
-
-Each row:
-
-| Field | Type | Notes |
-|---|---|---|
-| `rank` | integer | 1-based dispatch position on the host. It is not renumbered after drops, so a gap means a row was dropped. `0` means outside the dispatch order (a `labelled_blocked` row) |
-| `repo` | string | forge `owner/repo`, never a local path |
-| `visibility` | `public` / `private` | per row; missing or unknown decodes to `private` |
-| `issue` | integer | issue number |
-| `workspace_weight` | integer | lower dispatches first |
-| `urgent` | bool | **deprecated (#9244): always `false`**. Its label was deleted (#11105); the field stays on the wire only for compatibility |
-| `level` | string | the issue's priority level (#11510): `default`, `important` (`loom:important`) or `very-important` (`loom:very-important`), after the very-important cap (#11509); a `labelled_blocked` row reads its own labels. Absent (an older daemon) or unknown decodes to `default`. It replaces `operator_priority` (always `false` since #11508) and `tier`, which a current daemon no longer sends; older daemons may still send both (and `operator_priority_at`) |
-| `created_at` | RFC 3339, optional | issue creation time (the age ordering key) |
-| `disposition` | string | `dispatched`, `in_flight`, `deferred_capacity`, `deferred_build_backoff`, `deferred_out_of_slice` (retired 2026-10-13, #11682, never emitted), `deferred_file_overlap`, `workspace_halted`, `workspace_commands_missing`, `host_constraint`, `parked`, `hard_exclusion`, `recheck_interval`, `quarantined`, `dispatch_backoff`, `open_pr_backoff`, `noop_cooldown`, `declined`, `prless_retry`, `peer_claim`, `open_pr`, `dispatch_error`, `already_landed`, `already_closed`, `labelled_blocked` (unknown values are forward-compatible). `deferred_ramp_cap`, `deferred_saturation` and `deferred_repo_cap` were retired in #12406; an old payload carrying one decodes as `unknown` |
-| `state` | string | `running` / `ready` / `blocked`, derived by the daemon so clients never keep a copy of the mapping |
-| `reason` | string | human-readable reason, also daemon-derived |
-| `detail` | string, optional | only for `parked` (the park label), `open_pr` (`open PR #N`), `deferred_file_overlap` (`file overlap: <paths>`, the shared `## Affected Files` paths, #9781), `already_landed` (`forge_closed` or `journal_landed`, #11429) and `labelled_blocked` (the hold labels it also carries, from `loom:operator`, `loom:operator-only`, `loom:operator-mechanical`, `loom:needs-capability`). Free-form dispatch-error and comment text is never exported |
-| `halt_cause` | string, optional | only for `workspace_halted` (#11417): why the repo's dispatch is held, the closed vocabulary of the SigNoz `loom.queue.halt_cause` attribute (`main_red`, `gate_pending`, `token_pool`, `preflight_advisory`, `drain`, `write_scope`, `ci_billing`, `install_incompatible`, `daemon_too_old`, `maintain_only`, `weight_zero`). Additive; no `schema_version` bump. `reason` names the cause (`blocked: repo dispatch held — main red`) and keeps the generic sentence only when the cause is unknown |
-| `position` | integer, optional | 1-based place in the host's **shaped** dispatch order (#9288, below). `null` when the row is not dispatchable on this host this tick |
-| `plan_state` | string | `running` / `next` / `queued` / `blocked` (#9288); `unknown` when absent |
-| `keys` | array, optional | `{name, value}` comparator keys that placed the row, in comparator order |
-| `gate` | string, optional | the admission gate holding a deferred row: `capacity`, `build_backoff` (#9410), `file_overlap` (#9781). `out_of_slice` (#11682) and `ramp`, `saturation`, `repo_cap` (#12406) are retired and decode as unknown |
-| `in_slice` | bool, optional | retired; absent since #11682 (2026-10-13). It said whether the row's workspace was in this host's preferred repo slice (#6243), which no longer exists |
-| `owning_shard` | integer, optional | the shard that owns the workspace when sharding is configured. A host can only name the shard; mapping it to a host is the fleet merge's job |
-
-**Dispatch plan (Issue #9288).** `rank` is the bare comparator rank over every
-row, so it is also where a blocked row re-enters. `position` is the order
-pass 2 offers candidates in: the tick records the shaped candidate order it iterated
-(`TickReport::plan_order`), and the plan is a pure projection of it, never a
-second ranking. (Before #11682, out-of-slice rows followed the shaped order.)
-`plan_state` is:
-
-- `running`: `dispatched` / `in_flight`;
-- `next`: the first `slots.max_concurrent` rows, in `position` order, among
-  rows deferred by the concurrency cap (`gate: capacity`). These are what the
-  next tick admits once slots free;
-- `queued`: every other deferred row;
-- `blocked`: everything else, with `position: null`.
-
-The comparator keys come from one seam (`ready_queue::candidate_keys`), which
-is also what `candidate_cmp` compares, so `keys` and `plan.ordering` can never
-describe a different order from the one the tick ran. Since #11508 the keys are
-exactly `level` (0 default, 1 `loom:important`, 2 `loom:very-important`),
-`created_at` (oldest first) and `number`; the star, starred-at, red-main-fix and
-`workspace_weight` keys are gone (workspace priority weights the workspace
-draw instead). The `plan` block:
-
-| Field | Type | Notes |
-|---|---|---|
-| `slots` | object | `max_concurrent`, `occupancy` (after the tick), `free` (`max_concurrent − occupancy`), `any_halted`, `overflow_free` (bool, optional: whether no overflow sweep is live. The slot is inert since #11508 — no priority starts past the configured cap — so `false` only means a sweep an older daemon started over the cap is still running) |
-| `tick_interval_secs` | integer, optional | the work finder's tick interval |
-| `shard` | object | `configured` (`false` when unsharded), `host_shard`, `shard_count` |
-| `scope` | array | the labels the plan covers: `["loom:issue", "loom:blocked"]` |
-| `ordering` | array | comparator key names, in order |
-| `complete` | bool | `false` when some repo's listing failed (like `listing_failed`) or came back partial (a later page failed, the page cap, a mid-walk change; #11139): the rows are not the whole queue |
-
-**Pre-ready tiers are unordered.** `loom:curated` and `loom:triage` issues have
-no dispatcher order and never appear in the plan; Champion's promotion order is
-a role-prompt convention, not daemon code. `scope` names what the plan covers.
-Positions are per host. Hosts do not share `workspace_weight`, so two hosts'
-positions cannot be compared directly. A fleet order is a merge of per-host
-plans (follow-up #9310). All of this is additive, so there is no
-`schema_version` bump.
-
-**Forge-side blocked issues (Issue #8957).** After the ranked rows, the
-snapshot carries one `labelled_blocked` row (`state: blocked`, `rank: 0`,
-reason `blocked: labelled loom:blocked`) for each open issue in a managed repo
-that carries `loom:blocked` without `loom:issue`. The work finder never lists
-these. They come from one ETag-cached REST listing per repo, made only when a
-snapshot is emitted. They count in `counts.blocked` (so `counts` is no longer
-only the tick's rows) and are subject to the same 200-row cap. The blocking
-reason itself is usually a forge comment, and comment text is never read or
-exported. This is additive, so there is no `schema_version` bump.
-
-**Starred landing states (removed, #11104).** Older daemons appended
-`operator_priority_landing`, the star-liveness pass's landing row for every
-starred issue. That pass is gone; a current daemon never sends the field, and
-loom-ui derives landing state from labels and PRs.
-
-Redaction (phase 3, `loom-ui:src/queueState.ts`): the Worker redacts per
-row on `visibility`. On `/public/*` a private row keeps only `rank`,
-`visibility`, `urgent`, `level` (formerly `operator_priority`), `disposition`,
-`state` and `reason` (plus the #9288 `position`, `plan_state` and `gate`); its
-`repo`, `issue`, `created_at`, `detail`, `keys`, `owning_shard` and
-`in_slice` are withheld (and `repo_cap` and `hot`, which only an older daemon
-sends), and a private `listing_failed` entry keeps
-only its `visibility`. A private `listing_incomplete` entry (#11139) needs the
-same treatment; a Worker that does not know the field must drop it rather
-than pass it through. `counts`, `seen`, `tick_at` and the `plan` block are
-aggregate and survive. A Worker older than phase 3 applies the
-unknown-kind rule instead (`/public/*` sees `kind` only).
-
-The Worker keeps the newest tick per host as live state (`hosts[<id>].queue`
-on `GET /api/fleet-state`) and ignores a redelivered or older snapshot, so a
-retried batch never makes a stalled work finder look live. The fleet
-dashboard renders it as the overview's "Work queue" section, a fleet-wide
-work queue (host, phase, wait, blocking reason, links) and a per-host panel.
+**Removed (#12813).** The native-HTTPS-only record carrying the work finder's
+ranked ready queue (schema version `11`) is gone, with the `/ingest` exporter
+that was its only route. No current daemon emits it. The queue reaches SigNoz
+as the `loom.queue.*` gauges and the per-issue `pick.decision` and `eta.*`
+records documented in this file; the
+`loom.queue.*` span attributes (#12827) carry the row fields it held. Version `11` stays retired: a future
+kind must not reuse it.
 
 ### `auto_update.tick`
 
@@ -2866,6 +2712,10 @@ the `workspace_draw` (seed, and each draw's candidates with `weight` =
 `base_weight` + `bonus` since #11742; read a draw as `weight / total_weight`).
 Its seed's inputs (`seed_scheme`, `seed_minute`, `seed_host`, #11683) were added
 as optional fields under the stability promise above.
+Since #12974 the exported record is a **bounded summary** (at most 16 KB, flagged
+by `payload_ref`; no `candidates[]`, `skipped[]` or draw lists, with
+`skipped_counts` / `exclusion_counts` instead); the full record is archived
+locally under that `payload_ref`. Additive: `schema_version` stays `2`.
 Full field reference, the SigNoz rank-at-instant query and the rows/day volume:
 [`telemetry-kind-pick-decision.md`](telemetry-kind-pick-decision.md).
 

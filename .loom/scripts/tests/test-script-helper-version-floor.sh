@@ -487,6 +487,24 @@ OUT="$(env LOOM_DAEMON_SELF_BIN="$WORKDIR/daemon-0.19.240" "$SCRIPTS_DIR/dep-rec
 assert_not_contains "$OUT" "requires-daemon" "a binary above the 0.19.104 floor is not refused by dep-recheck-fingerprint.sh"
 
 echo ""
+echo "…and the loom-tools slice (#12939): tools-first, with the daemon floor still guarding the fallback…"
+
+mkdir -p "$WORKDIR/slice-path"
+cp "$WORKDIR/daemon-0.16.0" "$WORKDIR/slice-path/loom-daemon"
+printf '#!/usr/bin/env bash\necho "TOOLS ran $*"\nexit 0\n' >"$WORKDIR/fake-tools"; chmod +x "$WORKDIR/fake-tools"
+
+# A daemon below the 0.17.0 floor is on PATH; loom-tools is pinned. The floor
+# names a DAEMON version, so it does not apply to the tools binary.
+OUT="$(env -i PATH="$WORKDIR/slice-path:/usr/bin:/bin" HOME="$WORKDIR" LOOM_TOOLS_BIN="$WORKDIR/fake-tools" "$SCRIPTS_DIR/strip-ansi.sh" 2>&1)"; RC=$?
+assert_contains "$OUT" "TOOLS ran strip-ansi" "strip-ansi.sh runs loom-tools first even with a too-old daemon on PATH"
+assert_eq "0" "$RC" "…and the tools binary's exit code reaches the caller"
+
+# No loom-tools: the transitional daemon fallback still gets the floor refusal.
+OUT="$(env -i PATH="$WORKDIR/slice-path:/usr/bin:/bin" HOME="$WORKDIR" "$SCRIPTS_DIR/strip-ansi.sh" 2>&1)"; RC=$?
+assert_contains "$OUT" "requires-daemon: strip-ansi >= 0.17.0" "the daemon fallback is still refused below the floor"
+assert_contains "$OUT" "transitional" "…and is logged as transitional"
+
+echo ""
 echo "────────────────────────────────"
 if [[ "$TESTS_FAILED" -eq 0 ]]; then
     echo -e "${GREEN}Results: $TESTS_PASSED/$TESTS_RUN passed, 0 failed${NC}"

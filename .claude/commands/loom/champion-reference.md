@@ -536,7 +536,7 @@ monotonically-growing held-PR backlog documented in #6848.
 `"forbiddenDiffPatterns": [...]` (jq `test()` regexes over every added/removed line). Criterion
 #3 then runs the class check before it emits FAIL. Worked examples, class
 `ci-steps` = `filePatterns: [".github/workflows/*.yml"]`, `coversCriticalFiles: true`,
-`excludeFilePatterns: [".github/workflows/*publish*", "*release*", "*deploy*"]`,
+`privilegedContentPatterns` (below), no name excludes,
 `forbiddenDiffPatterns: ["^\\s*permissions:", "id-token", "secrets\\.", "pull_request_target"]`,
 `conditions: ["judgeApproval", "greenCi"]`:
 
@@ -544,12 +544,28 @@ monotonically-growing held-PR backlog documented in #6848.
 |---|---|
 | `.github/workflows/ci.yml`, one added `run:` step, Judge-approved, CI green | #3 **PASS**, rationale names `ci-steps`; no hold |
 | `ci.yml` plus `Cargo.toml` | `Cargo.toml` is outside the class: **FAIL**, today's hold |
-| `.github/workflows/publish.yml` | excluded file: **FAIL**, hold |
+| `.github/workflows/publish.yml` holding `npm publish` or a non-`GITHUB_TOKEN` secret | privileged content: **FAIL**, hold |
+| `.github/workflows/claude-bot-deploy-plan.yml`, credential-free and read-only, a `runs-on` edit | no privileged content: #3 **PASS**, whatever the name |
+| `ci.yml` with an existing `secrets.CLOUDFLARE_API_TOKEN` step, a `runs-on` edit | privileged content at the head SHA: **FAIL**, hold |
+| `ci.yml`, but its contents cannot be read at the head SHA | unreadable content: **FAIL**, hold |
 | `ci.yml` adding a `permissions:` block | forbidden diff line: **FAIL**, hold |
 | `ci.yml`, but the files API returns no patch for it | unreadable diff: **FAIL**, hold |
 | `ci.yml`, CI red or pending | `greenCi` does not hold: **FAIL**, hold |
 | same class without `coversCriticalFiles` | #3 unchanged: **FAIL**, hold |
 | `defaults/hooks/guard-x.sh` under a class that lists it with the flag | kept set: **FAIL**, hold |
+
+**Classify by capability, not by filename (#12954)**: `"privilegedContentPatterns": [...]`
+(jq `test()` regexes, matched line by line against each covered file's full
+contents at the PR head SHA) holds any file that carries a privilege and
+covers any file that does not, whatever it is called. `forbiddenDiffPatterns`
+still catches a PR that adds a privilege. Example list for `ci-steps`:
+`["secrets\\.(?!GITHUB_TOKEN\\b)", "secrets:\\s*inherit", "^\\s*environment:", ":\\s*write\\b", "write-all", "id-token", "pull_request_target", "workflow_run", "^\\s*release:", "types:.*released", "wrangler\\s+deploy", "npm\\s+publish", "gh\\s+release"]`.
+Unreadable or empty content, an oversized or removed file, an invalid regex or
+a head SHA that moved fails closed. Whole-line YAML comments are not scanned
+(a comment grants nothing; the 2026-10-20 fixtures say "no id-token: write"
+in comments); trailing comments and every other line are. The fixture set in
+`defaults/scripts/tests/fixtures/champion-workflows/` (`cases.tsv`) pins the
+expected outcomes so an attended mirror can run the same cases.
 
 The kept set (irreversible migrations, the merge gate itself, credential/token
 selection, guard hooks, installers/updaters that rewrite installed files on

@@ -587,3 +587,188 @@ loom_daemon_exec_checked() {
     _loom_daemon_version_preflight "$caller" "$sub" "$bin"
     exec "$bin" "$sub" "$@"
 }
+
+# ---------------------------------------------------------------------------
+# TOOLS-FIRST RESOLUTION FOR THE loom-tools SLICE (#12939, epic #12708 Phase 2c)
+# ---------------------------------------------------------------------------
+#
+# `loom-tools` (#12938) serves `strip-ansi` and `checkpoint` without the
+# daemon. This is the SAME locator teaching a tools-first order for those
+# commands, not a second resolver (design doc 4.3). Everything above is
+# unchanged; `loom_locate_slice_bin` is the only new entry point a stub needs.
+#
+# Order for a slice command (first match wins):
+#   1. $LOOM_DAEMON_BIN, when set and executable: an explicit pin is an
+#      operator or a harness naming the answer, and it keeps naming the daemon
+#      (kind "daemon-pinned"). Pin $LOOM_TOOLS_BIN to override it.
+#   2. $LOOM_TOOLS_BIN (executable), `loom-tools` on $PATH, the machine-level
+#      install ($LOOM_DAEMON_BIN_DIR, default $HOME/.local/bin), then a
+#      repo-local build (kind "tools").
+#   3. TRANSITIONAL fallback: the normal loom_locate_daemon_bin chain (kind
+#      "daemon-transitional"), logged on stderr every time. Disabled by
+#      LOOM_TOOLS_DAEMON_FALLBACK=0 and implied off when LOOM_MODE=session
+#      (design 7.2: a session has no daemon, so using one would be a leak).
+#   4. Nothing: LOOM_SLICE_BIN is empty and the caller exits non-zero. A
+#      missing binary is never an answer.
+#
+# Sets $LOOM_SLICE_BIN and $LOOM_SLICE_KIND (globals, so no subshell hides the
+# trace line). Returns 0 when something resolved, 1 otherwise.
+
+# The commands loom-tools serves. Others keep resolving the daemon only.
+loom_tools_serves() {
+    case "${1:-}" in
+        strip-ansi|checkpoint) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# loom_locate_tools_bin <repo_root> -- echo the loom-tools binary or nothing.
+loom_locate_tools_bin() {
+    local root="$1" candidate machine_bin
+    if [[ -n "${LOOM_TOOLS_BIN:-}" && -x "${LOOM_TOOLS_BIN}" ]]; then
+        printf '%s\n' "$LOOM_TOOLS_BIN"; return 0
+    fi
+    if [[ "${LOOM_PREFER_REPO_BUILD:-}" == "1" ]]; then
+        while IFS= read -r candidate; do
+            candidate="${candidate%/loom-daemon}/loom-tools"
+            [[ -x "$candidate" ]] && { printf '%s\n' "$candidate"; return 0; }
+        done < <(_loom_daemon_repo_candidates "$root")
+    fi
+    candidate="$(command -v loom-tools 2>/dev/null || true)"
+    if [[ -n "$candidate" && -x "$candidate" ]]; then
+        printf '%s\n' "$candidate"; return 0
+    fi
+    machine_bin="${LOOM_DAEMON_BIN_DIR:-$HOME/.local/bin}/loom-tools"
+    if [[ -x "$machine_bin" ]]; then
+        printf '%s\n' "$machine_bin"; return 0
+    fi
+    while IFS= read -r candidate; do
+        candidate="${candidate%/loom-daemon}/loom-tools"
+        [[ -x "$candidate" ]] && { printf '%s\n' "$candidate"; return 0; }
+    done < <(_loom_daemon_repo_candidates "$root")
+    return 0
+}
+
+# loom_tools_daemon_fallback_allowed -- 0 unless explicitly or session-disabled.
+loom_tools_daemon_fallback_allowed() {
+    [[ "${LOOM_TOOLS_DAEMON_FALLBACK:-1}" == "0" ]] && return 1
+    [[ "${LOOM_MODE:-}" == "session" ]] && return 1
+    return 0
+}
+
+# loom_locate_slice_bin <repo_root> <subcommand>
+# shellcheck disable=SC2034  # LOOM_SLICE_KIND is read by lib/script-helper.sh
+loom_locate_slice_bin() {
+    local root="$1" sub="$2" bin=""
+    LOOM_SLICE_BIN=""
+    LOOM_SLICE_KIND=""
+    if ! loom_tools_serves "$sub"; then
+        LOOM_SLICE_BIN="$(loom_locate_daemon_bin "$root")"
+        LOOM_SLICE_KIND="daemon"
+        [[ -n "$LOOM_SLICE_BIN" ]]; return
+    fi
+    if [[ -z "${LOOM_TOOLS_BIN:-}" && -n "${LOOM_DAEMON_BIN:-}" && -x "${LOOM_DAEMON_BIN}" ]]; then
+        LOOM_SLICE_BIN="${LOOM_DAEMON_BIN}"
+        LOOM_SLICE_KIND="daemon-pinned"
+        return 0
+    fi
+    bin="$(loom_locate_tools_bin "$root")"
+    if [[ -n "$bin" ]]; then
+        LOOM_SLICE_BIN="$bin"
+        LOOM_SLICE_KIND="tools"
+        if [[ "${LOOM_LOCATE_DAEMON_BIN_QUIET:-}" != "1" ]]; then
+            echo "loom_locate_slice_bin: resolved $bin (loom-tools) for '$sub'" >&2
+        fi
+        return 0
+    fi
+    if loom_tools_daemon_fallback_allowed; then
+        bin="$(loom_locate_daemon_bin "$root")"
+        if [[ -n "$bin" ]]; then
+            LOOM_SLICE_BIN="$bin"
+            LOOM_SLICE_KIND="daemon-transitional"
+            echo "loom_locate_slice_bin: loom-tools not found; falling back to loom-daemon for '$sub' (transitional: install loom-tools)" >&2
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# PAYLOAD IDENTITY (#12939): one compatibility answer when two binaries exist
+# ---------------------------------------------------------------------------
+#
+# Both binaries print the same `payload_identity` for the same payload (see
+# install_compat::payload_identity). Equal strings agree; different strings
+# conflict. There is deliberately no tie-break by PATH order, mtime or last
+# writer: resync refuses and says which two disagree.
+#
+# _loom_payload_identity_of <bin> <tools|daemon> -- echo the identity or nothing.
+# requires-daemon: capabilities optional   only loom-tools serves it; an old binary prints nothing and resync fails open
+_loom_payload_identity_of() {
+    local bin="$1" kind="$2" json=""
+    [[ -n "$bin" && -x "$bin" ]] || return 0
+    if [[ "$kind" == "tools" ]]; then
+        json="$("$bin" capabilities --json 2>/dev/null </dev/null || true)"
+    else
+        json="$("$bin" install-compat show --json 2>/dev/null </dev/null || true)"
+    fi
+    printf '%s' "$json" | sed -n 's/.*"payload_identity":"\([^"]*\)".*/\1/p' | head -n1
+}
+
+# _loom_requires_daemon_of <bin> <tools|daemon> -- the requires_daemon claim.
+_loom_requires_daemon_of() {
+    local id
+    id="$(_loom_payload_identity_of "$1" "$2")"
+    printf '%s' "$id" | sed -n 's/.*requires_daemon=\([0-9][0-9.]*\).*/\1/p'
+}
+
+# loom_payload_identity_conflict <repo_root> [source_root]
+#
+# Returns 0 and prints the refusal on stderr when resync must stop; returns 1
+# when it may proceed. Cases:
+#   tools-only / daemon-only  proceed (nothing to disagree with), except that a
+#                             tools binary whose requires_daemon claim is OLDER
+#                             than the payload being installed (the source's
+#                             REQUIRES_DAEMON) refuses: older tools, newer payload
+#   both agree                proceed
+#   both conflict             refuse
+#   rollback                  tools NEWER than the payload proceeds
+#   unreadable identity       proceed (fail open; an old binary with no
+#                             capabilities verb must not wedge a resync)
+loom_payload_identity_conflict() {
+    local root="$1" source_root="${2:-}" tools_bin daemon_bin t_id d_id t_req want=""
+    tools_bin="$(loom_locate_tools_bin "$root")"
+    daemon_bin="$(LOOM_LOCATE_DAEMON_BIN_QUIET=1 loom_locate_daemon_bin "$root")"
+    t_id="$(_loom_payload_identity_of "$tools_bin" tools)"
+    d_id="$(_loom_payload_identity_of "$daemon_bin" daemon)"
+
+    if [[ -n "$t_id" && -n "$d_id" && "$t_id" != "$d_id" ]]; then
+        {
+            echo "[ERROR] loom-tools and loom-daemon report different payload identities; resync refuses."
+            echo "  loom-tools:  $tools_bin"
+            echo "      $t_id"
+            echo "  loom-daemon: $daemon_bin"
+            echo "      $d_id"
+            echo "No tie-break by PATH order, mtime or last writer is applied. Make the two"
+            echo "binaries come from the same release (loom-daemon-update.sh --fetch), or remove"
+            echo "the stale one, then re-run."
+        } >&2
+        return 0
+    fi
+
+    if [[ -n "$t_id" && -n "$source_root" && -f "$source_root/loom-daemon/src/install_compat.rs" ]]; then
+        want="$(sed -n 's/^pub const REQUIRES_DAEMON: &str = "\([0-9][0-9.]*\)";.*/\1/p' \
+            "$source_root/loom-daemon/src/install_compat.rs" | head -n1)"
+        t_req="$(printf '%s' "$t_id" | sed -n 's/.*requires_daemon=\([0-9][0-9.]*\).*/\1/p')"
+        if [[ -n "$want" && -n "$t_req" ]] && _loom_daemon_version_lt "$t_req" "$want"; then
+            {
+                echo "[ERROR] loom-tools ($tools_bin) is older than the payload being installed; resync refuses."
+                echo "  loom-tools requires_daemon:  $t_req"
+                echo "  payload requires_daemon:     $want"
+                echo "Update loom-tools to this payload's release first."
+            } >&2
+            return 0
+        fi
+    fi
+    return 1
+}

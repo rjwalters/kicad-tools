@@ -581,6 +581,27 @@ out=$( env -i PATH="$MINIMAL_PATH" HOME="$T30/home" \
 assert_eq "$T30/checkout/target/release/loom-daemon" "$out" \
     "an unparseable local \`--version\` keeps the repo-local build (fail open) (#10079)"
 
+# ---------- 31. tools-first order for the loom-tools slice (#12939) ----------
+T31="$WORKDIR_N/t31"
+mkdir -p "$T31/home/.local/bin" "$T31/path" "$T31/root"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$T31/path/loom-tools"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$T31/path/loom-daemon"
+chmod +x "$T31/path/loom-tools" "$T31/path/loom-daemon"
+slice() { # <env assignments...> -- <sub>; echoes "<kind>|<bin>"
+    local sub="${*: -1}"; local -a e=("${@:1:$#-1}")
+    env -i PATH="$MINIMAL_PATH" HOME="$T31/home" "${e[@]}" \
+        bash -c "source '$LIB'; loom_locate_slice_bin '$T31/root' '$sub' 2>/dev/null; echo \"\$LOOM_SLICE_KIND|\$LOOM_SLICE_BIN\""
+}
+assert_eq "tools|$T31/path/loom-tools" "$(slice PATH="$T31/path:$MINIMAL_PATH" strip-ansi)" \
+    "slice command resolves loom-tools before loom-daemon (#12939)"
+rm "$T31/path/loom-tools"
+assert_eq "daemon-transitional|$T31/path/loom-daemon" "$(slice PATH="$T31/path:$MINIMAL_PATH" strip-ansi)" \
+    "no loom-tools: the loom-daemon fallback is marked transitional (#12939)"
+assert_eq "|" "$(slice PATH="$T31/path:$MINIMAL_PATH" LOOM_MODE=session strip-ansi)" \
+    "session mode never uses the daemon fallback (#12939)"
+assert_eq "daemon|$T31/path/loom-daemon" "$(slice PATH="$T31/path:$MINIMAL_PATH" resolve-model)" \
+    "a command outside the slice keeps the daemon-only resolution"
+
 # ---------- summary ----------
 echo
 echo "Ran $TESTS_RUN tests: $TESTS_PASSED passed, $TESTS_FAILED failed"

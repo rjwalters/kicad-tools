@@ -454,10 +454,10 @@ fi
 #
 # `worktree.sh remove` (tests 3/4) and the daemon's clean/reaper (the Rust twin,
 # `cargo_target/per_worktree.rs`) are covered elsewhere; this pins the third one
-# the issue names. It runs merge-pr.sh's ACTUAL `_remove_loom_worktree` body,
-# extracted from the live source with the no-drift `awk` pattern that
-# test-merge-pr-worktree-remove-diagnosis.sh established, so a later edit to
-# that function cannot silently stop reclaiming per-worktree dirs.
+# the issue names. It runs merge-pr.sh's ACTUAL `_post_merge_cleanup` wrapper over the
+# real `merge-pr post-merge-cleanup` verb (#8191 orchestrator slice 1), via the
+# no-drift harness lib/post-merge-cleanup-harness.sh, so a later edit to
+# either cannot silently stop reclaiming per-worktree dirs.
 #
 # Two things are asserted together, because the bug here is a PAIR: the marker
 # is a NEW untracked file born in every opted-in worktree, so if it were not
@@ -481,43 +481,21 @@ else
     EXPECT311="$SHARED11/wt/issue-311"
     seed_build_output "$EXPECT311" "binary-311"
 
-    # Run the real function body in a subshell: it needs merge-pr.sh's logging
-    # helpers and REPO_ROOT, and `eval`ing it here would leak those into the
-    # remaining assertions. Nothing is stubbed on the target-dir path: since
-    # #9153 the resolve and the reclaim are both `loom-daemon cargo-target-dir`
-    # (the binary $LOOM_DAEMON_BIN pins, above), so what runs here is the
-    # production decision rather than a shell stand-in for it.
+    # Run the real cleanup in a subshell: the harness defines merge-pr.sh's
+    # logging stubs and the REAL `_post_merge_cleanup` wrapper, and sourcing it
+    # here would leak those into the remaining assertions. Nothing is stubbed on
+    # the target-dir path: the resolve and the reclaim are both in-process in
+    # `loom-daemon merge-pr post-merge-cleanup` (the binary $LOOM_DAEMON_BIN
+    # pins, above) — the production decision rather than a shell stand-in.
     mp_out="$(
         set +e
-        info() { echo "INFO: $*"; }
-        warning() { echo "WARN: $*"; }
-        success() { echo "OK: $*"; }
-        error() {
-            echo "ERROR: $*" >&2
-            return 1
-        }
-        loom_record_worktree_removal() { :; }
-        # Consumed by the extracted merge-pr.sh function bodies below.
+        # shellcheck source=lib/post-merge-cleanup-harness.sh
+        source "$SCRIPT_DIR/lib/post-merge-cleanup-harness.sh"
+        pmc_load "$MERGE_PR"
+        # Consumed by the extracted wrapper.
         # shellcheck disable=SC2034
         REPO_ROOT="$R11"
-        extract_fn() {
-            awk -v fn="$1" '
-                $0 ~ "^"fn"\\(\\) \\{" { grab=1 }
-                grab { print }
-                grab && /^}/ { exit }
-            ' "$MERGE_PR"
-        }
-        # #8191 slice: the porcelain lookups below shell out through
-        # _mp_worktree, so it is extracted with them — without it they die with
-        # "_mp_worktree: command not found" under `set -e`.
-        eval "$(extract_fn _mp_worktree)"
-        # The two helpers the body calls for diagnostics are extracted too, not
-        # stubbed: a `command not found` from either would be swallowed by the
-        # `|| true` around them and quietly change which branch runs.
-        eval "$(extract_fn _primary_worktree_path)"
-        eval "$(extract_fn _worktree_branch_for)"
-        eval "$(extract_fn _remove_loom_worktree)"
-        _remove_loom_worktree "$WT311" 2>&1
+        pmc_run_issue 311 2>&1
     )"
 
     if [[ ! -d "$WT311" ]]; then
