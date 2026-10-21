@@ -172,10 +172,10 @@
       "rule_id": "diffpair_uncoupled_length",
       "type": "diffpair_uncoupled_length",
       "severity": "info",
-      "message": "Differential pair USB_D+/USB_D- uncoupled length 7.212 mm (P 7.212, N 7.212) within limit 19.050 mm = 6.35 mm x 3 components [protocol:USB2_FS (TI SPRAAR7J \u00a73.3 (breakout within 0.25 in of the package); high-speed guidance, applied to full speed)]",
+      "message": "Differential pair USB_D+/USB_D- uncoupled length 10.087 mm (P 10.087, N 10.087) within limit 19.050 mm = 6.35 mm x 3 components [protocol:USB2_FS (TI SPRAAR7J \u00a73.3 (breakout within 0.25 in of the package); high-speed guidance, applied to full speed)]",
       "location": null,
       "layer": null,
-      "actual_value": 7.212,
+      "actual_value": 10.087,
       "required_value": 19.05,
       "items": [],
       "nets": [
@@ -185,16 +185,16 @@
       "status": "info",
       "waived": false,
       "key": "diffpair_uncoupled_length||USB_D+,USB_D-|",
-      "evidence_hash": "ev2:09acf969bc7618b7"
+      "evidence_hash": "ev2:4dfe45b930e542f5"
     },
     {
       "rule_id": "diffpair_uncoupled_length",
       "type": "diffpair_uncoupled_length",
       "severity": "info",
-      "message": "Differential pair USB_D+/USB_D- worst per-terminal uncoupled length 2.007 mm within limit 6.350 mm [protocol:USB2_FS (TI SPRAAR7J \u00a73.3 (breakout within 0.25 in of the package); high-speed guidance, applied to full speed)] (kct-only: KiCad has no per-terminal uncoupled check)",
+      "message": "Differential pair USB_D+/USB_D- worst per-terminal uncoupled length 2.095 mm within limit 6.350 mm [protocol:USB2_FS (TI SPRAAR7J \u00a73.3 (breakout within 0.25 in of the package); high-speed guidance, applied to full speed)] (kct-only: KiCad has no per-terminal uncoupled check)",
       "location": null,
       "layer": null,
-      "actual_value": 2.0074,
+      "actual_value": 2.0949,
       "required_value": 6.35,
       "items": [],
       "nets": [
@@ -204,7 +204,7 @@
       "status": "info",
       "waived": false,
       "key": "diffpair_uncoupled_length||USB_D+,USB_D-|",
-      "evidence_hash": "ev2:0e7fe9124864e003"
+      "evidence_hash": "ev2:b30b44513a72d496"
     },
     {
       "rule_id": "diffpair_uncoupled_length",
