@@ -3358,7 +3358,8 @@ def run_selected_checks(
     #
     # * a gap caused by an absent model library (the variable is undefined or
     #   names a missing directory -- the CI runner and the pinned toolchain
-    #   ship none until #7683) is the *environment's* gap, not the board's.
+    #   ship none; ``kct models sync`` fetches the pinned subset, #7683) is
+    #   the *environment's* gap, not the board's.
     #   All of them collapse into ONE ``info`` finding per library variable,
     #   which never counts as a warning, so a host without a library reads
     #   "not evaluated" instead of N per-footprint defects;
@@ -3396,8 +3397,8 @@ def run_selected_checks(
                     severity="info",
                     message=(
                         f"3D coverage not evaluated for {len(entries)} footprint(s): "
-                        f"no model library at ${{{root}}} on this host (the pinned "
-                        "toolchain ships none; see #7683)"
+                        f"no model library at ${{{root}}} on this host (run "
+                        "`kct models sync` for the pinned subset; see #7683)"
                     ),
                     items=tuple(sorted(e.reference for e in entries)),
                 )

@@ -67,5 +67,10 @@ CHECK_CATEGORIES = [
 #: ``kicad_tools.pcb.model_audit.PINNED_MODEL_DIR`` is set while this set still
 #: names ``model_coverage``, so the category is made default-on (and board
 #: evidence re-recorded) deliberately rather than the deferral lingering.
+#: #7683 shipped the subset (``kct models sync``; ``PINNED_MODEL_DIR`` is now an
+#: explicit override, ``None`` by default) but kept this deferral: generated
+#: boards still carry ``no_ref`` footprints, a host-independent warning that
+#: would fail board 04's zero-warning reviewed gate on a fresh regen.  Drop
+#: ``model_coverage`` here with #7685, once every board is at 100%.
 #: Never add a category here to hide a host-independent defect.
 DEFERRED_OPT_IN_CATEGORIES: frozenset[str] = frozenset({"model_coverage"})

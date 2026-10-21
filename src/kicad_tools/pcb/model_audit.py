@@ -33,10 +33,10 @@ Resolution environments
 -----------------------
 ``host``    today's render environment (``_render_env`` + native Configure
             Paths), i.e. what ``kct render`` would see on this machine.
-``pinned``  the pinned KiCad toolchain image.  Its model set is not defined
-            yet (issue #7683), so every model variable points at an empty
-            directory: only ``${KIPRJMOD}``-relative files and embedded
-            models resolve.
+``pinned``  the pinned KiCad toolchain image plus the digest-verified model
+            subset ``kct models sync`` fetches (issue #7683).  Until that is
+            synced every model variable points at an empty directory: only
+            ``${KIPRJMOD}``-relative files and embedded models resolve.
 ``dir``     a caller-supplied model directory (``--model-dir``).
 
 Verified against host KiCad 10.0.x model libraries; the ``host`` totals depend
@@ -59,6 +59,7 @@ __all__ = [
     "EXEMPT_LIB_PATTERNS",
     "PLACEHOLDER_NAME_RE",
     "PINNED_MODEL_DIR",
+    "resolve_pinned_model_dir",
     "FootprintCoverage",
     "ModelAuditReport",
     "audit_pcb_models",
@@ -100,8 +101,10 @@ PLACEHOLDER_NAME_RE = re.compile(
     r"(^|[^a-z0-9])(placeholder|dummy|generic|proxy)([^a-z0-9]|$)", re.IGNORECASE
 )
 
-#: Model directory the pinned toolchain exposes.  ``None`` = it has none yet
-#: (issue #7683 will supply one).
+#: Explicit override of the pinned toolchain's model directory (tests, odd
+#: layouts).  ``None`` (the default) defers to
+#: :func:`kicad_tools.pcb.models3d_pinned.pinned_model_dir`, which is the
+#: synced cache only when every manifest file verifies (issue #7683).
 PINNED_MODEL_DIR: Path | None = None
 
 _PINNED_SENTINEL = "/nonexistent/kct-pinned-3dmodels"
@@ -219,6 +222,15 @@ class ModelAuditReport:
         }
 
 
+def resolve_pinned_model_dir() -> Path | None:
+    """The pinned toolchain's model directory, or ``None`` when not synced."""
+    if PINNED_MODEL_DIR is not None:
+        return PINNED_MODEL_DIR
+    from kicad_tools.pcb.models3d_pinned import pinned_model_dir
+
+    return pinned_model_dir()
+
+
 def build_environment(
     env: str = "host",
     *,
@@ -229,7 +241,8 @@ def build_environment(
     """Return the variable map used to expand model paths for *env*.
 
     ``host`` mirrors ``inspect_pcb_models`` (render env + native Configure
-    Paths); ``pinned`` exposes no model files; a *model_dir* maps every
+    Paths); ``pinned`` exposes the synced model subset (none until
+    ``kct models sync``); a *model_dir* maps every
     ``KICADn_3DMODEL_DIR`` variable to that directory.
     """
     # Imported lazily: ``cli.runner`` is heavy and imports back into ``pcb``.
@@ -247,9 +260,14 @@ def build_environment(
         variables = runner._configured_model_variables(kicad_cli)
         variables.update(runner._render_env(kicad_cli) or os.environ)
     else:
-        base = model_dir if model_dir is not None else (PINNED_MODEL_DIR or Path(_PINNED_SENTINEL))
+        explicit = model_dir if model_dir is not None else PINNED_MODEL_DIR
+        base = explicit or resolve_pinned_model_dir() or Path(_PINNED_SENTINEL)
         variables = {var: str(base) for var in runner.KICAD_3DMODEL_ENV_VARS}
-        variables[DEFAULT_CACHE_ENV_VAR] = str(base / "lcsc")
+        # The synced pinned subset is KiCad stock models only (#7683); it never
+        # serves LCSC/EasyEDA bodies (#7686), so the LCSC variable points at the
+        # sentinel unless the caller supplied an explicit model directory.
+        lcsc_base = explicit if explicit is not None else Path(_PINNED_SENTINEL)
+        variables[DEFAULT_CACHE_ENV_VAR] = str(lcsc_base / "lcsc")
     variables["KIPRJMOD"] = str(pcb_path.resolve().parent)
     return variables
 

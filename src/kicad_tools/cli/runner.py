@@ -28,7 +28,9 @@ from .kicad_toolchain import (
     KICAD_DOCKER_ENV,
     KICAD_DOCKER_IMAGE_ENV,
     PINNED_KICAD_IMAGE,
+    _synced_model_dir,
     docker_fallback_enabled,
+    docker_model_args,
     pinned_kicad_image,
     process_config_home,
 )
@@ -330,6 +332,8 @@ def _kicad_cli_candidates() -> list[Path]:
 
 #: Where :func:`build_docker_kicad_cmd` mounts the pinned config home.
 _DOCKER_CONFIG_HOME = "/kct-kicad-config"
+#: Where it mounts the synced pinned 3D model subset (#7683).
+_DOCKER_MODEL_DIR = "/kct-3dmodels"
 
 
 def build_docker_kicad_cmd(args: list[str], workdir: Path) -> list[str]:
@@ -347,6 +351,8 @@ def build_docker_kicad_cmd(args: list[str], workdir: Path) -> list[str]:
     """
     image = os.environ.get(KICAD_DOCKER_IMAGE_ENV) or pinned_kicad_image()
     config_home = process_config_home()
+    # The synced pinned 3D model subset (kct models sync, #7683), when verified.
+    model_args = docker_model_args(_synced_model_dir(), _DOCKER_MODEL_DIR)
     return [
         "docker",
         "run",
@@ -359,6 +365,7 @@ def build_docker_kicad_cmd(args: list[str], workdir: Path) -> list[str]:
         f"{config_home}:{_DOCKER_CONFIG_HOME}",
         "-e",
         f"KICAD_CONFIG_HOME={_DOCKER_CONFIG_HOME}",
+        *model_args,
         "-w",
         "/work",
         "--entrypoint",

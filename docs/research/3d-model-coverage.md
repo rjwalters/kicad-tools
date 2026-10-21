@@ -704,6 +704,9 @@ The issues are drafted in the session scratchpad, not filed.
    pinned kicad-cli. Fetch it by tag and digest into a cache, and mount it
    into the Docker shim. This is a network and size decision for an
    operator: 3.2 GB in full, or a sparse per-board subset.
+   *Status:* done in #7683 (ruling Q43 = 1). `kct models sync` fetches a
+   55-file, ~14 MB subset at tag `10.0.6` against a committed sha256
+   manifest; it excludes LCSC/EasyEDA bodies, which stay per-user (#7686).
 4. **Generators own their models.** Add a shared post-generation step
    (the `add_model_refs` ladder) to the board recipe and pipeline. Add a
    regeneration guard so a regen that drops bodies fails, as board 00 and

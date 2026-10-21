@@ -559,6 +559,11 @@ def _dispatch_command(args) -> int:
 
         return run_fleet_command(args)
 
+    elif args.command == "models":
+        from .commands.models import run_models_command
+
+        return run_models_command(args)
+
     elif args.command == "ecosystem":
         from .commands.ecosystem import run_ecosystem_command
 

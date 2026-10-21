@@ -253,11 +253,15 @@ def test_check_collapses_missing_library_into_one_info(tmp_path, models, monkeyp
 
 
 def test_opt_in_deferral_expires_with_pinned_model_set():
-    """``model_coverage`` stays out of the default set only until #7683.
+    """``model_coverage`` stays out of the default set until #7683/#7685.
 
     When ``PINNED_MODEL_DIR`` is set this fails: drop ``model_coverage`` from
     ``DEFERRED_OPT_IN_CATEGORIES`` (making it default-on) and re-record board
-    evidence then (#7683/#7685).
+    evidence then (#7683/#7685).  #7683 shipped the synced subset through
+    ``resolve_pinned_model_dir()`` with ``PINNED_MODEL_DIR`` left as a ``None``
+    override, and deliberately kept the deferral: fresh regens still carry
+    host-independent ``no_ref`` warnings (board 04's reviewed gate), so it
+    expires with #7685.
     """
     from kicad_tools.cli.check_categories import CHECK_CATEGORIES, DEFERRED_OPT_IN_CATEGORIES
 
