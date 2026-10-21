@@ -426,7 +426,7 @@ class HierarchyBuilder:
 
         # Get UUID
         uuid = ""
-        if uuid_node := sexp.find("uuid"):
+        if uuid_node := sexp.find_child("uuid"):
             uuid = uuid_node.get_string(0) or ""
 
         # Parse sheets

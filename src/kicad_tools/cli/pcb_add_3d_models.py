@@ -35,6 +35,7 @@ def run_add_3d_models(
     fetch_lcsc: bool = False,
     dry_run: bool = False,
     refresh: bool = False,
+    allow_dangling: bool = False,
     output_format: str = "text",
 ) -> int:
     """Patch missing 3D model refs into *pcb_path*.
@@ -60,6 +61,8 @@ def run_add_3d_models(
             nodes and replace them with freshly computed refs; footprints
             the tiers cannot re-resolve keep their existing nodes untouched
             (default: insert-only, existing refs are never modified).
+        allow_dangling: Insert a library ref even when its STEP file does not
+            exist (default: report it as ``dangling_in_library``, insert nothing).
         output_format: ``"text"`` or ``"json"``.
 
     Returns:
@@ -107,6 +110,7 @@ def run_add_3d_models(
             lcsc_warn=_warn,
             dry_run=dry_run,
             refresh=refresh,
+            allow_dangling=allow_dangling,
         )
     except Exception as e:
         if output_format == "json":
@@ -127,6 +131,7 @@ def run_add_3d_models(
         "refresh_kept": report.refresh_kept,
         "already_present": report.already_present,
         "unresolved": report.unresolved,
+        "dangling_in_library": report.dangling_in_library,
         "no_model_in_library": report.no_model_in_library,
         "variant_matches": report.variant_matches,
         "substitution_matches": report.substitution_matches,
@@ -182,6 +187,10 @@ def run_add_3d_models(
                 f"  Library footprint has no model: "
                 f"{', '.join(sorted(set(report.no_model_in_library)))}"
             )
+        if report.dangling_in_library:
+            print("  Library ref points at a missing file (nothing inserted):")
+            for lib_id, ref in sorted(report.dangling_in_library.items()):
+                print(f"    {lib_id} -> {ref}")
         if report.unresolved:
             print(
                 f"  Not in installed libraries (skipped): "

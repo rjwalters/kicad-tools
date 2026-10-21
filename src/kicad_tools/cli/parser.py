@@ -2753,6 +2753,13 @@ def _add_pcb_parser(subparsers) -> None:
         "keep their existing refs untouched. Default: insert-only — existing "
         "refs are never modified",
     )
+    pcb_add_models.add_argument(
+        "--allow-dangling",
+        action="store_true",
+        help="Insert a library (model ...) ref even when its STEP file does not "
+        "exist (KLC F9.3 behaviour). Default: such refs are reported as "
+        "dangling_in_library and nothing is inserted",
+    )
 
     # pcb remove-footprint
     pcb_remove_fp = pcb_subparsers.add_parser(
