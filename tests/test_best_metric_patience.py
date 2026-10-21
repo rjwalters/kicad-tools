@@ -572,7 +572,10 @@ class TestAllInnerCallsForwardPatience:
                 cursor += 1
             arg_block = src[idx + len(call_marker) : cursor - 1]
             call_count += 1
-            if "best_stall_patience" not in arg_block:
+            # Issue #7377: the sites splat ``**_negotiated_kwargs(...)``, which
+            # emits ``best_stall_patience`` (pinned by
+            # ``test_negotiated_kwargs_helper_forwards_patience`` below).
+            if "best_stall_patience" not in arg_block and "**_negotiated_kwargs(" not in arg_block:
                 # Translate idx -> 1-based line number for diagnostics.
                 line_no = src.count("\n", 0, idx) + 1
                 missing_lines.append(line_no)
@@ -595,6 +598,23 @@ class TestAllInnerCallsForwardPatience:
             f"signature default is 2 even when args.early_stop_patience is "
             f"larger."
         )
+
+    def test_negotiated_kwargs_helper_forwards_patience(self):
+        """Issue #7377: the shared kwargs builder is the single place that
+        derives ``best_stall_patience`` from ``args.early_stop_patience``."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.route_cmd import _negotiated_kwargs
+
+        def patience(**overrides):
+            args = Namespace(iterations=5, **overrides)
+            return _negotiated_kwargs(args, timeout=None, checkpoint_callback=None)[
+                "best_stall_patience"
+            ]
+
+        assert patience(early_stop_patience=4) == 4
+        assert patience() == 2
+        assert patience(early_stop_patience=0) is None
 
 
 if __name__ == "__main__":
