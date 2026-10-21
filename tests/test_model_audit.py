@@ -314,3 +314,15 @@ def test_check_cli_strict_unchanged_by_default_and_opt_in_flag(tmp_path, models)
     assert _coverage_rules(only) == ["model_coverage"]
     code, strict = _check_cli(pcb, "--only", "model_coverage", "--strict")
     assert code == 2 and _coverage_rules(strict) == ["model_coverage"]
+
+
+def test_top_level_kct_check_forwards_3d_models_flag(tmp_path, models):
+    """``kct check --3d-models`` goes through the top-level parser too."""
+    from kicad_tools.cli import main as kct_main
+
+    pcb = _write(tmp_path, _fp("U1"))
+    report = tmp_path / "top.json"
+    kct_main(["check", str(pcb), "--3d-models", "--format", "json", "--output", str(report)])
+    assert _coverage_rules(json.loads(report.read_text())) == ["model_coverage"]
+    kct_main(["check", str(pcb), "--format", "json", "--output", str(report)])
+    assert _coverage_rules(json.loads(report.read_text())) == []

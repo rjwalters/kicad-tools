@@ -952,6 +952,13 @@ def _add_check_parser(subparsers) -> None:
     check_parser.add_argument("--errors-only", action="store_true")
     check_parser.add_argument("--strict", action="store_true", help="Exit with code 2 on warnings")
     check_parser.add_argument(
+        "--3d-models",
+        dest="models_3d",
+        action="store_true",
+        help="Also run the opt-in model_coverage category (issue #7682; "
+        "off by default until #7683/#7685 because it depends on the host's 3D library)",
+    )
+    check_parser.add_argument(
         "--strict-connectivity",
         dest="strict_connectivity",
         action="store_true",
