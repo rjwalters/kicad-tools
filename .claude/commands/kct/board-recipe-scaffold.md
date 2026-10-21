@@ -50,6 +50,8 @@ Emit a `<board-path>/generate_design.py` with these nine steps as functions, and
 
 4. **`create_‹circuit›_pcb(output_dir)`** — build the `.kicad_pcb` with an explicit `NETS` dict and footprints placed at **0° / 45° / 90° / 135° only**. Non-multiple-of-45° rotations hit a footprint rotation-transform ambiguity (see issue #3737 for *why* — cited as rationale, not a required read). Return the unrouted PCB path.
 
+4.5. **`ensure_models(pcb_path)`** (in `main()`, right after step 4, before `route_pcb`) — `from kicad_tools.pcb.models3d import ensure_models`. Generated footprint text carries no `(model …)` nodes, so without this call every regeneration silently drops the 3D bodies (issue #7684). It runs the existence-checked model ladder and is pure insertion (copper, pads, zones and nets are byte-identical); library refs whose STEP file does not exist are reported in `dangling_in_library` instead of inserted. It returns an empty report, touching nothing, on a host without KiCad libraries.
+
 5. **`route_pcb(input_path, output_path)`** — `kicad_tools.router.DesignRules` + `load_pcb_for_routing` + `router.route_all()` + `TraceOptimizer`; then pour: `kicad_tools.router.auto_pour.auto_pour_if_missing()` + `kicad_tools.cli.route_cmd._fill_zones_after_route()` for the power/ground pour nets. Return a `route_success` boolean (`True` only when **all** signal nets landed) — do **not** swallow a partial route here; the gate in step 5.5 owns the decision.
 
 5.5. **`route_success` fast-fail gate (do this in `main()`, immediately after `route_pcb(...)`, BEFORE pour-stitching / LVS / export).** If `not route_success`, `raise` a **distinct, clearly-worded** error and stop — do not fall through to the LVS/pour/export steps:
