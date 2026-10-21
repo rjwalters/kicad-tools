@@ -22,10 +22,9 @@ KiCad itself) need no library setup.
 
 ``PIN_NETS`` below is the schematic-side source of truth and mirrors the
 per-pad net assignment in ``generate_pcb.py`` — the copper-LVS step in
-``generate_design.py`` is what keeps the two in lock-step.  Note board 07
-routes PARTIAL by design (1 unroutable net, #7557 / #3438:
-TMDS_D0_N), so with a wired schematic copper-LVS HONESTLY reports
-that net as an open.
+``generate_design.py`` is what keeps the two in lock-step.  Since #7557
+every signal net routes on seed 42, so copper-LVS against the wired
+schematic is clean (before it, TMDS_D0_N was the one honest open).
 
 Usage:
     python generate_schematic.py [output_file]
@@ -227,44 +226,44 @@ PIN_NETS: dict[str, dict[str, str]] = {
         "23": "GND",
         "24": "GND",
     },
-    # U4 -- BGA-49 HDMI sink
+    # U4 -- BGA-49 HDMI sink (TMDS on the J2-facing column 1, issue #7557)
     "U4": {
-        "A1": "GND",
+        "A1": "TMDS_D0_P",
         "A2": "GND",
         "A3": "GND",
         "A4": "GND",
         "A5": "GND",
         "A6": "GND",
         "A7": "GND",
-        "B1": "TMDS_D0_P",
-        "B2": "TMDS_D0_N",
-        "B3": "TMDS_D1_P",
-        "B4": "TMDS_D1_N",
-        "B5": "TMDS_D2_P",
-        "B6": "TMDS_D2_N",
+        "B1": "TMDS_D0_N",
+        "B2": "GND",
+        "B3": "GND",
+        "B4": "GND",
+        "B5": "GND",
+        "B6": "GND",
         "B7": "GND",
-        "C1": "GND",
+        "C1": "TMDS_D1_P",
         "C2": "+1V2",
         "C3": "+1V8",
         "C4": "+1V8",
         "C5": "+1V8",
         "C6": "+1V8",
         "C7": "GND",
-        "D1": "GND",
+        "D1": "TMDS_D1_N",
         "D2": "+1V8",
         "D3": "+1V8",
         "D4": "+1V8",
         "D5": "+1V8",
         "D6": "+1V8",
         "D7": "GND",
-        "E1": "GND",
+        "E1": "TMDS_D2_P",
         "E2": "+1V8",
         "E3": "+1V8",
         "E4": "+1V8",
         "E5": "+1V8",
         "E6": "+1V2",
         "E7": "GND",
-        "F1": "GND",
+        "F1": "TMDS_D2_N",
         "F2": "GND",
         "F3": "GND",
         "F4": "GND",

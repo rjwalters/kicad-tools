@@ -400,9 +400,8 @@ job_board_06_end_to_end() {
 }
 
 job_board_07_end_to_end() {
-  # Sole known open: TMDS_D0_N (#7557, measured in #7554, under epic
-  # #3438); must match ci.yml.
-  local known_opens="TMDS_D0_N"
+  # No known opens since #7557 (all 31 signal nets route); must match
+  # ci.yml's board-07-end-to-end job.
   uv run kct build-native
   rm -rf /tmp/board07-ci
   mkdir -p /tmp/board07-ci
@@ -416,7 +415,6 @@ job_board_07_end_to_end() {
     /tmp/board07-ci/matchgroup_test_routed.kicad_pcb \
     > /tmp/board07-copper.json
   uv run python scripts/ci/check_copper_lvs.py \
-    --expect-opens "$known_opens" \
     /tmp/board07-copper.json
   _check_drc_over_committed_path \
     /tmp/board07-ci/matchgroup_test_routed.kicad_pcb \
@@ -426,11 +424,10 @@ job_board_07_end_to_end() {
   cp -r /tmp/board07-ci/. /tmp/board07-staging/07-matchgroup-test/output/
   uv run kct board-metrics /tmp/board07-staging/07-matchgroup-test
   uv run python scripts/ci/check_net_status.py \
-    --known-open-nets "$known_opens" \
     /tmp/board07-ci/matchgroup_test_routed.kicad_pcb
   uv run python scripts/ci/check_board_00_e2e.py \
     --stem matchgroup_test \
-    --lvs-known-opens "$known_opens" \
+    --lvs-only \
     /tmp/board07-staging/07-matchgroup-test
 }
 

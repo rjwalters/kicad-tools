@@ -592,9 +592,18 @@ def generate_hdmi_connector() -> str:
 def generate_bga49_hdmi_sink() -> str:
     """BGA-49 simulator -- HDMI TMDS sink (3 pairs).
 
-    7x7 SMD pad grid at 1.27mm pitch.  TMDS pairs on row B with
-    adjacent column placement so the router has to escape the BGA's
-    perimeter ring before turning toward J2.
+    7x7 SMD pad grid at 1.27mm pitch.  The TMDS balls sit on the outer
+    column 1 (rows A-F, top to bottom D0_P/D0_N/D1_P/D1_N/D2_P/D2_N): the
+    J2-facing edge, in J2's pin order (issue #7557).
+
+    Issue #7557: they used to sit on row B (B1..B6), one ring inside the
+    perimeter, so every leg but B1 had to escape between the row-A GND
+    balls.  Seed-42 routed 30/31 there: TMDS_D0_N was sealed in
+    (``U4.B2 has no legal exit``) by the neighbouring balls plus the
+    committed escapes of the other TMDS legs, and moving only D0 to row A
+    (A1..A6) moved the seal-in to ``U4.A2``.  U4 is a synthetic sink, so its
+    ball assignment is a free design choice; on column 1 every leg leaves
+    the package straight toward J2 and seed-42 routes 31/31.
     """
     x = BOARD_ORIGIN_X + 85
     y = BOARD_ORIGIN_Y + 55
@@ -614,13 +623,13 @@ def generate_bga49_hdmi_sink() -> str:
     pin_nets["C2"] = "+1V2"
     pin_nets["E6"] = "+1V2"
 
-    # TMDS pairs on row B (3 pairs across cols 1/2, 3/4, 5/6).
-    pin_nets["B1"] = "TMDS_D0_P"
-    pin_nets["B2"] = "TMDS_D0_N"
-    pin_nets["B3"] = "TMDS_D1_P"
-    pin_nets["B4"] = "TMDS_D1_N"
-    pin_nets["B5"] = "TMDS_D2_P"
-    pin_nets["B6"] = "TMDS_D2_N"
+    # TMDS pairs on the J2-facing outer column 1 (issue #7557; was row B).
+    pin_nets["A1"] = "TMDS_D0_P"
+    pin_nets["B1"] = "TMDS_D0_N"
+    pin_nets["C1"] = "TMDS_D1_P"
+    pin_nets["D1"] = "TMDS_D1_N"
+    pin_nets["E1"] = "TMDS_D2_P"
+    pin_nets["F1"] = "TMDS_D2_N"
 
     pads: list[str] = []
     for row_idx, row_letter in enumerate("ABCDEFG"):

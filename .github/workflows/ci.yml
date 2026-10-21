@@ -2652,48 +2652,40 @@ jobs:
     # Set BOARD_07_CI_ENABLED=true after #5068/#5069 integration safeguards pass.
     needs: [changes, kicad_pin]
     if: ${{ (vars.BOARD_07_CI_ENABLED == 'true') && !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.board07 == 'true' || needs.changes.result == 'failure') }}
-    # Issue #3779 (LVS honestly dirty per #4012): end-to-end gate for
-    # board 07 ("matchgroup-test").  The fixture schematic is now FULLY
-    # WIRED (#4012: 244/244 pads bound), so the copper comparator carries
-    # real evidence -- and board 07 routes PARTIAL by design (1
-    # unroutable net, TMDS_D0_N, tracked in #7557 -- measured in #7554 --
-    # under epic #3438;
-    # DQ3, DQ4, MIPI_DAT0_N and TMDS_D1_N route as of 2026-10-20, origin/main
-    # e1c361478, seed 42), so the HONEST verdict is ``clean: false``
-    # with exactly that 1 open.  (Before #4012 the schematic bound 0
-    # pins and the #4006 vacuity guard masked these real opens behind a
-    # "LVS not run" verdict; before #4006, a zero-evidence ``clean=true``
-    # masked them entirely.)  The recipe emits ``lvs.json`` with
-    # ``require_clean=False`` (the opens are expected); this job asserts
-    # the exact known-opens contract:
+    # Issue #3779: end-to-end gate for board 07 ("matchgroup-test").  The
+    # fixture schematic is FULLY WIRED (#4012: 244/244 pads bound), so the
+    # copper comparator carries real evidence.  Issue #7557 moved U4's TMDS
+    # balls to its J2-facing outer column, and the seed-42 re-route now
+    # reaches 31/31 signal nets (TMDS_D0_N, the last known open, routes), so
+    # this job graduated from the known-opens contract to plain LVS-clean:
     #
-    # * ``check_copper_lvs.py --expect-opens TMDS_D0_N`` on a fresh
-    #   out-of-process re-check: ONLY kind='open', on EXACTLY that 1
-    #   net -- a short, a new open, or a net becoming routable all fail;
-    # * ``check_board_00_e2e.py --lvs-known-opens TMDS_D0_N``: lvs.json
-    #   carries the same 1 open (label leg clean) and board.json renders
-    #   the honest ``lvs_clean: false`` (gallery: "LVS: 1 mismatch",
-    #   status 'partial').
+    # * ``check_copper_lvs.py`` (no flags) on a fresh out-of-process
+    #   re-check: any open or short fails;
+    # * ``check_net_status.py`` (no ``--known-open-nets``): any unconnected
+    #   pad on a gated net fails;
+    # * ``check_board_00_e2e.py --lvs-only``: lvs.json ``clean: true`` and
+    #   board.json ``lvs_clean: true``.
+    #
+    # (Before #7557 the job asserted exactly 1 known open, TMDS_D0_N; before
+    # #4012 the schematic bound 0 pins and the #4006 vacuity guard masked the
+    # real opens behind a "LVS not run" verdict.)
     #
     # Issue #4468 (epic #3438 Phase 3) added the classifier-driven
     # placement-delta feedback loop to this board's route step and
     # measured it: the set was UNCHANGED at 5 then (since shrunk to
-    # TMDS_D0_N, #7552).  The loop does find a
+    # TMDS_D0_N, #7552, and emptied by #7557).  The loop does find a
     # reach-improving move (a 2 mm translate of U3 closes MIPI_DAT0_N,
     # 26/31 -> 27/31) but refuses it because it also raises the router's
     # clearance-violation count -- see boards/07-matchgroup-test/README.md
-    # 'Placement-delta feedback' for the per-probe measurements.  The list
-    # is a MAXIMUM: shrink it when a delta genuinely survives, never widen
-    # it to absorb one.
+    # 'Placement-delta feedback' for the per-probe measurements.  Never
+    # reintroduce a known-opens list to absorb a regression.
     #
     # NEW, ADDITIVE gate -- does NOT replace the
     # ``matchgroup-routing-regression`` job.  Board 07 carries identity-allowed
-    # DRC residuals (check_matchgroup_coverage.py, #7367) and routes PARTIAL
-    # by design, so no Overall: PASSED / status:ok / drc_violations:0
-    # assertions apply.  If #7557 / #3438 ever makes TMDS_D0_N routable, graduate
-    # this job to --lvs-only + a plain copper-clean assertion.
+    # DRC residuals (check_matchgroup_coverage.py, #7367), so no
+    # Overall: PASSED / status:ok / drc_violations:0 assertions apply.
     # Advisory until a repo admin adds it to branch protection.
-    name: Board 07 End-to-End (LVS known opens)
+    name: Board 07 End-to-End (LVS clean)
     runs-on: ubuntu-latest
     # Issue #4468: the route step now performs up to THREE full negotiated
     # passes (the baseline pass plus the two
@@ -2741,12 +2733,9 @@ jobs:
         run: uv run kct build-native
 
       - name: Regenerate board 07 from recipe (--step all, clean tmp directory)
-        # PARTIAL routing is expected on this board (1 unroutable net,
-        # TMDS_D0_N, #7557 / #3438), so the recipe exits non-zero -- tolerate
-        # it (|| true).
-        # The recipe emits lvs.json with the honest clean=false / 1-open
-        # verdict (#4012, require_clean=False because the opens are
-        # expected).  The asserters below are the gate.
+        # The recipe still exits non-zero on its allowlisted DRC residuals
+        # (skew/impedance, #7550/#7349/#7619) -- tolerate it (|| true).
+        # The asserters below are the gate.
         run: |
           set -uo pipefail
           rm -rf /tmp/board07-ci
@@ -2757,15 +2746,12 @@ jobs:
           test -f /tmp/board07-ci/matchgroup_test.kicad_sch
           test -f /tmp/board07-ci/matchgroup_test_routed.kicad_pcb
 
-      - name: Copper-LVS known-opens re-check (out-of-process, #3838/#4012)
+      - name: Copper-LVS clean re-check (out-of-process, #3838/#7557)
         # Re-run compare_copper_netlist in a process the CI job controls (NOT
         # the recipe) on the REGENERATED schematic + routed PCB.  Board 07's
-        # schematic is fully wired (#4012: 244/244 pads bound) and the board
-        # routes PARTIAL by design, so the honest verdict is exactly the 1
-        # known open (TMDS_D0_N, #7557 under #3438): --expect-opens asserts
-        # that set and nothing else.  A copper short, a NEW open, a vacuous
-        # verdict (the schematic regressed to unwired), or TMDS_D0_N becoming
-        # routable all fail the gate.  Entrypoint from #3838.
+        # schematic is fully wired (#4012: 244/244 pads bound) and, since
+        # #7557, every signal net routes: any open, short or vacuous verdict
+        # fails the gate.  Entrypoint from #3838.
         run: |
           set -euo pipefail
           uv run python -m kicad_tools.lvs.copper_lvs \
@@ -2773,7 +2759,6 @@ jobs:
             /tmp/board07-ci/matchgroup_test_routed.kicad_pcb \
             > /tmp/board07-copper.json
           uv run python scripts/ci/check_copper_lvs.py \
-            --expect-opens "TMDS_D0_N" \
             /tmp/board07-copper.json
 
       - name: Independent synthetic routing gate (matching PCB and sidecars)
@@ -2795,33 +2780,23 @@ jobs:
           cp -r /tmp/board07-ci/. /tmp/board07-staging/07-matchgroup-test/output/
           uv run kct board-metrics /tmp/board07-staging/07-matchgroup-test
 
-      - name: Assert plane-net completion (known opens tolerated, #4531)
-        # Raw total_unconnected_pads gate (scripts/ci/check_net_status.py).
-        # Board 07 routes PARTIAL by design: 1 unroutable net, TMDS_D0_N
-        # (#7557 / #3438 / #4012). --known-open-nets excludes THAT net's pads
-        # from the gated count while still failing on an unconnected pad on
-        # any OTHER net -- so a DIFFERENT net silently going open is still
-        # caught (tighter than raising --max-unconnected to its pad
-        # count). The set mirrors the --lvs-known-opens above.
+      - name: Assert net completion (#4531, no known opens since #7557)
+        # Raw total_unconnected_pads gate (scripts/ci/check_net_status.py):
+        # every signal net routes since #7557, so no net is excluded.
         run: |
           set -euo pipefail
           uv run python scripts/ci/check_net_status.py \
-            --known-open-nets "TMDS_D0_N" \
             /tmp/board07-ci/matchgroup_test_routed.kicad_pcb
 
-      - name: Assert artifacts + honest known-opens LVS state (#4012)
-        # --lvs-known-opens: lvs.json must be present, clean=false, NOT
-        # vacuous, with ONLY kind='open' copper mismatches on exactly the
-        # unroutable net TMDS_D0_N (#7557 / #3438) and an empty
-        # label-mismatch list; board.json must carry the honest
-        # lvs_clean=false (gallery: "LVS: 1 mismatch").  No
-        # status/drc_violations assertions (allowlisted DRC residuals ->
-        # status='partial').
+      - name: Assert artifacts + lvs.json clean (LVS-only, #7557)
+        # --lvs-only: artifact presence + lvs.json clean=true + board.json
+        # lvs_clean=true.  No status/drc_violations assertions (allowlisted
+        # DRC residuals -> status='partial').
         run: |
           set -euo pipefail
           uv run python scripts/ci/check_board_00_e2e.py \
             --stem matchgroup_test \
-            --lvs-known-opens "TMDS_D0_N" \
+            --lvs-only \
             /tmp/board07-staging/07-matchgroup-test
 
       - name: Collect failed routing bundle (diagnostic reproduction, #5067)
