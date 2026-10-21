@@ -408,8 +408,13 @@ def _fetch_lcsc_step(lcsc_id: str) -> bytes | None:
     return None if fetched is None else fetched[0]
 
 
-def _fetch_lcsc_step_ex(lcsc_id: str) -> tuple[bytes, str] | None:
-    """Fetch ``(STEP bytes, model uuid)`` for *lcsc_id*, or ``None`` on failure.
+def _fetch_lcsc_step_ex(lcsc_id: str) -> tuple[bytes, str, list[dict[str, object]]] | None:
+    """Fetch ``(STEP bytes, model uuid, EasyEDA pads)`` for *lcsc_id*, or ``None``.
+
+    The pads (``[{"number", "x", "y"}]`` in mm, EasyEDA footprint frame) come
+    from the component-info body already fetched for the uuid; they let
+    :mod:`kicad_tools.pcb.lcsc_registration` derive the body's rotate/offset
+    offline from the cache.  ``[]`` when the layout is not recognised.
 
     Two GETs: component-info (to extract the 3D-model uuid) then the STEP body.
     Never raises -- degrades to ``None`` on any network/parse failure.
@@ -429,7 +434,13 @@ def _fetch_lcsc_step_ex(lcsc_id: str) -> tuple[bytes, str] | None:
         return None
     if not step.lstrip().startswith(_STEP_MAGIC):
         return None
-    return step, uuid
+    from kicad_tools.pcb.lcsc_registration import parse_easyeda_pads
+
+    pads = [
+        {"number": p.number, "x": round(p.x, 4), "y": round(p.y, 4)}
+        for p in parse_easyeda_pads(info)
+    ]
+    return step, uuid, pads
 
 
 # --------------------------------------------------------------------------
@@ -451,6 +462,8 @@ class LcscCacheMeta:
     fetch_date: str
     model_uuid: str | None
     source: str = CACHE_SOURCE
+    pads: tuple[tuple[str, float, float], ...] = ()
+    """EasyEDA footprint pads ``(number, x_mm, y_mm)`` captured at fetch time."""
 
 
 def _meta_path(cache: Path, lcsc_id: str) -> Path:
@@ -472,12 +485,20 @@ def read_cache_meta(lcsc_id: str, cache_dir: Path | None = None) -> LcscCacheMet
     if not isinstance(digest, str) or not _SHA256_RE.match(digest):
         return None
     uuid = raw.get("model_uuid")
+    pads: list[tuple[str, float, float]] = []
+    for pad in raw.get("pads") or []:
+        if not isinstance(pad, dict):
+            continue
+        x, y = pad.get("x"), pad.get("y")
+        if isinstance(x, (int, float)) and isinstance(y, (int, float)) and pad.get("number"):
+            pads.append((str(pad["number"]), float(x), float(y)))
     return LcscCacheMeta(
         lcsc=lcsc_id,
         sha256=digest,
         fetch_date=str(raw.get("fetch_date", "")),
         model_uuid=uuid if isinstance(uuid, str) else None,
         source=str(raw.get("source", CACHE_SOURCE)),
+        pads=tuple(pads),
     )
 
 
@@ -657,13 +678,14 @@ def resolve_lcsc_step(
         if callable(warn):
             warn(f"LCSC 3D model fetch failed for {lcsc_id} (no model inserted)")
         return None
-    data, model_uuid = fetched
+    data, model_uuid, pads = fetched
     meta = {
         "lcsc": lcsc_id,
         "sha256": sha256_hex(data),
         "fetch_date": date.today().isoformat(),
         "model_uuid": model_uuid,
         "source": CACHE_SOURCE,
+        "pads": pads,
     }
     try:
         cache.mkdir(parents=True, exist_ok=True)

@@ -159,6 +159,8 @@ def run_add_3d_models(
         "lcsc_matches": report.lcsc_matches,
         "lcsc_transforms": report.lcsc_transforms,
         "lcsc_content_changed": report.lcsc_content_changed,
+        "lcsc_registration": report.lcsc_registration,
+        "lcsc_needs_calibration": report.lcsc_needs_calibration,
         "lcsc_from_bom": {
             lib_id: {"lcsc": entry.lcsc, "source": bom_result.sources.get(lib_id, "")}
             for lib_id, entry in sorted(bom_result.mapping.items())
@@ -202,6 +204,14 @@ def run_add_3d_models(
         if report.lcsc_transforms:
             print("  Per-part LCSC transforms applied:")
             for lib_id, desc in sorted(report.lcsc_transforms.items()):
+                print(f"    {lib_id}: {desc}")
+        if report.lcsc_registration:
+            print("  LCSC transforms derived from EasyEDA pad registration:")
+            for lib_id, desc in sorted(report.lcsc_registration.items()):
+                print(f"    {lib_id}: {desc}")
+        if report.lcsc_needs_calibration:
+            print("  LCSC registration residual too high (calibrate by hand, see the guide):")
+            for lib_id, desc in sorted(report.lcsc_needs_calibration.items()):
                 print(f"    {lib_id}: {desc}")
         if stale_sidecar:
             print("  Stale LCSC sidecar entries (remove or fix them; the BOM is authoritative):")

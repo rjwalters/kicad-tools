@@ -76,6 +76,7 @@ from kicad_tools.pcb.model_substitutions import substitute_lib_id
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from kicad_tools.pcb.lcsc_models import LcscModelEntry
+    from kicad_tools.pcb.lcsc_registration import RegistrationResult
 
 # The LCSC sidecar mapping accepted by the tier-4 resolver.  A bare ``str``
 # value (a plain ``lib_id -> C-number`` dict) stays valid for callers written
@@ -593,6 +594,11 @@ class ResolvedModels:
     """Set (with empty *models*) when every installed-library candidate
     carried only model refs whose file does not exist; holds the library's
     own ref so the report can name what needs sourcing."""
+    register: Callable[[str], tuple[list[str] | None, RegistrationResult | None]] | None = None
+    """LCSC tier only (issue #7686): called with the target footprint's text,
+    returns ``(models, result)`` -- *models* replace the identity block when the
+    EasyEDA-pad registration was accepted (``None`` otherwise), *result* is the
+    fit (``None`` when no fit was possible)."""
 
 
 # A resolver maps a lib id to its resolved models.  For backward
@@ -806,6 +812,31 @@ def make_library_resolver(
 
         return find_kicad_3dmodel_dir()
 
+    def _lcsc_registrar(
+        lcsc_id: str,
+    ) -> Callable[[str], tuple[list[str] | None, RegistrationResult | None]] | None:
+        """Pad-registration callback for a cached body with no authored transform.
+
+        Needs the EasyEDA footprint pads captured in the cache metadata at
+        fetch time; returns ``None`` (identity stays) when there are none.
+        """
+        from kicad_tools.pcb.lcsc_models import read_cache_meta, synthesize_model_block
+        from kicad_tools.pcb.lcsc_registration import EasyEdaPad, register_pads
+
+        meta = read_cache_meta(lcsc_id, lcsc_cache_dir)
+        if meta is None or not meta.pads:
+            return None
+        easy_pads = [EasyEdaPad(number=n, x=x, y=y) for n, x, y in meta.pads]
+
+        def _register(body: str) -> tuple[list[str] | None, RegistrationResult | None]:
+            result = register_pads(easy_pads, _pad_positions(body))
+            if result is None or not result.accepted:
+                return None, result
+            block = synthesize_model_block(lcsc_id, rotate=result.rotate, offset=result.offset)
+            return [block], result
+
+        return _register
+
     def _resolve_lcsc(lib_id: str) -> ResolvedModels | None:
         """Tier 4: LCSC/EasyEDA fetch-on-demand.  Returns None when the lib id
         has no mapping, or the STEP is neither cached nor fetchable."""
@@ -867,6 +898,9 @@ def make_library_resolver(
                 rotate_from_sidecar=sidecar_rotate is not None,
                 offset_from_sidecar=sidecar_offset is not None,
             )
+        register = None
+        if rotate is None and offset is None:
+            register = _lcsc_registrar(lcsc_id)
         # Origin-authored body: explicit (0, 0) source anchor so the shared
         # offset math shifts by the full target pad centroid.  ``source_orientation``
         # is deliberately left ``None`` -- there is no source footprint to
@@ -877,6 +911,7 @@ def make_library_resolver(
         return ResolvedModels(
             models=[synthesize_model_block(lcsc_id, rotate=rotate, offset=offset)],
             source_anchor=(0.0, 0.0),
+            register=register,
         )
 
     def resolve(lib_id: str) -> ResolvedModels | None:
@@ -963,6 +998,13 @@ class ModelPatchReport:
     lcsc_transforms: dict[str, str] = field(default_factory=dict)
     """Lib ids whose LCSC body received a non-identity per-part transform
     (``lib_id -> human-readable summary naming each field's source``)."""
+    lcsc_registration: dict[str, str] = field(default_factory=dict)
+    """Lib ids whose LCSC body transform was **derived** by registering the
+    EasyEDA pad geometry onto the footprint pads (``lib_id -> summary with the
+    fit residual``, issue #7686)."""
+    lcsc_needs_calibration: dict[str, str] = field(default_factory=dict)
+    """Lib ids where that registration's residual was too high to accept: the
+    identity (or packaged) transform was kept and a human must calibrate."""
     lcsc_content_changed: dict[str, str] = field(default_factory=dict)
     """Lib ids whose cached LCSC body no longer matches its sha256 pin
     (``lib_id -> message``).  Nothing was inserted for them: a changed body is
@@ -1015,6 +1057,13 @@ def add_model_refs_to_text(
             models = resolved.models
             source_anchor = resolved.source_anchor
             source_orientation = resolved.source_orientation
+            if resolved.register is not None and models:
+                derived_models, fit = resolved.register(body)
+                if fit is not None and derived_models is not None:
+                    models = derived_models
+                    report.lcsc_registration[block.lib_id] = fit.describe()
+                elif fit is not None:
+                    report.lcsc_needs_calibration[block.lib_id] = fit.describe()
             if resolved.dangling is not None and not models:
                 report.dangling_in_library[block.lib_id] = resolved.dangling
         else:
