@@ -33,6 +33,8 @@ def _make_symbol(
     sym.value = value
     sym.uuid = uuid
     sym.unit = unit
+    # No (instances ...) entry: the check falls back to ``reference``.
+    sym.instance_reference.return_value = None
     return sym
 
 

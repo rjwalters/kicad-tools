@@ -457,6 +457,10 @@ def execute_add_labels(
 
     # Build hierarchy to get label positions
     hierarchy = build_hierarchy(root_schematic)
+    # (child file, label name) pairs already handled: two placements of one
+    # sheet file each report the same missing label, but the file needs it
+    # added only once (issue #7616).
+    handled: set[tuple[Path, str]] = set()
 
     for action in actions:
         if action.action_type != "add_label":
@@ -474,6 +478,11 @@ def execute_add_labels(
                 )
             )
             continue
+
+        key = (_resolved(child_node.path), action.name)
+        if key in handled:
+            continue
+        handled.add(key)
 
         # Get page size
         child_path = Path(child_node.path)
