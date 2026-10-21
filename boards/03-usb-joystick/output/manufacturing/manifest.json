@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.24.0",
-  "generated_at": "2026-10-21T07:11:48.661331+00:00",
+  "generated_at": "2026-10-21T13:32:06.957882+00:00",
   "manufacturer": "jlcpcb-tier1",
   "files": {
     "DESIGN_REVIEW.md": {
@@ -29,7 +29,7 @@
       "size": 1033
     },
     "check-report.json": {
-      "sha256": "a0c11dc551e4c6b1c464b4b950656f0fa61b73d65454f03076ea9e7660b2af9e",
+      "sha256": "55c79aa3a2e5d8cedb31c5a20e8181b849cc7725c8898cb38e10ad2cc3621927",
       "size": 9334
     },
     "cpl_jlcpcb.csv": {
@@ -49,8 +49,8 @@
       "size": 6324
     },
     "design-source/generate_design.py": {
-      "sha256": "41396bc6c14a99d95c200352843bcdf3b9468c369ddd5af64087a19d0168fd3d",
-      "size": 58834
+      "sha256": "fb7d19ab02293021261cd12fe62f0f71b1b0bd1aa2c44da080858e6ce678083b",
+      "size": 59080
     },
     "design-source/generate_pcb.py": {
       "sha256": "36afb9c6a8b81878b88b3cf38b91da058c7a281f706d1a16451622e07cc32104",
@@ -63,10 +63,6 @@
     "design-source/joystick_hardware.py": {
       "sha256": "ff31a60e7b453fd16e56cc04c2d176de951838f8a0a176a5d7838fb1658a5da0",
       "size": 6178
-    },
-    "design-source/lcsc_models.json": {
-      "sha256": "858c695e41d56dd95ee310f59c8357c07bcd5c70b8a622dc4e93492da5c925b2",
-      "size": 41
     },
     "design-source/procurement-review.json": {
       "sha256": "e2b8bdf4b890697142c8be68d9235e4fbb77a476151b18e62d9c15aa0ccf47e2",
@@ -173,8 +169,8 @@
       "size": 2192
     },
     "gerbers/gerbers.zip": {
-      "sha256": "e722e7d141c297f2e775c9ba618f0e9a4069b21daf2a679a085f7dffa86911b2",
-      "size": 125175
+      "sha256": "ef7574b3c38fa1bad580c067ae4a42f0d18ccd61f5a2f64ad292fe803b6f1040",
+      "size": 125183
     },
     "images/assembly.png": {
       "sha256": "9c04d8d7cf77f5c54253103d16f97f8ef0d15613dba6ee9c4f35a5ef7d68e8c1",
@@ -209,12 +205,12 @@
       "size": 463877
     },
     "images/schematic_usb_joystick.png": {
-      "sha256": "c0a3950fda2f26c18ad6359ba1ccd02e953d67c0be8d2b40d3d8553de7445c79",
-      "size": 486466
+      "sha256": "435c684096c4c22d4f460823a2584c6e3f09f6663b89176976bbbaec2728eea2",
+      "size": 486460
     },
     "kicad_project.zip": {
-      "sha256": "a5607bb146ea3527d7f3b1d3aa57e4357ca00cab444c077343f86057915d393d",
-      "size": 187241
+      "sha256": "f138bdc00d42569a6522f70e31da8a988447ba21063830cd98f9b5f67221f341",
+      "size": 187252
     },
     "manufacturing-requirements.json": {
       "sha256": "48470a554e39b289ba0c079833a439c65dbc3611b505f7dd978552d25d13d37b",
@@ -317,8 +313,8 @@
       "size": 4605
     },
     "report.pdf": {
-      "sha256": "a9a832a8fb64c69ea2059cd98e199cd6dc2adb9b26a283815cd486d04c82b1bd",
-      "size": 3139430
+      "sha256": "3027637612ef2eab32a8ee40a8fd2775da6d9cbd74b7a2799bd35f35f9004cdc",
+      "size": 3107342
     },
     "schematic.pdf": {
       "sha256": "6fe021a9ea56eb056b2fc6dc24e3fee47c4f6555c6141a4ad1ec755b51aa0d98",

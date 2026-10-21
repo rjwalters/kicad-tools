@@ -2,7 +2,7 @@ Manufacturing package for charlieplex_3x3_routed.kicad_pcb
 
 Fabrication tier : jlcpcb
 Mode             : assembly
-Generated        : 2026-10-21T13:14:06.910218+00:00
+Generated        : 2026-10-19T20:30:00Z
 
 Assembly package: BOM and CPL are included.
 

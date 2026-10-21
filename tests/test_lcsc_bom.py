@@ -112,8 +112,12 @@ class TestBoard03:
         assert plan.mapping["Package_QFP:TQFP-44_10x10mm_P0.8mm"].lcsc == "C44854"
         assert plan.stale_sidecar == {}
 
-    def test_committed_sidecar_is_reported_stale(self):
-        plan = build_lcsc_mapping(self.PCB, sidecar=BOARD03 / "lcsc_models.json")
+    def test_sidecar_naming_a_lib_id_not_on_the_board_is_reported_stale(self, tmp_path):
+        # The committed board-03 sidecar that exercised this was deleted in #7685
+        # for exactly this reason (its lib_id is not on the board).
+        sidecar = tmp_path / "lcsc_models.json"
+        sidecar.write_text(json.dumps({"Module:Joystick_Analog": "C50950"}))
+        plan = build_lcsc_mapping(self.PCB, sidecar=sidecar)
         assert "Module:Joystick_Analog" in plan.stale_sidecar
 
     def test_shared_passive_footprints_are_conflicts(self):

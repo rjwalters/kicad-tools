@@ -252,49 +252,54 @@ def test_check_collapses_missing_library_into_one_info(tmp_path, models, monkeyp
     assert not info.is_warning
 
 
-def test_opt_in_deferral_expires_with_pinned_model_set():
-    """``model_coverage`` stays out of the default set until #7683/#7685.
-
-    When ``PINNED_MODEL_DIR`` is set this fails: drop ``model_coverage`` from
-    ``DEFERRED_OPT_IN_CATEGORIES`` (making it default-on) and re-record board
-    evidence then (#7683/#7685).  #7683 shipped the synced subset through
-    ``resolve_pinned_model_dir()`` with ``PINNED_MODEL_DIR`` left as a ``None``
-    override, and deliberately kept the deferral: fresh regens still carry
-    host-independent ``no_ref`` warnings (board 04's reviewed gate), so it
-    expires with #7685.
-    """
+def test_model_coverage_is_default_on():
+    """#7685 ended the #7682 opt-in deferral: every board is covered, so
+    ``model_coverage`` is part of the default ``kct check`` set."""
     from kicad_tools.cli.check_categories import CHECK_CATEGORIES, DEFERRED_OPT_IN_CATEGORIES
 
-    assert model_audit.PINNED_MODEL_DIR is None, "#7683 landed: drop the #7682 opt-in deferral"
-    assert {"model_coverage"} == DEFERRED_OPT_IN_CATEGORIES
-    assert set(CHECK_CATEGORIES) >= DEFERRED_OPT_IN_CATEGORIES
+    assert "model_coverage" in CHECK_CATEGORIES
+    assert frozenset() == DEFERRED_OPT_IN_CATEGORIES
 
 
-def test_default_category_set_excludes_model_coverage(tmp_path, models):
-    """The deferral lives in ``run_selected_checks``: every default caller
-    (``kct check``, ``run_check_rule_set``, ``kct readiness``) skips it."""
+def _committed_board_pcbs() -> list[Path]:
+    root = Path(__file__).resolve().parents[1] / "boards"
+    return sorted(
+        p
+        for p in root.glob("[0-9][0-9]-*/output/*.kicad_pcb")
+        if p.is_file() and "manufacturing" not in p.parts
+    )
+
+
+@pytest.mark.parametrize("pcb", _committed_board_pcbs(), ids=lambda p: str(p.parent.parent.name))
+def test_committed_boards_carry_a_body_ref_for_every_footprint(pcb):
+    """The deferral's real trigger (#7685): a committed board has no host-independent
+    gap -- every non-exempt footprint names a model (``no_ref``), and no body is a
+    placeholder or hidden.  This fails on regeneration that drops the refs (board 00's
+    2026-10-08 regeneration) instead of waiting for a pinned-set variable that
+    nothing sets."""
+    report = audit_pcb_models(pcb, env="host")
+    host_independent = [
+        (e.reference, e.klass)
+        for e in report.entries
+        if e.klass in {"no_ref", "placeholder", "hidden_only"}
+    ]
+    assert host_independent == []
+
+
+def test_default_category_set_runs_model_coverage(tmp_path, models):
+    """With no deferral, every default caller (``kct check``,
+    ``run_check_rule_set``, ``kct readiness``) runs the category."""
     from unittest.mock import MagicMock
 
     from kicad_tools.cli.check_cmd import run_selected_checks
 
     pcb = _write(tmp_path, _fp("U1"))
     coverage: dict = {}
-    only = {"model_coverage"}
-    for only_set, opt_in, expected in [
-        (None, frozenset(), []),
-        (None, {"model_coverage"}, [("warning", ("U1",))]),
-        (only, frozenset(), [("warning", ("U1",))]),
-    ]:
-        results = run_selected_checks(
-            MagicMock(), only_set, set(), pcb_path=pcb, opt_in=opt_in, coverage=coverage
-        )
+    for only_set in (None, {"model_coverage"}):
+        results = run_selected_checks(MagicMock(), only_set, set(), pcb_path=pcb, coverage=coverage)
         found = [(v.severity, v.items) for v in results.violations if v.rule_id == "model_coverage"]
-        assert found == expected, (only_set, opt_in)
-        if only_set is None and not opt_in:
-            # Invisible by default, so default reports match pre-#7682 bytes.
-            assert "model_coverage" not in coverage
-        else:
-            assert coverage["model_coverage"].state == "checked"
+        assert found == [("warning", ("U1",))], only_set
+        assert coverage["model_coverage"].state == "checked"
         coverage.clear()
 
 
@@ -311,11 +316,11 @@ def _coverage_rules(report: dict) -> list[str]:
 
 
 def test_check_cli_strict_unchanged_by_default_and_opt_in_flag(tmp_path, models):
-    """Plain ``kct check --strict`` never sees ``model_coverage``;
-    ``--3d-models`` / ``--only model_coverage`` opt in (issue #7682)."""
+    """Plain ``kct check`` runs ``model_coverage`` since #7685 (default-on); the
+    ``--3d-models`` flag is a kept-for-compatibility no-op (issue #7682)."""
     pcb = _write(tmp_path, _fp("U1"))
     _, default = _check_cli(pcb, "--strict")
-    assert _coverage_rules(default) == []
+    assert _coverage_rules(default) == ["model_coverage"]
     _, flagged = _check_cli(pcb, "--3d-models")
     assert _coverage_rules(flagged) == ["model_coverage"]
     _, only = _check_cli(pcb, "--only", "model_coverage")
@@ -333,7 +338,7 @@ def test_top_level_kct_check_forwards_3d_models_flag(tmp_path, models):
     kct_main(["check", str(pcb), "--3d-models", "--format", "json", "--output", str(report)])
     assert _coverage_rules(json.loads(report.read_text())) == ["model_coverage"]
     kct_main(["check", str(pcb), "--format", "json", "--output", str(report)])
-    assert _coverage_rules(json.loads(report.read_text())) == []
+    assert _coverage_rules(json.loads(report.read_text())) == ["model_coverage"]
 
 
 def test_lcsc_content_changed_class(tmp_path, models):
@@ -359,3 +364,42 @@ def test_lcsc_content_changed_class(tmp_path, models):
     classes = _classes(pcb)
     assert classes == {"R1": "lcsc_content_changed", "R2": "resolved"}
     assert "lcsc_content_changed" in model_audit.CLASSES
+
+
+def test_attach_local_models_replaces_dangling_ref_and_is_idempotent(tmp_path, monkeypatch):
+    """Project-local bodies (#7685) cover footprints whose stock STEP does not exist."""
+    from kicad_tools.pcb.models3d import attach_local_models
+
+    monkeypatch.delenv("KICAD_CONFIG_HOME", raising=False)
+    for var in ("KICAD7", "KICAD8", "KICAD9", "KICAD10"):
+        monkeypatch.setenv(f"{var}_3DMODEL_DIR", str(tmp_path / "no-library"))
+    stock = '(model "${KICAD10_3DMODEL_DIR}/Connector.3dshapes/J.step")\n'
+    pcb = _write(tmp_path, _fp("J1", lib_id="Connector:J", body=stock), _fp("R1"), extra="\n")
+    shapes = tmp_path / "3dshapes"
+    shapes.mkdir()
+    (shapes / "J.wrl").write_text("#VRML V2.0 utf8\n")
+    (shapes / "local_models.json").write_text(
+        json.dumps({"Connector:J": "J.wrl", "Other:X": "X.wrl"})
+    )
+
+    assert attach_local_models(pcb) == ["Connector:J"]
+    text = pcb.read_text()
+    assert "${KIPRJMOD}/3dshapes/J.wrl" in text and "J.step" not in text
+    assert _classes(pcb)["J1"] == "resolved"
+    assert _classes(pcb)["R1"] == "no_ref"  # only mapped lib_ids change
+    assert attach_local_models(pcb) == []  # idempotent
+    assert pcb.read_text() == text
+
+
+def test_attach_local_models_ignores_missing_manifest_or_body(tmp_path):
+    from kicad_tools.pcb.models3d import attach_local_models
+
+    pcb = _write(tmp_path, _fp("J1", lib_id="Connector:J"), extra="\n")
+    before = pcb.read_text()
+    assert attach_local_models(pcb) == []
+    (tmp_path / "3dshapes").mkdir()
+    (tmp_path / "3dshapes" / "local_models.json").write_text(
+        json.dumps({"Connector:J": "gone.wrl"})
+    )
+    assert attach_local_models(pcb) == []  # never a dangling ref
+    assert pcb.read_text() == before

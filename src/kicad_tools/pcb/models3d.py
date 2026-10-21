@@ -90,9 +90,11 @@ __all__ = [
     "FootprintBlock",
     "LcscMapping",
     "ModelPatchReport",
+    "LOCAL_MODELS_MANIFEST",
     "ResolvedModels",
     "add_model_refs",
     "add_model_refs_to_text",
+    "attach_local_models",
     "compare_model_coverage",
     "ensure_models",
     "extract_model_blocks",
@@ -1282,14 +1284,75 @@ def ensure_models(
     # any) is an override only (issue #7686).
     lcsc_mapping = build_lcsc_mapping(Path(pcb_path), sidecar=sidecar).mapping or None
     if not paths.found and lcsc_mapping is None:
-        return ModelPatchReport()
-    kwargs.setdefault("lcsc_fetch", fetch_enabled(False))
-    return add_model_refs(
-        pcb_path,
-        library_paths=paths,
-        lcsc_mapping=lcsc_mapping,
-        **kwargs,  # type: ignore[arg-type]
-    )
+        report = ModelPatchReport()
+    else:
+        kwargs.setdefault("lcsc_fetch", fetch_enabled(False))
+        report = add_model_refs(
+            pcb_path,
+            library_paths=paths,
+            lcsc_mapping=lcsc_mapping,
+            **kwargs,  # type: ignore[arg-type]
+        )
+    attach_local_models(pcb_path)
+    return report
+
+
+#: Manifest next to a board's project-local bodies: ``{lib_id: file name}``.
+LOCAL_MODELS_MANIFEST = "3dshapes/local_models.json"
+
+
+def attach_local_models(pcb_path: Path | str) -> list[str]:
+    """Attach the board's project-local bodies (source tier 2, issue #7685).
+
+    ``<pcb dir>/3dshapes/local_models.json`` maps a footprint ``lib_id`` to a
+    body file in the same directory.  Each matching footprint gets one
+    ``${KIPRJMOD}/3dshapes/<file>`` model node with an identity transform (the
+    body is authored in the footprint's frame), replacing any other model node
+    on it -- typically the dangling stock ref the library footprint carries.
+    Idempotent; a missing manifest or a missing body file is a no-op for that
+    entry (never a dangling ref).
+
+    Returns:
+        Lib ids that were changed.
+    """
+    import json
+
+    pcb_path = Path(pcb_path)
+    manifest = pcb_path.parent / LOCAL_MODELS_MANIFEST
+    if not manifest.is_file():
+        return []
+    mapping: dict[str, str] = json.loads(manifest.read_text())
+    text = pcb_path.read_text()
+    changed: list[str] = []
+    for lib_id, filename in mapping.items():
+        if not (manifest.parent / filename).is_file():
+            continue
+        ref = f"${{KIPRJMOD}}/3dshapes/{filename}"
+        # re-scan each pass: earlier insertions shift offsets
+        for block in iter_footprint_blocks(text):
+            if block.lib_id != lib_id:
+                continue
+            body = text[block.start : block.end + 1]
+            if f'(model "{ref}"' in body:
+                break
+            for a, b in reversed(_model_node_spans(body)):
+                body = body[:a] + body[b:]
+            t = block.indent + "\t\t"
+            node = (
+                f'{block.indent}\t(model "{ref}"\n'
+                f"{t}(offset\n{t}\t(xyz 0 0 0)\n{t})\n"
+                f"{t}(scale\n{t}\t(xyz 1 1 1)\n{t})\n"
+                f"{t}(rotate\n{t}\t(xyz 0 0 0)\n{t})\n"
+                f"{block.indent}\t)\n"
+            )
+            close_line = body.rfind("\n") + 1
+            body = body[:close_line] + node + body[close_line:]
+            text = text[: block.start] + body + text[block.end + 1 :]
+            changed.append(lib_id)
+            break
+    if changed:
+        pcb_path.write_text(text)
+    return changed
 
 
 _REFERENCE_RE = re.compile(
