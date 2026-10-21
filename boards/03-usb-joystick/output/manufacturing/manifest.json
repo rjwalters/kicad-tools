@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.24.0",
-  "generated_at": "2026-10-21T07:11:48.661331+00:00",
+  "generated_at": "2026-10-21T15:44:46.699650+00:00",
   "manufacturer": "jlcpcb-tier1",
   "files": {
     "DESIGN_REVIEW.md": {
@@ -29,7 +29,7 @@
       "size": 1033
     },
     "check-report.json": {
-      "sha256": "a0c11dc551e4c6b1c464b4b950656f0fa61b73d65454f03076ea9e7660b2af9e",
+      "sha256": "55c79aa3a2e5d8cedb31c5a20e8181b849cc7725c8898cb38e10ad2cc3621927",
       "size": 9334
     },
     "cpl_jlcpcb.csv": {
@@ -49,8 +49,8 @@
       "size": 6324
     },
     "design-source/generate_design.py": {
-      "sha256": "41396bc6c14a99d95c200352843bcdf3b9468c369ddd5af64087a19d0168fd3d",
-      "size": 58834
+      "sha256": "fcc21c86781a9d9df58976f9c760e51b9a1398d13fc431604450cfe8a51156db",
+      "size": 59231
     },
     "design-source/generate_pcb.py": {
       "sha256": "36afb9c6a8b81878b88b3cf38b91da058c7a281f706d1a16451622e07cc32104",
@@ -63,10 +63,6 @@
     "design-source/joystick_hardware.py": {
       "sha256": "ff31a60e7b453fd16e56cc04c2d176de951838f8a0a176a5d7838fb1658a5da0",
       "size": 6178
-    },
-    "design-source/lcsc_models.json": {
-      "sha256": "858c695e41d56dd95ee310f59c8357c07bcd5c70b8a622dc4e93492da5c925b2",
-      "size": 41
     },
     "design-source/procurement-review.json": {
       "sha256": "e2b8bdf4b890697142c8be68d9235e4fbb77a476151b18e62d9c15aa0ccf47e2",
@@ -173,8 +169,8 @@
       "size": 2192
     },
     "gerbers/gerbers.zip": {
-      "sha256": "e722e7d141c297f2e775c9ba618f0e9a4069b21daf2a679a085f7dffa86911b2",
-      "size": 125175
+      "sha256": "124f71900e3c13c51fc30eb6641ea9b435a11db214f560f812c89b81d506d1ba",
+      "size": 125183
     },
     "images/assembly.png": {
       "sha256": "9c04d8d7cf77f5c54253103d16f97f8ef0d15613dba6ee9c4f35a5ef7d68e8c1",
@@ -213,8 +209,8 @@
       "size": 486466
     },
     "kicad_project.zip": {
-      "sha256": "a5607bb146ea3527d7f3b1d3aa57e4357ca00cab444c077343f86057915d393d",
-      "size": 187241
+      "sha256": "e000829d6907220e6d15d542f04a8e166d2b44b1437b7462115dd324f48ec087",
+      "size": 187788
     },
     "manufacturing-requirements.json": {
       "sha256": "48470a554e39b289ba0c079833a439c65dbc3611b505f7dd978552d25d13d37b",
@@ -317,8 +313,8 @@
       "size": 4605
     },
     "report.pdf": {
-      "sha256": "a9a832a8fb64c69ea2059cd98e199cd6dc2adb9b26a283815cd486d04c82b1bd",
-      "size": 3139430
+      "sha256": "a0ba300fd99034e9980671f3e12ac425c4b94533ec54f3210bf554dcd76f537c",
+      "size": 3139924
     },
     "schematic.pdf": {
       "sha256": "6fe021a9ea56eb056b2fc6dc24e3fee47c4f6555c6141a4ad1ec755b51aa0d98",
@@ -396,8 +392,8 @@
     {
       "name": "bom_lcsc_values",
       "status": "WARN",
-      "message": "2 of 38 assigned item(s) verified (parts cache); 36 unverifiable (not in parts cache or offline catalog)",
-      "details": "unverified: U1 -> C44854, J1 -> C7095263, U2 -> C7519, F1 -> C126817, Y1 -> C2442665, J2 -> C265104, J3 -> C21285200, R1 -> C105580 (and 28 more)"
+      "message": "0 of 38 assigned item(s) verified (no source); 38 unverifiable (not in parts cache or offline catalog)",
+      "details": "unverified: U1 -> C44854, J1 -> C7095263, U2 -> C7519, F1 -> C126817, Y1 -> C2442665, J2 -> C265104, J3 -> C21285200, R1 -> C105580 (and 30 more)"
     },
     {
       "name": "bom_pcb_match",

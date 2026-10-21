@@ -29,7 +29,6 @@ from kicad_tools.pcb.lcsc_model_transforms import (
     TransformProvenance,
     entry_problems,
     lookup_transform,
-    resolve_merged_transform,
     table_problems,
 )
 from kicad_tools.pcb.lcsc_models import (
@@ -1136,28 +1135,6 @@ class TestSplitCalibrationGuard:
             tmp_path, {self.LIB_ID: LcscModelEntry("C50950", rotate=(0.0, 0.0, 45.0))}
         )
         assert resolver(self.LIB_ID) is not None
-
-    # -- the committed sidecars (AC 4) --------------------------------------
-
-    @pytest.mark.parametrize(
-        "sidecar",
-        [
-            "boards/03-usb-joystick/lcsc_models.json",
-            "boards/06-diffpair-test/lcsc_models.json",
-        ],
-    )
-    def test_committed_sidecars_never_trip_the_guard(self, sidecar):
-        """Both committed sidecars are bare-string form, so no packaged offset
-        can ever be split by one -- assert it, so a future table addition
-        cannot quietly break a board."""
-        path = Path(__file__).resolve().parents[1] / sidecar
-        mapping = load_lcsc_mapping(path)
-        assert mapping
-        for lib_id, entry in mapping.items():
-            c_number = entry.lcsc if isinstance(entry, LcscModelEntry) else entry
-            sidecar_rotate = entry.rotate if isinstance(entry, LcscModelEntry) else None
-            sidecar_offset = entry.offset if isinstance(entry, LcscModelEntry) else None
-            resolve_merged_transform(c_number, lib_id, sidecar_rotate, sidecar_offset)
 
 
 class TestTransformComposition:

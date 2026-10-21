@@ -16,6 +16,7 @@ from pathlib import Path
 from kicad_tools.core.canonical_uuids import canonicalize_pcb_file_uuids, uuids_in_file
 from kicad_tools.core.project_file import create_minimal_project, save_project
 from kicad_tools.operations.pintype import annotate_pcb_file_pintypes
+from kicad_tools.pcb.models3d import attach_local_models
 from kicad_tools.router.rules import NetClassRouting, net_class_map_to_dict
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.schematic.models.schematic import Schematic
@@ -979,6 +980,9 @@ def generate(output: Path) -> dict:
     add_host_bus_connections(pcb)
     sch.write(output / f"{NAME}.kicad_sch")
     pcb.save(output / f"{NAME}.kicad_pcb")
+    # Project-local 3D bodies for J1, RSH1 and L1, whose stock STEP files do
+    # not exist upstream (issue #7685); a no-op without output/3dshapes.
+    attach_local_models(output / f"{NAME}.kicad_pcb")
     # Copy schematic pin names/electrical types onto the pads (issues #5985,
     # #5998), as KiCad's "Update PCB from Schematic" does, so the committed
     # board carries the ``(pintype ...)`` rail evidence ``kct detect-mistakes``

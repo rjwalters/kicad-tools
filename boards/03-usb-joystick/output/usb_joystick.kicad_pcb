@@ -2221,13 +2221,18 @@
 			(roundrect_rratio 0.166667)
 		)
 		(embedded_fonts no)
-		(model "${KICAD10_3DMODEL_DIR}/Connector_JST.3dshapes/JST_PH_S5B-PH-SM4-TB_1x05-1MP_P2.00mm_Horizontal.step" (offset (xyz 0 0 0))
-			(scale (xyz 1 1 1)
+		(uuid "13e2732f-0b85-5eaf-91e6-c5654f612c44")
+		(model "${KIPRJMOD}/3dshapes/JST_PH_S5B-PH-SM4-TB.wrl"
+			(offset
+				(xyz 0 0 0)
 			)
-			(rotate (xyz 0 0 0)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
 			)
 		)
-		(uuid "13e2732f-0b85-5eaf-91e6-c5654f612c44")
 	)
 	(footprint "Joystick:Samtec_TSM-103-01-T-DV"
 		(at 163.5 75.5 0)
