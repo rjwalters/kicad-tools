@@ -1,0 +1,9 @@
+name: ci
+on:
+  pull_request:
+jobs:
+  stage:
+    runs-on: ubuntu-24.04
+    environment: staging
+    steps:
+      - run: echo staged

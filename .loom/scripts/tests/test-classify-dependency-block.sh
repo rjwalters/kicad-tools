@@ -1260,8 +1260,9 @@ assert_eq "2" "$RC" "unreadable root issue exits 2"
 # All three functions are Rust now, and none of these three scripts contains a
 # heredoc any more, so there is nothing here for that scan to find.
 #
-# The scan itself is NOT retired: it stays wired into the watchdog suites for
-# the rest of the repo's shell. See defaults/scripts/tests/lib/heredoc-body-safety.sh.
+# The scan itself was removed too: the watchdog suites retired their #7508 checks
+# (the watchdog is a Rust port, #8086) and nothing sourced it any more. It is
+# recoverable from git history (80309c318, 18a3ec401).
 
 echo
 echo "--- Doc pins: the Champion prose actually calls the gate ---"

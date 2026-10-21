@@ -54,7 +54,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 MERGE_PR="$SCRIPTS_DIR/merge-pr.sh"
 
-# #8191: _maybe_delete_local_branch (called directly and via
+# #8191: pmc_delete_branch (the harness's stand-in for the retired direct call;
+# it runs the whole post-merge cleanup, which ends in `merge-pr delete-branch`) —
+# formerly _maybe_delete_local_branch (called directly and via
 # _remove_loom_worktree) now delegates to `loom-daemon merge-pr delete-branch`.
 # Pin the binary built from this tree so a stale installed daemon cannot answer
 # instead — it would warn-and-keep every branch and fail these cases for the
@@ -98,10 +100,11 @@ assert_grep() {
 # --- Test 1: source retains the #4171 primary-checkout distinction ---
 echo "Test 1: merge-pr.sh source contains the primary-checkout helper and call sites"
 
-assert_grep '_is_primary_worktree_path\(\) \{' "$MERGE_PR" \
-    "merge-pr.sh defines the _is_primary_worktree_path helper"
-assert_grep '_is_primary_worktree_path "\$DISCOVERED_WT"' "$MERGE_PR" \
-    "discovery-fallback checks whether the discovered worktree is the primary checkout"
+retired \
+    "the greps for merge-pr.sh's _is_primary_worktree_path helper and its '_is_primary_worktree_path \"\$DISCOVERED_WT\"' call site" \
+    "the discovery fallback distinguishes the primary checkout from a linked worktree (#4171)" \
+    "#8191 orchestrator slice 1 moved the discovery fallback into loom-daemon (merge_pr/post_merge_cleanup.rs::discovery_fallback, in-process); merge-pr.sh no longer has the helper or the call site" \
+    "Test 2 below, which drives the REAL wrapper and verb against a real primary checkout and requires the primary-specific message, plus post_merge_cleanup/tests.rs::a_discovered_user_owned_worktree_is_advice_only"
 retired \
     "the grep for the in-shell 'not a removable worktree' text" \
     "the discovery fallback reports the primary checkout as not removable and never suggests worktree removal (#4171)" \
@@ -118,39 +121,9 @@ retired \
     "#8191: that message is now worded by worktree_cli::branch_delete (Rust) and replayed by the shell from a WARNING<TAB>message line; merge-pr.sh never spells '\$checkout_loc' or '\$default_label' again" \
     "Test 3 below, which asserts the replayed output contains 'checkout main' and 'branch -D <branch>' behaviourally — stronger than a grep, since it proves the text reaches the operator"
 
-# --- Extract the ACTUAL function bodies from the live source (no drift) ---
-extract_fn() {
-    local name="$1" file="$2"
-    awk -v fn="$name" '
-      $0 ~ "^"fn"\\(\\) \\{" { grab=1 }
-      grab { print }
-      grab && /^}/ { exit }
-    ' "$file"
-}
-
-# Harness: stub the logging helpers, then eval the real bodies.
-info()    { echo "INFO: $*"; }
-warning() { echo "WARN: $*"; }
-success() { echo "OK: $*"; }
-error()   { echo "ERROR: $*" >&2; return 1; }
-
-# #8191 slice: the porcelain lookups below shell out through _mp_worktree, so it
-# is extracted with them — without it they die with "_mp_worktree: command not
-# found" under `set -e`.
-eval "$(extract_fn _mp_worktree               "$MERGE_PR")"
-eval "$(extract_fn _primary_worktree_path     "$MERGE_PR")"
-eval "$(extract_fn _is_primary_worktree_path  "$MERGE_PR")"
-eval "$(extract_fn _worktree_branch_for       "$MERGE_PR")"
-eval "$(extract_fn _find_worktree_by_branch   "$MERGE_PR")"
-# #7812: _maybe_delete_local_branch's `-d` -> `-D` safety check is now the
-# shared `branch_landed` primitive — a real library, so it is SOURCED here
-# rather than extracted. Offline: these cases exercise merge-pr.sh's local
-# branch logic, not the forge rung, and the suite must stay hermetic.
-export LOOM_BRANCH_LANDED_OFFLINE=1
-# shellcheck source=../lib/branch-landed.sh
-source "$(dirname "$MERGE_PR")/lib/branch-landed.sh"
-eval "$(extract_fn _maybe_delete_local_branch "$MERGE_PR")"
-eval "$(extract_fn _remove_loom_worktree      "$MERGE_PR")"
+# shellcheck source=lib/post-merge-cleanup-harness.sh
+source "$SCRIPT_DIR/lib/post-merge-cleanup-harness.sh"
+pmc_load "$MERGE_PR"
 
 # --- Build a real git repo matching the #4171 repro scenario ---
 echo ""
@@ -174,6 +147,10 @@ git -C "$PRIMARY" commit -q -m "initial"
 # auto-cleanup does `git checkout "$DEFAULT_BRANCH_NAME"` (main), which would
 # otherwise fail on runners where `git init` does not name the branch `main`.
 git -C "$PRIMARY" branch -M main
+# Post-merge cleanup appends to <repo>/.loom/logs/worktree-removals.log (the
+# removal ledger, #5950), which every Loom repo gitignores. Do the same here so
+# that bookkeeping does not read as "dirty primary tree" to the #5015 check.
+printf '.loom/\n' >> "$PRIMARY/.git/info/exclude"
 
 # The merged PR's branch, checked out directly in the primary — NO
 # .loom-managed sentinel here (this is the real-world case: the primary
@@ -193,48 +170,24 @@ REPO_ROOT="$PRIMARY"
 # shellcheck disable=SC2034
 DEFAULT_BRANCH_NAME="main"
 
-# (a) Discovery: _find_worktree_by_branch finds the primary itself.
-discovered="$(_find_worktree_by_branch "$PR_BRANCH")"
-if [[ "$discovered" == "$PRIMARY" ]]; then
-    pass "_find_worktree_by_branch discovers the primary checkout for the PR branch"
+# The discovery fallback, run for real: no worktree at the convention path, so
+# cleanup walks `git worktree list`, finds the PRIMARY itself, and must NEVER
+# suggest `git worktree remove` / `--worktree-path` for it (git refuses to
+# remove a primary working tree, so that advice can never work).
+disc_out="$(pmc_delete_branch "$PR_BRANCH" 2>&1)" || true
+if [[ "$disc_out" == *"checked out in the primary repository checkout ($PRIMARY) — not a removable worktree."* ]] \
+   && [[ "$disc_out" != *"git worktree remove"* ]] \
+   && [[ "$disc_out" != *"--worktree-path"* ]]; then
+    pass "discovery finds the primary checkout and never suggests git worktree remove / --worktree-path for it"
 else
-    fail "_find_worktree_by_branch: expected '$PRIMARY', got '$discovered'"
-fi
-
-# (b) _is_primary_worktree_path correctly identifies it.
-if _is_primary_worktree_path "$discovered"; then
-    pass "_is_primary_worktree_path recognizes the discovered path as the primary checkout"
-else
-    fail "_is_primary_worktree_path failed to recognize the primary checkout"
-fi
-
-# (c) Simulate the discovery-fallback decision tree exactly as merge-pr.sh
-# does, and assert it NEVER suggests git worktree remove / --worktree-path.
-sim_out=""
-if _is_primary_worktree_path "$discovered"; then
-    sim_out="$(info "PR branch '$PR_BRANCH' is checked out in the primary repository checkout ($discovered) — not a removable worktree." 2>&1)"
-elif [[ -f "$discovered/.loom-managed" ]]; then
-    sim_out="$(_remove_loom_worktree "$discovered" 2>&1)"
-else
-    sim_out="$(warning "Discovered worktree for branch '$PR_BRANCH' at: $discovered"; \
-               warning "Worktree lacks .loom-managed sentinel — not removing (user-owned)."; \
-               warning "To clean it up, re-run with: --worktree-path '$discovered'"; \
-               warning "Or manually: git worktree remove '$discovered'")"
-fi
-
-if [[ "$sim_out" == *"not a removable worktree"* ]] \
-   && [[ "$sim_out" != *"git worktree remove"* ]] \
-   && [[ "$sim_out" != *"--worktree-path"* ]]; then
-    pass "discovery-fallback never suggests git worktree remove / --worktree-path for the primary checkout"
-else
-    fail "discovery-fallback should avoid worktree-remove advice for the primary; got: $sim_out"
+    fail "discovery-fallback should name the primary and avoid worktree-remove advice; got: $disc_out"
 fi
 
 echo ""
 echo "Test 3: branch-delete failure in the primary checkout gives the exact two-step advice"
 
 set +e
-branch_out="$(_maybe_delete_local_branch "$PR_BRANCH" 2>&1)"
+branch_out="$(pmc_delete_branch "$PR_BRANCH" 2>&1)"
 branch_rc=$?
 set -e
 
@@ -242,9 +195,9 @@ if [[ $branch_rc -eq 0 ]] \
    && [[ "$branch_out" == *"checked out in the primary repository checkout"* ]] \
    && [[ "$branch_out" == *"checkout main"* ]] \
    && [[ "$branch_out" == *"branch -D $PR_BRANCH"* ]]; then
-    pass "_maybe_delete_local_branch prints the exact two-step 'git checkout main && ... branch -D' advice"
+    pass "post-merge cleanup prints the exact two-step 'git checkout main && ... branch -D' advice"
 else
-    fail "_maybe_delete_local_branch: expected two-step advice; rc=$branch_rc, out: $branch_out"
+    fail "post-merge cleanup: expected two-step advice; rc=$branch_rc, out: $branch_out"
 fi
 
 # Branch must survive (never force-deleted out from under the checked-out HEAD).
@@ -264,20 +217,15 @@ mkdir -p "$(dirname "$SECONDARY")"
 git -C "$PRIMARY" worktree add -q -b feature/issue-999 "$SECONDARY" >/dev/null 2>&1
 touch "$SECONDARY/.loom-managed"
 
-if _is_primary_worktree_path "$SECONDARY"; then
-    fail "secondary worktree misidentified as the primary checkout"
-else
-    pass "secondary worktree correctly NOT identified as the primary checkout"
-fi
-
 set +e
-sec_out="$(_remove_loom_worktree "$SECONDARY" 2>&1)"
+sec_out="$(pmc_run_issue 999 2>&1)"
 sec_rc=$?
 set -e
 if [[ $sec_rc -eq 0 ]] \
    && [[ "$sec_out" == *"Removing worktree"* ]] \
+   && [[ "$sec_out" != *"not a removable worktree"* ]] \
    && [[ ! -d "$SECONDARY" ]]; then
-    pass "genuine Loom-managed secondary worktree is still auto-removed (unchanged)"
+    pass "genuine Loom-managed secondary worktree (found by discovery) is still auto-removed, and is not mistaken for the primary"
 else
     fail "secondary should still be removed; rc=$sec_rc, out: $sec_out"
 fi
@@ -288,18 +236,14 @@ fi
 USER_WT="$TMP_ROOT/scratch/user-owned"
 git -C "$PRIMARY" worktree add -q -b feature/user-owned "$USER_WT" >/dev/null 2>&1
 
-if _is_primary_worktree_path "$USER_WT"; then
-    fail "user-owned linked worktree misidentified as the primary checkout"
+user_out="$(pmc_delete_branch feature/user-owned 2>&1)" || true
+if [[ "$user_out" != *"not a removable worktree"* ]] \
+   && [[ "$user_out" == *"git worktree remove '$USER_WT'"* ]] \
+   && [[ "$user_out" == *"--worktree-path '$USER_WT'"* ]] \
+   && [[ -d "$USER_WT" ]]; then
+    pass "genuine user-owned linked worktree keeps the git-worktree-remove advice (unchanged), and is left in place"
 else
-    user_sim_out="$(warning "Discovered worktree for branch 'feature/user-owned' at: $USER_WT"; \
-                     warning "Worktree lacks .loom-managed sentinel — not removing (user-owned)."; \
-                     warning "To clean it up, re-run with: --worktree-path '$USER_WT'"; \
-                     warning "Or manually: git worktree remove '$USER_WT'")"
-    if [[ "$user_sim_out" == *"git worktree remove"* ]] && [[ "$user_sim_out" == *"--worktree-path"* ]]; then
-        pass "genuine user-owned linked worktree keeps the git-worktree-remove advice (unchanged)"
-    else
-        fail "user-owned worktree advice regressed: $user_sim_out"
-    fi
+    fail "user-owned worktree advice regressed: $user_out"
 fi
 
 # --- Test 5: primary-checkout auto-cleanup when it is PROVABLY safe (#5015) ---
@@ -324,7 +268,7 @@ git -C "$PRIMARY" commit -q -am "issue 501 work"
 CLEAN_TIP_SHA="$(git -C "$PRIMARY" rev-parse feature/issue-501)"
 
 set +e
-clean_out="$(_maybe_delete_local_branch "feature/issue-501" "$CLEAN_TIP_SHA" 2>&1)"
+clean_out="$(pmc_delete_branch "feature/issue-501" "$CLEAN_TIP_SHA" 2>&1)"
 clean_rc=$?
 set -e
 
@@ -348,7 +292,7 @@ DIRTY_TIP_SHA="$(git -C "$PRIMARY" rev-parse feature/issue-502)"
 echo "uncommitted" >> "$PRIMARY/README.md"
 
 set +e
-dirty_out="$(_maybe_delete_local_branch "feature/issue-502" "$DIRTY_TIP_SHA" 2>&1)"
+dirty_out="$(pmc_delete_branch "feature/issue-502" "$DIRTY_TIP_SHA" 2>&1)"
 dirty_rc=$?
 set -e
 

@@ -1,0 +1,19 @@
+# id	pr_path	fixture	changed_line	expected	note
+# Synthetic workflow reductions + expected covered/held outcomes for a class with privilegedContentPatterns (#12954).
+# Columns: id, workflow path in the PR, fixture file (head contents), one added line, expected (covered|held), note.
+# The class: filePatterns .github/workflows/*.yml, no name excludes, forbiddenDiffPatterns permissions:/id-token/secrets./pull_request_target.
+# Used by test-champion-standing-authorization.sh; an attended mirror in a consumer repo can run the same rows.
+plan-runs-on	.github/workflows/claude-bot-deploy-plan.yml	claude-bot-deploy-plan.yml	+    runs-on: ubuntu-24.04	covered	offline plan job, held today by *deploy*
+plan-checkout	.github/workflows/claude-bot-deploy-plan.yml	claude-bot-deploy-plan.yml	+      - uses: actions/checkout@v4	covered	offline plan job: checkout step
+plan-dry-run	.github/workflows/claude-bot-deploy-plan.yml	claude-bot-deploy-plan.yml	+        run: ./scripts/render-plan.sh --dry-run	covered	offline plan job: dry-run step
+plan-job-name	.github/workflows/claude-bot-deploy-plan.yml	claude-bot-deploy-plan.yml	+    name: deploy plan (offline, no credentials)	covered	offline plan job: job name
+loom-12402	.github/workflows/claude-bot-deploy-plan.yml	claude-bot-deploy-plan.yml	+    runs-on: ubuntu-24.04	covered	rjwalters/loom#12402
+plan-runs-on-2	.github/workflows/claude-bot-deploy-plan.yml	claude-bot-deploy-plan.yml	+    runs-on: ubuntu-24.04	covered	offline plan job: runs-on in a second consumer repo
+ci-github-token-only	.github/workflows/ci.yml	ci-github-token-only.yml	+    runs-on: ubuntu-24.04	covered	GITHUB_TOKEN and contents: read are not privileged
+ci-cloudflare-runs-on	.github/workflows/ci.yml	ci-with-cloudflare-secret.yml	+    runs-on: ubuntu-24.04	held	innocuous name, privileged content, edit avoids the diff patterns
+ci-adds-contents-write	.github/workflows/ci.yml	ci-adds-contents-write.yml	+permissions:	held	adds a write permission to an unprivileged workflow
+publish-npm	.github/workflows/publish.yml	publish-npm.yml	+    runs-on: ubuntu-24.04	held	npm publish
+innocuous-name-publish	.github/workflows/ci.yml	publish-npm.yml	+    runs-on: ubuntu-24.04	held	npm publish under an innocuous name
+pull-request-target	.github/workflows/label.yml	ci-pull-request-target.yml	+      - run: echo labeling	held	privileged trigger
+environment-gated	.github/workflows/stage.yml	ci-environment-gated.yml	+    runs-on: ubuntu-24.04	held	environment: key
+comment-mentions-privileges	.github/workflows/lint-workflows.yml	ci-comment-mentions-privileges.yml	+    runs-on: ubuntu-24.04	covered	whole-line comments naming id-token: write / secrets.X grant nothing (2026-10-20 consumer PR shape)

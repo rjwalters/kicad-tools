@@ -117,8 +117,8 @@ retired "the grep for the in-shell 'refusing to remove (user-owned)' text" \
     "_remove_loom_worktree refuses an unmarked (no .loom-managed) worktree unless the caller opted in" \
     "the sentinel check and its refusal message left merge-pr.sh in the #8191 remove-gate slice; they are Rust in loom-daemon/src/merge_pr/remove_gate.rs, so no grep of this file can pass" \
     "loom-daemon/tests/merge_pr_remove_gate_differential.rs (frozen retired block vs the verb, sentinel=absent with allow=false and allow=true, message compared byte for byte) and an_unmarked_worktree_is_refused_unless_opted_in in src/merge_pr/remove_gate/tests.rs"
-assert_grep '_mp_worktree remove-gate' "$MERGE_PR_SH" \
-    "_remove_loom_worktree delegates the sentinel/primary gate to 'merge-pr remove-gate'"
+assert_grep 'remove_gate::decide' "$SCRIPTS_DIR/../../loom-daemon/src/merge_pr/post_merge_cleanup.rs" \
+    "the post-merge cleanup (Rust, #8191 orchestrator slice 1) runs the sentinel/primary gate (remove_gate::decide) before any removal"
 
 # --- Test 3: agent-destroy.sh cleanup block enforces the same guards ---
 echo ""

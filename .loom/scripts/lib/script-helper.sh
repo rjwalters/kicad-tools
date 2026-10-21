@@ -113,6 +113,29 @@ loom_exec_script_helper() {
         loom_daemon_exec_checked "${BASH_SOURCE[1]:-$0}" "${LOOM_DAEMON_SELF_BIN}" "$subcommand" "$@"
     fi
 
+    # The loom-tools slice (#12939): `strip-ansi` and `checkpoint` resolve
+    # `loom-tools` first and fall back to `loom-daemon` explicitly marked
+    # transitional (see "TOOLS-FIRST RESOLUTION" in locate-daemon-bin.sh). The
+    # tools binary is exec'd directly: the `# requires-daemon:` floors name a
+    # DAEMON version and loom-tools has no daemon to be too old for. exec keeps
+    # the exit code unmodified, and nothing resolvable is a non-zero exit.
+    if loom_tools_serves "$subcommand"; then
+        if loom_locate_slice_bin "$repo_root" "$subcommand"; then
+            if [[ "$LOOM_SLICE_KIND" == "tools" ]]; then
+                exec "$LOOM_SLICE_BIN" "$subcommand" "$@"
+            fi
+            loom_daemon_exec_checked "${BASH_SOURCE[1]:-$0}" "$LOOM_SLICE_BIN" "$subcommand" "$@"
+        fi
+        printf '%s\n\n' "[ERROR] neither loom-tools nor loom-daemon found (needed for '$subcommand')." >&2
+        echo "Provide loom-tools (LOOM_TOOLS_BIN=/path/to/loom-tools, on PATH, or in \${LOOM_DAEMON_BIN_DIR:-\$HOME/.local/bin})" >&2
+        if loom_tools_daemon_fallback_allowed; then
+            echo "or a loom-daemon (LOOM_DAEMON_BIN / LOOM_DAEMON_SELF_BIN; transitional fallback)." >&2
+        else
+            echo "(the loom-daemon fallback is disabled: LOOM_TOOLS_DAEMON_FALLBACK=0 or LOOM_MODE=session)." >&2
+        fi
+        exit "${LOOM_SCRIPT_HELPER_MISSING_RC:-1}"
+    fi
+
     # $LOOM_DAEMON_SELF_BIN first (the implementation), then the normal
     # resolution completely unchanged — see "WHICH BINARY A STUB EXECS" above.
     # Both tiers are defined in the resolver library, not here: this file stays

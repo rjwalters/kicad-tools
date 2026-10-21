@@ -52,6 +52,56 @@ no journal is created, when no OTLP exporter runs.
 | `item_draw` | object, optional | step engine only (#11896, one pool since #12185), absent elsewhere and on a tick that drew nothing: the item draws of a tick from one pool of every actionable item across the host's repos. Header (repeats on every chunk): `seed_scheme` (`loom-draw/v3`), `seed_minute`, `seed_host`, `tick_counter` (decimal strings), `draws_total`, `backlog_exponent` (α) and `busy_exponent` (β) (decimal strings that parse back to the same float), `repos[]` (one `{repo, weight, in_flight, items, pool_weight}` per repo in the starting pool, in pool order: `weight` = `w_repo`, `in_flight` = `in_flight_repo`, `items` = `n_items`, `pool_weight` = `S_r`), `closures[]` (`{repo, after_draw, steps}`: a repo the per-repo cap took out of the pool mid-tick is absent from every draw with `draw_index >= after_draw`; with `steps` (absent when empty), only that repo's rows of those steps are, e.g. a repo whose Champion merge the tick spawned loses its other `champion_merge` and `champion_hold_reevaluate` rows, #12494), `weight_overflow[]` (the repos in the pool when Σw overflowed `u64` and the tick's draws stopped), and `excluded[]`, one `{repo, reason, skip_reason, count}` per workspace and weight-0 reason (`reason` is the classifier's pass reason, e.g. `claimed`, `blocked`, `no_stage`, `draft`, or `pool_exhausted` (the step's role has no spawnable account) or `build_backoff`; `skip_reason` is its closed-set mapping, `PickSkipReason::from_exclusion`; a `refused_<reason>` row counts draws a gate or the claim refused; a `merge_in_flight` row counts the repo's merge steps held out of the pool because a Champion merge, this host's or a peer's, was in flight there, and a `deferred_merge_in_flight` row those a merge this tick spawned took out, #12494). `pools[]` (chunked in order): the pool before the first draw, repos in workspace order, each repo's items in item order, `{repo, index, number, issue, pr, step, weight, priority, age_permille, age_source}`; `index` counts across the whole pool and `weight` is the item weight `iw` = `priority × (divisor_min + min(age_minutes, cap_min))`. `draws[]` (chunked in order): `{repo, draw_index, seed, pool_size, total_weight, roll, picked_index, number, issue, pr, step, weight, draw_weight, repo_weight, repo_items, repo_pool_weight, in_flight_repo, actionable, priority, level, lane, age_permille, age_minutes, age_source}`. Draw `i` of the tick is seeded `sha256("loom-draw/v3:" + seed_minute + ":" + seed_host + ":" + tick_counter + ":" + draw_index)`, first 8 bytes big-endian (`v2` also keyed the repo). A pooled item's draw weight is `w_repo × iw × S_r^(α−1) × (1 + in_flight_repo)^(−β)`, computed in floating point over the items still in the pool, scaled so the heaviest weighs `2^40` and rounded to an integer (a positive weight never becomes 0); `draw_weight` is the drawn item's, `repo_items` and `repo_pool_weight` are its repo's `n_items` and `S_r` at that draw, and P = `draw_weight / total_weight`. Draws are without replacement. The roll is `PickRng(seed)` values with rejection of the low `2^64 mod total_weight` ones, then `% total_weight` (no modulo bias). Replay: start from `pools[]` and `repos[]`; for each draw, drop the repos (or, for a closure with `steps`, those rows of the repo) `closures[]` closed by then, weigh the pool left with the formula above, check `seed`, `total_weight`, `roll` and `draw_weight`, and select the first row whose cumulative weight exceeds the roll; that row's position is `picked_index` (`step_dispatch::item_draw::replay_record`). The tick counter is per process, so a restart within a minute reuses that minute's seeds; replay is unaffected. `age_source` is `mirror`, `events`, `created` or `none`. Additive (a `loom-draw/v2` record has no `repos[]`, exponents or `closures[]` and does not replay under v3), so `schema_version` stays `2` |
 | `very_important_demoted` | array, optional | work finder only (#11509), absent when empty: one `{repo, number, holder}` per `loom:very-important` issue the per-workspace cap ranked as important this tick (`holder` keeps the slot; every one, uncapped). Additive, so `schema_version` is unchanged; see [`priority-model.md`](priority-model.md) |
 
+## Exported summary and payload archive (#12974)
+
+The **exported** log record is a bounded summary, at most 16 KB of JSON
+(`SUMMARY_MAX_BYTES`, pinned by `a_worst_case_summary_stays_under_the_ceiling`),
+so it survives a ~16 KB ingest cap (parent #12973). The **full record** (every
+candidate and draw, exactly the former chunk union) is written first to the
+payload archive and is no longer exported. Chunking (`chunk_index` /
+`chunk_count`, below) now applies only to records read back from older
+daemons; an exported summary is always `chunk_index` 0, `chunk_count` 1.
+
+A summary is recognised by `payload_ref`. It keeps `schema_version`, `role`,
+`host`, `tick_id`, `started_at` / `ended_at`, `outcome`, `dispatch_result`,
+`repo`, `candidate_source`, `decisions_observed`, `candidates_total`, up to 20
+`acted[]` entries, `workspace_draw` (`seed`, `draws_total`, the `seed_*` fields)
+and the `item_draw` header (the seed inputs, exponents and `draws_total`). It
+**never** carries `candidates[]`, `skipped[]`, `workspace_draw.draws[]` or
+`item_draw.pools[]` / `draws[]` / `repos[]` / `excluded[]` / `closures[]` /
+`weight_overflow[]`. If `lanes[]` or `very_important_demoted[]` would push it past
+the cap they are dropped too, then `acted[]`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `payload_ref` | string, summary only | the run id (= `tick_id`) the full record is archived under |
+| `skipped_counts` | object, summary only | `skipped[]` entries per closed-set skip reason, e.g. `{"in_flight": 12, "quota": 3}` |
+| `exclusion_counts` | object, summary only | the step engine's weight-0 items (`item_draw.excluded[].count`) per skip reason |
+
+**Archive.** `observability/pick_payload_archive.rs`: a `PickPayloadSink` trait
+with one implementation, `LocalDirSink`, which writes
+`~/.loom/pick-payloads/<yyyy-mm-dd>/<tick_id>.json.zst` (zstd-compressed JSON of
+the full `PickDecisionRecord`; the day is the tick's `ended_at` date;
+`LOOM_PICK_PAYLOAD_DIR` overrides the directory). Retention: payloads older than
+14 days and, past 512 MiB, the oldest files are deleted (checked at most hourly).
+An S3 sink is a separate child issue. The archive is best-effort: an unwritable
+directory is logged and counted (`pick_payload_archive::failure_count`), the
+summary still exports and the tick does not fail, so a `payload_ref` can name a
+payload that was never written.
+
+**Readers.** Anything needing candidate or draw detail (rank, the draw
+sequence, per-candidate verdicts) must fetch the payload by `payload_ref`:
+`pick_payload_archive::read_payload` returns the full `PickDecisionRecord`, and
+`step_dispatch::item_draw::replay_record` replays `item_draw` from it
+(`replay_from_the_archived_payload_gives_the_same_picks`). SigNoz alone no
+longer has the candidate list. The 2am `infra/ops/scripts/step-dispatch-watch.py`
+reads `item_draw` `draws_total` / `excluded[]` / `draws[]` from `logs_v2`; it
+keeps `draws_total` but loses `excluded[]` / `draws[]` (use `exclusion_counts`) and
+needs a follow-up in that repo.
+
+**Wire compatibility.** Additive only: `schema_version` stays `2`. The three
+new fields are omitted when unset, so a full record is byte-identical to before.
+
 ## What "ranking" means per source
 
 - **Work finder.** `candidates` are the ready-queue rows in comparator rank
@@ -173,6 +223,13 @@ there. The step engine's weight-0 exclusions map through the parallel total matc
 
 ## Rank of an item in each role's latest candidate list
 
+> **Since #12974 this is not derivable from SigNoz.** The exported record is a
+> summary with no `candidates[]` (see "Exported summary and payload archive"),
+> so the `arrayFirstIndex` query below returns `0` for every item on a daemon
+> that exports summaries. Rank at an instant needs the archived payload:
+> fetch it by `payload_ref` and read the candidate's `rank`. The query is kept
+> for records written by older daemons.
+
 For a record with `candidate_source = serving_queue` this is the item's rank in
 the role's serving-queue order; for `listing`, in the order the role read it;
 for `gate_listing`, only the forge listing order (select
@@ -218,6 +275,10 @@ filter grouped by `role, host`, restricted to `chunk_index = 0` so the chunks of
 one tick are not counted as multiple ticks.
 
 ## Record volume
+
+> **Since #12974** the exported records are summaries of at most 16 KB, so the
+> several-hundred-KB figures below describe the archived payload (compressed
+> on local disk), not the log stream.
 
 > **Step dispatch (#11894, live since #11909).** Item roles have left the fixed role-runner cadences, so this table no longer holds for Curator, Judge and Doctor. Work-finder records carry `item_draw` (the step, the weight terms, `age_source`, and `weight_overflow`), and each work-finder row's `stage` names its step. See [`docs/design/work-finder-step-dispatch.md`](https://github.com/rjwalters/loom/blob/main/docs/design/work-finder-step-dispatch.md) §12.
 

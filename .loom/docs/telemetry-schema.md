@@ -2866,6 +2866,10 @@ the `workspace_draw` (seed, and each draw's candidates with `weight` =
 `base_weight` + `bonus` since #11742; read a draw as `weight / total_weight`).
 Its seed's inputs (`seed_scheme`, `seed_minute`, `seed_host`, #11683) were added
 as optional fields under the stability promise above.
+Since #12974 the exported record is a **bounded summary** (at most 16 KB, flagged
+by `payload_ref`; no `candidates[]`, `skipped[]` or draw lists, with
+`skipped_counts` / `exclusion_counts` instead); the full record is archived
+locally under that `payload_ref`. Additive: `schema_version` stays `2`.
 Full field reference, the SigNoz rank-at-instant query and the rows/day volume:
 [`telemetry-kind-pick-decision.md`](telemetry-kind-pick-decision.md).
 

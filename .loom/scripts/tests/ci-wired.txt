@@ -345,3 +345,6 @@ test-targeted-role-invocation.sh
 # #10574: prompt-lint that Judge/Doctor CI-wait recipes agree (snapshot vs
 # bounded wait, unknown required contexts). Hermetic: reads files only.
 test-ci-wait-prompt-consistency.sh
+# #12939: tools-first slice resolution on a clean install (loom-tools before
+# loom-daemon, transitional fallback). Hermetic.
+test-tools-first-clean-install.sh

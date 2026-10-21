@@ -1098,6 +1098,14 @@ empty queue; `stale` = no new tick for 15 minutes; `no queue data` = the host
 never sent one), and a fleet-wide work queue listing every issue
 with its host, phase, waiting time, blocking reason and issue / PR links.
 
+### Size-bounded `pick.decision` logs (#12974)
+
+`pick.decision` is the largest log stream, so it is exported as a summary of at
+most 16 KB (flagged by `payload_ref`); the full record sits in the local payload
+archive (`~/.loom/pick-payloads/<day>/<tick_id>.json.zst`). Candidate- or
+draw-level questions (rank, draw replay) read the archive, not SigNoz. Fields,
+retention and readers: [`telemetry-kind-pick-decision.md`](telemetry-kind-pick-decision.md#exported-summary-and-payload-archive-12974).
+
 ### Which host and runtime ran a role tick? (#12342)
 
 Answer it from **traces**, not logs: a role-runner tick's identity lives on its
