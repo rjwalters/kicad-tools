@@ -15,6 +15,12 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-21
 
+- **PR #7712**: fix(zones): skip auto-pour on boards with legacy-named copper layers
+- **PR #7707**: fix(board04): move corner-seated C10.2/C11.2 GND welds clear of SMT lands
+- **PR #7697**: chore: register 3D-model neighbours in the ecosystem registry
+- **Issue #7708** (closed): bug: pocketbeagle zero-touch route raises 'Layer In1.Cu is not available' with empty declared layers; beagleconnect_freedom ends below input connectivity
+- **Issue #7704** (closed): main red: Slow Tests — test_board_04_drill_clearance_regen fails (manufacturing-requirements.json missing in temp dir) since 2026-10-20T20:04Z
+- **Issue #7694** (closed): chore: add ecosystem registry entries for the 3D-model neighbours
 - **PR #7715**: docs(board07): audit wall-clock limits under deterministic-budget
 - **PR #7714**: fix(route): name schema-2 migration step and surface load error on total failure
 - **PR #7709**: feat: add 2026-10-21 external benchmark collection from the workflow run
