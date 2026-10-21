@@ -15,6 +15,10 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-21
 
+- **PR #7751**: fix(board07): move U4 TMDS balls to the J2-facing column so TMDS_D0_N routes
+- **Issue #7557** (closed): Board 07: TMDS_D0_N pad U4.B2 has no legal exit; needs placement rework or joint TMDS escape-corridor allocation (#3673)
+- **PR #7749**: fix(boards): gate board 02 route_demo and board 05 legacy recipe on kct export
+- **Issue #7746** (closed): Gate route_demo.py (board 02) and legacy_drv8301/design.py (board 05) exports through the shared pipeline gate
 - **Issue #7186** (closed): kct post-route DRC reports 33 shorts on routed board 07m where pinned kicad-cli reports 0 (engine disagreement)
 - **PR #7744**: fix: gate board recipes on manufacturing export result
 - **Issue #7740** (closed): board generators report Overall: PASS and exit 0 when the manufacturing-bundle export fails
