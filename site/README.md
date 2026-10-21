@@ -65,11 +65,13 @@ assets separately, run `npm --prefix site run copy-renders`. `site/dist/` and
   dated routing attempts above the preserved historical archive.
 
 The primary navigation says **Routing status** and retains `/benchmarks/` for
-existing links. The September 12, 2026 collection includes actual partial
-router outputs, so it is useful engineering evidence, but it does not support
-competitive performance claims. Two other cases measured fallback inputs;
-STRF has a negative connectivity delta and its declared tuned run did not
-apply the intended rules. Keep these limitations beside the results. The
+existing links. The dated collections (September 12 and September 15, 2026)
+include actual partial router outputs, so they are useful engineering evidence,
+but they do not support competitive performance claims. Some cases measured
+fallback inputs; STRF has a negative connectivity delta and its declared tuned
+run did not apply the intended rules. Reviewed context is bound to each
+report's SHA-256 in `src/data/benchmarkContext.ts`, with a per-collection
+runtime note, and wording about issues must say when they have closed. Keep these limitations beside the results. The
 label describes the page's purpose without promising successful routing.
 
 Project version comes from `pyproject.toml`; no manual version badge update is
