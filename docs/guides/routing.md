@@ -385,7 +385,8 @@ still errors, with a message saying so; the class is the authored statement in
 reported as `netclass_clearance_unsupported`, never skipped.
 
 Netclass resolution follows KiCad 10: priorities, inheritance, wildcard
-patterns and schema 3-5 projects (checked against `kicad-cli` in
+patterns and schema 3-5 projects; a schema-2 project fails closed with a
+message naming the migration step (open and re-save it in KiCad) (checked against `kicad-cli` in
 `tests/fixtures/project_clearance`). If a project declares a named class this
 resolver cannot model, such as an unsupported pattern or schema, or an
 assignment to an unknown class, the route stops with an explicit
