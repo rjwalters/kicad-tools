@@ -23,6 +23,11 @@ npm --prefix site run check-links -- --external
 npm --prefix site run preview -- --host 127.0.0.1
 ```
 
+CI (the `Site` job in `.github/workflows/ci.yml`) runs `ci`, `test`, `check`,
+`build` and `check-links` (without `--external`) on every PR that touches
+`site/`, the benchmark results, board readiness files or the board JSON schema
+doc, including Dependabot `/site` bumps.
+
 The preview serves the production build. Check the printed URL, then inspect
 home, `/benchmarks/`, a board with assets and a development board such as
 `/09-usbc-pd-power/`. Test narrow mobile and desktop widths, the first-Tab skip

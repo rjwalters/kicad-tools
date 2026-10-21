@@ -136,6 +136,7 @@ jobs:
       board00: ${{ steps.shared.outputs.shared == 'true' || (steps.filter.outputs.code == 'true' && steps.boards.outputs.board00 == 'true') }}
       board06: ${{ steps.shared.outputs.shared == 'true' || (steps.filter.outputs.code == 'true' && steps.boards.outputs.board06 == 'true') }}
       board07: ${{ steps.shared.outputs.shared == 'true' || (steps.filter.outputs.code == 'true' && steps.boards.outputs.board07 == 'true') }}
+      site: ${{ steps.site.outputs.site }}
     steps:
       # Issue #5366: a single combined `!(a|b|c|...)` extglob only excludes
       # one path segment below each alternative (picomatch/extglob
@@ -210,6 +211,58 @@ jobs:
               - '!boards/05-bldc-motor-controller/**'
               - '!boards/06-diffpair-test/**'
               - '!boards/07-matchgroup-test/**'
+
+      # Issue #7665: the website under site/ has its own test/check/build/
+      # check-links suite. `code` excludes site/**, so it needs its own
+      # output. Default `some` quantifier (any listed path), which is why this
+      # is a separate step from the `every` steps above. The data inputs are
+      # the files the site renders (benchmark results, board readiness,
+      # the board JSON schema doc).
+      - uses: dorny/paths-filter@v4
+        id: site
+        with:
+          filters: |
+            site:
+              - 'site/**'
+              - 'benchmarks/external/results/**'
+              - 'boards/*/output/readiness.json'
+              - 'docs/board-json-schema.md'
+
+  # Issue #7665: run the website's own checks. Dependabot /site bumps are
+  # ordinary pull_request events, so they trigger this via the `site` filter.
+  # Same fail-open shape as the other jobs: always on schedule/dispatch, and
+  # on a failed `changes` job. Making this a *required* check is a repo-admin
+  # branch-protection action; the check name is "Site (test, check, build,
+  # links)". check-links runs without --external (no network in CI).
+  site:
+    name: Site (test, check, build, links)
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.site == 'true' || needs.changes.result == 'failure') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+
+      - name: Install site dependencies (lockfile)
+        run: npm --prefix site ci --no-audit --no-fund
+
+      - name: Site tests
+        run: npm --prefix site test
+
+      - name: Astro check
+        run: npm --prefix site run check
+
+      - name: Site build
+        run: npm --prefix site run build
+
+      - name: Check internal links
+        run: npm --prefix site run check-links
 
   lint:
     # Deliberately unconditional (no `needs`/`if`): the content contracts must
