@@ -55,9 +55,9 @@ CHECK_CATEGORIES = [
 #: deferred by #7682 while the audit depended on the host's KiCad 3D library
 #: and generated boards still carried ``no_ref`` footprints; #7683 shipped the
 #: pinned model subset and #7685 brought every board to full coverage, so the
-#: category is default-on.  A footprint's *absent library* is only an info
-#: finding (``missing_root``), so a verdict built on ``kct check`` stays
-#: host-independent (CLAUDE.md, #6962).  The mechanism stays for a future
-#: category that must be opt-in.  Never add a category here to hide a
+#: category is default-on.  A footprint's *absent library* is only a stderr note
+#: (``missing_root``, never a finding), so a verdict and its serialized report
+#: built on ``kct check`` stay host-independent (CLAUDE.md, #6962).  The
+#: mechanism stays for a future category that must be opt-in.  Never add a category here to hide a
 #: host-independent defect.
 DEFERRED_OPT_IN_CATEGORIES: frozenset[str] = frozenset()

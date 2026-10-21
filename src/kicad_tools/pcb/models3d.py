@@ -1328,13 +1328,14 @@ def attach_local_models(pcb_path: Path | str) -> list[str]:
         if not (manifest.parent / filename).is_file():
             continue
         ref = f"${{KIPRJMOD}}/3dshapes/{filename}"
-        # re-scan each pass: earlier insertions shift offsets
-        for block in iter_footprint_blocks(text):
+        # last block first: an insertion only shifts offsets after its own block
+        touched = False
+        for block in reversed(list(iter_footprint_blocks(text))):
             if block.lib_id != lib_id:
                 continue
             body = text[block.start : block.end + 1]
             if f'(model "{ref}"' in body:
-                break
+                continue
             for a, b in reversed(_model_node_spans(body)):
                 body = body[:a] + body[b:]
             t = block.indent + "\t\t"
@@ -1348,8 +1349,9 @@ def attach_local_models(pcb_path: Path | str) -> list[str]:
             close_line = body.rfind("\n") + 1
             body = body[:close_line] + node + body[close_line:]
             text = text[: block.start] + body + text[block.end + 1 :]
+            touched = True
+        if touched:
             changed.append(lib_id)
-            break
     if changed:
         pcb_path.write_text(text)
     return changed

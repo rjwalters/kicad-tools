@@ -234,22 +234,20 @@ def test_missing_library_root_is_marked(tmp_path, models, monkeypatch):
     assert _classes(pcb)["R1"] == "dangling"
 
 
-def test_check_collapses_missing_library_into_one_info(tmp_path, models, monkeypatch):
+def test_check_reports_missing_library_as_one_stderr_note(tmp_path, models, monkeypatch, capsys):
     refs = [_fp(f"R{i}", body='(model "${KICAD10_3DMODEL_DIR}/part.step")') for i in range(5)]
     pcb = _write(tmp_path, *refs, _fp("U1"))
     assert [(v.severity, v.items) for v in _model_coverage_findings(pcb)] == [("warning", ("U1",))]
+    assert "NOTE" not in capsys.readouterr().err
     _no_library(monkeypatch, tmp_path)
     findings = _model_coverage_findings(pcb)
-    # One informational finding for the absent library; the bare footprint
-    # (``no_ref``) is a board defect on every host and stays a warning.
-    assert sorted((v.severity, v.items) for v in findings) == [
-        ("info", ("R0", "R1", "R2", "R3", "R4")),
-        ("warning", ("U1",)),
-    ]
-    info = next(v for v in findings if v.severity == "info")
-    assert "not evaluated" in info.message and "${KICAD10_3DMODEL_DIR}" in info.message
-    assert "#7683" in info.message
-    assert not info.is_warning
+    # The absent library is the environment's gap: one stderr note, never a
+    # finding, so serialized reports are identical on every host.  The bare
+    # footprint (``no_ref``) is a board defect everywhere and stays a warning.
+    assert [(v.severity, v.items) for v in findings] == [("warning", ("U1",))]
+    err = capsys.readouterr().err
+    assert err.count("NOTE: 3D coverage not evaluated for 5 footprint(s)") == 1
+    assert "${KICAD10_3DMODEL_DIR}" in err and "#7683" in err
 
 
 def test_model_coverage_is_default_on():
@@ -403,3 +401,47 @@ def test_attach_local_models_ignores_missing_manifest_or_body(tmp_path):
     )
     assert attach_local_models(pcb) == []  # never a dangling ref
     assert pcb.read_text() == before
+
+
+def test_attach_local_models_covers_every_footprint_with_the_lib_id(tmp_path):
+    from kicad_tools.pcb.models3d import attach_local_models
+
+    pcb = _write(
+        tmp_path, _fp("L1", lib_id="L:X"), _fp("R1"), _fp("L2", lib_id="L:X"), extra="\n"
+    )
+    shapes = tmp_path / "3dshapes"
+    shapes.mkdir()
+    (shapes / "X.wrl").write_text("#VRML V2.0 utf8\n")
+    (shapes / "local_models.json").write_text(json.dumps({"L:X": "X.wrl"}))
+
+    assert attach_local_models(pcb) == ["L:X"]
+    classes = _classes(pcb)
+    assert classes["L1"] == classes["L2"] == "resolved"
+    assert classes["R1"] == "no_ref"
+    assert pcb.read_text().count('(model "${KIPRJMOD}/3dshapes/X.wrl"') == 2
+    assert attach_local_models(pcb) == []  # idempotent, even with a repeat
+
+
+def test_check_report_bytes_do_not_depend_on_a_model_library(
+    tmp_path, monkeypatch, capsys
+):
+    """Committed evidence must be identical with and without a 3D model library."""
+    from kicad_tools.cli.check_cmd import main
+
+    fp = _fp("R1", body='(model "${KICAD10_3DMODEL_DIR}/part.step")')
+    pcb = _write(tmp_path, fp)
+    monkeypatch.setenv("KCT_LCSC_3D_DIR", str(tmp_path / "lcsc"))
+    monkeypatch.delenv("KICAD_CONFIG_HOME", raising=False)
+
+    def report_bytes(model_dir: Path) -> str:
+        for var in ("KICAD7", "KICAD8", "KICAD9", "KICAD10"):
+            monkeypatch.setenv(f"{var}_3DMODEL_DIR", str(model_dir))
+        out = tmp_path / f"report-{model_dir.name}.json"
+        main([str(pcb), "--only", "model_coverage", "--format", "json", "--output", str(out)])
+        capsys.readouterr()
+        return out.read_text()
+
+    library = tmp_path / "library"
+    library.mkdir()
+    (library / "part.step").touch()
+    assert report_bytes(library) == report_bytes(tmp_path / "nonexistent")

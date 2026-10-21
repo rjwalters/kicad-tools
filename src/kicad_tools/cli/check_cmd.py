@@ -3358,9 +3358,9 @@ def run_selected_checks(
     #   names a missing directory -- the CI runner and the pinned toolchain
     #   ship none; ``kct models sync`` fetches the pinned subset, #7683) is
     #   the *environment's* gap, not the board's.
-    #   All of them collapse into ONE ``info`` finding per library variable,
-    #   which never counts as a warning, so a host without a library reads
-    #   "not evaluated" instead of N per-footprint defects;
+    #   All of them collapse into ONE stderr note per library variable (not a
+    #   finding, so evidence bytes are host-independent), so a host without a
+    #   library reads "not evaluated" instead of N per-footprint defects;
     # * every other gap -- ``no_ref`` above all, which is the same on every
     #   host -- is a real defect of the board and stays a per-footprint
     #   ``warning`` (advisory bucket: ``kct check --3d-models`` still
@@ -3386,18 +3386,16 @@ def run_selected_checks(
                     items=(gap.reference,),
                 )
             )
+        # The environment's gap goes to stderr, never into ``results``: a
+        # serialized finding would make committed evidence (``kct readiness``
+        # receipts, ``check-report.json``) differ byte-for-byte between a host
+        # with a model library and one without -- the pinned image has none.
         for root, entries in sorted(report.missing_roots.items()):
-            results.add(
-                DRCViolation(
-                    rule_id="model_coverage",
-                    severity="info",
-                    message=(
-                        f"3D coverage not evaluated for {len(entries)} footprint(s): "
-                        f"no model library at ${{{root}}} on this host (run "
-                        "`kct models sync` for the pinned subset; see #7683)"
-                    ),
-                    items=tuple(sorted(e.reference for e in entries)),
-                )
+            print(
+                f"NOTE: 3D coverage not evaluated for {len(entries)} footprint(s): "
+                f"no model library at ${{{root}}} on this host (run "
+                "`kct models sync` for the pinned subset; see #7683)",
+                file=sys.stderr,
             )
         return results
 

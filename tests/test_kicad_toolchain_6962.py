@@ -409,10 +409,20 @@ def test_routed_drc_container_script_exports_pinned_config_home():
     assert f'eval "$(python3 scripts/ci/{_INIT} --shell)"' in script
 
 
+# Board scripts that never invoke kicad-cli, so no pinned toolchain can matter.
+_NO_KICAD_CLI = frozenset(
+    {
+        # Writes VRML boxes and (model ...) nodes from hard-coded dimensions; it
+        # produces no DRC/ERC output and reads no KiCad config (#7685).
+        "generate_local_3d_bodies_7685.py",
+    }
+)
+
+
 def test_every_board_evidence_script_runs_on_the_pinned_toolchain():
     offenders = []
     for path in sorted((REPO / "scripts" / "boards").glob("*.py")):
-        if path.name.startswith("_"):
+        if path.name.startswith("_") or path.name in _NO_KICAD_CLI:
             continue
         text = path.read_text()
         if "evidence_toolchain" not in text and "run_on_evidence_toolchain" not in text:

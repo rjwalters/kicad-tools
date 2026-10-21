@@ -473,6 +473,8 @@ DRC_CLEAN_PCB = """(kicad_pcb
       (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
     (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64)
       (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "+3.3V"))
+    (model "${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0402_1005Metric.step"
+      (offset (xyz 0 0 0)) (scale (xyz 1 1 1)) (rotate (xyz 0 0 0)))
   )
   (footprint "TestPoint:TestPoint_Pad_1.0x1.0mm"
     (layer "F.Cu")
