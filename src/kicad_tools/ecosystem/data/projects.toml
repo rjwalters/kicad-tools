@@ -1489,6 +1489,8 @@ verdict = "ideas-adopted"
 license = "AGPL-3.0"
 license_compat = "copyleft-ideas-only"
 language = "Python"
+stars = 1714
+last_push = "2026-04-08"
 last_verified = "2026-10-21"
 research_docs = ["docs/research/3d-model-coverage.md"]
 summary = """
@@ -1510,6 +1512,8 @@ verdict = "watch"
 license = "MIT"
 license_compat = "mit-clean"
 language = "Python"
+stars = 488
+last_push = "2026-09-11"
 last_verified = "2026-10-21"
 research_docs = ["docs/research/3d-model-coverage.md"]
 summary = """
@@ -1532,9 +1536,14 @@ category = "3d-models"
 relation = "upstream"
 verdict = "complementary"
 # Some files are MIT/LGPL, but the project as a whole is GPL-3.0-or-later.
+# GitLab's detector reports "gpl-3.0", recorded below so
+# `ecosystem_refresh.py` does not report a phantom `license-changed`.
 license = "GPL-3.0-or-later"
+upstream_license_detected = "GPL-3.0"
 license_compat = "copyleft-ideas-only"
 language = "Python (CadQuery)"
+stars = 80
+last_push = "2026-10-12"
 last_verified = "2026-10-21"
 research_docs = ["docs/research/3d-model-coverage.md"]
 summary = """
@@ -1553,10 +1562,13 @@ category = "3d-models"
 relation = "reference"
 verdict = "watch"
 # The README says AGPLv3 but no LICENSE file is committed, so `license` is
-# "NONE" per the registry rules. We treat it as AGPL (ideas only) regardless.
+# "NONE" per the registry rules, and `unlicensed` (all rights reserved)
+# applies whatever the README claims. Either way: ideas only, no code reuse.
 license = "NONE"
-license_compat = "copyleft-ideas-only"
+license_compat = "unlicensed"
 language = "Python (FreeCAD)"
+stars = 696
+last_push = "2026-09-04"
 last_verified = "2026-10-21"
 research_docs = ["docs/research/3d-model-coverage.md"]
 summary = """
@@ -1580,6 +1592,8 @@ verdict = "watch"
 license = "MIT"
 license_compat = "mit-clean"
 language = "Python (CadQuery)"
+stars = 20
+last_push = "2025-07-22"
 last_verified = "2026-10-21"
 research_docs = ["docs/research/3d-model-coverage.md"]
 summary = """
