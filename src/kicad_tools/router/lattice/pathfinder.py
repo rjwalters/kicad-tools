@@ -653,9 +653,11 @@ class LatticePathfinder:
         # measure; ``None`` -> tracks plus a 1.6 mm barrel per through-via.
         self.pair_length_measure: Callable[[Route], float] | None = None
         # Issue #7721: price net signed turning in the coupled (fat) pair
-        # search.  Experimental and OFF by default -- it improves most pairs
-        # but regresses others (see PR #7726), so main's routes stay
-        # byte-identical unless opted in here or via the environment.
+        # search.  Experimental and OFF by default, and not yet a net win:
+        # of 20 board 06rf/07rf pairs it improves skew on 6, leaves 12
+        # unchanged and regresses 2, and with it on 07rf couples only 3 of 7
+        # pairs at about 3.5x the runtime (see PR #7726).  Default routes are
+        # unchanged unless opted in here or via the environment.
         self.pair_turn_pricing: bool = os.environ.get(PAIR_TURN_PRICING_ENV, "").strip() == "1"
         self._shortfall_memo: dict[int, tuple[_RouteResult, int]] = {}
         # Issue #6703: raised only while a partner-aware fallback leg is
