@@ -4883,6 +4883,7 @@ def main() -> int:
                 route_ok=route_success,
                 route_allowance=0,
                 lvs_ok=lvs_ok,
+                export_ok=mfg_ok,
                 supplemental_drc_ok=drc_ok,
                 supplemental_reason=(
                     "kct check --net-class-map reported diffpair / match-group "
@@ -4901,10 +4902,6 @@ def main() -> int:
             print("\nResults:")
             for line in gate.summary_lines():
                 print(line)
-            # ``MFG`` reports whether the bundle was WRITTEN (exit 0 of the
-            # export), NOT whether the board is DRC-clean -- board cleanliness
-            # is the ``DRC``/``Overall`` verdict above (issue #3912 wording).
-            print(f"  MFG bundle: {'WRITTEN' if mfg_ok else 'FAILED'}")
 
             return gate.exit_code()
 

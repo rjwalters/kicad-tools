@@ -3373,8 +3373,8 @@ Precedence is env > config > default.
 The star-liveness pass (#9244 C) is gone. The daemon no longer computes
 landing stages for starred issues, posts `loom:operator-priority-escalation`
 comments, runs the no-progress watchdog, propagates or materializes inherited
-stars or priority levels, or applies loom-ui star intents from the `/ingest`
-ack. Priority is the plain `loom:important` / `loom:very-important` labels
+stars or priority levels, or applies loom-ui star intents from the former `/ingest`
+ack (removed with the exporter, #12813). Priority is the plain `loom:important` / `loom:very-important` labels
 (#11103), which order dispatch only; loom-ui derives landing state from labels
 and PRs, and a stuck priority item reaching a human is a rule for the
 label-derived notifier.
@@ -3428,10 +3428,8 @@ dashboard has a matching "Ready queue" panel. The single-workspace tick path doe
 not record rows. Each row also carries daemon-derived `state` and `reason`
 strings, so clients do not keep their own copy of the mapping. With
 observability export on, the queue also reaches SigNoz as
-`loom.queue.issues{state,reason}` gauges and reaches the fleet backend as a
-`queue.snapshot` record (phase 2; see
+`loom.queue.issues{state,reason}` gauges (see
 [`observability.md` §3c](observability.md#3c-operational-signals-from-daemon-loops-issue-8860)).
-The fleet dashboard view is phase 3.
 
 **Dispatch plan (#9288).** Each row also carries `position`, `plan_state`
 (`running` / `next` / `queued` / `blocked`), `gate`, `keys` and
@@ -3444,8 +3442,8 @@ The fleet dashboard view is phase 3.
 `#<position> <plan_state>[/<gate>]` per row plus a `Plan:` slot line.
 `--json` adds `plan`, and its `ordering` is the daemon's own key list rather
 than a hard-coded string. `loom:curated` / `loom:triage` are unordered and never
-listed. The single-workspace tick has no plan (`plan: null`). Field reference:
-[`telemetry-schema.md` § `queue.snapshot`](telemetry-schema.md#queuesnapshot).
+listed. The single-workspace tick has no plan (`plan: null`). The plan attributes ride the
+`loom.queue.*` span attributes ([`telemetry-schema.md`](telemetry-schema.md)).
 Folding several hosts' plans into one fleet order (`merge_plans`, #9310) is a
 separate rule: [`dispatch-plan.md`](dispatch-plan.md).
 
@@ -4757,7 +4755,7 @@ they were the largest GitHub read cost a host made on its own initiative.
   decode, but nothing sends them. `telemetry-replay` and its `--check` read only
   records already in the store. A consumer that needs fleet state computes it
   from the facts the daemon still exports (`sweep.*`, `stage.work_started`,
-  `pick.decision`, `queue.snapshot`, `host.health`) and from the forge's label
+  `pick.decision`, `host.health`) and from the forge's label
   history.
 
 Neither loop had a config key, so no fleet configuration needs to change.
@@ -8148,8 +8146,8 @@ Full module-level rationale (including why `evaluate()` stays pure while
 
 #### Forge-read gauges (per host)
 
-The `queue.snapshot` blocked rows list each repo's `loom:blocked` issues, and
-every host produces them itself. The fleet-captain producer that once did this
+The queue's blocked rows listed each repo's `loom:blocked` issues, and
+every host produced them itself. The fleet-captain producer that once did this
 for the fleet (W12, `fleet.captainGauges`, #10673) was removed in #11406: it
 covered the 2 of 61 repos the captain managed, and both had starred issues, so
 stand-down saved almost nothing. A host config that still carries a
@@ -14071,21 +14069,10 @@ every 60 s.
 
 An **opt-in, off-by-default** telemetry exporter that pushes fleet telemetry
 (sweep lifecycle/outcome, token-pool snapshots, host health) to a configured
-HTTP(S) sink. This is the daemon-side half of epic #4702's rich fleet
-dashboard; the Phase-2 Cloudflare Workers backend (#4725) is the first real
-sink. The exporter ships value standalone, with no cloud dependency: a
-disabled or under-configured `observability` block is a zero-syscall no-op,
-exactly like `autonomous.idleExit` above.
-
-**Standing up your own sink**: the Workers backend is a deploy-to-your-own-
-account template — `wrangler.toml` plus a runbook that walks account/D1
-setup, migrations, ingest-key generation and rotation, and pointing the
-`observability` block below at the result, with a companion guide for gating
-the authenticated view behind Cloudflare Access. Both live beside the backend
-in the upstream Loom repo (not shipped to consumer installs):
-`2AMLogic/loom-ui` `docs/deploy-runbook.md`
-and
-`2AMLogic/loom-ui` `docs/cloudflare-access.md`.
+OTLP/HTTP sink. The native JSON-over-HTTPS `/ingest` exporter and the Workers
+backend it fed were removed in #12813: the daemon does not talk to the
+dashboard. A disabled or under-configured `observability` block is a
+zero-syscall no-op, exactly like `autonomous.idleExit` above.
 
 ### Config surface (`.loom/config.json → observability`)
 
@@ -14093,7 +14080,8 @@ and
 {
   "observability": {
     "enabled": false,
-    "endpoint": "https://ingest.example.com/v1/telemetry",
+    "endpoint": "https://otlp.example.com",
+    "exporter": "otlp",
     "batchSize": 50,
     "flushIntervalSecs": 30,
     "queueCapacity": 2000
@@ -14107,18 +14095,20 @@ Precedence is **env > config > default**, same convention as every other
 `LOOM_OBSERVABILITY_BATCH_SIZE` / `LOOM_OBSERVABILITY_FLUSH_INTERVAL_SECS` /
 `LOOM_OBSERVABILITY_QUEUE_CAPACITY` override the matching config key, which
 overrides the built-in default (`false` / *(none)* / `$HOME/.loom/observability/ingest.key`
-/ `50` / `30` / `2000`). The **ingest key is never inline in config** —
-`ingestKeyFile` names a path the daemon reads once at startup; the key
-contents never appear in a log line or error message (only the *path* does),
-and requests authenticate via an `Authorization: Bearer <key>` header.
+/ `50` / `30` / `2000`). The **bearer key is never inline in config** —
+`ingestKeyFile` (the OTLP sink's token file; the name predates the OTLP-only
+pipeline) names a path the daemon reads once at startup; the key contents
+never appear in a log line or error message (only the *path* does), and
+requests authenticate via an `Authorization: Bearer <key>` header.
 `loom-daemon` refuses to export (logs a `WARN` and skips both background
 tasks) when enabled without a resolvable `endpoint` — or, since #11555, when
 no exporter at all can start: a missing or unreadable `ingestKeyFile`
-degrades only the entries that need the key (every `https` entry, an `otlp`
-entry without `headers_file`) to their own `misconfigured` status, while an
-`otlp` entry carrying a `headers_file` starts with no ingest key at all —
-treated the same as "not configured", not a startup
-failure.
+degrades an `otlp` entry without `headers_file` to its own `misconfigured`
+status, while an `otlp` entry carrying a `headers_file` starts with no ingest
+key at all — treated the same as "not configured", not a startup failure. An
+enabled config naming **no** exporter is `misconfigured` too (there is no
+default exporter since #12813); a leftover `"https"` entry is skipped with one
+warning.
 
 `ingestKeyFile` is deliberately **excluded** from the example above and must
 never be committed to a shared `.loom/config.json`: it is the one key in this
@@ -14152,8 +14142,8 @@ wiring in `main.rs`:
   fraction, load-per-core, logical CPU count, worktree-root free space,
   daemon version/uptime) records, which have no corresponding bus event.
 - **Sender** (`observability::sender`) — drains the queue on a jittered
-  `flushIntervalSecs` timer via `observability::exporter::HttpsExporter`
-  (`reqwest`, JSON array POST per batch), retrying a failed batch with
+  `flushIntervalSecs` timer via `observability::otlp::OtlpExporter`
+  (`reqwest`, OTLP/HTTP+JSON per signal), retrying a failed batch with
   jittered exponential backoff (5s floor, 5 minute ceiling) — jitter comes
   from this crate's existing dependency-free `tokens_pool::rng::Rng`, not a
   new `rand` dependency.
@@ -14167,19 +14157,17 @@ atomically rewrites the file (temp-file + rename, mirroring
 queued record is dropped and a running `dropped_total` counter is logged —
 bounded growth, never an unbounded queue, and never a silent loss.
 
-### Exporter trait boundary (Phase 4 forward-compat, no OTel dependency yet)
+### Exporter trait boundary
 
 `observability::exporter::Exporter` is a two-method trait (`emit_batch`,
-`flush`) `observability::sender`'s drain loop is generic over — `HttpsExporter`
-is its only implementation today. This issue adds **no OTel dependency**; the
-trait boundary exists so epic #4702 Phase 4's optional OTLP exporter (for
-operators with an existing Grafana/Honeycomb/self-hosted-collector stack) can
-be a second `impl Exporter` later without touching the queue or sender.
+`flush`) `observability::sender`'s drain loop is generic over;
+`otlp::OtlpExporter` is its only implementation (#12813 removed the native
+`HttpsExporter`).
 
 ### Read-only invariant
 
 The exporter only ever originates outbound HTTP POSTs; it never parses a
-response body for anything beyond a batch-accepted/rejected status, and
+response body for anything beyond OTLP's accepted/partial-success status, and
 nothing received over this channel ever mutates daemon state — steering
 (dispatch/cancel/pause) stays with MCP, per the epic's explicit scope.
 

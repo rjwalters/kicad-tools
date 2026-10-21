@@ -522,6 +522,26 @@ behavior is byte-for-byte unchanged from before #6850.
   matching line disqualifies the PR from the class. **Fail closed**: an
   unreadable diff, a changed file the API returns no patch for (binary, or
   too large to inline), or an invalid regex also disqualifies it.
+- `privilegedContentPatterns` (#12954, optional) — regexes (jq `test()`, the
+  same engine and fail-closed rules as `forbiddenDiffPatterns`) matched, one
+  line at a time, against the **full contents at the PR head SHA** of every
+  file the class covers (every changed file, or the critical-file hits of a
+  `criticalFilesOnly` class), not against the changed lines. One matching line
+  means the file holds a privilege (a secret, a deploy or publish step, a
+  write permission, a privileged trigger), whatever its name, and
+  disqualifies the PR from the class; a file that matches none is covered
+  whatever its name. This classifies by capability, so a class can drop the
+  `*deploy*` / `*release*` / `*publish*` name excludes. It does not replace
+  `forbiddenDiffPatterns`, which still catches a PR that *adds* a privilege.
+  **Fail closed**: unreadable or empty content, a file the contents API cannot
+  serve (too large), a `removed` file, an invalid regex, a head SHA that moved
+  while the files were read, or a value that is not an array of non-empty
+  strings also disqualifies it. Absent or `[]` is today's class, unchanged. No
+  default list is built in; the class owns it (example in
+  `champion-reference.md`). Whole-line YAML comments (`^\s*#`) are not
+  scanned — a comment grants nothing, and the 2026-10-20 fixtures carry
+  comments such as "no id-token: write" — while trailing comments and every
+  other line are.
 - **Kept set — never satisfiable by a class (#12528).** In criterion #3 mode
   the matcher also disqualifies any PR touching a path of the kept set,
   whatever the class says and with or without `coversCriticalFiles`: kept-set
@@ -635,6 +655,46 @@ standing_auth_fetch_diff() {
   DIFF_JSON=$(printf '%s' "$raw" | jq -s -c 'add // []' 2>/dev/null) || return 1
 }
 
+# standing_auth_content_clear <files-json> <regexes>   (#12954)
+# 0 = every file in <files-json> was read at the PR head SHA and no line of it
+# matches any privilegedContentPatterns regex. Anything else (a removed or
+# unreadable or empty file, an invalid regex, a head SHA that moved) = 1.
+standing_auth_content_clear() {
+  local files_json="$1" regexes="$2" sha1 sha2 path enc body rx rc
+  [ -n "$regexes" ] || return 0
+  printf '%s' "$files_json" | jq -e 'length > 0 and all(.[]; (.status // "") != "removed")' >/dev/null 2>&1 || return 1
+  while IFS= read -r rx; do
+    [ -z "$rx" ] && continue
+    jq -n -e --arg rx "$rx" '"" | test($rx)' >/dev/null 2>&1
+    rc=$?
+    [ "$rc" -le 1 ] || return 1
+  done <<<"$regexes"
+  sha1=$(gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER" --jq '.head.sha' 2>/dev/null) || return 1
+  [ -n "$sha1" ] || return 1
+  while IFS= read -r path; do
+    [ -z "$path" ] && continue
+    enc=$(jq -rn --arg p "$path" '$p | split("/") | map(@uri) | join("/")') || return 1
+    body=$(gh api -H "Accept: application/vnd.github.raw" "repos/{owner}/{repo}/contents/${enc}?ref=$sha1" 2>/dev/null) || return 1
+    [ -n "$body" ] || return 1
+    while IFS= read -r rx; do
+      [ -z "$rx" ] && continue
+      # A whole-line YAML comment grants nothing, so it is not scanned: the
+      # 2026-10-20 fixtures hold comments such as "no id-token: write" that
+      # would otherwise read as the privilege they deny. Trailing comments
+      # and every other line stay scanned. The one shape this misses is a
+      # whole-line `#` inside a `run: |` block (Actions interpolates it); a
+      # PR that adds one is caught by forbiddenDiffPatterns, which scan the
+      # changed lines unstripped.
+      printf '%s' "$body" | jq -R -s -e --arg rx "$rx" 'split("\n") | map(select(test("^\\s*#") | not)) | any(.[]; test($rx))' >/dev/null 2>&1
+      rc=$?
+      # rc 1 = no privileged line; 0 = a privileged line; else error.
+      [ "$rc" -eq 1 ] || return 1
+    done <<<"$regexes"
+  done < <(printf '%s' "$files_json" | jq -r '.[].filename')
+  sha2=$(gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER" --jq '.head.sha' 2>/dev/null) || return 1
+  [ "$sha1" = "$sha2" ]
+}
+
 # standing_auth_eval <any|critical>
 #   any      criterion #2: a class satisfies the four-axis judgment. A class
 #            with "criticalFilesOnly" set (#12648) is never eligible here.
@@ -648,7 +708,7 @@ standing_auth_fetch_diff() {
 # read_ci_checks (greenCi) and, in "any" mode, FAST_PATH_FILES. In critical
 # mode $2 is criterion #3's own $FILES and CRITICAL_PATTERNS its pattern list.
 standing_auth_eval() {
-  local mode="$1" crit_files="${2:-}" i NUM_CLASSES CLASS_ID PATTERNS CONDITIONS EXCLUDES FORBIDDEN
+  local mode="$1" crit_files="${2:-}" i NUM_CLASSES CLASS_ID PATTERNS CONDITIONS EXCLUDES FORBIDDEN PRIVILEGED
   local MATCH_FILES CHANGED_COUNT CRIT_DIFF="" CRIT_PATS_JSON CRIT_MATCH_FILES="" CFO ONLY_CRIT CLASS_FILES CLASS_DIFF
   STANDING_AUTH_RESULT="NOT ELIGIBLE"
   STANDING_AUTH_ID=""
@@ -696,6 +756,11 @@ standing_auth_eval() {
     CONDITIONS=$(jq -r ".champion.standingAuthorizations[$i].conditions // [] | .[]" "$CONFIG_FILE")
     EXCLUDES=$(jq -r ".champion.standingAuthorizations[$i].excludeFilePatterns // [] | .[]" "$CONFIG_FILE")
     FORBIDDEN=$(jq -r ".champion.standingAuthorizations[$i].forbiddenDiffPatterns // [] | .[]" "$CONFIG_FILE")
+    # privilegedContentPatterns (#12954): absent/null/[] is today's class; anything
+    # but an array of non-empty strings is malformed and skips the entry (a
+    # silently ignored key would read as "no privilege found").
+    jq -e ".champion.standingAuthorizations[$i].privilegedContentPatterns // [] | type == \"array\" and all(.[]; type == \"string\" and length > 0)" "$CONFIG_FILE" >/dev/null 2>&1 || continue
+    PRIVILEGED=$(jq -r ".champion.standingAuthorizations[$i].privilegedContentPatterns // [] | .[]" "$CONFIG_FILE")
 
     # criticalFilesOnly (#12648): `null` (absent) or `false` is today's class.
     # `true` makes a class that waives criterion #3 for the critical-file hits
@@ -813,6 +878,16 @@ standing_auth_eval() {
         [ "$rc" -eq 1 ] || DIFF_HIT=1
       done <<<"$FORBIDDEN"
       [ "$DIFF_HIT" -eq 1 ] && continue
+    fi
+
+    # privilegedContentPatterns (#12954): capability, read from each covered
+    # file's full contents at the PR head SHA rather than from its name or its
+    # changed lines. Any privileged line, or any unreadable file, disqualifies.
+    if [ -n "$PRIVILEGED" ]; then
+      [ -n "$DIFF_JSON" ] || standing_auth_fetch_diff || continue
+      CLASS_DIFF="$DIFF_JSON"
+      [ "$ONLY_CRIT" -eq 1 ] && CLASS_DIFF="$CRIT_DIFF"
+      standing_auth_content_clear "$CLASS_DIFF" "$PRIVILEGED" || continue
     fi
 
     # File list matches this class and every condition is recognized --
