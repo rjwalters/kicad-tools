@@ -1,7 +1,7 @@
 {
   "version": "1.0",
-  "kicad_tools_version": "0.23.0",
-  "generated_at": "2026-10-19T21:59:37.876623+00:00",
+  "kicad_tools_version": "0.24.0",
+  "generated_at": "2026-10-21T07:11:48.661331+00:00",
   "manufacturer": "jlcpcb-tier1",
   "files": {
     "DESIGN_REVIEW.md": {
@@ -29,8 +29,8 @@
       "size": 1033
     },
     "check-report.json": {
-      "sha256": "de06eca2818e1f3b2f26cbd554a57da7c6a71d6ed4daa28f9a069238f677dedc",
-      "size": 9932
+      "sha256": "a0c11dc551e4c6b1c464b4b950656f0fa61b73d65454f03076ea9e7660b2af9e",
+      "size": 9334
     },
     "cpl_jlcpcb.csv": {
       "sha256": "213c62a3a2c9292f5c3845b76f4b447141a2206a83043afddd2a42a4c3064b05",
@@ -81,8 +81,8 @@
       "size": 10794
     },
     "design-source/routing-plan.json": {
-      "sha256": "9491eea72de04a303fb6eff1d1b2ca6e5724764e5229f5a6d7b5b0a1d09a2bbb",
-      "size": 215702
+      "sha256": "1d01c06088a65b3f81357eb997a4ce336fea2f8dc7e9bd57080b869aa531255f",
+      "size": 184224
     },
     "design-source/routing_plan.py": {
       "sha256": "162e59fafea7833e788f89dff8998c28f672c230434765c85c1747c60f0729f7",
@@ -173,48 +173,48 @@
       "size": 2192
     },
     "gerbers/gerbers.zip": {
-      "sha256": "3ffeb14c4b5e4148f3564e93846da9baac1cbaf6f94be41df0b43a22edb0917e",
-      "size": 131982
+      "sha256": "e722e7d141c297f2e775c9ba618f0e9a4069b21daf2a679a085f7dffa86911b2",
+      "size": 125175
     },
     "images/assembly.png": {
-      "sha256": "9196b12f7c83ecd66e4b68f34c9b4783e8681289b6931d236f240885991381b9",
-      "size": 473003
+      "sha256": "9c04d8d7cf77f5c54253103d16f97f8ef0d15613dba6ee9c4f35a5ef7d68e8c1",
+      "size": 451415
     },
     "images/layer_B_Cu.png": {
-      "sha256": "f74ab29809a5c4b75a469a055ed31c3f5d316de90b0fe926136003c79c4ca9f9",
-      "size": 268634
+      "sha256": "f8f83dd8d3f9d9388cc48e70d27d367a2528b912af0d0674b935959a166934df",
+      "size": 250072
     },
     "images/layer_F_Cu.png": {
-      "sha256": "adb92347236cdee4892ebb3a74874b4f078cf684f54697dae07295be752e8078",
-      "size": 362028
+      "sha256": "067025d913e802a2f073052874022e54791b8fd48923f29bc14ffc237f13c749",
+      "size": 339959
     },
     "images/layer_In1_Cu.png": {
-      "sha256": "02eb7fcf24e32070619cbc4b08b73939c3698ddf0bcd2502f88917210b20d5fe",
-      "size": 218871
+      "sha256": "439a86628959a8f1e29618dcef009ad5a7c578e615cbd177a102abe935582674",
+      "size": 198045
     },
     "images/layer_In2_Cu.png": {
-      "sha256": "7ca29fbc8a871e663bba733b6d6c2dd5943ce269e0632f973e025c91765486e3",
-      "size": 198804
+      "sha256": "e227f7e0bf21a918b4943b36ae3865aa395bc2446b2236c5a930a622cbf730e3",
+      "size": 177155
     },
     "images/pcb_back.png": {
-      "sha256": "10ae9b1524bce775a7f1a12d8af2402f601faf64dd4b998fbfab86a89c792394",
-      "size": 271057
+      "sha256": "10d3e43994ca7733745f4e19b8bb1c1ebf671fd0019b24a07edea0115b49a2ac",
+      "size": 252420
     },
     "images/pcb_copper.png": {
-      "sha256": "aa1196767571a61022bf8b70809fdce1454f7617dfae2dc441b504ff348da64f",
-      "size": 365432
+      "sha256": "f2c56ea85b14fdbd18ce58ddba21686d8f89188bb28af393b1cc0e6269251ebf",
+      "size": 344005
     },
     "images/pcb_front.png": {
-      "sha256": "e9ae481714040f6ae15d222caacd711fa3bb5fa5f65890b76a6d3469bb3a4226",
-      "size": 485752
+      "sha256": "7f334825b14b2afe3665b1bb2e2744c1345148cc78af2bd0da087ea67dde225c",
+      "size": 463877
     },
     "images/schematic_usb_joystick.png": {
-      "sha256": "435c684096c4c22d4f460823a2584c6e3f09f6663b89176976bbbaec2728eea2",
-      "size": 486460
+      "sha256": "c0a3950fda2f26c18ad6359ba1ccd02e953d67c0be8d2b40d3d8553de7445c79",
+      "size": 486466
     },
     "kicad_project.zip": {
-      "sha256": "c60d4150f46454877d4df154a873c45f28b7d566f9be59d84b99a292544780ee",
-      "size": 198455
+      "sha256": "a5607bb146ea3527d7f3b1d3aa57e4357ca00cab444c077343f86057915d393d",
+      "size": 187241
     },
     "manufacturing-requirements.json": {
       "sha256": "48470a554e39b289ba0c079833a439c65dbc3611b505f7dd978552d25d13d37b",
@@ -313,12 +313,12 @@
       "size": 3153
     },
     "report.md": {
-      "sha256": "ad06c3dcfecee2ac4a359b3a46a0b3a77850537ced09d5ae3cd62b2779477ca7",
-      "size": 4641
+      "sha256": "fc11b2776382ebc2f512c6d3b9d82407ef23dd1f05861c299b87c5883e8123cf",
+      "size": 4605
     },
     "report.pdf": {
-      "sha256": "ef50686cb50b339a7c4d40a8f59edaaebedb4933c58249cc1cc65a40ae6f2490",
-      "size": 3284088
+      "sha256": "a9a832a8fb64c69ea2059cd98e199cd6dc2adb9b26a283815cd486d04c82b1bd",
+      "size": 3139430
     },
     "schematic.pdf": {
       "sha256": "6fe021a9ea56eb056b2fc6dc24e3fee47c4f6555c6141a4ad1ec755b51aa0d98",
@@ -364,7 +364,7 @@
     {
       "name": "drill_holes",
       "status": "OK",
-      "message": "Drill holes present (105 vias, 20 TH pads)"
+      "message": "Drill holes present (85 vias, 20 TH pads)"
     },
     {
       "name": "stackup_copper",
@@ -396,8 +396,8 @@
     {
       "name": "bom_lcsc_values",
       "status": "WARN",
-      "message": "10 of 38 assigned item(s) verified (offline catalog and parts cache); 28 unverifiable (not in parts cache or offline catalog)",
-      "details": "unverified: U1 -> C44854, U2 -> C7519, F1 -> C126817, Y1 -> C2442665, J2 -> C265104, J3 -> C21285200, R1 -> C105580, R2 -> C105580 (and 20 more)"
+      "message": "2 of 38 assigned item(s) verified (parts cache); 36 unverifiable (not in parts cache or offline catalog)",
+      "details": "unverified: U1 -> C44854, J1 -> C7095263, U2 -> C7519, F1 -> C126817, Y1 -> C2442665, J2 -> C265104, J3 -> C21285200, R1 -> C105580 (and 28 more)"
     },
     {
       "name": "bom_pcb_match",
@@ -412,7 +412,7 @@
     {
       "name": "drc",
       "status": "WARN",
-      "message": "DRC passed with 11 warning(s)"
+      "message": "DRC passed with 10 warning(s)"
     },
     {
       "name": "erc",
