@@ -190,6 +190,11 @@ class HierarchyNode:
         default_factory=list
     )  # Full label details
     parent: HierarchyNode | None = field(default=None, repr=False)
+    # KiCad instance path of this placement: ``/<root uuid>`` for the root,
+    # then one ``/<sheet symbol uuid>`` per level, i.e. the ``(path ...)``
+    # key of the ``(instances ...)`` blocks for symbols on this placement.
+    # Two placements of one sheet file share ``path`` but differ here.
+    instance_path: str = ""
 
     @property
     def depth(self) -> int:
@@ -241,10 +246,32 @@ class HierarchyNode:
         return current
 
     def all_nodes(self) -> list[HierarchyNode]:
-        """Get all nodes in the hierarchy (including self)."""
+        """Get all nodes in the hierarchy (including self).
+
+        One node per sheet *placement*: a sheet file placed twice appears
+        twice, each time with its full subtree (issue #7616). Callers that
+        act on files rather than placements (editing, per-file checks)
+        should use :meth:`unique_file_nodes` instead.
+        """
         result = [self]
         for child in self.children:
             result.extend(child.all_nodes())
+        return result
+
+    def unique_file_nodes(self) -> list[HierarchyNode]:
+        """Get one node per distinct sheet file, in :meth:`all_nodes` order.
+
+        The first placement of each file is kept. Use this when acting on
+        file contents (rewriting a sheet, validating its sheet pins), so a
+        repeated sheet is not processed once per placement.
+        """
+        seen: set[str] = set()
+        result = []
+        for node in self.all_nodes():
+            if node.path in seen:
+                continue
+            seen.add(node.path)
+            result.append(node)
         return result
 
 
@@ -264,7 +291,12 @@ class HierarchyBuilder:
         """
         self.base_path = Path(base_path)
         self.strict_root = strict_root
+        # Resolved path -> first node built from that file. Doubles as a
+        # parse cache: later placements of the same file reuse its parsed
+        # sheets and labels instead of re-reading it.
         self.loaded_files: dict[str, HierarchyNode] = {}
+        # Resolved paths on the current recursion stack (the cycle guard).
+        self._ancestors: set[str] = set()
 
     def build(self, root_schematic: str) -> HierarchyNode:
         """
@@ -281,8 +313,11 @@ class HierarchyBuilder:
         """
         root_path = Path(root_schematic).resolve()
         self.base_path = root_path.parent
+        self._ancestors = set()
 
-        return self._load_schematic(str(root_path), "Root", None, base_dir=root_path.parent)
+        return self._load_schematic(
+            str(root_path), "Root", None, base_dir=root_path.parent, sheet_uuid=None
+        )
 
     def _load_schematic(
         self,
@@ -291,6 +326,7 @@ class HierarchyBuilder:
         parent: HierarchyNode | None,
         *,
         base_dir: Path | None = None,
+        sheet_uuid: str | None = None,
     ) -> HierarchyNode:
         """Load a schematic and recursively load its children.
 
@@ -298,27 +334,63 @@ class HierarchyBuilder:
         A relative name is resolved against ``base_dir``, the folder of the
         sheet file that contains the sheet symbol (KiCad's rule). It is never
         resolved against the working directory (issue #7614).
+
+        Every placement gets its own node with its full subtree, even when
+        the file was already loaded for an earlier placement (issue #7616).
+        Only a true cycle (the file is already one of this node's ancestors)
+        stops the recursion, with a childless node.
+
+        ``sheet_uuid`` is the UUID of the sheet symbol placing this file
+        (``None`` for the root); it extends the parent's instance path.
         """
         if base_dir is None:
             base_dir = self.base_path
         p = Path(path)
         full_path = (p if p.is_absolute() else base_dir / p).resolve()
-
-        # Already loaded (repeated sheet or circular reference). The key is
-        # the resolved absolute path, so both spellings of one file dedupe.
+        # The key is the resolved absolute path, so both spellings of one
+        # file dedupe.
         path_str = str(full_path)
-        if path_str in self.loaded_files:
-            # Return a reference to the existing node (but with different parent)
-            existing = self.loaded_files[path_str]
+
+        def _instance_path(file_uuid: str) -> str:
+            if parent is None:
+                return f"/{file_uuid}"
+            return f"{parent.instance_path.rstrip('/')}/{sheet_uuid or ''}"
+
+        cached = self.loaded_files.get(path_str)
+
+        if path_str in self._ancestors:
+            # Circular reference: the file includes itself or an ancestor.
+            logger.warning(
+                "Sheet %r (file %r) is its own ancestor in %s; not descending",
+                name,
+                path,
+                path_str,
+            )
             return HierarchyNode(
                 name=name,
                 path=path_str,
-                uuid=existing.uuid,
+                uuid=cached.uuid if cached else "",
                 sheets=[],
-                hierarchical_labels=existing.hierarchical_labels,
-                hierarchical_label_info=existing.hierarchical_label_info,
+                hierarchical_labels=cached.hierarchical_labels if cached else [],
+                hierarchical_label_info=cached.hierarchical_label_info if cached else [],
                 parent=parent,
+                instance_path=_instance_path(cached.uuid if cached else ""),
             )
+
+        if cached is not None:
+            # Another placement of an already-parsed file: reuse the parse.
+            node = HierarchyNode(
+                name=name,
+                path=path_str,
+                uuid=cached.uuid,
+                sheets=list(cached.sheets),
+                hierarchical_labels=cached.hierarchical_labels,
+                hierarchical_label_info=cached.hierarchical_label_info,
+                parent=parent,
+                instance_path=_instance_path(cached.uuid),
+            )
+            self._load_children(node, full_path)
+            return node
 
         # Parse the schematic
         try:
@@ -341,6 +413,7 @@ class HierarchyBuilder:
                 path=path_str,
                 uuid="",
                 parent=parent,
+                instance_path=_instance_path(""),
             )
 
         # Get UUID
@@ -371,28 +444,35 @@ class HierarchyBuilder:
             hierarchical_labels=h_labels,
             hierarchical_label_info=h_label_info,
             parent=parent,
+            instance_path=_instance_path(uuid),
         )
 
         self.loaded_files[path_str] = node
-
-        # Recursively load children, relative to this sheet's own folder
-        for sheet in sheets:
-            if not sheet.filename:
-                logger.warning(
-                    "Sheet %r in %s has no file property (Sheetfile / Sheet file); skipping",
-                    sheet.name,
-                    path_str,
-                )
-                continue
-            child = self._load_schematic(
-                sheet.filename,
-                sheet.name,
-                node,
-                base_dir=full_path.parent,
-            )
-            node.children.append(child)
-
+        self._load_children(node, full_path)
         return node
+
+    def _load_children(self, node: HierarchyNode, full_path: Path) -> None:
+        """Load ``node``'s sub-sheets, relative to its own folder."""
+        self._ancestors.add(node.path)
+        try:
+            for sheet in node.sheets:
+                if not sheet.filename:
+                    logger.warning(
+                        "Sheet %r in %s has no file property (Sheetfile / Sheet file); skipping",
+                        sheet.name,
+                        node.path,
+                    )
+                    continue
+                child = self._load_schematic(
+                    sheet.filename,
+                    sheet.name,
+                    node,
+                    base_dir=full_path.parent,
+                    sheet_uuid=sheet.uuid,
+                )
+                node.children.append(child)
+        finally:
+            self._ancestors.discard(node.path)
 
 
 def build_hierarchy(root_schematic: str, strict_root: bool = False) -> HierarchyNode:

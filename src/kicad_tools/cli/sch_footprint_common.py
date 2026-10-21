@@ -93,7 +93,7 @@ def iter_missing_footprint_symbols(
     """Yield ``(node, sym, sch)`` for every symbol needing a footprint.
 
     Walks the full hierarchy via :func:`build_hierarchy`, loads each
-    sheet's schematic, and applies the same skip rules as
+    sheet file once (not once per placement), and applies the same skip rules as
     ``check_missing_footprints`` (power, dnp). Sheets that fail to load
     are skipped; callers that need to surface those (the preflight path
     emits ``info`` severity issues) can pass ``on_sheet_error``.
@@ -119,7 +119,9 @@ def iter_missing_footprint_symbols(
         ``_resolve_target_pin_count`` / ``_get_fp_filters``).
     """
     root = build_hierarchy(str(schematic_path))
-    for node in root.all_nodes():
+    # One pass per sheet file: a repeated sheet's symbols are the same
+    # symbols on every placement, so yield (and edit) them once (#7616).
+    for node in root.unique_file_nodes():
         try:
             sch = Schematic.load(node.path)
         except Exception as exc:
