@@ -245,3 +245,87 @@ def test_rename_signal_lists_each_file_occurrence_once():
         if c.file_path.endswith(_NESTED[2]) and c.element_type == "hierarchical_label"
     ]
     assert len(leaf_labels) == 1
+
+
+# --- kct sch validate: duplicate references per placement ----------------------
+
+
+def _duplicate_reference_errors(path: Path) -> list[str]:
+    from kicad_tools.cli.sch_validate import check_duplicate_references
+
+    return [
+        f"{i.message} | {i.location}"
+        for i in check_duplicate_references(str(path))
+        if i.category == "duplicate_reference" and i.severity == "error"
+    ]
+
+
+def test_nested_repeat_has_no_false_duplicate_reference():
+    # The leaf's R1 is R1 on /MID_A/LEAF and R101 on /MID_B/LEAF.
+    assert _duplicate_reference_errors(_NESTED_ROOT) == []
+
+
+def test_direct_repeat_with_distinct_instance_references_is_clean():
+    # repeat_child's R1/R2 are R1/R2 on MCU_A and R11/R12 on MCU_B.
+    assert _duplicate_reference_errors(_REPEAT_ROOT) == []
+
+
+def test_placements_with_colliding_instance_references_are_flagged(tmp_path):
+    proj = _copy(_SQ, _NESTED, tmp_path / "p")
+    _rewrite(proj / _NESTED[2], '(reference "R101")', '(reference "R1")')
+    errors = _duplicate_reference_errors(proj / _NESTED[0])
+    assert len(errors) == 1
+    assert errors[0].startswith("Duplicate reference R1 ")
+    assert errors[0].endswith("| /MID_A/LEAF, /MID_B/LEAF")
+
+
+def test_symbol_without_instance_data_is_counted_once_per_file(tmp_path):
+    proj = _copy(_SQ, _NESTED, tmp_path / "p")
+    leaf = proj / _NESTED[2]
+    text = leaf.read_text()
+    start = text.index("\t\t(instances\n")
+    end = text.index("\n\t\t)\n", start) + len("\n\t\t)\n")
+    leaf.write_text(text[:start] + text[end:])
+    assert "(instances" not in leaf.read_text()
+    # Falls back to the Reference property, once for the file.
+    assert _duplicate_reference_errors(proj / _NESTED[0]) == []
+
+
+def test_instance_reference_lookup():
+    from kicad_tools.schema.schematic import Schematic
+
+    (sym,) = [s for s in Schematic.load(str(_SQ / _NESTED[2])).symbols if s.reference == "R1"]
+    a = f"/{_ROOT_UUID}/{_MID_A_SHEET}/{_LEAF_SHEET}"
+    b = f"/{_ROOT_UUID}/{_MID_B_SHEET}/{_LEAF_SHEET}"
+    assert sym.instance_reference(a) == "R1"
+    assert sym.instance_reference(b) == "R101"
+    assert sym.instance_reference(f"/{_ROOT_UUID}") is None
+    assert sym.instance_reference("") is None
+
+
+def test_sheet_symbol_without_uuid_has_no_partial_instance_path(tmp_path):
+    proj = _copy(_SQ, _NESTED, tmp_path / "p")
+    _rewrite(proj / _NESTED[0], f'\t\t(uuid "{_MID_A_SHEET}")\n', "")
+    root = build_hierarchy(str(proj / _NESTED[0]))
+    mid_a = root.find_by_path("/MID_A")
+    leaf_a = root.find_by_path("/MID_A/LEAF")
+    assert mid_a is not None and leaf_a is not None
+    # Unknown, not "/<root>/" (trailing slash) or a path missing a segment.
+    assert mid_a.instance_path == ""
+    assert leaf_a.instance_path == ""
+    leaf_b = root.find_by_path("/MID_B/LEAF")
+    assert leaf_b is not None
+    assert leaf_b.instance_path == f"/{_ROOT_UUID}/{_MID_B_SHEET}/{_LEAF_SHEET}"
+
+
+def test_cross_sheet_erc_uses_per_placement_references(tmp_path):
+    from kicad_tools.erc.cross_sheet import check_cross_sheet_duplicates
+
+    assert check_cross_sheet_duplicates(str(_NESTED_ROOT)) == []
+    assert check_cross_sheet_duplicates(str(_REPEAT_ROOT)) == []
+
+    proj = _copy(_SQ, _NESTED, tmp_path / "p")
+    _rewrite(proj / _NESTED[2], '(reference "R101")', '(reference "R1")')
+    clash = check_cross_sheet_duplicates(str(proj / _NESTED[0]))
+    assert len(clash) == 1
+    assert "R1" in clash[0].description

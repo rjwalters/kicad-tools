@@ -70,17 +70,32 @@ def check_cross_sheet_duplicates(root_schematic: str) -> list[ERCViolation]:
 
     # Collect all (reference, sheet_path, value, uuid, lib_id) tuples.
     all_refs: list[_SymbolRef] = []
+    # Each placement of a repeated sheet uses its own designators, from the
+    # symbol's ``(instances (path ...))`` entry for the placement (issue
+    # #7616). A symbol without one falls back to its ``Reference`` property
+    # and is counted once per file, not once per placement.
+    fallback_seen: set[tuple[str, int]] = set()
+    loaded: dict[str, Schematic] = {}
 
     for node in hierarchy.all_nodes():
-        try:
-            sch = Schematic.load(node.path)
-        except Exception:
-            continue
+        sch = loaded.get(node.path)
+        if sch is None:
+            try:
+                sch = Schematic.load(node.path)
+            except Exception:
+                continue
+            loaded[node.path] = sch
 
         sheet_path = node.get_path_string()
 
-        for sym in sch.symbols:
-            ref = sym.reference
+        for sym_index, sym in enumerate(sch.symbols):
+            ref = sym.instance_reference(node.instance_path)
+            if ref is None:
+                key = (node.path, sym_index)
+                if key in fallback_seen:
+                    continue
+                fallback_seen.add(key)
+                ref = sym.reference
             if not ref or ref.startswith("#"):
                 # Skip power flags and virtual symbols
                 continue
@@ -400,11 +415,12 @@ def _build_symbol_sheet_map(root_schematic: str) -> dict[str, str]:
         sheet_path = node.get_path_string()
 
         for sym in sch.symbols:
-            if sym.uuid:
+            if sym.uuid and sym.uuid not in mapping:
                 mapping[sym.uuid] = sheet_path
-            ref = sym.reference
-            if ref and ref not in mapping:
-                mapping[ref] = sheet_path
+            # This placement's designator (issue #7616), then the property.
+            for ref in (sym.instance_reference(node.instance_path), sym.reference):
+                if ref and ref not in mapping:
+                    mapping[ref] = sheet_path
 
         # Also index labels by UUID for label-type violations.
         for gl in sch.global_labels:

@@ -140,7 +140,9 @@ class SheetInstance:
         if sz := sexp.find("size"):
             size = (sz.get_float(0) or 50.8, sz.get_float(1) or 25.4)
 
-        if uuid_node := sexp.find("uuid"):
+        # The sheet's own (uuid ...), a direct child: a recursive find would
+        # return a sheet pin's UUID when the sheet has none (issue #7616).
+        if uuid_node := sexp.find_child("uuid"):
             uuid = uuid_node.get_string(0) or ""
 
         # Parse properties
@@ -194,6 +196,7 @@ class HierarchyNode:
     # then one ``/<sheet symbol uuid>`` per level, i.e. the ``(path ...)``
     # key of the ``(instances ...)`` blocks for symbols on this placement.
     # Two placements of one sheet file share ``path`` but differ here.
+    # Empty when a UUID on the chain (root file or a sheet symbol) is missing.
     instance_path: str = ""
 
     @property
@@ -352,9 +355,14 @@ class HierarchyBuilder:
         path_str = str(full_path)
 
         def _instance_path(file_uuid: str) -> str:
+            # "" means unknown: a missing UUID anywhere on the chain leaves
+            # no real KiCad path to report, and a partial one such as
+            # "/<root>/" would match no ``(instances (path ...))`` entry.
             if parent is None:
-                return f"/{file_uuid}"
-            return f"{parent.instance_path.rstrip('/')}/{sheet_uuid or ''}"
+                return f"/{file_uuid}" if file_uuid else ""
+            if not parent.instance_path or not sheet_uuid:
+                return ""
+            return f"{parent.instance_path.rstrip('/')}/{sheet_uuid}"
 
         cached = self.loaded_files.get(path_str)
 

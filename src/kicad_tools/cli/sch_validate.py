@@ -958,6 +958,16 @@ def check_duplicate_references(schematic_path: str) -> list[ValidationIssue]:
     - a different ``lib_id`` (definitively different components), or
     - the same ``lib_id`` but duplicate ``unit`` numbers (same unit placed
       on two sheets -- not a multi-unit split).
+
+    Each placement of a repeated sheet is checked with its own designators:
+    a symbol's reference is the one its ``(instances (path ...))`` entry
+    records for that placement's :attr:`HierarchyNode.instance_path`
+    (issue #7616), so ``R1`` on ``/MCU_A`` and ``R101`` on ``/MCU_B`` do not
+    clash, while two placements that both resolve to ``R1`` do. A symbol
+    with no entry for the placement falls back to its single ``Reference``
+    property and is then counted once per file, not once per placement:
+    without per-placement data there is no evidence of a clash between
+    placements of the same symbol.
     """
     issues: list[ValidationIssue] = []
 
@@ -966,17 +976,30 @@ def check_duplicate_references(schematic_path: str) -> list[ValidationIssue]:
 
         # ref -> list of (uuid, lib_id, value, unit, sheet_path)
         ref_map: dict[str, list[tuple[str, str, str, int, str]]] = {}
+        # (file, symbol index) already counted via the property fallback.
+        # The index, not the UUID, so UUID-less symbols are not merged.
+        fallback_seen: set[tuple[str, int]] = set()
+        loaded: dict[str, Schematic] = {}
 
         for node in hierarchy.all_nodes():
             try:
-                sch = Schematic.load(node.path)
+                sch = loaded.get(node.path)
+                if sch is None:
+                    sch = Schematic.load(node.path)
+                    loaded[node.path] = sch
                 sheet_path = node.get_path_string()
-                for sym in sch.symbols:
+                for sym_index, sym in enumerate(sch.symbols):
                     # Skip power symbols -- they reuse refs like #PWR01
                     if sym.lib_id.startswith("power:"):
                         continue
 
-                    ref = sym.reference
+                    ref = sym.instance_reference(node.instance_path)
+                    if ref is None:
+                        key = (node.path, sym_index)
+                        if key in fallback_seen:
+                            continue
+                        fallback_seen.add(key)
+                        ref = sym.reference
                     if not ref or ref == "?" or ref.startswith("#"):
                         continue
 
