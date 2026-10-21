@@ -237,9 +237,7 @@ def test_missing_library_root_is_marked(tmp_path, models, monkeypatch):
 def test_check_collapses_missing_library_into_one_info(tmp_path, models, monkeypatch):
     refs = [_fp(f"R{i}", body='(model "${KICAD10_3DMODEL_DIR}/part.step")') for i in range(5)]
     pcb = _write(tmp_path, *refs, _fp("U1"))
-    assert [(v.severity, v.items) for v in _model_coverage_findings(pcb)] == [
-        ("warning", ("U1",))
-    ]
+    assert [(v.severity, v.items) for v in _model_coverage_findings(pcb)] == [("warning", ("U1",))]
     _no_library(monkeypatch, tmp_path)
     findings = _model_coverage_findings(pcb)
     # One informational finding for the absent library; the bare footprint
@@ -268,7 +266,7 @@ def test_gate_deferral_expires_with_pinned_model_set():
     )
 
     assert model_audit.PINNED_MODEL_DIR is None, "#7683 landed: drop the #7682 gate deferral"
-    assert GATE_DEFERRED_CATEGORIES == {"model_coverage"}
-    assert GATE_DEFERRED_CATEGORIES <= set(CHECK_CATEGORIES)
+    assert {"model_coverage"} == GATE_DEFERRED_CATEGORIES
+    assert set(CHECK_CATEGORIES) >= GATE_DEFERRED_CATEGORIES
     assert gate_skip_set({"pad_grid"}) == {"pad_grid", "model_coverage"}
     assert gate_skip_argv({"pad_grid"}) == ["--skip", "model_coverage,pad_grid"]
