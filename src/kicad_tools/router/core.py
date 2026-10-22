@@ -20569,6 +20569,7 @@ class Autorouter:
         *,
         engage: str = "length_critical",
         foreign_clearance_gate: Callable[..., bool] | None = None,
+        foreign_clearance_host_tolerant: bool = False,
         quantized_lengths: bool = False,
     ) -> dict[tuple[str, str], DiffPairTuneResult]:
         """Apply per-pair length-match (skew) tuning to detected diff pairs.
@@ -20606,6 +20607,10 @@ class Autorouter:
                 -> bool``.  For a caller that checks the finished board itself
                 (``kct retune-lengths`` runs a DRC on what it writes, Issue
                 #7760); ``None`` keeps the strict gate.
+            foreign_clearance_host_tolerant: Issue #7767.  Use the built-in
+                gate in its ``host_tolerant`` form (foreign pads only, held to
+                the host segment's existing gap).  Ignored when
+                ``foreign_clearance_gate`` is given.
             quantized_lengths: Issue #7548.  Measure ``"checker_skew_limit"``
                 skew on the copper the 45-degree quantization pass will
                 leave (:func:`~.quantize.quantize_pcb_file` replaces each
@@ -20732,6 +20737,7 @@ class Autorouter:
                     foreign_clearance_gate
                     or self._skew_tune_foreign_clearance_ok(
                         routes_by_net,
+                        host_tolerant=foreign_clearance_host_tolerant,
                         partner_of={
                             dp.pair.positive.net_id: dp.pair.negative.net_id,
                             dp.pair.negative.net_id: dp.pair.positive.net_id,
@@ -20842,6 +20848,7 @@ class Autorouter:
         *,
         partner_of: dict[int, int],
         intra_pair_clearance_mm: float,
+        host_tolerant: bool = False,
     ) -> Callable[[list[Any], int], bool]:
         """Foreign-copper gate for a skew-tuning bump (Issue #6664).
 
@@ -20856,6 +20863,13 @@ class Autorouter:
         segment on the same layer.  The pair's own partner is held to the
         intra-pair gap instead (the coupled pair legitimately runs closer
         than the class clearance), matching the built-in self-check.
+
+        ``host_tolerant`` (Issue #7767, for ``kct retune-lengths``): check
+        foreign *pads* only, and hold a bump to the gap its host segment(s)
+        already had to that pad when that is smaller than the required
+        clearance.  The retune's finished-board DRC (#7760) judges the rest;
+        a strict gate would reject every leg off a host already under the
+        class clearance, while no gate lets a bump land on a foreign pad.
         """
         from kicad_tools.core.geometry import point_to_segment_distance, segment_clearance
 
@@ -20897,9 +20911,22 @@ class Autorouter:
                             ),
                         )
                     )
+                    if host_tolerant and host_segments:
+                        required = min(
+                            required,
+                            min(
+                                pad_segment_edge_clearance(pad, h.x1, h.y1, h.x2, h.y2, h.width / 2)
+                                for h in host_segments
+                                if h.layer == seg.layer
+                            )
+                            if any(h.layer == seg.layer for h in host_segments)
+                            else required,
+                        )
                     gap = pad_segment_edge_clearance(pad, seg.x1, seg.y1, seg.x2, seg.y2, half)
                     if gap + 1e-9 < required:
                         return False
+                if host_tolerant:
+                    continue
                 for other_net, route in routes_by_net.items():
                     if other_net == net:
                         continue
