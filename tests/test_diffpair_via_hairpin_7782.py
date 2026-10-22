@@ -99,3 +99,38 @@ def test_unmovable_hairpin_is_still_order_independent_after_joining_runs():
         assert (route.vias[0].x, route.vias[0].y) == (25.743, Y)
         lengths.add(round(_length(route), 6))
     assert len(lengths) == 1
+
+
+def test_committed_collapse_keeps_grid_state_consistent():
+    """The hook edits a registered route without desyncing the grid (#7782)."""
+    from types import SimpleNamespace
+
+    from kicad_tools.router.diffpair_routing import DiffPairRouter
+    from kicad_tools.router.grid import RoutingGrid
+    from kicad_tools.router.rules import DesignRules
+
+    grid = RoutingGrid(width=60.0, height=40.0, rules=DesignRules())
+    route = _route()
+    grid.mark_route(route)
+    routes_before = list(grid.routes)
+    marked_to_cpp = []
+    stub = SimpleNamespace(
+        autorouter=SimpleNamespace(
+            grid=grid, _mark_route_on_cpp_grid=lambda r: marked_to_cpp.append(r)
+        )
+    )
+    stub._remark_route_cells = lambda r: DiffPairRouter._remark_route_cells(stub, r)
+
+    assert DiffPairRouter._collapse_committed_via_hairpins(stub, [route]) >= 1
+
+    # Registered exactly once; never unmarked/re-appended.
+    assert grid.routes == routes_before
+    assert marked_to_cpp == [route]
+    # The moved via and every surviving segment are blocked for their own net.
+    via = route.vias[0]
+    gx, gy = grid.world_to_grid(via.x, via.y)
+    assert not grid.is_blocked(gx, gy, Layer.F_CU, net=route.net)
+    assert grid.is_blocked(gx, gy, Layer.F_CU, net=route.net + 1)
+    # Via R-tree tracks the edited via object, not a stale one.
+    if grid._via_rtree is not None:
+        assert id(via) in grid._via_rtree_items

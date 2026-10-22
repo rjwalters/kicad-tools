@@ -5808,10 +5808,22 @@ class DiffPairRouter:
             moved += merge_junction_runs(trial)
             if not moved:
                 continue
-            grid.unmark_route(route)
+            # The route is already registered (grid.routes, pathfinder, C++
+            # grid): edit it in place and ADD the new copper's cells, as
+            # ``_remark_route_cells`` does (#3508).  Unmark + re-mark would
+            # free cells a neighbour's halo shares and repeat the
+            # non-idempotent bookkeeping.  The old via/segment cells stay
+            # blocked -- conservative for the own net -- and only the
+            # R-trees, which key on object identity, are swapped.
+            grid._rtree_remove_route(route)
+            grid._rtree_remove_route_vias(route)
             route.segments = trial.segments
             route.vias = trial.vias
-            self.autorouter._mark_route(route)
+            grid._rtree_insert_route(route)
+            grid._rtree_insert_route_vias(route)
+            self._remark_route_cells(route)
+            for via in route.vias:
+                grid._mark_via(via)
             total += moved
         if total:
             print(f"    [via-hairpin] resolved {total} hairpin edit(s) on the committed pair")
