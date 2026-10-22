@@ -912,6 +912,24 @@ class TestBranch4RoutabilityProbe:
         d = self._tgt(dense_cluster_pcb)
         assert d.classification is StuckClass.PLACEMENT_BOUND
 
+    def test_probe_ignores_spent_wall_deadline(self, tmp_path: Path, monkeypatch):
+        """An installed (spent) excursion deadline must not starve the probe.
+
+        Only the iteration cap bounds the search, so the label is the same
+        on any machine and inside or outside a corridor-yield re-run.
+        """
+        from kicad_tools.router import wall_deadline
+
+        # Make a spent deadline fail a search instantly if it leaked through.
+        monkeypatch.setattr(wall_deadline, "MIN_SEARCH_TIMEOUT_S", 1e-12)
+        p = tmp_path / "routable.kicad_pcb"
+        p.write_text(_routable_moderate_board())
+        with wall_deadline.deadline(0.0):
+            d = self._tgt(p)
+            assert wall_deadline.active()
+        assert not wall_deadline.active()
+        assert d.classification is StuckClass.BUDGET_STARVED
+
     def test_deterministic_and_read_only(self, tmp_path: Path):
         import hashlib
 

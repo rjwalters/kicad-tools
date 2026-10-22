@@ -66,6 +66,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from kicad_tools.core.geometry import point_to_segment_distance as _point_to_segment_distance
+from kicad_tools.router import wall_deadline as _wall_deadline
 from kicad_tools.router.failure_analysis import FailureCause
 from kicad_tools.schema.physical_identity import footprint_keys
 
@@ -1110,7 +1111,12 @@ class _RoutabilityProbe:
                 if not targets:
                     return None
                 dst = min(targets, key=lambda q: math.hypot(q.x - src.x, q.y - src.y))
-                if router.router.route(src, dst, per_net_timeout=None) is None:
+                # Suspend any wall-clock excursion deadline (e.g. a caller
+                # inside a corridor-yield re-run) so only the iteration cap
+                # bounds the search and the label never varies by machine.
+                with _wall_deadline.suspended():
+                    path = router.router.route(src, dst, per_net_timeout=None)
+                if path is None:
                     return False
             return True
         except Exception:  # pragma: no cover - defensive only

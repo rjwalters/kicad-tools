@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from kicad_tools.router import stuck_classifier as sc
 from kicad_tools.router.placement_delta import (
     ENDPOINT_ALIGN_ROTATIONS,
     ENDPOINT_ALIGN_SOURCE,
@@ -441,6 +442,21 @@ def _endpoint_board(
     )
 
 
+@pytest.fixture
+def no_routability_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disable the #7832 branch-4 routability probe.
+
+    ``_endpoint_board`` carries an Edge.Cuts outline, so the probe would run,
+    find a route on the open board and relabel TGT BUDGET_STARVED (empty
+    recommendation).  ``TestEndpointAlignment`` tests the MOVE_PART ->
+    endpoint-alignment translation for a PLACEMENT_BOUND diagnosis, not the
+    probe (covered in ``test_stuck_classifier.py``), so the probe reports
+    "could not run" and the pre-probe label stands.
+    """
+    monkeypatch.setattr(sc._RoutabilityProbe, "routable", lambda self, net, pads: None)
+
+
+@pytest.mark.usefixtures("no_routability_probe")
 class TestEndpointAlignment:
     """AC: bounded +/-90 endpoint-orientation candidates for a row/column mismatch."""
 
