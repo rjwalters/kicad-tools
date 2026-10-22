@@ -248,9 +248,9 @@ _SHADOW_PER_PAIR_BUDGET_S: float = float(os.environ.get("KCT_SHADOW_PER_PAIR_BUD
 # of it, and is skipped when less than ``_POSE_CENTERLINE_MIN_BUDGET_S``
 # remains (a wall-clock budget-exit must still defer promptly, #3089/#4107).
 _POSE_CENTERLINE_TIMEOUT_S: float = 30.0
+_POSE_CENTERLINE_MIN_BUDGET_S: float = 0.25
 # Issue #7769: ``[coupled-select]`` decline reason for polarity-swapped pairs.
 _POSE_DECLINE_POLARITY_SWAP: str = "polarity-swap (no crossover in centerline trunk)"
-_POSE_CENTERLINE_MIN_BUDGET_S: float = 0.25
 # Issue #7769: shortest straight same-width chain the in-router skew tune fuses
 # into one host segment (board 06's #7548 value; see ``merge_collinear_same_width``).
 _SKEW_TUNE_FUSE_MIN_MM: float = 5.0
@@ -13046,19 +13046,11 @@ class DiffPairRouter:
         ``pair.rules.max_length_delta`` unless ``kct check`` enforces a
         stricter skew limit for the pair as an error.
         """
-        from kicad_tools.validate.diffpair_engagement import resolve_pair_thresholds
-
         rules = pair.rules
         assert rules is not None, "committed coupled pair always carries rules"
         tol = float(rules.max_length_delta)
-        thresholds = resolve_pair_thresholds(
-            getattr(self.autorouter, "net_class_map", None),
-            pair.positive.net_name,
-            pair.negative.net_name,
-        )
-        if thresholds.skew_severity == "error":
-            return min(tol, float(thresholds.skew_mm))
-        return tol
+        limit = self._checker_skew_limit_mm(pair)
+        return tol if limit is None else min(tol, limit)
 
     def route_differential_pair_independent(
         self,
