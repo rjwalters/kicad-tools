@@ -23,41 +23,38 @@ _None._
 
 `loom:important`; taken before unlabelled work.
 
-- **#6858**: router: coupled pre-pass should keep the better of the joint-search and pose-centreline candidates (compare-and-keep; unblocks #6835)
-- **#7269**: board 07 MIPI_DAT0: recover 0.038 mm skew lost to compare-and-keep (blocks #6858)
-- **#7738**: main: test_board_00_simple_led::test_no_connectivity_errors fails
+- **#7649**: router: source-side diff-pair skew avoidance; retire the Q35 2× interim bump excursion
 
 ## Ready
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-_None._
+- **#7349**: Boards 06/07: enable diff-pair gap tightening on seed-42 re-routes and drop the impedance caps (#7344 PR 2)
 
 ## In Progress
 
 Issues currently being built (`loom:building`).
 
-- **#7521**: Diff-pair skew compensation per best practice (Q16): exclude tuning bumps from uncoupled metric, emit KiCad tuning patterns, geometry gates, sourced per-class skew limits
-- **#7612**: Board 07 fixture: 4 diff pairs fail skew with no_suitable_segment (TMDS_D2, MIPI_DAT1, MIPI_DAT0, MIPI_CLK)
-- **#7685**: Bring every demo board to 100% 3D model coverage on the pinned model set
-- **#7721**: router: turn-aware lattice A* — price signed turning so diff pairs avoid same-direction U-turns (source-side skew, #7649)
-- **#7738**: main: test_board_00_simple_led::test_no_connectivity_errors fails
-- **#7740**: board generators report Overall: PASS and exit 0 when the manufacturing-bundle export fails
-- **#7741**: regenerated BOM LCSC column depends on the host (empty when the LCSC API returns 403), unlike the committed bundle
+- **#5333**: Board07 coupled pre-pass exhausts all seven pair searches despite valid corridor guides
+- **#7611**: Board 07 fixture: DDR_DATA_BYTE_0 and MIPI_CSI_LANES group length skew over tolerance
+- **#7766**: Board 07: DDR_DATA_BYTE_0 / MIPI_CSI_LANES group skew — pair members have no mirrorable N-side host for the group tuner
+- **#7767**: Board07 MIPI_DAT1 coupled pair keeps 0.31 mm skew: pose search fails and inline tuner gates on 0.5 mm max_length_delta
+- **#7769**: Board07 DQS polarity-swap pair: no pose candidate, coupled skew 2.0 mm untunable
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#7739**: test(board00): assert the manufacturing bundle exists before kct check
-- **#7742**: feat: add kct export --spec and pass project.kct from board generators
-- **#7744**: fix: gate board recipes on manufacturing export result
+- **#7770**: chore(ci): re-point board 07 MIPI/DDR group skew allowances to #7766
+- **#7771**: fix(router): prefer the coupled candidate that meets the pair's skew limit (#5333)
+- **#7772**: fix(router): report explicit pose decline reason for polarity-swapped diff pairs
+- **#7773**: fix: gate inline diff-pair length match on the enforced skew limit
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-- **#7736**: feat(check): default-on model_coverage with full demo-board 3D coverage
+_None._
 
 ## Proposed
 
@@ -73,30 +70,21 @@ Issues carrying `loom:curated`.
 - **#5798**: [Epic #5784] Phase 4: deconfound kct's match-group length tuning on board 07 (measure first) *(curated)*
 - **#6445**: [Epic #6441] Phase 3: via pairs as a single move in the lattice coupled centreline *(curated)*
 - **#6446**: [Epic #6441] Phase 4: budget-driven hybrid fallback — longest coupled trunk plus single-ended terminal legs *(curated)*
-- **#6858**: router: coupled pre-pass should keep the better of the joint-search and pose-centreline candidates (compare-and-keep; unblocks #6835) *(curated)*
-- **#7186**: kct post-route DRC reports 33 shorts on routed board 07m where pinned kicad-cli reports 0 (engine disagreement) *(curated)*
-- **#7256**: board 03: after #7163 a fresh arm C route fails usb_geometry (MCU launch 4.138/4.284 > 4 mm; USB width 0.30 -> 0.275) *(curated)*
-- **#7269**: board 07 MIPI_DAT0: recover 0.038 mm skew lost to compare-and-keep (blocks #6858) *(curated)*
 - **#7349**: Boards 06/07: enable diff-pair gap tightening on seed-42 re-routes and drop the impedance caps (#7344 PR 2) *(curated)*
 - **#7487**: Re-rule or remove board 03 usb_geometry via-in-pad window exception by 2027-04-19 (#7457 / #7084 Q10) *(curated)*
 - **#7518**: DSN export: verify a Specctra router doesn't double-flip back-side padstack layers (deferred from #7481 / #7496) *(curated)*
-- **#7521**: Diff-pair skew compensation per best practice (Q16): exclude tuning bumps from uncoupled metric, emit KiCad tuning patterns, geometry gates, sourced per-class skew limits *(curated)*
 - **#7548**: Board 06 synthetic fixture: 9 diff pairs over max skew on the seed-42 re-route (identity-allowed in check_diffpair_coverage.py) *(curated)*
-- **#7557**: Board 07: TMDS_D0_N pad U4.B2 has no legal exit; needs placement rework or joint TMDS escape-corridor allocation (#3673) *(curated)*
 - **#7573**: router: board 05 +5V/GND pour completeness depends on where nTRIP lands (C10 stitch sites unreserved) *(curated)*
 - **#7611**: Board 07 fixture: DDR_DATA_BYTE_0 and MIPI_CSI_LANES group length skew over tolerance *(curated)*
-- **#7612**: Board 07 fixture: 4 diff pairs fail skew with no_suitable_segment (TMDS_D2, MIPI_DAT1, MIPI_DAT0, MIPI_CLK) *(curated)*
 - **#7619**: Board 07 fixture: DQS and TMDS_D1 diff pairs routed with unequal via counts (N leg +2 vias), causing multi-mm skew *(curated)*
 - **#7649**: router: source-side diff-pair skew avoidance; retire the Q35 2× interim bump excursion *(curated)*
 - **#7650**: board 03: recover USB_D common-run and MCU-launch margin given up to route VBUS U2.5 (#7475) *(curated)*
 - **#7669**: bench: re-run PocketBeagle and STRF (zero-touch + tuned) after the #4945/#5302 fixes and add a dispatchable external-bench workflow *(curated)*
-- **#7685**: Bring every demo board to 100% 3D model coverage on the pinned model set *(curated)*
 - **#7690**: Epic: full 3D model coverage, from demo boards to the JLCPCB catalog, reproducible on the pinned toolchain *(curated)*
 - **#7716**: router: Python-fallback A* inside relief rescue is load-dependent on board 07 (1,024 expansions in ~420 s) *(curated)*
-- **#7721**: router: turn-aware lattice A* — price signed turning so diff pairs avoid same-direction U-turns (source-side skew, #7649) *(curated)*
-- **#7738**: main: test_board_00_simple_led::test_no_connectivity_errors fails *(curated)*
-- **#7740**: board generators report Overall: PASS and exit 0 when the manufacturing-bundle export fails *(curated)*
-- **#7741**: regenerated BOM LCSC column depends on the host (empty when the LCSC API returns 403), unlike the committed bundle *(curated)*
+- **#7766**: Board 07: DDR_DATA_BYTE_0 / MIPI_CSI_LANES group skew — pair members have no mirrorable N-side host for the group tuner *(curated)*
+- **#7767**: Board07 MIPI_DAT1 coupled pair keeps 0.31 mm skew: pose search fails and inline tuner gates on 0.5 mm max_length_delta *(curated)*
+- **#7769**: Board07 DQS polarity-swap pair: no pose candidate, coupled skew 2.0 mm untunable *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -122,12 +110,12 @@ Issues carrying `loom:curated`.
 |------|-------|
 | Operator merge-risk holds | 0 |
 | Very important | 0 |
-| Important | 3 |
-| Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 7 |
-| PRs awaiting review | 3 |
-| Approved PRs awaiting merge | 1 |
-| Curated | 34 |
+| Important | 1 |
+| Ready (`loom:issue`) | 1 |
+| In Progress (`loom:building`) | 5 |
+| PRs awaiting review | 4 |
+| Approved PRs awaiting merge | 0 |
+| Curated | 25 |
 | Architect / Hermit proposals | 5 |
 | Active epics | 7 |
 <!-- guide:plan-body:end -->
