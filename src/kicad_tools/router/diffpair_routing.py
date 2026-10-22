@@ -252,6 +252,9 @@ _POSE_CENTERLINE_TIMEOUT_S: float = 30.0
 # Issue #7769: ``[coupled-select]`` decline reason for polarity-swapped pairs.
 _POSE_DECLINE_POLARITY_SWAP: str = "polarity-swap (no crossover in centerline trunk)"
 _POSE_CENTERLINE_MIN_BUDGET_S: float = 0.25
+# Issue #7769: shortest straight same-width chain the in-router skew tune fuses
+# into one host segment (board 06's #7548 value; see ``merge_collinear_same_width``).
+_SKEW_TUNE_FUSE_MIN_MM: float = 5.0
 
 # Issue #5895: the pose-trunk corridor guard
 # (``DiffPairRouter._pose_corridor_guard``).  Before a pose-centerline trunk is
@@ -5867,6 +5870,20 @@ class DiffPairRouter:
         intra = _floored_pair_gap(ar, net_class) if net_class is not None else None
         if intra is None:
             intra = ar.rules.trace_clearance
+
+        # Issue #7769: a joint-search (``kept=joint``) candidate is committed
+        # as one segment per grid step, so no single segment reaches the
+        # tuner's ``min_segment_length`` and the pair is declined with
+        # ``no_suitable_segment`` although its trunk is a straight run of
+        # tens of mm (board 07 DQS: 189 x 0.127 mm, a 19.9 mm B.Cu run).
+        # Fuse the pair's straight same-width chains first, as board 06's
+        # recipe does after routing (#7548); copper and length are unchanged,
+        # so the grid needs no update.  Only chains of 5 mm or more, for the
+        # same reason as there: ``kct check`` exempts sub-1 mm breakout
+        # segments from its impedance rule.
+        from .optimizer.merge import merge_collinear_same_width
+
+        merge_collinear_same_width(ar, {p_name, n_name}, min_chain_mm=_SKEW_TUNE_FUSE_MIN_MM)
 
         routes_by_net = ar._net_routes_merged()
         old_p, old_n = routes_by_net.get(p_id), routes_by_net.get(n_id)

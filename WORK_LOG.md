@@ -15,6 +15,12 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-22
 
+- **PR #7773**: fix: gate inline diff-pair length match on the enforced skew limit
+- **PR #7772**: fix(router): report explicit pose decline reason for polarity-swapped diff pairs
+- **PR #7771**: fix(router): prefer the coupled candidate that meets the pair's skew limit (#5333)
+- **PR #7770**: chore(ci): re-point board 07 MIPI/DDR group skew allowances to #7766
+- **Issue #7611** (closed): Board 07 fixture: DDR_DATA_BYTE_0 and MIPI_CSI_LANES group length skew over tolerance
+- **Issue #7349** (closed): Boards 06/07: enable diff-pair gap tightening on seed-42 re-routes and drop the impedance caps (#7344 PR 2)
 - **Issue #7669** (closed): bench: re-run PocketBeagle and STRF (zero-touch + tuned) after the #4945/#5302 fixes and add a dispatchable external-bench workflow
 - **Issue #5798** (closed): [Epic #5784] Phase 4: deconfound kct's match-group length tuning on board 07 (measure first)
 - **Issue #7768** (closed): Match-group tuner cannot lengthen coupled diff pairs: no corresponding N-side segment (board07 flag-on)
