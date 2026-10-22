@@ -186,3 +186,30 @@ Caveats the flip PR should carry:
   `reserve_plane_via_sites(..., ["VBUS_USB"])` already serves every pad.
 - **Not a subset flip.** No board here wants the flag off, and the CLI has
   no per-board notion to key a subset on.
+
+## Addendum (2026-10-22, Issue #4410): default flipped, board 05 re-baseline
+
+The default is now **on**, and `--no-reserve-pour-only-passives` opts out.
+Board 05 was re-measured before the flip on main `8435ea01c` with the
+same harness protocol, seed 42 and pinned kicad-cli 10.0.6. Host load was
+15-49:
+
+| Arm | Nets complete | `kct check --mfr jlcpcb` err | kicad-cli err / unconnected |
+|---|---|---|---|
+| off | 34/37 | 1 (VCP) | 0 / 3 |
+| on | 36/37 | 1 (VCP) | 0 / 1 |
+
+These are the same numbers as the table above. With the default flipped and the flag omitted, the same run reserves 25 sites and reaches 36/37 (124 vias, 1136.4 mm), matching the flag-on arm. **VCP is not
+placement-bound**, although `kct net-status --why` labels it so. One
+`kct route <routed> --complete --seed 42` pass on the flag-on output routed
+it in 81 s (7 segments, 0 vias, 6.8 mm). The board then graded 37/37:
+`kct check --mfr jlcpcb` DRC 0 errors, ERC passed, LVS (label and copper)
+0 mismatches; pinned kicad-cli 0 errors and 0 unconnected. The grid route
+never chains that completion pass itself.
+
+**Measurement trap.** The first flag-on run graded 34/37 with 44
+unconnected items. That happened because the route's oracle stage hit
+`kicad-cli exited with status 137`, an OOM kill in a docker VM shared with
+other agents' containers. The route log marks such a run `unverified`; the
+harness row does not. Check `route.log` for `status 137` before trusting a
+board-05 row with pour links open.
