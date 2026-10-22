@@ -171,7 +171,30 @@ def test_reserve_pour_only_passives_flag_survives_main_cli_dispatch(tmp_path) ->
     assert "--reserve-pour-only-passives" in main.call_args.args[0]
 
 
-def test_apply_passes_pour_only_threshold_only_when_opted_in(tmp_path) -> None:
+def test_reserve_pour_only_passives_is_default_on_with_opt_out() -> None:
+    """Issue #4410: the #7794 evidence flipped the default; the opt-out parses."""
+    assert route_args(["board.kicad_pcb"]).reserve_pour_only_passives is True
+    assert (
+        route_args(["board.kicad_pcb", "--reserve-pour-only-passives"]).reserve_pour_only_passives
+        is True
+    )
+    assert (
+        route_args(
+            ["board.kicad_pcb", "--no-reserve-pour-only-passives"]
+        ).reserve_pour_only_passives
+        is False
+    )
+
+
+def test_no_reserve_pour_only_passives_survives_main_cli_dispatch(tmp_path) -> None:
+    path = tmp_path / "board.kicad_pcb"
+    path.write_text("(kicad_pcb)")
+    with patch("kicad_tools.cli.route_cmd.main", return_value=0) as main:
+        cli_main(["route", str(path), "--no-reserve-pour-only-passives"])
+    assert "--no-reserve-pour-only-passives" in main.call_args.args[0]
+
+
+def test_apply_passes_pour_only_threshold_unless_opted_out(tmp_path) -> None:
     from kicad_tools.cli.route_cmd import _apply_plane_via_reservation
 
     pcb = tmp_path / "b.kicad_pcb"
@@ -187,6 +210,7 @@ def test_apply_passes_pour_only_threshold_only_when_opted_in(tmp_path) -> None:
         patch("kicad_tools.core.sexp_file.load_pcb", return_value=None),
         patch("kicad_tools.router.plane_via_sites.reserve_router_plane_via_sites", fake_reserve),
     ):
+        # A namespace without the attribute (an in-process caller) gets the default.
         _apply_plane_via_reservation(
             object(), Namespace(_auto_skipped_net_names=["GND"]), pcb, quiet=True
         )
@@ -196,7 +220,13 @@ def test_apply_passes_pour_only_threshold_only_when_opted_in(tmp_path) -> None:
             pcb,
             quiet=True,
         )
-    assert seen == [None, 2]
+        _apply_plane_via_reservation(
+            object(),
+            Namespace(_auto_skipped_net_names=["GND"], reserve_pour_only_passives=False),
+            pcb,
+            quiet=True,
+        )
+    assert seen == [2, 2, None]
 
 
 # ---------------------------------------------------------------------------
