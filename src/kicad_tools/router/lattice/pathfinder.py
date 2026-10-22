@@ -439,6 +439,40 @@ def _shift_centerline_segment(points: list[Pt], i: int, delta: float) -> list[Pt
     return out
 
 
+def _pair_skew(pres: _PairResult, net_p: int) -> float:
+    """P-minus-N routed length of a pair result's runs (mm, issue #7649)."""
+    total = 0.0
+    for net, _layer, poly in pres.runs:
+        length = sum(dist(a, b) for a, b in zip(poly, poly[1:], strict=False))
+        total += length if net == net_p else -length
+    return total
+
+
+def _balanced_centerlines(result: _RouteResult, pitch: float) -> list[list[Pt]]:
+    """Balanced-bend rewrites of a pair search's centerline, to try in order (#7649).
+
+    One candidate per step length in
+    :data:`~kicad_tools.router.pairplan.bend_balance.BEND_STEP_PITCHES`
+    (smallest first, i.e. closest to the searched path): the same centerline
+    with each sharp joint that adds to the pair's skew taken in 45-degree
+    steps (:func:`~kicad_tools.router.pairplan.bend_balance.balance_bends`).
+    Empty when the centerline has no such joint.  The caller verifies each
+    one through the pair finish gate as it would a nudged centerline.
+    """
+    from ..pairplan.bend_balance import BEND_STEP_PITCHES, balance_bends
+    from .coupled import trim_end_reversals
+
+    if len(result.runs) != 1 or result.via_points:
+        return []
+    center = trim_end_reversals(result.runs[0][1])
+    out: list[list[Pt]] = []
+    for k in BEND_STEP_PITCHES:
+        balanced = balance_bends(center, pitch, k * pitch)
+        if balanced is not None and balanced not in out:
+            out.append(balanced)
+    return out
+
+
 #: Issue #6975: in a parity-filtered pair search, a lattice step and the end
 #: stub it joins "reverse" when the cosine of their angle is below this --
 #: i.e. the path doubles back along (nearly) the same line.  Only a straight
@@ -3258,6 +3292,7 @@ class LatticePathfinder:
         present: float,
         layers: tuple[int, ...] | None = None,
         keep_clear: tuple[tuple[Pt, float], ...] = (),
+        skew_bias: float = 0.0,
     ) -> tuple[_PairResult | None, str]:
         """Route one engaged diff pair as a fat centerline agent (#4270).
 
@@ -3286,6 +3321,12 @@ class LatticePathfinder:
         pair pitch, so a centerline passing between them would lay each leg
         over the partner's via.  The finish gate still sees them as the pair's
         own copper (so each leg can attach to its via).
+
+        ``skew_bias`` (issue #7649) is the P-minus-N length the caller adds
+        outside these legs (a gateway's fans).  Balanced-bend variants of the
+        searched centerline (:func:`_balanced_centerlines`) are verified
+        alongside it and the one whose legs plus the bias have the least skew
+        ships.
         """
         from .coupled import (
             assign_polarity,
@@ -3702,9 +3743,29 @@ class LatticePathfinder:
                         else f"pair-{search_reason}"
                     )
                     break
+                # Issue #7649: the same centerline with its skew-adding sharp
+                # joints taken in 45-degree steps (balanced bends) goes through
+                # the unchanged finish gate too; of the variants that pass,
+                # the one with the least skew (counting ``skew_bias``) ships,
+                # a balanced one on a tie.  The searched centerline runs last
+                # so a decline below reads its reason.
+                passed = [
+                    pres
+                    for pres, _why in (
+                        finish(result, balanced)
+                        for balanced in _balanced_centerlines(result, pc.pitch)
+                    )
+                    if pres is not None
+                ]
                 pres, finish_reason = finish(result)
                 if pres is not None:
-                    return pres, "ok"
+                    passed.append(pres)
+                if passed:
+                    best = min(
+                        passed,
+                        key=lambda r: round(abs(_pair_skew(r, net_p) + skew_bias), 6),
+                    )
+                    return best, "ok"
                 if finish_reason == "pair-leg-blocked":
                     pres = nudge(result)
                     if pres is not None:
@@ -4438,6 +4499,7 @@ class LatticePathfinder:
                 present=present,
                 layers=(layer,),
                 keep_clear=keep,
+                skew_bias=sum(g.fan_len_p - g.fan_len_n for g in (ga, gb) if g is not None),
             )
         finally:
             committed.rollback_trial(mark)

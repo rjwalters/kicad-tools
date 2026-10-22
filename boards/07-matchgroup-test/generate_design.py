@@ -3128,6 +3128,15 @@ def main() -> int:
             return 0
 
         if args.step == "pcb":
+            # Issue #7716: ``kct route`` reads its clearances from the
+            # ``.kicad_pro`` beside the input PCB.  Without one, ``--step pcb``
+            # then ``--step route`` into a fresh dir routed with the router's
+            # default rules instead of the project netclass, so the same seed
+            # landed different copper than ``--step all`` (MIPI_DAT1 0.045 vs
+            # 0.150 mm) and looked like load-dependent routing.  Write the
+            # project only when it is missing, so an existing one is kept.
+            if not (output_dir / "matchgroup_test.kicad_pro").exists():
+                create_project(output_dir, "matchgroup_test")
             create_pcb(output_dir, pad_overrides)
             if delta_path is not None and delta_report:
                 write_placement_delta_report(output_dir, delta_path, delta_report)
