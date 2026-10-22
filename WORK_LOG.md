@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-22
 
+- **PR #7763**: feat: DRC-check retune-lengths output, remove inherited-near-miss opt-in
+- **Issue #7760** (closed): retune-lengths: run DRC after writing, then drop allow_inherited_near_miss opt-in
 - **PR #7761**: chore(loom): resync installed Loom to v0.19.1205
 - **PR #7759**: fix(router): bump-tune a coupled pair's skew when the inline comb is rejected
 - **Issue #7269** (closed): board 07 MIPI_DAT0: recover 0.038 mm skew lost to compare-and-keep (blocks #6858)
