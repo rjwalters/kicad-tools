@@ -97,10 +97,11 @@ PLACEMENT_DELTA_FEEDBACK = True
 PLACEMENT_DELTA_FEEDBACK_BUDGET = 2
 PLACEMENT_DELTA_FEEDBACK_TIMEOUT_S = 600
 
-# Issue #7795: opt-in coupled/joint-search routing.  Off by default so the
-# committed recipe's route argv is unchanged; ``--differential-pairs`` on the
-# command line flips it for the scheduled diffpair ratchet in slow-tests.yml.
-USE_DIFFERENTIAL_PAIRS = False
+# Issue #5333: coupled/joint-search routing is on by default -- the route
+# argv carries ``--differential-pairs`` (the #7795 opt-in became the recipe).
+# The recipe's ``--differential-pairs`` option is kept so the scheduled
+# diffpair ratchet in slow-tests.yml keeps its command line; it is a no-op.
+USE_DIFFERENTIAL_PAIRS = True
 
 # Issue #5266: this board's route step is a STAGED budget contract, and the
 # two halves of it have to be stated separately.
@@ -1798,6 +1799,10 @@ def copy_project_sidecars(source_pcb: Path, frame_pcb: Path) -> list[Path]:
 # (``no_suitable_segment``).  The audited single-sided tuner needs neither:
 # it lengthens the shorter half alone.  The other skewed pairs (DQS, TMDS_D0)
 # are not listed -- they stay with their own trackers.
+# Issue #5333: the recipe now routes with ``--differential-pairs``, so
+# ``kct route``'s per-pair tuner brings these pairs inside their limits first
+# and this retune finds nothing left to do on seed 42.  It stays as the
+# backstop for a re-route whose pair tuner leaves one skewed.
 SKEW_RETUNE_PAIRS: tuple[tuple[str, str], ...] = (
     ("TMDS_D2_P", "TMDS_D2_N"),
     ("MIPI_DAT1_P", "MIPI_DAT1_N"),
@@ -1926,7 +1931,8 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
       test on the same date showed the ``CoupledPathfinder`` pre-pass
       hangs CPU-bound for >40 minutes on this board (well past the
       ``--timeout 600`` budget, which the pre-pass does not honour).
-      This recipe therefore continues to omit ``--differential-pairs``.
+      This recipe therefore continued to omit ``--differential-pairs``
+      until issue #5333 (2026-10-22) turned it on; see ``route_pcb``.
       Net yield is 28/31 (matching the PR #3276 baseline: DQ3,
       MIPI_CLK_N, MIPI_DAT0_N remain stranded per #3275) and routed-DRC
       stays under the per-board allowlist (currently 25; measured 23
@@ -2065,6 +2071,18 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         return False
     frame_dx = generate_pcb.BOARD_ORIGIN_X - bbox[0]
     frame_dy = generate_pcb.BOARD_ORIGIN_Y - bbox[1]
+    # Issue #5333: ``kct route`` writes ``output_path``'s ``.kicad_pro`` /
+    # ``.kicad_dru`` itself, and refuses to replace an unstamped one that
+    # differs from the source ("DRC sidecar conflict").  It then exits 1
+    # before its KiCad-oracle pour completion runs.  The match-group gate's
+    # re-route copies the committed fixture's routed sidecars into
+    # ``regression-output`` (``recipe_output_dir(prepare=True)``), so on that
+    # path every re-route hit the conflict and skipped the oracle.  With the
+    # pairs coupled, the recipe's own repair cannot then reach U1.36 (+1V2).
+    # These files are this step's output, so a stale copy is removed first.
+    for suffix in (".kicad_pro", ".kicad_dru"):
+        output_path.with_suffix(suffix).unlink(missing_ok=True)
+
     route_input = input_path
     if frame_dx != 0.0 or frame_dy != 0.0:
         route_input = output_path.parent / "matchgroup_test_routing_frame.kicad_pcb"
@@ -2298,6 +2316,15 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # controls (tests/test_coupled_search_replay_board07_pairs.py) show
     # the joint A* needs 48k-180k iterations even on an empty grid, so
     # the flag stays off until a search-shape fix lands (#5333).
+    #
+    # Issue #5333 (2026-10-22): the flag is now ON by default (see
+    # ``USE_DIFFERENTIAL_PAIRS``).  Re-measured on main ``8435ea01c`` (seed
+    # 42, ``PYTHONHASHSEED=42``, native build 64, pinned KiCad 10.0.6, budgets
+    # unchanged): 7/7 pairs commit coupled routes (``coupled-ok``), 31/31
+    # nets, copper-LVS 0 shorts / 0 opens over 244 pads, kicad-cli DRC 0
+    # errors / 0 unconnected, ``kct check`` 0 errors, and every pair and
+    # match group within its authored skew limit.  Everything above this
+    # addendum that says the recipe omits the flag is history.
     cmd = [
         sys.executable,
         "-m",
@@ -2435,8 +2462,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
             str(PLACEMENT_DELTA_FEEDBACK_TIMEOUT_S),
         ]
 
-    # Issue #7795: opt-in coupled/joint-search path (default off; the argv is
-    # byte-identical to the committed recipe when the flag is absent).
+    # Issue #5333: coupled/joint-search path, on by default (#7795 opt-in).
     if USE_DIFFERENTIAL_PAIRS:
         cmd.append("--differential-pairs")
 
@@ -2872,6 +2898,8 @@ def main() -> int:
     import argparse
     import random
 
+    global USE_DIFFERENTIAL_PAIRS
+
     parser = argparse.ArgumentParser(
         prog="generate_design",
         description="Board 07 (matchgroup-test) design generator + Phase 3N CI re-route hook.",
@@ -2921,16 +2949,16 @@ def main() -> int:
     parser.add_argument(
         "--differential-pairs",
         action="store_true",
+        default=USE_DIFFERENTIAL_PAIRS,
         help=(
             "Append ``--differential-pairs`` to the ``kct route`` argv so the "
-            "coupled/joint-search path is exercised (issue #7795).  Opt-in "
-            "only: omitted, the committed route argv is unchanged.  Used by "
-            "the scheduled ``board-07-diffpair-ratchet`` job."
+            "coupled/joint-search path is exercised (issue #7795).  The "
+            "recipe does this by default since issue #5333, so the option is "
+            "a no-op kept for the scheduled ``board-07-diffpair-ratchet`` job."
         ),
     )
     args = parser.parse_args()
 
-    global USE_DIFFERENTIAL_PAIRS
     USE_DIFFERENTIAL_PAIRS = args.differential_pairs
 
     # Precondition (#4539): refuse to mutate a board that carries no captured

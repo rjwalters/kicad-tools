@@ -7863,9 +7863,11 @@ def _apply_plane_via_reservation(
             # Issue #6589: keep foreign vias / plane-layer tracks outside the
             # pour's fill pullback, so the pour still covers each site.
             plane_fills=plane_fills_from_pcb(pcb, nets),
-            # Issue #7573: opt-in -- also serve pour-only 2-pad parts.
+            # Issue #7573: also serve pour-only 2-pad parts.  ON by default
+            # since Issue #4410 (evidence: #7794); --no-reserve-pour-only-passives
+            # opts out.
             min_pour_footprint_pads=(
-                2 if getattr(args, "reserve_pour_only_passives", False) else None
+                2 if getattr(args, "reserve_pour_only_passives", True) else None
             ),
         )
     except Exception as exc:  # advisory: never fail a route over a reservation
@@ -18730,13 +18732,29 @@ def _route_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--reserve-pour-only-passives",
+        dest="reserve_pour_only_passives",
         action="store_true",
+        default=True,
         help=(
             "Also hold a via site for pour-only 2-pad parts (e.g. a +5V/GND "
             "decoupling cap) in the pre-route plane-via reservation (Issue "
-            "#7573).  OFF by default: it enlarges the hard keep-out on every "
-            "board whose caps sit between two served pours.  Has no effect "
-            "with --no-plane-via-reservation."
+            "#7573).  ON by default since Issue #4410: across boards 03-07 it "
+            "closed board 05's last two pour links and changed no other "
+            "graded outcome (docs/research/reserve-pour-only-passives-"
+            "cross-board.md, Issue #7794).  Kept so existing scripts that "
+            "pass it still parse.  Has no effect with "
+            "--no-plane-via-reservation."
+        ),
+    )
+    parser.add_argument(
+        "--no-reserve-pour-only-passives",
+        dest="reserve_pour_only_passives",
+        action="store_false",
+        help=(
+            "Opt out of the pour-only 2-pad reservation (Issue #4410): only "
+            "pads on the perimeter of multi-pad footprints get a reserved "
+            "via site, the pre-#4410 default.  Use it when the larger hard "
+            "keep-out costs a signal net on your board."
         ),
     )
     parser.add_argument(

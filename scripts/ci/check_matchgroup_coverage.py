@@ -617,20 +617,13 @@ def count_errors_via_kct_check(
 # identities may carry the listed errors, a listed identity that stops firing
 # on the full re-route is stale and fails the gate, and an allowed finding
 # does not count against the (now strict 0) routed-DRC total.
-MATCHGROUP_FIXTURE_ALLOWED_FINDINGS: Allowance = {
-    # Restored: CI's re-route tightens MIPI_DAT1 only 1/2 runs (#7612 review).
-    # Issue #7766: the group retune's DAT1 meanders clear the P-side finding.
-    ("impedance", "MIPI_DAT1_N"): 7349,
-    ("impedance", "TMDS_D1_N"): 7349,
-    ("impedance", "TMDS_D1_P"): 7349,
-    ("impedance", "TMDS_D0_N"): 7349,  # Issue #7557: routes now
-    ("impedance", "TMDS_D0_P"): 7349,
-    # skew vs max_skew_mm, mm
-    # Since issue #7557 moved U4's TMDS balls to its J2-facing column, TMDS_D0
-    # (newly routed) carries the via imbalance instead (P 2, N 0) and TMDS_D1
-    # no longer does (its skew fell 4.968 -> 1.584 mm, then #7550 tuned it).
-    ("diffpair_length_skew", "TMDS_D0_N/TMDS_D0_P"): 7619,  # 4.149 / 0.075
-}
+# Issue #5333: the recipe now routes with ``--differential-pairs``.  On the
+# seed-42 re-route (main ``8435ea01c``) every pair and group is inside its
+# limit and none of the entries above fires any more: the five #7349
+# impedance findings (MIPI_DAT1_N, TMDS_D0_N/P, TMDS_D1_N/P) and the #7619
+# TMDS_D0 skew pair (4.149 mm single-ended; 0.068 mm coupled vs 0.075 mm).
+# The allowance is empty, so every blocking finding counts.
+MATCHGROUP_FIXTURE_ALLOWED_FINDINGS: Allowance = {}
 
 #: Every board key that carries an identity allowance (Issue #7367).  A key
 #: absent here has no allowance at all: every blocking finding counts.

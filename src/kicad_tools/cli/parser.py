@@ -9529,7 +9529,7 @@ def _add_models_parser(subparsers) -> None:
 
     models_parser = subparsers.add_parser(
         "models",
-        help="Manage the pinned subset of KiCad's stock 3D models",
+        help="Manage the pinned subset of KiCad's stock 3D models; generate missing bodies",
         description=(
             "Fetch and verify the pinned, sha256-checked subset of the KiCad "
             "3D model library that the pinned toolchain resolves "
@@ -9552,6 +9552,105 @@ def _add_models_parser(subparsers) -> None:
         help="Report whether the local cache holds the full verified subset",
     )
     add_format_flag(models_status, dest="models_format")
+    _add_models_generate_parser(models_subparsers)
+
+
+def _add_models_generate_parser(models_subparsers) -> None:
+    """``kct models generate`` / ``kct models families`` (Issue #7687)."""
+    from .format_options import add_format_flag
+
+    gen = models_subparsers.add_parser(
+        "generate",
+        help="Generate a STEP body for a footprint from a parametric family",
+        description=(
+            "Derive a 3D body from a footprint's fab/courtyard outline and pad field "
+            "plus parameters, and write it as STEP with a provenance sidecar. "
+            "Families need the optional CadQuery extra (pip install "
+            "'kicad-tools[models]'); --placeholder writes a courtyard box with no "
+            "extra, which the coverage audit still counts as a gap."
+        ),
+    )
+    gen.add_argument(
+        "models_target",
+        metavar="LIB_ID_OR_FAMILY",
+        help="Footprint lib_id (Library:Name) or a family name (see: kct models families)",
+    )
+    gen.add_argument(
+        "--param",
+        "--params",
+        dest="models_params",
+        action="append",
+        metavar="KEY=VALUE[,KEY=VALUE]",
+        help="Family parameter in mm (repeatable), e.g. --param H=5.0",
+    )
+    gen.add_argument("--family", dest="models_family", help="Force a family for the lib_id")
+    gen.add_argument(
+        "--footprint",
+        dest="models_footprint",
+        metavar="FILE",
+        help="Read the footprint from this .kicad_mod instead of the KiCad libraries",
+    )
+    gen.add_argument(
+        "--pcb",
+        dest="models_pcb",
+        metavar="BOARD",
+        help="Read the footprint as placed on this .kicad_pcb (custom libraries work)",
+    )
+    gen.add_argument("--ref", dest="models_ref", help="Reference designator on --pcb (e.g. L1)")
+    gen.add_argument(
+        "--placeholder",
+        dest="models_placeholder",
+        action="store_true",
+        help="Courtyard-extruded box, no extra needed; audited as 'placeholder'",
+    )
+    gen.add_argument(
+        "-o",
+        "--out",
+        dest="models_out",
+        metavar="DIR",
+        help="Output directory (default: ~/.cache/kicad-tools/generated-3d or $KCT_GENERATED_3D_DIR)",
+    )
+    gen.add_argument(
+        "--name", dest="models_name", help="Output file stem (default: footprint name)"
+    )
+    gen.add_argument(
+        "--register",
+        dest="models_register",
+        action="store_true",
+        help="Record lib_id -> file in <out>/local_models.json",
+    )
+    gen.add_argument(
+        "--attach",
+        dest="models_attach",
+        action="store_true",
+        help="Write into <pcb dir>/3dshapes, register, and attach the body to --pcb",
+    )
+    gen.add_argument(
+        "--backend",
+        dest="models_backend",
+        choices=["builtin", "kicad-library-tools"],
+        default="builtin",
+        help=(
+            "builtin = kicad-tools families (default); kicad-library-tools = run "
+            "KiCad's GPL generator as an external subprocess (--bridge-cmd)"
+        ),
+    )
+    gen.add_argument(
+        "--bridge-cmd",
+        dest="models_bridge_cmd",
+        metavar="TEMPLATE",
+        help=(
+            "Command template for --backend kicad-library-tools, with {target}, "
+            "{out_dir} and {params_json} (default: $KCT_KICAD_LIBRARY_TOOLS_CMD)"
+        ),
+    )
+    add_format_flag(gen, dest="models_format")
+
+    fams = models_subparsers.add_parser(
+        "families",
+        help="List the parametric families and their parameters",
+    )
+    add_format_flag(fams, dest="models_format")
 
 
 def _add_ecosystem_parser(subparsers) -> None:

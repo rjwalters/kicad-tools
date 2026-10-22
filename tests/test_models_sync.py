@@ -275,7 +275,10 @@ def test_models_command_sync_and_status(tmp_path, monkeypatch, capsys):
     capsys.readouterr()
 
 
-def test_docker_prefix_mounts_models_only_when_given(tmp_path):
+def test_docker_prefix_mounts_models_only_when_given(tmp_path, monkeypatch):
+    # Hermetic: model_dir=None falls back to the host's synced cache, which
+    # exists on any dev host that has run `kct models sync`.
+    monkeypatch.setattr("kicad_tools.cli.kicad_toolchain._synced_model_dir", lambda: None)
     base = docker_kicad_cli_prefix([tmp_path], tmp_path / "cfg", model_dir=None)
     models = tmp_path / "models"
     models.mkdir()
