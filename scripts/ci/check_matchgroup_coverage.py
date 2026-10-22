@@ -646,10 +646,9 @@ MATCHGROUP_FIXTURE_ALLOWED_FINDINGS: Allowance = {
     # ``declined:skew`` is correct (Issue #7613), tracked in #7619.  Since
     # issue #7557 moved U4's TMDS balls to its J2-facing column, TMDS_D0
     # (newly routed) carries the via imbalance instead (P 2, N 0) and TMDS_D1
-    # no longer does (its skew fell 4.968 -> 1.584 mm, now plain #7550).
+    # no longer does (its skew fell 4.968 -> 1.584 mm, then #7550 tuned it).
     ("diffpair_length_skew", "DQS_N/DQS_P"): 7619,  # 5.562 / 0.050
     ("diffpair_length_skew", "TMDS_D0_N/TMDS_D0_P"): 7619,  # 4.149 / 0.075
-    ("diffpair_length_skew", "TMDS_D1_N/TMDS_D1_P"): MATCHGROUP_SKEW_TRACKER,  # 1.584 / 0.075
 }
 
 #: Every board key that carries an identity allowance (Issue #7367).  A key
