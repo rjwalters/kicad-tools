@@ -78,43 +78,80 @@ class SerpentineConfig:
     # square-loop divergence).  From half a trace width up a chamfered bump
     # reads *less* uncoupled than a square one in both engines on thin
     # traces; below that it reads more.  The skew tuner's plain-copper
-    # fallback uses ``SKEW_BUMP_CHAMFER_WIDTHS`` (0.55).
+    # bumps use ``SKEW_BUMP_CHAMFER_WIDTHS`` (0.55).
     corner_chamfer_widths: float = 0.0
+    # Issue #7546: the chamfer of the two *foot* corners, where a leg leaves
+    # and rejoins the host line, in trace widths.  ``None`` (default) uses
+    # ``corner_chamfer_widths``, so all four corners match.  With a separate
+    # value ``corner_chamfer_widths`` is the *crown* chamfer, where a leg
+    # meets the flat top.  Only the crown chamfer lets the flat top couple to
+    # the partner (pinned kicad-cli 10.0.6: it must be at least half a trace
+    # width); a foot chamfer only shortens the partner's coupled run by its
+    # own length, so the skew tuner's plain bumps use square feet
+    # (``SKEW_BUMP_FOOT_CHAMFER_WIDTHS``).  When crown plus foot exceed the
+    # amplitude both shrink in proportion and the leg is one 45-degree run.
+    foot_chamfer_widths: float | None = None
+
+    def _chamfer_widths(self) -> tuple[float, float]:
+        """``(crown, foot)`` chamfers in trace widths, before clamping."""
+        crown = max(0.0, self.corner_chamfer_widths)
+        foot = crown if self.foot_chamfer_widths is None else max(0.0, self.foot_chamfer_widths)
+        return crown, foot
+
+    @property
+    def chamfered(self) -> bool:
+        """Whether any corner of a loop is chamfered (Issue #7546)."""
+        crown, foot = self._chamfer_widths()
+        return crown > 0.0 or foot > 0.0
+
+    def _clamped(self, width: float, amplitude: float | None) -> tuple[float, float]:
+        a = self.amplitude if amplitude is None else amplitude
+        crown, foot = self._chamfer_widths()
+        total = (crown + foot) * width
+        if total <= 0.0:
+            return 0.0, 0.0
+        scale = min(1.0, a / total)
+        return crown * width * scale, foot * width * scale
 
     def chamfer_mm(self, width: float, amplitude: float | None = None) -> float:
-        """The corner chamfer (mm) of a loop of ``amplitude`` on a ``width`` trace."""
-        a = self.amplitude if amplitude is None else amplitude
-        if self.corner_chamfer_widths <= 0.0:
-            return 0.0
-        return min(self.corner_chamfer_widths * width, a / 2.0)
+        """The crown (leg-to-top) chamfer (mm) of a loop of ``amplitude`` on a
+        ``width`` trace; with ``foot_chamfer_widths`` unset, every corner's."""
+        return self._clamped(width, amplitude)[0]
+
+    def foot_chamfer_mm(self, width: float, amplitude: float | None = None) -> float:
+        """The foot (host-to-leg) chamfer (mm) of a loop (Issue #7546)."""
+        return self._clamped(width, amplitude)[1]
+
+    def leg_advance_mm(self, width: float, amplitude: float | None = None) -> float:
+        """How far one leg advances along the host: its two chamfers (mm)."""
+        crown, foot = self._clamped(width, amplitude)
+        return crown + foot
 
     def loop_length_added(self, width: float, amplitude: float | None = None) -> float:
         """Copper one loop adds over the host length it occupies (mm)."""
         a = self.amplitude if amplitude is None else amplitude
-        c = self.chamfer_mm(width, a)
-        if c <= 0.0:
+        s = self.leg_advance_mm(width, a)
+        if s <= 0.0:
             return 2 * a
-        # Two legs, each chamfer + rise + chamfer, minus the 4c they advance.
-        return 2.0 * (2.0 * c * math.sqrt(2.0) + (a - 2.0 * c)) - 4.0 * c
+        # Two legs, each chamfer + rise + chamfer, minus the 2s they advance.
+        return 2.0 * (s * math.sqrt(2.0) + (a - s)) - 2.0 * s
 
     def loop_forward(self, width: float, amplitude: float | None = None) -> float:
         """Host length one loop occupies, flat top and connector included (mm)."""
         gap = self.min_spacing * self.gap_factor
-        c = self.chamfer_mm(width, amplitude)
-        if c <= 0.0:
-            return gap * 2
-        return 2.0 * gap + 4.0 * c
+        return gap * 2 + 2.0 * self.leg_advance_mm(width, amplitude)
 
     def amplitude_for(self, width: float, added: float) -> float:
         """The amplitude whose loop adds ``added`` mm (inverse of loop_length_added)."""
-        if self.corner_chamfer_widths <= 0.0:
+        crown, foot = self._chamfer_widths()
+        s = (crown + foot) * width
+        if s <= 0.0:
             return added / 2.0
-        c = self.corner_chamfer_widths * width
-        k = 8.0 - 4.0 * math.sqrt(2.0)  # 2A - k*c for A >= 2c
-        a = (added + k * c) / 2.0
-        if a >= 2.0 * c:
+        k = 4.0 - 2.0 * math.sqrt(2.0)  # 2A - k*s for A >= s
+        a = (added + k * s) / 2.0
+        if a >= s:
             return a
-        # Below 2c the leg is a single 45-degree run: adds 2A(sqrt(2) - 1).
+        # Below s the leg is a single 45-degree run: adds 2A(sqrt(2) - 1).
         return added / (2.0 * (math.sqrt(2.0) - 1.0))
 
 
@@ -362,6 +399,7 @@ class SerpentineGenerator:
         length_per_loop = self.config.loop_length_added(segment.width, amplitude)
         loop_forward = self.config.loop_forward(segment.width, amplitude)
         chamfer = self.config.chamfer_mm(segment.width, amplitude)
+        foot = self.config.foot_chamfer_mm(segment.width, amplitude)
         num_loops = int(math.ceil(target_length_add / length_per_loop))
         num_loops = min(num_loops, self.config.max_iterations)
 
@@ -413,15 +451,18 @@ class SerpentineGenerator:
         def emit_leg(sense: int) -> None:
             """A chamfered leg (Issue #7546): 45-degree chamfer, rise, chamfer.
 
-            ``sense`` +1 climbs away from the host line, -1 returns to it.
-            Every piece advances along the host only in its chamfers.
+            ``sense`` +1 climbs away from the host line (foot chamfer first),
+            -1 returns to it (crown chamfer first).  Every piece advances
+            along the host only in its chamfers.
             """
             nonlocal current_x, current_y
-            rise = amplitude - 2.0 * chamfer
-            if rise <= 1e-12:  # chamfer = amplitude / 2: one straight 45 run
-                steps = [(2.0 * chamfer, 2.0 * chamfer)]
+            rise = amplitude - foot - chamfer
+            if rise <= 1e-12:  # the chamfers span the amplitude: one 45 run
+                steps = [(foot + chamfer, foot + chamfer)]
+            elif sense > 0:
+                steps = [(foot, foot), (0.0, rise), (chamfer, chamfer)]
             else:
-                steps = [(chamfer, chamfer), (0.0, rise), (chamfer, chamfer)]
+                steps = [(chamfer, chamfer), (0.0, rise), (foot, foot)]
             for along, up in steps:
                 if along <= 0.0 and up <= 1e-12:
                     continue
@@ -443,7 +484,7 @@ class SerpentineGenerator:
 
         for loop in range(num_loops):
             # 1. Go perpendicular (up or down)
-            if chamfer > 0.0:
+            if chamfer + foot > 0.0:
                 emit_leg(+1)
             else:
                 next_x = current_x + px * amplitude * direction
@@ -480,7 +521,7 @@ class SerpentineGenerator:
             current_x, current_y = next_x, next_y
 
             # 3. Go perpendicular back (down or up)
-            if chamfer > 0.0:
+            if chamfer + foot > 0.0:
                 emit_leg(-1)
             else:
                 next_x = current_x - px * amplitude * direction
