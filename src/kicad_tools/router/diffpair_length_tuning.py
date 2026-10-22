@@ -211,18 +211,20 @@ SERPENTINE_TARGET_HEADROOM_FRACTION: float = 0.9
 # both engines.
 SKEW_BUMP_CHAMFER_WIDTHS: float = 0.55
 
-# Issue #7546: foot chamfer (in trace widths) of the skew tuner's plain bumps,
-# where a leg leaves and rejoins the host line.  Only the *crown* chamfer
-# (:data:`SKEW_BUMP_CHAMFER_WIDTHS`, where a leg meets the flat top) lets the
-# flat top couple to the partner: at under half a trace width the host line's
-# end blocks the top's pairing in pinned kicad-cli 10.0.6.  A foot chamfer
-# just leaves the partner copper beside it uncoupled, its own length per
-# corner.  Measured on a 0.2 mm pair, skew 0.5 mm, one loop: crown 0.11 mm
-# with square feet reads 0.72 mm, with 0.02 / 0.05 / 0.11 mm feet 0.76 /
-# 0.82 / 0.94 mm, in both engines.  So the feet stay square, and a loop
-# costs the partner two crown chamfers instead of four chamfers; that is
-# what lets the #7542 0.2 mm pairs be tuned under their limits.
-SKEW_BUMP_FOOT_CHAMFER_WIDTHS: float = 0.0
+# Issue #7546: foot chamfer (in **mm**) of the skew tuner's asymmetric plain
+# bumps, where a leg leaves and rejoins the host line.  Only the *crown*
+# chamfer (:data:`SKEW_BUMP_CHAMFER_WIDTHS`, where a leg meets the flat top)
+# lets the flat top couple to the partner: at under half a trace width the
+# host line's end blocks the top's pairing in pinned kicad-cli 10.0.6.  A
+# foot chamfer just leaves the partner copper beside it uncoupled, its own
+# length per corner, so the asymmetric bumps keep it short.  It is never
+# zero: operator ruling Q32 (clarified 2026-10-22) wants *every* bump corner
+# chamfered at 45 degrees, feet included.  Measured on a 0.2 mm pair, skew
+# 0.5 mm, one loop with 0.11 mm crowns: 0.02 / 0.05 / 0.11 mm feet read
+# 0.76 / 0.82 / 0.94 mm in both engines (and square feet, not shipped, 0.72),
+# so 0.02 mm feet still tune the #7542 0.2 mm pair under its 0.8 mm limit.
+# Do not lower it without an operator ruling.
+SKEW_BUMP_FOOT_CHAMFER_MM: float = 0.02
 
 # Issue #7521: corner chamfers (in trace widths) the gated tuner tries for its
 # plain-copper bumps, in order.  Under the excursion cap (2x the pair gap,
@@ -236,8 +238,8 @@ SKEW_BUMP_FOOT_CHAMFER_WIDTHS: float = 0.0
 # Q32) under the same gates, and the uncoupled guard measures every bump (a
 # chamfer under half a width can read more uncoupled than a square loop; the
 # guard rejects a bump that breaks the pair's limit that way).  The rungs
-# chamfer all four corners; Issue #7546 adds one square-foot cascade beside
-# them (:func:`tune_diff_pair_skew`).
+# chamfer all four corners alike; Issue #7546 adds one asymmetric-chamfer
+# cascade beside them (:func:`tune_diff_pair_skew`).
 SKEW_BUMP_CHAMFER_LADDER: tuple[float, ...] = (SKEW_BUMP_CHAMFER_WIDTHS, 0.25, 0.15)
 
 
@@ -338,10 +340,12 @@ def tune_diff_pair_skew(
 
     Plain-copper bumps (Issue #7546): the cascade runs once per rung of
     :data:`SKEW_BUMP_CHAMFER_LADDER` (four chamfered corners) until one
-    closes the pair.  When none does, it runs once more with square feet
-    (:data:`SKEW_BUMP_FOOT_CHAMFER_WIDTHS`), whose result replaces the
-    ladder's when it closes the pair, or leaves it no worse on skew and on
-    the pair's uncoupled figure (:func:`_square_feet_win`).
+    closes the pair.  When none does, and plain bumps were in play (a
+    spacing or an uncoupled limit), it runs once more with asymmetric
+    chamfers: wide crowns, :data:`SKEW_BUMP_FOOT_CHAMFER_MM` feet.  That
+    result replaces the ladder's when it closes the pair, or leaves it no
+    worse on skew and on the pair's uncoupled figure
+    (:func:`_asymmetric_chamfers_win`).
 
     Returns:
         ``(p_route, n_route, result)`` where ``p_route`` and ``n_route`` are
@@ -383,7 +387,7 @@ def tune_diff_pair_skew(
     )
     reference: tuple[Route, Route, DiffPairTuneResult] | None = None
     for chamfer in ladder:
-        outcome = once(plain_chamfer_widths=chamfer, plain_foot_chamfer_widths=None)
+        outcome = once(plain_chamfer_widths=chamfer, plain_foot_chamfer_mm=None)
         if reference is None or outcome[2].success or outcome[2].reason == "unrouted":
             reference = outcome
         if outcome[2].success or outcome[2].reason == "unrouted":
@@ -392,18 +396,23 @@ def tune_diff_pair_skew(
     assert reference is not None
     if reference[2].success or reference[2].reason in _UNTOUCHED_REASONS:
         return reference
+    # Without a spacing or an uncoupled limit no plain bump is ever tried
+    # (:func:`_pattern_then_plain_options`), so a rerun would only repeat the
+    # ladder's run.
+    if intra_pair_clearance_mm <= 0.0 and max_uncoupled_mm is None:
+        return reference
     # Issue #7546: no rung closed the pair, so the same cascade runs with
-    # square feet (:data:`SKEW_BUMP_FOOT_CHAMFER_WIDTHS`), whose loops cost
-    # the partner two crown chamfers instead of four chamfers.  A pair the
-    # ladder tunes keeps the ladder's bumps: making square feet the first
-    # choice reads 0.2-4.3 mm less uncoupled on 14 of the 20 bench pairs, but
-    # on 07rf the match-group tuner then re-tunes MIPI_DAT0/MIPI_DAT1 0.4 /
-    # 0.6 mm worse, against the no-worse-than-before bar.
-    square = once(
+    # asymmetric chamfers: 0.55-width crowns on 0.02 mm feet
+    # (:data:`SKEW_BUMP_FOOT_CHAMFER_MM`), whose loops cost the partner two
+    # crown chamfers plus two short foot chamfers instead of four wide ones.
+    # A pair the ladder tunes keeps the ladder's bumps (no-worse-than-before
+    # bar: making the asymmetric bumps the first choice re-tunes 07rf's
+    # MIPI group worse).
+    asymmetric = once(
         plain_chamfer_widths=SKEW_BUMP_CHAMFER_WIDTHS,
-        plain_foot_chamfer_widths=SKEW_BUMP_FOOT_CHAMFER_WIDTHS,
+        plain_foot_chamfer_mm=SKEW_BUMP_FOOT_CHAMFER_MM,
     )
-    return square if _square_feet_win(square, reference) else reference
+    return asymmetric if _asymmetric_chamfers_win(asymmetric, reference) else reference
 
 
 #: Results the ladder returns before any bump is tried (Issue #7546).
@@ -412,29 +421,27 @@ _UNTOUCHED_REASONS: frozenset[str] = frozenset(
 )
 
 
-def _square_feet_win(
-    square: tuple[Route, Route, DiffPairTuneResult],
+def _asymmetric_chamfers_win(
+    asymmetric: tuple[Route, Route, DiffPairTuneResult],
     reference: tuple[Route, Route, DiffPairTuneResult],
 ) -> bool:
-    """Whether the square-foot cascade beats the four-corner ladder (Issue #7546).
+    """Whether the asymmetric-chamfer cascade beats the ladder (Issue #7546).
 
-    A tuned pair beats an untuned one (the uncoupled guard already held it to
-    its limit), and an untuned pair a tuned one never.  Between two tuned
-    pairs the lower uncoupled figure wins.  Between two untuned ones the
-    square-foot result must be no worse on both the remaining skew and the
-    figure, and better on one.  Ties keep the ladder's result.
+    Only called when the four-corner ladder left the pair untuned.  A tuned
+    pair beats it (the uncoupled guard already held it to its limit).
+    Otherwise the asymmetric result must be no worse on both the remaining
+    skew and the pair's uncoupled figure, and better on one; ties keep the
+    ladder's result.
     """
     eps = 1e-6
-    s_res, r_res = square[2], reference[2]
-    if s_res.success != r_res.success:
-        return s_res.success
-    s_fig = _pair_uncoupled_mm(square[0], square[1])
+    a_res, r_res = asymmetric[2], reference[2]
+    if a_res.success:
+        return True
+    a_fig = _pair_uncoupled_mm(asymmetric[0], asymmetric[1])
     r_fig = _pair_uncoupled_mm(reference[0], reference[1])
-    if s_res.success:
-        return s_fig < r_fig - eps
-    if s_res.skew_after_mm > r_res.skew_after_mm + eps or s_fig > r_fig + eps:
+    if a_res.skew_after_mm > r_res.skew_after_mm + eps or a_fig > r_fig + eps:
         return False
-    return s_res.skew_after_mm < r_res.skew_after_mm - eps or s_fig < r_fig - eps
+    return a_res.skew_after_mm < r_res.skew_after_mm - eps or a_fig < r_fig - eps
 
 
 def _tune_diff_pair_skew_once(
@@ -454,11 +461,12 @@ def _tune_diff_pair_skew_once(
     max_uncoupled_mm: float | None,
     corner_chamfer_widths: float,
     plain_chamfer_widths: float,
-    plain_foot_chamfer_widths: float | None,
+    plain_foot_chamfer_mm: float | None,
 ) -> tuple[Route, Route, DiffPairTuneResult]:
     """One :func:`tune_diff_pair_skew` cascade with plain bumps chamfered at
     ``plain_chamfer_widths`` trace widths (issue #7521), their feet at
-    ``plain_foot_chamfer_widths`` (``None``: the same, issue #7546)."""
+    ``plain_foot_chamfer_mm`` mm (``None``: the same as the crowns, issue
+    #7546)."""
     p_id = pair.pair.positive.net_id
     n_id = pair.pair.negative.net_id
 
@@ -648,7 +656,7 @@ def _tune_diff_pair_skew_once(
             placement_kwargs,
             plain_only=gated,
             plain_chamfer_widths=plain_chamfer_widths,
-            plain_foot_chamfer_widths=plain_foot_chamfer_widths,
+            plain_foot_chamfer_mm=plain_foot_chamfer_mm,
         ):
             result.serpentine_results.append(cand_serp)
             if not cand_serp.success:
@@ -958,7 +966,7 @@ def _pattern_then_plain_options(
     *,
     plain_only: bool = False,
     plain_chamfer_widths: float = SKEW_BUMP_CHAMFER_WIDTHS,
-    plain_foot_chamfer_widths: float | None = SKEW_BUMP_FOOT_CHAMFER_WIDTHS,
+    plain_foot_chamfer_mm: float | None = None,
 ) -> Iterator[tuple[Route, SerpentineResult, bool]]:
     """Yield ``(route, serpentine, as_pattern)`` placements (Issue #7546).
 
@@ -979,13 +987,14 @@ def _pattern_then_plain_options(
             yield route, serp, True
     if not guarded and not plain_only:
         return
-    # Issue #7546: ``plain_foot_chamfer_widths`` (square by default,
-    # :data:`SKEW_BUMP_FOOT_CHAMFER_WIDTHS`) chamfers the loops' feet; only
-    # their crowns need a chamfer for the flat top to couple.
+    # Issue #7546: ``plain_foot_chamfer_mm`` chamfers the loops' feet
+    # (``None``, the default: as wide as the crowns, so all four corners
+    # match).  Only the crowns need a wide chamfer for the flat top to
+    # couple; the feet are never square (operator ruling Q32).
     plain_config = dataclasses.replace(
         base_config,
         corner_chamfer_widths=max(base_config.corner_chamfer_widths, plain_chamfer_widths),
-        foot_chamfer_widths=plain_foot_chamfer_widths,
+        foot_chamfer_length_mm=plain_foot_chamfer_mm,
     )
     for route, serp in _placement_options(base_config=plain_config, **placement_kwargs):
         yield route, serp, False
@@ -1083,7 +1092,7 @@ def _partial_placement_options(
                     side="outer",
                     outer_normal_hint=hint,
                     corner_chamfer_widths=base_config.corner_chamfer_widths,
-                    foot_chamfer_widths=base_config.foot_chamfer_widths,
+                    foot_chamfer_length_mm=base_config.foot_chamfer_length_mm,
                 )
                 seen: set[tuple[float, float]] = set()
                 for anchor in PARTIAL_BUMP_ANCHORS:
@@ -1182,7 +1191,7 @@ def _placement_options(
             side="outer",
             outer_normal_hint=hint,
             corner_chamfer_widths=base_config.corner_chamfer_widths,
-            foot_chamfer_widths=base_config.foot_chamfer_widths,
+            foot_chamfer_length_mm=base_config.foot_chamfer_length_mm,
         )
 
     # First option: identical to the original attempt apart from sizing.

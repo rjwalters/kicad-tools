@@ -81,41 +81,46 @@ class SerpentineConfig:
     # bumps use ``SKEW_BUMP_CHAMFER_WIDTHS`` (0.55).
     corner_chamfer_widths: float = 0.0
     # Issue #7546: the chamfer of the two *foot* corners, where a leg leaves
-    # and rejoins the host line, in trace widths.  ``None`` (default) uses
-    # ``corner_chamfer_widths``, so all four corners match.  With a separate
-    # value ``corner_chamfer_widths`` is the *crown* chamfer, where a leg
-    # meets the flat top.  Only the crown chamfer lets the flat top couple to
-    # the partner (pinned kicad-cli 10.0.6: it must be at least half a trace
-    # width); a foot chamfer only shortens the partner's coupled run by its
-    # own length, so the skew tuner's plain bumps use square feet
-    # (``SKEW_BUMP_FOOT_CHAMFER_WIDTHS``).  When crown plus foot exceed the
-    # amplitude both shrink in proportion and the leg is one 45-degree run.
-    foot_chamfer_widths: float | None = None
+    # and rejoins the host line, in **mm** (not trace widths).  ``None``
+    # (default) uses ``corner_chamfer_widths``, so all four corners match.
+    # With a separate value ``corner_chamfer_widths`` is the *crown* chamfer,
+    # where a leg meets the flat top.  Only the crown chamfer lets the flat
+    # top couple to the partner (pinned kicad-cli 10.0.6: it must be at least
+    # half a trace width, so it scales with the width); a foot chamfer only
+    # shortens the partner's coupled run by its own length, so the skew
+    # tuner's asymmetric bumps keep it small but never zero
+    # (``SKEW_BUMP_FOOT_CHAMFER_MM``, 0.02 mm: operator ruling Q32 wants
+    # every corner chamfered).  When crown plus foot exceed the amplitude
+    # both shrink in proportion and the leg is one 45-degree run, which has
+    # no square corner either.
+    foot_chamfer_length_mm: float | None = None
 
-    def _chamfer_widths(self) -> tuple[float, float]:
-        """``(crown, foot)`` chamfers in trace widths, before clamping."""
-        crown = max(0.0, self.corner_chamfer_widths)
-        foot = crown if self.foot_chamfer_widths is None else max(0.0, self.foot_chamfer_widths)
+    def _chamfers(self, width: float) -> tuple[float, float]:
+        """``(crown, foot)`` chamfers in mm on a ``width`` trace, unclamped."""
+        crown = max(0.0, self.corner_chamfer_widths) * width
+        foot = (
+            crown if self.foot_chamfer_length_mm is None else max(0.0, self.foot_chamfer_length_mm)
+        )
         return crown, foot
 
     @property
     def chamfered(self) -> bool:
         """Whether any corner of a loop is chamfered (Issue #7546)."""
-        crown, foot = self._chamfer_widths()
+        crown, foot = self._chamfers(1.0)
         return crown > 0.0 or foot > 0.0
 
     def _clamped(self, width: float, amplitude: float | None) -> tuple[float, float]:
         a = self.amplitude if amplitude is None else amplitude
-        crown, foot = self._chamfer_widths()
-        total = (crown + foot) * width
+        crown, foot = self._chamfers(width)
+        total = crown + foot
         if total <= 0.0:
             return 0.0, 0.0
         scale = min(1.0, a / total)
-        return crown * width * scale, foot * width * scale
+        return crown * scale, foot * scale
 
     def chamfer_mm(self, width: float, amplitude: float | None = None) -> float:
         """The crown (leg-to-top) chamfer (mm) of a loop of ``amplitude`` on a
-        ``width`` trace; with ``foot_chamfer_widths`` unset, every corner's."""
+        ``width`` trace; with ``foot_chamfer_length_mm`` unset, every corner's."""
         return self._clamped(width, amplitude)[0]
 
     def foot_chamfer_mm(self, width: float, amplitude: float | None = None) -> float:
@@ -143,8 +148,8 @@ class SerpentineConfig:
 
     def amplitude_for(self, width: float, added: float) -> float:
         """The amplitude whose loop adds ``added`` mm (inverse of loop_length_added)."""
-        crown, foot = self._chamfer_widths()
-        s = (crown + foot) * width
+        crown, foot = self._chamfers(width)
+        s = crown + foot
         if s <= 0.0:
             return added / 2.0
         k = 4.0 - 2.0 * math.sqrt(2.0)  # 2A - k*s for A >= s
