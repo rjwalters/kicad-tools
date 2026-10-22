@@ -286,6 +286,9 @@ resolve. `--model-dir DIR` maps every
 - `kct pcb model-audit <pcb> [--env host|pinned] [--model-dir DIR] [--format json]`
 - `kct models sync --sparse` / `kct models status`: fetch / check the pinned
   model subset (below).
+- `kct models generate`: parametric STEP bodies (or `--placeholder` boxes) for
+  footprints whose stock model does not exist; see
+  [parametric-3d-models.md](parametric-3d-models.md) (issue #7687).
 - `kct check --3d-models` (or `--only model_coverage`): one *warning* per
   non-exempt uncovered footprint (message carries reference, `lib_id`, class
   and path), or a single *info* finding ("3D coverage not evaluated") when the

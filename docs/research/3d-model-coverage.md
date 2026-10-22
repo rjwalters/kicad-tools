@@ -681,8 +681,105 @@ are:
 3. a black-box differential probe that varies inputs and checks KiCad's
    accept or reject behaviour.
 
-Until one of these works, embedding stays a spike. The license position is
-clear, though:
+### Checksum spike outcome (#7688, 2026-10-22): blocked
+
+The spike tried all three options, timeboxed to one session. It read KiCad
+docs, issue titles and data files only, and ran the `kicad-cli` and `pcbnew`
+binaries as black boxes. No KiCad source was read.
+[`scripts/research/embedded_checksum_probe.py`](../../scripts/research/embedded_checksum_probe.py)
+reproduces every hash and inversion result below. Its `verify` subcommand is
+the accept/reject oracle.
+
+**The corpus.** The host KiCad 10.0.7 demos ship 96 data-bearing blocks, with
+51 distinct payloads (`royalblue54L_feather`, `vme-wren` and its `.pretty`).
+Re-saving a scratch board with `(embedded_fonts yes)` and a TrueType face
+makes kicad-cli embed the font and write its checksum. That yields further
+KiCad-produced pairs over bytes we know exactly: the decompressed `data` is
+byte-identical to the font file on disk.
+
+**What the checksum covers.** `kicad-cli pcb upgrade --force` prints
+`Warning: Checksum error in embedded file <name>` and drops the block on a
+mismatch. That makes it a cheap oracle, with no render needed:
+
+| Variant of a valid KiCad-written block | 10.0.7 host | 10.0.6 pinned image |
+|---|---|---|
+| Unchanged | accepted | accepted |
+| Payload recompressed at zstd level 19 (different `data` bytes, same raw) | accepted | accepted |
+| `name` changed (`SODFL1608X65N.step` to `x.step`) | accepted | not run |
+| Raw payload plus one trailing byte | **rejected** | not run |
+| Self-built block, zero, empty or missing `checksum` | **rejected** | **rejected** |
+
+So the checksum is a function of the **decompressed bytes only**. It does not
+cover the zstd frame, the base64 text or the name. The loader never
+generates one: blocks with an empty or missing checksum are rejected, not
+filled in.
+
+**What it is not.** These were tested over the raw, compressed and base64
+bytes, in five output byte orders (as-is, reversed, halves swapped,
+big-endian u64 lanes, big-endian u32 lanes):
+- MD5, SHA-1/16, SHA-256 (first or last 16 bytes), BLAKE2b-128, BLAKE2s-128;
+- XXH3-128 (seeds 0, 1 and a few common ones), CityHash128, FarmHash128 and
+  SpookyHash V2 (seeds 0 and 1);
+- MurmurHash3 x86_128 by brute force over seeds 0–4095;
+- CRC32, Adler-32, XXH32/64 or the zstd frame checksum as any 4- or 8-byte
+  piece of it, plus the length.
+
+None match.
+
+**MurmurHash3 is excluded for every seed, not just common ones.** Both
+x64_128 and x86_128 are invertible when the input is known, so the harness
+runs them *backwards* from each observed checksum to their initial state.
+- A seeded hash would come back with all lanes equal.
+- A fixed non-standard initial state would come back identical across
+  samples.
+
+Neither happens, for any output byte order. The same holds with a 4- or
+8-byte length prefix or suffix, a name prefix, a NUL terminator, a
+zero-padded final block, or any of eight alternative finalizer length
+values.
+
+**Routes that would let KiCad compute it for us, both closed:**
+- **The font oracle.** It hashes arbitrary bytes only if they load as a
+  font. A STEP file overwritten in place under a cached fontconfig entry is
+  silently not embedded.
+- **The `pcbnew` SWIG module.** Bundled with KiCad 10, it exposes
+  `BOARD.GetEmbeddedFiles()` only as an opaque `SwigPyObject`, with no
+  methods.
+
+**Docs and upstream.** The format docs ([s-expression intro](https://dev-docs.kicad.org/en/file-formats/sexpr-intro/index.html),
+[board](https://dev-docs.kicad.org/en/file-formats/sexpr-pcb/index.html),
+[footprint](https://dev-docs.kicad.org/en/file-formats/sexpr-footprint/index.html))
+do not describe `embedded_files` at all. Searches of the KiCad issue tracker
+for "embedded checksum", "embedded_files", "kicad-cli embed" and "embed 3d
+models cli" (2026-10-22) find bug reports about embedding, but none that
+documents the checksum or requests a CLI embed command.
+
+**Conclusion.** The checksum cannot be produced clean-room with the means
+available today. `kct pcb embed-models` and package embedding stay deferred,
+because writing blocks that KiCad silently drops would be worse than
+shipping `${KICAD10_3DMODEL_DIR}` refs. Two kinds of upstream answer would
+unblock it:
+- a documented checksum definition;
+- a `kicad-cli pcb embed-models` (or an `--embed-models` flag on
+  `pcb upgrade`). With that, kct shells out and never needs the algorithm.
+
+Filing the request is operator decision D4 (#7690). Suggested text for the
+KiCad issue tracker:
+
+> **kicad-cli: embed 3D models, or document the `embedded_files` checksum**
+>
+> KiCad 10 can embed 3D models in a board (Tools → Collect and Embed 3D
+> Models), which makes boards self-contained for fabrication packages and
+> headless renders. kicad-cli has no equivalent, so CI pipelines cannot
+> produce embedded boards. Third-party tools cannot write the blocks
+> themselves either: the `(checksum "…")` field of an `embedded_files` entry
+> is validated on load (a mismatch drops the file with "Checksum error in
+> embedded file"), but the file-format documentation does not define it.
+> Could kicad-cli gain `pcb embed-models [--output]` (or `pcb upgrade
+> --embed-models`), and could the s-expression docs specify how the checksum
+> is computed?
+
+The license position is clear, though:
 - **KiCad library bodies may be embedded in published boards.** The design
   exception covers "generated files".
 - **Self-generated bodies** may be embedded.
@@ -728,6 +825,10 @@ The issues are drafted in the session scratchpad, not filed.
 8. **Embed for self-contained packages and stable renders**, once the
    checksum spike is resolved. Only KiCad and self-generated bodies; never
    EasyEDA bodies in published artifacts.
+   *Status:* the spike (#7688, 2026-10-22) is **blocked**. The checksum
+   covers the raw bytes, but no clean-room route produces it (see
+   "Checksum spike outcome"). Embedding waits on an upstream answer, and
+   filing that request is operator decision D4.
 9. **Registry hygiene.** Add entries for easyeda2kicad (AGPL, ideas only),
    JLC2KiCadLib (MIT), kicad-library-tools (GPL, run only), kicadStepUpMod
    (AGPL) and cq-electronics (MIT), with this note as "our notes".
