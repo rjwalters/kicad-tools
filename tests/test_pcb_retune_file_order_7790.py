@@ -45,3 +45,24 @@ def test_model_applies_copper_order_hook():
     model.copper_order = hook
     assert model.route_length(route) == plain
     assert seen == [route]
+
+
+def test_splice_anchors_after_last_block_when_vias_precede_segments():
+    """New copper lands after the net's last block by offset, not the last via (#7796)."""
+    from kicad_tools.router.pcb_retune import _splice
+    from kicad_tools.router.primitives import Via
+
+    text = (
+        "(kicad_pcb\n"
+        '\t(net 1 "N")\n'
+        '\t(via (at 5 0) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))\n'
+        '\t(segment (start 0 0) (end 1 0) (width 0.2) (layer "F.Cu") (net 1))\n'
+        '\t(arc (start 1 0) (mid 2 1) (end 3 0) (width 0.2) (layer "F.Cu") (net 1))\n'
+        ")\n"
+    )
+    old = Segment(0, 0, 1, 0, 0.2, Layer.F_CU, net=1, net_name="N")
+    via = Via(5, 0, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), net=1, net_name="N")
+    new = _seg(7, 8)
+    route = Route(net=1, net_name="N", segments=[old, new], vias=[via])
+    out = _splice(text, {"N": route}, {"N": 1}, {1: "N"}, False)
+    assert out.index("(start 7.0000") > out.index("(arc")
