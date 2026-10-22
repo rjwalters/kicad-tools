@@ -5780,20 +5780,46 @@ class DiffPairRouter:
         The joint search can run a leg past its via and return over the same
         cells on the other layer; the doubled copper makes junctions whose
         measured length depends on segment order.  A moved via must keep the
-        grid's segment, via and pad clearances, so a hairpin with no legal
-        site is left as routed.  Returns the number of vias moved.
+        grid's segment, via and pad clearances, and its drill must stay off
+        the net's own SMT lands (Issue #7808).  Where no site is legal, the
+        doubled leg is replaced by a straight segment from the via
+        (:func:`~.via_hairpin.shortcut_via_hairpins`).  Returns the number
+        of hairpin edits kept.
         """
-        from .via_hairpin import collapse_via_hairpins, merge_junction_runs
+        from .drc_nudge import _router_pad_bbox, _via_drill_overlaps_bbox
+        from .via_hairpin import (
+            collapse_via_hairpins,
+            merge_junction_runs,
+            shortcut_via_hairpins,
+        )
 
         grid = self.autorouter.grid
+        pads = getattr(self.autorouter, "pads", None) or {}
         total = 0
         for route in routes:
             if not route.vias:
                 continue
+            # Issue #7808: the turn of a pad-escape hairpin is usually right
+            # beside the pad, and ``worst_via_pad_deficit`` skips same-net
+            # pads -- so a collapsed via could land its drill on its own
+            # SMT land.  ``kct route``'s via-in-pad sweep then relocated it
+            # and re-grew a doubled stub, and board 07's DQS skew went from
+            # 0.119 mm to 1.291 mm.  A site whose drill overlaps a same-net
+            # SMT land is not a legal collapse site.
+            own_pads = [pad for pad in pads.values() if getattr(pad, "net", 0) == route.net]
+            own_pad_boxes = [
+                _router_pad_bbox(pad) for pad in own_pads if not getattr(pad, "through_hole", False)
+            ]
+            own_pad_centres = [(pad.x, pad.y) for pad in own_pads]
 
-            def via_ok(via: Via, net: int = route.net) -> bool:
+            def via_ok(
+                via: Via,
+                net: int = route.net,
+                own_pad_boxes: list[tuple[float, float, float, float]] = own_pad_boxes,
+            ) -> bool:
                 return (
-                    grid.validate_via_clearance(via, net)[0]
+                    not any(_via_drill_overlaps_bbox(via, box) for box in own_pad_boxes)
+                    and grid.validate_via_clearance(via, net)[0]
                     and grid.validate_via_to_via_clearance(via, net)[0]
                     and grid.worst_via_pad_deficit(via, net)[0] <= _SHADOW_VIA_DEFICIT_EPS
                 )
@@ -5805,6 +5831,13 @@ class DiffPairRouter:
                 vias=[dataclasses.replace(v) for v in route.vias],
             )
             moved = collapse_via_hairpins(trial, via_ok)
+
+            def seg_ok(seg: Segment, net: int = route.net) -> bool:
+                return bool(grid.validate_segment_clearance(seg, net)[0])
+
+            # Issue #7808: where the via cannot move, drop the doubled leg
+            # instead (a straight segment from the via past the turn).
+            moved += shortcut_via_hairpins(trial, seg_ok, anchors=own_pad_centres)
             moved += merge_junction_runs(trial)
             if not moved:
                 continue
