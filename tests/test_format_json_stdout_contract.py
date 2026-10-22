@@ -186,6 +186,18 @@ CONTRACT_ARGV: dict[str, list[str]] = {
     # Hermetic: HOME is scratch and KCT_KICAD_3DMODEL_CACHE is popped, so it
     # reads an empty cache and prints one JSON document with exit 1.
     "models status": [],
+    # Parametric bodies (#7687): placeholder mode needs no CadQuery extra.
+    "models generate": [
+        "chip",
+        "--pcb",
+        "{pcb}",
+        "--ref",
+        "R1",
+        "--placeholder",
+        "-o",
+        "{dir}/_gen",
+    ],
+    "models families": [],
     "lib symbols": ["{fixtures}/multiunit_test.kicad_sym"],
     "lib footprints": ["{fixtures}/Test_Library.pretty"],
     "lib footprint": ["{fixtures}/Test_Library.pretty/SOT-23-5.kicad_mod"],
