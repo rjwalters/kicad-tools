@@ -284,6 +284,12 @@ def enumerate_gateways(
     mid = ((pad_p[0] + pad_n[0]) / 2.0, (pad_p[1] + pad_n[1]) / 2.0)
     to_dir = _unit((toward[0] - mid[0], toward[1] - mid[1]))
     found: list[Gateway] = []
+    # Issue #7649: a family whose site coincides with an earlier family's
+    # (``centred`` == ``parallel`` when the pads sit exactly one via gap
+    # apart) is the same gateway; keeping both spent the combination budget
+    # on copies (07rf DQS: four identical ``against`` combinations, so the
+    # shorter, lower-skew opposite heading was never routed).
+    seen: set[tuple[int, Pt, Pt]] = set()
     for ladder in propose_gateway_sites(
         pad_p, pad_n, pitch=pitch, via_gap=via_gap, step=step, max_setback=max_setback
     ):
@@ -291,6 +297,13 @@ def enumerate_gateways(
             # A rung farther than the budget can only grow the fan.
             if max_fan_mm is not None and site.setback > max_fan_mm + 1e-9:
                 break
+            sites = (
+                site.heading,
+                (round(site.via_p[0], 6), round(site.via_p[1], 6)),
+                (round(site.via_n[0], 6), round(site.via_n[1], 6)),
+            )
+            if sites in seen:
+                break  # this ladder's first legal site is that same gateway
             fans = check(site)
             if fans is None:
                 continue
@@ -302,6 +315,7 @@ def enumerate_gateways(
             bend = 0.0 if to_dir is None else 1.0 - (h[0] * to_dir[0] + h[1] * to_dir[1])
             cost = lp + ln + BEND_WEIGHT_MM * bend
             found.append(Gateway(layer, site, tuple(fan_p), tuple(fan_n), round(cost, 9)))
+            seen.add(sites)
             break  # smallest legal setback of this (heading, family) only
     found.sort(key=lambda g: (g.cost, g.site.heading, FAMILIES.index(g.site.family)))
     return found[:cap], len(found)
