@@ -110,3 +110,71 @@ def test_partial_improvement_keeps_board_and_exit(board, monkeypatch):
     monkeypatch.setattr(route_cmd, "_main_impl", fake_main)
     assert _chain_complete_pass(_args(board), None, 2) == 2
     assert board.read_text() == "better"
+
+
+def test_staged_output_never_aliases_input(board, monkeypatch):
+    """The inner pass writes a separate staging board, even under the supervisor."""
+    from kicad_tools.cli.route_deadline import CONTROL_ENV
+
+    control = board.with_name("control.json")
+    control.write_text('{"stage": "routing", "output": "real"}')
+    monkeypatch.setenv(CONTROL_ENV, str(control))
+    _stub_open(monkeypatch, [["VCP"], []])
+    seen = {}
+
+    def fake_main(argv):
+        out = Path(argv[argv.index("-o") + 1])
+        seen["out"] = out
+        out.write_text("completed")
+        out.with_suffix(".routing_plan.json").write_text("plan")
+        control.write_text('{"stage": "setup", "output": "staged"}')
+        return 0
+
+    monkeypatch.setattr(route_cmd, "_main_impl", fake_main)
+    assert _chain_complete_pass(_args(board), None, 2) == 0
+    assert seen["out"] != board and seen["out"].stem != board.stem
+    assert board.read_text() == "completed"
+    assert board.with_suffix(".routing_plan.json").read_text() == "plan"
+    assert not list(board.parent.glob("*.chain*"))
+    assert "real" in control.read_text()
+
+
+@pytest.mark.parametrize("rc", [3, 4, 6])
+def test_dirty_inner_exit_is_discarded_even_if_net_closed(board, monkeypatch, rc):
+    _stub_open(monkeypatch, [["VCP"], []])
+
+    def fake_main(argv):
+        Path(argv[argv.index("-o") + 1]).write_text("dirty")
+        return rc
+
+    monkeypatch.setattr(route_cmd, "_main_impl", fake_main)
+    assert _chain_complete_pass(_args(board), None, 2) == 2
+    assert board.read_text() == "negotiated"
+    assert not list(board.parent.glob("*.chain*"))
+
+
+def test_deadline_during_pass_leaves_output_and_cleans_staging(board, monkeypatch):
+    from kicad_tools.cli.route_deadline import RouteDeadlineExpired
+
+    _stub_open(monkeypatch, [["VCP"]])
+
+    def fake_main(argv):
+        Path(argv[argv.index("-o") + 1]).write_text("partial")
+        raise RouteDeadlineExpired()
+
+    monkeypatch.setattr(route_cmd, "_main_impl", fake_main)
+    with pytest.raises(RouteDeadlineExpired):
+        _chain_complete_pass(_args(board), None, 2)
+    assert board.read_text() == "negotiated"
+    assert not list(board.parent.glob("*.chain*"))
+
+
+def test_skipped_when_budget_is_nearly_spent(board, monkeypatch):
+    import time
+
+    from kicad_tools.cli.route_deadline import DEADLINE_ENV
+
+    monkeypatch.setenv(DEADLINE_ENV, str(time.monotonic() + 5))
+    _stub_open(monkeypatch, [["VCP"]])
+    monkeypatch.setattr(route_cmd, "_main_impl", lambda a: pytest.fail("must not run"))
+    assert _chain_complete_pass(_args(board), None, 2) == 2

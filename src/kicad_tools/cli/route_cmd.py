@@ -20467,6 +20467,13 @@ def _route_parser() -> argparse.ArgumentParser:
 # attempted -- fatal (1), interrupted (5) and plan-gate abort (9).  The
 # supervisor's timeout exit never reaches here (it is raised, not returned).
 _CHAIN_COMPLETE_SKIP_EXITS = frozenset({1, 5, 9})
+# Inner-pass exits whose board may be promoted: clean (0) or a genuine partial
+# improvement with no dirty copper (8).  Anything else -- DRC-dirty copper (3),
+# false completion (6), 4 -- is discarded even when it closed a net.
+_CHAIN_COMPLETE_ACCEPT_EXITS = frozenset({0, 8})
+# Under ``--timeout`` the chain is skipped below this much remaining budget so a
+# negotiation that ends near the deadline cannot turn into a timeout.
+_CHAIN_COMPLETE_MIN_BUDGET_S = 90.0
 
 
 def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
@@ -20484,11 +20491,17 @@ def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
     A strict no-op -- ``result`` is returned untouched and nothing is written --
     unless the grid engine finished, the output still has unconnected signal
     nets and ``--no-chain-complete`` was not passed, so fully routed boards
-    (the board 04/07 recipes) are byte-identical.  The pre-pass board is kept
-    and restored when the pass closes nothing, so a failing or timed-out pass
-    leaves the negotiated output intact.  When the pass closes every open net
-    its exit code replaces the stale pre-pass one; a partial improvement keeps
-    the improved board and the original exit code.
+    (the board 04/07 recipes) are byte-identical.
+
+    The pass reads the negotiated board in place but writes to a separate
+    staging output (``<stem>.chain.kicad_pcb`` plus its derived sidecars): the
+    ``--timeout`` supervisor refuses an output aliasing its protected input.
+    The staged board is promoted over ``-o`` only when the inner pass exits
+    cleanly (0, or 8 for a partial improvement) and closed at least one net;
+    otherwise it is discarded and ``-o`` was never touched.  A closing pass
+    replaces the stale pre-pass exit code; a partial improvement keeps the
+    original one.  The pass uses the board's own rules: recipe flags such as
+    via size, ``--grid`` and ``--layers`` are not forwarded.
     """
     if (
         getattr(args, "no_chain_complete", False)
@@ -20497,9 +20510,11 @@ def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
         or getattr(args, "resume", None)
         or getattr(args, "nets", None)
         or getattr(args, "skip_nets", None)
-        or getattr(args, "route_engine", "grid") != "grid"
+        or getattr(args, "region", None)
+        or _resolve_route_engine(args) != "grid"
         or getattr(args, "format", "text") == "json"
         or result in _CHAIN_COMPLETE_SKIP_EXITS
+        or _interrupt_pending()
     ):
         return result
     pcb = Path(args.pcb)
@@ -20511,6 +20526,8 @@ def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
 
     from kicad_tools.router.partial_rescue import partially_connected_signal_nets
 
+    from .route_deadline import CONTROL_ENV, DEADLINE_ENV
+
     quiet = bool(getattr(args, "quiet", False))
     manufacturer = getattr(args, "manufacturer", "jlcpcb") or "jlcpcb"
     excluded = frozenset(
@@ -20519,18 +20536,29 @@ def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
         if n.strip()
     )
 
-    def _open_nets() -> list[str]:
+    def _open_nets(board: Path) -> list[str]:
         return list(
             partially_connected_signal_nets(
-                output,
+                board,
                 manufacturer=manufacturer,
                 excluded_nets=excluded,
                 include_unrouted=True,
             )
         )
 
+    deadline = os.environ.get(DEADLINE_ENV)
+    if deadline is not None:
+        remaining = float(deadline) - time.monotonic()
+        if remaining < _CHAIN_COMPLETE_MIN_BUDGET_S:
+            if not quiet:
+                print(
+                    f"\n--- Chained completion pass skipped: {remaining:.0f}s of "
+                    f"--timeout left (< {_CHAIN_COMPLETE_MIN_BUDGET_S:.0f}s) ---"
+                )
+            return result
+
     try:
-        before = _open_nets()
+        before = _open_nets(output)
     except Exception:
         return result
     if not before:
@@ -20541,7 +20569,9 @@ def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
             f"\n--- Chained completion pass: {len(before)} signal net(s) still open "
             f"({', '.join(before)}); disable with --no-chain-complete ---"
         )
-    chain_argv = [str(output), "-o", str(output), "--complete"]
+    stage_stem = output.stem + ".chain"
+    staged = output.with_name(stage_stem + output.suffix)
+    chain_argv = [str(output), "-o", str(staged), "--complete"]
     for flag, attr in (
         ("--manufacturer", "manufacturer"),
         ("--seed", "seed"),
@@ -20556,22 +20586,81 @@ def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
         if getattr(args, attr, False):
             chain_argv.append(flag)
 
-    backup = output.with_name(output.name + ".pre-complete")
-    shutil.copy2(output, backup)
+    def _staged_files() -> list[Path]:
+        import glob
+
+        return sorted(
+            Path(f) for f in glob.glob(glob.escape(str(output.with_name(stage_stem))) + "*")
+        )
+
+    def _discard() -> None:
+        for f in _staged_files():
+            f.unlink(missing_ok=True)
+
+    # The inner pass republishes the supervisor's output identity (its staged
+    # path); put the real one back so a later timeout quarantines ``-o``.
+    control = os.environ.get(CONTROL_ENV)
+    control_snapshot: str | None = None
+    if control:
+        try:
+            control_snapshot = Path(control).read_text()
+        except OSError:
+            control_snapshot = None
+
+    # The inner pass re-runs route_receipt.configure, replacing the outer
+    # invocation's context; keep it so the outer run still publishes -o's receipt.
+    from . import route_receipt
+
+    outer_invocation = route_receipt._current.get()
+
+    _discard()
+    chain_rc: int | None = None
+    after = before
     try:
         try:
             chain_rc = _main_impl(chain_argv)
-            after = _open_nets()
+            if staged.is_file():
+                after = _open_nets(staged)
         except Exception as exc:
             print(f"  Chained completion pass failed ({exc}); keeping negotiated output")
             chain_rc, after = None, before
-        if chain_rc is None or chain_rc in _CHAIN_COMPLETE_SKIP_EXITS or len(after) >= len(before):
-            shutil.copy2(backup, output)
+        finally:
+            route_receipt._current.set(outer_invocation)
+            if control and control_snapshot is not None:
+                with contextlib.suppress(OSError):
+                    Path(control).write_text(control_snapshot)
+        if (
+            chain_rc not in _CHAIN_COMPLETE_ACCEPT_EXITS
+            or len(after) >= len(before)
+            or not staged.is_file()
+        ):
             if not quiet:
-                print("  Chained completion pass closed no nets; negotiated output restored")
+                print(
+                    "  Chained completion pass closed no nets cleanly "
+                    f"(exit {chain_rc}); negotiated output kept"
+                )
             return result
+        # Sidecars first, the board last, so -o only changes once the rest is in place.
+        # The receipt and constraint sidecars (.kicad_pro/.kicad_dru/.kicad_prl)
+        # are not promoted: the outer run republishes the receipt for -o, and the
+        # constraints are derived from the same rules it already wrote.
+        for f in _staged_files():
+            if (
+                f != staged
+                and f.suffix not in {".kicad_pro", ".kicad_dru", ".kicad_prl"}
+                and not f.name.endswith(".route.json")
+            ):
+                os.replace(
+                    f,
+                    output.with_name(
+                        output.name[: -len(output.suffix)] + f.name[len(stage_stem) :]
+                    ),
+                )
+        os.replace(staged, output)
     finally:
-        backup.unlink(missing_ok=True)
+        # Also runs on RouteDeadlineExpired / KeyboardInterrupt (BaseException):
+        # -o was never written before promotion, so only staging needs removing.
+        _discard()
     if not quiet:
         print(
             f"  Chained completion pass closed {len(before) - len(after)} of "
