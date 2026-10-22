@@ -30,6 +30,7 @@ from kicad_tools.router.diffpair_detection import DetectedPair, DetectionSource
 from kicad_tools.router.diffpair_length_tuning import (
     SKEW_BUMP_CHAMFER_LADDER,
     SKEW_BUMP_CHAMFER_WIDTHS,
+    SKEW_BUMP_FOOT_CHAMFER_MM,
     tune_diff_pair_skew,
 )
 from kicad_tools.router.layers import Layer
@@ -134,9 +135,9 @@ WIDE_ONLY = (SKEW_BUMP_CHAMFER_WIDTHS,)
 
 
 def _ladder_only():
-    """Keep the four-corner ladder's result (Issue #7546 adds a square-foot
-    cascade beside it, which needs less host per loop)."""
-    return patch.object(tuning, "_square_feet_win", lambda *_a: False)
+    """Keep the four-corner ladder's result (Issue #7546 adds an
+    asymmetric-chamfer cascade beside it, which needs less host per loop)."""
+    return patch.object(tuning, "_asymmetric_chamfers_win", lambda *_a: False)
 
 
 def test_partial_bumps_slide_past_the_foreign_vias():
@@ -215,10 +216,10 @@ def test_no_rung_closes_the_pair_reports_the_wide_attempt():
     assert result.reason == wide.reason
 
 
-def test_square_feet_close_the_scarce_pair_with_the_wide_crown():
-    """Issue #7546: square-foot loops spend two chamfers of host instead of
-    four, so when the four-corner 0.55 rung cannot close the pair, 0.55-width
-    crowns on square feet can."""
+def test_short_feet_close_the_scarce_pair_with_the_wide_crown():
+    """Issue #7546: loops with 0.02 mm feet spend two wide chamfers of host
+    instead of four, so when the four-corner 0.55 rung cannot close the pair,
+    0.55-width crowns on 0.02 mm feet can."""
     routes = _routes(12.0, 2.5)
     with patch.object(tuning, "SKEW_BUMP_CHAMFER_LADDER", WIDE_ONLY), _ladder_only():
         _p, _n, wide = tune_diff_pair_skew(
@@ -231,5 +232,12 @@ def test_square_feet_close_the_scarce_pair_with_the_wide_crown():
         )
     assert result.success, result.message
     assert result.skew_after_mm <= 0.1
-    assert _chamfer_widths(p_out) == pytest.approx(SKEW_BUMP_CHAMFER_WIDTHS, abs=1e-6)
+    # Crowns at 0.55 widths, feet at 0.02 mm: never square (operator ruling Q32).
+    diagonals = sorted(
+        abs(s.x2 - s.x1)
+        for s in _bump_copper(p_out)
+        if not math.isclose(s.x1, s.x2, abs_tol=1e-9) and not math.isclose(s.y1, s.y2, abs_tol=1e-9)
+    )
+    assert diagonals[0] == pytest.approx(SKEW_BUMP_FOOT_CHAMFER_MM, abs=1e-6)
+    assert diagonals[-1] == pytest.approx(SKEW_BUMP_CHAMFER_WIDTHS * W, abs=1e-6)
     _assert_gated(p_out)

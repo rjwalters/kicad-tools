@@ -17,10 +17,13 @@ chamfered bump below one trace width of amplitude.
 
 Only the *crown* chamfers (where a leg meets the flat top) let the top couple
 to the partner; a *foot* chamfer (where a leg leaves the host line) just
-leaves the partner copper beside it uncoupled.  So the tuner's plain bumps
-keep square feet (``SKEW_BUMP_FOOT_CHAMFER_WIDTHS``): a loop then costs the
-partner two crown chamfers instead of four chamfers, which is what tunes the
-0.2 mm #7542 pair at skew 0.5 mm under its 0.8 mm limit.
+leaves the partner copper beside it uncoupled.  So when the four-corner
+ladder fails, the tuner retries with asymmetric chamfers: wide crowns on
+short 0.02 mm feet (``SKEW_BUMP_FOOT_CHAMFER_MM``).  Operator ruling Q32
+wants every corner chamfered, so the feet are never square.  A loop then
+costs the partner two crown chamfers plus two short foot chamfers, which is
+what tunes the 0.2 mm #7542 pair at skew 0.5 mm under its 0.8 mm limit
+(0.76 mm in both engines).
 
 The pinned classes run in CI's KiCad 10.0.6 image (locally
 ``KCT_KICAD_DOCKER=1``) and skip elsewhere.
@@ -44,7 +47,7 @@ from kicad_tools.router.diffpair import (
 from kicad_tools.router.diffpair_detection import DetectedPair, DetectionSource
 from kicad_tools.router.diffpair_length_tuning import (
     SKEW_BUMP_CHAMFER_WIDTHS,
-    SKEW_BUMP_FOOT_CHAMFER_WIDTHS,
+    SKEW_BUMP_FOOT_CHAMFER_MM,
     exact_fit_amplitude,
     tune_diff_pair_skew,
 )
@@ -98,7 +101,7 @@ def _bump(
         side="outer",
         outer_normal_hint=(0.0, 1.0),
         corner_chamfer_widths=chamfer,
-        foot_chamfer_widths=foot,
+        foot_chamfer_length_mm=foot,
     )
     result = SerpentineGenerator(config).generate_trombone(host, need)
     assert result.success
@@ -380,8 +383,8 @@ class TestBindingLimitFallsBackToChamferedPlainCopper:
         cli, root = pinned_cli
         p, n, p_out, n_out, result = self._tune(0.127, n_end, limit)
         assert result.reason == "tuned" and result.skew_after_mm <= 0.127
-        # Plain copper (Q32); the capped square-foot bumps read 0.64 / 0.94 mm
-        # in both engines (1.06 / 1.64 mm with four chamfered corners).
+        # Plain copper (Q32); the four-corner ladder closes both pairs, its
+        # capped bumps reading 0.78 / 1.08 mm in both engines.
         assert all(s.tuning_pattern is None for s in n_out.segments)
         diagonal = [
             s for s in n_out.segments if abs(s.x2 - s.x1) > 1e-9 and abs(s.y2 - s.y1) > 1e-9
@@ -395,7 +398,7 @@ class TestBindingLimitFallsBackToChamferedPlainCopper:
     def test_wide_trace_pair_at_skew_2_and_limit_2_1_stays_refused(self, pinned_cli):
         """#7542's 0.2 mm pair, skew 2.0 mm under a 2.1 mm limit: the 2.0 mm
         tail leaves 0.1 mm, and every loop costs the partner two crown
-        chamfers (0.22 mm), so no bump fits (2.22 mm for one loop)."""
+        chamfers plus two foot chamfers (0.26 mm), so no bump fits."""
         cli, root = pinned_cli
         *_, p_out, n_out, result = self._tune(0.2, 128.0, 2.1)
         assert result.inserts_applied == 0
@@ -404,53 +407,96 @@ class TestBindingLimitFallsBackToChamferedPlainCopper:
 
 
 # ---------------------------------------------------------------------------
-# Square feet (Issue #7546): crown chamfers only
+# Asymmetric chamfers (Issue #7546): wide crowns, short (never square) feet
 # ---------------------------------------------------------------------------
 
+FOOT = SKEW_BUMP_FOOT_CHAMFER_MM
 
-class TestSquareFootGeometry:
+
+def _turns_deg(route: Route) -> list[float]:
+    """The direction change (degrees) at every vertex of ``route``'s chain."""
+    segs = route.segments
+    turns = []
+    for a, b in zip(segs, segs[1:], strict=False):
+        assert (a.x2, a.y2) == pytest.approx((b.x1, b.y1), abs=1e-9)
+        da = math.atan2(a.y2 - a.y1, a.x2 - a.x1)
+        db = math.atan2(b.y2 - b.y1, b.x2 - b.x1)
+        turn = abs(math.degrees(db - da)) % 360.0
+        turns.append(min(turn, 360.0 - turn))
+    return turns
+
+
+def _assert_no_square_corner(route: Route) -> None:
+    """Every vertex of a generated bump turns by 45 degrees (or not at all):
+    no 90-degree corner anywhere, feet included (operator ruling Q32)."""
+    turns = _turns_deg(route)
+    assert turns
+    for turn in turns:
+        assert turn == pytest.approx(0.0, abs=1e-6) or turn == pytest.approx(45.0, abs=1e-6), turns
+
+
+class TestAsymmetricChamferGeometry:
+    def test_foot_chamfer_is_0_02_mm(self):
+        assert FOOT == 0.02
+
     @pytest.mark.parametrize("amplitude", [0.2, 0.3, 0.495])
     def test_length_model_matches_generated_copper(self, amplitude):
         config = SerpentineConfig(
-            amplitude=amplitude, corner_chamfer_widths=0.55, foot_chamfer_widths=0.0
+            amplitude=amplitude, corner_chamfer_widths=0.55, foot_chamfer_length_mm=FOOT
         )
         added = config.loop_length_added(0.2, amplitude)
-        assert added == pytest.approx(2 * amplitude - 2 * 0.11 * (2 - math.sqrt(2)))
-        route = _bump(0.2, amplitude, 2 * added - 1e-6, 0.55, 0.0)
+        assert added == pytest.approx(2 * amplitude - 2 * (0.11 + FOOT) * (2 - math.sqrt(2)))
+        route = _bump(0.2, amplitude, 2 * added - 1e-6, 0.55, FOOT)
         copper = sum(math.hypot(s.x2 - s.x1, s.y2 - s.y1) for s in route.segments) - 25.0
         assert copper == pytest.approx(2 * added, abs=1e-9)
         assert config.amplitude_for(0.2, added) == pytest.approx(amplitude)
-        assert config.loop_forward(0.2, amplitude) == pytest.approx(0.8 + 2 * 0.11)
+        assert config.loop_forward(0.2, amplitude) == pytest.approx(0.8 + 2 * (0.11 + FOOT))
 
-    def test_only_the_crowns_are_chamfered(self):
-        """Every diagonal touches the flat top; the feet are square corners."""
-        route = _bump(0.2, 0.4, 1.0, 0.55, 0.0)
+    def test_crowns_are_wide_and_feet_short(self):
+        """Diagonals meeting the flat top advance 0.11 mm (>= W/2); those
+        leaving the host line advance 0.02 mm."""
+        route = _bump(0.2, 0.4, 1.0, 0.55, FOOT)
         y_n = Y_P + 0.2 + GAP
         diagonal = [
             s for s in route.segments if abs(s.x2 - s.x1) > 1e-9 and abs(s.y2 - s.y1) > 1e-9
         ]
-        assert diagonal
+        crowns = [s for s in diagonal if max(s.y1, s.y2) == pytest.approx(y_n + 0.4)]
+        feet = [s for s in diagonal if min(s.y1, s.y2) == pytest.approx(y_n)]
+        assert crowns and feet and len(crowns) + len(feet) == len(diagonal)
         for s in diagonal:
             verify_segment_45(s.x1, s.y1, s.x2, s.y2, context="test")
-            assert abs(s.x2 - s.x1) == pytest.approx(0.11)
-            assert max(s.y1, s.y2) == pytest.approx(y_n + 0.4)  # meets the top
-            assert min(s.y1, s.y2) > y_n + 1e-6  # never the host line
+        assert all(abs(s.x2 - s.x1) == pytest.approx(0.11) for s in crowns)
+        assert all(abs(s.x2 - s.x1) == pytest.approx(FOOT) for s in feet)
+        assert 0.11 >= 0.2 / 2
+
+    @pytest.mark.parametrize("amplitude", [0.1, 0.13, 0.2, 0.4, 0.495])
+    def test_no_generated_corner_is_square(self, amplitude):
+        """Down to amplitudes where crown + foot span the whole leg (one 45
+        degree run), every bump corner is chamfered (operator ruling Q32)."""
+        config = SerpentineConfig(
+            amplitude=amplitude, corner_chamfer_widths=0.55, foot_chamfer_length_mm=FOOT
+        )
+        route = _bump(
+            0.2, amplitude, 3 * config.loop_length_added(0.2, amplitude) - 1e-6, 0.55, FOOT
+        )
+        _assert_no_square_corner(route)
 
     def test_symmetric_default_is_unchanged(self):
-        """``foot_chamfer_widths=None`` keeps all four corners alike (#7564)."""
+        """``foot_chamfer_length_mm=None`` keeps all four corners alike (#7564)."""
         a = SerpentineConfig(amplitude=0.6, corner_chamfer_widths=0.55)
-        b = SerpentineConfig(amplitude=0.6, corner_chamfer_widths=0.55, foot_chamfer_widths=0.55)
+        b = SerpentineConfig(amplitude=0.6, corner_chamfer_widths=0.55, foot_chamfer_length_mm=0.11)
         for amp in (0.15, 0.2, 0.6):
-            assert a.loop_length_added(0.2, amp) == b.loop_length_added(0.2, amp)
+            assert a.loop_length_added(0.2, amp) == pytest.approx(b.loop_length_added(0.2, amp))
             assert a.chamfer_mm(0.2, amp) == pytest.approx(min(0.11, amp / 2))
             assert a.foot_chamfer_mm(0.2, amp) == a.chamfer_mm(0.2, amp)
         assert [(s.x1, s.y1, s.x2, s.y2) for s in _bump(0.2, 0.6, 2.0, 0.55).segments] == [
-            (s.x1, s.y1, s.x2, s.y2) for s in _bump(0.2, 0.6, 2.0, 0.55, 0.55).segments
+            (s.x1, s.y1, s.x2, s.y2) for s in _bump(0.2, 0.6, 2.0, 0.55, 0.11).segments
         ]
 
-    def test_binding_limit_bumps_have_square_feet(self):
+    def test_binding_limit_bumps_have_short_chamfered_feet(self):
         """The four-corner ladder cannot fit this pair under 0.8 mm; the
-        square-foot cascade that follows can (Issue #7546)."""
+        asymmetric-chamfer cascade that follows can (Issue #7546), and every
+        corner of its bump is chamfered, feet included."""
         p = _straight(1, "D_P", Y_P, 130.0)
         n = _straight(2, "D_N", Y_P + 0.45, 129.5)
         _p, n_out, result = tune_diff_pair_skew(
@@ -461,16 +507,15 @@ class TestSquareFootGeometry:
             max_uncoupled_mm=0.8,
         )
         assert result.reason == "tuned"
-        assert SKEW_BUMP_FOOT_CHAMFER_WIDTHS == 0.0
         diagonal = [
             s for s in n_out.segments if abs(s.x2 - s.x1) > 1e-9 and abs(s.y2 - s.y1) > 1e-9
         ]
-        assert diagonal
-        assert all(min(s.y1, s.y2) > Y_P + 0.45 + 1e-6 for s in diagonal)
+        assert {round(abs(s.x2 - s.x1), 6) for s in diagonal} == {FOOT, 0.11}
+        _assert_no_square_corner(n_out)
 
     def test_pair_the_ladder_tunes_keeps_four_chamfered_corners(self):
         """A pair the four-corner ladder closes keeps its bumps (Issue #7546:
-        square feet are only tried after the ladder fails)."""
+        asymmetric chamfers are only tried after the ladder fails)."""
         p = _straight(1, "D_P", Y_P, 120.0)
         n = _straight(2, "D_N", Y_P + 0.45, 119.88)
         _p, n_out, result = tune_diff_pair_skew(
@@ -485,37 +530,35 @@ class TestSquareFootGeometry:
         )
 
 
-class TestSquareFootBumpsAgreeWithPinnedKicadCli:
+class TestAsymmetricChamferBumpsAgreeWithPinnedKicadCli:
     """The crown-chamfer rule measured on pinned kicad-cli 10.0.6.
 
     A 0.2 mm pair, N a 25 mm host with one generated bump, P a straight 25 mm
     run: the partner loses exactly the length of copper beside no parallel N
-    copper, so each loop costs it its two crown chamfers with square feet and
-    four chamfers with chamfered feet."""
+    copper, so each loop costs it its two crown chamfers plus its two foot
+    chamfers."""
 
     @pytest.mark.parametrize(
         ("width", "amplitude", "need"),
         [(0.2, 0.2, 0.25), (0.2, 0.495, 1.6), (0.15, 0.3, 1.0), (0.3, 0.6, 1.5)],
     )
-    def test_square_foot_bump_agrees(self, pinned_cli, width, amplitude, need):
+    def test_asymmetric_bump_agrees(self, pinned_cli, width, amplitude, need):
         cli, root = pinned_cli
         p = _straight(1, "D_P", Y_P, 125.0, width)
-        n = _bump(width, amplitude, need, SKEW_BUMP_CHAMFER_WIDTHS, 0.0)
+        n = _bump(width, amplitude, need, SKEW_BUMP_CHAMFER_WIDTHS, FOOT)
         pcb = _write(root, f"foot_{width}_{amplitude}_{need}", [p, n])
         kicad = _kicad(cli, pcb)
         assert kicad > 0.0
         assert _kct(pcb) == pytest.approx(kicad, abs=1e-3)
 
-    @pytest.mark.parametrize(
-        ("foot", "expected"), [(0.0, 0.22), (0.25, 0.32), (SKEW_BUMP_CHAMFER_WIDTHS, 0.44)]
-    )
+    @pytest.mark.parametrize(("foot", "expected"), [(FOOT, 0.26), (0.05, 0.32), (0.11, 0.44)])
     def test_partner_loses_the_chamfers_beside_it(self, pinned_cli, foot, expected):
-        """One loop, 0.11 mm crowns: P loses 2 x 0.11 mm with square feet, plus
-        both feet's chamfers (2 x 0.05 / 2 x 0.11 mm) when they are chamfered."""
+        """One loop, 0.11 mm crowns: P loses 2 x 0.11 mm plus both feet's
+        chamfers (2 x 0.02 / 0.05 / 0.11 mm)."""
         cli, root = pinned_cli
         p = _straight(1, "D_P", Y_P, 125.0)
         config = SerpentineConfig(
-            amplitude=0.4, corner_chamfer_widths=0.55, foot_chamfer_widths=foot
+            amplitude=0.4, corner_chamfer_widths=0.55, foot_chamfer_length_mm=foot
         )
         n = _bump(0.2, 0.4, config.loop_length_added(0.2, 0.4) - 1e-6, 0.55, foot)
         pcb = _write(root, f"foot_cost_{foot}", [p, n])
@@ -537,7 +580,8 @@ class TestBindingLimitTunesTheWidePairs:
 
     def test_skew_0_5_is_tuned_under_its_0_8_limit(self, pinned_cli):
         """Four chamfered corners read 0.94 mm and the square loop 0.90 mm
-        (main refused the pair); square feet read 0.72 mm in both engines."""
+        (the ladder refuses the pair); 0.11 mm crowns on 0.02 mm feet read
+        0.76 mm in both engines."""
         cli, root = pinned_cli
         *_, p_out, n_out, result = self._tune(129.5, 0.8)
         assert result.reason == "tuned" and result.skew_after_mm <= 0.127
@@ -546,20 +590,23 @@ class TestBindingLimitTunesTheWidePairs:
         kicad = _kicad(cli, pcb)
         assert _kct(pcb) == pytest.approx(kicad, abs=1e-3)
         assert kicad <= 0.8
+        assert kicad == pytest.approx(0.76, abs=1e-3)
+        _assert_no_square_corner(n_out)
 
     def test_skew_0_5_is_tuned_without_kicad(self):
         *_, result = self._tune(129.5, 0.8)
         assert result.reason == "tuned" and result.skew_after_mm <= 0.127
 
     def test_skew_2_0_under_2_5_closes_more_of_the_skew(self, pinned_cli):
-        """Under the 2x-gap excursion cap two square-foot loops add 1.72 mm
-        within the 2.5 mm limit (the third would read 2.66 mm); the
-        four-corner ladder left 1.27 mm of skew at the same 2.44 mm."""
+        """Under the 2x-gap excursion cap the asymmetric-chamfer bump closes
+        0.84 mm of the skew and reads 2.26 mm against the 2.5 mm limit; the
+        four-corner ladder left 1.27 mm of skew at 2.44 mm."""
         cli, root = pinned_cli
         *_, p_out, n_out, result = self._tune(128.0, 2.5)
         assert result.inserts_applied == 1
-        assert result.skew_after_mm == pytest.approx(0.278, abs=1e-3)
+        assert result.skew_after_mm == pytest.approx(1.162, abs=1e-3)
         pcb = _write(root, "wide_128.0_2.5", [p_out, n_out])
         kicad = _kicad(cli, pcb)
         assert _kct(pcb) == pytest.approx(kicad, abs=1e-3)
-        assert kicad <= 2.5
+        assert kicad == pytest.approx(2.26, abs=1e-3)
+        _assert_no_square_corner(n_out)
