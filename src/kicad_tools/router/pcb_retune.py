@@ -692,8 +692,10 @@ def retune_pcb(
                 # Issue #7760: the written board is DRC-checked against the
                 # input below, so the tuner's strict foreign-clearance gate
                 # (which rejects every leg off a host already under the class
-                # clearance) is replaced by that check.
-                foreign_clearance_gate=lambda *_a, **_k: True,
+                # clearance) is replaced by that check.  Issue #7767: foreign
+                # pads are still gated, against the host's existing gap, so a
+                # bump is never laid onto a pad the DRC then refuses.
+                foreign_clearance_host_tolerant=True,
             )
             for (p_name, n_name), res in pair_results.items():
                 tuner_reasons[_target_key("diffpair", f"{p_name}/{n_name}")] = res.reason
