@@ -4724,6 +4724,21 @@ def _tune_match_group_of_pairs(
                 r.reason = r.reason or "exceeded_max_inserts"
 
         if mirror_missed_n_host:
+            # Issue #7805: a pair already past its own skew limit is left for
+            # the pair-skew tuner.  Fixing that skew lengthens the shorter
+            # rail and moves the lane again, so tuning the lane first only
+            # spends the copper the skew fix needs.
+            skew_limit = (pair_skew_limits_mm or {}).get((p_id, n_id))
+            pair_skew_before = abs(member_lengths[p_id] - member_lengths[n_id])
+            if skew_limit is not None and pair_skew_before > skew_limit + 1e-9:
+                mirror_missed_n_host = False
+                for r in (per_pair_result_p, per_pair_result_n):
+                    r.message = (r.message or "") + (
+                        f" Pair fallback skipped: pair skew {pair_skew_before:.4f}mm "
+                        f"exceeds its {skew_limit:.4f}mm limit."
+                    )
+
+        if mirror_missed_n_host:
             # Issue #7799: coupled rails from the joint search break at
             # different points, so the mirror has no N-side host.  Only this
             # lane leaves the mirror path: hand it to the fallback cascade

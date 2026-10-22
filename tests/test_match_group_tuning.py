@@ -2431,16 +2431,10 @@ class TestPhase2FUnequalHostSpanRejection:
         n_result_route, n_result = results[31]
 
         # The malformed mirror candidate must be rejected -- never silently
-        # committed.  Issue #7799: the lane may then be tuned by the pair
-        # fallbacks instead, but never by splicing the mismatched host.
-        if p_result.reason == "no_suitable_segment":
-            assert n_result.reason == "no_suitable_segment"
-            # Drift-prevention: rejected candidate means the routes are
-            # returned byte-for-byte unchanged.
-            assert p_result_route is p_route
-            assert n_result_route is n_route
-        else:
-            assert p_result.reason == n_result.reason == "tuned"
+        # committed.  Issue #7799: with no pair skew limits given, the lane is
+        # then tuned by the pair fallbacks instead, never by splicing the
+        # mismatched host.
+        assert p_result.reason == n_result.reason == "tuned"
 
         # Independent verification (per issue #4984): whatever the tuner
         # decided, the resulting routes must still be geometrically
@@ -2449,13 +2443,13 @@ class TestPhase2FUnequalHostSpanRejection:
         # copper and asymmetric added length).
         self._assert_contiguous(p_result_route, label="P")
         self._assert_contiguous(n_result_route, label="N")
-        if p_result.reason == "no_suitable_segment":
-            assert LengthTracker.calculate_route_length(p_result_route) == pytest.approx(
-                original_p_length
-            )
-            assert LengthTracker.calculate_route_length(n_result_route) == pytest.approx(
-                original_n_length
-            )
+        # The pair-skew invariant: the fallbacks never widen the pair's skew.
+        skew_before = abs(original_p_length - original_n_length)
+        skew_after = abs(
+            LengthTracker.calculate_route_length(p_result_route)
+            - LengthTracker.calculate_route_length(n_result_route)
+        )
+        assert skew_after <= skew_before + 1e-3
 
 
 # =============================================================================

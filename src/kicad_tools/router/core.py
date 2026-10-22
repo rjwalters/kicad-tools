@@ -21499,8 +21499,10 @@ class Autorouter:
             # Issue #6675: the pair-skew invariant needs each pair's own
             # checker limit, so a pair the diff-pair tuner (#6664) left inside
             # it stays inside it while the group tuner lengthens the lane.
+            # Issue #7805: the length_critical path needs them too, to keep
+            # pairs past their limit out of the mirror-miss fallback.
             pair_skew_limits_mm: dict[tuple[int, int], float] | None = None
-            if engage == "checker_limit" and group.pair_ids:
+            if group.pair_ids:
                 from kicad_tools.validate.diffpair_engagement import (
                     resolve_pair_thresholds,
                 )
