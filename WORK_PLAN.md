@@ -29,21 +29,25 @@ _None._
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-_None._
+- **#5333**: Board07 coupled pre-pass exhausts all seven pair searches despite valid corridor guides
 
 ## In Progress
 
 Issues currently being built (`loom:building`).
 
-- **#7795**: CI never exercises board 07's --differential-pairs path, so green board 07 jobs prove nothing for coupled-routing changes
-- **#7799**: kct route --length-match-groups never tries pair fallbacks on coupled rails (no_suitable_segment)
-- **#7808**: Board07 DQS: measure the merged via-hairpin collapse and finish order-independent DQS skew (split from #7782)
+- **#4410**: board-05: generator must produce a manufacturable BLDC board unattended (81% route, 7 ISENSE/PWM open, 2 real shorts)
+- **#6446**: [Epic #6441] Phase 4: budget-driven hybrid fallback — longest coupled trunk plus single-ended terminal legs
+- **#6730**: boards 03/07: regenerate routed artifacts under kicad-cli-exact length (USB_D 1.246 mm, ADDR_BUS 1.0998 mm skew)
+- **#7649**: router: source-side diff-pair skew avoidance; retire the Q35 2× interim bump excursion
+- **#7687**: Parametric 3D model generation for standard-package gaps (CadQuery, optional extra)
+- **#7716**: router: Python-fallback A* inside relief rescue is load-dependent on board 07 (1,024 expansions in ~420 s)
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-_None._
+- **#7824**: test(board03): pin USB_D skew inside the 0.5 mm stretch by both checkers (#6730)
+- **#7826**: docs(research): record the #7688 embedded-checksum spike outcome (blocked)
 
 ## Approved (Awaiting Merge)
 
@@ -69,16 +73,8 @@ Issues carrying `loom:curated`.
 - **#7548**: Board 06 synthetic fixture: 9 diff pairs over max skew on the seed-42 re-route (identity-allowed in check_diffpair_coverage.py) *(curated)*
 - **#7619**: Board 07 fixture: DQS and TMDS_D1 diff pairs routed with unequal via counts (N leg +2 vias), causing multi-mm skew *(curated)*
 - **#7649**: router: source-side diff-pair skew avoidance; retire the Q35 2× interim bump excursion *(curated)*
-- **#7650**: board 03: recover USB_D common-run and MCU-launch margin given up to route VBUS U2.5 (#7475) *(curated)*
 - **#7690**: Epic: full 3D model coverage, from demo boards to the JLCPCB catalog, reproducible on the pinned toolchain *(curated)*
 - **#7716**: router: Python-fallback A* inside relief rescue is load-dependent on board 07 (1,024 expansions in ~420 s) *(curated)*
-- **#7767**: Board07 MIPI_DAT1 coupled pair keeps 0.31 mm skew: pose search fails and inline tuner gates on 0.5 mm max_length_delta *(curated)*
-- **#7769**: Board07 DQS polarity-swap pair: no pose candidate, coupled skew 2.0 mm untunable *(curated)*
-- **#7790**: Board 07 coupled geometry: DQS pair retune no-op and MIPI/TMDS residual skew after retune_pcb *(curated)*
-- **#7795**: CI never exercises board 07's --differential-pairs path, so green board 07 jobs prove nothing for coupled-routing changes *(curated)*
-- **#7799**: kct route --length-match-groups never tries pair fallbacks on coupled rails (no_suitable_segment) *(curated)*
-- **#7805**: Board-07 skew/impedance regression from mirror-miss pair fallback (PR #7802 review) *(curated)*
-- **#7808**: Board07 DQS: measure the merged via-hairpin collapse and finish order-independent DQS skew (split from #7782) *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -106,11 +102,11 @@ Issues carrying `loom:curated`.
 | Operator merge-risk holds | 0 |
 | Very important | 0 |
 | Important | 1 |
-| Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 3 |
-| PRs awaiting review | 0 |
+| Ready (`loom:issue`) | 1 |
+| In Progress (`loom:building`) | 6 |
+| PRs awaiting review | 2 |
 | Approved PRs awaiting merge | 0 |
-| Curated | 24 |
+| Curated | 16 |
 | Architect / Hermit proposals | 7 |
 | Active epics | 6 |
 <!-- guide:plan-body:end -->
