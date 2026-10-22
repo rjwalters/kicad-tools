@@ -5787,13 +5787,12 @@ class DiffPairRouter:
         of hairpin edits kept.
         """
         from .drc_nudge import _router_pad_bbox, _via_drill_overlaps_bbox
+        from .via_clearance import drill_hole_to_hole_clear
         from .via_hairpin import (
             collapse_via_hairpins,
             merge_junction_runs,
             shortcut_via_hairpins,
         )
-
-        from .via_clearance import drill_hole_to_hole_clear
 
         grid = self.autorouter.grid
         pads = getattr(self.autorouter, "pads", None) or {}
