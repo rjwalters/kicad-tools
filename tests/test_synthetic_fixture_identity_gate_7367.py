@@ -357,9 +357,11 @@ class TestBoard07CheckBoard:
         gate = load("check_matchgroup_coverage")
         found = self.measured(gate)
         listed = [v for v in found if v["rule_id"] == "diffpair_length_skew"]
-        # Fix every listed skew pair but one, and add one unlisted pair: the
-        # total drops well below the old 8, the gate still fails.
-        for v in listed[1:]:
+        # Fix every listed skew pair (leaving its allowance stale) and add one
+        # unlisted pair: the total drops well below the old 8, the gate still
+        # fails. Independent of how many skew entries remain listed.
+        assert listed
+        for v in listed:
             found.remove(v)
         found.append(violation("diffpair_length_skew", "NEW_N/NEW_P"))
         gate, board = _stub_matchgroup(monkeypatch, tmp_path, found, self.groups(gate))

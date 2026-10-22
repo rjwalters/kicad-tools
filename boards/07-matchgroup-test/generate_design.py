@@ -1791,13 +1791,14 @@ def copy_project_sidecars(source_pcb: Path, frame_pcb: Path) -> list[Path]:
 # (0.730 / 1.021 / 4.060 / 4.854 mm against 0.05-0.075 mm).  Their halves run
 # loosely coupled, so the group tuner finds no span-matched host either
 # (``no_suitable_segment``).  The audited single-sided tuner needs neither:
-# it lengthens the shorter half alone.  The other skewed pairs (DQS, TMDS_D1)
+# it lengthens the shorter half alone.  The other skewed pairs (DQS, TMDS_D0)
 # are not listed -- they stay with their own trackers.
 SKEW_RETUNE_PAIRS: tuple[tuple[str, str], ...] = (
     ("TMDS_D2_P", "TMDS_D2_N"),
     ("MIPI_DAT1_P", "MIPI_DAT1_N"),
     ("MIPI_DAT0_P", "MIPI_DAT0_N"),
     ("MIPI_CLK_P", "MIPI_CLK_N"),
+    ("TMDS_D1_P", "TMDS_D1_N"),  # Issue #7550
 )
 
 
