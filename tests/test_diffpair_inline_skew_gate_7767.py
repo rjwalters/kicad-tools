@@ -40,3 +40,15 @@ def test_looser_checker_limit_keeps_router_default():
 
 def test_no_class_uses_generic_default_not_looser_than_router():
     assert _tolerance({}, _pair(0.1)) == 0.1
+
+
+def test_route_gate_enters_length_match_above_the_enforced_limit(monkeypatch, capsys):
+    """Through ``route_differential_pair_coupled``: a delta under ``max_length_delta``
+    but above the enforced skew limit must reach the length-match block."""
+    from tests.test_coupled_candidate_selection import _run, _tight
+
+    p, n = _tight()
+    n.segments[-1].x2 += 0.2  # N is 0.2 mm longer than P
+    monkeypatch.setattr(DiffPairRouter, "_checker_skew_limit_mm", lambda self, pair: 0.05)
+    *_, out = _run(monkeypatch, capsys, (p, n), None)
+    assert "Length mismatch" in out

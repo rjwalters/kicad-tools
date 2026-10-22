@@ -1813,9 +1813,9 @@ SKEW_RETUNE_PAIRS: tuple[tuple[str, str], ...] = (
 # (centreline / per-leg meanders) that the single-ended pass of ``kct route``
 # does not use.  The call is after the pair-skew retune, so MIPI's reference
 # lane (the CLK pair, which that retune lengthens) is final when it is matched.
-# ``HDMI_TMDS_LANES`` is not listed: its halves have too few usable hosts for
-# it (tracked in #7550).
-RETUNE_GROUPS: tuple[str, ...] = ("DDR_DATA_BYTE_0", "MIPI_CSI_LANES")
+# Issue #7550: ``HDMI_TMDS_LANES`` goes through the same fallbacks (7.723 ->
+# 0.001 mm against 0.075 mm).
+RETUNE_GROUPS: tuple[str, ...] = ("DDR_DATA_BYTE_0", "MIPI_CSI_LANES", "HDMI_TMDS_LANES")
 
 
 def retune_pair_skew(routed_path: Path, sidecar_path: Path) -> list[str]:
