@@ -412,7 +412,7 @@ OUT=$(run_precheck)
 assert_contains "$OUT" "BLOCKED=true PRIOR=true" "a [bot] citing clear does not close the condition"
 # Closing the condition is not itself a release of the merge-risk hold: at the
 # held head the ordinary rows apply (still held); a new head then releases it.
-FIX_COMMENTS="[$HOLD_COMMENT, $COND, $(cond_comment "-met" "2026-10-12T09:00:00Z" "predecessor merged" "turian")]"
+FIX_COMMENTS="[$HOLD_COMMENT, $COND, $(cond_comment "-met" "2026-10-12T09:00:00Z" "predecessor merged" "example-reviewer")]"
 OUT=$(run_precheck)
 assert_contains "$OUT" "BLOCKED=true PRIOR=true MANUAL=false REASON=" "a person's -met closes the condition; the merge-risk hold still stands at its head"
 assert_lacks "$OUT" "POST" "no condition notice once it is closed"
