@@ -686,7 +686,15 @@ def retune_pcb(
                 )
         if selection.pairs:
             pair_results = router.apply_diffpair_length_tuning(
-                selection.pairs, verbose=False, engage="checker_skew_limit"
+                selection.pairs,
+                verbose=False,
+                engage="checker_skew_limit",
+                # Issue #7612: a bump may inherit its host segment's existing
+                # near-miss (never a closer approach elsewhere on the net).
+                # Temporary: retune_pcb runs no DRC after writing, so this gate
+                # is its only clearance guard.  Remove the opt-in once it does
+                # (Issue #7760).
+                allow_inherited_near_miss=True,
             )
             for (p_name, n_name), res in pair_results.items():
                 tuner_reasons[_target_key("diffpair", f"{p_name}/{n_name}")] = res.reason

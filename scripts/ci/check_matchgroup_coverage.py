@@ -153,9 +153,10 @@ DEFAULT_ALLOWLIST = Path(".github/routed-drc-tolerance.yml")
 # canonical rule_id string + per-rule counter increment (Issue #2702).
 MATCHGROUP_RULE_IDS: tuple[str, ...] = ("match_group_length_skew",)
 
-#: Open tracker for board 07's seed-42 skew residuals (Issue #7367): the 6
-#: diff pairs and 2 match groups below.  The groups used to cite #3916 / #7339
-#: (closed) and #5798 (pending close).
+#: Open tracker for board 07's seed-42 skew residuals (Issue #7367): the 2
+#: diff pairs (DQS, TMDS_D1) and 2 match groups below.  Issue #7612 tuned the
+#: other four pairs in the recipe (``retune_pair_skew``), so they left it.
+#: The groups used to cite #3916 / #7339 (closed) and #5798 (pending close).
 MATCHGROUP_SKEW_TRACKER = 7550
 
 # Repo-relative key of board 07's synthetic regression fixture.  Its re-route
@@ -606,6 +607,9 @@ def count_errors_via_kct_check(
 # fraction 86.7 % -> 84.6 %; TMDS_D1 48.372 -> 49.379 mm), so the
 # uncoupled-length gate (operator Q12) declines them and the 4 entries stay.
 # Deleting these 4 entries is the whole of #7349.
+# Issue #7612: the MIPI_DAT1 impedance entries stay.  The author's re-route
+# tightened MIPI_DAT1 2/2 runs, but CI's re-route tightens 1/2
+# (``no_suitable_segment`` on the second), so the findings persist there.
 # Issue #7557: once TMDS_D0_N routes (U4's TMDS balls on its J2-facing
 # column) the TMDS_D0 pair's F.Cu run reads 125.2 ohm too -- the same
 # defect, so it joins the #7349 entries (6 in total).
@@ -614,14 +618,16 @@ def count_errors_via_kct_check(
 # count.  Until #7367 the gate let every skew/continuity finding through by
 # rule and bounded them only with the ``.github/routed-drc-tolerance.yml``
 # total of 8, so a new pair could fail in place of a fixed one.  The pairs
-# below are the ones the seed-42 re-route measures over ``max_skew_mm``
+# below are the ones the seed-42 re-route still measures over ``max_skew_mm``
 # (``e1c361478``, 2026-10-20, identical to ``c2c1beb02``); each cites #7550.
+# MIPI_CLK, MIPI_DAT0, MIPI_DAT1 and TMDS_D2 skew entries were removed by #7612.
 #
 # Allowed by identity, not by count (#7359, #7270 Q3 ruling): only these
 # identities may carry the listed errors, a listed identity that stops firing
 # on the full re-route is stale and fails the gate, and an allowed finding
 # does not count against the (now strict 0) routed-DRC total.
 MATCHGROUP_FIXTURE_ALLOWED_FINDINGS: Allowance = {
+    # Restored: CI's re-route tightens MIPI_DAT1 only 1/2 runs (#7612 review).
     ("impedance", "MIPI_DAT1_N"): 7349,
     ("impedance", "MIPI_DAT1_P"): 7349,
     ("impedance", "TMDS_D1_N"): 7349,
@@ -635,12 +641,8 @@ MATCHGROUP_FIXTURE_ALLOWED_FINDINGS: Allowance = {
     # (newly routed) carries the via imbalance instead (P 2, N 0) and TMDS_D1
     # no longer does (its skew fell 4.968 -> 1.584 mm, now plain #7550).
     ("diffpair_length_skew", "DQS_N/DQS_P"): 7619,  # 5.562 / 0.050
-    ("diffpair_length_skew", "MIPI_CLK_N/MIPI_CLK_P"): MATCHGROUP_SKEW_TRACKER,  # 4.854 / 0.050
-    ("diffpair_length_skew", "MIPI_DAT0_N/MIPI_DAT0_P"): MATCHGROUP_SKEW_TRACKER,  # 4.060 / 0.050
-    ("diffpair_length_skew", "MIPI_DAT1_N/MIPI_DAT1_P"): MATCHGROUP_SKEW_TRACKER,  # 1.021 / 0.050
     ("diffpair_length_skew", "TMDS_D0_N/TMDS_D0_P"): 7619,  # 4.149 / 0.075
     ("diffpair_length_skew", "TMDS_D1_N/TMDS_D1_P"): MATCHGROUP_SKEW_TRACKER,  # 1.584 / 0.075
-    ("diffpair_length_skew", "TMDS_D2_N/TMDS_D2_P"): MATCHGROUP_SKEW_TRACKER,  # 0.833 / 0.075
 }
 
 #: Every board key that carries an identity allowance (Issue #7367).  A key

@@ -20568,6 +20568,7 @@ class Autorouter:
         verbose: bool = True,
         *,
         engage: str = "length_critical",
+        allow_inherited_near_miss: bool = False,
         quantized_lengths: bool = False,
     ) -> dict[tuple[str, str], DiffPairTuneResult]:
         """Apply per-pair length-match (skew) tuning to detected diff pairs.
@@ -20598,6 +20599,12 @@ class Autorouter:
                 against that same ``skew_mm``, regardless of
                 ``length_critical``.  A pair whose limit resolves to a
                 warning is declined with ``reason="skew_limit_not_enforced"``.
+            allow_inherited_near_miss: Only meaningful with
+                ``engage="checker_skew_limit"``.  Passed to the foreign-clearance
+                gate (Issue #7612): a bump is then rejected only when it sits
+                nearer a foreign pad, via or track than the pair's own route
+                already does.  Off by default -- the strict gate keeps
+                admitting nothing under the class clearance.
             quantized_lengths: Issue #7548.  Measure ``"checker_skew_limit"``
                 skew on the copper the 45-degree quantization pass will
                 leave (:func:`~.quantize.quantize_pcb_file` replaces each
@@ -20728,6 +20735,7 @@ class Autorouter:
                             dp.pair.negative.net_id: dp.pair.positive.net_id,
                         },
                         intra_pair_clearance_mm=intra_pair_clearance_mm,
+                        allow_inherited_near_miss=allow_inherited_near_miss,
                     )
                     if engage == "checker_skew_limit"
                     else None
@@ -20833,6 +20841,7 @@ class Autorouter:
         *,
         partner_of: dict[int, int],
         intra_pair_clearance_mm: float,
+        allow_inherited_near_miss: bool = False,
     ) -> Callable[[list[Any], int], bool]:
         """Foreign-copper gate for a skew-tuning bump (Issue #6664).
 
@@ -20847,6 +20856,14 @@ class Autorouter:
         segment on the same layer.  The pair's own partner is held to the
         intra-pair gap instead (the coupled pair legitimately runs closer
         than the class clearance), matching the built-in self-check.
+
+        With ``allow_inherited_near_miss`` (Issue #7612) a bump is rejected
+        only when it is nearer the object than the pair's own route already
+        is; off by default, because a shared recipe such as board 06's can
+        otherwise be admitted a bump that breaks a pour.  The inherited gap is
+        the host segment's own (the segments the bump replaces), never the
+        net's closest approach elsewhere.  The only opt-in, ``kct
+        retune-lengths``, is temporary (Issue #7760).
         """
         from kicad_tools.core.geometry import point_to_segment_distance, segment_clearance
 
@@ -20857,7 +20874,36 @@ class Autorouter:
         pitches = self.component_pitches
         class_clearance = self._net_class_clearance_mm
 
-        def ok(new_segments: list[Any], net: int) -> bool:
+        def no_closer(
+            seg: Any,
+            gap: float,
+            measure: Callable[[Any], float],
+            host_segments: list[Any],
+        ) -> bool:
+            """The bump leaves ``seg`` no nearer a foreign object than its host was.
+
+            Issue #7612: a trombone hangs off its host segment, so the leg that
+            joins it inherits whatever gap the host already had to a neighbour
+            (a lane routed 0.156 mm off its sibling against a 0.2 mm limit).
+            That near-miss is not the bump's doing and the bump cannot cure it;
+            only a bump that makes it worse is rejected.  ``measure`` returns
+            the gap from one segment to the same object, and the floor is taken
+            over ``host_segments`` alone -- the segments the bump replaces -- not
+            the whole net, so a closer approach elsewhere on the net licenses
+            nothing.  Without a host there is no inherited gap: strict.
+            """
+            if not allow_inherited_near_miss:
+                return False
+            floor = min(
+                (measure(o) for o in host_segments if o.layer == seg.layer),
+                default=None,
+            )
+            if floor is None:
+                return False
+            return gap + 1e-9 >= floor
+
+        def ok(new_segments: list[Any], net: int, host_segments: list[Any] | None = None) -> bool:
+            hosts = list(host_segments or [])
             own = max(base, class_clearance(net))
             partner = partner_of.get(net)
             for seg in new_segments:
@@ -20889,7 +20935,13 @@ class Autorouter:
                         )
                     )
                     gap = pad_segment_edge_clearance(pad, seg.x1, seg.y1, seg.x2, seg.y2, half)
-                    if gap + 1e-9 < required:
+
+                    def pad_gap(o: Any, pad: Any = pad) -> float:
+                        return float(
+                            pad_segment_edge_clearance(pad, o.x1, o.y1, o.x2, o.y2, o.width / 2)
+                        )
+
+                    if gap + 1e-9 < required and not no_closer(seg, gap, pad_gap, hosts):
                         return False
                 for other_net, route in routes_by_net.items():
                     if other_net == net:
@@ -20904,7 +20956,17 @@ class Autorouter:
                         dist = point_to_segment_distance(
                             via.x, via.y, seg.x1, seg.y1, seg.x2, seg.y2
                         )
-                        if dist - half - radius + 1e-9 < required:
+
+                        def via_gap(o: Any, via: Any = via, radius: float = radius) -> float:
+                            return float(
+                                point_to_segment_distance(via.x, via.y, o.x1, o.y1, o.x2, o.y2)
+                                - o.width / 2
+                                - radius
+                            )
+
+                        if dist - half - radius + 1e-9 < required and not no_closer(
+                            seg, dist - half - radius, via_gap, hosts
+                        ):
                             return False
                     for other in route.segments:
                         if other.layer != seg.layer:
@@ -20929,7 +20991,24 @@ class Autorouter:
                             other.y2,
                             other.width,
                         )
-                        if gap + 1e-9 < required:
+
+                        def seg_gap(o: Any, other: Any = other) -> float:
+                            return float(
+                                segment_clearance(
+                                    o.x1,
+                                    o.y1,
+                                    o.x2,
+                                    o.y2,
+                                    o.width,
+                                    other.x1,
+                                    other.y1,
+                                    other.x2,
+                                    other.y2,
+                                    other.width,
+                                )
+                            )
+
+                        if gap + 1e-9 < required and not no_closer(seg, gap, seg_gap, hosts):
                             return False
             return True
 
