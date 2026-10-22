@@ -10,6 +10,11 @@
 # 0.119 mm vs 0.050 mm).  The long-term targets are 0 opens and 0 skew
 # violations (#5333/#7619/#7769); the gate is the measured value.
 # `null` would mean "not measured": the checker reports it and does not gate.
+#
+# To refresh: read the numbers from the latest run's job summary and commit the
+# lower values (skew violation text, in measured mm, is printed there too).
+# This is not a per-PR check: the regen takes ~27 min (#6738), so the job runs
+# on schedule, main push and workflow_dispatch only.
 baseline:
   copper_safety: 0
   opens: 0
