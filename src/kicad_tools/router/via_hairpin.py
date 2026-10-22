@@ -213,6 +213,217 @@ def _branches_inside(
     return False
 
 
+_OCTILINEAR = tuple((math.cos(k * math.pi / 4), math.sin(k * math.pi / 4)) for k in range(8))
+
+
+def _layer_path(
+    segments: list[Segment],
+    layer: object,
+    start: tuple[float, float],
+    first: list[Segment],
+    max_arc: float,
+) -> list[tuple[Segment, tuple[float, float], tuple[float, float]]]:
+    """Unbranched same-layer path continuing past ``first`` (any direction).
+
+    Returns ``(segment, near_end, far_end)`` triples, starting with the
+    ``first`` chain, and stops at a branch, a dead end or ``max_arc`` mm.
+    """
+    path: list[tuple[Segment, tuple[float, float], tuple[float, float]]] = []
+    used: set[int] = set()
+    cur = start
+    arc = 0.0
+    for seg in first:
+        far = _other_end(seg, cur)
+        assert far is not None
+        path.append((seg, cur, far))
+        used.add(id(seg))
+        arc += math.hypot(far[0] - cur[0], far[1] - cur[1])
+        cur = far
+    while arc <= max_arc + _TOL:
+        touching = [
+            s
+            for s in segments
+            if s.layer == layer and id(s) not in used and _other_end(s, cur) is not None
+        ]
+        if len(touching) != 1 or touching[0].tuning_pattern is not None:
+            break
+        seg = touching[0]
+        far = _other_end(seg, cur)
+        assert far is not None
+        path.append((seg, cur, far))
+        used.add(id(seg))
+        arc += math.hypot(far[0] - cur[0], far[1] - cur[1])
+        cur = far
+    return path
+
+
+def _ray_hit(
+    origin: tuple[float, float],
+    d: tuple[float, float],
+    p: tuple[float, float],
+    q: tuple[float, float],
+) -> float | None:
+    """Parameter ``s`` in [0, 1] where the ray ``origin + t*d`` (t > 0) meets ``p..q``."""
+    ex, ey = q[0] - p[0], q[1] - p[1]
+    den = d[0] * ey - d[1] * ex
+    if abs(den) <= 1e-12:
+        return None
+    wx, wy = p[0] - origin[0], p[1] - origin[1]
+    t = (wx * ey - wy * ex) / den
+    s = (wx * d[1] - wy * d[0]) / den
+    if t <= _TOL or s < -1e-9 or s > 1.0 + 1e-9:
+        return None
+    return min(max(s, 0.0), 1.0)
+
+
+def _segments_cross(a: Segment, b: Segment) -> bool:
+    """True when the two segments share a point other than a common end."""
+    (p, q), (r, t) = _ends(a), _ends(b)
+
+    def orient(o, x, y):
+        return (x[0] - o[0]) * (y[1] - o[1]) - (x[1] - o[1]) * (y[0] - o[0])
+
+    shared = [e for e in (r, t) if _near(e, p) or _near(e, q)]
+    if shared:
+        return False
+    d1, d2 = orient(p, q, r), orient(p, q, t)
+    d3, d4 = orient(r, t, p), orient(r, t, q)
+    eps = 1e-9
+    if ((d1 > eps and d2 < -eps) or (d1 < -eps and d2 > eps)) and (
+        (d3 > eps and d4 < -eps) or (d3 < -eps and d4 > eps)
+    ):
+        return True
+
+    def on(o, x, y):
+        return (
+            abs(orient(o, x, y)) <= 1e-7
+            and min(o[0], x[0]) - _TOL <= y[0] <= max(o[0], x[0]) + _TOL
+            and min(o[1], x[1]) - _TOL <= y[1] <= max(o[1], x[1]) + _TOL
+        )
+
+    return on(p, q, r) or on(p, q, t) or on(r, t, p) or on(r, t, q)
+
+
+def shortcut_via_hairpins(
+    route: Route,
+    seg_ok: Callable[[Segment], bool],
+    anchors: list[tuple[float, float]] | None = None,
+) -> int:
+    """Drop the doubled copper of a hairpin whose via cannot move (Issue #7808).
+
+    Where :func:`collapse_via_hairpins` finds no legal via site, the layer
+    whose leg turns first still runs back over the other layer's cells from
+    the via to its turn.  This replaces that doubled stretch -- and up to the
+    same length again of the path past the turn -- with one octilinear
+    segment straight from the via, so the via keeps its site and the copper
+    no longer doubles back.  The longest shortcut ``seg_ok`` accepts wins.
+    ``anchors`` are points (the net's pad centres) the removed copper must
+    not pass through.  Returns the number of hairpins shortcut.  ``route``
+    is mutated in place.
+    """
+    anchors = anchors or []
+    done = 0
+    for via in list(route.vias):
+        if via.in_pad or via.is_micro or via.span_type is not None:
+            continue
+        at = (via.x, via.y)
+        layers = {s.layer for s in route.segments if any(_near(p, at) for p in _ends(s))}
+        if len(layers) != 2:
+            continue
+        la, lb = sorted(layers, key=lambda layer: layer.value)
+        for a_layer, b_layer in ((la, lb), (lb, la)):
+            walked_a = _walk(route.segments, a_layer, at, None)
+            if walked_a is None:
+                continue
+            chain_a, u = walked_a
+            walked_b = _walk(route.segments, b_layer, at, u)
+            if walked_b is None:
+                continue
+            chain_b, _ = walked_b
+            if any(s.tuning_pattern is not None for s in chain_a + chain_b):
+                continue
+            len_a = _cumulative(at, chain_a)[-1]
+            len_b = _cumulative(at, chain_b)[-1]
+            # Reshape the layer whose leg turns first (the shorter one).
+            if len_b > len_a + _TOL:
+                continue
+            overlap = len_b
+            path = _layer_path(route.segments, b_layer, at, chain_b, 2.0 * overlap)
+            n_hair = len(chain_b)
+            if len(path) <= n_hair:
+                continue
+            other = [s for s in route.segments if not any(s is e[0] for e in path)]
+            candidates: list[tuple[float, int, float, tuple[float, float]]] = []
+            arc = overlap
+            for idx in range(n_hair, len(path)):
+                _seg, p, q = path[idx]
+                seg_len = math.hypot(q[0] - p[0], q[1] - p[1])
+                hits = {1.0}
+                for d in _OCTILINEAR:
+                    hit = _ray_hit(at, d, p, q)
+                    if hit is not None:
+                        hits.add(round(hit, 9))
+                for frac in hits:
+                    point = (p[0] + (q[0] - p[0]) * frac, p[1] + (q[1] - p[1]) * frac)
+                    along = arc + seg_len * frac
+                    if along > 2.0 * overlap + _TOL:
+                        continue
+                    dx, dy = point[0] - at[0], point[1] - at[1]
+                    dist = math.hypot(dx, dy)
+                    if dist <= _TOL or dist >= along - _TOL:
+                        continue
+                    # Octilinear, and not back along the doubled leg.
+                    if not any(
+                        abs(dx / dist - d[0]) <= 1e-6 and abs(dy / dist - d[1]) <= 1e-6
+                        for d in _OCTILINEAR
+                    ):
+                        continue
+                    if abs(dx / dist - u[0]) <= 1e-6 and abs(dy / dist - u[1]) <= 1e-6:
+                        continue
+                    candidates.append((along, idx, frac, point))
+                arc += seg_len
+            for _along, idx, frac, point in sorted(candidates, key=lambda c: -c[0]):
+                removed = [e[0] for e in path[:idx]]
+                if frac >= 1.0 - 1e-9:
+                    removed.append(path[idx][0])
+                removed_ids = {id(s) for s in removed}
+                # Removed copper must not carry a branch, a via or a pad, and
+                # the new end must not land on other copper's end (that is
+                # the multi-end junction this pass exists to remove).
+                fixed = [(v.x, v.y) for v in route.vias if v is not via] + list(anchors)
+                same_layer = [pt for s in other if s.layer == b_layer for pt in _ends(s)]
+                any_layer = [pt for s in other for pt in _ends(s)]
+                inner = [e[2] for e in path[:idx]]
+                if any(_near(k, pt) for k in fixed + same_layer for pt in inner):
+                    continue
+                if any(_near(k, point) for k in fixed + any_layer):
+                    continue
+                first = path[0][0]
+                new = replace(first, x1=at[0], y1=at[1], x2=point[0], y2=point[1])
+                survivors = [s for s in route.segments if id(s) not in removed_ids]
+                if any(
+                    s.layer == b_layer and s is not path[idx][0] and _segments_cross(new, s)
+                    for s in survivors
+                ):
+                    continue
+                if not seg_ok(new):
+                    continue
+                if frac < 1.0 - 1e-9:
+                    seg = path[idx][0]
+                    near = path[idx][1]
+                    if _near((seg.x1, seg.y1), near):
+                        seg.x1, seg.y1 = point
+                    else:
+                        seg.x2, seg.y2 = point
+                route.segments[:] = survivors + [new]
+                done += 1
+                break
+            else:
+                continue
+            break
+    return done
+
+
 def merge_junction_runs(route: Route) -> int:
     """Join collinear same-layer segments that meet at a multi-layer junction.
 
