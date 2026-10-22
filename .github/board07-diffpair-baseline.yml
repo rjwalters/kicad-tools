@@ -4,11 +4,13 @@
 # Ratchet only: a number may go down, never up (the job fails if this file's
 # last change on main raised one, or turned a number back into null).
 #
-# `null` = not measured yet: the checker reports the value and does not gate.
-# The first scheduled run prints the measured numbers; commit them here (the
-# long-term targets are 0 opens and 0 skew violations, #5333/#7619/#7769, but
-# the gate is the measured value, not the target).
+# Measured on the pinned KiCad image by the `board-07-diffpair-ratchet` job,
+# workflow_dispatch run 39813315402 on head 081f26d4 (seed 42,
+# PYTHONHASHSEED=42): copper_safety 0, opens 0, skew_out_of_range 1 (DQS_P/DQS_N
+# 0.119 mm vs 0.050 mm).  The long-term targets are 0 opens and 0 skew
+# violations (#5333/#7619/#7769); the gate is the measured value.
+# `null` would mean "not measured": the checker reports it and does not gate.
 baseline:
-  copper_safety: null
-  opens: null
-  skew_out_of_range: null
+  copper_safety: 0
+  opens: 0
+  skew_out_of_range: 1
