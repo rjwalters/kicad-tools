@@ -335,7 +335,7 @@ classification_is_transient() {
 # `loom_model_class_marker` -- how NARROW a `.bad_tokens` mark may be (#8058) --
 # used to live here. It is now `loom-daemon retry-classify model-class`
 # (loom_daemon::retry_classify::model_class_marker), ported out of shell by
-# #8138 under epic #7810's shell budget.
+# #8138 under epic #7810.
 #
 # It moved rather than shrank because the boundary was already drawn: #8037 put
 # every one of claude-wrapper.sh's OTHER rotation predicates behind

@@ -512,7 +512,7 @@ BROKEN_DIR="$(mktemp -d)"; printf '#!/usr/bin/env bash\nexit 1\n' > "$BROKEN_DIR
 broken_out="$(SCRIPT_DIR="$BROKEN_DIR" bash -c 'set -euo pipefail; GH_READ="gh"; _ghc="$SCRIPT_DIR/gh-cached"; if [[ -x "$_ghc" ]] && "$_ghc" --version >/dev/null 2>&1; then GH_READ="$_ghc"; fi; echo "$GH_READ"')"
 assert_eq "gh" "$broken_out" "broken wrapper -> GH_READ falls back to plain gh (set -euo pipefail safe)"
 rm -rf "$BROKEN_DIR"
-# Each routed script resolves the probe on ONE code line (shell budget, #7810).
+# Each routed script resolves the probe on ONE code line.
 for sc in check-duplicate blame-issue sync-labels; do
     grep -qE '^GH_READ="gh"; _ghc=.*"\$_ghc" --version >/dev/null 2>&1; then GH_READ="\$_ghc"; fi$' "$S_DIR/$sc.sh"
     assert_eq "0" "$?" "$sc.sh resolves \$GH_READ on a single probe line"

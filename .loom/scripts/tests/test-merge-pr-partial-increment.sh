@@ -516,8 +516,8 @@ echo "Testing backticked-trailer warning (#5690, ported to Rust #8831)..."
 # #8831: the detection logic (_backticked_partial_increment_trailer_refs /
 # _backticked_partial_increment_trailer_snippets) and the warning-message
 # assembly moved to loom-daemon (cli/merge_pr_refs.rs's
-# `backticks-partial-increment-warnings`, loom_daemon::merge_pr::refs) to keep
-# the portable shell pool net zero (Shell Budget Ratchet). BT2-BT7 exercised
+# `backticks-partial-increment-warnings`, loom_daemon::merge_pr::refs) so the
+# logic is not duplicated in portable shell. BT2-BT7 exercised
 # the detector's regex shape directly and are retired in favor of the byte-
 # identical port's own unit tests
 # (loom-daemon/src/merge_pr/refs/tests.rs::bt2_.. through bt7_..). BT1 and BT8

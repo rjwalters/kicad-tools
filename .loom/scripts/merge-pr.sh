@@ -148,12 +148,11 @@
 
 set -euo pipefail
 
-# ANSI color codes (one line — file-size-ratchet offset for the #8248 guard
-# above; verbatim, behavior-preserving join of the five assignments).
+# ANSI color codes (one line).
 RED='\033[0;31m'; GREEN='\033[0;32m'; BLUE='\033[0;34m'; YELLOW='\033[1;33m'; NC='\033[0m'
 
 error() { echo -e "${RED}Error: $*${NC}" >&2; exit 1; }
-# info/success/warning joined onto one line: file-size/shell-budget offset for #11859's --expected-head.
+# info/success/warning joined onto one line.
 info() { echo -e "${BLUE}$*${NC}"; }; success() { echo -e "${GREEN}$*${NC}"; }; warning() { echo -e "${YELLOW}$*${NC}"; }
 # #5579: distinct from error() (exit 1) — see "Exit codes" above. Emits to
 # stderr like error() so it is visible in logs, but exits 3 so the caller can
@@ -225,9 +224,7 @@ _classify_merge_response() { local _k; _k="$(printf '%s' "$1" | "${LOOM_DAEMON_B
 # attribution check, not just the asynchronous-push one. One extra round trip
 # buys uniform attribution instead of two different safety levels for the same
 # claim ("this new head is our own sync").
-# Written as one dense line for the same reason the guards above are: this file
-# is frozen by the file-size ratchet, and `shell-budget --check` refuses a
-# change that grows the portable pool at all.
+# Written as one dense line, like the guards above.
 _refresh_precondition_sha() { _HEAD_SELF_SYNCED=true; return 0; }
 # _mr_say KEY -- the KEY<TAB>text line of the current `merge-pr merge-route`
 # answer ($_MR), or a generic line when the route was synthesized without one.
@@ -394,9 +391,7 @@ while [[ $# -gt 0 ]]; do
     --no-cleanup-worktree) CLEANUP_WORKTREE=false; shift ;;
     --expected-head) [[ $# -ge 2 && "$2" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || error "--expected-head requires a full lowercase hex commit SHA (40 or 64 chars)"; EXPECTED_HEAD_SHA="$2"; shift 2 ;;
     --no-cleanup-primary) CLEANUP_PRIMARY_CHECKOUT=false; shift ;;
-    # The two --worktree-path arms are joined onto one line each (verbatim,
-    # behavior-preserving) — the shell-budget ratchet's option 2
-    # (.loom/docs/shell-language-policy.md).
+    # The two --worktree-path arms are joined onto one line each.
     --worktree-path) [[ $# -lt 2 ]] && error "--worktree-path requires a value"; WORKTREE_PATH_OVERRIDE="$2"; shift 2 ;;
     --worktree-path=*) WORKTREE_PATH_OVERRIDE="${1#--worktree-path=}"; [[ -z "$WORKTREE_PATH_OVERRIDE" ]] && error "--worktree-path= requires a value"; shift ;;
     --dry-run) DRY_RUN=true; shift ;;
@@ -405,10 +400,8 @@ while [[ $# -gt 0 ]]; do
     --allow-unapproved) ALLOW_UNAPPROVED=true; shift ;;
     --allow-red-tree) ALLOW_RED_TREE=true; shift ;;
     --allow-red-required) [[ $# -lt 2 || -z "$2" ]] && error "--allow-red-required requires a context name"; ALLOW_RED_REQUIRED+=("$2"); shift 2 ;;
-    # #8845's --merge-method arm is paid for by flattening the `*)` positional
-    # arm below onto one line — the shell-budget ratchet's option 2
-    # (.loom/docs/shell-language-policy.md), same offsetting convention
-    # --worktree-path already documents in this file. Validation here is vocabulary-only (mirrors PR_NUMBER's own
+    # #8845's --merge-method arm; the `*)` positional arm below is flattened
+    # onto one line, as --worktree-path is above. Validation here is vocabulary-only (mirrors PR_NUMBER's own
     # ^[0-9]+$ check below); which methods the REPO actually allows is decided
     # in loom-daemon (loom-daemon/src/forge_cmd.rs), not here.
     --merge-method) [[ $# -lt 2 ]] && error "--merge-method requires a value"; case "$2" in squash|merge|rebase) ;; *) error "--merge-method must be one of: squash, merge, rebase (got: $2)" ;; esac; MERGE_METHOD_REQUESTED="$2"; shift 2 ;;
@@ -1077,9 +1070,7 @@ _check_partial_increment_close_conflict() {
   # where $partial_refs is EMPTY — a trailer the author backticked, which
   # parses as no declaration at all. Pure text analysis, no forge calls, so
   # the common (non-partial-increment) path still costs zero extra requests.
-  # (The statements below share one line deliberately — #8831 pays for the
-  # daemon round trip inside the shell-budget ratchet's portable pool, and
-  # this keeps that cost at net zero. The unquoted $(...) is intentional: it
+  # (The statements below share one line deliberately (#8831). The unquoted $(...) is intentional: it
   # expands to a single `--dry-run` token or nothing, never anything word
   # splitting could mis-tokenize — hence the SC2046 disable directly below.
   # That directive covers only the ONE statement that follows it, which is why
@@ -2089,7 +2080,7 @@ _revalidate_merge_guards() {
   local fresh v; fresh="$(forge_get_pr_nocache "$REPO_NWO" "$PR_NUMBER" "$GH" 2>/dev/null || echo '{}')"
   # The merged / no-head / head-moved decision, and the label set to re-check, are `loom-daemon merge-pr revalidate-head` (Rust, loom-daemon/src/merge_pr/revalidate_head.rs — #8191 slice): MERGED = merged underneath us while we waited (nothing left to guard); MOVED = the head moved during the wait (PR #8220's 07:12 force-push), the #5579 "re-queue, not a failure" signal (exit 3); NO-HEAD = the re-read was unusable (#8896: a forge read failure, NOT a missing loom:pr). No verdict line at all (a daemon predating the verb: rc 2/127) falls back to the retired jq predicate below, emitting the same protocol — the pre-verb behaviour, so an older host still merges (floor-test row `revalidate-head open -`, no floor raise). jq still READS the payload, so "head unchanged" and "never looked" still cannot read alike.
   v="$(printf '%s' "$fresh" | "${LOOM_DAEMON_BIN:-loom-daemon}" merge-pr revalidate-head --precondition-sha "${MERGE_PRECONDITION_SHA:-}" 2>/dev/null)" || v=""
-  # Legacy fallback (two joined lines, a shell-budget offset): the retired #8410/#8896 jq filters, byte-for-byte, mapped onto the verb's protocol.
+  # Legacy fallback (two joined lines): the retired #8410/#8896 jq filters, byte-for-byte, mapped onto the verb's protocol.
   [[ "$v" == "LOOM-REVALIDATE "* ]] || v="$(_fs="$(jq -r '.head.sha // empty' <<<"$fresh" 2>/dev/null || true)"; if [[ "$(jq -r '.merged // false' <<<"$fresh" 2>/dev/null || true)" == "true" ]]; then echo "LOOM-REVALIDATE MERGED"; elif [[ -z "$_fs" ]]; then echo "LOOM-REVALIDATE NO-HEAD"
     elif [[ -n "${MERGE_PRECONDITION_SHA:-}" && "$_fs" != "$MERGE_PRECONDITION_SHA" ]]; then echo "LOOM-REVALIDATE MOVED $_fs"; else echo "LOOM-REVALIDATE CLEAR"; jq -r '.labels[]?.name // empty' <<<"$fresh" 2>/dev/null || true; fi)"
   # CLEAR: re-point the guards' input at the state just read, then re-run them. A loom:verdict-stale revocation (#5686), a Judge re-claim, or a contradicting verdict label (#8112) now blocks the merge exactly as it would have at queue time. --allow-unapproved still overrides the loom:pr block, as on the queue-time evaluation.
