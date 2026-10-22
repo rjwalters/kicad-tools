@@ -153,12 +153,6 @@ DEFAULT_ALLOWLIST = Path(".github/routed-drc-tolerance.yml")
 # canonical rule_id string + per-rule counter increment (Issue #2702).
 MATCHGROUP_RULE_IDS: tuple[str, ...] = ("match_group_length_skew",)
 
-#: Open tracker for board 07's seed-42 skew residuals (Issue #7367): the 2
-#: diff pairs (DQS, TMDS_D1) and the match group below.  Issue #7612 tuned the
-#: other four pairs in the recipe (``retune_pair_skew``), so they left it.
-#: The groups used to cite #3916 / #7339 (closed) and #5798 (pending close).
-MATCHGROUP_SKEW_TRACKER = 7550
-
 # Repo-relative key of board 07's synthetic regression fixture.  Its re-route
 # lands in the git-ignored ``regression-output/``, which
 # ``recipe_baseline_key`` canonicalises back to this key.
@@ -174,8 +168,9 @@ MATCHGROUP_FIXTURE_KEY = (
 # DDR_DATA_BYTE_0 and MIPI_CSI_LANES have no mirrorable N-side host on their
 # pairs at route time; the recipe matches both after the pair-skew retune
 # (``RETUNE_GROUPS``), so neither fires any more.
-# Issue #7557: HDMI_TMDS_LANES becomes measurable once TMDS_D0_N routes (U4's
-# TMDS balls moved to its J2-facing column): 7.723 mm vs 0.075 mm, also #7550.
+# Issue #7557 / #7550: HDMI_TMDS_LANES became measurable once TMDS_D0_N routes
+# (U4's TMDS balls moved to its J2-facing column), 7.723 mm vs 0.075 mm; the
+# recipe now matches it too (``RETUNE_GROUPS``), so no group is allowed.
 #
 # Per the operator ruling in #7270 (Q3) the allowance is NOT a count: it names
 # the exact groups that may fire, so a DIFFERENT group failing (e.g. ADDR_BUS
@@ -190,9 +185,7 @@ MATCHGROUP_FIXTURE_KEY = (
 # REMOVAL: delete an entry once its group meets its length-match tolerance
 # (tracked in the issue it cites).
 MATCHGROUP_ALLOWED_GROUPS: dict[str, dict[str, int]] = {
-    MATCHGROUP_FIXTURE_KEY: {
-        "HDMI_TMDS_LANES": MATCHGROUP_SKEW_TRACKER,
-    },
+    MATCHGROUP_FIXTURE_KEY: {},
 }
 
 

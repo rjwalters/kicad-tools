@@ -66,14 +66,13 @@ class TestBoard07Allowance:
     def test_board_07_allowance_is_keyed_to_named_groups(self):
         """Board 07's allowance names its groups (Issue #7339, #7270 Q3).
 
-        Reroute path: HDMI_TMDS_LANES (7.723 mm vs 0.075 mm), which became
-        measurable when TMDS_D0_N routed (#7557).  DDR_DATA_BYTE_0 and
-        MIPI_CSI_LANES are matched by the recipe's retune step (#7766).  A count would let another group be absorbed in
-        place of a known one.  Delete an entry once the tuner fixes it (#7550).
+        Reroute path: no group may fire.  DDR_DATA_BYTE_0 and MIPI_CSI_LANES
+        (#7766) and HDMI_TMDS_LANES (#7550) are matched by the recipe's retune
+        step.  An entry would let a group be absorbed in place of a regression.
         """
         mod = _load_helper_module()
         key = "boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb"
-        assert set(mod.MATCHGROUP_ALLOWED_GROUPS[key]) == {"HDMI_TMDS_LANES"}
+        assert set(mod.MATCHGROUP_ALLOWED_GROUPS[key]) == set()
         assert not hasattr(mod, "MATCHGROUP_VIOLATION_BASELINE")
         assert not hasattr(mod, "check_zero_violations")
 
