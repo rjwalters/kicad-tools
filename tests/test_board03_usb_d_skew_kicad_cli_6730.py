@@ -110,3 +110,35 @@ def test_usb_lengths_and_skew_match_kicad_cli(tmp_path):
     for name, kicad_len in actual.items():
         assert ours[name] == pytest.approx(kicad_len, abs=1e-3), name
     assert abs(actual["USB_D+"] - actual["USB_D-"]) <= 0.5
+
+
+def test_retuner_on_the_committed_board_is_already_satisfied(tmp_path):
+    """The #6885 retuner, applied to the committed board, has nothing to change.
+
+    The operator ruling on #6730 requires the existing-board retuner to be run
+    on the committed board 03 artifact, selecting the USB_D pair.  It reports
+    ``already_satisfied`` at 0.224 mm skew, and its output is byte-identical
+    to the input, so no copper (and no readiness evidence) changes.
+    """
+    from kicad_tools.router.pcb_retune import retune_pcb, sha256_file
+    from kicad_tools.router.rules import net_class_map_from_path
+
+    before = sha256_file(ROUTED)
+    out = tmp_path / "usb_joystick_retuned.kicad_pcb"
+    report = retune_pcb(
+        ROUTED,
+        out,
+        diffpairs=[("USB_D+", "USB_D-")],
+        net_class_map=net_class_map_from_path(OUTPUT / "net_class_map.json", pcb_path=ROUTED),
+    )
+    assert report.status == "already_satisfied"
+    assert report.changed_nets == []
+    (target,) = report.targets
+    assert target.name == "USB_D+/USB_D-"
+    assert target.tolerance_mm == 2.5
+    assert target.before_skew_mm == pytest.approx(0.224, abs=0.001)
+    assert target.after_skew_mm == target.before_skew_mm
+    assert target.stretch_target_mm == 0.5 and target.stretch_achieved
+    assert sha256_file(ROUTED) == before, "the committed input must be untouched"
+    assert report.input_sha256 == report.output_sha256 == before
+    assert out.read_bytes() == ROUTED.read_bytes()
