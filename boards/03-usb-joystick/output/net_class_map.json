@@ -283,7 +283,7 @@
   "USB_MCU_D+": {
     "name": "HighSpeed",
     "priority": 2,
-    "trace_width": 0.2,
+    "trace_width": 0.25,
     "neck_trace_width": null,
     "clearance": 0.15,
     "via_size": 0.6,
@@ -322,7 +322,7 @@
   "USB_MCU_D-": {
     "name": "HighSpeed",
     "priority": 2,
-    "trace_width": 0.2,
+    "trace_width": 0.25,
     "neck_trace_width": null,
     "clearance": 0.15,
     "via_size": 0.6,

@@ -109,9 +109,14 @@ At an assumed FR4 relative permittivity of 4.6, a 16mm line has approximately
 The main ESD-to-series-resistor run is paired on In2.Cu beside In1 ground.
 The connector's reversed duplicate contacts and the ESD device's 1.9mm channel
 spacing necessarily introduce short uncoupled launches. The saved layout has
-15.072/15.268mm total copper per connector/ESD net, 0.197mm skew, and a connected
-4.711mm common coupled run. MCU-side lengths are both 3.535mm, with 73.5%
-coupling. Pair traces are 0.20mm wide with 0.15mm minimum edge gap.
+15.791/15.791mm total copper per connector/ESD net, 0mm skew, and a connected
+4.071mm common coupled run. MCU-side launches are 3.936/3.798mm. Both pairs
+use a 0.15mm edge gap. Widths are set per layer in `generate_design.py`, so a
+fresh route lays the same widths as the saved plan (Issue #7256): the In2.Cu
+connector/ESD pair is 0.20mm, and the F.Cu MCU launch pair is 0.25mm. On this
+stackup `CoupledLines` estimates 83.9 ohm and 93.2 ohm, both inside the
+declared 90 ohm ±10% band. The MCU launch pair is not wider because at 0.275mm
+and 0.30mm the seed-42 route takes its launches past 4mm (4.190mm and 4.047mm).
 
 The circuit-specific replay gate independently requires a connected common
 run of at least 4mm, at most 16mm total copper per connector/ESD net, and at
