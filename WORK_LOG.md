@@ -15,6 +15,10 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-22
 
+- **PR #7783**: fix(router): fuse stepped joint-search pair legs before the in-router skew tune
+- **PR #7781**: test: match DDR_DATA_BYTE_0 in board 07 retune step
+- **PR #7778**: fix: gate retune skew bumps against foreign pads using the host's existing gap
+- **Issue #5784** (closed): Epic: adopt measured KiCadRoutingTools techniques (oracle completion, pose diff-pair search, N+1 rip-up)
 - **PR #7773**: fix: gate inline diff-pair length match on the enforced skew limit
 - **PR #7772**: fix(router): report explicit pose decline reason for polarity-swapped diff pairs
 - **PR #7771**: fix(router): prefer the coupled candidate that meets the pair's skew limit (#5333)
