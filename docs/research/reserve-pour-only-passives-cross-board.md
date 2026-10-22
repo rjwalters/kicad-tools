@@ -199,7 +199,7 @@ same harness protocol, seed 42 and pinned kicad-cli 10.0.6. Host load was
 | off | 34/37 | 1 (VCP) | 0 / 3 |
 | on | 36/37 | 1 (VCP) | 0 / 1 |
 
-These are the same numbers as the table above. **VCP is not
+These are the same numbers as the table above. With the default flipped and the flag omitted, the same run reserves 25 sites and reaches 36/37 (124 vias, 1136.4 mm), matching the flag-on arm. **VCP is not
 placement-bound**, although `kct net-status --why` labels it so. One
 `kct route <routed> --complete --seed 42` pass on the flag-on output routed
 it in 81 s (7 segments, 0 vias, 6.8 mm). The board then graded 37/37:
