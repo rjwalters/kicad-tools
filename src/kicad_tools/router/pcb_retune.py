@@ -503,6 +503,57 @@ def _geometry_signature(routes: Sequence[Any]) -> dict[str, tuple]:
     return {n: (sorted(segs[n]), sorted(vias[n])) for n in segs}
 
 
+def _file_order_fn(blocks: list) -> Any:
+    """``Route -> Route`` with its copper in the order ``_splice`` will write it.
+
+    Issue #7790: the checker and kicad-cli resolve track junctions in board-file
+    order, while the length model's default (canonical UUID order) assumes a
+    freshly routed net.  On a board whose file order is not canonical the two
+    disagree by ~0.07 mm per net, which made the tuner call DQS "already
+    within tolerance" at a checker skew of 0.1194 mm.  Copper that already
+    exists keeps its file position; copper the tuner adds is appended after it
+    (``_splice`` inserts after the net's last block).
+    """
+    from dataclasses import replace
+
+    positions: dict[tuple[str, tuple], list[int]] = {}
+    for idx, (kind, _st, _en, net, key) in enumerate(sorted(blocks, key=lambda b: b[1])):
+        if key is not None and kind in ("segment", "via"):
+            positions.setdefault((net, key), []).append(idx)
+
+    def ordered(items: Sequence[Any], net: str, key_of: Any) -> list[Any]:
+        taken: dict[tuple, int] = {}
+        kept: list[tuple[int, Any]] = []
+        added: list[Any] = []
+        for item in items:
+            key = key_of(item)
+            slots = positions.get((net, key), [])
+            n = taken.get(key, 0)
+            if n < len(slots):
+                taken[key] = n + 1
+                kept.append((slots[n], item))
+            else:
+                added.append(item)
+        return [i for _p, i in sorted(kept, key=lambda t: t[0])] + added
+
+    def order(route: Any) -> Any:
+        segs = ordered(
+            route.segments,
+            route.net_name,
+            lambda s: _seg_key(s.x1, s.y1, s.x2, s.y2, s.layer.kicad_name, s.width),
+        )
+        vias = ordered(
+            route.vias,
+            route.net_name,
+            lambda v: _via_key(
+                v.x, v.y, v.diameter, tuple(layer.kicad_name for layer in v.drilled_layers)
+            ),
+        )
+        return replace(route, segments=segs, vias=vias)
+
+    return order
+
+
 def _write_atomic(path: Path, data: bytes) -> None:
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
@@ -604,6 +655,8 @@ def retune_pcb(
     )
 
     blocks = _block_keys(text, net_ids, names_by_id)
+    # Issue #7790: measure in the order the written file will hold the copper.
+    router.route_copper_order = _file_order_fn(blocks)
     arcs = sorted({b[3] for b in blocks if b[0] == "arc" and b[3] in selection.net_names})
     if arcs:
         raise RetuneError(

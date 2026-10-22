@@ -21006,7 +21006,9 @@ class Autorouter:
             cache = (num_layers, stackup)
             self._kicad_stackup_cache = cache
         return KicadLengthModel.for_router(
-            cache[1], (p for p in self.pads.values() if not p.steiner_point)
+            cache[1],
+            (p for p in self.pads.values() if not p.steiner_point),
+            copper_order=getattr(self, "route_copper_order", None),
         )
 
     def _preserved_fragments(self, net_ids: set[int], *, invert: bool = False) -> list[Route]:
