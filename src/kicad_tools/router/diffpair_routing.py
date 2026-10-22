@@ -12649,10 +12649,21 @@ class DiffPairRouter:
             pose_decline: str | None = None
             pose_elapsed = 0.0
             if self.enable_pose_centerline and spec.polarity_swap:
-                # Issue #7769: the centreline trunk keeps P and N as parallel
-                # rails and has no crossover, so a polarity-swapped pair is
-                # never offered to ``route_centerline_pose``.  Say so in the
-                # ``[coupled-select]`` line instead of the opaque ``n/a``.
+                # Issue #7769: a polarity-swapped pair is never offered to
+                # ``route_centerline_pose``.  This is structural, not a guess:
+                # the pose candidate is single-layer and via-free by
+                # construction (it refuses pads on more than one layer and
+                # returns pad-to-pad rails with no vias), and its two rails
+                # stay parallel, so P and N cannot exchange sides.  A swap
+                # needs one rail to cross the other on a second layer, which
+                # only the joint search builds.  Measured on board 07
+                # (``--differential-pairs``, seed 42): the pose gate was not
+                # what held DQS over its limit.  The joint candidate's skew
+                # tune found no host segment (fixed by #7783), then a doubled
+                # via leg made its length order-dependent (fixed by #7812).
+                # After both, ``kct check`` measures DQS at 0.045 mm against
+                # 0.050 mm, so no crossover pose construction is needed.
+                # Report the reason in ``[coupled-select]`` instead of ``n/a``.
                 pose_decline = _POSE_DECLINE_POLARITY_SWAP
             if (
                 self.enable_pose_centerline
