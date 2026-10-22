@@ -710,6 +710,44 @@ behaviour change that must be A/B'd on every board. No recipe or router code is
 changed by #7710; the follow-up decision is left to a separate issue. Reach threshold and
 allowances are untouched.
 
+## Load independence re-measured on current main (#7716)
+
+Measured 2026-10-22 on `8435ea01c` + the #7716 changes, 18-core macOS host
+shared with other builders, native C++ backend, `PYTHONHASHSEED=42 uv run python
+generate_design.py <dir> --step all --seed 42 [--differential-pairs]`. "Copper" is
+a SHA-256 over the sorted `segment`/`via`/`arc` s-expressions of the final routed
+PCB with UUIDs stripped. "Dilation K" runs the route with Python's
+`time.monotonic`/`perf_counter`/`time` scaled K times (a `sitecustomize` shim),
+so every Python wall-clock budget sees K times more elapsed time.
+
+| Recipe | Arm | Load avg (1 min, start -> end) | Copper |
+|---|---|---|---|
+| `--differential-pairs` | ambient | ~8 at start | 1642 items, `0a4e59e4bc4c9318` |
+| `--differential-pairs` | dilation K=4 | ambient | identical |
+| `--differential-pairs` | 16 `yes` burners | 35.8 -> 54.1 | identical |
+| `--differential-pairs` | dilation K=8 | ambient | identical |
+| `--differential-pairs` | main without the cache fix | ambient | identical |
+| default | ambient | 17.2 -> 17.7 | 1630 items, `752d6b8028e3877b` |
+| default | 6 `yes` burners | 17.1 -> 19.7 | identical |
+| default | dilation K=8 | ambient | identical |
+| default | main without the cache fix | ambient | identical |
+| `--differential-pairs` at `3dfc2b8a7` | ambient | ~39 | 1550 items, `fb926938137404df` |
+| `--differential-pairs` at `3dfc2b8a7` | 16 `yes` burners | 28.4 -> 40.7 | identical |
+
+No run logs `per-net wall clock bound` or `stage deadline fired`. The default
+recipe now routes 31/31 in the negotiated pass, so the relief rescue and the
+`TMDS_D1_P` Python fallback measured in #7710 are no longer reached.
+
+**The "diverged between seed-42 runs" data point (MIPI_DAT1 0.045 vs 0.150 mm)
+was not load.** At `3dfc2b8a7`, `--step all` gives `skew-tune ... not tuned
+(overshoot; skew 0.053mm)` and 0.150 mm at both loads. The 0.045 mm run used
+`--step pcb` then `--step route`, and `--step pcb` wrote no `.kicad_pro`. Without
+it, `kct route` routes with its default rules, not the project netclass, and the
+first coupled search already differs (DQS `corridor_iters` 146085 vs 144767).
+#7716 makes `--step pcb` write the project file when it is missing. After that,
+`--step pcb` + `--step route` produces the same in-route log as `--step all`
+(skew-tune results, pair lengths and coupled-search iteration counts).
+
 ## Files in this directory
 
 - `README.md` -- this file.
