@@ -1612,3 +1612,25 @@ class TestRecipeRoutesPairsCoupled:
         assert value("--timeout") == "2400"
         assert value("--placement-delta-feedback-budget") == "2"
         assert value("--placement-delta-feedback-timeout") == "600"
+
+    def test_stale_routed_sidecars_are_removed_before_routing(
+        self, generate_design_mod, tmp_path, monkeypatch
+    ) -> None:
+        """A fixture copy of the routed ``.kicad_pro`` / ``.kicad_dru`` (the
+        match-group gate's ``regression-output``) made ``kct route`` refuse to
+        write its own sidecars and skip the pour oracle (issue #5333)."""
+        monkeypatch.setattr(sys, "argv", ["generate_design.py", str(tmp_path), "--step", "pcb"])
+        assert generate_design_mod.main() == 0
+        routed = tmp_path / "matchgroup_test_routed.kicad_pcb"
+        stale = [routed.with_suffix(".kicad_pro"), routed.with_suffix(".kicad_dru")]
+        for path in stale:
+            path.write_text("stale fixture copy\n")
+        seen: list[bool] = []
+
+        def fake_run(cmd, *args, **kwargs):
+            seen.append(any(path.exists() for path in stale))
+            return subprocess.CompletedProcess(cmd, 1)
+
+        monkeypatch.setattr(generate_design_mod.subprocess, "run", fake_run)
+        generate_design_mod.route_pcb(tmp_path / "matchgroup_test.kicad_pcb", routed)
+        assert seen and seen[0] is False

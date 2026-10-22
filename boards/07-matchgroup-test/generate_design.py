@@ -2071,6 +2071,18 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         return False
     frame_dx = generate_pcb.BOARD_ORIGIN_X - bbox[0]
     frame_dy = generate_pcb.BOARD_ORIGIN_Y - bbox[1]
+    # Issue #5333: ``kct route`` writes ``output_path``'s ``.kicad_pro`` /
+    # ``.kicad_dru`` itself, and refuses to replace an unstamped one that
+    # differs from the source ("DRC sidecar conflict").  It then exits 1
+    # before its KiCad-oracle pour completion runs.  The match-group gate's
+    # re-route copies the committed fixture's routed sidecars into
+    # ``regression-output`` (``recipe_output_dir(prepare=True)``), so on that
+    # path every re-route hit the conflict and skipped the oracle.  With the
+    # pairs coupled, the recipe's own repair cannot then reach U1.36 (+1V2).
+    # These files are this step's output, so a stale copy is removed first.
+    for suffix in (".kicad_pro", ".kicad_dru"):
+        output_path.with_suffix(suffix).unlink(missing_ok=True)
+
     route_input = input_path
     if frame_dx != 0.0 or frame_dy != 0.0:
         route_input = output_path.parent / "matchgroup_test_routing_frame.kicad_pcb"
