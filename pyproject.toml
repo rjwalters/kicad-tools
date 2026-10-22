@@ -191,6 +191,13 @@ report = [
     "weasyprint>=60.0",
     "cairosvg>=2.6",
 ]
+# Parametric 3D body generation: `kct models generate` (Issue #7687).
+# CadQuery and its OCP bindings are Apache-2.0, but the OCP wheels are large
+# (~1 GB installed), so this extra is opt-in and deliberately NOT part of
+# `all`.  Placeholder bodies (`--placeholder`) need no extra.
+models = [
+    "cadquery>=2.4; python_version < '3.14'",
+]
 # All optional features
 all = [
     "rtree>=1.0",
@@ -391,7 +398,7 @@ namespace_packages = true
 explicit_package_bases = true
 
 [[tool.mypy.overrides]]
-module = ["numpy.*", "scipy.*", "rtree.*", "cupy.*", "mlx.*", "ax.*", "botorch.*", "torch.*"]
+module = ["numpy.*", "scipy.*", "rtree.*", "cupy.*", "mlx.*", "ax.*", "botorch.*", "torch.*", "cadquery.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
