@@ -675,15 +675,9 @@ def retune_pcb(
 
     tuner_reasons: dict[str, str] = {}
     with _deadline(timeout_s):
-        if selection.groups:
-            results = router.apply_match_group_tuning(
-                selection.groups, verbose=False, engage="checker_limit"
-            )
-            for name, per_net in results.items():
-                reasons = sorted({res.reason for (_r, res) in per_net.values()})
-                tuner_reasons[_target_key("match_group", name)] = (
-                    ",".join(reasons) or "within_limit"
-                )
+        # Issue #7766: pairs first.  A pair retune lengthens the short leg
+        # of its lane, which can make that lane the group's reference, so the
+        # group is matched against lengths that are final.
         if selection.pairs:
             pair_results = router.apply_diffpair_length_tuning(
                 selection.pairs,
@@ -699,6 +693,15 @@ def retune_pcb(
             )
             for (p_name, n_name), res in pair_results.items():
                 tuner_reasons[_target_key("diffpair", f"{p_name}/{n_name}")] = res.reason
+        if selection.groups:
+            results = router.apply_match_group_tuning(
+                selection.groups, verbose=False, engage="checker_limit"
+            )
+            for name, per_net in results.items():
+                reasons = sorted({res.reason for (_r, res) in per_net.values()})
+                tuner_reasons[_target_key("match_group", name)] = (
+                    ",".join(reasons) or "within_limit"
+                )
 
     # Which nets actually changed?
     merged: dict[str, Any] = {}

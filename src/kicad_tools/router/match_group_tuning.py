@@ -254,6 +254,11 @@ MAX_SEGMENT_RETRY_CANDIDATES: int = 3
 #: into A2's own corridor.
 AMPLITUDE_BACKOFF_FACTORS: tuple[float, ...] = (1.0, 0.5, 0.25, 0.125)
 
+#: Issue #7766: the pair centreline meander also tries a taller bump once every
+#: back-off rung is rejected.  A short coupled span (board 07's MIPI_DAT1: 3.4mm)
+#: hosts few loops, so only a taller one reaches the length the lane lacks.
+PAIR_CENTERLINE_AMPLITUDE_FACTORS: tuple[float, ...] = (*AMPLITUDE_BACKOFF_FACTORS, 2.0)
+
 # Issue #7423: a committed meander must not end past the group target.  The
 # amplitude is re-fitted (at most this many times) while the member is more
 # than ``OVERSHOOT_EPS_MM`` past it.
@@ -3244,6 +3249,170 @@ def _merge_mutable_runs(route: Route, fixed_segment_ids: set[int] | None) -> Rou
     )
 
 
+#: Issue #7766: widest perpendicular excursion of a jog run that
+#: :func:`_straighten_jog_runs` flattens.  The grid router leaves a "staircase"
+#: (e.g. board 07's MIPI_DAT0_P: 81 segments hopping 0.26mm between two rails
+#: for 14mm) whose longest straight host is far too short for a meander.
+STRAIGHTEN_BAND_MM: float = 0.3
+#: Fewest segments a run must have to be worth flattening.
+STRAIGHTEN_MIN_SEGMENTS: int = 6
+
+
+def _straighten_jog_runs(
+    route: Route,
+    *,
+    skip_segment_ids: set[int] | None = None,
+    pads: list[Pad] | None = None,
+    band_mm: float = STRAIGHTEN_BAND_MM,
+    min_segments: int = STRAIGHTEN_MIN_SEGMENTS,
+) -> tuple[Route, list[Segment]] | None:
+    """Flatten staircase runs of ``route`` into straight segments (Issue #7766).
+
+    A run is a chain of at least ``min_segments`` same-layer, same-width
+    segments joined end to end (no via, pad or branch at an interior joint),
+    whose interior joints all lie within ``band_mm`` of the straight line
+    between its ends, never step backwards along it, and whose end-to-end
+    direction is a multiple of 45 degrees.  Each such run is replaced by one
+    segment, giving the meander generator a host as long as the run.  The
+    flattened run is never longer than the original.
+
+    Segments whose ``id`` is in ``skip_segment_ids`` (fixed or coupled copper)
+    are never part of a run.  Returns ``(new_route, new_segments)``, or ``None``
+    when nothing flattens.  The caller must DRC-check ``new_segments``.
+    """
+    import math
+    from dataclasses import replace
+
+    from .primitives import Route as _Route
+
+    segs = route.segments
+    if len(segs) < min_segments:
+        return None
+    skip = skip_segment_ids or set()
+
+    def key(x: float, y: float) -> tuple[int, int]:
+        return (round(x * 1e4), round(y * 1e4))
+
+    at: dict[tuple[int, int], list[tuple[int, int]]] = {}  # node -> [(seg, end)]
+    for i, s in enumerate(segs):
+        at.setdefault(key(s.x1, s.y1), []).append((i, 0))
+        at.setdefault(key(s.x2, s.y2), []).append((i, 1))
+    barred = {key(v.x, v.y) for v in route.vias}
+    for pad in pads or ():
+        reach = max(pad.width, pad.height) / 2.0
+        for k_node in at:
+            if math.hypot(k_node[0] / 1e4 - pad.x, k_node[1] / 1e4 - pad.y) <= reach:
+                barred.add(k_node)
+
+    def joins(a: int, b: int, node: tuple[int, int]) -> bool:
+        return (
+            len(at[node]) == 2
+            and node not in barred
+            and segs[a].layer == segs[b].layer
+            and abs(segs[a].width - segs[b].width) < 1e-9
+        )
+
+    def mutable(i: int) -> bool:
+        return id(segs[i]) not in skip
+
+    # Walk maximal chains of mutable segments as ordered point lists.
+    seen: set[int] = set()
+    chains: list[tuple[list[int], list[tuple[float, float]]]] = []
+    for start in range(len(segs)):
+        if start in seen or not mutable(start):
+            continue
+        # Extend backwards to the chain head, then walk forwards.
+        head, head_end = start, 0
+        steps = 0
+        while steps < len(segs):
+            node = key(
+                *(
+                    (segs[head].x1, segs[head].y1)
+                    if head_end == 0
+                    else (segs[head].x2, segs[head].y2)
+                )
+            )
+            nbrs = [(i, e) for (i, e) in at[node] if i != head]
+            if len(nbrs) != 1 or not mutable(nbrs[0][0]) or not joins(head, nbrs[0][0], node):
+                break
+            if nbrs[0][0] == start:
+                break
+            head, head_end = nbrs[0][0], 1 - nbrs[0][1]
+            steps += 1
+        order = [head]
+        pts = [(segs[head].x1, segs[head].y1) if head_end == 0 else (segs[head].x2, segs[head].y2)]
+        cur, cur_end = head, head_end
+        while True:
+            seen.add(cur)
+            far = (segs[cur].x2, segs[cur].y2) if cur_end == 0 else (segs[cur].x1, segs[cur].y1)
+            pts.append(far)
+            node = key(*far)
+            nbrs = [(i, e) for (i, e) in at[node] if i != cur]
+            if (
+                len(nbrs) != 1
+                or nbrs[0][0] in seen
+                or not mutable(nbrs[0][0])
+                or not joins(cur, nbrs[0][0], node)
+            ):
+                break
+            cur, cur_end = nbrs[0][0], nbrs[0][1]
+            order.append(cur)
+        chains.append((order, pts))
+
+    replaced: set[int] = set()
+    new_segments: list[Segment] = []
+    for order, pts in chains:
+        k = len(order)
+        i = 0
+        while i + min_segments <= k:
+            found = None
+            for j in range(k, i + min_segments - 1, -1):
+                (x0, y0), (x1, y1) = pts[i], pts[j]
+                length = math.hypot(x1 - x0, y1 - y0)
+                if length < 1e-6:
+                    continue
+                ang = math.degrees(math.atan2(y1 - y0, x1 - x0)) / 45.0
+                if abs(ang - round(ang)) > 1e-3:
+                    continue
+                ux, uy = (x1 - x0) / length, (y1 - y0) / length
+                dev, last, ok = 0.0, -1e-6, True
+                for px, py in pts[i + 1 : j]:
+                    along = (px - x0) * ux + (py - y0) * uy
+                    if along < last - 1e-6 or along > length + 1e-6:
+                        ok = False
+                        break
+                    last = along
+                    dev = max(dev, abs((px - x0) * uy - (py - y0) * ux))
+                    if dev > band_mm:
+                        ok = False
+                        break
+                if ok and dev > 1e-3:
+                    found = j
+                    break
+            if found is None:
+                i += 1
+                continue
+            first = segs[order[i]]
+            new_segments.append(
+                replace(first, x1=pts[i][0], y1=pts[i][1], x2=pts[found][0], y2=pts[found][1])
+            )
+            replaced.update(order[i:found])
+            i = found
+    if not new_segments:
+        return None
+    kept = [s for idx, s in enumerate(segs) if idx not in replaced]
+    return (
+        _Route(
+            net=route.net,
+            net_name=route.net_name,
+            segments=kept + new_segments,
+            vias=route.vias.copy(),
+            is_escape=route.is_escape,
+        ),
+        new_segments,
+    )
+
+
 def _coupling_window_mm() -> float:
     """Edge gap under which ``kct check`` counts two parallel rails as coupled."""
     from kicad_tools.validate.rules.diffpair_routing_continuity import (
@@ -3382,6 +3551,32 @@ def _tune_pair_lane_with_fallbacks(
             vias=route.vias.copy(),
             is_escape=route.is_escape,
         )
+
+    def flatten_pair(p: Route, n: Route) -> tuple[Route, Route] | None:
+        """Both legs with their staircase runs flattened, or ``None``.
+
+        Coupled spans and fixed segments stay as routed, and the flattened
+        copper must pass the paired DRC self-check, else the pair is left alone.
+        """
+        from .pair_centerline_meander import coupled_segment_ids
+
+        skip = set(fixed_segment_ids or ()) | coupled_segment_ids(
+            p, n, max_edge_gap_mm=_coupling_window_mm()
+        )
+        flat_p = _straighten_jog_runs(p, skip_segment_ids=skip, pads=(pads_by_net or {}).get(p_id))
+        flat_n = _straighten_jog_runs(n, skip_segment_ids=skip, pads=(pads_by_net or {}).get(n_id))
+        if flat_p is None and flat_n is None:
+            return None
+        cand_p = flat_p[0] if flat_p else p
+        cand_n = flat_n[0] if flat_n else n
+        detail = paired_drc(
+            flat_p[1] if flat_p else [],
+            flat_n[1] if flat_n else [],
+            cand_p,
+            cand_n,
+            intra_pair_clearance_mm,
+        )
+        return None if detail is not None else (cand_p, cand_n)
 
     per_leg_ran = False
     for attempt in range(max_inserts_per_member):
@@ -3535,6 +3730,7 @@ def _tune_pair_lane_with_fallbacks(
                 if span.overlap_mm >= meander_footprint_mm(span.pitch_mm, leg_spacing, 1)
             ][:MAX_SEGMENT_RETRY_CANDIDATES]
             for span in spans:
+                partial: tuple[Route, Route] | None = None
                 p_host = merged_p.segments[span.p_index]
                 n_host = merged_n.segments[span.n_index]
                 # Within-pair floor: the meander keeps the host's own gap, so
@@ -3550,7 +3746,7 @@ def _tune_pair_lane_with_fallbacks(
                 )
                 first_side = 1 if hint[0] * span.nx + hint[1] * span.ny >= 0.0 else -1
                 for side in (first_side, -first_side):
-                    for amp_factor in AMPLITUDE_BACKOFF_FACTORS:
+                    for amp_factor in PAIR_CENTERLINE_AMPLITUDE_FACTORS:
                         meander = centerline_meander(
                             span,
                             p_host,
@@ -3615,10 +3811,19 @@ def _tune_pair_lane_with_fallbacks(
                                 f"its skew past {skew_allowance:.3f}mm."
                             )
                             continue
+                        if target_length - lane(cand_p, cand_n) > tolerance_mm:
+                            # Issue #7766: a partial bump.  Keep the longest
+                            # one and try the taller rungs and the other
+                            # side before settling for it.
+                            if partial is None or lane(cand_p, cand_n) > lane(*partial):
+                                partial = (cand_p, cand_n)
+                            continue
                         candidate = (cand_p, cand_n)
                         break
                     if candidate is not None:
                         break
+                if candidate is None and partial is not None:
+                    candidate = partial
                 if candidate is not None:
                     break
 
@@ -3631,35 +3836,47 @@ def _tune_pair_lane_with_fallbacks(
 
         # --- Strategy 3: per-leg meanders on uncoupled copper (ends cascade).
         per_leg_ran = True
-        leg = _tune_pair_legs_single_ended(
-            group=group,
-            p_id=p_id,
-            n_id=n_id,
-            p_route=current_p,
-            n_route=current_n,
-            routes_by_net=routes_by_net,
-            target_length=target_length,
-            tolerance_mm=tolerance_mm,
-            other_member_routes=other_member_routes,
-            intra_group_clearance_mm=intra_group_clearance_mm,
-            intra_pair_clearance_mm=intra_pair_clearance_mm,
-            config=config,
-            max_inserts_per_member=max_inserts_per_member,
-            via_clearance_mm=via_clearance_mm,
-            diff_pair_partners=diff_pair_partners,
-            pads_by_net=pads_by_net,
-            pad_clearance_mm=pad_clearance_mm,
-            net_clearance_mm=net_clearance_mm,
-            pad_floor_mm=pad_floor_mm,
-            board_thickness_mm=board_thickness_mm,
-            num_copper_layers=num_copper_layers,
-            blind_buried_supported=blind_buried_supported,
-            length_model=length_model,
-            fixed_segment_ids=fixed_segment_ids,
-            measure=measure,
-            skew_allowance_mm=skew_allowance,
-            leg_bounds_mm=leg_bounds,
-        )
+
+        def per_leg(p_route: Route, n_route: Route) -> tuple[Route, Route, int] | str:
+            return _tune_pair_legs_single_ended(
+                group=group,
+                p_id=p_id,
+                n_id=n_id,
+                p_route=p_route,
+                n_route=n_route,
+                routes_by_net=routes_by_net,
+                target_length=target_length,
+                tolerance_mm=tolerance_mm,
+                other_member_routes=other_member_routes,
+                intra_group_clearance_mm=intra_group_clearance_mm,
+                intra_pair_clearance_mm=intra_pair_clearance_mm,
+                config=config,
+                max_inserts_per_member=max_inserts_per_member,
+                via_clearance_mm=via_clearance_mm,
+                diff_pair_partners=diff_pair_partners,
+                pads_by_net=pads_by_net,
+                pad_clearance_mm=pad_clearance_mm,
+                net_clearance_mm=net_clearance_mm,
+                pad_floor_mm=pad_floor_mm,
+                board_thickness_mm=board_thickness_mm,
+                num_copper_layers=num_copper_layers,
+                blind_buried_supported=blind_buried_supported,
+                length_model=length_model,
+                fixed_segment_ids=fixed_segment_ids,
+                measure=measure,
+                skew_allowance_mm=skew_allowance,
+                leg_bounds_mm=leg_bounds,
+            )
+
+        leg = per_leg(current_p, current_n)
+        if not isinstance(leg, tuple):
+            # Issue #7766: a staircase leg has no host long enough for a
+            # meander.  Flatten the staircases (DRC-checked) and retry.
+            flat = flatten_pair(current_p, current_n)
+            if flat is not None:
+                retry = per_leg(flat[0], flat[1])
+                if isinstance(retry, tuple):
+                    leg = retry
         if isinstance(leg, tuple):
             current_p, current_n, leg_inserts = leg
             committed += leg_inserts

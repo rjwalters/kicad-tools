@@ -41,6 +41,7 @@ from kicad_tools.router.match_group_tuning import (
     _outer_normal_hint_group,
     _post_insertion_clearance_detail_group,
     _post_insertion_clearance_ok_group,
+    _straighten_jog_runs,
     format_reason_counts,
     group_skew_before_after,
     tune_match_group_v2,
@@ -4489,3 +4490,61 @@ class TestBoard07RealGeometryNeverPastReference:
         assert excess <= 0.0, (
             f"DQ14 tuned {excess * 1e6:.3f} nm past the UDQM reference ({result.reason})"
         )
+
+
+# =============================================================================
+# Issue #7766: staircase flattening
+# =============================================================================
+
+
+def _staircase_route(hops: int, *, layer: Layer = Layer.F_CU) -> Route:
+    """Pad stub, then ``hops`` 0.675 mm runs hopping 0.26 mm between two rails.
+
+    Mirrors board 07's MIPI_DAT0_P: the longest straight run is 0.675 mm, so no
+    meander fits, yet every joint lies within 0.26 mm of the line y=1.0.
+    """
+    pts = [(0.0, 1.0)]
+    x = 0.0
+    for k in range(hops):
+        y_a, y_b = (1.0, 0.74) if k % 2 == 0 else (0.74, 1.0)
+        pts += [(x + 0.675, y_a), (x + 0.675, y_b)]
+        x += 0.675
+    pts[-1] = (pts[-1][0], 1.0)
+    pts.append((pts[-1][0] + 1.0, 2.0))  # 45 degree exit
+    segs = [
+        Segment(x1=a[0], y1=a[1], x2=b[0], y2=b[1], width=0.2, layer=layer, net=1, net_name="P")
+        for a, b in zip(pts[:-1], pts[1:], strict=True)
+        if a != b
+    ]
+    return Route(net=1, net_name="P", segments=segs, vias=[])
+
+
+class TestStraightenJogRuns:
+    def test_flattens_staircase_to_one_host(self) -> None:
+        route = _staircase_route(10)
+        out = _straighten_jog_runs(route)
+        assert out is not None
+        flat, new = out
+        assert len(new) == 1
+        assert len(flat.segments) < len(route.segments)
+        assert max(s.x2 - s.x1 for s in flat.segments if s.y1 == s.y2) > 5.0
+        # Only shortens, and stays connected end to end.
+        assert LengthTracker.calculate_route_length(flat) <= LengthTracker.calculate_route_length(
+            route
+        )
+        ends = {(round(s.x1, 4), round(s.y1, 4)) for s in flat.segments} | {
+            (round(s.x2, 4), round(s.y2, 4)) for s in flat.segments
+        }
+        assert (0.0, 1.0) in ends
+
+    def test_straight_route_is_untouched(self) -> None:
+        assert _straighten_jog_runs(_straight_route(1, "P", 20.0)) is None
+
+    def test_skipped_segments_are_not_flattened(self) -> None:
+        route = _staircase_route(10)
+        skip = {id(s) for s in route.segments}
+        assert _straighten_jog_runs(route, skip_segment_ids=skip) is None
+
+    def test_wide_excursion_is_not_a_jog(self) -> None:
+        route = _staircase_route(10)
+        assert _straighten_jog_runs(route, band_mm=0.1) is None
