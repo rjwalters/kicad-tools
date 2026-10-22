@@ -345,3 +345,23 @@ def test_router_commits_the_in_limit_pose_over_a_better_coupled_skewed_joint(mon
     )
     assert "[coupled-select] kept=pose" in out
     assert not independent
+
+
+def test_warning_severity_limit_leaves_candidate_selection_unchanged(monkeypatch, capsys):
+    """A warning-severity skew limit is advisory: plain #6858 ordering decides."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        "kicad_tools.validate.diffpair_engagement.resolve_pair_thresholds",
+        lambda *a, **k: SimpleNamespace(skew_mm=0.05, skew_severity="warning"),
+    )
+    router = _router()
+    [pair] = router._diffpair.detect_differential_pairs()
+    assert router._diffpair._checker_skew_limit_mm(pair) is None
+
+    # Same fixtures as the error-limit end-to-end test, opposite winner.
+    _router_, _marked, independent, out = _run(
+        monkeypatch, capsys, _tight_skewed(), _split_balanced()
+    )
+    assert "[coupled-select] kept=joint" in out
+    assert not independent
