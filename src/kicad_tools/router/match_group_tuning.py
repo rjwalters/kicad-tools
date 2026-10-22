@@ -2002,11 +2002,12 @@ def _centered_sub_host(
     ``sub_host`` is just long enough for the trombone generator to fit
     ``loops`` loops (its own 90% margin included), never shorter than
     ``min_length_mm``.  When the host has no slack the segment is returned
-    unchanged with empty leads.  ``chamfer_mm`` is the corner chamfer of a
-    chamfered trombone (Issue #7546), whose loops are ``4 * chamfer_mm``
-    longer.  ``anchor`` is the fraction of the host's slack left before the
-    trombone: ``0.5`` centres it, ``1.0`` seats it at the segment's second
-    endpoint (Issue #7548), and an empty lead is omitted.
+    unchanged with empty leads.  ``chamfer_mm`` is the mean corner chamfer of
+    a chamfered trombone (Issue #7546), whose loops are ``4 * chamfer_mm``
+    longer (half of :meth:`SerpentineConfig.leg_advance_mm` when crown and
+    foot chamfers differ).  ``anchor`` is the fraction of the host's slack
+    left before the trombone: ``0.5`` centres it, ``1.0`` seats it at the
+    segment's second endpoint (Issue #7548), and an empty lead is omitted.
     """
     from .primitives import Segment as _Segment
 

@@ -133,6 +133,12 @@ def _tune_beside_vias(host_mm: float = 8.0, skew_mm: float = 0.8):
 WIDE_ONLY = (SKEW_BUMP_CHAMFER_WIDTHS,)
 
 
+def _ladder_only():
+    """Keep the four-corner ladder's result (Issue #7546 adds a square-foot
+    cascade beside it, which needs less host per loop)."""
+    return patch.object(tuning, "_square_feet_win", lambda *_a: False)
+
+
 def test_partial_bumps_slide_past_the_foreign_vias():
     """No full-need bump clears both vias; partial ones between them close it."""
     with patch.object(tuning, "SKEW_BUMP_CHAMFER_LADDER", WIDE_ONLY):
@@ -148,6 +154,7 @@ def test_without_partial_bumps_the_vias_block_the_pair():
     with (
         patch.object(tuning, "SKEW_BUMP_CHAMFER_LADDER", WIDE_ONLY),
         patch.object(tuning, "_partial_placement_options", lambda **_kw: iter(())),
+        _ladder_only(),
     ):
         _p, _n, result = _tune_beside_vias()
     assert not result.success
@@ -178,14 +185,15 @@ def test_pair_the_wide_chamfer_closes_keeps_it():
 def test_ladder_closes_a_pair_the_wide_chamfer_cannot():
     """Too little host for 0.55-width loops; a tighter chamfer packs enough."""
     routes = _routes(12.0, 2.5)
-    with patch.object(tuning, "SKEW_BUMP_CHAMFER_LADDER", WIDE_ONLY):
+    with patch.object(tuning, "SKEW_BUMP_CHAMFER_LADDER", WIDE_ONLY), _ladder_only():
         _p, _n, wide = tune_diff_pair_skew(
             _pair(), routes, tolerance_mm=0.1, intra_pair_clearance_mm=GAP
         )
     assert not wide.success
-    p_out, _n, result = tune_diff_pair_skew(
-        _pair(), routes, tolerance_mm=0.1, intra_pair_clearance_mm=GAP
-    )
+    with _ladder_only():
+        p_out, _n, result = tune_diff_pair_skew(
+            _pair(), routes, tolerance_mm=0.1, intra_pair_clearance_mm=GAP
+        )
     assert result.success, result.message
     assert result.skew_after_mm <= 0.1
     assert _chamfer_widths(p_out) < SKEW_BUMP_CHAMFER_WIDTHS
@@ -205,3 +213,23 @@ def test_no_rung_closes_the_pair_reports_the_wide_attempt():
     assert not result.success
     assert result.skew_after_mm == pytest.approx(wide.skew_after_mm)
     assert result.reason == wide.reason
+
+
+def test_square_feet_close_the_scarce_pair_with_the_wide_crown():
+    """Issue #7546: square-foot loops spend two chamfers of host instead of
+    four, so when the four-corner 0.55 rung cannot close the pair, 0.55-width
+    crowns on square feet can."""
+    routes = _routes(12.0, 2.5)
+    with patch.object(tuning, "SKEW_BUMP_CHAMFER_LADDER", WIDE_ONLY), _ladder_only():
+        _p, _n, wide = tune_diff_pair_skew(
+            _pair(), routes, tolerance_mm=0.1, intra_pair_clearance_mm=GAP
+        )
+    assert not wide.success
+    with patch.object(tuning, "SKEW_BUMP_CHAMFER_LADDER", WIDE_ONLY):
+        p_out, _n, result = tune_diff_pair_skew(
+            _pair(), routes, tolerance_mm=0.1, intra_pair_clearance_mm=GAP
+        )
+    assert result.success, result.message
+    assert result.skew_after_mm <= 0.1
+    assert _chamfer_widths(p_out) == pytest.approx(SKEW_BUMP_CHAMFER_WIDTHS, abs=1e-6)
+    _assert_gated(p_out)
