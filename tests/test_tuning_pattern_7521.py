@@ -1,8 +1,11 @@
-"""Skew-compensation bumps are written as KiCad tuning patterns (Issue #7521).
+"""KiCad tuning-pattern objects for skew bumps (Issue #7521).
 
 Step (2) of #7521 (operator ruling Q16 on #6858): the post-route skew tuner
-writes each bump it commits as a KiCad 10 ``(generated ...)`` tuning-pattern
-object owning the bump's segments.
+could write each bump it commits as a KiCad 10 ``(generated ...)``
+tuning-pattern object owning the bump's segments.  Operator ruling Q32 (on
+#7521) has the gated tuner commit chamfered *plain* copper instead, because
+KiCad counts a pattern's partner span in full; the pattern writer stays for
+hand-built bumps and is exercised on them here.
 
 The pinned-toolchain tests at the bottom load such boards in kicad-cli
 10.0.6 (CI's image; locally ``KCT_KICAD_DOCKER=1``) and skip elsewhere.
@@ -31,10 +34,10 @@ from kicad_tools.router.primitives import Route, Segment
 from kicad_tools.router.tuning_pattern import (
     MODE_DIFF_PAIR_SKEW,
     STATUS_TOO_SHORT,
-    STATUS_TUNED,
     TuningPattern,
     bump_members,
     read_tuning_patterns,
+    retag,
     skew_bump_pattern,
     tag_skew_bump,
 )
@@ -189,21 +192,16 @@ class TestEmission:
         assert read_tuning_patterns(text)[0].members == ("a", "b", "c")
 
 
-class TestTunerTagsBumps:
-    def test_committed_bump_is_tagged(self):
+class TestTunerCommitsPlainBumps:
+    def test_committed_bump_is_plain_copper(self):
+        """Operator ruling Q32: no tuning pattern on the tuner's bumps."""
         p, n, result = _tuned_pair()
-        assert result.reason == "tuned" and result.inserts_applied == 1
+        assert result.reason == "tuned" and result.inserts_applied >= 1
         assert all(s.tuning_pattern is None for s in p.segments)
-        tagged = [s for s in n.segments if s.tuning_pattern is not None]
-        assert tagged, "the bump must be owned by a tuning pattern"
-        assert {id(s.tuning_pattern) for s in tagged} == {id(tagged[0].tuning_pattern)}
-        pattern = tagged[0].tuning_pattern
-        assert pattern.net_name == "D_N" and pattern.last_status == STATUS_TUNED
-        assert pattern.diff_pair_gap == GAP
-        # Lead-in/lead-out copper along the host line stays ordinary copper.
-        assert len(tagged) < len(n.segments)
+        assert all(s.tuning_pattern is None for s in n.segments)
+        assert len(n.segments) > 1
 
-    def test_unreached_target_is_marked_too_short(self):
+    def test_unreached_target_stays_plain(self):
         p = _straight(1, "D_P", Y_P, 130.0)
         n = _straight(2, "D_N", Y_N, 110.0)
         _p, n_out, result = tune_diff_pair_skew(
@@ -215,8 +213,7 @@ class TestTunerTagsBumps:
             config=SerpentineConfig(amplitude=0.2),
         )
         assert result.reason == "exceeded_max_inserts" and result.inserts_applied == 1
-        tagged = [s for s in n_out.segments if s.tuning_pattern is not None]
-        assert {s.tuning_pattern.last_status for s in tagged} == {STATUS_TOO_SHORT}
+        assert all(s.tuning_pattern is None for s in n_out.segments)
 
 
 # ---------------------------------------------------------------------------
@@ -322,8 +319,11 @@ def _segments(text: str) -> list[tuple[float, ...]]:
 class TestPinnedKicadCli:
     def test_patterns_survive_load_and_save(self, pinned_cli):
         cli, root = pinned_cli
-        p, n, result = _tuned_pair()
-        assert result.reason == "tuned"
+        p, n, segs = _hand_bump()
+        pattern, members = skew_bump_pattern(
+            segs, p, diff_pair_gap=GAP, min_spacing=0.6, tolerance_mm=0.127
+        )
+        tag_skew_bump(members, pattern)
         pcb = _write_board(root, "tuned", [p, n])
         before = pcb.read_text()
         assert len(read_tuning_patterns(before)) == 1
@@ -344,16 +344,11 @@ class TestPinnedKicadCli:
 
     def test_too_short_status_round_trips(self, pinned_cli):
         cli, root = pinned_cli
-        p = _straight(1, "D_P", Y_P, 130.0)
-        n = _straight(2, "D_N", Y_N, 110.0)
-        p, n, _result = tune_diff_pair_skew(
-            _pair(),
-            {1: p, 2: n},
-            tolerance_mm=0.127,
-            intra_pair_clearance_mm=GAP,
-            max_inserts=1,
-            config=SerpentineConfig(amplitude=0.2),
+        p, n, segs = _hand_bump()
+        pattern, members = skew_bump_pattern(
+            segs, p, diff_pair_gap=GAP, min_spacing=0.6, tolerance_mm=0.127
         )
+        retag(members, pattern, last_status=STATUS_TOO_SHORT)
         pcb = _write_board(root, "too_short", [p, n])
         subprocess.run(
             [cli, "pcb", "upgrade", "--force", str(pcb)], check=True, capture_output=True

@@ -1,9 +1,12 @@
 """KiCad tuning-pattern (``generated``) objects for skew-compensation bumps.
 
-Issue #7521 (operator ruling Q16 on #6858), step (2): skew-compensation
-bumps are written as KiCad 10 tuning-pattern generator objects instead of
-anonymous track segments, so KiCad's own DRC can tell a deliberate bump from
-an accidental uncoupled run.
+Issue #7521 (operator ruling Q16 on #6858), step (2): this module writes
+KiCad 10 tuning-pattern generator objects, so KiCad's own DRC can tell a
+deliberate bump from an accidental uncoupled run.  Since operator ruling Q32
+(#7521) the skew tuner no longer emits them: its bumps are 45-degree-chamfered
+plain copper, because a pattern bump leaves the partner copper beside it
+counted as uncoupled in full.  The writer stays for hand-built bumps and for
+reading patterns others authored.
 
 File format
 ===========

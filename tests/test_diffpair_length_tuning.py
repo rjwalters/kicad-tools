@@ -38,6 +38,7 @@ from kicad_tools.router.diffpair_detection import DetectedPair, DetectionSource
 from kicad_tools.router.diffpair_length_tuning import (
     MAX_INSERTS_PER_PAIR,
     SERPENTINE_TARGET_HEADROOM_FRACTION,
+    SKEW_BUMP_CHAMFER_LADDER,
     DiffPairTuneResult,
     tune_diff_pair_skew,
 )
@@ -370,8 +371,11 @@ class TestCascadeBudget:
                 config=cfg,
             )
 
-        assert call_count["n"] == MAX_INSERTS_PER_PAIR, (
-            f"Expected exactly {MAX_INSERTS_PER_PAIR} add_serpentine calls, got {call_count['n']}"
+        # Issue #7521: the gated tuner runs the cascade once per chamfer of
+        # its ladder, each run capped at the budget.
+        expected = len(SKEW_BUMP_CHAMFER_LADDER) * MAX_INSERTS_PER_PAIR
+        assert call_count["n"] == expected, (
+            f"Expected exactly {expected} add_serpentine calls, got {call_count['n']}"
         )
         assert result.attempts == MAX_INSERTS_PER_PAIR
         assert result.reason == "exceeded_max_inserts"
@@ -411,14 +415,14 @@ class TestPostInsertionRollback:
         neighbor = Route(
             net=3,
             net_name="VCC",
-            segments=[Segment(0.0, -0.5, 10.0, -0.5, 0.2, Layer.F_CU, net=3, net_name="VCC")],
+            segments=[Segment(0.0, -0.3, 10.0, -0.3, 0.2, Layer.F_CU, net=3, net_name="VCC")],
         )
         # Issue #6788: the tuner now also tries the reverse side, so block
         # the +y side (toward the partner) the same way.
         neighbor_inner = Route(
             net=4,
             net_name="VCC2",
-            segments=[Segment(0.0, 0.5, 10.0, 0.5, 0.2, Layer.F_CU, net=4, net_name="VCC2")],
+            segments=[Segment(0.0, 0.3, 10.0, 0.3, 0.2, Layer.F_CU, net=4, net_name="VCC2")],
         )
         routes = {1: p, 2: n, 3: neighbor, 4: neighbor_inner}
         original_p = p
@@ -526,7 +530,7 @@ class TestSuccessfulTuning:
             pair,
             routes,
             tolerance_mm=0.5,
-            intra_pair_clearance_mm=0.1,
+            intra_pair_clearance_mm=0.5,
             config=SerpentineConfig(amplitude=1.0, min_spacing=0.2, gap_factor=2.0),
         )
 
@@ -615,7 +619,7 @@ class TestTripleGate:
             Route(
                 net=2,
                 net_name="USB_D-",
-                segments=[Segment(0.0, 5.0, 16.0, 5.0, 0.2, Layer.F_CU, net=2, net_name="USB_D-")],
+                segments=[Segment(0.0, 5.0, 13.0, 5.0, 0.2, Layer.F_CU, net=2, net_name="USB_D-")],
             ),
         ]
 
@@ -646,7 +650,7 @@ class TestTripleGate:
             f"got {call_count['n']}"
         )
         assert ("USB_D+", "USB_D-") in results
-        # A 4mm skew at default amplitude=1.0 / 2 loops should tune cleanly.
+        # A 1mm skew fits the bumps the pair-gap excursion cap (#7521) allows.
         assert results[("USB_D+", "USB_D-")].reason in ("tuned", "already_within_tolerance")
 
 
@@ -939,7 +943,7 @@ class TestExactFitAndPlacementSearch:
         p = _straight_route(1, "USB_D+", 20.0, y=0.0)
         n = _straight_route(2, "USB_D-", 25.255, y=5.0)
         p_out, n_out, result = tune_diff_pair_skew(
-            _make_pair(), {1: p, 2: n}, tolerance_mm=0.5, intra_pair_clearance_mm=0.1
+            _make_pair(), {1: p, 2: n}, tolerance_mm=0.5, intra_pair_clearance_mm=0.5
         )
         assert result.success is True
         assert result.reason == "tuned"
@@ -960,7 +964,7 @@ class TestExactFitAndPlacementSearch:
 
         with patch.object(SerpentineGenerator, "add_serpentine", noop):
             _p, _n, result = tune_diff_pair_skew(
-                _make_pair(), {1: p, 2: n}, tolerance_mm=0.5, intra_pair_clearance_mm=0.1
+                _make_pair(), {1: p, 2: n}, tolerance_mm=0.5, intra_pair_clearance_mm=1.0
             )
         assert result.success is True
         assert result.inserts_applied == 1
@@ -979,7 +983,7 @@ class TestExactFitAndPlacementSearch:
             _make_pair(),
             {1: p, 2: n, 3: blocker},
             tolerance_mm=0.5,
-            intra_pair_clearance_mm=0.1,
+            intra_pair_clearance_mm=0.5,
         )
         assert result.success is True
         assert result.reason == "tuned"
@@ -999,6 +1003,15 @@ class TestExactFitAndPlacementSearch:
 
 
 class TestUncoupledGuardAndOvershootRevert:
+    @pytest.fixture(autouse=True)
+    def _isolate_uncoupled_guard(self):
+        """Judge the uncoupled guard alone: the hand-built folds here break the
+        issue #7521 AC3 geometry gates, which have their own tests."""
+        with patch(
+            "kicad_tools.router.diffpair_length_tuning.bump_gate_violation", return_value=None
+        ):
+            yield
+
     @staticmethod
     def _figures(p: Route, n: Route) -> tuple[float, float]:
         """``(uncoupled(P), uncoupled(N))`` exactly as ``kct check`` measures them."""
@@ -1084,10 +1097,12 @@ class TestUncoupledGuardAndOvershootRevert:
             max_uncoupled_mm=4.0,
         )
         assert result.success is False
-        assert result.inserts_applied == 0
-        assert p_out is p and p_out.segments is p.segments
         assert n_out is n
-        assert "uncoupled length exceeds limit" in result.message
+        # Issue #7521: a partial bump small enough to keep the figure under
+        # the limit may still be committed (and the skew stays open); the
+        # meander that would close it crosses the limit and is refused.
+        assert max(self._figures(p_out, n_out)) <= 4.0 + 1e-6
+        assert result.skew_after_mm > 0.5
 
     def test_meander_raising_longer_half_uncoupled_is_rejected(self):
         """The guard judges the checker's pair figure, both halves (Judge point 2).
@@ -1113,7 +1128,7 @@ class TestUncoupledGuardAndOvershootRevert:
                     _make_pair(),
                     {1: p, 2: n},
                     tolerance_mm=1.0,
-                    intra_pair_clearance_mm=0.1,
+                    intra_pair_clearance_mm=0.5,
                     max_uncoupled_mm=limit,
                 )
 
@@ -1169,7 +1184,7 @@ class TestUncoupledGuardAndOvershootRevert:
         from kicad_tools.router.optimizer.serpentine import SerpentineResult
 
         p = _straight_route(1, "USB_D+", 20.0, y=0.0)
-        n = _straight_route(2, "USB_D-", 25.0, y=-1.0)
+        n = _straight_route(2, "USB_D-", 22.5, y=-1.0)
         folded = self._folded_route(1, "USB_D+", y=0.0, legs=5, leg_mm=4.88)
 
         def fold(self, route, _target):
@@ -1186,7 +1201,7 @@ class TestUncoupledGuardAndOvershootRevert:
                 _make_pair(),
                 {1: p, 2: n},
                 tolerance_mm=1.0,
-                intra_pair_clearance_mm=0.1,
+                intra_pair_clearance_mm=0.6,
                 max_uncoupled_mm=10.0,
             )
         assert all(s.tuning_pattern is None for s in folded.segments)
@@ -1206,7 +1221,7 @@ class TestUncoupledGuardAndOvershootRevert:
                 _make_pair(),
                 {1: p, 2: n},
                 tolerance_mm=0.5,
-                intra_pair_clearance_mm=0.1,
+                intra_pair_clearance_mm=0.5,
                 **kw,
             )
             return [(s.x1, s.y1, s.x2, s.y2) for s in p_out.segments], result.reason
