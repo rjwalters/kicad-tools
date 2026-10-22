@@ -1124,6 +1124,19 @@ def parse_route_log(text: str) -> dict:
     out["hit_timeout"] = bool(
         re.search(r"deadline (?:reached|exceeded)|stage deadline fired --|\(deadline\)", text, re.I)
     )
+    # The stranded-pour oracle (kicad-cli DRC) could not give an answer: first
+    # DRC crashed/OOM-killed (status 137) or docker was unreachable. The CLI
+    # says so in two stable lines, and the artifact is graded regardless of
+    # exit code, so the row must carry the fact itself. Anchored at line start:
+    # a warning that merely quotes the phrase is not evidence.
+    unknown = re.search(r"^\s*stranded-pour status UNKNOWN\b", text, re.M)
+    failed = re.search(r"^\s*\d+ -> \d+ unconnected pour link\(s\) \(oracle_failed\)", text, re.M)
+    out["oracle_unverified"] = bool(unknown or failed)
+    if unknown:
+        skipped = re.findall(r"^\s*skipped: (.+)$", text, re.M)
+        out["oracle_unverified_reason"] = skipped[-1].strip() if skipped else "status UNKNOWN"
+    elif failed:
+        out["oracle_unverified_reason"] = "oracle_failed"
     # ``kct route`` keeps a result cache keyed on the board bytes and the CLI
     # recipe. A hit replays stored copper and routes nothing, so a "repeat" of
     # a row is not a second sample. The harness passes --no-cache; this records
@@ -1164,7 +1177,13 @@ def manufacturable(row: dict) -> bool | None:
     kicad-cli is trusted over the in-process ``Nets`` count: that count comes
     from ``NetStatusAnalyzer`` and can disagree with kicad-cli on exposed-pad
     / thermal-via footprints, so it is deliberately not a gate here.
+
+    ``None`` as well when the stranded-pour oracle failed or was skipped
+    (``oracle_unverified``, OOM 137 / docker unreachable): the board was graded
+    but never actually checked, so any "yes"/"no" would be invented.
     """
+    if row.get("oracle_unverified"):
+        return None
     kct = row.get("kct_check_errors_total", row.get("kct_check_errors"))
     cli = row.get("kicad_drc_errors")
     unconnected = row.get("kicad_drc_unconnected")
@@ -1538,7 +1557,9 @@ def _kct_errors(row: dict):
 
 def _manufacturable_cell(row: dict) -> str:
     verdict = row["manufacturable"] if "manufacturable" in row else manufacturable(row)
-    return "unknown" if verdict is None else ("yes" if verdict else "no")
+    if verdict is None:
+        return "unknown (oracle unverified)" if row.get("oracle_unverified") else "unknown"
+    return "yes" if verdict else "no"
 
 
 def render_route(rows: list[dict]) -> str:

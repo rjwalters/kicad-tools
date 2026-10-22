@@ -372,6 +372,7 @@ def test_route_log_facts_are_extracted():
         "layers_used": 4,
         "router_nets": "18/33",
         "hit_timeout": True,
+        "oracle_unverified": False,
         "cache_hit": False,
     }
     assert ere.parse_route_log("nothing relevant")["hit_timeout"] is False
@@ -1208,6 +1209,40 @@ def test_run_one_passes_and_records_deterministic_rescue(tmp_path, monkeypatch):
     )
     assert row["deterministic_rescue"] is False
     assert "--deterministic-rescue" not in row["cmd"]
+
+
+def test_oracle_failure_log_shapes_mark_row_unverified():
+    oom = (
+        "  skipped: kicad-cli exited with status 137 (killed)\n"
+        "  stranded-pour status UNKNOWN -- the run is reported unverified\n"
+    )
+    facts = ere.parse_route_log(oom)
+    assert facts["oracle_unverified"] is True
+    assert "137" in facts["oracle_unverified_reason"]
+
+    docker = "  3 -> 3 unconnected pour link(s) (oracle_failed)\n"
+    facts = ere.parse_route_log(docker)
+    assert facts["oracle_unverified"] is True
+    assert facts["oracle_unverified_reason"] == "oracle_failed"
+
+    clean = "  3 -> 0 unconnected pour link(s) (converged)\nNets routed: 3/3\n"
+    assert ere.parse_route_log(clean)["oracle_unverified"] is False
+    quoted = "WARNING: a 'stranded-pour status UNKNOWN' line marks an unverified run\n"
+    assert ere.parse_route_log(quoted)["oracle_unverified"] is False
+
+
+def test_oracle_unverified_row_has_no_manufacturable_verdict():
+    row = {
+        "exit_code": 0,
+        "kct_check_errors": 0,
+        "kicad_drc_errors": 0,
+        "kicad_drc_unconnected": 0,
+        "artifact": "final",
+    }
+    assert ere.manufacturable(row) is True
+    flagged = {**row, "oracle_unverified": True}
+    assert ere.manufacturable(flagged) is None
+    assert ere._manufacturable_cell(flagged) == "unknown (oracle unverified)"
 
 
 def test_route_log_records_which_wall_clocks_were_live():
