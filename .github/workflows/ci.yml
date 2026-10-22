@@ -706,8 +706,7 @@ jobs:
         # now gates: if it is red, fix the tests -- do NOT re-add
         # continue-on-error. Known-broken tests must be xfail'd with a
         # tracking issue instead.
-        # Match the temporary Board 07 job suspension (#5097, #5160).
-        # Its tests remain runnable locally; the same variable restores them.
+        # Match the Board 07 jobs: both are gated on vars.BOARD_07_CI_ENABLED.
         env:
           KCT_OBSERVER_CONTAINER_ID: ${{ job.container.id }}
           BOARD_07_CI_ENABLED: ${{ vars.BOARD_07_CI_ENABLED }}
@@ -1642,8 +1641,8 @@ jobs:
           retention-days: 14
 
   matchgroup-routing-regression:
-    # Temporarily suspended at user request (#5097) to unblock unrelated PRs.
-    # Set BOARD_07_CI_ENABLED=true after #5068/#5069 integration safeguards pass.
+    # Board 07 CI is enabled via the repository variable vars.BOARD_07_CI_ENABLED
+    # (#5097 suspension ended; #5164).
     needs: [changes, kicad_pin]
     if: ${{ (vars.BOARD_07_CI_ENABLED == 'true') && !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.board07 == 'true' || needs.changes.result == 'failure') }}
     # Issue #2726 / Epic #2661 Phase 3N: re-route board 07 (the
@@ -2648,8 +2647,8 @@ jobs:
           retention-days: 14
 
   board-07-end-to-end:
-    # Temporarily suspended at user request (#5097) to unblock unrelated PRs.
-    # Set BOARD_07_CI_ENABLED=true after #5068/#5069 integration safeguards pass.
+    # Board 07 CI is enabled via the repository variable vars.BOARD_07_CI_ENABLED
+    # (#5097 suspension ended; #5164).
     needs: [changes, kicad_pin]
     if: ${{ (vars.BOARD_07_CI_ENABLED == 'true') && !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.board07 == 'true' || needs.changes.result == 'failure') }}
     # Issue #3779: end-to-end gate for board 07 ("matchgroup-test").  The
