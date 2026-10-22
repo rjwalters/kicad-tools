@@ -12874,8 +12874,11 @@ class DiffPairRouter:
         # Check and apply length matching
         delta = pair.length_delta
         warning = None
+        # Issue #7767: gate on the limit ``kct check`` enforces when that is
+        # an error and stricter than the router's default ``max_length_delta``.
+        match_tol = self._inline_match_tolerance(pair)
 
-        if delta > pair.rules.max_length_delta:
+        if delta > match_tol:
             # Issue #3003: gate the inline serpentine shim on
             # ``length_critical=True``.  The intent is that length
             # matching for length-critical pairs is performed by the
@@ -12917,7 +12920,7 @@ class DiffPairRouter:
                     matched = match_pair_lengths(
                         p_routes[0],
                         n_routes[0],
-                        pair.rules.max_length_delta,
+                        match_tol,
                         add_serpentines=True,
                         intra_pair_clearance_mm=intra_clearance,
                         # Issue #3508: grid-validate the bulges (foreign
@@ -12971,10 +12974,33 @@ class DiffPairRouter:
                 max_allowed=pair.rules.max_length_delta,
             )
             print(f"    WARNING: {warning}")
+        elif delta > match_tol:
+            print(
+                f"    Length delta {delta:.3f}mm is within max_length_delta but "
+                f"above the enforced skew limit {match_tol:.3f}mm"
+            )
         else:
             print(f"    Length matched: delta={delta:.3f}mm (within tolerance)")
 
         return routes, warning
+
+    def _inline_match_tolerance(self, pair: DifferentialPair) -> float:
+        """Inline length-match tolerance for a committed coupled pair (#7767).
+
+        ``pair.rules.max_length_delta`` unless ``kct check`` enforces a
+        stricter skew limit for the pair as an error.
+        """
+        from kicad_tools.validate.diffpair_engagement import resolve_pair_thresholds
+
+        tol = float(pair.rules.max_length_delta)
+        thresholds = resolve_pair_thresholds(
+            getattr(self.autorouter, "net_class_map", None),
+            pair.positive.net_name,
+            pair.negative.net_name,
+        )
+        if thresholds.skew_severity == "error":
+            return min(tol, float(thresholds.skew_mm))
+        return tol
 
     def route_differential_pair_independent(
         self,
