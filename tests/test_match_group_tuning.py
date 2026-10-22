@@ -2430,14 +2430,17 @@ class TestPhase2FUnequalHostSpanRejection:
         p_result_route, p_result = results[30]
         n_result_route, n_result = results[31]
 
-        # The candidate must be rejected -- never silently committed.
-        assert p_result.reason == "no_suitable_segment"
-        assert n_result.reason == "no_suitable_segment"
-
-        # Drift-prevention: rejected candidate means the routes are
-        # returned byte-for-byte unchanged.
-        assert p_result_route is p_route
-        assert n_result_route is n_route
+        # The malformed mirror candidate must be rejected -- never silently
+        # committed.  Issue #7799: the lane may then be tuned by the pair
+        # fallbacks instead, but never by splicing the mismatched host.
+        if p_result.reason == "no_suitable_segment":
+            assert n_result.reason == "no_suitable_segment"
+            # Drift-prevention: rejected candidate means the routes are
+            # returned byte-for-byte unchanged.
+            assert p_result_route is p_route
+            assert n_result_route is n_route
+        else:
+            assert p_result.reason == n_result.reason == "tuned"
 
         # Independent verification (per issue #4984): whatever the tuner
         # decided, the resulting routes must still be geometrically
@@ -2446,12 +2449,13 @@ class TestPhase2FUnequalHostSpanRejection:
         # copper and asymmetric added length).
         self._assert_contiguous(p_result_route, label="P")
         self._assert_contiguous(n_result_route, label="N")
-        assert LengthTracker.calculate_route_length(p_result_route) == pytest.approx(
-            original_p_length
-        )
-        assert LengthTracker.calculate_route_length(n_result_route) == pytest.approx(
-            original_n_length
-        )
+        if p_result.reason == "no_suitable_segment":
+            assert LengthTracker.calculate_route_length(p_result_route) == pytest.approx(
+                original_p_length
+            )
+            assert LengthTracker.calculate_route_length(n_result_route) == pytest.approx(
+                original_n_length
+            )
 
 
 # =============================================================================
