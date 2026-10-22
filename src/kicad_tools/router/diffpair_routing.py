@@ -4950,6 +4950,7 @@ def _select_coupled_candidate(
     joint: tuple[Route, Route, Any] | None,
     pose: tuple[Route, Route, Any] | None,
     resolution: float,
+    skew_limit_mm: float | None = None,
 ) -> str | None:
     """Pick ``"joint"`` or ``"pose"`` among gate-surviving candidates (#6858).
 
@@ -4957,6 +4958,14 @@ def _select_coupled_candidate(
     lower skew (ties within 0.01 mm), then fewer vias; a full tie keeps the
     joint result, today's committed choice.  Returns ``None`` when neither
     candidate survived.
+
+    Issue #5333: when ``skew_limit_mm`` (the pair's authored ``kct check``
+    skew limit) is given and exactly ONE candidate meets it, that candidate
+    wins outright.  Uncoupled length is only a tie-break among candidates
+    that are equally acceptable to the checker; trading a pair that already
+    passes its skew rule for 0.16 mm less uncoupled copper (board 07
+    TMDS_D1: pose skew 0.070 mm vs joint 0.498 mm, limit 0.075 mm) leaves a
+    hard error the post-route tuner then cannot remove.
     """
     if joint is None and pose is None:
         return None
@@ -4966,6 +4975,10 @@ def _select_coupled_candidate(
         return "pose"
     j_unc, j_skew, j_vias = _coupled_candidate_metrics(joint[0], joint[1])
     t_unc, t_skew, t_vias = _coupled_candidate_metrics(pose[0], pose[1])
+    if skew_limit_mm is not None:
+        j_ok, t_ok = j_skew <= skew_limit_mm, t_skew <= skew_limit_mm
+        if j_ok != t_ok:
+            return "joint" if j_ok else "pose"
     if abs(j_unc - t_unc) > resolution:
         return "pose" if t_unc < j_unc else "joint"
     if abs(j_skew - t_skew) > _COUPLED_SELECT_SKEW_TOL_MM:
@@ -5737,6 +5750,23 @@ class DiffPairRouter:
             clearance_cells = routed_halo_radius_cells(seg, grid.rules, grid.resolution)
             grid._mark_segment(seg, clearance_cells=clearance_cells)
         self.autorouter._mark_route_on_cpp_grid(route)
+
+    def _checker_skew_limit_mm(self, pair: DifferentialPair) -> float | None:
+        """The pair's ``kct check`` skew limit when it is an ERROR (#5333).
+
+        ``None`` when the limit is only advisory (warning/info), so candidate
+        selection keeps its plain #6858 ordering for such pairs.
+        """
+        from kicad_tools.validate.diffpair_engagement import resolve_pair_thresholds
+
+        thresholds = resolve_pair_thresholds(
+            getattr(self.autorouter, "net_class_map", None),
+            pair.positive.net_name,
+            pair.negative.net_name,
+        )
+        if thresholds.skew_severity != "error":
+            return None
+        return float(thresholds.skew_mm)
 
     def _tune_committed_pair_skew(self, pair: DifferentialPair) -> bool:
         """Bump-tune a just-committed coupled pair's skew (Issue #7269).
@@ -12661,6 +12691,7 @@ class DiffPairRouter:
                     gated.get("joint"),
                     gated.get("pose"),
                     float(self.autorouter.grid.resolution),
+                    skew_limit_mm=self._checker_skew_limit_mm(pair),
                 )
             if pose_candidate is not None or joint_result is not None:
                 print(
