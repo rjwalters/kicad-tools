@@ -12,6 +12,7 @@ Key features:
 from __future__ import annotations
 
 import collections
+import dataclasses
 import heapq
 import itertools
 import logging
@@ -5769,6 +5770,49 @@ class DiffPairRouter:
         if thresholds.skew_severity != "error":
             return None
         return float(thresholds.skew_mm)
+
+    def _collapse_committed_via_hairpins(self, routes: list[Route]) -> int:
+        """Move committed vias back to their turn where a leg doubles back (#7782).
+
+        The joint search can run a leg past its via and return over the same
+        cells on the other layer; the doubled copper makes junctions whose
+        measured length depends on segment order.  A moved via must keep the
+        grid's segment, via and pad clearances, so a hairpin with no legal
+        site is left as routed.  Returns the number of vias moved.
+        """
+        from .via_hairpin import collapse_via_hairpins, merge_junction_runs
+
+        grid = self.autorouter.grid
+        total = 0
+        for route in routes:
+            if not route.vias:
+                continue
+
+            def via_ok(via: Via, net: int = route.net) -> bool:
+                return (
+                    grid.validate_via_clearance(via, net)[0]
+                    and grid.validate_via_to_via_clearance(via, net)[0]
+                    and grid.worst_via_pad_deficit(via, net)[0] <= _SHADOW_VIA_DEFICIT_EPS
+                )
+
+            trial = Route(
+                net=route.net,
+                net_name=route.net_name,
+                segments=[dataclasses.replace(s) for s in route.segments],
+                vias=[dataclasses.replace(v) for v in route.vias],
+            )
+            moved = collapse_via_hairpins(trial, via_ok)
+            moved += merge_junction_runs(trial)
+            if not moved:
+                continue
+            grid.unmark_route(route)
+            route.segments = trial.segments
+            route.vias = trial.vias
+            self.autorouter._mark_route(route)
+            total += moved
+        if total:
+            print(f"    [via-hairpin] resolved {total} hairpin edit(s) on the committed pair")
+        return total
 
     def _tune_committed_pair_skew(self, pair: DifferentialPair) -> bool:
         """Bump-tune a just-committed coupled pair's skew (Issue #7269).
@@ -12900,6 +12944,10 @@ class DiffPairRouter:
         # optimizer off it.
         if committed_coupled:
             self._committed_coupled_claims().update((pair.positive.net_id, pair.negative.net_id))
+
+        # Issue #7782: pull the joint search's via hairpins back to the turn
+        # before the lengths are taken (the collapse changes them).
+        self._collapse_committed_via_hairpins(routes)
 
         # Calculate lengths
         p_length = calculate_route_length(p_routes)
