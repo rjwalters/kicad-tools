@@ -66,6 +66,7 @@ Measured experiments on `kct route`; several record negative results.
 | [Diff-pair skew compensation](diffpair-skew-compensation.md) | Sourced skew limits and uncoupled-length budgets for the diff-pair skew fixer |
 | [Bundle crossing report](bundle-crossing-report.md) | Measured hit and false-alarm counts |
 | [Pad-budget via footprint](pad-budget-via-footprint-6415.md) | Via-footprint charging on board 05 |
+| [`--reserve-pour-only-passives` cross-board](reserve-pour-only-passives-cross-board.md) | Flag off/on on boards 03-07: closes board 05's last 2 pour links and changes no other board's outcome; the note recommends flipping the default with an opt-out (Issue #7794) |
 | [kct check vs kicad-cli lengths](kicad-length-bench-6725.md) | Per-net length and pair skew comparison |
 
 ## Calibration notes
