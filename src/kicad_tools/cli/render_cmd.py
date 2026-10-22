@@ -59,6 +59,12 @@ import sys
 from pathlib import Path
 
 from kicad_tools.cli.export_cmd import _find_pcb_for_export
+from kicad_tools.cli.kicad_toolchain import (
+    KiCadEnvironmentError,
+    docker_fallback_enabled,
+    docker_image,
+    evidence_toolchain,
+)
 from kicad_tools.cli.runner import (
     find_kicad_cli,
     get_kicad_version,
@@ -309,7 +315,39 @@ def _render_board(
 
 
 def run_render(args: argparse.Namespace) -> int:
-    """Execute the render command. Returns a process exit code."""
+    """Execute the render command. Returns a process exit code.
+
+    With ``KCT_KICAD_DOCKER=1`` the run executes inside the pinned evidence
+    toolchain so ``find_kicad_cli()`` resolves the Docker shim instead of a
+    host kicad-cli (#7810).  Renders are not readiness evidence, so the
+    pinned *version* is not enforced; the version that ran is reported in the
+    ``--format json`` output instead.
+    """
+    if not docker_fallback_enabled():
+        return _run_render(args, None)
+    root = Path(args.path)
+    mounts = [root if root.is_dir() else root.parent]
+    output = getattr(args, "output", None)
+    if output:
+        mounts.append(Path(output))
+    try:
+        with evidence_toolchain(mounts, required_version=None):
+            return _run_render(args, docker_image())
+    except KiCadEnvironmentError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+
+def _render_json(boards: list[dict], kicad_cli: Path, image: str | None) -> str:
+    """Serialize *boards* with the kicad-cli version (and image) that rendered them."""
+    payload: dict = {"kicad_cli_version": get_kicad_version(kicad_cli)}
+    if image:
+        payload["docker_image"] = image
+    payload["boards"] = boards
+    return json.dumps(payload, indent=2)
+
+
+def _run_render(args: argparse.Namespace, image: str | None) -> int:
     root = Path(args.path)
     if not root.exists():
         print(f"Error: path not found: {root}", file=sys.stderr)
@@ -369,7 +407,7 @@ def run_render(args: argparse.Namespace) -> int:
             allow_incomplete=allow_incomplete,
         )
         if args.format == "json":
-            print(json.dumps({"boards": [result]}, indent=2))
+            print(_render_json([result], kicad_cli, image))
         return (
             1 if result["status"] == "error" or result["model_check"]["status"] == "failed" else 0
         )
@@ -392,7 +430,7 @@ def run_render(args: argparse.Namespace) -> int:
     ]
 
     if args.format == "json":
-        print(json.dumps({"boards": results}, indent=2))
+        print(_render_json(results, kicad_cli, image))
 
     # Incomplete model coverage also fails, even if images were produced. Boards
     # skipped for lack of a PCB are a non-fatal condition (exit 0).

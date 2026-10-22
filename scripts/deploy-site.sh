@@ -256,9 +256,23 @@ fi
 
 # kicad-cli is OPTIONAL: if absent, skip renders and let the site fall back to
 # placeholder-board.svg.  board-metrics does not need kicad-cli.
+#
+# Renderer selection (Issue #7810): the 3D coverage gate audits against the
+# pinned model set, so renders should come from the pinned Docker kicad-cli too.
+# Honour an explicit KCT_KICAD_DOCKER=1; when it is unset and docker is
+# available, opt in.  An explicit KCT_KICAD_DOCKER=0 keeps the host kicad-cli.
+# With the Docker shim a host kicad-cli is not required.
 SKIP_RENDERS=0
-if ! command -v kicad-cli >/dev/null 2>&1; then
-  warn "'kicad-cli' not found — skipping board renders. The site will serve placeholder thumbnails."
+if [ -z "${KCT_KICAD_DOCKER:-}" ] && command -v docker >/dev/null 2>&1; then
+  export KCT_KICAD_DOCKER=1
+fi
+if [ "${KCT_KICAD_DOCKER:-}" = "1" ] && command -v docker >/dev/null 2>&1; then
+  info "Renderer: pinned Docker kicad-cli (KCT_KICAD_DOCKER=1)."
+elif command -v kicad-cli >/dev/null 2>&1; then
+  [ "${KCT_KICAD_DOCKER:-}" = "1" ] && warn "KCT_KICAD_DOCKER=1 but 'docker' not found; unset it or install docker."
+  info "Renderer: host kicad-cli (not the pinned release)."
+else
+  warn "'kicad-cli' not found (and no usable Docker) — skipping board renders. The site will serve placeholder thumbnails."
   SKIP_RENDERS=1
 fi
 
