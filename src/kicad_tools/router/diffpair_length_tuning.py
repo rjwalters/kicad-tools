@@ -210,6 +210,20 @@ SERPENTINE_TARGET_HEADROOM_FRACTION: float = 0.9
 # both engines.
 SKEW_BUMP_CHAMFER_WIDTHS: float = 0.55
 
+# Issue #7521: corner chamfers (in trace widths) the gated tuner tries for its
+# plain-copper bumps, in order.  Under the excursion cap (2x the pair gap,
+# issue #7649) host length is what runs out, and a tighter chamfer leaves each
+# leg more vertical rise: at a 0.225 mm trace and 0.267 mm amplitude a loop
+# adds 0.24 mm over 1.85 mm of host at 0.55 widths, 0.40 mm over 1.58 mm at
+# 0.25 and 0.45 mm over 1.49 mm at 0.15.  The whole cascade runs at each rung
+# in turn, from the pair's untouched routes, and the first rung that brings
+# the pair inside its limit wins; a pair the 0.55-width bumps already close is
+# tuned exactly as before.  Every rung is a 45-degree chamfer (operator ruling
+# Q32) under the same gates, and the uncoupled guard measures every bump (a
+# chamfer under half a width can read more uncoupled than a square loop; the
+# guard rejects a bump that breaks the pair's limit that way).
+SKEW_BUMP_CHAMFER_LADDER: tuple[float, ...] = (SKEW_BUMP_CHAMFER_WIDTHS, 0.25, 0.15)
+
 
 def tune_diff_pair_skew(
     pair: DetectedPair,
@@ -322,6 +336,58 @@ def tune_diff_pair_skew(
         this contract via ``is`` identity on both the longer route and
         its segments list.
     """
+    # Issue #7521: gated bumps try each chamfer of the ladder in turn.
+    ladder = (
+        SKEW_BUMP_CHAMFER_LADDER if intra_pair_clearance_mm > 0.0 else (SKEW_BUMP_CHAMFER_WIDTHS,)
+    )
+    first: tuple[Route, Route, DiffPairTuneResult] | None = None
+    for chamfer in ladder:
+        outcome = _tune_diff_pair_skew_once(
+            pair,
+            routes_by_net,
+            tolerance_mm=tolerance_mm,
+            intra_pair_clearance_mm=intra_pair_clearance_mm,
+            config=config,
+            max_inserts=max_inserts,
+            length_critical=length_critical,
+            grid=grid,
+            prefer_reserved_slack=prefer_reserved_slack,
+            fixed_segment_ids=fixed_segment_ids,
+            extra_clearance_ok=extra_clearance_ok,
+            route_length=route_length,
+            max_uncoupled_mm=max_uncoupled_mm,
+            corner_chamfer_widths=corner_chamfer_widths,
+            plain_chamfer_widths=chamfer,
+        )
+        if first is None:
+            first = outcome
+        if outcome[2].success or outcome[2].reason == "unrouted":
+            return outcome
+    # No rung closed the pair: report the first (0.55-width) attempt, as before.
+    assert first is not None
+    return first
+
+
+def _tune_diff_pair_skew_once(
+    pair: DetectedPair,
+    routes_by_net: dict[int, Route],
+    *,
+    tolerance_mm: float,
+    intra_pair_clearance_mm: float,
+    config: SerpentineConfig | None,
+    max_inserts: int,
+    length_critical: bool,
+    grid: RoutingGrid | None,
+    prefer_reserved_slack: bool,
+    fixed_segment_ids: set[int] | None,
+    extra_clearance_ok: Callable[..., bool] | None,
+    route_length: Callable[[Route], float] | None,
+    max_uncoupled_mm: float | None,
+    corner_chamfer_widths: float,
+    plain_chamfer_widths: float,
+) -> tuple[Route, Route, DiffPairTuneResult]:
+    """One :func:`tune_diff_pair_skew` cascade with plain bumps chamfered at
+    ``plain_chamfer_widths`` trace widths (issue #7521)."""
     p_id = pair.pair.positive.net_id
     n_id = pair.pair.negative.net_id
 
@@ -506,7 +572,11 @@ def tune_diff_pair_skew(
             "measure": measure,
         }
         for cand_route, cand_serp, as_pattern in _pattern_then_plain_options(
-            base_config, max_uncoupled_mm is not None, placement_kwargs, plain_only=gated
+            base_config,
+            max_uncoupled_mm is not None,
+            placement_kwargs,
+            plain_only=gated,
+            plain_chamfer_widths=plain_chamfer_widths,
         ):
             result.serpentine_results.append(cand_serp)
             if not cand_serp.success:
@@ -815,6 +885,7 @@ def _pattern_then_plain_options(
     placement_kwargs: dict[str, Any],
     *,
     plain_only: bool = False,
+    plain_chamfer_widths: float = SKEW_BUMP_CHAMFER_WIDTHS,
 ) -> Iterator[tuple[Route, SerpentineResult, bool]]:
     """Yield ``(route, serpentine, as_pattern)`` placements (Issue #7546).
 
@@ -837,10 +908,134 @@ def _pattern_then_plain_options(
         return
     plain_config = dataclasses.replace(
         base_config,
-        corner_chamfer_widths=max(base_config.corner_chamfer_widths, SKEW_BUMP_CHAMFER_WIDTHS),
+        corner_chamfer_widths=max(base_config.corner_chamfer_widths, plain_chamfer_widths),
     )
     for route, serp in _placement_options(base_config=plain_config, **placement_kwargs):
         yield route, serp, False
+    if plain_only:
+        # Issue #7521: last, bumps sized to the host they fit (partial ones).
+        for route, serp in _partial_placement_options(base_config=plain_config, **placement_kwargs):
+            yield route, serp, False
+
+
+#: Issue #7521: where along its host a partial bump may sit, as the fraction of
+#: the host's slack left before it (0 seats it at the host's start, 1 at its
+#: end).  A neighbour that crowds only part of the host -- a via beside it, a
+#: pad at one end -- leaves the bump room at another position.
+PARTIAL_BUMP_ANCHORS: tuple[float, ...] = (0.0, 0.25, 0.5, 0.75, 1.0)
+
+
+def _partial_placement_options(
+    *,
+    base_config: SerpentineConfig,
+    current_shorter: Route,
+    first_host: tuple[int, Segment],
+    first_hint: tuple[float, float],
+    longer_route: Route,
+    length_needed: float,
+    grid: RoutingGrid | None,
+    prefer_reserved_slack: bool,
+    shorter_id: int,
+    fixed_segment_ids: set[int] | None,
+    serpentine_target: float,
+    measure: Callable[[Route], float],
+) -> Iterator[tuple[Route, SerpentineResult]]:
+    """Yield bumps sized to the host they fit, partial ones included (issue #7521).
+
+    Under the excursion cap (2x the pair gap, issue #7649) a bump that closes
+    the whole skew can need more loops than any free stretch of host holds:
+    board 06's USB2_D+ has a single 7.75 mm host with a foreign via beside its
+    middle and a pad beside its start.  :func:`_placement_options` only offers
+    full-need bumps (the start-anchored one trimmed to the loops that fit), so
+    the cascade stopped there.  These options are the
+    fallback, pulled only once every full-need option was rejected: per host
+    and side, the most loops the host can hold (at most the need's worth, the
+    loops that cover it sized to it) first, then fewer at the capped
+    amplitude, each slid along the host (:data:`PARTIAL_BUMP_ANCHORS`).  The
+    cascade commits the first one that passes every gate and clearance
+    check and spends its next insert on the rest of the need, typically on the
+    host left beside the bump.  Nothing is loosened: each option is gated like
+    any other bump.
+    """
+    from .match_group_tuning import _centered_sub_host, _rank_candidate_segments
+    from .primitives import Route
+
+    hosts = [first_host]
+    for idx, seg in _rank_candidate_segments(
+        current_shorter,
+        min_segment_length=base_config.min_segment_length,
+        max_candidates=MAX_HOST_CANDIDATES + 1,
+        fixed_segment_ids=fixed_segment_ids,
+    ):
+        if idx != first_host[0] and len(hosts) < MAX_HOST_CANDIDATES:
+            hosts.append((idx, seg))
+
+    cap = base_config.amplitude
+    for host_no, (idx, host) in enumerate(hosts):
+        length = math.hypot(host.x2 - host.x1, host.y2 - host.y1)
+        spaced = jog_spaced(base_config, host.width)
+        gap = spaced.min_spacing * spaced.gap_factor
+        per_loop = spaced.loop_length_added(host.width, cap)
+        if per_loop <= 0.0 or length <= 0.0:
+            continue
+        # The most loops a host this long holds (``_centered_sub_host``'s
+        # sizing, the generator's 90% margin included), and no more than
+        # the need takes.
+        fit = int((0.9 * length - gap) / (2.0 * gap + 4.0 * spaced.chamfer_mm(host.width, cap)))
+        most = min(fit, math.ceil(length_needed / per_loop), base_config.max_iterations)
+        base_hint = first_hint if host_no == 0 else _outer_normal_hint(host, longer_route)
+        for hint in (base_hint, (-base_hint[0], -base_hint[1])):
+            for loops in range(most, 0, -1):
+                if loops * per_loop >= length_needed:
+                    # These loops cover the rest of the need: size them to
+                    # it (as ``exact_fit_amplitude`` does), not past it.
+                    amp = min(cap, spaced.amplitude_for(host.width, length_needed / loops))
+                    target = length_needed
+                else:
+                    # Loops at the cap; just under their worth, so the
+                    # generator's ``ceil`` lands on exactly ``loops``.
+                    amp = cap
+                    target = loops * per_loop * (1.0 - 1e-9)
+                config = SerpentineConfig(
+                    style=base_config.style,
+                    amplitude=amp,
+                    min_spacing=spaced.min_spacing,
+                    min_segment_length=0.0,
+                    gap_factor=base_config.gap_factor,
+                    max_iterations=base_config.max_iterations,
+                    side="outer",
+                    outer_normal_hint=hint,
+                    corner_chamfer_widths=base_config.corner_chamfer_widths,
+                )
+                seen: set[tuple[float, float]] = set()
+                for anchor in PARTIAL_BUMP_ANCHORS:
+                    sub_host, lead_in, lead_out = _centered_sub_host(
+                        host,
+                        loops=loops,
+                        gap_mm=gap,
+                        min_length_mm=0.0,
+                        chamfer_mm=config.chamfer_mm(host.width, amp),
+                        anchor=anchor,
+                    )
+                    key = (round(sub_host.x1, 6), round(sub_host.y1, 6))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    serp = SerpentineGenerator(config).generate_trombone(sub_host, target)
+                    if serp.success:
+                        serp.new_segments = lead_in + serp.new_segments + lead_out
+                    yield (
+                        Route(
+                            net=current_shorter.net,
+                            net_name=current_shorter.net_name,
+                            segments=current_shorter.segments[:idx]
+                            + serp.new_segments
+                            + current_shorter.segments[idx + 1 :],
+                            vias=current_shorter.vias.copy(),
+                            is_escape=current_shorter.is_escape,
+                        ),
+                        serp,
+                    )
 
 
 def _min_chamfered_amplitude(config: SerpentineConfig, width: float) -> float:

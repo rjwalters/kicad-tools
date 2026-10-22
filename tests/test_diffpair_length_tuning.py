@@ -38,6 +38,7 @@ from kicad_tools.router.diffpair_detection import DetectedPair, DetectionSource
 from kicad_tools.router.diffpair_length_tuning import (
     MAX_INSERTS_PER_PAIR,
     SERPENTINE_TARGET_HEADROOM_FRACTION,
+    SKEW_BUMP_CHAMFER_LADDER,
     DiffPairTuneResult,
     tune_diff_pair_skew,
 )
@@ -370,8 +371,11 @@ class TestCascadeBudget:
                 config=cfg,
             )
 
-        assert call_count["n"] == MAX_INSERTS_PER_PAIR, (
-            f"Expected exactly {MAX_INSERTS_PER_PAIR} add_serpentine calls, got {call_count['n']}"
+        # Issue #7521: the gated tuner runs the cascade once per chamfer of
+        # its ladder, each run capped at the budget.
+        expected = len(SKEW_BUMP_CHAMFER_LADDER) * MAX_INSERTS_PER_PAIR
+        assert call_count["n"] == expected, (
+            f"Expected exactly {expected} add_serpentine calls, got {call_count['n']}"
         )
         assert result.attempts == MAX_INSERTS_PER_PAIR
         assert result.reason == "exceeded_max_inserts"
@@ -1093,10 +1097,12 @@ class TestUncoupledGuardAndOvershootRevert:
             max_uncoupled_mm=4.0,
         )
         assert result.success is False
-        assert result.inserts_applied == 0
-        assert p_out is p and p_out.segments is p.segments
         assert n_out is n
-        assert "uncoupled length exceeds limit" in result.message
+        # Issue #7521: a partial bump small enough to keep the figure under
+        # the limit may still be committed (and the skew stays open); the
+        # meander that would close it crosses the limit and is refused.
+        assert max(self._figures(p_out, n_out)) <= 4.0 + 1e-6
+        assert result.skew_after_mm > 0.5
 
     def test_meander_raising_longer_half_uncoupled_is_rejected(self):
         """The guard judges the checker's pair figure, both halves (Judge point 2).
