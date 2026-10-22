@@ -803,7 +803,13 @@ def retune_pcb(
 def _clearance_findings(
     pcb_path: Path, net_class_map: dict, nets: set[str]
 ) -> dict[tuple[str, tuple[str, ...], str], float]:
-    """Smallest measured gap per (rule, net pair, layer) of clearance errors on ``nets``."""
+    """Smallest measured gap per (rule, net pair, layer) of clearance errors on ``nets``.
+
+    Copper-to-copper only.  Zone fills are deliberately not compared: the
+    retune does not regenerate them, so a bump laid across a committed foreign
+    fill is stale-fill noise that the next zone refill carves around (Board 07's
+    ``+1V8`` pour); segment-vs-zone errors would refuse every such bump.
+    """
     from kicad_tools.schema.pcb import PCB
     from kicad_tools.validate import DRCChecker
 
@@ -811,13 +817,12 @@ def _clearance_findings(
     layers = len(pcb.copper_layers) or 2
     checker = DRCChecker(pcb, layers=layers, net_class_map=net_class_map)
     found: dict[tuple[str, tuple[str, ...], str], float] = {}
-    for results in (checker.check_clearances(), checker.check_segment_zone_clearances()):
-        for v in results.errors:
-            if not nets.intersection(v.nets):
-                continue
-            key = (v.rule_id, tuple(sorted(v.nets)), v.layer or "")
-            gap = v.actual_value if v.actual_value is not None else 0.0
-            found[key] = min(found.get(key, gap), gap)
+    for v in checker.check_clearances().errors:
+        if not nets.intersection(v.nets):
+            continue
+        key = (v.rule_id, tuple(sorted(v.nets)), v.layer or "")
+        gap = v.actual_value if v.actual_value is not None else 0.0
+        found[key] = min(found.get(key, gap), gap)
     return found
 
 
