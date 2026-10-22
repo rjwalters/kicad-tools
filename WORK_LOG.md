@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-22
 
+- **PR #7591**: feat: gate diff-pair skew bumps on excursion, jog width and source proximity
+- **Issue #7521** (closed): Diff-pair skew compensation per best practice (Q16): exclude tuning bumps from uncoupled metric, emit KiCad tuning patterns, geometry gates, sourced per-class skew limits
 - **PR #7763**: feat: DRC-check retune-lengths output, remove inherited-near-miss opt-in
 - **Issue #7760** (closed): retune-lengths: run DRC after writing, then drop allow_inherited_near_miss opt-in
 - **PR #7761**: chore(loom): resync installed Loom to v0.19.1205
