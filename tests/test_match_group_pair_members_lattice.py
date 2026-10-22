@@ -152,9 +152,10 @@ class TestUncoupledPairPerLeg:
         assert len(p_route.segments) > 1 and _contiguous(p_route)
         assert _measure(n_route) > _measure(original[2])
 
-    def test_legacy_path_still_declines(self):
+    def test_legacy_path_hands_mirror_miss_to_fallbacks(self):
+        """Issue #7799: no N host on the mirror path -> that lane falls back."""
         results = _tune(_pairs_group([(1, 2), (3, 4)]), self._routes(), pair_fallbacks=False)
-        assert results[1][1].reason == "no_suitable_segment"
+        assert results[1][1].reason == results[2][1].reason == "tuned"
 
     def test_one_sided_lengthening_is_rolled_back(self):
         """The invariant: a leg that cannot be tuned vetoes its partner's meander."""
@@ -176,11 +177,53 @@ class TestUncoupledPairPerLeg:
 class TestLatticeCoupledPairCentreline:
     """(b) offset rails get equal length from a centreline meander."""
 
-    def test_reflection_guard_rejects_without_fallbacks(self):
+    def test_mirror_miss_falls_back_without_pair_fallbacks(self):
+        """Issue #7799: the ``length_critical`` path (``pair_fallbacks=False``)
+        reaches the centreline meander when the mirror finds no N-side host,
+        and a lane the mirror cannot touch gets equal length on both rails."""
         routes = {**_lattice_pair(), **_reference_pair(6.0)}
+        p0, n0 = routes[1], routes[2]
         results = _tune(_pairs_group([(1, 2), (3, 4)]), routes, pair_fallbacks=False)
-        assert results[1][1].reason == "no_suitable_segment"
-        assert results[1][0] is routes[1]
+        p_route, p_res = results[1]
+        n_route, _ = results[2]
+        assert p_res.reason == "tuned"
+        assert _measure(p_route) - _measure(p0) == pytest.approx(
+            _measure(n_route) - _measure(n0), abs=1e-3
+        )
+        assert _contiguous(p_route) and _contiguous(n_route)
+
+    def test_mirror_miss_skips_fallback_for_pair_past_its_skew_limit(self):
+        """Issue #7805: a pair already past its skew limit keeps the mirror's
+        decline, so the pair-skew tuner later finds the copper as routed."""
+        routes = {**_lattice_pair(), **_reference_pair(6.0)}
+        p0, n0 = routes[1], routes[2]
+        assert abs(_measure(p0) - _measure(n0)) > 0.05
+        results = _tune(
+            _pairs_group([(1, 2), (3, 4)]),
+            routes,
+            pair_fallbacks=False,
+            pair_skew_limits_mm={(1, 2): 0.05, (3, 4): 0.05},
+        )
+        (p_route, p_res), (n_route, n_res) = results[1], results[2]
+        assert p_res.reason == n_res.reason == "no_suitable_segment"
+        assert p_route is p0 and n_route is n0
+        assert "Pair fallback skipped" in p_res.message
+
+    def test_mirror_miss_falls_back_for_pair_inside_its_skew_limit(self):
+        """Issue #7805: the gate only holds back pairs past their limit."""
+        routes = {**_lattice_pair(), **_reference_pair(6.0)}
+        p0, n0 = routes[1], routes[2]
+        limit = 0.2
+        assert abs(_measure(p0) - _measure(n0)) < limit
+        results = _tune(
+            _pairs_group([(1, 2), (3, 4)]),
+            routes,
+            pair_fallbacks=False,
+            pair_skew_limits_mm={(1, 2): limit, (3, 4): limit},
+        )
+        (p_route, p_res), (n_route, _) = results[1], results[2]
+        assert p_res.reason == "tuned"
+        assert abs(_measure(p_route) - _measure(n_route)) <= limit
 
     def test_equal_length_gap_kept_and_coupled(self):
         routes = {**_lattice_pair(), **_reference_pair(6.0)}
@@ -538,6 +581,29 @@ class TestClassClearanceFloor:
     def test_looser_foreign_class_does_not_raise_floor(self):
         kw = self._captured_kwargs(group_clearance=0.175, foreign_clearance=0.15)
         assert kw["intra_group_clearance_mm"] == pytest.approx(0.175)
+
+
+class TestLengthCriticalPassesPairSkewLimits:
+    def test_length_critical_path_gets_pair_skew_limits(self):
+        """Issue #7805: the mirror-miss fallback gate needs each pair's limit
+        on the ``length_critical`` path too."""
+        routes = {**_lattice_pair(), **_reference_pair(6.0)}
+        ar = _autorouter(list(routes.values()), {1: "D_P", 2: "D_N", 3: "C_P", 4: "C_N"}, 0.05)
+        group = _pairs_group([(1, 2), (3, 4)])
+        captured: dict = {}
+
+        def fake_tune(*a, **kw):
+            captured.update(kw)
+            return {}
+
+        with patch("kicad_tools.router.match_group_tuning.tune_match_group_v2", fake_tune):
+            ar.apply_match_group_tuning(
+                detected_groups=[group], verbose=False, engage="length_critical"
+            )
+        assert captured["pair_fallbacks"] is False
+        limits = captured["pair_skew_limits_mm"]
+        assert set(limits) == {(1, 2), (3, 4)}
+        assert all(v > 0.0 for v in limits.values())
 
 
 class TestBlindBuriedConsistency:

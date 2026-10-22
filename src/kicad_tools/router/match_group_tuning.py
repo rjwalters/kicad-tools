@@ -4281,6 +4281,48 @@ def _tune_match_group_of_pairs(
         if ref_lane_ceiling is None:
             ref_lane_ceiling = ref_length
 
+    def _run_lane_fallbacks(
+        p_id: int,
+        n_id: int,
+        result_p: TuneResult,
+        result_n: TuneResult,
+        target_length: float,
+        group_net_ids: set[int],
+        group_budget_left: int,
+    ) -> tuple[Route, Route, int]:
+        return _tune_pair_lane_with_fallbacks(
+            group=group,
+            p_id=p_id,
+            n_id=n_id,
+            routes_by_net=routes_by_net,
+            result_p=result_p,
+            result_n=result_n,
+            target_length=target_length,
+            tolerance_mm=tolerance_mm,
+            group_net_ids=group_net_ids,
+            intra_group_clearance_mm=intra_group_clearance_mm,
+            intra_pair_clearance_mm=intra_pair_clearance_mm,
+            base_config=base_config,
+            config=config,
+            max_inserts_per_member=max_inserts_per_member,
+            group_budget_left=group_budget_left,
+            grid_resolution_mm=grid_resolution_mm,
+            fixed_segment_ids=fixed_segment_ids,
+            via_clearance_mm=via_clearance_mm,
+            diff_pair_partners=diff_pair_partners,
+            pads_by_net=pads_by_net,
+            pad_clearance_mm=pad_clearance_mm,
+            net_clearance_mm=net_clearance_mm,
+            pad_floor_mm=pad_floor_mm,
+            board_thickness_mm=board_thickness_mm,
+            num_copper_layers=num_copper_layers,
+            blind_buried_supported=blind_buried_supported,
+            length_model=length_model,
+            measure=_measure,
+            pair_skew_limit_mm=(pair_skew_limits_mm or {}).get((p_id, n_id)),
+            leg_ceiling_mm=ref_leg_ceiling,
+        )
+
     # --- Per-pair iteration --------------------------------------------
     total_inserts_committed = 0
 
@@ -4422,37 +4464,14 @@ def _tune_match_group_of_pairs(
             # Issue #6675: host retry, centreline meanders for lattice
             # coupled pairs, per-leg tuning for uncoupled pairs, all under
             # the pair-skew invariant.
-            current_p, current_n, committed = _tune_pair_lane_with_fallbacks(
-                group=group,
-                p_id=p_id,
-                n_id=n_id,
-                routes_by_net=routes_by_net,
-                result_p=per_pair_result_p,
-                result_n=per_pair_result_n,
-                target_length=target_length,
-                tolerance_mm=tolerance_mm,
-                group_net_ids=group_net_ids,
-                intra_group_clearance_mm=intra_group_clearance_mm,
-                intra_pair_clearance_mm=intra_pair_clearance_mm,
-                base_config=base_config,
-                config=config,
-                max_inserts_per_member=max_inserts_per_member,
-                group_budget_left=MAX_TOTAL_INSERTS_PER_GROUP - total_inserts_committed,
-                grid_resolution_mm=grid_resolution_mm,
-                fixed_segment_ids=fixed_segment_ids,
-                via_clearance_mm=via_clearance_mm,
-                diff_pair_partners=diff_pair_partners,
-                pads_by_net=pads_by_net,
-                pad_clearance_mm=pad_clearance_mm,
-                net_clearance_mm=net_clearance_mm,
-                pad_floor_mm=pad_floor_mm,
-                board_thickness_mm=board_thickness_mm,
-                num_copper_layers=num_copper_layers,
-                blind_buried_supported=blind_buried_supported,
-                length_model=length_model,
-                measure=_measure,
-                pair_skew_limit_mm=(pair_skew_limits_mm or {}).get((p_id, n_id)),
-                leg_ceiling_mm=ref_leg_ceiling,
+            current_p, current_n, committed = _run_lane_fallbacks(
+                p_id,
+                n_id,
+                per_pair_result_p,
+                per_pair_result_n,
+                target_length,
+                group_net_ids,
+                MAX_TOTAL_INSERTS_PER_GROUP - total_inserts_committed,
             )
             total_inserts_committed += committed
             results[p_id] = (current_p, per_pair_result_p)
@@ -4465,6 +4484,7 @@ def _tune_match_group_of_pairs(
                 routes_by_net[n_id] = original_n_route
             continue
 
+        mirror_missed_n_host = False
         # Inner attempt loop (mirrors Phase 2E single-ended structure
         # but operates on the pair as a single logical "member").
         for attempt in range(max_inserts_per_member):
@@ -4533,6 +4553,7 @@ def _tune_match_group_of_pairs(
                     )
                 current_p = original_p_route
                 current_n = original_n_route
+                mirror_missed_n_host = True
                 break
             n_insertion_seg_idx, n_insertion_segment = n_corr
 
@@ -4728,6 +4749,47 @@ def _tune_match_group_of_pairs(
         else:
             for r in (per_pair_result_p, per_pair_result_n):
                 r.reason = r.reason or "exceeded_max_inserts"
+
+        if mirror_missed_n_host:
+            # Issue #7805: a pair already past its own skew limit is left for
+            # the pair-skew tuner.  Fixing that skew lengthens the shorter
+            # rail and moves the lane again, so tuning the lane first only
+            # spends the copper the skew fix needs.
+            skew_limit = (pair_skew_limits_mm or {}).get((p_id, n_id))
+            pair_skew_before = abs(member_lengths[p_id] - member_lengths[n_id])
+            if skew_limit is not None and pair_skew_before > skew_limit + 1e-9:
+                mirror_missed_n_host = False
+                for r in (per_pair_result_p, per_pair_result_n):
+                    r.message = (r.message or "") + (
+                        f" Pair fallback skipped: pair skew {pair_skew_before:.4f}mm "
+                        f"exceeds its {skew_limit:.4f}mm limit."
+                    )
+
+        if mirror_missed_n_host:
+            # Issue #7799: coupled rails from the joint search break at
+            # different points, so the mirror has no N-side host.  Only this
+            # lane leaves the mirror path: hand it to the fallback cascade
+            # (centreline meander, per-leg) from its original routes.  Lanes
+            # the mirror tunes never reach here, so their output is unchanged.
+            total_inserts_committed -= per_pair_result_p.inserts_applied
+            per_pair_result_p = TuneResult(length_before_mm=member_lengths[p_id])
+            per_pair_result_n = TuneResult(length_before_mm=member_lengths[n_id])
+            current_p, current_n, committed = _run_lane_fallbacks(
+                p_id,
+                n_id,
+                per_pair_result_p,
+                per_pair_result_n,
+                target_length,
+                group_net_ids,
+                MAX_TOTAL_INSERTS_PER_GROUP - total_inserts_committed,
+            )
+            total_inserts_committed += committed
+            results[p_id] = (current_p, per_pair_result_p)
+            results[n_id] = (current_n, per_pair_result_n)
+            if current_p is not original_p_route or current_n is not original_n_route:
+                routes_by_net[p_id] = current_p
+                routes_by_net[n_id] = current_n
+            continue
 
         for r, nid, route in (
             (per_pair_result_p, p_id, current_p),
