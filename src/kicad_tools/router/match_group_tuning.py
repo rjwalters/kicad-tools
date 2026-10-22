@@ -259,6 +259,13 @@ AMPLITUDE_BACKOFF_FACTORS: tuple[float, ...] = (1.0, 0.5, 0.25, 0.125)
 #: hosts few loops, so only a taller one reaches the length the lane lacks.
 PAIR_CENTERLINE_AMPLITUDE_FACTORS: tuple[float, ...] = (*AMPLITUDE_BACKOFF_FACTORS, 2.0)
 
+#: Issue #7815: where a pair centreline meander that does not fill its coupled
+#: span sits along it -- centred first (the historical placement), then
+#: against either end.  Board 07's DQS lane: the one coupled span ends at the
+#: BGA, where the centred 3-loop meander clipped DQ4's via and DQ6's trace; the
+#: same meander against the span's other end clears them.
+PAIR_CENTERLINE_ALIGNMENTS: tuple[float, ...] = (0.5, 0.0, 1.0)
+
 # Issue #7423: a committed meander must not end past the group target.  The
 # amplitude is re-fitted (at most this many times) while the member is more
 # than ``OVERSHOOT_EPS_MM`` past it.
@@ -3593,6 +3600,9 @@ def _tune_pair_lane_with_fallbacks(
             break
 
         candidate: tuple[Route, Route] | None = None
+        # Issue #7815: what each strategy found, for the failure message.
+        notes: list[str] = []
+        unmatched_hosts = 0
 
         # --- Strategy 1: mirrored meander, retried over ranked P hosts.
         hosts = _rank_candidate_segments(
@@ -3612,6 +3622,7 @@ def _tune_pair_lane_with_fallbacks(
                 current_n, p_seg, fixed_segment_ids=fixed_segment_ids
             )
             if n_corr is None:
+                unmatched_hosts += 1
                 last_reason = "no_suitable_segment"
                 last_message = (
                     f"No corresponding N-side segment found for the P-side "
@@ -3729,6 +3740,10 @@ def _tune_pair_lane_with_fallbacks(
                 )
                 if span.overlap_mm >= meander_footprint_mm(span.pitch_mm, leg_spacing, 1)
             ][:MAX_SEGMENT_RETRY_CANDIDATES]
+            if hosts and unmatched_hosts == len(hosts):
+                notes.append(f"mirror: no N-side segment matches any of {len(hosts)} P host(s)")
+            if not spans:
+                notes.append("centreline: no coupled span left that fits one bump")
             for span in spans:
                 partial: tuple[Route, Route] | None = None
                 p_host = merged_p.segments[span.p_index]
@@ -3745,82 +3760,92 @@ def _tune_pair_lane_with_fallbacks(
                     group_routes=other_member_routes,
                 )
                 first_side = 1 if hint[0] * span.nx + hint[1] * span.ny >= 0.0 else -1
-                for side in (first_side, -first_side):
-                    for amp_factor in PAIR_CENTERLINE_AMPLITUDE_FACTORS:
-                        meander = centerline_meander(
-                            span,
-                            p_host,
-                            n_host,
-                            length_add_mm=length_needed,
-                            amplitude_mm=base_config.amplitude * amp_factor,
-                            leg_spacing_mm=leg_spacing,
-                            side=side,
-                        )
-                        if meander is None:
-                            last_reason = last_reason or "no_suitable_segment"
-                            break
-                        cand_p = splice(merged_p, span.p_index, meander.p_segments)
-                        cand_n = splice(merged_n, span.n_index, meander.n_segments)
-                        # Issue #7423: rebuild with a smaller request while
-                        # the written candidate ends past the target.
-                        need = length_needed
-                        excess = overshoot(cand_p, cand_n, current_p, current_n)
-                        for _refit in range(MAX_OVERSHOOT_REFITS):
-                            if excess <= OVERSHOOT_EPS_MM:
-                                break
-                            need -= excess + QUANTIZED_REFIT_MARGIN_MM
-                            refit = (
-                                centerline_meander(
-                                    span,
-                                    p_host,
-                                    n_host,
-                                    length_add_mm=need,
-                                    amplitude_mm=base_config.amplitude * amp_factor,
-                                    leg_spacing_mm=leg_spacing,
-                                    side=side,
-                                )
-                                if need > 0.0
-                                else None
+                # Issue #7815: a centred meander that clips a neighbour may fit at
+                # either end of the span.  The ends are tried only once every centred
+                # candidate failed, so a lane the centred meander tunes is unchanged.
+                no_host = False
+                for align in PAIR_CENTERLINE_ALIGNMENTS:
+                    for side in (first_side, -first_side):
+                        for amp_factor in PAIR_CENTERLINE_AMPLITUDE_FACTORS:
+                            meander = centerline_meander(
+                                span,
+                                p_host,
+                                n_host,
+                                length_add_mm=length_needed,
+                                amplitude_mm=base_config.amplitude * amp_factor,
+                                leg_spacing_mm=leg_spacing,
+                                side=side,
+                                align=align,
                             )
-                            if refit is None:
+                            if meander is None:
+                                last_reason = last_reason or "no_suitable_segment"
+                                no_host = True
                                 break
-                            meander = refit
+                            if align != PAIR_CENTERLINE_ALIGNMENTS[0] and meander.slack_mm <= 1e-6:
+                                continue  # fills the span: the centred try was this one
                             cand_p = splice(merged_p, span.p_index, meander.p_segments)
                             cand_n = splice(merged_n, span.n_index, meander.n_segments)
+                            # Issue #7423: rebuild with a smaller request while
+                            # the written candidate ends past the target.
+                            need = length_needed
                             excess = overshoot(cand_p, cand_n, current_p, current_n)
-                        if excess > OVERSHOOT_EPS_MM:
-                            last_reason = "overshoot"
-                            last_message = (
-                                f"Centreline meander on pair ({p_id}, {n_id}) would end "
-                                f"{excess:.4f}mm past the group target as written."
+                            for _refit in range(MAX_OVERSHOOT_REFITS):
+                                if excess <= OVERSHOOT_EPS_MM:
+                                    break
+                                need -= excess + QUANTIZED_REFIT_MARGIN_MM
+                                refit = (
+                                    centerline_meander(
+                                        span,
+                                        p_host,
+                                        n_host,
+                                        length_add_mm=need,
+                                        amplitude_mm=base_config.amplitude * amp_factor,
+                                        leg_spacing_mm=leg_spacing,
+                                        side=side,
+                                        align=align,
+                                    )
+                                    if need > 0.0
+                                    else None
+                                )
+                                if refit is None:
+                                    break
+                                meander = refit
+                                cand_p = splice(merged_p, span.p_index, meander.p_segments)
+                                cand_n = splice(merged_n, span.n_index, meander.n_segments)
+                                excess = overshoot(cand_p, cand_n, current_p, current_n)
+                            if excess > OVERSHOOT_EPS_MM:
+                                last_reason = "overshoot"
+                                last_message = (
+                                    f"Centreline meander on pair ({p_id}, {n_id}) would end "
+                                    f"{excess:.4f}mm past the group target as written."
+                                )
+                                continue
+                            detail = paired_drc(
+                                meander.p_segments, meander.n_segments, cand_p, cand_n, pair_floor
                             )
-                            continue
-                        detail = paired_drc(
-                            meander.p_segments, meander.n_segments, cand_p, cand_n, pair_floor
-                        )
-                        if detail is not None:
-                            last_reason = "post_insertion_drc_violation"
-                            last_message = (
-                                f"Centreline meander on pair ({p_id}, {n_id}) rejected: {detail}"
-                            )
-                            continue
-                        if not skew_ok(cand_p, cand_n):
-                            last_reason = "rolled_back_pair_skew"
-                            last_message = (
-                                f"Centreline meander on pair ({p_id}, {n_id}) would raise "
-                                f"its skew past {skew_allowance:.3f}mm."
-                            )
-                            continue
-                        if target_length - lane(cand_p, cand_n) > tolerance_mm:
-                            # Issue #7766: a partial bump.  Keep the longest
-                            # one and try the taller rungs and the other
-                            # side before settling for it.
-                            if partial is None or lane(cand_p, cand_n) > lane(*partial):
-                                partial = (cand_p, cand_n)
-                            continue
-                        candidate = (cand_p, cand_n)
-                        break
-                    if candidate is not None:
+                            if detail is not None:
+                                last_reason = "post_insertion_drc_violation"
+                                last_message = f"Centreline meander on pair ({p_id}, {n_id}) rejected: {detail}"
+                                continue
+                            if not skew_ok(cand_p, cand_n):
+                                last_reason = "rolled_back_pair_skew"
+                                last_message = (
+                                    f"Centreline meander on pair ({p_id}, {n_id}) would raise "
+                                    f"its skew past {skew_allowance:.3f}mm."
+                                )
+                                continue
+                            if target_length - lane(cand_p, cand_n) > tolerance_mm:
+                                # Issue #7766: a partial bump.  Keep the longest
+                                # one and try the taller rungs and the other
+                                # side before settling for it.
+                                if partial is None or lane(cand_p, cand_n) > lane(*partial):
+                                    partial = (cand_p, cand_n)
+                                continue
+                            candidate = (cand_p, cand_n)
+                            break
+                        if candidate is not None or no_host:
+                            break
+                    if candidate is not None or no_host:
                         break
                 if candidate is None and partial is not None:
                     candidate = partial
@@ -3885,6 +3910,7 @@ def _tune_pair_lane_with_fallbacks(
         else:
             if leg:
                 last_reason, last_message = leg.split("|", 1)
+                last_message = "; ".join([*notes, f"per-leg: {last_message}"])
         break
 
     # --- Outcome --------------------------------------------------------
@@ -4856,6 +4882,8 @@ def mark_group_improved_still_over_limit(
                     f"{spread_mm:.3f}mm) but is still over its limit "
                     f"({tolerance_mm:.3f}mm); DRC-clean meanders kept "
                     f"(tuner outcome was {result.reason!r})."
+                    # Issue #7815: keep the tuner's own account of why it stopped.
+                    + (f" {result.message}" if result.message else "")
                 ),
                 serpentine_results=result.serpentine_results,
             )

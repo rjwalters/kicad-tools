@@ -64,10 +64,15 @@ class RetuneError(Exception):
     ``ambiguous_group``, ``unattainable``, ``timeout``, ...).
     """
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(
+        self, code: str, message: str, *, targets: list[TargetReport] | None = None
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+        #: ``unattainable`` only: every selected target, measured on the
+        #: board the run would have written (Issue #7815).
+        self.targets: list[TargetReport] = list(targets or [])
 
     def __str__(self) -> str:
         return f"{self.code}: {self.message}"
@@ -87,6 +92,9 @@ class TargetReport:
     achieved: bool
     status: str  # "already_satisfied" | "tuned" | "unattainable"
     tuner_reason: str = ""
+    #: Issue #7815: the members that kept the target over its limit, with the
+    #: tuner's own reason for each (empty when the target was achieved).
+    tuner_detail: str = ""
     #: Diff pairs only: the separate, tighter stretch target (not the gate).
     stretch_target_mm: float | None = None
     stretch_achieved: bool | None = None
@@ -102,7 +110,9 @@ class RetuneReport:
     input_sha256: str
     output_sha256: str
     tool_version: str
-    status: str  # "tuned" | "already_satisfied"
+    #: "tuned" | "already_satisfied" | "partial" (``keep_achieved`` only:
+    #: some targets are written, the ``unattainable`` ones are left as routed).
+    status: str
     targets: list[TargetReport] = field(default_factory=list)
     changed_nets: list[str] = field(default_factory=list)
     net_lengths_mm: dict[str, dict[str, float]] = field(default_factory=dict)
@@ -595,6 +605,48 @@ def _require_board_prerequisites(text: str, net_class_map: dict | None) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _limiting_members(
+    per_net: dict[int, tuple[Any, Any]], net_names: dict[int, str], tolerance_mm: float
+) -> str:
+    """The group members still short of the longest one, with the tuner's reason.
+
+    Issue #7815: the group-level reason set (``already_within_tolerance,
+    improved_still_over_limit``) does not say which member stopped short or
+    why.  A member limits the group when its tuned length is more than
+    ``tolerance_mm`` below the longest member; members that share a reason and
+    message (the two rails of a pair lane) are reported together.
+    """
+    if not per_net:
+        return ""
+    lengths = {nid: res.length_after_mm for nid, (_r, res) in per_net.items()}
+    longest = max(lengths.values())
+    entries: dict[tuple[str, str], list[str]] = {}
+    spans: dict[tuple[str, str], tuple[float, float]] = {}
+    for nid, (_r, res) in sorted(per_net.items()):
+        if res.success or longest - lengths[nid] <= tolerance_mm + _EPS:
+            continue
+        if res.reason in ("reference", "already_within_tolerance", "not_length_critical"):
+            continue
+        key = (res.reason, res.message)
+        entries.setdefault(key, []).append(net_names.get(nid, str(nid)))
+        spans.setdefault(key, (res.length_before_mm, res.length_after_mm))
+    return "; ".join(
+        f"{'/'.join(names)} {spans[key][0]:.3f} -> {spans[key][1]:.3f} mm "
+        f"of {longest:.3f} mm [{key[0]}]: {key[1]}"
+        for key, names in entries.items()
+    )
+
+
+def _failure_detail(failed: Sequence[TargetReport]) -> str:
+    return "; ".join(
+        f"{t.name}: skew {t.before_skew_mm:.4f} -> {t.after_skew_mm:.4f} mm, "
+        f"limit {t.tolerance_mm:g} mm ({t.tuner_reason or 'no tuner result'})"
+        + (f"; limited by {t.tuner_detail}" if t.tuner_detail else "")
+        for t in failed
+        if t.before_skew_mm is not None and t.after_skew_mm is not None
+    )
+
+
 def retune_pcb(
     input_pcb: str | Path,
     output_pcb: str | Path,
@@ -604,13 +656,96 @@ def retune_pcb(
     net_class_map: dict | None = None,
     provenance_path: str | Path | None = None,
     timeout_s: float = DEFAULT_TIMEOUT_S,
+    keep_achieved: bool = False,
 ) -> RetuneReport:
     """Retune the selected groups/pairs of ``input_pcb`` into ``output_pcb``.
 
     Raises :class:`RetuneError` (and writes nothing) on an unknown or
     ambiguous selection, missing rules/stackup, unsupported copper, a timeout,
     a target the tuners could not reach, or any change outside the selection.
+
+    ``keep_achieved`` (Issue #7815): when some targets are ``unattainable``,
+    re-run the retune on the *unchanged input* with those targets dropped, so
+    the targets that do reach their limit are still written (in one output,
+    by one uuid-seeded splice).  The dropped targets stay in the report with
+    status ``"unattainable"``, re-measured on the written board, and the
+    report's status is ``"partial"``.  Every other refusal still raises, and
+    so does a run in which no target is achieved.  Each re-run gets its own
+    ``timeout_s``.
     """
+    kw: dict[str, Any] = {
+        "net_class_map": net_class_map,
+        "provenance_path": provenance_path,
+        "timeout_s": timeout_s,
+    }
+    if not keep_achieved:
+        return _retune_once(input_pcb, output_pcb, groups=groups, diffpairs=diffpairs, **kw)
+
+    group_list = list(groups)
+    pair_list: list[tuple[str, str]] = [(p[0], p[1]) for p in diffpairs]
+    dropped: dict[str, TargetReport] = {}
+    while True:
+        try:
+            report = _retune_once(
+                input_pcb, output_pcb, groups=group_list, diffpairs=pair_list, **kw
+            )
+            break
+        except RetuneError as exc:
+            failed = [t for t in exc.targets if not t.achieved]
+            if exc.code != "unattainable" or not failed:
+                raise
+            for t in failed:
+                dropped[_target_key(t.kind, t.name)] = t
+            group_list = [g for g in group_list if _target_key("match_group", g) not in dropped]
+            pair_list = [
+                p for p in pair_list if _target_key("diffpair", f"{p[0]}/{p[1]}") not in dropped
+            ]
+            if not group_list and not pair_list:
+                # Nothing achievable is left: report every dropped target.
+                raise RetuneError(
+                    "unattainable",
+                    "target not reached; no output written. "
+                    + _failure_detail(list(dropped.values())),
+                    targets=list(dropped.values()),
+                ) from exc
+    if not dropped:
+        return report
+
+    # The dropped targets as they stand on the written board: their nets may
+    # be shared with a written target (a pair that is also a group lane).
+    assert net_class_map is not None
+    group_now, pair_now, _ = _measure(Path(report.output_path), net_class_map)
+    for t in dropped.values():
+        attempted = t.after_skew_mm
+        p_name, _, n_name = t.name.partition("/")
+        t.after_skew_mm = (
+            group_now.get(t.name)
+            if t.kind == "match_group"
+            else _pair_skew(pair_now, p_name, n_name)
+        )
+        t.achieved = False
+        t.status = "unattainable"
+        best = f"best attempt {attempted:.4f} mm, not written" if attempted is not None else ""
+        t.tuner_detail = "; limited by ".join(x for x in (best, t.tuner_detail) if x)
+    report.targets = [*report.targets, *dropped.values()]
+    report.status = "partial"
+    report.settings["unattainable_targets"] = [t.name for t in dropped.values()]
+    prov_bytes = (json.dumps(report.to_dict(), indent=2, sort_keys=True) + "\n").encode("utf-8")
+    _write_atomic(Path(report.provenance_path), prov_bytes)
+    return report
+
+
+def _retune_once(
+    input_pcb: str | Path,
+    output_pcb: str | Path,
+    *,
+    groups: Sequence[str] = (),
+    diffpairs: Sequence[tuple[str, str]] = (),
+    net_class_map: dict | None = None,
+    provenance_path: str | Path | None = None,
+    timeout_s: float = DEFAULT_TIMEOUT_S,
+) -> RetuneReport:
+    """One all-or-nothing retune (see :func:`retune_pcb`)."""
     from dataclasses import replace
 
     from kicad_tools.router.io import load_pcb_for_routing
@@ -730,6 +865,7 @@ def retune_pcb(
     before_geometry = _geometry_signature(router.routes)
 
     tuner_reasons: dict[str, str] = {}
+    tuner_details: dict[str, str] = {}
     with _deadline(timeout_s):
         # Issue #7766: pairs first.  A pair retune lengthens the short leg
         # of its lane, which can make that lane the group's reference, so the
@@ -757,6 +893,10 @@ def retune_pcb(
                 reasons = sorted({res.reason for (_r, res) in per_net.values()})
                 tuner_reasons[_target_key("match_group", name)] = (
                     ",".join(reasons) or "within_limit"
+                )
+                key = _target_key("match_group", name)
+                tuner_details[key] = _limiting_members(
+                    per_net, router.net_names, selection.tolerance.get(key, (0.0, ""))[0]
                 )
 
     # Which nets actually changed?
@@ -806,6 +946,7 @@ def retune_pcb(
     for t in targets:
         key = _target_key(t.kind, t.name)
         t.tuner_reason = tuner_reasons.get(key, "")
+        t.tuner_detail = tuner_details.get(key, "")
         assert t.before_skew_mm is not None
         if t.after_skew_mm is None:
             raise RetuneError("unmeasurable", f"{t.name}: cannot re-measure the written board")
@@ -818,12 +959,11 @@ def retune_pcb(
             t.status = "tuned" if t.achieved else "unattainable"
     failed = [t for t in targets if not t.achieved]
     if failed:
-        detail = "; ".join(
-            f"{t.name}: skew {t.before_skew_mm:.4f} -> {t.after_skew_mm:.4f} mm, "
-            f"limit {t.tolerance_mm:g} mm ({t.tuner_reason or 'no tuner result'})"
-            for t in failed
+        raise RetuneError(
+            "unattainable",
+            f"target not reached; no output written. {_failure_detail(failed)}",
+            targets=targets,
         )
-        raise RetuneError("unattainable", f"target not reached; no output written. {detail}")
 
     out_bytes = new_text.encode("utf-8")
     report = RetuneReport(

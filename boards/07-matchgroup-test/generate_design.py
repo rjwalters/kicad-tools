@@ -1824,10 +1824,13 @@ def retune_pair_skew(routed_path: Path, sidecar_path: Path) -> list[str]:
     All pairs go through ONE ``retune_pcb`` call: it seeds its uuid generator
     per call, so a second call on the same board re-mints the first call's
     uuids and the duplicates make the checker merge one pair's bump into
-    another net.  ``retune_pcb`` is all-or-nothing, and the result is swapped
-    in only when every pair reached the limit ``kct check`` enforces; when one
-    cannot, the board is left as routed and the DRC gate reports the skews.
-    Returns the ``"P/N"`` names that were tuned (empty when nothing changed).
+    another net.  Issue #7815: the call passes ``keep_achieved=True``, so a
+    target that cannot reach the limit ``kct check`` enforces (board 07's
+    ``DDR_DATA_BYTE_0`` under ``--differential-pairs``) is left as routed and
+    reported, while the targets that do reach it are still written -- the
+    retune re-runs on the untouched input without the failed target, so the
+    board is still spliced once.  The DRC gate reports what stays skewed.
+    Returns the names that were tuned (empty when nothing changed).
     """
     import tempfile
 
@@ -1845,6 +1848,7 @@ def retune_pair_skew(routed_path: Path, sidecar_path: Path) -> list[str]:
                 diffpairs=list(SKEW_RETUNE_PAIRS),
                 net_class_map=net_class_map,
                 provenance_path=Path(scratch) / "retune.json",
+                keep_achieved=True,
             )
         except RetuneError as exc:
             print(f"   not tuned ({exc})")
@@ -1853,11 +1857,14 @@ def retune_pair_skew(routed_path: Path, sidecar_path: Path) -> list[str]:
         # different filesystems on CI (EXDEV).
         shutil.move(str(out), str(routed_path))
     for t in report.targets:
-        print(
+        line = (
             f"   {t.name}: skew {t.before_skew_mm:.3f} -> {t.after_skew_mm:.3f} mm "
             f"(limit {t.tolerance_mm:g} mm)"
         )
-    return [t.name for t in report.targets]
+        if not t.achieved:
+            line += f" UNATTAINABLE: {t.tuner_reason}; {t.tuner_detail}"
+        print(line)
+    return [t.name for t in report.targets if t.achieved]
 
 
 def route_pcb(input_path: Path, output_path: Path) -> bool:
