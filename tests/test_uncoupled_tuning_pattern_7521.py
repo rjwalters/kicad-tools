@@ -232,9 +232,16 @@ class TestGuardedTunerAgreesWithPinnedKicadCli:
         # The #6795 rule, judged by KiCad's own figure: within the limit, or
         # no worse than before the insert.
         assert kicad <= limit + 1e-3 or kicad <= before + 1e-3
-        # Every committed bump is a pattern; none was demoted to plain copper.
-        bump = [s for s in n_out.segments if s.tuning_pattern is not None]
-        assert bool(bump) == bool(result.inserts_applied)
+        # Q32: a gated bump is 45-degree-chamfered plain copper, never a
+        # tuning pattern, so the legs never carry a pattern marker.
+        assert all(s.tuning_pattern is None for s in (*p_out.segments, *n_out.segments))
+        if result.inserts_applied:
+            diagonals = [
+                s
+                for s in (*p_out.segments, *n_out.segments)
+                if abs(abs(s.x2 - s.x1) - abs(s.y2 - s.y1)) < 1e-6 and abs(s.x2 - s.x1) > 1e-6
+            ]
+            assert diagonals, "a committed bump must carry 45-degree chamfered corners"
 
     def test_over_long_pair_is_refused_in_both_engines(self, pinned_cli):
         """P 20 / N 25 mm, 5 mm apart: any bump on P takes KiCad's figure 5.0 -> 6.2."""
