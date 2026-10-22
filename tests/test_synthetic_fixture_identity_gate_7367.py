@@ -102,9 +102,39 @@ def test_no_via_in_pad_entries(gate, allowance_name):
 # ---------------------------------------------------------------------------
 
 
+#: The entries board 07's allowance last held before issue #5333 emptied it.
+BOARD07_SYNTHETIC = {
+    ("diffpair_length_skew", "TMDS_D0_N/TMDS_D0_P"): 7619,
+    ("impedance", "MIPI_DAT1_N"): 7349,
+    ("impedance", "TMDS_D1_P"): 7349,
+}
+
+
+def with_board07_synthetic(gate):
+    """Install :data:`BOARD07_SYNTHETIC` on a freshly loaded matchgroup gate."""
+    gate.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS = dict(BOARD07_SYNTHETIC)
+    gate.MATCHGROUP_ALLOWANCES[BOARD07_KEY] = gate.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS
+    return gate
+
+
+def test_board07_committed_allowance_is_empty():
+    """Issue #5333: the ``--differential-pairs`` re-route fires none of the
+    former entries, so board 07 allows no blocking finding at all."""
+    gate = load("check_matchgroup_coverage")
+    assert gate.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS == {}
+    assert gate.board_allowance(BOARD07_KEY) == {}
+
+
 class TestBoard07:
+    """The identity mechanism on board 07's key, with a synthetic allowance.
+
+    Issue #5333 emptied the committed allowance; these tests install the
+    entries it last held (#7619 TMDS_D0 skew, #7349 impedance) on a freshly
+    loaded gate so the stale / swapped / zero-budget paths stay covered.
+    """
+
     def gate(self):
-        return load("check_matchgroup_coverage")
+        return with_board07_synthetic(load("check_matchgroup_coverage"))
 
     def measured(self):
         """The seed-42 re-route: every allowed identity fires, plus advisory opens."""
@@ -306,8 +336,12 @@ def test_unallowed_findings_counts_records_and_skips_warnings():
 # ---------------------------------------------------------------------------
 
 
-def _stub_matchgroup(monkeypatch, tmp_path, found: list[dict], fired_groups: set[str]):
+def _stub_matchgroup(
+    monkeypatch, tmp_path, found: list[dict], fired_groups: set[str], *, synthetic: bool = True
+):
     gate = load("check_matchgroup_coverage")
+    if synthetic:
+        with_board07_synthetic(gate)
     board = tmp_path / "07-matchgroup-test"
     board.mkdir()
     pcb = board / "matchgroup_test_routed.kicad_pcb"
@@ -334,6 +368,29 @@ def _stub_matchgroup(monkeypatch, tmp_path, found: list[dict], fired_groups: set
 
 
 class TestBoard07CheckBoard:
+    def test_clean_reroute_passes_on_the_committed_allowance(self, monkeypatch, tmp_path, capsys):
+        """Issue #5333: the measured ``--differential-pairs`` re-route has no
+        blocking finding, and the empty committed allowance has nothing stale."""
+        gate = load("check_matchgroup_coverage")
+        found = [violation("connectivity", "TMDS_D0_N")]
+        groups = set(gate.MATCHGROUP_ALLOWED_GROUPS[BOARD07_KEY])
+        gate, board = _stub_matchgroup(monkeypatch, tmp_path, found, groups, synthetic=False)
+        assert gate.check_board(board, gate.load_allowlist(TOLERANCE), 42, skip_route=False) == 0
+        out = capsys.readouterr().out
+        assert "Unallowed blocking findings: 0 (allowed: 0)" in out
+        assert "Stale identity allowance" not in out
+
+    def test_former_finding_now_fails_on_the_committed_allowance(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        """A former #7349 impedance finding coming back is no longer allowed."""
+        gate = load("check_matchgroup_coverage")
+        found = [violation("impedance", "MIPI_DAT1_N")]
+        groups = set(gate.MATCHGROUP_ALLOWED_GROUPS[BOARD07_KEY])
+        gate, board = _stub_matchgroup(monkeypatch, tmp_path, found, groups, synthetic=False)
+        assert gate.check_board(board, gate.load_allowlist(TOLERANCE), 42, skip_route=False) == 2
+        assert "MIPI_DAT1_N" in capsys.readouterr().out
+
     def measured(self, gate):
         return violations_for(gate.board_allowance(BOARD07_KEY)) + [
             violation("connectivity", "TMDS_D0_N")
@@ -343,7 +400,7 @@ class TestBoard07CheckBoard:
         return set(gate.MATCHGROUP_ALLOWED_GROUPS[BOARD07_KEY])
 
     def test_measured_reroute_passes_at_strict_zero(self, monkeypatch, tmp_path, capsys):
-        gate = load("check_matchgroup_coverage")
+        gate = with_board07_synthetic(load("check_matchgroup_coverage"))
         found = self.measured(gate)
         gate, board = _stub_matchgroup(monkeypatch, tmp_path, found, self.groups(gate))
         allowlist = gate.load_allowlist(TOLERANCE)
@@ -354,7 +411,7 @@ class TestBoard07CheckBoard:
     def test_one_unlisted_finding_fails_even_far_below_old_total(
         self, monkeypatch, tmp_path, capsys
     ):
-        gate = load("check_matchgroup_coverage")
+        gate = with_board07_synthetic(load("check_matchgroup_coverage"))
         found = self.measured(gate)
         listed = [v for v in found if v["rule_id"] == "diffpair_length_skew"]
         # Fix every listed skew pair (leaving its allowance stale) and add one
@@ -373,7 +430,7 @@ class TestBoard07CheckBoard:
     def test_stale_entry_fails_on_the_bundle_path_too(self, monkeypatch, tmp_path, capsys):
         """The E2E job's ``--skip-route`` bundle carries the same identities
         (measured, #7367), so staleness is enforced there as well."""
-        gate = load("check_matchgroup_coverage")
+        gate = with_board07_synthetic(load("check_matchgroup_coverage"))
         found = [v for v in self.measured(gate) if v["rule_id"] != "impedance"]
         gate, board = _stub_matchgroup(monkeypatch, tmp_path, found, self.groups(gate))
         assert gate.check_board(board, {}, 42, skip_route=True) == 2

@@ -1566,3 +1566,71 @@ class TestRoutingFrameSidecars:
         src = tmp_path / "a.kicad_pcb"
         src.write_text("x")
         assert generate_design_mod.copy_project_sidecars(src, tmp_path / "f.kicad_pcb") == []
+
+
+# =============================================================================
+# Issue #5333: the recipe routes the pairs coupled (``--differential-pairs``)
+# =============================================================================
+
+
+class TestRecipeRoutesPairsCoupled:
+    """The committed recipe's ``kct route`` argv carries ``--differential-pairs``
+    with the seed and stage budgets unchanged (issue #5333)."""
+
+    def _route_argv(self, generate_design_mod, tmp_path, monkeypatch) -> list[str]:
+        monkeypatch.setattr(sys, "argv", ["generate_design.py", str(tmp_path), "--step", "pcb"])
+        assert generate_design_mod.main() == 0
+        captured: list[list[str]] = []
+
+        def fake_run(cmd, *args, **kwargs):
+            captured.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, 1)
+
+        monkeypatch.setattr(generate_design_mod.subprocess, "run", fake_run)
+        generate_design_mod.route_pcb(
+            tmp_path / "matchgroup_test.kicad_pcb", tmp_path / "matchgroup_test_routed.kicad_pcb"
+        )
+        routes = [c for c in captured if "route" in c and "--strategy" in c]
+        assert len(routes) == 1, captured
+        return routes[0]
+
+    def test_default_recipe_passes_differential_pairs(
+        self, generate_design_mod, tmp_path, monkeypatch
+    ) -> None:
+        assert generate_design_mod.USE_DIFFERENTIAL_PAIRS is True
+        argv = self._route_argv(generate_design_mod, tmp_path, monkeypatch)
+        assert argv.count("--differential-pairs") == 1
+
+    def test_budgets_and_seed_unchanged(self, generate_design_mod, tmp_path, monkeypatch) -> None:
+        argv = self._route_argv(generate_design_mod, tmp_path, monkeypatch)
+
+        def value(flag: str) -> str:
+            return argv[argv.index(flag) + 1]
+
+        assert value("--seed") == "42"
+        assert value("--search-timeout") == "600"
+        assert value("--timeout") == "2400"
+        assert value("--placement-delta-feedback-budget") == "2"
+        assert value("--placement-delta-feedback-timeout") == "600"
+
+    def test_stale_routed_sidecars_are_removed_before_routing(
+        self, generate_design_mod, tmp_path, monkeypatch
+    ) -> None:
+        """A fixture copy of the routed ``.kicad_pro`` / ``.kicad_dru`` (the
+        match-group gate's ``regression-output``) made ``kct route`` refuse to
+        write its own sidecars and skip the pour oracle (issue #5333)."""
+        monkeypatch.setattr(sys, "argv", ["generate_design.py", str(tmp_path), "--step", "pcb"])
+        assert generate_design_mod.main() == 0
+        routed = tmp_path / "matchgroup_test_routed.kicad_pcb"
+        stale = [routed.with_suffix(".kicad_pro"), routed.with_suffix(".kicad_dru")]
+        for path in stale:
+            path.write_text("stale fixture copy\n")
+        seen: list[bool] = []
+
+        def fake_run(cmd, *args, **kwargs):
+            seen.append(any(path.exists() for path in stale))
+            return subprocess.CompletedProcess(cmd, 1)
+
+        monkeypatch.setattr(generate_design_mod.subprocess, "run", fake_run)
+        generate_design_mod.route_pcb(tmp_path / "matchgroup_test.kicad_pcb", routed)
+        assert seen and seen[0] is False
