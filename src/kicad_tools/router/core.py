@@ -7836,6 +7836,16 @@ class Autorouter:
         ``intra_pair_clearance`` with physically unrouteable ~8 mm gaps
         on dense diff-pair fabrics (board 06's MIPI/USB/PCIE classes).
 
+        Issue #7755: this dormancy is a deliberate contract, not a gap.
+        An explicit ``target_*_impedance`` with no stackup argument
+        (the ``load_pcb_for_routing`` / ``kct route`` path) lays the
+        class's literal ``trace_width``.  A board that wants sizing
+        calls :func:`~router.diffpair_impedance.resolve_impedance_for_net_classes`
+        itself with its own stackup (board 06's
+        ``APPLY_IMPEDANCE_DRIVEN_SIZING``).  Sizing is F.Cu-referenced
+        (see :meth:`_resolve_impedance_for_net_classes`); pairs routed on
+        an inner layer must pin widths per layer, as board 03 does.
+
         Idempotent: calling on a router that already has a stackup is
         a no-op.  Safe to call on every routing invocation.
         """
@@ -7908,6 +7918,14 @@ class Autorouter:
         kept dormant, and the resolver's ``intra_pair_clearance``
         overrides break routing on dense diff-pair boards (see PR #2966
         Judge review).
+
+        Issue #7755: consequently a class whose every net already
+        declares an explicit ``target_*_impedance`` is *not* a
+        candidate, so with no stackup argument impedance sizing stays
+        dormant by design.  Auto-deriving on any explicit target would
+        flip behaviour for every board that passes a net-class map
+        without a stackup and bring back the #2966 ``intra_pair_clearance``
+        overwrite.
 
         This method scans :attr:`net_names` against the validator's
         regex defaults and returns ``True`` only if at least one net:
@@ -8151,6 +8169,17 @@ class Autorouter:
           back to its literal sizing; this method's net effect is a
           byte-for-byte no-op (modulo the dict identity which the helper
           preserves for non-target classes).
+
+        Issue #7755: when every target is explicit and no stackup is
+        passed (the CLI path), ``self._stackup`` stays ``None`` and
+        sizing is dormant by design (#2967); the literal ``trace_width``
+        is used.  When the resolver does engage, it sizes every class
+        for ``layer="F.Cu"`` because the resolver takes one layer for
+        the whole map and ``NetClassRouting`` carries no per-pair
+        layer.  A pair routed on an inner layer would read a different
+        impedance (board 03: 0.275 mm is 89.6 ohm on F.Cu but 74.2 ohm
+        on In2.Cu), so such pairs must pin widths per layer in the
+        board recipe (#7256).
 
         Diagnostics (stackup-mismatch warnings, clamp errors) are
         surfaced through ``logger`` -- the same channel
