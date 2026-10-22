@@ -12992,7 +12992,9 @@ class DiffPairRouter:
         """
         from kicad_tools.validate.diffpair_engagement import resolve_pair_thresholds
 
-        tol = float(pair.rules.max_length_delta)
+        rules = pair.rules
+        assert rules is not None, "committed coupled pair always carries rules"
+        tol = float(rules.max_length_delta)
         thresholds = resolve_pair_thresholds(
             getattr(self.autorouter, "net_class_map", None),
             pair.positive.net_name,
