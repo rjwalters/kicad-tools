@@ -30,6 +30,7 @@ _None._
 Human-approved issues ready for implementation (`loom:issue`).
 
 - **#7573**: router: board 05 +5V/GND pour completeness depends on where nTRIP lands (C10 stitch sites unreserved)
+- **#7785**: Verify pair group tuning on board 07's coupled --differential-pairs geometry
 
 ## In Progress
 
@@ -37,12 +38,13 @@ Issues currently being built (`loom:building`).
 
 - **#7550**: Board 07 synthetic fixture: 6 diff pairs + 2 match groups over skew tolerance on the seed-42 re-route (identity-allowed in check_matchgroup_coverage.py)
 - **#7782**: Board07 DQS: joint-search via hairpins make kct check skew depend on segment order
+- **#7790**: Board 07 coupled geometry: DQS pair retune no-op and MIPI/TMDS residual skew after retune_pcb
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-_None._
+- **#7779**: fix(board07): retune TMDS_D1 pair skew and delete its gate allowance
 
 ## Approved (Awaiting Merge)
 
@@ -76,6 +78,7 @@ Issues carrying `loom:curated`.
 - **#7769**: Board07 DQS polarity-swap pair: no pose candidate, coupled skew 2.0 mm untunable *(curated)*
 - **#7782**: Board07 DQS: joint-search via hairpins make kct check skew depend on segment order *(curated)*
 - **#7785**: Verify pair group tuning on board 07's coupled --differential-pairs geometry *(curated)*
+- **#7790**: Board 07 coupled geometry: DQS pair retune no-op and MIPI/TMDS residual skew after retune_pcb *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -103,11 +106,11 @@ Issues carrying `loom:curated`.
 | Operator merge-risk holds | 0 |
 | Very important | 0 |
 | Important | 1 |
-| Ready (`loom:issue`) | 1 |
-| In Progress (`loom:building`) | 2 |
-| PRs awaiting review | 0 |
+| Ready (`loom:issue`) | 2 |
+| In Progress (`loom:building`) | 3 |
+| PRs awaiting review | 1 |
 | Approved PRs awaiting merge | 0 |
-| Curated | 22 |
+| Curated | 23 |
 | Architect / Hermit proposals | 7 |
 | Active epics | 6 |
 <!-- guide:plan-body:end -->
