@@ -5831,13 +5831,13 @@ class DiffPairRouter:
                 vias=[dataclasses.replace(v) for v in route.vias],
             )
             moved = collapse_via_hairpins(trial, via_ok)
+
+            def seg_ok(seg: Segment, net: int = route.net) -> bool:
+                return bool(grid.validate_segment_clearance(seg, net)[0])
+
             # Issue #7808: where the via cannot move, drop the doubled leg
             # instead (a straight segment from the via past the turn).
-            moved += shortcut_via_hairpins(
-                trial,
-                lambda seg, net=route.net: grid.validate_segment_clearance(seg, net)[0],
-                anchors=own_pad_centres,
-            )
+            moved += shortcut_via_hairpins(trial, seg_ok, anchors=own_pad_centres)
             moved += merge_junction_runs(trial)
             if not moved:
                 continue

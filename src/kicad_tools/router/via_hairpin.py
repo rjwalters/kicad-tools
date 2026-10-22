@@ -280,7 +280,7 @@ def _segments_cross(a: Segment, b: Segment) -> bool:
     """True when the two segments share a point other than a common end."""
     (p, q), (r, t) = _ends(a), _ends(b)
 
-    def orient(o, x, y):
+    def orient(o: tuple[float, float], x: tuple[float, float], y: tuple[float, float]) -> float:
         return (x[0] - o[0]) * (y[1] - o[1]) - (x[1] - o[1]) * (y[0] - o[0])
 
     shared = [e for e in (r, t) if _near(e, p) or _near(e, q)]
@@ -294,7 +294,7 @@ def _segments_cross(a: Segment, b: Segment) -> bool:
     ):
         return True
 
-    def on(o, x, y):
+    def on(o: tuple[float, float], x: tuple[float, float], y: tuple[float, float]) -> bool:
         return (
             abs(orient(o, x, y)) <= 1e-7
             and min(o[0], x[0]) - _TOL <= y[0] <= max(o[0], x[0]) + _TOL
