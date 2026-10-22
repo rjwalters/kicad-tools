@@ -28,7 +28,6 @@ from pathlib import Path
 import pytest
 
 from kicad_tools.router import placement_nudge as pn
-from kicad_tools.router import stuck_classifier as sc
 from kicad_tools.router.partial_rescue import RescueConfig, build_rescue_command
 from kicad_tools.router.placement_nudge import (
     REROUTE_PASS_OVERRIDES,
@@ -43,20 +42,8 @@ from kicad_tools.router.stuck_classifier import (
 )
 from kicad_tools.schema.pcb import PCB
 
-
-@pytest.fixture(autouse=True)
-def _no_routability_probe(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Disable the #7832 branch-4 routability probe for this module.
-
-    These fixtures carry an Edge.Cuts outline, so the probe would run, find a
-    route around the open-arc ring and relabel the net BUDGET_STARVED.  The
-    tests here are about the nudge geometry and accept/reject guard for a net
-    the classifier calls PLACEMENT_BOUND, not about the probe (covered in
-    ``test_stuck_classifier.py::TestBranch4RoutabilityProbe``), so the probe
-    reports "could not run" and the pre-probe label stands.
-    """
-    monkeypatch.setattr(sc._RoutabilityProbe, "routable", lambda self, net, pads: None)
-
+# Every test here consumes a PLACEMENT_BOUND diagnosis on an outlined board.
+pytestmark = pytest.mark.usefixtures("no_routability_probe")
 
 # A board with a real Edge.Cuts rectangle so extract_board_outline() works and
 # the #3804 outline guard is exercised.  Outline: (0,0)-(100,100).
