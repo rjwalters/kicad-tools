@@ -20494,6 +20494,12 @@ _CHAIN_COMPLETE_ACCEPT_EXITS = frozenset({0, 8})
 _CHAIN_COMPLETE_MIN_BUDGET_S = 90.0
 
 
+def _restore_supervisor_control(control: str, snapshot: str) -> None:
+    """Put the supervisor control record back (JSON sidecar, not PCB text)."""
+    with contextlib.suppress(OSError):
+        Path(control).write_text(snapshot)
+
+
 def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
     """Chain one ``--complete`` pass after a grid route left signal nets open.
 
@@ -20645,8 +20651,7 @@ def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
         finally:
             route_receipt._current.set(outer_invocation)
             if control and control_snapshot is not None:
-                with contextlib.suppress(OSError):
-                    Path(control).write_text(control_snapshot)
+                _restore_supervisor_control(control, control_snapshot)
         if (
             chain_rc not in _CHAIN_COMPLETE_ACCEPT_EXITS
             or len(after) >= len(before)

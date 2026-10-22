@@ -375,7 +375,11 @@ _CENTRAL_WRITER = "_write_routed_pcb"
 # s-expressions, reads no staged PCB input, and must NOT route through
 # ``_write_routed_pcb``.  Keep this set as small as possible so the audit keeps
 # its teeth for genuine PCB-write sites (#3900-class zone-preservation).
-_NON_PCB_WRITE_FUNCS = frozenset({"_export_failed_nets"})
+#
+# ``_restore_supervisor_control`` rewrites the ``--timeout`` supervisor's control
+# record (the file named by ``CONTROL_ENV``) with a previously read snapshot after
+# the chained ``--complete`` pass.  It is a supervisor sidecar, never PCB text.
+_NON_PCB_WRITE_FUNCS = frozenset({"_export_failed_nets", "_restore_supervisor_control"})
 
 
 def _route_cmd_module_ast() -> ast.Module:
