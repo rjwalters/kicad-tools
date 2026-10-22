@@ -67,17 +67,15 @@ class TestBoard07Allowance:
         """Board 07's allowance names its groups (Issue #7339, #7270 Q3).
 
         Reroute path: MIPI_CSI_LANES pair-only skew (#3916) plus
-        DDR_DATA_BYTE_0 (16.717 mm vs 0.100 mm tol, seed 42), which fires now
-        that DQ0 is routed (#7331), plus HDMI_TMDS_LANES (7.723 mm vs
-        0.075 mm), which became measurable when TMDS_D0_N routed (#7557).  A
-        count would let another group be absorbed in place of a known one.
-        Delete an entry once the tuner fixes it (#7550).
+        HDMI_TMDS_LANES (7.723 mm vs 0.075 mm), which became measurable when
+        TMDS_D0_N routed (#7557).  DDR_DATA_BYTE_0 is matched by the recipe's
+        retune step (#7766).  A count would let another group be absorbed in
+        place of a known one.  Delete an entry once the tuner fixes it (#7550).
         """
         mod = _load_helper_module()
         key = "boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb"
         assert set(mod.MATCHGROUP_ALLOWED_GROUPS[key]) == {
             "MIPI_CSI_LANES",
-            "DDR_DATA_BYTE_0",
             "HDMI_TMDS_LANES",
         }
         assert not hasattr(mod, "MATCHGROUP_VIOLATION_BASELINE")
@@ -107,6 +105,14 @@ class TestBoard07SkewRetune:
         }
         for p_net, n_net in recipe.SKEW_RETUNE_PAIRS:
             assert "/".join(sorted((p_net, n_net))) not in allowed
+
+    def test_retuned_groups_have_no_allowance(self):
+        """Issue #7766: a group the recipe retunes may not also be allowed."""
+        mod = _load_helper_module()
+        recipe = _load_board_recipe_module()
+        assert recipe.RETUNE_GROUPS
+        allowed = set(mod.MATCHGROUP_ALLOWED_GROUPS[mod.MATCHGROUP_FIXTURE_KEY])
+        assert not allowed & set(recipe.RETUNE_GROUPS)
 
     def test_retuned_pairs_are_declared_pairs(self):
         recipe = _load_board_recipe_module()
