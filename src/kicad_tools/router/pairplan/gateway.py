@@ -508,6 +508,10 @@ class WorkableCombo:
     # escape site reserved for another net (#6697).  A combination that seals
     # a neighbour in loses to any that does not, however short.
     sealed: int = 0
+    # Issue #7650: how much of the body runs coupled at the pair pitch
+    # (:func:`coupled_length`).  It only breaks a matched-length tie: of two
+    # equally long combinations, the one with less uncoupled copper wins.
+    coupled: float = 0.0
 
     @property
     def score(self) -> float:
@@ -526,14 +530,71 @@ class WorkableCombo:
         """
         return self.score + abs(self.length_p - self.length_n)
 
-    def key(self) -> tuple[int, float, int]:
-        """Deterministic sort key: sealed count, matched length (to 1 um), try order."""
-        return (self.sealed, round(self.matched, 3), self.order)
+    def key(self) -> tuple[int, float, float, int]:
+        """Deterministic sort key: sealed count, matched length (to 1 um),
+        longest coupled run (to 1 um, issue #7650), try order."""
+        return (self.sealed, round(self.matched, 3), -round(self.coupled, 3), self.order)
 
 
 def best_workable(combos: list[WorkableCombo]) -> WorkableCombo | None:
     """The combination to keep: lowest :meth:`WorkableCombo.key`."""
     return min(combos, key=WorkableCombo.key) if combos else None
+
+
+#: Issue #7650: two leg pieces this close to the pair pitch (centre to
+#: centre) and parallel within :data:`FAN_PARALLEL_SIN_TOLERANCE` are
+#: coupled.  Offset emission puts the legs exactly at the pitch, so the
+#: tolerance only absorbs float noise.
+COUPLED_PITCH_TOL_MM = 0.01
+
+
+def coupled_length(
+    leg_a: list[Pt] | tuple[Pt, ...],
+    leg_b: list[Pt] | tuple[Pt, ...],
+    *,
+    pitch: float,
+) -> float:
+    """Length of ``leg_a`` that runs beside ``leg_b`` at the pair pitch (mm).
+
+    Issue #7650: the pair's coupled body, measured the way a coupling check
+    sees it -- each piece of ``leg_a`` counts where a parallel piece of
+    ``leg_b`` overlaps it at a centreline spacing of ``pitch``.  Fan legs,
+    convergence jogs and the turn-in to a via pair do not count.  Board 03's
+    USB_D gateway has two combinations of equal matched length (15.032 mm)
+    whose R4-end via pairs differ: the centred one keeps the body coupled
+    0.15 mm further, which is the tie-break :meth:`WorkableCombo.key` uses.
+    """
+    total = 0.0
+    for a, b in zip(leg_a, leg_a[1:], strict=False):
+        length = dist(a, b)
+        if length <= 1e-9:
+            continue
+        ux, uy = (b[0] - a[0]) / length, (b[1] - a[1]) / length
+        spans: list[tuple[float, float]] = []
+        for c, d in zip(leg_b, leg_b[1:], strict=False):
+            olen = dist(c, d)
+            if olen <= 1e-9:
+                continue
+            if abs(ux * (d[1] - c[1]) - uy * (d[0] - c[0])) / olen > FAN_PARALLEL_SIN_TOLERANCE:
+                continue
+            mx, my = (c[0] + d[0]) / 2.0, (c[1] + d[1]) / 2.0
+            if abs(abs((mx - a[0]) * uy - (my - a[1]) * ux) - pitch) > COUPLED_PITCH_TOL_MM:
+                continue
+            t1 = (c[0] - a[0]) * ux + (c[1] - a[1]) * uy
+            t2 = (d[0] - a[0]) * ux + (d[1] - a[1]) * uy
+            lo, hi = max(min(t1, t2), 0.0), min(max(t1, t2), length)
+            if hi - lo > 1e-9:
+                spans.append((lo, hi))
+        # Union of the overlaps, so a partner piece split at a vertex is not
+        # counted twice.
+        spans.sort()
+        end = -math.inf
+        for lo, hi in spans:
+            if hi <= end:
+                continue
+            total += hi - max(lo, end)
+            end = hi
+    return total
 
 
 def combo_length_floor(end_a: tuple[Pt, Pt], end_b: tuple[Pt, Pt], fans: float) -> float:

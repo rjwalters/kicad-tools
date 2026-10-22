@@ -5579,6 +5579,16 @@ class Autorouter:
             if isinstance(rollback, str):
                 print(f"  Diff-pair gateway (lattice): {rollback}")
             self._print_pair_gateway_lines(coupled, gateways, gateway_log)
+            # Issue #7650: planar pairs the converged pass straightened.
+            straightened = getattr(pf, "pair_straightened", {}) or {}
+            for pc in coupled:
+                if pc.key in straightened:
+                    old_len, new_len = straightened[pc.key]
+                    label = f"{pc.pad_p_a.ref}.{pc.pad_p_a.pin}->{pc.pad_p_b.ref}.{pc.pad_p_b.pin}"
+                    print(
+                        f"  Diff-pair straightened (lattice) {pc.pair_name} {label}: "
+                        f"history-free re-route, matched length {old_len:.3f} -> {new_len:.3f} mm"
+                    )
             # Issue #6446: one line per segment the one-ended hybrid retry was
             # offered to -- the coupled trunk and its legs on success, or the
             # hard terminal and the shortest legs found against the cap.
