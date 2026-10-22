@@ -248,6 +248,8 @@ _SHADOW_PER_PAIR_BUDGET_S: float = float(os.environ.get("KCT_SHADOW_PER_PAIR_BUD
 # of it, and is skipped when less than ``_POSE_CENTERLINE_MIN_BUDGET_S``
 # remains (a wall-clock budget-exit must still defer promptly, #3089/#4107).
 _POSE_CENTERLINE_TIMEOUT_S: float = 30.0
+# Issue #7769: ``[coupled-select]`` decline reason for polarity-swapped pairs.
+_POSE_DECLINE_POLARITY_SWAP: str = "polarity-swap (no crossover in centerline trunk)"
 _POSE_CENTERLINE_MIN_BUDGET_S: float = 0.25
 
 # Issue #5895: the pose-trunk corridor guard
@@ -12487,6 +12489,12 @@ class DiffPairRouter:
             pose_candidate: tuple[Route, Route] | None = None
             pose_decline: str | None = None
             pose_elapsed = 0.0
+            if self.enable_pose_centerline and spec.polarity_swap:
+                # Issue #7769: the centreline trunk keeps P and N as parallel
+                # rails and has no crossover, so a polarity-swapped pair is
+                # never offered to ``route_centerline_pose``.  Say so in the
+                # ``[coupled-select]`` line instead of the opaque ``n/a``.
+                pose_decline = _POSE_DECLINE_POLARITY_SWAP
             if (
                 self.enable_pose_centerline
                 and not spec.polarity_swap
