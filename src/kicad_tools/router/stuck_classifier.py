@@ -1072,6 +1072,7 @@ class _RoutabilityProbe:
         import sys
 
         from kicad_tools.router.io import load_pcb_for_routing
+        from kicad_tools.router.pathfinder import Router as PyRouter
 
         try:
             with contextlib.redirect_stdout(sys.stderr):
@@ -1082,6 +1083,11 @@ class _RoutabilityProbe:
                     force_python=True,
                 )
                 router._install_grid_rule_area_keepouts()
+            # ``force_python=True`` guarantees the pure-Python pathfinder, the
+            # only one that honours ``_max_iterations_override``; refuse
+            # anything else so the iteration cap is never silently ignored.
+            if not isinstance(router.router, PyRouter):
+                raise TypeError("probe needs the Python pathfinder")
             router.router._max_iterations_override = PROBE_MAX_ITERATIONS
         except Exception:  # pragma: no cover - defensive only
             self._failed = True
