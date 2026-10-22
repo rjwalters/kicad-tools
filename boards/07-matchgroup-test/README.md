@@ -54,3 +54,22 @@ The previous nonfunctional fixture remains in
 coverage. Legacy `generate_design.py` defaults to `regression-output/` and
 must not be used to generate this assembled demo. Its synthetic pinouts and
 historical routing failures are not manufacturing artifacts.
+
+## Coupled-routing ratchet (`--differential-pairs`, #7795)
+
+`generate_design.py --differential-pairs` (default off; the committed route
+argv is unchanged without it) appends `--differential-pairs` to `kct route`,
+exercising the coupled/joint-search path (`router/diffpair_*`,
+`CoupledPathfinder`) that no PR job reaches. The scheduled / main-push job
+`board-07-diffpair-ratchet` in `.github/workflows/slow-tests.yml` regenerates
+the board that way (seed 42, `PYTHONHASHSEED=42`, C++ backend), runs
+`kicad-cli pcb drc`, and `scripts/ci/check_board07_diffpair_baseline.py` gates
+copper-safety errors, opens (`unconnected_items`) and `skew_out_of_range`
+violations against `.github/board07-diffpair-baseline.yml`. Skew violation text
+(measured mm) is printed in the job summary.
+
+The baseline is a **ratchet**, not a target: values are the measured numbers,
+may only go down, and a `null` entry means "not measured yet" (reported, not
+gated). To refresh: read the numbers from the latest run's summary and commit
+the lower values. 0 opens / 0 skew violations are the long-term goals
+(#5333, #7619, #7769). It is not a per-PR check (~27 min regen, #6738).

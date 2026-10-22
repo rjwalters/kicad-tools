@@ -1,0 +1,14 @@
+# Baseline for board 07 regenerated with `generate_design.py --differential-pairs`
+# (issue #7795).  Checked by scripts/ci/check_board07_diffpair_baseline.py in the
+# scheduled `board-07-diffpair-ratchet` job of .github/workflows/slow-tests.yml.
+# Ratchet only: a number may go down, never up (the job fails if this file's
+# last change on main raised one, or turned a number back into null).
+#
+# `null` = not measured yet: the checker reports the value and does not gate.
+# The first scheduled run prints the measured numbers; commit them here (the
+# long-term targets are 0 opens and 0 skew violations, #5333/#7619/#7769, but
+# the gate is the measured value, not the target).
+baseline:
+  copper_safety: null
+  opens: null
+  skew_out_of_range: null

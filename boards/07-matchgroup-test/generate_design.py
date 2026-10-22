@@ -97,6 +97,11 @@ PLACEMENT_DELTA_FEEDBACK = True
 PLACEMENT_DELTA_FEEDBACK_BUDGET = 2
 PLACEMENT_DELTA_FEEDBACK_TIMEOUT_S = 600
 
+# Issue #7795: opt-in coupled/joint-search routing.  Off by default so the
+# committed recipe's route argv is unchanged; ``--differential-pairs`` on the
+# command line flips it for the scheduled diffpair ratchet in slow-tests.yml.
+USE_DIFFERENTIAL_PAIRS = False
+
 # Issue #5266: this board's route step is a STAGED budget contract, and the
 # two halves of it have to be stated separately.
 #
@@ -2423,6 +2428,11 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
             str(PLACEMENT_DELTA_FEEDBACK_TIMEOUT_S),
         ]
 
+    # Issue #7795: opt-in coupled/joint-search path (default off; the argv is
+    # byte-identical to the committed recipe when the flag is absent).
+    if USE_DIFFERENTIAL_PAIRS:
+        cmd.append("--differential-pairs")
+
     # Issue #3146: Pin PYTHONHASHSEED for the subprocess so any string-
     # keyed dict/set iteration in the negotiated router (net_order
     # construction, net_names lookup, etc.) is reproducible across
@@ -2901,7 +2911,20 @@ def main() -> int:
             "CI gate so re-routes are deterministic across PRs."
         ),
     )
+    parser.add_argument(
+        "--differential-pairs",
+        action="store_true",
+        help=(
+            "Append ``--differential-pairs`` to the ``kct route`` argv so the "
+            "coupled/joint-search path is exercised (issue #7795).  Opt-in "
+            "only: omitted, the committed route argv is unchanged.  Used by "
+            "the scheduled ``board-07-diffpair-ratchet`` job."
+        ),
+    )
     args = parser.parse_args()
+
+    global USE_DIFFERENTIAL_PAIRS
+    USE_DIFFERENTIAL_PAIRS = args.differential_pairs
 
     # Precondition (#4539): refuse to mutate a board that carries no captured
     # intent.  Anchored on ``__file__`` -- NOT ``Path.cwd()`` and NOT the
