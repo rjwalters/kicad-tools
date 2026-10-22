@@ -154,15 +154,10 @@ DEFAULT_ALLOWLIST = Path(".github/routed-drc-tolerance.yml")
 MATCHGROUP_RULE_IDS: tuple[str, ...] = ("match_group_length_skew",)
 
 #: Open tracker for board 07's seed-42 skew residuals (Issue #7367): the 2
-#: diff pairs (DQS, TMDS_D1) and 2 match groups below.  Issue #7612 tuned the
+#: diff pairs (DQS, TMDS_D1) and the match group below.  Issue #7612 tuned the
 #: other four pairs in the recipe (``retune_pair_skew``), so they left it.
 #: The groups used to cite #3916 / #7339 (closed) and #5798 (pending close).
 MATCHGROUP_SKEW_TRACKER = 7550
-
-#: Narrower tracker (Issue #7611) for the two N-trace groups whose pair
-#: members have no mirrorable N-side host: MIPI_CSI_LANES (8.956 mm vs 0.050 mm)
-#: and DDR_DATA_BYTE_0 (16.717 mm vs 0.100 mm), seed 42 on ``c24f44758``.
-MATCHGROUP_PAIR_HOST_TRACKER = 7766
 
 # Repo-relative key of board 07's synthetic regression fixture.  Its re-route
 # lands in the git-ignored ``regression-output/``, which
@@ -175,12 +170,10 @@ MATCHGROUP_FIXTURE_KEY = (
 # ``match_group_length_skew`` error, each with an OPEN tracking issue.
 #
 # Issue #3931: ADDR_BUS's via-count imbalance is compensated by the via-aware
-# tuner, so it no longer fires on the re-route.  Issue #3916 made pair-only
-# groups checkable; MIPI_CSI_LANES is the one pair-only group whose skew
-# survives (7.039 mm vs 0.050 mm).  Issue #7339: DDR_DATA_BYTE_0 fires once
-# DQ0 routes (#7331): 16.717 mm vs 0.100 mm.  Re-measured in #7611 after the
-# pair fixes (#7612/#7613): MIPI 8.956 mm, DDR unchanged; the group tuner finds
-# no mirrorable N-side host on their pairs, tracked in #7766.
+# tuner, so it no longer fires on the re-route.  Issues #7339 / #7766:
+# DDR_DATA_BYTE_0 and MIPI_CSI_LANES have no mirrorable N-side host on their
+# pairs at route time; the recipe matches both after the pair-skew retune
+# (``RETUNE_GROUPS``), so neither fires any more.
 # Issue #7557: HDMI_TMDS_LANES becomes measurable once TMDS_D0_N routes (U4's
 # TMDS balls moved to its J2-facing column): 7.723 mm vs 0.075 mm, also #7550.
 #
@@ -198,7 +191,6 @@ MATCHGROUP_FIXTURE_KEY = (
 # (tracked in the issue it cites).
 MATCHGROUP_ALLOWED_GROUPS: dict[str, dict[str, int]] = {
     MATCHGROUP_FIXTURE_KEY: {
-        "MIPI_CSI_LANES": MATCHGROUP_PAIR_HOST_TRACKER,
         "HDMI_TMDS_LANES": MATCHGROUP_SKEW_TRACKER,
     },
 }
@@ -634,8 +626,8 @@ def count_errors_via_kct_check(
 # does not count against the (now strict 0) routed-DRC total.
 MATCHGROUP_FIXTURE_ALLOWED_FINDINGS: Allowance = {
     # Restored: CI's re-route tightens MIPI_DAT1 only 1/2 runs (#7612 review).
+    # Issue #7766: the group retune's DAT1 meanders clear the P-side finding.
     ("impedance", "MIPI_DAT1_N"): 7349,
-    ("impedance", "MIPI_DAT1_P"): 7349,
     ("impedance", "TMDS_D1_N"): 7349,
     ("impedance", "TMDS_D1_P"): 7349,
     ("impedance", "TMDS_D0_N"): 7349,  # Issue #7557: routes now

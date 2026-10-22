@@ -235,6 +235,40 @@ class TestMixedGroup:
         assert report.changed_nets == ["D0_N", "D0_P"]  # the reference CLK is untouched
 
 
+class TestTuningOrder:
+    def test_pairs_are_tuned_before_groups(self, tmp_path, monkeypatch):
+        """Issue #7766: a pair retune moves lane lengths, so the group runs after it."""
+        nets = {"CLK": (10, 5, 45), "D0_P": (20, 5, 41), "D0_N": (21, 5, 41.4)}
+        path = tmp_path / "in.kicad_pcb"
+        path.write_text(board(nets))
+        nc = NetClassRouting(
+            name="LANES",
+            length_match_group="LANES",
+            length_match_tolerance_mm=0.5,
+            length_critical=True,
+        )
+        calls: list[str] = []
+        for attr, tag in (
+            ("apply_diffpair_length_tuning", "pairs"),
+            ("apply_match_group_tuning", "groups"),
+        ):
+            real = getattr(Autorouter, attr)
+
+            def wrapped(self, *a, _real=real, _tag=tag, **k):
+                calls.append(_tag)
+                return _real(self, *a, **k)
+
+            monkeypatch.setattr(Autorouter, attr, wrapped)
+        retune_pcb(
+            path,
+            tmp_path / "out.kicad_pcb",
+            groups=["LANES"],
+            diffpairs=[("D0_P", "D0_N")],
+            net_class_map=dict.fromkeys(nets, nc),
+        )
+        assert calls == ["pairs", "groups"]
+
+
 class TestGates:
     """A successful retune of the fixture passes both checkers (not a board receipt)."""
 
