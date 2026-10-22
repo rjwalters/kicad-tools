@@ -15,6 +15,16 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-22
 
+- **PR #7807**: docs(research): measure --reserve-pour-only-passives across boards 03-07
+- **PR #7804**: fix: retune HDMI_TMDS_LANES group in board 07 recipe and drop its allowance
+- **PR #7803**: refactor: dedupe coupled skew-limit lookup and cover gate, selection and swap routing
+- **PR #7801**: fix: anchor retune insertions after the net's last block by file offset
+- **PR #7784**: fix(router): collapse via hairpins in committed coupled legs
+- **Issue #7797** (closed): diffpair_routing: dedupe the skew-limit lookup and close the test gaps from the #7771/#7772/#7773 reviews
+- **Issue #7796** (closed): retune writer appends new copper after a net's last via, not its last block, so the read-order mismatch can return
+- **Issue #7794** (closed): router: measure --reserve-pour-only-passives across boards 03-07 and confirm board 05 pad-edge via (split from #7573)
+- **Issue #7782** (closed): Board07 DQS: joint-search via hairpins make kct check skew depend on segment order
+- **Issue #7550** (closed): Board 07 synthetic fixture: 6 diff pairs + 2 match groups over skew tolerance on the seed-42 re-route (identity-allowed in check_matchgroup_coverage.py)
 - **PR #7792**: fix: measure retune copper in board-file order so over-limit pairs are tuned
 - **Issue #7798** (closed): Committed boards/07-matchgroup-test/output/matchgroup_test.kicad_pcb is stale: it has no TMDS/MIPI nets
 - **Issue #7785** (closed): Verify pair group tuning on board 07's coupled --differential-pairs geometry
