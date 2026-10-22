@@ -5793,12 +5793,34 @@ class DiffPairRouter:
             shortcut_via_hairpins,
         )
 
+        from .via_clearance import drill_hole_to_hole_clear
+
         grid = self.autorouter.grid
         pads = getattr(self.autorouter, "pads", None) or {}
+        min_h2h = getattr(getattr(self.autorouter, "rules", None), "min_hole_to_hole", 0.5)
         total = 0
         for route in routes:
             if not route.vias:
                 continue
+            # Issue #7818: the clearance checks below are copper-to-copper;
+            # they never see the drill-to-drill floor.  A via moved back to
+            # its turn can land beside the partner rail's via (the pair's
+            # pitch is 0.762 mm, so two 0.3 mm drills sit 0.462 mm apart).
+            # The partner's via is already committed when the second rail is
+            # processed, so every other-net drill belongs in the registry.
+            foreign_drills = [
+                (v.x, v.y, v.drill)
+                for other in getattr(self.autorouter, "routes", None) or ()
+                if other.net != route.net
+                for v in other.vias
+                if v.drill > 0
+            ] + [
+                (pad.x, pad.y, pad.drill)
+                for pad in pads.values()
+                if getattr(pad, "through_hole", False)
+                and pad.drill > 0
+                and getattr(pad, "net", 0) != route.net
+            ]
             # Issue #7808: the turn of a pad-escape hairpin is usually right
             # beside the pad, and ``worst_via_pad_deficit`` skips same-net
             # pads -- so a collapsed via could land its drill on its own
@@ -5816,12 +5838,14 @@ class DiffPairRouter:
                 via: Via,
                 net: int = route.net,
                 own_pad_boxes: list[tuple[float, float, float, float]] = own_pad_boxes,
+                foreign_drills: list[tuple[float, float, float]] = foreign_drills,
             ) -> bool:
                 return (
                     not any(_via_drill_overlaps_bbox(via, box) for box in own_pad_boxes)
                     and grid.validate_via_clearance(via, net)[0]
                     and grid.validate_via_to_via_clearance(via, net)[0]
                     and grid.worst_via_pad_deficit(via, net)[0] <= _SHADOW_VIA_DEFICIT_EPS
+                    and drill_hole_to_hole_clear(via.x, via.y, via.drill, foreign_drills, min_h2h)
                 )
 
             trial = Route(
