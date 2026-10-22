@@ -115,7 +115,7 @@ class TestBoard07SkewRetune:
 
 
 class TestCheckGroupAllowances:
-    ALLOWED = {"MIPI_CSI_LANES": 7550, "DDR_DATA_BYTE_0": 7550}
+    ALLOWED = {"MIPI_CSI_LANES": 7766, "DDR_DATA_BYTE_0": 7766}
 
     def test_exactly_the_allowed_groups_pass(self):
         mod = _load_helper_module()

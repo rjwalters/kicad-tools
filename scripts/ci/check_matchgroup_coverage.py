@@ -159,6 +159,11 @@ MATCHGROUP_RULE_IDS: tuple[str, ...] = ("match_group_length_skew",)
 #: The groups used to cite #3916 / #7339 (closed) and #5798 (pending close).
 MATCHGROUP_SKEW_TRACKER = 7550
 
+#: Narrower tracker (Issue #7611) for the two N-trace groups whose pair
+#: members have no mirrorable N-side host: MIPI_CSI_LANES (8.956 mm vs 0.050 mm)
+#: and DDR_DATA_BYTE_0 (16.717 mm vs 0.100 mm), seed 42 on ``c24f44758``.
+MATCHGROUP_PAIR_HOST_TRACKER = 7766
+
 # Repo-relative key of board 07's synthetic regression fixture.  Its re-route
 # lands in the git-ignored ``regression-output/``, which
 # ``recipe_baseline_key`` canonicalises back to this key.
@@ -173,7 +178,9 @@ MATCHGROUP_FIXTURE_KEY = (
 # tuner, so it no longer fires on the re-route.  Issue #3916 made pair-only
 # groups checkable; MIPI_CSI_LANES is the one pair-only group whose skew
 # survives (7.039 mm vs 0.050 mm).  Issue #7339: DDR_DATA_BYTE_0 fires once
-# DQ0 routes (#7331): 16.717 mm vs 0.100 mm.  Both are tracked in #7550.
+# DQ0 routes (#7331): 16.717 mm vs 0.100 mm.  Re-measured in #7611 after the
+# pair fixes (#7612/#7613): MIPI 8.956 mm, DDR unchanged; the group tuner finds
+# no mirrorable N-side host on their pairs, tracked in #7766.
 # Issue #7557: HDMI_TMDS_LANES becomes measurable once TMDS_D0_N routes (U4's
 # TMDS balls moved to its J2-facing column): 7.723 mm vs 0.075 mm, also #7550.
 #
@@ -191,8 +198,8 @@ MATCHGROUP_FIXTURE_KEY = (
 # (tracked in the issue it cites).
 MATCHGROUP_ALLOWED_GROUPS: dict[str, dict[str, int]] = {
     MATCHGROUP_FIXTURE_KEY: {
-        "MIPI_CSI_LANES": MATCHGROUP_SKEW_TRACKER,
-        "DDR_DATA_BYTE_0": MATCHGROUP_SKEW_TRACKER,
+        "MIPI_CSI_LANES": MATCHGROUP_PAIR_HOST_TRACKER,
+        "DDR_DATA_BYTE_0": MATCHGROUP_PAIR_HOST_TRACKER,
         "HDMI_TMDS_LANES": MATCHGROUP_SKEW_TRACKER,
     },
 }
