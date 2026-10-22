@@ -51,4 +51,4 @@ def test_route_gate_enters_length_match_above_the_enforced_limit(monkeypatch, ca
     n.segments[-1].x2 += 0.2  # N is 0.2 mm longer than P
     monkeypatch.setattr(DiffPairRouter, "_checker_skew_limit_mm", lambda self, pair: 0.05)
     *_, out = _run(monkeypatch, capsys, (p, n), None)
-    assert "Length mismatch" in out or "above the enforced skew limit" in out
+    assert "Length mismatch" in out
