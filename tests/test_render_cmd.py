@@ -791,3 +791,59 @@ class TestBoardMetricsCoverage:
         metrics: dict = {}
         _attach_render_paths(metrics, tmp_path)
         assert "model_coverage" not in metrics
+
+
+# --------------------------------------------------------------------------
+# Pinned toolchain routing (#7810)
+# --------------------------------------------------------------------------
+
+
+class TestPinnedToolchain:
+    def test_json_reports_kicad_cli_version(self, tmp_path, fake_kicad, capsys, monkeypatch):
+        monkeypatch.delenv("KCT_KICAD_DOCKER", raising=False)
+        _make_board(tmp_path, "00-a", "a.kicad_pcb")
+        assert render_main([str(tmp_path), "--format", "json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["kicad_cli_version"] == "8.0.6"
+        assert "docker_image" not in payload
+
+    def test_docker_env_runs_inside_evidence_toolchain(
+        self, tmp_path, fake_kicad, capsys, monkeypatch
+    ):
+        import contextlib
+
+        monkeypatch.setenv("KCT_KICAD_DOCKER", "1")
+        seen: dict = {}
+
+        @contextlib.contextmanager
+        def fake_toolchain(mounts=(), *, required_version="x"):
+            seen["entered"] = True
+            seen["required_version"] = required_version
+            yield None
+            seen["exited"] = True
+
+        monkeypatch.setattr(render_cmd, "evidence_toolchain", fake_toolchain)
+        monkeypatch.setattr(render_cmd, "docker_image", lambda: "kicad/kicad:10.0.6")
+        _make_board(tmp_path, "00-a", "a.kicad_pcb")
+
+        assert render_main([str(tmp_path), "--format", "json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert seen == {"entered": True, "required_version": None, "exited": True}
+        assert payload["docker_image"] == "kicad/kicad:10.0.6"
+
+    def test_docker_env_without_docker_exits_1(self, tmp_path, fake_kicad, capsys, monkeypatch):
+        import contextlib
+
+        from kicad_tools.cli.kicad_toolchain import KiCadEnvironmentError
+
+        monkeypatch.setenv("KCT_KICAD_DOCKER", "1")
+
+        @contextlib.contextmanager
+        def broken(mounts=(), *, required_version=None):
+            raise KiCadEnvironmentError("KCT_KICAD_DOCKER=1 but docker is not on PATH")
+            yield
+
+        monkeypatch.setattr(render_cmd, "evidence_toolchain", broken)
+        _make_board(tmp_path, "00-a", "a.kicad_pcb")
+        assert render_main([str(tmp_path)]) == 1
+        assert "docker is not on PATH" in capsys.readouterr().err
