@@ -245,3 +245,103 @@ def test_select_line_reports_metrics(monkeypatch, capsys, kind):
     joint, pose = (_tight(), _loose()) if kind == "joint" else (_loose(), _tight())
     _, _, _, out = _run(monkeypatch, capsys, joint, pose)
     assert f"kept={kind} joint=(" in out and "pose=(" in out and "pose_s=" in out
+
+
+# ---------------------------------------------------------------------------
+# Issue #5333: the pair's enforced skew limit outranks uncoupled length
+# ---------------------------------------------------------------------------
+
+
+def _split_balanced() -> tuple[Route, Route]:
+    """P and N bow apart symmetrically: long uncoupled stretch, zero skew."""
+    return (
+        _rail(
+            P_NET,
+            "USB_D+",
+            [(5.0, 4.6), (8.0, 4.6), (10.0, 1.0), (20.0, 1.0), (22.0, 4.6), (25.0, 4.6)],
+        ),
+        _rail(
+            N_NET,
+            "USB_D-",
+            [(5.0, 5.4), (8.0, 5.4), (10.0, 9.0), (20.0, 9.0), (22.0, 5.4), (25.0, 5.4)],
+        ),
+    )
+
+
+def _tight_skewed() -> tuple[Route, Route]:
+    """Fully coupled, but N carries a 0.5 mm stub: little uncoupled, big skew."""
+    p, n = _tight()
+    n.segments.append(
+        Segment(x1=25.0, y1=5.4, x2=25.0, y2=5.9, width=0.2, layer=Layer.F_CU,
+                net=N_NET, net_name="USB_D-")
+    )  # fmt: skip
+    return p, n
+
+
+def _metrics(routes):
+    from kicad_tools.router.diffpair_routing import _coupled_candidate_metrics
+
+    return _coupled_candidate_metrics(*routes)
+
+
+def test_fixture_preconditions_for_the_skew_limit_rule():
+    """The two fixtures disagree: one wins on uncoupled, the other on skew."""
+    bal_unc, bal_skew, _ = _metrics(_split_balanced())
+    sk_unc, sk_skew, _ = _metrics(_tight_skewed())
+    assert sk_unc + RES < bal_unc  # the skewed pair is the better-coupled one
+    assert bal_skew < 0.05 < sk_skew
+
+
+def test_candidate_meeting_the_skew_limit_beats_a_better_coupled_one():
+    # Old rule (no limit): the lower-uncoupled, out-of-limit candidate wins.
+    assert _select_coupled_candidate(_cand(_tight_skewed()), _cand(_split_balanced()), RES) == (
+        "joint"
+    )
+    # Issue #5333: with the enforced limit, the in-limit candidate wins either way round.
+    assert (
+        _select_coupled_candidate(
+            _cand(_tight_skewed()), _cand(_split_balanced()), RES, skew_limit_mm=0.05
+        )
+        == "pose"
+    )
+    assert (
+        _select_coupled_candidate(
+            _cand(_split_balanced()), _cand(_tight_skewed()), RES, skew_limit_mm=0.05
+        )
+        == "joint"
+    )
+
+
+def test_skew_limit_is_ignored_when_both_or_neither_candidate_meets_it():
+    # Both meet a loose limit: the #6858 ordering (uncoupled first) decides.
+    assert (
+        _select_coupled_candidate(
+            _cand(_tight_skewed()), _cand(_split_balanced()), RES, skew_limit_mm=5.0
+        )
+        == "joint"
+    )
+    # Neither meets an impossible limit: same ordering.
+    assert (
+        _select_coupled_candidate(
+            _cand(_tight_skewed()), _cand(_split_balanced()), RES, skew_limit_mm=-1.0
+        )
+        == "joint"
+    )
+
+
+def test_checker_skew_limit_is_the_enforced_error_limit_only():
+    router = _router()
+    [pair] = router._diffpair.detect_differential_pairs()
+    nc = NetClassRouting(name="HS", coupled_routing=True, skew_tolerance_mm=0.05)
+    router.net_class_map = {"USB_D+": nc, "USB_D-": nc}
+    assert router._diffpair._checker_skew_limit_mm(pair) == pytest.approx(0.05)
+
+
+def test_router_commits_the_in_limit_pose_over_a_better_coupled_skewed_joint(monkeypatch, capsys):
+    """End to end through ``route_differential_pair_coupled`` (board 07 TMDS_D1 shape)."""
+    monkeypatch.setattr(DiffPairRouter, "_checker_skew_limit_mm", lambda self, pair: 0.05)
+    _router_, marked, independent, out = _run(
+        monkeypatch, capsys, _tight_skewed(), _split_balanced()
+    )
+    assert "[coupled-select] kept=pose" in out
+    assert not independent
