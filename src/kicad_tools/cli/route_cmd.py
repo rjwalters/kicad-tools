@@ -18361,6 +18361,18 @@ def _route_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--no-chain-complete",
+        action="store_true",
+        default=False,
+        help=(
+            "Issue #7831: do not chain a --complete pass after a grid route "
+            "that leaves signal nets open. By default, when the grid engine "
+            "finishes with unconnected signal nets, one in-process --complete "
+            "(lattice, existing copper fixed) pass runs on the output before "
+            "the exit code is decided; fully routed boards are untouched."
+        ),
+    )
+    parser.add_argument(
         "--complete-exclude-nets",
         metavar="NAMES",
         default="",
@@ -20451,6 +20463,123 @@ def _route_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# Issue #7831: exit codes after which the chained completion pass is not
+# attempted -- fatal (1), interrupted (5) and plan-gate abort (9).  The
+# supervisor's timeout exit never reaches here (it is raised, not returned).
+_CHAIN_COMPLETE_SKIP_EXITS = frozenset({1, 5, 9})
+
+
+def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
+    """Chain one ``--complete`` pass after a grid route left signal nets open.
+
+    Issue #7831 (board 05): the negotiated grid route can demote a net it
+    routed in iteration 0 (``Demoted 1 net(s) ... to unrouted``) and the
+    post-negotiation sweep never recovers it, yet a plain lattice completion
+    pass over the same output closes it.  This runs that existing pass
+    (:func:`_apply_complete_mode_defaults` / :func:`_resolve_complete_nets`,
+    ``--preserve-existing`` and the #4413 copper-loss guard) on the freshly
+    written ``-o`` board, in-process, so ``kct route`` no longer stops one net
+    short.
+
+    A strict no-op -- ``result`` is returned untouched and nothing is written --
+    unless the grid engine finished, the output still has unconnected signal
+    nets and ``--no-chain-complete`` was not passed, so fully routed boards
+    (the board 04/07 recipes) are byte-identical.  The pre-pass board is kept
+    and restored when the pass closes nothing, so a failing or timed-out pass
+    leaves the negotiated output intact.  When the pass closes every open net
+    its exit code replaces the stale pre-pass one; a partial improvement keeps
+    the improved board and the original exit code.
+    """
+    if (
+        getattr(args, "no_chain_complete", False)
+        or getattr(args, "complete", False)
+        or getattr(args, "dry_run", False)
+        or getattr(args, "resume", None)
+        or getattr(args, "nets", None)
+        or getattr(args, "skip_nets", None)
+        or getattr(args, "route_engine", "grid") != "grid"
+        or getattr(args, "format", "text") == "json"
+        or result in _CHAIN_COMPLETE_SKIP_EXITS
+    ):
+        return result
+    pcb = Path(args.pcb)
+    output = Path(args.output) if getattr(args, "output", None) else None
+    if output is None:
+        output = pcb.with_stem(pcb.stem + "_routed")
+    if not output.is_file():
+        return result
+
+    from kicad_tools.router.partial_rescue import partially_connected_signal_nets
+
+    quiet = bool(getattr(args, "quiet", False))
+    manufacturer = getattr(args, "manufacturer", "jlcpcb") or "jlcpcb"
+    excluded = frozenset(
+        n.strip()
+        for n in (getattr(args, "complete_exclude_nets", "") or "").split(",")
+        if n.strip()
+    )
+
+    def _open_nets() -> list[str]:
+        return list(
+            partially_connected_signal_nets(
+                output,
+                manufacturer=manufacturer,
+                excluded_nets=excluded,
+                include_unrouted=True,
+            )
+        )
+
+    try:
+        before = _open_nets()
+    except Exception:
+        return result
+    if not before:
+        return result
+
+    if not quiet:
+        print(
+            f"\n--- Chained completion pass: {len(before)} signal net(s) still open "
+            f"({', '.join(before)}); disable with --no-chain-complete ---"
+        )
+    chain_argv = [str(output), "-o", str(output), "--complete"]
+    for flag, attr in (
+        ("--manufacturer", "manufacturer"),
+        ("--seed", "seed"),
+        ("--backend", "backend"),
+        ("--copper", "copper"),
+        ("--complete-exclude-nets", "complete_exclude_nets"),
+    ):
+        value = getattr(args, attr, None)
+        if value not in (None, ""):
+            chain_argv.extend([flag, str(value)])
+    for flag, attr in (("--quiet", "quiet"), ("--skip-drc", "skip_drc")):
+        if getattr(args, attr, False):
+            chain_argv.append(flag)
+
+    backup = output.with_name(output.name + ".pre-complete")
+    shutil.copy2(output, backup)
+    try:
+        try:
+            chain_rc = _main_impl(chain_argv)
+            after = _open_nets()
+        except Exception as exc:
+            print(f"  Chained completion pass failed ({exc}); keeping negotiated output")
+            chain_rc, after = None, before
+        if chain_rc is None or chain_rc in _CHAIN_COMPLETE_SKIP_EXITS or len(after) >= len(before):
+            shutil.copy2(backup, output)
+            if not quiet:
+                print("  Chained completion pass closed no nets; negotiated output restored")
+            return result
+    finally:
+        backup.unlink(missing_ok=True)
+    if not quiet:
+        print(
+            f"  Chained completion pass closed {len(before) - len(after)} of "
+            f"{len(before)} open signal net(s)"
+        )
+    return chain_rc if not after and chain_rc == 0 else result
+
+
 def _main_impl(argv: list[str] | None = None) -> int:
     parser = _route_parser()
     args = parser.parse_args(argv)
@@ -20517,6 +20646,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
                             args._lint_gate_output = str(gate.output)
                             args.output = str(staged)
                     result = _run_main_impl(args, parser, argv)
+                    result = _chain_complete_pass(args, argv, result)
                 except BaseException:
                     if gate is not None:
                         # Never leave an unjudged board at --output.
