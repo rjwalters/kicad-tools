@@ -29,22 +29,21 @@ _None._
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-- **#7573**: router: board 05 +5V/GND pour completeness depends on where nTRIP lands (C10 stitch sites unreserved)
-- **#7785**: Verify pair group tuning on board 07's coupled --differential-pairs geometry
+_None._
 
 ## In Progress
 
 Issues currently being built (`loom:building`).
 
-- **#7550**: Board 07 synthetic fixture: 6 diff pairs + 2 match groups over skew tolerance on the seed-42 re-route (identity-allowed in check_matchgroup_coverage.py)
-- **#7782**: Board07 DQS: joint-search via hairpins make kct check skew depend on segment order
-- **#7790**: Board 07 coupled geometry: DQS pair retune no-op and MIPI/TMDS residual skew after retune_pcb
+- **#7795**: CI never exercises board 07's --differential-pairs path, so green board 07 jobs prove nothing for coupled-routing changes
+- **#7799**: kct route --length-match-groups never tries pair fallbacks on coupled rails (no_suitable_segment)
+- **#7808**: Board07 DQS: measure the merged via-hairpin collapse and finish order-independent DQS skew (split from #7782)
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#7779**: fix(board07): retune TMDS_D1 pair skew and delete its gate allowance
+_None._
 
 ## Approved (Awaiting Merge)
 
@@ -68,7 +67,6 @@ Issues carrying `loom:curated`.
 - **#7487**: Re-rule or remove board 03 usb_geometry via-in-pad window exception by 2027-04-19 (#7457 / #7084 Q10) *(curated)*
 - **#7518**: DSN export: verify a Specctra router doesn't double-flip back-side padstack layers (deferred from #7481 / #7496) *(curated)*
 - **#7548**: Board 06 synthetic fixture: 9 diff pairs over max skew on the seed-42 re-route (identity-allowed in check_diffpair_coverage.py) *(curated)*
-- **#7573**: router: board 05 +5V/GND pour completeness depends on where nTRIP lands (C10 stitch sites unreserved) *(curated)*
 - **#7619**: Board 07 fixture: DQS and TMDS_D1 diff pairs routed with unequal via counts (N leg +2 vias), causing multi-mm skew *(curated)*
 - **#7649**: router: source-side diff-pair skew avoidance; retire the Q35 2× interim bump excursion *(curated)*
 - **#7650**: board 03: recover USB_D common-run and MCU-launch margin given up to route VBUS U2.5 (#7475) *(curated)*
@@ -76,9 +74,11 @@ Issues carrying `loom:curated`.
 - **#7716**: router: Python-fallback A* inside relief rescue is load-dependent on board 07 (1,024 expansions in ~420 s) *(curated)*
 - **#7767**: Board07 MIPI_DAT1 coupled pair keeps 0.31 mm skew: pose search fails and inline tuner gates on 0.5 mm max_length_delta *(curated)*
 - **#7769**: Board07 DQS polarity-swap pair: no pose candidate, coupled skew 2.0 mm untunable *(curated)*
-- **#7782**: Board07 DQS: joint-search via hairpins make kct check skew depend on segment order *(curated)*
-- **#7785**: Verify pair group tuning on board 07's coupled --differential-pairs geometry *(curated)*
 - **#7790**: Board 07 coupled geometry: DQS pair retune no-op and MIPI/TMDS residual skew after retune_pcb *(curated)*
+- **#7795**: CI never exercises board 07's --differential-pairs path, so green board 07 jobs prove nothing for coupled-routing changes *(curated)*
+- **#7799**: kct route --length-match-groups never tries pair fallbacks on coupled rails (no_suitable_segment) *(curated)*
+- **#7805**: Board-07 skew/impedance regression from mirror-miss pair fallback (PR #7802 review) *(curated)*
+- **#7808**: Board07 DQS: measure the merged via-hairpin collapse and finish order-independent DQS skew (split from #7782) *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -106,11 +106,11 @@ Issues carrying `loom:curated`.
 | Operator merge-risk holds | 0 |
 | Very important | 0 |
 | Important | 1 |
-| Ready (`loom:issue`) | 2 |
+| Ready (`loom:issue`) | 0 |
 | In Progress (`loom:building`) | 3 |
-| PRs awaiting review | 1 |
+| PRs awaiting review | 0 |
 | Approved PRs awaiting merge | 0 |
-| Curated | 23 |
+| Curated | 24 |
 | Architect / Hermit proposals | 7 |
 | Active epics | 6 |
 <!-- guide:plan-body:end -->
