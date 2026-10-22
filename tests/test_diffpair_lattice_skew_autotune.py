@@ -208,6 +208,85 @@ def test_auto_path_bump_respects_foreign_pad_class_clearance():
     assert ok([far], 1) is True
 
 
+def test_auto_path_bump_may_inherit_the_host_segments_existing_near_miss():
+    """Issue #7612: a bump is not vetoed for a gap its host already had.
+
+    Board 07's MIPI_DAT0 host runs 0.156 mm off its sibling against a 0.2 mm
+    limit; every trombone leg joins that line, so the gate rejected all of
+    them.  It now rejects only a bump that sits nearer the object than the
+    route already does.
+    """
+    from kicad_tools.router.primitives import Pad
+
+    nc = NetClassRouting(name="LVDS", length_critical=False, skew_tolerance_mm=0.1)
+    ar = _router(nc)
+    ar.net_names[3] = "+5V"
+    ar.net_class_map["+5V"] = NetClassRouting(name="Power", clearance=0.2)
+    pad = Pad(x=10.0, y=-0.5, width=0.4, height=0.4, net=3, net_name="+5V", ref="C1", pin="1")
+    ar.grid._pads = [pad]
+    width = 0.2
+    # The pair's P half already runs 0.163 mm from the pad (edge at y=-0.3).
+    ar.routes[0] = Route(
+        net=1,
+        net_name=P_NAME,
+        segments=[Segment(0.0, -0.037, 20.0, -0.037, width, Layer.F_CU, net=1, net_name=P_NAME)],
+    )
+    ok = ar._skew_tune_foreign_clearance_ok(
+        {r.net: r for r in ar.routes},
+        partner_of={1: 2, 2: 1},
+        intra_pair_clearance_mm=0.15,
+        allow_inherited_near_miss=True,
+    )
+    strict = ar._skew_tune_foreign_clearance_ok(
+        {r.net: r for r in ar.routes}, partner_of={1: 2, 2: 1}, intra_pair_clearance_mm=0.15
+    )
+    host = ar.routes[0].segments
+    on_host = Segment(5.0, -0.037, 15.0, -0.037, width, Layer.F_CU, net=1, net_name=P_NAME)
+    leg_away = Segment(8.0, -0.037, 8.0, 0.1, width, Layer.F_CU, net=1, net_name=P_NAME)
+    closer = Segment(5.0, -0.0, 15.0, 0.0, width, Layer.F_CU, net=1, net_name=P_NAME)
+    nearer = Segment(5.0, -0.1, 15.0, -0.1, width, Layer.F_CU, net=1, net_name=P_NAME)
+    assert ok([on_host], 1, host_segments=host) is True
+    assert ok([leg_away], 1, host_segments=host) is True
+    assert ok([closer], 1, host_segments=host) is True
+    assert ok([nearer], 1, host_segments=host) is False
+    # No host named: nothing is inherited, so the gate stays strict.
+    assert ok([on_host], 1) is False
+    # Off by default: the shared (board 06) path still rejects the inherited gap.
+    assert strict([on_host], 1, host_segments=host) is False
+
+
+def test_inherited_near_miss_is_measured_against_the_host_not_the_whole_net():
+    """Issue #7612 (review): a closer approach elsewhere on the net licenses nothing.
+
+    The net's far segment runs 0.063 mm from the pad; the host the bump
+    replaces runs 0.163 mm from it.  A bump 0.1 mm off the pad is nearer
+    than its host, so it is rejected even though the net, taken whole,
+    already gets that close.
+    """
+    from kicad_tools.router.primitives import Pad
+
+    nc = NetClassRouting(name="LVDS", length_critical=False, skew_tolerance_mm=0.1)
+    ar = _router(nc)
+    ar.net_names[3] = "+5V"
+    ar.net_class_map["+5V"] = NetClassRouting(name="Power", clearance=0.2)
+    pad = Pad(x=10.0, y=-0.5, width=0.4, height=0.4, net=3, net_name="+5V", ref="C1", pin="1")
+    ar.grid._pads = [pad]
+    width = 0.2
+    host = Segment(0.0, -0.037, 20.0, -0.037, width, Layer.F_CU, net=1, net_name=P_NAME)
+    elsewhere = Segment(0.0, -0.137, 20.0, -0.137, width, Layer.F_CU, net=1, net_name=P_NAME)
+    ar.routes[0] = Route(net=1, net_name=P_NAME, segments=[host, elsewhere])
+    ok = ar._skew_tune_foreign_clearance_ok(
+        {r.net: r for r in ar.routes},
+        partner_of={1: 2, 2: 1},
+        intra_pair_clearance_mm=0.15,
+        allow_inherited_near_miss=True,
+    )
+    bump = Segment(5.0, -0.1, 15.0, -0.1, width, Layer.F_CU, net=1, net_name=P_NAME)
+    assert ok([bump], 1, host_segments=[host]) is False
+    # Hosted on the closer segment, the same bump is no nearer than its host.
+    assert ok([bump], 1, host_segments=[elsewhere]) is True
+
+
 def test_auto_path_measures_skew_with_via_barrels_like_the_checker():
     """07rf regression guard: the checker counts drilled via length.
 

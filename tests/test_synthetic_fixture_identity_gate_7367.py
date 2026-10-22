@@ -180,10 +180,10 @@ class TestBoard07:
         assert f"#{issue}" in gate.format_stale(stale)
 
     def test_identity_allowed_findings_do_not_count(self):
-        """(c') the operator-ruling precondition: 12 allowed findings use no budget."""
+        """(c') the operator-ruling precondition: the allowed findings use no budget."""
         gate = self.gate()
         found = self.measured()
-        assert len([v for v in found if v["rule_id"] != "connectivity"]) > 8
+        assert len([v for v in found if v["rule_id"] != "connectivity"]) > 0
         assert gate.unallowed_blocking(BOARD07_KEY, found) == []
 
     def test_advisory_connectivity_is_not_blocking(self):

@@ -223,7 +223,7 @@ def tune_diff_pair_skew(
     grid: RoutingGrid | None = None,
     prefer_reserved_slack: bool = False,
     fixed_segment_ids: set[int] | None = None,
-    extra_clearance_ok: Callable[[list[Segment], int], bool] | None = None,
+    extra_clearance_ok: Callable[..., bool] | None = None,
     route_length: Callable[[Route], float] | None = None,
     max_uncoupled_mm: float | None = None,
     corner_chamfer_widths: float = 0.0,
@@ -271,7 +271,8 @@ def tune_diff_pair_skew(
             segment preference above.  Default ``False`` (inert).  Has no
             effect unless ``grid`` is also supplied.
         extra_clearance_ok: Issue #6664.  Optional extra post-insertion
-            gate ``(new_segments, shorter_net_id) -> bool`` run after the
+            gate ``(new_segments, shorter_net_id, *, host_segments) -> bool``
+            (``host_segments``: the segments the bump replaces) run after the
             built-in segment-vs-segment self-check.  ``False`` rolls the
             insertion back exactly like a built-in violation
             (``reason="post_insertion_drc_violation"``).  The lattice
@@ -597,7 +598,13 @@ def tune_diff_pair_skew(
                 routes_by_net=routes_by_net,
                 intra_pair_clearance_mm=intra_pair_clearance_mm,
             ) and (
-                extra_clearance_ok is None or extra_clearance_ok(cand_serp.new_segments, shorter_id)
+                extra_clearance_ok is None
+                or extra_clearance_ok(
+                    cand_serp.new_segments,
+                    shorter_id,
+                    # Issue #7612: the host segment(s) the bump replaces.
+                    host_segments=_replaced_segments(current_shorter, cand_route),
+                )
             ):
                 candidate_route = cand_route
                 break
@@ -1115,6 +1122,12 @@ def _segments_within(a: Segment, b: Segment, margin: float) -> bool:
     if max(a.y1, a.y2) + margin < min(b.y1, b.y2):
         return False
     return True
+
+
+def _replaced_segments(before: Route, after: Route) -> list[Segment]:
+    """Segments of ``before`` that ``after`` no longer carries (the bump's hosts)."""
+    kept = {id(s) for s in after.segments}
+    return [s for s in before.segments if id(s) not in kept]
 
 
 def _post_insertion_clearance_ok(

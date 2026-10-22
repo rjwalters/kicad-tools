@@ -93,6 +93,27 @@ class TestBoard07Allowance:
         }
 
 
+class TestBoard07SkewRetune:
+    """Issue #7612: the pairs the recipe length-tunes carry no skew allowance."""
+
+    def test_retuned_pairs_have_no_skew_allowance(self):
+        mod = _load_helper_module()
+        recipe = _load_board_recipe_module()
+        assert recipe.SKEW_RETUNE_PAIRS, "the recipe must name the pairs it tunes"
+        allowed = {
+            ident
+            for rule, ident in mod.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS
+            if rule == "diffpair_length_skew"
+        }
+        for p_net, n_net in recipe.SKEW_RETUNE_PAIRS:
+            assert "/".join(sorted((p_net, n_net))) not in allowed
+
+    def test_retuned_pairs_are_declared_pairs(self):
+        recipe = _load_board_recipe_module()
+        for p_net, n_net in recipe.SKEW_RETUNE_PAIRS:
+            assert recipe.generate_pcb.DIFFPAIRS[p_net] == n_net
+
+
 class TestCheckGroupAllowances:
     ALLOWED = {"MIPI_CSI_LANES": 7550, "DDR_DATA_BYTE_0": 7550}
 

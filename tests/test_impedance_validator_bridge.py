@@ -360,6 +360,40 @@ class TestBoard06DormancyOptOut:
         )
         assert resolved.target_diff_impedance == 100.0
 
+    def test_cli_path_explicit_diff_target_keeps_literal_width(self, tmp_path):
+        """Issue #7755: a board-03-shaped class (explicit
+        ``target_diff_impedance=90``, ``trace_width=0.20``) routed via
+        ``load_pcb_for_routing`` (the CLI path) keeps its literal width.
+        Sizing would give ~0.275 mm, so this fails if explicit targets
+        ever start engaging the resolver without a stackup."""
+        from kicad_tools.router.io import load_pcb_for_routing
+        from kicad_tools.schema.pcb import PCB
+
+        path = tmp_path / "board03-shape.kicad_pcb"
+        PCB.create(width=20, height=20, layers=4).save(path)
+        router, _ = load_pcb_for_routing(
+            path,
+            rules=DesignRules(manufacturer="jlcpcb"),
+            layer_stack=LayerStack.four_layer_sig_gnd_pwr_sig(),
+            validate_drc=False,
+        )
+        usb_class = NetClassRouting(
+            name="USB",
+            trace_width=0.20,
+            clearance=0.15,
+            target_diff_impedance=90.0,
+        )
+        router.nets = {1: [("U1", "1")], 2: [("U1", "2")]}
+        router.net_names = {1: "USB_DP", 2: "USB_DN"}
+        router.net_class_map = {"USB_DP": usb_class, "USB_DN": usb_class}
+
+        assert router._stackup is None
+        router._prepare_routing()
+
+        assert router._stackup is None
+        for name in ("USB_DP", "USB_DN"):
+            assert router.net_class_map[name].trace_width == 0.20
+
     def test_swclk_synthesis_candidate_still_wakes_auto_derive(self):
         """The opt-out must NOT regress the #2964 SWCLK fix: when a
         regex-matching net (e.g. SWCLK) has no explicit target,

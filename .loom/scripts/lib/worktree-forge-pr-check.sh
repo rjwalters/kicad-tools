@@ -305,7 +305,7 @@ _worktree_guard_fresh_branch_against_open_pr() {
     # fetch simply failed — $origin_fetch_result). Either way we are about to
     # fall through to creating a FRESH branch under this exact name, which is
     # precisely the silent-divergence trap #7765 describes: a fork PR's head
-    # (e.g. turian/loom:feature/issue-7717) never shows up as
+    # (e.g. example-reviewer/loom:feature/issue-7717) never shows up as
     # origin/feature/issue-7717, so ref-absence on origin is NOT proof that no
     # PR already claims this branch name. Ask the forge directly before
     # deciding.

@@ -15,6 +15,10 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-21
 
+- **PR #7742**: feat: add kct export --spec and pass project.kct from board generators
+- **Issue #7754** (closed): Lattice coupled search: offset-aware turn spacing so the balanced 06b LVDS centerline survives finish()
+- **Issue #7741** (closed): regenerated BOM LCSC column depends on the host (empty when the LCSC API returns 403), unlike the committed bundle
+- **Issue #7721** (closed): router: turn-aware lattice A* — price signed turning so diff pairs avoid same-direction U-turns (source-side skew, #7649)
 - **PR #7751**: fix(board07): move U4 TMDS balls to the J2-facing column so TMDS_D0_N routes
 - **Issue #7557** (closed): Board 07: TMDS_D0_N pad U4.B2 has no legal exit; needs placement rework or joint TMDS escape-corridor allocation (#3673)
 - **PR #7749**: fix(boards): gate board 02 route_demo and board 05 legacy recipe on kct export

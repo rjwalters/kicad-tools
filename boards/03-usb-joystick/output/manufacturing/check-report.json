@@ -1,7 +1,7 @@
 {
   "file": "boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb",
   "manufacturer": "jlcpcb-tier1",
-  "pcb_sha256": "cc396d018ca6d6bd4dffc7796869be3fe5a27a560cb503fb55aaf8221f7f2119",
+  "pcb_sha256": "94005ce497b8c968fd655d6c954de033bc6751c52248421c3e79cfc47a907e96",
   "layers": 4,
   "summary": {
     "errors": 0,
@@ -106,10 +106,10 @@
       "rule_id": "diffpair_length_skew",
       "type": "diffpair_length_skew",
       "severity": "info",
-      "message": "Engaged differential pair USB_MCU_D+/USB_MCU_D- length-skew 0.154 mm within tolerance 2.500 mm [protocol:USB2_FS (Renesas, Guidelines for Full-Speed USB2.0 Board Design, Table 2)]",
+      "message": "Engaged differential pair USB_MCU_D+/USB_MCU_D- length-skew 0.137 mm within tolerance 2.500 mm [protocol:USB2_FS (Renesas, Guidelines for Full-Speed USB2.0 Board Design, Table 2)]",
       "location": null,
       "layer": null,
-      "actual_value": 0.1544,
+      "actual_value": 0.1374,
       "required_value": 2.5,
       "items": [],
       "nets": [
@@ -204,10 +204,10 @@
       "rule_id": "diffpair_uncoupled_length",
       "type": "diffpair_uncoupled_length",
       "severity": "info",
-      "message": "Differential pair USB_MCU_D+/USB_MCU_D- uncoupled length 1.055 mm (P 1.055, N 0.901) within limit 12.700 mm = 6.35 mm x 2 components [protocol:USB2_FS (TI SPRAAR7J \u00a73.3 (breakout within 0.25 in of the package); high-speed guidance, applied to full speed)]",
+      "message": "Differential pair USB_MCU_D+/USB_MCU_D- uncoupled length 0.955 mm (P 0.955, N 0.818) within limit 12.700 mm = 6.35 mm x 2 components [protocol:USB2_FS (TI SPRAAR7J \u00a73.3 (breakout within 0.25 in of the package); high-speed guidance, applied to full speed)]",
       "location": null,
       "layer": null,
-      "actual_value": 1.055,
+      "actual_value": 0.9553,
       "required_value": 12.7,
       "items": [],
       "nets": [
@@ -223,10 +223,10 @@
       "rule_id": "diffpair_uncoupled_length",
       "type": "diffpair_uncoupled_length",
       "severity": "info",
-      "message": "Differential pair USB_MCU_D+/USB_MCU_D- worst per-terminal uncoupled length 0.720 mm within limit 6.350 mm [protocol:USB2_FS (TI SPRAAR7J \u00a73.3 (breakout within 0.25 in of the package); high-speed guidance, applied to full speed)] (kct-only: KiCad has no per-terminal uncoupled check)",
+      "message": "Differential pair USB_MCU_D+/USB_MCU_D- worst per-terminal uncoupled length 0.800 mm within limit 6.350 mm [protocol:USB2_FS (TI SPRAAR7J \u00a73.3 (breakout within 0.25 in of the package); high-speed guidance, applied to full speed)] (kct-only: KiCad has no per-terminal uncoupled check)",
       "location": null,
       "layer": null,
-      "actual_value": 0.72,
+      "actual_value": 0.8004,
       "required_value": 6.35,
       "items": [],
       "nets": [
@@ -276,8 +276,8 @@
     "lengths_mm": {
       "USB_D+": 15.790877515751076,
       "USB_D-": 15.790877515751076,
-      "USB_MCU_D+": 3.8035802579248226,
-      "USB_MCU_D-": 3.6491614418720992
+      "USB_MCU_D+": 3.9356328834891876,
+      "USB_MCU_D-": 3.7982796662062412
     },
     "common_coupled_mm": 4.070927124746197,
     "branch_skew_mm": 0.0
