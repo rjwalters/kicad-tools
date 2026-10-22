@@ -248,6 +248,8 @@ _SHADOW_PER_PAIR_BUDGET_S: float = float(os.environ.get("KCT_SHADOW_PER_PAIR_BUD
 # of it, and is skipped when less than ``_POSE_CENTERLINE_MIN_BUDGET_S``
 # remains (a wall-clock budget-exit must still defer promptly, #3089/#4107).
 _POSE_CENTERLINE_TIMEOUT_S: float = 30.0
+# Issue #7769: ``[coupled-select]`` decline reason for polarity-swapped pairs.
+_POSE_DECLINE_POLARITY_SWAP: str = "polarity-swap (no crossover in centerline trunk)"
 _POSE_CENTERLINE_MIN_BUDGET_S: float = 0.25
 
 # Issue #5895: the pose-trunk corridor guard
@@ -4950,6 +4952,7 @@ def _select_coupled_candidate(
     joint: tuple[Route, Route, Any] | None,
     pose: tuple[Route, Route, Any] | None,
     resolution: float,
+    skew_limit_mm: float | None = None,
 ) -> str | None:
     """Pick ``"joint"`` or ``"pose"`` among gate-surviving candidates (#6858).
 
@@ -4957,6 +4960,14 @@ def _select_coupled_candidate(
     lower skew (ties within 0.01 mm), then fewer vias; a full tie keeps the
     joint result, today's committed choice.  Returns ``None`` when neither
     candidate survived.
+
+    Issue #5333: when ``skew_limit_mm`` (the pair's authored ``kct check``
+    skew limit) is given and exactly ONE candidate meets it, that candidate
+    wins outright.  Uncoupled length is only a tie-break among candidates
+    that are equally acceptable to the checker; trading a pair that already
+    passes its skew rule for 0.16 mm less uncoupled copper (board 07
+    TMDS_D1: pose skew 0.070 mm vs joint 0.498 mm, limit 0.075 mm) leaves a
+    hard error the post-route tuner then cannot remove.
     """
     if joint is None and pose is None:
         return None
@@ -4966,6 +4977,10 @@ def _select_coupled_candidate(
         return "pose"
     j_unc, j_skew, j_vias = _coupled_candidate_metrics(joint[0], joint[1])
     t_unc, t_skew, t_vias = _coupled_candidate_metrics(pose[0], pose[1])
+    if skew_limit_mm is not None:
+        j_ok, t_ok = j_skew <= skew_limit_mm, t_skew <= skew_limit_mm
+        if j_ok != t_ok:
+            return "joint" if j_ok else "pose"
     if abs(j_unc - t_unc) > resolution:
         return "pose" if t_unc < j_unc else "joint"
     if abs(j_skew - t_skew) > _COUPLED_SELECT_SKEW_TOL_MM:
@@ -5737,6 +5752,23 @@ class DiffPairRouter:
             clearance_cells = routed_halo_radius_cells(seg, grid.rules, grid.resolution)
             grid._mark_segment(seg, clearance_cells=clearance_cells)
         self.autorouter._mark_route_on_cpp_grid(route)
+
+    def _checker_skew_limit_mm(self, pair: DifferentialPair) -> float | None:
+        """The pair's ``kct check`` skew limit when it is an ERROR (#5333).
+
+        ``None`` when the limit is only advisory (warning/info), so candidate
+        selection keeps its plain #6858 ordering for such pairs.
+        """
+        from kicad_tools.validate.diffpair_engagement import resolve_pair_thresholds
+
+        thresholds = resolve_pair_thresholds(
+            getattr(self.autorouter, "net_class_map", None),
+            pair.positive.net_name,
+            pair.negative.net_name,
+        )
+        if thresholds.skew_severity != "error":
+            return None
+        return float(thresholds.skew_mm)
 
     def _tune_committed_pair_skew(self, pair: DifferentialPair) -> bool:
         """Bump-tune a just-committed coupled pair's skew (Issue #7269).
@@ -12487,6 +12519,12 @@ class DiffPairRouter:
             pose_candidate: tuple[Route, Route] | None = None
             pose_decline: str | None = None
             pose_elapsed = 0.0
+            if self.enable_pose_centerline and spec.polarity_swap:
+                # Issue #7769: the centreline trunk keeps P and N as parallel
+                # rails and has no crossover, so a polarity-swapped pair is
+                # never offered to ``route_centerline_pose``.  Say so in the
+                # ``[coupled-select]`` line instead of the opaque ``n/a``.
+                pose_decline = _POSE_DECLINE_POLARITY_SWAP
             if (
                 self.enable_pose_centerline
                 and not spec.polarity_swap
@@ -12661,6 +12699,7 @@ class DiffPairRouter:
                     gated.get("joint"),
                     gated.get("pose"),
                     float(self.autorouter.grid.resolution),
+                    skew_limit_mm=self._checker_skew_limit_mm(pair),
                 )
             if pose_candidate is not None or joint_result is not None:
                 print(
@@ -12874,8 +12913,11 @@ class DiffPairRouter:
         # Check and apply length matching
         delta = pair.length_delta
         warning = None
+        # Issue #7767: gate on the limit ``kct check`` enforces when that is
+        # an error and stricter than the router's default ``max_length_delta``.
+        match_tol = self._inline_match_tolerance(pair)
 
-        if delta > pair.rules.max_length_delta:
+        if delta > match_tol:
             # Issue #3003: gate the inline serpentine shim on
             # ``length_critical=True``.  The intent is that length
             # matching for length-critical pairs is performed by the
@@ -12917,7 +12959,7 @@ class DiffPairRouter:
                     matched = match_pair_lengths(
                         p_routes[0],
                         n_routes[0],
-                        pair.rules.max_length_delta,
+                        match_tol,
                         add_serpentines=True,
                         intra_pair_clearance_mm=intra_clearance,
                         # Issue #3508: grid-validate the bulges (foreign
@@ -12971,10 +13013,35 @@ class DiffPairRouter:
                 max_allowed=pair.rules.max_length_delta,
             )
             print(f"    WARNING: {warning}")
+        elif delta > match_tol:
+            print(
+                f"    Length delta {delta:.3f}mm is within max_length_delta but "
+                f"above the enforced skew limit {match_tol:.3f}mm"
+            )
         else:
             print(f"    Length matched: delta={delta:.3f}mm (within tolerance)")
 
         return routes, warning
+
+    def _inline_match_tolerance(self, pair: DifferentialPair) -> float:
+        """Inline length-match tolerance for a committed coupled pair (#7767).
+
+        ``pair.rules.max_length_delta`` unless ``kct check`` enforces a
+        stricter skew limit for the pair as an error.
+        """
+        from kicad_tools.validate.diffpair_engagement import resolve_pair_thresholds
+
+        rules = pair.rules
+        assert rules is not None, "committed coupled pair always carries rules"
+        tol = float(rules.max_length_delta)
+        thresholds = resolve_pair_thresholds(
+            getattr(self.autorouter, "net_class_map", None),
+            pair.positive.net_name,
+            pair.negative.net_name,
+        )
+        if thresholds.skew_severity == "error":
+            return min(tol, float(thresholds.skew_mm))
+        return tol
 
     def route_differential_pair_independent(
         self,
