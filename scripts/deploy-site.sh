@@ -263,13 +263,25 @@ fi
 # available, opt in.  An explicit KCT_KICAD_DOCKER=0 keeps the host kicad-cli.
 # With the Docker shim a host kicad-cli is not required.
 SKIP_RENDERS=0
-if [ -z "${KCT_KICAD_DOCKER:-}" ] && command -v docker >/dev/null 2>&1; then
-  export KCT_KICAD_DOCKER=1
+# "Usable" means the daemon answers, not just that the binary exists: a stopped
+# Docker Desktop would otherwise fail every render and publish stale images.
+docker_usable() {
+  command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1
+}
+if [ "${KCT_KICAD_DOCKER:-}" = "1" ] && ! docker_usable; then
+  err "KCT_KICAD_DOCKER=1 but Docker is not installed or not running; start Docker or unset KCT_KICAD_DOCKER."
+  exit 1
 fi
-if [ "${KCT_KICAD_DOCKER:-}" = "1" ] && command -v docker >/dev/null 2>&1; then
+if [ -z "${KCT_KICAD_DOCKER:-}" ]; then
+  if docker_usable; then
+    export KCT_KICAD_DOCKER=1
+  elif command -v docker >/dev/null 2>&1; then
+    warn "docker installed but not running; falling back to host kicad-cli."
+  fi
+fi
+if [ "${KCT_KICAD_DOCKER:-}" = "1" ]; then
   info "Renderer: pinned Docker kicad-cli (KCT_KICAD_DOCKER=1)."
 elif command -v kicad-cli >/dev/null 2>&1; then
-  [ "${KCT_KICAD_DOCKER:-}" = "1" ] && warn "KCT_KICAD_DOCKER=1 but 'docker' not found; unset it or install docker."
   info "Renderer: host kicad-cli (not the pinned release)."
 else
   warn "'kicad-cli' not found (and no usable Docker) — skipping board renders. The site will serve placeholder thumbnails."
@@ -340,7 +352,8 @@ PY
     if uv run kct render boards/ --no-3d; then
       info "2D renders complete."
     else
-      warn "Render step failed; continuing with existing renders (placeholders will be served)."
+      err "2D render failed; refusing to publish stale renders. Fix the render error or pass --no-deploy."
+      exit 1
     fi
   fi
 fi
