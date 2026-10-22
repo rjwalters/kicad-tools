@@ -4530,6 +4530,49 @@ class CoupledPathfinder:
             route.segments.append(seg)
 
 
+def _splice_tuned_segments(
+    fragments: list[Route],
+    old_segments: list[Segment],
+    new_segments: list[Segment],
+) -> list[tuple[Route, list[Segment]]] | None:
+    """Map a tuned net's segments back onto its committed fragments (#7269).
+
+    ``old_segments`` is the merged net (every fragment's segments, in fragment
+    order) the tuner was handed and ``new_segments`` what it returned: the
+    same Segment objects, with each bump host replaced by the bump's run of
+    new segments.  Each fragment keeps its surviving segments and takes the
+    run that replaced each of its hosts, in place.  Returns ``(fragment,
+    segments)`` for every fragment that changed, or ``None`` when the result
+    does not decompose that way (nothing is changed then).
+    """
+    old_ids = {id(s) for s in old_segments}
+    new_pos = {id(s): i for i, s in enumerate(new_segments)}
+    if not old_ids or {id(s) for f in fragments for s in f.segments} != old_ids:
+        return None
+    order = [id(s) for s in old_segments]
+    assigned: set[int] = set()
+    plan: list[tuple[Route, list[Segment]]] = []
+    for fragment in fragments:
+        out: list[Segment] = []
+        changed = False
+        for seg in fragment.segments:
+            if id(seg) in new_pos:
+                out.append(seg)
+                continue
+            changed = True
+            k = order.index(id(seg))
+            before = next((new_pos[i] for i in reversed(order[:k]) if i in new_pos), -1)
+            after = next((new_pos[i] for i in order[k + 1 :] if i in new_pos), len(new_segments))
+            for s in new_segments[before + 1 : after]:
+                if id(s) not in old_ids and id(s) not in assigned:
+                    assigned.add(id(s))
+                    out.append(s)
+        if changed:
+            plan.append((fragment, out))
+    added = {id(s) for s in new_segments if id(s) not in old_ids}
+    return plan if added == assigned else None
+
+
 def create_serpentine(
     route: Route,
     length_to_add: float,
@@ -5694,6 +5737,115 @@ class DiffPairRouter:
             clearance_cells = routed_halo_radius_cells(seg, grid.rules, grid.resolution)
             grid._mark_segment(seg, clearance_cells=clearance_cells)
         self.autorouter._mark_route_on_cpp_grid(route)
+
+    def _tune_committed_pair_skew(self, pair: DifferentialPair) -> bool:
+        """Bump-tune a just-committed coupled pair's skew (Issue #7269).
+
+        The fallback for the inline serpentine of
+        :meth:`route_differential_pair_coupled` when that legacy comb is
+        rejected.  On a tightly coupled trunk (board 07's MIPI pose trunks)
+        the partner's grid envelope covers the shorter half's own cells, so
+        every bulge the comb tries reads "blocked" and the pair is left with
+        its skew.  The grid engine never runs the post-route Phase 3I tuner
+        (``_diffpair_skew_tuning_mode``), so nothing else fixes it.
+
+        This runs the audited bump tuner (:func:`tune_diff_pair_skew`) on the
+        pair exactly as ``Autorouter.apply_diffpair_length_tuning`` does on
+        its ``"checker_skew_limit"`` path: engaged only when ``kct check``
+        enforces the pair's skew limit as an error, tuned to that limit with
+        the checker's via-inclusive length measure, the foreign pad/via/track
+        gate, the #6795 uncoupled-length guard and the never-worse backstop.
+        Its bumps (KiCad tuning patterns, or the chamfered plain fallback)
+        are spliced into the committed fragments in place and re-marked on
+        the grid, like the comb's.  Fixed escape copper is never a host.
+
+        Returns ``True`` when a tune was committed.
+        """
+        from kicad_tools.validate.diffpair_engagement import resolve_pair_thresholds
+        from kicad_tools.validate.rules.diffpair_uncoupled_length import uncoupled_limit
+
+        from .diffpair_detection import DetectedPair, DetectionSource
+        from .diffpair_length_tuning import tune_diff_pair_skew
+
+        ar = self.autorouter
+        p_id, n_id = pair.positive.net_id, pair.negative.net_id
+        p_name, n_name = pair.positive.net_name, pair.negative.net_name
+        thresholds = resolve_pair_thresholds(getattr(ar, "net_class_map", None), p_name, n_name)
+        if thresholds.skew_severity != "error":
+            print(
+                f"    [skew-tune] {p_name}/{n_name}: not tuned "
+                f"(skew limit is {thresholds.skew_severity}, not error)"
+            )
+            return False
+
+        components: dict[str, set[str]] = {}
+        for pad in ar.pads.values():
+            if pad.net_name in (p_name, n_name) and pad.ref:
+                components.setdefault(pad.net_name, set()).add(pad.ref)
+        max_uncoupled_mm, _how = uncoupled_limit(
+            thresholds,
+            max(len(components.get(p_name, ())), len(components.get(n_name, ()))),
+        )
+        num_layers = len(ar.layer_stack.layers) if ar.layer_stack is not None else 2
+        net_class = (getattr(ar, "net_class_map", None) or {}).get(p_name)
+        intra = _floored_pair_gap(ar, net_class) if net_class is not None else None
+        if intra is None:
+            intra = ar.rules.trace_clearance
+
+        routes_by_net = ar._net_routes_merged()
+        old_p, old_n = routes_by_net.get(p_id), routes_by_net.get(n_id)
+        if old_p is None or old_n is None:
+            return False
+        old_routes: dict[int, Route] = {p_id: old_p, n_id: old_n}
+        fixed_segment_ids = {id(s) for r in ar.routes if r.is_escape for s in r.segments}
+        new_p, new_n, result = tune_diff_pair_skew(
+            DetectedPair(pair=pair, source=DetectionSource.EXPLICIT),
+            routes_by_net,
+            tolerance_mm=thresholds.skew_mm,
+            intra_pair_clearance_mm=intra,
+            grid=ar.grid,
+            prefer_reserved_slack=getattr(ar, "enable_slack_corridor_widening", False),
+            fixed_segment_ids=fixed_segment_ids,
+            extra_clearance_ok=ar._skew_tune_foreign_clearance_ok(
+                routes_by_net,
+                partner_of={p_id: n_id, n_id: p_id},
+                intra_pair_clearance_mm=intra,
+            ),
+            route_length=ar._checker_route_length(num_layers),
+            max_uncoupled_mm=max_uncoupled_mm,
+        )
+        # Never ship a tune that leaves the checker's skew worse (#6664).
+        if (
+            not result.inserts_applied
+            or result.skew_after_mm > result.skew_before_mm - 1e-9
+            or result.reason == "post_insertion_drc_violation"
+        ):
+            print(
+                f"    [skew-tune] {p_name}/{n_name}: not tuned ({result.reason}; "
+                f"skew {result.skew_before_mm:.3f}mm, limit {thresholds.skew_mm:.3f}mm)"
+            )
+            return False
+
+        spliced: list[tuple[Route, list[Segment]]] = []
+        for net, new_route in ((p_id, new_p), (n_id, new_n)):
+            old = old_routes[net]
+            if new_route is old or new_route.segments is old.segments:
+                continue
+            fragments = [r for r in ar.routes if r.net == net]
+            plan = _splice_tuned_segments(fragments, old.segments, new_route.segments)
+            if plan is None:
+                print(f"    [skew-tune] {p_name}/{n_name}: not tuned (could not splice bumps)")
+                return False
+            spliced.extend(plan)
+        for fragment, segments in spliced:
+            fragment.segments = segments
+            self._remark_route_cells(fragment)
+        print(
+            f"    [skew-tune] {p_name}/{n_name}: {result.reason}, "
+            f"{result.inserts_applied} insert(s), skew {result.skew_before_mm:.3f}mm -> "
+            f"{result.skew_after_mm:.3f}mm (limit {thresholds.skew_mm:.3f}mm)"
+        )
+        return True
 
     def _virtual_pad_at(self, template: Pad, wx: float, wy: float, layer_idx: int) -> Pad:
         """Virtual pad at an arbitrary board position (issue #3508).
@@ -12798,9 +12950,19 @@ class DiffPairRouter:
                     else:
                         print(
                             "    Serpentine rejected (no suitable segment OR "
-                            "would violate intra-pair clearance); falling through "
-                            "to length-mismatch warning."
+                            "would violate intra-pair clearance); trying the "
+                            "skew-bump tuner."
                         )
+                        # Issue #7269: the grid engine never runs the post-route
+                        # Phase 3I tuner, so a rejected comb used to leave the
+                        # committed pair's skew as routed.
+                        if self._tune_committed_pair_skew(pair):
+                            p_length = calculate_route_length(p_routes)
+                            n_length = calculate_route_length(n_routes)
+                            pair.routed_length_p = p_length
+                            pair.routed_length_n = n_length
+                            delta = pair.length_delta
+                            print(f"    After skew-bump tuning: delta={delta:.3f}mm")
 
         if delta > pair.rules.max_length_delta:
             warning = LengthMismatchWarning(
