@@ -498,3 +498,57 @@ class TestCli:
         assert code == 1
         assert "unknown_group" in capsys.readouterr().err
         assert not out.exists()
+
+
+class TestHostTolerantPadGate:
+    """Issue #7767: a bump may keep its host's gap to a foreign pad, never shrink it."""
+
+    @pytest.fixture
+    def gate_parts(self, tmp_path):
+        from kicad_tools.router.io import load_pcb_for_routing
+
+        # OTHER's pads (0.6 square, at x=5 and x=40, y=10.5) sit 0.1 mm edge-to-edge
+        # from A0's y=10 track: the host is already under the class clearance.
+        path = tmp_path / "gate.kicad_pcb"
+        path.write_text(board({"A0": (10, 5, 45), "OTHER": (10.5, 5, 40)}))
+        router, _ = load_pcb_for_routing(
+            str(path),
+            use_pcb_rules=True,
+            validate_drc=False,
+            load_existing_routes=True,
+            force_python=True,
+        )
+        from kicad_tools.router.pcb_retune import _adopt_existing_routes
+
+        _adopt_existing_routes(router, {"A0"})
+        ids = {n: i for i, n in router.net_names.items()}
+        host = [s for r in router.routes if r.net_name == "A0" for s in r.segments]
+        routes = {r.net: r for r in router.routes}
+
+        def make(tolerant):
+            return router._skew_tune_foreign_clearance_ok(
+                routes, partner_of={}, intra_pair_clearance_mm=0.1, host_tolerant=tolerant
+            )
+
+        def leg(y):
+            import copy
+
+            seg = copy.copy(host[0])
+            seg.x1, seg.x2 = 4.5, 6.0
+            seg.y1 = seg.y2 = y
+            return [seg]
+
+        return make, leg, host, ids["A0"]
+
+    def test_strict_gate_rejects_leg_off_an_already_close_host(self, gate_parts):
+        make, leg, host, net = gate_parts
+        assert not make(False)(leg(10.0), net, host_segments=host)
+
+    def test_tolerant_gate_accepts_leg_that_keeps_the_host_gap(self, gate_parts):
+        make, leg, host, net = gate_parts
+        assert make(True)(leg(10.0), net, host_segments=host)
+        assert make(True)(leg(9.0), net, host_segments=host)
+
+    def test_tolerant_gate_rejects_leg_that_closes_on_the_pad(self, gate_parts):
+        make, leg, host, net = gate_parts
+        assert not make(True)(leg(10.2), net, host_segments=host)

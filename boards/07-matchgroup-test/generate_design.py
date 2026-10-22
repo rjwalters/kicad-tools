@@ -1802,8 +1802,17 @@ SKEW_RETUNE_PAIRS: tuple[tuple[str, str], ...] = (
 )
 
 
+# Issue #7766: ``kct route``'s group tuner finds no span-matched host on the
+# DDR byte-lane pairs (``no_suitable_segment``), so DDR_DATA_BYTE_0 is matched
+# here in the same ``retune_pcb`` call, through the pair fallbacks (centreline /
+# per-leg meanders) that the single-ended pass of ``kct route`` does not use.
+# ``MIPI_CSI_LANES`` and ``HDMI_TMDS_LANES`` are not listed: their halves have
+# too few usable hosts for it (tracked in #7550).
+RETUNE_GROUPS: tuple[str, ...] = ("DDR_DATA_BYTE_0",)
+
+
 def retune_pair_skew(routed_path: Path, sidecar_path: Path) -> list[str]:
-    """Length-tune :data:`SKEW_RETUNE_PAIRS` in place on the routed board.
+    """Length-tune :data:`SKEW_RETUNE_PAIRS` and :data:`RETUNE_GROUPS` in place.
 
     All pairs go through ONE ``retune_pcb`` call: it seeds its uuid generator
     per call, so a second call on the same board re-mints the first call's
@@ -1825,6 +1834,7 @@ def retune_pair_skew(routed_path: Path, sidecar_path: Path) -> list[str]:
             report = retune_pcb(
                 routed_path,
                 out,
+                groups=list(RETUNE_GROUPS),
                 diffpairs=list(SKEW_RETUNE_PAIRS),
                 net_class_map=net_class_map,
                 provenance_path=Path(scratch) / "retune.json",
