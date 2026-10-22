@@ -721,6 +721,9 @@ class LatticePathfinder:
         self.pair_gateway_limits: dict[object, tuple[float | None, int | None]] = {}
         self.pair_gateway_log: dict[object, str] = {}
         self.pair_gateways: dict[object, str] = {}
+        # Issue #7650: planar coupled pairs the converged pass re-routed
+        # without negotiation history, ``key -> (old, new)`` matched length.
+        self.pair_straightened: dict[object, tuple[float, float]] = {}
         # Keys the caller excludes from the gateway retry (a trunk the #6535
         # tap-chain retry handles first).
         self.pair_gateway_skip: frozenset[object] = frozenset()
@@ -3981,6 +3984,7 @@ class LatticePathfinder:
             GatewayCombo,
             WorkableCombo,
             combo_length_floor,
+            coupled_length,
             enumerate_gateways,
             polarity_crosses,
             rank_gateway_combos,
@@ -4188,11 +4192,22 @@ class LatticePathfinder:
                     lengths[0 if net == pc.pad_p_a.net else 1] += sum(
                         dist(a, b) for a, b in zip(poly, poly[1:], strict=False)
                     )
+                # Issue #7650: the coupled body on the gateway layer, the
+                # matched-length tie-break.
+                body = [
+                    [poly for net, run_layer, poly in pres.runs if run_layer == layer and net == n]
+                    for n in (pc.pad_p_a.net, pc.pad_n_a.net)
+                ]
+                coupled = min(
+                    sum(coupled_length(a, b, pitch=pc.pitch) for a in body[x] for b in body[1 - x])
+                    for x in (0, 1)
+                )
                 scored = WorkableCombo(
                     order,
                     lengths[0],
                     lengths[1],
                     self._escape_sites_sealed(pres, half, pad_layers),
+                    coupled,
                 )
                 if best is None or scored.key() < best[0].key():
                     desc = []
@@ -4224,6 +4239,61 @@ class LatticePathfinder:
             declined += f"; {summary}"
         self.pair_gateway_log[pc.key] = declined
         return None, reason
+
+    def _straighten_pairs(
+        self,
+        planar: list[tuple[CoupledConnection, _PairResult]],
+        committed: CommittedCopper,
+        routes: dict[object, Route],
+        present: float,
+    ) -> None:
+        """Re-route each planar coupled pair without history (issue #7650).
+
+        Pairs are routed first in every pass, so the converged pass routes
+        them against the history earlier passes left on the corridors their
+        failed nets wanted.  Once every net has routed that pressure has done
+        its job, but the pairs keep the detours it caused (board 03: both
+        USB_MCU_D legs jog 0.68 mm west at y = 19.4 around ground nothing in
+        the final pass occupies, +0.57 mm on the MCU launch).
+
+        Each pair, in commit order, is lifted out of ``committed`` and routed
+        again with an empty history against everything else the pass
+        committed.  The new run is kept only when it is strictly shorter in
+        matched length (``P + N + |P - N|``) and, like the old one, has no
+        vias; otherwise the old run goes back unchanged.  The search verifies
+        the new legs against the committed copper exactly as it verified the
+        old ones, so no other net's legality changes.
+        """
+        self.pair_straightened = {}
+
+        def matched(pres: _PairResult, pc: CoupledConnection) -> float:
+            lengths = [0.0, 0.0]
+            for net, _layer, poly in pres.runs:
+                lengths[0 if net == pc.pad_p_a.net else 1] += sum(
+                    dist(a, b) for a, b in zip(poly, poly[1:], strict=False)
+                )
+            return lengths[0] + lengths[1] + abs(lengths[0] - lengths[1])
+
+        for pc, pres in planar:
+            for leg_net, layer_idx, points in pres.runs:
+                half, clr = self._conn_geometry(pc.net_class, leg_net)
+                committed.remove_run(layer_idx, points, leg_net, half, clr)
+            new, _reason = self._route_pair_impl(
+                pc, committed=committed, history=PhysicalHistory(), present=present
+            )
+            old_len = matched(pres, pc)
+            keep = pres
+            if new is not None and not new.vias:
+                new_len = matched(new, pc)
+                if new_len < old_len - 1e-3:
+                    keep = new
+                    self.pair_straightened[pc.key] = (old_len, new_len)
+            for leg_net, layer_idx, points in keep.runs:
+                half, clr = self._conn_geometry(pc.net_class, leg_net)
+                committed.add_run(layer_idx, points, leg_net, half, clr)
+            if keep is new:
+                routes[(pc.key, "P")] = new.routes[0]
+                routes[(pc.key, "N")] = new.routes[1]
 
     def _escape_sites_sealed(
         self, pres: _PairResult, half: float, pad_layers: frozenset[int] | None = None
@@ -7071,6 +7141,7 @@ class LatticePathfinder:
         start_time = time.monotonic()
         self._set_fixed_copper(fixed_copper, fixed_clearance)
         self.build()
+        self.pair_straightened = {}
         pairs = list(coupled or [])
 
         # Interleave singles and pairs shortest-first (pair length = the
@@ -7159,6 +7230,8 @@ class LatticePathfinder:
             deferred_hybrid: list[Any] = []
             hybrid_pairs: list[Any] = []
             pass_gateways: dict[object, str] = {}
+            # Issue #7650: planar coupled pairs of this pass, in commit order.
+            planar_pairs: list[tuple[Any, _PairResult]] = []
 
             def commit_pair(item: Any, pres: _PairResult) -> None:
                 routes[(item.key, "P")] = pres.routes[0]
@@ -7374,6 +7447,8 @@ class LatticePathfinder:
                     coupled_count += 1
                     routed_items += 1
                     commit_pair(item, pres)
+                    if not pres.vias:
+                        planar_pairs.append((item, pres))
                     continue
                 flush_fallbacks()
                 key = item[0]
@@ -7446,6 +7521,8 @@ class LatticePathfinder:
 
             if not failed and not congested_fallback:
                 converged = True
+                if planar_pairs and best_routes is routes:
+                    self._straighten_pairs(planar_pairs, committed, routes, present)
                 break
             if it == max_iterations - 1:
                 break

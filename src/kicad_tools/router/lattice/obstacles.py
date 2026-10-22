@@ -645,6 +645,34 @@ class CommittedCopper:
             if dist(a, b) > 1e-9:
                 self._add_seg(layer, a, b, net, half_width, clr)
 
+    def remove_run(
+        self,
+        layer: int,
+        points: list[Pt],
+        net: int,
+        half_width: float,
+        clearance: float | None = None,
+    ) -> None:
+        """Undo one :meth:`add_run` with the same arguments (issue #7650).
+
+        Removes one stored copy of each segment; raises if a segment was never
+        committed, so a caller can never silently leave stale copper behind.
+        Not allowed inside a trial: the journal could no longer replay.
+        """
+        if self._journal is not None:
+            raise RuntimeError("CommittedCopper.remove_run inside an open trial")
+        clr = self.clearance if clearance is None else clearance
+        index = self.copper[layer]
+        for a, b in zip(points, points[1:], strict=False):
+            if dist(a, b) <= 1e-9:
+                continue
+            item = (a, b, net, half_width, clr)
+            for key in index._cells_for_seg(a, b, pad=half_width + clr + 0.5):
+                bucket = index.buckets.get(key)
+                if not bucket or item not in bucket:
+                    raise RuntimeError("CommittedCopper.remove_run: segment was not committed")
+                bucket.remove(item)
+
     def add_run_widths(
         self,
         layer: int,
