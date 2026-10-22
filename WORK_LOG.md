@@ -15,6 +15,9 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-22
 
+- **Issue #7669** (closed): bench: re-run PocketBeagle and STRF (zero-touch + tuned) after the #4945/#5302 fixes and add a dispatchable external-bench workflow
+- **Issue #5798** (closed): [Epic #5784] Phase 4: deconfound kct's match-group length tuning on board 07 (measure first)
+- **Issue #7768** (closed): Match-group tuner cannot lengthen coupled diff pairs: no corresponding N-side segment (board07 flag-on)
 - **PR #7591**: feat: gate diff-pair skew bumps on excursion, jog width and source proximity
 - **Issue #7521** (closed): Diff-pair skew compensation per best practice (Q16): exclude tuning bumps from uncoupled metric, emit KiCad tuning patterns, geometry gates, sourced per-class skew limits
 - **PR #7763**: feat: DRC-check retune-lengths output, remove inherited-near-miss opt-in
