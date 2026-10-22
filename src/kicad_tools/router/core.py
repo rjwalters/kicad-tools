@@ -1602,6 +1602,9 @@ class Autorouter:
     """
 
     _loaded_component_holes: list[Pad] | None
+    # Issue #7790: ``Route -> Route`` putting copper in written-file order;
+    # set by ``pcb_retune`` so the length model measures what the checker sees.
+    route_copper_order: Callable[[Route], Route] | None = None
 
     def __init__(
         self,
@@ -21006,7 +21009,9 @@ class Autorouter:
             cache = (num_layers, stackup)
             self._kicad_stackup_cache = cache
         return KicadLengthModel.for_router(
-            cache[1], (p for p in self.pads.values() if not p.steiner_point)
+            cache[1],
+            (p for p in self.pads.values() if not p.steiner_point),
+            copper_order=self.route_copper_order,
         )
 
     def _preserved_fragments(self, net_ids: set[int], *, invert: bool = False) -> list[Route]:

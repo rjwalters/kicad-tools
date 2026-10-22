@@ -60,7 +60,7 @@ Via span
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any
@@ -641,7 +641,7 @@ def _w(value: float) -> float:
     return round(value, 4)
 
 
-def route_geometry(route: Route) -> tuple[list[LSeg], list[LVia]]:
+def route_geometry(route: Route, *, file_order: bool = False) -> tuple[list[LSeg], list[LVia]]:
     """Neutral segments and vias of a router :class:`Route`, in file order.
 
     Issue #6778: junction resolution follows input order (see
@@ -661,11 +661,17 @@ def route_geometry(route: Route) -> tuple[list[LSeg], list[LVia]]:
     that meet at a via each carry it; charging its span per copy over-counts
     the net (by ~1.05 mm for In1.Cu + In2.Cu fragments sharing a via in a
     through-hole pad on a 1.6 mm 4-layer board).
+
+    Issue #7790: ``file_order=True`` keeps ``Route.segments`` / ``Route.vias``
+    order instead of the canonical UUID order.  A route loaded from an
+    existing board file holds its copper in that file's order, which is what
+    the checker and kicad-cli measure; the canonical sort assumes a freshly
+    routed net and mis-resolves junctions on a file that is not in it (DQS_P
+    on board 07: 29.369 mm tuner vs 29.443 mm checker).
     """
-    segs = sorted(
-        (LSeg(_w(s.x1), _w(s.y1), _w(s.x2), _w(s.y2), _lname(s.layer)) for s in route.segments),
-        key=lambda s: segment_order_key(s.x1, s.y1, s.x2, s.y2, s.layer),
-    )
+    segs = [LSeg(_w(s.x1), _w(s.y1), _w(s.x2), _w(s.y2), _lname(s.layer)) for s in route.segments]
+    if not file_order:
+        segs.sort(key=lambda s: segment_order_key(s.x1, s.y1, s.x2, s.y2, s.layer))
     vias: list[LVia] = []
     seen: set[tuple[float, float, float, str, str]] = set()
     for v in route.vias:
@@ -677,7 +683,8 @@ def route_geometry(route: Route) -> tuple[list[LSeg], list[LVia]]:
             continue
         seen.add(key)
         vias.append(LVia(x, y, d, (la, lb)))
-    vias.sort(key=lambda v: via_order_key(v.x, v.y, v.layers))
+    if not file_order:
+        vias.sort(key=lambda v: via_order_key(v.x, v.y, v.layers))
     return segs, vias
 
 
@@ -711,6 +718,9 @@ class KicadLengthModel:
 
     stackup: KicadStackup
     pads_by_net: dict[int, list[LPad]] = field(default_factory=dict)
+    # Issue #7790: re-orders a Route's copper into the order the board file
+    # will hold it (see :func:`route_geometry`); ``None`` keeps canonical order.
+    copper_order: Callable[[Route], Route] | None = None
 
     @classmethod
     def default(cls, thickness_mm: float, num_copper_layers: int) -> KicadLengthModel:
@@ -726,15 +736,24 @@ class KicadLengthModel:
         return cls(KicadStackup.from_pcb(pcb), pads_by_net)
 
     @classmethod
-    def for_router(cls, stackup: KicadStackup, pads: Iterable[Any]) -> KicadLengthModel:
+    def for_router(
+        cls,
+        stackup: KicadStackup,
+        pads: Iterable[Any],
+        *,
+        copper_order: Callable[[Route], Route] | None = None,
+    ) -> KicadLengthModel:
         pads_by_net: dict[int, list[LPad]] = {}
         for pad in pads:
             if getattr(pad, "net", 0):
                 pads_by_net.setdefault(pad.net, []).append(router_pad(pad))
-        return cls(stackup, pads_by_net)
+        return cls(stackup, pads_by_net, copper_order)
 
     def route_length(self, route: Route) -> float:
-        segs, vias = route_geometry(route)
+        if self.copper_order is not None:
+            segs, vias = route_geometry(self.copper_order(route), file_order=True)
+        else:
+            segs, vias = route_geometry(route)
         return net_length(
             segs, vias, self.pads_by_net.get(route.net, []), self.stackup, partial_net=True
         )
