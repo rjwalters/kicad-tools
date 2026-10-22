@@ -5808,6 +5808,29 @@ class DiffPairRouter:
             moved += merge_junction_runs(trial)
             if not moved:
                 continue
+
+            # Per-route guard: the edit must not add a clearance violation
+            # against any neighbouring net's copper.  Count violations before
+            # and after (a route may already carry some) and roll back --
+            # leave the route as routed -- if the edit made it worse.
+            def violations(r: Route, net: int = route.net) -> int:
+                return sum(
+                    not grid.validate_segment_clearance(s, net)[0] for s in r.segments
+                ) + sum(
+                    not (
+                        grid.validate_via_clearance(v, net)[0]
+                        and grid.validate_via_to_via_clearance(v, net)[0]
+                        and grid.worst_via_pad_deficit(v, net)[0] <= _SHADOW_VIA_DEFICIT_EPS
+                    )
+                    for v in r.vias
+                )
+
+            if violations(trial) > violations(route):
+                logger.debug(
+                    "via-hairpin edit on net %s rolled back: adds clearance violation",
+                    route.net_name,
+                )
+                continue
             # The route is already registered (grid.routes, pathfinder, C++
             # grid): edit it in place and ADD the new copper's cells, as
             # ``_remark_route_cells`` does (#3508).  Unmark + re-mark would

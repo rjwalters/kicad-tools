@@ -134,3 +134,37 @@ def test_committed_collapse_keeps_grid_state_consistent():
     # Via R-tree tracks the edited via object, not a stale one.
     if grid._via_rtree is not None:
         assert id(via) in grid._via_rtree_items
+
+
+def test_committed_collapse_rolls_back_when_edit_adds_violation():
+    """A hairpin edit that adds a clearance violation is rolled back (#7782)."""
+    from types import SimpleNamespace
+
+    from kicad_tools.router.diffpair_routing import DiffPairRouter
+    from kicad_tools.router.grid import RoutingGrid
+    from kicad_tools.router.rules import DesignRules
+
+    grid = RoutingGrid(width=60.0, height=40.0, rules=DesignRules())
+    route = _route()
+    grid.mark_route(route)
+    snapshot = (
+        [(s.x1, s.y1, s.x2, s.y2, s.layer) for s in route.segments],
+        [(v.x, v.y) for v in route.vias],
+    )
+    # via_ok accepts the move; the trial's copies of the edited copper
+    # (not the registered originals) violate clearance, so the post-edit
+    # guard must roll back.
+    originals = {id(s) for s in route.segments}
+    grid.validate_segment_clearance = lambda seg, net, *a, **k: (
+        (True, 1.0, None) if id(seg) in originals else (False, -1.0, (seg.x2, seg.y2))
+    )
+    stub = SimpleNamespace(
+        autorouter=SimpleNamespace(grid=grid, _mark_route_on_cpp_grid=lambda r: None)
+    )
+    stub._remark_route_cells = lambda r: DiffPairRouter._remark_route_cells(stub, r)
+
+    assert DiffPairRouter._collapse_committed_via_hairpins(stub, [route]) == 0
+    assert snapshot == (
+        [(s.x1, s.y1, s.x2, s.y2, s.layer) for s in route.segments],
+        [(v.x, v.y) for v in route.vias],
+    )
