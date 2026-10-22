@@ -13,6 +13,19 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-10-22
+
+- **PR #7761**: chore(loom): resync installed Loom to v0.19.1205
+- **PR #7759**: fix(router): bump-tune a coupled pair's skew when the inline comb is rejected
+- **Issue #7269** (closed): board 07 MIPI_DAT0: recover 0.038 mm skew lost to compare-and-keep (blocks #6858)
+- **Issue #6858** (closed): router: coupled pre-pass should keep the better of the joint-search and pose-centreline candidates (compare-and-keep; unblocks #6835)
+- **PR #7757**: fix(board03): route and commit the USB MCU pair at one width (0.25 mm, 93 ohm)
+- **Issue #7256** (closed): board 03: after #7163 a fresh arm C route fails usb_geometry (MCU launch 4.138/4.284 > 4 mm; USB width 0.30 -> 0.275)
+- **PR #7756**: docs(router): pin dormant impedance sizing for explicit targets without a stackup
+- **Issue #7755** (closed): router: explicit target_diff_impedance leaves impedance sizing dormant on the CLI path, and the resolver sizes every pair for F.Cu
+- **PR #7628**: fix: tune board 07's four skewed diff pairs and stop the skew gate vetoing inherited near-misses
+- **Issue #7612** (closed): Board 07 fixture: 4 diff pairs fail skew with no_suitable_segment (TMDS_D2, MIPI_DAT1, MIPI_DAT0, MIPI_CLK)
+
 ### 2026-10-21
 
 - **PR #7742**: feat: add kct export --spec and pass project.kct from board generators
