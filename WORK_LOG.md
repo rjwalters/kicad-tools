@@ -15,6 +15,31 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-22
 
+- **PR #7823**: fix: keep hole-to-hole floor when collapsing committed via hairpins
+- **PR #7822**: fix(router): chamfer skew-bump feet at 0.02 mm instead of square (#7546)
+- **PR #7821**: chore(loom): resync installed Loom to v0.19.1209
+- **PR #7820**: fix(router): close board 07 DDR_DATA_BYTE_0 and keep achieved retune targets (#7815)
+- **PR #7819**: fix: deploy-site.sh requires a running Docker and aborts on render failure
+- **PR #7816**: docs(router): state the measured reason swapped pairs skip the pose trunk (#7769)
+- **PR #7814**: feat(router): square-foot skew bumps when the four-corner chamfer ladder can't fit (#7546)
+- **PR #7813**: fix(router): straighten history detours on converged diff pairs; prefer the longer coupled gateway (#7650)
+- **PR #7812**: fix(router): keep via-hairpin collapse off own SMT lands and shortcut unmovable hairpins
+- **PR #7811**: fix: route kct render through pinned Docker kicad-cli under KCT_KICAD_DOCKER=1
+- **PR #7802**: fix: fall back to pair centreline/per-leg tuners when mirror finds no N-side host
+- **PR #7800**: ci: gate board 07 --differential-pairs routing against a ratcheting baseline
+- **Issue #7818** (closed): Board 07 --differential-pairs: MIPI_DAT1 P/N vias placed 0.462 mm hole-to-hole (< 0.5 mm)
+- **Issue #7817** (closed): deploy-site.sh: selects Docker when it's installed but not running, then publishes stale renders
+- **Issue #7815** (closed): Board 07 --differential-pairs: DDR_DATA_BYTE_0 group retune unattainable (10.9 -> 5.9 mm), which discards the MIPI/TMDS group retune
+- **Issue #7810** (closed): KCT_KICAD_DOCKER=1 kct render silently uses host kicad-cli when one is installed
+- **Issue #7808** (closed): Board07 DQS: measure the merged via-hairpin collapse and finish order-independent DQS skew (split from #7782)
+- **Issue #7805** (closed): Board-07 skew/impedance regression from mirror-miss pair fallback (PR #7802 review)
+- **Issue #7799** (closed): kct route --length-match-groups never tries pair fallbacks on coupled rails (no_suitable_segment)
+- **Issue #7795** (closed): CI never exercises board 07's --differential-pairs path, so green board 07 jobs prove nothing for coupled-routing changes
+- **Issue #7790** (closed): Board 07 coupled geometry: DQS pair retune no-op and MIPI/TMDS residual skew after retune_pcb
+- **Issue #7769** (closed): Board07 DQS polarity-swap pair: no pose candidate, coupled skew 2.0 mm untunable
+- **Issue #7767** (closed): Board07 MIPI_DAT1 coupled pair keeps 0.31 mm skew: pose search fails and inline tuner gates on 0.5 mm max_length_delta
+- **Issue #7689** (closed): Site and readiness renders use the pinned or embedded model set and fail on incomplete 3D coverage
+- **Issue #7650** (closed): board 03: recover USB_D common-run and MCU-launch margin given up to route VBUS U2.5 (#7475)
 - **PR #7807**: docs(research): measure --reserve-pour-only-passives across boards 03-07
 - **PR #7804**: fix: retune HDMI_TMDS_LANES group in board 07 recipe and drop its allowance
 - **PR #7803**: refactor: dedupe coupled skew-limit lookup and cover gate, selection and swap routing
