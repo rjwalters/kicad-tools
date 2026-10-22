@@ -5793,9 +5793,10 @@ class DiffPairRouter:
             intra = ar.rules.trace_clearance
 
         routes_by_net = ar._net_routes_merged()
-        old_routes = {net: routes_by_net.get(net) for net in (p_id, n_id)}
-        if any(r is None for r in old_routes.values()):
+        old_p, old_n = routes_by_net.get(p_id), routes_by_net.get(n_id)
+        if old_p is None or old_n is None:
             return False
+        old_routes: dict[int, Route] = {p_id: old_p, n_id: old_n}
         fixed_segment_ids = {id(s) for r in ar.routes if r.is_escape for s in r.segments}
         new_p, new_n, result = tune_diff_pair_skew(
             DetectedPair(pair=pair, source=DetectionSource.EXPLICIT),
