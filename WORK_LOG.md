@@ -15,6 +15,10 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-22
 
+- **PR #7792**: fix: measure retune copper in board-file order so over-limit pairs are tuned
+- **Issue #7798** (closed): Committed boards/07-matchgroup-test/output/matchgroup_test.kicad_pcb is stale: it has no TMDS/MIPI nets
+- **Issue #7785** (closed): Verify pair group tuning on board 07's coupled --differential-pairs geometry
+- **Issue #7573** (closed): router: board 05 +5V/GND pour completeness depends on where nTRIP lands (C10 stitch sites unreserved)
 - **PR #7779**: fix(board07): retune TMDS_D1 pair skew and delete its gate allowance
 - **PR #7786**: fix: match board 07 MIPI lanes by flattening staircase legs and tuning pairs first
 - **Issue #7766** (closed): Board 07: DDR_DATA_BYTE_0 / MIPI_CSI_LANES group skew — pair members have no mirrorable N-side host for the group tuner
