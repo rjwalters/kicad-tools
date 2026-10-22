@@ -12,6 +12,7 @@ Key features:
 from __future__ import annotations
 
 import collections
+import dataclasses
 import heapq
 import itertools
 import logging
@@ -248,9 +249,9 @@ _SHADOW_PER_PAIR_BUDGET_S: float = float(os.environ.get("KCT_SHADOW_PER_PAIR_BUD
 # of it, and is skipped when less than ``_POSE_CENTERLINE_MIN_BUDGET_S``
 # remains (a wall-clock budget-exit must still defer promptly, #3089/#4107).
 _POSE_CENTERLINE_TIMEOUT_S: float = 30.0
+_POSE_CENTERLINE_MIN_BUDGET_S: float = 0.25
 # Issue #7769: ``[coupled-select]`` decline reason for polarity-swapped pairs.
 _POSE_DECLINE_POLARITY_SWAP: str = "polarity-swap (no crossover in centerline trunk)"
-_POSE_CENTERLINE_MIN_BUDGET_S: float = 0.25
 # Issue #7769: shortest straight same-width chain the in-router skew tune fuses
 # into one host segment (board 06's #7548 value; see ``merge_collinear_same_width``).
 _SKEW_TUNE_FUSE_MIN_MM: float = 5.0
@@ -5772,6 +5773,117 @@ class DiffPairRouter:
         if thresholds.skew_severity != "error":
             return None
         return float(thresholds.skew_mm)
+
+    def _collapse_committed_via_hairpins(self, routes: list[Route]) -> int:
+        """Move committed vias back to their turn where a leg doubles back (#7782).
+
+        The joint search can run a leg past its via and return over the same
+        cells on the other layer; the doubled copper makes junctions whose
+        measured length depends on segment order.  A moved via must keep the
+        grid's segment, via and pad clearances, and its drill must stay off
+        the net's own SMT lands (Issue #7808).  Where no site is legal, the
+        doubled leg is replaced by a straight segment from the via
+        (:func:`~.via_hairpin.shortcut_via_hairpins`).  Returns the number
+        of hairpin edits kept.
+        """
+        from .drc_nudge import _router_pad_bbox, _via_drill_overlaps_bbox
+        from .via_hairpin import (
+            collapse_via_hairpins,
+            merge_junction_runs,
+            shortcut_via_hairpins,
+        )
+
+        grid = self.autorouter.grid
+        pads = getattr(self.autorouter, "pads", None) or {}
+        total = 0
+        for route in routes:
+            if not route.vias:
+                continue
+            # Issue #7808: the turn of a pad-escape hairpin is usually right
+            # beside the pad, and ``worst_via_pad_deficit`` skips same-net
+            # pads -- so a collapsed via could land its drill on its own
+            # SMT land.  ``kct route``'s via-in-pad sweep then relocated it
+            # and re-grew a doubled stub, and board 07's DQS skew went from
+            # 0.119 mm to 1.291 mm.  A site whose drill overlaps a same-net
+            # SMT land is not a legal collapse site.
+            own_pads = [pad for pad in pads.values() if getattr(pad, "net", 0) == route.net]
+            own_pad_boxes = [
+                _router_pad_bbox(pad) for pad in own_pads if not getattr(pad, "through_hole", False)
+            ]
+            own_pad_centres = [(pad.x, pad.y) for pad in own_pads]
+
+            def via_ok(
+                via: Via,
+                net: int = route.net,
+                own_pad_boxes: list[tuple[float, float, float, float]] = own_pad_boxes,
+            ) -> bool:
+                return (
+                    not any(_via_drill_overlaps_bbox(via, box) for box in own_pad_boxes)
+                    and grid.validate_via_clearance(via, net)[0]
+                    and grid.validate_via_to_via_clearance(via, net)[0]
+                    and grid.worst_via_pad_deficit(via, net)[0] <= _SHADOW_VIA_DEFICIT_EPS
+                )
+
+            trial = Route(
+                net=route.net,
+                net_name=route.net_name,
+                segments=[dataclasses.replace(s) for s in route.segments],
+                vias=[dataclasses.replace(v) for v in route.vias],
+            )
+            moved = collapse_via_hairpins(trial, via_ok)
+
+            def seg_ok(seg: Segment, net: int = route.net) -> bool:
+                return bool(grid.validate_segment_clearance(seg, net)[0])
+
+            # Issue #7808: where the via cannot move, drop the doubled leg
+            # instead (a straight segment from the via past the turn).
+            moved += shortcut_via_hairpins(trial, seg_ok, anchors=own_pad_centres)
+            moved += merge_junction_runs(trial)
+            if not moved:
+                continue
+
+            # Per-route guard: the edit must not add a clearance violation
+            # against any neighbouring net's copper.  Count violations before
+            # and after (a route may already carry some) and roll back --
+            # leave the route as routed -- if the edit made it worse.
+            def violations(r: Route, net: int = route.net) -> int:
+                return sum(
+                    not grid.validate_segment_clearance(s, net)[0] for s in r.segments
+                ) + sum(
+                    not (
+                        grid.validate_via_clearance(v, net)[0]
+                        and grid.validate_via_to_via_clearance(v, net)[0]
+                        and grid.worst_via_pad_deficit(v, net)[0] <= _SHADOW_VIA_DEFICIT_EPS
+                    )
+                    for v in r.vias
+                )
+
+            if violations(trial) > violations(route):
+                logger.debug(
+                    "via-hairpin edit on net %s rolled back: adds clearance violation",
+                    route.net_name,
+                )
+                continue
+            # The route is already registered (grid.routes, pathfinder, C++
+            # grid): edit it in place and ADD the new copper's cells, as
+            # ``_remark_route_cells`` does (#3508).  Unmark + re-mark would
+            # free cells a neighbour's halo shares and repeat the
+            # non-idempotent bookkeeping.  The old via/segment cells stay
+            # blocked -- conservative for the own net -- and only the
+            # R-trees, which key on object identity, are swapped.
+            grid._rtree_remove_route(route)
+            grid._rtree_remove_route_vias(route)
+            route.segments = trial.segments
+            route.vias = trial.vias
+            grid._rtree_insert_route(route)
+            grid._rtree_insert_route_vias(route)
+            self._remark_route_cells(route)
+            for via in route.vias:
+                grid._mark_via(via)
+            total += moved
+        if total:
+            print(f"    [via-hairpin] resolved {total} hairpin edit(s) on the committed pair")
+        return total
 
     def _tune_committed_pair_skew(self, pair: DifferentialPair) -> bool:
         """Bump-tune a just-committed coupled pair's skew (Issue #7269).
@@ -12918,6 +13030,10 @@ class DiffPairRouter:
         if committed_coupled:
             self._committed_coupled_claims().update((pair.positive.net_id, pair.negative.net_id))
 
+        # Issue #7782: pull the joint search's via hairpins back to the turn
+        # before the lengths are taken (the collapse changes them).
+        self._collapse_committed_via_hairpins(routes)
+
         # Calculate lengths
         p_length = calculate_route_length(p_routes)
         n_length = calculate_route_length(n_routes)
@@ -13046,19 +13162,11 @@ class DiffPairRouter:
         ``pair.rules.max_length_delta`` unless ``kct check`` enforces a
         stricter skew limit for the pair as an error.
         """
-        from kicad_tools.validate.diffpair_engagement import resolve_pair_thresholds
-
         rules = pair.rules
         assert rules is not None, "committed coupled pair always carries rules"
         tol = float(rules.max_length_delta)
-        thresholds = resolve_pair_thresholds(
-            getattr(self.autorouter, "net_class_map", None),
-            pair.positive.net_name,
-            pair.negative.net_name,
-        )
-        if thresholds.skew_severity == "error":
-            return min(tol, float(thresholds.skew_mm))
-        return tol
+        limit = self._checker_skew_limit_mm(pair)
+        return tol if limit is None else min(tol, limit)
 
     def route_differential_pair_independent(
         self,

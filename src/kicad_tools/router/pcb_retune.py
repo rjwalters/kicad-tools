@@ -452,7 +452,10 @@ def _splice(
                 new_vias.append(via)
         added = _serialize(new_segs, name_only) + _serialize(new_vias, name_only)
         if added:
-            anchor = _block_span(text, own[-1][1], own[-1][2])[1]
+            # After the net's last block of any kind by file offset (arcs
+            # included); ``own[-1]`` is list-ordered, not file-ordered (#7796).
+            last = max((b for b in blocks if b[3] == net_name), key=lambda b: b[2])
+            anchor = _block_span(text, last[1], last[2])[1]
             inserts.setdefault(anchor, []).extend("\t" + a + "\n" for a in added)
     # An insert at an offset must precede a removal that starts there.
     events = [(s, 1, e, "") for s, e in removals]
