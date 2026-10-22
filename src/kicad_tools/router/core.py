@@ -20831,7 +20831,10 @@ class Autorouter:
         With ``allow_inherited_near_miss`` (Issue #7612) a bump is rejected
         only when it is nearer the object than the pair's own route already
         is; off by default, because a shared recipe such as board 06's can
-        otherwise be admitted a bump that breaks a pour.
+        otherwise be admitted a bump that breaks a pour.  The inherited gap is
+        the host segment's own (the segments the bump replaces), never the
+        net's closest approach elsewhere.  The only opt-in, ``kct
+        retune-lengths``, is temporary (Issue #7760).
         """
         from kicad_tools.core.geometry import point_to_segment_distance, segment_clearance
 
@@ -20842,26 +20845,36 @@ class Autorouter:
         pitches = self.component_pitches
         class_clearance = self._net_class_clearance_mm
 
-        def no_closer(seg: Any, net: int, gap: float, measure: Callable[[Any], float]) -> bool:
-            """The bump leaves ``seg`` no nearer a foreign object than the route was.
+        def no_closer(
+            seg: Any,
+            gap: float,
+            measure: Callable[[Any], float],
+            host_segments: list[Any],
+        ) -> bool:
+            """The bump leaves ``seg`` no nearer a foreign object than its host was.
 
             Issue #7612: a trombone hangs off its host segment, so the leg that
             joins it inherits whatever gap the host already had to a neighbour
             (a lane routed 0.156 mm off its sibling against a 0.2 mm limit).
             That near-miss is not the bump's doing and the bump cannot cure it;
             only a bump that makes it worse is rejected.  ``measure`` returns
-            the gap from one of the net's pre-tune segments to the same object.
+            the gap from one segment to the same object, and the floor is taken
+            over ``host_segments`` alone -- the segments the bump replaces -- not
+            the whole net, so a closer approach elsewhere on the net licenses
+            nothing.  Without a host there is no inherited gap: strict.
             """
-            route = routes_by_net.get(net)
-            if not allow_inherited_near_miss or route is None:
+            if not allow_inherited_near_miss:
                 return False
             floor = min(
-                (measure(o) for o in route.segments if o.layer == seg.layer),
-                default=float("inf"),
+                (measure(o) for o in host_segments if o.layer == seg.layer),
+                default=None,
             )
+            if floor is None:
+                return False
             return gap + 1e-9 >= floor
 
-        def ok(new_segments: list[Any], net: int) -> bool:
+        def ok(new_segments: list[Any], net: int, host_segments: list[Any] | None = None) -> bool:
+            hosts = list(host_segments or [])
             own = max(base, class_clearance(net))
             partner = partner_of.get(net)
             for seg in new_segments:
@@ -20899,7 +20912,7 @@ class Autorouter:
                             pad_segment_edge_clearance(pad, o.x1, o.y1, o.x2, o.y2, o.width / 2)
                         )
 
-                    if gap + 1e-9 < required and not no_closer(seg, net, gap, pad_gap):
+                    if gap + 1e-9 < required and not no_closer(seg, gap, pad_gap, hosts):
                         return False
                 for other_net, route in routes_by_net.items():
                     if other_net == net:
@@ -20923,7 +20936,7 @@ class Autorouter:
                             )
 
                         if dist - half - radius + 1e-9 < required and not no_closer(
-                            seg, net, dist - half - radius, via_gap
+                            seg, dist - half - radius, via_gap, hosts
                         ):
                             return False
                     for other in route.segments:
@@ -20966,7 +20979,7 @@ class Autorouter:
                                 )
                             )
 
-                        if gap + 1e-9 < required and not no_closer(seg, net, gap, seg_gap):
+                        if gap + 1e-9 < required and not no_closer(seg, gap, seg_gap, hosts):
                             return False
             return True
 
