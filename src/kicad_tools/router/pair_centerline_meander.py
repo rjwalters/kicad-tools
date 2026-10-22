@@ -93,6 +93,9 @@ class CenterlineMeander:
     loops: int
     amplitude_mm: float
     side: int
+    #: Span length left over beside the meander (Issue #7815): zero when the
+    #: meander fills the span, so every ``align`` gives the same geometry.
+    slack_mm: float = 0.0
 
 
 def _seg_len(seg: Segment) -> float:
@@ -236,6 +239,7 @@ def centerline_meander(
     side: int,
     end_margin_mm: float | None = None,
     max_loops: int = 100,
+    align: float = 0.5,
 ) -> CenterlineMeander | None:
     """Build a centreline serpentine on ``span`` and offset it to both rails.
 
@@ -248,6 +252,10 @@ def centerline_meander(
     for that many, as many as fit are used (a partial correction, reported in
     :attr:`CenterlineMeander.added_length_mm`).  With the bump count fixed,
     the amplitude is shrunk so the bumps add exactly the requested length.
+
+    ``align`` places a meander shorter than the span along it: ``0.5``
+    centres it, ``0.0`` puts it against the span's low-``s`` end and ``1.0``
+    against the high-``s`` end (Issue #7815).
 
     Returns ``None`` when the span cannot host even one bump, or the host
     direction is not 45-aligned (the meander legs would leave the routing
@@ -277,7 +285,8 @@ def centerline_meander(
     loops = min(needed, max_fit, max_loops)
     amplitude = length_add_mm / (2.0 * loops) if loops == needed else amplitude_mm
     footprint = 2.0 * lead + (2 * loops - 1) * w
-    s0 = span.s_lo + (span.overlap_mm - footprint) / 2.0
+    slack = max(0.0, usable - footprint)
+    s0 = span.s_lo + margin + slack * min(1.0, max(0.0, align))
 
     # Centreline polyline in the P frame, t measured from the centreline.
     cl: list[tuple[float, float]] = [(s0, 0.0)]
@@ -329,6 +338,7 @@ def centerline_meander(
         loops=loops,
         amplitude_mm=amplitude,
         side=side,
+        slack_mm=slack,
     )
 
 
