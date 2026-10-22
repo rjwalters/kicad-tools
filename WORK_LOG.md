@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-22
 
+- **PR #7786**: fix: match board 07 MIPI lanes by flattening staircase legs and tuning pairs first
+- **Issue #7766** (closed): Board 07: DDR_DATA_BYTE_0 / MIPI_CSI_LANES group skew — pair members have no mirrorable N-side host for the group tuner
 - **PR #7783**: fix(router): fuse stepped joint-search pair legs before the in-router skew tune
 - **PR #7781**: test: match DDR_DATA_BYTE_0 in board 07 retune step
 - **PR #7778**: fix: gate retune skew bumps against foreign pads using the host's existing gap
