@@ -27,6 +27,9 @@ on:
       - "boards/07-matchgroup-test/**"
       - "scripts/ci/check_copper_safety_drc.py"
       - ".github/copper-safety-drc-floor.yml"
+      # Board 07 --differential-pairs baseline ratchet inputs (#7795).
+      - "scripts/ci/check_board07_diffpair_baseline.py"
+      - ".github/board07-diffpair-baseline.yml"
   workflow_dispatch: {}
 
 concurrency:
@@ -299,4 +302,116 @@ jobs:
         with:
           name: board-07-copper-safety-drc
           path: /tmp/board07-ci/drc.json
+          if-no-files-found: ignore
+
+  board-07-diffpair-ratchet:
+    name: Board 07 --differential-pairs baseline ratchet
+    # Issue #7795: the coupled/joint-search path (router/diffpair_*,
+    # CoupledPathfinder) is reachable only with --differential-pairs, which no
+    # PR job passes. Regenerate board 07 with it (scheduled / main push only,
+    # never per PR: ~27 min regen, #6738 ruling) and gate copper-safety errors,
+    # opens and skew violations against .github/board07-diffpair-baseline.yml.
+    needs: [kicad_pin]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    container:
+      image: ${{ needs.kicad_pin.outputs.image }}
+      options: --user 0:0
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONHASHSEED: "42"
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Ensure container has prerequisites
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git cmake build-essential
+          kicad-cli --version
+
+      - uses: actions/checkout@v7
+        with:
+          # Full history: the baseline ratchet reads the file as it was
+          # before its last change.
+          fetch-depth: 0
+
+      - name: Trust the workspace for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Initialize stock KiCad libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
+
+      - name: Install uv
+        run: |
+          set -euo pipefail
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        run: uv sync --frozen --extra dev --python 3.12
+
+      - name: Build native router extension
+        run: |
+          uv run kct build-native
+          uv run kct build-native --check
+
+      - name: Regenerate board 07 with --differential-pairs (seed 42)
+        # Partial routing is expected, so the recipe's status is tolerated and
+        # the routed PCB's existence is the gate.
+        run: |
+          set -uo pipefail
+          rm -rf /tmp/board07-dp
+          mkdir -p /tmp/board07-dp
+          uv run python boards/07-matchgroup-test/generate_design.py \
+            /tmp/board07-dp --step all --seed 42 --differential-pairs || true
+          test -f /tmp/board07-dp/matchgroup_test_routed.kicad_pcb
+
+      - name: Read the baseline before its last change (ratchet)
+        id: prev_baseline
+        run: |
+          set -euo pipefail
+          f=.github/board07-diffpair-baseline.yml
+          last=$(git log --first-parent -n1 --format=%H -- "$f")
+          if [ -n "$last" ] && git cat-file -e "${last}^1:${f}" 2>/dev/null; then
+            git show "${last}^1:${f}" > /tmp/board07-dp-prev-baseline.yml
+            echo "args=--previous-baseline-file /tmp/board07-dp-prev-baseline.yml" >> "$GITHUB_OUTPUT"
+          else
+            echo "args=" >> "$GITHUB_OUTPUT"
+            echo "no earlier ${f} on this ref; shrink-only check skipped"
+          fi
+
+      - name: Diffpair baseline ratchet (kicad-cli, #7795)
+        # kicad-cli exits non-zero on violations (|| true); the checker is the
+        # gate and treats a missing/empty/truncated report as a tool failure
+        # (#6724).
+        env:
+          PREV_BASELINE_ARGS: ${{ steps.prev_baseline.outputs.args }}
+        run: |
+          set -uo pipefail
+          rm -f /tmp/board07-dp/drc.json
+          kicad-cli pcb drc --format json --severity-all --refill-zones \
+            -o /tmp/board07-dp/drc.json \
+            /tmp/board07-dp/matchgroup_test_routed.kicad_pcb || true
+          # PREV_BASELINE_ARGS is empty or one flag plus a path: split on purpose.
+          # shellcheck disable=SC2086
+          uv run python scripts/ci/check_board07_diffpair_baseline.py \
+            $PREV_BASELINE_ARGS /tmp/board07-dp/drc.json | tee /tmp/board07-dp/summary.txt
+          rc=${PIPESTATUS[0]}
+          {
+            echo '### Board 07 --differential-pairs'
+            echo '```'
+            cat /tmp/board07-dp/summary.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+      - name: Upload DRC report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: board-07-diffpair-ratchet
+          path: /tmp/board07-dp/drc.json
           if-no-files-found: ignore
