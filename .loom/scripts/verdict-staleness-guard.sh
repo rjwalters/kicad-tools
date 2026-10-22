@@ -178,7 +178,7 @@
 # mutation inline here in `gh api graphql` plus two comment bodies; review
 # rejected it (PR #8990) as exactly the new portable shell
 # `.loom/docs/shell-language-policy.md` forbids — new executable logic is a
-# loom-daemon subcommand — and the shell-budget ratchet refused the PR outright.
+# loom-daemon subcommand.
 # Do NOT reintroduce an inline mutation "as a fallback for hosts without
 # loom-daemon": that duplication is the thing that was rejected. A host that
 # cannot resolve the binary gets AUTO_MERGE_DISARMED=0 and a named failure in
@@ -521,10 +521,8 @@ MARKER_LINES="$(jq -r --arg t "$MARKER_TEST" --arg c "$MARKER_CAPTURE" '
 # Newest marker wins (the lines are oldest-first). The `-n "$MARKER_LINES"`
 # guard this used to carry was redundant — `tail -n 1` of the empty string is an
 # empty line and `cut -f2` of an empty line is empty, so MARKER_SHA comes out ""
-# either way, which is the value the UNVERIFIABLE branch below keys on. Dropping
-# it pays for the three lines the #8900 disarm delegation adds above, per option
-# 2 of the shell-budget gate's own remedies ("remove portable shell elsewhere in
-# the same change to pay for it"); cases (g)/(h)/(i) cover the no-marker path.
+# either way, which is the value the UNVERIFIABLE branch below keys on.
+# Cases (g)/(h)/(i) cover the no-marker path.
 MARKER_SHA="$(tail -n 1 <<<"$MARKER_LINES" | cut -f2)"
 
 # #9258: an APPROVAL with no trusted marker is STALE, not UNVERIFIABLE — never
@@ -633,8 +631,7 @@ if [[ "$CLEAR" -eq 1 ]]; then
   # The binary is probed through ${LOOM_DAEMON_BIN:-loom-daemon}, the first two
   # tiers of lib/locate-daemon-bin.sh's own precedence (explicit override, then
   # $PATH). The full resolver is NOT sourced here on purpose: it would add more
-  # portable shell to this `contract`-category script than the whole delegation
-  # does, which the shell-budget ratchet refuses.
+  # shell to this script than the whole delegation does.
   #
   # stderr is deliberately NOT redirected — a failed disarm must reach the
   # caller's stderr, not a temp file nobody reads. An unresolvable binary or a

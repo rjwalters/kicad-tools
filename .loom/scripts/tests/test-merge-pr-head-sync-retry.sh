@@ -94,8 +94,7 @@ FUNCS_FILE="$(mktemp)"
 STUB_DIR="$(mktemp -d "${TMPDIR:-/tmp}/test-merge-pr-head-sync.XXXXXX")"
 trap 'rm -rf "$FUNCS_FILE" "$STUB_DIR" 2>/dev/null || true' EXIT
 
-# _refresh_precondition_sha is a single dense line (the file is ratchet-frozen
-# and `shell-budget --check` refuses any growth of the portable pool), so it is
+# _refresh_precondition_sha is a single dense line in merge-pr.sh, so it is
 # captured by `print; next` rather than by the brace-matching the other two
 # need.
 awk '

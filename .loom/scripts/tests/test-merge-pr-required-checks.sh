@@ -46,7 +46,7 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/test-merge-pr-required-checks.XXXXXX")"
 trap 'rm -rf "$WORK" 2>/dev/null || true' EXIT
 
 FUNCS="$WORK/funcs.sh"
-# A one-liner (merge-pr.sh is held by the file-size and shell-budget ratchets).
+# A one-liner in merge-pr.sh.
 awk '/^_check_required_checks\(\) \{/ { print }' "$MERGE_PR_SRC" > "$FUNCS"
 grep -q '^_check_required_checks() {.*; }$' "$FUNCS" || { echo "FATAL: could not extract _check_required_checks" >&2; exit 2; }
 # shellcheck disable=SC1090

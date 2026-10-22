@@ -11,7 +11,7 @@ Role records carry the queue the role agent **actually consumed** and what it
 below; the daemon's admission-gate listing is only the fallback when the agent's
 queue was not observed. `candidate_source` and `decisions_observed` say which.
 
-OTLP-only log record (`otlp: Logs`, `native: false`), envelope
+OTLP-only log record (`otlp: Logs`), envelope
 `schema_version: 12` (`NEW_KIND_SCHEMA_VERSION`). The log **body** is the
 record's JSON; the attributes are `loom.kind` (`pick.decision`, which the
 queries below filter on), `loom.role` and, on a role record, `loom.repo`

@@ -204,9 +204,8 @@ source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
 loom_test_require_daemon_bin "$HELPERS_DIR" "merge-pr"
 
 CLASSIFIER_FILE="$(mktemp)"
-# `_classify_merge_response` is a single dense line (merge-pr.sh is
-# ratchet-frozen and `shell-budget --check` refuses any growth of the portable
-# pool), so it is captured by `print; next` rather than the brace-matching
+# `_classify_merge_response` is a single dense line in merge-pr.sh, so it is
+# captured by `print; next` rather than the brace-matching
 # error_head_moved needs — the same split test-merge-pr-head-sync-retry.sh makes
 # for _refresh_precondition_sha.
 awk '

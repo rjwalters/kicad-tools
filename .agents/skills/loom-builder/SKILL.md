@@ -244,7 +244,7 @@ Check for an argument passed via the slash command:
 
 If a number is provided (e.g., `/builder 42`):
 1. Treat that number as the target **issue** to work on; **skip** "Finding Work"
-2. **Guard before any write** (#11863): `loom-daemon forge check-claim <number>`. Exit `1`: claim. Exit `0` prints a token: `TARGET_IS_PR` (an issue role, #9929), `CLOSED`, `FROZEN`, `OPERATOR` or `OPEN_PR` → refuse, writing nothing. `BUILDING` / `LEASE_ALREADY_HELD` / `BRANCH_EXISTS` → refuse unless your invoker holds this claim (`LOOM_SWEEP_CLAIM_OWNED` names the number, or your brief says `This /loom:sweep pre-flighted #<number>`) or the operator told you to resume or force it: that overrides these three, never the five above. Any other exit: stop. A hard-excluded label (Label Workflow) refuses too
+2. **Guard before any write** (#11863): `loom-daemon forge check-claim <number>`. Exit `1`: claim. Exit `0` prints a token: `TARGET_IS_PR` (an issue role, #9929), `CLOSED`, `FROZEN`, `OPERATOR`, `OPEN_PR`, `MERGED_PR` (#12615) or `TRIAGE` (#12713) → refuse, writing nothing, and end with `LOOM_STEP_OUTCOME role=builder target=<n> class=refused reason=<token lowercased, e.g. merged_pr|triage>` so the step-outcome ledger can back off a repeated refusal. `BUILDING` / `LEASE_ALREADY_HELD` / `BRANCH_EXISTS` → refuse unless your invoker holds this claim (`LOOM_SWEEP_CLAIM_OWNED` names the number, or your brief says `This /loom:sweep pre-flighted #<number>`) or the operator told you to resume or force it: that overrides these three, never the seven above. Any other exit: stop. A hard-excluded label (Label Workflow) refuses too
 3. Claim the issue: `gh issue edit <number> --remove-label "loom:issue" --add-label "loom:building"` (`worktree.sh` leases it)
 4. Proceed directly to implementation
 5. End with the outcome line from `.loom/docs/targeted-role-invocation.md`: `LOOM_STEP_OUTCOME role=builder target=<n> class=<verdict|noop|refused|failed> reason=<token>`
@@ -363,7 +363,7 @@ workflow) that require maintainer approval before being worked on.
 
 **User commands override the label-based state machine.** When the user names an issue ("work on issue 592 as builder", "implement issue 342", "fix bug 234"):
 
-1. **Gate first**: the guard above. The instruction approves the stage (e.g. `loom:curated`) and overrides only its three claim tokens, never the five refusals
+1. **Gate first**: the guard above. The instruction approves the stage (e.g. `loom:curated`) and overrides only its three claim tokens, never the seven refusals
 2. **Claim**: add `loom:building` and comment "Starting work on this issue per user request"
 3. **Work and finish normally**: `./.loom/scripts/worktree.sh 592`, implement, then a PR with `loom:review-requested` (builder-pr.md § "Creating the PR")
 

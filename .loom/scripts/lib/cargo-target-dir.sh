@@ -678,9 +678,8 @@ loom_reclaim_worktree_target_dir() {
 # Every bit of #8458's LOGIC is in the daemon — the opt-in, the derivation, the
 # `mkdir`, the marker write (`loom-daemon cargo-target-dir provision|path`), AND
 # the two predicates below (`… is-attributable`, `… marker`). That is the
-# language policy (`.loom/docs/shell-language-policy.md`): `defaults/scripts/`
-# is the shell budget's `contract` (portable) pool, whose growth the ratchet
-# refuses with no `Shell-Budget-Growth:` override.
+# language policy (`.loom/docs/shell-language-policy.md`): new executable logic
+# goes behind a `loom-daemon` subcommand, not into `defaults/scripts/`.
 #
 # What could NOT move is the *call sites*. `merge-pr.sh` and `worktree.sh
 # remove` already resolve a target dir in bash, and marker-first resolution has

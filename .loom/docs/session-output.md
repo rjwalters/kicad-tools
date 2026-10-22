@@ -53,7 +53,7 @@ relaxes any of them.
    `loom.session.output.redaction` (currently `producer/v1`).
    Scrub-then-clip, never clip-then-scrub: clipping first can cut a secret in
    half and export the surviving prefix verbatim.
-3. **OTLP only.** The kind is declared `native: false` in the registry
+3. **OTLP only.** The kind is declared an OTLP log (`otlp: Logs`) in the registry
    ([`telemetry/kinds.rs`](https://github.com/rjwalters/loom/blob/main/loom-daemon/src/telemetry/kinds.rs)), so the
    native HTTPS `/ingest` backend — the managed-cloud sink, removed in #12813 —
    never received it, on any configuration. Enabling live output cannot start shipping session
@@ -487,7 +487,7 @@ repository's config → SigNoz):
 | Source-to-queryable latency, both clocks | e2e p50 **211 ms** / p95 **239 ms** / max **239 ms** over 9 content rows, using the backend insert clock as the observation clock (measured before the 2026-10-11 finding that the live logs tables have no such column; re-measure with `inserted_at_unix_milli` once it exists) |
 | Historical timestamp not a latency | A 6 h-old source event was published (and sorts at its source time, `producer_lag_ms = 21600032`) while the run's heartbeat reported `lag_p95_ms = 1`, `lag_samples = 1`, `lag_historical_excluded = 1` — the outlier excluded from the distribution, and the exclusion visible |
 | Credentials cannot pass | 4 live credential shapes plus a prompt canary in the source; the published body contained only `[REDACTED:*]` markers, the prompt line produced no record at all, and a `tool_use.input` holding a token produced a `tool_start` carrying only the tool name |
-| Cannot enable managed-cloud export | `native: false` is asserted in two separate tests; `resolve_exporters` is byte-identical with live output on and off |
+| Cannot enable managed-cloud export | the kind is registered OTLP-only; `resolve_exporters` is byte-identical with live output on and off |
 
 ## Source map
 

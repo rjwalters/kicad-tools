@@ -188,9 +188,7 @@ fi
 # must actually route through post-verdict.sh with the right verdict token —
 # the section existing while the commands agents copy do not is the
 # regression that matters most.
-# Written as `grep || fail` one-liners (like 5c below) so this contract-category
-# guard does not grow epic #7810's portable-shell pool; a Shell-Budget-Growth
-# trailer covers only FLOOR growth, never portable.
+# Written as `grep || fail` one-liners, like 5c below.
 grep -qF 'post-verdict.sh <number> approved' "$JUDGE_MD" || fail "judge.md's approval command in Label Workflow no longer posts through post-verdict.sh (#6382) — the loom:verdict-sha marker could be typed as prose again, and dropped"
 grep -qF 'post-verdict.sh <number> changes-requested' "$JUDGE_MD" || fail "judge.md's changes-requested command in Label Workflow no longer posts through post-verdict.sh (#6382) — the loom:verdict-sha marker could be typed as prose again, and dropped"
 

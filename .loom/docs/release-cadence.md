@@ -348,9 +348,9 @@ genuinely unbuilt platform — the window changes only the **wording** of a
 refusal, never its outcome.
 
 `loom-daemon-update.sh`'s own resolver (the shell twin `--fetch` uses) still
-emits the flat, pre-#8515 wording: it is a `contract`-category script, frozen by
-the portable shell budget, so the classification
-cannot be added there without first porting the resolution behind the daemon.
+emits the flat, pre-#8515 wording: it is a `contract`-category script, so the
+classification cannot be added there without first porting the resolution
+behind the daemon.
 Tracked separately in
 [#8654](https://github.com/rjwalters/loom/issues/8654).
 

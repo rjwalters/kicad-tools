@@ -3542,6 +3542,7 @@ absent measurement as "unknown", never as zero/full.
 | `managed_repos[]` | `loom.host.managed_repo` (1 per repo, `repo`, `visibility`); `weight` as `loom.host.managed_repo_weight` (`repo`), only when known |
 | `protection.state` | `loom.host.protection` (1, `state`) |
 | `built_at` | `loom.host.built_at_seconds` (Unix seconds) |
+| `is_captain` | `loom.host.is_captain` (1 = this host believes it is captain, 0 = a captain is declared and it is not this host); no point when `fleet.captain` is undeclared (`None`) |
 | `build_commit` | Resource `loom.daemon.revision` (full SHA) |
 | `roles.persistent[]` | `loom.host.role_persistent_failure` (failures) and `loom.host.role_persistent_failure_last_at_seconds`, both `role` + `workspace` (directory name, never the path); `detail` is not exported |
 | `worktree_root_total_gb` | `loom.host.worktree_volume.total_bytes` (`metric.points`, same `df -Pk` sample; GB = bytes / 1024^3, floored) |
@@ -3862,7 +3863,7 @@ ticks already record the prompt tree they launch from (`prompt` on
 daemon workspace, a sweep worker's clone) reported nothing, so "how often does a
 daemon host run from a stale or divergent checkout" had no answer. The checkout
 fast-forward pass visits every managed checkout, and emits **one record per
-checkout per pass**. **OTLP only** (`otlp: Logs`, `native: false`), and only when
+checkout per pass**. **OTLP only** (`otlp: Logs`), and only when
 the exporter is configured; `observability/otlp/mapping/checkout_freshness.rs`
 maps it, with the record's JSON as the body and `host` on the Resource.
 
@@ -4188,7 +4189,7 @@ One OTLP log per agent scope (`loom-agent-*.scope`, a sweep, step or role
 agent) when the daemon sees it end (Issue #12241). The daemon samples every
 live scope's cgroup each work-finder tick (`ram_peaks`); this record carries the
 last sample. Linux with cgroup v2 only. Envelopes carry `schema_version: 12`.
-**OTLP-only** (`native: false`). Severity `WARN` when the scope had OOM kills,
+**OTLP-only**. Severity `WARN` when the scope had OOM kills,
 else `INFO`.
 
 The JSON body contains:
@@ -4247,7 +4248,7 @@ collector's `transform/privacy` `keep_keys`, contract-tested).
 One OTLP log per deliberate daemon exit (Issue #11839), enqueued by the single
 exit funnel `observability::shutdown::exit` before the exporter's final flush,
 so the drain carries it. Envelopes carry `schema_version: 12`. **OTLP-only**
-(`native: false`), always on when OTLP export is on.
+(OTLP-only), always on when OTLP export is on.
 
 The JSON body contains `signal` (`SIGTERM` / `SIGINT`; absent for a non-signal
 exit), `exit_code`, `requested_by`, `relaunch_expected`, `supervisor`
@@ -4302,7 +4303,7 @@ the record then stays queued for the next start.
 One OTLP log per run-state IPC request (Issue #12546), emitted when the daemon
 **receives** it: `drain` (`DrainAndRestartDaemon`), `abort-drain`,
 `pause-then-exit` (`restart --pause --then-exit`), `restart` and `shutdown`.
-Envelopes carry `schema_version: 12`. **OTLP-only** (`native: false`), always
+Envelopes carry `schema_version: 12`. **OTLP-only**, always
 on when OTLP export is on. Exempt from the per-kind silence check: a quiet
 host runs no such verb.
 
@@ -4337,7 +4338,7 @@ One OTLP log (INFO) per `merge_queue.{enqueued,merged,removed}` record the
 sink appended (Issue #12653, F3). Emitted from `FileEventSink::record` only
 after the `seen/` marker and the JSONL append succeed, so the JSONL and its
 dedupe stay authoritative and a duplicate, a second reconcile pass or a restart
-emits nothing. No forge read is added. **OTLP-only** (`native: false`); the
+emits nothing. No forge read is added. **OTLP-only**; the
 short-lived CLI processes have no sink and export nothing.
 
 The JSON body holds `event` (`enqueued` / `merged` / `removed`), `pr`, `nonce`
@@ -4359,7 +4360,7 @@ every return path including an unreadable group listing. It explains the
 `loom/merge-authorization` status the evaluation concluded; it changes neither
 the decision nor the posted status, and adds no forge read (`states()` and
 `latest_status()` are each still read at most once). **OTLP-only**
-(`native: false`). The short-lived `group-check` CLI has no sink and exports
+(OTLP-only). The short-lived `group-check` CLI has no sink and exports
 nothing; production emission is the daemon's `tick_groups` pass.
 
 `reason` is a closed set: `pending-other-checks` (other required checks not
@@ -4391,7 +4392,7 @@ One OTLP log (INFO) per Champion hold-label write (Issue #12665, #12653 F2):
 holds) and `remove` from `park-record released` (Champion's reversal pass).
 The writers append to the role tick's pick journal and the daemon drains it at
 the end of the tick, so no forge read or polling is added. **OTLP-only**
-(`native: false`).
+(OTLP-only).
 
 One record per (PR, transition): an `add` is journaled only when `loom:blocked`
 was not already on the PR, so the every-tick idempotent re-apply emits nothing.
@@ -4421,7 +4422,7 @@ One OTLP log (INFO) per run of the existing `mergeQueue.entries` read behind
 `GroupForge::groups()` (Issue #12667, slice of #12653). **No forge call is
 added** and there is no timer: the record exists only when a Loom-owned
 transition ran the read, so a gap between records is **not** an empty queue.
-OTLP-only (`native: false`).
+OTLP-only.
 
 The JSON body holds `state`, `complete`, `order` (PR numbers in `position`
 order), `entries` (`position`, `pr`, `head`, `has_group_commit`),
@@ -4456,7 +4457,7 @@ One OTLP log (INFO) when the active `merge_queue` rule's settings
 differ from the last ones this daemon process saw for the repository, and once
 on first observation after a daemon start (the dedupe state is in-process, not
 persisted). They shape `merge_wait` / `merge_hold` duration. OTLP-only
-(`native: false`).
+(OTLP-only).
 
 **No forge call is added.** The values ride on the `rules/branches/<branch>`
 read that `tick_groups` already makes every daemon tick
@@ -4494,7 +4495,7 @@ per-call checks the daemon's in-process `GhForge` writes make
 dependency parks, step refusals). Before #12606 those refused silently, with a
 `daemon.log` line only. **Not deduplicated**: the
 `daemon.log` WARN fires once per change of reason per key, this record fires
-on every refusal, because the point is a count. **OTLP-only** (`native: false`).
+on every refusal, because the point is a count. **OTLP-only**.
 
 **Scope.** The daemon process only. Short-lived `loom-daemon forge ...` / `cli/*`
 processes have no OTLP sink, so their refusals (the quoted `refusing the write
