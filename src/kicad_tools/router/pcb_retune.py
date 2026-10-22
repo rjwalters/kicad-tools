@@ -689,12 +689,11 @@ def retune_pcb(
                 selection.pairs,
                 verbose=False,
                 engage="checker_skew_limit",
-                # Issue #7612: a bump may inherit its host segment's existing
-                # near-miss (never a closer approach elsewhere on the net).
-                # Temporary: retune_pcb runs no DRC after writing, so this gate
-                # is its only clearance guard.  Remove the opt-in once it does
-                # (Issue #7760).
-                allow_inherited_near_miss=True,
+                # Issue #7760: the written board is DRC-checked against the
+                # input below, so the tuner's strict foreign-clearance gate
+                # (which rejects every leg off a host already under the class
+                # clearance) is replaced by that check.
+                foreign_clearance_gate=lambda *_a, **_k: True,
             )
             for (p_name, n_name), res in pair_results.items():
                 tuner_reasons[_target_key("diffpair", f"{p_name}/{n_name}")] = res.reason
@@ -732,6 +731,9 @@ def retune_pcb(
         text, selection.net_names, net_ids, names_by_id
     ):
         raise RetuneError("scope_violation", "output differs from input outside the selected nets")
+
+    if changed:
+        _require_no_clearance_regression(src, new_text, selection.net_names, net_class_map)
 
     # Measure the *written* board, with the checker's own functions.
     with tempfile.TemporaryDirectory(prefix="kct-retune-") as scratch:
@@ -796,6 +798,61 @@ def retune_pcb(
             dst.unlink()
         raise
     return report
+
+
+def _clearance_findings(
+    pcb_path: Path, net_class_map: dict, nets: set[str]
+) -> dict[tuple[str, tuple[str, ...], str], float]:
+    """Smallest measured gap per (rule, net pair, layer) of clearance errors on ``nets``.
+
+    Copper-to-copper only.  Zone fills are deliberately not compared: the
+    retune does not regenerate them, so a bump laid across a committed foreign
+    fill is stale-fill noise that the next zone refill carves around (Board 07's
+    ``+1V8`` pour); segment-vs-zone errors would refuse every such bump.
+    """
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate import DRCChecker
+
+    pcb = PCB.load(str(pcb_path))
+    layers = len(pcb.copper_layers) or 2
+    checker = DRCChecker(pcb, layers=layers, net_class_map=net_class_map)
+    found: dict[tuple[str, tuple[str, ...], str], float] = {}
+    for v in checker.check_clearances().errors:
+        if not nets.intersection(v.nets):
+            continue
+        key = (v.rule_id, tuple(sorted(v.nets)), v.layer or "")
+        gap = v.actual_value if v.actual_value is not None else 0.0
+        found[key] = min(found.get(key, gap), gap)
+    return found
+
+
+def _require_no_clearance_regression(
+    src: Path, new_text: str, nets: set[str], net_class_map: dict
+) -> None:
+    """Refuse a retune whose output has a clearance error the input did not (Issue #7760).
+
+    Both boards are DRC-checked; only errors touching a selected net count.  A
+    finding already in the input (same rule, nets and layer) is the board's own
+    and passes unless the output makes it worse.  Nothing has been written yet.
+    """
+    with tempfile.TemporaryDirectory(prefix="kct-retune-drc-") as scratch:
+        probe = Path(scratch) / "output.kicad_pcb"
+        probe.write_text(new_text, encoding="utf-8")
+        before = _clearance_findings(src, net_class_map, nets)
+        after = _clearance_findings(probe, net_class_map, nets)
+    worse = sorted(
+        f"{rule} {'/'.join(pair)} on {layer or '?'}: {gap:.4f} mm"
+        + (f" (input {before[key]:.4f} mm)" if key in before else "")
+        for key, gap in after.items()
+        for rule, pair, layer in [key]
+        if key not in before or gap + 1e-3 < before[key]
+    )
+    if worse:
+        raise RetuneError(
+            "drc_regression",
+            "the retune introduces clearance error(s) the input board did not have; "
+            "no output written: " + "; ".join(worse),
+        )
 
 
 def _uses_name_only(text: str) -> bool:

@@ -424,6 +424,31 @@ class TestFailureLeavesNothing:
         assert_refused(src, "scope_violation")
 
 
+class TestDrcGuard:
+    """Issue #7760: the written board is DRC-checked against the input."""
+
+    def test_bump_that_creates_a_clearance_violation_is_refused(self, src, monkeypatch):
+        def crowd(self, groups, **kw):
+            route = next(r for r in self.routes if r.net_name == "A3")
+            for seg in route.segments:
+                seg.y1 = seg.y2 = 29.9  # 0.1 mm centre gap to OTHER (y=30), width 0.2
+            return {}
+
+        monkeypatch.setattr(Autorouter, "apply_match_group_tuning", crowd)
+        err = assert_refused(src, "drc_regression")
+        assert "A3" in err.message and "OTHER" in err.message
+
+    def test_pre_existing_input_near_miss_does_not_block_a_retune(self, tmp_path):
+        nets = ADDR | {"OTHER": (10.25, 20, 30)}  # 0.05 mm edge gap to A0 (y=10) in the input
+        path = tmp_path / "in.kicad_pcb"
+        path.write_text(board(nets))
+        from kicad_tools.router.pcb_retune import _clearance_findings
+
+        assert _clearance_findings(path, addr_map(), {"A0", "OTHER"}), "fixture must start dirty"
+        report = run(path)
+        assert report.status == "tuned"
+
+
 class TestCli:
     def _map_file(self, tmp_path: Path) -> Path:
         path = tmp_path / "ncm.json"
