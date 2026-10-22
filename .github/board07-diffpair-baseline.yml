@@ -9,6 +9,9 @@
 # PYTHONHASHSEED=42): copper_safety 0, opens 0, skew_out_of_range 1 (DQS_P/DQS_N
 # 0.119 mm vs 0.050 mm).  The long-term targets are 0 opens and 0 skew
 # violations (#5333/#7619/#7769); the gate is the measured value.
+# Issue #5333 (main 8435ea01c, seed 42, PYTHONHASHSEED=42, pinned KiCad
+# 10.0.6 image): copper_safety 0, opens 0, skew_out_of_range 0 (DQS now
+# 0.045 mm after #7812), so skew_out_of_range is lowered to 0.
 # `null` would mean "not measured": the checker reports it and does not gate.
 #
 # To refresh: read the numbers from the latest run's job summary and commit the
@@ -18,4 +21,4 @@
 baseline:
   copper_safety: 0
   opens: 0
-  skew_out_of_range: 1
+  skew_out_of_range: 0
