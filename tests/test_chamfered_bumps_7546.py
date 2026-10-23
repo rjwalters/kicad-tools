@@ -417,15 +417,17 @@ class TestBindingLimitFallsBackToChamferedPlainCopper:
 
     def test_wide_trace_pair_at_skew_2_and_limit_2_1_is_tuned_by_a_tail_fold(self, pinned_cli):
         """Issue #7891: N folds past its own end into P's uncoupled tail; the
-        pair reads 0.622 mm in both engines (and 1.531 mm with P stored the
-        other way, ``tests/test_pad_aware_skew_tuning_7891.py``)."""
+        pair reads 1.122 mm in both engines (and 1.781 mm with P stored the
+        other way, ``tests/test_pad_aware_skew_tuning_7891.py``).  Issue
+        #7902: the fold's top runs at ``W + gap`` (0.45 mm), clear of its own
+        return run; at one width (0.622 / 1.531 mm before) the two touched."""
         cli, root = pinned_cli
         *_, p_out, n_out, result = self._tune(0.2, 128.0, 2.1)
         assert result.reason == "tuned" and result.skew_after_mm <= 0.127
         pcb = _write(root, "wide_fold_128.0_2.1", [p_out, n_out])
         kicad = _kicad(cli, pcb)
         assert _kct(pcb) == pytest.approx(kicad, abs=1e-3)
-        assert kicad == pytest.approx(0.622, abs=1e-3)
+        assert kicad == pytest.approx(1.122, abs=1e-3)
         _assert_no_square_corner(n_out)
 
 

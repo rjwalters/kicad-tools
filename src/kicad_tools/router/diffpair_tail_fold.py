@@ -129,19 +129,18 @@ def route_terminals(route: Route) -> list[tuple[int, bool]]:
     return out
 
 
-def partner_tail_mm(
+def _partner_runs(
     partner: Route, tx: float, ty: float, ux: float, uy: float, nx: float, ny: float, layer: object
-) -> float:
-    """How far the partner runs on past the terminal ``T``, beside the host line (mm).
+) -> tuple[float, float, float]:
+    """``(tail, offset, width)`` of the partner run beside the terminal ``T``.
 
-    The partner's same-layer segments parallel to the host direction ``u``,
-    on the inner side (opposite the outer normal ``n``) and passing beside
-    ``T``: the farthest point of their run along ``u`` past ``T``.  ``0`` when
-    the partner stops at or before ``T``.  A fold stays within this tail, so
-    all of its copper runs beside partner copper that was uncoupled.
+    ``tail`` is :func:`partner_tail_mm`; ``offset`` the centre-to-centre
+    distance of the nearest inner-side run passing beside ``T`` (``inf`` when
+    there is none) and ``width`` that run's width.
     """
     best = 0.0
     nearest = math.inf
+    nearest_width = 0.0
     runs: list[tuple[float, float, float]] = []
     for seg in partner.segments:
         if seg.layer != layer:
@@ -156,24 +155,49 @@ def partner_tail_mm(
         if offset >= 0.0:
             continue  # outer side: not the partner beside the host
         runs.append((min(t1, t2), max(t1, t2), -offset))
-        if min(t1, t2) <= _EPS:
-            nearest = min(nearest, -offset)
+        if min(t1, t2) <= _EPS and -offset < nearest:
+            nearest, nearest_width = -offset, seg.width
     for lo, hi, off in runs:
         if lo <= _EPS and abs(off - nearest) <= 1e-6:
             best = max(best, hi)
-    return best
+    return best, nearest, nearest_width
+
+
+def partner_tail_mm(
+    partner: Route, tx: float, ty: float, ux: float, uy: float, nx: float, ny: float, layer: object
+) -> float:
+    """How far the partner runs on past the terminal ``T``, beside the host line (mm).
+
+    The partner's same-layer segments parallel to the host direction ``u``,
+    on the inner side (opposite the outer normal ``n``) and passing beside
+    ``T``: the farthest point of their run along ``u`` past ``T``.  ``0`` when
+    the partner stops at or before ``T``.  A fold stays within this tail, so
+    all of its copper runs beside partner copper that was uncoupled.
+    """
+    return _partner_runs(partner, tx, ty, ux, uy, nx, ny, layer)[0]
 
 
 def _amplitudes(
-    cap: float, width: float, crown: float, foot: float, pad_floor: float, ladder: Sequence[float]
+    cap: float,
+    width: float,
+    crown: float,
+    foot: float,
+    pad_floor: float,
+    ladder: Sequence[float],
+    self_gap: float = 0.0,
 ) -> list[float]:
     """Fold heights to try, lowest first (a lower fold reads less uncoupled).
 
     Never under one trace width (the chamfered-bump floor of Issue #7546) or
     under the two chamfers of either leg; ``pad_floor`` is the height that
-    clears the terminal's own pad.
+    clears the terminal's own pad.  ``self_gap`` (Issue #7902) is the
+    edge-to-edge gap the top must keep to the fold's own return run, which
+    runs parallel beneath it on the host line: the floor is ``width +
+    self_gap``, so the two runs never touch or sit closer than the clearance
+    (a bridged fold shorts its added length out, and KiCad's DRC does not
+    flag same-net copper).  An empty list when the cap is under the floor.
     """
-    floor = max(width, crown + foot) * (1.0 + 1e-6)
+    floor = max(width + self_gap, crown + foot) * (1.0 + 1e-6)
     values = {max(floor, pad_floor)} | {cap * f for f in ladder}
     return sorted(a for a in values if floor <= a <= cap + _EPS)
 
@@ -230,8 +254,22 @@ def tail_fold_options(
         if length < back + width:  # keep a lead-in on the host
             continue
         pad_floor = side + width / 2.0 + clearance if pad is not None else 0.0
-        tail = partner_tail_mm(partner, tx, ty, ux, uy, nx, ny, host.layer)
-        for amp in _amplitudes(config.amplitude, width, crown, foot, pad_floor, ladder):
+        tail, beside, beside_width = _partner_runs(partner, tx, ty, ux, uy, nx, ny, host.layer)
+        # Issue #7902: the top and the return run are parallel same-net
+        # copper; hold them apart by the board clearance.  Without a known
+        # clearance, by the pair's own gap (the spacing the router already
+        # holds this net to); with neither, no fold.
+        if own_copper is not None:
+            self_gap = clearance
+        elif math.isfinite(beside):
+            self_gap = beside - (width + beside_width) / 2.0
+        else:
+            continue
+        if self_gap <= 0.0:
+            continue
+        for amp in _amplitudes(
+            config.amplitude, width, crown, foot, pad_floor, ladder, self_gap=self_gap
+        ):
             overrun = (length_needed - fold_length_added(amp, 0.0, crown, foot)) / 2.0
             # top2 is a Q16 jog too.
             if overrun + split_back < jog - _EPS or overrun <= 0.0:
