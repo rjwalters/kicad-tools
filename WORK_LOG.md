@@ -15,6 +15,18 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-23
 
+- **PR #7900**: test(router): pin lattice deadline stop line end to end with a voltage map active
+- **Issue #7881** (closed): lattice negotiation exhausts its deadline with the pairwise clearance matrix active; no way to tell timeout from infeasible
+- **PR #7899**: fix(router): pad-aware skew tuning -- own-copper rule, escape hosts, tail fold (#7891)
+- **Issue #7891** (closed): router: pad-aware skew tuning — let the tuner see the net's own pads and host bumps on escape stubs
+- **PR #7897**: feat(check): derived skew budgets in ps and time-domain diff-pair skew in kct check
+- **Issue #7892** (closed): Derived skew budgets in ps: one helper (−30 dB phase rule) and time-domain skew in kct check
+- **PR #7895**: test(router): pin 06rf USB3_RX1 pad-end stub limits at 1x (#7864 diagnosis)
+- **PR #7890**: perf(router): per-net partner row and node_clear bbox skip for lattice pairwise predicates
+- **PR #7889**: fix(router): length-balance crossing USB-C row-to-row ties (06rf USB2_D)
+- **Issue #7869** (closed): fix(router): USB2_D lattice pair needs a longer straight run for skew tuning (06rf)
+- **PR #7888**: fix(net-status): --why honours the router's pairwise declines (lattice reasons reach the sidecar)
+- **Issue #7879** (closed): net-status --why ignores voltage/class-pair clearance, so it calls pads routable that the router declines
 - **PR #7886**: docs: derive intra-pair skew limits from a differential-phase tolerance (research + proposal)
 - **Issue #7883** (closed): Derive intra-pair skew limits from a differential-phase tolerance at the operating frequency
 - **PR #7885**: fix(router): hold the pad class clearance under a voltage map in the lattice
