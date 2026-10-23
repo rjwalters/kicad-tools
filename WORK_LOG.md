@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-23
 
+- **PR #7871**: fix(router): hybrid parity accepts a longer via-equal pair that removes much skew
+- **Issue #7870** (closed): fix(router): USB3_RX2 hybrid leg selection leaves 5.7 mm skew untunable (06rf)
 - **PR #7866**: fix(router): SkewLedger walks gateway pair routes in copper order (#7864)
 - **PR #7865**: docs: explain PTH annular-ring and hole-to-edge rules in DRC guide
 - **PR #7860**: fix(router): offer gateway-first pair declines the hybrid retry
