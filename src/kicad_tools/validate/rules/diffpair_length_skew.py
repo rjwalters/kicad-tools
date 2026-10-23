@@ -163,7 +163,7 @@ def measured_skew_verdict(m: PairSkewMeasurement) -> str | None:
     if not judged:
         return None
     severities = []
-    if budget_exceeded(m):
+    if limits.budget is not None and budget_exceeded(m):
         severities.append(limits.budget.severity)
     if length_cap_exceeded(m):
         severities.append(limits.length_severity)
