@@ -14,8 +14,6 @@ import random
 from kicad_tools.router.lattice import kernel_adapter as ka
 from kicad_tools.router.lattice.obstacles import CommittedCopper
 from kicad_tools.router.lattice.pairwise import LatticePairwise
-from kicad_tools.router.lattice.pathfinder import LatticeNegotiationStats
-from kicad_tools.router.lattice.round_cap import lattice_stop_reason
 
 HALF = 0.1
 CLR = 0.2
@@ -110,15 +108,28 @@ def test_seg_clear_without_pairwise_matches_with_empty_matrix():
         assert off.seg_clear(a, b, layer, net) == on.seg_clear(a, b, layer, net)
 
 
-def test_deadline_stop_line_reports_rounds_with_matrix_active():
-    stats = LatticeNegotiationStats(
-        iterations=7,
-        routed=207,
-        total=212,
-        converged=False,
-        deadline_hit=True,
-        elapsed_s=5400.0,
-        lattice_builds=1,
+def test_expired_deadline_reports_rounds_with_matrix_active(tmp_path, capsys):
+    """A real lattice run with a voltage map hits its deadline and says so."""
+    import time
+
+    from kicad_tools.router.io import load_pcb_for_routing
+    from kicad_tools.router.pairwise_clearance import build_pairwise_clearance_table
+    from tests.test_cli_route_complete_4471 import STRANDED_BOARD
+
+    pcb = tmp_path / "stranded.kicad_pcb"
+    pcb.write_text(STRANDED_BOARD)
+    router, _ = load_pcb_for_routing(
+        pcb, strategy="lattice", lattice_max_iterations=5, force_python=True
     )
-    line = lattice_stop_reason(stats, 12)
-    assert line is not None and "deadline after 7/12 round(s)" in line
+    # Matrix active: NET1 is the 300 V net, NET2 the logic net.
+    router.rules.pairwise_clearance = build_pairwise_clearance_table(
+        {"NET1": 300.0, "NET2": 0.0}, dru=router.rules.trace_clearance
+    )
+    assert router._lattice_pairwise_projection() is not None
+    router._lattice_deadline = time.monotonic() - 1.0  # already expired
+
+    router._negotiate_lattice_netset()
+
+    out = capsys.readouterr().out
+    assert "Lattice negotiation:" in out and "converged=False" in out
+    assert "stopped by: deadline after " in out and "/5 round(s)" in out
