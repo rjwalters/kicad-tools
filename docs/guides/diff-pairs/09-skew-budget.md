@@ -1,8 +1,7 @@
 # 09 — Skew Budgets in Picoseconds
 
-The budget comes from
-`src/kicad_tools/physics/skew_budget.py` (Issue #7892, ruling on #7883; the
-derivation is in
+The budget comes from `src/kicad_tools/physics/skew_budget.py` (Issue #7892,
+ruling on #7883; the derivation is in
 [`docs/research/diffpair-phase-skew-tolerance.md`](../../research/diffpair-phase-skew-tolerance.md)).
 
 **Skew is checked in time.** Each leg's propagation delay is the sum of its
@@ -59,8 +58,7 @@ recognised from a class or net name (Issue #7894). It does not replace:
 - a class's own `skew_tolerance_mm`, which is checked as an extra length cap
   (error). The board generators no longer set one (Issue #7894);
 - the generic 0.5 mm, when the protocol is completely unknown: no
-  `pair_protocol` and no class- or net-name match (a budget then exists only
-  if the class declares `data_rate_gbps`).
+  `pair_protocol` and no class- or net-name match.
 
 A finding reports the skew in ps, the budget, and the budget in mm at the
 slowest layer, and names its source in brackets:

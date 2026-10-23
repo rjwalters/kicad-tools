@@ -90,14 +90,14 @@ The protocol-specific `NetClassRouting` instances live in
   `target_diff_impedance=100`, `pair_protocol="MIPI_DPHY"`, `skew_tolerance_mm=0.05`
 - `hdmi_tmds_net_class()` --- `length_match_group="HDMI_TMDS_LANES"`,
   `target_diff_impedance=100`, `pair_protocol="HDMI_TMDS"`, `skew_tolerance_mm=0.075`
+- `addr_bus_net_class()` --- `length_match_group="ADDR_BUS"`,
+  `length_match_reference="A0"` (pace-car semantic)
 
 Within-pair skew is judged against the derived ps budget of the declared
 protocol ([guide 09](../../../docs/guides/diff-pairs/09-skew-budget.md)),
 plus the explicit `skew_tolerance_mm` caps.  The caps stay until #7913:
 without them the seed-42 re-route fails `impedance` on re-routed TMDS
 breakout runs (Issue #7894).
-- `addr_bus_net_class()` --- `length_match_group="ADDR_BUS"`,
-  `length_match_reference="A0"` (pace-car semantic)
 
 `build_net_class_map()` assembles them into a `net_name -> NetClassRouting`
 dict that the autorouter (in `route_pcb()`), the JSON sidecar
