@@ -15,6 +15,16 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-23
 
+- **PR #7866**: fix(router): SkewLedger walks gateway pair routes in copper order (#7864)
+- **PR #7865**: docs: explain PTH annular-ring and hole-to-edge rules in DRC guide
+- **PR #7860**: fix(router): offer gateway-first pair declines the hybrid retry
+- **PR #7849**: refactor(board-05): apply silk DFM corrections during generation, not routing replay
+- **Issue #7862** (closed): Replay or discard quarantined stash b0c6a741 (#5059 native PTH rules test + docs)
+- **Issue #7858** (closed): router: board 03 USB_D[0] skips the hybrid retry on main and falls back to plain uncoupled
+- **Issue #7848** (closed): board 05: silk DFM corrections live in the routing.json replay step, so an unattended route carries 137 kct check warnings
+- **Issue #7834** (closed): board 05: CI/recipe job that routes from scratch unattended and gates on 100% nets + both DRC engines + LVS
+- **Issue #7649** (closed): router: source-side diff-pair skew avoidance; retire the Q35 2× interim bump excursion
+- **Issue #5550** (closed): Reconcile 4 outstanding loom-quarantine stashes left by the worktree reaper (issues 5201, 4982, 5216, 5004)
 - **PR #7850**: ci(board05): nightly unattended from-scratch route gate (#7834)
 - **PR #7854**: test: compare min-of-5 timings in segment-components perf guard
 - **PR #7851**: feat(router): gate skew bumps against SkewLedger sources

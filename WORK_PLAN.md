@@ -2,7 +2,7 @@
 
 Prioritized roadmap generated from current GitHub label state. Maintained by the Guide triage agent.
 
-*Last updated: 2026-10-20*
+*Last updated: 2026-10-23*
 
 ---
 
@@ -23,19 +23,19 @@ _None._
 
 `loom:important`; taken before unlabelled work.
 
-- **#7649**: router: source-side diff-pair skew avoidance; retire the Q35 2× interim bump excursion
+- **#7867**: router: 06rf lattice bench row fails skew on USB3_RX2 (hybrid), USB3_RX1 and USB2_D after the pair tuner
 
 ## Ready
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-_None._
+- **#7867**: router: 06rf lattice bench row fails skew on USB3_RX2 (hybrid), USB3_RX1 and USB2_D after the pair tuner
 
 ## In Progress
 
 Issues currently being built (`loom:building`).
 
-- **#7858**: router: board 03 USB_D[0] skips the hybrid retry on main and falls back to plain uncoupled
+- **#7548**: Board 06 synthetic fixture: 9 diff pairs over max skew on the seed-42 re-route (identity-allowed in check_diffpair_coverage.py)
 
 ## PRs Awaiting Review
 
@@ -54,15 +54,14 @@ _None._
 Issues carrying `loom:curated`.
 
 - **#5509**: Epic: one clearance kernel — search, commit, and final validation must agree with kicad-cli DRC *(curated)*
-- **#5550**: Reconcile 4 outstanding loom-quarantine stashes left by the worktree reaper (issues 5201, 4982, 5216, 5004) *(curated)*
 - **#6445**: [Epic #6441] Phase 3: via pairs as a single move in the lattice coupled centreline *(curated)*
 - **#6446**: [Epic #6441] Phase 4: budget-driven hybrid fallback — longest coupled trunk plus single-ended terminal legs *(curated)*
 - **#7487**: Re-rule or remove board 03 usb_geometry via-in-pad window exception by 2027-04-19 (#7457 / #7084 Q10) *(curated)*
 - **#7518**: DSN export: verify a Specctra router doesn't double-flip back-side padstack layers (deferred from #7481 / #7496) *(curated)*
 - **#7548**: Board 06 synthetic fixture: 9 diff pairs over max skew on the seed-42 re-route (identity-allowed in check_diffpair_coverage.py) *(curated)*
-- **#7649**: router: source-side diff-pair skew avoidance; retire the Q35 2× interim bump excursion *(curated)*
 - **#7690**: Epic: full 3D model coverage, from demo boards to the JLCPCB catalog, reproducible on the pinned toolchain *(curated)*
-- **#7858**: router: board 03 USB_D[0] skips the hybrid retry on main and falls back to plain uncoupled *(curated)*
+- **#7864**: router: 06rf USB3_RX1 one-sided fan skew fails at 1× (narrowed from #7649) *(curated)*
+- **#7867**: router: 06rf lattice bench row fails skew on USB3_RX2 (hybrid), USB3_RX1 and USB2_D after the pair tuner *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -88,11 +87,11 @@ Issues carrying `loom:curated`.
 | Operator merge-risk holds | 0 |
 | Very important | 0 |
 | Important | 1 |
-| Ready (`loom:issue`) | 0 |
+| Ready (`loom:issue`) | 1 |
 | In Progress (`loom:building`) | 1 |
 | PRs awaiting review | 0 |
 | Approved PRs awaiting merge | 0 |
-| Curated | 10 |
+| Curated | 9 |
 | Architect / Hermit proposals | 6 |
 | Active epics | 5 |
 <!-- guide:plan-body:end -->
