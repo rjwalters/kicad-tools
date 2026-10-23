@@ -1486,6 +1486,41 @@ bool Grid3D::segment_pads_clear(const Segment& seg, int exclude_net,
     return true;
 }
 
+int Grid3D::segment_pads_pairwise_blocker(const Segment& seg, int exclude_net,
+                                          const std::vector<uint32_t>& exclude_ref_hashes,
+                                          const std::vector<uint32_t>& clamp_ref_hashes) const {
+    // Issue #7887: same candidate set as ``segment_pads_clear``, but every pad
+    // is visited (no early exit) so a geometric refusal anywhere in reach
+    // vetoes the pairwise attribution.  ``segment_pad_clear`` reports the
+    // measured gap whenever it measures a pad, and a pad it refuses is always
+    // measured, so ``gap`` against the pad's own non-pairwise requirement
+    // tells whether the HV widening was the deciding term.
+    if (!pairwise_active_) return 0;
+    const float reach = seg.width / 2.0f
+        + std::max(pad_bucket_max_override_, max_pairwise_clearance_)
+        + CLEARANCE_EPSILON_MM;
+    const int qx1 = static_cast<int>(std::floor((std::min(seg.x1, seg.x2) - reach) / PAD_BUCKET_MM));
+    const int qx2 = static_cast<int>(std::floor((std::max(seg.x1, seg.x2) + reach) / PAD_BUCKET_MM));
+    const int qy1 = static_cast<int>(std::floor((std::min(seg.y1, seg.y2) - reach) / PAD_BUCKET_MM));
+    const int qy2 = static_cast<int>(std::floor((std::max(seg.y1, seg.y2) + reach) / PAD_BUCKET_MM));
+    int blocker = 0;
+    for (int qy = qy1; qy <= qy2; ++qy) {
+        for (int qx = qx1; qx <= qx2; ++qx) {
+            const auto it = pad_buckets_.find(pad_bucket_key(qx, qy));
+            if (it == pad_buckets_.end()) continue;
+            for (uint32_t i : it->second) {
+                const auto& pad = pads_[i];
+                float gap = 0.0f;
+                if (segment_pad_clear(seg, pad, exclude_net, exclude_ref_hashes,
+                                      clamp_ref_hashes, &gap)) continue;
+                if (gap < pad.clearance_override - CLEARANCE_EPSILON_MM) return 0;
+                if (blocker == 0 && pad.net != 0) blocker = pad.net;
+            }
+        }
+    }
+    return blocker;
+}
+
 bool Grid3D::trace_stored_vias_clear(const Segment& s, float clearance,
                                     int partner_net, float partner_clearance) const {
     // Issue #5661 (Epic #5509 Phase 3b): the copper verdict is delegated to

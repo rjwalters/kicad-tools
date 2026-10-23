@@ -351,7 +351,12 @@ namespace router {
 // v64 (Issue #7569): Grid3D.set_pad_class_clearances + PadInfo::class_clearance
 // -- the exact pad test holds each pad to its own net-class clearance.  A v63
 // .so keeps the board-wide largest-class floor, so it must be rejected.
-constexpr int ROUTER_CPP_BUILD_VERSION = 64;
+// v65 (Issue #7887): the own-pad step gate names the foreign-domain pad when
+// the pairwise (HV) floor alone refuses a step, so an HV pad walled in by LV
+// pads drains as FAILURE_PAIRWISE_BLOCKED instead of a bare NO_PATH
+// (``Grid3D::segment_pads_pairwise_blocker`` is new).  A v64 .so cannot emit
+// that attribution, so it must be rejected.
+constexpr int ROUTER_CPP_BUILD_VERSION = 65;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor

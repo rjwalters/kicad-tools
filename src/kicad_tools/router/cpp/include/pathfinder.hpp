@@ -318,6 +318,13 @@ public:
     }
     bool own_pad_step_clear(int x1, int y1, int x2, int y2, int layer, int net,
                             float emit_trace_width) const;
+    // Issue #7887: after the own-pad step gate refused (x1,y1)->(x2,y2),
+    // record the refusal as a cross-domain block (``note_pairwise_block``)
+    // when the pairwise (HV) floor alone decided it -- the gate is how an HV
+    // pad walled in by foreign-domain pads drains its search.  Diagnostic
+    // only; a no-op without an active pairwise matrix.
+    void note_own_pad_pairwise_block(int x1, int y1, int x2, int y2, int layer, int net,
+                                     float emit_trace_width) const;
     void set_search_fill_clearances(float trace, float via) {
         search_fill_trace_clearance_ = trace;
         search_fill_via_clearance_ = via;
@@ -492,6 +499,9 @@ private:
     // Issue #6315: exact swept-step vs foreign-pad clearance, and the
     // per-cell gate that applies it to ``GridCell::pad_cell`` cells.
     bool pad_step_clear(int x1, int y1, int x2, int y2, int layer, int net) const;
+    // Issue #6375 / #7887: the swept segment the own-pad step gate measures.
+    Segment own_pad_step_segment(int x1, int y1, int x2, int y2, int layer, int net,
+                                 float emit_trace_width) const;
     bool pad_cell_clear(int cx, int cy, int layer, int x1, int y1,
                         int x2, int y2, int net) const;
     bool pad_cell_resolvable(const GridCell& cell, int cx, int cy, int layer) const;

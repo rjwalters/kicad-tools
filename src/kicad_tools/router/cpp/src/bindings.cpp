@@ -307,6 +307,11 @@ NB_MODULE(router_cpp, m) {
              "seg"_a, "exclude_net"_a,
              "exclude_ref_hashes"_a = std::vector<uint32_t>{},
              "clamp_ref_hashes"_a = std::vector<uint32_t>{})
+        // Issue #7887: the pad whose pairwise (HV) floor alone refuses ``seg``.
+        .def("segment_pads_pairwise_blocker", &Grid3D::segment_pads_pairwise_blocker,
+             "seg"_a, "exclude_net"_a,
+             "exclude_ref_hashes"_a = std::vector<uint32_t>{},
+             "clamp_ref_hashes"_a = std::vector<uint32_t>{})
         .def("mark_rect_blocked", &Grid3D::mark_rect_blocked,
              "x1"_a, "y1"_a, "x2"_a, "y2"_a, "layer"_a, "net"_a, "is_obstacle"_a = false)
         // Route marking

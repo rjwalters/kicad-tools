@@ -225,16 +225,19 @@ def test_without_voltage_map_nothing_declines_and_no_sidecar(
 
 @pytest.mark.slow
 def test_why_agrees_with_grid_decline(board: Path, vmap: Path, tmp_path: Path, capsys) -> None:
-    """Grid engine: the recorded decline keeps ``--why`` off BUDGET_STARVED.
+    """Grid engine: the C++ search names the pairwise clearance, like the lattice.
 
     Before #7879 this failed too: the sidecar was written only by the
-    post-route DRC step, so a ``--skip-drc`` run left none.  Measured on this
-    fixture, the C++ grid search drains its open set and records the decline
-    as ``no_path`` -- not ``pairwise_blocked`` -- so the evidence quotes the
-    generic geometric wording; it must still never say "raise the budget".
+    post-route DRC step, so a ``--skip-drc`` run left none.  Before #7887 the
+    C++ grid search drained its open set on this fixture and recorded the
+    decline as ``no_path``: every escape of ``Q1.2`` was refused by the
+    own-pad step gate (#6375), whose validator verdict widens each ``/LV_B``
+    ring pad to the HV pairwise floor, and that gate named no blocker.  It now
+    attributes a refusal the pairwise floor alone decided, so the sidecar says
+    ``pairwise_blocked`` and ``--why`` quotes the HV clearance.
     """
     from kicad_tools.router.cpp_backend import is_cpp_available
-    from kicad_tools.router.stuck_classifier import is_budget_search_failure
+    from kicad_tools.router.stuck_classifier import is_pairwise_search_failure
 
     if not is_cpp_available():
         pytest.skip("grid search-failure codes need the C++ backend (kct build-native)")
@@ -245,10 +248,18 @@ def test_why_agrees_with_grid_decline(board: Path, vmap: Path, tmp_path: Path, c
     sidecar = tmp_path / "to220_grid.search_failures.json"
     assert sidecar.is_file()
     reason = json.loads(sidecar.read_text())["search_failures"]["/HV_A"]
-    assert not is_budget_search_failure(reason), reason
+    assert reason == "pairwise_blocked", reason
+    assert is_pairwise_search_failure(reason)
 
     net_status_main([str(out), "--why", "--format", "json"])
     data = json.loads(capsys.readouterr().out)
     hv = next(n for n in data["nets"] if n["net_name"] == "/HV_A")
     assert hv["classification"] == "escape_blocked", hv
     assert hv["search_failure"] == reason
+    assert "pairwise (HV) class-pair clearance stopped" in hv["evidence"]
+
+    net_status_main([str(out), "--why"])
+    text = capsys.readouterr().out
+    assert "[ESCAPE_BLOCKED] /HV_A" in text
+    assert "[BUDGET_STARVED] /HV_A" not in text
+    assert "pairwise (HV) class-pair clearance" in text
