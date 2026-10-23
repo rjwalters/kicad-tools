@@ -340,6 +340,33 @@ def _skew_space(
     return _SkewSpace(length=route_length or LengthTracker.calculate_route_length, tol=tolerance_mm)
 
 
+def _cap_first(
+    space: _SkewSpace, pair: DetectedPair, routes_by_net: dict[int, Route]
+) -> _SkewSpace:
+    """Fix a violated error cap first when time and length disagree (Issue #7893).
+
+    On a pair split across layers the leg with less delay can be the longer
+    one in mm, so closing the delay skew grows the length skew.  When the
+    pair is already over its error-level mm cap, the cap (what both
+    ``kct check`` and kicad-cli fail as an error) is tuned first, in mm, by
+    lengthening the shorter leg; the ps budget is left to report.  Otherwise
+    the ps space stands, with the cap as a hard bound in the cascade.
+    """
+    if not space.in_time or space.cap_mm is None:
+        return space
+    p_route = routes_by_net.get(pair.pair.positive.net_id)
+    n_route = routes_by_net.get(pair.pair.negative.net_id)
+    if p_route is None or n_route is None:
+        return space
+    l_p, l_n = space.length(p_route), space.length(n_route)
+    if abs(l_p - l_n) <= space.cap_mm + space.cap_eps:
+        return space
+    q_p, q_n = space.q(p_route), space.q(n_route)
+    if (q_p < q_n) == (l_p < l_n):
+        return space  # the same leg is short in both: the ps need covers the cap
+    return _SkewSpace(length=space.length, tol=space.cap_mm, eps=space.cap_eps)
+
+
 def _skew_figure(result: DiffPairTuneResult) -> float:
     """The remaining skew in the unit the pair was tuned in (ps, else mm)."""
     return result.skew_after_ps if result.skew_after_ps is not None else result.skew_after_mm
@@ -498,6 +525,7 @@ def tune_diff_pair_skew(
         its segments list.
     """
     space = _skew_space(tolerance_mm, route_length, skew_target, route_parts)
+    space = _cap_first(space, pair, routes_by_net)
     if tolerance_mm is None:
         tolerance_mm = (skew_target.tolerance_mm if skew_target is not None else None) or space.tol
     once = functools.partial(

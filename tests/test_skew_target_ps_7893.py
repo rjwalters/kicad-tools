@@ -192,6 +192,20 @@ def test_error_cap_is_never_traded_for_ps_on_a_split_layer_pair():
     assert result.skew_after_ps <= result.skew_before_ps
 
 
+def test_violated_error_cap_is_fixed_first_when_time_and_length_disagree():
+    """Board 06 MIPI_CLK at the end-of-recipe tuner: 1.29 mm over a 0.3 mm cap.
+
+    The delay-shorter leg is the longer one in mm, so no bump can serve both.
+    The cap is an error, the budget a warning: the length skew is fixed.
+    """
+    nc = _usb3(skew_tolerance_mm=0.3)
+    ar = _router(F, IN1, LENGTH + 1.3, LENGTH, nc)
+    result = _tune(ar)
+    assert result.skew_before_mm == pytest.approx(1.3, abs=1e-6)
+    assert result.reason == "tuned"
+    assert result.skew_after_mm <= 0.3 + 1e-6
+
+
 def test_tuned_split_layer_board_passes_kct_check_in_time(tmp_path):
     """Written to a board, the tuned pair passes the checker's own ps measurement."""
     from kicad_tools.schema.pcb import PCB
