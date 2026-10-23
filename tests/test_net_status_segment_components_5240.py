@@ -175,15 +175,28 @@ def test_build_segment_components_faster_on_larger_net(tmp_path: Path) -> None:
     layers = ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
     segments = [_random_segment(rng, layers) for _ in range(200)]
 
-    analyzer_ref = _analyzer(tmp_path)
-    t0 = time.perf_counter()
-    reference = _reference_build_segment_components(analyzer_ref, segments)
-    reference_elapsed = time.perf_counter() - t0
+    repeats = 5
 
-    analyzer_opt = _analyzer(tmp_path)
-    t0 = time.perf_counter()
-    optimized = analyzer_opt._build_segment_components(segments)
-    optimized_elapsed = time.perf_counter() - t0
+    def _min_elapsed(build):
+        """Min wall time over ``repeats`` runs, each on a fresh analyzer.
+
+        A fresh analyzer per repeat keeps cached geometry from one run from
+        flattering the next; taking the minimum keeps a single scheduler/GC
+        stall on a shared CI runner from failing the comparison (#7853).
+        """
+        best = float("inf")
+        result = None
+        for _ in range(repeats):
+            analyzer = _analyzer(tmp_path)
+            t0 = time.perf_counter()
+            result = build(analyzer)
+            best = min(best, time.perf_counter() - t0)
+        return best, result
+
+    reference_elapsed, reference = _min_elapsed(
+        lambda a: _reference_build_segment_components(a, segments)
+    )
+    optimized_elapsed, optimized = _min_elapsed(lambda a: a._build_segment_components(segments))
 
     ref_sets = {frozenset(c) for c in reference}
     opt_sets = {frozenset(c) for c in optimized}
@@ -192,5 +205,6 @@ def test_build_segment_components_faster_on_larger_net(tmp_path: Path) -> None:
     # The optimized path must not be slower than the naive reference on this
     # workload (random, mostly-disjoint segments spread across 4 layers).
     assert optimized_elapsed <= reference_elapsed, (
-        f"expected optimized ({optimized_elapsed:.4f}s) <= reference ({reference_elapsed:.4f}s)"
+        f"expected optimized ({optimized_elapsed:.4f}s) <= reference ({reference_elapsed:.4f}s) "
+        f"(min of {repeats} runs each)"
     )
