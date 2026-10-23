@@ -15,6 +15,10 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-23
 
+- **PR #7910**: fix(research): krt_compare.py grades on the pinned kicad-cli (#7903)
+- **Issue #7903** (closed): krt_compare.py kicad-cli DRC bypasses the pinned evidence toolchain
+- **PR #7909**: feat(router): tune diff-pair skew to the derived ps budget (single source with kct check)
+- **Issue #7893** (closed): Router and tuners tune to the derived ps skew budget (single source with kct check)
 - **PR #7906**: fix(router): grid search names the HV clearance when it walls a pad in (#7887)
 - **Issue #7887** (closed): Grid C++ search records an HV-walled pad as no_path, not pairwise_blocked (net-status --why loses the pairwise wording)
 - **PR #7905**: fix(router): hold a tail fold's top off its own return run by the clearance
