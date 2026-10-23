@@ -11,14 +11,10 @@ pair back and says so.
 
 from __future__ import annotations
 
-import itertools
-
 import pytest
 
 from kicad_tools.router import pair_postpass_invariant as ppi
 from kicad_tools.router.core import Autorouter
-from kicad_tools.router.diffpair import DifferentialPair, DifferentialSignal
-from kicad_tools.router.diffpair_routing import DiffPairRouter
 from kicad_tools.router.drc_nudge import drc_verify_and_nudge
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.pcb_retune import RetuneError, _require_no_pair_skew_regression
@@ -146,87 +142,6 @@ def test_nudge_guard_leaves_a_pair_whose_change_stays_inside_the_limit():
     assert result.pair_skew_reverts == []
     assert p.vias[0].y != pytest.approx(Y)
     assert LIMIT < _skew(router) <= 1.0
-
-
-# ---------------------------------------------------------------------------
-# Via-hairpin collapse (#7782/#7808 commit path)
-# ---------------------------------------------------------------------------
-
-STEP = 0.127
-HY = 25.451
-
-
-def _hairpin_p() -> Route:
-    """Board 07's DQS_P near end: F.Cu runs past the turn to the via, B.Cu returns."""
-
-    def seg(x1: float, y1: float, x2: float, y2: float, layer: Layer) -> Segment:
-        return Segment(x1, y1, x2, y2, 0.1, layer, net=1, net_name="DQS_P")
-
-    segs = [seg(24.981, HY, 25.108, HY, F)]
-    xs = [25.108 + STEP * i for i in range(6)]
-    segs += [seg(a, HY, b, HY, F) for a, b in itertools.pairwise(xs)]
-    segs += [seg(b, HY, a, HY, B) for a, b in itertools.pairwise(xs)]
-    ys = [HY - STEP * i for i in range(13)]
-    segs += [seg(25.108, a, 25.108, b, B) for a, b in itertools.pairwise(ys)]
-    segs.append(seg(25.108, ys[-1], 30.0, ys[-1], B))
-    via = Via(25.743, HY, 0.3, 0.6, (F, B), net=1, net_name="DQS_P")
-    return Route(net=1, net_name="DQS_P", segments=segs, vias=[via])
-
-
-def _hairpin_board() -> tuple[Autorouter, DifferentialPair, Route, Route]:
-    rules = DesignRules(trace_width=0.1, trace_clearance=0.1, grid_resolution=STEP)
-    router = Autorouter(width=40.0, height=40.0, rules=rules)
-    end_y = HY - 12 * STEP
-    router.add_component(
-        "U1", [_pad("1", 24.981, HY, 1, "DQS_P", 0.4), _pad("2", 5.0, 5.0, 2, "DQS_N", 0.4)]
-    )
-    router.add_component("U2", [_pad("1", 30.0, end_y, 1, "DQS_P", 0.4)])
-    router.net_names.update({1: "DQS_P", 2: "DQS_N"})
-    router.net_class_map = _class_map()
-    p = _hairpin_p()
-    measure = ppi.checker_length_measure(router)
-    assert measure is not None
-    # N is a plain straight leg exactly as long as P *with* its hairpin, so
-    # collapsing P's hairpin alone is what skews the pair.
-    length = measure(p)
-    router.add_component("U3", [_pad("1", 5.0 + length, 5.0, 2, "DQS_N", 0.4)])
-    n = Route(
-        net=2,
-        net_name="DQS_N",
-        segments=[Segment(5.0, 5.0, 5.0 + length, 5.0, 0.1, F, net=2, net_name="DQS_N")],
-    )
-    for route in (p, n):
-        router.grid.mark_route(route)
-        router.routes.append(route)
-    pair = DifferentialPair(
-        name="DQS",
-        positive=DifferentialSignal("DQS_P", 1, "DQS", "P", "pn_suffix"),
-        negative=DifferentialSignal("DQS_N", 2, "DQS", "N", "pn_suffix"),
-    )
-    return router, pair, p, n
-
-
-def test_hairpin_collapse_without_pair_still_edits():
-    """The pre-#6447 call (no pair) keeps the #7782 behaviour: P loses its hairpin."""
-    router, _pair, p, _n = _hairpin_board()
-    assert _skew(router) <= 1e-6
-
-    assert DiffPairRouter(router)._collapse_committed_via_hairpins([p]) >= 1
-    assert _skew(router) > LIMIT
-
-
-def test_hairpin_collapse_guard_undoes_an_edit_that_skews_the_pair():
-    router, pair, p, n = _hairpin_board()
-    before = p.copy_geometry()
-
-    assert DiffPairRouter(router)._collapse_committed_via_hairpins([p, n], pair) == 0
-
-    assert p.segments == before.segments and p.vias == before.vias
-    assert _skew(router) <= 1e-6
-    # The R-tree is keyed on the live objects again, not the discarded edit.
-    grid = router.grid
-    if grid._via_rtree is not None:
-        assert id(p.vias[0]) in grid._via_rtree_items
 
 
 # ---------------------------------------------------------------------------

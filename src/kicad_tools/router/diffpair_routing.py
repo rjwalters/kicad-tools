@@ -30,7 +30,6 @@ if TYPE_CHECKING:
     from .core import Autorouter
     from .cpp_backend import CppCoupledPathfinder
     from .grid import RoutingGrid
-    from .pair_postpass_invariant import PairSkewGuard
     from .rules import DesignRules, NetClassRouting
 
 import contextlib
@@ -5774,9 +5773,7 @@ class DiffPairRouter:
             pair.negative.net_name,
         )
 
-    def _collapse_committed_via_hairpins(
-        self, routes: list[Route], pair: DifferentialPair | None = None
-    ) -> int:
+    def _collapse_committed_via_hairpins(self, routes: list[Route]) -> int:
         """Move committed vias back to their turn where a leg doubles back (#7782).
 
         The joint search can run a leg past its via and return over the same
@@ -5787,11 +5784,6 @@ class DiffPairRouter:
         doubled leg is replaced by a straight segment from the via
         (:func:`~.via_hairpin.shortcut_via_hairpins`).  Returns the number
         of hairpin edits kept.
-
-        Issue #6447: with ``pair`` given, the pair's ``kct check`` skew is
-        measured before and after; if the edits push it past its error limit
-        (or more than 0.01 mm further past it) every edit on the pair is
-        undone (:mod:`~.pair_postpass_invariant`).
         """
         from .drc_nudge import _router_pad_bbox, _via_drill_overlaps_bbox
         from .via_clearance import drill_hole_to_hole_clear
@@ -5805,10 +5797,6 @@ class DiffPairRouter:
         pads = getattr(self.autorouter, "pads", None) or {}
         min_h2h = getattr(getattr(self.autorouter, "rules", None), "min_hole_to_hole", 0.5)
         total = 0
-        skew_guard = (
-            self._arm_pair_skew_guard(pair, routes, "via-hairpin") if pair is not None else None
-        )
-        edited: list[tuple[Route, list[Segment], list[Via]]] = []
         for route in routes:
             if not route.vias:
                 continue
@@ -5905,7 +5893,6 @@ class DiffPairRouter:
             # non-idempotent bookkeeping.  The old via/segment cells stay
             # blocked -- conservative for the own net -- and only the
             # R-trees, which key on object identity, are swapped.
-            edited.append((route, route.segments, route.vias))
             grid._rtree_remove_route(route)
             grid._rtree_remove_route_vias(route)
             route.segments = trial.segments
@@ -5916,66 +5903,9 @@ class DiffPairRouter:
             for via in route.vias:
                 grid._mark_via(via)
             total += moved
-        if total and skew_guard is not None:
-            regressions = skew_guard.regressions(self._pair_guard_routes(routes))
-            if regressions:
-                # Issue #6447: undo every edit on the pair.  The edited copper's
-                # cells stay marked (own net, conservative -- as for the
-                # original copper above); only the R-trees are swapped back.
-                for route, segments, vias in edited:
-                    grid._rtree_remove_route(route)
-                    grid._rtree_remove_route_vias(route)
-                    route.segments = segments
-                    route.vias = vias
-                    grid._rtree_insert_route(route)
-                    grid._rtree_insert_route_vias(route)
-                for regression in regressions:
-                    print(
-                        "    "
-                        + skew_guard.report(
-                            regression, f"undid {total} hairpin edit(s) on the pair"
-                        )
-                    )
-                return 0
         if total:
             print(f"    [via-hairpin] resolved {total} hairpin edit(s) on the committed pair")
         return total
-
-    def _pair_guard_routes(self, routes: list[Route]) -> list[Route]:
-        """Every committed route plus ``routes`` (deduplicated), for skew measures."""
-        seen: set[int] = set()
-        out: list[Route] = []
-        for route in [*(getattr(self.autorouter, "routes", None) or ()), *routes]:
-            if id(route) not in seen:
-                seen.add(id(route))
-                out.append(route)
-        return out
-
-    def _arm_pair_skew_guard(
-        self, pair: DifferentialPair | None, routes: list[Route], pass_name: str
-    ) -> PairSkewGuard | None:
-        """A :class:`~.pair_postpass_invariant.PairSkewGuard` for ``pair`` (#6447).
-
-        ``None`` without a pair, or when ``kct check``'s skew limit for it is
-        only advisory.
-        """
-        if pair is None:
-            return None
-        from .pair_postpass_invariant import GuardedPair, PairSkewGuard
-
-        limit = self._checker_skew_limit_mm(pair)
-        if limit is None:
-            return None
-        guarded = GuardedPair(
-            pair.positive.net_id,
-            pair.negative.net_id,
-            pair.positive.net_name,
-            pair.negative.net_name,
-            limit,
-        )
-        return PairSkewGuard.arm(
-            self.autorouter, pass_name, pairs=[guarded], routes=self._pair_guard_routes(routes)
-        )
 
     def _tune_committed_pair_skew(self, pair: DifferentialPair) -> bool:
         """Bump-tune a just-committed coupled pair's skew (Issue #7269).
@@ -13134,8 +13064,17 @@ class DiffPairRouter:
             self._committed_coupled_claims().update((pair.positive.net_id, pair.negative.net_id))
 
         # Issue #7782: pull the joint search's via hairpins back to the turn
-        # before the lengths are taken (the collapse changes them).
-        self._collapse_committed_via_hairpins(routes, pair)
+        # before the lengths are taken (the collapse changes them).  Issue
+        # #6447: deliberately NOT wrapped in the post-pass pair-skew guard.
+        # The collapse runs before this pair's skew is matched (inline comb,
+        # then ``_tune_committed_pair_skew`` for every pair whose limit is an
+        # error), so the skew it leaves is not the pair's final skew: on
+        # board 07 a guard here reverted MIPI_DAT1's collapse over a
+        # pre-tuning 0.336 -> 0.858 mm change the tuner then took to 0.045 mm,
+        # and kept the doubled, order-dependent copper #7782 removes.  The
+        # hazard #7784 showed -- a later pass moving the collapsed via -- is
+        # guarded in ``drc_verify_and_nudge``.
+        self._collapse_committed_via_hairpins(routes)
 
         # Calculate lengths
         p_length = calculate_route_length(p_routes)
