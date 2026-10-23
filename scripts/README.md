@@ -154,6 +154,8 @@ plus standalone router benchmark / profiling scripts (`bench_*.py`,
 `bench_python_astar_via_kernel.py`, `bench_rtree_ripup.py`,
 `bench_stitch_fill_predicates.py`, `bench_stitch_track_index.py`,
 `calibrate_fom.py`, `check_negatives.py`, `demo_integration.py`,
+`diffpair_phase_skew_table.py` (#7883, write-up in
+[`docs/research/diffpair-phase-skew-tolerance.md`](../docs/research/diffpair-phase-skew-tolerance.md)),
 `generate_negative_controls.py`, `generate_perturbations.py`,
 `placement_score_calibration.py` (#5948, write-up in
 [`docs/research/placement_score_calibration.md`](../docs/research/placement_score_calibration.md)),
