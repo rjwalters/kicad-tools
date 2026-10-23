@@ -68,12 +68,18 @@ class SkewLedger:
         sources: Attributed contributions.
         residual_mm: The part no source explains (``measured - sum``).
         pitch_mm: Centre-to-centre pitch the joint terms used.
+        run_count: Number of via-delimited runs on the P leg (run indices of
+            :attr:`sources` are in P's order).
+        n_reversed: The N leg is routed from the far end, so its run ``k``
+            is ledger run ``run_count - 1 - k``.
     """
 
     measured_skew_mm: float
     sources: tuple[SkewSource, ...]
     residual_mm: float
     pitch_mm: float
+    run_count: int = 0
+    n_reversed: bool = False
 
     @property
     def attributed_mm(self) -> float:
@@ -99,6 +105,21 @@ class SkewLedger:
             if abs(s.skew_mm) > _EPS and (run is None or s.run == run)
         ]
 
+    def host_run(self, route: Route, seg_idx: int, *, host_is_p: bool) -> int | None:
+        """Ledger run holding segment ``seg_idx`` of ``route``, or ``None``.
+
+        ``None`` when the leg's runs do not line up with the ledger's (the
+        route changed shape since the ledger was built).
+        """
+        k = _segment_run(route, seg_idx)
+        if k is None:
+            return None
+        if host_is_p:
+            return k if k < self.run_count else None
+        if k >= self.run_count:
+            return None
+        return self.run_count - 1 - k if self.n_reversed else k
+
     def dominant(self, run: int | None = None) -> SkewSource | None:
         """The source with the largest contribution of the sign that needs fixing.
 
@@ -112,12 +133,14 @@ class SkewLedger:
         return max(pool, key=lambda s: abs(s.skew_mm), default=None)
 
 
-def _runs(route: Route) -> list[list[Pt]]:
-    """Via-delimited, single-layer polylines of ``route``, in order."""
+def _split_runs(route: Route) -> tuple[list[list[Pt]], dict[int, int]]:
+    """Via-delimited, single-layer polylines of ``route``, plus the run each
+    segment index belongs to (zero-length segments are not mapped)."""
     runs: list[list[Pt]] = []
+    seg_run: dict[int, int] = {}
     cur: list[Pt] = []
     prev = None
-    for seg in route.segments:
+    for i, seg in enumerate(route.segments):
         a, b = (seg.x1, seg.y1), (seg.x2, seg.y2)
         if math.dist(a, b) <= _EPS:
             continue
@@ -135,10 +158,21 @@ def _runs(route: Route) -> list[list[Pt]]:
         if not cur:
             cur = [a]
         cur.append(b)
+        seg_run[i] = len(runs)
         prev = seg
     if cur:
         runs.append(cur)
-    return runs
+    return runs, seg_run
+
+
+def _runs(route: Route) -> list[list[Pt]]:
+    """Via-delimited, single-layer polylines of ``route``, in order."""
+    return _split_runs(route)[0]
+
+
+def _segment_run(route: Route, seg_idx: int) -> int | None:
+    """Index of the run holding segment ``seg_idx`` of ``route``."""
+    return _split_runs(route)[1].get(seg_idx)
 
 
 def _length(points: Sequence[Pt]) -> float:
@@ -199,7 +233,9 @@ def build_skew_ledger(
     (a run that starts or ends at a via is ``via``).
     """
     p_runs = _runs(p_route)
-    n_runs = _orient(p_runs, _runs(n_route))
+    n_raw = _runs(n_route)
+    n_runs = _orient(p_runs, n_raw)
+    n_reversed = n_runs is not n_raw
     measured = sum(_length(r) for r in p_runs) - sum(_length(r) for r in n_runs)
 
     pairable = len(p_runs) == len(n_runs)
@@ -236,4 +272,6 @@ def build_skew_ledger(
         sources=tuple(sources),
         residual_mm=measured - attributed,
         pitch_mm=pitch,
+        run_count=len(p_runs),
+        n_reversed=n_reversed,
     )

@@ -96,6 +96,7 @@ if TYPE_CHECKING:
     from .diffpair_detection import DetectedPair
     from .grid import RoutingGrid
     from .primitives import Route, Segment
+    from .skew_ledger import SkewLedger
 
 
 # ---------------------------------------------------------------------------
@@ -263,6 +264,7 @@ def tune_diff_pair_skew(
     route_length: Callable[[Route], float] | None = None,
     max_uncoupled_mm: float | None = None,
     corner_chamfer_widths: float = 0.0,
+    ledger: SkewLedger | None = None,
 ) -> tuple[Route, Route, DiffPairTuneResult]:
     """Tune the skew of a detected diff pair by serpentining the shorter half.
 
@@ -342,6 +344,13 @@ def tune_diff_pair_skew(
             plain-copper fallback uses, where a plain bump starts to read
             less uncoupled than a square one.
 
+    ``ledger`` (Issue #6447): the pair's
+    :class:`~kicad_tools.router.skew_ledger.SkewLedger`, built once from the
+    untuned routes.  The bump gate's proximity rule then measures to the
+    ledger's sources on the host's via-delimited run (joints included)
+    instead of re-scanning for them; with ``None``, or a run the ledger has
+    no source on, the re-scan stands.
+
     Plain-copper bumps (Issue #7546): the cascade runs once per rung of
     :data:`SKEW_BUMP_CHAMFER_LADDER` (four chamfered corners) until one
     closes the pair.  When none does, and plain bumps were in play (a
@@ -383,6 +392,7 @@ def tune_diff_pair_skew(
         route_length=route_length,
         max_uncoupled_mm=max_uncoupled_mm,
         corner_chamfer_widths=corner_chamfer_widths,
+        ledger=ledger,
     )
     # Issue #7521: gated bumps try each chamfer of the ladder in turn, all
     # four corners alike.
@@ -417,6 +427,20 @@ def tune_diff_pair_skew(
         plain_foot_chamfer_mm=SKEW_BUMP_FOOT_CHAMFER_MM,
     )
     return asymmetric if _asymmetric_chamfers_win(asymmetric, reference) else reference
+
+
+def _ledger_anchors(
+    ledger: SkewLedger | None, host: Route, host_idx: int, *, host_is_p: bool
+) -> list[tuple[float, float]] | None:
+    """Ledger sources on the via-delimited run of ``host``'s segment ``host_idx``.
+
+    ``None`` (use the gate's own re-scan) without a ledger or when the
+    segment cannot be placed on one of its runs (Issue #6447).
+    """
+    if ledger is None:
+        return None
+    run = ledger.host_run(host, host_idx, host_is_p=host_is_p)
+    return None if run is None else ledger.anchors(run)
 
 
 #: Results the ladder returns before any bump is tried (Issue #7546).
@@ -466,6 +490,7 @@ def _tune_diff_pair_skew_once(
     corner_chamfer_widths: float,
     plain_chamfer_widths: float,
     plain_foot_chamfer_mm: float | None,
+    ledger: SkewLedger | None = None,
 ) -> tuple[Route, Route, DiffPairTuneResult]:
     """One :func:`tune_diff_pair_skew` cascade with plain bumps chamfered at
     ``plain_chamfer_widths`` trace widths (issue #7521), their feet at
@@ -672,12 +697,16 @@ def _tune_diff_pair_skew_once(
                 continue
             # Issue #7521 (AC3): excursion, jog and mismatch-source proximity.
             # Measured on the generated geometry, chamfered or square.
+            host_idx = replaced_index(current_shorter, cand_route)
             gate_violation = bump_gate_violation(
                 cand_serp.new_segments,
                 current_shorter,
-                replaced_index(current_shorter, cand_route),
+                host_idx,
                 longer_route,
                 nominal_gap_mm=intra_pair_clearance_mm,
+                source_anchors=_ledger_anchors(
+                    ledger, current_shorter, host_idx, host_is_p=not longer_is_p
+                ),
             )
             if gate_violation is not None:
                 generator_failure = gate_violation
