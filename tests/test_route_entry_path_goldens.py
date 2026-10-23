@@ -110,6 +110,9 @@ COMMON_ARGS = (
     "cpp",
     "--checkpoint-interval",
     "0",
+    # The goldens pin the route entry paths themselves; the chained
+    # ``--complete`` pass (#7831) is covered by test_cli_route_complete_chain_7831.
+    "--no-chain-complete",
 )
 
 ENTRY_PATHS: dict[str, tuple[str, ...]] = {

@@ -18365,6 +18365,18 @@ def _route_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--no-chain-complete",
+        action="store_true",
+        default=False,
+        help=(
+            "Issue #7831: do not chain a --complete pass after a grid route "
+            "that leaves signal nets open. By default, when the grid engine "
+            "finishes with unconnected signal nets, one in-process --complete "
+            "(lattice, existing copper fixed) pass runs on the output before "
+            "the exit code is decided; fully routed boards are untouched."
+        ),
+    )
+    parser.add_argument(
         "--complete-exclude-nets",
         metavar="NAMES",
         default="",
@@ -20471,6 +20483,253 @@ def _route_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# Issue #7831: exit codes after which the chained completion pass is not
+# attempted -- fatal (1), interrupted (5) and plan-gate abort (9).  The
+# supervisor's timeout exit never reaches here (it is raised, not returned).
+_CHAIN_COMPLETE_SKIP_EXITS = frozenset({1, 5, 9})
+# Inner-pass exits whose board may be promoted: clean (0) or a genuine partial
+# improvement with no dirty copper (8).  Anything else -- DRC-dirty copper (3),
+# false completion (6), 4 -- is discarded even when it closed a net.
+_CHAIN_COMPLETE_ACCEPT_EXITS = frozenset({0, 8})
+# Under ``--timeout`` the chain is skipped below this much remaining budget so a
+# negotiation that ends near the deadline cannot turn into a timeout.
+_CHAIN_COMPLETE_MIN_BUDGET_S = 90.0
+
+
+def _restore_supervisor_control(control: str, snapshot: str) -> None:
+    """Put the supervisor control record back (JSON sidecar, not PCB text)."""
+    with contextlib.suppress(OSError):
+        Path(control).write_text(snapshot)
+
+
+def _chain_complete_argv(args, argv: list[str] | None, output: Path, staged: Path) -> list[str]:
+    """Argv for the inner ``--complete`` pass over ``output``, writing ``staged``.
+
+    Copper-affecting recipe flags are forwarded so the inner pass reserves and
+    places copper under the same rules as the outer route: via size,
+    clearance and trace width (only when the operator passed them, since their
+    resolved ``args`` values may come from the board or manufacturer), the net
+    class map, the plane-via reservation opt-outs and the deterministic
+    budget.  ``--auto-layers``, ``--route-engine`` and ``--grid`` are left out:
+    ``--complete`` deliberately picks its own engine and lattice.
+    """
+    chain_argv = [str(output), "-o", str(staged), "--complete"]
+    for flag, attr in (
+        ("--manufacturer", "manufacturer"),
+        ("--seed", "seed"),
+        ("--backend", "backend"),
+        ("--copper", "copper"),
+        ("--complete-exclude-nets", "complete_exclude_nets"),
+        ("--net-class-map", "net_class_map"),
+    ):
+        value = getattr(args, attr, None)
+        if value not in (None, ""):
+            chain_argv.extend([flag, str(value)])
+    for flag, attr in (
+        ("--via-drill", "via_drill"),
+        ("--via-diameter", "via_diameter"),
+        ("--clearance", "clearance"),
+        ("--trace-width", "trace_width"),
+    ):
+        value = getattr(args, attr, None)
+        if value is not None and _flag_passed_explicitly(argv, (flag,)):
+            chain_argv.extend([flag, str(value)])
+    per_net = getattr(args, "per_net_iterations", 0)
+    if isinstance(per_net, int) and per_net > 0:
+        chain_argv.extend(["--per-net-iterations", str(per_net)])
+    for flag, attr in (
+        ("--quiet", "quiet"),
+        ("--skip-drc", "skip_drc"),
+        ("--no-plane-via-reservation", "no_plane_via_reservation"),
+        ("--deterministic-budget", "deterministic_budget"),
+    ):
+        if getattr(args, attr, False):
+            chain_argv.append(flag)
+    if getattr(args, "reserve_pour_only_passives", True) is False:
+        chain_argv.append("--no-reserve-pour-only-passives")
+    return chain_argv
+
+
+def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
+    """Chain one ``--complete`` pass after a grid route left signal nets open.
+
+    Issue #7831 (board 05): the negotiated grid route can demote a net it
+    routed in iteration 0 (``Demoted 1 net(s) ... to unrouted``) and the
+    post-negotiation sweep never recovers it, yet a plain lattice completion
+    pass over the same output closes it.  This runs that existing pass
+    (:func:`_apply_complete_mode_defaults` / :func:`_resolve_complete_nets`,
+    ``--preserve-existing`` and the #4413 copper-loss guard) on the freshly
+    written ``-o`` board, in-process, so ``kct route`` no longer stops one net
+    short.
+
+    A strict no-op -- ``result`` is returned untouched and nothing is written --
+    unless the grid engine finished, the output still has unconnected signal
+    nets and ``--no-chain-complete`` was not passed, so fully routed boards
+    (the board 04/07 recipes) are byte-identical.
+
+    The pass reads the negotiated board in place but writes to a separate
+    staging output (``<stem>.chain.kicad_pcb`` plus its derived sidecars): the
+    ``--timeout`` supervisor refuses an output aliasing its protected input.
+    The staged board is promoted over ``-o`` only when the inner pass exits
+    cleanly (0, or 8 for a partial improvement) and closed at least one net;
+    otherwise it is discarded and ``-o`` was never touched.  A closing pass
+    replaces the stale pre-pass exit code; a partial improvement keeps the
+    original one.  Copper-affecting recipe flags are forwarded
+    (:func:`_chain_complete_argv`); ``--grid``, ``--layers`` and the engine
+    flags are not, since ``--complete`` picks its own.
+    """
+    if (
+        getattr(args, "no_chain_complete", False)
+        or getattr(args, "complete", False)
+        or getattr(args, "dry_run", False)
+        or getattr(args, "resume", None)
+        or getattr(args, "nets", None)
+        or getattr(args, "skip_nets", None)
+        or getattr(args, "region", None)
+        or _resolve_route_engine(args) != "grid"
+        or getattr(args, "format", "text") == "json"
+        or result in _CHAIN_COMPLETE_SKIP_EXITS
+        or _interrupt_pending()
+    ):
+        return result
+    pcb = Path(args.pcb)
+    output = Path(args.output) if getattr(args, "output", None) else None
+    if output is None:
+        output = pcb.with_stem(pcb.stem + "_routed")
+    if not output.is_file():
+        return result
+
+    from kicad_tools.router.partial_rescue import partially_connected_signal_nets
+
+    from .route_deadline import CONTROL_ENV, DEADLINE_ENV
+
+    quiet = bool(getattr(args, "quiet", False))
+    manufacturer = getattr(args, "manufacturer", "jlcpcb") or "jlcpcb"
+    excluded = frozenset(
+        n.strip()
+        for n in (getattr(args, "complete_exclude_nets", "") or "").split(",")
+        if n.strip()
+    )
+
+    def _open_nets(board: Path) -> list[str]:
+        return list(
+            partially_connected_signal_nets(
+                board,
+                manufacturer=manufacturer,
+                excluded_nets=excluded,
+                include_unrouted=True,
+            )
+        )
+
+    deadline = os.environ.get(DEADLINE_ENV)
+    if deadline is not None:
+        remaining = float(deadline) - time.monotonic()
+        if remaining < _CHAIN_COMPLETE_MIN_BUDGET_S:
+            if not quiet:
+                print(
+                    f"\n--- Chained completion pass skipped: {remaining:.0f}s of "
+                    f"--timeout left (< {_CHAIN_COMPLETE_MIN_BUDGET_S:.0f}s) ---"
+                )
+            return result
+
+    try:
+        before = _open_nets(output)
+    except Exception:
+        return result
+    if not before:
+        return result
+
+    if not quiet:
+        print(
+            f"\n--- Chained completion pass: {len(before)} signal net(s) still open "
+            f"({', '.join(before)}); disable with --no-chain-complete ---"
+        )
+    stage_stem = output.stem + ".chain"
+    staged = output.with_name(stage_stem + output.suffix)
+    chain_argv = _chain_complete_argv(args, argv, output, staged)
+
+    def _staged_files() -> list[Path]:
+        import glob
+
+        return sorted(
+            Path(f) for f in glob.glob(glob.escape(str(output.with_name(stage_stem))) + "*")
+        )
+
+    def _discard() -> None:
+        for f in _staged_files():
+            f.unlink(missing_ok=True)
+
+    # The inner pass republishes the supervisor's output identity (its staged
+    # path); put the real one back so a later timeout quarantines ``-o``.
+    control = os.environ.get(CONTROL_ENV)
+    control_snapshot: str | None = None
+    if control:
+        try:
+            control_snapshot = Path(control).read_text()
+        except OSError:
+            control_snapshot = None
+
+    # The inner pass re-runs route_receipt.configure, replacing the outer
+    # invocation's context; keep it so the outer run still publishes -o's receipt.
+    from . import route_receipt
+
+    outer_invocation = route_receipt._current.get()
+
+    _discard()
+    chain_rc: int | None = None
+    after = before
+    try:
+        try:
+            chain_rc = _main_impl(chain_argv)
+            if staged.is_file():
+                after = _open_nets(staged)
+        except Exception as exc:
+            print(f"  Chained completion pass failed ({exc}); keeping negotiated output")
+            chain_rc, after = None, before
+        finally:
+            route_receipt._current.set(outer_invocation)
+            if control and control_snapshot is not None:
+                _restore_supervisor_control(control, control_snapshot)
+        if (
+            chain_rc not in _CHAIN_COMPLETE_ACCEPT_EXITS
+            or len(after) >= len(before)
+            or not staged.is_file()
+        ):
+            if not quiet:
+                print(
+                    "  Chained completion pass closed no nets cleanly "
+                    f"(exit {chain_rc}); negotiated output kept"
+                )
+            return result
+        # Sidecars first, the board last, so -o only changes once the rest is in place.
+        # The receipt and constraint sidecars (.kicad_pro/.kicad_dru/.kicad_prl)
+        # are not promoted: the outer run republishes the receipt for -o, and the
+        # constraints are derived from the same rules it already wrote.
+        for f in _staged_files():
+            if (
+                f != staged
+                and f.suffix not in {".kicad_pro", ".kicad_dru", ".kicad_prl"}
+                and not f.name.endswith(".route.json")
+            ):
+                os.replace(
+                    f,
+                    output.with_name(
+                        output.name[: -len(output.suffix)] + f.name[len(stage_stem) :]
+                    ),
+                )
+        os.replace(staged, output)
+    finally:
+        # Also runs on RouteDeadlineExpired / KeyboardInterrupt (BaseException):
+        # -o was never written before promotion, so only staging needs removing.
+        _discard()
+    if not quiet:
+        print(
+            f"  Chained completion pass closed {len(before) - len(after)} of "
+            f"{len(before)} open signal net(s)"
+        )
+    return chain_rc if not after and chain_rc == 0 else result
+
+
 def _main_impl(argv: list[str] | None = None) -> int:
     parser = _route_parser()
     args = parser.parse_args(argv)
@@ -20537,6 +20796,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
                             args._lint_gate_output = str(gate.output)
                             args.output = str(staged)
                     result = _run_main_impl(args, parser, argv)
+                    result = _chain_complete_pass(args, argv, result)
                 except BaseException:
                     if gate is not None:
                         # Never leave an unjudged board at --output.
