@@ -14,28 +14,6 @@ from kicad_tools.sexp import parse_file, parse_string, serialize_sexp
 
 ROOT = Path(__file__).resolve().parent
 
-# Reference-designator silkscreen placement, as (x, y) offsets from the
-# footprint origin.  Library defaults collide with neighbouring copper on this
-# layout; each entry below is a legibility/DFM correction that moves only
-# F.SilkS text and never pads, nets or placement.
-#
-# R4 (issue #5204): the library default for R_0805_2012Metric puts the
-# reference 1.65 mm ABOVE the part, straight into R1's pad 2 mask aperture
-# (R1 is a 2512 at (127.5, 110) whose pad 2 copper reaches y = 111.675 and
-# whose mask aperture is identical -- the board sets pad_to_mask_clearance 0).
-# Native KiCad 10.0.6 measured the rendered glyphs at 0.0548 mm from that
-# aperture, under JLCPCB's 0.15 mm silk-to-pad floor.  Mirroring the same
-# standard offset BELOW the part clears R1 entirely: nothing is placed below
-# R4 within 8 mm, and native DRC now measures its reference field at
-# 0.8631 mm from R4's own pad 1 (5.8x the floor).  The tightest remaining
-# silk-to-pad pair on the board is U2's library outline against its own
-# pad 29 at 0.2073 mm, so the 0.15 mm floor holds board-wide.
-REFERENCE_OFFSETS = {
-    "R4": (0, 1.65),
-    "R11": (0, 1.8),
-    "RV1": (0, 6.0),
-}
-
 
 def geometry_fingerprint(path):
     pcb = PCB.load(path)
@@ -107,20 +85,5 @@ def apply_routing(path):
                 else:
                     node.append(parse_string(f"(net_name {json.dumps(name)})"))
         board.append(node)
-    # Drawing edits never replace source pads or net assignments.
-    for fp in board.find_all("footprint"):
-        props = {p.get_string(0): p for p in fp.find_all("property")}
-        ref = props["Reference"].get_string(1)
-        if ref in REFERENCE_OFFSETS:
-            at = props["Reference"].find("at")
-            x, y = REFERENCE_OFFSETS[ref]
-            at.set_value(0, x)
-            at.set_value(1, y)
-        for line in fp.children:
-            if line.name in {"fp_line", "fp_poly", "fp_arc", "fp_rect", "fp_circle"} and line.find(
-                "layer"
-            ).get_string(0) in {"F.SilkS", "B.SilkS"}:
-                width = line.find("stroke").find("width")
-                width.set_value(0, max(0.15, width.get_float(0)))
     path.write_text(serialize_sexp(board))
     return recipe["geometry_sha256"]
