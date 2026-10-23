@@ -55,11 +55,14 @@ from kicad_tools.validate.rules.diffpair_uncoupled_length import is_via_count_fi
 REPO = Path(__file__).resolve().parents[2]
 BOARD = REPO / "boards" / "03-usb-joystick"
 # Issue #7920: the subprocess hang guard, NOT a routing budget -- the route
-# itself runs without ``--timeout`` (see the fixture).  The route takes ~180 s
-# on an idle Mac and 452-504 s in the passing ``slow-tests.yml`` runs (pinned
-# image, ``pytest -n auto`` on a 4 vCPU runner); the failing runs were cut at
-# the old ``--timeout 600``.  1200 s is ~2.4x the slowest complete CI route.
-ROUTE_TIMEOUT = 1200
+# itself runs without ``--timeout`` (see the fixture).  Measured fixture time:
+# ~180-190 s on an idle Mac; 452-504 s in the lightly loaded passing
+# ``slow-tests.yml`` runs (pinned image, ``pytest -n auto`` on a 4 vCPU
+# runner); 929 s uncapped in run 40036478350, where the runner was loaded
+# enough that ``test_board03_pour_fill_is_reproducible`` took 1115 s (it
+# reaches 1362 s on the worst runs, ~1.2x more).  1800 s keeps ~1.9x
+# headroom over the slowest measured CI route.
+ROUTE_TIMEOUT = 1800
 
 # Issue #7920: log lines that mean a wall clock, not the iteration budget,
 # shaped the routed board.  Any of them makes the route's copper (and its
