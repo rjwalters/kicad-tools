@@ -66,6 +66,8 @@ __all__ = [
     "build_environment",
     "classify_footprint",
     "expected_pin_count",
+    "host_library_dependent",
+    "is_library_rooted_ref",
 ]
 
 CLASSES: tuple[str, ...] = (
@@ -131,6 +133,13 @@ class FootprintCoverage:
     #: (undefined, or naming a directory that does not exist), when that --
     #: not the board -- is why the footprint is a gap.  ``None`` otherwise.
     missing_root: str | None = None
+    #: Every visible model ref expands only through a path variable other than
+    #: ``KIPRJMOD`` (``${KICADn_3DMODEL_DIR}``, ``${KCT_LCSC_3D_DIR}``, ...) and
+    #: none is embedded, so the 3D verdict depends on the host's model library
+    #: (issue #7743).  Decided from the ref text alone -- never from the
+    #: filesystem or the environment -- so it is a fact about the board file.
+    #: Not serialized: ``to_dict`` output is unchanged.
+    library_rooted: bool = False
 
     @property
     def covered(self) -> bool:
@@ -362,6 +371,30 @@ def _missing_root(raw: str, variables: Mapping[str, str]) -> str | None:
     return None
 
 
+def is_library_rooted_ref(raw: str) -> bool:
+    """True when the model ref *raw* expands through a non-``KIPRJMOD`` variable.
+
+    Pure text test (issue #7743): ``${KICAD10_3DMODEL_DIR}/x.step`` and
+    ``${KCT_LCSC_3D_DIR}/C1.step`` are library-rooted; ``${KIPRJMOD}/x.wrl``,
+    a relative or absolute literal path, an empty ref and a ``kicad-embed://``
+    ref are not.
+    """
+    if not raw or raw.startswith(_EMBED_PREFIX):
+        return False
+    return any((m.group(1) or m.group(2)) != "KIPRJMOD" for m in _VARIABLE.finditer(raw))
+
+
+def host_library_dependent(entries: list[FootprintCoverage]) -> list[FootprintCoverage]:
+    """Footprints whose 3D verdict depends on a host model library (issue #7743).
+
+    Host-independent by construction: it reads only
+    :attr:`FootprintCoverage.library_rooted`, which ``classify_footprint``
+    derives from the ref text.  ``exempt``, ``no_ref`` and ``hidden_only``
+    footprints never count.
+    """
+    return [e for e in entries if e.library_rooted]
+
+
 #: Worst-first: which ref decides the class when no ref is covered.
 _GAP_PRIORITY = (
     "lcsc_content_changed",
@@ -449,6 +482,7 @@ def classify_footprint(
     entry = FootprintCoverage(reference, lib_id, klass, path=path or raw or None, reason=reason)
     if klass in _ROOT_SENSITIVE:
         entry.missing_root = _missing_root(raw, variables)
+    entry.library_rooted = all(is_library_rooted_ref(v[3]) for v in verdicts)
     if entry.covered:
         want = expected_pin_count(raw)
         have = _pad_count(footprint)

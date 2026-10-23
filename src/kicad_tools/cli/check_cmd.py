@@ -3365,13 +3365,23 @@ def run_selected_checks(
     #   host -- is a real defect of the board and stays a per-footprint
     #   ``warning`` (advisory bucket: ``kct check --3d-models`` still
     #   passes, only adding ``--strict`` fails).  Default-on since #7685.
+    #
+    # Issue #7743: the category's *coverage* is a fact about the board alone.
+    # A footprint whose every visible ref is library-rooted
+    # (``${KICADn_3DMODEL_DIR}``, ``${KCT_LCSC_3D_DIR}``, ...) cannot be judged
+    # host-independently, so ``model_coverage`` reads
+    # ``unknown:host_library_refs (N ...)`` on every host -- never ``checked``
+    # on one and something else on another.  N is counted from the ref text.
+    model_library_dependent: list[int] = []
+
     def _model_coverage_check() -> DRCResults:
         if pcb_path is None:
             return DRCResults()
-        from kicad_tools.pcb.model_audit import audit_pcb_models
+        from kicad_tools.pcb.model_audit import audit_pcb_models, host_library_dependent
 
         results = DRCResults()
         report = audit_pcb_models(pcb_path, env="host")
+        model_library_dependent.append(len(host_library_dependent(report.entries)))
         for gap in report.gaps:
             if gap.missing_root:
                 continue
@@ -3512,6 +3522,18 @@ def run_selected_checks(
         pour_unmeasured = getattr(checker, "ampacity_unmeasured_nets", None)
         if category == "ampacity" and pour_unmeasured and pre is None:
             cov_map[category] = cov.ampacity_pour_unknown(pour_unmeasured)
+        # Issue #7743: a footprint whose models resolve only through a host
+        # library variable was not judged by a host-independent report, so the
+        # category is ``unknown`` -- on every host, so evidence bytes never
+        # depend on whether a library is installed.  Non-blocking.
+        if category == "model_coverage" and pre is None and model_library_dependent:
+            n_lib = model_library_dependent[-1]
+            if n_lib:
+                cov_map[category] = cov.unknown(
+                    category,
+                    f"host_library_refs ({n_lib} footprint(s); "
+                    "per-host detail: kct pcb model-audit)",
+                )
 
     return results
 

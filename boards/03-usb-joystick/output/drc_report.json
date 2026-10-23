@@ -6,7 +6,7 @@
   "summary": {
     "errors": 0,
     "warnings": 0,
-    "infos": 10,
+    "infos": 11,
     "waived": 0,
     "rules_checked": 74,
     "rules_checked_by_rule": {
@@ -37,9 +37,10 @@
     },
     "passed": true,
     "stale_waivers": 0,
-    "coverage_checked": 35,
+    "coverage_checked": 34,
     "coverage_skipped": 6,
     "coverage_unknown": [
+      "model_coverage",
       "spec_conformance"
     ],
     "coverage_blocking_unknown": []
@@ -86,6 +87,27 @@
       "waived": false,
       "key": "connector_edge_distance|J1||F.Cu",
       "evidence_hash": "ev2:ac27d7b200a57786"
+    },
+    {
+      "rule_id": "diffpair_length_skew",
+      "type": "diffpair_length_skew",
+      "severity": "info",
+      "message": "Differential-pair chain USB_D+/USB_D- -> USB_MCU_D+/USB_MCU_D- end-to-end length-skew 0.362 mm chain skew (no chain limit declared)",
+      "location": null,
+      "layer": null,
+      "actual_value": 0.3617,
+      "required_value": null,
+      "items": [],
+      "nets": [
+        "USB_D+",
+        "USB_D-",
+        "USB_MCU_D+",
+        "USB_MCU_D-"
+      ],
+      "status": "info",
+      "waived": false,
+      "key": "diffpair_length_skew||USB_D+,USB_D-,USB_MCU_D+,USB_MCU_D-|",
+      "evidence_hash": "ev2:7941f8a208f48b51"
     },
     {
       "rule_id": "diffpair_length_skew",
@@ -366,9 +388,9 @@
       "blocking": true
     },
     "model_coverage": {
-      "status": "checked",
-      "state": "checked",
-      "reason": null,
+      "status": "unknown:host_library_refs (37 footprint(s); per-host detail: kct pcb model-audit)",
+      "state": "unknown",
+      "reason": "host_library_refs (37 footprint(s); per-host detail: kct pcb model-audit)",
       "blocking": false
     },
     "netclass_clearance_copper": {

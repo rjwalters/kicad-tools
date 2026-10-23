@@ -35,9 +35,10 @@
     },
     "passed": true,
     "stale_waivers": 0,
-    "coverage_checked": 36,
+    "coverage_checked": 35,
     "coverage_skipped": 5,
     "coverage_unknown": [
+      "model_coverage",
       "spec_conformance"
     ],
     "coverage_blocking_unknown": []
@@ -215,9 +216,9 @@
       "blocking": true
     },
     "model_coverage": {
-      "status": "checked",
-      "state": "checked",
-      "reason": null,
+      "status": "unknown:host_library_refs (3 footprint(s); per-host detail: kct pcb model-audit)",
+      "state": "unknown",
+      "reason": "host_library_refs (3 footprint(s); per-host detail: kct pcb model-audit)",
       "blocking": false
     },
     "netclass_clearance_copper": {

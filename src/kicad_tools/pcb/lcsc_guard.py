@@ -1,4 +1,4 @@
-"""Guard: LCSC/EasyEDA STEP bodies must never be committed or shipped.
+"""Guard: LCSC/EasyEDA 3D bodies must never be committed or shipped.
 
 Operator ruling Q44 (issue #7686): EasyEDA/LCSC 3D models are per-user,
 opt-in and fetched at use time only.  A fetched body must never end up in a
@@ -6,10 +6,12 @@ committed board, a manufacturing bundle, a wheel or a site render.  This module
 is the enforcement point used by ``tests/test_lcsc_no_commit_guard.py`` and by
 export/embedding code that needs to exclude LCSC-sourced bodies.
 
-A STEP file is an LCSC body when *either*
+A 3D body file (STEP, or VRML since issue #7743 -- common EasyEDA converters
+write ``.wrl``) is an LCSC body when *either*
 
 * its sha256 equals that of a body in an LCSC cache directory (the cache's
-  ``C<n>.meta.json`` records, plus a digest of every ``*.step`` there), or
+  ``C<n>.meta.json`` records, plus a digest of every ``*.step``/``*.wrl``
+  there), or
 * it has a sibling ``<name>.meta.json`` (or ``<name>.step.meta.json``) whose
   ``source`` is ``lcsc``.
 """
@@ -26,10 +28,12 @@ from kicad_tools.pcb.lcsc_models import CACHE_SOURCE, lcsc_cache_dir
 
 __all__ = [
     "GUARDED_ROOTS",
+    "MODEL_SUFFIXES",
     "STEP_SUFFIXES",
     "find_lcsc_step_violations",
     "is_lcsc_sourced",
     "lcsc_cache_digests",
+    "tracked_model_files",
     "tracked_step_files",
 ]
 
@@ -37,6 +41,10 @@ __all__ = [
 GUARDED_ROOTS: tuple[str, ...] = ("boards", "src")
 
 STEP_SUFFIXES: frozenset[str] = frozenset({".step", ".stp"})
+
+#: Every 3D body suffix the guard scans: STEP plus VRML (issue #7743).
+#: Ruling Q44 covers EasyEDA/LCSC 3D models in general, not only STEP files.
+MODEL_SUFFIXES: frozenset[str] = STEP_SUFFIXES | frozenset({".wrl", ".vrml"})
 
 
 def _sha256_file(path: Path) -> str | None:
@@ -65,7 +73,7 @@ def lcsc_cache_digests(cache_dir: Path | None = None) -> dict[str, str]:
         if isinstance(raw, dict) and isinstance(raw.get("sha256"), str):
             digests[raw["sha256"]] = f"{meta.name.removesuffix('.meta.json')} (cache metadata)"
     for step in sorted(cache.iterdir()):
-        if step.suffix.lower() in STEP_SUFFIXES:
+        if step.suffix.lower() in MODEL_SUFFIXES:
             digest = _sha256_file(step)
             if digest:
                 digests[digest] = f"{step.name} (cache file)"
@@ -99,10 +107,14 @@ def find_lcsc_step_violations(
     paths: Iterable[Path],
     digests: dict[str, str] | None = None,
 ) -> list[str]:
-    """Return one message per STEP file in *paths* that is an LCSC body."""
+    """Return one message per 3D body file in *paths* that is an LCSC body.
+
+    Despite the historical name, STEP and VRML bodies (``MODEL_SUFFIXES``) are
+    both checked.
+    """
     violations: list[str] = []
     for path in paths:
-        if path.suffix.lower() not in STEP_SUFFIXES:
+        if path.suffix.lower() not in MODEL_SUFFIXES:
             continue
         reason = is_lcsc_sourced(path, digests)
         if reason:
@@ -111,7 +123,7 @@ def find_lcsc_step_violations(
 
 
 def tracked_step_files(root: Path, roots: Iterable[str] = GUARDED_ROOTS) -> list[Path]:
-    """STEP files tracked or staged by git under the guarded *roots* of *root*.
+    """3D body files (STEP and VRML) tracked or staged by git under *roots*.
 
     Uses ``git ls-files --cached`` (tracked, including staged additions).
     Returns an empty list when *root* is not a git work tree.
@@ -126,4 +138,8 @@ def tracked_step_files(root: Path, roots: Iterable[str] = GUARDED_ROOTS) -> list
     except (OSError, subprocess.SubprocessError):
         return []
     files = [root / name for name in out.decode().split("\0") if name]
-    return [f for f in files if f.suffix.lower() in STEP_SUFFIXES]
+    return [f for f in files if f.suffix.lower() in MODEL_SUFFIXES]
+
+
+#: Suffix-neutral alias for :func:`tracked_step_files` (issue #7743).
+tracked_model_files = tracked_step_files

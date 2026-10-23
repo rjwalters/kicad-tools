@@ -441,3 +441,176 @@ def test_check_report_bytes_do_not_depend_on_a_model_library(tmp_path, monkeypat
     library.mkdir()
     (library / "part.step").touch()
     assert report_bytes(library) == report_bytes(tmp_path / "nonexistent")
+
+
+# --- Issue #7743: host-library-dependent refs are `unknown`, from the board alone ---
+
+_LIB = '(model "${KICAD10_3DMODEL_DIR}/part.step")'
+_LCSC = '(model "${KCT_LCSC_3D_DIR}/C12345.step")'
+_PRJ = '(model "${KIPRJMOD}/3dshapes/X.wrl")'
+_EMBED = '(model "kicad-embed://body.step")'
+_HOST_LIB_REASON = "host_library_refs ({n} footprint(s); per-host detail: kct pcb model-audit)"
+
+
+def _host_library_board(tmp_path: Path) -> Path:
+    return _write(
+        tmp_path,
+        _fp("R1", body=_LIB),  # counts
+        _fp("R2", body=_LCSC),  # counts: LCSC cache variable
+        _fp("R3", body=_PRJ),  # project-local: no
+        _fp("R4", body=_EMBED),  # embedded (dangling here): no
+        _fp("R5", body=_LIB + _PRJ),  # one project-local ref suffices: no
+        _fp("R6", body=_LIB + _EMBED),  # one embedded ref suffices: no
+        _fp("MH1", lib_id="MountingHole:MountingHole_3.2mm", body=_LIB),  # exempt: no
+        _fp("U1"),  # no_ref: no
+        _fp("R7", body='(model "${KICAD10_3DMODEL_DIR}/part.step" (hide yes))'),  # hidden_only
+        _fp("R8", body='(model "3dshapes/rel.step")'),  # literal relative path: no
+        _fp("R9", body='(model "${KICAD10_3DMODEL_DIR}/x.step" (hide yes))' + _LIB),  # counts
+    )
+
+
+def _dependent(pcb: Path) -> list[str]:
+    return [e.reference for e in model_audit.host_library_dependent(audit_pcb_models(pcb).entries)]
+
+
+def test_is_library_rooted_ref_is_text_only():
+    rooted = model_audit.is_library_rooted_ref
+    assert rooted("${KICAD10_3DMODEL_DIR}/Package_SO.3dshapes/SOIC-8.step")
+    assert rooted("$(KICAD8_3DMODEL_DIR)/x.step")
+    assert rooted("${KCT_LCSC_3D_DIR}/C1.step")
+    assert not rooted("${KIPRJMOD}/3dshapes/x.wrl")
+    assert not rooted("kicad-embed://x.step")
+    assert not rooted("3dshapes/x.step")
+    assert not rooted("/abs/x.step")
+    assert not rooted("")
+
+
+def test_host_library_dependent_counts_only_all_library_rooted_footprints(
+    tmp_path, models, monkeypatch
+):
+    pcb = _host_library_board(tmp_path)
+    expected = ["R1", "R2", "R9"]
+    assert _dependent(pcb) == expected
+    # Same answer with the library variables unset or naming a missing dir.
+    for var in ("KICAD7", "KICAD8", "KICAD9", "KICAD10"):
+        monkeypatch.delenv(f"{var}_3DMODEL_DIR", raising=False)
+    monkeypatch.delenv("KCT_LCSC_3D_DIR", raising=False)
+    assert _dependent(pcb) == expected
+    _no_library(monkeypatch, tmp_path)
+    assert _dependent(pcb) == expected
+    # And under the pinned and explicit-dir environments.
+    assert [
+        e.reference
+        for e in model_audit.host_library_dependent(audit_pcb_models(pcb, env="pinned").entries)
+    ] == expected
+    assert [
+        e.reference
+        for e in model_audit.host_library_dependent(audit_pcb_models(pcb, model_dir=models).entries)
+    ] == expected
+    # Not serialized: ``kct pcb model-audit`` JSON is unchanged.
+    assert all("library_rooted" not in e.to_dict() for e in audit_pcb_models(pcb).entries)
+
+
+def _model_coverage_entry(pcb: Path, tag: str) -> tuple[int, dict]:
+    from kicad_tools.cli import check_cmd
+
+    out = pcb.with_name(f"{tag}.check.json")
+    code = check_cmd.main(
+        [str(pcb), "--only", "model_coverage", "--format", "json", "--output", str(out)]
+    )
+    return code, json.loads(out.read_text())["coverage"]["model_coverage"]
+
+
+def test_check_json_reports_host_library_refs_unknown(tmp_path, models, monkeypatch, capsys):
+    """AC4: unknown, non-blocking, same N with and without the library."""
+    pcb = _write(tmp_path, _fp("R1", body=_LIB), _fp("R2", body=_LIB), _fp("R3", body=_PRJ + _LIB))
+    (tmp_path / "3dshapes").mkdir()
+    (tmp_path / "3dshapes" / "X.wrl").touch()
+    code_lib, with_lib = _model_coverage_entry(pcb, "lib")
+    _no_library(monkeypatch, tmp_path)
+    code_none, without = _model_coverage_entry(pcb, "none")
+    capsys.readouterr()
+    assert with_lib == without
+    assert with_lib["state"] == "unknown"
+    assert with_lib["reason"] == _HOST_LIB_REASON.format(n=2)
+    assert with_lib["blocking"] is False
+    assert code_lib == code_none
+
+
+def test_check_json_keeps_checked_without_library_refs(tmp_path, models, capsys):
+    """AC5: project-local, embedded, exempt and no_ref footprints stay ``checked``."""
+    pcb = _write(
+        tmp_path,
+        _fp("R1", body=_PRJ),
+        _fp("R2", body=_EMBED),
+        _fp("MH1", lib_id="MountingHole:MountingHole_3.2mm", body=_LIB),
+        _fp("U1"),
+    )
+    _, entry = _model_coverage_entry(pcb, "local")
+    capsys.readouterr()
+    assert entry["state"] == "checked"
+    assert entry["reason"] is None
+
+
+def test_host_library_unknown_does_not_change_findings_or_strict(tmp_path, models, capsys):
+    """AC7: per-footprint warnings, verdict and ``--strict`` exit codes are the
+    same as for an otherwise-identical board whose body is project-local."""
+    lib_dir = tmp_path / "lib"
+    prj_dir = tmp_path / "prj"
+    lib_dir.mkdir()
+    prj_dir.mkdir()
+    (prj_dir / "3dshapes").mkdir()
+    (prj_dir / "3dshapes" / "X.wrl").touch()
+    lib_pcb = _write(lib_dir, _fp("R1", body=_LIB), _fp("U1"))
+    prj_pcb = _write(prj_dir, _fp("R1", body=_PRJ), _fp("U1"))
+    for extra in ((), ("--strict",)):
+        lib_code, lib_report = _check_cli(lib_pcb, "--only", "model_coverage", *extra)
+        prj_code, prj_report = _check_cli(prj_pcb, "--only", "model_coverage", *extra)
+        assert lib_code == prj_code, extra
+        assert lib_report["verdict"] == prj_report["verdict"], extra
+        assert _coverage_rules(lib_report) == _coverage_rules(prj_report) == ["model_coverage"]
+        assert lib_report["coverage"]["model_coverage"]["state"] == "unknown"
+        assert prj_report["coverage"]["model_coverage"]["state"] == "checked"
+    assert lib_code == 2  # --strict still fails on the U1 no_ref warning
+    capsys.readouterr()
+
+
+def test_model_coverage_stays_non_blocking(tmp_path, models, capsys):
+    """``kct readiness`` refuses only on *blocking* unknowns; this one is not."""
+    from kicad_tools.cli.readiness_cmd import _blocking_unknown_coverage
+    from kicad_tools.validate.coverage import BLOCKING_CATEGORIES
+
+    assert "model_coverage" not in BLOCKING_CATEGORIES
+    pcb = _write(tmp_path, _fp("R1", body=_LIB))
+    _, report = _check_cli(pcb)
+    capsys.readouterr()
+    assert report["coverage"]["model_coverage"]["state"] == "unknown"
+    assert not any(u.startswith("model_coverage") for u in _blocking_unknown_coverage(report))
+
+
+def test_check_report_shows_host_library_refs_unknown(tmp_path, monkeypatch, capsys):
+    """AC6: the bytes-test board reports ``unknown:host_library_refs`` on both hosts,
+    and a library that exists but lacks the file yields the same coverage entry."""
+    from kicad_tools.cli.check_cmd import main
+
+    pcb = _write(tmp_path, _fp("R1", body='(model "${KICAD10_3DMODEL_DIR}/part.step")'))
+    monkeypatch.setenv("KCT_LCSC_3D_DIR", str(tmp_path / "lcsc"))
+    monkeypatch.delenv("KICAD_CONFIG_HOME", raising=False)
+
+    def coverage(model_dir: Path) -> dict:
+        for var in ("KICAD7", "KICAD8", "KICAD9", "KICAD10"):
+            monkeypatch.setenv(f"{var}_3DMODEL_DIR", str(model_dir))
+        out = tmp_path / f"report-{model_dir.name}.json"
+        main([str(pcb), "--only", "model_coverage", "--format", "json", "--output", str(out)])
+        capsys.readouterr()
+        return json.loads(out.read_text())["coverage"]["model_coverage"]
+
+    library = tmp_path / "library"
+    library.mkdir()
+    (library / "part.step").touch()
+    empty_library = tmp_path / "empty-library"  # exists, lacks part.step
+    empty_library.mkdir()
+    entries = [coverage(d) for d in (library, tmp_path / "nonexistent", empty_library)]
+    assert entries[0] == entries[1] == entries[2]
+    assert entries[0]["state"] == "unknown"
+    assert entries[0]["reason"] == _HOST_LIB_REASON.format(n=1)
