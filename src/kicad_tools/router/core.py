@@ -20732,12 +20732,23 @@ class Autorouter:
                         print(self._format_skew_tune_line(p_name, n_name, result))
                     continue
 
+            # Issue #6447: attribute the pair's skew once, from the untuned
+            # routes; the bump gate measures to these sources.
+            pair_ledger = None
+            ledger_p = routes_by_net.get(dp.pair.positive.net_id)
+            ledger_n = routes_by_net.get(dp.pair.negative.net_id)
+            if ledger_p is not None and ledger_n is not None:
+                from .skew_ledger import build_skew_ledger
+
+                pair_ledger = build_skew_ledger(ledger_p, ledger_n)
+
             p_route, n_route, result = tune_diff_pair_skew(
                 dp,
                 routes_by_net,
                 tolerance_mm=tolerance_mm,
                 intra_pair_clearance_mm=intra_pair_clearance_mm,
                 length_critical=length_critical,
+                ledger=pair_ledger,
                 # Issue #4085 (Phase 1): when the slack-corridor gate is on,
                 # let the tuner prefer segments inside the pair's own
                 # reserved slack corridor.  Grid is passed unconditionally

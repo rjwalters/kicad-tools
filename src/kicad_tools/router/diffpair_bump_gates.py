@@ -14,7 +14,9 @@ jog, [T][R1] for proximity:
   :data:`MIN_JOG_WIDTHS` x the trace width, so no loop is a sub-width stub.
 * **Proximity**: the bump sits within :data:`MAX_SOURCE_DISTANCE_MM` of a
   mismatch source, in the same via-delimited segment.  The sources are the
-  ends of that via-delimited run (a pad or a via, where the legs part ways) and
+  pair's :class:`~kicad_tools.router.skew_ledger.SkewLedger` entries for that
+  run when the caller passes them (issue #6447: joints included); otherwise
+  they are re-scanned: the ends of that via-delimited run (a pad or a via, where the legs part ways) and
   the partner's vias that land on it.  A bump never hops a via to compensate.
 
 The gates apply to every candidate, square or chamfered
@@ -98,6 +100,7 @@ def bump_gate_violation(
     partner_route: Route,
     *,
     nominal_gap_mm: float,
+    source_anchors: Sequence[tuple[float, float]] | None = None,
 ) -> str | None:
     """Why a candidate bump breaks an AC3 gate, or ``None`` when it passes.
 
@@ -109,6 +112,14 @@ def bump_gate_violation(
             replaced (:func:`replaced_index`).
         partner_route: The other leg of the pair.
         nominal_gap_mm: The pair's edge-to-edge gap.
+        source_anchors: Issue #6447.  Mismatch sources of the host's
+            via-delimited run, taken from the pair's
+            :class:`~kicad_tools.router.skew_ledger.SkewLedger`
+            (:meth:`~kicad_tools.router.skew_ledger.SkewLedger.anchors`),
+            so the proximity gate measures to a ledger source, joints
+            included.  ``None`` or empty (no source on the run) keeps the
+            re-scan of :func:`_section_anchors`: the run's two ends plus the
+            partner's nearby vias.
     """
     if len(new_segments) < 2:
         return None
@@ -146,7 +157,11 @@ def bump_gate_violation(
             )
 
     # Proximity to a mismatch source within the host's via-delimited run.
-    anchors = _section_anchors(host_route, partner_route, host_idx)
+    anchors = (
+        list(source_anchors)
+        if source_anchors
+        else _section_anchors(host_route, partner_route, host_idx)
+    )
     if anchors:
         # The bump's own copper only: the lead-in and lead-out span the whole
         # host segment, so their ends sit on the host line at its endpoints
