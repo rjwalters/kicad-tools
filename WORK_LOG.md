@@ -15,6 +15,7 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-23
 
+- **Issue #7863** (closed): Replay or discard quarantined stash 39250ba1 (#5664 clearance-kernel parity tests)
 - **PR #7877**: feat(check): model_coverage reads unknown for host-library 3D refs; LCSC guard scans VRML
 - **Issue #7743** (closed): Follow-ups from #7736: lcsc_guard should scan .wrl/.vrml; record 3D-coverage 'not evaluated' host-independently in kct check JSON
 - **Issue #7775** (closed): [Epic #5952] AGENTS.md parity: shared contributor-guidance source rendered into CLAUDE.md and AGENTS.md, with drift test
