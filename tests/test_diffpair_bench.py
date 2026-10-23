@@ -573,3 +573,49 @@ def test_pick_artifact_labels_by_exit_code(tmp_path):
     assert ere.pick_artifact(out, 3)[1] == "final"
     assert ere.pick_artifact(out, 1)[1] == "checkpoint"
     assert ere.pick_artifact(out)[1] == "final"
+
+
+def _board03_rows_with_measurements(monkeypatch, **override):
+    """Bench the committed board 03 with every measured pair's fields overridden."""
+    import dataclasses
+
+    import kicad_tools.validate.diffpair_skew as diffpair_skew
+
+    real = diffpair_skew.derive_pair_skews
+
+    def patched(*args, **kwargs):
+        return [dataclasses.replace(m, **override) for m in real(*args, **kwargs)]
+
+    monkeypatch.setattr(diffpair_skew, "derive_pair_skews", patched)
+    _pcb, ncm = _board03()
+    return bench.measure_pairs(B03 / "usb_joystick_routed.kicad_pcb", ncm, 4)
+
+
+def test_bench_skew_verdict_follows_the_ps_budget_not_the_legacy_mm(monkeypatch):
+    """Issue #7914: 3 mm breaks the legacy 2.5 mm table limit, 50 ps is inside the
+    115.16 ps budget -- ``kct check`` passes the pair, so the bench must too."""
+    rows = _board03_rows_with_measurements(monkeypatch, skew_mm=3.0, skew_ps=50.0)
+    assert rows
+    for row in rows:
+        assert row["skew_tolerance_mm"] == 2.5  # the legacy figure is still reported ...
+        assert row["skew_ps"] == 50.0
+        assert row["skew_budget_ps"] == pytest.approx(115.16, abs=0.01)
+        assert row["skew_budget_provenance"].startswith("derived:")
+        assert (row["kct_verdict"]["skew"], row["skew_pass"]) == ("pass", True)  # ... not judged
+
+
+def test_bench_skew_verdict_fails_the_budget_at_its_own_severity(monkeypatch):
+    """Issue #7914: 200 ps breaks the budget although 0.2 mm is inside every mm limit."""
+    rows = _board03_rows_with_measurements(monkeypatch, skew_mm=0.2, skew_ps=200.0)
+    for row in rows:
+        severity = row["skew_budget_severity"]
+        assert row["kct_verdict"]["skew"] == ("fail" if severity == "error" else "warn")
+        assert row["skew_pass"] is False
+
+
+def test_bench_skew_verdict_without_a_stackup_keeps_the_length_cap(monkeypatch):
+    """Issue #7914: no ps figure leaves the pair to its length cap, as ``kct check`` does."""
+    rows = _board03_rows_with_measurements(monkeypatch, skew_ps=None)
+    for row in rows:
+        assert row["skew_ps"] is None
+        assert row["kct_verdict"]["skew"] == (None if row["skew_length_cap_mm"] is None else "pass")
