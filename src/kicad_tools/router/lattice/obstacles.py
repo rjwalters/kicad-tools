@@ -335,6 +335,7 @@ class LatticeObstacleModel:
         if reach <= 0.0:
             return False
         floor_extra = max(base_extra, 0.0)
+        row = pairwise.row(net)
         max_extra = own_half + reach - self.agent_radius
         if max_extra <= floor_extra:
             return False
@@ -344,7 +345,7 @@ class LatticeObstacleModel:
             pad = self.pads[idx]
             if pad.net == net:
                 continue
-            req = pairwise.required(net, pad.net)
+            req = row.get(pad.net, 0.0)
             if req <= 0.0:
                 continue
             extra_pw = own_half + req - self.agent_radius
@@ -752,6 +753,8 @@ class CommittedCopper:
         # forbidden copper).  Dormant/unmapped nets keep the scalar window.
         pw = self.pairwise
         pw_reach = pw.max_required_for(net) if pw is not None else 0.0
+        # Perf (#7881): one per-net partner row instead of ``pw.required`` per obstacle.
+        row = pw.row(net) if pw is not None else {}
         pad = own_half + max(own_clr, pw_reach) + 0.5
         # Epic #5509 Phase 3d: every gap below is the KERNEL's edge-to-edge
         # answer, measured once per obstacle and compared against the
@@ -772,7 +775,7 @@ class CommittedCopper:
                 continue
             need = own_clr if own_clr > iclr else iclr
             if pw is not None:
-                req = pw.required(net, cnet)
+                req = row.get(cnet, 0.0)
                 if req > need:
                     need = req
             cx0, cx1 = (c[0], d[0]) if c[0] <= d[0] else (d[0], c[0])
@@ -788,7 +791,7 @@ class CommittedCopper:
             # requirement may be waived by a #4506 attach zone, probed at the
             # closest-gap midpoint exactly as the #4588 gate probes it.
             if pw is not None:
-                req = pw.required(net, cnet)
+                req = row.get(cnet, 0.0)
                 if req > max(own_clr, iclr):
                     if not ka.satisfies(edge_gap, req) and not pw.exempt_seg_seg(
                         a, b, c, d, net, cnet, layer
@@ -804,7 +807,7 @@ class CommittedCopper:
                 # Perf (#6182): same exact bbox lower-bound skip as above.
                 need = own_clr if own_clr > vclr else vclr
                 if pw is not None:
-                    vreq = pw.required(net, vnet)
+                    vreq = row.get(vnet, 0.0)
                     if vreq > need:
                         need = vreq
                 vsep = max(ax0 - point[0], point[0] - ax1, ay0 - point[1], point[1] - ay1)
@@ -816,7 +819,7 @@ class CommittedCopper:
                 # Issue #4602: a committed via is copper too -- the pair
                 # requirement spaces the trace from its barrel edge.
                 if pw is not None:
-                    req = pw.required(net, vnet)
+                    req = row.get(vnet, 0.0)
                     if req > max(own_clr, vclr):
                         if not ka.satisfies(via_gap, req) and not pw.exempt_seg_pt(
                             a, b, point, net, vnet, layer
@@ -853,18 +856,33 @@ class CommittedCopper:
         # ``seg_clear``); dormant/unmapped nets keep the scalar window.
         pw = self.pairwise
         pw_reach = pw.max_required_for(net) if pw is not None else 0.0
+        # Perf (#7881): one per-net partner row instead of ``pw.required`` per obstacle.
+        row = pw.row(net) if pw is not None else {}
         pad = own_half + max(own_clr, pw_reach) + 0.5
         # Epic #5509 Phase 3d: the node site is a disc of the querying copper's
         # own half-width, and every gap below is the kernel's (see ``seg_clear``).
         probe = ka.LatticeProbe(ka.site(point, own_half), net)
+        px, py = point
         for c, d, cnet, hw, iclr in self.copper[layer].query_seg(point, point, pad=pad):
             if not probe.foreign(cnet):
+                continue
+            # Perf (#7881): the exact bbox lower-bound skip ``seg_clear`` uses
+            # (#6182) -- when the bbox separation already exceeds the largest
+            # requirement the kernel gap necessarily passes every test below.
+            need = own_clr if own_clr > iclr else iclr
+            if pw is not None:
+                req = row.get(cnet, 0.0)
+                if req > need:
+                    need = req
+            sx = max(min(c[0], d[0]) - px, px - max(c[0], d[0]), 0.0)
+            sy = max(min(c[1], d[1]) - py, py - max(c[1], d[1]), 0.0)
+            if max(sx, sy) - own_half - hw > need + 1e-6:
                 continue
             edge_gap = probe.gap(ka.trace(c, d, hw, layer))
             if not ka.satisfies(edge_gap, max(own_clr, iclr)):
                 return False
             if pw is not None:
-                req = pw.required(net, cnet)
+                req = row.get(cnet, 0.0)
                 if req > max(own_clr, iclr):
                     if not ka.satisfies(edge_gap, req) and not pw.exempt_seg_pt(
                         c, d, point, net, cnet, layer
@@ -878,7 +896,7 @@ class CommittedCopper:
             if not ka.satisfies(via_gap, max(own_clr, vclr)):
                 return False
             if pw is not None:
-                req = pw.required(net, vnet)
+                req = row.get(vnet, 0.0)
                 if req > max(own_clr, vclr):
                     if not ka.satisfies(via_gap, req) and not pw.exempt_pt_pt(
                         point, vpt, net, vnet, layer
@@ -916,6 +934,8 @@ class CommittedCopper:
             return False
         pw = self.pairwise
         pw_reach = pw.max_required_for(net) if pw is not None else 0.0
+        # Perf (#7881): one per-net partner row instead of ``pw.required`` per obstacle.
+        row = pw.row(net) if pw is not None else {}
         pad = self.via_radius + own_clr + self.trace_half + 2.0 + pw_reach
         # Epic #5509 Phase 3d: the candidate is a through-via barrel, and
         # every gap below is the kernel's (see ``seg_clear``).
@@ -927,7 +947,7 @@ class CommittedCopper:
                 # Perf (#6182): exact bbox lower-bound skip (see ``seg_clear``).
                 need = own_clr if own_clr > iclr else iclr
                 if pw is not None:
-                    preq = pw.required(net, cnet)
+                    preq = row.get(cnet, 0.0)
                     if preq > need:
                         need = preq
                 sx = max(min(c[0], d[0]) - point[0], point[0] - max(c[0], d[0]), 0.0)
@@ -938,7 +958,7 @@ class CommittedCopper:
                 if not ka.satisfies(edge_gap, max(own_clr, iclr)):
                     return False
                 if pw is not None:
-                    req = pw.required(net, cnet)
+                    req = row.get(cnet, 0.0)
                     if req > max(own_clr, iclr):
                         if not ka.satisfies(edge_gap, req) and not pw.exempt_seg_pt(
                             c, d, point, net, cnet, layer
@@ -976,7 +996,7 @@ class CommittedCopper:
                 return False
             # Issue #4602: barrel-to-barrel pair requirement for cross-net vias.
             if pw is not None and probe.foreign(vnet):
-                req = pw.required(net, vnet)
+                req = row.get(vnet, 0.0)
                 if req > 0.0:
                     if not ka.satisfies(barrel_gap, req) and not pw.exempt_pt_pt(
                         point, vpt, net, vnet
