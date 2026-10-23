@@ -160,25 +160,24 @@ DIFFPAIR_FIXTURE_KEY = "boards/06-diffpair-test/regression-fixture/diffpair_test
 # rule and bounded them only with ``DIFFPAIR_VIOLATION_BASELINE`` (18) and the
 # ``.github/routed-drc-tolerance.yml`` total (18), so up to 7 continuity
 # findings, or a new pair in place of a fixed one, passed both.  The pairs
-# below are the ones the seed-42 re-route measures over ``max_skew_mm``.  All 9
-# declared pairs started here; the recipe's final skew-tuning pass (#7548)
+# listed here were the ones the seed-42 re-route measured over ``max_skew_mm``.
+# All 9 declared pairs started here; the recipe's final skew-tuning pass (#7548)
 # cleared four, and fusing the pair legs' grid-step segments before it (#7548)
 # cleared four more (MIPI_CLK, PCIE_RX and USB3_RX2 now measure 0.287, 0.450
 # and 0.450 mm).  USB2_D (1.896 mm after #7491 coupled it) now tunes within
 # its 1.000 mm budget on the quantized-length / end-anchored tuner (#7548), so
-# its entry is gone.  One remains, tracked in #7548: MIPI_D0.  The tuner's
-# post-insertion intra-pair clearance check rolls it back (coupling-preserving
-# tuning in general is #6447).
-DIFFPAIR_SKEW_TRACKER = 7548
+# its entry is gone.  The last one, MIPI_D0 (2.320 mm), was the router's own
+# inline comb: its 0.3 mm amplitude floor turned a 0.663 mm skew into 0.986 mm
+# the other way, in off-angle teeth that quantization grew by another 1.3 mm.
+# A comb that leaves the pair no closer is now undone and the audited bump
+# tuner closes the pair at routing time (0.270 mm, #7548), so no skew pair is
+# allowed any more.
 #
 # Allowed by identity, not by count (#7359, #7270 Q3 ruling): only these
 # identities may carry the listed errors, a listed identity that stops firing
 # makes its entry stale and fails the gate, and an allowed finding does not
 # count against the (now strict 0) routed-DRC total.
-DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
-    # Seed-42 re-route, PR #7570 / #7491 (2026-10-20): skew vs max_skew_mm.
-    ("diffpair_length_skew", "MIPI_D0+/MIPI_D0-"): DIFFPAIR_SKEW_TRACKER,  # 2.320 / 0.300
-}
+DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {}
 
 #: Every board key that carries an identity allowance (Issue #7367).  A key
 #: absent here has no allowance at all: every blocking finding counts.
