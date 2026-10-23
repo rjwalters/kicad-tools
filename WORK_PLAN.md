@@ -29,66 +29,59 @@ _None._
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-- **#5333**: Board07 coupled pre-pass exhausts all seven pair searches despite valid corridor guides
+_None._
 
 ## In Progress
 
 Issues currently being built (`loom:building`).
 
-- **#4410**: board-05: generator must produce a manufacturable BLDC board unattended (81% route, 7 ISENSE/PWM open, 2 real shorts)
-- **#6446**: [Epic #6441] Phase 4: budget-driven hybrid fallback — longest coupled trunk plus single-ended terminal legs
-- **#6730**: boards 03/07: regenerate routed artifacts under kicad-cli-exact length (USB_D 1.246 mm, ADDR_BUS 1.0998 mm skew)
-- **#7649**: router: source-side diff-pair skew avoidance; retire the Q35 2× interim bump excursion
-- **#7687**: Parametric 3D model generation for standard-package gaps (CadQuery, optional extra)
-- **#7716**: router: Python-fallback A* inside relief rescue is load-dependent on board 07 (1,024 expansions in ~420 s)
+- **#6447**: [Epic #6441] Phase 5: coupling-preserving skew tuning from a skew ledger, and pair invariants for post-passes
+- **#7834**: board 05: CI/recipe job that routes from scratch unattended and gates on 100% nets + both DRC engines + LVS
+- **#7848**: board 05: silk DFM corrections live in the routing.json replay step, so an unattended route carries 137 kct check warnings
+- **#7853**: test flake: test_build_segment_components_faster_on_larger_net fails on Test job
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#7824**: test(board03): pin USB_D skew inside the 0.5 mm stretch by both checkers (#6730)
-- **#7826**: docs(research): record the #7688 embedded-checksum spike outcome (blocked)
+- **#7849**: refactor(board-05): apply silk DFM corrections during generation, not routing replay
+- **#7854**: test: compare min-of-5 timings in segment-components perf guard
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-_None._
+- **#7850**: ci(board05): nightly unattended from-scratch route gate (#7834)
+- **#7851**: feat(router): gate skew bumps against SkewLedger sources
 
 ## Proposed
 
 Issues carrying `loom:curated`.
 
-- **#5164**: Stage and validate native zone refill for Board 07 via repairs before restoring CI *(curated)*
-- **#5240**: CI runtime: reduce measured Test, Board06 E2E and diff-pair regression job medians *(curated)*
-- **#5286**: Board07 full recipe exports seven unexpected signal opens and clearance failures after stage-budget integration *(curated)*
-- **#5333**: Board07 coupled pre-pass exhausts all seven pair searches despite valid corridor guides *(curated)*
-- **#5410**: router: refine dynamic route halo rejection with physical clearance checks *(curated)*
 - **#5509**: Epic: one clearance kernel — search, commit, and final validation must agree with kicad-cli DRC *(curated)*
 - **#5550**: Reconcile 4 outstanding loom-quarantine stashes left by the worktree reaper (issues 5201, 4982, 5216, 5004) *(curated)*
 - **#6445**: [Epic #6441] Phase 3: via pairs as a single move in the lattice coupled centreline *(curated)*
 - **#6446**: [Epic #6441] Phase 4: budget-driven hybrid fallback — longest coupled trunk plus single-ended terminal legs *(curated)*
+- **#6447**: [Epic #6441] Phase 5: coupling-preserving skew tuning from a skew ledger, and pair invariants for post-passes *(curated)*
 - **#7487**: Re-rule or remove board 03 usb_geometry via-in-pad window exception by 2027-04-19 (#7457 / #7084 Q10) *(curated)*
 - **#7518**: DSN export: verify a Specctra router doesn't double-flip back-side padstack layers (deferred from #7481 / #7496) *(curated)*
 - **#7548**: Board 06 synthetic fixture: 9 diff pairs over max skew on the seed-42 re-route (identity-allowed in check_diffpair_coverage.py) *(curated)*
-- **#7619**: Board 07 fixture: DQS and TMDS_D1 diff pairs routed with unequal via counts (N leg +2 vias), causing multi-mm skew *(curated)*
 - **#7649**: router: source-side diff-pair skew avoidance; retire the Q35 2× interim bump excursion *(curated)*
 - **#7690**: Epic: full 3D model coverage, from demo boards to the JLCPCB catalog, reproducible on the pinned toolchain *(curated)*
-- **#7716**: router: Python-fallback A* inside relief rescue is load-dependent on board 07 (1,024 expansions in ~420 s) *(curated)*
+- **#7848**: board 05: silk DFM corrections live in the routing.json replay step, so an unattended route carries 137 kct check warnings *(curated)*
+- **#7853**: test flake: test_build_segment_components_faster_on_larger_net fails on Test job *(curated)*
 
 ## Proposed (Architect / Hermit)
 
 - **#6441**: Epic: diff-pair routing redesign — gateways, via pairs, uncoupled budget, per-segment rules *(architect)*
 - **#6445**: [Epic #6441] Phase 3: via pairs as a single move in the lattice coupled centreline *(architect)*
 - **#6446**: [Epic #6441] Phase 4: budget-driven hybrid fallback — longest coupled trunk plus single-ended terminal legs *(architect)*
-- **#6447**: [Epic #6441] Phase 5: coupling-preserving skew tuning from a skew ledger, and pair invariants for post-passes *(architect)*
 - **#6448**: [Epic #6441] Phase 6: unify diff-pair engines — grid consumes PairPlan or grid coupled pre-pass retired *(architect)*
 - **#7775**: [Epic #5952] AGENTS.md parity: shared contributor-guidance source rendered into CLAUDE.md and AGENTS.md, with drift test *(architect)*
 - **#7776**: [Epic #5952] Validate kicad-tools in non-Claude harnesses: pcba-bench Codex CLI run and opencode/GLM-5.3 judge session *(architect)*
 
 ## Epics
 
-- **#3438**: router: board 07 stuck at 28/31 — negotiated router cannot complete parallel pad-array bundles (DDR bundle ALONE routes 9/11)
 - **#4410**: board-05: generator must produce a manufacturable BLDC board unattended (81% route, 7 ISENSE/PWM open, 2 real shorts)
 - **#4431**: route: per-net scalar clearance cannot express HV isolation — need class-pair (net-class × net-class) clearance rules in the router; both workarounds proven inadequate on a mains board
 - **#5509**: Epic: one clearance kernel — search, commit, and final validation must agree with kicad-cli DRC
@@ -102,13 +95,13 @@ Issues carrying `loom:curated`.
 | Operator merge-risk holds | 0 |
 | Very important | 0 |
 | Important | 1 |
-| Ready (`loom:issue`) | 1 |
-| In Progress (`loom:building`) | 6 |
+| Ready (`loom:issue`) | 0 |
+| In Progress (`loom:building`) | 4 |
 | PRs awaiting review | 2 |
-| Approved PRs awaiting merge | 0 |
-| Curated | 16 |
-| Architect / Hermit proposals | 7 |
-| Active epics | 6 |
+| Approved PRs awaiting merge | 2 |
+| Curated | 12 |
+| Architect / Hermit proposals | 6 |
+| Active epics | 5 |
 <!-- guide:plan-body:end -->
 
 ## Release History (static archive)
