@@ -133,22 +133,80 @@ class SkewLedger:
         return max(pool, key=lambda s: abs(s.skew_mm), default=None)
 
 
+#: Two segment ends this close are the same polyline vertex (walk order).
+_JOIN_MM = 1e-4
+
+
+def _walk_order(route: Route) -> list[tuple[int, bool]]:
+    """``(segment index, reversed)`` of ``route`` in copper order (#7864).
+
+    A gateway pair route is emitted as ``[fan A, fan B, coupled body]``:
+    its list order is not its copper order, so the runs read off the list
+    pair the wrong pieces (board 06rf ``USB3_RX1``: "run 1" was the U2-end
+    fan and "run 2" the body, so the bump gate measured a body bump to the
+    U2 end, 37.8 mm away).  When the non-degenerate segments form one
+    simple path, this is that path from the end the list starts nearest,
+    each segment flipped as needed; otherwise (a branch, a gap) it is the
+    list order, unchanged.
+    """
+    idx = [i for i, s in enumerate(route.segments) if math.hypot(s.x2 - s.x1, s.y2 - s.y1) > _EPS]
+    listed = [(i, False) for i in idx]
+    if len(idx) < 2:
+        return listed
+
+    def key(x: float, y: float) -> tuple[int, int]:
+        return (round(x / _JOIN_MM), round(y / _JOIN_MM))
+
+    ends: dict[tuple[int, int], list[int]] = {}
+    for i in idx:
+        s = route.segments[i]
+        for k in {key(s.x1, s.y1), key(s.x2, s.y2)}:
+            ends.setdefault(k, []).append(i)
+    if any(len(v) > 2 for v in ends.values()):
+        return listed
+    tips = [k for k, v in ends.items() if len(v) == 1]
+    if len(tips) != 2:
+        return listed
+    first = route.segments[idx[0]]
+    start = min(
+        tips, key=lambda k: math.hypot(k[0] * _JOIN_MM - first.x1, k[1] * _JOIN_MM - first.y1)
+    )
+    order: list[tuple[int, bool]] = []
+    used: set[int] = set()
+    at = start
+    while True:
+        nxt = [i for i in ends[at] if i not in used]
+        if not nxt:
+            break
+        i = nxt[0]
+        s = route.segments[i]
+        rev = key(s.x1, s.y1) != at
+        order.append((i, rev))
+        used.add(i)
+        at = key(s.x1, s.y1) if rev else key(s.x2, s.y2)
+    return order if len(order) == len(idx) else listed
+
+
 def _split_runs(route: Route) -> tuple[list[list[Pt]], dict[int, int]]:
-    """Via-delimited, single-layer polylines of ``route``, plus the run each
-    segment index belongs to (zero-length segments are not mapped)."""
+    """Via-delimited, single-layer polylines of ``route`` in copper order
+    (:func:`_walk_order`), plus the run each segment index belongs to
+    (zero-length segments are not mapped)."""
     runs: list[list[Pt]] = []
     seg_run: dict[int, int] = {}
     cur: list[Pt] = []
-    prev = None
-    for i, seg in enumerate(route.segments):
+    prev_end: Pt | None = None
+    prev_layer = None
+    for i, rev in _walk_order(route):
+        seg = route.segments[i]
         a, b = (seg.x1, seg.y1), (seg.x2, seg.y2)
-        if math.dist(a, b) <= _EPS:
-            continue
-        split = prev is not None and (
-            prev.layer != seg.layer
+        if rev:
+            a, b = b, a
+        split = prev_end is not None and (
+            prev_layer != seg.layer
+            or math.dist(prev_end, a) > _VIA_SNAP_MM
             or any(
-                math.hypot(v.x - prev.x2, v.y - prev.y2) <= _VIA_SNAP_MM
-                or math.hypot(v.x - seg.x1, v.y - seg.y1) <= _VIA_SNAP_MM
+                math.hypot(v.x - prev_end[0], v.y - prev_end[1]) <= _VIA_SNAP_MM
+                or math.hypot(v.x - a[0], v.y - a[1]) <= _VIA_SNAP_MM
                 for v in route.vias
             )
         )
@@ -159,7 +217,7 @@ def _split_runs(route: Route) -> tuple[list[list[Pt]], dict[int, int]]:
             cur = [a]
         cur.append(b)
         seg_run[i] = len(runs)
-        prev = seg
+        prev_end, prev_layer = b, seg.layer
     if cur:
         runs.append(cur)
     return runs, seg_run
@@ -216,6 +274,122 @@ def _joint_terms(p: list[Pt], n: list[Pt], pitch: float) -> list[tuple[Pt, float
     return out
 
 
+#: A leg piece within this of the pitch from a parallel partner piece is
+#: coupled (:func:`_leg_joint_terms`).
+_COUPLED_TOL_MM = 0.02
+#: Parallel within this sine (the impedance rule's tolerance).
+_PARALLEL_SIN = 0.1
+
+
+def _coupled_partner(a: Pt, b: Pt, other: list[Pt], pitch: float) -> Pt | None:
+    """A point of a piece of ``other`` running beside ``a-b`` at ``pitch``.
+
+    ``None`` when no piece of ``other`` is parallel to ``a-b``, overlaps it
+    along its length and sits ``pitch`` away (centre to centre).
+    """
+    length = math.dist(a, b)
+    if length <= _EPS:
+        return None
+    ux, uy = (b[0] - a[0]) / length, (b[1] - a[1]) / length
+    for c, d in zip(other, other[1:], strict=False):
+        olen = math.dist(c, d)
+        if olen <= _EPS:
+            continue
+        if abs(ux * (d[1] - c[1]) - uy * (d[0] - c[0])) / olen > _PARALLEL_SIN:
+            continue
+        mx, my = (c[0] + d[0]) / 2.0, (c[1] + d[1]) / 2.0
+        if abs(abs((mx - a[0]) * uy - (my - a[1]) * ux) - pitch) > _COUPLED_TOL_MM:
+            continue
+        t1 = (c[0] - a[0]) * ux + (c[1] - a[1]) * uy
+        t2 = (d[0] - a[0]) * ux + (d[1] - a[1]) * uy
+        if min(max(t1, t2), length) - max(min(t1, t2), 0.0) > _EPS:
+            return (mx, my)
+    return None
+
+
+def _leg_joint_terms(p: list[Pt], n: list[Pt], pitch: float) -> list[tuple[Pt, float]]:
+    """Joint terms of a run pair whose legs have differing vertex counts (#7864).
+
+    The pairwise centreline of :func:`_joint_terms` needs one N vertex per P
+    vertex; a gateway body's convergence jogs into its via pairs give the
+    legs different counts (06rf ``USB3_RX1``: 17 P vertices, 18 N), which
+    used to leave the whole body -- every joint of its winding -- as a single
+    entry at one run end.  Here each interior P vertex whose two pieces both
+    run coupled beside N at the pitch is a joint of P's own turn (the
+    offset legs of a coupled run turn together); P is inner when N sits on
+    the outside of the turn.  Joints in a jog are not coupled and stay with
+    the run's leftover.
+    """
+    out: list[tuple[Pt, float]] = []
+    for i in range(1, len(p) - 1):
+        d_in = (p[i][0] - p[i - 1][0], p[i][1] - p[i - 1][1])
+        d_out = (p[i + 1][0] - p[i][0], p[i + 1][1] - p[i][1])
+        if math.hypot(*d_in) <= _EPS or math.hypot(*d_out) <= _EPS:
+            continue
+        turn = math.atan2(
+            d_in[0] * d_out[1] - d_in[1] * d_out[0], d_in[0] * d_out[0] + d_in[1] * d_out[1]
+        )
+        if abs(turn) <= 1e-9 or abs(turn) >= math.pi - 1e-9:
+            continue
+        q_in = _coupled_partner(p[i - 1], p[i], n, pitch)
+        q_out = _coupled_partner(p[i], p[i + 1], n, pitch)
+        if q_in is None or q_out is None:
+            continue
+        # Which side N is on, from the incoming piece: > 0 is left of travel.
+        side = d_in[0] * (q_in[1] - p[i - 1][1]) - d_in[1] * (q_in[0] - p[i - 1][0])
+        if abs(side) <= _EPS:
+            continue
+        p_left = side < 0.0
+        p_inner = p_left == (turn > 0.0)
+        mag = 2.0 * pitch * math.tan(abs(turn) / 2.0)
+        # Report at the centreline vertex, half a pitch toward N.
+        nx, ny = -d_in[1], d_in[0]
+        norm = math.hypot(nx, ny)
+        sgn = 1.0 if side > 0.0 else -1.0
+        at = (p[i][0] + sgn * nx / norm * pitch / 2.0, p[i][1] + sgn * ny / norm * pitch / 2.0)
+        out.append((at, -mag if p_inner else mag))
+    return out
+
+
+def _coupled_pitch(p_runs: list[list[Pt]], n_runs: list[list[Pt]]) -> float | None:
+    """The legs' coupled centre-to-centre spacing, or ``None`` (#7864).
+
+    The spacing (to 1 um) over which the most P length runs parallel to,
+    and overlapping, an N piece of the same run.  Run starts are no measure
+    of it when a run begins at pads or fan vias wider than the pitch (06rf
+    ``USB3_RX1``'s runs start 1.0 and 0.8 mm apart, its body runs 0.376 mm).
+    """
+    weight: dict[float, float] = {}
+    for p, n in zip(p_runs, n_runs, strict=False):
+        for a, b in zip(p, p[1:], strict=False):
+            length = math.dist(a, b)
+            if length <= _EPS:
+                continue
+            ux, uy = (b[0] - a[0]) / length, (b[1] - a[1]) / length
+            best: tuple[float, float] | None = None
+            for c, d in zip(n, n[1:], strict=False):
+                olen = math.dist(c, d)
+                if olen <= _EPS:
+                    continue
+                if abs(ux * (d[1] - c[1]) - uy * (d[0] - c[0])) / olen > _PARALLEL_SIN:
+                    continue
+                t1 = (c[0] - a[0]) * ux + (c[1] - a[1]) * uy
+                t2 = (d[0] - a[0]) * ux + (d[1] - a[1]) * uy
+                overlap = min(max(t1, t2), length) - max(min(t1, t2), 0.0)
+                if overlap <= _EPS:
+                    continue
+                mx, my = (c[0] + d[0]) / 2.0, (c[1] + d[1]) / 2.0
+                gap = abs((mx - a[0]) * uy - (my - a[1]) * ux)
+                if gap > _EPS and (best is None or gap < best[0]):
+                    best = (gap, overlap)
+            if best is not None:
+                k = round(best[0], 3)
+                weight[k] = weight.get(k, 0.0) + best[1]
+    if not weight:
+        return None
+    return max(weight.items(), key=lambda kv: (kv[1], -kv[0]))[0]
+
+
 def build_skew_ledger(
     p_route: Route, n_route: Route, *, pitch_mm: float | None = None
 ) -> SkewLedger:
@@ -241,6 +415,8 @@ def build_skew_ledger(
     pairable = len(p_runs) == len(n_runs)
     pitch = pitch_mm
     if pitch is None:
+        pitch = _coupled_pitch(p_runs, n_runs) if pairable else None
+    if pitch is None:
         gaps = [math.dist(p[0], n[0]) for p, n in zip(p_runs, n_runs, strict=False)]
         pitch = sum(gaps) / len(gaps) if gaps else 0.0
 
@@ -248,7 +424,9 @@ def build_skew_ledger(
     if pairable:
         for k, (p, n) in enumerate(zip(p_runs, n_runs, strict=True)):
             run_skew = _length(p) - _length(n)
-            joints = _joint_terms(p, n, pitch) if len(p) == len(n) else []
+            joints = (
+                _joint_terms(p, n, pitch) if len(p) == len(n) else _leg_joint_terms(p, n, pitch)
+            )
             for (x, y), s in joints:
                 sources.append(SkewSource(KIND_JOINT, x, y, s, k))
             left = run_skew - sum(s for _, s in joints)
