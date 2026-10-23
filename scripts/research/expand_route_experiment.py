@@ -88,7 +88,14 @@ person would get by hand, so the harness does not under-count:
   release is refused (exit 2, nothing written) unless ``--allow-unpinned-kicad``
   is given, and every graded row records ``kicad_cli_version``,
   ``kicad_cli_image`` (``null`` for a host build), ``kicad_cli_source`` and
-  ``kicad_cli_pinned``.
+  ``kicad_cli_pinned``.  The session covers the ``kct route`` subprocess as
+  well, so the routed copper is itself produced against the pinned kicad-cli:
+  oracle completion (on by default) adds copper from kicad-cli's DRC / zone
+  fill unconnected report and stops when the next kicad-cli call would overrun
+  ``--timeout``, and the finishing DRC is gated on time left.  A different
+  release, or per-call Docker start-up under a tight ``--timeout``, can change
+  what gets routed, so the routing columns of rows made under the session are
+  not comparable with older host-run rows (pre #7901, no ``kicad_cli_version``).
 * ``manufacturable`` is ``true`` only when ``kct route`` exited 0, both
   engines report 0 errors, kicad-cli reports 0 unconnected items and the
   graded board is the finished output; ``null`` when either engine did not run.
@@ -1396,6 +1403,29 @@ def refused(exc: Exception) -> int:
     return REFUSED_EXIT
 
 
+def make_dirs(*paths: Path) -> list[Path]:
+    """``mkdir -p`` each of *paths*; return the directories this call created.
+
+    Created before :func:`kicad_toolchain_session`, whose Docker probe
+    bind-mounts them (a missing bind source would be created by the Docker
+    daemon, as root on Linux), so a refusal hands them to
+    :func:`remove_if_empty` instead.
+    """
+    created: list[Path] = []
+    for path in paths:
+        missing = [p for p in (path, *path.parents) if not p.exists()]
+        path.mkdir(parents=True, exist_ok=True)
+        created += reversed(missing)
+    return created
+
+
+def remove_if_empty(created: list[Path]) -> None:
+    """Remove the directories :func:`make_dirs` created, deepest first, if still empty."""
+    for path in reversed(created):
+        with contextlib.suppress(OSError):
+            path.rmdir()
+
+
 def add_kicad_toolchain_arg(parser) -> None:
     parser.add_argument(
         "--allow-unpinned-kicad",
@@ -1898,7 +1928,7 @@ def _cmd_route(args) -> int:
             raise SystemExit(
                 f"board {key!r} is a diff-pair benchmark row; use the `pairs` subcommand"
             )
-    args.work_dir.mkdir(parents=True, exist_ok=True)
+    created = make_dirs(args.work_dir)
     rows: list[dict] = []
     if args.json and args.append and args.json.exists():
         rows = json.loads(args.json.read_text())["rows"]
@@ -1916,6 +1946,7 @@ def _cmd_route(args) -> int:
         with kicad_toolchain_session(mounts, allow_unpinned=args.allow_unpinned_kicad):
             _route_rows(args, keys, scales, modes, rows)
     except KiCadEnvironmentError as exc:
+        remove_if_empty(created)
         return refused(exc)
     print()
     print(render_route(rows))

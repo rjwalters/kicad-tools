@@ -51,6 +51,20 @@ host build), ``kicad_cli_source`` and ``kicad_cli_pinned``; the file header
 carries the same under ``kicad_cli``. ``remeasure`` re-runs only the pair
 verdicts and records their toolchain under ``remeasured_kicad_cli``.
 
+The session covers the ``kct route`` subprocess too, so the routed copper
+itself is produced against the pinned kicad-cli, not only graded by it.
+``kct route`` runs oracle completion by default (``DEFAULT_ORACLE_ROUNDS``):
+it runs kicad-cli DRC and zone fill and adds copper to close the links in
+kicad-cli's unconnected report, stopping (``STOP_DEADLINE``) when the next
+kicad-cli call would overrun ``--timeout``; its finishing DRC is gated on the
+time left as well. A different kicad-cli release can report different
+unconnected items or fills, and per-call Docker start-up can trip those
+deadline gates sooner. The routing columns (``Nets``, ``Pairs coupled``,
+``Valid``, the kct columns of the routed board, ``Wall s``) of rows made under
+the session are therefore **not comparable** with older host-run rows (pre
+#7901, ``kicad-cli: unrecorded``); compare rows that share a ``kicad-cli``
+column.
+
 Board 06 gap-error root cause
 -----------------------------
 See ``docs/research/diffpair-bench-phase0.md``.
@@ -889,8 +903,9 @@ def _cmd_run(args) -> int:
             raise SystemExit(f"unknown engine {e!r}")
     check_no_replay(args.extra.split())
     sha = args.router_rev[:8] if args.router_rev else git_sha()
-    args.work_dir.mkdir(parents=True, exist_ok=True)
-    args.out_dir.mkdir(parents=True, exist_ok=True)
+    # Before the session: its Docker probe bind-mounts these, and a missing
+    # bind source would be created by the Docker daemon (as root on Linux).
+    created = ere.make_dirs(args.work_dir, args.out_dir)
     out_path = args.out_dir / f"{args.label}-{sha}.json"
     rows: list[dict] = []
     mounts = [args.work_dir.resolve(), args.out_dir.resolve()]
@@ -904,6 +919,7 @@ def _cmd_run(args) -> int:
         ) as session:
             _run_rows(args, boards, engines, seeds, sha, out_path, rows, session)
     except KiCadEnvironmentError as exc:
+        ere.remove_if_empty(created)
         return ere.refused(exc)
     print(render(rows))
     print(f"wrote {out_path}")

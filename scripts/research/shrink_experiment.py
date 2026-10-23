@@ -382,11 +382,12 @@ def main(argv=None) -> int:
     mounts = [args.out_dir.resolve(), args.src.resolve().parent, args.routed.resolve().parent]
     if args.json:
         mounts.append(args.json.resolve().parent)
-    args.out_dir.mkdir(parents=True, exist_ok=True)
+    created = ere.make_dirs(args.out_dir)
     try:
         with ere.kicad_toolchain_session(mounts, allow_unpinned=args.allow_unpinned_kicad) as tc:
             return _run(args, ere.kicad_cli_columns(tc))
     except KiCadEnvironmentError as exc:
+        ere.remove_if_empty(created)
         return ere.refused(exc)
 
 

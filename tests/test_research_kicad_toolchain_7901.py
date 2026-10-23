@@ -69,9 +69,53 @@ FAKE_SESSION = {
 # ---------------------------------------------------------------------------
 
 
-def _bypasses(path: Path) -> list[str]:
+#: DRC wrappers that fall back to ``find_kicad_cli()`` (the host build) unless
+#: handed the session's binary.  This is the path the original ``grade`` bug
+#: took: ``run_kicad_cli_drc`` -> ``run_geometric_drc`` -> ``find_kicad_cli``.
+_DRC_WRAPPERS = {"run_kicad_cli_drc", "run_geometric_drc"}
+
+#: Callables that run a command line given as one shell string.
+_SHELL_RUNNERS = {"system", "popen", "getoutput", "getstatusoutput"}
+_SUBPROCESS_RUNNERS = {"run", "call", "check_call", "check_output", "Popen"}
+
+
+def _call_name(func: ast.expr) -> str | None:
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
+
+
+def _is_kicad_cli_exe(node: ast.AST) -> bool:
+    """A string literal naming the bare executable: ``"kicad-cli"`` or ``".../kicad-cli"``."""
+    return (
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and (node.value == "kicad-cli" or node.value.endswith("/kicad-cli"))
+    )
+
+
+def _is_kicad_cli_command_line(node: ast.AST) -> bool:
+    """A string or f-string literal that starts a ``kicad-cli ...`` command line."""
+    if isinstance(node, ast.JoinedStr):
+        node = node.values[0] if node.values else node
+    return (
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and node.value.split(" ", 1)[0] in ("kicad-cli", "kicad-cli.exe")
+        and " " in node.value
+    )
+
+
+def _bypass_findings(source: str) -> list[str]:
+    """Every way *source* reaches a kicad-cli without the session's binary.
+
+    AST-based, so comments, docstrings and table headers that merely mention
+    kicad-cli are not flagged; only code that would run one is.
+    """
     found = []
-    for node in ast.walk(ast.parse(path.read_text())):
+    for node in ast.walk(ast.parse(source)):
         name = None
         if isinstance(node, ast.Name):
             name = node.id
@@ -81,15 +125,42 @@ def _bypasses(path: Path) -> list[str]:
             found += [f"import {a.name}" for a in node.names if a.name in _BYPASS_NAMES]
         if name in _BYPASS_NAMES:
             found.append(f"line {node.lineno}: {name}")
-        # ``shutil.which("kicad-cli")`` is the other way round the resolver.
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "which"
-            and any(isinstance(a, ast.Constant) and a.value == "kicad-cli" for a in node.args)
+
+        # A bare executable literal in an argv list/tuple, e.g.
+        # ``subprocess.run(["kicad-cli", "pcb", "drc", b])``.
+        if isinstance(node, (ast.List, ast.Tuple)) and any(map(_is_kicad_cli_exe, node.elts)):
+            found.append(f"line {node.lineno}: 'kicad-cli' argv literal")
+
+        if not isinstance(node, ast.Call):
+            continue
+        fname = _call_name(node.func)
+        args = list(node.args) + [k.value for k in node.keywords]
+
+        # ``shutil.which("kicad-cli")``, ``Popen(executable="kicad-cli")``,
+        # ``os.execvp("kicad-cli", ...)``: the executable passed straight in.
+        if any(map(_is_kicad_cli_exe, args)):
+            found.append(f"line {node.lineno}: {fname}('kicad-cli')")
+
+        # ``os.system("kicad-cli pcb drc ...")`` / ``subprocess.run(f"kicad-cli ...", shell=True)``.
+        if fname in _SHELL_RUNNERS | _SUBPROCESS_RUNNERS and any(
+            map(_is_kicad_cli_command_line, args)
         ):
-            found.append(f"line {node.lineno}: which('kicad-cli')")
+            found.append(f"line {node.lineno}: {fname}('kicad-cli ...') command line")
+
+        # A DRC wrapper without the session's binary looks the host one up.
+        if fname in _DRC_WRAPPERS:
+            kw = {k.arg: k.value for k in node.keywords}
+            given = kw.get("kicad_cli")
+            splatted = any(k.arg is None for k in node.keywords)
+            if not splatted and (
+                given is None or (isinstance(given, ast.Constant) and given.value is None)
+            ):
+                found.append(f"line {node.lineno}: {fname}() without kicad_cli=")
     return found
+
+
+def _bypasses(path: Path) -> list[str]:
+    return _bypass_findings(path.read_text())
 
 
 @pytest.mark.parametrize("name", KICAD_CLI_HARNESSES)
@@ -107,6 +178,56 @@ def test_bypass_detector_catches_the_old_bench_code(tmp_path):
         "    return shutil.which('kicad-cli')\n"
     )
     assert len(_bypasses(old)) == 3
+
+
+#: One snippet per bypass form the scanner must flag (Judge review of #7904).
+BYPASS_SNIPPETS = {
+    "subprocess_argv_list": "import subprocess\nsubprocess.run(['kicad-cli', 'pcb', 'drc', str(b)])\n",
+    "subprocess_argv_tuple": "import subprocess\nsubprocess.check_output(('kicad-cli', 'version'))\n",
+    "argv_built_first": "argv = ['kicad-cli', 'pcb', 'drc']\nrun(argv + [b])\n",
+    "absolute_path_argv": "subprocess.run(['/usr/bin/kicad-cli', 'version'])\n",
+    "popen_executable_kw": "subprocess.Popen(['x'], executable='kicad-cli')\n",
+    "execvp": "import os\nos.execvp('kicad-cli', ['kicad-cli', 'version'])\n",
+    "os_system_string": "import os\nos.system('kicad-cli pcb drc board.kicad_pcb')\n",
+    "shell_fstring": "subprocess.run(f'kicad-cli pcb drc {b}', shell=True)\n",
+    "shutil_which": "import shutil\nshutil.which('kicad-cli')\n",
+    "find_kicad_cli": "from kicad_tools.cli.runner import find_kicad_cli\nfind_kicad_cli()\n",
+    "run_kicad_cli_drc_no_kw": (
+        "from kicad_tools.benchmark.external.metrics import run_kicad_cli_drc\n"
+        "run_kicad_cli_drc(b, timeout=600, all_track_errors=True)\n"
+    ),
+    "run_kicad_cli_drc_kw_none": "metrics.run_kicad_cli_drc(b, kicad_cli=None)\n",
+    "run_geometric_drc_no_kw": (
+        "from kicad_tools.drc.geometric import run_geometric_drc\nrun_geometric_drc(b)\n"
+    ),
+    "run_geometric_drc_attr": "geometric.run_geometric_drc(b, timeout=60)\n",
+}
+
+
+@pytest.mark.parametrize("snippet", BYPASS_SNIPPETS.values(), ids=BYPASS_SNIPPETS.keys())
+def test_bypass_detector_flags_every_bypass_form(snippet):
+    assert _bypass_findings(snippet), "scanner missed a kicad-cli bypass"
+
+
+def test_bypass_detector_passes_session_routed_code():
+    clean = (
+        '"""Mentions kicad-cli in a docstring; runs it only via the session."""\n'
+        "import subprocess\n"
+        "from pathlib import Path\n"
+        "from kicad_tools.benchmark.external.metrics import run_kicad_cli_drc\n"
+        "from kicad_tools.drc.geometric import run_geometric_drc\n"
+        "# kicad-cli is the session's (a comment that mentions kicad-cli)\n"
+        "def grade(b, session, **kw):\n"
+        "    exe = Path(session['kicad_cli_binary'])\n"
+        "    run_kicad_cli_drc(b, timeout=600, kicad_cli=exe)\n"
+        "    run_geometric_drc(b, kicad_cli=exe)\n"
+        "    run_geometric_drc(b, **kw)  # caller supplies kicad_cli\n"
+        "    subprocess.run([str(exe), 'pcb', 'drc', str(b)])\n"
+        "    head = '| Board | kicad-cli |\\n'\n"
+        "    print('kicad-cli verdicts must run inside a session')\n"
+        "    return head\n"
+    )
+    assert _bypass_findings(clean) == []
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +411,8 @@ def test_refused_toolchain_exits_2_and_writes_nothing(tmp_path, monkeypatch, cap
     assert bench.main(_run_argv(tmp_path)) == ere.REFUSED_EXIT
     assert "REFUSED" in capsys.readouterr().err
     assert not list((tmp_path / "out").glob("*.json"))
+    # Not even the empty directories: they are created only after the check.
+    assert not (tmp_path / "out").exists() and not (tmp_path / "work").exists()
 
 
 def test_every_bench_row_records_the_kicad_cli_it_used(tmp_path, monkeypatch):
