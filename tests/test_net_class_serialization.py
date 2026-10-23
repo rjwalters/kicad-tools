@@ -333,6 +333,7 @@ class TestDriftPrevention:
             "max_uncoupled_per_terminal_mm": 5.5,
             "max_uncoupled_total_mm": 17.5,
             "max_vias_per_net": 3,
+            "chain_skew_tolerance_mm": 1.5,
             "gather_ignore": 0.5,
             "length_match_group": "DRIFT_GROUP",
             "length_match_reference": "DRIFT_REF",

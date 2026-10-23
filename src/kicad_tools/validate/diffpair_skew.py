@@ -47,6 +47,7 @@ mirrors PR #2653's pattern.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -245,3 +246,140 @@ def _net_has_geometry(pcb: PCB, net_id: int) -> bool:
     for _via in pcb.vias_in_net(net_id):
         return True
     return False
+
+
+@dataclass(frozen=True)
+class ChainSkew:
+    """Skew across a chain of diff-pair segments joined by series elements.
+
+    ``segments`` lists each pair segment as ``(p_net, n_net)``;
+    ``side_a_mm`` / ``side_b_mm`` are the summed routed lengths of the two
+    conductors end to end (polarity-aligned through the series elements, so
+    a swap across a part is followed rather than counted as skew).
+    ``limit_mm`` is ``None`` when no class declares a chain limit.
+    """
+
+    segments: tuple[tuple[str, str], ...]
+    side_a_mm: float
+    side_b_mm: float
+    limit_mm: float | None
+
+    @property
+    def skew_mm(self) -> float:
+        return abs(self.side_a_mm - self.side_b_mm)
+
+
+def derive_chain_skew(
+    pcb: PCB,
+    net_class_map: dict[str, NetClassRouting] | None,
+    board_thickness_mm: float | None = None,
+    num_copper_layers: int = 2,
+) -> list[ChainSkew]:
+    """Measure pair skew across series-element chains (Issue #6447).
+
+    Two detected pairs are chained when a two-pad part (a series resistor,
+    capacitor or ferrite) joins one net of each pair and a second two-pad
+    part joins the remaining nets.  Pairs linked this way form a chain; the
+    chain's two sides are the polarity-aligned sums of the member nets'
+    routed lengths.  The part's own body length is not counted.  A pair with
+    no chain partner is not reported -- the per-pair rule covers it.
+
+    ``kct check`` measures per net segment; this adds the end-to-end figure.
+    Returns ``[]`` without a ``net_class_map``, like the per-pair producers.
+    """
+    if not net_class_map:
+        return []
+
+    from kicad_tools.router.diffpair_detection import build_synth_routing, detect_diff_pairs
+    from kicad_tools.router.diffpair_length import DiffPairLengthTracker
+
+    net_names = {net_id: net.name for net_id, net in pcb.nets.items() if getattr(net, "name", None)}
+    if not net_names:
+        return []
+    synth_routing, net_to_class = build_synth_routing(net_class_map)
+    try:
+        detected = detect_diff_pairs(
+            net_names,
+            net_class_routing=synth_routing,
+            net_to_class=net_to_class,
+            kicad_groups=getattr(pcb, "kicad_diff_pair_groups", None),
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("[diffpair-chain-skew] detector raised %s; no chain data", exc)
+        return []
+
+    pairs = [d.pair for d in detected]
+    net_to_pair: dict[str, tuple[int, int]] = {}  # name -> (pair index, 0=P / 1=N)
+    for i, pair in enumerate(pairs):
+        net_to_pair[pair.positive.net_name] = (i, 0)
+        net_to_pair[pair.negative.net_name] = (i, 1)
+
+    # Series links: a two-pad part between nets of two different pairs.
+    links: list[tuple[str, str]] = []
+    for fp in getattr(pcb, "footprints", ()):
+        if len(fp.pads) != 2:
+            continue
+        a, b = fp.pads[0].net_name, fp.pads[1].net_name
+        if a in net_to_pair and b in net_to_pair and net_to_pair[a][0] != net_to_pair[b][0]:
+            links.append((a, b))
+
+    # A pair link needs a part on each conductor, with one polarity relation.
+    relation: dict[tuple[int, int], list[bool]] = {}
+    for a, b in links:
+        (ia, sa), (ib, sb) = net_to_pair[a], net_to_pair[b]
+        relation.setdefault((min(ia, ib), max(ia, ib)), []).append(sa == sb)
+    adjacency: dict[int, list[tuple[int, bool]]] = {}
+    for (i, j), kinds in relation.items():
+        if len(kinds) < 2 or len(set(kinds)) != 1:
+            continue  # one conductor only, or contradictory polarity
+        adjacency.setdefault(i, []).append((j, kinds[0]))
+        adjacency.setdefault(j, []).append((i, kinds[0]))
+
+    name_to_id = {v: k for k, v in net_names.items()}
+
+    def length(name: str) -> float:
+        return DiffPairLengthTracker.measure_net_from_pcb(
+            pcb, name_to_id[name], board_thickness_mm, num_copper_layers
+        )
+
+    chains: list[ChainSkew] = []
+    seen: set[int] = set()
+    for root in sorted(adjacency):
+        if root in seen:
+            continue
+        flip = {root: False}  # True when that pair's P lies on side B
+        stack = [root]
+        while stack:
+            cur = stack.pop()
+            for nxt, same in adjacency[cur]:
+                if nxt not in flip:
+                    flip[nxt] = flip[cur] if same else not flip[cur]
+                    stack.append(nxt)
+        seen.update(flip)
+        members = sorted(flip)
+        if not all(
+            _net_has_geometry(pcb, n.net_id)
+            for i in members
+            for n in (pairs[i].positive, pairs[i].negative)
+        ):
+            continue
+        side_a = side_b = 0.0
+        for i in members:
+            p_len = length(pairs[i].positive.net_name)
+            n_len = length(pairs[i].negative.net_name)
+            if flip[i]:
+                p_len, n_len = n_len, p_len
+            side_a += p_len
+            side_b += n_len
+        first = net_class_map.get(pairs[members[0]].positive.net_name)
+        chains.append(
+            ChainSkew(
+                segments=tuple(
+                    (pairs[i].positive.net_name, pairs[i].negative.net_name) for i in members
+                ),
+                side_a_mm=side_a,
+                side_b_mm=side_b,
+                limit_mm=getattr(first, "chain_skew_tolerance_mm", None),
+            )
+        )
+    return chains

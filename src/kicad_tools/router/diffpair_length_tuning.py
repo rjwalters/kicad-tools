@@ -6,8 +6,9 @@ This module implements :func:`tune_diff_pair_skew`, a router-internal
 helper that inserts serpentines (trombones) on the *shorter* half of a
 detected differential pair until the pair's skew is within the per-class
 :meth:`~kicad_tools.router.rules.NetClassRouting.effective_skew_tolerance`
-window, OR a cascade-safety budget of three insertion attempts is
-exhausted.
+window, OR a cascade-safety budget of insertion attempts is
+exhausted (three by default, scaled up to ``MAX_INSERT_BUDGET_SCALE`` times
+by the source-local bump gates of #7521).
 
 Design notes
 ============
@@ -47,10 +48,13 @@ Design notes
 Out of scope for Phase 3I:
 
 * Multi-segment trombone splitting (very tight boards).
-* Differential-pair coupling preservation during the bulge (today the
-  bulge is on only the shorter half; the longer half is unchanged, so
-  coupling is necessarily broken within the bulge.  Phase 3K's
-  impedance-controlled rebuild is the place to restore coupling).
+* Coupling preservation inside this tuner's own bulge (the bulge is on
+  only the shorter half, so coupling is broken within it).  Coupling-
+  preserving compensation lives elsewhere: the source-local bump gates
+  (``diffpair_bump_gates``, #7521), the chamfered partly-coupled bumps
+  (#7546) and the mirrored serpentines of ``match_group_tuning``.  Phase 3K
+  (``diffpair_impedance``) is the impedance consumer, not a coupling
+  repair.
 """
 
 from __future__ import annotations
