@@ -51,6 +51,9 @@ ZoneLayers = Mapping[int, frozenset[int]]
 ZoneIds = tuple[float, float, float, float, frozenset[int], "ZoneLayers | None"]
 
 
+_EMPTY_ROW: Mapping[int, float] = {}
+
+
 @dataclass(frozen=True)
 class LatticePairwise:
     """Order-independent net-id pair -> required edge-to-edge clearance (mm).
@@ -81,6 +84,25 @@ class LatticePairwise:
                 "zones",
                 tuple(zone if len(zone) >= 6 else (*zone, None) for zone in self.zones),
             )
+
+    def row(self, net: int) -> Mapping[int, float]:
+        """``{partner_id: requirement}`` for ``net`` (#7881).
+
+        The hot predicates probe one stored obstacle at a time; a per-net row
+        turns each :meth:`required` call (tuple build + ordered-key dict get)
+        into one dict get.  Same values as :meth:`required` for every partner;
+        a net with no pair requirement gets a shared empty row.
+        """
+        rows: dict[int, dict[int, float]] | None = self.__dict__.get("_rows")
+        if rows is None:
+            rows = {}
+            for (lo, hi), req in self.required_by_pair.items():
+                if lo == hi:
+                    continue
+                rows.setdefault(lo, {})[hi] = req
+                rows.setdefault(hi, {})[lo] = req
+            object.__setattr__(self, "_rows", rows)
+        return rows.get(net, _EMPTY_ROW)
 
     def required(self, net_a: int, net_b: int) -> float:
         """Raw pairwise requirement for an id pair; 0.0 when unmapped."""
