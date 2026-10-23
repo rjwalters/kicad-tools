@@ -184,6 +184,7 @@ def test_reason_sets_are_reexported_unchanged() -> None:
         "no-path",
         "no-path-keepout-constrained",
         "no-path-layer-constrained",
+        "no-path-pairwise-constrained",  # issue #7879
     } == EXHAUSTED_SEARCH_REASONS
     assert {f"pair-{r}" for r in EXHAUSTED_SEARCH_REASONS} | {
         "pair-leg-keepout"

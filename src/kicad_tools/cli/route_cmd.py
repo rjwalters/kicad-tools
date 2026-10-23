@@ -4542,23 +4542,73 @@ def _write_routing_plan_sidecar(
         print(f"  {routing_plan.summary_line()}")
 
 
+def _merge_search_failure(failures: dict[str, str], net_name: str, reason: object) -> None:
+    """Record *reason* for *net_name*, a geometric reason beating a budget one.
+
+    Issues #6315 / #7879.  A net with several declined links (or a reason
+    from both engines) keeps a GEOMETRIC reason over a time / iteration
+    budget one: the router already proved more budget is not the fix for at
+    least one of its links.  Among reasons of the same kind the first one
+    recorded stays.  The single merge rule shared by the ``--complete``
+    decline census and the ``.search_failures.json`` sidecar.
+    """
+    from kicad_tools.router.stuck_classifier import (
+        is_budget_search_failure,
+        normalize_search_failure,
+    )
+
+    label = normalize_search_failure(reason)  # type: ignore[arg-type]
+    if not label:
+        return
+    prev = failures.get(net_name)
+    if prev is None or (is_budget_search_failure(prev) and not is_budget_search_failure(label)):
+        failures[net_name] = label
+
+
+def _lattice_search_failures(router: object | None) -> dict[str, str]:
+    """The lattice engine's per-connection declines, keyed by net name (#7879).
+
+    Reads ``router._lattice_failure_reasons`` (the plain dict the Autorouter
+    copies off the pathfinder, so it survives ``_release_routing_engine_state``)
+    and names each key with :func:`_net_name_for_lattice_key`.  Empty when the
+    run never used the lattice engine.
+    """
+    reasons = getattr(router, "_lattice_failure_reasons", None)
+    if not isinstance(reasons, dict) or not reasons:
+        return {}
+    out: dict[str, str] = {}
+    for key, reason in reasons.items():
+        _merge_search_failure(out, _net_name_for_lattice_key(router, key), reason)  # type: ignore[arg-type]
+    return out
+
+
 def _write_search_failures_sidecar(output_path: Path, router: object | None) -> Path | None:
-    """Persist each net's last C++ search-failure reason (issue #6369).
+    """Persist each net's last router search-failure reason (#6369, #7879).
 
     ``net-status --why`` reads this so a geometric give-up (``no_path``,
-    ``via_via_blocked``, ``pairwise_blocked``) is not mislabelled
-    ``budget_starved``.  Without recorded failures any stale sidecar a
-    previous route left at the same path is removed (the writer unlinks on
-    ``{}``), so the sidecar only ever describes the run that wrote it.
+    ``via_via_blocked``, ``pairwise_blocked``, or a lattice decline such as
+    ``no-path-pairwise-constrained``) is not mislabelled ``budget_starved``.
+    Both engines' stores are merged: the grid pathfinder's
+    ``search_failures_by_net`` (C++ ``FAILURE_*`` codes by net id) and the
+    lattice engine's per-connection decline reasons (#7879 -- before it a
+    ``--route-engine lattice`` run always wrote an empty map).  A net in both
+    keeps a geometric reason over a budget one.  Without recorded failures any
+    stale sidecar a previous route left at the same path is removed (the
+    writer unlinks on ``{}``), so the sidecar only ever describes the run that
+    wrote it.
     """
     from kicad_tools.router.stuck_classifier import write_search_failures_sidecar
 
+    named: dict[str, str] = {}
     pathfinder = getattr(router, "router", None)
     by_id = getattr(pathfinder, "search_failures_by_net", None)
-    if not isinstance(by_id, dict) or not by_id:
-        return write_search_failures_sidecar(output_path, {})
-    names = getattr(router, "net_names", None) or {}
-    named = {names[nid]: code for nid, code in by_id.items() if names.get(nid)}
+    if isinstance(by_id, dict) and by_id:
+        names = getattr(router, "net_names", None) or {}
+        for nid, code in by_id.items():
+            if names.get(nid):
+                _merge_search_failure(named, names[nid], code)
+    for name, reason in _lattice_search_failures(router).items():
+        _merge_search_failure(named, name, reason)
     return write_search_failures_sidecar(output_path, named)
 
 
@@ -12421,6 +12471,12 @@ def route_with_layer_escalation(
         print(f"  Saved to: {output_path}")
         print(f"  Layer count: {final_result.layer_count}")
 
+    # Issue #7879: the per-net search-failure sidecar describes THIS save,
+    # DRC or not.  It was only written from ``run_post_route_drc``, so a
+    # ``--skip-drc`` run or one that routed no net left none (or a stale
+    # one) and ``net-status --why`` fell back to geometry alone.
+    _write_search_failures_sidecar(output_path, final_result.router)
+
     # Issue #6376: post-save output connectivity verification.  This flow
     # returns before main_with_result's tail, so it runs the shared verifier
     # itself -- before zone fill, matching main (pour nets are not routed).
@@ -13391,6 +13447,12 @@ def route_with_rule_relaxation(
         print(f"  Saved to: {output_path}")
         print(f"  Final trace width: {final_result.trace_width:.3f}mm")
         print(f"  Final clearance: {final_result.clearance:.3f}mm")
+
+    # Issue #7879: the per-net search-failure sidecar describes THIS save,
+    # DRC or not.  It was only written from ``run_post_route_drc``, so a
+    # ``--skip-drc`` run or one that routed no net left none (or a stale
+    # one) and ``net-status --why`` fell back to geometry alone.
+    _write_search_failures_sidecar(output_path, final_result.router)
 
     # Issue #6376: post-save output connectivity verification.  This flow
     # returns before main_with_result's tail, so it runs the shared verifier
@@ -15921,6 +15983,12 @@ def route_with_combined_escalation(
         print(f"  Final trace width: {final_result.trace_width:.3f}mm")
         print(f"  Final clearance: {final_result.clearance:.3f}mm")
 
+    # Issue #7879: the per-net search-failure sidecar describes THIS save,
+    # DRC or not.  It was only written from ``run_post_route_drc``, so a
+    # ``--skip-drc`` run or one that routed no net left none (or a stale
+    # one) and ``net-status --why`` fell back to geometry alone.
+    _write_search_failures_sidecar(output_path, final_result.router)
+
     # Issue #6376: post-save output connectivity verification.  This flow
     # returns before main_with_result's tail, so it runs the shared verifier
     # itself -- before zone fill, matching main (pour nets are not routed).
@@ -17530,23 +17598,14 @@ def _build_complete_link_report(router: "Autorouter", pcb_path: Path) -> dict | 
         )
 
     try:
-        from kicad_tools.router.stuck_classifier import (
-            classify_stuck_nets,
-            is_budget_search_failure,
-        )
+        from kicad_tools.router.stuck_classifier import classify_stuck_nets
 
         # Issue #6315: hand the classifier the router's own per-net decline
         # reasons, so a net the search gave up on for a GEOMETRIC reason is
         # not labelled ``budget_starved``.  A net with several declined links
-        # keeps a geometric reason over a budget one.
-        search_failures: dict[str, str] = {}
-        for _key, _reason in reasons.items():
-            _name = _net_name_for_lattice_key(router, _key)
-            _prev = search_failures.get(_name)
-            if _prev is None or (
-                is_budget_search_failure(_prev) and not is_budget_search_failure(str(_reason))
-            ):
-                search_failures[_name] = str(_reason)
+        # keeps a geometric reason over a budget one -- the same merge the
+        # ``.search_failures.json`` sidecar uses (#7879).
+        search_failures = _lattice_search_failures(router)
         diag_by_net = {
             d.net_name: d
             for d in classify_stuck_nets(pcb_path, search_failures=search_failures).diagnoses
@@ -23714,6 +23773,12 @@ def _run_main_impl(args, parser, argv) -> int:
 
         if not quiet:
             print(f"  Saved to: {output_path}")
+
+        # Issue #7879: the per-net search-failure sidecar describes THIS save,
+        # DRC or not.  It was only written from ``run_post_route_drc``, so a
+        # ``--skip-drc`` run or one that routed no net left none (or a stale
+        # one) and ``net-status --why`` fell back to geometry alone.
+        _write_search_failures_sidecar(output_path, router)
 
     _rss.mark("post-save")
 

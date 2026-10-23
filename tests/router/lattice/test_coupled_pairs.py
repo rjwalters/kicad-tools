@@ -1484,6 +1484,7 @@ def test_tap_chain_retry_pairs_accepts_constrained_no_path_refinements() -> None
         "no-path",
         "no-path-keepout-constrained",
         "no-path-layer-constrained",
+        "no-path-pairwise-constrained",  # issue #7879
     } == EXHAUSTED_SEARCH_REASONS
     for reason in EXHAUSTED_SEARCH_REASONS:
         one = [pc(("pair", 1, 2), "X")]
