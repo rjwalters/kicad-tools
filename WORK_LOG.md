@@ -15,6 +15,11 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-23
 
+- **PR #7850**: ci(board05): nightly unattended from-scratch route gate (#7834)
+- **PR #7854**: test: compare min-of-5 timings in segment-components perf guard
+- **PR #7851**: feat(router): gate skew bumps against SkewLedger sources
+- **Issue #7853** (closed): test flake: test_build_segment_components_faster_on_larger_net fails on Test job
+- **Issue #6447** (closed): [Epic #6441] Phase 5: coupling-preserving skew tuning from a skew ledger, and pair invariants for post-passes
 - **PR #7847**: feat(check): report chain (XNet) pair skew across series elements
 - **PR #7846**: feat(router): post-pass pair-skew invariant guard (DRC nudge + via-in-pad, retune)
 - **PR #7845**: feat(router): add SkewLedger attributing pair P/N skew to joints, vias and ties
