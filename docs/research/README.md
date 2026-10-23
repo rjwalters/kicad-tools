@@ -67,6 +67,7 @@ Measured experiments on `kct route`; several record negative results.
 | [Bundle crossing report](bundle-crossing-report.md) | Measured hit and false-alarm counts |
 | [Pad-budget via footprint](pad-budget-via-footprint-6415.md) | Via-footprint charging on board 05 |
 | [`--reserve-pour-only-passives` cross-board](reserve-pour-only-passives-cross-board.md) | Flag off/on on boards 03-07: closes board 05's last 2 pour links and changes no other board's outcome; the note recommends flipping the default with an opt-out (Issue #7794) |
+| [Board 05 unattended route](board-05-unattended-route.md) | `kct route` from scratch at seeds 42/7/1337: 37/37, both DRC engines 0 errors, LVS clean, byte-identical across seeds; which wall clocks stay live; the nightly gate (Issue #7834) |
 | [kct check vs kicad-cli lengths](kicad-length-bench-6725.md) | Per-net length and pair skew comparison |
 
 ## Calibration notes
