@@ -831,6 +831,10 @@ class LatticePathfinder:
         # refusal by THIS projection may name the pairwise clearance in a
         # decline reason, so no new reason can appear without a voltage map.
         self._hv_pairwise: LatticePairwise | None = None
+        # Issue #7880: whether :meth:`set_pairwise` installed a REAL HV
+        # projection.  ``_pairwise`` alone cannot say: a #6703 fallback leg's
+        # class projection is swapped into it while that leg is searched.
+        self._hv_projection = False
         # Issue #4605: optional static keepout rule-area mask
         # (:class:`.obstacles.LatticeKeepoutMask`), resolved by the CALLER
         # from the board's ``(zone ... (keepout ...))`` rule areas + the
@@ -867,6 +871,9 @@ class LatticePathfinder:
         """
         self._pairwise = pairwise
         self._hv_pairwise = pairwise
+        self._hv_projection = pairwise is not None
+        if self._obstacles is not None:
+            self._obstacles.pairwise_composes_pad_extra = self._hv_projection
 
     @contextlib.contextmanager
     def _pairwise_off(self, committed: CommittedCopper) -> Iterator[None]:
@@ -975,7 +982,7 @@ class LatticePathfinder:
         return self._lattice
 
     def _make_obstacles(self, lattice: OctilinearLattice) -> LatticeObstacleModel:
-        return LatticeObstacleModel(
+        model = LatticeObstacleModel(
             lattice,
             self.pads,
             [self._pad_layer_indices(p) for p in self.pads],
@@ -984,6 +991,11 @@ class LatticePathfinder:
             pad_extra=self._authored_pad_extra(),
             pad_class_extra=self._class_outline_extra(),
         )
+        # Issue #7880: under an HV projection a pad's grown keep-out (authored
+        # floor, #6489 class growth) composes with the pair requirement by
+        # ``max`` (see ``pairwise_pad_blocked``).
+        model.pairwise_composes_pad_extra = self._hv_projection
+        return model
 
     def _class_outline_extra(self) -> list[float] | None:
         """Per-pad class requirement above the base clearance (issue #7503).
@@ -6391,17 +6403,24 @@ class LatticePathfinder:
         candidate at its gap (PR #6735 review); such a pad is now kept clear
         through the projection only.
 
+        Issue #7880: under an HV pairwise projection (``--voltage-map``) the
+        class keep-outs are MERGED into it rather than dropped.  The HV
+        projection carries cross-domain pairs only, so a same-domain class
+        pair (a 0.4 mm-class pad beside a 0.2 mm leg, HV or not) is in no HV
+        entry and nothing else holds it for a leg the repair barely moves.
+        Each pair keeps ``max(HV requirement, pad class)``; the HV attach
+        zones, and so the search's waiver, are the projection's own.  (A zone
+        covering both nets therefore also waives the class part of that
+        pair inside the zone -- the pre-#7880 behaviour there, where no class
+        keep-out was installed at all.)
+
         ``(None, 0.0)`` when no pad is stricter than either leg (the searches
-        are then exactly the partner-blind ones), when the router installed
-        no pad classes, or when a real HV pairwise projection is already
-        active (it governs pad clearance itself, and the repair is skipped
-        there).
+        are then exactly the partner-blind ones, under the active projection
+        when there is one) or when the router installed no pad classes.
         """
         from .class_pad_repair import pad_class_requirements
         from .pairwise import LatticePairwise
 
-        if self._pairwise is not None:
-            return None, 0.0
         pad_req = pad_class_requirements(self)
         if not pad_req:
             return None, 0.0
@@ -6427,8 +6446,20 @@ class LatticePathfinder:
         own_min = min(self._conn_geometry(pc.net_class, it[1].net)[1] for it in items.values())
         cap = _SEARCH_FLOOR_MAX_FACTOR * own_min + 1e-9
         floor = max((req for req in required.values() if req <= cap), default=0.0)
+        active = self._pairwise
+        if active is None:
+            return (
+                LatticePairwise(required_by_pair=required, zones=(), max_by_net=max_by_net),
+                floor,
+            )
+        merged = dict(active.required_by_pair)
+        for key, req in required.items():
+            merged[key] = max(merged.get(key, 0.0), req)
+        merged_max = dict(active.max_by_net)
+        for net, req in max_by_net.items():
+            merged_max[net] = max(merged_max.get(net, 0.0), req)
         return (
-            LatticePairwise(required_by_pair=required, zones=(), max_by_net=max_by_net),
+            LatticePairwise(required_by_pair=merged, zones=active.zones, max_by_net=merged_max),
             floor,
         )
 
