@@ -48,12 +48,12 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from kicad_tools.router.rules import NetClassRouting
     from kicad_tools.schema.pcb import PCB
-    from kicad_tools.validate.diffpair_engagement import PairThresholds
+    from kicad_tools.validate.diffpair_engagement import PairSkewLimits, PairThresholds
 
 
 logger = logging.getLogger(__name__)
@@ -230,6 +230,130 @@ def derive_skew_limits(
         )
 
     return skew_data, threshold_map
+
+
+@dataclass(frozen=True)
+class PairSkewMeasurement:
+    """One routed pair measured in length and in time (Issue #7892).
+
+    ``skew_mm`` is the kicad-cli length difference (as before #7892).
+    ``skew_ps`` is the difference of the two legs' propagation delays: each
+    trimmed track run at its layer's delay plus each via barrel at the via
+    delay (:class:`~kicad_tools.physics.skew_budget.LayerDelays`); ``None``
+    without per-layer delays.  ``layers`` maps each net to its track length
+    per copper layer (mm).
+    """
+
+    p_id: int
+    n_id: int
+    p_name: str
+    n_name: str
+    skew_mm: float
+    skew_ps: float | None
+    limits: PairSkewLimits
+    layers: dict[str, dict[str, float]]
+
+    @property
+    def key(self) -> tuple[int, int]:
+        return (self.p_id, self.n_id) if self.p_id <= self.n_id else (self.n_id, self.p_id)
+
+
+def derive_pair_skews(
+    pcb: PCB,
+    net_class_map: dict[str, NetClassRouting] | None,
+    num_copper_layers: int = 2,
+    stackup: Any | None = None,
+) -> list[PairSkewMeasurement]:
+    """Measure every routed, detected pair in mm and ps (Issue #7892).
+
+    Detection and the routed-both-halves gate are those of
+    :func:`derive_skew_limits`; lengths are the same kicad-cli measurement
+    (:func:`kicad_tools.router.kicad_length.measure_pcb_net_parts`, whose
+    total is :meth:`DiffPairLengthTracker.measure_net_from_pcb`).  The limits
+    come from :func:`~kicad_tools.validate.diffpair_engagement.resolve_pair_skew_limits`.
+    ``stackup`` defaults to :meth:`Stackup.from_pcb`.
+    """
+    if not net_class_map:
+        return []
+    from kicad_tools.router.kicad_length import KicadStackup, measure_pcb_net_parts
+    from kicad_tools.validate.diffpair_engagement import resolve_pair_skew_limits
+
+    if stackup is None:
+        stackup = _board_stackup(pcb, num_copper_layers)
+    kstack = KicadStackup.from_pcb(pcb, num_copper_layers)
+
+    out: list[PairSkewMeasurement] = []
+    for p_id, n_id, p_name, n_name in _routed_pairs(pcb, net_class_map):
+        parts_p = measure_pcb_net_parts(pcb, p_id, kstack)
+        parts_n = measure_pcb_net_parts(pcb, n_id, kstack)
+        limits = resolve_pair_skew_limits(net_class_map, p_name, n_name, stackup)
+        skew_ps = None
+        if limits.delays is not None:
+            t_p = limits.delays.delay_ps(parts_p.by_layer, parts_p.via_mm)
+            t_n = limits.delays.delay_ps(parts_n.by_layer, parts_n.via_mm)
+            skew_ps = abs(t_p - t_n)
+        out.append(
+            PairSkewMeasurement(
+                p_id=p_id,
+                n_id=n_id,
+                p_name=p_name,
+                n_name=n_name,
+                skew_mm=abs(parts_p.total - parts_n.total),
+                skew_ps=skew_ps,
+                limits=limits,
+                layers={p_name: parts_p.by_layer, n_name: parts_n.by_layer},
+            )
+        )
+    return out
+
+
+def _board_stackup(pcb: PCB, num_copper_layers: int) -> Any | None:
+    """The board's stackup, else the default for its layer count, else ``None``."""
+    from kicad_tools.physics.stackup import Stackup
+
+    try:
+        return Stackup.from_pcb(pcb)
+    except Exception as exc:
+        logger.debug("[diffpair-skew] no stackup on the board (%s); using a default", exc)
+    try:
+        if num_copper_layers <= 2:
+            return Stackup.default_2layer()
+        if num_copper_layers == 4:
+            return Stackup.jlcpcb_4layer()
+        if num_copper_layers == 6:
+            return Stackup.default_6layer()
+        return Stackup._create_generic_stackup(num_copper_layers)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("[diffpair-skew] no stackup (%s); skew checked in mm only", exc)
+        return None
+
+
+def _routed_pairs(
+    pcb: PCB, net_class_map: dict[str, NetClassRouting]
+) -> list[tuple[int, int, str, str]]:
+    """``(p_id, n_id, p_name, n_name)`` of every detected pair with both halves routed."""
+    from kicad_tools.router.diffpair_detection import build_synth_routing, detect_diff_pairs
+
+    net_names = {net_id: net.name for net_id, net in pcb.nets.items() if getattr(net, "name", None)}
+    if not net_names:
+        return []
+    synth_routing, net_to_class = build_synth_routing(net_class_map)
+    try:
+        detected = detect_diff_pairs(
+            net_names,
+            net_class_routing=synth_routing,
+            net_to_class=net_to_class,
+            kicad_groups=getattr(pcb, "kicad_diff_pair_groups", None),
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("[diffpair-skew] detector raised %s; treating as no skew data", exc)
+        return []
+    out = []
+    for d in detected:
+        p, n = d.pair.positive, d.pair.negative
+        if _net_has_geometry(pcb, p.net_id) and _net_has_geometry(pcb, n.net_id):
+            out.append((p.net_id, n.net_id, p.net_name, n.net_name))
+    return out
 
 
 def _net_has_geometry(pcb: PCB, net_id: int) -> bool:

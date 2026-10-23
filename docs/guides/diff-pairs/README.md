@@ -16,6 +16,7 @@ Epic #2556 (Phases 1–3).
 | See the per-protocol limits and where each number comes from | [07-protocol-defaults.md](07-protocol-defaults.md) |
 | Understand the diff-pair DRC rules (`kct check`) | [06-drc-rules.md](06-drc-rules.md) |
 | Limit uncoupled length and via count; how KiCad measures it | [08-uncoupled-length.md](08-uncoupled-length.md) |
+| Skew budgets in ps: the phase rule, per-layer delay, kicad-cli parity | [09-skew-budget.md](09-skew-budget.md) |
 | Length-match N>=3 nets together (parallel bus, not a pair) | [../match-groups/README.md](../match-groups/README.md) |
 
 ## Canonical pre-configured class

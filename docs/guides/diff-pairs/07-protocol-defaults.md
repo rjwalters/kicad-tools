@@ -36,6 +36,14 @@ deprecated shim over the same table.
 
 ## Severity follows the source
 
+> **Skew is now a time budget (Issue #7892).** `kct check` judges a pair whose
+> protocol it can identify against a derived budget in ps (guide 06), which
+> replaces the protocol's millimetre value in the table above. The millimetre
+> column remains the router's tuning target until #7893, and the floor of the
+> exported `.kicad_dru` skew rule. The severities below apply to the
+> millimetre limits that remain: class fields, protocols with no budget, and
+> the generic default.
+
 A `diffpair_length_skew` finding is:
 
 - an **error** when the limit is cited (every row but `LVDS`, `ETHERNET`) or explicit

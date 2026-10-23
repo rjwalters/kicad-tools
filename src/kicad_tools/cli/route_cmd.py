@@ -5022,27 +5022,49 @@ def _router_pair_limits(
     via limit gets no such rule; the skew rule is written for every pair (the
     generic 0.5 mm default is an error in both engines).  ``None`` (no pair
     list) keeps whatever an earlier route wrote.
+
+    Issue #7892: ``kct check`` judges skew in ps, which kicad-cli 10.0.6
+    cannot enforce, so the skew rule is the tightest millimetre form
+    (:attr:`~kicad_tools.validate.diffpair_engagement.PairSkewLimits.kicad_skew_mm`:
+    the derived budget at the board's slowest layer delay, any class cap, and
+    the router's own length target).
     """
     if pairs is None or net_class_map is None:
         return None
     from kicad_tools.manufacturers.netclass_dru import PairLimits
-    from kicad_tools.validate.diffpair_engagement import resolve_pair_thresholds
+    from kicad_tools.validate.diffpair_engagement import (
+        resolve_pair_skew_limits,
+        resolve_pair_thresholds,
+    )
     from kicad_tools.validate.rules.diffpair_uncoupled_length import (
         net_component_counts,
         uncoupled_limit,
     )
 
     components: dict[str, int] = {}
+    stackup = None
     if pairs:
         try:
             from kicad_tools.schema.pcb import PCB
 
-            components = net_component_counts(PCB.load(str(board_path)))
+            board = PCB.load(str(board_path))
         except Exception:  # limits stay valid without it; the count falls back to 1
-            components = {}
+            board = None
+        if board is not None:
+            try:
+                components = net_component_counts(board)
+            except Exception:  # the count falls back to 1
+                components = {}
+            try:
+                from kicad_tools.physics.stackup import Stackup
+
+                stackup = Stackup.from_pcb(board)
+            except Exception:  # no delays: the skew rule keeps its length limits
+                stackup = None
     limits: list[PairLimits] = []
     for p, n in pairs:
         t = resolve_pair_thresholds(net_class_map, p, n)
+        skew = resolve_pair_skew_limits(net_class_map, p, n, stackup)
         count = max(components.get(p, 0), components.get(n, 0))
         unc, _how = uncoupled_limit(t, count)
         limits.append(
@@ -5051,8 +5073,8 @@ def _router_pair_limits(
                 n,
                 uncoupled_mm=unc,
                 uncoupled_severity=t.uncoupled_severity,
-                skew_mm=t.skew_mm,
-                skew_severity=t.skew_severity,
+                skew_mm=skew.kicad_skew_mm,
+                skew_severity=skew.kicad_skew_severity,
                 max_vias=t.max_vias_per_net,
                 vias_severity=t.vias_severity,
             )

@@ -296,12 +296,17 @@ def test_router_report_and_kct_check_agree_on_board03_thresholds():
     for p, n in (("USB_D+", "USB_D-"), ("USB_MCU_D+", "USB_MCU_D-")):
         line = next(ln for ln in report.splitlines() if ln.strip().startswith(f"{p}/{n}:"))
         assert "skew tolerance 2.500 mm [protocol:USB2_FS (Renesas" in line
-        assert line.rstrip().endswith("; error]")
+        # The router still tunes to 2.5 mm until #7893 ...
         got = resolve_pair_thresholds(ncm, p, n)
         assert (got.skew_mm, got.protocol, got.skew_severity) == (2.5, "USB2_FS", "error")
+        # ... while kct check judges the derived ps budget (Issue #7892), and
+        # the router report quotes that same budget.
+        assert "kct check skew budget 115.16 ps [derived:-30 dB at knee" in line
+        assert line.rstrip().endswith("; warning]")
         finding = findings[tuple(sorted((p, n)))]
         assert finding.severity == "info"  # the committed copper passes
-        assert "within tolerance 2.500 mm [protocol:USB2_FS (Renesas" in finding.message
+        assert "within budget 115.16 ps" in finding.message
+        assert "USB2_FS 0.012 Gb/s, protocol max rate" in finding.message
 
 
 def test_board03_bench_rows_carry_the_limit_and_the_stretch_figure():

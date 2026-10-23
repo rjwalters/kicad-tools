@@ -2,6 +2,8 @@
 
 Research note and proposal for Issue #7883. Compiled 2026-10-23 against `main` @ `c162396a8`.
 
+**Status (2026-10-23):** ruled on #7883 (issuecomment-6370363844): Q-a −30 dB, Q-b knee, Q-c max rate = warning, Q-d derivation wins, Q-e time domain, Q-f DDR 2 ps. Step 1 (#7892) implements the budget in `src/kicad_tools/physics/skew_budget.py` and the time-domain `kct check`. The router and tuners follow in #7893, and the generator limits are removed in #7894.
+
 **This note changes no limit.** It derives a physics-based skew limit, proposes a tolerance and
 shows what that tolerance would do to every diff pair on boards 03, 06 (with the 06rf bench
 fixture) and 07. The implementation follows in a separate PR, after an operator ruling on the

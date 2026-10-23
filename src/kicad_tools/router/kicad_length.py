@@ -516,29 +516,56 @@ def _via_height(
     return stackup.span(*via.layers) if partial_net and not in_through_hole_pad else 0.0
 
 
-def net_length(
+@dataclass(frozen=True)
+class NetLengthParts:
+    """One net's kicad-cli length split by where it runs (Issue #7892).
+
+    ``runs`` holds each trimmed track run as ``(layer, length)`` and ``vias``
+    each via's charged stackup height, both in measurement order;
+    :attr:`total` sums them in that order, so it equals :func:`net_length`
+    exactly.  The time-domain skew check weights each layer by its own delay.
+    """
+
+    runs: tuple[tuple[str, float], ...]
+    vias: tuple[float, ...]
+
+    @property
+    def total(self) -> float:
+        total = 0.0
+        for _layer, length in self.runs:
+            total += length
+        for height in self.vias:
+            total += height
+        return total
+
+    @property
+    def by_layer(self) -> dict[str, float]:
+        """Trimmed track length per copper layer, in mm."""
+        out: dict[str, float] = {}
+        for layer, length in self.runs:
+            out[layer] = out.get(layer, 0.0) + length
+        return out
+
+    @property
+    def via_mm(self) -> float:
+        """Total via barrel height charged to the net, in mm."""
+        return sum(self.vias)
+
+
+def net_length_parts(
     segs: Iterable[LSeg],
     vias: Iterable[LVia],
     pads: Iterable[LPad],
     stackup: KicadStackup | None,
     *,
     partial_net: bool = False,
-) -> float:
-    """Length of one net exactly as kicad-cli measures it (see module docs).
-
-    ``stackup`` of ``None`` charges vias nothing (runs and trims only).
-    ``partial_net`` marks geometry that may be only part of its net (a router
-    ``Route``): a via connected on fewer than two layers then keeps its
-    declared span instead of counting as a zero-height stub.  Junction
-    resolution follows input order, which is file order for the PCB form
-    and the routed file's order for the Route form (:func:`route_geometry`,
-    Issue #6778).
-    """
+) -> NetLengthParts:
+    """:func:`net_length`, itemised per track run and per via (Issue #7892)."""
     seg_list = list(segs)
     via_list = list(vias)
     pad_list = list(pads)
 
-    total = 0.0
+    runs: list[tuple[str, float]] = []
     for run in _RunBuilder(seg_list).runs():
         # Vias first, then pads, each acting on the path the previous one left:
         # a via straightens a run end to its own centre, so a pad still trims
@@ -561,12 +588,34 @@ def net_length(
             path = _straighten_one_end(
                 _pad_shape(pad), path, lambda p, c=centre: math.dist(p, c) <= _CENTRE_TOL
             )
-        total += _Run(run.layer, path).length
+        runs.append((run.layer, _Run(run.layer, path).length))
 
+    heights: list[float] = []
     if stackup is not None:
         for via in via_list:
-            total += _via_height(via, seg_list, pad_list, stackup, partial_net)
-    return total
+            heights.append(_via_height(via, seg_list, pad_list, stackup, partial_net))
+    return NetLengthParts(tuple(runs), tuple(heights))
+
+
+def net_length(
+    segs: Iterable[LSeg],
+    vias: Iterable[LVia],
+    pads: Iterable[LPad],
+    stackup: KicadStackup | None,
+    *,
+    partial_net: bool = False,
+) -> float:
+    """Length of one net exactly as kicad-cli measures it (see module docs).
+
+    ``stackup`` of ``None`` charges vias nothing (runs and trims only).
+    ``partial_net`` marks geometry that may be only part of its net (a router
+    ``Route``): a via connected on fewer than two layers then keeps its
+    declared span instead of counting as a zero-height stub.  Junction
+    resolution follows input order, which is file order for the PCB form
+    and the routed file's order for the Route form (:func:`route_geometry`,
+    Issue #6778).  :func:`net_length_parts` gives the same total itemised.
+    """
+    return net_length_parts(segs, vias, pads, stackup, partial_net=partial_net).total
 
 
 # ---------------------------------------------------------------------------
@@ -614,6 +663,19 @@ def pcb_net_geometry(pcb: PCB, net_id: int) -> tuple[list[LSeg], list[LVia], lis
             continue
         vias.append(LVia(v.position[0], v.position[1], v.size, (v.layers[0], v.layers[-1])))
     return segs, vias, _pcb_pads(pcb, net_id)
+
+
+def measure_pcb_net_parts(
+    pcb: PCB,
+    net_id: int,
+    stackup: KicadStackup | None = None,
+    num_copper_hint: int = 2,
+) -> NetLengthParts:
+    """:func:`measure_pcb_net`, itemised per layer and via (Issue #7892)."""
+    segs, vias, pads = pcb_net_geometry(pcb, net_id)
+    return net_length_parts(
+        segs, vias, pads, stackup or KicadStackup.from_pcb(pcb, num_copper_hint)
+    )
 
 
 def measure_pcb_net(

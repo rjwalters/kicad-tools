@@ -44,23 +44,22 @@ to `max_vias_per_net`, and warns on unequal P and N via counts. Details: [guide 
 ## `diffpair_length_skew`
 
 Source: `DiffPairLengthSkewRule` in
-`src/kicad_tools/validate/rules/diffpair_length_skew.py`.
-Fires when an engaged pair's routed length skew (`|L_p - L_n|`) exceeds
-its limit. Total-length parity, not topology.
-
-The limit resolves as `skew_tolerance_mm` on the class, then the declared
-`pair_protocol`'s value in the protocol defaults table, then the generic
-0.5 mm (see [guide 07](07-protocol-defaults.md)). The finding names the source
-in brackets. It is an **error** when the limit is cited or explicit, and a
-**warning** when the limit is an `uncited` table value.
+`src/kicad_tools/validate/rules/diffpair_length_skew.py`. Since Issue #7892
+skew is checked **in time**: the difference between the two legs'
+propagation delays (per-layer delay from the stackup's ε_eff, vias at the
+inner-layer delay), against a budget in ps derived by
+`src/kicad_tools/physics/skew_budget.py` (−30 dB of mode conversion, 2 ps for
+DDR strobes). A protocol's maximum rate gives a **warning**; set
+`data_rate_gbps` on the class to make it an **error**. A class's own
+`skew_tolerance_mm`, and the generic 0.5 mm for pairs with no derivable
+budget, are still checked in mm. See [guide 09](09-skew-budget.md).
 
 ```bash
 kct check board.kicad_pcb --only diffpair_length_skew
 ```
 
-Remediate: insert serpentine on the shorter half (manual today; #2648 will
-automate), declare the pair's real `pair_protocol`, or set
-`skew_tolerance_mm` on the net class (see guide 04).
+Remediate: balance each leg's layer mix, tune the shorter leg, declare the
+pair's real `pair_protocol`, or set `data_rate_gbps` (see guides 04 and 09).
 
 ## `impedance`
 
@@ -90,7 +89,8 @@ inter-net floors.
 `via_count` rules per coupled pair into one managed `.kicad_dru` block, at the
 limits `kct check` resolves (guide 02 for the gap, guide 08 for the rest).
 Pair violations block `manufacturable` only when the limit is cited or
-explicit; the generic 0.5 mm skew default stays an error.
+explicit; the generic 0.5 mm skew default stays an error. The skew rule stays
+in mm: kicad-cli 10.0.6 cannot enforce a time budget ([guide 09](09-skew-budget.md)).
 
 ## ViolationType enumeration
 

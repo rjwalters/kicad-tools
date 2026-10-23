@@ -47,17 +47,21 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "src"))
 
-from kicad_tools.physics.constants import SPEED_OF_LIGHT  # noqa: E402
+# The formula and the sourced operating points live in the one helper
+# ``kicad_tools.physics.skew_budget`` (Issue #7892); this script only adds the
+# per-board assumptions of the note.
+from kicad_tools.physics import skew_budget as _sb  # noqa: E402
+from kicad_tools.physics.skew_budget import (  # noqa: E402
+    C_MM_PER_PS,
+    KNEE_COEFF,
+    dphi_max_rad,
+    scd21_db,
+)
 
 #: Mode-conversion tolerances evaluated (dB, |Scd21| at the evaluation frequency).
 #: -30 dB is the note's recommendation; -36 dB reserves half the phase budget
 #: for skew sources routing cannot see (fibre weave, package, connector).
 TOLERANCES_DB: tuple[float, ...] = (-30.0, -36.0)
-
-#: Bandwidth of a single-pole response with 10-90 % rise time t_r: ln(9)/(2 pi).
-KNEE_COEFF = math.log(9.0) / (2.0 * math.pi)  # 0.3497
-
-C_MM_PER_PS = SPEED_OF_LIGHT * 1e3 / 1e12  # 0.2998 mm/ps
 
 
 @dataclass(frozen=True)
@@ -74,30 +78,34 @@ class Signal:
     timing_source: str = ""
 
 
+def _signal(point: _sb.OperatingPoint, rate_source: str | None = None) -> Signal:
+    """A :class:`Signal` from one of the helper's sourced operating points."""
+    return Signal(
+        point.rate_gbps,
+        rate_source or point.rate_source,
+        point.edge_floor_ps,
+        point.edge_source,
+        point.timing_limit_ps,
+        point.timing_source,
+    )
+
+
 # Sources are keyed in the note's Sources list.
-USB2_FS = Signal(0.012, "[USB2] 12 Mb/s", 4000.0, "[USB2] s7.1.2.1: FS rise 4-20 ns")
-USB2_HS = Signal(0.48, "[USB2] 480 Mb/s", 500.0, "[USB2] THSR/THSF >= 500 ps")
+USB2_FS = _signal(_sb.USB2_FS)
+USB2_HS = _signal(_sb.USB2_HS)
+#: The note evaluates 06rf at the rates its README declares, not each
+#: protocol's maximum (which ``kct check`` uses by default, Issue #7892).
 USB3_G1 = Signal(5.0, "06rf README: USB 3.0, 5 Gb/s")
 PCIE_G1 = Signal(2.5, "06rf README: PCIe Gen1, 2.5 Gb/s")
 MIPI_1G = Signal(1.0, "06rf README: D-PHY, 1 Gb/s/lane")
 #: Board 07's regression fixture is synthetic and declares no rate: use the
 #: rate TI's D-PHY footnote evaluates (UI = 400 ps) [TI1].
-MIPI_2G5 = Signal(2.5, "assumed: [TI1] UI = 400 ps (2.5 Gb/s)")
-HDMI_14 = Signal(3.4, "assumed: HDMI 1.4b, data up to 1.7 GHz [TI2]")
+MIPI_2G5 = _signal(_sb.MIPI_DPHY, "assumed: [TI1] UI = 400 ps (2.5 Gb/s)")
+HDMI_14 = _signal(_sb.HDMI_14, "assumed: HDMI 1.4b, data up to 1.7 GHz [TI2]")
 #: SN65LVDS1 specifies a typical 0.6 ns differential rise and no minimum, so
 #: the typical value stands in for the floor (flagged in the note).
-LVDS_400M = Signal(
-    0.4,
-    "[LV1] SN65LVDS1/2 link: 400 Mb/s",
-    600.0,
-    "[LV1] driver t_r typ 0.6 ns (no min given)",
-)
-DDR4_3200 = Signal(
-    3.2,
-    "assumed: DDR4-3200 (synthetic fixture)",
-    timing_limit_ps=2.0,
-    timing_source="[X1] UG583 DQS_T/DQS_C 2 ps",
-)
+LVDS_400M = _signal(_sb.LVDS)
+DDR4_3200 = _signal(_sb.DDR_DQS_CK, "assumed: DDR4-3200 (synthetic fixture)")
 
 
 @dataclass(frozen=True)
@@ -190,15 +198,6 @@ class Row:
     #: converted to time layer by layer -- the quantity a derived limit checks.
     committed_skew_mm: float | None = None
     committed_skew_ps: float | None = None
-
-
-def dphi_max_rad(tol_db: float) -> float:
-    return 2.0 * math.asin(10.0 ** (tol_db / 20.0))
-
-
-def scd21_db(dphi_rad: float) -> float:
-    s = abs(math.sin(dphi_rad / 2.0))
-    return 20.0 * math.log10(s) if s > 0 else float("-inf")
 
 
 def load_board(spec: BoardSpec):

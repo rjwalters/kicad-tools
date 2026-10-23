@@ -1052,27 +1052,27 @@ class DRCChecker:
             context to supply ``skew_data``).
         """
         from kicad_tools.validate.diffpair_engagement import derive_engagement_state
-        from kicad_tools.validate.diffpair_skew import derive_chain_skew, derive_skew_limits
+        from kicad_tools.validate.diffpair_skew import derive_chain_skew, derive_pair_skews
 
         if self.net_class_map is None:
             self._warn_inactive_skew_rule("diffpair_length_skew")
 
-        # Issue #6443: the limit, its provenance and its severity all come
-        # from the one resolver (class field > protocol default > generic).
-        skew_data, limits = derive_skew_limits(
+        # Issue #7892: each pair is measured in length and in time (per-layer
+        # delay from the board's stackup) and judged against the derived ps
+        # budget of ``physics.skew_budget`` -- the one source of skew limits
+        # for this check.  Pairs with nothing to derive from keep the #6443
+        # millimetre resolution (class field > protocol default > generic).
+        measurements = derive_pair_skews(
             self.pcb,
             self.net_class_map,
             num_copper_layers=self.layers,
         )
         engaged_pairs, _ = derive_engagement_state(self.pcb, self.net_class_map)
         rule = DiffPairLengthSkewRule(
-            skew_data=skew_data,
             engaged_pairs=engaged_pairs,
-            threshold_map={key: t.skew_mm for key, t in limits.items()},
             emit_info=self._emit_skew_info,
-            severity_map={key: t.skew_severity for key, t in limits.items()},
-            source_map={key: t.skew_source for key, t in limits.items()},
             chains=derive_chain_skew(self.pcb, self.net_class_map, num_copper_layers=self.layers),
+            measurements=measurements,
         )
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
