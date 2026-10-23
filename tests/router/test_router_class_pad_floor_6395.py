@@ -450,34 +450,103 @@ def test_via_pad_shortfall_is_reported_not_moved(clearance: float, expected: int
     assert (via.x, via.y) == (gnd.x, gnd.y - 0.3 - clearance - 0.3)
 
 
-def test_voltage_map_board_is_skipped_visibly() -> None:
+def _unrelated_hv_projection():
+    """An HV projection that maps no net of :func:`_repair_case` (#7880).
+
+    Two far-away nets (8, 9) form the only cross-domain pair, so the board
+    has a live ``--voltage-map`` projection that says nothing about the run.
+    """
+    from kicad_tools.router.lattice.pairwise import LatticePairwise
+
+    return LatticePairwise(required_by_pair={(8, 9): 3.0}, zones=(), max_by_net={8: 3.0, 9: 3.0})
+
+
+def test_repair_runs_under_a_voltage_map() -> None:
+    """Issue #7880: a projection no longer switches the class repair off.
+
+    The HV projection carries cross-domain pairs only; the run/pad pair here is
+    in none of them, so before #7880 nothing held the pad's class and the
+    router's backstop demoted the net.
+    """
     pf, routes = _repair_case()
-    pf._pairwise = object()  # any HV projection disables the repair
+    pf.set_pairwise(_unrelated_hv_projection())
+    stats = repair_class_pad_pairs(pf, routes, dict.fromkeys(routes))
+    assert not hasattr(stats, "skipped")
+    assert (stats.found, stats.repaired, stats.remaining) == (1, 1, 0)
+    assert copper_gap(segment_shape(routes[(1, 0)].segments[1]), pad_shape(pf.pads[2])) >= (
+        POWER - EPS
+    )
+
+
+def _hv_pad_case(*, projection: bool) -> tuple[LatticePathfinder, dict]:
+    """:func:`_repair_case` plus a foreign HV pad just above the run (#7880).
+
+    The pad (net 5) sits so the run's centreline clears its pairwise keep-out
+    (``pad half + own half + 0.5 mm``) by 0.01 mm: legal where it is, but the
+    ~0.027 mm move off the GND pad below would enter it.
+    """
+    from kicad_tools.router.lattice.pairwise import LatticePairwise
+
+    req = 0.5
+    outline = [(0.0, 0.0), (20.0, 0.0), (20.0, 20.0), (0.0, 20.0)]
+    term_a = Pad(x=2.0, y=10.0, width=0.6, height=0.6, net=1, net_name="SIG", ref="R1", pin="1")
+    term_b = Pad(x=18.0, y=10.0, width=0.6, height=0.6, net=1, net_name="SIG", ref="R2", pin="1")
+    gnd_y = 10.0 - TRACE_W / 2 - 0.175 - 0.3
+    gnd = Pad(x=10.0, y=gnd_y, width=0.6, height=0.6, net=0, net_name="GND", ref="C1", pin="1")
+    hv_y = 10.0 + TRACE_W / 2 + req + 0.3 + 0.01
+    hv = Pad(x=10.0, y=hv_y, width=0.6, height=0.6, net=5, net_name="HV", ref="J1", pin="1")
+    pf = LatticePathfinder(outline, [term_a, term_b, gnd, hv], _rules())
+    pf.set_pad_class_clearances([BASE, BASE, POWER, BASE])
+    if projection:
+        pf.set_pairwise(
+            LatticePairwise(required_by_pair={(1, 5): req}, zones=(), max_by_net={1: req, 5: req})
+        )
+    run = [_seg(2.0, 10.0, 6.0, 10.0), _seg(6.0, 10.0, 14.0, 10.0), _seg(14.0, 10.0, 18.0, 10.0)]
+    return pf, {(1, 0): Route(1, "SIG", segments=run)}
+
+
+def test_repair_refuses_a_move_into_an_hv_pad_keepout() -> None:
+    """Issue #7880: a class move must also pass the search's HV pad keep-out.
+
+    Without the projection the same move is legal and kept (the control), so
+    the refusal is the pairwise term alone: the repair never trades a class
+    shortfall for an HV one.
+    """
+    pf, routes = _hv_pad_case(projection=False)
+    stats = repair_class_pad_pairs(pf, routes, dict.fromkeys(routes))
+    assert (stats.found, stats.repaired, stats.remaining) == (1, 1, 0)
+
+    pf, routes = _hv_pad_case(projection=True)
     before = _coords(routes)
     stats = repair_class_pad_pairs(pf, routes, dict.fromkeys(routes))
-    assert stats.skipped == "voltage-map"
-    assert (stats.found, stats.repaired) == (0, 0)
+    assert (stats.found, stats.repaired, stats.remaining) == (1, 0, 1)
     assert _coords(routes) == before
+    # Left in place and reported, so the #6489 growth round can take it.
+    assert stats.unrepaired_pads == {2: POWER}
 
 
-def test_router_logs_the_voltage_map_skip(monkeypatch, capsys) -> None:
+def test_router_repairs_under_a_voltage_map(monkeypatch, capsys) -> None:
+    """The router runs (and logs) the repair with a projection installed."""
     import kicad_tools.router.lattice.class_pad_repair as cpr
 
     real = cpr.repair_class_pad_pairs
 
     def with_hv(pf, *args, **kwargs):
-        saved, pf._pairwise = pf._pairwise, object()
+        saved = pf._pairwise
+        pf.set_pairwise(_unrelated_hv_projection())
         try:
             return real(pf, *args, **kwargs)
         finally:
-            pf._pairwise = saved
+            pf.set_pairwise(saved)
 
     monkeypatch.setattr(cpr, "repair_class_pad_pairs", with_hv)
     router = _board("lattice")
-    assert router.route_net(1)
-    assert router._lattice_pathfinder.class_pad_repair_stats.skipped == "voltage-map"
+    routes = router.route_net(1)
+    assert routes
+    assert _min_gap_to_cap(router, routes) >= POWER - EPS
     out = capsys.readouterr().out
-    assert "Pad class clearance (#6395): skipped -- HV pairwise clearance" in out
+    assert "1/1 track-pad shortfall(s) moved clear" in out
+    assert "--voltage-map" not in out
 
 
 # ---------------------------------------------------------------------------
