@@ -250,6 +250,11 @@ def sideband_net_class() -> NetClassRouting:
     )
 
 
+# Grid-layer indices of the 4-layer stack's inner layers (F.Cu=0, In1.Cu=1,
+# In2.Cu=2, B.Cu=3); see ``build_net_class_map`` (Issue #7908).
+OUTER_ONLY_AVOID_LAYERS = (1, 2)
+
+
 def build_net_class_map() -> dict[str, NetClassRouting]:
     """Build the canonical net-name -> NetClassRouting mapping.
 
@@ -285,9 +290,19 @@ def build_net_class_map() -> dict[str, NetClassRouting]:
     # In1 corridor under J1's B row that USB3_RX1 used, and RX1 lost its
     # route (seed 42: RX1 uncoupled 10.3/10.8 -> 14.7/18.3 mm).  Same class
     # otherwise: only the routing order changes.
+    #
+    # Issue #7908: MIPI_CLK keeps both legs on the outer (F/B) layers.  Its
+    # legs otherwise split across layers of different speed (outer microstrip
+    # 5.57 ps/mm vs inner stripline 6.94 ps/mm), so a skew inside the 0.3 mm
+    # length cap still exceeds the ps budget, and the tuner cannot close it
+    # without breaking the cap.  Outer-with-outer legs have equal ps/mm.
+    # ``DesignRules.strict_layers`` makes the avoid a hard block.  The same
+    # treatment on USB3_TX1 (6.6 ps vs 4.03 ps) leaves two GND vias in pads
+    # and strands U2.B1 (seed 42), so TX1 is left to the ps tuner (#7893).
     usb3_tx1 = dataclasses.replace(usb3, priority=3)
     pcie = pcie_net_class()
     mipi = mipi_net_class()
+    mipi_clk = dataclasses.replace(mipi, avoid_layers=list(OUTER_ONLY_AVOID_LAYERS))
     sideband = sideband_net_class()
 
     return {
@@ -309,8 +324,8 @@ def build_net_class_map() -> dict[str, NetClassRouting]:
         "PCIE_RX+": pcie,
         "PCIE_RX-": pcie,
         # MIPI (2 lanes)
-        "MIPI_CLK+": mipi,
-        "MIPI_CLK-": mipi,
+        "MIPI_CLK+": mipi_clk,
+        "MIPI_CLK-": mipi_clk,
         "MIPI_D0+": mipi,
         "MIPI_D0-": mipi,
         # Single-ended sideband
@@ -3270,6 +3285,9 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         min_trace_width=0.1016,
         neck_down_distance=1.0,
         neck_down_threshold=0.8,
+        # Issue #7908: hard-block the inner layers for the classes that
+        # declare ``avoid_layers`` (MIPI_CLK).
+        strict_layers=True,
     )
 
     # Power and ground nets are handled via copper pours on the inner planes
