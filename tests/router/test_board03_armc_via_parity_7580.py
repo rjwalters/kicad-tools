@@ -19,6 +19,12 @@ the profile board 03's copper is derived under -- and holds every gate of
   Q36 bounds hold explicitly;
 * every segment is on a 45-degree multiple.
 
+Issue #7920: the route runs WITHOUT ``--timeout`` (the tier-1 test's
+``--timeout 600`` starved pour-net oracle completion on loaded CI runners),
+and the fixture refuses a non-zero exit or any time-budget marker in the log
+before a single gate runs, so a wall-clock loss is reported as such rather
+than as copper-LVS opens.
+
 Pinned kicad-cli DRC and tier-1 ``kct check`` are recorded on #7580 for the
 same route; they need Docker / a full check and stay out of this test.
 
@@ -48,7 +54,23 @@ from kicad_tools.validate.rules.diffpair_uncoupled_length import is_via_count_fi
 
 REPO = Path(__file__).resolve().parents[2]
 BOARD = REPO / "boards" / "03-usb-joystick"
-ROUTE_TIMEOUT = 900
+# Issue #7920: the subprocess hang guard, NOT a routing budget -- the route
+# itself runs without ``--timeout`` (see the fixture).  The route takes ~180 s
+# on an idle Mac and 452-504 s in the passing ``slow-tests.yml`` runs (pinned
+# image, ``pytest -n auto`` on a 4 vCPU runner); the failing runs were cut at
+# the old ``--timeout 600``.  1200 s is ~2.4x the slowest complete CI route.
+ROUTE_TIMEOUT = 1200
+
+# Issue #7920: log lines that mean a wall clock, not the iteration budget,
+# shaped the routed board.  Any of them makes the route's copper (and its
+# copper-LVS) a function of runner speed, so the fixture refuses the board.
+_TIME_STARVED_MARKERS = (
+    "stage deadline fired -- run is not",
+    "outer timeout reached",
+    "budget left cannot cover",
+    "stranded-pour status UNKNOWN",
+    "UNVERIFIED",
+)
 
 PAIR = ("USB_D+", "USB_D-")
 # Operator ruling Q36 = 1 on #7463: the bounds that hold while VBUS U2.5 routes.
@@ -70,6 +92,17 @@ def _routing_plan():
     return mod
 
 
+def _time_starved_markers(log: str) -> list[str]:
+    """The :data:`_TIME_STARVED_MARKERS` present in a ``kct route`` log."""
+    return [m for m in _TIME_STARVED_MARKERS if m in log]
+
+
+def _tail(text: str | bytes | None, n: int = 4000) -> str:
+    if isinstance(text, bytes):
+        text = text.decode(errors="replace")
+    return (text or "")[-n:]
+
+
 @pytest.fixture(scope="module")
 def armc_route(tmp_path_factory) -> Path:
     """Route board 03 once under arm C (lattice, plain jlcpcb, seed 42)."""
@@ -85,8 +118,6 @@ def armc_route(tmp_path_factory) -> Path:
         str(pcb_in),
         "-o",
         str(routed),
-        "--timeout",
-        "600",
         "--no-cache",
         "--manufacturer",
         "jlcpcb",
@@ -108,15 +139,38 @@ def armc_route(tmp_path_factory) -> Path:
         "1000000",
         "--no-placement-delta-feedback",
     ]
-    proc = subprocess.run(
-        cmd,
-        cwd=REPO,
-        env=dict(os.environ, PYTHONHASHSEED="0"),
-        capture_output=True,
-        text=True,
-        timeout=ROUTE_TIMEOUT,
-    )
-    assert routed.is_file(), proc.stdout[-2000:] + proc.stderr[-2000:]
+    # Issue #7920: NO ``--timeout``.  With ``--timeout 600`` the route took
+    # 489-599 s on loaded CI runners, the post-route finishing reserve ran
+    # out, and ``KiCad Oracle Completion (pour nets)`` was skipped (#6273):
+    # exit 10 with ~20 GND/VCC pour links open, which this test then reported
+    # as copper-LVS opens.  Without ``--timeout`` the route is bounded by the
+    # ``--deterministic-budget`` iteration caps alone (the #5752 recipe for
+    # board 03's baseline test), so the copper and the pour completion no
+    # longer depend on runner speed.  ROUTE_TIMEOUT stays the hang guard.
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=REPO,
+            env=dict(os.environ, PYTHONHASHSEED="0"),
+            capture_output=True,
+            text=True,
+            timeout=ROUTE_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as exc:
+        pytest.fail(
+            f"kct route (board 03 arm C) did not finish within the {ROUTE_TIMEOUT}s "
+            f"hang guard: route ended unverified, timeout-starved\n"
+            f"{_tail(exc.stdout)}\n{_tail(exc.stderr)}"
+        )
+    starved = _time_starved_markers(proc.stdout + proc.stderr)
+    if proc.returncode != 0 or starved:
+        pytest.fail(
+            f"kct route (board 03 arm C) exited {proc.returncode} with time-budget "
+            f"markers {starved}: route ended unverified, timeout-starved -- its "
+            f"copper-LVS would report a wall-clock loss as opens (issue #7920)\n"
+            f"{_tail(proc.stdout)}\n{_tail(proc.stderr)}"
+        )
+    assert routed.is_file(), _tail(proc.stdout) + _tail(proc.stderr)
     return routed
 
 
@@ -149,3 +203,38 @@ def test_armc_route_gives_usb_d_equal_vias_with_every_gate(armc_route: Path) -> 
     lengths = geometry["lengths_mm"]
     assert geometry["common_coupled_mm"] >= COMMON_RUN_MIN_MM
     assert max(lengths["USB_MCU_D+"], lengths["USB_MCU_D-"]) <= MCU_LAUNCH_MAX_MM
+
+
+def test_time_starved_markers_catch_the_7920_failure_signature() -> None:
+    """The fixture's guard recognises a timeout-starved route (Issue #7920).
+
+    Lines from a real ``--timeout 150`` run of the arm C argv, which exited
+    10 with the 21 pour/USB_CC2 opens CI reported as copper-LVS failures.
+    The header lines every ``--deterministic-budget`` run prints (they QUOTE
+    the deadline marker) must not trip it.
+    """
+    header = (
+        "[deterministic-budget] Iteration-budgeted routing enabled (Issue #3538): ... "
+        "unless a later '[deterministic-budget] per-net wall clock bound' or "
+        "'stage deadline fired' line says a wall clock bound first (Issue #6329).\n"
+        "  20 -> 0 unconnected pour link(s) (converged)\n"
+        "SUCCESS: All signal nets routed, DRC passed! (2 power skipped)\n"
+    )
+    assert _time_starved_markers(header) == []
+    starved = header + (
+        "  route_all: outer timeout reached (111.4s >= 111.3s) after 1/25 nets; "
+        "returning partial result.\n"
+        "--- KiCad Oracle Completion (pour nets) ---\n"
+        "  skipped: the --timeout budget left cannot cover a kicad-cli DRC run (issue #6273)\n"
+        "  stranded-pour status UNKNOWN -- the run is reported unverified\n"
+        "UNVERIFIED: Routed 24/25 signal nets (96%, meets 95% threshold) (2 power skipped)\n"
+    )
+    assert _time_starved_markers(starved) == [
+        "outer timeout reached",
+        "budget left cannot cover",
+        "stranded-pour status UNKNOWN",
+        "UNVERIFIED",
+    ]
+    assert _time_starved_markers(
+        "[deterministic-budget] stage deadline fired -- run is not reproducible\n"
+    ) == ["stage deadline fired -- run is not"]
