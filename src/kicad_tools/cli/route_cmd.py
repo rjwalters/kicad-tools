@@ -20500,6 +20500,54 @@ def _restore_supervisor_control(control: str, snapshot: str) -> None:
         Path(control).write_text(snapshot)
 
 
+def _chain_complete_argv(args, argv: list[str] | None, output: Path, staged: Path) -> list[str]:
+    """Argv for the inner ``--complete`` pass over ``output``, writing ``staged``.
+
+    Copper-affecting recipe flags are forwarded so the inner pass reserves and
+    places copper under the same rules as the outer route: via size,
+    clearance and trace width (only when the operator passed them, since their
+    resolved ``args`` values may come from the board or manufacturer), the net
+    class map, the plane-via reservation opt-outs and the deterministic
+    budget.  ``--auto-layers``, ``--route-engine`` and ``--grid`` are left out:
+    ``--complete`` deliberately picks its own engine and lattice.
+    """
+    chain_argv = [str(output), "-o", str(staged), "--complete"]
+    for flag, attr in (
+        ("--manufacturer", "manufacturer"),
+        ("--seed", "seed"),
+        ("--backend", "backend"),
+        ("--copper", "copper"),
+        ("--complete-exclude-nets", "complete_exclude_nets"),
+        ("--net-class-map", "net_class_map"),
+    ):
+        value = getattr(args, attr, None)
+        if value not in (None, ""):
+            chain_argv.extend([flag, str(value)])
+    for flag, attr in (
+        ("--via-drill", "via_drill"),
+        ("--via-diameter", "via_diameter"),
+        ("--clearance", "clearance"),
+        ("--trace-width", "trace_width"),
+    ):
+        value = getattr(args, attr, None)
+        if value is not None and _flag_passed_explicitly(argv, (flag,)):
+            chain_argv.extend([flag, str(value)])
+    per_net = getattr(args, "per_net_iterations", 0)
+    if isinstance(per_net, int) and per_net > 0:
+        chain_argv.extend(["--per-net-iterations", str(per_net)])
+    for flag, attr in (
+        ("--quiet", "quiet"),
+        ("--skip-drc", "skip_drc"),
+        ("--no-plane-via-reservation", "no_plane_via_reservation"),
+        ("--deterministic-budget", "deterministic_budget"),
+    ):
+        if getattr(args, attr, False):
+            chain_argv.append(flag)
+    if getattr(args, "reserve_pour_only_passives", True) is False:
+        chain_argv.append("--no-reserve-pour-only-passives")
+    return chain_argv
+
+
 def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
     """Chain one ``--complete`` pass after a grid route left signal nets open.
 
@@ -20524,8 +20572,9 @@ def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
     cleanly (0, or 8 for a partial improvement) and closed at least one net;
     otherwise it is discarded and ``-o`` was never touched.  A closing pass
     replaces the stale pre-pass exit code; a partial improvement keeps the
-    original one.  The pass uses the board's own rules: recipe flags such as
-    via size, ``--grid`` and ``--layers`` are not forwarded.
+    original one.  Copper-affecting recipe flags are forwarded
+    (:func:`_chain_complete_argv`); ``--grid``, ``--layers`` and the engine
+    flags are not, since ``--complete`` picks its own.
     """
     if (
         getattr(args, "no_chain_complete", False)
@@ -20595,20 +20644,7 @@ def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
         )
     stage_stem = output.stem + ".chain"
     staged = output.with_name(stage_stem + output.suffix)
-    chain_argv = [str(output), "-o", str(staged), "--complete"]
-    for flag, attr in (
-        ("--manufacturer", "manufacturer"),
-        ("--seed", "seed"),
-        ("--backend", "backend"),
-        ("--copper", "copper"),
-        ("--complete-exclude-nets", "complete_exclude_nets"),
-    ):
-        value = getattr(args, attr, None)
-        if value not in (None, ""):
-            chain_argv.extend([flag, str(value)])
-    for flag, attr in (("--quiet", "quiet"), ("--skip-drc", "skip_drc")):
-        if getattr(args, attr, False):
-            chain_argv.append(flag)
+    chain_argv = _chain_complete_argv(args, argv, output, staged)
 
     def _staged_files() -> list[Path]:
         import glob

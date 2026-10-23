@@ -178,3 +178,59 @@ def test_skipped_when_budget_is_nearly_spent(board, monkeypatch):
     _stub_open(monkeypatch, [["VCP"]])
     monkeypatch.setattr(route_cmd, "_main_impl", lambda a: pytest.fail("must not run"))
     assert _chain_complete_pass(_args(board), None, 2) == 2
+
+
+def test_recipe_flags_reach_inner_argv(tmp_path):
+    out = tmp_path / "out.kicad_pcb"
+    staged = tmp_path / "out.chain.kicad_pcb"
+    outer = [
+        "in.kicad_pcb",
+        "--via-drill", "0.25",
+        "--via-diameter", "0.5",
+        "--clearance=0.12",
+        "--trace-width", "0.18",
+        "--net-class-map", "classes.json",
+        "--no-plane-via-reservation",
+        "--no-reserve-pour-only-passives",
+        "--deterministic-budget",
+        "--per-net-iterations", "1000000",
+    ]  # fmt: skip
+    args = _route_parser().parse_args(outer)
+    argv = route_cmd._chain_complete_argv(args, outer, out, staged)
+    for flag, value in (
+        ("--via-drill", "0.25"),
+        ("--via-diameter", "0.5"),
+        ("--clearance", "0.12"),
+        ("--trace-width", "0.18"),
+        ("--net-class-map", "classes.json"),
+        ("--per-net-iterations", "1000000"),
+    ):
+        assert argv[argv.index(flag) + 1] == value
+    for flag in (
+        "--no-plane-via-reservation",
+        "--no-reserve-pour-only-passives",
+        "--deterministic-budget",
+    ):
+        assert flag in argv
+    # The inner argv must itself parse alongside --complete.
+    assert _route_parser().parse_args(argv).complete
+
+
+def test_unset_recipe_flags_are_not_forwarded(tmp_path):
+    outer = ["in.kicad_pcb"]
+    args = _route_parser().parse_args(outer)
+    argv = route_cmd._chain_complete_argv(
+        args, outer, tmp_path / "o.kicad_pcb", tmp_path / "o.chain.kicad_pcb"
+    )
+    for flag in (
+        "--via-drill",
+        "--via-diameter",
+        "--clearance",
+        "--trace-width",
+        "--net-class-map",
+        "--no-plane-via-reservation",
+        "--no-reserve-pour-only-passives",
+        "--deterministic-budget",
+        "--per-net-iterations",
+    ):
+        assert flag not in argv
