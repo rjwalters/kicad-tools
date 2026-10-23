@@ -7453,6 +7453,7 @@ class LatticePathfinder:
                         else []
                     )
                     gateway_first = bool(pref_layers)
+                    first_greason: str | None = None
                     if gateway_first and not (
                         deadline is not None and time.monotonic() >= deadline
                     ):
@@ -7465,6 +7466,7 @@ class LatticePathfinder:
                             vias_used=pair_vias_used(item),
                             only_layers=pref_layers,
                         )
+                        first_greason = _greason
                         if gres is not None:
                             pass_gateways[item.key] = gres.gateway or "gateway"
                             pair_outcomes[item.key] = SegmentOutcome.coupled(
@@ -7486,6 +7488,22 @@ class LatticePathfinder:
                     )
                     if gateway_retry:
                         deferred_gateway.append((item, preason))
+                    elif (
+                        pres is None
+                        and uncoupled_fallback
+                        and first_greason is not None
+                        and preason in GATEWAY_RETRY_REASONS
+                        and hybrid_retry_reason(first_greason)
+                    ):
+                        # Issue #7858: the gateway-first attempt (#6883) IS
+                        # this segment's gateway retry -- it ran before the
+                        # planar run instead of after it -- so a qualifying
+                        # decline earns the hybrid retry (#6446) exactly as a
+                        # deferred retry's would.  Without this a preferred-
+                        # layer pair skipped straight to the plain fallback
+                        # (board 03 USB_D[0]).  Its per-end verdict is the
+                        # one the gateway-first search just recorded.
+                        deferred_hybrid.append(item)
                     if pres is None and uncoupled_fallback:
                         # Issue #6373: a declined pair's main run is routed as
                         # two single-ended legs.  Issue #6697: DEFERRED until
