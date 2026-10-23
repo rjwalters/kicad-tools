@@ -794,6 +794,36 @@ results = rule.check(pcb, design_rules)
 
 Increase via pad size or use larger drill.
 
+### PTH Annular Ring and Hole-to-Edge Rules
+
+The generated `.kicad_dru` file carries two rules that are easy to confuse
+with the via annular-ring and copper-to-edge rules above. Both are written by
+`src/kicad_tools/manufacturers/dru_generator.py`.
+
+- **PTH annular ring is its own rule.** `Annular Ring` is the via ring
+  (`A.Via_Type != 'Micro'`, ~line 465). `PTH Annular Ring` is a separate
+  `annular_width` rule scoped to `A.Type == 'pad'` (~line 471), so a plated
+  component pad can be held to a wider ring than a via.
+- **It is emitted only when the profile sets it.** The rule is skipped when
+  `min_pth_annular_ring_mm` is `None` (the default in
+  `manufacturers/base.py`), in which case pads fall back to the shared ring
+  behaviour and no `PTH Annular Ring` finding can appear. The JLCPCB profiles
+  set it (e.g. 0.18 mm in `data/jlcpcb_tier1.yaml`).
+- **`Hole to Edge` measures against the board edge only.** The rule applies
+  to `A.Type == 'via' || 'pad'` against `B.Layer == 'Edge.Cuts'` using
+  `physical_hole_clearance` with `min_hole_to_edge_mm` (~line 484). A pad next
+  to a neighbouring pad's hole, ten millimetres from the edge, is therefore
+  not held to the board-edge floor.
+- **Hole-to-hole spacing is a different knob** (`min_hole_to_hole_mm`) and is
+  not covered by these two rules.
+
+Both behaviours are exercised against native `kicad-cli pcb drc` by
+`tests/test_native_pth_rules.py` (skipped when `kicad-cli` is not installed):
+the 0.7 mm pad / 0.4 mm drill probe (0.15 mm ring) violates the 2-layer
+profile's floor but not the 4-layer one, and `Hole to Edge` fires only when the
+pads sit within 1 mm of the edge. The line numbers above are as of this writing; the rule
+names in the generated file are the stable handle.
+
 ### Via Type Not Supported by the Fab
 
 **Error:** `via_type_unsupported` — `Blind via at (105.000, 100.000) on F.Cu-In1.Cu (net 'SIG'): the current manufacturer profile does not support blind/buried vias (blind_buried_vias_supported=False). ...`
