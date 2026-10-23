@@ -192,9 +192,18 @@ class LatticeObstacleModel:
         # and the edge band beyond the rectangle stays with
         # :mod:`.class_pad_repair` exactly as before.
         self._pad_reach: list[float] = []
+        # Issue #7880: each pad's ``pad_extra`` growth (authored floor, #6489
+        # class growth), kept so :meth:`pairwise_pad_blocked` can compose the
+        # pair requirement with it by ``max`` instead of adding the two.  The
+        # pathfinder turns that on (:attr:`pairwise_composes_pad_extra`) only
+        # under an HV ``--voltage-map`` projection, so every other board keeps
+        # its pre-#7880 keep-outs byte-for-byte.
+        self._pad_grow: list[float] = []
+        self.pairwise_composes_pad_extra = False
         for i, pad in enumerate(pads):
             half_w, half_h = pad_half_extents(pad)
             grow = pad_extra[i] if pad_extra is not None else 0.0
+            self._pad_grow.append(grow)
             class_grow = pad_class_extra[i] if pad_class_extra is not None else 0.0
             hx = half_w + agent_radius + grow
             hy = half_h + agent_radius + grow
@@ -330,6 +339,15 @@ class LatticeObstacleModel:
         apply (``max(0, own_half + own_clr - agent_radius)``): pads whose
         pairwise inflation does not exceed it are the scalar path's business.
         The degenerate ``a == b`` form doubles as a point probe.
+
+        Issue #7880: ``pad_rects`` already carry each pad's ``pad_extra``
+        growth (its authored floor, or the #6489 class growth), which the
+        scalar checks hold in full.  With :attr:`pairwise_composes_pad_extra`
+        set, that growth is taken back out of the pairwise inflation, so the
+        pad is held to ``max(pair requirement, its own floor)`` -- each at its
+        full value -- rather than their sum.  Unset (every board without a
+        voltage map, including the #6703 fallback-leg projection) the
+        pre-#7880 inflation is unchanged.
         """
         reach = pairwise.max_required_for(net)
         if reach <= 0.0:
@@ -349,6 +367,8 @@ class LatticeObstacleModel:
             if req <= 0.0:
                 continue
             extra_pw = own_half + req - self.agent_radius
+            if self.pairwise_composes_pad_extra:
+                extra_pw -= self._pad_grow[idx]
             if extra_pw <= floor_extra:
                 continue
             if layer is not None and layer not in self.pad_layer_indices[idx]:

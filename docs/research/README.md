@@ -64,6 +64,7 @@ Measured experiments on `kct route`; several record negative results.
 | [Diff-pair primitive pairing spec](diffpair-primitive-pairing-spec.md) | Black-box, probe-only spec of how kicad-cli pairs P/N primitives into coupled length (Issue #7565) |
 | [Tuning-pattern uncoupled exclusion](kicad-tuning-pattern-uncoupled-exclusion.md) | Black-box probes: a KiCad tuning pattern drops the bump from the uncoupled figure but not the partner beside it, unless that partner span is a member too (Issue #7632, Q31) |
 | [Diff-pair skew compensation](diffpair-skew-compensation.md) | Sourced skew limits and uncoupled-length budgets for the diff-pair skew fixer |
+| [Diff-pair phase skew tolerance](diffpair-phase-skew-tolerance.md) | Skew limits derived from mode conversion at the Nyquist (or edge-knee) frequency. Proposes −30 dB (UI/50), under which every pair on boards 03/06/06rf/07rf loosens in mm. Moving to a time check fails layer-asymmetric pairs. Changes no limit; needs a ruling (Issue #7883) |
 | [Bundle crossing report](bundle-crossing-report.md) | Measured hit and false-alarm counts |
 | [Pad-budget via footprint](pad-budget-via-footprint-6415.md) | Via-footprint charging on board 05 |
 | [`--reserve-pour-only-passives` cross-board](reserve-pour-only-passives-cross-board.md) | Flag off/on on boards 03-07: closes board 05's last 2 pour links and changes no other board's outcome; the note recommends flipping the default with an opt-out (Issue #7794) |
