@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-23
 
+- **PR #7873**: fix(router): undo an inline diff-pair comb that leaves the skew no smaller
+- **Issue #7548** (closed): Board 06 synthetic fixture: 9 diff pairs over max skew on the seed-42 re-route (identity-allowed in check_diffpair_coverage.py)
 - **PR #7871**: fix(router): hybrid parity accepts a longer via-equal pair that removes much skew
 - **Issue #7870** (closed): fix(router): USB3_RX2 hybrid leg selection leaves 5.7 mm skew untunable (06rf)
 - **PR #7866**: fix(router): SkewLedger walks gateway pair routes in copper order (#7864)
