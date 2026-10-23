@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import functools
 import logging
 import math
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
     from kicad_tools.placement.routing import RoutingPlacementDisposition
     from kicad_tools.progress import ProgressCallback
 
+    from .diffpair_own_copper import OwnCopperRule
     from .io import FineZone
     from .kicad_length import KicadLengthModel
     from .pairplan.outcome import PairOutcome
@@ -20734,6 +20736,9 @@ class Autorouter:
         # Complete-net views include fixed escapes and every mutable fragment.
         routes_by_net = self._net_routes_merged()
         fixed_segment_ids = {id(s) for r in self.routes if r.is_escape for s in r.segments}
+        # Issue #7891: the net's own pads, so a bump never lands on its own
+        # copper -- and with that checked, escape stubs may host a bump.
+        own_copper = self._skew_tune_own_copper_rule()
 
         # Update the skew tracker so the post-tuning results are queryable.
         # Use the layer-stack count when available, else default to 2.
@@ -20844,7 +20849,8 @@ class Autorouter:
                 # True; flag-off keeps the pre-#4085 geometric selection.
                 grid=self.grid,
                 prefer_reserved_slack=self.enable_slack_corridor_widening,
-                fixed_segment_ids=fixed_segment_ids,
+                escape_segment_ids=fixed_segment_ids,
+                own_copper=own_copper,
                 extra_clearance_ok=(
                     foreign_clearance_gate
                     or self._skew_tune_foreign_clearance_ok(
@@ -20891,6 +20897,26 @@ class Autorouter:
                 )
                 if route is not None and net in routes_by_net and route is not routes_by_net[net]
             }
+            # Issue #7891: a bump hosted on an escape stub is written back into
+            # that escape fragment, in place of the stub it replaced.
+            escape_edits: dict[int, list[Any]] = {}
+            for net, route in changed.items():
+                edits = self._escape_fragment_edits(net, routes_by_net[net], route)
+                if edits is None:
+                    escape_edits = {}
+                    changed = {}
+                    p_route = routes_by_net[dp.pair.positive.net_id]
+                    n_route = routes_by_net[dp.pair.negative.net_id]
+                    result = DiffPairTuneResult(
+                        success=False,
+                        reason="post_insertion_drc_violation",
+                        attempts=result.attempts,
+                        skew_before_mm=result.skew_before_mm,
+                        skew_after_mm=result.skew_before_mm,
+                        message="Bump on an escape stub could not be written back; rolled back.",
+                    )
+                    break
+                escape_edits.update(edits)
             routes_by_net.update(changed)
             if changed:
                 previous = list(self.routes)
@@ -20898,11 +20924,14 @@ class Autorouter:
                 for net, route in changed.items():
                     escapes = [r for r in previous if r.net == net and r.is_escape]
                     fixed_vias = {id(v) for r in escapes for v in r.vias}
+                    escape_ids = {
+                        id(s) for r in escapes for s in escape_edits.get(id(r), r.segments)
+                    }
                     replacements[net] = (
                         Route(
                             net=net,
                             net_name=route.net_name,
-                            segments=[s for s in route.segments if id(s) not in fixed_segment_ids],
+                            segments=[s for s in route.segments if id(s) not in escape_ids],
                             vias=[v for v in route.vias if id(v) not in fixed_vias],
                         )
                         if escapes
@@ -20910,8 +20939,14 @@ class Autorouter:
                     )
                 published = []
                 for fragment in previous:
-                    if fragment.net not in changed or fragment.is_escape:
+                    if fragment.net not in changed:
                         published.append(fragment)
+                    elif fragment.is_escape:
+                        published.append(
+                            dataclasses.replace(fragment, segments=escape_edits[id(fragment)])
+                            if id(fragment) in escape_edits
+                            else fragment
+                        )
                     elif fragment.net in replacements:
                         published.append(replacements.pop(fragment.net))
                 self.restore_route_snapshot(published, replaced_routes=previous)
@@ -20939,6 +20974,44 @@ class Autorouter:
             num_copper_layers=num_layers,
         )
         return results
+
+    def _escape_fragment_edits(
+        self, net: int, before: Route, after: Route
+    ) -> dict[int, list[Any]] | None:
+        """New segments for each escape fragment of ``net`` a tune edited (Issue #7891).
+
+        ``before`` is the merged net the tuner was given, ``after`` what it
+        returned.  ``{id(fragment): segments}`` for every escape fragment that
+        lost a segment to a bump (each takes the bump that replaced its stub,
+        in place); ``{}`` when no escape segment was replaced; ``None`` when
+        the result does not map back onto the fragments.
+        """
+        from .diffpair_routing import _splice_tuned_segments
+
+        fragments = [r for r in self.routes if r.net == net]
+        escapes = [r for r in fragments if r.is_escape]
+        kept = {id(s) for s in after.segments}
+        if not any(id(s) not in kept for r in escapes for s in r.segments):
+            return {}
+        plan = _splice_tuned_segments(fragments, before.segments, after.segments)
+        if plan is None:
+            return None
+        return {id(frag): segs for frag, segs in plan if frag.is_escape}
+
+    def _skew_tune_own_copper_rule(self) -> OwnCopperRule:
+        """The own-copper rule every skew-tuning path checks (Issue #7891).
+
+        The board's pads (shape, rotation, layer, through-hole) grouped by
+        net, and the board's minimum copper clearance as the gap a bump keeps
+        to its own pads and vias.  See
+        :mod:`~kicad_tools.router.diffpair_own_copper` for why that clearance.
+        Built here once for the inline comb, the end-of-recipe tuner and
+        ``kct retune-lengths``.
+        """
+        from .diffpair_own_copper import OwnCopperRule
+
+        pads = list(getattr(self.grid, "_pads", None) or self.pads.values())
+        return OwnCopperRule.from_pads(pads, float(self.rules.trace_clearance))
 
     def _net_class_clearance_mm(self, net: int, name: str = "") -> float:
         """Net-class clearance (mm) declared for ``net``, or 0.0 when none.

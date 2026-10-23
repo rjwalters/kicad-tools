@@ -201,19 +201,41 @@ def test_ladder_closes_a_pair_the_wide_chamfer_cannot():
     _assert_gated(p_out)
 
 
+def _no_tail_fold():
+    """Bumps only (Issue #7891 adds a tail-fold run after them)."""
+    import kicad_tools.router.diffpair_tail_fold as fold
+
+    return patch.object(fold, "tail_fold_options", lambda **_kw: iter(()))
+
+
 def test_no_rung_closes_the_pair_reports_the_wide_attempt():
     """When even the tightest chamfer falls short, the 0.55-width result stands."""
     routes = _routes(6.0, 5.0)
-    with patch.object(tuning, "SKEW_BUMP_CHAMFER_LADDER", WIDE_ONLY):
+    with patch.object(tuning, "SKEW_BUMP_CHAMFER_LADDER", WIDE_ONLY), _no_tail_fold():
         _p, _n, wide = tune_diff_pair_skew(
             _pair(), routes, tolerance_mm=0.1, intra_pair_clearance_mm=GAP
         )
-    _p, _n, result = tune_diff_pair_skew(
-        _pair(), routes, tolerance_mm=0.1, intra_pair_clearance_mm=GAP
-    )
+    with _no_tail_fold():
+        _p, _n, result = tune_diff_pair_skew(
+            _pair(), routes, tolerance_mm=0.1, intra_pair_clearance_mm=GAP
+        )
     assert not result.success
     assert result.skew_after_mm == pytest.approx(wide.skew_after_mm)
     assert result.reason == wide.reason
+
+
+def test_tail_fold_closes_the_pair_no_bump_can():
+    """Issue #7891: D+ ends 5 mm before D-; folding D+'s end into D-'s
+    uncoupled tail closes the skew the 6 mm host's bumps cannot, within the
+    excursion cap and with every corner at 45 degrees."""
+    p_out, _n, result = tune_diff_pair_skew(
+        _pair(), _routes(6.0, 5.0), tolerance_mm=0.1, intra_pair_clearance_mm=GAP
+    )
+    assert result.success and result.skew_after_mm <= 0.1
+    copper = _bump_copper(p_out)
+    assert max(abs(v) for s in copper for v in (s.y1, s.y2)) <= MAX_EXCURSION_GAPS * GAP + 1e-6
+    # It runs past D+'s own end (x = 6) and stays beside D-'s tail (x <= 11).
+    assert 6.0 < max(max(s.x1, s.x2) for s in p_out.segments) <= 11.0
 
 
 def test_short_feet_close_the_scarce_pair_with_the_wide_crown():

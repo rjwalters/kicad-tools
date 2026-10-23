@@ -83,8 +83,19 @@ def test_split_pair_publishes_once_and_refreshes_state(native, shorter, escape_l
     assert abs(length(ar, 1) - length(ar, 2)) <= 0.5
     assert result.skew_after_mm == pytest.approx(abs(length(ar, 1) - length(ar, 2)))
     assert ar.diffpair_length_tracker.lengths[shorter] == pytest.approx(length(ar, shorter))
-    assert all(any(r is escape for r in ar.routes) for escape in escapes)
-    assert [(r.segments, r.vias) for r in escapes] == fixed_geometry
+    # Issue #7891: an escape stub may host the bump when it is the best host
+    # (the 17 mm synthetic escape here); the bump is written into that escape
+    # fragment, in place of the stub.  Every other escape is untouched.
+    hosted = escape_length > 2.0
+    for escape, geometry in zip(escapes, fixed_geometry, strict=True):
+        if hosted and escape.net == shorter:
+            [edited] = [r for r in ar.routes if r.is_escape and r.net == escape.net]
+            assert edited is not escape
+            assert all(a is b for a, b in zip(edited.vias, escape.vias, strict=True))
+            assert any(s.y1 != s.y2 for s in edited.segments)
+        else:
+            assert any(r is escape for r in ar.routes)
+            assert (escape.segments, escape.vias) == geometry
     assert sum(r.net == shorter and not r.is_escape for r in ar.routes) == 1
     assert not any(r in ar.routes for r in original if r.net == shorter and not r.is_escape)
     assert {id(r) for r in ar.grid.routes} == {id(r) for r in ar.routes} | {id(independent)}
@@ -94,7 +105,7 @@ def test_split_pair_publishes_once_and_refreshes_state(native, shorter, escape_l
     segment = next(
         s
         for r in ar.routes
-        if r.net == shorter and not r.is_escape
+        if r.net == shorter and r.is_escape == hosted
         for s in r.segments
         if s.y1 != s.y2
     )
@@ -113,7 +124,11 @@ def test_split_pair_publishes_once_and_refreshes_state(native, shorter, escape_l
     assert all(a is b for a, b in zip(first, ar.routes, strict=True))
 
 
-def test_escape_only_and_via_identity_are_preserved():
+def test_escape_only_net_hosts_its_bump_in_the_escape_and_keeps_via_identity():
+    """Issue #7891: escape copper is a host like any other (it used to be
+    refused, ``no_suitable_segment``).  The bump lands in the escape fragment
+    it replaced, still an escape; no channel fragment is invented, and the
+    other fragments and the via keep their identity."""
     ar, pairs = setup()
     for route in ar.routes:
         route.is_escape = True
@@ -121,9 +136,30 @@ def test_escape_only_and_via_identity_are_preserved():
     ar.routes[0].vias.append(via)
     original = list(ar.routes)
     result = ar.apply_diffpair_length_tuning(pairs, verbose=False)[("USB_D+", "USB_D-")]
-    assert result.reason == "no_suitable_segment"
-    assert all(a is b for a, b in zip(original, ar.routes, strict=True))
-    assert ar.routes[0].vias[0] is via
+    assert result.reason == "tuned"
+    assert abs(length(ar, 1) - length(ar, 2)) <= 0.5
+    assert len(ar.routes) == len(original) and all(r.is_escape for r in ar.routes)
+    assert ar.routes[0] is original[0] and ar.routes[0].vias[0] is via
+    assert ar.routes[1] is not original[1]
+    assert any(s.y1 != s.y2 for s in ar.routes[1].segments)
+    assert all(a is b for a, b in zip(original[2:], ar.routes[2:], strict=True))
+
+
+def test_escape_bump_never_touches_its_own_pad():
+    """Issue #7891: the own-copper rule holds an escape-hosted bump off its
+    own pads: no off-line bump copper within the board clearance of one."""
+    from kicad_tools.router.grid import pad_segment_edge_clearance
+
+    ar, pairs = setup(escape_length=17, split=True)
+    result = ar.apply_diffpair_length_tuning(pairs, verbose=False)[("USB_D+", "USB_D-")]
+    assert result.reason == "tuned"
+    bump = [s for r in ar.routes if r.net == 1 for s in r.segments if s.y1 != 10 or s.y2 != 10]
+    assert bump
+    for pad in (p for p in ar.pads.values() if p.net == 1):
+        assert (
+            min(pad_segment_edge_clearance(pad, s.x1, s.y1, s.x2, s.y2, s.width / 2) for s in bump)
+            >= ar.rules.trace_clearance - 1e-9
+        )
 
 
 def test_earlier_foreign_fragment_rejects_and_retains_original_objects():
