@@ -84,6 +84,16 @@ A black-box probe of pinned kicad-cli 10.0.6 (Issue #7892) found that
 `skew (max 4ps)` (and `ns`) parses but enforces nothing on a project without a
 KiCad tuning profile; an `mm` rule enforces. The exported `.kicad_dru` rule
 is the tightest length form of the pair's limits: the budget at the slowest
-layer, any class cap, and the router's own target until #7893. kicad-cli
-fails every pair whose legs share a layer mix and that `kct check` fails. It
-cannot see layer-dependent delay.
+layer and any class cap. kicad-cli fails every pair whose legs share a layer
+mix and that `kct check` fails. It cannot see layer-dependent delay.
+
+## What the router tunes to (Issue #7893)
+
+Every skew tuner and the coupled-candidate choice resolve their target with
+`kct check`'s own limits (`router.pair_skew_target.resolve_pair_skew_target`):
+the budget in ps **and** the error-level mm caps (a class `skew_tolerance_mm`
+until #7894, the generic 0.5 mm for a name-guessed protocol, and the
+`.kicad_dru` length rule when it is an error and tighter). Progress is
+measured in ps and each bump is sized by its host layer's delay, so a split
+pair matched in length is tuned until its delays match. A cap is never
+traded for ps: when closing the delay skew would break it, the tuner stops.

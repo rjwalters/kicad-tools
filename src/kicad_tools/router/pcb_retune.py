@@ -43,7 +43,7 @@ import signal
 import tempfile
 import threading
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -98,6 +98,12 @@ class TargetReport:
     #: Diff pairs only: the separate, tighter stretch target (not the gate).
     stretch_target_mm: float | None = None
     stretch_achieved: bool | None = None
+    #: Diff pairs only (Issue #7893): the derived budget the pair is judged
+    #: against in time, and its skew in ps before / after (``None`` when the
+    #: pair has no budget; ``tolerance_mm`` is then its error cap).
+    budget_ps: float | None = None
+    before_skew_ps: float | None = None
+    after_skew_ps: float | None = None
 
 
 @dataclass
@@ -178,6 +184,8 @@ class _Selection:
     pairs: list[Any]  # DetectedPair
     net_names: set[str]
     tolerance: dict[str, tuple[float, str]]  # target key -> (mm, source)
+    #: Issue #7893: each selected diff pair's skew target (``_retune_once``).
+    pair_targets: dict[str, Any] = field(default_factory=dict)
 
 
 def _target_key(kind: str, name: str) -> str:
@@ -205,7 +213,6 @@ def _resolve_selection(
     """Resolve names to detected groups/pairs, refusing anything not exact."""
     from kicad_tools.router.diffpair_detection import build_synth_routing, detect_diff_pairs
     from kicad_tools.router.match_group_detection import detect_match_groups
-    from kicad_tools.validate.diffpair_engagement import resolve_pair_thresholds
     from kicad_tools.validate.match_group_skew import resolve_group_tolerance_mm
 
     if not groups and not diffpairs:
@@ -273,10 +280,10 @@ def _resolve_selection(
         ids = list(g.net_ids) + [n for pair in g.pair_ids for n in pair]
         selected.update(net_names[i] for i in ids if i in net_names)
     for p in chosen_pairs:
-        p_name, n_name = p.pair.positive.net_name, p.pair.negative.net_name
-        th = resolve_pair_thresholds(net_class_map, p_name, n_name)
-        tolerance[_target_key("diffpair", f"{p_name}/{n_name}")] = (th.skew_mm, th.skew_source)
-        selected.update((p_name, n_name))
+        # Issue #7893: a pair's target (the derived ps budget and the error
+        # caps) is resolved by ``_retune_once`` from the router, which has the
+        # board's stackup; ``tolerance`` gets its length form there.
+        selected.update((p.pair.positive.net_name, p.pair.negative.net_name))
     return _Selection(chosen_groups, chosen_pairs, selected, tolerance)
 
 
@@ -287,26 +294,41 @@ def _resolve_selection(
 
 def _measure(
     pcb_path: Path, net_class_map: dict
-) -> tuple[dict[str, float], dict[tuple[str, str], float], dict[str, float]]:
-    """``(group_skew, pair_skew, net_length)`` of a board file, checker-exact."""
+) -> tuple[
+    dict[str, float],
+    dict[tuple[str, str], float],
+    dict[str, float],
+    dict[tuple[str, str], float | None],
+]:
+    """``(group_skew, pair_skew, net_length, pair_skew_ps)`` of a board file, checker-exact.
+
+    Issue #7893: ``pair_skew_ps`` is each pair's delay difference exactly as
+    ``kct check`` measures it (:func:`~kicad_tools.validate.diffpair_skew.derive_pair_skews`),
+    ``None`` for a pair without per-layer delays.
+    """
     from kicad_tools.router.kicad_length import KicadLengthModel
     from kicad_tools.schema.pcb import PCB
-    from kicad_tools.validate.diffpair_skew import derive_skew_limits
+    from kicad_tools.validate.diffpair_skew import derive_pair_skews, derive_skew_limits
     from kicad_tools.validate.match_group_skew import derive_group_skew_data
 
     pcb = PCB.load(str(pcb_path))
     group_skew, _groups, _thr = derive_group_skew_data(pcb, net_class_map)
     pair_skew, _limits = derive_skew_limits(pcb, net_class_map)
+    layers = len(getattr(pcb, "copper_layers", None) or ()) or 2
+    pair_ps = {
+        (m.p_name, m.n_name): m.skew_ps
+        for m in derive_pair_skews(pcb, net_class_map, num_copper_layers=layers)
+    }
     model = KicadLengthModel.from_pcb(pcb)
     lengths = {
         net.name: model.net_length_pcb(pcb, net_id)
         for net_id, net in pcb.nets.items()
         if net_id and net.name
     }
-    return group_skew, dict(pair_skew), lengths
+    return group_skew, dict(pair_skew), lengths, pair_ps
 
 
-def _pair_skew(pair_skew: dict[tuple[str, str], float], p: str, n: str) -> float | None:
+def _pair_skew(pair_skew: Mapping[tuple[str, str], float | None], p: str, n: str) -> float | None:
     for key in ((p, n), (n, p)):
         if key in pair_skew:
             return pair_skew[key]
@@ -638,8 +660,20 @@ def _limiting_members(
 
 
 def _failure_detail(failed: Sequence[TargetReport]) -> str:
+    def skew(t: TargetReport) -> str:
+        assert t.before_skew_mm is not None and t.after_skew_mm is not None
+        text = f"skew {t.before_skew_mm:.4f} -> {t.after_skew_mm:.4f} mm"
+        if t.budget_ps is not None and t.before_skew_ps is not None and t.after_skew_ps is not None:
+            # Issue #7893: the pair is judged in time.
+            text = (
+                f"skew {t.before_skew_ps:.3f} -> {t.after_skew_ps:.3f} ps "
+                f"({t.before_skew_mm:.4f} -> {t.after_skew_mm:.4f} mm), "
+                f"budget {t.budget_ps:.2f} ps"
+            )
+        return text
+
     return "; ".join(
-        f"{t.name}: skew {t.before_skew_mm:.4f} -> {t.after_skew_mm:.4f} mm, "
+        f"{t.name}: {skew(t)}, "
         f"limit {t.tolerance_mm:g} mm ({t.tuner_reason or 'no tuner result'})"
         + (f"; limited by {t.tuner_detail}" if t.tuner_detail else "")
         for t in failed
@@ -714,7 +748,7 @@ def retune_pcb(
     # The dropped targets as they stand on the written board: their nets may
     # be shared with a written target (a pair that is also a group lane).
     assert net_class_map is not None
-    group_now, pair_now, _ = _measure(Path(report.output_path), net_class_map)
+    group_now, pair_now, _, ps_now = _measure(Path(report.output_path), net_class_map)
     for t in dropped.values():
         attempted = t.after_skew_mm
         p_name, _, n_name = t.name.partition("/")
@@ -723,6 +757,8 @@ def retune_pcb(
             if t.kind == "match_group"
             else _pair_skew(pair_now, p_name, n_name)
         )
+        if t.kind == "diffpair" and t.budget_ps is not None:
+            t.after_skew_ps = _pair_skew(ps_now, p_name, n_name)
         t.achieved = False
         t.status = "unattainable"
         best = f"best attempt {attempted:.4f} mm, not written" if attempted is not None else ""
@@ -807,10 +843,24 @@ def _retune_once(
     if missing:
         raise RetuneError("no_geometry", f"selected net(s) {missing} are not routed")
 
-    group_before, pair_before, len_before = _measure(src, net_class_map)
+    group_before, pair_before, len_before, ps_before = _measure(src, net_class_map)
+    # Issue #7893: each selected pair's skew target -- the derived ps budget
+    # and the error-level caps, from the resolver ``kct check`` reads.
+    for p in selection.pairs:
+        p_name, n_name = p.pair.positive.net_name, p.pair.negative.net_name
+        key = _target_key("diffpair", f"{p_name}/{n_name}")
+        pair_target = router._pair_skew_target(p_name, n_name)
+        selection.pair_targets[key] = pair_target
+        tol_mm = pair_target.tolerance_mm
+        selection.tolerance[key] = (
+            tol_mm if tol_mm is not None else float("inf"),
+            pair_target.describe(),
+        )
 
     def violated(
-        g_skew: dict[str, float], p_skew: dict[tuple[str, str], float]
+        g_skew: dict[str, float],
+        p_skew: dict[tuple[str, str], float],
+        p_ps: dict[tuple[str, str], float | None] | None = None,
     ) -> list[TargetReport]:
         reports: list[TargetReport] = []
         for g in selection.groups:
@@ -837,6 +887,8 @@ def _retune_once(
             from kicad_tools.validate.diffpair_engagement import resolve_pair_thresholds
 
             th = resolve_pair_thresholds(net_class_map, p_name, n_name)
+            p_target = selection.pair_targets[_target_key("diffpair", f"{p_name}/{n_name}")]
+            in_time = p_target.budget_ps is not None
             reports.append(
                 TargetReport(
                     kind="diffpair",
@@ -849,6 +901,11 @@ def _retune_once(
                     achieved=False,
                     status="",
                     stretch_target_mm=th.skew_stretch_mm,
+                    budget_ps=p_target.budget_ps,
+                    before_skew_ps=_pair_skew(ps_before, p_name, n_name) if in_time else None,
+                    after_skew_ps=(
+                        _pair_skew(p_ps, p_name, n_name) if in_time and p_ps is not None else None
+                    ),
                 )
             )
         return reports
@@ -940,11 +997,18 @@ def _retune_once(
     with tempfile.TemporaryDirectory(prefix="kct-retune-") as scratch:
         probe = Path(scratch) / dst.name
         probe.write_text(new_text, encoding="utf-8")
-        group_after, pair_after, len_after = _measure(probe, net_class_map)
+        group_after, pair_after, len_after, ps_after = _measure(probe, net_class_map)
 
-    _require_no_pair_skew_regression(pair_before, pair_after, net_class_map)
+    _require_no_pair_skew_regression(
+        pair_before,
+        pair_after,
+        net_class_map,
+        ps_before=ps_before,
+        ps_after=ps_after,
+        targets=_targets_by_pair(router, pair_after),
+    )
 
-    targets = violated(group_after, pair_after)
+    targets = violated(group_after, pair_after, ps_after)
     for t in targets:
         key = _target_key(t.kind, t.name)
         t.tuner_reason = tuner_reasons.get(key, "")
@@ -952,10 +1016,18 @@ def _retune_once(
         assert t.before_skew_mm is not None
         if t.after_skew_mm is None:
             raise RetuneError("unmeasurable", f"{t.name}: cannot re-measure the written board")
-        t.achieved = t.after_skew_mm <= t.tolerance_mm + _EPS
+        judged = selection.pair_targets.get(key) if t.kind == "diffpair" else None
+        if judged is not None:
+            # Issue #7893: judged as ``kct check`` judges it -- the ps budget
+            # and every error cap.
+            t.achieved = judged.within(t.after_skew_ps, t.after_skew_mm)
+            satisfied_before = judged.within(t.before_skew_ps, t.before_skew_mm)
+        else:
+            t.achieved = t.after_skew_mm <= t.tolerance_mm + _EPS
+            satisfied_before = t.before_skew_mm <= t.tolerance_mm + _EPS
         if t.kind == "diffpair" and t.stretch_target_mm is not None:
             t.stretch_achieved = t.after_skew_mm <= t.stretch_target_mm + _EPS
-        if t.before_skew_mm <= t.tolerance_mm + _EPS and not changed:
+        if satisfied_before and not changed:
             t.status = "already_satisfied"
         else:
             t.status = "tuned" if t.achieved else "unattainable"
@@ -1003,35 +1075,65 @@ def _retune_once(
     return report
 
 
+def _targets_by_pair(
+    router: Any, pairs: dict[tuple[str, str], float]
+) -> dict[tuple[str, str], Any]:
+    """Every measured pair's skew target, from the router's resolver (Issue #7893)."""
+    return {(p, n): router._pair_skew_target(p, n) for (p, n) in pairs}
+
+
 def _require_no_pair_skew_regression(
     pair_before: dict[tuple[str, str], float],
     pair_after: dict[tuple[str, str], float],
     net_class_map: dict,
+    *,
+    ps_before: dict[tuple[str, str], float | None] | None = None,
+    ps_after: dict[tuple[str, str], float | None] | None = None,
+    targets: dict[tuple[str, str], Any] | None = None,
 ) -> None:
-    """Reject a retune that pushed any diff pair past its skew limit (Issue #6447).
+    """Reject a retune that pushed any diff pair off its skew target (Issue #6447).
 
     The post-pass pair-skew invariant, on the checker's own numbers: every
     pair on the board -- selected or not -- is compared before and after on
-    the written copper.  A pair now over its ``kct check`` error limit that
-    was inside it, or that got more than 0.01 mm further over it, fails the
-    whole retune (nothing is written).  The tuners carry their own guards
-    (#6664's never-worse backstop, #6675's group invariant); this is the
-    board-level backstop behind them.
-    """
-    from .pair_postpass_invariant import checker_skew_limit_mm, classify_skew_change
+    the written copper.  A pair now off its target that met it, or that got
+    more than 0.01 mm (in ps: that length at the slowest layer delay) further
+    off it, fails the whole retune (nothing is written).  The tuners carry
+    their own guards (#6664's never-worse backstop, #6675's group invariant);
+    this is the board-level backstop behind them.
 
+    Issue #7893: ``targets`` maps each pair to its
+    :class:`~kicad_tools.router.pair_skew_target.PairSkewTarget` (the ps
+    budget and the error caps) and ``ps_before`` / ``ps_after`` carry its
+    skew in ps; without ``targets`` each pair's target is resolved from
+    ``net_class_map`` on the default stackup for a 2-layer board.
+    """
+    from .pair_postpass_invariant import PairSkew, classify_target_change
+    from .pair_skew_target import resolve_pair_skew_target, skew_stackup
+
+    ps_before = ps_before or {}
+    ps_after = ps_after or {}
+    stackup = None if targets is not None else skew_stackup(None, 2)
     broken: list[str] = []
     for (p_name, n_name), after_mm in sorted(pair_after.items()):
-        limit = checker_skew_limit_mm(net_class_map, p_name, n_name)
-        if limit is None:
+        target = (targets or {}).get((p_name, n_name)) or resolve_pair_skew_target(
+            net_class_map, p_name, n_name, stackup
+        )
+        if not target.enforced:
             continue
         before_mm = _pair_skew(pair_before, p_name, n_name)
-        kind = classify_skew_change(before_mm, after_mm, limit)
+        if before_mm is None:
+            continue
+        before = PairSkew(_pair_skew(ps_before, p_name, n_name), before_mm)
+        after = PairSkew(_pair_skew(ps_after, p_name, n_name), after_mm)
+        kind = classify_target_change(target, before, after)
         if kind is not None:
-            broken.append(
-                f"{p_name}/{n_name} {before_mm:.3f} -> {after_mm:.3f} mm "
-                f"(limit {limit:.3f} mm, {kind})"
-            )
+            if before.ps is not None and after.ps is not None:
+                moved = (
+                    f"{before.ps:.3f} -> {after.ps:.3f} ps ({before_mm:.3f} -> {after_mm:.3f} mm)"
+                )
+            else:
+                moved = f"{before_mm:.3f} -> {after_mm:.3f} mm"
+            broken.append(f"{p_name}/{n_name} {moved} (target {target.short()}, {kind})")
     if broken:
         raise RetuneError(
             "pair_skew_regression",

@@ -820,6 +820,21 @@ class KicadLengthModel:
             segs, vias, self.pads_by_net.get(route.net, []), self.stackup, partial_net=True
         )
 
+    def route_length_parts(self, route: Route) -> NetLengthParts:
+        """:meth:`route_length`, itemised per layer and via (Issue #7893).
+
+        The tuners weight each layer's length by its propagation delay, as
+        ``kct check`` does on the written board; ``.total`` equals
+        :meth:`route_length`.
+        """
+        if self.copper_order is not None:
+            segs, vias = route_geometry(self.copper_order(route), file_order=True)
+        else:
+            segs, vias = route_geometry(route)
+        return net_length_parts(
+            segs, vias, self.pads_by_net.get(route.net, []), self.stackup, partial_net=True
+        )
+
     def net_length_pcb(self, pcb: PCB, net_id: int) -> float:
         segs, vias, _pads = pcb_net_geometry(pcb, net_id)
         return net_length(segs, vias, self.pads_by_net.get(net_id, []), self.stackup)

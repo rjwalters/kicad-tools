@@ -329,17 +329,26 @@ def test_skew_limit_is_ignored_when_both_or_neither_candidate_meets_it():
     )
 
 
-def test_checker_skew_limit_is_the_enforced_error_limit_only():
+def test_pair_skew_target_carries_the_class_cap_and_the_derived_budget():
+    """Issue #7893: the class's error cap and the name-identified ps budget."""
     router = _router()
     [pair] = router._diffpair.detect_differential_pairs()
     nc = NetClassRouting(name="HS", coupled_routing=True, skew_tolerance_mm=0.05)
     router.net_class_map = {"USB_D+": nc, "USB_D-": nc}
-    assert router._diffpair._checker_skew_limit_mm(pair) == pytest.approx(0.05)
+    target = router._diffpair._pair_skew_target(pair)
+    assert target.cap_mm == pytest.approx(0.05)
+    assert target.budget_ps == pytest.approx(14.39, abs=0.01)  # USB 2.0 HS, from the name
+
+
+def _cap_only(cap_mm):
+    from kicad_tools.router.pair_skew_target import PairSkewTarget
+
+    return lambda self, pair: PairSkewTarget("USB_D+", "USB_D-", cap_mm=cap_mm)
 
 
 def test_router_commits_the_in_limit_pose_over_a_better_coupled_skewed_joint(monkeypatch, capsys):
     """End to end through ``route_differential_pair_coupled`` (board 07 TMDS_D1 shape)."""
-    monkeypatch.setattr(DiffPairRouter, "_checker_skew_limit_mm", lambda self, pair: 0.05)
+    monkeypatch.setattr(DiffPairRouter, "_pair_skew_target", _cap_only(0.05))
     _router_, marked, independent, out = _run(
         monkeypatch, capsys, _tight_skewed(), _split_balanced()
     )
@@ -348,16 +357,17 @@ def test_router_commits_the_in_limit_pose_over_a_better_coupled_skewed_joint(mon
 
 
 def test_warning_severity_limit_leaves_candidate_selection_unchanged(monkeypatch, capsys):
-    """A warning-severity skew limit is advisory: plain #6858 ordering decides."""
-    from types import SimpleNamespace
+    """No skew target (only an advisory limit): plain #6858 ordering decides."""
+    from kicad_tools.router.pair_skew_target import PairSkewTarget
 
     monkeypatch.setattr(
-        "kicad_tools.validate.diffpair_engagement.resolve_pair_thresholds",
-        lambda *a, **k: SimpleNamespace(skew_mm=0.05, skew_severity="warning"),
+        DiffPairRouter,
+        "_pair_skew_target",
+        lambda self, pair: PairSkewTarget("USB_D+", "USB_D-", warning_cap_mm=0.05),
     )
     router = _router()
     [pair] = router._diffpair.detect_differential_pairs()
-    assert router._diffpair._checker_skew_limit_mm(pair) is None
+    assert router._diffpair._pair_skew_target(pair).enforced is False
 
     # Same fixtures as the error-limit end-to-end test, opposite winner.
     _router_, _marked, independent, out = _run(

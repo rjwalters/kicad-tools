@@ -29,7 +29,9 @@ if TYPE_CHECKING:
 
     from .core import Autorouter
     from .cpp_backend import CppCoupledPathfinder
+    from .diffpair_length_tuning import DiffPairTuneResult
     from .grid import RoutingGrid
+    from .pair_skew_target import PairSkewMeter, PairSkewTarget
     from .rules import DesignRules, NetClassRouting
 
 import contextlib
@@ -4962,11 +4964,60 @@ def _coupled_candidate_metrics(p_route: Route, n_route: Route) -> tuple[float, f
     return uncoupled, skew, len(p_route.vias) + len(n_route.vias)
 
 
+def _merged_route(routes: list[Route]) -> Route:
+    """One Route carrying every fragment's copper (the tuners' merged-net view)."""
+    if len(routes) == 1:
+        return routes[0]
+    return Route(
+        net=routes[0].net,
+        net_name=routes[0].net_name,
+        segments=[s for r in routes for s in r.segments],
+        vias=[v for r in routes for v in r.vias],
+    )
+
+
+def _comb_lengthens_time_shorter(
+    meter: PairSkewMeter, p_routes: list[Route], n_routes: list[Route]
+) -> bool:
+    """Whether the mm comb's leg (the length-shorter) is also the delay-shorter (#7893).
+
+    Always ``True`` without a ps budget.  The comb measures plain segment
+    length, as :func:`match_pair_lengths` picks its leg.
+    """
+    if not meter.in_time:
+        return True
+    p, n = _merged_route(p_routes), _merged_route(n_routes)
+    tp, tn = meter.delay_ps(p), meter.delay_ps(n)
+    if tp is None or tn is None:
+        return True
+    # ``match_pair_lengths`` compares the first fragment of each leg.
+    p_shorter_mm = calculate_route_length(p_routes[:1]) < calculate_route_length(n_routes[:1])
+    return p_shorter_mm == (tp < tn)
+
+
+def _skew_text(result: DiffPairTuneResult, *, after: bool = False) -> str:
+    """``skew 5.1ps [0.8mm]`` / ``skew 5.1ps -> 3.2ps [...]`` of a tune (Issue #7893)."""
+    if result.skew_before_ps is not None:
+        text = f"skew {result.skew_before_ps:.3f}ps"
+        if after and result.skew_after_ps is not None:
+            text += f" -> {result.skew_after_ps:.3f}ps"
+        mm = f"{result.skew_before_mm:.3f}mm"
+        if after:
+            mm += f" -> {result.skew_after_mm:.3f}mm"
+        return f"{text} [{mm}]"
+    text = f"skew {result.skew_before_mm:.3f}mm"
+    if after:
+        text += f" -> {result.skew_after_mm:.3f}mm"
+    return text
+
+
 def _select_coupled_candidate(
     joint: tuple[Route, Route, Any] | None,
     pose: tuple[Route, Route, Any] | None,
     resolution: float,
     skew_limit_mm: float | None = None,
+    *,
+    skew_ok: Callable[[Route, Route], bool] | None = None,
 ) -> str | None:
     """Pick ``"joint"`` or ``"pose"`` among gate-surviving candidates (#6858).
 
@@ -4982,6 +5033,12 @@ def _select_coupled_candidate(
     passes its skew rule for 0.16 mm less uncoupled copper (board 07
     TMDS_D1: pose skew 0.070 mm vs joint 0.498 mm, limit 0.075 mm) leaves a
     hard error the post-route tuner then cannot remove.
+
+    Issue #7893: ``skew_ok(p, n)`` -- the pair's
+    :meth:`~kicad_tools.router.pair_skew_target.PairSkewMeter.within`, its
+    ps budget and error-level caps on the checker's measure -- decides "meets
+    it" instead when given; the router always passes it.  ``skew_limit_mm``
+    remains for callers with only a length limit.
     """
     if joint is None and pose is None:
         return None
@@ -4991,7 +5048,11 @@ def _select_coupled_candidate(
         return "pose"
     j_unc, j_skew, j_vias = _coupled_candidate_metrics(joint[0], joint[1])
     t_unc, t_skew, t_vias = _coupled_candidate_metrics(pose[0], pose[1])
-    if skew_limit_mm is not None:
+    if skew_ok is not None:
+        j_ok, t_ok = skew_ok(joint[0], joint[1]), skew_ok(pose[0], pose[1])
+        if j_ok != t_ok:
+            return "joint" if j_ok else "pose"
+    elif skew_limit_mm is not None:
         j_ok, t_ok = j_skew <= skew_limit_mm, t_skew <= skew_limit_mm
         if j_ok != t_ok:
             return "joint" if j_ok else "pose"
@@ -5767,21 +5828,25 @@ class DiffPairRouter:
             grid._mark_segment(seg, clearance_cells=clearance_cells)
         self.autorouter._mark_route_on_cpp_grid(route)
 
-    def _checker_skew_limit_mm(self, pair: DifferentialPair) -> float | None:
-        """The pair's ``kct check`` skew limit when it is an ERROR (#5333).
+    def _pair_skew_target(self, pair: DifferentialPair) -> PairSkewTarget:
+        """The pair's skew target (Issue #7893; #5333 before it).
 
-        ``None`` when the limit is only advisory (warning/info), so candidate
-        selection keeps its plain #6858 ordering for such pairs.  The lookup
-        is :func:`~.pair_postpass_invariant.checker_skew_limit_mm`, shared
-        with the post-pass pair-skew guard (Issue #6447).
+        :meth:`Autorouter._pair_skew_target` -- the derived ps budget and the
+        error-level mm caps, from the one resolver ``kct check`` reads (it
+        replaces the millimetre ``_checker_skew_limit_mm``).
         """
-        from .pair_postpass_invariant import checker_skew_limit_mm
+        return self.autorouter._pair_skew_target(pair.positive.net_name, pair.negative.net_name)
 
-        return checker_skew_limit_mm(
-            getattr(self.autorouter, "net_class_map", None),
-            pair.positive.net_name,
-            pair.negative.net_name,
-        )
+    def _pair_skew_meter(self, pair: DifferentialPair) -> PairSkewMeter:
+        """Measures the pair's routes against its target, in ps and mm (Issue #7893).
+
+        The checker-exact, via-inclusive length model itemised per layer.
+        """
+        from .pair_skew_target import PairSkewMeter
+
+        ar = self.autorouter
+        num_layers = len(ar.layer_stack.layers) if ar.layer_stack is not None else 2
+        return PairSkewMeter(self._pair_skew_target(pair), ar._checker_route_parts(num_layers))
 
     def _collapse_committed_via_hairpins(self, routes: list[Route]) -> int:
         """Move committed vias back to their turn where a leg doubles back (#7782).
@@ -5930,9 +5995,10 @@ class DiffPairRouter:
 
         This runs the audited bump tuner (:func:`tune_diff_pair_skew`) on the
         pair exactly as ``Autorouter.apply_diffpair_length_tuning`` does on
-        its ``"checker_skew_limit"`` path: engaged only when ``kct check``
-        enforces the pair's skew limit as an error, tuned to that limit with
-        the checker's via-inclusive length measure, the foreign pad/via/track
+        its ``"checker_skew_limit"`` path: engaged when the pair has a skew
+        target (Issue #7893: the derived ps budget and the error-level mm
+        caps), tuned to it in ps with the checker's via-inclusive length
+        measure weighted by layer delay, the foreign pad/via/track
         gate, the #6795 uncoupled-length guard and the never-worse backstop.
         Its bumps (KiCad tuning patterns, or the chamfered plain fallback)
         are spliced into the committed fragments in place and re-marked on
@@ -5951,10 +6017,11 @@ class DiffPairRouter:
         p_id, n_id = pair.positive.net_id, pair.negative.net_id
         p_name, n_name = pair.positive.net_name, pair.negative.net_name
         thresholds = resolve_pair_thresholds(getattr(ar, "net_class_map", None), p_name, n_name)
-        if thresholds.skew_severity != "error":
+        target = self._pair_skew_target(pair)
+        if not target.enforced:
             print(
                 f"    [skew-tune] {p_name}/{n_name}: not tuned "
-                f"(skew limit is {thresholds.skew_severity}, not error)"
+                "(no derived budget and the skew limit is only a warning)"
             )
             return False
 
@@ -5995,7 +6062,7 @@ class DiffPairRouter:
         new_p, new_n, result = tune_diff_pair_skew(
             DetectedPair(pair=pair, source=DetectionSource.EXPLICIT),
             routes_by_net,
-            tolerance_mm=thresholds.skew_mm,
+            tolerance_mm=target.tolerance_mm,
             intra_pair_clearance_mm=intra,
             grid=ar.grid,
             prefer_reserved_slack=getattr(ar, "enable_slack_corridor_widening", False),
@@ -6011,16 +6078,27 @@ class DiffPairRouter:
             ),
             route_length=ar._checker_route_length(num_layers),
             max_uncoupled_mm=max_uncoupled_mm,
+            skew_target=target,
+            route_parts=ar._checker_route_parts(num_layers),
         )
-        # Never ship a tune that leaves the checker's skew worse (#6664).
+        # Never ship a tune that leaves the checker's skew worse (#6664), in
+        # the unit it was tuned in (Issue #7893).
+        if result.skew_after_ps is not None and result.skew_before_ps is not None:
+            not_better = result.skew_after_ps > result.skew_before_ps - 1e-6 or (
+                target.cap_mm is not None
+                and result.skew_after_mm > target.cap_mm + 1e-6
+                and result.skew_after_mm > result.skew_before_mm + 1e-6
+            )
+        else:
+            not_better = result.skew_after_mm > result.skew_before_mm - 1e-9
         if (
             not result.inserts_applied
-            or result.skew_after_mm > result.skew_before_mm - 1e-9
+            or not_better
             or result.reason == "post_insertion_drc_violation"
         ):
             print(
                 f"    [skew-tune] {p_name}/{n_name}: not tuned ({result.reason}; "
-                f"skew {result.skew_before_mm:.3f}mm, limit {thresholds.skew_mm:.3f}mm)"
+                f"{_skew_text(result)}, target {target.short()})"
             )
             return False
 
@@ -6040,8 +6118,8 @@ class DiffPairRouter:
             self._remark_route_cells(fragment)
         print(
             f"    [skew-tune] {p_name}/{n_name}: {result.reason}, "
-            f"{result.inserts_applied} insert(s), skew {result.skew_before_mm:.3f}mm -> "
-            f"{result.skew_after_mm:.3f}mm (limit {thresholds.skew_mm:.3f}mm)"
+            f"{result.inserts_applied} insert(s), {_skew_text(result, after=True)} "
+            f"(target {target.short()})"
         )
         return True
 
@@ -12872,11 +12950,14 @@ class DiffPairRouter:
 
             kept_kind: str | None = None
             if gated:
+                # Issue #7893: "meets its skew target" is judged in ps
+                # against the derived budget and the error-level caps.
+                meter = self._pair_skew_meter(pair)
                 kept_kind = _select_coupled_candidate(
                     gated.get("joint"),
                     gated.get("pose"),
                     float(self.autorouter.grid.resolution),
-                    skew_limit_mm=self._checker_skew_limit_mm(pair),
+                    skew_ok=meter.within if meter.target.enforced else None,
                 )
             if pose_candidate is not None or joint_result is not None:
                 print(
@@ -13105,9 +13186,21 @@ class DiffPairRouter:
         warning = None
         # Issue #7767: gate on the limit ``kct check`` enforces when that is
         # an error and stricter than the router's default ``max_length_delta``.
+        # Issue #7893: that limit is the pair's skew target, judged in ps (each
+        # leg's delay per layer) on the checker's via-inclusive measure.
         match_tol = self._inline_match_tolerance(pair)
+        meter = self._pair_skew_meter(pair)
+        pair_rules = pair.rules
+        assert pair_rules is not None, "committed coupled pair always carries rules"
 
-        if delta > match_tol:
+        def off_target() -> bool:
+            if delta > pair_rules.max_length_delta:
+                return True
+            if not meter.target.enforced or not p_routes or not n_routes:
+                return delta > match_tol
+            return not meter.within(_merged_route(p_routes), _merged_route(n_routes))
+
+        if off_target():
             # Issue #3003: gate the inline serpentine shim on
             # ``length_critical=True``.  The intent is that length
             # matching for length-critical pairs is performed by the
@@ -13144,8 +13237,26 @@ class DiffPairRouter:
             else:
                 print(f"    Length mismatch: {delta:.3f}mm, attempting serpentine...")
 
-                # Try to add serpentine to shorter route
-                if p_routes and n_routes:
+                # Try to add serpentine to shorter route.  Issue #7893: the
+                # comb lengthens the shorter leg in mm; on a pair split across
+                # layers of different speed that can be the leg with MORE
+                # delay, so the comb is skipped there for the ps-aware tuner.
+                comb_leg_ok = bool(p_routes and n_routes) and _comb_lengthens_time_shorter(
+                    meter, p_routes, n_routes
+                )
+                if p_routes and n_routes and not comb_leg_ok:
+                    print(
+                        "    Length-shorter leg has more delay (layer mix); "
+                        "trying the skew-bump tuner."
+                    )
+                    if self._tune_committed_pair_skew(pair):
+                        p_length = calculate_route_length(p_routes)
+                        n_length = calculate_route_length(n_routes)
+                        pair.routed_length_p = p_length
+                        pair.routed_length_n = n_length
+                        delta = pair.length_delta
+                        print(f"    After skew-bump tuning: delta={delta:.3f}mm")
+                elif p_routes and n_routes:
                     matched = match_pair_lengths(
                         p_routes[0],
                         n_routes[0],
@@ -13179,12 +13290,21 @@ class DiffPairRouter:
                         pair.routed_length_n = n_length
                         delta = pair.length_delta
                         print(f"    After serpentine: delta={delta:.3f}mm")
-                    else:
+                    if matched and off_target():
+                        # Issue #7893: the comb closed the mm delta it was
+                        # given, but not the pair's ps target.
+                        matched = False
+                        print(
+                            "    Serpentine left the pair off its skew target "
+                            f"({meter.target.short()}); trying the skew-bump tuner."
+                        )
+                    elif not matched:
                         print(
                             "    Serpentine rejected (no suitable segment OR "
                             "would violate intra-pair clearance); trying the "
                             "skew-bump tuner."
                         )
+                    if not matched:
                         # Issue #7269: the grid engine never runs the post-route
                         # Phase 3I tuner, so a rejected comb used to leave the
                         # committed pair's skew as routed.
@@ -13203,10 +13323,10 @@ class DiffPairRouter:
                 max_allowed=pair.rules.max_length_delta,
             )
             print(f"    WARNING: {warning}")
-        elif delta > match_tol:
+        elif off_target():
             print(
                 f"    Length delta {delta:.3f}mm is within max_length_delta but "
-                f"above the enforced skew limit {match_tol:.3f}mm"
+                f"off the pair's skew target {meter.target.short()}"
             )
         else:
             print(f"    Length matched: delta={delta:.3f}mm (within tolerance)")
@@ -13214,15 +13334,19 @@ class DiffPairRouter:
         return routes, warning
 
     def _inline_match_tolerance(self, pair: DifferentialPair) -> float:
-        """Inline length-match tolerance for a committed coupled pair (#7767).
+        """Inline comb's millimetre tolerance for a committed coupled pair (#7767).
 
-        ``pair.rules.max_length_delta`` unless ``kct check`` enforces a
-        stricter skew limit for the pair as an error.
+        ``pair.rules.max_length_delta``, or the pair's skew target in its
+        tightest length form when that is stricter (Issue #7893:
+        :attr:`~kicad_tools.router.pair_skew_target.PairSkewTarget.tolerance_mm`,
+        the error caps and the ps budget at the slowest layer delay).  It only
+        sizes the comb; whether the pair is matched is judged in ps
+        (:meth:`_pair_skew_meter`).
         """
         rules = pair.rules
         assert rules is not None, "committed coupled pair always carries rules"
         tol = float(rules.max_length_delta)
-        limit = self._checker_skew_limit_mm(pair)
+        limit = self._pair_skew_target(pair).tolerance_mm
         return tol if limit is None else min(tol, limit)
 
     def route_differential_pair_independent(

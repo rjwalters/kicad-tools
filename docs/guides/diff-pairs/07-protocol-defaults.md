@@ -38,9 +38,10 @@ deprecated shim over the same table.
 
 > **Skew is now a time budget (Issue #7892).** `kct check` judges a pair whose
 > protocol it can identify against a derived budget in ps (guide 06), which
-> replaces the protocol's millimetre value in the table above. The millimetre
-> column remains the router's tuning target until #7893, and the floor of the
-> exported `.kicad_dru` skew rule. The severities below apply to the
+> replaces the protocol's millimetre value in the table above. Since #7893 the
+> router and every skew tuner tune to that same budget, so the millimetre
+> column is no longer a tuning target or a floor of the exported `.kicad_dru`
+> skew rule. The severities below apply to the
 > millimetre limits that remain: class fields, protocols with no budget, and
 > the generic default.
 

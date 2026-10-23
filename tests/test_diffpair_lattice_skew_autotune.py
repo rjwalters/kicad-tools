@@ -8,7 +8,8 @@ same ``skew_mm`` -- regardless of the class's ``length_critical`` flag.
 
 (a) a ``length_critical=False`` class with ``skew_tolerance_mm=0.1`` is tuned,
     to the checker's limit;
-(b) a limit that resolves to ``skew_severity="warning"`` is not tuned;
+(b) a limit that resolves to ``skew_severity="warning"`` with no derived
+    budget is not tuned; a derived budget is tuned in ps (Issue #7893);
 (c) ``--length-match-diffpairs`` semantics are unchanged
     (``not_length_critical``);
 (d) the grid engine never auto-engages.
@@ -100,12 +101,15 @@ def test_a_checker_limit_tunes_non_length_critical_pair_to_checker_limit():
     assert _skew(ar) <= limit.skew_mm + 1e-9
 
 
-def test_b_warning_severity_limit_is_not_tuned():
-    # LVDS's protocol default (0.5 mm) is uncited -> kct check only warns.
-    nc = NetClassRouting(name="LVDS", length_critical=True, pair_protocol="LVDS")
+def test_b_warning_only_limit_without_budget_is_not_tuned():
+    # Issue #7893: ETHERNET has no operating point in the phase rule, so the pair
+    # has no derived budget; its protocol default is uncited -> kct check only
+    # warns.  Nothing the checker fails it on, so it is not tuned.
+    nc = NetClassRouting(name="ETH", length_critical=True, pair_protocol="ETHERNET")
     ar = _router(nc, skew_mm=4.0)
     limit = resolve_pair_thresholds(ar.net_class_map, P_NAME, N_NAME)
     assert limit.skew_severity == "warning"
+    assert ar._pair_skew_target(P_NAME, N_NAME).enforced is False
     before = [list(r.segments) for r in ar.routes]
 
     calls, spy = _spy()
@@ -119,6 +123,32 @@ def test_b_warning_severity_limit_is_not_tuned():
     assert result.reason == "skew_limit_not_enforced"
     assert result.skew_before_mm == pytest.approx(4.0)
     assert [list(r.segments) for r in ar.routes] == before
+
+
+def test_b2_derived_warning_budget_is_tuned_in_ps():
+    # Issue #7893: LVDS's uncited 0.5 mm table value used to make the pair a
+    # warning the router declined.  ``kct check`` now judges it against the
+    # derived 17.27 ps budget (a warning: protocol max rate), and the router
+    # tunes to exactly that budget, in ps.
+    nc = NetClassRouting(name="LVDS", length_critical=True, pair_protocol="LVDS")
+    ar = _router(nc, skew_mm=4.0)
+    target = ar._pair_skew_target(P_NAME, N_NAME)
+    assert target.budget_ps == pytest.approx(17.27, abs=0.01)
+    assert target.cap_mm is None
+
+    calls, spy = _spy()
+    with patch.object(dlt_module, "tune_diff_pair_skew", spy):
+        results = ar.apply_diffpair_length_tuning(
+            detected_pairs=_pairs(ar), verbose=False, engage="checker_skew_limit"
+        )
+
+    assert len(calls) == 1
+    assert calls[0]["skew_target"] == target
+    result = results[(P_NAME, N_NAME)]
+    assert result.budget_ps == pytest.approx(target.budget_ps)
+    assert result.skew_before_ps > target.budget_ps
+    assert result.reason == "tuned"
+    assert result.skew_after_ps <= target.budget_ps
 
 
 def test_c_length_match_diffpairs_still_gates_on_length_critical():

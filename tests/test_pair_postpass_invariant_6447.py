@@ -100,7 +100,7 @@ def _skew(router: Autorouter) -> float:
     assert measure is not None
     skew = ppi.measure_pair_skews(pairs, router.routes, measure)[pairs[0].nets]
     assert skew is not None
-    return skew
+    return skew.mm
 
 
 def test_unguarded_via_in_pad_sweep_breaks_the_pair(monkeypatch):
@@ -165,19 +165,22 @@ def test_classify_skew_change(before, after, expected):
 
 
 def test_advisory_skew_limit_is_not_guarded():
-    """Only limits ``kct check`` fails the board on are guarded.
+    """Only pairs with a skew target are guarded (Issue #7893).
 
-    LVDS's protocol skew default is uncited, so ``kct check`` reports it as a
-    warning and the guard leaves such a pair alone.
+    ETHERNET has no operating point in the phase rule, so the pair has no
+    derived budget, and its protocol skew default is uncited: ``kct check``
+    only warns, and the guard leaves such a pair alone.
     """
-    assert ppi.checker_skew_limit_mm(_class_map(), "DQS_P", "DQS_N") == pytest.approx(LIMIT)
+    router, p, _n = _nudge_board()
+    [guarded] = ppi.guarded_pairs(router)
+    assert guarded.target.cap_mm == pytest.approx(LIMIT)
+    assert guarded.target.budget_ps == pytest.approx(2.0)  # DQS: UG583 timing limit
     advisory = {
-        name: NetClassRouting(name="LV", pair_protocol="LVDS", diffpair_partner=partner)
+        name: NetClassRouting(name="ETH", pair_protocol="ETHERNET", diffpair_partner=partner)
         for name, partner in (("DQS_P", "DQS_N"), ("DQS_N", "DQS_P"))
     }
-    assert ppi.checker_skew_limit_mm(advisory, "DQS_P", "DQS_N") is None
-    router, p, _n = _nudge_board()
     router.net_class_map = advisory
+    assert router._pair_skew_target("DQS_P", "DQS_N").enforced is False
     assert ppi.guarded_pairs(router) == []
     result = drc_verify_and_nudge(router)
     assert result.pair_skew_reverts == []

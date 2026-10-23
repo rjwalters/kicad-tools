@@ -43,8 +43,8 @@ from __future__ import annotations
 
 import dataclasses
 import math
-from collections.abc import Iterator, Sequence
-from typing import TYPE_CHECKING
+from collections.abc import Callable, Iterator, Sequence
+from typing import TYPE_CHECKING, Any
 
 from .diffpair_bump_gates import MIN_JOG_WIDTHS
 from .optimizer.serpentine import SerpentineResult
@@ -210,8 +210,12 @@ def tail_fold_options(
     config: SerpentineConfig,
     ladder: Sequence[float],
     own_copper: OwnCopperRule | None = None,
+    need_for_layer: Callable[[Any], float] | None = None,
 ) -> Iterator[tuple[Route, TailFoldResult]]:
     """Yield ``(candidate_route, fold)`` tail folds adding ``length_needed`` mm.
+
+    ``need_for_layer`` (Issue #7893): when the tuner works in ps, the need in
+    mm of copper on the terminal segment's layer replaces ``length_needed``.
 
     One candidate per route terminal and fold height (:func:`_amplitudes`),
     each sized so the fold adds exactly the need.  ``config`` supplies the
@@ -223,8 +227,12 @@ def tail_fold_options(
     from .diffpair_own_copper import pad_half_extent
     from .primitives import Route
 
+    outer_need = length_needed
     for idx, at_end in route_terminals(route):
         host = route.segments[idx]
+        length_needed = need_for_layer(host.layer) if need_for_layer is not None else outer_need
+        if length_needed <= 0.0:
+            continue
         if at_end:
             hx, hy, tx, ty = host.x1, host.y1, host.x2, host.y2
         else:

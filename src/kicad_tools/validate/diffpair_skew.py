@@ -307,14 +307,29 @@ def derive_pair_skews(
     return out
 
 
-def _board_stackup(pcb: PCB, num_copper_layers: int) -> Any | None:
-    """The board's stackup, else the default for its layer count, else ``None``."""
+def board_stackup(pcb: PCB, num_copper_layers: int) -> Any | None:
+    """The board's stackup, else the default for its layer count, else ``None``.
+
+    ``kct check``'s delay source; the router resolves its skew target from the
+    same function (Issue #7893, ``router.pair_skew_target.skew_stackup``).
+    """
     from kicad_tools.physics.stackup import Stackup
 
     try:
         return Stackup.from_pcb(pcb)
     except Exception as exc:
         logger.debug("[diffpair-skew] no stackup on the board (%s); using a default", exc)
+    return default_board_stackup(num_copper_layers)
+
+
+#: Pre-#7893 private name.
+_board_stackup = board_stackup
+
+
+def default_board_stackup(num_copper_layers: int) -> Any | None:
+    """The default stackup for a layer count, else ``None`` (Issue #7893)."""
+    from kicad_tools.physics.stackup import Stackup
+
     try:
         if num_copper_layers <= 2:
             return Stackup.default_2layer()

@@ -4,11 +4,23 @@ Issue #2648, Epic #2556 Phase 3I.
 
 This module implements :func:`tune_diff_pair_skew`, a router-internal
 helper that inserts serpentines (trombones) on the *shorter* half of a
-detected differential pair until the pair's skew is within the per-class
-:meth:`~kicad_tools.router.rules.NetClassRouting.effective_skew_tolerance`
-window, OR a cascade-safety budget of insertion attempts is
+detected differential pair until the pair's skew is within its target, OR a
+cascade-safety budget of insertion attempts is
 exhausted (three by default, scaled up to ``MAX_INSERT_BUDGET_SCALE`` times
 by the source-local bump gates of #7521).
+
+Skew target in time (Issue #7893)
+=================================
+
+Given a ``skew_target``
+(:class:`~kicad_tools.router.pair_skew_target.PairSkewTarget`, from the one
+resolver ``kct check`` shares) and a ``route_parts`` measure, the tuner works
+in **ps**: the shorter leg is the one with less delay, progress is the pair's
+delay difference, and a bump on a host is sized by that host layer's delay
+(``ps needed / ps per mm``), so length on a slow inner layer counts for more
+than the same length on an outer one.  The pair is matched when it meets the
+budget **and** every error-level millimetre cap of the target.  Without a
+target the tuner keeps its millimetre ``tolerance_mm`` contract.
 
 Design notes
 ============
@@ -97,6 +109,8 @@ if TYPE_CHECKING:
     from .diffpair_detection import DetectedPair
     from .diffpair_own_copper import OwnCopperRule
     from .grid import RoutingGrid
+    from .kicad_length import NetLengthParts
+    from .pair_skew_target import PairSkewTarget
     from .primitives import Route, Segment
     from .skew_ledger import SkewLedger
 
@@ -169,6 +183,11 @@ class DiffPairTuneResult:
     message: str = ""
     tolerance_mm: float | None = None
     gate_refusal: str = ""
+    #: Issue #7893: the pair's delay difference before / after (ps) and the
+    #: budget it was tuned to, when the tuner worked in time; ``None`` otherwise.
+    skew_before_ps: float | None = None
+    skew_after_ps: float | None = None
+    budget_ps: float | None = None
     # The trombone results, kept for diagnostic / test inspection.  An
     # entry is present for every attempt (including rejected ones).
     serpentine_results: list[SerpentineResult] = field(default_factory=list)
@@ -250,11 +269,114 @@ SKEW_BUMP_FOOT_CHAMFER_MM: float = 0.02
 SKEW_BUMP_CHAMFER_LADDER: tuple[float, ...] = (SKEW_BUMP_CHAMFER_WIDTHS, 0.25, 0.15)
 
 
+@dataclass(frozen=True)
+class _SkewSpace:
+    """The quantity the cascade closes (Issue #7893).
+
+    ``q`` is a leg's delay in ps when ``delay`` is given (a target with a
+    budget), else its length in mm; ``tol`` is in the same unit.  ``cap_mm``
+    is the target's error-level length cap, checked beside a ps budget.
+    ``layer_delay`` converts a need in ``q`` units to mm of copper on a
+    host's layer (1 mm per mm in the legacy length space).
+    """
+
+    length: Callable[[Route], float]
+    tol: float
+    delay: Callable[[Route], float] | None = None
+    layer_delay: Callable[[Any], float] | None = None
+    cap_mm: float | None = None
+    eps: float = 0.0
+    cap_eps: float = 0.0
+
+    @property
+    def in_time(self) -> bool:
+        return self.delay is not None
+
+    def q(self, route: Route) -> float:
+        return self.delay(route) if self.delay is not None else self.length(route)
+
+    def within(self, skew_q: float, skew_mm: float) -> bool:
+        if skew_q > self.tol + self.eps:
+            return False
+        if self.in_time and self.cap_mm is not None and skew_mm > self.cap_mm + self.cap_eps:
+            return False
+        return True
+
+    def per_mm(self, layer: Any) -> float:
+        """``q`` units one mm of copper on ``layer`` adds."""
+        return self.layer_delay(layer) if self.layer_delay is not None else 1.0
+
+
+def _skew_space(
+    tolerance_mm: float | None,
+    route_length: Callable[[Route], float] | None,
+    skew_target: PairSkewTarget | None,
+    route_parts: Callable[[Route], NetLengthParts] | None,
+) -> _SkewSpace:
+    """The cascade's :class:`_SkewSpace` for the caller's target (Issue #7893)."""
+    from .length import LengthTracker  # avoid cycle
+
+    if skew_target is not None and route_parts is not None:
+        from .pair_skew_target import CAP_EPSILON_MM, PairSkewMeter
+
+        meter = PairSkewMeter(skew_target, route_parts, route_length)
+        if meter.in_time:
+            from kicad_tools.physics.skew_budget import SKEW_BUDGET_EPSILON_PS
+
+            assert skew_target.budget_ps is not None
+            return _SkewSpace(
+                length=meter.length_mm,
+                tol=float(skew_target.budget_ps),
+                delay=lambda r: float(meter.delay_ps(r) or 0.0),
+                layer_delay=meter.layer_delay,
+                cap_mm=skew_target.cap_mm,
+                eps=SKEW_BUDGET_EPSILON_PS,
+                cap_eps=CAP_EPSILON_MM,
+            )
+        if skew_target.cap_mm is not None:
+            return _SkewSpace(length=meter.length_mm, tol=float(skew_target.cap_mm))
+    if tolerance_mm is None:
+        raise ValueError("tune_diff_pair_skew needs tolerance_mm or skew_target + route_parts")
+    return _SkewSpace(length=route_length or LengthTracker.calculate_route_length, tol=tolerance_mm)
+
+
+def _cap_first(
+    space: _SkewSpace, pair: DetectedPair, routes_by_net: dict[int, Route]
+) -> _SkewSpace:
+    """Fix a violated error cap first when time and length disagree (Issue #7893).
+
+    On a pair split across layers the leg with less delay can be the longer
+    one in mm, so closing the delay skew grows the length skew.  When the
+    pair is already over its error-level mm cap, the cap (what both
+    ``kct check`` and kicad-cli fail as an error) is tuned first, in mm, by
+    lengthening the shorter leg; the ps budget is left to report.  Otherwise
+    the ps space stands, with the cap as a hard bound in the cascade.
+    """
+    if not space.in_time or space.cap_mm is None:
+        return space
+    p_route = routes_by_net.get(pair.pair.positive.net_id)
+    n_route = routes_by_net.get(pair.pair.negative.net_id)
+    if p_route is None or n_route is None:
+        return space
+    l_p, l_n = space.length(p_route), space.length(n_route)
+    if abs(l_p - l_n) <= space.cap_mm + space.cap_eps:
+        return space
+    q_p, q_n = space.q(p_route), space.q(n_route)
+    if (q_p < q_n) == (l_p < l_n):
+        return space  # the same leg is short in both: the ps need covers the cap
+    return _SkewSpace(length=space.length, tol=space.cap_mm, eps=space.cap_eps)
+
+
+def _skew_figure(result: DiffPairTuneResult) -> float:
+    """The remaining skew in the unit the pair was tuned in (ps, else mm)."""
+    return result.skew_after_ps if result.skew_after_ps is not None else result.skew_after_mm
+
+
 def tune_diff_pair_skew(
     pair: DetectedPair,
     routes_by_net: dict[int, Route],
     *,
-    tolerance_mm: float,
+    tolerance_mm: float | None = None,
     intra_pair_clearance_mm: float,
     config: SerpentineConfig | None = None,
     max_inserts: int = MAX_INSERTS_PER_PAIR,
@@ -269,6 +391,8 @@ def tune_diff_pair_skew(
     ledger: SkewLedger | None = None,
     own_copper: OwnCopperRule | None = None,
     escape_segment_ids: set[int] | None = None,
+    skew_target: PairSkewTarget | None = None,
+    route_parts: Callable[[Route], NetLengthParts] | None = None,
 ) -> tuple[Route, Route, DiffPairTuneResult]:
     """Tune the skew of a detected diff pair by serpentining the shorter half.
 
@@ -360,6 +484,14 @@ def tune_diff_pair_skew(
     ``own_copper`` it may host one like any segment, under every gate; without
     it, it stays fixed.
 
+    ``skew_target`` / ``route_parts`` (Issue #7893): the pair's target from
+    :func:`~kicad_tools.router.pair_skew_target.resolve_pair_skew_target` and
+    an itemised ``Route -> NetLengthParts`` measure (the checker's,
+    ``KicadLengthModel.route_length_parts``).  With both, the cascade works in
+    ps (module docstring) and ``tolerance_mm`` is only reported; a target
+    with no budget but an error cap tunes to that cap in mm.  ``route_length``
+    still gives the mm figure when supplied (a quantized measure).
+
     ``ledger`` (Issue #6447): the pair's
     :class:`~kicad_tools.router.skew_ledger.SkewLedger`, built once from the
     untuned routes.  The bump gate's proximity rule then measures to the
@@ -392,11 +524,16 @@ def tune_diff_pair_skew(
         this contract via ``is`` identity on both the longer route and
         its segments list.
     """
+    space = _skew_space(tolerance_mm, route_length, skew_target, route_parts)
+    space = _cap_first(space, pair, routes_by_net)
+    if tolerance_mm is None:
+        tolerance_mm = (skew_target.tolerance_mm if skew_target is not None else None) or space.tol
     once = functools.partial(
         _tune_diff_pair_skew_once,
         pair,
         routes_by_net,
         tolerance_mm=tolerance_mm,
+        space=space,
         intra_pair_clearance_mm=intra_pair_clearance_mm,
         config=config,
         max_inserts=max_inserts,
@@ -462,6 +599,11 @@ def tune_diff_pair_skew(
     return folded if _asymmetric_chamfers_win(folded, best) else best
 
 
+def _need_for_layer(need_on: Callable[[Any, Route], float], shorter: Route, layer: Any) -> float:
+    """``need_on(layer, shorter)``: the placement options' per-host need (Issue #7893)."""
+    return need_on(layer, shorter)
+
+
 def _ledger_anchors(
     ledger: SkewLedger | None, host: Route, host_idx: int, *, host_is_p: bool
 ) -> list[tuple[float, float]] | None:
@@ -500,9 +642,10 @@ def _asymmetric_chamfers_win(
         return True
     a_fig = _pair_uncoupled_mm(asymmetric[0], asymmetric[1])
     r_fig = _pair_uncoupled_mm(reference[0], reference[1])
-    if a_res.skew_after_mm > r_res.skew_after_mm + eps or a_fig > r_fig + eps:
+    a_skew, r_skew = _skew_figure(a_res), _skew_figure(r_res)
+    if a_skew > r_skew + eps or a_fig > r_fig + eps:
         return False
-    return a_res.skew_after_mm < r_res.skew_after_mm - eps or a_fig < r_fig - eps
+    return a_skew < r_skew - eps or a_fig < r_fig - eps
 
 
 def _tune_diff_pair_skew_once(
@@ -510,6 +653,7 @@ def _tune_diff_pair_skew_once(
     routes_by_net: dict[int, Route],
     *,
     tolerance_mm: float,
+    space: _SkewSpace,
     intra_pair_clearance_mm: float,
     config: SerpentineConfig | None,
     max_inserts: int,
@@ -580,15 +724,28 @@ def _tune_diff_pair_skew_once(
 
     from kicad_tools.validate.rules.diffpair_uncoupled_length import UNCOUPLED_EPSILON_MM
 
-    from .length import LengthTracker  # avoid cycle
-
-    measure = route_length or LengthTracker.calculate_route_length
+    del route_length  # Issue #7893: ``space`` carries the measure
+    measure = space.length
+    q = space.q
+    in_time = space.in_time
     l_p = measure(p_route)
     l_n = measure(n_route)
     skew = abs(l_p - l_n)
+    # Issue #7893: ``q`` is the leg's delay (ps) when the target has a budget,
+    # else its length; ``skew_q`` is the pair's skew in that unit.
+    q_p, q_n = (q(p_route), q(n_route)) if in_time else (l_p, l_n)
+    skew_q = abs(q_p - q_n)
+
+    def ps_or_none(value: float) -> float | None:
+        return value if in_time else None
+
+    def unit_text(value: float, tol: float) -> str:
+        if in_time:
+            return f"skew={value:.3f}ps vs budget={tol:.3f}ps"
+        return f"skew={value:.4f}mm vs tol={tol:.4f}mm"
 
     # Already within tolerance -- byte-for-byte unchanged.
-    if skew <= tolerance_mm:
+    if space.within(skew_q, skew):
         return (
             p_route,
             n_route,
@@ -597,19 +754,28 @@ def _tune_diff_pair_skew_once(
                 reason="already_within_tolerance",
                 skew_before_mm=skew,
                 skew_after_mm=skew,
-                message=f"Pair already matched: skew={skew:.4f}mm <= tol={tolerance_mm:.4f}mm",
+                skew_before_ps=ps_or_none(skew_q),
+                skew_after_ps=ps_or_none(skew_q),
+                budget_ps=ps_or_none(space.tol),
+                message=(
+                    f"Pair already matched: {unit_text(skew_q, space.tol)}"
+                    if in_time
+                    else f"Pair already matched: skew={skew:.4f}mm <= tol={tolerance_mm:.4f}mm"
+                ),
             ),
         )
 
     # The shorter half gets the trombone; the longer half is the target
-    # length and is NEVER touched.
-    if l_p < l_n:
+    # length and is NEVER touched.  Issue #7893: "shorter" is less delay
+    # when tuning in time.
+    if q_p < q_n:
         shorter_id, shorter_route, longer_id, longer_route = p_id, p_route, n_id, n_route
         longer_is_p = False
     else:
         shorter_id, shorter_route, longer_id, longer_route = n_id, n_route, p_id, p_route
         longer_is_p = True
-    target_length = max(l_p, l_n)
+    target_length = l_n if longer_is_p is False else l_p
+    target_q = max(q_p, q_n)
     # Under-target by a fraction of the tolerance so quantized loop sizing
     # does not overshoot the partner length and push the measured skew just
     # *over* tolerance (issue #3543).  ``serpentine_target`` is what the
@@ -618,10 +784,26 @@ def _tune_diff_pair_skew_once(
     # headroom is clamped so it never reaches/inverts the gap on a pair
     # whose skew is smaller than the headroom itself.
     target_headroom = min(
-        SERPENTINE_TARGET_HEADROOM_FRACTION * tolerance_mm,
-        skew,
+        SERPENTINE_TARGET_HEADROOM_FRACTION * space.tol,
+        skew_q,
     )
-    serpentine_target = target_length - target_headroom
+    serpentine_target_q = target_q - target_headroom
+    # Issue #7893: a ps budget's error-level mm cap is closed the same way,
+    # on the same leg; it only adds to the need when the time-shorter leg is
+    # also the shorter in length and the cap is the tighter of the two.
+    cap_target_mm: float | None = None
+    if in_time and space.cap_mm is not None:
+        cap_target_mm = target_length - min(
+            SERPENTINE_TARGET_HEADROOM_FRACTION * space.cap_mm, skew
+        )
+
+    def need_on(layer: Any, shorter: Route) -> float:
+        """mm of copper on ``layer`` that closes the remaining need (Issue #7893)."""
+        need = (serpentine_target_q - q(shorter)) / space.per_mm(layer)
+        if cap_target_mm is not None:
+            need = max(need, cap_target_mm - measure(shorter))
+        return need
+
     original_longer_segments = longer_route.segments  # for rollback assertion
 
     # Snapshot the original shorter route -- we may need to roll back.
@@ -645,9 +827,11 @@ def _tune_diff_pair_skew_once(
             )
         base_config = dataclasses.replace(base_config, amplitude=capped)
 
-    result = DiffPairTuneResult(skew_before_mm=skew)
+    result = DiffPairTuneResult(
+        skew_before_mm=skew, skew_before_ps=ps_or_none(skew_q), budget_ps=ps_or_none(space.tol)
+    )
     current_shorter = shorter_route
-    current_skew = skew
+    current_skew = skew_q
     # Committed bumps and their tuning patterns (issue #7521).
     bumps: list[tuple[list[Segment], TuningPattern]] = []
 
@@ -673,9 +857,10 @@ def _tune_diff_pair_skew_once(
         )
         if best is None:
             result.reason = "no_suitable_segment"
-            result.message = (
-                f"No segment long enough for a trombone on net {shorter_id} "
-                f"(skew={current_skew:.4f}mm > tol={tolerance_mm:.4f}mm)"
+            result.message = f"No segment long enough for a trombone on net {shorter_id} " + (
+                f"({unit_text(current_skew, space.tol)})"
+                if in_time
+                else f"(skew={current_skew:.4f}mm > tol={tolerance_mm:.4f}mm)"
             )
             # Inserts committed by earlier attempts stay (issue #6788); with
             # none committed the original route comes back by reference.
@@ -691,14 +876,21 @@ def _tune_diff_pair_skew_once(
         # An overshoot (the formerly shorter leg is now the longer one)
         # leaves nothing to add.  Stop with a distinct reason instead of
         # committing an empty serpentine that burns an insert (issue #6788).
-        length_needed = serpentine_target - measure(current_shorter)
+        if in_time:
+            # Issue #7893: the need in ps, as mm of copper on the host's layer.
+            length_needed = need_on(insertion_segment.layer, current_shorter)
+            serpentine_target = measure(current_shorter) + length_needed
+        else:
+            serpentine_target = serpentine_target_q
+            length_needed = serpentine_target - measure(current_shorter)
         if length_needed <= 0:
             result.reason = "overshoot"
-            result.message = (
-                f"Trombone on net {shorter_id} overshot the partner length "
-                f"(skew={current_skew:.4f}mm > tol={tolerance_mm:.4f}mm)"
+            result.message = f"Trombone on net {shorter_id} overshot the partner length " + (
+                f"({unit_text(current_skew, space.tol)})"
+                if in_time
+                else f"(skew={current_skew:.4f}mm > tol={tolerance_mm:.4f}mm)"
             )
-            if current_skew >= skew:
+            if current_skew >= skew_q:
                 current_shorter = original_shorter_route
                 # Reverted to the original route: no insert survives (#6795).
                 result.inserts_applied = 0
@@ -722,6 +914,9 @@ def _tune_diff_pair_skew_once(
             "host_first": host_first,
             "serpentine_target": serpentine_target,
             "measure": measure,
+            "need_for_layer": (
+                functools.partial(_need_for_layer, need_on, current_shorter) if in_time else None
+            ),
         }
         for cand_route, cand_serp, as_pattern in _pattern_then_plain_options(
             base_config,
@@ -738,9 +933,25 @@ def _tune_diff_pair_skew_once(
                 generator_failure = cand_serp.message
                 continue
             # An option that adds no copper is not an insert (issue #6788).
-            if measure(cand_route) - measure(current_shorter) <= 1e-9:
+            cand_length = measure(cand_route)
+            if cand_length - measure(current_shorter) <= 1e-9:
                 generator_failure = "serpentine added no length"
                 continue
+            # Issue #7893: an error-level mm cap is a hard bound beside the ps
+            # budget.  When the leg with less delay is the longer one in mm (a
+            # pair split across layers), closing the delay skew grows the
+            # length skew; never past a cap the pair met, never further past
+            # one it was already over.
+            if in_time and space.cap_mm is not None:
+                cand_mm = abs(target_length - cand_length)
+                now_mm = abs(target_length - measure(current_shorter))
+                if cand_mm > space.cap_mm + space.cap_eps and cand_mm > now_mm + space.cap_eps:
+                    generator_failure = (
+                        f"length skew {cand_mm:.4f}mm would exceed the "
+                        f"{space.cap_mm:.4f}mm cap (was {now_mm:.4f}mm)"
+                    )
+                    result.gate_refusal = generator_failure
+                    continue
             # Issue #7521 (AC3): excursion, jog and mismatch-source proximity.
             # Measured on the generated geometry, chamfered or square.
             host_idx = replaced_index(current_shorter, cand_route)
@@ -896,15 +1107,14 @@ def _tune_diff_pair_skew_once(
         if cand_bump is not None:
             bumps.append((cand_bump[1], cand_bump[0]))
         new_shorter_length = measure(current_shorter)
+        # Issue #7893: progress in the space's unit (ps when tuning in time).
         current_skew = (
-            abs(new_shorter_length - target_length)
-            if longer_is_p
-            else abs(target_length - new_shorter_length)
+            abs(target_q - q(current_shorter))
+            if in_time
+            else (abs(target_length - new_shorter_length))
         )
-        # Both branches reduce to abs(target_length - new_shorter_length)
-        current_skew = abs(target_length - new_shorter_length)
 
-        if current_skew <= tolerance_mm:
+        if space.within(current_skew, abs(target_length - new_shorter_length)):
             result.success = True
             result.reason = "tuned"
             break
@@ -916,12 +1126,20 @@ def _tune_diff_pair_skew_once(
         result.message = result.message or (
             f"Cascade budget exhausted (attempts={result.attempts}, "
             f"inserts_applied={result.inserts_applied}, "
-            f"skew={current_skew:.4f}mm vs tol={tolerance_mm:.4f}mm)"
+            + (
+                f"{unit_text(current_skew, space.tol)})"
+                if in_time
+                else f"skew={current_skew:.4f}mm vs tol={tolerance_mm:.4f}mm)"
+            )
         )
 
     result.skew_after_mm = (
         abs(target_length - measure(current_shorter)) if result.inserts_applied > 0 else skew
     )
+    if in_time:
+        result.skew_after_ps = (
+            abs(target_q - q(current_shorter)) if result.inserts_applied > 0 else skew_q
+        )
     # Issue #7521: a gate that refused a bump is named even when a later,
     # generic failure ended the cascade.
     if result.gate_refusal and not result.success and result.gate_refusal not in result.message:
@@ -931,9 +1149,10 @@ def _tune_diff_pair_skew_once(
     # (``last_status``), the way KiCad reports a saved pattern.
     if result.inserts_applied > 0 and bumps:
         final_shorter = measure(current_shorter)
-        if abs(target_length - final_shorter) <= tolerance_mm:
+        final_q = q(current_shorter) if in_time else final_shorter
+        if space.within(abs(target_q - final_q), abs(target_length - final_shorter)):
             status = STATUS_TUNED
-        elif final_shorter < target_length:
+        elif final_q < target_q:
             status = STATUS_TOO_SHORT
         else:
             status = STATUS_TOO_LONG
@@ -1129,6 +1348,7 @@ def _pattern_then_plain_options(
             route=placement_kwargs["current_shorter"],
             partner=placement_kwargs["longer_route"],
             length_needed=placement_kwargs["length_needed"],
+            need_for_layer=placement_kwargs.get("need_for_layer"),
             config=plain_config,
             ladder=AMPLITUDE_LADDER,
             own_copper=own_copper,
@@ -1164,6 +1384,7 @@ def _partial_placement_options(
     serpentine_target: float,
     measure: Callable[[Route], float],
     host_first: bool = False,
+    need_for_layer: Callable[[Any], float] | None = None,
 ) -> Iterator[tuple[Route, SerpentineResult]]:
     """Yield bumps sized to the host they fit, partial ones included (issue #7521).
 
@@ -1196,7 +1417,12 @@ def _partial_placement_options(
             hosts.append((idx, seg))
 
     cap = base_config.amplitude
+    outer_need = length_needed
     for host_no, (idx, host) in enumerate(hosts):
+        # Issue #7893: the need in mm on this host's layer (ps / layer delay).
+        length_needed = need_for_layer(host.layer) if need_for_layer is not None else outer_need
+        if length_needed <= 0.0:
+            continue
         length = math.hypot(host.x2 - host.x1, host.y2 - host.y1)
         spaced = jog_spaced(base_config, host.width)
         gap = spaced.min_spacing * spaced.gap_factor
@@ -1299,8 +1525,12 @@ def _placement_options(
     serpentine_target: float,
     measure: Callable[[Route], float],
     host_first: bool = False,
+    need_for_layer: Callable[[Any], float] | None = None,
 ):
     """Yield ``(candidate_route, SerpentineResult)`` placements, best first.
+
+    ``need_for_layer`` (Issue #7893): the need in mm of copper on a host's
+    layer, when tuning in time; ``length_needed`` is the first host's.
 
     The first option is the pre-#6788 attempt (best host, outer-normal side,
     start-anchored) with exact-fit amplitude.  Later options are only pulled
@@ -1372,7 +1602,11 @@ def _placement_options(
         if idx != first_host[0] and len(hosts) < MAX_HOST_CANDIDATES:
             hosts.append((idx, seg))
 
+    first_need = length_needed
     for host_no, (idx, host) in enumerate(hosts):
+        length_needed = need_for_layer(host.layer) if need_for_layer is not None else first_need
+        if length_needed <= 0.0:
+            continue
         base_hint = first_hint if host_no == 0 else _outer_normal_hint(host, longer_route)
         sides = [base_hint, (-base_hint[0], -base_hint[1])]
         # Anchors: ``None`` is the start-anchored host; 0.5 centres the
