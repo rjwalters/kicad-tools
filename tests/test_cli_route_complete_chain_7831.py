@@ -234,3 +234,55 @@ def test_unset_recipe_flags_are_not_forwarded(tmp_path):
         "--per-net-iterations",
     ):
         assert flag not in argv
+
+
+def _disposition(invalid: frozenset[str]):
+    from kicad_tools.placement.routing import RoutingPlacementDisposition
+
+    return RoutingPlacementDisposition(
+        all_nets=frozenset({"GOOD"}) | invalid,
+        direct_invalid_nets=invalid,
+        requested_nets=frozenset({"GOOD"}) | invalid,
+    )
+
+
+def test_placement_invalid_open_net_is_not_chained(board, monkeypatch):
+    """Issue #7922: a net the outer run refused on placement grounds stays open
+    by design; the chain must not build a second router just to refuse it."""
+    seen = {}
+
+    def open_nets(*a, **k):
+        seen["excluded"] = k["excluded_nets"]
+        return [n for n in ["BAD"] if n not in k["excluded_nets"]]
+
+    monkeypatch.setattr(
+        "kicad_tools.router.partial_rescue.partially_connected_signal_nets", open_nets
+    )
+    monkeypatch.setattr(route_cmd, "_main_impl", lambda a: pytest.fail("must not run"))
+    args = _args(board, _initial_placement_disposition=_disposition(frozenset({"BAD"})))
+    assert _chain_complete_pass(args, None, 8) == 8
+    assert "BAD" in seen["excluded"]
+    assert board.read_text() == "negotiated"
+
+
+def test_placement_invalid_nets_forwarded_as_exclusions(board, monkeypatch):
+    """Issue #7922: the inner pass gets the outer placement-invalid nets (and the
+    operator's own exclusions) so it only requests the closable ones."""
+    _stub_open(monkeypatch, [["VCP"], []])
+    seen = {}
+
+    def fake_main(argv):
+        seen["argv"] = argv
+        Path(argv[argv.index("-o") + 1]).write_text("completed")
+        return 0
+
+    monkeypatch.setattr(route_cmd, "_main_impl", fake_main)
+    args = _args(
+        board,
+        complete_exclude_nets="GND",
+        _initial_placement_disposition=_disposition(frozenset({"BAD"})),
+    )
+    assert _chain_complete_pass(args, None, 2) == 0
+    argv = seen["argv"]
+    assert argv.count("--complete-exclude-nets") == 1
+    assert argv[argv.index("--complete-exclude-nets") + 1] == "BAD,GND"

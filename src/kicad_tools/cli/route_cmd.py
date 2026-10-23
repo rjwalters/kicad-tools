@@ -20586,8 +20586,20 @@ def _restore_supervisor_control(control: str, snapshot: str) -> None:
         Path(control).write_text(snapshot)
 
 
-def _chain_complete_argv(args, argv: list[str] | None, output: Path, staged: Path) -> list[str]:
+def _chain_complete_argv(
+    args,
+    argv: list[str] | None,
+    output: Path,
+    staged: Path,
+    excluded_nets: frozenset[str] = frozenset(),
+) -> list[str]:
     """Argv for the inner ``--complete`` pass over ``output``, writing ``staged``.
+
+    ``excluded_nets`` is the full exclusion set the outer pass resolved (the
+    operator's ``--complete-exclude-nets`` plus the outer run's
+    placement-invalid nets, Issue #7922); it replaces the raw
+    ``--complete-exclude-nets`` value so the inner pass never requests a net
+    the outer run already refused to attempt.
 
     Copper-affecting recipe flags are forwarded so the inner pass reserves and
     places copper under the same rules as the outer route: via size,
@@ -20603,12 +20615,18 @@ def _chain_complete_argv(args, argv: list[str] | None, output: Path, staged: Pat
         ("--seed", "seed"),
         ("--backend", "backend"),
         ("--copper", "copper"),
-        ("--complete-exclude-nets", "complete_exclude_nets"),
         ("--net-class-map", "net_class_map"),
     ):
         value = getattr(args, attr, None)
         if value not in (None, ""):
             chain_argv.extend([flag, str(value)])
+    exclude = set(excluded_nets) | {
+        n.strip()
+        for n in (getattr(args, "complete_exclude_nets", "") or "").split(",")
+        if n.strip()
+    }
+    if exclude:
+        chain_argv.extend(["--complete-exclude-nets", ",".join(sorted(exclude))])
     for flag, attr in (
         ("--via-drill", "via_drill"),
         ("--via-diameter", "via_diameter"),
@@ -20694,6 +20712,18 @@ def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
         for n in (getattr(args, "complete_exclude_nets", "") or "").split(",")
         if n.strip()
     )
+    # Issue #7922: a net the outer run's placement check declared invalid
+    # ("Placement-invalid, not attempted") is open by design -- its pads sit
+    # off the board or on an invalid footprint, and the inner --complete pass
+    # runs the same check and does not attempt it.  Counting it as open made
+    # every such board pay a second router build for a pass that can never
+    # close it (exit 1, output discarded).  It is also forwarded to the inner
+    # pass's --complete-exclude-nets so it is never requested there.
+    disposition = getattr(args, "_initial_placement_disposition", None) or getattr(
+        args, "_placement_disposition", None
+    )
+    if disposition is not None:
+        excluded |= frozenset(disposition.invalid_nets)
 
     def _open_nets(board: Path) -> list[str]:
         return list(
@@ -20730,7 +20760,7 @@ def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
         )
     stage_stem = output.stem + ".chain"
     staged = output.with_name(stage_stem + output.suffix)
-    chain_argv = _chain_complete_argv(args, argv, output, staged)
+    chain_argv = _chain_complete_argv(args, argv, output, staged, excluded)
 
     def _staged_files() -> list[Path]:
         import glob
