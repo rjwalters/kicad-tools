@@ -15,6 +15,15 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-23
 
+- **PR #7906**: fix(router): grid search names the HV clearance when it walls a pad in (#7887)
+- **Issue #7887** (closed): Grid C++ search records an HV-walled pad as no_path, not pairwise_blocked (net-status --why loses the pairwise wording)
+- **PR #7905**: fix(router): hold a tail fold's top off its own return run by the clearance
+- **Issue #7902** (closed): router: tail fold's top and return run have no same-net clearance (A floors at W; gap 0 on the #7546 fixture)
+- **PR #7904**: fix(research): run bench kicad-cli verdicts on the pinned evidence toolchain (#7901)
+- **Issue #7901** (closed): diffpair_bench.py kicad-cli verdict bypasses the pinned toolchain (KCT_KICAD_DOCKER ignored)
+- **Issue #7864** (closed): router: 06rf USB3_RX1 one-sided fan skew fails at 1× (narrowed from #7649)
+- **Issue #7546** (closed): router: give generated trombone bumps 45° legs so kct and kicad-cli agree on plain meanders (#7521 follow-up)
+
 - **PR #7900**: test(router): pin lattice deadline stop line end to end with a voltage map active
 - **Issue #7881** (closed): lattice negotiation exhausts its deadline with the pairwise clearance matrix active; no way to tell timeout from infeasible
 - **PR #7899**: fix(router): pad-aware skew tuning -- own-copper rule, escape hosts, tail fold (#7891)
