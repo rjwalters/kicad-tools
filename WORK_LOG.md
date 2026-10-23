@@ -13,8 +13,30 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-10-23
+
+- **PR #7847**: feat(check): report chain (XNet) pair skew across series elements
+- **PR #7846**: feat(router): post-pass pair-skew invariant guard (DRC nudge + via-in-pad, retune)
+- **PR #7845**: feat(router): add SkewLedger attributing pair P/N skew to joints, vias and ties
+- **PR #7839**: fix: probe routability before labelling moderate-congestion nets PLACEMENT_BOUND
+- **PR #7838**: feat: chain a --complete pass when the grid route leaves signal nets open
+- **Issue #7832** (closed): stuck classifier: board 05 VCP labelled PLACEMENT_BOUND although --complete routes it on current copper
+- **Issue #7831** (closed): router: chain the lattice --complete pass when grid negotiation leaves signal nets open (board 05 VCP -> 37/37 clean)
+
 ### 2026-10-22
 
+- **PR #7844**: docs: update stale Board 07 CI suspension comments
+- **PR #7843**: feat(router): balanced bends and distinct gateways for lattice diff pairs (#7649)
+- **PR #7842**: chore(deps): bump opentelemetry-api from 1.39.1 to 1.45.1
+- **PR #7841**: test(board03): apply the #6885 retuner to the committed board 03 artifact, with receipts (#6730)
+- **PR #7840**: fix(board07): make --step pcb write the project file; authored-index cache fix (#7716)
+- **PR #7837**: feat(board07): route the recipe's differential pairs coupled (#5333)
+- **PR #7836**: chore(research): flag route-experiment rows whose stranded-pour oracle failed
+- **PR #7835**: feat(router): reserve pour-only 2-pad stitch sites by default (board 05 36/37)
+- **PR #7830**: test: make docker prefix model-mount test hermetic
+- **PR #7828**: feat(models): parametric 3D body generation with an optional CadQuery extra (#7687)
+- **PR #7826**: docs(research): record the #7688 embedded-checksum spike outcome (blocked)
+- **PR #7824**: test(board03): pin USB_D skew inside the 0.5 mm stretch by both checkers (#6730)
 - **PR #7823**: fix: keep hole-to-hole floor when collapsing committed via hairpins
 - **PR #7822**: fix(router): chamfer skew-bump feet at 0.02 mm instead of square (#7546)
 - **PR #7821**: chore(loom): resync installed Loom to v0.19.1209
@@ -84,6 +106,18 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - **Issue #7755** (closed): router: explicit target_diff_impedance leaves impedance sizing dormant on the CLI path, and the resolver sizes every pair for F.Cu
 - **PR #7628**: fix: tune board 07's four skewed diff pairs and stop the skew gate vetoing inherited near-misses
 - **Issue #7612** (closed): Board 07 fixture: 4 diff pairs fail skew with no_suitable_segment (TMDS_D2, MIPI_DAT1, MIPI_DAT0, MIPI_CLK)
+- **Issue #7833** (closed): expand_route_experiment: flag rows whose route oracle stage failed (kicad-cli OOM 137 / docker unreachable) as unverified
+- **Issue #7829** (closed): test: test_docker_prefix_mounts_models_only_when_given is not hermetic (fails with a synced model cache)
+- **Issue #7716** (closed): router: Python-fallback A* inside relief rescue is load-dependent on board 07 (1,024 expansions in ~420 s)
+- **Issue #7687** (closed): Parametric 3D model generation for standard-package gaps (CadQuery, optional extra)
+- **Issue #7619** (closed): Board 07 fixture: DQS and TMDS_D1 diff pairs routed with unequal via counts (N leg +2 vias), causing multi-mm skew
+- **Issue #6730** (closed): boards 03/07: regenerate routed artifacts under kicad-cli-exact length (USB_D 1.246 mm, ADDR_BUS 1.0998 mm skew)
+- **Issue #5410** (closed): router: refine dynamic route halo rejection with physical clearance checks
+- **Issue #5333** (closed): Board07 coupled pre-pass exhausts all seven pair searches despite valid corridor guides
+- **Issue #5286** (closed): Board07 full recipe exports seven unexpected signal opens and clearance failures after stage-budget integration
+- **Issue #5240** (closed): CI runtime: reduce measured Test, Board06 E2E and diff-pair regression job medians
+- **Issue #5164** (closed): Stage and validate native zone refill for Board 07 via repairs before restoring CI
+- **Issue #3438** (closed): router: board 07 stuck at 28/31 — negotiated router cannot complete parallel pad-array bundles (DDR bundle ALONE routes 9/11)
 
 ### 2026-10-21
 
