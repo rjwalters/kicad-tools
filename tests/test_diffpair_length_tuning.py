@@ -373,8 +373,8 @@ class TestCascadeBudget:
 
         # Issue #7521: the gated tuner runs the cascade once per chamfer of
         # its ladder, each run capped at the budget; Issue #7546 adds one
-        # asymmetric-chamfer run.
-        expected = (len(SKEW_BUMP_CHAMFER_LADDER) + 1) * MAX_INSERTS_PER_PAIR
+        # asymmetric-chamfer run and Issue #7891 one tail-fold run.
+        expected = (len(SKEW_BUMP_CHAMFER_LADDER) + 2) * MAX_INSERTS_PER_PAIR
         assert call_count["n"] == expected, (
             f"Expected exactly {expected} add_serpentine calls, got {call_count['n']}"
         )

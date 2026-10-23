@@ -239,6 +239,15 @@ _RULES = """(version 1)
 """
 
 
+def _no_tail_fold():
+    """Bumps only (Issue #7891 tries a tail fold once no bump closes a pair)."""
+    from unittest.mock import patch
+
+    import kicad_tools.router.diffpair_tail_fold as fold
+
+    return patch.object(fold, "tail_fold_options", lambda **_kw: iter(()))
+
+
 def _write(directory: Path, name: str, routes: list[Route]) -> Path:
     body = "\t" + "\n\t".join(r.to_sexp(name_only=True) for r in routes) + "\n"
     pcb = directory / f"{name}.kicad_pcb"
@@ -395,15 +404,29 @@ class TestBindingLimitFallsBackToChamferedPlainCopper:
         assert _kct(pcb) == pytest.approx(kicad, abs=1e-3)
         assert kicad <= limit + 1e-3
 
-    def test_wide_trace_pair_at_skew_2_and_limit_2_1_stays_refused(self, pinned_cli):
+    def test_wide_trace_pair_at_skew_2_and_limit_2_1_fits_no_bump(self, pinned_cli):
         """#7542's 0.2 mm pair, skew 2.0 mm under a 2.1 mm limit: the 2.0 mm
         tail leaves 0.1 mm, and every loop costs the partner two crown
         chamfers plus two foot chamfers (0.26 mm), so no bump fits."""
         cli, root = pinned_cli
-        *_, p_out, n_out, result = self._tune(0.2, 128.0, 2.1)
+        with _no_tail_fold():
+            *_, p_out, n_out, result = self._tune(0.2, 128.0, 2.1)
         assert result.inserts_applied == 0
         pcb = _write(root, "wide_128.0_2.1", [p_out, n_out])
         assert _kct(pcb) == pytest.approx(_kicad(cli, pcb), abs=1e-3)
+
+    def test_wide_trace_pair_at_skew_2_and_limit_2_1_is_tuned_by_a_tail_fold(self, pinned_cli):
+        """Issue #7891: N folds past its own end into P's uncoupled tail; the
+        pair reads 0.622 mm in both engines (and 1.531 mm with P stored the
+        other way, ``tests/test_pad_aware_skew_tuning_7891.py``)."""
+        cli, root = pinned_cli
+        *_, p_out, n_out, result = self._tune(0.2, 128.0, 2.1)
+        assert result.reason == "tuned" and result.skew_after_mm <= 0.127
+        pcb = _write(root, "wide_fold_128.0_2.1", [p_out, n_out])
+        kicad = _kicad(cli, pcb)
+        assert _kct(pcb) == pytest.approx(kicad, abs=1e-3)
+        assert kicad == pytest.approx(0.622, abs=1e-3)
+        _assert_no_square_corner(n_out)
 
 
 # ---------------------------------------------------------------------------
@@ -600,9 +623,11 @@ class TestBindingLimitTunesTheWidePairs:
     def test_skew_2_0_under_2_5_closes_more_of_the_skew(self, pinned_cli):
         """Under the 2x-gap excursion cap the asymmetric-chamfer bump closes
         0.84 mm of the skew and reads 2.26 mm against the 2.5 mm limit; the
-        four-corner ladder left 1.27 mm of skew at 2.44 mm."""
+        four-corner ladder left 1.27 mm of skew at 2.44 mm.  (Bumps only: the
+        tail fold of Issue #7891 closes this pair outright.)"""
         cli, root = pinned_cli
-        *_, p_out, n_out, result = self._tune(128.0, 2.5)
+        with _no_tail_fold():
+            *_, p_out, n_out, result = self._tune(128.0, 2.5)
         assert result.inserts_applied == 1
         assert result.skew_after_mm == pytest.approx(1.162, abs=1e-3)
         pcb = _write(root, "wide_128.0_2.5", [p_out, n_out])

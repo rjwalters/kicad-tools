@@ -5936,7 +5936,8 @@ class DiffPairRouter:
         gate, the #6795 uncoupled-length guard and the never-worse backstop.
         Its bumps (KiCad tuning patterns, or the chamfered plain fallback)
         are spliced into the committed fragments in place and re-marked on
-        the grid, like the comb's.  Fixed escape copper is never a host.
+        the grid, like the comb's.  Escape copper may host a bump only under
+        the own-copper rule (Issue #7891), like any other segment.
 
         Returns ``True`` when a tune was committed.
         """
@@ -5990,7 +5991,7 @@ class DiffPairRouter:
         if old_p is None or old_n is None:
             return False
         old_routes: dict[int, Route] = {p_id: old_p, n_id: old_n}
-        fixed_segment_ids = {id(s) for r in ar.routes if r.is_escape for s in r.segments}
+        escape_segment_ids = {id(s) for r in ar.routes if r.is_escape for s in r.segments}
         new_p, new_n, result = tune_diff_pair_skew(
             DetectedPair(pair=pair, source=DetectionSource.EXPLICIT),
             routes_by_net,
@@ -5998,7 +5999,11 @@ class DiffPairRouter:
             intra_pair_clearance_mm=intra,
             grid=ar.grid,
             prefer_reserved_slack=getattr(ar, "enable_slack_corridor_widening", False),
-            fixed_segment_ids=fixed_segment_ids,
+            # Issue #7891: escape stubs may host a bump, checked against the
+            # net's own pads; the splice below writes it into the escape
+            # fragment it replaced.
+            escape_segment_ids=escape_segment_ids,
+            own_copper=ar._skew_tune_own_copper_rule(),
             extra_clearance_ok=ar._skew_tune_foreign_clearance_ok(
                 routes_by_net,
                 partner_of={p_id: n_id, n_id: p_id},

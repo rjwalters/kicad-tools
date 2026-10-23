@@ -71,6 +71,7 @@ from .diffpair_bump_gates import (
     jog_spaced,
     replaced_index,
 )
+from .diffpair_tail_fold import TailFoldResult
 from .optimizer.geometry import segment_length
 from .optimizer.serpentine import (
     SerpentineConfig,
@@ -94,6 +95,7 @@ if TYPE_CHECKING:
     from kicad_tools.validate.rules.diffpair_uncoupled_length import Copper
 
     from .diffpair_detection import DetectedPair
+    from .diffpair_own_copper import OwnCopperRule
     from .grid import RoutingGrid
     from .primitives import Route, Segment
     from .skew_ledger import SkewLedger
@@ -265,6 +267,8 @@ def tune_diff_pair_skew(
     max_uncoupled_mm: float | None = None,
     corner_chamfer_widths: float = 0.0,
     ledger: SkewLedger | None = None,
+    own_copper: OwnCopperRule | None = None,
+    escape_segment_ids: set[int] | None = None,
 ) -> tuple[Route, Route, DiffPairTuneResult]:
     """Tune the skew of a detected diff pair by serpentining the shorter half.
 
@@ -344,6 +348,18 @@ def tune_diff_pair_skew(
             plain-copper fallback uses, where a plain bump starts to read
             less uncoupled than a square one.
 
+    ``own_copper`` (Issue #7891): the net's own pads and the clearance a bump
+    keeps to them and to its own vias
+    (:class:`~kicad_tools.router.diffpair_own_copper.OwnCopperRule`).  Every
+    candidate, bump or tail fold, is checked against it beside the bump gates;
+    ``None`` (default) applies no own-copper check.
+
+    ``escape_segment_ids`` (Issue #7891): escape copper (the stubs that leave a
+    pad).  It used to be passed as ``fixed_segment_ids`` and so never hosted a
+    bump, because nothing checked a bump beside its own pad.  With
+    ``own_copper`` it may host one like any segment, under every gate; without
+    it, it stays fixed.
+
     ``ledger`` (Issue #6447): the pair's
     :class:`~kicad_tools.router.skew_ledger.SkewLedger`, built once from the
     untuned routes.  The bump gate's proximity rule then measures to the
@@ -393,6 +409,8 @@ def tune_diff_pair_skew(
         max_uncoupled_mm=max_uncoupled_mm,
         corner_chamfer_widths=corner_chamfer_widths,
         ledger=ledger,
+        own_copper=own_copper,
+        escape_segment_ids=escape_segment_ids,
     )
     # Issue #7521: gated bumps try each chamfer of the ladder in turn, all
     # four corners alike.
@@ -408,6 +426,7 @@ def tune_diff_pair_skew(
             break
     # No rung closed the pair: the first (0.55-width) attempt stands, as before.
     assert reference is not None
+    gated_bumps = intra_pair_clearance_mm > 0.0
     if reference[2].success or reference[2].reason in _UNTOUCHED_REASONS:
         return reference
     # Without a spacing or an uncoupled limit no plain bump is ever tried
@@ -426,7 +445,21 @@ def tune_diff_pair_skew(
         plain_chamfer_widths=SKEW_BUMP_CHAMFER_WIDTHS,
         plain_foot_chamfer_mm=SKEW_BUMP_FOOT_CHAMFER_MM,
     )
-    return asymmetric if _asymmetric_chamfers_win(asymmetric, reference) else reference
+    best = asymmetric if _asymmetric_chamfers_win(asymmetric, reference) else reference
+    if best[2].success or not gated_bumps:
+        return best
+    # Issue #7891: no bump closes the pair, so the cascade runs once more with
+    # a tail fold as each insert's first option (:mod:`.diffpair_tail_fold`):
+    # the shorter leg runs past its own terminal beside the partner's
+    # uncoupled tail and returns into it.  Every fold goes through the same
+    # gates as a bump (own copper included); the result replaces the best
+    # bump result only on the same no-worse-and-better terms.
+    folded = once(
+        plain_chamfer_widths=SKEW_BUMP_CHAMFER_WIDTHS,
+        plain_foot_chamfer_mm=SKEW_BUMP_FOOT_CHAMFER_MM,
+        tail_fold=True,
+    )
+    return folded if _asymmetric_chamfers_win(folded, best) else best
 
 
 def _ledger_anchors(
@@ -491,13 +524,23 @@ def _tune_diff_pair_skew_once(
     plain_chamfer_widths: float,
     plain_foot_chamfer_mm: float | None,
     ledger: SkewLedger | None = None,
+    own_copper: OwnCopperRule | None = None,
+    tail_fold: bool = False,
+    escape_segment_ids: set[int] | None = None,
 ) -> tuple[Route, Route, DiffPairTuneResult]:
     """One :func:`tune_diff_pair_skew` cascade with plain bumps chamfered at
     ``plain_chamfer_widths`` trace widths (issue #7521), their feet at
     ``plain_foot_chamfer_mm`` mm (``None``: the same as the crowns, issue
-    #7546)."""
+    #7546).  ``tail_fold`` (issue #7891) offers a tail fold first at every
+    insert."""
     p_id = pair.pair.positive.net_id
     n_id = pair.pair.negative.net_id
+    # Issue #7891: escape segments host bumps only when the own-copper rule
+    # can check them.  ``host_first`` keeps the first placement on the
+    # pre-#7891 path whenever the caller had any fixed or escape copper.
+    host_first = bool(fixed_segment_ids or escape_segment_ids)
+    if escape_segment_ids and own_copper is None:
+        fixed_segment_ids = set(fixed_segment_ids or ()) | set(escape_segment_ids)
 
     # Engagement gate: pairs whose net class does NOT have length_critical=True
     # are not tuned (the curator's spec on Issue #2648).
@@ -676,6 +719,7 @@ def _tune_diff_pair_skew_once(
             "prefer_reserved_slack": prefer_reserved_slack,
             "shorter_id": shorter_id,
             "fixed_segment_ids": fixed_segment_ids,
+            "host_first": host_first,
             "serpentine_target": serpentine_target,
             "measure": measure,
         }
@@ -686,6 +730,8 @@ def _tune_diff_pair_skew_once(
             plain_only=gated,
             plain_chamfer_widths=plain_chamfer_widths,
             plain_foot_chamfer_mm=plain_foot_chamfer_mm,
+            tail_fold=tail_fold and gated,
+            own_copper=own_copper,
         ):
             result.serpentine_results.append(cand_serp)
             if not cand_serp.success:
@@ -712,6 +758,20 @@ def _tune_diff_pair_skew_once(
                 generator_failure = gate_violation
                 result.gate_refusal = gate_violation
                 continue
+            # Issue #7891: the net's own pads and vias (the foreign gate skips
+            # them), so no bump touches its own copper and ``kct check`` and
+            # kicad-cli count all of the length it adds.
+            if own_copper is not None:
+                own_violation = own_copper.violation(
+                    cand_serp.new_segments,
+                    _replaced_segments(current_shorter, cand_route),
+                    current_shorter.vias,
+                    shorter_id,
+                )
+                if own_violation is not None:
+                    generator_failure = own_violation
+                    result.gate_refusal = own_violation
+                    continue
             # Issue #7521: a pattern-form candidate (ungated tuning only) is
             # tagged before the uncoupled guard measures it (the measure
             # leaves pattern copper out, as kicad-cli 10.0.6 does).  Gated
@@ -760,7 +820,19 @@ def _tune_diff_pair_skew_once(
             # thin traces it can (0.127 mm, skew 0.5: pattern 0.90 mm, plain
             # chamfered 0.78 mm); on 0.2 mm traces the square pattern is
             # always at least as good.
-            if max_uncoupled_mm is not None:
+            if max_uncoupled_mm is not None and isinstance(cand_serp, TailFoldResult):
+                # Issue #7891: a fold's figure depends on which way the pair
+                # is stored (kicad-cli anchors at P's stored start), so it
+                # must fit the limit both ways, with no worse-than-before
+                # allowance.
+                fold_figure = _pair_uncoupled_both_ways(cand_route, longer_route)
+                if fold_figure > max_uncoupled_mm + UNCOUPLED_EPSILON_MM:
+                    generator_failure = (
+                        f"tail fold uncoupled length exceeds limit ({fold_figure:.3f} mm > "
+                        f"{max_uncoupled_mm:.3f} mm in one stored direction)"
+                    )
+                    continue
+            elif max_uncoupled_mm is not None:
                 cand_figure = _pair_uncoupled_mm(cand_route, longer_route)
                 if cand_figure > max_uncoupled_mm + UNCOUPLED_EPSILON_MM:
                     if pre_insert_figure is None:
@@ -917,6 +989,23 @@ def _pair_copper(a: Route, b: Route) -> Copper:
     return Copper(tracks, ())
 
 
+def _pair_uncoupled_both_ways(a: Route, b: Route) -> float:
+    """:func:`_pair_uncoupled_mm` at its worst over the halves' stored directions.
+
+    kicad-cli anchors each pairing at P's stored start (Issue #6554), and
+    nothing downstream promises which way a segment is written, so a shape
+    whose figure depends on it (the tail fold, Issue #7891) is judged at its
+    worst.  Reversing one half covers both relative directions.
+    """
+    from .diffpair_tail_fold import reversed_route
+
+    return max(
+        _pair_uncoupled_mm(a, b),
+        _pair_uncoupled_mm(reversed_route(a), b),
+        _pair_uncoupled_mm(a, reversed_route(b)),
+    )
+
+
 def _is_n_name(name: str) -> bool:
     return name.endswith(("-", "_N", "_n", "N"))
 
@@ -1000,6 +1089,8 @@ def _pattern_then_plain_options(
     plain_only: bool = False,
     plain_chamfer_widths: float = SKEW_BUMP_CHAMFER_WIDTHS,
     plain_foot_chamfer_mm: float | None = None,
+    tail_fold: bool = False,
+    own_copper: OwnCopperRule | None = None,
 ) -> Iterator[tuple[Route, SerpentineResult, bool]]:
     """Yield ``(route, serpentine, as_pattern)`` placements (Issue #7546).
 
@@ -1029,6 +1120,20 @@ def _pattern_then_plain_options(
         corner_chamfer_widths=max(base_config.corner_chamfer_widths, plain_chamfer_widths),
         foot_chamfer_length_mm=plain_foot_chamfer_mm,
     )
+    if tail_fold:
+        # Issue #7891: the tail fold first (the caller only asks for it once
+        # no bump closed the pair); then the bumps, for the rest of the need.
+        from .diffpair_tail_fold import tail_fold_options
+
+        for route, fold in tail_fold_options(
+            route=placement_kwargs["current_shorter"],
+            partner=placement_kwargs["longer_route"],
+            length_needed=placement_kwargs["length_needed"],
+            config=plain_config,
+            ladder=AMPLITUDE_LADDER,
+            own_copper=own_copper,
+        ):
+            yield route, fold, False
     for route, serp in _placement_options(base_config=plain_config, **placement_kwargs):
         yield route, serp, False
     if plain_only:
@@ -1058,6 +1163,7 @@ def _partial_placement_options(
     fixed_segment_ids: set[int] | None,
     serpentine_target: float,
     measure: Callable[[Route], float],
+    host_first: bool = False,
 ) -> Iterator[tuple[Route, SerpentineResult]]:
     """Yield bumps sized to the host they fit, partial ones included (issue #7521).
 
@@ -1192,6 +1298,7 @@ def _placement_options(
     fixed_segment_ids: set[int] | None,
     serpentine_target: float,
     measure: Callable[[Route], float],
+    host_first: bool = False,
 ):
     """Yield ``(candidate_route, SerpentineResult)`` placements, best first.
 
@@ -1235,7 +1342,7 @@ def _placement_options(
         amplitude = max(amplitude, _min_chamfered_amplitude(base_config, first_host[1].width))
     generator = SerpentineGenerator(config_for(amplitude, first_hint, first_host[1].width))
     seg_idx, host = first_host
-    if fixed_segment_ids:
+    if fixed_segment_ids or host_first:
         serp = generator.generate_trombone(host, length_needed)
         yield (
             Route(
