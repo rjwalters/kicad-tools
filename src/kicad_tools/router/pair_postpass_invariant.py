@@ -54,10 +54,17 @@ _EPS = 1e-6
 def checker_skew_limit_mm(
     net_class_map: dict[str, Any] | None, p_name: str, n_name: str
 ) -> float | None:
-    """The pair's ``kct check`` skew limit when it is an ERROR (#5333).
+    """The pair's millimetre skew limit when it is an ERROR (#5333).
 
     ``None`` when the limit is only advisory (warning/info).  The one lookup
     behind ``DiffPairRouter._checker_skew_limit_mm`` and this guard.
+
+    Issue #7892: ``kct check`` no longer reads this.  It judges skew in ps
+    against :func:`kicad_tools.physics.skew_budget.resolve_skew_budget`
+    (``validate.diffpair_engagement.resolve_pair_skew_limits``).  This
+    millimetre resolution stays the router's and tuners' target until #7893
+    switches them to the same helper; the ``.kicad_dru`` skew rule keeps it as
+    a floor so kicad-cli is never looser than what the router tunes to.
     """
     from kicad_tools.validate.diffpair_engagement import resolve_pair_thresholds
 

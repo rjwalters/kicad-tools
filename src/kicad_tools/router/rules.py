@@ -1591,6 +1591,15 @@ class NetClassRouting:
     :meth:`effective_pair_protocol`.
     """
 
+    data_rate_gbps: float | None = None
+    """The rate this class's pairs actually run at, in Gb/s (Issue #7892).
+
+    ``kct check`` derives each pair's skew budget in ps from its protocol
+    (:mod:`kicad_tools.physics.skew_budget`).  Without this field the budget
+    uses the protocol's maximum rate and is a ``warning``; setting it derives
+    the budget at this rate and makes it an ``error``.  A class with a rate
+    and no identifiable protocol is evaluated at Nyquist (rate / 2)."""
+
     max_uncoupled_per_terminal_mm: float | None = None
     """Uncoupled copper allowed at each pair terminal, in mm.  ``None`` ->
     the protocol default, if any.  Derives the total limit (#6443) and is
@@ -1739,6 +1748,17 @@ class NetClassRouting:
             ValueError: :attr:`pair_protocol` names no known protocol.
         """
         parse_protocol(self.pair_protocol)
+        rate = self.data_rate_gbps
+        if rate is not None and (
+            isinstance(rate, bool)
+            or not isinstance(rate, (int, float))
+            or not math.isfinite(rate)
+            or rate <= 0
+        ):
+            raise ValueError(
+                f"net class {self.name!r}: data_rate_gbps must be a positive number "
+                f"of Gb/s, got {rate!r}"
+            )
         gather = self.gather_ignore
         if isinstance(gather, bool) or not (
             gather in ("courtyard", "none")
@@ -2002,6 +2022,7 @@ class NetClassRouting:
             "coupled_continuity_threshold": self.coupled_continuity_threshold,
             "skew_tolerance_mm": self.skew_tolerance_mm,
             "pair_protocol": getattr(self.pair_protocol, "name", self.pair_protocol),
+            "data_rate_gbps": self.data_rate_gbps,
             "max_uncoupled_per_terminal_mm": self.max_uncoupled_per_terminal_mm,
             "max_uncoupled_total_mm": self.max_uncoupled_total_mm,
             "max_vias_per_net": self.max_vias_per_net,
@@ -2104,6 +2125,7 @@ class NetClassRouting:
             coupled_continuity_threshold=data.get("coupled_continuity_threshold"),
             skew_tolerance_mm=data.get("skew_tolerance_mm"),
             pair_protocol=_normalize_pair_protocol(data.get("pair_protocol")),
+            data_rate_gbps=data.get("data_rate_gbps"),
             max_uncoupled_per_terminal_mm=data.get("max_uncoupled_per_terminal_mm"),
             max_uncoupled_total_mm=data.get("max_uncoupled_total_mm"),
             max_vias_per_net=data.get("max_vias_per_net"),

@@ -43,7 +43,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from kicad_tools.router.pair_protocols import (
     SKEW_STRETCH_TARGET_MM,
@@ -226,6 +226,125 @@ def resolve_pair_thresholds(
     )
 
 
+#: Provenance suffix of a class millimetre limit kept beside a derived budget.
+TRANSITIONAL_CLASS_CAP = "transitional: removed from the generators by #7894"
+
+
+@dataclass(frozen=True)
+class PairSkewLimits:
+    """Every skew limit ``kct check`` applies to one pair (Issue #7892).
+
+    ``budget`` is the derived time budget of
+    :func:`kicad_tools.physics.skew_budget.resolve_skew_budget` -- the one
+    source of skew budgets -- or ``None`` when the pair's protocol and rate
+    give nothing to derive from.  ``length_cap_mm`` is a length limit checked
+    as before: the class's own ``skew_tolerance_mm`` beside a budget (kept
+    until #7894 removes those fields from the board generators), or, for a
+    pair with no budget, the pre-#7892 limit (protocol table or generic
+    0.5 mm).  ``delays`` are the board's per-layer delays at the class trace
+    width, ``None`` when the caller has no stackup.  ``legacy`` is the
+    millimetre resolution the router still tunes to until #7893.
+    """
+
+    budget: Any | None
+    length_cap_mm: float | None
+    length_severity: str
+    length_source: str
+    legacy: PairThresholds
+    delays: Any | None = None
+
+    @property
+    def budget_mm_equivalent(self) -> float | None:
+        """The budget at the slowest layer delay (mm), the conservative length form."""
+        if self.budget is None or self.delays is None:
+            return None
+        return float(self.delays.mm_equivalent(self.budget.budget_ps))
+
+    @property
+    def kicad_skew_mm(self) -> float:
+        """The millimetre ``skew`` rule the ``.kicad_dru`` carries.
+
+        kicad-cli 10.0.6 cannot enforce a time budget (Issue #7892 probe), so
+        it gets the tightest length form of every limit: the budget at the
+        slowest layer, the class cap, and the router's own length target
+        (until #7893 switches the router, kicad-cli is never looser than what
+        ``kct route`` tunes to).
+        """
+        values = [float(self.legacy.skew_mm)]
+        if self.length_cap_mm is not None:
+            values.append(float(self.length_cap_mm))
+        eq = self.budget_mm_equivalent
+        if eq is not None:
+            values.append(eq)
+        return min(values)
+
+    @property
+    def kicad_skew_severity(self) -> str:
+        """``error`` when any of the limits behind :attr:`kicad_skew_mm` is one."""
+        severities = [self.legacy.skew_severity]
+        if self.length_cap_mm is not None:
+            severities.append(self.length_severity)
+        if self.budget is not None:
+            severities.append(self.budget.severity)
+        return "error" if "error" in severities else "warning"
+
+
+def resolve_pair_skew_limits(
+    net_class_map: dict[str, NetClassRouting] | None,
+    p_name: str,
+    n_name: str,
+    stackup: Any | None = None,
+) -> PairSkewLimits:
+    """The skew limits ``kct check`` applies to a pair (Issue #7892).
+
+    The class is chosen as :func:`resolve_pair_thresholds` chooses it (the
+    positive net's, then the negative net's).  ``stackup`` (a
+    :class:`~kicad_tools.physics.stackup.Stackup`) supplies the per-layer
+    delays at the class trace width.
+    """
+    from kicad_tools.physics.skew_budget import layer_delays, resolve_skew_budget
+
+    ncm = net_class_map or {}
+    nc = ncm.get(p_name)
+    if nc is None:
+        nc = ncm.get(n_name)
+    legacy = resolve_pair_thresholds(net_class_map, p_name, n_name)
+    budget = resolve_skew_budget(nc, p_name, n_name)
+    delays = None
+    if stackup is not None:
+        width = getattr(nc, "trace_width", None) if nc is not None else None
+        delays = layer_delays(stackup, float(width) if width else 0.2)
+    if budget is None:
+        return PairSkewLimits(
+            budget=None,
+            length_cap_mm=float(legacy.skew_mm),
+            length_severity=legacy.skew_severity,
+            length_source=legacy.skew_source,
+            legacy=legacy,
+            delays=delays,
+        )
+    source = legacy.skew_source
+    if source.startswith("protocol:") and delays is not None:
+        # The derived budget supersedes the protocol table's millimetres.
+        cap, cap_severity = None, "error"
+    elif source.startswith("class:"):
+        # Kept beside the budget until #7894 removes the generator fields.
+        cap, cap_severity = float(legacy.skew_mm), "error"
+        source = f"{source} ({TRANSITIONAL_CLASS_CAP})"
+    else:
+        # The generic default (a protocol only inferred from a name does not
+        # loosen it), or no delays to measure time with: keep the length check.
+        cap, cap_severity = float(legacy.skew_mm), legacy.skew_severity
+    return PairSkewLimits(
+        budget=budget,
+        length_cap_mm=cap,
+        length_severity=cap_severity,
+        length_source=source if cap is not None else "",
+        legacy=legacy,
+        delays=delays,
+    )
+
+
 def pair_threshold_report(
     net_names: dict[int, str] | None,
     net_class_map: dict[str, NetClassRouting] | None,
@@ -258,10 +377,19 @@ def pair_threshold_report(
         if not engaged:
             continue
         t = resolve_pair_thresholds(net_class_map, p_name, n_name)
-        lines.append(
+        line = (
             f"    {p_name}/{n_name}: continuity threshold {t.continuity * 100:.1f}%, "
             f"skew tolerance {t.skew_mm:.3f} mm [{t.skew_source}; {t.skew_severity}]"
         )
+        # Issue #7892: ``kct check`` judges the pair in time.  The router still
+        # tunes to the millimetre tolerance above until #7893.
+        budget = resolve_pair_skew_limits(net_class_map, p_name, n_name).budget
+        if budget is not None:
+            line += (
+                f"; kct check skew budget {budget.budget_ps:.2f} ps "
+                f"[{budget.provenance}; {budget.severity}]"
+            )
+        lines.append(line)
     return sorted(lines)
 
 

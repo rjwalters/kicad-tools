@@ -330,6 +330,7 @@ class TestDriftPrevention:
             "coupled_continuity_threshold": 0.65,
             "skew_tolerance_mm": 0.35,
             "pair_protocol": "USB2_HS",
+            "data_rate_gbps": 0.48,
             "max_uncoupled_per_terminal_mm": 5.5,
             "max_uncoupled_total_mm": 17.5,
             "max_vias_per_net": 3,

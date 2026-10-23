@@ -62,8 +62,20 @@ Scope (out of scope -- explicitly):
 - Fixing the skew (Phase 3I's domain -- this rule does NOT consult any
   ``serpentine_inserted`` flag; it fires on routed-as-found geometry).
 - Cross-pair lane-matching skew (future ``diffpair_lane_skew`` rule).
-- Propagation-delay-aware skew (geometric only here; delay-aware lives
-  in a Phase 5+ rule).
+
+Time domain (Issue #7892)
+=========================
+
+When the caller supplies ``measurements``
+(:func:`~kicad_tools.validate.diffpair_skew.derive_pair_skews`), a pair is
+judged in **picoseconds**: the difference of its legs' propagation delays,
+each trimmed track run at its own layer's delay and each via barrel at the
+via delay, against the derived budget of
+:func:`kicad_tools.physics.skew_budget.resolve_skew_budget`.  The finding
+reports the skew in ps, the budget, and the budget's millimetre form at the
+slowest layer.  A pair whose class still sets ``skew_tolerance_mm`` is also
+held to that length cap (until #7894 removes those class fields).  Pairs with
+no derivable budget keep the length check below.
 - Modifying the sibling ``diffpair_routing_continuity`` or
   ``diffpair_clearance_intra`` rules (orthogonal concerns).
 """
@@ -80,7 +92,7 @@ if TYPE_CHECKING:
 
     from kicad_tools.manufacturers import DesignRules
     from kicad_tools.schema.pcb import PCB
-    from kicad_tools.validate.diffpair_skew import ChainSkew
+    from kicad_tools.validate.diffpair_skew import ChainSkew, PairSkewMeasurement
 
 
 # Module-level default skew tolerance in mm.  MUST equal the default arg
@@ -155,8 +167,9 @@ class DiffPairLengthSkewRule(DRCRule):
     rule_id = "diffpair_length_skew"
     name = "Differential-Pair Length Skew"
     description = (
-        "Validates that engaged differential pairs have a routed-length "
-        "skew (|L_p - L_n|) at or below the per-class skew tolerance."
+        "Validates that engaged differential pairs have a propagation-delay "
+        "skew within their derived budget (ps) and a routed-length skew "
+        "(|L_p - L_n|) at or below any length tolerance that applies."
     )
 
     def __init__(
@@ -169,6 +182,7 @@ class DiffPairLengthSkewRule(DRCRule):
         severity_map: dict[tuple[int, int], str] | None = None,
         source_map: dict[tuple[int, int], str] | None = None,
         chains: Sequence[ChainSkew] | None = None,
+        measurements: Sequence[PairSkewMeasurement] | None = None,
     ) -> None:
         """Initialize the rule.
 
@@ -212,8 +226,17 @@ class DiffPairLengthSkewRule(DRCRule):
                 metric when ``emit_info`` is set, and as an ``error`` when
                 its class declares ``chain_skew_tolerance_mm`` and the
                 end-to-end skew exceeds it.
+            measurements: Issue #7892 -- pairs measured in length and time
+                with their resolved limits
+                (:func:`~kicad_tools.validate.diffpair_skew.derive_pair_skews`).
+                A measured pair is judged against its derived time budget
+                (ps) and, where one applies, its length cap (mm); it ignores
+                ``skew_data`` / ``threshold_map`` for that pair.
         """
         self._chains = list(chains or [])
+        self._measurements: dict[tuple[str, str], PairSkewMeasurement] = {
+            _normalize_name_pair(m.p_name, m.n_name): m for m in (measurements or [])
+        }
         # Normalize skew_data keys -- name tuples sorted lexicographically
         # so the caller does not have to maintain P/N ordering.
         self._skew_data: dict[tuple[str, str], float] = {}
@@ -272,7 +295,7 @@ class DiffPairLengthSkewRule(DRCRule):
         # AND a producer-side engagement set, the rule has nothing to
         # validate.
         self._check_chains(results)
-        if not self._skew_data or not self._engaged:
+        if (not self._skew_data and not self._measurements) or not self._engaged:
             return results
 
         # Build a {net_name -> net_id} lookup for resolving skew_data
@@ -284,7 +307,10 @@ class DiffPairLengthSkewRule(DRCRule):
 
         # Iterate the (sorted) skew_data entries deterministically so
         # violations appear in a stable order across runs.
-        for (name_a, name_b), skew_mm in sorted(self._skew_data.items()):
+        entries = dict(self._skew_data)
+        for names, m in self._measurements.items():
+            entries[names] = m.skew_mm
+        for (name_a, name_b), skew_mm in sorted(entries.items()):
             id_a = name_to_id.get(name_a)
             id_b = name_to_id.get(name_b)
             if id_a is None or id_b is None:
@@ -311,6 +337,11 @@ class DiffPairLengthSkewRule(DRCRule):
             results.rules_checked_by_rule["diffpair_length_skew"] = (
                 results.rules_checked_by_rule.get("diffpair_length_skew", 0) + 1
             )
+
+            measured = self._measurements.get((name_a, name_b))
+            if measured is not None:
+                self._check_measured(results, measured)
+                continue
 
             tolerance_mm = self._threshold_map.get(key, self._default_tolerance_mm)
             if skew_mm > tolerance_mm + SKEW_TOLERANCE_EPSILON_MM:
@@ -339,6 +370,82 @@ class DiffPairLengthSkewRule(DRCRule):
                 )
 
         return results
+
+    def _check_measured(self, results: DRCResults, m: PairSkewMeasurement) -> None:
+        """Judge one pair against its time budget and length cap (Issue #7892)."""
+        from kicad_tools.physics.skew_budget import SKEW_BUDGET_EPSILON_PS
+
+        first, second = sorted([m.p_name, m.n_name])
+        limits = m.limits
+        budget = limits.budget
+        findings: list[DRCViolation] = []
+        passes: list[str] = []
+        if budget is not None and m.skew_ps is not None:
+            eq = limits.budget_mm_equivalent
+            eq_text = f" = {eq:.3f} mm at the slowest layer" if eq is not None else ""
+            text = (
+                f"propagation-delay skew {m.skew_ps:.2f} ps (length skew {m.skew_mm:.3f} mm) "
+                f"{{verdict}} budget {budget.budget_ps:.2f} ps{eq_text} [{budget.provenance}]"
+            )
+            if m.skew_ps > budget.budget_ps + SKEW_BUDGET_EPSILON_PS:
+                kct_only = m.skew_mm <= limits.kicad_skew_mm + SKEW_TOLERANCE_EPSILON_MM
+                note = (
+                    " -- kct-only: kicad-cli checks length, and this pair's legs run on "
+                    "layers of different delay"
+                    if kct_only
+                    else ""
+                )
+                findings.append(
+                    DRCViolation(
+                        rule_id=self.rule_id,
+                        severity=budget.severity,
+                        message=f"Engaged differential pair {first}/{second} "
+                        + text.format(verdict="exceeds")
+                        + note,
+                        location=None,
+                        layer=None,
+                        actual_value=round(m.skew_ps, 3),
+                        required_value=round(budget.budget_ps, 3),
+                        items=(first, second),
+                        nets=(m.p_name, m.n_name),
+                    )
+                )
+            else:
+                passes.append(text.format(verdict="within"))
+        if limits.length_cap_mm is not None:
+            source = f" [{limits.length_source}]" if limits.length_source else ""
+            if m.skew_mm > limits.length_cap_mm + SKEW_TOLERANCE_EPSILON_MM:
+                findings.append(
+                    self._make_violation(
+                        name_a=m.p_name,
+                        name_b=m.n_name,
+                        skew_mm=m.skew_mm,
+                        tolerance_mm=limits.length_cap_mm,
+                        severity=limits.length_severity,
+                        source=limits.length_source or None,
+                    )
+                )
+            else:
+                passes.append(
+                    f"length-skew {m.skew_mm:.3f} mm within tolerance "
+                    f"{limits.length_cap_mm:.3f} mm{source}"
+                )
+        for finding in findings:
+            results.add(finding)
+        if self._emit_info and passes and not findings:
+            results.add(
+                DRCViolation(
+                    rule_id=self.rule_id,
+                    severity="info",
+                    message=f"Engaged differential pair {first}/{second} " + "; ".join(passes),
+                    location=None,
+                    layer=None,
+                    actual_value=round(m.skew_ps if m.skew_ps is not None else m.skew_mm, 4),
+                    required_value=None,
+                    items=(),
+                    nets=(first, second),
+                )
+            )
 
     def _check_chains(self, results: DRCResults) -> None:
         """Report each chain's end-to-end skew (Issue #6447)."""

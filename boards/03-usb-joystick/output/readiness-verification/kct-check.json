@@ -115,11 +115,11 @@
       "rule_id": "diffpair_length_skew",
       "type": "diffpair_length_skew",
       "severity": "info",
-      "message": "Engaged differential pair USB_D+/USB_D- length-skew 0.224 mm within tolerance 2.500 mm [protocol:USB2_FS (Renesas, Guidelines for Full-Speed USB2.0 Board Design, Table 2)]",
+      "message": "Engaged differential pair USB_D+/USB_D- propagation-delay skew 2.74 ps (length skew 0.224 mm) within budget 115.16 ps = 16.096 mm at the slowest layer [derived:-30 dB at knee 0.0874 GHz (USB2_FS 0.012 Gb/s, protocol max rate); [USB2] USB 2.0 full speed, 12 Mb/s; [USB2] \u00a77.1.2.1: FS rise/fall 4-20 ns]",
       "location": null,
       "layer": null,
-      "actual_value": 0.2243,
-      "required_value": 2.5,
+      "actual_value": 2.7446,
+      "required_value": null,
       "items": [],
       "nets": [
         "USB_D+",
@@ -128,17 +128,17 @@
       "status": "info",
       "waived": false,
       "key": "diffpair_length_skew||USB_D+,USB_D-|",
-      "evidence_hash": "ev2:249a34ecd3788d86"
+      "evidence_hash": "ev2:515db704eeadde65"
     },
     {
       "rule_id": "diffpair_length_skew",
       "type": "diffpair_length_skew",
       "severity": "info",
-      "message": "Engaged differential pair USB_MCU_D+/USB_MCU_D- length-skew 0.137 mm within tolerance 2.500 mm [protocol:USB2_FS (Renesas, Guidelines for Full-Speed USB2.0 Board Design, Table 2)]",
+      "message": "Engaged differential pair USB_MCU_D+/USB_MCU_D- propagation-delay skew 0.82 ps (length skew 0.137 mm) within budget 115.16 ps = 16.096 mm at the slowest layer [derived:-30 dB at knee 0.0874 GHz (USB2_FS 0.012 Gb/s, protocol max rate); [USB2] USB 2.0 full speed, 12 Mb/s; [USB2] \u00a77.1.2.1: FS rise/fall 4-20 ns]",
       "location": null,
       "layer": null,
-      "actual_value": 0.1374,
-      "required_value": 2.5,
+      "actual_value": 0.8167,
+      "required_value": null,
       "items": [],
       "nets": [
         "USB_MCU_D+",
@@ -147,7 +147,7 @@
       "status": "info",
       "waived": false,
       "key": "diffpair_length_skew||USB_MCU_D+,USB_MCU_D-|",
-      "evidence_hash": "ev2:d64d5343c9a313b2"
+      "evidence_hash": "ev2:efe2098b5a9b3e84"
     },
     {
       "rule_id": "diffpair_routing_continuity",
