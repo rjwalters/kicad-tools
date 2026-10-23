@@ -98,14 +98,26 @@ def test_tie_declines_when_no_layer_is_permitted(capsys, monkeypatch) -> None:
     assert "Diff-pair ties D+/D-: not used (J1.B6->J1.A6 has no permitted tie layer" in out
 
 
-def test_tie_declines_when_only_one_permitted_layer_fits_one_tie(capsys) -> None:
-    # One permitted layer has room for only one of the two crossing ties.
+def test_tie_declines_when_only_one_permitted_layer_fits_one_tie(capsys, monkeypatch) -> None:
+    # One permitted layer has room for only one of the two crossing DIRECT
+    # ties.  Without a length-balanced crossing set (#7869) the pair declines.
+    import kicad_tools.router.pairplan.tie as tie_mod
+
+    monkeypatch.setattr(tie_mod, "plan_crossing_ties", lambda *a, **k: None)
     router = _router(allowed=["F.Cu"])
     router._lattice_netset_connections()
     assert router._lattice_pair_ties == []
-    assert "Diff-pair ties D+/D-: not used (J1.B7->J1.A7 has no clearing tie)" in (
+    assert "Diff-pair ties D+/D-: not used (J1.B7->J1.A7 has no clearing tie" in (
         capsys.readouterr().out
     )
+
+
+def test_crossing_ties_stay_on_the_permitted_layer() -> None:
+    # Issue #7869: the length-balanced crossing set honours the same filter:
+    # with only F.Cu permitted both ties land there, never on In1.Cu.
+    router = _router(allowed=["F.Cu"])
+    router._lattice_netset_connections()
+    assert _tie_layers(router) == {"D+": "F.Cu", "D-": "F.Cu"}
 
 
 @pytest.mark.parametrize(
