@@ -4907,21 +4907,31 @@ def match_pair_lengths(
     length_to_add = delta - max_delta * 0.5  # Leave some margin
 
     if p_length < n_length:
-        return create_serpentine(
-            p_route,
-            length_to_add,
-            partner_route=n_route if intra_pair_clearance_mm is not None else None,
-            intra_pair_clearance_mm=intra_pair_clearance_mm,
-            grid=grid,
-        )
+        shorter, partner = p_route, n_route
     else:
-        return create_serpentine(
-            n_route,
-            length_to_add,
-            partner_route=p_route if intra_pair_clearance_mm is not None else None,
-            intra_pair_clearance_mm=intra_pair_clearance_mm,
-            grid=grid,
-        )
+        shorter, partner = n_route, p_route
+    original_segments = shorter.segments
+    added = create_serpentine(
+        shorter,
+        length_to_add,
+        partner_route=partner if intra_pair_clearance_mm is not None else None,
+        intra_pair_clearance_mm=intra_pair_clearance_mm,
+        grid=grid,
+    )
+    if not added:
+        return False
+    # Issue #7548: the comb's 0.3 mm amplitude floor and fixed bend count can
+    # add far more than asked (board 06 MIPI_D0: a 0.663 mm skew came back
+    # 0.986 mm the other way, and its off-angle teeth grew another 1.3 mm
+    # under 45-degree quantization, 2.320 mm against a 0.300 mm limit).  A
+    # comb that leaves the pair no closer than before is undone, so the
+    # caller falls through to the audited skew-bump tuner on the untouched
+    # route instead.
+    new_delta = abs(calculate_route_length([p_route]) - calculate_route_length([n_route]))
+    if new_delta >= delta - 1e-9:
+        shorter.segments = original_segments
+        return False
+    return True
 
 
 def _snap_route_ends_to_pads(route: Route, start: Pad, end: Pad, tol: float = 0.005) -> None:

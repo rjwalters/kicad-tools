@@ -246,9 +246,36 @@ class TestBoard07:
 # ---------------------------------------------------------------------------
 
 
+#: The entry board 06's allowance last held before issue #7548 emptied it.
+BOARD06_SYNTHETIC = {("diffpair_length_skew", "MIPI_D0+/MIPI_D0-"): 7548}
+
+
+def with_board06_synthetic(gate):
+    """Install :data:`BOARD06_SYNTHETIC` on a freshly loaded diff-pair gate."""
+    gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS = dict(BOARD06_SYNTHETIC)
+    gate.DIFFPAIR_ALLOWANCES[gate.DIFFPAIR_FIXTURE_KEY] = gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS
+    return gate
+
+
+def test_board06_committed_allowance_is_empty():
+    """Issue #7548: the seed-42 re-route measures every declared pair within
+    its ``max_skew_mm``, so board 06 allows no blocking finding at all."""
+    gate = load("check_diffpair_coverage")
+    assert gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS == {}
+    assert not hasattr(gate, "DIFFPAIR_SKEW_TRACKER")
+    assert gate.DIFFPAIR_ALLOWANCES.get(BOARD06_KEY, {}) == {}
+
+
 class TestBoard06:
+    """The identity mechanism on board 06's key, with a synthetic allowance.
+
+    Issue #7548 emptied the committed allowance; these tests install the
+    entry it last held (MIPI_D0 skew) on a freshly loaded gate so the stale /
+    swapped / zero-budget paths stay covered.
+    """
+
     def gate(self):
-        return load("check_diffpair_coverage")
+        return with_board06_synthetic(load("check_diffpair_coverage"))
 
     def measured(self):
         return violations_for(self.gate().DIFFPAIR_FIXTURE_ALLOWED_FINDINGS)
