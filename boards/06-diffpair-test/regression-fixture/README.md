@@ -82,10 +82,17 @@ layers; GND/PWR planes are unencumbered for impedance reference.
 
 The protocol-specific `NetClassRouting` instances live in `generate_design.py`:
 
-- `usb2_net_class()` --- `target_diff_impedance=90`, `intra_pair_clearance=0.075`
-- `usb3_net_class()` --- `target_diff_impedance=90`, `coupled_continuity_threshold=0.9`
-- `pcie_net_class()` --- `target_diff_impedance=100`, `skew_tolerance_mm=0.5`
-- `mipi_net_class()` --- `target_diff_impedance=100`, `skew_tolerance_mm=0.3`
+- `usb2_net_class()` --- `target_diff_impedance=90`, `intra_pair_clearance=0.075`, `pair_protocol="USB2_HS"`
+- `usb3_net_class()` --- `target_diff_impedance=90`, `coupled_continuity_threshold=0.9`, `pair_protocol="USB3_SS"`
+- `pcie_net_class()` --- `target_diff_impedance=100`, `pair_protocol="PCIE_G1"`
+- `mipi_net_class()` --- `target_diff_impedance=100`, `pair_protocol="MIPI_DPHY"`, `data_rate_gbps=1.0`
+
+No class sets `skew_tolerance_mm` (Issue #7894): every pair is held to the
+derived ps skew budget of its declared protocol
+([guide 09](../../../docs/guides/diff-pairs/09-skew-budget.md)).  USB 2.0,
+USB 3.0 and PCIe Gen1 run at their protocol's maximum rate, so their budgets
+are warnings; MIPI declares its 1 Gb/s lane rate, so its 20.1 ps budget is an
+error.
 - `sideband_net_class()` --- `target_single_impedance=50` (for USB_CC1/CC2, MIPI_RST)
 
 `build_net_class_map()` assembles them into a `net_name -> NetClassRouting`

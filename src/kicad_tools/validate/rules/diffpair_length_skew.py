@@ -73,9 +73,11 @@ each trimmed track run at its own layer's delay and each via barrel at the
 via delay, against the derived budget of
 :func:`kicad_tools.physics.skew_budget.resolve_skew_budget`.  The finding
 reports the skew in ps, the budget, and the budget's millimetre form at the
-slowest layer.  A pair whose class still sets ``skew_tolerance_mm`` is also
-held to that length cap (until #7894 removes those class fields).  Pairs with
-no derivable budget keep the length check below.
+slowest layer.  A pair whose class sets ``skew_tolerance_mm`` explicitly is
+also held to that length cap (the board generators no longer set one, Issue
+#7894).  A pair whose protocol is completely unknown keeps the generic 0.5 mm
+beside a budget derived from a declared rate; a declared or name-recognised
+protocol does not.  Pairs with no derivable budget keep the length check below.
 - Modifying the sibling ``diffpair_routing_continuity`` or
   ``diffpair_clearance_intra`` rules (orthogonal concerns).
 """

@@ -369,7 +369,7 @@ def test_outer_layer_only_pair_keeps_its_verdict(tmp_path: Path, skew_mm: float,
     assert bool(legacy) is fails
     assert bool(new) is fails
     if fails:
-        # The class millimetre cap still fails it as an error (until #7894),
+        # An explicit class millimetre cap still fails it as an error,
         # and the time budget agrees.
         assert {f.severity for f in new} == {"error", "warning"}
         assert all("kct-only" not in f.message for f in new)
@@ -409,6 +409,61 @@ def test_no_budget_keeps_the_legacy_length_check(tmp_path: Path):
     findings = _skew_findings(path, ncm)
     assert len(findings) == 1
     assert "length-skew 0.700 mm exceeds tolerance 0.500 mm" in findings[0].message
+
+
+# ---------------------------------------------------------------------------
+# Issue #7894 ruling: the generic 0.5 mm cap is for unknown protocols only
+# ---------------------------------------------------------------------------
+
+#: 0.55 mm on F.Cu: inside USB 3 Gen 1's 4.03 ps (about 3.1 ps on the outer
+#: layer) but over the generic 0.5 mm.
+_OVER_GENERIC_MM = 0.55
+
+
+def _outer_pair(tmp_path: Path, name: str = "USB3_TX1") -> Path:
+    path = _board(
+        tmp_path,
+        _seg(110, 120, 140, 120, "F.Cu", 1, 1),
+        _seg(110, 120.375, 140 + _OVER_GENERIC_MM, 120.375, "F.Cu", 2, 2),
+    )
+    path.write_text(path.read_text().replace("USB3_TX1", name))
+    return path
+
+
+def _default_class(**kw) -> NetClassRouting:
+    return NetClassRouting(name="Default", coupled_routing=True, trace_width=0.275, **kw)
+
+
+def test_kct_check_known_protocol_gets_the_budget_not_the_generic_cap(tmp_path: Path):
+    path = _outer_pair(tmp_path)
+    assert _skew_findings(path, _ncm()) == []  # pair_protocol=USB3_SS: 4.03 ps only
+
+
+def test_kct_check_name_guessed_protocol_gets_the_budget_not_the_generic_cap(tmp_path: Path):
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.diffpair_engagement import resolve_pair_skew_limits
+
+    path = _outer_pair(tmp_path)
+    nc = _default_class()  # no pair_protocol: USB3_TX1 names the protocol
+    ncm = {"USB3_TX1+": nc, "USB3_TX1-": nc}
+    assert _skew_findings(path, ncm) == []
+    limits = resolve_pair_skew_limits(
+        ncm, "USB3_TX1+", "USB3_TX1-", Stackup.from_pcb(PCB.load(str(path)))
+    )
+    assert limits.budget is not None and limits.budget.identified_by == "pair name"
+    assert limits.length_cap_mm is None
+    assert limits.kicad_skew_mm == pytest.approx(limits.budget_mm_equivalent)
+    assert limits.kicad_skew_severity == "warning"
+
+
+@pytest.mark.parametrize("rate", [None, 5.0])
+def test_kct_check_unknown_protocol_keeps_the_generic_cap(tmp_path: Path, rate):
+    path = _outer_pair(tmp_path, "FOO")
+    nc = _default_class(data_rate_gbps=rate)
+    findings = _skew_findings(path, {"FOO+": nc, "FOO-": nc})
+    errors = [f for f in findings if f.severity == "error"]
+    assert len(errors) == 1
+    assert "exceeds tolerance 0.500 mm" in errors[0].message
 
 
 def test_parts_total_equals_net_length(split_layer_board: Path):

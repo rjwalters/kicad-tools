@@ -790,18 +790,18 @@ class TestCheckerIntegration:
 
         assert results.rules_checked == 1
         assert results.rules_checked_by_rule.get("diffpair_length_skew") == 1
-        errors = [v for v in results.violations if v.severity == "error"]
-        assert len(errors) == 1
-        v = errors[0]
-        assert v.rule_id == "diffpair_length_skew"
-        assert v.actual_value == 5.0
-        assert v.required_value == 0.5
         # Issue #7892: the ``USB_D`` name implies USB 2.0 HS, whose derived
-        # budget adds a ps warning; the generic 0.5 mm error is not loosened.
+        # budget fires as a ps warning (protocol max rate).  Issue #7894
+        # ruling: a name-recognised protocol gets that budget alone, not the
+        # generic 0.5 mm error.
+        assert [v for v in results.violations if v.severity == "error"] == []
         warnings = [v for v in results.violations if v.severity == "warning"]
         assert len(warnings) == 1
-        assert "propagation-delay skew" in warnings[0].message
-        assert "by pair name" in warnings[0].message
+        v = warnings[0]
+        assert v.rule_id == "diffpair_length_skew"
+        assert "propagation-delay skew" in v.message
+        assert "by pair name" in v.message
+        assert abs(v.required_value - 14.39) < 0.01  # USB2_HS budget, ps
 
     def test_with_net_class_map_passes_when_under_tolerance(self):
         """With net_class_map + within-tolerance pair -> no fire, but rule

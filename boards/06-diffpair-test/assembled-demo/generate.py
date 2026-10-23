@@ -444,8 +444,9 @@ def main():
                 coupled_routing=True,
                 target_diff_impedance=100,
                 impedance_tolerance_percent=15,
-                skew_tolerance_mm=0.1,
-                pair_protocol="LVDS",  # Issue #6443 (explicit 0.1 mm above wins)
+                # Issue #7894: no class skew limit.  The derived LVDS budget
+                # (SN65LVDS1/2, 400 Mb/s, the protocol's operating point) applies.
+                pair_protocol="LVDS",
                 coupled_continuity_threshold=0.8,
                 diffpair_partner=f"LVDS{i}_{other}",
             )

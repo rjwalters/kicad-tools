@@ -227,7 +227,9 @@ def resolve_pair_thresholds(
 
 
 #: Provenance suffix of a class millimetre limit kept beside a derived budget.
-TRANSITIONAL_CLASS_CAP = "transitional: removed from the generators by #7894"
+#: Issue #7894 removed these fields from the board generators; a class that
+#: still sets ``skew_tolerance_mm`` gets it as an explicit extra length cap.
+CLASS_CAP_NOTE = "explicit class cap beside the derived budget"
 
 
 @dataclass(frozen=True)
@@ -238,10 +240,12 @@ class PairSkewLimits:
     :func:`kicad_tools.physics.skew_budget.resolve_skew_budget` -- the one
     source of skew budgets -- or ``None`` when the pair's protocol and rate
     give nothing to derive from.  ``length_cap_mm`` is a length limit checked
-    as before: the class's own ``skew_tolerance_mm`` beside a budget (kept
-    until #7894 removes those fields from the board generators), or, for a
-    pair with no budget, the pre-#7892 limit (protocol table or generic
-    0.5 mm).  ``delays`` are the board's per-layer delays at the class trace
+    as before: a class's own explicit ``skew_tolerance_mm`` beside a budget
+    (the board generators no longer set one, Issue #7894), or, for a pair
+    with no budget, the pre-#7892 limit (protocol table or generic 0.5 mm).
+    The generic 0.5 mm applies beside a budget only when the protocol is
+    completely unknown (#7894 ruling): a protocol declared or recognised
+    from a class or net name gets its derived budget alone.  ``delays`` are the board's per-layer delays at the class trace
     width, ``None`` when the caller has no stackup.  ``legacy`` is the
     pre-#7892 millimetre resolution (its source and severity feed
     ``length_cap_mm``; since #7893 nothing tunes to its value directly).
@@ -330,16 +334,21 @@ def resolve_pair_skew_limits(
             delays=delays,
         )
     source = legacy.skew_source
-    if source.startswith("protocol:") and delays is not None:
-        # The derived budget supersedes the protocol table's millimetres.
-        cap, cap_severity = None, "error"
-    elif source.startswith("class:"):
-        # Kept beside the budget until #7894 removes the generator fields.
+    if source.startswith("class:"):
+        # An explicit class millimetre limit is the user's own extra cap.
         cap, cap_severity = float(legacy.skew_mm), "error"
-        source = f"{source} ({TRANSITIONAL_CLASS_CAP})"
+        source = f"{source} ({CLASS_CAP_NOTE})"
+    elif delays is None:
+        # No delays to measure time with: keep the length check.
+        cap, cap_severity = float(legacy.skew_mm), legacy.skew_severity
+    elif source.startswith("protocol:") or budget.protocol is not None:
+        # The derived budget supersedes the protocol table's millimetres, and
+        # the generic 0.5 mm for a protocol recognised from a class or net
+        # name (Issue #7894 ruling: the generic cap is for unknown protocols).
+        cap, cap_severity = None, "error"
     else:
-        # The generic default (a protocol only inferred from a name does not
-        # loosen it), or no delays to measure time with: keep the length check.
+        # The protocol is completely unknown (a budget derived from a declared
+        # rate alone): the generic default stays beside it.
         cap, cap_severity = float(legacy.skew_mm), legacy.skew_severity
     return PairSkewLimits(
         budget=budget,
