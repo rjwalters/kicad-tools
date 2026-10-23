@@ -235,7 +235,10 @@ class TestTailFold:
         _p, n_out, result = _tune_7546(None)
         assert result.reason == "tuned" and result.skew_after_mm <= TOLERANCE
         fold = _fold(result, n_out)
-        assert fold.amplitude == pytest.approx(W, rel=1e-5)  # the lowest fold reads least
+        # Issue #7902: the lowest fold whose top keeps the pair's own gap to
+        # its return run (no clearance is known without an own-copper rule).
+        # Before, it ran at one width (0.2 mm) and the two runs touched.
+        assert fold.amplitude == pytest.approx(W + GAP, rel=1e-5)
 
     def test_only_room_is_beside_its_own_pad(self):
         """With pads at every end, the fold's top must clear N's end pad by the
@@ -292,16 +295,93 @@ class TestTailFold:
 
     def test_the_fold_must_fit_the_limit_in_both_stored_directions(self):
         """kicad-cli anchors the pairing at P's stored start: the padless fold
-        reads 0.62 mm one way and 1.53 mm the other, so a 1.5 mm limit
-        refuses it and 1.6 mm accepts it."""
-        assert _tune_7546(None, limit=1.5)[2].inserts_applied == 0
-        assert _tune_7546(None, limit=1.6)[2].reason == "tuned"
+        reads 1.12 mm one way and 1.78 mm the other (Issue #7902, at
+        A = W + gap), so a 1.75 mm limit refuses it and 1.8 mm accepts it."""
+        assert _tune_7546(None, limit=1.75)[2].inserts_applied == 0
+        assert _tune_7546(None, limit=1.8)[2].reason == "tuned"
+
+    @pytest.mark.parametrize("pad_height", [0.3, 0.15, 0.1])
+    def test_pad_narrower_than_the_trace_still_holds_the_clearance(self, pad_height):
+        """Issue #7902: the fold's top clears the pad at ``side + W/2 +
+        clearance``, which is under ``W + clearance`` when the pad is
+        narrower than the trace across the host (0.15 and 0.1 mm here, W 0.2):
+        the self-gap floor then sets the height."""
+        _p, n_out, result = _tune_7546(_end_pads(0.6, pad_height))
+        assert result.reason == "tuned" and result.skew_after_mm <= TOLERANCE
+        fold = _fold(result, n_out)
+        assert fold.amplitude == pytest.approx(max(pad_height / 2 + W / 2, W) + CLEARANCE)
+        assert _fold_self_gap(fold.new_segments) >= CLEARANCE - 1e-9
 
     def test_kct_reads_it_under_the_limit_both_ways(self, tmp_path):
         for label, pads in (("padless", None), ("pads", _end_pads())):
             p_out, n_out, _r = _tune_7546(pads)
             for p in (p_out, reversed_route(p_out)):
                 assert _kct_uncoupled(_write(tmp_path, label, [p, n_out], pads)) <= LIMIT
+
+
+def _fold_self_gap(segments: list[Segment]) -> float:
+    """Smallest edge-to-edge gap between two parallel, non-adjacent segments
+    of a fold that face each other (overlap along their direction), mm."""
+    best = math.inf
+    for i, a in enumerate(segments):
+        for b in segments[i + 2 :]:
+            ax, ay = a.x2 - a.x1, a.y2 - a.y1
+            la = math.hypot(ax, ay)
+            if la <= 1e-9 or abs(ax * (b.y2 - b.y1) - ay * (b.x2 - b.x1)) > 1e-9:
+                continue
+            ux, uy = ax / la, ay / la
+            ta = sorted((0.0, la))
+            tb = sorted(
+                ((b.x1 - a.x1) * ux + (b.y1 - a.y1) * uy, (b.x2 - a.x1) * ux + (b.y2 - a.y1) * uy)
+            )
+            if min(ta[1], tb[1]) - max(ta[0], tb[0]) <= 1e-9:
+                continue  # collinear end to end, or side by side without facing
+            perp = abs((b.x1 - a.x1) * -uy + (b.y1 - a.y1) * ux)
+            best = min(best, perp - (a.width + b.width) / 2)
+    return best
+
+
+class TestFoldSelfGap:
+    """Issue #7902: a fold's top and its return run are parallel copper of the
+    same net; every fold offered keeps them apart by the board clearance (by
+    the pair's gap when no clearance is known), never touching."""
+
+    @pytest.mark.parametrize("pad_height", [None, 0.3, 0.15, 0.1])
+    def test_every_fold_offered_keeps_the_clearance(self, pad_height):
+        from kicad_tools.router.diffpair_length_tuning import AMPLITUDE_LADDER
+        from kicad_tools.router.diffpair_tail_fold import tail_fold_options
+
+        pads = None if pad_height is None else _end_pads(0.6, pad_height)
+        rule = OwnCopperRule.from_pads(pads, CLEARANCE) if pads is not None else None
+        config = SerpentineConfig(
+            amplitude=MAX_EXCURSION_GAPS * GAP * 0.99,
+            corner_chamfer_widths=SKEW_BUMP_CHAMFER_WIDTHS,
+            foot_chamfer_length_mm=SKEW_BUMP_FOOT_CHAMFER_MM,
+        )
+        folds = [
+            fold
+            for need in (0.9, 1.4, 2.0)
+            for _route, fold in tail_fold_options(
+                route=_line(2, "D_N", 100.0, 128.0, Y_N),
+                partner=_line(1, "D_P", 100.0, 130.0, Y_P),
+                length_needed=need,
+                config=config,
+                ladder=AMPLITUDE_LADDER,
+                own_copper=rule,
+            )
+        ]
+        assert folds
+        required = CLEARANCE if rule is not None else GAP
+        for fold in folds:
+            assert _fold_self_gap(fold.new_segments) >= required - 1e-9, fold.message
+
+    def test_a_cap_under_the_self_gap_floor_offers_no_fold(self):
+        from kicad_tools.router.diffpair_tail_fold import _amplitudes
+
+        assert _amplitudes(0.3, W, 0.11, 0.02, 0.0, (1.0, 0.8), self_gap=CLEARANCE) == []
+        assert _amplitudes(0.4, W, 0.11, 0.02, 0.0, (1.0,), self_gap=CLEARANCE)[0] == (
+            pytest.approx(W + CLEARANCE)
+        )
 
 
 # ---------------------------------------------------------------------------

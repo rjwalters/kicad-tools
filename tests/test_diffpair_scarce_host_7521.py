@@ -227,15 +227,37 @@ def test_no_rung_closes_the_pair_reports_the_wide_attempt():
 def test_tail_fold_closes_the_pair_no_bump_can():
     """Issue #7891: D+ ends 5 mm before D-; folding D+'s end into D-'s
     uncoupled tail closes the skew the 6 mm host's bumps cannot, within the
-    excursion cap and with every corner at 45 degrees."""
+    excursion cap and with every corner at 45 degrees.  (At a 0.25 mm gap: the
+    fold's top keeps the pair gap to its own return run, Issue #7902, so it
+    needs ``W + gap`` of the ``2 * gap`` cap.)"""
+    gap = 0.25
+    routes = {
+        1: Route(net=1, net_name="D+", segments=[_seg(0, 0, 6.0, 0)]),
+        2: Route(net=2, net_name="D-", segments=[_seg(0, -(W + gap), 11.0, -(W + gap), 2, "D-")]),
+    }
     p_out, _n, result = tune_diff_pair_skew(
-        _pair(), _routes(6.0, 5.0), tolerance_mm=0.1, intra_pair_clearance_mm=GAP
+        _pair(), routes, tolerance_mm=0.1, intra_pair_clearance_mm=gap
     )
     assert result.success and result.skew_after_mm <= 0.1
     copper = _bump_copper(p_out)
-    assert max(abs(v) for s in copper for v in (s.y1, s.y2)) <= MAX_EXCURSION_GAPS * GAP + 1e-6
+    assert max(abs(v) for s in copper for v in (s.y1, s.y2)) <= MAX_EXCURSION_GAPS * gap + 1e-6
+    # The top clears the return run (on the host line) by the pair gap.
+    assert max(abs(v) for s in copper for v in (s.y1, s.y2)) >= W + gap - 1e-6
     # It runs past D+'s own end (x = 6) and stays beside D-'s tail (x <= 11).
     assert 6.0 < max(max(s.x1, s.x2) for s in p_out.segments) <= 11.0
+
+
+def test_tail_fold_without_room_for_its_own_gap_is_refused():
+    """Issue #7902: at a 0.15 mm gap the cap (0.297 mm) is under ``W + gap``
+    (0.35 mm), so a fold's top would sit closer than the gap to its own return
+    run (before #7902 it was committed at a 0.097 mm self-gap).  No fold."""
+    from kicad_tools.router.diffpair_tail_fold import TailFoldResult
+
+    _p, _n, result = tune_diff_pair_skew(
+        _pair(), _routes(6.0, 5.0), tolerance_mm=0.1, intra_pair_clearance_mm=GAP
+    )
+    assert not result.success
+    assert not any(isinstance(r, TailFoldResult) for r in result.serpentine_results)
 
 
 def test_short_feet_close_the_scarce_pair_with_the_wide_crown():
