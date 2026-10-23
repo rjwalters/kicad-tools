@@ -15,6 +15,7 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-23
 
+- **Issue #7775** (closed): [Epic #5952] AGENTS.md parity: shared contributor-guidance source rendered into CLAUDE.md and AGENTS.md, with drift test
 - **PR #7873**: fix(router): undo an inline diff-pair comb that leaves the skew no smaller
 - **Issue #7548** (closed): Board 06 synthetic fixture: 9 diff pairs over max skew on the seed-42 re-route (identity-allowed in check_diffpair_coverage.py)
 - **PR #7871**: fix(router): hybrid parity accepts a longer via-equal pair that removes much skew
