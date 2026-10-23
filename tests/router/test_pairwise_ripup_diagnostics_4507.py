@@ -23,6 +23,8 @@ This module pins the new diagnostic end to end:
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder, is_cpp_available
@@ -474,3 +476,198 @@ def test_negotiated_labels_the_new_reason() -> None:
         {"failure_reason": NegotiatedRouter._FAILURE_PAIRWISE_BLOCKED}
     )
     assert label == "pairwise_blocked"
+
+
+# ---------------------------------------------------------------------------
+# Issue #7887: the own-pad step gate attributes a pairwise-decided refusal
+# ---------------------------------------------------------------------------
+
+#: THT pad size of the HV pad and its ring (as in the #7879 TO-220 fixture).
+WALL_PAD_D = 1.5
+#: HV -> LV requirement of ``VOLTAGES`` (150 V, IEC 60664-1 PD2 IIIa).
+WALL_REQ = 1.6
+#: The HV pad sits here; its other terminal is 8 mm east.
+WALL_X, WALL_Y = 5.0, 6.0
+
+
+def _tht(x: float, y: float, net: int, name: str, ref: str, w: float, h: float, shape: str) -> Pad:
+    return Pad(
+        x=x,
+        y=y,
+        width=w,
+        height=h,
+        net=net,
+        net_name=name,
+        layer=Layer.F_CU,
+        ref=ref,
+        pin="1",
+        through_hole=True,
+        drill=0.8,
+        shape=shape,
+    )
+
+
+def _walled_grid(ring_pads, with_pairwise: bool, hv_shape: str = "circle"):
+    """An HV THT pad (``/AC_LINE``) walled in by ``ring_pads`` of ``/GND``.
+
+    Returns ``(cpp_grid, start, end)``.  The pads go through the production
+    ``RoutingGrid`` -> ``CppGrid`` conversion, so the HV pad's own halo cells
+    are the ones the own-pad step gate (#6375) guards.
+    """
+    rules = DesignRules(
+        trace_width=TRACE_WIDTH,
+        trace_clearance=DRU,
+        via_diameter=0.6,
+        via_clearance=DRU,
+        grid_resolution=RESOLUTION,
+    )
+    grid = RoutingGrid(width=16.0, height=12.0, rules=rules, layer_stack=LayerStack.two_layer())
+    start = _tht(WALL_X, WALL_Y, HV_NET, "/AC_LINE", "Q1", WALL_PAD_D, WALL_PAD_D, hv_shape)
+    end = _tht(WALL_X + 8.0, WALL_Y, HV_NET, "/AC_LINE", "J1", WALL_PAD_D, WALL_PAD_D, hv_shape)
+    grid.add_pad(start)
+    grid.add_pad(end)
+    for i, (x, y, w, h, shape) in enumerate(ring_pads):
+        grid.add_pad(_tht(x, y, LV_NET, "/GND", f"R{i + 1}", w, h, shape))
+    cpp_grid = CppGrid.from_routing_grid(grid)
+    if with_pairwise:
+        _install_domains(cpp_grid._impl)
+    return cpp_grid, start, end
+
+
+def _to220_ring():
+    """Four LV pads ring the HV pad just outside the HV requirement.
+
+    Each LV pad edge clears the requirement from the HV pad centre, so a stub
+    can leave the HV pad; adjacent ring pads leave no lane 2x the requirement
+    wide, so every way out passes inside the HV-to-LV floor -- yet each lane
+    is wide open at the scalar DRU floor (the dormant run routes).
+    """
+    ring = WALL_REQ + WALL_PAD_D / 2.0 + 0.55
+    pads = []
+    for deg in (0, 90, 180, 270):
+        a = math.radians(deg)
+        pads.append(
+            (
+                round(WALL_X + ring * math.cos(a), 3),
+                round(WALL_Y + ring * math.sin(a), 3),
+                WALL_PAD_D,
+                WALL_PAD_D,
+                "circle",
+            )
+        )
+    return pads
+
+
+def _tight_box():
+    """Four LV rectangles box the (square) HV pad in at 0.05 mm.
+
+    Every step off the HV pad is inside the scalar DRU floor of a box wall,
+    so the refusal is geometric whether or not the HV matrix is installed.
+    """
+    gap, wall = 0.05, 1.0
+    off = WALL_PAD_D / 2.0 + gap + wall / 2.0
+    span = WALL_PAD_D + 2.0 * (gap + wall)
+    return [
+        (WALL_X, WALL_Y - off, span, wall, "rect"),
+        (WALL_X, WALL_Y + off, span, wall, "rect"),
+        (WALL_X - off, WALL_Y, wall, span, "rect"),
+        (WALL_X + off, WALL_Y, wall, span, "rect"),
+    ]
+
+
+def _route_walled(cpp_grid, start, end):
+    """One-shot C++ search from ``start`` to ``end`` with production pad bounds.
+
+    The raw pathfinder (``CppPathfinder._impl``) is driven directly so its
+    ``pairwise_block_count`` is still readable afterwards (the backend's
+    resumable path clears it with the search state).
+    """
+    rules = DesignRules(
+        trace_width=TRACE_WIDTH,
+        trace_clearance=DRU,
+        via_diameter=0.6,
+        via_clearance=DRU,
+        grid_resolution=RESOLUTION,
+    )
+    backend = CppPathfinder(cpp_grid, rules, diagonal_routing=True)
+    pf = backend._impl
+    pf.set_search_pair_widths(TRACE_WIDTH / 2.0, 0.3)
+    result = pf.route(
+        start_x=start.x,
+        start_y=start.y,
+        start_layer=0,
+        end_x=end.x,
+        end_y=end.y,
+        end_layer=0,
+        net=HV_NET,
+        trace_radius_cells=SCALAR_RADIUS,
+        via_radius_cells=SCALAR_RADIUS,
+        start_pad_bounds=backend._compute_pad_bounds(start),
+        end_pad_bounds=backend._compute_pad_bounds(end),
+    )
+    return pf, result
+
+
+@requires_cpp
+def test_segment_pads_pairwise_blocker_names_only_a_pairwise_decided_pad() -> None:
+    """The grid-level companion of ``segment_pads_clear`` (Issue #7887)."""
+    from kicad_tools.router import router_cpp
+
+    cpp_grid, _, _ = _walled_grid(_to220_ring(), with_pairwise=True)
+    impl = cpp_grid._impl
+
+    def seg(x1, y1, x2, y2):
+        s = router_cpp.Segment()
+        s.x1, s.y1, s.x2, s.y2 = x1, y1, x2, y2
+        s.width, s.layer, s.net = TRACE_WIDTH, 0, HV_NET
+        return s
+
+    # A stub leaving the HV pad toward the north-east lane: clear of every
+    # ring pad at the DRU floor, inside the HV floor of two of them.
+    stub = seg(WALL_X + 0.8, WALL_Y + 0.8, WALL_X + 1.0, WALL_Y + 1.0)
+    assert impl.segment_pads_clear(stub, HV_NET) is False
+    assert impl.segment_pads_pairwise_blocker(stub, HV_NET) == LV_NET
+
+    # A step that also violates the DRU floor of a ring pad is geometric:
+    # vetoed even though another pad in reach only fails the HV floor.
+    east = _to220_ring()[0][0]
+    clash = seg(east - WALL_PAD_D / 2.0 - 0.15, WALL_Y, east - WALL_PAD_D / 2.0 - 0.1, WALL_Y)
+    assert impl.segment_pads_clear(clash, HV_NET) is False
+    assert impl.segment_pads_pairwise_blocker(clash, HV_NET) == 0
+
+    # Dormant matrix: nothing is ever attributed.
+    dormant, _, _ = _walled_grid(_to220_ring(), with_pairwise=False)
+    assert dormant._impl.segment_pads_pairwise_blocker(stub, HV_NET) == 0
+
+
+@requires_cpp
+def test_hv_pad_walled_in_at_the_pairwise_floor_is_pairwise_blocked() -> None:
+    """Issue #7887: the #7879 TO-220 drain names the LV ring, not NO_PATH."""
+    from kicad_tools.router import router_cpp
+
+    # Baseline: the ring's lanes are wide open at the DRU floor.
+    _, open_result = _route_walled(*_walled_grid(_to220_ring(), with_pairwise=False))
+    assert open_result.success is True
+
+    pf, blocked = _route_walled(*_walled_grid(_to220_ring(), with_pairwise=True))
+    assert blocked.success is False
+    assert blocked.failure_reason == router_cpp.FAILURE_PAIRWISE_BLOCKED
+    assert blocked.blocking_via_net == LV_NET
+    assert pf.pairwise_block_count > 0
+    assert pf.last_pairwise_block_net == LV_NET
+    # The refused candidate sits beside the HV pad, not at (0, 0).
+    assert abs(blocked.failure_x - WALL_X) < WALL_REQ + WALL_PAD_D
+    assert abs(blocked.failure_y - WALL_Y) < WALL_REQ + WALL_PAD_D
+
+
+@requires_cpp
+@pytest.mark.parametrize("with_pairwise", [False, True])
+def test_hv_pad_walled_in_at_the_dru_floor_stays_no_path(with_pairwise: bool) -> None:
+    """A wall inside the scalar clearance is geometric: nothing is recorded."""
+    from kicad_tools.router import router_cpp
+
+    pf, result = _route_walled(*_walled_grid(_tight_box(), with_pairwise, hv_shape="rect"))
+    assert result.success is False
+    assert result.failure_reason == router_cpp.FAILURE_NO_PATH
+    assert result.blocking_via_net == 0
+    assert pf.pairwise_block_count == 0

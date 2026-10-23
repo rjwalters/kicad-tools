@@ -698,6 +698,17 @@ public:
                             const std::vector<uint32_t>& exclude_ref_hashes,
                             const std::vector<uint32_t>& clamp_ref_hashes) const;
 
+    // Issue #7887: the diagnostic companion of ``segment_pads_clear`` for a
+    // step it REFUSED.  Returns the net of a foreign pad that rejects ``seg``
+    // only because of the pairwise (HV) floor -- the step clears that pad's
+    // non-pairwise requirement (``clearance_override``) -- or 0 when any pad
+    // in reach rejects the step at its non-pairwise requirement (a plain
+    // geometric refusal) or no pairwise matrix is active.  Never feeds a
+    // verdict: callers consult it only after the gate already refused.
+    int segment_pads_pairwise_blocker(const Segment& seg, int exclude_net,
+                                      const std::vector<uint32_t>& exclude_ref_hashes,
+                                      const std::vector<uint32_t>& clamp_ref_hashes) const;
+
 private:
     inline size_t index(int x, int y, int layer) const {
         return static_cast<size_t>(layer) * rows_ * cols_ +

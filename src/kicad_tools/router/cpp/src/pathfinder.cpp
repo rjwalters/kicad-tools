@@ -316,8 +316,8 @@ bool Pathfinder::own_pad_cell(int x, int y, int layer, int net) const {
 
 // Issue #6375: the post-route validator's segment-vs-pad verdict on the swept
 // step (x1,y1)->(x2,y2), via the very function ``validate_route`` calls.
-bool Pathfinder::own_pad_step_clear(int x1, int y1, int x2, int y2, int layer, int net,
-                                    float emit_trace_width) const {
+Segment Pathfinder::own_pad_step_segment(int x1, int y1, int x2, int y2, int layer, int net,
+                                         float emit_trace_width) const {
     const auto [ax, ay] = grid_.grid_to_world(x1, y1);
     const auto [bx, by] = grid_.grid_to_world(x2, y2);
     Segment segment;
@@ -325,8 +325,32 @@ bool Pathfinder::own_pad_step_clear(int x1, int y1, int x2, int y2, int layer, i
     segment.width = search_gate_trace_width_ > 0.0f ? search_gate_trace_width_
                   : (emit_trace_width > 0.0f ? emit_trace_width : rules_.trace_width);
     segment.layer = layer; segment.net = net;
-    return grid_.segment_pads_clear(segment, net, search_gate_exclude_refs_,
+    return segment;
+}
+
+bool Pathfinder::own_pad_step_clear(int x1, int y1, int x2, int y2, int layer, int net,
+                                    float emit_trace_width) const {
+    return grid_.segment_pads_clear(own_pad_step_segment(x1, y1, x2, y2, layer, net,
+                                                         emit_trace_width),
+                                    net, search_gate_exclude_refs_,
                                     search_gate_clamp_refs_);
+}
+
+// Issue #7887: the own-pad step gate measures the validator's verdict, which
+// widens a foreign-domain pad's requirement to the pairwise (HV) floor
+// (``Grid3D::segment_pad_clear``).  On a TO-220-style HV pad ringed by LV pads
+// that gate -- not the annulus scan of ``cross_domain_trace_blocked`` -- is
+// what refuses every escape, so the drained search reported a bare NO_PATH.
+// Attribute the refusal only when the pairwise floor decided it.
+void Pathfinder::note_own_pad_pairwise_block(int x1, int y1, int x2, int y2, int layer,
+                                             int net, float emit_trace_width) const {
+    if (!grid_.pairwise_active()) return;
+    const int blocker = grid_.segment_pads_pairwise_blocker(
+        own_pad_step_segment(x1, y1, x2, y2, layer, net, emit_trace_width),
+        net, search_gate_exclude_refs_, search_gate_clamp_refs_);
+    if (blocker == 0) return;
+    const auto [wx, wy] = grid_.grid_to_world(x2, y2);
+    note_pairwise_block(blocker, wx, wy);
 }
 
 bool Pathfinder::via_route_geometry_clear(int x, int y, int net) const {
@@ -1961,6 +1985,8 @@ RouteResult Pathfinder::route(
                  own_pad_cell(current.x, current.y, nlayer, net)) &&
                 !own_pad_step_clear(current.x, current.y, nx, ny, nlayer, net,
                                     emit_trace_width)) {
+                note_own_pad_pairwise_block(current.x, current.y, nx, ny, nlayer, net,
+                                            emit_trace_width);  // Issue #7887
                 if (astar_trace_enabled()) {
                     std::fprintf(stderr,
                         "[A*/one-shot] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) "
@@ -2719,6 +2745,8 @@ RouteResult Pathfinder::run_astar_loop() {
                  own_pad_cell(current.x, current.y, nlayer, search_net_)) &&
                 !own_pad_step_clear(current.x, current.y, nx, ny, nlayer, search_net_,
                                     search_emit_trace_width_)) {
+                note_own_pad_pairwise_block(current.x, current.y, nx, ny, nlayer,
+                                            search_net_, search_emit_trace_width_);  // #7887
                 if (astar_trace_enabled()) {
                     std::fprintf(stderr,
                         "[A*] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) REJECT "

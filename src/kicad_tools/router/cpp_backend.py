@@ -118,7 +118,10 @@ logger = logging.getLogger(__name__)
 # v64 (Issue #7569): ``Grid3D.set_pad_class_clearances`` + the
 # ``PadInfo::class_clearance`` field -- the exact pad test holds each pad to
 # its own net class.  A v63 .so keeps the board-wide largest-class floor.
-_REQUIRED_CPP_BUILD_VERSION = 64
+# v65 (Issue #7887): the own-pad step gate attributes a refusal decided by the
+# pairwise (HV) floor alone, so an HV pad walled in by LV pads drains as
+# ``FAILURE_PAIRWISE_BLOCKED``.  A v64 .so still reports a bare NO_PATH.
+_REQUIRED_CPP_BUILD_VERSION = 65
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
