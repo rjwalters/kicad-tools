@@ -85,3 +85,20 @@ def test_thermal_vias_keep_real_smt_ics_in_cpl(hardware):
         is_through_hole_footprint(pcb.get_footprint(ref))
         for ref in ["J1", "J2", "J3", "J4", "J5", "RV1"]
     )
+
+
+def test_unrouted_board_carries_silk_dfm_corrections(hardware):
+    """Silk width floor and reference offsets belong to generation, not the replay (#7848)."""
+    pcb = hardware.build_pcb()
+    for fp in pcb._sexp.find_all("footprint"):
+        props = {p.get_string(0): p for p in fp.find_all("property")}
+        ref = props["Reference"].get_string(1)
+        if ref in hardware.REFERENCE_OFFSETS:
+            at = props["Reference"].find("at")
+            assert (at.get_float(0), at.get_float(1)) == hardware.REFERENCE_OFFSETS[ref]
+        for line in fp.children:
+            if (line.name or "").startswith("fp_") and line.find("layer") is not None:
+                if line.find("layer").get_string(0) in {"F.SilkS", "B.SilkS"}:
+                    stroke = line.find("stroke")
+                    if stroke is not None:
+                        assert stroke.find("width").get_float(0) >= 0.15
