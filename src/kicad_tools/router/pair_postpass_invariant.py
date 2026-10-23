@@ -161,10 +161,11 @@ def checker_length_measure(router: Any) -> Callable[[Route], float] | None:
     layer_stack = getattr(router, "layer_stack", None)
     num_layers = len(layer_stack.layers) if layer_stack is not None else 2
     try:
-        return measure_factory(num_layers)
+        measure: Callable[[Route], float] = measure_factory(num_layers)
     except Exception as exc:  # noqa: BLE001 - a guard must never break routing
         logger.debug("pair-skew guard: no checker length model: %s", exc)
         return None
+    return measure
 
 
 def measure_pair_skews(
