@@ -384,8 +384,9 @@ def measure_pairs(routed: Path, net_class_map, layers: int, log_text: str = "") 
         derive_engagement_state,
         resolve_pair_thresholds,
     )
-    from kicad_tools.validate.diffpair_skew import derive_skew_data
+    from kicad_tools.validate.diffpair_skew import derive_pair_skews, derive_skew_data
     from kicad_tools.validate.rules.clearance import CopperElement, _segment_segment_clearance
+    from kicad_tools.validate.rules.diffpair_length_skew import measured_skew_verdict
     from kicad_tools.validate.rules.diffpair_routing_continuity import (
         DEFAULT_COUPLING_WINDOW_MM,
         DEFAULT_PARALLEL_TOLERANCE_DEG,
@@ -408,6 +409,11 @@ def measure_pairs(routed: Path, net_class_map, layers: int, log_text: str = "") 
     skew_data, _ = derive_skew_data(
         pcb, net_class_map, board_thickness_mm=thickness, num_copper_layers=layers
     )
+    # The skew verdict is ``kct check``'s: the ps budget plus any length cap.
+    measured = {
+        tuple(sorted((m.p_name, m.n_name))): m
+        for m in derive_pair_skews(pcb, net_class_map, num_copper_layers=layers)
+    }
     segs: dict[int, list] = {}
     for s in pcb.segments:
         if s.net_number:
@@ -479,12 +485,21 @@ def measure_pairs(routed: Path, net_class_map, layers: int, log_text: str = "") 
         # P5 stretch figure (reported, never a gate).
         row = out[-1]
         skew = row["skew_mm"]
+        m = measured.get(tuple(sorted((pname, nname))))
+        budget = m.limits.budget if m is not None else None
+        skew_verdict = None if m is None else measured_skew_verdict(m)
         row.update(
             {
+                "skew_ps": None if m is None or m.skew_ps is None else round(m.skew_ps, 3),
+                "skew_budget_ps": None if budget is None else round(budget.budget_ps, 3),
+                "skew_budget_provenance": None if budget is None else budget.provenance,
+                "skew_budget_severity": None if budget is None else budget.severity,
+                "skew_length_cap_mm": None if m is None else m.limits.length_cap_mm,
                 "protocol": thr.protocol,
                 "skew_source": thr.skew_source,
                 "skew_severity": thr.skew_severity,
-                "skew_pass": None if skew is None else skew <= thr.skew_mm + 1e-6,
+                "skew_pass": None if skew_verdict is None else skew_verdict == "pass",
+                "skew_verdict": skew_verdict,
                 "skew_stretch_mm": thr.skew_stretch_mm,
                 "skew_stretch_pass": None if skew is None else skew <= thr.skew_stretch_mm + 1e-6,
                 "max_uncoupled_per_terminal_mm": thr.max_uncoupled_per_terminal_mm,
@@ -493,11 +508,11 @@ def measure_pairs(routed: Path, net_class_map, layers: int, log_text: str = "") 
                 "continuity_label": "info",
             }
         )
-        row.update(_uncoupled_columns(pcb, pid, nid, pname, nname, thr, skew, components))
+        row.update(_uncoupled_columns(pcb, pid, nid, pname, nname, thr, skew_verdict, components))
     return out
 
 
-def _uncoupled_columns(pcb, pid, nid, pname, nname, thr, skew, components) -> dict:
+def _uncoupled_columns(pcb, pid, nid, pname, nname, thr, skew_verdict, components) -> dict:
     """The #6443 columns of one pair: per-net uncoupled length, limits, kct verdicts.
 
     ``uncoupled_net_mm`` is each net's length beside no partner copper and
@@ -532,7 +547,6 @@ def _uncoupled_columns(pcb, pid, nid, pname, nname, thr, skew, components) -> di
     unc_pass = None if limit is None else m.uncoupled_mm <= limit + 1e-6
     cap = thr.max_vias_per_net
     vias_pass = None if cap is None else max(m.vias_p, m.vias_n) <= cap
-    skew_pass = None if skew is None else skew <= thr.skew_mm + 1e-6
 
     def verdict(ok, severity):
         return (
@@ -551,7 +565,7 @@ def _uncoupled_columns(pcb, pid, nid, pname, nname, thr, skew, components) -> di
         "vias_pass": vias_pass,
         "vias_severity": thr.vias_severity,
         "kct_verdict": {
-            "skew": verdict(skew_pass, thr.skew_severity),
+            "skew": skew_verdict,
             "uncoupled": verdict(unc_pass, thr.uncoupled_severity),
             "vias": verdict(vias_pass, thr.vias_severity),
         },
@@ -654,6 +668,13 @@ _LIMIT_KEYS = frozenset(
         "skew_source",
         "skew_severity",
         "skew_pass",
+        # Issue #7914: the ps verdict and its budget are limit descriptors too.
+        "skew_verdict",
+        "skew_ps",
+        "skew_budget_ps",
+        "skew_budget_provenance",
+        "skew_budget_severity",
+        "skew_length_cap_mm",
         "skew_stretch_mm",
         "skew_stretch_pass",
         "max_uncoupled_per_terminal_mm",
