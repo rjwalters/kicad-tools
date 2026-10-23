@@ -46,7 +46,10 @@ def test_pair_improvement_cannot_hide_new_physical_error():
     gate = load("check_diffpair_coverage")
     identity = load("identity_allowance")
     key = "boards/06-diffpair-test/regression-fixture/diffpair_test_routed.kicad_pcb"
-    found = [_v(rule, ident) for rule, ident in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS]
+    # Issue #7548 emptied the committed allowance; install the entry it last
+    # held so a fixed pair has something to free.
+    gate.DIFFPAIR_ALLOWANCES[key] = {("diffpair_length_skew", "MIPI_D0+/MIPI_D0-"): 7548}
+    found = [_v(rule, ident) for rule, ident in gate.DIFFPAIR_ALLOWANCES[key]]
     fixed = next(v for v in found if v["rule_id"] == "diffpair_length_skew")
     found.remove(fixed)
     found += [_v("via_in_pad", "USB3_TX1+"), _v("diffpair_length_skew", "NEW+/NEW-")]
