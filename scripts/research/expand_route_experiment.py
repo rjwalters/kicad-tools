@@ -82,7 +82,13 @@ person would get by hand, so the harness does not under-count:
   rather than calling ``DRCChecker.check_all()``. With no sidecar the row says so
   (``kct_check_net_class_map: null``) and lists ``kct_check_inactive_rules``.
 * ``kicad_drc_*`` runs ``kicad-cli pcb drc --refill-zones --all-track-errors``
-  and records ``kicad_drc_unconnected``.
+  and records ``kicad_drc_unconnected``.  kicad-cli is the pinned evidence
+  toolchain (:func:`kicad_toolchain_session`, Issue #7901): ``KCT_KICAD_DOCKER=1``
+  routes it through CI's pinned image, a kicad-cli other than the pinned
+  release is refused (exit 2, nothing written) unless ``--allow-unpinned-kicad``
+  is given, and every graded row records ``kicad_cli_version``,
+  ``kicad_cli_image`` (``null`` for a host build), ``kicad_cli_source`` and
+  ``kicad_cli_pinned``.
 * ``manufacturable`` is ``true`` only when ``kct route`` exited 0, both
   engines report 0 errors, kicad-cli reports 0 unconnected items and the
   graded board is the finished output; ``null`` when either engine did not run.
@@ -1307,6 +1313,98 @@ def find_net_class_map(routed: Path) -> Path | None:
     return next((c for c in net_class_map_sidecar_candidates(routed) if c.is_file()), None)
 
 
+# ---------------------------------------------------------------------------
+# kicad-cli toolchain (Issue #7901)
+# ---------------------------------------------------------------------------
+
+
+class KiCadToolchainRequired(RuntimeError):
+    """A kicad-cli verdict was asked for outside :func:`kicad_toolchain_session`."""
+
+
+#: The record of the active :func:`kicad_toolchain_session` -- the kicad-cli
+#: every kicad-cli column graded in this process comes from.  ``None`` outside
+#: a session; nothing in these harnesses may reach kicad-cli then.
+_KICAD_SESSION: dict | None = None
+
+#: Exit status of a harness whose kicad-cli the evidence toolchain refused
+#: (the same status ``kct readiness`` and ``scripts/boards/*`` use, #6962).
+REFUSED_EXIT = 2
+
+
+@contextlib.contextmanager
+def kicad_toolchain_session(mounts=(), *, allow_unpinned: bool = False):
+    """Run the enclosed block on the pinned evidence toolchain (Issue #7901).
+
+    A thin wrapper over :func:`kicad_tools.cli.kicad_toolchain.evidence_toolchain`,
+    the resolver ``kct readiness`` and ``scripts/boards/*`` use: an isolated
+    ``KICAD_CONFIG_HOME`` with the pinned library tables, ``KCT_KICAD_DOCKER=1``
+    routed through CI's pinned image (binding *mounts* and the repository),
+    and a kicad-cli other than the pinned release refused with
+    :class:`~kicad_tools.cli.kicad_toolchain.KiCadEnvironmentError`.
+    ``allow_unpinned`` accepts any release instead, and the record says so
+    (``kicad_cli_pinned: false``) so the numbers can never pass for pinned ones.
+
+    Yields the record every row graded inside the block carries.
+    """
+    global _KICAD_SESSION
+    from kicad_tools.cli.kicad_toolchain import PINNED_KICAD_VERSION, evidence_toolchain
+
+    required = None if allow_unpinned else PINNED_KICAD_VERSION
+    with evidence_toolchain([REPO, *mounts], required_version=required) as toolchain:
+        record = {
+            "kicad_cli_version": toolchain.version,
+            # The image reference carries its digest (``kicad/kicad@sha256:...``);
+            # ``None`` means a host build answered.
+            "kicad_cli_image": toolchain.docker_image,
+            "kicad_cli_source": "docker" if toolchain.docker_image else "host",
+            "kicad_cli_pinned": toolchain.version == PINNED_KICAD_VERSION,
+            "kicad_cli_binary": toolchain.kicad_cli,
+        }
+        saved = _KICAD_SESSION
+        _KICAD_SESSION = record
+        try:
+            yield dict(record)
+        finally:
+            _KICAD_SESSION = saved
+
+
+def kicad_cli_session() -> dict:
+    """The active session's record; raises :class:`KiCadToolchainRequired` outside one."""
+    if _KICAD_SESSION is None:
+        raise KiCadToolchainRequired(
+            "kicad-cli verdicts must run inside kicad_toolchain_session() "
+            "(the pinned evidence toolchain, Issue #7901); find_kicad_cli() "
+            "alone ignores KCT_KICAD_DOCKER and the pinned release"
+        )
+    return dict(_KICAD_SESSION)
+
+
+def kicad_cli_columns(record: dict) -> dict:
+    """The per-row provenance columns of a session *record* (no host path)."""
+    return {k: v for k, v in record.items() if k != "kicad_cli_binary"}
+
+
+def refused(exc: Exception) -> int:
+    """Report a toolchain refusal the way ``run_on_evidence_toolchain`` does."""
+    print(f"REFUSED (KiCad environment, Issue #6962/#7901): {exc}", file=sys.stderr)
+    print(
+        "  Re-run with KCT_KICAD_DOCKER=1 (pinned image), or pass "
+        "--allow-unpinned-kicad to label the kicad-cli columns as unpinned.",
+        file=sys.stderr,
+    )
+    return REFUSED_EXIT
+
+
+def add_kicad_toolchain_arg(parser) -> None:
+    parser.add_argument(
+        "--allow-unpinned-kicad",
+        action="store_true",
+        help="accept a kicad-cli other than the pinned release instead of refusing; "
+        "every row then records kicad_cli_pinned: false (Issue #7901)",
+    )
+
+
 def grade(routed: Path, board: Board) -> dict:
     """Completion, both DRC engines, copper, and the stuck-class breakdown.
 
@@ -1316,7 +1414,12 @@ def grade(routed: Path, board: Board) -> dict:
     net-class clearances apply) and the manufacturer ``kct route`` recorded
     in ``fab_profile.json``. kicad-cli runs with ``--all-track-errors`` and
     its unconnected-item count is recorded (Issue #6420).
+
+    kicad-cli is the active :func:`kicad_toolchain_session`'s (Issue #7901);
+    outside one this raises :class:`KiCadToolchainRequired` before anything
+    runs, and the row records which kicad-cli produced its columns.
     """
+    session = kicad_cli_session()
     from kicad_tools.benchmark.external.metrics import (
         measure_completion,
         measure_copper,
@@ -1331,7 +1434,9 @@ def grade(routed: Path, board: Board) -> dict:
     ncm = find_net_class_map(routed)
     # ``layers=None``: detect from the routed board, as ``kct check`` does.
     check = run_kct_check(routed, manufacturer=mfr, layers=None, net_class_map=ncm)
-    drc = run_kicad_cli_drc(routed, timeout=600, all_track_errors=True)
+    drc = run_kicad_cli_drc(
+        routed, timeout=600, all_track_errors=True, kicad_cli=Path(session["kicad_cli_binary"])
+    )
     check_ran = bool(getattr(check, "ran", False))
     drc_ran = bool(getattr(drc, "ran", False))
     kct_errors = check.error_count if check_ran else None
@@ -1366,6 +1471,7 @@ def grade(routed: Path, board: Board) -> dict:
         "kicad_drc_all_track_errors": True,
         "kicad_drc_by_type": dict(sorted(drc.by_type.items())),
         "kicad_drc_note": drc.note,
+        **kicad_cli_columns(session),
     }
     try:
         stuck = classify_stuck_nets(routed)
@@ -1796,6 +1902,29 @@ def _cmd_route(args) -> int:
     rows: list[dict] = []
     if args.json and args.append and args.json.exists():
         rows = json.loads(args.json.read_text())["rows"]
+    mounts = [args.work_dir.resolve()]
+    if args.json:
+        mounts.append(args.json.resolve().parent)
+    # Out-of-tree inputs (the chorus fixture) must be visible to a Docker kicad-cli.
+    for key in keys:
+        src = resolve_board_path(BOARDS[key], args.chorus_pcb)
+        if src is not None:
+            mounts.append(Path(src).resolve().parent)
+    from kicad_tools.cli.kicad_toolchain import KiCadEnvironmentError
+
+    try:
+        with kicad_toolchain_session(mounts, allow_unpinned=args.allow_unpinned_kicad):
+            _route_rows(args, keys, scales, modes, rows)
+    except KiCadEnvironmentError as exc:
+        return refused(exc)
+    print()
+    print(render_route(rows))
+    print()
+    print(render_transitions(stuck_transitions(rows)))
+    return 0
+
+
+def _route_rows(args, keys, scales, modes, rows: list[dict]) -> None:
     for key in keys:
         board = BOARDS[key]
         src = resolve_board_path(board, args.chorus_pcb)
@@ -1828,11 +1957,6 @@ def _cmd_route(args) -> int:
                     args.json.parent.mkdir(parents=True, exist_ok=True)
                     payload = {"rows": rows, "transitions": stuck_transitions(rows)}
                     args.json.write_text(json.dumps(payload, indent=2) + "\n")
-    print()
-    print(render_route(rows))
-    print()
-    print(render_transitions(stuck_transitions(rows)))
-    return 0
 
 
 def _rule_from_args(args) -> ClusterRule:
@@ -2067,6 +2191,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     route.add_argument("--chorus-pcb", type=Path, help="override the chorus fixture path")
     _add_rule_args(route)
+    add_kicad_toolchain_arg(route)
     route.set_defaults(func=_cmd_route)
 
     clusters = sub.add_parser(

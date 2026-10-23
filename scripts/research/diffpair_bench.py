@@ -38,6 +38,19 @@ A pair result only counts if the router drew it:
 * a row whose pair copper is identical to the committed board's is invalid (the
   committed routing came back, nothing was routed).
 
+kicad-cli toolchain
+-------------------
+Both kicad-cli steps of a row -- the DRC graded by ``ere.grade`` and the
+per-pair ``kicad_cli_verdict`` -- run on the pinned evidence toolchain
+(``ere.kicad_toolchain_session``, the resolver ``kct readiness`` uses; Issue
+#7901). ``KCT_KICAD_DOCKER=1`` routes kicad-cli through CI's pinned image; a
+kicad-cli other than the pinned release is refused (exit 2, nothing written)
+unless ``--allow-unpinned-kicad`` is given. Every row records
+``kicad_cli_version``, ``kicad_cli_image`` (the image digest, ``null`` for a
+host build), ``kicad_cli_source`` and ``kicad_cli_pinned``; the file header
+carries the same under ``kicad_cli``. ``remeasure`` re-runs only the pair
+verdicts and records their toolchain under ``remeasured_kicad_cli``.
+
 Board 06 gap-error root cause
 -----------------------------
 See ``docs/research/diffpair-bench-phase0.md``.
@@ -548,33 +561,36 @@ def kicad_pair_verdicts(routed: Path, pairs: list[dict], timeout: int = 600) -> 
     ``.kicad_dru`` does not carry for the pair (limit absent, or a pair KiCad
     does not recognise by name) stays ``None``: kicad-cli did not judge it.
     Rows get ``None`` for every rule when kicad-cli cannot run.
+
+    kicad-cli is the active ``ere.kicad_toolchain_session``'s (Issue #7901);
+    outside one this raises ``ere.KiCadToolchainRequired`` -- it never looks a
+    kicad-cli up on its own, which would ignore ``KCT_KICAD_DOCKER``.
     """
     import subprocess
     import tempfile
 
-    from kicad_tools.cli.runner import find_kicad_cli
-
-    exe = find_kicad_cli()
+    exe = ere.kicad_cli_session()["kicad_cli_binary"]
     found: dict[tuple[str, str], str] | None = None
-    if exe is not None:
+    if pairs:
         with tempfile.TemporaryDirectory() as tmp:
             report = Path(tmp) / "drc.json"
-            subprocess.run(
-                [
-                    str(exe),
-                    "pcb",
-                    "drc",
-                    "--format",
-                    "json",
-                    "--severity-all",
-                    "-o",
-                    str(report),
-                    str(routed),
-                ],
-                check=False,
-                capture_output=True,
-                timeout=timeout,
-            )
+            with contextlib.suppress(OSError, subprocess.SubprocessError):
+                subprocess.run(
+                    [
+                        str(exe),
+                        "pcb",
+                        "drc",
+                        "--format",
+                        "json",
+                        "--severity-all",
+                        "-o",
+                        str(report),
+                        str(routed),
+                    ],
+                    check=False,
+                    capture_output=True,
+                    timeout=timeout,
+                )
             if report.is_file():
                 found = {}
                 for v in json.loads(report.read_text()).get("violations", []):
@@ -772,8 +788,9 @@ def run_cell(
 def render(rows: list[dict]) -> str:
     head = (
         "| Board | Engine | Seed | Map | Valid | Pairs coupled | Pairs hybrid | Nets | "
-        "kct err (by rule) | kicad-cli err (by type) | unconn | Manufacturable | Wall s |\n"
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+        "kct err (by rule) | kicad-cli err (by type) | unconn | Manufacturable | Wall s | "
+        "kicad-cli |\n"
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
     )
     out = [head]
     for r in rows:
@@ -787,9 +804,24 @@ def render(rows: list[dict]) -> str:
             f"{r.get('net_class_map_mode', 'committed')} | {r.get('valid')} | "
             f"{coupled}/{len(pairs)} | {hybrid} | {r.get('nets_routed', '-')} | "
             f"{r.get('kct_errors_by_rule') or '-'} | {r.get('kicad_cli_errors_by_type') or '-'} | "
-            f"{r.get('kicad_drc_unconnected', '-')} | {r.get('manufacturable')} | {r.get('wall_s', '-')} |"
+            f"{r.get('kicad_drc_unconnected', '-')} | {r.get('manufacturable')} | {r.get('wall_s', '-')} | "
+            f"{kicad_cli_cell(r)} |"
         )
     return "\n".join(out)
+
+
+def kicad_cli_cell(row: dict) -> str:
+    """Which kicad-cli produced a row's kicad-cli columns (Issue #7901).
+
+    ``10.0.6 image`` / ``10.0.6 host`` for the pinned release, ``UNPINNED
+    10.0.7 host`` otherwise, and ``unrecorded`` for a row written before the
+    bench recorded it -- such a row's kicad-cli columns may be host numbers.
+    """
+    version = row.get("kicad_cli_version")
+    if version is None:
+        return "unrecorded"
+    where = "image" if row.get("kicad_cli_image") else "host"
+    return f"{version} {where}" if row.get("kicad_cli_pinned") else f"UNPINNED {version} {where}"
 
 
 def render_pairs(rows: list[dict]) -> str:
@@ -861,41 +893,60 @@ def _cmd_run(args) -> int:
     args.out_dir.mkdir(parents=True, exist_ok=True)
     out_path = args.out_dir / f"{args.label}-{sha}.json"
     rows: list[dict] = []
+    mounts = [args.work_dir.resolve(), args.out_dir.resolve()]
+    if args.router_src is not None:
+        mounts.append(args.router_src.resolve())
+    from kicad_tools.cli.kicad_toolchain import KiCadEnvironmentError
+
+    try:
+        with ere.kicad_toolchain_session(
+            mounts, allow_unpinned=args.allow_unpinned_kicad
+        ) as session:
+            _run_rows(args, boards, engines, seeds, sha, out_path, rows, session)
+    except KiCadEnvironmentError as exc:
+        return ere.refused(exc)
+    print(render(rows))
+    print(f"wrote {out_path}")
+    return 0 if all(r.get("valid") for r in rows) else 1
+
+
+def _run_rows(args, boards, engines, seeds, sha, out_path: Path, rows: list[dict], session):
+    columns = ere.kicad_cli_columns(session)
     for key in boards:
         board = ere.BOARDS[key]
         for engine in engines:
             for seed in seeds:
                 for rep in range(args.rep_start, args.rep_start + args.repeat):
                     print(f"==> {key} {engine} seed {seed} rep {rep}", flush=True)
-                    rows.append(
-                        run_cell(
-                            board,
-                            engine,
-                            seed,
-                            args.timeout,
-                            args.work_dir,
-                            rep,
-                            args.router_src,
-                            args.router_rev,
-                            not args.inferred_map,
-                            args.extra.split(),
-                        )
+                    row = run_cell(
+                        board,
+                        engine,
+                        seed,
+                        args.timeout,
+                        args.work_dir,
+                        rep,
+                        args.router_src,
+                        args.router_rev,
+                        not args.inferred_map,
+                        args.extra.split(),
                     )
+                    # Every row, graded or refused before grading, says which
+                    # kicad-cli this run used (Issue #7901).
+                    row.update(columns)
+                    rows.append(row)
                     out_path.write_text(
                         json.dumps(
                             {
                                 "label": args.label,
                                 "git_sha": sha,
                                 "timeout_s": args.timeout,
+                                "kicad_cli": columns,
                                 "rows": rows,
                             },
                             indent=2,
                         )
                         + "\n"
                     )
-    print(render(rows))
-    print(f"wrote {out_path}")
-    return 0 if all(r.get("valid") for r in rows) else 1
 
 
 def _key(row: dict) -> tuple:
@@ -957,7 +1008,13 @@ def _cmd_determinism(args) -> int:
 
 
 def remeasure(doc: dict) -> dict:
-    """Recompute ``pairs`` / ``pair_digest`` of every row from its routed board and log."""
+    """Recompute ``pairs`` / ``pair_digest`` of every row from its routed board and log.
+
+    Runs inside the caller's ``ere.kicad_toolchain_session``; each remeasured
+    row records that toolchain under ``remeasured_kicad_cli`` (its
+    ``kicad_cli_*`` columns still describe the run that graded the DRC).
+    """
+    columns = ere.kicad_cli_columns(ere.kicad_cli_session())
     for row in doc["rows"]:
         routed = Path(row.get("routed", ""))
         if not routed.is_file():
@@ -972,12 +1029,25 @@ def remeasure(doc: dict) -> dict:
         text = log.read_text(errors="replace") if log.is_file() else ""
         row["pairs"] = measure_pairs(routed, ncm, board.layers, text)
         kicad_pair_verdicts(routed, row["pairs"])
+        row["remeasured_kicad_cli"] = dict(columns)
         row["pair_digest"] = pair_digest(row["pairs"])
     return doc
 
 
 def _cmd_remeasure(args) -> int:
-    doc = remeasure(json.loads(args.file.read_text()))
+    from kicad_tools.cli.kicad_toolchain import KiCadEnvironmentError
+
+    doc = json.loads(args.file.read_text())
+    mounts = {
+        Path(r["routed"]).resolve().parent
+        for r in doc["rows"]
+        if r.get("routed") and Path(r["routed"]).is_file()
+    }
+    try:
+        with ere.kicad_toolchain_session(sorted(mounts), allow_unpinned=args.allow_unpinned_kicad):
+            doc = remeasure(doc)
+    except KiCadEnvironmentError as exc:
+        return ere.refused(exc)
     args.file.write_text(json.dumps(doc, indent=2) + "\n")
     print(f"remeasured {len(doc['rows'])} rows in {args.file}")
     return 0
@@ -1029,6 +1099,7 @@ def main(argv: list[str] | None = None) -> int:
         help="do not pass the committed net_class_map.json to kct route (the classifier's "
         "map: how the #6440 doctor ran board 06)",
     )
+    ere.add_kicad_toolchain_arg(run)
     run.set_defaults(func=_cmd_run)
     det = sub.add_parser(
         "determinism", help="did repeated runs of a cell give identical pair metrics?"
@@ -1037,6 +1108,7 @@ def main(argv: list[str] | None = None) -> int:
     det.set_defaults(func=_cmd_determinism)
     rem = sub.add_parser("remeasure", help="recompute pair metrics from the routed boards")
     rem.add_argument("file", type=Path)
+    ere.add_kicad_toolchain_arg(rem)
     rem.set_defaults(func=_cmd_remeasure)
     summ = sub.add_parser("summary", help="markdown table of one or more result files")
     summ.add_argument("files", type=Path, nargs="+")

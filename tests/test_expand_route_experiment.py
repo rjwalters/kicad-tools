@@ -35,6 +35,30 @@ def _load():
 
 ere = _load()
 
+#: What a session on the pinned image records (Issue #7901).
+FAKE_KICAD_SESSION = {
+    "kicad_cli_version": "10.0.6",
+    "kicad_cli_image": "kicad/kicad@sha256:" + "0" * 64,
+    "kicad_cli_source": "docker",
+    "kicad_cli_pinned": True,
+    "kicad_cli_binary": "/fake/kicad-cli",
+}
+
+
+@pytest.fixture
+def kicad_session(monkeypatch):
+    """Grade as if inside ``kicad_toolchain_session`` -- no kicad-cli is probed."""
+    import contextlib
+
+    monkeypatch.setattr(ere, "_KICAD_SESSION", dict(FAKE_KICAD_SESSION))
+
+    @contextlib.contextmanager
+    def fake_session(mounts=(), *, allow_unpinned=False):
+        yield dict(FAKE_KICAD_SESSION)
+
+    monkeypatch.setattr(ere, "kicad_toolchain_session", fake_session)
+    return FAKE_KICAD_SESSION
+
 
 def _footprint(ref: str, x: float, y: float, pads: list[tuple[str, float, float, str]]) -> str:
     """A footprint with 1x1 mm SMD pads on F.Cu; pads are (number, dx, dy, net)."""
@@ -572,7 +596,7 @@ def test_vias_are_counted_per_net(tmp_path):
     assert ere.vias_by_net(_pcb(tmp_path, "n.kicad_pcb", _board(TWO_PARTS))) == {}
 
 
-def test_vias_per_connection_divides_by_routed_connections(tmp_path, monkeypatch):
+def test_vias_per_connection_divides_by_routed_connections(tmp_path, monkeypatch, kicad_session):
     """The ratio is over *routed* connections, and is None when there are none.
 
     A deadline row can lose a third of its connections (board 05 ``rigid``
@@ -760,7 +784,9 @@ def test_rigid_scaling_uses_and_records_the_cluster_rule(tmp_path):
     assert uniform.to_dict()["cluster_rule"] is None
 
 
-def test_cluster_flags_reach_the_route_and_clusters_commands(tmp_path, monkeypatch, capsys):
+def test_cluster_flags_reach_the_route_and_clusters_commands(
+    tmp_path, monkeypatch, capsys, kicad_session
+):
     seen: list = []
 
     def fake_run_one(*args):
@@ -1074,7 +1100,9 @@ def _grade_offline(monkeypatch, run_dir: Path, *, sidecar: bool, fab_mfr: str | 
     return row, seen
 
 
-def test_grade_counts_diff_pair_errors_with_the_run_dirs_net_class_map(tmp_path, monkeypatch):
+def test_grade_counts_diff_pair_errors_with_the_run_dirs_net_class_map(
+    tmp_path, monkeypatch, kicad_session
+):
     row, seen = _grade_offline(monkeypatch, tmp_path / "run", sidecar=True)
 
     assert row["kct_check_by_rule"]["diffpair_length_skew"] == 1
@@ -1089,7 +1117,7 @@ def test_grade_counts_diff_pair_errors_with_the_run_dirs_net_class_map(tmp_path,
     assert row["kicad_drc_unconnected"] == 2
 
 
-def test_grade_without_a_sidecar_says_so_instead_of_passing(tmp_path, monkeypatch):
+def test_grade_without_a_sidecar_says_so_instead_of_passing(tmp_path, monkeypatch, kicad_session):
     row, _ = _grade_offline(monkeypatch, tmp_path / "run", sidecar=False)
 
     assert row["kct_check_net_class_map"] is None
@@ -1102,7 +1130,7 @@ def test_grade_without_a_sidecar_says_so_instead_of_passing(tmp_path, monkeypatc
     }
 
 
-def test_grade_uses_the_routes_own_manufacturer_tier(tmp_path, monkeypatch):
+def test_grade_uses_the_routes_own_manufacturer_tier(tmp_path, monkeypatch, kicad_session):
     row, _ = _grade_offline(monkeypatch, tmp_path / "a", sidecar=False, fab_mfr="jlcpcb-tier1")
     assert row["kct_check_mfr"] == "jlcpcb-tier1"  # not split to "jlcpcb"
     # No fab_profile.json: the board's declared manufacturer, unsplit.
@@ -1110,7 +1138,9 @@ def test_grade_uses_the_routes_own_manufacturer_tier(tmp_path, monkeypatch):
     assert row["kct_check_mfr"] == "jlcpcb"
 
 
-def test_grade_records_null_unconnected_when_kicad_cli_did_not_run(tmp_path, monkeypatch):
+def test_grade_records_null_unconnected_when_kicad_cli_did_not_run(
+    tmp_path, monkeypatch, kicad_session
+):
     from types import SimpleNamespace
 
     from kicad_tools.benchmark.external import metrics

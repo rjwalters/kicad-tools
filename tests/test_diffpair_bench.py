@@ -40,6 +40,22 @@ def _load():
 bench = _load()
 ere = bench.ere
 
+#: What a session on the pinned image records (Issue #7901).
+FAKE_KICAD_SESSION = {
+    "kicad_cli_version": "10.0.6",
+    "kicad_cli_image": "kicad/kicad@sha256:" + "0" * 64,
+    "kicad_cli_source": "docker",
+    "kicad_cli_pinned": True,
+    "kicad_cli_binary": "/fake/kicad-cli",
+}
+
+
+@pytest.fixture
+def kicad_session(monkeypatch):
+    """Run as if inside ``ere.kicad_toolchain_session`` -- no kicad-cli is probed."""
+    monkeypatch.setattr(ere, "_KICAD_SESSION", dict(FAKE_KICAD_SESSION))
+    return FAKE_KICAD_SESSION
+
 
 # ---------------------------------------------------------------------------
 # Router-produced guard
@@ -518,7 +534,7 @@ def test_extra_resume_is_refused_in_run_cell(tmp_path):
 
 
 @pytest.mark.parametrize("code", [1, 5])
-def test_crashed_route_row_is_invalid_and_not_final(tmp_path, monkeypatch, code):
+def test_crashed_route_row_is_invalid_and_not_final(tmp_path, monkeypatch, code, kicad_session):
     def fake_run_route(inp, out, extra, timeout, log):
         out.write_text("(kicad_pcb)")
         log.write_text("")

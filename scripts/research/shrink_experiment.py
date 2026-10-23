@@ -301,13 +301,9 @@ def moved_by_route(scaled_input: Path, routed: Path, tol: float = 1e-3) -> list[
 
 def kicad_violation_nets(board: Path) -> dict:
     """Run ``kicad-cli pcb drc --refill-zones`` (JSON); map violations to net names."""
-    from kicad_tools.cli.runner import find_kicad_cli
-
-    # Same resolver ``ere.grade`` uses: kicad-cli is often not on PATH (macOS
-    # app bundle), and a bare ``shutil.which`` then silently rips nothing.
-    cli = find_kicad_cli()
-    if cli is None:
-        return {"ran": False, "nets": []}
+    # Same kicad-cli ``ere.grade`` uses: the active pinned evidence toolchain
+    # (Issue #7901), never a host lookup that ignores ``KCT_KICAD_DOCKER``.
+    cli = ere.kicad_cli_session()["kicad_cli_binary"]
     with tempfile.TemporaryDirectory() as td:
         rep = Path(td) / "drc.json"
         subprocess.run(
@@ -379,8 +375,22 @@ def main(argv=None) -> int:
         help="extra kct route arguments for the re-route, as one quoted string "
         "(e.g. the lattice protocol the step-1 route used)",
     )
+    ere.add_kicad_toolchain_arg(ap)
     args = ap.parse_args(argv)
+    from kicad_tools.cli.kicad_toolchain import KiCadEnvironmentError
 
+    mounts = [args.out_dir.resolve(), args.src.resolve().parent, args.routed.resolve().parent]
+    if args.json:
+        mounts.append(args.json.resolve().parent)
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        with ere.kicad_toolchain_session(mounts, allow_unpinned=args.allow_unpinned_kicad) as tc:
+            return _run(args, ere.kicad_cli_columns(tc))
+    except KiCadEnvironmentError as exc:
+        return ere.refused(exc)
+
+
+def _run(args, kicad_cli: dict) -> int:
     board = ere.BOARDS[args.board]
     res = shrink(args.src, args.routed, args.scale, args.out_dir)
     if args.scaled_input:
@@ -427,6 +437,7 @@ def main(argv=None) -> int:
         res["s2_reroute"] = s2
         print("s2_reroute", json.dumps(s2)[:2500])
 
+    res["kicad_cli"] = kicad_cli
     if args.json:
         args.json.write_text(json.dumps(res, indent=2))
     return 0
