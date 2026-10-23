@@ -93,7 +93,7 @@ class LatticePairwise:
         into one dict get.  Same values as :meth:`required` for every partner;
         a net with no pair requirement gets a shared empty row.
         """
-        rows = self.__dict__.get("_rows")
+        rows: dict[int, dict[int, float]] | None = self.__dict__.get("_rows")
         if rows is None:
             rows = {}
             for (lo, hi), req in self.required_by_pair.items():
