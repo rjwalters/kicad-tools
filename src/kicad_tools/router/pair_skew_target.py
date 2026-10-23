@@ -206,10 +206,11 @@ def skew_stackup(source_pcb: Any | None, num_layers: int) -> Stackup | None:
             logger.debug("skew target: cannot load %s (%s); default stackup", source_pcb, exc)
             pcb = None
     if pcb is not None:
-        stackup = board_stackup(pcb, num_layers)
+        stackup: Stackup | None = board_stackup(pcb, num_layers)
         if stackup is not None and len(stackup.copper_layers) == num_layers:
             return stackup
-    return default_board_stackup(num_layers)
+    fallback: Stackup | None = default_board_stackup(num_layers)
+    return fallback
 
 
 def _layer_name(layer: Any) -> str:

@@ -20810,7 +20810,7 @@ class Autorouter:
             # invoked with the module-level default tolerance and the
             # tolerance is matched against the manufacturer minimum
             # clearance.
-            tolerance_mm = 0.5
+            tolerance_mm: float | None = 0.5
             intra_pair_clearance_mm = self.rules.trace_clearance
             length_critical = True
             max_uncoupled_mm: float | None = None

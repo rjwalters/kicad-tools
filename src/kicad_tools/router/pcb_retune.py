@@ -43,7 +43,7 @@ import signal
 import tempfile
 import threading
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -328,7 +328,7 @@ def _measure(
     return group_skew, dict(pair_skew), lengths, pair_ps
 
 
-def _pair_skew(pair_skew: dict[tuple[str, str], float], p: str, n: str) -> float | None:
+def _pair_skew(pair_skew: Mapping[tuple[str, str], float | None], p: str, n: str) -> float | None:
     for key in ((p, n), (n, p)):
         if key in pair_skew:
             return pair_skew[key]
@@ -849,12 +849,12 @@ def _retune_once(
     for p in selection.pairs:
         p_name, n_name = p.pair.positive.net_name, p.pair.negative.net_name
         key = _target_key("diffpair", f"{p_name}/{n_name}")
-        target = router._pair_skew_target(p_name, n_name)
-        selection.pair_targets[key] = target
-        tol_mm = target.tolerance_mm
+        pair_target = router._pair_skew_target(p_name, n_name)
+        selection.pair_targets[key] = pair_target
+        tol_mm = pair_target.tolerance_mm
         selection.tolerance[key] = (
             tol_mm if tol_mm is not None else float("inf"),
-            target.describe(),
+            pair_target.describe(),
         )
 
     def violated(
@@ -887,8 +887,8 @@ def _retune_once(
             from kicad_tools.validate.diffpair_engagement import resolve_pair_thresholds
 
             th = resolve_pair_thresholds(net_class_map, p_name, n_name)
-            target = selection.pair_targets[_target_key("diffpair", f"{p_name}/{n_name}")]
-            in_time = target.budget_ps is not None
+            p_target = selection.pair_targets[_target_key("diffpair", f"{p_name}/{n_name}")]
+            in_time = p_target.budget_ps is not None
             reports.append(
                 TargetReport(
                     kind="diffpair",
@@ -901,7 +901,7 @@ def _retune_once(
                     achieved=False,
                     status="",
                     stretch_target_mm=th.skew_stretch_mm,
-                    budget_ps=target.budget_ps,
+                    budget_ps=p_target.budget_ps,
                     before_skew_ps=_pair_skew(ps_before, p_name, n_name) if in_time else None,
                     after_skew_ps=(
                         _pair_skew(p_ps, p_name, n_name) if in_time and p_ps is not None else None
@@ -1016,12 +1016,12 @@ def _retune_once(
         assert t.before_skew_mm is not None
         if t.after_skew_mm is None:
             raise RetuneError("unmeasurable", f"{t.name}: cannot re-measure the written board")
-        pair_target = selection.pair_targets.get(key) if t.kind == "diffpair" else None
-        if pair_target is not None:
+        judged = selection.pair_targets.get(key) if t.kind == "diffpair" else None
+        if judged is not None:
             # Issue #7893: judged as ``kct check`` judges it -- the ps budget
             # and every error cap.
-            t.achieved = pair_target.within(t.after_skew_ps, t.after_skew_mm)
-            satisfied_before = pair_target.within(t.before_skew_ps, t.before_skew_mm)
+            t.achieved = judged.within(t.after_skew_ps, t.after_skew_mm)
+            satisfied_before = judged.within(t.before_skew_ps, t.before_skew_mm)
         else:
             t.achieved = t.after_skew_mm <= t.tolerance_mm + _EPS
             satisfied_before = t.before_skew_mm <= t.tolerance_mm + _EPS

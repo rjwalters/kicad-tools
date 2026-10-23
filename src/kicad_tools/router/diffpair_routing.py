@@ -13190,9 +13190,11 @@ class DiffPairRouter:
         # leg's delay per layer) on the checker's via-inclusive measure.
         match_tol = self._inline_match_tolerance(pair)
         meter = self._pair_skew_meter(pair)
+        pair_rules = pair.rules
+        assert pair_rules is not None, "committed coupled pair always carries rules"
 
         def off_target() -> bool:
-            if delta > pair.rules.max_length_delta:
+            if delta > pair_rules.max_length_delta:
                 return True
             if not meter.target.enforced or not p_routes or not n_routes:
                 return delta > match_tol

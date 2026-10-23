@@ -6613,7 +6613,9 @@ class LatticePathfinder:
         layer count; :data:`_PARITY_FALLBACK_SKEW_BUDGET_MM` when the pair has
         no target.  Cached per pair.
         """
-        cache = self.__dict__.setdefault("_pair_skew_budget_cache", {})
+        cache: dict[tuple[str, str, int], float] = self.__dict__.setdefault(
+            "_pair_skew_budget_cache", {}
+        )
         p_name = pc.pad_p_a.net_name or ""
         n_name = pc.pad_n_a.net_name or ""
         key = (p_name, n_name, id(pc.net_class))
