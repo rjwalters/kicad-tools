@@ -113,7 +113,45 @@ chained completion of VCP. It is not byte-identical to the macOS board (sha1
 but every graded number matches. Emulation made this run about 1.8x slower than
 the host, and it still did not reach either live wall clock.
 
-This was a local container, not a GitHub-hosted runner. A new workflow cannot
-be dispatched until it is on the default branch, so the first hosted-runner
-numbers come from the first `workflow_dispatch` (or the 07:30 UTC schedule)
-after merge. Add them here when they exist.
+This was a local container, not a GitHub-hosted runner.
+
+### GitHub-hosted runner (`workflow_dispatch`)
+
+Run [39907090297](https://github.com/rjwalters/kicad-tools/actions/runs/39907090297)
+on `main` @ `986ec551c`, 2026-10-23: one matrix job per seed on a hosted
+`ubuntu` runner, the pinned KiCad image, `kct build-native` first. All three
+jobs concluded `success`; the numbers below are read from each job's uploaded
+`results.json` and `route.log`.
+
+| Seed | Nets | kicad-cli DRC err | Unconnected | ERC | kct check err | LVS (copper / label) | Vias | Wall s | Load avg (start) | Verdict |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 42 | 37/37 | 0 | 0 | 0 | 0 | clean / clean | 124 | 604.0 | 3.70 | PASS |
+| 7 | 37/37 | 0 | 0 | 0 | 0 | clean / clean | 124 | 591.9 | 3.31 | PASS |
+| 1337 | 37/37 | 0 | 0 | 0 | 0 | clean / clean | 124 | 607.6 | 2.12 | PASS |
+
+All three boards are byte-identical to each other (sha1 `50fa6559...`), and to
+the local Linux container's seed-42 board above. So the seed does not change
+the outcome on Linux either, and the hosted runner reproduces the Linux
+container's copper exactly. The macOS board (`b80c221d...`) still differs, as
+recorded under #3822. Every graded number is the same on both. The hosted
+boards carry the same unchecked warnings as before (5 kicad-cli, 137
+`kct check`; see "Not gated: warnings").
+
+Each seed's route log shows the same shape as on the host: main pass 32/33
+with VCP open, then the chained `--complete` pass closes VCP in one lattice
+iteration (`1/1 connections, converged=True`).
+
+### Load dependence on the hosted runner
+
+The hosted wall clocks (592-608 s) are about 2.5x the macOS host's 242 s and
+about 1.4x the emulated container's 431 s. The route reports
+`sweep_wall_clock: true` for all three (the 60 s whole-sweep / 10 s per-net
+bound is live), and `rescue_wall_clock: false`, `hit_timeout: false`. The three
+jobs ran concurrently on separate runners at start load 2.1-3.7, and still
+produced identical copper. That is evidence the 60 s sweep bound and the 60 s
+per-link completion budget did not bind at this speed. It is not proof of
+headroom: nothing in the log records how close either bound came. A runner much
+slower than this one could still cut the sweep short or leave VCP open, and
+that would show up as `nets 36/37` with kicad-cli unconnected > 0, never as a
+pass. The earlier advice stands: read the uploaded `route.log` before treating
+a red nightly as a router regression.
