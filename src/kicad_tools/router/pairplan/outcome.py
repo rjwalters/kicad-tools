@@ -29,10 +29,11 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 #: Decline reasons the lattice ``_route_impl`` returns when its A* actually RAN
-#: and was exhausted (issues #6373, #4605, #4979).  The plain value and its two
-#: "constrained" refinements differ only in which diagnostic label wins when a
-#: keepout mask or a hard layer set pruned candidates on the way -- every one of
-#: them still means "a search ran and found no path".  Consumers that gate on
+#: and was exhausted (issues #6373, #4605, #4979, #7879).  The plain value and
+#: its "constrained" refinements differ only in which diagnostic label wins when
+#: a keepout mask, a hard layer set or the HV pairwise (class-pair) clearance
+#: pruned candidates on the way -- every one of them still means "a search ran
+#: and found no path".  Consumers that gate on
 #: exhaustion (the #6535 tap-chain retry, issue #6743) must use this set rather
 #: than compare one literal, so a diagnostic refinement cannot silently disable
 #: them.  ``no-egress-start``/``-end`` are deliberately NOT here: they name a
@@ -40,8 +41,13 @@ from typing import Any, Literal
 REASON_NO_PATH = "no-path"
 REASON_NO_PATH_KEEPOUT = "no-path-keepout-constrained"
 REASON_NO_PATH_LAYER = "no-path-layer-constrained"
+#: Issue #7879: the search ran out of options after the HV pairwise
+#: (``--voltage-map`` / class-pair) clearance refused at least one candidate.
+#: A contributing cause, like the two refinements above -- never a claim of
+#: sole causation.  Only a real voltage-map projection can produce it.
+REASON_NO_PATH_PAIRWISE = "no-path-pairwise-constrained"
 EXHAUSTED_SEARCH_REASONS: frozenset[str] = frozenset(
-    {REASON_NO_PATH, REASON_NO_PATH_KEEPOUT, REASON_NO_PATH_LAYER}
+    {REASON_NO_PATH, REASON_NO_PATH_KEEPOUT, REASON_NO_PATH_LAYER, REASON_NO_PATH_PAIRWISE}
 )
 
 #: Issue #6444: pair-segment decline reasons that earn ONE fan-via gateway

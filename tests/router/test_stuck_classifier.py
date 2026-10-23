@@ -1227,3 +1227,125 @@ class TestSearchFailuresSidecar6369:
             _write_search_failures_sidecar(out, first)
             assert _write_search_failures_sidecar(out, second) is None
             assert load_search_failures_sidecar(out) is None
+
+
+class TestPairwiseDecline7879:
+    """Issue #7879: the router's pairwise decline outranks the geometry-only view."""
+
+    def _tgt(self, path: Path, failures=None):
+        return next(
+            d
+            for d in classify_stuck_nets(path, search_failures=failures).diagnoses
+            if d.net_name == "TGT"
+        )
+
+    @pytest.mark.parametrize("reason", ["no-path-pairwise-constrained", 7])
+    def test_pairwise_reason_gets_pairwise_wording(self, budget_starved_pcb: Path, reason):
+        d = self._tgt(budget_starved_pcb, {"TGT": reason})
+        assert d.classification is StuckClass.ESCAPE_BLOCKED
+        assert "pairwise (HV) class-pair clearance stopped" in d.evidence
+        label = "pairwise_blocked" if reason == 7 else reason
+        assert f"({label})" in d.evidence
+        assert "re-route" not in d.evidence.lower()
+        assert d.to_dict()["search_failure"] == label
+
+    def test_other_geometric_reason_keeps_escape_wording(self, budget_starved_pcb: Path):
+        d = self._tgt(budget_starved_pcb, {"TGT": "no-path"})
+        assert d.classification is StuckClass.ESCAPE_BLOCKED
+        assert "pairwise" not in d.evidence
+        assert "real trace width" in d.evidence
+        assert d.to_dict()["search_failure"] == "no-path"
+
+    def test_no_recorded_reason_adds_no_json_key(self, budget_starved_pcb: Path):
+        d = self._tgt(budget_starved_pcb)
+        assert d.search_failure is None
+        assert "search_failure" not in d.to_dict()
+
+    def test_router_decline_skips_the_pairwise_blind_probe(self, tmp_path: Path, monkeypatch):
+        """A net the router declined geometrically is never probe-upgraded (#7832)."""
+        from kicad_tools.router import stuck_classifier as sc
+
+        def forbidden(self, *a, **k):
+            raise AssertionError("a router-declined net must not be probed")
+
+        monkeypatch.setattr(sc._RoutabilityProbe, "routable", forbidden)
+        p = tmp_path / "routable.kicad_pcb"
+        p.write_text(_routable_moderate_board())
+        d = self._tgt(p, {"TGT": "no-path-pairwise-constrained"})
+        assert d.classification is not StuckClass.BUDGET_STARVED
+        assert d.classification is StuckClass.PLACEMENT_BOUND
+        assert d.to_dict()["search_failure"] == "no-path-pairwise-constrained"
+
+    def test_budget_reason_still_probed(self, tmp_path: Path):
+        """A budget give-up is exactly what the probe exists to second-guess."""
+        p = tmp_path / "routable.kicad_pcb"
+        p.write_text(_routable_moderate_board())
+        d = self._tgt(p, {"TGT": "timeout"})
+        assert d.classification is StuckClass.BUDGET_STARVED
+        assert "found a route" in d.evidence
+
+    def test_is_pairwise_search_failure(self):
+        from kicad_tools.router.stuck_classifier import is_pairwise_search_failure
+
+        assert is_pairwise_search_failure("pairwise_blocked")
+        assert is_pairwise_search_failure("no-path-pairwise-constrained")
+        assert not is_pairwise_search_failure("no-path")
+        assert not is_pairwise_search_failure("no-path-layer-constrained")
+
+
+class TestLatticeReasonsReachSidecar7879:
+    """Issue #7879: lattice declines are persisted next to the routed board."""
+
+    def test_lattice_reasons_merged_geometric_beats_budget(self, tmp_path: Path):
+        from types import SimpleNamespace
+
+        from kicad_tools.cli.route_cmd import _write_search_failures_sidecar
+        from kicad_tools.router.stuck_classifier import load_search_failures_sidecar
+
+        router = SimpleNamespace(
+            router=SimpleNamespace(search_failures_by_net={4: 3}),  # grid: timeout
+            net_names={4: "/HV_A", 5: "SIG", 6: "D+", 7: "D-"},
+            _lattice_failure_reasons={
+                (4, 0): "deadline-exceeded",
+                (4, 1): "no-path-pairwise-constrained",
+                (5, 0): "deadline-exceeded",
+                ("pair", 6, 7): "pair-no-path",
+            },
+        )
+        out = tmp_path / "b_routed.kicad_pcb"
+        assert _write_search_failures_sidecar(out, router) is not None
+        assert load_search_failures_sidecar(out) == {
+            "/HV_A": "no-path-pairwise-constrained",
+            "SIG": "deadline-exceeded",
+            "D+/D-": "pair-no-path",
+        }
+
+    def test_lattice_only_run_writes_sidecar(self, tmp_path: Path):
+        """Before #7879 a lattice run always wrote an empty map (no grid store)."""
+        from types import SimpleNamespace
+
+        from kicad_tools.cli.route_cmd import _write_search_failures_sidecar
+        from kicad_tools.router.stuck_classifier import load_search_failures_sidecar
+
+        router = SimpleNamespace(
+            router=None, net_names={4: "/HV_A"}, _lattice_failure_reasons={(4, 0): "no-path"}
+        )
+        out = tmp_path / "b_routed.kicad_pcb"
+        assert _write_search_failures_sidecar(out, router) is not None
+        assert load_search_failures_sidecar(out) == {"/HV_A": "no-path"}
+
+    def test_later_lattice_run_recording_nothing_removes_stale_grid_sidecar(self, tmp_path: Path):
+        from types import SimpleNamespace
+
+        from kicad_tools.cli.route_cmd import _write_search_failures_sidecar
+        from kicad_tools.router.stuck_classifier import load_search_failures_sidecar
+
+        out = tmp_path / "b_routed.kicad_pcb"
+        grid = SimpleNamespace(
+            router=SimpleNamespace(search_failures_by_net={4: 7}), net_names={4: "/HV_A"}
+        )
+        assert _write_search_failures_sidecar(out, grid) is not None
+        assert load_search_failures_sidecar(out) == {"/HV_A": "pairwise_blocked"}
+        lattice = SimpleNamespace(router=None, net_names={4: "/HV_A"}, _lattice_failure_reasons={})
+        assert _write_search_failures_sidecar(out, lattice) is None
+        assert load_search_failures_sidecar(out) is None

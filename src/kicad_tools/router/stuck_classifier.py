@@ -87,6 +87,7 @@ __all__ = [
     "classify_stuck_nets",
     "classify_stuck_nets_from_pcb",
     "is_budget_search_failure",
+    "is_pairwise_search_failure",
     "normalize_search_failure",
     "SEARCH_FAILURES_SIDECAR_SUFFIX",
     "write_search_failures_sidecar",
@@ -436,6 +437,12 @@ class StuckNetDiagnosis:
     # line-of-sight guess over the finished board -- this is replayed from the
     # order copper actually landed in.
     access_witness: AccessWitness | None = None
+    # Issue #7879: the router's own recorded reason its last search for this
+    # net ended (the ``search_failures`` map / ``.search_failures.json``
+    # sidecar, normalized).  ``None`` when nothing was recorded -- and kept OUT
+    # of :meth:`to_dict` in that case so a board without a sidecar emits
+    # byte-identical JSON.
+    search_failure: str | None = None
 
     @property
     def classification_value(self) -> str:
@@ -462,6 +469,7 @@ class StuckNetDiagnosis:
             "recommendation": [a.to_dict() for a in self.recommendation],
             **({"swap_proposal": self.swap_proposal.to_dict()} if self.swap_proposal else {}),
             **({"access_witness": self.access_witness.to_dict()} if self.access_witness else {}),
+            **({"search_failure": self.search_failure} if self.search_failure else {}),
         }
 
     def one_line(self) -> str:
@@ -1282,6 +1290,9 @@ def classify_stuck_nets_from_pcb(
             pcb, net_number, pad_points, strict_nets, blocker_radius_mm
         )
 
+        search_failure = (
+            normalize_search_failure(search_failures.get(net.net_name)) if search_failures else None
+        )
         diag = _decide(
             net_name=net.net_name,
             net_number=net_number,
@@ -1294,17 +1305,25 @@ def classify_stuck_nets_from_pcb(
             dense_cluster_threshold=dense_cluster_threshold,
             same_group_congestion=same_group_congestion,
             foreign_congestion=foreign_congestion,
-            search_failure=(
-                normalize_search_failure(search_failures.get(net.net_name))
-                if search_failures
-                else None
-            ),
+            search_failure=search_failure,
         )
+        diag.search_failure = search_failure
         # Issue #7832: branch 4 is geometry-only and cannot see that a route
         # exists.  Confirm with a bounded single-net probe before telling the
         # operator a part must move.
-        if diag.classification is StuckClass.PLACEMENT_BOUND and diag.evidence.endswith(
-            _BRANCH4_TAIL
+        #
+        # Issue #7879: not when the router itself recorded a GEOMETRIC give-up
+        # for this net.  The probe loads the board without the voltage map or
+        # net classes, so it is blind to the pairwise (HV) class-pair
+        # clearance the router searched under; its "route found" must never
+        # outrank the router's own refusal and relabel the net BUDGET_STARVED.
+        router_declined = search_failure is not None and not is_budget_search_failure(
+            search_failure
+        )
+        if (
+            diag.classification is StuckClass.PLACEMENT_BOUND
+            and diag.evidence.endswith(_BRANCH4_TAIL)
+            and not router_declined
         ):
             verdict = probe.routable(net.net_name, pad_names)
             if verdict:
@@ -1743,6 +1762,16 @@ def is_budget_search_failure(reason: str) -> bool:
     return any(marker in lowered for marker in _BUDGET_FAILURE_MARKERS)
 
 
+def is_pairwise_search_failure(reason: str) -> bool:
+    """True when the pairwise (HV) class-pair clearance stopped the search (#7879).
+
+    Covers the C++ grid's ``pairwise_blocked`` (``FAILURE_PAIRWISE_BLOCKED``)
+    and the lattice's ``no-path-pairwise-constrained`` (and the pair legs'
+    ``pair-leg-pairwise-blocked``).  A budget reason never qualifies.
+    """
+    return "pairwise" in reason.lower() and not is_budget_search_failure(reason)
+
+
 # Issue #7832: the branch-4 (moderate congestion, no rippable copper) evidence
 # ends with this clause; it is how the caller tells branch 4 from the
 # dense-cluster PLACEMENT_BOUND, which is never probed.
@@ -1905,13 +1934,27 @@ def _decide(
         and search_failure is not None
         and not is_budget_search_failure(search_failure)
     ):
-        evidence = (
-            f"the router's search ended for a geometric reason "
-            f"({search_failure}) with budget to spare, although the "
-            f"geometry-only probe sees a {open_deg:.0f} deg lane ({nb}); "
-            f"more search budget will not route it -- the pad's escape at the "
-            f"net's real trace width is the constraint"
-        )
+        if is_pairwise_search_failure(search_failure):
+            # Issue #7879: the router searched under the pairwise (HV)
+            # class-pair clearance -- which this geometry-only view does not
+            # model -- and it stopped the search.  Say so, so an agent reads
+            # "clearance", not "escape width" or "budget".
+            evidence = (
+                f"the pairwise (HV) class-pair clearance stopped the router's "
+                f"search ({search_failure}) with budget to spare, although the "
+                f"geometry-only probe, which does not model voltage or "
+                f"class-pair clearance, sees a {open_deg:.0f} deg lane ({nb}); "
+                f"more search budget will not route it -- the HV clearance "
+                f"to the neighbouring copper is the constraint"
+            )
+        else:
+            evidence = (
+                f"the router's search ended for a geometric reason "
+                f"({search_failure}) with budget to spare, although the "
+                f"geometry-only probe sees a {open_deg:.0f} deg lane ({nb}); "
+                f"more search budget will not route it -- the pad's escape at the "
+                f"net's real trace width is the constraint"
+            )
         return StuckNetDiagnosis(
             net_name=net_name,
             net_number=net_number,

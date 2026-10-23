@@ -43,6 +43,7 @@ DECLINES (``None``) -- it is never emitted crossing copper.
 
 from __future__ import annotations
 
+import contextlib
 import heapq
 import math
 import os
@@ -61,6 +62,7 @@ from ..pairplan.outcome import (
     REASON_NO_PATH,
     REASON_NO_PATH_KEEPOUT,
     REASON_NO_PATH_LAYER,
+    REASON_NO_PATH_PAIRWISE,
     SegmentOutcome,
     SegmentOutcomes,
     hybrid_retry_reason,
@@ -823,6 +825,12 @@ class LatticePathfinder:
         # ``--voltage-map``) keeps every predicate on its scalar path
         # byte-for-byte.
         self._pairwise: LatticePairwise | None = None
+        # Issue #7879: the projection :meth:`set_pairwise` installed -- the
+        # real ``--voltage-map`` one.  ``_pairwise`` is also borrowed for the
+        # #6703 per-pad class keep-out of a fallback leg search; only a
+        # refusal by THIS projection may name the pairwise clearance in a
+        # decline reason, so no new reason can appear without a voltage map.
+        self._hv_pairwise: LatticePairwise | None = None
         # Issue #4605: optional static keepout rule-area mask
         # (:class:`.obstacles.LatticeKeepoutMask`), resolved by the CALLER
         # from the board's ``(zone ... (keepout ...))`` rule areas + the
@@ -858,6 +866,28 @@ class LatticePathfinder:
         pathfinder so it cannot carry a stale projection across runs.
         """
         self._pairwise = pairwise
+        self._hv_pairwise = pairwise
+
+    @contextlib.contextmanager
+    def _pairwise_off(self, committed: CommittedCopper) -> Iterator[None]:
+        """Switch the HV pairwise projection off for the ``with`` body (#7879).
+
+        Used only after a candidate was refused with a voltage-map projection
+        active, to tell whether the pairwise clearance was DECISIVE for it
+        (the candidate is legal without it).  Both carriers of the projection
+        -- the static pad probe (``self._pairwise``) and the committed-copper
+        model (``committed.pairwise``) -- are cleared for the call and
+        restored afterwards, so the search's own state is untouched.
+        """
+        prev_pw = self._pairwise
+        prev_committed = getattr(committed, "pairwise", None)
+        self._pairwise = None
+        committed.pairwise = None
+        try:
+            yield
+        finally:
+            self._pairwise = prev_pw
+            committed.pairwise = prev_committed
 
     def set_pad_class_clearances(self, values: list[float] | None) -> None:
         """Install (or clear) the per-pad net-class clearances (#6395).
@@ -2336,6 +2366,16 @@ class LatticePathfinder:
         # decline distinguish a layer-constrained shortfall (see the
         # ``end_state is None`` branch below).
         layer_pruned = False
+        # Issue #7879: set when the HV pairwise (voltage-map) clearance was
+        # decisive for refusing at least one candidate edge, node or via of
+        # this search -- the same CONTRIBUTING-cause contract as
+        # ``ko_pruned`` / ``layer_pruned``.  Only the projection
+        # :meth:`set_pairwise` installed counts (never the #6703 per-pad class
+        # keep-out borrowed for a fallback leg), and the fat coupled search is
+        # excluded from pairwise widening, so without ``--voltage-map`` this
+        # stays ``False`` and the decline reasons are unchanged.
+        pairwise_pruned = False
+        pw_hv = pw is not None and pw is getattr(self, "_hv_pairwise", None)
         if fat:
             # v1 coupled runs are planar; there is no fat via legality.
             allow_vias = False
@@ -2693,6 +2733,19 @@ class LatticePathfinder:
                         )
                         if ko_hit:
                             ko_pruned = True
+                        if not ok and pw_hv and not pairwise_pruned:
+                            with self._pairwise_off(committed):
+                                pairwise_pruned = self._body_edge_legal(
+                                    edge,
+                                    layer,
+                                    net,
+                                    half,
+                                    clr,
+                                    committed,
+                                    extra=extra,
+                                    pw=None,
+                                    ko=ko,
+                                )[0]
                     ok = ok and boundary.segment_clear(
                         lattice.node_point(edge[0]),
                         lattice.node_point(edge[1]),
@@ -2724,6 +2777,19 @@ class LatticePathfinder:
                         )
                         if ko_hit:
                             ko_pruned = True
+                        if not nok and pw_hv and not pairwise_pruned:
+                            with self._pairwise_off(committed):
+                                pairwise_pruned = self._body_node_legal(
+                                    nbr,
+                                    layer,
+                                    net,
+                                    half,
+                                    clr,
+                                    committed,
+                                    extra=extra,
+                                    pw=None,
+                                    ko=ko,
+                                )[0]
                     node_ok[nbase] = nok
                 if not nok:
                     continue
@@ -2779,6 +2845,15 @@ class LatticePathfinder:
                         clearance=clr if net_class is not None else None,
                     )
                     via_ok[key] = vok
+                    if not vok and pw_hv and not pairwise_pruned:
+                        with self._pairwise_off(committed):
+                            pairwise_pruned = self._via_ok(
+                                key,
+                                net,
+                                committed,
+                                via_in_pad_override=via_in_pad_override,
+                                clearance=clr if net_class is not None else None,
+                            )
                 if vok:
                     # Issue #6957: ``via_ok`` is memoised per node against
                     # COMMITTED copper only; this route's own earlier vias are
@@ -2866,6 +2941,19 @@ class LatticePathfinder:
                                 )
                                 and committed.node_clear(kpt, nl, net, landing_half, clr)
                             )
+                            if not nok and pw_hv and not pairwise_pruned:
+                                with self._pairwise_off(committed):
+                                    pairwise_pruned = (
+                                        not ko_hit
+                                        and not obstacles.node_blocked(key, nl, net)
+                                        and not (
+                                            landing_extra > 0.0
+                                            and obstacles.segment_blocked(
+                                                kpt, kpt, nl, net, landing_extra
+                                            )
+                                        )
+                                        and committed.node_clear(kpt, nl, net, landing_half, clr)
+                                    )
                             if not tapered_goal:
                                 node_ok[nbase] = nok
                         if not nok:
@@ -2936,6 +3024,14 @@ class LatticePathfinder:
             # the forbidden copper: this branch returns no route at all.
             if layer_pruned:
                 return None, REASON_NO_PATH_LAYER
+            # Issue #7879: same contract for the HV pairwise (voltage-map)
+            # clearance -- it refused at least one candidate this search
+            # could otherwise have used, so the decline names it as a
+            # contributing cause.  ``net-status --why`` reads this reason
+            # back from the ``.search_failures.json`` sidecar and must not
+            # then call the net budget-starved.
+            if pairwise_pruned:
+                return None, REASON_NO_PATH_PAIRWISE
             return None, REASON_NO_PATH
 
         # -- reconstruct ---------------------------------------------------
