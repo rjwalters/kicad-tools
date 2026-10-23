@@ -135,7 +135,11 @@ def test_retuner_on_the_committed_board_is_already_satisfied(tmp_path):
     assert report.changed_nets == []
     (target,) = report.targets
     assert target.name == "USB_D+/USB_D-"
-    assert target.tolerance_mm == 2.5
+    # Issue #7893: judged against the derived USB 2.0 FS budget in ps (the
+    # 2.5 mm table value it superseded); ``tolerance_mm`` is its length form.
+    assert target.budget_ps == pytest.approx(115.16, abs=0.01)
+    assert target.before_skew_ps is not None and target.before_skew_ps < target.budget_ps
+    assert target.tolerance_mm > 2.5
     assert target.before_skew_mm == pytest.approx(0.224, abs=0.001)
     assert target.after_skew_mm == target.before_skew_mm
     assert target.stretch_target_mm == 0.5 and target.stretch_achieved

@@ -2320,12 +2320,14 @@ def _diffpair_skew_tuning_mode(args: argparse.Namespace) -> str | None:
     """Which diff-pair skew tuning (if any) runs after routing.
 
     * ``"length_critical"`` -- ``--length-match-diffpairs`` (Issue #2648),
-      on every engine: tune ``length_critical`` classes to
-      ``effective_skew_tolerance(0.5)``.  Unchanged by Issue #6664.
+      on every engine: tune ``length_critical`` classes.
     * ``"checker_skew_limit"`` -- Issue #6664: the resolved engine is
-      ``lattice`` and ``--differential-pairs`` is set.  Tune every pair whose
-      skew ``kct check`` fails as an error, to the checker's own limit.  Grid
-      is frozen for new pair features until #6448, so it never auto-engages.
+      ``lattice`` and ``--differential-pairs`` is set.  Tune every pair with
+      a skew target, to the checker's own limits.  Grid is frozen for new
+      pair features until #6448, so it never auto-engages.
+
+    Issue #7893: both tune to the pair's skew target (the derived ps budget
+    and the error-level mm caps ``kct check`` applies), in ps.
     * ``None`` -- no tuning.
     """
     if getattr(args, "length_match_diffpairs", False):
@@ -5076,8 +5078,9 @@ def _router_pair_limits(
     Issue #7892: ``kct check`` judges skew in ps, which kicad-cli 10.0.6
     cannot enforce, so the skew rule is the tightest millimetre form
     (:attr:`~kicad_tools.validate.diffpair_engagement.PairSkewLimits.kicad_skew_mm`:
-    the derived budget at the board's slowest layer delay, any class cap, and
-    the router's own length target).
+    the derived budget at the board's slowest layer delay and any length cap).
+    Issue #7893: the router tunes to the same limits, so its old table target
+    is no longer part of the rule.
     """
     if pairs is None or net_class_map is None:
         return None

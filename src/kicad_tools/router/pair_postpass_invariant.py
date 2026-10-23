@@ -10,23 +10,24 @@ guard (class-pad repair #6437, the match-group tuner #6675) or none at all.
 This module is the shared guard.  A caller measures every detected pair's
 skew before its pass (:meth:`PairSkewGuard.arm`), runs the pass, and asks
 :meth:`PairSkewGuard.regressions` which pairs the pass broke.  A pair has
-regressed when its skew now exceeds the limit ``kct check`` enforces as an
-error and either
+regressed when it is now off its skew target and either
 
-* it was inside that limit before the pass (``"newly_exceeds"``), or
-* it was already over it and the pass made it worse by more than
-  :data:`PAIR_SKEW_REGRESSION_TOL_MM` (``"worsened"``).
+* it met the target before the pass (``"newly_exceeds"``), or
+* it was already off it and the pass made it worse by more than
+  :data:`PAIR_SKEW_REGRESSION_TOL_MM` (``"worsened"``; in ps, that length at
+  the slowest layer delay).
 
 The caller then reverts that pass's edits to the regressed pair (or rejects
 the pass) and logs the :class:`PairSkewRegression`.
 
-The limit and the measure are the checker's own: the limit comes from
-:func:`checker_skew_limit_mm` (``resolve_pair_thresholds``, the single source
-shared with ``kct check`` and the coupled router since #7803) and the length
-from ``Autorouter._checker_route_length`` (the kicad-cli-exact model, #6725),
-so the guard never disagrees with the check it protects.  Pairs whose skew
-limit is only advisory (warning/info) are not guarded -- ``kct check`` does
-not fail the board on them.
+The target and the measure are the checker's own (Issue #7893): the target is
+:func:`~kicad_tools.router.pair_skew_target.resolve_pair_skew_target` (the
+derived ps budget and the error-level mm caps, from the resolver ``kct check``
+reads) and each leg is measured with ``Autorouter._checker_route_parts`` (the
+kicad-cli-exact model, #6725, itemised per layer so its delay is the
+checker's), so the guard never disagrees with the check it protects.  Pairs
+with no target (an advisory length limit and no derived budget) are not
+guarded.
 """
 
 from __future__ import annotations
@@ -39,6 +40,8 @@ from typing import TYPE_CHECKING, Any
 from .lattice.class_pad_repair import PAIR_LENGTH_TOLERANCE_MM
 
 if TYPE_CHECKING:
+    from .kicad_length import NetLengthParts
+    from .pair_skew_target import PairSkewTarget
     from .primitives import Route
 
 logger = logging.getLogger(__name__)
@@ -51,38 +54,23 @@ PAIR_SKEW_REGRESSION_TOL_MM = PAIR_LENGTH_TOLERANCE_MM
 _EPS = 1e-6
 
 
-def checker_skew_limit_mm(
-    net_class_map: dict[str, Any] | None, p_name: str, n_name: str
-) -> float | None:
-    """The pair's millimetre skew limit when it is an ERROR (#5333).
+@dataclass(frozen=True)
+class PairSkew:
+    """One pair's skew: ``ps`` (``None`` without a budget to weigh by) and ``mm``."""
 
-    ``None`` when the limit is only advisory (warning/info).  The one lookup
-    behind ``DiffPairRouter._checker_skew_limit_mm`` and this guard.
-
-    Issue #7892: ``kct check`` no longer reads this.  It judges skew in ps
-    against :func:`kicad_tools.physics.skew_budget.resolve_skew_budget`
-    (``validate.diffpair_engagement.resolve_pair_skew_limits``).  This
-    millimetre resolution stays the router's and tuners' target until #7893
-    switches them to the same helper; the ``.kicad_dru`` skew rule keeps it as
-    a floor so kicad-cli is never looser than what the router tunes to.
-    """
-    from kicad_tools.validate.diffpair_engagement import resolve_pair_thresholds
-
-    thresholds = resolve_pair_thresholds(net_class_map, p_name, n_name)
-    if thresholds.skew_severity != "error":
-        return None
-    return float(thresholds.skew_mm)
+    ps: float | None
+    mm: float
 
 
 @dataclass(frozen=True)
 class GuardedPair:
-    """A detected pair whose skew ``kct check`` enforces as an error."""
+    """A detected pair with a skew target ``kct check`` judges it against."""
 
     p_id: int
     n_id: int
     p_name: str
     n_name: str
-    limit_mm: float
+    target: PairSkewTarget
 
     @property
     def nets(self) -> tuple[int, int]:
@@ -92,21 +80,68 @@ class GuardedPair:
     def name(self) -> str:
         return f"{self.p_name}/{self.n_name}"
 
+    @property
+    def limit_mm(self) -> float | None:
+        """The target's tightest length form (for reports)."""
+        return self.target.tolerance_mm
+
 
 @dataclass(frozen=True)
 class PairSkewRegression:
-    """One pair a pass pushed past (or further past) its skew limit."""
+    """One pair a pass pushed off (or further off) its skew target."""
 
     pair: GuardedPair
-    before_mm: float
-    after_mm: float
+    before: PairSkew
+    after: PairSkew
     kind: str  # "newly_exceeds" | "worsened"
+
+    @property
+    def before_mm(self) -> float:
+        return self.before.mm
+
+    @property
+    def after_mm(self) -> float:
+        return self.after.mm
 
     def describe(self, pass_name: str) -> str:
         return (
-            f"{pass_name}: {self.pair.name} skew {self.before_mm:.3f} -> "
-            f"{self.after_mm:.3f} mm (limit {self.pair.limit_mm:.3f} mm, {self.kind})"
+            f"{pass_name}: {self.pair.name} skew {_skew_text(self.before)} -> "
+            f"{_skew_text(self.after)} (target {self.pair.target.short()}, {self.kind})"
         )
+
+
+def _skew_text(skew: PairSkew) -> str:
+    if skew.ps is None:
+        return f"{skew.mm:.3f} mm"
+    return f"{skew.ps:.3f} ps [{skew.mm:.3f} mm]"
+
+
+def classify_target_change(
+    target: PairSkewTarget,
+    before: PairSkew | None,
+    after: PairSkew | None,
+    tol_mm: float = PAIR_SKEW_REGRESSION_TOL_MM,
+) -> str | None:
+    """``"newly_exceeds"`` / ``"worsened"`` when a pass moved a pair off its target.
+
+    Issue #7893: judged against the whole target (ps budget and error caps).
+    "Worse" is more than ``tol_mm`` of extra length skew on a cap the pair is
+    over, or more than ``tol_mm`` at the slowest layer delay of extra ps skew.
+    """
+    if before is None or after is None:
+        return None
+    if target.within(after.ps, after.mm):
+        return None
+    if target.within(before.ps, before.mm):
+        return "newly_exceeds"
+    worse = False
+    delays = target.delays
+    if target.budget_ps is not None and delays is not None:
+        if after.ps is not None and before.ps is not None:
+            worse = worse or after.ps > before.ps + tol_mm * delays.slowest
+    if target.cap_mm is not None and after.mm > target.cap_mm + _EPS:
+        worse = worse or after.mm > before.mm + tol_mm
+    return "worsened" if worse else None
 
 
 def classify_skew_change(
@@ -150,25 +185,36 @@ def guarded_pairs(router: Any) -> list[GuardedPair]:
     except Exception as exc:  # noqa: BLE001 - a guard must never break routing
         logger.debug("pair-skew guard: pair detection failed: %s", exc)
         return []
+    resolve = getattr(router, "_pair_skew_target", None)
+    if resolve is None:
+        return []
     out: list[GuardedPair] = []
     for dp in detected:
         p, n = dp.pair.positive, dp.pair.negative
-        limit = checker_skew_limit_mm(net_class_map, p.net_name, n.net_name)
-        if limit is None:
+        try:
+            target = resolve(p.net_name, n.net_name)
+        except Exception as exc:  # noqa: BLE001 - a guard must never break routing
+            logger.debug("pair-skew guard: no target for %s/%s: %s", p.net_name, n.net_name, exc)
             continue
-        out.append(GuardedPair(p.net_id, n.net_id, p.net_name, n.net_name, limit))
+        if not target.enforced:
+            continue
+        out.append(GuardedPair(p.net_id, n.net_id, p.net_name, n.net_name, target))
     return out
 
 
-def checker_length_measure(router: Any) -> Callable[[Route], float] | None:
-    """``Route -> mm`` measured as ``kct check`` measures, or ``None``."""
-    measure_factory = getattr(router, "_checker_route_length", None)
+def checker_length_measure(router: Any) -> Callable[[Route], NetLengthParts] | None:
+    """``Route -> NetLengthParts`` measured as ``kct check`` measures, or ``None``.
+
+    Issue #7893: itemised per layer and via, so each leg's delay is the
+    checker's; ``.total`` is the kicad-cli length.
+    """
+    measure_factory = getattr(router, "_checker_route_parts", None)
     if measure_factory is None:
         return None
     layer_stack = getattr(router, "layer_stack", None)
     num_layers = len(layer_stack.layers) if layer_stack is not None else 2
     try:
-        measure: Callable[[Route], float] = measure_factory(num_layers)
+        measure: Callable[[Route], NetLengthParts] = measure_factory(num_layers)
     except Exception as exc:  # noqa: BLE001 - a guard must never break routing
         logger.debug("pair-skew guard: no checker length model: %s", exc)
         return None
@@ -178,9 +224,13 @@ def checker_length_measure(router: Any) -> Callable[[Route], float] | None:
 def measure_pair_skews(
     pairs: Iterable[GuardedPair],
     routes: Iterable[Route],
-    measure: Callable[[Route], float],
-) -> dict[tuple[int, int], float | None]:
-    """``{(p_id, n_id): |len(P) - len(N)|}``; ``None`` where a leg is unrouted.
+    measure: Callable[[Route], NetLengthParts],
+) -> dict[tuple[int, int], PairSkew | None]:
+    """``{(p_id, n_id): PairSkew}``; ``None`` where a leg is unrouted.
+
+    Issue #7893: each leg's delay is its length per layer at that layer's
+    delay plus its vias at the via delay (the pair's target supplies the
+    delays), as ``kct check`` measures it.
 
     A net held as several fragments is measured as one merged route, as
     ``Autorouter._net_routes_merged`` hands it to the tuners (#6792).
@@ -196,7 +246,7 @@ def measure_pair_skews(
             seen.add(id(route))
             fragments.setdefault(route.net, []).append(route)
 
-    def length(net: int) -> float | None:
+    def length(net: int) -> NetLengthParts | None:
         frags = [r for r in fragments.get(net, ()) if r.segments or r.vias]
         if not frags:
             return None
@@ -211,15 +261,24 @@ def measure_pair_skews(
             )
         )
         try:
-            return float(measure(merged))
+            return measure(merged)
         except Exception as exc:  # noqa: BLE001 - unmeasurable is "unknown", not a failure
             logger.debug("pair-skew guard: cannot measure net %s: %s", net, exc)
             return None
 
-    out: dict[tuple[int, int], float | None] = {}
+    out: dict[tuple[int, int], PairSkew | None] = {}
     for pair in pairs:
         lp, ln = length(pair.p_id), length(pair.n_id)
-        out[pair.nets] = None if lp is None or ln is None else abs(lp - ln)
+        if lp is None or ln is None:
+            out[pair.nets] = None
+            continue
+        delays = pair.target.delays
+        ps = None
+        if pair.target.budget_ps is not None and delays is not None:
+            ps = abs(
+                delays.delay_ps(lp.by_layer, lp.via_mm) - delays.delay_ps(ln.by_layer, ln.via_mm)
+            )
+        out[pair.nets] = PairSkew(ps, abs(lp.total - ln.total))
     return out
 
 
@@ -230,8 +289,8 @@ class PairSkewGuard:
         self,
         pass_name: str,
         pairs: list[GuardedPair],
-        measure: Callable[[Route], float],
-        before: dict[tuple[int, int], float | None],
+        measure: Callable[[Route], NetLengthParts],
+        before: dict[tuple[int, int], PairSkew | None],
     ) -> None:
         self.pass_name = pass_name
         self.pairs = pairs
@@ -267,11 +326,11 @@ class PairSkewGuard:
         after = measure_pair_skews(self.pairs, routes, self.measure)
         out: list[PairSkewRegression] = []
         for pair in self.pairs:
-            before_mm, after_mm = self.before.get(pair.nets), after.get(pair.nets)
-            kind = classify_skew_change(before_mm, after_mm, pair.limit_mm, tol_mm)
+            before, now = self.before.get(pair.nets), after.get(pair.nets)
+            kind = classify_target_change(pair.target, before, now, tol_mm)
             if kind is not None:
-                assert before_mm is not None and after_mm is not None
-                out.append(PairSkewRegression(pair, before_mm, after_mm, kind))
+                assert before is not None and now is not None
+                out.append(PairSkewRegression(pair, before, now, kind))
         return out
 
     def report(self, regression: PairSkewRegression, action: str) -> str:

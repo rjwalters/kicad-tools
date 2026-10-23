@@ -243,7 +243,8 @@ class PairSkewLimits:
     pair with no budget, the pre-#7892 limit (protocol table or generic
     0.5 mm).  ``delays`` are the board's per-layer delays at the class trace
     width, ``None`` when the caller has no stackup.  ``legacy`` is the
-    millimetre resolution the router still tunes to until #7893.
+    pre-#7892 millimetre resolution (its source and severity feed
+    ``length_cap_mm``; since #7893 nothing tunes to its value directly).
     """
 
     budget: Any | None
@@ -265,27 +266,32 @@ class PairSkewLimits:
         """The millimetre ``skew`` rule the ``.kicad_dru`` carries.
 
         kicad-cli 10.0.6 cannot enforce a time budget (Issue #7892 probe), so
-        it gets the tightest length form of every limit: the budget at the
-        slowest layer, the class cap, and the router's own length target
-        (until #7893 switches the router, kicad-cli is never looser than what
-        ``kct route`` tunes to).
+        it gets the tightest length form of every limit ``kct check`` applies:
+        the budget at the slowest layer and the length cap.  Issue #7893: the
+        router now tunes to these same limits
+        (:func:`kicad_tools.router.pair_skew_target.resolve_pair_skew_target`),
+        so the pre-#7892 table value it used to tune to is no longer a floor.
         """
-        values = [float(self.legacy.skew_mm)]
+        values: list[float] = []
         if self.length_cap_mm is not None:
             values.append(float(self.length_cap_mm))
         eq = self.budget_mm_equivalent
         if eq is not None:
             values.append(eq)
+        if not values:  # a budget without delays: keep the length resolution
+            values.append(float(self.legacy.skew_mm))
         return min(values)
 
     @property
     def kicad_skew_severity(self) -> str:
         """``error`` when any of the limits behind :attr:`kicad_skew_mm` is one."""
-        severities = [self.legacy.skew_severity]
+        severities: list[str] = []
         if self.length_cap_mm is not None:
             severities.append(self.length_severity)
-        if self.budget is not None:
+        if self.budget is not None and self.delays is not None:
             severities.append(self.budget.severity)
+        if not severities:
+            severities.append(self.legacy.skew_severity)
         return "error" if "error" in severities else "warning"
 
 
@@ -381,8 +387,9 @@ def pair_threshold_report(
             f"    {p_name}/{n_name}: continuity threshold {t.continuity * 100:.1f}%, "
             f"skew tolerance {t.skew_mm:.3f} mm [{t.skew_source}; {t.skew_severity}]"
         )
-        # Issue #7892: ``kct check`` judges the pair in time.  The router still
-        # tunes to the millimetre tolerance above until #7893.
+        # Issue #7892: ``kct check`` judges the pair in time; since #7893 the
+        # router tunes to that budget too (the tolerance above is the
+        # pre-#7892 length resolution, kept for its provenance).
         budget = resolve_pair_skew_limits(net_class_map, p_name, n_name).budget
         if budget is not None:
             line += (

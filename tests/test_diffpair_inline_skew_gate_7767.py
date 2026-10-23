@@ -17,8 +17,11 @@ def _pair(max_length_delta=0.5):
 
 
 def _tolerance(net_class_map, pair):
+    from kicad_tools.router.core import Autorouter
+
     router = DiffPairRouter.__new__(DiffPairRouter)
-    router.autorouter = SimpleNamespace(net_class_map=net_class_map)
+    router.autorouter = Autorouter(width=10.0, height=10.0)
+    router.autorouter.net_class_map = net_class_map
     return router._inline_match_tolerance(pair)
 
 
@@ -49,6 +52,12 @@ def test_route_gate_enters_length_match_above_the_enforced_limit(monkeypatch, ca
 
     p, n = _tight()
     n.segments[-1].x2 += 0.2  # N is 0.2 mm longer than P
-    monkeypatch.setattr(DiffPairRouter, "_checker_skew_limit_mm", lambda self, pair: 0.05)
+    from kicad_tools.router.pair_skew_target import PairSkewTarget
+
+    monkeypatch.setattr(
+        DiffPairRouter,
+        "_pair_skew_target",
+        lambda self, pair: PairSkewTarget("USB_D+", "USB_D-", cap_mm=0.05),
+    )
     *_, out = _run(monkeypatch, capsys, (p, n), None)
     assert "Length mismatch" in out

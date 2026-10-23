@@ -26,7 +26,8 @@ if TYPE_CHECKING:
 
     from .diffpair_own_copper import OwnCopperRule
     from .io import FineZone
-    from .kicad_length import KicadLengthModel
+    from .kicad_length import KicadLengthModel, NetLengthParts
+    from .pair_skew_target import PairSkewTarget
     from .pairplan.outcome import PairOutcome
     from .pathfinder import Router
     from .region_graph import RegionGraph
@@ -1593,6 +1594,25 @@ def _emit_route_checkpoint(
 
 
 _NOGOOD_ENV_IGNORE_PF = "KCT_NOGOOD_CACHE_IGNORE_PF"
+
+
+def _tune_raised_skew(result: DiffPairTuneResult, cap_mm: float | None = None) -> bool:
+    """Whether a tune left the pair's skew worse than it found it (Issue #6664).
+
+    Issue #7893: compared in ps when the pair was tuned in time (a bump on a
+    slow layer can lower the delay skew while the length skew grows), and a
+    tune that pushed the length skew past an error-level ``cap_mm`` (or
+    further past it) is worse whatever it did to the ps figure.
+    """
+    if result.skew_before_ps is not None and result.skew_after_ps is not None:
+        if result.skew_after_ps > result.skew_before_ps + 1e-6:
+            return True
+        return (
+            cap_mm is not None
+            and result.skew_after_mm > cap_mm + 1e-6
+            and result.skew_after_mm > result.skew_before_mm + 1e-6
+        )
+    return result.skew_after_mm > result.skew_before_mm + 1e-9
 
 
 class Autorouter:
@@ -20695,14 +20715,17 @@ class Autorouter:
             verbose: Whether to print progress information.
             engage: Engagement policy.  ``"length_critical"`` (default, the
                 ``--length-match-diffpairs`` contract of Issue #2648): tune
-                only pairs whose class is ``length_critical=True``, against
-                ``effective_skew_tolerance(0.5)``.  ``"checker_skew_limit"``
-                (Issue #6664, the lattice auto-engage path): tune every pair
-                whose skew limit ``kct check`` enforces as an error --
-                ``resolve_pair_thresholds(...).skew_severity == "error"`` --
-                against that same ``skew_mm``, regardless of
-                ``length_critical``.  A pair whose limit resolves to a
-                warning is declined with ``reason="skew_limit_not_enforced"``.
+                only pairs whose class is ``length_critical=True``, on the
+                segment-only measure.  ``"checker_skew_limit"`` (Issue #6664,
+                the lattice auto-engage path): tune every pair with a skew
+                target, on the checker's via-inclusive measure, regardless of
+                ``length_critical``.  Issue #7893: both tune to the pair's
+                skew target (:meth:`_pair_skew_target`: the derived ps budget
+                and the error-level mm caps), in ps with each layer's delay.
+                A pair with no target (only an advisory length limit, no
+                derived budget) is declined with
+                ``reason="skew_limit_not_enforced"``; the explicit
+                ``length_critical`` opt-in still tunes to that advisory limit.
             foreign_clearance_gate: Only meaningful with
                 ``engage="checker_skew_limit"``.  Replaces the built-in strict
                 foreign-clearance gate (:meth:`_skew_tune_foreign_clearance_ok`)
@@ -20761,8 +20784,14 @@ class Autorouter:
         # TMDS_D2: 1.029 -> 5.029 mm).  The ``length_critical`` path keeps its
         # segment-only measure (byte-identical ``--length-match-diffpairs``).
         route_length = None
+        # Issue #7893: both modes tune to the pair's skew target in time, each
+        # leg's delay summed per layer; ``route_parts`` itemises the measure.
+        from .pair_skew_target import segment_length_parts
+
+        route_parts: Callable[[Route], Any] = segment_length_parts
         if engage == "checker_skew_limit":
             route_length = self._checker_route_length(num_layers)
+            route_parts = self._checker_route_parts(num_layers, quantized=quantized_lengths)
             if quantized_lengths:
                 route_length = self._quantized_route_length(route_length)
 
@@ -20790,16 +20819,21 @@ class Autorouter:
             n_name = dp.pair.negative.net_name
             net_class = self._resolve_net_class_for_pair(dp)
             if net_class is not None:
-                tolerance_mm = net_class.effective_skew_tolerance(0.5)
                 # Issue #6443: floored like the routed gap, so a meander
                 # never re-closes a pair below the board's own minimum.
                 intra_pair_clearance_mm = self._pair_gap_mm(net_class)
                 length_critical = net_class.length_critical
+            # Issue #7893: the skew target -- the derived ps budget and the
+            # error-level mm caps -- from the one resolver ``kct check`` reads.
+            skew_target = self._pair_skew_target(p_name, n_name)
+            if engage == "length_critical":
+                # The explicit opt-in also tunes to a warning-only cap.
+                skew_target = skew_target.opt_in()
+            tolerance_mm = skew_target.tolerance_mm
 
             if engage == "checker_skew_limit":
-                # Issue #6664: engage on the limit ``kct check`` fails the
-                # board on, and tune to exactly that number -- the single
-                # source shared with the checker (#6442/#6443).
+                # Issue #6664: engage on what ``kct check`` judges the pair
+                # against, and tune to exactly that (Issue #7893: in time).
                 from kicad_tools.validate.diffpair_engagement import (
                     resolve_pair_thresholds,
                 )
@@ -20807,7 +20841,6 @@ class Autorouter:
                 thresholds = resolve_pair_thresholds(
                     getattr(self, "net_class_map", None), p_name, n_name
                 )
-                tolerance_mm = thresholds.skew_mm
                 length_critical = True
                 from kicad_tools.validate.rules.diffpair_uncoupled_length import (
                     uncoupled_limit,
@@ -20816,14 +20849,16 @@ class Autorouter:
                 max_uncoupled_mm, _how = uncoupled_limit(
                     thresholds, max(net_components.get(p_name, 0), net_components.get(n_name, 0))
                 )
-                if thresholds.skew_severity != "error":
-                    result = self._declined_skew_result(
-                        dp, routes_by_net, tolerance_mm, thresholds.skew_severity, route_length
-                    )
-                    results[(p_name, n_name)] = result
-                    if verbose:
-                        print(self._format_skew_tune_line(p_name, n_name, result))
-                    continue
+            if not skew_target.enforced:
+                result = self._declined_skew_result(
+                    dp, routes_by_net, skew_target.warning_cap_mm, "warning", route_length
+                )
+                results[(p_name, n_name)] = result
+                if verbose and engage == "checker_skew_limit":
+                    print(self._format_skew_tune_line(p_name, n_name, result))
+                elif verbose:
+                    print(f"  {p_name}/{n_name}: {result.reason}")
+                continue
 
             # Issue #6447: attribute the pair's skew once, from the untuned
             # routes; the bump gate measures to these sources.
@@ -20867,26 +20902,33 @@ class Autorouter:
                 ),
                 route_length=route_length,
                 max_uncoupled_mm=max_uncoupled_mm,
+                skew_target=skew_target,
+                route_parts=route_parts,
             )
             if (
                 engage == "checker_skew_limit"
                 and result.inserts_applied
-                and result.skew_after_mm > result.skew_before_mm + 1e-9
+                and _tune_raised_skew(result, skew_target.cap_mm)
             ):
                 # Issue #6664 backstop: never ship a "tune" that leaves the
-                # checker's skew worse than it found it.
+                # checker's skew worse than it found it (Issue #7893: in the
+                # unit it was tuned in, ps when the pair has a budget).
                 p_route = routes_by_net[dp.pair.positive.net_id]
                 n_route = routes_by_net[dp.pair.negative.net_id]
+                if result.skew_after_ps is not None and result.skew_before_ps is not None:
+                    raised = f"{result.skew_before_ps:.3f}ps -> {result.skew_after_ps:.3f}ps"
+                else:
+                    raised = f"{result.skew_before_mm:.3f}mm -> {result.skew_after_mm:.3f}mm"
                 result = DiffPairTuneResult(
                     success=False,
                     reason="rolled_back_skew_worse",
                     attempts=result.attempts,
                     skew_before_mm=result.skew_before_mm,
                     skew_after_mm=result.skew_before_mm,
-                    message=(
-                        f"Tuning would raise skew {result.skew_before_mm:.3f}mm -> "
-                        f"{result.skew_after_mm:.3f}mm; rolled back."
-                    ),
+                    skew_before_ps=result.skew_before_ps,
+                    skew_after_ps=result.skew_before_ps,
+                    budget_ps=result.budget_ps,
+                    message=f"Tuning would raise skew {raised}; rolled back.",
                 )
 
             changed = {
@@ -20913,6 +20955,9 @@ class Autorouter:
                         attempts=result.attempts,
                         skew_before_mm=result.skew_before_mm,
                         skew_after_mm=result.skew_before_mm,
+                        skew_before_ps=result.skew_before_ps,
+                        skew_after_ps=result.skew_before_ps,
+                        budget_ps=result.budget_ps,
                         message="Bump on an escape stub could not be written back; rolled back.",
                     )
                     break
@@ -21288,6 +21333,66 @@ class Autorouter:
 
         return measure
 
+    def _checker_route_parts(
+        self, num_layers: int, *, quantized: bool = False
+    ) -> Callable[[Route], NetLengthParts]:
+        """``Route -> NetLengthParts``: :meth:`_checker_route_length` itemised (Issue #7893).
+
+        Per copper layer and per via, so a tuner can weight each layer by its
+        propagation delay as ``kct check`` does.  ``quantized`` adds the
+        45-degree quantizer's dogleg length to each segment's layer, like
+        :meth:`_quantized_route_length`.
+        """
+        from .kicad_length import NetLengthParts, _lname
+
+        model = self._kicad_length_model(num_layers)
+        if not quantized:
+            return model.route_length_parts
+        from .quantize import dogleg_length_extra_mm
+
+        def parts(route: Route) -> NetLengthParts:
+            base = model.route_length_parts(route)
+            extra = tuple(
+                (_lname(s.layer), dogleg_length_extra_mm(s.x1, s.y1, s.x2, s.y2))
+                for s in route.segments
+            )
+            return NetLengthParts(base.runs + extra, base.vias)
+
+        return parts
+
+    def _skew_target_stackup(self, num_layers: int) -> Any:
+        """The stackup ``kct check`` reads delays from on the routed board (Issue #7893).
+
+        The source board's (the routed file keeps its setup), else the
+        checker's default for ``num_layers``; cached per layer count.
+        """
+        from .pair_skew_target import skew_stackup
+
+        cache = getattr(self, "_skew_target_stackup_cache", None)
+        if cache is None or cache[0] != num_layers:
+            cache = (
+                num_layers,
+                skew_stackup(getattr(self, "_impedance_source_pcb_path", None), num_layers),
+            )
+            self._skew_target_stackup_cache = cache
+        return cache[1]
+
+    def _pair_skew_target(self, p_name: str, n_name: str) -> PairSkewTarget:
+        """The pair's skew target: the router's single skew-limit lookup (Issue #7893).
+
+        :func:`~kicad_tools.router.pair_skew_target.resolve_pair_skew_target`
+        on this router's class map and the routed board's stackup.
+        """
+        from .pair_skew_target import resolve_pair_skew_target
+
+        num_layers = len(self.layer_stack.layers) if self.layer_stack is not None else 2
+        return resolve_pair_skew_target(
+            getattr(self, "net_class_map", None),
+            p_name,
+            n_name,
+            self._skew_target_stackup(num_layers),
+        )
+
     @staticmethod
     def _quantized_route_length(measure: Callable[[Route], float]) -> Callable[[Route], float]:
         """``measure`` plus the length the 45-degree quantizer adds (Issue #7548)."""
@@ -21304,11 +21409,15 @@ class Autorouter:
     def _declined_skew_result(
         dp,
         routes_by_net: dict[int, Route],
-        tolerance_mm: float,
+        tolerance_mm: float | None,
         severity: str,
         route_length: Callable[[Route], float] | None = None,
     ) -> DiffPairTuneResult:
-        """A no-change result for a pair whose skew limit the checker only warns on."""
+        """A no-change result for a pair with no skew target (Issue #6664, #7893).
+
+        Its only length limit is one ``kct check`` warns on and it has no
+        derived budget, so there is nothing the checker would fail it on.
+        """
         from .length import LengthTracker
 
         measure = route_length or LengthTracker.calculate_route_length
@@ -21317,6 +21426,7 @@ class Autorouter:
         skew = 0.0
         if p_route is not None and n_route is not None:
             skew = abs(measure(p_route) - measure(n_route))
+        limit = f"{tolerance_mm:.3f}mm" if tolerance_mm is not None else "n/a"
         return DiffPairTuneResult(
             success=True,
             reason="skew_limit_not_enforced",
@@ -21324,8 +21434,9 @@ class Autorouter:
             skew_after_mm=skew,
             tolerance_mm=tolerance_mm,
             message=(
-                f"Skew limit {tolerance_mm:.3f}mm resolves to severity "
-                f"{severity!r}; kct check does not fail on it, so it is not tuned."
+                f"Skew limit {limit} resolves to severity "
+                f"{severity!r} and the pair has no derived budget; kct check does not "
+                "fail on it, so it is not tuned."
             ),
         )
 
@@ -21333,17 +21444,29 @@ class Autorouter:
     def _format_skew_tune_line(p_name: str, n_name: str, result: DiffPairTuneResult) -> str:
         """One report line per pair for the checker-limit tuning path (Issue #6664)."""
         limit = f"{result.tolerance_mm:.3f}mm" if result.tolerance_mm is not None else "n/a"
-        line = (
-            f"  {p_name}/{n_name}: {result.reason} "
-            f"(skew {result.skew_before_mm:.3f}mm -> {result.skew_after_mm:.3f}mm, "
-            f"limit {limit}"
-        )
+        if result.budget_ps is not None and result.skew_after_ps is not None:
+            # Issue #7893: tuned in time; the mm figures follow in brackets.
+            before_ps = result.skew_before_ps if result.skew_before_ps is not None else 0.0
+            line = (
+                f"  {p_name}/{n_name}: {result.reason} "
+                f"(skew {before_ps:.3f}ps -> {result.skew_after_ps:.3f}ps "
+                f"[{result.skew_before_mm:.3f}mm -> {result.skew_after_mm:.3f}mm], "
+                f"budget {result.budget_ps:.2f}ps, mm form {limit}"
+            )
+            over = not result.success and result.reason != "unrouted"
+        else:
+            line = (
+                f"  {p_name}/{n_name}: {result.reason} "
+                f"(skew {result.skew_before_mm:.3f}mm -> {result.skew_after_mm:.3f}mm, "
+                f"limit {limit}"
+            )
+            over = result.tolerance_mm is not None and result.skew_after_mm > result.tolerance_mm
         if result.inserts_applied:
             line += f", {result.inserts_applied} inserts"
         line += ")"
         if not result.success and result.message and result.reason not in ("tuned",):
             line += f" -- {result.message}"
-        if result.tolerance_mm is not None and result.skew_after_mm > result.tolerance_mm:
+        if over:
             line += " -- STILL OVER LIMIT"
         return line
 
@@ -21683,20 +21806,18 @@ class Autorouter:
             # it stays inside it while the group tuner lengthens the lane.
             # Issue #7805: the length_critical path needs them too, to keep
             # pairs past their limit out of the mirror-miss fallback.
+            # Issue #7893: the limit is the pair's skew target in its tightest
+            # length form (error caps, ps budget at the slowest layer delay);
+            # the group tuner reasons in mm.
             pair_skew_limits_mm: dict[tuple[int, int], float] | None = None
             if group.pair_ids:
-                from kicad_tools.validate.diffpair_engagement import (
-                    resolve_pair_thresholds,
-                )
-
-                pair_skew_limits_mm = {
-                    (p_id, n_id): resolve_pair_thresholds(
-                        getattr(self, "net_class_map", None),
-                        self.net_names.get(p_id, ""),
-                        self.net_names.get(n_id, ""),
-                    ).skew_mm
-                    for p_id, n_id in group.pair_ids
-                }
+                pair_skew_limits_mm = {}
+                for p_id, n_id in group.pair_ids:
+                    limit = self._pair_skew_target(
+                        self.net_names.get(p_id, ""), self.net_names.get(n_id, "")
+                    ).tolerance_mm
+                    if limit is not None:
+                        pair_skew_limits_mm[(p_id, n_id)] = limit
 
             # Phase 2F (#2701) requires intra_pair_clearance_mm
             # unconditionally for groups whose pair_ids is non-empty.  The

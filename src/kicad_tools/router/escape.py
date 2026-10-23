@@ -2477,12 +2477,13 @@ class EscapeRouter:
     def _resolve_pair_skew_tolerance(self, members: list[EscapeRoute]) -> float:
         """Resolve the skew tolerance (mm) for a paired corridor.
 
-        Issue #4085 (Phase 1).  Reads the first member's net class from
-        ``net_class_map`` and returns its
-        :meth:`NetClassRouting.effective_skew_tolerance`.  Falls back to
-        the module-level 0.5 mm default (matching
-        ``Autorouter.apply_diffpair_length_tuning``) when no net class is
-        configured for the pair.
+        Issue #4085 (Phase 1).  Issue #7893: the pair's skew target from the
+        router's single resolver
+        (:func:`~kicad_tools.router.pair_skew_target.resolve_pair_skew_target`),
+        in its tightest length form -- the error caps and the derived ps budget
+        at the slowest layer delay of the default stackup for this layer
+        count.  Falls back to the module-level 0.5 mm default (the generic
+        ``kct check`` limit) when the pair has no target.
 
         Args:
             members: The paired EscapeRoutes.
@@ -2491,14 +2492,20 @@ class EscapeRouter:
             The skew tolerance in mm.
         """
         default = 0.5
-        first_net = members[0].pad.net_name or ""
-        nc = self.net_class_map.get(first_net) if self.net_class_map else None
-        if nc is not None and hasattr(nc, "effective_skew_tolerance"):
-            try:
-                return float(nc.effective_skew_tolerance(default))
-            except Exception:
-                return default
-        return default
+        names = [m.pad.net_name or "" for m in members[:2]]
+        if len(names) < 2:
+            names.append("")
+        try:
+            from .pair_skew_target import resolve_pair_skew_target, skew_stackup
+
+            layers = int(getattr(self.grid, "num_layers", 2) or 2)
+            target = resolve_pair_skew_target(
+                self.net_class_map, names[0], names[1], skew_stackup(None, layers)
+            )
+        except Exception:  # noqa: BLE001 - the corridor slack is a heuristic
+            return default
+        tol = target.tolerance_mm
+        return float(tol) if tol is not None else default
 
     def _reserve_pair_continuation_corridor(
         self,

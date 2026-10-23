@@ -778,8 +778,8 @@ def tune_match_group_v2(
             :func:`_pair_skew_allowance`).  The router turns this on for the
             lattice auto-engaged path (``engage="checker_limit"``).
         pair_skew_limits_mm: ``{(p_net_id, n_net_id): skew_limit_mm}`` -- the
-            per-pair limit ``kct check`` enforces
-            (``resolve_pair_thresholds(...).skew_mm``).  Used only with
+            per-pair limit in mm (Issue #7893: the pair's skew target in its
+            tightest length form, ``PairSkewTarget.tolerance_mm``).  Used only with
             ``pair_fallbacks``: a pair inside its limit before tuning must
             still be inside it afterwards.
 
@@ -3220,7 +3220,8 @@ def _pair_skew_allowance(skew_before_mm: float, limit_mm: float | None) -> float
     The pair-skew invariant: the group tuner may lengthen a pair member only
     if the pair's own via-inclusive skew does not grow (beyond
     :data:`PAIR_SKEW_SLACK_MM` of rounding), and a pair that was inside its
-    checker limit (``resolve_pair_thresholds(...).skew_mm``) stays inside it.
+    skew target's length form (``PairSkewTarget.tolerance_mm``, Issue #7893)
+    stays inside it.
     """
     allowance = skew_before_mm + PAIR_SKEW_SLACK_MM
     if limit_mm is not None and skew_before_mm <= limit_mm:

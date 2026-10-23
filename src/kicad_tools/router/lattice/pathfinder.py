@@ -170,9 +170,8 @@ _PARITY_SKEW_TOLERANCE_MM = 0.5
 # ... and at most this much to its longer leg (mm).  The protocol table has no
 # per-net length budget, so this relative bound is the length gate.
 _PARITY_LENGTH_TOLERANCE_MM = 0.5
-# The pair skew budget when the pair's net class cannot supply one (no
-# ``effective_skew_tolerance``): the generic DRC default
-# (``NetClassRouting.effective_skew_tolerance``'s own fallback).
+# The pair skew budget when the pair has no skew target (Issue #7893): the
+# generic ``kct check`` default.
 _PARITY_FALLBACK_SKEW_BUDGET_MM = 0.5
 
 # One fallback leg pair: ``{"P"|"N": (search result or None, reason)}`` (#6703).
@@ -6607,18 +6606,33 @@ class LatticePathfinder:
     def _pair_skew_budget(self, pc: CoupledConnection) -> float:
         """The pair's skew budget in mm (issue #7284).
 
-        The net class's :meth:`~kicad_tools.router.rules.NetClassRouting.effective_skew_tolerance`
-        (explicit ``skew_tolerance_mm``, else the declared protocol's
-        ``max_skew_mm``, else 0.5 mm); :data:`_PARITY_FALLBACK_SKEW_BUDGET_MM`
-        when the class has no such method.
+        Issue #7893: the pair's skew target from the router's single resolver
+        (:func:`~kicad_tools.router.pair_skew_target.resolve_pair_skew_target`)
+        in its tightest length form -- the error caps and the derived ps
+        budget at the slowest layer delay of the default stackup for this
+        layer count; :data:`_PARITY_FALLBACK_SKEW_BUDGET_MM` when the pair has
+        no target.  Cached per pair.
         """
-        resolve = getattr(pc.net_class, "effective_skew_tolerance", None)
-        if callable(resolve):
-            try:
-                return float(resolve(_PARITY_FALLBACK_SKEW_BUDGET_MM))
-            except (TypeError, ValueError):
-                pass
-        return _PARITY_FALLBACK_SKEW_BUDGET_MM
+        cache = self.__dict__.setdefault("_pair_skew_budget_cache", {})
+        p_name = pc.pad_p_a.net_name or ""
+        n_name = pc.pad_n_a.net_name or ""
+        key = (p_name, n_name, id(pc.net_class))
+        if key in cache:
+            return cache[key]
+        budget = _PARITY_FALLBACK_SKEW_BUDGET_MM
+        try:
+            from ..pair_skew_target import resolve_pair_skew_target, skew_stackup
+
+            ncm = {p_name: pc.net_class, n_name: pc.net_class} if pc.net_class else {}
+            target = resolve_pair_skew_target(
+                ncm, p_name, n_name, skew_stackup(None, self.num_layers)
+            )
+            if target.tolerance_mm is not None:
+                budget = float(target.tolerance_mm)
+        except Exception:  # noqa: BLE001 - a ranking bound, never a reason to crash
+            budget = _PARITY_FALLBACK_SKEW_BUDGET_MM
+        cache[key] = budget
+        return budget
 
     def _fallback_rank(
         self, pc: CoupledConnection, candidates: list[_FallbackLegs]

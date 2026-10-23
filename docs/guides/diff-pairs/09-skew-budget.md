@@ -84,6 +84,24 @@ A black-box probe of pinned kicad-cli 10.0.6 (Issue #7892) found that
 `skew (max 4ps)` (and `ns`) parses but enforces nothing on a project without a
 KiCad tuning profile; an `mm` rule enforces. The exported `.kicad_dru` rule
 is the tightest length form of the pair's limits: the budget at the slowest
-layer, any class cap, and the router's own target until #7893. kicad-cli
-fails every pair whose legs share a layer mix and that `kct check` fails. It
-cannot see layer-dependent delay.
+layer and any class cap. kicad-cli fails every pair whose legs share a layer
+mix and that `kct check` fails. It cannot see layer-dependent delay.
+
+## What the router tunes to (Issue #7893)
+
+The router and every skew tuner (the inline comb, the coupled-candidate
+choice, the end-of-recipe and lattice pair tuners, `kct retune-lengths`, the
+post-pass pair-skew guard) take their target from the same resolver as
+`kct check`: `kicad_tools.router.pair_skew_target.resolve_pair_skew_target`.
+The target is the budget in ps (warning or error) **and** the error-level
+millimetre caps beside it: a class's own `skew_tolerance_mm` (until #7894)
+and, for a protocol only guessed from a name, the generic 0.5 mm. When the
+`.kicad_dru` length rule is an error and tighter than those caps, it is a cap
+too, so kicad-cli does not fail what the router tuned.
+
+The tuner measures progress in ps. The shorter leg is the one with less
+delay, and a bump is sized by its host layer's delay, so a millimetre of
+copper on a slow inner layer closes more skew than a millimetre on F.Cu. A
+pair matched in length but split across layers (one leg on F.Cu, one on
+In1.Cu) is tuned until its delay difference meets the budget, which leaves
+the legs different in length on purpose.

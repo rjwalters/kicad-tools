@@ -206,8 +206,13 @@ class TestTune:
         (target,) = report.targets
         assert target.kind == "diffpair"
         assert target.before_skew_mm == pytest.approx(3.5)
-        assert target.tolerance_mm == 2.5
-        assert target.after_skew_mm <= 2.5 and target.achieved
+        # Issue #7893: the USB 2.0 HS budget (14.39 ps) at the slowest layer
+        # delay is tighter than the 2.5 mm class cap; kicad-cli enforces that
+        # length form as an error, so it is the target's length form too.
+        assert target.budget_ps == pytest.approx(14.39, abs=0.01)
+        assert target.tolerance_mm < 2.5
+        assert target.after_skew_mm <= target.tolerance_mm and target.achieved
+        assert target.after_skew_ps <= target.budget_ps
         assert target.stretch_target_mm == 0.5
         assert target.stretch_achieved == (target.after_skew_mm <= 0.5)
 

@@ -386,13 +386,13 @@ def test_kicad_dru_rule_is_the_tightest_length_form(split_layer_board: Path):
     )
     assert capped.kicad_skew_mm == pytest.approx(0.5)
     assert capped.kicad_skew_severity == "error"
-    # Without a cap the derived budget at the slowest layer is tighter than
-    # the router's table target only when it is smaller; here the Q16 table's
-    # 0.127 mm (the router's target until #7893) stays the floor.
+    # Without a cap the rule is the derived budget at the slowest layer.  The
+    # Q16 table's 0.127 mm was the router's target, and so a floor, until
+    # Issue #7893 switched the router to the budget; it is no longer one.
     bare = resolve_pair_skew_limits(_ncm(), "USB3_TX1+", "USB3_TX1-", stackup)
     assert bare.budget_mm_equivalent == pytest.approx(0.58, abs=0.01)
-    assert bare.kicad_skew_mm == pytest.approx(0.127)
-    assert bare.kicad_skew_severity == "error"
+    assert bare.kicad_skew_mm == pytest.approx(bare.budget_mm_equivalent)
+    assert bare.kicad_skew_severity == "warning"  # the budget's own severity
 
 
 def test_no_budget_keeps_the_legacy_length_check(tmp_path: Path):
