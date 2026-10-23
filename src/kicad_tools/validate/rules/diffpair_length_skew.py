@@ -76,8 +76,11 @@ from ..violations import DRCResults, DRCViolation
 from .base import DRCRule
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from kicad_tools.manufacturers import DesignRules
     from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.diffpair_skew import ChainSkew
 
 
 # Module-level default skew tolerance in mm.  MUST equal the default arg
@@ -165,6 +168,7 @@ class DiffPairLengthSkewRule(DRCRule):
         emit_info: bool = False,
         severity_map: dict[tuple[int, int], str] | None = None,
         source_map: dict[tuple[int, int], str] | None = None,
+        chains: Sequence[ChainSkew] | None = None,
     ) -> None:
         """Initialize the rule.
 
@@ -202,7 +206,14 @@ class DiffPairLengthSkewRule(DRCRule):
             source_map: Optional per-pair provenance of the limit (e.g.
                 ``"protocol:USB2_FS (Renesas ...)"``), appended to the
                 finding's message.
+            chains: Optional chain (XNet) skew measurements (Issue #6447),
+                from :func:`~kicad_tools.validate.diffpair_skew.derive_chain_skew`.
+                Each chain is reported under this rule as an ``info``
+                metric when ``emit_info`` is set, and as an ``error`` when
+                its class declares ``chain_skew_tolerance_mm`` and the
+                end-to-end skew exceeds it.
         """
+        self._chains = list(chains or [])
         # Normalize skew_data keys -- name tuples sorted lexicographically
         # so the caller does not have to maintain P/N ordering.
         self._skew_data: dict[tuple[str, str], float] = {}
@@ -260,6 +271,7 @@ class DiffPairLengthSkewRule(DRCRule):
         # issue body -- without a tracker context to populate skew_data
         # AND a producer-side engagement set, the rule has nothing to
         # validate.
+        self._check_chains(results)
         if not self._skew_data or not self._engaged:
             return results
 
@@ -327,6 +339,44 @@ class DiffPairLengthSkewRule(DRCRule):
                 )
 
         return results
+
+    def _check_chains(self, results: DRCResults) -> None:
+        """Report each chain's end-to-end skew (Issue #6447)."""
+        for chain in self._chains:
+            label = " -> ".join(f"{p}/{n}" for p, n in chain.segments)
+            nets = tuple(net for seg in chain.segments for net in seg)
+            skew = chain.skew_mm
+            over = chain.limit_mm is not None and skew > chain.limit_mm + SKEW_TOLERANCE_EPSILON_MM
+            if chain.limit_mm is not None:
+                results.rules_checked += 1
+                results.rules_checked_by_rule["diffpair_length_skew"] = (
+                    results.rules_checked_by_rule.get("diffpair_length_skew", 0) + 1
+                )
+            if not over and not self._emit_info:
+                continue
+            limit = (
+                f"exceeds chain tolerance {chain.limit_mm:.3f} mm"
+                if over
+                else (
+                    "chain skew (no chain limit declared)"
+                    if chain.limit_mm is None
+                    else f"within chain tolerance {chain.limit_mm:.3f} mm"
+                )
+            )
+            results.add(
+                DRCViolation(
+                    rule_id=self.rule_id,
+                    severity="error" if over else "info",
+                    message=f"Differential-pair chain {label} end-to-end length-skew "
+                    f"{skew:.3f} mm {limit}",
+                    location=None,
+                    layer=None,
+                    actual_value=round(skew, 4),
+                    required_value=round(chain.limit_mm, 4) if chain.limit_mm is not None else None,
+                    items=(),
+                    nets=nets,
+                )
+            )
 
     def _make_info(
         self,

@@ -1052,7 +1052,7 @@ class DRCChecker:
             context to supply ``skew_data``).
         """
         from kicad_tools.validate.diffpair_engagement import derive_engagement_state
-        from kicad_tools.validate.diffpair_skew import derive_skew_limits
+        from kicad_tools.validate.diffpair_skew import derive_chain_skew, derive_skew_limits
 
         if self.net_class_map is None:
             self._warn_inactive_skew_rule("diffpair_length_skew")
@@ -1072,6 +1072,7 @@ class DRCChecker:
             emit_info=self._emit_skew_info,
             severity_map={key: t.skew_severity for key, t in limits.items()},
             source_map={key: t.skew_source for key, t in limits.items()},
+            chains=derive_chain_skew(self.pcb, self.net_class_map, num_copper_layers=self.layers),
         )
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
