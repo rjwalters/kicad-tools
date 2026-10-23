@@ -288,11 +288,22 @@ _CROSSING_MARGIN_MM = 0.005
 #: Parameter grid of the generated shapes (mm).
 _GRID_MM = 0.05
 
+#: Form U's run levels are solved on this finer grid (mm): the hairpin sits
+#: between two pad rows with its turnaround a full Q16 run, so on board 06rf
+#: it fits with no coarse-grid slack (issue #7869).
+_FINE_GRID_MM = 0.01
+
 #: Upper bounds on the shapes verified per search, so a connector with no
-#: room declines in bounded time (the wrap grid is ~28k shapes; most fail
-#: the cheap angle / Q16 / cached-room screens before the exact check).
+#: room declines in bounded time (the wrap grid is ~28k shapes, the padded
+#: grid ~90k; most fail the cheap angle / Q16 / cached-room screens before
+#: the exact check, and a full padded pass takes ~2 s).  On 06rf the
+#: lengthened-wrap pass finds its hairpin ~44k shapes in.
 _MAX_WRAP_CHECKS = 40000
-_MAX_PAD_CHECKS = 6000
+_MAX_PAD_CHECKS = 100000
+
+#: Outer-run chamfers a re-planned (lengthened) wrap may use (mm), smallest
+#: first; the floor is the Q32 foot chamfer, as for form U's turnaround.
+_WRAP_CHAMFERS_MM = (0.02, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5)
 
 _SQRT2 = math.sqrt(2.0)
 
@@ -345,17 +356,20 @@ def _all_45(local: list[Pt]) -> bool:
 
 
 def _flats_ok(local: list[Pt], min_flat: float) -> bool:
-    """Q16: every interior flat run is at least ``min_flat`` long.
+    """Q16: every interior non-diagonal leg is at least ``min_flat`` long.
 
-    A flat run is a leg parallel to the host line -- here the rows, the
-    frame's ``u`` axis -- as the skew-bump gate defines a jog
-    (:func:`~kicad_tools.router.diffpair_bump_gates.bump_gate_violation`).
-    Legs across the rows are the detour's flanks, diagonal legs its Q32
-    chamfers, and the first and last legs the pad leads (the gate's lead-in
-    and lead-out).
+    That is every run along the rows *and* every run across them: a
+    hairpin's turnaround, the leg that joins its two runs, is the flat top
+    Q16 measures in a serpentine (the skew-bump gate's jog,
+    :func:`~kicad_tools.router.diffpair_bump_gates.bump_gate_violation`,
+    and the "flat tops and connectors" ``jog_spaced`` sizes).  Only the
+    diagonal legs (the Q32 chamfers) and the first and last legs (the pad
+    leads, the gate's lead-in and lead-out) are exempt.  The frame is
+    octilinear, so a leg that is not diagonal is axis-aligned in it.
     """
     for a, b in list(zip(local, local[1:], strict=False))[1:-1]:
-        if abs(b[1] - a[1]) < 1e-9 and abs(b[0] - a[0]) < min_flat - 1e-9:
+        dx, dy = abs(b[0] - a[0]), abs(b[1] - a[1])
+        if (dx < 1e-9 or dy < 1e-9) and max(dx, dy) < min_flat - 1e-9:
             return False
     return True
 
@@ -467,6 +481,67 @@ def _hairpin(y1: float, k: float, d: float, m: float, lu: float, start: Pt, end:
     return pts
 
 
+def _ties_uncoupled_mm(
+    a: PlannedTie, b: PlannedTie, pads: list[Pad], on_layer, layer: int
+) -> float:
+    """The pair's uncoupled figure (mm) over the two ties ``a`` and ``b`` alone.
+
+    ``kct check``'s ``diff_pair_uncoupled`` measure
+    (:func:`~kicad_tools.validate.rules.diffpair_uncoupled_length.measure_uncoupled`):
+    each tie against the other, the larger of the two, with the ties
+    themselves and the pads near them as the copper that can stand between
+    two parallel runs.  The tie planner does not know which net is P (whose
+    stored direction anchors KiCad's blocking probe), so both are tried and
+    the worse figure kept.
+    """
+    from kicad_tools.validate.rules.diffpair_uncoupled_length import (
+        Copper,
+        PadRect,
+        measure_uncoupled,
+    )
+
+    lname = f"L{layer}"
+
+    def segs(t: PlannedTie):
+        return [
+            (p[0], p[1], q[0], q[1], lname, t.width)
+            for p, q in zip(t.points, t.points[1:], strict=False)
+        ]
+
+    sa, sb = segs(a), segs(b)
+    pts = list(a.points) + list(b.points)
+    lo_x = min(p[0] for p in pts) - 1.0
+    hi_x = max(p[0] for p in pts) + 1.0
+    lo_y = min(p[1] for p in pts) - 1.0
+    hi_y = max(p[1] for p in pts) + 1.0
+    rects = []
+    for pad in pads:
+        if not on_layer(pad, layer) or not (lo_x <= pad.x <= hi_x and lo_y <= pad.y <= hi_y):
+            continue
+        ang = math.radians(float(getattr(pad, "rotation", 0.0) or 0.0))
+        rects.append(
+            PadRect(
+                pad.x,
+                pad.y,
+                pad.width / 2.0,
+                pad.height / 2.0,
+                math.cos(ang),
+                math.sin(ang),
+                frozenset({lname}),
+                str(pad.net),
+            )
+        )
+    copper = Copper([(s[0], s[1], s[2], s[3], s[5], lname) for s in sa + sb], rects)
+    na, nb = str(a.net), str(b.net)
+    return max(
+        max(
+            measure_uncoupled(sa, sb, copper, lead, na, nb),
+            measure_uncoupled(sb, sa, copper, not lead, nb, na),
+        )
+        for lead in (True, False)
+    )
+
+
 def plan_crossing_ties(
     wrap_extra: Pad,
     wrap_anchor: Pad,
@@ -497,11 +572,13 @@ def plan_crossing_ties(
       inside the wrap, its length set to the wrap's with a run away from the
       wrap (:func:`_c_shape`) or, when that is too short, the same run
       turned back under itself (:func:`_hairpin`).  When even the shortest
-      padded tie that fits is longer than the wrap, the wrap is lengthened to
-      it instead (its lead out of the pad, else its outer run).
+      padded tie that fits is longer than the wrap, the wrap is re-planned
+      to its length instead, the wrap of that length whose two ties leave
+      the least uncoupled copper (:func:`_ties_uncoupled_mm`) kept.
 
     Every leg is octilinear and every corner a 45 degree turn (Q32); every
-    interior flat run (parallel to the rows, :func:`_flats_ok`) is at least
+    interior non-diagonal leg -- runs along the rows and across them, a
+    hairpin's turnaround included (:func:`_flats_ok`) -- is at least
     :data:`~kicad_tools.router.diffpair_bump_gates.MIN_JOG_WIDTHS` x the
     class width (Q16).  Nothing here is a tuning pattern: both ties are
     plain copper, committed like any other tie.  Both shapes are verified against exact copper with
@@ -591,6 +668,13 @@ def _plan_crossing_on_layer(
     neck: bool,
 ) -> tuple[PlannedTie, PlannedTie] | None:
     from ..diffpair_bump_gates import MIN_JOG_WIDTHS
+    from ..diffpair_length_tuning import SKEW_BUMP_FOOT_CHAMFER_MM
+
+    # Form U's four turnaround chamfers, smallest first.  The floor is the
+    # smallest 45 degree corner Q32 already ships (the skew tuner's foot
+    # chamfer): a hairpin between two pad rows needs its whole turnaround
+    # to be a Q16 run, which leaves the chamfers only what is left over.
+    hairpin_chamfers = (SKEW_BUMP_FOOT_CHAMFER_MM, 0.025, 0.05, 0.1, 0.15)
 
     frame = _CrossingFrame((w_start.x, w_start.y), (p_start.x, p_start.y), (w_end.x, w_end.y))
     if not frame.ok:
@@ -745,8 +829,16 @@ def _plan_crossing_on_layer(
                         continue
                     local = _c_shape(y1, k, j, m, p_start_l, p_end_l)
                     out.append(((0, m, _polyline_length(local)), local))
-                for d in (0.025, 0.05, 0.1, 0.15):
-                    for m in _grid(_GRID_MM, 0.8):
+            # Form U on the fine grid: its two runs sit between two pad rows
+            # and its turnaround is itself a Q16 run, so the run levels are
+            # solved to _FINE_GRID_MM, not the coarse grid.
+            for k in _grid(_FINE_GRID_MM, 1.5, _FINE_GRID_MM):
+                top = s_v - y1 - k
+                for d in hairpin_chamfers:
+                    for m in _grid(_FINE_GRID_MM, 0.8, _FINE_GRID_MM):
+                        # Q16 on the turnaround (top run to bottom run).
+                        if top - (e_v + m) - 2.0 * d < min_flat - 1e-9:
+                            continue
                         # The farthest turn column Q16 allows (shortest).
                         lu_max = min(
                             p_start_l[0] - k - d - min_flat,
@@ -781,25 +873,58 @@ def _plan_crossing_on_layer(
             return wrap, padded
 
     # 3. Nothing that short fits inside the wrap: take the shortest padded
-    #    tie that does, and lengthen the wrap to it -- first its lead out of
-    #    the pad (z), then its outer run (s).
+    #    tie that does, and re-plan the wrap to its length.  Every wrap of
+    #    that length that clears is scored by the pair's uncoupled figure
+    #    over the two ties (:func:`_ties_uncoupled_mm`), and the best is
+    #    kept: the extra length goes where the two ties run beside each
+    #    other, not into copper the checker counts as uncoupled (issue
+    #    #7869, AC 5).  The descent column stays no farther out than the
+    #    shortest wrap's (``g <= g0``): a column moved towards the next pad
+    #    out crowds that pad's own escape (on 06rf, 0.11 mm towards B5 necked
+    #    USB_CC2 to 0.2 mm and failed its impedance check).
     longer = sorted(
         (item for item in padded_shapes(None) if item[0][2] > target),
         key=lambda item: item[0][2],
     )
-    z, s, e, g, f = wrap_params
+    a_u, a_v = w_end_l
+    g0 = wrap_params[3]
     for _key, local in longer[:_MAX_PAD_CHECKS]:
         padded = fit_pad(local, [wrap], p_ends)
         if padded is None:
             continue
-        extra = padded.length - target
-        for params in ((z + extra / 2.0, s, e, g, f), (z, s + extra / _SQRT2, e, g, f)):
-            longer_wrap = fit_wrap(_wrap_shape(*params, w_end_l), [], w_ends)
-            if longer_wrap is None or abs(longer_wrap.length - padded.length) > (
-                CROSSING_TIE_MATCH_MM
-            ):
-                continue
-            again = fit_pad(local, [longer_wrap], p_ends)
-            if again is not None:
-                return longer_wrap, again
+        best: tuple[tuple, PlannedTie, PlannedTie] | None = None
+        checks = 0
+        for g in _grid(max(pitch + _GRID_MM, g0 - 0.1), g0, _FINE_GRID_MM):
+            for s in _grid(_GRID_MM, 1.2, _FINE_GRID_MM * 2.5):
+                for e in _WRAP_CHAMFERS_MM:
+                    # The wrap's length is linear in its lead z (slope 2)
+                    # and independent of its final lead f.
+                    rest = s * _SQRT2 + e * (_SQRT2 - 2.0) - a_v + a_u + (g - a_u) * _SQRT2
+                    z = (padded.length - rest) / 2.0
+                    if z < -1e-9 or g - e < s + 1e-9:
+                        continue
+                    z = max(z, 0.0)
+                    for f in _grid(0.0, 1.0, 0.1):
+                        if checks >= _MAX_WRAP_CHECKS:
+                            break
+                        checks += 1
+                        cand = fit_wrap(_wrap_shape(z, s, e, g, f, w_end_l), [padded], w_ends)
+                        if cand is None or abs(cand.length - padded.length) > CROSSING_TIE_MATCH_MM:
+                            continue
+                        again = fit_pad(local, [cand], p_ends)
+                        if again is None:
+                            continue
+                        score = _ties_uncoupled_mm(cand, again, foreign, on_layer, layer)
+                        key = (
+                            round(score, 6),
+                            round(abs(cand.length - again.length), 6),
+                            -g,
+                            s,
+                            e,
+                            f,
+                        )
+                        if best is None or key < best[0]:
+                            best = (key, cand, again)
+        if best is not None:
+            return best[1], best[2]
     return None
