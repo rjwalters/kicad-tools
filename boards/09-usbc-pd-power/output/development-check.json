@@ -51,7 +51,7 @@
       "summary": {
         "errors": 51,
         "warnings": 147,
-        "infos": 2,
+        "infos": 3,
         "waived": 0,
         "rules_checked": 70,
         "rules_checked_by_rule": {
@@ -81,9 +81,11 @@
         },
         "passed": false,
         "stale_waivers": 0,
-        "coverage_checked": 37,
+        "coverage_checked": 36,
         "coverage_skipped": 5,
-        "coverage_unknown": [],
+        "coverage_unknown": [
+          "model_coverage"
+        ],
         "coverage_blocking_unknown": []
       }
     },

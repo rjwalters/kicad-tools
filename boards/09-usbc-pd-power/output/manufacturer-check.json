@@ -6,7 +6,7 @@
   "summary": {
     "errors": 51,
     "warnings": 147,
-    "infos": 2,
+    "infos": 3,
     "waived": 0,
     "rules_checked": 70,
     "rules_checked_by_rule": {
@@ -36,9 +36,11 @@
     },
     "passed": false,
     "stale_waivers": 0,
-    "coverage_checked": 37,
+    "coverage_checked": 36,
     "coverage_skipped": 5,
-    "coverage_unknown": [],
+    "coverage_unknown": [
+      "model_coverage"
+    ],
     "coverage_blocking_unknown": []
   },
   "violations": [
@@ -1154,6 +1156,27 @@
       "waived": false,
       "key": "connector_edge_distance|J1||F.Cu",
       "evidence_hash": "ev2:dbad69da0b1f4837"
+    },
+    {
+      "rule_id": "diffpair_length_skew",
+      "type": "diffpair_length_skew",
+      "severity": "info",
+      "message": "Differential-pair chain KELVIN_P/KELVIN_N -> SENSE_P/SENSE_N end-to-end length-skew 5.830 mm chain skew (no chain limit declared)",
+      "location": null,
+      "layer": null,
+      "actual_value": 5.83,
+      "required_value": null,
+      "items": [],
+      "nets": [
+        "KELVIN_P",
+        "KELVIN_N",
+        "SENSE_P",
+        "SENSE_N"
+      ],
+      "status": "info",
+      "waived": false,
+      "key": "diffpair_length_skew||KELVIN_N,KELVIN_P,SENSE_N,SENSE_P|",
+      "evidence_hash": "ev2:f70cefb0121cf90f"
     },
     {
       "rule_id": "silkscreen_line_width",
@@ -4540,9 +4563,9 @@
       "blocking": true
     },
     "model_coverage": {
-      "status": "checked",
-      "state": "checked",
-      "reason": null,
+      "status": "unknown:host_library_refs (44 footprint(s); per-host detail: kct pcb model-audit)",
+      "state": "unknown",
+      "reason": "host_library_refs (44 footprint(s); per-host detail: kct pcb model-audit)",
       "blocking": false
     },
     "netclass_clearance_copper": {
