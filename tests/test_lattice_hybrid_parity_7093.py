@@ -200,10 +200,19 @@ def test_via_equal_alternative_no_worse_on_skew_and_length_is_kept(monkeypatch) 
     assert pres is alternative and why == "ok-mirrored"
 
 
-def test_via_equal_alternative_trading_length_for_skew_is_not_kept(monkeypatch) -> None:
-    # Element-wise, never lexicographic: lower skew does not excuse a longer pair.
+def test_via_equal_alternative_trading_bounded_length_for_skew_is_kept(monkeypatch) -> None:
+    # Issue #7870 (board 06rf USB3_RX2): a much lower skew is worth some extra
+    # length -- 0.5 vs 2.6 mm of skew for 3.1 mm of length is inside the bound.
     original = _pair(10.0, 11.0, 0, 1)
-    alternative = _pair(11.0, 11.5, 1, 1)  # skew 0.5 < 2.6, but total 25.7 > 22.6
+    alternative = _pair(11.0, 11.5, 1, 1)
+    pres, why, _lens = _run_selection(monkeypatch, original, alternative)
+    assert pres is alternative and why == "ok-mirrored"
+
+
+def test_via_equal_alternative_trading_unbounded_length_for_skew_is_not_kept(monkeypatch) -> None:
+    # The price is bounded per mm of skew removed: +24 mm for 2.1 mm is refused.
+    original = _pair(10.0, 11.0, 0, 1)
+    alternative = _pair(22.0, 22.5, 1, 1)
     pres, why, _lens = _run_selection(monkeypatch, original, alternative)
     assert pres is original and why == "ok"
 

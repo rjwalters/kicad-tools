@@ -382,6 +382,14 @@ class _HybridParityCtx:
     rejected: tuple[tuple[int, int], tuple[float, float]] | None = None
 
 
+#: Issue #7870: a via-equal hybrid leg pair that is LONGER than the pick is
+#: still taken when it removes more than this much skew (mm) ...
+_HYBRID_PARITY_MIN_SKEW_GAIN_MM = 0.5
+
+#: ... and costs at most this many mm of extra total length per mm of skew
+#: removed (06rf USB3_RX2: 2.86 mm of skew for 8.5 mm, a ratio of 3.0).
+_HYBRID_PARITY_LENGTH_PER_SKEW = 4.0
+
 #: Bounded retries of a pair search after a ``pair-partner-pad`` decline (#6839).
 _PARTNER_PAD_RETRIES = 4
 
@@ -5169,6 +5177,23 @@ class LatticePathfinder:
                 vias = (len(apres.routes[0].vias), len(apres.routes[1].vias))
                 if ctx.rejected is None or r_alt < ctx.rejected[1]:
                     ctx.rejected = (vias, r_alt)
+        if why == "ok":
+            # Issue #7870: nothing is no-worse on both axes.  A via-equal pair
+            # that is much better on skew may still be taken at the price of
+            # some extra length -- the tuner then starts from a pair with no
+            # via mismatch to compensate, and a longer pair is only ever
+            # "worse" on a metric the pair rule does not gate.  The price is
+            # bounded per mm of skew removed, never unbounded.
+            best_skew = pick[0]
+            for kind, apres, alens in self._hybrid_parity_candidates(ctx, committed=committed):
+                a_skew, a_total = self._hybrid_rank(apres)
+                gain = pick[0] - a_skew
+                if (
+                    gain > _HYBRID_PARITY_MIN_SKEW_GAIN_MM
+                    and a_skew < best_skew
+                    and a_total - pick[1] <= _HYBRID_PARITY_LENGTH_PER_SKEW * gain
+                ):
+                    pres, why, lens, best_skew = apres, f"ok-{kind}", alens, a_skew
         return pres, why, lens
 
     def _hybrid_joint_legs(
