@@ -36,11 +36,22 @@ Fairness rules the script enforces
   outputs (``measure_group_spread``).
 * A run killed at ``--timeout`` is recorded and printed as a TIMEOUT, even
   when the tool left a partial board behind that could still be scored.
+* **The referee is the pinned kicad-cli** (Issue #7903). Every kicad-cli DRC
+  runs inside ``ere.kicad_toolchain_session`` -- the evidence toolchain
+  ``kct readiness`` uses -- with ``--work-dir`` (and ``--krt-dir``) bind-mounted,
+  so ``KCT_KICAD_DOCKER=1`` sends it through CI's pinned image. A kicad-cli
+  other than the pinned release is refused (exit 2, nothing written) unless
+  ``--allow-unpinned-kicad`` is given, and every result row records
+  ``kicad_cli_version``, ``kicad_cli_image``, ``kicad_cli_source`` and
+  ``kicad_cli_pinned``.
 
 Usage (from a worktree with the C++ backend built)::
 
-    uv run python scripts/research/krt_compare.py \\
+    KCT_KICAD_DOCKER=1 uv run python scripts/research/krt_compare.py \\
         --krt-dir /path/to/KiCadRoutingTools --work-dir /tmp/krt-bench
+
+(``KCT_KICAD_DOCKER=1`` is needed unless the host kicad-cli is the pinned
+release; see the referee rule above.)
 
 ``--krt-python`` defaults to ``<krt-dir>/.venv/bin/python`` (a venv with KRT's
 ``requirements.txt`` installed; ``python build_router.py`` run once).
@@ -64,6 +75,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import expand_route_experiment as ere  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -512,8 +526,14 @@ def run_krt(
 
 
 def kicad_cli_drc(pcb: Path, report: Path, save_board: bool) -> dict:
+    """The shared referee: ``kicad-cli pcb drc --refill-zones`` on *pcb*.
+
+    kicad-cli is the active ``ere.kicad_toolchain_session``'s (Issue #7903);
+    outside one this raises ``ere.KiCadToolchainRequired`` before anything
+    runs, never falling back to whatever ``kicad-cli`` is first on ``PATH``.
+    """
     cmd = [
-        "kicad-cli",
+        str(ere.kicad_cli_session()["kicad_cli_binary"]),
         "pcb",
         "drc",
         "--refill-zones",
@@ -760,7 +780,7 @@ def score(
     return out
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--krt-dir", type=Path, required=True)
     ap.add_argument("--krt-python", default=None)
@@ -773,11 +793,32 @@ def main() -> int:
         action="store_true",
         help="re-grade existing outputs in --work-dir without re-routing",
     )
-    args = ap.parse_args()
+    ere.add_kicad_toolchain_arg(ap)
+    args = ap.parse_args(argv)
+    from kicad_tools.cli.kicad_toolchain import KiCadEnvironmentError
 
-    krt_python = args.krt_python or str(args.krt_dir / ".venv/bin/python")
     work = args.work_dir.resolve()
-    work.mkdir(parents=True, exist_ok=True)
+    # Before the session: its Docker probe bind-mounts the work dir, and a
+    # missing bind source would be created by the Docker daemon (as root on
+    # Linux). A refusal removes it again if this call created it.
+    created = ere.make_dirs(work)
+    mounts = [work]
+    # KRT runs inside the session too; let a Docker kicad-cli see its tree.
+    # Only an existing one: a missing bind source would be created.
+    if args.krt_dir.is_dir():
+        mounts.append(args.krt_dir.resolve())
+    try:
+        with ere.kicad_toolchain_session(mounts, allow_unpinned=args.allow_unpinned_kicad) as tc:
+            return _run_boards(args, work, ere.kicad_cli_columns(tc))
+    except KiCadEnvironmentError as exc:
+        ere.remove_if_empty(created)
+        return ere.refused(exc)
+
+
+def _run_boards(args, work: Path, kicad_cli: dict) -> int:
+    """The board loop; runs inside the caller's toolchain session."""
+    print(f"kicad-cli: {json.dumps(kicad_cli)}", flush=True)
+    krt_python = args.krt_python or str(args.krt_dir / ".venv/bin/python")
     results_path = work / "results.json"
     results = json.loads(results_path.read_text()) if results_path.exists() else {}
 
@@ -814,6 +855,8 @@ def main() -> int:
                             board.match_groups,
                         )
                     )
+                    # Re-graded now, so by this session's kicad-cli (Issue #7903).
+                    entry.update(kicad_cli)
                 results[tag] = entry
                 results_path.write_text(json.dumps(results, indent=2))
                 continue
@@ -827,6 +870,7 @@ def main() -> int:
                     "board": key,
                     "wall_s": None,
                     "commands": [f"(committed artifact) {board.routed_ref}"],
+                    **kicad_cli,
                 }
                 entry.update(
                     score(
@@ -856,6 +900,8 @@ def main() -> int:
                 "timed_out": rr.timed_out,
                 "commands": rr.commands,
                 "note": board.note,
+                # Every row, scored or not, says which kicad-cli this run used.
+                **kicad_cli,
             }
             if rr.output is not None:
                 entry.update(
