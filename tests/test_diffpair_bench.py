@@ -461,8 +461,21 @@ def test_committed_06b_lattice_row_couples_with_copper_on_both_nets():
 def test_06b_lattice_route_couples_with_copper_on_both_nets(tmp_path):
     """Live guard: route 06b with the lattice exactly as the bench does and fail if
     no pair couples, a coupled pair lacks copper on one net, or the post-route
-    short check removes an LVDS net (the double-copper signature of #6535)."""
-    row = bench.run_cell(ere.BOARDS["06b"], "lattice", 42, 2400, tmp_path)
+    short check removes an LVDS net (the double-copper signature of #6535).
+
+    Grades inside ``ere.kicad_toolchain_session`` exactly as the bench command
+    does (Issue #7916): the pinned kicad-cli (the CI image, or the pinned image
+    under ``KCT_KICAD_DOCKER=1``), and a skip -- never an unpinned grade --
+    when that toolchain is unavailable.
+    """
+    from kicad_tools.cli.kicad_toolchain import KiCadEnvironmentError
+
+    with contextlib.ExitStack() as stack:
+        try:
+            stack.enter_context(ere.kicad_toolchain_session([tmp_path]))
+        except KiCadEnvironmentError as exc:
+            pytest.skip(f"pinned kicad-cli unavailable: {exc}")
+        row = bench.run_cell(ere.BOARDS["06b"], "lattice", 42, 2400, tmp_path)
     assert row["valid"] is True, row.get("invalid_reasons")
     log = next(tmp_path.rglob("route.log")).read_text()
     assert "Post-optimize backstop demoted" not in log
