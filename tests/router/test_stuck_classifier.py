@@ -810,6 +810,138 @@ class TestBudgetStarved:
         assert data["failure_cause"] == "routing_order"
 
 
+# --- Branch-4 routability probe (issue #7832) -------------------------------
+# Boards need an Edge.Cuts outline so the router can load them; without one the
+# probe cannot run and the classifier keeps its geometry-only label.
+
+_OUTLINE = (
+    "  (gr_rect (start 0 0) (end 100 100) (stroke (width 0.1) (type default)) "
+    '(fill no) (layer "Edge.Cuts"))\n'
+)
+
+
+def _routable_moderate_board() -> str:
+    """The PLACEMENT_BOUND fixture plus an outline: the pad IS routable."""
+    return _placement_bound_board().replace("  (segment", _OUTLINE + "  (segment", 1)
+
+
+def _walled_moderate_board() -> str:
+    """Moderate congestion, open escape lane, but a closed two-layer track
+    octagon (net WALL, single-pad so never a rippable strict net) at 1.5 mm
+    leaves the pad genuinely unroutable."""
+    import math
+
+    segs = []
+    for layer in ("F.Cu", "B.Cu"):
+        for i in range(8):
+            a0, a1 = 2 * math.pi * i / 8, 2 * math.pi * (i + 1) / 8
+            segs.append(
+                f"  (segment (start {80 + 1.5 * math.cos(a0):.4f} {80 + 1.5 * math.sin(a0):.4f}) "
+                f"(end {80 + 1.5 * math.cos(a1):.4f} {80 + 1.5 * math.sin(a1):.4f}) "
+                f'(width 0.2) (layer "{layer}") (net 2))\n'
+            )
+    header = _HEADER.replace('(0 "F.Cu" signal)', '(0 "F.Cu" signal)\n    (31 "B.Cu" signal)')
+    return (
+        header + '  (net 0 "")\n  (net 1 "TGT")\n  (net 2 "WALL")\n'
+        '  (footprint "R_0402" (layer "F.Cu") (at 10 10)\n'
+        '    (property "Reference" "R1")\n'
+        '    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "TGT"))\n'
+        '    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "TGT"))\n'
+        "  )\n"
+        '  (footprint "U_SOT" (layer "F.Cu") (at 80 80)\n'
+        '    (property "Reference" "U1")\n'
+        '    (pad "1" smd circle (at 0 0) (size 0.2 0.2) (layers "F.Cu") (net 1 "TGT"))\n'
+        "  )\n"
+        '  (footprint "W" (layer "F.Cu") (at 80 78.5)\n'
+        '    (property "Reference" "W1")\n'
+        '    (pad "1" smd circle (at 0 0) (size 0.2 0.2) (layers "F.Cu") (net 2 "WALL"))\n'
+        "  )\n"
+        + _OUTLINE
+        + "".join(segs)
+        + '  (segment (start 9.5 10) (end 10.5 10) (width 0.25) (layer "F.Cu") (net 1))\n)\n'
+    )
+
+
+class TestBranch4RoutabilityProbe:
+    def _tgt(self, path: Path):
+        return next(d for d in classify_stuck_nets(path).diagnoses if d.net_name == "TGT")
+
+    def test_routable_net_flips_to_budget_starved(self, tmp_path: Path):
+        p = tmp_path / "routable.kicad_pcb"
+        p.write_text(_routable_moderate_board())
+        d = self._tgt(p)
+        assert d.classification is StuckClass.BUDGET_STARVED
+        assert "found a route" in d.evidence
+        assert "kct route --complete" in d.evidence
+        assert "a part must move" not in d.evidence
+        assert "not confirmed" not in d.evidence
+
+    def test_unroutable_net_keeps_placement_bound(self, tmp_path: Path):
+        p = tmp_path / "walled.kicad_pcb"
+        p.write_text(_walled_moderate_board())
+        d = self._tgt(p)
+        assert d.classification is StuckClass.PLACEMENT_BOUND
+        assert "a part must move" in d.evidence
+        assert "found no route on current copper" in d.evidence
+
+    def test_no_outline_degrades_to_geometry_only_label(self, placement_pcb: Path):
+        d = self._tgt(placement_pcb)
+        assert d.classification is StuckClass.PLACEMENT_BOUND
+        assert "bounded probe" not in d.evidence
+
+    def test_probe_exception_keeps_placement_bound(self, tmp_path: Path, monkeypatch):
+        from kicad_tools.router import stuck_classifier as sc
+
+        def boom(self):
+            raise RuntimeError("no router")
+
+        monkeypatch.setattr(sc._RoutabilityProbe, "_load", boom)
+        p = tmp_path / "routable.kicad_pcb"
+        p.write_text(_routable_moderate_board())
+        d = self._tgt(p)
+        assert d.classification is StuckClass.PLACEMENT_BOUND
+        assert "bounded probe" not in d.evidence
+
+    def test_dense_cluster_is_never_probed(self, dense_cluster_pcb: Path, monkeypatch):
+        from kicad_tools.router import stuck_classifier as sc
+
+        def forbidden(self, *a, **k):
+            raise AssertionError("dense-cluster PLACEMENT_BOUND must not be probed")
+
+        monkeypatch.setattr(sc._RoutabilityProbe, "routable", forbidden)
+        d = self._tgt(dense_cluster_pcb)
+        assert d.classification is StuckClass.PLACEMENT_BOUND
+
+    def test_probe_ignores_spent_wall_deadline(self, tmp_path: Path, monkeypatch):
+        """An installed (spent) excursion deadline must not starve the probe.
+
+        Only the iteration cap bounds the search, so the label is the same
+        on any machine and inside or outside a corridor-yield re-run.
+        """
+        from kicad_tools.router import wall_deadline
+
+        # Make a spent deadline fail a search instantly if it leaked through.
+        monkeypatch.setattr(wall_deadline, "MIN_SEARCH_TIMEOUT_S", 1e-12)
+        p = tmp_path / "routable.kicad_pcb"
+        p.write_text(_routable_moderate_board())
+        with wall_deadline.deadline(0.0):
+            d = self._tgt(p)
+            assert wall_deadline.active()
+        assert not wall_deadline.active()
+        assert d.classification is StuckClass.BUDGET_STARVED
+
+    def test_deterministic_and_read_only(self, tmp_path: Path):
+        import hashlib
+
+        p = tmp_path / "routable.kicad_pcb"
+        p.write_text(_routable_moderate_board())
+        before = hashlib.sha256(p.read_bytes()).hexdigest()
+        first = self._tgt(p).to_dict()
+        second = self._tgt(p).to_dict()
+        assert first == second
+        assert hashlib.sha256(p.read_bytes()).hexdigest() == before
+
+
 def _pour_discontinuous_board(net_name: str = "VCC", *, with_zone: bool = True) -> str:
     """*net_name* (power net) is incomplete: R1.1/R1.2 connected, U1.1 stranded.
 

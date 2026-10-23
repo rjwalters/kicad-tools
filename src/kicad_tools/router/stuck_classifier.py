@@ -63,9 +63,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from kicad_tools.core.geometry import point_to_segment_distance as _point_to_segment_distance
+from kicad_tools.router import wall_deadline as _wall_deadline
 from kicad_tools.router.failure_analysis import FailureCause
 from kicad_tools.schema.physical_identity import footprint_keys
 
@@ -1037,6 +1038,91 @@ def _build_swap_proposal(
     )
 
 
+# Issue #7832: expansion cap for the branch-4 routability probe.  An
+# iteration count, never wall-clock, so the verdict is machine-independent.
+PROBE_MAX_ITERATIONS = 400_000
+
+
+class _RoutabilityProbe:
+    """Bounded, read-only "does a route exist on the current copper?" probe.
+
+    Loads the board once (lazily, on first use) the way ``kct route`` does, with
+    every existing track and via committed as obstacles, then runs the grid A*
+    for one stranded pad at a time.  Nothing is committed back, so neither the
+    loaded board nor the file on disk changes.  The search is bounded by
+    :data:`PROBE_MAX_ITERATIONS` node expansions with no wall-clock deadline.
+
+    :meth:`routable` returns ``True`` (a route was found for every stranded
+    pad), ``False`` (at least one found none within the cap) or ``None`` (the
+    probe could not run: no board path, a load failure, an unknown pad).
+    """
+
+    def __init__(self, pcb: PCB) -> None:
+        self._pcb = pcb
+        self._router: Any = None
+        self._failed = False
+
+    def _load(self) -> Any:
+        if self._router is not None or self._failed:
+            return self._router
+        path = getattr(self._pcb, "_path", None)
+        if path is None:
+            self._failed = True
+            return None
+        import contextlib
+        import sys
+
+        from kicad_tools.router.io import load_pcb_for_routing
+        from kicad_tools.router.pathfinder import Router as PyRouter
+
+        try:
+            with contextlib.redirect_stdout(sys.stderr):
+                router, _ = load_pcb_for_routing(
+                    str(path),
+                    validate_drc=False,
+                    load_existing_routes=True,
+                    force_python=True,
+                )
+                router._install_grid_rule_area_keepouts()
+            # ``force_python=True`` guarantees the pure-Python pathfinder, the
+            # only one that honours ``_max_iterations_override``; refuse
+            # anything else so the iteration cap is never silently ignored.
+            if not isinstance(router.router, PyRouter):
+                raise TypeError("probe needs the Python pathfinder")
+            router.router._max_iterations_override = PROBE_MAX_ITERATIONS
+        except Exception:  # pragma: no cover - defensive only
+            self._failed = True
+            return None
+        self._router = router
+        return router
+
+    def routable(self, net_name: str, pad_names: list[str]) -> bool | None:
+        try:
+            router = self._load()
+            if router is None:
+                return None
+            pads = [p for p in router.pads.values() if p.net_name == net_name]
+            stranded = [p for p in pads if f"{p.ref}.{p.pin}" in pad_names]
+            others = [p for p in pads if f"{p.ref}.{p.pin}" not in pad_names] or pads
+            if not stranded or len(pads) < 2:
+                return None
+            for src in stranded:
+                targets = [p for p in others if p is not src]
+                if not targets:
+                    return None
+                dst = min(targets, key=lambda q: math.hypot(q.x - src.x, q.y - src.y))
+                # Suspend any wall-clock excursion deadline (e.g. a caller
+                # inside a corridor-yield re-run) so only the iteration cap
+                # bounds the search and the label never varies by machine.
+                with _wall_deadline.suspended():
+                    path = router.router.route(src, dst, per_net_timeout=None)
+                if path is None:
+                    return False
+            return True
+        except Exception:  # pragma: no cover - defensive only
+            return None
+
+
 def classify_stuck_nets_from_pcb(
     pcb: PCB,
     *,
@@ -1129,6 +1215,8 @@ def classify_stuck_nets_from_pcb(
         n.net_name for n in analysis.nets if n.is_plane_net and n.status == "incomplete"
     )
 
+    probe = _RoutabilityProbe(pcb)
+
     diagnoses: list[StuckNetDiagnosis] = []
     for net in analysis.nets:
         if net.net_name in excluded_nets:
@@ -1212,6 +1300,17 @@ def classify_stuck_nets_from_pcb(
                 else None
             ),
         )
+        # Issue #7832: branch 4 is geometry-only and cannot see that a route
+        # exists.  Confirm with a bounded single-net probe before telling the
+        # operator a part must move.
+        if diag.classification is StuckClass.PLACEMENT_BOUND and diag.evidence.endswith(
+            _BRANCH4_TAIL
+        ):
+            verdict = probe.routable(net.net_name, pad_names)
+            if verdict:
+                diag = _routable_on_current_copper(diag)
+            elif verdict is False:
+                diag.evidence += _PROBE_NO_ROUTE_CLAUSE
         # Attach match-group identity (Defect 2): same-group vs foreign split and
         # which blockers are the net's own bundle siblings.
         diag.match_group = target_group
@@ -1642,6 +1741,27 @@ def is_budget_search_failure(reason: str) -> bool:
     """True when a search-failure label means "ran out of time/iterations"."""
     lowered = reason.lower()
     return any(marker in lowered for marker in _BUDGET_FAILURE_MARKERS)
+
+
+# Issue #7832: the branch-4 (moderate congestion, no rippable copper) evidence
+# ends with this clause; it is how the caller tells branch 4 from the
+# dense-cluster PLACEMENT_BOUND, which is never probed.
+_BRANCH4_TAIL = "ripping cannot help, a part must move"
+_PROBE_NO_ROUTE_CLAUSE = (
+    f"; a bounded probe (<= {PROBE_MAX_ITERATIONS} expansions) found no route on current copper"
+)
+
+
+def _routable_on_current_copper(diag: StuckNetDiagnosis) -> StuckNetDiagnosis:
+    """Reclassify a probe-confirmed branch-4 net as BUDGET_STARVED (#7832)."""
+    diag.classification = StuckClass.BUDGET_STARVED
+    diag.evidence = (
+        diag.evidence.removesuffix(_BRANCH4_TAIL).rstrip(" -")
+        + f" -- a bounded probe (<= {PROBE_MAX_ITERATIONS} expansions) found a route "
+        "on the current copper, so no part needs to move; run "
+        "`kct route --complete` to commit it"
+    )
+    return diag
 
 
 def _decide(

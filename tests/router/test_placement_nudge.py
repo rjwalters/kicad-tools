@@ -42,6 +42,9 @@ from kicad_tools.router.stuck_classifier import (
 )
 from kicad_tools.schema.pcb import PCB
 
+# Every test here consumes a PLACEMENT_BOUND diagnosis on an outlined board.
+pytestmark = pytest.mark.usefixtures("no_routability_probe")
+
 # A board with a real Edge.Cuts rectangle so extract_board_outline() works and
 # the #3804 outline guard is exercised.  Outline: (0,0)-(100,100).
 _HEADER = """(kicad_pcb

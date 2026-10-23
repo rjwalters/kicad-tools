@@ -441,6 +441,7 @@ def _endpoint_board(
     )
 
 
+@pytest.mark.usefixtures("no_routability_probe")
 class TestEndpointAlignment:
     """AC: bounded +/-90 endpoint-orientation candidates for a row/column mismatch."""
 

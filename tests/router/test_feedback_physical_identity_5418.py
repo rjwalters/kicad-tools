@@ -114,6 +114,7 @@ def test_ambiguous_authored_selector_rejected_and_fixed_physical_target_respecte
     assert all(loop._target_is_fixed(key) for key in keys)
 
 
+@pytest.mark.usefixtures("no_routability_probe")
 @pytest.mark.parametrize("ref", ["", "DUP"])
 def test_endpoint_proposer_groups_complete_physical_footprints(tmp_path, ref):
     original = _load(tmp_path, _endpoint_board())

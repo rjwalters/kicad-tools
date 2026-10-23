@@ -122,6 +122,25 @@ def clamp_epoch_deadline(epoch_deadline: float | None) -> float | None:
     return ours if epoch_deadline is None else min(epoch_deadline, ours)
 
 
+@contextlib.contextmanager
+def suspended() -> Iterator[None]:
+    """Hide any installed deadline for the duration of a block.
+
+    For work whose result must not depend on wall time (issue #7832: the
+    stuck classifier's routability probe is bounded by an iteration count
+    only, so its verdict is machine-independent).  Inside the block every
+    helper behaves as if no deadline were installed; the previous deadline
+    and excursion are restored on exit, including on an exception.
+    """
+    global _deadline_monotonic, _excursion
+    saved = (_deadline_monotonic, _excursion)
+    _deadline_monotonic, _excursion = None, None
+    try:
+        yield
+    finally:
+        _deadline_monotonic, _excursion = saved
+
+
 def abandon(reason: str) -> bool:
     """Mark the innermost installed excursion abandoned (see module doc).
 
