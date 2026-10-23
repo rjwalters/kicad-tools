@@ -910,7 +910,11 @@ class KicadCliDrcSummary:
 
 
 def run_kicad_cli_drc(
-    pcb_path: str | Path, *, timeout: int = 300, all_track_errors: bool = False
+    pcb_path: str | Path,
+    *,
+    timeout: int = 300,
+    all_track_errors: bool = False,
+    kicad_cli: Path | None = None,
 ) -> KicadCliDrcSummary:
     """Run the ``kicad-cli pcb drc --refill-zones`` cross-gate.
 
@@ -918,10 +922,14 @@ def run_kicad_cli_drc(
     single in-repo implementation of that invocation, so the benchmark and
     the board-recipe pipeline gate reason over identical geometry.
     ``all_track_errors`` adds ``--all-track-errors`` (off by default).
+    ``kicad_cli`` runs that binary instead of auto-detecting one, e.g. the
+    pinned evidence toolchain's (Issue #7901).
     """
     from kicad_tools.drc.geometric import run_geometric_drc
 
-    result = run_geometric_drc(pcb_path, timeout=timeout, all_track_errors=all_track_errors)
+    result = run_geometric_drc(
+        pcb_path, timeout=timeout, all_track_errors=all_track_errors, kicad_cli=kicad_cli
+    )
     if not result.ran:
         return KicadCliDrcSummary(ran=False, note=result.note, all_track_errors=all_track_errors)
     return KicadCliDrcSummary(
