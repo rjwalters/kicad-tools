@@ -30,6 +30,11 @@ from kicad_tools.router.optimizer.pcb import (
     parse_vias,
     replace_segments,
 )
+from kicad_tools.router.pair_skew_target import (
+    resolve_pair_skew_target,
+    segment_length_parts,
+    skew_stackup,
+)
 from kicad_tools.router.primitives import Route
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.sexp import SExp, parse_string, serialize_sexp
@@ -108,16 +113,22 @@ def tune_mipi(pcb_text: str) -> tuple[str, dict]:
     if len(mipis) != 6 or any(net not in routes for net in mipis):
         raise ValueError("All six MIPI nets must have routed copper before tuning")
     classes = generate_design.build_net_class_map(preserve_authored_gap=True)
+    # Issue #7893: the pair's skew target (derived ps budget + error caps) from
+    # the resolver ``kct check`` reads, on board 07's 4-layer stackup.
+    stackup = skew_stackup(None, 4)
     partners = {}
     results = {}
     for pair in detect_diff_pairs(mipis):
         p_id, n_id = pair.pair.positive.net_id, pair.pair.negative.net_id
         cls = classes[names[p_id]]
+        target = resolve_pair_skew_target(classes, names[p_id], names[n_id], stackup)
         p_route, n_route, result = tune_diff_pair_skew(
             pair,
             routes,
-            tolerance_mm=cls.skew_tolerance_mm,
+            tolerance_mm=target.tolerance_mm,
             intra_pair_clearance_mm=cls.intra_pair_clearance,
+            skew_target=target,
+            route_parts=segment_length_parts,
         )
         routes[p_id], routes[n_id] = p_route, n_route
         partners[p_id], partners[n_id] = n_id, p_id
