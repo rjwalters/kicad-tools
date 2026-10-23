@@ -5807,9 +5807,16 @@ class Autorouter:
         after impedance synthesis -- necked down to
         ``rules.min_trace_width_floor`` at the least).
 
+        A single-layer SMD receptacle has room for only one of the two
+        crossing direct ties (board 06rf USB2_D).  Issue #7869 then plans both
+        as one length-balanced set (:func:`plan_crossing_ties`: the blocked
+        net round its partner's pad, the partner padded to the same length),
+        so the pair leaves the connector without the ~2.3 mm skew the wrap
+        alone would add.
+
         Ties are committed per pair, all or nothing: when any eligible extra
-        of either net has no clearing tie (a single-layer SMD receptacle has
-        room for only one of the two crossing ties -- board 06rf USB2_D), the
+        of either net has no clearing tie (and no balanced crossing set fits
+        either), the
         pair keeps today's connections for every extra, so P and N are not
         attached by different mechanisms.  That includes a pair where only one
         net has an eligible extra: neither net is tied (#6697).  A tie must also clear
@@ -5821,7 +5828,13 @@ class Autorouter:
         if not reserved:
             return set()
         from .pair_layer_filter import pair_permitted_layers
-        from .pairplan.tie import MAX_TIE_STUB_MM, PlannedTie, plan_equivalent_pin_tie
+        from .pairplan.geometry import segs_intersect
+        from .pairplan.tie import (
+            MAX_TIE_STUB_MM,
+            PlannedTie,
+            plan_crossing_ties,
+            plan_equivalent_pin_tie,
+        )
         from .primitives import Segment
 
         try:
@@ -5925,8 +5938,8 @@ class Autorouter:
                         (seq, anchor, other, net_class, permitted(net, layers))
                     )
 
-        def plan(net: int, item: Any, accepted: list[PlannedTie]) -> PlannedTie | None:
-            _seq, anchor, extra, net_class, layers = item
+        def tie_rules(net: int, net_class: Any) -> dict[str, Any]:
+            """One net's tie width, clearance, fab floor and rule-area veto."""
             width = getattr(net_class, "trace_width", None) or self.rules.trace_width
             clearance = clearance_for(net)
 
@@ -5940,23 +5953,79 @@ class Autorouter:
                     keepouts.segment_blocked(a, b, layer, net, half)
                 )
 
+            return {
+                "width": width,
+                "clearance": clearance,
+                "min_width": self.rules.min_trace_width_floor,
+                "blocked": blocked,
+            }
+
+        def on_layer(pad: Pad, layer: int) -> bool:
+            return layer in pad_layers(pad)
+
+        def plan(net: int, item: Any, accepted: list[PlannedTie]) -> PlannedTie | None:
+            _seq, anchor, extra, net_class, layers = item
             try:
                 return plan_equivalent_pin_tie(
                     extra,
                     anchor,
                     all_pads,
                     layers,
-                    width=width,
-                    clearance=clearance,
-                    min_width=self.rules.min_trace_width_floor,
                     accepted=accepted,
-                    on_layer=lambda pad, layer: layer in pad_layers(pad),
+                    on_layer=on_layer,
                     clearance_for=clearance_for,
                     fixed_runs=fixed_runs,
-                    blocked=blocked,
+                    **tie_rules(net, net_class),
                 )
             except Exception:
                 return None
+
+        def plan_crossing(
+            wrap_net: int, pad_net: int, accepted: list[PlannedTie]
+        ) -> list[tuple[int, Any, PlannedTie]] | None:
+            """Issue #7869: the pair's two CROSSING ties as one balanced set.
+
+            ``None``: not a crossing pair (today's decline stands as is);
+            ``[]``: crossing, but no length-matched set fits.
+
+            Only for a pair with exactly one eligible extra per net, both
+            tieable on a common permitted layer.  ``wrap_net`` is the net
+            whose direct tie was blocked; it goes round its partner's pad and
+            the partner's tie is padded to the same length
+            (:func:`plan_crossing_ties`).  Both or neither.
+            """
+            if len(eligible[wrap_net]) != 1 or len(eligible[pad_net]) != 1:
+                return None
+            w_item = eligible[wrap_net][0]
+            p_item = eligible[pad_net][0]
+            shared = [layer for layer in w_item[4] if layer in p_item[4]]
+            if not shared:
+                return None
+            w_line = ((w_item[2].x, w_item[2].y), (w_item[1].x, w_item[1].y))
+            p_line = ((p_item[2].x, p_item[2].y), (p_item[1].x, p_item[1].y))
+            if not segs_intersect(*w_line, *p_line):
+                return None
+            try:
+                got = plan_crossing_ties(
+                    w_item[2],
+                    w_item[1],
+                    p_item[2],
+                    p_item[1],
+                    all_pads,
+                    shared,
+                    wrap_rules=tie_rules(wrap_net, w_item[3]),
+                    pad_rules=tie_rules(pad_net, p_item[3]),
+                    accepted=accepted,
+                    on_layer=on_layer,
+                    clearance_for=clearance_for,
+                    fixed_runs=fixed_runs,
+                )
+            except Exception:
+                return []
+            if got is None:
+                return []
+            wrap, padded = got
+            return [(wrap_net, w_item, wrap), (pad_net, p_item, padded)]
 
         accepted: list[PlannedTie] = []
         tied: set[tuple[int, int]] = set()
@@ -5986,6 +6055,7 @@ class Autorouter:
             local = list(accepted)
             planned: list[tuple[int, Any, PlannedTie]] = []
             declined: str | None = None
+            blocked_net: int | None = None
             for g in group:
                 for item in eligible[g]:
                     pair_ends = f"{item[2].ref}.{item[2].pin}->{item[1].ref}.{item[1].pin}"
@@ -5998,12 +6068,35 @@ class Autorouter:
                     tie = plan(g, item, local)
                     if tie is None:
                         declined = f"{pair_ends} has no clearing tie"
+                        blocked_net = g
                         break
                     local.append(tie)
                     planned.append((g, item, tie))
                 if declined:
                     break
             names = "/".join(self.net_names.get(g, str(g)) for g in group)
+            if declined and blocked_net is not None and len(group) == 2:
+                # Issue #7869: the two ties cross (a mirrored USB-C receptacle
+                # on one layer, board 06rf USB2_D).  Plan them together, the
+                # blocked net round its partner's pad and the partner padded
+                # to the same length, instead of declining the pair.
+                padded_net = group[0] if blocked_net == group[1] else group[1]
+                crossing = plan_crossing(blocked_net, padded_net, accepted)
+                if crossing == []:
+                    declined += "; no length-matched crossing tie fits (issue #7869)"
+                elif crossing:
+                    declined = None
+                    # Committed in the group's order, as direct ties are.
+                    planned = sorted(crossing, key=lambda c: group.index(c[0]))
+                    local = list(accepted) + [tie for _g, _item, tie in crossing]
+                    wrap, padded = crossing[0][2], crossing[1][2]
+                    print(
+                        f"  Diff-pair ties {names}: crossing ties length-balanced "
+                        f"({self.net_names.get(crossing[0][0], crossing[0][0])} "
+                        f"{wrap.length:.2f} mm round the partner pad, "
+                        f"{self.net_names.get(crossing[1][0], crossing[1][0])} "
+                        f"{padded.length:.2f} mm padded; issue #7869)"
+                    )
             if declined:
                 print(
                     f"  Diff-pair ties {names}: not used ({declined}); "

@@ -1918,25 +1918,67 @@ def test_core_without_a_tie_keeps_todays_connections(monkeypatch) -> None:
     router._ensure_lattice_pathfinder()
     today = _todays_connections(router, monkeypatch)
     monkeypatch.setattr(tie_mod, "plan_equivalent_pin_tie", lambda *a, **k: None)
+    # Issue #7869: nor a length-balanced crossing set.
+    monkeypatch.setattr(tie_mod, "plan_crossing_ties", lambda *a, **k: None)
     _c, declined = router._lattice_netset_connections()
     assert router._lattice_pair_ties == []
     assert declined == today
     assert any(k == (1, 0) for k, *_ in today) and any(k == (2, 0) for k, *_ in today)
 
 
+def test_core_ties_a_crossing_pair_length_balanced(capsys) -> None:
+    # Issue #7869: a single-layer (SMD) receptacle has room for only one of
+    # the two crossing DIRECT ties (board 06rf USB2_D).  Both are now planned
+    # as one set: D- round the D+ pad, D+ padded to the same length.
+    from kicad_tools.router.pairplan.tie import CROSSING_TIE_MATCH_MM
+
+    router = _usbc_autorouter(smd=True)
+    router._ensure_lattice_pathfinder()
+    _c, conns = router._lattice_netset_connections()
+    ties = router._lattice_pair_ties
+    assert [ends for _k, _r, ends in ties] == [("J1.B6", "J1.A6"), ("J1.B7", "J1.A7")]
+    lengths = [
+        sum(math.hypot(s.x2 - s.x1, s.y2 - s.y1) for s in route.segments) for _k, route, _e in ties
+    ]
+    assert abs(lengths[0] - lengths[1]) <= CROSSING_TIE_MATCH_MM
+    assert {route.segments[0].layer for _k, route, _e in ties} == {Layer.F_CU}
+    # Neither extra is left to a single-ended connection.
+    assert not any(k in ((1, 0), (2, 0)) for k, *_ in conns)
+    out = capsys.readouterr().out
+    assert "Diff-pair ties D+/D-: crossing ties length-balanced" in out
+    assert "Diff-pair tie D+ J1.B6->J1.A6" in out and "Diff-pair tie D- J1.B7->J1.A7" in out
+
+
 def test_core_ties_a_pair_all_or_nothing(capsys, monkeypatch) -> None:
-    # A single-layer (SMD) receptacle has room for only one of the two
-    # crossing ties: the pair keeps today's connections for BOTH extras
-    # rather than attaching D+ and D- by different mechanisms (board 06rf).
+    # All or nothing (#6697): when no length-balanced crossing set fits, the
+    # pair keeps today's connections for BOTH extras rather than attaching D+
+    # (whose direct tie clears) and D- by different mechanisms.
+    import kicad_tools.router.pairplan.tie as tie_mod
+
     router = _usbc_autorouter(smd=True)
     router._ensure_lattice_pathfinder()
     today = _todays_connections(router, monkeypatch)
+    monkeypatch.setattr(tie_mod, "plan_crossing_ties", lambda *a, **k: None)
     _c, conns = router._lattice_netset_connections()
     assert router._lattice_pair_ties == []
     assert conns == today
-    assert "Diff-pair ties D+/D-: not used (J1.B7->J1.A7 has no clearing tie)" in (
-        capsys.readouterr().out
-    )
+    assert (
+        "Diff-pair ties D+/D-: not used (J1.B7->J1.A7 has no clearing tie; "
+        "no length-matched crossing tie fits (issue #7869))"
+    ) in capsys.readouterr().out
+
+
+def test_core_direct_ties_never_consult_the_crossing_planner(monkeypatch) -> None:
+    # Issue #7869: pairs whose direct ties clear (here: THT pads, the crossing
+    # D- tie on the second layer) are planned exactly as before.
+    import kicad_tools.router.pairplan.tie as tie_mod
+
+    calls: list = []
+    monkeypatch.setattr(tie_mod, "plan_crossing_ties", lambda *a, **k: calls.append(a))
+    router = _usbc_autorouter()
+    router._ensure_lattice_pathfinder()
+    router._lattice_netset_connections()
+    assert len(router._lattice_pair_ties) == 2 and calls == []
 
 
 def test_core_ties_neither_net_when_only_one_has_a_candidate(capsys, monkeypatch) -> None:
