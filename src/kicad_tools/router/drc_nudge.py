@@ -47,6 +47,7 @@ if TYPE_CHECKING:
     from kicad_tools.manufacturers.fabrication_process import FabricationProcess
 
     from .core import Autorouter
+    from .pair_postpass_invariant import PairSkewGuard
 
 from kicad_tools.core.types import copper_layers_in_span, copper_span, copper_span_contains
 
@@ -103,6 +104,10 @@ class DRCNudgeResult:
     # introduced an HV pairwise (creepage) shortfall that was not there before.
     # Always 0 without a ``--voltage-map`` table.
     pairwise_reverts: int = 0
+    # Issue #6447: one line per diff pair whose routes were restored to their
+    # entry geometry because the pass pushed the pair past its ``kct check``
+    # skew limit (or further past it).
+    pair_skew_reverts: list[str] = field(default_factory=list)
     # Issue #2743: structured skip-reason counters so the user sees
     # "4/6 resolved; 2 unsupported (via-via anchored)" instead of a
     # silent 0/6 with no diagnostic.  Keyed by reason; integer counts.
@@ -130,6 +135,12 @@ class DRCNudgeResult:
                 f"  HV pairwise gate: {self.pairwise_reverts} route(s) reverted to "
                 "pre-nudge geometry"
             )
+        if self.pair_skew_reverts:
+            lines.append(
+                f"  Pair-skew guard: {len(self.pair_skew_reverts)} pair(s) reverted to "
+                "pre-nudge geometry"
+            )
+            lines.extend(f"    {line}" for line in self.pair_skew_reverts)
         if self.skipped:
             for reason, count in sorted(self.skipped.items()):
                 lines.append(f"  Skipped ({reason}): {count}")
@@ -2688,6 +2699,43 @@ def _revert_new_pairwise_violations(
     return reverted
 
 
+def _revert_pair_skew_regressions(
+    router: Autorouter,
+    guard: PairSkewGuard,
+    snapshot: list[tuple[Route, Route]],
+) -> list[str]:
+    """Undo this pass's edits to every pair it pushed past its skew limit (#6447).
+
+    A pair regressed when :meth:`PairSkewGuard.regressions` says so: its
+    ``kct check`` skew now exceeds the error limit and either was inside it
+    before the pass or got more than 0.01 mm worse.  Every route on the
+    pair's two nets is restored to the pass's entry snapshot -- the same
+    net-granular revert :func:`_revert_new_pairwise_violations` does -- so the
+    pair ends exactly as it entered.  Other nets keep their nudges.
+
+    Returns one log line per reverted pair (also logged as a warning).
+    """
+    by_route = {id(live): snap for snap, live in snapshot}
+    lines: list[str] = []
+    for regression in guard.regressions(router.routes):
+        nets = set(regression.pair.nets)
+        restored = 0
+        for route in router.routes:
+            snap = by_route.get(id(route))
+            if snap is not None and route.net in nets and _restore_route_geometry(route, snap):
+                restored += 1
+        still = next(
+            (r for r in guard.regressions(router.routes) if r.pair == regression.pair), None
+        )
+        action = f"reverted {restored} route(s) to pre-nudge geometry"
+        if still is not None:
+            # Defensive: the snapshot is the pass's own entry state, so a
+            # remaining regression means copper outside the snapshot moved.
+            action += f" (skew still {still.after_mm:.3f} mm)"
+        lines.append(guard.report(regression, action))
+    return lines
+
+
 def _resolve_route_net_key(route: Route, checker: PairwisePathChecker) -> str:
     """Normalised net key a pairwise scan would report for ``route``.
 
@@ -2769,7 +2817,14 @@ def drc_verify_and_nudge(
     # #4766 reuses the same snapshot as the revert source, so it is also
     # taken (grid or not) whenever the pairwise gate is armed.
     _grid = getattr(router, "grid", None)
-    _need_snapshot = _grid is not None or _pairwise is not None
+    # Issue #6447: the post-pass pair-skew invariant.  Measured before the
+    # pass (including its via-in-pad sweep) so a pair the pass pushes past
+    # its ``kct check`` skew limit can be put back -- the #7784/#7808 board
+    # 07 DQS regression (0.119 -> 1.291 mm) went through this pass.
+    from .pair_postpass_invariant import PairSkewGuard
+
+    _skew_guard = PairSkewGuard.arm(router, "drc-nudge")
+    _need_snapshot = _grid is not None or _pairwise is not None or _skew_guard is not None
     _grid_snapshot = [(r.copy_geometry(), r) for r in router.routes] if _need_snapshot else []
     _before_keys = (
         violation_pair_keys(_pairwise_scan(router, _pairwise)) if _pairwise is not None else set()
@@ -2781,18 +2836,22 @@ def drc_verify_and_nudge(
             max_passes=max_passes,
             skip_nets=skip_nets,
         )
+        if _skew_guard is not None:
+            result.pair_skew_reverts = _revert_pair_skew_regressions(
+                router, _skew_guard, _grid_snapshot
+            )
         if _pairwise is not None:
             result.pairwise_reverts = _revert_new_pairwise_violations(
                 router, _pairwise, _before_keys, _grid_snapshot
             )
-            if result.pairwise_reverts:
-                # Reverting restores the entry geometry, which may restore the
-                # scalar violation the nudge had just repaired -- report the
-                # true post-revert count rather than the pre-revert one.
-                remaining = [v for v in validate_routes(router) if not v.component_inherent]
-                if skip_nets:
-                    remaining = [v for v in remaining if v.net not in skip_nets]
-                result.remaining_violations = len(remaining)
+        if result.pairwise_reverts or result.pair_skew_reverts:
+            # Reverting restores the entry geometry, which may restore the
+            # scalar violation the nudge had just repaired -- report the
+            # true post-revert count rather than the pre-revert one.
+            remaining = [v for v in validate_routes(router) if not v.component_inherent]
+            if skip_nets:
+                remaining = [v for v in remaining if v.net not in skip_nets]
+            result.remaining_violations = len(remaining)
         return result
     finally:
         if _grid is not None:

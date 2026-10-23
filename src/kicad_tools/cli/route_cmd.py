@@ -2537,7 +2537,9 @@ def _run_post_route_pipeline(
 
         with spinner("DRC nudge pass...", quiet=quiet):
             nudge_result = drc_verify_and_nudge(router)
-        if not quiet and nudge_result.initial_violations > 0:
+        # Issue #6447: a pair-skew revert is reported even when the pass
+        # found no clearance violation (the via-in-pad sweep runs anyway).
+        if not quiet and (nudge_result.initial_violations > 0 or nudge_result.pair_skew_reverts):
             print(f"  {nudge_result.summary()}")
 
         _enforce_connectivity_invariant_or_exit(

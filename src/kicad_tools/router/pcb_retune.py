@@ -942,6 +942,8 @@ def _retune_once(
         probe.write_text(new_text, encoding="utf-8")
         group_after, pair_after, len_after = _measure(probe, net_class_map)
 
+    _require_no_pair_skew_regression(pair_before, pair_after, net_class_map)
+
     targets = violated(group_after, pair_after)
     for t in targets:
         key = _target_key(t.kind, t.name)
@@ -999,6 +1001,42 @@ def _retune_once(
             dst.unlink()
         raise
     return report
+
+
+def _require_no_pair_skew_regression(
+    pair_before: dict[tuple[str, str], float],
+    pair_after: dict[tuple[str, str], float],
+    net_class_map: dict,
+) -> None:
+    """Reject a retune that pushed any diff pair past its skew limit (Issue #6447).
+
+    The post-pass pair-skew invariant, on the checker's own numbers: every
+    pair on the board -- selected or not -- is compared before and after on
+    the written copper.  A pair now over its ``kct check`` error limit that
+    was inside it, or that got more than 0.01 mm further over it, fails the
+    whole retune (nothing is written).  The tuners carry their own guards
+    (#6664's never-worse backstop, #6675's group invariant); this is the
+    board-level backstop behind them.
+    """
+    from .pair_postpass_invariant import checker_skew_limit_mm, classify_skew_change
+
+    broken: list[str] = []
+    for (p_name, n_name), after_mm in sorted(pair_after.items()):
+        limit = checker_skew_limit_mm(net_class_map, p_name, n_name)
+        if limit is None:
+            continue
+        before_mm = _pair_skew(pair_before, p_name, n_name)
+        kind = classify_skew_change(before_mm, after_mm, limit)
+        if kind is not None:
+            broken.append(
+                f"{p_name}/{n_name} {before_mm:.3f} -> {after_mm:.3f} mm "
+                f"(limit {limit:.3f} mm, {kind})"
+            )
+    if broken:
+        raise RetuneError(
+            "pair_skew_regression",
+            "tuning broke diff-pair skew; no output written: " + "; ".join(broken),
+        )
 
 
 def _clearance_findings(
