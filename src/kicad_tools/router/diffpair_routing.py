@@ -5761,18 +5761,17 @@ class DiffPairRouter:
         """The pair's ``kct check`` skew limit when it is an ERROR (#5333).
 
         ``None`` when the limit is only advisory (warning/info), so candidate
-        selection keeps its plain #6858 ordering for such pairs.
+        selection keeps its plain #6858 ordering for such pairs.  The lookup
+        is :func:`~.pair_postpass_invariant.checker_skew_limit_mm`, shared
+        with the post-pass pair-skew guard (Issue #6447).
         """
-        from kicad_tools.validate.diffpair_engagement import resolve_pair_thresholds
+        from .pair_postpass_invariant import checker_skew_limit_mm
 
-        thresholds = resolve_pair_thresholds(
+        return checker_skew_limit_mm(
             getattr(self.autorouter, "net_class_map", None),
             pair.positive.net_name,
             pair.negative.net_name,
         )
-        if thresholds.skew_severity != "error":
-            return None
-        return float(thresholds.skew_mm)
 
     def _collapse_committed_via_hairpins(self, routes: list[Route]) -> int:
         """Move committed vias back to their turn where a leg doubles back (#7782).
@@ -13065,7 +13064,16 @@ class DiffPairRouter:
             self._committed_coupled_claims().update((pair.positive.net_id, pair.negative.net_id))
 
         # Issue #7782: pull the joint search's via hairpins back to the turn
-        # before the lengths are taken (the collapse changes them).
+        # before the lengths are taken (the collapse changes them).  Issue
+        # #6447: deliberately NOT wrapped in the post-pass pair-skew guard.
+        # The collapse runs before this pair's skew is matched (inline comb,
+        # then ``_tune_committed_pair_skew`` for every pair whose limit is an
+        # error), so the skew it leaves is not the pair's final skew: on
+        # board 07 a guard here reverted MIPI_DAT1's collapse over a
+        # pre-tuning 0.336 -> 0.858 mm change the tuner then took to 0.045 mm,
+        # and kept the doubled, order-dependent copper #7782 removes.  The
+        # hazard #7784 showed -- a later pass moving the collapsed via -- is
+        # guarded in ``drc_verify_and_nudge``.
         self._collapse_committed_via_hairpins(routes)
 
         # Calculate lengths
