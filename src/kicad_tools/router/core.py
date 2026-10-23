@@ -5470,12 +5470,7 @@ class Autorouter:
                     f"{rnd.left_before}->{rnd.left_after}: "
                     f"{'kept' if rnd.kept else 'rolled back'}"
                 )
-        if repair is not None and repair.skipped == "voltage-map":
-            print(
-                "  Pad class clearance (#6395): skipped -- HV pairwise clearance "
-                "(--voltage-map) is not modelled by the repair"
-            )
-        elif repair is not None and (repair.found or repair.pair_skipped or repair.via_found):
+        if repair is not None and (repair.found or repair.pair_skipped or repair.via_found):
             print(
                 f"  Pad class clearance (#6395): {repair.repaired}/{repair.found} "
                 f"track-pad shortfall(s) moved clear"

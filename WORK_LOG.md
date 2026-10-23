@@ -15,6 +15,13 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-23
 
+- **PR #7886**: docs: derive intra-pair skew limits from a differential-phase tolerance (research + proposal)
+- **Issue #7883** (closed): Derive intra-pair skew limits from a differential-phase tolerance at the operating frequency
+- **PR #7885**: fix(router): hold the pad class clearance under a voltage map in the lattice
+- **Issue #7880** (closed): lattice commits track-to-pad copper the post-route backstop then demotes under class-pair clearance
+- **PR #7882**: test(router): pin 06rf USB3_RX1 1x skew-tuner capacity limit (#7864)
+- **Issue #7861** (closed): Replay or discard quarantined stash da00b7cf (#5617 candidate-gather benchmark work)
+- **Issue #7863** (closed): Replay or discard quarantined stash 39250ba1 (#5664 clearance-kernel parity tests)
 - **PR #7877**: feat(check): model_coverage reads unknown for host-library 3D refs; LCSC guard scans VRML
 - **Issue #7743** (closed): Follow-ups from #7736: lcsc_guard should scan .wrl/.vrml; record 3D-coverage 'not evaluated' host-independently in kct check JSON
 - **Issue #7775** (closed): [Epic #5952] AGENTS.md parity: shared contributor-guidance source rendered into CLAUDE.md and AGENTS.md, with drift test

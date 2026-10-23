@@ -44,10 +44,22 @@ moving it is worse: the router's post-route backstop then demotes the whole net
 for the shortfall.  Pair-net shortfalls left in place (over budget, or on a
 non-repairable leg) are counted as ``pair_skipped``.  Via-vs-pad
 shortfalls are reported (``via_found`` / ``via_remaining``) but never repaired:
-moving a via moves copper on every layer plus all its incident segments.  A
-board with an HV pairwise projection (``--voltage-map``) is skipped, since its
-attach-zone waivers are not modelled here; the skip is reported as
-``skipped == "voltage-map"`` so the router can log it.
+moving a via moves copper on every layer plus all its incident segments.
+
+HV pairwise clearance (``--voltage-map``, issue #7880)
+-----------------------------------------------------
+The HV projection (:class:`~.pairwise.LatticePairwise`) carries only the pairs
+that need HV widening, i.e. CROSS-domain pairs.  A same-domain class pair -- a
+0.2 mm-class net beside a 0.4 mm-class pad, or one HV net beside another HV
+net's pad -- is in no pairwise entry, so the search holds it exactly as it does
+without a voltage map, and this repair is what holds the pad's class.  It runs
+unchanged under a projection, with one extra legality term: a moved segment
+must also pass the search's own pairwise pad keep-out
+(:meth:`~.obstacles.LatticeObstacleModel.pairwise_pad_blocked`, attach-zone
+waiver included, exactly as the search applies it), and the committed model
+(:meth:`LatticePathfinder._fresh_committed`) already carries the pairwise
+copper-vs-copper term.  So a move never trades a class shortfall for an HV
+one; a shortfall it cannot clear that way is left in place and counted.
 """
 
 from __future__ import annotations
@@ -104,8 +116,6 @@ class ClassPadRepairStats:
     #: Via-vs-pad shortfalls found / left (vias are never moved, so equal).
     via_found: int = 0
     via_remaining: int = 0
-    #: Why the repair did not run at all (``"voltage-map"``), else ``None``.
-    skipped: str | None = None
     #: Issue #6489: pads still short of their class after the repair, over EVERY
     #: route (pair legs and unmovable copper included), as pad index -> the
     #: clearance that pad's pairs require.  The lattice grows exactly these
@@ -186,9 +196,6 @@ def repair_class_pad_pairs(
     classes = pf.pad_class_clearances
     if classes is None or not routes:
         return stats
-    if pf._pairwise is not None:
-        stats.skipped = "voltage-map"
-        return stats
     pads: Sequence[Pad] = pf.pads
     base = pf.rules.trace_clearance
     pad_req = pad_class_requirements(pf)
@@ -249,6 +256,34 @@ def repair_class_pad_pairs(
             if gap < required - _EPS:
                 found.append((i, required, gap))
         return found
+
+    pairwise = pf._pairwise
+    obstacles = pf.obstacles if pairwise is not None else None
+
+    def hv_pad_blocked(key: object, seg: Segment) -> bool:
+        """Issue #7880: the search's HV pairwise pad keep-out for ``seg``.
+
+        The same predicate, inflation floor and attach-zone waiver the search
+        expands with (``_body_edge_legal``), so a move is never kept where the
+        search itself would have refused the copper.  ``False`` (no check)
+        without a ``--voltage-map`` projection.
+        """
+        if pairwise is None or obstacles is None:
+            return False
+        layer = lidx(seg.layer)
+        if layer is None:
+            return True
+        half = seg.width / 2.0
+        extra = max(0.0, half + own_clr[key] - pf._agent_radius)
+        return obstacles.pairwise_pad_blocked(
+            (seg.x1, seg.y1),
+            (seg.x2, seg.y2),
+            layer,
+            routes[key].net,
+            half,
+            extra,
+            pairwise,
+        )
 
     def build_committed() -> Any:
         committed = pf._fresh_committed()
@@ -344,7 +379,9 @@ def repair_class_pad_pairs(
                 committed = build_committed()
 
             def pads_ok(key: object, new: Segment) -> bool:
-                return not pad_shortfalls(key, new, class_only=False)
+                return not pad_shortfalls(key, new, class_only=False) and not hv_pad_blocked(
+                    key, new
+                )
 
             budget = (
                 (pair_drift, partners, pair_length_tolerance)
@@ -513,7 +550,7 @@ def class_pad_shortfalls(pf: LatticePathfinder, route: Route, net_class: object 
     repair will not have to touch.
     """
     pad_req = pad_class_requirements(pf)
-    if pad_req is None or pf._pairwise is not None or not route.segments:
+    if pad_req is None or not route.segments:
         return 0
     own = pf._conn_geometry(net_class, route.net)[1]
     candidates = [i for i, req in enumerate(pad_req) if req > own + _EPS]
