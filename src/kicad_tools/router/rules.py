@@ -1616,6 +1616,13 @@ class NetClassRouting:
     """Vias allowed on each net of the pair.  ``None`` -> the protocol
     default, if any.  Data only in piece (a)."""
 
+    chain_skew_tolerance_mm: float | None = None
+    """Maximum skew (mm) across a chain of pairs joined by series elements
+    (Issue #6447): the P-side total minus the N-side total, summed over every
+    pair segment of the chain.  ``None`` (the default) means the chain skew is
+    reported as an ``info`` metric only; a number makes it an ``error`` when
+    exceeded.  Read from the class of the chain's first pair segment."""
+
     # Match-group declaration (Issue #2687, Epic #2661 Phase 1A)
     length_match_group: str | None = None
     """Group name for nets in this class that must arrive length-matched.
@@ -1998,6 +2005,7 @@ class NetClassRouting:
             "max_uncoupled_per_terminal_mm": self.max_uncoupled_per_terminal_mm,
             "max_uncoupled_total_mm": self.max_uncoupled_total_mm,
             "max_vias_per_net": self.max_vias_per_net,
+            "chain_skew_tolerance_mm": self.chain_skew_tolerance_mm,
             "gather_ignore": self.gather_ignore,
             "length_match_group": self.length_match_group,
             "length_match_reference": self.length_match_reference,
@@ -2099,6 +2107,7 @@ class NetClassRouting:
             max_uncoupled_per_terminal_mm=data.get("max_uncoupled_per_terminal_mm"),
             max_uncoupled_total_mm=data.get("max_uncoupled_total_mm"),
             max_vias_per_net=data.get("max_vias_per_net"),
+            chain_skew_tolerance_mm=data.get("chain_skew_tolerance_mm"),
             gather_ignore=data.get("gather_ignore", "courtyard"),
             length_match_group=data.get("length_match_group"),
             length_match_reference=data.get("length_match_reference"),
