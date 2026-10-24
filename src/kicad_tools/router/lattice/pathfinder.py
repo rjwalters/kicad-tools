@@ -67,6 +67,7 @@ from ..pairplan.outcome import (
     SegmentOutcomes,
     hybrid_retry_reason,
 )
+from ..pairplan.via_pair import ViaPair, via_pair_sites
 from ..primitives import Pad, Route, Segment, Via, pad_half_extents
 from ..quantize import dogleg_points
 from ..rules import DesignRules, layer_permitted
@@ -336,6 +337,10 @@ class _RouteResult:
     runs: list[tuple[int, list[Pt], list[float]]]
     via_points: list[Pt]
     resources: set[Resource]  # lattice edges/via-nodes consumed (history keys)
+    # Issue #7932: the via pairs of a fat coupled search that took the
+    # mid-trunk via-pair move, in path order.  ``runs`` then has one more
+    # entry than this list (the run before each via pair, plus the last).
+    via_pairs: list[ViaPair] = field(default_factory=list)
 
 
 @dataclass
@@ -350,6 +355,30 @@ class _PairResult:
     vias: list[tuple[int, Pt]] = field(default_factory=list)
     # Issue #6444: log line naming the gateway (``None`` for a planar pair).
     gateway: str | None = None
+    # Issue #7932: how many mid-trunk via pairs the coupled body uses, and
+    # where (``F.Cu->B.Cu at (x, y)`` per via pair, for the log line).
+    via_pair_count: int = 0
+    via_pair_note: str | None = None
+
+
+@dataclass(frozen=True)
+class _ViaPairSpec:
+    """What the mid-trunk via-pair move may do in one fat search (issue #7932).
+
+    ``layers`` are the layers a via pair may land on; ``via_pitch`` is the
+    centre-to-centre distance of its two vias; ``reach`` is the least
+    straight run on each side of its centre; ``p_left`` is the searched
+    parity (P on the left of the travel direction); ``clearance`` is the
+    class clearance each via is held to; ``jog`` is each leg's 45-degree
+    jog out to its via.
+    """
+
+    layers: frozenset[int]
+    via_pitch: float
+    reach: float
+    jog: float
+    clearance: float
+    p_left: bool = True
 
 
 @dataclass
@@ -390,6 +419,17 @@ _HYBRID_PARITY_MIN_SKEW_GAIN_MM = 0.5
 #: ... and costs at most this many mm of extra total length per mm of skew
 #: removed (06rf USB3_RX2: 2.86 mm of skew for 8.5 mm, a ratio of 3.0).
 _HYBRID_PARITY_LENGTH_PER_SKEW = 4.0
+
+#: Issue #7932: unit vectors of the 8 octilinear headings (index = the
+#: :func:`_heading_index` value, 45-degree units counter-clockwise from +x).
+_HEADING_UNITS: tuple[Pt, ...] = tuple(
+    (round(math.cos(i * math.pi / 4.0), 15), round(math.sin(i * math.pi / 4.0), 15))
+    for i in range(8)
+)
+
+#: Issue #7932: longest straight lattice ray (in nodes) a via-pair macro edge
+#: walks to find its end node; a ray that needs more is not offered.
+_VIA_PAIR_MAX_RAY_NODES = 512
 
 #: Bounded retries of a pair search after a ``pair-partner-pad`` decline (#6839).
 _PARTNER_PAD_RETRIES = 4
@@ -779,6 +819,15 @@ class LatticePathfinder:
         # holds the latest hybrid-retry diagnostic per key.
         self.pair_gateway_ends: dict[object, tuple[int | None, int | None]] = {}
         self.pair_hybrid_log: dict[object, str] = {}
+        # Issue #7932: the mid-trunk via-pair retry -- a third attempt for a
+        # segment whose planar and gateway attempts both declined.  Runs only
+        # with ``pair_gateways``; ``pair_via_pairs`` False switches it off
+        # (copper exactly as before).  ``pair_via_pair_log`` holds the latest
+        # outcome text per key; ``pair_via_pair_coupled`` maps each key the
+        # BEST pass coupled through via pairs to its outcome text.
+        self.pair_via_pairs: bool = True
+        self.pair_via_pair_log: dict[object, str] = {}
+        self.pair_via_pair_coupled: dict[object, str] = {}
         # Issue #7093: ``key -> (vias_P, vias_N)`` of each fallback pair whose
         # committed legs have unequal via counts (no candidate had parity).
         self.pair_via_mismatch: dict[object, tuple[int, int]] = {}
@@ -2128,6 +2177,7 @@ class LatticePathfinder:
         escape_plan: dict[int, EscapeChoice] | None = None,
         guide: PartnerGuide | None = None,
         mirror: LayerMirror | None = None,
+        via_pairs: _ViaPairSpec | None = None,
     ) -> tuple[_RouteResult | None, str]:
         """Apply physical Kelvin isolation throughout every search stage."""
         from ..kelvin import detect_kelvin_topology
@@ -2163,6 +2213,7 @@ class LatticePathfinder:
                 escape_plan=escape_plan,
                 guide=guide,
                 mirror=mirror,
+                via_pairs=via_pairs,
             )
         finally:
             committed.kelvin_guard = previous
@@ -2185,6 +2236,7 @@ class LatticePathfinder:
         escape_plan: dict[int, EscapeChoice] | None = None,
         guide: PartnerGuide | None = None,
         mirror: LayerMirror | None = None,
+        via_pairs: _ViaPairSpec | None = None,
     ) -> tuple[_RouteResult | None, str]:
         """Route one connection, staging via-in-pad as a last resort (#4475).
 
@@ -2240,6 +2292,8 @@ class LatticePathfinder:
             search_kwargs["guide"] = guide
         if mirror is not None and not fat:
             search_kwargs["mirror"] = mirror
+        if via_pairs is not None and fat:
+            search_kwargs["via_pairs"] = via_pairs
         if not last_resort:
             return self._route_search(start, end, net_class, **search_kwargs)
 
@@ -2285,6 +2339,7 @@ class LatticePathfinder:
         escape_plan: dict[int, EscapeChoice] | None = None,
         guide: PartnerGuide | None = None,
         mirror: LayerMirror | None = None,
+        via_pairs: _ViaPairSpec | None = None,
     ) -> tuple[_RouteResult | None, str]:
         """A* over the (node, layer) graph; returns ``(result, reason)``.
 
@@ -2669,11 +2724,171 @@ class LatticePathfinder:
                 cur = came[cur][0] if cur in came else None
             return False
 
+        # Issue #7932: the mid-trunk via-pair macro edge, offered only to a
+        # fat search that was handed a :class:`_ViaPairSpec` (the deferred
+        # third retry).  ``None`` keeps every pre-#7932 search byte-identical.
+        vp = via_pairs if fat else None
+        end_move = "move"
+        vp_info: dict[tuple[NodeKey, NodeKey, int, int], ViaPair] = {}
+        vp_rays: dict[tuple[NodeKey, int], tuple[list[NodeKey], list[float]] | None] = {}
+        vp_sites: dict[tuple[Pt, int], bool] = {}
+        vp_moves: dict[tuple[NodeKey, int, int, int], tuple[NodeKey, ViaPair, float] | None] = {}
+
+        def fat_edge_legal(edge: EdgeKey, lyr: int) -> bool:
+            """The fat branch of the planar edge check, sharing its memo (#7932)."""
+            nonlocal ko_pruned
+            ek = (edge, lyr)
+            ok = edge_ok.get(ek)
+            if ok is None:
+                pa = lattice.node_point(edge[0])
+                pb = lattice.node_point(edge[1])
+                ok = not pads_block_segment_grown(
+                    obstacles, pa, pb, lyr, pair_nets, extra_clearance, exempt_pads
+                ) and committed_seg_clear_grown(committed, pa, pb, lyr, pair_nets, extra_clearance)
+                if (
+                    ok
+                    and fat_ko is not None
+                    and fat_ko.segment_blocked(pa, pb, lyr, net, fat_ko_half)
+                ):
+                    ok = False
+                    ko_pruned = True
+                ok = ok and boundary.segment_clear(pa, pb, half + extra_clearance)
+                edge_ok[ek] = ok
+            return ok
+
+        def fat_node_legal(nkey: NodeKey, lyr: int) -> bool:
+            """The fat branch of the planar node check, sharing its memo (#7932)."""
+            nonlocal ko_pruned
+            nbase_ = (nkey, lyr)
+            nok_ = node_ok.get(nbase_)
+            if nok_ is None:
+                npt = lattice.node_point(nkey)
+                nok_ = not pads_block_point_grown(
+                    obstacles, npt, lyr, pair_nets, extra_clearance, exempt_pads
+                ) and committed_point_clear_grown(committed, npt, lyr, pair_nets, extra_clearance)
+                if (
+                    nok_
+                    and fat_ko is not None
+                    and fat_ko.segment_blocked(npt, npt, lyr, net, fat_ko_node_half)
+                ):
+                    nok_ = False
+                    ko_pruned = True
+                node_ok[nbase_] = nok_
+            return nok_
+
+        def vp_ray(k0: NodeKey, hd: int) -> tuple[list[NodeKey], list[float]] | None:
+            """Straight lattice ray from ``k0`` along heading ``hd`` (#7932).
+
+            Follows lattice edges of exactly that heading until the ray is
+            at least ``2 * reach`` long; returns its nodes (``k0`` first) and
+            the cumulative length at each, or ``None`` if the ray breaks.
+            """
+            assert vp is not None
+            memo_key = (k0, hd)
+            if memo_key in vp_rays:
+                return vp_rays[memo_key]
+            nodes = [k0]
+            cum = [0.0]
+            need = 2.0 * vp.reach
+            out: tuple[list[NodeKey], list[float]] | None = None
+            while True:
+                if cum[-1] >= need - 1e-9:
+                    out = (nodes, cum)
+                    break
+                cur = nodes[-1]
+                pc_ = lattice.node_point(cur)
+                step_ = None
+                for nb, el in lattice.adj.get(cur, ()):
+                    if _heading_index(pc_, lattice.node_point(nb)) == hd:
+                        step_ = (nb, el)
+                        break
+                if step_ is None or len(nodes) > _VIA_PAIR_MAX_RAY_NODES:
+                    break
+                nodes.append(step_[0])
+                cum.append(cum[-1] + step_[1])
+            vp_rays[memo_key] = out
+            return out
+
+        def vp_site_legal(site: Pt, site_net: int) -> bool:
+            assert vp is not None
+            sk = ((round(site[0], 9), round(site[1], 9)), site_net)
+            ok = vp_sites.get(sk)
+            if ok is None:
+                ok = self._via_ok_at(site, site_net, committed, clearance=vp.clearance)
+                vp_sites[sk] = ok
+            return ok
+
+        def vp_move(
+            k0: NodeKey, hd: int, lyr: int, lyr2: int
+        ) -> tuple[NodeKey, ViaPair, float] | None:
+            """Legal via-pair macro edge ``(k0, lyr) -> (w, lyr2)`` along ``hd``.
+
+            Straight on ``lyr`` from ``k0`` to the centre ``c``, the via pair
+            at ``c`` perpendicular to the heading, straight on ``lyr2`` from
+            ``c`` to the ray's end node ``w``.  Both straights pass the fat
+            predicates (edge by edge, sharing the planar memo), ``w`` passes
+            the fat node check, and both vias pass :meth:`_via_ok_at` for
+            their own net.  Returns ``(w, via pair, extra cost)``.
+            """
+            assert vp is not None
+            mk = (k0, hd, lyr, lyr2)
+            if mk in vp_moves:
+                return vp_moves[mk]
+            out: tuple[NodeKey, ViaPair, float] | None = None
+            ray = vp_ray(k0, hd)
+            if ray is not None:
+                nodes, cum = ray
+                total = cum[-1]
+                mid = total / 2.0
+                p0 = lattice.node_point(k0)
+                d = _HEADING_UNITS[hd]
+                centre = (p0[0] + d[0] * mid, p0[1] + d[1] * mid)
+                ok = True
+                extra_cost = 0.0
+                for i in range(len(nodes) - 1):
+                    a_k, b_k = nodes[i], nodes[i + 1]
+                    edge = (min(a_k, b_k), max(a_k, b_k))
+                    seg_layers = []
+                    if cum[i] < mid - 1e-12:
+                        seg_layers.append(lyr)
+                    if cum[i + 1] > mid + 1e-12:
+                        seg_layers.append(lyr2)
+                    for sl in seg_layers:
+                        if not fat_edge_legal(edge, sl):
+                            ok = False
+                            break
+                        extra_cost += present * history.get(("e", edge, sl), 0.0)
+                    if not ok:
+                        break
+                w = nodes[-1]
+                if ok and not fat_node_legal(w, lyr2):
+                    ok = False
+                if ok:
+                    via_p, via_n = via_pair_sites(centre, d, vp.via_pitch, p_left=vp.p_left)
+                    ok = vp_site_legal(via_p, net) and vp_site_legal(
+                        via_n, partner_net if partner_net is not None else net
+                    )
+                    if ok:
+                        wp = lattice.node_point(w)
+                        for sa, sb, sl in ((p0, centre, lyr), (centre, wp, lyr2)):
+                            seg_len = dist(sa, sb)
+                            if preferred_layers and sl not in preferred_layers:
+                                extra_cost += seg_len * _NON_PREFERRED_LAYER_SURCHARGE
+                            extra_cost += copper_cost(sa, sb, sl, body_w)
+                        out = (
+                            w,
+                            ViaPair(centre, d, via_p, via_n, lyr, lyr2),
+                            total + 2.0 * self.via_cost + extra_cost,
+                        )
+            vp_moves[mk] = out
+            return out
+
         while heap:
             f, _c, state = heapq.heappop(heap)
             if state == _GOAL:
-                if came[_GOAL][1] == "arrive-edge":
+                if came[_GOAL][1] in ("arrive-edge", "arrive-vpair"):
                     end_state, end_pred = arrive_node, came[_GOAL][0]
+                    end_move = "vpair" if came[_GOAL][1] == "arrive-vpair" else "move"
                 else:
                     end_state = came[_GOAL][0]
                 break
@@ -2988,6 +3203,80 @@ class LatticePathfinder:
                             path_vias[nstate] = (lattice.node_point(key), path_vias.get(state))
                             heapq.heappush(heap, (tentative + h(key), counter, nstate))
                             counter += 1
+            if vp is not None:
+                # Issue #7932: the via-pair macro edge.  The incoming travel
+                # direction (from the predecessor, or the start stub) rules
+                # out a sharp turn straight into the move: the offset legs
+                # would collapse there.
+                d_in: Pt | None = None
+                if state in came:
+                    prev_state, prev_move = came[state]
+                    if prev_move in ("move", "vpair"):
+                        d_in = _unit_step(
+                            lattice.node_point(prev_state[0]), lattice.node_point(key)
+                        )
+                else:
+                    d_in = start_in.get(base) if start_in else None
+                for hd in range(8):
+                    d = _HEADING_UNITS[hd]
+                    if d_in is not None and d_in[0] * d[0] + d_in[1] * d[1] < -1e-6:
+                        continue  # a 135- or 180-degree turn into the move
+                    if parity_ends and is_start and _reverses(start_in.get(base), d):
+                        continue
+                    nhd = hd
+                    if turn_aware and abs(_signed_turn(state[2], nhd)) >= 3:
+                        continue
+                    for nl in sorted(vp.layers):
+                        if nl == layer:
+                            continue
+                        move_ = vp_move(key, hd, layer, nl)
+                        if move_ is None:
+                            continue
+                        w, pair_, mcost = move_
+                        # The path's own earlier via pairs (both nets).
+                        chain_ = path_vias.get(state)
+                        clash = False
+                        floor_ = vp.via_pitch - LATTICE_CLEARANCE_EPSILON_MM
+                        while chain_ is not None and not clash:
+                            other, chain_ = chain_
+                            for site in (pair_.via_p, pair_.via_n):
+                                if dist(site, other) < floor_:
+                                    clash = True
+                        if clash:
+                            continue
+                        wbase: _State = (w, nl)
+                        nstate = wbase
+                        if turn_aware:
+                            nwd = max(
+                                -_WINDING_CLAMP,
+                                min(_WINDING_CLAMP, state[3] + _signed_turn(state[2], nhd)),
+                            )
+                            nstate = (w, nl, nhd, nwd)
+                        tentative = g + mcost
+                        vp_info[(key, w, layer, nl)] = pair_
+                        if (
+                            parity_ends
+                            and wbase in goal
+                            and not _reverses(d, goal_out.get(wbase))
+                            and not passes_through(state, wbase)
+                        ):
+                            total = tentative + goal[wbase][0] + end_penalty(nstate)
+                            if total < g_score.get(_GOAL, math.inf) - 1e-12:
+                                g_score[_GOAL] = total
+                                came[_GOAL] = (state, "arrive-vpair")
+                                arrive_node = nstate
+                                heapq.heappush(heap, (total, counter, _GOAL))
+                                counter += 1
+                        if tentative < g_score.get(nstate, math.inf) - 1e-12 and not (
+                            turn_aware and wbase in reached and passes_through(state, wbase)
+                        ):
+                            if turn_aware:
+                                reached.add(wbase)
+                            g_score[nstate] = tentative
+                            came[nstate] = (state, "vpair")
+                            path_vias[nstate] = (pair_.via_n, (pair_.via_p, path_vias.get(state)))
+                            heapq.heappush(heap, (tentative + h(w), counter, nstate))
+                            counter += 1
 
         if end_state is None:
             # Issue #4605: when the keepout mask actually rejected resources
@@ -3054,7 +3343,7 @@ class LatticePathfinder:
             # registered edge, not the goal node's own (possibly reversing)
             # best arrival.
             chain.append(end_pred)
-            moves.append("move")
+            moves.append(end_move)
             cur = end_pred
         while cur in came:
             prev, move = came[cur]
@@ -3068,6 +3357,7 @@ class LatticePathfinder:
         resources: set[Resource] = set()
         runs: list[tuple[int, list[Pt], list[float]]] = []
         via_points: list[Pt] = []
+        found_pairs: list[ViaPair] = []
         cur_layer = start_state[1]
         start_poly = list(start_stub[start_state])  # pad -> first node
         cur_pts: list[Pt] = start_poly
@@ -3085,6 +3375,19 @@ class LatticePathfinder:
                 cur_layer = layer
                 cur_pts = [lattice.node_point(key)]
                 cur_ws = []
+            elif move == "vpair":
+                # Issue #7932: straight to the via pair's centre on the old
+                # layer, then on from the centre on the new one.
+                prev_key, prev_layer = chain[idx - 1][0], chain[idx - 1][1]
+                pair_ = vp_info[(prev_key, key, prev_layer, layer)]
+                cur_pts.append(pair_.centre)
+                cur_ws.append(body_w)
+                runs.append((cur_layer, cur_pts, cur_ws))
+                found_pairs.append(pair_)
+                resources.add(("vp", prev_key, key, prev_layer, layer))
+                cur_layer = layer
+                cur_pts = [pair_.centre, lattice.node_point(key)]
+                cur_ws = [body_w]
             else:
                 prev_key = chain[idx - 1][0]
                 resources.add(("e", (min(prev_key, key), max(prev_key, key)), layer))
@@ -3099,6 +3402,8 @@ class LatticePathfinder:
         route = self._emit(start, net, net_class, runs, via_points)
         if route is None:
             return None, "empty-route"
+        if found_pairs:
+            return _RouteResult(route, runs, via_points, resources, found_pairs), "ok"
         return _RouteResult(route, runs, via_points, resources), "ok"
 
     def _own_via_floor(self) -> float:
@@ -3408,6 +3713,7 @@ class LatticePathfinder:
         layers: tuple[int, ...] | None = None,
         keep_clear: tuple[tuple[Pt, float], ...] = (),
         skew_bias: float = 0.0,
+        via_pairs: _ViaPairSpec | None = None,
     ) -> tuple[_PairResult | None, str]:
         """Route one engaged diff pair as a fat centerline agent (#4270).
 
@@ -3442,6 +3748,13 @@ class LatticePathfinder:
         searched centerline (:func:`_balanced_centerlines`) are verified
         alongside it and the one whose legs plus the bias have the least skew
         ships.
+
+        ``via_pairs`` (issue #7932) offers the fat search the mid-trunk
+        via-pair move (see :meth:`_route_pair_via_pair`); each parity's
+        search gets it with that parity's side bit, and a centerline that
+        took the move goes through :meth:`_finish_via_pair_legs` instead of
+        the planar finish gate.  ``None`` (every caller but that retry) is
+        the planar agent byte-for-byte.
         """
         from .coupled import (
             assign_polarity,
@@ -3465,6 +3778,15 @@ class LatticePathfinder:
             common = tuple(sorted(set(common) & set(layers)))
         if not common:
             return None, "pair-no-common-layer"
+        # Issue #7932: with via pairs on offer each end escapes on the layers
+        # ITS two pads share -- a via pair can bring the body to the other
+        # end's layer.  The planar agent keeps one common layer set.
+        layers_a = layers_b = common
+        if via_pairs is not None:
+            layers_a = tuple(sorted((layer_sets[0] & layer_sets[1]) & via_pairs.layers))
+            layers_b = tuple(sorted((layer_sets[2] & layer_sets[3]) & via_pairs.layers))
+            if not layers_a or not layers_b:
+                return None, "pair-no-common-layer"
 
         mid_a, mid_b = pc.mid_a, pc.mid_b
         v_a = Pad(
@@ -3537,7 +3859,7 @@ class LatticePathfinder:
                 kmax=10_000,
                 extra_clearance=half_pitch,
                 partner_net=net_n,
-                layers=common,
+                layers=layers_a,
                 exempt_pads=exempt,
             )
             raw_b = self.pad_stubs(
@@ -3547,7 +3869,7 @@ class LatticePathfinder:
                 kmax=10_000,
                 extra_clearance=half_pitch,
                 partner_net=net_n,
-                layers=common,
+                layers=layers_b,
                 exempt_pads=exempt,
             )
         finally:
@@ -3621,6 +3943,9 @@ class LatticePathfinder:
             emitted legs from scratch anyway.
             """
             partner_fail.clear()
+            if result.via_pairs and via_pairs is not None and nudged is None:
+                # Issue #7932: several runs joined by via pairs.
+                return self._finish_via_pair_legs(pc, result, committed, via_pairs)
             if len(result.runs) != 1 or result.via_points:
                 return None, "pair-not-planar"  # defensive: vias are off
 
@@ -3848,6 +4173,7 @@ class LatticePathfinder:
                         # path hugs an endpoint pad row and the emitted legs land
                         # on the partner's copper (board-06 MIPI lesson).
                         exempt_pads=frozenset(),
+                        via_pairs=(None if via_pairs is None else replace(via_pairs, p_left=bit)),
                     )
                 finally:
                     guard_close(guard)
@@ -3895,6 +4221,373 @@ class LatticePathfinder:
                     break  # the turn is not on any stub: nothing to retry
                 pool[:] = kept
         return None, reason
+
+    # -- mid-trunk via pairs (issue #7932) --------------------------------------
+
+    def _finish_via_pair_legs(
+        self,
+        pc: CoupledConnection,
+        result: _RouteResult,
+        committed: CommittedCopper,
+        spec: _ViaPairSpec,
+    ) -> tuple[_PairResult | None, str]:
+        """Emit and verify a coupled centerline of runs joined by via pairs (#7932).
+
+        The multi-run counterpart of the planar finish gate in
+        :meth:`_route_pair_impl`.  It accepts ``N + 1`` runs separated by
+        ``N`` via pairs and nothing else: a single-ended via
+        (``via_points``) or a run / via-pair count mismatch declines
+        ``pair-not-planar`` as before.  Each run is offset by ``+/- pitch/2``
+        exactly as a planar body; P's side is fixed by the end pads
+        (:func:`~.coupled.assign_polarity` over the whole chain) and every
+        via pair must have been placed with P's via on that same side -- a
+        via pair never swaps polarity.  Each leg then jogs 45 degrees out to
+        its via and back (:mod:`kicad_tools.router.pairplan.via_pair`).
+
+        Everything emitted is re-verified from scratch, per layer: foreign
+        pads and committed copper at the leg's true width and class, the HV
+        pairwise rule, keepouts, the intra-pair floor, the partner-pad floor,
+        each leg against the PARTNER's vias at class geometry, every via
+        through :meth:`_via_ok_at`, and the vias against each other.  P and
+        N must end with the same via count.  Any failure declines with a
+        reason; nothing partial is returned (#3906).
+        """
+        from ..pairplan.via_pair import jog_into_via, jog_out_of_via
+        from .coupled import (
+            assign_polarity,
+            clip_to_pad_entry,
+            offset_polyline,
+            pads_block_segment_grown,
+            seg_rect_dist,
+            trim_end_reversals,
+        )
+
+        pairs = result.via_pairs
+        if result.via_points or len(result.runs) != len(pairs) + 1:
+            return None, "pair-not-planar"
+        for i, pair in enumerate(pairs):
+            if pair.from_layer != result.runs[i][0] or pair.to_layer != result.runs[i + 1][0]:
+                return None, "pair-not-planar"
+
+        net_p, net_n = pc.pad_p_a.net, pc.pad_n_a.net
+        pair_nets = {net_p, net_n}
+        trace_w = getattr(pc.net_class, "trace_width", None) or self.rules.trace_width
+        half = trace_w / 2.0
+        via_r = self.rules.via_diameter / 2.0
+        intra_clearance = pc.pitch - trace_w
+        emit_half = pc.pitch / 2.0 + _PAIR_SERIALIZATION_MARGIN_MM / 2.0
+
+        centers: list[tuple[int, list[Pt]]] = []
+        for i, (layer, pts, _widths) in enumerate(result.runs):
+            center = trim_end_reversals(pts)
+            if len(center) < 2:
+                return None, "pair-degenerate-centerline"
+            if i > 0 and dist(center[0], pairs[i - 1].centre) > 1e-9:
+                return None, "pair-via-pair-jog"
+            if i < len(pairs) and dist(center[-1], pairs[i].centre) > 1e-9:
+                return None, "pair-via-pair-jog"
+            centers.append((layer, center))
+
+        plus_runs: list[list[Pt]] = []
+        minus_runs: list[list[Pt]] = []
+        for _layer, center in centers:
+            plus = offset_polyline(center, +emit_half)
+            minus = offset_polyline(center, -emit_half)
+            if plus is None or minus is None:
+                return None, "pair-offset-degenerate"
+            plus_runs.append(plus)
+            minus_runs.append(minus)
+        ends_plus = [plus_runs[0][0], plus_runs[-1][-1]]
+        ends_minus = [minus_runs[0][0], minus_runs[-1][-1]]
+        assigned = assign_polarity(
+            ends_plus, ends_minus, pc.pad_p_a, pc.pad_n_a, pc.pad_p_b, pc.pad_n_b
+        )
+        if assigned is None:
+            return None, "pair-polarity-twist"
+        p_left = assigned[0] is ends_plus
+
+        # A via pair never swaps: P's via is on P's side of the travel.
+        vias: list[tuple[int, Pt]] = []
+        for pair in pairs:
+            via_p, via_n = via_pair_sites(pair.centre, pair.heading, spec.via_pitch, p_left=p_left)
+            if dist(via_p, pair.via_p) > 1e-9 or dist(via_n, pair.via_n) > 1e-9:
+                return None, "pair-via-pair-side"
+            vias.extend(((net_p, via_p), (net_n, via_n)))
+
+        leg_runs = {
+            net_p: plus_runs if p_left else minus_runs,
+            net_n: minus_runs if p_left else plus_runs,
+        }
+        pieces: dict[int, list[tuple[int, list[Pt]]]] = {}
+        for net in (net_p, net_n):
+            out: list[tuple[int, list[Pt]]] = []
+            for i, leg in enumerate(leg_runs[net]):
+                poly: list[Pt] | None = list(leg)
+                if i > 0 and poly is not None:
+                    prev = pairs[i - 1]
+                    site = prev.via_p if net == net_p else prev.via_n
+                    poly = jog_out_of_via(poly, site, prev.heading, spec.jog)
+                if i < len(pairs) and poly is not None:
+                    nxt = pairs[i]
+                    site = nxt.via_p if net == net_p else nxt.via_n
+                    poly = jog_into_via(poly, site, nxt.heading, spec.jog)
+                if poly is None:
+                    return None, "pair-via-pair-jog"
+                out.append((centers[i][0], poly))
+            pieces[net] = out
+
+        pad_reqs = self._pair_pad_reqs()
+        for net, pad_a, pad_b in (
+            (net_p, pc.pad_p_a, pc.pad_p_b),
+            (net_n, pc.pad_n_a, pc.pad_n_b),
+        ):
+            leg_clr = self._conn_geometry(pc.net_class, net)[1]
+            first_layer, first = pieces[net][0]
+            last_layer, last = pieces[net][-1]
+            attach_a = self._pair_attach(
+                pad_a, first[0], first_layer, net, pair_nets, committed, half, leg_clr
+            )
+            if attach_a is None:
+                return None, "pair-pad-attach"
+            attach_b = self._pair_attach(
+                pad_b, last[-1], last_layer, net, pair_nets, committed, half, leg_clr
+            )
+            if attach_b is None:
+                return None, "pair-pad-attach"
+            first = clip_to_pad_entry((attach_a[:-1] + first)[::-1], pad_a, trace_w)[::-1]
+            last = clip_to_pad_entry(last + list(reversed(attach_b))[1:], pad_b, trace_w)
+            pieces[net][0] = (first_layer, first)
+            pieces[net][-1] = (last_layer, last)
+
+            # Never-ship-a-short: the same checks as the planar finish gate,
+            # each segment on its own layer.
+            leg_pad_extra = self._pair_leg_pad_extra(committed, half, leg_clr)
+            for layer, poly in pieces[net]:
+                for a, b in zip(poly, poly[1:], strict=False):
+                    if dist(a, b) <= 1e-9:
+                        continue
+                    if pads_block_segment_grown(
+                        self.obstacles, a, b, layer, pair_nets, leg_pad_extra
+                    ):
+                        return None, "pair-leg-blocked"
+                    if not self._pair_pad_class_clear(a, b, layer, net, pair_nets, half, pad_reqs):
+                        return None, "pair-leg-blocked"
+                    if not committed.seg_clear(a, b, layer, net):
+                        return None, "pair-leg-blocked"
+                    if not self._pair_leg_clear(committed, a, b, layer, pair_nets, half, leg_clr):
+                        return None, "pair-leg-blocked"
+                    if self._pairwise is not None and self.obstacles.pairwise_pad_blocked(
+                        a, b, layer, net, half, 0.0, self._pairwise
+                    ):
+                        return None, "pair-leg-pairwise-blocked"
+                    if self._keepouts is not None and self._keepouts.segment_blocked(
+                        a, b, layer, net, half
+                    ):
+                        return None, "pair-leg-keepout"
+
+        # Each leg against the PARTNER's vias (a through via is on every
+        # layer), at the class geometry -- the gateway's #6444 rule.
+        clr = max(
+            self._conn_geometry(pc.net_class, net_p)[1],
+            self._conn_geometry(pc.net_class, net_n)[1],
+        )
+        for net in (net_p, net_n):
+            for _layer, poly in pieces[net]:
+                for a, b in zip(poly, poly[1:], strict=False):
+                    for vnet, site in vias:
+                        if (
+                            vnet != net
+                            and seg_seg_dist(a, b, site, site) < half + via_r + clr - 1e-6
+                        ):
+                            return None, "pair-via-pair-leg-via"
+        floor = spec.via_pitch - LATTICE_CLEARANCE_EPSILON_MM - 1e-9
+        for i, (vnet, site) in enumerate(vias):
+            if not self._via_ok_at(site, vnet, committed, clearance=spec.clearance):
+                return None, "pair-via-pair-via-blocked"
+            for _onet, other in vias[i + 1 :]:
+                if dist(site, other) < floor:
+                    return None, "pair-via-pair-via-gap"
+
+        # Intra-pair floor, per layer.
+        layers_used = sorted({layer for layer, _poly in pieces[net_p] + pieces[net_n]})
+        for layer in layers_used:
+            segs_p = [
+                (a, b)
+                for lyr, poly in pieces[net_p]
+                if lyr == layer
+                for a, b in zip(poly, poly[1:], strict=False)
+                if dist(a, b) > 1e-9
+            ]
+            segs_n = [
+                (a, b)
+                for lyr, poly in pieces[net_n]
+                if lyr == layer
+                for a, b in zip(poly, poly[1:], strict=False)
+                if dist(a, b) > 1e-9
+            ]
+            for a, b in segs_p:
+                for c, d in segs_n:
+                    if seg_seg_dist(a, b, c, d) < pc.pitch - 1e-4:
+                        return None, "pair-intra-clearance"
+
+        # Partner-pad floor, per layer.
+        need = intra_clearance + half - 1e-4
+        for net, other_net in ((net_p, net_n), (net_n, net_p)):
+            for idx, pad in enumerate(self.pads):
+                if pad.net != other_net:
+                    continue
+                half_w, half_h = pad_half_extents(pad)
+                rect = (pad.x - half_w, pad.y - half_h, pad.x + half_w, pad.y + half_h)
+                for layer, poly in pieces[net]:
+                    if layer not in self.obstacles.pad_layer_indices[idx]:
+                        continue
+                    for a, b in zip(poly, poly[1:], strict=False):
+                        if dist(a, b) > 1e-9 and seg_rect_dist(a, b, rect) < need:
+                            return None, "pair-partner-pad"
+
+        top = self.layer_stack.index_to_layer_enum(0)
+        bottom = self.layer_stack.index_to_layer_enum(self.num_layers - 1)
+        routes: list[Route] = []
+        runs: list[tuple[int, int, list[Pt]]] = []
+        for net, pad in ((net_p, pc.pad_p_a), (net_n, pc.pad_n_a)):
+            route = Route(net=net, net_name=pad.net_name)
+            for layer, poly in pieces[net]:
+                emitted = self._emit_leg(net, pad.net_name, poly, layer, trace_w)
+                if emitted is None:
+                    return None, "pair-empty-route"
+                route.segments.extend(emitted.segments)
+                runs.append((net, layer, poly))
+            for vnet, site in vias:
+                if vnet == net:
+                    route.vias.append(
+                        Via(
+                            x=site[0],
+                            y=site[1],
+                            drill=self.rules.via_drill,
+                            diameter=self.rules.via_diameter,
+                            layers=(top, bottom),
+                            net=net,
+                            net_name=pad.net_name,
+                        )
+                    )
+            routes.append(route)
+        if len(routes[0].vias) != len(routes[1].vias):
+            return None, "pair-via-pair-via-count"
+        note = "; ".join(
+            f"{self._layer_name(pair.from_layer)}->{self._layer_name(pair.to_layer)}"
+            f" at ({pair.centre[0]:.3f}, {pair.centre[1]:.3f})"
+            for pair in pairs
+        )
+        return (
+            _PairResult(
+                routes=routes,
+                runs=runs,
+                resources=result.resources,
+                vias=vias,
+                via_pair_count=len(pairs),
+                via_pair_note=note,
+            ),
+            "ok",
+        )
+
+    def _route_pair_via_pair(
+        self,
+        pc: CoupledConnection,
+        *,
+        committed: CommittedCopper,
+        history: dict[Resource, float],
+        present: float,
+        deadline: float | None = None,
+        vias_used: int = 0,
+    ) -> tuple[_PairResult | None, str]:
+        """Couple a segment with mid-trunk via pairs, the third retry (#7932).
+
+        Offered (by :meth:`_route_netset_once`) only to a segment whose
+        planar attempt AND fan-via gateway attempt (#6444) both declined.
+        The unchanged pair agent (:meth:`_route_pair_impl`) runs again with
+        the via-pair macro edge switched on: from a fat state the search may
+        run straight along one of the 8 headings, place a P/N via pair
+        perpendicular to it (P's via on P's side) and carry on straight on
+        another layer, as one move costing ``2 x via_cost`` plus its length.
+        The vias sit ``max(via-via gap, pitch)`` apart; the straights are at
+        least :func:`~kicad_tools.router.pairplan.via_pair.via_pair_reach`
+        long on each side.
+
+        Via budget (``max_vias_per_net`` of :attr:`pair_gateway_limits`,
+        per NET, counting ``vias_used`` on the pair's other chain segments,
+        #6834): a budget below one via declines before any search; a path
+        that needs more via pairs than the budget left declines after it.
+        Both are ``pair-via-pair-via-limit``.  P and N always get the same
+        via count (one each per via pair).
+
+        The outcome text lands in :attr:`pair_via_pair_log` either way.
+        Nothing is committed here; the caller commits a success.
+        """
+        from ..pairplan.via_pair import via_pair_jog, via_pair_pitch, via_pair_reach
+
+        key = pc.key
+        _max_fan, max_vias = self.pair_gateway_limits.get(key, (None, None))
+        common = set.intersection(
+            *(
+                set(self._pad_layer_indices(p))
+                for p in (pc.pad_p_a, pc.pad_n_a, pc.pad_p_b, pc.pad_n_b)
+            )
+        )
+        other = self._gateway_layers(pc)
+        if not common or not other:
+            reason = "pair-via-pair-no-layer"
+            self.pair_via_pair_log[key] = f"via-pair declined ({reason}): no other routable layer"
+            return None, reason
+        if max_vias is not None and 1 + vias_used > max_vias:
+            reason = "pair-via-pair-via-limit"
+            self.pair_via_pair_log[key] = (
+                f"via-pair declined ({reason}): needs 1 via/net"
+                f"{f' + {vias_used} on other segments' if vias_used else ''}"
+                f" > limit {max_vias}"
+            )
+            return None, reason
+        if deadline is not None and time.monotonic() >= deadline:
+            reason = "pair-via-pair-deadline"
+            self.pair_via_pair_log[key] = f"via-pair declined ({reason})"
+            return None, reason
+
+        clr = max(
+            self._conn_geometry(pc.net_class, pc.pad_p_a.net)[1],
+            self._conn_geometry(pc.net_class, pc.pad_n_a.net)[1],
+        )
+        via_r = self.rules.via_diameter / 2.0
+        via_gap = max(self._via_via_gap, self.rules.via_diameter + clr, self._same_net_via_gap)
+        via_pitch = via_pair_pitch(pc.pitch, via_gap)
+        spec = _ViaPairSpec(
+            layers=frozenset(sorted(common | set(other))),
+            via_pitch=via_pitch,
+            reach=via_pair_reach(pc.pitch, via_pitch, via_r, clr),
+            jog=via_pair_jog(pc.pitch, via_pitch),
+            clearance=clr,
+        )
+        names = ",".join(self._layer_name(layer) for layer in sorted(spec.layers))
+        geometry = f"layers {names}, via pitch {via_pitch:.3f} mm, reach {spec.reach:.3f} mm"
+        pres, why = self._route_pair_impl(
+            pc, committed=committed, history=history, present=present, via_pairs=spec
+        )
+        if pres is None:
+            reason = f"pair-via-pair-{why.removeprefix('pair-')}"
+            self.pair_via_pair_log[key] = f"via-pair declined ({reason}): {geometry}"
+            return None, reason
+        k = pres.via_pair_count
+        if max_vias is not None and k + vias_used > max_vias:
+            reason = "pair-via-pair-via-limit"
+            self.pair_via_pair_log[key] = (
+                f"via-pair declined ({reason}): path needs {k} via(s)/net"
+                f"{f' + {vias_used} on other segments' if vias_used else ''}"
+                f" > limit {max_vias}; {geometry}"
+            )
+            return None, reason
+        where = f" ({pres.via_pair_note})" if pres.via_pair_note else ""
+        self.pair_via_pair_log[key] = (
+            f"coupled through {k} via pair(s){where}; vias P/N={k}/{k}; {geometry}"
+        )
+        return pres, "ok"
 
     # -- fan-via terminal gateways (issue #6444) --------------------------------
 
@@ -7084,6 +7777,7 @@ class LatticePathfinder:
             self._obstacles,
         )
         saved_hybrid = dict(self.pair_hybrid_log)
+        saved_vp = (dict(self.pair_via_pair_log), dict(self.pair_via_pair_coupled))
         if self._class_pad_growth:
             self._lattice = None  # rebuild without the gateway run's growth
             self._obstacles = None
@@ -7099,6 +7793,8 @@ class LatticePathfinder:
             )
             self.pair_gateway_log = {}  # the kept run attempted no gateway
             self.pair_hybrid_log = {}  # ... and so no hybrid (it follows the gateway)
+            self.pair_via_pair_log = {}  # ... nor a via-pair retry (#7932)
+            self.pair_via_pair_coupled = {}
             return alt
         (
             self.failure_reasons,
@@ -7112,6 +7808,7 @@ class LatticePathfinder:
             self._obstacles,
         ) = saved
         self.pair_hybrid_log = saved_hybrid
+        self.pair_via_pair_log, self.pair_via_pair_coupled = saved_vp
         self.pair_gateway_rollback = (
             f"gateway run left {left} class-pad shortfall(s); a run without gateways "
             f"was no better ({alt_left} left): gateways kept"
@@ -7218,6 +7915,7 @@ class LatticePathfinder:
                     self._obstacles,
                 )
                 saved_hybrid = dict(self.pair_hybrid_log)
+                saved_vp = (dict(self.pair_via_pair_log), dict(self.pair_via_pair_coupled))
                 self._class_pad_growth.update(grow)
                 self._lattice = None
                 self._obstacles = None
@@ -7254,6 +7952,7 @@ class LatticePathfinder:
                     self._obstacles,
                 ) = saved
                 self.pair_hybrid_log = saved_hybrid
+                self.pair_via_pair_log, self.pair_via_pair_coupled = saved_vp
             if not kept:
                 break
         routes, stats = best
@@ -7393,6 +8092,7 @@ class LatticePathfinder:
         best_reasons: dict[object, str] = {}
         best_pair_outcomes = SegmentOutcomes()
         best_pair_gateways: dict[object, str] = {}
+        best_pair_via_pairs: dict[object, str] = {}
         best_count = -1
         # Issue #6373: best-pass ranking ``(routed_items, coupled_count,
         # fallback_legs)``.  ``routed_items`` keeps its pre-#6373 meaning
@@ -7460,6 +8160,10 @@ class LatticePathfinder:
             deferred_hybrid: list[Any] = []
             hybrid_pairs: list[Any] = []
             pass_gateways: dict[object, str] = {}
+            # Issue #7932: segments whose planar AND gateway attempts declined,
+            # awaiting the mid-trunk via-pair retry; and the ones it coupled.
+            deferred_via_pair: list[Any] = []
+            pass_via_pairs: dict[object, str] = {}
             # Issue #7650: planar coupled pairs of this pass, in commit order.
             planar_pairs: list[tuple[Any, _PairResult]] = []
 
@@ -7515,6 +8219,8 @@ class LatticePathfinder:
                             failed.append((1, item))
                         elif hybrid_retry_reason(_greason):
                             deferred_hybrid.append(item)
+                        if via_pair_retry(item):
+                            deferred_via_pair.append(item)
                         continue
                     pass_gateways[item.key] = gres.gateway or "gateway"
                     pair_outcomes[item.key] = SegmentOutcome.coupled(pass_gateways[item.key])
@@ -7526,6 +8232,40 @@ class LatticePathfinder:
                     if item in fallback_pairs:
                         fallback_pairs.remove(item)
                     commit_pair(item, gres)
+
+            def via_pair_retry(item: Any) -> bool:
+                # Issue #7932: the third retry rides on the gateway switch.
+                return (
+                    pair_gateways and self.pair_via_pairs and item.key not in self.pair_gateway_skip
+                )
+
+            def flush_via_pairs() -> None:
+                nonlocal routed_items, coupled_count
+                pending = list(deferred_via_pair)
+                deferred_via_pair.clear()
+                for item in pending:
+                    if deadline is not None and time.monotonic() >= deadline:
+                        break
+                    vres, _vreason = self._route_pair_via_pair(
+                        item,
+                        committed=committed,
+                        history=history,
+                        present=present,
+                        deadline=deadline,
+                        vias_used=pair_vias_used(item),
+                    )
+                    if vres is None:
+                        continue  # keeps its hybrid retry / fallback / decline
+                    pass_via_pairs[item.key] = self.pair_via_pair_log.get(item.key, "via pair")
+                    pair_outcomes[item.key] = SegmentOutcome.coupled()
+                    coupled_count += 1
+                    routed_items += 1
+                    reasons.pop(item.key, None)
+                    failed[:] = [f for f in failed if f[1] is not item]
+                    for pending_list in (deferred_hybrid, deferred_fallback, fallback_pairs):
+                        if item in pending_list:
+                            pending_list.remove(item)
+                    commit_pair(item, vres)
 
             def flush_hybrids() -> None:
                 nonlocal routed_items, hybrid_count
@@ -7559,6 +8299,7 @@ class LatticePathfinder:
             def flush_fallbacks() -> None:
                 nonlocal routed_items, fallback_legs
                 flush_gateways()
+                flush_via_pairs()
                 flush_hybrids()
                 if not deferred_fallback:
                     return
@@ -7672,6 +8413,16 @@ class LatticePathfinder:
                         # (board 03 USB_D[0]).  Its per-end verdict is the
                         # one the gateway-first search just recorded.
                         deferred_hybrid.append(item)
+                    if (
+                        pres is None
+                        and first_greason is not None
+                        and preason in GATEWAY_RETRY_REASONS
+                        and via_pair_retry(item)
+                    ):
+                        # Issue #7932: the gateway-first attempt was this
+                        # segment's gateway retry, so it earns the via-pair
+                        # retry too.
+                        deferred_via_pair.append(item)
                     if pres is None and uncoupled_fallback:
                         # Issue #6373: a declined pair's main run is routed as
                         # two single-ended legs.  Issue #6697: DEFERRED until
@@ -7733,6 +8484,7 @@ class LatticePathfinder:
                 best_reasons = reasons
                 best_pair_outcomes = pair_outcomes
                 best_pair_gateways = pass_gateways
+                best_pair_via_pairs = pass_via_pairs
                 best_fallback_pairs = len(fallback_pairs)
                 best_fallback_legs = fallback_legs
                 best_hybrid_pairs = hybrid_count
@@ -7839,6 +8591,7 @@ class LatticePathfinder:
         self.failure_reasons = best_reasons
         self.pair_outcomes = best_pair_outcomes
         self.pair_gateways = best_pair_gateways
+        self.pair_via_pair_coupled = best_pair_via_pairs
         # Issue #6395: hold the best pass's single-ended copper to each pad's
         # own net class (``max(own, pad)``).  Pair legs (coupled and
         # uncoupled-fallback) stay put and count as foreign copper.  Issue
