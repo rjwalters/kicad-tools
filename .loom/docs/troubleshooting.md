@@ -18,7 +18,7 @@
 `loom-daemon-stop.sh` is "stopped for now"; the watchdog, a supervised relaunch, the
 auto-update roll or `loom update` can bring a daemon back. For a durable opt-out run
 `loom-daemon host disable --reason "<why>"` (writes `~/.loom/autonomy-disabled`, stops
-the daemon and removes its jobs). Every start/re-provision path then refuses with the
+the daemon; the watchdog job stays loaded and refuses on the marker). Every start/re-provision path then refuses with the
 reason, who and when; `loom-daemon status` shows `disabled by operator: <reason>
 (<when>)`. Undo with `loom-daemon host enable` (it does not start anything). Agents must
 not start or repair a daemon on such a host. See `daemon-reference.md`.
