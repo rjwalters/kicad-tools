@@ -343,8 +343,13 @@ with the same predicate as [`comment-trust.md`](comment-trust.md) (repo insider,
 fleet App, this daemon, `forge.trustedCommenters`, the fleet admin roster), with
 no second trust table. Only `TRUSTED` promotes. An `UNTRUSTED` author, or an
 `UNKNOWN` one (the issue could not be read), leaves the issue at `loom:curated`
-with one comment (keyed on `<!-- loom:promotion-author-gate -->`, so retries do not
-repeat it). Unreadable evidence never counts as trust.
+with one comment (keyed on its `<!-- loom:promotion-author-gate rev=… trust=… -->`
+marker line, so retries do not repeat it). Unreadable evidence never counts as trust.
+The marker records the issue's title/body revision and the trust-rules digest; while a
+trusted notice matches both, the step tick excludes the issue from `champion_promote`
+(pass reason `author_gate_held`, #13142) instead of re-drawing a session that can only
+repeat the verdict. A body edit, a trust-list change, or a legacy unstamped notice
+makes it drawable once; a trusted `loom:issue` takes it out of the queue.
 
 Adoption is a trusted maintainer applying `loom:issue` by hand, or re-filing the
 issue; an automated Champion verdict alone is not adoption. Trusted authors see no
