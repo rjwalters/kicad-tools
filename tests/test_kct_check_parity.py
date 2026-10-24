@@ -25,7 +25,7 @@ These tests pin two contracts so a future silent-no-op regression (cf.
    without a net_class_map.
 2. **Parity (the fix):** ``kct check --net-class-map <sidecar>`` reports the
    bare error set PLUS exactly the three families, with the family-level
-   counts pinned in ``BOARD_07_EXPECTED_FAMILY_DELTA`` (diffpair_length_skew=5,
+   counts pinned in ``BOARD_07_EXPECTED_FAMILY_DELTA`` (diffpair_length_skew=6,
    match_group_length_skew=1 on board 07 since #6725; see #6802).
 
 It also exercises the CI gate's net-class-map resolver
@@ -120,8 +120,14 @@ NET_CLASS_GATED_FAMILIES: tuple[str, ...] = (
 # with ``kct retune-lengths --group ADDR_BUS`` (skew 1.0998 -> 0.0169 mm), so
 # ``match_group_length_skew`` is now clean (0). The five pair-skew findings
 # above are untouched.
+#
+# Re-pinned by #7894: the fixture's pair classes now declare ``pair_protocol``
+# (their explicit caps stay until #7913).  DQS declares ``DDR_DQS_CK``, so its
+# UG583 2 ps timing limit is an error (48.4 ps), beside its 0.05 mm cap error:
+# 6 findings on the same five pairs.  The MIPI (8.05 ps) and TMDS (3.36 ps)
+# budgets are maximum-rate warnings and add no error.
 BOARD_07_EXPECTED_FAMILY_DELTA = {
-    "diffpair_length_skew": 5,
+    "diffpair_length_skew": 6,
     "diffpair_routing_continuity": 0,
     "diffpair_uncoupled_length": 0,
     "match_group_length_skew": 0,

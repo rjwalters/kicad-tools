@@ -1,8 +1,7 @@
 # 09 — Skew Budgets in Picoseconds
 
-The budget comes from
-`src/kicad_tools/physics/skew_budget.py` (Issue #7892, ruling on #7883; the
-derivation is in
+The budget comes from `src/kicad_tools/physics/skew_budget.py` (Issue #7892,
+ruling on #7883; the derivation is in
 [`docs/research/diffpair-phase-skew-tolerance.md`](../../research/diffpair-phase-skew-tolerance.md)).
 
 **Skew is checked in time.** Each leg's propagation delay is the sum of its
@@ -53,11 +52,13 @@ nothing to derive from (`SATA`, `ETHERNET`, `CUSTOM`, unknown names) keeps the
 length check: the table value, or the generic 0.5 mm.
 
 **Length checks that stay.** A derived budget replaces the declared
-protocol's millimetre table value. It does not replace:
+protocol's millimetre table value, and the generic 0.5 mm for a protocol
+recognised from a class or net name (Issue #7894). It does not replace:
 
-- a class's own `skew_tolerance_mm`, which is still checked as a length cap
-  (error) until #7894 removes those fields from the board generators;
-- the generic 0.5 mm, when the protocol was only inferred from a name.
+- a class's own `skew_tolerance_mm`, which is checked as an extra length cap
+  (error). The board generators no longer set one (Issue #7894);
+- the generic 0.5 mm, when the protocol is completely unknown: no
+  `pair_protocol` and no class- or net-name match.
 
 A finding reports the skew in ps, the budget, and the budget in mm at the
 slowest layer, and names its source in brackets:
@@ -91,9 +92,9 @@ mix and that `kct check` fails. It cannot see layer-dependent delay.
 
 Every skew tuner and the coupled-candidate choice resolve their target with
 `kct check`'s own limits (`router.pair_skew_target.resolve_pair_skew_target`):
-the budget in ps **and** the error-level mm caps (a class `skew_tolerance_mm`
-until #7894, the generic 0.5 mm for a name-guessed protocol, and the
-`.kicad_dru` length rule when it is an error and tighter). Progress is
+the budget in ps **and** the error-level mm caps (an explicit class
+`skew_tolerance_mm`, the generic 0.5 mm for a completely unknown protocol, and
+the `.kicad_dru` length rule when it is an error and tighter). Progress is
 measured in ps and each bump is sized by its host layer's delay, so a split
 pair matched in length is tuned until its delays match. A cap is never
 traded for ps: when closing the delay skew would break it, the tuner stops.

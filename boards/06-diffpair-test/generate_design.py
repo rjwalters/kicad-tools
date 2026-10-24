@@ -23,7 +23,7 @@ protocol that opt into each Phase 1-3 feature:
     - coupled_continuity_threshold (Phase 2G)
     - target_diff_impedance (Phase 3K)
     - target_single_impedance (Phase 3K)
-    - skew_tolerance_mm (Phase 3H)
+    - pair_protocol / data_rate_gbps (derived ps skew budget, Issue #7894)
 
 Usage:
     python generate_design.py [output_dir]
@@ -170,8 +170,9 @@ def usb3_net_class() -> NetClassRouting:
     """USB 3.0 SuperSpeed net class (4 pairs).
 
     Tighter than USB 2.0: target_diff_impedance=90, coupled_continuity_threshold
-    bumped to 0.9 (HSDI demands tight coupling), skew tolerance dropped to
-    0.5mm (USB 3.0 spec ~0.4 mm).
+    bumped to 0.9 (HSDI demands tight coupling).  Skew is the derived USB 3
+    Gen 1 budget (4.03 ps at Nyquist, Issue #7892); the hand-set 0.5 mm class
+    limit is gone (Issue #7894).
     """
     return NetClassRouting(
         name="USB3",
@@ -183,8 +184,9 @@ def usb3_net_class() -> NetClassRouting:
         coupled_continuity_threshold=0.9,  # Phase 2G: HSDI tight coupling
         target_diff_impedance=90.0,  # Phase 3K
         impedance_tolerance_percent=10.0,
-        skew_tolerance_mm=0.5,  # Phase 3H: USB 3.0 budget
-        pair_protocol="USB3_SS",  # Issue #6443 (explicit 0.5 mm above wins)
+        # Issue #7894: no class skew limit; the derived budget of the declared
+        # protocol at its maximum rate (5 Gb/s, this board's rate) applies.
+        pair_protocol="USB3_SS",
         length_critical=True,
     )
 
@@ -192,8 +194,8 @@ def usb3_net_class() -> NetClassRouting:
 def pcie_net_class() -> NetClassRouting:
     """PCIe Gen1 net class (2 pairs).
 
-    Phase 3I/3J focal point.  100 Ohm differential, 0.5mm skew is the
-    tightest constraint that engages Phase 3I serpentine insertion.
+    Phase 3I/3J focal point.  100 Ohm differential; skew is the derived
+    PCIe Gen1 budget (Issue #7892), no hand-set class limit (Issue #7894).
     """
     return NetClassRouting(
         name="PCIe",
@@ -205,8 +207,9 @@ def pcie_net_class() -> NetClassRouting:
         coupled_continuity_threshold=0.85,  # Phase 2G
         target_diff_impedance=100.0,  # Phase 3K: PCIe 100 Ohm
         impedance_tolerance_percent=10.0,
-        skew_tolerance_mm=0.5,  # Phase 3H: PCIe Gen1 budget
-        pair_protocol="PCIE_G1",  # Issue #6443 (explicit 0.5 mm above wins)
+        # Issue #7894: no class skew limit; PCIe Gen1 runs at the protocol's
+        # 2.5 GT/s maximum, so the derived budget needs no declared rate.
+        pair_protocol="PCIE_G1",
         length_critical=True,
     )
 
@@ -214,9 +217,10 @@ def pcie_net_class() -> NetClassRouting:
 def mipi_net_class() -> NetClassRouting:
     """MIPI D-PHY net class (2 lanes: CLK + D0).
 
-    Tight skew (0.3mm) and 100 Ohm differential.  Exercises Phase 3I
-    serpentine for the CLK pair (which is typically shortest and least
-    matched).
+    100 Ohm differential at 1 Gb/s per lane.  Skew is the derived D-PHY
+    budget at the declared rate (Issue #7892), an error; the hand-set 0.3 mm
+    class limit is gone (Issue #7894).  Exercises Phase 3I serpentine for the
+    CLK pair (which is typically shortest and least matched).
     """
     return NetClassRouting(
         name="MIPI",
@@ -228,8 +232,11 @@ def mipi_net_class() -> NetClassRouting:
         coupled_continuity_threshold=0.85,  # Phase 2G
         target_diff_impedance=100.0,  # Phase 3K: MIPI 100 Ohm
         impedance_tolerance_percent=10.0,
-        skew_tolerance_mm=0.3,  # Phase 3H: tight MIPI lane budget
-        pair_protocol="MIPI_DPHY",  # Issue #6443 (explicit 0.3 mm above wins)
+        # Issue #7894: no class skew limit.  The lanes run at 1 Gb/s (README),
+        # below D-PHY's 2.5 Gb/s maximum, so the rate is declared: the derived
+        # budget is 20.1 ps at Nyquist and an error (ruling Q-c).
+        pair_protocol="MIPI_DPHY",
+        data_rate_gbps=1.0,
         length_critical=True,
     )
 
@@ -3347,8 +3354,8 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     #     in pathfinder.py / cpp_backend.py
     #   - coupled_routing as the opt-in gate for CoupledPathfinder
     #   - target_diff_impedance via apply_impedance_driven_sizing()
-    #   - skew_tolerance_mm via DiffPairLengthTracker / Phase 3I
-    #     serpentine (when #2648 lands)
+    #   - pair_protocol / data_rate_gbps via the derived ps skew budget
+    #     the skew tuners aim for (Issues #7893, #7894)
     #   - coupled_continuity_threshold via the DRC rule (passed to
     #     DiffPairRoutingContinuityRule.threshold_map)
     net_class_map = build_net_class_map()

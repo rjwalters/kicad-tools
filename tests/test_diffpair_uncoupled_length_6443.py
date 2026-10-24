@@ -613,7 +613,9 @@ def test_committed_boards_carry_the_native_rules() -> None:
     assert "skew (max 2.5mm) (within_diff_pairs)" in b03
     assert "via_count (max 4)" in b03
     b06 = (REPO / "boards/06-diffpair-test/output/diffpair_test_routed.kicad_dru").read_text()
-    assert "skew (max 0.1mm) (within_diff_pairs)" in b06
+    # Issue #7894: no class cap; the 17.3 ps LVDS budget at the slowest layer,
+    # a warning at the protocol's maximum rate.
+    assert "skew (max 2.414465mm) (within_diff_pairs))\n  (severity warning)" in b06
 
 
 def test_native_rules_are_accepted_and_enforced_by_kicad_cli(tmp_path) -> None:

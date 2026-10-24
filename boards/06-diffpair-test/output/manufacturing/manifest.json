@@ -21,16 +21,16 @@
       "size": 746
     },
     "check-report.json": {
-      "sha256": "97b241f8800f6de378c9285995a41229f3fb34c2c33f16937d0125bf39fd120e",
-      "size": 6952
+      "sha256": "6c759b5c9517bd0bad794a08d61b3fdc10f77649c93c43eb66ac0fce9a430ae7",
+      "size": 16592
     },
     "cpl_jlcpcb.csv": {
       "sha256": "cf68a29f553dbfc0332a67c018be523dd09f8a2017d441ba69e8cb17d310b86e",
       "size": 2750
     },
     "design-source.zip": {
-      "sha256": "e97af70d790f1f701fe725b0bff302c490c32d57b2c8f4314b74a27fc971986b",
-      "size": 13218
+      "sha256": "b018a678170f9f74f172f56111a44bd10bc88c13439f70ce2a84ccc3b769ce97",
+      "size": 13254
     },
     "fill-consistency.json": {
       "sha256": "6aea658a7d30a148c08b041c382b38c562024696eda159f25addb85c3d45b944",
@@ -77,8 +77,8 @@
       "size": 262645
     },
     "kicad_project.zip": {
-      "sha256": "c95459f29d90474cafb05c98ac551b171e7a427f80994a8fcfe5d9ba5db67272",
-      "size": 79453
+      "sha256": "6ffc4b5725d8d7f657493eecd9216098f4bad8e37cba556d30c3e11382652988",
+      "size": 79471
     },
     "lvs.json": {
       "sha256": "8a44e465f8db5c6f95b19b46257bd87290819ef27e8b68a85cbf490bd0f47a68",

@@ -43,8 +43,6 @@ KNOWN_OFFENDERS = frozenset(
         "boards/03-usb-joystick/output/manufacturing/native-clearance-qualification/factory-check.json",
         "boards/03-usb-joystick/output/manufacturing/native-clearance-qualification/final-board-manufacturing-check.json",
         "boards/04-stm32-devboard/output/check-report.json",
-        "boards/06-diffpair-test/output/manufacturing/check-report.json",
-        "boards/06-diffpair-test/output/readiness/kct-check.json",
     }
 )
 

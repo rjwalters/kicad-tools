@@ -17,12 +17,13 @@ checker enforces:
   the function ``kct check`` itself reads, which closes the #7797 drift risk:
   there is no second resolution that could disagree.
 * :class:`PairSkewTarget` holds the budget in ps (any severity: a warning
-  budget is still a ``kct check`` finding) and the transitional
-  **error-level** millimetre caps #7892 keeps beside it -- a class's own
-  ``skew_tolerance_mm`` and, for a pair whose protocol was only guessed from a
-  name, the generic 0.5 mm.  A pair meets its target only when it meets the
-  budget **and** every active cap, so the router never stops at a skew
-  ``kct check`` fails.  Removing the caps is #7894.  When the ``.kicad_dru``
+  budget is still a ``kct check`` finding) and any **error-level**
+  millimetre cap ``kct check`` keeps beside it -- a class's own explicit
+  ``skew_tolerance_mm`` and, only for a pair whose protocol is completely
+  unknown (no ``pair_protocol`` and no class- or net-name match), the generic
+  0.5 mm (Issue #7894 ruling; the board generators no longer set class caps).
+  A pair meets its target only when it meets the budget **and** every active
+  cap, so the router never stops at a skew ``kct check`` fails.  When the ``.kicad_dru``
   length rule kicad-cli enforces (the budget at the slowest layer delay) is an
   error and tighter than the caps, it is a cap too, so kicad-cli does not
   fail what the router tuned either.

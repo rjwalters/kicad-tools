@@ -76,14 +76,18 @@
 # that limit is uncited.
 (rule "kct diff pair skew - LVDS1_P/LVDS1_N"
   (condition "A.inDiffPair('LVDS1_')")
-  (constraint skew (max 0.1mm) (within_diff_pairs)))
+  (constraint skew (max 2.414465mm) (within_diff_pairs))
+  (severity warning))
 (rule "kct diff pair skew - LVDS2_P/LVDS2_N"
   (condition "A.inDiffPair('LVDS2_')")
-  (constraint skew (max 0.1mm) (within_diff_pairs)))
+  (constraint skew (max 2.414465mm) (within_diff_pairs))
+  (severity warning))
 (rule "kct diff pair skew - LVDS3_P/LVDS3_N"
   (condition "A.inDiffPair('LVDS3_')")
-  (constraint skew (max 0.1mm) (within_diff_pairs)))
+  (constraint skew (max 2.414465mm) (within_diff_pairs))
+  (severity warning))
 (rule "kct diff pair skew - LVDS4_P/LVDS4_N"
   (condition "A.inDiffPair('LVDS4_')")
-  (constraint skew (max 0.1mm) (within_diff_pairs)))
+  (constraint skew (max 2.414465mm) (within_diff_pairs))
+  (severity warning))
 # END kct router diff-pair gaps

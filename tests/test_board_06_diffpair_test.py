@@ -304,17 +304,19 @@ class TestPhaseFeatureCoverage:
             t = nc.coupled_continuity_threshold
             assert 0.0 < t <= 1.0, f"{net} coupled_continuity_threshold={t} out of (0, 1] range"
 
-    def test_phase3h_skew_tolerance_engaged(self, net_class_map) -> None:
-        """Phase 3H: at least one pair sets ``skew_tolerance_mm``."""
-        engaged = [
-            (net, nc)
-            for net, nc in net_class_map.items()
-            if "+" in net and nc.skew_tolerance_mm is not None
-        ]
-        assert engaged, (
-            "Phase 3H: no diff-pair net class declares skew_tolerance_mm. "
-            "Expected USB3/PCIe/MIPI to set tight skew budgets."
-        )
+    def test_phase3h_skew_budget_is_derived(self, net_class_map) -> None:
+        """Issue #7894: every pair declares ``pair_protocol``; none hand-sets a skew limit.
+
+        The derived ps budget is the pair's skew limit (ruling Q-d on #7883).
+        MIPI declares its real 1 Gb/s lane rate, so its budget is an error.
+        """
+        pairs = {net: nc for net, nc in net_class_map.items() if net[-1] in "+-"}
+        assert pairs
+        missing = sorted(net for net, nc in pairs.items() if not nc.pair_protocol)
+        assert missing == [], f"pair classes without pair_protocol: {missing}"
+        hand_set = sorted(net for net, nc in pairs.items() if nc.skew_tolerance_mm is not None)
+        assert hand_set == [], f"hand-set skew_tolerance_mm on: {hand_set}"
+        assert {nc.data_rate_gbps for net, nc in pairs.items() if net.startswith("MIPI")} == {1.0}
 
     def test_phase3k_target_diff_impedance_engaged(self, net_class_map) -> None:
         """Phase 3K: at least one pair sets ``target_diff_impedance``."""
