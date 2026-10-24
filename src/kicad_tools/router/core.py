@@ -5596,6 +5596,16 @@ class Autorouter:
             if isinstance(rollback, str):
                 print(f"  Diff-pair gateway (lattice): {rollback}")
             self._print_pair_gateway_lines(coupled, gateways, gateway_log)
+            # Issue #7932: one line per segment the mid-trunk via-pair retry
+            # was offered to -- the via pairs it coupled through, or why it
+            # declined.  Also after the outcome list (bench parser layout).
+            via_pair_coupled = getattr(pf, "pair_via_pair_coupled", {}) or {}
+            via_pair_log = getattr(pf, "pair_via_pair_log", {}) or {}
+            for pc in coupled:
+                note = via_pair_coupled.get(pc.key, via_pair_log.get(pc.key))
+                if isinstance(note, str):
+                    label = f"{pc.pad_p_a.ref}.{pc.pad_p_a.pin}->{pc.pad_p_b.ref}.{pc.pad_p_b.pin}"
+                    print(f"  Diff-pair via-pair (lattice) {pc.pair_name} {label}: {note}")
             # Issue #7650: planar pairs the converged pass straightened.
             straightened = getattr(pf, "pair_straightened", {}) or {}
             for pc in coupled:
@@ -6208,6 +6218,11 @@ class Autorouter:
             pf._lattice,
             pf._obstacles,
         )
+        # Issue #7932: the via-pair retry's diagnostics, restored with the rest.
+        saved_vp = (
+            dict(getattr(pf, "pair_via_pair_log", {})),
+            dict(getattr(pf, "pair_via_pair_coupled", {})),
+        )
         first_failed = len(pf.failure_reasons)
         # Every pair's first-run coupling, read before the retry's
         # ``route_netset`` replaces ``pf.pair_outcomes`` (issue #6550).
@@ -6266,6 +6281,8 @@ class Autorouter:
             pf._lattice,
             pf._obstacles,
         ) = saved
+        if hasattr(pf, "pair_via_pair_log"):
+            pf.pair_via_pair_log, pf.pair_via_pair_coupled = saved_vp
         return first_routes, first_stats, first_coupled
 
     def _lattice_gateway_offer_retry(
@@ -6299,6 +6316,11 @@ class Autorouter:
             getattr(pf, "pair_gateway_rollback", None),
             pf._lattice,
             pf._obstacles,
+        )
+        # Issue #7932: the via-pair retry's diagnostics, restored with the rest.
+        saved_vp = (
+            dict(getattr(pf, "pair_via_pair_log", {})),
+            dict(getattr(pf, "pair_via_pair_coupled", {})),
         )
         first_failed = len(pf.failure_reasons)
         first_left = pf.class_pad_repair_stats.total_remaining if pf.class_pad_repair_stats else 0
@@ -6341,6 +6363,8 @@ class Autorouter:
             pf._lattice,
             pf._obstacles,
         ) = saved
+        if hasattr(pf, "pair_via_pair_log"):
+            pf.pair_via_pair_log, pf.pair_via_pair_coupled = saved_vp
         return first_routes, first_stats
 
     def _warn_lattice_pair_nets_routed_twice(self) -> None:
