@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-24
 
+- **PR #7952**: fix(router): gap tightening squeezes runs whose partner rail is split into long pieces
+- **Issue #7951** (closed): Gap tightening run discovery still narrower than the impedance rule's partner-union coupling (residual of #7913 AC-R1)
 - **PR #7956**: fix(research): mark diffpair bench rows invalid when the pour oracle was skipped
 - **Issue #7955** (closed): diffpair_bench pairs run: mark oracle_unverified rows invalid (killed kicad-cli oracle still reads valid: true)
 - **PR #7954**: refactor(router): remove DifferentialPairRules.for_type and add the Phase 6 diff-pair benchmark table
