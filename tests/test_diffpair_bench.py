@@ -566,6 +566,50 @@ def test_crashed_route_row_is_invalid_and_not_final(tmp_path, monkeypatch, code,
     assert any(f"exited {code}" in r for r in row["invalid_reasons"])
 
 
+@pytest.mark.parametrize(
+    "log_text, reason",
+    [
+        (
+            "stranded-pour status UNKNOWN\n  skipped: kicad-cli exited 137\n",
+            "kicad-cli exited 137",
+        ),
+        ("3 -> 2 unconnected pour link(s) (oracle_failed)\n", "oracle_failed"),
+    ],
+)
+def test_oracle_unverified_row_is_invalid(tmp_path, monkeypatch, log_text, reason, kicad_session):
+    """Issue #7955: a killed/failed pour oracle must not read ``valid: true``."""
+    row = _run_cell_with_log(tmp_path, monkeypatch, log_text)
+    assert row["oracle_unverified"] is True
+    assert row["valid"] is False
+    assert any(reason in r and "environment, not a result" in r for r in row["invalid_reasons"])
+
+
+@pytest.mark.parametrize(
+    "log_text",
+    ["", "WARNING: a 'stranded-pour status UNKNOWN' line would mark the oracle skipped\n"],
+)
+def test_oracle_verified_row_stays_valid(tmp_path, monkeypatch, log_text, kicad_session):
+    row = _run_cell_with_log(tmp_path, monkeypatch, log_text)
+    assert not row["oracle_unverified"]
+    assert row["valid"] is True
+
+
+def _run_cell_with_log(tmp_path, monkeypatch, log_text):
+    def fake_run_route(inp, out, extra, timeout, log):
+        out.write_text("(kicad_pcb)")
+        log.write_text(log_text)
+        return {"exit_code": 0, "cmd": []}
+
+    monkeypatch.setattr(ere, "run_route", fake_run_route)
+    monkeypatch.setattr(ere, "grade", lambda *a, **k: {})
+    monkeypatch.setattr(ere, "manufacturable", lambda *a, **k: False)
+    monkeypatch.setattr(ere, "find_net_class_map", lambda *a, **k: None)
+    monkeypatch.setattr(bench, "load_net_class_map", lambda *a, **k: {})
+    monkeypatch.setattr(bench, "measure_pairs", lambda *a, **k: [])
+    monkeypatch.setattr(bench, "committed_copper_matches", lambda *a, **k: None)
+    return bench.run_cell(ere.BOARDS["06b"], "grid", 42, 10.0, tmp_path)
+
+
 def test_pick_artifact_labels_by_exit_code(tmp_path):
     out = tmp_path / "o.kicad_pcb"
     out.write_text("x")
