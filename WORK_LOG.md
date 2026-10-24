@@ -15,6 +15,13 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-24
 
+- **PR #7940**: chore(deps): Bump zod from 4.5.4 to 4.6.7 in /site
+- **PR #7939**: chore(deps-dev): Bump fast-uri from 3.1.7 to 3.1.9 in /site
+- **PR #7936**: feat(lattice): mid-trunk via-pair move for the coupled search (#7932)
+- **PR #7934**: chore(deps): Bump brotlicffi from 1.2.0.1 to 1.2.1.0
+- **Issue #7932** (closed): lattice: mid-trunk via-pair move for the coupled search (split from #6445)
+- **Issue #7908** (closed): Board 06 recipe: MIPI_CLK and USB3_TX1 exceed their ps skew budget through layer imbalance (cap blocks the ps tuner)
+- **Issue #7896** (closed): 06rf USB3_TX1 exceeds its 4.0 ps skew budget in time (28.8 ps, length-matched to 0.015 mm, legs on In2.Cu vs In1.Cu)
 - **PR #7935**: chore(deps): Bump brotli from 1.2.0 to 1.2.1
 - **PR #7933**: chore(deps): Bump undici from 8.10.2 to 8.12.3 in /site
 - **PR #7930**: fix: gap tightening squeezes runs the impedance rule judges across fragmented partners
