@@ -15,6 +15,20 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-24
 
+- **PR #7935**: chore(deps): Bump brotli from 1.2.0 to 1.2.1
+- **PR #7933**: chore(deps): Bump undici from 8.10.2 to 8.12.3 in /site
+- **PR #7930**: fix: gap tightening squeezes runs the impedance rule judges across fragmented partners
+- **PR #7928**: chore(deps): Bump setuptools from 83.0.0 to 84.1.0
+- **PR #7927**: chore(deps): Bump fastmcp from 4.0.11 to 4.1.2
+- **PR #7926**: test: re-pin board-06 coupled witness class-map hash after #7915
+- **PR #7921**: test(router): bound board 03 arm C route by iterations, fail loudly when time-starved (#7920)
+- **PR #7915**: fix(diffpair): derived skew budget wins over hand-set generator limits (06rf, board 06; 07rf protocols)
+- **Issue #7925** (closed): slow test test_coupled_board06 pins the pre-#7915 net_class_map hash (fails on main)
+- **Issue #7920** (closed): slow-tests: board 03 arm C route test fails copper-LVS when pour-net oracle completion runs out of --timeout budget
+- **Issue #7894** (closed): Remove hand-set class skew limits from board generators; derived budget wins; prune obsolete allowances
+- **Issue #7867** (closed): router: 06rf lattice bench row fails skew on USB3_RX2 (hybrid), USB3_RX1 and USB2_D after the pair tuner
+- **Issue #6446** (closed): [Epic #6441] Phase 4: budget-driven hybrid fallback — longest coupled trunk plus single-ended terminal legs
+- **Issue #6445** (closed): [Epic #6441] Phase 3: via pairs as a single move in the lattice coupled centreline
 - **PR #7923**: fix: skip placement-invalid nets in route's chained --complete pass (#7922)
 - **Issue #7922** (closed): CI Test (extended) red on main since 2026-10-23: test_production_layer_winner_keeps_placement[0.1] (assert 2 == 1)
 
