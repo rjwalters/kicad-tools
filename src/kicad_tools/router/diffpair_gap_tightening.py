@@ -643,15 +643,88 @@ def _pair_segments(routes: list[Route], net: int, *, editable: bool) -> list[Seg
     ]
 
 
-def _replace_segment(routes: list[Route], old: Segment, chain: list[Segment]) -> list[Route] | None:
-    """Copy of ``routes`` with ``old`` replaced by ``chain`` in its fragment."""
+def _merge_fragments(
+    routes: list[Route], net: int
+) -> tuple[list[Segment], dict[int, list[Segment]]]:
+    """Editable segments of ``net`` with collinear sub-run fragments merged.
+
+    Router output is fragmented into grid-step pieces, and the impedance rule
+    sums those pieces into one coupled length (Issue #7575), so run discovery
+    must see the rail the rule sees.  A merged piece is a fresh :class:`Segment`
+    spanning its fragments; ``origins`` maps ``id(merged)`` to them, in order.
+    Only consecutive pieces shorter than ``MIN_RUN_MM`` merge (the ones the
+    rule exempts individually but sums); a segment with no such neighbour is
+    returned as itself.
+    """
+    out: list[Segment] = []
+    origins: dict[int, list[Segment]] = {}
+    for route in routes:
+        if route.net != net or route.is_escape:
+            continue
+        group: list[Segment] = []
+
+        def flush() -> None:
+            if len(group) == 1:
+                out.append(group[0])
+            elif group:
+                merged = dataclasses.replace(group[0], x2=group[-1].x2, y2=group[-1].y2)
+                origins[id(merged)] = list(group)
+                out.append(merged)
+            group.clear()
+
+        for seg in route.segments:
+            short = _seg_len(seg) < MIN_RUN_MM
+            if group and not (
+                short and _seg_len(group[-1]) < MIN_RUN_MM and _extends(group[-1], seg)
+            ):
+                flush()
+            group.append(seg)
+        flush()
+    return out, origins
+
+
+def _seg_len(seg: Segment) -> float:
+    return math.hypot(seg.x2 - seg.x1, seg.y2 - seg.y1)
+
+
+def _extends(a: Segment, b: Segment) -> bool:
+    """True when ``b`` continues ``a`` on the same line, layer and width."""
+    if a.layer != b.layer or abs(a.width - b.width) > _EPS:
+        return False
+    if abs(a.x2 - b.x1) > _DIR_EPS or abs(a.y2 - b.y1) > _DIR_EPS:
+        return False
+    ax, ay = a.x2 - a.x1, a.y2 - a.y1
+    bx, by = b.x2 - b.x1, b.y2 - b.y1
+    la, lb = math.hypot(ax, ay), math.hypot(bx, by)
+    if la < _EPS or lb < _EPS:
+        return False
+    return abs(ax * by - ay * bx) / (la * lb) < 1e-4 and ax * bx + ay * by > 0
+
+
+def _replace_segment(
+    routes: list[Route],
+    old: Segment,
+    chain: list[Segment],
+    origins: dict[int, list[Segment]] | None = None,
+) -> list[Route] | None:
+    """Copy of ``routes`` with ``old`` replaced by ``chain`` in its fragment.
+
+    ``old`` may be a merged segment (see :func:`_merge_fragments`); then every
+    fragment it spans is replaced.
+    """
+    frags = (origins or {}).get(id(old), [old])
     out = list(routes)
     for i, route in enumerate(out):
         if route.is_escape:
             continue
         for j, seg in enumerate(route.segments):
-            if seg is old:
-                segs = route.segments[:j] + chain + route.segments[j + 1 :]
+            if seg is frags[0]:
+                tail = route.segments[j : j + len(frags)]
+                if len(tail) != len(frags) or any(
+                    a is not b for a, b in zip(tail, frags, strict=True)
+                ):
+                    return None
+                segs = route.segments[:j] + chain + route.segments[j + len(frags) :]
                 out[i] = dataclasses.replace(route, segments=segs)
                 return out
     return None
@@ -747,11 +820,14 @@ def tighten_pair(
     band_gaps: list[float] = []
 
     for _ in range(MAX_RUNS_PER_PAIR):
+        p_merged, p_origins = _merge_fragments(routes, p_id)
+        n_merged, n_origins = _merge_fragments(routes, n_id)
+        origins = {**p_origins, **n_origins}
         runs = [
             r
             for r in _find_runs(
-                _pair_segments(routes, p_id, editable=True),
-                _pair_segments(routes, n_id, editable=True),
+                p_merged,
+                n_merged,
                 min_run_mm=MIN_RUN_MM,
                 max_gap_mm=candidate_window_mm,
             )
@@ -876,7 +952,7 @@ def tighten_pair(
                             ok = False
                             break
                         chain, new_segs = built
-                        replaced = _replace_segment(candidate, seg, chain)
+                        replaced = _replace_segment(candidate, seg, chain, origins)
                         if replaced is None:
                             ok = False
                             break
@@ -946,6 +1022,28 @@ def tighten_pair(
         result.reason = first_decline
     else:
         result.reason = "in_band"
+        # ``in_band`` means the rule judges nothing out of band (Issue #7913):
+        # a segment it still fails, but for which no squeezable run was
+        # found, is a decline, not a pass.
+        unsqueezed = [
+            s
+            for s in _pair_segments(routes, p_id, editable=False)
+            + _pair_segments(routes, n_id, editable=False)
+            if id(s) in (final := judge(routes)) and not final[id(s)][0]
+        ]
+        if unsqueezed:
+            result.reason = "declined:no_squeezable_run"
+            worst = unsqueezed[0]
+            result.runs.append(
+                RunOutcome(
+                    layer=worst.layer.kicad_name,
+                    status=result.reason,
+                    gap_before_mm=0.0,
+                    gap_after_mm=0.0,
+                    zdiff_before=final[id(worst)][2],
+                    zdiff_after=final[id(worst)][2],
+                )
+            )
     result.skew_after_mm = abs(skew_of(routes))
     result.target_gap_mm = min(target_gaps) if target_gaps else None
     result.band_max_gap_mm = min(band_gaps) if band_gaps else None

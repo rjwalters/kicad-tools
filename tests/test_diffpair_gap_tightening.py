@@ -260,6 +260,63 @@ def test_mipi_dat1_shape_is_tightened_into_band():
     _assert_45(ar)
 
 
+# --- Issue #7913: fragmented partner rail (board 07 TMDS breakout shape) ---
+
+
+def _fragmented_partner_board():
+    """A 1.27 mm P segment beside an N rail of three sub-1 mm pieces.
+
+    The rule exempts each short N piece by length but sums them into the
+    coupled union of the P segment, so it judges P at the 0.41 mm edge gap.
+    """
+    w, gap = MIPI_W, 0.41
+    y_p, y_n = 10.0, round(10.0 + gap + w, 4)
+    xs = [5.0, 5.4, 5.8, 6.27]
+    rails = {
+        1: [((5.0, y_p), (6.27, y_p), w)],
+        2: [((a, y_n), (b, y_n), w) for a, b in zip(xs, xs[1:], strict=False)],
+    }
+    pads = [
+        ("U1", 1, (5.0, y_p)),
+        ("U2", 2, (5.0, y_n)),
+        ("J1", 1, (6.27, y_p)),
+        ("J2", 2, (6.27, y_n)),
+    ]
+    return _board("TMDS_D1_P", "TMDS_D1_N", _class(100.0, 10.0), rails, pads)
+
+
+def test_fragmented_partner_run_is_not_reported_in_band():
+    ar = _fragmented_partner_board()
+    before = _impedance_findings(ar)
+    assert len(before) == 1, before
+    skew_before = _skew(ar)
+
+    results = ar.apply_diffpair_gap_tightening(verbose=False, stackup=STACKUP)
+
+    res = results[("TMDS_D1_P", "TMDS_D1_N")]
+    assert res.reason != "in_band", res
+    assert res.reason == "tightened", res
+    assert _impedance_findings(ar) == []
+    assert abs(_skew(ar) - skew_before) <= 0.01
+    assert _clearance_errors(ar) == []
+    assert _connected(ar) == {1: True, 2: True}
+
+
+def test_judged_out_of_band_segment_without_a_squeezable_run_is_declined():
+    # The partner is off the 8-direction grid, so no run can be squeezed; the
+    # rule still judges the P segment, so the pair is not "in_band".
+    ar = _fragmented_partner_board()
+    ar.routes[1].segments[0] = dataclasses.replace(ar.routes[1].segments[0], y2=10.636)
+    assert _impedance_findings(ar)
+    before = _snapshot(ar)
+
+    results = ar.apply_diffpair_gap_tightening(verbose=False, stackup=STACKUP)
+
+    res = results[("TMDS_D1_P", "TMDS_D1_N")]
+    assert res.reason.startswith("declined:"), res
+    assert _snapshot(ar) == before
+
+
 # --- Board 06 USB3_TX2 45-degree shape -----------------------------------
 
 USB_W = 0.275
