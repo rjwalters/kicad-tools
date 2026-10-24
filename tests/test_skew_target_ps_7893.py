@@ -4,8 +4,9 @@ Step 2 of the #7883 ruling.  ``kct check`` judges intra-pair skew in time
 (#7892); these tests pin the router's side of the same rule:
 
 * one resolver (:func:`~kicad_tools.router.pair_skew_target.resolve_pair_skew_target`)
-  behind every skew-limit lookup, carrying the budget and the transitional
-  error-level millimetre caps;
+  behind every skew-limit lookup, carrying the budget and any error-level
+  millimetre cap (an explicit class ``skew_tolerance_mm``, or the generic
+  0.5 mm for a completely unknown protocol, Issue #7894);
 * the tuner measures progress in ps, so a split-layer pair that is matched
   in length but not in time is tuned until its *delay* skew meets the budget,
   and inner-layer length counts for more than the same outer-layer length;
@@ -88,18 +89,65 @@ def test_target_is_the_derived_budget_with_the_error_caps():
     capped = resolve_pair_skew_target(
         {P: _usb3(skew_tolerance_mm=0.5), N: _usb3(skew_tolerance_mm=0.5)}, P, N, stackup
     )
-    assert capped.cap_mm == pytest.approx(0.5)  # transitional class cap (#7894)
+    assert capped.cap_mm == pytest.approx(0.5)  # an explicit class cap is still honoured
     assert capped.budget_ps == pytest.approx(bare.budget_ps)
     assert capped.tolerance_mm == pytest.approx(0.5)  # tighter than 4.03 ps at the slowest layer
 
-    # A protocol only guessed from the name keeps the generic 0.5 mm as an error cap.
-    guessed = resolve_pair_skew_target({}, P, N, stackup)
-    assert guessed.cap_mm == pytest.approx(0.5)
-    assert guessed.budget_ps == pytest.approx(bare.budget_ps)
 
-    # No operating point and an uncited table value: nothing to tune to.
+# Issue #7894 ruling: the generic 0.5 mm cap is for a completely unknown protocol only.
+UNKNOWN_P, UNKNOWN_N = "FOO+", "FOO-"
+
+
+def test_known_protocol_gets_the_budget_without_the_generic_cap():
+    target = resolve_pair_skew_target({P: _usb3(), N: _usb3()}, P, N, skew_stackup(None, 4))
+    assert target.budget_ps == pytest.approx(4.03, abs=0.01)
+    assert target.cap_mm is None
+
+
+@pytest.mark.parametrize(
+    ("ncm", "how"),
+    [
+        ({}, "pair name"),  # no class at all: USB3_TX1 names the protocol
+        ({P: NetClassRouting(name="Default"), N: NetClassRouting(name="Default")}, "pair name"),
+        (
+            {"X+": NetClassRouting(name="USB3_LANES"), "X-": NetClassRouting(name="USB3_LANES")},
+            "class name",
+        ),
+    ],
+)
+def test_name_guessed_protocol_gets_the_budget_without_the_generic_cap(ncm, how):
+    p, n = ("X+", "X-") if "X+" in ncm else (P, N)
+    target = resolve_pair_skew_target(ncm, p, n, skew_stackup(None, 4))
+    assert target.budget_ps == pytest.approx(4.03, abs=0.01)  # USB 3 Gen 1, max rate
+    assert how in target.budget_provenance
+    assert target.cap_mm is None  # not the generic 0.5 mm
+    assert target.budget_severity == "warning"
+
+
+def test_unknown_protocol_keeps_the_generic_cap():
+    stackup = skew_stackup(None, 4)
+    # No protocol and no rate: nothing to derive, the generic 0.5 mm error is the target.
+    bare = NetClassRouting(name="Default")
+    target = resolve_pair_skew_target(
+        {UNKNOWN_P: bare, UNKNOWN_N: bare}, UNKNOWN_P, UNKNOWN_N, stackup
+    )
+    assert target.budget_ps is None
+    assert target.cap_mm == pytest.approx(0.5)
+    assert target.cap_source == "default:generic"
+    # A declared rate gives a Nyquist budget, but the protocol is still unknown,
+    # so the generic 0.5 mm stays beside it.
+    rated = NetClassRouting(name="Default", data_rate_gbps=1.0)
+    target = resolve_pair_skew_target(
+        {UNKNOWN_P: rated, UNKNOWN_N: rated}, UNKNOWN_P, UNKNOWN_N, stackup
+    )
+    assert target.budget_ps == pytest.approx(20.13, abs=0.01)
+    assert target.cap_mm == pytest.approx(0.5)
+    assert target.cap_source == "default:generic"
+
+
+def test_uncited_table_value_without_an_operating_point_is_not_a_target():
     eth = NetClassRouting(name="ETH", pair_protocol="ETHERNET")
-    assert not resolve_pair_skew_target({P: eth, N: eth}, P, N, stackup).enforced
+    assert not resolve_pair_skew_target({P: eth, N: eth}, P, N, skew_stackup(None, 4)).enforced
 
 
 def test_target_meets_budget_and_caps_together():
@@ -167,7 +215,7 @@ def test_inner_layer_length_counts_for_more_delay():
 
 
 def test_error_cap_still_binds_beside_the_budget():
-    """A transitional 0.05 mm class cap is met as well as the budget."""
+    """An explicit 0.05 mm class cap is met as well as the budget."""
     ar = _router(F, F, LENGTH, LENGTH + 0.4, _usb3(skew_tolerance_mm=0.05))
     result = _tune(ar)
     assert result.skew_before_ps < 4.03  # the budget alone would not tune it

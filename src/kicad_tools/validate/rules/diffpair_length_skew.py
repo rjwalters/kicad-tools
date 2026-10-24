@@ -73,9 +73,11 @@ each trimmed track run at its own layer's delay and each via barrel at the
 via delay, against the derived budget of
 :func:`kicad_tools.physics.skew_budget.resolve_skew_budget`.  The finding
 reports the skew in ps, the budget, and the budget's millimetre form at the
-slowest layer.  A pair whose class still sets ``skew_tolerance_mm`` is also
-held to that length cap (until #7894 removes those class fields).  Pairs with
-no derivable budget keep the length check below.
+slowest layer.  A pair whose class sets ``skew_tolerance_mm`` explicitly is
+also held to that length cap (the board generators no longer set one, Issue
+#7894).  A pair whose protocol is completely unknown keeps the generic 0.5 mm
+beside a budget derived from a declared rate; a declared or name-recognised
+protocol does not.  Pairs with no derivable budget keep the length check below.
 - Modifying the sibling ``diffpair_routing_continuity`` or
   ``diffpair_clearance_intra`` rules (orthogonal concerns).
 """
@@ -128,6 +130,48 @@ SKEW_TOLERANCE_EPSILON_MM = 1e-6
 def _normalize_name_pair(a: str, b: str) -> tuple[str, str]:
     """Return the lexicographically-sorted (low, high) name tuple."""
     return (a, b) if a <= b else (b, a)
+
+
+def budget_exceeded(m: PairSkewMeasurement) -> bool:
+    """Whether the pair's time skew breaks its derived budget (Issue #7914)."""
+    from kicad_tools.physics.skew_budget import SKEW_BUDGET_EPSILON_PS
+
+    budget = m.limits.budget
+    return (
+        budget is not None
+        and m.skew_ps is not None
+        and m.skew_ps > budget.budget_ps + SKEW_BUDGET_EPSILON_PS
+    )
+
+
+def length_cap_exceeded(m: PairSkewMeasurement) -> bool:
+    """Whether the pair's length skew breaks an active length cap (Issue #7914)."""
+    cap = m.limits.length_cap_mm
+    return cap is not None and m.skew_mm > cap + SKEW_TOLERANCE_EPSILON_MM
+
+
+def measured_skew_verdict(m: PairSkewMeasurement) -> str | None:
+    """The verdict ``kct check`` reaches for one measured pair (Issue #7914).
+
+    ``fail`` / ``warn`` / ``pass`` -- the worse of the budget and the length
+    cap, each at its own severity -- or ``None`` when neither limit applies.
+    ``DiffPairLengthSkewRule._check_measured`` judges with the same two
+    predicates, so the research bench has no second resolution.
+    """
+    limits = m.limits
+    judged = (
+        limits.budget is not None and m.skew_ps is not None
+    ) or limits.length_cap_mm is not None
+    if not judged:
+        return None
+    severities = []
+    if limits.budget is not None and budget_exceeded(m):
+        severities.append(limits.budget.severity)
+    if length_cap_exceeded(m):
+        severities.append(limits.length_severity)
+    if not severities:
+        return "pass"
+    return "fail" if "error" in severities else "warn"
 
 
 class DiffPairLengthSkewRule(DRCRule):
@@ -373,8 +417,6 @@ class DiffPairLengthSkewRule(DRCRule):
 
     def _check_measured(self, results: DRCResults, m: PairSkewMeasurement) -> None:
         """Judge one pair against its time budget and length cap (Issue #7892)."""
-        from kicad_tools.physics.skew_budget import SKEW_BUDGET_EPSILON_PS
-
         first, second = sorted([m.p_name, m.n_name])
         limits = m.limits
         budget = limits.budget
@@ -387,7 +429,7 @@ class DiffPairLengthSkewRule(DRCRule):
                 f"propagation-delay skew {m.skew_ps:.2f} ps (length skew {m.skew_mm:.3f} mm) "
                 f"{{verdict}} budget {budget.budget_ps:.2f} ps{eq_text} [{budget.provenance}]"
             )
-            if m.skew_ps > budget.budget_ps + SKEW_BUDGET_EPSILON_PS:
+            if budget_exceeded(m):
                 kct_only = m.skew_mm <= limits.kicad_skew_mm + SKEW_TOLERANCE_EPSILON_MM
                 note = (
                     " -- kct-only: kicad-cli checks length, and this pair's legs run on "
@@ -414,7 +456,7 @@ class DiffPairLengthSkewRule(DRCRule):
                 passes.append(text.format(verdict="within"))
         if limits.length_cap_mm is not None:
             source = f" [{limits.length_source}]" if limits.length_source else ""
-            if m.skew_mm > limits.length_cap_mm + SKEW_TOLERANCE_EPSILON_MM:
+            if length_cap_exceeded(m):
                 findings.append(
                     self._make_violation(
                         name_a=m.p_name,

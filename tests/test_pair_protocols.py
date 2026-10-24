@@ -375,18 +375,23 @@ def test_board06_usb2_takes_the_high_speed_default():
     usb2 = resolve_pair_thresholds(ncm, "USB2_D+", "USB2_D-")
     assert (usb2.skew_mm, usb2.protocol, usb2.skew_severity) == (1.0, "USB2_HS", "error")
     assert "TI" in usb2.skew_source
-    # Every other class keeps its explicit number.
-    for p, n, mm, protocol in (
-        ("USB3_TX1+", "USB3_TX1-", 0.5, "USB3_SS"),
-        ("PCIE_TX+", "PCIE_TX-", 0.5, "PCIE_G1"),
-        ("MIPI_CLK+", "MIPI_CLK-", 0.3, "MIPI_DPHY"),
+    # Issue #7894: no class hand-sets a skew number any more; each resolves
+    # through its declared protocol (the derived ps budget then supersedes
+    # the table millimetres, see tests/test_skew_budget_7892.py).
+    for p, n, protocol in (
+        ("USB3_TX1+", "USB3_TX1-", "USB3_SS"),
+        ("PCIE_TX+", "PCIE_TX-", "PCIE_G1"),
+        ("MIPI_CLK+", "MIPI_CLK-", "MIPI_DPHY"),
     ):
+        assert ncm[p].skew_tolerance_mm is None
         got = resolve_pair_thresholds(ncm, p, n)
-        assert (got.skew_mm, got.protocol, got.skew_severity) == (mm, protocol, "error")
-        assert got.skew_source.startswith("class:")
+        assert got.protocol == protocol
+        assert got.skew_source.startswith("protocol:")
     lvds = _load_map(BOARDS / "06-diffpair-test" / "output" / "net_class_map.json")
+    assert lvds["LVDS1_P"].skew_tolerance_mm is None
     got = resolve_pair_thresholds(lvds, "LVDS1_P", "LVDS1_N")
-    assert (got.skew_mm, got.protocol, got.skew_source) == (0.1, "LVDS", "class:LVDS")
+    assert got.protocol == "LVDS"
+    assert got.skew_source.startswith("protocol:LVDS")
 
 
 def _committed_sidecars() -> list[Path]:
@@ -394,7 +399,7 @@ def _committed_sidecars() -> list[Path]:
 
 
 def test_no_other_board_declares_a_protocol_or_changes_a_threshold():
-    """Only boards 03 and 06 opt in; an untagged class still resolves as before."""
+    """Only boards 03, 06 and the 07 fixture opt in; an untagged class resolves as before."""
     paths = [p for p in _committed_sidecars() if "/manufacturing/" not in p.as_posix()]
     assert len(paths) >= 6
     for path in paths:
@@ -405,6 +410,10 @@ def test_no_other_board_declares_a_protocol_or_changes_a_threshold():
             if not isinstance(entry, dict) or net not in ncm:
                 continue
             if board in ("03-usb-joystick", "06-diffpair-test"):
+                continue
+            if "07-matchgroup-test/regression-" in path.as_posix():
+                # Issue #7894: the 07 fixture (and its git-ignored re-route
+                # output) declares pair_protocol on its pair classes.
                 continue
             assert entry.get("pair_protocol") is None, (path, net)
             before = entry.get("skew_tolerance_mm")

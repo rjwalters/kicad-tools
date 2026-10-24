@@ -1,13 +1,14 @@
 {
-  "file": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5044/boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb",
+  "file": "boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb",
   "manufacturer": "jlcpcb-tier1",
+  "pcb_sha256": "6d81d32008dc45005236da689a706ff792b72f102fab4da49d8b15f64d8a22ca",
   "layers": 4,
   "summary": {
     "errors": 0,
     "warnings": 0,
     "infos": 11,
     "waived": 0,
-    "rules_checked": 55,
+    "rules_checked": 82,
     "rules_checked_by_rule": {
       "connectivity": 1,
       "copper_sliver": 1,
@@ -16,13 +17,34 @@
       "diffpair_clearance_intra": 4,
       "diffpair_length_skew": 4,
       "diffpair_routing_continuity": 4,
+      "diffpair_uncoupled_length": 4,
       "doc_drift_stale_pin": 1,
       "doc_drift_unresolvable_pin": 1,
       "isolated_copper": 1,
+      "netclass_clearance_copper": 1,
+      "netclass_clearance_unsupported": 1,
+      "netclass_track_width": 1,
+      "netclass_clearance": 1,
+      "netclass_via_diameter": 1,
+      "netclass_via_drill": 1,
+      "netclass_annular_ring": 1,
       "sch_field_offset": 1,
-      "sch_field_overlap": 1
+      "sch_field_overlap": 1,
+      "spec_conformance_dimensions": 1,
+      "spec_conformance_layers": 1,
+      "spec_conformance_min_trace": 1,
+      "spec_conformance_min_via": 1,
+      "spec_conformance_min_drill": 1,
+      "spec_conformance_target_fab": 1
     },
-    "passed": true
+    "passed": true,
+    "stale_waivers": 0,
+    "coverage_checked": 35,
+    "coverage_skipped": 6,
+    "coverage_unknown": [
+      "model_coverage"
+    ],
+    "coverage_blocking_unknown": []
   },
   "violations": [
     {
@@ -42,7 +64,9 @@
       ],
       "nets": [],
       "status": "info",
-      "waived": false
+      "waived": false,
+      "key": "connector_edge_distance|J1||F.Cu",
+      "evidence_hash": "ev2:f63884ed583fc95e"
     },
     {
       "rule_id": "connector_edge_distance",
@@ -61,7 +85,9 @@
       ],
       "nets": [],
       "status": "info",
-      "waived": false
+      "waived": false,
+      "key": "connector_edge_distance|J2||F.Cu",
+      "evidence_hash": "ev2:ce58d37d81be35f9"
     },
     {
       "rule_id": "connector_edge_distance",
@@ -80,75 +106,85 @@
       ],
       "nets": [],
       "status": "info",
-      "waived": false
+      "waived": false,
+      "key": "connector_edge_distance|J3||F.Cu",
+      "evidence_hash": "ev2:9b23038be30bc180"
     },
     {
       "rule_id": "diffpair_length_skew",
       "type": "diffpair_length_skew",
       "severity": "info",
-      "message": "Engaged differential pair LVDS1_N/LVDS1_P length-skew 0.000 mm within tolerance 0.100 mm",
+      "message": "Engaged differential pair LVDS1_N/LVDS1_P propagation-delay skew 0.00 ps (length skew 0.000 mm) within budget 17.27 ps = 2.414 mm at the slowest layer [derived:-30 dB at knee 0.583 GHz (LVDS 0.4 Gb/s, protocol max rate); [LV1] SN65LVDS1/2 link: 400 Mb/s; [LV1] driver differential t_r typ 0.6 ns (no minimum published; typical used)]",
       "location": null,
       "layer": null,
       "actual_value": 0.0,
-      "required_value": 0.1,
+      "required_value": null,
       "items": [],
       "nets": [
         "LVDS1_N",
         "LVDS1_P"
       ],
       "status": "info",
-      "waived": false
+      "waived": false,
+      "key": "diffpair_length_skew||LVDS1_N,LVDS1_P|",
+      "evidence_hash": "ev2:a099a1f61c06478c"
     },
     {
       "rule_id": "diffpair_length_skew",
       "type": "diffpair_length_skew",
       "severity": "info",
-      "message": "Engaged differential pair LVDS2_N/LVDS2_P length-skew 0.000 mm within tolerance 0.100 mm",
+      "message": "Engaged differential pair LVDS2_N/LVDS2_P propagation-delay skew 0.00 ps (length skew 0.000 mm) within budget 17.27 ps = 2.414 mm at the slowest layer [derived:-30 dB at knee 0.583 GHz (LVDS 0.4 Gb/s, protocol max rate); [LV1] SN65LVDS1/2 link: 400 Mb/s; [LV1] driver differential t_r typ 0.6 ns (no minimum published; typical used)]",
       "location": null,
       "layer": null,
       "actual_value": 0.0,
-      "required_value": 0.1,
+      "required_value": null,
       "items": [],
       "nets": [
         "LVDS2_N",
         "LVDS2_P"
       ],
       "status": "info",
-      "waived": false
+      "waived": false,
+      "key": "diffpair_length_skew||LVDS2_N,LVDS2_P|",
+      "evidence_hash": "ev2:0367f9d71e718715"
     },
     {
       "rule_id": "diffpair_length_skew",
       "type": "diffpair_length_skew",
       "severity": "info",
-      "message": "Engaged differential pair LVDS3_N/LVDS3_P length-skew 0.000 mm within tolerance 0.100 mm",
+      "message": "Engaged differential pair LVDS3_N/LVDS3_P propagation-delay skew 0.00 ps (length skew 0.000 mm) within budget 17.27 ps = 2.414 mm at the slowest layer [derived:-30 dB at knee 0.583 GHz (LVDS 0.4 Gb/s, protocol max rate); [LV1] SN65LVDS1/2 link: 400 Mb/s; [LV1] driver differential t_r typ 0.6 ns (no minimum published; typical used)]",
       "location": null,
       "layer": null,
       "actual_value": 0.0,
-      "required_value": 0.1,
+      "required_value": null,
       "items": [],
       "nets": [
         "LVDS3_N",
         "LVDS3_P"
       ],
       "status": "info",
-      "waived": false
+      "waived": false,
+      "key": "diffpair_length_skew||LVDS3_N,LVDS3_P|",
+      "evidence_hash": "ev2:2c9a453f5e477a47"
     },
     {
       "rule_id": "diffpair_length_skew",
       "type": "diffpair_length_skew",
       "severity": "info",
-      "message": "Engaged differential pair LVDS4_N/LVDS4_P length-skew 0.000 mm within tolerance 0.100 mm",
+      "message": "Engaged differential pair LVDS4_N/LVDS4_P propagation-delay skew 0.00 ps (length skew 0.000 mm) within budget 17.27 ps = 2.414 mm at the slowest layer [derived:-30 dB at knee 0.583 GHz (LVDS 0.4 Gb/s, protocol max rate); [LV1] SN65LVDS1/2 link: 400 Mb/s; [LV1] driver differential t_r typ 0.6 ns (no minimum published; typical used)]",
       "location": null,
       "layer": null,
       "actual_value": 0.0,
-      "required_value": 0.1,
+      "required_value": null,
       "items": [],
       "nets": [
         "LVDS4_N",
         "LVDS4_P"
       ],
       "status": "info",
-      "waived": false
+      "waived": false,
+      "key": "diffpair_length_skew||LVDS4_N,LVDS4_P|",
+      "evidence_hash": "ev2:69c619908299baef"
     },
     {
       "rule_id": "diffpair_routing_continuity",
@@ -165,7 +201,9 @@
         "LVDS4_P"
       ],
       "status": "info",
-      "waived": false
+      "waived": false,
+      "key": "diffpair_routing_continuity||LVDS4_N,LVDS4_P|",
+      "evidence_hash": "ev2:d6e0ebb5ed4b8dee"
     },
     {
       "rule_id": "diffpair_routing_continuity",
@@ -182,7 +220,9 @@
         "LVDS2_P"
       ],
       "status": "info",
-      "waived": false
+      "waived": false,
+      "key": "diffpair_routing_continuity||LVDS2_N,LVDS2_P|",
+      "evidence_hash": "ev2:2e28c9cf1a625c9f"
     },
     {
       "rule_id": "diffpair_routing_continuity",
@@ -199,7 +239,9 @@
         "LVDS3_P"
       ],
       "status": "info",
-      "waived": false
+      "waived": false,
+      "key": "diffpair_routing_continuity||LVDS3_N,LVDS3_P|",
+      "evidence_hash": "ev2:284baab19f9d4196"
     },
     {
       "rule_id": "diffpair_routing_continuity",
@@ -216,13 +258,16 @@
         "LVDS1_P"
       ],
       "status": "info",
-      "waived": false
+      "waived": false,
+      "key": "diffpair_routing_continuity||LVDS1_N,LVDS1_P|",
+      "evidence_hash": "ev2:77aa12d12c6d5c0e"
     }
   ],
+  "mask_copper_assessments": [],
   "meta_checks": {
     "drc": {
       "status": "PASSED",
-      "detail": "55 rules checked, 0 error(s), 0 warning(s)"
+      "detail": "82 rules checked, 0 error(s), 0 warning(s)"
     },
     "erc": {
       "status": "PASSED",
@@ -239,23 +284,291 @@
     },
     "manifest": {
       "status": "PASSED",
-      "detail": "manifest.json mtime within tolerance of routed PCB mtime"
+      "detail": "bundle SHA-256 hashes verified; archived PCB matches current content"
     },
     "overall": "PASSED",
     "schematic_missing": false
   },
   "routing_quality": {
-    "total_segments": 196,
+    "total_segments": 214,
     "nets_with_copper": 18,
-    "segments_per_net": 10.88888888888889,
+    "segments_per_net": 11.88888888888889,
     "zero_length_count": 0,
-    "median_length_mm": 1.1999999999999886,
-    "fragment_count": 35,
-    "fragment_fraction": 0.17857142857142858,
-    "orthogonal_count": 135,
-    "diagonal_45_count": 61,
+    "median_length_mm": 1.0,
+    "fragment_count": 53,
+    "fragment_fraction": 0.24766355140186916,
+    "orthogonal_count": 151,
+    "diagonal_45_count": 63,
     "off_axis_count": 0,
     "staircase_step_count": 2,
-    "staircase_fraction": 0.01020408163265306
-  }
+    "staircase_fraction": 0.009345794392523364
+  },
+  "fabrication_process": {
+    "process_id": "jlcpcb-tier1-pofv-4l",
+    "name": "JLCPCB Capability Plus -- Plated-Over Filled Via (POFV), 4+ layer",
+    "min_layer_count": 4,
+    "min_via_drill_mm": 0.2,
+    "max_via_drill_mm": 0.5,
+    "min_annular_ring_mm": 0.1,
+    "requires_filled_and_capped": true,
+    "min_component_hole_distance_mm": 0.5,
+    "source": "https://jlcpcb.com/news/free-via-in-pad-6-20-layer-pcbs-pofv",
+    "ordering_instructions": "Order the JLCPCB Capability Plus -- Plated-Over Filled Via (POFV), 4+ layer process (jlcpcb-tier1-pofv-4l): a >= 4-layer stackup with epoxy-filled and copper-capped (plated-over) vias, via drills between 0.2 and 0.5 mm, annular ring >= 0.1 mm, and in-pad vias kept >= 0.5 mm from any other component's drilled hole. Do not substitute ordinary open or merely tented vias. Source: https://jlcpcb.com/news/free-via-in-pad-6-20-layer-pcbs-pofv"
+  },
+  "coverage": {
+    "ampacity": {
+      "status": "skipped:no_declared_targets",
+      "state": "skipped",
+      "reason": "no_declared_targets",
+      "blocking": true
+    },
+    "clearance": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "connectivity": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "connector_access": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "copper_sliver": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "courtyard_overlap": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "dangling_copper": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "diffpair_clearance_intra": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "diffpair_length_skew": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "diffpair_routing_continuity": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "diffpair_uncoupled_length": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "dimensions": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "doc_drift": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "edge": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "impedance": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "isolated_copper": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "mask_to_copper": {
+      "status": "skipped:opt_in:--mask-copper-config",
+      "state": "skipped",
+      "reason": "opt_in:--mask-copper-config",
+      "blocking": true
+    },
+    "match_group_length_skew": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "model_coverage": {
+      "status": "unknown:host_library_refs (36 footprint(s); per-host detail: kct pcb model-audit)",
+      "state": "unknown",
+      "reason": "host_library_refs (36 footprint(s); per-host detail: kct pcb model-audit)",
+      "blocking": false
+    },
+    "netclass_clearance_copper": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "netclass_floor": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "netlist": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "pad_grid": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "path_ampacity": {
+      "status": "skipped:no_declared_current_paths",
+      "state": "skipped",
+      "reason": "no_declared_current_paths",
+      "blocking": true
+    },
+    "physical_copper_gap": {
+      "status": "skipped:opt_in:--physical-copper-gap",
+      "state": "skipped",
+      "reason": "opt_in:--physical-copper-gap",
+      "blocking": true
+    },
+    "pin1_marker": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "placement": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "routing_policy": {
+      "status": "skipped:no_declared_policies",
+      "state": "skipped",
+      "reason": "no_declared_policies",
+      "blocking": true
+    },
+    "sch_fields": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "segment_zone": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "silkscreen": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "single_pad_net": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "solder_mask": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "spec_conformance": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "thermal_asymmetry": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "via_in_pad": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "via_type": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "via_under_body": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "via_zone": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    },
+    "width_consistency": {
+      "status": "skipped:opt_in:--only",
+      "state": "skipped",
+      "reason": "opt_in:--only",
+      "blocking": false
+    },
+    "zero_length_segment": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "zones": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": true
+    }
+  },
+  "verdict": "pass",
+  "exit_code": 0
 }

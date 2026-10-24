@@ -54,9 +54,9 @@ This is what the Phase 3K impedance formulas
 | Scenario   | Pairs | Speed         | Source -> Sink                       | Phase features exercised                                          |
 |------------|-------|---------------|--------------------------------------|-------------------------------------------------------------------|
 | USB 2.0    | 1     | 480 Mbps      | USB-C (J1) -> QFN-32 (U1)            | 1C clearance, 2E coupled, 2G continuity, 3K 90 Ohm diff           |
-| USB 3.0    | 4     | 5 Gbps        | USB-C (J1) -> BGA-49 simulator (U2)  | 1C, 2E, 2F BGA escape, 2G tight (0.9), 3K 90 Ohm, 3H 0.5 mm skew  |
-| PCIe Gen1  | 2     | 2.5 Gbps      | Mini-PCIe edge (J3) -> QFP-48 (U3)   | 1C, 2E, 3H 0.5 mm skew, 3I serpentine, 3J skew DRC, 3K 100 Ohm    |
-| MIPI D-PHY | 2     | 1 Gbps/lane   | FFC (J4) -> QFN-24 (U4)              | 1C, 2E, 3I serpentine (tight 0.3 mm), 3K 100 Ohm                  |
+| USB 3.0    | 4     | 5 Gbps        | USB-C (J1) -> BGA-49 simulator (U2)  | 1C, 2E, 2F BGA escape, 2G tight (0.9), 3K 90 Ohm, 3H 4.0 ps skew  |
+| PCIe Gen1  | 2     | 2.5 Gbps      | Mini-PCIe edge (J3) -> QFP-48 (U3)   | 1C, 2E, 3H 8.1 ps skew, 3I serpentine, 3J skew DRC, 3K 100 Ohm    |
+| MIPI D-PHY | 2     | 1 Gbps/lane   | FFC (J4) -> QFN-24 (U4)              | 1C, 2E, 3I serpentine (20.1 ps skew), 3K 100 Ohm                  |
 
 **9 differential pairs / 18 paired nets**.  Combined with ground / power /
 single-ended sideband (USB_CC1, USB_CC2, MIPI_RST), the board has **26 nets
@@ -82,11 +82,18 @@ layers; GND/PWR planes are unencumbered for impedance reference.
 
 The protocol-specific `NetClassRouting` instances live in `generate_design.py`:
 
-- `usb2_net_class()` --- `target_diff_impedance=90`, `intra_pair_clearance=0.075`
-- `usb3_net_class()` --- `target_diff_impedance=90`, `coupled_continuity_threshold=0.9`
-- `pcie_net_class()` --- `target_diff_impedance=100`, `skew_tolerance_mm=0.5`
-- `mipi_net_class()` --- `target_diff_impedance=100`, `skew_tolerance_mm=0.3`
+- `usb2_net_class()` --- `target_diff_impedance=90`, `intra_pair_clearance=0.075`, `pair_protocol="USB2_HS"`
+- `usb3_net_class()` --- `target_diff_impedance=90`, `coupled_continuity_threshold=0.9`, `pair_protocol="USB3_SS"`
+- `pcie_net_class()` --- `target_diff_impedance=100`, `pair_protocol="PCIE_G1"`
+- `mipi_net_class()` --- `target_diff_impedance=100`, `pair_protocol="MIPI_DPHY"`, `data_rate_gbps=1.0`
 - `sideband_net_class()` --- `target_single_impedance=50` (for USB_CC1/CC2, MIPI_RST)
+
+No class sets `skew_tolerance_mm` (Issue #7894): every pair is held to the
+derived ps skew budget of its declared protocol
+([guide 09](../../../docs/guides/diff-pairs/09-skew-budget.md)).  USB 2.0,
+USB 3.0 and PCIe Gen1 run at their protocol's maximum rate, so their budgets
+are warnings; MIPI declares its 1 Gb/s lane rate, so its 20.1 ps budget is an
+error.
 
 `build_net_class_map()` assembles them into a `net_name -> NetClassRouting`
 dict that both the autorouter (in `route_pcb()`) and the regression test

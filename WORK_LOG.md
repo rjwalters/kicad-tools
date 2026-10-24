@@ -13,8 +13,18 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-10-24
+
+- **PR #7923**: fix: skip placement-invalid nets in route's chained --complete pass (#7922)
+- **Issue #7922** (closed): CI Test (extended) red on main since 2026-10-23: test_production_layer_winner_keeps_placement[0.1] (assert 2 == 1)
+
 ### 2026-10-23
 
+- **PR #7918**: fix: judge diffpair bench skew by the ps budget kct check uses
+- **Issue #7914** (closed): diffpair bench: kct_verdict.skew still judges the legacy mm thresholds, not kct check's ps budget
+- **PR #7917**: test: grade the live 06b diffpair guard inside kicad_toolchain_session (#7916)
+- **Issue #7916** (closed): test_diffpair_bench slow test fails since #7904: grades outside kicad_toolchain_session (KiCadToolchainRequired)
+- **PR #7911**: fix(board06): route MIPI_CLK on outer layers so its legs share a layer speed
 - **PR #7910**: fix(research): krt_compare.py grades on the pinned kicad-cli (#7903)
 - **Issue #7903** (closed): krt_compare.py kicad-cli DRC bypasses the pinned evidence toolchain
 - **PR #7909**: feat(router): tune diff-pair skew to the derived ps budget (single source with kct check)

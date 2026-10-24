@@ -84,13 +84,20 @@ The protocol-specific `NetClassRouting` instances live in
 - `ddr_data_byte_0_net_class()` --- `length_match_group="DDR_DATA_BYTE_0"`,
   `length_match_tolerance_mm=0.1` (DDR commodity tolerance)
 - `ddr_dqs_pair_net_class()` --- pair members of DDR group
-  + `coupled_routing=True`, `skew_tolerance_mm=0.05` (Phase 3H within-pair)
+  + `coupled_routing=True`, `pair_protocol="DDR_DQS_CK"` (UG583 2 ps
+  within-pair limit, an error), `skew_tolerance_mm=0.05`
 - `mipi_csi_net_class()` --- `length_match_group="MIPI_CSI_LANES"`,
-  `target_diff_impedance=100`, `skew_tolerance_mm=0.05`
+  `target_diff_impedance=100`, `pair_protocol="MIPI_DPHY"`, `skew_tolerance_mm=0.05`
 - `hdmi_tmds_net_class()` --- `length_match_group="HDMI_TMDS_LANES"`,
-  `target_diff_impedance=100`, `skew_tolerance_mm=0.075`
+  `target_diff_impedance=100`, `pair_protocol="HDMI_TMDS"`, `skew_tolerance_mm=0.075`
 - `addr_bus_net_class()` --- `length_match_group="ADDR_BUS"`,
   `length_match_reference="A0"` (pace-car semantic)
+
+Within-pair skew is judged against the derived ps budget of the declared
+protocol ([guide 09](../../../docs/guides/diff-pairs/09-skew-budget.md)),
+plus the explicit `skew_tolerance_mm` caps.  The caps stay until #7913:
+without them the seed-42 re-route fails `impedance` on re-routed TMDS
+breakout runs (Issue #7894).
 
 `build_net_class_map()` assembles them into a `net_name -> NetClassRouting`
 dict that the autorouter (in `route_pcb()`), the JSON sidecar

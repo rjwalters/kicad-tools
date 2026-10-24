@@ -19,7 +19,7 @@ from kicad_tools.router.primitives import Pad, Route, Segment, Via
 def fragment(net, a, b, y, escape=False):
     return Route(
         net=net,
-        net_name={1: "USB_D+", 2: "USB_D-"}.get(net, "OTHER"),
+        net_name={1: "SIG_P", 2: "SIG_N"}.get(net, "OTHER"),
         is_escape=escape,
         segments=[Segment(a, y, b, y, 0.2, Layer.F_CU, net=net)],
     )
@@ -32,7 +32,7 @@ def setup(shorter=1, *, native=False, escape_length=1, split=False):
         if not is_cpp_available():
             pytest.skip("matching C++ backend unavailable")
     ar = Autorouter(width=60, height=40, force_python=not native)
-    ar.net_names = {1: "USB_D+", 2: "USB_D-"}
+    ar.net_names = {1: "SIG_P", 2: "SIG_N"}
     for net, y in [(1, 10), (2, 20)]:
         end = 5 + escape_length + (12 if net == shorter else 13)
         boundary = 5 + escape_length
@@ -78,7 +78,7 @@ def test_split_pair_publishes_once_and_refreshes_state(native, shorter, escape_l
     ar.grid.mark_route(independent)
     checker = make_collision_checker(ar.grid, ignore_overflow=True)
     connected = snapshot_connectivity(ar)
-    result = ar.apply_diffpair_length_tuning(pairs, verbose=False)[("USB_D+", "USB_D-")]
+    result = ar.apply_diffpair_length_tuning(pairs, verbose=False)[("SIG_P", "SIG_N")]
     assert result.reason == "tuned"
     assert abs(length(ar, 1) - length(ar, 2)) <= 0.5
     assert result.skew_after_mm == pytest.approx(abs(length(ar, 1) - length(ar, 2)))
@@ -119,7 +119,7 @@ def test_split_pair_publishes_once_and_refreshes_state(native, shorter, escape_l
         indexed = [s for items in ar.grid._seg_rtree_items.values() for s in items.values()]
         assert {id(s) for s in indexed} == {id(s) for r in ar.grid.routes for s in r.segments}
     first = list(ar.routes)
-    second = ar.apply_diffpair_length_tuning(pairs, verbose=False)[("USB_D+", "USB_D-")]
+    second = ar.apply_diffpair_length_tuning(pairs, verbose=False)[("SIG_P", "SIG_N")]
     assert second.reason == "already_within_tolerance"
     assert all(a is b for a, b in zip(first, ar.routes, strict=True))
 
@@ -135,7 +135,7 @@ def test_escape_only_net_hosts_its_bump_in_the_escape_and_keeps_via_identity():
     via = Via(6, 10, 0.6, 0.3, (Layer.F_CU, Layer.B_CU), net=1)
     ar.routes[0].vias.append(via)
     original = list(ar.routes)
-    result = ar.apply_diffpair_length_tuning(pairs, verbose=False)[("USB_D+", "USB_D-")]
+    result = ar.apply_diffpair_length_tuning(pairs, verbose=False)[("SIG_P", "SIG_N")]
     assert result.reason == "tuned"
     assert abs(length(ar, 1) - length(ar, 2)) <= 0.5
     assert len(ar.routes) == len(original) and all(r.is_escape for r in ar.routes)
@@ -151,7 +151,7 @@ def test_escape_bump_never_touches_its_own_pad():
     from kicad_tools.router.grid import pad_segment_edge_clearance
 
     ar, pairs = setup(escape_length=17, split=True)
-    result = ar.apply_diffpair_length_tuning(pairs, verbose=False)[("USB_D+", "USB_D-")]
+    result = ar.apply_diffpair_length_tuning(pairs, verbose=False)[("SIG_P", "SIG_N")]
     assert result.reason == "tuned"
     bump = [s for r in ar.routes if r.net == 1 for s in r.segments if s.y1 != 10 or s.y2 != 10]
     assert bump
@@ -172,7 +172,7 @@ def test_earlier_foreign_fragment_rejects_and_retains_original_objects():
         ar._mark_route(route)
     original = list(ar.routes)
     geometry = copy.deepcopy([(r.segments, r.vias) for r in original])
-    result = ar.apply_diffpair_length_tuning(pairs, verbose=False)[("USB_D+", "USB_D-")]
+    result = ar.apply_diffpair_length_tuning(pairs, verbose=False)[("SIG_P", "SIG_N")]
     assert result.reason == "post_insertion_drc_violation"
     assert all(a is b for a, b in zip(original, ar.routes, strict=True))
     assert [(r.segments, r.vias) for r in ar.routes] == geometry
@@ -206,13 +206,13 @@ def test_untuned_fragments_keep_identity_and_complete_tracker(disabled):
 
     ar, pairs = setup(split=True)
     if disabled:
-        ar.net_class_map = {"USB_D+": NetClassRouting(name="No tuning", length_critical=False)}
+        ar.net_class_map = {"SIG_P": NetClassRouting(name="No tuning", length_critical=False)}
     else:
         # Trim the longer channel to the same complete-net length.
         ar.routes[-1].segments[0].x2 -= 1
         ar.restore_route_snapshot(ar.routes)
     original = list(ar.routes)
-    result = ar.apply_diffpair_length_tuning(pairs, verbose=False)[("USB_D+", "USB_D-")]
+    result = ar.apply_diffpair_length_tuning(pairs, verbose=False)[("SIG_P", "SIG_N")]
     assert result.reason == ("not_length_critical" if disabled else "already_within_tolerance")
     assert all(a is b for a, b in zip(original, ar.routes, strict=True))
     assert ar.diffpair_length_tracker.lengths[1] == pytest.approx(length(ar, 1))
