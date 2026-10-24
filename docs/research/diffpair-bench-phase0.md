@@ -312,6 +312,64 @@ routing effects show up:
   unrouted, and grid reaches 0/9 coupled. These are router gaps for the later phases of
   #6441, not checker findings.
 
+### Phase 6 table (#6448)
+
+`data/research/diffpair_bench/p6-6448-merged-511a681f.json` (8 rows; issue #6448,
+epic #6441 Phase 6). Taken on main `edc7ab3a1` plus the `for_type` removal
+(`511a681f`), native build 65, seed 42, `--timeout 2400`, kicad-cli 10.0.6 through the
+pinned image (`KCT_KICAD_DOCKER=1`, `kicad/kicad@sha256:186935...`). `07rf` is board 07's
+synthetic match-group regression fixture
+(`boards/07-matchgroup-test/regression-fixture/`, no copper on any net). It has the
+same 7 pairs and 34 nets (31 signal and 3 pour) as the recipe's synthetic board. The
+committed `boards/07-matchgroup-test/output/` board is a different circuit.
+
+```bash
+KCT_KICAD_DOCKER=1 uv run python scripts/research/expand_route_experiment.py pairs run \
+    --boards 03,06b,06rf,07rf --engines lattice,grid --seeds 42 --timeout 2400 \
+    --label p6-6448 --work-dir <dir>
+```
+
+In the first pass (`p6-6448-511a681f.json`), kicad-cli inside the Docker VM exited 137
+(killed) during two routes: `03` lattice and `06rf` grid. Other worktrees were running
+pinned kicad-cli at the same time. On those rows oracle completion was skipped
+(`oracle_unverified: true`) and kicad-cli gave no grade. Both cells were re-run alone
+with the same command (`--boards 03 --engines lattice`, `--boards 06rf --engines grid`)
+and joined with `diffpair_bench.py merge`. The harness still marks the killed rows
+`valid: true`. Only `oracle_unverified` and `manufacturable: null` show that they are
+not results.
+
+Uncoupled is the sum of the per-pair `uncoupled_mm`. Skew verdicts are counted per
+pair, as fail/warn, under the time budget `kct check` applies (#7892). A skew above the
+millimetre limit can still be a warning or a pass.
+
+| Board | Engine | Pairs coupled (hybrid) | Uncoupled mm | Max pair skew mm | Skew kct fail/warn | Skew kicad-cli fail/warn | Nets | kct errors | kicad-cli errors / unconnected | `manufacturable` | Exit | Wall s |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 03 | grid | 1/2 (0) | 63.9 | 1.594 | 0/0 | 0/0 | 26/27 | 2 (connectivity 1, diffpair_uncoupled_length 1) | 1 (diff_pair_uncoupled_length_too_long 1) / 1 | False | 3 | 470.8 |
+| 03 | lattice | 1/2 (0) | 19.7 | 0.387 | 0/0 | 0/0 | 27/27 | 0 | 0 / 0 | True | 0 | 496.2 |
+| 06b | grid | 0/4 (0) | 40.9 | 0.445 | 0/0 | 0/0 | 18/18 | 0 | 0 / 0 | True | 0 | 92.7 |
+| 06b | lattice | 4/4 (0) | 13.2 | 2.651 | 0/0 | 0/4 | 18/18 | 0 | 0 / 0 | True | 0 | 80.4 |
+| 06rf | grid | 4/9 (0) | 292.5 | 4.074 | 0/6 | 0/6 | 24/26 | 7 (impedance 7) | 0 / 5 | False | 3 | 658.5 |
+| 06rf | lattice | 8/9 (1) | 68.6 | 1.195 | 0/0 | 0/4 | 26/26 | 0 | 0 / 0 | True | 0 | 407.7 |
+| 07rf | grid | 5/7 (0) | 83.1 | 13.728 | 3/0 | 3/0 | 34/34 | 12 (diffpair_length_skew 4, impedance 4, match_group_length_skew 4) | 3 (skew_out_of_range 3) / 0 | False | 3 | 170.9 |
+| 07rf | lattice | 7/7 (0) | 22.6 | 0.067 | 0/0 | 0/0 | 34/34 | 0 | 0 / 0 | True | 0 | 345.0 |
+
+The `07rf` grid row is the bench's flag set (`--route-engine grid --differential-pairs
+--deterministic-rescue`). That is not board 07's production recipe, which adds
+`--strategy negotiated`, `--length-match-groups`, `--tighten-diffpair-gap`, the
+routing-frame translation, pour repair and a post-route retune. The recipe was run
+separately, with `PYTHONHASHSEED=42 KCT_KICAD_DOCKER=1 uv run python
+boards/07-matchgroup-test/generate_design.py <dir> --step all --seed 42
+--differential-pairs`. It routes on the grid engine, because the recipe has no engine
+option. It gave 7/7 `coupled-ok` and 31/31 nets. Copper-LVS showed 0 shorts and 0 opens
+over 244 pads, and `check_net_status` found 0 unconnected. Pair skews were DQS 0.045,
+MIPI_CLK/DAT0/DAT1 0.045, TMDS_D0 0.068, TMDS_D1 0.059 and TMDS_D2 0.027 mm. Group
+skews were DDR_DATA_BYTE_0 0.002, MIPI_CSI_LANES 0.000 and HDMI_TMDS_LANES 0.001 mm.
+Pinned kicad-cli `--refill-zones` reported 0 errors and 0 unconnected, with 24 warnings:
+10 silk_over_copper, 6 lib_footprint_issues, 4 text_thickness and 4 text_height.
+`check_board07_diffpair_baseline.py` found copper_safety 0, opens 0 and
+skew_out_of_range 0, and exited 0. The recipe exits 1 (`Routing: PARTIAL`), as it did on
+#7837. The wall time was 102 s.
+
 ## Other findings
 
 - **Coupled outcome without copper.** `coupled` in the lattice log does not mean the
