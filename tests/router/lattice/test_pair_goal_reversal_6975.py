@@ -42,8 +42,8 @@ def centrelines(monkeypatch):
     seen: list[tuple[list, list]] = []
     orig = coupled_mod.trim_end_reversals
 
-    def spy(points):
-        out = orig(points)
+    def spy(points, *args, **kwargs):
+        out = orig(points, *args, **kwargs)
         seen.append((coupled_mod.merge_collinear_points(points), out))
         return out
 
@@ -95,3 +95,50 @@ def test_finished_centrelines_keep_the_stub_parity(centrelines) -> None:
         first = (center[1][0] - center[0][0], center[1][1] - center[0][1])
         last = (center[-1][0] - center[-2][0], center[-1][1] - center[-2][1])
         assert side_bit(first, pc.pad_p_a, pc.pad_n_a) == side_bit(last, pc.pad_p_b, pc.pad_n_b)
+
+
+def test_trimmed_tail_loop_chord_is_still_reverified(monkeypatch) -> None:
+    """Issue #7931: a centerline cut by the tail-loop trim is re-verified.
+
+    Every centerline the finish gate sees is replaced by a straight run
+    between its two end anchors with a sub-pitch jog-and-return past the far
+    anchor -- the board-03 tail shape.  The real trim removes the loop, and
+    the remaining chord runs straight through a foreign pad sitting on the
+    pair's axis.  The finish gate must reject it like any other centerline:
+    the trim changes the centerline, never the verification.
+    """
+    blocker = _pad(15.0, 5.5, 9, "OTHER", ref="X1", width=1.0, height=1.0)
+    pf, pc = _pair_board([blocker])
+    orig = coupled_mod.trim_end_reversals
+    trimmed: list[list] = []
+
+    def looped(points, *args, **kwargs):
+        p0, pe = points[0], points[-1]
+        if abs(p0[1] - pe[1]) > 1e-9:
+            return orig(points, *args, **kwargs)
+        sx = 1.0 if pe[0] > p0[0] else -1.0
+        loop = [p0, pe, (pe[0] + 0.05 * sx, pe[1] + 0.05), (pe[0] + 0.1 * sx, pe[1]), pe]
+        out = orig(loop, *args, **kwargs)
+        trimmed.append(out)
+        return out
+
+    monkeypatch.setattr(coupled_mod, "trim_end_reversals", looped)
+    routes, _stats = pf.route_netset([], coupled=[pc])
+
+    # The trim did fire: the loop was cut to the bare chord through X1.
+    assert trimmed, "the finish gate never saw a straight-axis centerline"
+    assert all(len(c) == 2 for c in trimmed), trimmed
+    # ...and that chord was not shipped: nothing emitted touches X1's copper.
+    assert pf.pair_outcomes[pc.key] != "coupled", pf.pair_outcomes
+    for route in routes.values():
+        for seg in route.segments:
+            for x, y in ((seg.x1, seg.y1), (seg.x2, seg.y2)):
+                assert not (14.4 <= x <= 15.6 and 4.9 <= y <= 6.1), (x, y)
+    assert pf.pair_outcomes[pc.key].startswith("pair-leg"), pf.pair_outcomes
+
+    # Control: with the real centerlines (around X1) the pair couples, so the
+    # decline above is the re-verified chord, not the board.
+    monkeypatch.setattr(coupled_mod, "trim_end_reversals", orig)
+    pf2, pc2 = _pair_board([blocker])
+    pf2.route_netset([], coupled=[pc2])
+    assert pf2.pair_outcomes[pc2.key] == "coupled", pf2.pair_outcomes

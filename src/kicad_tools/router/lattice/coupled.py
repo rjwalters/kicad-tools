@@ -347,8 +347,46 @@ def merge_collinear_points(points: list[Pt]) -> list[Pt]:
     return out
 
 
-def trim_end_reversals(points: list[Pt]) -> list[Pt]:
-    """Trim a collinear overshoot-and-return at either end of a polyline.
+def _trim_tail_loop(seq: list[Pt], max_lateral: float) -> list[Pt] | None:
+    """Replace a short jog/detour-and-return ending at ``seq[-1]`` (Issue #7931).
+
+    Looks for the latest earlier edge ``seq[k] -> seq[k + 1]`` whose segment
+    contains the end vertex ``p = seq[-1]`` strictly ahead of ``seq[k]``,
+    with every vertex between ``seq[k + 1]`` and ``p`` within
+    ``max_lateral`` of that edge's line.  Returns ``seq[:k + 1] + [p]``: the
+    end vertex is kept exactly and the new last step runs along edge ``k``
+    over ground the search already took, so no new direction and no new
+    copper is introduced -- only the loop is removed.  ``None`` when no such
+    loop exists.
+    """
+    p = seq[-1]
+    # The last edge ends at p and the one before it shares a vertex with it,
+    # so the earliest candidate that can carry a loop is three edges back.
+    for k in range(len(seq) - 4, -1, -1):
+        a, b = seq[k], seq[k + 1]
+        length = dist(a, b)
+        if length <= _EPS:
+            continue
+        d = ((b[0] - a[0]) / length, (b[1] - a[1]) / length)
+        rel = (p[0] - a[0], p[1] - a[1])
+        along = rel[0] * d[0] + rel[1] * d[1]
+        if abs(rel[0] * d[1] - rel[1] * d[0]) > _EPS:
+            continue
+        if along <= _EPS or along > length + _EPS:
+            continue
+        loop = seq[k + 1 : -1]
+        if all(
+            abs((q[0] - a[0]) * d[1] - (q[1] - a[1]) * d[0]) <= max_lateral + _EPS for q in loop
+        ):
+            return [*seq[: k + 1], p]
+        # A wider loop is a real routing decision, not a lattice artefact;
+        # an earlier edge would only enclose it, so stop looking.
+        return None
+    return None
+
+
+def trim_end_reversals(points: list[Pt], max_lateral: float = 0.0) -> list[Pt]:
+    """Trim an overshoot-and-return at either end of a polyline.
 
     The lattice search can reach a node beyond the goal anchor and append a
     goal stub that returns along the same line, leaving a 180-degree
@@ -357,9 +395,22 @@ def trim_end_reversals(points: list[Pt]) -> list[Pt]:
     single step ``a -> p`` (``p`` lies on segment ``a``-``b``).  When ``p``
     coincides with ``a`` the whole out-and-back spur is dropped.
 
-    Only the first and last two steps are considered: a reversal in the
-    middle of the path is a genuine defect and must still decline.  The
-    caller re-verifies the trimmed centerline like any other.
+    Issue #7931: the overshoot is not always collinear.  Near the anchor the
+    search can also jog sideways (or take a 45-degree detour) past the end
+    and come back to it, e.g. ``... A -> B -> jog -> back on B's line -> B``.
+    With ``max_lateral > 0`` such a tail loop is cut to the straight step
+    along the earlier edge whose segment holds the end vertex, provided
+    every vertex of the loop stays within ``max_lateral`` of that edge's
+    line.  Callers pass the pair's copper half-width (half pitch plus half
+    the trace width): a loop that never leaves the band the pair's own
+    copper covers is a lattice artefact, a wider one is a routing decision
+    and still declines.  The anchored end vertex is never moved, and the step
+    that replaces the loop lies on an already-searched edge, so emitted
+    directions stay a subset of the source directions.
+
+    Only the ends are considered: a reversal in the middle of the path is a
+    genuine defect and must still decline.  The caller re-verifies the
+    trimmed centerline like any other.
     """
     pts = merge_collinear_points(points)
 
@@ -375,6 +426,11 @@ def trim_end_reversals(points: list[Pt]) -> list[Pt]:
             # p is on segment a-b: drop the overshoot vertex b (and p too
             # when it lands back on a, so the spur vanishes entirely).
             seq = seq[:-2] if dist(a, p) <= _EPS else [*seq[:-2], p]
+        if max_lateral > 0.0 and len(seq) >= 4:
+            looped = _trim_tail_loop(seq, max_lateral)
+            if looped is not None:
+                # The cut can expose a collinear overshoot underneath.
+                seq = trim_tail(merge_collinear_points(looped))
         return seq
 
     pts = trim_tail(pts)

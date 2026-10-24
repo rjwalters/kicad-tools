@@ -497,7 +497,7 @@ def _pair_skew(pres: _PairResult, net_p: int) -> float:
     return total
 
 
-def _balanced_centerlines(result: _RouteResult, pitch: float) -> list[list[Pt]]:
+def _balanced_centerlines(result: _RouteResult, pitch: float, band: float) -> list[list[Pt]]:
     """Balanced-bend rewrites of a pair search's centerline, to try in order (#7649).
 
     One candidate per step length in
@@ -507,13 +507,15 @@ def _balanced_centerlines(result: _RouteResult, pitch: float) -> list[list[Pt]]:
     steps (:func:`~kicad_tools.router.pairplan.bend_balance.balance_bends`).
     Empty when the centerline has no such joint.  The caller verifies each
     one through the pair finish gate as it would a nudged centerline.
+    ``band`` is the pair's copper half-width, the tail-loop bound of
+    :func:`~kicad_tools.router.lattice.coupled.trim_end_reversals` (#7931).
     """
     from ..pairplan.bend_balance import BEND_STEP_PITCHES, balance_bends
     from .coupled import trim_end_reversals
 
     if len(result.runs) != 1 or result.via_points:
         return []
-    center = trim_end_reversals(result.runs[0][1])
+    center = trim_end_reversals(result.runs[0][1], band)
     out: list[list[Pt]] = []
     for k in BEND_STEP_PITCHES:
         balanced = balance_bends(center, pitch, k * pitch)
@@ -3926,6 +3928,9 @@ class LatticePathfinder:
 
         trace_w = getattr(pc.net_class, "trace_width", None) or self.rules.trace_width
         intra_clearance = pc.pitch - trace_w
+        # Issue #7931: a tail loop that never leaves the band the pair's own
+        # copper covers is a lattice artefact; ``trim_end_reversals`` cuts it.
+        loop_band = half_pitch + trace_w / 2.0
 
         # Issue #6839: ``(partner pad is at end A, first centerline turn
         # next to that end)`` of the last ``pair-partner-pad`` decline.
@@ -3950,7 +3955,7 @@ class LatticePathfinder:
                 return None, "pair-not-planar"  # defensive: vias are off
 
             layer, raw_pts, _widths = result.runs[0]
-            center = trim_end_reversals(raw_pts) if nudged is None else nudged
+            center = trim_end_reversals(raw_pts, loop_band) if nudged is None else nudged
             if len(center) < 2:
                 return None, "pair-degenerate-centerline"
             if nudged is not None:
@@ -4123,7 +4128,7 @@ class LatticePathfinder:
             """
             if len(result.runs) != 1 or result.via_points:
                 return None
-            center = trim_end_reversals(result.runs[0][1])
+            center = trim_end_reversals(result.runs[0][1], loop_band)
             for step in _PAIR_NUDGE_STEPS:
                 for i in range(1, len(center) - 2):
                     for delta in (step, -step):
@@ -4194,7 +4199,7 @@ class LatticePathfinder:
                     pres
                     for pres, _why in (
                         finish(result, balanced)
-                        for balanced in _balanced_centerlines(result, pc.pitch)
+                        for balanced in _balanced_centerlines(result, pc.pitch, loop_band)
                     )
                     if pres is not None
                 ]
@@ -4279,7 +4284,7 @@ class LatticePathfinder:
 
         centers: list[tuple[int, list[Pt]]] = []
         for i, (layer, pts, _widths) in enumerate(result.runs):
-            center = trim_end_reversals(pts)
+            center = trim_end_reversals(pts, pc.pitch / 2.0 + half)
             if len(center) < 2:
                 return None, "pair-degenerate-centerline"
             if i > 0 and dist(center[0], pairs[i - 1].centre) > 1e-9:
