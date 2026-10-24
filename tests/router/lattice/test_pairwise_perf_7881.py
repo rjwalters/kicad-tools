@@ -10,10 +10,13 @@ reference that calls ``required`` per obstacle and measures every kernel gap.
 from __future__ import annotations
 
 import random
+from collections.abc import Iterator, Mapping
 
 from kicad_tools.router.lattice import kernel_adapter as ka
-from kicad_tools.router.lattice.obstacles import CommittedCopper
+from kicad_tools.router.lattice.obstacles import CommittedCopper, LatticeObstacleModel
 from kicad_tools.router.lattice.pairwise import LatticePairwise
+from kicad_tools.router.lattice.quadtree import OctilinearLattice
+from kicad_tools.router.primitives import Pad
 
 HALF = 0.1
 CLR = 0.2
@@ -25,6 +28,42 @@ def _pairwise() -> LatticePairwise:
     return LatticePairwise(
         required_by_pair=REQ,
         zones=(),
+        max_by_net={1: 3.2, 2: 3.2, 3: 1.5, 4: 0.9},
+    )
+
+
+# A #4506 attach zone covering nets 1 and 2 over part of the board, so the
+# equivalence runs also exercise the exemption branches.
+ZONE = (8.0, 8.0, 16.0, 16.0, frozenset({1, 2}), None)
+
+
+class _RequiredRow(Mapping[int, float]):
+    """A partner row that answers every lookup through ``required`` (pre-#7881)."""
+
+    def __init__(self, pw: LatticePairwise, net: int) -> None:
+        self._pw, self._net = pw, net
+
+    def __getitem__(self, other: int) -> float:
+        return self._pw.required(self._net, other)
+
+    def __iter__(self) -> Iterator[int]:
+        return iter(())
+
+    def __len__(self) -> int:
+        return 0
+
+
+class _PerPairPairwise(LatticePairwise):
+    """Reference: the pre-#7881 per-obstacle ``required(net, other)`` lookup."""
+
+    def row(self, net: int) -> Mapping[int, float]:
+        return _RequiredRow(self, net)
+
+
+def _populated(cls: type[LatticePairwise] = LatticePairwise) -> LatticePairwise:
+    return cls(
+        required_by_pair=REQ,
+        zones=(ZONE,),
         max_by_net={1: 3.2, 2: 3.2, 3: 1.5, 4: 0.9},
     )
 
@@ -97,6 +136,57 @@ def test_node_clear_verdicts_unchanged_by_bbox_skip():
     assert seen[True] and seen[False]
 
 
+def test_predicates_match_per_pair_required_with_populated_map():
+    """Row lookups give the same seg/node/via verdicts as per-pair ``required``."""
+    rng = random.Random(78810)
+    seen = {True: 0, False: 0}
+    for seed in range(3):
+        new, old = _copper(_populated(), seed), _copper(_populated(_PerPairPairwise), seed)
+        for _ in range(200):
+            a = (rng.uniform(-2, 32), rng.uniform(-2, 32))
+            b = (a[0] + rng.uniform(-3, 3), a[1] + rng.uniform(-3, 3))
+            layer, net = rng.randrange(2), rng.randrange(1, 6)
+            want = old.seg_clear(a, b, layer, net)
+            assert new.seg_clear(a, b, layer, net) is want
+            seen[want] += 1
+            assert new.node_clear(a, layer, net) is old.node_clear(a, layer, net)
+            assert new.via_clear(a, net) is old.via_clear(a, net)
+    assert seen[True] and seen[False]
+
+
+def test_pad_check_matches_per_pair_required_with_populated_map():
+    rng = random.Random(78811)
+    pads = [
+        Pad(
+            x=rng.uniform(2, 28),
+            y=rng.uniform(2, 28),
+            width=rng.uniform(0.5, 2.0),
+            height=rng.uniform(0.5, 2.0),
+            net=rng.randrange(1, 6),
+            net_name="",
+        )
+        for _ in range(40)
+    ]
+    model = LatticeObstacleModel(
+        OctilinearLattice((0.0, 0.0, 30.0, 30.0), []),
+        pads,
+        [(0,)] * len(pads),
+        1,
+        agent_radius=HALF + CLR,
+    )
+    new, old = _populated(), _populated(_PerPairPairwise)
+    seen = {True: 0, False: 0}
+    for _ in range(400):
+        a = (rng.uniform(0, 30), rng.uniform(0, 30))
+        b = (a[0] + rng.uniform(-3, 3), a[1] + rng.uniform(-3, 3))
+        layer = rng.choice((0, None))
+        net = rng.randrange(1, 6)
+        want = model.pairwise_pad_blocked(a, b, layer, net, HALF, 0.0, old)
+        assert model.pairwise_pad_blocked(a, b, layer, net, HALF, 0.0, new) is want
+        seen[want] += 1
+    assert seen[True] and seen[False]
+
+
 def test_seg_clear_without_pairwise_matches_with_empty_matrix():
     empty = LatticePairwise(required_by_pair={}, zones=(), max_by_net={})
     rng = random.Random(3)
@@ -133,3 +223,4 @@ def test_expired_deadline_reports_rounds_with_matrix_active(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "Lattice negotiation:" in out and "converged=False" in out
     assert "stopped by: deadline after " in out and "/5 round(s)" in out
+    assert out.count("stopped by: deadline after ") == 1
