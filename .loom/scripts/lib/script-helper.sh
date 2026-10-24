@@ -34,7 +34,7 @@
 # checkout-local build above it would be a silent behaviour change of exactly
 # the kind #8134 rejected.
 #
-# This is the native replacement for `lib/loom-tools.sh`'s `run_loom_tool` on
+# This is the native replacement for `lib/repo-root.sh`'s `run_loom_tool` on
 # the six script-helper entry points (`strip-ansi.sh`, `resolve-model.sh`,
 # `check-usage.sh`, `checkpoint.sh`, `sweep-experiment.sh`,
 # `validate-phase.sh`). It exists for the same reason `run_loom_tool` did:

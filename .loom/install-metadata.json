@@ -1,6 +1,6 @@
 {
-  "loom_version": "0.19.1209",
-  "loom_commit": "bd5c60210e2d233769a8c08af04de6c89341c9dd",
+  "loom_version": "0.19.1218",
+  "loom_commit": "c040107bf671a4a8cba1e2aba8522c5c71222902",
   "install_date": "2026-08-10",
   "installed_files": [
     ".claude/agents/loom-architect.md",
@@ -653,9 +653,20 @@
     ".loom/scripts/tests/test-resync-installed-output-staging.sh",
     ".loom/scripts/tests/test-resync-installed-retired-dry-run.sh",
     ".loom/scripts/tests/test-resync-installed-stamp.sh",
-    ".loom/scripts/tests/test-session-mode.sh"
+    ".loom/scripts/tests/test-session-mode.sh",
+    ".claude/commands/loom/champion-ratification-hold.md",
+    ".loom/docs/ratification-hold.md",
+    ".loom/scripts/lib/repo-root.sh",
+    ".loom/scripts/tests/test-champion-ratification-hold.sh",
+    ".loom/scripts/tests/test-champion-resync-waiver.sh",
+    ".loom/scripts/tests/test-create-issue-curated.sh",
+    ".loom/scripts/tests/test-repo-root-alias.sh",
+    ".loom/scripts/tests/test-worktree-stale-local-branch-reuse.sh",
+    ".claude/commands/loom/champion-merge-risk-shadow.md",
+    ".loom/scripts/tests/test-champion-ci-checks-no-checks-signal.sh",
+    ".loom/scripts/tests/test-install-lock.sh"
   ],
-  "last_resync": "2026-10-22",
+  "last_resync": "2026-10-24",
   "loom_source_remote": "https://github.com/rjwalters/loom.git",
-  "requires_daemon": "0.19.1088"
+  "requires_daemon": "0.19.1146"
 }

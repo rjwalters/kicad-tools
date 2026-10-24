@@ -1279,6 +1279,21 @@ if [[ "$_loom_print_mode" == "true" ]]; then
 fi
 unset _loom_print_mode
 
+# --- Refuse to invent a git identity (issue #13088) ---
+# A worker with no user.name/user.email commits as `user@hostname` (git's
+# auto-detected fallback), which fails DCO/attribution checks only after a full
+# Judge/Doctor cycle. `user.useConfigOnly=true` makes git refuse to commit
+# unless the identity is explicit (config or GIT_AUTHOR_*/GIT_COMMITTER_*
+# env). Injected per-process via GIT_CONFIG_COUNT/KEY_n/VALUE_n, appending
+# after any count already set, so no config file (the shared primary clone or
+# the host-global config) is written. Fix on refusal: set a real identity
+# (git config --global user.name/user.email, or GIT_AUTHOR_* env).
+_gc_count="${GIT_CONFIG_COUNT:-0}"
+[[ "$_gc_count" =~ ^[0-9]+$ ]] || _gc_count=0
+export "GIT_CONFIG_KEY_${_gc_count}=user.useConfigOnly" "GIT_CONFIG_VALUE_${_gc_count}=true"
+export GIT_CONFIG_COUNT=$((_gc_count + 1))
+unset _gc_count
+
 # --- Session pinning and roll resume (issue #10830) ---
 # Pause-and-roll (docs/design/daemon-roll-pause-resume.md) resumes a paused
 # agent from its saved session, so the daemon pins every Claude session id at

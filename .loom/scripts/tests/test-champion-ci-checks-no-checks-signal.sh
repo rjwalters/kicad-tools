@@ -3,14 +3,14 @@
 # Champion's "no CI checks" merge-gate read couldn't distinguish genuine
 # no-checks from a transient `gh pr checks` failure.
 #
-# Champion's criterion #6 ("CI Status Check") in `champion-pr-merge.md` is
+# Champion's ci-green criterion ("CI Status Check") in `champion-pr-merge.md` is
 # prose an LLM instance reads and executes, not a standalone script (same
 # situation as test-champion-critical-file-check.sh) — so this file mirrors
 # the documented `read_ci_checks()` helper in a local function and pins the
 # shipped markdown's exact commands with `assert_doc_contains`, catching
 # drift between the two.
 #
-# Bug recap (#6211, follow-up from #6169/PR #6212): both criterion #6 and
+# Bug recap (#6211, follow-up from #6169/PR #6212): both the ci-green criterion and
 # the pre-merge-comment CI-status gather step treated ANY empty stdout from
 # `gh pr checks --json bucket,name` as proof "no CI checks are configured
 # for this PR" and therefore safe to auto-merge (`CHECKS=$(gh pr checks
@@ -99,7 +99,7 @@ assert_doc_lacks() {
 }
 
 # =====================================================================
-# champion-pr-merge.md criterion #6's read_ci_checks(), mirrored verbatim
+# champion-pr-merge.md the ci-green criterion's read_ci_checks(), mirrored verbatim
 # from defaults/.claude/commands/loom/champion-pr-merge.md (#6211).
 # =====================================================================
 read_ci_checks() {
@@ -238,7 +238,7 @@ echo "--- Doc pins: champion-pr-merge.md ships the fixed read_ci_checks() (#6211
 
 assert_doc_contains "$CHAMPION_MD" \
     'read_ci_checks() {' \
-    "criterion #6 defines the read_ci_checks() helper"
+    "the ci-green criterion defines the read_ci_checks() helper"
 
 assert_doc_contains "$CHAMPION_MD" \
     'if [ "$rc" -ne 0 ] && printf '"'"'%s'"'"' "$err" | grep -qi "no checks reported"; then' \
@@ -250,15 +250,15 @@ assert_doc_contains "$CHAMPION_MD" \
 
 assert_doc_contains "$CHAMPION_MD" \
     'read_ci_checks <number>' \
-    "criterion #6's check-loop calls read_ci_checks before evaluating buckets"
+    "the ci-green criterion's check-loop calls read_ci_checks before evaluating buckets"
 
 assert_doc_contains "$CHAMPION_MD" \
     'echo "SKIP: gh pr checks returned an ambiguous empty read twice in a row' \
-    "criterion #6 SKIPs (does not merge) on the ambiguous-after-retry NO_CHECKS=unknown outcome"
+    "the ci-green criterion SKIPs (does not merge) on the ambiguous-after-retry NO_CHECKS=unknown outcome"
 
 assert_doc_lacks "$CHAMPION_MD" \
     'if [ -z "$CHECKS" ] || [ "$(printf '"'"'%s\n'"'"' "$CHECKS" | jq '"'"'length'"'"')" = "0" ]; then' \
-    "criterion #6 no longer trusts bare empty stdout alone as 'no checks'"
+    "the ci-green criterion no longer trusts bare empty stdout alone as 'no checks'"
 
 assert_doc_contains "$CHAMPION_MD" \
     "#6211" \

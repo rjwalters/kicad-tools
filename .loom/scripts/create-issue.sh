@@ -264,6 +264,24 @@ if [[ -n "$BODY_FILE" ]]; then
   fi
 fi
 
+# --- #11787: loom:curated is only ever set by `curation-complete` ------------
+# A bare creation-time loom:curated bypasses the estimate gate (no points:N,
+# no issue.estimate fact). Refuse it unless the body carries a points marker,
+# and with one, defer the label to `loom-daemon curation-complete` below.
+WANT_CURATED=false
+_kept=()
+for _l in "${LABELS[@]+"${LABELS[@]}"}"; do
+  if [[ "$_l" == "loom:curated" ]]; then WANT_CURATED=true; else _kept+=("$_l"); fi
+done
+if [[ "$WANT_CURATED" == "true" ]]; then
+  if ! grep -Eq '^[[:space:]]*<!-- loom:points=[0-9]+ -->[[:space:]]*$' <<< "$BODY"; then
+    echo "create-issue.sh: refusing --label loom:curated without a standalone '<!-- loom:points=N -->' marker in the body." >&2
+    echo "create-issue.sh: file without the label, then run: loom-daemon curation-complete (see .loom/roles/curator-estimate.md)." >&2
+    exit 2
+  fi
+  LABELS=("${_kept[@]+"${_kept[@]}"}" "loom:curating")
+fi
+
 forge_detect
 if [[ "$FORGE_TYPE" != "github" ]]; then
   echo "create-issue.sh: this GraphQL-exhaustion fallback is GitHub-specific; \
@@ -461,6 +479,21 @@ else
   [[ "$_create_rc" -eq 0 && -n "$ISSUE_URL" ]] || exit 1
 fi
 echo "$ISSUE_URL"
+
+# --- #11787: curated-at-filing goes through the one producer ----------------
+# requires-daemon: curation-complete >= 0.19.1146   #11676 — the subcommand first shipped in 0.19.1120 (#11621) but only journaled the estimate; applying `loom:curated` (the write this branch relies on) landed in #11676 (31126cd07), first shipped by the 0.19.1146 bump. Hard, not `optional`: there is no version probe — an older or absent binary fails the call and the already-filed issue is left in loom:curating with the stderr note below (#11787).
+if [[ "$WANT_CURATED" == "true" ]]; then
+  _cc_n="${ISSUE_URL##*/}"; _cc_repo="${ISSUE_URL#*://*/}"; _cc_repo="${_cc_repo%/issues/*}"
+  if ! loom-daemon curation-complete --repo "$_cc_repo" --issue "$_cc_n" \
+      --model "${LOOM_CURATION_MODEL:-unknown}" --runtime "${LOOM_CURATION_RUNTIME:-unknown}" \
+      --completion-id "$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid)" \
+      --workspace-root "${LOOM_WORKSPACE_ROOT:-$PWD}" >&2; then
+    echo "create-issue.sh: issue filed but left in loom:curating: curation-complete failed; fix the marker and rerun it" >&2
+  else
+    # curation-complete adds loom:curated but never drops the claim label; 404 = already absent.
+    gh api -X DELETE "repos/$_cc_repo/issues/$_cc_n/labels/loom%3Acurating" >/dev/null 2>&1 || true
+  fi
+fi
 
 # --- #10012: native sub-issue link, best effort -----------------------------
 [[ -z "${PARENT+x}" ]] \

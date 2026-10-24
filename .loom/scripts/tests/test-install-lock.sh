@@ -336,6 +336,7 @@ mkdir -p "$target/.loom/scripts/lib" "$target/.loom/roles"
 echo '{"terminals": []}' > "$target/.loom/config.json"
 echo '#!/usr/bin/env bash' > "$target/.loom/scripts/worktree.sh"
 echo '#!/usr/bin/env bash' > "$target/.loom/scripts/lib/loom-tools.sh"
+echo '#!/usr/bin/env bash' > "$target/.loom/scripts/lib/repo-root.sh"
 printf '# Loom\n\n**Loom Version**: %s\n' "${LOOM_VERSION:-unknown}" > "$target/.loom/CLAUDE.md"
 echo "STUB loom-daemon: init wrote $target/.loom"
 EOF

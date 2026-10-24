@@ -130,13 +130,14 @@ open PRs on that issue. Do not review the code: that is Judge's.
 | Outcome | When | Write |
 |---|---|---|
 | `triaged` | **The normal case**: none of the rows below applies | `gh pr edit N --add-label loom:review-requested` |
-| `triage-blocked` | A **duplicate** of another open PR on the same issue, **superseded** (its change is already on the default branch, or a newer PR replaces it), or it **closes an issue that is already closed** | A comment naming the reason and the PR or issue it points at, then `loom-daemon park-record apply --pr N --by champion --reason "<duplicate of #M, superseded by #M, or closes #K, already closed>"` (it adds `loom:blocked`; a reason-only park, so the PR is not released back here when #M closes) |
+| `triage-blocked` | A **duplicate** of another open PR on the same issue, **superseded** (its change is already on the default branch, or a newer PR replaces it), or it **closes an issue that is already closed** | **Duplicate / closes an already-closed issue**: a comment naming the reason and the PR or issue it points at, then `loom-daemon park-record apply --pr N --by champion --reason "<duplicate of #M or closes #K, already closed>"` (it adds `loom:blocked`; a reason-only park, so the PR is not released back here when #M closes). **Superseded, confirmed**: the superseder is a PR that `gh pr view M --json state,mergedAt` shows **merged** into the default branch, or a commit that `git merge-base --is-ancestor <sha> origin/<default>` shows is on it; read it live, then comment `Superseded by #M` (or `by <sha>`), then `gh pr close N`. **Superseded, not confirmed** (superseder still open, unreadable, or only "looks similar"): park it with `--reason "superseded (unconfirmed): <what you could not verify>"` |
 | `triage-operator` | `UNTRUSTED_FORK=yes`, whatever else applies; or it **needs a human decision** that an agent may not make ("Routing to a human" in `label-state-machine.md`), e.g. it carries a change no issue asks for and only the operator can rule on its scope | A ruling: `loom-daemon operator-decision apply N --input d.json` (2-4 ranked options; for an outside contribution, admit it to review or close it), which adds `loom:operator` itself. Only a human-hands step: a comment opening `Operator reason: <class> — <one line>`, then `gh pr edit N --add-label loom:operator` |
 | `not-eligible` | Re-read the labels just before the write: a stage label, hold or claim appeared (a peer moved it) | No writes |
 
 When in doubt between `triaged` and the others, choose `triaged`: Judge
 reviews it, and Judge can still reject it. The one exception is
-`UNTRUSTED_FORK=yes`, which is never `triaged`. Never close the PR, push to it, or
+`UNTRUSTED_FORK=yes`, which is never `triaged`. Close a PR only when its
+supersession is confirmed (the `triage-blocked` row); never push to it or
 add `loom:pr`.
 
 ## `--issue N`: one promotion verdict

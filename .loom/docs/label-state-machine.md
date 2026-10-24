@@ -214,8 +214,8 @@ the migration table in `priority-model.md`.
 
 | Role | Trigger | Label |
 |---|---|---|
-| Champion (PR merge) | Posts a merge-risk hold (`champion:merge-risk-hold`) because a safety axis is red (criterion #2) | `loom:blocked` (#11861) — `champion-pr-merge.md`, "Hold behavior" |
-| Champion (PR merge) | Posts a critical-file hold (`champion:critical-file-hold`) because criterion #3 matched a critical-file pattern | `loom:blocked` (#11861) — `champion-critical-file-hold.md` |
+| Champion (PR merge) | Posts a merge-risk hold (`champion:merge-risk-hold`) because a safety axis is red (the `merge-risk` criterion) | `loom:blocked` (#11861) — `champion-pr-merge.md`, "Hold behavior" |
+| Champion (PR merge) | Posts a critical-file hold (`champion:critical-file-hold`) because the `critical-files` criterion matched a critical-file pattern | `loom:blocked` (#11861) — `champion-critical-file-hold.md` |
 | Champion (issue close) | Holds a merged PR's linked **issue** open because one of its acceptance criteria needs out-of-band verification and no `loom:ac-verified` marker attests it | `loom:operator` (#6883) — `champion-pr-merge.md`, Step 4; per-repo off switch `champion.outOfBandAcGate=false` (#12703, first use: 2AMLogic/loom-ui) |
 | Champion (promotion) | A proposal's only recurring finding is an open dependency | `loom:blocked` + one park record per blocker (#11860, #11861) — Step 4 `park-record apply --blocked-by` |
 | Curator / Builder / Doctor / Judge | Encounters work that needs a ruling or a human's hands | `loom:operator` (#11795) — "Routing to a human" above |
@@ -223,7 +223,7 @@ the migration table in `priority-model.md`.
 
 ## Champion's PR holds (#11861)
 
-A merge-risk hold (criterion #2) and a critical-file hold (criterion #3) are
+A merge-risk hold (the `merge-risk` criterion) and a critical-file hold (the `critical-files` criterion) are
 Champion's own, and Champion must keep re-evaluating and releasing them. Before
 #11861 they used `loom:operator`, which was not a park on a PR. Under the
 all-role rule they moved to `loom:blocked`:
@@ -271,16 +271,16 @@ gh pr edit <N> --remove-label "loom:blocked"
 ./.loom/scripts/merge-pr.sh <N>
 ```
 
-- **Critical-file hold** (criterion #3): the release is scoped to the **diff**,
+- **Critical-file hold** (the `critical-files` criterion): the release is scoped to the **diff**,
   not to a commit id (#9416). Champion acknowledges it once, behind a
   `champion:critical-file-release-respected` marker, and does not re-apply the
   label. A push that changes the diff re-arms the hold; a head move across which
   the PR's own change is *provably* unchanged (`loom-daemon forge
   verdict-equivalent`) does not. See `champion-critical-file-hold.md` and
   `critical-file-hold.md`.
-- **Merge-risk hold** (criterion #2): your removal (a human `unlabeled` event
+- **Merge-risk hold** (the `merge-risk` criterion): your removal (a human `unlabeled` event
   after the hold) **releases** it (#11416). Champion merges it on its next tick
-  unless it finds a concern the hold did not name (criteria #3-#6 still apply),
+  unless it finds a concern the hold did not name (the `critical-files`, `mergeable`, `recency` and `ci-green` criteria still apply),
   posting the reversal comment. A human removal of the pre-#11861
   `loom:operator` counts too, so a hold released before the migration stays
   released.
@@ -353,12 +353,12 @@ a compromised trusted agent, and it adds no signed decisions or keys.
 
 ## Current implementation
 
-- **Criterion #2 (merge-risk hold)** — `champion-pr-merge.md`: entry in
+- **The `merge-risk` criterion (merge-risk hold)** — `champion-pr-merge.md`: entry in
   "Hold behavior" (`park-record apply --pr`), exit in Step 2 (`gh pr edit
   --remove-label loom:blocked`, gated on `$HOLD_REVERSAL_BLOCK`), repair in
   the sticky precheck (`LABEL_REPAIR`).
-- **Criterion #3 (critical-file hold, #6879, #9016)** —
-  `champion-critical-file-hold.md`, run after criterion #3's check-loop: add on
+- **The `critical-files` criterion (critical-file hold, #6879, #9016)** —
+  `champion-critical-file-hold.md`, run after the `critical-files` criterion's check-loop: add on
   FAIL, remove with the `champion:critical-file-hold-cleared` notice once a push
   leaves every pattern, and respect a human's hand-removal at the held diff.
 - **Queues** — `pr-queue --role champion` keeps `loom:pr` + `loom:blocked`

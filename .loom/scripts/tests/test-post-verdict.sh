@@ -195,6 +195,12 @@ if [[ "${1:-}" == forge && "${2:-}" == verdict-* && "${3:-}" == --help ]]; then
   [[ -f "$D/old-daemon" ]] && { echo "error: unrecognized subcommand '$2'" >&2; exit 2; }
   exit 0
 fi
+# #13055: `lease pr check` answers from lease-state ("<rc> <line>"); default held-self.
+if [[ "${1:-} ${2:-} ${3:-}" == "lease pr check" ]]; then
+  printf '%s\n' "$*" >> "$D/lease-calls.log"
+  [[ -f "$D/lease-state" ]] || { echo "PR_LEASE_STATE=held-self"; exit 0; }
+  read -r rc line < "$D/lease-state"; [[ -n "$line" ]] && echo "$line"; exit "$rc"
+fi
 if [[ "${1:-}" == --version ]]; then echo "loom-daemon 0.19.870 (mock)"; exit 0; fi
 # #12475: the reconciliation gate reads comment verdicts through the trust
 # filter; this suite posts none, so the filter just echoes its (empty) stdin.
@@ -249,7 +255,7 @@ reset_state() {
     "$STUB_DIR"/ci-stdout "$STUB_DIR"/ci-stderr "$STUB_DIR"/ci-garbage "$STUB_DIR"/ci-absent "$STUB_DIR"/ci-empty "$STUB_DIR"/ci-required \
     "$STUB_DIR"/final-head "$STUB_DIR"/final-head-fail "$STUB_DIR/wait-checks-calls.log" \
     "$STUB_DIR/gate-answer" "$STUB_DIR/reconcile-answer" "$STUB_DIR"/reconcile-answer.* "$STUB_DIR/labels-fail" "$STUB_DIR/lock-fail" "$STUB_DIR/daemon-calls.log" \
-    "$STUB_DIR/old-daemon" "$STUB_DIR/body-answer" "$STUB_DIR/body-check-missing" "$STUB_DIR/body-check-input.txt" "$STUB_DIR/delete-fail" "$STUB_DIR/labels-read-fail" "$STUB_DIR/pr-edit.log" "$STUB_DIR/pr-edit-fail"
+    "$STUB_DIR/lease-state" "$STUB_DIR/lease-calls.log" "$STUB_DIR/old-daemon" "$STUB_DIR/body-answer" "$STUB_DIR/body-check-missing" "$STUB_DIR/body-check-input.txt" "$STUB_DIR/delete-fail" "$STUB_DIR/labels-read-fail" "$STUB_DIR/pr-edit.log" "$STUB_DIR/pr-edit-fail"
 }
 
 run_pv() {
@@ -841,6 +847,30 @@ run_pv 332 changes-requested abc1234 --body "please fix"
 assert_eq "8" "$EXIT_CODE" "legacy path label failure -> exit 8"
 assert_eq "332" "$(cat "$STUB_DIR/last-pr.txt" 2>/dev/null || true)" "the comment itself was posted"
 assert_contains "$OUTPUT" "Repair: gh pr edit 332 --repo owner/repo --add-label loom:changes-requested" "repair command is printed"
+
+# --- Judge lease gate (#13055) ------------------------------------------------
+for case_ in "0 PR_LEASE_STATE=free" "4 PR_LEASE_STATE=held-peer" "5 PR_LEASE_STATE=unknown" "5 garbage-no-state-line" "0 "; do
+  reset_state
+  echo "$case_" > "$STUB_DIR/lease-state"
+  run_pv 340 approved abc1234 --body "ok"
+  assert_eq "10" "$EXIT_CODE" "lease '$case_' -> approval refused with exit 10"
+  no_comment "lease '$case_'"
+  assert_contains "$OUTPUT" "does not hold a live Judge lease" "lease '$case_': stderr names the refusal"
+done
+reset_state
+echo "0 PR_LEASE_STATE=free" > "$STUB_DIR/lease-state"
+run_pv 341 changes-requested abc1234 --body "please fix"
+assert_eq "0" "$EXIT_CODE" "changes-requested is not gated on the lease"
+reset_state
+echo "0 PR_LEASE_STATE=held-self" > "$STUB_DIR/lease-state"
+run_pv 342 approved abc1234 --body "ok"
+assert_eq "0" "$EXIT_CODE" "held-self -> approval posted"
+assert_contains "$(cat "$STUB_DIR/lease-calls.log")" "lease pr check 342 --role judge --watch-pid" "check asked for this PR and role"
+reset_state
+echo "2 error: unrecognized subcommand 'pr'" > "$STUB_DIR/lease-state"
+run_pv 343 approved abc1234 --body "ok"
+assert_eq "0" "$EXIT_CODE" "binary without lease pr (exit 2) -> approval proceeds"
+assert_contains "$OUTPUT" "not gating the approval" "older binary: loud warning"
 
 # --- Summary ---
 echo ""

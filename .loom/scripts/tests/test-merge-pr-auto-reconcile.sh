@@ -100,7 +100,7 @@ STUB_DIR="$(mktemp -d)"
 RECON_DIR="$(mktemp -d)"
 trap 'rm -rf "$FUNCS_FILE" "$STUB_DIR" "$RECON_DIR" 2>/dev/null || true' EXIT
 awk '
-  /^_reset_one_partial_issue\(\) \{/ { capture=1 }
+  /^_post_merge_bookkeeping\(\) \{/ { capture=1 }
   /^# Handle auto-merge mode/        { capture=0 }
   capture { print }
 ' "$MERGE_PR_SRC" > "$FUNCS_FILE"
@@ -264,29 +264,6 @@ cat > "$FAKE_DIR/daemon-no-verbs" <<'FAKE'
 #!/usr/bin/env bash
 echo "error: unrecognized subcommand '${3:-}'" >&2
 exit 2
-FAKE
-
-# A binary that answers `reconcile-plan` for real but cannot answer
-# `reconcile-child` — the partial-availability case that isolates the child
-# verdict, which is the one that decides whether a branch gets force-pushed.
-cat > "$FAKE_DIR/daemon-no-child" <<'FAKE'
-#!/usr/bin/env bash
-if [[ "${2:-}" == "reconcile-child" ]]; then
-  echo "error: unrecognized subcommand 'reconcile-child'" >&2
-  exit 2
-fi
-exec "$LOOM_TEST_REAL_DAEMON" "$@"
-FAKE
-
-# A binary that exits 0 for `reconcile-child` but prints something that is not a
-# verdict. Exit status alone must not be read as consent.
-cat > "$FAKE_DIR/daemon-child-garbage" <<'FAKE'
-#!/usr/bin/env bash
-if [[ "${2:-}" == "reconcile-child" ]]; then
-  echo "warning: token pool refreshed"
-  exit 0
-fi
-exec "$LOOM_TEST_REAL_DAEMON" "$@"
 FAKE
 
 chmod +x "$FAKE_DIR"/daemon-*
@@ -459,27 +436,16 @@ assert_eq "" "$(read_recon)" \
   "Unanswerable reconcile-plan with a pre-merge snapshot -> still no reconcile (a snapshot is not a verdict)"
 unset STACKED_CHILDREN_JSON
 
-# T12: the plan is answered but the CHILD verdict is not. The child that WOULD
-# have reconciled must be skipped instead: not knowing whether issue #201 is
-# still claimed is not the same as knowing it is not.
-reset_logs
-PR_BRANCH="feature/issue-100"
-write_prlist "feature/issue-100" '[{"number":501,"headRefName":"feature/issue-201"}]'
-unset STACKED_CHILDREN_JSON 2>/dev/null || true
-with_daemon "$FAKE_DIR/daemon-no-child" 2>/dev/null || true
-assert_eq "" "$(read_recon)" \
-  "Unanswerable reconcile-child -> the safe-looking child is NOT force-pushed on a guess"
-assert_eq "" "$(read_gh_log)" \
-  "Unanswerable reconcile-child -> no deferral comment either (an unknown verdict is not a deferral)"
-
-# T13: exit 0 is not consent. A daemon that succeeds but prints something other
-# than a verdict — a warning line, a truncated write — must still skip.
-reset_logs
-PR_BRANCH="feature/issue-100"
-write_prlist "feature/issue-100" '[{"number":501,"headRefName":"feature/issue-201"}]'
-with_daemon "$FAKE_DIR/daemon-child-garbage" 2>/dev/null || true
-assert_eq "" "$(read_recon)" \
-  "reconcile-child exiting 0 with a non-verdict -> still no reconcile (status alone is not consent)"
+# T12/T13 (retired, #8191 slice 3): they injected a `reconcile-child` the binary
+# could not answer or answered with a non-verdict. That verb is no longer a seam
+# the shell calls: the route is decided in-process by `merge-pr stacked-reconcile`,
+# so a half-available daemon cannot exist. The remaining fault, a daemon that
+# cannot answer at all, is T10/T11, and the wrapper reads a missing terminator
+# as "did not run".
+retired "T12/T13: unanswerable / non-verdict reconcile-child skips the child" \
+  "a child is never force-pushed on a guessed verdict, and exit 0 alone is not consent" \
+  "the shell no longer calls reconcile-child; there is no separate verdict to be unanswered or garbled" \
+  "T10/T11 (a daemon that cannot answer skips the whole pass) plus the wrapper's required LOOM-STACKED-RECONCILE DONE terminator; stacked_reconcile::tests pin the route per child in-process"
 
 # T14: the pin is restored — every later assertion, and every rerun of T1-T9,
 # must still be measuring the real binary rather than a leaked fake.
@@ -545,18 +511,14 @@ assert_contains "$src" "_auto_reconcile_stacked_children" \
   "merge-pr.sh defines and calls _auto_reconcile_stacked_children"
 assert_contains "$src" "_auto_reconcile_stacked_children || true" \
   "merge-pr.sh invokes the reconcile step best-effort (|| true) at the merge choke point"
-assert_contains "$src" 'gh pr list --repo "$REPO_NWO" --base "$PR_BRANCH" --state open' \
-  "merge-pr.sh discovers children via a live forge query, not the daemon registry"
-assert_contains "$src" 'local children_json="${STACKED_CHILDREN_JSON:-}"' \
-  "merge-pr.sh's post-merge reconcile prefers the pre-merge STACKED_CHILDREN_JSON snapshot (#8010 item 2)"
-retired "source grep for \"grep -qx 'loom:building'\" in merge-pr.sh" \
-  "safe/unsafe is gated on the child issue's loom:building label, matched as a WHOLE LINE (grep -qx) so a different label that merely contains the name cannot authorise a deferral or a rebase" \
-  "the grep is gone — the gate is loom-daemon merge-pr reconcile-child (merge_pr::reconcile::child_route), so there is no grep invocation in merge-pr.sh left to assert the flags of, and a source grep for one can only ever fail" \
-  "T3/T7 above still prove the label DECIDES the route end-to-end through the real binary; merge_pr::reconcile::tests::the_claim_match_is_whole_line_not_substring pins the -x half against loom:building-paused, ' loom:building', 'LOOM:BUILDING' and 'loom:build'; and merge_pr_reconcile_differential.rs replays a label corpus against the frozen retired grep -qx itself"
-assert_contains "$src" '"$SCRIPT_DIR/reconcile-stack.sh" "$child_pr" "$parent_branch"' \
-  "merge-pr.sh reuses reconcile-stack.sh unmodified (no inline rebase logic)"
-assert_contains "$src" 'forge_gh_comment_rl_safe "$REPO_NWO" "$child_pr" "$comment"' \
-  "merge-pr.sh posts the deferral comment via the rate-limit-safe wrapper (#4856)"
+assert_contains "$src" 'merge-pr stacked-reconcile --repo "$REPO_NWO" --parent-branch "$PR_BRANCH"' \
+  "merge-pr.sh delegates the whole pass to loom-daemon merge-pr stacked-reconcile (#8191 slice 3)"
+assert_contains "$src" 'printf '"'"'%s'"'"' "${STACKED_CHILDREN_JSON:-}"' \
+  "merge-pr.sh feeds the pre-merge STACKED_CHILDREN_JSON snapshot to the verb (#8010 item 2)"
+retired "source greps for the live 'gh pr list' discovery, the reconcile-stack.sh call and the rl-safe comment in merge-pr.sh" \
+  "children come from a live forge query only when no snapshot exists, reconcile-stack.sh is reused unmodified, and the deferral comment goes through forge_gh_comment_rl_safe (#4856)" \
+  "the code moved to loom-daemon/src/merge_pr/stacked_reconcile.rs; the script text no longer contains it" \
+  "the live-query / snapshot / reconcile-stack.sh / comment behaviours are asserted end-to-end above (T2, T3, T5, T9 and the snapshot cases) and by stacked_reconcile::tests (stacked_parent_without_snapshot_queries_once, snapshot_is_preferred_over_live_query, building_child_with_held_lease_defers_with_comment); the rl-safe writer is the SystemHost::comment helper call and forge-helpers is covered by test-forge-helpers-rate-limit-fallback.sh"
 
 # --- Summary ---
 echo ""

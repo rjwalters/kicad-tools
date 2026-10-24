@@ -55,7 +55,7 @@ configured (e.g. a quickstart repo) is never made to wait — only an
 ambiguous read pays the one retry.
 
 ```bash
-# See champion-pr-merge.md criterion #6 ("CI Status Check") for the full
+# See champion-pr-merge.md the ci-green criterion ("CI Status Check") for the full
 # read_ci_checks() definition and rationale (#6211). Summary of its contract:
 #   NO_CHECKS="true"    -> confirmed genuine no-checks signature; PASS, merge.
 #   NO_CHECKS="false"   -> real checks exist; $CHECKS holds them, evaluate buckets.
@@ -328,7 +328,7 @@ A level cap now stops evaluation before the claim, so a passing proposal is neve
 
 **Decision**: **Allow merge if criteria pass** - test-only changes are safe.
 
-**Rationale**: The merge-risk judgment (criterion #2) and CI checks provide sufficient protection — a test-only diff is green on diff composition and revertability by construction, however many lines it is.
+**Rationale**: The merge-risk judgment (the `merge-risk` criterion) and CI checks provide sufficient protection — a test-only diff is green on diff composition and revertability by construction, however many lines it is.
 
 ---
 
@@ -336,7 +336,7 @@ A level cap now stops evaluation before the claim, so a passing proposal is neve
 
 **Scenario**: Human removes the `loom:pr` label (or adds `loom:changes-requested`) to hold a PR while Champion is evaluating it.
 
-**Handling**: Label check (#1) runs first, catches the missing `loom:pr` immediately.
+**Handling**: Label check (`judge-approval`) runs first, catches the missing `loom:pr` immediately.
 
 **Decision**: **Skip immediately** - a PR without `loom:pr` is not a merge candidate.
 
@@ -403,7 +403,7 @@ fi
 
 **Scenario**: A PR touches a file matching `CRITICAL_PATTERNS` (e.g. a new `.github/workflows/*.yml` job), with no version-only carve-out applicable. Before #6879, this FAIL routed through the same generic "Transient failures — keep `loom:pr`, retry next tick" template as `label-check`/`size-check`/`ci-status`, even though nothing about a diff's critical-file-ness ever clears without a human decision or a force-push that narrows the diff — one fleet PR was re-evaluated and re-rejected ~59 times over 36 hours this way, at 200-300s per tick.
 
-**Handling**: Criterion #3 now mirrors criterion #2's merge-risk-hold pattern (see Edge Case 11b below): on FAIL, comment once behind a `<!-- champion:critical-file-hold -->` idempotency marker and add `loom:blocked` with a reason-only park record (#11861; `loom:operator` before), instead of the shared transient-failure template. Unlike criterion #2 it needs no sticky-hold precheck: the pattern match is deterministic, so a later re-read of the *same* diff cannot score it differently. Two releases (#9016): a later push narrowing the diff below every pattern (removes `loom:blocked`, posts `<!-- champion:critical-file-hold-cleared -->`), or the operator hand-removing `loom:blocked` at the held head — durable, so their own `merge-pr.sh` run does not race a tick past #8112; a moved head re-arms. `loom:auto-merge-ok` does **not** release it — scoped to criterion #2 only (Edge Case 11).
+**Handling**: The `critical-files` criterion now mirrors the `merge-risk` criterion's merge-risk-hold pattern (see Edge Case 11b below): on FAIL, comment once behind a `<!-- champion:critical-file-hold -->` idempotency marker and add `loom:blocked` with a reason-only park record (#11861; `loom:operator` before), instead of the shared transient-failure template. Unlike the `merge-risk` criterion it needs no sticky-hold precheck: the pattern match is deterministic, so a later re-read of the *same* diff cannot score it differently. Two releases (#9016): a later push narrowing the diff below every pattern (removes `loom:blocked`, posts `<!-- champion:critical-file-hold-cleared -->`), or the operator hand-removing `loom:blocked` at the held head — durable, so their own `merge-pr.sh` run does not race a tick past #8112; a moved head re-arms. `loom:auto-merge-ok` does **not** release it — scoped to the `merge-risk` criterion only (Edge Case 11).
 
 **Decision**: **Durable hold, not a retry** — `loom:blocked` joins the PR beside `loom:pr` (the janitor exception), and the Held-PR Census (keyed on that pair) counts it alongside merge-risk holds for free. The exact commands live in `champion-critical-file-hold.md` (#9016).
 
@@ -415,13 +415,13 @@ fi
 
 **Scenario B — small but high-risk**: A 40-line PR that changes the ordering guard in `.loom/scripts/merge-pr.sh` (or a `.loom/hooks/guard-*.sh` hook), approved with a one-line "LGTM".
 
-**Handling**: There is no line-count gate. Criterion #2 (Merge-Risk Judgment) scores each PR on diff composition, blast radius, Judge review depth, and revertability.
+**Handling**: There is no line-count gate. The `merge-risk` criterion (Merge-Risk Judgment) scores each PR on diff composition, blast radius, Judge review depth, and revertability.
 
 **Decision**:
 - **Scenario A: allow merge** — green on all four axes (test-heavy composition, single-module blast radius, specific review, plain `git revert`).
 - **Scenario B: hold for a human** — red on blast radius (merge/guard automation the whole fleet depends on) *and* on review depth (a generic approval), with revertability weak because a bad guard can delete a branch before the revert lands. Comment names that concern, `loom:pr` stays, Champion retries next tick.
 
-**Rationale**: Size was never the risk; it was a proxy that inverted in both directions. The `champion.auto_merge_max_lines` knob that produced this edge case is retired — see the migration note in `champion-pr-merge.md` → "Safety Criteria → 2. Merge-Risk Judgment". `loom:auto-merge-ok` still exists, repurposed: it is an explicit human/Judge override of a Champion merge-risk hold (it does not waive the critical-file check).
+**Rationale**: Size was never the risk; it was a proxy that inverted in both directions. The `champion.auto_merge_max_lines` knob that produced this edge case is retired — see the migration note in `champion-pr-merge.md` → "Safety Criteria → `merge-risk`: Merge-Risk Judgment". `loom:auto-merge-ok` still exists, repurposed: it is an explicit human/Judge override of a Champion merge-risk hold (it does not waive the critical-file check).
 
 ---
 
@@ -429,7 +429,7 @@ fi
 
 **Scenario**: An earlier Champion tick posted `<!-- champion:merge-risk-hold -->` on a red axis. A later tick re-reads the *same* diff and — axis scoring being a judgment call, not an arithmetic one — scores it green. Nothing external changed: no `loom:auto-merge-ok`, no new push, no new review. (Observed live on PR #4700, 2026-07-31: hold at 04:16Z, merge at 11:21Z, no override label, and no comment of any kind accompanying the merge — the last comment on the PR is still the hold notice. #4742.)
 
-**Handling**: The merge-risk hold is **sticky**. Before scoring the axes, criterion #2 runs a precheck that looks for an existing hold marker and, if found, requires a durable release signal:
+**Handling**: The merge-risk hold is **sticky**. Before scoring the axes, the `merge-risk` criterion runs a precheck that looks for an existing hold marker and, if found, requires a durable release signal:
 
 ```bash
 # Plain `gh` — merge-gating, so never "$GH_READ".
@@ -450,7 +450,7 @@ HOLD_BODY=$(jq -r --arg m "<!-- champion:merge-risk-hold -->" \
 
 **Rationale**: A hold that a later subjective re-read can silently evaporate is not a hold. Because every fleet agent acts under the operator's forge identity, `mergedBy` cannot distinguish a human override from a Champion tick that scored the axes differently — so the comment is the *only* audit trail, and the anti-spam guard that (correctly) suppresses repeat holds was suppressing precisely the comment that would have explained the reversal.
 
-**Action** (single authoritative policy — implemented in `champion-pr-merge.md` → "Safety Criteria → 2. Merge-Risk Judgment → Sticky holds"): see that section for the precheck, its outcomes, and the reversal-comment template. Claim/label machinery is not red by itself; only the documented kept set is (#11416).
+**Action** (single authoritative policy — implemented in `champion-pr-merge.md` → "Safety Criteria → `merge-risk`: Merge-Risk Judgment → Sticky holds"): see that section for the precheck, its outcomes, and the reversal-comment template. Claim/label machinery is not red by itself; only the documented kept set is (#11416).
 
 ---
 
@@ -484,12 +484,12 @@ default — no config, no behavior change):
 }
 ```
 
-Criterion #2 consults this config **after** the sticky-hold precheck and the
+The `merge-risk` criterion consults this config **after** the sticky-hold precheck and the
 docs-only fast path (#6134), and **before** the four-axis table: if the PR's
 full changed-file list is an exact-glob-subset match against one class's
 `filePatterns` **and** every condition in that class's `conditions` array
 is mechanically re-verified true (not merely assumed from an earlier
-criterion), criterion #2 passes without scoring the four axes — the same
+criterion), the `merge-risk` criterion passes without scoring the four axes — the same
 shape as the docs-only fast path, generalized to an operator-declared,
 per-repo class instead of a hardcoded, always-safe one.
 
@@ -509,16 +509,16 @@ per-repo class instead of a hardcoded, always-safe one.
   vocabulary (today: `judgeApproval`, `greenCi`, `authorIsDependabot`, `noMajorBump`), is skipped — that entry
   never authorizes anything, and a malformed entry never disables sibling
   entries in the array. No config, or an empty array, is a full no-op.
-- **Criteria #1/#3/#4/#5/#6 still run independently.** A standing
-  authorization only ever waives criterion #2's four-axis judgment for a
-  matching PR — nothing else, **except** criterion #3 for a class that
+- **The `judge-approval`, `critical-files`, `mergeable`, `recency` and `ci-green` criteria still run independently.** A standing
+  authorization only ever waives the `merge-risk` criterion's four-axis judgment for a
+  matching PR — nothing else, **except** the `critical-files` criterion for a class that
   opts in with `"coversCriticalFiles": true` (#12528, below). A PR that
-  matches a class but fails, say, the critical-file check (#3) on a class
-  without that flag, or CI (#6), still does not merge.
+  matches a class but fails, say, the critical-file check (`critical-files`) on a class
+  without that flag, or CI (`ci-green`), still does not merge.
 
 **Decision**:
 - Full changed-file list matches an authorized class's patterns and every
-  stated condition holds -> criterion #2 **PASS** without judging the axes;
+  stated condition holds -> the `merge-risk` criterion **PASS** without judging the axes;
   name the class `id` in the Step 2 rationale.
 - Any file outside every authorized class's patterns, or any stated
   condition does not hold, or the config entry is malformed/unrecognized ->
@@ -534,7 +534,7 @@ monotonically-growing held-PR backlog documented in #6848.
 **Covering critical files (#12528)**: a class may add
 `"coversCriticalFiles": true`, `"excludeFilePatterns": [...]` (globs) and
 `"forbiddenDiffPatterns": [...]` (jq `test()` regexes over every added/removed line). Criterion
-#3 then runs the class check before it emits FAIL. Worked examples, class
+`critical-files` then runs the class check before it emits FAIL. Worked examples, class
 `ci-steps` = `filePatterns: [".github/workflows/*.yml"]`, `coversCriticalFiles: true`,
 `privilegedContentPatterns` (below), no name excludes,
 `forbiddenDiffPatterns: ["^\\s*permissions:", "id-token", "secrets\\.", "pull_request_target"]`,
@@ -542,16 +542,16 @@ monotonically-growing held-PR backlog documented in #6848.
 
 | PR | Result |
 |---|---|
-| `.github/workflows/ci.yml`, one added `run:` step, Judge-approved, CI green | #3 **PASS**, rationale names `ci-steps`; no hold |
+| `.github/workflows/ci.yml`, one added `run:` step, Judge-approved, CI green | `critical-files` **PASS**, rationale names `ci-steps`; no hold |
 | `ci.yml` plus `Cargo.toml` | `Cargo.toml` is outside the class: **FAIL**, today's hold |
 | `.github/workflows/publish.yml` holding `npm publish` or a non-`GITHUB_TOKEN` secret | privileged content: **FAIL**, hold |
-| `.github/workflows/claude-bot-deploy-plan.yml`, credential-free and read-only, a `runs-on` edit | no privileged content: #3 **PASS**, whatever the name |
+| `.github/workflows/claude-bot-deploy-plan.yml`, credential-free and read-only, a `runs-on` edit | no privileged content: `critical-files` **PASS**, whatever the name |
 | `ci.yml` with an existing `secrets.CLOUDFLARE_API_TOKEN` step, a `runs-on` edit | privileged content at the head SHA: **FAIL**, hold |
 | `ci.yml`, but its contents cannot be read at the head SHA | unreadable content: **FAIL**, hold |
 | `ci.yml` adding a `permissions:` block | forbidden diff line: **FAIL**, hold |
 | `ci.yml`, but the files API returns no patch for it | unreadable diff: **FAIL**, hold |
 | `ci.yml`, CI red or pending | `greenCi` does not hold: **FAIL**, hold |
-| same class without `coversCriticalFiles` | #3 unchanged: **FAIL**, hold |
+| same class without `coversCriticalFiles` | `critical-files` unchanged: **FAIL**, hold |
 | `defaults/hooks/guard-x.sh` under a class that lists it with the flag | kept set: **FAIL**, hold |
 
 **Classify by capability, not by filename (#12954)**: `"privilegedContentPatterns": [...]`
@@ -573,20 +573,31 @@ roll) is never satisfiable by a class. Revertability is red only for a one-way
 effect that happens on merge or roll, not for one an operator later triggers
 by hand. Absent `coversCriticalFiles`, nothing changes.
 
+**Resync waiver (#13096)**: the one exception to the kept-set hold is not a
+class and has no config key. A `chore(loom): resync installed Loom to vX` PR
+passes the `merge-risk` kept-set entries when `resync_waiver_eval` proves every
+changed kept-set file has the same blob SHA as its `defaults/` counterpart at
+tag `vX` (the title and `.loom/install-metadata.json` must both name `X`). A
+differing byte, a removed or renamed file, a kept-set file with no upstream
+counterpart, a missing tag or a failed read holds as before. The pre-merge
+comment lists the tag and each file's SHA. See `champion-pr-merge.md`
+"Resync waiver for the kept-set hold".
+
 **Critical files only (#12648)**: `"criticalFilesOnly": true` narrows a class
 to the critical-file hits. Its `filePatterns`, `excludeFilePatterns` and
-`forbiddenDiffPatterns` are applied to the files criterion #3 flags (and each
+`forbiddenDiffPatterns` are applied to the files the `critical-files` criterion flags (and each
 one's `previous_filename`) and nothing else; the kept set still covers every
-changed file. It waives criterion #3 only and is never eligible for criterion
-#2. Class `ci-only` = `ci-steps` above with `criticalFilesOnly: true`:
+changed file. It waives the `critical-files` criterion only and is never eligible for criterion
+`merge-risk`. Class `ci-only` = `ci-steps` above with `criticalFilesOnly: true`:
 
 | PR | Result |
 |---|---|
-| `.github/workflows/ci.yml` plus `docs/guide.md`, Judge-approved, CI green | #3 **PASS** under `ci-only`, naming `ci.yml`; criterion #2 still judges the whole PR on the four axes and may hold it |
-| same PR, `ci.yml` adds a `permissions:` block | forbidden line in a critical file: #3 **FAIL**, hold |
-| `ci.yml` plus `defaults/scripts/install-loom.sh` | kept set: #3 **FAIL**, hold |
-| `src/ci.yml` renamed to `.github/workflows/ci.yml` | the previous name is outside the class: #3 **FAIL**, hold |
-| `docs/guide.md` alone | no critical-file hit: the class does not apply, #3 passes on its own |
+| `.github/workflows/ci.yml` plus `docs/guide.md`, Judge-approved, CI green | `critical-files` **PASS** under `ci-only`, naming `ci.yml`; the `merge-risk` criterion still judges the whole PR on the four axes and may hold it |
+| same PR, `ci.yml` adds a `permissions:` block | forbidden line in a critical file: `critical-files` **FAIL**, hold |
+| `ci.yml` plus `defaults/scripts/install-loom.sh` | kept set: `critical-files` **FAIL**, hold |
+| `src/ci.yml` renamed to `.github/workflows/ci.yml` | the previous name is outside the class: `critical-files` **FAIL**, hold |
+| `docs/guide.md` alone | no critical-file hit: the class does not apply, `critical-files` passes on its own |
+| `ci.yml` plus `package.json` scripts, classes `workflow-critical-only` and `package-scripts` (#13042) | each hit is covered by its own class: `critical-files` **PASS** naming both; a forbidden line in either hunk, or a third critical file neither covers, **FAIL**s |
 
 **Dependabot bumps merge by default (#12948)**: operator direction 2026-10-20,
 "merge Dependabot and then fix things that break". Two more conditions express
@@ -623,7 +634,7 @@ reason to pre-hold. After a Dependabot merge, `champion-pr-merge.md` Step 3.5
 comments `@dependabot rebase` once on open Dependabot PRs that now conflict.
 
 **Action** (single authoritative policy — implemented in
-`champion-pr-merge.md` → "Safety Criteria → 2. Merge-Risk Judgment →
+`champion-pr-merge.md` → "Safety Criteria → `merge-risk`: Merge-Risk Judgment →
 Standing operator authorization (#6850)"): see that section for the config
 schema, the matcher, and the condition vocabulary.
 
@@ -732,7 +743,7 @@ EXISTING=$(gh issue list --search "Follow-on from PR #$PR_NUMBER" --limit 500)
 | Prior merge-risk hold, later tick scores the same diff green | **Hold stands (sticky)** | Skip silently, post nothing (anti-spam guard already covers it). Release only on `loom:auto-merge-ok`, an explicit operator clearing comment after the hold (leading-clause instruction, not a negation or a question), a new head SHA, or a new Judge review |
 | Prior merge-risk hold released, PR merges | Allow + **mandatory reversal comment** | Pre-merge comment carries `<!-- champion:merge-risk-hold-cleared -->` naming the override honored or the axis that flipped and why; never suppressed by the hold idempotency guard |
 | `loom:auto-merge-ok` present | Allow | Explicit human/Judge override of a merge-risk hold (does not waive critical files); a *previously posted* hold still requires the reversal comment |
-| PR matches an operator-declared standing authorization class (`champion.standingAuthorizations`, #6850) and every stated condition holds | Allow | Criterion #2 passes without the four-axis judgment; runs after the sticky-hold precheck and docs-only fast path, orthogonal to `loom:auto-merge-ok`; no config present = unchanged behavior |
+| PR matches an operator-declared standing authorization class (`champion.standingAuthorizations`, #6850) and every stated condition holds | Allow | The `merge-risk` criterion passes without the four-axis judgment; runs after the sticky-hold precheck and docs-only fast path, orthogonal to `loom:auto-merge-ok`; no config present = unchanged behavior |
 | API rate limit | Error | Comment and continue |
 | Multiple approvals | Allow | Label is source of truth |
 | Follow-on indicators found | Create | If thresholds met |

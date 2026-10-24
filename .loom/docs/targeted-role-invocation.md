@@ -154,6 +154,17 @@ sweep releases `loom:building` back to `loom:issue` and records the no-op
 (`record-noop-release.sh`) when it finds the marker. A Builder step run
 without a sweep around it gets neither unless the engine does both.
 
+**Who posts the reason comment (#13054).** For a Builder step the daemon does,
+not the Builder prompt (a cut-short Builder never reaches the prompt): when
+the step engine records a Builder step as `noop` or `failed`,
+`SweepRegistry::note_builder_outcome` posts one comment tagged
+`<!-- loom:builder-step-outcome (#13054) sweep=<id> -->` with the outcome's
+reason token and, for a `noop`, the first 200 characters of
+`.no-changes-needed` when the worktree still has it. It is keyed by the step's
+sweep id, so one step never comments twice. The `/loom:sweep` orchestrator
+posts its own comment on its path (`sweep-wave-lifecycle.md`); the two paths
+do not overlap, because a sweep-run Builder is not a recorded step.
+
 ## Audit (2026-10-14, at `6b6f2074f`)
 
 | Role | Gate | Before this change | Now |

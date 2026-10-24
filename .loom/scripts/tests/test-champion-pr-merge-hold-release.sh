@@ -6,13 +6,13 @@
 # Extract-and-execute (#7979), not a mirror: the SHIPPED bash blocks are lifted
 # out of champion-pr-merge.md and run against canned forge JSON with `gh`,
 # `loom-daemon`, `$GH_READ` and `post-comment.sh` stubbed. Blocks run:
-#   1. criterion #2's sticky-hold precheck ("Run this precheck before judging
+#   1. the merge-risk criterion's sticky-hold precheck ("Run this precheck before judging
 #      the axes") -> MERGE_BLOCKED_BY_HOLD / RELEASE_REASON /
 #      MANUAL_RELEASE_SINCE_HOLD / label repair;
 #   2. "Hold behavior" -> same-concern PASS vs. fresh hold notice + label;
 #   3. the Held-PR Census `RELEASED` line.
 # The four risk axes are an LLM judgment with no executable form, so the
-# narrowed criterion-2 rule and its kept set are pinned as doc literals
+# narrowed merge-risk rule and its kept set are pinned as doc literals
 # (Test 1); the precheck itself is shown never to hold an unheld PR.
 #
 # Hermetic: no network, no forge, no tokens.
@@ -175,18 +175,18 @@ assert_contains "$HOLD_BEHAVIOR" 'CONCERN_BULLET=' "Hold behavior block extracte
 assert_contains "$CENSUS_RELEASED" 'Released holds, not yet merged' "census RELEASED line extracted"
 echo
 
-echo "Test 1: criterion #2 narrowed — claim/label machinery is not red by itself; the kept set is listed (#11416)"
+echo "Test 1: the merge-risk criterion narrowed — claim/label machinery is not red by itself; the kept set is listed (#11416)"
 assert_doc_contains '**Claim/label machinery is not red by itself (#11416).**' "the narrowed rule is stated"
 assert_doc_contains '"Reverting cannot undo forge labels already changed" or "a defect could strand work fleet-wide" is **not** a red reason.' \
     "the reasoning behind the #10280/#11321 holds is named and rejected"
-assert_doc_contains '1. **Irreversible migration, no rollback step**' "kept set item 1: irreversible migrations"
-assert_doc_contains '2. **The merge gate itself**' "kept set item 2: the merge gate"
+assert_doc_contains '- **Irreversible migration, no rollback step**' "kept set: irreversible migrations"
+assert_doc_contains '- **The merge gate itself**' "kept set: the merge gate"
 assert_doc_contains 'Writing a verdict label (the Judge'"'"'s `loom:pr` approval) is part of the gate, not a role hand-back' \
-    "kept set item 2: verdict-label writes are the gate, not a hand-back"
+    "kept set: the merge gate: verdict-label writes are the gate, not a hand-back"
 for producer in post-verdict.sh verdict-staleness-guard.sh reconcile_pr_verdicts comment_trust.rs 'forge trusted-comments' check-review-feedback.sh; do
-    assert_doc_contains "\`$producer\`" "kept set item 2 names gate-input producer $producer"
+    assert_doc_contains "\`$producer\`" "kept set: the merge gate names gate-input producer $producer"
 done
-assert_doc_contains '3. **The other red entries in the table above**, unchanged.' "kept set item 3: existing red entries"
+assert_doc_contains '- **The other red entries in the table above**, unchanged.' "kept set: existing red entries"
 echo
 
 echo "Test 2: never held -> the precheck does not block (a claim-machinery PR is judged on the axes alone)"

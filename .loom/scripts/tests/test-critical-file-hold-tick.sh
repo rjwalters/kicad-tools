@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test-critical-file-hold-tick.sh - runs the SHIPPED criterion #3 hold tick
+# test-critical-file-hold-tick.sh - runs the SHIPPED critical-files criterion hold tick
 # (#10875).
 #
 # test-champion-critical-file-check.sh mirrors the tick in local functions, and
@@ -114,13 +114,20 @@ cat >"$T/bin/loom-daemon" <<EOF
 S="$T"
 case "\$1 \$2" in
   "park-record apply")
+    echo "TRIGGER:\${LOOM_HOLD_EQUIVALENCE:-}" >>"\$S/triggers"
     echo "LABEL+:loom:blocked" >>"\$S/writes"; grep -qxF loom:blocked "\$S/labels" || echo loom:blocked >>"\$S/labels" ;;
   "forge trusted-comments")
     [ -e "\$S/trust_down" ] && { echo "forge trusted-comments: --fetch failed" >&2; exit 1; }
     jq -c --arg bot "$BOT" '[.[] | select(.author.login == \$bot or .author.login == "rjwalters")]' "\$S/comments.json" ;;
   "forge verdict-equivalent")
     rec=\$4 head=\$5
+    printf '%s\n' "\$*" >>"\$S/ve.argv"
     case "\$(cat "\$S/mode")" in
+      unread) echo "loom-daemon forge verdict-equivalent: could not decide — Why: rebase-patch-identical: equivalence=unread — forge compare unreadable after retries" >&2; exit 1 ;;
+      scoped)
+        # The real verb's rule, stubbed: carry only when --allowed-paths names the whole delta.
+        case "\$*" in *"--allowed-paths docs/run.md"*) echo VERDICT_EQUIVALENT=1; echo EQUIVALENCE_KIND=requested-change; exit 0 ;; esac
+        echo VERDICT_EQUIVALENT=0; exit 0 ;;
       unknown) echo "loom-daemon forge verdict-equivalent: could not decide — Why: tree: forge compare \$rec...\$head unavailable" >&2; exit 1 ;;
       disabled) echo "loom-daemon forge verdict-equivalent: could not decide — Why: verdict equivalence is switched off (LOOM_VERDICT_TREE_CARVEOUT)" >&2; exit 1 ;;
     esac
@@ -162,11 +169,11 @@ chmod +x "$T/bin/gh" "$T/bin/loom-daemon" "$T/w/.loom/scripts/"*.sh
 # --- harness -------------------------------------------------------------------
 reset() { # <head>
     echo '[]' >"$T/comments.json"; echo '[]' >"$T/events.json"; : >"$T/labels"; echo "$1" >"$T/head"
-    echo repo >"$T/mode"; rm -f "$T/trust_down" "$T/last_why"
+    echo repo >"$T/mode"; rm -f "$T/trust_down" "$T/last_why" "$T/ve.argv" "$T/triggers"
 }
 tick() { # [FAIL|PASS] — sets WRITES (";"-joined) and OUT
     : >"$T/writes"
-    OUT=$(cd "$T/w" && env -u LOOM_DAEMON_BIN PATH="$T/bin:$PATH" CRITERION3_RESULT="${1:-FAIL}" bash "$T/tick.sh" 2>&1)
+    OUT=$(cd "$T/w" && env -u LOOM_DAEMON_BIN PATH="$T/bin:$PATH" CRITICAL_FILES_RESULT="${1:-FAIL}" bash "$T/tick.sh" 2>&1)
     WRITES=$(paste -sd';' "$T/writes")
 }
 label() { grep -qxF loom:blocked "$T/labels" && echo present || echo absent; }
@@ -244,6 +251,32 @@ comment_as "$BOT" "<!-- champion:critical-file-hold -->
 tick; check "COMMENT:hold(rearm);LABEL+:loom:blocked" "$WRITES" "legacy hold (no recorded head), label absent: re-arms"
 grep -q "legacy hold" "$T/last_why"; check 0 "$?" "legacy hold: reason surfaced"
 
+echo "--- #13114: unread compare, requested-change carry ---"
+reset "$A"; tick; operator_release; tick; echo unread >"$T/mode"; push "$D"
+tick; check "COMMENT:hold(rearm);LABEL+:loom:blocked" "$WRITES" "unreadable compare: re-arms"
+grep -q "equivalence=unread" "$T/last_why"; check 0 "$?" "unread: the notice quotes equivalence=unread"
+grep -qx "TRIGGER:unread" "$T/triggers"; check 0 "$?" "unread: the park write is tagged for hold.transition telemetry"
+reset "$A"; tick; operator_release; tick; echo unknown >"$T/mode"; push "$D"; tick
+grep -qx "TRIGGER:" "$T/triggers"; check 0 "$?" "a changed/unknown re-arm is not tagged unread"
+
+reset "$A"; tick; operator_release; tick
+echo scoped >"$T/mode"; push "$D"
+comment_as rjwalters "Doctor: please fix the runbook.
+release-scope: docs/run.md"
+tick; check "COMMENT:released:requested-change" "$WRITES" "operator release-scope naming the delta: carried as requested-change"
+grep -q -- "--allowed-paths docs/run.md" "$T/ve.argv"; check 0 "$?" "the named path is passed to the verb"
+reset "$A"; tick; operator_release; tick; echo scoped >"$T/mode"; push "$D"
+tick; check "COMMENT:hold(rearm);LABEL+:loom:blocked" "$WRITES" "no release-scope line: re-arms"
+grep -q -- "--allowed-paths" "$T/ve.argv"; check 1 "$?" "no line, no --allowed-paths"
+reset "$A"; tick; operator_release; tick; echo scoped >"$T/mode"; push "$D"
+comment_as rjwalters "release-scope: src/other.rs"
+tick; check "COMMENT:hold(rearm);LABEL+:loom:blocked" "$WRITES" "release-scope naming a different path: verb refuses, re-arms"
+reset "$A"; tick; operator_release; tick; echo scoped >"$T/mode"; push "$D"
+comment_as "$BOT" "release-scope: docs/run.md"
+tick; check "COMMENT:hold(rearm);LABEL+:loom:blocked" "$WRITES" "a bot's release-scope line is ignored"
+reset "$A"; comment_as rjwalters "release-scope: docs/run.md"; tick; operator_release; tick; echo scoped >"$T/mode"; push "$D"
+tick; check "COMMENT:hold(rearm);LABEL+:loom:blocked" "$WRITES" "a release-scope line posted BEFORE the hold is ignored"
+
 echo "--- untrusted and quoted markers never carry a release ---"
 forged="<!-- champion:critical-file-release-respected -->
 <!-- champion:hold-state head=$A -->"
@@ -292,6 +325,17 @@ tick PASS; check "" "$WRITES" "trust filter down + PASS: no clear, no label writ
 check "present" "$(label)" "loom:blocked kept while the trusted read fails"
 rm -f "$T/trust_down"
 tick PASS; check "LABEL-:loom:blocked;COMMENT:cleared" "$WRITES" "trust filter back: the clear lands"
+
+echo "--- #12999: the hold notice names the matched suspect line ---"
+reset "$A"
+CRITERION3_SUSPECT_LINE='+serde = "1"' CRITERION3_SUSPECT_SECTION=dependencies tick
+check "COMMENT:hold;LABEL+:loom:blocked" "$WRITES" "a suspect-line FAIL holds as before"
+check "1" "$(jq -r '[.[].body | select(contains("**Matched suspect line** (in `[dependencies]`): `+serde = \"1\"`"))] | length' "$T/comments.json")" \
+    "the hold comment shows the matched line and its section"
+reset "$A"
+tick
+check "0" "$(jq -r '[.[].body | select(contains("Matched suspect line"))] | length' "$T/comments.json")" \
+    "a plain pattern hit (no suspect line) carries no matched-line bullet"
 
 echo
 echo "Results: $((TESTS_RUN - TESTS_FAILED))/$TESTS_RUN passed, $TESTS_FAILED failed"

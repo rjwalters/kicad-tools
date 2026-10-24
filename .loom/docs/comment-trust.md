@@ -159,7 +159,7 @@ unavailable:
 | `sweep-lease-renew.sh` | same | exit 1, nothing patched |
 | `classify-ac-verification.sh` | `loom:ac-verified` (comments; the PR body only when its author is trusted) | no evidence: the issue stays held |
 | Champion merge precheck | hold markers, release phrases, new Judge reviews | skip the PR this pass |
-| Champion criterion #5 | "real activity" comments | the raw read (it can only read as more active) |
+| Champion's `recency` criterion | "real activity" comments | the raw read (it can only read as more active) |
 | Critical-file hold | `champion:critical-file-*`, `hold-state` | the raw read, which may hold but never release — a `none`/`respect` decision defers with no write (#10875) |
 | Champion epic | epic verdict / escalation markers | skip the epic this pass |
 | Judge fast-track | `loom:conflict-only` | full evaluation |

@@ -24,8 +24,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck source=lib/locate-daemon-bin.sh
 source "$SCRIPT_DIR/lib/locate-daemon-bin.sh"
-# shellcheck source=lib/loom-tools.sh
-source "$SCRIPT_DIR/lib/loom-tools.sh"
+# shellcheck source=lib/repo-root.sh
+source "$SCRIPT_DIR/lib/repo-root.sh"
 
 REPO_ROOT="$(_find_repo_root "$SCRIPT_DIR" 2>/dev/null || echo "$PWD")"
 DAEMON_BIN="$(loom_locate_daemon_bin "$REPO_ROOT")"

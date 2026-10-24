@@ -30,15 +30,6 @@ LIB="$(cd "$SCRIPT_DIR/../lib" && pwd)/branch-landed.sh"
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
-assert_eq() {
-    local expected="$1" actual="$2" what="$3"
-    if [[ "$expected" == "$actual" ]]; then
-        pass "$what (= $actual)"
-    else
-        fail "$what: expected '$expected', got '$actual'"
-    fi
-}
-
 # shellcheck source=../lib/branch-landed.sh
 source "$LIB"
 

@@ -551,32 +551,42 @@ rm -rf "$STUB_DIR"
 echo ""
 echo "Testing merge-pr.sh source wiring (#4856)..."
 
-TESTS_RUN=$((TESTS_RUN + 1))
-if grep -q 'forge_gh_reopen_issue_rl_safe "\$REPO_NWO" "\$issue_num"' "$MERGE_PR_SRC"; then
-    TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "  ${GREEN}PASS${NC}: merge-pr.sh's premature-auto-close reopen uses forge_gh_reopen_issue_rl_safe"
-else
-    TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "  ${RED}FAIL${NC}: merge-pr.sh missing forge_gh_reopen_issue_rl_safe at the reopen call site"
-fi
-
-TESTS_RUN=$((TESTS_RUN + 1))
-if grep -q 'forge_gh_swap_label_rl_safe "\$REPO_NWO" "\$issue_num" "loom:building" "\${text:-loom:issue}"' "$MERGE_PR_SRC"; then
-    TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "  ${GREEN}PASS${NC}: merge-pr.sh's partial-increment label reset uses forge_gh_swap_label_rl_safe"
-else
-    TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "  ${RED}FAIL${NC}: merge-pr.sh missing forge_gh_swap_label_rl_safe at the label-swap call site"
-fi
+# #8191 slice 2: the reopen, the label swap and the partial-increment comments
+# are no longer call sites in merge-pr.sh. `merge-pr post-merge-bookkeeping`
+# (loom-daemon/src/merge_pr/post_merge_bookkeeping.rs) makes them, through a
+# child bash that sources THIS library, so they still reach the #4856 wrappers.
+# The three source greps cannot pass against merge-pr.sh any more; each is
+# retired under the three-part test (defaults/docs/verification-recipes.md §6).
+YELLOW='\033[0;33m'
+retired() { # <what> <property> <structural> <successor>
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${YELLOW}RETIRED${NC}: $1"
+    echo "      property:   $2"
+    echo "      structural: $3"
+    echo "      successor:  $4"
+}
+_moved="the call moved into the Rust orchestrator, which reaches the wrapper through a child bash; merge-pr.sh no longer contains the call text"
+retired "merge-pr.sh's premature-auto-close reopen uses forge_gh_reopen_issue_rl_safe" \
+    "the #4569 revert reopens through the rate-limit-safe wrapper, never a raw gh issue reopen" \
+    "$_moved" \
+    "post_merge_bookkeeping::tests::partial_reset_reverts_a_premature_close_before_swapping asserts the orchestrator calls forge_gh_reopen_issue_rl_safe, and test-merge-pr-partial-increment.sh drives the real wrapper against the stub gh"
+retired "merge-pr.sh's partial-increment label reset uses forge_gh_swap_label_rl_safe" \
+    "the loom:building -> loom:issue swap goes through the rate-limit-safe wrapper" \
+    "$_moved" \
+    "post_merge_bookkeeping::tests::partial_reset_swaps_and_comments asserts the exact wrapper call, and test-merge-pr-partial-increment.sh T1/T2 assert the recorded gh call"
 
 comment_call_count="$(grep -c 'forge_gh_comment_rl_safe "\$REPO_NWO"' "$MERGE_PR_SRC" || true)"
-assert_eq "3" "$comment_call_count" "merge-pr.sh routes all 3 comment call sites (PR override, shared partial-increment helper, stacked-child PR) through forge_gh_comment_rl_safe"
+assert_eq "1" "$comment_call_count" "merge-pr.sh's remaining comment call site (PR override) goes through forge_gh_comment_rl_safe"
 
-# The two partial-increment comments (partial-merged, premature-close) share
-# one helper that owns the single wrapper call above; both kinds must still
-# reach it, so the #4856 rate-limit-safe coverage of each is preserved.
-partial_helper_calls="$(grep -c '^ *_mp_post_partial_comment \(partial-merged\|premature-close\) ' "$MERGE_PR_SRC" || true)"
-assert_eq "2" "$partial_helper_calls" "both partial-increment comment kinds route through _mp_post_partial_comment"
+retired "merge-pr.sh's stacked-child deferred-reconciliation comment uses forge_gh_comment_rl_safe" \
+    "the stacked-child PR comment is posted through the #4856 rate-limit-safe wrapper, never a raw gh pr comment" \
+    "$_moved (_reconcile_one_stacked_child was ported to merge_pr/stacked_reconcile.rs, #8191)" \
+    "stacked_reconcile::tests assert the orchestrator's comment path, and the raw-gh-comment assertion below still pins that nothing posts around the wrapper"
+
+retired "both partial-increment comment kinds route through _mp_post_partial_comment" \
+    "the two partial-increment audit comments are posted through the one #4856 comment wrapper" \
+    "$_moved" \
+    "post_merge_bookkeeping::tests::partial_reset_reverts_a_premature_close_before_swapping asserts both bodies reach forge_gh_comment_rl_safe, and the raw-gh-comment assertion below still pins that nothing posts around the wrapper"
 
 # ...and nothing posts a comment by invoking gh directly. The two assertions
 # above pin the shape of the call sites that DO exist; this one pins that no
