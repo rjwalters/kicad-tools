@@ -94,24 +94,6 @@ class DifferentialPairRules:
         """
         return cls.from_protocol(_PAIR_TYPE_PROTOCOL.get(pair_type, "CUSTOM"))
 
-    @classmethod
-    def for_type(cls, pair_type: DifferentialPairType) -> DifferentialPairRules:
-        """Deprecated shim over the protocol defaults table (Issue #6443).
-
-        Use :meth:`for_pair_type`, or :meth:`from_protocol` with a
-        :class:`~kicad_tools.router.pair_protocols.PairProtocol`.
-        """
-        import warnings
-
-        warnings.warn(
-            "DifferentialPairRules.for_type is deprecated: it is a shim over "
-            "kicad_tools.router.pair_protocols.PROTOCOL_DEFAULTS. Use "
-            "DifferentialPairRules.for_pair_type or .from_protocol.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return cls.for_pair_type(pair_type)
-
 
 #: Name-detected pair type -> the protocol row its rules are read from.
 _PAIR_TYPE_PROTOCOL: dict[DifferentialPairType, str] = {
