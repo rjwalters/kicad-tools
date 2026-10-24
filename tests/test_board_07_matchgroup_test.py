@@ -293,8 +293,8 @@ class TestPhaseFeatureCoverage:
         AC#6: the DQS pair, MIPI lanes, and HDMI lanes all have diff-pair
         members.  Issue #7894: each declares ``pair_protocol`` so the
         diff-pair-level DRC rule fires at its derived ps budget alongside
-        the group-level rule.  Their explicit ``skew_tolerance_mm`` caps
-        stay until #7913 (which flips the last assertion to "none").
+        the group-level rule.  Issue #7913: none sets a hand-set
+        ``skew_tolerance_mm`` cap; the derived budget is the only limit.
         """
         protocols = {
             nc.name: nc.pair_protocol
@@ -311,7 +311,7 @@ class TestPhaseFeatureCoverage:
             for nc in net_class_map.values()
             if nc.skew_tolerance_mm is not None
         }
-        assert caps == {"DDR_DQS": 0.05, "MIPI_CSI_LANES": 0.05, "HDMI_TMDS_LANES": 0.075}
+        assert caps == {}
 
     def test_protocol_diversity_in_tolerances(self, net_class_map) -> None:
         """At least three distinct ``length_match_tolerance_mm`` values are used.

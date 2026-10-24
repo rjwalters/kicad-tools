@@ -375,3 +375,89 @@ def test_warning_severity_limit_leaves_candidate_selection_unchanged(monkeypatch
     )
     assert "[coupled-select] kept=joint" in out
     assert not independent
+
+
+# ---------------------------------------------------------------------------
+# Issue #7913: the budget's length form (kicad-cli's .kicad_dru skew limit)
+# ---------------------------------------------------------------------------
+
+
+def _within_mm(limit):
+    """``(p, n) -> bool``: the pair's length skew meets ``limit`` mm."""
+    from kicad_tools.router.diffpair_routing import calculate_route_length
+
+    return lambda p, n: abs(calculate_route_length([p]) - calculate_route_length([n])) <= limit
+
+
+def test_candidate_meeting_the_length_form_beats_a_better_coupled_one():
+    """Board 07 TMDS_D1 shape: both meet the ps budget, only one its length form.
+
+    Before #7913 the better-coupled joint won although its skew was over the
+    0.484 mm limit kicad-cli and the router's own post-route pair tuners
+    hold it to.
+    """
+    both_meet_ps = _within_mm(5.0)
+    joint, pose = _cand(_tight_skewed()), _cand(_split_balanced())
+    # The ps tier alone ties, so uncoupled length decides (the old outcome).
+    assert _select_coupled_candidate(joint, pose, RES, skew_ok=both_meet_ps) == "joint"
+    # The length form breaks the tie for the in-limit candidate, either way round.
+    assert (
+        _select_coupled_candidate(
+            joint, pose, RES, skew_ok=both_meet_ps, skew_ok_length=_within_mm(0.05)
+        )
+        == "pose"
+    )
+    assert (
+        _select_coupled_candidate(
+            pose, joint, RES, skew_ok=both_meet_ps, skew_ok_length=_within_mm(0.05)
+        )
+        == "joint"
+    )
+
+
+def test_length_form_ranks_below_the_ps_budget():
+    """A candidate that meets the ps budget still beats one that only meets the length form."""
+    joint, pose = _cand(_tight_skewed()), _cand(_split_balanced())
+    joint_only_ps = lambda p, n: p is joint[0]  # noqa: E731
+    assert (
+        _select_coupled_candidate(
+            joint, pose, RES, skew_ok=joint_only_ps, skew_ok_length=_within_mm(0.05)
+        )
+        == "joint"
+    )
+
+
+def test_length_form_is_ignored_when_both_or_neither_meets_it():
+    joint, pose = _cand(_tight_skewed()), _cand(_split_balanced())
+    for limit in (5.0, -1.0):
+        assert _select_coupled_candidate(joint, pose, RES, skew_ok_length=_within_mm(limit)) == (
+            "joint"
+        )
+
+
+def test_length_form_predicate_uses_the_budget_at_the_slowest_layer():
+    """``_length_form_ok`` is ``PairSkewTarget.tolerance_mm`` on the meter's length."""
+    from kicad_tools.physics.skew_budget import LayerDelays
+    from kicad_tools.router.diffpair_routing import _length_form_ok
+    from kicad_tools.router.pair_skew_target import (
+        PairSkewMeter,
+        PairSkewTarget,
+        segment_length_parts,
+    )
+
+    delays = LayerDelays(ps_per_mm={"F.Cu": 6.0, "B.Cu": 6.0}, via_ps_per_mm=6.0)
+    target = PairSkewTarget("USB_D+", "USB_D-", budget_ps=3.0, delays=delays)
+    assert target.tolerance_mm == pytest.approx(0.5)
+    ok = _length_form_ok(PairSkewMeter(target, segment_length_parts))
+    assert ok is not None
+    p, n = _tight()
+    assert ok(p, n)
+    p, n = _tight_skewed()  # N carries 0.5 mm more copper: at the limit
+    assert ok(p, n)
+    n.segments[-1].y2 += 0.1
+    assert not ok(p, n)
+    # No ps budget: nothing to add beside the caps ``within`` already checks.
+    assert (
+        _length_form_ok(PairSkewMeter(PairSkewTarget("a", "b", cap_mm=0.05), segment_length_parts))
+        is None
+    )

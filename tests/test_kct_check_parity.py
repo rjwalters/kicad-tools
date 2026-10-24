@@ -121,13 +121,17 @@ NET_CLASS_GATED_FAMILIES: tuple[str, ...] = (
 # ``match_group_length_skew`` is now clean (0). The five pair-skew findings
 # above are untouched.
 #
-# Re-pinned by #7894: the fixture's pair classes now declare ``pair_protocol``
-# (their explicit caps stay until #7913).  DQS declares ``DDR_DQS_CK``, so its
-# UG583 2 ps timing limit is an error (48.4 ps), beside its 0.05 mm cap error:
-# 6 findings on the same five pairs.  The MIPI (8.05 ps) and TMDS (3.36 ps)
-# budgets are maximum-rate warnings and add no error.
+# Re-pinned by #7894: the fixture's pair classes now declare ``pair_protocol``.
+# DQS declares ``DDR_DQS_CK``, so its UG583 2 ps timing limit is an error
+# (48.4 ps).  The MIPI (8.05 ps) and TMDS (3.36 ps) budgets are maximum-rate
+# warnings and add no error.
+#
+# Re-pinned by #7913: the hand-set ``skew_tolerance_mm`` caps are gone from the
+# fixture's DQS/MIPI/TMDS classes, so their five 0.05/0.075 mm cap errors
+# (DQS, MIPI_CLK, MIPI_DAT0, MIPI_DAT1, TMDS_D2) no longer fire.  Only the DQS
+# 2 ps timing error is left: 6 -> 1.  The committed copper did not change.
 BOARD_07_EXPECTED_FAMILY_DELTA = {
-    "diffpair_length_skew": 6,
+    "diffpair_length_skew": 1,
     "diffpair_routing_continuity": 0,
     "diffpair_uncoupled_length": 0,
     "match_group_length_skew": 0,
@@ -432,8 +436,9 @@ class TestCiGateCountsGatedFamilies:
 
         The corrected drill/pad intersection check (#5012) exposes five
         unsupported partial drill overlaps under the default manufacturer;
-        the net-class-gated families add the six kicad-cli-confirmed skew
-        findings pinned in ``BOARD_07_EXPECTED_FAMILY_DELTA`` (#6802).
+        the net-class-gated families add the skew findings pinned in
+        ``BOARD_07_EXPECTED_FAMILY_DELTA`` (#6802; the DQS timing error
+        only since the #7913 cap removal).
         These are preserved fixture findings, not manufacturing waivers.
         """
         if not BOARD_07_PCB.is_file():
