@@ -815,6 +815,13 @@ def run_cell(
     match = committed_copper_matches(artifact, board, nets)
     if match:
         invalid.append(f"pair copper identical to committed {match}")
+    # Issue #7955: a skipped/failed pour oracle (kicad-cli OOM 137, docker
+    # unreachable) changes the copper, so the row is the environment, not a result.
+    if row.get("oracle_unverified"):
+        invalid.append(
+            f"route oracle stage skipped/failed ({row.get('oracle_unverified_reason')}); "
+            "environment, not a result"
+        )
     row["valid"] = not invalid
     row["invalid_reasons"] = invalid
     return row
