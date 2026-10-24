@@ -20642,6 +20642,7 @@ def _chain_complete_argv(
     for flag, attr in (
         ("--quiet", "quiet"),
         ("--skip-drc", "skip_drc"),
+        ("--allow-offboard", "allow_offboard"),
         ("--no-plane-via-reservation", "no_plane_via_reservation"),
         ("--deterministic-budget", "deterministic_budget"),
     ):

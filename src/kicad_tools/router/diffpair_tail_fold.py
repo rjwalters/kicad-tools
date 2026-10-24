@@ -259,6 +259,13 @@ def tail_fold_options(
         jog = MIN_JOG_WIDTHS * width
         # D: the rise, then a top1 of one Q16 jog before the split.
         back = split_back + crown + foot + jog
+        # Issue #7943: the lead-in end sits ``back - width`` from the
+        # terminal; hold that gap to the own-copper clearance with or
+        # without a pad (the pad rule covers only the pad case).  Grow the
+        # fold's setback; the length gate below refuses it if it no longer
+        # fits on the host.
+        if own_copper is not None:
+            back = max(back, width + own_copper.clearance_mm)
         if length < back + width:  # keep a lead-in on the host
             continue
         pad_floor = side + width / 2.0 + clearance if pad is not None else 0.0
