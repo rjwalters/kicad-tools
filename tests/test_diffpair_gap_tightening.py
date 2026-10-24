@@ -302,6 +302,48 @@ def test_fragmented_partner_run_is_not_reported_in_band():
     assert _connected(ar) == {1: True, 2: True}
 
 
+def _long_piece_partner_board():
+    """A 1.5 mm P segment beside an N rail of two long collinear pieces.
+
+    Each N piece is >= MIN_RUN_MM so ``_merge_fragments`` leaves them alone,
+    but each overlaps P by under MIN_RUN_MM (0.6 and 0.9 mm); the rule sums
+    the overlaps into one coupled union.
+    """
+    w, gap = MIPI_W, 0.41
+    y_p, y_n = 10.0, round(10.0 + gap + w, 4)
+    rails = {
+        1: [((5.0, y_p), (6.5, y_p), w)],
+        2: [((3.5, y_n), (5.6, y_n), w), ((5.6, y_n), (8.5, y_n), w)],
+    }
+    pads = [
+        ("U1", 1, (5.0, y_p)),
+        ("U2", 2, (3.5, y_n)),
+        ("J1", 1, (6.5, y_p)),
+        ("J2", 2, (8.5, y_n)),
+    ]
+    return _board("TMDS_D2_P", "TMDS_D2_N", _class(100.0, 10.0), rails, pads)
+
+
+def test_long_partner_pieces_each_overlapping_under_min_run_are_squeezed():
+    # Filter responsible: ``_find_runs`` requires ONE partner piece to overlap
+    # the segment by >= MIN_RUN_MM (here 0.6 mm and 0.9 mm), while the rule
+    # judges the union (1.5 mm) of those overlaps.
+    from kicad_tools.router.diffpair_gap_tightening import MIN_RUN_MM, _find_runs
+
+    ar = _long_piece_partner_board()
+    assert _impedance_findings(ar)
+    p, n = ([s for r in ar.routes if r.net == i for s in r.segments] for i in (1, 2))
+    assert _find_runs(p, n, min_run_mm=MIN_RUN_MM, max_gap_mm=1.0) == []
+
+    results = ar.apply_diffpair_gap_tightening(verbose=False, stackup=STACKUP)
+
+    res = results[("TMDS_D2_P", "TMDS_D2_N")]
+    assert res.reason == "tightened", res
+    assert _impedance_findings(ar) == []
+    assert _clearance_errors(ar) == []
+    assert _connected(ar) == {1: True, 2: True}
+
+
 def test_judged_out_of_band_segment_without_a_squeezable_run_is_declined():
     # The partner is off the 8-direction grid, so no run can be squeezed; the
     # rule still judges the P segment, so the pair is not "in_band".
