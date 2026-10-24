@@ -19,6 +19,14 @@ board's purpose is to exercise every Phase 1-3 net-class feature on at least
 one pair so future router/validate changes have an end-to-end witness on
 disk.
 
+> **Not native-DRC evidence.** The footprints in this fixture's `*.kicad_pcb`
+> files use invented library names (e.g. `Connector_FFC:FFC_4P_0.5mm`,
+> `Package_BGA:BGA-49_5.0x5.0mm_Layout7x7_P0.5mm`) that are not in the stock
+> KiCad libraries, so pinned kicad-cli DRC reports `lib_footprint_issues` on
+> them. This artifact is a router regression witness only and must never be
+> committed as native DRC/ERC evidence; the stock-named `../output/` board is
+> the evidence artifact. Do not suppress `lib_footprint_issues` to hide this.
+
 ## Quick Start
 
 ```bash

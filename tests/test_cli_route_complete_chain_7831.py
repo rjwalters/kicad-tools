@@ -232,8 +232,18 @@ def test_unset_recipe_flags_are_not_forwarded(tmp_path):
         "--no-reserve-pour-only-passives",
         "--deterministic-budget",
         "--per-net-iterations",
+        "--allow-offboard",
     ):
         assert flag not in argv
+
+
+def test_allow_offboard_reaches_inner_argv(tmp_path):
+    outer = ["in.kicad_pcb", "--allow-offboard"]
+    args = _route_parser().parse_args(outer)
+    argv = route_cmd._chain_complete_argv(
+        args, outer, tmp_path / "o.kicad_pcb", tmp_path / "o.chain.kicad_pcb"
+    )
+    assert "--allow-offboard" in argv
 
 
 def _disposition(invalid: frozenset[str]):
