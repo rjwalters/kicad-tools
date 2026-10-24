@@ -15,6 +15,11 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-24
 
+- **PR #7947**: fix(router): forward --allow-offboard in chained --complete and hold tail-fold lead-in gap to clearance
+- **PR #7946**: test: skip subprocess bench-harness tests on toolchain refusal
+- **PR #7941**: chore(loom): resync installed Loom to v0.19.1218
+- **Issue #7944** (closed): Subprocess bench-harness tests fail instead of skipping without a pinned kicad-cli
+- **Issue #7943** (closed): Router follow-ups from #7905/#7908/#7923 reviews: --allow-offboard in chained --complete, tail-fold lead-in gap, regression-fixture library names
 - **PR #7940**: chore(deps): Bump zod from 4.5.4 to 4.6.7 in /site
 - **PR #7939**: chore(deps-dev): Bump fast-uri from 3.1.7 to 3.1.9 in /site
 - **PR #7936**: feat(lattice): mid-trunk via-pair move for the coupled search (#7932)
