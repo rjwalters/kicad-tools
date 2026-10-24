@@ -118,7 +118,7 @@ def test_parse_protocol():
 
 
 # ---------------------------------------------------------------------------
-# The legacy table is a shim over it
+# Name-detected pair types read the same table
 # ---------------------------------------------------------------------------
 
 _TYPE_ROW = {
@@ -132,15 +132,21 @@ _TYPE_ROW = {
 
 
 @pytest.mark.parametrize("pair_type", list(DifferentialPairType))
-def test_for_type_returns_table_values_and_warns(pair_type):
+def test_for_pair_type_returns_table_values(pair_type):
     row = PROTOCOL_DEFAULTS[_TYPE_ROW[pair_type]]
-    with pytest.warns(DeprecationWarning, match="for_type is deprecated"):
-        rules = DifferentialPairRules.for_type(pair_type)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        rules = DifferentialPairRules.for_pair_type(pair_type)
     assert rules.spacing == row.gap_mm.value
     assert rules.trace_width == row.trace_width_mm.value
     assert rules.impedance == row.diff_impedance_ohm.value
     expected = row.max_skew_mm.value if row.max_skew_mm is not None else GENERIC_SKEW_MM
     assert rules.max_length_delta == expected
+
+
+def test_for_type_shim_is_removed():
+    # The DeprecationWarning shim was deleted in Issue #6448.
+    assert not hasattr(DifferentialPairRules, "for_type")
 
 
 def test_internal_callers_do_not_trip_the_deprecation():
