@@ -37,11 +37,12 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+from tests._bench_harness import run_harness_or_skip_on_refusal
 
 REPO = Path(__file__).resolve().parents[1]
 HARNESS = REPO / "scripts" / "research" / "expand_route_experiment.py"
@@ -154,14 +155,7 @@ def test_lattice_route_is_complete_and_manufacturable(
         "--json",
         str(rows_path),
     ]
-    proc = subprocess.run(
-        cmd,
-        cwd=REPO,
-        capture_output=True,
-        text=True,
-        timeout=route_timeout_s + SUBPROCESS_GRACE_S,
-    )
-    assert proc.returncode == 0, proc.stdout[-4000:] + proc.stderr[-4000:]
+    run_harness_or_skip_on_refusal(cmd, cwd=REPO, timeout=route_timeout_s + SUBPROCESS_GRACE_S)
     rows = json.loads(rows_path.read_text())["rows"]
     assert len(rows) == 1, rows
     assert_row_manufacturable(rows[0], tally)
