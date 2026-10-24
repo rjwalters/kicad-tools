@@ -657,7 +657,7 @@ UNRESOLVED_TASK_IDS=$(jq -s -r "$JQ_PRELUDE"'
 # entries enter $bg_ids, so a subagent dispatch is never miscounted as a
 # background Bash task. Task subagents are covered by their own detector
 # (UNRESOLVED_TASK_IDS) above.
-UNRESOLVED_BG_IDS=$(jq -s -r "$JQ_PRELUDE"'
+BG_JQ_PROG="$JQ_PRELUDE"'
   . as $t
   | (results) as $r
   | (stopped_task_ids) as $stopped
@@ -711,7 +711,25 @@ UNRESOLVED_BG_IDS=$(jq -s -r "$JQ_PRELUDE"'
         elif (($read_refs | index($id)) != null) then empty
         else $id end
     ] | .[]
-' "$TRANSCRIPT_PATH" 2>/dev/null) || UNRESOLVED_BG_IDS=""
+'
+
+# Issue #9081: a FOREGROUND subagent's own background Bash lives in a sibling
+# transcript (`<session>/subagents/agent-*.jsonl`), not the orchestrator one.
+# Run the SAME program (no second detector) over each file and union the
+# unresolved ids. A missing/unreadable dir yields no files: fail open.
+UNRESOLVED_BG_IDS=$(jq -s -r "$BG_JQ_PROG" "$TRANSCRIPT_PATH" 2>/dev/null) || UNRESOLVED_BG_IDS=""
+SUBAGENT_BG_IDS=""
+if [[ "$TRANSCRIPT_PATH" == *.jsonl && -d "${TRANSCRIPT_PATH%.jsonl}/subagents" ]]; then
+    for _sub in "${TRANSCRIPT_PATH%.jsonl}"/subagents/agent-*.jsonl; do
+        [[ -f "$_sub" && -r "$_sub" ]] || continue
+        _ids=$(jq -s -r "$BG_JQ_PROG" "$_sub" 2>/dev/null) || _ids=""
+        [[ -n "$_ids" ]] || continue
+        SUBAGENT_BG_IDS="${SUBAGENT_BG_IDS:+${SUBAGENT_BG_IDS}$'\n'}${_ids}"
+    done
+fi
+if [[ -n "$SUBAGENT_BG_IDS" ]]; then
+    UNRESOLVED_BG_IDS=$(printf '%s\n%s\n' "$UNRESOLVED_BG_IDS" "$SUBAGENT_BG_IDS" | grep . | awk '!seen[$0]++' || true)
+fi
 
 # Diff armed Monitor / ScheduleWakeup timers (issue #4462) against every event
 # that can retire one (issue #4696 — see the header for why `<tool-use-id>`
@@ -889,6 +907,9 @@ fi
 REASON="STOP BLOCKED (guard-background-subagents.sh, issues #4257/#4389/#4462/#4696/#5013/#5086/#5976/#6175):${SUMMARY}"
 if [[ "$MONITOR_COUNT" -gt 0 ]]; then
     REASON="${REASON} An orphaned timer BLOCKS this stop: a transport-failure backoff (529/Overloaded) MUST be retried inline in the same turn, or the orchestrator must exit NONZERO, never parked on an end-of-turn timer."
+fi
+if [[ -n "$SUBAGENT_BG_IDS" ]]; then
+    REASON="${REASON} (#9081) Unresolved background Bash task id(s)$(format_id_list "$SUBAGENT_BG_IDS") were started by a subagent that has since returned. Wait on or read that job's output (a bounded BashOutput/TaskOutput poll) until it completes before stopping; do NOT re-dispatch it."
 fi
 REASON="${REASON} This session was classified as HEADLESS \`claude -p\` mode (see #6645 -- LOOM_SESSION_MODE / LOOM_HEADLESS_SESSION / the owning claude process's argv; an undetermined session is treated as headless on purpose). In HEADLESS mode, ending this turn TERMINATES THE PROCESS and kills every still-running background child -- there is no 'it finishes after I stop talking'. Before writing a final message, you MUST explicitly await each one, with a CONTEXT-SAFE recipe (issue #6168 -- a blocking \`TaskOutput\` on a still-running local_agent Task/Agent subagent can time out and return the raw JSONL transcript dump instead of just status, overflowing your context): poll each dispatched Task/Agent subagent in-turn with a bounded, NON-BLOCKING \`TaskOutput\` loop (\`block: false\` or a short timeout, sleeping between checks, reading only the result's <status> tag) instead of one big blocking call. Also await each background Bash task's completion notification (or a bounded BashOutput poll), and each armed Monitor/ScheduleWakeup timer's fire event -- see defaults/.claude/commands/loom/sweep.md, 'CRITICAL: Subagent dispatch is async-only' (#3822). If you are certain every subagent/background task/timer has actually finished (e.g. this is a false positive from a slow transcript flush), it is safe to stop again -- this guard blocks at most once per stop sequence."
 

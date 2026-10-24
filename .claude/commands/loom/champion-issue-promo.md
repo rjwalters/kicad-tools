@@ -886,10 +886,14 @@ GATE_OUT="$(loom-daemon forge promotion-author --number "$ISSUE_NUMBER")" || GAT
 GATE="$(head -n1 <<<"$GATE_OUT")"
 if [ "$GATE" != "TRUSTED" ]; then
   # Fail closed: UNTRUSTED and UNKNOWN (unreadable evidence) both hold the issue.
-  # One deduplicated explanation per issue, keyed on the marker.
+  # One deduplicated explanation per verdict, keyed on the notice's marker line
+  # (it carries the issue's revision and the trust digest, #13142: the step
+  # tick stops drawing this issue while a trusted notice matches both, so a
+  # changed body or trust list posts a fresh notice).
+  NOTICE="$(tail -n +2 <<<"$GATE_OUT")"
   if ! loom-daemon forge trusted-comments --fetch "$ISSUE_NUMBER" 2>/dev/null \
-      | grep -q 'loom:promotion-author-gate'; then
-    tail -n +2 <<<"$GATE_OUT" | ./.loom/scripts/post-comment.sh "$ISSUE_NUMBER" --body-file -
+      | grep -qF -- "$(head -n1 <<<"$NOTICE")"; then
+    printf '%s\n' "$NOTICE" | ./.loom/scripts/post-comment.sh "$ISSUE_NUMBER" --body-file -
   fi
   gh issue edit "$ISSUE_NUMBER" --remove-label "loom:evaluating"   # release the claim; stays loom:curated
   # HARD STOP for this issue: no loom:issue, no APPROVED comment. Continue the batch loop.
