@@ -7,7 +7,7 @@
 # label state on the same PR. The fix is prompt/doc-only (Option A — these are
 # role prompts, not compiled code), so there is no compiler to catch a
 # regression if a future edit strips the recheck sections back out, or if the
-# Champion janitor / criterion-1 fix gets silently reverted. This script is
+# Champion janitor / judge-approval fix gets silently reverted. This script is
 # the executable tie that would fail CI if any of that guidance regresses.
 #
 # What it checks:
@@ -17,7 +17,7 @@
 #      check — see #1185).
 #   2. Same for doctor.md.
 #   3. defaults/.claude/commands/loom/champion-pr-merge.md contains the
-#      Verdict-State Janitor section AND criterion 1's verification snippet
+#      Verdict-State Janitor section AND the judge-approval criterion's verification snippet
 #      actually checks for loom:changes-requested (not just loom:pr presence).
 #   4. .github/labels.yml and defaults/.github/labels.yml both document the
 #      verdict-label mutual-exclusion invariant (byte-identity between the
@@ -127,16 +127,16 @@ if ! grep -q "### Verdict-Time CAS Recheck" "$DOCTOR_MD"; then
   fail "doctor.md is missing the 'Verdict-Time CAS Recheck' section (#4570)"
 fi
 
-# --- 3: Champion Verdict-State Janitor + criterion-1 fix --------------------
+# --- 3: Champion Verdict-State Janitor + judge-approval fix --------------------
 if ! grep -q "## Verdict-State Janitor" "$CHAMPION_MERGE_MD"; then
   fail "champion-pr-merge.md is missing the 'Verdict-State Janitor' section (#4570)"
 fi
 
-# Criterion 1's verification snippet must actually check for
+# The judge-approval criterion's verification snippet must actually check for
 # loom:changes-requested, not just loom:pr presence (the doc-vs-check
 # contradiction #4570 fixed). Look for the grep check within the file.
 if ! grep -q 'grep -q "loom:changes-requested"' "$CHAMPION_MERGE_MD"; then
-  fail "champion-pr-merge.md criterion 1 no longer checks for loom:changes-requested alongside loom:pr — the doc-vs-check contradiction (#4570) may have regressed"
+  fail "champion-pr-merge.md judge-approval criterion no longer checks for loom:changes-requested alongside loom:pr — the doc-vs-check contradiction (#4570) may have regressed"
 fi
 
 # --- 4: labels.yml mutual-exclusion invariant documented --------------------
@@ -224,4 +224,4 @@ if [[ "$FAIL" -eq 1 ]]; then
   exit 1
 fi
 
-echo "check-cas-recheck-consistency: OK — Verdict-Time CAS Recheck (Judge + Doctor), Champion's Verdict-State Janitor, criterion 1's fix, the labels.yml mutual-exclusion invariant, the SHA-scoped verdict lifetime (#5686), and post-verdict.sh as the sole merge-gating verdict writer (#12136) are all present."
+echo "check-cas-recheck-consistency: OK — Verdict-Time CAS Recheck (Judge + Doctor), Champion's Verdict-State Janitor, the judge-approval fix, the labels.yml mutual-exclusion invariant, the SHA-scoped verdict lifetime (#5686), and post-verdict.sh as the sole merge-gating verdict writer (#12136) are all present."

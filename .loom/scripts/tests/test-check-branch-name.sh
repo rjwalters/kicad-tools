@@ -56,14 +56,6 @@ LIB="$SCRIPTS_DIR/lib/default-branch.sh"
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
-assert_contains() {
-    local haystack="$1" needle="$2" what="$3"
-    case "$haystack" in
-        *"$needle"*) pass "$what" ;;
-        *) fail "$what (expected to find '$needle' in: ${haystack:0:400})" ;;
-    esac
-}
-
 # shellcheck source=../lib/default-branch.sh
 source "$LIB"
 

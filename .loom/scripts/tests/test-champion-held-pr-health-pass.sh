@@ -10,10 +10,10 @@
 # shipped markdown's exact commands with `assert_doc_contains` /
 # `assert_doc_lacks`, catching drift between the two.
 #
-# Incident recap (#6720): criterion #2's sticky-hold precheck bailed out with
-# "HOLD, silently. Skip the PR for this pass" BEFORE criteria #4 (merge
+# Incident recap (#6720): the merge-risk criterion's sticky-hold precheck bailed out with
+# "HOLD, silently. Skip the PR for this pass" BEFORE the mergeable criterion (merge
 # conflict), #5 (recency) and #6 (CI status) were ever evaluated. Because
-# criterion #5's stale route is the ONLY automated path from `loom:pr` to
+# the recency criterion's stale route is the ONLY automated path from `loom:pr` to
 # `loom:changes-requested` — i.e. the only way a `loom:pr` PR reaches Doctor —
 # a held PR could never be reported as conflicting nor routed for a rebase.
 # Measured on rjwalters/loom 2026-08-22: 21 open PRs carried `loom:pr` +
@@ -22,8 +22,8 @@
 #
 # The #6720 fix decouples MERGE PERMISSION from HEALTH REPORTING:
 #   1. A hold (sticky OR fresh) sets MERGE_BLOCKED_BY_HOLD=true and blocks the
-#      merge + criterion #3 + Steps 2-3 — but the PR is NOT dropped from the
-#      pass. Criteria #4/#6/#5 still run ("Held-PR Health Pass").
+#      merge + the critical-files criterion + Steps 2-3 — but the PR is NOT dropped from the
+#      pass. The mergeable, ci-green and recency criteria still run ("Held-PR Health Pass").
 #   2. A held PR that turns CONFLICTING gets one idempotent
 #      `champion:held-pr-conflict-notice` comment.
 #   3. A held PR that goes stale is routed to Doctor exactly like an unheld one
@@ -42,13 +42,13 @@
 # an unproductive "rebase treadmill" — conflict, route to Doctor, rebase,
 # still-held, `main` moves again — that cannot converge, since the real
 # blocker (a pending human merge decision) is untouched by any of it. #6852
-# narrows criterion #5's held route: it distinguishes a **hold-only** stale PR
+# narrows the recency criterion's held route: it distinguishes a **hold-only** stale PR
 # (no other red criterion — left in place, one-time suspension notice, no
 # label change) from a **hold-plus-feedback** one (a failing required check —
 # routes to Doctor exactly as #6720 shipped). CI status is the only currently
 # available live signal cheap enough to compute every pass without inventing
 # new history-tracking machinery, so it is what `HELD_CI_FAILING` is keyed on;
-# criterion #6 is reordered to run BEFORE #5 so that signal is known before
+# the ci-green criterion is reordered to run BEFORE #5 so that signal is known before
 # #5's routing decision. Neither branch ever touches the hold marker or
 # `loom:blocked` — #6720's core property (a held PR is never silently dropped
 # from reporting) holds on both.
@@ -61,7 +61,7 @@
 #   1B. THE HOLD-ONLY VARIANT (#6852): the identical shape MINUS the failing
 #       check -> the automatic route is SUSPENDED, not fired; the PR stays on
 #       `loom:pr`, still reported, still carrying `loom:blocked`.
-#   2. Criteria #4/#6/#5 are evaluated under a hold; #3 and the merge are not.
+#   2. The mergeable, ci-green and recency criteria are evaluated under a hold; #3 and the merge are not.
 #   3. The conflict notice, the stale notice, and the suspension notice are
 #      each posted exactly once across repeated ticks (10-minute cron
 #      anti-spam).
@@ -222,15 +222,15 @@ state_labels() {
 
 # =====================================================================
 # champion-pr-merge.md's per-PR evaluation, mirrored from the shipped prose:
-#   - criterion #2's sticky-hold precheck (STICKY_HOLD / MERGE_BLOCKED_BY_HOLD)
-#   - criterion #2's "Hold behavior" fresh-hold branch
+#   - the merge-risk criterion's sticky-hold precheck (STICKY_HOLD / MERGE_BLOCKED_BY_HOLD)
+#   - the merge-risk criterion's "Hold behavior" fresh-hold branch
 #   - the "Held-PR Health Pass" (#6720, reordered by #6852): criteria
-#     #4/#6/#5 under a hold
+#     mergeable, ci-green, recency under a hold
 #   - "PR Rejection Workflow -> Stale PR, hold-plus-feedback or unheld"
 #     (#6720/#5802) and "-> Hold-only Stale PR" (#6852)
 #
 # Emits one ACTION line per observable effect so a test can assert on the
-# whole tick. Deliberately does NOT model criterion #1 or #3's internals —
+# whole tick. Deliberately does NOT model the judge-approval criterion or #3's internals —
 # those are covered by test-champion-critical-file-check.sh.
 #
 # Args: <state-file> <prior_hold> <release_reason> <axes_red> <mergeable>
@@ -242,7 +242,7 @@ state_labels() {
 #
 # last_activity (#6860): the stale-notice marker's episode key, mirroring
 # champion-pr-merge.md's `<!-- champion:stale-pr-notice:$LAST_ACTIVITY -->` —
-# the same "most recent commit or non-Champion comment" value criterion #5's
+# the same "most recent commit or non-Champion comment" value the recency criterion's
 # recency check computes (#6843/#6844), reused here as the episode key.
 # Defaults to a fixed value so every pre-existing call site (none of which
 # models a Doctor round-trip landing real new activity) is unaffected.
@@ -258,7 +258,7 @@ champion_pr_pass() {
 
     local MERGE_BLOCKED_BY_HOLD=false
 
-    # ---- criterion #2: sticky-hold precheck -------------------------------
+    # ---- the merge-risk criterion: sticky-hold precheck -------------------------------
     # (The doc also sets STICKY_HOLD here for narration; the `HOLD:sticky`
     # action line below is this mirror's equivalent, so the flag itself is not
     # duplicated.)
@@ -300,15 +300,15 @@ champion_pr_pass() {
         fi
     fi
 
-    # ---- criterion #3: merge gate only; skipped under a hold --------------
+    # ---- the critical-files criterion: merge gate only; skipped under a hold --------------
     if [ "$MERGE_BLOCKED_BY_HOLD" = true ]; then
-        echo "SKIP:criterion-3"
+        echo "SKIP:critical-files"
     else
-        echo "EVAL:criterion-3"
+        echo "EVAL:critical-files"
     fi
 
-    # ---- criterion #4: ALWAYS evaluated (the #6720 fix) ------------------
-    echo "EVAL:criterion-4"
+    # ---- the mergeable criterion: ALWAYS evaluated (the #6720 fix) ------------------
+    echo "EVAL:mergeable"
     if [ "$mergeable" = "CONFLICTING" ] && [ "$MERGE_BLOCKED_BY_HOLD" = true ]; then
         if state_has "marker:champion:held-pr-conflict-notice" "$state"; then
             echo "CONFLICT_NOTICE:suppressed"
@@ -318,9 +318,9 @@ champion_pr_pass() {
         fi
     fi
 
-    # ---- criterion #6: ALWAYS evaluated; now runs BEFORE #5 (#6852) so its
+    # ---- the ci-green criterion: ALWAYS evaluated; now runs BEFORE #5 (#6852) so its
     # outcome (HELD_CI_FAILING) is known before #5's routing decision -------
-    echo "EVAL:criterion-6"
+    echo "EVAL:ci-green"
     if [ "$ci" = "fail" ]; then
         echo "REPORT:ci-status"
     fi
@@ -329,11 +329,11 @@ champion_pr_pass() {
     local HELD_CI_FAILING=false
     [ "$ci" = "fail" ] && HELD_CI_FAILING=true
 
-    # ---- criterion #5: ALWAYS evaluated; stale routes to Doctor -----------
+    # ---- the recency criterion: ALWAYS evaluated; stale routes to Doctor -----------
     # ONLY when hold-plus-feedback or unheld (#6720/#5802). A hold-only stale
     # PR (MERGE_BLOCKED_BY_HOLD=true, HELD_CI_FAILING=false) is suspended
     # instead — no label change, a separate one-time notice (#6852).
-    echo "EVAL:criterion-5"
+    echo "EVAL:recency"
     local stale=false
     [ "$hours_ago" -gt 24 ] && stale=true
     if [ "$stale" = true ]; then
@@ -590,7 +590,7 @@ assert_contains "$OUT" "HOLD:sticky" "the sticky hold is still recognized and st
 assert_contains "$OUT" "NO_MERGE:hold" "the held PR is not merged"
 assert_contains "$OUT" "COMMENT:champion:held-pr-conflict-notice" \
     "the conflict is surfaced with an idempotent marker comment (AC #2)"
-assert_contains "$OUT" "REPORT:ci-status" "the failing check is reported (criterion #6)"
+assert_contains "$OUT" "REPORT:ci-status" "the failing check is reported (the ci-green criterion)"
 assert_contains "$OUT" "LABEL_REMOVE:loom:pr" "loom:pr is removed by the stale route"
 assert_contains "$OUT" "LABEL_ADD:loom:changes-requested" \
     "the held+stale+hold-plus-feedback PR REACHES DOCTOR via loom:changes-requested (AC #3, unchanged by #6852)"
@@ -671,10 +671,10 @@ S=$(state_new)
 state_add "marker:champion:merge-risk-hold" "$S"
 state_add "label:loom:blocked" "$S"
 OUT=$(champion_pr_pass "$S" true "" false MERGEABLE 1 pass)
-assert_contains "$OUT" "EVAL:criterion-4" "criterion #4 (conflict) runs under a hold (AC #1)"
-assert_contains "$OUT" "EVAL:criterion-5" "criterion #5 (recency) runs under a hold (AC #1)"
-assert_contains "$OUT" "EVAL:criterion-6" "criterion #6 (CI) runs under a hold (AC #1)"
-assert_contains "$OUT" "SKIP:criterion-3" "criterion #3 is skipped under a hold (pure merge gate, no remedy)"
+assert_contains "$OUT" "EVAL:mergeable" "the mergeable criterion (conflict) runs under a hold (AC #1)"
+assert_contains "$OUT" "EVAL:recency" "the recency criterion (recency) runs under a hold (AC #1)"
+assert_contains "$OUT" "EVAL:ci-green" "the ci-green criterion (CI) runs under a hold (AC #1)"
+assert_contains "$OUT" "SKIP:critical-files" "the critical-files criterion is skipped under a hold (pure merge gate, no remedy)"
 assert_contains "$OUT" "NO_MERGE:hold" "the hold still blocks the merge — health reporting is not permission"
 assert_lacks "$OUT" "COMMENT:" "a healthy held PR produces no comment at all (anti-spam)"
 rm -f "$S"
@@ -748,7 +748,7 @@ S=$(state_new)
 OUT=$(champion_pr_pass "$S" false "" true CONFLICTING 63 fail)
 assert_contains "$OUT" "COMMENT:champion:merge-risk-hold" "the fresh hold notice is posted"
 assert_contains "$OUT" "HOLD:fresh" "the fresh hold blocks the merge"
-assert_contains "$OUT" "EVAL:criterion-5" "criterion #5 still runs behind a fresh hold"
+assert_contains "$OUT" "EVAL:recency" "the recency criterion still runs behind a fresh hold"
 assert_contains "$OUT" "COMMENT:champion:held-pr-conflict-notice" "a freshly-held conflicting PR is surfaced too"
 assert_contains "$OUT" "LABEL_ADD:loom:changes-requested" "a freshly-held, hold-plus-feedback stale PR reaches Doctor too"
 assert_contains "$OUT" "LABEL_KEEP:loom:blocked" "the fresh hold's loom:blocked is kept on the route (#11861)"
@@ -792,7 +792,7 @@ echo
 echo "Test 7: the never-held green path still merges (no collateral change)"
 S=$(state_new)
 OUT=$(champion_pr_pass "$S" false "" false MERGEABLE 2 pass)
-assert_contains "$OUT" "EVAL:criterion-3" "criterion #3 runs on the unheld path"
+assert_contains "$OUT" "EVAL:critical-files" "the critical-files criterion runs on the unheld path"
 assert_contains "$OUT" "MERGE" "a green, recent, mergeable, unheld PR still merges"
 assert_lacks "$OUT" "COMMENT:" "the never-held merge path posts none of the new notices"
 assert_eq "loom:pr" "$(state_labels "$S")" "labels untouched on the merge path"
@@ -1194,7 +1194,7 @@ assert_doc_contains "$CHAMPION_MD" \
 
 assert_doc_contains "$CHAMPION_MD" \
     "it reuses this same run's \`\$LAST_ACTIVITY\` as" \
-    "the Held-PR Health Pass invocation documents reusing criterion #5's LAST_ACTIVITY as the episode key (#6860)"
+    "the Held-PR Health Pass invocation documents reusing the recency criterion's LAST_ACTIVITY as the episode key (#6860)"
 
 # --- #6851: per-PR digest, durable across passes ---
 assert_doc_contains "$CHAMPION_MD" \
@@ -1258,7 +1258,7 @@ assert_doc_lacks "$CHAMPION_MD" \
     "# merge-risk hold — the PR leaves the auto-merge queue either way" \
     "the stale route no longer claims it unconditionally exits the hold (#5802's stale premise)"
 
-# --- #6843: criterion #5 must not derive staleness from `updatedAt` ---
+# --- #6843: the recency criterion must not derive staleness from `updatedAt` ---
 # `updatedAt` is bumped by ANY PR write, including the Held-PR Health Pass's
 # OWN comments (conflict notices, loom:blocked reasserts) — so a held PR
 # nobody but Champion touches never accumulates real staleness and the stale
@@ -1267,15 +1267,15 @@ assert_doc_lacks "$CHAMPION_MD" \
 # mode itself. These pins guard the actual verification-command literal.
 assert_doc_lacks "$CHAMPION_MD" \
     "UPDATED_AT=\$(gh pr view <number> --json updatedAt --jq '.updatedAt')" \
-    "criterion #5 no longer derives staleness from the bot-comment-bumped updatedAt field (#6843)"
+    "the recency criterion no longer derives staleness from the bot-comment-bumped updatedAt field (#6843)"
 
 assert_doc_contains "$CHAMPION_MD" \
     'PR_DATA=$(cat "$(git rev-parse --git-common-dir)/loom-champion-facts-pr-<number>.json")' \
-    "criterion #5 reads the PR facts' commits + comments (+ createdAt floor) instead of updatedAt (#6843, #12242)"
+    "the recency criterion reads the PR facts' commits + comments (+ createdAt floor) instead of updatedAt (#6843, #12242)"
 
 assert_doc_contains "$CHAMPION_MD" \
     'select((.body | test("champion:|Automated by Champion role")) | not) | .createdAt)' \
-    "criterion #5's activity computation excludes Champion's own comments, mirroring the sticky-hold precheck's exclusion test (#6843)"
+    "the recency criterion's activity computation excludes Champion's own comments, mirroring the sticky-hold precheck's exclusion test (#6843)"
 
 # --- #6852: hold-only vs hold-plus-feedback stale routing ---
 assert_doc_contains "$CHAMPION_MD" \
@@ -1283,7 +1283,7 @@ assert_doc_contains "$CHAMPION_MD" \
     "the Held-PR Health Pass computes HELD_CI_FAILING to distinguish hold-only from hold-plus-feedback staleness (#6852)"
 
 assert_doc_contains "$CHAMPION_MD" \
-    "### #5 under a hold — route to Doctor only when there is ALSO genuine feedback (#6852)" \
+    "### \`recency\` under a hold — route to Doctor only when there is ALSO genuine feedback (#6852)" \
     "the Held-PR Health Pass ships the #6852 hold-only-vs-hold-plus-feedback routing decision"
 
 assert_doc_contains "$CHAMPION_MD" \
@@ -1303,13 +1303,13 @@ assert_doc_contains "$CHAMPION_MD" \
     "the hold-only suspension block documents that it never swaps loom:pr -> loom:changes-requested (#6852)"
 
 assert_doc_contains "$CHAMPION_MD" \
-    "Evaluate #4, then #6, then #5" \
+    "Evaluate \`mergeable\`, then \`ci-green\`, then \`recency\`" \
     "the Held-PR Health Pass documents the reordered evaluation sequence (#6852)"
 
 # --- absence pin: a hold-only PR must never be silently dropped from
 # reporting — #6720's core property, re-verified after #6852 ---
 assert_doc_lacks "$CHAMPION_MD" \
-    "### #5 under a hold — route to Doctor, keep the hold" \
+    "### \`recency\` under a hold — route to Doctor, keep the hold" \
     "the pre-#6852 unconditional held-route heading is gone (superseded, not just supplemented)"
 
 # --- #7020: per-PR conflict-duration tracking, and the held-clean/
@@ -1438,7 +1438,7 @@ OUT=$(champion_pr_pass "$S" true "loom:blocked removed by rjwalters" true MERGEA
 assert_contains "$OUT" "RELEASE:human-same-concern" "the human removal releases the hold for the same concern"
 assert_lacks "$OUT" "COMMENT:champion:merge-risk-hold" "the ORIGINAL hold notice is not reposted"
 assert_lacks "$OUT" "NO_MERGE:hold" "the hold no longer blocks the merge — never silently loom:pr and unmerged (#11416 AC3)"
-assert_eq "MERGE" "$(tail -n 1 <<<"$OUT")" "the PR merges on this tick (criteria #4-#6 green)"
+assert_eq "MERGE" "$(tail -n 1 <<<"$OUT")" "the PR merges on this tick (the mergeable, recency and ci-green criteria green)"
 assert_lacks "$(state_labels "$S")" "loom:blocked" "loom:blocked is NOT reapplied over the human's decision"
 rm -f "$S"
 echo

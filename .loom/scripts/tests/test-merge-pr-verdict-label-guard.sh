@@ -193,7 +193,7 @@ assert_eq "1" "$LAST_RC" "loom:pr + loom:review-requested -> merge hard-blocked 
 assert_contains "$LAST_OUT" "loom:review-requested" "Block message names loom:review-requested"
 
 # T10 (#9016): the critical-file-hold release path, end to end through this
-# guard. Champion's criterion-#3 hold keeps `loom:pr` and adds `loom:operator`,
+# guard. Champion's critical-files hold keeps `loom:pr` and adds `loom:operator`,
 # and its documented human path is "remove the label, then run merge-pr.sh".
 # Before #9016 Champion re-added the label on its next tick, so the operator's
 # second command hit T4's block again (merge train #8996: the label was back

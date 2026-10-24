@@ -139,7 +139,7 @@ make_sweep_repo() {
     local r; r="$(mktemp -d)"
     mkdir -p "$r/.loom/scripts/lib"
     cp "$REAL_SPAWN_WORKER" "$r/.loom/scripts/spawn-worker.sh"
-    cp "$REPO_ROOT/defaults/scripts/lib/"{locate-daemon-bin,loom-tools}.sh "$r/.loom/scripts/lib/"
+    cp "$REPO_ROOT/defaults/scripts/lib/"{locate-daemon-bin,repo-root}.sh "$r/.loom/scripts/lib/"
     # Stub runners: each announces which runtime ran and forwards its argv so a
     # test can assert on both the selected runner and the passthrough flags.
     cat > "$r/.loom/scripts/spawn-claude.sh" <<'EOF'

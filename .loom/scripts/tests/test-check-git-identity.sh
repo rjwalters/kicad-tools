@@ -43,9 +43,12 @@ make_repo() {
 
 # run_rc <repo> [global-config-file] -- runs the script with a sandboxed
 # global config (defaults to the empty one) and records stdout+stderr / rc.
+# Fixtures configure only user.email, so supply an explicit author name via the
+# environment (honoured as explicit, #13088) to keep the missing-identity
+# condition out of the way; the dedicated tests below use run_check_noenv.
 run_check() {
     local repo="$1" global="${2:-$EMPTY_GLOBAL}"
-    OUT=$(cd "$repo" && GIT_CONFIG_GLOBAL="$global" "$SCRIPT" 2>&1)
+    OUT=$(cd "$repo" && GIT_AUTHOR_NAME="Fixture User" GIT_CONFIG_GLOBAL="$global" "$SCRIPT" 2>&1)
     RC=$?
 }
 
@@ -252,6 +255,37 @@ if [[ "$RC" -eq 0 && "$before" == "$(cat "$NORMAL_GLOBAL")" ]]; then
 else
     fail "expected 0, got rc=$RC; out=$OUT"
 fi
+rm -rf "$REPO"
+
+# run_check_noenv <repo> [global] -- like run_check but with no env identity.
+run_check_noenv() {
+    local repo="$1" global="${2:-$EMPTY_GLOBAL}"
+    OUT=$(cd "$repo" && env -u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL -u EMAIL \
+        GIT_CONFIG_GLOBAL="$global" GIT_CONFIG_NOSYSTEM=1 "$SCRIPT" 2>&1)
+    RC=$?
+}
+
+# -------- Test 18: hostname-fallback (no identity anywhere) reports missing --------
+echo "Test 18: no global/local/env identity reports missing (exit 4)"
+REPO=$(make_repo)
+run_check_noenv "$REPO"
+if [[ "$RC" -eq 4 ]] && grep -q "no explicit git identity" <<<"$OUT" && grep -q "git config --global user.email" <<<"$OUT"; then
+    pass "missing identity -> exit 4 with remediation"
+else
+    fail "expected 4 + remediation, got rc=$RC; out=$OUT"
+fi
+rm -rf "$REPO"
+
+# -------- Test 19: configured / env identities are not missing --------
+echo "Test 19: global identity and GIT_AUTHOR_* env identity stay clean"
+REPO=$(make_repo)
+FULL_GLOBAL="$WORKDIR/global-full"
+git config --file "$FULL_GLOBAL" user.name "Dev"
+git config --file "$FULL_GLOBAL" user.email "dev@example.org"
+run_check_noenv "$REPO" "$FULL_GLOBAL"
+if [[ "$RC" -eq 0 ]]; then pass "global name+email -> exit 0"; else fail "global: expected 0, got rc=$RC; out=$OUT"; fi
+OUT=$(cd "$REPO" && GIT_AUTHOR_NAME=Dev GIT_AUTHOR_EMAIL=dev@example.org GIT_CONFIG_GLOBAL="$EMPTY_GLOBAL" GIT_CONFIG_NOSYSTEM=1 "$SCRIPT" 2>&1); RC=$?
+if [[ "$RC" -eq 0 ]]; then pass "env identity -> exit 0"; else fail "env: expected 0, got rc=$RC; out=$OUT"; fi
 rm -rf "$REPO"
 
 # -------- Summary --------

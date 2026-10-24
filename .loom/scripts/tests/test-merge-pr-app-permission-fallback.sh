@@ -43,28 +43,6 @@ MERGE_PR_SRC="$HELPERS_DIR/merge-pr.sh"
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
-assert_eq() {
-    local expected="$1" actual="$2" msg="$3"
-    if [[ "$expected" == "$actual" ]]; then
-        pass "$msg"
-    else
-        fail "$msg"
-        echo "    Expected: '$expected'"
-        echo "    Actual:   '$actual'"
-    fi
-}
-
-assert_contains() {
-    local haystack="$1" needle="$2" msg="$3"
-    if [[ "$haystack" == *"$needle"* ]]; then
-        pass "$msg"
-    else
-        fail "$msg"
-        echo "    Expected to contain: '$needle'"
-        echo "    Actual:              '$haystack'"
-    fi
-}
-
 # shellcheck source=../lib/forge-helpers.sh
 source "$HELPERS_DIR/lib/forge-helpers.sh"
 

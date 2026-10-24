@@ -4,7 +4,7 @@
 # diff is confined to WORK_LOG.md/WORK_PLAN.md/README.md skip the full code
 # evaluation + merge-risk judgment cycle, while still landing safely.
 #
-# Judge's "Docs-Only Fast Path" section and Champion's criterion #2 "Docs-only
+# Judge's "Docs-Only Fast Path" section and Champion's merge-risk criterion "Docs-only
 # fast path" subsection are prose an LLM instance reads and executes, not a
 # standalone script (same situation as test-champion-critical-file-check.sh)
 # — so this file mirrors the documented `docs_only_fast_path_check()`
@@ -83,7 +83,7 @@ assert_doc_lacks() {
 # =====================================================================
 # The docs-only fast-path eligibility check, mirrored verbatim from BOTH
 # judge.md's "Docs-Only Fast Path" section and champion-pr-merge.md's
-# "Docs-only fast path" subsection of criterion #2 — the two shipped copies
+# "Docs-only fast path" subsection of the merge-risk criterion — the two shipped copies
 # are intentionally identical, and the doc pins below confirm both actually
 # match this mirror.
 # =====================================================================

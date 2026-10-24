@@ -60,17 +60,6 @@ assert_pred() {
     fi
 }
 
-assert_eq() {
-    local expected="$1" actual="$2" msg="$3"
-    if [[ "$expected" == "$actual" ]]; then
-        pass "$msg"
-    else
-        fail "$msg"
-        echo "    Expected: '$expected'"
-        echo "    Actual:   '$actual'"
-    fi
-}
-
 [[ -r "$WRAPPER" ]] || { echo "FATAL: $WRAPPER not readable" >&2; exit 2; }
 
 # The #4192 seam: reach the function definitions without running main.

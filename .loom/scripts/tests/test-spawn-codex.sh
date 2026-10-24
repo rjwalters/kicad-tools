@@ -841,7 +841,7 @@ STAGE="$TMPROOT/stage"
 WS="$TMPROOT/ws"
 mkdir -p "$STAGE/lib" "$WS/.loom"
 cp "$SCRIPTS_DIR/spawn-worker.sh" "$STAGE/spawn-worker.sh"
-cp "$SCRIPTS_DIR/lib/"{config-resolver,locate-daemon-bin,loom-tools}.sh "$STAGE/lib/"
+cp "$SCRIPTS_DIR/lib/"{config-resolver,locate-daemon-bin,loom-tools,repo-root}.sh "$STAGE/lib/"
 cp "$SPAWN_CODEX" "$STAGE/spawn-codex.sh"
 # A stub claude runner so the "available runtimes" list and the default path
 # stay realistic without ever reaching the real token-selection code.

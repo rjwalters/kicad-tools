@@ -54,44 +54,11 @@ loom_test_require_daemon_bin "$SCRIPTS_DIR" "classify-dependency-block"
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
-assert_eq() {
-    local expected="$1" actual="$2" msg="$3"
-    if [[ "$expected" == "$actual" ]]; then
-        pass "$msg"
-    else
-        fail "$msg"
-        echo "    Expected: '$expected'"
-        echo "    Actual:   '$actual'"
-    fi
-}
-
 # assert_line <haystack> <line> <msg>: an EXACT line match. "loom:operator" is
 # a prefix of every retired operator-hold name (#11795), so a substring check
 # would also accept "REMOVE loom:operator-only".
 assert_line() {
     if grep -qxF -- "$2" <<<"$1"; then pass "$3"; else fail "$3"; echo "    expected line: $2"; echo "    got: $1"; fi
-}
-
-assert_contains() {
-    local haystack="$1" needle="$2" msg="$3"
-    if [[ "$haystack" == *"$needle"* ]]; then
-        pass "$msg"
-    else
-        fail "$msg"
-        echo "    Expected to contain: '$needle'"
-        echo "    Actual: '$haystack'"
-    fi
-}
-
-assert_not_contains() {
-    local haystack="$1" needle="$2" msg="$3"
-    if [[ "$haystack" != *"$needle"* ]]; then
-        pass "$msg"
-    else
-        fail "$msg"
-        echo "    Expected NOT to contain: '$needle'"
-        echo "    Actual: '$haystack'"
-    fi
 }
 
 assert_true() { if "$@"; then pass "${!#}"; else fail "${!#}"; fi; }

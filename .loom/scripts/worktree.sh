@@ -1491,6 +1491,12 @@ if [[ -x "$GIT_IDENTITY_CHECK" ]]; then
             echo '{"success": false, "error": "corrupted-git-identity", "issueNumber": '"$ISSUE_NUMBER"'}' >&3
         fi
         exit 1
+    elif [[ "$GIT_IDENTITY_RC" -eq 4 ]]; then
+        # Missing identity (#13088): warn, don't hard-fail. Workers spawned via
+        # spawn-claude.sh set user.useConfigOnly, so a commit will refuse loudly
+        # and name the fix; a hard-fail here would strand read-only uses too.
+        print_warning "No explicit git identity — commits from this worktree will be refused (user.useConfigOnly)."
+        echo "$GIT_IDENTITY_OUTPUT"
     elif [[ "$GIT_IDENTITY_RC" -eq 1 ]]; then
         print_warning "Stacked local git identity values detected (non-fatal — see details below)."
         echo "$GIT_IDENTITY_OUTPUT"

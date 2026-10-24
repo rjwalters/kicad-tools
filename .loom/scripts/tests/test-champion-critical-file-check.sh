@@ -6,7 +6,7 @@
 # replaces the endless-retry rejection on a genuine critical-file match
 # (#6879).
 #
-# Champion's criterion #3 (`champion-pr-merge.md` "Critical File Exclusion
+# Champion's critical-files criterion (`champion-pr-merge.md` "Critical File Exclusion
 # Check") is prose an LLM instance reads and executes, not a standalone
 # script (same situation as test-dependency-parse.sh) — so this file mirrors
 # the documented check-loop (since #9611 the shipped `version_only_diff()` is
@@ -22,7 +22,7 @@
 # 100 files with no error, while the paginated REST endpoint
 # (`gh api repos/{owner}/{repo}/pulls/<n>/files --paginate`) returns the full
 # set. The fix (#4613):
-#   1. Switches criterion #3's FILES command (and the criterion #2 evidence-
+#   1. Switches the critical-files criterion's FILES command (and the merge-risk criterion evidence-
 #      gathering command) from `gh pr view --json files` to the paginated
 #      REST endpoint.
 #   2. Makes explicit that "no critical-file changes" / "No critical files
@@ -35,8 +35,8 @@
 # critical-file-ness clears on its own. A fleet PR was re-evaluated and
 # re-rejected ~59 times over 36 hours this way (200-300s/tick), invisible to
 # the operator queue the whole time (no loom:blocked* label). The fix routes
-# criterion #3's FAIL through its own durable hold instead — `loom:blocked`
-# + a `<!-- champion:critical-file-hold -->` marker, mirroring criterion #2's
+# the critical-files criterion's FAIL through its own durable hold instead — `loom:blocked`
+# + a `<!-- champion:critical-file-hold -->` marker, mirroring the merge-risk criterion's
 # merge-risk hold — released only when a later push narrows the diff so it no
 # longer matches any critical-file pattern.
 #
@@ -47,7 +47,7 @@
 #   2. The mirrored loop correctly PASSes on a large all-clean file list.
 #   3. The shipped markdown no longer contains the truncating
 #      `gh pr view <number> --json files` invocation for either the
-#      criterion #3 FILES command or the criterion #2 evidence-gathering
+#      the critical-files criterion FILES command or the merge-risk criterion evidence-gathering
 #      command, and does contain the paginated replacement.
 #   4. (#6879) A fresh critical-file FAIL applies the loom:blocked label and
 #      posts the champion:critical-file-hold marker comment exactly once; a
@@ -116,7 +116,7 @@ assert_doc_lacks() {
 }
 
 # =====================================================================
-# champion-pr-merge.md criterion #3's critical-file check-loop, mirrored
+# champion-pr-merge.md the critical-files criterion's critical-file check-loop, mirrored
 # verbatim (pattern list + matching loop) from defaults/.claude/commands/
 # loom/champion-pr-merge.md.
 # =====================================================================
@@ -160,7 +160,9 @@ champion_critical_file_check() {
 # =====================================================================
 STUB_DIR="$(mktemp -d)" && trap 'rm -rf "$STUB_DIR"' EXIT
 mkdir -p "$STUB_DIR/bin" "$STUB_DIR/noexec" "$STUB_DIR/empty"
-printf '%s\n' "#!$(command -v bash)" '[ "$1 $2" = "forge version-only-diff" ] || exit 64' \
+printf '%s\n' "#!$(command -v bash)" \
+    '[ "$1 $2" = "forge suspect-critical-diff" ] && { printf "%b" "${STUB_SUSPECT_OUT:-}"; exit "${STUB_SUSPECT_RC:-1}"; }' \
+    '[ "$1 $2" = "forge version-only-diff" ] || exit 64' \
     'for kv in $STUB_RCS; do [ "${kv%=*}" = "$4" ] && exit "${kv##*=}"; done; exit 1' \
     >"$STUB_DIR/bin/loom-daemon"
 chmod +x "$STUB_DIR/bin/loom-daemon"
@@ -169,7 +171,7 @@ eval "$(sed -n '/^version_only_diff() {$/,/^}$/p' "$CHAMPION_MD")"
 export STUB_RCS=""
 vod() { PATH="$1" version_only_diff "$2" 42 2>/dev/null && echo 0 || echo 1; }
 
-# The criterion #3 check-loop as shipped, calling the shipped version_only_diff.
+# The critical-files criterion check-loop as shipped, calling the shipped version_only_diff.
 champion_critical_file_check_with_carveout() {
     local file
     while IFS= read -r file; do
@@ -340,6 +342,28 @@ assert_eq "1" "$(vod "$STUB_DIR/noexec" package.json)" "a non-executable loom-da
 assert_eq "1" "$(vod "$STUB_DIR/empty" package.json)" "a missing loom-daemon binary (exit 127) is not eligible"
 
 echo
+echo "--- suspect_critical_diff (shipped): only exit 0 with a literal SUSPECT=0 clears; every other answer holds (#12999) ---"
+eval "$(sed -n '/^suspect_critical_diff() {$/,/^}$/p' "$CHAMPION_MD")"
+scd() { # <rc> <stdout> <file>; echoes rc, then the captured line
+    STUB_SUSPECT_RC="$1" STUB_SUSPECT_OUT="$2" PATH="$STUB_DIR/bin:$PATH" suspect_critical_diff "$3" 42 && printf '0|%s' "$CRITERION3_SUSPECT_LINE" || printf '1|%s' "$CRITERION3_SUSPECT_LINE"
+}
+CRITERION3_SUSPECT_LINE=""
+assert_eq "0|" "$(scd 0 'SUSPECT=0\n' loom-daemon/Cargo.toml)" "exit 0 with SUSPECT=0 (e.g. #12976's [[bin]] entries) clears"
+assert_eq "1|" "$(scd 0 '' loom-daemon/Cargo.toml)" "exit 0 without the SUSPECT=0 line is not a pass"
+assert_eq "1|" "$(scd 0 'SUSPECT=1\n' loom-daemon/Cargo.toml)" "exit 0 with any other body is not a pass"
+assert_eq '1|+postinstall = "x"' "$(scd 1 'SUSPECT_LINE=+postinstall = "x"\nSUSPECT_SECTION=scripts.postinstall\n' package.json)" \
+    "a suspect line holds and its text is captured for the FAIL line and hold comment"
+assert_eq "1|" "$(scd 2 '' Cargo.toml)" "exit 2 (a daemon predating the verb) holds"
+assert_eq "1|" "$(scd 70 '' Cargo.toml)" "any other non-zero exit holds"
+assert_eq "1|" "$(scd 0 'SUSPECT=0\n' migrations/0001_initial.py)" "a migrations hit never reaches the daemon verb: holds on any change"
+assert_eq "1|" "$(scd 0 'SUSPECT=0\n' .github/workflows/ci.yml)" "a workflow hit never clears through the manifest verb"
+assert_eq "1|" "$(scd 0 'SUSPECT=0\n' Cargo.lock)" "Cargo.lock is not a manifest-family hit"
+PATH="$STUB_DIR/noexec:$PATH" suspect_critical_diff Cargo.toml 42 && r=0 || r=1
+assert_eq "1" "$r" "a non-executable loom-daemon (126) holds"
+PATH="$STUB_DIR/empty" suspect_critical_diff Cargo.toml 42 && r=0 || r=1
+assert_eq "1" "$r" "a missing loom-daemon (127) holds"
+
+echo
 echo "--- champion_critical_file_check_with_carveout: full check-loop integration (#6147) ---"
 
 STUB_RCS="loom-api/Cargo.toml=0 loom-daemon/Cargo.toml=0 package.json=0 mcp-loom/package.json=0"
@@ -357,30 +381,30 @@ PASS" "$out" \
 STUB_RCS="loom-daemon/Cargo.toml=0 package.json=0 mcp-loom/package.json=0"
 out="$(printf '%s\n' "$fixture" | champion_critical_file_check_with_carveout)"
 assert_eq "FAIL: loom-api/Cargo.toml" "$out" \
-    "the same list fails criterion #3 when the daemon finds one file not version-only"
+    "the same list fails the critical-files criterion when the daemon finds one file not version-only"
 
 STUB_RCS="" out="$(printf '%s\n' "$fixture" | champion_critical_file_check_with_carveout)"
 assert_eq "FAIL: loom-api/Cargo.toml" "$out" \
-    "with every daemon answer non-zero (forge down, old daemon) criterion #3 FAILS rather than PASSes"
+    "with every daemon answer non-zero (forge down, old daemon) the critical-files criterion FAILS rather than PASSes"
 
 echo
 echo "--- Doc pins: shipped markdown uses the paginated REST endpoint, not the truncating gh pr view field ---"
 
 assert_doc_contains "$CHAMPION_MD" \
     'FILES=$(gh api "repos/{owner}/{repo}/pulls/<number>/files" --paginate --jq '"'"'.[].filename'"'"')' \
-    "criterion #3 FILES command ships the paginated REST endpoint"
+    "the critical-files criterion FILES command ships the paginated REST endpoint"
 
 assert_doc_contains "$CHAMPION_MD" \
     'gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER/files" --paginate --jq' \
-    "criterion #2 evidence-gathering command ships the paginated REST endpoint"
+    "the merge-risk criterion evidence-gathering command ships the paginated REST endpoint"
 
 assert_doc_lacks "$CHAMPION_MD" \
     'FILES=$(gh pr view <number> --json files --jq -r' \
-    "criterion #3 FILES command no longer uses the truncating gh pr view --json files field"
+    "the critical-files criterion FILES command no longer uses the truncating gh pr view --json files field"
 
 assert_doc_lacks "$CHAMPION_MD" \
     'gh pr view "$PR_NUMBER" --json files --jq'"'"'.files[] | "\(.additions)+/\(.deletions)- \(.path)"'"'" \
-    "criterion #2 evidence-gathering command no longer uses the truncating gh pr view --json files field"
+    "the merge-risk criterion evidence-gathering command no longer uses the truncating gh pr view --json files field"
 
 assert_doc_contains "$CHAMPION_MD" \
     "#4613" \
@@ -436,7 +460,7 @@ echo "--- Doc pins: shipped markdown ships the version-only diff carve-out (#614
 
 assert_doc_contains "$CHAMPION_MD" \
     'version_only_diff() {' \
-    "criterion #3 defines the version_only_diff() carve-out function"
+    "the critical-files criterion defines the version_only_diff() carve-out function"
 
 assert_doc_contains "$CHAMPION_MD" \
     'loom-daemon forge version-only-diff "$number" "$file" >/dev/null || return 1' \
@@ -448,11 +472,31 @@ assert_doc_lacks "$CHAMPION_MD" \
 
 assert_doc_contains "$CHAMPION_MD" \
     'if version_only_diff "$file" <number>; then' \
-    "criterion #3's check-loop calls version_only_diff before failing on a critical-pattern match"
+    "the critical-files criterion's check-loop calls version_only_diff before failing on a critical-pattern match"
+
+assert_doc_contains "$CHAMPION_MD" \
+    'elif suspect_critical_diff "$file" <number>; then' \
+    "criterion #3's check-loop tries the suspect-line carve-out after the version-only one (#12999)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    'elif [[ "$file" == *".github/workflows/"* ]] && wf_blast_green; then' \
+    "criterion #3 clears a workflow hit only on WF_BLAST=green (#12999)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    "loom-daemon forge suspect-critical-diff" \
+    "criterion #3 delegates the suspect-line decision to the fail-closed daemon verb (#12999)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    'FAIL: Critical file modified: $file${CRITERION3_SUSPECT_LINE:+' \
+    "the FAIL line names the matched suspect line (#12999)"
+
+assert_doc_contains "$PROMPT_DIR/champion-critical-file-hold.md" \
+    "Matched suspect line" \
+    "the hold comment shows the matched suspect line (#12999)"
 
 assert_doc_contains "$CHAMPION_MD" \
     "PASS (version-only carve-out)" \
-    "criterion #3's check-loop emits the carve-out PASS line so it can be reused verbatim in a Champion comment"
+    "the critical-files criterion's check-loop emits the carve-out PASS line so it can be reused verbatim in a Champion comment"
 
 assert_doc_contains "$CHAMPION_MD" \
     "#6147" \
@@ -465,15 +509,15 @@ assert_doc_contains "$CHAMPION_MD" \
 # =====================================================================
 # Durable critical-file hold (#6879): a critical-file FAIL is a one-way
 # terminal state (nothing about a diff's critical-file-ness changes without a
-# human decision or a later push that narrows the diff), so criterion #3 now
+# human decision or a later push that narrows the diff), so the critical-files criterion now
 # applies its own durable hold (`loom:blocked` + `<!-- champion:critical-
 # file-hold -->`) instead of routing through the shared "Transient failures"
 # template. Mirrored here (same rationale as the mirrors above: the criterion
 # is prose an LLM instance executes, not a standalone script) from
-# `champion-pr-merge.md`'s "Safety Criteria → 3. Critical File Exclusion
+# `champion-pr-merge.md`'s "Safety Criteria → critical-files: Critical File Exclusion
 # Check → Durable hold on FAIL" subsection.
 #
-# Unlike criterion #2's merge-risk hold, this one needs no sticky-hold
+# Unlike the merge-risk criterion's merge-risk hold, this one needs no sticky-hold
 # precheck machinery: the check-loop above is a deterministic file-pattern
 # match, not a judgment call, so the FAIL/PASS verdict recomputed fresh every
 # tick IS the release signal — "last marker wins" is enough state to track.
@@ -499,7 +543,7 @@ assert_lacks() {
 # recorded in its own `<!-- champion:hold-state head=<sha> -->` line. This
 # mirrors the doc's "last comment matching any marker prefix" lookup without
 # needing real timestamps (a deterministic check-loop makes this sufficient —
-# see the doc's own rationale for skipping criterion #2's sticky-hold
+# see the doc's own rationale for skipping the merge-risk criterion's sticky-hold
 # machinery). `released` is #9016's state: the operator hand-removed
 # loom:blocked at the head the hold was written against.
 hold_state_get() {
@@ -811,7 +855,7 @@ echo "--- Doc pins: shipped markdown ships the durable critical-file hold (#6879
 
 assert_doc_contains "$CRITICAL_HOLD_MD" \
     'HOLD_MARKER="<!-- champion:critical-file-hold -->"' \
-    "the hold prompt defines its own durable-hold marker, distinct from criterion #2's champion:merge-risk-hold"
+    "the hold prompt defines its own durable-hold marker, distinct from the merge-risk criterion's champion:merge-risk-hold"
 
 assert_doc_contains "$CRITICAL_HOLD_MD" \
     'CLEARED_MARKER="<!-- champion:critical-file-hold-cleared -->"' \
@@ -835,7 +879,7 @@ assert_doc_contains "$CHAMPION_MD" \
 
 assert_doc_contains "$CHAMPION_MD" \
     '[`champion-critical-file-hold.md`](champion-critical-file-hold.md)' \
-    "criterion #3 points at the sibling prompt that owns the hold state machine (#9016)"
+    "the critical-files criterion points at the sibling prompt that owns the hold state machine (#9016)"
 
 echo
 echo "--- Doc pins: the operator's release is durable and head-scoped (#9016) ---"
@@ -926,6 +970,39 @@ assert_doc_lacks "$CHAMPION_MD" \
 assert_doc_lacks "$CHAMPION_MD" \
     'label-check | size-check | critical-file |' \
     "the shared CRITERION_KEY slug comment no longer lists critical-file among the transient-failure criteria (#6879)"
+
+# ---------------------------------------------------------------------
+# (#13031) A criterion-#3 standing-authorization waiver leaves a truthful,
+# greppable record in the pre-merge comment; the no-waiver text is unchanged.
+# The shipped bullet-building block is extracted from the markdown and run,
+# not mirrored, so the test cannot drift from the prompt.
+# ---------------------------------------------------------------------
+echo
+echo "Criterion #3 waiver record (#13031):"
+BULLET_BLOCK=$(awk '/^if \[ -n "\$\{CRITERION3_WAIVER_ID:-\}" \]; then$/{f=1} f{print} f&&/^fi$/{exit}' "$CHAMPION_MD")
+render_bullet() {
+    # shellcheck disable=SC2034 # consumed by the eval'd BULLET_BLOCK
+    ( CRITERION3_WAIVER_ID="$1" CRITERION3_WAIVER_SCOPE="$2" CRITERION3_WAIVED_FILES="$3"
+      eval "$BULLET_BLOCK"; printf '%s' "$CRITICAL_BULLET" )
+}
+assert_contains "$BULLET_BLOCK" "CRITICAL_BULLET" "the shipped markdown carries the waiver bullet block"
+
+OUT=$(render_bullet "workflow-critical-only" "critical" ".github/workflows/ci.yml")
+assert_contains "$OUT" "workflow-critical-only" "waiver bullet names the class id"
+assert_contains "$OUT" "scope: critical" "waiver bullet names the scope"
+assert_contains "$OUT" ".github/workflows/ci.yml" "waiver bullet lists the waived files"
+assert_contains "$OUT" "<!-- champion:critical-file-waiver class=workflow-critical-only -->" "waiver bullet carries the machine-readable marker"
+assert_not_contains "$OUT" "No critical files modified" "waiver bullet never claims no critical files"
+
+OUT=$(render_bullet "all-class" "all" "a.yml b.yml")
+assert_contains "$OUT" "scope: all" "coversCriticalFiles (scope all) waiver names its scope"
+
+OUT=$(render_bullet "" "" "")
+assert_eq "No critical files modified" "$OUT" "no waiver keeps the unchanged text"
+assert_not_contains "$OUT" "champion:critical-file-waiver" "no waiver emits no marker"
+
+assert_doc_contains "$CHAMPION_MD" '- $CRITICAL_BULLET' "the pre-merge comment template renders the bullet from CRITERION3_WAIVER_*"
+assert_doc_lacks "$CHAMPION_MD" '- No critical files modified' "the pre-merge comment no longer hardcodes the no-critical-files bullet"
 
 echo
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed"

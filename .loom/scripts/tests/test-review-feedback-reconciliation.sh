@@ -220,6 +220,8 @@ if [[ "${1:-} ${2:-}" == "forge trusted-comments" ]]; then
   jq -c 'if type == "array" then map(select(.author_association != "NONE")) else . end'
   exit $?
 fi
+# #13055: approvals are gated on a live Judge lease; the caller holds it here.
+[[ "${1:-} ${2:-} ${3:-}" == "lease pr check" ]] && { echo "PR_LEASE_STATE=held-self"; exit 0; }
 [[ "${1:-} ${2:-}" == "forge verdict-gate" ]] && { echo "LOOM-VERDICT-GATE PROCEED ok"; exit 0; }
 [[ "${1:-} ${2:-}" == "forge verdict-labels" ]] && { echo "LOOM-VERDICT-LABELS OK"; exit 0; }
 [[ "${1:-} ${2:-}" == "forge verdict-lock" ]] && exit 0

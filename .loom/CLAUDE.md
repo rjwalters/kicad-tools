@@ -268,8 +268,11 @@ pr comment` — **not** `gh pr review --approve`; GitHub's API blocks self-revie
 ### Curator Workflow
 
 Find unlabeled issues (use `-label:` search terms, **not** `--label` — gh ANDs
-`--label` values, no negation), enhance with technical detail, then
-`gh issue edit 42 --add-label "loom:curated"`.
+`--label` values, no negation), enhance with technical detail,
+then write the standalone `<!-- loom:points=3 -->`
+marker and run `loom-daemon curation-complete --repo OWNER/REPO --issue 42 --model M
+--runtime R --completion-id $(uuidgen) --workspace-root ROOT` (it applies `loom:curated`;
+never a bare `--add-label`, #11787; recipe: `.loom/roles/curator-estimate.md`).
 
 ## Configuration
 

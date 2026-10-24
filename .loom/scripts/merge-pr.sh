@@ -654,7 +654,7 @@ _trusted_pr_comments() {
 # (mirrors --allow-stacked-children's own override warning) and, on a REAL
 # run only (never --dry-run — a preview must have zero forge side effects),
 # best-effort recorded as a PR comment audit trail too, mirroring the
-# _post_premature_close_comment / partial-increment comment pattern already
+# retired _post_premature_close_comment / partial-increment comment pattern already
 # used elsewhere in this file. --dry-run reports the would-be block without
 # exiting 1 or merging, same dry-run contract as both guards above.
 #
@@ -745,7 +745,7 @@ _check_loom_pr_label() {
       # The body is `loom-daemon merge-pr loom-pr-override-comment` (Rust,
       # loom-daemon/src/merge_pr/loom_pr_guard.rs, `override_comment` -- #8191
       # slice), byte-frozen from this shell. Same LOOM-MERGE-PR-COMMENT
-      # sentinel protocol `_mp_post_partial_comment` uses, inlined here rather
+      # sentinel protocol the retired `_mp_post_partial_comment` used, inlined here rather
       # than reused because this comment posts on $PR_NUMBER itself, not an
       # issue. Fails OPEN with a warning naming the gap: the merge and the
       # override both already happened, so a missing body costs only the note.
@@ -937,7 +937,7 @@ _check_required_checks() { [[ "$FORGE_TYPE" == "github" ]] || return 0; local ms
 #   consulted as a third signal below.
 #
 # Fix shape: DETECT (here, pre-merge, with a loud actionable warning) plus
-# SELF-HEAL (post-merge reopen in _reset_one_partial_issue below). Prevention by
+# SELF-HEAL (post-merge reopen in `merge-pr post-merge-bookkeeping`). Prevention by
 # rewriting the PR body at merge time was rejected — mutating a body the Judge
 # already reviewed is a worse failure mode than a seconds-long close/reopen.
 #
@@ -1038,16 +1038,6 @@ _pr_commit_messages() {
       | jq -r '.[].commit.message' 2>/dev/null; } || true
 }
 
-# Membership tests over the space-separated globals above.
-_partial_ref_is_conflicted() {
-  [[ -n "${PARTIAL_CONFLICT_ISSUES:-}" ]] || return 1
-  [[ " $PARTIAL_CONFLICT_ISSUES " == *" $1 "* ]]
-}
-_partial_ref_was_open_before_merge() {
-  [[ -n "${PARTIAL_OPEN_BEFORE_MERGE:-}" ]] || return 1
-  [[ " $PARTIAL_OPEN_BEFORE_MERGE " == *" $1 "* ]]
-}
-
 # Populate the two globals and warn about each detected conflict. Best-effort:
 # never fails the merge, and a lookup failure simply yields a smaller set.
 _check_partial_increment_close_conflict() {
@@ -1113,7 +1103,7 @@ _check_partial_increment_close_conflict() {
   # and the source-attributed warning — is `loom-daemon merge-pr
   # partial-conflict` (Rust, loom-daemon/src/merge_pr/partial_conflict.rs —
   # #8191 slice). Only the forge reads stay here: fresh (uncached) plain
-  # `gh api`, not $GH, per issue, mirroring _reset_one_partial_issue. They go
+  # `gh api`, not $GH, per issue, mirroring `merge-pr post-merge-bookkeeping`. They go
   # over stdin NUL-framed (a bash string cannot hold NUL, so the framing is
   # lossless and has no argv size limit). The plan's OPEN/CONFLICT<TAB>n lines
   # fill the two sets the post-merge pass reads; WARNING<TAB>text is replayed.
@@ -1181,297 +1171,50 @@ info "Branch: $PR_BRANCH"
 # GitHub-only for v1 (guarded on FORGE_TYPE); merge-pr.sh already branches on
 # forge type elsewhere. Every step is best-effort and must never fail the merge.
 
-# Reset a single referenced issue's labels if — verified fresh at merge time —
-# it is still open and still carries loom:building (reopening it first when
-# this very merge auto-closed it through a stray closing keyword, #4569).
-# Idempotent: a no-op when the issue is already closed, already lacks
-# loom:building (e.g. re-claimed by a second builder), or is actually a PR.
+# The three post-merge issue passes -- the partial-increment reset (#3667, with
+# the #4569 premature-auto-close revert), the closed-issue `loom:building` /
+# `loom:issue` strip (#6199, #11517) and the branch-derived issue close (#12615)
+# -- are `loom-daemon merge-pr post-merge-bookkeeping --step <pass>` (Rust,
+# loom-daemon/src/merge_pr/post_merge_bookkeeping.rs -- #8191 slice 2). The verb
+# reads each issue fresh (uncached `gh api`), decides, and performs the writes
+# through THIS library's forge_gh_*_rl_safe helpers (--forge-helpers), so the
+# write-scope vet, the permission ladder and the GraphQL-exhaustion REST
+# fallback stay in one place. This wrapper only supplies the facts the verb asks
+# for (`LOOM-NEED close-targets`: forge_pr_close_targets also serves Gitea) and
+# replays its `LEVEL<TAB>message` records. The order the call sites keep is
+# load-bearing: reset (so a reopened issue is no longer closed), branch close
+# (so the strip sees the issue it closed), then strip.
 #
-# The decision — which of those cases this is, and the log text for each — is
-# `loom-daemon merge-pr partial-reset` (Rust, loom-daemon/src/merge_pr/
-# partial_reset.rs — #8191 slice), fed the fresh issue body on stdin. It prints
-# the steps in order: `INFO`/`WARNING<TAB>text` to replay, `REOPEN`, `SWAP`.
-# Only the mutations and their audit comments stay here. The fresh read uses
-# plain `gh api` (uncached; not $GH, which may be gh-cached) so a stale cached
-# view cannot mask a re-claim. Best-effort like the rest of this pass: a daemon
-# that cannot plan (missing, or predating the verb) is a warning naming the
-# manual swap, never a guessed mutation. The plan is read on fd 3 so no forge
-# call below can consume it from stdin.
-_reset_one_partial_issue() {
-  local issue_num="$1" issue_json reopened=false out rc=0 level text flags=()
-  issue_json="$(gh api "repos/$REPO_NWO/issues/$issue_num" 2>/dev/null || echo '{}')"
-  ! _partial_ref_is_conflicted "$issue_num" || flags+=(--conflicted)
-  ! _partial_ref_was_open_before_merge "$issue_num" || flags+=(--open-before-merge)
-  out="$(printf '%s\n' "$issue_json" | "${LOOM_DAEMON_BIN:-loom-daemon}" merge-pr partial-reset --issue "$issue_num" --pr "$PR_NUMBER" --repo "$REPO_NWO" ${flags[@]+"${flags[@]}"} 2>/dev/null)" || rc=$?
-  if [[ $rc -ne 0 ]]; then warning "Partial-increment reset for issue #$issue_num did not run — '${LOOM_DAEMON_BIN:-loom-daemon} merge-pr partial-reset' exited $rc (a loom-daemon predating #8191's slice has no such verb). Advisory only — the merge already happened and #$issue_num was left untouched; if it is still open and loom:building, return it to the ready queue by hand: gh issue edit $issue_num --repo $REPO_NWO --remove-label loom:building --add-label loom:issue $(! declare -F _mp_daemon_roll_hint >/dev/null || _mp_daemon_roll_hint merge-pr "$(command -v "${LOOM_DAEMON_BIN:-loom-daemon}" 2>/dev/null || true)")"; return 0; fi
-  while IFS=$'\t' read -r -u 3 level text; do
+# Every pass is best-effort and never fails the merge. A verb that did not run
+# (missing or older loom-daemon: no `LOOM-POST-MERGE-BOOKKEEPING DONE`
+# terminator) changes NO issue and names the manual remedy; silence is never
+# read as "nothing to do".
+_post_merge_bookkeeping() {
+  [[ "$FORGE_TYPE" == "github" ]] || return 0
+  local step="$1" bin="${LOOM_DAEMON_BIN:-loom-daemon}" body out="" rc=0 attempt level text
+  local args=(merge-pr post-merge-bookkeeping --step "$step" --repo "$REPO_NWO" --pr "$PR_NUMBER" --branch "${PR_BRANCH:-}" --conflicted "${PARTIAL_CONFLICT_ISSUES:-}" --open-before-merge "${PARTIAL_OPEN_BEFORE_MERGE:-}" --forge-helpers "$_LOOM_FORGE_HELPERS_LIB_DIR/forge-helpers.sh")
+  body="$(echo "$PR_JSON" | jq -r '.body // ""')"
+  for attempt in 1 2; do
+    rc=0; out="$(printf '%s' "$body" | "$bin" "${args[@]}")" || rc=$?
+    [[ $rc -eq 3 && "$out" == "LOOM-NEED close-targets" ]] || break
+    args+=(--close-targets "$(forge_pr_close_targets "$PR_NUMBER" "$GH" 2>/dev/null || true)")
+  done
+  [[ $rc -ne 0 || "${out##*$'\n'}" == "LOOM-POST-MERGE-BOOKKEEPING DONE" ]] || rc=4
+  if [[ $rc -ne 0 ]]; then
+    warning "Post-merge issue bookkeeping ($step) for PR #$PR_NUMBER did not run — '$bin merge-pr post-merge-bookkeeping' exited $rc without finishing (no LOOM-POST-MERGE-BOOKKEEPING DONE terminator; a loom-daemon predating #8191's bookkeeping slice has no such verb). Advisory only — the merge already happened and no issue was touched; do by hand what applies: partial-increment issue still loom:building -> gh issue edit <N> --repo $REPO_NWO --remove-label loom:building --add-label loom:issue; issue closed by this merge still labelled -> gh issue edit <N> --repo $REPO_NWO --remove-label loom:building --remove-label loom:issue. $(! declare -F _mp_daemon_roll_hint >/dev/null || _mp_daemon_roll_hint merge-pr "$(command -v "$bin" 2>/dev/null || true)")"
+    return 0
+  fi
+  while IFS=$'\t' read -r level text; do
     case "$level" in
       INFO) info "$text" ;;
       WARNING) warning "$text" ;;
-      REOPEN)
-        # forge_gh_reopen_issue_rl_safe (#4856): falls back to a REST PATCH
-        # (state=open) when `gh issue reopen`'s GraphQL mutation is rate-limited.
-        if forge_gh_reopen_issue_rl_safe "$REPO_NWO" "$issue_num" 2>/dev/null; then
-          success "Issue #$issue_num reopened (premature auto-close reverted)"
-          reopened=true
-          _post_premature_close_comment "$issue_num"
-        else
-          warning "Could not reopen issue #$issue_num after its premature auto-close — reopen manually: gh issue reopen $issue_num --repo $REPO_NWO"
-          return 0
-        fi ;;
-      SWAP)
-        # forge_gh_swap_label_rl_safe (#4856): falls back to REST (DELETE the old
-        # label, POST the new one) when `gh issue edit`'s GraphQL mutation is
-        # rate-limited, rather than silently dropping the label swap.
-        if forge_gh_swap_label_rl_safe "$REPO_NWO" "$issue_num" "loom:building" "${text:-loom:issue}" 2>/dev/null; then
-          success "Issue #$issue_num: loom:building -> ${text:-loom:issue} (partial increment; issue remains open)"
-          local rn=(); [[ "$reopened" != "true" ]] || rn=(--reopened); [[ -z "$text" ]] || rn+=(--held)  # held remainder (#9264)
-          # forge_gh_comment_rl_safe (#4856): falls back to the REST comments
-          # endpoint on a GraphQL rate-limit rejection.
-          _mp_post_partial_comment partial-merged "$issue_num" "Could not post partial-increment comment on issue #$issue_num (label swap still applied)" ${rn[@]+"${rn[@]}"}
-        else
-          warning "Could not reset labels on issue #$issue_num (partial increment) — may need manual 'gh issue edit'"
-        fi
-        ;;
+      SUCCESS) success "$text" ;;
     esac
-  done 3<<< "$out"
+  done <<<"$out"
 }
-
-# _mp_post_partial_comment <kind> <issue_num> <post-failure warning> [--reopened]
-#
-# Render one of the post-merge partial-increment audit comments and post it.
-# Both bodies are `loom-daemon merge-pr partial-comment` (Rust,
-# loom-daemon/src/merge_pr/partial_comment.rs — #8191 slice), byte-frozen from
-# the shell that used to build them here; only the POST stays, behind #4856's
-# rate-limit-safe wrapper.
-#
-# The bodies moved for the reason this file exists: they were ~40 lines of pure
-# text in a script the size ratchet freezes, and NOTHING asserted either of them
-# — the retained suite stubs the comment post, so a mangled interpolation or a
-# lost `$reopen_note` would have shipped silently. They now have unit tests and
-# a byte-for-byte differential against the frozen retired shell
-# (loom-daemon/tests/merge_pr_partial_comment_differential.rs).
-#
-# Fails OPEN, and deliberately: both comments are posted AFTER the mutation they
-# describe (the #4569 reopen, the #3667 label swap), and the merge itself is
-# long done — so a body that cannot be rendered costs the note, nothing else.
-# But it must never post SILENCE over the audit trail, which is what a bare
-# `comment="$(… || true)"` would do against a daemon predating the verb. Only
-# output led by the LOOM-MERGE-PR-COMMENT sentinel is posted; anything else is a
-# warning naming what is missing.
-#
-# `$nl` holds the sentinel's terminating newline in a plain variable rather than
-# writing `$'\n'` inline in the two patterns below. Both places are PATTERNS —
-# a `[[ ]]` right-hand side and a `${var#…}` word — and bash only began
-# processing `$'…'` inside those relatively late (it is literal `$'\n'` on
-# macOS's stock /bin/bash 3.2, which this repo supports and has been bitten by
-# before: #7717/#7721/#4242). Getting it literal would fail in BOTH directions,
-# silently and only off-Linux: the `[[ ]]` would never match, so every macOS
-# host would skip both comments with a warning, and if only the strip were
-# literal the sentinel line would be posted as the body's first line. A plain
-# `$nl` expansion is unambiguous on every bash. The ANSI-C quote in the
-# *assignment* is fine everywhere — that use has worked since bash 2. Inside the
-# `${out#…}` word `"$nl"` is quoted separately (SC2295) so the newline is matched
-# literally rather than as a pattern; it holds no glob metacharacters either way,
-# but the quoting is what says so.
-_mp_post_partial_comment() {
-  local kind="$1" issue_num="$2" post_warn="$3"; shift 3
-  local out rc=0 nl
-  nl=$'\n'
-  out="$("${LOOM_DAEMON_BIN:-loom-daemon}" merge-pr partial-comment --kind "$kind" --issue "$issue_num" --pr "$PR_NUMBER" "$@" <<<"${issue_json-}" 2>/dev/null)" || rc=$?
-  if [[ $rc -ne 0 || "$out" != "LOOM-MERGE-PR-COMMENT$nl"* ]]; then
-    warning "The $kind audit comment for issue #$issue_num (#3667/#4569) was NOT posted — '${LOOM_DAEMON_BIN:-loom-daemon} merge-pr partial-comment' exited $rc without the LOOM-MERGE-PR-COMMENT sentinel (a loom-daemon predating #8191's slice has no such verb). Advisory only: the merge, the reopen and the label swap all already happened and are unaffected — only this explanatory note is missing, and an empty comment is never posted in its place. $(! declare -F _mp_daemon_roll_hint >/dev/null || _mp_daemon_roll_hint merge-pr "$(command -v "${LOOM_DAEMON_BIN:-loom-daemon}" 2>/dev/null || true)")"
-    return 0
-  fi
-  forge_gh_comment_rl_safe "$REPO_NWO" "$issue_num" "${out#LOOM-MERGE-PR-COMMENT"$nl"}" 2>/dev/null || warning "$post_warn"
-}
-
-# Audit trail for a reverted premature auto-close (#4569). Posted right after
-# the reopen so the record survives even when the label swap below is skipped
-# (e.g. the issue no longer carries loom:building). Best-effort.
-_post_premature_close_comment() {
-  _mp_post_partial_comment premature-close "$1" "Could not post premature-close comment on issue #$1 (reopen still applied)"
-}
-
-# Parse the merged PR body for non-closing partial-increment references and
-# reset each referenced issue. Best-effort; returns 0 unconditionally.
-_reset_partial_increment_labels() {
-  [[ "$FORGE_TYPE" == "github" ]] || return 0
-
-  local pr_body
-  pr_body="$(echo "$PR_JSON" | jq -r '.body // ""')"
-  [[ -n "$pr_body" ]] || return 0
-
-  # Issue numbers referenced with a NON-closing partial-increment keyword.
-  # Shares _partial_increment_refs with the pre-merge #4569 conflict guard so the
-  # two passes can never disagree about which issues are partial increments.
-  local refs
-  refs="$(_partial_increment_refs "$pr_body")"
-  [[ -n "$refs" ]] || return 0
-
-  local issue_num
-  while IFS= read -r issue_num; do
-    [[ -n "$issue_num" ]] || continue
-    _reset_one_partial_issue "$issue_num"
-  done <<< "$refs"
-
-  return 0
-}
-
-# ---------------------------------------------------------------------------
-# Closed-issue `loom:building` cleanup (#6199).
-#
-# The #2838 "no label cleanup on close" decision reasoned that a stale label
-# on a closed issue is harmless — every queue query filters on open state, so
-# it can never cause a duplicate build or a blocked candidate. That is still
-# true. What #6199 found is that the decision also has a real, if narrow,
-# cost: any consumer that reasonably reads `loom:building` as "in flight"
-# WITHOUT also filtering on state — a dashboard, a capacity check, an
-# operator `gh issue list --label loom:building` spot-check, or a future tool
-# — gets pure noise once the population of closed-but-still-labelled issues
-# grows (observed: 20 stale claims on one consumer repo, 0 real ones). The
-# label has stopped meaning what its name says for anyone who doesn't already
-# know to filter it out.
-#
-# Scope decision (recorded here per #6199's own "worth deciding deliberately"
-# note): this pass covers ONLY the merge-driven auto-close path (`Closes #N`
-# / `Fixes #N` / `Resolves #N`, resolved the same way Champion's "Verify
-# Issue Auto-Close" step does — via GitHub's GraphQL
-# `closingIssuesReferences`, see forge_pr_close_targets above) — the
-# deterministic case merge-pr.sh already owns and can act on right at the
-# confirmed-merge choke point, with zero extra liveness/state ambiguity: a
-# merge just happened on the PR that closed the issue, so the label is
-# unconditionally stale. An issue closed OUTSIDE a merge (closed manually, as
-# a duplicate, or `--reason "not planned"` by an autonomous role) is
-# deliberately OUT OF SCOPE here — merge-pr.sh has no hook into that path at
-# all, and inventing one (e.g. polling every issue close event) is
-# disproportionate to a cosmetic-but-annoying defect. That population is
-# instead handled by the standalone, idempotent
-# `clean-stale-building-labels.sh` (same directory) — run once against this
-# repo as part of #6199 to clear the accumulated backlog, and safe to re-run
-# on demand (by an operator, or wired into a periodic role) for any future
-# manual-close stragglers. See that script's header for the full rationale.
-#
-# Runs AFTER _reset_partial_increment_labels (and therefore after any #4569
-# premature-auto-close revert) so an issue that pass just reopened is no
-# longer `closed` by the time this pass reads it — reopened partial-increment
-# issues must keep `loom:building` (they return to `loom:issue` instead, via
-# that pass), never lose the label outright.
-#
-# GitHub-only for v1 (guarded on FORGE_TYPE), mirroring
-# _reset_partial_increment_labels's gating — forge_gh_remove_label_rl_safe is
-# a `gh`-specific helper. Every step is best-effort and must never fail the
-# merge.
-
-# Strip `loom:building` from one issue this merge closed, if it is still
-# present. Idempotent: a no-op when the issue isn't actually closed (a
-# transient PR-close-target false positive, or #4569 reopened it above),
-# already lacks the label, or is actually a PR.
-#
-# The decision — which of those cases this is — is `loom-daemon merge-pr
-# closed-building` (Rust, loom-daemon/src/merge_pr/closed_building.rs — #8191
-# slice), fed the fresh issue body on stdin. It prints exactly one line:
-# `STRIP`, or `SKIP<TAB><reason>` which this pass deliberately discards (the
-# retired function's skips were silent and stdout stays byte-identical). Only
-# the mutation stays here. The fresh read uses plain `gh api` (uncached; not
-# $GH, which may be gh-cached) so a stale cached view cannot mask a fresh
-# re-claim — the same freshness discipline _reset_one_partial_issue keeps.
-# Best-effort like the rest of this pass: a daemon that cannot decide, or that
-# answers with anything but the two known lines, is a warning naming the manual
-# removal, never a guessed mutation. Silence is NOT read as `SKIP`.
-_strip_one_closed_issue_building_label() {
-  local issue_num="$1" issue_json out rc=0
-
-  issue_json="$(gh api "repos/$REPO_NWO/issues/$issue_num" 2>/dev/null || echo '{}')"
-  out="$(printf '%s\n' "$issue_json" | "${LOOM_DAEMON_BIN:-loom-daemon}" merge-pr closed-building 2>/dev/null)" || rc=$?
-  if [[ $rc -ne 0 || ( "$out" != STRIP && "$out" != STRIP-READY && "$out" != STRIP-BOTH && "$out" != "SKIP"$'\t'* ) ]]; then
-    warning "Closed-issue loom:building cleanup for issue #$issue_num did not run — '${LOOM_DAEMON_BIN:-loom-daemon} merge-pr closed-building' exited $rc and printed '${out//$'\n'/ }' rather than STRIP or SKIP (a loom-daemon predating #8191's slice has no such verb). Advisory only — the merge already happened and #$issue_num was left untouched; if it is closed and still loom:building, drop the stale claim by hand: gh issue edit $issue_num --repo $REPO_NWO --remove-label loom:building $(! declare -F _mp_daemon_roll_hint >/dev/null || _mp_daemon_roll_hint merge-pr "$(command -v "${LOOM_DAEMON_BIN:-loom-daemon}" 2>/dev/null || true)")"
-    return 0
-  fi
-  local labels=()
-  case "$out" in
-    STRIP) labels=(loom:building) ;;
-    # #11517 (operator ruling 2026-10-13): a closed issue also loses loom:issue.
-    STRIP-READY) labels=(loom:issue) ;;
-    STRIP-BOTH) labels=(loom:building loom:issue) ;;
-    *) return 0 ;;
-  esac
-
-  local label
-  for label in "${labels[@]}"; do
-    if forge_gh_remove_label_rl_safe "$REPO_NWO" "$issue_num" "$label" 2>/dev/null; then
-      success "Issue #$issue_num: removed stale $label label (closed by this merge, #6199/#11517)"
-    else
-      warning "Could not remove $label from closed issue #$issue_num — may need manual: gh issue edit $issue_num --repo $REPO_NWO --remove-label $label"
-    fi
-  done
-}
-
-# Resolve this PR's closing issue targets and strip loom:building from each
-# that is (still) closed. Best-effort; returns 0 unconditionally.
-_strip_closed_issue_building_labels() {
-  [[ "$FORGE_TYPE" == "github" ]] || return 0
-
-  local close_targets issue_num
-  close_targets="$(forge_pr_close_targets "$PR_NUMBER" "$GH" 2>/dev/null || true)"
-  [[ -n "$close_targets" ]] || return 0
-
-  # Loop status is 0: each body command (continue / the helper) returns 0.
-  while IFS= read -r issue_num; do
-    [[ -n "$issue_num" ]] || continue
-    _strip_one_closed_issue_building_label "$issue_num"
-  done <<< "$close_targets"
-}
-
-# ---------------------------------------------------------------------------
-# Branch-derived issue close (#12615). A `feature/issue-N` PR can merge with no
-# closing keyword (PR #12512 / issue #12509 -- a Doctor body edit dropped it),
-# leaving N open and `loom:issue`-eligible so Builders are re-dispatched onto
-# finished work. The branch name identifies the issue, so close N here unless
-# the PR (a) already closes it (close targets / body / commit keyword), or
-# (b) declares it a partial increment (`Part of #N` / `Contributes to #N`;
-# slice-branch reuse of feature/issue-N is legitimate, #3667/#3599).
-#
-# Fail-safe: if the partial-increment analysis cannot run, nothing is closed.
-# Runs BEFORE _strip_closed_issue_building_labels so that pass strips
-# loom:building / loom:issue from the issue closed here. GitHub-only,
-# best-effort, never fails the merge.
-_close_branch_derived_issue() {
-  [[ "$FORGE_TYPE" == "github" ]] || return 0
-  [[ "${PR_BRANCH:-}" =~ ^feature/issue-([0-9]+)$ ]] || return 0
-  local issue_num="${BASH_REMATCH[1]}"
-
-  local pr_body refs
-  pr_body="$(echo "$PR_JSON" | jq -r '.body // ""')"
-  refs="$(_partial_increment_refs "$pr_body")" || return 0
-  if grep -qx "$issue_num" <<<"$refs"; then
-    return 0
-  fi
-
-  local close_targets
-  close_targets="$(forge_pr_close_targets "$PR_NUMBER" "$GH" 2>/dev/null || true)"
-  if grep -qx "$issue_num" <<<"$close_targets"; then
-    return 0
-  fi
-  # closingIssuesReferences can be empty on API exhaustion; a closing keyword in
-  # the body or a commit message means GitHub closes the issue itself.
-  if printf '%s\n%s\n' "$pr_body" "$(_pr_commit_messages)" \
-      | grep -Eqi "\b(close[sd]?|fix(e[sd])?|resolve[sd]?)\b[[:space:]]+#${issue_num}\b"; then
-    return 0
-  fi
-
-  local state
-  state="$(gh api "repos/$REPO_NWO/issues/$issue_num" --jq 'if has("pull_request") then "pr" else .state end' 2>/dev/null || true)"
-  [[ "$state" == "open" ]] || return 0
-
-  if gh issue close "$issue_num" --repo "$REPO_NWO" --reason completed \
-      --comment "Closing: PR #$PR_NUMBER merged from \`$PR_BRANCH\` without a closing keyword or a \`Part of #$issue_num\` partial-increment reference, so this issue's work is delivered (#12615). If more work remains, reopen it and have the follow-up PR declare \`Part of #$issue_num\`." >/dev/null 2>&1; then
-    success "Issue #$issue_num: closed (merged from $PR_BRANCH with no closing keyword, #12615)"
-  else
-    warning "Could not close issue #$issue_num after merging $PR_BRANCH -- may need manual: gh issue close $issue_num --repo $REPO_NWO"
-  fi
-  return 0
-}
+_reset_partial_increment_labels() { _post_merge_bookkeeping partial-reset; }
+_close_branch_derived_issue() { _post_merge_bookkeeping branch-close; }
+_strip_closed_issue_building_labels() { _post_merge_bookkeeping strip; }
 
 # ---------------------------------------------------------------------------
 # Close-triggered `loom:blocked` re-check (#9102; item 2 of #8927's deferred
@@ -1507,7 +1250,7 @@ _notify_cleared_blockers() { [[ "$FORGE_TYPE" == "github" ]] || return 0; "${LOO
 # .loom/docs/daemon-reference.md → "Stacked-PR dependency").
 #
 # Safe/unsafe split per child, gated on the child ISSUE's loom:building label
-# (fresh, uncached `gh api` read, mirroring _reset_one_partial_issue's freshness
+# (fresh, uncached `gh api` read, mirroring post-merge-bookkeeping's freshness
 # discipline):
 #   - Safe   (child issue NOT loom:building): no live claim on the child, so
 #            invoke reconcile-stack.sh directly.
@@ -1565,108 +1308,26 @@ _notify_cleared_blockers() { [[ "$FORGE_TYPE" == "github" ]] || return 0; "${LOO
 # ratchet's threshold, so it may shrink but not grow (.loom/docs/file-size-policy.md).
 _mp_reconcile_roll_hint() { declare -F _mp_daemon_roll_hint >/dev/null || return 0; _mp_daemon_roll_hint merge-pr "$(command -v "${LOOM_DAEMON_SELF_BIN:-${LOOM_DAEMON_BIN:-loom-daemon}}" 2>/dev/null || true)"; }
 
-# Reconcile (or defer) one child PR from the plan. Best-effort; returns 0.
-_reconcile_one_stacked_child() {
-  local child_pr="$1" child_branch="$2" parent_branch="$3" child_issue="$4"
-
-  # Fresh (uncached) label read — mirrors _reset_one_partial_issue: use plain
-  # `gh api` (not $GH, which may be gh-cached) so a stale cached view cannot mask
-  # a live re-claim. Skipped entirely when the plan derived no issue number,
-  # which is the "child branch is not feature/issue-<N>, so no claim to race"
-  # case; the verb reaches the same answer from an empty --child-issue.
-  local issue_labels=""; [[ -z "$child_issue" ]] || issue_labels="$(gh api "repos/$REPO_NWO/issues/$child_issue" 2>/dev/null | jq -r '.labels[]?.name' 2>/dev/null || true)"
-
-  local out rc=0
-  out="$(printf '%s\n' "$issue_labels" | "${LOOM_DAEMON_SELF_BIN:-${LOOM_DAEMON_BIN:-loom-daemon}}" merge-pr reconcile-child --child-pr "$child_pr" --parent-branch "$parent_branch" --child-issue "$child_issue" 2>/dev/null)" || rc=$?
-  case "${out%%$'\n'*}" in
-    "LOOM-RECONCILE-CHILD defer")
-      # Unsafe: defer, do not rebase.
-      info "Stacked reconcile: child PR #$child_pr (issue #$child_issue) is still loom:building — deferring auto-rebase to avoid racing a live Builder"
-      # Everything after the marker is the comment body verbatim, so the text
-      # cannot be reshaped by a line-oriented read on this side.
-      local comment="${out#*$'\nLOOM-RECONCILE-COMMENT\n'}"
-      # forge_gh_comment_rl_safe (#4856): the REST comments endpoint is shared
-      # by issues and PRs, so the same helper covers this `gh pr comment` call
-      # site's GraphQL rate-limit fallback.
-      forge_gh_comment_rl_safe "$REPO_NWO" "$child_pr" "$comment" 2>/dev/null || \
-        warning "Could not post deferred-reconciliation comment on PR #$child_pr"
-      ;;
-    "LOOM-RECONCILE-CHILD reconcile")
-      # Safe: no live claim — run the existing reconcile script unmodified. Do
-      # NOT re-implement the rebase/force-with-lease/retarget logic inline.
-      info "Stacked reconcile: parent '$parent_branch' merged; reconciling child PR #$child_pr onto the default branch"
-      if "$SCRIPT_DIR/reconcile-stack.sh" "$child_pr" "$parent_branch"; then
-        success "Stacked reconcile: child PR #$child_pr reconciled onto the default branch"
-      else
-        warning "Stacked reconcile: reconcile-stack.sh failed for child PR #$child_pr (rebase conflict, rejected force-with-lease push, or retarget failure). The parent merge is unaffected — reconcile manually: ./.loom/scripts/reconcile-stack.sh $child_pr $parent_branch"
-      fi
-      ;;
-    *)
-      warning "Stacked reconcile: SKIPPING child PR #$child_pr — 'loom-daemon merge-pr reconcile-child' exited $rc without a LOOM-RECONCILE-CHILD verdict, so whether a Builder still holds issue #${child_issue:-?} is unknown. Rebasing on a guess could force-push over uncommitted work, so nothing was done. The parent merge is unaffected — reconcile by hand once that is answered: ./.loom/scripts/reconcile-stack.sh $child_pr $parent_branch $(_mp_reconcile_roll_hint)" ;;
-  esac
-  return 0
-}
-
-# Discover open child PRs stacked on the just-merged parent branch and reconcile
-# (or defer) each. Best-effort; returns 0 unconditionally.
+# The whole pass (plan, per-child route, deferral comment or reconcile-stack.sh)
+# is `loom-daemon merge-pr stacked-reconcile` (#8191 slice 3). This wrapper only
+# replays its `LEVEL<TAB>message` records; best-effort, returns 0 unconditionally.
+# No `LOOM-STACKED-RECONCILE DONE` terminator means the verb did not run: nothing
+# was rebased or commented, and the manual command is named.
 _auto_reconcile_stacked_children() {
   [[ "$FORGE_TYPE" == "github" ]] || return 0
-
-  # Prefer the pre-merge snapshot the guard above already captured (#8010
-  # item 2) over a fresh post-merge query: GitHub retargets an open child PR
-  # the instant delete_branch_on_merge removes this parent branch, so a query
-  # run AFTER the merge can return zero rows even though children existed
-  # seconds earlier — the guard's own pre-merge query already paid for this
-  # exact answer. Live forge discovery (uncached `gh`, NEVER the daemon
-  # registry) is only a fallback for when the guard never ran (e.g. this
-  # function invoked standalone, as the unit tests do).
-  local children_json="${STACKED_CHILDREN_JSON:-}"
-
-  # AT MOST TWO plan calls, which is what the `for` bounds structurally.
-  #
-  # Pass `gate`: the parent-branch gate. NOT-STACKED is decided from
-  # --parent-branch alone, so feeding it `[]` when no snapshot exists answers
-  # the gate without a forge round trip — which is why the live query below
-  # still costs nothing on an ordinary non-stacked merge. Only a stacked parent
-  # with no snapshot falls through to pass `live` and queries, precisely when
-  # the retired shell queried.
-  #
-  # The gate is also where the fail-OPEN skip is taken, BEFORE the query rather
-  # than after it. An unanswered gate is indistinguishable from NOT-STACKED, so
-  # on a host whose daemon predates these verbs this path runs once per merge;
-  # it must not also spend a `gh pr list` on a rollup nothing will read.
-  local plan rc verdict count _pass bin="${LOOM_DAEMON_SELF_BIN:-${LOOM_DAEMON_BIN:-loom-daemon}}"
-  for _pass in gate live; do
-    rc=0; plan="$(printf '%s' "${children_json:-[]}" | "$bin" merge-pr reconcile-plan --parent-branch "$PR_BRANCH" 2>/dev/null)" || rc=$?
-    verdict="${plan%%$'\n'*}"
-    [[ "$verdict" == "LOOM-RECONCILE-PLAN NOT-STACKED" ]] && return 0
-    [[ "$verdict" == "LOOM-RECONCILE-PLAN COUNT "* ]] || { warning "Stacked reconcile: skipping auto-reconciliation for '$PR_BRANCH' — 'loom-daemon merge-pr reconcile-plan' exited $rc without a plan${verdict:+ (it said: $verdict)}. The parent merge is unaffected; reconcile any stacked child by hand: ./.loom/scripts/reconcile-stack.sh <child-pr> $PR_BRANCH $(_mp_reconcile_roll_hint)"; return 0; }
-    [[ -z "$children_json" ]] || break   # the snapshot (or pass `live`'s query) already answered
-    children_json="$(gh pr list --repo "$REPO_NWO" --base "$PR_BRANCH" --state open \
-      --json number,headRefName 2>/dev/null || echo '[]')"; children_json="${children_json:-[]}"
-  done
-  count="${verdict#LOOM-RECONCILE-PLAN COUNT }"; [[ "$count" -gt 0 ]] || return 0
-
-  info "Stacked reconcile: found $count open child PR(s) based on '$PR_BRANCH'"
-
-  if [[ ! -x "$SCRIPT_DIR/reconcile-stack.sh" ]]; then
-    warning "Stacked reconcile: reconcile-stack.sh not found or not executable at $SCRIPT_DIR — skipping auto-reconciliation"
+  local bin="${LOOM_DAEMON_SELF_BIN:-${LOOM_DAEMON_BIN:-loom-daemon}}" out="" rc=0 level text
+  out="$(printf '%s' "${STACKED_CHILDREN_JSON:-}" | "$bin" merge-pr stacked-reconcile --repo "$REPO_NWO" --parent-branch "$PR_BRANCH" --script-dir "$SCRIPT_DIR" --forge-helpers "$_LOOM_FORGE_HELPERS_LIB_DIR/forge-helpers.sh" --roll-hint "$(_mp_reconcile_roll_hint)")" || rc=$?
+  if [[ $rc -ne 0 || "${out##*$'\n'}" != "LOOM-STACKED-RECONCILE DONE" ]]; then
+    warning "Stacked reconcile: skipping auto-reconciliation for '$PR_BRANCH' — '$bin merge-pr stacked-reconcile' exited $rc without finishing (no LOOM-STACKED-RECONCILE DONE terminator). The parent merge is unaffected; reconcile any stacked child by hand: ./.loom/scripts/reconcile-stack.sh <child-pr> $PR_BRANCH $(_mp_reconcile_roll_hint)"
     return 0
   fi
-
-  local line child_pr child_branch child_issue
-  while IFS= read -r line; do
-    case "$line" in
-      "LOOM-RECONCILE-PLAN CHILD "*)
-        IFS=$'\t' read -r child_pr child_branch child_issue <<<"${line#LOOM-RECONCILE-PLAN CHILD }"
-        [[ -n "$child_pr" ]] || continue
-        _reconcile_one_stacked_child "$child_pr" "$child_branch" "$PR_BRANCH" "$child_issue"
-        ;;
-      "LOOM-RECONCILE-PLAN MALFORMED "*)
-        warning "Stacked reconcile: ignoring an unusable child row from the forge — ${line#LOOM-RECONCILE-PLAN MALFORMED }" ;;
+  while IFS=$'\t' read -r level text; do
+    case "$level" in
+      INFO) info "$text" ;;
+      WARNING) warning "$text" ;;
+      SUCCESS) success "$text" ;;
     esac
-  done <<< "$plan"
-
+  done <<<"$out"
   return 0
 }
 

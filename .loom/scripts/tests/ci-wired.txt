@@ -60,6 +60,8 @@ test-champion-pr-merge-negation-guard.sh
 test-champion-post-claim-recheck.sh
 test-champion-premise-false-close.sh
 test-champion-promotion-throughput.sh
+test-champion-ratification-hold.sh
+test-champion-resync-waiver.sh
 test-champion-standing-authorization.sh
 test-champion-targeted-modes.sh
 test-champion-terminal-verdicts.sh
@@ -167,7 +169,6 @@ test-merge-pr-app-permission-fallback.sh
 test-merge-pr-auto-merge-disabled-fallback.sh
 test-merge-pr-auto-queued-stacked-children.sh
 test-merge-pr-expected-head.sh
-test-merge-pr-feature-branch-close.sh
 test-merge-pr-pr-state.sh
 test-merge-pr-check-runs-404-fallback.sh
 test-merge-pr-daemon-version-floor.sh
@@ -308,6 +309,7 @@ tests/install/test-lint-ignore-configs.sh
 tests/install/test-manifest-freshness-after-hook-wiring.sh
 tests/install/test-pnpm-runnable-check.sh
 tests/install/test-provision-daemon.sh
+tests/install/test-provision-tools.sh
 tests/install/test-setup-branch-protection-bypass-actors.sh
 tests/install/test-setup-branch-protection-required-checks.sh
 tests/install/test-setup-repository-settings-merge-method.sh
@@ -348,3 +350,7 @@ test-ci-wait-prompt-consistency.sh
 # #12939: tools-first slice resolution on a clean install (loom-tools before
 # loom-daemon, transitional fallback). Hermetic.
 test-tools-first-clean-install.sh
+# #12941: lib/loom-tools.sh is a compat alias for lib/repo-root.sh. Hermetic.
+test-repo-root-alias.sh
+# #11787: create-issue.sh refuses a direct loom:curated write (exits 2 before forge_detect). Hermetic.
+test-create-issue-curated.sh

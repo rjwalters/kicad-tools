@@ -153,6 +153,10 @@
 #       hold; stderr carries the repair command (#10581)
 #   9 - the per-PR verdict lock is held by another verdict transaction on
 #       this host (loom-daemon forge verdict-lock, #10581); nothing was posted
+#  10 - approval refused, the caller does not hold a live Judge lease on the PR
+#       (loom-daemon lease pr check, #13055): its reclaim was refused, it was
+#       displaced, or the state is unreadable. Stand down: do NOT retry, release
+#       the lease; nothing was posted. changes-requested is never gated.
 #
 #   A resolved loom-daemon without the #10581 verdict verbs (a capability
 #   probe, not a version guess) takes the legacy path for either verdict: the
@@ -442,6 +446,27 @@ if [[ "$VERDICT" == "approved" ]]; then
     LOOM-CHECKS-ERROR) ci_refuse "the checks could not be read" "$PENDING_NEXT" 5 ;;
     *) ci_refuse "no checks sentinel from '${LOOM_DAEMON_BIN:-loom-daemon} forge wait-checks' (missing daemon, or older than 0.19.707?) — an unread CI state is never green. Run ./.loom/scripts/resync-installed.sh / roll loom-daemon" "$PENDING_NEXT" 5 ;;
   esac
+fi
+
+# --- Judge lease gate (#13055) ----------------------------------------------
+# Approvals only. A Judge whose `lease pr claim` / reclaim was refused (stand
+# down) must not land an approval. `check`, not `fence`: fence exits 0 on "no
+# evidence either way", which is exactly the refused-reclaim case. Parse the
+# PR_LEASE_STATE= line; check exits 0 for free AND held-self. Only held-self
+# proceeds; free / held-peer / unknown / no line refuse (exit 10). A binary
+# without `lease pr` exits 2 (lease-record.md "Older binaries"): warn, proceed.
+if [[ "$VERDICT" == "approved" ]]; then
+  LEASE_RC=0
+  LEASE_OUT="$("${LOOM_DAEMON_BIN:-loom-daemon}" lease pr check "$PR" --role judge --watch-pid "${LOOM_AGENT_SESSION_PID:-${CLAUDE_PID:-$PPID}}" 2>&1)" || LEASE_RC=$?
+  if [[ "$LEASE_RC" -eq 2 ]]; then
+    echo "post-verdict.sh: WARNING — '${LOOM_DAEMON_BIN:-loom-daemon} lease pr check' is unavailable (older binary); not gating the approval on the Judge lease (#13055)" >&2
+  else
+    LEASE_STATE="$(printf '%s\n' "$LEASE_OUT" | sed -n 's/^PR_LEASE_STATE=\([a-z-]*\).*/\1/p' | head -n1)"
+    if [[ "$LEASE_STATE" != "held-self" ]]; then
+      echo "post-verdict.sh: REFUSING to post an approval on PR #$PR — the caller does not hold a live Judge lease (PR_LEASE_STATE=${LEASE_STATE:-unknown}, exit $LEASE_RC) (#13055). Nothing was posted. Stand down: do NOT retry; release the lease (loom-daemon lease pr release $PR --role judge --watch-pid ...)." >&2
+      exit 10
+    fi
+  fi
 fi
 
 # --- The marker is appended HERE, never accepted as part of $BODY ----------

@@ -156,6 +156,8 @@ REAL_DAEMON="${LOOM_DAEMON_BIN:-loom-daemon}"
 cat > "$STUB_DIR/daemon" <<WRAP
 #!/usr/bin/env bash
 [[ "\${1:-} \${2:-}" == "forge wait-checks" ]] && { echo "LOOM-CHECKS-GREEN \$(cat "$STUB_DIR/cur-sha")"; exit 0; }
+# #13055: approvals are gated on a live Judge lease; the caller holds it here.
+[[ "\${1:-} \${2:-} \${3:-}" == "lease pr check" ]] && { echo "PR_LEASE_STATE=held-self"; exit 0; }
 exec "$REAL_DAEMON" "\$@"
 WRAP
 chmod +x "$STUB_DIR/daemon"
@@ -300,6 +302,7 @@ cat > "$STUB_DIR/old-daemon" <<OLD
 case "\${1:-} \${2:-}" in
   "--version "*) echo "loom-daemon 0.19.870 (pre-10581)"; exit 0 ;;
   "forge wait-checks") echo "LOOM-CHECKS-GREEN \$(cat "$STUB_DIR/cur-sha")"; exit 0 ;;
+  "lease pr") echo "PR_LEASE_STATE=held-self"; exit 0 ;;  # #13055: the caller holds the Judge lease
   "forge verdict-"*) printf "error: unrecognized subcommand '%s'\n\nUsage: loom-daemon forge <COMMAND>\n" "\$2" >&2; exit 2 ;;
 esac
 exec "$REAL_DAEMON" "\$@"

@@ -1,13 +1,13 @@
 # Shadow-Mode Merge-Risk Pre-Score (#8545) — telemetry, never a verdict
 
-Load-gated: `champion-pr-merge.md` criterion #2 points here, and **only when
+Load-gated: `champion-pr-merge.md`'s `merge-risk` criterion points here, and **only when
 `TYPESAFE_API_KEY` is set**. With the key unset this file is never read, no
 call is made, no log line is written, and Champion's pass is byte-identical to
 one from before #8545.
 
 ## Why this exists
 
-Criterion #2 is the one safety criterion that is a fresh LLM judgment every
+The `merge-risk` criterion is the one safety criterion that is a fresh LLM judgment every
 tick, and it is the criterion behind the recurring merge-risk-hold gridlock
 (digest #6877): the same unchanged PR can read green one pass and red the
 next. Jev (TypeSafe) answers the same four axes as calibrated probabilities,
@@ -20,7 +20,7 @@ why every rule below is about keeping the two apart.
 ## What to run, after your own verdict is final
 
 ```bash
-# ONLY after criterion #2's four-axis judgment is decided. Never before.
+# ONLY after the merge-risk criterion's four-axis judgment is decided. Never before.
 SHADOW=$(loom-daemon jev-merge-risk "$PR_NUMBER" 2>/dev/null) || SHADOW=""
 ```
 
@@ -66,7 +66,7 @@ comment spam on a PR whose decision the score did not touch.
 
 - The score is **read after** the verdict, and **never** re-opens it. It is not
   grounds to re-read the diff, revise an axis, hold a PR you passed, pass one
-  you held, or record "unsure" under criterion #2's decision rule.
+  you held, or record "unsure" under the `merge-risk` criterion's decision rule.
 - **A confident score is still not a verdict.** `probability: 0.97` on an axis
   you scored green means the disagreement gets logged, and nothing else. High
   confidence is the most tempting case and the one this rule exists for: if a
