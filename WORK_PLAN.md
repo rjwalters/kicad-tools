@@ -2,7 +2,7 @@
 
 Prioritized roadmap generated from current GitHub label state. Maintained by the Guide triage agent.
 
-*Last updated: 2026-10-23*
+*Last updated: 2026-10-24*
 
 ---
 
@@ -23,19 +23,19 @@ _None._
 
 `loom:important`; taken before unlabelled work.
 
-- **#7867**: router: 06rf lattice bench row fails skew on USB3_RX2 (hybrid), USB3_RX1 and USB2_D after the pair tuner
+_None._
 
 ## Ready
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-- **#7867**: router: 06rf lattice bench row fails skew on USB3_RX2 (hybrid), USB3_RX1 and USB2_D after the pair tuner
+_None._
 
 ## In Progress
 
 Issues currently being built (`loom:building`).
 
-- **#7548**: Board 06 synthetic fixture: 9 diff pairs over max skew on the seed-42 re-route (identity-allowed in check_diffpair_coverage.py)
+- **#7908**: Board 06 recipe: MIPI_CLK and USB3_TX1 exceed their ps skew budget through layer imbalance (cap blocks the ps tuner)
 
 ## PRs Awaiting Review
 
@@ -47,29 +47,25 @@ _None._
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-_None._
+- **#7934**: chore(deps): Bump brotlicffi from 1.2.0.1 to 1.2.1.0
 
 ## Proposed
 
 Issues carrying `loom:curated`.
 
 - **#5509**: Epic: one clearance kernel — search, commit, and final validation must agree with kicad-cli DRC *(curated)*
-- **#6445**: [Epic #6441] Phase 3: via pairs as a single move in the lattice coupled centreline *(curated)*
-- **#6446**: [Epic #6441] Phase 4: budget-driven hybrid fallback — longest coupled trunk plus single-ended terminal legs *(curated)*
 - **#7487**: Re-rule or remove board 03 usb_geometry via-in-pad window exception by 2027-04-19 (#7457 / #7084 Q10) *(curated)*
 - **#7518**: DSN export: verify a Specctra router doesn't double-flip back-side padstack layers (deferred from #7481 / #7496) *(curated)*
-- **#7548**: Board 06 synthetic fixture: 9 diff pairs over max skew on the seed-42 re-route (identity-allowed in check_diffpair_coverage.py) *(curated)*
 - **#7690**: Epic: full 3D model coverage, from demo boards to the JLCPCB catalog, reproducible on the pinned toolchain *(curated)*
-- **#7864**: router: 06rf USB3_RX1 one-sided fan skew fails at 1× (narrowed from #7649) *(curated)*
-- **#7867**: router: 06rf lattice bench row fails skew on USB3_RX2 (hybrid), USB3_RX1 and USB2_D after the pair tuner *(curated)*
+- **#7896**: 06rf USB3_TX1 exceeds its 4.0 ps skew budget in time (28.8 ps, length-matched to 0.015 mm, legs on In2.Cu vs In1.Cu) *(curated)*
+- **#7908**: Board 06 recipe: MIPI_CLK and USB3_TX1 exceed their ps skew budget through layer imbalance (cap blocks the ps tuner) *(curated)*
+- **#7913**: 07rf: drop the hand-set class skew caps (blocked on impedance at re-routed TMDS breakout runs) *(curated)*
+- **#7931**: pairplan hybrid: two-ended hybrid for degenerate trunk offset (board 03 USB_D J1.A6→U2.3) *(curated)*
 
 ## Proposed (Architect / Hermit)
 
 - **#6441**: Epic: diff-pair routing redesign — gateways, via pairs, uncoupled budget, per-segment rules *(architect)*
-- **#6445**: [Epic #6441] Phase 3: via pairs as a single move in the lattice coupled centreline *(architect)*
-- **#6446**: [Epic #6441] Phase 4: budget-driven hybrid fallback — longest coupled trunk plus single-ended terminal legs *(architect)*
 - **#6448**: [Epic #6441] Phase 6: unify diff-pair engines — grid consumes PairPlan or grid coupled pre-pass retired *(architect)*
-- **#7775**: [Epic #5952] AGENTS.md parity: shared contributor-guidance source rendered into CLAUDE.md and AGENTS.md, with drift test *(architect)*
 - **#7776**: [Epic #5952] Validate kicad-tools in non-Claude harnesses: pcba-bench Codex CLI run and opencode/GLM-5.3 judge session *(architect)*
 
 ## Epics
@@ -86,13 +82,13 @@ Issues carrying `loom:curated`.
 |------|-------|
 | Operator merge-risk holds | 0 |
 | Very important | 0 |
-| Important | 1 |
-| Ready (`loom:issue`) | 1 |
+| Important | 0 |
+| Ready (`loom:issue`) | 0 |
 | In Progress (`loom:building`) | 1 |
 | PRs awaiting review | 0 |
-| Approved PRs awaiting merge | 0 |
-| Curated | 9 |
-| Architect / Hermit proposals | 6 |
+| Approved PRs awaiting merge | 1 |
+| Curated | 8 |
+| Architect / Hermit proposals | 3 |
 | Active epics | 5 |
 <!-- guide:plan-body:end -->
 
