@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-24
 
+- **PR #7956**: fix(research): mark diffpair bench rows invalid when the pour oracle was skipped
+- **Issue #7955** (closed): diffpair_bench pairs run: mark oracle_unverified rows invalid (killed kicad-cli oracle still reads valid: true)
 - **PR #7954**: refactor(router): remove DifferentialPairRules.for_type and add the Phase 6 diff-pair benchmark table
 - **PR #7950**: fix(router): prefer the coupled candidate meeting the skew budget's length form; drop 07rf class skew caps
 - **PR #7945**: test(router): check pairwise row() against per-pair required() with populated map
