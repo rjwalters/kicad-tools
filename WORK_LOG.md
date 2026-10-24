@@ -15,6 +15,10 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-24
 
+- **PR #7954**: refactor(router): remove DifferentialPairRules.for_type and add the Phase 6 diff-pair benchmark table
+- **PR #7950**: fix(router): prefer the coupled candidate meeting the skew budget's length form; drop 07rf class skew caps
+- **PR #7945**: test(router): check pairwise row() against per-pair required() with populated map
+- **Issue #7913** (closed): 07rf: drop the hand-set class skew caps (blocked on impedance at re-routed TMDS breakout runs)
 - **PR #7947**: fix(router): forward --allow-offboard in chained --complete and hold tail-fold lead-in gap to clearance
 - **PR #7946**: test: skip subprocess bench-harness tests on toolchain refusal
 - **PR #7941**: chore(loom): resync installed Loom to v0.19.1218
