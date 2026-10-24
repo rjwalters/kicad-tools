@@ -15,6 +15,7 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-24
 
+- **Issue #7942** (closed): #7881 remainder: lattice deadline AC3 on a real run, a bigger pairwise speedup, and per-pair equivalence tests
 - **PR #7952**: fix(router): gap tightening squeezes runs whose partner rail is split into long pieces
 - **Issue #7951** (closed): Gap tightening run discovery still narrower than the impedance rule's partner-union coupling (residual of #7913 AC-R1)
 - **PR #7956**: fix(research): mark diffpair bench rows invalid when the pour oracle was skipped

@@ -11,7 +11,7 @@ Prioritized roadmap generated from current GitHub label state. Maintained by the
 
 Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a human merge decision is missing.
 
-_None._
+- **#7960**: chore(loom): resync installed Loom to v0.19.1220
 
 ## Very Important
 
@@ -35,19 +35,19 @@ _None._
 
 Issues currently being built (`loom:building`).
 
-- **#7908**: Board 06 recipe: MIPI_CLK and USB3_TX1 exceed their ps skew budget through layer imbalance (cap blocks the ps tuner)
+- **#6448**: [Epic #6441] Phase 6: unify diff-pair engines — grid consumes PairPlan or grid coupled pre-pass retired
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-_None._
+- **#7961**: chore(loom): resync installed Loom to v0.19.1221
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-- **#7934**: chore(deps): Bump brotlicffi from 1.2.0.1 to 1.2.1.0
+- **#7960**: chore(loom): resync installed Loom to v0.19.1220
 
 ## Proposed
 
@@ -57,10 +57,7 @@ Issues carrying `loom:curated`.
 - **#7487**: Re-rule or remove board 03 usb_geometry via-in-pad window exception by 2027-04-19 (#7457 / #7084 Q10) *(curated)*
 - **#7518**: DSN export: verify a Specctra router doesn't double-flip back-side padstack layers (deferred from #7481 / #7496) *(curated)*
 - **#7690**: Epic: full 3D model coverage, from demo boards to the JLCPCB catalog, reproducible on the pinned toolchain *(curated)*
-- **#7896**: 06rf USB3_TX1 exceeds its 4.0 ps skew budget in time (28.8 ps, length-matched to 0.015 mm, legs on In2.Cu vs In1.Cu) *(curated)*
-- **#7908**: Board 06 recipe: MIPI_CLK and USB3_TX1 exceed their ps skew budget through layer imbalance (cap blocks the ps tuner) *(curated)*
-- **#7913**: 07rf: drop the hand-set class skew caps (blocked on impedance at re-routed TMDS breakout runs) *(curated)*
-- **#7931**: pairplan hybrid: two-ended hybrid for degenerate trunk offset (board 03 USB_D J1.A6→U2.3) *(curated)*
+- **#7931**: lattice coupled: tolerate near-anchor jog-and-return tails in trim_end_reversals (board 03 USB_D J1.A6→U2.3 trunk-offset-degenerate) *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -80,14 +77,14 @@ Issues carrying `loom:curated`.
 
 | Bucket | Count |
 |------|-------|
-| Operator merge-risk holds | 0 |
+| Operator merge-risk holds | 1 |
 | Very important | 0 |
 | Important | 0 |
 | Ready (`loom:issue`) | 0 |
 | In Progress (`loom:building`) | 1 |
 | PRs awaiting review | 0 |
 | Approved PRs awaiting merge | 1 |
-| Curated | 8 |
+| Curated | 6 |
 | Architect / Hermit proposals | 3 |
 | Active epics | 5 |
 <!-- guide:plan-body:end -->
