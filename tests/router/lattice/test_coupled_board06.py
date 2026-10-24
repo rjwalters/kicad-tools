@@ -52,7 +52,10 @@ _INPUT_HASHES = {
     _BOARD: "d69b22100589c86892219723a26e4ba7a08954dc583043ff80e334e119f60143",
     # Re-pinned after #6517 (#6443 piece a): classes gained pair_protocol and
     # USB2 dropped its explicit 3.0 mm skew. Routing geometry is unchanged.
-    _CLASS_MAP: "c4b20079325581127f84401a0fc904ba3f5917a3b42d93812dffa855a167905d",
+    # Re-pinned after #7915 (#7894): every pair's skew_tolerance_mm became
+    # null (judged against its protocol's derived ps budget) and MIPI gained
+    # data_rate_gbps=1.0. Routing geometry is unchanged.
+    _CLASS_MAP: "996a65e42fd256305652900d8296948806545ebb1a1271e316894914c4b01831",
 }
 
 _SIGNAL_ONLY = {"GND", "+3V3", "+1V8", "+1V2", "VBUS_USB"}
