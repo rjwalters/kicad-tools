@@ -644,7 +644,7 @@ def _pair_segments(routes: list[Route], net: int, *, editable: bool) -> list[Seg
 
 
 def _merge_fragments(
-    routes: list[Route], net: int
+    routes: list[Route], net: int, *, any_length: bool = False
 ) -> tuple[list[Segment], dict[int, list[Segment]]]:
     """Editable segments of ``net`` with collinear sub-run fragments merged.
 
@@ -654,7 +654,10 @@ def _merge_fragments(
     spanning its fragments; ``origins`` maps ``id(merged)`` to them, in order.
     Only consecutive pieces shorter than ``MIN_RUN_MM`` merge (the ones the
     rule exempts individually but sums); a segment with no such neighbour is
-    returned as itself.
+    returned as itself.  With ``any_length`` every consecutive collinear piece
+    merges, whatever its length: the rule sums partner pieces into one coupled
+    union, so a rail whose pieces are each long but each overlap the run by
+    under ``MIN_RUN_MM`` is still judged (Issue #7951).
     """
     out: list[Segment] = []
     origins: dict[int, list[Segment]] = {}
@@ -673,9 +676,11 @@ def _merge_fragments(
             group.clear()
 
         for seg in route.segments:
-            short = _seg_len(seg) < MIN_RUN_MM
+            short = any_length or _seg_len(seg) < MIN_RUN_MM
             if group and not (
-                short and _seg_len(group[-1]) < MIN_RUN_MM and _extends(group[-1], seg)
+                short
+                and (any_length or _seg_len(group[-1]) < MIN_RUN_MM)
+                and _extends(group[-1], seg)
             ):
                 flush()
             group.append(seg)
@@ -822,17 +827,19 @@ def tighten_pair(
     for _ in range(MAX_RUNS_PER_PAIR):
         p_merged, p_origins = _merge_fragments(routes, p_id)
         n_merged, n_origins = _merge_fragments(routes, n_id)
-        origins = {**p_origins, **n_origins}
-        runs = [
-            r
-            for r in _find_runs(
-                p_merged,
-                n_merged,
-                min_run_mm=MIN_RUN_MM,
-                max_gap_mm=candidate_window_mm,
+        all_runs = _find_runs(
+            p_merged, n_merged, min_run_mm=MIN_RUN_MM, max_gap_mm=candidate_window_mm
+        )
+        if not all_runs:
+            # Partner pieces that each overlap a segment by under MIN_RUN_MM
+            # but sum to a coupled run the rule judges (Issue #7951).
+            p_merged, p_origins = _merge_fragments(routes, p_id, any_length=True)
+            n_merged, n_origins = _merge_fragments(routes, n_id, any_length=True)
+            all_runs = _find_runs(
+                p_merged, n_merged, min_run_mm=MIN_RUN_MM, max_gap_mm=candidate_window_mm
             )
-            if r.key not in attempted
-        ]
+        origins = {**p_origins, **n_origins}
+        runs = [r for r in all_runs if r.key not in attempted]
         # Only runs whose coupled Zdiff is above the band.
         chosen: tuple[_Run, float] | None = None
         for candidate_run in runs:
