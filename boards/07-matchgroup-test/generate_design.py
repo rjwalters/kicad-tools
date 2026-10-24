@@ -27,8 +27,8 @@ per group that opt into each Phase 1A field (Epic #2661):
     - length_match_group (Phase 1A #2687) -- group declaration
     - length_match_reference (Phase 1A #2687) -- pace-car semantic
     - length_match_tolerance_mm (Phase 1A #2687) -- per-group tolerance
-    - pair_protocol (derived ps skew budget, #7892/#7894) plus the
-      skew_tolerance_mm caps kept until #7913 -- diff-pair sub-skew (DQS,
+    - pair_protocol (derived ps skew budget, #7892/#7894; no hand-set
+      skew_tolerance_mm caps since #7913) -- diff-pair sub-skew (DQS,
       MIPI, HDMI lanes)
 
 Dependency note (Phase 3H, #2723):
@@ -151,10 +151,9 @@ def _route_total_timeout_s() -> int:
 # Each group class declares ``length_match_group`` (Phase 1A #2687).
 # Pair members within a group additionally declare ``pair_protocol``
 # so the diff-pair-level DRC rule judges them against the derived ps
-# skew budget alongside the group-level rule (Issue #7894).  Their
-# Phase 3H (#2647) ``skew_tolerance_mm`` caps stay as explicit extra
-# length caps until #7913: without them the seed-42 re-route fails
-# ``impedance`` on re-routed TMDS breakout runs.
+# skew budget alongside the group-level rule (Issue #7894).  They set
+# no ``skew_tolerance_mm`` cap (Issue #7913): the derived budget is the
+# only pair skew limit.
 #
 # AC#6 of issue #2724 asserts that each Phase 1-2 feature is engaged;
 # this dict is the single source of truth for that audit.
@@ -193,8 +192,8 @@ def ddr_dqs_pair_net_class() -> NetClassRouting:
     ``length_match_group``, but additionally declares
     ``coupled_routing`` and ``pair_protocol="DDR_DQS_CK"`` so the
     within-pair DRC rule fires at the sourced UG583 2 ps strobe limit
-    (ruling Q-f; an error because the protocol is declared), beside its
-    0.05 mm class cap until #7913.  This is
+    (ruling Q-f; an error because the protocol is declared); no class
+    cap beside it (Issue #7913).  This is
     the Phase 2F "group-of-pairs" composition exercise: a pair that is
     also a member of an N-trace group.
 
@@ -219,9 +218,6 @@ def ddr_dqs_pair_net_class() -> NetClassRouting:
         target_diff_impedance=100.0,
         impedance_tolerance_percent=10.0,
         pair_protocol="DDR_DQS_CK",  # Issue #7894: 2 ps timing limit, error
-        # Issue #7913: explicit cap kept until the re-route without it stops
-        # failing ``impedance`` on the TMDS breakout runs.
-        skew_tolerance_mm=0.05,
         length_critical=True,
         length_match_group="DDR_DATA_BYTE_0",  # Group membership
         length_match_tolerance_mm=0.1,
@@ -246,9 +242,8 @@ def mipi_csi_net_class() -> NetClassRouting:
         target_diff_impedance=100.0,  # Phase 3K (Epic #2556)
         impedance_tolerance_percent=10.0,
         # Issue #7894: derived D-PHY budget at its 2.5 Gb/s maximum (8.05 ps,
-        # warning).  The explicit cap stays until #7913.
+        # warning); no explicit cap (Issue #7913).
         pair_protocol="MIPI_DPHY",
-        skew_tolerance_mm=0.05,
         length_critical=True,
         length_match_group="MIPI_CSI_LANES",  # Phase 1A #2687
         length_match_tolerance_mm=0.05,  # Phase 1A: tight MIPI tolerance
@@ -273,9 +268,8 @@ def hdmi_tmds_net_class() -> NetClassRouting:
         target_diff_impedance=100.0,  # Phase 3K
         impedance_tolerance_percent=10.0,
         # Issue #7894: derived HDMI 2.0 TMDS budget at its 6 Gb/s maximum
-        # (warning).  The explicit cap stays until #7913.
+        # (warning); no explicit cap (Issue #7913).
         pair_protocol="HDMI_TMDS",
-        skew_tolerance_mm=0.075,
         length_critical=True,
         length_match_group="HDMI_TMDS_LANES",  # Phase 1A
         length_match_tolerance_mm=0.075,  # Phase 1A

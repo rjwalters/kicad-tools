@@ -5011,6 +5011,30 @@ def _skew_text(result: DiffPairTuneResult, *, after: bool = False) -> str:
     return text
 
 
+def _length_form_ok(meter: PairSkewMeter) -> Callable[[Route, Route], bool] | None:
+    """Whether a pair meets its ps budget's length form (Issue #7913), or ``None``.
+
+    The budget at the slowest layer delay (``PairSkewTarget.tolerance_mm``)
+    on the checker's via-inclusive length: the limit kicad-cli's
+    ``.kicad_dru`` skew rule, the post-route pair tuners and the match-group
+    pair invariant hold the pair to.  ``None`` when the target has no ps
+    budget (its caps are already in ``meter.within``).
+    """
+    from .pair_skew_target import CAP_EPSILON_MM
+
+    target = meter.target
+    if target.budget_mm_equivalent is None:
+        return None
+    limit = target.tolerance_mm
+    if limit is None:
+        return None
+
+    def ok(p_route: Route, n_route: Route) -> bool:
+        return abs(meter.length_mm(p_route) - meter.length_mm(n_route)) <= limit + CAP_EPSILON_MM
+
+    return ok
+
+
 def _select_coupled_candidate(
     joint: tuple[Route, Route, Any] | None,
     pose: tuple[Route, Route, Any] | None,
@@ -5018,6 +5042,7 @@ def _select_coupled_candidate(
     skew_limit_mm: float | None = None,
     *,
     skew_ok: Callable[[Route, Route], bool] | None = None,
+    skew_ok_length: Callable[[Route, Route], bool] | None = None,
 ) -> str | None:
     """Pick ``"joint"`` or ``"pose"`` among gate-surviving candidates (#6858).
 
@@ -5039,6 +5064,18 @@ def _select_coupled_candidate(
     ps budget and error-level caps on the checker's measure -- decides "meets
     it" instead when given; the router always passes it.  ``skew_limit_mm``
     remains for callers with only a length limit.
+
+    Issue #7913: ``skew_ok_length(p, n)`` -- the budget's length form at the
+    slowest layer delay (:attr:`~kicad_tools.router.pair_skew_target.PairSkewTarget.tolerance_mm`),
+    the limit of the ``.kicad_dru`` skew rule kicad-cli checks and of the
+    router's own post-route pair tuners and match-group pair invariant -- is
+    the next tier: when both (or neither) candidates meet the ps budget and
+    exactly one also meets its length form, that one wins.  Without the caps
+    board 07 TMDS_D1's joint (0.498 mm, 3.24 ps against 3.36 ps) met the
+    budget but not its 0.484 mm length form; it beat a pose at 0.070 mm on
+    0.16 mm of uncoupled copper, left a 1.27 mm breakout stub at a 0.41 mm
+    gap that failed ``impedance``, and its copper made TMDS_D2's pose search
+    fail, so D2 kept a joint path at 5.09 mm skew.
     """
     if joint is None and pose is None:
         return None
@@ -5054,6 +5091,10 @@ def _select_coupled_candidate(
             return "joint" if j_ok else "pose"
     elif skew_limit_mm is not None:
         j_ok, t_ok = j_skew <= skew_limit_mm, t_skew <= skew_limit_mm
+        if j_ok != t_ok:
+            return "joint" if j_ok else "pose"
+    if skew_ok_length is not None:
+        j_ok, t_ok = skew_ok_length(joint[0], joint[1]), skew_ok_length(pose[0], pose[1])
         if j_ok != t_ok:
             return "joint" if j_ok else "pose"
     if abs(j_unc - t_unc) > resolution:
@@ -12958,6 +12999,9 @@ class DiffPairRouter:
                     gated.get("pose"),
                     float(self.autorouter.grid.resolution),
                     skew_ok=meter.within if meter.target.enforced else None,
+                    # Issue #7913: then the budget's length form, as kicad-cli
+                    # and the post-route pair tuners judge the pair.
+                    skew_ok_length=_length_form_ok(meter),
                 )
             if pose_candidate is not None or joint_result is not None:
                 print(
