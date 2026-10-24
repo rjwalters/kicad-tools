@@ -31,8 +31,9 @@ or the tag `uncited`.
 | `CUSTOM`, or no protocol | 0.5 mm | none | none | generic default |
 
 The table also carries a gap, a trace width and an impedance per protocol.
-None of those has a source yet. `DifferentialPairRules.for_type` is a
-deprecated shim over the same table.
+None of those has a source yet. `DifferentialPairRules.for_pair_type` and
+`DifferentialPairRules.from_protocol` read the same table. The former
+`DifferentialPairRules.for_type` shim was removed in Issue #6448.
 
 ## Severity follows the source
 
