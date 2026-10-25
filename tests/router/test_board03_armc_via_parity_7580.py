@@ -169,8 +169,15 @@ def armc_route(tmp_path_factory) -> Path:
     if proc.returncode != 0 or starved:
         pytest.fail(
             f"kct route (board 03 arm C) exited {proc.returncode} with time-budget "
-            f"markers {starved}: route ended unverified, timeout-starved -- its "
-            f"copper-LVS would report a wall-clock loss as opens (issue #7920)\n"
+            f"markers {starved}: "
+            + (
+                "route ended unverified, timeout-starved -- its copper-LVS would "
+                "report a wall-clock loss as opens (issue #7920)"
+                if starved
+                else "no time-budget marker, so this is a routing failure, not a "
+                "wall-clock loss (issue #7970)"
+            )
+            + "\n"
             f"{_tail(proc.stdout)}\n{_tail(proc.stderr)}"
         )
     assert routed.is_file(), _tail(proc.stdout) + _tail(proc.stderr)

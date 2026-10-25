@@ -4273,8 +4273,15 @@ class LatticePathfinder:
             :data:`_END_BALANCE_MIN_SKEW_MM`.  Planar single-run results only.
             """
             skew = _pair_skew(pres, net_p) + skew_bias
+            # Issue #7970: copper moves only for a skew the pair's own bound
+            # would flag.  A within-tolerance pair (board 03's USB_D at its
+            # 2.5 mm full-speed bound) keeps the searched stubs; the shift
+            # cost its later pour closure a via spot.
+            tol_of = getattr(pc.net_class, "effective_skew_tolerance", None)
+            tolerance = tol_of() if callable(tol_of) else 0.0
             if (
-                abs(skew) < _END_BALANCE_MIN_SKEW_MM
+                abs(skew) <= tolerance
+                or abs(skew) < _END_BALANCE_MIN_SKEW_MM
                 or result.via_pairs
                 or len(result.runs) != 1
                 or result.via_points
