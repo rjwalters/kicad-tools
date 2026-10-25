@@ -1351,6 +1351,40 @@ fi
 result=$(run_hook_detect "$T1" false LOOM_GUARD_BACKGROUND_SUBAGENTS=0 LOOM_SESSION_MODE=interactive)
 assert_allow "(m6645p) guard disabled + interactive -> allow, silent" "$result"
 
+# --- subagent-started background Bash (issue #9081) ---------------------------
+# The orchestrator transcript is clean; the background Bash lives in
+# <session>/subagents/agent-*.jsonl (a foreground subagent started it, returned).
+S_ROOT="$TMPROOT/s9081"
+mkdir -p "$S_ROOT/sess/subagents"
+S_ORCH="$S_ROOT/sess.jsonl"
+write_transcript "$S_ORCH" "$FG_FINAL_TURN"
+write_transcript "$S_ROOT/sess/subagents/agent-x.jsonl" "$BG_USE_UNRESOLVED" "$BG_ACK_UNRESOLVED"
+
+result=$(run_hook "$S_ORCH" false)
+assert_block "(s9081a) unresolved subagent background Bash, headless -> block" "$result"
+reason=$(echo "${result#*|}" | jq -r '.reason // empty')
+if [[ "$reason" == *toolu_bg01* && "$reason" == *"Wait on or read"* && "$reason" != *"re-dispatch it"*"must"* ]]; then
+    pass "(s9081a2) block message names the id and says wait/read"
+else
+    fail "(s9081a2) block message missing id or wait/read guidance: $reason"
+fi
+
+result=$(run_hook "$S_ORCH" true)
+assert_allow "(s9081a3) subagent background Bash + stop_hook_active -> allow" "$result"
+
+write_transcript "$S_ROOT/sess/subagents/agent-x.jsonl" "$BG_USE_RESOLVED" "$BG_ACK_RESOLVED" "$BG_NOTIFICATION_QUEUEOP"
+result=$(run_hook "$S_ORCH" false)
+assert_allow "(s9081b) subagent background Bash with completion notification -> allow" "$result"
+
+write_transcript "$S_ROOT/sess/subagents/agent-x.jsonl" "$BG_USE_UNRESOLVED" "$BG_ACK_UNRESOLVED"
+result=$(run_hook_detect "$S_ORCH" false LOOM_SESSION_MODE=interactive)
+assert_advisory "(s9081c) unresolved subagent background Bash, interactive -> not blocked" "$result"
+
+S_ORCH2="$S_ROOT/nodir.jsonl"
+write_transcript "$S_ORCH2" "$FG_FINAL_TURN"
+result=$(run_hook "$S_ORCH2" false)
+assert_allow "(s9081d) no subagents dir -> allow (fail open)" "$result"
+
 # --- jq absent -> allow (fail-open) -----------------------------------------
 NOJQ_DIR="$(mktemp -d)"
 for b in bash cat mkdir echo date sed dirname basename find python3 grep git env; do

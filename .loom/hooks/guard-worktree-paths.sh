@@ -411,11 +411,32 @@ any_managed_worktree_exists() {
     [[ -n "$hit" ]]
 }
 
+# True if $1 (an absolute, normalized path) is exactly one of the Champion
+# state files, a DIRECT child of the git common dir (#13180).
+champion_state_path_ok() {
+    local p="$1" common dir phys
+    [[ "$p" =~ ^(.*)/(loom-champion-(pin|facts)-pr-[0-9]+(\.json)?)$ ]] || return 1
+    dir="${BASH_REMATCH[1]}"
+    [[ "$dir" == *"/../"* || "$dir" == */.. || "$dir" == *"/./"* ]] && return 1
+    common="$(cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)" || return 1
+    [[ -n "$common" ]] || return 1
+    [[ "$dir" == "$common" ]] && return 0
+    phys="$(cd "$dir" 2>/dev/null && pwd -P)" || return 1
+    [[ "$phys" == "$common" ]]
+}
+
 # Decide allow(0)/deny(1) for a resolved target path when no
 # LOOM_WORKTREE_PATH fast path is set. See the mechanism-2 comment above for
 # the rationale.
 path_derived_allow() {
     local target="$1"
+
+    # (a0) The Champion pin / PR-facts file, a direct child of the git common
+    # dir (#13180) -> allow. Exactly those two name patterns; `.git/config`,
+    # siblings, nested paths and `..` traversal never match.
+    if champion_state_path_ok "$target"; then
+        return 0
+    fi
 
     # (a) Already inside some managed worktree -> allow.
     if walk_up_for_sentinel "$target" >/dev/null; then

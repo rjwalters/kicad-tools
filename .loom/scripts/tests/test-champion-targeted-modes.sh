@@ -189,7 +189,7 @@ check "an unknown or doubled argument refuses and touches nothing" \
   doc_has "$TARGETED_MD" 'Error: /loom:champion takes --pr N, --issue N or --non-item'
 # --pr N
 check "--pr: writes the pin file only for an eligible PR" doc_has "$TARGETED_MD" '[ -n "$EVALUATED_SHA" ] && printf'
-check "--pr: the pin records the step's agent process (#11902)" doc_has "$TARGETED_MD" '"$EVALUATED_SHA" "$PPID" > "$PIN_FILE"'
+check "--pr: the pin records the step's agent process (#11902)" doc_has "$TARGETED_MD" '"$EVALUATED_SHA" "$PPID" > "$(git rev-parse --git-common-dir)/loom-champion-pin-pr-N"'
 check "--pr: Step 3 must carry the SHA literally (env does not survive tool calls)" \
   doc_has "$TARGETED_MD" 'first line must be `EXPECTED_HEAD=<that SHA, written out literally>`'
 check "--pr: a lost pin is outcome requeued, never merged" doc_has "$TARGETED_MD" '9 (`CHAMPION-PIN-MISSING`): not merged, still approved, no "Merge Failed"'
