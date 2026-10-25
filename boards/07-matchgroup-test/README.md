@@ -54,3 +54,12 @@ The previous nonfunctional fixture remains in
 coverage. Legacy `generate_design.py` defaults to `regression-output/` and
 must not be used to generate this assembled demo. Its synthetic pinouts and
 historical routing failures are not manufacturing artifacts.
+
+The legacy recipe routes on the lattice engine
+(`--route-engine lattice --strategy basic --differential-pairs`) since
+issue #6448. Before that it used the default grid engine
+(`--strategy negotiated`), the grid coupled pre-pass and the placement-delta
+feedback loop. The loop is off now: it re-routes with the grid router, and the
+lattice route already reaches 31/31. See
+[`regression-fixture/README.md`](regression-fixture/README.md#ci-gate-phase-3n-2726)
+for the measured numbers.

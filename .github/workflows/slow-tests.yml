@@ -201,8 +201,9 @@ jobs:
     name: Board 07 copper-safety DRC ratchet
     needs: [kicad_pin]
     runs-on: ubuntu-latest
-    # The board 07 regen takes ~27 min locally solo (three negotiated
-    # passes, #4468). 90 min matches ci.yml's board-07-end-to-end job.
+    # The board 07 regen took ~27 min locally solo on the grid recipe
+    # (three negotiated passes, #4468); since #6448 it is one lattice pass
+    # (~1 min). 90 min matches ci.yml's board-07-end-to-end job.
     timeout-minutes: 90
     container:
       image: ${{ needs.kicad_pin.outputs.image }}

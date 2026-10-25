@@ -623,6 +623,10 @@ def count_errors_via_kct_check(
 # impedance findings (MIPI_DAT1_N, TMDS_D0_N/P, TMDS_D1_N/P) and the #7619
 # TMDS_D0 skew pair (4.149 mm single-ended; 0.068 mm coupled vs 0.075 mm).
 # The allowance is empty, so every blocking finding counts.
+# Issue #6448 (slice 1): the recipe now routes on the lattice engine
+# (``--route-engine lattice --strategy basic``).  The seed-42 re-route
+# (main ``1388d4190``) is still 31/31 with 0 blocking findings, so the
+# allowance stays empty.
 MATCHGROUP_FIXTURE_ALLOWED_FINDINGS: Allowance = {}
 
 #: Every board key that carries an identity allowance (Issue #7367).  A key

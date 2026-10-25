@@ -94,7 +94,16 @@ SUPPORTS_STEP_ROUTE = True
 # measurement the issue's acceptance criteria demand is a one-line edit and the
 # recipe's cost contract is stated in one place.  See the block adjacent to the
 # ``cmd`` list in ``route_pcb`` for the empirical record.
-PLACEMENT_DELTA_FEEDBACK = True
+#
+# Issue #6448 (slice 1): OFF.  The recipe now routes on the lattice engine
+# (``ROUTE_ENGINE`` below), and ``route_with_placement_delta_feedback``
+# re-routes each probe with the grid negotiated router, so leaving the loop on
+# would splice grid copper into a lattice run -- the mixed-engine output
+# ``_validate_route_engine_strategy`` (#4280) exists to prevent.  The loop
+# only fires when nets are left unrouted, and the lattice recipe reaches 31/31,
+# so dropping it loses no reach.  The budget constants stay so the #4468 A/B
+# is still a one-line edit.
+PLACEMENT_DELTA_FEEDBACK = False
 PLACEMENT_DELTA_FEEDBACK_BUDGET = 2
 PLACEMENT_DELTA_FEEDBACK_TIMEOUT_S = 600
 
@@ -103,6 +112,17 @@ PLACEMENT_DELTA_FEEDBACK_TIMEOUT_S = 600
 # The recipe's ``--differential-pairs`` option is kept so the scheduled
 # diffpair ratchet in slow-tests.yml keeps its command line; it is a no-op.
 USE_DIFFERENTIAL_PAIRS = True
+
+# Issue #6448 (slice 1): board 07 ships on the lattice pair path.  The
+# operator ruled (2026-10-24) that the grid coupled pre-pass is deprecated and
+# then removed, and that this recipe moves to lattice first.  Lattice rejects
+# ``--strategy negotiated`` (#4280), so it runs ``--strategy basic`` -- the
+# #7954 benchmark's flags.  With ``--differential-pairs`` the lattice engine
+# routes all 7 pairs (``[diffpair-engage] ... grid coupled pre-pass
+# skipped``) and ``_diffpair_skew_tuning_mode`` auto-engages the
+# ``checker_skew_limit`` pair tuner in place of the grid inline serpentine.
+ROUTE_ENGINE = "lattice"
+ROUTE_STRATEGY = "basic"
 
 # Issue #5266: this board's route step is a STAGED budget contract, and the
 # two halves of it have to be stated separately.
@@ -125,7 +145,8 @@ USE_DIFFERENTIAL_PAIRS = True
 # consolidation, native zone fill, serialization).  With the loop on that is
 # 600 + 2x600 + 600 = 2400 s, comfortably inside the 90-minute CI allowance
 # these jobs already carry, and comfortably above the ~27-minute measured
-# full-route wall clock.
+# full-route wall clock.  With the loop off (lattice, #6448) it is
+# 600 + 600 = 1200 s; the lattice route step measures ~1 min wall locally.
 ROUTE_SEARCH_TIMEOUT_S = 600
 ROUTE_POSTPROCESS_RESERVE_S = 600
 
@@ -1894,8 +1915,13 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     in PR #2981, replace the in-process call with a subprocess
     invocation of the ``kct route`` CLI:
 
-        --manufacturer jlcpcb --strategy negotiated --no-auto-layers
-        --layers 4 --seed 42 --search-timeout 600 --timeout <derived total>
+        --manufacturer jlcpcb --route-engine lattice --strategy basic
+        --no-auto-layers --layers 4 --seed 42 --search-timeout 600
+        --timeout <derived total>
+
+    (Issue #6448: the engine/strategy pair was ``--strategy negotiated`` on
+    the default grid engine until slice 1 of #6448 moved the recipe to the
+    lattice pair path; the history below describes the grid recipe.)
 
     Recipe-vs-AC deviation (Issue #2991, builder empirical validation
     2026-05-17):
@@ -1953,8 +1979,11 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
 
     - ``--manufacturer jlcpcb``: triggers the jlcpcb design-rule
       profile so the router applies the tier-1 trace/space/via floor.
-    - ``--strategy negotiated``: the negotiated rip-up/reroute strategy
-      (explicit for clarity; this is also the default).
+    - ``--route-engine lattice --strategy basic``: the lattice engine's
+      whole-netset negotiation, which also routes the declared pairs
+      coupled under ``--differential-pairs`` (Issue #6448; the lattice
+      engine rejects ``--strategy negotiated``, #4280).  Until #6448 this
+      was ``--strategy negotiated`` on the grid engine.
     - ``--no-auto-layers --layers 4``: pin a 4-layer stackup (the
       board's declared topology: F.Cu / In1.Cu GND / In2.Cu PWR / B.Cu).
       The router's layer-escalation loop would otherwise spend the
@@ -2334,6 +2363,21 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # errors / 0 unconnected, ``kct check`` 0 errors, and every pair and
     # match group within its authored skew limit.  Everything above this
     # addendum that says the recipe omits the flag is history.
+    #
+    # Issue #6448 slice 1 (2026-10-25): the recipe moved from the default grid
+    # engine (``--strategy negotiated`` + grid coupled pre-pass +
+    # placement-delta feedback) to ``--route-engine lattice --strategy basic``
+    # with the placement-delta loop off (see ``PLACEMENT_DELTA_FEEDBACK``).
+    # Every other flag is unchanged.  Measured on main ``1388d4190`` (seed 42,
+    # ``PYTHONHASHSEED=42``, native build 65, pinned KiCad 10.0.6 image): 7/7
+    # pairs coupled, 31/31 nets, copper-LVS 0 shorts / 0 opens over 244 pads,
+    # ``kct check --mfr jlcpcb`` 0 errors, kicad-cli ``--refill-zones`` 0
+    # errors / 0 unconnected (the same 24 warnings as grid),
+    # ``check_board07_diffpair_baseline.py`` 0/0/0.  Pair skew: DQS 0.260 mm
+    # (1.454 ps of its 2.00 ps budget), MIPI and TMDS pairs 0.000 mm (after
+    # #7966 removed the lattice end-stub turn asymmetry); groups
+    # DDR_DATA_BYTE_0 0.001 mm, MIPI_CSI_LANES and HDMI_TMDS_LANES 0.000 mm.
+    # Everything above that describes negotiated passes is grid history.
     cmd = [
         sys.executable,
         "-m",
@@ -2344,8 +2388,10 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         str(output_path),
         "--manufacturer",
         "jlcpcb",
+        "--route-engine",
+        ROUTE_ENGINE,
         "--strategy",
-        "negotiated",
+        ROUTE_STRATEGY,
         "--no-auto-layers",
         "--layers",
         "4",

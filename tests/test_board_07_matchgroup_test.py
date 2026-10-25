@@ -1617,9 +1617,31 @@ class TestRecipeRoutesPairsCoupled:
 
         assert value("--seed") == "42"
         assert value("--search-timeout") == "600"
-        assert value("--timeout") == "2400"
-        assert value("--placement-delta-feedback-budget") == "2"
-        assert value("--placement-delta-feedback-timeout") == "600"
+        # Issue #6448: the placement-delta loop is off on lattice, so the
+        # derived total is one search stage plus the postprocess reserve.
+        assert value("--timeout") == "1200"
+        assert "--placement-delta-feedback" not in argv
+        assert "--deterministic-budget" in argv
+
+    def test_recipe_routes_on_the_lattice_engine(
+        self, generate_design_mod, tmp_path, monkeypatch
+    ) -> None:
+        """Issue #6448 slice 1: board 07 ships on the lattice pair path.
+
+        The lattice engine rejects ``--strategy negotiated`` (#4280), so the
+        recipe must pair it with ``--strategy basic``, and the grid-only
+        placement-delta loop must stay off so no grid copper is spliced in.
+        """
+        argv = self._route_argv(generate_design_mod, tmp_path, monkeypatch)
+
+        def value(flag: str) -> str:
+            return argv[argv.index(flag) + 1]
+
+        assert value("--route-engine") == "lattice"
+        assert value("--strategy") == "basic"
+        assert generate_design_mod.PLACEMENT_DELTA_FEEDBACK is False
+        for flag in ("--tighten-diffpair-gap", "--length-match-groups"):
+            assert flag in argv
 
     def test_stale_routed_sidecars_are_removed_before_routing(
         self, generate_design_mod, tmp_path, monkeypatch
