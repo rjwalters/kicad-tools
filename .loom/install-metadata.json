@@ -1,6 +1,6 @@
 {
-  "loom_version": "0.19.1218",
-  "loom_commit": "c040107bf671a4a8cba1e2aba8522c5c71222902",
+  "loom_version": "0.19.1225",
+  "loom_commit": "e237f318d659d87858625088df650aa45ec72657",
   "install_date": "2026-08-10",
   "installed_files": [
     ".claude/agents/loom-architect.md",
@@ -664,9 +664,10 @@
     ".loom/scripts/tests/test-worktree-stale-local-branch-reuse.sh",
     ".claude/commands/loom/champion-merge-risk-shadow.md",
     ".loom/scripts/tests/test-champion-ci-checks-no-checks-signal.sh",
-    ".loom/scripts/tests/test-install-lock.sh"
+    ".loom/scripts/tests/test-install-lock.sh",
+    ".loom/hooks/guard-background-subagents.sh"
   ],
-  "last_resync": "2026-10-24",
+  "last_resync": "2026-10-25",
   "loom_source_remote": "https://github.com/rjwalters/loom.git",
   "requires_daemon": "0.19.1146"
 }

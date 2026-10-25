@@ -255,7 +255,10 @@ re-checks with single targeted reads (Step 3's hold classify and
 
 ```bash
 PR_NUMBER=<number>
-PR_FACTS="$(git rev-parse --git-common-dir)/loom-champion-facts-pr-$PR_NUMBER.json"; rm -f "$PR_FACTS"
+# Write the PR number out as digits in the two `loom-champion-facts-pr-<number>.json`
+# paths below that are written or removed (not as `$PR_NUMBER`): the worktree-write
+# guard only admits that exact spelling, and fails closed on a variable path (#13180).
+rm -f "$(git rev-parse --git-common-dir)/loom-champion-facts-pr-<number>.json"
 # gh's `--json` shape, so every reader below is unchanged. Comments: TRUSTED
 # authors only (#9548). Any failed read -> skip the PR this pass.
 P=$(gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER") &&
@@ -264,8 +267,8 @@ C=$(loom-daemon forge trusted-comments --fetch "$PR_NUMBER" --gh-shape) &&
 printf '%s\n' "$P" "$K" "$C" | jq -s '.[0] as $p | {labels: [$p.labels[] | {name}], headRefOid: $p.head.sha,
   mergeable: (if $p.mergeable == true then "MERGEABLE" elif $p.mergeable == false then "CONFLICTING" else "UNKNOWN" end),
   createdAt: $p.created_at, updatedAt: $p.updated_at, additions: $p.additions, deletions: $p.deletions,
-  commits: [.[1:-1][][] | {oid: .sha, committedDate: .commit.committer.date}], comments: .[-1]}' > "$PR_FACTS" \
-  || { rm -f "$PR_FACTS"; echo "SKIP #$PR_NUMBER: PR facts unread (or comments unauthenticated) — no merge, no comment"; continue; }  # single-PR step: outcome=skipped reason=facts_unread
+  commits: [.[1:-1][][] | {oid: .sha, committedDate: .commit.committer.date}], comments: .[-1]}' > "$(git rev-parse --git-common-dir)/loom-champion-facts-pr-<number>.json" \
+  || { rm -f "$(git rev-parse --git-common-dir)/loom-champion-facts-pr-<number>.json"; echo "SKIP #$PR_NUMBER: PR facts unread (or comments unauthenticated) — no merge, no comment"; continue; }  # single-PR step: outcome=skipped reason=facts_unread
 ```
 
 The other blocks re-derive the path with the same `PR_FACTS=` line, because

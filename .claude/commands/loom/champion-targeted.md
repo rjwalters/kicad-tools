@@ -44,6 +44,7 @@ release (`--reason <gate>`), from this closed list, so the lease comment and
 | `ci_pending` | CI checks were still running when you read them (say it only if that is what you saw) |
 | `mergeable_unknown` | `mergeable` read `UNKNOWN` (GitHub still computing) |
 | `pin_missing` | Step 3 printed `CHAMPION-PIN-MISSING` |
+| `guard_refused` | A guard hook refused the step's own pin or PR-facts write or removal (#13180) |
 | `merge_rc<N>` | `merge-pr.sh` exited `N` (3, 4, 5, 7 or 9) |
 
 Anything else is recorded as `unspecified`; never write `ci_pending` as a
@@ -63,10 +64,15 @@ default.
    UNTRUSTED_FORK=$(printf '%s' "$PR_JSON" | jq -r '(.author_association // "NONE") as $a | select((.head.repo.full_name // "") != .base.repo.full_name and ((["OWNER","MEMBER","COLLABORATOR"] | index($a)) == null)) | "yes"')
    echo "UNTRUSTED_FORK=${UNTRUSTED_FORK:-no}"
    EVALUATED_SHA=$(printf '%s' "$PR_JSON" | jq -r 'select(.state == "open" and any(.labels[]; .name == "loom:pr") and (any(.labels[]; .name | startswith("loom:operator")) | not)) | .head.sha // empty')
-   PIN_FILE="$(git rev-parse --git-common-dir)/loom-champion-pin-pr-$PR_NUMBER"; rm -f "$PIN_FILE"
-   [ -n "$EVALUATED_SHA" ] && printf '%s %s\n' "$EVALUATED_SHA" "$PPID" > "$PIN_FILE"
+   rm -f "$(git rev-parse --git-common-dir)/loom-champion-pin-pr-N"
+   [ -n "$EVALUATED_SHA" ] && printf '%s %s\n' "$EVALUATED_SHA" "$PPID" > "$(git rev-parse --git-common-dir)/loom-champion-pin-pr-N"
    echo "EVALUATED_SHA=${EVALUATED_SHA:-none}"
    ```
+
+   Write `N` in the two pin-file paths as the PR number's digits (not `$PR_NUMBER`):
+   the worktree-write guard admits only that exact spelling and fails closed on a
+   variable path (#13180). A step whose own pin or facts write a guard refused is
+   released with `reason=guard_refused`.
 
    `TRIAGE=yes` (open, not a draft, no stage label, no hold, no claim):
    run **"`--pr N` on an unlabelled PR: triage"** below instead of the rest
