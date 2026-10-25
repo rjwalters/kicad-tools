@@ -15,6 +15,9 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-25
 
+- **PR #7971**: chore(loom): resync installed Loom to v0.19.1225
+- **PR #7968**: fix(router): balance lattice pair turn skew at the end stubs
+- **Issue #7966** (closed): lattice pair path: constant 0.597 mm N-short intra-pair skew on every board 07 MIPI/TMDS pair
 - **PR #7965**: docs: add non-Claude harness pilot run plan, checklist and gap template
 - **Issue #7964** (closed): [Epic #5952] Prep the non-Claude harness pilot: run plan, checklist and gap template (docs only)
 
