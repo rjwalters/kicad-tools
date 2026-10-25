@@ -13,6 +13,11 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-10-25
+
+- **PR #7965**: docs: add non-Claude harness pilot run plan, checklist and gap template
+- **Issue #7964** (closed): [Epic #5952] Prep the non-Claude harness pilot: run plan, checklist and gap template (docs only)
+
 ### 2026-10-24
 
 - **Issue #7942** (closed): #7881 remainder: lattice deadline AC3 on a real run, a bigger pairwise speedup, and per-pair equivalence tests
