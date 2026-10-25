@@ -138,6 +138,25 @@ assert_deny "(b) target at main root, worktree exists -> deny" "$result"
 result=$(run_hook "CLAUDE.md" "$TMPROOT")
 assert_deny "(c) relative path + cwd at main root -> deny" "$result"
 
+# --- #13180: Champion pin / PR-facts files under the git common dir --------
+# Exactly two name patterns, direct children of the git common dir, are
+# writable while a managed worktree exists; everything else under .git stays
+# denied.
+result=$(run_hook "$TMPROOT/.git/loom-champion-pin-pr-42")
+assert_allow "(#13180) champion pin file under git common dir -> allow" "$result"
+result=$(run_hook "$TMPROOT/.git/loom-champion-facts-pr-42.json")
+assert_allow "(#13180) champion facts file under git common dir -> allow" "$result"
+result=$(run_hook "$TMPROOT/.git/config")
+assert_deny "(#13180) .git/config still denied" "$result"
+result=$(run_hook "$TMPROOT/.git/other-file")
+assert_deny "(#13180) sibling file under git common dir still denied" "$result"
+result=$(run_hook "$TMPROOT/.git/loom-champion-pin-pr-x")
+assert_deny "(#13180) non-numeric PR suffix still denied" "$result"
+result=$(run_hook "$TMPROOT/.git/loom-champion-pin-pr-1/../config")
+assert_deny "(#13180) traversal out of the pin name still denied" "$result"
+result=$(run_hook "$TMPROOT/loom-champion-pin-pr-42")
+assert_deny "(#13180) pin name at the checkout root (not .git) still denied" "$result"
+
 # --- deny reason references the worktree isolation contract ----------------
 raw=$(run_hook "$TMPROOT/CLAUDE.md")
 out="${raw#*|}"

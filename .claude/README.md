@@ -93,9 +93,6 @@ Representative tools by category:
 - `get_ui_state` - Comprehensive UI state (workspace, config, terminals) — this
   replaced the removed per-file readers
 - `get_heartbeat` - Check whether the Loom app is running
-- `trigger_start` - Trigger workspace start with confirmation dialog
-- `trigger_force_start` - Trigger force start without confirmation (immediate reset)
-- `stop_engine` - Stop all terminals
 
 **Durable watches**: `register_watch` / `list_watches` / `remove_watch` — operator
 watches on issue/PR terminal state that survive the registering session.
