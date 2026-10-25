@@ -488,6 +488,118 @@ def _shift_centerline_segment(points: list[Pt], i: int, delta: float) -> list[Pt
     return out
 
 
+#: Issue #7966: least P-minus-N skew (mm) a planar pair must carry before
+#: the end-stub balancing variants (:func:`_end_balanced_centerline`) are
+#: tried, and the least improvement (mm) one must bring to replace the pick.
+_END_BALANCE_MIN_SKEW_MM = 0.01
+
+#: Issue #7966: an end stub is only shifted when it runs across its pad axis
+#: (|cos| between its left normal and the P-N pad axis at least this), so the
+#: shift lengthens one attach dogleg and shortens the other.
+_END_BALANCE_MIN_AXIS_COS = 0.5
+
+#: Issue #7966: finish-gate evaluations per end per coordinate round of the
+#: end balancing -- with the rounds, the bound on what balancing can cost.
+_END_BALANCE_STEPS = 4
+
+#: Issue #7966: coordinate rounds over the two ends (start, then end).
+_END_BALANCE_ROUNDS = 2
+
+
+def _shift_centerline_end(points: list[Pt], delta: float) -> list[Pt] | None:
+    """Shift the FIRST segment of ``points`` sideways by ``delta`` (#7966).
+
+    The segment's line moves ``delta`` along its left normal: its start
+    vertex (the pair's end anchor) moves with it and its far vertex is
+    re-intersected with the unmoved line of the next segment, so every
+    direction in the polyline is preserved.  ``None`` for a straight (two
+    point) centerline, a parallel neighbour, or a shift that would collapse
+    or reverse either affected segment.
+    """
+    if len(points) < 3:
+        return None
+    a, b, c = points[0], points[1], points[2]
+    seg_len = dist(a, b)
+    if seg_len <= 1e-9:
+        return None
+    ux, uy = (b[0] - a[0]) / seg_len, (b[1] - a[1]) / seg_len
+    sa = (a[0] - uy * delta, a[1] + ux * delta)
+    dx, dy = c[0] - b[0], c[1] - b[1]
+    den = dx * uy - dy * ux
+    if abs(den) <= 1e-9:
+        return None
+    t = ((sa[0] - b[0]) * uy - (sa[1] - b[1]) * ux) / den
+    sb = (b[0] + t * dx, b[1] + t * dy)
+    out = [sa, sb, *points[2:]]
+    for j in (0, 1):
+        old_d = (points[j + 1][0] - points[j][0], points[j + 1][1] - points[j][1])
+        new_d = (out[j + 1][0] - out[j][0], out[j + 1][1] - out[j][1])
+        if math.hypot(*new_d) <= 1e-6 or old_d[0] * new_d[0] + old_d[1] * new_d[1] <= 0.0:
+            return None
+    return out
+
+
+def _end_toward_p(points: list[Pt], pad_p: Pad, pad_n: Pad) -> float:
+    """Sign of the left-normal shift of ``points``' first segment toward P (#7966).
+
+    ``+1.0`` / ``-1.0`` when moving the first segment along its left normal
+    moves the anchor toward / away from the P pad, ``0.0`` when the segment
+    does not run across the P-N pad axis (a shift would change both attach
+    doglegs alike and balance nothing).
+    """
+    a, b = points[0], points[1]
+    seg_len = dist(a, b)
+    ax, ay = pad_p.x - pad_n.x, pad_p.y - pad_n.y
+    axis_len = math.hypot(ax, ay)
+    if seg_len <= 1e-9 or axis_len <= 1e-9:
+        return 0.0
+    nx, ny = -(b[1] - a[1]) / seg_len, (b[0] - a[0]) / seg_len
+    cos = (nx * ax + ny * ay) / axis_len
+    if abs(cos) < _END_BALANCE_MIN_AXIS_COS:
+        return 0.0
+    return 1.0 if cos > 0.0 else -1.0
+
+
+def _end_balanced_centerline(
+    points: list[Pt],
+    shift_a: float,
+    shift_b: float,
+    pads_a: tuple[Pad, Pad],
+    pads_b: tuple[Pad, Pad],
+    pitch: float,
+) -> list[Pt] | None:
+    """``points`` with its end stubs moved toward their P pads (#7966).
+
+    ``shift_a`` / ``shift_b`` are the distances (mm, negative = toward the N
+    pad) the start / end anchor moves along the P-N pad axis.  Each end stub
+    keeps its direction (:func:`_shift_centerline_end`), so the coupled body
+    and every joint -- and therefore the turn skew the joints add -- are
+    unchanged; only the two attach doglegs at that end change length, one by
+    ``+shift`` and the other by ``-shift``.  A shift is bounded by the room
+    the attach doglegs have, ``(pad spacing - pitch) / 2``: at that bound a
+    leg end sits level with its own pad and the dogleg would otherwise have
+    to double back (a bump, which is the tuner's job).  ``None`` when a
+    requested end cannot move (stub not across its pad axis, shift beyond
+    that room, geometry does not close).
+    """
+    out = list(points)
+    for shift, (pad_p, pad_n), at_start in ((shift_a, pads_a, True), (shift_b, pads_b, False)):
+        if abs(shift) <= 1e-9:
+            continue
+        room = (dist((pad_p.x, pad_p.y), (pad_n.x, pad_n.y)) - pitch) / 2.0
+        if abs(shift) > room + 1e-9:
+            return None
+        work = out if at_start else out[::-1]
+        sign = _end_toward_p(work, pad_p, pad_n)
+        if sign == 0.0:
+            return None
+        moved = _shift_centerline_end(work, sign * shift)
+        if moved is None:
+            return None
+        out = moved if at_start else moved[::-1]
+    return out
+
+
 def _pair_skew(pres: _PairResult, net_p: int) -> float:
     """P-minus-N routed length of a pair result's runs (mm, issue #7649)."""
     total = 0.0
@@ -4135,6 +4247,138 @@ class LatticePathfinder:
                             return pres
             return None
 
+        def balance_ends(
+            result: _RouteResult, center: list[Pt] | None, pres: _PairResult
+        ) -> _PairResult:
+            """Issue #7966: cancel a passed pair's turn skew at its end stubs.
+
+            A coupled pair is two offsets of one centerline, so the net
+            turning its pad orientations force (90 degrees from side-by-side
+            connector pads to stacked IC pads) leaves the outside leg longer
+            by at least ``1.66 * pitch`` even after balanced bends (#7649):
+            board 07's six MIPI/TMDS pairs all shipped 0.597 mm, N short.
+            Where an end stub runs across its pad axis, moving it sideways
+            toward the long leg's pad shortens that leg's attach dogleg and
+            lengthens the partner's by the same amount -- ``2 * shift`` of
+            skew per end, with the coupled body and its joints untouched.
+
+            The two end shifts are found by a bounded coordinate search (each
+            end in turn, :data:`_END_BALANCE_ROUNDS` rounds of at most
+            :data:`_END_BALANCE_STEPS` evaluations): sized from the measured
+            skew, refined by secant steps (a leg end that starts to clip into
+            its own pad's copper makes the response jump), and never pushed
+            past a shift the finish gate refused.  Every candidate goes
+            through the UNCHANGED finish gate; the least-skew one that passes
+            replaces ``pres`` only when it removes at least
+            :data:`_END_BALANCE_MIN_SKEW_MM`.  Planar single-run results only.
+            """
+            skew = _pair_skew(pres, net_p) + skew_bias
+            if (
+                abs(skew) < _END_BALANCE_MIN_SKEW_MM
+                or result.via_pairs
+                or len(result.runs) != 1
+                or result.via_points
+            ):
+                return pres
+            base = trim_end_reversals(result.runs[0][1]) if center is None else center
+            pads_a = (pc.pad_p_a, pc.pad_n_a)
+            pads_b = (pc.pad_p_b, pc.pad_n_b)
+            best, best_skew = pres, skew
+            shifts = [0.0, 0.0]  # start / end anchor shift of ``best``
+
+            def partner_gaps(pr: _PairResult) -> dict[int, float]:
+                """Each leg's least edge gap to its PARTNER's pads (mm)."""
+                gaps: dict[int, float] = {}
+                for net, run_layer, poly in pr.runs:
+                    other = net_n if net == net_p else net_p
+                    best_gap = math.inf
+                    for idx, pad in enumerate(self.pads):
+                        if (
+                            pad.net != other
+                            or run_layer not in self.obstacles.pad_layer_indices[idx]
+                        ):
+                            continue
+                        hw, hh = pad_half_extents(pad)
+                        rect = (pad.x - hw, pad.y - hh, pad.x + hw, pad.y + hh)
+                        for a, b in zip(poly, poly[1:], strict=False):
+                            if dist(a, b) > 1e-9:
+                                best_gap = min(best_gap, seg_rect_dist(a, b, rect))
+                    gaps[net] = best_gap - trace_w / 2.0
+                return gaps
+
+            # A shift moves the short leg toward its partner's pad.  The
+            # finish gate holds that gap to the intra-pair clearance only
+            # (the searched legs never come close), so the balanced legs must
+            # also keep the leg's full class clearance there -- or, where the
+            # searched pair was already closer, not get any closer.
+            base_gaps = partner_gaps(pres)
+            gap_floor = {
+                net: min(base_gaps[net], self._conn_geometry(pc.net_class, net)[1]) - 1e-4
+                for net in base_gaps
+            }
+
+            def attempt(cand_shifts: list[float]) -> float | None:
+                """Skew of the finished variant, or ``None`` when it does not pass."""
+                nonlocal best, best_skew
+                variant = _end_balanced_centerline(
+                    base, cand_shifts[0], cand_shifts[1], pads_a, pads_b, pc.pitch
+                )
+                if variant is None:
+                    return None
+                cand, _why = finish(result, variant)
+                if cand is None:
+                    return None
+                if any(g < gap_floor.get(n, -math.inf) for n, g in partner_gaps(cand).items()):
+                    return None
+                got = _pair_skew(cand, net_p) + skew_bias
+                if abs(got) < abs(best_skew):
+                    best, best_skew = cand, got
+                    shifts[:] = cand_shifts
+                return got
+
+            for _round in range(_END_BALANCE_ROUNDS):
+                for end in (0, 1):
+                    if abs(best_skew) < _END_BALANCE_MIN_SKEW_MM:
+                        break
+                    # Points (shift of this end, skew) seen on this line.
+                    x0, y0 = shifts[end], best_skew
+                    pts = [(x0, y0)]
+                    refused: float | None = None
+                    step = y0 / 2.0  # first order: 2 mm of skew per mm
+                    for _step in range(_END_BALANCE_STEPS):
+                        x = x0 + step
+                        if refused is not None and (x - x0) * (refused - x0) > 0.0:
+                            if abs(x - x0) >= abs(refused - x0) - 1e-6:
+                                x = (x0 + refused) / 2.0
+                        trial = list(shifts)
+                        trial[end] = x
+                        got = attempt(trial)
+                        if got is None:
+                            refused = x
+                            step = (x - x0) / 2.0
+                            continue
+                        pts.append((x, got))
+                        if abs(best_skew) < _END_BALANCE_MIN_SKEW_MM:
+                            break
+                        # Secant through the bracketing pair when the skew
+                        # changed sign, else through the two latest points.
+                        lo = [p for p in pts if p[1] > 0.0]
+                        hi = [p for p in pts if p[1] < 0.0]
+                        if lo and hi:
+                            pa = min(lo, key=lambda p: p[1])
+                            pb = max(hi, key=lambda p: p[1])
+                        else:
+                            pa, pb = pts[-2], pts[-1]
+                        if abs(pb[1] - pa[1]) <= 1e-9:
+                            break
+                        x_next = pa[0] - pa[1] * (pb[0] - pa[0]) / (pb[1] - pa[1])
+                        if any(abs(x_next - p[0]) <= 1e-4 for p in pts):
+                            break
+                        step = x_next - x0
+            if abs(skew) - abs(best_skew) < _END_BALANCE_MIN_SKEW_MM:
+                return pres
+            return best
+
         # Attempt each consistent parity through the FULL pipeline: a parity
         # whose shortest path emits degenerate/blocked legs must not doom the
         # pair when the other parity works.
@@ -4190,23 +4434,21 @@ class LatticePathfinder:
                 # the one with the least skew (counting ``skew_bias``) ships,
                 # a balanced one on a tie.  The searched centerline runs last
                 # so a decline below reads its reason.
-                passed = [
-                    pres
-                    for pres, _why in (
-                        finish(result, balanced)
-                        for balanced in _balanced_centerlines(result, pc.pitch)
-                    )
+                passed: list[tuple[list[Pt] | None, _PairResult]] = [
+                    (balanced, pres)
+                    for balanced in _balanced_centerlines(result, pc.pitch)
+                    for pres in (finish(result, balanced)[0],)
                     if pres is not None
                 ]
                 pres, finish_reason = finish(result)
                 if pres is not None:
-                    passed.append(pres)
+                    passed.append((None, pres))
                 if passed:
-                    best = min(
+                    best_center, best = min(
                         passed,
-                        key=lambda r: round(abs(_pair_skew(r, net_p) + skew_bias), 6),
+                        key=lambda cr: round(abs(_pair_skew(cr[1], net_p) + skew_bias), 6),
                     )
-                    return best, "ok"
+                    return balance_ends(result, best_center, best), "ok"
                 if finish_reason == "pair-leg-blocked":
                     pres = nudge(result)
                     if pres is not None:
