@@ -60,6 +60,7 @@ Detailed reference documentation:
 | [`board.json` Schema](board-json-schema.md) | Normalized per-board data contract (`kct board-metrics`) |
 | [External Benchmark Report Schema](benchmark-external-report-schema.md) | Per-board report contract for `kct bench external` |
 | [Agent Surfaces](agent-surfaces.md) | What each `kct` skill needs from its harness |
+| [Non-Claude Harness Pilot](non-claude-harness-pilot.md) | Run plan, checklist and gap template for the Codex CLI / opencode pilot (#7776) |
 | [Ecosystem](ecosystem.md) | Where kicad-tools sits among related projects (`kct ecosystem`) |
 
 ### For Contributors

@@ -161,3 +161,9 @@ There are two exceptions:
 
 The Claude Code frontmatter keys `invocation` and `suggestedModel` are not linted.
 They are harness metadata, and the Codex renderer drops them.
+
+## Validation pilot
+
+The plan for checking these surfaces in real Codex CLI and opencode runs, with its
+pre-run checklist and gap-report template, is in
+[non-claude-harness-pilot.md](non-claude-harness-pilot.md) (Epic #5952, #7776).
