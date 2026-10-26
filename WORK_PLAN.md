@@ -11,7 +11,7 @@ Prioritized roadmap generated from current GitHub label state. Maintained by the
 
 Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a human merge decision is missing.
 
-- **#7960**: chore(loom): resync installed Loom to v0.19.1220
+- **#7969**: feat(boards): ship board 07 on the lattice pair path
 
 ## Very Important
 
@@ -41,19 +41,20 @@ Issues currently being built (`loom:building`).
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#7961**: chore(loom): resync installed Loom to v0.19.1221
+_None._
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-- **#7960**: chore(loom): resync installed Loom to v0.19.1220
+- **#7969**: feat(boards): ship board 07 on the lattice pair path
 
 ## Proposed
 
 Issues carrying `loom:curated`.
 
 - **#5509**: Epic: one clearance kernel — search, commit, and final validation must agree with kicad-cli DRC *(curated)*
+- **#6448**: [Epic #6441] Phase 6: unify diff-pair engines — grid consumes PairPlan or grid coupled pre-pass retired *(curated)*
 - **#7487**: Re-rule or remove board 03 usb_geometry via-in-pad window exception by 2027-04-19 (#7457 / #7084 Q10) *(curated)*
 - **#7518**: DSN export: verify a Specctra router doesn't double-flip back-side padstack layers (deferred from #7481 / #7496) *(curated)*
 - **#7690**: Epic: full 3D model coverage, from demo boards to the JLCPCB catalog, reproducible on the pinned toolchain *(curated)*
@@ -63,7 +64,6 @@ Issues carrying `loom:curated`.
 
 - **#6441**: Epic: diff-pair routing redesign — gateways, via pairs, uncoupled budget, per-segment rules *(architect)*
 - **#6448**: [Epic #6441] Phase 6: unify diff-pair engines — grid consumes PairPlan or grid coupled pre-pass retired *(architect)*
-- **#7776**: [Epic #5952] Validate kicad-tools in non-Claude harnesses: pcba-bench Codex CLI run and opencode/GLM-5.3 judge session *(architect)*
 
 ## Epics
 
@@ -85,7 +85,7 @@ Issues carrying `loom:curated`.
 | PRs awaiting review | 0 |
 | Approved PRs awaiting merge | 1 |
 | Curated | 6 |
-| Architect / Hermit proposals | 3 |
+| Architect / Hermit proposals | 2 |
 | Active epics | 5 |
 <!-- guide:plan-body:end -->
 
