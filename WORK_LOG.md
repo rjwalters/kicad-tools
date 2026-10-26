@@ -15,6 +15,11 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-26
 
+- **PR #7983**: feat(router): deprecate the grid coupled diff-pair pre-pass
+- **PR #7978**: chore(deps-dev): Bump the npm-minor-patch group across 1 directory with 2 updates
+- **PR #7977**: chore(deps): Bump the uv-minor-patch group across 1 directory with 2 updates
+- **PR #7969**: feat(boards): ship board 07 on the lattice pair path
+- **Issue #6448** (closed): [Epic #6441] Phase 6: unify diff-pair engines — grid consumes PairPlan or grid coupled pre-pass retired
 - **PR #7979**: chore(deps): Bump astro from 7.3.5 to 7.3.8 in /site
 - **PR #7975**: chore(loom): resync installed Loom to v0.19.1227
 - **PR #7972**: fix(router): skip pair end-stub balancing for within-tolerance skew
