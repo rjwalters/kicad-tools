@@ -283,7 +283,7 @@ Root cause verification (for process/behavior issues):
 Local verification:
 - [ ] Fast-tier pre-flight passes (`loom-daemon preflight --issue N`); CI runs the suite
 - [ ] Formatter + linter run on changed files (see "Format and Lint Changed Files" below) — a format-only CI failure is a guaranteed Judge rejection
-- [ ] Commits are signed off if required (`commit.signoff: true` or a DCO requirement — `git commit --signoff`; see "DCO sign-off" above)
+- [ ] No `Signed-off-by:` trailer on any commit; if a `dco`/`sign-off` check is required, PR is labelled `loom:operator` with the replacement-needed comment (see "DCO sign-off" above)
 - [ ] Relevant tests pass
 - [ ] Diff adds/moves a direct forge caller? Rebase onto the landing base; no `defaults/forge/manifest.toml` there = no inventory command. Else declare it under its `[[operation.callers]]` (`defaults/forge/README.md`; a move must drop the old path, which no command flags), then run `loom-daemon forge-inventory validate --manifest-dir defaults/forge` and `gate --manifest-dir defaults/forge --baseline defaults/forge/call-bypass-baseline.toml` (bare forms read the binary's embedded copy). Nonzero blocks review, even if pre-existing: fix, rerun; never add baseline debt or weaken the gate.
 - [ ] Each criterion has explicit verification
@@ -626,19 +626,21 @@ These patterns are **WRONG** — sweep phase validation will reject PRs with tit
 
 ### DCO sign-off
 
-If `commit.signoff` is `true` in `.loom/config.json`, pass `--signoff` on **every**
-commit you author (including `git commit --amend`) so each carries a
-`Signed-off-by:` trailer — DCO-requiring repos gate PRs on it:
+**No role attests a DCO sign-off (operator ruling 2026-10-25, #13089).** Do not pass
+`--signoff` / `-s` and do not write a `Signed-off-by:` trailer; a human certifies
+origin, an agent cannot.
+
+If a required status check name matches `dco` or `sign-?off` (check
+`gh api repos/{owner}/{repo}/branches/<base>/protection/required_status_checks`
+or the ruleset; `CONTRIBUTING.md` / a `DCO` file is a hint to look), then after
+`create-pr.sh` opens the PR, **before any Judge or Doctor pass**:
 
 ```bash
-git commit --signoff -m "fix: validate PR title format in sweep phase validation"
+gh pr edit <PR> --add-label "loom:operator"
+./.loom/scripts/post-comment.sh <PR> --body "DCO required: agent-authored commits carry no sign-off (operator ruling 2026-10-25, #13089). An operator-signed replacement PR is needed."
 ```
 
-If the knob is unset, do a one-time check before your first commit: if
-`CONTRIBUTING.md`/a `DCO` file mentions `Signed-off-by`/DCO **or** a required status
-check name matches `dco`/`sign-?off`, use `--signoff` too and note it in the PR
-body. `--signoff` is harmless when not required. See
-`defaults/docs/commit-signoff.md`.
+See `defaults/docs/commit-signoff.md`.
 
 ---
 
@@ -823,7 +825,7 @@ When creating a PR, verify:
 6. It compiles (pre-flight) and targeted tests pass — **including the formatter/linter on changed files** (see "Format and Lint Changed Files" above); a format-only failure is a guaranteed Judge rejection. CI runs the rest
 7. PR description includes verification table for each criterion
 8. Tests added/updated as needed
-9. Commits carry a `Signed-off-by:` trailer if required (`commit.signoff: true` in `.loom/config.json`, or a DCO/`sign-off` check — see "DCO sign-off")
+9. If a `dco`/`sign-off` check is required, the PR is labelled `loom:operator` with a replacement-needed comment; no commit carries an agent `Signed-off-by:` (see "DCO sign-off")
 10. `## Test Plan` includes a `TDD:` line for any diff touching executing code (see "Test-First Discipline" above) — omit only for docs/config/ADR-only changes
 11. `## Rollout check` section present if the PR is a host-move PR (see "Rollout check" above)
 12. **Synced with latest `origin/main` immediately before push** — "Pre-Push Rebase: Sync with `origin/main`" below

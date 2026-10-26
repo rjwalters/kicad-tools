@@ -1270,7 +1270,7 @@ assert_doc_lacks "$CHAMPION_MD" \
     "the recency criterion no longer derives staleness from the bot-comment-bumped updatedAt field (#6843)"
 
 assert_doc_contains "$CHAMPION_MD" \
-    'PR_DATA=$(cat "$(git rev-parse --git-common-dir)/loom-champion-facts-pr-<number>.json")' \
+    'PR_DATA=$(cat "/tmp/loom-champion/$CHAMPION_KEY/facts-pr-<number>.json")' \
     "the recency criterion reads the PR facts' commits + comments (+ createdAt floor) instead of updatedAt (#6843, #12242)"
 
 assert_doc_contains "$CHAMPION_MD" \

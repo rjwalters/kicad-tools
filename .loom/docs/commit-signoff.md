@@ -1,68 +1,38 @@
-# Commit sign-off (DCO): the `commit.signoff` knob
+# Commit sign-off (DCO): roles never attest it
 
 Some repositories require a [Developer Certificate of Origin](https://developercertificate.org/)
-(DCO) sign-off on **every** commit — a `Signed-off-by: Name <email>` trailer,
-produced by `git commit --signoff`. These repos typically enforce it with a
-required `sign-off` / `DCO` status check that fails any PR whose commits lack the
-trailer.
+(DCO) sign-off on **every** commit: a `Signed-off-by: Name <email>` trailer,
+produced by `git commit --signoff`, usually enforced by a required `sign-off` /
+`DCO` status check.
 
-Loom's Builder and Doctor roles author the commits that land in a PR, so a
-DCO-requiring repo will fail those PRs on the first Judge pass unless the roles
-sign off. This page documents the opt-in knob that makes them do so
-deterministically.
+## Policy (operator ruling 2026-10-25, #13089)
 
-## The knob
+**No role attests a DCO sign-off.** A `Signed-off-by:` trailer is a human's
+certification of origin; an agent cannot give it. Builder, Doctor and every other
+role therefore:
 
-Add to the repo's `.loom/config.json`:
+- never pass `--signoff` / `-s` (including on `--amend` and rebase re-authoring);
+- never write a `Signed-off-by:` trailer by hand;
+- **route to the operator instead.** When an agent-authored PR opens in a repo
+  whose required checks match `dco` or `sign-?off`, apply `loom:operator` with a
+  comment saying an operator-signed replacement is needed, **before** any Judge or
+  Doctor pass.
 
-```json
-{
-  "commit": {
-    "signoff": true
-  }
-}
+The `commit.signoff` knob in `.loom/config.json` and the `CONTRIBUTING.md` /
+`DCO`-file heuristic that used to make the roles sign off are retired. A repo that
+still sets `commit.signoff` gets no behavior change from it.
+
+## Detecting a DCO requirement
+
+Check the base branch's required status checks (branch protection or ruleset) for
+a name matching `dco` or `sign-?off`. A `CONTRIBUTING.md` or `DCO` file that
+mentions `Signed-off-by` is a hint to look, not proof the check is required.
+
+## Routing recipe
+
+```bash
+gh pr edit <PR> --add-label "loom:operator"
+./.loom/scripts/post-comment.sh <PR> --body "DCO required: agent-authored commits carry no sign-off (operator ruling 2026-10-25, #13089). An operator-signed replacement PR is needed."
 ```
 
-When `commit.signoff` is `true`, the Builder and Doctor roles pass `--signoff` on
-**every** commit they author, including `git commit --amend` and the rebase +
-force-push path. Each resulting commit carries a `Signed-off-by:` trailer for the
-committing identity.
-
-**The knob is the load-bearing guarantee.** It is read the same way roles already
-read `buildGate.command` — from `.loom/config.json`, by the role prompt. There is
-no git-native "always sign off `git commit`" setting (`format.signoff` affects
-`git format-patch` only), so the trailer must come from `--signoff` on each commit.
-
-### Absent by default
-
-`commit.signoff` is **opt-in and absent by default** — it is intentionally *not*
-present in `defaults/config.json`, and enabling it is a per-consuming-repo choice.
-When the knob is unset, commit behavior is unchanged (no trailer added), except for
-the advisory heuristic below.
-
-## Detection heuristic (advisory fallback)
-
-When the knob is **unset**, the roles do one bounded, best-effort check before the
-first commit and use `--signoff` if any of these fire (noting it in the PR body):
-
-- `CONTRIBUTING.md` (or a `DCO` / `DCO.txt` file) mentions `Signed-off-by` or DCO, or
-- the repo has a required status check whose name matches `dco` or `sign-?off`.
-
-The heuristic is **advisory, not load-bearing** — set the knob for a guarantee. A
-`--signoff` on a repo that does not require it is harmless: it only adds a trailer.
-
-## Edge cases
-
-- **No duplicate trailer**: `git commit --signoff` does not add a second identical
-  `Signed-off-by:` trailer when one for the same identity is already present.
-- **Amend / rebase**: the same rule applies to `git commit --amend --signoff` and
-  to any commit re-authored during a rebase + `git push --force-with-lease`.
-- **Existing trailer**: a commit that already carries the trailer is left as-is.
-
-## Optional hook backstop (not installed by default)
-
-A repo-local `prepare-commit-msg` hook that appends the trailer when missing would
-make the guarantee independent of prompt adherence. Loom does **not** install one:
-`worktree.sh` stays free of DCO-specific behavior, and the knob-driven prompt
-guidance is the mechanism. Repos that want a hard, prompt-independent guarantee can
-add such a hook themselves.
+The operator signs the work off and opens the replacement; the agent PR is closed.

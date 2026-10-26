@@ -2178,6 +2178,9 @@ chain has no worklist tier, never a 0):
 | `loom.discovery.repos.{ok,unknown,backfilling,error}` | Of those, by the worklist's `status` for the repo (a repo the worklist omits counts as `unknown`; a failed request counts every repo as `error`) |
 | `loom.discovery.items` | Open issues and PRs in the snapshot (count) |
 | `loom.discovery.forge_reads` | Per-repo forge listing calls made for discovery. `0` while every repo is served by the mirror tier. Per-item gate reads (hold markers, CI at a Judge head) are not listings and are not counted (count) |
+| `loom.discovery.live_reads.landed` | Closes-graph queries the landed pre-filter sent this tick (#12317). The mirror lists open items only, so "has a merged PR closed this candidate?" stays a live forge read (`purpose = discovery`; GitHub only). It and `.markers` are the only discovery reads left while `tier = mirror`; the way to zero is for the mirror to serve merged PRs that close #N (count) |
+| `loom.discovery.live_reads.markers` | Trusted-comment reads for the hold markers of `loom:blocked` PRs this tick (#12317). Comments are outside the mirror's scope by design, so these stay live (`purpose = discovery`; count) |
+| `loom.discovery.live_reads.ci` | Judge heads the snapshot had no check summary for, so the gather read CI at the head itself (`pr_planning`, cached 60 s per head). `0` while the worklist summarises every head; always `0` on the direct backend, which reads CI as before (count) |
 | `loom.discovery.stale_repos` | Repos whose newest watermark evidence is older than `forge.mirror.maxStalenessSecs`. They are served anyway (worklist only; count) |
 | `loom.discovery.oldest_watermark_age_secs` | Age of the stalest repo's newest watermark evidence (worklist only; seconds) |
 

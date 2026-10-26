@@ -76,9 +76,12 @@ chmod +x "$WORK/.loom/scripts/post-comment.sh"
 # FIX_COMMENTS its trusted comments (loom-daemon forge trusted-comments --gh-shape)
 # FIX_EVENTS   issues/N/events payload; FIX_EVENTS_FAIL=1 makes the read fail
 # FIX_LIST     gh pr list payload for the census
-git() { [[ "$*" == "rev-parse --git-common-dir" ]] && echo "$WORK"; }
+# #13200: the facts file lives under /tmp/loom-champion/<sha256 of the git common dir, first 12 hex>, not in .git.
+FACTS_DIR="/tmp/loom-champion/$(printf '%s\n' "$WORK" | sha256sum | cut -c1-12)"
+mkdir -p "$FACTS_DIR"; trap 'rm -rf "$WORK" "$FACTS_DIR"' EXIT
+git() { [[ "$*" == "rev-parse --path-format=absolute --git-common-dir" ]] && echo "$WORK"; }
 # Write the "0. PR facts" file the precheck reads, from FIX_PR + FIX_COMMENTS.
-write_facts() { jq --argjson c "$FIX_COMMENTS" '.comments = $c' <<<"$FIX_PR" >"$WORK/loom-champion-facts-pr-$1.json"; }
+write_facts() { jq --argjson c "$FIX_COMMENTS" '.comments = $c' <<<"$FIX_PR" >"$FACTS_DIR/facts-pr-$1.json"; }
 gh() {
     case "$1 $2" in
         "pr view") printf '%s\n' "$FIX_PR" ;;
