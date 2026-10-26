@@ -13,6 +13,11 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-10-26
+
+- **PR #7972**: fix(router): skip pair end-stub balancing for within-tolerance skew
+- **Issue #7970** (closed): slow-tests: test_armc_route_gives_usb_d_equal_vias_with_every_gate errors at setup (ROUTING FAILED: pour pads left unconnected)
+
 ### 2026-10-25
 
 - **PR #7971**: chore(loom): resync installed Loom to v0.19.1225
