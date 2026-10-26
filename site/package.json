@@ -16,7 +16,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "astro": "^7.3.5"
+    "astro": "^7.3.8"
   },
   "devDependencies": {
     "@astrojs/check": "^0.9.10",
