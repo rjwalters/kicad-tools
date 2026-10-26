@@ -12,6 +12,11 @@
 # Issue #5333 (main 8435ea01c, seed 42, PYTHONHASHSEED=42, pinned KiCad
 # 10.0.6 image): copper_safety 0, opens 0, skew_out_of_range 0 (DQS now
 # 0.045 mm after #7812), so skew_out_of_range is lowered to 0.
+# Issue #6448 slice 1 (main 1388d4190, seed 42, PYTHONHASHSEED=42, native
+# build 65, pinned KiCad 10.0.6 image): the recipe now routes on the lattice
+# engine (`--route-engine lattice --strategy basic`).  copper_safety 0,
+# opens 0, skew_out_of_range 0 -- unchanged; MIPI/TMDS pairs 0.000 mm, DQS
+# 0.260 mm, all inside their #7883 ps budgets and the .kicad_dru mm forms.
 # `null` would mean "not measured": the checker reports it and does not gate.
 #
 # To refresh: read the numbers from the latest run's job summary and commit the

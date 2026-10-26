@@ -1764,6 +1764,11 @@ jobs:
     # value the committed floor already carries, and 2 better than a loop-off
     # local regen).  90 min matches the precedent already set by
     # board-05-routing-regression.
+    #
+    # Issue #6448 (slice 1): the recipe now routes on the lattice engine
+    # (``--route-engine lattice --strategy basic``) with the placement-delta
+    # loop off, so the route step is ONE lattice pass (~1 min locally).  The
+    # allowance is left at 90 min; it is a wall-clock ceiling, not a gate.
     timeout-minutes: 90
     # Issue #3146 closure: the matrix-scoped soft-fail
     # (``continue-on-error: ${{ matrix.board == 'boards/07-matchgroup-test' }}``)
@@ -2694,7 +2699,9 @@ jobs:
     # the loop-off recipe.  This is a wall-clock allowance, NOT a
     # correctness threshold -- every gate below is unchanged (the known-open
     # set and the DRC allowlist floor both hold).  90 min matches the
-    # precedent set by ``board-05-routing-regression``.
+    # precedent set by ``board-05-routing-regression``.  Issue #6448: the
+    # recipe now runs one lattice pass with the loop off (~1 min locally);
+    # the ceiling is left unchanged.
     timeout-minutes: 90
     container:
       image: ${{ needs.kicad_pin.outputs.image }}

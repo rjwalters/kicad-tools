@@ -347,14 +347,22 @@ class TestBoard07BudgetContract:
     def test_total_covers_every_stage_the_recipe_permits(self):
         mod = _load_board_07_recipe()
         search = mod.ROUTE_SEARCH_TIMEOUT_S
-        probes = mod.PLACEMENT_DELTA_FEEDBACK_BUDGET * mod.PLACEMENT_DELTA_FEEDBACK_TIMEOUT_S
+        # Issue #6448: the lattice recipe runs with the placement-delta loop
+        # off, so it permits no probe stages; the total must still cover
+        # whichever stages the recipe does permit.
+        probes = (
+            mod.PLACEMENT_DELTA_FEEDBACK_BUDGET * mod.PLACEMENT_DELTA_FEEDBACK_TIMEOUT_S
+            if mod.PLACEMENT_DELTA_FEEDBACK
+            else 0
+        )
         total = mod._route_total_timeout_s()
 
         assert search == 600, "the initial search stage keeps its measured 600 s allocation"
         assert mod.PLACEMENT_DELTA_FEEDBACK_TIMEOUT_S == 600, (
             "probes must get the SAME wall clock as the initial pass"
         )
-        # The whole point: 600 + 2x600 fits, with room left for postprocessing.
+        # The whole point: every permitted stage fits (600 + 2x600 with the
+        # loop on, 600 with it off), with room left for postprocessing.
         assert total >= search + probes
         assert total - (search + probes) >= 300
         # ... and the total still fits the existing 90-minute CI allowance.

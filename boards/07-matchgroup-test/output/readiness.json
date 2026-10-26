@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "checked_at": "2026-10-21T03:20:00+00:00",
+  "checked_at": "2026-10-25T20:30:00+00:00",
   "mode": "assembly",
   "status": "ready",
   "blockers": [],
@@ -177,7 +177,7 @@
     "output/readiness/native-drc.json": "91ab0119eef9e6d04aadb8a8ee0dcff28570d05919b5d6bcee5f813b0f26a8c2",
     "output/readiness/validation.json": "a094cc52a4fced79c333193aba894530e81a026a0d837749c0ce2885f53dd75c",
     "output/sdram_constraints.json": "0916629d2f25c3e3a68e233ec05b85c6e578fd6fd54447204d28eb4153e39628",
-    "README.md": "0f6246342f0ec4d2a111dfbda70d11282b9e55b896ba312640b1c26a4e8d9998",
+    "README.md": "7832d3cd94cce5b6ff744877e8aff48dda141d42612b7f751407973141418162",
     "project.kct": "30a0730996b8fbcf274b1e5fccbc119cef89a6d23111632e688363960facbd2b",
     "real_design/repair-plan.json": "733d9bb9289d243d82e810b60b39a80cce6c644fc719cdad2fced058b7b1d26b",
     "real_design/optimization-evidence/checked.kicad_pro": "0302972d3b5268436bf2f69d5a031d7844275a25a159e369299c09992d61d047",

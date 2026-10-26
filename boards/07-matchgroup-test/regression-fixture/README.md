@@ -325,6 +325,12 @@ provenance record. Earlier sections describe the pre-retune bytes.
 
 ### Placement-delta feedback (#4468, epic #3438 Phase 3)
 
+> **Off since #6448.** The recipe now routes on the lattice engine, and the
+> loop's probes re-route with the grid negotiated router, so
+> `PLACEMENT_DELTA_FEEDBACK` is `False`. The lattice route reaches 31/31,
+> so the loop would have nothing to probe. This section records the grid
+> recipe's measurements.
+
 The route step runs `kct route --placement-delta-feedback
 --placement-delta-feedback-budget 2 --placement-delta-feedback-timeout
 600` (wired from the `PLACEMENT_DELTA_FEEDBACK*` constants at the top of
@@ -727,6 +733,30 @@ The gate is a sibling of the `diffpair-routing-regression` job (board
    names the open nets.  The committed 27/31 routed artifact in this
    directory is below the contract on purpose; it is the witness that
    the assertion bites (`--skip-route` against it fails).
+
+### Lattice recipe (Issue #6448, slice 1)
+
+The recipe routes with `--route-engine lattice --strategy basic` (plus the
+unchanged `--differential-pairs`, `--tighten-diffpair-gap`,
+`--length-match-groups`, `--deterministic-budget`, seed 42). The grid
+`--strategy negotiated` run and its placement-delta loop are gone. Measured on
+main `1388d4190` (native build 65, `PYTHONHASHSEED=42`, pinned KiCad 10.0.6
+image, `--refill-zones`):
+
+| check | lattice recipe |
+|---|---|
+| pairs coupled | 7/7 |
+| signal reach / copper-LVS | 31/31; 0 shorts / 0 opens over 244 pads |
+| pair skew | DQS 0.260 mm (1.454 ps of 2.00 ps); MIPI_CLK/DAT0/DAT1 and TMDS_D0/D1/D2 0.000 mm |
+| group skew | DDR_DATA_BYTE_0 0.001 mm; MIPI_CSI_LANES 0.000 mm; HDMI_TMDS_LANES 0.000 mm |
+| `kct check --mfr jlcpcb` | 0 errors |
+| kicad-cli DRC | 0 errors, 0 unconnected; the same 24 warnings as grid |
+| `check_board07_diffpair_baseline.py` | copper_safety 0, opens 0, skew_out_of_range 0 |
+| `check_matchgroup_coverage.py --seed 42` | exit 0, 0 unallowed errors |
+
+The route step runs about 1 min, against about 27 min for the grid recipe.
+Its derived `--timeout` drops from 2400 s to 1200 s because there are no
+probe allocations.
 
 ### Re-route reach (seed 42, Issue #7319)
 
