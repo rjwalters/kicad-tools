@@ -16,6 +16,7 @@ tests pin that on the board-07 pad pattern, with no tuner in the loop.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 
 import pytest
@@ -104,7 +105,7 @@ def test_end_balanced_centerline_leaves_a_stub_along_its_pad_axis() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _board07_pattern(*, swap: bool):
+def _board07_pattern(*, swap: bool, skew_tolerance_mm: float = 0.25):
     """Side-by-side connector pads -> stacked BGA balls: a 90-degree net turn.
 
     ``swap`` trades the P and N pad positions at both ends, which makes N the
@@ -129,7 +130,7 @@ def _board07_pattern(*, swap: bool):
         pad_n_a=n_a,
         pad_p_b=p_b,
         pad_n_b=n_b,
-        net_class=_HS,
+        net_class=dataclasses.replace(_HS, skew_tolerance_mm=skew_tolerance_mm),
         pitch=_PITCH,
     )
     return pf, pc, pads
@@ -139,11 +140,17 @@ def _length(route) -> float:
     return sum(math.hypot(s.x2 - s.x1, s.y2 - s.y1) for s in route.segments)
 
 
-def _route(monkeypatch: pytest.MonkeyPatch, *, swap: bool, balance: bool):
+def _route(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    swap: bool,
+    balance: bool,
+    skew_tolerance_mm: float = 0.25,
+):
     with monkeypatch.context() as m:
         if not balance:
             m.setattr(pathfinder_mod, "_end_balanced_centerline", lambda *_a, **_k: None)
-        pf, pc, pads = _board07_pattern(swap=swap)
+        pf, pc, pads = _board07_pattern(swap=swap, skew_tolerance_mm=skew_tolerance_mm)
         routes, _stats = pf.route_netset([], coupled=[pc])
     assert pf.pair_outcomes[pc.key] == "coupled", pf.pair_outcomes
     return routes[(pc.key, "P")], routes[(pc.key, "N")], pads
@@ -177,3 +184,14 @@ def test_balanced_legs_keep_full_clearance_to_the_partner_pads(monkeypatch, swap
             rect = (pad.x - hw, pad.y - hh, pad.x + hw, pad.y + hh)
             for s in route.segments:
                 assert seg_rect_dist((s.x1, s.y1), (s.x2, s.y2), rect) >= need, (pad.ref, s)
+
+
+@pytest.mark.parametrize("swap", [False, True], ids=["p-outside", "n-outside"])
+def test_skew_within_the_pair_tolerance_keeps_the_searched_stubs(monkeypatch, swap: bool) -> None:
+    # Issue #7970: board 03's USB_D (2.5 mm full-speed bound) carries a turn
+    # skew its bound accepts; moving its stubs cost the later VCC pour
+    # closure a via spot.  Copper moves only for a skew the bound would flag.
+    kept_p, kept_n, _ = _route(monkeypatch, swap=swap, balance=True, skew_tolerance_mm=2.5)
+    off_p, off_n, _ = _route(monkeypatch, swap=swap, balance=False, skew_tolerance_mm=2.5)
+    assert _length(kept_p) == pytest.approx(_length(off_p))
+    assert _length(kept_n) == pytest.approx(_length(off_n))

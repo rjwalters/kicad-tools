@@ -15,6 +15,7 @@ Two pieces, both default behaviour on the lattice engine:
 
 from __future__ import annotations
 
+import dataclasses
 import math
 
 import pytest
@@ -145,7 +146,9 @@ def _turning_pair(b_x: float, b_y: float) -> tuple[LatticePathfinder, CoupledCon
         pad_n_a=n_a,
         pad_p_b=p_b,
         pad_n_b=n_b,
-        net_class=_HS,
+        # Issue #7970: end-stub balancing only moves copper for a skew the
+        # pair's bound would flag, so give the pair a bound below the turn skew.
+        net_class=dataclasses.replace(_HS, skew_tolerance_mm=0.05),
         pitch=_PITCH,
     )
     return pf, pc
