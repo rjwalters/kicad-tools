@@ -41,13 +41,15 @@ Issues currently being built (`loom:building`).
 
 PRs waiting on Judge (`loom:review-requested`).
 
-_None._
+- **#7977**: chore(deps): Bump the uv-minor-patch group across 1 directory with 2 updates
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
 - **#7969**: feat(boards): ship board 07 on the lattice pair path
+- **#7978**: chore(deps-dev): Bump the npm-minor-patch group across 1 directory with 2 updates
+- **#7980**: chore(deps): Bump the github-actions group across 1 directory with 4 updates
 
 ## Proposed
 
@@ -82,8 +84,8 @@ Issues carrying `loom:curated`.
 | Important | 0 |
 | Ready (`loom:issue`) | 0 |
 | In Progress (`loom:building`) | 1 |
-| PRs awaiting review | 0 |
-| Approved PRs awaiting merge | 1 |
+| PRs awaiting review | 1 |
+| Approved PRs awaiting merge | 3 |
 | Curated | 6 |
 | Architect / Hermit proposals | 2 |
 | Active epics | 5 |
