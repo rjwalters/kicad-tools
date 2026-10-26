@@ -20,6 +20,7 @@ import math
 import os
 import re
 import time
+import warnings as _stdlib_warnings
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
@@ -14175,6 +14176,14 @@ class DiffPairRouter:
                 routed (and should therefore be skipped by the follow-up
                 strategy).
         """
+        _stdlib_warnings.warn(
+            "route_diffpair_prepass (the grid coupled diff-pair pre-pass) is "
+            "deprecated and will be removed in a future release (Issue #6448); "
+            "route pairs with the lattice pair path "
+            "(--route-engine lattice --strategy basic --differential-pairs)",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         # Issue #6008: this driver can route without the ``route_all*``
         # preamble that installs board keepout rule areas, so install them
         # here (idempotent; one ``getattr`` once installed).

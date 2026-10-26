@@ -1133,6 +1133,7 @@ Common flags (the full surface lives in `kct route --help`):
 |--------|-------------|
 | `-o`, `--output PATH` | Output file (default: `<input>_routed.kicad_pcb`) |
 | `--strategy {basic,negotiated,monte-carlo,evolutionary}` | Routing strategy (default: `negotiated`) |
+| `--differential-pairs` | Route differential pairs coupled. **Deprecated on the grid engine (#6448)** — warns and is removed one release later; use `--route-engine lattice --strategy basic --differential-pairs` |
 | `--trace-width MM` / `--clearance MM` | Trace + clearance overrides |
 | `--via-diameter MM` / `--via-drill MM` | Via geometry |
 | `--manufacturer NAME` (`--mfr`) | Manufacturer profile for DRC and adaptive rules |

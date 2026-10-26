@@ -18,6 +18,8 @@ and the dispatcher integration in
 
 import dataclasses
 
+import pytest
+
 from kicad_tools.router.core import Autorouter
 from kicad_tools.router.diffpair import (
     DifferentialPair,
@@ -31,6 +33,9 @@ from kicad_tools.router.rules import (
     DesignRules,
     NetClassRouting,
 )
+
+# Issue #6448: the deprecated grid coupled pre-pass is exercised on purpose here.
+pytestmark = pytest.mark.filterwarnings("ignore:route_diffpair_prepass.*:DeprecationWarning")
 
 # =============================================================================
 # Test helpers
