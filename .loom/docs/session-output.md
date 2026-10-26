@@ -17,7 +17,6 @@ It is **off by default** and must be enabled deliberately. See
 - [Latency](#latency)
 - [Consumer query example](#consumer-query-example)
 - [Configuration](#configuration)
-- [The S3 write path: chunks and pointer events](#the-s3-write-path-chunks-and-pointer-events)
 - [Attended runs (removed, #12536)](#attended-runs-removed-12536)
 - [Supported runtimes](#supported-runtimes)
 - [Rollout](#rollout)
@@ -380,42 +379,6 @@ or every `loom.session.output.*` attribute is stripped by `transform/privacy`
 and the bodies arrive un-rescrubbed by the gateway (the producer still scrubs
 them).
 
-## The S3 write path: chunks and pointer events
-
-Alongside the OTLP export, which is unchanged, the producer can write the same
-post-scrub records to the artifact store's `logs/` prefix (2am#5933, design
-2am#5480). It is **inert until a store is registered**
-(`session_output::register_chunk_store`); the store is the `ChunkStore` trait,
-implemented by the `artifact-broker` client (2am#5563). The OTLP offer always
-happens first, and a failing store can neither delay nor fail it.
-
-- **Chunks.** Records are batched per stream in `(stream_id, sequence)` order
-  into zstd-compressed ndjson, one record per line. A chunk closes at 256 KB
-  uncompressed or 5 s after its first record, whichever comes first, and is put
-  as `kind: log`. The broker builds the key,
-  `logs/<host>/<yyyy-mm>/<sha256>.zst`, where `<yyyy-mm>` is the **writing**
-  time and `<sha256>` the hash of the compressed bytes, so a replayed record
-  set hashes to the same key and the put is a no-op. The producer does not
-  de-duplicate.
-- **Pointer events.** The key carries no repo, issue or stream, so each stored
-  chunk is announced by one `daemon.event` with topic `session.output.chunk`
-  whose `loom.payload` holds `loom.repo`, `loom.issue`, `loom.session_id`,
-  `stream_id`, `first_sequence`, `last_sequence`, `first_source_at`,
-  `last_source_at`, `host`, `month`, `sha256`, `size`, `records` and
-  `dropped_events`. It contains no record text. A chunk with no `loom.issue`
-  is still written; its pointer carries `null`.
-- **Redaction.** Chunk bytes never cross the captain edge, so
-  `redact::scrub` carries the edge's `transform/live-output` pattern set
-  (PEM, including an unterminated block, GitHub tokens, `AKIA`/`ASIA`, AWS
-  secrets, JWT, Azure SAS, signed URLs, SSM paths) and is applied again to
-  every free-text field of each record as it is chunked.
-- **Never written.** A record whose `loom.repo` is unresolved, malformed, or
-  `notebook` / `corporate` (any case) produces no chunk and no pointer.
-- **Failure.** Sealed chunks wait in a bounded retry queue (64). On overflow
-  the oldest is dropped and the loss is declared as `dropped_events` on the
-  next chunk (a `{"chunk_meta":{"dropped_events":N}}` first line, and the
-  pointer field). Gap and coverage records pass through verbatim.
-
 ## Attended runs (removed, #12536)
 
 The daemon publishes `session.output` only for the sweeps it dispatched.
@@ -534,7 +497,6 @@ repository's config → SigNoz):
 | [`telemetry/kinds/session_output/redact.rs`](https://github.com/rjwalters/loom/blob/main/loom-daemon/src/telemetry/kinds/session_output/redact.rs) | Producer-edge redaction (`producer/v1`), scrub-then-clip |
 | [`observability/session_output.rs`](https://github.com/rjwalters/loom/blob/main/loom-daemon/src/observability/session_output.rs) | Config/gate, sink over existing OTLP queues, run tracking, the tick loop |
 | [`observability/session_output/claude.rs`](https://github.com/rjwalters/loom/blob/main/loom-daemon/src/observability/session_output/claude.rs) | The Claude adapter: incremental tail, content boundary, gap detection |
-| [`observability/session_output/chunker.rs`](https://github.com/rjwalters/loom/blob/main/loom-daemon/src/observability/session_output/chunker.rs) | S3 chunks, retry queue, chunk-pointer payload |
 | [`observability/session_output/latency.rs`](https://github.com/rjwalters/loom/blob/main/loom-daemon/src/observability/session_output/latency.rs) | Producer-lag window, percentiles, historical-sample exclusion |
 | [`observability/otlp/mapping/session_output.rs`](https://github.com/rjwalters/loom/blob/main/loom-daemon/src/observability/otlp/mapping/session_output.rs) | OTLP log mapping, dual timestamps, severity |
 | [`defaults/observability/collector/config.yaml`](https://github.com/rjwalters/loom/blob/main/defaults/observability/collector/config.yaml) | Gateway re-scrub stage + attribute allowlist |

@@ -1089,30 +1089,13 @@ git diff   # Read the actual changes
 
 ### Commit Conventions: DCO / sign-off
 
-Some repos require a DCO `Signed-off-by:` trailer on **every** commit (enforced by
-a required `sign-off`/`DCO` status check). Honor it so your PR passes on the first
-Judge pass instead of burning a Doctor cycle on `git commit --amend --signoff`:
-
-```bash
-# Load-bearing: if commit.signoff is true in .loom/config.json, pass --signoff
-# on EVERY commit you author (including --amend).
-if [ "$(jq -r '.commit.signoff // false' .loom/config.json 2>/dev/null)" = "true" ]; then
-  git commit --signoff -m "fix: ..."
-else
-  git commit -m "fix: ..."
-fi
-```
-
-- **Knob (deterministic)**: `commit.signoff: true` in `.loom/config.json` ⇒ always
-  `--signoff`. Read it the same way you read `buildGate.command`. Absent ⇒ behavior
-  unchanged, except:
-- **Heuristic (advisory fallback, knob unset)**: before your first commit, if
-  `CONTRIBUTING.md`/a `DCO` file mentions `Signed-off-by`/DCO, **or** a required
-  status check name matches `dco`/`sign-?off`, use `--signoff` too and note it in
-  the PR body.
-- `--signoff` is harmless when not required (only adds a trailer); git does not add
-  a duplicate trailer for an identity already present. Full reference:
-  `defaults/docs/commit-signoff.md`.
+**No role attests a DCO sign-off (operator ruling 2026-10-25, #13089).** Never pass
+`--signoff` / `-s` and never write a `Signed-off-by:` trailer: a `Signed-off-by:` is
+a human's certification of origin, and an agent cannot make it. If the repo's
+required checks match `dco` or `sign-?off`, commit normally, open the PR, then
+route it to the operator (`loom:operator` plus a comment saying an
+operator-signed replacement is needed) before any Judge or Doctor pass. Recipe:
+builder-pr.md § "DCO sign-off"; reference: `defaults/docs/commit-signoff.md`.
 
 ### Closing vs Non-Closing References (multi-PR landings)
 

@@ -63,11 +63,14 @@ awk '/^```bash$/{buf="";inb=1;next} /^```$/{if(inb&&buf~/merge-queue step/){prin
 [[ -s "$TMP/step3.sh" ]] || { echo "FAIL: could not extract Step 3 block"; exit 1; }
 bash -n "$TMP/step3.sh" || { echo "FAIL: Step 3 block is not valid bash"; exit 1; }
 
-# git: only `rev-parse --git-common-dir` answers (where the --pr pin file lives).
+# git: only `rev-parse --path-format=absolute --git-common-dir` answers (it keys the
+# temp dir where the --pr pin file lives, #13200).
 mkdir -p "$TMP/gitdir"
+PIN_DIR="/tmp/loom-champion/$(printf '%s\n' "$TMP/gitdir" | sha256sum | cut -c1-12)"
+mkdir -p "$PIN_DIR"; trap 'rm -rf "$TMP" "$PIN_DIR"' EXIT
 cat > "$TMP/bin/git" <<S
 #!/usr/bin/env bash
-[ "\$*" = "rev-parse --git-common-dir" ] && echo "$TMP/gitdir"
+[ "\$*" = "rev-parse --path-format=absolute --git-common-dir" ] && echo "$TMP/gitdir"
 exit 0
 S
 cat > "$TMP/bin/gh" <<S
@@ -123,7 +126,7 @@ check "exit 1 is still a failure under --pr N" eval 'has "Merge failed for PR #4
 unset MERGE_STUB_RC
 
 echo "--- 1b. the --pr pin file: fail closed when the pin does not reach Step 3 ---"
-PIN_FILE="$TMP/gitdir/loom-champion-pin-pr-42"
+PIN_FILE="$PIN_DIR/pin-pr-42"
 printf '%s\n' "$EVAL_SHA" > "$PIN_FILE"
 run_step3
 check "pin file + NO EXPECTED_HEAD (the env var was lost between calls): no merge, no queue call" \
@@ -189,11 +192,11 @@ check "an unknown or doubled argument refuses and touches nothing" \
   doc_has "$TARGETED_MD" 'Error: /loom:champion takes --pr N, --issue N or --non-item'
 # --pr N
 check "--pr: writes the pin file only for an eligible PR" doc_has "$TARGETED_MD" '[ -n "$EVALUATED_SHA" ] && printf'
-check "--pr: the pin records the step's agent process (#11902)" doc_has "$TARGETED_MD" '"$EVALUATED_SHA" "$PPID" > "$(git rev-parse --git-common-dir)/loom-champion-pin-pr-N"'
+check "--pr: the pin records the step's agent process (#11902)" doc_has "$TARGETED_MD" '"$EVALUATED_SHA" "$PPID" > "/tmp/loom-champion/$CHAMPION_KEY/pin-pr-N"'
 check "--pr: Step 3 must carry the SHA literally (env does not survive tool calls)" \
   doc_has "$TARGETED_MD" 'first line must be `EXPECTED_HEAD=<that SHA, written out literally>`'
 check "--pr: a lost pin is outcome requeued, never merged" doc_has "$TARGETED_MD" '9 (`CHAMPION-PIN-MISSING`): not merged, still approved, no "Merge Failed"'
-check "--pr: the pin file is removed at the end of every step, by a literal command" doc_has "$TARGETED_MD" '`rm -f "$(git rev-parse --git-common-dir)/loom-champion-pin-pr-N"`'
+check "--pr: the pin file is removed at the end of every step, by a literal command" doc_has "$TARGETED_MD" '`rm -f "/tmp/loom-champion/$CHAMPION_KEY/pin-pr-N"`'
 check "batch Step 3 never reads a pin it was not given: the guard is a no-op without a pin file" \
   doc_has "$PR_MERGE_MD" 'if [ -n "$PIN" ] && [ "${EXPECTED_HEAD:-}" != "$PIN" ]; then MERGE_RC=9'
 check "--pr: full criteria, sticky holds, merge-risk axes, health pass" \
@@ -237,7 +240,7 @@ awk '/^## `--pr N`: one merge decision/{on=1} on&&/^ *```bash$/{inb=1;next} inb&
 bash -n "$TMP/step1.sh" || { echo "FAIL: --pr step 1 block is not valid bash"; exit 1; }
 run_step1() { # FAKE_PR_JSON
   out=$( cd "$TMP" && FAKE_PR_JSON="$1" PATH="$TMP/bin:$PATH" bash "$TMP/step1.sh" 2>&1 )
-  rm -f "$TMP/gitdir"/loom-champion-pin-pr-*
+  rm -f "$PIN_DIR"/pin-pr-*
 }
 # HEAD_REPO (a JSON value: the head repo object, or null for a deleted fork)
 # and ASSOC (author_association) default to a same-repo PR by the owner.

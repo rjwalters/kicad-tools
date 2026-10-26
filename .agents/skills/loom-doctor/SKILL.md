@@ -689,7 +689,7 @@ gh pr edit 588 --remove-label "loom:treating" --add-label "loom:review-requested
    - **Pre-push head-SHA recheck (MANDATORY)**: before the push, re-compare the PR's `headRefOid` against the `CLAIM_HEAD_SHA` you captured in step 2 — see "Pre-Push Head-SHA Recheck" below. If the head moved, another agent pushed while you were working; re-verify the blocker is still unaddressed and stand down rather than duplicating (or clobbering) their fix.
    - **Then run "Pin the lease" below, top to bottom**: the pre-open update from `origin/main` (MANDATORY, #7668, as `builder-pr.md` § "Pre-Push Rebase"; a merge unless `loom-daemon branch-update strategy` says rebase, #10771) and the push (#9487). Never update before it. On a conflict resolve in place (`git add`, then `git commit --no-edit` or `git rebase --continue`), resume at its version gate, not "PR Has Merge Conflicts". No-op if `main` hasn't moved.
    - **Lease fence (MANDATORY)**: its `lease pr fence` runs right before the push.
-   - **DCO / sign-off**: if `commit.signoff` is `true` in `.loom/config.json` (read it the same way as `buildGate.command`), or the repo has a DCO / required `sign-off` check, add `--signoff` to **every** commit you author — including `git commit --amend --signoff` when re-authoring during a rebase — so each carries a `Signed-off-by:` trailer. Harmless when not required; git will not add a duplicate trailer. Reference: `defaults/docs/commit-signoff.md`.
+   - **DCO / sign-off**: never pass `--signoff` / `-s` or write a `Signed-off-by:` trailer — no role attests a DCO sign-off (operator ruling 2026-10-25, #13089). If the PR's required checks match `dco` / `sign-?off` and it lacks `loom:operator`, stop: apply `loom:operator` with a comment saying an operator-signed replacement is needed, and do not fix anything else. Reference: `defaults/docs/commit-signoff.md`.
    - **9a. Rebase any stacked children** (best-effort): if the just-pushed branch matches `feature/issue-<N>` (i.e. you amended a stacked *parent*), run:
      ```bash
      ./.loom/scripts/rebase-stacked-children.sh feature/issue-<N>
@@ -1333,8 +1333,7 @@ gh api repos/{owner}/{repo}/pulls/42/comments \
 
 # Commit and push
 git add .
-# DCO: if commit.signoff is true in .loom/config.json (or a DCO check is required),
-# pass --signoff on EVERY commit, --amend too (defaults/docs/commit-signoff.md).
+# DCO: never pass --signoff; no role attests a sign-off (defaults/docs/commit-signoff.md).
 # Never write a skip-CI marker ("[skip ci]" etc.) literally — no CI would run
 # (#11389); add a space inside or describe it.
 git commit -m "Address review feedback

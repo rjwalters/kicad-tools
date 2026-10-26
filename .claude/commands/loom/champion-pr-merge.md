@@ -255,10 +255,13 @@ re-checks with single targeted reads (Step 3's hold classify and
 
 ```bash
 PR_NUMBER=<number>
-# Write the PR number out as digits in the two `loom-champion-facts-pr-<number>.json`
-# paths below that are written or removed (not as `$PR_NUMBER`): the worktree-write
-# guard only admits that exact spelling, and fails closed on a variable path (#13180).
-rm -f "$(git rev-parse --git-common-dir)/loom-champion-facts-pr-<number>.json"
+# Pin and facts files live under a per-repo dir in `/tmp`, never under `.git`: a guard that
+# refuses writes into the main checkout's `.git` (Repo Skills') would otherwise end the
+# step `guard_refused` (#13200). The dir is computed in its own plain assignment and
+# the PR number is written out as digits in the written/removed paths below.
+CHAMPION_KEY=$(git rev-parse --path-format=absolute --git-common-dir | sha256sum | cut -c1-12)
+mkdir -p -m 700 /tmp/loom-champion "/tmp/loom-champion/$CHAMPION_KEY"
+rm -f "/tmp/loom-champion/$CHAMPION_KEY/facts-pr-<number>.json"
 # gh's `--json` shape, so every reader below is unchanged. Comments: TRUSTED
 # authors only (#9548). Any failed read -> skip the PR this pass.
 P=$(gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER") &&
@@ -267,14 +270,14 @@ C=$(loom-daemon forge trusted-comments --fetch "$PR_NUMBER" --gh-shape) &&
 printf '%s\n' "$P" "$K" "$C" | jq -s '.[0] as $p | {labels: [$p.labels[] | {name}], headRefOid: $p.head.sha,
   mergeable: (if $p.mergeable == true then "MERGEABLE" elif $p.mergeable == false then "CONFLICTING" else "UNKNOWN" end),
   createdAt: $p.created_at, updatedAt: $p.updated_at, additions: $p.additions, deletions: $p.deletions,
-  commits: [.[1:-1][][] | {oid: .sha, committedDate: .commit.committer.date}], comments: .[-1]}' > "$(git rev-parse --git-common-dir)/loom-champion-facts-pr-<number>.json" \
-  || { rm -f "$(git rev-parse --git-common-dir)/loom-champion-facts-pr-<number>.json"; echo "SKIP #$PR_NUMBER: PR facts unread (or comments unauthenticated) — no merge, no comment"; continue; }  # single-PR step: outcome=skipped reason=facts_unread
+  commits: [.[1:-1][][] | {oid: .sha, committedDate: .commit.committer.date}], comments: .[-1]}' > "/tmp/loom-champion/$CHAMPION_KEY/facts-pr-<number>.json" \
+  || { rm -f "/tmp/loom-champion/$CHAMPION_KEY/facts-pr-<number>.json"; echo "SKIP #$PR_NUMBER: PR facts unread (or comments unauthenticated) — no merge, no comment"; continue; }  # single-PR step: outcome=skipped reason=facts_unread
 ```
 
 The other blocks re-derive the path with the same `PR_FACTS=` line, because
 shell variables do not survive between tool calls. After the PR's last step
 (merged, held, rejected or skipped), remove it with
-`rm -f "$(git rev-parse --git-common-dir)/loom-champion-facts-pr-<number>.json"`.
+`rm -f "/tmp/loom-champion/$CHAMPION_KEY/facts-pr-<number>.json"` (`CHAMPION_KEY` as defined above).
 
 ### `judge-approval`: Label Check
 - [ ] PR has `loom:pr` label (Judge approval)
@@ -284,7 +287,8 @@ shell variables do not survive between tool calls. After the PR's last step
 ```bash
 # Labels from "0. PR facts" (this pass's live read, never "$GH_READ"): all 6
 # safety criteria are merge-gating (see "Cached forge reads").
-PR_FACTS="$(git rev-parse --git-common-dir)/loom-champion-facts-pr-<number>.json"
+CHAMPION_KEY=$(git rev-parse --path-format=absolute --git-common-dir | sha256sum | cut -c1-12)
+PR_FACTS="/tmp/loom-champion/$CHAMPION_KEY/facts-pr-<number>.json"
 if [ -z "$(find "$PR_FACTS" -mmin -30 2>/dev/null)" ]; then
   echo "FAIL: no PR facts from this pass — run \"0. PR facts\" first"
   exit 1
@@ -338,7 +342,8 @@ gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER/files" --paginate --jq '.[] | "\(.
 gh pr diff "$PR_NUMBER"
 
 # The Judge's verdict comment (how deeply was this verified?), from "0. PR facts"
-jq -r '.comments[] | select(.body | test("Judge"; "i")) | .body' "$(git rev-parse --git-common-dir)/loom-champion-facts-pr-$PR_NUMBER.json"
+CHAMPION_KEY=$(git rev-parse --path-format=absolute --git-common-dir | sha256sum | cut -c1-12)
+jq -r '.comments[] | select(.body | test("Judge"; "i")) | .body' "/tmp/loom-champion/$CHAMPION_KEY/facts-pr-$PR_NUMBER.json"
 ```
 
 **Docs-only fast path (#6134)** — run this check immediately after the
@@ -1387,7 +1392,8 @@ MERGE_BLOCKED_BY_HOLD=false
 # "0. PR facts" — this pass's live read, NOT "$GH_READ": it gates the merge.
 # Comments are TRUSTED authors only (#9548, `.loom/docs/comment-trust.md`): an
 # outsider's marker, release phrase or ✅ is prose. No facts -> skip the PR.
-PR_JSON=$(cat "$(git rev-parse --git-common-dir)/loom-champion-facts-pr-$PR_NUMBER.json") \
+CHAMPION_KEY=$(git rev-parse --path-format=absolute --git-common-dir | sha256sum | cut -c1-12)
+PR_JSON=$(cat "/tmp/loom-champion/$CHAMPION_KEY/facts-pr-$PR_NUMBER.json") \
   || { echo "SKIP #$PR_NUMBER: no PR facts — no merge, no comment"; MERGE_BLOCKED_BY_HOLD=true; continue; }
 
 # `startswith`, not `contains`: a later comment may quote the marker in prose;
@@ -1801,7 +1807,8 @@ The concern must be **specific and falsifiable**. Good: *"touches `merge-pr.sh`'
 **`loom:auto-merge-ok` override**: this label is an explicit human/Judge statement that the PR is safe to auto-merge. It **overrides a merge-risk hold on this criterion only** — it does **not** waive the `critical-files` criterion (critical file exclusion), nor any of the `judge-approval`, `mergeable`, `recency` and `ci-green` criteria. A human who wants a critical-file PR merged should merge it themselves.
 
 ```bash
-HAS_AUTO_MERGE_OK=$(jq '[.labels[].name] | any(. == "loom:auto-merge-ok")' "$(git rev-parse --git-common-dir)/loom-champion-facts-pr-<number>.json")
+CHAMPION_KEY=$(git rev-parse --path-format=absolute --git-common-dir | sha256sum | cut -c1-12)
+HAS_AUTO_MERGE_OK=$(jq '[.labels[].name] | any(. == "loom:auto-merge-ok")' "/tmp/loom-champion/$CHAMPION_KEY/facts-pr-<number>.json")
 if [ "$HAS_AUTO_MERGE_OK" = "true" ]; then
   echo "PASS: Merge-risk hold overridden by loom:auto-merge-ok label"
 fi
@@ -2041,7 +2048,8 @@ Run [`champion-ratification-hold.md`](champion-ratification-hold.md)'s tick on e
 ```bash
 # Check merge status, from "0. PR facts" (live this pass, NOT "$GH_READ":
 # merge-gating, see "Cached forge reads").
-MERGEABLE=$(jq -r '.mergeable' "$(git rev-parse --git-common-dir)/loom-champion-facts-pr-<number>.json")
+CHAMPION_KEY=$(git rev-parse --path-format=absolute --git-common-dir | sha256sum | cut -c1-12)
+MERGEABLE=$(jq -r '.mergeable' "/tmp/loom-champion/$CHAMPION_KEY/facts-pr-<number>.json")
 
 # Verify mergeable state
 if [ "$MERGEABLE" != "MERGEABLE" ]; then
@@ -2085,7 +2093,8 @@ produce. Never let a hold be the reason a conflict goes unreported.
 # `createdAt` is the floor, so a PR with no commits and no non-Champion
 # comments still ages from when it was opened rather than reading as
 # eternally fresh. The facts' comments are already the trusted set.
-PR_DATA=$(cat "$(git rev-parse --git-common-dir)/loom-champion-facts-pr-<number>.json")
+CHAMPION_KEY=$(git rev-parse --path-format=absolute --git-common-dir | sha256sum | cut -c1-12)
+PR_DATA=$(cat "/tmp/loom-champion/$CHAMPION_KEY/facts-pr-<number>.json")
 
 LAST_ACTIVITY=$(jq -r '
   [
@@ -2279,7 +2288,8 @@ from a hold-plus-feedback one before it acts on either.
 ```bash
 PR_NUMBER=<number>
 # The same "0. PR facts" value the mergeable criterion already read.
-MERGEABLE=$(jq -r '.mergeable' "$(git rev-parse --git-common-dir)/loom-champion-facts-pr-$PR_NUMBER.json")
+CHAMPION_KEY=$(git rev-parse --path-format=absolute --git-common-dir | sha256sum | cut -c1-12)
+MERGEABLE=$(jq -r '.mergeable' "/tmp/loom-champion/$CHAMPION_KEY/facts-pr-$PR_NUMBER.json")
 
 if [ "$MERGEABLE" = "CONFLICTING" ] && [ "${MERGE_BLOCKED_BY_HOLD:-false}" = true ]; then
   CONFLICT_MARKER="<!-- champion:held-pr-conflict-notice -->"
@@ -2733,7 +2743,8 @@ PR_NUMBER=$1
 
 # "0. PR facts", NOT "$GH_READ": each bullet below claims a result from THIS
 # pass; a cached answer is restating from memory (#4613, "Cached forge reads").
-PR_DATA=$(cat "$(git rev-parse --git-common-dir)/loom-champion-facts-pr-$PR_NUMBER.json")
+CHAMPION_KEY=$(git rev-parse --path-format=absolute --git-common-dir | sha256sum | cut -c1-12)
+PR_DATA=$(cat "/tmp/loom-champion/$CHAMPION_KEY/facts-pr-$PR_NUMBER.json")
 ADDITIONS=$(printf '%s\n' "$PR_DATA" | jq -r '.additions')
 DELETIONS=$(printf '%s\n' "$PR_DATA" | jq -r '.deletions')
 TOTAL_LINES=$((ADDITIONS + DELETIONS))
@@ -2846,7 +2857,8 @@ echo "Attempting to merge PR #$PR_NUMBER..."
 git checkout main 2>/dev/null || true
 
 # `--pr N` (#11859): a live pin means this block MUST set EXPECTED_HEAD=<sha>. Live: <60 min old, or <24h while its step's agent runs (#11902).
-PF="$(git rev-parse --git-common-dir)/loom-champion-pin-pr-$PR_NUMBER"; PIN=; PIN_PID=; { read -r PIN PIN_PID < "$PF"; } 2>/dev/null
+CHAMPION_KEY=$(git rev-parse --path-format=absolute --git-common-dir | sha256sum | cut -c1-12)
+PF="/tmp/loom-champion/$CHAMPION_KEY/pin-pr-$PR_NUMBER"; PIN=; PIN_PID=; { read -r PIN PIN_PID < "$PF"; } 2>/dev/null
 { [ -n "$(find "$PF" -mmin -60)" ] || { [ "${PIN_PID:-0}" -gt 1 ] && kill -0 "$PIN_PID" && [ -n "$(find "$PF" -mmin -1440)" ]; } || PIN=; } 2>/dev/null
 if [ -n "$PIN" ] && [ "${EXPECTED_HEAD:-}" != "$PIN" ]; then MERGE_RC=9; echo "CHAMPION-PIN-MISSING pr=$PR_NUMBER: set EXPECTED_HEAD=$PIN in this block; not merging";
 # #11932: only `state=clear` (or exit 2: a daemon older than the verb) merges.
