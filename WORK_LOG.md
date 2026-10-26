@@ -15,6 +15,7 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-26
 
+- **PR #7979**: chore(deps): Bump astro from 7.3.5 to 7.3.8 in /site
 - **PR #7975**: chore(loom): resync installed Loom to v0.19.1227
 - **PR #7972**: fix(router): skip pair end-stub balancing for within-tolerance skew
 - **Issue #7970** (closed): slow-tests: test_armc_route_gives_usb_d_equal_vias_with_every_gate errors at setup (ROUTING FAILED: pour pads left unconnected)
