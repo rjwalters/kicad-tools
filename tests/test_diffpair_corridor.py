@@ -31,6 +31,8 @@ import logging
 import math
 import random
 
+import pytest
+
 from kicad_tools.router.core import Autorouter
 from kicad_tools.router.diffpair import DifferentialPairConfig
 from kicad_tools.router.diffpair_routing import (
@@ -42,6 +44,9 @@ from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Pad, Route, Segment, Via
 from kicad_tools.router.rules import DesignRules, NetClassRouting
+
+# Issue #6448: the deprecated grid coupled pre-pass is exercised on purpose here.
+pytestmark = pytest.mark.filterwarnings("ignore:route_diffpair_prepass.*:DeprecationWarning")
 
 # ---------------------------------------------------------------------------
 # build_corridor_mask

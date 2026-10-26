@@ -12,9 +12,14 @@ Verifies that:
   pre-pass and does not re-route those nets.
 """
 
+import pytest
+
 from kicad_tools.router.core import Autorouter
 from kicad_tools.router.diffpair import DifferentialPairConfig
 from kicad_tools.router.rules import DesignRules, NetClassRouting
+
+# Issue #6448: the deprecated grid coupled pre-pass is exercised on purpose here.
+pytestmark = pytest.mark.filterwarnings("ignore:route_diffpair_prepass.*:DeprecationWarning")
 
 
 def _opt_in_diffpair_class_map(net_names: list[str]) -> dict[str, NetClassRouting]:

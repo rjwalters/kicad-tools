@@ -2323,8 +2323,9 @@ def _diffpair_skew_tuning_mode(args: argparse.Namespace) -> str | None:
       on every engine: tune ``length_critical`` classes.
     * ``"checker_skew_limit"`` -- Issue #6664: the resolved engine is
       ``lattice`` and ``--differential-pairs`` is set.  Tune every pair with
-      a skew target, to the checker's own limits.  Grid is frozen for new
-      pair features until #6448, so it never auto-engages.
+      a skew target, to the checker's own limits.  Grid pairs are deprecated
+      (#6448: the coupled pre-pass is removed one release later) and frozen
+      for new pair features, so it never auto-engages.
 
     Issue #7893: both tune to the pair's skew target (the derived ps budget
     and the error-level mm caps ``kct check`` applies), in ps.
@@ -16378,6 +16379,8 @@ def _build_diffpair_config(args):
     if not getattr(args, "differential_pairs", False):
         return None
 
+    _warn_grid_diffpair_deprecated(args)
+
     from kicad_tools.router import DifferentialPairConfig
 
     return DifferentialPairConfig(
@@ -16387,6 +16390,32 @@ def _build_diffpair_config(args):
         # Issue #3275: forward the optional per-pair wall-clock budget so the
         # CoupledPathfinder's per-pair coupled A* search can be bounded.
         per_pair_timeout=getattr(args, "diffpair_per_pair_timeout", None),
+    )
+
+
+def _warn_grid_diffpair_deprecated(args) -> None:
+    """Warn once per run that grid ``--differential-pairs`` is deprecated (Issue #6448).
+
+    The grid coupled pre-pass (``route_diffpair_prepass``) is deprecated in
+    favour of the lattice pair path and is removed one release later.  Pairs
+    still route through it (copper is unchanged); only the warning is new.
+    Silent when the resolved engine is ``lattice``.  Goes to stderr (so
+    ``--format json`` stdout is untouched) and is guarded by a flag on
+    ``args`` so escalation-ladder retries and the other dispatch sites
+    sharing :func:`_build_diffpair_config` do not repeat it.
+    """
+    if _resolve_route_engine(args) == "lattice":
+        return
+    if getattr(args, "_grid_diffpair_deprecation_warned", False):
+        return
+    with contextlib.suppress(AttributeError):  # frozen namespace
+        args._grid_diffpair_deprecation_warned = True
+    print(
+        "warning: --differential-pairs on the grid engine is deprecated and will be "
+        "removed in a future release (Issue #6448); use "
+        "--route-engine lattice --strategy basic --differential-pairs instead",
+        file=sys.stderr,
+        flush=True,
     )
 
 
@@ -19225,7 +19254,11 @@ def _route_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--differential-pairs",
         action="store_true",
-        help="Enable differential pair routing (routes paired signals together)",
+        help=(
+            "Enable differential pair routing (routes paired signals together). "
+            "Deprecated on the grid engine (Issue #6448); use "
+            "--route-engine lattice --strategy basic --differential-pairs"
+        ),
     )
     parser.add_argument(
         "--diffpair-spacing",

@@ -57,7 +57,7 @@ grep -rlE -- "--<flag>\b|<flag_attr>" tests        # tests
 | `--strict-layers` | 06, 07, 09 | 8 | 18 | Graduation candidate |
 | `--strict-pad-clearance` | 07, 09 | 6 | 14 | Graduation candidate |
 | `--strict-in-pad-clearance` | 09 | 4 | 6 | Keep opt-in |
-| `--differential-pairs` | 03, 05, 07 | 10 | 49 | Frozen (#6448) |
+| `--differential-pairs` | 03, 05, 07 | 10 | 49 | Deprecated on grid (#6448) |
 | `--length-match-diffpairs` | none | 0 | 3 | Frozen (#6448) |
 | `--targeted-ripup` | 07 | 2 | 9 | Keep opt-in |
 | `--bundle-river-planner` | 07 | 2 | 4 | Frozen (#6448) |

@@ -10,6 +10,7 @@ import math
 import os
 import random
 import time
+import warnings
 from dataclasses import dataclass, field
 from fractions import Fraction
 from typing import TYPE_CHECKING, Any
@@ -22453,6 +22454,14 @@ class Autorouter:
             ``(routes, warnings, routed_net_ids)`` — see
             :meth:`DiffPairRouter.route_diffpair_prepass` for details.
         """
+        warnings.warn(
+            "route_diffpair_prepass (the grid coupled diff-pair pre-pass) is "
+            "deprecated and will be removed in a future release (Issue #6448); "
+            "route pairs with the lattice pair path "
+            "(--route-engine lattice --strategy basic --differential-pairs)",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         return self._diffpair.route_diffpair_prepass(diffpair_config)
 
     # =========================================================================

@@ -32,7 +32,10 @@ from kicad_tools.router.rules import DesignRules, NetClassRouting
 # 60s alone, but under full-suite xdist CPU contention the wall-clock
 # reaper killed them spuriously.  The marker overrides the CLI default
 # with a contention-tolerant budget; it does NOT slow the happy path.
-pytestmark = pytest.mark.timeout(300)
+pytestmark = [
+    pytest.mark.timeout(300),
+    pytest.mark.filterwarnings("ignore:route_diffpair_prepass.*:DeprecationWarning"),
+]
 
 
 # ---------------------------------------------------------------------------
