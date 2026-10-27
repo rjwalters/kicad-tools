@@ -45,8 +45,8 @@
       "size": 3394
     },
     "design-source/generate_design.py": {
-      "sha256": "de18b07ead4efa82aa82bd02685a10bb458ef8e6809fa7d8bf93e56a9a6e3944",
-      "size": 127178
+      "sha256": "f79bb25f0839ea7a6129e9ffab5905029fbe592590f1c99fa77b3593a0fdce2e",
+      "size": 127320
     },
     "design-source/manufacturing_process.py": {
       "sha256": "f755d41b58b4ec906352f6d53e68eb33ca75d8064723bd42dd0e918f50ef79ac",
@@ -93,8 +93,8 @@
       "size": 278127
     },
     "kicad_project.zip": {
-      "sha256": "43ca6ea9c01589f8b87347cd4ecd8126f637cc88f29f15a06914ed988638eae1",
-      "size": 72506
+      "sha256": "7f5dd7eba2383d2e20cb44c2378e54a6161e1aa83b00338e1d5f5446de5be2dc",
+      "size": 72514
     },
     "manufacturing-requirements.json": {
       "sha256": "52ef1e5957c569c120a43b82a63c9dff8d3bf5dee2392e473e2e73f20b8fb199",

@@ -3219,7 +3219,7 @@
 	)
 	(symbol
 		(lib_id "Device:Crystal")
-		(at 139.7 100.33 0)
+		(at 139.7 149.86 0)
 		(unit 1)
 		(exclude_from_sim no)
 		(in_bom yes)
@@ -3227,7 +3227,7 @@
 		(dnp no)
 		(uuid "e4ab6f52-f01c-5bd6-b20f-09b618362bc5")
 		(property "Reference" "Y1"
-			(at 139.7 95.25 0)
+			(at 139.7 144.78 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -3235,7 +3235,7 @@
 			)
 		)
 		(property "Value" "8MHz"
-			(at 139.7 97.79 0)
+			(at 139.7 147.32 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -3243,7 +3243,7 @@
 			)
 		)
 		(property "Footprint" "Crystal:Crystal_HC49-4H_Vertical"
-			(at 139.7 100.33 0)
+			(at 139.7 149.86 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -3252,7 +3252,7 @@
 			)
 		)
 		(property "Datasheet" "~"
-			(at 139.7 100.33 0)
+			(at 139.7 149.86 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -3273,7 +3273,7 @@
 	)
 	(symbol
 		(lib_id "Device:C")
-		(at 132.08 115.57 0)
+		(at 132.08 165.1 0)
 		(unit 1)
 		(exclude_from_sim no)
 		(in_bom yes)
@@ -3281,7 +3281,7 @@
 		(dnp no)
 		(uuid "213edcfd-9ab0-539e-b322-d65a22833ccc")
 		(property "Reference" "C10"
-			(at 132.08 110.49 0)
+			(at 132.08 160.02 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -3289,7 +3289,7 @@
 			)
 		)
 		(property "Value" "20pF"
-			(at 132.08 113.03 0)
+			(at 132.08 162.56 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -3297,7 +3297,7 @@
 			)
 		)
 		(property "Footprint" "Capacitor_SMD:C_0805_2012Metric"
-			(at 132.08 115.57 0)
+			(at 132.08 165.1 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -3306,7 +3306,7 @@
 			)
 		)
 		(property "Datasheet" "~"
-			(at 132.08 115.57 0)
+			(at 132.08 165.1 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -3327,7 +3327,7 @@
 	)
 	(symbol
 		(lib_id "Device:C")
-		(at 147.32 115.57 0)
+		(at 147.32 165.1 0)
 		(unit 1)
 		(exclude_from_sim no)
 		(in_bom yes)
@@ -3335,7 +3335,7 @@
 		(dnp no)
 		(uuid "adb9c479-193d-5b5c-b55f-470b787c6d80")
 		(property "Reference" "C11"
-			(at 147.32 110.49 0)
+			(at 147.32 160.02 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -3343,7 +3343,7 @@
 			)
 		)
 		(property "Value" "20pF"
-			(at 147.32 113.03 0)
+			(at 147.32 162.56 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -3351,7 +3351,7 @@
 			)
 		)
 		(property "Footprint" "Capacitor_SMD:C_0805_2012Metric"
-			(at 147.32 115.57 0)
+			(at 147.32 165.1 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -3360,7 +3360,7 @@
 			)
 		)
 		(property "Datasheet" "~"
-			(at 147.32 115.57 0)
+			(at 147.32 165.1 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -4157,68 +4157,68 @@
 		(uuid "43cf0026-b517-5121-84bc-d5b36e5e24e7")
 	)
 	(wire
-		(pts (xy 135.89 100.33) (xy 132.08 100.33))
+		(pts (xy 135.89 149.86) (xy 132.08 149.86))
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "12d59033-384a-584c-b00d-980d0a127266")
+		(uuid "84cfbddb-7ded-5fdd-81d2-207158b17529")
 	)
 	(wire
-		(pts (xy 132.08 100.33) (xy 132.08 111.76))
+		(pts (xy 132.08 149.86) (xy 132.08 161.29))
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "1ee33c33-b30a-5bbd-82e5-dd0364c91752")
+		(uuid "c482eb1e-56b5-5d4f-ae91-2a9668abd5ec")
 	)
 	(wire
-		(pts (xy 143.51 100.33) (xy 147.32 100.33))
+		(pts (xy 143.51 149.86) (xy 147.32 149.86))
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "266ab63c-1148-5b7a-9dc1-ed0435faf2a7")
+		(uuid "de7b386b-0429-5d08-81fa-ba4d5d9fe571")
 	)
 	(wire
-		(pts (xy 147.32 100.33) (xy 147.32 111.76))
+		(pts (xy 147.32 149.86) (xy 147.32 161.29))
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "df2efd22-613e-59a4-9341-fc04898304f1")
+		(uuid "fcdfbbee-0e91-5302-98f1-8ea0a7d68caf")
 	)
 	(wire
-		(pts (xy 132.08 119.38) (xy 147.32 119.38))
+		(pts (xy 132.08 168.91) (xy 147.32 168.91))
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "f00a1c5c-f2a5-583c-8e8f-f646d2219f78")
+		(uuid "7288ce3b-7fe0-518a-8829-6ebc8351dab5")
 	)
 	(wire
-		(pts (xy 139.7 119.38) (xy 139.7 199.39))
+		(pts (xy 139.7 168.91) (xy 139.7 199.39))
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "2e37de1c-71aa-5ffc-8589-4b54166e6aec")
+		(uuid "bd0c21d6-a8a6-5721-ac7f-e31db0aed87c")
 	)
 	(wire
-		(pts (xy 135.89 100.33) (xy 125.73 100.33))
+		(pts (xy 135.89 149.86) (xy 125.73 149.86))
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "fdd1b6d6-8540-5535-a18c-719d53331668")
+		(uuid "bae8db3a-4f1b-5df7-b474-d823bab13059")
 	)
 	(wire
-		(pts (xy 143.51 100.33) (xy 153.67 100.33))
+		(pts (xy 143.51 149.86) (xy 153.67 149.86))
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "33c57ffd-4101-57b6-a736-4df1b04db020")
+		(uuid "09bff2db-a38c-5f8c-becf-7f5e95fc85b8")
 	)
 	(wire
 		(pts (xy 284.48 97.79) (xy 281.94 97.79))
@@ -4518,14 +4518,14 @@
 		(uuid "b14906c1-f525-5bf1-a6c8-afba14666f3c")
 	)
 	(junction
-		(at 132.08 100.33)
+		(at 132.08 149.86)
 		(diameter 0)
-		(uuid "f402ca3f-a7cb-5c19-87d2-d2be5c3bc8c8")
+		(uuid "c46b991b-30ac-566d-ba2a-e18eabb780fa")
 	)
 	(junction
-		(at 147.32 100.33)
+		(at 147.32 149.86)
 		(diameter 0)
-		(uuid "9cce0dc4-f832-56b9-8a1c-cc34c7bc850a")
+		(uuid "6e16e459-55da-5803-9eba-0f5a6bbe90d9")
 	)
 	(junction
 		(at 139.7 199.39)
@@ -4533,9 +4533,9 @@
 		(uuid "7434cf3b-d830-59a5-b3e6-a77a82a929a0")
 	)
 	(junction
-		(at 139.7 119.38)
+		(at 139.7 168.91)
 		(diameter 0)
-		(uuid "48161cd4-d30b-55c9-9834-a74fce0bd787")
+		(uuid "99ddb7d9-8b21-5233-8137-ad3a18f217fe")
 	)
 	(junction
 		(at 284.48 69.85)
@@ -4615,7 +4615,7 @@
 	(no_connect (at 191.77 137.16) (uuid "5fa84cb2-167d-5f33-8a71-094ae067dec9")
 	)
 	(label "OSC_IN"
-		(at 125.73 100.33 0)
+		(at 125.73 149.86 0)
 		(fields_autoplaced yes)
 		(effects
 			(font
@@ -4623,10 +4623,10 @@
 			)
 			(justify left bottom)
 		)
-		(uuid "3ccbdcda-522a-5ca1-b6df-bf89c3c5dc22")
+		(uuid "8f573f45-f9b9-5137-9429-57dbf7e86bee")
 	)
 	(label "OSC_OUT"
-		(at 153.67 100.33 0)
+		(at 153.67 149.86 0)
 		(fields_autoplaced yes)
 		(effects
 			(font
@@ -4634,7 +4634,7 @@
 			)
 			(justify left bottom)
 		)
-		(uuid "3c158eef-1602-53b7-bbc9-442b2356cbd5")
+		(uuid "535cbc5b-27e0-5d24-b1dc-74bd2ebc3ff1")
 	)
 	(label "SWDIO"
 		(at 281.94 97.79 0)
