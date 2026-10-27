@@ -48,6 +48,7 @@ from kicad_tools.cli.check_categories import (
     DEFERRED_OPT_IN_CATEGORIES,
 )
 from kicad_tools.cli.copper_weight import add_check_copper_argument, parse_copper_weight_arg
+from kicad_tools.findings import findings_payload, from_violation_dict
 from kicad_tools.manufacturers import (
     get_all_manufacturer_names,
     get_manufacturer_ids,
@@ -1270,6 +1271,48 @@ def _warn_unevaluated_routing_policy(
         )
 
 
+def add_check_scope_arguments(parser: argparse.ArgumentParser) -> None:
+    """Register ``--bbox`` / ``--refs`` / ``--nets`` (Issue #8016)."""
+    parser.add_argument(
+        "--bbox",
+        default=None,
+        metavar="X1,Y1,X2,Y2",
+        help=(
+            "Scope findings to a board-coordinate box in mm.  Checks still run "
+            "in full; findings outside the scope (union of --bbox/--refs/--nets) "
+            "are omitted.  Board-level findings are kept.  Not sign-off eligible."
+        ),
+    )
+    parser.add_argument(
+        "--refs", default=None, help="Scope findings to these references (comma-separated)"
+    )
+    parser.add_argument(
+        "--nets", default=None, help="Scope findings to these nets (comma-separated)"
+    )
+
+
+def _resolve_check_scope(args: argparse.Namespace, parser: argparse.ArgumentParser, pcb):
+    """Build the :class:`CheckScope` from CLI args (``None`` when unscoped)."""
+    from kicad_tools.validate.scope import CheckScope
+
+    try:
+        scope = CheckScope.from_args(
+            getattr(args, "bbox", None), getattr(args, "refs", None), getattr(args, "nets", None)
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    if scope is not None:
+        unknown = scope.unknown_names(
+            (fp.reference for fp in pcb.footprints), (n.name for n in pcb.nets.values())
+        )
+        if unknown:
+            print(
+                f"Warning: --refs/--nets name unknown to this board: {', '.join(unknown)}",
+                file=sys.stderr,
+            )
+    return scope
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for kct check command."""
     parser = argparse.ArgumentParser(
@@ -1489,6 +1532,7 @@ def main(argv: list[str] | None = None) -> int:
         dest="skip_checks",
         help=f"Skip specific checks (comma-separated: {', '.join(CHECK_CATEGORIES)})",
     )
+    add_check_scope_arguments(parser)
     parser.add_argument(
         "--output",
         "-o",
@@ -2424,6 +2468,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Run selected checks
     coverage: dict = {}
+    check_scope = _resolve_check_scope(args, parser, pcb)
     results = run_selected_checks(
         checker,
         only_set,
@@ -2627,6 +2672,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.errors_only:
         violations = [v for v in violations if v.is_error]
 
+    # Issue #8016: --bbox/--refs/--nets filter the findings (checks still ran
+    # over the whole board).  Applied before the verdict so ``summary`` and the
+    # exit code reflect in-scope findings only.
+    scope_record: dict | None = None
+    if check_scope is not None:
+        violations, scope_record = check_scope.apply(violations)
+
     # Fill-freshness advisory (issue #4096).  The clearance_*_zone rules
     # measure copper against the committed `filled_polygon` geometry, which is
     # only trustworthy if the on-disk fills are in sync with the copper.  A
@@ -2703,6 +2755,7 @@ def main(argv: list[str] | None = None) -> int:
             coverage=coverage_dict,
             verdict=verdict,
             exit_code=exit_code,
+            scope=scope_record,
         )
     elif args.format == "summary":
         output_summary(violations, results, pcb_path)
@@ -2711,6 +2764,8 @@ def main(argv: list[str] | None = None) -> int:
         if routing_quality is not None:
             print_routing_quality_stanza(routing_quality)
     else:
+        if check_scope is not None:
+            print(f"Scope: {check_scope.describe()} (checks ran in full; not sign-off eligible)")
         output_table(violations, results, pcb_path, effective_mfr, layers, args.verbose)
         if meta is not None:
             print_meta_check_stanza(meta, args.verbose)
@@ -2739,6 +2794,7 @@ def main(argv: list[str] | None = None) -> int:
             coverage=coverage_dict,
             verdict=verdict,
             exit_code=exit_code,
+            scope=scope_record,
         )
 
     # Issue #4375: optionally emit DRC-constraint sidecars from the SAME
@@ -4023,6 +4079,7 @@ def output_json(
     coverage: dict | None = None,
     verdict: str | None = None,
     exit_code: int | None = None,
+    scope: dict | None = None,
 ) -> None:
     """Output violations as JSON.
 
@@ -4049,6 +4106,8 @@ def output_json(
     warning_count = sum(1 for v in violations if v.is_warning)
     info_count = sum(1 for v in violations if v.is_info)
     waived_count = sum(1 for v in violations if v.is_waived)
+
+    violation_dicts = [v.to_dict() for v in violations]
 
     summary_data: dict = {
         "errors": error_count,
@@ -4088,8 +4147,10 @@ def output_json(
         "pcb_sha256": _pcb_sha256_or_none(pcb_path),
         "layers": layers,
         "summary": summary_data,
-        "violations": [v.to_dict() for v in violations],
+        "violations": violation_dicts,
         "mask_copper_assessments": [a.to_dict() for a in results.mask_copper_assessments],
+        # Issue #8015: shared, versioned finding locators (additive).
+        **findings_payload(from_violation_dict(d) for d in violation_dicts),
     }
     if meta is not None:
         data["meta_checks"] = meta.to_dict()
@@ -4105,6 +4166,9 @@ def output_json(
         data["verdict"] = verdict
     if exit_code is not None:
         data["exit_code"] = exit_code
+    # Issue #8016: additive; omitted without --bbox/--refs/--nets.
+    if scope is not None:
+        data["scope"] = scope
     print(json.dumps(data, indent=2))
 
 
@@ -4155,6 +4219,7 @@ def write_json_report(
     coverage: dict | None = None,
     verdict: str | None = None,
     exit_code: int | None = None,
+    scope: dict | None = None,
 ) -> None:
     """Write DRC results as a JSON report file.
 
@@ -4172,6 +4237,8 @@ def write_json_report(
     warning_count = sum(1 for v in violations if v.is_warning)
     info_count = sum(1 for v in violations if v.is_info)
     waived_count = sum(1 for v in violations if v.is_waived)
+
+    violation_dicts = [v.to_dict() for v in violations]
 
     summary_data: dict = {
         "errors": error_count,
@@ -4205,8 +4272,10 @@ def write_json_report(
         "pcb_sha256": _pcb_sha256_or_none(pcb_path),
         "layers": layers,
         "summary": summary_data,
-        "violations": [v.to_dict() for v in violations],
+        "violations": violation_dicts,
         "mask_copper_assessments": [a.to_dict() for a in results.mask_copper_assessments],
+        # Issue #8015: shared, versioned finding locators (additive).
+        **findings_payload(from_violation_dict(d) for d in violation_dicts),
     }
     if meta is not None:
         data["meta_checks"] = meta.to_dict()
@@ -4222,6 +4291,9 @@ def write_json_report(
         data["verdict"] = verdict
     if exit_code is not None:
         data["exit_code"] = exit_code
+    # Issue #8016: additive; omitted without --bbox/--refs/--nets.
+    if scope is not None:
+        data["scope"] = scope
     output_path.write_text(json.dumps(data, indent=2) + "\n")
 
 

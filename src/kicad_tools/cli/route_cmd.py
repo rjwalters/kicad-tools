@@ -22982,11 +22982,18 @@ def _run_main_impl(args, parser, argv) -> int:
             # so, and say so loudly when neither bound is in force.
             _banner_engine = _resolve_route_engine(args)
             if args.timeout:
-                _cap_note = (
-                    " (hard cap on the lattice negotiation)"
-                    if (_banner_engine == "lattice")
-                    else ""
-                )
+                # Issue #8012: ``--timeout`` only LOWERS the per-link-derived
+                # deadline, so it is a hard cap only when no per-link budget
+                # is active.
+                if _banner_engine != "lattice":
+                    _cap_note = ""
+                elif getattr(args, "per_net_timeout", None):
+                    _cap_note = (
+                        " (can only lower the negotiation deadline; see "
+                        "'Negotiation deadline' for the effective bound)"
+                    )
+                else:
+                    _cap_note = " (hard cap on the lattice negotiation)"
                 flush_print(f"  Timeout: {args.timeout}s{_cap_note}")
             per_net_timeout_val = getattr(args, "per_net_timeout", None)
             if per_net_timeout_val:

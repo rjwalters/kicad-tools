@@ -5305,7 +5305,11 @@ class Autorouter:
         # ranking only ever accepts a strictly better pass, so a board that
         # converges within 8 passes is unchanged.
         # Issue #6362: ``--lattice-iterations`` overrides the cap.
-        from .lattice.round_cap import LATTICE_NEGOTIATION_DEFAULT_ROUNDS, lattice_stop_reason
+        from .lattice.round_cap import (
+            LATTICE_NEGOTIATION_DEFAULT_ROUNDS,
+            lattice_deadline_binding,
+            lattice_stop_reason,
+        )
 
         max_iterations = self._lattice_max_iterations or LATTICE_NEGOTIATION_DEFAULT_ROUNDS
         # Issue #4355: the preserved copper of NON-listed nets
@@ -5368,6 +5372,24 @@ class Autorouter:
                 if deadline is None
                 else min(deadline, self._lattice_deadline)
             )
+        # Issue #8012: say which term binds -- ``--timeout`` only lowers the
+        # per-link-derived deadline, so raising it alone can be a no-op.
+        deadline_binding: str | None = None
+        if deadline is not None:
+            link_count = max(1, len(connections) + len(coupled))
+            _now = time.monotonic()
+            _eff_s, deadline_binding = lattice_deadline_binding(
+                self._lattice_link_budget_s,
+                link_count,
+                None if self._lattice_deadline is None else self._lattice_deadline - _now,
+            )
+            if deadline_binding == "--per-net-timeout":
+                _detail = f"--per-net-timeout {self._lattice_link_budget_s:g}s x {link_count} links"
+                if self._lattice_deadline is not None:
+                    _detail += f"; --timeout leaves {self._lattice_deadline - _now:.0f}s"
+            else:
+                _detail = "--timeout"
+            print(f"  Negotiation deadline: {_eff_s:.0f}s (binding: {_detail})")
 
         ran: dict[int, list[Any]] = {}
 
@@ -5470,7 +5492,7 @@ class Autorouter:
             f"lattice_builds={stats.lattice_builds})"
         )
         # Issue #6362: name the limit that stopped an unconverged run.
-        stop_reason = lattice_stop_reason(stats, max_iterations)
+        stop_reason = lattice_stop_reason(stats, max_iterations, deadline_binding)
         if stop_reason:
             print(f"    {stop_reason}")
         # Issue #6395: say what the pad-side class repair did, honestly.

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rjwalters/kicad-tools/schemas/finding.schema.json",
+  "title": "kicad-tools Finding (schema_version 1)",
+  "description": "Shared finding shape carried in the `findings` array of `kct check`, `kct drc` and `kct detect-mistakes` JSON output (Issue #8015). Coordinates are millimetres in the KiCad file frame (y-down).",
+  "type": "object",
+  "required": ["schema_version", "rule_id", "severity", "message", "refs", "pads", "nets", "point", "bbox", "layer", "waived"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "rule_id": {"type": "string"},
+    "severity": {"type": "string"},
+    "message": {"type": "string"},
+    "refs": {"type": "array", "items": {"type": "string"}},
+    "pads": {"type": "array", "items": {"type": "string", "pattern": "^[^.]+\\..+$"}},
+    "nets": {"type": "array", "items": {"type": "string"}},
+    "point": {"type": ["array", "null"], "items": {"type": "number"}, "minItems": 2, "maxItems": 2},
+    "bbox": {"type": ["array", "null"], "items": {"type": "number"}, "minItems": 4, "maxItems": 4},
+    "layer": {"type": ["string", "null"]},
+    "waived": {"type": "boolean"}
+  },
+  "additionalProperties": true
+}
