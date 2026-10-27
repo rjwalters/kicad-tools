@@ -48,6 +48,7 @@ from kicad_tools.cli.check_categories import (
     DEFERRED_OPT_IN_CATEGORIES,
 )
 from kicad_tools.cli.copper_weight import add_check_copper_argument, parse_copper_weight_arg
+from kicad_tools.findings import findings_payload, from_violation_dict
 from kicad_tools.manufacturers import (
     get_all_manufacturer_names,
     get_manufacturer_ids,
@@ -4050,6 +4051,8 @@ def output_json(
     info_count = sum(1 for v in violations if v.is_info)
     waived_count = sum(1 for v in violations if v.is_waived)
 
+    violation_dicts = [v.to_dict() for v in violations]
+
     summary_data: dict = {
         "errors": error_count,
         "warnings": warning_count,
@@ -4088,8 +4091,10 @@ def output_json(
         "pcb_sha256": _pcb_sha256_or_none(pcb_path),
         "layers": layers,
         "summary": summary_data,
-        "violations": [v.to_dict() for v in violations],
+        "violations": violation_dicts,
         "mask_copper_assessments": [a.to_dict() for a in results.mask_copper_assessments],
+        # Issue #8015: shared, versioned finding locators (additive).
+        **findings_payload(from_violation_dict(d) for d in violation_dicts),
     }
     if meta is not None:
         data["meta_checks"] = meta.to_dict()
@@ -4173,6 +4178,8 @@ def write_json_report(
     info_count = sum(1 for v in violations if v.is_info)
     waived_count = sum(1 for v in violations if v.is_waived)
 
+    violation_dicts = [v.to_dict() for v in violations]
+
     summary_data: dict = {
         "errors": error_count,
         "warnings": warning_count,
@@ -4205,8 +4212,10 @@ def write_json_report(
         "pcb_sha256": _pcb_sha256_or_none(pcb_path),
         "layers": layers,
         "summary": summary_data,
-        "violations": [v.to_dict() for v in violations],
+        "violations": violation_dicts,
         "mask_copper_assessments": [a.to_dict() for a in results.mask_copper_assessments],
+        # Issue #8015: shared, versioned finding locators (additive).
+        **findings_payload(from_violation_dict(d) for d in violation_dicts),
     }
     if meta is not None:
         data["meta_checks"] = meta.to_dict()
