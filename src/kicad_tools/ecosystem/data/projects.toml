@@ -600,7 +600,8 @@ research_docs = [
 summary = """
 upstream was archived on 2026-10-26 (read-only, no further releases expected); it continues as \
 Konnect-EDA (Orchis-ai-LLC), which is commercial closed-source software, so there is no source \
-left to audit and no further capability audits are planned. The ideas we adopted stand on their \
+left to audit and no further capability audits are planned. The open replacement is our own \
+clean-room openkonnect, with Konnect-EDA as the closed-source successor. The ideas we adopted stand on their \
 own, and KiCAD-MCP-Server is now our agent-interface reference. A single-binary native KiCad 10 plugin exposing a very large LLM tool \
 surface (228 tools in 21 toolsets) across schematic, layout, routing, placement, review \
 and manufacturing. AGPL means no code can move between it and this MIT \
@@ -609,6 +610,29 @@ audited its connectivity primitives, its tool-economy design and its \
 design-rule handling against our own surface. Five of its six connectivity \
 primitives we already had; the sixth (near-miss auto-snap repair) was a \
 real gap. Re-checked at v0.13: four new ideas adopted as follow-ups (visual baselines, truth-contract audit, honest-schema CI guard, SES provenance).\
+"""
+
+[projects.openkonnect]
+name = "openkonnect"
+slug = "rjwalters/openkonnect"
+repo_url = "https://github.com/rjwalters/openkonnect"
+vcs = "github"
+category = "agent-interface"
+relation = "downstream"
+verdict = "watch"
+license = "MIT"
+license_compat = "mit-clean"
+last_verified = "2026-10-27"
+summary = """
+our own clean-room project: an MIT-licensed MCP server that lets LLM agents drive a running \
+KiCad 10 over its IPC API, built on kicad-tools. It owns the live-editor surface that kicad-tools \
+deliberately does not, and is the open replacement for Konnect's live-editor tool surface. \
+Its clean-room rules are in its CLEANROOM.md: no Konnect source is read in either repo, and \
+our Konnect audits stay capability-level.\
+"""
+reeval_trigger = """
+If it reaches a tagged release covering the live-editor tools (schematic and board edits over \
+KiCad 10's IPC API), promote it from watch and revisit the live-editor non-goal wording.\
 """
 
 [projects.copperhead]
@@ -1634,7 +1658,7 @@ invariants = [
 
 # What we deliberately do not do. Each line names who does it instead.
 non_goals = [
-  "No GUI and no KiCad fork: Zeo and Konnect own the live-editor surface.",
+  "No GUI and no KiCad fork: the live-editor surface is covered by openkonnect (our clean-room project); Zeo also owns it.",
   "No schematic-capture language: atopile and SKiDL own design-as-code upstream of us.",
   "No cloud routing service: DeepPCB owns that trade-off, and it costs offline/air-gapped CI.",
   "No Specctra DSN/SES round-trip: freerouting and AutoRoute route a translated view; we stay on the board file so LVS and the fab gates see the artifact that ships.",
