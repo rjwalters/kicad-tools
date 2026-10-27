@@ -227,6 +227,15 @@ def main(argv: list[str] | None = None) -> int:
         help="Append to existing library instead of creating new",
     )
     gen_parser.add_argument(
+        "--register",
+        metavar="PROJECT_DIR",
+        help="Register the library in PROJECT_DIR/sym-lib-table so the project can resolve it",
+    )
+    gen_parser.add_argument(
+        "--nickname",
+        help="Library nickname for --register (default: output file stem)",
+    )
+    gen_parser.add_argument(
         "--interactive",
         action="store_true",
         help="Prompt for confirmation of pin types (not yet implemented)",
@@ -938,6 +947,25 @@ def _generate_symbol(args) -> int:
         print(f"  Units: {generated.units}")
         print(f"  Confidence: {generated.generation_confidence:.1%}")
         print(f"  Output: {output_path}")
+
+        if args.register:
+            from ..library.lib_table import register_symbol_library
+
+            project_dir = Path(args.register)
+            nickname = args.nickname or output_path.stem
+            try:
+                rel = output_path.resolve().relative_to(project_dir.resolve())
+                uri = f"${{KIPRJMOD}}/{rel.as_posix()}"
+            except ValueError:
+                uri = str(output_path.resolve())
+            added = register_symbol_library(
+                project_dir / "sym-lib-table",
+                nickname,
+                uri,
+                f"kicad-tools generated symbols ({output_path.name})",
+            )
+            state = "Registered" if added else "Already registered"
+            print(f"  {state}: {nickname} -> {uri}")
 
         # Show pin type summary
         pin_types: dict[str, int] = {}
