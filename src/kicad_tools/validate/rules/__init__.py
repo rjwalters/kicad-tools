@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from .match_group_length_skew import MatchGroupLengthSkewRule
     from .pin1_marker import Pin1MarkerRule
     from .schematic_fields import check_schematic_fields
+    from .schematic_wire_symbol import check_schematic_wire_symbol
     from .silkscreen import (
         check_all_silkscreen,
         check_silk_edge_clearance,
@@ -61,6 +62,7 @@ _EXPORT_MODULES: dict[str, str] = {
     "MatchGroupLengthSkewRule": ".match_group_length_skew",
     "Pin1MarkerRule": ".pin1_marker",
     "check_schematic_fields": ".schematic_fields",
+    "check_schematic_wire_symbol": ".schematic_wire_symbol",
     "check_all_silkscreen": ".silkscreen",
     "check_silk_edge_clearance": ".silkscreen",
     "check_silk_over_copper": ".silkscreen",
@@ -104,6 +106,7 @@ __all__ = [
     "WidthConsistencyRule",
     "check_all_silkscreen",
     "check_schematic_fields",
+    "check_schematic_wire_symbol",
     "check_silk_edge_clearance",
     "check_silk_over_copper",
     "check_silkscreen_line_width",

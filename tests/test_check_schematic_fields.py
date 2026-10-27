@@ -511,6 +511,7 @@ class TestCheckCliWiring:
         assert payload["summary"]["rules_checked_by_rule"] == {
             RULE_FIELD_OFFSET: 1,
             RULE_FIELD_OVERLAP: 1,
+            "sch_wire_through_symbol": 1,  # Issue #7996 rides in this category
         }
 
     def test_threshold_flag_plumbed(

@@ -105,6 +105,7 @@ PUBLIC_EXPORTS = {
         "MatchGroupLengthSkewRule": ".match_group_length_skew",
         "Pin1MarkerRule": ".pin1_marker",
         "check_schematic_fields": ".schematic_fields",
+        "check_schematic_wire_symbol": ".schematic_wire_symbol",
         "check_all_silkscreen": ".silkscreen",
         "check_silk_edge_clearance": ".silkscreen",
         "check_silk_over_copper": ".silkscreen",
