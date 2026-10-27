@@ -38,6 +38,7 @@ from ..drc import (
     check_manufacturer_rules,
     generate_fix_suggestions,
 )
+from ..findings import findings_payload, from_drc_dict
 from ..manufacturers import compare_design_rules, get_all_manufacturer_names, get_profile
 from .runner import find_kicad_cli, run_drc
 
@@ -946,6 +947,8 @@ def output_json(
         "pcb_name": report.pcb_name,
         "summary": summary,
         "violations": violations_data,
+        # Issue #8015: shared, versioned finding locators (additive).
+        **findings_payload(from_drc_dict(d) for d in violations_data),
         "schematic_parity": parity.to_dict(),
         "schematic_parity_checked": parity.checked,
     }

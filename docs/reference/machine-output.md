@@ -518,6 +518,38 @@ to one child file are processed once, using that
 file's embedded library definitions. Unchanged files are never rewritten.
 
 
+## Findings: the shared, versioned locator shape
+
+`kct check`, `kct drc` and `kct detect-mistakes` (`--format json`) carry a
+top-level `schema_version` (int, currently `1`) and a `findings` array
+(Issue #8015). Each entry follows
+`src/kicad_tools/data/schemas/finding.schema.json`:
+
+| field | meaning |
+|---|---|
+| `rule_id`, `severity`, `message` | what was found |
+| `refs` | reference designators involved (`["U1", "C5"]`) |
+| `pads` | `REF.PAD` strings (`["U1.3"]`); the owning refs are also in `refs` |
+| `nets` | net names |
+| `point` | `[x, y]` mm or `null` |
+| `bbox` | `[x0, y0, x1, y1]` mm or `null` (set when a finding has two or more locations) |
+| `layer` | layer name or `null` |
+| `waived` | acknowledged by a waiver |
+
+**Coordinate frame.** `point`/`bbox` are millimetres in the KiCad *file*
+frame (y grows downward), the frame KiCad displays. Verified per emitter:
+`kct check` and `kct drc` already report file-frame coordinates;
+`detect-mistakes` measures on the loaded board (board-relative, Edge.Cuts
+origin subtracted), so its adapter adds the board origin back. The legacy
+`mistakes[].location` key is left unchanged (board-relative); use `findings`.
+
+**Compatibility policy.** Additive fields keep the same `schema_version`.
+A renamed, removed or retyped field, or a changed meaning, bumps
+`schema_version`; the previous version is documented here for one minor
+release. Existing per-command keys (`violations`, `mistakes`, ...) are
+unaffected by this model. `kct net-status` and the MCP `measure_clearance`
+adapters are not yet part of the model.
+
 ## Interop note (survey idea 7)
 
 A stable machine-output contract is the enabling precondition for external

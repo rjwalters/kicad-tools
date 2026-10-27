@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from kicad_tools.explain.mistakes import MistakeCategory
+from kicad_tools.findings import findings_payload, from_violation_dict
 
 if TYPE_CHECKING:
     from kicad_tools.explain.mistake_waivers import MistakeWaiverResult
@@ -259,7 +260,9 @@ def _analyze_pcb(args) -> int:
 
     # Output results
     if args.format == "json":
-        _output_json(mistakes, coverage, advisories)
+        from kicad_tools.explain.mistake_waivers import board_origin
+
+        _output_json(mistakes, coverage, advisories, board_origin(pcb))
     elif args.format == "sarif":
         from kicad_tools.explain.mistake_waivers import board_origin
 
@@ -491,7 +494,10 @@ def _summary(mistakes: list, advisories: list) -> dict:
 
 
 def _output_json(
-    mistakes: list, coverage: list | None = None, advisories: list | None = None
+    mistakes: list,
+    coverage: list | None = None,
+    advisories: list | None = None,
+    origin: tuple[float, float] = (0.0, 0.0),
 ) -> None:
     """Output mistakes (and coverage, issue #4899) as JSON."""
     coverage = coverage or []
@@ -499,6 +505,10 @@ def _output_json(
     data = {
         "summary": _summary(mistakes, advisories),
         "mistakes": [m.to_dict() for m in mistakes],
+        # Issue #8015: shared, versioned finding locators (additive).  The
+        # location is in sheet (KiCad file) coordinates, unlike the legacy
+        # board-relative ``mistakes[].location``.
+        **findings_payload(from_violation_dict(_mistake_finding(m, origin)) for m in mistakes),
         # Issue #6006: waiver_stale / waiver_unused advisories (about the
         # waivers sidecar, not the board).
         "waiver_findings": [a.to_dict() for a in advisories],
