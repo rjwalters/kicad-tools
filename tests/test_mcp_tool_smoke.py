@@ -209,6 +209,8 @@ SMOKE_ARGS: dict[str, Callable[[Fixtures], dict[str, Any]]] = {
     "get_recent_calls": lambda f: {},
     "ecosystem_list": lambda f: {},
     "ecosystem_show": lambda f: {"project_id": "kicadroutingtools"},
+    "parts_search": lambda f: {"query": "10k 0402"},
+    "parts_lookup": lambda f: {"lcsc_part": "C25804"},
 }
 
 # Tools that cannot be called yet.  Every entry needs a reason and an issue number.
@@ -225,6 +227,27 @@ def _no_network(monkeypatch):
 
     monkeypatch.setattr(socket.socket, "connect", blocked)
     monkeypatch.setattr(socket.socket, "connect_ex", blocked)
+
+
+@pytest.fixture(autouse=True)
+def _offline_parts_backend(monkeypatch):
+    """Serve the parts tools from a stub client: no network, no local catalog."""
+    from kicad_tools.parts import LCSCClient, Part
+    from kicad_tools.parts.models import LookupResult, SearchResult
+
+    part = Part(lcsc_part="C25804", mfr_part="0402WGF1002TCE", package="0402")
+    monkeypatch.setattr(
+        LCSCClient,
+        "search",
+        lambda self, query, **kw: SearchResult(
+            query=query, parts=[part], total_count=1, source="offline", coverage="offline"
+        ),
+    )
+    monkeypatch.setattr(
+        LCSCClient,
+        "lookup_result",
+        lambda self, lcsc_part, **kw: LookupResult(part, "offline", "found", []),
+    )
 
 
 def _fixture_hashes() -> dict[str, str]:

@@ -729,6 +729,88 @@ List nets that still need routing.
 
 ---
 
+## Parts Tools
+
+### parts_search
+
+Search JLCPCB/LCSC parts.
+
+**Description**: Searches by free-text query using the live API, falling back to the synced offline jlcparts catalog (the same backend as `kct parts search`). `coverage` reports `live`, `offline` or `incomplete`; an empty `parts` list is a verified miss only when `coverage` is `live`. Returns `error` when neither a live nor an offline source is available.
+
+**Parameters**:
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `query` | string | Yes | - | Search text, e.g. `"10k 0402"` |
+| `package` | string | No | - | Package filter, e.g. `"0402"` |
+| `in_stock` | boolean | No | false | Only parts with stock |
+| `basic_only` | boolean | No | false | Only JLCPCB basic parts |
+| `page` | integer | No | 1 | 1-based result page |
+| `page_size` | integer | No | 20 | Results per page (1-100) |
+
+**Response**:
+
+```json
+{
+  "query": "10k 0402",
+  "parts": [
+    {
+      "lcsc_part": "C25744",
+      "mfr_part": "0402WGF1002TCE",
+      "manufacturer": "UNI-ROYAL",
+      "description": "10kΩ ±1% 62.5mW",
+      "package": "0402",
+      "stock": 1200000,
+      "inventory": {"source": "live", "stock_verified": true},
+      "is_basic": true,
+      "is_preferred": false,
+      "best_price": 0.0006
+    }
+  ],
+  "total_count": 1,
+  "page": 1,
+  "page_size": 20,
+  "source": "live",
+  "coverage": "live",
+  "diagnostics": []
+}
+```
+
+---
+
+### parts_lookup
+
+Look up one part by LCSC number.
+
+**Description**: Resolves an LCSC part number (live API, then offline catalog). `status` is `found`, `not_found` (verified no-match, `part` is null), `offline_miss` or `unavailable`; the last two do not confirm absence and also set `error`.
+
+**Parameters**:
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `lcsc_part` | string | Yes | - | LCSC part number, e.g. `"C25804"` (the `C` prefix is optional) |
+
+**Response**:
+
+```json
+{
+  "status": "found",
+  "source": "offline",
+  "diagnostics": [],
+  "part": {
+    "lcsc_part": "C25804",
+    "mfr_part": "0402WGF1002TCE",
+    "package": "0402",
+    "category": "resistor",
+    "stock": 1200000,
+    "prices": [{"quantity": 1, "unit_price": 0.0008}],
+    "datasheet_url": "https://example.com/ds.pdf"
+  }
+}
+```
+
+---
+
 ## Error Handling
 
 All tools return consistent error responses:
