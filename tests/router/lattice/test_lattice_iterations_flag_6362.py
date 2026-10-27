@@ -24,6 +24,7 @@ import pytest
 from kicad_tools.router.lattice.pathfinder import LatticeNegotiationStats, LatticePathfinder
 from kicad_tools.router.lattice.round_cap import (
     LATTICE_NEGOTIATION_DEFAULT_ROUNDS,
+    lattice_deadline_binding,
     lattice_stop_reason,
 )
 
@@ -223,3 +224,34 @@ class TestStopReason:
 
     def test_neither_limit_is_silent(self):
         assert lattice_stop_reason(_stats(iterations=3), 12) is None
+
+
+# ---------------------------------------------------------------------------
+# Issue #8012: the deadline hint names the binding flag
+# ---------------------------------------------------------------------------
+class TestDeadlineBinding:
+    def test_per_net_binding_does_not_say_raise_timeout(self):
+        stats = _stats(iterations=7, deadline_hit=True)
+        msg = lattice_stop_reason(stats, 12, "--per-net-timeout")
+        assert msg is not None and "raise --per-net-timeout" in msg
+        assert "raise --timeout" not in msg
+
+    def test_timeout_binding(self):
+        msg = lattice_stop_reason(_stats(iterations=7, deadline_hit=True), 12, "--timeout")
+        assert msg is not None and "raise --timeout for more time" in msg
+
+    def test_no_binding_unchanged(self):
+        msg = lattice_stop_reason(_stats(iterations=7, deadline_hit=True), 12)
+        assert msg is not None and "raise --timeout / --per-net-timeout" in msg
+
+    def test_binding_per_net_smaller(self):
+        assert lattice_deadline_binding(30.0, 153, 5400.0) == (4590.0, "--per-net-timeout")
+
+    def test_binding_timeout_smaller(self):
+        assert lattice_deadline_binding(30.0, 153, 100.0) == (100.0, "--timeout")
+
+    def test_per_net_zero_leaves_timeout(self):
+        assert lattice_deadline_binding(0, 153, 21600.0) == (21600.0, "--timeout")
+
+    def test_unbounded(self):
+        assert lattice_deadline_binding(None, 10, None) == (None, None)

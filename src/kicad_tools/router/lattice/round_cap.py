@@ -21,7 +21,34 @@ if TYPE_CHECKING:
 LATTICE_NEGOTIATION_DEFAULT_ROUNDS = 12
 
 
-def lattice_stop_reason(stats: LatticeNegotiationStats, cap: int) -> str | None:
+# Issue #8012: the two terms that can bind the negotiation deadline.
+BINDING_PER_NET_TIMEOUT = "--per-net-timeout"
+BINDING_TIMEOUT = "--timeout"
+
+
+def lattice_deadline_binding(
+    link_budget_s: float | None,
+    link_count: int,
+    timeout_remaining_s: float | None,
+) -> tuple[float | None, str | None]:
+    """Return ``(effective_seconds, binding_flag)`` for the negotiation deadline.
+
+    The deadline is ``min(per_net_timeout x links, --timeout remaining)``;
+    ``--timeout`` can only lower it.  ``(None, None)`` means unbounded.
+    """
+    per_link = link_budget_s * max(1, link_count) if link_budget_s and link_budget_s > 0 else None
+    if per_link is None and timeout_remaining_s is None:
+        return None, None
+    if per_link is None:
+        return timeout_remaining_s, BINDING_TIMEOUT
+    if timeout_remaining_s is None or per_link <= timeout_remaining_s:
+        return per_link, BINDING_PER_NET_TIMEOUT
+    return timeout_remaining_s, BINDING_TIMEOUT
+
+
+def lattice_stop_reason(
+    stats: LatticeNegotiationStats, cap: int, binding: str | None = None
+) -> str | None:
     """Return a log clause naming the limit that ended an unconverged run.
 
     Returns ``None`` for a converged run (its output stays unchanged) and for
@@ -32,10 +59,18 @@ def lattice_stop_reason(stats: LatticeNegotiationStats, cap: int) -> str | None:
     if stats.converged:
         return None
     if stats.deadline_hit:
+        if binding == BINDING_PER_NET_TIMEOUT:
+            hint = (
+                "raise --per-net-timeout (or set it to 0 so --timeout is the "
+                "only bound) for more time"
+            )
+        elif binding == BINDING_TIMEOUT:
+            hint = "raise --timeout for more time"
+        else:
+            hint = "raise --timeout / --per-net-timeout for more time"
         return (
             f"stopped by: deadline after {stats.iterations}/{cap} round(s) "
-            f"({stats.elapsed_s:.1f}s) -- raise --timeout / --per-net-timeout "
-            "for more time"
+            f"({stats.elapsed_s:.1f}s) -- {hint}"
         )
     if stats.iterations >= cap:
         return f"stopped by: round cap ({cap}) -- raise --lattice-iterations for more rounds"
