@@ -366,6 +366,7 @@ CONTRACT_ARGV: dict[str, list[str]] = {
     "board-view list": ["{pcb}"],
     "report generate": ["{pcb}", "-o", "{dir}/reports", "--skip-erc", "--no-figures"],
     "export": ["{pcb}", "-o", "{dir}/export", "--dry-run"],
+    "export-formats": ["{pcb}", "-o", "{dir}/formats"],
     "optim fom-debug": ["{pcb}"],
 }
 
