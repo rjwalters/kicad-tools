@@ -29,25 +29,20 @@ _None._
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-_None._
+- **#8008**: chore: ecosystem registry: Backplane and KiStack moved to BackplaneWorks org
 
 ## In Progress
 
 Issues currently being built (`loom:building`).
 
-- **#7989**: Ecosystem registry: acknowledge Konnect's archive, name its successor, and make KiCAD-MCP-Server our agent-interface reference
-- **#7990**: Evaluate KiCAD-MCP-Server (MIT) against kct mcp serve, as the replacement for Konnect
-- **#7992**: feat: suggest Basic-library JLCPCB alternatives for Extended parts
-- **#7993**: feat: expose parts search and lookup as kct MCP tools
-- **#7995**: feat: symbol library write and registration helpers (create/delete/rename symbol, register library)
-- **#7996**: feat: schematic cosmetic lint and declutter suggestions
+- **#8005**: board 04: LDO output wire runs through C2/C3 bodies in the schematic (sch_wire_through_symbol)
+- **#8012**: route (lattice): banner calls --timeout the 'hard cap' but per-net-timeout x links binds first — raising --timeout is a silent no-op
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#7994**: chore: acknowledge archived upstreams in ecosystem registry
-- **#7997**: docs: evaluate KiCAD-MCP-Server against kct mcp serve
+- **#8013**: fix(router): name the binding term of the lattice negotiation deadline
 
 ## Approved (Awaiting Merge)
 
@@ -61,14 +56,10 @@ Issues carrying `loom:curated`.
 
 - **#5509**: Epic: one clearance kernel — search, commit, and final validation must agree with kicad-cli DRC *(curated)*
 - **#7487**: Re-rule or remove board 03 usb_geometry via-in-pad window exception by 2027-04-19 (#7457 / #7084 Q10) *(curated)*
-- **#7518**: DSN export: verify a Specctra router doesn't double-flip back-side padstack layers (deferred from #7481 / #7496) *(curated)*
 - **#7931**: lattice coupled: tolerate near-anchor jog-and-return tails in trim_end_reversals (board 03 USB_D J1.A6→U2.3 trunk-offset-degenerate) *(curated)*
-- **#7989**: Ecosystem registry: acknowledge Konnect's archive, name its successor, and make KiCAD-MCP-Server our agent-interface reference *(curated)*
-- **#7990**: Evaluate KiCAD-MCP-Server (MIT) against kct mcp serve, as the replacement for Konnect *(curated)*
-- **#7992**: feat: suggest Basic-library JLCPCB alternatives for Extended parts *(curated)*
-- **#7993**: feat: expose parts search and lookup as kct MCP tools *(curated)*
-- **#7995**: feat: symbol library write and registration helpers (create/delete/rename symbol, register library) *(curated)*
-- **#7996**: feat: schematic cosmetic lint and declutter suggestions *(curated)*
+- **#8005**: board 04: LDO output wire runs through C2/C3 bodies in the schematic (sch_wire_through_symbol) *(curated)*
+- **#8008**: chore: ecosystem registry: Backplane and KiStack moved to BackplaneWorks org *(curated)*
+- **#8012**: route (lattice): banner calls --timeout the 'hard cap' but per-net-timeout x links binds first — raising --timeout is a silent no-op *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -88,11 +79,11 @@ _None._
 | Operator merge-risk holds | 0 |
 | Very important | 0 |
 | Important | 0 |
-| Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 6 |
-| PRs awaiting review | 2 |
+| Ready (`loom:issue`) | 1 |
+| In Progress (`loom:building`) | 2 |
+| PRs awaiting review | 1 |
 | Approved PRs awaiting merge | 0 |
-| Curated | 10 |
+| Curated | 6 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 4 |
 <!-- guide:plan-body:end -->
