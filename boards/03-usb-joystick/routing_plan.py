@@ -66,7 +66,9 @@ USB_COMMON_RUN_WINDOW = (37.5, 40.3, 13.0, 16.8)
 # USB_VIA_IN_PAD_EXCEPTION_EXPIRES: ``tests/test_board03_usb_window_7084.py``
 # fails after that date so the exception is re-ruled rather than kept.
 USB_VIA_IN_PAD_EXCEPTION_ISSUE = 7487
-USB_VIA_IN_PAD_EXCEPTION_EXPIRES = "2027-04-19"
+# Extended to 2027-10-19 by operator ruling (fleet:decide 20261024-r1 q55,
+# 2026-10-27, option 1; recorded on issue #7487).  Re-rule before this date.
+USB_VIA_IN_PAD_EXCEPTION_EXPIRES = "2027-10-19"
 USB_ESD_LANDS_7084 = {
     "USB_D+": (36.75, 37.35, 10.975, 12.30),  # U2 pad 4
     "USB_D-": (38.65, 39.25, 10.975, 12.30),  # U2 pad 6
