@@ -961,10 +961,13 @@ class TestDSNPinPlacement:
         ).export()
         images = re.findall(r'\(image "?([^"\s]+)"?\s*$', dsn, re.M)
         assert sorted(images) == ["Lib_A", "Lib_A__back"]
-        # Back image pre-negates x; every back pad stays on B.Cu.
+        # Back image pre-negates x and names its B.Cu pads on F.Cu: the
+        # reader swaps a back image's layers too (#7518, recorded run in
+        # tests/test_dsn_back_side_reader_7518.py).
         back = re.search(r'\(image "?Lib_A__back"?\s*\n(.*?)\n    \)', dsn, re.S).group(1)
         assert re.search(r'"?1"? 2000\.0 500\.0', back)
-        assert "Rect[B]" in back
+        assert "Rect[T]" in back
+        assert "Rect[B]" not in back
 
     @pytest.mark.parametrize(
         "board",
@@ -1186,10 +1189,13 @@ class TestPadShapes:
     def test_plain_rect_keeps_size_only_name(self, tmp_path):
         assert "Rect[T]Pad_1500.0x1500.0_um" in _shapes_dsn(tmp_path)
 
-    def test_back_side_shapes_stay_on_back_copper(self, tmp_path):
+    def test_back_side_shapes_are_named_on_the_mirror_layer(self, tmp_path):
+        # B.Cu pads of a back image are written on F.Cu so the reader's
+        # back-side layer swap lands them on B.Cu (#7518).
         shapes = _padstack_shapes(_shapes_dsn(tmp_path, back=True))
-        assert shapes
-        assert all("B.Cu" in s for s in shapes.values())
+        pads = {k: v for k, v in shapes.items() if not k.startswith("Via")}
+        assert pads
+        assert all("F.Cu" in s and "B.Cu" not in s for s in pads.values())
 
     def test_back_side_custom_polygon_is_mirrored_like_pins(self, tmp_path):
         front = _padstack_shapes(_shapes_dsn(tmp_path))
