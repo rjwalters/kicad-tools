@@ -13,8 +13,14 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-10-27
+
+- **PR #7980**: chore(deps): Bump the github-actions group across 1 directory with 4 updates
+- **Issue #7690** (closed): Epic: full 3D model coverage, from demo boards to the JLCPCB catalog, reproducible on the pinned toolchain
+
 ### 2026-10-26
 
+- **Issue #6441** (closed): Epic: diff-pair routing redesign — gateways, via pairs, uncoupled budget, per-segment rules
 - **PR #7983**: feat(router): deprecate the grid coupled diff-pair pre-pass
 - **PR #7978**: chore(deps-dev): Bump the npm-minor-patch group across 1 directory with 2 updates
 - **PR #7977**: chore(deps): Bump the uv-minor-patch group across 1 directory with 2 updates
