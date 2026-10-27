@@ -15,6 +15,9 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-27
 
+- **PR #8009**: docs(ecosystem): record the no-fallback-router ruling
+- **PR #8007**: fix(dsn): name back-image pad copper on the mirror layer (#7518)
+- **Issue #7518** (closed): DSN export: verify a Specctra router doesn't double-flip back-side padstack layers (deferred from #7481 / #7496)
 - **PR #8003**: feat: add parts_search and parts_lookup MCP tools
 - **PR #8001**: feat: add sch_wire_through_symbol advisory lint to kct check
 - **PR #7999**: feat: add kct parts alternatives for offline Basic-part substitution
