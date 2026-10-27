@@ -2688,3 +2688,76 @@ register_tool(
     handler=_handler_ecosystem_show,
     category="ecosystem",
 )
+
+
+# -----------------------------------------------------------------------------
+# Parts Tools (Issue #7993)
+# -----------------------------------------------------------------------------
+
+
+def _handler_parts_search(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle parts_search tool call."""
+    from kicad_tools.mcp.tools.parts import parts_search
+
+    return parts_search(
+        query=params["query"],
+        package=params.get("package"),
+        in_stock=params.get("in_stock", False),
+        basic_only=params.get("basic_only", False),
+        page=params.get("page", 1),
+        page_size=params.get("page_size", 20),
+    )
+
+
+register_tool(
+    name="parts_search",
+    description=(
+        "Search JLCPCB/LCSC parts by free-text query (value + package). Uses the "
+        "live API and falls back to the offline jlcparts catalog; the result's "
+        "'coverage' (live/offline/incomplete) says which. An empty list is a "
+        "verified miss only when coverage is 'live'. Returns an error when no "
+        "source is available."
+    ),
+    parameters=_make_params(
+        properties={
+            "query": {"type": "string", "description": "Search text, e.g. '10k 0402'"},
+            "package": {"type": "string", "description": "Package filter, e.g. '0402'"},
+            "in_stock": {"type": "boolean", "description": "Only parts with stock"},
+            "basic_only": {"type": "boolean", "description": "Only JLCPCB basic parts"},
+            "page": {"type": "integer", "description": "1-based page (default 1)"},
+            "page_size": {"type": "integer", "description": "Results per page, 1-100 (default 20)"},
+        },
+        required=["query"],
+    ),
+    handler=_handler_parts_search,
+    category="parts",
+)
+
+
+def _handler_parts_lookup(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle parts_lookup tool call."""
+    from kicad_tools.mcp.tools.parts import parts_lookup
+
+    return parts_lookup(lcsc_part=params["lcsc_part"])
+
+
+register_tool(
+    name="parts_lookup",
+    description=(
+        "Look up one part by LCSC number (e.g. 'C25804'): specs, stock, price "
+        "breaks and datasheet. Uses the live API with offline catalog fallback; "
+        "'status' is found, not_found (verified), offline_miss or unavailable — "
+        "the last two are NOT confirmed absence and also carry an error."
+    ),
+    parameters=_make_params(
+        properties={
+            "lcsc_part": {
+                "type": "string",
+                "description": "LCSC part number; the 'C' prefix is optional",
+            },
+        },
+        required=["lcsc_part"],
+    ),
+    handler=_handler_parts_lookup,
+    category="parts",
+)
