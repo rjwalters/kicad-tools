@@ -520,8 +520,9 @@ file's embedded library definitions. Unchanged files are never rewritten.
 
 ## Findings: the shared, versioned locator shape
 
-`kct check`, `kct drc` and `kct detect-mistakes` (`--format json`) carry a
-top-level `schema_version` (int, currently `1`) and a `findings` array
+`kct check`, `kct drc`, `kct detect-mistakes` and `kct net-status`
+(`--format json`) carry a top-level `schema_version` (int, currently `1`) and a
+`findings` array; the MCP `measure_clearance` result carries the same two keys
 (Issue #8015). Each entry follows
 `src/kicad_tools/data/schemas/finding.schema.json`:
 
@@ -542,6 +543,25 @@ frame (y grows downward), the frame KiCad displays. Verified per emitter:
 `detect-mistakes` measures on the loaded board (board-relative, Edge.Cuts
 origin subtracted), so its adapter adds the board origin back. The legacy
 `mistakes[].location` key is left unchanged (board-relative); use `findings`.
+`kct net-status` (`PadInfo.position`) and `measure_clearance` (`location`) are
+also board-relative -- both read the loaded `PCB` -- so their adapters add
+`PCB.board_origin` back too; the legacy `unconnected_pads[].position` and
+`location` keys stay board-relative. Checked on a board whose Edge.Cuts starts
+at (100, 100) with `U1` at `(at 115 115)`: `kct detect-mistakes --format json`
+reports `mistakes[].location == [15.0, 15.0]` and `findings[].point ==
+[115.0, 115.0]`. `PCB.board_origin` is the Edge.Cuts minimum corner;
+`setup.aux_axis_origin` plays no part in the loader's frame, so it does not
+shift any finding.
+
+`kct net-status` emits one finding per incomplete / unrouted net
+(`net_status.incomplete`, `net_status.unrouted`; `point` is the first
+unconnected pad, `bbox` spans two or more, `severity` is `info` for
+plane/pour-advisory nets and `error` otherwise) and one `net_status.stranded`
+finding per net with copper reaching no pad (`point` is `null`). Complete nets
+emit nothing. `measure_clearance` emits one `measure_clearance.clearance`
+finding when `passes_rules` is false (`point`/`layer` at the closest approach,
+`refs`/`pads` from the two closest elements) and an empty `findings` array
+otherwise.
 
 **Compatibility policy.** Additive fields keep the same `schema_version`.
 A renamed, removed or retyped field, or a changed meaning, bumps

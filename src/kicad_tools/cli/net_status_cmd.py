@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Any
 
 from kicad_tools.analysis.net_status import NetStatus, NetStatusAnalyzer, NetStatusResult
 from kicad_tools.cli.check_cmd import portable_report_path
+from kicad_tools.findings import findings_payload, from_net_status
 
 if TYPE_CHECKING:
     from kicad_tools.router.stuck_classifier import StuckNetDiagnosis
@@ -228,7 +229,13 @@ def main(argv: list[str] | None = None) -> int:
 
     # Output
     if args.format == "json":
-        output_json(filtered, pcb_path, args.by_class, strict=strict)
+        output_json(
+            filtered,
+            pcb_path,
+            args.by_class,
+            strict=strict,
+            origin=tuple(analyzer.pcb.board_origin),
+        )
     else:
         # For --incomplete the summary header must describe the unfiltered
         # board so its counts stay internally consistent (Complete +
@@ -471,8 +478,13 @@ def output_json(
     pcb_path: Path,
     by_class: bool = False,
     strict: bool = True,
+    origin: tuple[float, float] = (0.0, 0.0),
 ) -> None:
-    """Output results as JSON."""
+    """Output results as JSON.
+
+    ``origin`` is ``PCB.board_origin``; it moves the board-relative pad
+    positions back into the KiCad file frame for ``findings`` (Issue #8015).
+    """
     data: dict[str, Any] = {
         "pcb": portable_report_path(pcb_path),
         "connectivity_model": "strict" if strict else "legacy_proximity",
@@ -484,6 +496,7 @@ def output_json(
             "stranded": result.stranded_count,
             "total_unconnected_pads": result.total_unconnected_pads,
         },
+        **findings_payload(f for n in result.nets for f in from_net_status(n, origin)),
     }
 
     if by_class:

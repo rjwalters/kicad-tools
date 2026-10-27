@@ -57,6 +57,9 @@ class ClearanceResult:
         clearances: List of all individual clearance measurements
         passes_rules: Whether the clearance meets design rules
         required_clearance_mm: Required minimum clearance from design rules
+        board_origin: ``PCB.board_origin`` of the measured board.  ``location``
+            is board-relative; ``findings`` adds this back to report the KiCad
+            file frame (Issue #8015).
     """
 
     item1: str
@@ -67,10 +70,14 @@ class ClearanceResult:
     clearances: list[ClearanceMeasurement] = field(default_factory=list)
     passes_rules: bool = True
     required_clearance_mm: float | None = None
+    board_origin: tuple[float, float] = (0.0, 0.0)
 
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization."""
+        from kicad_tools.findings import findings_payload, from_clearance
+
         return {
+            **findings_payload(from_clearance(self, self.board_origin)),
             "item1": self.item1,
             "item2": self.item2,
             "min_clearance_mm": round(self.min_clearance_mm, 4),
