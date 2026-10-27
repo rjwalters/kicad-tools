@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-27
 
+- **PR #7986**: docs(ecosystem): mark konnect as archived upstream
+- **Issue #7981** (closed): Ecosystem registry drift: upstream license/rename/archive change
 - **PR #7980**: chore(deps): Bump the github-actions group across 1 directory with 4 updates
 - **Issue #7690** (closed): Epic: full 3D model coverage, from demo boards to the JLCPCB catalog, reproducible on the pinned toolchain
 
