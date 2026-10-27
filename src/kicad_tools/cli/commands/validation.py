@@ -313,6 +313,10 @@ def run_check_command(args) -> int:
         sub_argv.extend(["--only", args.only_checks])
     if args.skip_checks:
         sub_argv.extend(["--skip", args.skip_checks])
+    # Issue #8016: forward the finding-scope flags.
+    for flag in ("bbox", "refs", "nets"):
+        if getattr(args, flag, None):
+            sub_argv.extend([f"--{flag}", getattr(args, flag)])
     # Issue #4375: forward the DRC-constraint sidecar emission flags.
     if getattr(args, "emit_dru", False):
         sub_argv.append("--emit-dru")
