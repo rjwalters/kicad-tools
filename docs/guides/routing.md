@@ -1492,3 +1492,25 @@ An empty problem list confirms matching artifact bytes and optional-file absence
 It does not certify electrical connectivity, native DRC, or factory DFM, and does
 not authenticate who created the receipt. Later board or rule edits invalidate
 the binding. Manufacturing packages retain their separate archive manifest.
+
+## External Routers: Specctra DSN and SES
+
+`kct pcb export-dsn` writes a Specctra DSN for an external router such as
+Freerouting, and `kct pcb import-ses` merges the routed session back into the
+board. Back-side parts need care, because a Specctra reader flips a
+`back`-placed image twice: it mirrors the image in x, and it swaps the image's
+padstack layers. KiCad's file already stores back-side pads flipped, so the
+exporter writes each back-side part as its own `<image>__back` image with
+x-negated pins (#7481), and names that image's B.Cu pad copper on F.Cu, so the
+reader's layer swap lands it on B.Cu again (#7518).
+
+The layer swap was observed black-box rather than inferred. Freerouting v2.5.0
+(jar sha256 `f6f51bb02245e8e717f9359bd260cc9c5c0b1bc0acc8b7cb2cd5b8ffeb5de3c7`)
+was run on a small mixed-side board. When the back pads were named on B.Cu, it
+routed every back-side SMD pad on F.Cu, and kicad-cli DRC of the imported
+board reported each of those track ends as unconnected. With the mirror-layer
+naming, every back-side pad was reached on B.Cu and DRC showed no unconnected
+or dangling copper. Through-hole pads span every layer and are unaffected. The
+recorded DSN and SES files, and the run record, are in
+`tests/fixtures/dsn_back_side_7518/`, and
+`tests/test_dsn_back_side_reader_7518.py` pins the result.

@@ -904,6 +904,27 @@ class KiCadToDSNExporter:
         """The board copper layers a pad's layer list covers."""
         return self._resolve_copper_layers(pad.layers)
 
+    def _image_copper_layers(self, pad: PadInfo, back: bool) -> list[str]:
+        """The copper layers a pad's padstack names inside its image.
+
+        A Specctra reader swaps the layers of a ``back``-placed image's
+        padstacks (observed black-box with Freerouting v2.5.0 on a two-layer
+        board, issue #7518: B.Cu-named pads of back placements were routed
+        to as F.Cu). So a back image names each pad's copper on the mirror
+        layer of the stack -- B.Cu as F.Cu -- and the reader's swap puts it
+        back where the KiCad file has it. The same stack mirror is applied
+        to inner layers; that part was not observed (SMD pads on inner
+        layers are not a case the run covered).
+        """
+        copper = self._pad_copper_layers(pad) or ["F.Cu"]
+        if not back:
+            return copper
+        if any(c not in self._layers for c in copper):
+            return copper
+        last = len(self._layers) - 1
+        mirrored = [self._layers[last - self._layers.index(c)] for c in copper]
+        return sorted(mirrored, key=self._layers.index)
+
     def _pad_is_pin(self, pad: PadInfo) -> bool:
         """Whether a pad is exported as an image pin.
 
@@ -1044,7 +1065,9 @@ class KiCadToDSNExporter:
             )
         return [(x, y) for x, y in list(hull.exterior.coords)[:-1]]
 
-    def _make_padstack_name(self, pad: PadInfo, shape: tuple[str, tuple[float, ...]]) -> str:
+    def _make_padstack_name(
+        self, pad: PadInfo, shape: tuple[str, tuple[float, ...]], back: bool = False
+    ) -> str:
         """Generate a unique padstack name for a pad geometry.
 
         A plain rectangle keeps the size-only name; any other shape appends a
@@ -1062,7 +1085,7 @@ class KiCadToDSNExporter:
         if pad.pad_type == "thru_hole":
             d = mm_to_um(pad.drill)
             return f"Round[A]Pad_{w}x{h}_Drill{d}{suffix}_um"
-        copper = self._pad_copper_layers(pad) or ["F.Cu"]
+        copper = self._image_copper_layers(pad, back)
         if copper == ["F.Cu"]:
             side = "T"
         elif copper == ["B.Cu"]:
@@ -1072,7 +1095,7 @@ class KiCadToDSNExporter:
         return f"Rect[{side}]Pad_{w}x{h}{suffix}_um"
 
     def _build_padstack_def(
-        self, name: str, pad: PadInfo, shape: tuple[str, tuple[float, ...]]
+        self, name: str, pad: PadInfo, shape: tuple[str, tuple[float, ...]], back: bool = False
     ) -> str:
         """Build DSN padstack definition for a pad."""
         kind, n = shape
@@ -1082,7 +1105,7 @@ class KiCadToDSNExporter:
         if pad.pad_type == "thru_hole":
             layers = list(self._layers)  # shapes on all copper layers
         else:
-            layers = self._pad_copper_layers(pad) or ["F.Cu"]
+            layers = self._image_copper_layers(pad, back)
         for layer in layers:
             dsn_layer = _dsn_quote(KICAD_TO_DSN_LAYER.get(layer, layer))
             if kind == "circle":
@@ -1305,6 +1328,16 @@ class KiCadToDSNExporter:
         file already stores back-side pad offsets flipped, so back images
         are distinct from front ones and carry x-negated pins (issue #7481).
 
+        The reader also swaps a back-placed image's padstack layers. This was
+        observed black-box, not inferred (issue #7518): Freerouting v2.5.0
+        (jar sha256 ``f6f51bb0...b5de3c7``) routed to the B.Cu-named pads of
+        ``back`` placements on F.Cu, with every wire end on the right pad
+        position. So a back image names its pads' copper on the mirror layer
+        (:meth:`_image_copper_layers`): B.Cu pads are written as F.Cu, and
+        the reader's swap lands them on B.Cu again. Through-hole pads span
+        every layer and are unaffected. The recorded run is the fixture in
+        ``tests/fixtures/dsn_back_side_7518/``.
+
         Pad shapes depend on each pad's rotation *relative to the footprint*,
         which differs between instances of one library footprint (same
         absolute pad angle, different footprint rotation). The first variant
@@ -1388,10 +1421,11 @@ class KiCadToDSNExporter:
             for pad in fp.pads:
                 # Back-side offsets are already flipped in the KiCad file;
                 # pre-negate x so the reader's back-side mirror restores them.
-                # Padstack layers stay as the file names them (B.Cu pads on
-                # B.Cu): whether a reader also swaps a back image's layers is
-                # not verified black-box yet (issue #7481 open question).
-                px_um = mm_to_um(-pad.x if fp.layer != "F.Cu" else pad.x)
+                # The reader also swaps a back image's padstack layers, so
+                # those are named on the mirror layer (B.Cu pads as F.Cu) and
+                # the two flips cancel (issue #7518, see _image_name).
+                back = fp.layer != "F.Cu"
+                px_um = mm_to_um(-pad.x if back else pad.x)
                 py_um = mm_to_um(pad.y)
                 if pad.pad_type == "np_thru_hole":
                     lines.extend(self._npth_keepouts(pad, px_um, py_um))
@@ -1399,10 +1433,10 @@ class KiCadToDSNExporter:
                 if not self._pad_is_pin(pad):
                     continue
 
-                shape = self._pad_shape(pad, fp.layer != "F.Cu")
-                ps_name = self._make_padstack_name(pad, shape)
+                shape = self._pad_shape(pad, back)
+                ps_name = self._make_padstack_name(pad, shape, back)
                 if ps_name not in padstack_defs:
-                    padstack_defs[ps_name] = self._build_padstack_def(ps_name, pad, shape)
+                    padstack_defs[ps_name] = self._build_padstack_def(ps_name, pad, shape, back)
 
                 lines.append(
                     f"      (pin {_dsn_quote(ps_name)} {_dsn_quote(pad.number)} {px_um:.1f} {py_um:.1f})"

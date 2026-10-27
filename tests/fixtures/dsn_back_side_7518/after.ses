@@ -1,0 +1,131 @@
+(session out
+  (base_design out)
+  (placement
+    (resolution um 10)
+    (component "Package_TO_SOT_SMD:SOT-23"
+      (place U1 80000 80000 front 0)
+    )
+    (component "Package_TO_SOT_SMD:SOT-23__back"
+      (place U3 280000 220000 back 180)
+      (place U2 280000 80000 back 210)
+    )
+    (component "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical__back"
+      (place J1 80000 200000 back 180)
+    )
+  )
+  (was_is
+  )
+  (routes 
+    (resolution um 10)
+    (parser
+      (host_cad "KiCad's Pcbnew")
+      (host_version "kicad-tools")
+    )
+    (library_out 
+      (padstack "Via[0-1]_Pad600_um"
+        (shape
+          (circle F.Cu 6000 0 0)
+        )
+        (shape
+          (circle B.Cu 6000 0 0)
+        )
+        (attach off)
+      )
+    )
+    (network_out 
+      (net BB
+        (wire
+          (path B.Cu 2000
+            292869 76460
+            288467 84083
+          )
+        )
+        (wire
+          (path B.Cu 2000
+            289375 210500
+            289375 202346
+            294661 197060
+            294661 90277
+            288467 84083
+          )
+        )
+      )
+      (net FB
+        (wire
+          (path F.Cu 1500
+            175522 73998
+            88949 73998
+            83234 68283
+          )
+        )
+        (wire
+          (path F.Cu 2000
+            267179 84600
+            186124 84600
+            175522 73998
+          )
+        )
+        (wire
+          (path B.Cu 1500
+            267179 84600
+            270776 84600
+            273247 87071
+          )
+        )
+        (wire
+          (path B.Cu 1500
+            283369 92915
+            273247 87071
+          )
+        )
+        (via "Via[0-1]_Pad600_um" 267179 84600
+        )
+        (wire
+          (path F.Cu 2000
+            83234 68283
+            81017 70500
+          )
+        )
+        (wire
+          (path F.Cu 2000
+            70625 70500
+            81017 70500
+          )
+        )
+      )
+      (net FT
+        (wire
+          (path B.Cu 2000
+            80000 225400
+            68044 213444
+            68044 100387
+            70625 97806
+          )
+        )
+        (wire
+          (path F.Cu 2000
+            70625 97806
+            70625 89500
+          )
+        )
+        (via "Via[0-1]_Pad600_um" 70625 97806
+        )
+      )
+      (net TB
+        (wire
+          (path B.Cu 2000
+            80000 200000
+            91517 200000
+          )
+        )
+        (wire
+          (path B.Cu 2000
+            91517 200000
+            121017 229500
+            289375 229500
+          )
+        )
+      )
+    )
+  )
+)
