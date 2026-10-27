@@ -1246,5 +1246,5 @@ def measure_clearance(
         clearances=measurements,
         passes_rules=passes_rules,
         required_clearance_mm=required_clearance,
-        board_origin=tuple(pcb.board_origin),
+        board_origin=pcb.board_origin,
     )

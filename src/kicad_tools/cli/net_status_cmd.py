@@ -234,7 +234,7 @@ def main(argv: list[str] | None = None) -> int:
             pcb_path,
             args.by_class,
             strict=strict,
-            origin=tuple(analyzer.pcb.board_origin),
+            origin=analyzer.pcb.board_origin,
         )
     else:
         # For --incomplete the summary header must describe the unfiltered
