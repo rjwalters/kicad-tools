@@ -3292,8 +3292,15 @@ def run_selected_checks(
         if sch_path is None:
             return DRCResults()
         from kicad_tools.validate.rules.schematic_fields import check_schematic_fields
+        from kicad_tools.validate.rules.schematic_wire_symbol import (
+            check_schematic_wire_symbol,
+        )
 
-        return check_schematic_fields(sch_path, threshold_mm=sch_field_threshold)
+        # Issue #7996: the wire-through-symbol cosmetic rule rides in the
+        # same category, so --only/--skip sch_fields selects both.
+        results = check_schematic_fields(sch_path, threshold_mm=sch_field_threshold)
+        results.merge(check_schematic_wire_symbol(sch_path))
+        return results
 
     # Issue #4540: LLM-free doc-drift lint (kct:doc-pin markers vs
     # machine ground truth).  Dispatched as a CLI-level closure (like

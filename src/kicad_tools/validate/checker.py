@@ -514,6 +514,8 @@ class DRCChecker:
         # Manufacturing bucket and there is no "sch" prefix fallback.
         "sch_field_offset": CATEGORY_ADVISORY,
         "sch_field_overlap": CATEGORY_ADVISORY,
+        # Wire crossing a symbol body (Issue #7996): cosmetic advisory.
+        "sch_wire_through_symbol": CATEGORY_ADVISORY,
         # Doc-drift lint (Issue #4540): INFO-severity documentation
         # staleness advisories (kct:doc-pin markers vs machine ground
         # truth) -- never fab-blocking.  Explicit entries are REQUIRED:
