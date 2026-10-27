@@ -594,6 +594,7 @@ full list (every command and subcommand) lives in
 | `kct datasheet <subcommand>` | Search, download, parse datasheets |
 | `kct parts <subcommand>` | LCSC/JLCPCB part lookup, cache, offline catalog sync |
 | `kct export <pcb>` | Manufacturing bundle export (gerbers, BOM, CPL) |
+| `kct export-formats <pcb>` | PDF / SVG / STEP / IPC-2581 / ODB++ via kicad-cli, with a per-format result |
 | `kct mfr <subcommand>` | Manufacturer rule profiles (apply-rules, validate) |
 | `kct spec <subcommand>` | Project specification (`.kct`) management |
 | `kct fleet status` | Routing + manufacturing readiness across all boards |

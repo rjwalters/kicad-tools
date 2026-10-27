@@ -273,6 +273,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_skills_parser(subparsers)
     _add_agent_guide_parser(subparsers)
     _add_render_parser(subparsers)
+    _add_export_formats_parser(subparsers)
     _add_board_metrics_parser(subparsers)
     _add_readiness_parser(subparsers)
     _add_clean_parser(subparsers)
@@ -7013,6 +7014,22 @@ def _add_render_parser(subparsers) -> None:
         default="text",
         help="Output format (default: text)",
     )
+
+
+def _add_export_formats_parser(subparsers) -> None:
+    """Add the ``export-formats`` subcommand parser (Issue #8017)."""
+    from .export_formats_cmd import build_parser
+
+    sub = subparsers.add_parser(
+        "export-formats",
+        help="Export PDF/SVG/STEP/IPC-2581/ODB++ via kicad-cli",
+        description=(
+            "Run 'kicad-cli pcb export' for each requested format and report what "
+            "was produced. Exits non-zero unless every format wrote a non-empty file."
+        ),
+    )
+    build_parser(sub)
+    sub.set_defaults(export_formats_cmd=True)
 
 
 def _add_clean_parser(subparsers) -> None:

@@ -581,6 +581,10 @@ def _dispatch_command(args) -> int:
 
     elif args.command == "render":
         return _run_render_command(args)
+    elif args.command == "export-formats":
+        from .export_formats_cmd import run as run_export_formats
+
+        return run_export_formats(args)
 
     elif args.command == "board-metrics":
         from .commands.board_metrics import run_board_metrics_command
