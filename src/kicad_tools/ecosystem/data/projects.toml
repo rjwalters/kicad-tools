@@ -582,9 +582,9 @@ verdict = "ideas-adopted"
 license = "AGPL-3.0"
 license_compat = "copyleft-ideas-only"
 language = "Rust"
-stars = 1200
-last_push = "2026-10-02"
-last_verified = "2026-10-17"
+stars = 1424
+last_push = "2026-10-26"
+last_verified = "2026-10-26"
 research_docs = [
   "docs/research/konnect-connectivity-audit.md",
   "docs/konnect-item1-toolset-economy-audit.md",
@@ -592,7 +592,7 @@ research_docs = [
   "docs/research/konnect-v013-delta.md",
 ]
 summary = """
-a single-binary native KiCad 10 plugin exposing a very large LLM tool \
+upstream is archived (read-only, no further releases expected); the ideas we adopted stand on their own as of 2026-10-26. A single-binary native KiCad 10 plugin exposing a very large LLM tool \
 surface (228 tools in 21 toolsets) across schematic, layout, routing, placement, review \
 and manufacturing. AGPL means no code can move between it and this MIT \
 repo in either direction, so our engagement is capability-level only: we \
