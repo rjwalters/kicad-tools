@@ -19,6 +19,7 @@ licence-compatibility, is the ecosystem registry: `kct ecosystem list`,
 | [copperhead](copperhead-workflow-ideas.md) | Adoptable workflow ideas from the copperhead AI PCB agent |
 | [Diode `pcb`](diode-pcb-comparison.md) | Diode (Zener) vs kicad-tools feature comparison |
 | [KiCadRoutingTools (KRT)](kicad-routing-tools-comparison.md) | KRT vs kicad-tools comparison and benchmark |
+| [KiCAD-MCP-Server](kicad-mcp-server-evaluation.md) | mixelpixx MCP server (MIT) tool-by-tool vs `kct mcp serve` |
 | [kipy IPC API](kipy-ipc-api-evaluation.md) | Official KiCad Python API as a parser cross-check |
 | [OmniLayout / OmniRouting](omnilayout-recon.md) | External LLM layout/routing benchmark recon |
 | [RepoRecon KiCad AI sweep](reporecon-kicad-ai-sweep.md) | Sweep of KiCad AI repositories |
