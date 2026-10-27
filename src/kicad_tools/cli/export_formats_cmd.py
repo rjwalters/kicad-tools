@@ -1,8 +1,8 @@
 """``kct export-formats`` -- PDF/SVG/STEP/IPC-2581/ODB++ via kicad-cli (Issue #8017).
 
 Usage:
-    kct export-formats board.kicad_pcb --format pdf,svg,step,ipc2581,odb -o out/
-    kct export-formats board.kicad_pcb --json
+    kct export-formats board.kicad_pcb --formats pdf,svg,step,ipc2581,odb -o out/
+    kct export-formats board.kicad_pcb --format json
 
 Exits 0 only if every requested format produced a non-empty file.
 """
@@ -20,13 +20,14 @@ from ..export.kicad_cli_exports import (
     export_formats,
     parse_formats,
 )
+from .format_options import add_format_flag, wants_json
 
 
 def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.ArgumentParser:
     p = parser or argparse.ArgumentParser(prog="kct export-formats")
     p.add_argument("pcb", help="Path to .kicad_pcb file")
     p.add_argument(
-        "--format",
+        "--formats",
         dest="formats",
         default=",".join(FORMAT_SUFFIX),
         help=f"Comma-separated formats ({', '.join(FORMAT_SUFFIX)}; default: all)",
@@ -39,7 +40,7 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
         default=DEFAULT_LAYERS,
         help=f"Layers for PDF/SVG (default: {DEFAULT_LAYERS})",
     )
-    p.add_argument("--json", action="store_true", help="Emit a JSON summary of what was produced")
+    add_format_flag(p, help_text="Output format; json emits a summary of what was produced")
     return p
 
 
@@ -63,7 +64,7 @@ def run(args: argparse.Namespace) -> int:
     results = export_formats(pcb, out_dir, formats, layers=args.layers)
     ok = all(r.status == "ok" for r in results)
 
-    if args.json:
+    if wants_json(args):
         print(
             json.dumps(
                 {

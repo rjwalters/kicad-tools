@@ -109,7 +109,9 @@ def test_cli_exit_codes_and_json(pcb, tmp_path, capsys):
         patch.object(mod, "find_kicad_cli", return_value=FAKE_CLI),
         patch.object(mod.subprocess, "run", _runner(partial)),
     ):
-        rc = export_formats_cmd.main([str(pcb), "--format", "pdf,step", "-o", str(out), "--json"])
+        rc = export_formats_cmd.main(
+            [str(pcb), "--formats", "pdf,step", "-o", str(out), "--format", "json"]
+        )
     data = json.loads(capsys.readouterr().out)
     assert rc == 1 and data["success"] is False
     assert [f["status"] for f in data["formats"]] == ["ok", "failed"]
@@ -119,9 +121,9 @@ def test_cli_exit_codes_and_json(pcb, tmp_path, capsys):
         patch.object(mod, "find_kicad_cli", return_value=FAKE_CLI),
         patch.object(mod.subprocess, "run", _runner(_write)),
     ):
-        assert export_formats_cmd.main([str(pcb), "--format", "pdf", "-o", str(out)]) == 0
+        assert export_formats_cmd.main([str(pcb), "--formats", "pdf", "-o", str(out)]) == 0
 
 
 def test_bad_inputs(pcb, tmp_path):
     assert export_formats_cmd.main([str(tmp_path / "nope.kicad_pcb")]) == 2
-    assert export_formats_cmd.main([str(pcb), "--format", "dxf"]) == 2
+    assert export_formats_cmd.main([str(pcb), "--formats", "dxf"]) == 2
