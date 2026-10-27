@@ -851,24 +851,27 @@ repo_url = "https://github.com/mixelpixx/KiCAD-MCP-Server"
 vcs = "github"
 category = "agent-interface"
 relation = "peer"
-verdict = "watch"
+verdict = "complementary"
 license = "MIT"
 license_compat = "mit-clean"
 language = "Python + TypeScript"
 stars = 2592
-last_push = "2026-10-01"
-last_verified = "2026-10-06"
-summary = """
-the most-starred KiCad MCP server: project setup, schematic editing, \
-placement, routing via Freerouting, DRC/ERC, export, custom symbol and \
-footprint generation and JLCPCB parts lookup. It is the MIT predecessor \
-of Konnect, which its authors now say is where new development happens. \
-Not yet compared tool-by-tool with `kct mcp serve`.\
+last_push = "2026-10-25"
+last_verified = "2026-10-27"
+summary = """\
+the most-starred KiCad MCP server: ~250 fine-grained tools for project \
+setup, schematic and board editing, Freerouting, DRC/ERC, export, symbol and \
+footprint creation and JLCPCB parts lookup. It is the MIT predecessor of \
+Konnect. Compared tool-by-tool with `kct mcp serve` (pinned 628d320f): \
+a wide imperative editing surface against our narrow session/verification \
+one, so complementary; a Freerouting runner, parts alternatives, symbol \
+library writes and schematic cosmetic lint are worth borrowing under MIT \
+with attribution.\
 """
-reeval_trigger = """
-Diff its tool catalog and its symbol/footprint generation against ours; \
-being MIT, anything worth having can move with attribution, unlike \
-Konnect.\
+research_docs = ["docs/research/kicad-mcp-server-evaluation.md"]
+reeval_trigger = """\
+Re-diff the tool catalog if upstream changes its tool architecture, or \
+when the follow-ups #7991, #7992, #7993, #7995 and #7996 land.\
 """
 
 [projects.kicad-mcp-pro]
