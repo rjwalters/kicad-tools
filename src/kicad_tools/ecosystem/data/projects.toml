@@ -899,9 +899,10 @@ editing, Freerouting, DRC/ERC, export, symbol and footprint creation and \
 JLCPCB parts lookup. It is the MIT predecessor of Konnect. Compared \
 tool-by-tool with `kct mcp serve` (pinned 628d320f): a wide imperative \
 editing surface against our narrow session/verification one, so \
-complementary; a Freerouting runner, parts alternatives, symbol library \
-writes and schematic cosmetic lint are worth borrowing under MIT with \
-attribution.\
+complementary; parts alternatives, symbol library writes and schematic \
+cosmetic lint are worth borrowing under MIT with attribution. Its \
+Freerouting runner is not: we improve our own router rather than add a \
+fallback (#7991).\
 """
 research_docs = ["docs/research/kicad-mcp-server-evaluation.md"]
 reeval_trigger = """\

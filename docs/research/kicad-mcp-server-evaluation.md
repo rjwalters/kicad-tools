@@ -25,11 +25,11 @@ detection, and manufacturing export. Almost no tool overlaps one-to-one; we do
 not want to chase its count, and most of its schematic-surgery tools are
 served on our side by the `kct` CLI and Python API rather than MCP.
 
-Three areas are worth a closer look because they are real capability we lack
-at the MCP layer (follow-ups below): a Freerouting *runner* (we export DSN and
-import SES, but never run Freerouting), a live JLCPCB parts *search* tool
+Two areas are worth a closer look because they are real capability we lack
+at the MCP layer (follow-ups below): a live JLCPCB parts *search* tool
 (we have `kct parts` and an offline catalog, not MCP tools), and symbol
-*creation*/library registration tools. Being MIT, code from these can move
+*creation*/library registration tools. A Freerouting *runner* was also
+proposed and **rejected** (see "Freerouting integration"). Being MIT, code from these can move
 with attribution; each follow-up says so.
 
 ## Where the two surfaces differ
@@ -193,10 +193,15 @@ Java-version detection, or a Docker image), retries with varied `-mp` pass
 counts and keeps the best-scoring SES, then imports it with net-name
 reconciliation and protects `.kicad_pro` settings. We export DSN
 (`export/dsn.py`) and import SES (`export/ses.py`) and use Freerouting as a
-benchmark competitor, but never *run* it from the product. Closing that gap
-makes Freerouting a selectable fallback behind `route_net_auto`. It is the
-most valuable idea here; the multi-attempt scoring and SES net-name
-reconciliation are worth reusing.
+benchmark competitor, but never *run* it from the product.
+
+**Rejected (operator ruling 2026-10-27, #7991): no fallback router.** We do
+not run Freerouting or any external router from kct. The goal is to improve
+our own router until it routes our circuits fully (100% of nets, 0 DRC
+errors, 0 netlist drift), and a fallback would hide those gaps instead of
+closing them. It would also break the `where-we-sit` non-goal of no Specctra
+DSN/SES round-trip. Where Freerouting finishes a board that ours can't, file a
+router-gap issue with the board and the failing nets.
 
 ## Follow-up issues
 
@@ -204,7 +209,7 @@ Filed via `create-issue.sh`, one per gap:
 
 | Issue | Gap | Upstream code |
 |-------|-----|---------------|
-| #7991 | Run Freerouting from kct as a fallback router | reusable under MIT with attribution |
+| #7991 | Run Freerouting from kct as a fallback router | **closed, not planned** (no fallback router; see above) |
 | #7992 | Basic-library JLCPCB alternatives suggestion | idea only (package map reusable with attribution) |
 | #7993 | Parts search/lookup as MCP tools | idea only |
 | #7995 | Symbol library write and registration helpers | reusable under MIT with attribution |
