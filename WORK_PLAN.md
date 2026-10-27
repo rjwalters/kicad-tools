@@ -2,7 +2,7 @@
 
 Prioritized roadmap generated from current GitHub label state. Maintained by the Guide triage agent.
 
-*Last updated: 2026-10-24*
+*Last updated: 2026-10-27*
 
 ---
 
@@ -11,7 +11,7 @@ Prioritized roadmap generated from current GitHub label state. Maintained by the
 
 Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a human merge decision is missing.
 
-- **#7969**: feat(boards): ship board 07 on the lattice pair path
+_None._
 
 ## Very Important
 
@@ -35,37 +35,44 @@ _None._
 
 Issues currently being built (`loom:building`).
 
-- **#6448**: [Epic #6441] Phase 6: unify diff-pair engines — grid consumes PairPlan or grid coupled pre-pass retired
+- **#7989**: Ecosystem registry: acknowledge Konnect's archive, name its successor, and make KiCAD-MCP-Server our agent-interface reference
+- **#7990**: Evaluate KiCAD-MCP-Server (MIT) against kct mcp serve, as the replacement for Konnect
+- **#7992**: feat: suggest Basic-library JLCPCB alternatives for Extended parts
+- **#7993**: feat: expose parts search and lookup as kct MCP tools
+- **#7995**: feat: symbol library write and registration helpers (create/delete/rename symbol, register library)
+- **#7996**: feat: schematic cosmetic lint and declutter suggestions
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#7977**: chore(deps): Bump the uv-minor-patch group across 1 directory with 2 updates
+- **#7994**: chore: acknowledge archived upstreams in ecosystem registry
+- **#7997**: docs: evaluate KiCAD-MCP-Server against kct mcp serve
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-- **#7969**: feat(boards): ship board 07 on the lattice pair path
-- **#7978**: chore(deps-dev): Bump the npm-minor-patch group across 1 directory with 2 updates
-- **#7980**: chore(deps): Bump the github-actions group across 1 directory with 4 updates
+_None._
 
 ## Proposed
 
 Issues carrying `loom:curated`.
 
 - **#5509**: Epic: one clearance kernel — search, commit, and final validation must agree with kicad-cli DRC *(curated)*
-- **#6448**: [Epic #6441] Phase 6: unify diff-pair engines — grid consumes PairPlan or grid coupled pre-pass retired *(curated)*
 - **#7487**: Re-rule or remove board 03 usb_geometry via-in-pad window exception by 2027-04-19 (#7457 / #7084 Q10) *(curated)*
 - **#7518**: DSN export: verify a Specctra router doesn't double-flip back-side padstack layers (deferred from #7481 / #7496) *(curated)*
-- **#7690**: Epic: full 3D model coverage, from demo boards to the JLCPCB catalog, reproducible on the pinned toolchain *(curated)*
 - **#7931**: lattice coupled: tolerate near-anchor jog-and-return tails in trim_end_reversals (board 03 USB_D J1.A6→U2.3 trunk-offset-degenerate) *(curated)*
+- **#7989**: Ecosystem registry: acknowledge Konnect's archive, name its successor, and make KiCAD-MCP-Server our agent-interface reference *(curated)*
+- **#7990**: Evaluate KiCAD-MCP-Server (MIT) against kct mcp serve, as the replacement for Konnect *(curated)*
+- **#7992**: feat: suggest Basic-library JLCPCB alternatives for Extended parts *(curated)*
+- **#7993**: feat: expose parts search and lookup as kct MCP tools *(curated)*
+- **#7995**: feat: symbol library write and registration helpers (create/delete/rename symbol, register library) *(curated)*
+- **#7996**: feat: schematic cosmetic lint and declutter suggestions *(curated)*
 
 ## Proposed (Architect / Hermit)
 
-- **#6441**: Epic: diff-pair routing redesign — gateways, via pairs, uncoupled budget, per-segment rules *(architect)*
-- **#6448**: [Epic #6441] Phase 6: unify diff-pair engines — grid consumes PairPlan or grid coupled pre-pass retired *(architect)*
+_None._
 
 ## Epics
 
@@ -73,22 +80,21 @@ Issues carrying `loom:curated`.
 - **#4431**: route: per-net scalar clearance cannot express HV isolation — need class-pair (net-class × net-class) clearance rules in the router; both workarounds proven inadequate on a mains board
 - **#5509**: Epic: one clearance kernel — search, commit, and final validation must agree with kicad-cli DRC
 - **#5952**: Epic: Harness-neutral kicad-tools (Claude Code, Codex CLI, opencode)
-- **#6441**: Epic: diff-pair routing redesign — gateways, via pairs, uncoupled budget, per-segment rules
 
 ## Backlog Balance
 
 | Bucket | Count |
 |------|-------|
-| Operator merge-risk holds | 1 |
+| Operator merge-risk holds | 0 |
 | Very important | 0 |
 | Important | 0 |
 | Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 1 |
-| PRs awaiting review | 1 |
-| Approved PRs awaiting merge | 3 |
-| Curated | 6 |
-| Architect / Hermit proposals | 2 |
-| Active epics | 5 |
+| In Progress (`loom:building`) | 6 |
+| PRs awaiting review | 2 |
+| Approved PRs awaiting merge | 0 |
+| Curated | 10 |
+| Architect / Hermit proposals | 0 |
+| Active epics | 4 |
 <!-- guide:plan-body:end -->
 
 ## Release History (static archive)
