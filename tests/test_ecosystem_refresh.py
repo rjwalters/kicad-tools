@@ -128,6 +128,18 @@ class TestErrorClasses:
         (finding,) = [f for f in findings if f.drift_class == "archived"]
         assert finding.severity == "error"
 
+    def test_acknowledged_archive_is_info(self, refresh) -> None:
+        project = _project(upstream_archived="2026-09-29")
+        findings = refresh.compare(project, _facts(refresh, archived=True), TODAY)
+        assert "archived" not in _classes(findings)
+        (finding,) = [f for f in findings if f.drift_class == "archived-acknowledged"]
+        assert finding.severity == "info"
+
+    def test_acknowledgement_without_upstream_archive_is_ignored(self, refresh) -> None:
+        project = _project(upstream_archived="2026-09-29")
+        findings = refresh.compare(project, _facts(refresh, archived=False), TODAY)
+        assert not {"archived", "archived-acknowledged"} & _classes(findings)
+
 
 class TestWarnClasses:
     def test_missing_license_upstream_is_a_warning(self, refresh) -> None:
@@ -428,6 +440,7 @@ class TestSeverityTable:
             "license-changed",
             "renamed",
             "archived",
+            "archived-acknowledged",
             "license-missing",
             "reeval-trigger",
             "stale-facts",

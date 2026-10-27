@@ -34,6 +34,11 @@
 # not raise a false `license-changed`; any *other* detected value is still an
 # error. Omit the field when the detector agrees with `license`.
 #
+# `upstream_archived` (optional, YYYY-MM-DD) records the day we acknowledged
+# that the upstream repository is archived. The refresh script reports an
+# archived upstream as an error until the entry sets this, then as info. Set
+# it only after the verdict and summary have been reworded to say so.
+#
 # ORDER IS EDITORIAL. Projects render into the README in the order they
 # appear here, grouped by `category`. The closest peer leads its section.
 # Re-render after any edit: `uv run python scripts/ecosystem_render.py --write`
@@ -584,7 +589,8 @@ license_compat = "copyleft-ideas-only"
 language = "Rust"
 stars = 1424
 last_push = "2026-10-26"
-last_verified = "2026-10-26"
+last_verified = "2026-10-27"
+upstream_archived = "2026-10-26"
 research_docs = [
   "docs/research/konnect-connectivity-audit.md",
   "docs/konnect-item1-toolset-economy-audit.md",
@@ -592,7 +598,10 @@ research_docs = [
   "docs/research/konnect-v013-delta.md",
 ]
 summary = """
-upstream is archived (read-only, no further releases expected); the ideas we adopted stand on their own as of 2026-10-26. A single-binary native KiCad 10 plugin exposing a very large LLM tool \
+upstream was archived on 2026-10-26 (read-only, no further releases expected); it continues as \
+Konnect-EDA (Orchis-ai-LLC), which is commercial closed-source software, so there is no source \
+left to audit and no further capability audits are planned. The ideas we adopted stand on their \
+own, and KiCAD-MCP-Server is now our agent-interface reference. A single-binary native KiCad 10 plugin exposing a very large LLM tool \
 surface (228 tools in 21 toolsets) across schematic, layout, routing, placement, review \
 and manufacturing. AGPL means no code can move between it and this MIT \
 repo in either direction, so our engagement is capability-level only: we \
@@ -855,15 +864,15 @@ verdict = "watch"
 license = "MIT"
 license_compat = "mit-clean"
 language = "Python + TypeScript"
-stars = 2592
-last_push = "2026-10-01"
-last_verified = "2026-10-06"
+stars = 2978
+last_push = "2026-10-26"
+last_verified = "2026-10-27"
 summary = """
-the most-starred KiCad MCP server: project setup, schematic editing, \
+actively developed again (pushed 2026-10-26) and now our agent-interface reference in place of the \
+archived Konnect. The most-starred KiCad MCP server: project setup, schematic editing, \
 placement, routing via Freerouting, DRC/ERC, export, custom symbol and \
 footprint generation and JLCPCB parts lookup. It is the MIT predecessor \
-of Konnect, which its authors now say is where new development happens. \
-Not yet compared tool-by-tool with `kct mcp serve`.\
+of Konnect. Not yet compared tool-by-tool with `kct mcp serve`.\
 """
 reeval_trigger = """
 Diff its tool catalog and its symbol/footprint generation against ours; \

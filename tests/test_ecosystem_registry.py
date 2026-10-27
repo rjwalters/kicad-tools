@@ -162,6 +162,22 @@ class TestValidation:
         assert project.license == license_id
         assert project.upstream_license_detected == detected
 
+    def test_upstream_archived_is_accepted(self, tmp_path: Path) -> None:
+        text = MINIMAL.replace(
+            'license = "MIT"', 'license = "MIT"\nupstream_archived = "2026-10-26"'
+        )
+        project = load_registry(_write(tmp_path, text)).get("example")
+        assert project.upstream_archived == "2026-10-26"
+
+    def test_upstream_archived_defaults_to_empty(self, tmp_path: Path) -> None:
+        assert load_registry(_write(tmp_path, MINIMAL)).get("example").upstream_archived == ""
+
+    @pytest.mark.parametrize("bad", ['"yesterday"', "3", "2026-10-26"], ids=["text", "int", "bare"])
+    def test_upstream_archived_must_be_iso_date_string(self, tmp_path: Path, bad: str) -> None:
+        text = MINIMAL.replace('license = "MIT"', f'license = "MIT"\nupstream_archived = {bad}')
+        with pytest.raises(RegistryError, match="upstream_archived"):
+            load_registry(_write(tmp_path, text))
+
     def test_upstream_license_detected_defaults_to_empty(self, tmp_path: Path) -> None:
         assert (
             load_registry(_write(tmp_path, MINIMAL)).get("example").upstream_license_detected == ""

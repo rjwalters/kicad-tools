@@ -21,14 +21,17 @@ Drift classes, in severity order:
                      forbids reuse.  ERROR
 ``renamed``          Upstream moved; the recorded URL is now a redirect and
                      will eventually rot.  ERROR
-``archived``         Upstream archived; the verdict and framing need
-                     rewording.  ERROR
+``archived``         Upstream archived and the entry does not acknowledge
+                     it (``upstream_archived``); the verdict and framing
+                     need rewording.  ERROR
 ``license-missing``  No LICENSE file upstream; treat as all-rights-reserved
                      regardless of what the README claims.  WARN
 ``reeval-trigger``   The entry records a re-evaluation trigger and an
                      error-class fact moved; a human should re-read it.  WARN
 ``stale-facts``      stars / last_push drifted, or last_verified is older
                      than --max-age days.  INFO
+``archived-``        Upstream archived, and the entry records that with
+``acknowledged``     ``upstream_archived``.  INFO
 ``license-alias-``   The forge's detector now agrees with ``license``, so
 ``stale``            the entry's ``upstream_license_detected`` is no longer
                      needed and can be deleted.  INFO
@@ -76,6 +79,7 @@ SEVERITY: dict[str, str] = {
     "license-missing": "warn",
     "reeval-trigger": "warn",
     "stale-facts": "info",
+    "archived-acknowledged": "info",
     "license-alias-stale": "info",
     "unpollable": "info",
     "probe-failed": "info",
@@ -287,13 +291,23 @@ def compare(
         )
 
     if facts.archived:
-        findings.append(
-            Finding(
-                project.project_id,
-                "archived",
-                "upstream repository is archived; re-word the verdict and summary",
+        if project.upstream_archived:
+            findings.append(
+                Finding(
+                    project.project_id,
+                    "archived-acknowledged",
+                    f"upstream repository is archived (acknowledged {project.upstream_archived})",
+                )
             )
-        )
+        else:
+            findings.append(
+                Finding(
+                    project.project_id,
+                    "archived",
+                    "upstream repository is archived; re-word the verdict and summary, "
+                    'then record upstream_archived = "YYYY-MM-DD"',
+                )
+            )
 
     upstream_license = facts.license or "NONE"
     detector_alias = project.upstream_license_detected
