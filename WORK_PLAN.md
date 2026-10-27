@@ -39,6 +39,7 @@ Issues currently being built (`loom:building`).
 - **#7990**: Evaluate KiCAD-MCP-Server (MIT) against kct mcp serve, as the replacement for Konnect
 - **#7992**: feat: suggest Basic-library JLCPCB alternatives for Extended parts
 - **#7993**: feat: expose parts search and lookup as kct MCP tools
+- **#7995**: feat: symbol library write and registration helpers (create/delete/rename symbol, register library)
 - **#7996**: feat: schematic cosmetic lint and declutter suggestions
 
 ## PRs Awaiting Review
@@ -88,7 +89,7 @@ _None._
 | Very important | 0 |
 | Important | 0 |
 | Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 5 |
+| In Progress (`loom:building`) | 6 |
 | PRs awaiting review | 2 |
 | Approved PRs awaiting merge | 0 |
 | Curated | 10 |
