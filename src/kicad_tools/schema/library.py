@@ -1176,6 +1176,49 @@ class SymbolLibrary:
 
         sym = LibrarySymbol(name=name, units=units)
         self.symbols[name] = sym
+        self._sexp = None  # modified: serialize from symbols, not the loaded tree
+        return sym
+
+    def delete_symbol(self, name: str) -> None:
+        """Remove a symbol from the library.
+
+        Raises:
+            KeyError: If no symbol with this name exists.
+            ValueError: If another symbol ``extends`` this one.
+        """
+        if name not in self.symbols:
+            raise KeyError(f"Symbol '{name}' not found in library")
+        dependents = [s.name for s in self.symbols.values() if s.extends == name]
+        if dependents:
+            raise ValueError(f"Cannot delete '{name}': extended by {', '.join(sorted(dependents))}")
+        del self.symbols[name]
+        self._sexp = None
+
+    def rename_symbol(self, old: str, new: str) -> LibrarySymbol:
+        """Rename a symbol, updating its ``Value`` property.
+
+        Unit sub-symbol names (``<name>_N_M``) are derived from the symbol
+        name when the library is serialized, so they follow the rename.
+        Symbols that ``extends`` the old name are repointed at the new one.
+
+        Raises:
+            KeyError: If ``old`` does not exist.
+            ValueError: If ``new`` already exists.
+        """
+        if old not in self.symbols:
+            raise KeyError(f"Symbol '{old}' not found in library")
+        if new != old and new in self.symbols:
+            raise ValueError(f"Symbol '{new}' already exists in library")
+        sym = self.symbols[old]
+        if sym.properties.get("Value") == old:
+            sym.properties["Value"] = new
+        sym.name = new
+        # Rebuild so the renamed symbol keeps its position in the library
+        self.symbols = {(new if k == old else k): v for k, v in self.symbols.items()}
+        for other in self.symbols.values():
+            if other.extends == old:
+                other.extends = new
+        self._sexp = None
         return sym
 
     def to_sexp_node(self) -> SExp:

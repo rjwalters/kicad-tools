@@ -1144,55 +1144,21 @@ class SchematicIOMixin:
         Creates the table if absent; otherwise appends the entry only when
         the nickname is not already present, preserving any user entries.
         """
-        from kicad_tools.sexp import parse_string
+        from kicad_tools.library.lib_table import register_symbol_library
 
         nickname = self._PWR_SYNTH_LIB_PREFIX
-        entry = SExp.list(
-            "lib",
-            SExp.list("name", SExp.quoted_atom(nickname)),
-            SExp.list("type", SExp.quoted_atom("KiCad")),
-            SExp.list(
-                "uri",
-                SExp.quoted_atom("${KIPRJMOD}/kicad_tools_pwr.kicad_sym"),
-            ),
-            SExp.list("options", SExp.quoted_atom("")),
-            SExp.list(
-                "descr",
-                SExp.quoted_atom("kicad-tools synthesized power symbols"),
-            ),
-        )
-
-        if path.exists():
-            try:
-                table = parse_string(path.read_text())
-            except Exception as exc:
-                _log_warning(
-                    f"Existing sym-lib-table at {path} could not be parsed "
-                    f"({exc}); leaving it untouched. ERC may warn about the "
-                    f"'kicad_tools_pwr' library until the entry is added."
-                )
-                return
-            if table.name != "sym_lib_table":
-                _log_warning(
-                    f"Existing sym-lib-table at {path} is not a sym_lib_table "
-                    f"node; leaving it untouched."
-                )
-                return
-            # Skip if the nickname is already registered.
-            for lib_node in table.find_all("lib"):
-                name_node = lib_node.get("name")
-                if name_node and str(name_node.get_first_atom() or "") == nickname:
-                    return
-            table.append(entry)
-            path.write_text(table.to_string() + "\n")
-            return
-
-        table = SExp.list(
-            "sym_lib_table",
-            SExp.list("version", self._SYM_LIB_TABLE_VERSION),
-            entry,
-        )
-        path.write_text(table.to_string() + "\n")
+        try:
+            register_symbol_library(
+                path,
+                nickname,
+                "${KIPRJMOD}/kicad_tools_pwr.kicad_sym",
+                "kicad-tools synthesized power symbols",
+            )
+        except ValueError as exc:
+            _log_warning(
+                f"{exc}; leaving it untouched. ERC may warn about the "
+                f"'kicad_tools_pwr' library until the entry is added."
+            )
 
     def _warn_if_content_overflows(self) -> None:
         """Log a warning when content exceeds the declared sheet bounds."""
