@@ -1022,6 +1022,9 @@ def _add_check_parser(subparsers) -> None:
         dest="skip_checks",
         help=f"Skip specific checks (comma-separated: {', '.join(CHECK_CATEGORIES)})",
     )
+    from .check_cmd import add_check_scope_arguments
+
+    add_check_scope_arguments(check_parser)
     check_parser.add_argument(
         "--emit-dru",
         dest="emit_dru",
