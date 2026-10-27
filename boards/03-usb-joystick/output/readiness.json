@@ -91,7 +91,7 @@
     "output/manufacturing/design-source/project.kct": "5083f66d5eaf2034ec5917ab56627ca1a2128bf9f79e723be04da5936a3f9573",
     "output/manufacturing/design-source/route_demo.py": "0fca0042fac91f385db16120c90cf8f12332d1f463e9ff336417c8d0649b56c6",
     "output/manufacturing/design-source/routing-plan.json": "e52f9b5f9eea819f788803737ea18960bd87c65be0057fe834fe29e570415dce",
-    "output/manufacturing/design-source/routing_plan.py": "162e59fafea7833e788f89dff8998c28f672c230434765c85c1747c60f0729f7",
+    "output/manufacturing/design-source/routing_plan.py": "0ccf452d67c5f37549f7bae2924627616aec7daa78e820e9db293338113543bf",
     "output/manufacturing/firmware/.gitignore": "692b1af4436043e2e965c8d563bbf90d648cda3a6afa9bba38e1c38af1d38919",
     "output/manufacturing/firmware/README.md": "08667b811161162459ab9950164f799e0549aa760c124e1fc4a933a20ce79e40",
     "output/manufacturing/firmware/artifacts/build-report.json": "b0a0d5abf82faedfe23b6c787b7d8e8681de5f3b21e2ec525a15bda9169239bf",
@@ -124,7 +124,7 @@
     "output/manufacturing/images/pcb_front.png": "722ce2ab52c21f84685ccaebc937de4cc6748a2a7119a011c8aa13583a621cc2",
     "output/manufacturing/images/schematic_usb_joystick.png": "435c684096c4c22d4f460823a2584c6e3f09f6663b89176976bbbaec2728eea2",
     "output/manufacturing/kicad_project.zip": "66d00eacf748adfafeea34347ba5552b1275c1c744e14262a21cf86c1d3a65db",
-    "output/manufacturing/manifest.json": "f12705543023c6f3fbb86b291138a1257183a6c61dace76d54feb6fdae6cede9",
+    "output/manufacturing/manifest.json": "b8c0fb04c5a330a7ff0ea18d3f55be8848357e0d092da42e21b6c4f410b86424",
     "output/manufacturing/manufacturing-requirements.json": "48470a554e39b289ba0c079833a439c65dbc3611b505f7dd978552d25d13d37b",
     "output/manufacturing/native-clearance-qualification/control-inputs.json": "3ac8e8cb03eb81f4e3686d7aaa653c3322d01acad885cb0122babbdaf648de6c",
     "output/manufacturing/native-clearance-qualification/copper-check.log": "b4106a3222de5c09bdb3d909d57ad4b3e2853ca15118fec4586ec65450bfaaec",
@@ -152,7 +152,7 @@
     "output/manufacturing/report.md": "fc11b2776382ebc2f512c6d3b9d82407ef23dd1f05861c299b87c5883e8123cf",
     "output/manufacturing/report.pdf": "e2541af02eecb74e9aad15be0768748ed627bc19b5691a9e3a65651b0625c017",
     "output/manufacturing/schematic.pdf": "6fe021a9ea56eb056b2fc6dc24e3fee47c4f6555c6141a4ad1ec755b51aa0d98",
-    "output/manufacturing.zip": "ead53a533587857a970095ac3b8ed70f9eeb5337a49eaad60e905fbc59d41913",
+    "output/manufacturing.zip": "6ab96d29166116ca612e871fcf00c83e4136c5a5bcd935d6b32699172aaf7d7c",
     "output/net_class_map.json": "e2a340a9eadb332a1ad42f363a32091561c42d2eb3ddb4917fd61ca14d2c418f",
     "output/readiness-verification/fill-consistency.json": "3a81465e77bd46f392002361159ace1fa43744960f3a0697458da0e2eb8024a5",
     "output/readiness-verification/fill-refilled/footprints/Joystick.pretty/Samtec_TSM-103-01-T-DV.kicad_mod": "492671cda5112d330aaf0cf514ce2188b589834eb10d493769ad0dd6bc5f9b86",
@@ -183,7 +183,7 @@
     "routing-plan.json": "e52f9b5f9eea819f788803737ea18960bd87c65be0057fe834fe29e570415dce",
     "generate_design.py": "e9879386ab0a92f227a62446317452b9d216f819167915e4db8e6843dc3eafa8",
     "check_manufacturing.py": "81d7da58af4b6e80644a4ef5654093a0aceed7e00a1696e225884e7e90aacc32",
-    "routing_plan.py": "162e59fafea7833e788f89dff8998c28f672c230434765c85c1747c60f0729f7"
+    "routing_plan.py": "0ccf452d67c5f37549f7bae2924627616aec7daa78e820e9db293338113543bf"
   },
   "report_sources": {
     "output/readiness-verification/native-drc.json": "94005ce497b8c968fd655d6c954de033bc6751c52248421c3e79cfc47a907e96",
