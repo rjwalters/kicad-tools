@@ -51,7 +51,7 @@ does it instead.
 
 | We do not | Who does |
 |---|---|
-| Ship a GUI or fork KiCad | Zeo, Konnect |
+| Ship a GUI or fork KiCad | openkonnect (our clean-room live-editor project), Zeo |
 | Provide a schematic-capture language | atopile, SKiDL |
 | Run routing as a cloud service | DeepPCB (at the cost of offline/air-gapped CI) |
 | Round-trip through Specctra DSN/SES | freerouting, AutoRoute |

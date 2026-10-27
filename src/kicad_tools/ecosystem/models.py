@@ -154,6 +154,7 @@ _KNOWN_FIELDS = frozenset(
         "research_docs",
         "reeval_trigger",
         "upstream_license_detected",
+        "upstream_archived",
     )
 )
 
@@ -199,6 +200,11 @@ class EcosystemProject:
             ``scripts/ecosystem_refresh.py`` treats it as matching ``license``
             instead of raising ``license-changed``.  Empty when the detector
             agrees with ``license`` (the normal case).
+        upstream_archived: ``YYYY-MM-DD`` on which we acknowledged that the
+            upstream repository is archived.  ``scripts/ecosystem_refresh.py``
+            reports an archived upstream as an error unless this is set, in
+            which case it is info only.  Empty (the normal case) for a live
+            project.
     """
 
     project_id: str
@@ -220,6 +226,7 @@ class EcosystemProject:
     research_docs: tuple[str, ...] = field(default_factory=tuple)
     reeval_trigger: str = ""
     upstream_license_detected: str = ""
+    upstream_archived: str = ""
 
     @property
     def is_pollable(self) -> bool:
@@ -259,6 +266,7 @@ class EcosystemProject:
             "summary": self.summary,
             "reeval_trigger": self.reeval_trigger,
             "upstream_license_detected": self.upstream_license_detected,
+            "upstream_archived": self.upstream_archived,
         }
 
     @classmethod
@@ -347,6 +355,12 @@ class EcosystemProject:
                     "result that differs from the real license"
                 )
 
+        archived = raw.get("upstream_archived", "")
+        if not isinstance(archived, str):
+            raise RegistryError(f"{project_id}: upstream_archived must be a YYYY-MM-DD string")
+        if archived and not _DATE_RE.match(archived):
+            raise RegistryError(f"{project_id}: upstream_archived {archived!r} must be YYYY-MM-DD")
+
         research_docs = raw.get("research_docs", [])
         if not isinstance(research_docs, list) or not all(
             isinstance(doc, str) for doc in research_docs
@@ -373,6 +387,7 @@ class EcosystemProject:
             research_docs=tuple(research_docs),
             reeval_trigger=str(raw.get("reeval_trigger", "")).strip(),
             upstream_license_detected=detected,
+            upstream_archived=archived,
         )
 
 

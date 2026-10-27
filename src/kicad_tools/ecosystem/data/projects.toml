@@ -34,6 +34,11 @@
 # not raise a false `license-changed`; any *other* detected value is still an
 # error. Omit the field when the detector agrees with `license`.
 #
+# `upstream_archived` (optional, YYYY-MM-DD) records the day we acknowledged
+# that the upstream repository is archived. The refresh script reports an
+# archived upstream as an error until the entry sets this, then as info. Set
+# it only after the verdict and summary have been reworded to say so.
+#
 # ORDER IS EDITORIAL. Projects render into the README in the order they
 # appear here, grouped by `category`. The closest peer leads its section.
 # Re-render after any edit: `uv run python scripts/ecosystem_render.py --write`
@@ -584,7 +589,8 @@ license_compat = "copyleft-ideas-only"
 language = "Rust"
 stars = 1424
 last_push = "2026-10-26"
-last_verified = "2026-10-26"
+last_verified = "2026-10-27"
+upstream_archived = "2026-10-26"
 research_docs = [
   "docs/research/konnect-connectivity-audit.md",
   "docs/konnect-item1-toolset-economy-audit.md",
@@ -592,7 +598,11 @@ research_docs = [
   "docs/research/konnect-v013-delta.md",
 ]
 summary = """
-upstream is archived (read-only, no further releases expected); the ideas we adopted stand on their own as of 2026-10-26. A single-binary native KiCad 10 plugin exposing a very large LLM tool \
+upstream was archived on 2026-10-26 (read-only, no further releases expected); it continues as \
+Konnect-EDA (Orchis-ai-LLC), which is commercial closed-source software, so there is no source \
+left to audit and no further capability audits are planned. The open replacement is our own \
+clean-room openkonnect, with Konnect-EDA as the closed-source successor. The ideas we adopted stand on their \
+own, and KiCAD-MCP-Server is now our agent-interface reference. A single-binary native KiCad 10 plugin exposing a very large LLM tool \
 surface (228 tools in 21 toolsets) across schematic, layout, routing, placement, review \
 and manufacturing. AGPL means no code can move between it and this MIT \
 repo in either direction, so our engagement is capability-level only: we \
@@ -600,6 +610,29 @@ audited its connectivity primitives, its tool-economy design and its \
 design-rule handling against our own surface. Five of its six connectivity \
 primitives we already had; the sixth (near-miss auto-snap repair) was a \
 real gap. Re-checked at v0.13: four new ideas adopted as follow-ups (visual baselines, truth-contract audit, honest-schema CI guard, SES provenance).\
+"""
+
+[projects.openkonnect]
+name = "openkonnect"
+slug = "rjwalters/openkonnect"
+repo_url = "https://github.com/rjwalters/openkonnect"
+vcs = "github"
+category = "agent-interface"
+relation = "downstream"
+verdict = "watch"
+license = "MIT"
+license_compat = "mit-clean"
+last_verified = "2026-10-27"
+summary = """
+our own clean-room project: an MIT-licensed MCP server that lets LLM agents drive a running \
+KiCad 10 over its IPC API, built on kicad-tools. It owns the live-editor surface that kicad-tools \
+deliberately does not, and is the open replacement for Konnect's live-editor tool surface. \
+Its clean-room rules are in its CLEANROOM.md: no Konnect source is read in either repo, and \
+our Konnect audits stay capability-level.\
+"""
+reeval_trigger = """
+If it reaches a tagged release covering the live-editor tools (schematic and board edits over \
+KiCad 10's IPC API), promote it from watch and revisit the live-editor non-goal wording.\
 """
 
 [projects.copperhead]
@@ -855,18 +888,20 @@ verdict = "complementary"
 license = "MIT"
 license_compat = "mit-clean"
 language = "Python + TypeScript"
-stars = 2592
-last_push = "2026-10-25"
+stars = 2978
+last_push = "2026-10-26"
 last_verified = "2026-10-27"
 summary = """\
-the most-starred KiCad MCP server: ~250 fine-grained tools for project \
-setup, schematic and board editing, Freerouting, DRC/ERC, export, symbol and \
-footprint creation and JLCPCB parts lookup. It is the MIT predecessor of \
-Konnect. Compared tool-by-tool with `kct mcp serve` (pinned 628d320f): \
-a wide imperative editing surface against our narrow session/verification \
-one, so complementary; a Freerouting runner, parts alternatives, symbol \
-library writes and schematic cosmetic lint are worth borrowing under MIT \
-with attribution.\
+actively developed again (pushed 2026-10-26) and now our agent-interface \
+reference in place of the archived Konnect. The most-starred KiCad MCP \
+server: ~250 fine-grained tools for project setup, schematic and board \
+editing, Freerouting, DRC/ERC, export, symbol and footprint creation and \
+JLCPCB parts lookup. It is the MIT predecessor of Konnect. Compared \
+tool-by-tool with `kct mcp serve` (pinned 628d320f): a wide imperative \
+editing surface against our narrow session/verification one, so \
+complementary; a Freerouting runner, parts alternatives, symbol library \
+writes and schematic cosmetic lint are worth borrowing under MIT with \
+attribution.\
 """
 research_docs = ["docs/research/kicad-mcp-server-evaluation.md"]
 reeval_trigger = """\
@@ -1628,7 +1663,7 @@ invariants = [
 
 # What we deliberately do not do. Each line names who does it instead.
 non_goals = [
-  "No GUI and no KiCad fork: Zeo and Konnect own the live-editor surface.",
+  "No GUI and no KiCad fork: the live-editor surface is covered by openkonnect (our clean-room project); Zeo also owns it.",
   "No schematic-capture language: atopile and SKiDL own design-as-code upstream of us.",
   "No cloud routing service: DeepPCB owns that trade-off, and it costs offline/air-gapped CI.",
   "No Specctra DSN/SES round-trip: freerouting and AutoRoute route a translated view; we stay on the board file so LVS and the fab gates see the artifact that ships.",
