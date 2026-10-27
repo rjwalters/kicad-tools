@@ -15,6 +15,11 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-27
 
+- **PR #8020**: feat: scope kct check findings with --bbox/--refs/--nets
+- **PR #8019**: feat: add shared versioned Finding locators to check/drc/detect-mistakes JSON
+- **PR #8013**: fix(router): name the binding term of the lattice negotiation deadline
+- **Issue #8016** (closed): kct check: limit a check to a region or a set of references (openkonnect G2)
+- **Issue #8012** (closed): route (lattice): banner calls --timeout the 'hard cap' but per-net-timeout x links binds first — raising --timeout is a silent no-op
 - **PR #8011**: fix(board04): move crystal block off C2/C3 row, drop wire-through waivers
 - **Issue #8005** (closed): board 04: LDO output wire runs through C2/C3 bodies in the schematic (sch_wire_through_symbol)
 - **PR #8009**: docs(ecosystem): record the no-fallback-router ruling

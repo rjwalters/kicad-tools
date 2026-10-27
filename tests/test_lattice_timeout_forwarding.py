@@ -494,10 +494,23 @@ class TestBannerHonesty:
         assert "the lattice negotiation is UNBOUNDED" in captured.replace("\n", " ")
 
     def test_lattice_labels_timeout_as_a_hard_cap(self, board, tmp_path, capsys):
+        # Issue #8012: with no per-link budget (``--per-net-timeout 0``)
+        # ``--timeout`` is the only bound, so it really is a hard cap.
         out = tmp_path / "out.kicad_pcb"
-        _lattice_route(board, out, "--timeout", "0.001")
+        _lattice_route(board, out, "--per-net-timeout", "0", "--timeout", "0.001")
         captured = capsys.readouterr().out
         assert "Timeout: 0.001s (hard cap on the lattice negotiation)" in captured
+
+    def test_lattice_timeout_with_per_link_budget_only_lowers_the_deadline(
+        self, board, tmp_path, capsys
+    ):
+        # Issue #8012: with a per-link budget active, ``--timeout`` can only
+        # lower the derived deadline, so the banner must not call it a hard cap.
+        out = tmp_path / "out.kicad_pcb"
+        _lattice_route(board, out, "--per-net-timeout", "20", "--timeout", "0.001")
+        captured = capsys.readouterr().out.replace("\n", " ")
+        assert "Timeout: 0.001s (can only lower the negotiation deadline" in captured
+        assert "hard cap on the lattice negotiation" not in captured
 
     def test_complete_backstop_is_reported_instead_of_unbounded(self, board, tmp_path, capsys):
         """Issue #4765: ``--complete --per-net-timeout 0`` IS bounded.
