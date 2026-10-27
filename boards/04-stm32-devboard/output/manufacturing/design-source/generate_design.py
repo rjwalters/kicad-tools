@@ -423,10 +423,12 @@ def create_stm32_schematic(output_dir: Path) -> Path:
     # (pin 6, OSC_OUT) emerge.  PD0 is at (MCU_X - 17.78, MCU_Y - 22.86) =
     # (192.22, 97.14) and PD1 at (192.22, 99.68) in screen coords.  Place the
     # crystal block well to the left so its IN/OUT labels align cleanly.
+    # y=150 keeps the crystal's horizontal OSC_IN/OSC_OUT stubs off the C2/C3
+    # row (y=100), which they previously crossed (Issue #8005).
     xtal = create_crystal_with_loads(
         sch,
         x=140,
-        y=100,
+        y=150,
         frequency="8MHz",
         load_pF=20,
         cap_ref_start=10,
