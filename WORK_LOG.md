@@ -15,6 +15,15 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-27
 
+- **PR #8003**: feat: add parts_search and parts_lookup MCP tools
+- **PR #8001**: feat: add sch_wire_through_symbol advisory lint to kct check
+- **PR #7999**: feat: add kct parts alternatives for offline Basic-part substitution
+- **PR #7994**: chore: acknowledge archived upstreams in ecosystem registry
+- **Issue #7996** (closed): feat: schematic cosmetic lint and declutter suggestions
+- **Issue #7993** (closed): feat: expose parts search and lookup as kct MCP tools
+- **Issue #7992** (closed): feat: suggest Basic-library JLCPCB alternatives for Extended parts
+- **Issue #7991** (closed): feat: run Freerouting from kct as a selectable fallback router
+- **Issue #7989** (closed): Ecosystem registry: acknowledge Konnect's archive, name its successor, and make KiCAD-MCP-Server our agent-interface reference
 - **Issue #7990** (closed): Evaluate KiCAD-MCP-Server (MIT) against kct mcp serve, as the replacement for Konnect
 - **PR #7997**: docs: evaluate KiCAD-MCP-Server against kct mcp serve
 - **Issue #7995** (closed): feat: symbol library write and registration helpers (create/delete/rename symbol, register library)
