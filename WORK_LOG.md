@@ -15,6 +15,11 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-27
 
+- **Issue #7990** (closed): Evaluate KiCAD-MCP-Server (MIT) against kct mcp serve, as the replacement for Konnect
+- **PR #7997**: docs: evaluate KiCAD-MCP-Server against kct mcp serve
+- **Issue #7995** (closed): feat: symbol library write and registration helpers (create/delete/rename symbol, register library)
+- **PR #8002**: feat: register generated symbol libraries in sym-lib-table
+- **Issue #8004** (closed): Ecosystem registry: add openkonnect and point Konnect's entry at it (missed scope from #7989)
 - **PR #7986**: docs(ecosystem): mark konnect as archived upstream
 - **Issue #7981** (closed): Ecosystem registry drift: upstream license/rename/archive change
 - **PR #7980**: chore(deps): Bump the github-actions group across 1 directory with 4 updates
