@@ -451,6 +451,7 @@ EXEMPT: dict[str, str] = {
     "parts search": "network: queries the LCSC/JLCPCB API",
     "parts availability": "network: queries the LCSC/JLCPCB API per BOM line",
     "parts suggest": "network: queries the LCSC/JLCPCB API per BOM line",
+    "parts alternatives": "needs the ~620 MB jlcparts catalog from `parts sync-catalog` (unit-tested in tests/test_parts_alternatives.py)",
     "parts import": "network: searches and downloads datasheets (mocked JSON run in tests/test_parts_cmd_import.py)",
     "suggest alternatives": "network: queries the LCSC/JLCPCB API",
     "parts sync-catalog": "network: downloads the JLCPCB parts catalog",

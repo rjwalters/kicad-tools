@@ -4898,6 +4898,21 @@ def _add_parts_parser(subparsers) -> None:
     )
     add_format_flag(parts_sync)
 
+    # parts alternatives
+    parts_alt = parts_subparsers.add_parser(
+        "alternatives",
+        help="Suggest Basic/Preferred JLCPCB alternatives for an LCSC part (offline)",
+        description=(
+            "Suggest in-stock substitutes from the offline jlcparts catalog. "
+            "Ranks Basic, then Preferred, then Extended, then lowest unit price; "
+            "only a strictly better library tier, or the same tier at a lower "
+            "price, is shown."
+        ),
+    )
+    parts_alt.add_argument("part", help="LCSC part number (e.g., C123456)")
+    parts_alt.add_argument("--limit", type=int, default=5, help="Max results (default: 5)")
+    add_format_flag(parts_alt)
+
     # parts suggest
     parts_suggest = parts_subparsers.add_parser(
         "suggest", help="Suggest LCSC part numbers for components without them"

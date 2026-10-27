@@ -13,7 +13,9 @@ def run_parts_command(args) -> int:
     """Handle parts subcommands."""
     if not args.parts_command:
         print("Usage: kicad-tools parts <command> [options]")
-        print("Commands: lookup, search, availability, import, cache, suggest, sync-catalog")
+        print(
+            "Commands: lookup, search, availability, import, cache, suggest, sync-catalog, alternatives"
+        )
         return 1
 
     from ..parts_cmd import main as parts_main
@@ -82,6 +84,14 @@ def run_parts_command(args) -> int:
             sub_argv.append("--force")
         if args.base_url:
             sub_argv.extend(["--base-url", args.base_url])
+        if getattr(args, "format", "text") != "text":
+            sub_argv.extend(["--format", args.format])
+        return parts_main(sub_argv) or 0
+
+    elif args.parts_command == "alternatives":
+        sub_argv = ["alternatives", args.part]
+        if args.limit != 5:
+            sub_argv.extend(["--limit", str(args.limit)])
         if getattr(args, "format", "text") != "text":
             sub_argv.extend(["--format", args.format])
         return parts_main(sub_argv) or 0

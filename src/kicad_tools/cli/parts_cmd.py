@@ -4,6 +4,7 @@ CLI commands for parts lookup and management.
 Usage:
     kct parts lookup C123456              - Look up LCSC part
     kct parts search "100nF 0402"         - Search for parts
+    kct parts alternatives C123456        - Suggest Basic alternatives (offline)
     kct parts availability design.kicad_sch - Check BOM availability
     kct parts suggest design.kicad_sch    - Suggest LCSC parts based on value/footprint
     kct parts suggest design.kicad_sch --apply - Apply suggestions to schematic
@@ -150,6 +151,22 @@ def main(argv: list[str] | None = None) -> int:
     )
     add_format_flag(sync_parser)
 
+    # alternatives subcommand
+    alt_parser = subparsers.add_parser(
+        "alternatives",
+        help="Suggest Basic/Preferred JLCPCB alternatives for an LCSC part (offline)",
+        description=(
+            "Suggest in-stock substitutes from the offline jlcparts catalog "
+            "(same package and value). Candidates rank Basic, then Preferred, "
+            "then Extended, then lowest unit price; only a strictly better "
+            "library tier, or the same tier at a lower price, is shown. "
+            "Requires 'kct parts sync-catalog'."
+        ),
+    )
+    alt_parser.add_argument("part", help="LCSC part number (e.g., C123456)")
+    alt_parser.add_argument("--limit", type=int, default=5, help="Max results (default: 5)")
+    add_format_flag(alt_parser)
+
     # cache subcommand
     cache_parser = subparsers.add_parser("cache", help="Cache management")
     add_format_flag(cache_parser)
@@ -186,11 +203,78 @@ def main(argv: list[str] | None = None) -> int:
         return _availability(args)
     elif args.action == "suggest":
         return _suggest(args)
+    elif args.action == "alternatives":
+        return _alternatives(args)
     elif args.action == "cache":
         return _cache(args)
     elif args.action == "sync-catalog":
         return _sync_catalog(args)
 
+    return 0
+
+
+def _alternatives(args) -> int:
+    """Handle the alternatives command (offline catalog only)."""
+    from ..parts.alternatives import library_tier_name, suggest_alternatives
+    from ..parts.jlcparts_catalog import JlcpartsCatalog
+
+    as_json = args.format == "json"
+
+    def fail(message: str) -> int:
+        hint = "Run 'kct parts sync-catalog' to download the offline catalog."
+        if as_json:
+            emit_json({"command": "alternatives", "error": message, "success": False})
+        else:
+            print(f"Error: {message}", file=sys.stderr)
+            if "catalog" in message and "not found" not in message:
+                print(hint, file=sys.stderr)
+        return 1
+
+    catalog = JlcpartsCatalog()
+    if not catalog.available:
+        return fail(f"offline jlcparts catalog not installed at {catalog.db_path}")
+    source = catalog.lookup(args.part)
+    if source is None:
+        return fail(f"{args.part} not found in the offline jlcparts catalog")
+
+    alts = suggest_alternatives(catalog, source, limit=args.limit)
+
+    def row(p) -> dict:
+        return {
+            "lcsc": p.lcsc_part,
+            "mfr_part": p.mfr_part,
+            "package": p.package,
+            "library_type": library_tier_name(p),
+            "stock": p.stock,
+            "unit_price": p.best_price,
+        }
+
+    if as_json:
+        emit_json(
+            {
+                "command": "alternatives",
+                "success": True,
+                "source": row(source),
+                "alternatives": [row(p) for p in alts],
+            }
+        )
+        return 0
+
+    print(
+        f"Source: {source.lcsc_part} {source.mfr_part} "
+        f"({source.package}, {library_tier_name(source)})"
+    )
+    if not alts:
+        print("No better in-stock alternatives found.")
+        return 0
+    print(f"{'LCSC':<10} {'MFR Part':<25} {'Package':<12} {'Type':<10} {'Stock':>8} {'Price':>9}")
+    print("-" * 78)
+    for p in alts:
+        price = f"${p.best_price:.4f}" if p.best_price is not None else "N/A"
+        print(
+            f"{p.lcsc_part:<10} {p.mfr_part[:25]:<25} {p.package:<12} "
+            f"{library_tier_name(p):<10} {p.stock:>8} {price:>9}"
+        )
     return 0
 
 

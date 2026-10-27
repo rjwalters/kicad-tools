@@ -1064,6 +1064,7 @@ kct parts <subcommand> [options]
 | `availability` | Check BOM part availability on LCSC for a schematic |
 | `import` | Import a part's symbol/footprint from its datasheet into a library |
 | `suggest` | Suggest LCSC part numbers for components without them |
+| `alternatives` | Suggest in-stock Basic/Preferred JLCPCB substitutes for an LCSC part from the offline jlcparts catalog (`--limit N`, default 5) |
 | `cache` | Cache management (`stats`, `clear`, `clear-expired`) |
 | `sync-catalog` | Download the jlcparts dataset (~620 MB) into the cache dir for fully-offline lookups (#4117) |
 
@@ -1071,6 +1072,7 @@ kct parts <subcommand> [options]
 ```bash
 kct parts search "STM32F103"
 kct parts lookup C8734
+kct parts alternatives C123456 --limit 3
 kct parts availability project.kicad_sch --quantity 100
 kct parts import STM32F103C8T6 --library my.kicad_sym --dry-run
 ```
