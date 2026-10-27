@@ -163,3 +163,86 @@ def from_drc_dict(data: dict[str, Any]) -> Finding:
         layer=layer,
         waived=bool(data.get("waived", False)),
     )
+
+
+def _shift(point: Sequence[float], origin: tuple[float, float]) -> list[float]:
+    return [float(point[0]) + origin[0], float(point[1]) + origin[1]]
+
+
+def from_net_status(net: Any, origin: tuple[float, float] = (0.0, 0.0)) -> list[Finding]:
+    """Adapt a :class:`~kicad_tools.analysis.net_status.NetStatus` (``kct net-status``).
+
+    One finding per incomplete / unrouted net and one more for stranded copper
+    (tracks or vias reaching no pad).  Complete nets with nothing stranded
+    emit nothing.  Advisory-incomplete nets (plane / pour residuals, which the
+    text report still lists) are ``info``; everything else is ``error``.
+
+    ``PadInfo.position`` is board-relative (``PCB.load`` subtracts the
+    Edge.Cuts origin), so *origin* -- ``PCB.board_origin`` -- is added back to
+    land in the file frame.  ``point`` is the first unconnected pad and
+    ``bbox`` spans them when there are two or more.
+    """
+    found: list[Finding] = []
+    if net.status in ("incomplete", "unrouted"):
+        pads = list(net.unconnected_pads)
+        points = [_shift(p.position, origin) for p in pads]
+        found.append(
+            Finding(
+                rule_id=f"net_status.{net.status}",
+                severity="info" if net.is_advisory_incomplete else "error",
+                message=f"Net {net.net_name} is {net.status}: {len(pads)} pad(s) unconnected",
+                refs=list(dict.fromkeys(p.reference for p in pads)),
+                pads=list(dict.fromkeys(p.full_name for p in pads)),
+                nets=[net.net_name],
+                point=points[0] if points else None,
+                bbox=_bbox_of(points),
+            )
+        )
+    if net.is_stranded:
+        items = ", ".join(net.stranded_items)
+        found.append(
+            Finding(
+                rule_id="net_status.stranded",
+                severity="error",
+                message=(
+                    f"Net {net.net_name} has {net.padless_components} stranded copper "
+                    f"fragment(s) reaching no pad" + (f": {items}" if items else "")
+                ),
+                nets=[net.net_name],
+            )
+        )
+    return found
+
+
+def from_clearance(result: Any, origin: tuple[float, float] = (0.0, 0.0)) -> list[Finding]:
+    """Adapt a ``ClearanceResult`` (MCP ``measure_clearance``).
+
+    Empty when the clearance passes.  Otherwise one finding located at the
+    closest approach (``min_location`` / ``min_layer``), with ``refs`` / ``pads``
+    from the two measured elements that realise the minimum.  Locations come
+    from the loaded (board-relative) PCB, so *origin* is added back.
+    """
+    if result.passes_rules:
+        return []
+    closest = min(result.clearances, key=lambda m: m.clearance_mm, default=None)
+    items = [closest.from_item, closest.to_item] if closest else []
+    refs, pads = split_items(items)
+    # Items given by name (not a ref) are nets.
+    nets = [n for n in (result.item1, result.item2) if n and not _REF_ONLY.match(n)]
+    required = result.required_clearance_mm
+    return [
+        Finding(
+            rule_id="measure_clearance.clearance",
+            severity="error",
+            message=(
+                f"Clearance between {result.item1} and {result.item2} is "
+                f"{result.min_clearance_mm:.4f} mm"
+                + (f" (required {required:.4f} mm)" if required is not None else "")
+            ),
+            refs=refs,
+            pads=pads,
+            nets=nets,
+            point=_shift(result.location, origin),
+            layer=result.layer or None,
+        )
+    ]
