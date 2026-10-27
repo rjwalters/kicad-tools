@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-27
 
+- **PR #8011**: fix(board04): move crystal block off C2/C3 row, drop wire-through waivers
+- **Issue #8005** (closed): board 04: LDO output wire runs through C2/C3 bodies in the schematic (sch_wire_through_symbol)
 - **PR #8009**: docs(ecosystem): record the no-fallback-router ruling
 - **PR #8007**: fix(dsn): name back-image pad copper on the mirror layer (#7518)
 - **Issue #7518** (closed): DSN export: verify a Specctra router doesn't double-flip back-side padstack layers (deferred from #7481 / #7496)
