@@ -36,7 +36,9 @@ KNOWN_7220_WARNINGS: list[tuple[str, str]] = []
 
 def _warnings(report: dict) -> list[tuple[str, str]]:
     return sorted(
-        (v["rule_id"], v["items"][0]) for v in report["violations"] if v["severity"] == "warning"
+        (v["rule_id"], v["items"][0])
+        for v in report["violations"]
+        if v["severity"] == "warning" and not v.get("waived")
     )
 
 

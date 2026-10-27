@@ -1,0 +1,21 @@
+{
+  "version": 2,
+  "waivers": [
+    {
+      "rule": "sch_wire_through_symbol",
+      "items": [
+        "C2"
+      ],
+      "reason": "Board-04 schematic routes the +3.3V LDO output / decoupling-cap wiring across the C2 body; genuine advisory finding from the new sch_wire_through_symbol rule (#7996), waived until the generator re-routes it (tracking #8005).",
+      "issue": "#8005"
+    },
+    {
+      "rule": "sch_wire_through_symbol",
+      "items": [
+        "C3"
+      ],
+      "reason": "Board-04 schematic routes the +3.3V LDO output / decoupling-cap wiring across the C3 body; genuine advisory finding from the new sch_wire_through_symbol rule (#7996), waived until the generator re-routes it (tracking #8005).",
+      "issue": "#8005"
+    }
+  ]
+}
