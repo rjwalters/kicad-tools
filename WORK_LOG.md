@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-27
 
+- **PR #8018**: feat: add kct export-formats for PDF/SVG/STEP/IPC-2581/ODB++
+- **Issue #8017** (closed): Wrap plot, 3D and alternative fabrication exports: PDF/SVG, STEP, IPC-2581, ODB++ (openkonnect G4)
 - **PR #8020**: feat: scope kct check findings with --bbox/--refs/--nets
 - **PR #8019**: feat: add shared versioned Finding locators to check/drc/detect-mistakes JSON
 - **PR #8013**: fix(router): name the binding term of the lattice negotiation deadline
