@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-28
 
+- **PR #8037**: chore: point ecosystem registry at BackplaneWorks org for Backplane and KiStack
+- **Issue #8008** (closed): chore: ecosystem registry: Backplane and KiStack moved to BackplaneWorks org
 - **PR #8032**: fix(route): make oracle pour completion honour pairwise HV clearance
 - **Issue #8027** (closed): route: KiCad-oracle pour completion is pairwise-blind — GND/+3.3V vias land 0.4 mm from 150 V copper under --voltage-map
 - **PR #8031**: feat(creepage): add --waive-attach-zone census waiver matching router attach zones
