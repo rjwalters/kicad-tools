@@ -19781,42 +19781,38 @@ class Autorouter:
         and existing copper, every pad.  Greedy, one violation at a time, so
         of a violating pair only one side is stripped.
 
-        Issue #8029 narrowed it twice:
+        Issue #8029: a violation strips only the offending CONNECTION's
+        copper -- the violating segment or via and the copper it leaves
+        dangling (:meth:`_strip_floor_violating_copper`) -- not every route of
+        the net, so the net reports partial rather than unrouted.  Nothing is
+        waived: a router-class floor is written into the routed ``.kicad_dru``
+        (#6390), and ``kct check`` mirrors it, so a gap inside a #4506 attach
+        zone fails both DRC engines exactly like one outside it.
 
-        * A ROUTER-class floor shortfall inside an installed #4506 attach
-          zone that lists both nets (layer-scoped, #4699) is waived -- the
-          search relaxes exactly those pairs, and so does the #8028 census
-          waiver (:func:`~.authored_clearance.attach_zone_floor_waiver`).
-          Designer floors (``rules.designer_clearance_floors``; ``None``
-          means every floor is designer, #6449) are never waived.
-        * A real violation strips only the offending CONNECTION's copper --
-          the violating segment or via and the copper it leaves dangling
-          (:meth:`_strip_floor_violating_copper`) -- not every route of the
-          net, so the net reports partial rather than unrouted.
+        If a strip makes no progress (nothing removed, or copper it already
+        stripped is reported again), the loop logs the unresolved violation
+        and stops rather than spinning; that net is still returned, so a
+        caller that refuses demoted nets refuses it.
 
         Returns:
-            Sorted ids of the nets that lost copper (empty in the common
-            case, and always when no authored minimum exists).
+            Sorted ids of the nets that lost copper or kept an unresolved
+            violation (empty in the common case, and always when no
+            authored minimum exists).
         """
         floors = self.rules.net_clearance_floors
         if not floors and getattr(self.grid, "_authored_item_floors", False) is not True:
             return []
-        from .authored_clearance import attach_zone_floor_waiver, authored_violations
+        from .authored_clearance import authored_violations
 
-        waive = attach_zone_floor_waiver(
-            self._pairwise_attach_zones_cache or (),
-            base=float(self.rules.trace_clearance),
-            designer=self.rules.designer_clearance_floors,
-            designer_by_name=self.rules.designer_clearance_floors_by_name,
-            net_names=self.net_names,
-        )
         pads = self.grid.pads
         victims: list[int] = []
+        # Copper already stripped, held by reference so an id is never reused.
+        stripped: dict[int, Any] = {}
         while True:
             routed_ids = {id(r) for r in self.routes}
             fixed = [r for r in self.existing_routes if id(r) not in routed_ids]
             owned = {id(item) for r in self.routes for item in (*r.segments, *r.vias)}
-            found = authored_violations(floors, pads, [*self.routes, *fixed], waive=waive)
+            found = authored_violations(floors, pads, [*self.routes, *fixed])
             routed = [v for v in found if id(v.copper) in owned]
             if not routed:
                 break
@@ -19824,17 +19820,27 @@ class Autorouter:
             # Issue #6670: name the foreign copper.  A pour pad neutralised to
             # net 0 read as "net 0 pad", hiding the GND class floor and the pad.
             other = hit.other_label or f"net {hit.other_net} {hit.kind}"
+            where = (
+                f"    Net {hit.net} ({self.net_names.get(hit.net, '?')}): {hit.actual:.3f}mm "
+                f"from {other} at ({hit.x:.3f}, {hit.y:.3f}) is below "
+                f"the authored netclass minimum {hit.required:.3f}mm"
+            )
+            if id(hit.copper) in stripped:
+                flush_print(f"{where}; could not remove it (already stripped); backstop stopped")
+                victims.append(hit.net)
+                break
             n_seg, n_via, conn, left = self._strip_floor_violating_copper(hit.net, hit.copper)
+            if n_seg + n_via == 0:
+                flush_print(f"{where}; could not remove it (nothing stripped); backstop stopped")
+                victims.append(hit.net)
+                break
+            stripped[id(hit.copper)] = hit.copper
             outcome = (
                 f"demoted connection {conn} ({n_seg} segment(s), {n_via} via(s)); net left partial"
                 if left
                 else "demoted to unrouted"
             )
-            flush_print(
-                f"    Net {hit.net} ({self.net_names.get(hit.net, '?')}): {hit.actual:.3f}mm "
-                f"from {other} at ({hit.x:.3f}, {hit.y:.3f}) is below "
-                f"the authored netclass minimum {hit.required:.3f}mm; {outcome}"
-            )
+            flush_print(f"{where}; {outcome}")
             victims.append(hit.net)
         return sorted(set(victims))
 
