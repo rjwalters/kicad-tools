@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-28
 
+- **PR #8040**: fix: refuse .kicad_dru content KiCad silently drops and flag netclass-only cross-gates
+- **Issue #8039** (closed): kicad_dru sidecar silently ignored by KiCad 10 when hand-written content has ';' comments or regex conditions — cross-gate runs netclass-only
 - **PR #8037**: chore: point ecosystem registry at BackplaneWorks org for Backplane and KiStack
 - **Issue #8008** (closed): chore: ecosystem registry: Backplane and KiStack moved to BackplaneWorks org
 - **PR #8032**: fix(route): make oracle pour completion honour pairwise HV clearance
