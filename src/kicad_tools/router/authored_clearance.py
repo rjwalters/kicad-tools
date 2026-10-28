@@ -53,11 +53,12 @@ vias the router emits and conservative for a blind/buried barrel.
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from .clearance_shapes import (
+    CLEARANCE_EPSILON_MM,
     KShape,
     copper_gap,
     pad_shape,
@@ -72,6 +73,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 __all__ = [
     "AuthoredCopperIndex",
     "AuthoredViolation",
+    "attach_zone_floor_waiver",
     "authored_violations",
     "pad_authored_floor",
     "pad_label",
@@ -121,6 +123,20 @@ class AuthoredViolation:
     #: A neutralised pour pad is ``net 0`` in the router, which hides both the
     #: net whose class sets the floor and which pad it is; empty when unknown.
     other_label: str = ""
+    #: Issue #8029: the offending copper itself (the scanned
+    #: :class:`~.primitives.Segment` / :class:`~.primitives.Via`) and the
+    #: foreign copper it is too close to (a ``Pad``, ``Segment`` or ``Via``),
+    #: so a consumer can waive by geometry (the #4506 attach zone) or strip
+    #: exactly the offending connection.  ``None`` when not known.
+    copper: Any = field(default=None, compare=False, repr=False)
+    other: Any = field(default=None, compare=False, repr=False)
+    #: The foreign copper's net NAME (survives a pad's neutralisation to 0).
+    other_name: str = ""
+
+
+#: A census waiver: ``True`` drops the violation (the next foreign copper is
+#: then asked), ``False`` keeps it.
+AuthoredWaiver = Callable[[AuthoredViolation], bool]
 
 
 @dataclass(frozen=True)
@@ -133,6 +149,8 @@ class _Item:
     y: float
     bbox: tuple[float, float, float, float]
     label: str = ""
+    source: Any = None
+    name: str = ""
 
 
 def pad_label(pad: Pad) -> str:
@@ -200,6 +218,8 @@ class AuthoredCopperIndex:
                     pad.y,
                     _pad_bbox(pad),
                     pad_label(pad),
+                    pad,
+                    pad.net_name or "",
                 )
             )
         self.add_routes(routes)
@@ -221,11 +241,25 @@ class AuthoredCopperIndex:
                         (seg.x1 + seg.x2) / 2.0,
                         (seg.y1 + seg.y2) / 2.0,
                         _seg_bbox(seg),
+                        "",
+                        seg,
+                        route.net_name or "",
                     )
                 )
             for via in route.vias:
                 self._add(
-                    _Item(via_shape(via), route.net, floor, "via", via.x, via.y, _via_bbox(via))
+                    _Item(
+                        via_shape(via),
+                        route.net,
+                        floor,
+                        "via",
+                        via.x,
+                        via.y,
+                        _via_bbox(via),
+                        "",
+                        via,
+                        route.net_name or "",
+                    )
                 )
 
     @property
@@ -261,12 +295,22 @@ class AuthoredCopperIndex:
         return out
 
     def first_violation(
-        self, shape: KShape, bbox: tuple[float, float, float, float], net: int, own_floor=None
+        self,
+        shape: KShape,
+        bbox: tuple[float, float, float, float],
+        net: int,
+        own_floor=None,
+        *,
+        copper: Any = None,
+        waive: AuthoredWaiver | None = None,
     ) -> AuthoredViolation | None:
         """The first foreign copper ``shape`` (owned by ``net``) is too close to.
 
         ``own_floor`` defaults to the net's floor; a caller holding an
-        item-level floor (a neutral pad) passes it explicitly.
+        item-level floor (a neutral pad) passes it explicitly.  ``copper`` is
+        the router object ``shape`` was built from (carried on the result);
+        ``waive`` (issue #8029) may drop a shortfall, in which case the next
+        foreign copper is asked.
         """
         own = self.floors.get(net, 0.0) if own_floor is None else own_floor
         for item in self._candidates(bbox, own):
@@ -276,7 +320,7 @@ class AuthoredCopperIndex:
             if required <= 0.0:
                 continue
             if not shapes_clear(shape, item.shape, required):
-                return AuthoredViolation(
+                hit = AuthoredViolation(
                     item.x,
                     item.y,
                     net,
@@ -285,7 +329,13 @@ class AuthoredCopperIndex:
                     copper_gap(shape, item.shape),
                     item.kind,
                     item.label,
+                    copper,
+                    item.source,
+                    item.name,
                 )
+                if waive is not None and waive(hit):
+                    continue
+                return hit
         return None
 
     def candidate_mask(
@@ -359,15 +409,29 @@ class AuthoredCopperIndex:
                     mask[idx, y0 : y1 + 1, x0 : x1 + 1] = True
         return mask
 
-    def segment_violation(self, seg: Segment, net: int | None = None) -> AuthoredViolation | None:
+    def segment_violation(
+        self, seg: Segment, net: int | None = None, *, waive: AuthoredWaiver | None = None
+    ) -> AuthoredViolation | None:
         """Authored-minimum check for a trace segment (``net`` defaults to ``seg.net``)."""
         return self.first_violation(
-            segment_shape(seg), _seg_bbox(seg), seg.net if net is None else net
+            segment_shape(seg),
+            _seg_bbox(seg),
+            seg.net if net is None else net,
+            copper=seg,
+            waive=waive,
         )
 
-    def via_violation(self, via: Via, net: int | None = None) -> AuthoredViolation | None:
+    def via_violation(
+        self, via: Via, net: int | None = None, *, waive: AuthoredWaiver | None = None
+    ) -> AuthoredViolation | None:
         """Authored-minimum check for a via barrel on every layer."""
-        return self.first_violation(via_shape(via), _via_bbox(via), via.net if net is None else net)
+        return self.first_violation(
+            via_shape(via),
+            _via_bbox(via),
+            via.net if net is None else net,
+            copper=via,
+            waive=waive,
+        )
 
     def segment_clear(self, seg: Segment, net: int | None = None) -> bool:
         return self.segment_violation(seg, net) is None
@@ -390,12 +454,15 @@ def authored_violations(
     routes: Iterable[Route],
     *,
     first_per_net: bool = False,
+    waive: AuthoredWaiver | None = None,
 ) -> list[AuthoredViolation]:
     """Every committed segment/via that breaks an authored minimum.
 
     The final-validation census: the same predicate the search gate and the
     commit validators ask, run over finished copper.  Each offending pair is
     reported once per offending segment/via (from the side being scanned).
+    ``waive`` (issue #8029, e.g. :func:`attach_zone_floor_waiver`) drops the
+    shortfalls it accepts; ``None`` keeps every one, as before.
     """
     routes = list(routes)
     index = AuthoredCopperIndex(floors, pads, routes)
@@ -407,7 +474,7 @@ def authored_violations(
         if first_per_net and route.net in flagged:
             continue
         for seg in route.segments:
-            hit = index.segment_violation(seg, route.net)
+            hit = index.segment_violation(seg, route.net, waive=waive)
             if hit is not None:
                 found.append(hit)
                 flagged.add(route.net)
@@ -416,13 +483,110 @@ def authored_violations(
         if first_per_net and route.net in flagged:
             continue
         for via in route.vias:
-            hit = index.via_violation(via, route.net)
+            hit = index.via_violation(via, route.net, waive=waive)
             if hit is not None:
                 found.append(hit)
                 flagged.add(route.net)
                 if first_per_net:
                     break
     return found
+
+
+def _gap_point_and_layer(copper: Any, other: Any) -> tuple[float, float, object | None]:
+    """The #4506 attach-zone probe for a copper pair: gap midpoint and layer.
+
+    The same conventions the search kernels use (``Grid3D::attach_zone_exempts``
+    callers in ``grid.cpp`` and their Python twins in
+    :mod:`.pairwise_clearance`): the midpoint between the closest points of
+    the two centrelines, a pad or via being a point at its centre; the layer
+    is the trace's own layer, else an SMD pad's layer, else ``None`` (a
+    through-hole barrel or via against via spans every layer, layer-agnostic).
+    """
+    from .pairwise_clearance import closest_gap_midpoint_xy
+
+    def _line(item: Any) -> tuple[float, float, float, float]:
+        if hasattr(item, "x1"):
+            return (item.x1, item.y1, item.x2, item.y2)
+        return (item.x, item.y, item.x, item.y)
+
+    mx, my = closest_gap_midpoint_xy(*_line(copper), *_line(other))
+    layer: object | None = None
+    for item in (copper, other):
+        if hasattr(item, "x1"):
+            return mx, my, item.layer
+    if hasattr(other, "through_hole") and not other.through_hole:
+        layer = other.layer
+    return mx, my, layer
+
+
+def attach_zone_floor_waiver(
+    zones: Sequence[Any],
+    *,
+    base: float,
+    designer: Mapping[int, float] | None,
+    designer_by_name: Mapping[str, float] | None = None,
+    net_names: Mapping[int, str] | None = None,
+) -> AuthoredWaiver | None:
+    """Waive ROUTER-class floor shortfalls inside a #4506 attach zone (issue #8029).
+
+    Since #6427 ``net_clearance_floors`` carries the router's own net-class
+    clearances as well as the designer's ``.kicad_pro`` / DRU minimums.  The
+    search already relaxes a pair inside a rated footprint's pad field (the
+    #4506 attach zone, layer-scoped by #4699): the part's own pin pitch sets
+    the spacing of the copper attaching to it.  This waiver applies the very
+    same rule (:meth:`~.pairwise_clearance.AttachZone.exempts` at the gap
+    midpoint, as the #8028 ``kct creepage --waive-attach-zone`` census does)
+    to the post-route authored-floor census, so the backstop stops demoting
+    copper the search legitimately committed.
+
+    A shortfall is waived only when every one of these holds:
+
+    * a zone contains the gap midpoint and lists BOTH nets, with both nets'
+      pad copper on the shared layer (#4699);
+    * the gap still meets ``base`` (the board's scalar trace clearance, the
+      ``dru`` floor the pairwise twin keeps) and the pair's DESIGNER floor --
+      a designer minimum is enforced by kicad-cli and is never waived.
+
+    ``designer is None`` means the rules were built outside the loader, and
+    every floor is treated as designer-authored (#6449): no waiver at all.
+    Returns ``None`` (no waiver) then, or when no zone is installed.
+    """
+    if designer is None or not zones:
+        return None
+    from .pairwise_clearance import _attach_zone_exempts
+
+    by_name = designer_by_name or {}
+    names = net_names or {}
+
+    def _designer_floor(net: int, name: str, item: Any) -> float:
+        if net:
+            return float(designer.get(net, 0.0))
+        # A neutralised pad (net 0) keeps its designer minimum by name, exactly
+        # as the lattice pad masks read it (``_designer_pad_extra``).  Other
+        # neutralised copper carries an item floor of unknown provenance:
+        # treat it as designer-authored (strict).
+        if hasattr(item, "pin") or hasattr(item, "through_hole"):
+            return float(by_name.get(name, 0.0))
+        return float(getattr(item, "authored_clearance", 0.0) or 0.0)
+
+    def waive(hit: AuthoredViolation) -> bool:
+        if hit.copper is None or hit.other is None:
+            return False
+        own_name = names.get(hit.net, "") or str(getattr(hit.copper, "net_name", "") or "")
+        other_name = hit.other_name or names.get(hit.other_net, "")
+        if not own_name or not other_name:
+            return False
+        strict = max(
+            base,
+            _designer_floor(hit.net, own_name, hit.copper),
+            _designer_floor(hit.other_net, other_name, hit.other),
+        )
+        if hit.actual < strict - CLEARANCE_EPSILON_MM:
+            return False
+        x, y, layer = _gap_point_and_layer(hit.copper, hit.other)
+        return _attach_zone_exempts(zones, x, y, own_name, other_name, layer)
+
+    return waive
 
 
 _EMPTY: list[Any] = []

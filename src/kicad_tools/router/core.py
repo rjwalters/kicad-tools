@@ -19772,51 +19772,204 @@ class Autorouter:
         return sorted(set(victims))
 
     def demote_authored_floor_violation_nets(self) -> list[int]:
-        """Demote every routed net whose copper breaks an authored minimum (#6243).
+        """Strip routed copper that breaks an authored minimum (#6243, #8029).
 
         The final-validation half of the authored-netclass contract: the same
         kernel-backed census the search gates and the commit validators ask
         (:func:`~kicad_tools.router.authored_clearance.authored_violations`),
         run over the finished copper -- routed nets, escape stubs, preserved
-        and existing copper, every pad.  A net that still violates a stricter
-        netclass after search, optimize and nudge is demoted to unrouted
-        (grid unmarked, routes removed) and reported, never shipped as a
-        clearance failure.  Demotion is greedy and one net at a time, so of a
-        violating pair only one side is stripped.
+        and existing copper, every pad.  Greedy, one violation at a time, so
+        of a violating pair only one side is stripped.
+
+        Issue #8029 narrowed it twice:
+
+        * A ROUTER-class floor shortfall inside an installed #4506 attach
+          zone that lists both nets (layer-scoped, #4699) is waived -- the
+          search relaxes exactly those pairs, and so does the #8028 census
+          waiver (:func:`~.authored_clearance.attach_zone_floor_waiver`).
+          Designer floors (``rules.designer_clearance_floors``; ``None``
+          means every floor is designer, #6449) are never waived.
+        * A real violation strips only the offending CONNECTION's copper --
+          the violating segment or via and the copper it leaves dangling
+          (:meth:`_strip_floor_violating_copper`) -- not every route of the
+          net, so the net reports partial rather than unrouted.
 
         Returns:
-            Sorted demoted net ids (empty in the common case, and always
-            when no authored minimum exists).
+            Sorted ids of the nets that lost copper (empty in the common
+            case, and always when no authored minimum exists).
         """
         floors = self.rules.net_clearance_floors
         if not floors and getattr(self.grid, "_authored_item_floors", False) is not True:
             return []
-        from .authored_clearance import authored_violations
+        from .authored_clearance import attach_zone_floor_waiver, authored_violations
 
+        waive = attach_zone_floor_waiver(
+            self._pairwise_attach_zones_cache or (),
+            base=float(self.rules.trace_clearance),
+            designer=self.rules.designer_clearance_floors,
+            designer_by_name=self.rules.designer_clearance_floors_by_name,
+            net_names=self.net_names,
+        )
         pads = self.grid.pads
-        routed_ids = {id(r) for r in self.routes}
-        fixed = [r for r in self.existing_routes if id(r) not in routed_ids]
         victims: list[int] = []
         while True:
-            found = authored_violations(floors, pads, [*self.routes, *fixed], first_per_net=True)
-            routed = [v for v in found if any(r.net == v.net for r in self.routes)]
+            routed_ids = {id(r) for r in self.routes}
+            fixed = [r for r in self.existing_routes if id(r) not in routed_ids]
+            owned = {id(item) for r in self.routes for item in (*r.segments, *r.vias)}
+            found = authored_violations(floors, pads, [*self.routes, *fixed], waive=waive)
+            routed = [v for v in found if id(v.copper) in owned]
             if not routed:
                 break
             hit = routed[0]
             # Issue #6670: name the foreign copper.  A pour pad neutralised to
             # net 0 read as "net 0 pad", hiding the GND class floor and the pad.
             other = hit.other_label or f"net {hit.other_net} {hit.kind}"
+            n_seg, n_via, conn, left = self._strip_floor_violating_copper(hit.net, hit.copper)
+            outcome = (
+                f"demoted connection {conn} ({n_seg} segment(s), {n_via} via(s)); net left partial"
+                if left
+                else "demoted to unrouted"
+            )
             flush_print(
                 f"    Net {hit.net} ({self.net_names.get(hit.net, '?')}): {hit.actual:.3f}mm "
                 f"from {other} at ({hit.x:.3f}, {hit.y:.3f}) is below "
-                f"the authored netclass minimum {hit.required:.3f}mm; demoted to unrouted"
+                f"the authored netclass minimum {hit.required:.3f}mm; {outcome}"
             )
             victims.append(hit.net)
-            for route in [r for r in self.routes if r.net == hit.net]:
-                self.grid.unmark_route_usage(route)
-                self.grid.unmark_route(route)
+        return sorted(set(victims))
+
+    def _strip_floor_violating_copper(self, net: int, bad: Any) -> tuple[int, int, str, bool]:
+        """Remove ``bad`` and the routed copper of ``net`` it leaves dangling (#8029).
+
+        ``bad`` is a routed :class:`Segment` / :class:`Via` of ``net``.  Its
+        removal is propagated outward: a neighbouring segment whose end now
+        touches nothing (no other copper of the net, no pad of the net, no
+        preserved same-net copper, no same-net zone cell) is removed, and so
+        is a via left bonding at most one piece of copper -- until every
+        remaining end is anchored.  Copper never connected to ``bad`` is not
+        examined, so the net's other connections stay routed.
+
+        Returns:
+            ``(segments removed, vias removed, connection label, copper left)``
+            where the label names the net's pads the removed copper touched
+            (``"U1.4 -> R3.2"``), and ``copper left`` is whether the net still
+            has routed copper.
+        """
+        from .clearance_shapes import KSegment, copper_gap, pad_shape, segment_shape, via_shape
+
+        tol = 1e-3
+        routes = [r for r in self.routes if r.net == net]
+        owner: dict[int, Route] = {}
+        items: list[Any] = []
+        for route in routes:
+            for item in (*route.segments, *route.vias):
+                owner[id(item)] = route
+                items.append(item)
+        shapes = {id(item): self._floor_item_shape(item) for item in items}
+        routed_ids = {id(r) for r in self.routes}
+        anchors: list[Any] = [pad_shape(p) for p in self.grid.pads if p.net == net]
+        net_pads = [p for p in self.grid.pads if p.net == net]
+        for route in self.existing_routes:
+            if id(route) in routed_ids or route.net != net:
+                continue
+            anchors.extend(segment_shape(seg) for seg in route.segments)
+            anchors.extend(via_shape(via) for via in route.vias)
+
+        alive = {id(item) for item in items}
+
+        def _touches(a: Any, b: Any) -> bool:
+            return copper_gap(a, b) <= tol
+
+        def _probe(seg: Any, x: float, y: float) -> Any:
+            # The segment's round end cap: a track ending on a pad's edge, or
+            # on a neighbour off its exact centreline, still connects there.
+            return KSegment(x1=x, y1=y, x2=x, y2=y, width=seg.width, layer=segment_shape(seg).layer)
+
+        def _anchored(shape: Any, x: float, y: float) -> bool:
+            if any(_touches(shape, a) for a in anchors):
+                return True
+            return self._point_on_same_net_zone(net, x, y)
+
+        def _dangling(item: Any) -> bool:
+            others = [o for o in items if id(o) in alive and o is not item]
+            if hasattr(item, "x1"):
+                for x, y in ((item.x1, item.y1), (item.x2, item.y2)):
+                    probe = _probe(item, x, y)
+                    if _anchored(probe, x, y):
+                        continue
+                    if not any(_touches(probe, shapes[id(o)]) for o in others):
+                        return True
+                return False
+            shape = shapes[id(item)]
+            if _anchored(shape, item.x, item.y):
+                return False
+            return sum(1 for o in others if _touches(shape, shapes[id(o)])) <= 1
+
+        removed: list[Any] = []
+        queue = [bad]
+        first = True
+        while queue:
+            item = queue.pop()
+            if id(item) not in alive:
+                continue
+            if not first and not _dangling(item):
+                continue
+            first = False
+            alive.discard(id(item))
+            removed.append(item)
+            shape = shapes[id(item)]
+            queue.extend(o for o in items if id(o) in alive and _touches(shape, shapes[id(o)]))
+
+        touched: list[str] = []
+        for pad in net_pads:
+            ps = pad_shape(pad)
+            if any(_touches(shapes[id(item)], ps) for item in removed):
+                label = f"{pad.ref}.{pad.pin}" if pad.ref and pad.pin else (pad.ref or "?")
+                if label not in touched:
+                    touched.append(label)
+        if touched:
+            conn = " -> ".join(touched)
+        else:
+            conn = f"at ({getattr(bad, 'x1', getattr(bad, 'x', 0.0)):.3f}, " + (
+                f"{getattr(bad, 'y1', getattr(bad, 'y', 0.0)):.3f})"
+            )
+
+        gone = {id(item) for item in removed}
+        tmp = Route(net=net, net_name=self.net_names.get(net, ""))
+        for route in {id(owner[i]): owner[i] for i in gone}.values():
+            self.grid.unmark_route(route)
+            tmp.segments = [s for s in route.segments if id(s) in gone]
+            tmp.vias = [v for v in route.vias if id(v) in gone]
+            self.grid.unmark_route_usage(tmp)
+            route.segments = [s for s in route.segments if id(s) not in gone]
+            route.vias = [v for v in route.vias if id(v) not in gone]
+            if route.segments or route.vias:
+                self.grid.mark_route(route)
+            else:
                 self.routes.remove(route)
-        return sorted(victims)
+        n_seg = sum(1 for item in removed if hasattr(item, "x1"))
+        left = any(r.net == net for r in self.routes)
+        return n_seg, len(removed) - n_seg, conn, left
+
+    @staticmethod
+    def _floor_item_shape(item: Any) -> Any:
+        from .clearance_shapes import segment_shape, via_shape
+
+        return segment_shape(item) if hasattr(item, "x1") else via_shape(item)
+
+    def _point_on_same_net_zone(self, net: int, x: float, y: float) -> bool:
+        """Whether a same-net zone cell covers ``(x, y)`` on any layer (#8029)."""
+        grid = self.grid
+        try:
+            gx, gy = grid.world_to_grid(x, y)
+            is_zone = grid._is_zone
+            nets = grid._net
+            for layer_idx in range(int(is_zone.shape[0])):
+                if bool(is_zone[layer_idx, gy, gx]) and int(nets[layer_idx, gy, gx]) == net:
+                    return True
+        except (AttributeError, IndexError, TypeError, ValueError):
+            return False
+        return False
 
     def route_all_advanced(
         self,
