@@ -54,7 +54,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from .clearance_shapes import (
@@ -121,6 +121,11 @@ class AuthoredViolation:
     #: A neutralised pour pad is ``net 0`` in the router, which hides both the
     #: net whose class sets the floor and which pad it is; empty when unknown.
     other_label: str = ""
+    #: Issue #8029: the offending copper itself (the scanned
+    #: :class:`~.primitives.Segment` / :class:`~.primitives.Via`), so the
+    #: post-route backstop can strip exactly the offending connection rather
+    #: than every route of the net.  ``None`` when not known.
+    copper: Any = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -261,12 +266,20 @@ class AuthoredCopperIndex:
         return out
 
     def first_violation(
-        self, shape: KShape, bbox: tuple[float, float, float, float], net: int, own_floor=None
+        self,
+        shape: KShape,
+        bbox: tuple[float, float, float, float],
+        net: int,
+        own_floor=None,
+        *,
+        copper: Any = None,
     ) -> AuthoredViolation | None:
         """The first foreign copper ``shape`` (owned by ``net``) is too close to.
 
         ``own_floor`` defaults to the net's floor; a caller holding an
-        item-level floor (a neutral pad) passes it explicitly.
+        item-level floor (a neutral pad) passes it explicitly.  ``copper`` is
+        the router object ``shape`` was built from, carried on the result
+        (issue #8029).
         """
         own = self.floors.get(net, 0.0) if own_floor is None else own_floor
         for item in self._candidates(bbox, own):
@@ -285,6 +298,7 @@ class AuthoredCopperIndex:
                     copper_gap(shape, item.shape),
                     item.kind,
                     item.label,
+                    copper,
                 )
         return None
 
@@ -362,12 +376,14 @@ class AuthoredCopperIndex:
     def segment_violation(self, seg: Segment, net: int | None = None) -> AuthoredViolation | None:
         """Authored-minimum check for a trace segment (``net`` defaults to ``seg.net``)."""
         return self.first_violation(
-            segment_shape(seg), _seg_bbox(seg), seg.net if net is None else net
+            segment_shape(seg), _seg_bbox(seg), seg.net if net is None else net, copper=seg
         )
 
     def via_violation(self, via: Via, net: int | None = None) -> AuthoredViolation | None:
         """Authored-minimum check for a via barrel on every layer."""
-        return self.first_violation(via_shape(via), _via_bbox(via), via.net if net is None else net)
+        return self.first_violation(
+            via_shape(via), _via_bbox(via), via.net if net is None else net, copper=via
+        )
 
     def segment_clear(self, seg: Segment, net: int | None = None) -> bool:
         return self.segment_violation(seg, net) is None
