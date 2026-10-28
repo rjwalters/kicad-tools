@@ -420,6 +420,50 @@ _HYBRID_PARITY_MIN_SKEW_GAIN_MM = 0.5
 #: removed (06rf USB3_RX2: 2.86 mm of skew for 8.5 mm, a ratio of 3.0).
 _HYBRID_PARITY_LENGTH_PER_SKEW = 4.0
 
+#: Issue #7931: the "nothing tried yet" decline of a hybrid retry; every real
+#: decline replaces it.
+_HYBRID_NO_PATH = "pair-hybrid-no-path"
+
+#: Issue #7931: hybrid declines from a stage AFTER the trunk body was routed
+#: (a leg search, or the checks on two routed legs).  ``pair-hybrid-leg-budget``
+#: ranks above these; see :func:`_hybrid_decline_rank`.
+_HYBRID_POST_TRUNK_PREFIXES: tuple[str, ...] = (
+    "pair-hybrid-leg-",
+    "pair-hybrid-via-limit",
+    "pair-hybrid-junction",
+)
+
+
+def _hybrid_decline_rank(reason: str) -> int:
+    """How far a hybrid candidate got before ``reason`` declined it (#7931).
+
+    ``-1`` is the :data:`_HYBRID_NO_PATH` placeholder (nothing tried), ``0`` a
+    pre-trunk, site or trunk decline (``pair-hybrid-anchor``,
+    ``pair-hybrid-trunk-*``, ``pair-hybrid-deadline`` ...), ``1`` a decline
+    after the trunk body was found (``pair-hybrid-leg-*``, the via limit, the
+    junction), and ``2`` ``pair-hybrid-leg-budget``: both legs routed but one
+    is over the per-terminal cap, the most informative decline.
+    """
+    if reason == _HYBRID_NO_PATH:
+        return -1
+    if reason == "pair-hybrid-leg-budget":
+        return 2
+    if reason.startswith(_HYBRID_POST_TRUNK_PREFIXES):
+        return 1
+    return 0
+
+
+def _further_hybrid_decline(best: str, new: str) -> bool:
+    """Whether ``new`` got further than ``best``; ties keep ``best`` (#7931).
+
+    Pure.  The hybrid retry reports its furthest-progress decline, not the
+    first one: a hooked start that fails at the trunk is tried before a
+    hook-free one whose trunk routes and whose leg then fails, and the first
+    reason would hide the stage that actually blocks the segment.
+    """
+    return _hybrid_decline_rank(new) > _hybrid_decline_rank(best)
+
+
 #: Issue #7932: unit vectors of the 8 octilinear headings (index = the
 #: :func:`_heading_index` value, 45-degree units counter-clockwise from +x).
 _HEADING_UNITS: tuple[Pt, ...] = tuple(
@@ -5787,7 +5831,7 @@ class LatticePathfinder:
             ]
             order = [True, False] if counts[0] >= counts[1] else [False, True]
         notes: list[str] = []
-        reason = "pair-hybrid-no-path"
+        reason = _HYBRID_NO_PATH
         for hard_a in order:
             pres, why, note = self._route_pair_hybrid_end(
                 pc,
@@ -5802,7 +5846,8 @@ class LatticePathfinder:
             if pres is not None:
                 return pres, why
             notes.append(note)
-            if reason == "pair-hybrid-no-path" or why == "pair-hybrid-leg-budget":
+            # Issue #7931: the end that got furthest names the decline.
+            if _further_hybrid_decline(reason, why):
                 reason = why
             if why == "pair-hybrid-deadline":
                 break
@@ -5915,7 +5960,9 @@ class LatticePathfinder:
 
             reqs = pad_class_requirements(self)
         shortest: tuple[float, float] | None = None
-        reason = "pair-hybrid-no-path"
+        reason = _HYBRID_NO_PATH
+        # Issue #7931: the (start, layer) that reached ``reason``'s stage.
+        furthest: tuple[Any, int] | None = None
         searches = 0
         for layer in trunk_layers:
             misses = 0
@@ -5958,9 +6005,13 @@ class LatticePathfinder:
                 if legs is not None and (shortest is None or max(legs) < max(shortest)):
                     shortest = legs
                 if pres is None:
-                    # An over-budget leg is the informative decline.
-                    if why == "pair-hybrid-leg-budget" or reason == "pair-hybrid-no-path":
+                    # Issue #7931: report the furthest-progress decline (an
+                    # over-budget leg first, then any post-trunk one), not the
+                    # first: the first start tried is often a hooked one whose
+                    # trunk fails while a later trunk routes and its leg fails.
+                    if _further_hybrid_decline(reason, why):
                         reason = why
+                        furthest = (start, layer)
                     continue
                 lens = legs or (0.0, 0.0)
                 self.pair_hybrid_log[key] = (
@@ -5977,9 +6028,16 @@ class LatticePathfinder:
                 f"{shortest[0]:.1f}/{shortest[1]:.1f} mm vs cap {cap_text}"
             )
         else:
+            where = (
+                f" at {furthest[0].describe()}"
+                f"{', crossed' if getattr(furthest[0], 'crossed', False) else ''}"
+                f" on {self._layer_name(furthest[1])}"
+                if furthest is not None
+                else ""
+            )
             note = (
                 f"hard terminal {terminal}: no leg routed from {searches} trunk search(es) "
-                f"({reason.removeprefix('pair-hybrid-')})"
+                f"({reason.removeprefix('pair-hybrid-')}{where})"
             )
         return None, reason, note
 
