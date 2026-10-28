@@ -16,7 +16,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -395,6 +395,15 @@ class KiCadCLIResult:
     parity_schematic: Path | None = None
     #: Cause-specific NOT RUN reason when :attr:`parity_skipped` (Issue #7147).
     parity_skip_reason: str | None = None
+    #: Issue #8053: what the self-verifying foreign-pad carve did to the
+    #: saved fill (e.g. "rolled back on the whole board"), for the caller to
+    #: print.  Empty when the carve was kept as is or never ran.
+    fill_notes: list[str] = field(default_factory=list)
+    #: Issue #8053: zones whose KiCad fill violates foreign-pad clearance
+    #: (so the carve is needed) *and* whose carve splits the saved fill, one
+    #: line per zone naming the foreign pads.  Non-empty means the saved
+    #: fill is clearance-correct but fragmented; ``kct zones fill`` exits 1.
+    fill_conflicts: list[str] = field(default_factory=list)
 
 
 #: The line kicad-cli prints (and then exits 0) when ``--schematic-parity``
@@ -1145,20 +1154,43 @@ def run_fill_zones(
         already_freshly_refilled = (not _kicad_cli_has_fill_zones(kicad_cli)) and (
             _kicad_drc_supports_refill(kicad_cli) is True
         )
+        # Issue #6273: the fill just measured is one KiCad load + refill.
+        fill_cost = _monotonic() - fill_started
         remediation_kwargs: dict = {}
         if time_left is not None:
-            # Issue #6273: the fill just measured is one KiCad load + refill.
             remediation_kwargs = {
                 "time_left": time_left,
-                "refill_cost_estimate": _monotonic() - fill_started,
+                "refill_cost_estimate": fill_cost,
             }
-        _remediate_starved_thermal(
+        # Issue #8053: remember whether the carve that is on disk at the end
+        # actually changed any copper, so a no-op carve costs nothing extra.
+        carve_on_disk = [False]
+
+        def _carve(path: Path) -> None:
+            carve_on_disk[0] = bool(_apply_foreign_pad_clearance(path))
+
+        settled_report = _remediate_starved_thermal(
             result.output_path,
             kicad_cli,
-            settle=None if native_clearance else _apply_foreign_pad_clearance,
+            settle=None if native_clearance else _carve,
             skip_first_refill=already_freshly_refilled,
             **remediation_kwargs,
         )
+        if carve_on_disk[0]:
+            verify_affordable = True
+            if time_left is not None:
+                left = time_left()
+                # One refill plus one read-only DRC, like a remediation pass.
+                cost = 2.0 * fill_cost * _REMEDIATION_DEADLINE_SAFETY
+                verify_affordable = left is None or left >= cost
+            if verify_affordable:
+                notes, conflicts = _verify_foreign_pad_carve(
+                    result.output_path,
+                    kicad_cli,
+                    settled_report if isinstance(settled_report, dict) else None,
+                )
+                result.fill_notes.extend(notes)
+                result.fill_conflicts.extend(conflicts)
 
     return result
 
@@ -1177,7 +1209,7 @@ def _remediate_starved_thermal(
     skip_first_refill: bool = False,
     time_left: Callable[[], float | None] | None = None,
     refill_cost_estimate: float = 0.0,
-) -> None:
+) -> dict | None:
     """Remediate the pads KiCad's DRC flags (Issue #3729).
 
     The size-based selective pass clears the obvious small-SMD starved pads;
@@ -1222,10 +1254,12 @@ def _remediate_starved_thermal(
             left as the last completed step wrote it.
         refill_cost_estimate: Seconds of one KiCad refill of this board
             (the caller's measured fill).  Measured passes replace it.
-    """
-    import json
-    import os
 
+    Returns:
+        Issue #8053: the read-only DRC report of the settled geometry when
+        that is exactly what is left on disk (so the caller can judge the
+        saved fill without another kicad-cli run), else ``None``.
+    """
     try:
         from kicad_tools.core.sexp_file import save_pcb
         from kicad_tools.sexp import parse_file
@@ -1236,55 +1270,10 @@ def _remediate_starved_thermal(
             starved_thermal_pad_uuids,
         )
     except Exception:
-        return
+        return None
 
     def _run_drc(refill: bool) -> dict | None:
-        """Run DRC on ``pcb_path`` and return the parsed report (or ``None``).
-
-        ``refill`` adds ``--refill-zones --save-board`` so the pass also
-        refills and persists the zones.  The default (all) severity is used so
-        ``isolated_copper`` *warnings* are visible alongside ``starved_thermal``
-        *errors*; ``--schematic-parity`` is omitted because the fill output may
-        lack a paired schematic.  The input net table is snapshotted and
-        restored around every invocation -- kicad-cli's ``--save-board`` can
-        strip the net declarations on kicad-tools-serialized boards, the same
-        quirk :func:`_run_fill_zones_via_drc` guards against -- so a refill
-        never drops the nets that segments/vias/pads depend on.
-        """
-        input_net_nodes = _snapshot_net_declarations(pcb_path)
-        input_element_nets = _snapshot_element_nets(pcb_path)
-
-        fd, report_name = tempfile.mkstemp(suffix=".json", prefix="thermal_drc_")
-        os.close(fd)
-        report_path = Path(report_name)
-        try:
-            cmd = [
-                str(kicad_cli),
-                "pcb",
-                "drc",
-                "--output",
-                str(report_path),
-                "--format",
-                "json",
-            ]
-            if refill and _kicad_drc_supports_refill(kicad_cli):
-                cmd.extend(["--refill-zones", "--save-board"])
-            cmd.append(str(pcb_path))
-            proc = subprocess.run(cmd, capture_output=True, text=True)
-            _restore_net_declarations(pcb_path, input_net_nodes, input_element_nets)
-            # Issue #6724: a killed kicad-cli (negative status) or a missing,
-            # empty or truncated report is "no report", never an empty one.
-            if proc.returncode < 0:
-                return None
-            if not report_path.exists() or report_path.stat().st_size == 0:
-                return None
-            try:
-                parsed = json.loads(report_path.read_text())
-            except ValueError:
-                return None
-            return parsed if isinstance(parsed, dict) else None
-        finally:
-            report_path.unlink(missing_ok=True)
+        return _kicad_drc_report(pcb_path, kicad_cli, refill=refill)
 
     def _settle() -> None:
         if settle is not None:
@@ -1305,7 +1294,7 @@ def _remediate_starved_thermal(
     try:
         for pass_num in range(max_passes):
             if not _affordable(2):
-                return  # Issue #6273: out of --timeout budget; keep the fill.
+                return None  # Issue #6273: out of --timeout budget; keep the fill.
             pass_started = _monotonic()
             # Refill the zones (bakes in prior overrides), then apply the
             # foreign-pad carve so the DRC we read reflects the shipped copper.
@@ -1314,22 +1303,22 @@ def _remediate_starved_thermal(
             # see the ``skip_first_refill`` docstring above.
             if not (skip_first_refill and pass_num == 0):
                 if _run_drc(refill=True) is None:
-                    return
+                    return None
             _settle()
             report = _run_drc(refill=False)
             if report is None:
-                return
+                return None
             starved_pads = starved_thermal_pad_uuids(report)
             isolated_zones = isolated_copper_zone_uuids(report)
             if not starved_pads and not isolated_zones:
-                return  # board is clean (carve already applied) -> done
+                return report  # board is clean (carve already applied) -> done
             doc = parse_file(pcb_path)
             applied = force_solid_on_pads_by_uuid(doc, starved_pads)
             applied += force_solid_on_isolated_island_pads(doc, isolated_zones)
             if applied == 0:
                 # Flagged but nothing new to remediate -- the carve geometry
                 # is already on disk and we cannot improve it; stop here.
-                return
+                return report
             save_pcb(doc, pcb_path)
             pass_costs.append(_monotonic() - pass_started)
             # Next pass refills (reverting the carve), re-applies it, re-checks.
@@ -1337,6 +1326,7 @@ def _remediate_starved_thermal(
         # refill + carve so the shipped copper reflects both.
         if _affordable(1) and _run_drc(refill=True) is not None:
             _settle()
+        return None
     except ModuleNotFoundError:
         # shapely unavailable -> the carve/remediation is not clearance-
         # correct (issue #3824).  Propagate loud rather than shipping a
@@ -1344,7 +1334,56 @@ def _remediate_starved_thermal(
         raise
     except Exception:
         # Never let remediation abort a successful fill.
-        return
+        return None
+
+
+def _kicad_drc_report(pcb_path: Path, kicad_cli: Path, *, refill: bool) -> dict | None:
+    """Run DRC on ``pcb_path`` and return the parsed report (or ``None``).
+
+    ``refill`` adds ``--refill-zones --save-board`` so the run also refills
+    and persists the zones.  The default (all) severity is used so
+    ``isolated_copper`` *warnings* are visible alongside ``starved_thermal``
+    *errors*; ``--schematic-parity`` is omitted because the fill output may
+    lack a paired schematic.  The input net table is snapshotted and
+    restored around every invocation -- kicad-cli's ``--save-board`` can
+    strip the net declarations on kicad-tools-serialized boards, the same
+    quirk :func:`_run_fill_zones_via_drc` guards against -- so a refill
+    never drops the nets that segments/vias/pads depend on.
+    """
+    input_net_nodes = _snapshot_net_declarations(pcb_path)
+    input_element_nets = _snapshot_element_nets(pcb_path)
+
+    fd, report_name = tempfile.mkstemp(suffix=".json", prefix="thermal_drc_")
+    os.close(fd)
+    report_path = Path(report_name)
+    try:
+        cmd = [
+            str(kicad_cli),
+            "pcb",
+            "drc",
+            "--output",
+            str(report_path),
+            "--format",
+            "json",
+        ]
+        if refill and _kicad_drc_supports_refill(kicad_cli):
+            cmd.extend(["--refill-zones", "--save-board"])
+        cmd.append(str(pcb_path))
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        _restore_net_declarations(pcb_path, input_net_nodes, input_element_nets)
+        # Issue #6724: a killed kicad-cli (negative status) or a missing,
+        # empty or truncated report is "no report", never an empty one.
+        if proc.returncode < 0:
+            return None
+        if not report_path.exists() or report_path.stat().st_size == 0:
+            return None
+        try:
+            parsed = json.loads(report_path.read_text())
+        except ValueError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    finally:
+        report_path.unlink(missing_ok=True)
 
 
 def _normalize_pad_connection_in_place(pcb_path: Path) -> None:
@@ -1401,11 +1440,12 @@ def _stage_normalized_pad_connection(pcb_path: Path) -> Path | None:
         return None
 
 
-def _apply_foreign_pad_clearance(pcb_path: Path) -> None:
+def _apply_foreign_pad_clearance(pcb_path: Path) -> int:
     """Carve foreign-net antipads out of every zone fill (Issue #3711).
 
     Loads the filled PCB, applies the pure-Python clearance correction,
     and rewrites the file only when at least one filled_polygon changed.
+    Returns the number of ``filled_polygon`` nodes it changed (Issue #8053).
 
     A missing/broken ``shapely`` is propagated **loud** (it is a core
     dependency — issue #3824): silently leaving the fill as kicad-cli
@@ -1423,6 +1463,7 @@ def _apply_foreign_pad_clearance(pcb_path: Path) -> None:
         modified = apply_foreign_pad_clearance(doc)
         if modified:
             save_pcb(doc, pcb_path)
+        return modified
     except ModuleNotFoundError:
         # shapely unavailable -> the fill is NOT clearance-correct.  Never
         # swallow this: surface it so the caller cannot mistake an uncarved
@@ -1430,7 +1471,209 @@ def _apply_foreign_pad_clearance(pcb_path: Path) -> None:
         raise
     except Exception:
         # Non-import geometry edge case: never let it abort a successful fill.
-        return
+        return 0
+
+
+#: Issue #8053: the saved-fill measures the export gate compares against a
+#: refill (:func:`kicad_tools.drc.geometric.saved_fill_regressions`).
+_FILL_CONNECTIVITY_MEASURES: tuple[str, ...] = (
+    "unconnected_items",
+    "isolated_copper",
+    "copper_sliver",
+)
+
+#: Issue #8053: DRC findings that show KiCad's own fill too close to foreign
+#: copper -- the defect the #3711 carve exists to fix.
+_FOREIGN_CLEARANCE_TYPES: frozenset[str] = frozenset({"clearance", "hole_clearance"})
+
+
+def _fill_connectivity_counts(report: dict) -> dict[str, int]:
+    """Count the saved-fill connectivity measures in a kicad-cli DRC report."""
+    counts = dict.fromkeys(_FILL_CONNECTIVITY_MEASURES, 0)
+    counts["unconnected_items"] = len(report.get("unconnected_items") or [])
+    for v in report.get("violations") or []:
+        if not isinstance(v, dict):
+            continue
+        t = v.get("type")
+        if t in counts and t != "unconnected_items" and v.get("severity") != "ignore":
+            counts[t] += 1
+    return counts
+
+
+def _fill_regressions(carved: dict[str, int], uncarved: dict[str, int]) -> list[str]:
+    """One line per measure where the carved fill is worse than KiCad's."""
+    return [
+        f"{m}: {carved[m]} with the carve vs {uncarved[m]} on KiCad's fill"
+        for m in _FILL_CONNECTIVITY_MEASURES
+        if carved[m] > uncarved[m]
+    ]
+
+
+def _zone_identities(doc) -> dict[str, str]:
+    """Map every zone's UUID to a ``<net> on <layers>`` label."""
+    out: dict[str, str] = {}
+    for zone in doc.find_all("zone"):
+        uuid_node = zone.find("uuid")
+        uuid = uuid_node.get_string(0) if uuid_node is not None else None
+        if not uuid:
+            continue
+        net_name = zone.find("net_name")
+        net = net_name.get_string(0) if net_name is not None else None
+        if not net:
+            net_node = zone.find("net")
+            if net_node is not None:
+                net = net_node.get_string(1) or net_node.get_string(0)
+        layers_node = zone.find("layers")
+        if layers_node is None:
+            layers_node = zone.find("layer")
+        layers = "?"
+        if layers_node is not None:
+            layers = " ".join(str(a) for a in layers_node.get_atoms()) or "?"
+        out[str(uuid)] = f"zone {net or '?'} on {layers}"
+    return out
+
+
+def _foreign_clearance_conflicts(report: dict, zone_uuids: set[str]) -> dict[str, list[str]]:
+    """Zones KiCad's fill puts too close to foreign copper (Issue #8053).
+
+    Returns ``{zone_uuid: [description of each foreign item]}`` for every
+    ``clearance`` / ``hole_clearance`` finding between a zone and a non-zone
+    item (pad, via, track).  Zone-to-zone findings are left out: the carve
+    only clears pads and vias.
+    """
+    out: dict[str, list[str]] = {}
+    for v in report.get("violations") or []:
+        if not isinstance(v, dict) or v.get("type") not in _FOREIGN_CLEARANCE_TYPES:
+            continue
+        if v.get("severity") == "ignore":
+            continue
+        items = [i for i in v.get("items") or [] if isinstance(i, dict)]
+        zones = [i for i in items if i.get("uuid") in zone_uuids]
+        others = [i for i in items if i.get("uuid") not in zone_uuids]
+        if not zones or not others:
+            continue
+        for z in zones:
+            for o in others:
+                desc = str(o.get("description") or o.get("uuid") or "?")
+                bucket = out.setdefault(str(z["uuid"]), [])
+                if desc not in bucket:
+                    bucket.append(desc)
+    return out
+
+
+def _transplant_zone_fills(target_doc, source_doc, zone_uuids: set[str]) -> int:
+    """Copy ``source_doc``'s ``filled_polygon`` nodes into ``target_doc`` for ``zone_uuids``."""
+
+    def _by_uuid(doc) -> dict:
+        out = {}
+        for zone in doc.find_all("zone"):
+            u = zone.find("uuid")
+            if u is not None and u.get_string(0):
+                out[str(u.get_string(0))] = zone
+        return out
+
+    src = _by_uuid(source_doc)
+    moved = 0
+    for uuid, zone in _by_uuid(target_doc).items():
+        if uuid not in zone_uuids or uuid not in src:
+            continue
+        fills = [c for c in src[uuid].children if c.name == "filled_polygon"]
+        idx = next(
+            (i for i, c in enumerate(zone.children) if c.name == "filled_polygon"),
+            len(zone.children),
+        )
+        zone.children = [c for c in zone.children if c.name != "filled_polygon"]
+        zone.children[idx:idx] = fills
+        moved += 1
+    return moved
+
+
+def _verify_foreign_pad_carve(
+    pcb_path: Path,
+    kicad_cli: Path,
+    carved_report: dict | None = None,
+) -> tuple[list[str], list[str]]:
+    """Keep the #3711 carve only where it fixes a real clearance (Issue #8053).
+
+    The carve subtracts foreign-net antipads from KiCad's saved fill.  It is
+    more conservative than KiCad's filler, so where KiCad's fill already
+    clears foreign copper it fixes nothing and can still leave slivers or
+    cut the pour (chorus v25: ``copper_sliver`` 5 vs 0 on KiCad's own fill),
+    which ``kct export`` then refuses (#6078).  ``pcb_path`` holds the
+    carved fill on entry.
+
+    1. If the carved fill shows no unconnected item, ``isolated_copper`` or
+       ``copper_sliver``, keep it (one read-only DRC, reused from
+       remediation when ``carved_report`` is given).
+    2. Otherwise refill in place with KiCad (the un-carved fill).  If the
+       carved fill is no worse than that, restore the carve.
+    3. If it is worse and KiCad's fill has no zone-to-foreign-copper
+       clearance finding, keep KiCad's fill: the carve is rolled back.
+    4. Otherwise keep the carve only on the zones DRC names, and re-check.
+       If that still regresses, the carve is needed for clearance *and*
+       splits the pour: return one conflict line per such zone.
+
+    Returns ``(notes, conflicts)``.  Never raises except for a missing
+    shapely; any kicad-cli failure leaves the carved fill as it was.
+    """
+    from kicad_tools.core.sexp_file import save_pcb
+    from kicad_tools.sexp import parse_file, parse_string
+
+    try:
+        if carved_report is None:
+            carved_report = _kicad_drc_report(pcb_path, kicad_cli, refill=False)
+            if carved_report is None:
+                return [], []
+        carved = _fill_connectivity_counts(carved_report)
+        if not any(carved.values()):
+            return [], []
+
+        carved_text = pcb_path.read_text()
+        uncarved_report = _kicad_drc_report(pcb_path, kicad_cli, refill=True)
+        if uncarved_report is None:
+            pcb_path.write_text(carved_text)
+            return [], []
+        uncarved = _fill_connectivity_counts(uncarved_report)
+        regressions = _fill_regressions(carved, uncarved)
+        if not regressions:
+            pcb_path.write_text(carved_text)
+            return [], []
+
+        uncarved_doc = parse_file(pcb_path)
+        zones = _zone_identities(uncarved_doc)
+        needed = _foreign_clearance_conflicts(uncarved_report, set(zones))
+        why = "; ".join(regressions)
+        if not needed:
+            return [
+                "Foreign-pad clearance carve (#3711) rolled back: KiCad's fill already "
+                f"meets foreign-pad clearance and the carve split it ({why})."
+            ], []
+
+        carved_doc = parse_string(carved_text)
+        _transplant_zone_fills(uncarved_doc, carved_doc, set(needed))
+        save_pcb(uncarved_doc, pcb_path)
+        partial_report = _kicad_drc_report(pcb_path, kicad_cli, refill=False)
+        if partial_report is None:
+            return [], []
+        partial = _fill_connectivity_counts(partial_report)
+        kept = ", ".join(zones[u] for u in needed)
+        if not _fill_regressions(partial, uncarved):
+            note = (
+                f"Foreign-pad clearance carve (#3711) kept only on {kept}, where KiCad's "
+                f"fill violates foreign-pad clearance; rolled back elsewhere ({why})."
+            )
+            return [note], []
+        conflicts = [
+            f"{zones[u]}: KiCad's fill violates clearance to {', '.join(pads)}, "
+            f"and the carve that fixes it splits the pour"
+            for u, pads in needed.items()
+        ]
+        return [], conflicts
+    except ModuleNotFoundError:
+        raise
+    except Exception:
+        # Never let verification abort a successful fill.
+        return [], []
 
 
 def _run_fill_zones_native(
