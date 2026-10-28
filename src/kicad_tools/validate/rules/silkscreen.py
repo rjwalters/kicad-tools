@@ -572,14 +572,17 @@ def _text_bbox_geometry(
     font_size: tuple[float, float],
     font_thickness: float,
     center: tuple[float, float],
+    angle: float = 0.0,
 ) -> _Geometry | None:
     """Build a shapely box approximating a stroked-text bounding box.
 
-    The box is centered on ``center`` (board coordinates).  Rotation /
-    justification are modeled only to first order (axis-aligned box), which is
-    sufficient to reproduce the kicad-cli silk findings.  Returns ``None`` for
-    empty text.
+    The box is centered on ``center`` (board coordinates).  Justification is
+    modeled only to first order (centered).  ``angle`` is the absolute
+    board-frame text angle in KiCad degrees (positive turns toward negative
+    board y); the default ``0`` yields the axis-aligned box.  Returns ``None``
+    for empty text.
     """
+    from shapely.affinity import rotate  # type: ignore[import-untyped]
     from shapely.geometry import box  # type: ignore[import-untyped]
 
     n = len(text)
@@ -588,12 +591,13 @@ def _text_bbox_geometry(
     width = font_size[0] * n * _TEXT_CHAR_WIDTH_FACTOR + font_thickness
     height = font_size[1] + font_thickness
     cx, cy = center
-    return box(
+    geom = box(
         cx - width / 2.0,
         cy - height / 2.0,
         cx + width / 2.0,
         cy + height / 2.0,
     )
+    return rotate(geom, -angle, origin=center) if angle else geom
 
 
 def _poly_geometry(
@@ -857,7 +861,11 @@ def _iter_silk_elements(
                 continue
             center = transform(fp_text.position)
             geom = _text_bbox_geometry(
-                fp_text.text, fp_text.font_size, fp_text.font_thickness, center
+                fp_text.text,
+                fp_text.font_size,
+                fp_text.font_thickness,
+                center,
+                fp_text.rotation,
             )
             if geom is None:
                 continue

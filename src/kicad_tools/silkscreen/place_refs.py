@@ -140,10 +140,7 @@ def _oriented_text_geometry(
     the footprint orientation before its position transform). Do not add the
     footprint angle again. KiCad positive angles turn toward negative board y.
     """
-    from shapely.affinity import rotate  # type: ignore[import-untyped]
-
-    geom = _text_bbox_geometry(text, font_size, thickness, center)
-    return rotate(geom, -angle, origin=center) if geom is not None else None
+    return _text_bbox_geometry(text, font_size, thickness, center, angle)
 
 
 def _set_text_at(ref_node: SExp, x: float, y: float, angle: float) -> None:
