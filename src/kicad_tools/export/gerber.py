@@ -1012,7 +1012,11 @@ class GerberExporter:
                 "Saved zone fill is split where a refill is not; refusing to export Gerbers",
                 context={"pcb": str(self.pcb_path), "saved_fill": "; ".join(check.regressions)},
                 suggestions=[
-                    f"Re-run `kct zones fill {self.pcb_path}` to rewrite the fill, then export again",
+                    "Refill with KiCad's own filler and save the board: "
+                    f"`kicad-cli pcb drc --refill-zones --save-board {self.pcb_path}` "
+                    "(or pcbnew.ZONE_FILLER via KiCad's bundled Python), then export again",
+                    "`kct zones fill` writes the fill this check can reject, so re-running it "
+                    "does not help",
                     "Compare `kicad-cli pcb drc` with and without --refill-zones on the board",
                 ],
             )

@@ -8,11 +8,13 @@ import pytest
 
 from kicad_tools.cli.runner import find_kicad_cli
 from kicad_tools.cli.zones_cmd import main
+from kicad_tools.drc.geometric import SavedFillCheck
 
 # Patch targets -- _run_fill imports from .runner at call time, so we patch
 # the names in the runner module itself.
 _FIND_CLI = "kicad_tools.cli.runner.find_kicad_cli"
 _RUN_FILL = "kicad_tools.cli.runner.run_fill_zones"
+_CHECK_SAVED_FILL = "kicad_tools.drc.geometric.check_saved_fill"
 _SUBPROCESS_RUN = "kicad_tools.cli.runner.subprocess.run"
 _HAS_FILL_ZONES = "kicad_tools.cli.runner._kicad_cli_has_fill_zones"
 _DRC_SUPPORTS_REFILL = "kicad_tools.cli.runner._kicad_drc_supports_refill"
@@ -1860,6 +1862,7 @@ class TestAddFillPipeline:
         with (
             patch(_FIND_CLI, return_value=Path("/usr/bin/kicad-cli")),
             patch(_RUN_FILL, return_value=mock_result) as mock_fill,
+            patch(_CHECK_SAVED_FILL, return_value=SavedFillCheck(ran=True)),
         ):
             fill_ret = main(["fill", str(tmp_pcb)])
         assert fill_ret == 0
