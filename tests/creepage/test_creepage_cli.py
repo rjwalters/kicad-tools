@@ -17,6 +17,7 @@ from kicad_tools.cli.commands.creepage import run_creepage_command
 from kicad_tools.cli.parser import create_parser
 
 from .fixtures import (
+    board_attach_zone_source,
     board_benign_suspect_names_source,
     board_mains_named_source,
     board_no_hv_source,
@@ -561,3 +562,66 @@ def test_census_threshold_defaults_to_thirty(tmp_path):
     # The flag default matches optimize-placement --hv-threshold (30.0).
     args = create_parser().parse_args(["creepage", "board.kicad_pcb", "--min", "1.5"])
     assert args.census_threshold == 30.0
+
+
+# ---------------------------------------------------------------------------
+# #8028 attach-zone waiver: census agrees with the router's #4506 exemption.
+# ---------------------------------------------------------------------------
+
+
+def _attach_argv(pcb, ncm, *extra):
+    return [
+        "creepage",
+        str(pcb),
+        "--net-class-map",
+        str(ncm),
+        "--min",
+        "1.0",
+        "--format",
+        "json",
+        *extra,
+    ]
+
+
+def _gnd_row(payload):
+    return next(r for r in payload["pairs"] if r["net_b"] == "GND" and r["kind"] == "conductor")
+
+
+def test_attach_zone_off_by_default_stays_board_fail(tmp_path, capsys):
+    pcb = _write(tmp_path, board_attach_zone_source(outside_shortfall=False))
+    rc = _run(_attach_argv(pcb, _hv_map_file(tmp_path)))
+    payload = json.loads(capsys.readouterr().out)
+    row = _gnd_row(payload)
+    assert rc != 0
+    assert row["relationship"] == "board"
+    assert "residual_pass" not in row
+    assert payload["waived_count"] == 0
+
+
+def test_attach_zone_waived_when_residual_passes(tmp_path, capsys):
+    pcb = _write(tmp_path, board_attach_zone_source(outside_shortfall=False))
+    rc = _run(_attach_argv(pcb, _hv_map_file(tmp_path), "--waive-attach-zone"))
+    payload = json.loads(capsys.readouterr().out)
+    row = _gnd_row(payload)
+    assert row["relationship"] == "attach_zone"
+    assert row["waived"] is True
+    assert row["residual_pass"] is True
+    assert payload["waived_count"] == 1
+    # raw verdict stays waiver-blind (kct audit); only gate_passed/exit honour it.
+    assert payload["passed"] is False
+    assert payload["gate_passed"] is True
+    assert rc == 0
+
+
+def test_attach_zone_does_not_mask_shortfall_outside_zone(tmp_path, capsys):
+    pcb = _write(tmp_path, board_attach_zone_source(outside_shortfall=True))
+    rc = _run(_attach_argv(pcb, _hv_map_file(tmp_path), "--waive-attach-zone"))
+    payload = json.loads(capsys.readouterr().out)
+    row = _gnd_row(payload)
+    assert row["relationship"] == "attach_zone"
+    assert row["residual_pass"] is False
+    assert "waived" not in row
+    assert row["residual_creepage_mm"] == pytest.approx(0.8, abs=0.01)
+    assert row["residual_witness_mm"][0] > 25  # board-relative: at P3/P4, not Q1 (x~10)
+    assert payload["gate_passed"] is False
+    assert rc != 0

@@ -35,6 +35,7 @@ from __future__ import annotations
 import heapq
 import math
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -289,12 +290,37 @@ class CreepagePair:
     # pin pitch), which the board layout cannot change -- per IEC 60664-1 that is
     # functional insulation governed by the component's own rating, not the
     # board's creepage tables.
-    relationship: str = "board"  # "board" | "same_footprint"
+    relationship: str = "board"  # "board" | "same_footprint" | "attach_zone"
     # Set True only when the operator passes ``--waive-same-footprint`` AND this
     # pair is ``relationship == "same_footprint"``.  A waived pair is still listed
     # (annotated WAIVED) but is excluded from :attr:`CreepageReport.gate_passed`.
     # It NEVER affects the raw :attr:`CreepageReport.passed` (the safety gate).
     waived: bool = False
+    # Attach-zone residual (#8028).  Only set when ``relationship ==
+    # "attach_zone"``: the pair's minimum measured with the copper inside the
+    # router's #4506 attach zone(s) clipped away, across every layer the zone
+    # covers (a waived witness must never mask a failing one elsewhere on the
+    # same pair, softstart#88).  ``residual_creepage_mm is None`` means no
+    # copper of one net remains outside the zone, i.e. nothing left to fail.
+    residual_clearance_mm: float | None = None
+    residual_creepage_mm: float | None = None
+    residual_layer: str | None = None
+    residual_witness_mm: tuple[float, float] | None = None
+
+    @property
+    def residual_passed(self) -> bool:
+        """``True`` when the copper OUTSIDE the attach zone still clears its bounds.
+
+        Vacuously ``True`` when no copper remains outside the zone.  Only
+        meaningful for ``relationship == "attach_zone"`` rows.
+        """
+        if self.residual_creepage_mm is None:
+            return True
+        if self.residual_creepage_mm < self.governing_creepage_mm - _PASS_TOLERANCE:
+            return False
+        if self.required_clearance_mm is not None and self.residual_clearance_mm is not None:
+            return self.residual_clearance_mm >= self.required_clearance_mm - _PASS_TOLERANCE
+        return True
 
     @property
     def governing_creepage_mm(self) -> float:
@@ -375,6 +401,16 @@ class CreepagePair:
         }
         if self.waived:
             base["waived"] = True
+        if self.relationship == "attach_zone":
+            base["residual_pass"] = self.residual_passed
+            if self.residual_creepage_mm is not None:
+                base["residual_creepage_mm"] = round(self.residual_creepage_mm, 4)
+            if self.residual_clearance_mm is not None:
+                base["residual_clearance_mm"] = round(self.residual_clearance_mm, 4)
+            if self.residual_layer is not None:
+                base["residual_layer"] = self.residual_layer
+            if self.residual_witness_mm is not None:
+                base["residual_witness_mm"] = [round(v, 4) for v in self.residual_witness_mm]
         if self.required_creepage_mm is None:
             return base
         # Phase-2 (standard) mode: attach the derived requirements + provenance.
@@ -770,6 +806,76 @@ class _FootprintPadIndex:
             if abs(min_dist - clearance_mm) <= _PASS_TOLERANCE:
                 return "same_footprint"
         return "board"
+
+
+def _attach_zone_residual(
+    layer_unions: dict[str, dict[int, Any]],
+    zones: Sequence[Any],
+    net_a: int,
+    net_b: int,
+    name_a: str,
+    name_b: str,
+    obstacles: list[Any],
+) -> tuple[float | None, float | None, str | None, tuple[float, float] | None]:
+    """Residual ``(clearance, creepage, layer, witness)`` outside the attach zones (#8028).
+
+    On every layer the zones cover for BOTH nets, the zone bbox is clipped out
+    of each net's copper and the pair is re-measured; the minimum over layers
+    is returned.  ``creepage``/``clearance`` are ``None`` when no copper of one
+    net remains outside the zone on any layer.
+    """
+    from shapely.geometry import box
+    from shapely.ops import nearest_points, unary_union
+
+    best: tuple[float, float, str, tuple[float, float]] | None = None
+    min_clearance: float | None = None
+    for layer_name, unions in layer_unions.items():
+        geom_a = unions.get(net_a)
+        geom_b = unions.get(net_b)
+        if geom_a is None or geom_b is None:
+            continue
+        boxes = [
+            box(z.min_x, z.min_y, z.max_x, z.max_y)
+            for z in zones
+            if z.covers_layer(name_a, layer_name)
+            and z.covers_layer(name_b, layer_name)
+            and _norm_net_key(name_a) in z.net_names
+            and _norm_net_key(name_b) in z.net_names
+        ]
+        if boxes:
+            clip = unary_union(boxes)
+            geom_a = geom_a.difference(clip)
+            geom_b = geom_b.difference(clip)
+        if geom_a.is_empty or geom_b.is_empty:
+            continue
+        clearance, creepage = surface_path_length(geom_a, geom_b, obstacles, _bridged=True)
+        if min_clearance is None or clearance < min_clearance:
+            min_clearance = clearance
+        if best is None or creepage < best[1]:
+            pa, pb = nearest_points(geom_a, geom_b)
+            best = (
+                clearance,
+                creepage,
+                layer_name,
+                ((pa.x + pb.x) / 2.0, (pa.y + pb.y) / 2.0),
+            )
+    if best is None:
+        return None, None, None, None
+    return min_clearance, best[1], best[2], best[3]
+
+
+def _witness_in_attach_zone(
+    geom_a: Any, geom_b: Any, zones: Sequence[Any], name_a: str, name_b: str, layer_name: str
+) -> bool:
+    """True when BOTH nearest points of the binding gap lie in one exempting zone."""
+    from shapely.ops import nearest_points
+
+    pa, pb = nearest_points(geom_a, geom_b)
+    return any(
+        z.exempts(pa.x, pa.y, name_a, name_b, layer_name)
+        and z.exempts(pb.x, pb.y, name_a, name_b, layer_name)
+        for z in zones
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1213,6 +1319,7 @@ def compute_creepage_census(
     edge_voltage: float = 0.0,
     overvoltage_category: str = "II",
     insulation: str = DEFAULT_INSULATION,
+    attach_zones: Sequence[Any] | None = None,
 ) -> CreepageReport:
     """Build the full HV creepage/clearance census for a board.
 
@@ -1245,6 +1352,17 @@ def compute_creepage_census(
     per-pair clearance derivation (issue #7057); ``insulation`` (default
     ``"reinforced"``) selects the basic / supplementary / reinforced rule for
     both the per-pair creepage and clearance (issue #7082).
+
+    Attach zones (#8028)
+    --------------------
+    When ``attach_zones`` (the router's own
+    :func:`~kicad_tools.router.pairwise_clearance.build_attach_zones` output) is
+    supplied, a ``board`` conductor pair whose binding gap lies inside a zone
+    that terminates both nets on that layer is classified ``attach_zone`` and
+    carries a *residual*: the pair re-measured with the zone's copper clipped
+    away on every layer it covers.  The CLI waives such a row only when the
+    residual passes, so a waived witness never masks a failing one elsewhere on
+    the same pair (softstart#88).  ``None`` (default) leaves the census unchanged.
 
     In single-voltage mode (no ``voltage_map``) the derived requirement is
     identical for every pair (it depends only on the standard + voltage + PD +
@@ -1440,6 +1558,28 @@ def compute_creepage_census(
         net_a_name = hv_nets[hv_num]
         net_b_name = number_to_name.get(other_num, f"net{other_num}")
         relationship = fp_index.relationship(layer_name, hv_num, other_num, clearance)
+        residual: dict[str, Any] = {}
+        if attach_zones and relationship == "board":
+            lu = layer_unions[layer_name]
+            if _witness_in_attach_zone(
+                lu[hv_num], lu[other_num], attach_zones, net_a_name, net_b_name, layer_name
+            ):
+                r_clr, r_creep, r_layer, r_wit = _attach_zone_residual(
+                    layer_unions,
+                    attach_zones,
+                    hv_num,
+                    other_num,
+                    net_a_name,
+                    net_b_name,
+                    obstacles,
+                )
+                relationship = "attach_zone"
+                residual = {
+                    "residual_clearance_mm": r_clr,
+                    "residual_creepage_mm": r_creep,
+                    "residual_layer": r_layer,
+                    "residual_witness_mm": r_wit,
+                }
         if map_mode:
             req_creep, req_clear, prov = _pair_requirement(net_a_name, net_b_name)
             report.pairs.append(
@@ -1454,6 +1594,7 @@ def compute_creepage_census(
                     clearance_mm=clearance,
                     creepage_mm=creepage,
                     relationship=relationship,
+                    **residual,
                 )
             )
         else:
@@ -1466,6 +1607,7 @@ def compute_creepage_census(
                     clearance_mm=clearance,
                     creepage_mm=creepage,
                     relationship=relationship,
+                    **residual,
                 )
             )
 

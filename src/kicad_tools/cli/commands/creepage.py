@@ -209,6 +209,13 @@ def run_creepage_command(args) -> int:
             getattr(args, "census_threshold", 30.0) if voltage_map is not None else None
         ),
     )
+    # Attach-zone waiver (#8028): zones come from the SAME builder the router's
+    # #4506 exemption uses, so search, route gate and census agree on geometry.
+    attach_zones = None
+    if getattr(args, "waive_attach_zone", False):
+        from kicad_tools.router.pairwise_clearance import build_attach_zones
+
+        attach_zones = build_attach_zones(pcb.footprints)
     try:
         report = compute_creepage_census(
             pcb,
@@ -232,6 +239,7 @@ def run_creepage_command(args) -> int:
             edge_voltage=edge_voltage,
             overvoltage_category=overvoltage_category,
             insulation=insulation,
+            attach_zones=attach_zones,
         )
     except StandardLookupError as e:
         # A per-pair |ΔV| out of the table's range (map mode): fail LOUD, never
@@ -248,6 +256,12 @@ def run_creepage_command(args) -> int:
         for pair in report.pairs:
             if pair.relationship == "same_footprint":
                 pair.waived = True
+    # Attach-zone waiver (#8028): only rows the census classified ``attach_zone``
+    # (flag-gated, see ``attach_zones`` above) and only when the copper outside
+    # the zone still passes; a failing residual keeps the pair FAIL.
+    for pair in report.pairs:
+        if pair.relationship == "attach_zone" and pair.residual_passed:
+            pair.waived = True
 
     # Vacuity guard (issue #4354): a census that resolves ZERO HV nets is only
     # legitimately "nothing to audit" on a genuinely low-voltage board.  When
@@ -327,6 +341,8 @@ def _result_token(p: CreepagePair) -> str:
 
 def _rel_token(p: CreepagePair) -> str:
     """Compact footprint-relationship token for the census tables (#4403)."""
+    if p.relationship == "attach_zone":
+        return "attach-zn"
     return "same-ftpt" if p.relationship == "same_footprint" else "board"
 
 
@@ -347,14 +363,14 @@ def _print_gate_summary(report: CreepageReport, unit_desc: str) -> None:
         if gate_failures:
             print(
                 f"FAIL (gate): {len(gate_failures)}/{total} board pair(s) fail "
-                f"{unit_desc}; {len(waived)} same-footprint pair(s) WAIVED "
-                "(component-rating residuals -- qualify at the component, not the layout)."
+                f"{unit_desc}; {len(waived)} pair(s) WAIVED "
+                "(same-footprint / attach-zone -- qualify at the component, not the layout)."
             )
         else:
             print(
                 f"PASS (gate): {total - len(waived)}/{total} pair(s) clear "
-                f"{unit_desc}; {len(waived)} same-footprint pair(s) WAIVED "
-                "(component-rating residuals -- qualify at the component, not the layout)."
+                f"{unit_desc}; {len(waived)} pair(s) WAIVED "
+                "(same-footprint / attach-zone -- qualify at the component, not the layout)."
             )
         return
 
