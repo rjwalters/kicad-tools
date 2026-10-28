@@ -1910,6 +1910,22 @@ placement capacity wall, and a definitional mismatch between two gates.
 | T3 | Backward compat: no `--voltage-map` → unchanged routes | **MET** | `test_no_voltage_map_route_leaves_grid_dormant` + this run's control arm (dormant, no banner, 7/7 in 32 s) |
 | **T4** | **softstart rev-C: route completes, 0 board-level census fails** | **FAILS — re-scored, and no longer blocked on a correctness defect** | **50/82 nets (was 49); 25 board-level fails after step 2 (was 57), 35 after step 3 (was 42); 2 router-gate leaks (was 3); 1922 cross-pairs (was 1823). The sign collapse is fixed and did *not* grow the leak set. What remains: 9 pour-scope + 5 sub-`--hv-threshold` + 12 pad/placement fails and 32 unrouted nets — none of them a Phase 2 search defect** |
 
+## Router/census agreement on the attach zone (#8028)
+
+`kct route --voltage-map` exempts copper inside a rated footprint's #4506
+attach zone (the pad-field bbox of its connected pads, per net per copper
+layer), but the census used to report that same router-legal copper as a
+`board`-level fail. `kct creepage --waive-attach-zone` closes the gap: it builds
+the zones with the router's own `build_attach_zones()` and classifies a pair
+whose binding gap lies inside a zone that terminates both nets on that layer as
+`attach_zone`. The waiver is per witness, not per pair (softstart#88): each
+such row carries a *residual* -- the pair re-measured with the zone's copper
+clipped away on every layer it covers -- and is WAIVED only if the residual
+still clears the requirement. A failing residual keeps the pair FAIL and reports
+`residual_creepage_mm` / `residual_witness_mm`. The flag is off by default and
+only moves `gate_passed` and the exit code; the raw `passed` and `kct audit`
+stay waiver-blind.
+
 ## Reproducing
 
 Everything is deterministic given the fixture and this repo at `090086b4`
