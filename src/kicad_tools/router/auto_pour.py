@@ -606,6 +606,42 @@ def auto_skip_pour_nets(
     return [], []
 
 
+def _remove_zones_reaching_no_pads(pcb_path: Path, net_names: list[str]) -> dict[str, str]:
+    """Remove freshly synthesized zones whose outline contains none of their net's pads.
+
+    Pad positions are tested against the zone polygon in the XY plane only
+    (an inner-layer pour reaches SMD pads through vias).  A net with no
+    pads, or one whose zone reaches at least one pad, is left alone.
+
+    Returns:
+        ``{net_name: layer}`` for each net whose zone was removed.
+    """
+    from kicad_tools.core.geometry import point_in_polygon
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.zones.generator import _net_pad_positions_absolute
+
+    if not net_names:
+        return {}
+    pcb = PCB.load(str(pcb_path))
+    removed: dict[str, str] = {}
+    for name in net_names:
+        zones = [z for z in pcb.zones if z.net_name == name and z.polygon]
+        # Zone polygons are board-relative; the helper returns sheet-absolute
+        # pad positions, so subtract the board origin to compare like with like.
+        ox, oy = pcb.board_origin
+        pads = [(x - ox, y - oy) for x, y in _net_pad_positions_absolute(pcb, name)]
+        if not zones or not pads:
+            continue
+        reached = any(
+            point_in_polygon(x, y, z.polygon, boundary_inside=True) for z in zones for x, y in pads
+        )
+        if not reached:
+            removed[name] = zones[0].layer
+    if removed:
+        _remove_zones_for_nets(pcb_path, set(removed))
+    return removed
+
+
 def auto_pour_if_missing(
     pcb_path: Path,
     *,
@@ -793,7 +829,16 @@ def auto_pour_if_missing(
         skipped_out=skipped,
     )
 
+    # Issue #8051: a synthesized zone that reaches none of its net's pads
+    # gives the net no copper, yet ``auto_skip_pour_nets`` would still see
+    # the zone and drop the net from routing.  Withdraw such zones so the
+    # router routes the net as traces (the same handling as #5864).
     skipped_nets = {err.failing_net for err in skipped}
+    uncovered = _remove_zones_reaching_no_pads(
+        pcb_path, [name for name, _ in new_pour_nets if name not in skipped_nets]
+    )
+    count -= len(uncovered)
+    skipped_nets |= set(uncovered)
     names = [name for name, _ in new_pour_nets if name not in skipped_nets]
     if not quiet and count > 0:
         print(f"Auto-pour: created {count} zone(s) for {', '.join(sorted(names))}")
@@ -805,6 +850,12 @@ def auto_pour_if_missing(
                 f"{err.layer} -- its pad region is fully covered by "
                 f"higher-priority zone(s) ({covering}), so the zone would "
                 f"receive zero copper; routing this net as traces instead"
+            )
+        for net, layer in sorted(uncovered.items()):
+            print(
+                f"Auto-pour: WARNING skipped pour for '{net}' on {layer} -- "
+                f"the zone reaches none of its pads, so it would provide no "
+                f"copper; routing this net as traces instead"
             )
 
     # ------------------------------------------------------------------
