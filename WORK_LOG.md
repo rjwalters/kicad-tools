@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-28
 
+- **PR #8044**: feat: honour _pair_bounds device-bounded pair ΔV in voltage maps
+- **Issue #8043** (closed): voltage-map: device-bounded pair ΔV (_pair_bounds) — worst-case intervals make a TO-220 drain unroutable (300 V judged, ≤100 V physical)
 - **PR #8040**: fix: refuse .kicad_dru content KiCad silently drops and flag netclass-only cross-gates
 - **Issue #8039** (closed): kicad_dru sidecar silently ignored by KiCad 10 when hand-written content has ';' comments or regex conditions — cross-gate runs netclass-only
 - **PR #8037**: chore: point ecosystem registry at BackplaneWorks org for Backplane and KiStack
