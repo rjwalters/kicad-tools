@@ -115,7 +115,12 @@ Examples:
     parser.add_argument(
         "--drc-aware",
         action="store_true",
-        help="Enable DRC-aware mode: roll back per-net optimizations that increase violations",
+        help=(
+            "Enable DRC-aware mode: roll back per-net optimizations that increase violations. "
+            "Gated checks: clearances, dimensions, and trace/via/pad vs foreign-net zone fill; "
+            "growth in pad or short categories forces rollback, and if baseline cannot be "
+            "restored all changes are reverted"
+        ),
     )
     parser.add_argument(
         "--mfr",
@@ -318,6 +323,11 @@ Examples:
                 f"  DRC errors:      {stats.drc_errors_before:>6} -> "
                 f"{stats.drc_errors_after:>6}  {suffix}"
             )
+            if stats.drc_failsafe_reverted:
+                print(
+                    "  WARNING: per-net rollback could not restore the DRC baseline; "
+                    "all changed nets were reverted"
+                )
         print()
 
         if args.verbose and stats.per_net:

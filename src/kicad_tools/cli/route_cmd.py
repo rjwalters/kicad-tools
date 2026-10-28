@@ -1959,13 +1959,16 @@ def _finalize_committed_copper_or_demote(
     demoted = router.revalidate_committed_copper_or_demote()
     if demoted and not quiet:
         # Issue #6489: an authored/class-floor demotion is not a cross-net short.
+        # Issue #8029: it strips only the offending connection's copper, so
+        # these are nets with demoted copper -- left partial, or unrouted when
+        # nothing else of the net was routed.
         floor = set(getattr(router, "last_floor_demoted_nets", None) or [])
         shorts = sorted(set(demoted) - floor)
         if floor:
             print(
-                f"  ⚠ Post-optimize backstop demoted {len(floor)} net(s) whose "
-                f"copper is below the authored/class clearance minimum: "
-                f"{sorted(floor)}"
+                f"  ⚠ Post-optimize backstop demoted copper of {len(floor)} net(s) "
+                f"below the authored/class clearance minimum (the offending "
+                f"connection only): {sorted(floor)}"
             )
         if shorts:
             print(

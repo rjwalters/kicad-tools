@@ -6,88 +6,20 @@ a hooked one whose trunk degenerates, so the log said
 ``trunk-offset-degenerate`` while later hook-free starts routed a trunk and
 failed at the leg (``leg-pad-escape-end``).  This is a diagnostics change only:
 the ranking picks which reason is REPORTED, never which copper is routed.
+
+The ranking helpers themselves are unit-tested in
+``tests/router/pairplan/test_hybrid.py``; these tests drive the real latches
+through the ring fixture.
 """
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
-from kicad_tools.router.lattice.pathfinder import (
-    LatticePathfinder,
-    _further_hybrid_decline,
-    _hybrid_decline_rank,
-)
+from kicad_tools.router.lattice.pathfinder import LatticePathfinder
 from tests.router.lattice.test_pair_hybrid_6446 import _board, _route, _signature
-
-_PRE_TRUNK = (
-    "pair-hybrid-anchor",
-    "pair-hybrid-trunk-offset-degenerate",
-    "pair-hybrid-trunk-intra-clearance",
-    "pair-hybrid-trunk-no-path",
-    "pair-hybrid-trunk-short",
-    "pair-hybrid-trunk-pad-class",
-    "pair-hybrid-deadline",
-    "pair-hybrid-no-trunk-start",
-)
-_POST_TRUNK = (
-    "pair-hybrid-leg-pad-escape-end",
-    "pair-hybrid-leg-no-path",
-    "pair-hybrid-leg-end",
-    "pair-hybrid-leg-pad-class",
-    "pair-hybrid-via-limit",
-    "pair-hybrid-junction",
-)
-
-
-def _furthest(reasons: list[str]) -> str:
-    """Fold ``reasons`` the way both latches do."""
-    best = "pair-hybrid-no-path"
-    for why in reasons:
-        if _further_hybrid_decline(best, why):
-            best = why
-    return best
-
-
-def test_rank_orders_placeholder_trunk_leg_budget() -> None:
-    assert _hybrid_decline_rank("pair-hybrid-no-path") == -1
-    for r in _PRE_TRUNK:
-        assert _hybrid_decline_rank(r) == 0, r
-    for r in _POST_TRUNK:
-        assert _hybrid_decline_rank(r) == 1, r
-    assert _hybrid_decline_rank("pair-hybrid-leg-budget") == 2
-    # The trunk's own no-path is a trunk decline, not the placeholder.
-    assert _hybrid_decline_rank("pair-hybrid-trunk-no-path") == 0
-
-
-@pytest.mark.parametrize("leg", _POST_TRUNK)
-@pytest.mark.parametrize("trunk", _PRE_TRUNK)
-def test_leg_stage_beats_trunk_stage_in_either_order(trunk: str, leg: str) -> None:
-    assert _furthest([trunk, leg]) == leg
-    assert _furthest([leg, trunk]) == leg
-
-
-@pytest.mark.parametrize("other", _PRE_TRUNK + _POST_TRUNK)
-def test_leg_budget_beats_every_other_reason(other: str) -> None:
-    assert _furthest([other, "pair-hybrid-leg-budget"]) == "pair-hybrid-leg-budget"
-    assert _furthest(["pair-hybrid-leg-budget", other]) == "pair-hybrid-leg-budget"
-
-
-def test_ties_keep_the_first_seen() -> None:
-    assert (
-        _furthest(["pair-hybrid-trunk-offset-degenerate", "pair-hybrid-trunk-intra-clearance"])
-        == "pair-hybrid-trunk-offset-degenerate"
-    )
-    assert (
-        _furthest(["pair-hybrid-leg-pad-escape-end", "pair-hybrid-leg-no-path"])
-        == "pair-hybrid-leg-pad-escape-end"
-    )
-    assert not _further_hybrid_decline("pair-hybrid-leg-budget", "pair-hybrid-leg-budget")
-
-
-def test_any_real_reason_replaces_the_placeholder() -> None:
-    for r in _PRE_TRUNK + _POST_TRUNK + ("pair-hybrid-leg-budget",):
-        assert _further_hybrid_decline("pair-hybrid-no-path", r), r
-    assert not _further_hybrid_decline("pair-hybrid-no-path", "pair-hybrid-no-path")
 
 
 def _script_declines(monkeypatch: pytest.MonkeyPatch, script: list[str]) -> list[str]:
@@ -125,8 +57,7 @@ def test_the_end_note_names_the_furthest_reason_and_its_start(
     assert "trunk-offset-degenerate" not in log
     # The note names the THIRD start tried, the one that got to the leg.
     start_text, _layer = seen[2].split("|")
-    assert f"(leg-pad-escape-end at {start_text}" in log, log
-    assert " on F.Cu)" in log or " on B.Cu)" in log, log
+    assert re.search(rf"\(leg-pad-escape-end at (F|B)\.Cu {re.escape(start_text)}\)", log), log
 
 
 def test_trunk_only_declines_keep_the_first_reason(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -139,7 +70,7 @@ def test_trunk_only_declines_keep_the_first_reason(monkeypatch: pytest.MonkeyPat
     log = pf.pair_hybrid_log[pc.key]
     assert log.startswith("hybrid declined (hybrid-trunk-offset-degenerate): "), log
     start_text, _layer = seen[0].split("|")
-    assert f"(trunk-offset-degenerate at {start_text}" in log, log
+    assert re.search(rf"\(trunk-offset-degenerate at (F|B)\.Cu {re.escape(start_text)}\)", log), log
 
 
 def test_routed_copper_is_unchanged_by_the_ranking() -> None:
