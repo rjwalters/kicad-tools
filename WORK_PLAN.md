@@ -29,27 +29,25 @@ _None._
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-- **#8008**: chore: ecosystem registry: Backplane and KiStack moved to BackplaneWorks org
-- **#8027**: route: KiCad-oracle pour completion is pairwise-blind — GND/+3.3V vias land 0.4 mm from 150 V copper under --voltage-map
-- **#8028**: creepage: census has no #4506 attach-zone waiver — router-legal attach copper fails the gate as board-level
+_None._
 
 ## In Progress
 
 Issues currently being built (`loom:building`).
 
-- **#7487**: Re-rule or remove board 03 usb_geometry via-in-pad window exception by 2027-04-19 (#7457 / #7084 Q10)
+- **#8039**: kicad_dru sidecar silently ignored by KiCad 10 when hand-written content has ';' comments or regex conditions — cross-gate runs netclass-only
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-_None._
+- **#8040**: fix: refuse .kicad_dru content KiCad silently drops and flag netclass-only cross-gates
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-- **#8025**: fix: extend board 03 USB via-in-pad exception expiry to 2027-10-19
+_None._
 
 ## Proposed
 
@@ -58,9 +56,7 @@ Issues carrying `loom:curated`.
 - **#5509**: Epic: one clearance kernel — search, commit, and final validation must agree with kicad-cli DRC *(curated)*
 - **#7487**: Re-rule or remove board 03 usb_geometry via-in-pad window exception by 2027-04-19 (#7457 / #7084 Q10) *(curated)*
 - **#7931**: lattice coupled: tolerate near-anchor jog-and-return tails in trim_end_reversals (board 03 USB_D J1.A6→U2.3 trunk-offset-degenerate) *(curated)*
-- **#8008**: chore: ecosystem registry: Backplane and KiStack moved to BackplaneWorks org *(curated)*
-- **#8027**: route: KiCad-oracle pour completion is pairwise-blind — GND/+3.3V vias land 0.4 mm from 150 V copper under --voltage-map *(curated)*
-- **#8028**: creepage: census has no #4506 attach-zone waiver — router-legal attach copper fails the gate as board-level *(curated)*
+- **#8039**: kicad_dru sidecar silently ignored by KiCad 10 when hand-written content has ';' comments or regex conditions — cross-gate runs netclass-only *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -80,11 +76,11 @@ _None._
 | Operator merge-risk holds | 0 |
 | Very important | 0 |
 | Important | 0 |
-| Ready (`loom:issue`) | 3 |
+| Ready (`loom:issue`) | 0 |
 | In Progress (`loom:building`) | 1 |
-| PRs awaiting review | 0 |
-| Approved PRs awaiting merge | 1 |
-| Curated | 6 |
+| PRs awaiting review | 1 |
+| Approved PRs awaiting merge | 0 |
+| Curated | 4 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 4 |
 <!-- guide:plan-body:end -->
