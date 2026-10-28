@@ -19891,23 +19891,35 @@ class Autorouter:
             # on a neighbour off its exact centreline, still connects there.
             return KSegment(x1=x, y1=y, x2=x, y2=y, width=seg.width, layer=segment_shape(seg).layer)
 
-        def _anchored(shape: Any, x: float, y: float) -> bool:
+        def _zone_layers(item: Any) -> range:
+            # A zone only anchors copper it shares a layer with: a segment's own
+            # layer, or the layers a via's barrel spans (all, for a through via).
+            grid = self.grid
+            if hasattr(item, "x1"):
+                idx = grid.layer_to_index(item.layer.value)
+                return range(idx, idx + 1)
+            if item.span_type is None and not item.is_micro:
+                return range(int(grid._is_zone.shape[0]))
+            lo, hi = sorted(grid.layer_to_index(layer.value) for layer in item.layers)
+            return range(lo, hi + 1)
+
+        def _anchored(item: Any, shape: Any, x: float, y: float) -> bool:
             if any(_touches(shape, a) for a in anchors):
                 return True
-            return self._point_on_same_net_zone(net, x, y)
+            return self._point_on_same_net_zone(net, x, y, _zone_layers(item))
 
         def _dangling(item: Any) -> bool:
             others = [o for o in items if id(o) in alive and o is not item]
             if hasattr(item, "x1"):
                 for x, y in ((item.x1, item.y1), (item.x2, item.y2)):
                     probe = _probe(item, x, y)
-                    if _anchored(probe, x, y):
+                    if _anchored(item, probe, x, y):
                         continue
                     if not any(_touches(probe, shapes[id(o)]) for o in others):
                         return True
                 return False
             shape = shapes[id(item)]
-            if _anchored(shape, item.x, item.y):
+            if _anchored(item, shape, item.x, item.y):
                 return False
             return sum(1 for o in others if _touches(shape, shapes[id(o)])) <= 1
 
@@ -19963,14 +19975,18 @@ class Autorouter:
 
         return segment_shape(item) if hasattr(item, "x1") else via_shape(item)
 
-    def _point_on_same_net_zone(self, net: int, x: float, y: float) -> bool:
-        """Whether a same-net zone cell covers ``(x, y)`` on any layer (#8029)."""
+    def _point_on_same_net_zone(self, net: int, x: float, y: float, layers: range) -> bool:
+        """Whether a same-net zone cell covers ``(x, y)`` on one of ``layers`` (#8029).
+
+        ``layers`` are grid layer indices: the probing copper's own layer, or
+        the span of a via.  A zone on another layer does not anchor it.
+        """
         grid = self.grid
         try:
             gx, gy = grid.world_to_grid(x, y)
             is_zone = grid._is_zone
             nets = grid._net
-            for layer_idx in range(int(is_zone.shape[0])):
+            for layer_idx in layers:
                 if bool(is_zone[layer_idx, gy, gx]) and int(nets[layer_idx, gy, gx]) == net:
                     return True
         except (AttributeError, IndexError, TypeError, ValueError):

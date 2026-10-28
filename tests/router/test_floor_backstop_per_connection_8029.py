@@ -201,3 +201,34 @@ def test_backstop_stops_when_stripped_copper_reappears(monkeypatch, capsys):
     assert calls == [A]
     assert bad in router.routes
     assert "could not remove" in capsys.readouterr().out
+
+
+def _zone_cell(router: Autorouter, layer: Layer, x: float, y: float) -> None:
+    gx, gy = router.grid.world_to_grid(x, y)
+    idx = router.grid.layer_to_index(layer.value)
+    router.grid._is_zone[idx, gy, gx] = True
+    router.grid._net[idx, gy, gx] = A
+
+
+def test_zone_on_other_layer_does_not_anchor_stub():
+    """A same-net zone on B.Cu does not anchor an F.Cu track end: the stub is stripped."""
+    router = _router(designer={B: B_FLOOR})
+    _zone_cell(router, Layer.B_CU, 10, 8)
+    bad = _attach_route(router)
+
+    assert router.demote_authored_floor_violation_nets() == [A]
+
+    assert bad.segments == [] or all(s.y2 != 8 and s.y1 != 8 for s in bad.segments)
+    assert router.demote_authored_floor_violation_nets() == []
+
+
+def test_zone_on_same_layer_anchors_stub():
+    """The same zone cell on F.Cu anchors the junction, so the upstream leg is kept."""
+    router = _router(designer={B: B_FLOOR})
+    _zone_cell(router, Layer.F_CU, 10, 8)
+    bad = _attach_route(router)
+
+    assert router.demote_authored_floor_violation_nets() == [A]
+
+    assert bad in router.routes and len(bad.segments) == 1
+    assert (bad.segments[0].y1, bad.segments[0].y2) == (2, 8)
