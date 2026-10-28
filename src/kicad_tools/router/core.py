@@ -19771,6 +19771,47 @@ class Autorouter:
                 self.routes.remove(route)
         return sorted(set(victims))
 
+    def _attach_floor_zones(self) -> tuple[Any, ...]:
+        """The attach-zone floor exemptions (#8048), in the router's sheet-absolute frame.
+
+        The same zones the emitted ``.kicad_dru`` and ``kct check`` apply
+        (:mod:`kicad_tools.manufacturers.attach_zone_dru`).  A net with a
+        designer-authored floor is never a member.  Empty without a source
+        board, or when the rules were built outside the loader (every floor is
+        then designer-authored, #6449).  Cached.
+        """
+        cached: tuple[Any, ...] | None = getattr(self, "_attach_floor_zones_cache", None)
+        if cached is not None:
+            return cached
+        zones: tuple[Any, ...] = ()
+        designer = self.rules.designer_clearance_floors
+        pcb_path = self._pairwise_attach_zone_pcb_path
+        if designer is not None and pcb_path is not None:
+            try:
+                from kicad_tools.manufacturers.attach_zone_dru import build_floor_zones
+                from kicad_tools.schema.pcb import PCB as _SchemaPCB
+
+                by_name = self.rules.designer_clearance_floors_by_name
+                ids = {name: net for net, name in self.net_names.items()}
+
+                def eligible(name: str) -> bool:
+                    return (
+                        by_name.get(name, 0.0) <= 0.0 and designer.get(ids.get(name, 0), 0.0) <= 0.0
+                    )
+
+                pcb = _SchemaPCB.load(str(pcb_path))
+                ox, oy = pcb.board_origin
+                zones = tuple(
+                    zone.shifted(ox, oy) for zone in build_floor_zones(pcb.footprints, eligible)
+                )
+            except Exception as exc:  # noqa: BLE001 - no zone means the strict (pre-#8048) census
+                flush_print(
+                    f"  Warning: could not build attach-zone floor exemptions from {pcb_path} "
+                    f"({type(exc).__name__}: {exc}); router-class floors apply everywhere."
+                )
+        self._attach_floor_zones_cache = zones
+        return zones
+
     def demote_authored_floor_violation_nets(self) -> list[int]:
         """Demote every routed net whose copper breaks an authored minimum (#6243).
 
@@ -19791,14 +19832,25 @@ class Autorouter:
         floors = self.rules.net_clearance_floors
         if not floors and getattr(self.grid, "_authored_item_floors", False) is not True:
             return []
-        from .authored_clearance import authored_violations
+        from .authored_clearance import attach_zone_floor_waiver, authored_violations
 
+        # Issue #8048: router-class floors do not govern a rated footprint's pad
+        # nets inside its courtyard -- the zones the emitted DRU and kct check use.
+        waive = attach_zone_floor_waiver(
+            self._attach_floor_zones(),
+            base=float(self.rules.trace_clearance),
+            designer=self.rules.designer_clearance_floors,
+            designer_by_name=self.rules.designer_clearance_floors_by_name,
+            net_names=self.net_names,
+        )
         pads = self.grid.pads
         routed_ids = {id(r) for r in self.routes}
         fixed = [r for r in self.existing_routes if id(r) not in routed_ids]
         victims: list[int] = []
         while True:
-            found = authored_violations(floors, pads, [*self.routes, *fixed], first_per_net=True)
+            found = authored_violations(
+                floors, pads, [*self.routes, *fixed], first_per_net=True, waive=waive
+            )
             routed = [v for v in found if any(r.net == v.net for r in self.routes)]
             if not routed:
                 break

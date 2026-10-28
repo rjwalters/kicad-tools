@@ -69,6 +69,16 @@ pairs.  The fab floor (the ``clearance`` family) still applies to the pair, and
 ``diffpair_clearance_intra`` owns the intra-pair minimum.  Authored classes are
 unaffected.
 
+Attach zones (Issue #8048)
+--------------------------
+Copper attaching to a rated part is spaced by that part's own pin pitch, so a
+router-class floor does not govern a pair of that footprint's pad nets inside
+its courtyard (:mod:`kicad_tools.manufacturers.attach_zone_dru`).  The routed
+``.kicad_dru`` carries the same exemption as a managed block, and this check
+applies it only when the sibling ``.kicad_dru`` carries that block, from the
+same zone definition, so ``kicad-cli`` and ``kct check`` judge a board by the
+same rule set.  Designer-authored classes are never exempted.
+
 Out of scope: copper-to-zone-fill clearance (the zone rules own it) and custom
 ``.kicad_dru`` expressions, which are not evaluated as netclass rules.
 """
@@ -77,11 +87,19 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from kicad_tools.core.project_clearance import ProjectClearanceError, authored_netclass_clearances
+from kicad_tools.manufacturers.attach_zone_dru import (
+    FloorZone,
+    ZoneItem,
+    build_floor_zones,
+    eligible_net_names,
+    has_attach_zone_block,
+    zones_exempt,
+)
 
 from ..spatial import candidate_pairs
 from ..violations import DRCResults, DRCViolation
@@ -89,6 +107,7 @@ from .base import DRC_TOLERANCE
 from .clearance import (
     _COLOCATION_EPSILON_MM,
     ClearanceRule,
+    CopperElement,
     _calculate_clearance,
 )
 
@@ -196,6 +215,7 @@ def check_netclass_clearance_copper(
     package_floors = {
         num: value for num, value in floors.items() if classes[num] not in router_classes
     }
+    zones = _attach_zones(pcb_path, pcb, project, net_names.values())
     max_floor = max(floors.values())
     rule = ClearanceRule()
     for layer in pcb.copper_layers:
@@ -234,6 +254,10 @@ def check_netclass_clearance_copper(
             clearance, x, y = _calculate_clearance(a, b)
             if clearance + DRC_TOLERANCE >= required_class:
                 continue
+            # Issue #8048: an attach zone lifts the router-class floor (never a
+            # designer's: only router-class and unclassed nets are members).
+            if zones and zones_exempt(zones, _zone_item(a, layer.name), _zone_item(b, layer.name)):
+                continue
             required = max(fab_floor, required_class)
             owner = max((a, b), key=lambda e: governing.get(e.net_number, 0.0))
             cls = classes[owner.net_number]
@@ -254,6 +278,36 @@ def check_netclass_clearance_copper(
                 )
             )
     return results
+
+
+def _attach_zones(
+    pcb_path: Path, pcb: PCB, project: dict, net_names: Iterable[str]
+) -> tuple[FloorZone, ...]:
+    """The floor zones in force: none unless the sibling ``.kicad_dru`` carries them."""
+    try:
+        dru_text = pcb_path.with_suffix(".kicad_dru").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ()
+    if not has_attach_zone_block(dru_text):
+        return ()
+    return build_floor_zones(pcb.footprints, eligible_net_names(project, net_names))
+
+
+def _zone_item(element: CopperElement, layer: str) -> ZoneItem:
+    """``element`` as the attach-zone predicate sees it on copper layer ``layer``."""
+    from shapely.geometry import LineString, Point, box  # type: ignore[import-untyped]
+
+    if element.element_type == "segment":
+        x1, y1, x2, y2, width = element.geometry
+        shape = LineString([(x1, y1), (x2, y2)]).buffer(width / 2.0)
+    elif element.element_type == "via":
+        shape = Point(element.geometry[0], element.geometry[1]).buffer(element.geometry[2] / 2.0)
+    elif element.polygon is not None:
+        shape = element.polygon
+    else:
+        x, y, width, height = element.geometry
+        shape = box(x - width / 2.0, y - height / 2.0, x + width / 2.0, y + height / 2.0)
+    return ZoneItem(shape, element.net_name, layer, element.element_type)
 
 
 def netclass_pair_requirement(
