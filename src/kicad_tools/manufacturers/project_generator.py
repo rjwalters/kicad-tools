@@ -1655,8 +1655,6 @@ def write_drc_constraints(
         merged_dru = apply_netclass_dru_rules(
             merged_dru, rules, project_data, preserve_board_rules=preserve_board_rules
         )
-        # Issue #8048: attach zones lift the router-class floors.
-        merged_dru = apply_attach_zone_dru_rules(merged_dru, rules, project_data, board)
         # Issue #6443: one native diff_pair_gap rule per router-coupled pair.
         if router_pair_gaps is not None or router_pair_limits is not None:
             from .netclass_dru import merge_pair_gap_block, pair_gap_block_rules, pair_limit_rules
@@ -1666,6 +1664,10 @@ def write_drc_constraints(
             limit_rules = pair_limit_rules(router_pair_limits or [], on_board)
             merged = merge_pair_gap_block(merged_dru, gap_rules, limit_rules)
             merged_dru = merged if merged is not None else merged_dru
+        # Issue #8048: attach zones lift the router-class floors.  Merged after
+        # the pair-gap block so a re-write that keeps both blocks (``None``)
+        # reproduces the same bytes: this block always ends the file.
+        merged_dru = apply_attach_zone_dru_rules(merged_dru, rules, project_data, board)
         dru_path.write_text(merged_dru, encoding="utf-8")
         written.append(dru_path)
         # The sidecar is on disk now; tell the user if the engine they have
