@@ -90,6 +90,9 @@ class OptimizationStats:
     nets_rolled_back: int = 0
     drc_errors_before: int = 0
     drc_errors_after: int = 0
+    # Issue #8052: DRC-aware rollback could not reach baseline; all changed
+    # nets were reverted.
+    drc_failsafe_reverted: bool = False
     # Issue #6889: Kelvin-branch rewrites kept at their original geometry.
     kelvin_vetoes: int = 0
     # Issue #7065: one row per optimized net, built after any DRC rollback.

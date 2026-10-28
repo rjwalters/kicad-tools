@@ -436,6 +436,13 @@ _PAD_VIOLATION_CATEGORIES = frozenset(
     {
         "clearance_pad_segment",
         "clearance_pad_via",
+        # Issue #8052: short-class categories.  A trace overlapping foreign-net
+        # zone fill, or an island bridging net 0, is a hard short that
+        # kicad-cli reports as ``shorting_items``.
+        "clearance_segment_zone",
+        "clearance_via_zone",
+        "clearance_pad_zone",
+        "clearance_net0_bridge",
     }
 )
 
@@ -478,6 +485,10 @@ def _run_drc_error_count_by_category(
         # by segment reshaping)
         results = checker.check_clearances()
         results.merge(checker.check_dimensions())
+        # Issue #8052: also gate on foreign-net zone fill overlap.  These
+        # are no-ops on boards without filled zones.
+        results.merge(checker.check_segment_zone_clearances())
+        results.merge(checker.check_via_zone_clearances())
 
         counts: dict[str, int] = {"__total__": results.error_count}
         for v in results.errors:
@@ -518,7 +529,10 @@ def optimize_pcb(
 
     When ``config.drc_aware`` is True, the optimizer runs DRC before and
     after optimization. Any net whose optimized segments increase the
-    total DRC error count is rolled back to its original segments.
+    total DRC error count is rolled back to its original segments.  The
+    gate runs the clearance, dimension and segment/via-vs-zone-fill checks;
+    growth in a pad- or short-class category also triggers rollback.  If
+    the rollback loop cannot reach baseline, all changed nets are reverted.
 
     Args:
         pcb_path: Path to input .kicad_pcb file.
@@ -655,6 +669,27 @@ def optimize_pcb(
                         baseline_counts, current_counts
                     ):
                         break
+
+            # Issue #8052: fail safe.  If the per-net loop could not get back
+            # to baseline (or a protected category is still above baseline),
+            # revert every remaining changed net rather than accept a pass
+            # that leaves new shorts / pad violations.
+            if full_errors > baseline_errors or _pad_violations_grew(
+                baseline_counts, current_counts
+            ):
+                for net in optimized_segments:
+                    if final_segments[net] != segments_by_net[net]:
+                        final_segments[net] = segments_by_net[net]
+                        stats.nets_rolled_back += 1
+                        rolled_back_nets.add(net)
+                stats.drc_failsafe_reverted = True
+                reverted_text = replace_segments(pcb_text, segments_by_net, final_segments)
+                full_errors = _run_drc_error_count_by_category(
+                    reverted_text,
+                    manufacturer=config.drc_manufacturer,
+                    layers=config.drc_layers,
+                    copper_oz=config.drc_copper_oz,
+                )["__total__"]
 
             optimized_segments = final_segments
 
