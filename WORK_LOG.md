@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-28
 
+- **PR #8067**: fix(route): keep listed nets' preserved copper as obstacle and output under --complete
+- **Issue #8066** (closed): route --complete: preserved copper on listed (incomplete) nets is not an obstacle to other listed nets, and is dropped from output once the net completes
 - **PR #8063**: fix: orient footprint text boxes in silk checker to match placer
 - **PR #8060**: feat(route): attach zones exempt router-class clearance floors in the emitted DRU, kct check and the backstop
 - **PR #8059**: test(lattice): cover the furthest-progress hybrid decline latches (#7931)
