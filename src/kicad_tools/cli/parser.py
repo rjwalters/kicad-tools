@@ -760,7 +760,10 @@ def _add_creepage_parser(subparsers) -> None:
             "one global --working-voltage: same-potential nets require ~0 and "
             "cross-domain pairs use their real difference.  Unmapped nets default "
             "to 0 V; the reserved key _edge_voltage sets the board-edge/earth "
-            "reference (default 0 V); other _-prefixed keys (e.g. _comment) are "
+            "reference (default 0 V); the reserved key _pair_bounds is a list of "
+            '{"nets": [a, b], "max_dv": V, "why": "..."} device-bounded caps that '
+            "can only LOWER that pair's |ΔV| (transitive pairs are the author's "
+            "to declare); other _-prefixed keys (e.g. _comment) are "
             "ignored.  Potentials are worst-case DC-equivalent magnitudes -- AC "
             "phase is not modelled, so |ΔV| is conservative for in-phase nets.  "
             "Requires --standard (and --pollution-degree)."

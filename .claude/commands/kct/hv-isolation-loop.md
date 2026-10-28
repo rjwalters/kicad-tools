@@ -52,6 +52,7 @@ uv run kct build-native
 **A single JSON voltage map `{net_name: volts}` feeds BOTH the HV-aware placement (Step 4) and the creepage gate (Step 6).** Do not maintain two files. Each value is the net's RMS working potential (volts) about a common reference. Conventions (verified against `kct creepage --help` / `kct optimize-placement --help`):
 
 - Reserved key `_edge_voltage` sets the board-edge/earth reference (default 0 V).
+- Reserved key `_pair_bounds` is a list of `{"nets": ["/A", "/B"], "max_dv": 100, "why": "Q2B V_DS (IRFB4110 100 V)"}` device-bounded caps (#8043). The pair's \|ΔV\| becomes `min(worst case, max_dv)` in the router table, the post-route audit and `kct creepage` (bounded pairs are listed in the census with `why`). A bound only lowers; `why` is required; transitive pairs (e.g. drain↔gate) are the author's to declare.
 - Other `_`-prefixed keys (e.g. `_comment`) are ignored.
 - **Unmapped nets default to 0 V.**
 - Potentials are worst-case DC-equivalent magnitudes — AC phase is not modelled, so \|ΔV\| is conservative for in-phase nets.

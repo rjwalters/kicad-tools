@@ -361,6 +361,23 @@ def load_signed_voltage_map(path: str | Path) -> dict[str, float]:
     return {name: (iv.hi if abs(iv.hi) >= abs(iv.lo) else iv.lo) for name, iv in intervals.items()}
 
 
+def load_pair_bounds(path: str | Path) -> dict[frozenset[str], tuple[float, str]]:
+    """Load the reserved ``_pair_bounds`` list from a ``--voltage-map`` sidecar (#8043).
+
+    Counterpart to :func:`load_signed_voltage_map` reading the same file; see
+    :func:`kicad_tools.creepage.engine.pair_bounds_from_dict`.
+
+    Raises:
+        ValueError: If the file is not a JSON object or a bound is malformed.
+    """
+    from kicad_tools.creepage.engine import pair_bounds_from_dict
+
+    raw = json.loads(Path(path).read_text())
+    if not isinstance(raw, dict):
+        raise ValueError(f"voltage map must be a JSON object, got {type(raw).__name__}")
+    return pair_bounds_from_dict(raw)
+
+
 def build_pairwise_clearance_table(
     net_voltages: Mapping[str, float],
     *,
@@ -369,6 +386,7 @@ def build_pairwise_clearance_table(
     pollution_degree: int = 2,
     material_group: str = "IIIa",
     hv_threshold: float = 30.0,
+    pair_bounds: Mapping[frozenset[str], tuple[float, str]] | None = None,
 ) -> PairwiseClearanceTable:
     """Build a :class:`PairwiseClearanceTable` from a per-net voltage map.
 
@@ -397,6 +415,8 @@ def build_pairwise_clearance_table(
         material_group: Insulation material group (``I``/``II``/``IIIa``/``IIIb``).
         hv_threshold: Minimum ``|Delta V|`` (volts) for a pair to receive a
             creepage widening; pairs below it keep only the ``dru`` floor.
+        pair_bounds: Optional device-bounded ``|ΔV|`` caps (#8043), see
+            :func:`load_pair_bounds`. Only ever lowers a pair's ``|ΔV|``.
 
     Returns:
         A frozen :class:`PairwiseClearanceTable`.
@@ -422,6 +442,7 @@ def build_pairwise_clearance_table(
         pollution_degree=pollution_degree,
         material_group=material_group,
         hv_threshold=hv_threshold,
+        pair_bounds=pair_bounds,
     )
     return PairwiseClearanceTable(
         dru=float(dru),

@@ -186,6 +186,7 @@ def build_required_by_domain_pair(
     pollution_degree: int = 2,
     material_group: str = "IIIa",
     hv_threshold: float = 30.0,
+    pair_bounds: Mapping[frozenset[str], tuple[float, str]] | None = None,
 ) -> dict[tuple[str, str], float]:
     """Build the per-domain-pair required-creepage table.
 
@@ -202,6 +203,10 @@ def build_required_by_domain_pair(
         pollution_degree: IEC pollution degree (1, 2 or 3).
         material_group: Insulation material group (``I``/``II``/``IIIa``/``IIIb``).
         hv_threshold: Minimum ``|ΔV|`` (volts) for a pair to receive a keepout.
+        pair_bounds: Optional device-bounded caps (#8043) keyed by the unordered
+            ``frozenset({domain_a, domain_b})`` -> ``(max_dv, why)``. The pair's
+            ``|ΔV|`` becomes ``min(|ΔV|, max_dv)``: a bound only lowers.
+            ``None`` (default) leaves behaviour unchanged.
 
     Returns:
         ``{(domain_a, domain_b): required_mm}`` with order-independent keys.
@@ -217,6 +222,10 @@ def build_required_by_domain_pair(
         for j in range(i + 1, len(ids)):
             a, b = ids[i], ids[j]
             dv = abs(domain_voltages[a] - domain_voltages[b])
+            if pair_bounds:
+                bound = pair_bounds.get(frozenset((a, b)))
+                if bound is not None:
+                    dv = min(dv, bound[0])
             if dv == 0.0 or dv < hv_threshold:
                 continue
             # Explicitly basic (also the #7082 default): placement never

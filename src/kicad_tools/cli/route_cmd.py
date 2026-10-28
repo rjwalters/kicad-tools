@@ -21679,6 +21679,7 @@ def _run_main_impl(args, parser, argv) -> int:
         from kicad_tools.placement.hv_domains import build_required_by_domain_pair
         from kicad_tools.router.pairwise_clearance import (
             _norm_net_key,
+            load_pair_bounds,
             load_signed_voltage_map,
         )
 
@@ -21697,10 +21698,19 @@ def _run_main_impl(args, parser, argv) -> int:
             # (``kct creepage``) reads the same file signed, so the router now
             # agrees with the gate it is scored against.
             _raw_voltages = load_signed_voltage_map(vm_path)
+            # Issue #8043: device-bounded pair caps from the same sidecar.
+            _pair_bounds = load_pair_bounds(vm_path)
         except (ValueError, OSError) as e:
             print(f"Error: invalid voltage-map: {e}", file=sys.stderr)
             return 1
         _voltages = {_norm_net_key(n): float(v) for n, v in _raw_voltages.items()}
+        from kicad_tools.creepage.engine import pair_bounds_unmapped_nets
+
+        for _n in pair_bounds_unmapped_nets(_pair_bounds, _voltages):
+            print(
+                f"Warning: _pair_bounds names net {_n!r} absent from the voltage map",
+                file=sys.stderr,
+            )
         try:
             _required = build_required_by_domain_pair(
                 _voltages,
@@ -21708,6 +21718,7 @@ def _run_main_impl(args, parser, argv) -> int:
                 pollution_degree=getattr(args, "pollution_degree", 2),
                 material_group=getattr(args, "material_group", "IIIa"),
                 hv_threshold=getattr(args, "hv_threshold", 30.0),
+                pair_bounds=_pair_bounds or None,
             )
         except StandardLookupError as e:
             print(f"Error: voltage-map creepage lookup failed: {e}", file=sys.stderr)
