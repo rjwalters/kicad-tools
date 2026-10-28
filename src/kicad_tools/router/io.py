@@ -715,7 +715,12 @@ def kept_input_routes(router: Autorouter) -> list[Route]:
     if not existing:
         return []
     routed_net_ids = {r.net for r in getattr(router, "routes", None) or []}
-    routed_net_ids -= set(getattr(router, "_stub_terminals", None) or {})
+    kept_ids = getattr(router, "kept_preserved_net_ids", None)
+    routed_net_ids -= (
+        set(kept_ids())
+        if callable(kept_ids)
+        else set(getattr(router, "_stub_terminals", None) or {})
+    )
     return [r for r in existing if r.net not in routed_net_ids]
 
 
@@ -5290,6 +5295,7 @@ def load_pcb_for_routing(
     stub_terminals: dict[int, list[StubTerminal]] | None = None,
     strategy: str = "grid",
     localize_lattice_to_region: bool = False,
+    preserve_listed_copper: bool = False,
     lattice_link_budget_s: float | None = None,
     lattice_deadline: float | None = None,
     lattice_max_iterations: int | None = None,
@@ -5393,6 +5399,11 @@ def load_pcb_for_routing(
                 :class:`Pad` and are never inserted into ``router.pads`` /
                 ``router.nets``.  Requires ``load_existing_routes=True`` (the
                 stub copper must be loaded first).
+        preserve_listed_copper: Issue #8066.  ``--complete`` only: the preserved
+                copper of listed nets stays a fixed obstacle for the other nets
+                and is re-emitted on write (stored on
+                ``router._preserve_listed_copper``).  Requires
+                ``load_existing_routes=True``.
         localize_lattice_to_region: Issue #4472 (epic #4465, Phase 2).  When
                 True AND ``region`` is set, the WORLD-coordinate region box is
                 stamped on ``router._lattice_region_world`` so the octilinear
@@ -5978,6 +5989,8 @@ def load_pcb_for_routing(
     )
 
     router.placement_disposition = placement_disposition
+    # Issue #8066: --complete keeps listed nets' preserved copper (obstacle + output).
+    router._preserve_listed_copper = bool(preserve_listed_copper and load_existing_routes)
     remember_authored_floors(router, authored_floors)
     # Issue #5863: what this board lost to pad geometry the router cannot
     # represent, for reports and callers that need to say so out loud.

@@ -2809,7 +2809,7 @@ def _make_checkpoint_callback(
             preserved_sexp,
             preserved_routes,
             routed,
-            stub_net_ids=getattr(router, "_stub_terminals", None) or (),
+            stub_net_ids=_kept_preserved_net_ids(router),
             name_only=name_only,
         )
 
@@ -3076,6 +3076,18 @@ def _capture_attempt_preserved_copper(pcb_path: Path, args) -> tuple[list["Route
                 blocks.append((offset, block))
     raw = "\n".join(block for _, block in sorted(blocks))
     return routes, "\n\t".join(part for part in (ordinary, raw) if part)
+
+
+def _kept_preserved_net_ids(router) -> set[int]:
+    """Nets whose preserved copper is re-emitted even when re-routed.
+
+    Stub-terminal nets (#4170) plus, under ``--complete``, every net carrying
+    preserved copper (#8066).  Tolerates stand-in routers without the method.
+    """
+    method = getattr(router, "kept_preserved_net_ids", None)
+    if callable(method):
+        return set(method())
+    return set(getattr(router, "_stub_terminals", None) or {})
 
 
 def _dedupe_preserved_sexp(
@@ -3545,7 +3557,7 @@ def _finalize_routes(
             # replace it.  The router records its stub net ids in
             # ``_stub_terminals``; keep those nets' existing copper by removing
             # them from the exclusion set.
-            stub_net_ids = set(getattr(router, "_stub_terminals", {}) or {})
+            stub_net_ids = _kept_preserved_net_ids(router)
             if stub_net_ids:
                 routed_net_ids = routed_net_ids - stub_net_ids
             preserved_sexp = _serialize_preserved_routes(
@@ -3974,7 +3986,7 @@ def _save_partial_results() -> bool:
             _interrupt_state.get("source_copper") or "",
             _interrupt_state.get("source_routes"),
             router.routes,
-            stub_net_ids=getattr(router, "_stub_terminals", None) or (),
+            stub_net_ids=_kept_preserved_net_ids(router),
             name_only=name_only,
         )
         if source_copper and route_sexp:
@@ -8759,7 +8771,7 @@ def _preserved_trace_copper(
     preserved = getattr(router, "_emitted_preserved_routes", None)
     if preserved is None:
         source = list(getattr(router, "existing_routes", None) or [])
-        routed_net_ids = {r.net for r in routed} - set(getattr(router, "_stub_terminals", {}) or {})
+        routed_net_ids = {r.net for r in routed} - _kept_preserved_net_ids(router)
         preserved = [r for r in source if r.net not in routed_net_ids]
 
     if preserved:
@@ -11904,6 +11916,7 @@ def route_with_layer_escalation(
                     # (it now derives from --per-net-timeout on every lattice run),
                     # and --timeout supplies an absolute ceiling alongside it.
                     localize_lattice_to_region=getattr(args, "_complete_localized", False),
+                    preserve_listed_copper=bool(getattr(args, "complete", False)),
                     lattice_link_budget_s=_resolve_lattice_link_budget(args),
                     # Issue #4798: bound by THIS attempt's fair slice, not the
                     # whole remaining run budget -- otherwise the lattice's
@@ -13121,6 +13134,7 @@ def route_with_rule_relaxation(
                     # (it now derives from --per-net-timeout on every lattice run),
                     # and --timeout supplies an absolute ceiling alongside it.
                     localize_lattice_to_region=getattr(args, "_complete_localized", False),
+                    preserve_listed_copper=bool(getattr(args, "complete", False)),
                     lattice_link_budget_s=_resolve_lattice_link_budget(args),
                     # Issue #4798: bound by THIS tier's fair slice, not the
                     # whole remaining run budget.
@@ -15616,6 +15630,7 @@ def route_with_combined_escalation(
                         # (it now derives from --per-net-timeout on every lattice run),
                         # and --timeout supplies an absolute ceiling alongside it.
                         localize_lattice_to_region=getattr(args, "_complete_localized", False),
+                        preserve_listed_copper=bool(getattr(args, "complete", False)),
                         lattice_link_budget_s=_resolve_lattice_link_budget(args),
                         # Issue #4798: bound by THIS cell's fair slice, not the
                         # whole remaining run budget.
@@ -22445,6 +22460,7 @@ def _run_main_impl(args, parser, argv) -> int:
                 # (it now derives from --per-net-timeout on every lattice run),
                 # and --timeout supplies an absolute ceiling alongside it.
                 localize_lattice_to_region=getattr(args, "_complete_localized", False),
+                preserve_listed_copper=bool(getattr(args, "complete", False)),
                 lattice_link_budget_s=_resolve_lattice_link_budget(args),
                 lattice_deadline=_lattice_absolute_deadline(args),
                 lattice_max_iterations=getattr(args, "lattice_iterations", None),
@@ -22532,6 +22548,7 @@ def _run_main_impl(args, parser, argv) -> int:
                 # (it now derives from --per-net-timeout on every lattice run),
                 # and --timeout supplies an absolute ceiling alongside it.
                 localize_lattice_to_region=getattr(args, "_complete_localized", False),
+                preserve_listed_copper=bool(getattr(args, "complete", False)),
                 lattice_link_budget_s=_resolve_lattice_link_budget(args),
                 lattice_deadline=_lattice_absolute_deadline(args),
                 lattice_max_iterations=getattr(args, "lattice_iterations", None),
