@@ -779,8 +779,8 @@ would be a cheap bug-finder in both directions.\
 
 [projects.backplane]
 name = "Backplane"
-slug = "i2cjak/Backplane"
-repo_url = "https://github.com/i2cjak/Backplane"
+slug = "BackplaneWorks/Backplane"
+repo_url = "https://github.com/BackplaneWorks/Backplane"
 vcs = "github"
 category = "agent-interface"
 relation = "peer"
@@ -807,7 +807,8 @@ every tool call onto a hidden git ref (private index, never the user's) \
 and compares any two versions as a uuid-keyed removed/changed/added \
 board diff -- geometric only, no DRC or LVS. Agents get the exact \
 `kicad-cli`, the canonical files and the KiStack skills. Its board diff \
-is the idea we lacked for reviewing routing PRs (#6417).\
+is the idea we lacked for reviewing routing PRs (#6417). \
+Note: moved from `i2cjak/Backplane` since our note was written.\
 """
 reeval_trigger = """
 When `kct pcb diff` (#6417) lands, move the verdict to `ideas-adopted`. \
@@ -817,8 +818,8 @@ re-check whether it can review our routing PRs directly.\
 
 [projects.kistack]
 name = "KiStack"
-slug = "American-Embedded/KiStack"
-repo_url = "https://github.com/American-Embedded/KiStack"
+slug = "BackplaneWorks/kistack"
+repo_url = "https://github.com/BackplaneWorks/kistack"
 vcs = "github"
 category = "agent-interface"
 relation = "peer"
