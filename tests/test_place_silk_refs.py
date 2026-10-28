@@ -587,3 +587,24 @@ def test_duplicate_references_reject_without_mutating(tmp_path, capsys, hidden, 
     assert "Duplicate footprint reference" in capsys.readouterr().err
     assert path.read_bytes() == original
     assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    "angle,fp_angle,obstacle",
+    [(90, 0, (2, 0)), (30, 90, (1.5, 2.598)), (-30, 45, (1.5, -2.598))],
+)
+def test_placer_clear_rotated_reference_is_checker_clear(tmp_path, angle, fp_angle, obstacle):
+    """Issue #8054: a position the placer calls clear must pass ``kct check``.
+
+    The placer rotated the text envelope while the checker used an axis-aligned
+    box, so a long rotated reference beside a pad was flagged by the checker.
+    """
+    path, _ = _orientation_fixture(tmp_path, angle=angle, fp_angle=fp_angle, obstacle=obstacle)
+    placer = SilkRefPlacer(path)
+    result = placer.plan()
+    ref = next(p for p in result.placements if p.footprint_ref == "R11111111")
+    assert ref.status == "unchanged"
+
+    report = check_all_silkscreen(PCB.load(path), _rules())
+    flagged = [v for v in report.violations if v.rule_id in ("silk_over_copper", "silk_overlap")]
+    assert flagged == [], [tuple(v.items) for v in flagged]
