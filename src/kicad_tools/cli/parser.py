@@ -813,6 +813,24 @@ def _add_creepage_parser(subparsers) -> None:
             "layout.  Does NOT affect the kct audit manufacturing-readiness gate."
         ),
     )
+    # Attach-zone waiver (#8028): the census-side counterpart of the router's
+    # #4506 rated-footprint exemption.  Zones come from the same
+    # build_attach_zones() the router uses.  Per-witness: a pair is waived only
+    # if the copper outside the zone still passes.
+    creepage_parser.add_argument(
+        "--waive-attach-zone",
+        dest="waive_attach_zone",
+        action="store_true",
+        help=(
+            "Waive pairs whose binding gap lies inside a rated-footprint attach "
+            "zone (the same zone kct route --voltage-map exempts, #4506) AND "
+            "whose residual -- the pair re-measured with the zone's copper "
+            "clipped away -- still clears the requirement; a failing residual "
+            "keeps the pair FAIL.  Waived rows stay listed (relationship "
+            "attach_zone, WAIVED).  Off by default; does NOT affect the kct "
+            "audit manufacturing-readiness gate."
+        ),
+    )
     creepage_parser.add_argument(
         "--format",
         choices=["table", "json"],
@@ -820,7 +838,7 @@ def _add_creepage_parser(subparsers) -> None:
         help=(
             "Output format (default: table).  JSON carries two verdicts (#4687): "
             "'passed' is the raw, waiver-blind result (what kct audit uses), "
-            "while 'gate_passed' honors --waive-same-footprint and is what the "
+            "while 'gate_passed' honors --waive-same-footprint / --waive-attach-zone and is what the "
             "exit code follows -- CI consumers should key on 'gate_passed'."
         ),
     )
