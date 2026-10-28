@@ -1106,6 +1106,7 @@ def is_kct_owned_project(project_data: object) -> bool:
 
 def _strip_managed_dru_blocks(text: str) -> str:
     """``.kicad_dru`` content outside every kct-managed block, whitespace-normalised."""
+    from .attach_zone_dru import DRU_ATTACH_ZONE_BLOCK_BEGIN, DRU_ATTACH_ZONE_BLOCK_END
     from .dru_generator import DRU_FLOORS_BLOCK_BEGIN, DRU_FLOORS_BLOCK_END
     from .keepout_dru import DRU_KEEPOUT_BLOCK_BEGIN, DRU_KEEPOUT_BLOCK_END
     from .netclass_dru import (
@@ -1120,6 +1121,7 @@ def _strip_managed_dru_blocks(text: str) -> str:
         (DRU_KEEPOUT_BLOCK_BEGIN, DRU_KEEPOUT_BLOCK_END),
         (DRU_NETCLASS_BLOCK_BEGIN, DRU_NETCLASS_BLOCK_END),
         (DRU_PAIR_GAP_BLOCK_BEGIN, DRU_PAIR_GAP_BLOCK_END),
+        (DRU_ATTACH_ZONE_BLOCK_BEGIN, DRU_ATTACH_ZONE_BLOCK_END),
     ):
         text = re.sub(re.escape(begin) + r".*?" + re.escape(end), "", text, flags=re.DOTALL)
     lines = [line.strip() for line in text.splitlines()]
@@ -1268,6 +1270,53 @@ def apply_netclass_dru_rules(
         merge_netclass_block(dru_text, block_rules, recorded_router_coupled_pairs(project_data))
         or dru_text
     )
+
+
+def apply_attach_zone_dru_rules(
+    dru_text: str,
+    rules: DesignRules,
+    project_data: dict,
+    board: Path,
+) -> str:
+    """Merge the attach-zone managed block into ``.kicad_dru`` text (#8048).
+
+    One relaxed clearance rule per footprint zone, appended after every other
+    clearance rule, in every preserve mode.  The relaxed value is the
+    board-wide base: the larger of the DRU floor and the ``Default`` class.
+    No block is written (and a stale one is removed) when the board has no
+    zone, the project declares no router class, or the unmanaged DRU text
+    carries a clearance constraint of the designer's own -- a later rule
+    would override it.  See :mod:`kicad_tools.manufacturers.attach_zone_dru`.
+    """
+    from .attach_zone_dru import (
+        build_floor_zones,
+        eligible_net_names,
+        has_designer_clearance_rule,
+        merge_attach_zone_block,
+    )
+
+    zones: tuple = ()
+    router_classes = router_netclass_provenance(project_data)[0]
+    if router_classes and board.exists() and not has_designer_clearance_rule(dru_text):
+        from kicad_tools.schema.pcb import PCB
+
+        try:
+            pcb = PCB.load(str(board))
+        except Exception:  # noqa: BLE001 - an unreadable board gets no zones
+            pcb = None
+        if pcb is not None:
+            names = {pad.net_name for fp in pcb.footprints for pad in fp.pads if pad.net_name}
+            zones = build_floor_zones(pcb.footprints, eligible_net_names(project_data, names))
+    native = project_data.get("board", {}).get("design_settings", {}).get("rules", {})
+    floor = rules.min_clearance_mm
+    native_min = native.get("min_clearance", 0)
+    if isinstance(native_min, (int, float)) and not isinstance(native_min, bool):
+        floor = max(floor, native_min)
+    for cls in project_data.get("net_settings", {}).get("classes", []):
+        if cls.get("name") == "Default" and isinstance(cls.get("clearance"), (int, float)):
+            floor = max(floor, cls["clearance"])
+    merged = merge_attach_zone_block(dru_text, zones, floor)
+    return merged if merged is not None else dru_text
 
 
 @lru_cache(maxsize=1)
@@ -1615,6 +1664,10 @@ def write_drc_constraints(
             limit_rules = pair_limit_rules(router_pair_limits or [], on_board)
             merged = merge_pair_gap_block(merged_dru, gap_rules, limit_rules)
             merged_dru = merged if merged is not None else merged_dru
+        # Issue #8048: attach zones lift the router-class floors.  Merged after
+        # the pair-gap block so a re-write that keeps both blocks (``None``)
+        # reproduces the same bytes: this block always ends the file.
+        merged_dru = apply_attach_zone_dru_rules(merged_dru, rules, project_data, board)
         dru_path.write_text(merged_dru, encoding="utf-8")
         written.append(dru_path)
         # The sidecar is on disk now; tell the user if the engine they have
