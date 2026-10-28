@@ -2,7 +2,7 @@
 
 Prioritized roadmap generated from current GitHub label state. Maintained by the Guide triage agent.
 
-*Last updated: 2026-10-27*
+*Last updated: 2026-10-28*
 
 ---
 
@@ -35,13 +35,13 @@ _None._
 
 Issues currently being built (`loom:building`).
 
-- **#8043**: voltage-map: device-bounded pair ΔV (_pair_bounds) — worst-case intervals make a TO-220 drain unroutable (300 V judged, ≤100 V physical)
+_None._
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#8044**: feat: honour _pair_bounds device-bounded pair ΔV in voltage maps
+_None._
 
 ## Approved (Awaiting Merge)
 
@@ -56,7 +56,6 @@ Issues carrying `loom:curated`.
 - **#5509**: Epic: one clearance kernel — search, commit, and final validation must agree with kicad-cli DRC *(curated)*
 - **#7487**: Re-rule or remove board 03 usb_geometry via-in-pad window exception by 2027-04-19 (#7457 / #7084 Q10) *(curated)*
 - **#7931**: lattice coupled: tolerate near-anchor jog-and-return tails in trim_end_reversals (board 03 USB_D J1.A6→U2.3 trunk-offset-degenerate) *(curated)*
-- **#8043**: voltage-map: device-bounded pair ΔV (_pair_bounds) — worst-case intervals make a TO-220 drain unroutable (300 V judged, ≤100 V physical) *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -77,10 +76,10 @@ _None._
 | Very important | 0 |
 | Important | 0 |
 | Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 1 |
-| PRs awaiting review | 1 |
+| In Progress (`loom:building`) | 0 |
+| PRs awaiting review | 0 |
 | Approved PRs awaiting merge | 0 |
-| Curated | 4 |
+| Curated | 3 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 4 |
 <!-- guide:plan-body:end -->
