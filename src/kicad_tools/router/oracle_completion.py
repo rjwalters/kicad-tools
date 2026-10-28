@@ -1372,6 +1372,11 @@ class PourLinkCloser:
     #: via keeps from every SMD pad (the router's ``min_via_pad_edge_gap``).
     #: ``0`` disables the guard.
     pad_edge_gap: float = 0.0
+    #: Issue #8027: the router's ``PairwiseClearanceTable`` (``--voltage-map``).
+    #: ``pair_clearance(P, N)`` is raised to ``table.required_clearance(P, N)``
+    #: so oracle copper keeps the same HV ΔV gap as the lattice search.  ``None``
+    #: leaves every clearance exactly as before.
+    pairwise_table: Any | None = None
 
     # -- net-class clearance (Issue #6374) ----------------------------------------
 
@@ -1383,7 +1388,10 @@ class PourLinkCloser:
 
     def pair_clearance(self, pour_net: str, other_net: str | None) -> float:
         """``c(P, N)``: the clearance copper on ``pour_net`` keeps from ``other_net``."""
-        return max(self.class_clearance(pour_net), self.class_clearance(other_net))
+        base = max(self.class_clearance(pour_net), self.class_clearance(other_net))
+        if self.pairwise_table is None or not other_net:
+            return base
+        return max(base, float(self.pairwise_table.required_clearance(pour_net, other_net)))
 
     def link_rules(self, base: Any, pcb: Any, pour_net: str) -> Any:
         """``base`` (a ``LinkRouteRules``) specialised to links on ``pour_net``.
@@ -1391,7 +1399,7 @@ class PourLinkCloser:
         Without a net-class map the rules are returned unchanged (so the
         routed copper is byte-identical to the single-scalar behaviour).
         """
-        if not self.net_class_map:
+        if not self.net_class_map and self.pairwise_table is None:
             return base
         by_net = {
             num: self.pair_clearance(pour_net, getattr(net, "name", None))
@@ -1740,12 +1748,19 @@ class PourLinkCloser:
         centre.
         """
         floor = max((self.class_clearance(net) for net in pads_by_net), default=self.clearance)
-        if not self.net_class_map:
+        if not self.net_class_map and self.pairwise_table is None:
             return floor
-        # Only a neighbour class above the floor can raise the scalar.
+        # Only a neighbour class above the floor can raise the scalar; with a
+        # pairwise table (Issue #8027) any net in an HV pair may be stricter.
         stricter = {
-            name for name in self.net_class_map if self.class_clearance(name) > floor + 1e-9
+            name for name in (self.net_class_map or {}) if self.class_clearance(name) > floor + 1e-9
         }
+        if self.pairwise_table is not None:
+            stricter |= {
+                name
+                for name in self.pairwise_table.net_voltages
+                if any(self.pair_clearance(net, name) > floor + 1e-9 for net in pads_by_net)
+            }
         if not stricter:
             return floor
         try:
@@ -1756,7 +1771,10 @@ class PourLinkCloser:
             pcb = PCB.load(str(pcb_path))
             model = _build_model(pcb)
         except Exception:  # cannot see the neighbours: be conservative
-            return max(floor, *(self.class_clearance(name) for name in stricter))
+            return max(
+                floor,
+                *(self.pair_clearance(net, name) for name in stricter for net in pads_by_net),
+            )
         names = {num: getattr(net, "name", None) for num, net in pcb.nets.items()}
         candidates = [it for it in model.items if names.get(it.net) in stricter]
         copper_half = max(self.via_size, self.trace_width) / 2

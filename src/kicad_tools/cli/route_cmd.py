@@ -65,7 +65,7 @@ import shutil
 import signal
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 
@@ -8638,7 +8638,83 @@ def _audited_trace_copper(router: "Autorouter", *, id_to_name=None) -> "list[Rou
     voltage -- the silent-blindness failure mode this issue is about.
     """
     routed = list(getattr(router, "routes", None) or [])
-    return routed + _preserved_trace_copper(router, routed=routed, id_to_name=id_to_name)
+    preserved = _preserved_trace_copper(router, routed=routed, id_to_name=id_to_name)
+    return routed + preserved + _oracle_trace_copper(router, id_to_name=id_to_name)
+
+
+def _oracle_trace_copper(router: "Autorouter", *, id_to_name=None) -> "list[Route]":
+    """Copper the post-route KiCad-oracle pour completion wrote (Issue #8027).
+
+    :func:`_record_oracle_copper` stores it on the router after the oracle stage;
+    re-keyed to the audit's net ids by NAME like the preserved half.
+    """
+    from kicad_tools.router.primitives import Route
+
+    stored = getattr(router, "_oracle_copper_routes", None) or []
+    name_to_id = {name: nid for nid, name in (id_to_name or {}).items() if name}
+    return [
+        Route(
+            net=name_to_id.get(r.net_name, r.net),
+            net_name=r.net_name,
+            segments=r.segments,
+            vias=r.vias,
+        )
+        for r in stored
+    ]
+
+
+def _record_oracle_copper(router, output_path: Path) -> None:
+    """Remember the segments/vias in the written board no audited route owns.
+
+    The oracle stage writes straight to ``output_path`` after the routes were
+    finalized, so anything on the board that is neither routed nor preserved
+    copper was placed by it (Issue #8027).
+    """
+    from kicad_tools.router.optimizer.pcb import parse_segments, parse_vias
+    from kicad_tools.router.primitives import Route
+
+    text = Path(output_path).read_text()
+    known = list(getattr(router, "routes", None) or []) + list(
+        getattr(router, "_emitted_preserved_routes", None)
+        or getattr(router, "existing_routes", None)
+        or []
+    )
+
+    def seg_key(sg):
+        return (
+            sg.net_name,
+            str(sg.layer),
+            round(sg.x1, 3),
+            round(sg.y1, 3),
+            round(sg.x2, 3),
+            round(sg.y2, 3),
+        )
+
+    def via_key(v):
+        return (v.net_name, round(v.x, 3), round(v.y, 3))
+
+    known_segs = {seg_key(sg) for r in known for sg in r.segments}
+    known_vias = {via_key(v) for r in known for v in r.vias}
+    segs, vias = parse_segments(text), parse_vias(text)
+    routes = []
+    for name in sorted(set(segs) | set(vias)):
+        new_segs = [
+            sg for sg in segs.get(name, []) if seg_key(replace(sg, net_name=name)) not in known_segs
+        ]
+        new_vias = [
+            v for v in vias.get(name, []) if via_key(replace(v, net_name=name)) not in known_vias
+        ]
+        if new_segs or new_vias:
+            net = (new_segs[0].net if new_segs else new_vias[0].net) or 0
+            routes.append(
+                Route(
+                    net=net,
+                    net_name=name,
+                    segments=[replace(sg, net_name=name) for sg in new_segs],
+                    vias=[replace(v, net_name=name) for v in new_vias],
+                )
+            )
+    router._oracle_copper_routes = routes
 
 
 def _print_pair_via_parity_summary(router: "Autorouter", *, quiet: bool = False) -> None:
@@ -9126,6 +9202,12 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
             pad_edge_gap=float(
                 getattr(getattr(router, "rules", None), "min_via_pad_edge_gap", 0.0) or 0.0
             ),
+            # Issue #8027: oracle copper keeps the --voltage-map pairwise gaps.
+            pairwise_table=(
+                getattr(getattr(router, "rules", None), "pairwise_clearance", None)
+                if getattr(args, "_pairwise_required", None) is not None
+                else None
+            ),
         )
         if not quiet:
             print("\n--- KiCad Oracle Completion (pour nets) ---")
@@ -9150,6 +9232,11 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
     except Exception as exc:  # advisory machinery must never fail a route
         logger.warning("Oracle completion skipped: %s", exc)
         return 0
+    try:
+        if router is not None and getattr(args, "_pairwise_required", None) is not None:
+            _record_oracle_copper(router, output_path)
+    except Exception as exc:  # the audit then sees only router copper, as before
+        logger.warning("Could not record oracle copper for the pairwise audit: %s", exc)
     if not result.ran:
         if not quiet:
             print(f"  skipped: {result.note or 'kicad-cli DRC did not run'}")
