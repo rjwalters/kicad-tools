@@ -394,3 +394,128 @@ def test_emit_dru_preserves_reviewed_project_without_mutating_it(tmp_path: Path)
     )
     assert pro.read_bytes() == before_pro
     assert board.with_suffix(".kicad_dru").read_bytes() == before_dru
+
+
+# ---------------------------------------------------------------------------
+# Issue #8039: refuse rules files KiCad silently drops
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "; a comment\n",
+        '(rule "x"\n  (condition "A.NetName =~ /^AC$/")\n  (constraint clearance (min 1mm)))\n',
+        '(rule "x") ; trailing\n',
+    ],
+)
+def test_merge_dru_floors_rejects_unloadable_constructs(extra: str) -> None:
+    from kicad_tools.manufacturers.dru_generator import DRUUnloadableError
+
+    with pytest.raises(DRUUnloadableError, match=r"line \d+"):
+        merge_dru_floors("(version 1)\n" + extra, '(version 1)\n(rule "a")\n', path="b.kicad_dru")
+
+
+def test_merge_dru_floors_rejects_with_crlf_and_replace_branch() -> None:
+    from kicad_tools.manufacturers.dru_generator import (
+        DRU_FLOORS_BLOCK_BEGIN,
+        DRU_FLOORS_BLOCK_END,
+        DRUUnloadableError,
+    )
+
+    existing = (
+        f"(version 1)\r\n; bad\r\n{DRU_FLOORS_BLOCK_BEGIN}\r\nold\r\n{DRU_FLOORS_BLOCK_END}\r\n"
+    )
+    with pytest.raises(DRUUnloadableError):
+        merge_dru_floors(existing, '(version 1)\n(rule "a")\n')
+
+
+def test_merge_dru_floors_accepts_hash_comments_and_quoted_semicolon() -> None:
+    existing = '(version 1)\n# fine\n(rule "a;b"\n  (constraint clearance (min 1mm)))\n'
+    out = merge_dru_floors(existing, '(version 1)\n(rule "c")\n')
+    assert "# fine" in out
+    assert merge_dru_floors(out, '(version 1)\n(rule "c")\n') == out
+
+
+def test_netclass_only_attribution() -> None:
+    from kicad_tools.drc.report import netclass_only_attribution, parse_text_report
+
+    nc = "[clearance]: Clearance violation (netclass 'Default')\n    Rule: netclass 'Default'; error\n    @(1 mm, 1 mm): Track\n"
+    ru = "[clearance]: Clearance violation\n    Rule: Reviewed clearance - X; error\n    @(1 mm, 1 mm): Track\n"
+    assert netclass_only_attribution(parse_text_report(nc)) == (1, 0)
+    assert netclass_only_attribution(parse_text_report(nc + ru)) == (1, 1)
+    assert netclass_only_attribution(parse_text_report("")) == (0, 0)
+
+
+# Descriptions captured from a live ``kicad-cli 10.0.6 pcb drc --format json``
+# run on boards/03-usb-joystick with a sidecar that loaded vs. one dropped for
+# a ``;`` comment.  Real items carry only type/severity/description/items --
+# there is no ``rule`` key -- and a dropped file leaves an EMPTY source.
+_LOADED = "Clearance violation (rule 'Strict clr' clearance 0.5000 mm; actual 0.3200 mm)"
+_DROPPED = "Clearance violation ( clearance 0.2000 mm; actual 0.1657 mm)"
+_WIDTH = "Track width (board setup constraints min width 0.2000 mm; actual 0.1500 mm)"
+
+
+def _kicad_json(*descriptions: str) -> dict:
+    return {
+        "kicad_version": "10.0.6",
+        "source": "b.kicad_pcb",
+        "unconnected_items": [],
+        "schematic_parity": [],
+        "violations": [
+            {"type": "clearance", "severity": "error", "description": d, "items": []}
+            for d in descriptions
+        ],
+    }
+
+
+def _gate(tmp_path: Path, descriptions: tuple[str, ...], *, dru: bool = True, raw: bool = True):
+    import json
+    from types import SimpleNamespace
+
+    from kicad_tools.cli.readiness_cmd import _gate_dru_loaded
+
+    pcb = tmp_path / "b.kicad_pcb"
+    pcb.write_text("(kicad_pcb)")
+    if dru:
+        pcb.with_suffix(".kicad_dru").write_text("(version 1)\n")
+    if raw:
+        (tmp_path / "native-drc-raw.json").write_text(json.dumps(_kicad_json(*descriptions)))
+    options = SimpleNamespace(pcb=pcb, evidence_dir=tmp_path)
+    return _gate_dru_loaded(options, {"ran": True})
+
+
+def test_netclass_only_attribution_on_real_kicad_json(tmp_path: Path) -> None:
+    import json
+
+    from kicad_tools.drc.report import DRCReport, netclass_only_attribution
+
+    def attr(*descs: str) -> tuple[int, int]:
+        p = tmp_path / "r.json"
+        p.write_text(json.dumps(_kicad_json(*descs)))
+        return netclass_only_attribution(DRCReport.load(p))
+
+    assert attr(_LOADED, _WIDTH) == (0, 1)
+    assert attr(_DROPPED, _WIDTH) == (1, 0)
+    assert attr(_DROPPED, _LOADED) == (1, 1)
+
+
+def test_gate_dru_loaded_fails_when_sidecar_dropped(tmp_path: Path) -> None:
+    outcome = _gate(tmp_path, (_DROPPED, _WIDTH))
+    assert outcome is not None
+    assert outcome.name == "dru_loaded"
+    assert outcome.status == "failed"
+    assert outcome.blockers
+
+
+def test_gate_dru_loaded_passes_when_rule_attributed(tmp_path: Path) -> None:
+    assert _gate(tmp_path, (_LOADED, _DROPPED)) is None
+
+
+def test_gate_dru_loaded_skips_without_sidecar_or_raw_or_findings(tmp_path: Path) -> None:
+    (tmp_path / "a").mkdir()
+    assert _gate(tmp_path / "a", (_DROPPED,), dru=False) is None
+    (tmp_path / "b").mkdir()
+    assert _gate(tmp_path / "b", (_DROPPED,), raw=False) is None
+    (tmp_path / "c").mkdir()
+    assert _gate(tmp_path / "c", ()) is None

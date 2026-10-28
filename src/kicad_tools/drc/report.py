@@ -278,6 +278,33 @@ class DRCReport:
             return parse_text_report(content, str(path))
 
 
+_EMPTY_SOURCE_CLEARANCE = re.compile(r"\(\s+clearance\s+[\d.]+\s*mm")
+
+
+def netclass_only_attribution(report: DRCReport) -> tuple[int, int]:
+    """Count ``(netclass-attributed, rule-attributed)`` violations (#8039).
+
+    KiCad names the constraint source of each finding, e.g. ``netclass
+    'Default'`` or ``rule 'Reviewed clearance - X'``.  When a ``.kicad_dru``
+    is present, a report with netclass-attributed findings and zero
+    custom-rule-attributed ones suggests KiCad never loaded the rules file.
+    Findings naming neither source (opens, parity) are not counted.
+
+    Live kicad-cli 10.0.6 JSON has no ``rule`` key, and once it drops a rules
+    file the default-netclass findings carry an *empty* source
+    (``Clearance violation ( clearance 0.2000 mm; actual 0.1657 mm)``), so that
+    shape counts as netclass-attributed too.
+    """
+    netclass = rule = 0
+    for v in report.violations:
+        text = f"{v.message} {v.rule}".lower()
+        if "rule '" in text or (v.rule and not v.rule.lower().startswith("netclass '")):
+            rule += 1
+        elif "netclass '" in text or _EMPTY_SOURCE_CLEARANCE.search(v.message):
+            netclass += 1
+    return netclass, rule
+
+
 def parse_text_report(content: str, source_file: str = "") -> DRCReport:
     """Parse KiCad text-format DRC report (.rpt).
 

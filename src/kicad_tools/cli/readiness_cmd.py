@@ -1679,6 +1679,45 @@ def _gate_native_drc(options: ReadinessOptions, engines: Engines) -> tuple[Check
     )
 
 
+def _gate_dru_loaded(options: ReadinessOptions, native_report: dict) -> CheckOutcome | None:
+    """Flag a ``.kicad_dru`` that KiCad evidently never loaded (Issue #8039).
+
+    KiCad silently drops a whole rules file on one unparseable construct, so
+    the native DRC then judges netclass clearances only.  When a sidecar is
+    present and the native report has findings attributed to ``netclass '...'``
+    but none to a custom ``rule '...'``, the cross-gate did not apply kct's
+    fab floors.  A clean report (no findings) proves nothing either way.
+    """
+    if not native_report.get("ran") or not options.pcb.with_suffix(".kicad_dru").is_file():
+        return None
+    raw = options.evidence_dir / "native-drc-raw.json"
+    if not raw.is_file():
+        return None
+    from kicad_tools.drc import DRCReport
+    from kicad_tools.drc.report import netclass_only_attribution
+
+    try:
+        netclass, rule = netclass_only_attribution(DRCReport.load(raw))
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("could not inspect native DRC rule attribution: %s", exc)
+        return None
+    if netclass and not rule:
+        detail = (
+            f"{options.pcb.with_suffix('.kicad_dru').name} is present but all {netclass} "
+            "attributed native DRC finding(s) cite netclass rules and none cite a "
+            "custom rule; KiCad probably dropped the rules file."
+        )
+        return CheckOutcome(
+            name="dru_loaded",
+            status=FAILED,
+            detail=detail,
+            blockers=[
+                f"{detail} Check it for ';' comments or '=~ /regex/' conditions (Issue #8039)."
+            ],
+        )
+    return None
+
+
 def _gate_lvs(check_report: dict) -> tuple[CheckOutcome, dict]:
     """Require *meaningful* LVS evidence, not merely a green sub-check.
 
@@ -3209,6 +3248,10 @@ def _run_readiness_candidate(
         )
         refilled_check.name = "native_refilled_drc"
         checks.append(refilled_check)
+
+    dru_loaded = _gate_dru_loaded(options, native_report)
+    if dru_loaded is not None:
+        checks.append(dru_loaded)
 
     lvs, lvs_metrics = _gate_lvs(check_report)
     checks.append(lvs)
