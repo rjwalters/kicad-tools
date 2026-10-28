@@ -5080,14 +5080,20 @@ class EscapeRouter:
                 # Issue #1840: Place via INWARD (toward IC body center)
                 # instead of outward. The inward direction has more
                 # available space under the IC body for via placement.
-                # ``via_offset`` is a clearance measured from the pad's
-                # inner TIP, not its centre: measured from the centre, a
+                # ``via_offset`` is measured from the pad centre, so on a
                 # long TSSOP/SSOP pad (1.475 mm on a 0.65 mm-pitch
-                # TSSOP-20) swallows the drill and the escape emits a
-                # via-in-pad on tiers that do not support it.
+                # TSSOP-20) it can leave the drill inside the pad -- a
+                # via-in-pad on tiers that do not support it.  Push the
+                # via out until the drill clears the pad's inner tip (one
+                # grid step of margin survives snapping); short pads keep
+                # the original offset.
                 pad_half_along = (pad.width if abs(dx) >= abs(dy) else pad.height) / 2
-                via_x = pad.x - dx * (pad_half_along + via_offset) + row_dx * lateral_offset * sign
-                via_y = pad.y - dy * (pad_half_along + via_offset) + row_dy * lateral_offset * sign
+                drill_clear_offset = (
+                    pad_half_along + self.rules.via_drill / 2 + self.rules.grid_resolution
+                )
+                pad_via_offset = max(via_offset, drill_clear_offset)
+                via_x = pad.x - dx * pad_via_offset + row_dx * lateral_offset * sign
+                via_y = pad.y - dy * pad_via_offset + row_dy * lateral_offset * sign
 
                 # Issue #1840: Select inner signal layer from LayerStack
                 # when available (e.g. In1.Cu on 4-layer boards), falling

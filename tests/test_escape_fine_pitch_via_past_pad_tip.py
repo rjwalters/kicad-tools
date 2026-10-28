@@ -1,11 +1,11 @@
 """Fine-pitch dual-row escape vias must clear the pad they escape.
 
 ``_create_fine_pitch_row_escapes`` places odd-pin vias inward (toward the IC
-body) at a clearance-derived offset. That offset is a gap from the pad's
-inner tip; it used to be measured from the pad centre, so on a TSSOP whose
-pads are longer than twice the offset (1.475 mm pads on a 0.65 mm-pitch
+body) at a clearance-derived offset measured from the pad centre. On a TSSOP
+whose pads are longer than twice that offset (1.475 mm pads on a 0.65 mm-pitch
 TSSOP-20) the drill landed inside the pad and the escape emitted a via-in-pad
-on tiers that do not support one.
+on tiers that do not support one. The offset is now extended just enough for
+the drill to clear the pad's inner tip.
 """
 
 from kicad_tools.router.escape import EscapeRouter, PackageType
