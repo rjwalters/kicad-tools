@@ -75,7 +75,12 @@ def export_gerbers(
             print("Error: saved zone fill is split where a refill is not:")
             for line in check.regressions:
                 print(f"  {line}")
-            print(f"Re-run `kct zones fill {pcb_path}` and export again.")
+            print(
+                "Refill with KiCad's own filler, then export again: "
+                f"`kicad-cli pcb drc --refill-zones --save-board {pcb_path}` "
+                "(or pcbnew.ZONE_FILLER via KiCad's bundled Python)."
+            )
+            print("Re-running `kct zones fill` does not help: it wrote this fill.")
             return False
         if not check.ran:
             print(f"Warning: saved zone fill not verified ({check.note or 'no DRC report'})")

@@ -416,3 +416,54 @@ class TestRouteFillUsesTheShippedRules:
         )
         route_cmd._fill_zones_after_route(self._pcb(tmp_path), quiet=True)
         assert calls == ["fill"]
+
+
+class TestZonesFillSelfVerifies:
+    """Issue #8053: `kct zones fill` surfaces a split saved fill at fill time."""
+
+    def _run(self, tmp_path, monkeypatch, check):
+        import argparse
+
+        from kicad_tools.cli import runner, zones_cmd
+
+        pcb = tmp_path / "b.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        monkeypatch.setattr(runner, "find_kicad_cli", lambda: Path("/fake/kicad-cli"))
+        monkeypatch.setattr(
+            runner, "run_fill_zones", lambda *a, **k: type("R", (), {"success": True})()
+        )
+        monkeypatch.setattr("kicad_tools.drc.geometric.check_saved_fill", lambda *a, **k: check)
+        args = argparse.Namespace(
+            pcb=str(pcb), output=None, net=None, dry_run=False, quiet=True, format="text"
+        )
+        return zones_cmd._run_fill(args)
+
+    def test_regression_fails_the_fill(self, tmp_path, monkeypatch, capsys):
+        check = SavedFillCheck(ran=True, regressions=["unconnected_items: 17 vs 1"])
+        assert self._run(tmp_path, monkeypatch, check) == 1
+        err = capsys.readouterr().err
+        assert "unconnected_items: 17 vs 1" in err
+        assert "--refill-zones --save-board" in err
+
+    def test_clean_or_unverifiable_fill_succeeds(self, tmp_path, monkeypatch):
+        assert self._run(tmp_path, monkeypatch, SavedFillCheck(ran=True)) == 0
+        assert self._run(tmp_path, monkeypatch, SavedFillCheck(ran=False, note="x")) == 0
+
+
+def test_export_refusal_does_not_suggest_rerunning_zones_fill(tmp_path, monkeypatch):
+    from kicad_tools.exceptions import ExportError
+
+    pcb = tmp_path / "b.kicad_pcb"
+    pcb.write_text("(kicad_pcb)")
+    from kicad_tools.export import gerber
+
+    monkeypatch.setattr(gerber, "find_kicad_cli", lambda: Path("/fake/kicad-cli"))
+    monkeypatch.setattr(
+        "kicad_tools.drc.geometric.check_saved_fill",
+        lambda *a, **k: SavedFillCheck(ran=True, regressions=["x"]),
+    )
+    with pytest.raises(ExportError) as exc:
+        gerber.GerberExporter(pcb)._verify_saved_fill(pcb)
+    text = " ".join(exc.value.suggestions)
+    assert "--refill-zones --save-board" in text
+    assert "Re-run `kct zones fill" not in text
