@@ -90,3 +90,35 @@ def test_degenerate_target_falls_back_to_every_heading() -> None:
         PAD_P, PAD_N, (24.0, 6.0), FIELD, site_gap=GAP, max_leg_mm=HYBRID_MAX_LEG_MM
     )
     assert starts
+
+
+def test_decline_progress_order_issue_7931() -> None:
+    from kicad_tools.router.pairplan import hybrid_decline_progress as rank
+
+    order = [
+        "pair-hybrid-no-path",
+        "pair-hybrid-trunk-offset-degenerate",
+        "pair-hybrid-leg-pad-escape-end",
+        "pair-hybrid-leg-budget",
+    ]
+    ranks = [rank(r) for r in order]
+    assert ranks == sorted(set(ranks))  # strictly increasing
+    assert rank("pair-hybrid-anchor-off-grid") == rank("pair-hybrid-trunk-no-path")
+    assert rank("pair-hybrid-via-limit") == rank("pair-hybrid-leg-no-path")
+
+
+def test_furthest_decline_keeps_leg_budget_and_first_seen_on_ties() -> None:
+    from kicad_tools.router.pairplan import furthest_hybrid_decline as far
+
+    trunk, leg, budget = (
+        "pair-hybrid-trunk-offset-degenerate",
+        "pair-hybrid-leg-pad-escape-end",
+        "pair-hybrid-leg-budget",
+    )
+    assert far("pair-hybrid-no-path", trunk) == trunk
+    assert far(trunk, leg) == leg  # the trunk body was found: more progress
+    assert far(leg, trunk) == leg  # a later, shallower decline never replaces it
+    assert far(leg, budget) == budget
+    assert far(budget, leg) == budget  # leg-budget still beats any other leg reason
+    assert far(trunk, "pair-hybrid-trunk-short") == trunk  # tie keeps the first
+    assert far(leg, "pair-hybrid-leg-end") == leg
