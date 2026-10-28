@@ -35,13 +35,13 @@ _None._
 
 Issues currently being built (`loom:building`).
 
-- **#8039**: kicad_dru sidecar silently ignored by KiCad 10 when hand-written content has ';' comments or regex conditions — cross-gate runs netclass-only
+- **#8043**: voltage-map: device-bounded pair ΔV (_pair_bounds) — worst-case intervals make a TO-220 drain unroutable (300 V judged, ≤100 V physical)
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#8040**: fix: refuse .kicad_dru content KiCad silently drops and flag netclass-only cross-gates
+- **#8044**: feat: honour _pair_bounds device-bounded pair ΔV in voltage maps
 
 ## Approved (Awaiting Merge)
 
@@ -56,7 +56,7 @@ Issues carrying `loom:curated`.
 - **#5509**: Epic: one clearance kernel — search, commit, and final validation must agree with kicad-cli DRC *(curated)*
 - **#7487**: Re-rule or remove board 03 usb_geometry via-in-pad window exception by 2027-04-19 (#7457 / #7084 Q10) *(curated)*
 - **#7931**: lattice coupled: tolerate near-anchor jog-and-return tails in trim_end_reversals (board 03 USB_D J1.A6→U2.3 trunk-offset-degenerate) *(curated)*
-- **#8039**: kicad_dru sidecar silently ignored by KiCad 10 when hand-written content has ';' comments or regex conditions — cross-gate runs netclass-only *(curated)*
+- **#8043**: voltage-map: device-bounded pair ΔV (_pair_bounds) — worst-case intervals make a TO-220 drain unroutable (300 V judged, ≤100 V physical) *(curated)*
 
 ## Proposed (Architect / Hermit)
 
