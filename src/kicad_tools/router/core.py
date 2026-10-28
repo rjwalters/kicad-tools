@@ -2064,6 +2064,12 @@ class Autorouter:
         # they are NEVER inserted into ``self.pads`` / ``self.nets`` (they are
         # not real pads -- no footprint, no metal, no drill).
         self._stub_terminals: dict[int, list[StubTerminal]] = {}
+        # Issue #8066: ``--complete`` keeps the preserved copper of the nets it
+        # lists (they already carry copper plus an open link) as a fixed
+        # obstacle for the other nets and re-emits it on write, instead of
+        # treating it as stale copper the net replaces.  Set by
+        # ``load_pcb_for_routing(preserve_listed_copper=True)``.
+        self._preserve_listed_copper: bool = False
         # Issue #4170: the WORLD-coordinate region box for stub-reconnection
         # routing.  When set, per-net target expansion for a stub net drops pads
         # that fall OUTSIDE the box -- those pads are already electrically the
@@ -3353,6 +3359,26 @@ class Autorouter:
 
             self.grid.add_pad(pad, pin_pitch=pin_pitch)
 
+    def _is_fixed_copper_net(self, net: int) -> bool:
+        """True when preserved copper on *net* is held fixed in the negotiation.
+
+        Non-listed nets always are.  Under ``--complete`` (Issue #8066) a
+        listed net's preserved copper is too: it is not stale, and the
+        same-net exemption keeps it from blocking its own net.
+        """
+        return self._preserve_listed_copper or net not in self.nets
+
+    def kept_preserved_net_ids(self) -> set[int]:
+        """Nets whose preserved copper survives even when the net is re-routed.
+
+        Stub-terminal nets (Issue #4170) keep their outside stub; under
+        ``--complete`` (Issue #8066) every net with preserved copper does.
+        """
+        kept = set(getattr(self, "_stub_terminals", None) or {})
+        if getattr(self, "_preserve_listed_copper", False):
+            kept |= {r.net for r in self.existing_routes}
+        return kept
+
     def set_stub_terminals(
         self,
         stub_terminals: dict[int, list[StubTerminal]],
@@ -4141,7 +4167,7 @@ class Autorouter:
         # routable set: a listed net being re-routed replaces its own stale
         # copper, so it must not fix itself in place (byte-identical filter to
         # ``_negotiate_lattice_netset``).
-        fixed_copper = [r for r in self.existing_routes if r.net not in self.nets]
+        fixed_copper = [r for r in self.existing_routes if self._is_fixed_copper_net(r.net)]
         routes_by_key, stats = pf.route_netset(connections, fixed_copper=fixed_copper)
         self._mesh_negotiation_stats = stats
 
@@ -5321,7 +5347,7 @@ class Autorouter:
         # its own stale copper, so it must not fix itself in place.  Without
         # this the lattice sees the non-listed pads but not the traces between
         # them and legally crosses foreign copper -> segment-segment shorts.
-        fixed_copper = [r for r in self.existing_routes if r.net not in self.nets]
+        fixed_copper = [r for r in self.existing_routes if self._is_fixed_copper_net(r.net)]
 
         # Issue #4597: preserved copper keeps its NET-CLASS clearance across the
         # pass boundary.  ``--preserve-existing`` composition (the documented
@@ -5923,7 +5949,7 @@ class Autorouter:
         # Other-net preserved copper the negotiation also holds fixed.
         fixed_runs: list[tuple[int, Any, Any, float, int]] = []
         for route in self.existing_routes:
-            if route.net in self.nets:
+            if not self._is_fixed_copper_net(route.net):
                 continue
             for seg in route.segments:
                 try:
@@ -8811,9 +8837,7 @@ class Autorouter:
         except for ``_stub_terminals`` nets whose outside stub is kept.  A
         route present in both lists is counted once (dedupe by ``id()``).
         """
-        routed_net_ids = {r.net for r in self.routes} - set(
-            getattr(self, "_stub_terminals", None) or {}
-        )
+        routed_net_ids = {r.net for r in self.routes} - self.kept_preserved_net_ids()
         copper: list[Route] = []
         seen: set[int] = set()
         for route in [
