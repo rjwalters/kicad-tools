@@ -5764,6 +5764,8 @@ class LatticePathfinder:
         way.  On success the second return value is the hard terminal
         (``"U4.B1"``, the outcome label's tail), else the decline reason.
         """
+        from ..pairplan.hybrid import furthest_hybrid_decline
+
         key = pc.key
         verdict = self.pair_gateway_ends.get(key)
         if verdict is None:
@@ -5802,8 +5804,7 @@ class LatticePathfinder:
             if pres is not None:
                 return pres, why
             notes.append(note)
-            if reason == "pair-hybrid-no-path" or why == "pair-hybrid-leg-budget":
-                reason = why
+            reason = furthest_hybrid_decline(reason, why)
             if why == "pair-hybrid-deadline":
                 break
         self.pair_hybrid_log[key] = (
@@ -5832,6 +5833,7 @@ class LatticePathfinder:
             HYBRID_MAX_LEG_MM,
             MAX_CONSECUTIVE_TRUNK_MISSES,
             MAX_TRUNK_SEARCHES,
+            furthest_hybrid_decline,
             propose_trunk_starts,
         )
 
@@ -5916,6 +5918,7 @@ class LatticePathfinder:
             reqs = pad_class_requirements(self)
         shortest: tuple[float, float] | None = None
         reason = "pair-hybrid-no-path"
+        furthest = ""  # the layer and start of the decline `reason` came from
         searches = 0
         for layer in trunk_layers:
             misses = 0
@@ -5958,9 +5961,12 @@ class LatticePathfinder:
                 if legs is not None and (shortest is None or max(legs) < max(shortest)):
                     shortest = legs
                 if pres is None:
-                    # An over-budget leg is the informative decline.
-                    if why == "pair-hybrid-leg-budget" or reason == "pair-hybrid-no-path":
+                    # The decline that got furthest is the informative one
+                    # (#7931): an over-budget leg, then any leg stage, then
+                    # the trunk stage; a tie keeps the first seen.
+                    if furthest_hybrid_decline(reason, why) != reason:
                         reason = why
+                        furthest = f"{self._layer_name(layer)} {start.describe()}"
                     continue
                 lens = legs or (0.0, 0.0)
                 self.pair_hybrid_log[key] = (
@@ -5979,7 +5985,9 @@ class LatticePathfinder:
         else:
             note = (
                 f"hard terminal {terminal}: no leg routed from {searches} trunk search(es) "
-                f"({reason.removeprefix('pair-hybrid-')})"
+                f"({reason.removeprefix('pair-hybrid-')}"
+                + (f" at {furthest}" if furthest else "")
+                + ")"
             )
         return None, reason, note
 

@@ -96,6 +96,38 @@ class TrunkStart:
         return f"setback {self.setback:.1f} mm @{self.heading * 45}deg"
 
 
+#: The reason a hybrid attempt starts from, before any start was tried.
+HYBRID_NO_PATH_REASON = "pair-hybrid-no-path"
+#: A leg was found and priced; an over-budget one is the most informative
+#: decline there is (it keeps the priority the latch gave it before #7931).
+HYBRID_LEG_BUDGET_REASON = "pair-hybrid-leg-budget"
+
+
+def hybrid_decline_progress(reason: str) -> int:
+    """How far a hybrid attempt got before declining with ``reason`` (#7931).
+
+    ``0`` the initial no-path placeholder; ``1`` a decline before any leg
+    search (a site, anchor or trunk-body reason: ``pair-hybrid-trunk-*``,
+    ``pair-hybrid-anchor-*`` ...); ``2`` the trunk body was found and a leg
+    or the via check declined (``pair-hybrid-leg-*``, ``pair-hybrid-via-limit``);
+    ``3`` a leg was found but is over budget.
+    """
+    if reason == HYBRID_NO_PATH_REASON:
+        return 0
+    if reason == HYBRID_LEG_BUDGET_REASON:
+        return 3
+    if reason.startswith("pair-hybrid-leg-") or reason == "pair-hybrid-via-limit":
+        return 2
+    return 1
+
+
+def furthest_hybrid_decline(current: str, candidate: str) -> str:
+    """The decline reason that got further; a tie keeps ``current`` (#7931)."""
+    if hybrid_decline_progress(candidate) > hybrid_decline_progress(current):
+        return candidate
+    return current
+
+
 def _ray_exit(origin: Pt, d: Pt, box: Rect) -> float:
     """Distance along unit ``d`` from ``origin`` to where it leaves ``box``.
 
