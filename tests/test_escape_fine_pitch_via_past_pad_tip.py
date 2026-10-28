@@ -11,7 +11,6 @@ on tiers that do not support one.
 from kicad_tools.router.escape import EscapeRouter, PackageType
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.rules import DesignRules
-
 from tests.test_escape_fine_pitch_clearance import make_dual_row_ssop
 
 
@@ -27,8 +26,9 @@ def _escape_vias(pad_height: float):
     )
     grid = RoutingGrid(width=20.0, height=20.0, rules=rules, origin_x=-10.0, origin_y=-10.0)
     router = EscapeRouter(grid, rules, component_holes=())
-    pads = make_dual_row_ssop(pin_count=20, pitch=0.65, pad_width=0.4,
-                              pad_height=pad_height, row_spacing=5.72)
+    pads = make_dual_row_ssop(
+        pin_count=20, pitch=0.65, pad_width=0.4, pad_height=pad_height, row_spacing=5.72
+    )
     package = router.analyze_package(pads)
     assert package.package_type in (PackageType.SSOP, PackageType.TSSOP)
     return rules, [e for e in router.generate_escapes(package) if e.via_pos is not None]
