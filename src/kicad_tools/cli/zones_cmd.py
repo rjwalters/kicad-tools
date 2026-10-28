@@ -1029,12 +1029,33 @@ def _run_fill(args) -> int:
     if not result.success:
         return _fail(args, f"Error: {result.stderr}")
 
+    target = output_path if output_path else pcb_path
+
+    # Issue #8053: export refuses a saved fill that is split where a refill
+    # is not.  Say so now, not at export time.
+    from kicad_tools.drc.geometric import check_saved_fill
+
+    check = check_saved_fill(target, kicad_cli=kicad_cli)
+    payload["saved_fill_regressions"] = list(check.regressions)
+
     if json_mode:
         payload["filled"] = True
         emit_json(payload)
     elif not quiet:
-        target = output_path if output_path else pcb_path
         print(f"Zones filled: {target}")
+
+    if check.regressions:
+        print("Error: saved zone fill is split where a refill is not:", file=sys.stderr)
+        for line in check.regressions:
+            print(f"  {line}", file=sys.stderr)
+        print(
+            "`kct export` will refuse this board. Refill with KiCad's own filler: "
+            f"`kicad-cli pcb drc --refill-zones --save-board {target}`",
+            file=sys.stderr,
+        )
+        return 1
+    if not check.ran and not quiet:
+        print(f"Warning: saved zone fill not verified ({check.note or 'no DRC report'})")
 
     return 0
 
