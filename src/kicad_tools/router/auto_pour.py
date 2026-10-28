@@ -626,7 +626,10 @@ def _remove_zones_reaching_no_pads(pcb_path: Path, net_names: list[str]) -> dict
     removed: dict[str, str] = {}
     for name in net_names:
         zones = [z for z in pcb.zones if z.net_name == name and z.polygon]
-        pads = _net_pad_positions_absolute(pcb, name)
+        # Zone polygons are board-relative; the helper returns sheet-absolute
+        # pad positions, so subtract the board origin to compare like with like.
+        ox, oy = pcb.board_origin
+        pads = [(x - ox, y - oy) for x, y in _net_pad_positions_absolute(pcb, name)]
         if not zones or not pads:
             continue
         reached = any(
