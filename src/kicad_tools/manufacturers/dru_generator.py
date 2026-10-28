@@ -211,6 +211,57 @@ def _is_legacy_generated_dru(existing: str) -> bool:
     return saw_rule
 
 
+class DRUUnloadableError(ValueError):
+    """Merged ``.kicad_dru`` content holds constructs KiCad silently drops (#8039)."""
+
+
+_DRU_REGEX_LITERAL_RE = re.compile(r"=~\s*/")
+
+
+def _has_unquoted_semicolon(line: str) -> bool:
+    in_string = False
+    for ch in line:
+        if ch == '"':
+            in_string = not in_string
+        elif ch == ";" and not in_string:
+            return True
+    return False
+
+
+def lint_dru_for_kicad_loadability(content: str) -> list[str]:
+    """Flag constructs that make KiCad 10.0.7 drop a whole ``.kicad_dru`` (#8039).
+
+    KiCad discards the entire file, with no message, when it meets a ``;``
+    comment or a ``=~ /regex/`` condition.  ``#`` comments are fine.  The list
+    is what was observed on 10.0.7; other triggers are not covered.
+
+    Returns one ``line N: ...`` description per offending line.
+    """
+    findings: list[str] = []
+    for lineno, line in enumerate(content.splitlines(), start=1):
+        if line.lstrip().startswith("#"):
+            continue
+        if _has_unquoted_semicolon(line):
+            findings.append(f"line {lineno}: ';' comment")
+        if _DRU_REGEX_LITERAL_RE.search(line):
+            findings.append(f"line {lineno}: '=~ /regex/' condition")
+    return findings
+
+
+def _check_dru_loadable(merged: str, path: str | Path | None) -> str:
+    findings = lint_dru_for_kicad_loadability(merged)
+    if findings:
+        name = str(path) if path is not None else ".kicad_dru content"
+        raise DRUUnloadableError(
+            f"{name}: KiCad silently ignores the ENTIRE rules file (including kct's "
+            f"managed fab floors) when it contains a ';' comment or a "
+            f"'=~ /regex/' condition (observed on KiCad 10.0.7; other triggers are "
+            f"not detected). Use '#' comments and quoted-string conditions instead. "
+            f"Offending: " + "; ".join(findings) + " (Issue #8039)"
+        )
+    return merged
+
+
 def _strip_version_header(content: str) -> str:
     """Drop a leading ``(version N)`` line so a merged file keeps exactly one."""
     return re.sub(r"^\s*\(version[^)]*\)\s*\n?", "", content, count=1)
@@ -281,7 +332,8 @@ def merge_dru_floors(
     )
     if pattern.search(existing):
         merged = pattern.sub(lambda _m: block, existing)
-        return merged if merged.endswith("\n") else merged + "\n"
+        merged = merged if merged.endswith("\n") else merged + "\n"
+        return _check_dru_loadable(merged, path)
 
     if _is_legacy_generated_dru(existing):
         # Pre-#4600 clobber-written sidecar: the whole file is our own
@@ -303,7 +355,7 @@ def merge_dru_floors(
     prefix = existing if existing.endswith("\n") else existing + "\n"
     if not re.search(r"^\s*\(version\b", existing, re.MULTILINE):
         prefix = f"{DRU_VERSION_HEADER}\n" + prefix
-    return f"{prefix}\n{block}\n"
+    return _check_dru_loadable(f"{prefix}\n{block}\n", path)
 
 
 def generate_dru(

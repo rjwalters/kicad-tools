@@ -278,6 +278,25 @@ class DRCReport:
             return parse_text_report(content, str(path))
 
 
+def netclass_only_attribution(report: DRCReport) -> tuple[int, int]:
+    """Count ``(netclass-attributed, rule-attributed)`` violations (#8039).
+
+    KiCad names the constraint source of each finding, e.g. ``netclass
+    'Default'`` or ``rule 'Reviewed clearance - X'``.  When a ``.kicad_dru``
+    is present, a report with netclass-attributed findings and zero
+    custom-rule-attributed ones suggests KiCad never loaded the rules file.
+    Findings naming neither source (opens, parity) are not counted.
+    """
+    netclass = rule = 0
+    for v in report.violations:
+        text = f"{v.message} {v.rule}".lower()
+        if "rule '" in text or (v.rule and not v.rule.lower().startswith("netclass '")):
+            rule += 1
+        elif "netclass '" in text:
+            netclass += 1
+    return netclass, rule
+
+
 def parse_text_report(content: str, source_file: str = "") -> DRCReport:
     """Parse KiCad text-format DRC report (.rpt).
 

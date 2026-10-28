@@ -120,6 +120,8 @@ rc=$?
   and ((.unconnected_items | length) == 0)' <pcb-dir>/drc_report.json
 ```
 
+When a `<board>.kicad_dru` exists, also confirm the report cites at least one custom `rule '...'` (not only `netclass '...'`) on its findings. KiCad silently drops a whole `.kicad_dru` that holds a `;` comment or a `=~ /regex/` condition, leaving the gate judging netclass clearances only (Issue #8039). `kct readiness` fails with a `dru_loaded` check when every attributed finding is netclass-only; a clean (zero-violation) report proves nothing either way.
+
 This is **not decorative and not skippable.** It is a *second, independent* DRC engine (KiCad's own), and it is the gate that catches what `kct check` misses:
 
 - On 2026-07-04 a live copper short shipped past a clean `kct check` because `kct` read **stale zone fills**. The `--refill-zones` flag is load-bearing: it forces KiCad to refill the pours before checking, so the DRC reasons over the *actual* copper, not a stale cache.

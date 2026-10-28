@@ -394,3 +394,54 @@ def test_emit_dru_preserves_reviewed_project_without_mutating_it(tmp_path: Path)
     )
     assert pro.read_bytes() == before_pro
     assert board.with_suffix(".kicad_dru").read_bytes() == before_dru
+
+
+# ---------------------------------------------------------------------------
+# Issue #8039: refuse rules files KiCad silently drops
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "; a comment\n",
+        '(rule "x"\n  (condition "A.NetName =~ /^AC$/")\n  (constraint clearance (min 1mm)))\n',
+        '(rule "x") ; trailing\n',
+    ],
+)
+def test_merge_dru_floors_rejects_unloadable_constructs(extra: str) -> None:
+    from kicad_tools.manufacturers.dru_generator import DRUUnloadableError
+
+    with pytest.raises(DRUUnloadableError, match=r"line \d+"):
+        merge_dru_floors("(version 1)\n" + extra, '(version 1)\n(rule "a")\n', path="b.kicad_dru")
+
+
+def test_merge_dru_floors_rejects_with_crlf_and_replace_branch() -> None:
+    from kicad_tools.manufacturers.dru_generator import (
+        DRU_FLOORS_BLOCK_BEGIN,
+        DRU_FLOORS_BLOCK_END,
+        DRUUnloadableError,
+    )
+
+    existing = (
+        f"(version 1)\r\n; bad\r\n{DRU_FLOORS_BLOCK_BEGIN}\r\nold\r\n{DRU_FLOORS_BLOCK_END}\r\n"
+    )
+    with pytest.raises(DRUUnloadableError):
+        merge_dru_floors(existing, '(version 1)\n(rule "a")\n')
+
+
+def test_merge_dru_floors_accepts_hash_comments_and_quoted_semicolon() -> None:
+    existing = '(version 1)\n# fine\n(rule "a;b"\n  (constraint clearance (min 1mm)))\n'
+    out = merge_dru_floors(existing, '(version 1)\n(rule "c")\n')
+    assert "# fine" in out
+    assert merge_dru_floors(out, '(version 1)\n(rule "c")\n') == out
+
+
+def test_netclass_only_attribution() -> None:
+    from kicad_tools.drc.report import netclass_only_attribution, parse_text_report
+
+    nc = "[clearance]: Clearance violation (netclass 'Default')\n    Rule: netclass 'Default'; error\n    @(1 mm, 1 mm): Track\n"
+    ru = "[clearance]: Clearance violation\n    Rule: Reviewed clearance - X; error\n    @(1 mm, 1 mm): Track\n"
+    assert netclass_only_attribution(parse_text_report(nc)) == (1, 0)
+    assert netclass_only_attribution(parse_text_report(nc + ru)) == (1, 1)
+    assert netclass_only_attribution(parse_text_report("")) == (0, 0)
