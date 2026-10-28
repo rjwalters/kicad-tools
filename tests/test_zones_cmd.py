@@ -1476,7 +1476,13 @@ class TestFillIntegration:
     def test_fill_zones_on_fixture(self, tmp_pcb, tmp_path):
         """Fill zones on the multilayer fixture and check output has filled_polygon."""
         out = tmp_path / "filled_board.kicad_pcb"
-        ret = main(["fill", str(tmp_pcb), "-o", str(out)])
+        # This fixture already has ~14 unconnected items, and the saved-vs-refilled
+        # count differs by one between kicad-cli releases (14 vs 13 on CI's pinned
+        # toolchain, 14 vs 14 on 10.0.6).  The post-fill saved-fill check (Issue
+        # #8053) is covered in test_saved_fill_connectivity_6078.py; this test is
+        # only about the fill itself.
+        with patch(_CHECK_SAVED_FILL, return_value=SavedFillCheck(ran=True)):
+            ret = main(["fill", str(tmp_pcb), "-o", str(out)])
         assert ret == 0
         assert out.exists()
         content = out.read_text()
