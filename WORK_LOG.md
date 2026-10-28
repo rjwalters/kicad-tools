@@ -15,6 +15,18 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-28
 
+- **PR #8063**: fix: orient footprint text boxes in silk checker to match placer
+- **PR #8060**: feat(route): attach zones exempt router-class clearance floors in the emitted DRU, kct check and the backstop
+- **PR #8059**: test(lattice): cover the furthest-progress hybrid decline latches (#7931)
+- **PR #8058**: fix: report a split saved fill at kct zones fill and drop circular export advice
+- **PR #8057**: fix: withdraw auto-pour zones that reach none of their net's pads
+- **PR #8050**: fix(router): place fine-pitch dual-row escape vias past the pad tip
+- **Issue #8065** (closed): Fine-pitch dual-row escape vias land inside long TSSOP/SSOP pads (via-in-pad at tiers without it)
+- **Issue #8061** (closed): router: fine-pitch dual-row escape vias land inside long pads (TSSOP via_in_pad)
+- **Issue #8054** (closed): kct place-silk-refs and kct check disagree on silkscreen reference placement
+- **Issue #8051** (closed): kct route auto-skips a net with no zone as a "pour net" (+5V left unrouted)
+- **Issue #8048** (closed): route + check: attach zones exempt router-class clearance floors in both engines (emitted DRU and kct check)
+- **Issue #7931** (closed): lattice coupled: tolerate near-anchor jog-and-return tails in trim_end_reversals (board 03 USB_D J1.A6→U2.3 trunk-offset-degenerate)
 - **PR #8056**: fix: gate optimize-traces --drc-aware on zone-fill shorts with fail-safe revert
 - **Issue #8052** (closed): kct optimize-traces --drc-aware introduces shorts its rollback does not catch
 - **PR #8055**: refactor(lattice): report the furthest-progress hybrid decline reason
