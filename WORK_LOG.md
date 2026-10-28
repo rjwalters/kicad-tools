@@ -13,8 +13,16 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-10-28
+
+- **PR #8031**: feat(creepage): add --waive-attach-zone census waiver matching router attach zones
+- **Issue #8028** (closed): creepage: census has no #4506 attach-zone waiver — router-legal attach copper fails the gate as board-level
+
 ### 2026-10-27
 
+- **PR #8025**: fix: extend board 03 USB via-in-pad exception expiry to 2027-10-19
+- **PR #8022**: feat: add Finding locators to net-status JSON and measure_clearance
+- **Issue #8015** (closed): Stable, versioned finding format shared by finding-emitting commands (openkonnect G1)
 - **PR #8018**: feat: add kct export-formats for PDF/SVG/STEP/IPC-2581/ODB++
 - **Issue #8017** (closed): Wrap plot, 3D and alternative fabrication exports: PDF/SVG, STEP, IPC-2581, ODB++ (openkonnect G4)
 - **PR #8020**: feat: scope kct check findings with --bbox/--refs/--nets
