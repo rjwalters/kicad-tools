@@ -43,6 +43,8 @@ from .hybrid import (
     MAX_TRUNK_STARTS,
     MIN_TRUNK_PITCHES,
     TrunkStart,
+    furthest_hybrid_decline,
+    hybrid_decline_progress,
     propose_trunk_starts,
 )
 from .outcome import (
@@ -86,6 +88,8 @@ __all__ = [
     "gateway_anchor_point",
     "gateway_side",
     "handedness_consistent",
+    "furthest_hybrid_decline",
+    "hybrid_decline_progress",
     "hybrid_retry_reason",
     "plan_equivalent_pin_tie",
     "propose_gateway_sites",
