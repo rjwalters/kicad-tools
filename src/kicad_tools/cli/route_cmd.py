@@ -8693,6 +8693,8 @@ def _record_oracle_copper(router, output_path: Path) -> None:
     def via_key(v):
         return (v.net_name, round(v.x, 3), round(v.y, 3))
 
+    # Rounding to 3 decimals is safe: the oracle writes KiCad-native mm values, so
+    # a re-read of the same copper matches the router's float to well under 1 um.
     known_segs = {seg_key(sg) for r in known for sg in r.segments}
     known_vias = {via_key(v) for r in known for v in r.vias}
     segs, vias = parse_segments(text), parse_vias(text)

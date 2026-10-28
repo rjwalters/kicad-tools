@@ -50,6 +50,47 @@ def test_weld_clearance_raised_for_hv_neighbour_even_without_class_map(tmp_path)
     assert got == 1.6
 
 
+def _fp(ref, x, y, net_num, net):
+    return (
+        f'  (footprint "T:{ref}" (layer "F.Cu")\n'
+        f"    (at {x:g} {y:g})\n"
+        f'    (property "Reference" "{ref}" (at 0 0) (layer "F.SilkS"))\n'
+        f'    (pad "1" smd rect (at 0 0) (size 0.3 0.3) (layers "F.Cu") '
+        f'(net {net_num} "{net}"))\n'
+        f"  )\n"
+    )
+
+
+def _board(tmp_path, hv_dx):
+    """A readable board: GND pad R1.1 at (10, 10), HV pad ``hv_dx`` mm to its right."""
+    path = tmp_path / "b.kicad_pcb"
+    path.write_text(
+        '(kicad_pcb (version 20240108) (generator "pcbnew")\n'
+        '  (layers (0 "F.Cu" signal) (44 "Edge.Cuts" user))\n'
+        '  (net 0 "")\n  (net 1 "GND")\n  (net 2 "HV")\n'
+        + _fp("R1", 10, 10, 1, "GND")
+        + _fp("J1", 10 + hv_dx, 10, 2, "HV")
+        + '  (gr_rect (start 0 0) (end 60 30) (layer "Edge.Cuts") (width 0.1))\n)\n'
+    )
+    return path
+
+
+def test_weld_clearance_geometry_near_hv_returns_table_value(tmp_path):
+    # PCB.load succeeds: the geometric branch runs, not the unreadable-board fallback.
+    got = _closer(_table()).weld_clearance(_board(tmp_path, 1.5), {"GND": {"R1.1"}})
+    assert got == 1.6
+
+
+def test_weld_clearance_geometry_far_hv_keeps_floor(tmp_path):
+    got = _closer(_table()).weld_clearance(_board(tmp_path, 40.0), {"GND": {"R1.1"}})
+    assert got == 0.2
+
+
+def test_weld_clearance_geometry_without_table_keeps_floor(tmp_path):
+    got = _closer().weld_clearance(_board(tmp_path, 1.5), {"GND": {"R1.1"}})
+    assert got == 0.2
+
+
 def test_audit_includes_oracle_vias(tmp_path):
     pcb = tmp_path / "out.kicad_pcb"
     pcb.write_text(
