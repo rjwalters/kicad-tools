@@ -718,7 +718,7 @@ def _pad_aperture_geometry(
     neither the true copper outline (``silk_pad_clearance`` measures 0
     findings on the same board) nor native DRC sees.
     """
-    from shapely.affinity import rotate  # type: ignore[import-untyped]
+    from shapely.affinity import rotate
     from shapely.geometry import box
 
     margin = pad.solder_mask_margin if pad.solder_mask_margin is not None else min_mask_clearance
