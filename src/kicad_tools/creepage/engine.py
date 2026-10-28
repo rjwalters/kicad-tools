@@ -35,7 +35,7 @@ from __future__ import annotations
 import heapq
 import math
 import re
-from collections.abc import Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -166,6 +166,73 @@ def voltage_map_from_dict(data: Any) -> tuple[dict[str, VoltageInterval], float]
             continue  # other _-prefixed keys are documentation (_comment, ...)
         voltages[str(key)] = _coerce_interval(key, value)
     return voltages, edge_voltage
+
+
+# Reserved voltage-map key (#8043): device-bounded pair |ΔV| caps.
+_PAIR_BOUNDS_KEY = "_pair_bounds"
+
+
+def pair_bounds_from_dict(data: Any) -> dict[frozenset[str], tuple[float, str]]:
+    """Parse the reserved ``_pair_bounds`` list of a voltage map (#8043).
+
+    Each entry is ``{"nets": [a, b], "max_dv": volts, "why": "reason"}`` and
+    caps the pairwise |ΔV| of nets ``a``/``b`` at ``max_dv`` (a device rating
+    such as a MOSFET V_DS keeps two correlated nodes closer than their
+    independent worst-case intervals suggest).  A bound can only LOWER a
+    pair's ΔV, never raise it.  Transitive pairs are the author's to declare.
+
+    Returns ``{frozenset({norm_a, norm_b}): (max_dv, why)}`` keyed by the
+    :func:`_norm_net_key`-normalised, unordered pair.  A map without the key
+    yields ``{}``.
+
+    Raises:
+        TypeError: if ``data`` is not a dict.
+        ValueError: on a malformed list/entry, a non-finite or non-positive
+            ``max_dv`` (bool rejected), a missing/empty ``why``, or a pair
+            declared twice.
+    """
+    if not isinstance(data, dict):
+        raise TypeError(f"pair_bounds_from_dict expects a dict, got {type(data).__name__}")
+    raw = data.get(_PAIR_BOUNDS_KEY)
+    if raw is None:
+        return {}
+    if not isinstance(raw, list):
+        raise ValueError(f"{_PAIR_BOUNDS_KEY} must be a list, got {type(raw).__name__}")
+    out: dict[frozenset[str], tuple[float, str]] = {}
+    for i, entry in enumerate(raw):
+        where = f"{_PAIR_BOUNDS_KEY}[{i}]"
+        if not isinstance(entry, dict):
+            raise ValueError(f"{where} must be an object, got {type(entry).__name__}")
+        nets = entry.get("nets")
+        if (
+            not isinstance(nets, list)
+            or len(nets) != 2
+            or not all(isinstance(n, str) and n for n in nets)
+        ):
+            raise ValueError(f"{where}.nets must be a list of exactly two net names")
+        a, b = _norm_net_key(nets[0]), _norm_net_key(nets[1])
+        if a == b:
+            raise ValueError(f"{where}.nets must name two distinct nets, got {nets[0]!r} twice")
+        max_dv = _coerce_voltage(f"{where}.max_dv", entry.get("max_dv"))
+        if max_dv <= 0:
+            raise ValueError(f"{where}.max_dv must be > 0, got {max_dv!r}")
+        why = entry.get("why")
+        if not isinstance(why, str) or not why.strip():
+            raise ValueError(f"{where}.why is required (the reason makes the bound reviewable)")
+        key = frozenset((a, b))
+        if key in out:
+            raise ValueError(f"{where} duplicates the bound for pair {sorted(key)!r}")
+        out[key] = (max_dv, why.strip())
+    return out
+
+
+def pair_bounds_unmapped_nets(
+    bounds: Mapping[frozenset[str], tuple[float, str]],
+    voltage_nets: Iterable[str],
+) -> list[str]:
+    """Return sorted net names in *bounds* absent from the voltage map (typo guard)."""
+    mapped = {_norm_net_key(n) for n in voltage_nets}
+    return sorted({n for pair in bounds for n in pair} - mapped)
 
 
 def _coerce_interval(key: Any, value: Any) -> VoltageInterval:
@@ -1320,6 +1387,7 @@ def compute_creepage_census(
     overvoltage_category: str = "II",
     insulation: str = DEFAULT_INSULATION,
     attach_zones: Sequence[Any] | None = None,
+    pair_bounds: Mapping[frozenset[str], tuple[float, str]] | None = None,
 ) -> CreepageReport:
     """Build the full HV creepage/clearance census for a board.
 
@@ -1484,6 +1552,16 @@ def compute_creepage_census(
             dv, a_ep, b_ep, va, vb = dv_hi_lo, "hi", "lo", a.hi, b.lo
         else:
             dv, a_ep, b_ep, va, vb = dv_lo_hi, "lo", "hi", a.lo, b.hi
+        bound_prov: dict[str, Any] | None = None
+        if pair_bounds and not edge:
+            bound = pair_bounds.get(frozenset((_norm_net_key(name_a), _norm_net_key(name_b or ""))))
+            if bound is not None and bound[0] < dv:
+                bound_prov = {
+                    "unbounded_delta_v_v": round(dv, 4),
+                    "max_dv_v": bound[0],
+                    "why": bound[1],
+                }
+                dv = bound[0]
         req_creep, req_clear, cprov, clprov = _required_for_dv(dv)
         voltage_prov: dict[str, Any] = {
             "net_a_v": va,
@@ -1497,6 +1575,8 @@ def compute_creepage_census(
         if not (a.is_degenerate and b.is_degenerate):
             voltage_prov["net_a_endpoint"] = a_ep
             voltage_prov["net_b_endpoint"] = b_ep
+        if bound_prov is not None:
+            voltage_prov["pair_bound"] = bound_prov
         prov: dict[str, Any] = {"voltage": voltage_prov}
         if cprov:
             prov["creepage"] = cprov

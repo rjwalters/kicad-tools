@@ -603,6 +603,45 @@ def test_cross_domain_pair_matches_flat_voltage_lookup(tmp_path):
     assert pair.provenance["voltage"]["delta_v_v"] == 150.0
 
 
+def test_pair_bound_lowers_census_requirement_and_is_listed(tmp_path):
+    # #8043: a device bound caps the pair dV; provenance lists unbounded dV + why.
+    from kicad_tools.creepage.engine import compute_creepage_census, voltage_map_from_dict
+
+    pcb = _load(tmp_path, board_source(with_slot=False))
+    hv = resolve_hv_nets(pcb, "HV", _hv_map())
+    std = _std()
+    parsed, _ = voltage_map_from_dict({"L_MAINS": 150.0})
+
+    def run(bounds):
+        return compute_creepage_census(
+            pcb,
+            hv,
+            None,
+            standard="iec60664",
+            standard_edition=std.edition,
+            pollution_degree=2,
+            material_group="IIIa",
+            voltage_map=parsed,
+            standard_obj=std,
+            pair_bounds=bounds,
+        )
+
+    plain = _conductor_pair(run(None), "GND")
+    assert "pair_bound" not in plain.provenance["voltage"]
+    bounded = _conductor_pair(run({frozenset({"L_MAINS", "GND"}): (50.0, "dev rating")}), "GND")
+    expected, _ = std.required_creepage(50.0, 2, "IIIa")
+    assert bounded.required_creepage_mm == pytest.approx(expected)
+    assert bounded.required_creepage_mm < plain.required_creepage_mm
+    assert bounded.provenance["voltage"]["pair_bound"] == {
+        "unbounded_delta_v_v": 150.0,
+        "max_dv_v": 50.0,
+        "why": "dev rating",
+    }
+    # A bound above the worst case changes nothing (and adds no provenance).
+    big = _conductor_pair(run({frozenset({"L_MAINS", "GND"}): (500.0, "x")}), "GND")
+    assert big.provenance == plain.provenance
+
+
 def test_sub_50v_steps_up_to_nearest_tabulated_row(tmp_path):
     # dv=30 V steps up to the 32 V row of Table F.4 (issue #4402: the sub-50 V
     # rows are now tabulated, so a 30 V pair no longer jumps to the 50 V row).

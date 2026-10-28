@@ -45,6 +45,8 @@ def run_creepage_command(args) -> int:
         SELV_WORKING_VOLTAGE_V,
         compute_creepage_census,
         mains_suspect_nets,
+        pair_bounds_from_dict,
+        pair_bounds_unmapped_nets,
         resolve_hv_nets,
         voltage_map_from_dict,
     )
@@ -91,6 +93,7 @@ def run_creepage_command(args) -> int:
     # --standard (the table is the only source of a derived requirement) but
     # makes --working-voltage optional (unmapped nets default to 0 V).
     voltage_map: dict | None = None
+    pair_bounds: dict = {}
     edge_voltage = 0.0
     vmap_arg = getattr(args, "voltage_map", None)
     if vmap_arg:
@@ -106,7 +109,14 @@ def run_creepage_command(args) -> int:
             print(f"Error: voltage-map file not found: {vmap_path}", file=sys.stderr)
             return 1
         try:
-            voltage_map, edge_voltage = voltage_map_from_dict(json.loads(vmap_path.read_text()))
+            _vm_raw = json.loads(vmap_path.read_text())
+            voltage_map, edge_voltage = voltage_map_from_dict(_vm_raw)
+            pair_bounds = pair_bounds_from_dict(_vm_raw)  # #8043
+            for _n in pair_bounds_unmapped_nets(pair_bounds, voltage_map):
+                print(
+                    f"Warning: _pair_bounds names net {_n!r} absent from the voltage map",
+                    file=sys.stderr,
+                )
         except json.JSONDecodeError as e:
             print(f"Error: parsing voltage-map JSON: {e}", file=sys.stderr)
             return 1
@@ -240,6 +250,7 @@ def run_creepage_command(args) -> int:
             overvoltage_category=overvoltage_category,
             insulation=insulation,
             attach_zones=attach_zones,
+            pair_bounds=pair_bounds or None,
         )
     except StandardLookupError as e:
         # A per-pair |ΔV| out of the table's range (map mode): fail LOUD, never
