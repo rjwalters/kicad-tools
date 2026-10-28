@@ -15,6 +15,11 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-28
 
+- **PR #8056**: fix: gate optimize-traces --drc-aware on zone-fill shorts with fail-safe revert
+- **Issue #8052** (closed): kct optimize-traces --drc-aware introduces shorts its rollback does not catch
+- **PR #8055**: refactor(lattice): report the furthest-progress hybrid decline reason
+- **PR #8047**: fix(route): demote only the offending connection in the authored-floor backstop
+- **Issue #8029** (closed): route (lattice): post-route class-clearance backstop demotes 11 whole nets the negotiation just committed (209/212 -> 68/82)
 - **PR #8044**: feat: honour _pair_bounds device-bounded pair ΔV in voltage maps
 - **Issue #8043** (closed): voltage-map: device-bounded pair ΔV (_pair_bounds) — worst-case intervals make a TO-220 drain unroutable (300 V judged, ≤100 V physical)
 - **PR #8040**: fix: refuse .kicad_dru content KiCad silently drops and flag netclass-only cross-gates
