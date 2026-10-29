@@ -489,12 +489,26 @@ class LCSCClient:
         last_exception: Exception | None = None
 
         for attempt in range(self._max_retries + 1):
+            # The first response sets an XSRF-TOKEN cookie; once the session
+            # holds it, every POST must echo it as X-XSRF-TOKEN (as the browser
+            # does) or the endpoint answers 403. Without this, only the first
+            # request of a session succeeded.
+            token = session.cookies.get("XSRF-TOKEN")
+            headers = {"X-XSRF-TOKEN": token} if isinstance(token, str) else {}
             try:
-                response = session.post(url, json=payload, timeout=self.timeout)
+                extra = {"headers": headers} if headers else {}
+                response = session.post(url, json=payload, timeout=self.timeout, **extra)
                 response.raise_for_status()
                 return response.json()
             except requests.HTTPError as e:
                 status_code = e.response.status_code if e.response is not None else 0
+
+                # A 403 while holding a token may be an expired token (Max-Age
+                # 1800 s): drop the cookies and retry once tokenless. That
+                # retry sends no header, so a second 403 trips the breaker.
+                if status_code == 403 and headers:
+                    session.cookies.clear()
+                    return self._make_request(url, payload)
 
                 # 403 is not transient -- trip the circuit breaker and raise
                 if status_code == 403:
