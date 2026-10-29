@@ -397,6 +397,7 @@ def test_route_log_facts_are_extracted():
         "router_nets": "18/33",
         "hit_timeout": True,
         "oracle_unverified": False,
+        "pour_cut_by_timeout": False,
         "cache_hit": False,
     }
     assert ere.parse_route_log("nothing relevant")["hit_timeout"] is False
