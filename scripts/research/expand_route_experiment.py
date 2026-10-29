@@ -1150,6 +1150,12 @@ def parse_route_log(text: str) -> dict:
         out["oracle_unverified_reason"] = skipped[-1].strip() if skipped else "status UNKNOWN"
     elif failed:
         out["oracle_unverified_reason"] = "oracle_failed"
+    # Pour completion stopped on --timeout with links still open (Issue #8078):
+    # the open GND/VCC links are a budget cut, not a closer failure. Line-anchored
+    # like the patterns above so a warning that quotes the phrase is not evidence.
+    out["pour_cut_by_timeout"] = bool(
+        re.search(r"^\s*pour completion cut by --timeout:", text, re.M)
+    )
     # ``kct route`` keeps a result cache keyed on the board bytes and the CLI
     # recipe. A hit replays stored copper and routes nothing, so a "repeat" of
     # a row is not a second sample. The harness passes --no-cache; this records
@@ -1683,6 +1689,8 @@ def _fmt_counts(counts: dict | None) -> str:
 def _timeout_cell(row: dict) -> str:
     if row.get("artifact") == "deadline":
         return "yes (graded best-so-far)"
+    if row.get("pour_cut_by_timeout"):
+        return "yes (pour completion cut)"
     return "yes" if row.get("hit_timeout") or row.get("killed_by_harness") else "no"
 
 
