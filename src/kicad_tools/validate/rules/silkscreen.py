@@ -550,6 +550,39 @@ def _shared_endpoint(
     return None
 
 
+def _t_joint_point(
+    ends_a: tuple[tuple[float, float], tuple[float, float]],
+    ends_b: tuple[tuple[float, float], tuple[float, float]],
+    epsilon: float = _CLEARANCE_EPSILON_MM,
+) -> tuple[float, float] | None:
+    """Return the point where exactly one segment's endpoint lands on the other.
+
+    A T-joint (one line ending mid-span on another) is one drawing, like a
+    corner, but has no *shared* endpoint (#8090).  Returns ``None`` unless
+    exactly one endpoint of either segment lies within ``epsilon`` of the other
+    segment and the segments are not collinear -- so a line lying along
+    another (both endpoints on it, or collinear overlap) and an X-crossing
+    (no endpoint on the other line) still count as real overlaps.
+    """
+
+    def on_segment(p: tuple[float, float], seg: tuple[tuple[float, float], ...]) -> bool:
+        (x1, y1), (x2, y2) = seg
+        dx, dy = x2 - x1, y2 - y1
+        length_sq = dx * dx + dy * dy
+        if length_sq == 0.0:
+            return math.dist(p, seg[0]) <= epsilon
+        t = max(0.0, min(1.0, ((p[0] - x1) * dx + (p[1] - y1) * dy) / length_sq))
+        return math.dist(p, (x1 + t * dx, y1 + t * dy)) <= epsilon
+
+    da = (ends_a[1][0] - ends_a[0][0], ends_a[1][1] - ends_a[0][1])
+    db = (ends_b[1][0] - ends_b[0][0], ends_b[1][1] - ends_b[0][1])
+    if abs(da[0] * db[1] - da[1] * db[0]) <= 1e-9 * math.hypot(*da) * math.hypot(*db):
+        return None
+    candidates = [p for p in ends_a if on_segment(p, ends_b)]
+    candidates += [p for p in ends_b if on_segment(p, ends_a)]
+    return candidates[0] if len(candidates) == 1 else None
+
+
 def _fp_transform(footprint: Footprint) -> _Transform:
     """Return a ``(x, y) -> (X, Y)`` local->board transform for a footprint."""
     fp_x, fp_y = footprint.position
@@ -1281,6 +1314,12 @@ def check_silk_overlap(
                         joint = Point(joint_point).buffer(max(a[1], b[1]))
                         if not collinear_overlap and overlap.difference(joint).area < 1e-9:
                             continue
+                    else:
+                        t_point = _t_joint_point(a[0], b[0])
+                        if t_point is not None:
+                            joint = Point(t_point).buffer(max(a[1], b[1]))
+                            if overlap.difference(joint).area < 1e-9:
+                                continue
                 # Same-label siblings (e.g. several fp_line strokes on one
                 # footprint) are otherwise indistinguishable in `items` --
                 # append the element's own UUID so a per-corner waiver can
