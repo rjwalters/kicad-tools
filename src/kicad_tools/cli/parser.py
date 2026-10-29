@@ -2519,6 +2519,46 @@ def _add_pcb_parser(subparsers) -> None:
         "even with --all-runs.",
     )
     pcb_reinforce.add_argument(
+        "--voltage-map",
+        dest="voltage_map",
+        default=None,
+        metavar="FILE",
+        help="Path to a JSON per-net voltage map (same format as `kct route "
+        "--voltage-map`). Anchors are then refused unless they keep the "
+        "pairwise IEC creepage clearance max(class floor, creepage @ |dV|) "
+        "from every other-net obstacle (Issue #8085). Absent, only the scalar "
+        "fab/net-class floors apply.",
+    )
+    pcb_reinforce.add_argument(
+        "--creepage-standard",
+        dest="creepage_standard",
+        choices=["iec60664", "iec62368"],
+        default="iec60664",
+        help="Creepage standard for the --voltage-map lookup (default: iec60664)",
+    )
+    pcb_reinforce.add_argument(
+        "--pollution-degree",
+        dest="pollution_degree",
+        type=int,
+        choices=[1, 2, 3],
+        default=2,
+        help="IEC pollution degree for the --voltage-map lookup (default: 2)",
+    )
+    pcb_reinforce.add_argument(
+        "--material-group",
+        dest="material_group",
+        default="IIIa",
+        help="Insulation material group I/II/IIIa/IIIb (default: IIIa)",
+    )
+    pcb_reinforce.add_argument(
+        "--hv-threshold",
+        dest="hv_threshold",
+        type=float,
+        default=30.0,
+        metavar="VOLTS",
+        help="Minimum net-pair |dV| that triggers a creepage widening (default: 30.0)",
+    )
+    pcb_reinforce.add_argument(
         "-o",
         "--output",
         dest="output",

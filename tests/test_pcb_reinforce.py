@@ -1323,3 +1323,120 @@ def test_board09_force_runs_survive_current_path_gate():
     assert sum(r.length_mm for r in eligible) > 20
     assert any(r.path_excluded_reason for r in result.runs)
     assert board.read_bytes() == before
+
+
+# --------------------------------------------------------------------------
+# Board rules: class floors, pairwise voltage map, same-net holes (#8085)
+# --------------------------------------------------------------------------
+
+
+def _blocked_by_foreign_track(gap_mm: float) -> PCB:
+    """Straight run whose x=35 anchor window is walled by a thin foreign track.
+
+    The 0.2 mm foreign track spans the whole nudge window and sits so its edge
+    is ``gap_mm`` from the (1.916 mm) anchor pad edge.
+    """
+    pcb = _straight_run_pcb(length=100.0)
+    pad_radius = anchor_pad_for_drill(anchor_drill_for_awg(16), 0.25) / 2
+    dy = gap_mm + pad_radius + 0.1
+    pcb.add_trace((27, 50 + dy), (43, 50 + dy), width=0.2, layer="F.Cu", net="OTHER")
+    return pcb
+
+
+class TestBoardRulesClearance:
+    def test_class_floor_refuses_where_fallback_would_place(self):
+        # 0.3 mm gap clears the 0.2 mm fallback ...
+        baseline = reinforce_net(_blocked_by_foreign_track(0.3), "FUSED_LINE", spacing_mm=15.0)
+        assert baseline.refused_count == 0
+        # ... but not a 0.4 mm net-class floor on the obstacle's class.
+        result = reinforce_net(
+            _blocked_by_foreign_track(0.3),
+            "FUSED_LINE",
+            spacing_mm=15.0,
+            net_class_clearances={"OTHER": 0.4},
+        )
+        assert result.refused_count >= 1
+        r = result.refused[0]
+        assert r.rule == "dru_class_floor"
+        assert r.required_mm == pytest.approx(0.4)
+        assert r.actual_mm == pytest.approx(0.3, abs=0.01)
+        assert r.obstacle_net == "OTHER"
+
+    def test_pairwise_voltage_map_refuses_hv_pair(self):
+        from kicad_tools.router.pairwise_clearance import build_pairwise_clearance_table
+
+        table = build_pairwise_clearance_table(
+            {"FUSED_LINE": 150.0, "OTHER": 3.3}, dru=0.0, hv_threshold=30.0
+        )
+        required = table.required_clearance("FUSED_LINE", "OTHER")
+        assert required > 0.44
+        # 0.44 mm passes the scalar floors ...
+        scalar = reinforce_net(_blocked_by_foreign_track(0.44), "FUSED_LINE", spacing_mm=15.0)
+        assert scalar.refused_count == 0
+        # ... and is refused, naming the pairwise rule, once the map is given.
+        result = reinforce_net(
+            _blocked_by_foreign_track(0.44),
+            "FUSED_LINE",
+            spacing_mm=15.0,
+            pairwise_clearance=table,
+        )
+        assert result.refused_count >= 1
+        r = result.refused[0]
+        assert r.rule == "voltage_map_pairwise"
+        assert r.required_mm == pytest.approx(required)
+        assert r.actual_mm == pytest.approx(0.44, abs=0.01)
+
+    def test_endpoint_on_same_net_pth_drill_is_nudged_off(self):
+        pcb = _straight_run_pcb(length=100.0)
+        _add_th_pad_footprint(pcb, ref="J1", x=20.0, y=50.0, net="FUSED_LINE", drill=1.0, size=2.0)
+        result = reinforce_net(pcb, "FUSED_LINE", spacing_mm=15.0)
+        drill = anchor_drill_for_awg(16)
+        min_center = 0.5 + drill / 2 + 1.0 / 2  # hole-to-hole floor, edge to edge
+        for a in result.placed:
+            assert math.hypot(a.x - 20.0, a.y - 50.0) >= min_center - 1e-6
+
+    def test_candidate_on_existing_same_net_via_is_refused(self):
+        pcb = _straight_run_pcb(length=100.0)
+        pcb.add_via(35.0, 50.0, size=0.6, drill=0.3, layers=("F.Cu", "B.Cu"), net="FUSED_LINE")
+        result = reinforce_net(pcb, "FUSED_LINE", spacing_mm=15.0)
+        drill = anchor_drill_for_awg(16)
+        min_center = 0.5 + drill / 2 + 0.3 / 2
+        for a in result.placed:
+            assert math.hypot(a.x - 35.0, a.y - 50.0) >= min_center - 1e-6
+
+    def test_hole_to_hole_refusal_names_rule(self):
+        pcb = _straight_run_pcb(length=100.0)
+        # Same-net vias walling the whole nudge window around x=35.
+        for x in (28.0, 30.5, 33.0, 35.0, 37.0, 39.5, 42.0):
+            pcb.add_via(x, 50.0, size=0.6, drill=0.3, layers=("F.Cu", "B.Cu"), net="FUSED_LINE")
+        result = reinforce_net(pcb, "FUSED_LINE", spacing_mm=15.0)
+        mid = [r for r in result.refused if abs(r.x - 35.0) < 0.5]
+        assert mid and mid[0].rule == "hole_to_hole"
+        assert mid[0].required_mm == pytest.approx(0.5)
+
+
+class TestReinforceCLIBoardRules:
+    def test_cli_voltage_map_reports_rule_in_json(self, tmp_path, capsys):
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        pcb_path = tmp_path / "board.kicad_pcb"
+        _blocked_by_foreign_track(0.44).save(pcb_path)
+        vm = tmp_path / "vm.json"
+        vm.write_text(json.dumps({"FUSED_LINE": 150.0, "OTHER": 3.3}))
+
+        rc = run_pcb_command(
+            _reinforce_args(pcb_path, format="json", dry_run=True, voltage_map=str(vm))
+        )
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["refused"]
+        assert data["refused"][0]["rule"] == "voltage_map_pairwise"
+        assert data["refused"][0]["required_mm"] > 0.44
+
+    def test_cli_missing_voltage_map_errors(self, tmp_path):
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        pcb_path = tmp_path / "board.kicad_pcb"
+        _straight_run_pcb(length=100.0).save(pcb_path)
+        rc = run_pcb_command(_reinforce_args(pcb_path, voltage_map=str(tmp_path / "nope.json")))
+        assert rc == 1
