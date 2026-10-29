@@ -1037,17 +1037,31 @@ def _run_fill(args) -> int:
 
     check = check_saved_fill(target, kicad_cli=kicad_cli)
     payload["saved_fill_regressions"] = list(check.regressions)
+    # Issue #8053: what the self-verifying foreign-pad carve did.
+    fill_notes = list(getattr(result, "fill_notes", None) or [])
+    fill_conflicts = list(getattr(result, "fill_conflicts", None) or [])
+    payload["fill_notes"] = fill_notes
+    payload["fill_conflicts"] = fill_conflicts
 
     if json_mode:
         payload["filled"] = True
         emit_json(payload)
     elif not quiet:
         print(f"Zones filled: {target}")
+        for note in fill_notes:
+            print(f"Note: {note}")
 
-    if check.regressions:
+    if check.regressions or fill_conflicts:
         print("Error: saved zone fill is split where a refill is not:", file=sys.stderr)
         for line in check.regressions:
             print(f"  {line}", file=sys.stderr)
+        if fill_conflicts:
+            print(
+                "The foreign-pad clearance carve is needed on these zones but splits them:",
+                file=sys.stderr,
+            )
+            for line in fill_conflicts:
+                print(f"  {line}", file=sys.stderr)
         print(
             "`kct export` will refuse this board. Refill with KiCad's own filler: "
             f"`kicad-cli pcb drc --refill-zones --save-board {target}`",
