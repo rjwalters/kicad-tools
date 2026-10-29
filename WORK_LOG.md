@@ -15,6 +15,10 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-29
 
+- **PR #8094**: fix: treat a single Kelvin sense tap as non-force copper in current-path fanout check
+- **Issue #8092** (closed): current-paths-audit: Kelvin sense tap at a 2-terminal shunt endpoint (pad -> via -> sense IC) marks the path ambiguous; same-net Kelvin taps unverifiable
+- **PR #8091**: fix(validate): exempt same-footprint silk T-joints from silk_overlap
+- **Issue #8090** (closed): check: silk_overlap false positives at T-joints within one library footprint (follow-up to #4989; blocks tapeout Gate 4b)
 - **PR #8088**: fix: make pcb reinforce honor class clearance floors, voltage map and same-net holes
 - **Issue #8085** (closed): pcb reinforce: anchors ignore the DRU class floor and the pairwise HV voltage map, and land on PTH pad drills (co-located holes)
 - **PR #8084**: fix(bench): label pour completion cut by --timeout in route rows
