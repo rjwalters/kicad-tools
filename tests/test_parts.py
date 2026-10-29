@@ -1683,6 +1683,64 @@ class TestLCSCClientCircuitBreaker:
             # No HTTP request should have been made
             mock_session.return_value.post.assert_not_called()
 
+    def test_xsrf_cookie_echoed_as_header(self, tmp_path):
+        """A held XSRF-TOKEN cookie is sent back as X-XSRF-TOKEN (second-request 403)."""
+        import requests
+
+        from kicad_tools.parts import LCSCClient, PartsCache
+
+        cache = PartsCache(db_path=tmp_path / "cache.db")
+        client = LCSCClient(cache=cache, rate_limit=0)
+        session = requests.Session()
+        session.cookies.set("XSRF-TOKEN", "tok-123")
+
+        ok = MagicMock()
+        ok.json.return_value = {"code": 200}
+        with (
+            patch.object(client, "_get_session", return_value=session),
+            patch.object(session, "post", return_value=ok) as post,
+        ):
+            client._make_request("https://example.com/api", {})
+
+        assert post.call_args.kwargs["headers"] == {"X-XSRF-TOKEN": "tok-123"}
+
+    def test_403_with_stale_xsrf_token_refreshes_once(self, tmp_path):
+        """A 403 while holding a token clears cookies and retries once before tripping."""
+        import requests
+
+        from kicad_tools.parts import LCSCClient, PartsCache
+        from kicad_tools.parts.lcsc import LCSCForbiddenError
+
+        cache = PartsCache(db_path=tmp_path / "cache.db")
+        client = LCSCClient(cache=cache, rate_limit=0)
+        session = requests.Session()
+        session.cookies.set("XSRF-TOKEN", "expired")
+
+        forbidden = MagicMock()
+        forbidden.status_code = 403
+        forbidden.raise_for_status.side_effect = requests.HTTPError(response=forbidden)
+        ok = MagicMock()
+        ok.json.return_value = {"code": 200}
+
+        with (
+            patch.object(client, "_get_session", return_value=session),
+            patch.object(session, "post", side_effect=[forbidden, ok]) as post,
+        ):
+            assert client._make_request("https://example.com/api", {}) == {"code": 200}
+        assert post.call_count == 2
+        assert "headers" not in post.call_args_list[1].kwargs
+        assert client._api_forbidden is False
+
+        # A 403 without a token (true geo-block) still trips the breaker at once.
+        with (
+            patch.object(client, "_get_session", return_value=session),
+            patch.object(session, "post", return_value=forbidden) as post,
+            pytest.raises(LCSCForbiddenError),
+        ):
+            client._make_request("https://example.com/api", {})
+        assert post.call_count == 1
+        assert client._api_forbidden is True
+
     def test_429_still_retries(self, tmp_path):
         """429 responses still trigger retries (not affected by 403 change)."""
         import requests
