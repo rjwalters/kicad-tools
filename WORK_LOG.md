@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-29
 
+- **PR #8079**: chore(changelog): cite parent epics #5798 and #7690 (unblocks release gate)
+- **PR #8075**: chore(deps): Bump authlib from 1.6.12 to 1.9.1
 - **PR #8074**: ci: gate board 05 nightly on 0 warnings in both engines
 - **PR #8071**: fix(router): hold hybrid legs to the partner trunk at the intra-pair gap near the virtual site
 - **Issue #8073** (closed): board 05 nightly: gate on 0 warnings in both engines (finish #7848 AC 2)
