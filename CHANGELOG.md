@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.1] - 2026-10-29
+
+### Fixed
+
+- **Pour completion cut by `--timeout` is reported as its own outcome** (Issue #8078). When the KiCad-oracle pour stage stops on the deadline with links still open, `kct route` now logs the time-left / DRC-cost / attempt-estimate that made the gate refuse and says the closer was cut by `--timeout` instead of presenting the links as plain unconnected GND/VCC nets.
+
+- **Bench rows label a pour-completion deadline cut** (Issue #8078). `expand_route_experiment.py` now records `pour_cut_by_timeout` and the route table's Timeout cell reads `yes (pour completion cut)`, so open GND/VCC links caused by `--timeout` are distinguishable from a closer failure. The manufacturable verdict is unchanged.
+
+- **`kct pcb reinforce` honors the board's own clearance rules** (Issue #8085).
+  Anchors are now checked against the net-class clearance floors from the
+  `.kicad_pro` (as `kct check` reads them), and with the new `--voltage-map`
+  (plus `--creepage-standard`, `--pollution-degree`, `--material-group`,
+  `--hv-threshold`) against the pairwise IEC requirement `kct route` uses. The
+  hole-to-hole check now includes same-net PTH pads and vias, so anchors no
+  longer land on pad drills. Refusals report the governing rule
+  (`hole_to_hole` / `dru_class_floor` / `voltage_map_pairwise`) with required
+  vs actual mm in text and JSON.
+
+- **`silk_overlap` no longer flags T-joints within one footprint** (Issue #8090).
+  A line ending mid-span on another `fp_line` of the same footprint is treated
+  like a corner join; duplicates, collinear overlaps, X-crossings and
+  cross-footprint pairs still flag.
+
+- **`kct pcb current-paths-audit` no longer reports a correct Kelvin layout as ambiguous** (Issue #8092). A thin sense tap off an endpoint pad (stub -> via -> sense-IC pad, acyclic and narrower than the force copper) is now set aside from the endpoint-fanout judgement and listed in `PathResolution.sense_taps` instead of being treated as a force leg; rejoining, equally wide or dangling taps and real via arrays stay ambiguous.
+
 ## [0.25.0] - 2026-10-29
 
 ### Upgrade notes / behaviour changes
@@ -14673,6 +14698,7 @@ All blocks feature:
 - Python 3.10+
 - numpy >= 1.20
 
+[0.25.1]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.25.1
 [0.25.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.25.0
 [0.24.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.24.0
 [0.23.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.23.0
