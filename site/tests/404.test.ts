@@ -5,6 +5,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symli
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { PROJECT_FACT_SOURCES } from "../src/data/projectFactSources.ts";
 
 const site = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 let root: string;
@@ -16,7 +17,7 @@ beforeAll(() => {
   const boards = join(root, "boards");
   mkdirSync(fixtureSite);
   mkdirSync(boards);
-  cpSync(join(site, "..", "pyproject.toml"), join(root, "pyproject.toml"));
+  for (const rel of PROJECT_FACT_SOURCES) cpSync(join(site, "..", rel), join(root, rel), { recursive: true });
   for (const entry of ["src", "scripts", "astro.config.mjs", "package.json", "tsconfig.json"]) {
     cpSync(join(site, entry), join(fixtureSite, entry), { recursive: true });
   }
