@@ -593,6 +593,11 @@ class CommittedCopper:
         # no trial is open -- the pre-#6703 add path, byte-for-byte.
         self._journal: list[tuple[int, Pt, Pt, int, float, float]] | None = None
         self._trial_depth = 0
+        # Issue #7931: ``(partner net, site, reach, gap)`` while a hybrid leg is
+        # searched.  Only the partner's copper, and only for geometry wholly
+        # within ``reach`` of the leg's virtual site, is held to ``gap`` (the
+        # pair's own intra-pair gap) instead of the leg's full clearance.
+        self.intra_pair: tuple[int, Pt, float, float] | None = None
 
     # -- trial commits (issue #6703) ---------------------------------------
 
@@ -751,6 +756,16 @@ class CommittedCopper:
         own_clr = self.clearance if clearance is None else clearance
         return own_half, own_clr
 
+    def _intra_gap(self, cnet: int, a: Pt, b: Pt, required: float) -> float:
+        """``required``, relaxed to the intra-pair gap for the hybrid partner (#7931)."""
+        ip = self.intra_pair
+        if ip is None or cnet != ip[0]:
+            return required
+        _net, site, reach, gap = ip
+        if dist(a, site) > reach or dist(b, site) > reach:
+            return required
+        return min(required, gap)
+
     def seg_clear(
         self,
         a: Pt,
@@ -804,7 +819,7 @@ class CommittedCopper:
             if sep - own_half - hw > need + 1e-6:
                 continue
             edge_gap = probe.gap(ka.trace(c, d, hw, layer))
-            if not ka.satisfies(edge_gap, max(own_clr, iclr)):
+            if not ka.satisfies(edge_gap, self._intra_gap(cnet, a, b, max(own_clr, iclr))):
                 return False
             # Issue #4602: pair term.  The gap widens to the PAIR requirement
             # (never a per-net scalar); a scalar-passing hit inside the
@@ -899,7 +914,7 @@ class CommittedCopper:
             if max(sx, sy) - own_half - hw > need + 1e-6:
                 continue
             edge_gap = probe.gap(ka.trace(c, d, hw, layer))
-            if not ka.satisfies(edge_gap, max(own_clr, iclr)):
+            if not ka.satisfies(edge_gap, self._intra_gap(cnet, point, point, max(own_clr, iclr))):
                 return False
             if pw is not None:
                 req = row.get(cnet, 0.0)
