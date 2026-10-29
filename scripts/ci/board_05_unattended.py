@@ -19,10 +19,11 @@ that proof. It leaves the shipping path alone:
    ``KCT_KICAD_DOCKER=1`` works on a host):
 
    * kicad-cli ``pcb drc --refill-zones --all-track-errors``: 0 error-severity
-     violations and 0 unconnected items. A ``lib_footprint_issues`` finding
+     violations, 0 warnings and 0 unconnected items. A ``lib_footprint_issues`` finding
      refuses (exit 2): it describes the environment, not the board (#6962).
    * kicad-cli ``sch erc``: 0 violations (the same gate ``build.py`` applies).
-   * ``kct check --mfr jlcpcb``: 0 errors.
+   * ``kct check --mfr jlcpcb``: 0 errors and 0 warnings (the #7298
+     no-warning gate ``build.py`` applies; #8073).
    * copper + label LVS (:func:`kicad_tools.lvs.write_lvs_report`): clean.
    * every net complete (``measure_completion``), and the route itself exited
      0 with a finished (not deadline best-so-far) output.
@@ -163,6 +164,8 @@ def gate_failures(row: dict) -> list[str]:
     count("kicad_drc_unconnected", "kicad-cli unconnected items")
     count("kicad_erc_violations", "kicad-cli ERC violations")
     count("kct_check_errors", f"kct check --mfr {MANUFACTURER} errors")
+    count("kicad_drc_warnings", "kicad-cli DRC warnings")
+    count("kct_check_warnings", f"kct check --mfr {MANUFACTURER} warnings")
 
     for key, label in (("lvs_copper_clean", "copper LVS"), ("lvs_label_clean", "label LVS")):
         value = row.get(key)
