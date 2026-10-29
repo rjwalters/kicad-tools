@@ -2,7 +2,7 @@
 
 Prioritized roadmap generated from current GitHub label state. Maintained by the Guide triage agent.
 
-*Last updated: 2026-10-28*
+*Last updated: 2026-10-29*
 
 ---
 
@@ -29,30 +29,20 @@ _None._
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-- **#8054**: kct place-silk-refs and kct check disagree on silkscreen reference placement
+- **#7931**: lattice hybrid: legs fail pad-escape-end at the trunk's virtual site (board 03 USB_D J1.A6→U2.3)
 
 ## In Progress
 
 Issues currently being built (`loom:building`).
 
-- **#7931**: lattice coupled: tolerate near-anchor jog-and-return tails in trim_end_reversals (board 03 USB_D J1.A6→U2.3 trunk-offset-degenerate)
-- **#8029**: route (lattice): post-route class-clearance backstop demotes 11 whole nets the negotiation just committed (209/212 -> 68/82)
-- **#8048**: route + check: attach zones exempt router-class clearance floors in both engines (emitted DRU and kct check)
-- **#8051**: kct route auto-skips a net with no zone as a "pour net" (+5V left unrouted)
-- **#8052**: kct optimize-traces --drc-aware introduces shorts its rollback does not catch
-- **#8053**: kct export rejects a zone fill written by kct zones fill ("Saved zone fill is split where a refill is not")
+- **#8077**: install-kct.sh: PyPI source mode as the default (+ kct doctor, opt-in upgrade workflow) — consumers track releases, lockfile pins
+- **#8078**: board 03 bench: pour completion hits its deadline near --timeout, leaving 20 GND/VCC links unconnected
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#8047**: fix(route): demote only the offending connection in the authored-floor backstop
-- **#8055**: refactor(lattice): report the furthest-progress hybrid decline reason
-- **#8056**: fix: gate optimize-traces --drc-aware on zone-fill shorts with fail-safe revert
-- **#8057**: fix: withdraw auto-pour zones that reach none of their net's pads
-- **#8058**: fix: report a split saved fill at kct zones fill and drop circular export advice
-- **#8059**: fix(lattice): report the furthest-progress hybrid decline reason (#7931)
-- **#8060**: feat(route): attach zones exempt router-class clearance floors in the emitted DRU, kct check and the backstop
+- **#8080**: fix(route): report pour completion cut by --timeout as its own outcome
 
 ## Approved (Awaiting Merge)
 
@@ -66,10 +56,8 @@ Issues carrying `loom:curated`.
 
 - **#5509**: Epic: one clearance kernel — search, commit, and final validation must agree with kicad-cli DRC *(curated)*
 - **#7487**: Re-rule or remove board 03 usb_geometry via-in-pad window exception by 2027-04-19 (#7457 / #7084 Q10) *(curated)*
-- **#8051**: kct route auto-skips a net with no zone as a "pour net" (+5V left unrouted) *(curated)*
-- **#8052**: kct optimize-traces --drc-aware introduces shorts its rollback does not catch *(curated)*
-- **#8053**: kct export rejects a zone fill written by kct zones fill ("Saved zone fill is split where a refill is not") *(curated)*
-- **#8054**: kct place-silk-refs and kct check disagree on silkscreen reference placement *(curated)*
+- **#7931**: lattice hybrid: legs fail pad-escape-end at the trunk's virtual site (board 03 USB_D J1.A6→U2.3) *(curated)*
+- **#8078**: board 03 bench: pour completion hits its deadline near --timeout, leaving 20 GND/VCC links unconnected *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -90,10 +78,10 @@ _None._
 | Very important | 0 |
 | Important | 0 |
 | Ready (`loom:issue`) | 1 |
-| In Progress (`loom:building`) | 6 |
-| PRs awaiting review | 7 |
+| In Progress (`loom:building`) | 2 |
+| PRs awaiting review | 1 |
 | Approved PRs awaiting merge | 0 |
-| Curated | 6 |
+| Curated | 4 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 4 |
 <!-- guide:plan-body:end -->
