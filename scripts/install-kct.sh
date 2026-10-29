@@ -420,9 +420,30 @@ PYPI_PIN_HELPER="$KCT_ROOT/scripts/lib/install_kct_pypi_pin.py"
 # may name a release uv cannot resolve yet, and the edit must stay
 # network-free. "match" = a lower bound >= PYPI_FLOOR and no
 # [tool.uv.sources] kicad-tools entry; anything else is rewritten in place.
+# The helper re-parses its edit with tomllib (Python >= 3.11) or tomli and
+# refuses to write without one, so pick an interpreter that has either. A bare
+# `python3` may be macOS's 3.9; `uv python find` never downloads.
+pick_pin_python() {
+  local cand
+  for cand in python3 python3.15 python3.14 python3.13 python3.12 python3.11; do
+    command -v "$cand" >/dev/null 2>&1 || continue
+    if "$cand" -c $'try:\n import tomllib\nexcept ImportError:\n import tomli' >/dev/null 2>&1; then
+      printf '%s\n' "$cand"
+      return 0
+    fi
+  done
+  if command -v uv >/dev/null 2>&1; then
+    cand="$(uv python find '>=3.11' 2>/dev/null)" && [[ -n "$cand" ]] && {
+      printf '%s\n' "$cand"
+      return 0
+    }
+  fi
+  return 1
+}
+
 run_pypi_pin() {
   local out
-  out="$(python3 "$PYPI_PIN_HELPER" apply "$TARGET_PYPROJECT" "$PYPI_FLOOR")" \
+  out="$("$PIN_PYTHON" "$PYPI_PIN_HELPER" apply "$TARGET_PYPROJECT" "$PYPI_FLOOR")" \
     || error "could not rewrite the kicad-tools dependency in $TARGET_PYPROJECT"
   while IFS= read -r req; do
     [[ -n "$req" ]] && ok "dependency: $req"
@@ -430,9 +451,12 @@ run_pypi_pin() {
 }
 
 if [[ "$SOURCE_MODE" == "pypi" ]]; then
-  command -v python3 >/dev/null 2>&1 || error "python3 not found on PATH but required to edit $TARGET_PYPROJECT"
+  PIN_PYTHON="$(pick_pin_python)" \
+    || error "editing $TARGET_PYPROJECT needs Python >= 3.11 (or python3 with tomli) on PATH, or uv with one installed"
   [[ -f "$PYPI_PIN_HELPER" ]] || error "source root missing scripts/lib/install_kct_pypi_pin.py: $KCT_ROOT"
-  case "$(python3 "$PYPI_PIN_HELPER" state "$TARGET_PYPROJECT" "$PYPI_FLOOR")" in
+  PIN_STATE="$("$PIN_PYTHON" "$PYPI_PIN_HELPER" state "$TARGET_PYPROJECT" "$PYPI_FLOOR")" \
+    || error "could not read the kicad-tools dependency from $TARGET_PYPROJECT"
+  case "$PIN_STATE" in
     match)
       ok "kicad-tools dependency already present and up to date (no-op)"
       ;;

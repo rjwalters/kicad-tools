@@ -142,6 +142,8 @@ _RECONCILE_TEMPLATE = "install-kct.sh --tag v{version}"
 # PyPI mode (issue #8077): the installer writes ``kicad-tools>=<its version>``,
 # so the reconcile is a --pypi re-run from a checkout of the installed release.
 _RECONCILE_TEMPLATE_PYPI = "install-kct.sh --pypi  # from a kicad-tools v{version} checkout"
+# PyPI mode with the installed package below pyproject.toml's ``>=`` floor.
+_RECONCILE_UV_SYNC = "uv sync"
 
 # A ``>=X`` lower bound inside a PEP 508 requirement string.
 _LOWER_BOUND_RE = re.compile(r">=\s*v?([0-9][^\s,;]*)")
@@ -236,8 +238,38 @@ class DriftReport:
         if not self.has_drift:
             return None
         if self.pypi_mode:
-            return _RECONCILE_TEMPLATE_PYPI.format(version=self.installed_version)
+            reinstall = _RECONCILE_TEMPLATE_PYPI.format(version=self.installed_version)
+            stale = self.stale_records
+            if not any(_is_floor_above_installed(r) for r in stale):
+                return reinstall
+            # The environment is behind pyproject.toml's floor: a re-install
+            # is a no-op for that record (a higher floor already reads as a
+            # match), so `uv sync` is the fix -- and it also settles every
+            # record that is *ahead* of the installed package. Only records
+            # older than the installed package still need a re-install.
+            if all(_is_ahead_of(r, self.installed_version) for r in stale):
+                return _RECONCILE_UV_SYNC
+            return f"{_RECONCILE_UV_SYNC}, then {reinstall}"
         return _RECONCILE_TEMPLATE.format(version=self.installed_version)
+
+
+def _is_ahead_of(record: RecordResult, installed: str) -> bool:
+    """Does ``record`` name a version at or above ``installed``?"""
+    recorded = _numeric_version_tuple((record.recorded_version or "").lstrip(">="))
+    current = _numeric_version_tuple(installed)
+    if recorded is None or current is None:
+        return False
+    width = max(len(recorded), len(current))
+    return recorded + (0,) * (width - len(recorded)) >= current + (0,) * (width - len(current))
+
+
+def _is_floor_above_installed(record: RecordResult) -> bool:
+    """A PyPI ``>=X`` dependency record that drifts because installed < X."""
+    return (
+        record.name == PYPROJECT_DEPENDENCY
+        and record.is_drift
+        and (record.recorded_version or "").startswith(">=")
+    )
 
 
 def normalize_version(version: str) -> str:

@@ -423,6 +423,27 @@ def test_pypi_lower_bound_above_installed_is_drift(tmp_path):
     assert "uv sync" in rec.detail
 
 
+def test_pypi_floor_above_installed_reconciles_with_uv_sync(tmp_path):
+    # A --pypi re-run is a no-op here (a higher floor already reads as a
+    # match), so the reconcile hint must be `uv sync` (#8081 review).
+    write_consumer_pyproject_pypi(tmp_path, "0.19.0")
+    write_pypi_metadata(tmp_path, "0.19.0")
+    report = check_version_drift(tmp_path, INSTALLED)
+    # install-metadata (v0.19.0) is ahead of the package too; `uv sync`
+    # settles both records.
+    assert {r.name for r in report.stale_records} == {PYPROJECT_DEPENDENCY, INSTALL_METADATA}
+    assert report.reconcile_command == "uv sync"
+
+
+def test_pypi_floor_above_installed_plus_stale_records_syncs_first(tmp_path):
+    write_consumer_pyproject_pypi(tmp_path, "0.19.0")
+    write_pypi_metadata(tmp_path, "0.17.0")
+    report = check_version_drift(tmp_path, INSTALLED)
+    assert {r.name for r in report.stale_records} == {PYPROJECT_DEPENDENCY, INSTALL_METADATA}
+    assert report.reconcile_command is not None
+    assert report.reconcile_command.startswith("uv sync, then install-kct.sh --pypi")
+
+
 def test_pypi_mode_flags_stale_install_metadata(tmp_path):
     # The vendored skills/gates (install-metadata) are older than the package.
     write_consumer_pyproject_pypi(tmp_path, "0.17.0")

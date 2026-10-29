@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -1146,3 +1147,116 @@ def test_pypi_mode_removes_table_form_sources_entry(
     assert data["project"]["dependencies"] == [f"kicad-tools[report]>={_source_version()}"]
     assert "sources" not in data.get("tool", {}).get("uv", {})
     assert data["tool"]["ruff"] == {"line-length": 100}
+
+
+# --- the pin helper only edits dependency arrays (#8081 review) --------------
+
+PIN_HELPER = REPO_ROOT / "scripts" / "lib" / "install_kct_pypi_pin.py"
+
+
+def _pin(path: Path, cmd: str, version: str = "0.25.0") -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(PIN_HELPER), cmd, str(path), version],
+        capture_output=True,
+        text=True,
+    )
+
+
+def _pin_apply(tmp_path: Path, text: str) -> tuple[subprocess.CompletedProcess[str], dict]:
+    path = tmp_path / "pyproject.toml"
+    path.write_text(text)
+    result = _pin(path, "apply")
+    return result, tomllib.loads(path.read_text())
+
+
+def test_pin_helper_ignores_keywords_and_adds_the_dependency(tmp_path: Path) -> None:
+    text = (
+        '[project]\nname = "board"\nversion = "0.1.0"\n'
+        'keywords = ["kicad-tools", "pcb"]\ndependencies = ["numpy"]\n'
+    )
+    (tmp_path / "pyproject.toml").write_text(text)
+    assert _pin(tmp_path / "pyproject.toml", "state").stdout.strip() == "absent"
+    result, data = _pin_apply(tmp_path, text)
+    assert result.returncode == 0, result.stderr
+    assert data["project"]["keywords"] == ["kicad-tools", "pcb"]
+    assert data["project"]["dependencies"] == ["kicad-tools>=0.25.0", "numpy"]
+    assert _pin(tmp_path / "pyproject.toml", "state").stdout.strip() == "match"
+
+
+@pytest.mark.parametrize(
+    ("deps", "expected"),
+    [
+        ('["numpy"]', ["kicad-tools>=0.25.0", "numpy"]),
+        ('["numpy", "kicad-tools[drc]"]', ["numpy", "kicad-tools[drc]>=0.25.0"]),
+    ],
+    ids=["dependency-absent", "dependency-present"],
+)
+def test_pin_helper_leaves_a_kicad_tools_description_alone(
+    tmp_path: Path, deps: str, expected: list[str]
+) -> None:
+    text = (
+        '[project]\nname = "board"\nversion = "0.1.0"\n'
+        'description = "kicad-tools based motor driver board"\n'
+        f"dependencies = {deps}\n"
+    )
+    result, data = _pin_apply(tmp_path, text)
+    assert result.returncode == 0, result.stderr
+    assert data["project"]["description"] == "kicad-tools based motor driver board"
+    assert data["project"]["dependencies"] == expected
+
+
+def test_pin_helper_ignores_comments_and_still_adds_the_dependency(tmp_path: Path) -> None:
+    text = (
+        '[project]\nname = "board"\nversion = "0.1.0"\n'
+        'dependencies = [\n  "numpy",\n  # "kicad-tools>=0.1",\n]\n'
+        '# Note: add "kicad-tools" later\n'
+        "\n"
+        "[tool.uv.sources]\n"
+        "kicad-tools = [\n"
+        '  { git = "https://github.com/rjwalters/kicad-tools", tag = "v0.24.0" },\n'
+        "]\n"
+    )
+    result, data = _pin_apply(tmp_path, text)
+    assert result.returncode == 0, result.stderr
+    assert data["project"]["dependencies"] == ["kicad-tools>=0.25.0", "numpy"]
+    assert "sources" not in data.get("tool", {}).get("uv", {})
+    new = (tmp_path / "pyproject.toml").read_text()
+    assert '# Note: add "kicad-tools" later' in new
+    assert '# "kicad-tools>=0.1",' in new
+
+
+def test_pin_helper_adds_main_dependency_when_only_in_a_group(tmp_path: Path) -> None:
+    text = (
+        '[project]\nname = "board"\nversion = "0.1.0"\ndependencies = ["numpy"]\n'
+        '\n[dependency-groups]\ndev = ["kicad-tools>=0.20"]\n'
+    )
+    (tmp_path / "pyproject.toml").write_text(text)
+    assert _pin(tmp_path / "pyproject.toml", "state").stdout.strip() == "mismatch"
+    result, data = _pin_apply(tmp_path, text)
+    assert result.returncode == 0, result.stderr
+    assert data["project"]["dependencies"] == ["kicad-tools>=0.25.0", "numpy"]
+    assert data["dependency-groups"]["dev"] == ["kicad-tools>=0.25.0"]
+
+
+def test_pin_helper_refuses_a_sources_entry_it_cannot_remove(tmp_path: Path) -> None:
+    text = (
+        '[project]\nname = "board"\nversion = "0.1.0"\ndependencies = ["numpy"]\n'
+        '\n[tool.uv]\nsources.kicad-tools = { git = "https://github.com/rjwalters/kicad-tools" }\n'
+    )
+    path = tmp_path / "pyproject.toml"
+    path.write_text(text)
+    result = _pin(path, "apply")
+    assert result.returncode == 1
+    assert "[tool.uv.sources]" in result.stderr
+    assert path.read_text() == text
+
+
+def test_installer_keeps_keywords_and_adds_the_dependency(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    _write_pyproject(target_repo, 'keywords = ["kicad-tools", "pcb"]\ndependencies = ["numpy"]\n')
+    result = run_installer(target_repo, env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    data = _load_toml(target_repo / "pyproject.toml")
+    assert data["project"]["keywords"] == ["kicad-tools", "pcb"]
+    assert data["project"]["dependencies"] == [f"kicad-tools>={_source_version()}", "numpy"]

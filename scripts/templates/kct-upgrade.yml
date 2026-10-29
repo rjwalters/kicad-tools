@@ -7,8 +7,9 @@
 #
 # Weekly (and on demand) this job:
 #   1. finds the latest kicad-tools release on PyPI;
-#   2. no-ops when .kct/install-metadata.json already records it, or when an
-#      upgrade branch for it already exists;
+#   2. no-ops when .kct/install-metadata.json already records it or a newer
+#      version (it never proposes a downgrade), or when an upgrade branch for
+#      it already exists;
 #   3. checks out kicad-tools at v<latest> and runs
 #      `install-kct.sh --pypi -y .`, which raises the `kicad-tools>=` floor and
 #      re-vendors the skills, CI gates and conventions;
@@ -42,17 +43,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      GH_TOKEN: ${{ secrets.KCT_UPGRADE_TOKEN || github.token }}
       KCT_INSTALL_ARGS: ${{ vars.KCT_INSTALL_ARGS }}
       BASE_BRANCH: ${{ github.event.repository.default_branch }}
     steps:
       - name: Check out
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           token: ${{ secrets.KCT_UPGRADE_TOKEN || github.token }}
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@v10
 
       - name: Resolve the latest kicad-tools release
         id: versions
@@ -60,6 +60,11 @@ jobs:
           set -euo pipefail
           latest="$(curl -fsSL https://pypi.org/pypi/kicad-tools/json \
             | python3 -c 'import json, sys; print(json.load(sys.stdin)["info"]["version"])')"
+          # It reaches $GITHUB_OUTPUT, a branch name and `git clone --branch`.
+          if ! [[ "$latest" =~ ^[0-9]+(\.[0-9]+)*([a-z0-9.+-]*)$ ]]; then
+            echo "::error::unexpected kicad-tools version from PyPI: ${latest}"
+            exit 1
+          fi
           current="$(python3 - <<'PY'
           import json
           try:
@@ -71,8 +76,25 @@ jobs:
           )"
           branch="kct-upgrade/v${latest}"
           skip=false
-          if [ "$latest" = "$current" ]; then
-            echo "kicad-tools is already at v${latest}; nothing to do."
+          # Compare release numbers, not strings: skip unless PyPI is strictly
+          # newer, so a repo installed from a newer checkout is never downgraded.
+          newer="$(python3 - "$latest" "$current" <<'PY'
+          import re
+          import sys
+
+          def release(v):
+              m = re.match(r"v?(\d+(?:\.\d+)*)", v)
+              parts = [int(p) for p in m.group(1).split(".")] if m else []
+              while parts and parts[-1] == 0:
+                  parts.pop()
+              return parts
+
+          latest, current = sys.argv[1], sys.argv[2]
+          print("true" if not current or release(latest) > release(current) else "false")
+          PY
+          )"
+          if [ "$newer" != true ]; then
+            echo "kicad-tools v${current} is already at or past PyPI's latest v${latest}; nothing to do."
             skip=true
           elif git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
             echo "Branch ${branch} already exists (upgrade PR already open); nothing to do."
@@ -190,6 +212,9 @@ jobs:
       - name: Open the upgrade PR
         if: steps.upgrade.outputs.changed == 'true'
         env:
+          # The only step that needs the token (gh pr create); never exported
+          # to the installer or `uv lock`, which run third-party code.
+          GH_TOKEN: ${{ secrets.KCT_UPGRADE_TOKEN || github.token }}
           LATEST: ${{ steps.versions.outputs.latest }}
           BRANCH: ${{ steps.versions.outputs.branch }}
         run: |
