@@ -54,6 +54,31 @@ To check GPU acceleration status:
 kct calibrate --show-gpu
 ```
 
+### In a board (consumer) repository
+
+The supported setup for a PCB-design repo that depends on kicad-tools is **PyPI
+plus a committed `uv.lock`**: `pyproject.toml` carries a lower bound
+(`kicad-tools[<extras>]>=X`) and `uv.lock` is the exact pin. Install it, with
+the agent skills, CI gates and conventions, from a kicad-tools checkout:
+
+```bash
+./scripts/install-kct.sh /path/to/board-repo        # PyPI floor (default; same as --pypi)
+./scripts/install-kct.sh --upgrade-workflow /path/to/board-repo  # + weekly upgrade PR
+cd /path/to/board-repo && uv lock && uv sync && uv run kct build-native
+```
+
+The installer keeps the repo's existing extras and removes any
+`[tool.uv.sources]` kicad-tools entry. Re-running it is a no-op when the floor
+is already current. `--upgrade-workflow` adds `.github/workflows/kct-upgrade.yml`,
+which opens a PR for each new PyPI release; the PR raises the floor, refreshes
+`uv.lock` and the vendored files, and lists the release's upgrade notes.
+`kct doctor` checks that the vendored files match the installed version.
+
+Git and SHA pins (`--tag vX.Y.Z`, `--rev <sha>`) and local checkouts
+(`--path ../kicad-tools`) are escape hatches for short-lived use. If you need
+a fix that is not on PyPI yet, ask for a patch release rather than carrying a
+SHA pin. Run `./scripts/install-kct.sh --help` for every option.
+
 ## Quick Start
 
 ### Command Line (`kct`)

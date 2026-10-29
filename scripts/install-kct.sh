@@ -3,8 +3,11 @@
 #
 # Distribution model (Epic #4054, owner-confirmed): uv-dependency + vendored
 # skills (Anvil's model, NOT Loom's full-package vendoring). This installer:
-#   1. Adds kicad-tools as a uv dependency in the target's pyproject.toml
-#      (git source by default, local path source with --path <dir>).
+#   1. Adds kicad-tools as a dependency in the target's pyproject.toml. The
+#      default (issue #8077) is a PyPI dependency with a lower bound,
+#      `kicad-tools[<extras>]>=<version>`, with any [tool.uv.sources]
+#      kicad-tools entry removed; uv.lock is the exact pin. --tag/--rev keep
+#      the git source and --path the local path source (escape hatches).
 #   2. Vendors workflow content for the selected --client (default: claude;
 #      claude|codex|both — #4905):
 #        - claude: .claude/commands/kct/*.md skills (NEVER touches
@@ -35,7 +38,10 @@
 #      of --client. Both the CLAUDE.md and AGENTS.md blocks point at this one
 #      file rather than inlining a second copy of the substance.
 #   5. Writes .kct/install-metadata.json for a future uninstaller/upgrader.
-#   6. --dry-run prints every planned write and writes nothing.
+#   6. --upgrade-workflow (opt-in) vendors .github/workflows/kct-upgrade.yml,
+#      a weekly job that opens a PR bumping kicad-tools to the latest PyPI
+#      release (floor, lockfile, skills, gates and conventions together).
+#   7. --dry-run prints every planned write and writes nothing.
 #
 # Usage:
 #   ./scripts/install-kct.sh [OPTIONS] <target-repo>
@@ -44,13 +50,22 @@
 #   --client <c>       Which agent runtime(s) to install workflow content for:
 #                      `claude` (default, backward-compatible), `codex`, or
 #                      `both`. Unknown values are rejected before any write.
-#   --path <dir>       Install kicad-tools as a LOCAL PATH dependency pointing
-#                      at <dir> (a kicad-tools checkout), for sibling-repo
-#                      development (e.g. --path ../kicad-tools). Network-free.
-#                      Without --path, a git source is used (default).
-#   --tag <tag>        Git-source pin: use this tag (git mode only). Default:
-#                      the source checkout's kct version tag (v<version>).
-#   --rev <rev>        Git-source pin: use this rev/sha (git mode only).
+#   --pypi             PyPI source (the DEFAULT when none of --path, --tag or
+#                      --rev is given): writes `kicad-tools[<extras>]>=<version>`
+#                      (<version> = this checkout's version; the target's
+#                      existing extras are kept) and removes any
+#                      [tool.uv.sources] kicad-tools entry. Edits pyproject.toml
+#                      only; run `uv lock` afterwards. This is the supported
+#                      consumer setup: PyPI + a committed uv.lock.
+#   --path <dir>       Escape hatch: a LOCAL PATH dependency pointing at <dir>
+#                      (a kicad-tools checkout), for sibling-repo development
+#                      (e.g. --path ../kicad-tools). Network-free.
+#   --tag <tag>        Escape hatch: git source pinned to this tag.
+#   --rev <rev>        Escape hatch: git source pinned to this rev/sha. Prefer
+#                      asking for a patch release over a long-lived SHA pin.
+#   --upgrade-workflow Also vendor .github/workflows/kct-upgrade.yml: weekly
+#                      (and on demand) it opens a PR moving the target to the
+#                      latest kicad-tools release on PyPI.
 #   --skills=<a,b,c>   Vendor only the listed skills (default: all *.md under
 #                      the source .claude/commands/kct/), for whichever
 #                      client(s) --client selects. README is always vendored
@@ -63,6 +78,7 @@
 #
 # Examples:
 #   ./scripts/install-kct.sh /path/to/board-repo
+#   ./scripts/install-kct.sh --upgrade-workflow /path/to/board-repo
 #   ./scripts/install-kct.sh --path ../kicad-tools /path/to/board-repo
 #   ./scripts/install-kct.sh --dry-run /path/to/board-repo
 #   ./scripts/install-kct.sh --skills=ee-review /path/to/board-repo
@@ -104,8 +120,9 @@ warn()  { echo "${YELLOW}  warn: $*${NC}"; }
 note()  { echo "${CYAN}  note: $*${NC}"; }
 
 usage() {
-  # The Usage / Options / Examples block lives in the header comment.
-  sed -n '40,80p' "$0" | sed 's/^# \{0,1\}//'
+  # The Usage / Options / Examples / Prerequisites block lives in the header
+  # comment, from "# Usage:" up to (not including) the re-run paragraph.
+  awk '/^# Usage:/{p=1} /^# Re-running the installer/{p=0} p' "$0" | sed 's/^# \{0,1\}//'
   exit 0
 }
 
@@ -121,6 +138,8 @@ PATH_MODE=false
 PATH_DIR=""
 GIT_TAG=""
 GIT_REV=""
+PYPI_FLAG=false          # --pypi given explicitly (pypi is also the default)
+UPGRADE_WORKFLOW=false   # --upgrade-workflow (opt-in, #8077)
 TARGET=""
 CLIENT="claude"   # backward-compatible default (#4905)
 
@@ -136,6 +155,8 @@ while [[ $# -gt 0 ]]; do
     --tag=*)    GIT_TAG="${1#--tag=}"; shift ;;
     --rev)      shift; GIT_REV="${1:-}"; [[ -z "$GIT_REV" ]] && error "--rev requires a value"; shift ;;
     --rev=*)    GIT_REV="${1#--rev=}"; shift ;;
+    --pypi)     PYPI_FLAG=true; shift ;;
+    --upgrade-workflow) UPGRADE_WORKFLOW=true; shift ;;
     --dry-run)  DRY_RUN=true; shift ;;
     -y|--yes)   NON_INTERACTIVE=true; shift ;;
     -h|--help)  usage ;;
@@ -152,6 +173,9 @@ done
 
 if [[ "$PATH_MODE" == true ]] && { [[ -n "$GIT_TAG" ]] || [[ -n "$GIT_REV" ]]; }; then
   error "--path is a local-path source; --tag/--rev only apply to git mode"
+fi
+if [[ "$PYPI_FLAG" == true ]] && { [[ "$PATH_MODE" == true ]] || [[ -n "$GIT_TAG" ]] || [[ -n "$GIT_REV" ]]; }; then
+  error "--pypi is the PyPI source; it cannot be combined with --path, --tag or --rev"
 fi
 
 # Reject an unknown --client selection before any write (Curator acceptance
@@ -241,13 +265,15 @@ if [[ "$PATH_MODE" == true ]]; then
   PATH_COMMIT="$(git -C "$RESOLVED_PATH" rev-parse --short HEAD 2>/dev/null || echo "")"
   [[ -n "$PATH_COMMIT" ]] && KCT_COMMIT="$PATH_COMMIT"
   note "path mode: local source at $RESOLVED_PATH (network-free)"
+elif [[ -z "$GIT_TAG" && -z "$GIT_REV" ]]; then
+  # Default (issue #8077): PyPI with a lower bound at this checkout's version.
+  # uv.lock is the exact pin; git/SHA pins are short-lived escape hatches.
+  SOURCE_MODE="pypi"
+  PYPI_FLOOR="$KCT_VERSION"
+  SOURCE_REF="kicad-tools>=$PYPI_FLOOR"
+  note "pypi mode: $SOURCE_REF (uv.lock is the exact pin)"
 else
   SOURCE_MODE="git"
-  # Default the git pin to the source version tag when neither --tag nor --rev
-  # was given, so a bare `install-kct.sh <target>` pins reproducibly.
-  if [[ -z "$GIT_TAG" && -z "$GIT_REV" ]]; then
-    GIT_TAG="v$KCT_VERSION"
-  fi
   if [[ -n "$GIT_TAG" ]]; then
     SOURCE_REF="$KCT_GIT_URL@$GIT_TAG"
   else
@@ -388,7 +414,61 @@ run_uv_add() {
 # absent OR present-but-pointing-at-a-different-source. If present and the
 # source entry already matches the requested mode/ref, no-op.
 info "Stage 5: kicad-tools uv dependency"
-if target_declares_kct_dep; then
+PYPI_PIN_HELPER="$KCT_ROOT/scripts/lib/install_kct_pypi_pin.py"
+
+# PyPI mode (#8077): a text edit of pyproject.toml, no `uv add` -- the floor
+# may name a release uv cannot resolve yet, and the edit must stay
+# network-free. "match" = a lower bound >= PYPI_FLOOR and no
+# [tool.uv.sources] kicad-tools entry; anything else is rewritten in place.
+# The helper re-parses its edit with tomllib (Python >= 3.11) or tomli and
+# refuses to write without one, so pick an interpreter that has either. A bare
+# `python3` may be macOS's 3.9; `uv python find` never downloads.
+pick_pin_python() {
+  local cand
+  for cand in python3 python3.15 python3.14 python3.13 python3.12 python3.11; do
+    command -v "$cand" >/dev/null 2>&1 || continue
+    if "$cand" -c $'try:\n import tomllib\nexcept ImportError:\n import tomli' >/dev/null 2>&1; then
+      printf '%s\n' "$cand"
+      return 0
+    fi
+  done
+  if command -v uv >/dev/null 2>&1; then
+    cand="$(uv python find '>=3.11' 2>/dev/null)" && [[ -n "$cand" ]] && {
+      printf '%s\n' "$cand"
+      return 0
+    }
+  fi
+  return 1
+}
+
+run_pypi_pin() {
+  local out
+  out="$("$PIN_PYTHON" "$PYPI_PIN_HELPER" apply "$TARGET_PYPROJECT" "$PYPI_FLOOR")" \
+    || error "could not rewrite the kicad-tools dependency in $TARGET_PYPROJECT"
+  while IFS= read -r req; do
+    [[ -n "$req" ]] && ok "dependency: $req"
+  done <<< "$out"
+}
+
+if [[ "$SOURCE_MODE" == "pypi" ]]; then
+  PIN_PYTHON="$(pick_pin_python)" \
+    || error "editing $TARGET_PYPROJECT needs Python >= 3.11 (or python3 with tomli) on PATH, or uv with one installed"
+  [[ -f "$PYPI_PIN_HELPER" ]] || error "source root missing scripts/lib/install_kct_pypi_pin.py: $KCT_ROOT"
+  PIN_STATE="$("$PIN_PYTHON" "$PYPI_PIN_HELPER" state "$TARGET_PYPROJECT" "$PYPI_FLOOR")" \
+    || error "could not read the kicad-tools dependency from $TARGET_PYPROJECT"
+  case "$PIN_STATE" in
+    match)
+      ok "kicad-tools dependency already present and up to date (no-op)"
+      ;;
+    mismatch)
+      warn "kicad-tools present but not a PyPI lower bound >= $PYPI_FLOOR; updating to pypi (extras kept, [tool.uv.sources] entry removed)"
+      do_action "pin kicad-tools>=$PYPI_FLOOR from PyPI [update]" run_pypi_pin
+      ;;
+    absent)
+      do_action "add kicad-tools>=$PYPI_FLOOR (pypi)" run_pypi_pin
+      ;;
+  esac
+elif target_declares_kct_dep; then
   case "$(uv_source_state)" in
     match)
       ok "kicad-tools dependency already present and up to date (no-op)"
@@ -614,6 +694,23 @@ CONVENTIONS_EOF
 do_action "write .kct/CONVENTIONS.md" write_conventions
 VENDORED_FILES+=(".kct/CONVENTIONS.md")
 ok "vendored load-bearing conventions into .kct/CONVENTIONS.md"
+
+# ----- Stage 6e: opt-in upgrade workflow (#8077) ----------------------------
+# --upgrade-workflow vendors .github/workflows/kct-upgrade.yml: weekly (plus
+# workflow_dispatch) it re-runs this installer in --pypi mode from the latest
+# PyPI release's tag, runs `uv lock --upgrade-package kicad-tools`, and opens a
+# PR linking the release's CHANGELOG and its upgrade notes. Opt-in only: a run
+# without the flag never creates, refreshes or removes the workflow.
+UPGRADE_WORKFLOW_SRC="$KCT_ROOT/scripts/templates/kct-upgrade.yml"
+UPGRADE_WORKFLOW_REL=".github/workflows/kct-upgrade.yml"
+if [[ "$UPGRADE_WORKFLOW" == true ]]; then
+  info "Stage 6e: vendor $UPGRADE_WORKFLOW_REL"
+  [[ -f "$UPGRADE_WORKFLOW_SRC" ]] || error "source root missing scripts/templates/kct-upgrade.yml: $KCT_ROOT"
+  do_action "vendor $UPGRADE_WORKFLOW_REL" \
+    vendor_file "$UPGRADE_WORKFLOW_SRC" "$TARGET/$UPGRADE_WORKFLOW_REL"
+  VENDORED_FILES+=("$UPGRADE_WORKFLOW_REL")
+  ok "vendored $UPGRADE_WORKFLOW_REL (weekly kicad-tools upgrade PR)"
+fi
 
 # ----- Stage 6d: vendor .agents/skills/kct-<name>/SKILL.md (client: codex) --
 # Codex (and other AGENTS.md-aware runtimes) discover skills via the
@@ -952,6 +1049,9 @@ else
   note "client: $CLIENT"
   note "source: $SOURCE_MODE ($SOURCE_REF)"
   note "skills: ${SELECTED_SKILLS[*]}"
+  if [[ "$SOURCE_MODE" == "pypi" ]]; then
+    note "next: run 'uv lock' in the target (resolves kicad-tools from PyPI; commit uv.lock -- it is the exact pin)"
+  fi
   if [[ "$CLIENT_WANTS_CLAUDE" == true ]]; then
     note "next (claude): run 'uv sync' in the target, then 'uv run kct build-native' (see the CLAUDE.md block)"
   fi

@@ -356,15 +356,118 @@ def test_exact_pypi_pin(tmp_path):
     assert get(report, PYPROJECT_DEPENDENCY).status is RecordStatus.OK
 
 
-def test_range_pypi_spec_is_informational(tmp_path):
+def test_compatible_release_spec_is_informational(tmp_path):
+    # Only a plain `>=X` lower bound is the PyPI-mode record (#8077); other
+    # range specs stay informational.
     (tmp_path / "pyproject.toml").write_text(
-        '[project]\nname = "my-board"\nversion = "0.1.0"\ndependencies = ["kicad-tools>=0.10"]\n',
+        '[project]\nname = "my-board"\nversion = "0.1.0"\ndependencies = ["kicad-tools~=0.10"]\n',
         encoding="utf-8",
     )
     report = check_version_drift(tmp_path, INSTALLED)
     rec = get(report, PYPROJECT_DEPENDENCY)
     assert rec.status is RecordStatus.EDITABLE
     assert not report.has_drift
+
+
+# ---------------------------------------------------------------------------
+# PyPI source mode: `kicad-tools[...]>=X` lower bound (issue #8077)
+# ---------------------------------------------------------------------------
+
+
+def write_consumer_pyproject_pypi(root, floor, extras="[placement,drc]"):
+    """A consumer pyproject in install-kct.sh's default PyPI mode."""
+    (root / "pyproject.toml").write_text(
+        "[project]\n"
+        'name = "my-board"\n'
+        'version = "0.1.0"\n'
+        f'dependencies = ["kicad-tools{extras}>={floor}"]\n',
+        encoding="utf-8",
+    )
+
+
+def write_pypi_metadata(root, version):
+    kct = root / ".kct"
+    kct.mkdir(exist_ok=True)
+    (kct / "install-metadata.json").write_text(
+        json.dumps({"kct_version": version, "source_mode": "pypi"}),
+        encoding="utf-8",
+    )
+
+
+def test_pypi_lower_bound_at_installed_version_is_ok(tmp_path):
+    write_consumer_pyproject_pypi(tmp_path, INSTALLED)
+    write_pypi_metadata(tmp_path, INSTALLED)
+    write_claude_md(tmp_path, INSTALLED)
+    report = check_version_drift(tmp_path, INSTALLED)
+    rec = get(report, PYPROJECT_DEPENDENCY)
+    assert rec.status is RecordStatus.OK
+    assert rec.recorded_version == f">={INSTALLED}"
+    assert not report.has_drift
+    assert report.pypi_mode
+
+
+def test_pypi_lower_bound_below_installed_is_not_drift(tmp_path):
+    # uv.lock moved the exact version past the floor: not drift.
+    write_consumer_pyproject_pypi(tmp_path, "0.16.0")
+    report = check_version_drift(tmp_path, INSTALLED)
+    assert get(report, PYPROJECT_DEPENDENCY).status is RecordStatus.OK
+    assert not report.has_drift
+
+
+def test_pypi_lower_bound_above_installed_is_drift(tmp_path):
+    # The environment is older than pyproject.toml demands (`uv sync` needed).
+    write_consumer_pyproject_pypi(tmp_path, "0.19.0")
+    report = check_version_drift(tmp_path, INSTALLED)
+    rec = get(report, PYPROJECT_DEPENDENCY)
+    assert rec.status is RecordStatus.DRIFT
+    assert "uv sync" in rec.detail
+
+
+def test_pypi_floor_above_installed_reconciles_with_uv_sync(tmp_path):
+    # A --pypi re-run is a no-op here (a higher floor already reads as a
+    # match), so the reconcile hint must be `uv sync` (#8081 review).
+    write_consumer_pyproject_pypi(tmp_path, "0.19.0")
+    write_pypi_metadata(tmp_path, "0.19.0")
+    report = check_version_drift(tmp_path, INSTALLED)
+    # install-metadata (v0.19.0) is ahead of the package too; `uv sync`
+    # settles both records.
+    assert {r.name for r in report.stale_records} == {PYPROJECT_DEPENDENCY, INSTALL_METADATA}
+    assert report.reconcile_command == "uv sync"
+
+
+def test_pypi_floor_above_installed_plus_stale_records_syncs_first(tmp_path):
+    write_consumer_pyproject_pypi(tmp_path, "0.19.0")
+    write_pypi_metadata(tmp_path, "0.17.0")
+    report = check_version_drift(tmp_path, INSTALLED)
+    assert {r.name for r in report.stale_records} == {PYPROJECT_DEPENDENCY, INSTALL_METADATA}
+    assert report.reconcile_command is not None
+    assert report.reconcile_command.startswith("uv sync, then install-kct.sh --pypi")
+
+
+def test_pypi_mode_flags_stale_install_metadata(tmp_path):
+    # The vendored skills/gates (install-metadata) are older than the package.
+    write_consumer_pyproject_pypi(tmp_path, "0.17.0")
+    write_pypi_metadata(tmp_path, "0.17.0")
+    report = check_version_drift(tmp_path, INSTALLED)
+    assert get(report, PYPROJECT_DEPENDENCY).status is RecordStatus.OK
+    assert get(report, INSTALL_METADATA).status is RecordStatus.DRIFT
+    assert report.has_drift
+    assert report.reconcile_command is not None
+    assert report.reconcile_command.startswith("install-kct.sh --pypi")
+    assert f"v{INSTALLED}" in report.reconcile_command
+
+
+def test_pypi_dev_installed_version_satisfies_floor(tmp_path):
+    write_consumer_pyproject_pypi(tmp_path, "0.18", extras="")
+    report = check_version_drift(tmp_path, "0.18.0.dev3")
+    assert get(report, PYPROJECT_DEPENDENCY).status is RecordStatus.OK
+
+
+def test_git_mode_reconcile_command_unchanged(tmp_path):
+    write_consumer_pyproject_tag(tmp_path, "v0.16.0")
+    report = check_version_drift(tmp_path, INSTALLED)
+    assert not report.pypi_mode
+    assert report.reconcile_command == f"install-kct.sh --tag v{INSTALLED}"
 
 
 def test_no_kicad_tools_dependency(tmp_path):
