@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-29
 
+- **PR #8103**: docs(site): add generated quick start and refresh homepage cards
+- **Issue #8101** (closed): site: refresh kicad-tools.org homepage for v0.25.0 (on-site quick start, generated facts, klayout-tools cross-link)
 - **PR #8094**: fix: treat a single Kelvin sense tap as non-force copper in current-path fanout check
 - **Issue #8092** (closed): current-paths-audit: Kelvin sense tap at a 2-terminal shunt endpoint (pad -> via -> sense IC) marks the path ambiguous; same-net Kelvin taps unverifiable
 - **PR #8091**: fix(validate): exempt same-footprint silk T-joints from silk_overlap
