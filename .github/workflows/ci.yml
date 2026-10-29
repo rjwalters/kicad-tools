@@ -542,6 +542,28 @@ jobs:
             ca-certificates curl git cmake build-essential nodejs jq
           kicad-cli --version
 
+      - name: Install pinned actionlint
+        # Issue #8098: tests/install/test_install_kct.py
+        # ::test_upgrade_workflow_passes_actionlint lints the vendored
+        # kct-upgrade workflow and skipped here because actionlint was not
+        # on PATH. Pinned version + committed sha256 (same curl pattern as
+        # uv; no third-party setup action inside the container). A failed
+        # download or checksum fails the job; KCT_REQUIRE_ACTIONLINT (set on
+        # "Run tests") turns a missing binary into a test failure, not a skip.
+        env:
+          ACTIONLINT_VERSION: "1.7.12"
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          set -euo pipefail
+          tarball="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          dir="$(mktemp -d)"
+          curl -fsSL -o "$dir/$tarball" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${tarball}"
+          echo "${ACTIONLINT_SHA256}  $dir/$tarball" | sha256sum -c -
+          tar -xzf "$dir/$tarball" -C "$dir" actionlint
+          install -m 0755 "$dir/actionlint" /usr/local/bin/actionlint
+          actionlint -version
+
       - uses: actions/checkout@v7
         with:
           # Full history + tags: the release repo-introspection tests
@@ -710,6 +732,8 @@ jobs:
         env:
           KCT_OBSERVER_CONTAINER_ID: ${{ job.container.id }}
           BOARD_07_CI_ENABLED: ${{ vars.BOARD_07_CI_ENABLED }}
+          # Issue #8098: the actionlint test fails instead of skipping here.
+          KCT_REQUIRE_ACTIONLINT: "1"
         run: |
           test_args=(--ignore=tests/test_board_05_drc_allowlist.py --ignore=tests/test_mask_copper_native.py --ignore=tests/test_stitch_physical_completion.py --ignore=tests/test_zones_cmd.py --ignore=tests/test_zones_hv_keepout.py --ignore=tests/conformance)
           if [[ "$BOARD_07_CI_ENABLED" != "true" ]]; then

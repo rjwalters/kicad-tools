@@ -1115,6 +1115,11 @@ def test_upgrade_workflow_passes_actionlint(target_repo: Path, fake_uv_env: dict
 
     actionlint = shutil.which("actionlint")
     if actionlint is None:
+        # Issue #8098: CI installs a pinned actionlint and sets
+        # KCT_REQUIRE_ACTIONLINT=1, so a missing binary there is a failure,
+        # never a skip that reads as a pass.
+        if os.environ.get("KCT_REQUIRE_ACTIONLINT") == "1":
+            pytest.fail("KCT_REQUIRE_ACTIONLINT=1 but actionlint is not on PATH")
         pytest.skip("actionlint not installed")
     result = run_installer(target_repo, "--upgrade-workflow", env=fake_uv_env)
     assert result.returncode == 0, result.stderr
