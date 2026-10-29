@@ -1,0 +1,207 @@
+# kct-upgrade -- keep this repo on the latest kicad-tools release.
+#
+# Vendored by kicad-tools' `scripts/install-kct.sh --upgrade-workflow`
+# (issue #8077). Installer-managed: edit the upstream template
+# (scripts/templates/kct-upgrade.yml in rjwalters/kicad-tools), not this copy;
+# re-running the installer with --upgrade-workflow overwrites it.
+#
+# Weekly (and on demand) this job:
+#   1. finds the latest kicad-tools release on PyPI;
+#   2. no-ops when .kct/install-metadata.json already records it, or when an
+#      upgrade branch for it already exists;
+#   3. checks out kicad-tools at v<latest> and runs
+#      `install-kct.sh --pypi -y .`, which raises the `kicad-tools>=` floor and
+#      re-vendors the skills, CI gates and conventions;
+#   4. runs `uv lock --upgrade-package kicad-tools` (uv.lock is the exact pin);
+#   5. opens a PR whose body links the release's CHANGELOG section and lists
+#      its upgrade notes (the entries that need action from you).
+#
+# Repository settings: allow GitHub Actions to create pull requests
+# (Settings > Actions > General). PRs opened with the default GITHUB_TOKEN do
+# not trigger your other workflows; to have CI run on the upgrade PR, add a
+# KCT_UPGRADE_TOKEN secret (a fine-grained token with contents and
+# pull-requests write). Extra installer flags (e.g. `--skills=tapeout`) go in
+# the KCT_INSTALL_ARGS repository variable.
+name: kct-upgrade
+
+on:
+  schedule:
+    - cron: "23 7 * * 1" # Mondays 07:23 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: kct-upgrade
+  cancel-in-progress: false
+
+jobs:
+  upgrade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ secrets.KCT_UPGRADE_TOKEN || github.token }}
+      KCT_INSTALL_ARGS: ${{ vars.KCT_INSTALL_ARGS }}
+      BASE_BRANCH: ${{ github.event.repository.default_branch }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.KCT_UPGRADE_TOKEN || github.token }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Resolve the latest kicad-tools release
+        id: versions
+        run: |
+          set -euo pipefail
+          latest="$(curl -fsSL https://pypi.org/pypi/kicad-tools/json \
+            | python3 -c 'import json, sys; print(json.load(sys.stdin)["info"]["version"])')"
+          current="$(python3 - <<'PY'
+          import json
+          try:
+              with open(".kct/install-metadata.json", encoding="utf-8") as fh:
+                  print(json.load(fh).get("kct_version", ""))
+          except (OSError, ValueError):
+              print("")
+          PY
+          )"
+          branch="kct-upgrade/v${latest}"
+          skip=false
+          if [ "$latest" = "$current" ]; then
+            echo "kicad-tools is already at v${latest}; nothing to do."
+            skip=true
+          elif git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            echo "Branch ${branch} already exists (upgrade PR already open); nothing to do."
+            skip=true
+          fi
+          {
+            echo "latest=${latest}"
+            echo "current=${current}"
+            echo "branch=${branch}"
+            echo "skip=${skip}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upgrade kicad-tools
+        if: steps.versions.outputs.skip != 'true'
+        id: upgrade
+        env:
+          LATEST: ${{ steps.versions.outputs.latest }}
+        run: |
+          set -euo pipefail
+          src="$RUNNER_TEMP/kicad-tools"
+          git clone --quiet --depth 1 --branch "v${LATEST}" \
+            https://github.com/rjwalters/kicad-tools "$src"
+          # Keep the agent client(s) this repo already installed.
+          client="$(python3 - <<'PY'
+          import json
+          try:
+              with open(".kct/install-metadata.json", encoding="utf-8") as fh:
+                  clients = set(json.load(fh).get("clients_installed", []))
+          except (OSError, ValueError):
+              clients = set()
+          print("both" if {"claude", "codex"} <= clients else ("codex" if clients == {"codex"} else "claude"))
+          PY
+          )"
+          read -r -a extra <<< "${KCT_INSTALL_ARGS:-}"
+          "$src/scripts/install-kct.sh" --pypi -y --client "$client" "${extra[@]}" .
+          uv lock --upgrade-package kicad-tools
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "Already current after re-install; nothing to do."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Write the PR body
+        if: steps.upgrade.outputs.changed == 'true'
+        env:
+          LATEST: ${{ steps.versions.outputs.latest }}
+          CURRENT: ${{ steps.versions.outputs.current }}
+        run: |
+          set -euo pipefail
+          python3 - "$RUNNER_TEMP/kicad-tools" "$RUNNER_TEMP/pr-body.md" <<'PY'
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          src, out = Path(sys.argv[1]), Path(sys.argv[2])
+          latest, current = os.environ["LATEST"], os.environ.get("CURRENT", "")
+          repo = "https://github.com/rjwalters/kicad-tools"
+          limit = 50000
+
+          def vtuple(v):
+              m = re.match(r"v?(\d+(?:\.\d+)*)", v or "")
+              return tuple(int(p) for p in m.group(1).split(".")) if m else ()
+
+          changelog = src / "CHANGELOG.md"
+          text = changelog.read_text(encoding="utf-8") if changelog.is_file() else ""
+          sections = re.split(r"(?m)^## \[", text)[1:]
+          notes, versions = [], []
+          for sec in sections:
+              version = sec.split("]", 1)[0]
+              if not vtuple(version) or vtuple(version) > vtuple(latest):
+                  continue
+              if current and vtuple(version) <= vtuple(current):
+                  continue
+              versions.append(version)
+              m = re.search(
+                  r"(?ms)^### Upgrade notes[^\n]*\n(.*?)(?=^### |\Z)", sec
+              )
+              if m and m.group(1).strip():
+                  notes.append(f"#### v{version}\n\n{m.group(1).strip()}\n")
+          pending = sorted(p.name for p in (src / "changelog.d").glob("*.upgrade.md"))
+
+          lines = [
+              f"Upgrades kicad-tools from v{current or '?'} to v{latest} "
+              "(PyPI floor, `uv.lock`, vendored skills, CI gates and conventions).",
+              "",
+              f"- Release: {repo}/releases/tag/v{latest}",
+              f"- CHANGELOG: {repo}/blob/v{latest}/CHANGELOG.md"
+              + (f" (versions: {', '.join('v' + v for v in versions)})" if versions else ""),
+              "",
+          ]
+          if notes or pending:
+              lines += [
+                  "## Upgrade notes -- action may be needed",
+                  "",
+                  "These are the release's `*.upgrade.md` entries: a check that "
+                  "can newly fail, a changed default or a removed flag. Review "
+                  "them before merging.",
+                  "",
+              ]
+              body = "\n".join(notes)
+              if len(body) > limit:
+                  body = body[:limit] + "\n\n_(truncated; see the CHANGELOG link above)_\n"
+              lines.append(body)
+              if pending:
+                  lines += ["Unassembled upgrade fragments at the tag:", ""]
+                  lines += [f"- `changelog.d/{name}`" for name in pending]
+          else:
+              lines.append("No upgrade notes in this range.")
+          lines += ["", "_Opened by `.github/workflows/kct-upgrade.yml` (kicad-tools `install-kct.sh --upgrade-workflow`)._"]
+          out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PY
+
+      - name: Open the upgrade PR
+        if: steps.upgrade.outputs.changed == 'true'
+        env:
+          LATEST: ${{ steps.versions.outputs.latest }}
+          BRANCH: ${{ steps.versions.outputs.branch }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add -A
+          git commit -m "chore(deps): upgrade kicad-tools to v${LATEST}"
+          git push origin "$BRANCH"
+          gh pr create \
+            --base "$BASE_BRANCH" \
+            --head "$BRANCH" \
+            --title "chore(deps): upgrade kicad-tools to v${LATEST}" \
+            --body-file "$RUNNER_TEMP/pr-body.md"

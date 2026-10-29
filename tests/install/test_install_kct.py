@@ -882,3 +882,267 @@ def test_client_codex_preserves_existing_loom_agents_md_block(
     text_second = agents_md.read_text()
     assert text_second.count("<!-- BEGIN KICAD-TOOLS -->") == 1
     assert "BEGIN LOOM ORCHESTRATION (AGENTS)" in text_second
+
+
+# --- PyPI source mode: the default (#8077) -----------------------------------
+
+UPGRADE_WORKFLOW_SRC = REPO_ROOT / "scripts" / "templates" / "kct-upgrade.yml"
+UPGRADE_WORKFLOW_REL = Path(".github") / "workflows" / "kct-upgrade.yml"
+
+
+try:
+    import tomllib
+except ImportError:  # pragma: no cover - Python < 3.11
+    import tomli as tomllib  # type: ignore[no-redef]
+
+
+def _source_version() -> str:
+    return tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())["project"]["version"]
+
+
+def _load_toml(path: Path) -> dict:
+    return tomllib.loads(path.read_text())
+
+
+def _write_pyproject(target: Path, body: str) -> None:
+    (target / "pyproject.toml").write_text(
+        '[project]\nname = "board-repo"\nversion = "0.1.0"\nrequires-python = ">=3.10"\n' + body
+    )
+
+
+GIT_PINNED_BODY = (
+    "dependencies = [\n"
+    '    "pyyaml>=6",\n'
+    '    "kicad-tools[placement,parts,geometry,drc,report]",\n'
+    "]\n"
+    "\n"
+    "[tool.uv.sources]\n"
+    'kicad-tools = { git = "https://github.com/rjwalters/kicad-tools", rev = "v0.24.0" }\n'
+)
+
+
+def test_bare_install_defaults_to_pypi_and_removes_git_source(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    _write_pyproject(target_repo, GIT_PINNED_BODY)
+    result = run_installer(target_repo, env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    data = _load_toml(target_repo / "pyproject.toml")
+    version = _source_version()
+    assert data["project"]["dependencies"] == [
+        "pyyaml>=6",
+        f"kicad-tools[placement,parts,geometry,drc,report]>={version}",
+    ]
+    # The sources entry is gone, and so is the table it emptied.
+    assert "kicad-tools" not in data.get("tool", {}).get("uv", {}).get("sources", {})
+    assert "[tool.uv.sources]" not in (target_repo / "pyproject.toml").read_text()
+    meta = json.loads((target_repo / ".kct" / "install-metadata.json").read_text())
+    assert meta["source_mode"] == "pypi"
+    assert meta["source_ref"] == f"kicad-tools>={version}"
+    assert "uv lock" in result.stdout
+
+
+def test_pypi_mode_explicit_flag_matches_default(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    _write_pyproject(target_repo, GIT_PINNED_BODY)
+    result = run_installer(target_repo, "--pypi", env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    deps = _load_toml(target_repo / "pyproject.toml")["project"]["dependencies"]
+    assert deps[1].endswith(f">={_source_version()}")
+
+
+def test_pypi_mode_rerun_is_noop(target_repo: Path, fake_uv_env: dict[str, str]) -> None:
+    _write_pyproject(target_repo, GIT_PINNED_BODY)
+    first = run_installer(target_repo, env=fake_uv_env)
+    assert first.returncode == 0, first.stderr
+    pyproject_after_first = (target_repo / "pyproject.toml").read_text()
+    second = run_installer(target_repo, env=fake_uv_env)
+    assert second.returncode == 0, second.stderr
+    assert "already present and up to date (no-op)" in second.stdout
+    assert (target_repo / "pyproject.toml").read_text() == pyproject_after_first
+
+
+def test_pypi_mode_keeps_other_sources_entries(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    _write_pyproject(
+        target_repo,
+        'dependencies = ["kicad-tools", "other-lib"]\n'
+        "\n"
+        "[tool.uv.sources]\n"
+        'kicad-tools = { path = "../kicad-tools", editable = true }\n'
+        'other-lib = { git = "https://example.invalid/other-lib", tag = "v1" }\n'
+        "\n"
+        "[tool.ruff]\n"
+        "line-length = 100\n",
+    )
+    result = run_installer(target_repo, env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    data = _load_toml(target_repo / "pyproject.toml")
+    assert data["tool"]["uv"]["sources"] == {
+        "other-lib": {"git": "https://example.invalid/other-lib", "tag": "v1"}
+    }
+    assert data["tool"]["ruff"] == {"line-length": 100}
+    assert data["project"]["dependencies"] == [
+        f"kicad-tools>={_source_version()}",
+        "other-lib",
+    ]
+
+
+def test_pypi_mode_adds_absent_dependency(target_repo: Path, fake_uv_env: dict[str, str]) -> None:
+    # target_repo's fixture pyproject has `dependencies = []`.
+    result = run_installer(target_repo, env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    deps = _load_toml(target_repo / "pyproject.toml")["project"]["dependencies"]
+    assert deps == [f"kicad-tools>={_source_version()}"]
+
+
+def test_pypi_mode_keeps_a_higher_floor_and_marker(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    _write_pyproject(
+        target_repo, "dependencies = [\"kicad-tools[drc]>=99.0; python_version >= '3.10'\"]\n"
+    )
+    before = (target_repo / "pyproject.toml").read_text()
+    result = run_installer(target_repo, env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    assert "no-op" in result.stdout
+    assert (target_repo / "pyproject.toml").read_text() == before
+
+
+def test_pypi_mode_raises_a_lower_floor_and_drops_exact_pin(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    _write_pyproject(target_repo, 'dependencies = ["kicad-tools[drc]==0.1.0"]\n')
+    result = run_installer(target_repo, env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    deps = _load_toml(target_repo / "pyproject.toml")["project"]["dependencies"]
+    assert deps == [f"kicad-tools[drc]>={_source_version()}"]
+
+
+def test_pypi_mode_dry_run_writes_nothing(target_repo: Path, fake_uv_env: dict[str, str]) -> None:
+    _write_pyproject(target_repo, GIT_PINNED_BODY)
+    before = _snapshot(target_repo)
+    result = run_installer(target_repo, "--dry-run", env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    assert f"[dry-run] pin kicad-tools>={_source_version()} from PyPI" in result.stdout
+    assert _snapshot(target_repo) == before
+
+
+@pytest.mark.parametrize("other", [["--tag", "v0.14.0"], ["--rev", "abc1234"], ["--path", "."]])
+def test_pypi_flag_conflicts_with_other_sources(
+    target_repo: Path, fake_uv_env: dict[str, str], other: list[str]
+) -> None:
+    before = _snapshot(target_repo)
+    result = run_installer(target_repo, "--pypi", *other, env=fake_uv_env)
+    assert result.returncode != 0
+    assert "--pypi" in result.stderr
+    assert _snapshot(target_repo) == before
+
+
+def test_pypi_install_reports_no_doctor_drift(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    from kicad_tools.doctor import INSTALL_METADATA, RecordStatus, check_version_drift
+
+    _write_pyproject(target_repo, GIT_PINNED_BODY)
+    result = run_installer(target_repo, env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    version = _source_version()
+    report = check_version_drift(target_repo, version)
+    assert not report.has_drift, [(r.name, r.status, r.detail) for r in report.records]
+    assert report.pypi_mode
+
+    # A newer installed package than the vendored skills/gates is drift.
+    newer = check_version_drift(target_repo, "999.0.0")
+    stale = {r.name for r in newer.stale_records}
+    assert INSTALL_METADATA in stale
+    dep = next(r for r in newer.records if r.name == "pyproject-dependency")
+    assert dep.status is not RecordStatus.DRIFT
+
+
+def test_help_documents_pypi_default(tmp_path: Path) -> None:
+    result = subprocess.run([str(INSTALLER), "--help"], capture_output=True, text=True)
+    assert result.returncode == 0
+    assert "--pypi" in result.stdout
+    assert "DEFAULT" in result.stdout
+    assert "--upgrade-workflow" in result.stdout
+    assert "Escape hatch" in result.stdout
+
+
+# --- opt-in upgrade workflow (#8077) -----------------------------------------
+
+
+def test_upgrade_workflow_is_opt_in(target_repo: Path, fake_uv_env: dict[str, str]) -> None:
+    result = run_installer(target_repo, env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    assert not (target_repo / UPGRADE_WORKFLOW_REL).exists()
+
+
+def test_upgrade_workflow_vendored_and_recorded(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    result = run_installer(target_repo, "--upgrade-workflow", env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    dst = target_repo / UPGRADE_WORKFLOW_REL
+    assert dst.read_bytes() == UPGRADE_WORKFLOW_SRC.read_bytes()
+    meta = json.loads((target_repo / ".kct" / "install-metadata.json").read_text())
+    assert str(UPGRADE_WORKFLOW_REL) in meta["installed_files"]
+
+    wf = yaml.safe_load(dst.read_text())
+    triggers = wf[True] if True in wf else wf["on"]  # PyYAML reads `on:` as True
+    assert "workflow_dispatch" in triggers
+    assert triggers["schedule"]
+    run_text = dst.read_text()
+    assert 'install-kct.sh" --pypi -y' in run_text
+    assert "uv lock --upgrade-package kicad-tools" in run_text
+    assert "pypi.org/pypi/kicad-tools/json" in run_text
+    assert "Upgrade notes" in run_text
+
+
+def test_upgrade_workflow_dry_run_lists_it(target_repo: Path, fake_uv_env: dict[str, str]) -> None:
+    before = _snapshot(target_repo)
+    result = run_installer(target_repo, "--upgrade-workflow", "--dry-run", env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    assert f"[dry-run] vendor {UPGRADE_WORKFLOW_REL}" in result.stdout
+    assert _snapshot(target_repo) == before
+
+
+def test_upgrade_workflow_passes_actionlint(target_repo: Path, fake_uv_env: dict[str, str]) -> None:
+    import shutil
+
+    actionlint = shutil.which("actionlint")
+    if actionlint is None:
+        pytest.skip("actionlint not installed")
+    result = run_installer(target_repo, "--upgrade-workflow", env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    lint = subprocess.run(
+        [actionlint, str(UPGRADE_WORKFLOW_REL)],
+        cwd=target_repo,
+        capture_output=True,
+        text=True,
+    )
+    assert lint.returncode == 0, lint.stdout + lint.stderr
+
+
+def test_pypi_mode_removes_table_form_sources_entry(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    _write_pyproject(
+        target_repo,
+        'dependencies = ["kicad-tools[report] @ git+https://github.com/rjwalters/kicad-tools@45744d0a"]\n'
+        "\n"
+        "[tool.uv.sources.kicad-tools]\n"
+        'git = "https://github.com/rjwalters/kicad-tools"\n'
+        'rev = "45744d0a"\n'
+        "\n"
+        "[tool.ruff]\n"
+        "line-length = 100\n",
+    )
+    result = run_installer(target_repo, env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    data = _load_toml(target_repo / "pyproject.toml")
+    assert data["project"]["dependencies"] == [f"kicad-tools[report]>={_source_version()}"]
+    assert "sources" not in data.get("tool", {}).get("uv", {})
+    assert data["tool"]["ruff"] == {"line-length": 100}

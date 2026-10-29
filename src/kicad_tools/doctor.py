@@ -46,7 +46,10 @@ When ``kicad-tools`` is installed into a consumer repo by
 several *records* that live in the consumer's tree:
 
 1. ``pyproject.toml`` -- the ``kicad-tools`` uv dependency pin
-   (git ``tag = "vX"``, ``rev = "<sha>"``, or a local ``path`` install).
+   (a PyPI lower bound ``kicad-tools>=X`` -- the default since issue #8077 --
+   or git ``tag = "vX"``, ``rev = "<sha>"``, or a local ``path`` install).
+   A lower bound is satisfied (``ok``) by any installed version ``>= X``;
+   ``uv.lock`` is the exact pin, so a newer installed package is not drift.
 2. ``.kct/install-metadata.json`` -- the ``kct_version`` field.
 3. ``CLAUDE.md`` -- the ``## kicad-tools (X)`` header inside the
    ``<!-- BEGIN KICAD-TOOLS -->`` / ``<!-- END KICAD-TOOLS -->`` markers.
@@ -136,6 +139,12 @@ _CLAUDE_HEADER_RE = re.compile(r"^\s*##\s+kicad-tools\s*\(([^)]+)\)\s*$")
 # The reconcile command template. Records are only rewritten by the installer,
 # so re-running it at the installed tag reconciles every stale record at once.
 _RECONCILE_TEMPLATE = "install-kct.sh --tag v{version}"
+# PyPI mode (issue #8077): the installer writes ``kicad-tools>=<its version>``,
+# so the reconcile is a --pypi re-run from a checkout of the installed release.
+_RECONCILE_TEMPLATE_PYPI = "install-kct.sh --pypi  # from a kicad-tools v{version} checkout"
+
+# A ``>=X`` lower bound inside a PEP 508 requirement string.
+_LOWER_BOUND_RE = re.compile(r">=\s*v?([0-9][^\s,;]*)")
 
 # A version that looks like a release tag (e.g. "0.18.0", "v1.2.3rc1"). Used to
 # distinguish a git ``tag`` pin from a bare commit sha / branch name.
@@ -206,6 +215,11 @@ class DriftReport:
     records: list[RecordResult]
     """One :class:`RecordResult` per known record type (always all four)."""
 
+    pypi_mode: bool = False
+    """True when the consumer tracks kicad-tools from PyPI with a lower bound
+    (``source_mode: "pypi"`` in install-metadata.json, or a ``>=X`` dependency
+    with no ``[tool.uv.sources]`` entry). Selects the reconcile command."""
+
     @property
     def has_drift(self) -> bool:
         """True when any record's recorded version is stale."""
@@ -221,6 +235,8 @@ class DriftReport:
         """The command that reconciles stale records, or ``None`` when clean."""
         if not self.has_drift:
             return None
+        if self.pypi_mode:
+            return _RECONCILE_TEMPLATE_PYPI.format(version=self.installed_version)
         return _RECONCILE_TEMPLATE.format(version=self.installed_version)
 
 
@@ -315,6 +331,59 @@ def _classify_uv_source(source: dict) -> tuple[RecordStatus, str | None, str]:
             "git source without a tag pin; cannot check for drift",
         )
     return (RecordStatus.EDITABLE, None, "dependency source has no version pin")
+
+
+def _lower_bound_record(rel: str, spec: str, installed: str) -> RecordResult | None:
+    """Classify a PyPI lower-bound requirement (``kicad-tools[...]>=X``).
+
+    Returns ``None`` when ``spec`` is not a plain lower bound (a direct URL,
+    an exact ``==`` pin, or no ``>=`` clause), so the caller falls back to
+    :func:`_classify_dependency_spec`. A lower bound is the PyPI-mode record
+    (issue #8077): ``uv.lock`` carries the exact version, so the record only
+    drifts when the installed package is *older* than the floor (the
+    environment is behind ``pyproject.toml`` -- run ``uv sync``).
+    """
+    if "@" in spec or "==" in spec:
+        return None
+    match = _LOWER_BOUND_RE.search(spec)
+    if not match:
+        return None
+    floor = match.group(1)
+    floor_t = _numeric_version_tuple(floor)
+    installed_t = _numeric_version_tuple(installed)
+    if floor_t is None or installed_t is None:
+        return RecordResult(
+            PYPROJECT_DEPENDENCY,
+            rel,
+            RecordStatus.EDITABLE,
+            None,
+            f"lower bound >={floor} could not be compared to installed {installed!r}",
+        )
+    width = max(len(floor_t), len(installed_t))
+    floor_t = floor_t + (0,) * (width - len(floor_t))
+    installed_t = installed_t + (0,) * (width - len(installed_t))
+    if installed_t >= floor_t:
+        return RecordResult(
+            PYPROJECT_DEPENDENCY,
+            rel,
+            RecordStatus.OK,
+            f">={floor}",
+            (
+                f"PyPI lower bound >={floor} satisfied by installed "
+                f"v{normalize_version(installed)} (uv.lock is the exact pin)"
+            ),
+        )
+    return RecordResult(
+        PYPROJECT_DEPENDENCY,
+        rel,
+        RecordStatus.DRIFT,
+        f">={floor}",
+        (
+            f"PyPI lower bound >={floor} but installed is "
+            f"v{normalize_version(installed)} (environment is behind "
+            "pyproject.toml: run 'uv sync')"
+        ),
+    )
 
 
 def _classify_dependency_spec(spec: str) -> tuple[RecordStatus, str | None, str]:
@@ -436,6 +505,9 @@ def _check_pyproject_records(root: Path, installed: str) -> tuple[RecordResult, 
         spec = _find_dependency_spec(project)
         if spec is None:
             return project_result, dep_result  # dep_result stays NOT_PRESENT
+        lower_bound = _lower_bound_record(rel, spec, installed)
+        if lower_bound is not None:
+            return project_result, lower_bound
         status, recorded_version, detail = _classify_dependency_spec(spec)
 
     dep_result = _finalize_versioned_record(
@@ -596,7 +668,23 @@ def check_version_drift(root: Path | str, installed_version: str) -> DriftReport
         installed_version=installed_version,
         root=str(root_path),
         records=records,
+        pypi_mode=_is_pypi_mode(root_path, dep_result),
     )
+
+
+def _is_pypi_mode(root: Path, dep_result: RecordResult) -> bool:
+    """Is this consumer installed in PyPI source mode (issue #8077)?"""
+    path = root / ".kct" / "install-metadata.json"
+    if path.is_file():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = None
+        mode = data.get("source_mode") if isinstance(data, dict) else None
+        if isinstance(mode, str):
+            return mode == "pypi"
+    recorded = dep_result.recorded_version
+    return recorded is not None and recorded.startswith(">=")
 
 
 # ---------------------------------------------------------------------------
