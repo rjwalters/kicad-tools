@@ -15,6 +15,9 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-29
 
+- **PR #8074**: ci: gate board 05 nightly on 0 warnings in both engines
+- **PR #8071**: fix(router): hold hybrid legs to the partner trunk at the intra-pair gap near the virtual site
+- **Issue #8073** (closed): board 05 nightly: gate on 0 warnings in both engines (finish #7848 AC 2)
 - **PR #8070**: fix(zones): roll back the foreign-pad carve where KiCad's fill is already clean
 - **Issue #8053** (closed): kct export rejects a zone fill written by kct zones fill ("Saved zone fill is split where a refill is not")
 
