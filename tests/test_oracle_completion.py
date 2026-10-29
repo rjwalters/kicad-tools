@@ -640,6 +640,36 @@ class TestCloserReasonsPrinted:
         assert res.rounds[-1].attempts == 0
         assert res.closer_notes == ["GND C1.1: boxed in"]
 
+    def test_deadline_after_first_drc_reports_gate_inputs(self, tmp_path):
+        """Issue #8078: a stop after the first DRC records why the gate refused."""
+        board = FakeBoard(tmp_path, 3)
+        calls = []
+
+        def closer(path, links, banned):
+            calls.append(1)
+            return ClosureAttempt(applied=0)
+
+        budget = iter([100.0])  # first DRC affordable, the attempt gate sees 0 s
+        logs: list[str] = []
+
+        res = run_oracle_completion(
+            board.path,
+            oracle=board.oracle,
+            closer=closer,
+            nets=["GND"],
+            max_rounds=2,
+            time_left=lambda: next(budget, 0.0),
+            call_cost_estimate=1.0,
+            log=logs.append,
+        )
+        assert res.ran
+        assert res.stop_reason == STOP_DEADLINE
+        assert res.final_links > 0
+        assert calls == []
+        assert res.deadline_detail is not None
+        assert "0.0s left" in res.deadline_detail
+        assert any(m.strip().startswith("deadline:") for m in logs)
+
     def test_withdrawn_culprit_explains_a_no_closer_round(self, tmp_path):
         """Board 04's shape: every weld is withdrawn, the last attempt is empty."""
         from kicad_tools.cli.route_cmd import _closer_reasons_for

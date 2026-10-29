@@ -574,6 +574,12 @@ class OracleCompletionResult:
     #: KiCad's DRC count (a round that ends ``no_closer`` after such retries
     #: has an empty final attempt, so its notes alone would explain nothing).
     closer_notes: list[str] = field(default_factory=list)
+    #: Issue #8078: the gate inputs (time left, DRC cost, attempt estimate) that
+    #: made the ``--timeout`` check refuse the next kicad-cli call.  Set only
+    #: when ``stop_reason`` is ``deadline``; a deadline stop with
+    #: ``final_links > 0`` after a successful first DRC means the budget, not
+    #: the closer, left those links open.
+    deadline_detail: str | None = None
 
     @property
     def closed(self) -> int:
@@ -878,6 +884,8 @@ def run_oracle_completion(
     #: attempt (closer, which refills the zones, plus its DRC).
     drc_costs: list[float] = []
     attempt_costs: list[float] = []
+    #: Issue #8078: the inputs of the most recent refused ``affordable()`` call.
+    last_refusal: list[str | None] = [None]
 
     def affordable(*, attempt: bool) -> bool:
         if time_left is None:
@@ -890,7 +898,14 @@ def run_oracle_completion(
         estimate = (
             max(attempt_costs) if (attempt and attempt_costs) else drc * (2 if attempt else 1)
         )
-        return left >= estimate * ORACLE_DEADLINE_SAFETY
+        ok = left >= estimate * ORACLE_DEADLINE_SAFETY
+        if not ok:
+            last_refusal[0] = (
+                f"{'attempt' if attempt else 'DRC'} needs ~{estimate * ORACLE_DEADLINE_SAFETY:.1f}s "
+                f"(estimate {estimate:.1f}s x {ORACLE_DEADLINE_SAFETY:g}, DRC cost {drc:.1f}s), "
+                f"{left:.1f}s left"
+            )
+        return ok
 
     def in_scope(geo: GeometricDRCResult) -> list[OracleLink]:
         # Canonical order: KiCad's report order is not reproducible (#5934).
@@ -903,6 +918,7 @@ def run_oracle_completion(
             ran=False,
             stop_reason=STOP_DEADLINE,
             note="the --timeout budget left cannot cover a kicad-cli DRC run (issue #6273)",
+            deadline_detail=last_refusal[0],
         )
     started = time.monotonic()
     geo = oracle(pcb_path)
@@ -1272,6 +1288,9 @@ def run_oracle_completion(
 
     result.final_links = len(links)
     result.final_link_details = list(links)
+    if result.stop_reason == STOP_DEADLINE:
+        result.deadline_detail = last_refusal[0]
+        say(f"  deadline: {last_refusal[0] or 'budget exhausted'}")
     return result
 
 
