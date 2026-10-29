@@ -481,3 +481,146 @@ def test_cli_pr_event_mode_end_to_end(tmp_path: Path, monkeypatch, capsys) -> No
     _git(tmp_path, "commit", "-q", "-m", "fix: q")
     assert gap_report.main(args) == 0
     assert "RESULT: PASS" in capsys.readouterr().out
+
+
+# --- per-PR mode: commit trailers (issue #8099) ------------------------------
+
+
+def _resolved(subject: str, body: str, resolver: object | None = None) -> object:
+    commit = _commit(subject, body)
+    commit.issues, commit.tier = gap_report.resolve_issue_numbers(
+        commit, resolver or _StubResolver()
+    )
+    return commit
+
+
+#: The f409e6a8 shape: two ``Part of`` trailers on one user-visible commit.
+_TWO_PART_OF = "Body.\n\nPart of #7423\nPart of #5798\n"
+
+
+def test_pr_fails_when_a_commit_part_of_issue_is_uncited() -> None:
+    """The release gate reported #5798 after this PR shape passed (#8099)."""
+    commits = [_resolved("fix(router): hold meanders", _TWO_PART_OF)]
+    verdict = gap_report.evaluate_pr(
+        _pr("fix(router): hold meanders", "Closes #7423\n", head_ref="feature/issue-7423"),
+        {7423},
+        ["changelog.d/7423.added.md"],
+        commits,
+    )
+    assert not verdict.ok
+    assert "'Part of #5798'" in verdict.reason
+    assert "add 'part of #5798' to changelog.d/7423.added.md" in verdict.reason
+    assert "'Part of #7423'" not in verdict.reason  # the cited one is not reported
+
+
+def test_pr_passes_once_the_fragment_cites_every_part_of_issue() -> None:
+    commits = [_resolved("fix(router): hold meanders", _TWO_PART_OF)]
+    verdict = gap_report.evaluate_pr(
+        _pr("fix(router): hold meanders", "Closes #7423\n"),
+        {7423, 5798},
+        ["changelog.d/7423.added.md"],
+        commits,
+    )
+    assert verdict.ok, verdict.reason
+
+
+def test_uncited_part_of_without_a_pr_fragment_suggests_one() -> None:
+    commits = [_resolved("feat: models sync", "Part of #7690.\n")]
+    verdict = gap_report.evaluate_pr(
+        _pr("feat: models sync", "Closes #7683\n"), {7683}, [], commits
+    )
+    assert not verdict.ok
+    assert "add 'part of #7690' to changelog.d/7690.<kind>.md" in verdict.reason
+
+
+def test_commit_trailers_skip_internal_title_prs() -> None:
+    """An internal-title PR needs no fragment at all, trailers included."""
+    commits = [_resolved("fix: x", _TWO_PART_OF)]
+    verdict = gap_report.evaluate_pr(_pr("ci: x", "Closes #7423\n"), set(), [], commits)
+    assert verdict.ok and "title" in verdict.reason
+
+
+def test_commit_trailers_skip_internal_commits_and_internal_issues() -> None:
+    internal_issue = next(iter(gap_report.INTERNAL_ISSUES))
+    commits = [
+        _resolved("test: pin a case", "Part of #5798\n"),
+        _resolved("fix: y", f"Part of #{internal_issue}\n"),
+    ]
+    verdict = gap_report.evaluate_pr(
+        _pr("fix: y", "Closes #7423\n"), {7423}, ["changelog.d/7423.fixed.md"], commits
+    )
+    assert verdict.ok, verdict.reason
+
+
+def test_closing_trailer_wins_over_part_of_as_in_the_release_gate() -> None:
+    """``Closes #A`` + ``Part of #B`` resolves to #A only, so #B needs no citation."""
+    commits = [_resolved("fix: z", "Closes #7423\nPart of #5798\n")]
+    verdict = gap_report.evaluate_pr(
+        _pr("fix: z", "Closes #7423\n"), {7423}, ["changelog.d/7423.fixed.md"], commits
+    )
+    assert verdict.ok, verdict.reason
+
+
+def test_pr_number_subject_suffix_resolves_to_its_branch_issue() -> None:
+    """A ``(#PR)`` suffix is a PR number, resolved via the release gate's tier 2."""
+    commits = [_resolved("fix: z (#8100)", "Part of #5798\n", _StubResolver({8100: 7423}))]
+    assert commits[0].issues == [7423]
+    verdict = gap_report.evaluate_pr(
+        _pr("fix: z", "Closes #7423\n"), {7423}, ["changelog.d/7423.fixed.md"], commits
+    )
+    assert verdict.ok, verdict.reason
+
+
+def test_cli_pr_event_mode_checks_the_pr_commits(tmp_path: Path, monkeypatch, capsys) -> None:
+    """End to end: the PR's own commits (``base..HEAD``) are read and resolved."""
+    import json
+
+    _git(tmp_path, "init", "-q", "-b", "main")
+    _git(tmp_path, "config", "user.email", "t@example.com")
+    _git(tmp_path, "config", "user.name", "t")
+    (tmp_path / "CHANGELOG.md").write_text("# Changelog\n\n## [Unreleased]\n")
+    (tmp_path / "changelog.d").mkdir()
+    (tmp_path / "changelog.d" / "README.md").write_text("x\n")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "chore: base")
+    _git(tmp_path, "tag", "base")
+    fragment = tmp_path / "changelog.d" / "7423.added.md"
+    fragment.write_text("- **A** (Issue #7423).\n")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "fix(router): a", "-m", _TWO_PART_OF)
+    event = tmp_path / "event.json"
+    event.write_text(
+        json.dumps(
+            {
+                "pull_request": {
+                    "number": 5,
+                    "title": "fix(router): a",
+                    "body": "Closes #7423",
+                    "labels": [],
+                    "head": {"ref": "feature/issue-7423"},
+                }
+            }
+        )
+    )
+    monkeypatch.setattr(gap_report, "REPO_ROOT", tmp_path)
+    args = [
+        "--pr-event",
+        str(event),
+        "--base",
+        "base",
+        "--offline",
+        "--changelog",
+        str(tmp_path / "CHANGELOG.md"),
+        "--fragments-dir",
+        str(tmp_path / "changelog.d"),
+    ]
+
+    assert gap_report.main(args) == 1
+    out = capsys.readouterr().out
+    assert "RESULT: FAIL" in out
+    assert "add 'part of #5798' to changelog.d/7423.added.md" in out
+
+    fragment.write_text("- **A** (Issue #7423, part of #5798).\n")
+    _git(tmp_path, "commit", "-q", "-am", "fix(router): cite the epic")
+    assert gap_report.main(args) == 0
+    assert "RESULT: PASS" in capsys.readouterr().out

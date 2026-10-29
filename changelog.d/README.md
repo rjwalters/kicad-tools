@@ -58,11 +58,23 @@ A PR passes when any of these hold:
 - a fragment (or `[Unreleased]`) at the PR head cites its issue;
 - it carries the `changelog:skip` label.
 
+Unless the PR is exempt by one of the first three rules above or the
+`changelog:skip` label, the check also reads the PR's own commits
+(`<base>..HEAD`; issue #8099) and **fails when a user-visible commit references
+an issue that no fragment or `[Unreleased]` entry cites**: every `Closes #N` /
+`Fixes #N` line, or, for a commit with no closing line, every `Part of #N`
+line. A commit with `Part of #7423` and `Part of #5798` therefore needs a
+fragment citing both; the fix is one line, e.g. append `part of #5798` to the
+fragment's bullet. Commits with an internal subject type, and issues in
+`INTERNAL_ISSUES`, are skipped. A trailing `(#N)` in a commit subject is read
+as a PR number and resolved to that PR's `feature/issue-<N>` issue, as the
+release gate does.
+
 The daily release gate (`scripts/changelog_gap_report.py` without `--pr`)
-applies the same rule per commit: a commit is documented when **any** issue it
-resolves to is cited, so a commit with `Part of #A` and `Part of #B` needs a
-fragment citing only one of them. An issue cited by a different commit's
-fragment does not excuse an unrelated commit.
+keeps the looser per-commit rule: a commit is documented when **any** issue it
+resolves to is cited. An issue cited by a different commit's fragment does not
+excuse an unrelated commit. A PR that passes the per-PR check therefore cannot
+turn the release gate red.
 
 Run it locally with
 `uv run python scripts/changelog_gap_report.py --pr <N>`.
