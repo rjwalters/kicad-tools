@@ -17,6 +17,11 @@ beforeAll(() => {
   mkdirSync(fixtureSite);
   mkdirSync(boards);
   cpSync(join(site, "..", "pyproject.toml"), join(root, "pyproject.toml"));
+  // projectFacts.ts reads these from the repo root at build time.
+  for (const f of ["src/kicad_tools/agent_skills/kct", "src/kicad_tools/mcp/tools/registry.py"]) {
+    mkdirSync(dirname(join(root, f)), { recursive: true });
+    cpSync(join(site, "..", f), join(root, f), { recursive: true });
+  }
   for (const entry of ["src", "scripts", "astro.config.mjs", "package.json", "tsconfig.json"]) {
     cpSync(join(site, entry), join(fixtureSite, entry), { recursive: true });
   }

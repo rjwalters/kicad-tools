@@ -8,6 +8,7 @@
 import { join, resolve } from "node:path";
 import { existsSync } from "node:fs";
 import { projectVersion } from "../data/siteMetadata.ts";
+import { projectFacts } from "../data/projectFacts.ts";
 import { loadBoards } from "../data/loadBoards.ts";
 import BoardCard from "../components/BoardCard.astro";
 import SiteHeader from "../components/Header.astro";
@@ -56,7 +57,7 @@ const hasPcbFor = (slug: string): boolean =>
           Explore the examples below to see the work and the evidence behind it.
         </p>
         <div class="hero-links">
-          <a class="primary-link" href="https://github.com/rjwalters/kicad-tools#quick-start">Get started</a>
+          <a class="primary-link" href="#quick-start">Get started</a>
           {demoBoards.length > 0 && <a href="#demo-boards">Explore demo boards ↓</a>}
         </div>
         <p class="count">
@@ -71,6 +72,26 @@ const hasPcbFor = (slug: string): boolean =>
           <code>uv run kct board-metrics --all</code> to populate data.
         </p>
       )}
+
+      <section class="quick-start" id="quick-start" aria-labelledby="quick-start-heading">
+        <h2 id="quick-start-heading">Quick start</h2>
+        <p class="section-copy">
+          Requires Python {projectFacts.requiresPython}. Optional extras:
+          {projectFacts.extras.map((e, i) => (<>{i > 0 && ", "}<code>{e}</code></>))}.
+        </p>
+        <ol class="steps">
+          <li><span>Install</span><code>pip install "kicad-tools[mcp]"</code></li>
+          <li><span>Build a project</span><code>kct build</code></li>
+          <li><span>Check a board</span><code>kct check board.kicad_pcb --mfr jlcpcb</code></li>
+          <li><span>Set up your agent</span><code>kct mcp setup --client claude-code</code></li>
+          <li><span>Install skills</span><code>kct skills install</code></li>
+        </ol>
+        <p class="section-copy">
+          {projectFacts.skills.length} agent skills ship in the wheel:
+          {projectFacts.skills.map((s, i) => (<>{i > 0 && ", "}<code>{s}</code></>))}.
+          The MCP server exposes {projectFacts.mcpTools.length} tools.
+        </p>
+      </section>
 
       <section class="capabilities" aria-labelledby="capabilities-heading">
         <div class="capabilities-head">
@@ -89,6 +110,10 @@ const hasPcbFor = (slug: string): boolean =>
               and opencode; MCP registration is a separate
               <code>kct mcp setup --client</code> step per harness.</p>
             <code>kct skills install --harness codex</code>
+            <p>Look up and substitute parts with <code>kct parts</code>, including
+              offline Basic/Preferred alternatives; the MCP tools
+              {projectFacts.partsTools.map((t, i) => (<>{i > 0 && ", "}<code>{t}</code></>))}
+              do the same for agents.</p>
             <a href="https://github.com/rjwalters/kicad-tools#python-api">Python examples</a>
             <a href="https://github.com/rjwalters/kicad-tools#mcp-server-for-ai-agents">MCP setup</a>
             <a href="https://github.com/rjwalters/kicad-tools#using-kicad-tools-from-claude-code-codex-and-opencode">Claude Code, Codex and opencode</a>
@@ -101,6 +126,10 @@ const hasPcbFor = (slug: string): boolean =>
               clearance results for each design. Differential-pair skew and
               match-group length tuning are available, and
               <code>kct retune-lengths</code> re-tunes an already routed board.</p>
+            <p><code>kct build</code> runs the project pipeline end to end.
+              <code>kct export</code> and <code>kct export-formats</code> write
+              fabrication files and PDF, SVG, STEP, IPC-2581 and ODB++ views.</p>
+            <code>kct export-formats board.kicad_pcb</code>
             <a href="https://github.com/rjwalters/kicad-tools#pcb-autorouter">Routing example</a>
             <a href="/benchmarks">Recorded external-board attempts</a>
             <a href="https://github.com/rjwalters/kicad-tools#cli-commands">Length-tuning commands</a>
@@ -114,7 +143,13 @@ const hasPcbFor = (slug: string): boolean =>
               report <code>verdict</code> and <code>exit_code</code> in JSON.
               The gallery shows each board's own evidence; a passing check is
               not a fabrication guarantee.</p>
+            <p><code>kct models sync</code> fetches the checksum-verified KiCad 3D
+              model subset, and the <code>model_coverage</code> check reports
+              footprints without a model. Scope a check to part of a board with
+              <code>--bbox</code>, <code>--refs</code> or <code>--nets</code>;
+              scoped runs are not sign-off eligible.</p>
             <code>kct check board.kicad_pcb --mfr jlcpcb</code>
+            <code>kct models sync</code>
             <a href="https://github.com/rjwalters/kicad-tools#pure-python-drc">Design-check examples</a>
             <a href="https://github.com/rjwalters/kicad-tools#cli-commands">Analysis and repair commands</a>
             <a href="https://github.com/rjwalters/kicad-tools#agent-skills-kct-namespace">Sign-off skills</a>
@@ -305,6 +340,12 @@ const hasPcbFor = (slug: string): boolean =>
   .hero-links { display: flex; flex-wrap: wrap; align-items: center; gap: 1.25rem; margin: 1.5rem 0; }
   .hero-links a, .capability-list a { color: var(--accent); text-underline-offset: 0.2em; }
   .hero-links .primary-link { background: var(--accent); color: var(--bg); padding: 0.7rem 1rem; border-radius: 5px; font-weight: 600; text-decoration: none; }
+  .quick-start { margin-top: 2.5rem; }
+  .quick-start h2 { margin: 0 0 0.3rem; font-size: 1.3rem; }
+  .quick-start code { background: var(--badge-bg); padding: 0.05rem 0.3rem; border-radius: 4px; font-size: 0.85em; color: var(--text); }
+  .steps { list-style: none; margin: 0 0 1rem; padding: 0; display: grid; gap: 0.5rem; }
+  .steps li { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; padding: 0.6rem 0.9rem; border: 1px solid var(--border); border-radius: 6px; }
+  .steps span { color: var(--muted); font-size: 0.85rem; min-width: 9rem; }
   .capability-list h3 { color: var(--text); font-size: 1.05rem; margin: 0; }
   .capability-list p { margin: 0.75rem 0; }
   .capability-list a { display: block; margin-top: 0.7rem; }
