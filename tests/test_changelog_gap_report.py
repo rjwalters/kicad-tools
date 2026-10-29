@@ -284,6 +284,55 @@ def test_build_report_any_resolved_issue_documents_commit(tmp_path: Path, monkey
     assert report.gaps == [800]
 
 
+def _repo_with_release_section(tmp_path: Path, changelog_text: str, *subjects: tuple[str, str]):
+    _git(tmp_path, "init", "-q", "-b", "main")
+    _git(tmp_path, "config", "user.email", "t@example.com")
+    _git(tmp_path, "config", "user.name", "t")
+    _git(tmp_path, "commit", "-q", "--allow-empty", "-m", "chore: base")
+    _git(tmp_path, "tag", "v1.2.3")
+    for subject, body in subjects:
+        _git(tmp_path, "commit", "-q", "--allow-empty", "-m", subject, "-m", body)
+    changelog = tmp_path / "CHANGELOG.md"
+    changelog.write_text(changelog_text)
+    fragments = tmp_path / "changelog.d"
+    fragments.mkdir()
+    return changelog, fragments
+
+
+def test_since_release_section_counts_as_documented(tmp_path: Path, monkeypatch) -> None:
+    """A fragment consumed into ``## [1.2.3]`` still documents a post-tag commit (#8111)."""
+    changelog, fragments = _repo_with_release_section(
+        tmp_path,
+        "# Changelog\n\n## [Unreleased]\n\n## [1.2.3]\n\n- **A** (Issue #900).\n"
+        "\n## [1.2.2]\n\n- **Old** (Issue #901).\n",
+        ("feat: a (#9)", "Part of #900"),
+        ("feat: b (#10)", "Part of #901"),
+        ("fix: c (#11)", "Closes #902"),
+    )
+    monkeypatch.setattr(gap_report, "REPO_ROOT", tmp_path)
+
+    report = gap_report.build_report(
+        "v1.2.3", "HEAD", changelog, "Unreleased", _StubResolver(), fragments
+    )
+    # #900 is in the since-release; #901 only in an older release; #902 nowhere.
+    assert report.gaps == [901, 902]
+
+
+def test_non_tag_since_ignores_release_sections(tmp_path: Path, monkeypatch) -> None:
+    changelog, fragments = _repo_with_release_section(
+        tmp_path,
+        "# Changelog\n\n## [Unreleased]\n\n## [1.2.3]\n\n- **A** (Issue #900).\n",
+        ("feat: a (#9)", "Part of #900"),
+    )
+    monkeypatch.setattr(gap_report, "REPO_ROOT", tmp_path)
+    sha = gap_report._run(["git", "rev-parse", "HEAD~1"]).strip()
+
+    report = gap_report.build_report(
+        sha, "HEAD", changelog, "Unreleased", _StubResolver(), fragments
+    )
+    assert report.gaps == [900]
+
+
 # --- per-PR mode (issue #5775) ----------------------------------------------
 
 

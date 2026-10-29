@@ -404,6 +404,9 @@ class Report:
         return not self.gaps
 
 
+_RELEASE_TAG = re.compile(r"^v(\d+(?:\.\d+)*)$")
+
+
 def build_report(
     since: str,
     head: str,
@@ -413,8 +416,19 @@ def build_report(
     fragments_dir: Path | None = None,
 ) -> Report:
     commits = read_commits(since, head)
-    section_text = extract_section(changelog_path.read_text(encoding="utf-8"), section)
-    documented = documented_issue_numbers(section_text) | fragment_documented_issues(fragments_dir)
+    changelog_text = changelog_path.read_text(encoding="utf-8")
+    documented = documented_issue_numbers(
+        extract_section(changelog_text, section)
+    ) | fragment_documented_issues(fragments_dir)
+    # The window starts at a release tag whose bump consumed ``changelog.d/``
+    # fragments into ``## [X.Y.Z]``. A commit landing after the tag can still
+    # cite an issue documented there (it passed the per-PR check), so count
+    # that one release section too. Trade-off: an issue cited only there is
+    # treated as documented even if a new commit cites it alone; the per-PR
+    # check is the primary guard (#8111).
+    release = _RELEASE_TAG.match(since)
+    if release:
+        documented |= documented_issue_numbers(extract_section(changelog_text, release.group(1)))
 
     user_visible = 0
     internal = 0
