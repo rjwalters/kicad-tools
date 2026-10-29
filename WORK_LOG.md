@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-29
 
+- **PR #8088**: fix: make pcb reinforce honor class clearance floors, voltage map and same-net holes
+- **Issue #8085** (closed): pcb reinforce: anchors ignore the DRU class floor and the pairwise HV voltage map, and land on PTH pad drills (co-located holes)
 - **PR #8084**: fix(bench): label pour completion cut by --timeout in route rows
 - **PR #8083**: chore(release): v0.25.0
 - **PR #8080**: fix(route): report pour completion cut by --timeout as its own outcome
