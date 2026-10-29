@@ -1672,7 +1672,7 @@ def resolve_current_path(pcb: PCB, spec: CurrentPathSpec) -> PathResolution:
             taps = [
                 (arm, tap)
                 for arm in arms
-                if arm[1].segment is not None
+                if hub is not None and arm[1].segment is not None
                 for tap in [_sense_tap_segments(adjacency, hub, arm, widest, declared)]
                 if tap
             ]
