@@ -36,12 +36,14 @@ Human-approved issues ready for implementation (`loom:issue`).
 Issues currently being built (`loom:building`).
 
 - **#8077**: install-kct.sh: PyPI source mode as the default (+ kct doctor, opt-in upgrade workflow) — consumers track releases, lockfile pins
+- **#8099**: changelog: per-PR fragment check passes 'Part of #<epic>' commits that the release gate later rejects
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
 - **#8081**: feat(install): PyPI source mode as install-kct.sh default (+ kct doctor, opt-in upgrade workflow)
+- **#8100**: fix(ci): release gap report accepts a commit when any resolved issue is cited
 
 ## Approved (Awaiting Merge)
 
@@ -76,8 +78,8 @@ _None._
 | Very important | 0 |
 | Important | 0 |
 | Ready (`loom:issue`) | 1 |
-| In Progress (`loom:building`) | 1 |
-| PRs awaiting review | 1 |
+| In Progress (`loom:building`) | 2 |
+| PRs awaiting review | 2 |
 | Approved PRs awaiting merge | 0 |
 | Curated | 3 |
 | Architect / Hermit proposals | 0 |
