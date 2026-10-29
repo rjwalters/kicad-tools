@@ -36,7 +36,10 @@ issue a user-visible commit resolves to -- ``Closes #N``, or ``Part of #N``
 when the commit has no closing line -- must be cited at the PR head.  Those
 trailers are what the release gate reads once the PR merges, so an uncited
 ``Part of #<epic>`` fails here, where it is a one-line fix, rather than on
-release day.
+release day.  Passing does not guarantee a green release gate: exempt PRs
+(internal title, Dependabot/resync, ``changelog:skip``) skip the commit check,
+and a release cut can consume the citing fragment before the gate reads the
+commit (issue #8111; see :func:`evaluate_pr`).
 
 Note that the trailing ``(#NNNN)`` in a squash-merge subject is the **PR**
 number, never the issue number -- the CHANGELOG convention in this repo is to
@@ -630,6 +633,18 @@ def evaluate_pr(
     6. A resolved issue is documented -> pass.
     7. No issue resolves, but the PR adds/modifies a fragment -> pass.
     8. Otherwise -> fail.
+
+    For a non-exempt PR, rule 4 is a superset of the release gate's
+    per-commit rule, evaluated against the fragments present at the PR head,
+    so an uncited ``Part of`` / ``Closes`` issue is caught at PR time.  A pass
+    does **not** guarantee a green release gate.  There are two known gaps:
+
+    * Exempt PRs (rules 1-3) skip rule 4, but the release gate still reads
+      their branch commits, because ``main`` uses merge commits.
+    * The release tag points at the release-branch bump commit, which is not
+      an ancestor of PRs merged during the release window.  Their commits stay
+      in the next gate window after the bump has moved the citing fragment
+      into the released section (issue #8111, the #5798 incident).
     """
     issues, tier = resolve_pr_issues(pr)
     if SKIP_LABEL in pr.labels:

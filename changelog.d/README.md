@@ -73,8 +73,24 @@ release gate does.
 The daily release gate (`scripts/changelog_gap_report.py` without `--pr`)
 keeps the looser per-commit rule: a commit is documented when **any** issue it
 resolves to is cited. An issue cited by a different commit's fragment does not
-excuse an unrelated commit. A PR that passes the per-PR check therefore cannot
-turn the release gate red.
+excuse an unrelated commit.
+
+For a non-exempt PR, the per-PR rule is a superset of the release gate's
+per-commit rule, evaluated against the fragments present at the PR head. That
+means an uncited `Part of #N` / `Closes #N` is caught at PR time, where the fix
+is one line. Passing the per-PR check does **not** guarantee a green release
+gate. There are two known gaps:
+
+- **Release-window race
+  ([#8111](https://github.com/rjwalters/kicad-tools/issues/8111)).** The
+  release tag points at the release-branch bump commit, which is not an
+  ancestor of PRs merged while the release was open. Those PRs' commits stay in
+  the next gate window (`<tag>..main`), but the bump has already moved their
+  citing fragments into the released section. This is how #5798 went red.
+- **Exempt PRs.** Internal-title, Dependabot/resync and `changelog:skip` PRs
+  skip the commit check. Because `main` uses merge commits, the release gate
+  still reads every commit on their branches. A user-visible `feat:` commit
+  with `Closes #N` inside such a PR can still fail the gate.
 
 Run it locally with
 `uv run python scripts/changelog_gap_report.py --pr <N>`.

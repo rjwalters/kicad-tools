@@ -499,7 +499,11 @@ _TWO_PART_OF = "Body.\n\nPart of #7423\nPart of #5798\n"
 
 
 def test_pr_fails_when_a_commit_part_of_issue_is_uncited() -> None:
-    """The release gate reported #5798 after this PR shape passed (#8099)."""
+    """The f409e6a8 commit shape: an uncited ``Part of`` issue fails (#8099).
+
+    This reproduces the commit shape, not the #5798 incident itself, which was
+    the release-window race tracked in #8111.
+    """
     commits = [_resolved("fix(router): hold meanders", _TWO_PART_OF)]
     verdict = gap_report.evaluate_pr(
         _pr("fix(router): hold meanders", "Closes #7423\n", head_ref="feature/issue-7423"),
