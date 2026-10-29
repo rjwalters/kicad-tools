@@ -78,22 +78,20 @@ would fail loudly as `nets 36/37`, with kicad-cli unconnected > 0, never as a
 pass. So a red nightly with VCP open and no router change is a load signal
 first. Read the uploaded `route.log` before assuming a regression.
 
-## Not gated: warnings
+## Gated: warnings
 
-The AC gates errors. The unattended board also carries warnings that the
-shipping `build.py` would refuse (it accepts no `kct check` warning, #7298):
+The nightly gates warnings too (#8073, finishing #7848 AC 2), matching the
+no-warning gate in the shipping `build.py` (#7298): `kct check` warnings and
+kicad-cli DRC warnings must both be 0, and a count that did not run fails like
+the error counters.
 
-* `kct check`: 136 `silkscreen_line_width` and 1 `silk_overlap`.
-* kicad-cli: 4 `silk_over_copper` and 1 `silk_overlap`, all warning severity.
-
-None of them come from routing. The unrouted board from `hardware.generate`
-carries the same 136 + 1 before any copper exists. The shipping path clears
-them in `redesign/routing.py:apply_routing`. Along with the replay, that
-function widens silk strokes to 0.15 mm and moves the R4/R11/RV1 reference
-fields (`REFERENCE_OFFSETS`). So those DFM corrections live in the replay step,
-and an unattended route never gets them. Fixing that means moving them into
-`hardware.generate`, which is outside this issue's scope (it may not change the
-shipping recipe). It is tracked as #7848.
+This was not always so. The unrouted board from `hardware.generate` used to
+carry 136 `silkscreen_line_width` and 1 `silk_overlap` (`kct check`) plus 4
+`silk_over_copper` and 1 `silk_overlap` (kicad-cli), because the DFM silk
+corrections (0.15 mm strokes, the R4/R11/RV1 `REFERENCE_OFFSETS`) lived only in
+`redesign/routing.py:apply_routing`. #7848 moved them into
+`hardware.generate`, and the nightly of 2026-10-28 (run 40705286766) reported
+0 warnings in both engines on seeds 42, 7 and 1337.
 
 ## CI / Linux
 

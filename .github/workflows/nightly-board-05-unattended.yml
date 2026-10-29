@@ -9,8 +9,8 @@ name: Nightly Board 05 Unattended Route
 # tests the router. This workflow routes the recipe's UNROUTED board with
 # `kct route` under the #6508 protocol flags at three seeds, then gates each
 # seed on: every net complete, kicad-cli DRC 0 errors / 0 unconnected,
-# kicad-cli ERC clean, `kct check --mfr jlcpcb` 0 errors, copper + label LVS
-# clean. scripts/ci/board_05_unattended.py exits 1 on any failure (no
+# kicad-cli ERC clean, kicad-cli DRC 0 warnings, `kct check --mfr jlcpcb`
+# 0 errors and 0 warnings (the #7298 gate; #8073), copper + label LVS clean. scripts/ci/board_05_unattended.py exits 1 on any failure (no
 # allowlist) and 2 when kicad-cli is not the pinned release (#6962).
 #
 # Not per-PR: one seed is a full from-scratch route (~5 min on a host, more
