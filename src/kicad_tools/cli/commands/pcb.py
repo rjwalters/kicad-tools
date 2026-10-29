@@ -538,6 +538,57 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
         print(f"Error loading PCB: {e}", file=sys.stderr)
         return 1
 
+    # Issue #8085: clearance floors from the board's own rules (the sibling
+    # .kicad_pro net classes, as ``kct check`` reads them) and, with
+    # --voltage-map, the pairwise IEC requirement ``kct route`` uses.
+    net_class_clearances: dict[str, float] = {}
+    project_path = pcb_path.with_suffix(".kicad_pro")
+    if project_path.is_file():
+        from kicad_tools.core.project_clearance import (
+            ProjectClearanceError,
+            authored_netclass_clearances,
+        )
+        from kicad_tools.validate.rules.netclass_clearance_copper import load_project
+
+        project = load_project(pcb_path)
+        if project is not None:
+            try:
+                authored = authored_netclass_clearances(
+                    project, [n.name for n in pcb.nets.values() if n.name]
+                )
+            except ProjectClearanceError as e:
+                print(f"Error reading net-class clearances: {e}", file=sys.stderr)
+                return 1
+            net_class_clearances = {name: v.clearance for name, v in authored.items()}
+
+    pairwise = None
+    voltage_map_arg = getattr(args, "voltage_map", None)
+    if voltage_map_arg:
+        from kicad_tools.creepage.standards import StandardLookupError
+        from kicad_tools.router.pairwise_clearance import (
+            build_pairwise_clearance_table,
+            load_pair_bounds,
+            load_signed_voltage_map,
+        )
+
+        vm_path = Path(voltage_map_arg)
+        if not vm_path.exists():
+            print(f"Error: voltage-map file not found: {vm_path}", file=sys.stderr)
+            return 1
+        try:
+            pairwise = build_pairwise_clearance_table(
+                load_signed_voltage_map(vm_path),
+                dru=0.0,  # scalar floors are applied by reinforce_net itself
+                standard_id=getattr(args, "creepage_standard", "iec60664"),
+                pollution_degree=getattr(args, "pollution_degree", 2),
+                material_group=getattr(args, "material_group", "IIIa"),
+                hv_threshold=getattr(args, "hv_threshold", 30.0),
+                pair_bounds=load_pair_bounds(vm_path) or None,
+            )
+        except (ValueError, OSError, StandardLookupError) as e:
+            print(f"Error: invalid voltage-map: {e}", file=sys.stderr)
+            return 1
+
     try:
         outcome = reinforce_net(
             pcb,
@@ -549,6 +600,8 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             all_runs=all_runs,
             min_run_length_mm=min_run_length,
             current_paths=current_paths,
+            net_class_clearances=net_class_clearances,
+            pairwise_clearance=pairwise,
         )
     except ReinforceError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -570,8 +623,18 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
         "anchors_placed": outcome.placed_count,
         "anchors_refused": outcome.refused_count,
         "refused": [
-            {"x": round(r.x, 4), "y": round(r.y, 4), "reason": r.reason} for r in outcome.refused
+            {
+                "x": round(r.x, 4),
+                "y": round(r.y, 4),
+                "reason": r.reason,
+                "rule": r.rule,
+                "required_mm": round(r.required_mm, 4),
+                "actual_mm": round(r.actual_mm, 4),
+                "obstacle_net": r.obstacle_net,
+            }
+            for r in outcome.refused
         ],
+        "voltage_map": voltage_map_arg,
         # Additive per-run accounting (#4319): existing keys above are
         # unchanged so current agent consumers keep working.
         "all_runs": all_runs,
@@ -652,7 +715,14 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
         print(f"  Anchors placed:  {outcome.placed_count}")
         print(f"  Anchors refused: {outcome.refused_count}")
         for r in outcome.refused:
-            print(f"    refused at ({r.x:.2f}, {r.y:.2f}): {r.reason}")
+            detail = (
+                f" [{r.rule}: need {r.required_mm:.3f} mm, have {r.actual_mm:.3f} mm"
+                + (f", vs {r.obstacle_net}" if r.obstacle_net else "")
+                + "]"
+                if r.rule
+                else ""
+            )
+            print(f"    refused at ({r.x:.2f}, {r.y:.2f}): {r.reason}{detail}")
         if not dry_run and outcome.placed_count:
             print()
             print(

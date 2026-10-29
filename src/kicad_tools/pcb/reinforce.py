@@ -38,7 +38,7 @@ HV/creepage model (Unit F).
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 from kicad_tools.core.types import CopperLayer
@@ -52,11 +52,13 @@ from kicad_tools.router.current_paths import CurrentPathSpec, reinforcement_elig
 from kicad_tools.router.optimizer.algorithms import merge_collinear
 from kicad_tools.router.optimizer.chain import sort_into_chains
 from kicad_tools.router.optimizer.config import OptimizationConfig
+from kicad_tools.router.pairwise_clearance import PairwiseClearanceTable
 from kicad_tools.router.primitives import Segment as RouterSegment
 from kicad_tools.router.via_clearance import (
     FilledPolygonLike,
     ForeignPadTuple,
     TrackSegmentLike,
+    drill_hole_to_hole_clear,
     point_clear_of_copper,
 )
 from kicad_tools.schema.pcb import PCB, Segment
@@ -93,6 +95,14 @@ _FALLBACK_DESIGN_RULES = DesignRules(  # noqa: MFR001 reason="intentional manufa
 )
 
 
+# Governing-rule tags carried on :attr:`RefusedAnchor.rule` (#8085).
+RULE_HOLE_TO_HOLE = "hole_to_hole"
+RULE_DRU_CLASS_FLOOR = "dru_class_floor"
+RULE_VOLTAGE_MAP_PAIRWISE = "voltage_map_pairwise"
+
+_RULE_EPS = 1e-9
+
+
 @dataclass
 class RefusedAnchor:
     """An anchor position that was refused for clearance reasons."""
@@ -100,6 +110,14 @@ class RefusedAnchor:
     x: float
     y: float
     reason: str
+    #: Governing rule (``hole_to_hole`` / ``dru_class_floor`` /
+    #: ``voltage_map_pairwise``) of the first candidate tried at this position.
+    rule: str = ""
+    #: Requirement of that rule (mm) and the measured gap (mm); ``0.0`` unknown.
+    required_mm: float = 0.0
+    actual_mm: float = 0.0
+    #: Name of the obstacle net (empty for hole-to-hole against same-net holes).
+    obstacle_net: str = ""
 
 
 @dataclass
@@ -450,28 +468,110 @@ def _too_close(p: tuple[float, float], placed: list[tuple[float, float]], floor:
     return any(math.hypot(p[0] - q[0], p[1] - q[1]) < floor - 1e-9 for q in placed)
 
 
-def _position_clear(
+@dataclass(frozen=True)
+class _Violation:
+    """The rule an anchor candidate breaks, with required vs measured gap."""
+
+    rule: str
+    required_mm: float
+    actual_mm: float
+    obstacle_net: str = ""
+
+
+@dataclass
+class _ClearancePolicy:
+    """Per-obstacle-net required clearance for the target net (#8085).
+
+    ``required = max(fab floor, target class floor, obstacle class floor,
+    pairwise voltage-map requirement)``; the pairwise term is only present
+    when a :class:`PairwiseClearanceTable` was supplied.
+    """
+
+    fab_floor: float
+    target_net: str
+    class_floors: Mapping[str, float]
+    pairwise: PairwiseClearanceTable | None
+
+    def required(self, obstacle_net: str) -> tuple[float, str]:
+        floor = max(
+            self.fab_floor,
+            self.class_floors.get(self.target_net, 0.0),
+            self.class_floors.get(obstacle_net, 0.0),
+        )
+        pair = (
+            self.pairwise.required_clearance(self.target_net, obstacle_net)
+            if self.pairwise is not None and obstacle_net
+            else 0.0
+        )
+        if pair > floor + _RULE_EPS:
+            return pair, RULE_VOLTAGE_MAP_PAIRWISE
+        return floor, RULE_DRU_CLASS_FLOOR
+
+
+def _group_clear(
+    x: float, y: float, anchor_pad: float, clearance: float, group: _NetCopper
+) -> bool:
+    return point_clear_of_copper(
+        x,
+        y,
+        via_size=anchor_pad,
+        clearance=clearance,
+        other_net_tracks=group.tracks,
+        other_net_vias=group.vias,
+        other_net_pads=group.pads,
+        other_net_filled_polygons=group.filled_polygons,
+    )
+
+
+def _actual_gap(x: float, y: float, anchor_pad: float, required: float, group: _NetCopper) -> float:
+    """Measured copper gap (mm) to ``group``, by bisecting the shared predicate."""
+    lo, hi = 0.0, required
+    if not _group_clear(x, y, anchor_pad, 0.0, group):
+        return 0.0
+    for _ in range(16):
+        mid = (lo + hi) / 2.0
+        if _group_clear(x, y, anchor_pad, mid, group):
+            lo = mid
+        else:
+            hi = mid
+    return lo
+
+
+def _position_violation(
     x: float,
     y: float,
     anchor_pad: float,
     anchor_drill: float,
     rules: DesignRules,
     other: _OtherNetCopper,
-) -> bool:
-    """Clearance re-check of a candidate anchor against all other-net copper."""
-    return point_clear_of_copper(
+    policy: _ClearancePolicy,
+) -> _Violation | None:
+    """Clearance re-check of a candidate anchor; ``None`` when it is clear.
+
+    Hole-to-hole is checked against every drill on the board, same-net PTH
+    pads and vias included (a same-net hole is still a separate drilled hole).
+    Copper clearance is then checked per obstacle net against that net's own
+    requirement (:class:`_ClearancePolicy`).
+    """
+    if other.all_drills and not drill_hole_to_hole_clear(
         x,
         y,
-        via_size=anchor_pad,
-        clearance=rules.min_clearance_mm,
-        other_net_tracks=other.tracks,
-        other_net_vias=other.vias,
-        other_net_pads=other.pads,
-        other_net_filled_polygons=other.filled_polygons,
-        via_drill=anchor_drill,
-        other_net_drills=other.drills,
+        anchor_drill,
+        [(dx, dy, dd) for dx, dy, dd in other.all_drills],
         min_hole_to_hole=rules.min_hole_to_hole_mm,
-    )
+    ):
+        gap = min(
+            math.hypot(dx - x, dy - y) - anchor_drill / 2.0 - dd / 2.0
+            for dx, dy, dd in other.all_drills
+        )
+        return _Violation(RULE_HOLE_TO_HOLE, rules.min_hole_to_hole_mm, max(0.0, gap))
+
+    for net_number, group in other.by_net.items():
+        net = other.net_names.get(net_number, "")
+        required, rule = policy.required(net)
+        if not _group_clear(x, y, anchor_pad, required, group):
+            return _Violation(rule, required, _actual_gap(x, y, anchor_pad, required, group), net)
+    return None
 
 
 class _TrackObstacle:
@@ -504,53 +604,78 @@ class _FilledPolyObstacle:
 
 @dataclass
 class _OtherNetCopper:
-    """Collected other-net copper for the clearance re-check."""
+    """Other-net copper grouped by net, plus every drill on the board."""
+
+    by_net: dict[int, _NetCopper] = field(default_factory=dict)
+    net_names: dict[int, str] = field(default_factory=dict)
+    #: ``(x, y, drill_mm)`` of every via and PTH pad, same-net included.
+    all_drills: list[tuple[float, float, float]] = field(default_factory=list)
+
+
+@dataclass
+class _NetCopper:
+    """Copper of one obstacle net for the clearance re-check."""
 
     tracks: list[TrackSegmentLike] = field(default_factory=list)
     vias: list[tuple[float, float, float, int]] = field(default_factory=list)
     pads: list[ForeignPadTuple] = field(default_factory=list)
     filled_polygons: list[FilledPolygonLike] = field(default_factory=list)
-    drills: list[tuple[float, float, float, int]] = field(default_factory=list)
 
 
-def _collect_other_net_copper(pcb: PCB, target_net: int) -> _OtherNetCopper:
-    """Build the other-net obstacle set (everything NOT on ``target_net``)."""
+def _collect_other_net_copper(
+    pcb: PCB, target_net: int, anchor_drill: float, anchor_pad: float
+) -> _OtherNetCopper:
+    """Build the obstacle set: other-net copper by net, all drills (any net).
+
+    A same-net via that already has this pass's anchor geometry is a previous
+    anchor, not an obstacle: skipping it keeps a re-run idempotent (the same
+    candidates are chosen and ``add_via(dedupe=True)`` drops the duplicates).
+    """
     other = _OtherNetCopper()
+    other.net_names = {n.number: n.name for n in pcb.nets.values()}
+
+    def group(net_number: int) -> _NetCopper:
+        return other.by_net.setdefault(net_number, _NetCopper())
 
     for seg in pcb.segments:
         if seg.net_number == target_net:
             continue
         (sx, sy), (ex, ey) = seg.start, seg.end
-        other.tracks.append(_TrackObstacle(sx, sy, ex, ey, seg.width))
+        group(seg.net_number).tracks.append(_TrackObstacle(sx, sy, ex, ey, seg.width))
 
     for via in pcb.vias:
+        vx, vy = via.position
+        own_anchor = (
+            via.net_number == target_net
+            and abs(via.drill - anchor_drill) < 1e-6
+            and abs(via.size - anchor_pad) < 1e-6
+        )
+        if via.drill > 0 and not own_anchor:
+            other.all_drills.append((vx, vy, via.drill))
         if via.net_number == target_net:
             continue
-        vx, vy = via.position
-        other.vias.append((vx, vy, via.size, via.net_number))
-        if via.drill > 0:
-            other.drills.append((vx, vy, via.drill, via.net_number))
+        group(via.net_number).vias.append((vx, vy, via.size, via.net_number))
 
     for fp in pcb.footprints:
         for pad in fp.pads:
-            if pad.net_number == target_net:
-                continue
             pos = pcb.get_pad_position(fp.reference, pad.number)
             if pos is None:
                 continue
             px, py = pos
+            if pad.drill > 0:
+                other.all_drills.append((px, py, pad.drill))
+            if pad.net_number == target_net:
+                continue
             # Effective bounding radius of the pad (disc model).
             radius = max(pad.size) / 2.0 if pad.size else 0.0
-            other.pads.append((px, py, radius, pad.net_number))
-            if pad.drill > 0:
-                other.drills.append((px, py, pad.drill, pad.net_number))
+            group(pad.net_number).pads.append((px, py, radius, pad.net_number))
 
     for zone in pcb.zones:
         if zone.net_number == target_net:
             continue
         for poly in zone.filled_polygons:
             if len(poly) >= 3:
-                other.filled_polygons.append(_FilledPolyObstacle(list(poly)))
+                group(zone.net_number).filled_polygons.append(_FilledPolyObstacle(list(poly)))
 
     return other
 
@@ -567,6 +692,8 @@ def reinforce_net(
     all_runs: bool = False,
     min_run_length_mm: float | None = None,
     current_paths: Sequence[CurrentPathSpec] | None = None,
+    net_class_clearances: Mapping[str, float] | None = None,
+    pairwise_clearance: PairwiseClearanceTable | None = None,
 ) -> ReinforceResult:
     """Emit a spaced same-net PTH anchor row along a routed net's trace.
 
@@ -615,6 +742,12 @@ def reinforce_net(
             reported via :attr:`RunSummary.path_excluded_reason`, never
             silently anchored. ``None`` (the default) preserves the
             pre-#4980 ungated behavior.
+        net_class_clearances: ``{net_name: mm}`` authored net-class clearance
+            floors (the source ``kct check`` uses, #8085). The clearance to an
+            other-net obstacle is at least the larger of the two nets' floors.
+        pairwise_clearance: Optional ``--voltage-map`` pairwise table (#8085);
+            when given, the requirement for (target, obstacle) is raised to
+            the table's value. ``None`` keeps the scalar-floor behavior.
 
     Returns:
         A :class:`ReinforceResult` summarising placed/refused anchors, the
@@ -727,7 +860,13 @@ def reinforce_net(
         result.run_length_mm = primary.length_mm
     result.unhandled_runs = len(geoms) - len(anchored_idx)
 
-    other = _collect_other_net_copper(pcb, target_net_number)
+    other = _collect_other_net_copper(pcb, target_net_number, anchor_drill, anchor_pad)
+    policy = _ClearancePolicy(
+        fab_floor=rules.min_clearance_mm,
+        target_net=net_name,
+        class_floors=net_class_clearances or {},
+        pairwise=pairwise_clearance,
+    )
 
     # Cross-run dedup floor: two placed anchors must be at least a pad diameter
     # apart center-to-center (no overlapping copper), which also satisfies the
@@ -753,21 +892,32 @@ def reinforce_net(
                     continue
 
                 chosen: tuple[float, float] | None = None
+                first_violation: _Violation | None = None
                 for cand_t in _nudge_arc_candidates(t, g.length_mm, spacing_mm):
                     cx, cy = _point_at_arc(g.points, cum, cand_t)
                     if _too_close((cx, cy), placed_positions, dedup_floor):
                         continue
-                    if _position_clear(cx, cy, anchor_pad, anchor_drill, rules, other):
+                    violation = _position_violation(
+                        cx, cy, anchor_pad, anchor_drill, rules, other, policy
+                    )
+                    if violation is None:
                         chosen = (cx, cy)
                         break
+                    if first_violation is None:
+                        first_violation = violation
 
                 if chosen is None:
                     bx, by = base
+                    v = first_violation
                     result.refused.append(
                         RefusedAnchor(
                             x=bx,
                             y=by,
                             reason="other-net clearance/hole-to-hole violation",
+                            rule=v.rule if v else "",
+                            required_mm=v.required_mm if v else 0.0,
+                            actual_mm=v.actual_mm if v else 0.0,
+                            obstacle_net=v.obstacle_net if v else "",
                         )
                     )
                     run_refused += 1
