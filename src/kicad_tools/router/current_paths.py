@@ -81,7 +81,10 @@ barrels, and one straight receiving trunk. Stub length and via span must not
 exceed the endpoint pad diagonal. Every original member remains in the resolved
 segment evidence and is checked at the declaration's full current; no I/N or
 summed-width assumption is made. The proof permits one or more receiving exits proved to terminate at real
-pads through acyclic copper. Other cycles and
+pads through acyclic copper. A Kelvin sense tap -- acyclic copper strictly
+narrower than the widest endpoint arm that ends only at pads of other
+footprints -- is set aside from the fanout judgement and reported in
+``PathResolution.sense_taps``, never as force copper. Other cycles and
 unproved endpoint via fanouts remain explicitly ambiguous.
 
 Unsupported custom/trapezoid pads, repeated physical pad numbers, and copper
@@ -790,6 +793,10 @@ class PathResolution:
         segments: The ordered copper segments covering this path. Only
             populated when ``status == "resolved"``.
         length_mm: Cumulative length of ``segments``.
+        sense_taps: Copper recognised as a Kelvin sense tap off an endpoint
+            pad (see :func:`_sense_tap_segments`). Deliberately NOT part of
+            ``segments``: it carries no declared current, so the ampacity
+            check and reinforcement never treat it as force copper.
     """
 
     spec: CurrentPathSpec
@@ -799,6 +806,7 @@ class PathResolution:
     sink: ResolvedEndpoint | None = None
     segments: tuple[Segment, ...] = ()
     length_mm: float = 0.0
+    sense_taps: tuple[Segment, ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -1325,7 +1333,12 @@ def _endpoint_via_array(
 
 
 def _candidate_via_array_leg_count(
-    graph: _CopperGraph, pcb: PCB, hub: _Node, pad: Pad, net_name: str
+    graph: _CopperGraph,
+    pcb: PCB,
+    hub: _Node,
+    pad: Pad,
+    net_name: str,
+    arms: list[tuple[_Node, _GraphEdge]] | None = None,
 ) -> int:
     """Count intact local via arms; fewer than two does not prove safe branching.
 
@@ -1335,7 +1348,7 @@ def _candidate_via_array_leg_count(
     bound = math.hypot(*pad.size)
     net = pcb.get_net_by_name(net_name)
     count = 0
-    for top, edge in graph.adjacency.get(hub, []):
+    for top, edge in graph.adjacency.get(hub, []) if arms is None else arms:
         seg = edge.segment
         if seg is None or seg.layer != hub[2]:
             continue
@@ -1351,6 +1364,42 @@ def _candidate_via_array_leg_count(
             continue
         count += 1
     return count
+
+
+def _sense_tap_segments(
+    graph: _CopperGraph,
+    hub: _Node,
+    arm: tuple[_Node, _GraphEdge],
+    max_width: float,
+    declared: set[tuple[str, str]],
+) -> list[Segment] | None:
+    """Return the copper of a Kelvin sense tap hanging off ``hub`` via ``arm``.
+
+    A tap is acyclic copper, strictly narrower than the widest arm at the
+    hub, that ends only at pad terminals of other footprints (never a
+    declared endpoint pad, never back at the hub). Anything else -- a rejoin,
+    a dangling end, an equally wide leg -- is not proved to be a tap.
+    """
+    terminals = {node for key, node in graph.pads.items() if key[:2] not in declared}
+    declared_nodes = {node for key, node in graph.pads.items() if key[:2] in declared}
+    first, incoming = arm
+    segments: dict[int, Segment] = {}
+    visited: set[_Node] = set()
+    pending = [(first, incoming)]
+    while pending:
+        node, previous = pending.pop()
+        if node == hub or node in visited or node in declared_nodes:
+            return None
+        visited.add(node)
+        if previous.segment is not None:
+            if previous.segment.width >= max_width - _PAD_EPS:
+                return None
+            segments[id(previous.segment)] = previous.segment
+        onward = [(n, e) for n, e in graph.adjacency[node] if e is not previous]
+        if not onward and node not in terminals:
+            return None
+        pending.extend(onward)
+    return list(segments.values())
 
 
 def _component_has_cycle(
@@ -1602,6 +1651,7 @@ def resolve_current_path(pcb: PCB, spec: CurrentPathSpec) -> PathResolution:
         )
 
     arrays: list[_ViaArray] = []
+    sense_taps: list[Segment] = []
     for endpoint in (spec.source, spec.sink):
         array = _endpoint_via_array(adjacency, pcb, endpoint, spec.net_name)
         if array is not None and not any(array.nodes & previous.nodes for previous in arrays):
@@ -1615,6 +1665,22 @@ def resolve_current_path(pcb: PCB, spec: CurrentPathSpec) -> PathResolution:
                 else None
             )
             arms = adjacency.adjacency.get(hub, []) if hub is not None else []
+            # Kelvin sense taps are not force fanout legs: set them aside
+            # (and record them as evidence) before judging the remaining arms.
+            widest = max((e.segment.width for _, e in arms if e.segment is not None), default=0.0)
+            declared = {(spec.source.ref, spec.source.pad), (spec.sink.ref, spec.sink.pad)}
+            taps = [
+                (arm, tap)
+                for arm in arms
+                if arm[1].segment is not None
+                for tap in [_sense_tap_segments(adjacency, hub, arm, widest, declared)]
+                if tap
+            ]
+            # Exactly one tap per pad: several thin via legs are
+            # indistinguishable from a damaged fanout and stay ambiguous.
+            if len(taps) == 1:
+                sense_taps.extend(taps[0][1])
+                arms = [arm for arm in arms if arm is not taps[0][0]]
             # A single-via ordinary branch is supported only when all arms
             # lead through acyclic copper to actual pad terminals. Counting
             # surviving vias alone would accept a damaged array after missing
@@ -1630,7 +1696,9 @@ def resolve_current_path(pcb: PCB, spec: CurrentPathSpec) -> PathResolution:
                     for node, edge in arms
                 )
                 and (
-                    _candidate_via_array_leg_count(adjacency, pcb, hub, endpoint_pad, spec.net_name)
+                    _candidate_via_array_leg_count(
+                        adjacency, pcb, hub, endpoint_pad, spec.net_name, arms
+                    )
                     >= 2
                     or not _proved_load_exits(
                         adjacency, {hub}, [(hub, node, edge) for node, edge in arms]
@@ -1696,6 +1764,7 @@ def resolve_current_path(pcb: PCB, spec: CurrentPathSpec) -> PathResolution:
         sink=sink,
         segments=tuple(path_segments),
         length_mm=sum(_seg_length(s) for s in path_segments),
+        sense_taps=tuple({id(seg): seg for seg in sense_taps}.values()),
     )
 
 
