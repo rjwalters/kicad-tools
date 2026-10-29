@@ -36,13 +36,14 @@ Human-approved issues ready for implementation (`loom:issue`).
 Issues currently being built (`loom:building`).
 
 - **#8077**: install-kct.sh: PyPI source mode as the default (+ kct doctor, opt-in upgrade workflow) — consumers track releases, lockfile pins
-- **#8078**: board 03 bench: pour completion hits its deadline near --timeout, leaving 20 GND/VCC links unconnected
+- **#8085**: pcb reinforce: anchors ignore the DRU class floor and the pairwise HV voltage map, and land on PTH pad drills (co-located holes)
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#8080**: fix(route): report pour completion cut by --timeout as its own outcome
+- **#8081**: feat(install): PyPI source mode as install-kct.sh default (+ kct doctor, opt-in upgrade workflow)
+- **#8088**: fix: make pcb reinforce honor class clearance floors, voltage map and same-net holes
 
 ## Approved (Awaiting Merge)
 
@@ -57,7 +58,7 @@ Issues carrying `loom:curated`.
 - **#5509**: Epic: one clearance kernel — search, commit, and final validation must agree with kicad-cli DRC *(curated)*
 - **#7487**: Re-rule or remove board 03 usb_geometry via-in-pad window exception by 2027-04-19 (#7457 / #7084 Q10) *(curated)*
 - **#7931**: lattice hybrid: legs fail pad-escape-end at the trunk's virtual site (board 03 USB_D J1.A6→U2.3) *(curated)*
-- **#8078**: board 03 bench: pour completion hits its deadline near --timeout, leaving 20 GND/VCC links unconnected *(curated)*
+- **#8085**: pcb reinforce: anchors ignore the DRU class floor and the pairwise HV voltage map, and land on PTH pad drills (co-located holes) *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -79,7 +80,7 @@ _None._
 | Important | 0 |
 | Ready (`loom:issue`) | 1 |
 | In Progress (`loom:building`) | 2 |
-| PRs awaiting review | 1 |
+| PRs awaiting review | 2 |
 | Approved PRs awaiting merge | 0 |
 | Curated | 4 |
 | Architect / Hermit proposals | 0 |

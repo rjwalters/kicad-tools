@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-29
 
+- **PR #8084**: fix(bench): label pour completion cut by --timeout in route rows
+- **PR #8083**: chore(release): v0.25.0
 - **PR #8080**: fix(route): report pour completion cut by --timeout as its own outcome
 - **PR #8079**: chore(changelog): cite parent epics #5798 and #7690 (unblocks release gate)
 - **PR #8075**: chore(deps): Bump authlib from 1.6.12 to 1.9.1
