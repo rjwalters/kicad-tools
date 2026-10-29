@@ -1260,3 +1260,154 @@ def test_installer_keeps_keywords_and_adds_the_dependency(
     data = _load_toml(target_repo / "pyproject.toml")
     assert data["project"]["keywords"] == ["kicad-tools", "pcb"]
     assert data["project"]["dependencies"] == [f"kicad-tools>={_source_version()}", "numpy"]
+
+
+# --- pin helper / workflow hardening (#8097) ---------------------------------
+
+
+def test_pin_helper_keeps_crlf_line_endings(tmp_path: Path) -> None:
+    lines = [
+        "[project]",
+        'name = "board"',
+        'version = "0.1.0"',
+        "dependencies = [",
+        '    "numpy",',
+        '    "kicad-tools[drc]",',
+        "]",
+        "",
+        "[tool.uv.sources]",
+        'kicad-tools = { git = "https://github.com/rjwalters/kicad-tools", tag = "v0.24.0" }',
+        "",
+        "[tool.ruff]",
+        "line-length = 100",
+    ]
+    path = tmp_path / "pyproject.toml"
+    path.write_bytes(("\r\n".join(lines) + "\r\n").encode())
+    result = _pin(path, "apply")
+    assert result.returncode == 0, result.stderr
+    raw = path.read_bytes().decode()
+    # Every line still ends CRLF -- no whole-file LF conversion.
+    assert raw.count("\n") == raw.count("\r\n") > 0
+    expected = lines[:5] + [
+        '    "kicad-tools[drc]>=0.25.0",',
+        "]",
+        "",
+        "[tool.ruff]",
+        "line-length = 100",
+    ]
+    assert raw == "\r\n".join(expected) + "\r\n"
+
+
+@pytest.mark.parametrize(
+    "deps",
+    ['dependencies = ["numpy"]', 'dependencies = [\r\n    "numpy",\r\n]'],
+    ids=["inline", "multi-line"],
+)
+def test_pin_helper_added_line_matches_crlf(tmp_path: Path, deps: str) -> None:
+    path = tmp_path / "pyproject.toml"
+    path.write_bytes(f'[project]\r\nname = "board"\r\n{deps}\r\n'.encode())
+    result = _pin(path, "apply")
+    assert result.returncode == 0, result.stderr
+    raw = path.read_bytes().decode()
+    assert raw.count("\n") == raw.count("\r\n")
+    assert tomllib.loads(raw)["project"]["dependencies"] == ["kicad-tools>=0.25.0", "numpy"]
+
+
+def test_pin_helper_keeps_mixed_line_endings_per_line(tmp_path: Path) -> None:
+    path = tmp_path / "pyproject.toml"
+    text = (
+        '[project]\r\nname = "board"\nversion = "0.1.0"\r\n'
+        'dependencies = ["kicad-tools"]\n\n[tool.uv.sources]\r\n'
+        'kicad-tools = { path = "../kct" }\r\n\r\n[tool.ruff]\nline-length = 100\r\n'
+    )
+    path.write_bytes(text.encode())
+    result = _pin(path, "apply")
+    assert result.returncode == 0, result.stderr
+    assert path.read_bytes().decode() == (
+        '[project]\r\nname = "board"\nversion = "0.1.0"\r\n'
+        'dependencies = ["kicad-tools>=0.25.0"]\n\n[tool.ruff]\nline-length = 100\r\n'
+    )
+
+
+_BS = chr(92)  # a backslash, spelled so no tool decodes the escapes below
+
+
+@pytest.mark.parametrize(
+    ("literal", "expected"),
+    [
+        (f'"kicad{_BS}u002Dtools>=0.20"', "kicad-tools>=0.25.0"),
+        (f'"kicad{_BS}u005Ftools[drc]>=0.20"', "kicad-tools[drc]>=0.25.0"),
+        (f'"kicad{_BS}u002etools{_BS}u003E=99.0"', "kicad-tools>=99.0"),
+    ],
+    ids=["escaped-dash", "escaped-underscore-extras", "escaped-dot-higher-floor"],
+)
+def test_pin_helper_decodes_toml_escapes_and_never_duplicates(
+    tmp_path: Path, literal: str, expected: str
+) -> None:
+    text = f'[project]\nname = "board"\nversion = "0.1.0"\ndependencies = ["numpy", {literal}]\n'
+    path = tmp_path / "pyproject.toml"
+    path.write_text(text)
+    # The escaped string is a kicad-tools requirement, not "absent".
+    assert _pin(path, "state").stdout.strip() != "absent"
+    result, data = _pin_apply(tmp_path, text)
+    assert result.returncode == 0, result.stderr
+    assert data["project"]["dependencies"] == ["numpy", expected]
+    assert _pin(path, "state").stdout.strip() == "match"
+
+
+def _python_without_toml(tmp_path: Path, env: dict[str, str]) -> dict[str, str]:
+    """``env`` whose only usable Python cannot import tomllib or tomli (a 3.9 stand-in)."""
+    block = tmp_path / "no-toml"
+    block.mkdir()
+    for mod in ("tomllib", "tomli"):
+        (block / f"{mod}.py").write_text(f"raise ImportError('no {mod} (test stand-in)')\n")
+    bindir = Path(env["PATH"].split(os.pathsep)[0])  # fake_uv_env's fakebin
+    (bindir / "python3").write_text(
+        f'#!/usr/bin/env bash\nPYTHONPATH="{block}" exec "{sys.executable}" "$@"\n'
+    )
+    (bindir / "python3").chmod(0o755)
+    for minor in range(9, 16):  # shadow any real python3.X on PATH
+        shim = bindir / f"python3.{minor}"
+        shim.write_text("#!/usr/bin/env bash\nexit 1\n")
+        shim.chmod(0o755)
+    return env
+
+
+def test_pypi_dry_run_needs_no_tomllib(
+    tmp_path: Path, target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    env = _python_without_toml(tmp_path, fake_uv_env)
+    _write_pyproject(target_repo, GIT_PINNED_BODY)
+    before = _snapshot(target_repo)
+    result = run_installer(target_repo, "--dry-run", env=env)
+    assert result.returncode == 0, result.stderr
+    assert f"[dry-run] pin kicad-tools>={_source_version()} from PyPI" in result.stdout
+    assert _snapshot(target_repo) == before
+
+
+def test_pypi_apply_without_tomllib_refuses_clearly(
+    tmp_path: Path, target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    env = _python_without_toml(tmp_path, fake_uv_env)
+    _write_pyproject(target_repo, GIT_PINNED_BODY)
+    before = (target_repo / "pyproject.toml").read_text()
+    result = run_installer(target_repo, env=env)
+    assert result.returncode != 0
+    assert "Python >= 3.11" in result.stderr
+    assert (target_repo / "pyproject.toml").read_text() == before
+
+
+def test_upgrade_workflow_scopes_the_token_to_the_push_step() -> None:
+    workflow = yaml.safe_load(UPGRADE_WORKFLOW_SRC.read_text())
+    steps = workflow["jobs"]["upgrade"]["steps"]
+    checkout = next(s for s in steps if str(s.get("uses", "")).startswith("actions/checkout"))
+    assert checkout["with"]["persist-credentials"] is False
+    assert "token" not in checkout["with"]
+    # The steps that run third-party code (installer, `uv lock`) see no token.
+    upgrade = next(s for s in steps if s.get("id") == "upgrade")
+    assert "GH_TOKEN" not in upgrade.get("env", {})
+    assert "GH_TOKEN" not in workflow["jobs"]["upgrade"].get("env", {})
+    pr_step = next(s for s in steps if s.get("name") == "Open the upgrade PR")
+    assert "GH_TOKEN" in pr_step["env"]
+    assert "push origin" in pr_step["run"]
+    assert "credential.helper='!gh auth git-credential'" in pr_step["run"]
