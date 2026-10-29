@@ -13,6 +13,11 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-10-29
+
+- **PR #8070**: fix(zones): roll back the foreign-pad carve where KiCad's fill is already clean
+- **Issue #8053** (closed): kct export rejects a zone fill written by kct zones fill ("Saved zone fill is split where a refill is not")
+
 ### 2026-10-28
 
 - **PR #8067**: fix(route): keep listed nets' preserved copper as obstacle and output under --complete
