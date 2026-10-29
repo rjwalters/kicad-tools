@@ -645,6 +645,70 @@ class TestSilkOverlap:
         results = check_silk_overlap(pcb, _rules())
         assert len(results) == 0, [tuple(v.items) for v in results.violations]
 
+    def test_t_joint_is_not_a_collision(self):
+        """One line ending mid-span on another is one drawing (#8090)."""
+        pcb = _empty_pcb()
+        pcb._footprints.append(
+            _make_footprint(
+                graphics=[
+                    _silk_line(start=(0, 0), end=(4, 0)),
+                    _silk_line(start=(2, 0), end=(2, 2)),
+                ]
+            )
+        )
+        assert len(check_silk_overlap(pcb, _rules())) == 0
+
+    def test_multi_t_outline_is_not_a_collision(self):
+        """Three horizontals ending on one vertical (J1-style outline)."""
+        pcb = _empty_pcb()
+        pcb._footprints.append(
+            _make_footprint(
+                graphics=[
+                    _silk_line(start=(0, -4), end=(0, 4)),
+                    _silk_line(start=(0, -3), end=(3, -3)),
+                    _silk_line(start=(0, 0), end=(3, 0)),
+                    _silk_line(start=(0, 3), end=(3, 3)),
+                ]
+            )
+        )
+        assert len(check_silk_overlap(pcb, _rules())) == 0
+
+    def test_x_crossing_still_flags(self):
+        pcb = _empty_pcb()
+        pcb._footprints.append(
+            _make_footprint(
+                graphics=[
+                    _silk_line(start=(0, 1), end=(4, 1)),
+                    _silk_line(start=(2, 0), end=(2, 2)),
+                ]
+            )
+        )
+        assert len(check_silk_overlap(pcb, _rules())) == 1
+
+    def test_collinear_overlap_with_endpoint_on_span_still_flags(self):
+        pcb = _empty_pcb()
+        pcb._footprints.append(
+            _make_footprint(
+                graphics=[
+                    _silk_line(start=(0, 0), end=(4, 0)),
+                    _silk_line(start=(2, 0), end=(6, 0)),
+                ]
+            )
+        )
+        assert len(check_silk_overlap(pcb, _rules())) == 1
+
+    def test_line_lying_along_another_still_flags(self):
+        pcb = _empty_pcb()
+        pcb._footprints.append(
+            _make_footprint(
+                graphics=[
+                    _silk_line(start=(0, 0), end=(4, 0)),
+                    _silk_line(start=(1, 0), end=(3, 0)),
+                ]
+            )
+        )
+        assert len(check_silk_overlap(pcb, _rules())) == 1
+
     def test_collinear_overlap_with_shared_endpoint_still_flags(self):
         pcb = _empty_pcb()
         pcb._footprints.append(
