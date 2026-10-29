@@ -9174,6 +9174,8 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
     args._stranded_pour_unknown = False
     # Issue #6724: why the check is unknown when kicad-cli failed (not --timeout).
     args._stranded_pour_failure = None
+    # Issue #8078: True when --timeout stopped pour completion with links open.
+    args._pour_completion_cut_by_timeout = False
     args._allow_stranded_pour_pads = allow_stranded_pour_pads(
         bool(getattr(args, "allow_stranded_pour_pads", False))
     )
@@ -9290,6 +9292,14 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
         # Issue #6374: a link closed below its class clearance is never silent.
         for line in result.relaxed_links:
             print(f"    RELAXED: {line}")
+    if result.stop_reason == STOP_DEADLINE and result.final_links > 0:
+        # Issue #8078: --timeout, not the closer, left these links open.
+        args._pour_completion_cut_by_timeout = True
+        if not quiet:
+            print(
+                f"  pour completion cut by --timeout: {result.final_links} link(s) were "
+                "not attempted (raise --timeout to let the closer run)"
+            )
     return result.final_links
 
 
@@ -9336,6 +9346,8 @@ def _print_stranded_pour_failure_banner(args, output_path) -> None:
     print("=" * 60)
     print()
     print(f"{n} pour link(s) remain that KiCad's own connectivity reports unconnected.")
+    if getattr(args, "_pour_completion_cut_by_timeout", False) is True:
+        print("Pour completion was cut by --timeout before the closer could run (issue #8078).")
     print("These pads sit on a pour that does not reach them; the board is not")
     print("electrically complete as written.")
     print(f"Board written to {output_path} for inspection.")
