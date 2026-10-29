@@ -31,6 +31,16 @@ user-visible, not classified internal, not labelled ``changelog:skip``, and no
 fragment / ``[Unreleased]`` entry at the PR head cites its issue (or, for a PR
 with no resolvable issue, it adds no fragment at all).
 
+The PR's own commits (``<base>..HEAD``) are checked too (issue #8099): every
+issue a user-visible commit resolves to -- ``Closes #N``, or ``Part of #N``
+when the commit has no closing line -- must be cited at the PR head.  Those
+trailers are what the release gate reads once the PR merges, so an uncited
+``Part of #<epic>`` fails here, where it is a one-line fix, rather than on
+release day.  Passing does not guarantee a green release gate: exempt PRs
+(internal title, Dependabot/resync, ``changelog:skip``) skip the commit check,
+and a release cut can consume the citing fragment before the gate reads the
+commit (issue #8111; see :func:`evaluate_pr`).
+
 Note that the trailing ``(#NNNN)`` in a squash-merge subject is the **PR**
 number, never the issue number -- the CHANGELOG convention in this repo is to
 cite issues.  That is exactly why this script exists rather than a one-line
@@ -581,24 +591,74 @@ def is_structurally_internal_pr(pr: PullRequest) -> bool:
     return any(p.search(pr.title) for p in STRUCTURAL_INTERNAL_SUBJECTS)
 
 
+def uncited_commit_issues(commits: list[Commit], documented: set[int]) -> list[tuple[Commit, int]]:
+    """``(commit, issue)`` pairs the release gate would report once the PR merges.
+
+    ``commits`` must already be resolved (``commit.issues`` / ``commit.tier``
+    set by :func:`resolve_issue_numbers`, which also maps a ``(#PR)`` subject
+    suffix to that PR's branch issue rather than reading it as an issue).
+    Internal commits -- by subject or ``INTERNAL_COMMITS`` -- and issues in
+    ``INTERNAL_ISSUES`` are skipped exactly as :func:`build_report` skips them.
+    """
+    pairs: list[tuple[Commit, int]] = []
+    for commit in commits:
+        if commit.is_internal or commit.short_sha in INTERNAL_COMMITS:
+            continue
+        for issue in commit.issues:
+            if issue not in documented and issue not in INTERNAL_ISSUES:
+                pairs.append((commit, issue))
+    return pairs
+
+
+def _trailer_fix(commit: Commit, issue: int, changed_fragments: list[str]) -> str:
+    """One finding of the per-commit rule, with the one-line fix."""
+    trailer = {
+        "partial": f"'Part of #{issue}'",
+        "closing": f"'Closes #{issue}'",
+        "branch": f"a PR reference resolving to #{issue}",
+    }.get(commit.tier, f"#{issue}")
+    where = changed_fragments[0] if changed_fragments else f"changelog.d/{issue}.<kind>.md"
+    return (
+        f"commit {commit.short_sha} ({commit.subject!r}) carries {trailer}, "
+        f"which no fragment cites; add 'part of #{issue}' to {where}"
+    )
+
+
 def evaluate_pr(
     pr: PullRequest,
     documented: set[int],
     changed_fragments: list[str],
+    commits: list[Commit] | None = None,
 ) -> PrVerdict:
     """Decide whether one PR satisfies the changelog-fragment rule.
 
     ``documented`` is every issue cited at the PR head by a ``changelog.d/``
     fragment or by ``[Unreleased]``; ``changed_fragments`` is the fragment
-    files the PR itself adds or modifies.  Rules, first match wins:
+    files the PR itself adds or modifies; ``commits`` is the PR's own resolved
+    commits (``None`` skips rule 4).  Rules, first match wins:
 
     1. ``changelog:skip`` label -> pass.
     2. Structurally internal (Dependabot author/branch, Loom resync title) -> pass.
     3. Internal conventional-commit type in the PR **title** -> pass.
-    4. Every resolved issue is in ``INTERNAL_ISSUES`` -> pass.
-    5. A resolved issue is documented -> pass.
-    6. No issue resolves, but the PR adds/modifies a fragment -> pass.
-    7. Otherwise -> fail.
+    4. A user-visible commit resolves to an issue nothing cites (issue #8099:
+       e.g. ``Part of #<epic>`` beside a fragment for the commit's own issue)
+       -> fail.  This is the release gate's per-commit rule, applied early.
+    5. Every resolved issue is in ``INTERNAL_ISSUES`` -> pass.
+    6. A resolved issue is documented -> pass.
+    7. No issue resolves, but the PR adds/modifies a fragment -> pass.
+    8. Otherwise -> fail.
+
+    For a non-exempt PR, rule 4 is a superset of the release gate's
+    per-commit rule, evaluated against the fragments present at the PR head,
+    so an uncited ``Part of`` / ``Closes`` issue is caught at PR time.  A pass
+    does **not** guarantee a green release gate.  There are two known gaps:
+
+    * Exempt PRs (rules 1-3) skip rule 4, but the release gate still reads
+      their branch commits, because ``main`` uses merge commits.
+    * The release tag points at the release-branch bump commit, which is not
+      an ancestor of PRs merged during the release window.  Their commits stay
+      in the next gate window after the bump has moved the citing fragment
+      into the released section (issue #8111, the #5798 incident).
     """
     issues, tier = resolve_pr_issues(pr)
     if SKIP_LABEL in pr.labels:
@@ -607,6 +667,17 @@ def evaluate_pr(
         return PrVerdict(True, "internal by construction (Dependabot / Loom resync)", issues, tier)
     if is_internal_subject(pr.title):
         return PrVerdict(True, "internal conventional-commit type in PR title", issues, tier)
+    uncited = uncited_commit_issues(commits or [], documented)
+    if uncited:
+        return PrVerdict(
+            False,
+            "the release gate requires every issue a user-visible commit references "
+            "to be cited by a fragment: "
+            + "; ".join(_trailer_fix(c, i, changed_fragments) for c, i in uncited)
+            + f" (or apply the {SKIP_LABEL} label)",
+            issues,
+            tier,
+        )
     if issues and all(i in INTERNAL_ISSUES for i in issues):
         return PrVerdict(True, "issue classified internal in INTERNAL_ISSUES", issues, tier)
     cited = [i for i in issues if i in documented]
@@ -666,17 +737,22 @@ def run_pr_mode(
     section: str,
     fragments_dir: Path,
     as_json: bool,
+    resolver: _BranchResolver | None = None,
 ) -> int:
     """CLI driver for per-PR mode.  Reads the working tree as the PR head."""
+    resolver = resolver or _BranchResolver(None, offline=True)
     try:
         documented = documented_issue_numbers(
             extract_section(changelog_path.read_text(encoding="utf-8"), section)
         ) | fragment_documented_issues(fragments_dir)
         changed = changed_fragment_paths(base)
+        commits = read_commits(base, "HEAD")
     except (changelog_assemble.FragmentError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1 if isinstance(exc, changelog_assemble.FragmentError) else 2
-    verdict = evaluate_pr(pr, documented, changed)
+    for commit in commits:
+        commit.issues, commit.tier = resolve_issue_numbers(commit, resolver)
+    verdict = evaluate_pr(pr, documented, changed, commits)
     if as_json:
         print(
             json.dumps(
@@ -778,8 +854,18 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"error: `gh pr view {args.pr}` failed", file=sys.stderr)
                 return 2
             pr = PullRequest.from_gh(json.loads(out))
+        # Only a commit whose subject ends in ``(#PR)`` triggers a gh lookup, so
+        # the usual CI run stays offline; a failed lookup falls back to its
+        # ``Part of`` lines, which is stricter, never laxer, than the release gate.
+        pr_resolver = _BranchResolver(args.repo or default_repo_slug(), args.offline)
         return run_pr_mode(
-            pr, args.base, args.changelog, args.section, args.fragments_dir, args.json
+            pr,
+            args.base,
+            args.changelog,
+            args.section,
+            args.fragments_dir,
+            args.json,
+            pr_resolver,
         )
 
     since = args.since or latest_release_tag()
