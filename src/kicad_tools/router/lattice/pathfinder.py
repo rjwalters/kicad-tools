@@ -6075,15 +6075,30 @@ class LatticePathfinder:
             legs: dict[str, _RouteResult] = {}
             for pol, real, virt in (("P", hard_p, v_p), ("N", hard_n, v_n)):
                 item: Connection = ((pc.key, pol), real, virt, pc.net_class)
-                res, why = self._search_hybrid_leg(
-                    item,
-                    strict,
-                    floor,
-                    committed=committed,
-                    history=history,
-                    present=present,
-                    escape_plan=escape_plan,
+                # Issue #7931: the virtual site sits one pair pitch from the
+                # partner's just-committed trunk, so the leg's stubs are held
+                # to the partner at the intra-pair gap (the one the trunk's own
+                # ``_pair_attach`` doglegs use), within the attach reach of the
+                # site only.  Every other net keeps the leg's full clearance.
+                partner = hard_n if pol == "P" else hard_p
+                committed.intra_pair = (
+                    partner.net,
+                    (virt.x, virt.y),
+                    reach,
+                    max(0.0, pc.pitch - 2.0 * half),
                 )
+                try:
+                    res, why = self._search_hybrid_leg(
+                        item,
+                        strict,
+                        floor,
+                        committed=committed,
+                        history=history,
+                        present=present,
+                        escape_plan=escape_plan,
+                    )
+                finally:
+                    committed.intra_pair = None
                 if res is None:
                     return None, f"pair-hybrid-leg-{why.removeprefix('pair-')}", None, trunk_mm
                 end = res.runs[-1][1][-1] if res.runs and res.runs[-1][1] else None
