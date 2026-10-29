@@ -5,11 +5,14 @@
 # (scripts/templates/kct-upgrade.yml in rjwalters/kicad-tools), not this copy;
 # re-running the installer with --upgrade-workflow overwrites it.
 #
-# Weekly (and on demand) this job:
+# Weekly (and on demand) two jobs run: `prepare` (read-only, no secrets) does
+# steps 1-4 and hands a patch over as an artifact; `publish` (the only job with
+# a write token) applies it and does step 5, so code the installer or `uv lock`
+# runs never shares a job with the token (#8115).
 #   1. finds the latest kicad-tools release on PyPI;
 #   2. no-ops when .kct/install-metadata.json already records it or a newer
 #      version (it never proposes a downgrade), or when an upgrade branch for
-#      it already exists;
+#      it already exists (checked in `publish`);
 #   3. checks out kicad-tools at v<latest> and runs
 #      `install-kct.sh --pypi -y .`, which raises the `kicad-tools>=` floor and
 #      re-vendors the skills, CI gates and conventions;
@@ -31,27 +34,32 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 concurrency:
   group: kct-upgrade
   cancel-in-progress: false
 
 jobs:
-  upgrade:
+  # Runs third-party code (installer, `uv lock`). No secret, read-only token:
+  # it hands the publish job a patch and a PR body, never a `.git` directory.
+  prepare:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
     env:
       KCT_INSTALL_ARGS: ${{ vars.KCT_INSTALL_ARGS }}
-      BASE_BRANCH: ${{ github.event.repository.default_branch }}
+    outputs:
+      changed: ${{ steps.upgrade.outputs.changed }}
+      latest: ${{ steps.versions.outputs.latest }}
+      branch: ${{ steps.versions.outputs.branch }}
     steps:
       - name: Check out
         uses: actions/checkout@v7
         with:
           # No token left in .git/config: the installer and `uv lock` below
-          # run third-party code. Only the PR step pushes, with its own
-          # step-scoped GH_TOKEN (#8097).
+          # run third-party code. Only the publish job pushes (#8097, #8115).
           persist-credentials: false
 
       - name: Set up uv
@@ -59,10 +67,6 @@ jobs:
 
       - name: Resolve the latest kicad-tools release
         id: versions
-        env:
-          # Read-only use: `git ls-remote` below (a private repo needs auth now
-          # that checkout persists no credentials). No third-party code runs here.
-          GH_TOKEN: ${{ secrets.KCT_UPGRADE_TOKEN || github.token }}
         run: |
           set -euo pipefail
           latest="$(curl -fsSL https://pypi.org/pypi/kicad-tools/json \
@@ -103,10 +107,6 @@ jobs:
           if [ "$newer" != true ]; then
             echo "kicad-tools v${current} is already at or past PyPI's latest v${latest}; nothing to do."
             skip=true
-          elif git -c credential.helper= -c credential.helper='!gh auth git-credential' \
-              ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
-            echo "Branch ${branch} already exists (upgrade PR already open); nothing to do."
-            skip=true
           fi
           {
             echo "latest=${latest}"
@@ -144,6 +144,10 @@ jobs:
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
+            # Hand over a patch (new files and modes included), not the tree.
+            mkdir -p "$RUNNER_TEMP/handoff"
+            git add -A
+            git diff --cached --binary > "$RUNNER_TEMP/handoff/upgrade.patch"
           fi
 
       - name: Write the PR body
@@ -153,7 +157,7 @@ jobs:
           CURRENT: ${{ steps.versions.outputs.current }}
         run: |
           set -euo pipefail
-          python3 - "$RUNNER_TEMP/kicad-tools" "$RUNNER_TEMP/pr-body.md" <<'PY'
+          python3 - "$RUNNER_TEMP/kicad-tools" "$RUNNER_TEMP/handoff/pr-body.md" <<'PY'
           import os
           import re
           import sys
@@ -217,17 +221,58 @@ jobs:
           out.write_text("\n".join(lines) + "\n", encoding="utf-8")
           PY
 
-      - name: Open the upgrade PR
+      - name: Upload the upgrade patch
         if: steps.upgrade.outputs.changed == 'true'
-        env:
-          # The only step that writes with the token (git push, gh pr create);
-          # never exported to the installer or `uv lock`, which run third-party
-          # code -- and checkout persists no credentials for them to find.
-          GH_TOKEN: ${{ secrets.KCT_UPGRADE_TOKEN || github.token }}
-          LATEST: ${{ steps.versions.outputs.latest }}
-          BRANCH: ${{ steps.versions.outputs.branch }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: kct-upgrade
+          path: ${{ runner.temp }}/handoff/
+          if-no-files-found: error
+          retention-days: 3
+
+  # The only job with a write token. It runs nothing from the installer: it
+  # applies a patch (git apply refuses paths under .git and outside the tree)
+  # onto a fresh checkout, then commits, pushes and opens the PR.
+  publish:
+    needs: prepare
+    if: needs.prepare.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      BASE_BRANCH: ${{ github.event.repository.default_branch }}
+      LATEST: ${{ needs.prepare.outputs.latest }}
+      BRANCH: ${{ needs.prepare.outputs.branch }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Download the upgrade patch
+        uses: actions/download-artifact@v8
+        with:
+          name: kct-upgrade
+          path: ${{ runner.temp }}/handoff
+
+      - name: Apply the upgrade patch
         run: |
           set -euo pipefail
+          git apply --whitespace=nowarn "$RUNNER_TEMP/handoff/upgrade.patch"
+
+      - name: Open the upgrade PR
+        env:
+          # The only step that holds the token (git push, gh pr create).
+          GH_TOKEN: ${{ secrets.KCT_UPGRADE_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          auth=(-c credential.helper= -c 'credential.helper=!gh auth git-credential')
+          if git "${auth[@]}" ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            echo "Branch ${BRANCH} already exists (upgrade PR already open); nothing to do."
+            exit 0
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
           git checkout -b "$BRANCH"
@@ -236,10 +281,9 @@ jobs:
           # checkout ran with persist-credentials: false, so authenticate this
           # one push with the step's GH_TOKEN through gh's credential helper
           # (never written to .git/config, never on a command line).
-          git -c credential.helper= -c credential.helper='!gh auth git-credential' \
-            push origin "HEAD:refs/heads/${BRANCH}"
+          git "${auth[@]}" push origin "HEAD:refs/heads/${BRANCH}"
           gh pr create \
             --base "$BASE_BRANCH" \
             --head "$BRANCH" \
             --title "chore(deps): upgrade kicad-tools to v${LATEST}" \
-            --body-file "$RUNNER_TEMP/pr-body.md"
+            --body-file "$RUNNER_TEMP/handoff/pr-body.md"

@@ -1402,17 +1402,85 @@ def test_pypi_apply_without_tomllib_refuses_clearly(
     assert (target_repo / "pyproject.toml").read_text() == before
 
 
-def test_upgrade_workflow_scopes_the_token_to_the_push_step() -> None:
+def test_upgrade_workflow_scopes_the_token_to_the_publish_job() -> None:
     workflow = yaml.safe_load(UPGRADE_WORKFLOW_SRC.read_text())
-    steps = workflow["jobs"]["upgrade"]["steps"]
-    checkout = next(s for s in steps if str(s.get("uses", "")).startswith("actions/checkout"))
-    assert checkout["with"]["persist-credentials"] is False
-    assert "token" not in checkout["with"]
-    # The steps that run third-party code (installer, `uv lock`) see no token.
-    upgrade = next(s for s in steps if s.get("id") == "upgrade")
-    assert "GH_TOKEN" not in upgrade.get("env", {})
-    assert "GH_TOKEN" not in workflow["jobs"]["upgrade"].get("env", {})
-    pr_step = next(s for s in steps if s.get("name") == "Open the upgrade PR")
+    jobs = workflow["jobs"]
+    prepare, publish = jobs["prepare"], jobs["publish"]
+    assert publish["needs"] == "prepare"
+    # No step that executes installer or `uv lock` output shares a job with the token.
+    assert "secrets." not in yaml.safe_dump(prepare)
+    assert "GH_TOKEN" not in yaml.safe_dump(prepare)
+    assert prepare["permissions"] == {"contents": "read"}
+    assert any("install-kct.sh" in s.get("run", "") for s in prepare["steps"])
+    assert not any(
+        "install-kct.sh" in s.get("run", "") or "uv lock" in s.get("run", "")
+        for s in publish["steps"]
+    )
+    for job in (prepare, publish):
+        checkout = next(
+            s for s in job["steps"] if str(s.get("uses", "")).startswith("actions/checkout")
+        )
+        assert checkout["with"]["persist-credentials"] is False
+        assert "token" not in checkout["with"]
+    pr_step = next(s for s in publish["steps"] if s.get("name") == "Open the upgrade PR")
     assert "GH_TOKEN" in pr_step["env"]
+    assert "GH_TOKEN" not in publish.get("env", {})
     assert "push origin" in pr_step["run"]
-    assert "credential.helper='!gh auth git-credential'" in pr_step["run"]
+    assert "credential.helper=!gh auth git-credential" in pr_step["run"]
+    assert any("git apply" in s.get("run", "") for s in publish["steps"])
+
+
+@pytest.mark.parametrize(
+    "literal",
+    ['"""kicad-tools>=0.20"""', "'''kicad-tools>=0.20'''", '"""\nkicad-tools>=0.20"""'],
+    ids=["basic", "literal", "leading-newline"],
+)
+def test_pin_helper_rewrites_multiline_strings_in_place(tmp_path: Path, literal: str) -> None:
+    text = f'[project]\nname = "board"\nversion = "0.1.0"\ndependencies = [\n    "numpy",\n    {literal},\n]\n'
+    path = tmp_path / "pyproject.toml"
+    path.write_text(text)
+    assert _pin(path, "state").stdout.strip() == "mismatch"
+    result, data = _pin_apply(tmp_path, text)
+    assert result.returncode == 0, result.stderr
+    assert data["project"]["dependencies"] == ["numpy", "kicad-tools>=0.25.0"]
+
+
+def test_pin_helper_multiline_in_dependency_group(tmp_path: Path) -> None:
+    text = (
+        '[project]\nname = "b"\nversion = "0.1.0"\ndependencies = ["numpy"]\n'
+        "[dependency-groups]\ndev = [\n    '''kicad-tools>=0.20''',\n]\n"
+    )
+    path = tmp_path / "pyproject.toml"
+    path.write_text(text)
+    result, data = _pin_apply(tmp_path, text)
+    assert result.returncode == 0, result.stderr
+    assert data["dependency-groups"]["dev"] == ["kicad-tools>=0.25.0"]
+    assert data["project"]["dependencies"].count("kicad-tools>=0.25.0") == 1
+
+
+def test_pin_helper_multiline_crlf(tmp_path: Path) -> None:
+    text = '[project]\r\nname = "b"\r\nversion = "0.1.0"\r\ndependencies = [\r\n    """kicad-tools>=0.20""",\r\n]\r\n'
+    path = tmp_path / "pyproject.toml"
+    path.write_bytes(text.encode())
+    result, data = _pin_apply(tmp_path, text)
+    assert result.returncode == 0, result.stderr
+    assert data["project"]["dependencies"] == ["kicad-tools>=0.25.0"]
+
+
+def test_pin_helper_leaves_requirement_spanning_lines_unmatched(tmp_path: Path) -> None:
+    text = '[project]\nname = "b"\nversion = "0.1.0"\ndependencies = [\n    """kicad-tools\n>=0.20""",\n]\n'
+    path = tmp_path / "pyproject.toml"
+    path.write_text(text)
+    assert _pin(path, "state").stdout.strip() == "absent"
+    result, data = _pin_apply(tmp_path, text)
+    assert result.returncode == 0, result.stderr  # valid TOML either way
+
+
+@pytest.mark.parametrize("escape", ["\\x2D", "\\e"], ids=["hex-x", "escape-e"])
+def test_pin_helper_rejects_toml_1_1_escapes(tmp_path: Path, escape: str) -> None:
+    text = (
+        f'[project]\nname = "b"\nversion = "0.1.0"\ndependencies = ["kicad{escape}tools>=0.20"]\n'
+    )
+    path = tmp_path / "pyproject.toml"
+    path.write_text(text)
+    assert _pin(path, "state").returncode != 0

@@ -277,11 +277,10 @@ _ESCAPES = {
     "n": "\n",
     "f": "\f",
     "r": "\r",
-    "e": "\x1b",
     '"': '"',
     "\\": "\\",
 }
-_HEX_ESCAPES = {"x": 2, "u": 4, "U": 8}
+_HEX_ESCAPES = {"u": 4, "U": 8}  # TOML 1.0: no \e / \xHH (1.1 only; tomllib rejects them)
 
 
 def _decode_basic(raw: str, offset: int) -> str:
@@ -323,7 +322,7 @@ def _encode(value: str, quote: str) -> str:
     if quote == "'" and "'" not in value and not re.search(r"[\x00-\x08\x0a-\x1f\x7f]", value):
         return f"'{value}'"
     body = []
-    reverse = {v: k for k, v in _ESCAPES.items() if k != "e"}
+    reverse = {v: k for k, v in _ESCAPES.items()}
     for ch in value:
         if ch in reverse:
             body.append("\\" + reverse[ch])
@@ -361,13 +360,36 @@ def _is_dep_array(path: tuple[str, ...]) -> bool:
     )
 
 
+def _multiline_value(s: _Str) -> str | None:
+    """A multi-line string's value, or None when it is not a one-line requirement.
+
+    TOML trims one newline right after the opening delimiter. Anything still
+    spanning lines (or using a line-ending backslash) is left unmatched; the
+    ``_verify`` re-parse stays the backstop (#8115).
+    """
+    value = s.value
+    for nl in ("\r\n", "\n"):
+        if value.startswith(nl):
+            value = value[len(nl) :]
+            break
+    if s.quote == '"':
+        try:
+            value = _decode_basic(value, s.start)
+        except ValueError:
+            return None
+    if "\n" in value.strip() or "\r" in value.strip():
+        return None
+    return value
+
+
 def _requirements(text: str) -> list[tuple[_Str, re.Match[str]]]:
     """Every kicad-tools requirement that is an element of a dependency array."""
     out = []
     for s in _Scanner(text).strings:
-        if not s.in_array or s.multiline or not _is_dep_array(s.path):
+        if not s.in_array or not _is_dep_array(s.path):
             continue
-        m = _REQ_RE.fullmatch(s.value)
+        value = _multiline_value(s) if s.multiline else s.value
+        m = _REQ_RE.fullmatch(value) if value is not None else None
         if m:
             out.append((s, m))
     return out
