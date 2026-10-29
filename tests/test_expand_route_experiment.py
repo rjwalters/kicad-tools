@@ -397,6 +397,7 @@ def test_route_log_facts_are_extracted():
         "router_nets": "18/33",
         "hit_timeout": True,
         "oracle_unverified": False,
+        "pour_cut_by_timeout": False,
         "cache_hit": False,
     }
     assert ere.parse_route_log("nothing relevant")["hit_timeout"] is False
@@ -1259,6 +1260,27 @@ def test_oracle_failure_log_shapes_mark_row_unverified():
     assert ere.parse_route_log(clean)["oracle_unverified"] is False
     quoted = "WARNING: a 'stranded-pour status UNKNOWN' line marks an unverified run\n"
     assert ere.parse_route_log(quoted)["oracle_unverified"] is False
+
+
+def test_pour_cut_by_timeout_fact_is_line_anchored():
+    cut = (
+        "  20 -> 20 unconnected pour link(s) (deadline)\n"
+        "  pour completion cut by --timeout: 20 link(s) still open\n"
+    )
+    facts = ere.parse_route_log(cut)
+    assert facts["pour_cut_by_timeout"] is True
+    assert facts["hit_timeout"] is True
+    assert ere._timeout_cell(facts) == "yes (pour completion cut)"
+
+    clean = "  3 -> 0 unconnected pour link(s) (converged)\nNets routed: 3/3\n"
+    assert ere.parse_route_log(clean)["pour_cut_by_timeout"] is False
+    quoted = "WARNING: the 'pour completion cut by --timeout: N' line marks a cut\n"
+    assert ere.parse_route_log(quoted)["pour_cut_by_timeout"] is False
+
+
+def test_pour_cut_does_not_change_manufacturable_verdict():
+    row = {"kicad_drc_unconnected": 20, "pour_cut_by_timeout": True}
+    assert ere.manufacturable(row) == ere.manufacturable({"kicad_drc_unconnected": 20})
 
 
 def test_oracle_unverified_row_has_no_manufacturable_verdict():
