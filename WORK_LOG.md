@@ -15,6 +15,9 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-29
 
+- **Issue #8099** (closed): install-kct.sh: PyPI source mode as the default (+ kct doctor, opt-in upgrade workflow) — consumers track releases, lockfile pins
+- **PR #8100**: chore(ci): release gap report accepts a commit when any resolved issue is cited
+- **Issue #8077** (closed): changelog: per-PR fragment check passes 'Part of #<epic>' commits that the release gate later rejects
 - **PR #8103**: docs(site): add generated quick start and refresh homepage cards
 - **Issue #8101** (closed): site: refresh kicad-tools.org homepage for v0.25.0 (on-site quick start, generated facts, klayout-tools cross-link)
 - **PR #8094**: fix: treat a single Kelvin sense tap as non-force copper in current-path fanout check
