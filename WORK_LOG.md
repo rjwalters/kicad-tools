@@ -15,6 +15,14 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-29
 
+- **PR #8112**: fix: count the since-tag release section as documented in the changelog gap report
+- **Issue #8111** (closed): changelog: release gate reports a gap when the citing fragment was consumed by a release cut that raced the PR merge
+- **PR #8110**: fix(install): harden the PyPI pin helper (CRLF, 3.9 dry-run, token scope, escapes)
+- **Issue #8097** (closed): install-kct PyPI mode: hardening follow-ups from #8081 review (CRLF, dry-run on py3.9, persist-credentials, escaped requirements)
+- **PR #8109**: fix(changelog): per-PR check fails on uncited Part of / Closes commit trailers
+- **PR #8108**: ci: install pinned actionlint in Test job so upgrade-workflow lint test runs
+- **Issue #8098** (closed): CI: install actionlint so the vendored kct-upgrade.yml lint test runs instead of skipping
+- **PR #8106**: chore(release): v0.25.1
 - **Issue #8099** (closed): install-kct.sh: PyPI source mode as the default (+ kct doctor, opt-in upgrade workflow) — consumers track releases, lockfile pins
 - **PR #8100**: chore(ci): release gap report accepts a commit when any resolved issue is cited
 - **Issue #8077** (closed): changelog: per-PR fragment check passes 'Part of #<epic>' commits that the release gate later rejects
