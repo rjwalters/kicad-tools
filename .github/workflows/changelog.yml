@@ -17,6 +17,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: changelog-${{ github.event.pull_request.number }}
@@ -28,11 +29,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      # The PR merge commit plus its first parent (the base), so
-      # `--base HEAD^1` diffs exactly the PR's own changes.
+      # The PR merge commit, its first parent (the base, so `--base HEAD^1`
+      # diffs exactly the PR's own changes) and the PR branch's full history:
+      # every commit in `HEAD^1..HEAD` has its trailers checked (issue #8099).
+      # `tree:0` fetches commits only -- trees and blobs arrive on demand -- so
+      # full history costs a few MB instead of the ~900 MB pack.
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 2
+          fetch-depth: 0
+          filter: tree:0
 
       - uses: actions/setup-python@v7
         with:
@@ -42,4 +47,8 @@ jobs:
         run: python scripts/changelog_assemble.py --check
 
       - name: Check this PR has a changelog fragment (or is internal)
+        env:
+          # Only for a commit whose subject ends in `(#PR)` (resolved to that
+          # PR's branch issue, as the release gate does); usually unused.
+          GH_TOKEN: ${{ github.token }}
         run: python scripts/changelog_gap_report.py --pr-event "$GITHUB_EVENT_PATH" --base HEAD^1

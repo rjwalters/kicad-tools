@@ -49,13 +49,20 @@ jobs:
       - name: Check out
         uses: actions/checkout@v7
         with:
-          token: ${{ secrets.KCT_UPGRADE_TOKEN || github.token }}
+          # No token left in .git/config: the installer and `uv lock` below
+          # run third-party code. Only the PR step pushes, with its own
+          # step-scoped GH_TOKEN (#8097).
+          persist-credentials: false
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v10
 
       - name: Resolve the latest kicad-tools release
         id: versions
+        env:
+          # Read-only use: `git ls-remote` below (a private repo needs auth now
+          # that checkout persists no credentials). No third-party code runs here.
+          GH_TOKEN: ${{ secrets.KCT_UPGRADE_TOKEN || github.token }}
         run: |
           set -euo pipefail
           latest="$(curl -fsSL https://pypi.org/pypi/kicad-tools/json \
@@ -96,7 +103,8 @@ jobs:
           if [ "$newer" != true ]; then
             echo "kicad-tools v${current} is already at or past PyPI's latest v${latest}; nothing to do."
             skip=true
-          elif git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+          elif git -c credential.helper= -c credential.helper='!gh auth git-credential' \
+              ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
             echo "Branch ${branch} already exists (upgrade PR already open); nothing to do."
             skip=true
           fi
@@ -212,8 +220,9 @@ jobs:
       - name: Open the upgrade PR
         if: steps.upgrade.outputs.changed == 'true'
         env:
-          # The only step that needs the token (gh pr create); never exported
-          # to the installer or `uv lock`, which run third-party code.
+          # The only step that writes with the token (git push, gh pr create);
+          # never exported to the installer or `uv lock`, which run third-party
+          # code -- and checkout persists no credentials for them to find.
           GH_TOKEN: ${{ secrets.KCT_UPGRADE_TOKEN || github.token }}
           LATEST: ${{ steps.versions.outputs.latest }}
           BRANCH: ${{ steps.versions.outputs.branch }}
@@ -224,7 +233,11 @@ jobs:
           git checkout -b "$BRANCH"
           git add -A
           git commit -m "chore(deps): upgrade kicad-tools to v${LATEST}"
-          git push origin "$BRANCH"
+          # checkout ran with persist-credentials: false, so authenticate this
+          # one push with the step's GH_TOKEN through gh's credential helper
+          # (never written to .git/config, never on a command line).
+          git -c credential.helper= -c credential.helper='!gh auth git-credential' \
+            push origin "HEAD:refs/heads/${BRANCH}"
           gh pr create \
             --base "$BASE_BRANCH" \
             --head "$BRANCH" \

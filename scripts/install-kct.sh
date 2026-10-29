@@ -420,20 +420,30 @@ PYPI_PIN_HELPER="$KCT_ROOT/scripts/lib/install_kct_pypi_pin.py"
 # may name a release uv cannot resolve yet, and the edit must stay
 # network-free. "match" = a lower bound >= PYPI_FLOOR and no
 # [tool.uv.sources] kicad-tools entry; anything else is rewritten in place.
-# The helper re-parses its edit with tomllib (Python >= 3.11) or tomli and
-# refuses to write without one, so pick an interpreter that has either. A bare
-# `python3` may be macOS's 3.9; `uv python find` never downloads.
+# Only `apply` re-parses its edit with tomllib (Python >= 3.11) or tomli and
+# refuses to write without one; `state` is plain text scanning that runs on
+# Python >= 3.9. So the interpreter is gated by action (#8097): `state` (all a
+# --dry-run or an already-current repo needs) takes any Python >= 3.9, and
+# only a real `apply` demands tomllib/tomli. A bare `python3` may be macOS's
+# 3.9; `uv python find` never downloads.
 pick_pin_python() {
-  local cand
-  for cand in python3 python3.15 python3.14 python3.13 python3.12 python3.11; do
+  local action="$1" cand probe floor
+  if [[ "$action" == apply ]]; then
+    probe=$'try:\n import tomllib\nexcept ImportError:\n import tomli'
+    floor='>=3.11'
+  else
+    probe='import sys; sys.exit(sys.version_info < (3, 9))'
+    floor='>=3.9'
+  fi
+  for cand in python3 python3.15 python3.14 python3.13 python3.12 python3.11 python3.10 python3.9; do
     command -v "$cand" >/dev/null 2>&1 || continue
-    if "$cand" -c $'try:\n import tomllib\nexcept ImportError:\n import tomli' >/dev/null 2>&1; then
+    if "$cand" -c "$probe" >/dev/null 2>&1; then
       printf '%s\n' "$cand"
       return 0
     fi
   done
   if command -v uv >/dev/null 2>&1; then
-    cand="$(uv python find '>=3.11' 2>/dev/null)" && [[ -n "$cand" ]] && {
+    cand="$(uv python find "$floor" 2>/dev/null)" && [[ -n "$cand" ]] && {
       printf '%s\n' "$cand"
       return 0
     }
@@ -442,8 +452,10 @@ pick_pin_python() {
 }
 
 run_pypi_pin() {
-  local out
-  out="$("$PIN_PYTHON" "$PYPI_PIN_HELPER" apply "$TARGET_PYPROJECT" "$PYPI_FLOOR")" \
+  local out apply_python
+  apply_python="$(pick_pin_python apply)" \
+    || error "rewriting $TARGET_PYPROJECT needs Python >= 3.11 (or python3 with tomli) on PATH, or uv with one installed"
+  out="$("$apply_python" "$PYPI_PIN_HELPER" apply "$TARGET_PYPROJECT" "$PYPI_FLOOR")" \
     || error "could not rewrite the kicad-tools dependency in $TARGET_PYPROJECT"
   while IFS= read -r req; do
     [[ -n "$req" ]] && ok "dependency: $req"
@@ -451,8 +463,8 @@ run_pypi_pin() {
 }
 
 if [[ "$SOURCE_MODE" == "pypi" ]]; then
-  PIN_PYTHON="$(pick_pin_python)" \
-    || error "editing $TARGET_PYPROJECT needs Python >= 3.11 (or python3 with tomli) on PATH, or uv with one installed"
+  PIN_PYTHON="$(pick_pin_python state)" \
+    || error "reading $TARGET_PYPROJECT needs Python >= 3.9 on PATH, or uv with one installed"
   [[ -f "$PYPI_PIN_HELPER" ]] || error "source root missing scripts/lib/install_kct_pypi_pin.py: $KCT_ROOT"
   PIN_STATE="$("$PIN_PYTHON" "$PYPI_PIN_HELPER" state "$TARGET_PYPROJECT" "$PYPI_FLOOR")" \
     || error "could not read the kicad-tools dependency from $TARGET_PYPROJECT"

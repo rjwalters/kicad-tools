@@ -14,7 +14,10 @@ strings that are *elements of a dependency array* are ever read or rewritten:
 ``[dependency-groups]``. A ``"kicad-tools"`` in ``keywords``, a
 ``description``, a comment or any other value is never touched (#8081 review).
 The result is re-parsed with ``tomllib`` (Python >= 3.11) or ``tomli`` before
-anything is written; with neither available the helper refuses (exit 1).
+anything is written; with neither available ``apply`` refuses (exit 1).
+``state`` needs neither and runs on Python >= 3.9 (#8097). Line endings are
+kept as found: a CRLF file stays CRLF, and a line the helper inserts takes the
+ending of the line it is inserted after.
 
 Usage::
 
@@ -101,7 +104,7 @@ class _Str(NamedTuple):
     start: int  # span of the literal, quotes included
     end: int
     quote: str
-    value: str  # raw text between the quotes
+    value: str  # the string's value: escapes decoded (single-line basic strings)
     path: tuple[str, ...]  # TOML key path of the value it belongs to
     in_array: bool  # a direct element of an array
     multiline: bool
@@ -219,7 +222,8 @@ class _Scanner:
             if basic and c == "\\":
                 j += 2
             elif c == q:
-                return j + 1, False, self.t[i + 1 : j]
+                raw = self.t[i + 1 : j]
+                return j + 1, False, _decode_basic(raw, i) if basic else raw
             elif c == "\n":
                 break
             else:
@@ -267,6 +271,84 @@ class _Scanner:
 
 
 _BARE_KEY_RE = re.compile(r"[A-Za-z0-9_-]+")
+_ESCAPES = {
+    "b": "\b",
+    "t": "\t",
+    "n": "\n",
+    "f": "\f",
+    "r": "\r",
+    "e": "\x1b",
+    '"': '"',
+    "\\": "\\",
+}
+_HEX_ESCAPES = {"x": 2, "u": 4, "U": 8}
+
+
+def _decode_basic(raw: str, offset: int) -> str:
+    """The value of a single-line basic string: TOML escapes decoded (#8097).
+
+    ``"kicad\\u002Dtools>=0.20"`` is the requirement ``kicad-tools>=0.20``;
+    matching the undecoded text would miss it and append a duplicate.
+    """
+    if "\\" not in raw:
+        return raw
+    out: list[str] = []
+    i = 0
+    while i < len(raw):
+        c = raw[i]
+        if c != "\\":
+            out.append(c)
+            i += 1
+            continue
+        e = raw[i + 1 : i + 2]
+        if e in _ESCAPES:
+            out.append(_ESCAPES[e])
+            i += 2
+        elif e in _HEX_ESCAPES:
+            digits = raw[i + 2 : i + 2 + _HEX_ESCAPES[e]]
+            if len(digits) != _HEX_ESCAPES[e] or not re.fullmatch(r"[0-9A-Fa-f]+", digits):
+                raise ValueError(f"invalid \\{e} escape in string at offset {offset}")
+            code = int(digits, 16)
+            if code > 0x10FFFF or 0xD800 <= code <= 0xDFFF:
+                raise ValueError(f"invalid unicode escape in string at offset {offset}")
+            out.append(chr(code))
+            i += 2 + len(digits)
+        else:
+            raise ValueError(f"invalid escape \\{e} in string at offset {offset}")
+    return "".join(out)
+
+
+def _encode(value: str, quote: str) -> str:
+    """``value`` as a single-line TOML string literal delimited by ``quote``."""
+    if quote == "'" and "'" not in value and not re.search(r"[\x00-\x08\x0a-\x1f\x7f]", value):
+        return f"'{value}'"
+    body = []
+    reverse = {v: k for k, v in _ESCAPES.items() if k != "e"}
+    for ch in value:
+        if ch in reverse:
+            body.append("\\" + reverse[ch])
+        elif ord(ch) < 0x20 or ord(ch) == 0x7F:
+            body.append(f"\\u{ord(ch):04X}")
+        else:
+            body.append(ch)
+    return '"' + "".join(body) + '"'
+
+
+def _newline_at(text: str, i: int) -> str:
+    """The line ending of the line containing offset ``i`` (``\\n`` at EOF)."""
+    nl = text.find("\n", i)
+    if nl > 0 and text[nl - 1] == "\r":
+        return "\r\n"
+    if nl < 0 and "\r\n" in text and text.count("\r\n") * 2 >= text.count("\n"):
+        return "\r\n"
+    return "\n"
+
+
+def _split_ending(line: str) -> tuple[str, str]:
+    body = line.rstrip("\r\n")
+    return body, line[len(body) :]
+
+
 _MAIN_DEPS = ("project", "dependencies")
 
 
@@ -345,7 +427,7 @@ def _remove_source_entry(lines: list[str]) -> list[str]:
     i = 0
     while i < len(lines):
         line = lines[i]
-        name = _table_name(line)
+        name = _table_name(_split_ending(line)[0])
         if name is not None:
             table = name
             skipping_table = name.lower() in {
@@ -375,11 +457,12 @@ def _remove_source_entry(lines: list[str]) -> list[str]:
 
 
 def _drop_empty_sources_table(lines: list[str]) -> list[str]:
+    """Drop an emptied ``[tool.uv.sources]`` table (``lines`` keep their endings)."""
     for idx, line in enumerate(lines):
-        if _table_name(line) != "tool.uv.sources":
+        if _table_name(_split_ending(line)[0]) != "tool.uv.sources":
             continue
         end = idx + 1
-        while end < len(lines) and _table_name(lines[end]) is None:
+        while end < len(lines) and _table_name(_split_ending(lines[end])[0]) is None:
             end += 1
         body = [ln for ln in lines[idx + 1 : end] if ln.strip()]
         if body:
@@ -389,10 +472,9 @@ def _drop_empty_sources_table(lines: list[str]) -> list[str]:
         # Collapse the blank run left where the table was.
         while before and not before[-1].strip():
             before.pop()
-        if after:
-            before.append("")
-        trimmed = before + after
-        return trimmed
+        if before and after:
+            before.append(_split_ending(before[-1])[1] or _split_ending(line)[1])
+        return before + after
     return lines
 
 
@@ -407,7 +489,7 @@ def _rewrite_requirements(text: str, version: str) -> str:
         marker = ""
         if ";" in rest:
             marker = "; " + rest.split(";", 1)[1].strip()
-        new = f"{lit.quote}{PACKAGE}{extras}{spec}{marker}{lit.quote}"
+        new = _encode(f"{PACKAGE}{extras}{spec}{marker}", lit.quote)
         text = text[: lit.start] + new + text[lit.end :]
     return text
 
@@ -423,32 +505,36 @@ def _add_requirement(text: str, version: str) -> str:
         line_end = scan.tables.get(("project",))
         if line_end is None:
             raise ValueError("pyproject.toml has no [project] table")
-        return text[:line_end] + f"\ndependencies = [{req}]" + text[line_end:]
+        nl = _newline_at(text, line_end)
+        if line_end >= len(text):  # `[project]` is the last line, unterminated
+            return text + f"{nl}dependencies = [{req}]"
+        return text[: line_end + 1] + f"dependencies = [{req}]{nl}" + text[line_end + 1 :]
     body = text[arr.open + 1 : arr.close]
     if "\n" not in body:
         sep = ", " if body.strip() else ""
         return text[: arr.open + 1] + req + sep + body.lstrip() + text[arr.close :]
     # Multi-line array: a new first line, indented like the next element.
     nl = text.index("\n", arr.open)
+    ending = _newline_at(text, arr.open)
     indent = "    "
     for line in text[nl + 1 : arr.close].splitlines():
         if line.strip() and not line.lstrip().startswith("#"):
             indent = line[: len(line) - len(line.lstrip())]
             break
-    return text[: nl + 1] + f"{indent}{req},\n" + text[nl + 1 :]
+    return text[: nl + 1] + f"{indent}{req},{ending}" + text[nl + 1 :]
 
 
 def apply(text: str, version: str) -> str:
-    trailing_nl = text.endswith("\n")
+    """The rewritten file. Every line keeps its own ending (CRLF stays CRLF)."""
     reqs = _requirements(text)
     if reqs:
         text = _rewrite_requirements(text, version)
     if not _in_main(reqs):
         text = _add_requirement(text, version)
-    lines = _remove_source_entry(text.splitlines())
-    out = "\n".join(lines)
-    if trailing_nl:
-        out += "\n"
+    lines = [ln for ln in re.split(r"(?<=\n)", text) if ln]
+    out = "".join(_remove_source_entry(lines))
+    if not text.endswith("\n"):  # removed trailing lines must not add an ending
+        out = _split_ending(out)[0]
     return out
 
 
@@ -533,7 +619,9 @@ def main(argv: list[str]) -> int:
         print(__doc__, file=sys.stderr)
         return 1
     cmd, path, version = argv[1], argv[2], argv[3]
-    with open(path, encoding="utf-8") as fh:
+    # newline="": no universal-newline translation either way, so CRLF
+    # survives the round trip (#8097).
+    with open(path, encoding="utf-8", newline="") as fh:
         text = fh.read()
     if cmd == "state":
         try:
@@ -551,7 +639,7 @@ def main(argv: list[str]) -> int:
     if state(new, version) != "match":
         print("error: could not rewrite the kicad-tools dependency safely", file=sys.stderr)
         return 1
-    with open(path, "w", encoding="utf-8") as fh:
+    with open(path, "w", encoding="utf-8", newline="") as fh:
         fh.write(new)
     for lit, _ in _requirements(new):
         print(lit.value)
