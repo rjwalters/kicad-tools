@@ -430,6 +430,10 @@ def build_report(
         if not commit.issues:
             unattributed.append(f"{commit.short_sha} {commit.subject}")
             continue
+        # Same rule as evaluate_pr: a commit is documented when ANY issue it
+        # resolves to is cited, so ``Part of #A`` + ``Part of #B`` needs one.
+        if any(issue in documented for issue in commit.issues):
+            continue
         for issue in commit.issues:
             candidates.setdefault(issue, []).append(f"{commit.short_sha} {commit.subject}")
 

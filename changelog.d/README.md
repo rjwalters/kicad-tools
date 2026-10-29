@@ -58,6 +58,12 @@ A PR passes when any of these hold:
 - a fragment (or `[Unreleased]`) at the PR head cites its issue;
 - it carries the `changelog:skip` label.
 
+The daily release gate (`scripts/changelog_gap_report.py` without `--pr`)
+applies the same rule per commit: a commit is documented when **any** issue it
+resolves to is cited, so a commit with `Part of #A` and `Part of #B` needs a
+fragment citing only one of them. An issue cited by a different commit's
+fragment does not excuse an unrelated commit.
+
 Run it locally with
 `uv run python scripts/changelog_gap_report.py --pr <N>`.
 

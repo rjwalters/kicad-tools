@@ -251,6 +251,39 @@ def test_build_report_counts_fragments_as_documented(tmp_path: Path, monkeypatch
     assert with_fragment.ok and with_fragment.gaps == []
 
 
+def test_build_report_any_resolved_issue_documents_commit(tmp_path: Path, monkeypatch) -> None:
+    """Two ``Part of`` trailers with a fragment citing only one is not a gap (#8099)."""
+    _git(tmp_path, "init", "-q", "-b", "main")
+    _git(tmp_path, "config", "user.email", "t@example.com")
+    _git(tmp_path, "config", "user.name", "t")
+    _git(tmp_path, "commit", "-q", "--allow-empty", "-m", "chore: base")
+    _git(tmp_path, "tag", "v0.0.1")
+    _git(
+        tmp_path,
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "feat: a (#9)",
+        "-m",
+        "Part of #7423\n\nPart of #5798",
+    )
+    _git(tmp_path, "commit", "-q", "--allow-empty", "-m", "fix: b (#10)", "-m", "Closes #800")
+    changelog = tmp_path / "CHANGELOG.md"
+    changelog.write_text("# Changelog\n\n## [Unreleased]\n")
+    fragments = tmp_path / "changelog.d"
+    fragments.mkdir()
+    (fragments / "7423.added.md").write_text("- **A** (Issue #7423).\n")
+    monkeypatch.setattr(gap_report, "REPO_ROOT", tmp_path)
+
+    report = gap_report.build_report(
+        "v0.0.1", "HEAD", changelog, "Unreleased", _StubResolver(), fragments
+    )
+    # #5798 is excused by its own commit's other citation; #800 (a different
+    # commit) is not excused by #7423.
+    assert report.gaps == [800]
+
+
 # --- per-PR mode (issue #5775) ----------------------------------------------
 
 
