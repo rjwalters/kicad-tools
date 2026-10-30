@@ -16,6 +16,9 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+#: Rule classes ``--check`` evaluates, reported in the JSON ``check`` block.
+CHECK_RULE_CLASSES = ("clearance", "hole_clearance", "hole_to_hole")
+
 
 def run_move_via(
     pcb_path: Path,
@@ -92,7 +95,7 @@ def run_move_via(
 
     before: Counter | None = None
     if check:
-        before = _violation_counter(pcb, touched, manufacturer, layers)
+        before = _violation_counter(pcb, touched, manufacturer, layers, via, pcb_path)
 
     # Drag attached endpoints first (matched against the OLD via position).
     net_filter = via.net_number or None
@@ -120,9 +123,12 @@ def run_move_via(
     }
 
     if check and before is not None:
-        after = _violation_counter(pcb, touched, manufacturer, layers)
+        after = _violation_counter(pcb, touched, manufacturer, layers, via, pcb_path)
         new = after - before
-        result["check"] = {"new_violations": sum(new.values())}
+        result["check"] = {
+            "new_violations": sum(new.values()),
+            "rules_checked": list(CHECK_RULE_CLASSES),
+        }
         if new:
             result["check"]["details"] = [
                 {"rule_id": k[0], "layer": k[1], "nets": list(k[2]), "items": list(k[3])}
@@ -130,7 +136,8 @@ def run_move_via(
             ]
             return _fail(
                 f"--check: move introduces {sum(new.values())} new clearance "
-                "violation(s) on the touched net(s); nothing written",
+                "violation(s) (copper clearance, hole_clearance, hole_to_hole) "
+                "on the touched net(s); nothing written",
                 output_format,
                 extra=result,
             )
@@ -158,16 +165,20 @@ def run_move_via(
         )
         print(f"    Endpoints dragged: {dragged}")
         if check:
-            print("    Clearance check: no new violations")
+            print(f"    Check ({', '.join(CHECK_RULE_CLASSES)}): no new violations")
         print(f"  {'Would move via' if dry_run else 'Saved to: ' + result['output']}")
     return 0
 
 
-def _violation_counter(pcb, touched: set[str], manufacturer: str, layers: int) -> Counter:
-    """Clearance violations touching ``touched`` nets, as a location-free multiset.
+def _violation_counter(
+    pcb, touched: set[str], manufacturer: str, layers: int, via, pcb_path: Path
+) -> Counter:
+    """Violations for the moved via on ``touched`` nets, as a location-free multiset.
 
     Locations shift with the move, so violations are compared by
-    (rule, layer, nets, items) rather than by count or position.
+    (rule, layer, nets, items) rather than by count or position.  Covers
+    manufacturer copper clearance plus the moved via's ``hole_clearance`` and
+    ``hole_to_hole`` against the board's own ``.kicad_pro`` / ``.kicad_dru``.
     """
     from kicad_tools.validate.checker import DRCChecker
 
@@ -179,6 +190,89 @@ def _violation_counter(pcb, touched: set[str], manufacturer: str, layers: int) -
         counter[
             (viol.rule_id, viol.layer, tuple(sorted(viol.nets)), tuple(sorted(viol.items)))
         ] += 1
+    counter.update(_via_hole_violations(pcb, via, pcb_path))
+    return counter
+
+
+def _via_hole_violations(pcb, via, pcb_path: Path) -> Counter:
+    """``hole_clearance`` / ``hole_to_hole`` breaches of ``via``'s drill.
+
+    Hole clearance is measured from the drill edge to foreign copper (tracks,
+    pads, vias, zone fills) on every copper layer the barrel spans, connected
+    or not.  Hole-to-hole is measured to every other drill, any net.  The
+    moved via is keyed by uuid so its own identity is stable across the move.
+    """
+    from shapely.geometry import LineString, Point
+
+    from kicad_tools._shapely import require_shapely
+    from kicad_tools.core.layers import via_spans_layer
+    from kicad_tools.router.board_clearance_rules import BoardClearanceRules, ItemProps
+    from kicad_tools.validate.rules.base import DRC_TOLERANCE
+    from kicad_tools.validate.rules.clearance import (
+        ClearanceRule,
+        _collect_zone_fills,
+        _element_to_shapely_geom,
+    )
+    from kicad_tools.validate.rules.factory_clearance import _hole_geometry
+
+    counter: Counter = Counter()
+    if via.drill <= 0:
+        return counter
+    require_shapely("move-via hole checks")
+    rules = BoardClearanceRules.from_board(pcb_path)
+    hole = Point(*via.position).buffer(via.drill / 2, quad_segs=64)
+    me = ItemProps("Via", via.net_name, plated=True)
+    me_id = f"via {via.uuid or 'moved'} hole"
+    kinds = {"segment": "Track", "pad": "Pad", "via": "Via"}
+    fills = _collect_zone_fills(pcb, include_unassigned=True)
+
+    def foreign(net: int) -> bool:
+        return not (net != 0 and net == via.net_number)
+
+    for layer in pcb.copper_layers:
+        if not via_spans_layer(via.layers, layer.name):
+            continue
+        candidates = []
+        for elem in ClearanceRule()._collect_elements(pcb, layer.name):
+            if elem.element_type == "via" and elem.geometry[:2] == tuple(via.position):
+                continue  # the moved via itself
+            if elem.element_type == "segment":
+                x1, y1, x2, y2, width = elem.geometry
+                geom = LineString(((x1, y1), (x2, y2))).buffer(width / 2, quad_segs=64)
+            else:
+                geom = _element_to_shapely_geom(elem)
+            if geom is not None and foreign(elem.net_number):
+                candidates.append((geom, kinds[elem.element_type], elem.net_name, elem.reference))
+        candidates.extend(
+            (f.polygon, "Zone", f.net_name, f"Zone [{f.net_name}]")
+            for f in fills.get(layer.name, [])
+            if foreign(f.net_number)
+        )
+        for geom, kind, net_name, ref in candidates:
+            required = rules.hole_clearance(me, ItemProps(kind, net_name), layer.name)
+            if hole.distance(geom) + DRC_TOLERANCE < required:
+                nets = tuple(sorted({via.net_name, net_name}))
+                counter[("hole_clearance", layer.name, nets, tuple(sorted((me_id, ref))))] += 1
+
+    drills = [
+        (
+            ItemProps("Via", v.net_name, plated=True),
+            Point(*v.position).buffer(v.drill / 2, quad_segs=64),
+            v.net_name,
+            f"via {v.uuid or v.position} hole",
+        )
+        for v in pcb.vias
+        if v is not via and v.drill > 0
+    ]
+    for fp in pcb.footprints:
+        for pad in fp.pads:
+            if pad.type == "thru_hole" and (geom := _hole_geometry(pad, fp)) is not None:
+                props = ItemProps("Pad", pad.net_name, plated=True, pad_type="Through-hole")
+                drills.append((props, geom, pad.net_name, f"{fp.reference}-{pad.number} hole"))
+    for props, geom, net_name, ref in drills:
+        if hole.distance(geom) + DRC_TOLERANCE < rules.hole_to_hole(me, props):
+            nets = tuple(sorted({via.net_name, net_name}))
+            counter[("hole_to_hole", "*", nets, tuple(sorted((me_id, ref))))] += 1
     return counter
 
 
