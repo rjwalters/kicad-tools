@@ -9530,6 +9530,18 @@ def _add_export_parser(subparsers) -> None:
         ),
     )
     export_parser.add_argument(
+        "--boards",
+        dest="export_boards",
+        type=positive_int,
+        default=5,
+        metavar="N",
+        help=(
+            "Boards in the assembly order (>= 1, default 5 = JLCPCB minimum); "
+            "the bom_lcsc_stock preflight check needs placements-per-board x N "
+            "of each LCSC part in stock (Issue #8121)"
+        ),
+    )
+    export_parser.add_argument(
         "--allow-unbuildable-bom",
         dest="export_allow_unbuildable_bom",
         action="store_true",

@@ -31,6 +31,17 @@ STACKUP_ID_HELP = (
 )
 
 
+def _boards_arg(value: str) -> int:
+    """argparse type for ``--boards``: an integer >= 1 (Issue #8121)."""
+    try:
+        n = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid int value: {value!r}") from None
+    if n < 1:
+        raise argparse.ArgumentTypeError("--boards must be >= 1")
+    return n
+
+
 def _find_pcb_for_export(directory: Path) -> Path | None:
     """Find a .kicad_pcb file in the given directory for export.
 
@@ -211,6 +222,17 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--boards",
+        type=_boards_arg,
+        default=5,
+        metavar="N",
+        help=(
+            "Boards in the assembly order (>= 1, default 5 = JLCPCB minimum); "
+            "the bom_lcsc_stock preflight check needs placements-per-board x N "
+            "of each LCSC part in stock (Issue #8121)"
+        ),
+    )
+    parser.add_argument(
         "--allow-unbuildable-bom",
         action="store_true",
         help=(
@@ -303,6 +325,7 @@ def build_manufacturing_config(
     drc_report_path: str | None = None,
     erc_report_path: str | None = None,
     assembly_tier: str = "auto",
+    boards: int = 5,
     strict_preflight: bool = False,
     allow_unbuildable_bom: bool = False,
     include_tht: bool = False,
@@ -329,6 +352,7 @@ def build_manufacturing_config(
         drc_report_path=drc_report_path,
         erc_report_path=erc_report_path,
         assembly_tier=assembly_tier or "auto",
+        order_boards=boards,
     )
 
     # Build PnP configuration when --include-tht is specified
@@ -433,6 +457,7 @@ def run_export(args: argparse.Namespace) -> int:
         drc_report_path=getattr(args, "drc_report", None),
         erc_report_path=getattr(args, "erc_report", None),
         assembly_tier=getattr(args, "assembly_tier", "auto") or "auto",
+        boards=getattr(args, "boards", 5),
         strict_preflight=getattr(args, "strict_preflight", False),
         allow_unbuildable_bom=getattr(args, "allow_unbuildable_bom", False),
         include_tht=getattr(args, "include_tht", False),

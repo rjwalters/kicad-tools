@@ -2708,6 +2708,27 @@ def _gate_bom(
             detail=f"LCSC part check FAIL: {part_message}",
             blockers=[f"{problem}: {part_details or part_message}"],
         )
+    # Stock (issue #8121): a recorded FAIL (live shortfall, or unverified
+    # shortfall under strict preflight) blocks; absent in older bundles.
+    stock_check = next(
+        (
+            entry
+            for entry in _read_json(options.output_dir / "manifest.json").get("preflight") or []
+            if isinstance(entry, dict) and entry.get("name") == "bom_lcsc_stock"
+        ),
+        None,
+    )
+    if stock_check is not None and str(stock_check.get("status", "")).upper() == "FAIL":
+        stock_message = str(stock_check.get("message", "")).strip()
+        stock_details = str(stock_check.get("details", "") or "").strip()
+        return CheckOutcome(
+            name="bom",
+            status=FAILED,
+            detail=f"LCSC stock check FAIL: {stock_message}",
+            blockers=[
+                f"Assigned LCSC part lacks stock for the order: {stock_details or stock_message}"
+            ],
+        )
     if part_status not in ("OK", "WARN"):
         return CheckOutcome(
             name="bom",

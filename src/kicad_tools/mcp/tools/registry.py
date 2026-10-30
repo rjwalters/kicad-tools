@@ -157,7 +157,7 @@ register_tool(
         "LCSC/JLCPCB parts library and categorizes them by tier (Basic/Extended), "
         "stock status, and availability. Returns a summary of parts that are "
         "available, out of stock, or missing LCSC part numbers. When a PCB is given "
-        "or found next to the schematic, also returns `kct export`'s bom_lcsc_values "
+        "or found next to the schematic, also returns `kct export`'s bom_lcsc_values and bom_lcsc_stock "
         "check (assigned LCSC part value/package vs the BOM row and PCB footprint); "
         "a FAIL sets summary.assembly_ready false. Use this to verify assembly "
         "readiness before ordering."
