@@ -298,7 +298,10 @@ class TestFillSuccess:
             stderr="",
             return_code=0,
         )
-        with patch(_RUN_FILL, return_value=mock_result) as mock_fill:
+        with (
+            patch(_RUN_FILL, return_value=mock_result) as mock_fill,
+            patch(_CHECK_SAVED_FILL, return_value=SavedFillCheck(ran=True)),
+        ):
             ret = main(["fill", str(tmp_pcb)])
             assert ret == 0
             mock_fill.assert_called_once()
@@ -320,7 +323,10 @@ class TestFillSuccess:
             stderr="",
             return_code=0,
         )
-        with patch(_RUN_FILL, return_value=mock_result) as mock_fill:
+        with (
+            patch(_RUN_FILL, return_value=mock_result) as mock_fill,
+            patch(_CHECK_SAVED_FILL, return_value=SavedFillCheck(ran=True)),
+        ):
             ret = main(["fill", str(tmp_pcb), "-o", str(out)])
             assert ret == 0
             call_args = mock_fill.call_args
@@ -364,7 +370,10 @@ class TestFillNetFilter:
         from kicad_tools.cli.runner import KiCadCLIResult
 
         mock_result = KiCadCLIResult(success=True, output_path=tmp_pcb, return_code=0)
-        with patch(_RUN_FILL, return_value=mock_result):
+        with (
+            patch(_RUN_FILL, return_value=mock_result),
+            patch(_CHECK_SAVED_FILL, return_value=SavedFillCheck(ran=True)),
+        ):
             ret = main(["fill", str(tmp_pcb), "--net", "GND"])
             assert ret == 0
         captured = capsys.readouterr()
