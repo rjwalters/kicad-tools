@@ -38,6 +38,7 @@ import math
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING, Literal
 
 from ..cost.suggest import (
@@ -1009,6 +1010,49 @@ class LcscVerdict:
     source: str | None = None  # "parts cache" | "offline catalog"
     mismatch: LcscMismatch | None = None
     reason: str | None = None
+    #: The resolved record the verdict was computed from, so callers (the
+    #: ``bom_lcsc_stock`` check, issue #8121) need no second lookup.
+    part: Part | None = None
+
+
+@dataclass(frozen=True)
+class StockShortfall:
+    """A part whose recorded stock cannot cover ``qty x boards`` (issue #8121)."""
+
+    needed: int
+    available: int
+    verified: bool  # live observation within 24h (``Part.stock_verified``)
+    source: str  # ``Part.stock_source``: "live" | "cache" | "unknown" | ...
+    observed_at: datetime | None = None
+
+    def describe(self) -> str:
+        if self.verified:
+            when = "live"
+        else:
+            age = ""
+            if self.observed_at is not None:
+                now = datetime.now(tz=self.observed_at.tzinfo)
+                age = f", {max(0, (now - self.observed_at).days)}d old"
+            when = f"unverified {self.source}{age}"
+        return f"needs {self.needed}, stock {self.available} ({when})"
+
+
+def stock_shortfall(part: Part, qty_per_board: int, boards: int) -> StockShortfall | None:
+    """Return the shortfall of ``part`` against ``qty_per_board x boards``, else ``None``.
+
+    Pure: reads only ``part.stock`` and its provenance.  Stock exactly equal
+    to the requirement is sufficient.
+    """
+    needed = max(0, qty_per_board) * max(1, boards)
+    if part.stock >= needed:
+        return None
+    return StockShortfall(
+        needed=needed,
+        available=part.stock,
+        verified=part.stock_verified,
+        source=part.stock_source,
+        observed_at=part.fetched_at,
+    )
 
 
 UNVERIFIED_NOT_FOUND = "not in parts cache or offline catalog"
@@ -1095,12 +1139,18 @@ def verify_lcsc_assignment(
     if not candidates:
         return LcscVerdict("unverified", reason=UNVERIFIED_NOT_FOUND)
 
+    # Stock comes from the most trustworthy record: a live-verified one, else
+    # the first that states a provenance, else the first (issue #8121).
+    stock_part = next(
+        (p for p, _ in candidates if p.stock_verified),
+        next((p for p, _ in candidates if p.stock_source != "unknown"), candidates[0][0]),
+    )
     for part, source in candidates:
         mismatch = _compare_part(
             part, requested_value, reference, footprint, pad_numbers, check_ic=True
         )
         if mismatch is not None:
-            return LcscVerdict("mismatch", source, mismatch)
+            return LcscVerdict("mismatch", source, mismatch, part=stock_part)
     # A header/socket footprint whose part states no readable pin count was
     # never pin-checked: report it, never a bare ``match`` (issue #7446).
     problems = [
@@ -1108,5 +1158,5 @@ def verify_lcsc_assignment(
         for part, _ in candidates
     ]
     if all(problems):
-        return LcscVerdict("unverified", candidates[-1][1], reason=problems[-1])
-    return LcscVerdict("match", candidates[-1][1])
+        return LcscVerdict("unverified", candidates[-1][1], reason=problems[-1], part=stock_part)
+    return LcscVerdict("match", candidates[-1][1], part=stock_part)

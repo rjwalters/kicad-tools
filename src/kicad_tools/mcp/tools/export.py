@@ -79,6 +79,8 @@ def validate_assembly_bom(
         - summary: Statistics on parts by tier and status
         - items: Detailed validation results for each BOM item
         - assembly_ready: Whether all parts are available
+        - bom_lcsc_stock: ``{status, message, details}`` (Issue #8121) -- stock vs
+          placements x 5 boards, alongside bom_lcsc_values.
         - bom_lcsc_values: ``{status, message, details}`` when a PCB resolved
 
     Example:
@@ -128,9 +130,16 @@ def validate_assembly_bom(
         if pcb_file is not None and pcb_file.exists():
             from kicad_tools.export.preflight import PreflightChecker
 
-            lcsc_values = PreflightChecker(
-                pcb_path=pcb_file, schematic_path=sch_file
-            ).check_bom_lcsc_values()
+            checker = PreflightChecker(pcb_path=pcb_file, schematic_path=sch_file)
+            lcsc_values = checker.check_bom_lcsc_values()
+            lcsc_stock = checker.check_bom_lcsc_stock()
+            output["bom_lcsc_stock"] = {
+                "status": lcsc_stock.status,
+                "message": lcsc_stock.message,
+                "details": lcsc_stock.details,
+            }
+            if lcsc_stock.status == "FAIL":
+                output["summary"]["assembly_ready"] = False
             output["bom_lcsc_values"] = {
                 "status": lcsc_values.status,
                 "message": lcsc_values.message,

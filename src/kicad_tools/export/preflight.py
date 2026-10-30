@@ -348,6 +348,11 @@ class PreflightConfig:
     # word) judges against that tier.  Fabs without published tiers ignore it.
     assembly_tier: str = "auto"
 
+    # Boards ordered, for the ``bom_lcsc_stock`` check (Issue #8121): each
+    # assigned LCSC part needs ``placements per board x order_boards`` in
+    # stock.  Defaults to JLCPCB's minimum PCBA order.
+    order_boards: int = 5
+
 
 class PreflightChecker:
     """
@@ -495,6 +500,7 @@ class PreflightChecker:
         if can_load_bom:
             results.append(self._check_bom_fields())
             results.append(self._check_bom_lcsc_values())
+            results.append(self._check_bom_lcsc_stock())
             results.append(self._check_bom_footprint_match())
             if self._pcb is not None:
                 results.append(self._check_bom_cpl_match())
@@ -1530,6 +1536,113 @@ class PreflightChecker:
                 f"{assigned} of {assigned} assigned item(s) verified against {against}; "
                 f"no LCSC value/package mismatches"
             ),
+        )
+
+    def check_bom_lcsc_stock(self) -> PreflightResult:
+        """Run the ``bom_lcsc_stock`` check on its own (Issue #8121)."""
+        return self._check_bom_lcsc_stock()
+
+    def _check_bom_lcsc_stock(self) -> PreflightResult:
+        """Flag assigned LCSC parts whose recorded stock cannot cover the order.
+
+        Required stock per LCSC number is its placements per board (summed
+        over references) times ``config.order_boards``.  Read-only like
+        :meth:`_check_bom_lcsc_values`: it consults the local parts cache and
+        the offline catalog and never touches the network.  Parts in neither
+        source are left to ``bom_lcsc_values`` and not repeated here.
+
+        A shortfall on a live-verified observation (``Part.stock_verified``)
+        is a FAIL.  On any other observation (stale cache, offline catalog,
+        unknown source) it is a WARN -- a legacy cache row with no stock info
+        also reads ``stock=0`` -- escalated to FAIL under
+        ``strict_report_source`` (``--strict-preflight``).
+        """
+        name = "bom_lcsc_stock"
+        boards = max(1, int(self.config.order_boards))
+        try:
+            bom = self._load_bom()
+            items = self._items_with_spec_overlay(bom)
+        except Exception as e:
+            return PreflightResult(name=name, status="WARN", message=f"Could not extract BOM: {e}")
+
+        cache = self._parts_cache
+        if cache is None:
+            try:
+                from ..parts.cache import PartsCache
+
+                cache = PartsCache()
+            except Exception as e:
+                return PreflightResult(
+                    name=name,
+                    status="WARN",
+                    message=f"Parts cache unavailable for LCSC stock check: {e}",
+                )
+        catalog = self._parts_catalog
+        if catalog is None:
+            with contextlib.suppress(Exception):
+                from ..parts.jlcparts_catalog import CATALOG_FILENAME, JlcpartsCatalog
+
+                catalog = JlcpartsCatalog(Path(cache.db_path).parent / CATALOG_FILENAME)
+
+        from .lcsc_value_check import stock_shortfall, verify_lcsc_assignment
+
+        refs_by_lcsc: dict[str, list[str]] = {}
+        for item in items:
+            if item.is_virtual or item.dnp or not item.lcsc:
+                continue
+            refs_by_lcsc.setdefault(item.lcsc, []).append(item.reference)
+
+        if not refs_by_lcsc:
+            return PreflightResult(
+                name=name, status="OK", message="No assigned LCSC parts to check stock for"
+            )
+
+        live_short: list[str] = []
+        soft_short: list[str] = []
+        checked = 0
+        for lcsc, refs in sorted(refs_by_lcsc.items()):
+            verdict = verify_lcsc_assignment(cache, catalog, lcsc, "", refs[0])
+            if verdict.part is None:
+                continue  # not in any source: reported by bom_lcsc_values
+            checked += 1
+            short = stock_shortfall(verdict.part, len(refs), boards)
+            if short is None:
+                continue
+            shown_refs = ",".join(sorted(refs)[:3]) + ("..." if len(refs) > 3 else "")
+            entry = f"{shown_refs} -> {lcsc}: {short.describe()}"
+            (live_short if short.verified else soft_short).append(entry)
+
+        def _fmt(entries: list[str]) -> str:
+            suffix = f" (and {len(entries) - 5} more)" if len(entries) > 5 else ""
+            return "; ".join(entries[:5]) + suffix
+
+        order = f"{boards} board(s)"
+        if live_short:
+            return PreflightResult(
+                name=name,
+                status="FAIL",
+                message=(
+                    f"{len(live_short)} LCSC part(s) lack live stock for {order}"
+                    + (f"; {len(soft_short)} more short on unverified stock" if soft_short else "")
+                ),
+                details=_fmt(live_short + soft_short),
+            )
+        if soft_short:
+            strict = self.config.strict_report_source
+            return PreflightResult(
+                name=name,
+                status="FAIL" if strict else "WARN",
+                message=(
+                    f"{len(soft_short)} LCSC part(s) show insufficient stock for {order} "
+                    f"on unverified data (stale cache/offline catalog)"
+                    + (" (strict preflight)" if strict else "")
+                ),
+                details=_fmt(soft_short),
+            )
+        return PreflightResult(
+            name=name,
+            status="OK",
+            message=f"{checked} LCSC part(s) have recorded stock for {order}",
         )
 
     def _check_bom_footprint_match(self) -> PreflightResult:

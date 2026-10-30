@@ -1187,6 +1187,7 @@ _EXPORT_PASS_THROUGH_CASES = {
     "skip_drc_floor": (["--skip-drc-floor"], True),
     "strict_preflight": (["--strict-preflight"], True),
     "assembly_tier": (["--assembly-tier", "standard"], "standard"),
+    "boards": (["--boards", "20"], 20),
     "allow_unbuildable_bom": (["--allow-unbuildable-bom"], True),
     "skip_drc": (["--skip-drc"], True),
     "skip_erc": (["--skip-erc"], True),
