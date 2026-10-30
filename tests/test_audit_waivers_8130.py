@@ -116,3 +116,45 @@ def test_many_waived_counted(tmp_path, monkeypatch, n):
     )
     status = audit._check_drc(_DummyPcb())
     assert status.waived_count == n and status.blocking_count == 0
+
+
+def test_waived_only_errors_verdict_not_not_ready(tmp_path, monkeypatch):
+    from kicad_tools.audit.auditor import AuditResult, AuditVerdict
+
+    audit, pcb_path = _audit(tmp_path, monkeypatch, [_violation()])
+    _write_sidecar(
+        pcb_path,
+        [{"rule": "clearance_pad_pad", "items": ["C1", "R1"], "reason": "ok", "issue": "x#1"}],
+    )
+    result = AuditResult(drc=audit._check_drc(_DummyPcb()))
+    assert result.drc.blocking_count == 0
+    assert result.verdict != AuditVerdict.NOT_READY
+
+    # Control: the same finding without a waiver is NOT_READY.
+    (tmp_path / "board.kct-waivers.json").unlink()
+    result = AuditResult(drc=audit._check_drc(_DummyPcb()))
+    assert result.verdict == AuditVerdict.NOT_READY
+
+
+def test_stale_evidence_waiver_leaves_finding_blocking(tmp_path, monkeypatch):
+    audit, pcb_path = _audit(tmp_path, monkeypatch, [_violation()])
+    sidecar = pcb_path.parent / f"{pcb_path.stem}.kct-waivers.json"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "version": 3,
+                "waivers": [
+                    {
+                        "rule": "clearance_pad_pad",
+                        "items": ["C1", "R1"],
+                        "reason": "ok",
+                        "issue": "x#1",
+                        "evidence_hash": "ev2:0000000000000000",
+                    }
+                ],
+            }
+        )
+    )
+    status = audit._check_drc(_DummyPcb())
+    assert status.blocking_count >= 1
+    assert status.waived_count == 0
