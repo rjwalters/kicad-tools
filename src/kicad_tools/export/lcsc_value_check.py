@@ -633,6 +633,7 @@ _SO_RE = re.compile(
 _QFP_RE = re.compile(r"^(HTQFP|LQFP|TQFP|QFP)-?(\d+)(?![0-9])")
 _QFN_RE = re.compile(r"^([A-Z]{0,2}QFN|[A-Z]{0,2}DFN)-?(\d+)(?![0-9])")
 _DIP_RE = re.compile(r"^(PDIP|SPDIP|DIP)-?(\d+)(?![0-9])")
+_BGA_RE = re.compile(r"^(LFBGA|TFBGA|VFBGA|UFBGA|FBGA|BGA|LGA|WLCSP|CSP)-?(\d+)(?![0-9])")
 # Body size: ``(10x10)`` on LCSC strings, ``_10x10mm`` on KiCad footprints.
 _BODY_RE = re.compile(r"[(_-](\d+(?:\.\d+)?)X(\d+(?:\.\d+)?)(?:MM)?(?:\)|_|$|-)")
 # Exposed pad / tab markers in a footprint name or part package string.
@@ -680,7 +681,7 @@ def _pitches_conflict(a: IcPackage, b: IcPackage) -> bool:
 class IcPackage:
     """A recognized IC package: family, signal pin count, optional body."""
 
-    family: str  # group key: SOT23 | SOT223 | SO | QFP | QFN | DIP
+    family: str  # group key: SOT23 | SOT223 | SO | QFP | QFN | DIP | BGA
     pins: int
     body: tuple[float, float] | None = None
     exposed_pad: bool = False
@@ -741,6 +742,10 @@ def parse_ic_package(text: str) -> IcPackage | None:
     m = _DIP_RE.match(name)
     if m is not None:
         return IcPackage("DIP", int(m.group(2)), None, exposed)
+
+    m = _BGA_RE.match(name)
+    if m is not None:
+        return IcPackage("BGA", int(m.group(2)), None, False)
 
     return None
 
@@ -1020,6 +1025,69 @@ UNVERIFIED_HEADER_CONFLICT = "conflicting pin counts stated by part"
 UNVERIFIED_HEADER_REASONS = frozenset({UNVERIFIED_HEADER_COUNT, UNVERIFIED_HEADER_CONFLICT})
 
 
+#: KiCad footprint library prefix -> discrete component class (issue #8113).
+_DISCRETE_FOOTPRINT_LIBS = {
+    "DIODE_SMD": "diode",
+    "DIODE_THT": "diode",
+    "RESISTOR_SMD": "resistor",
+    "RESISTOR_THT": "resistor",
+    "CAPACITOR_SMD": "capacitor",
+    "CAPACITOR_THT": "capacitor",
+    "INDUCTOR_SMD": "inductor",
+    "INDUCTOR_THT": "inductor",
+    "LED_SMD": "led",
+    "LED_THT": "led",
+}
+#: IC families that never belong on a discrete footprint.  SOT-23/223 are
+#: excluded: diodes and transistors legitimately ship in them.
+_IC_ONLY_FAMILIES = frozenset({"BGA", "QFP", "QFN", "SO", "DIP"})
+#: LCSC top-level IC category text found in part descriptions.
+_IC_CATEGORY_TEXT = (
+    "MICROCONTROLLERS",
+    "EMBEDDED PROCESSORS",
+    "MEMORY",
+    "INTERFACE ICS",
+    "POWER MANAGEMENT ICS",
+    "AMPLIFIERS",
+    "CLOCK/TIMING",
+    "DATA CONVERTERS",
+    "LOGIC",
+)
+
+
+def find_discrete_footprint_ic_mismatch(
+    footprint_name: str,
+    part_package: str,
+    part_description: str,
+) -> PackageMismatch | None:
+    """Flag an IC part assigned to a discrete (diode/R/C/L/LED) footprint.
+
+    Works without PCB pads (schematic-only BOMs).  Reads the IC category from
+    the description, not ``Part.category`` (which mis-files "Power-on reset").
+    """
+    if not footprint_name or ":" not in footprint_name:
+        return None
+    lib = footprint_name.split(":", 1)[0].strip().upper()
+    cls = _DISCRETE_FOOTPRINT_LIBS.get(lib)
+    if cls is None:
+        return None
+    fp_label = footprint_name.rsplit(":", 1)[-1]
+    pkg = parse_ic_package(part_package)
+    if pkg is not None and pkg.family in _IC_ONLY_FAMILIES:
+        reason = f"IC package {part_package} on discrete {cls} footprint {footprint_name}"
+    else:
+        desc = (part_description or "").upper()
+        hit = next((t for t in _IC_CATEGORY_TEXT if t in desc), None)
+        if hit is None:
+            return None
+        reason = f"IC category '{hit.title()}' on discrete {cls} footprint {footprint_name}"
+    return PackageMismatch(
+        requested_package=fp_label,
+        candidate_package=part_package,
+        candidate_source=reason,
+    )
+
+
 def _compare_part(
     part: Part,
     requested_value: str,
@@ -1046,6 +1114,10 @@ def _compare_part(
         )
     if mismatch is None and check_ic and (footprint or pad_numbers is not None):
         mismatch = find_ic_package_mismatch(footprint, pad_numbers, part.package)
+        if mismatch is None:
+            mismatch = find_discrete_footprint_ic_mismatch(
+                footprint, part.package, part.description
+            )
         if mismatch is None:
             mismatch = find_header_pin_mismatch(
                 footprint, pad_numbers, part.package, part.description, part.mfr_part
