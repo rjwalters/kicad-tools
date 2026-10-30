@@ -202,7 +202,7 @@ def _via_hole_violations(pcb, via, pcb_path: Path) -> Counter:
     or not.  Hole-to-hole is measured to every other drill, any net.  The
     moved via is keyed by uuid so its own identity is stable across the move.
     """
-    from shapely.geometry import LineString, Point
+    from shapely.geometry import LineString, Point  # type: ignore[import-untyped]
 
     from kicad_tools._shapely import require_shapely
     from kicad_tools.core.layers import via_spans_layer
