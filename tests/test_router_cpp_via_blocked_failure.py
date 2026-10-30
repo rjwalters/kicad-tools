@@ -214,6 +214,57 @@ class TestRouteResultFailureReason:
             f"got ({info['failure_x']}, {info['failure_y']})"
         )
 
+    def test_blocker_is_nearest_to_endpoints_not_last_expanded(self):
+        """Issue #8155: with a far-away net's stored vias also rejecting
+        candidates, the reported blocker is the one next to the pads."""
+        from kicad_tools.router import router_cpp
+
+        rules = DesignRules(
+            trace_width=0.25,
+            trace_clearance=0.2,
+            via_diameter=0.6,
+            via_clearance=0.2,
+            grid_resolution=0.1,
+        )
+        grid = RoutingGrid(
+            width=12.0,
+            height=2.0,
+            rules=rules,
+            layer_stack=LayerStack.four_layer_all_signal(),
+        )
+        cpp_grid = CppGrid.from_routing_grid(grid)
+
+        near_net, far_net = 2, 3
+
+        def carpet(x0: float, count: int, net: int) -> None:
+            for i in range(count):
+                for j in range(6):
+                    cpp_grid._impl.add_stored_via(
+                        x0 + i * 0.4,
+                        j * 0.4,
+                        0.3,
+                        rules.via_diameter,
+                        net,
+                        layer_from=1,
+                        layer_to=3,
+                    )
+
+        carpet(0.0, 6, near_net)  # covers x in [0, 2.0], around both pads
+        carpet(8.0, 10, far_net)  # far from both pads
+
+        pathfinder = CppPathfinder(cpp_grid, rules, diagonal_routing=True)
+        pathfinder.set_routable_layers(cpp_grid.get_routable_indices())
+
+        start = Pad(x=0.2, y=0.2, width=0.2, height=0.2, layer=Layer.F_CU, net=1, net_name="N1")
+        end = Pad(x=0.2, y=1.8, width=0.2, height=0.2, layer=Layer.B_CU, net=1, net_name="N1")
+        pathfinder.route(start, end, negotiated_mode=False)
+
+        info = pathfinder.get_last_failure_info()
+        assert info is not None
+        assert info["failure_reason"] == router_cpp.FAILURE_VIA_VIA_BLOCKED
+        assert info["blocking_via_net"] == near_net
+        assert info["failure_x"] < 4.0, info
+
     def test_failure_info_cleared_on_success(self):
         """A successful route() clears any previous failure diagnostic."""
         grid, rules = _make_grid_and_rules()

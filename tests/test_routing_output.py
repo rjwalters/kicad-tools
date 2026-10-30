@@ -42,6 +42,7 @@ class _FailureCause(Enum):
     UNKNOWN = "unknown"
     ROUTING_ORDER = "routing_order"
     CONGESTION = "congestion"
+    PIN_ACCESS = "pin_access"
 
 
 @dataclass
@@ -57,6 +58,7 @@ class _RoutingFailure:
     reason: str = "No path found"
     failure_cause: _FailureCause = _FailureCause.UNKNOWN
     analysis: object | None = None
+    via_site_exhausted: bool = False
 
 
 def _make_router(
@@ -1085,3 +1087,34 @@ def test_adaptive_unavailable_placement_does_not_impose_new_failure():
     assert result.converged is True
     assert result.success_rate == 1
     assert result.placement_report.to_dict()["status"] == "unavailable"
+
+
+# ---------------------------------------------------------------------------
+# Issue #8155: pin_access suggestions follow the recorded decline reason
+# ---------------------------------------------------------------------------
+
+
+class TestPinAccessSuggestionFollowsDeclineReason:
+    def _summary(self, capsys, *, via_site_exhausted: bool) -> str:
+        failure = _RoutingFailure(
+            net=1,
+            net_name="NetA",
+            source_pad=("U1", "1"),
+            target_pad=("U2", "1"),
+            failure_cause=_FailureCause.PIN_ACCESS,
+            via_site_exhausted=via_site_exhausted,
+        )
+        router = _make_router(routing_failures=[failure])
+        show_routing_summary(router, {"NetA": 1}, nets_to_route=1)
+        return capsys.readouterr().out
+
+    def test_via_site_exhaustion_names_cause_not_grid(self, capsys):
+        output = self._summary(capsys, via_site_exhausted=True)
+        assert "PIN ESCAPE BOXED IN" in output
+        assert "GRID ALIGNMENT" not in output
+        assert "--grid" not in output
+
+    def test_plain_pin_access_keeps_grid_advice(self, capsys):
+        output = self._summary(capsys, via_site_exhausted=False)
+        assert "GRID ALIGNMENT" in output
+        assert "PIN ESCAPE BOXED IN" not in output

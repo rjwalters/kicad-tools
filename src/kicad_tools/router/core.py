@@ -367,6 +367,10 @@ class RoutingFailure:
     reason: str = "No path found"
     failure_cause: FailureCause = FailureCause.UNKNOWN
     analysis: FailureAnalysis | None = None
+    # Issue #8155: the C++ search declined because every via candidate was
+    # refused by stored-via geometry (pin escape boxed in), as opposed to a
+    # pad that does not align with the routing grid.
+    via_site_exhausted: bool = False
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
@@ -6767,6 +6771,7 @@ class Autorouter:
                 reason=reason,
                 failure_cause=failure_cause,
                 analysis=analysis,
+                via_site_exhausted=self._last_decline_was_via_sites(),
             )
             self.routing_failures.append(failure)
 
@@ -11989,8 +11994,16 @@ class Autorouter:
             reason=analysis.root_cause.value if analysis else "No path found",
             failure_cause=analysis.root_cause if analysis else FailureCause.UNKNOWN,
             analysis=analysis,
+            via_site_exhausted=self._last_decline_was_via_sites(),
         )
         self.routing_failures.append(failure)
+
+    def _last_decline_was_via_sites(self) -> bool:
+        """True when the last C++ decline was via-site exhaustion (Issue #8155)."""
+        getter = getattr(self.router, "get_last_failure_info", None)
+        info = getter() if getter is not None else None
+        # 5 == FAILURE_VIA_VIA_BLOCKED (types.hpp)
+        return bool(info) and info.get("failure_reason") == 5
 
     def _analyze_failure_budgeted(
         self,

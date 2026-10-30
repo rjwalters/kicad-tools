@@ -1452,6 +1452,13 @@ static void build_pad_channel_cost_lookup(
 
 // Helper: Initialize pad bounds from arguments, applying default single-cell
 // fallback when no explicit bounds are provided (Issue #2427).
+// Issue #8155: squared grid distance from (x, y) to the nearer of the two
+// route endpoints, used to prefer the locally relevant via-blocker.
+static long long endpoint_dist2(int x, int y, int sx, int sy, int ex, int ey) {
+    const long long dsx = x - sx, dsy = y - sy, dex = x - ex, dey = y - ey;
+    return std::min(dsx * dsx + dsy * dsy, dex * dex + dey * dey);
+}
+
 static void init_pad_bounds(
     PadBounds& sp, PadBounds& ep,
     int start_gx, int start_gy, int end_gx, int end_gy,
@@ -1652,9 +1659,12 @@ RouteResult Pathfinder::route(
     // candidate slot that was rejected.  When the search ends with
     // success=false, these are written into ``result``'s diagnostic fields.
     int via_block_count = 0;
+    // Issue #8155: keep the blocker nearest the start/goal pad, not whichever
+    // via candidate happened to be expanded last (A* floods the board first).
     int last_blocking_net = 0;
     float last_block_world_x = 0.0f;
     float last_block_world_y = 0.0f;
+    long long best_block_d2 = std::numeric_limits<long long>::max();
 
     // Issue #4507: same idea for cross-domain (HV) refusals, which until now
     // were the one rejection path that produced no diagnostic at all.  The
@@ -2099,9 +2109,15 @@ RouteResult Pathfinder::route(
                                  blocking_net, block_wx, block_wy)) {
                 if (blocking_net != 0) {
                     ++via_block_count;
-                    last_blocking_net = blocking_net;
-                    last_block_world_x = block_wx;
-                    last_block_world_y = block_wy;
+                    const long long d2 = endpoint_dist2(current.x, current.y,
+                                                        start_gx, start_gy,
+                                                        end_gx, end_gy);
+                    if (d2 < best_block_d2) {
+                        best_block_d2 = d2;
+                        last_blocking_net = blocking_net;
+                        last_block_world_x = block_wx;
+                        last_block_world_y = block_wy;
+                    }
                 }
                 continue;
             }
@@ -2261,6 +2277,8 @@ RouteResult Pathfinder::route_resumable(
 
     auto [start_gx, start_gy] = grid_.world_to_grid(start_x, start_y);
     auto [end_gx, end_gy] = grid_.world_to_grid(end_x, end_y);
+    search_start_gx_ = start_gx;
+    search_start_gy_ = start_gy;
     search_end_gx_ = end_gx;
     search_end_gy_ = end_gy;
 
@@ -2331,6 +2349,7 @@ RouteResult Pathfinder::route_resumable(
     search_last_blocking_net_ = 0;
     search_last_block_world_x_ = 0.0f;
     search_last_block_world_y_ = 0.0f;
+    search_best_block_d2_ = std::numeric_limits<long long>::max();
 
     // Issue #4507: cross-domain (HV) refusal diagnostics follow the SAME
     // reset discipline -- cleared for a fresh resumable search, deliberately
@@ -2862,9 +2881,16 @@ RouteResult Pathfinder::run_astar_loop() {
                                           blocking_net, block_wx, block_wy)) {
                 if (blocking_net != 0) {
                     ++search_via_block_count_;
-                    search_last_blocking_net_ = blocking_net;
-                    search_last_block_world_x_ = block_wx;
-                    search_last_block_world_y_ = block_wy;
+                    // Issue #8155: nearest-to-endpoint blocker, as in route().
+                    const long long d2 = endpoint_dist2(current.x, current.y,
+                                                        search_start_gx_, search_start_gy_,
+                                                        search_end_gx_, search_end_gy_);
+                    if (d2 < search_best_block_d2_) {
+                        search_best_block_d2_ = d2;
+                        search_last_blocking_net_ = blocking_net;
+                        search_last_block_world_x_ = block_wx;
+                        search_last_block_world_y_ = block_wy;
+                    }
                 }
                 continue;
             }
@@ -2984,6 +3010,7 @@ void Pathfinder::clear_search_state() {
     search_last_blocking_net_ = 0;
     search_last_block_world_x_ = 0.0f;
     search_last_block_world_y_ = 0.0f;
+    search_best_block_d2_ = std::numeric_limits<long long>::max();
     // Issue #4507: ditto for the cross-domain (HV) blocker diagnostics.
     clear_pairwise_block_diagnostics();
     // Issue #2559 / Phase 1C: reset partner-net state so a stale partner

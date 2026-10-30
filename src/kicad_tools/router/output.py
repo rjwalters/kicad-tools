@@ -371,7 +371,20 @@ def show_routing_summary(
         suggestions_shown = 0
 
         # Check for PAD_INACCESSIBLE issues
-        pad_failures = failures_by_cause.get("pin_access", [])
+        all_pin_failures = failures_by_cause.get("pin_access", [])
+        # Issue #8155: a decline from via-site exhaustion is a boxed-in pin
+        # escape, not a grid misalignment -- don't send the operator to --grid.
+        via_site_failures = [f for f in all_pin_failures if getattr(f, "via_site_exhausted", False)]
+        pad_failures = [f for f in all_pin_failures if f not in via_site_failures]
+        if via_site_failures:
+            count = len({f.net for f in via_site_failures})
+            suggestions_shown += 1
+            print(
+                f"{suggestions_shown}. PIN ESCAPE BOXED IN ({count} net{'s' if count != 1 else ''} affected)"
+            )
+            print("   Every via site near the pad is blocked by existing copper/vias,")
+            print("   so legal via sites are only reachable by a local hand-routed escape.")
+            print("   Try: rip up or shift the trace along the pin tips, then re-route\n")
         if pad_failures:
             count = len({f.net for f in pad_failures})
             grid_res = getattr(router.grid, "resolution", 0.25)
