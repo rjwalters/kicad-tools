@@ -7,6 +7,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-10-30
+
+### Upgrade notes / behaviour changes
+
+- **`install-kct.sh` without `--tag`/`--rev`/`--path` now switches a consumer
+  to PyPI** (Issue #8077). It previously pinned a git tag
+  (`[tool.uv.sources] kicad-tools = { git = ..., tag = "v<version>" }`); a
+  re-run now removes that entry and writes `kicad-tools[...]>=<version>`.
+  Run `uv lock` afterwards and commit `uv.lock`. To keep a git pin, pass
+  `--tag v<version>` (or `--rev <sha>`) explicitly. Requires Python >= 3.11 (or `python3` with `tomli`) on PATH, or one `uv python find` can locate.
+
+- **Changelog Fragment Check can newly fail on commit trailers** (Issue #8099).
+  A PR whose commits say `Part of #<epic>` must cite that epic in a fragment,
+  e.g. `(Issue #7423, part of #5798)`, or carry the `changelog:skip` label.
+
+- **`kct export` can newly warn or fail on out-of-stock LCSC parts** (Issue #8121).
+  A part whose cached/offline stock is below placements x 5 boards (e.g. a
+  `stock=0` C4223175) now WARNs, and FAILs under `--strict-preflight` or when
+  the stock was observed live. Pass `--boards N` to match your real order size.
+
+### Fixed
+
+- **`install-kct.sh` PyPI pin hardening** (Issue #8097). The pin helper now
+  keeps a CRLF (or mixed-ending) `pyproject.toml` line-for-line instead of
+  rewriting it to LF, and decodes TOML escapes such as `"kicad\u002Dtools>=0.20"`
+  so it rewrites that requirement rather than appending a duplicate.
+  `--dry-run` and already-current repos need only Python >= 3.9; Python >= 3.11
+  (or `tomli`) is required just for an actual rewrite. The vendored
+  `kct-upgrade.yml` checks out with `persist-credentials: false`, so the
+  installer and `uv lock` never see a token; the PR step pushes with its own
+  step-scoped `GH_TOKEN`.
+
+- **Release changelog gap gate no longer flags issues already documented in the window's starting release** (Issue #8111). When `changelog_gap_report.py` runs with `--since vX.Y.Z`, issues cited in the `## [X.Y.Z]` section now count as documented, matching the per-PR check.
+
+- **LCSC guard no longer passes an IC on a discrete footprint** (Issue #8113). `parse_ic_package` now recognises BGA/LGA/CSP packages so the pad-count check runs, and a new rule flags an IC package or IC category on a `Diode_*`/`Resistor_*`/`Capacitor_*`/`Inductor_*`/`LED_*` footprint even without PCB pads. `/kct:tapeout --assembly` Gate 4 now reads the manifest's `bom_lcsc_values` result and refuses on `FAIL`, a missing result, or unverified lines.
+
+- **`kct-upgrade` workflow keeps its write token away from installer code** (Issue #8115). The
+  template now runs the installer and `uv lock` in a read-only `prepare` job and
+  hands a patch to a separate `publish` job, the only one holding a token. The PyPI pin helper
+  also rewrites multi-line (`"""..."""` / `'''...'''`) requirements in place instead of
+  appending a duplicate, and rejects the TOML 1.1-only `\e` / `\xHH` escapes like `tomllib` does.
+
+- **Anonymous JLC parts lookups no longer 403 after the first request of a session** (Issue #8118). The parts endpoint sets an `XSRF-TOKEN` cookie on its first response and then refuses (403) every POST that carries the cookie without echoing it as an `X-XSRF-TOKEN` header. `LCSCClient` kept the cookie but never sent the header, so `kct parts availability`, `lookup_many` and BOM enrichment resolved only one part live, tripped the 403 circuit breaker, and reported the rest as unavailable or offline-only (it looked like a geo-block). The header is now sent, and a 403 while a token is held drops the cookies and retries once tokenless before tripping the breaker (the token expires after 1800 s).
+
+- **LCSC discrete-footprint IC guard no longer fails diodes or caps that mention "logic" or "memory"** (Issue #8124). The IC-category clause now matches whole LCSC category phrases (`Logic Gates`, `Non-Volatile Memory`, `Microcontrollers`, ...) on word boundaries instead of bare substrings, so a description like "ESD protection diode for logic lines" no longer FAILs `bom_lcsc_values` and blocks `/kct:tapeout --assembly`. The IC-package check is unchanged.
+
+- **LCSC IC-on-discrete-footprint guard recognises pin-count-first BGA and LFCSP packages** (Issue #8127). `48-TFBGA (6x8)` now parses as BGA-48 and `LFCSP-32-WQ(5x5)` as a QFN-group package, so such parts assigned to a discrete footprint are flagged.
+
+### Added
+
+- **`kct export` checks LCSC stock against the order** (Issue #8121). New
+  `bom_lcsc_stock` preflight check compares each assigned part's recorded
+  stock with placements-per-board x `--boards N` (new flag, default 5, JLCPCB's
+  minimum). A shortfall on live-verified stock FAILs; on stale/offline/unknown
+  stock it WARNs (FAIL under `--strict-preflight`). Also surfaced by
+  `validate_assembly_bom` and `kct readiness`.
+
+### Changed
+
+- **`install-kct.sh` installs kicad-tools from PyPI by default** (Issue #8077).
+  A bare `install-kct.sh <target>` (or `--pypi`) now writes
+  `kicad-tools[<extras>]>=<version>`, keeps the target's existing extras,
+  removes any `[tool.uv.sources]` kicad-tools entry and records
+  `source_mode: "pypi"`; `uv.lock` is the exact pin. `--tag`, `--rev` and
+  `--path` are unchanged and documented as escape hatches. Only kicad-tools
+  requirements inside dependency arrays are edited, never `keywords`,
+  descriptions or comments. `kct doctor` treats a `>=X` floor as satisfied by
+  any installed version at or above it. It reports drift when the installed
+  package is below the floor (fix: `uv sync`), or when the vendored skills and
+  gates (`install-metadata.json`) record a different version than the package
+  (fix: re-run the installer). New opt-in `--upgrade-workflow` vendors
+  `.github/workflows/kct-upgrade.yml`, a weekly job that opens a PR moving the
+  consumer to the latest PyPI release (never a downgrade) and lists that
+  release's upgrade notes.
+
+- **The per-PR Changelog Fragment Check now reads the PR's commit trailers**
+  (Issue #8099). A user-visible commit whose `Part of #N` (or `Closes #N` /
+  `Fixes #N`) issue no fragment cites now fails the check at PR time, with the
+  one-line fix in the message ("add 'part of #N' to <fragment>"), instead of
+  passing and then turning the release gate red after merge. Internal-title
+  PRs, internal commits and `INTERNAL_ISSUES` entries are unaffected.
+
 ## [0.25.1] - 2026-10-29
 
 ### Fixed
@@ -14698,6 +14780,7 @@ All blocks feature:
 - Python 3.10+
 - numpy >= 1.20
 
+[0.26.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.26.0
 [0.25.1]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.25.1
 [0.25.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.25.0
 [0.24.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.24.0
