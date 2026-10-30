@@ -632,9 +632,13 @@ _SO_RE = re.compile(
     r"^(HTSSOP|HVSSOP|VSSOP|TSSOP|MSOP|SSOP|SOIC|SOP|SO|TSOP(?:-?II)?)-?(\d+)(?![0-9])"
 )
 _QFP_RE = re.compile(r"^(HTQFP|LQFP|TQFP|QFP)-?(\d+)(?![0-9])")
-_QFN_RE = re.compile(r"^([A-Z]{0,2}QFN|[A-Z]{0,2}DFN)-?(\d+)(?![0-9])")
+_QFN_RE = re.compile(r"^([A-Z]{0,2}QFN|[A-Z]{0,2}DFN|LFCSP)-?(\d+)(?![0-9])")
 _DIP_RE = re.compile(r"^(PDIP|SPDIP|DIP)-?(\d+)(?![0-9])")
 _BGA_RE = re.compile(r"^(LFBGA|TFBGA|VFBGA|UFBGA|FBGA|BGA|LGA|WLCSP|CSP)-?(\d+)(?![0-9])")
+# LCSC pin-count-first BGA form: ``48-TFBGA(6x8)`` (issue #8127).
+_BGA_PINS_FIRST_RE = re.compile(
+    r"^(\d+)-(LFBGA|TFBGA|VFBGA|UFBGA|FBGA|BGA|LGA|WLCSP|CSP)(?![A-Z0-9])"
+)
 # Body size: ``(10x10)`` on LCSC strings, ``_10x10mm`` on KiCad footprints.
 _BODY_RE = re.compile(r"[(_-](\d+(?:\.\d+)?)X(\d+(?:\.\d+)?)(?:MM)?(?:\)|_|$|-)")
 # Exposed pad / tab markers in a footprint name or part package string.
@@ -708,6 +712,10 @@ def parse_ic_package(text: str) -> IcPackage | None:
     if not name:
         return None
     exposed = bool(_EP_MARKER_RE.search(name))
+
+    m = _BGA_PINS_FIRST_RE.match(name)
+    if m is not None:
+        name = f"{m.group(2)}-{m.group(1)}{name[m.end() :]}"
 
     m = _SOT223_RE.match(name)
     if m is not None:
