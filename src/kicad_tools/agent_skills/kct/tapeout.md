@@ -103,6 +103,11 @@ The gate then:
 2. **Fails hard** if the resolution machinery is broken rather than merely finding no match — the canonical case is the missing `[parts]` extra, where `--auto-lcsc` **soft-fails to an empty part-number column while `kct export` still exits 0** (this is the defect tracked in **#4104**). An **entirely empty** part-number column (0 resolved lines) when resolution was expected is treated as **matcher-broken**, not "every part is exotic" — that is a **hard failure of this gate**, not an unresolved-lines report.
 3. **Fails** `--assembly` tapeout if **any** line is unresolved. A complete assembly package has zero human-selection-required lines by definition; surface the unresolved report and refuse.
 
+4. **Reads the recorded `bom_lcsc_values` result** from the Gate 3 `manifest.json` (`jq '.preflight[] | select(.name=="bom_lcsc_values")'`, the same lookup `kct readiness` uses), because "LCSC column populated" does not mean "right part" (issue #8113: an NXP BGA-196 MCU sat on a 2-pad diode footprint and counted as resolved). `kct export` downgrades that check's FAIL to a warning, so this step is where it blocks. In `--assembly` mode:
+   - `FAIL` → **refuse**, naming the mismatched lines from `details`.
+   - Entry missing, or a status other than `OK`/`WARN` → **refuse** (the check did not run; unknown is not pass, #5946).
+   - `WARN` with lines the check could not look up (`unverified`, "not in parts cache or offline catalog") → count those lines as **unresolved** and **refuse**; tell the human to run `kct parts lookup <LCSC>` (which fills the cache) and re-run.
+
 The distinction is load-bearing: **matcher-broken → refuse the whole tapeout** (the package is not trustworthy); **no-match on specific parts → unresolved report → refuse `--assembly`** (the human must pick parts before this can ship as an assembly order). Never let a silently-empty part-number column pass as "resolved."
 
 ### Gate 4b — warning review (per-rule table + assembly-affecting acknowledgement)
@@ -213,6 +218,8 @@ Refuse the tapeout, loudly, when any of these hold:
 - **A stale evidence-bound waiver** — `summary.stale_waivers` is nonzero, or any finding carries `"waiver_status": "stale"`. The geometry or nets under a reviewed waiver changed, so the finding is active again; it must be re-reviewed (and re-waived with `kct check --waive <key> --waive-reason ... --waive-reviewer ...` only if still intentional), never carried forward as accepted risk.
 - **Unacknowledged assembly-affecting warnings (Gate 4b)** — any rule in the assembly-affecting set (`silk_over_copper`, `silkscreen_line_width`, `silk_edge_clearance`, `silk_overlap`, `courtyard_missing`, at minimum) has a nonzero warning count with no matching `--ack-warnings` entry or per-rule accepted-risk line. Quote the per-rule warning table in the refusal. "0 errors" is not "fit to fabricate" — these two claims must never be conflated by this skill.
 - **`--assembly` with unresolved BOM lines** — one or more components have no fab-orderable part number (human selection required). Surface the unresolved report; do not ship an incomplete assembly order.
+- **LCSC part/package check failed or unverified (Gate 4, `--assembly`)** — the manifest's `bom_lcsc_values` preflight entry is `FAIL`, is missing, or is `WARN` with `unverified` lines (issue #8113). Quote the offending `details` lines.
+
 - **BOM-resolution machinery unavailable** — the requested capability could not run: the `[parts]` extra is missing (so `--auto-lcsc` soft-fails to an empty column — **#4104**), or there is no network for part matching. This is a **refusal**, not a silently-empty BOM that exits 0.
 - **Requested capability unavailable** generally — e.g. `kicad-cli` cannot be found by the `find_kicad_cli()` resolution (drawings and the cross-gate cannot run), `jq` is missing, or the resolved tier is not in `get_manufacturer_ids()`.
 - **Board has no paired project rules** — the board file has no accompanying `.kicad_pro` (or the rules live only in the board / `.kicad_prl` and not the project file, echoing #4097). Without paired project rules the sign-off tier is not trustworthy; refuse.
