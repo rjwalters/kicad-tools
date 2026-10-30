@@ -22,12 +22,12 @@
         "DRC Validation"
       ],
       "files": [
-        "fab_profile.json",
-        "net_class_map.json",
         "out.access_witness.json",
+        "out.fab_profile.json",
         "out.kicad_dru",
         "out.kicad_pcb",
         "out.kicad_pro",
+        "out.net_class_map.json",
         "out.route.json",
         "out.routing_plan.json"
       ]
@@ -53,12 +53,12 @@
         "DRC Validation"
       ],
       "files": [
-        "fab_profile.json",
-        "net_class_map.json",
         "out.access_witness.json",
+        "out.fab_profile.json",
         "out.kicad_dru",
         "out.kicad_pcb",
         "out.kicad_pro",
+        "out.net_class_map.json",
         "out.route.json",
         "out.routing_plan.json"
       ]
@@ -85,12 +85,12 @@
         "DRC Validation"
       ],
       "files": [
-        "fab_profile.json",
-        "net_class_map.json",
         "out.access_witness.json",
+        "out.fab_profile.json",
         "out.kicad_dru",
         "out.kicad_pcb",
         "out.kicad_pro",
+        "out.net_class_map.json",
         "out.route.json",
         "out.routing_plan.json"
       ]
@@ -117,12 +117,12 @@
         "DRC Validation"
       ],
       "files": [
-        "fab_profile.json",
-        "net_class_map.json",
         "out.access_witness.json",
+        "out.fab_profile.json",
         "out.kicad_dru",
         "out.kicad_pcb",
         "out.kicad_pro",
+        "out.net_class_map.json",
         "out.route.json",
         "out.routing_plan.json"
       ]
@@ -156,13 +156,13 @@
         "Routing Suggestions"
       ],
       "files": [
-        "fab_profile.json",
         "failed_nets.json",
-        "net_class_map.json",
         "out.access_witness.json",
+        "out.fab_profile.json",
         "out.kicad_dru",
         "out.kicad_pcb",
         "out.kicad_pro",
+        "out.net_class_map.json",
         "out.route.json",
         "out.routing_plan.json",
         "out.search_failures.json"
@@ -194,13 +194,13 @@
         "Routing Suggestions"
       ],
       "files": [
-        "fab_profile.json",
         "failed_nets.json",
-        "net_class_map.json",
         "out.access_witness.json",
+        "out.fab_profile.json",
         "out.kicad_dru",
         "out.kicad_pcb",
         "out.kicad_pro",
+        "out.net_class_map.json",
         "out.route.json",
         "out.routing_plan.json",
         "out.search_failures.json"
@@ -233,13 +233,13 @@
         "Routing Suggestions"
       ],
       "files": [
-        "fab_profile.json",
         "failed_nets.json",
-        "net_class_map.json",
         "out.access_witness.json",
+        "out.fab_profile.json",
         "out.kicad_dru",
         "out.kicad_pcb",
         "out.kicad_pro",
+        "out.net_class_map.json",
         "out.route.json",
         "out.routing_plan.json",
         "out.search_failures.json"
@@ -273,13 +273,13 @@
         "Routing Suggestions"
       ],
       "files": [
-        "fab_profile.json",
         "failed_nets.json",
-        "net_class_map.json",
         "out.access_witness.json",
+        "out.fab_profile.json",
         "out.kicad_dru",
         "out.kicad_pcb",
         "out.kicad_pro",
+        "out.net_class_map.json",
         "out.route.json",
         "out.routing_plan.json",
         "out.search_failures.json",

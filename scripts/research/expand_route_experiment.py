@@ -1304,17 +1304,21 @@ def vias_by_net(pcb) -> dict[str, int]:
 
 
 def fab_profile_mfr(routed: Path) -> str | None:
-    """The manufacturer ``kct route`` used, from ``fab_profile.json`` beside *routed*.
+    """The manufacturer ``kct route`` used, from ``<stem>.fab_profile.json`` beside *routed*.
 
     ``kct route`` writes the sidecar next to ``-o``; ``kct check`` resolves
     it ahead of ``project.kct``. Grading against it is what makes the
     harness's ``kct check`` columns match a manual ``kct check`` on the same
     file (Issue #6420). ``None`` when there is no readable sidecar.
     """
-    try:
-        data = json.loads((routed.parent / "fab_profile.json").read_text())
-    except (OSError, ValueError):
-        return None
+    # Issue #8156: stem-keyed first, bare name as the legacy fallback.
+    data: object = None
+    for name in (f"{routed.stem}.fab_profile.json", "fab_profile.json"):
+        try:
+            data = json.loads((routed.parent / name).read_text())
+            break
+        except (OSError, ValueError):
+            continue
     mfr = data.get("mfr") if isinstance(data, dict) else None
     return mfr if isinstance(mfr, str) and mfr else None
 
