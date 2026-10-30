@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-30
 
+- **PR #8128**: fix(export): parse pin-count-first BGA and LFCSP LCSC packages as ICs
+- **Issue #8127** (closed): parse_ic_package misses pin-count-first BGA forms ('48-TFBGA (6x8)') and LFCSP
 - **PR #8126**: fix(export): match whole LCSC IC-category phrases in discrete-footprint guard
 - **Issue #8124** (closed): LCSC discrete-footprint IC guard: bare 'Logic'/'Memory' substring can false-FAIL real diodes/caps
 - **PR #8123**: fix: flag IC parts on discrete footprints in LCSC guard and tapeout Gate 4
