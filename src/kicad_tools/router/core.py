@@ -12003,7 +12003,7 @@ class Autorouter:
         getter = getattr(self.router, "get_last_failure_info", None)
         info = getter() if getter is not None else None
         # 5 == FAILURE_VIA_VIA_BLOCKED (types.hpp)
-        return bool(info) and info.get("failure_reason") == 5
+        return info is not None and info.get("failure_reason") == 5
 
     def _analyze_failure_budgeted(
         self,
