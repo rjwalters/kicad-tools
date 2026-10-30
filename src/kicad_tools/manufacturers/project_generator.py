@@ -1272,6 +1272,20 @@ def apply_netclass_dru_rules(
     )
 
 
+def _suppressed_zone_count(board: Path, project_data: dict) -> int:
+    """Number of attach zones the board would have had (#8131); 0 if unreadable."""
+    from kicad_tools.schema.pcb import PCB
+
+    from .attach_zone_dru import build_floor_zones, eligible_net_names
+
+    try:
+        pcb = PCB.load(str(board))
+    except Exception:  # noqa: BLE001 - an unreadable board has no zones
+        return 0
+    names = {pad.net_name for fp in pcb.footprints for pad in fp.pads if pad.net_name}
+    return len(build_floor_zones(pcb.footprints, eligible_net_names(project_data, names)))
+
+
 def apply_attach_zone_dru_rules(
     dru_text: str,
     rules: DesignRules,
@@ -1315,6 +1329,17 @@ def apply_attach_zone_dru_rules(
     for cls in project_data.get("net_settings", {}).get("classes", []):
         if cls.get("name") == "Default" and isinstance(cls.get("clearance"), (int, float)):
             floor = max(floor, cls["clearance"])
+    if not zones and router_classes and board.exists():
+        from .attach_zone_dru import attach_zone_exemption_status
+
+        status, reason = attach_zone_exemption_status(dru_text, True)
+        if reason is not None and _suppressed_zone_count(board, project_data):
+            print(
+                f"Warning: attach-zone exemption suppressed ({reason}): {board.with_suffix('.kicad_dru').name} "
+                "carries its own clearance rule, so no managed attach-zone block is written; "
+                "kct check will not exempt attach-zone copper",
+                file=sys.stderr,
+            )
     merged = merge_attach_zone_block(dru_text, zones, floor)
     return merged if merged is not None else dru_text
 

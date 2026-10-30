@@ -198,6 +198,13 @@ class DRCResults:
     rules_checked_by_rule: dict[str, int] = field(default_factory=dict)
     suppressed_count: int = 0
     mask_copper_assessments: list[MaskCopperAssessment] = field(default_factory=list)
+    # Issue #8131: whether the attach-zone exemption was applied by
+    # ``netclass_clearance_copper`` (``active`` / ``suppressed``); ``None`` when
+    # not applicable.  ``attach_zone_unexempted`` counts the findings the
+    # exemption would have waived.
+    attach_zone_exemption: str | None = None
+    attach_zone_exemption_reason: str | None = None
+    attach_zone_unexempted: int = 0
 
     @property
     def error_count(self) -> int:
@@ -280,6 +287,10 @@ class DRCResults:
         for rule_id, count in other.rules_checked_by_rule.items():
             self.rules_checked_by_rule[rule_id] = self.rules_checked_by_rule.get(rule_id, 0) + count
         self.suppressed_count += other.suppressed_count
+        if other.attach_zone_exemption is not None:
+            self.attach_zone_exemption = other.attach_zone_exemption
+            self.attach_zone_exemption_reason = other.attach_zone_exemption_reason
+            self.attach_zone_unexempted += other.attach_zone_unexempted
 
     def filter_by_rule(self, rule_id: str) -> list[DRCViolation]:
         """Get violations for a specific rule."""

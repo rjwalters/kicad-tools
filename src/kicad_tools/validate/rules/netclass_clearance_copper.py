@@ -93,11 +93,14 @@ from typing import TYPE_CHECKING
 
 from kicad_tools.core.project_clearance import ProjectClearanceError, authored_netclass_clearances
 from kicad_tools.manufacturers.attach_zone_dru import (
+    ATTACH_ZONE_ACTIVE,
+    ATTACH_ZONE_NOT_APPLICABLE,
+    ATTACH_ZONE_SUPPRESSED,
     FloorZone,
     ZoneItem,
+    attach_zone_exemption_status,
     build_floor_zones,
     eligible_net_names,
-    has_attach_zone_block,
     zones_exempt,
 )
 
@@ -215,7 +218,9 @@ def check_netclass_clearance_copper(
     package_floors = {
         num: value for num, value in floors.items() if classes[num] not in router_classes
     }
-    zones = _attach_zones(pcb_path, pcb, project, net_names.values())
+    zones, shadow_zones = _attach_zones(
+        pcb_path, pcb, project, net_names.values(), bool(router_classes), results
+    )
     max_floor = max(floors.values())
     rule = ClearanceRule()
     for layer in pcb.copper_layers:
@@ -258,6 +263,10 @@ def check_netclass_clearance_copper(
             # designer's: only router-class and unclassed nets are members).
             if zones and zones_exempt(zones, _zone_item(a, layer.name), _zone_item(b, layer.name)):
                 continue
+            if shadow_zones and zones_exempt(
+                shadow_zones, _zone_item(a, layer.name), _zone_item(b, layer.name)
+            ):
+                results.attach_zone_unexempted += 1
             required = max(fab_floor, required_class)
             owner = max((a, b), key=lambda e: governing.get(e.net_number, 0.0))
             cls = classes[owner.net_number]
@@ -281,16 +290,36 @@ def check_netclass_clearance_copper(
 
 
 def _attach_zones(
-    pcb_path: Path, pcb: PCB, project: dict, net_names: Iterable[str]
-) -> tuple[FloorZone, ...]:
-    """The floor zones in force: none unless the sibling ``.kicad_dru`` carries them."""
+    pcb_path: Path,
+    pcb: PCB,
+    project: dict,
+    net_names: Iterable[str],
+    router_classes_declared: bool,
+    results: DRCResults,
+) -> tuple[tuple[FloorZone, ...], tuple[FloorZone, ...]]:
+    """``(zones in force, zones a designer rule suppressed)``; records the status (#8131).
+
+    Zones are in force only when the sibling ``.kicad_dru`` carries the managed
+    block.  When a designer clearance rule keeps the block out, the zones that
+    would have existed are returned second so the caller can count the findings
+    left unexempted.
+    """
     try:
         dru_text = pcb_path.with_suffix(".kicad_dru").read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
-        return ()
-    if not has_attach_zone_block(dru_text):
-        return ()
-    return build_floor_zones(pcb.footprints, eligible_net_names(project, net_names))
+        return (), ()
+    status, reason = attach_zone_exemption_status(dru_text, router_classes_declared)
+    if status == ATTACH_ZONE_NOT_APPLICABLE:
+        return (), ()
+    zones = build_floor_zones(pcb.footprints, eligible_net_names(project, net_names))
+    if status == ATTACH_ZONE_ACTIVE:
+        if zones:
+            results.attach_zone_exemption = ATTACH_ZONE_ACTIVE
+        return zones, ()
+    if zones:
+        results.attach_zone_exemption = ATTACH_ZONE_SUPPRESSED
+        results.attach_zone_exemption_reason = reason
+    return (), zones
 
 
 def _zone_item(element: CopperElement, layer: str) -> ZoneItem:
