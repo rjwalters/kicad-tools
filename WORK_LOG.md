@@ -15,6 +15,11 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-29
 
+- **PR #8116**: fix(install): isolate kct-upgrade token from installer code; match multi-line pins
+- **PR #8114**: fix(parts): send X-XSRF-TOKEN so JLC lookups don't 403 after the first request
+- **PR #8081**: feat(install): PyPI source mode as install-kct.sh default (+ kct doctor, opt-in upgrade workflow)
+- **Issue #8118** (closed): Anonymous JLC parts lookups 403 after the first request of a session (missing X-XSRF-TOKEN)
+- **Issue #8115** (closed): Follow-on from PR #8110: kct-upgrade token exposure to later steps; multi-line TOML string pin match
 - **PR #8112**: fix: count the since-tag release section as documented in the changelog gap report
 - **Issue #8111** (closed): changelog: release gate reports a gap when the citing fragment was consumed by a release cut that raced the PR merge
 - **PR #8110**: fix(install): harden the PyPI pin helper (CRLF, 3.9 dry-run, token scope, escapes)
