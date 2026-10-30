@@ -13,7 +13,7 @@ def run_pcb_command(args) -> int:
     if not args.pcb_command:
         print("Usage: kicad-tools pcb <command> [options] <file>")
         print(
-            "Commands: summary, footprints, nets, traces, stackup, zones, strip, reinforce, dedupe, reannotate, sync-netlist, annotate-pintypes, add-3d-models, remove-footprint, move-footprint, page-fit, center-on-sheet, lock-footprints, unlock-footprints, add-zone, snap-rotation, edit-outline, net-audit, model-audit, diff, export-dsn, import-ses, current-paths-audit"
+            "Commands: summary, footprints, nets, traces, stackup, zones, strip, reinforce, dedupe, reannotate, sync-netlist, annotate-pintypes, add-3d-models, remove-footprint, move-footprint, move-via, page-fit, center-on-sheet, lock-footprints, unlock-footprints, add-zone, snap-rotation, edit-outline, net-audit, model-audit, diff, export-dsn, import-ses, current-paths-audit"
         )
         return 1
 
@@ -84,6 +84,10 @@ def run_pcb_command(args) -> int:
     # Handle remove-footprint command
     if args.pcb_command == "remove-footprint":
         return _run_remove_footprint_command(args, pcb_path)
+
+    # Handle move-via command
+    if args.pcb_command == "move-via":
+        return _run_move_via_command(args, pcb_path)
 
     # Handle move-footprint command
     if args.pcb_command == "move-footprint":
@@ -1327,6 +1331,32 @@ def _run_move_footprint_command(args, pcb_path: Path) -> int:
         absolute=absolute,
         drag_endpoints=drag_endpoints,
         drag_tolerance=drag_tolerance,
+    )
+
+
+def _run_move_via_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb move-via' command."""
+    from kicad_tools.cli.pcb_move_via import run_move_via
+
+    at = getattr(args, "at", None)
+    to = getattr(args, "to", None)
+    by = getattr(args, "by", None)
+    output = getattr(args, "output", None)
+    return run_move_via(
+        pcb_path=pcb_path,
+        at=tuple(at) if at else None,
+        to=tuple(to) if to else None,
+        by=tuple(by) if by else None,
+        net=getattr(args, "net", None),
+        uuid=getattr(args, "uuid", None),
+        tolerance=getattr(args, "tolerance", 0.05),
+        dry_run=getattr(args, "dry_run", False),
+        check=getattr(args, "check", False),
+        output_path=Path(output) if output else None,
+        output_format=getattr(args, "format", "text"),
+        absolute=getattr(args, "absolute", False),
+        manufacturer=getattr(args, "mfr", "jlcpcb"),
+        layers=getattr(args, "layers", 4),
     )
 
 

@@ -2970,6 +2970,61 @@ def _add_pcb_parser(subparsers) -> None:
         help="Endpoint-coincidence match radius in mm for --drag-endpoints (default: 0.05)",
     )
 
+    # pcb move-via
+    pcb_move_via = pcb_subparsers.add_parser(
+        "move-via",
+        help="Move a via and drag its attached trace endpoints",
+        description="Relocate exactly one via, selected by --at/--net/--uuid, "
+        "translating coincident trace endpoints on the same net so routed "
+        "copper stays connected. Coordinates are board-relative by default.",
+    )
+    pcb_move_via.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_move_via.add_argument(
+        "--at", nargs=2, type=float, metavar=("X", "Y"), help="Current via position in mm"
+    )
+    pcb_move_via.add_argument("--net", help="Narrow selection to this net name")
+    pcb_move_via.add_argument("--uuid", help="Select the via by UUID")
+    pcb_move_via.add_argument(
+        "--tolerance",
+        type=float,
+        default=0.05,
+        metavar="MM",
+        help="Match radius in mm for --at and endpoint dragging (default: 0.05)",
+    )
+    pcb_move_via.add_argument(
+        "--to", nargs=2, type=float, metavar=("X", "Y"), help="New via position in mm"
+    )
+    pcb_move_via.add_argument(
+        "--by", nargs=2, type=float, metavar=("DX", "DY"), help="Move the via by this offset in mm"
+    )
+    pcb_move_via.add_argument(
+        "--absolute",
+        action="store_true",
+        help="Interpret --at/--to as absolute KiCad page coordinates "
+        "instead of board-relative. Default: board-relative.",
+    )
+    pcb_move_via.add_argument(
+        "--check",
+        action="store_true",
+        help="Refuse (exit 1, nothing written) if the move adds a clearance "
+        "violation on the touched nets",
+    )
+    pcb_move_via.add_argument(
+        "--mfr", default="jlcpcb", help="Manufacturer rules for --check (default: jlcpcb)"
+    )
+    pcb_move_via.add_argument(
+        "--layers", type=int, default=4, help="Layer count for --check rules (default: 4)"
+    )
+    pcb_move_via.add_argument(
+        "-o", "--output", dest="output", help="Output file path (default: overwrite input PCB)"
+    )
+    pcb_move_via.add_argument(
+        "--format", choices=["text", "json"], default="text", help="Output format for results"
+    )
+    pcb_move_via.add_argument(
+        "--dry-run", action="store_true", help="Preview the move without modifying the PCB file"
+    )
+
     # pcb page-fit
     pcb_page_fit = pcb_subparsers.add_parser(
         "page-fit",
