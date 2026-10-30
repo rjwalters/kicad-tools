@@ -44,21 +44,6 @@ fi
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
-assert_eq() {
-    local actual="$1" expected="$2" msg="$3"
-    if [[ "$actual" == "$expected" ]]; then pass "$msg"; else fail "$msg (got '$actual', expected '$expected')"; fi
-}
-
-assert_grep() {
-    local pattern="$1" file="$2" msg="$3"
-    if grep -qE "$pattern" "$file"; then pass "$msg"; else fail "$msg (missing pattern: $pattern)"; fi
-}
-
-assert_no_grep() {
-    local pattern="$1" file="$2" msg="$3"
-    if grep -qE "$pattern" "$file"; then fail "$msg (found pattern: $pattern)"; else pass "$msg"; fi
-}
-
 if [[ ! -f "$GUIDE_MD" ]]; then
     echo -e "${RED}FATAL${NC}: guide.md not found at $GUIDE_MD"
     exit 1
@@ -145,9 +130,9 @@ STUB
         fail "expected both important issues in the Important section (got: $SECTION)"
     fi
     FIRST="$(grep -m1 '^- ' <<<"$SECTION")"
-    assert_eq "$FIRST" "- **#4765**: Important issue A" "important issues render in stable number order"
+    assert_eq "- **#4765**: Important issue A" "$FIRST" "important issues render in stable number order"
     VSECTION="$(awk '/^## Very Important$/{f=1;next} f && /^## /{exit} f' <<<"$RENDER")"
-    assert_eq "$(grep -m1 '^- ' <<<"$VSECTION")" "- **#9001**: Very important issue" \
+    assert_eq "- **#9001**: Very important issue" "$(grep -m1 '^- ' <<<"$VSECTION")" \
         "the Very Important section lists the loom:very-important issue"
     if grep -q '^| Important | 2 |$' <<<"$RENDER" && grep -q '^| Very important | 1 |$' <<<"$RENDER"; then
         pass "the Backlog Balance table counts both levels"

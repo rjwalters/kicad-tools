@@ -42,11 +42,6 @@ GUIDE_MD="$REPO_ROOT/defaults/.claude/commands/loom/guide.md"
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
-assert_grep() {
-    local pattern="$1" file="$2" msg="$3"
-    if grep -qE "$pattern" "$file"; then pass "$msg"; else fail "$msg (missing pattern: $pattern)"; fi
-}
-
 for bin in "$TELEMETRY_SH" "$LOCK_SH"; do
     if [[ ! -x "$bin" ]]; then
         fail "$bin missing or not executable"

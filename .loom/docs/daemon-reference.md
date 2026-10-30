@@ -1405,6 +1405,7 @@ answering the on-command verbs below.
 | `fleet.ref` | `LOOM_FLEET_REF` | `main` | Branch, tag or commit to read |
 | `fleet.syncIntervalSecs` | `LOOM_FLEET_SYNC_INTERVAL_SECS` | `300` | Cadence of the daemon's own sync timer; clamped up to a `30`s floor |
 | `fleet.autoApply` | `LOOM_FLEET_AUTO_APPLY` | `false` | Let a **timer** pass write (render) and apply (roster) on its own, cloning a desired repo that is not cloned yet ([Roster clones](#roster-clones-11218)). Off by default — `roster --apply` deregisters workspaces |
+| `fleet.autoApplyRoster` / `fleet.autoApplyConfig` / `fleet.autoApplyResync` / `fleet.autoApplyCheckout` | `LOOM_FLEET_AUTO_APPLY_ROSTER` / `_CONFIG` / `_RESYNC` / `_CHECKOUT` | `fleet.autoApply` | Arm one timer write on its own (#13228): **roster** = register/deregister plus the missing-clone clone; **config** = machine, host-local and per-repo tiers and the restart they demand; **resync** = the workspace resync push; **checkout** = the checkout fast-forward. An explicit value (env over config) beats the `fleet.autoApply` umbrella, which is the default for each — so `autoApply=true, autoApplyResync=false` is "everything but resync", and only `autoApplyRoster=true` is registration-only. Restart-required. `loom-daemon status` lists the armed writes (`autoApply on: roster`); `--json` keeps `autoApply` (any armed) beside `autoApplyWrites`. The startup pass still renders the config tiers regardless |
 | `fleet.cloneMaxPerPass` | `LOOM_FLEET_CLONE_MAX_PER_PASS` | `2` | Most missing clones one `autoApply` timer pass clones; the rest wait for the next pass. `0` never clones |
 | `fleet.cloneTimeoutSecs` | `LOOM_FLEET_CLONE_TIMEOUT_SECS` | `300` | Wall-clock cap on one clone (clamped up to `30`); a clone that hits it is killed, removed and retried next pass |
 | *(startup cap)* | `LOOM_FLEET_SYNC_STARTUP_TIMEOUT_SECS` | `60` | Wall-clock cap on the startup pass, so a hanging forge cannot hold up boot. `0` waits indefinitely |
@@ -6227,7 +6228,7 @@ knobs not yet audited here.
 | `autonomous.roleRunner.architectMaxProposals` | `LOOM_ARCHITECT_MAX_PROPOSALS` | `5` | **Per-invocation** cap on how many proposal issues one `architect` dispatch may file (#5656) — the actuator-saturation limit of the idle-edge control loop. Passed to the session as `/loom:architect --max-proposals <n>`, which `architect.md` enforces as a hard ceiling. Per-repo on purpose (the workable cap grows with a repo's maturity — ~5 while work is narrow, 7+ once it fans out), so it is read from each root's own config. Zero/negative/non-integer at either tier drops to the next one (a cap of `0` would spend a whole session forbidden from producing anything). Ignored for every other role |
 | `autonomous.roleRunner.championMode` | *(config only)* | *(retired)* | **Retired by #11909.** Every role-runner Champion launch is `/loom:champion --non-item`: proposals (architect/hermit/auditor), epics, Doctor-cap parked PRs, rollout checks and the batch-wide Pass 0 / held-PR census. Curated-issue promotion and `loom:pr` merges are work-finder steps (`/loom:champion --issue N` / `--pr N`, `champion-targeted.md`). Any value is ignored with a warning |
 | **`curator.backlogTarget`** *(retired, #12077)* | *(config only)* | *(ignored)* | **Retired; set it and the daemon logs one `WARN` per process, then ignores it.** It drove backlog-pressure admission (#11819) on role-runner Curator ticks only; Curator now runs as step-dispatch steps, which never read it. The `backlog.level` OTLP log and the `--backlog-level/--backlog-open/--backlog-target` Curator flags are gone with it. Remove the key from every config tier. |
-| `autonomous.balance.idleGate` | `LOOM_BALANCE_IDLE_GATE` | `false` | **Pipeline-empty gate for hermit/architect idle generation (#10817, slice 4 of #10630).** Off: an `onIdle` edge means a host slot is free, exactly as before (no ledger read, no log line). On: `hermit` and `architect` additionally need this repo's pipeline empty -- no review/changes/merge debt in the demand ledger (`role_runner::demand`) and, where observed, no ready/building issues; any observed work denies the run even with free slots. Unobserved axes never deny nor newly grant (today's host-slot rule applies). Other idle roles are untouched; `architectMaxProposals` still caps a granted architect run. A grant logs `role_runner: idle grant root=<r> role=<role> trigger=idle reason=pipeline-empty`. Precedence env > config > default; truthy `1/true/yes/on`, falsy `0/false/no/off`, an invalid env value warns and falls back to config. Per-repo, live |
+| **`autonomous.balance.idleGate`** *(retired, #13273)* | *(`LOOM_BALANCE_IDLE_GATE` ignored)* | *(ignored)* | **Retired; set it and the daemon logs one `WARN` per process, then ignores it.** It gated `hermit`/`architect` idle generation on an empty pipeline (#10817); it was default-off and never granted, so an `onIdle` edge now means a free host slot, as before it existed. The env var is ignored silently. Per-repo |
 | `autonomous.roleRunner.collisionDetection` | `LOOM_ROLE_RUNNER_DETECT_COLLISIONS` | inherits `autonomous.collisionDetection.enabled`, else `false` | Cross-host role-tick collision baseline (#4623). Detection only — a pre-tick probe of that role's own label queue, logged/counted, never acted on. Absent → falls through to #4085's shared toggle; see [Cross-host role-tick collision detection](#cross-host-role-tick-collision-detection-4623) |
 | `autonomous.roleRunner.collisionWindowSecs` | `LOOM_ROLE_RUNNER_COLLISION_WINDOW_SECS` | that role's tick interval | Lookback window for the #4623 probe, clamped to `[60, 3600]`. Zero/invalid dropped to the next tier |
 | *(host-local tiers only — see below)* | `LOOM_ROLE_RUNNER_SHARD_INDEX` | *(unset)* | **This host's** 0-based role-runner shard index (#6374). Must **differ** per host, so it belongs in the service unit next to `LOOM_ROLE_RUNNER`, never in the tracked `.loom/config.json` — a committed `autonomous.roleRunner.shardIndex` gives every host the same index and leaves every other slice with zero owners fleet-wide, so the daemon **refuses** it (logs `error!`, falls back to unsharded). Requires `shardCount`; out-of-range/malformed → unsharded. See [Role-runner host sharding](#role-runner-host-sharding-6374) |
@@ -10195,6 +10196,64 @@ routinely run long jobs by hand in a finished issue's worktree, raise
 `minAgeSecs`, drop a `.loom-in-use` file in the worktree, or turn the pass off.
 Linux-only (it needs `/proc`); on other hosts the pass is a no-op. See
 `loom-daemon/src/orphan_process_reaper.rs`.
+
+#### Agent residue reaper (#10802)
+
+The pass above only sees `issue-<N>` worktrees that still exist, are registered
+and are provably unowned. Dev servers (`vite`, `workerd`) that an agent starts
+with `setsid` outlive the agent, its sweep and even its worktree, and keep
+`loom-agent-*` systemd scopes alive for days. `loom-daemon/src/agent_residue_reaper.rs`
+adds three passes. They share the `autonomous.processReaper.{enabled,dryRun,minAgeSecs}`
+config and `LOOM_ORPHAN_PROCESS_REAPER*` env above (one switch for all residue
+reaping; the host-wide periodic pass is on when any registered root has it on,
+dry when any says so, with the longest `minAgeSecs`).
+**This pass ships dark:** unlike the pass above, its `dryRun` defaults to `true`
+(env `LOOM_ORPHAN_PROCESS_REAPER_DRY_RUN` still wins). It records "would reap"
+plans and signals, stops and resets nothing until an operator sets
+`autonomous.processReaper.dryRun: false` after reviewing that list.
+
+- **Exit teardown** (no grace period): when a sweep or a role run reaches a
+  terminal state, for any reason (success, failure, kill, timeout, requeue), its
+  scope is stopped (the `scope_unit` recorded in `owner.json` or at role launch,
+  else the `loom-agent-<pid>-*` scope whose embedded pid is the run's and which
+  began within its lifetime), its recorded pid and process group are torn down
+  with the shared #10831 helper (`auto_update/pause_roll/teardown.rs`), and, for
+  a sweep, processes in the worktree that started at or after it did **and carry
+  its `LOOM_SWEEP_ID`** in their environment are killed freeze-first (a later
+  start alone is not ownership: an operator shell opened mid-run is left alone,
+  as is any process whose environment is unreadable). On macOS and scope-less
+  Linux only the last two apply (`ps` snapshot, argv attribution, `ps -E`). A
+  live agent runtime in the worktree, or another run holding the issue's claim,
+  skips the worktree leg (a requeue may already be running).
+- **Periodic pass** (same tick as the worktree reaper): `loom-agent-*` scopes older
+  than `minAgeSecs` that no live run claims (recorded `scope_unit`, else the
+  embedded pid alive and not started after the scope) are stopped; processes whose
+  cwd is in (or whose argv names) a deleted `.loom/worktrees/issue-*` directory, or in a
+  `.loom-managed` one of a workspace that is no longer registered, are reaped with
+  the orphan reaper's fail-safes (age, daemon ancestry, live agent, claim). A
+  process elsewhere in the same checkout is never touched.
+- **Failed scopes**: after the outcome (`Result`, `ExecMainStatus`) is recorded,
+  failed `loom-agent-*.scope` units get `systemctl --user reset-failed`. No other
+  unit is ever stopped or reset, and `loom-agent-probe-*` is excluded.
+
+Nothing is matched by process name. `dryRun` records the plan (event field
+`dry_run: true`) and stops, signals and resets nothing.
+
+**Records.** Each reap logs a line, publishes `daemon.agent_residue.reaped`
+(fields in `telemetry-schema.md`) and increments a counter. `loom-daemon status
+--json` reports them under `agent_residue` (selectable alone with
+`--section agent_residue`):
+
+| Field | Meaning |
+|-------|---------|
+| `scope` | `loom-agent-*` scopes stopped |
+| `tree` | process trees reaped (recorded identity or worktree attribution) |
+| `failed_scope` | failed scopes cleared with `reset-failed` |
+| `dry_run_planned` | reaps `dryRun` planned and did not perform |
+| `last_reap_at` | time of the last real reap, or `null` |
+
+Counters are since daemon start. An opt-in real-systemd test runs with
+`LOOM_REAL_SYSTEMD_TEST=1` and skips when `systemctl --user` is unavailable.
 
 ### Install/host invariant self-check (#5035)
 

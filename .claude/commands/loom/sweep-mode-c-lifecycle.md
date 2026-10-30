@@ -73,6 +73,7 @@ Apply exactly one of the three branches below, based on the PR's current label.
 #### C1a. `loom:review-requested` → Judge phase only
 
 - Load and follow the instructions in `.claude/commands/loom/judge.md` for this PR.
+- **In-session Judge dispatch (#13222):** do not pass the orchestrator's run id as the Judge's `LOOM_SWEEP_ID`; the Stale-Read Gate takes the start from a `step-judge-<pr>-<epoch>` id or the PR judge lease.
 - Dispatch `loom-judge` as a **single subagent Task** from this orchestrator session. Do **NOT** invoke `/loom:sweep` or `/loom:judge` slash-commands as subagents — see "CRITICAL: One level deep" in the Execution Model.
 - If a previous Judge attempt for this PR died mid-flight without a fresh checkpoint (rate limit, crash), re-verify forge state and complete only the missing steps before re-dispatching — see "Mid-phase-death recovery" in the Wave Lifecycle (the rule is phase-generic; Mode C inherits it, same as the Doctor-cycle cap).
 - Expected exit states:
@@ -93,6 +94,7 @@ Apply exactly one of the three branches below, based on the PR's current label.
 If the PR entered the wave already labeled `loom:changes-requested` (e.g., from a previous Judge run), or just transitioned there from C1a, run inline Doctor → Judge cycles for this PR — **up to `sweep.max_doctor_cycles`** (default 1; see "Doctor-cycle cap" in the Execution Model):
 
 - Load and follow the instructions in `.claude/commands/loom/doctor.md` for this PR.
+- **In-session sweep (#13222):** before the first Doctor dispatch, release the closing issue's lease if one is live (`loom-daemon lease release N`), and dispatch the Doctor with `LOOM_DOCTOR_PUSH_WINDOW_MINUTES=0` (all roles push as one GitHub login, so the Builder's own push would otherwise read as another actor).
 - Dispatch `loom-doctor` as a **single subagent Task** from this orchestrator session. Do **NOT** invoke `/loom:sweep` or `/loom:doctor` slash-commands as subagents — see "CRITICAL: One level deep".
 - If a previous Doctor attempt for this PR died mid-flight without a fresh `doctor-done` checkpoint (rate limit, crash), re-verify forge state (pushed commit? already re-labeled `loom:review-requested`?) and complete only the missing steps rather than duplicating the pushed fix — see "Mid-phase-death recovery" in the Wave Lifecycle (inherited here, same as the Doctor-cycle cap).
 - **Model escalation (#3481)**: Mode C inherits the issue-side rule unchanged — this Doctor is dispatched because of a `loom:changes-requested` rejection, so resolve its model per "Model escalation on Judge rejection" in the Execution Model: pass `ladder[1]` from `sweep.escalation` via the Task tool's `model` parameter, **unless** a tier-1/tier-2 pin applies (pins win) or escalation is disabled (`[]`/`false`). Run a pinned ID through `resolve-model.sh --task-alias` (#4282).

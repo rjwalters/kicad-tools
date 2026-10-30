@@ -579,7 +579,11 @@ passes the `merge-risk` kept-set entries when `resync_waiver_eval` proves every
 changed kept-set file has the same blob SHA as its `defaults/` counterpart at
 tag `vX` (the title and `.loom/install-metadata.json` must both name `X`). A
 differing byte, a removed or renamed file, a kept-set file with no upstream
-counterpart, a missing tag or a failed read holds as before. The pre-merge
+counterpart, a missing tag or a failed read holds as before. So does any changed
+file outside `.loom/` and `.claude/`, or any merge-gate path (`champion*`,
+`judge*`, `merge-pr.sh`, `merge_pr*`, `verdict*`, comment trust, `config.json`;
+`RESYNC_GATE_PATTERNS`, #12945). After a resync PR merges, Step 3b closes open
+resync PRs for lower versions as superseded. The pre-merge
 comment lists the tag and each file's SHA. See `champion-pr-merge.md`
 "Resync waiver for the kept-set hold".
 

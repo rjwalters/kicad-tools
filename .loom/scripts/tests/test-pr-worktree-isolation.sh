@@ -39,11 +39,6 @@ fi
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
-assert_grep() {
-    local pattern="$1" file="$2" msg="$3"
-    if grep -qE "$pattern" "$file"; then pass "$msg"; else fail "$msg (pattern: $pattern)"; fi
-}
-
 if [[ ! -f "$DOCTOR_MD" ]]; then
     echo -e "${RED}FATAL${NC}: doctor.md not found at $DOCTOR_MD"
     exit 1

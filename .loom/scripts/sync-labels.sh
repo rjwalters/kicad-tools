@@ -101,9 +101,9 @@
 #
 # requires-daemon: labels optional  only --prune-undeclared/--migrate-retired need `labels undeclared`/`labels migrate`; an older binary is refused with a clear message there and every other path is unaffected
 #
-# This is the installed-tree counterpart of the source-only
-# scripts/install/sync-labels.sh. It is self-contained apart from the
-# shipped .loom/scripts/lib/forge-helpers.sh helper library.
+# This is the only label-sync implementation; the installer's Step 4 calls the
+# installed copy (#13148). It is self-contained apart from the shipped
+# .loom/scripts/lib/forge-helpers.sh helper library.
 
 set -euo pipefail
 

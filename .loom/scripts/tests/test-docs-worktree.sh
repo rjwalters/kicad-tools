@@ -54,16 +54,6 @@ WORK_PLAN_MD="$REPO_ROOT/WORK_PLAN.md"
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
-assert_grep() {
-    local pattern="$1" file="$2" msg="$3"
-    if grep -qE "$pattern" "$file"; then pass "$msg"; else fail "$msg (missing pattern: $pattern)"; fi
-}
-
-assert_no_grep() {
-    local pattern="$1" file="$2" msg="$3"
-    if grep -qE "$pattern" "$file"; then fail "$msg (unexpected pattern: $pattern)"; else pass "$msg"; fi
-}
-
 if ! command -v jq >/dev/null 2>&1; then
     echo "SKIP: jq not available"
     exit 0
