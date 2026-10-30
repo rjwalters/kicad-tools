@@ -602,3 +602,35 @@ class TestReportInputDiscoversBoardDir:
         assert rc == 1
         assert "auto-loaded waivers sidecar" not in captured.err
         assert "Errors:     2" in captured.out
+
+
+class TestNonReportJsonRejected:
+    """Issue #8133: a JSON file that is not a DRC report must not pass."""
+
+    def _run(self, tmp_path, data, extra):
+        report = _report(tmp_path, name="not-a-report.json", data=data)
+        waiver = _waivers(tmp_path / "w.json", [])
+        return drc_cmd.main([str(report), "--waivers", str(waiver), *extra])
+
+    def test_unrelated_object_rejected(self, tmp_path, capsys):
+        for extra in ([], ["--allow-incomplete"]):
+            rc = self._run(tmp_path, {"anything": 1}, extra)
+            err = capsys.readouterr().err
+            assert rc == 1
+            assert "Error loading report" in err
+
+    def test_non_object_json_rejected(self, tmp_path, capsys):
+        for data in ([], [1, 2], 3, "x"):
+            rc = self._run(tmp_path, data, ["--allow-incomplete"])
+            assert rc == 1
+            assert "Error loading report" in capsys.readouterr().err
+
+    def test_empty_kicad_report_still_loads(self, tmp_path, capsys):
+        data = {**RECORDED_REPORT, "violations": []}
+        rc = self._run(tmp_path, data, ["--allow-incomplete"])
+        assert rc == 0
+
+    def test_kct_check_report_still_loads(self, tmp_path):
+        data = {"manufacturer": "jlcpcb", "summary": {"errors": 0}, "violations": []}
+        report = DRCReport.load(_report(tmp_path, data=data))
+        assert report.violations == []
