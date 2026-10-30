@@ -309,3 +309,28 @@ def has_designer_clearance_rule(dru_text: str | None) -> bool:
     from .project_generator import _strip_managed_dru_blocks
 
     return _CLEARANCE_CONSTRAINT_RE.search(_strip_managed_dru_blocks(dru_text)) is not None
+
+
+ATTACH_ZONE_ACTIVE = "active"
+ATTACH_ZONE_SUPPRESSED = "suppressed"
+ATTACH_ZONE_NOT_APPLICABLE = "not_applicable"
+SUPPRESSED_BY_DESIGNER_RULE = "designer_clearance_rule"
+
+
+def attach_zone_exemption_status(
+    dru_text: str | None, router_classes_declared: bool
+) -> tuple[str, str | None]:
+    """``(status, reason)`` for the attach-zone exemption on a ``.kicad_dru`` (#8131).
+
+    The one decision point shared by the DRU writer and ``kct check``:
+    ``active`` when the managed block is present, ``suppressed`` (reason
+    ``designer_clearance_rule``) when router classes are declared but the
+    designer's own clearance rule keeps the block out (#8060), otherwise
+    ``not_applicable``.  Whether the board has any zone is the caller's
+    refinement: a ``suppressed`` answer with no zone is ``not_applicable``.
+    """
+    if has_attach_zone_block(dru_text):
+        return ATTACH_ZONE_ACTIVE, None
+    if router_classes_declared and has_designer_clearance_rule(dru_text):
+        return ATTACH_ZONE_SUPPRESSED, SUPPRESSED_BY_DESIGNER_RULE
+    return ATTACH_ZONE_NOT_APPLICABLE, None

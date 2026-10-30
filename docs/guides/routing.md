@@ -384,6 +384,18 @@ still errors, with a message saying so; the class is the authored statement in
 `.kicad_pro`, which no mode rewrites. A declaration the resolver cannot model is
 reported as `netclass_clearance_unsupported`, never skipped.
 
+A designer-authored `(constraint clearance ...)` rule in the board's `.kicad_dru`
+disables the HV attach-zone exemption in both the router's DRU write and
+`kct check` (#8060): kct then writes no managed attach-zone block, and
+`netclass_clearance_copper` applies no exemption. This is reported rather than
+silent (#8131): `kct route` prints `attach-zone exemption suppressed
+(designer_clearance_rule)` when it writes the DRU, and `kct check` prints a
+warning on stderr with the number of findings the exemption would have waived.
+`kct check --format json` carries `summary.attach_zone_exemption` (`active`,
+`suppressed` or `not_applicable`); when suppressed, `attach_zone_exemption_reason`
+(`designer_clearance_rule`) and `attach_zone_unexempted` are set too, so a gate
+can assert the exemption is on.
+
 Netclass resolution follows KiCad 10: priorities, inheritance, wildcard
 patterns and schema 3-5 projects; a schema-2 project fails closed with a
 message naming the migration step (open and re-save it in KiCad) (checked against `kicad-cli` in
