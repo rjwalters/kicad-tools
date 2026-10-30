@@ -56,6 +56,7 @@ Layer Stack Configuration:
 import argparse
 import contextlib
 import functools
+import glob
 import logging
 import math
 import os
@@ -4496,12 +4497,13 @@ def _write_net_class_map_sidecar(
     if not effective_map:
         return
 
-    sidecar_path = output_path.parent / NET_CLASS_MAP_SIDECAR_BASENAME
+    # Issue #8156: stem-keyed so boards sharing a directory never collide.
+    sidecar_path = output_path.parent / f"{output_path.stem}.{NET_CLASS_MAP_SIDECAR_BASENAME}"
 
     # Never clobber the user's --net-class-map input file (Issue #4428).
     diverted = False
     if input_path is not None and _sidecar_collides_with_input(input_path, sidecar_path):
-        sidecar_path = output_path.parent / "net_class_map.effective.json"
+        sidecar_path = output_path.parent / f"{output_path.stem}.net_class_map.effective.json"
         diverted = True
 
     try:
@@ -4980,7 +4982,7 @@ def _write_fab_profile_sidecar(
     defaults to the base ``jlcpcb`` tier -- reporting a false ``FAILED`` on
     boards that route legal, tier-gated geometry (e.g. via-in-pad, legal at
     ``jlcpcb-tier1``).  Writing the profile the router actually resolved
-    (``--manufacturer``) to a small ``<output_dir>/fab_profile.json`` lets
+    (``--manufacturer``) to a small ``<output_dir>/<stem>.fab_profile.json`` lets
     ``kct check`` auto-discover it and judge against the same tier, without
     mutating the ``.kicad_pcb``.  This mirrors the net-class-map sidecar
     precedent (Issue #3917 / PR #3948) exactly: the schema is single-purpose,
@@ -4999,7 +5001,8 @@ def _write_fab_profile_sidecar(
         return
     import json
 
-    sidecar_path = output_path.parent / "fab_profile.json"
+    # Issue #8156: stem-keyed so boards sharing a directory never collide.
+    sidecar_path = output_path.parent / f"{output_path.stem}.fab_profile.json"
     payload = {"mfr": manufacturer, "source": "kct route --manufacturer"}
     try:
         sidecar_path.write_text(json.dumps(payload, indent=2))
@@ -18438,6 +18441,33 @@ def main_with_result(argv: list[str] | None = None) -> "RouteAttemptResult":
     return run_attempt(argv)
 
 
+def _list_unverified_sets(output_path: object, *, file=None) -> list[Path]:
+    """Name the ``*_unverified_*`` PCBs a non-zero route left beside ``--output``.
+
+    Issue #8156: checkpoint/completed/timeout archives keep copper a later
+    checkpoint would overwrite, so they are never deleted -- but they must not
+    be silent either.  Prints one line per archived PCB (its ``.kicad_pro`` /
+    ``.kicad_dru`` / ``.route.json`` companions share the stem).
+    """
+    if not isinstance(output_path, Path) or not output_path.parent.is_dir():
+        return []
+    found = sorted(
+        output_path.parent.glob(
+            f"{glob.escape(output_path.stem)}_*_unverified_*{output_path.suffix}"
+        )
+    )
+    if found:
+        out = file if file is not None else sys.stderr
+        print(
+            f"Unverified intermediate sets left beside {output_path.name} "
+            "(kept on purpose; delete once no longer needed):",
+            file=out,
+        )
+        for path in found:
+            print(f"  {path}", file=out)
+    return found
+
+
 def _in_process_main(argv: list[str] | None = None) -> int:
     from .route_receipt import run
 
@@ -18459,7 +18489,10 @@ def _in_process_main_impl(argv: list[str] | None = None) -> int:
 
     with _process_state_guard():
         try:
-            return _main_impl(argv)
+            rc = _main_impl(argv)
+            if rc != 0:
+                _list_unverified_sets(_interrupt_state.get("output_path"))
+            return rc
         except DRCConstraintPropagationError as exc:
             # A rule conflict is not a copper violation that --auto-fix may
             # clear. Abort every route flow before its ordinary DRC handling.

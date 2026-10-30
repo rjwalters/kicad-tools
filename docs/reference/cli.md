@@ -1160,11 +1160,24 @@ derived sidecars next to the output board. All of them degrade to a warning
 
 | Sidecar | Contents |
 |---------|----------|
-| `net_class_map.json` | The resolved per-net routing classes, for `kct check` auto-discovery |
+| `<stem>.net_class_map.json` | The resolved per-net routing classes, for `kct check` auto-discovery |
 | `current_paths.json` | The declared branch current-path intent this route validated against |
 | `<stem>.routing_plan.json` | The report-only capacity plan — see [`routing-plan.md`](routing-plan.md) |
 | `<stem>.access_witness.json` | The ordered commit journal — every copper commit and rip-up, in order, tagged with the pass and iteration that produced it ([`commit-journal.md`](commit-journal.md)) — plus, when the run stranded anything, the replayed per-pad access witness ([`../diagnostics/access-witness.md`](../diagnostics/access-witness.md)) |
-| `fab_profile.json`, `.kicad_pro`, `.kicad_dru` | The resolved manufacturer tier and its constraint exports |
+| `<stem>.fab_profile.json`, `.kicad_pro`, `.kicad_dru` | The resolved manufacturer tier and its constraint exports |
+
+Every sidecar is keyed to the `--output` stem, so several boards can share one
+directory without colliding (Issue #8156). `kct route` no longer writes the bare
+`fab_profile.json` / `net_class_map.json`; `kct check` still reads an existing
+bare file, but a stem-keyed one wins.
+
+Files `kct route` may create beside `--output`: the routed `.kicad_pcb`;
+`<stem>.kicad_pro` / `.kicad_dru` / `.route.json`; the sidecars above
+(`<stem>.net_class_map.json`, `<stem>.fab_profile.json`, `<stem>.routing_plan.json`,
+`<stem>.access_witness.json`, `current_paths.json`); `<stem>_placement_delta.json`;
+and `<stem>_{checkpoint,completed,timeout}_unverified_*` sets. The
+`*_unverified_*` sets preserve copper a later checkpoint would overwrite, so they
+are never deleted; when a route exits non-zero they are listed on stderr.
 
 The commit journal has no flag: it is always written, because recording is one
 list append plus one shallow geometry copy per grid mutation and changes no

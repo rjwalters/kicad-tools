@@ -320,8 +320,9 @@ class TestFabProfileSidecarRoundTrip:
         pcb = _write_pcb(tmp_path)
         _write_fab_profile_sidecar(pcb, "jlcpcb-tier1", quiet=True)
 
-        sidecar = tmp_path / "fab_profile.json"
+        sidecar = tmp_path / "routed.fab_profile.json"
         assert sidecar.is_file()
+        assert not (tmp_path / "fab_profile.json").exists()
         payload = json.loads(sidecar.read_text())
         assert payload["mfr"] == "jlcpcb-tier1"
         assert payload["source"] == "kct route --manufacturer"
@@ -333,7 +334,28 @@ class TestFabProfileSidecarRoundTrip:
     def test_empty_manufacturer_writes_nothing(self, tmp_path: Path) -> None:
         pcb = _write_pcb(tmp_path)
         _write_fab_profile_sidecar(pcb, "", quiet=True)
-        assert not (tmp_path / "fab_profile.json").exists()
+        assert not (tmp_path / "routed.fab_profile.json").exists()
+
+    def test_two_boards_in_one_directory_do_not_cross_pick_up(self, tmp_path: Path) -> None:
+        """Issue #8156: stem-keyed sidecars never leak between sibling boards."""
+        a = _write_pcb(tmp_path)
+        b = tmp_path / "other.kicad_pcb"
+        b.write_text(a.read_text())
+        _write_fab_profile_sidecar(a, "jlcpcb-tier1", quiet=True)
+        assert _resolve_effective_check_mfr(None, a)[0] == "jlcpcb-tier1"
+        assert _resolve_effective_check_mfr(None, b)[2] != "sidecar"
+
+    def test_stem_keyed_wins_over_legacy_bare(self, tmp_path: Path) -> None:
+        pcb = _write_pcb(tmp_path)
+        _write_sidecar(tmp_path, "jlcpcb")
+        (tmp_path / "routed.fab_profile.json").write_text(json.dumps({"mfr": "jlcpcb-tier1"}))
+        assert _resolve_effective_check_mfr(None, pcb)[0] == "jlcpcb-tier1"
+
+    def test_legacy_bare_sidecar_still_found(self, tmp_path: Path) -> None:
+        pcb = _write_pcb(tmp_path)
+        _write_sidecar(tmp_path, "jlcpcb-tier1")
+        mfr, _m, source = _resolve_effective_check_mfr(None, pcb)
+        assert (mfr, source) == ("jlcpcb-tier1", "sidecar")
 
 
 # ---------------------------------------------------------------------------

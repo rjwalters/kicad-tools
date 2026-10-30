@@ -39,10 +39,13 @@ def _discover_fab_profile_sidecar(pcb_path: Path) -> Path | None:
         found.
     """
     pcb_dir = pcb_path.parent
+    # Issue #8156: the stem-keyed name (what ``kct route`` writes now) wins over
+    # the legacy bare name within each directory.
+    names = [f"{pcb_path.stem}.fab_profile.json", "fab_profile.json"]
     candidates = [
-        pcb_dir / "fab_profile.json",
-        pcb_dir / "output" / "fab_profile.json",
-        pcb_dir.parent / "output" / "fab_profile.json",
+        directory / name
+        for directory in (pcb_dir, pcb_dir / "output", pcb_dir.parent / "output")
+        for name in names
     ]
     for candidate in candidates:
         if candidate.is_file():
