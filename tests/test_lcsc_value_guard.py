@@ -198,6 +198,30 @@ class TestCrossTypeMismatch:
         )
 
 
+class TestVaristorReference:
+    """RV* references are varistors/trimpots, not fixed resistors (issue #8157)."""
+
+    MOV_DESC = "275VAC 220pF@1kHz 1.2kV Varistors"
+
+    @pytest.mark.parametrize("ref", ["RV1", "rv1", "RV"])
+    def test_rv_prefix_not_resistor(self, ref):
+        from kicad_tools.cost.suggest import ComponentType, parse_component_value
+
+        assert parse_component_value("275VAC", ref).component_type == ComponentType.OTHER
+
+    def test_plain_resistor_prefixes_unchanged(self):
+        from kicad_tools.cost.suggest import ComponentType, parse_component_value
+
+        for ref in ("R1", "RN1"):
+            assert parse_component_value("10k", ref).component_type == ComponentType.RESISTOR
+
+    def test_varistor_not_rejected_as_cross_type(self):
+        assert find_value_mismatch("275VAC", "RV1", part_description=self.MOV_DESC) is None
+
+    def test_resistor_vs_capacitor_still_rejected(self):
+        assert find_value_mismatch("10k", "R1", part_description=self.MOV_DESC) is not None
+
+
 class TestMpnCodeFallback:
     """EIA-code decoding from MLCC part numbers (last-resort fallback)."""
 
