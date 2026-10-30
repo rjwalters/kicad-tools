@@ -73,14 +73,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 ROUTED_PCB_PATTERN = re.compile(r"^boards/[^/]+/output/[^/]+_routed\.kicad_pcb$")
 
 # Board04's committed routed PCB is dispatched through the reviewed paid
-# mechanical-drill validator (scripts/ci/check_routed_drc.py's
+# mechanical-drill validator (scripts/ci/check_routed_drc_internal.py's
 # ``PAID_DRILL_BOARD``), which requires a working native ``kicad-cli`` for
 # its strict ERC step. Kept as a literal (rather than importing
 # ``check_routed_drc`` here) so this module stays dependency-free and
 # importable/runnable with the stdlib interpreter alone, before ``uv sync``
 # has installed third-party packages like PyYAML that ``check_routed_drc``
 # needs at import time. ``tests/test_select_routed_pcbs.py`` pins that this
-# stays in sync with ``check_routed_drc.PAID_DRILL_BOARD``.
+# stays in sync with ``check_routed_drc_internal.PAID_DRILL_BOARD``.
 NATIVE_BOARD_RELATIVE_PATH = "boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb"
 
 # Paths whose modification makes this job's OWN selection/native-execution
@@ -92,6 +92,7 @@ INFRA_TRIGGER_PATHS = frozenset(
     {
         ".github/workflows/ci.yml",
         "scripts/ci/check_routed_drc.py",
+        "scripts/ci/check_routed_drc_internal.py",
         "scripts/ci/select_routed_pcbs.py",
         "scripts/ci/run_native_routed_drc.sh",
         "scripts/ci/init_kicad_libraries.py",

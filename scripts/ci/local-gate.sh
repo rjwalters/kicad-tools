@@ -218,7 +218,7 @@ job_routed_pcb_drc_check() {
   fi
   echo "Modified routed PCBs:"
   printf '  %s\n' "${files[@]}"
-  uv run python scripts/ci/check_routed_drc.py "${files[@]}"
+  uv run python scripts/ci/check_routed_drc_internal.py "${files[@]}"
 }
 
 # Issue #7682: a REPORT, never a gate (`continue-on-error` in CI, advisory
@@ -278,7 +278,7 @@ _check_drc_over_committed_path() {
     trap '_restore_committed_from_backup "$bak" "$committed"' EXIT
     trap 'trap - INT EXIT; _restore_committed_from_backup "$bak" "$committed"; kill -INT "$BASHPID"' INT
     trap 'trap - TERM EXIT; _restore_committed_from_backup "$bak" "$committed"; kill -TERM "$BASHPID"' TERM
-    uv run python scripts/ci/check_routed_drc.py "$committed"
+    uv run python scripts/ci/check_routed_drc_internal.py "$committed"
   ) || rc=$?
   # Belt-and-braces: if the subshell died without running its traps (SIGKILL),
   # restore here. No-op on the normal path.

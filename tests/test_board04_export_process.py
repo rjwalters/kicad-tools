@@ -80,7 +80,7 @@ def test_export_rejects_unselected_paid_option(monkeypatch, board):
 
 
 def test_paid_gate_reports_failure_from_json_when_stderr_empty(monkeypatch, tmp_path):
-    script = BOARD.parents[1] / "scripts/ci/check_routed_drc.py"
+    script = BOARD.parents[1] / "scripts/ci/check_routed_drc_internal.py"
     spec = importlib.util.spec_from_file_location("board04_paid_gate", script)
     assert spec and spec.loader
     gate = importlib.util.module_from_spec(spec)

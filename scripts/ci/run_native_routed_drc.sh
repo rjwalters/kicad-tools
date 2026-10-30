@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Native-execution helper for the `routed-pcb-drc-check` CI job (issue #5349).
 #
-# scripts/ci/check_routed_drc.py dispatches Board04's committed routed PCB
+# scripts/ci/check_routed_drc_internal.py dispatches Board04's committed routed PCB
 # through the reviewed paid mechanical-drill validator
 # (boards/04-stm32-devboard/check_manufacturing.py), which calls strict
 # `run_meta_checks(..., strict=True)` -- including native ERC via
@@ -60,4 +60,4 @@ export UV_PROJECT_ENVIRONMENT=/opt/kct-native-venv
 uv sync --frozen --extra dev --python 3.12
 
 echo "Running native routed-PCB DRC check on: $*"
-uv run python scripts/ci/check_routed_drc.py "$@"
+uv run python scripts/ci/check_routed_drc_internal.py "$@"
