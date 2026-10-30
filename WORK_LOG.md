@@ -13,6 +13,13 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-10-30
+
+- **PR #8123**: fix: flag IC parts on discrete footprints in LCSC guard and tapeout Gate 4
+- **PR #8122**: feat(export): add bom_lcsc_stock preflight check and --boards flag
+- **Issue #8121** (closed): BOM gate accepts an LCSC part whose stock is below qty x boards (0-stock C4223175 counted resolved)
+- **Issue #8113** (closed): BOM resolution gate accepts an LCSC number whose package/category contradicts the footprint (BGA MCU on a D_SMA diode)
+
 ### 2026-10-29
 
 - **PR #8116**: fix(install): isolate kct-upgrade token from installer code; match multi-line pins
