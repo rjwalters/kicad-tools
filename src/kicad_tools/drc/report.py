@@ -272,10 +272,20 @@ class DRCReport:
         content = path.read_text()
 
         # Detect format
-        if content.strip().startswith("{"):
+        if content.strip().startswith("{") or _is_json(content):
             return parse_json_report(content, str(path))
         else:
             return parse_text_report(content, str(path))
+
+
+def _is_json(content: str) -> bool:
+    """True for any valid JSON document, so non-object JSON is rejected rather
+    than silently parsed as an empty text report (issue #8133)."""
+    try:
+        json.loads(content)
+    except ValueError:
+        return False
+    return True
 
 
 _EMPTY_SOURCE_CLEARANCE = re.compile(r"\(\s+clearance\s+[\d.]+\s*mm")
@@ -444,9 +454,20 @@ def parse_json_report(content: str, source_file: str = "") -> DRCReport:
     """
     data = json.loads(content)
 
+    if not isinstance(data, dict):
+        raise ValueError(f"Not a DRC report: expected a JSON object, got {type(data).__name__}")
+
     # Detect kct-check format by presence of "summary" or "manufacturer" keys
     if "summary" in data or "manufacturer" in data:
         return _parse_kct_check_json(data, source_file)
+
+    # Without a kicad-cli section, the lenient parser below would return an
+    # empty report -- a silent pass for a mis-pointed file (issue #8133).
+    if not any(k in data for k in ("violations", "unconnected_items", "schematic_parity")):
+        raise ValueError(
+            "Not a DRC report: JSON has none of the 'violations', "
+            "'unconnected_items' or 'schematic_parity' sections"
+        )
 
     return _parse_kicad_cli_json(data, source_file)
 

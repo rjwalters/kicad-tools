@@ -29,27 +29,34 @@ _None._
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-- **#7931**: lattice hybrid: legs fail pad-escape-end at the trunk's virtual site (board 03 USB_D J1.A6→U2.3)
+_None._
 
 ## In Progress
 
 Issues currently being built (`loom:building`).
 
-- **#8077**: install-kct.sh: PyPI source mode as the default (+ kct doctor, opt-in upgrade workflow) — consumers track releases, lockfile pins
-- **#8099**: changelog: per-PR fragment check passes 'Part of #<epic>' commits that the release gate later rejects
+- **#8130**: report.md Manufacturing Readiness verdict counts ampacity findings that kct check waivers cover
+- **#8132**: LCSC discrete-footprint guard false-FAILs DIP-4 bridge rectifiers on Diode_Bridge_* footprints
+- **#8133**: kct drc --waivers --allow-incomplete treats a non-DRC JSON file as zero findings and passes
+- **#8134**: install-kct.sh vendors .kct/ci/check_routed_drc.py with board04-specific paid-drill code
+- **#8135**: No CLI to move a free via (move-footprint only moves footprints)
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#8081**: feat(install): PyPI source mode as install-kct.sh default (+ kct doctor, opt-in upgrade workflow)
-- **#8100**: fix(ci): release gap report accepts a commit when any resolved issue is cited
+- **#8136**: fix(export): accept DIP parts on same-pin-count Diode_Bridge_DIP footprints
+- **#8137**: fix(audit): apply waivers sidecar in audit DRC
+- **#8138**: feat(pcb): add move-via command that drags attached trace endpoints
+- **#8139**: refactor(ci): move board04 paid-drill dispatch out of vendored routed-DRC gate
+- **#8141**: fix(drc): reject JSON input that is not a DRC report
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-_None._
+- **#8105**: docs(site): refresh kicad-tools.org homepage for v0.25.0
+- **#8119**: chore(loom): resync installed Loom to v0.19.1236
 
 ## Proposed
 
@@ -58,6 +65,11 @@ Issues carrying `loom:curated`.
 - **#5509**: Epic: one clearance kernel — search, commit, and final validation must agree with kicad-cli DRC *(curated)*
 - **#7487**: Re-rule or remove board 03 usb_geometry via-in-pad window exception by 2027-04-19 (#7457 / #7084 Q10) *(curated)*
 - **#7931**: lattice hybrid: legs fail pad-escape-end at the trunk's virtual site (board 03 USB_D J1.A6→U2.3) *(curated)*
+- **#8130**: report.md Manufacturing Readiness verdict counts ampacity findings that kct check waivers cover *(curated)*
+- **#8132**: LCSC discrete-footprint guard false-FAILs DIP-4 bridge rectifiers on Diode_Bridge_* footprints *(curated)*
+- **#8133**: kct drc --waivers --allow-incomplete treats a non-DRC JSON file as zero findings and passes *(curated)*
+- **#8134**: install-kct.sh vendors .kct/ci/check_routed_drc.py with board04-specific paid-drill code *(curated)*
+- **#8135**: No CLI to move a free via (move-footprint only moves footprints) *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -77,11 +89,11 @@ _None._
 | Operator merge-risk holds | 0 |
 | Very important | 0 |
 | Important | 0 |
-| Ready (`loom:issue`) | 1 |
-| In Progress (`loom:building`) | 2 |
-| PRs awaiting review | 2 |
-| Approved PRs awaiting merge | 0 |
-| Curated | 3 |
+| Ready (`loom:issue`) | 0 |
+| In Progress (`loom:building`) | 5 |
+| PRs awaiting review | 5 |
+| Approved PRs awaiting merge | 2 |
+| Curated | 8 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 4 |
 <!-- guide:plan-body:end -->

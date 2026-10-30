@@ -2739,6 +2739,8 @@ def main(argv: list[str] | None = None) -> int:
             for reason in assessment.reasons:
                 print(f"  {reason}")
 
+    _warn_attach_zone_suppressed(results)
+
     # Output results
     if args.format == "sarif":
         output_sarif(violations, results, pcb_path, coverage=coverage_dict)
@@ -4067,6 +4069,31 @@ def _pcb_sha256_or_none(pcb_path: Path | str) -> str | None:
         return None
 
 
+def _attach_zone_summary(results: DRCResults) -> dict:
+    """``summary`` keys for the attach-zone exemption state (Issue #8131)."""
+    if results.attach_zone_exemption is None:
+        return {"attach_zone_exemption": "not_applicable"}
+    out: dict = {"attach_zone_exemption": results.attach_zone_exemption}
+    if results.attach_zone_exemption_reason:
+        out["attach_zone_exemption_reason"] = results.attach_zone_exemption_reason
+        out["attach_zone_unexempted"] = results.attach_zone_unexempted
+    return out
+
+
+def _warn_attach_zone_suppressed(results: DRCResults) -> None:
+    """One stderr line when a designer rule silently disabled the exemption (#8131)."""
+    if results.attach_zone_exemption != "suppressed":
+        return
+    print(
+        "Warning: attach-zone clearance exemption is NOT active "
+        f"({results.attach_zone_exemption_reason}: the board's .kicad_dru carries its own "
+        "clearance rule, so kct writes no managed attach-zone block); "
+        f"{results.attach_zone_unexempted} netclass_clearance_copper finding(s) "
+        "inside attach zones are left unexempted",
+        file=sys.stderr,
+    )
+
+
 def output_json(
     violations: list[DRCViolation],
     results: DRCResults,
@@ -4139,6 +4166,8 @@ def output_json(
     )
     if coverage is not None:
         summary_data.update(_coverage_summary(coverage))
+    # Issue #8131: gates can assert the attach-zone exemption was applied.
+    summary_data.update(_attach_zone_summary(results))
 
     data: dict = {
         "file": portable_report_path(pcb_path),
