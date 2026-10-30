@@ -1085,17 +1085,33 @@ _DISCRETE_FOOTPRINT_LIBS = {
 #: IC families that never belong on a discrete footprint.  SOT-23/223 are
 #: excluded: diodes and transistors legitimately ship in them.
 _IC_ONLY_FAMILIES = frozenset({"BGA", "QFP", "QFN", "SO", "DIP"})
-#: LCSC top-level IC category text found in part descriptions.
+#: LCSC IC category / subcategory text found in part descriptions.  Generic
+#: words are only listed in their LCSC phrase form ("Logic Gates", not bare
+#: "Logic"): a diode "for logic lines" or a "memory backup" cap is not an IC
+#: (issue #8124).  Phrases taken from the offline jlcparts catalog.
 _IC_CATEGORY_TEXT = (
     "MICROCONTROLLERS",
     "EMBEDDED PROCESSORS",
-    "MEMORY",
     "INTERFACE ICS",
     "POWER MANAGEMENT ICS",
     "AMPLIFIERS",
     "CLOCK/TIMING",
     "DATA CONVERTERS",
-    "LOGIC",
+    "LOGIC ICS",
+    "LOGIC GATES",
+    "SPECIALTY LOGIC",
+    "PROGRAMMABLE LOGIC DEVICE",
+    "MEMORY ICS",
+    "NON-VOLATILE MEMORY",
+    "RANDOM ACCESS MEMORY",
+    "FIFOS MEMORY",
+    "MEMORY CONTROLLERS",
+    "MEMORY - CONFIGURATION PROMS",
+    "MEMORY - SERIAL MCP",
+)
+#: Whole-word match: a token never matches inside another word.
+_IC_CATEGORY_RE = re.compile(
+    r"(?<![A-Z0-9])(" + "|".join(re.escape(t) for t in _IC_CATEGORY_TEXT) + r")(?![A-Z0-9])"
 )
 
 
@@ -1121,9 +1137,10 @@ def find_discrete_footprint_ic_mismatch(
         reason = f"IC package {part_package} on discrete {cls} footprint {footprint_name}"
     else:
         desc = (part_description or "").upper()
-        hit = next((t for t in _IC_CATEGORY_TEXT if t in desc), None)
-        if hit is None:
+        found = _IC_CATEGORY_RE.search(desc)
+        if found is None:
             return None
+        hit = found.group(1)
         reason = f"IC category '{hit.title()}' on discrete {cls} footprint {footprint_name}"
     return PackageMismatch(
         requested_package=fp_label,
