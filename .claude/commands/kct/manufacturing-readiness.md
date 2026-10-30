@@ -80,7 +80,7 @@ The order matches `kct readiness` and is deliberate: check, then the native DRC,
 
 ```bash
 # sign-off gate 1
-mkdir -p <dir> && rm -f <dir>/check-report.json
+mkdir -p <dir> && rm -f <dir>/check-report.json <dir>/manifest.json
 kct check <board.kicad_pcb> --mfr <tier> --output <dir>/check-report.json
 jq -e '(.summary.errors == 0)
   and ((.summary.stale_waivers // 0) == 0)
@@ -95,6 +95,7 @@ jq -e '(.summary.errors == 0)
   <dir>/check-report.json
 ```
 
+- The block also clears a previous `<dir>/manifest.json`: a stale manifest from an earlier bundle lists `check-report.json`, which is missing while `kct check` runs, so the Manifest sub-check would read `FAILED` instead of `NOT RUN` and Gate 1 would refuse a clean board on every re-tapeout (#8158). Gate 3 deletes it anyway.
 - This is the DRC / manufacturing-rules check (clearances, dimensions, edge, silkscreen) plus the ERC / LVS / Manifest meta sub-checks.
 - **`kct check` exits 2 on a good board here, and that is expected.** Gate 1 runs before the export, so the Manifest sub-check is always `NOT RUN` and the overall line reads `INCOMPLETE`. The verdict is the `jq` rule, which mirrors `kct readiness`'s `kct_check` + `lvs` gates:
   - 0 errors, 0 stale waivers, and no blocking check whose coverage is `unknown` ("unknown is not pass").
