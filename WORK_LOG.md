@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-30
 
+- **PR #8126**: fix(export): match whole LCSC IC-category phrases in discrete-footprint guard
+- **Issue #8124** (closed): LCSC discrete-footprint IC guard: bare 'Logic'/'Memory' substring can false-FAIL real diodes/caps
 - **PR #8123**: fix: flag IC parts on discrete footprints in LCSC guard and tapeout Gate 4
 - **PR #8122**: feat(export): add bom_lcsc_stock preflight check and --boards flag
 - **Issue #8121** (closed): BOM gate accepts an LCSC part whose stock is below qty x boards (0-stock C4223175 counted resolved)
