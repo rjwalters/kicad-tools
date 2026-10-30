@@ -15,6 +15,9 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-30
 
+- **PR #8138**: feat(pcb): add move-via command that drags attached trace endpoints
+- **Issue #8135** (closed): No CLI to move a free via (move-footprint only moves footprints)
+- **Issue #8078** (closed): board 03 bench: pour completion hits its deadline near --timeout, leaving 20 GND/VCC links unconnected
 - **PR #8144**: chore(release): v0.26.0
 - **PR #8141**: fix(drc): reject JSON input that is not a DRC report
 - **PR #8137**: fix(audit): apply waivers sidecar in audit DRC
