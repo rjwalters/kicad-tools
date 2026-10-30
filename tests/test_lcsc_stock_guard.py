@@ -96,9 +96,45 @@ def test_dnp_and_unassigned_skipped(tmp_path):
     assert r.status == "OK"
 
 
-def test_part_missing_from_sources_not_double_reported(tmp_path):
+def test_all_unresolvable_numbers_warn_not_ok(tmp_path):
     r = _run(tmp_path, [], [_item("R1", "C999")])
+    assert r.status == "WARN"
+    assert "1 assigned LCSC" in r.message
+    assert "C999" in r.details
+
+
+def test_unresolvable_alongside_checked_part_is_ok(tmp_path):
+    items = [_item("R1", "C999"), _item("R2", "C1")]
+    assert _run(tmp_path, [_part("C1", 50, "live")], items).status == "OK"
+
+
+def test_existing_csv_merged_zero_stock_part_warns(tmp_path):
+    (tmp_path / "bom_jlcpcb.csv").write_text(
+        f"Comment,Designator,Footprint,LCSC Part #\n137k,R1,{FP_0805},C4223175\n",
+        encoding="utf-8",
+    )
+    cache = PartsCache(db_path=tmp_path / "parts.db")
+    cache.put(_part("C4223175", 0))
+    checker = PreflightChecker(
+        pcb_path=tmp_path / "board.kicad_pcb",
+        config=PreflightConfig(skip_drc=True, skip_erc=True),
+        output_dir=tmp_path,
+        parts_cache=cache,
+    )
+    checker._bom = BOM(items=[_item("R1", "")])
+    r = checker.check_bom_lcsc_stock()
+    assert r.status == "WARN"
+    assert "C4223175" in r.details
+
+
+def test_existing_csv_ignored_without_output_dir(tmp_path):
+    (tmp_path / "bom_jlcpcb.csv").write_text(
+        f"Comment,Designator,Footprint,LCSC Part #\n137k,R1,{FP_0805},C4223175\n",
+        encoding="utf-8",
+    )
+    r = _run(tmp_path, [_part("C4223175", 0)], [_item("R1", "")])
     assert r.status == "OK"
+    assert "No assigned" in r.message
 
 
 def test_stock_shortfall_pure():
