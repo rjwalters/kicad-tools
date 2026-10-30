@@ -168,6 +168,7 @@ CONTRACT_ARGV: dict[str, list[str]] = {
     "pcb add-3d-models": ["{pcb}", "--dry-run"],
     "pcb remove-footprint": ["{pcb}", "--ref", "R1", "--dry-run"],
     "pcb move-footprint": ["{pcb}", "--ref", "R1", "--to", "1", "1", "--dry-run"],
+    "pcb move-via": ["{pcb}", "--at", "1", "1", "--to", "2", "2", "--dry-run"],
     "pcb page-fit": ["{pcb}", "--dry-run"],
     "pcb center-on-sheet": ["{pcb}", "--dry-run"],
     "pcb lock-footprints": ["{pcb}", "--dry-run"],
