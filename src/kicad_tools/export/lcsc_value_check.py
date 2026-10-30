@@ -1093,6 +1093,10 @@ _DISCRETE_FOOTPRINT_LIBS = {
 #: IC families that never belong on a discrete footprint.  SOT-23/223 are
 #: excluded: diodes and transistors legitimately ship in them.
 _IC_ONLY_FAMILIES = frozenset({"BGA", "QFP", "QFN", "SO", "DIP"})
+#: ``DIP-<pins>`` token inside a KiCad footprint label.  ``Diode_THT`` ships
+#: ``Diode_Bridge_DIP-4_*``, which ``parse_ic_package`` cannot see (prefix
+#: match), so a DIP bridge rectifier is matched by pin count here (issue #8132).
+_FOOTPRINT_DIP_RE = re.compile(r"(?<![A-Z0-9])DIP-?(\d+)(?![0-9])")
 #: LCSC IC category / subcategory text found in part descriptions.  Generic
 #: words are only listed in their LCSC phrase form ("Logic Gates", not bare
 #: "Logic"): a diode "for logic lines" or a "memory backup" cap is not an IC
@@ -1142,6 +1146,10 @@ def find_discrete_footprint_ic_mismatch(
     fp_label = footprint_name.rsplit(":", 1)[-1]
     pkg = parse_ic_package(part_package)
     if pkg is not None and pkg.family in _IC_ONLY_FAMILIES:
+        if pkg.family == "DIP":
+            dip_m = _FOOTPRINT_DIP_RE.search(fp_label.upper())
+            if dip_m is not None and int(dip_m.group(1)) == pkg.pins:
+                return None
         reason = f"IC package {part_package} on discrete {cls} footprint {footprint_name}"
     else:
         desc = (part_description or "").upper()
