@@ -85,6 +85,11 @@ class DRCStatus:
     # Human-readable note describing why geometric DRC did not run (skip
     # path) -- mirrors GeometricDRCResult.note.  None when it ran cleanly.
     geometric_drc_note: str | None = None
+    # Findings suppressed by the waivers sidecar (issue #8130).  They are
+    # excluded from error/warning/blocking counts but stay visible here:
+    # {rule_id: {"count": n, "reasons": [...], "issues": [...]}}.
+    waived_count: int = 0
+    waived_by_rule: dict[str, dict] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         result = {
@@ -98,6 +103,9 @@ class DRCStatus:
         }
         if self.violations_by_type:
             result["violations_by_type"] = dict(self.violations_by_type)
+        if self.waived_count:
+            result["waived_count"] = self.waived_count
+            result["waived_by_rule"] = {k: dict(v) for k, v in self.waived_by_rule.items()}
         return result
 
 
@@ -1221,6 +1229,30 @@ class ManufacturingAudit:
 
         return status
 
+    def _apply_waivers_sidecar(self, results, pcb: PCB) -> None:
+        """Annotate evidence and apply the board's waivers sidecar (issue #8130).
+
+        Mirrors ``kct check``: auto-discovered sidecar, malformed file warns
+        and applies nothing.
+        """
+        from kicad_tools.validate.evidence import annotate_evidence
+        from kicad_tools.validate.rules.waivers import (
+            apply_waivers,
+            discover_waivers_sidecar,
+            load_waivers,
+        )
+
+        path = discover_waivers_sidecar(self.pcb_path)
+        if path is None:
+            return
+        try:
+            waivers = load_waivers(path)
+        except (OSError, ValueError) as e:
+            logger.warning("Ignoring malformed waivers sidecar %s: %s", path, e)
+            return
+        annotate_evidence(results, pcb)
+        apply_waivers(results, waivers.for_check())
+
     def _check_drc(self, pcb: PCB) -> DRCStatus:
         """Run DRC on PCB."""
         status = DRCStatus()
@@ -1267,6 +1299,12 @@ class ManufacturingAudit:
             # gate (issue #3497).
             results = checker.check_all(pad_grid_auto_derive=True)
 
+            # Issue #8130: honour the waivers sidecar exactly as ``kct check``
+            # does, so a waived finding cannot read as blocking here while
+            # ``kct check`` passes.  Stale evidence-bound waivers leave the
+            # finding active (same ``apply_waivers`` semantics).
+            self._apply_waivers_sidecar(results, pcb)
+
             # Some rules (e.g. ``connectivity`` from Issue #3041) report
             # at error severity for the standalone ``kct check`` CLI but
             # must NOT count toward manufacturability-blocking verdicts
@@ -1291,6 +1329,19 @@ class ManufacturingAudit:
             ]
             non_advisory_errors = sum(1 for v in non_advisory_violations if v.is_error)
             non_advisory_warnings = sum(1 for v in non_advisory_violations if v.is_warning)
+
+            for v in results.violations:
+                if not v.waived:
+                    continue
+                status.waived_count += 1
+                entry = status.waived_by_rule.setdefault(
+                    v.rule_id, {"count": 0, "reasons": [], "issues": []}
+                )
+                entry["count"] += 1
+                if v.waiver_reason and v.waiver_reason not in entry["reasons"]:
+                    entry["reasons"].append(v.waiver_reason)
+                if v.waiver_issue and v.waiver_issue not in entry["issues"]:
+                    entry["issues"].append(v.waiver_issue)
 
             status.error_count = non_advisory_errors
             status.warning_count = non_advisory_warnings

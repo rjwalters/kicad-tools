@@ -346,6 +346,12 @@ def output_table(result: AuditResult, verbose: bool = False) -> None:
         print("    Verdict is NOT authoritative -- geometric defects (shorts,")
         print("    edge clearance, mask bridges) could not be checked.")
 
+    if drc.waived_count:
+        print(f"    Waived: {drc.waived_count} finding(s) (not counted as blocking)")
+        for rule, info in sorted(drc.waived_by_rule.items()):
+            extra = "; ".join(info.get("reasons", []) + info.get("issues", []))
+            print(f"      - {rule} ({info['count']})" + (f": {extra}" if extra else ""))
+
     # Sync drift (schematic <-> PCB)
     sync = result.sync
     if sync.could_not_verify:

@@ -290,6 +290,9 @@ hand (DNP for fab assembly).
 {% endif %}
 | Warnings | {{ drc.warning_count | default(0) }} |
 | Blocking | {{ drc.blocking_count | default(0) }} |
+{% if drc.waived_count is defined and drc.waived_count %}
+| Waived | {{ drc.waived_count }} |
+{% endif %}
 
 **Status**: {% if drc.passed | default(false) %}PASS{% else %}FAIL{% endif %}
 
@@ -305,6 +308,18 @@ hand (DNP for fab assembly).
 |----------------|-------|
 {% for vtype, count in drc.violations_by_type | dictsort(by='value', reverse=true) %}
 | {{ vtype }} | {{ count }} |
+{% endfor %}
+{% endif %}
+
+{% if drc.waived_by_rule is defined and drc.waived_by_rule %}
+### Waived Findings
+
+*Counted in Violations by Type above but excluded from Errors and Blocking (waivers sidecar).*
+
+| Rule | Waived | Reason | Issue |
+|------|--------|--------|-------|
+{% for rule, info in drc.waived_by_rule | dictsort %}
+| {{ rule }} | {{ info.count }} | {{ info.reasons | join("; ") }} | {{ info.issues | join(", ") }} |
 {% endfor %}
 {% endif %}
 

@@ -642,6 +642,36 @@ class TestReportGenerator:
         assert "## DRC Status" in content
         assert "### Violations by Type" not in content
 
+    def test_drc_waived_findings_rendered(self, tmp_path: Path) -> None:
+        """Waived findings get a count row and a per-rule table (issue #8130)."""
+        data = _full_data(
+            drc={
+                "error_count": 0,
+                "warning_count": 0,
+                "blocking_count": 0,
+                "passed": True,
+                "violations_by_type": {"ampacity": 238},
+                "waived_count": 238,
+                "waived_by_rule": {
+                    "ampacity": {"count": 238, "reasons": ["sized by hand"], "issues": ["x#1"]}
+                },
+            }
+        )
+        report_path = ReportGenerator().generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "| Waived | 238 |" in content
+        assert "### Waived Findings" in content
+        assert "| ampacity | 238 | sized by hand | x#1 |" in content
+
+    def test_drc_waived_omitted_when_absent(self, tmp_path: Path) -> None:
+        data = _full_data(
+            drc={"error_count": 0, "warning_count": 0, "blocking_count": 0, "passed": True}
+        )
+        content = ReportGenerator().generate(data, tmp_path).read_text(encoding="utf-8")
+        assert "| Waived |" not in content
+        assert "### Waived Findings" not in content
+
     def test_erc_pass_status(self, tmp_path: Path) -> None:
         """ERC section renders PASS when passed is True."""
         data = _full_data(
