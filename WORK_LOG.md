@@ -15,6 +15,13 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-30
 
+- **PR #8144**: chore(release): v0.26.0
+- **PR #8141**: fix(drc): reject JSON input that is not a DRC report
+- **PR #8137**: fix(audit): apply waivers sidecar in audit DRC
+- **PR #8136**: fix(export): accept DIP parts on same-pin-count Diode_Bridge_DIP footprints
+- **Issue #8133** (closed): kct drc --waivers --allow-incomplete treats a non-DRC JSON file as zero findings and passes
+- **Issue #8132** (closed): LCSC discrete-footprint guard false-FAILs DIP-4 bridge rectifiers on Diode_Bridge_* footprints
+- **Issue #8130** (closed): report.md Manufacturing Readiness verdict counts ampacity findings that kct check waivers cover
 - **PR #8140**: fix(check): report when a designer DRU rule suppresses the attach-zone exemption
 - **Issue #8131** (closed): Attach-zone kct check exemption is silently inactive when designer DRU rules suppress the managed block
 - **PR #8128**: fix(export): parse pin-count-first BGA and LFCSP LCSC packages as ICs
