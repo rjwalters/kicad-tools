@@ -324,9 +324,10 @@ class TestLatticeAttemptDeadline:
             args, _per_attempt_budgeted_timeout(args, attempt_index=3, max_attempts=4)
         )
         assert first is not None and last is not None
-        # The first attempt is capped near now+100s, NOT near the now+400s
-        # whole-run deadline it used to receive.
-        assert first < absolute - 250.0
+        # The first attempt is capped near now+73s (a quarter of the ~292s
+        # routing budget after the #8148 reserve), NOT near the whole-run
+        # deadline it used to receive.
+        assert first < absolute - 150.0
         # The final attempt may use whatever remains -> the absolute cap.
         assert last == absolute
 
