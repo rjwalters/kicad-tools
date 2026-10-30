@@ -15,6 +15,7 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-30
 
+- **PR #8146**: chore(deps): Bump joserfc from 1.7.5 to 1.7.6
 - **PR #8138**: feat(pcb): add move-via command that drags attached trace endpoints
 - **Issue #8135** (closed): No CLI to move a free via (move-footprint only moves footprints)
 - **Issue #8078** (closed): board 03 bench: pour completion hits its deadline near --timeout, leaving 20 GND/VCC links unconnected
