@@ -76,6 +76,8 @@ def test_skill_gate_markers_present() -> None:
     # The pass rules the #7136 fix depends on stay in the blocks themselves.
     assert "--allow-incomplete" not in blocks[1]
     assert '.meta_checks.erc.status == "PASSED"' in blocks[1]
+    # A stale manifest from a previous bundle must not fail Gate 1 (#8158).
+    assert "rm -f <dir>/check-report.json <dir>/manifest.json" in blocks[1]
     for flag in ("--refill-zones", "--severity-error", "--exit-code-violations", "--format json"):
         assert flag in blocks[2]
     assert "unconnected_items" in blocks[2]
@@ -201,6 +203,13 @@ def _run_case(case: str, root: Path) -> dict:
     env = _tool_env()
     pcb = _make_case(case, root / case)
     out_dir = pcb.parent / "manufacturing"
+    if case == "good":
+        # Re-tapeout into a populated bundle dir (#8158): a stale manifest
+        # listing check-report.json must not make Gate 1 refuse.
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "manifest.json").write_text(
+            json.dumps({"files": [{"path": "check-report.json"}]}), encoding="utf-8"
+        )
     results: dict[int, subprocess.CompletedProcess[str]] = {}
     for gate in GATES:
         results[gate] = subprocess.run(
