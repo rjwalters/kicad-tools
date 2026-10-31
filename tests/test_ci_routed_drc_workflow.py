@@ -144,7 +144,7 @@ class TestWorkflowYAML:
         steps = workflow["jobs"][JOB_NAME]["steps"]
         run_blocks = [s.get("run", "") for s in steps if isinstance(s, dict) and "run" in s]
         joined = "\n".join(run_blocks)
-        assert "scripts/ci/check_routed_drc.py" in joined, (
+        assert "scripts/ci/check_routed_drc_internal.py" in joined, (
             "routed-pcb-drc-check must invoke scripts/ci/check_routed_drc.py "
             "(the helper that reads the per-board allowlist and emits "
             "::error:: annotations)."

@@ -1272,11 +1272,11 @@ jobs:
           for f in "${files[@]}"; do
             [ -n "$f" ] && args+=("$f")
           done
-          uv run python scripts/ci/check_routed_drc.py "${args[@]}"
+          uv run python scripts/ci/check_routed_drc_internal.py "${args[@]}"
 
       - name: Run native paid-drill validation (Board04)
         if: steps.changed.outputs.native_files != ''
-        # Runs scripts/ci/check_routed_drc.py's paid-drill dispatch INSIDE
+        # Runs scripts/ci/check_routed_drc_internal.py's paid-drill dispatch INSIDE
         # the official kicad/kicad:10.0 container (same image used by the
         # `test` / `kicad-cli-smoke` / `diffpair-routing-regression` /
         # `matchgroup-routing-regression` jobs) via a single `docker run`
@@ -3150,7 +3150,7 @@ jobs:
           # manifest freshness as well as copper. Preserve the entire fresh
           # bundle and its mtimes instead of mixing a new PCB with old evidence.
           cp -a /tmp/board04-ci/. boards/04-stm32-devboard/output/
-          uv run python scripts/ci/check_routed_drc.py \
+          uv run python scripts/ci/check_routed_drc_internal.py \
             boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb
 
       - name: Emit board.json via kct board-metrics

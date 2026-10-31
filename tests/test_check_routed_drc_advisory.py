@@ -61,6 +61,19 @@ def _load_helper_module():
     return _load_script_module("check_routed_drc", HELPER_SCRIPT_PATH)
 
 
+def _load_internal_module():
+    """Import the kicad-tools-only wrapper carrying the board04 paid-drill dispatch."""
+    _load_helper_module()
+    return _load_script_module("check_routed_drc_internal", CI_DIR / "check_routed_drc_internal.py")
+
+
+def test_vendored_gate_has_no_reference_board_logic():
+    """Issue #8134: the consumer-vendored gate must stay consumer-generic."""
+    text = HELPER_SCRIPT_PATH.read_text().lower()
+    for needle in ("boards/0", "board04", "paid-drill", "paid_drill", "paid drill"):
+        assert needle not in text, needle
+
+
 def _make_violation(rule_id: str, severity: str = "error", message: str = "synthetic") -> dict:
     """Synthesize a single violation dict matching ``DRCViolation.to_dict()``.
 
@@ -556,7 +569,7 @@ class TestMfrCliOverride:
 
 @pytest.mark.parametrize("meta_status", ["PASSED", "FAILED"])
 def test_reviewed_paid_drill_gate_requires_complete_meta_checks(monkeypatch, meta_status):
-    module = _load_helper_module()
+    module = _load_internal_module()
 
     def run(cmd, **kwargs):
         assert cmd[0] == sys.executable
@@ -576,13 +589,13 @@ def test_reviewed_paid_drill_gate_requires_complete_meta_checks(monkeypatch, met
 
 
 def test_reviewed_paid_drill_gate_rejects_wrong_process():
-    module = _load_helper_module()
+    module = _load_internal_module()
     with pytest.raises(RuntimeError, match="requires its reviewed"):
         module.count_errors(module.PAID_DRILL_BOARD, "jlcpcb")
 
 
 def test_reviewed_paid_drill_gate_rejects_missing_report(monkeypatch):
-    module = _load_helper_module()
+    module = _load_internal_module()
     monkeypatch.setattr(
         module.subprocess, "run", lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 0, "", "")
     )
