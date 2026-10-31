@@ -821,6 +821,7 @@ private:
     // Cached route parameters for resume()
     float search_start_x_ = 0, search_start_y_ = 0;
     float search_end_x_ = 0, search_end_y_ = 0;
+    int search_start_gx_ = 0, search_start_gy_ = 0;
     int search_end_gx_ = 0, search_end_gy_ = 0;
     int search_net_ = 0;
     int search_max_iterations_ = 0;
@@ -850,6 +851,9 @@ private:
     int search_last_blocking_net_ = 0;
     float search_last_block_world_x_ = 0.0f;
     float search_last_block_world_y_ = 0.0f;
+    // Issue #8155: squared grid distance (to the nearer endpoint) of the
+    // candidate that produced the recorded blocker; a closer one replaces it.
+    long long search_best_block_d2_ = std::numeric_limits<long long>::max();
 
     // Issue #3130: Per-net emit widths/diameters cached so ``resume()`` ->
     // ``reconstruct_path()`` honors the same values across an entire
