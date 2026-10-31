@@ -1600,10 +1600,12 @@ class PreflightChecker:
         live_short: list[str] = []
         soft_short: list[str] = []
         checked = 0
+        unresolved = 0
         for lcsc, refs in sorted(refs_by_lcsc.items()):
             verdict = verify_lcsc_assignment(cache, catalog, lcsc, "", refs[0])
             if verdict.part is None:
-                continue  # not in any source: reported by bom_lcsc_values
+                unresolved += 1  # not in any source: also reported by bom_lcsc_values
+                continue
             checked += 1
             short = stock_shortfall(verdict.part, len(refs), boards)
             if short is None:
@@ -1638,6 +1640,18 @@ class PreflightChecker:
                     + (" (strict preflight)" if strict else "")
                 ),
                 details=_fmt(soft_short),
+            )
+        if checked == 0:
+            strict = self.config.strict_report_source
+            return PreflightResult(
+                name=name,
+                status="FAIL" if strict else "WARN",
+                message=(
+                    f"Stock not verified: {unresolved} assigned LCSC number(s) found in "
+                    f"neither the parts cache nor the offline catalog"
+                    + (" (strict preflight)" if strict else "")
+                ),
+                details=", ".join(sorted(refs_by_lcsc)[:10]),
             )
         return PreflightResult(
             name=name,
@@ -2185,19 +2199,22 @@ class PreflightChecker:
             return set()
 
     def _items_with_spec_overlay(self, bom) -> list:
-        """Return copies of ``bom.items`` with the ``.kct`` LCSC/MPN overlay applied.
+        """Return copies of ``bom.items`` with the ``.kct`` overlay and CSV merge applied.
 
-        Mirrors the assembly export (issue #7180) so ``bom_lcsc_values``
-        validates the parts the written BOM actually carries, not just
-        schematic fields.  Works on copies: the cached BOM other checks read
+        Mirrors the assembly export (issues #7180, #8154) so ``bom_lcsc_values``
+        and ``bom_lcsc_stock`` validate the parts the written BOM actually
+        carries: schematic fields, then the ``.kct`` LCSC/MPN overlay, then
+        LCSC numbers merged from an existing ``bom_<fab>.csv`` in
+        ``output_dir``.  Works on copies: the cached BOM other checks read
         (e.g. ``bom_fields``) is left untouched.  Best-effort -- a missing or
-        malformed spec is logged and skipped, matching the export pipeline.
+        malformed spec/CSV is logged and skipped, matching the export pipeline.
         """
         import copy
 
         items = [copy.copy(i) for i in bom.items]
+        spec_refs: set[str] = set()
         try:
-            from .bom_spec_overlay import apply_spec_overlay, find_spec_file
+            from .bom_spec_overlay import apply_spec_overlay, find_spec_file, resolved_refs
 
             spec_file = find_spec_file(self.pcb_path.parent)
             if spec_file is not None:
@@ -2205,9 +2222,40 @@ class PreflightChecker:
 
                 spec = load_spec(spec_file)
                 if spec.bom_entries:
-                    apply_spec_overlay(items, spec.bom_entries)
+                    spec_refs = resolved_refs(apply_spec_overlay(items, spec.bom_entries))
         except Exception as e:
             logger.warning("Spec overlay failed in preflight (continuing without): %s", e)
+
+        # Existing-CSV merge (issue #8154).  parts_cache=None keeps this
+        # read-only and avoids value/package filtering dropping a number the
+        # export will in fact write.
+        if self.output_dir is not None:
+            try:
+                from .assembly import AssemblyConfig
+                from .bom_formats import (
+                    apply_existing_lcsc_assignments,
+                    read_existing_lcsc_assignments,
+                )
+
+                cfg = AssemblyConfig()
+                if cfg.merge_lcsc:
+                    csv_path = self.output_dir / cfg.bom_filename.format(
+                        manufacturer=self._fab_family
+                    )
+                    if csv_path.is_file():
+                        existing = read_existing_lcsc_assignments(csv_path)
+                        if existing:
+                            apply_existing_lcsc_assignments(
+                                [
+                                    i
+                                    for i in items
+                                    if not (i.reference in spec_refs and i.mpn and not i.lcsc)
+                                ],
+                                existing,
+                                parts_cache=None,
+                            )
+            except Exception as e:
+                logger.warning("BOM CSV merge failed in preflight (continuing without): %s", e)
         return items
 
     def _load_bom(self):

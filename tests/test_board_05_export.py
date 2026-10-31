@@ -32,7 +32,10 @@ future "clean preflight" state:
 
 from __future__ import annotations
 
+import csv
 import json
+import os
+import re
 import shutil
 import subprocess
 import sys
@@ -77,6 +80,30 @@ def routed_pcb_path() -> Path:
     return ROUTED_PCB
 
 
+def _seed_parts_cache(board_dir: Path, xdg_cache: Path) -> None:
+    """Populate ``$XDG_CACHE_HOME/kicad-tools/parts.db`` with the board's LCSC numbers."""
+    from kicad_tools.parts.cache import PartsCache
+    from kicad_tools.parts.models import Part
+
+    text = "".join(
+        (board_dir / name).read_text(encoding="utf-8", errors="ignore")
+        for name in ("project.kct", "bldc_controller.kicad_sch")
+    )
+    (xdg_cache / "kicad-tools").mkdir(parents=True, exist_ok=True)
+    # Pin header/socket numbers are left unseeded: a seeded record without a
+    # readable pin count would make ``bom_lcsc_values`` FAIL under strict
+    # preflight, which is a different contract than the one under test.
+    bom_csv = BOARD_DIR / "output" / "manufacturing" / "bom_jlcpcb.csv"
+    headers = {
+        row["LCSC Part #"]
+        for row in csv.DictReader(bom_csv.open(encoding="utf-8"))
+        if "PinHeader" in row["Footprint"] or "PinSocket" in row["Footprint"]
+    }
+    cache = PartsCache(db_path=xdg_cache / "kicad-tools" / "parts.db")
+    for lcsc in sorted(set(re.findall(r"\bC\d{4,8}\b", text)) - headers):
+        cache.put(Part(lcsc_part=lcsc, stock=1_000_000, stock_source="live"))
+
+
 @pytest.fixture(scope="module")
 def export_strict_preflight_result(
     routed_pcb_path: Path,
@@ -103,6 +130,14 @@ def export_strict_preflight_result(
     staged_dir = tmp_path_factory.mktemp("export_strict_preflight_board") / "output"
     shutil.copytree(routed_pcb_path.parent, staged_dir, ignore=_STAGING_IGNORE)
     staged_pcb = staged_dir / routed_pcb_path.name
+    # Issue #8154: ``bom_lcsc_stock`` now FAILs under --strict-preflight when
+    # none of the BOM's LCSC numbers resolve in the parts cache/catalog
+    # (previously a false OK).  Seed a scratch cache -- via XDG_CACHE_HOME so
+    # the host cache is never read or written -- so the check really
+    # evaluates board 05's numbers.
+    xdg_cache = tmp_path_factory.mktemp("export_strict_preflight_cache")
+    _seed_parts_cache(staged_dir, xdg_cache)
+    env = {**os.environ, "XDG_CACHE_HOME": str(xdg_cache)}
     cmd = [
         sys.executable,
         "-m",
@@ -132,6 +167,7 @@ def export_strict_preflight_result(
         text=True,
         timeout=120,
         check=False,
+        env=env,
     )
     # The JSON output is emitted on stdout regardless of exit code when
     # --format json is set.  Parse it; if parsing fails, surface stderr
