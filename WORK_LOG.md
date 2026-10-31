@@ -13,6 +13,19 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-10-31
+
+- **PR #8160**: fix: report nearest via-blocker and via-site-aware pin-access advice
+- **Issue #8155** (closed): route --nets: 'blocked by stored-via geometry (blocking net X)' blames a distant net; escape-limited nets fail slowly
+- **PR #8163**: fix: evaluate CSV-merged LCSC numbers in stock preflight and warn when nothing checked
+- **Issue #8154** (closed): export: bom_lcsc_stock reports OK without checking LCSC numbers merged from an existing BOM
+- **PR #8161**: fix: classify RV* references as non-resistors in value parsing
+- **Issue #8157** (closed): bom_lcsc_values: RV (varistor) references classified as resistors, so a correct MOV FAILs as 'different component type'
+- **PR #8165**: fix: check hole_clearance and hole_to_hole in pcb move-via --check
+- **Issue #8153** (closed): pcb move-via --check does not evaluate hole clearance (passes moves kicad-cli rejects)
+- **PR #8139**: refactor(ci): move board04 paid-drill dispatch out of vendored routed-DRC gate
+- **Issue #8134** (closed): install-kct.sh vendors .kct/ci/check_routed_drc.py with board04-specific paid-drill code
+
 ### 2026-10-30
 
 - **PR #8169**: test: mock check_saved_fill in mocked zones fill success tests
