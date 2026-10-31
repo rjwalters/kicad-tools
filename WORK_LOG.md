@@ -15,6 +15,12 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-30
 
+- **PR #8169**: test: mock check_saved_fill in mocked zones fill success tests
+- **PR #8162**: fix: clear stale manifest.json in sign-off Gate 1
+- **PR #8152**: chore(research): add hybrid-parity relaxation study driver for board 03 USB_D
+- **Issue #8168** (closed): test flake: tests/test_zones_cmd.py::TestFillSuccess::test_fill_calls_run_fill_zones fails on Test job
+- **Issue #8158** (closed): tapeout: re-running into an existing bundle dir fails sign-off Gate 1 on the previous run's stale manifest.json
+- **Issue #8149** (closed): study: what bounded extra-length or skew trade would give a via-equal hybrid leg pair on board 03 USB_D (J1.A6→U2.3)? Measure, no tolerance change
 - **PR #8146**: chore(deps): Bump joserfc from 1.7.5 to 1.7.6
 - **PR #8138**: feat(pcb): add move-via command that drags attached trace endpoints
 - **Issue #8135** (closed): No CLI to move a free via (move-footprint only moves footprints)
