@@ -38,12 +38,31 @@ _None._
 Issues currently being built (`loom:building`).
 
 - **#8134**: install-kct.sh vendors .kct/ci/check_routed_drc.py with board04-specific paid-drill code
+- **#8148**: route: size the post-route reserve so one oracle refill+DRC round fits at --timeout 600 (board 03: oracle stage ~144 s vs 90 s reserve)
+- **#8149**: study: what bounded extra-length or skew trade would give a via-equal hybrid leg pair on board 03 USB_D (J1.A6→U2.3)? Measure, no tolerance change
+- **#8153**: pcb move-via --check does not evaluate hole clearance (passes moves kicad-cli rejects)
+- **#8154**: export: bom_lcsc_stock reports OK without checking LCSC numbers merged from an existing BOM
+- **#8155**: route --nets: 'blocked by stored-via geometry (blocking net X)' blames a distant net; escape-limited nets fail slowly
+- **#8156**: route writes unsuffixed fab_profile.json / net_class_map.json and leaves *_unverified_* sets beside the board
+- **#8157**: bom_lcsc_values: RV (varistor) references classified as resistors, so a correct MOV FAILs as 'different component type'
+- **#8158**: tapeout: re-running into an existing bundle dir fails sign-off Gate 1 on the previous run's stale manifest.json
+- **#8159**: silk_overlap: intra-footprint false positives remain for fp_line vs fp_rect (follow-up to #8090)
+- **#8168**: test flake: tests/test_zones_cmd.py::TestFillSuccess::test_fill_calls_run_fill_zones fails on Test job
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#8146**: chore(deps): Bump joserfc from 1.7.5 to 1.7.6
+- **#8150**: perf: raise post-route finishing reserve to 27% of --timeout
+- **#8152**: chore(research): add hybrid-parity relaxation study driver for board 03 USB_D
+- **#8160**: fix: report nearest via-blocker and via-site-aware pin-access advice
+- **#8161**: fix: classify RV* references as non-resistors in value parsing
+- **#8162**: fix: clear stale manifest.json in sign-off Gate 1
+- **#8163**: fix: evaluate CSV-merged LCSC numbers in stock preflight and warn when nothing checked
+- **#8164**: fix: exempt same-footprint line-to-rect silk joints from silk_overlap
+- **#8165**: fix: check hole_clearance and hole_to_hole in pcb move-via --check
+- **#8167**: fix: key kct route sidecars to the output stem and list unverified sets
+- **#8169**: test: mock check_saved_fill in mocked zones fill success tests
 
 ## Approved (Awaiting Merge)
 
@@ -59,8 +78,17 @@ Issues carrying `loom:curated`.
 
 - **#5509**: Epic: one clearance kernel — search, commit, and final validation must agree with kicad-cli DRC *(curated)*
 - **#7487**: Re-rule or remove board 03 usb_geometry via-in-pad window exception by 2027-04-19 (#7457 / #7084 Q10) *(curated)*
-- **#7931**: lattice hybrid: legs fail pad-escape-end at the trunk's virtual site (board 03 USB_D J1.A6→U2.3) *(curated)*
 - **#8134**: install-kct.sh vendors .kct/ci/check_routed_drc.py with board04-specific paid-drill code *(curated)*
+- **#8148**: route: size the post-route reserve so one oracle refill+DRC round fits at --timeout 600 (board 03: oracle stage ~144 s vs 90 s reserve) *(curated)*
+- **#8149**: study: what bounded extra-length or skew trade would give a via-equal hybrid leg pair on board 03 USB_D (J1.A6→U2.3)? Measure, no tolerance change *(curated)*
+- **#8153**: pcb move-via --check does not evaluate hole clearance (passes moves kicad-cli rejects) *(curated)*
+- **#8154**: export: bom_lcsc_stock reports OK without checking LCSC numbers merged from an existing BOM *(curated)*
+- **#8155**: route --nets: 'blocked by stored-via geometry (blocking net X)' blames a distant net; escape-limited nets fail slowly *(curated)*
+- **#8156**: route writes unsuffixed fab_profile.json / net_class_map.json and leaves *_unverified_* sets beside the board *(curated)*
+- **#8157**: bom_lcsc_values: RV (varistor) references classified as resistors, so a correct MOV FAILs as 'different component type' *(curated)*
+- **#8158**: tapeout: re-running into an existing bundle dir fails sign-off Gate 1 on the previous run's stale manifest.json *(curated)*
+- **#8159**: silk_overlap: intra-footprint false positives remain for fp_line vs fp_rect (follow-up to #8090) *(curated)*
+- **#8168**: test flake: tests/test_zones_cmd.py::TestFillSuccess::test_fill_calls_run_fill_zones fails on Test job *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -81,10 +109,10 @@ _None._
 | Very important | 0 |
 | Important | 0 |
 | Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 1 |
-| PRs awaiting review | 1 |
+| In Progress (`loom:building`) | 11 |
+| PRs awaiting review | 10 |
 | Approved PRs awaiting merge | 3 |
-| Curated | 4 |
+| Curated | 13 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 4 |
 <!-- guide:plan-body:end -->

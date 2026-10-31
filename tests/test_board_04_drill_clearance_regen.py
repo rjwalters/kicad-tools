@@ -44,7 +44,7 @@ The committed artifact has always reported the same family (see
 because this module's end-to-end test is ``@pytest.mark.slow`` and runs
 nightly, never at PR time.
 
-``scripts/ci/check_routed_drc.py`` -- the CI fresh-regen gate this module
+``scripts/ci/check_routed_drc_internal.py`` -- the CI fresh-regen gate this module
 mirrors -- already special-cases board 04 for this reason
 (``PAID_DRILL_BOARD`` / ``_run_paid_drill_check``: *"Stock tier1 alone cannot
 express that process.  Never turn this into an error-count allowance."*).  It

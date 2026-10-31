@@ -19,7 +19,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HELPER_SCRIPT_PATH = REPO_ROOT / "scripts" / "ci" / "select_routed_pcbs.py"
-CHECK_ROUTED_DRC_PATH = REPO_ROOT / "scripts" / "ci" / "check_routed_drc.py"
+CHECK_ROUTED_DRC_PATH = REPO_ROOT / "scripts" / "ci" / "check_routed_drc_internal.py"
 
 
 def _load_module(path: Path, name: str):
