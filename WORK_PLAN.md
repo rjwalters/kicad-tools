@@ -36,15 +36,13 @@ _None._
 
 Issues currently being built (`loom:building`).
 
-- **#8148**: route: size the post-route reserve so one oracle refill+DRC round fits at --timeout 600 (board 03: oracle stage ~144 s vs 90 s reserve)
-- **#8156**: route writes unsuffixed fab_profile.json / net_class_map.json and leaves *_unverified_* sets beside the board
-- **#8159**: silk_overlap: intra-footprint false positives remain for fp_line vs fp_rect (follow-up to #8090)
+_None._
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#8164**: fix: exempt same-footprint line-to-rect silk joints from silk_overlap
+_None._
 
 ## Approved (Awaiting Merge)
 
@@ -52,18 +50,13 @@ PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
 - **#8105**: docs(site): refresh kicad-tools.org homepage for v0.25.0
 - **#8119**: chore(loom): resync installed Loom to v0.19.1236
-- **#8150**: perf: raise post-route finishing reserve to 27% of --timeout
-- **#8167**: fix: key kct route sidecars to the output stem and list unverified sets
 
 ## Proposed
 
 Issues carrying `loom:curated`.
 
-- **#5509**: Epic: one clearance kernel — search, commit, and final validation must agree with kicad-cli DRC$2
-- **#7487**: Re-rule or remove board 03 usb_geometry via-in-pad window exception by 2027-04-19 (#7457 / #7084 Q10)$2
-- **#8148**: route: size the post-route reserve so one oracle refill+DRC round fits at --timeout 600 (board 03: oracle stage ~144 s vs 90 s reserve)$2
-- **#8156**: route writes unsuffixed fab_profile.json / net_class_map.json and leaves *_unverified_* sets beside the board$2
-- **#8159**: silk_overlap: intra-footprint false positives remain for fp_line vs fp_rect (follow-up to #8090)$2
+- **#5509**: Epic: one clearance kernel — search, commit, and final validation must agree with kicad-cli DRC *(curated)*
+- **#7487**: Re-rule or remove board 03 usb_geometry via-in-pad window exception by 2027-04-19 (#7457 / #7084 Q10) *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -71,10 +64,10 @@ _None._
 
 ## Epics
 
-- **#4410**: board-05: generator must produce a manufacturable BLDC board unattended (81% route, 7 ISENSE/PWM open, 2 real shorts)$2
-- **#4431**: route: per-net scalar clearance cannot express HV isolation — need class-pair (net-class × net-class) clearance rules in the router; both workarounds proven inadequate on a mains board$2
-- **#5509**: Epic: one clearance kernel — search, commit, and final validation must agree with kicad-cli DRC$2
-- **#5952**: Epic: Harness-neutral kicad-tools (Claude Code, Codex CLI, opencode)$2
+- **#4410**: board-05: generator must produce a manufacturable BLDC board unattended (81% route, 7 ISENSE/PWM open, 2 real shorts)
+- **#4431**: route: per-net scalar clearance cannot express HV isolation — need class-pair (net-class × net-class) clearance rules in the router; both workarounds proven inadequate on a mains board
+- **#5509**: Epic: one clearance kernel — search, commit, and final validation must agree with kicad-cli DRC
+- **#5952**: Epic: Harness-neutral kicad-tools (Claude Code, Codex CLI, opencode)
 
 ## Backlog Balance
 
@@ -84,10 +77,10 @@ _None._
 | Very important | 0 |
 | Important | 0 |
 | Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 3 |
-| PRs awaiting review | 1 |
-| Approved PRs awaiting merge | 4 |
-| Curated | 5 |
+| In Progress (`loom:building`) | 0 |
+| PRs awaiting review | 0 |
+| Approved PRs awaiting merge | 2 |
+| Curated | 2 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 4 |
 <!-- guide:plan-body:end -->
