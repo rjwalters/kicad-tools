@@ -15,6 +15,12 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-31
 
+- **PR #8164**: fix: exempt same-footprint line-to-rect silk joints from silk_overlap
+- **Issue #8159** (closed): silk_overlap: intra-footprint false positives remain for fp_line vs fp_rect (follow-up to #8090)
+- **PR #8167**: fix: key kct route sidecars to the output stem and list unverified sets
+- **Issue #8156** (closed): route writes unsuffixed fab_profile.json / net_class_map.json and leaves *_unverified_* sets beside the board
+- **PR #8150**: perf: raise post-route finishing reserve to 27% of --timeout
+- **Issue #8148** (closed): route: size the post-route reserve so one oracle refill+DRC round fits at --timeout 600 (board 03: oracle stage ~144 s vs 90 s reserve)
 - **PR #8160**: fix: report nearest via-blocker and via-site-aware pin-access advice
 - **Issue #8155** (closed): route --nets: 'blocked by stored-via geometry (blocking net X)' blames a distant net; escape-limited nets fail slowly
 - **PR #8163**: fix: evaluate CSV-merged LCSC numbers in stock preflight and warn when nothing checked
