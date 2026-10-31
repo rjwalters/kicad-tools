@@ -594,7 +594,7 @@ def _line_rect_contact(
     (#8159).  ``None`` when zero or both endpoints touch the ring, so a line
     crossing the outline or running along an edge still counts as an overlap.
     """
-    from shapely.geometry import LineString, Point
+    from shapely.geometry import LineString, Point  # type: ignore[import-untyped]
 
     outline = LineString(ring)
     touching = [p for p in ends if outline.distance(Point(p)) <= epsilon]
@@ -634,7 +634,7 @@ def _text_bbox_geometry(
     for empty text.
     """
     from shapely.affinity import rotate  # type: ignore[import-untyped]
-    from shapely.geometry import box  # type: ignore[import-untyped]
+    from shapely.geometry import box
 
     n = len(text)
     if n == 0:
