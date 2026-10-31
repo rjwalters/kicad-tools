@@ -3161,3 +3161,7 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 ## 2026-10-30 — v0.26.0 release cut
 
 - v0.26.0 release PR opened by the automated daily release workflow (`release-pr.yml`, #5776); PRs merged since the previous tag: #8128, #8129, #8126, #8125, #8122, #8123, #8120, #8114, #8116, #8117, #8108, #8109, #8112, #8110, #8107, #8081.
+
+## 2026-10-31 — v0.27.0 release cut
+
+- v0.27.0 release PR opened by the automated daily release workflow (`release-pr.yml`, #5776); PRs merged since the previous tag: #8119, #8174, #8173, #8164, #8172, #8167, #8150, #8171, #8160, #8163, #8161, #8165, #8139, #8170, #8169, #8162, #8152, #8166, #8151, #8146, #8147, #8138, #8145, #8137, #8136, #8143, #8141, #8140, #8142.
