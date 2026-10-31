@@ -101,11 +101,11 @@ class TestOptimizationBudget:
         assert route_cmd._optimization_fits_budget(args, quiet=True)
 
     def test_runs_when_routing_stopped_inside_its_budget(self):
-        # 900 s run, reserve 135 s; routing stopped on time at 765 s.
-        assert route_cmd._optimization_fits_budget(_stamped(900.0, 765.0), quiet=True)
+        # 900 s run, reserve 243 s (27%, #8148); routing stopped on time at 657 s.
+        assert route_cmd._optimization_fits_budget(_stamped(900.0, 657.0), quiet=True)
 
     def test_skipped_when_routing_overran_into_the_reserve(self, capsys):
-        # Routing ran to 820 s: 80 s left, under 0.75 x 135 = ~101 s.
+        # Routing ran to 820 s: 80 s left, under 0.75 x 243 = ~182 s.
         args = _stamped(900.0, 820.0)
         assert not route_cmd._optimization_fits_budget(args, quiet=False)
         assert "Optimizing traces: skipped" in capsys.readouterr().out

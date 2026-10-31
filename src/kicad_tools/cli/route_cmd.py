@@ -150,9 +150,9 @@ _AUTO_FIX_RESERVE_FRACTION = 0.20
 _AUTO_FIX_RESERVE_FLOOR_SEC = 60.0
 
 # Issue #6273: post-route finishing reserve.  See :func:`_post_route_reserve`.
-_POST_ROUTE_RESERVE_FRACTION = 0.15
+_POST_ROUTE_RESERVE_FRACTION = 0.27
 _POST_ROUTE_RESERVE_FLOOR_SEC = 60.0
-_POST_ROUTE_RESERVE_CAP_FRACTION = 0.25
+_POST_ROUTE_RESERVE_CAP_FRACTION = 0.30
 # Every carved-out reserve together never takes more than this share of
 # ``--timeout`` from routing (the #3238 auto-fix cap, now shared).
 _TOTAL_RESERVE_CAP_FRACTION = 0.5
@@ -525,7 +525,8 @@ def _post_route_reserve(args, timeout: float | None = None) -> float:
 
     This reserve is carved out of the routing deadline so the routing loops
     stop early enough for those stages to finish inside ``--timeout``.  It is
-    ``max(60 s, 15% of --timeout)`` capped at 25% of ``--timeout``.  A run
+    ``max(60 s, 27% of --timeout)`` capped at 30% of ``--timeout`` (issue #8148:
+    a refill + DRC round on a pour-heavy board needs ~160 s at ``--timeout 600``).  A run
     whose routing finishes earlier than ``--timeout`` minus the reserve is
     unaffected: the reserve is a ceiling on routing, never a target.
 
@@ -768,6 +769,12 @@ def _set_wall_clock_deadline(args) -> None:
         # Routing deadline is the wall-clock deadline minus the auto-fix
         # reserve (#3238) and the post-route finishing reserve (#6273).
         args._routing_deadline = now + float(timeout) - reserve - post_route
+        logger.info(
+            "Post-route finishing reserve: %.0fs of --timeout %.0fs (auto-fix reserve %.0fs)",
+            post_route,
+            float(timeout),
+            reserve,
+        )
     else:
         args._wall_clock_deadline = None
         args._auto_fix_reserve = 0.0
