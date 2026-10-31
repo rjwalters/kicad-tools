@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-10-31
+
+### Upgrade notes / behaviour changes
+
+- **Bare route sidecars are no longer written** (Issue #8156). Consumers that
+  expected `fab_profile.json` / `net_class_map.json` after `kct route` must read
+  `<out-stem>.fab_profile.json` / `<out-stem>.net_class_map.json`. `kct check`
+  still discovers existing bare files.
+
+### Fixed
+
+- **`kct audit` / export readiness report honour the waivers sidecar** (Issue #8130). Waived DRC findings no longer count as blocking (matching `kct check`); they are listed separately as waived with rule, count and reason. Stale evidence-bound waivers still leave the finding blocking.
+
+- **Suppressed attach-zone exemption is now visible** (Issue #8131). When a designer clearance rule in `.kicad_dru` keeps kct from writing its managed attach-zone block, `kct route` and `kct check` print a warning (check includes the count of unexempted findings), and `kct check --format json` adds `summary.attach_zone_exemption` (`active` / `suppressed` / `not_applicable`) with `attach_zone_exemption_reason`. The suppression rule itself is unchanged.
+
+- **LCSC discrete-footprint guard no longer FAILs DIP bridge rectifiers** (Issue #8132).
+  A DIP-N part on a `Diode_*` footprint whose name carries the same `DIP-N` token
+  (e.g. `Diode_THT:Diode_Bridge_DIP-4_W7.62mm_P5.08mm`) now passes; a different pin
+  count or a footprint with no DIP token still FAILs.
+
+- **`kct drc` rejects JSON that is not a DRC report** (Issue #8133). A mis-pointed or non-report JSON file (e.g. `{"anything": 1}`, a list) previously loaded as zero findings and passed with `--allow-incomplete`; it now exits 1 with `Error loading report:`.
+
+- **`kct pcb move-via --check` now catches hole violations** (Issue #8153). Besides copper clearance, `--check` evaluates the moved via's `hole_clearance` (drill edge to foreign copper on every spanned layer) and `hole_to_hole` against the board's `.kicad_pro`/`.kicad_dru`, refusing moves kicad-cli would reject. The JSON `check` block lists `rules_checked`.
+
+- **`bom_lcsc_stock` preflight no longer reports OK when it checked nothing** (Issue #8154).
+  LCSC numbers merged from an existing `bom_<fab>.csv` are now evaluated (also for
+  `bom_lcsc_values`), and when assigned numbers exist but none can be found in the parts
+  cache or offline catalog the check warns (fails under `--strict-preflight`).
+
+- **Router via-blocked diagnostics name the local blocker** (Issue #8155). A C++
+  decline "blocked by stored-via geometry (blocking net X)" now reports the net
+  nearest the start/goal pad instead of whichever via candidate was expanded
+  last, and pin-access failures caused by via-site exhaustion print a "PIN
+  ESCAPE BOXED IN" suggestion rather than the generic `--grid` advice.
+
+- **`RV*` varistors no longer fail the tapeout LCSC value gate as resistors** (Issue #8157). `parse_component_value` now classifies `RV` references as `OTHER` instead of `RESISTOR`, so a MOV with a `220pF@1kHz` description is "cannot validate" rather than a cross-type FAIL.
+
+- **`/kct:manufacturing-readiness` and `/kct:tapeout` Gate 1 no longer refuse on a stale manifest** (Issue #8158). Re-running sign-off into an existing bundle directory now clears the previous `manifest.json` before `kct check`, so the Manifest sub-check reads `NOT RUN` instead of `FAILED`.
+
+- **`silk_overlap` no longer flags a footprint's lead line meeting its own body rectangle** (Issue #8159). A same-footprint `fp_line` ending on an `fp_rect` outline is one drawing, like the line-vs-line joints from #8090; crossings, edge overlaps and cross-footprint pairs still flag.
+
+### Added
+
+- **`kct pcb move-via` nudges a free via and drags its copper** (Issue #8135). Select a
+  via by `--at X Y` (with `--tolerance`), `--net` or `--uuid`, move it with `--to`/`--by`;
+  coincident trace endpoints follow. Supports `--dry-run`, `--format json`, and `--check`
+  to refuse a move that adds a clearance violation.
+
+### Changed
+
+- **Vendored `check_routed_drc.py` no longer carries board04 logic** (Issue #8134).
+  The paid-drill dispatch moved to the kicad-tools-only
+  `scripts/ci/check_routed_drc_internal.py`; re-running `install-kct.sh`
+  replaces the consumer copy with the generic gate.
+
+- **`kct route --timeout` reserves more time for finishing** (Issue #8148). The
+  post-route reserve is now 27% of `--timeout` (cap 30%, floor 60 s), e.g.
+  162 s at `--timeout 600`, so zone refill and DRC fit after routing; the
+  chosen reserve is logged.
+
+- **`kct route` sidecars are keyed to the output stem** (Issue #8156). It now
+  writes `<stem>.fab_profile.json` and `<stem>.net_class_map.json` instead of the
+  bare `fab_profile.json` / `net_class_map.json`, so boards sharing a directory no
+  longer collide. A non-zero exit lists any `*_unverified_*` sets it left behind.
+
 ## [0.26.0] - 2026-10-30
 
 ### Upgrade notes / behaviour changes
@@ -14780,6 +14845,7 @@ All blocks feature:
 - Python 3.10+
 - numpy >= 1.20
 
+[0.27.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.27.0
 [0.26.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.26.0
 [0.25.1]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.25.1
 [0.25.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.25.0
