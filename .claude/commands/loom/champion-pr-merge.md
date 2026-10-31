@@ -1120,6 +1120,9 @@ still cannot waive the kept set, and `KEPT_SET_PATTERNS` stays hardcoded (no con
 It is eligible only when **all** hold, each read live in this pass:
 
 - the PR title is `chore(loom): resync installed Loom to v<X.Y.Z>`;
+- every changed file is under `.loom/` or `.claude/`, and none is a merge-gate path
+  (`RESYNC_GATE_PATTERNS`: `champion*`, `judge*`, `merge-pr.sh`, `merge_pr*`, `verdict*`,
+  comment-trust files, `config.json`): the gate never waives a change to itself (#12945);
 - `.loom/install-metadata.json` at the PR head has `loom_version` equal to `<X.Y.Z>`, and
   `refs/tags/v<X.Y.Z>` exists in `rjwalters/loom`;
 - the files read is complete (count equals `changed_files`) and at least one changed file is a
@@ -1136,6 +1139,17 @@ A differing byte, a local-only file, a missing or unparsable tag, or any failed 
 `NOT ELIGIBLE` and the kept-set hold applies exactly as before. A non-resync PR never matches.
 
 ```bash
+# Merge-gate entries of the kept set (operator ruling on #12945, option a): a resync that
+# changes any of these keeps the human hold, because the gate cannot vouch for a change to
+# itself. Hardcoded, like KEPT_SET_PATTERNS; the first two blocks of that array.
+RESYNC_GATE_PATTERNS=(
+  "*champion*" "*judge*"
+  "*merge-pr.sh" "*merge_pr*" "*verdict*" "*check-review-feedback.sh"
+  "*comment_trust*" "*trusted_comments*" "*claim_reconciliation*"
+  "*version_only_diff*" "*version-only-diff*"
+  "*.loom/config.json" "*defaults/config.json"
+)
+
 # resync_upstream_path <installed-path>: the defaults/ counterpart per resync-installed.sh's
 # surface map, empty when the path has none. Roles and skills are symlinks or generated
 # upstream, so their blobs never compare equal: no mapping, hold.
@@ -1177,6 +1191,12 @@ resync_waiver_eval() {
     || { RESYNC_WAIVER_REASON="files read incomplete"; return 0; }
   while IFS=$'\t' read -r file prev head_sha status; do
     [ -z "$file" ] && continue
+    # Install set only (#12945): any file outside .loom/ and .claude/ holds the whole PR.
+    case "$file" in .loom/* | .claude/*) ;; *) RESYNC_WAIVER_REASON="$file is outside the install set"; RESYNC_WAIVER_RECORD=""; return 0 ;; esac
+    for pattern in "${RESYNC_GATE_PATTERNS[@]}"; do
+      # shellcheck disable=SC2053
+      if [[ "$file" == $pattern || "$prev" == $pattern ]]; then RESYNC_WAIVER_REASON="$file is a merge-gate path"; RESYNC_WAIVER_RECORD=""; return 0; fi
+    done
     is_kept=0
     for pattern in "${KEPT_SET_PATTERNS[@]}"; do
       # shellcheck disable=SC2053
@@ -2941,6 +2961,29 @@ Champion: #$PR_NUMBER merged and this bump now conflicts. Requesting a rebase.
 
 $MARK"
   done
+fi
+```
+
+### Step 3b: Close Superseded Resync PRs (#12945)
+
+When the PR just merged is a `chore(loom): resync installed Loom to vY` PR, every other open resync PR
+in this repo for a lower version is superseded by it. Close each with a comment. A title that does not
+parse as `X.Y.Z` is left alone; a failed read or close skips that PR (best effort, never blocks Step 4).
+
+```bash
+MERGED_TITLE=$(gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER" --jq '.title' 2>/dev/null) || MERGED_TITLE=""
+if [[ "$MERGED_TITLE" =~ ^chore\(loom\):\ resync\ installed\ Loom\ to\ v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+  NEW_VER="${BASH_REMATCH[1]}"
+  while IFS=$'\t' read -r OLD_PR OLD_TITLE; do
+    [ -n "$OLD_PR" ] && [ "$OLD_PR" != "$PR_NUMBER" ] || continue
+    [[ "$OLD_TITLE" =~ ^chore\(loom\):\ resync\ installed\ Loom\ to\ v([0-9]+\.[0-9]+\.[0-9]+)$ ]] || continue
+    OLD_VER="${BASH_REMATCH[1]}"
+    [ "$OLD_VER" != "$NEW_VER" ] && [ "$(printf '%s\n%s\n' "$OLD_VER" "$NEW_VER" | sort -V | head -1)" = "$OLD_VER" ] || continue
+    ./.loom/scripts/post-comment.sh "$OLD_PR" --pr --body "Champion: closing as superseded by #$PR_NUMBER (resync to v$NEW_VER merged; this PR targets v$OLD_VER).
+
+<!-- champion:resync-superseded by=$PR_NUMBER -->" || continue
+    gh pr close "$OLD_PR" >/dev/null 2>&1 || true
+  done < <(gh pr list --state open --limit 100 --json number,title --jq '.[] | [.number, .title] | @tsv' 2>/dev/null)
 fi
 ```
 

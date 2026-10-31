@@ -74,3 +74,16 @@ assert_not_contains() {
     fi
 }
 
+
+# assert_grep/assert_no_grep: extended-regex (-E) match of <pattern> against
+# <file>. Suites that need fixed-string (-F) or whole-line (-x) matching, or a
+# different message shape, keep a local helper instead (#13258).
+assert_grep() {
+    local pattern="$1" file="$2" msg="$3"
+    if grep -qE "$pattern" "$file"; then pass "$msg"; else fail "$msg (missing pattern: $pattern)"; fi
+}
+
+assert_no_grep() {
+    local pattern="$1" file="$2" msg="$3"
+    if grep -qE "$pattern" "$file"; then fail "$msg (found pattern: $pattern)"; else pass "$msg"; fi
+}

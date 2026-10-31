@@ -9,6 +9,46 @@ the label, re-evaluates them every tick, and removes the label when the
 recorded predecessor lands, closes, or the ordering no longer applies.
 Read-only inspection: `loom-daemon merge-pr sequence-plan`.
 
+## Only stacked PRs are ordered automatically (#12775, part of #12344)
+
+The pass **no longer orders PRs that merely overlap.** Before #12775 it
+chained any open PRs whose heads really conflicted (`git merge-tree`) into a
+landing order, writing a durable `source=pass` marker and `loom:sequenced`
+label for each follower. That machinery is gone from the planner: two
+independent PRs are never held against each other, however much they change
+the same files. The accepted trade-off is more conflict-resolution work and CI
+reruns when overlapping PRs land one after another. That cost is unmeasured
+(a conflict-versus-review-churn measurement is still outstanding; #12506
+owns kept/released explanations), so nothing here claims a runtime improvement.
+
+What is still ordered, and still held by `merge-pr.sh`:
+
+- **Stacked PRs.** A follower whose base branch is a predecessor's head branch
+  (conflict stacking above, or a hand-stacked PR) still gets a `StackedBase`
+  edge when the pair shares a changed file. Only those PRs' changed files are
+  read.
+- **Explicit constraints.** A trusted `loom:sequence` marker without
+  `source=pass`, and a bare `loom:sequenced` label, are human holds; the pass
+  never writes, re-plans or releases them on its own.
+- **Consolidation reservations** (`cons-` plans) and the sticky operator
+  release below.
+
+**Holds recorded before #12775.** A recorded hold is released, once, with a
+comment saying the automatic ordering was retired, **only on positive
+evidence** that this pass generated it between independent PRs: a trusted
+`source=pass` marker, a plan id that does not start with `cons-`, a
+predecessor present in this tick's open listing, and a follower that is not
+stacked on that predecessor or on any other open PR (an empty branch name
+never proves "not stacked"). Everything else stays held for a human to look at:
+hard and markerless holds, an unrecognized `source=`, consolidation plans,
+stacked pairs, an unreadable comments thread, and a predecessor outside the
+listing (the existing landed/closed/moved-head rules still apply to it). The
+label is never bulk-removed. `sequence-plan` prints
+`would release #F (after #P): automatic ordering retired` for each candidate.
+The older soft-hold release rules below (expiry, stalled head, no overlap,
+not ready) remain only for the soft holds that are still stacked; they are
+candidates for the remaining #12344 rows.
+
 ## Conflict stacking and the sequencer (#12759)
 
 With `stacking.onConflict.enabled` (#12758), a Builder whose committed work
@@ -27,7 +67,8 @@ treats it as a conflict.
 - **Interaction.** A stacked child is a follower of its parent through the
   existing `StackedBase` edge, so once the plan triggers (more than two open
   PRs) the child is held `loom:sequenced` behind P. Conflicts stacking did not
-  absorb (siblings, a PR at `maxDepth`) are sequenced as above.
+  absorb (siblings, a PR at `maxDepth`) are no longer ordered (#12775); they
+  are plain conflicting PRs that the Doctor rebases.
 - **Parent merges.** The child retargets to the default branch and the
   post-merge reconcile rebases it. `reconcile-child` defers a `loom:building`
   child only while its issue lease is live (`route_with_lease`); the label alone
@@ -38,8 +79,8 @@ treats it as a conflict.
   `stacking.onConflict.enabled` **off fleet-wide** until that path has been
   qualified on a real orphan, or the operator accepts the flag-only behaviour.
 - **#11708 / #12344.** Stacking does not depend on their ruling. If either
-  deletes or simplifies the sequencer, `merge_tree_conflicts` must stay: the
-  stacking verb uses it.
+  deletes or simplifies the sequencer further, `merge_tree_conflicts` must
+  stay: the stacking verb uses it (#12775 kept it).
 
 ## Tick cadence: "the next tick" is minutes, not seconds (#12595)
 
@@ -55,14 +96,15 @@ the first `with_readiness` condition keeping each hold (human hold, predecessor
 outside the listing or moved off the recorded head, stacked base, or
 "predecessor is ready"). It writes nothing.
 
-## A `CHANGELOG.md`-only conflict creates no landing order (#12595)
+## A `CHANGELOG.md`-only conflict is not a conflict (#12595)
 
 Two PRs that both add an entry at the same spot of `CHANGELOG.md` do conflict
-textually, but the Doctor resolves that on the rebase; ordering their merges
-saves nothing. The pair check (`git merge-tree --write-tree --name-only`) treats
-a conflict whose **only** conflicted path is `CHANGELOG.md` as a clean merge. Any
-other conflicted path, or an unavailable path list, keeps the edge (fail closed).
-Stacked-base edges are unaffected.
+textually, but the Doctor resolves that on the rebase. The pair check (`git
+merge-tree --write-tree --name-only`, shared with conflict stacking) treats a
+conflict whose **only** conflicted path is `CHANGELOG.md` as a clean merge. Any
+other conflicted path, or an unavailable path list, counts as a conflict (fail
+closed). The planner no longer consults it (#12775); stacking and the
+no-overlap release do.
 
 ## One landing-order comment per PR (#10634)
 
@@ -92,19 +134,17 @@ that is not sharded.
 
 ## Only a landable predecessor anchors a hold (#12010)
 
-A PR is only ever held behind a predecessor that is ready to land: `loom:pr`,
+A hold is only ever anchored on a predecessor that is ready to land: `loom:pr`,
 with no `loom:changes-requested`, `loom:ci-failure`, `loom:blocked` or
 `loom:operator` (#10371), not itself sequenced behind such a PR (#10465), and
 **landable now**. Each tick the pass reads every such approved PR's check runs
 on its current head and its mergeability, both as conditional (ETag'd) REST
 reads that cost nothing for an unchanged head. A PR with a completed `failure`
 or `timed_out` check, or that GitHub reports as conflicting with its base, is
-treated as not ready: no new hold is planned behind it, and an existing soft
-hold behind it is released on that tick, with a comment naming the red checks
+treated as not ready: an existing soft hold behind it is released on that tick, with a comment naming the red checks
 or the conflict. Pending CI, a `cancelled` run, and unknown mergeability change
 nothing, so a freshly re-dated head does not churn holds. Human holds (no
 `source=pass`), stacked bases and consolidation reservations are unaffected.
-Once the predecessor is green again it is ordered oldest-first as before.
 
 ## A pinned head that moves
 

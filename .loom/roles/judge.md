@@ -276,6 +276,10 @@ section for the full carve-out list).
 
 **Post every verdict comment through `./.loom/scripts/post-verdict.sh`, never a bare `gh pr comment` (#6382).** It takes `$VERDICT_SHA` as an argument and appends the `<!-- loom:verdict-sha ... -->` marker itself, so the marker cannot be typed-and-forgotten the way it can in a hand-written heredoc — the same reasoning behind `create-pr.sh` / `merge-pr.sh`. See "Verdict SHA Marker" under Evaluation Process for why the marker matters; it applies to **every** verdict-label write in this document, not just the two below.
 
+**Every comment you post before the verdict carries a Loom marker, or you post none (#13222).** In an in-session sweep every role comments as the operator's one GitHub account, so an unmarked claim or progress note ("Evaluating this PR…") reads to the Stale-Read Gate as a trusted human comment newer than `REVIEW_STARTED` and refuses your own approval. End any such note with an HTML-comment marker the gate ignores (e.g. `<!-- loom:judge-note -->`); prefer posting nothing, since the PR lease and `loom:reviewing` already record the claim.
+
+**In an in-session sweep, do not inherit the orchestrator's `LOOM_SWEEP_ID`.** Only a `step-judge-<pr>-<epoch>` id names a Judge dispatch time; a run id such as `sweep-<timestamp>-…` is not one, and the gate must take the start from your PR judge lease instead. If your environment holds the orchestrator's run id, `unset LOOM_SWEEP_ID` before calling `post-verdict.sh`.
+
 **`post-verdict.sh` is the SOLE merge-gating verdict writer — never approve with a bare `gh pr edit --add-label "loom:pr"` or a hand-typed marker (#12136).** That bypass drops the marker (#6319), and post-#9258 a markerless `loom:pr` is a HARD STALL: re-queued, never merged.
 
 **After approval (green → blue):**
@@ -310,7 +314,7 @@ section for the full carve-out list).
 **User commands override the label-based state machine.** When the user names a PR ("evaluate pr 599 as judge", "check pr 577"):
 
 1. **Gate first**: the probe above. The instruction approves the stage and overrides a stale claim, never `closed` / `loom:frozen` / `loom:operator` / an issue number
-2. **Claim** as in Primary Queue step 2 (PR lease, then `loom:reviewing`) and note "Evaluating this PR per user request" in a comment
+2. **Claim** as in Primary Queue step 2 (PR lease, then `loom:reviewing`) and note "Evaluating this PR per user request" in a comment ending `<!-- loom:judge-note -->` (an unmarked note trips the Stale-Read Gate on your own approval)
 3. **Evaluate** in a worktree ("PR Branch Isolation", "Worktree-Aware Code Access")
 4. **Finish normally**: `post-verdict.sh` with `$VERDICT_SHA` from the Verdict-Time CAS Recheck (`loom:pr` or `loom:changes-requested`)
 

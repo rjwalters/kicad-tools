@@ -63,11 +63,6 @@ assert_eq() {
     if [[ "$actual" == "$expected" ]]; then pass "$msg"; else fail "$msg (got '$actual', expected '$expected')"; fi
 }
 
-assert_grep() {
-    local pattern="$1" file="$2" msg="$3"
-    if grep -qE "$pattern" "$file"; then pass "$msg"; else fail "$msg (missing pattern: $pattern)"; fi
-}
-
 if [[ ! -f "$GUIDE_MD" ]]; then
     echo -e "${RED}FATAL${NC}: guide.md not found at $GUIDE_MD"
     exit 1

@@ -1,6 +1,6 @@
 {
-  "loom_version": "0.19.1227",
-  "loom_commit": "3f8d69bdce593a6d9fdb798414fa4453cc018c6b",
+  "loom_version": "0.19.1236",
+  "loom_commit": "290e83f9bf9c8b7ff5c9b33f871bfce5bcd95090",
   "install_date": "2026-08-10",
   "installed_files": [
     ".claude/agents/loom-architect.md",
@@ -253,7 +253,6 @@
     ".loom/scripts/tests/test-install-reinstall-safety.sh",
     ".loom/scripts/tests/test-install-source-guard.sh",
     ".loom/scripts/tests/test-install-stash-scope.sh",
-    ".loom/scripts/tests/test-install-sync-labels.sh",
     ".loom/scripts/tests/test-locate-daemon-bin.sh",
     ".loom/scripts/tests/test-loom-daemon-launchd-plist.sh",
     ".loom/scripts/tests/test-loom-daemon-start.sh",
@@ -667,7 +666,7 @@
     ".loom/scripts/tests/test-install-lock.sh",
     ".loom/hooks/guard-background-subagents.sh"
   ],
-  "last_resync": "2026-10-26",
+  "last_resync": "2026-10-30",
   "loom_source_remote": "https://github.com/rjwalters/loom.git",
   "requires_daemon": "0.19.1146"
 }

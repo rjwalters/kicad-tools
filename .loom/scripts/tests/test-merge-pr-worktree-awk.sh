@@ -73,11 +73,6 @@ retired() { # <what> <property> <why-structural> <successor>
     echo "      successor:  $4"
 }
 
-assert_grep() {
-    local pattern="$1" file="$2" msg="$3"
-    if grep -qE "$pattern" "$file"; then pass "$msg"; else fail "$msg (pattern: $pattern)"; fi
-}
-
 # assert_single_line <label> <expected> <actual>
 # Asserts $actual equals $expected AND contains no embedded newline (i.e. the
 # lookup emitted a single line, not a doubled `/path\n/path` string).

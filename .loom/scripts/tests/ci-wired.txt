@@ -149,7 +149,6 @@ test-install-lock.sh
 test-install-pr-markers.sh
 test-install-source-guard.sh
 test-install-stash-scope.sh
-test-install-sync-labels.sh
 test-jq-reserved-word-args.sh
 test-judge-fallback-cap.sh
 test-judge-payload-drop-guard.sh
@@ -252,6 +251,7 @@ test-worktree-root-override.sh
 test-worktree-sentinel.sh
 
 # tests/hooks/ (repo root) — Claude-path guard suites, wired since #4769.
+tests/hooks/test-guard-cross-tool-champion.sh
 tests/hooks/test-guard-destructive-dispatcher.sh
 tests/hooks/test-guard-install-matrix.sh
 tests/hooks/test-guard-destructive-cargo-and-perf.sh

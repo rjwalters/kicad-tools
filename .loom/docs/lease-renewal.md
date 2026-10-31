@@ -159,6 +159,20 @@ belongs to another host. `--watch-pid` on `lease ensure` must be the process
 doing the work, never an inherited `$PPID` in a subagent: that is the parent
 session, which outlives the subagent and keeps the lease live.
 
+`lease release` prints each renewer it stopped (`pid=N sweep=ID`). **A sweep
+child (Builder) must not release the orchestrator's lease**: when
+`/loom:sweep` published the lease in-session, the orchestrator owns it and its
+renewer, and releasing from a child stops that renewer and yields the lease
+while the sweep is still running. Release only a lease this session itself took
+(a hand-claim via `lease ensure`).
+
+**Reuse of an orchestrator's lease (#13252).** A Builder's `worktree.sh N` runs
+`lease ensure`. If this host already holds exactly one live lease on the issue
+under another sweep id (the orchestrator's, which a tool-call subshell does not
+inherit as `LOOM_SWEEP_RUN_ID`) and no other host holds one, `lease ensure`
+reuses it: no second lease comment and no second renewer; it reports `reusing
+it`. A foreign live lease still falls through to publish's refusal.
+
 **Before a loop exists: the deferred publisher (#10570).** When an attended
 `loom-daemon lease ensure` is declined (publish exit 4, a peer lease still in
 its TTL, or exit 2, a failed `gh` write), there is no lease to renew yet. A
@@ -411,6 +425,14 @@ the hard way (#7876):
 - **Keep `> /dev/null 2>&1`.** The loop is disowned but inherits whatever
   stdout it was given; attach a pipe (e.g. `| tail`) and the calling tool call
   blocks until the loop exits — i.e. for the lifetime of the sweep.
+- **Launch it once, in the foreground of a single tool call; never with a
+  trailing `&` or `nohup`** (#13252). `start` already forks its own detached
+  loop and returns the loop pid. A job backgrounded with `&`/`nohup` from a
+  short-lived Bash call belongs to that call's process group, and the harness
+  reaps it when the call returns, so the renewer dies and the lease ages out at
+  the TTL. Recipe: `LEASE_PID=$(sweep-lease-renew.sh start N --watch-pid
+  "$PPID" --host H --sweep-id S 2>/dev/null)` — with stderr redirected, never
+  piped. If a call blocks, stdout/stderr is still attached to a pipe.
 
 ## What this does not do (Phase 1 scope)
 
