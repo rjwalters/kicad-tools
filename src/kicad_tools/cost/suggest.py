@@ -332,7 +332,11 @@ def parse_component_value(value: str, reference: str = "") -> ParsedValue:
     ref_prefix = reference[:1].upper() if reference else ""
     component_type = ComponentType.OTHER
 
-    if ref_prefix == "R":
+    if reference[:2].upper() == "RV":
+        # Varistors (RV1) and trimpots share the "RV" prefix; they are not
+        # fixed resistors, so leave them as OTHER ("cannot validate").
+        pass
+    elif ref_prefix == "R":
         component_type = ComponentType.RESISTOR
     elif ref_prefix == "C":
         component_type = ComponentType.CAPACITOR
