@@ -3006,8 +3006,9 @@ def _add_pcb_parser(subparsers) -> None:
     pcb_move_via.add_argument(
         "--check",
         action="store_true",
-        help="Refuse (exit 1, nothing written) if the move adds a clearance "
-        "violation on the touched nets",
+        help="Refuse (exit 1, nothing written) if the move adds a violation "
+        "on the touched nets: copper clearance (manufacturer rules), plus "
+        "hole_clearance and hole_to_hole for the moved via (board .kicad_pro/.kicad_dru)",
     )
     pcb_move_via.add_argument(
         "--mfr", default="jlcpcb", help="Manufacturer rules for --check (default: jlcpcb)"

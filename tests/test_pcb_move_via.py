@@ -118,3 +118,72 @@ def test_check_refuses_new_violation_and_allows_clean(tmp_path):
     assert f.read_text() == before
     assert run_move_via(f, uuid="v1", to=(22, 12), check=True) == 0
     assert f.read_text() != before
+
+
+def _hole_board(tmp_path, extra="", project=None):
+    """4-layer board with one free SIG via ``h1`` at (20, 10) plus ``extra``."""
+    f = tmp_path / "h.kicad_pcb"
+    f.write_text(
+        """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers (0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal)
+    (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (net 0 "")
+  (net 1 "SIG")
+  (net 2 "OTHER")
+  (gr_rect (start 0 0) (end 50 50) (layer "Edge.Cuts") (stroke (width 0.1) (type default)))
+  (via (at 20 10) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 1) (uuid "h1"))
+"""
+        + extra
+        + ")\n"
+    )
+    if project is not None:
+        f.with_suffix(".kicad_pro").write_text(json.dumps(project))
+    return f
+
+
+def _hole_project(**rules):
+    return {"board": {"design_settings": {"rules": rules}}}
+
+
+def _details(capsys):
+    out = json.loads(capsys.readouterr().out)
+    return {d["rule_id"] for d in out["check"].get("details", [])}
+
+
+def test_check_refuses_hole_clearance_to_inner_foreign_trace(tmp_path, capsys):
+    # Foreign In2.Cu trace; the via has no connection there.  0.6 mm off the
+    # centre the copper clearance is fine (0.15 mm) but the drill edge is
+    # 0.35 mm away, short of the 0.5 mm hole_clearance the project declares.
+    trace = '(segment (start 10 15) (end 40 15) (width 0.1) (layer "In2.Cu") (net 2) (uuid "t"))'
+    f = _hole_board(tmp_path, trace, _hole_project(min_hole_clearance=0.5))
+    before = f.read_bytes()
+    assert run_move_via(f, uuid="h1", to=(20, 14.4), check=True, output_format="json") == 1
+    assert "hole_clearance" in _details(capsys)
+    assert f.read_bytes() == before
+    # Clear of the drill band: accepted.
+    assert run_move_via(f, uuid="h1", to=(20, 13.8), check=True) == 0
+
+
+def test_check_refuses_hole_to_hole_breach(tmp_path, capsys):
+    other = '(via (at 30 30) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 2) (uuid "h2"))'
+    f = _hole_board(tmp_path, other, _hole_project(min_hole_to_hole=0.6))
+    before = f.read_bytes()
+    # 0.95 mm centres: pads clear (0.15 mm) but drill edges are 0.55 mm < 0.6.
+    assert run_move_via(f, uuid="h1", to=(30.95, 30), check=True, output_format="json") == 1
+    assert "hole_to_hole" in _details(capsys)
+    assert f.read_bytes() == before
+    assert run_move_via(f, uuid="h1", to=(35, 30), check=True) == 0
+
+
+def test_check_ignores_preexisting_hole_violation(tmp_path, capsys):
+    trace = (
+        '(segment (start 10 10.6) (end 40 10.6) (width 0.1) (layer "In2.Cu") (net 2) (uuid "t"))'
+    )
+    f = _hole_board(tmp_path, trace, _hole_project(min_hole_clearance=0.5))
+    # Already 0.35 mm from the trace; sliding along it adds nothing new.
+    assert run_move_via(f, uuid="h1", by=(3, 0), check=True, output_format="json") == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["check"]["new_violations"] == 0
+    assert out["check"]["rules_checked"] == ["clearance", "hole_clearance", "hole_to_hole"]
