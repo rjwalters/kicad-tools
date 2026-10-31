@@ -1070,13 +1070,14 @@ def _discover_tier(board_dir: Path, pcb: Path) -> str | None:
 
 
 def _find_net_class_map(pcb: Path) -> Path | None:
-    for candidate in (
-        pcb.parent / "net_class_map.json",
-        pcb.parent / "output" / "net_class_map.json",
-        pcb.parent.parent / "output" / "net_class_map.json",
-    ):
-        if candidate.is_file():
-            return candidate
+    from kicad_tools.sidecars import first_existing_net_class_map_sidecar
+
+    # Issue #8156: ``kct route`` writes ``<stem>.net_class_map.json``; the
+    # shared helper probes the stem-keyed name before the legacy bare one.
+    for directory in (pcb.parent, pcb.parent / "output", pcb.parent.parent / "output"):
+        found = first_existing_net_class_map_sidecar([directory], pcb.stem)
+        if found is not None:
+            return found
     return None
 
 
@@ -2833,7 +2834,7 @@ def _hashable_inputs(options: ReadinessOptions) -> list[Path]:
             if (
                 path.suffix in {".kicad_pro", ".kicad_dru"}
                 or path.name.endswith("net_class_map.json")
-                or path.name == "fab_profile.json"
+                or path.name.endswith("fab_profile.json")
             ):
                 paths.add(path.resolve())
 

@@ -758,7 +758,7 @@ class TestSidecarWrittenByRoute:
 
         _write_net_class_map_sidecar(pcb_out, ncm, quiet=True)
 
-        sidecar = tmp_path / "net_class_map.json"
+        sidecar = tmp_path / "board_routed.net_class_map.json"
         assert sidecar.is_file()
         # AC1: round-trips with no data loss.
         loaded = net_class_map_from_dict(json.loads(sidecar.read_text()))
@@ -777,7 +777,7 @@ class TestSidecarWrittenByRoute:
         _write_net_class_map_sidecar(pcb_out, {}, quiet=True)
         _write_net_class_map_sidecar(pcb_out, None, quiet=True)
 
-        assert not (tmp_path / "net_class_map.json").exists()
+        assert not (tmp_path / "board_routed.net_class_map.json").exists()
 
     def test_readonly_output_dir_is_non_fatal(self, tmp_path: Path, capsys):
         """A blocked write (read-only output dir) warns but does not raise --
@@ -804,7 +804,7 @@ class TestSidecarWrittenByRoute:
         # ignored the mode bits (running as root) and the sidecar exists.
         assert (
             "could not write net-class-map sidecar" in captured.out
-            or (ro_dir / "net_class_map.json").exists()
+            or (ro_dir / "board_routed.net_class_map.json").exists()
         )
 
     def test_input_file_not_overwritten_on_collision(self, tmp_path: Path):
@@ -821,7 +821,7 @@ class TestSidecarWrittenByRoute:
 
         # Hand-authored HV input sidecar, sitting next to where the board
         # will be written.
-        input_path = tmp_path / "net_class_map.json"
+        input_path = tmp_path / "board_routed.net_class_map.json"
         authored = {
             "AC_LINE": NetClassRouting(
                 name="HV",
@@ -851,7 +851,7 @@ class TestSidecarWrittenByRoute:
         assert input_path.read_bytes() == original_bytes
 
         # The derived map landed in the effective sidecar, not the input file.
-        effective = tmp_path / "net_class_map.effective.json"
+        effective = tmp_path / "board_routed.net_class_map.effective.json"
         assert effective.is_file()
         loaded = net_class_map_from_dict(json.loads(effective.read_text()))
         # Round-trip fidelity: authored HV fields survive, not "Audio".
@@ -889,8 +889,8 @@ class TestSidecarWrittenByRoute:
         )
 
         # Plain sidecar written; no diverted effective sidecar.
-        assert (out_dir / "net_class_map.json").is_file()
-        assert not (out_dir / "net_class_map.effective.json").exists()
+        assert (out_dir / "board_routed.net_class_map.json").is_file()
+        assert not (out_dir / "board_routed.net_class_map.effective.json").exists()
 
     def test_round_trip_fidelity_merges_loaded_over_classifier(self, tmp_path: Path):
         """Issue #4428: the loaded user map is merged OVER the classifier
@@ -910,7 +910,7 @@ class TestSidecarWrittenByRoute:
         # authored map must still override the classifier's "Audio".
         _write_net_class_map_sidecar(pcb_out, classifier, quiet=True, loaded_net_class_map=authored)
 
-        sidecar = tmp_path / "net_class_map.json"
+        sidecar = tmp_path / "board_routed.net_class_map.json"
         loaded = net_class_map_from_dict(json.loads(sidecar.read_text()))
         assert loaded["AC_LINE"].name == "HV"
         assert loaded["AC_LINE"].target_ampacity == 20.0
@@ -923,7 +923,7 @@ class TestSidecarWrittenByRoute:
         from kicad_tools.cli.route_cmd import _write_net_class_map_sidecar
         from kicad_tools.router.rules import NetClassRouting, net_class_map_to_dict
 
-        real = tmp_path / "net_class_map.json"
+        real = tmp_path / "board_routed.net_class_map.json"
         real.write_text(json.dumps(net_class_map_to_dict({"AC_LINE": NetClassRouting(name="HV")})))
         original_bytes = real.read_bytes()
 
@@ -943,7 +943,7 @@ class TestSidecarWrittenByRoute:
 
         # The real file (target of the symlink) is untouched.
         assert real.read_bytes() == original_bytes
-        assert (tmp_path / "net_class_map.effective.json").is_file()
+        assert (tmp_path / "board_routed.net_class_map.effective.json").is_file()
 
 
 class TestInactiveSkewRuleWarningNonCLI:

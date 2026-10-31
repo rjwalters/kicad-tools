@@ -80,6 +80,9 @@ def repair_fixed_copper(
                     "net_class_map.json",
                     "net_class_map.effective.json",
                     "fab_profile.json",
+                    f"{output.stem}.net_class_map.json",
+                    f"{output.stem}.net_class_map.effective.json",
+                    f"{output.stem}.fab_profile.json",
                     "current_paths.json",
                     "voltage_map.json",
                 )

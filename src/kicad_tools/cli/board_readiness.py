@@ -99,7 +99,7 @@ def read_readiness(board_dir: Path) -> dict:
             and (
                 p.suffix in {".kicad_pro", ".kicad_dru"}
                 or p.name.endswith("net_class_map.json")
-                or p.name == "fab_profile.json"
+                or p.name.endswith("fab_profile.json")
             )
         }
         if not required.issubset(inputs):
