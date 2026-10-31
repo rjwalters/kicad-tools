@@ -12,7 +12,6 @@ Prioritized roadmap generated from current GitHub label state. Maintained by the
 Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a human merge decision is missing.
 
 - **#8105**: docs(site): refresh kicad-tools.org homepage for v0.25.0
-- **#8119**: chore(loom): resync installed Loom to v0.19.1236
 
 ## Very Important
 
@@ -49,7 +48,6 @@ _None._
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
 - **#8105**: docs(site): refresh kicad-tools.org homepage for v0.25.0
-- **#8119**: chore(loom): resync installed Loom to v0.19.1236
 
 ## Proposed
 
@@ -64,7 +62,6 @@ _None._
 
 ## Epics
 
-- **#4410**: board-05: generator must produce a manufacturable BLDC board unattended (81% route, 7 ISENSE/PWM open, 2 real shorts)
 - **#4431**: route: per-net scalar clearance cannot express HV isolation — need class-pair (net-class × net-class) clearance rules in the router; both workarounds proven inadequate on a mains board
 - **#5509**: Epic: one clearance kernel — search, commit, and final validation must agree with kicad-cli DRC
 - **#5952**: Epic: Harness-neutral kicad-tools (Claude Code, Codex CLI, opencode)
@@ -73,16 +70,16 @@ _None._
 
 | Bucket | Count |
 |------|-------|
-| Operator merge-risk holds | 2 |
+| Operator merge-risk holds | 1 |
 | Very important | 0 |
 | Important | 0 |
 | Ready (`loom:issue`) | 0 |
 | In Progress (`loom:building`) | 0 |
 | PRs awaiting review | 0 |
-| Approved PRs awaiting merge | 2 |
+| Approved PRs awaiting merge | 1 |
 | Curated | 2 |
 | Architect / Hermit proposals | 0 |
-| Active epics | 4 |
+| Active epics | 3 |
 <!-- guide:plan-body:end -->
 
 ## Release History (static archive)

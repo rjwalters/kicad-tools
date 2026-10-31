@@ -15,6 +15,9 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-10-31
 
+- **PR #8175**: chore(release): v0.27.0
+- **PR #8119**: chore(loom): resync installed Loom to v0.19.1236
+- **Issue #4410** (closed): board-05: generator must produce a manufacturable BLDC board unattended (81% route, 7 ISENSE/PWM open, 2 real shorts)
 - **PR #8164**: fix: exempt same-footprint line-to-rect silk joints from silk_overlap
 - **Issue #8159** (closed): silk_overlap: intra-footprint false positives remain for fp_line vs fp_rect (follow-up to #8090)
 - **PR #8167**: fix: key kct route sidecars to the output stem and list unverified sets
