@@ -673,6 +673,75 @@ class TestSilkOverlap:
         )
         assert len(check_silk_overlap(pcb, _rules())) == 0
 
+    def _rect(self, start=(-1.5, -0.5), end=(1.5, 0.5)):
+        return FootprintGraphic(
+            graphic_type="rect",
+            layer="F.SilkS",
+            stroke_width=0.12,
+            start=start,
+            end=end,
+        )
+
+    def test_lead_line_ending_on_own_rect_is_not_a_collision(self):
+        """Axial resistor: rect body plus leads ending on its short edges (#8159)."""
+        pcb = _empty_pcb()
+        pcb._footprints.append(
+            _make_footprint(
+                reference="R20",
+                graphics=[
+                    self._rect(),
+                    _silk_line(start=(-4, 0), end=(-1.5, 0)),
+                    _silk_line(start=(1.5, 0), end=(4, 0)),
+                ],
+            )
+        )
+        assert len(check_silk_overlap(pcb, _rules())) == 0
+
+    def test_lead_line_on_rect_corner_in_rotated_footprint(self):
+        pcb = _empty_pcb()
+        pcb._footprints.append(
+            _make_footprint(
+                reference="R20",
+                rotation=90.0,
+                graphics=[
+                    self._rect(),
+                    _silk_line(start=(-3, -2), end=(-1.5, -0.5)),
+                ],
+            )
+        )
+        assert len(check_silk_overlap(pcb, _rules())) == 0
+
+    def test_line_crossing_own_rect_still_flags(self):
+        pcb = _empty_pcb()
+        pcb._footprints.append(
+            _make_footprint(
+                reference="R20",
+                graphics=[self._rect(), _silk_line(start=(-4, 0), end=(0, 0))],
+            )
+        )
+        assert len(check_silk_overlap(pcb, _rules())) == 1
+
+    def test_line_along_own_rect_edge_still_flags(self):
+        pcb = _empty_pcb()
+        pcb._footprints.append(
+            _make_footprint(
+                reference="R20",
+                graphics=[self._rect(), _silk_line(start=(-1.5, -0.5), end=(-1.5, 0.2))],
+            )
+        )
+        assert len(check_silk_overlap(pcb, _rules())) >= 1
+
+    def test_line_ending_on_other_footprints_rect_still_flags(self):
+        pcb = _empty_pcb()
+        pcb._footprints.append(_make_footprint(reference="R1", graphics=[self._rect()]))
+        pcb._footprints.append(
+            _make_footprint(
+                reference="R2",
+                graphics=[_silk_line(start=(-4, 0), end=(-1.5, 0))],
+            )
+        )
+        assert len(check_silk_overlap(pcb, _rules())) == 1
+
     def test_x_crossing_still_flags(self):
         pcb = _empty_pcb()
         pcb._footprints.append(

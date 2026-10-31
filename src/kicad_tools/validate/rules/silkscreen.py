@@ -583,6 +583,24 @@ def _t_joint_point(
     return candidates[0] if len(candidates) == 1 else None
 
 
+def _line_rect_contact(
+    ends: tuple[tuple[float, float], tuple[float, float]],
+    ring: list[tuple[float, float]],
+    epsilon: float = _CLEARANCE_EPSILON_MM,
+) -> tuple[float, float] | None:
+    """Return the line endpoint resting on a rect outline, if exactly one does.
+
+    A lead line ending on its own footprint's body rectangle is one drawing
+    (#8159).  ``None`` when zero or both endpoints touch the ring, so a line
+    crossing the outline or running along an edge still counts as an overlap.
+    """
+    from shapely.geometry import LineString, Point  # type: ignore[import-untyped]
+
+    outline = LineString(ring)
+    touching = [p for p in ends if outline.distance(Point(p)) <= epsilon]
+    return touching[0] if len(touching) == 1 else None
+
+
 def _fp_transform(footprint: Footprint) -> _Transform:
     """Return a ``(x, y) -> (X, Y)`` local->board transform for a footprint."""
     fp_x, fp_y = footprint.position
@@ -616,7 +634,7 @@ def _text_bbox_geometry(
     for empty text.
     """
     from shapely.affinity import rotate  # type: ignore[import-untyped]
-    from shapely.geometry import box  # type: ignore[import-untyped]
+    from shapely.geometry import box
 
     n = len(text)
     if n == 0:
@@ -1247,25 +1265,40 @@ def check_silk_overlap(
     # stroke caps overlap at the common vertex, which is intentional artwork,
     # not the line crossings or text collisions this rule detects.
     #
-    # The ``graphic_type != "line"`` gate below stays line-ONLY on purpose, and
+    # The line-endpoint exemption stays line-ONLY on purpose, and
     # #5811's new poly support does not widen it: the exemption is defined by
     # :func:`_shared_endpoint` over a primitive's TWO endpoints, which a
     # polygon (a closed ring, already one primitive) does not have.  A polygon
     # overlapping an adjacent stroke is a genuine overlap of two separately
     # drawn shapes, exactly as a rect overlapping a line already is.
+    #
+    # A lead line ending on its own footprint's rect body outline is the same
+    # one drawing (#8159): rects are recorded separately (their ring has no
+    # 2-endpoint form) and only ever paired with a line of the same footprint.
     line_endpoints = {}
+    rect_rings = {}
     for footprint in pcb.footprints:
         transform = _fp_transform(footprint)
         for graphic in footprint.graphics:
-            if graphic.graphic_type != "line" or _silk_side(graphic.layer) is None:
+            if graphic.graphic_type not in ("line", "rect") or _silk_side(graphic.layer) is None:
                 continue
             geom = _stroke_geometry(graphic, transform)
-            if geom is not None:
-                label = f"{footprint.reference} (fp_line)"
-                line_endpoints[(label, geom.wkb)] = (
-                    (transform(graphic.start), transform(graphic.end)),
+            if geom is None:
+                continue
+            if graphic.graphic_type == "rect":
+                sx, sy = graphic.start
+                ex, ey = graphic.end
+                ring = [(sx, sy), (ex, sy), (ex, ey), (sx, ey), (sx, sy)]
+                rect_rings[(f"{footprint.reference} (fp_rect)", geom.wkb)] = (
+                    [transform(p) for p in ring],
                     graphic.stroke_width,
                 )
+                continue
+            label = f"{footprint.reference} (fp_line)"
+            line_endpoints[(label, geom.wkb)] = (
+                (transform(graphic.start), transform(graphic.end)),
+                graphic.stroke_width,
+            )
 
     found: list[DRCViolation] = []
     for entries in by_side.values():
@@ -1289,6 +1322,18 @@ def check_silk_overlap(
                     continue
                 a = line_endpoints.get((label_a, geom.wkb))
                 b = line_endpoints.get((label_b, other_geom.wkb))
+                if label_a.split(" (")[0] == label_b.split(" (")[0]:
+                    line_rect = None
+                    if a is not None and (label_b, other_geom.wkb) in rect_rings:
+                        line_rect = (a, rect_rings[(label_b, other_geom.wkb)])
+                    elif b is not None and (label_a, geom.wkb) in rect_rings:
+                        line_rect = (b, rect_rings[(label_a, geom.wkb)])
+                    if line_rect is not None:
+                        contact = _line_rect_contact(line_rect[0][0], line_rect[1][0])
+                        if contact is not None:
+                            joint = Point(contact).buffer(max(line_rect[0][1], line_rect[1][1]))
+                            if overlap.difference(joint).area < 1e-9:
+                                continue
                 if label_a == label_b and a is not None and b is not None:
                     # Duplicate lines share both endpoints and must still
                     # flag; _shared_endpoint returns None in that case.
