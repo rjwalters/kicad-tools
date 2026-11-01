@@ -1,6 +1,7 @@
 {
-  "version": "0.24.7",
-  "commit": "2ba5730",
+  "version": "0.25.1",
+  "commit": "4a8c9b9",
+  "tag": "v0.25.1",
   "layout_version": 2,
   "dev": false,
   "filtered": false,

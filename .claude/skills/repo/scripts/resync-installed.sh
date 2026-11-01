@@ -402,7 +402,7 @@ fi
 # ---------------------------------------------------------------------------
 PLAN_SRC=(); PLAN_DST=(); PLAN_EXEC=(); PLAN_XFORM=()
 
-plan() {  # <source-rel> <dest-rel> <exec:0|1> [transform: render|codex-skill]
+plan() {  # <source-rel> <dest-rel> <exec:0|1> [transform: render|codex-skill|codex-command]
   PLAN_SRC+=("$1"); PLAN_DST+=("$2"); PLAN_EXEC+=("$3"); PLAN_XFORM+=("${4:-render}")
 }
 
@@ -458,6 +458,12 @@ if [[ "$CODEX_EMITTER" == true ]] && codex_skill_is_managed "$TARGET/$CODEX_SKIL
   while IFS= read -r cmd; do
     [[ -n "$cmd" ]] || continue
     plan "commands/repo/$cmd.md" "$CODEX_REFERENCES_REL/$cmd.md" 0
+    # Per-command skills (repo#676). A repo-<verb> dir someone else authored
+    # (SKILL.md present, no marker) is never planned, so never overwritten.
+    _cmd_dir="$(codex_command_skill_rel "$cmd")"
+    if [[ ! -f "$TARGET/$_cmd_dir/SKILL.md" ]] || codex_skill_is_managed "$TARGET/$_cmd_dir/SKILL.md"; then
+      plan "commands/repo/$cmd.md" "$_cmd_dir/SKILL.md" 0 codex-command
+    fi
   done <<<"$COMMANDS"
 fi
 
@@ -485,6 +491,7 @@ report() {  # <verb> <colour> <dest-rel> [detail]
 emit() {
   case "$2" in
     codex-skill) codex_skill_render "$1" "$COMMANDS" ;;
+    codex-command) codex_command_skill_render "$1" ;;
     *)           render <"$1" ;;
   esac
 }
@@ -690,6 +697,26 @@ while [[ $i -lt ${#PLAN_SRC[@]} ]]; do
   sync_one "${PLAN_SRC[$i]}" "${PLAN_DST[$i]}" "${PLAN_EXEC[$i]}" "${PLAN_XFORM[$i]}"
   i=$((i + 1))
 done
+
+# Stale per-command Codex skills (repo#676): a marker-managed repo-<verb>/ whose
+# verb is no longer in this install's command set (a filtered install, or a verb
+# retired upstream) is removed. Unmarked directories are someone else's and stay.
+if [[ -n "$CODEX_ROOT" ]]; then
+  for _d in "$TARGET/$CODEX_SKILLS_ROOT_REL/$CODEX_COMMAND_SLUG_PREFIX"*/; do
+    _d="${_d%/}"
+    [[ -d "$_d" ]] || continue
+    [[ "$_d" == "$CODEX_ROOT" ]] && continue
+    codex_skill_is_managed "$_d/SKILL.md" || continue
+    _verb="${_d##*/}"; _verb="${_verb#"$CODEX_COMMAND_SLUG_PREFIX"}"
+    grep -qxF "$_verb" <<<"$COMMANDS" && continue
+    if [[ "$DRY_RUN" == true ]]; then
+      report "would drop" "$YELLOW" "${_d#"$TARGET"/}/" "verb not in this install"
+    else
+      rm -rf -- "$_d"
+      report "removed" "$YELLOW" "${_d#"$TARGET"/}/" "verb not in this install"
+    fi
+  done
+fi
 
 # ---------------------------------------------------------------------------
 # Report what was LEFT ALONE. This is the visible half of "never uninstalls":

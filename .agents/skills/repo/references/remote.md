@@ -285,6 +285,7 @@ REPO_REMOTE_SETUP="make setup"            # optional first-boot command; fallbac
 # --- session ---
 REPO_REMOTE_IDLE_SHUTDOWN_MIN=120         # interactive-host default; use ~20 for daemon-managed/worker hosts; 0 disables the guard entirely (see below)
 REPO_REMOTE_IDLE_MARKER=                   # optional idle-exit marker path (default: /var/run/repo-remote-daemon-idle.marker)
+REPO_REMOTE_RUST=0                        # AWS only: 1 installs rustup/cargo system-wide at first boot (see "Rust toolchain" below)
 
 # --- fleet-marker guard (refuse to reuse a managed fleet host) ---
 REPO_REMOTE_FLEET_TAG_KEY=Fleet           # tag (AWS) / label (GCP) key that marks a managed fleet host; empty disables the check
@@ -1178,6 +1179,24 @@ instance's actual lifecycle.
 Any value other than exactly `on-demand` or `spot` (including `Spot`), and
 `spot` with GCP, fails before any cloud call (exit `2`), on `up` (dry run
 included) and on `down`.
+
+#### Rust toolchain (`REPO_REMOTE_RUST=1`, AWS)
+
+Opt-in and off by default; with it off the user-data is unchanged. When set to
+`1`, a newly created AWS box's user-data installs rustup system-wide
+(`/opt/rust`, minimal profile, stable toolchain; plus `build-essential` if there
+is no C compiler) and puts `cargo`, `rustc` and `rustup` wrapper scripts (which set `RUSTUP_HOME`) in
+`/usr/local/bin`, so `ssh box cargo --version` works non-interactively. The
+fragment runs last and is non-fatal: a failed install leaves ssh keys, host
+identity and the idle guard intact (log: `/var/log/repo-remote-rust.log`).
+
+- **Wait for the marker.** User-data runs asynchronously after ssh is
+  reachable, so `up` returning does not mean Rust is ready. The file
+  `/var/lib/repo-remote/rust-ready` appears only after `cargo` and `rustc`
+  ran successfully with `RUSTUP_HOME`/`CARGO_HOME` unset (as over ssh); poll for it before an on-box `cargo install`.
+- **Existing boxes are not retrofitted.** `up` never re-attaches user-data to a
+  reused instance, so recreate the box (or install Rust by hand once).
+- GCP is not covered.
 
 #### The idle-shutdown guard
 
