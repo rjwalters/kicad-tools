@@ -580,6 +580,7 @@ VOLUME_THROUGHPUT="" # AWS only, gp3 only: provisioned throughput, MiB/s (defaul
 IMAGE=""
 GPU_ACCEL=""       # GCP accelerator string, e.g. nvidia-l4:1
 IDLE_MIN=""
+RUST_ENABLED="0"
 IS_GPU=false
 FLEET_TAG_KEY=""   # tag/label key that marks a managed fleet host ("" disables)
 FLEET_TAG_VALUE="" # required value for that key ("" = any non-empty value)
@@ -750,6 +751,8 @@ resolve_settings() {
   VOLUME_IOPS="${REPO_REMOTE_VOLUME_IOPS:-}"
   VOLUME_THROUGHPUT="${REPO_REMOTE_VOLUME_THROUGHPUT:-}"
   IDLE_MIN="${REPO_REMOTE_IDLE_SHUTDOWN_MIN:-120}"
+  # Opt-in Rust toolchain in the AWS user-data (repo#708). Default off.
+  RUST_ENABLED="${REPO_REMOTE_RUST:-0}"
   # Idle-exit marker contract (see commands/repo/remote.md). A daemon-managed
   # host (e.g. one running loom-daemon) may write this file on clean idle-exit;
   # the guard treats its mtime as an authoritative "idle since" timestamp. The
@@ -2084,6 +2087,39 @@ chmod 600 ~ubuntu/.ssh/authorized_keys
 EOF
 }
 
+# Opt-in (REPO_REMOTE_RUST=1) system-wide Rust toolchain for a newly created AWS
+# box (repo#708), so an on-box `cargo install` works over non-interactive ssh.
+# Emitted LAST and every step is non-fatal: a failed install must never break
+# the ssh key injection, host identity or idle guard that precede it. The
+# readiness marker is touched only after cargo and rustc actually run, because
+# user-data executes asynchronously after ssh is already reachable.
+rust_userdata() {
+  [[ "$RUST_ENABLED" == "1" ]] || return 0
+  cat <<'EOF'
+# repo-remote Rust toolchain (REPO_REMOTE_RUST=1)
+(
+  export DEBIAN_FRONTEND=noninteractive
+  export RUSTUP_HOME=/opt/rust/rustup CARGO_HOME=/opt/rust/cargo
+  mkdir -p /var/lib/repo-remote /opt/rust
+  rm -f /var/lib/repo-remote/rust-ready
+  # cargo install needs a C linker; stock Ubuntu may not ship one.
+  command -v cc >/dev/null 2>&1 || { apt-get update -y && apt-get install -y build-essential curl; }
+  command -v curl >/dev/null 2>&1 || { apt-get update -y && apt-get install -y curl; }
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --no-modify-path --profile minimal --default-toolchain stable \
+  && for b in cargo rustc rustup; do
+    # A wrapper, not a symlink: the rustup proxy finds its toolchain via
+    # RUSTUP_HOME, which a non-interactive ssh session does not have set.
+    printf '#!/bin/sh\nexport RUSTUP_HOME=/opt/rust/rustup\nexec /opt/rust/cargo/bin/%s "$@"\n' "$b" \
+      >/usr/local/bin/$b && chmod 755 /usr/local/bin/$b || exit 1
+  done \
+  && env -u RUSTUP_HOME -u CARGO_HOME HOME=/root PATH=/usr/local/bin:$PATH cargo --version \
+  && env -u RUSTUP_HOME -u CARGO_HOME HOME=/root PATH=/usr/local/bin:$PATH rustc --version \
+  && touch /var/lib/repo-remote/rust-ready
+) >>/var/log/repo-remote-rust.log 2>&1 || true
+EOF
+}
+
 # Build the full AWS EC2 user-data script for a newly created instance:
 # ALWAYS injects the resolved SSH public key into authorized_keys
 # (unconditional belt-and-suspenders, repo#177) and ALWAYS records the
@@ -2100,6 +2136,7 @@ aws_userdata() {  # <pubkey-line>
     # combined script only needs the ONE shebang emitted above.
     idle_guard_userdata | tail -n +2
   fi
+  rust_userdata
 }
 
 # Create a fresh instance into CREATED_ID (global, so a `die` propagates rather

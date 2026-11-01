@@ -210,3 +210,6 @@ node_modules/
 
 # DSN export revision sidecars written beside fixture boards (issue #6915)
 tests/fixtures/*.dsn-revision.json
+
+# Repo Skills Codex-side machine-local install metadata (never committed)
+.agents/skills/repo/.install-local.json
