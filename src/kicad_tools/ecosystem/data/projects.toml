@@ -1540,8 +1540,7 @@ a power-integrity analyzer (DC voltage drop and current density, AC PDN \
 impedance, switcher coupled noise) that runs as a KiCad IPC plugin or \
 standalone. No solver CLI, but its DC solver is importable without the GUI \
 and solved one rail of our board 09 in 0.1 s. GPL-3.0: ideas only, no \
-code in either direction. Our evaluation: \
-[docs/research/kipi-evaluation.md](docs/research/kipi-evaluation.md).\
+code in either direction.\
 """
 reeval_trigger = """
 If upstream ships a headless solve command with a stable output schema, or \
