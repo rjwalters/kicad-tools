@@ -13,6 +13,10 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-11-01
+
+- **PR #8177**: chore(repo-skills): bump Repo Skills 0.24.7 -> 0.25.1
+
 ### 2026-10-31
 
 - **PR #8175**: chore(release): v0.27.0
