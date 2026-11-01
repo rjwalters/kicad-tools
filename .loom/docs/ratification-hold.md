@@ -63,8 +63,8 @@ PR.
 
 ## Config
 
-`champion.ratificationPaths` (globs, additive to `spec/**`, `decisions/**`,
-`docs/decisions/**`, `*decision*.md`) and `champion.ratificationPhrases`
+`champion.ratificationPaths` (globs, additive to `spec/**`, `ratification/**`,
+`decisions/**`, `docs/decisions/**`, `*decision*.md`) and `champion.ratificationPhrases`
 (case-insensitive regexes, additive to the built-ins). Neither can remove a
 built-in. An explicit path alone does not hold; the phrase test still applies.
 Invalid phrase regexes degrade to literals.

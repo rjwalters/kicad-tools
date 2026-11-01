@@ -211,6 +211,10 @@ assert_contains "$OUT" "ACQUIRED" "interrupted-run lock does not block the retry
 assert_contains "$OUT" "interrupted during the 'uninstalling' phase" "names the interrupted phase"
 assert_contains "$OUT" "PARTIALLY UNINSTALLED" "warns the target may be half-uninstalled"
 assert_contains "$OUT" "git -C \"$T\" status --short" "prints a concrete recovery command"
+# #13356: the restore list must cover every path the uninstaller can stage.
+for p in .loom .claude CLAUDE.md AGENTS.md .gitignore .gitattributes; do
+  assert_contains "$OUT" " $p" "recovery restore list includes $p"
+done
 
 # 5. A lock with no parseable pid is treated as malformed and reclaimed.
 T="$(new_target)"
@@ -319,6 +323,17 @@ echo "$_tool (loom test stub) 0.0.0"
 EOF
   chmod +x "$STUB_BIN/$_tool"
 done
+# LOOM_STUB_PNPM_FAIL=1 makes the pnpm stub fail every call (a broken pinned
+# package manager / failed `pnpm daemon:build`); default is a version printer.
+cat > "$STUB_BIN/pnpm" <<'STUBEOF'
+#!/usr/bin/env bash
+if [[ "${LOOM_STUB_PNPM_FAIL:-0}" == "1" ]]; then
+  echo "STUB pnpm: simulated failure" >&2
+  exit 1
+fi
+echo "pnpm (loom test stub) 0.0.0"
+STUBEOF
+chmod +x "$STUB_BIN/pnpm"
 
 # Stub loom-daemon. \`init\` writes just enough for install.sh's post-init
 # steps (finalize_quick_install / verify_install) to run; LOOM_DAEMON_FAIL=1
@@ -431,6 +446,32 @@ if [[ ! -e "$T/.loom/.install.lock" ]]; then
   pass "e2e: lock released on an error()-triggered early exit"
 else
   fail "e2e: lock survived an error() exit (would wedge the next install)"
+fi
+
+# --- E2E 2b (#13356): a daemon build failure aborts BEFORE the uninstall, so
+# the target is left untouched (no staged deletions, lock never reaches
+# the destructive phase).
+T="$(new_target)"
+seed_target "$T"
+PRE_SHA="$(git -C "$T" rev-parse HEAD)"
+touch "$FAKE_ROOT/Cargo.toml"   # newer than the stub binary => stale => rebuild
+export LOOM_STUB_PNPM_FAIL=1
+OUT="$(run_installer "$T" --quick --confirm-reinstall -y)"
+EXIT_CODE=$?
+unset LOOM_STUB_PNPM_FAIL
+touch "$FAKE_ROOT/target/release/loom-daemon"   # fresh again for later cases
+if [[ $EXIT_CODE -ne 0 ]]; then
+  pass "e2e: failing daemon build/pnpm exits non-zero"
+else
+  fail "e2e: expected non-zero exit when the daemon build cannot run" "$OUT"
+fi
+assert_not_contains "$OUT" "Entering the destructive uninstall" "e2e: destructive window never opened on build failure"
+assert_not_contains "$OUT" "Uninstalling existing Loom installation" "e2e: uninstall never ran on build failure"
+STATUS_AFTER="$(git -C "$T" status --porcelain)"
+if [[ "$(git -C "$T" rev-parse HEAD)" == "$PRE_SHA" ]] && [[ -z "$STATUS_AFTER" ]]; then
+  pass "e2e: target git status clean after a pre-uninstall build failure"
+else
+  fail "e2e: target mutated by a run that failed before the uninstall" "$STATUS_AFTER"
 fi
 
 # --- E2E 3: a successful run releases the lock and leaves no lock artifacts.

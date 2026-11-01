@@ -156,6 +156,19 @@ captain's future use (#12810).
   `loom.forge.mirror.wake_latency{repo}` (summed seconds from a change at the
   mirror to the pull that saw it; divide by `changes` for the mean).
 
+**Stale draws report back (#12318).** In worklist mode, a claim refused because
+the live read disagreed with the drawn snapshot (`claimed`, or a
+`label_flip_failed` whose item moved; never `claim_lost` or a host-side
+refusal) makes the step driver `POST /v1/mirror/recheck {repo, number}`, so
+the mirror re-reads that one item. The daemon is a polite client: the call is
+fire-and-forget off the tick, deduplicated per `(repo, number)` per tick,
+never retried, and capped by a local token bucket at the mirror's per-caller
+default (60 an hour), so an excess is dropped on the host. It carries no state
+and nothing depends on it having happened; the refusal cooldown still applies.
+`loom.discovery.recheck{reason, outcome}` counts them (`outcome` = `sent`,
+`error` or `skipped`); the refused-for-staleness count per host is the
+daemon-side health measure for fleet discovery.
+
 That discovery no longer reaches GitHub shows as `loom.forge.calls` for
 `caller` `work_finder` falling while `reads{outcome=hit}`
 rises.

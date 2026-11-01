@@ -427,6 +427,19 @@ state "$OP_COMMENT" loom:review-requested loom:reviewing
 pv 12614 changes-requested "$HEAD" --body "Changes requested: see the spec." --review-started "$PAST_T"
 check "changes-requested is never refused by it" 0 "$RC"
 
+# #13134: --acknowledged-comment is forwarded and excuses only the listed id.
+state "$OP_COMMENT" loom:review-requested loom:reviewing
+pv 12614 approved "$HEAD" --body "Approved: covered by the new tests." --review-started "$PAST_T" --acknowledged-comment 4242
+check "acknowledged comment id: exit 0" 0 "$RC"
+check "acknowledged comment id: posted" 12614 "$POSTED"
+state "$OP_COMMENT" loom:review-requested loom:reviewing
+pv 12614 approved "$HEAD" --body "Approved: covered by the new tests." --review-started "$PAST_T" --acknowledged-comment 9999
+check "acknowledging a different id still refuses: exit 7" 7 "$RC"
+contains "refusal names the remedy flag" "$OUT" "--acknowledged-comment"
+state "$OP_COMMENT" loom:review-requested loom:reviewing
+pv 12614 approved "$HEAD" --body "Approved: covered by the new tests." --review-started "$PAST_T" --acknowledged-comment 4242 --issue-body-sha "50=$(printf %s 'stale body' | sha256sum | cut -d' ' -f1)"
+check "acknowledged id never excuses a body-hash mismatch: exit 7" 7 "$RC"
+
 # #12714: the start comes from the dispatch, so omitting or lying about the flag cannot hide a comment.
 DISPATCH_T="$(($(date +%s) - 3600))"
 state "$OP_COMMENT" loom:review-requested loom:reviewing

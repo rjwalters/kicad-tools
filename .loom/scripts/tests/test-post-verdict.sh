@@ -201,6 +201,12 @@ if [[ "${1:-} ${2:-} ${3:-}" == "lease pr check" ]]; then
   [[ -f "$D/lease-state" ]] || { echo "PR_LEASE_STATE=held-self"; exit 0; }
   read -r rc line < "$D/lease-state"; [[ -n "$line" ]] && echo "$line"; exit "$rc"
 fi
+# #13264: `lease pr release` is logged; lease-release-rc makes it fail.
+if [[ "${1:-} ${2:-} ${3:-}" == "lease pr release" ]]; then
+  printf '%s\n' "$*" >> "$D/lease-release.log"
+  [[ -f "$D/lease-release-rc" ]] && { echo "release failed" >&2; exit "$(cat "$D/lease-release-rc")"; }
+  exit 0
+fi
 if [[ "${1:-}" == --version ]]; then echo "loom-daemon 0.19.870 (mock)"; exit 0; fi
 # #12475: the reconciliation gate reads comment verdicts through the trust
 # filter; this suite posts none, so the filter just echoes its (empty) stdin.
@@ -871,6 +877,28 @@ echo "2 error: unrecognized subcommand 'pr'" > "$STUB_DIR/lease-state"
 run_pv 343 approved abc1234 --body "ok"
 assert_eq "0" "$EXIT_CODE" "binary without lease pr (exit 2) -> approval proceeds"
 assert_contains "$OUTPUT" "not gating the approval" "older binary: loud warning"
+
+# --- Judge lease release after a posted verdict (#13264) ---------------------
+for v in approved changes-requested; do
+  reset_state
+  rm -f "$STUB_DIR/lease-release.log" "$STUB_DIR/lease-release-rc"
+  run_pv 344 "$v" abc1234 --body "ok"
+  assert_eq "0" "$EXIT_CODE" "$v: posted"
+  assert_contains "$(cat "$STUB_DIR/lease-release.log" 2>/dev/null || true)" "lease pr release 344 --role judge --watch-pid" "$v: lease released after the verdict"
+done
+reset_state
+rm -f "$STUB_DIR/lease-release.log"
+echo 2 > "$STUB_DIR/lease-release-rc"
+run_pv 345 approved abc1234 --body "ok"
+assert_eq "0" "$EXIT_CODE" "release failure (exit 2) never fails the verdict"
+assert_contains "$OUTPUT" "releasing the Judge lease failed" "release failure warns"
+rm -f "$STUB_DIR/lease-release-rc"
+reset_state
+echo "0 PR_LEASE_STATE=free" > "$STUB_DIR/lease-state"
+rm -f "$STUB_DIR/lease-release.log"
+run_pv 346 approved abc1234 --body "ok"
+assert_contains "$OUTPUT" "gate-refused:lease" "exit-10 message names the skip reason"
+assert_eq "" "$(cat "$STUB_DIR/lease-release.log" 2>/dev/null || true)" "refused approval: script does not release"
 
 # --- Summary ---
 echo ""

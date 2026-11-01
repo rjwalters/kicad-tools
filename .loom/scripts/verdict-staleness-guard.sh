@@ -601,7 +601,17 @@ FRESH_REASON=""
 if [[ -n "$MARKER_SHA" && "${HEAD_SHA:0:${#MARKER_SHA}}" == "$MARKER_SHA" ]]; then
   FRESH_REASON="verdict $VERDICT_LABEL was rendered against the current head SHA"
 elif [[ -n "$MARKER_SHA" ]]; then
-  EQUIV_KIND="$("${LOOM_DAEMON_BIN:-loom-daemon}" forge verdict-equivalent "$PR" "$MARKER_SHA" "$HEAD_SHA" 2>"$GH_STDERR" | sed -n 's/^EQUIVALENCE_KIND=//p')"
+  # #13150: name the repo when one is known (LOOM_REPO, else the vetted write repo) so the
+  # answer does not depend on cwd. A daemon predating `--repo` (#13146) rejects the flag with
+  # nothing on stdout; retry once without it so that degrades to the old cwd resolution, not STALE.
+  EQUIV_REPO="${LOOM_REPO:-$WRITE_REPO}"
+  EQUIV_KIND=""
+  if [[ -n "$EQUIV_REPO" ]]; then
+    EQUIV_KIND="$("${LOOM_DAEMON_BIN:-loom-daemon}" forge verdict-equivalent --repo "$EQUIV_REPO" "$PR" "$MARKER_SHA" "$HEAD_SHA" 2>"$GH_STDERR" | sed -n 's/^EQUIVALENCE_KIND=//p')"
+  fi
+  if [[ -z "$EQUIV_KIND" ]] && { [[ -z "$EQUIV_REPO" ]] || grep -q -- '--repo' "$GH_STDERR" 2>/dev/null; }; then
+    EQUIV_KIND="$("${LOOM_DAEMON_BIN:-loom-daemon}" forge verdict-equivalent "$PR" "$MARKER_SHA" "$HEAD_SHA" 2>"$GH_STDERR" | sed -n 's/^EQUIVALENCE_KIND=//p')"
+  fi
   EQUIV_WHY="$(sed -n 's/.* Why: //p' "$GH_STDERR" | head -n 1)"; if [[ -n "$EQUIV_KIND" ]]; then
     FRESH_REASON="verdict $VERDICT_LABEL was rendered against $MARKER_SHA and head is now $HEAD_SHA, but the change this PR makes is unchanged across the move (equivalence kind: $EQUIV_KIND) — so the verdict still describes it (#9576, #9416). CI still re-runs against $HEAD_SHA; only the review carries over."
   fi

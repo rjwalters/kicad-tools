@@ -194,6 +194,10 @@ if [[ "$1" == "forge" && "$2" == "verdict-equivalent" ]]; then
     echo "stub loom-daemon: could not decide $4 -> $5 — re-review (fail closed). Why: clean-merge: new head $5 is not in the local clone and could not be fetched: stub" >&2
     exit 1
   fi
+  if [[ -f "$STUB_DIR_FROM_ENV/tree-no-repo-flag" && "$*" == *" --repo "* ]]; then
+    echo "error: unexpected argument '--repo' found" >&2
+    exit 2
+  fi
   EQ_KIND=""
   [[ -f "$STUB_DIR_FROM_ENV/tree-identical" ]] && EQ_KIND=tree
   [[ -f "$STUB_DIR_FROM_ENV/equiv-clean-merge" ]] && EQ_KIND=clean-merge
@@ -1275,7 +1279,7 @@ assert_eq "$SHA_B" "$(get_field "$OUT" HEAD_SHA)" "(u1) HEAD_SHA is the moved he
 assert_eq "" "$WRITES" "(u1) loom:pr is NOT removed on a tree-identical move"
 assert_eq "" "$COMMENTS_POSTED" "(u1) No stale-verdict comment posted"
 assert_eq "" "$DAEMON" "(u1) No auto-merge disarm — the reviewed tree IS what is at the head"
-assert_contains "$TREE_CALLS" "forge verdict-equivalent 270 $SHA_A $SHA_B" "(u1) The comparison is asked pr, marker, head, in that order"
+assert_contains "$TREE_CALLS" "forge verdict-equivalent --repo owner/repo 270 $SHA_A $SHA_B" "(u1) The comparison names the vetted write repo, then asks pr, marker, head, in that order (#13150)"
 assert_contains "$OUT" "equivalence kind: tree" "(u1) REASON names the equivalence kind that carried the verdict"
 assert_contains "$OUT" "CI still re-runs" "(u1) REASON states that CI is not exempted (#9416 AC5)"
 
@@ -1327,6 +1331,27 @@ pr_json 274 "$SHA_A" "loom:pr"
 run_guard 274 --clear
 assert_eq "0" "$RC" "(u5) Marker == head -> exit 0"
 assert_eq "" "$TREE_CALLS" "(u5) No compare call on the unchanged-head fast path"
+
+# (u5b) #13150: with LOOM_REPO known the comparison names the repo; without it the flag is omitted.
+reset_state
+pr_json 276 "$SHA_B" "loom:pr"
+{ echo "["; verdict_comment "2026-09-30T00:00:00Z" "$SHA_A" "approved"; echo "]"; } > "$STUB_DIR/comments-276.json"
+: > "$STUB_DIR/tree-identical"
+rm -f "$STUB_DIR/tree-calls.log"
+LOOM_REPO=acme/widgets run_guard 276
+assert_eq "FRESH" "$(get_field "$OUT" DECISION)" "(u5b) LOOM_REPO set -> FRESH"
+assert_contains "$TREE_CALLS" "forge verdict-equivalent --repo acme/widgets 276 $SHA_A $SHA_B" "(u5b) --repo <repo> is passed to the verb"
+rm -f "$STUB_DIR/tree-calls.log"
+run_guard 276
+assert_contains "$TREE_CALLS" "forge verdict-equivalent 276 $SHA_A $SHA_B" "(u5b) No known repo -> flag omitted, as before"
+
+# (u5c) #13150: a daemon whose clap rejects --repo is retried once without it (not widened into STALE).
+rm -f "$STUB_DIR/tree-calls.log"
+: > "$STUB_DIR/tree-no-repo-flag"
+LOOM_REPO=acme/widgets run_guard 276
+assert_eq "FRESH" "$(get_field "$OUT" DECISION)" "(u5c) --repo-rejecting daemon -> still FRESH via the retry"
+assert_contains "$TREE_CALLS" "forge verdict-equivalent 276 $SHA_A $SHA_B" "(u5c) The retry omits the flag"
+rm -f "$STUB_DIR/tree-no-repo-flag"
 
 # (u6) Report-only (no --clear) on a tree-identical move: FRESH, exit 0, and
 #      still nothing written — a caller that only reports must see the

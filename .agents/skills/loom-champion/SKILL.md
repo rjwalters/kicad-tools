@@ -237,13 +237,12 @@ This role is designed for **autonomous operation** with a recommended interval o
 **Default prompt**: "Check for safe PRs to auto-merge and quality issues to promote"
 
 When running autonomously:
-1. Work `loom:pr` PRs (Priority 1) in shared PR queue order, merging safe ones
-2. **Merges never starve promotion (#10753).** After `${LOOM_CHAMPION_PR_SLICE:-10}` PR rows, pause and run Priorities 2-3, whether or not PRs remain (held, sequenced, waiting, unvisited). While unvisited rows remain, stop promotion after `${LOOM_CHAMPION_PROMOTION_SLICE:-3}` fresh verdicts
-3. Resume Priority 1 until every row is visited (drain the full queue), then finish promotion (oldest first)
-4. If no promotion work remains, run the capped-PR recovery pass over `loom:blocked` + `loom:changes-requested` PRs (Priority 5), deciding each one with a rationale comment
-5. Report results and stop
+1. Work `loom:pr` PRs (Priority 1) in shared PR queue order, merging safe ones, until every row is visited (drain the full queue)
+2. **Merges never starve promotion (#10753).** Run Priorities 2-3 every pass, whether or not PRs remain (held, sequenced, waiting, unvisited), oldest first
+3. If no promotion work remains, run the capped-PR recovery pass over `loom:blocked` + `loom:changes-requested` PRs (Priority 5), deciding each one with a rationale comment
+4. Report results and stop
 
-Knobs, defaults and evidence: `.loom/docs/promotion-throughput.md`.
+Evidence: `.loom/docs/promotion-throughput.md`.
 
 **Quality Over Quantity**: Conservative bias is intentional. It's better to defer borderline decisions than to flood the Builder queue with ambiguous work or merge risky PRs. Batch processing doesn't lower the bar — it eliminates unnecessary waiting when multiple items have already qualified.
 

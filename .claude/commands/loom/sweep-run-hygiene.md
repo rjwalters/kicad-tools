@@ -2,7 +2,7 @@
 
 > **Reference file for [`sweep.md`](sweep.md)**, the `/loom:sweep` dispatcher.
 >
-> **Load when:** **before the first wave** (or, on the daemon path, before the first `mcp__loom__dispatch_sweep` call) for the five advisory checks, and whenever a peer `/loom:sweep` or a daemon may be sharing this repo.
+> **Load when:** **before the first wave** (or, on the daemon path, before the first `mcp__loom__dispatch_sweep` call) for the six advisory checks, and whenever a peer `/loom:sweep` or a daemon may be sharing this repo.
 >
 > **Flat, one level deep.** `sweep.md` names every file a given run needs up
 > front; nothing here needs a *third* file. An unresolved "above"/"below" points
@@ -20,6 +20,7 @@
 - [Outstanding Quarantine Stashes (#5185)](#outstanding-quarantine-stashes-5185)
 - [Stale / Undocumented `loom:blocked` Issues (#8927)](#stale--undocumented-loomblocked-issues-8927)
 - [Silent PR Queues (#8923)](#silent-pr-queues-8923)
+- [Missing Hold / State Labels (#13330)](#missing-hold--state-labels-13330)
 - [Sweep Child Working-Set Contract (#3980)](#sweep-child-working-set-contract-3980)
 - [Coexistence (peer `/loom:sweep` and legacy daemon)](#coexistence-peer-loomsweep-and-legacy-daemon)
 
@@ -125,6 +126,23 @@ loom-daemon pr-latency --advise
 ```
 
 Advisory-only: always exits `0`, **must not block** the sweep, strictly **read-only** (never writes a label, never comments). If it warns, the operator should merge the PR, clear the hold, or say why it stands (`./.loom/scripts/merge-pr.sh <PR>`) — it reports the **silence**, never judges the hold. Why the unshipped side needs a view at all, dwell vs. age, the four disjoint populations, and the gated-exclusion rationale: [`pr-latency.md`](../../../.loom/docs/pr-latency.md).
+
+## Missing Hold / State Labels (#13330)
+
+A park written to a forge that lacks `loom:operator` (a consumer repo that never ran `sync-labels.sh`) fails with `'loom:operator' not found`; if nothing notices, the issue keeps `loom:curated` with no hold and a later pass can promote it.
+
+**Same pre-wave timing and sibling role as the five checks above** — run it and surface its output to the user:
+
+```bash
+out=$(./.loom/scripts/sync-labels.sh --check 2>&1); rc=$?   # capture first: a pipe would hide the exit status
+printf '%s\n' "$out" | grep -E '^[[:space:]]*MISSING[[:space:]]+loom:(operator|blocked|frozen|issue|curated|building)[[:space:]]'
+```
+
+`--check` prints each line as `  MISSING       <label> (declared in labels.yml, absent on <repo>)` (leading spaces, padded), and exits `3` on drift, so match with `[[:space:]]` and read `$rc`, not the `grep` status.
+
+Advisory-only: **must not block** the sweep, strictly **read-only** (`--check` never creates a label). Reuse `sync-labels.sh --check` (it reads the live label set once); do not write a second lister. Print **one line** naming the missing hold/state labels (`loom:operator`, `loom:blocked`, `loom:frozen`, `loom:issue`, `loom:curated`, `loom:building`) and pointing at `./.loom/scripts/sync-labels.sh`. Every other missing label is out of this check's scope. If `$rc` is `4` (forge unreachable), say "hold labels not evaluated" — never claim they exist. All present: print nothing to stderr.
+
+If a park write later fails anyway (`park-record apply` / `operator-decision apply` exit non-zero with a `sync-labels.sh` hint), the summary reports it as `park failed (label missing)` — see `sweep-summary-output.md`.
 
 ## Sweep Child Working-Set Contract (#3980)
 

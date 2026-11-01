@@ -2,11 +2,10 @@
   "name": "Plain Shell",
   "description": "Standard shell environment with no specialized role",
   "suggestedModel": "sonnet",
-  "defaultInterval": 0,
-  "defaultIntervalPrompt": "",
-  "autonomousRecommended": false,
   "suggestedWorkerType": "claude",
   "toolPolicy": {
-    "allowedCapabilities": ["*"]
+    "allowedCapabilities": [
+      "*"
+    ]
   }
 }

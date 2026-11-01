@@ -147,7 +147,7 @@ done <"$FIXTURE_DIR/cases.tsv"
 
 echo "Forbidden lines"
 # shellcheck disable=SC2016  # literal workflow text
-for line in '  permissions:' '      id-token: write' '  token: ${{ secrets.PAT }}' '  pull_request_target:' '  workflow_run:' \
+for line in '      id-token: write' '  permissions: read-all' '  permissions: {contents: read}' '  "permissions":' '  token: ${{ secrets.PAT }}' '  pull_request_target:' '  workflow_run:' \
     '      secrets: inherit' '  token: ${{ secrets["PAT"] }}' '  env: ${{ toJSON(secrets) }}' '  token: ${{ SECRETS.PAT }}' \
     '  "permissions": {contents: write}' '  permissions : write-all' '      - run: gh pr merge --admin --merge "$PR"' \
     '      - run: npm publish' '      - run: gh release create v1' '      - run: wrangler deploy' \
@@ -155,6 +155,19 @@ for line in '  permissions:' '      id-token: write' '  token: ${{ secrets.PAT }
     patch=$(printf '@@ -1 +1,2 @@\n x\n+%s' "$line")
     assert_eq red "$(run "[$(entry .github/workflows/ci.yml "$patch")]" green "loom:pr")" "added '$line' -> red"
 done
+echo "Read-only permissions header (#13291)"
+for line in 'permissions:' '  permissions:' '      permissions:' $'\tpermissions:' $'permissions:\r' 'permissions: {}' '    permissions:  '; do
+    patch=$(printf '@@ -1 +1,2 @@\n x\n+%s' "$line")
+    assert_eq green "$(run "[$(entry .github/workflows/ci.yml "$patch")]" green "loom:pr")" "added header '$line' -> green"
+done
+patch=$(printf '@@ -1,2 +1,4 @@\n x\n+permissions:\n+  contents: read')
+assert_eq green "$(run "[$(entry .github/workflows/ci.yml "$patch")]" green "loom:pr")" "workflow-level permissions + contents: read -> green"
+patch=$(printf '@@ -1,2 +1,4 @@\n x\n+    permissions:\n+      contents: read')
+assert_eq green "$(run "[$(entry .github/workflows/ci.yml "$patch")]" green "loom:pr")" "job-level permissions + contents: read -> green"
+patch=$(printf '@@ -1,2 +1,4 @@\n x\n+permissions:\n+  contents: write')
+assert_eq red "$(CONTENT=ci-adds-contents-write.yml run "[$(entry .github/workflows/ci.yml "$patch")]" green "loom:pr")" "permissions header + contents: write child (head contents) -> red"
+patch=$(printf '@@ -1,2 +1,4 @@\n x\n+permissions:\n+  contents: write-all')
+assert_eq red "$(CONTENT=ci-adds-contents-write.yml run "[$(entry .github/workflows/ci.yml "$patch")]" green "loom:pr")" "permissions header + write-all child -> red"
 patch=$(printf '@@ -1,2 +1 @@\n x\n-  permissions:')
 assert_eq red "$(run "[$(entry .github/workflows/ci.yml "$patch")]" green "loom:pr")" "removed 'permissions:' -> red"
 patch=$(printf '@@ -1,2 +1,2 @@\n permissions:\n-  x: 1\n+  x: 2')

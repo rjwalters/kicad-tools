@@ -126,7 +126,7 @@ assert_not_contains "$rec" "other-tool.sh" "non-kept-set files are not in the re
 
 echo "--- one changed byte holds ---"
 new_fx "$V"
-sed -i 's/aaa111/aaa999/' "$FX/files.json"
+sed -i.bak 's/aaa111/aaa999/' "$FX/files.json"; rm -f "$FX/files.json.bak"
 assert_eq "NOT ELIGIBLE" "$(result_of "$(run_eval)")" "a kept-set blob that differs from the tag holds"
 
 echo "--- missing / unparsable tag holds ---"
@@ -147,9 +147,9 @@ echo '[{"filename":".claude/settings.json","sha":"ddd444","status":"modified"}]'
 assert_eq "NOT ELIGIBLE" "$(result_of "$(run_eval)")" "kept-set file with no defaults/ mapping holds"
 
 echo "--- removed / renamed kept-set file holds ---"
-new_fx "$V"; sed -i '0,/"modified"/s//"removed"/' "$FX/files.json"
+new_fx "$V"; sed -i.bak '1s/"modified"/"removed"/' "$FX/files.json"; rm -f "$FX/files.json.bak"
 assert_eq "NOT ELIGIBLE" "$(result_of "$(run_eval)")" "a removed kept-set file holds"
-new_fx "$V"; sed -i '0,/"modified"/s//"renamed"/' "$FX/files.json"
+new_fx "$V"; sed -i.bak '1s/"modified"/"renamed"/' "$FX/files.json"; rm -f "$FX/files.json.bak"
 assert_eq "NOT ELIGIBLE" "$(result_of "$(run_eval)")" "a renamed kept-set file holds"
 new_fx "$V"
 jq '.[0] |= (.previous_filename = .filename | .filename = (.filename + ".bak") | .status = "renamed")' "$FX/files.json" >"$FX/files.tmp" && mv "$FX/files.tmp" "$FX/files.json"
@@ -175,7 +175,7 @@ new_fx "$V"; rm "$FX/files.json"
 assert_eq "NOT ELIGIBLE" "$(result_of "$(run_eval)")" "unreadable files list holds"
 
 echo "--- mixed PR: matches plus one mismatch holds ---"
-new_fx "$V"; sed -i 's/bbb222/bbb000/' "$FX/files.json"
+new_fx "$V"; sed -i.bak 's/bbb222/bbb000/' "$FX/files.json"; rm -f "$FX/files.json.bak"
 assert_eq "NOT ELIGIBLE" "$(result_of "$(run_eval)")" "one mismatching kept-set file among matches holds"
 
 echo "--- merge-gate path or non-install file holds (#12945) ---"
@@ -189,6 +189,15 @@ assert_eq "NOT ELIGIBLE" "$(result_of "$(run_eval)")" "a champion prompt change 
 new_fx "$V"
 jq '.[2].filename = "src/app.rs"' "$FX/files.json" >"$FX/f.tmp" && mv "$FX/f.tmp" "$FX/files.json"
 assert_eq "NOT ELIGIBLE" "$(result_of "$(run_eval)")" "a file outside the install set holds"
+new_fx "$V"
+jq '.[2].filename = ".agents/skills/loom-builder-worktree/SKILL.md"' "$FX/files.json" >"$FX/f.tmp" && mv "$FX/f.tmp" "$FX/files.json"
+assert_eq "NOT ELIGIBLE" "$(result_of "$(run_eval)")" "a .agents/skills file holds: deliberately unwaivable (ruling #13313)"
+new_fx "$V"
+jq '.[2].filename = ".loom/roles/builder-worktree.md"' "$FX/files.json" >"$FX/f.tmp" && mv "$FX/f.tmp" "$FX/files.json"
+assert_eq "NOT ELIGIBLE" "$(result_of "$(run_eval)")" "a .loom/roles file holds: no upstream mapping (ruling #13313)"
+new_fx "$V"
+jq '.[2].filename = ".loom/roles/judge.md"' "$FX/files.json" >"$FX/f.tmp" && mv "$FX/f.tmp" "$FX/files.json"
+assert_eq "NOT ELIGIBLE" "$(result_of "$(run_eval)")" "a .loom/roles/judge.md file holds as a merge-gate path (ruling #13313)"
 
 echo "--- docs ---"
 assert_doc() { assert_contains "$(cat "$1")" "$2" "$3"; }

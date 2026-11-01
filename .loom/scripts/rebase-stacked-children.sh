@@ -4,7 +4,7 @@
 # Sibling of reconcile-stack.sh. Where reconcile-stack.sh handles the
 # post-squash-merge moment (strip the parent's now-squashed commits off a child
 # and retarget its base to the default branch), THIS script handles the much
-# more common PRE-merge moment: a stacked parent's PR (feature/issue-<parent>)
+# more common PRE-merge moment: a stacked parent's PR (any branch name)
 # is still open and under review, Doctor amends the parent branch (interactive
 # rewrite or additive commits + force-with-lease), and any child that branched
 # off the parent's *pre-amend* tip is now silently stale. This tool detects that
@@ -55,7 +55,8 @@
 #     normal, recoverable failure (final exit 2) with manual-recovery hints; the
 #     conflicted rebase is aborted so remaining children still process.
 #   - Refuses to run with a dirty working tree (a rebase would fail confusingly).
-#   - GitHub-only, and only for a <parent-branch> matching feature/issue-<N>.
+#   - GitHub-only. <parent-branch> may have any name; a child that is not a
+#     feature/issue-<N> branch has no loom:building claim to race, so it is safe.
 #   - Rebases only where `loom-daemon branch-update strategy` says `rebase`
 #     (#10771). In a merge-only repo (the default answer, and the answer when
 #     anything is unknown) a stale child is NEVER rewritten; it is de-stacked by
@@ -473,12 +474,11 @@ Parent branch \`$parent_branch\` advanced (amended/pushed) after this child bran
 }
 
 # Discover open child PRs stacked on <parent-branch> and rebase (or defer) each
-# stale one. GitHub-only, feature/issue-<N> parent only; a no-op otherwise.
+# stale one. GitHub-only; the parent branch may have any name.
 _rebase_stacked_children() {
     local parent_branch="$1"
 
     [[ "$FORGE_TYPE" == "github" ]] || { info "Forge is '${FORGE_TYPE:-unknown}', not github — nothing to do"; return 0; }
-    [[ "$parent_branch" =~ ^feature/issue-([0-9]+)$ ]] || { info "Parent branch '$parent_branch' is not a feature/issue-<N> branch — nothing to do"; return 0; }
 
     # Live forge discovery — same shape as merge-pr.sh's item 1/2 query. Plain
     # `gh` (uncached) so we see child PRs as of right now.
@@ -512,7 +512,6 @@ _rebase_stacked_children() {
 # relevant when the parent branch actually gates a real rebase below.
 if [[ "$DRY_RUN" != "true" ]] \
    && [[ "$FORGE_TYPE" == "github" ]] \
-   && [[ "$PARENT_BRANCH" =~ ^feature/issue-([0-9]+)$ ]] \
    && [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
     err "Working tree is dirty. Commit, stash, or discard changes before rebasing stacked children."
     exit 1

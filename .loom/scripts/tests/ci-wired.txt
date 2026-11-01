@@ -55,6 +55,7 @@ test-champion-issue-promo-escalation-respects-human-hold.sh
 test-champion-markerless-park.sh
 test-champion-merge-queue-step-no-fallthrough.sh
 test-champion-out-of-band-ac-gate-switch.sh
+test-champion-merge-risk-self-release.sh
 test-champion-pr-merge-hold-release.sh
 test-champion-pr-merge-negation-guard.sh
 test-champion-post-claim-recheck.sh
@@ -354,3 +355,5 @@ test-tools-first-clean-install.sh
 test-repo-root-alias.sh
 # #11787: create-issue.sh refuses a direct loom:curated write (exits 2 before forge_detect). Hermetic.
 test-create-issue-curated.sh
+# #13414: guide unblock sweep honors a park record over AC checkboxes. Hermetic.
+test-guide-park-record-precedence.sh

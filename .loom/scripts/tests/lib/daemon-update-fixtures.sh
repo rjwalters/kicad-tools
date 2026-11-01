@@ -85,6 +85,16 @@ fi
 # clears it.
 export LOOM_DAEMON_UPDATE_INVOKER="${LOOM_DAEMON_UPDATE_INVOKER:-test-fixture}"
 
+# #13369: the updater's pre-sync `git fetch` is skipped when the checkout's
+# volume is below the disk-warn floor (#10995, default 20G). Those fixtures
+# fast-forward a local origin and expect the sync to land, so on a runner with
+# <20G free the sync silently did not happen: the source HEAD stayed behind
+# while the fake build stamped the origin's HEAD, tripping build verification
+# (floor-confirm 13 failures) and the "why not fast-forwarded" message (fetch).
+# The fixtures' origin is local and tiny; pin the floor to 0 (never skips) so
+# the result does not depend on how full the host's disk is.
+export LOOM_WORKTREE_REAPER_DISK_WARN_GB=0
+
 loom_fixture_scratch_root() {
     LOOM_FIXTURE_SCRATCH_ROOT="$(cd "$1" 2>/dev/null && pwd -P)" || {
         echo "loom_fixture_scratch_root: '$1' does not exist" >&2

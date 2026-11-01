@@ -530,10 +530,19 @@ matched line is captured, not just the first (#4508):
 | Depends on | `Depends on #123`, `_Depends on_ #123` |
 | Requires | `Requires #123` |
 | Task list (unchecked only) | `- [ ] #123: Description` — a checked `- [x] #123` records done work, not a gate (#7973) |
+| Park record (wins) | `<!-- loom:park Blocked by: #123 ... -->` — when present, ONLY these lines are gates; unchecked acceptance-criterion `- [ ] #N` lines in the same body are not (#13414) |
 
 ```bash
 parse_dependencies() {
   local body="$1"
+  # Park record wins (#13414): a body carrying `<!-- loom:park ... -->` names its
+  # gates there; ordinary `- [ ] #N` acceptance criteria must not count.
+  if grep -qE '^[[:space:]]*<!-- loom:park ' <<<"$body"; then
+    grep -E '^[[:space:]]*<!-- loom:park [*_:[:space:]]*Blocked by' <<<"$body" \
+      | sed -E 's/^[[:space:]]*<!-- loom:park //; s/ by=.*//' \
+      | grep -oE '([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#[0-9]+' | sed 's/^#//' | sort -u
+    return
+  fi
   # Two-stage parse (#4508): select dependency lines (checkbox UNCHECKED-only,
   # #7973), then extract every N / OWNER/REPO#N.
   echo "$body" \
@@ -661,6 +670,11 @@ has_permanent_block() {  # unreadable => true
   jq -e 'any(.[]; (.body // "") | test("(^|\n)[ \t]*<!-- loom:permanent-block -->[ \t\r]*(\n|$)"))' <<<"$t" >/dev/null && echo true || echo false
 }
 
+has_restore_note() {  # #13414: latest trusted comment is a Champion/operator hold-restore note; unreadable => true
+  local t; t=$(loom-daemon forge trusted-comments --fetch "$1" --with-body 2>/dev/null) || { echo true; return; }
+  jq -e '(. | last | .body // "") | test("(^|\n)[ \t]*<!-- loom:hold-restored -->[ \t\r]*(\n|$)")' <<<"$t" >/dev/null && echo true || echo false
+}
+
 check_and_unblock() {
   # --limit: gh defaults to 30 (#10553)
   local blocked_limit=1000 blocked_json blocked_count
@@ -676,6 +690,7 @@ check_and_unblock() {
     local title=$(printf '%s\n' "$issue" | jq -r '.title')
 
     [ "$(has_permanent_block "$number")" = "true" ] && continue  # #8742
+    [ "$(has_restore_note "$number")" = "true" ] && continue  # #13414: Champion/operator restored the hold
 
     local deps=$(parse_dependencies "$body")
 

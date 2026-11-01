@@ -47,7 +47,7 @@ Loom has three hold labels, each with one meaning:
 
 | Label | Meaning | Release |
 |---|---|---|
-| `loom:blocked` | Waiting on something outside the item: another change merging, a capability, a dependency. The park record or a `Blocked by #N` line says what. Also Champion's own merge-risk and critical-file PR holds (#11861, "Champion's PR holds" below) | A role or a human, once the blocker resolves. Nothing lifts it automatically: the daemon's release pass was retired (#11301). `check-stale-blocked` and `merge-pr.sh`'s cleared-blocker notice report cleared blockers; see [`park-record.md`](park-record.md). Champion releases its own PR holds |
+| `loom:blocked` | Waiting on something outside the item: another change merging, a capability, a dependency. The park record or a `Blocked by #N` line says what. Also Champion's own merge-risk and critical-file PR holds (#11861, "Champion's PR holds" below) | A role or a human, once the blocker resolves. Nothing lifts it automatically, with one carve-out (#13331): `merge-pr.sh`'s cleared-blocker notice (`notify-cleared-blockers`) swaps `loom:blocked` for `loom:curated` on an issue whose park records are all `by=curator`, name a blocker, and whose every blocker has merged or closed (no unticked dependency, no `loom:operator`/`loom:frozen`/hard-exclusion label); it never adds `loom:issue`. The daemon's release pass stays retired (#11301). `check-stale-blocked` and `merge-pr.sh`'s cleared-blocker notice report cleared blockers; see [`park-record.md`](park-record.md). Champion releases its own PR holds |
 | `loom:operator` | A human must act or decide. The body says which: a ```` ```decision ```` block is a ruling ([`operator-decision.md`](operator-decision.md)); otherwise the comment names the step; a `Blocked by #N` line says the human action waits on something named | A human removes it. Nothing else does |
 | `loom:frozen` | Not now; don't touch (#11743). No agent or daemon path reads it as work, comments on it or relabels it | A human removes it |
 
@@ -350,6 +350,14 @@ trusted notice matches both, the step tick excludes the issue from `champion_pro
 (pass reason `author_gate_held`, #13142) instead of re-drawing a session that can only
 repeat the verdict. A body edit, a trust-list change, or a legacy unstamped notice
 makes it drawable once; a trusted `loom:issue` takes it out of the queue.
+
+**ci-daily tracker exception (#13378).** `promotion-author` also returns `TRUSTED` for an
+issue authored by exactly `github-actions[bot]` whose title starts with `[ci-daily] ` and
+whose body contains ``opened, updated and closed by `.github/workflows/ci-daily.yml` ``
+(the sentence the workflow writes into every tracker); all three must hold. The exception
+lives in the author gate only: the bot is not added to `forge.trustedCommenters`, so its
+comments and markers stay untrusted everywhere (`forge trusted-comments`, verdict and
+hold markers, PRs and non-tracker issues).
 
 Adoption is a trusted maintainer applying `loom:issue` by hand, or re-filing the
 issue; an automated Champion verdict alone is not adoption. Trusted authors see no

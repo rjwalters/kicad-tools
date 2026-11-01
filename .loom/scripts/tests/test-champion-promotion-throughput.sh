@@ -1,35 +1,27 @@
 #!/usr/bin/env bash
-# test-champion-promotion-throughput.sh - Regression test for issue #10753,
-# items 1 and 2 (merges must not starve promotion; the promotion caps are
-# configurable), with the caps mapped onto priority level by #11512.
+# test-champion-promotion-throughput.sh - Regression test for issue #10753
+# (merges must not starve promotion; NEEDS REVISION goes to Curator). The
+# per-pass tier caps and promotion slices it once covered were retired by step
+# dispatch (#11894) and deleted (#13272).
 #
 # THE FAILURE MODES THIS GUARDS AGAINST
 #
 #   pass order    champion.md ran promotion only "if no PRs remain". A repo
 #                 with a held PR queue never reached it (rjwalters/loom on
 #                 2026-10-07: 30 of 38 `loom:pr` PRs held by loom:operator).
-#   fixed caps    The caps were literals (2 / 1 / 5) repeated in five files,
-#                 so a fleet could not tune them.
-#   self-pinning  The backlog gate once counted issues that cannot free a slot
-#                 (waiting proposals, held issues: 19 counted vs 2 promoted in
-#                 rjwalters/loom), so the cap pinned itself.
-#   stale caps    #11103 retired the `tier:*` labels the caps keyed on; #11512
-#                 maps them by population: very-important and important are
-#                 uncapped, no level = tier2Cap per pass with NO backlog gate.
-#                 Keyed on no level, the old Tier 3 backlog gate counted 46
-#                 promoted issues against a cap of 5 and froze promotion.
+#   self-pinning  The informational Backlog Balance Check once counted issues
+#                 that cannot free a slot (waiting proposals, held issues: 19
+#                 counted vs 2 promoted in rjwalters/loom).
 #
 # WHAT THIS SUITE DOES
 #
 #   1. BEHAVIOUR -- the Backlog Balance Check block is EXTRACTED from the
 #      shipped champion-issue-promo.md and EXECUTED against a stubbed `gh`:
-#      defaults, env overrides, malformed values, and the per-level occupant
-#      counts. A copy without the held-issue filter is run as a negative
-#      control, so the occupant assertions cannot pass vacuously.
-#   2. WIRING -- the rate-limit prose maps each level to its cap and names the
-#      env vars, no Champion file reads a retired tier label, and the docs
-#      record the knobs.
-#   3. champion.md runs promotion every pass with the two slice knobs.
+#      the per-level occupant counts. A copy without the held-issue filter is
+#      run as a negative control, so the assertions cannot pass vacuously.
+#   2. WIRING -- Promotion Order ranks the levels, no Champion file reads a
+#      retired tier label, and the deleted cap/slice text stays deleted.
+#   3. champion.md runs promotion every pass.
 #
 # Hermetic: file reads plus a mktemp -d fixture dir with a local `gh` stub.
 # No forge, no network. Requires jq. No `set -o pipefail` on purpose (#7790).
@@ -172,8 +164,7 @@ printf '%s\n' "$BLOCK" >"$FIXTURE_DIR/balance.sh"
 # Run a balance-check script with the given env assignments ("VAR=value" ...).
 run_balance() {
     local script="$1"; shift
-    ( cd "$FIXTURE_DIR" && env -u LOOM_CHAMPION_TIER2_CAP -u LOOM_CHAMPION_TIER3_CAP \
-        -u LOOM_CHAMPION_TIER3_BACKLOG_CAP "$@" PATH="$FIXTURE_DIR/bin:$PATH" \
+    ( cd "$FIXTURE_DIR" && env "$@" PATH="$FIXTURE_DIR/bin:$PATH" \
         LOOM_TEST_ISSUES="$FIXTURE_DIR/issues.json" bash "$script" 2>&1 )
 }
 
@@ -184,33 +175,13 @@ if [[ "$BLOCK" != *"check_backlog_balance"* ]]; then
     fail "could not extract the Backlog Balance Check bash block from $PROMO_MD"
 else
     OUT="$(run_balance balance.sh)"
-    assert_contains "$OUT" "Caps this pass: DEFAULT_CAP=2 " \
-        "unset env var gives the no-level per-pass default of 2 (the old Tier 2 cap)"
     assert_contains "$OUT" "default (no level):  3 promoted (occupants: #101,#102,#103)" \
         "the default level counts promoted, unheld, unlevelled issues only (#101-#103)"
     assert_contains "$OUT" "loom:important:      2 promoted (occupants: #301,#302)" \
         "loom:important issues are counted under their own level"
     assert_contains "$OUT" "loom:very-important: 1 promoted" \
         "loom:very-important issues are counted under their own level"
-    assert_not_contains "$OUT" "BACKLOG" \
-        "no backlog gate: the old Tier 3 gate has no population under the level mapping"
-
-    OUT="$(run_balance balance.sh LOOM_CHAMPION_TIER2_CAP=0)"
-    assert_contains "$OUT" "Caps this pass: DEFAULT_CAP=0 " "the env var overrides the default, and 0 is honoured"
-
-    OUT="$(run_balance balance.sh LOOM_CHAMPION_TIER3_CAP=0 LOOM_CHAMPION_TIER3_BACKLOG_CAP=1)"
-    assert_contains "$OUT" "Caps this pass: DEFAULT_CAP=2 " \
-        "the unused tier3 knobs change nothing (a backlog of 3 vs a cap of 1 does not gate)"
-    assert_not_contains "$OUT" "BACKLOG" "a tiny tier3BacklogCap never gates no-level promotion"
-
-    OUT="$(run_balance balance.sh LOOM_CHAMPION_TIER2_CAP=abc)"
-    assert_contains "$OUT" "Caps this pass: DEFAULT_CAP=2 " \
-        "a non-integer value falls back to the default"
-    OUT="$(run_balance balance.sh LOOM_CHAMPION_TIER2_CAP=-1)"
-    assert_contains "$OUT" "Caps this pass: DEFAULT_CAP=2 " "a negative value falls back to the default"
-
-    OUT="$(run_balance balance.sh LOOM_CHAMPION_TIER2_CAP=)"
-    assert_contains "$OUT" "Caps this pass: DEFAULT_CAP=2 " "an empty value falls back to the default"
+    assert_not_contains "$OUT" "Caps this pass" "the balance check prints no cap line"
 
     # Negative control: drop the held-issue exclusion (#7613). The same
     # fixture must then count the two held issues, or the occupant
@@ -228,29 +199,19 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "Test 2: the per-level rate limits are wired; no Champion file reads a retired tier label"
+echo "Test 2: promotion order is wired; no Champion file reads a retired tier label"
 RATE="$(section_body "$PROMO_MD" "Promotion Order")"
 assert_contains "$RATE" "\`loom:very-important\`, then \`loom:important\`" \
     "Promotion Order ranks very-important, then important"
 assert_contains "$RATE" "oldest first within a level" "Promotion Order breaks ties oldest first"
-for v in LOOM_CHAMPION_TIER2_CAP LOOM_CHAMPION_TIER3_CAP LOOM_CHAMPION_TIER3_BACKLOG_CAP; do
-    assert_contains "$RATE" "$v" "Rate Limiting by Level names $v"
-done
-assert_contains "$RATE" "\`LOOM_CHAMPION_TIER3_BACKLOG_CAP\` are currently
-unused" "the tier3 knobs are documented as unused by the level mapping"
-assert_contains "$RATE" "\`loom:very-important\` / \`loom:important\`: promote all qualifying proposals (no limit)" \
-    "both priority levels take the old Tier 1 slot (uncapped)"
-assert_contains "$RATE" "No priority level: promote up to \`\$DEFAULT_CAP\`" \
-    "an unlevelled proposal takes the old Tier 2 per-pass cap"
-assert_not_contains "$RATE" "DEFAULT_BACKLOG_CAP" "no-level promotion has no backlog gate"
+assert_not_contains "$(section_body "$PROMO_MD" "Backlog Balance Check")" "LOOM_CHAMPION_TIER2_CAP" \
+    "the Backlog Balance Check no longer reads a tier cap"
 assert_contains "$(section_body "$PROMO_MD" "Setting Priority")" "label the blocker too" \
     "Champion labels a priority proposal's blocker itself (no daemon inheritance)"
 assert_contains "$(section_body "$PROMO_MD" "Setting Priority")" "never set a level just to get past a capacity cap" \
     "a priority level is never set to dodge a cap"
 STEP3="$(section_body "$PROMO_MD" "Promote (All Criteria Pass)")"
 assert_not_contains "$STEP3" "Step 3c: Capacity Deferral" "the Step 3c capacity deferral is gone: a verdict is terminal (#11860)"
-assert_contains "$RATE" "evaluate no more proposals at that level this pass" \
-    "a spent cap stops evaluation before the claim, never after a passing one (#11860)"
 for f in "$PROMO_MD" "$COMMON_MD" "$REF_MD" "$AGENT_MD"; do
     for lit in "fewer than 5" "up to 2 per iteration" "≤2 per iteration" "gated at 5"; do
         assert_doc_lacks "$f" "$lit" "$(basename "$f") does not hardcode '$lit'"
@@ -261,12 +222,11 @@ for f in "$CHAMPION_MD" "$PROMO_MD" "$COMMON_MD" "$REF_MD" "$AGENT_MD"; do
         assert_doc_lacks "$f" "$lit" "$(basename "$f") no longer names '$lit'"
     done
 done
-for v in LOOM_CHAMPION_PR_SLICE LOOM_CHAMPION_PROMOTION_SLICE LOOM_CHAMPION_TIER2_CAP \
-         LOOM_CHAMPION_TIER3_CAP LOOM_CHAMPION_TIER3_BACKLOG_CAP; do
-    assert_doc_contains "$THROUGHPUT_DOC" "\`$v\`" "promotion-throughput.md documents $v"
+for f in "$CHAMPION_MD" "$PROMO_MD" "$COMMON_MD" "$PR_MERGE_MD" "$AGENT_MD" "$THROUGHPUT_DOC"; do
+    for lit in LOOM_CHAMPION_PR_SLICE LOOM_CHAMPION_PROMOTION_SLICE LOOM_CHAMPION_TIER2_CAP; do
+        assert_doc_lacks "$f" "$lit" "$(basename "$f") no longer names $lit (#13272)"
+    done
 done
-assert_doc_contains "$THROUGHPUT_DOC" "mapped by population" "promotion-throughput.md records the level mapping of the caps"
-assert_doc_contains "$THROUGHPUT_DOC" "46" "promotion-throughput.md cites the measurement behind dropping the backlog gate"
 assert_doc_contains "$THROUGHPUT_DOC" "loom-daemon-start.sh" \
     "promotion-throughput.md says where a fleet sets the knobs"
 
@@ -277,14 +237,9 @@ assert_doc_lacks "$CHAMPION_MD" "If no PRs need merging" "champion.md Priority 2
 assert_doc_lacks "$CHAMPION_MD" "If no PRs remain" "champion.md's autonomous steps no longer wait for an empty PR queue"
 assert_doc_lacks "$COMMON_MD" "If no PRs, check" "champion-common.md no longer waits for an empty PR queue"
 AUTO="$(section_body "$CHAMPION_MD" "Autonomous Operation")"
-# shellcheck disable=SC2016  # the literal, unexpanded text is what the prompt must carry
-assert_contains "$AUTO" '${LOOM_CHAMPION_PR_SLICE:-10}' "the PR pass pauses after LOOM_CHAMPION_PR_SLICE rows (default 10)"
-# shellcheck disable=SC2016  # literal, as above
-assert_contains "$AUTO" '${LOOM_CHAMPION_PROMOTION_SLICE:-3}' "promotion is bounded by LOOM_CHAMPION_PROMOTION_SLICE (default 3) while rows wait"
 assert_contains "$AUTO" "whether or not PRs remain" "the promotion step does not depend on the PR queue emptying"
-assert_contains "$AUTO" "Resume Priority 1 until every row is visited" "the PR pass still visits every row (no merge cap)"
+assert_contains "$AUTO" "until every row is visited (drain the full queue)" "the PR pass still visits every row (no merge cap)"
 BATCH="$(section_body "$PR_MERGE_MD" "PR Auto-Merge Batch Processing")"
-assert_contains "$BATCH" "LOOM_CHAMPION_PR_SLICE" "champion-pr-merge.md's batch loop names the promotion pause"
 assert_contains "$BATCH" "drain the full queue" "champion-pr-merge.md still drains the full queue"
 
 # ---------------------------------------------------------------------------

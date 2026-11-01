@@ -165,7 +165,14 @@ setup_sandbox() {
 #!/usr/bin/env bash
 if [[ "\$1" == "pr" && "\$2" == "view" ]]; then
   # gh pr view <n> --json headRefName --jq '.headRefName'
-  echo "$CHILD_BR"
+  # A scenario reconciling several children writes "<pr> <branch>" lines to
+  # \$PR_BRANCH_MAP; any PR not listed (every single-child scenario) resolves
+  # to the default $CHILD_BR.
+  _b=""
+  if [[ -f "$SANDBOX/pr-branches" ]]; then
+    _b="\$(awk -v p="\$3" '\$1 == p { print \$2 }' "$SANDBOX/pr-branches")"
+  fi
+  echo "\${_b:-$CHILD_BR}"
   exit 0
 fi
 if [[ "\$1" == "pr" && "\$2" == "edit" ]]; then
@@ -726,6 +733,112 @@ for M_MODE in merge auto-unknown; do
       "M ($M_MODE): the child PR base is still retargeted to the default branch"
     teardown_sandbox
 done
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scenarios N/O: a real-git 3-deep stack whose branch names do NOT follow
+# feature/issue-<N> (#13388, AC4 of #13332). merge-pr retargets a child of a
+# non-feature/issue-N parent by rebasing it with reconcile-stack.sh first, so
+# the contract under test is: after each bottom-up squash-merge, reconciling
+# the next child leaves it carrying exactly its own commit and file.
+#
+#   main <- chore/a <- feat/b <- feat/c     (one own commit + one own file each)
+
+# Replace setup_sandbox's two-branch fixture with the 3-deep stack, then squash
+# the bottom (chore/a, PR 101) into main and delete it on the remote.
+setup_stack_sandbox() {
+    setup_sandbox
+    git_q -C "$MAIN" checkout -q main
+    git_q -C "$MAIN" reset -q --hard HEAD~1
+    git_q -C "$MAIN" push -q --force origin main
+    git_q -C "$MAIN" branch -D "$PARENT_BR" "$CHILD_BR" >/dev/null 2>&1
+    git_q -C "$REMOTE" branch -D "$PARENT_BR" "$CHILD_BR" >/dev/null 2>&1 || true
+    git_q -C "$MAIN" update-ref -d "refs/remotes/origin/$PARENT_BR"
+    git_q -C "$MAIN" update-ref -d "refs/remotes/origin/$CHILD_BR"
+
+    local prev=main br
+    for br in chore/a feat/b feat/c; do
+        git_q -C "$MAIN" checkout -q -b "$br" "$prev"
+        echo "${br#*/}" > "$MAIN/${br#*/}.txt"
+        git_q -C "$MAIN" add "${br#*/}.txt"
+        git_q -C "$MAIN" commit -q -m "${br#*/}-own"
+        git_q -C "$MAIN" push -q -u origin "$br"
+        prev="$br"
+    done
+    printf '102 feat/b\n103 feat/c\n' > "$SANDBOX/pr-branches"
+    squash_into_main chore/a "a-squash (#101)"
+}
+
+# Squash-merge origin/<branch> into main (what the forge does), push it, and
+# delete the branch on the remote only — the clone keeps its local branch and a
+# stale remote-tracking ref, as after delete-branch-on-merge.
+squash_into_main() {
+    local br="$1" msg="$2"
+    git_q -C "$MAIN" fetch -q origin
+    git_q -C "$MAIN" checkout -q main
+    git_q -C "$MAIN" reset -q --hard origin/main
+    git_q -C "$MAIN" merge -q --squash "origin/$br" >/dev/null
+    git_q -C "$MAIN" commit -q -m "$msg"
+    git_q -C "$MAIN" push -q origin main
+    git_q -C "$REMOTE" branch -D "$br" >/dev/null 2>&1
+}
+
+# Reconcile PR $1 (branch $2) whose parent was $3.
+reconcile_stack_child() {
+    CHILD_PR="$1" CHILD_BR="$2" PARENT_BR="$3" run_reconcile "$MAIN"
+}
+
+echo ""
+echo "Scenario N: 3-deep non-feature/issue-N stack, squash-merged bottom-up"
+setup_stack_sandbox
+
+reconcile_stack_child 102 feat/b chore/a
+assert_eq "0" "$RUN_RC" "N: reconcile of B (parent chore/a) exits 0"
+git_q -C "$MAIN" fetch -q origin
+assert_eq "b-own" "$(git_q -C "$MAIN" log --format=%s origin/main..origin/feat/b)" \
+  "N: B carries only its own commit above main (parent's chore/a commit stripped)"
+assert_eq "b.txt" "$(git_q -C "$MAIN" diff --name-only origin/main origin/feat/b)" \
+  "N: B's diff against main is exactly its own file"
+assert_contains "$(cat "$GH_EDIT_LOG")" "pr edit 102 --repo owner/repo --base main" \
+  "N: PR 102 (B) retargeted to main"
+assert_not_contains "$(cat "$GH_EDIT_LOG")" "pr edit 103" \
+  "N: PR 103 (C) is not touched while reconciling B"
+assert_eq "0" "$(git_q -C "$MAIN" merge-base --is-ancestor origin/main origin/feat/b && echo 0 || echo 1)" \
+  "N: B sits on top of main"
+
+squash_into_main feat/b "b-squash (#102)"
+
+reconcile_stack_child 103 feat/c feat/b
+assert_eq "0" "$RUN_RC" "N: reconcile of C (parent feat/b) exits 0"
+git_q -C "$MAIN" fetch -q origin
+assert_eq "c-own" "$(git_q -C "$MAIN" log --format=%s origin/main..origin/feat/c)" \
+  "N: C carries only its own commit above main (A and B content stripped)"
+assert_eq "c.txt" "$(git_q -C "$MAIN" diff --name-only origin/main origin/feat/c)" \
+  "N: C's diff against main is exactly its own file"
+assert_contains "$(cat "$GH_EDIT_LOG")" "pr edit 103 --repo owner/repo --base main" \
+  "N: PR 103 (C) retargeted to main"
+
+# C merges cleanly, and main ends up with all three files exactly once.
+squash_into_main feat/c "c-squash (#103)"
+assert_eq "a.txt b.txt base.txt c.txt" "$(git_q -C "$MAIN" ls-tree --name-only origin/main | tr '\n' ' ' | sed 's/ $//')" \
+  "N: main holds every stacked change after the bottom-up merges"
+
+teardown_sandbox
+
+echo ""
+echo "Scenario O: LOOM_BRANCH_UPDATE_STRATEGY=merge retargets but keeps the parent's commit (documented limitation)"
+setup_stack_sandbox
+B_REMOTE_BEFORE="$(git_q -C "$MAIN" ls-remote origin refs/heads/feat/b | cut -f1)"
+LOOM_BRANCH_UPDATE_STRATEGY=merge reconcile_stack_child 102 feat/b chore/a
+assert_eq "0" "$RUN_RC" "O: reconcile of B under the merge strategy exits 0"
+assert_contains "$RUN_OUT" "#10771" "O: the output names the merge-only policy (rebase + force-push skipped)"
+assert_eq "$B_REMOTE_BEFORE" "$(git_q -C "$MAIN" ls-remote origin refs/heads/feat/b | cut -f1)" \
+  "O: nothing was pushed to B"
+git_q -C "$MAIN" fetch -q origin
+assert_contains "$(git_q -C "$MAIN" log --format=%s origin/main..origin/feat/b)" "a-own" \
+  "O: B still carries the parent's original commit (the squash left it behind)"
+assert_contains "$(cat "$GH_EDIT_LOG")" "pr edit 102 --repo owner/repo --base main" \
+  "O: the retarget is still performed and logged"
+teardown_sandbox
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Source guards: fail loudly if a refactor drops either fix.

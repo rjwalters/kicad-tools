@@ -45,7 +45,7 @@ its glibc floor) tracks that runner's OS exactly as the native `x86_64` leg
 does — an unpinned `ubuntu-latest` there would drift identically, just
 unobserved so far.
 
-The macOS leg (`aarch64-apple-darwin`, `macos-14`) is unaffected — glibc is a
+The macOS leg (`aarch64-apple-darwin`, `macos-15`) is unaffected — glibc is a
 Linux-only concept.
 
 ## Defense-in-depth: a release-time drift check
