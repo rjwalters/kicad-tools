@@ -1184,6 +1184,12 @@ After successfully creating the PR:
    ```bash
    gh pr view <number> --json labels,number,url
    ```
-2. **Exit the session** - the sweep orchestration will continue the workflow
+2. **Write the outcome line as the very last thing you output** (#13176) — after the
+   `gh pr view`, after any summary, nothing after it. A dispatched step that exits 0
+   without it is recorded as `no-outcome-line`, a failure, even though the PR exists:
+   `LOOM_STEP_OUTCOME role=builder target=<n> class=verdict reason=pr_opened`
+   (`target` is the bare issue number, no `#`; for a park or a no-op use the
+   `class`/`reason` from `.loom/docs/targeted-role-invocation.md`).
+3. **Exit the session** - the sweep orchestration will continue the workflow
 
 **Work completion is detected automatically.** When you complete your task (PR created with `loom:review-requested` label, or issue marked as `loom:blocked`), the orchestration layer terminates the session. However, you should explicitly exit after verifying PR creation to avoid unnecessary delays in the pipeline.
