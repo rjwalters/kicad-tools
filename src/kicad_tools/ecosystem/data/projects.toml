@@ -1516,6 +1516,37 @@ reasoning, its Task 1 is a ready baseline (the circuit-skills harness \
 already runs it). A LICENSE would allow using the questions directly.\
 """
 
+[projects.kipi]
+name = "KiPI"
+slug = "drewsum/KiPI"
+repo_url = "https://github.com/drewsum/KiPI"
+vcs = "github"
+# No "analysis" category exists; "benchmark" (evaluation tooling) is the
+# nearest. Issue #8185.
+category = "benchmark"
+relation = "reference"
+verdict = "watch"
+license = "GPL-3.0-or-later"
+upstream_license_detected = "GPL-3.0"
+license_compat = "copyleft-ideas-only"
+language = "Python"
+stars = 83
+last_push = "2026-11-01"
+last_verified = "2026-11-01"
+pinned_commit = "842b4ce74178f68eceec71c13c82d67368431daf"
+research_docs = ["docs/research/kipi-evaluation.md"]
+summary = """
+a power-integrity analyzer (DC voltage drop and current density, AC PDN \
+impedance, switcher coupled noise) that runs as a KiCad IPC plugin or \
+standalone. No solver CLI, but its DC solver is importable without the GUI \
+and solved one rail of our board 09 in 0.1 s. GPL-3.0: ideas only, no \
+code in either direction.\
+"""
+reeval_trigger = """
+If upstream ships a headless solve command with a stable output schema, or \
+if we decide a DC IR-drop check belongs in `kct check`.\
+"""
+
 # ----------------------------------------------------------------- 3d models
 
 [projects.easyeda2kicad]

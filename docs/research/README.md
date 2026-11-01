@@ -20,6 +20,7 @@ licence-compatibility, is the ecosystem registry: `kct ecosystem list`,
 | [Diode `pcb`](diode-pcb-comparison.md) | Diode (Zener) vs kicad-tools feature comparison |
 | [KiCadRoutingTools (KRT)](kicad-routing-tools-comparison.md) | KRT vs kicad-tools comparison and benchmark |
 | [KiCAD-MCP-Server](kicad-mcp-server-evaluation.md) | mixelpixx MCP server (MIT) tool-by-tool vs `kct mcp serve` |
+| [KiPI](kipi-evaluation.md) | Power-integrity analyzer (GPL): headless path, one-rail trial, integration shapes |
 | [kipy IPC API](kipy-ipc-api-evaluation.md) | Official KiCad Python API as a parser cross-check |
 | [OmniLayout / OmniRouting](omnilayout-recon.md) | External LLM layout/routing benchmark recon |
 | [RepoRecon KiCad AI sweep](reporecon-kicad-ai-sweep.md) | Sweep of KiCad AI repositories |
