@@ -79,7 +79,17 @@ the normal verdict, and the tracker comment keeps attempt 1 on record.
    sentinel as `ci-refusals-reference.md` shows. On `LOOM-RERUN-DENIED …` or
    `ERROR`, go to step 5 and quote the refusal in the verdict.
 3. **On `LOOM-RERUN-OK`**: post a PR comment naming the test, the tracker and
-   the rerun. Add no end-state label and no `loom:ci-failure`. Release the claim
+   the rerun, with this body (the last line is required: `post-verdict.sh`'s
+   stale-read gate counts a marker-less same-user comment as a human comment
+   newer than the review start and refuses your own verdict):
+
+   ```
+   CI flake rerun: `<test>` failed on `<job>` (attempt 1, head `<sha>`).
+   Tracker: #<tracker>. Rerun requested via `loom-daemon forge rerun <run_id> --failed`.
+   <!-- loom:ci-flake-note -->
+   ```
+
+   Add no end-state label and no `loom:ci-failure`. Release the claim
    exactly as "When CI is Pending" does
    (`gh pr edit <number> --remove-label "loom:reviewing"`; `loom:review-requested` stays).
    In single-PR mode you may instead wait for the rerun with

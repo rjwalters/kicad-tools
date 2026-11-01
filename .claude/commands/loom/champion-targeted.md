@@ -166,7 +166,7 @@ add `loom:pr`.
    ("Issue Promotion Batch Processing" → "Per-issue order in the loop"): the
    Dependency-Defer Fast Path, the Idempotency check, the Claim with `loom:evaluating`
    (staleness-aware: Pass 0b for this issue), Steps 1-4, and the verdict-time
-   recheck. The per-pass level cap and the promotion slice do not apply.
+   recheck.
 3. **Exactly one outcome**, from the verdict set below.
 
 ### Promotion verdict set

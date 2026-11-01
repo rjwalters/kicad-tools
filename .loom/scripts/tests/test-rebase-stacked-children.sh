@@ -2,7 +2,7 @@
 # test-rebase-stacked-children.sh - Unit tests for rebase-stacked-children.sh
 # (#3747, stacked-PR v2 item 3: rebase-on-parent-amend).
 #
-# When a stacked PARENT branch (feature/issue-<N>) is amended/pushed while still
+# When a stacked PARENT branch (any name) is amended/pushed while still
 # open under review, any CHILD PR that branched off its pre-amend tip is stale.
 # rebase-stacked-children.sh discovers open CHILD PRs based on the parent branch
 # via a LIVE forge query (`gh pr list --base <parent>`, never the daemon
@@ -12,7 +12,7 @@
 #     current tip + push --force-with-lease. NO PR base retarget.
 #   - Stale + unsafe (child issue still loom:building): skip the rebase and post
 #     a deferred-rebase comment on the child PR instead.
-# It is a no-op for non-feature/issue-N parent branches and non-GitHub forges,
+# It is a no-op for non-GitHub forges (#13333: any parent branch name works),
 # and --dry-run reports the per-child outcome without any git/gh mutation.
 #
 # Strategy (mirrors test-merge-pr-auto-reconcile.sh): the functions under test
@@ -561,6 +561,17 @@ assert_not_contains "$(read_git)" "push" "(m7) No scratch checkout -> no push"
 BRANCH_UPDATE_STRATEGY=rebase
 reset_state
 
+# (c-nf) #13333: a parent NOT named feature/issue-<N> with one stale child is
+#        rebased, not skipped as "nothing to do".
+reset_state
+write_prlist "feat/v25-respin-wip" '[{"number":601,"headRefName":"feat/v26-respin"}]'
+allow_pin "feat/v26-respin"
+clear_uptodate "feat/v26-respin"   # stale
+_rebase_stacked_children "feat/v25-respin-wip" >/dev/null 2>&1
+assert_contains "$(read_git)" "git rebase -- origin/feat/v25-respin-wip feat/v26-respin" \
+  "(c-nf) Non-feature/issue-N parent with stale child -> child rebased"
+reset_state
+
 # (c2) Same as (c), but version-check-gate.sh (real script, #7168) reports a
 #      mismatch via LOOM_VERSION_CHECK_SCRIPT -> rebase runs, but the push is
 #      NEVER attempted and RSC_FAILURE=2 (mirrors the rebase-conflict path).
@@ -649,12 +660,13 @@ assert_not_contains "$(read_git)" "rebase" "(d) Unsafe stale child -> rebase NOT
 assert_contains "$(read_gh)" "pr comment 502 --repo owner/repo" \
   "(d) Unsafe stale child -> deferred-rebase comment posted on PR #502"
 
-# (e) Non-feature/issue-N parent branch -> script skips entirely (no discovery).
+# (e) #13333: non-feature/issue-N parent with zero open children -> discovery
+#     runs, nothing to rebase, nothing posted.
 reset_state
-write_prlist "release-1" '[{"number":503,"headRefName":"feature/issue-201"}]'
-_rebase_stacked_children "release-1"
-assert_not_contains "$(read_git)" "rebase" "(e) Non-feature/issue-N parent -> no rebase"
-assert_eq "" "$(read_gh)" "(e) Non-feature/issue-N parent -> no comment, no discovery"
+clear_prlist "release-1"
+_rebase_stacked_children "release-1" >/dev/null 2>&1
+assert_not_contains "$(read_git)" "rebase" "(e) Non-feature/issue-N parent, no children -> no rebase"
+assert_not_contains "$(read_gh)" "pr comment" "(e) Non-feature/issue-N parent, no children -> no comment"
 
 # (e2) FORGE_TYPE != github -> no-op (GitHub-only).
 reset_state

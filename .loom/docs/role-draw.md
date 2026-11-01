@@ -74,8 +74,7 @@ candidate (set a candidate to `0` to switch it off on that host).
 
 ## Resolution
 
-1. An operator pin (`LOOM_RUNTIME`, `LOOM_RUNTIME_<ROLE>`, an explicit
-   per-dispatch runtime) still wins outright; no draw happens.
+1. An operator pin (`LOOM_RUNTIME`, `LOOM_RUNTIME_<ROLE>`) still wins outright; no draw happens.
 2. If the role has a table for its attempt, the daemon draws a **weighted
    random order** of the drawable candidates and runs the ordinary preference
    walk over it: admission, credential availability, the launch-failure hold

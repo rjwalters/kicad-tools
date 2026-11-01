@@ -1206,39 +1206,6 @@ The config read tolerates a missing config file, a missing `runtimes` block, and
 a missing `jq` — all of these degrade silently to the built-in `claude` default,
 so a bare install with no `runtimes` config sees no behavior change.
 
-### Per-dispatch runtime override (`runtime` / `modelProfile`, #11284)
-
-`loom-daemon dispatch <N> --runtime opencode --model-profile zai-flash`, the
-MCP `dispatch_sweep` tool (`runtime`, `model_profile`) and the daemon's
-`DispatchSweep` request all accept an optional explicit tap for **one sweep**.
-It is an operator pin: it wins over `rolePreference`/`preference` and
-**disables fall-through**.
-
-- **Scope.** Only the coding phases, **Builder and Doctor**, launch on the
-  tap (`worker run --role builder|doctor`). Curator, Judge and the
-  orchestrator keep their role policy, and `excludedRoles` of a profile
-  still applies.
-- **Refusal, never fallback.** At dispatch the daemon admits the tap for
-  Builder and checks its credential pool. A malformed request (a
-  `modelProfile` without a `runtime`, an invalid identifier), an unadmitted
-  runtime/profile, or one with no spawnable seat right now is refused with
-  the reason (`RuntimeRejected`, selected by `explicit`); no sweep starts and
-  the preference list is not consulted. A Doctor launch re-checks the same
-  tap when it runs and fails the same way if the seat has gone away.
-  PR-set sweeps cannot carry a tap (they have no issue to key it on).
-- **Compatibility.** Both fields are `#[serde(default)]`; a request without
-  them behaves exactly as before.
-- **Persistence.** The accepted tap is recorded in
-  `.loom/sweep-dispatch-tap/issue-<N>.json` (runtime, profile, timestamp; no
-  credentials). The phase runner reads it by issue (`--issue`, or the
-  daemon-exported `LOOM_SWEEP_CLAIM_OWNED` for a Doctor), so a resumed sweep
-  or a Doctor retry keeps the override. A record expires after 7 days, and a
-  later `dispatch` of the same issue without a tap clears it; automatic
-  re-dispatch (work finder, watchdog, crash resume) leaves it in place.
-- **Reporting.** The launch is stamped `source=explicit` with the tap
-  (`opencode:zai-flash`), so `sweep-outcomes summary --group-by tap` groups
-  it with the same taps chosen by preference.
-
 Seat-aware work-finder concurrency and free-seat status are a later slice.
 
 ### The `runtimes` config block
@@ -1334,7 +1301,7 @@ through", matching `runtimes.roles.<role>: ""`.
 | Guarantee | Meaning |
 |---|---|
 | **Absent key ⇒ no behaviour change** | With no `preference`/`rolePreference`, resolution is byte-identical to the static chain above, and no credential pool is read at all. |
-| **An operator pin wins outright** | `LOOM_RUNTIME`, `LOOM_RUNTIME_<ROLE>`, or an explicit per-dispatch runtime short-circuits to static resolution and **disables fall-through**. A pin is a deliberate act; routing around it would make it useless for the debugging it exists for. |
+| **An operator pin wins outright** | `LOOM_RUNTIME`, `LOOM_RUNTIME_<ROLE>` short-circuits to static resolution and **disables fall-through**. A pin is a deliberate act; routing around it would make it useless for the debugging it exists for. |
 | **Preference is never an admission override** | A runtime the role cannot be admitted onto is skipped, never forced. |
 | **Fail-closed stays fail-closed** | When *every* listed tap is skipped the caller holds/skips exactly as before; the #7708 hold becomes "hold when the whole list is exhausted". |
 | **Malformed config fails closed** | A non-array value, an unknown `rolePreference` role key, a malformed entry, or a duplicated tap is an error (surfaced by `loom-daemon validate`), not a silently different order. |
@@ -1370,7 +1337,7 @@ actually use — a tap's `modelProfile`, else `LOOM_MODEL_PROFILE`, else
 - a preference entry is skipped as `not-admitted(excludedRole)`, like
   `not-admitted(worktreeIsolation)` above, and the walk continues;
 - a `runtimes.roles` binding, `LOOM_RUNTIME_<ROLE>` / `LOOM_RUNTIME` with
-  `LOOM_MODEL_PROFILE`, or an explicit per-dispatch runtime is **refused** with
+  `LOOM_MODEL_PROFILE` is **refused** with
   the reason (exit 78) — a pin is never re-routed;
 - a native sweep runs Judge and Curator in its own session, so a sweep on an
   excluding profile is refused through its review phase;

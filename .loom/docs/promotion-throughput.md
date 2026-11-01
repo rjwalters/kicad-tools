@@ -10,119 +10,28 @@ Three throttles caused that tail. Each is fixed below.
 
 ## 1. Promotion runs every pass, even while PRs remain
 
-> **Step dispatch (#11894, live since #11909).** Promotion runs as one terminal targeted Champion step per curated issue (`/loom:champion --issue N`), drawn by the work finder. The interval Champion runs `--non-item` only, so the PR-row and promotion slices and `tier2Cap` described below no longer drive promotion. See [`docs/design/work-finder-step-dispatch.md`](https://github.com/rjwalters/loom/blob/main/docs/design/work-finder-step-dispatch.md) §12.
+> **Step dispatch (#11894, live since #11909).** Promotion runs as one terminal targeted Champion step per curated issue (`/loom:champion --issue N`), drawn by the work finder. The interval Champion runs `--non-item` only. See [`docs/design/work-finder-step-dispatch.md`](https://github.com/rjwalters/loom/blob/main/docs/design/work-finder-step-dispatch.md) §12.
 
 Champion used to promote only once no PRs remained. A repository with a steady
 or held PR queue never reached promotion. On 2026-10-07, rjwalters/loom had 38
 open `loom:pr` PRs, 30 of them held by `loom:operator`, so "no PRs remain" was
-never true. A Champion session is also capped at 30 minutes
-(`DEFAULT_ROLE_TIMEOUT`), so a long PR pass can end the session before
-promotion starts.
+never true. Promotion now runs every pass (`champion.md` → "Autonomous
+Operation"), whether or not PRs remain held, sequenced, waiting on CI, or
+unvisited. Every PR row is still visited each pass, in the same order, under
+the same safety criteria and holds. A `LOOM_MAX_UNREVISED_EVALUATIONS` bound
+(default 2, #4967) caps revision rounds (§3).
 
-Each pass now interleaves the two queues (`champion.md` → "Autonomous
-Operation"):
+## 2. Where a fleet sets the knobs
 
-1. Visit up to `LOOM_CHAMPION_PR_SLICE` PR rows, in `pr-queue` order.
-2. Run promotion (Priorities 2 and 3), whether or not PRs remain held,
-   sequenced, waiting on CI, or unvisited. While unvisited PR rows remain,
-   stop after `LOOM_CHAMPION_PROMOTION_SLICE` fresh verdicts. A fresh verdict
-   is any of the four terminal verdicts in §4, or a premise-false close.
-3. Resume the PR pass from its visited set, then finish promotion.
-
-This does not cap the PR queue. Every row is still visited each pass, in the
-same order, under the same safety criteria and holds. A cap on PR rows per
-pass was rejected because `pr-queue` does not sort held PRs last. Old held
-rows would fill the cap on every pass, and newer mergeable PRs behind them
-would never be reached.
-
-## 2. Promotion caps are configurable, keyed on priority level
-
-| Env var | Default | Governs |
-|---|---|---|
-| `LOOM_CHAMPION_PR_SLICE` | 10 | PR rows visited before the pass pauses for promotion |
-| `LOOM_CHAMPION_PROMOTION_SLICE` | 3 | Fresh promotion verdicts per pause while PR rows wait |
-| `LOOM_CHAMPION_TIER2_CAP` | 2 | Promotions per pass of proposals with no priority level |
-| `LOOM_CHAMPION_TIER3_CAP` | 1 | Unused since #11512 (parsed for config compatibility) |
-| `LOOM_CHAMPION_TIER3_BACKLOG_CAP` | 5 | Unused since #11512 (parsed for config compatibility) |
-| `LOOM_MAX_UNREVISED_EVALUATIONS` | 2 | Revision rounds before the bound (existing knob, #4967) |
-
-A value that is empty or not a non-negative integer falls back to the default.
-`0` is honoured, so `LOOM_CHAMPION_TIER2_CAP=0` stops no-level promotion.
-
-**The caps are the old tier caps, mapped by population (#11512).** #11103
-retired the `tier:*` labels the caps read without mapping them, so every old
-Tier 1, Tier 2 and unlabelled issue now has no level. Each cap goes to the
-level whose population matches the one it was sized for:
-
-| Level | Old slot | What is counted | Cap |
-|---|---|---|---|
-| `loom:very-important` | Tier 1 | Nothing | None. Guide keeps at most one eligible per workspace |
-| `loom:important` | Tier 1 | Nothing | None |
-| No level | Tier 2 | Proposals promoted at that level in this pass | `tier2Cap` (2). No backlog gate |
-
-`tier3Cap` and `tier3BacklogCap` govern no level today. They stay parsed so
-existing config still loads. A spent cap stops evaluation at its level for the
-rest of the pass, before any claim; there is no capacity deferral (#11860), and
-a targeted `--issue N` step has no cap. Champion never sets a level to get past
-a cap. An operator can rule otherwise
-on #11278.
-
-**Why the no-level backlog gate was dropped.** A name mapping (no level to
-Tier 3) would have put the Tier 3 backlog gate, sized for the minority
-`tier:maintenance` population, onto the majority. Measured on 2026-10-12 in
-rjwalters/loom, among 57 promoted, unheld issues:
-
-| Gate | Counted | Cap | Effect |
-|---|---|---|---|
-| The pre-#11512 Tier 3 gate (`tier:maintenance`) | 3 | 5 | Tier 3 promotes |
-| The same gate keyed on no level | 46 | 5 | No no-level promotion until about 42 issues drain |
-
-That is the #10753 starvation pattern again. With no backlog gate, no-level
-proposals promote again in rjwalters/loom, up to 2 per pass. Both priority
-levels promote without a cap. The live Backlog Balance Check printed
-`DEFAULT_CAP=2`, with 13 curated proposals waiting (11 with no level, 2
-`loom:important`).
-
-**Why the old Tier 3 gate counted promoted, unheld work only.** It used to
-count every open Tier 3 issue that was not held. Most of those were proposals
-still waiting for promotion. Measured on 2026-10-07:
-
-| Repository | Counted by the old gate | Promoted (`loom:issue` / `loom:building`) | Curated issues held by a capacity deferral |
-|---|---|---|---|
-| rjwalters/loom | 19 | 2 | 9 |
-| 2AMLogic/2am | 24 | 6 | 19 |
-| 2AMLogic/loom-ui | 8 | 0 | 0 |
-
-The gate pinned itself, the same failure as #7613: waiting proposals counted
-against the cap, which blocked every proposal at that level. #10753 fixed it
-by counting only open, unheld issues that carry `loom:issue` or
-`loom:building`. That is the backlog the cap was written to bound. With the
-same default of 5, rjwalters/loom and loom-ui promoted Tier 3 again. The 2 and
-1 per-pass caps were not binding in that data, so they are unchanged.
-
-**The slice defaults.** 10 PR rows takes roughly 10 minutes of a 30-minute
-session, which leaves room for promotion and the rest of the PR pass. Priority
-and interactive PRs lead the queue, so they still go first. 3 fresh verdicts
-per pause bounds the merge delay to a few minutes. That is still well above
-promotion demand: 683 curated issues over five days across the fleet is about
-two per repository per day.
-
-**Where a fleet sets them.** A role session inherits the daemon's environment.
+A role session inherits the daemon's environment.
 `loom-daemon-start.sh` forwards the exported `LOOM_*` variables into the
 service unit (launchd `EnvironmentVariables`, systemd `Environment=`), and
 later re-renders keep them. To change a value on a host, export it and re-run
 `loom-daemon-start.sh`. A plain `loom-daemon restart` keeps the old
 environment. See "Changing daemon environment variables" and "Env keys carried
 forward across a re-render" in `daemon-reference.md`. For a hand-run
-`/loom:champion`, export the value in that shell. The knobs are
-keys of the `champion` group of the `hyperparameters` config block
-(`prSlice`, `promotionSlice`, `tier2Cap`, `tier3Cap`, `tier3BacklogCap`;
-defaults 10, 3, 2, 1, 5), so the fleet store's machine tier
-(`fleet/defaults.json`) can carry them and they enter the run digest
-(`hyperparameters.md`). Precedence is env var > `LOOM_HYPERPARAMS` vector >
-config block > default. Follow-on work: the daemon does not yet export the
-resolved block values as `LOOM_CHAMPION_*` into role sessions, so Champion's
-shell snippets honour only the env vars today.
+`/loom:champion`, export the value in that shell. Precedence is env var >
+`LOOM_HYPERPARAMS` vector > config block > default (`hyperparameters.md`).
 
 ## 3. "Needs revision" goes to Curator, not to the operator
 

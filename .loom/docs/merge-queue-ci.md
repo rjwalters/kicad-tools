@@ -219,6 +219,11 @@ per head: the second infra drop on the same head, a mixed set, an in-progress
 run, an unreadable or empty check-run read, or a missing group commit all stay
 `check-failure` and go to Doctor as before (fail closed).
 
+The revoke comment says why: a `dropped-infra` comment names the cancelled or
+timed-out job(s); a `check-failure` drop whose group had cancelled runs, or
+whose refinement was skipped, names the guard that declined (failed step, real
+failure, run still in progress, unreadable read, no group commit, retry spent).
+
 ## Rollback to direct mode
 
 Direct mode is always available. To roll back:

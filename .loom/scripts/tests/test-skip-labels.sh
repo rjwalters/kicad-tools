@@ -224,7 +224,6 @@ fi
 # `./.loom/scripts/` path the block names, a fake `gh` that ANDs `--label`
 # like the real one), so the prompt's own quoting is what is under test.
 BUILDER_MD="$REPO_ROOT/defaults/.claude/commands/loom/builder.md"
-BUILDER_JSON="$REPO_ROOT/defaults/roles/builder.json"
 
 # The first ```bash block under "**Step <n>".
 step_block() {
@@ -329,15 +328,6 @@ EOF
         expect_tier 3 "$NO_CONFIG_REPO" "$(sorted $star_all ${bare}1 ${bare}2)" \
             "tier 3, no extraSkipLabels: only the external issue is dropped (AC5)"
     }
-
-    # AC6: the interval reminder must not restate a tier query without the filter.
-    interval="$(jq -r '.defaultIntervalPrompt' "$BUILDER_JSON")"
-    if [[ "$interval" != *"gh issue list"* || "$interval" == *"skip-labels.sh"* ]] \
-        && [[ "$interval" != *'--label="loom:issue"'* ]]; then
-        pass "builder.json's interval prompt carries no unfiltered tier query (AC6)"
-    else
-        fail "builder.json's defaultIntervalPrompt restates an unfiltered gh issue list query"
-    fi
 else
     echo "note: jq not installed — skipping the #8911 tier checks" >&2
 fi

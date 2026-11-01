@@ -17,6 +17,10 @@ many holds were noise. **Nothing can be learned from the comparison if the
 score is allowed to change the verdict it is being compared against**, which is
 why every rule below is about keeping the two apart.
 
+The shadow score is also **not** the confidence behind Champion's merge-risk
+self-release (#12950, `champion-pr-merge.md` → "Self-release"). Feeding it in
+would end this experiment.
+
 ## What to run, after your own verdict is final
 
 ```bash

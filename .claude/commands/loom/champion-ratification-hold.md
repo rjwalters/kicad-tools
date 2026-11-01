@@ -18,7 +18,7 @@ Rationale: `.loom/docs/ratification-hold.md`.
   `loom-daemon champion-hold ratification --pr N`. Never re-derive it, and never
   replace it with merge-risk judgment (that is the observed miss: it would have
   merged a private design repo's spec PR). It holds when a file the PR adds, modifies
-  or renames under `spec/**`, `decisions/**`, `docs/decisions/**`,
+  or renames under `spec/**`, `ratification/**`, `decisions/**`, `docs/decisions/**`,
   `*decision*.md` (or a `champion.ratificationPaths` glob) carries a
   ratification phrase at the head. A repo extends the phrases with
   `champion.ratificationPhrases`; it can never remove a built-in. A PR that only

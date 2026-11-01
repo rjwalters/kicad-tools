@@ -405,7 +405,14 @@ case "$SUBCOMMAND" in
         exit 0
         ;;
     marker)
-        [[ "$CLAIM_STATE" == "unclaimed" || -z "$CLAIMED_AT" ]] && exit 0
+        if [[ "$CLAIM_STATE" == "unclaimed" || -z "$CLAIMED_AT" ]]; then
+            # #13134: never print nothing for a live agent. A note with no
+            # `<!-- loom:` marker reads as a human comment to verdict-gate, so
+            # fall back to a lease-identified marker (it is not claimant
+            # activity: it carries no claim timestamp).
+            [[ -n "${LOOM_SWEEP_ID:-}" ]] && echo "<!-- loom:claim-activity sweep=${LOOM_SWEEP_ID} -->"
+            exit 0
+        fi
         echo "${ACTIVITY_PREFIX}${CLAIMED_AT} -->"
         exit 0
         ;;

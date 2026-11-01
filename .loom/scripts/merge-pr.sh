@@ -1191,10 +1191,10 @@ info "Branch: $PR_BRANCH"
 # read as "nothing to do".
 _post_merge_bookkeeping() {
   [[ "$FORGE_TYPE" == "github" ]] || return 0
-  local step="$1" bin="${LOOM_DAEMON_BIN:-loom-daemon}" body out="" rc=0 attempt level text
+  local step="$1" bin="${LOOM_DAEMON_BIN:-loom-daemon}" body out="" rc=0 level text
   local args=(merge-pr post-merge-bookkeeping --step "$step" --repo "$REPO_NWO" --pr "$PR_NUMBER" --branch "${PR_BRANCH:-}" --conflicted "${PARTIAL_CONFLICT_ISSUES:-}" --open-before-merge "${PARTIAL_OPEN_BEFORE_MERGE:-}" --forge-helpers "$_LOOM_FORGE_HELPERS_LIB_DIR/forge-helpers.sh")
   body="$(echo "$PR_JSON" | jq -r '.body // ""')"
-  for attempt in 1 2; do
+  for _ in 1 2; do
     rc=0; out="$(printf '%s' "$body" | "$bin" "${args[@]}")" || rc=$?
     [[ $rc -eq 3 && "$out" == "LOOM-NEED close-targets" ]] || break
     args+=(--close-targets "$(forge_pr_close_targets "$PR_NUMBER" "$GH" 2>/dev/null || true)")
@@ -1370,49 +1370,21 @@ _auto_reconcile_stacked_children() {
 #                                unavailable (missing refs, fetch failure) —
 #                                NOT a confirmed conflict, just unresolved.
 #
-# The terminal classification — which <action>:<reason> these observations
-# add up to — is `loom-daemon merge-pr mergeable-recheck` (Rust,
-# loom-daemon/src/merge_pr/mergeable_recheck.rs — #8191 slice): the reason
-# strings are byte-frozen there and held by a differential test. The I/O loop
-# below (backoff, uncached re-reads, fetch, merge-tree) stays here so the
-# retained suite's stubs keep driving the real code path unchanged. A daemon
-# that cannot answer is a POSITIVE refuse-stale, never a silent pass: an
-# unanswered corroboration must not read as "confirmed clean".
+# The whole loop — backoff, the uncached re-reads, the #9106 ref vet, fetch,
+# merge-tree and the terminal classification — is `loom-daemon merge-pr
+# mergeable-recheck-run` (Rust, loom-daemon/src/merge_pr/mergeable_recheck_run.rs
+# — #8191 slice); the reason strings are byte-frozen in mergeable_recheck.rs
+# and held by a differential test. This wrapper only locates the binary. A
+# daemon that cannot answer is a POSITIVE refuse-stale, never a silent pass: an
+# unanswered corroboration must not read as "confirmed clean". Every value is
+# passed as --flag=value: a forge-controlled ref starting with '--' would
+# otherwise be parsed as a flag instead of reaching the verb's own ref vet.
 _recheck_mergeable_before_refusal() {
-  local nwo="$1" pr_number="$2" gh_cmd="$3" base_ref="$4" head_ref="$5" repo_root="$6" retries="${7:-3}" delay="${8:-3}"
-  local attempt recheck_json recheck_mergeable resolved_attempt="" _MPR_BIN _MPR_OUT _MPR_RC=0
-  local _MPR_FLAGS=(--retries "$retries" --base-ref "$base_ref" --head-ref "$head_ref")
-
-  for attempt in $(seq 1 "$retries"); do
-    sleep "$delay"
-    recheck_json="$(forge_get_pr_nocache "$nwo" "$pr_number" "$gh_cmd" 2>/dev/null || echo '{}')"
-    recheck_mergeable="$(echo "$recheck_json" | jq -r '.mergeable // empty')"
-    if [[ "$recheck_mergeable" == "true" ]]; then resolved_attempt="$attempt"; break; fi
-  done
-
-  # Still false/unknown after the backoff retries — corroborate with a local
-  # git merge-tree check before conceding this is a genuine conflict.
-  [[ -n "$resolved_attempt" ]] && _MPR_FLAGS+=(--resolved-attempt "$resolved_attempt")
-  if [[ -z "$resolved_attempt" ]]; then
-    # #9106: both refs are forge-controlled ($base_ref from `.base.ref`,
-    # $head_ref from `.head.ref`) and the fetch below puts them in a git argv.
-    # A name git would parse as a switch is refused HERE, before the fetch —
-    # refuse-stale is the fail-closed verdict (it denies the merge without
-    # claiming a content conflict). An EMPTY ref keeps its pre-existing
-    # --refs-missing classification, which this must not swallow. The `--`
-    # after `origin` is defence in depth, not the gate.
-    if [[ -z "$base_ref" || -z "$head_ref" ]]; then _MPR_FLAGS+=(--refs-missing)
-    elif ! check_branch_name "$base_ref" "base ref of PR #$pr_number" || ! check_branch_name "$head_ref" "head ref of PR #$pr_number"; then
-      echo "refuse-stale:PR #$pr_number carries a ref name that is not a safe git operand (base='$base_ref' head='$head_ref') — refused before 'git fetch' could parse it as a switch (#9106). Rename the branch on the PR and re-run."; return 0
-    elif git -C "$repo_root" fetch -q origin -- "$base_ref" "$head_ref" 2>/dev/null; then
-      if git -C "$repo_root" merge-tree --write-tree "origin/$base_ref" "origin/$head_ref" >/dev/null 2>&1; then _MPR_FLAGS+=(--tree clean); else _MPR_FLAGS+=(--tree conflict); fi
-    else _MPR_FLAGS+=(--fetch-failed); fi
-  fi
-
+  local nwo="$1" pr_number="$2" gh_cmd="$3" base_ref="$4" head_ref="$5" repo_root="$6" retries="${7:-3}" delay="${8:-3}" _MPR_BIN _MPR_OUT _MPR_RC=0
   _MPR_BIN="${LOOM_DAEMON_SELF_BIN:-${LOOM_DAEMON_BIN:-$(command -v loom-daemon 2>/dev/null || printf '%s' "$HOME/.local/bin/loom-daemon")}}"
-  _MPR_OUT="$("$_MPR_BIN" merge-pr mergeable-recheck "${_MPR_FLAGS[@]}" 2>/dev/null)" || _MPR_RC=$?
-  if [[ "$_MPR_RC" -eq 0 ]] && [[ "$_MPR_OUT" == merge:* || "$_MPR_OUT" == refuse-stale:* || "$_MPR_OUT" == refuse-conflict:* ]]; then echo "$_MPR_OUT"; return 0; fi
-  echo "refuse-stale:mergeability corroboration could not be classified — 'merge-pr mergeable-recheck' exited $_MPR_RC without a recognized action (missing or older binary). Refusing rather than treating an unanswered corroboration as clean; build or install loom-daemon (cargo build --release -p loom-daemon, or re-run the Loom installer), then re-run this merge."
+  _MPR_OUT="$("$_MPR_BIN" merge-pr mergeable-recheck-run --repo="$nwo" --pr="$pr_number" --gh-cmd="$gh_cmd" --base-ref="$base_ref" --head-ref="$head_ref" --repo-root="$repo_root" --retries="$retries" --delay="$delay" --forge-helpers="$_LOOM_FORGE_HELPERS_LIB_DIR/forge-helpers.sh" 2>/dev/null)" || _MPR_RC=$?
+  if [[ "$_MPR_RC" -eq 0 ]] && [[ "$_MPR_OUT" == merge:* || "$_MPR_OUT" == refuse-stale:* || "$_MPR_OUT" == refuse-conflict:* ]]; then echo "${_MPR_OUT%%$'\n'*}"; return 0; fi
+  echo "refuse-stale:mergeability corroboration could not be classified — 'merge-pr mergeable-recheck-run' exited $_MPR_RC without a recognized action (missing or older binary). Refusing rather than treating an unanswered corroboration as clean; build or install loom-daemon (cargo build --release -p loom-daemon, or re-run the Loom installer), then re-run this merge."
   return 0
 }
 
@@ -2102,8 +2074,8 @@ _post_merge_cleanup() {
   [[ "${CLEANUP_PRIMARY_CHECKOUT:-true}" == "true" ]] || base+=(--no-cleanup-primary)
   [[ "${LOOM_PRESERVE_WORKTREE:-0}" != "1" ]] || base+=(--preserve-env)
   [[ -z "$WORKTREE_PATH_OVERRIDE" ]] || base+=(--worktree-path "$WORKTREE_PATH_OVERRIDE")
-  local facts=() out="" rc=0 attempt level text need
-  for attempt in 1 2 3 4; do
+  local facts=() out="" rc=0 level text need
+  for _ in 1 2 3 4; do
     rc=0; out="$("$bin" "${base[@]}" ${facts[@]+"${facts[@]}"})" || rc=$?
     [[ $rc -eq 3 && "$out" == "LOOM-NEED "* ]] || break
     need="${out#LOOM-NEED }"

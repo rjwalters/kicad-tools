@@ -251,7 +251,7 @@ before writing one (full contract in
   effectively `claude → opencode` for build work; the skip is recorded as
   `not-admitted(worktreeIsolation)`, which is not the same as "no credential".
 - **An operator pin disables fall-through outright.** `LOOM_RUNTIME`,
-  `LOOM_RUNTIME_<ROLE>`, or an explicit per-dispatch runtime short-circuits to
+  `LOOM_RUNTIME_<ROLE>` short-circuits to
   static resolution — deliberately, so a pin stays useful for debugging.
 - **`modelProfile` gates *and* pins** (#8602): availability is read against the
   named profile's pool, and the chosen tap's profile is pinned at launch as

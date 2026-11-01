@@ -101,10 +101,10 @@ assert_grep '_recheck_mergeable_before_refusal\(\) \{' "$MERGE_PR" \
     "_recheck_mergeable_before_refusal is defined"
 assert_grep '_MSM_DECISION="\$\(_recheck_mergeable_before_refusal' "$MERGE_PR" \
     "the mergeability gate calls _recheck_mergeable_before_refusal"
-assert_grep 'forge_get_pr_nocache "\$nwo" "\$pr_number" "\$gh_cmd"' "$MERGE_PR" \
-    "the recheck uses the UNCACHED forge_get_pr_nocache (not the cached forge_get_pr)"
-assert_grep 'git -C "\$repo_root" merge-tree --write-tree' "$MERGE_PR" \
-    "the recheck corroborates with a local git merge-tree check"
+retired "assert_grep 'forge_get_pr_nocache \"\$nwo\" ...' and 'git -C \"\$repo_root\" merge-tree --write-tree' on merge-pr.sh" \
+    "the recheck re-reads UNCACHED (forge_get_pr_nocache) and corroborates with a local git merge-tree check" \
+    "the loop moved into loom-daemon/src/merge_pr/mergeable_recheck_run.rs; the shell no longer contains either call" \
+    "Test 2 (a)-(f) drive the real wrapper + verb: (a)/(f) fail unless the fake gh is hit with the plain-gh uncached argv once per attempt, (b)/(c) fail unless a real git merge-tree decides; mergeable_recheck_run.rs unit tests pin the call order"
 assert_grep 'refuse-conflict\)' "$MERGE_PR" \
     "the gate branches on the refuse-conflict decision"
 # RETIRED (verification-recipes.md §6, #8191 slice): the reason literals now
@@ -242,31 +242,30 @@ echo "main version" > "$WORK/README.md"
 git -C "$WORK" commit -q -am "main edits README (diverges from feature/conflict)"
 git -C "$WORK" push -q origin main
 
-# Stub forge_get_pr_nocache: sequences of canned .mergeable values, one per
-# call, consumed via a call index. NOTE: the real function invokes this via
-# command substitution (`recheck_json="$(forge_get_pr_nocache ...)"`), which
-# forks a subshell -- a plain in-memory counter variable incremented inside
-# the stub would NOT persist across calls (each subshell gets its own copy).
-# A file-based counter survives across the subshell boundary.
+# The wrapper now runs the REAL verb (`loom-daemon merge-pr mergeable-recheck-run`,
+# #8191 slice), which reads the PR through the real `forge_get_pr_nocache` from
+# lib/forge-helpers.sh in a child bash. So the canned `.mergeable` sequence is
+# served by a fake `gh` on PATH (the plain-`gh` argv: `gh api repos/<nwo>/pulls/<n>`),
+# one entry per call, consumed via a file counter (each call is its own process).
 _STUB_SEQUENCE=()
 _STUB_COUNTER_FILE="$TMP_ROOT/stub-counter"
-_reset_stub_counter() { echo 0 > "$_STUB_COUNTER_FILE"; }
-forge_get_pr_nocache() {
-    # Args ($1=nwo $2=pr_number $3=gh_cmd) are intentionally ignored -- this
-    # stub replays a canned .mergeable sequence regardless of call args.
-    local idx val
-    idx="$(cat "$_STUB_COUNTER_FILE")"
-    echo $((idx + 1)) > "$_STUB_COUNTER_FILE"
-    val="false"
-    if [[ "$idx" -lt "${#_STUB_SEQUENCE[@]}" ]]; then
-        val="${_STUB_SEQUENCE[$idx]}"
-    fi
-    if [[ "$val" == "null" ]]; then
-        echo '{"mergeable":null}'
-    else
-        echo "{\"mergeable\":$val}"
-    fi
-}
+_STUB_SEQUENCE_FILE="$TMP_ROOT/stub-sequence"
+_reset_stub_counter() { echo 0 > "$_STUB_COUNTER_FILE"; printf '%s\n' "${_STUB_SEQUENCE[@]}" > "$_STUB_SEQUENCE_FILE"; }
+mkdir -p "$TMP_ROOT/bin"
+cat > "$TMP_ROOT/bin/gh" <<'GHEOF'
+#!/usr/bin/env bash
+[[ "$1" == "api" && "$2" == "repos/owner/repo/pulls/1" ]] || { echo "unexpected gh argv: $*" >&2; exit 2; }
+idx="$(cat "$STUB_COUNTER_FILE")"; echo $((idx + 1)) > "$STUB_COUNTER_FILE"
+val="$(sed -n "$((idx + 1))p" "$STUB_SEQUENCE_FILE")"; val="${val:-false}"
+echo "{\"mergeable\":$val}"
+GHEOF
+chmod +x "$TMP_ROOT/bin/gh"
+export STUB_COUNTER_FILE="$_STUB_COUNTER_FILE" STUB_SEQUENCE_FILE="$_STUB_SEQUENCE_FILE"
+export PATH="$TMP_ROOT/bin:$PATH" FORGE_TYPE=github
+_LOOM_FORGE_HELPERS_LIB_DIR="$(cd "$(dirname "$MERGE_PR")" && pwd)/lib"
+LOOM_DAEMON_BIN="${LOOM_DAEMON_BIN:-$(command -v loom-daemon || true)}"
+[[ -n "$LOOM_DAEMON_BIN" ]] || { echo "ERROR: loom-daemon not found (set LOOM_DAEMON_BIN)" >&2; exit 1; }
+export LOOM_DAEMON_BIN
 
 # --- (a) recheck resolves to mergeable=true after a stale first read -> merge ---
 _STUB_SEQUENCE=("false" "true")
@@ -332,6 +331,16 @@ if [[ "$out_f" == merge:* ]] && [[ "$out_f" == *"git merge-tree"* ]]; then
     pass "(f) persistent mergeable=null (still computing) still corroborates via git merge-tree and proceeds"
 else
     fail "(f) expected a merge:*git merge-tree* decision; got: $out_f"
+fi
+
+# --- (g) a switch-shaped forge ref is refused BEFORE any git runs (#9106) ---
+_STUB_SEQUENCE=("false")
+_reset_stub_counter
+out_g="$(_recheck_mergeable_before_refusal "owner/repo" 1 "gh" "main" "--upload-pack=/tmp/x" "$WORK" 1 0 2>/dev/null)"
+if [[ "$out_g" == refuse-stale:*"not a safe git operand"* ]]; then
+    pass "(g) a switch-shaped head ref refuses as refuse-stale before 'git fetch'"
+else
+    fail "(g) expected a refuse-stale:*not a safe git operand* decision; got: $out_g"
 fi
 
 echo ""

@@ -103,9 +103,6 @@ Create `.loom/roles/my-role.json`:
 {
   "name": "My Custom Role",
   "description": "Brief description",
-  "defaultInterval": 0,
-  "defaultIntervalPrompt": "Continue working",
-  "autonomousRecommended": false,
   "suggestedWorkerType": "claude"
 }
 ```

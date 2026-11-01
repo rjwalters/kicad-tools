@@ -398,6 +398,13 @@ actually be unparked is `guide.md`'s `check_and_unblock`/`check_and_unblock_prs`
 job (issues) and `check-stale-blocked`'s advisory report (both issues and
 PRs) — this document defines the wire format both sit on top of, nothing more.
 
+One mechanical carve-out (#13331): when a merge clears the blockers of an
+**issue** whose park records are all `by=curator`, each naming a blocker, and no
+other blocker, unticked dependency, or hold label remains,
+`loom-daemon notify-cleared-blockers` removes `loom:blocked`, adds
+`loom:curated` (never `loom:issue`), and says so in its cleared-blocker comment.
+`by=` is self-declared, which is accepted because the action approves nothing.
+
 See also: [`label-state-machine.md`](label-state-machine.md) for where
 `loom:blocked` sits relative to `loom:operator`/`loom:frozen`, and
 [`lease-record.md`](lease-record.md) for the sibling HTML-comment-marker

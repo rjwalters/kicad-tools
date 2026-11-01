@@ -2,9 +2,6 @@
   "name": "Triage",
   "description": "Keeps the backlog healthy: tier labels, orphan verification, unblocking, epic tracking, living docs",
   "suggestedModel": "sonnet",
-  "defaultInterval": 900000,
-  "defaultIntervalPrompt": "Run a triage pass: set or remove loom:important / loom:very-important where warranted (order only, never approval; at most one very-important per workspace; label a priority issue's blockers too), recover orphaned issues, unblock resolved dependencies, track epics, and refresh WORK_PLAN.md.",
-  "autonomousRecommended": true,
   "suggestedWorkerType": "claude",
   "toolPolicy": {
     "allowedCapabilities": []

@@ -73,7 +73,7 @@ Apply exactly one of the three branches below, based on the PR's current label.
 #### C1a. `loom:review-requested` → Judge phase only
 
 - Load and follow the instructions in `.claude/commands/loom/judge.md` for this PR.
-- **In-session Judge dispatch (#13222):** do not pass the orchestrator's run id as the Judge's `LOOM_SWEEP_ID`; the Stale-Read Gate takes the start from a `step-judge-<pr>-<epoch>` id or the PR judge lease.
+- **In-session Judge dispatch (#13222):** do not pass the orchestrator's run id as the Judge's `LOOM_SWEEP_ID`; the Stale-Read Gate takes the start from a `step-judge-<pr>-<epoch>` id or the PR judge lease. Brief the Judge to run `loom-daemon lease pr claim <pr> --role judge --watch-pid "${LOOM_AGENT_SESSION_PID:-${CLAUDE_PID:-$PPID}}"` (and `release`) with that same `--watch-pid` value on every call (#13264): without it the claim records `pr-lease-unknown` and `post-verdict.sh` refuses the approval as a peer's lease (exit 10).
 - Dispatch `loom-judge` as a **single subagent Task** from this orchestrator session. Do **NOT** invoke `/loom:sweep` or `/loom:judge` slash-commands as subagents — see "CRITICAL: One level deep" in the Execution Model.
 - If a previous Judge attempt for this PR died mid-flight without a fresh checkpoint (rate limit, crash), re-verify forge state and complete only the missing steps before re-dispatching — see "Mid-phase-death recovery" in the Wave Lifecycle (the rule is phase-generic; Mode C inherits it, same as the Doctor-cycle cap).
 - Expected exit states:

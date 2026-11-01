@@ -258,8 +258,9 @@ REST equivalents for the mutations you actually need mid-fix:
 # ./.loom/scripts/post-comment.sh <n> --pr --body "..."   ->
 gh api "repos/{owner}/{repo}/issues/<n>/comments" -F body="..."
 
-# gh pr edit <n> --add-label "loom:review-requested"   ->
-gh api "repos/{owner}/{repo}/issues/<n>/labels" -f "labels[]=loom:review-requested"
+# gh pr edit <n> --add-label "loom:treating"   ->
+gh api "repos/{owner}/{repo}/issues/<n>/labels" -f "labels[]=loom:treating"
+# (the hand-back, `forge doctor-handback`, is already REST)
 
 # gh pr edit <n> --remove-label "loom:treating"   ->
 gh api "repos/{owner}/{repo}/issues/<n>/labels/loom%3Atreating" -X DELETE
@@ -646,10 +647,10 @@ fi
 [ "$(gh pr view 588 --json headRefOid --jq '.headRefOid')" = "$CLAIM_HEAD_SHA" ] \
   || echo "Head moved since claim — re-verify the blocker before pushing"
 
-# Complete normally
+# Complete normally (hand-back: see "Verdict-Time CAS Recheck")
 git push
+loom-daemon forge doctor-handback 588 --expected-head-sha "$(git rev-parse HEAD)"
 ./.loom/scripts/post-comment.sh 588 --pr --body "Per-finding handoff (see Communicate Clearly): <fixed at file:line / still open / disputed + reason, per finding>. Ready for re-review"
-gh pr edit 588 --remove-label "loom:treating" --add-label "loom:review-requested"
 ```
 
 **Why This Matters**:
@@ -696,10 +697,7 @@ gh pr edit 588 --remove-label "loom:treating" --add-label "loom:review-requested
      ```
      It rebases open child PRs that went stale onto your new tip (safe children auto-rebase with a *pinned* force-with-lease; a child whose issue is still `loom:building` gets a deferred-reconciliation comment). No-op without stacked children, and **best-effort** — a failure (conflict, non-GitHub forge) never fails your own work; carry on to step 10. `--dry-run` previews.
 10. **Verify CI remotely**: after push, `loom-daemon forge wait-checks <number> --timeout 20` (GREEN/NONE = pass). Not green and not RED (pending, head moved, unknown required contexts): do not wait; hand back to Judge in step 11 and report CI as pending (see "CRITICAL: Never End Your Turn on a Background CI Monitor", path 1). RED: CI Assessment. Only an invocation that explicitly requires the settled result uses the bounded foreground wait (path 2)
-11. **Signal completion and unclaim** (run the lease fence and the Verdict-Time CAS Recheck — see below — immediately before this write; abort/stand down instead if either finds your claim lost or the PR already moved; then `lease pr release`):
-    - Remove `loom:changes-requested` and `loom:treating` labels
-    - Add `loom:review-requested` label (green badge)
-    - Comment to notify the reviewer with a per-finding handoff ("Communicate Clearly" below): for each finding from each reviewer, **fixed** at current head (`file:line`), **still open**, or **disputed** with a reason. Never write "all feedback addressed" while any finding is open or disputed
+11. **Signal completion and unclaim** with `loom-daemon forge doctor-handback` (see "Verdict-Time CAS Recheck" below — never a hand-written `gh pr edit`), then post a per-finding handoff comment ("Communicate Clearly" below): for each finding from each reviewer, **fixed** at current head (`file:line`), **still open**, or **disputed** with a reason. Never write "all feedback addressed" while any finding is open or disputed. Skip the comment and stand down if the exit says so
 
 ### Stale `loom:treating` Claim Check (Step 2)
 
@@ -972,37 +970,31 @@ on the *target issue* immediately before opening the PR, refusing to open a
 duplicate against an issue a different, already-merged PR already closed.
 See `builder-pr.md` § "Creating the PR" for the full behavior.
 
-### Verdict-Time CAS Recheck (Step 11 — immediately before the completion label write)
+### Verdict-Time CAS Recheck (Step 11 — the completion write)
 
-The Pre-Push Head-SHA Recheck above catches a concurrent **code** race. It
-does not catch a concurrent **label** race: while you were fixing and
-pushing, another actor may already have changed the PR's label state — a
-Judge reclaimed `loom:treating` as stale and is now reviewing it fresh, or
-another Doctor already completed the same fix and wrote
-`loom:review-requested`. GitHub's label API has no compare-and-swap, so
-nothing stops your completion write from landing on top of that in-flight
-state (the Judge-side analog of this raced in the PR #4560 incident,
-2026-07-30 — see `judge.md`'s "Verdict-Time CAS Recheck" and the
-mutual-exclusion invariant in `.github/labels.yml`).
-
-**Immediately before Step 11's completion write** (`loom:changes-requested` +
-`loom:treating` → `loom:review-requested`), re-read the PR's current labels:
+The Pre-Push Head-SHA Recheck catches a **code** race, not a **label** race.
+Your own push moves the head, so the stale-verdict guard may re-queue the PR
+and a Judge resolve it seconds later — before you write labels you read
+before pushing (#9388; Judge analog: `judge.md`'s "Verdict-Time CAS
+Recheck"). A prose re-read plus a separate `gh pr edit` did not hold, so the
+read-decide-write is one verb. **Never hand-write the completion labels:**
 
 ```bash
-N=<pr-number>
-CURRENT_LABELS=$(gh pr view $N --json labels --jq '[.labels[].name] | join(",")')
+loom-daemon forge doctor-handback $N --expected-head-sha "$(git rev-parse HEAD)"  # the SHA you pushed
 ```
 
-| Condition | Verdict | Action |
-|-----------|---------|--------|
-| `loom:treating` is still present (your claim intact), and neither `loom:review-requested` nor `loom:pr` is already present | **Safe** | Proceed with the completion write as planned. |
-| `loom:treating` was removed or replaced (e.g. reclaimed as stale by another Doctor, or a Judge/Champion touched the PR while you worked) | **Claim lost** | **ABORT.** Do not write the completion label — use the "Standing down" flow above (comment, remove only your own claim if still present, exit). |
-| `loom:review-requested` or `loom:pr` is already present | **Raced** | **ABORT.** Another Doctor already completed this fix, or the PR moved forward without you. Do not write a duplicate or contradictory label — comment and stand down instead. |
-| The `gh pr view` call fails or returns empty | **Unknown — fail safe** | Do NOT write the completion label. Retry the recheck once; if it still fails, abort and note the API failure rather than guessing. |
+It re-reads labels and head, adds `loom:review-requested` *before* removing
+`loom:changes-requested`/`loom:treating` (never an unlabelled PR), re-reads,
+and withdraws its add if a verdict landed meanwhile. Act on the exit:
 
-This is the same technique as the Pre-Push Head-SHA Recheck, applied to the
-**label** state instead of the code state — re-run immediately before the
-write that actually matters, not just at claim time.
+| Exit | Line | Action |
+|------|------|--------|
+| 0 | `HANDED-BACK` | Post the notifying comment. |
+| 10 | `ALREADY-ADVANCED` | Already re-queued/reviewed/approved; only your claim was released. Success — comment, assert no transition. |
+| 13 | `RACED` | A verdict landed mid-write; it withdrew its add. Done — write nothing more. |
+| 11 | `CLAIM-LOST` | `loom:treating` was gone; nothing written. Stand down (comment, exit). |
+| 12 | `HEAD-MOVED` | Someone pushed after you; only your claim was released. Comment, exit — no hand-back. |
+| 1 / other | `FAILED` | Retry once, then comment the printed line. Never hand-add `loom:review-requested`. No such verb (old `loom-daemon`): also remove only your `loom:treating`, so the next pass's stale-verdict guard re-queues the new head. |
 
 **Pre-completion checklist** (verify before signaling completion):
 - [ ] All CI checks pass (verified via `loom-daemon forge wait-checks <number>`)
@@ -1014,9 +1006,7 @@ write that actually matters, not just at claim time.
       before pushing, and on a mismatch re-verified the blocker (or stood down)
 - [ ] Merge mode: no rebase, amend or force push; rebase mode: every force-push pinned a
       SHA in my HEAD (`--force-with-lease=<branch>:<sha>`), re-pinned, never bare (#9487, #10771)
-- [ ] I re-read the PR's labels immediately before the completion write (Verdict-Time
-      CAS Recheck above), and aborted/stood down on a lost claim or a raced verdict
-      label instead of writing over it
+- [ ] I wrote the completion labels only via `forge doctor-handback` and acted on its exit
 - [ ] My commit(s) address the specific feedback quoted from the Judge's review
 - [ ] If any comment I posted came from a scratch file, the filename is
       namespaced by the PR/issue number (`fix-comment-<N>.md`, never a fixed
@@ -1025,8 +1015,6 @@ write that actually matters, not just at claim time.
       @<path>` (see the `--body @path` anti-pattern warning above)
 - [ ] I re-fetched the posted comment (`gh pr view <number> --comments`) to
       verify it renders my actual prose, not a literal path string
-- [ ] I ran the label transition (`loom:changes-requested`/`loom:treating` →
-      `loom:review-requested`) and the notifying comment together
 
 ## CI Assessment (First Step)
 
@@ -1352,14 +1340,9 @@ fi
 
 git push
 
-# Verdict-Time CAS Recheck — re-read labels one more time before the
-# completion write (see "Verdict-Time CAS Recheck" above); abort/stand down
-# instead of writing if loom:treating is gone or loom:review-requested/loom:pr
-# already appeared.
-CURRENT_LABELS=$(gh pr view 42 --json labels --jq '[.labels[].name] | join(",")')
-
-# Signal completion and unclaim (amber → green, remove in-progress)
-gh pr edit 42 --remove-label "loom:changes-requested" --remove-label "loom:treating" --add-label "loom:review-requested"
+# Signal completion and unclaim — one verified write; act on its exit code
+# (see "Verdict-Time CAS Recheck" above): 0/10 comment, 13 done, 11/12 stand down
+loom-daemon forge doctor-handback 42 --expected-head-sha "$(git rev-parse HEAD)"
 ./.loom/scripts/post-comment.sh 42 --pr --body "🩺 Doctor handoff — per-finding status at $(git rev-parse --short HEAD):
 - Reviewer A, null handling: **fixed** at foo.ts:15
 - Reviewer A, missing error-case test: **fixed** at foo.test.ts:40
@@ -1419,9 +1402,10 @@ The label transition depends on **which queue the PR came from**:
   does not invalidate that approval, and dropping `loom:pr` (or routing it through
   `loom:changes-requested` → `loom:review-requested`) would revoke the approval and
   force a needless full re-review, un-blocking nothing. Remove only your own
-  `loom:treating` claim, add the `<!-- loom:conflict-only -->` marker comment (see
-  below) so the Judge can fast-track if it wants to re-verify, and leave `loom:pr`
-  for Champion to merge.
+  `loom:treating` claim (`forge doctor-handback` does exactly this, exit 10),
+  add the `<!-- loom:conflict-only -->` marker comment (see below) so the Judge
+  can fast-track if it wants to re-verify, and leave `loom:pr` for Champion to
+  merge.
 - **A PR from the `loom:changes-requested` queue** — after addressing the feedback,
   transition `loom:changes-requested` → `loom:review-requested` as usual (this hands
   the PR back to the Judge). This is the standard feedback cycle and is unchanged.
