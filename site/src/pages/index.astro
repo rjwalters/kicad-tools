@@ -1,5 +1,8 @@
 ---
-// Gallery index for the kicad-tools.org demo gallery (issue #3680).
+// Homepage for kicad-tools.org: quick start, capabilities, agent skills and
+// the board gallery (issues #3680, #8101). Facts that change with the package
+// (version, Python floor, extras, harnesses, MCP tools, skills) are read at
+// build time from the repository; see src/data/projectFacts.ts.
 //
 // Renders one card per board discovered by the build-time loader. Cards link to
 // the per-board detail route `/<slug>` (issue #3681; a 404 there is expected
@@ -8,7 +11,7 @@
 import { join, resolve } from "node:path";
 import { existsSync } from "node:fs";
 import { projectVersion } from "../data/siteMetadata.ts";
-import { projectFacts } from "../data/projectFacts.ts";
+import { harnesses, harnessLabel, mcpTools, pythonMinimum, skills } from "../data/projectFacts.ts";
 import { loadBoards } from "../data/loadBoards.ts";
 import BoardCard from "../components/BoardCard.astro";
 import SiteHeader from "../components/Header.astro";
@@ -30,6 +33,14 @@ const projectBoards = boards.filter((b) => b.category === "project");
 // check and `resolve(process.cwd(), "public", "boards")` root resolution. Runs
 // in Node at build time (cwd = `site/`), so `existsSync` is available.
 const stagedBoardsRoot = resolve(process.cwd(), "public", "boards");
+const REPO = "https://github.com/rjwalters/kicad-tools";
+const DOCS = `${REPO}/blob/main/docs`;
+const harnessNames = harnesses.map(harnessLabel);
+const harnessList =
+  harnessNames.length > 1
+    ? `${harnessNames.slice(0, -1).join(", ")} and ${harnessNames[harnessNames.length - 1]}`
+    : harnessNames[0];
+
 const hasPcbFor = (slug: string): boolean =>
   existsSync(join(stagedBoardsRoot, slug, "board.kicad_pcb"));
 ---
@@ -42,7 +53,7 @@ const hasPcbFor = (slug: string): boolean =>
     <title>kicad-tools — tools for KiCad projects and AI agents</title>
     <meta
       name="description"
-      content={`Inspect, generate, route and check KiCad projects with Python, the command line and AI agents. Explore examples and their recorded validation. kicad-tools v${projectVersion}.`}
+      content={`Inspect, generate, route, check and export KiCad projects from Python, the command line and AI agents. Install with pip; explore demo boards and their recorded validation. kicad-tools v${projectVersion}.`}
     />
   </head>
   <body>
@@ -52,17 +63,23 @@ const hasPcbFor = (slug: string): boolean =>
         <p class="eyebrow">Python · Command line · AI agents</p>
         <h1>Build and understand<br />your KiCad projects.</h1>
         <p class="tagline">
-          kicad-tools gives developers and AI agents tools to inspect schematics,
-          generate PCB designs, route connections and check the results.
-          Explore the examples below to see the work and the evidence behind it.
+          kicad-tools gives developers and AI agents headless tools to inspect
+          schematics, generate PCB designs, route connections, check the results
+          and export manufacturing files. No running KiCad needed; commands
+          answer in JSON. Explore the examples below to see the work and the
+          evidence behind it.
         </p>
         <div class="hero-links">
-          <a class="primary-link" href="#quick-start">Get started</a>
+          <a class="primary-link" href="#quick-start">Quick start</a>
           {demoBoards.length > 0 && <a href="#demo-boards">Explore demo boards ↓</a>}
+          <a href={`${DOCS}/README.md`}>Documentation</a>
         </div>
+        <p class="install-line"><code>pip install kicad-tools</code></p>
         <p class="count">
           {boards.length} board{boards.length === 1 ? "" : "s"}
           {withData > 0 && ` · ${withData} with generated artifacts`}
+          {" · "}
+          <a href="https://pypi.org/project/kicad-tools/">PyPI</a> v{projectVersion}
         </p>
       </header>
 
@@ -76,21 +93,44 @@ const hasPcbFor = (slug: string): boolean =>
       <section class="quick-start" id="quick-start" aria-labelledby="quick-start-heading">
         <h2 id="quick-start-heading">Quick start</h2>
         <p class="section-copy">
-          Requires Python {projectFacts.requiresPython}. Optional extras:
-          {projectFacts.extras.map((e, i) => (<>{i > 0 && ", "}<code>{e}</code></>))}.
+          Requires Python {pythonMinimum} or newer. KiCad's <code>kicad-cli</code>
+          is optional; only the commands that wrap it (such as <code>kct erc</code>,
+          <code>kct drc</code> and <code>kct export-formats</code>) need it.
         </p>
-        <ol class="steps">
-          <li><span>Install</span><code>pip install "kicad-tools[mcp]"</code></li>
-          <li><span>Build a project</span><code>kct build</code></li>
-          <li><span>Check a board</span><code>kct check board.kicad_pcb --mfr jlcpcb</code></li>
-          <li><span>Set up your agent</span><code>kct mcp setup --client claude-code</code></li>
-          <li><span>Install skills</span><code>kct skills install</code></li>
+        <ol class="steps" role="list">
+          <li>
+            <h3><span class="step-n" aria-hidden="true">1</span>Install</h3>
+            <pre><code>pip install kicad-tools
+kct --version</code></pre>
+            <p>Optional extras: <code>[mcp]</code> for the agent server,
+              <code>[native]</code> for the C++ router backend
+              (<code>kct build-native</code>), <code>[all]</code> for everything.</p>
+            <a href={`${DOCS}/getting-started.md`}>Installation guide</a>
+          </li>
+          <li>
+            <h3><span class="step-n" aria-hidden="true">2</span>Inspect and check</h3>
+            <pre><code>kct symbols project.kicad_sch
+kct nets project.kicad_sch --format json
+kct bom project.kicad_sch --format csv
+kct check board.kicad_pcb --mfr jlcpcb</code></pre>
+            <p><code>kct check</code> is a pure-Python design-rule check against a
+              manufacturer profile; add <code>--format json</code> for a
+              machine-readable report.</p>
+            <a href={`${DOCS}/reference/cli.md`}>CLI reference</a>
+          </li>
+          <li>
+            <h3><span class="step-n" aria-hidden="true">3</span>Connect an agent</h3>
+            <pre><code>pip install "kicad-tools[mcp]"
+kct mcp setup --client claude-code
+kct skills install
+kct agent-guide</code></pre>
+            <p>Registers the MCP server, installs the <code>kct</code> skills and
+              prints the agent primer. Use <code>--client</code> /
+              <code>--harness</code> <code>codex</code> or <code>opencode</code> for
+              other harnesses.</p>
+            <a href={`${REPO}#using-kicad-tools-from-claude-code-codex-and-opencode`}>Harness setup</a>
+          </li>
         </ol>
-        <p class="section-copy">
-          {projectFacts.skills.length} agent skills ship in the wheel:
-          {projectFacts.skills.map((s, i) => (<>{i > 0 && ", "}<code>{s}</code></>))}.
-          The MCP server exposes {projectFacts.mcpTools.length} tools.
-        </p>
       </section>
 
       <section class="capabilities" aria-labelledby="capabilities-heading">
@@ -105,19 +145,25 @@ const hasPcbFor = (slug: string): boolean =>
         <ul class="capability-list" role="list">
           <li>
             <h3>Inspect and automate</h3>
-            <p>Read KiCad design data and build repeatable workflows with Python
-              or an AI agent. Agent skills install for Claude Code, Codex CLI
-              and opencode; MCP registration is a separate
-              <code>kct mcp setup --client</code> step per harness.</p>
-            <code>kct skills install --harness codex</code>
-            <p>Look up and substitute parts with <code>kct parts</code>, including
-              offline Basic/Preferred alternatives; the MCP tools
-              {projectFacts.partsTools.map((t, i) => (<>{i > 0 && ", "}<code>{t}</code></>))}
-              do the same for agents.</p>
-            <a href="https://github.com/rjwalters/kicad-tools#python-api">Python examples</a>
-            <a href="https://github.com/rjwalters/kicad-tools#mcp-server-for-ai-agents">MCP setup</a>
-            <a href="https://github.com/rjwalters/kicad-tools#using-kicad-tools-from-claude-code-codex-and-opencode">Claude Code, Codex and opencode</a>
-            <a href="https://github.com/rjwalters/kicad-tools#agent-skills-kct-namespace">Agent skills</a>
+            <p>Parse and edit KiCad 8+ schematics and PCBs in pure Python, with no
+              running KiCad. Query symbols, nets, footprints and hierarchy;
+              commands that produce a result accept <code>--format json</code>.</p>
+            <code>kct nets project.kicad_sch --net VCC</code>
+            <a href={`${REPO}#python-api`}>Python examples</a>
+            <a href={`${DOCS}/reference/machine-output.md`}>JSON output contract</a>
+            <a href={`${DOCS}/reference/api.md`}>Python API reference</a>
+          </li>
+          <li>
+            <h3>Build from a spec</h3>
+            <p><code>kct build</code> runs a <code>.kct</code> project spec through
+              schematic generation, ERC, PCB generation, placement, routing,
+              verification and export, one step at a time or all at once.
+              Circuit blocks add MCU, power, USB and debug-header sections in code.
+              Each demo board below has a <code>project.kct</code> spec and a
+              generation recipe in the repository.</p>
+            <code>kct build project.kct --step all</code>
+            <a href={`${DOCS}/guides/schematic-to-pcb-workflow.md`}>Schematic-to-PCB workflow</a>
+            <a href={`${DOCS}/reference/circuit-blocks.md`}>Circuit blocks</a>
           </li>
           <li>
             <h3>Place and route</h3>
@@ -125,37 +171,70 @@ const hasPcbFor = (slug: string): boolean =>
               rules. Automated routing is experimental; inspect connectivity and
               clearance results for each design. Differential-pair skew and
               match-group length tuning are available, and
-              <code>kct retune-lengths</code> re-tunes an already routed board.</p>
-            <p><code>kct build</code> runs the project pipeline end to end.
-              <code>kct export</code> and <code>kct export-formats</code> write
-              fabrication files and PDF, SVG, STEP, IPC-2581 and ODB++ views.</p>
-            <code>kct export-formats board.kicad_pcb</code>
-            <a href="https://github.com/rjwalters/kicad-tools#pcb-autorouter">Routing example</a>
+              <code>kct retune-lengths</code> re-tunes an already routed board.
+              The C++ backend speeds up the router 10–100x.</p>
+            <code>kct route board.kicad_pcb</code>
+            <a href={`${DOCS}/guides/routing.md`}>Routing guide</a>
+            <a href={`${DOCS}/guides/diff-pairs/README.md`}>Differential pairs</a>
+            <a href={`${DOCS}/guides/match-groups/README.md`}>Match groups</a>
             <a href="/benchmarks">Recorded external-board attempts</a>
-            <a href="https://github.com/rjwalters/kicad-tools#cli-commands">Length-tuning commands</a>
           </li>
           <li>
             <h3>Check the design</h3>
-            <p>Run geometric checks, electrical-rating analysis and high-voltage
-              creepage audits. These checks support design review; they do not
+            <p>Run geometric checks, electrical-rating analysis, 3D model coverage
+              and high-voltage creepage audits, and scope findings to a region,
+              references or nets. These checks support design review; they do not
               certify hardware. <code>kct readiness</code> records sign-off
               evidence (with known issues) per board, and sign-off commands
               report <code>verdict</code> and <code>exit_code</code> in JSON.
               The gallery shows each board's own evidence; a passing check is
               not a fabrication guarantee.</p>
-            <p><code>kct models sync</code> fetches the checksum-verified KiCad 3D
-              model subset, and the <code>model_coverage</code> check reports
-              footprints without a model. Scope a check to part of a board with
-              <code>--bbox</code>, <code>--refs</code> or <code>--nets</code>;
-              scoped runs are not sign-off eligible.</p>
-            <code>kct check board.kicad_pcb --mfr jlcpcb</code>
-            <code>kct models sync</code>
-            <a href="https://github.com/rjwalters/kicad-tools#pure-python-drc">Design-check examples</a>
-            <a href="https://github.com/rjwalters/kicad-tools#cli-commands">Analysis and repair commands</a>
-            <a href="https://github.com/rjwalters/kicad-tools#agent-skills-kct-namespace">Sign-off skills</a>
+            <code>kct check board.kicad_pcb --mfr jlcpcb --refs U1,U2</code>
+            <a href={`${DOCS}/guides/drc-and-validation.md`}>DRC and validation guide</a>
+            <a href={`${REPO}#pure-python-drc`}>Design-check examples</a>
             <a href="#demo-boards">Board evidence in the gallery</a>
           </li>
+          <li>
+            <h3>Parts and manufacturing</h3>
+            <p>Look up LCSC/JLCPCB parts, check BOM availability and find Basic-part
+              alternatives, online or from an offline catalog.
+              <code>kct export</code> writes a fab bundle (Gerbers, BOM, placement,
+              report and manifest) for a manufacturer profile, and
+              <code>kct export-formats</code> adds PDF, SVG, STEP, IPC-2581 and
+              ODB++ through <code>kicad-cli</code>.</p>
+            <code>kct export board.kicad_pcb --mfr jlcpcb</code>
+            <a href={`${DOCS}/guides/manufacturing-export.md`}>Manufacturing export guide</a>
+            <a href={`${REPO}#parts-lookup-lcsc--jlcpcb`}>Parts lookup</a>
+          </li>
+          <li>
+            <h3>Work with an agent</h3>
+            <p>The MCP server exposes {mcpTools.length} tools for board inspection,
+              placement sessions, routing, checks, parts and export.{" "}
+              {skills.length} packaged <code>kct</code> skills install for {harnessList}; the skill
+              text is shared, so every harness gets the same workflows.</p>
+            <code>kct mcp setup --client codex</code>
+            <a href={`${DOCS}/mcp/README.md`}>MCP server</a>
+            <a href={`${DOCS}/agent-surfaces.md`}>What each harness needs</a>
+            <a href="#agent-skills">Packaged skills</a>
+          </li>
         </ul>
+      </section>
+
+      <section class="skills" id="agent-skills" aria-labelledby="skills-heading">
+        <h2 id="skills-heading">Agent skills</h2>
+        <p class="section-copy">
+          Shipped in the wheel and installed with <code>kct skills install</code>.
+          Invocation syntax varies by harness; Claude Code's is shown.
+        </p>
+        <ul class="skill-list" role="list">
+          {skills.map((skill) => (
+            <li>
+              <code>{skill.invocation}</code>
+              <span>{skill.summary}</span>
+            </li>
+          ))}
+        </ul>
+        <a class="section-link" href={`${REPO}#agent-skills-kct-namespace`}>Skill contracts and install options</a>
       </section>
 
       {demoBoards.length > 0 && (
@@ -340,15 +419,74 @@ const hasPcbFor = (slug: string): boolean =>
   .hero-links { display: flex; flex-wrap: wrap; align-items: center; gap: 1.25rem; margin: 1.5rem 0; }
   .hero-links a, .capability-list a { color: var(--accent); text-underline-offset: 0.2em; }
   .hero-links .primary-link { background: var(--accent); color: var(--bg); padding: 0.7rem 1rem; border-radius: 5px; font-weight: 600; text-decoration: none; }
-  .quick-start { margin-top: 2.5rem; }
-  .quick-start h2 { margin: 0 0 0.3rem; font-size: 1.3rem; }
-  .quick-start code { background: var(--badge-bg); padding: 0.05rem 0.3rem; border-radius: 4px; font-size: 0.85em; color: var(--text); }
-  .steps { list-style: none; margin: 0 0 1rem; padding: 0; display: grid; gap: 0.5rem; }
-  .steps li { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; padding: 0.6rem 0.9rem; border: 1px solid var(--border); border-radius: 6px; }
-  .steps span { color: var(--muted); font-size: 0.85rem; min-width: 9rem; }
   .capability-list h3 { color: var(--text); font-size: 1.05rem; margin: 0; }
   .capability-list p { margin: 0.75rem 0; }
   .capability-list a { display: block; margin-top: 0.7rem; }
+  .install-line { margin: 0 0 0.75rem; }
+  .install-line code, .steps pre {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: var(--badge-bg);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+  }
+  .install-line code { display: inline-block; padding: 0.45rem 0.75rem; font-size: 0.95rem; }
+  .count a { color: var(--accent); text-underline-offset: 0.2em; }
+  .quick-start, .skills { margin-top: 2.5rem; }
+  .quick-start h2, .skills h2 { margin: 0 0 0.3rem; font-size: 1.3rem; }
+  .steps {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: 0.75rem;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .steps li {
+    display: flex;
+    flex-direction: column;
+    padding: 1.1rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--muted);
+    font-size: 0.92rem;
+    min-width: 0;
+  }
+  .steps h3 { color: var(--text); font-size: 1.05rem; margin: 0 0 0.75rem; display: flex; align-items: center; gap: 0.55rem; }
+  .step-n {
+    display: inline-grid;
+    place-items: center;
+    width: 1.5rem;
+    height: 1.5rem;
+    border: 1px solid var(--accent);
+    border-radius: 999px;
+    color: var(--accent);
+    font-size: 0.8rem;
+  }
+  .steps pre { margin: 0; padding: 0.75rem; overflow-x: auto; color: var(--text); font-size: 0.82rem; line-height: 1.55; }
+  .steps p { margin: 0.75rem 0 0; }
+  .steps p code, .skills .section-copy code, .quick-start .section-copy code {
+    background: var(--badge-bg);
+    padding: 0.05rem 0.3rem;
+    border-radius: 4px;
+    font-size: 0.85em;
+    color: var(--text);
+  }
+  .steps a, .section-link { color: var(--accent); text-underline-offset: 0.2em; margin-top: auto; padding-top: 0.7rem; }
+  .skill-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.5rem; }
+  .skill-list li {
+    display: grid;
+    grid-template-columns: minmax(14rem, max-content) 1fr;
+    gap: 0.4rem 1rem;
+    padding: 0.6rem 0;
+    border-bottom: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 0.9rem;
+  }
+  .skill-list code { color: var(--accent); font-size: 0.88rem; }
+  .section-link { display: inline-block; }
+  @media (max-width: 1000px) { .capability-list { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 800px) { .steps { grid-template-columns: 1fr; } }
+  @media (max-width: 600px) { .skill-list li { grid-template-columns: 1fr; } }
   @media (max-width: 800px) { .capability-list { grid-template-columns: 1fr; } }
   @media (max-width: 480px) {
     .grid {

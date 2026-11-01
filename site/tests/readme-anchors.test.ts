@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 
-const REPO_LINK = /https:\/\/github\.com\/rjwalters\/kicad-tools#([A-Za-z0-9_-]+)/g;
+const REPO_LINK = /(?:https:\/\/github\.com\/rjwalters\/kicad-tools|\$\{REPO\})#([A-Za-z0-9_-]+)/g;
 
 /** GitHub-style heading slug: lowercase, drop punctuation, spaces to hyphens. */
 export function slugify(heading: string): string {
@@ -65,5 +65,31 @@ describe("homepage README anchors", () => {
       .every((a) => anchors.has(a))).toBe(true);
     expect(readmeAnchorLinks("https://github.com/rjwalters/kicad-tools#python-apis")
       .every((a) => anchors.has(a))).toBe(false);
+  });
+});
+
+const BLOB_LINK = /\$\{DOCS\}\/([A-Za-z0-9_./-]+)|\$\{REPO\}\/blob\/main\/([A-Za-z0-9_./-]+)|https:\/\/github\.com\/rjwalters\/kicad-tools\/blob\/main\/([A-Za-z0-9_./-]+)/g;
+
+/** Repository paths a page links to, from literal URLs and the `${DOCS}` / `${REPO}/blob/main` templates. */
+export function blobLinkPaths(source: string): string[] {
+  return [...source.matchAll(BLOB_LINK)].map((m) => (m[1] ? `docs/${m[1]}` : (m[2] ?? m[3])));
+}
+
+describe("homepage and header documentation links (issue #8101)", () => {
+  const sources = ["../src/pages/index.astro", "../src/components/Header.astro"].map((rel) =>
+    readFileSync(new URL(rel, import.meta.url), "utf8"),
+  );
+
+  it("points every blob/main link at a file that exists on main", () => {
+    const paths = sources.flatMap(blobLinkPaths);
+    expect(paths.length).toBeGreaterThan(5);
+    const missing = paths.filter((p) => !existsSync(new URL(`../../${p}`, import.meta.url)));
+    expect(missing).toEqual([]);
+  });
+
+  it("extracts paths from every link form", () => {
+    expect(blobLinkPaths("href={`${DOCS}/mcp/README.md`} href={`${REPO}/blob/main/docs/README.md`}"))
+      .toEqual(["docs/mcp/README.md", "docs/README.md"]);
+    expect(blobLinkPaths("https://github.com/rjwalters/kicad-tools/blob/main/CHANGELOG.md")).toEqual(["CHANGELOG.md"]);
   });
 });

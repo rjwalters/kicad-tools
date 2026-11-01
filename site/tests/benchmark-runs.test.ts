@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
+import { PROJECT_FACT_SOURCES } from "../src/data/projectFactSources.ts";
 const site=resolve(dirname(fileURLToPath(import.meta.url)),"..");
 const outcomes=["completed","partial","stopped_before_routing","failed","timeout","unknown"];
 let root:string; let html:string;
@@ -12,12 +13,7 @@ beforeAll(()=>{
  root=mkdtempSync(join(tmpdir(),"benchmark-render-"));
  const fixtureSite=join(root,"site"), results=join(root,"results"), dated=join(results,"2026-09-12");
  mkdirSync(fixtureSite); mkdirSync(dated,{recursive:true});mkdirSync(join(root,"boards"));
- cpSync(join(site,"..","pyproject.toml"),join(root,"pyproject.toml"));
-  // projectFacts.ts reads these from the repo root at build time.
-  for (const f of ["src/kicad_tools/agent_skills/kct", "src/kicad_tools/mcp/tools/registry.py"]) {
-    mkdirSync(dirname(join(root, f)), { recursive: true });
-    cpSync(join(site, "..", f), join(root, f), { recursive: true });
-  }
+ for (const rel of PROJECT_FACT_SOURCES) cpSync(join(site, "..", rel), join(root, rel), { recursive: true });
  for(const entry of ["src","scripts","astro.config.mjs","package.json","tsconfig.json"])cpSync(join(site,entry),join(fixtureSite,entry),{recursive:true});
  // Share installed packages, but keep Vite's mutable cache private to this build.
  const configPath=join(fixtureSite,"astro.config.mjs");
