@@ -460,8 +460,7 @@ at `intervalSecs`; `feedFloorIntervalSecs` and its env override are ignored.
 runs-listing request per repo. The runs listing is not a conditional request,
 so it always counts. Discovery pages are ETag-cached and are ignored here.
 Each newly finished run costs one jobs listing. With `R` eligible repos and `F`
-finished runs per hour, and ignoring job logs, suite artifacts and story
-lookups:
+finished runs per hour, and ignoring job logs and suite artifacts:
 
 | Mode | Requests/hour | `R = 118`, `F = 100` |
 |---|---|---|
@@ -692,10 +691,9 @@ The attribute and label vocabulary is declared once, in
   `pull_requests[].number` (`pull_request`-triggered runs) or, as a fallback,
   from `feature/issue-N` in `head_branch` — but needs no allowlist entry of
   its own, since it is already in `bounded_attributes()`'s generic
-  always-admitted key list and the collector's span `keep_keys`. Since #9088
-  a run that belongs to an issue is also copied into that issue's story trace
-  (see [Story stitching](#story-stitching-9088)); the per-run trace itself
-  is still joined to sweeps by attribute only. Since #9089 the job span also
+  always-admitted key list and the collector's span `keep_keys`. The per-run trace
+  is joined to sweeps by attribute only (see "How a later join works" in
+  [tracing](tracing.md)). Since #9089 the job span also
   carries `loom.ci.queued_ms` (its own `started_at − created_at`).
 - Both lists also carry `loom.ci.trigger_reason` (#9337), and the run span
   carries `loom.ci.run_attempt` so a `flaky_retry` is auditable from the span.
@@ -724,7 +722,7 @@ The attribute and label vocabulary is declared once, in
 ### Trigger attribution (#9337)
 
 When one PR runs CI several times, `loom.ci.trigger_reason` on each
-`loom.ci.run` span (and its story-trace copy, which is a clone) and `ci.run`
+`loom.ci.run` span and `ci.run`
 record says why. It is a pure function of the one `/actions/runs` row, so
 replay and a second host attribute identically — no cross-run state.
 Rules, first match wins:
@@ -899,7 +897,7 @@ writes the same data as JSON and `ci.yml` uploads it.
 | Artifact | `ci-suite-timings-<shard>`, uploaded `if: always()` with `if-no-files-found: ignore`. The poller downloads **only** artifacts whose name starts with `ci-suite-timings`, so renaming it silently stops suite spans |
 | Transport | `gh run download` (`GithubApi::download_artifact`). `/actions/artifacts/{id}/zip` answers a zip, which every other method's `String::from_utf8_lossy` body path would corrupt; delegating the transfer *and* the unzip to `gh` avoids adding a zip reader for one small JSON file |
 | Cost gate | **Zero requests** unless the run has at least one *not-yet-emitted* `shell-suite-shard` job. A repo that does not shard shell suites pays nothing, not even the artifacts listing, and a re-listed run whose jobs are all already seen re-downloads nothing |
-| Pairing | the unique `shell-suite-shard` job of that run whose `(index, total)` equals the record's `shard`. Zero matches or several is `NoUniqueJob` — never guessed, the same rule [story stitching](#story-stitching-9088) follows for an ambiguous candidate. A `nextest-partition` leg with the same `(k/N)` is **not** a match |
+| Pairing | the unique `shell-suite-shard` job of that run whose `(index, total)` equals the record's `shard`. Zero matches or several is `NoUniqueJob` — never guessed. A `nextest-partition` leg with the same `(k/N)` is **not** a match |
 | Span id | derived from `(repo, job_id, sanitized suite name)`. The **name** is the identity here, unlike a step's number, because a suite's position within a shard is not stable — `ci-wired.txt` order and the `LOOM_CI_SHARD` round robin both shift every entry when one suite is added, and an ordinal-derived id would fork on every manifest edit and make "this suite's duration over the last week" unanswerable |
 | Window | the suite's own instants, **clamped inside the job's** GitHub-reported window. A child span outside its parent renders as a detached bar, and GitHub's window is the authority, not the runner's `date +%s` |
 | Status | the **suite's** own outcome (`pass` → Ok, `fail`/`missing`/`no-result` → Error, `skip`/unrecognised → Unset), never its job's conclusion — the fixture leg concludes `success` while one of its suites failed |
@@ -936,9 +934,6 @@ What is deliberately **not** emitted, and what a failure costs:
   `ci.run`/`ci.job` records hostage to a side artifact would be the worse
   failure. Only a rate limit or a rejected credential escapes — those are
   properties of the host and abort the whole cycle wherever they happen.
-- **Suite spans never reach a story trace.** They are appended after the
-  [story stitching](#story-stitching-9088) pass, so a per-issue story trace is
-  not swamped by one leg's ~118 suite spans.
 
 `ci-queries.sql` sections 12 (slowest suites, with retry and failure counts)
 and 13 (per-leg suite time and slowest suite, the "what to move" counterpart to
@@ -976,7 +971,7 @@ for the file.
 | Artifact | `ci-test-timings-<family>-<k>-<N>`, uploaded `if: always()` with `if-no-files-found: ignore`. **The name is the entire pairing key** — JUnit XML carries no run id, no shard and no job name, so unlike a suite-timings record there is nothing inside the file to pair on. `<family>` is the leg's display name with its `(k/N)` suffix stripped and slugified (`Rust Unit Tests (1/3)` → `rust-unit-tests`), which keeps the key unambiguous: `ci.yml` has one nextest-partition family today (`Rust Unit Tests`, since #10823), but the family slug stays in the name so a second family sharding `1..3` cannot make `(kind, k, N)` match two jobs. Renaming the artifact — or renaming the job without renaming the artifact — silently stops test spans, which `ci_telemetry::tests::test_spans` asserts against `ci.yml` itself |
 | Transport | the same `gh run download` path as a suite-timings artifact, and the same single artifacts listing: one listing serves both families, so a run with both pays one request, not two |
 | Cost gate | **Zero requests** unless the run has at least one *not-yet-emitted* `nextest-partition` job. The gate is **per family**: a run with only nextest legs never downloads a suite-timings artifact, and vice versa |
-| Pairing | the unique `nextest-partition` job of that run with the same family and `(index, total)`. Zero matches or several is `NoUniqueJob` — never guessed, the same rule [suite spans](#suite-spans-9089) and [story stitching](#story-stitching-9088) follow |
+| Pairing | the unique `nextest-partition` job of that run with the same family and `(index, total)`. Zero matches or several is `NoUniqueJob` — never guessed, the same rule [suite spans](#suite-spans-9089) follows |
 | Span id | derived from `(repo, job_id, sanitized binary id, sanitized test name)`. The **stable name** is the identity, never the ordinal, and for a sharper version of the suite-span reason: `--partition count:k/N` is a hash over the test list, so adding ONE test reshuffles which leg runs many of the others, and an ordinal-derived id would fork on every suite edit — making "this test's duration over the last week" unanswerable, which is the whole point. `classname` is part of the key because a test path is only unique within its binary |
 | Window | the test's own `timestamp` + `time`, **clamped inside the job's** GitHub-reported window, for the same reason a suite span's is |
 | Status | the **test's** own outcome (`pass`/`flaky` → Ok, `fail`/`error` → Error, `skip` → Unset), never its job's conclusion. A `flaky` test ultimately *passed*, so its span is Ok and only `loom.ci.test.outcome` distinguishes it from a clean pass |
@@ -1066,8 +1061,6 @@ What is deliberately **not** emitted, and what a failure costs:
   that run, counted in the cycle's `test_artifact_failures` and logged, and is
   never retried. Only a rate limit or a rejected credential escapes and aborts
   the cycle.
-- **Test spans never reach a story trace**, for the same reason suite spans do
-  not: a per-issue story trace must not be swamped by one leg's slow tail.
 
 `ci-queries.sql` sections 16 (slowest tests, with flake and failure counts) and
 17 (per-leg slow-tail time and slowest named test, the nextest counterpart to
@@ -1099,43 +1092,6 @@ not a measurement.
 Still future work, tracked separately from what shipped here: per-**test**
 spans from nextest JUnit output (`[profile.ci.junit]`), which would give the
 `nextest-partition` legs what suite spans give the shell-suite legs.
-
-### Story stitching (#9088)
-
-A completed run that belongs to exactly one issue N is **also** emitted into
-N's story trace (story key v1, see [tracing](tracing.md)): an extra
-`loom.ci.run` span with trace ID `story_context(repo_id, N).trace_id`,
-parented to the story root span, and an extra `loom.ci.job` span per job
-under it. Code: `loom-daemon/src/ci_telemetry/story.rs`.
-
-- **Which issue.** The candidates are the union of every closing reference of
-  every PR in the run's `pull_requests[]` (GraphQL `closingIssuesReferences`)
-  and `N` from a `feature/issue-N` head branch. Exactly one same-repo issue
-  stitches. Zero or several candidates, a cross-repo or truncated reference
-  list, unreadable references, or an unresolvable `repo_id` (the #9068
-  resolver; there is no name-derived fallback) leave the run unstitched. Each
-  outcome is counted in the cycle summary (`story_runs_stitched`,
-  `story_runs_no_candidate`, `story_runs_ambiguous`, `story_runs_unresolved`)
-  and logged. Nothing is guessed.
-- **Ids.** The story run span's ID derives from `(repo_id, run_id, attempt)`
-  and a story job span's from `(repo_id, job_id)`. They ride in the same
-  ledger units as the per-run records, so they are exactly-once like
-  everything else here, and a re-poll or another host derives the same IDs.
-- **The per-run trace is unchanged.** Same IDs, same records. Each per-run
-  span and its story copy link to each other (both directions, run and job).
-- **Attributes.** The story copy adds `loom.story` (`owner/repo#N`),
-  `loom.story.key_version` (`v1`) and `loom.issue`. It carries
-  `loom.pr_number` only when GitHub associated exactly one PR with the run,
-  never the branch-derived issue number.
-- **API cost.** Nothing for a repo whose unemitted runs have no PR and no
-  `feature/issue-N` branch. Otherwise one `repo_id` probe per repo per hour,
-  cached, and at most one batched GraphQL request per repo per cycle (50 PRs
-  each), with each PR's references cached for 10 minutes. A GraphQL rate
-  limit only stops lookups for the rest of the cycle. It is not fed to the
-  org-wide REST backoff.
-- **Single emitter.** Loom's poller is the story emitter for CI. The
-  harness-ops CI poller (harness-ops#193) must not also stitch, because SigNoz
-  does not deduplicate rows.
 
 ### Non-goals (phase 1)
 
