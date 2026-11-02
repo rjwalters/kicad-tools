@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-02
 
+- **PR #8201**: chore(loom): resync installed Loom to v0.19.1254
+- **PR #8105**: docs(site): refresh kicad-tools.org homepage for v0.25.0
 - **PR #8197**: chore(deps-dev): Bump vitest from 5.0.4 to 5.0.5 in /site in the npm-minor-patch group across 1 directory
 - **PR #8199**: chore(deps): Bump astro from 7.3.8 to 7.4.1 in /site
 - **PR #8198**: chore(deps-dev): Bump @astrojs/check from 0.9.10 to 0.9.11 in /site
