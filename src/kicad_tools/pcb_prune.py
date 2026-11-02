@@ -49,11 +49,16 @@ def _pt_seg_dist(p: tuple[float, float], a: tuple[float, float], b: tuple[float,
     return math.hypot(p[0] - (ax + t * dx), p[1] - (ay + t * dy))
 
 
-def _ccw(a, b, c) -> float:
+def _ccw(a: tuple[float, float], b: tuple[float, float], c: tuple[float, float]) -> float:
     return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
 
 
-def _seg_seg_dist(a1, a2, b1, b2) -> float:
+def _seg_seg_dist(
+    a1: tuple[float, float],
+    a2: tuple[float, float],
+    b1: tuple[float, float],
+    b2: tuple[float, float],
+) -> float:
     d1, d2 = _ccw(a1, a2, b1), _ccw(a1, a2, b2)
     d3, d4 = _ccw(b1, b2, a1), _ccw(b1, b2, a2)
     if ((d1 > 0) != (d2 > 0)) and ((d3 > 0) != (d4 > 0)) and d1 != 0 and d2 != 0:
@@ -506,7 +511,8 @@ def prune_board(
 
     pcb = PCB.load(pcb_path)
     plans = plan_prune(pcb)
-    accepted, rejected = list(plans), []
+    accepted = list(plans)
+    rejected: list[NetPlan] = []
     drc_verified, note = False, "DRC verification skipped (--no-drc)"
 
     if verify_drc and plans:
