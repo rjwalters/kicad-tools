@@ -3492,6 +3492,7 @@ def run_selected_checks(
         "copper_sliver": checker.check_copper_slivers,
         "courtyard_overlap": checker.check_courtyard_overlap,
         "dangling_copper": checker.check_dangling_copper,
+        "redundant_copper": checker.check_redundant_copper,
         "diffpair_clearance_intra": checker.check_diffpair_clearance_intra,
         "diffpair_length_skew": checker.check_diffpair_length_skew,
         "diffpair_routing_continuity": checker.check_diffpair_routing_continuity,

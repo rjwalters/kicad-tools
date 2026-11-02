@@ -27,6 +27,7 @@ from .rules.impedance import ImpedanceRule
 from .rules.match_group_length_skew import MatchGroupLengthSkewRule
 from .rules.path_ampacity import PathAmpacityRule
 from .rules.placement import FootprintOutsideBoardRule
+from .rules.redundant_copper import RedundantCopperRule
 from .rules.silkscreen import check_all_silkscreen
 from .rules.via_in_pad import ViaInPadRule
 from .rules.zone_fill import IsolatedCopperRule, ZoneFillRule
@@ -362,6 +363,7 @@ class DRCChecker:
         "check_copper_slivers",
         "check_courtyard_overlap",
         "check_dangling_copper",
+        "check_redundant_copper",
         "check_diffpair_clearance_intra",
         "check_diffpair_length_skew",
         "check_diffpair_routing_continuity",
@@ -501,6 +503,14 @@ class DRCChecker:
         "dangling_copper": CATEGORY_ADVISORY,
         "track_dangling": CATEGORY_ADVISORY,
         "via_dangling": CATEGORY_ADVISORY,
+        # Redundant copper (Issue #8218): warning-only advisories for
+        # avoidable copper (duplicates, fragment runs, detours, off-centre
+        # via ends).  Explicit entries keep them out of fab-blocking prefixes.
+        "redundant_copper": CATEGORY_ADVISORY,
+        "redundant_copper_duplicate": CATEGORY_ADVISORY,
+        "redundant_copper_fragments": CATEGORY_ADVISORY,
+        "redundant_copper_detour": CATEGORY_ADVISORY,
+        "redundant_copper_via_offcentre": CATEGORY_ADVISORY,
         # Isolated copper (Issue #4680, second slice): orphaned zone-fill
         # islands.  Warning-severity quality advisory mirroring KiCad's
         # default severity (project_generator.py pins it to "warning") --
@@ -921,6 +931,16 @@ class DRCChecker:
             warnings.
         """
         rule = DanglingCopperRule()
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_redundant_copper(self) -> DRCResults:
+        """Report avoidable copper (Issue #8218).
+
+        Warns on exact-duplicate segments, runs of very short segments,
+        long detours and track ends off a same-net via centre.  Own CLI
+        category (``redundant_copper``) so ``--skip redundant_copper`` works.
+        """
+        rule = RedundantCopperRule()
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_diffpair_clearance_intra(self) -> DRCResults:
