@@ -809,10 +809,21 @@ def _reverse_path(path: list[Segment]) -> list[Segment]:
     ]
 
 
+def _point_segment_distance(px: float, py: float, s: Segment) -> float:
+    """Distance from point (px, py) to the segment *s*."""
+    dx, dy = s.x2 - s.x1, s.y2 - s.y1
+    len_sq = dx * dx + dy * dy
+    if len_sq == 0.0:
+        return math.hypot(px - s.x1, py - s.y1)
+    t = max(0.0, min(1.0, ((px - s.x1) * dx + (py - s.y1) * dy) / len_sq))
+    return math.hypot(px - (s.x1 + t * dx), py - (s.y1 + t * dy))
+
+
 def shorten_detour_pass(
     segments: list[Segment],
     config: OptimizationConfig,
     path_is_clear: Callable[[Segment], bool] | None = None,
+    anchors: list[tuple[float, float]] | None = None,
 ) -> list[Segment]:
     """Replace a whole detouring chain with a shorter straight/single-bend path.
 
@@ -830,15 +841,25 @@ def shorten_detour_pass(
     the chain by more than ``config.tolerance`` and whose every segment passes
     *path_is_clear* replaces the chain; otherwise the chain is returned unchanged.
 
+    A whole-chain rewrite is only safe with a collision model and knowledge of
+    the net's own pads/vias, so the pass is a **no-op** unless both
+    *path_is_clear* and *anchors* are supplied.  Same-net pads/vias are
+    invisible to the collision check (``exclude_net``), and a pad sitting
+    mid-chain (daisy chain) must stay on the copper, so a candidate is rejected
+    unless it still passes over every anchor the original chain touched.
+
     Args:
         segments: Ordered chain of connected segments (single chain).
         config: Optimization configuration.
-        path_is_clear: Optional collision-check callback.
+        path_is_clear: Collision-check callback (required; ``None`` = no-op).
+        anchors: (x, y) positions of the net's pads and vias (required;
+            ``None`` = no-op).  Those lying on the original chain are fixed
+            points the replacement must also touch.
 
     Returns:
         The replacement path, or a copy of *segments* if nothing qualifies.
     """
-    if len(segments) < 3:
+    if len(segments) < 3 or path_is_clear is None or anchors is None:
         return list(segments)
 
     first, last = segments[0], segments[-1]
@@ -854,6 +875,13 @@ def shorten_detour_pass(
     if len(forward) > 1 and len(backward) > 1:
         candidates.append(backward)
 
+    reach = first.width / 2 + config.tolerance
+    fixed = [
+        (ax, ay)
+        for ax, ay in anchors
+        if any(_point_segment_distance(ax, ay, s) <= reach for s in segments)
+    ]
+
     current_len = sum(segment_length(s) for s in segments)
     scored = sorted(
         ((sum(segment_length(s) for s in c), c) for c in candidates),
@@ -862,6 +890,8 @@ def shorten_detour_pass(
     for length, cand in scored:
         if length >= current_len - config.tolerance:
             break  # sorted ascending: nothing later can be shorter
-        if path_is_clear is None or all(path_is_clear(s) for s in cand):
+        if not all(path_is_clear(s) for s in cand):
+            continue
+        if all(any(_point_segment_distance(ax, ay, s) <= reach for s in cand) for ax, ay in fixed):
             return cand
     return list(segments)

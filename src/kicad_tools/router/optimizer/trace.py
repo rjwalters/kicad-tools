@@ -372,6 +372,7 @@ class TraceOptimizer:
         self,
         config: OptimizationConfig | None = None,
         collision_checker: CollisionChecker | None = None,
+        net_anchors: dict[int, list[tuple[float, float]]] | None = None,
     ):
         """Initialize the trace optimizer.
 
@@ -380,9 +381,14 @@ class TraceOptimizer:
             collision_checker: Optional collision checker for DRC-safe optimization.
                 When provided, optimizations that would create collisions are skipped.
                 When None, no collision checking is performed (original behavior).
+            net_anchors: Optional map of net id to the (x, y) positions of that
+                net's pads and vias.  Together with *collision_checker* this
+                enables the whole-chain detour-shortening pass, which is a no-op
+                without both (Issue #8217).
         """
         self.config = config or OptimizationConfig()
         self.collision_checker = collision_checker
+        self.net_anchors = net_anchors
 
         # Initialize via optimizer with matching config
         via_config = ViaOptimizationConfig(
@@ -582,9 +588,18 @@ class TraceOptimizer:
             segments: List of connected segments (single chain).
 
         Returns:
-            The shorter replacement path, or the chain unchanged.
+            The shorter replacement path, or the chain unchanged.  Always the
+            chain unchanged unless both a collision checker and ``net_anchors``
+            were supplied.
         """
-        return shorten_detour_pass(segments, self.config, self._path_is_clear)
+        if self.collision_checker is None or self.net_anchors is None or not segments:
+            return list(segments)
+        return shorten_detour_pass(
+            segments,
+            self.config,
+            self._path_is_clear,
+            self.net_anchors.get(segments[0].net, []),
+        )
 
     def optimize_route(self, route: Route) -> Route:
         """Optimize a complete route.

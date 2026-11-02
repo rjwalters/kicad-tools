@@ -2186,17 +2186,54 @@ class TestShortenDetours:
     def _len(self, segs):
         return sum(((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2) ** 0.5 for s in segs)
 
+    def _opt(self, config=None, blocked=None, anchors=None):
+        return TraceOptimizer(
+            config=config or OptimizationConfig(),
+            collision_checker=MockCollisionChecker(blocked_paths=blocked),
+            net_anchors={1: []} if anchors is None else anchors,
+        )
+
     def test_tent_collapses_to_straight(self):
-        opt = TraceOptimizer(config=OptimizationConfig())
-        result = opt.shorten_detours(self._tent())
+        result = self._opt().shorten_detours(self._tent())
         assert len(result) == 1
         assert (result[0].x1, result[0].y1, result[0].x2, result[0].y2) == (0, 0, 6, 0)
         assert result[0].width == 0.2 and result[0].layer == Layer.F_CU and result[0].net == 1
 
+    def test_no_collision_checker_is_noop(self):
+        # Blocking 1: an unchecked whole-chain rewrite can short other nets.
+        opt = TraceOptimizer(config=OptimizationConfig(), net_anchors={1: []})
+        tent = self._tent()
+        assert opt.shorten_detours(tent) == tent
+        assert opt.optimize_segments(tent) == tent
+
+    def test_no_anchor_info_is_noop(self):
+        opt = TraceOptimizer(config=OptimizationConfig(), collision_checker=MockCollisionChecker())
+        tent = self._tent()
+        assert opt.shorten_detours(tent) == tent
+
+    def test_foreign_trace_not_crossed(self):
+        # A foreign-net trace sits across the straight path; tent must stay.
+        opt = self._opt(blocked=[(2.9, -1.0, 3.1, 0.5)])
+        tent = self._tent()
+        assert opt.optimize_segments(tent) == tent
+
+    def test_mid_chain_same_net_pad_stays_connected(self):
+        # Blocking 2: daisy-chain pad on the flat run at (3, 1) must stay on copper.
+        tent = [
+            self._seg(0, 0, 1, 1),
+            self._seg(1, 1, 3, 1),
+            self._seg(3, 1, 5, 1),
+            self._seg(5, 1, 6, 0),
+        ]
+        opt = self._opt(anchors={1: [(0, 0), (3, 1), (6, 0)]})
+        assert opt.shorten_detours(tent) == tent
+        # Same chain with no pad in the middle still collapses.
+        opt = self._opt(anchors={1: [(0, 0), (6, 0)]})
+        assert len(opt.shorten_detours(tent)) == 1
+
     def test_obstacle_on_shorter_path_leaves_chain(self):
         # Block everything touching y in [-0.1, 0.5] except the original tent top.
-        checker = MockCollisionChecker(blocked_paths=[(2.0, -0.1, 4.0, 0.5)])
-        opt = TraceOptimizer(config=OptimizationConfig(), collision_checker=checker)
+        opt = self._opt(blocked=[(2.0, -0.1, 4.0, 0.5)])
         tent = self._tent()
         assert opt.shorten_detours(tent) == tent
 
@@ -2207,8 +2244,7 @@ class TestShortenDetours:
             self._seg(0, 3, 6, 3),
             self._seg(6, 3, 6, 2),
         ]
-        checker = MockCollisionChecker(blocked_paths=[(0.5, 1.5, 1.5, 1.8)])
-        opt = TraceOptimizer(config=OptimizationConfig(), collision_checker=checker)
+        opt = self._opt(blocked=[(0.5, 1.5, 1.5, 1.8)])
         result = opt.shorten_detours(chain)
         assert len(result) == 2
         assert (result[0].x2, result[0].y2) == pytest.approx((4, 0))
@@ -2216,11 +2252,11 @@ class TestShortenDetours:
 
     def test_already_optimal_unchanged(self):
         chain = [self._seg(0, 0, 1, 0), self._seg(1, 0, 2, 0), self._seg(2, 0, 3, 0)]
-        assert TraceOptimizer().shorten_detours(chain) == chain
+        assert self._opt().shorten_detours(chain) == chain
 
     def test_loop_unchanged(self):
         chain = [self._seg(0, 0, 1, 0), self._seg(1, 0, 1, 1), self._seg(1, 1, 0, 0)]
-        assert TraceOptimizer().shorten_detours(chain) == chain
+        assert self._opt().shorten_detours(chain) == chain
 
     def test_config_flag_disables(self):
         cfg = OptimizationConfig(
@@ -2232,7 +2268,7 @@ class TestShortenDetours:
             shorten_detours=False,
         )
         tent = self._tent()
-        assert len(TraceOptimizer(config=cfg).optimize_segments(tent)) == 3
+        assert len(self._opt(config=cfg).optimize_segments(tent)) == 3
         cfg.shorten_detours = True
-        out = TraceOptimizer(config=cfg).optimize_segments(tent)
+        out = self._opt(config=cfg).optimize_segments(tent)
         assert len(out) == 1 and self._len(out) == pytest.approx(6.0)

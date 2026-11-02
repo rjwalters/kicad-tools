@@ -71,10 +71,6 @@ def _optimize(router: Autorouter) -> None:
         convert_45_corners=True,
         corner_chamfer_size=0.5,
         minimize_vias=True,
-        # These fixtures exercise the chamfer path; whole-chain detour
-        # shortening (Issue #8217) has its own coverage and interacts with the
-        # per-route veto order.
-        shorten_detours=False,
     )
     optimizer = TraceOptimizer(config=config, collision_checker=make_collision_checker(router.grid))
     optimize_routes_grid_synced(router, optimizer)
