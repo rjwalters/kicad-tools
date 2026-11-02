@@ -78,6 +78,10 @@ class PartAvailabilityResult:
     error: str | None = None
     inventory: dict = field(default_factory=dict)
 
+    # How the LCSC number was assigned when it was not in the schematic
+    # ("auto" = catalog match, "cache" = stale enrichment cache); "" otherwise.
+    lcsc_source: str = ""
+
     @property
     def sufficient_stock(self) -> bool:
         """Check if enough stock for needed quantity."""
@@ -113,6 +117,7 @@ class PartAvailabilityResult:
             "footprint": self.footprint,
             "mpn": self.mpn,
             "lcsc_part": self.lcsc_part,
+            "lcsc_source": self.lcsc_source,
             "quantity_needed": self.quantity_needed,
             "quantity_available": self.quantity_available,
             "status": self.status.value,
@@ -198,6 +203,9 @@ class BOMAvailabilityResult:
             "unverified": sum(item.status == AvailabilityStatus.UNKNOWN for item in self.items),
             "unavailable": sum(
                 item.status == AvailabilityStatus.UNAVAILABLE for item in self.items
+            ),
+            "discontinued": sum(
+                item.status == AvailabilityStatus.DISCONTINUED for item in self.items
             ),
             "all_available": self.all_available,
             "total_cost": self.total_cost,
