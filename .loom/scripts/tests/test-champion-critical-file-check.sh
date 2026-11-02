@@ -161,7 +161,7 @@ champion_critical_file_check() {
 STUB_DIR="$(mktemp -d)" && trap 'rm -rf "$STUB_DIR"' EXIT
 mkdir -p "$STUB_DIR/bin" "$STUB_DIR/noexec" "$STUB_DIR/empty"
 printf '%s\n' "#!$(command -v bash)" \
-    '[ "$1 $2" = "forge suspect-critical-diff" ] && { printf "%b" "${STUB_SUSPECT_OUT:-}"; exit "${STUB_SUSPECT_RC:-1}"; }' \
+    '[ "$1 $2" = "forge suspect-critical-diff" ] && { [ -n "${STUB_SUSPECT_ERR:-}" ] && echo "$STUB_SUSPECT_ERR" >&2; printf "%b" "${STUB_SUSPECT_OUT:-}"; exit "${STUB_SUSPECT_RC:-1}"; }' \
     '[ "$1 $2" = "forge version-only-diff" ] || exit 64' \
     'for kv in $STUB_RCS; do [ "${kv%=*}" = "$4" ] && exit "${kv##*=}"; done; exit 1' \
     >"$STUB_DIR/bin/loom-daemon"
@@ -358,6 +358,12 @@ assert_eq "1|" "$(scd 70 '' Cargo.toml)" "any other non-zero exit holds"
 assert_eq "1|" "$(scd 0 'SUSPECT=0\n' migrations/0001_initial.py)" "a migrations hit never reaches the daemon verb: holds on any change"
 assert_eq "1|" "$(scd 0 'SUSPECT=0\n' .github/workflows/ci.yml)" "a workflow hit never clears through the manifest verb"
 assert_eq "1|" "$(scd 0 'SUSPECT=0\n' Cargo.lock)" "Cargo.lock is not a manifest-family hit"
+# #13296: a forge read failure keeps its HTTP status for the hold comment.
+STUB_SUSPECT_ERR="could not read the PR's file list: \`gh api repos/a/b/pulls/42/files\` failed (exit 1): HTTP 403" \
+    STUB_SUSPECT_RC=1 PATH="$STUB_DIR/bin:$PATH" suspect_critical_diff Cargo.toml 42 && r=0 || r=1
+assert_eq "1" "$r" "a forge read failure holds"
+case "$CRITERION3_SUSPECT_ERROR" in *"HTTP 403"*) r=ok ;; *) r=missing ;; esac
+assert_eq "ok" "$r" "the read error's HTTP status is captured for the hold comment (#13296)"
 PATH="$STUB_DIR/noexec:$PATH" suspect_critical_diff Cargo.toml 42 && r=0 || r=1
 assert_eq "1" "$r" "a non-executable loom-daemon (126) holds"
 PATH="$STUB_DIR/empty" suspect_critical_diff Cargo.toml 42 && r=0 || r=1

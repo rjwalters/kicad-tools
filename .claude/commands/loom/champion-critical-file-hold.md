@@ -89,8 +89,9 @@ matching row wins:
 The #9416 row: `loom-daemon forge verdict-equivalent <pr> <recorded> <head>`
 (Judge's staleness verb; never re-derive it here) proves from the repository
 that the change survived the move (`tree`, `clean-merge`,
-`rebase-patch-identical`). An unreadable forge compare is retried (2×) and, if it
-stays unreadable, re-arms with `equivalence=unread` in the notice and in the
+`rebase-patch-identical`). An unreadable forge compare is retried (2×), then compared from local git
+(#13359: equal non-empty merge-base-relative patches keep the release); only if
+both reads fail does it re-arm, naming each failed read, with `equivalence=unread` in the notice and in the
 `hold.transition` trigger. **Requested-change carry (#13114)**: a trusted human
 (never a bot or Champion) comment posted after the hold may carry one
 `release-scope: <path> [<path>...]` line; the tick passes those paths as
@@ -229,6 +230,10 @@ if [ "$CRITICAL_FILES_RESULT" = "FAIL" ]; then
       [ -n "${CRITERION3_SUSPECT_LINE:-}" ] &&
         CF_SUSPECT_NOTE="
 - **Matched suspect line** (in \`[${CRITERION3_SUSPECT_SECTION:-?}]\`): \`${CRITERION3_SUSPECT_LINE}\`"
+      # #13296: a forge read failure holds too; show its HTTP status/message, not just "could not read".
+      [ -n "${CRITERION3_SUSPECT_ERROR:-}" ] &&
+        CF_SUSPECT_NOTE="${CF_SUSPECT_NOTE}
+- **Suspect-line check error**: \`${CRITERION3_SUSPECT_ERROR}\`"
       CF_WF_NOTE=""   # #10539
       gh pr diff "$PR_NUMBER" --name-only 2>/dev/null | grep -q '^\.github/workflows/' &&
         CF_WF_NOTE="
