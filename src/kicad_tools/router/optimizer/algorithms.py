@@ -790,3 +790,78 @@ def pull_tight_pass(
             break
 
     return result
+
+
+def _reverse_path(path: list[Segment]) -> list[Segment]:
+    """Return *path* traversed end-to-start (order and orientation flipped)."""
+    return [
+        Segment(
+            x1=s.x2,
+            y1=s.y2,
+            x2=s.x1,
+            y2=s.y1,
+            width=s.width,
+            layer=s.layer,
+            net=s.net,
+            net_name=s.net_name,
+        )
+        for s in reversed(path)
+    ]
+
+
+def shorten_detour_pass(
+    segments: list[Segment],
+    config: OptimizationConfig,
+    path_is_clear: Callable[[Segment], bool] | None = None,
+) -> list[Segment]:
+    """Replace a whole detouring chain with a shorter straight/single-bend path.
+
+    Local passes (``merge_collinear``, ``eliminate_zigzags``,
+    ``compress_staircase``, ``convert_corners_45``, ``pull_tight_pass``) never
+    replace a chain wholesale, so a "tent" climb/descent/flat between two fixed
+    points can survive them (Issue #8217).  Chains handed to this pass already
+    run between fixed points (pads, vias, junctions -- see ``sort_into_chains``),
+    so the chain's two endpoints are kept verbatim.
+
+    For a chain of >= 3 segments the candidates are the 1-2 segment 45-degree
+    paths between the endpoints (diagonal-then-orthogonal and
+    orthogonal-then-diagonal; a single segment when the endpoints are already
+    0/45/90 degrees apart).  The shortest candidate that is strictly shorter than
+    the chain by more than ``config.tolerance`` and whose every segment passes
+    *path_is_clear* replaces the chain; otherwise the chain is returned unchanged.
+
+    Args:
+        segments: Ordered chain of connected segments (single chain).
+        config: Optimization configuration.
+        path_is_clear: Optional collision-check callback.
+
+    Returns:
+        The replacement path, or a copy of *segments* if nothing qualifies.
+    """
+    if len(segments) < 3:
+        return list(segments)
+
+    first, last = segments[0], segments[-1]
+    start = (first.x1, first.y1)
+    end = (last.x2, last.y2)
+
+    forward = _optimal_path(start, end, first, config)
+    if not forward:  # loop: endpoints coincide
+        return list(segments)
+
+    candidates = [forward]
+    backward = _reverse_path(_optimal_path(end, start, first, config))
+    if len(forward) > 1 and len(backward) > 1:
+        candidates.append(backward)
+
+    current_len = sum(segment_length(s) for s in segments)
+    scored = sorted(
+        ((sum(segment_length(s) for s in c), c) for c in candidates),
+        key=lambda t: t[0],
+    )
+    for length, cand in scored:
+        if length >= current_len - config.tolerance:
+            break  # sorted ascending: nothing later can be shorter
+        if path_is_clear is None or all(path_is_clear(s) for s in cand):
+            return cand
+    return list(segments)

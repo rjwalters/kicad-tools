@@ -21,6 +21,7 @@ from .algorithms import (
     eliminate_zigzags,
     merge_collinear,
     pull_tight_pass,
+    shorten_detour_pass,
 )
 from .chain import sort_into_chains
 from .collision import CollisionChecker
@@ -406,6 +407,7 @@ class TraceOptimizer:
         4. Staircase compression
         5. 45-degree corner conversion
         6. PullTight perpendicular segment translation
+        7. Detour shortening (whole-chain straight/single-bend replacement)
 
         Args:
             segments: List of segments to optimize (may contain multiple chains).
@@ -451,6 +453,9 @@ class TraceOptimizer:
 
             if self.config.pull_tight:
                 result = self.pull_tight(result)
+
+            if self.config.shorten_detours:
+                result = self.shorten_detours(result)
 
             all_optimized.extend(result)
 
@@ -569,6 +574,17 @@ class TraceOptimizer:
             Optimised list of segments.
         """
         return pull_tight_pass(segments, self.config, self._path_is_clear)
+
+    def shorten_detours(self, segments: list[Segment]) -> list[Segment]:
+        """Replace a detouring chain with a shorter straight/single-bend path.
+
+        Args:
+            segments: List of connected segments (single chain).
+
+        Returns:
+            The shorter replacement path, or the chain unchanged.
+        """
+        return shorten_detour_pass(segments, self.config, self._path_is_clear)
 
     def optimize_route(self, route: Route) -> Route:
         """Optimize a complete route.
