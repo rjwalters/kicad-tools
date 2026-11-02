@@ -22,6 +22,7 @@ from .fixtures import (
     board_mains_named_source,
     board_no_hv_source,
     board_same_footprint_fail_source,
+    board_same_footprint_hides_board_source,
     board_same_footprint_only_source,
     board_source,
 )
@@ -625,3 +626,55 @@ def test_attach_zone_does_not_mask_shortfall_outside_zone(tmp_path, capsys):
     assert row["residual_witness_mm"][0] > 25  # board-relative: at P3/P4, not Q1 (x~10)
     assert payload["gate_passed"] is False
     assert rc != 0
+
+
+# ---------------------------------------------------------------------------
+# #8232: a same_footprint minimum must not hide a board-level approach.
+# ---------------------------------------------------------------------------
+
+
+def _hidden_board_run(tmp_path, capsys, board_gap_mm, *extra):
+    pcb = _write(tmp_path, board_same_footprint_hides_board_source(board_gap_mm=board_gap_mm))
+    ncm = _hv_map_file(tmp_path)
+    rc = _run(
+        [
+            "creepage",
+            str(pcb),
+            "--net-class-map",
+            str(ncm),
+            "--min",
+            "1.0",
+            "--format",
+            "json",
+            *extra,
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    rows = [p for p in payload["pairs"] if p["net_b"] == "DIV_MID"]
+    return rc, payload, rows
+
+
+def test_same_footprint_pair_also_reports_board_row(tmp_path, capsys):
+    _, _, rows = _hidden_board_run(tmp_path, capsys, 1.2)
+    assert sorted(r["relationship"] for r in rows) == ["board", "same_footprint"]
+    board = next(r for r in rows if r["relationship"] == "board")
+    sfp = next(r for r in rows if r["relationship"] == "same_footprint")
+    assert board["creepage_mm"] > sfp["creepage_mm"]
+    assert abs(board["creepage_mm"] - 1.2) < 0.05
+
+
+def test_waiver_does_not_hide_failing_board_row(tmp_path, capsys):
+    rc, payload, rows = _hidden_board_run(tmp_path, capsys, 0.8, "--waive-same-footprint")
+    board = next(r for r in rows if r["relationship"] == "board")
+    assert board["pass"] is False
+    assert not board.get("waived")
+    assert payload["gate_passed"] is False
+    assert rc == 1
+
+
+def test_waiver_passes_when_board_row_clears(tmp_path, capsys):
+    rc, payload, rows = _hidden_board_run(tmp_path, capsys, 1.2, "--waive-same-footprint")
+    sfp = next(r for r in rows if r["relationship"] == "same_footprint")
+    assert sfp["waived"] is True
+    assert payload["gate_passed"] is True
+    assert rc == 0

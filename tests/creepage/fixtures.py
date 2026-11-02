@@ -304,6 +304,24 @@ def board_same_footprint_only_source() -> str:
     return "".join(parts)
 
 
+def board_same_footprint_hides_board_source(*, board_gap_mm: float) -> str:
+    """Same-footprint minimum hiding a larger board-level approach (#8232).
+
+    ``R1`` holds an ``L_MAINS`` pad and a ``DIV_MID`` pad 0.4 mm apart (the
+    ``same_footprint`` global minimum).  A separate ``D1`` ``DIV_MID`` pad sits
+    ``board_gap_mm`` from ``R1``'s ``L_MAINS`` pad -- a board-level approach on
+    the SAME net pair that is larger than the minimum, so a one-row-per-pair
+    report never emitted it.
+    """
+    parts = [_SAMEFP_HEADER, _OUTLINE]
+    parts.append(
+        _footprint2("R1", 110, 110, [("1", 1, "L_MAINS", 0, 0), ("2", 4, "DIV_MID", 0, 1.0)])
+    )
+    parts.append(_footprint2("D1", 110, 110 - 0.6 - board_gap_mm, [("1", 4, "DIV_MID", 0, 0)]))
+    parts.append(")\n")
+    return "".join(parts)
+
+
 def board_attach_zone_source(*, outside_shortfall: bool) -> str:
     """TO-220-style attach-zone board (#8028).
 
