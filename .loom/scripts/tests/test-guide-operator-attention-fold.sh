@@ -33,21 +33,18 @@
 #   3. The committed WORK_PLAN.md carries the section INSIDE the markers, not
 #      above them, and contains no leftover `**Update (` append-log residue
 #      above the markers.
-#   4. THE REGRESSION, executed rather than grepped: a reconstruction of the
-#      section's render function, run twice against the SAME `loom:operator`
-#      PR membership, produces byte-identical output — i.e. a tick where the
-#      underlying facts (which PRs are held) have not changed can never
-#      manufacture a diff, regardless of when it runs.
-#   5. #6457: `$held` is derived FROM `$approved`'s already-fetched PR list
-#      (filtered on `loom:operator` label membership) rather than issuing a
-#      second, independently-cached/independently-search-indexed
+#   4. #6457: `$held` is derived FROM `$approved`'s already-fetched PR list
+#      (filtered on hold-label membership) rather than issuing a second,
+#      independently-cached/independently-search-indexed
 #      `gh pr list --label "loom:operator"` query — so the "Operator
 #      Attention" and "Approved (Awaiting Merge)" sections (and the Backlog
 #      Balance count derived from `$held`) can no longer disagree about
-#      which open `loom:pr` PRs also carry `loom:operator`, even under
-#      cache-age skew or GitHub search-index lag on a just-applied label.
+#      which open `loom:pr` PRs are held, even under cache-age skew or
+#      GitHub search-index lag on a just-applied label. The jq filter is
+#      EXTRACTED from guide.md and executed against a fixture (#13384), so it
+#      tests the shipped filter rather than a copy.
 #
-# Hermetic: pure grep/string reconstruction against fixture data. No forge,
+# Hermetic: grep plus the real extracted jq filter against fixture data. No forge,
 # network, or `gh` calls.
 
 set -uo pipefail
@@ -153,106 +150,69 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Reconstruct the section-rendering logic exactly as render_plan_body()
-# performs it for this section (mirrors section()'s heading/blurb/body
-# shape). $1 = held PR bullet list.
-# ---------------------------------------------------------------------------
-render_operator_attention() {
-    local held="$1"
-    printf '## Operator Attention: Merge-Risk-Hold Pileup\n'
-    printf '\n%s\n' "Judge-approved PRs stuck under a \`loom:operator\` merge-risk hold — implementation work is done, only a human merge decision is missing."
-    printf '\n%s\n' "${held:-_None._}"
-}
-
-# ---------------------------------------------------------------------------
-# Test 4: THE REGRESSION — identical membership renders byte-identical text
-# ---------------------------------------------------------------------------
-echo ""
-echo "Test 4: identical loom:operator membership renders byte-identical output"
-
-HELD_FIXTURE=$'- **#5904**: fix(daemon): treat stale worktree registrations as already-removed in loom-daemon clean\n- **#5619**: tokens: record (provider, upstream account id) in the pool storage layer'
-
-RENDER_1="$(render_operator_attention "$HELD_FIXTURE")"
-# Simulate a later tick — same PR membership, but "time has passed" (nothing
-# about that shows up in the render since there is no timestamp to smuggle
-# in, unlike the old hand-appended paragraph).
-RENDER_2="$(render_operator_attention "$HELD_FIXTURE")"
-
-assert_eq "$RENDER_1" "$RENDER_2" \
-    "two renders of the same held-PR set produce byte-identical text (no timestamp/prose drift)"
-
-# A genuinely different membership (a PR cleared, or a new one added) DOES
-# change the output — the fold must not make the section permanently inert.
-HELD_FIXTURE_CHANGED=$'- **#5904**: fix(daemon): treat stale worktree registrations as already-removed in loom-daemon clean'
-RENDER_3="$(render_operator_attention "$HELD_FIXTURE_CHANGED")"
-if [[ "$RENDER_1" != "$RENDER_3" ]]; then
-    pass "a genuine membership change (a PR cleared) still changes the rendered output"
-else
-    fail "expected a genuine membership change to change the rendered output"
-fi
-
-# Empty membership (no operator holds at all) renders the section's
-# "_None._" fallback rather than omitting the section — keeping it in
-# lockstep with every other section() call in render_plan_body().
-RENDER_EMPTY="$(render_operator_attention "")"
-if grep -q '_None._' <<<"$RENDER_EMPTY"; then
-    pass "empty loom:operator membership renders the _None._ fallback, consistent with other sections"
-else
-    fail "expected the _None._ fallback for empty loom:operator membership"
-fi
-
-# ---------------------------------------------------------------------------
-# Test 5 (#6457): $held is derived from $approved's fetched PR list, so the
+# Test 4 (#6457): $held is derived from $approved's fetched PR list, so the
 # "Operator Attention" and "Approved (Awaiting Merge)" sections can no
-# longer disagree about which open loom:pr PRs also carry loom:operator —
-# even when a second, independently-cached/independently-search-indexed
+# longer disagree about which open loom:pr PRs are held — even when a second,
+# independently-cached/independently-search-indexed
 # `gh pr list --label "loom:operator"` query would have returned stale or
 # lagging results for a PR labeled `loom:operator` moments earlier.
+#
+# The jq program under test is EXTRACTED from the shipped render_plan_body()
+# in guide.md and executed against a fixture — not re-typed here — so a
+# change to the real filter changes this test's result (#13384).
 # ---------------------------------------------------------------------------
 echo ""
-echo "Test 5: \$held is derived from \$approved's list, not a second live query (#6457)"
+echo "Test 4: guide.md's real \$held filter derives held PRs from \$approved's list (#6457)"
 
 if command -v jq >/dev/null 2>&1; then
-    # Simulate: two PRs carry both loom:pr and loom:operator (one just
-    # labeled loom:operator moments before this "tick"); a third carries
-    # only loom:pr. A second, separately-cached `loom:operator`-filtered
-    # query is deliberately NOT modeled here, because the fix removes it
-    # entirely — $held must come from the SAME fetched JSON as $approved.
-    APPROVED_JSON_FIXTURE='[
-      {"number":6333,"title":"Test PR A","labels":[{"name":"loom:pr"},{"name":"loom:operator"}]},
-      {"number":6325,"title":"Test PR B","labels":[{"name":"loom:pr"},{"name":"loom:operator"}]},
-      {"number":9999,"title":"Test PR C","labels":[{"name":"loom:pr"}]}
-    ]'
-
-    APPROVED_DERIVED="$(printf '%s' "$APPROVED_JSON_FIXTURE" | jq -r '.[] | "- **#\(.number)**: \(.title)"')"
-    HELD_DERIVED="$(printf '%s' "$APPROVED_JSON_FIXTURE" | jq -r '.[] | select([(.labels // [])[].name] | index("loom:operator")) | "- **#\(.number)**: \(.title)"')"
-
-    if grep -q '#6333' <<<"$HELD_DERIVED" && grep -q '#6325' <<<"$HELD_DERIVED"; then
-        pass "both loom:operator-labeled PRs are derived into \$held from the same fetch as \$approved"
-    else
-        fail "expected both #6333 and #6325 in \$held derived from \$approved_json (got: $HELD_DERIVED)"
+    HELD_LINE="$(grep -E '^[[:space:]]*held=\$\(printf .%s. "\$approved_json" \| jq -r ' <<<"$RPB_BODY" | head -1)"
+    HELD_JQ=""
+    if [[ "$HELD_LINE" =~ jq\ -r\ \'(.*)\'\)[[:space:]]*$ ]]; then
+        HELD_JQ="${BASH_REMATCH[1]}"
     fi
 
-    if grep -q '#9999' <<<"$HELD_DERIVED"; then
-        fail "PR #9999 (loom:pr only, no loom:operator) unexpectedly appeared in derived \$held"
+    if [[ -z "$HELD_JQ" ]]; then
+        fail "could not extract the jq program from guide.md's held= derivation (line: '$HELD_LINE')"
     else
-        pass "a loom:pr-only PR is correctly excluded from derived \$held"
-    fi
+        pass "extracted the real held= jq program from guide.md"
 
-    if grep -q '#9999' <<<"$APPROVED_DERIVED"; then
-        pass "\$approved still lists all three loom:pr PRs (rendering unchanged by the derivation refactor)"
-    else
-        fail "expected \$approved to still include #9999"
-    fi
+        # Two PRs carry loom:operator (one just labeled moments before this
+        # "tick"), one carries loom:blocked, and one carries neither.
+        APPROVED_JSON_FIXTURE='[
+          {"number":6333,"title":"Test PR A","labels":[{"name":"loom:pr"},{"name":"loom:operator"}]},
+          {"number":6325,"title":"Test PR B","labels":[{"name":"loom:pr"},{"name":"loom:operator"}]},
+          {"number":7777,"title":"Test PR D","labels":[{"name":"loom:pr"},{"name":"loom:blocked"}]},
+          {"number":9999,"title":"Test PR C","labels":[{"name":"loom:pr"}]}
+        ]'
 
-    HELD_COUNT="$([ -z "$HELD_DERIVED" ] && printf '0' || printf '%s\n' "$HELD_DERIVED" | grep -c '^- ')"
-    assert_eq "$HELD_COUNT" "2" "Backlog Balance's derived held-count is correct by construction (2)"
+        HELD_DERIVED="$(printf '%s' "$APPROVED_JSON_FIXTURE" | jq -r "$HELD_JQ" 2>&1)"
+
+        if grep -q '#6333' <<<"$HELD_DERIVED" && grep -q '#6325' <<<"$HELD_DERIVED"; then
+            pass "both loom:operator-labeled PRs are derived into \$held from the same fetch as \$approved"
+        else
+            fail "expected both #6333 and #6325 in \$held derived from \$approved_json (got: $HELD_DERIVED)"
+        fi
+
+        if grep -q '#7777' <<<"$HELD_DERIVED"; then
+            pass "a loom:blocked PR is derived into \$held by the real filter"
+        else
+            fail "expected #7777 (loom:blocked) in \$held derived from \$approved_json (got: $HELD_DERIVED)"
+        fi
+
+        if grep -q '#9999' <<<"$HELD_DERIVED"; then
+            fail "PR #9999 (loom:pr only, no hold label) unexpectedly appeared in derived \$held"
+        else
+            pass "a loom:pr-only PR is correctly excluded from derived \$held"
+        fi
+
+        HELD_COUNT="$([ -z "$HELD_DERIVED" ] && printf '0' || printf '%s\n' "$HELD_DERIVED" | grep -c '^- ')"
+        assert_eq "$HELD_COUNT" "3" "the real filter yields the expected held-count (3)"
+    fi
 else
-    echo "  SKIP: jq not available, skipping Test 5's executable derivation check"
+    echo "  SKIP: jq not available, skipping Test 4's executable derivation check"
 fi
 
 # ---------------------------------------------------------------------------
-echo ""
 echo "================================"
 echo "Tests run:    $TESTS_RUN"
 echo -e "Tests passed: ${GREEN}${TESTS_PASSED}${NC}"

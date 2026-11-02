@@ -62,6 +62,7 @@ test-champion-post-claim-recheck.sh
 test-champion-premise-false-close.sh
 test-champion-promotion-throughput.sh
 test-champion-ratification-hold.sh
+test-doctor-champion-hold-conflict.sh
 test-champion-resync-waiver.sh
 test-champion-standing-authorization.sh
 test-champion-targeted-modes.sh

@@ -40,6 +40,8 @@ Rationale: `.loom/docs/ratification-hold.md`.
   `clear`. With no hold standing the tick defers (no merge, no marker); with one
   standing it stays.
 
+A held PR that goes CONFLICTING is served by Doctor, hold intact (#13505): Doctor resolves and pushes, leaves `loom:blocked` and `loom:pr` on, and Judge re-reviews the new head; the operator then ratifies a clean head.
+
 ## The state machine
 
 The state is whichever of these markers is the **latest** trusted comment

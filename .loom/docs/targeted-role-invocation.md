@@ -130,6 +130,8 @@ LOOM_STEP_OUTCOME role=<judge|curator|builder> target=<N> class=<verdict|noop|re
 It is advisory: a classifier uses it only to choose between classes the
 post-state already allows, never to claim a `verdict` the forge does not show.
 A missing line on an unchanged item is `failed` with reason `unclassified`.
+The reason is read with `-` folded to `_` (#13500): `reason=ci-pending`, the
+spelling of the Judge's `--skip-reason`, is the `ci_pending` token below.
 
 ### Reason tokens
 
