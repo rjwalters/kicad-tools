@@ -664,6 +664,7 @@ class TraceOptimizer:
         output_path: str | None = None,
         net_filter: str | None = None,
         dry_run: bool = False,
+        on_net_optimized: Callable[[str, list[Segment], list[Segment]], None] | None = None,
     ) -> OptimizationStats:
         """Optimize traces in a PCB file.
 
@@ -672,6 +673,7 @@ class TraceOptimizer:
             output_path: Path for output file. If None, modifies in place.
             net_filter: Only optimize nets matching this pattern.
             dry_run: If True, calculate stats but don't write output.
+            on_net_optimized: Per-net commit hook; see :func:`optimize_pcb`.
 
         Returns:
             Statistics about the optimization.
@@ -683,6 +685,7 @@ class TraceOptimizer:
             config=self.config,
             net_filter=net_filter,
             dry_run=dry_run,
+            on_net_optimized=on_net_optimized,
         )
 
     # =========================================================================

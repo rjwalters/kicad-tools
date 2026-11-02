@@ -71,18 +71,24 @@ def _seg_key(seg) -> tuple:
 
 
 def _make_grid_synced_optimize_fn(router, optimizer):
-    """Wrap ``optimizer.optimize_segments`` so the checker sees the grid's ids and
-    every accepted rewrite.
+    """Return ``(optimize, commit)`` wrapping ``optimizer.optimize_segments``.
 
-    * Net identity (Issue #8214 review): the file parser yields net id 0 for
-      every segment on a KiCad-10 name-only board, while the grid carries the
-      loader's dialect-normalized ids.  The optimizer excludes ``seg.net`` as
-      "own net", so the segments are re-keyed to the grid id (looked up by net
-      *name*) for the optimization and restored afterwards.
-    * Static grid (Issue #8214 review): nets are optimized in turn, so net B
-      must be checked against net A's *rewrite*.  After each net whose
-      geometry changed, the old copper is unmarked and the new copper marked
-      (the same transaction ``apply_route_transform_grid_synced`` uses).
+    * ``optimize``: net identity (Issue #8214 review).  The file parser yields
+      net id 0 for every segment on a KiCad-10 name-only board, while the grid
+      carries the loader's dialect-normalized ids.  The optimizer excludes
+      ``seg.net`` as "own net", so the segments are re-keyed to the grid id
+      (looked up by net *name*) for the optimization and restored afterwards.
+      It does **not** touch the grid.
+    * ``commit(net_name, original, kept)``: static grid (Issue #8214 review).
+      Nets are optimized in turn, so net B must be checked against net A's
+      *kept* rewrite.  ``optimize_pcb`` calls this once per net after the
+      Kelvin gate has accepted or vetoed branch rewrites, so the grid follows
+      the copper that is actually written, not what ``optimize`` returned.
+      The old copper is unmarked and the new copper marked (the transaction
+      ``apply_route_transform_grid_synced`` uses).
+
+    ``--drc-aware`` rollback runs after the per-net loop and is not reflected
+    in the grid; its DRC re-check backstops that.
     """
     from dataclasses import replace
 
@@ -93,28 +99,34 @@ def _make_grid_synced_optimize_fn(router, optimizer):
     def optimize(segs):
         if not segs:
             return base_optimize(segs)
-        file_net = segs[0].net
         idx = by_name.get(segs[0].net_name)
         if idx is None:
-            # Net has no copper in the grid (or neutralised ownership):
-            # nothing to keep in sync, optimize as given.
+            # Net has no copper in the grid (or neutralised ownership).
             return base_optimize(segs)
+        gid = router.existing_routes[idx].net
+        out = base_optimize([replace(s, net=gid) for s in segs])
+        return [replace(s, net=segs[0].net) for s in out]
+
+    def commit(net_name, original, kept):
+        idx = by_name.get(net_name)
+        if idx is None or not original:
+            return
         old = router.existing_routes[idx]
         gid = old.net
-        work = [replace(s, net=gid) for s in segs]
-        out = base_optimize(work)
-        if [_seg_key(s) for s in out] != [_seg_key(s) for s in work]:
-            gone = {_seg_key(s) for s in work}
-            kept = [s for s in old.segments if _seg_key(s) not in gone]
-            new = replace(old, segments=kept + [replace(s, net=gid) for s in out])
-            grid.unmark_route(old)
-            grid.mark_route(new)
-            grid._mark_route_on_cpp_cells(new)
-            grid.resync_route_occupancy([(old, new)])
-            router.existing_routes[idx] = new
-        return [replace(s, net=file_net) for s in out]
+        work = [replace(s, net=gid) for s in original]
+        final = [replace(s, net=gid) for s in kept]
+        if [_seg_key(s) for s in final] == [_seg_key(s) for s in work]:
+            return
+        gone = {_seg_key(s) for s in work}
+        rest = [s for s in old.segments if _seg_key(s) not in gone]
+        new = replace(old, segments=rest + final)
+        grid.unmark_route(old)
+        grid.mark_route(new)
+        grid._mark_route_on_cpp_cells(new)
+        grid.resync_route_occupancy([(old, new)])
+        router.existing_routes[idx] = new
 
-    return optimize
+    return optimize, commit
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -281,7 +293,7 @@ Examples:
     optimizer = TraceOptimizer(config, collision_checker=checker)
     # ``optimize_pcb`` calls ``self.optimize_segments`` per net; route that
     # through the grid-synced wrapper (see its docstring).
-    optimizer.optimize_segments = _make_grid_synced_optimize_fn(router, optimizer)
+    optimizer.optimize_segments, commit_net = _make_grid_synced_optimize_fn(router, optimizer)
 
     if not quiet:
         print("=" * 50)
@@ -315,6 +327,7 @@ Examples:
                 output_path=args.output,
                 net_filter=args.net,
                 dry_run=args.dry_run,
+                on_net_optimized=commit_net,
             )
     except Exception as e:
         return _fail(

@@ -838,25 +838,66 @@ class TestNameOnlyBoardAndGridSync:
         )
         assert "2 ->    1" in row
 
-    def test_accepted_rewrite_is_synced_into_the_grid(self, simple_pcb_path):
+    @staticmethod
+    def _run_shifting_rewrite(pcb_path, monkeypatch, veto: bool):
+        """Run optimize_pcb with a base optimizer that moves NET1 copper 4 mm.
+
+        Returns a ``clear(y)`` probe: would a foreign net's path at row ``y``
+        be accepted by the checker the later nets are checked against?
+        """
+        from dataclasses import replace
+
         from kicad_tools.cli.optimize_cmd import (
             _build_collision_checker,
             _make_grid_synced_optimize_fn,
         )
+        from kicad_tools.router.layers import Layer
         from kicad_tools.router.optimizer import OptimizationConfig, TraceOptimizer
-        from kicad_tools.router.optimizer.pcb import parse_segments
+        from kicad_tools.router.optimizer.kelvin_gate import KelvinBoardGate
 
-        router, checker = _build_collision_checker(simple_pcb_path)
+        router, checker = _build_collision_checker(pcb_path)
         optimizer = TraceOptimizer(OptimizationConfig(), collision_checker=checker)
-        optimize = _make_grid_synced_optimize_fn(router, optimizer)
+        optimizer.optimize_segments = lambda segs: [
+            replace(s, y1=s.y1 + 4, y2=s.y2 + 4) for s in segs
+        ]
+        optimize, commit = _make_grid_synced_optimize_fn(router, optimizer)
+        optimizer.optimize_segments = optimize
 
-        segs = parse_segments(SIMPLE_PCB)["NET1"]
-        before = next(r for r in router.existing_routes if r.net_name == "NET1")
-        assert len(before.segments) == 2
+        if veto:
+            # A Kelvin gate that runs the rewrite and then keeps the original
+            # branch (the #6889 / #5398 veto).
+            class _Vetoing:
+                class gate:  # noqa: N801
+                    vetoes = 0
 
-        out = optimize(segs)
+                    @staticmethod
+                    def report():
+                        pass
 
-        assert len(out) == 1
-        assert out[0].net == segs[0].net  # file-side net id is restored
-        after = next(r for r in router.existing_routes if r.net_name == "NET1")
-        assert len(after.segments) == 1  # later nets see the rewrite
+                @staticmethod
+                def optimize_net(net_name, segments, optimize_fn):
+                    optimize_fn(list(segments))
+                    return list(segments)
+
+            monkeypatch.setattr(
+                KelvinBoardGate, "from_pcb_text", classmethod(lambda cls, text: _Vetoing())
+            )
+
+        optimizer.optimize_pcb(str(pcb_path), dry_run=True, on_net_optimized=commit)
+
+        def clear(y: float) -> bool:
+            return checker.path_is_clear(
+                x1=105, y1=y, x2=110, y2=y, layer=Layer.F_CU, width=0.25, exclude_net=999
+            )
+
+        return clear
+
+    def test_accepted_rewrite_is_synced_into_the_grid(self, simple_pcb_path, monkeypatch):
+        clear = self._run_shifting_rewrite(simple_pcb_path, monkeypatch, veto=False)
+        assert clear(50), "old copper must be unmarked once the rewrite is kept"
+        assert not clear(54), "new copper must be marked for later nets"
+
+    def test_vetoed_rewrite_is_not_committed_to_the_grid(self, simple_pcb_path, monkeypatch):
+        clear = self._run_shifting_rewrite(simple_pcb_path, monkeypatch, veto=True)
+        assert not clear(50), "vetoed branch's original copper must stay blocked"
+        assert clear(54), "rejected rewrite's copper must not be marked"

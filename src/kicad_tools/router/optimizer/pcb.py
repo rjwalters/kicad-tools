@@ -538,6 +538,7 @@ def optimize_pcb(
     config: OptimizationConfig,
     net_filter: str | None = None,
     dry_run: bool = False,
+    on_net_optimized: Callable[[str, list[Segment], list[Segment]], None] | None = None,
 ) -> OptimizationStats:
     """Optimize traces in a PCB file.
 
@@ -555,6 +556,14 @@ def optimize_pcb(
         config: Optimization configuration.
         net_filter: Only optimize nets matching this pattern.
         dry_run: If True, calculate stats but don't write output.
+        on_net_optimized: Optional per-net commit hook, called as
+            ``(net_name, original_segments, kept_segments)`` once a net's
+            result is final for the loop -- i.e. *after* the Kelvin gate has
+            accepted or vetoed its branch rewrites -- so a caller can keep
+            external state (e.g. a collision grid) following what is kept
+            rather than what ``optimize_fn`` returned (Issue #8214).  The
+            ``--drc-aware`` rollback below runs after the loop and does not
+            call it; the rollback's DRC re-check backstops that.
 
     Returns:
         Statistics about the optimization.
@@ -605,6 +614,8 @@ def optimize_pcb(
         if optimized is None:
             optimized = optimize_fn(segs)
         optimized_segments[net] = optimized
+        if on_net_optimized is not None:
+            on_net_optimized(net, segs, optimized)
         stats.nets_optimized += 1
     if kelvin is not None:
         stats.kelvin_vetoes = kelvin.gate.vetoes
