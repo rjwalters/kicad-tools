@@ -749,6 +749,27 @@ def _availability(args) -> int:
         print("No components found in schematic", file=sys.stderr)
         return 1
 
+    # Auto-match LCSC numbers for lines lacking one, as `kct export` does for
+    # JLCPCB (same defaults), so both commands resolve the same BOM.
+    auto_sources: dict[str, str] = {}
+    if not getattr(args, "no_auto_lcsc", False):
+        from ..export.bom_enrich import enrich_bom_lcsc
+        from ..parts.lcsc import LCSCDependencyMissingError
+
+        try:
+            report = enrich_bom_lcsc(bom.items, prefer_basic=True, min_stock=100)
+        except LCSCDependencyMissingError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            print("Install with: pip install kicad-tools[parts]", file=sys.stderr)
+            return 1
+        except Exception as e:
+            print(f"Warning: LCSC auto-matching failed (continuing without): {e}", file=sys.stderr)
+        else:
+            for entry in report.entries:
+                if entry.source in ("auto", "cache"):
+                    for ref in entry.references:
+                        auto_sources[ref] = entry.source
+
     # Check availability
     checker = LCSCAvailabilityChecker(
         find_alternatives=not args.no_alternatives,
@@ -758,6 +779,9 @@ def _availability(args) -> int:
         result = checker.check_bom(bom, quantity=args.quantity)
     finally:
         checker.close()
+
+    for item in result.items:
+        item.lcsc_source = auto_sources.get(item.reference, "")
 
     # Filter if requested
     items = result.items
@@ -797,6 +821,10 @@ def _availability_summary(result, schematic_path: Path) -> None:
     print(f"  ✓ Available:    {summary['available']}")
     print(f"  ⚠ Low stock:    {summary['low_stock']}")
     print(f"  ✗ Out of stock: {summary['out_of_stock']}")
+    print(f"  ? Unverified:   {summary['unverified']}")
+    print(f"  ? Unavailable:  {summary['unavailable']}")
+    if summary.get("discontinued"):
+        print(f"  ✗ Discontinued: {summary['discontinued']}")
     print(f"  ? Missing:      {summary['missing']}")
     print()
 
@@ -1109,6 +1137,11 @@ def _add_lcsc_property(symbol, lcsc_value: str) -> None:
     symbol.add(prop)
 
 
+def _auto_tag(item) -> str:
+    """Label parts whose LCSC number was auto-matched rather than in the schematic."""
+    return f" [auto-matched: {item.lcsc_source}]" if getattr(item, "lcsc_source", "") else ""
+
+
 def _availability_table(result, items, schematic_path: Path, quantity: int) -> None:
     """Output availability as formatted table."""
     from ..cost.availability import AvailabilityStatus
@@ -1147,7 +1180,7 @@ def _availability_table(result, items, schematic_path: Path, quantity: int) -> N
     if low_stock:
         print(f"⚠ LOW STOCK ({len(low_stock)} parts):")
         for item in low_stock:
-            print(f"  {item.reference}: {item.value} ({item.lcsc_part})")
+            print(f"  {item.reference}: {item.value} ({item.lcsc_part}){_auto_tag(item)}")
             print(f"    Stock: {item.quantity_available:,} (need {item.quantity_needed:,})")
             if item.alternatives:
                 print("    Alternatives:")
@@ -1173,7 +1206,7 @@ def _availability_table(result, items, schematic_path: Path, quantity: int) -> N
     if out_of_stock:
         print(f"✗ OUT OF STOCK ({len(out_of_stock)} parts):")
         for item in out_of_stock:
-            print(f"  {item.reference}: {item.value} ({item.lcsc_part})")
+            print(f"  {item.reference}: {item.value} ({item.lcsc_part}){_auto_tag(item)}")
             if item.lead_time_days:
                 print(f"    Lead time: {item.lead_time_days} days")
             if item.alternatives:
@@ -1196,6 +1229,20 @@ def _availability_table(result, items, schematic_path: Path, quantity: int) -> N
                     )
             else:
                 print("    No alternatives found")
+        print()
+
+    unverified = [i for i in items if i.status == AvailabilityStatus.UNKNOWN]
+    if unverified:
+        print(f"? STOCK UNVERIFIED ({len(unverified)} parts):")
+        for item in unverified:
+            print(f"  {item.reference}: {item.value} ({item.lcsc_part}){_auto_tag(item)}")
+        print()
+
+    discontinued = [i for i in items if i.status == AvailabilityStatus.DISCONTINUED]
+    if discontinued:
+        print(f"✗ DISCONTINUED ({len(discontinued)} parts):")
+        for item in discontinued:
+            print(f"  {item.reference}: {item.value} ({item.lcsc_part}){_auto_tag(item)}")
         print()
 
     unavailable = [i for i in items if i.status == AvailabilityStatus.UNAVAILABLE]
@@ -1223,8 +1270,17 @@ def _availability_table(result, items, schematic_path: Path, quantity: int) -> N
         print(f"  • {summary['low_stock']} parts low stock")
     if summary["out_of_stock"] > 0:
         print(f"  • {summary['out_of_stock']} parts out of stock")
+    if summary["unverified"] > 0:
+        print(f"  • {summary['unverified']} parts stock unverified")
+    if summary["unavailable"] > 0:
+        print(f"  • {summary['unavailable']} parts lookup unavailable")
+    if summary.get("discontinued", 0) > 0:
+        print(f"  • {summary['discontinued']} parts discontinued")
     if summary["missing"] > 0:
         print(f"  • {summary['missing']} parts missing LCSC number or not found")
+    auto = [i for i in result.items if i.lcsc_source]
+    if auto:
+        print(f"  • {len(auto)} parts LCSC auto-matched (not in schematic)")
 
     if summary["total_cost"] is not None:
         print(f"  • Estimated component cost: ${summary['total_cost']:.2f}")
