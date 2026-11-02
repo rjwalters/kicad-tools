@@ -21,10 +21,12 @@ from .fixtures import (
     board_benign_suspect_names_source,
     board_mains_named_source,
     board_no_hv_source,
+    board_other_layer_board_gap_source,
     board_same_footprint_fail_source,
     board_same_footprint_hides_board_source,
     board_same_footprint_only_source,
     board_source,
+    board_two_sharing_footprints_source,
 )
 
 pytestmark = pytest.mark.skipif(not has_shapely(), reason="creepage requires shapely")
@@ -678,3 +680,41 @@ def test_waiver_passes_when_board_row_clears(tmp_path, capsys):
     assert sfp["waived"] is True
     assert payload["gate_passed"] is True
     assert rc == 0
+
+
+def _waived_run(tmp_path, capsys, source):
+    pcb = _write(tmp_path, source)
+    ncm = _hv_map_file(tmp_path)
+    rc = _run(
+        [
+            "creepage",
+            str(pcb),
+            "--net-class-map",
+            str(ncm),
+            "--min",
+            "1.0",
+            "--format",
+            "json",
+            "--waive-same-footprint",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    return rc, payload, [p for p in payload["pairs"] if p["net_b"] == "DIV_MID"]
+
+
+def test_two_sharing_footprints_cross_approach_reported(tmp_path, capsys):
+    rc, payload, rows = _waived_run(tmp_path, capsys, board_two_sharing_footprints_source())
+    board = next(r for r in rows if r["relationship"] == "board")
+    assert abs(board["creepage_mm"] - 0.8) < 0.05
+    assert board["pass"] is False
+    assert payload["gate_passed"] is False
+    assert rc == 1
+
+
+def test_board_gap_on_layer_without_sharing_footprint_reported(tmp_path, capsys):
+    rc, payload, rows = _waived_run(tmp_path, capsys, board_other_layer_board_gap_source())
+    board = next(r for r in rows if r["relationship"] == "board")
+    assert board["layer"] == "B.Cu"
+    assert abs(board["creepage_mm"] - 0.8) < 0.05
+    assert payload["gate_passed"] is False
+    assert rc == 1

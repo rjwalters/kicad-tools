@@ -889,6 +889,27 @@ class _FootprintPadIndex:
         polys = [p for ref in shared for p in pads.get((ref, net), [])]
         return unary_union(polys) if polys else None
 
+    def shared_footprint_pads(
+        self, layer_name: str, net_a: int, net_b: int
+    ) -> list[tuple[Any, Any]]:
+        """Per-footprint ``(net_a pads, net_b pads)`` unions for footprints holding both nets.
+
+        Empty when no footprint shares the pair on ``layer_name`` (#8232).
+        """
+        from shapely.ops import unary_union
+
+        by_net = self._by_net.get(layer_name)
+        pads = self._pads.get(layer_name)
+        if not by_net or pads is None:
+            return []
+        out: list[tuple[Any, Any]] = []
+        for ref in sorted(by_net.get(net_a, set()) & by_net.get(net_b, set())):
+            a_polys = pads.get((ref, net_a), [])
+            b_polys = pads.get((ref, net_b), [])
+            if a_polys and b_polys:
+                out.append((unary_union(a_polys), unary_union(b_polys)))
+        return out
+
 
 def _board_residual_after_same_footprint(
     layer_unions: dict[str, dict[int, Any]],
@@ -906,6 +927,9 @@ def _board_residual_after_same_footprint(
     pads) and the pair is re-measured on every layer; the minimum creepage over
     both variants and all layers is returned.  This drops the intra-footprint
     pad pair but keeps e.g. a resistor pad -> neighbouring diode pad approach.
+    Cross-footprint approaches between two sharing footprints (A_i vs B_j,
+    i != j) are measured explicitly, and a layer where no footprint shares the
+    pair contributes its plain measurement.
     A trace stub leaving a masked pad can still register a near-gap, which errs
     conservative (more FAIL, never a false pass).  ``None`` when no residual
     copper exists.
@@ -919,10 +943,21 @@ def _board_residual_after_same_footprint(
         mask_a = fp_index.shared_pad_union(layer_name, net_a, net_b, net_a)
         mask_b = fp_index.shared_pad_union(layer_name, net_a, net_b, net_b)
         variants = []
+        if mask_a is None and mask_b is None:
+            # No footprint shares the pair here: the plain measurement is
+            # already a board-level gap.
+            variants.append((geom_a, geom_b))
         if mask_a is not None:
             variants.append((geom_a.difference(mask_a), geom_b))
         if mask_b is not None:
             variants.append((geom_a, geom_b.difference(mask_b)))
+        # Cross-footprint approaches (Ai vs Bj, i != j) lie in neither masked
+        # variant when two or more footprints share the pair.
+        sharing = fp_index.shared_footprint_pads(layer_name, net_a, net_b)
+        for i, (a_i, _b_i) in enumerate(sharing):
+            for j, (_a_j, b_j) in enumerate(sharing):
+                if i != j:
+                    variants.append((a_i, b_j))
         for ga, gb in variants:
             if ga.is_empty or gb.is_empty:
                 continue
@@ -1724,11 +1759,11 @@ def compute_creepage_census(
             # #8232: the minimum is component-internal; surface the smallest
             # board-level approach on the same pair as its own row so a waiver
             # of the same_footprint row cannot hide it.
-            board = _board_residual_after_same_footprint(
+            board_row = _board_residual_after_same_footprint(
                 layer_unions, fp_index, hv_num, other_num, obstacles
             )
-            if board is not None:
-                rows.append((board[2], board[0], board[1], "board", {}))
+            if board_row is not None:
+                rows.append((board_row[2], board_row[0], board_row[1], "board", {}))
         for row_layer, row_clr, row_creep, row_rel, row_residual in rows:
             if map_mode:
                 req_creep, req_clear, prov = _pair_requirement(net_a_name, net_b_name)
