@@ -2639,9 +2639,9 @@ def _add_pcb_parser(subparsers) -> None:
         help="Remove redundant copper and snap off-centre ends",
         description="Remove copper that adds no connectivity (redundant branches, "
         "same-layer loops) and snap off-centre segment ends onto the same-net "
-        "via/pad centre. Connectivity is built from copper geometry; a segment "
-        "is removed only if every pad and pad-to-zone connection stays in the "
-        "same component. With kicad-cli available each net's edits are checked "
+        "via/pad centre. Connectivity follows KiCad (endpoint-anchored track joins, "
+        "ends inside a pad/via/zone); a segment is removed only if every pad and "
+        "zone terminal stays in the same component and no joint becomes overlap-only. With kicad-cli available each net's edits are checked "
         "with 'pcb drc --refill-zones' and dropped if they add violations. "
         "In-place by default; use -o to write elsewhere.",
     )
@@ -2654,6 +2654,12 @@ def _add_pcb_parser(subparsers) -> None:
         "--dry-run", action="store_true", help="Report changes without modifying files"
     )
     pcb_prune.add_argument("--no-drc", action="store_true", help="Skip kicad-cli DRC verification")
+    pcb_prune.add_argument(
+        "--unverified",
+        action="store_true",
+        help="Write the result even when it was not verified with kicad-cli DRC "
+        "(--no-drc, or kicad-cli missing). Without this the file is left untouched.",
+    )
 
     # pcb reannotate
     pcb_reannotate = pcb_subparsers.add_parser(

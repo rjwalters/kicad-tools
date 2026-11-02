@@ -555,6 +555,16 @@ def _run_prune_command(args, pcb_path: Path) -> int:
         for n in result["rejected_by_drc"]:
             print(f"    {n['net']}: kept (edit would add DRC violations)")
 
+    if not dry_run and changed and not res.drc_verified and not getattr(args, "unverified", False):
+        # Never write an unverified edit by default (issue #8216 review).
+        print(
+            "Refusing to write: edits were not verified with kicad-cli DRC "
+            f"({res.drc_note}). Re-run with kicad-cli available, or pass "
+            "--unverified to write anyway.",
+            file=sys.stderr,
+        )
+        return 1
+
     if not dry_run and changed:
         try:
             pcb.save(output_path)

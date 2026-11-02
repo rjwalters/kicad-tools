@@ -161,6 +161,7 @@ CONTRACT_ARGV: dict[str, list[str]] = {
     "pcb reinforce": ["{pcb}", "--net", "VIN", "--dry-run"],
     "pcb current-paths-audit": ["{pcb}", "--current-paths", "{dir}/missing_current_paths.yaml"],
     "pcb dedupe": ["{pcb}", "--dry-run"],
+    "pcb prune": ["{pcb}", "--dry-run", "--no-drc"],
     "pcb reannotate": ["{pcb}", "--map", "{dir}/missing_map.json", "--dry-run"],
     "pcb sync-netlist": ["{pcb}", "--schematic", "{sch}", "--dry-run"],
     "pcb annotate-pintypes": ["{pcb}", "--schematic", "{sch}", "--dry-run"],
