@@ -792,8 +792,12 @@ class TestCollisionCheckedRewrites:
         assert "2 ->    1" in row
 
     def test_blocked_rewrite_is_skipped(self, simple_pcb_path, monkeypatch, capsys):
+        from kicad_tools.cli import optimize_cmd
+
+        real_build = optimize_cmd._build_collision_checker
         monkeypatch.setattr(
-            "kicad_tools.cli.optimize_cmd._build_collision_checker", lambda p: _BlockAll()
+            "kicad_tools.cli.optimize_cmd._build_collision_checker",
+            lambda p: (real_build(p)[0], _BlockAll()),
         )
         assert main([str(simple_pcb_path), "--dry-run", "--verbose"]) == 0
         row = next(
@@ -812,3 +816,47 @@ class TestCollisionCheckedRewrites:
         assert main([str(simple_pcb_path), "-o", str(out)]) == 1
         assert "unparseable rules" in capsys.readouterr().err
         assert not out.exists()
+
+
+def _name_only(text: str) -> str:
+    """SIMPLE_PCB as a KiCad-10 name-only board: no header net table."""
+    import re
+
+    text = re.sub(r'\t\(net \d+ "[^"]*"\)\n', "", text)
+    text = text.replace('(net 1 "NET1")', '(net "NET1")').replace('(net 2 "GND")', '(net "GND")')
+    return text.replace("(net 1)", '(net "NET1")')
+
+
+class TestNameOnlyBoardAndGridSync:
+    def test_name_only_board_still_merges_safe_collinear(self, tmp_path, capsys):
+        pcb = tmp_path / "name_only.kicad_pcb"
+        pcb.write_text(_name_only(SIMPLE_PCB))
+        assert "(net 1" not in pcb.read_text()
+        assert main([str(pcb), "--dry-run", "--verbose"]) == 0
+        row = next(
+            ln for ln in capsys.readouterr().out.splitlines() if "NET1" in ln and "segments" in ln
+        )
+        assert "2 ->    1" in row
+
+    def test_accepted_rewrite_is_synced_into_the_grid(self, simple_pcb_path):
+        from kicad_tools.cli.optimize_cmd import (
+            _build_collision_checker,
+            _make_grid_synced_optimize_fn,
+        )
+        from kicad_tools.router.optimizer import OptimizationConfig, TraceOptimizer
+        from kicad_tools.router.optimizer.pcb import parse_segments
+
+        router, checker = _build_collision_checker(simple_pcb_path)
+        optimizer = TraceOptimizer(OptimizationConfig(), collision_checker=checker)
+        optimize = _make_grid_synced_optimize_fn(router, optimizer)
+
+        segs = parse_segments(SIMPLE_PCB)["NET1"]
+        before = next(r for r in router.existing_routes if r.net_name == "NET1")
+        assert len(before.segments) == 2
+
+        out = optimize(segs)
+
+        assert len(out) == 1
+        assert out[0].net == segs[0].net  # file-side net id is restored
+        after = next(r for r in router.existing_routes if r.net_name == "NET1")
+        assert len(after.segments) == 1  # later nets see the rewrite
