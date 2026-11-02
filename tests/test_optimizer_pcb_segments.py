@@ -606,3 +606,48 @@ def test_block_scanner_ignores_comment_syntax():
     assert [block for _, _, block in _extract_balanced_blocks(text, "segment")] == [
         "(segment (net 1) # unmatched )\n)"
     ]
+
+
+# KiCad-10 name-only dialect: no ``(net N "name")`` header table; every
+# segment names its net inline.  Before the fix every segment resolved to
+# net id 0, so replace_segments removed nothing and appended the optimized
+# copper as ``(net 0)`` no-net segments on top of the originals.
+_PCB_NAME_ONLY = """\
+(kicad_pcb
+  (version 20260206)
+  (segment (start 100 100) (end 110 100) (width 0.25) (layer "F.Cu") (uuid "seg-a1") (net "VCC"))
+  (segment (start 110 100) (end 120 100) (width 0.25) (layer "F.Cu") (uuid "seg-a2") (net "VCC"))
+  (segment (start 200 200) (end 210 200) (width 0.25) (layer "B.Cu") (uuid "seg-b1") (net "GND"))
+)
+"""
+
+
+class TestReplaceSegmentsNameOnly:
+    """replace_segments on a board with no net header table."""
+
+    def test_removes_original_segments_of_optimized_net(self):
+        original = parse_segments(_PCB_NAME_ONLY)
+        optimized = {"VCC": [Segment(100, 100, 120, 100, 0.25, Layer.F_CU, net_name="VCC")]}
+        result = replace_segments(_PCB_NAME_ONLY, original, optimized)
+
+        assert '(uuid "seg-a1")' not in result
+        assert '(uuid "seg-a2")' not in result
+        assert '(uuid "seg-b1")' in result
+
+    def test_emits_name_only_net_refs(self):
+        original = parse_segments(_PCB_NAME_ONLY)
+        optimized = {"VCC": [Segment(100, 100, 120, 100, 0.25, Layer.F_CU)]}
+        result = replace_segments(_PCB_NAME_ONLY, original, optimized)
+
+        assert "(net 0)" not in result
+        reparsed = parse_segments(result)
+        assert len(reparsed["VCC"]) == 1
+        assert len(reparsed["GND"]) == 1
+
+    def test_unfiltered_nets_are_untouched(self):
+        original = parse_segments(_PCB_NAME_ONLY)
+        result = replace_segments(_PCB_NAME_ONLY, original, {"GND": original["GND"]})
+
+        assert '(uuid "seg-a1")' in result
+        assert '(uuid "seg-a2")' in result
+        assert result.count('(net "GND")') == 1

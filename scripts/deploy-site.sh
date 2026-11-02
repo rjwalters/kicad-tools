@@ -17,7 +17,9 @@
 #   1. renders     -- `kct render boards/` per-board PNGs  (3D via xvfb-run)
 #   2. board.json  -- `kct board-metrics --all`           (non-fatal)
 #   3. site build  -- `npm --prefix site ci && run build`  (prebuild stages
-#                     renders + manufacturing files into site/public/)
+#                     renders + manufacturing files into site/public/); then
+#                     tracked renders rewritten by step 1 are restored so the
+#                     tree is clean at upload (Issue #8220)
 #   4. deploy      -- `wrangler pages deploy site/dist` (guarded: asserts the
 #                     authenticated Cloudflare account before uploading)
 #   5. verify      -- fetch every deployed board asset (PCB, renders, and
@@ -205,6 +207,46 @@ assert_cloudflare_account() {
   fi
 }
 
+# --- Clean-tree helpers (Issue #8220) ----------------------------------------
+# Step 1 (`kct render`) rewrites tracked, opt-in-committed renders under
+# boards/*/output/renders/.  Left dirty, wrangler warns about uncommitted
+# changes and the Pages deployment's commit hash no longer describes what was
+# uploaded.  The build (Step 3) has already staged the FRESH renders into
+# site/public/ by then, so restoring the tracked files afterwards leaves the
+# published bytes unchanged.  Only the render pathspecs are touched, so
+# unrelated operator changes are never clobbered.
+RENDER_PATHSPECS=('boards/*/output/renders/*' 'boards/*/*/output/renders/*')
+
+# in_git_worktree -- true when REPO_ROOT is inside a git work tree
+in_git_worktree() {
+  git -C "${REPO_ROOT}" rev-parse --is-inside-work-tree >/dev/null 2>&1
+}
+
+# restore_tracked_renders -- git-checkout tracked render files that the render
+# step modified; logs each restored path.  No-op outside git or when clean.
+restore_tracked_renders() {
+  in_git_worktree || return 0
+  local changed
+  changed="$(git -C "${REPO_ROOT}" diff --name-only -- "${RENDER_PATHSPECS[@]}")"
+  [ -n "${changed}" ] || return 0
+  info "Restoring tracked renders rewritten by Step 1 (fresh bytes are already staged in site/public/):"
+  printf '%s\n' "${changed}" | sed 's/^/  /'
+  # Check out the exact changed paths: a pathspec that matches no tracked file
+  # (e.g. no nested boards/*/*/ layout) makes `git checkout` error out.
+  printf '%s\n' "${changed}" | tr '\n' '\0' \
+    | xargs -0 git -C "${REPO_ROOT}" checkout --
+}
+
+# warn_if_dirty_tree -- warn-level (never fails) list of uncommitted paths.
+warn_if_dirty_tree() {
+  in_git_worktree || return 0
+  local dirty
+  dirty="$(git -C "${REPO_ROOT}" status --porcelain)"
+  [ -n "${dirty}" ] || return 0
+  warn "Working tree is not clean; the deployment commit hash may not describe what was built:"
+  printf '%s\n' "${dirty}" | sed 's/^/  /' >&2
+}
+
 # --- Parse flags -----------------------------------------------------------
 NO_DEPLOY=0
 PREVIEW=0
@@ -228,6 +270,14 @@ while [ $# -gt 0 ]; do
 done
 
 cd "${REPO_ROOT}"
+
+# If the tree is already dirty, say so once now and skip the end-of-run check
+# (those changes are the operator's, not the deploy's).
+TREE_DIRTY_AT_START=0
+if in_git_worktree && [ -n "$(git -C "${REPO_ROOT}" status --porcelain)" ]; then
+  TREE_DIRTY_AT_START=1
+  warn_if_dirty_tree
+fi
 
 # --- Prerequisite checks ---------------------------------------------------
 MISSING=0
@@ -373,11 +423,13 @@ info "Step 3/5: building the Astro site (npm --prefix site ci && run build)"
 npm --prefix site ci
 npm --prefix site run build
 info "Site built to site/dist/."
+restore_tracked_renders
 
 # --- Step 4: deploy --------------------------------------------------------
 if [ "${NO_DEPLOY}" -eq 1 ]; then
   info "Step 4/5: --no-deploy set; skipping Cloudflare Pages deploy."
   info "Done. Build is in site/dist/ (not deployed)."
+  [ "${TREE_DIRTY_AT_START}" -eq 1 ] || warn_if_dirty_tree
   exit 0
 fi
 
@@ -412,6 +464,7 @@ else
 fi
 
 info "Deploy complete. The deployed URL is printed above by wrangler."
+[ "${TREE_DIRTY_AT_START}" -eq 1 ] || warn_if_dirty_tree
 
 # --- Step 5: verify the deploy actually took (Issue #5318) ------------------
 # A successful `wrangler pages deploy` exit code is NOT proof the public site
