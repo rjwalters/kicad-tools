@@ -625,6 +625,7 @@ def optimize_pcb(
         kelvin.gate.report()
 
     rolled_back_nets: set[str] = set()
+    net_violations: dict[str, dict[str, int]] = {}
 
     # DRC-aware per-net rollback
     if config.drc_aware and config.drc_manufacturer:
@@ -690,6 +691,13 @@ def optimize_pcb(
                     final_segments[net] = segments_by_net[net]
                     stats.nets_rolled_back += 1
                     rolled_back_nets.add(net)
+                    # Issue #8207: what disappeared by reverting this net is
+                    # what its rewrite introduced.
+                    net_violations[net] = {
+                        c: n - trial_counts.get(c, 0)
+                        for c, n in current_counts.items()
+                        if c != "__total__" and n > trial_counts.get(c, 0)
+                    }
                     full_errors = trial_total
                     current_counts = trial_counts
 
@@ -713,15 +721,16 @@ def optimize_pcb(
                         stats.nets_rolled_back += 1
                         rolled_back_nets.add(net)
                 stats.drc_failsafe_reverted = True
-                reverted_text = replace_segments(
-                    pcb_text, segments_by_net, final_segments, scratch=True
-                )
-                full_errors = _run_drc_error_count_by_category(
-                    reverted_text,
-                    manufacturer=config.drc_manufacturer,
-                    layers=config.drc_layers,
-                    copper_oz=config.drc_copper_oz,
-                )["__total__"]
+                # Issue #8207: name the rules still above baseline.
+                stats.drc_failsafe_rules = {
+                    c: n - baseline_counts.get(c, 0)
+                    for c, n in current_counts.items()
+                    if c != "__total__" and n > baseline_counts.get(c, 0)
+                }
+                # Every net is back to its input geometry, and the output is
+                # the untouched input text (see below), so the post-failsafe
+                # count *is* the baseline -- no re-serialised copper involved.
+                full_errors = baseline_errors
 
             optimized_segments = final_segments
 
@@ -747,12 +756,20 @@ def optimize_pcb(
                 length_before=total_length(before_segs),
                 length_after=total_length(after_segs),
                 rolled_back=net in rolled_back_nets,
+                new_violations=net_violations.get(net, {}),
             )
         )
+        if net not in rolled_back_nets and after_segs != before_segs:
+            stats.nets_kept += 1
 
     # Generate output (only if not dry run)
     if not dry_run:
-        output_text = replace_segments(pcb_text, segments_by_net, optimized_segments)
+        if all(optimized_segments.get(n) == segs for n, segs in segments_by_net.items()):
+            # Nothing changed (e.g. the failsafe reverted everything): write
+            # the input verbatim instead of re-serialising every segment.
+            output_text = pcb_text
+        else:
+            output_text = replace_segments(pcb_text, segments_by_net, optimized_segments)
         out_path = output_path or pcb_path
         Path(out_path).write_text(output_text)
 

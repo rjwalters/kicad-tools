@@ -183,7 +183,12 @@ board readiness/evidence dates or PCB/package hashes differ from this
 checkout. Run it after every publish; it should report no drift.
 
 The deployment workflow requires `uv`, Node/npm and authenticated `wrangler`
-(or its `npx` fallback). `kicad-cli` is optional for the script, but required
+(or its `npx` fallback). Authenticate with either a scoped Cloudflare Pages API
+token in `CLOUDFLARE_API_TOKEN` (when unset, the script auto-loads one from the
+operator's local credentials file if present) or interactive `wrangler login`.
+Post-deploy verification defaults to the live site, `https://kicad-tools.org`;
+set `KCT_SITE_BASE_URL` to check another host such as
+`https://kicad-tools.pages.dev`. `kicad-cli` is optional for the script, but required
 for fresh renders. If it is absent, inspect and report the provenance of
 retained renders; do not describe them as newly rendered. The script's
 Cloudflare account identity guard must pass for the intended existing project.
