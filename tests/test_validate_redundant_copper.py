@@ -88,3 +88,19 @@ def test_via_centred_and_other_net_not_flagged():
     assert _run([_Seg((0, 0), (5, 0))], [_Via((5.0, 0))]).violations == []
     other = _Via((5.0, 0), net_number=2)
     assert _run([_Seg((0, 0), (4.8, 0))], [other]).violations == []
+
+
+def test_via_centred_entry_with_bend_not_flagged():
+    # Track enters the via centre with a 45-degree bend ~0.35 mm away; the
+    # bend vertex is shared by two segments and must not be flagged.
+    segs = [
+        _Seg((0, 0), (4.75, 0)),
+        _Seg((4.75, 0), (5.0, 0.25)),  # ends exactly on the via centre
+    ]
+    assert _run(segs, [_Via((5.0, 0.25))]).violations == []
+
+
+def test_via_offcentre_unshared_end_flagged_when_via_not_centred():
+    # Free end 0.2 mm short of the via, nothing else on that layer.
+    res = _run([_Seg((0, 0), (4.8, 0))], [_Via((5.0, 0))])
+    assert _ids(res) == ["redundant_copper_via_offcentre"]

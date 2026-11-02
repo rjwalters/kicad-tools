@@ -17,12 +17,16 @@ error), each with a location:
 ``redundant_copper_detour``
     A chain of segments (joined through degree-2 nodes) whose routed
     length exceeds ``DETOUR_RATIO`` times the straight distance between
-    its ends, and is longer than ``DETOUR_MIN_LENGTH_MM``.
+    its ends, and is longer than ``DETOUR_MIN_LENGTH_MM``.  Known
+    limitation: intentional length-tuning meanders (match groups, diff
+    pairs) are also reported; treat those as expected advisories.
 
 ``redundant_copper_via_offcentre``
     A same-net track end that lands ``OFFCENTRE_MIN_MM`` to
     ``OFFCENTRE_MAX_MM`` from a via centre (on a layer the via spans),
-    connecting to it only by overlap.
+    connecting to it only by overlap.  Ends shared with another segment
+    (joints, bends near the via) and layers where a track already ends on
+    the via centre are not flagged.
 
 Redundant *branches* and the repair passes are the scope of #8216; this
 rule only reports.
@@ -244,26 +248,50 @@ class RedundantCopperRule(DRCRule):
                 )
 
     def _check_via_offcentre(self, pcb: PCB, segments: list[Any], results: DRCResults) -> None:
+        # Endpoint multiplicity per (net, layer, point): an end shared with
+        # another segment is a normal joint (e.g. a bend inside the via
+        # entry), not a track that connects "by overlap only".
+        ends: dict[tuple[int, str, tuple[float, float]], int] = defaultdict(int)
+        for seg in segments:
+            ends[(seg.net_number, seg.layer, _q(seg.start))] += 1
+            ends[(seg.net_number, seg.layer, _q(seg.end))] += 1
+
         for via in pcb.vias:
             vx, vy = via.position
-            for seg in segments:
-                if seg.net_number != via.net_number or not via_spans_layer(via.layers, seg.layer):
+            candidates = [
+                s
+                for s in segments
+                if s.net_number == via.net_number and via_spans_layer(via.layers, s.layer)
+            ]
+            # Layers where a track already terminates on the via centre are
+            # properly connected; skip off-centre ends on those layers.
+            centred_layers = {
+                s.layer
+                for s in candidates
+                for end in (s.start, s.end)
+                if math.dist(end, (vx, vy)) < OFFCENTRE_MIN_MM / 10
+            }
+            for seg in candidates:
+                if seg.layer in centred_layers:
                     continue
                 for end in (seg.start, seg.end):
                     d = math.dist(end, (vx, vy))
-                    if OFFCENTRE_MIN_MM <= d <= OFFCENTRE_MAX_MM:
-                        label = self._net_label(seg)
-                        results.add(
-                            DRCViolation(
-                                rule_id="redundant_copper_via_offcentre",
-                                severity="warning",
-                                message=(
-                                    f"Track end {d:.3f} mm off via centre: [{label}] "
-                                    f"on {seg.layer} (connects by overlap only)"
-                                ),
-                                location=end,
-                                layer=seg.layer,
-                                actual_value=d,
-                                nets=(label,),
-                            )
+                    if not OFFCENTRE_MIN_MM <= d <= OFFCENTRE_MAX_MM:
+                        continue
+                    if ends[(seg.net_number, seg.layer, _q(end))] > 1:
+                        continue
+                    label = self._net_label(seg)
+                    results.add(
+                        DRCViolation(
+                            rule_id="redundant_copper_via_offcentre",
+                            severity="warning",
+                            message=(
+                                f"Track end {d:.3f} mm off via centre: [{label}] "
+                                f"on {seg.layer} (connects by overlap only)"
+                            ),
+                            location=end,
+                            layer=seg.layer,
+                            actual_value=d,
+                            nets=(label,),
                         )
+                    )
