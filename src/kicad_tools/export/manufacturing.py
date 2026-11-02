@@ -1124,10 +1124,20 @@ class ManufacturingPackage:
             from ..report.models import ReportData
             from ..report.net_class_map import resolve_committed_net_class_map
             from ..report.utils import find_schematic
-        except ImportError:
-            logger.warning(
-                "Report generation skipped: required dependency not installed (e.g. jinja2)"
+        except ImportError as exc:
+            # The optional ``report`` extra is missing.  Record a hard error
+            # (not just a log line) so ``kct export`` exits non-zero instead
+            # of silently shipping a bundle without report.md / images/
+            # (issue #8203, mirrors #4104).  The rest of the bundle is still
+            # produced; ``--no-report`` skips this step entirely.
+            missing = exc.name or str(exc)
+            msg = (
+                f"Report generation failed: required dependency '{missing}' "
+                "is not installed. Install it with: pip install "
+                "'kicad-tools[report]' (or pass --no-report to skip the report)."
             )
+            result.errors.append(msg)
+            logger.error(msg)
             return
 
         try:
