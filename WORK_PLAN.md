@@ -12,7 +12,7 @@ Prioritized roadmap generated from current GitHub label state. Maintained by the
 Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a human merge decision is missing.
 
 - **#8105**: docs(site): refresh kicad-tools.org homepage for v0.25.0
-- **#8189**: chore(loom): resync installed Loom to v0.19.1250
+- **#8191**: chore(loom): resync installed Loom to v0.19.1251
 
 ## Very Important
 
@@ -49,7 +49,7 @@ _None._
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
 - **#8105**: docs(site): refresh kicad-tools.org homepage for v0.25.0
-- **#8189**: chore(loom): resync installed Loom to v0.19.1250
+- **#8191**: chore(loom): resync installed Loom to v0.19.1251
 
 ## Proposed
 
