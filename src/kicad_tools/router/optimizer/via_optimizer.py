@@ -79,10 +79,24 @@ def _via_removal_preserves_connectivity(
             pre_counts[k] = pre_counts.get(k, 0) + 1
     terminals = {k for k, c in pre_counts.items() if c == 1}
 
-    # Pad anchors: the pad's copper layers at its position.
+    # Pad anchors: the pad's copper layers at its position.  An anchor only
+    # counts as a terminal when THIS route's copper actually reaches it, i.e.
+    # the (x, y, layer) key is a segment endpoint or via end in the
+    # pre-removal graph.  Pads of the net that the route does not touch, and
+    # through-hole pad layers with no route copper, can never be satisfied by
+    # this route's graph and must not block removal.
+    pre_keys: set[tuple[int, int, int]] = set(pre_counts)
+    for seg in extra_segments:
+        for x, y in (seg.start, seg.end):
+            pre_keys.add(_key(x, y, seg.layer))
+    for via in vias:
+        for layer in via.layers or ():
+            pre_keys.add(_key(via.x, via.y, layer))
     for ax, ay, alayers in anchors:
         for layer in alayers:
-            terminals.add(_key(ax, ay, layer))
+            k = _key(ax, ay, layer)
+            if k in pre_keys:
+                terminals.add(k)
 
     # Via-to-zone ties: a via end that lands on a same-net zone layer is a
     # connection to the pour, even when no segment ends there.

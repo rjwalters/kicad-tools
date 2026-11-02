@@ -529,3 +529,16 @@ class TestViaRemovalKeepsPadAndZoneTies:
         opt.set_connection_context(anchors_by_net={1: [(6.0, 0.0, (Layer.B_CU,))]})
         result = opt.optimize_route(self._stub_route())
         assert len(result.vias) == 2
+
+    def test_unrelated_same_net_pad_does_not_block_removal(self):
+        opt = ViaOptimizer()
+        opt.set_connection_context(anchors_by_net={1: [(50.0, 50.0, (Layer.F_CU,))]})
+        result = opt.optimize_route(self._stub_route())
+        assert len(result.vias) == 0
+
+    def test_tht_anchor_with_copper_on_one_layer_does_not_block_removal(self):
+        opt = ViaOptimizer()
+        # THT pad at the route end: F.Cu has copper there, B.Cu does not.
+        opt.set_connection_context(anchors_by_net={1: [(11.0, 0.0, (Layer.F_CU, Layer.B_CU))]})
+        result = opt.optimize_route(self._stub_route())
+        assert len(result.vias) == 0
