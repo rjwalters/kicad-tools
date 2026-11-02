@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
@@ -342,23 +343,34 @@ def replace_segments(
     """Replace original segments with optimized ones in PCB text.
 
     Uses a balanced-parentheses walker to identify complete ``(segment ...)``
-    blocks, then checks each block for a matching ``(net N)`` field.  This
-    correctly handles segments that contain nested sub-expressions such as
-    ``(uuid "...")``, ``(locked yes)``, or any other field that the fragile
-    ``[^)]*`` character class would trip over.
+    blocks, then checks each block's net.  This correctly handles segments
+    that contain nested sub-expressions such as ``(uuid "...")``,
+    ``(locked yes)``, or any other field that the fragile ``[^)]*``
+    character class would trip over.
+
+    Blocks are matched by resolved net *name*, through the same
+    :func:`_resolve_block_net` that :func:`parse_segments` keyed ``original``
+    with, so both net-reference dialects (issue #4413) are handled.  Matching
+    by numeric id silently broke KiCad-10 name-only boards, which carry no
+    ``(net N "name")`` header table: every segment resolved to id 0, no
+    original segment was removed, and the optimized segments were appended
+    as ``(net 0)`` no-net copper on top of the originals.
     """
-    # Collect net IDs whose segments should be replaced.
-    net_ids_to_remove: set[int] = set()
-    for net_name, segs in original.items():
-        if net_name in optimized and segs:
-            net_ids_to_remove.add(segs[0].net)
+    net_names = parse_net_names(pcb_text)
+    name_to_id = {name: nid for nid, name in net_names.items()}
+    name_only = bool(_RE_NET_NAME.search(pcb_text))
+
+    # Collect net names whose segments should be replaced.
+    net_names_to_remove = {
+        net_name for net_name, segs in original.items() if net_name in optimized and segs
+    }
 
     # Build the set of (start, end) byte-spans to remove by walking
     # balanced segment blocks and checking the net field inside each one.
     spans_to_remove: list[tuple[int, int]] = []
     for blk_start, blk_end, block_text in _extract_balanced_blocks(pcb_text, "segment"):
-        m_net = _RE_NET.search(block_text)
-        if m_net and int(m_net.group(1)) in net_ids_to_remove:
+        resolved = _resolve_block_net(block_text, net_names, name_to_id)
+        if resolved and resolved[1] in net_names_to_remove:
             # Also consume any trailing whitespace so blank lines don't
             # accumulate after removal.
             trail = blk_end
@@ -382,7 +394,9 @@ def replace_segments(
     new_segments_sexp = []
     for net_name, segs in optimized.items():
         for seg in segs:
-            new_segments_sexp.append(seg.to_sexp())
+            if name_only and not seg.net_name:
+                seg = replace(seg, net_name=net_name)
+            new_segments_sexp.append(seg.to_sexp(name_only=name_only))
 
     if new_segments_sexp:
         # Find the last ) and insert before it
@@ -597,6 +611,7 @@ def optimize_pcb(
         kelvin.gate.report()
 
     rolled_back_nets: set[str] = set()
+    net_violations: dict[str, dict[str, int]] = {}
 
     # DRC-aware per-net rollback
     if config.drc_aware and config.drc_manufacturer:
@@ -660,6 +675,13 @@ def optimize_pcb(
                     final_segments[net] = segments_by_net[net]
                     stats.nets_rolled_back += 1
                     rolled_back_nets.add(net)
+                    # Issue #8207: what disappeared by reverting this net is
+                    # what its rewrite introduced.
+                    net_violations[net] = {
+                        c: n - trial_counts.get(c, 0)
+                        for c, n in current_counts.items()
+                        if c != "__total__" and n > trial_counts.get(c, 0)
+                    }
                     full_errors = trial_total
                     current_counts = trial_counts
 
@@ -683,13 +705,16 @@ def optimize_pcb(
                         stats.nets_rolled_back += 1
                         rolled_back_nets.add(net)
                 stats.drc_failsafe_reverted = True
-                reverted_text = replace_segments(pcb_text, segments_by_net, final_segments)
-                full_errors = _run_drc_error_count_by_category(
-                    reverted_text,
-                    manufacturer=config.drc_manufacturer,
-                    layers=config.drc_layers,
-                    copper_oz=config.drc_copper_oz,
-                )["__total__"]
+                # Issue #8207: name the rules still above baseline.
+                stats.drc_failsafe_rules = {
+                    c: n - baseline_counts.get(c, 0)
+                    for c, n in current_counts.items()
+                    if c != "__total__" and n > baseline_counts.get(c, 0)
+                }
+                # Every net is back to its input geometry, and the output is
+                # the untouched input text (see below), so the post-failsafe
+                # count *is* the baseline -- no re-serialised copper involved.
+                full_errors = baseline_errors
 
             optimized_segments = final_segments
 
@@ -715,12 +740,20 @@ def optimize_pcb(
                 length_before=total_length(before_segs),
                 length_after=total_length(after_segs),
                 rolled_back=net in rolled_back_nets,
+                new_violations=net_violations.get(net, {}),
             )
         )
+        if net not in rolled_back_nets and after_segs != before_segs:
+            stats.nets_kept += 1
 
     # Generate output (only if not dry run)
     if not dry_run:
-        output_text = replace_segments(pcb_text, segments_by_net, optimized_segments)
+        if all(optimized_segments.get(n) == segs for n, segs in segments_by_net.items()):
+            # Nothing changed (e.g. the failsafe reverted everything): write
+            # the input verbatim instead of re-serialising every segment.
+            output_text = pcb_text
+        else:
+            output_text = replace_segments(pcb_text, segments_by_net, optimized_segments)
         out_path = output_path or pcb_path
         Path(out_path).write_text(output_text)
 

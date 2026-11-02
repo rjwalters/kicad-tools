@@ -48,6 +48,9 @@ tests/fixtures/*.kicad_prl
 boards/*/output/renders/
 boards/*/*/output/renders/
 
+# Wrangler local cache (created by `wrangler pages deploy`, Issue #8220)
+.wrangler/
+
 # Board metrics (generated at runtime by `kct board-metrics`, Epic #3674)
 boards/*/output/board.json
 boards/*/*/output/board.json
