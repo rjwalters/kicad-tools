@@ -13,6 +13,7 @@ Via minimization improves:
 from __future__ import annotations
 
 import math
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -32,8 +33,18 @@ def _via_removal_preserves_connectivity(
     seg_after: Segment,
     alt_path: list[Segment],
     tolerance: float = 1e-4,
+    anchors: Sequence[tuple[float, float, Sequence[Layer]]] = (),
+    zone_layers: Collection[Layer] = (),
+    extra_vias: Sequence[Via] = (),
+    extra_segments: Sequence[Segment] = (),
 ) -> bool:
     """Check whether removing *candidate_via* preserves pad connectivity.
+
+    *anchors* are copper attachment points that are not segment endpoints
+    (pad centres, as ``(x, y, layers)``) and *zone_layers* are the layers
+    carrying a same-net pour (issue #8215).  Both are treated as terminals
+    in addition to the degree-1 segment endpoints: a via sitting on a zone
+    layer, or under a pad, is itself a connection that must survive.
 
     Computes the degree-1 (pad-like) terminal endpoints from the
     *current* segment+via graph, then simulates the removal (drop
@@ -59,10 +70,29 @@ def _via_removal_preserves_connectivity(
     # --- Identify terminals on the CURRENT (pre-removal) graph. ---
     pre_counts: dict[tuple[int, int, int], int] = {}
     for seg in segments:
+        # Intermediate-layer segments that a via-pair removal deletes outright
+        # (issue #8215) are not terminals: their ends are the pair's own vias.
+        if any(seg is e for e in extra_segments):
+            continue
         for x, y in (seg.start, seg.end):
             k = _key(x, y, seg.layer)
             pre_counts[k] = pre_counts.get(k, 0) + 1
     terminals = {k for k, c in pre_counts.items() if c == 1}
+
+    # Pad anchors: the pad's copper layers at its position.
+    for ax, ay, alayers in anchors:
+        for layer in alayers:
+            terminals.add(_key(ax, ay, layer))
+
+    # Via-to-zone ties: a via end that lands on a same-net zone layer is a
+    # connection to the pour, even when no segment ends there.
+    zone_layer_set = set(zone_layers)
+    for via in vias:
+        if not via.layers:
+            continue
+        for layer in via.layers:
+            if layer in zone_layer_set:
+                terminals.add(_key(via.x, via.y, layer))
 
     if len(terminals) < 2:
         return True  # Nothing to disconnect
@@ -72,10 +102,14 @@ def _via_removal_preserves_connectivity(
     for seg in segments:
         if seg is seg_before or seg is seg_after:
             continue
+        if any(seg is e for e in extra_segments):
+            continue
         hyp_segments.append(seg)
     hyp_segments.extend(alt_path)
 
-    hyp_vias: list[Via] = [v for v in vias if v is not candidate_via]
+    hyp_vias: list[Via] = [
+        v for v in vias if v is not candidate_via and not any(v is e for e in extra_vias)
+    ]
 
     # --- Build adjacency graph of the hypothetical state. ---
     adjacency: dict[tuple[int, int, int], set[tuple[int, int, int]]] = {}
@@ -95,6 +129,13 @@ def _via_removal_preserves_connectivity(
         a = _key(via.x, via.y, via.layers[0])
         b = _key(via.x, via.y, via.layers[1])
         _add(a, b)
+
+    # Same-net zone copper joins everything it touches on its layer.
+    for layer in zone_layer_set:
+        zone_node = (0, 0, -int(layer.value) - 1)
+        for key in list(adjacency):
+            if key[2] == int(layer.value):
+                _add(zone_node, key)
 
     # Every original terminal must still exist in the hypothetical graph.
     if not terminals.issubset(adjacency.keys()):
@@ -232,6 +273,19 @@ class ViaOptimizer:
         self.config = config or ViaOptimizationConfig()
         self.collision_checker = collision_checker
         self._stats = ViaOptimizationStats()
+        # Issue #8215: per-net pad anchors and same-net zone layers so a via
+        # removal cannot strand copper that connects through a pad or pour.
+        self._anchors_by_net: dict[int, list[tuple[float, float, tuple[Layer, ...]]]] = {}
+        self._zone_layers_by_net: dict[int, set[Layer]] = {}
+
+    def set_connection_context(
+        self,
+        anchors_by_net: dict[int, list[tuple[float, float, tuple[Layer, ...]]]] | None = None,
+        zone_layers_by_net: dict[int, set[Layer]] | None = None,
+    ) -> None:
+        """Provide pad positions and same-net zone layers (issue #8215)."""
+        self._anchors_by_net = dict(anchors_by_net or {})
+        self._zone_layers_by_net = {n: set(v) for n, v in (zone_layers_by_net or {}).items()}
 
     def get_stats(self) -> ViaOptimizationStats:
         """Get optimization statistics."""
@@ -406,6 +460,22 @@ class ViaOptimizer:
             )
 
             if alt_path:
+                pair_segs = self._pair_segments_to_remove(ctx1, ctx2, segments)
+                # Issue #8215: the pair removal must not strand pad/zone copper.
+                if pair_segs and not _via_removal_preserves_connectivity(
+                    segments,
+                    vias,
+                    ctx1.via,
+                    pair_segs[0],
+                    pair_segs[0],
+                    alt_path,
+                    tolerance=self.config.tolerance,
+                    anchors=self._anchors_by_net.get(route.net, ()),
+                    zone_layers=self._zone_layers_by_net.get(route.net, ()),
+                    extra_vias=[ctx2.via],
+                    extra_segments=pair_segs,
+                ):
+                    continue
                 # Remove the via pair and intermediate segment
                 self._apply_via_pair_removal(ctx1, ctx2, alt_path, segments, vias, route)
                 indices_to_remove.add(i)
@@ -479,6 +549,8 @@ class ViaOptimizer:
                     seg_after,
                     alt_path,
                     tolerance=self.config.tolerance,
+                    anchors=self._anchors_by_net.get(route.net, ()),
+                    zone_layers=self._zone_layers_by_net.get(route.net, ()),
                 ):
                     self._apply_single_via_removal(
                         ctx, seg_before, seg_after, alt_path, segments, vias, route
@@ -509,6 +581,8 @@ class ViaOptimizer:
                     seg_after,
                     alt_path,
                     tolerance=self.config.tolerance,
+                    anchors=self._anchors_by_net.get(route.net, ()),
+                    zone_layers=self._zone_layers_by_net.get(route.net, ()),
                 ):
                     self._apply_single_via_removal(
                         ctx, seg_before, seg_after, alt_path, segments, vias, route
@@ -570,6 +644,20 @@ class ViaOptimizer:
             )
         ]
 
+    def _pair_segments_to_remove(
+        self, ctx1: ViaContext, ctx2: ViaContext, segments: list[Segment]
+    ) -> list[Segment]:
+        """Intermediate-layer segments attached to a via pair."""
+        tol = self.config.tolerance
+        result: list[Segment] = []
+        for seg in segments:
+            if seg.layer == ctx1.to_layer:  # Intermediate layer
+                if (abs(seg.x1 - ctx1.via.x) < tol and abs(seg.y1 - ctx1.via.y) < tol) or (
+                    abs(seg.x2 - ctx2.via.x) < tol and abs(seg.y2 - ctx2.via.y) < tol
+                ):
+                    result.append(seg)
+        return result
+
     def _apply_via_pair_removal(
         self,
         ctx1: ViaContext,
@@ -580,23 +668,13 @@ class ViaOptimizer:
         route: Route,
     ) -> None:
         """Apply via pair removal by replacing with alternative path."""
-        tol = self.config.tolerance
-
         # Remove the two vias
         if ctx1.via in vias:
             vias.remove(ctx1.via)
         if ctx2.via in vias:
             vias.remove(ctx2.via)
 
-        # Find and remove segments connected to these vias on the intermediate layer
-        segs_to_remove: list[Segment] = []
-        for seg in segments:
-            # Check if segment is between the two via positions
-            if seg.layer == ctx1.to_layer:  # Intermediate layer
-                if (abs(seg.x1 - ctx1.via.x) < tol and abs(seg.y1 - ctx1.via.y) < tol) or (
-                    abs(seg.x2 - ctx2.via.x) < tol and abs(seg.y2 - ctx2.via.y) < tol
-                ):
-                    segs_to_remove.append(seg)
+        segs_to_remove = self._pair_segments_to_remove(ctx1, ctx2, segments)
 
         for seg in segs_to_remove:
             if seg in segments:

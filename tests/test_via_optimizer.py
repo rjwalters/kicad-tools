@@ -499,3 +499,33 @@ class TestEndpointsPreservedAfterViaMinimization:
         assert len(result.vias) >= 1, (
             "TraceOptimizer removed required via, breaking layer connectivity"
         )
+
+
+class TestViaRemovalKeepsPadAndZoneTies:
+    """Issue #8215: via removal must not strand pad or pour connections."""
+
+    @staticmethod
+    def _stub_route():
+        # F.Cu trace -> via at (5,0) -> short B.Cu stub ending at a zone-tied via.
+        seg1 = Segment(x1=0, y1=0, x2=5, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+        via = Via(x=5, y=0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
+        seg2 = Segment(x1=5, y1=0, x2=6, y2=0, width=0.2, layer=Layer.B_CU, net=1)
+        via2 = Via(x=6, y=0, drill=0.3, diameter=0.6, layers=(Layer.B_CU, Layer.F_CU), net=1)
+        seg3 = Segment(x1=6, y1=0, x2=11, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+        return Route(net=1, net_name="GND", segments=[seg1, seg2, seg3], vias=[via, via2])
+
+    def test_pair_removed_without_context(self):
+        result = ViaOptimizer().optimize_route(self._stub_route())
+        assert len(result.vias) == 0
+
+    def test_zone_tied_via_retained(self):
+        opt = ViaOptimizer()
+        opt.set_connection_context(zone_layers_by_net={1: {Layer.B_CU}})
+        result = opt.optimize_route(self._stub_route())
+        assert len(result.vias) == 2
+
+    def test_pad_anchor_on_other_layer_retained(self):
+        opt = ViaOptimizer()
+        opt.set_connection_context(anchors_by_net={1: [(6.0, 0.0, (Layer.B_CU,))]})
+        result = opt.optimize_route(self._stub_route())
+        assert len(result.vias) == 2
