@@ -415,16 +415,21 @@ def _auto_collect(
     """
     from kicad_tools.report import ReportDataCollector
     from kicad_tools.report.generator import ReportGenerator
+    from kicad_tools.report.net_class_map import resolve_committed_net_class_map
 
     # Pre-determine the version directory
     version_dir = ReportGenerator.next_version_dir(output_dir)
     data_dir = version_dir / "data"
 
+    # Resolve the committed net-class-map sidecar the same way the export
+    # path does (Issue #8204, mirrors #4008 Part B). Without it the
+    # sidecar-gated DRC rules run as silent no-ops. None -> graceful no-op.
     collector = ReportDataCollector(
         pcb_path=pcb_path,
         manufacturer=manufacturer,
         quantity=quantity,
         skip_erc=skip_erc,
+        net_class_map_path=resolve_committed_net_class_map(pcb_path),
     )
     print(f"Collecting design data into {data_dir} ...")
     collector.collect_all(data_dir)

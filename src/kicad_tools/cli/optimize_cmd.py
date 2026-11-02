@@ -344,6 +344,10 @@ Examples:
                 "stats": {
                     "nets_optimized": stats.nets_optimized,
                     "nets_rolled_back": stats.nets_rolled_back,
+                    "nets_attempted": stats.nets_optimized,
+                    "nets_kept": stats.nets_kept,
+                    "drc_failsafe_reverted": stats.drc_failsafe_reverted,
+                    "drc_failsafe_rules": stats.drc_failsafe_rules,
                     "segments_before": stats.segments_before,
                     "segments_after": stats.segments_after,
                     "segment_reduction_pct": stats.segment_reduction,
@@ -362,6 +366,7 @@ Examples:
                             "length_before_mm": n.length_before,
                             "length_after_mm": n.length_after,
                             "rolled_back": n.rolled_back,
+                            "new_violations": n.new_violations,
                         }
                         for n in stats.per_net
                     ],
@@ -382,10 +387,9 @@ Examples:
 
         # Show DRC-aware net stats
         if args.drc_aware:
-            drc_safe = stats.nets_optimized - stats.nets_rolled_back
             print(
-                f"  Nets optimized:  {stats.nets_optimized} "
-                f"(DRC safe: {drc_safe}, rolled back: {stats.nets_rolled_back})"
+                f"  Nets attempted:  {stats.nets_optimized} "
+                f"(kept: {stats.nets_kept}, rolled back: {stats.nets_rolled_back})"
             )
         else:
             print(f"  Nets optimized:  {stats.nets_optimized}")
@@ -418,6 +422,11 @@ Examples:
                     "  WARNING: per-net rollback could not restore the DRC baseline; "
                     "all changed nets were reverted"
                 )
+                if stats.drc_failsafe_rules:
+                    rules = ", ".join(
+                        f"{r} (+{c})" for r, c in sorted(stats.drc_failsafe_rules.items())
+                    )
+                    print(f"           rules above baseline: {rules}")
         print()
 
         if args.verbose and stats.per_net:
@@ -425,6 +434,9 @@ Examples:
             width = max(len(n.net) for n in stats.per_net)
             for n in stats.per_net:
                 note = "  (rolled back)" if n.rolled_back else ""
+                if n.new_violations:
+                    rules = ", ".join(f"{r}={c}" for r, c in sorted(n.new_violations.items()))
+                    note += f"  [new violations: {rules}]"
                 print(
                     f"  {n.net:<{width}}  segments {n.segments_before:>4} -> "
                     f"{n.segments_after:>4}  length {n.length_before:>7.2f}mm -> "
