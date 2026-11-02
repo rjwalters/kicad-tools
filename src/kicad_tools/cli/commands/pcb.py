@@ -13,7 +13,7 @@ def run_pcb_command(args) -> int:
     if not args.pcb_command:
         print("Usage: kicad-tools pcb <command> [options] <file>")
         print(
-            "Commands: summary, footprints, nets, traces, stackup, zones, strip, reinforce, dedupe, reannotate, sync-netlist, annotate-pintypes, add-3d-models, remove-footprint, move-footprint, move-via, page-fit, center-on-sheet, lock-footprints, unlock-footprints, add-zone, snap-rotation, edit-outline, net-audit, model-audit, diff, export-dsn, import-ses, current-paths-audit"
+            "Commands: summary, footprints, nets, traces, stackup, zones, strip, reinforce, dedupe, prune, reannotate, sync-netlist, annotate-pintypes, add-3d-models, remove-footprint, move-footprint, move-via, page-fit, center-on-sheet, lock-footprints, unlock-footprints, add-zone, snap-rotation, edit-outline, net-audit, model-audit, diff, export-dsn, import-ses, current-paths-audit"
         )
         return 1
 
@@ -64,6 +64,10 @@ def run_pcb_command(args) -> int:
     # Handle dedupe command (remove exact-duplicate copper; issue #4175)
     if args.pcb_command == "dedupe":
         return _run_dedupe_command(args, pcb_path)
+
+    # Handle prune command (remove redundant copper; issue #8216)
+    if args.pcb_command == "prune":
+        return _run_prune_command(args, pcb_path)
 
     # Handle reannotate command separately (doesn't use pcb_query)
     if args.pcb_command == "reannotate":
@@ -492,6 +496,73 @@ def _run_dedupe_command(args, pcb_path: Path) -> int:
             print(f"Error saving PCB: {e}", file=sys.stderr)
             return 1
 
+    return 0
+
+
+def _run_prune_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb prune' command (issue #8216).
+
+    Removes copper that adds no connectivity (redundant branches, same-layer
+    loops) and snaps off-centre ends onto via/pad centres, keeping every pad
+    and zone terminal connected. Each net's edits are DRC-verified with
+    ``kicad-cli pcb drc --refill-zones`` when kicad-cli is available.
+    """
+    from kicad_tools.pcb_prune import prune_board
+
+    output_format = getattr(args, "format", "text")
+    dry_run = getattr(args, "dry_run", False)
+    output_path = Path(args.output) if getattr(args, "output", None) else pcb_path
+
+    try:
+        pcb, res = prune_board(
+            pcb_path,
+            verify_drc=not getattr(args, "no_drc", False),
+            apply=not dry_run,
+        )
+    except Exception as e:
+        print(f"Error pruning PCB: {e}", file=sys.stderr)
+        return 1
+
+    def _net(p) -> dict[str, Any]:
+        return {
+            "net": p.net_name or p.net_number,
+            "segments_removed": len(p.remove),
+            "ends_snapped": len(p.snaps),
+        }
+
+    changed = res.stats["segments_removed"] or res.stats["ends_snapped"]
+    result: dict[str, Any] = {
+        "input": str(pcb_path),
+        "output": str(output_path) if not dry_run else None,
+        "dry_run": dry_run,
+        "drc_verified": res.drc_verified,
+        "drc_note": res.drc_note,
+        "removed": {"segments": res.stats["segments_removed"]},
+        "snapped": res.stats["ends_snapped"],
+        "nets": [_net(p) for p in res.accepted],
+        "rejected_by_drc": [_net(p) for p in res.rejected],
+    }
+    if output_format == "json":
+        print(json.dumps(result, indent=2))
+    else:
+        print(f"PCB Prune {'(dry run)' if dry_run else ''}")
+        print(f"  Input:  {pcb_path}")
+        print(f"  DRC:    {res.drc_note}")
+        print(f"  Segments removed: {res.stats['segments_removed']:,}")
+        print(f"  Ends snapped:     {res.stats['ends_snapped']:,}")
+        for n in result["nets"]:
+            print(f"    {n['net']}: -{n['segments_removed']} seg, {n['ends_snapped']} snapped")
+        for n in result["rejected_by_drc"]:
+            print(f"    {n['net']}: kept (edit would add DRC violations)")
+
+    if not dry_run and changed:
+        try:
+            pcb.save(output_path)
+            if output_format == "text":
+                print(f"\n  Saved to: {output_path}")
+        except Exception as e:
+            print(f"Error saving PCB: {e}", file=sys.stderr)
+            return 1
     return 0
 
 

@@ -2633,6 +2633,28 @@ def _add_pcb_parser(subparsers) -> None:
         help="Report duplicates without modifying files",
     )
 
+    # pcb prune (issue #8216)
+    pcb_prune = pcb_subparsers.add_parser(
+        "prune",
+        help="Remove redundant copper and snap off-centre ends",
+        description="Remove copper that adds no connectivity (redundant branches, "
+        "same-layer loops) and snap off-centre segment ends onto the same-net "
+        "via/pad centre. Connectivity is built from copper geometry; a segment "
+        "is removed only if every pad and pad-to-zone connection stays in the "
+        "same component. With kicad-cli available each net's edits are checked "
+        "with 'pcb drc --refill-zones' and dropped if they add violations. "
+        "In-place by default; use -o to write elsewhere.",
+    )
+    pcb_prune.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_prune.add_argument("-o", "--output", dest="output", help="Output file path")
+    pcb_prune.add_argument(
+        "--format", choices=["text", "json"], default="text", help="Output format"
+    )
+    pcb_prune.add_argument(
+        "--dry-run", action="store_true", help="Report changes without modifying files"
+    )
+    pcb_prune.add_argument("--no-drc", action="store_true", help="Skip kicad-cli DRC verification")
+
     # pcb reannotate
     pcb_reannotate = pcb_subparsers.add_parser(
         "reannotate",
