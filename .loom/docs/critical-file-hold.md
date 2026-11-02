@@ -87,8 +87,10 @@ Two further cases cost operators a second release for the same concern:
 
 - **An unreadable forge compare.** `patch_identity` retries a compare that gives
   no parsable answer twice (fixed short backoff, no loop) before answering
-  "could not tell". A compare that stays unreadable still re-arms (fail closed),
-  but its reason line carries `equivalence=unread`, and the re-arm's
+  "could not tell", then (#13359) compares the two heads' merge-base-relative
+  patches from local git (hunk headers ignored; equal non-empty patches keep the
+  release, anything else is "could not tell"). Only when both reads fail does the
+  hold re-arm (fail closed), naming each failed read, and its reason line carries `equivalence=unread`, and the re-arm's
   `hold.transition` record uses the trigger `champion_role_equivalence_unread`,
   so an outage is countable apart from a real change. An unreadable PR base
   branch likewise carries `equivalence=base-unread` and the trigger

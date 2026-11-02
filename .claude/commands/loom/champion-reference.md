@@ -827,5 +827,8 @@ the reference for its knobs.
   hold|self-release|pass [--confidence 0-1]` journals a `hold.transition` of
   transition `decision` (`reason_code` `merge-risk-hold`,
   `merge-risk-self-release` or `merge-risk-pass`) with `loom.hold.confidence_pct`.
+- **Calibration**: `loom-daemon champion-hold self-release-calibration [--min-age-days 7]`
+  (read-only, #12952) lists mature self-released PRs with a revert yes/no and the
+  hit rate per confidence bucket, so the 0.9 threshold can be judged.
 - **Not the shadow score**: the confidence is Champion's own, never the #8545
   pre-score.

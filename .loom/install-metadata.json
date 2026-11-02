@@ -1,6 +1,6 @@
 {
-  "loom_version": "0.19.1245",
-  "loom_commit": "9b0ee8a2445a7ab24ae451e6a62193083d49fd7a",
+  "loom_version": "0.19.1250",
+  "loom_commit": "b95c0def26e0ae706f1f6efa9086325c8f10d529",
   "install_date": "2026-08-10",
   "installed_files": [
     ".claude/agents/loom-architect.md",
@@ -669,9 +669,10 @@
     ".claude/commands/loom/sweep-run-hygiene.md",
     ".loom/docs/release-glibc-floor.md",
     ".loom/scripts/tests/lib/daemon-update-fixtures.sh",
-    ".loom/scripts/tests/test-skip-labels.sh"
+    ".loom/scripts/tests/test-skip-labels.sh",
+    ".loom/scripts/tests/test-merge-pr-stacked-child-branch-delete.sh"
   ],
-  "last_resync": "2026-11-01",
+  "last_resync": "2026-11-02",
   "loom_source_remote": "https://github.com/rjwalters/loom.git",
   "requires_daemon": "0.19.1146"
 }
