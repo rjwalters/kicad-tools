@@ -17,12 +17,27 @@ from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from kicad_tools.core.types import copper_layers_in_span
+
 from ..layers import Layer
 from ..primitives import Route, Segment, Via
 from .collision import CollisionChecker
 
 if TYPE_CHECKING:
     pass
+
+
+def _via_zone_span(via: Via, zone_layer_set: Collection[Layer]) -> list[Layer]:
+    """Zone layers a via's barrel crosses (issue #8215).
+
+    Uses :attr:`Via.drilled_layers`: a through via spans every board layer,
+    a micro/blind/buried via only the layers between its two ends.
+    """
+    if not zone_layer_set or not via.layers:
+        return []
+    first, last = via.drilled_layers
+    span = copper_layers_in_span(first, last)
+    return [layer for layer in zone_layer_set if layer in span]
 
 
 def _via_removal_preserves_connectivity(
@@ -100,13 +115,12 @@ def _via_removal_preserves_connectivity(
 
     # Via-to-zone ties: a via end that lands on a same-net zone layer is a
     # connection to the pour, even when no segment ends there.
+    # The copper span is the via's drilled barrel (a router via is a through
+    # via touching every inner plane), not its logical two-layer transition.
     zone_layer_set = set(zone_layers)
     for via in vias:
-        if not via.layers:
-            continue
-        for layer in via.layers:
-            if layer in zone_layer_set:
-                terminals.add(_key(via.x, via.y, layer))
+        for layer in _via_zone_span(via, zone_layer_set):
+            terminals.add(_key(via.x, via.y, layer))
 
     if len(terminals) < 2:
         return True  # Nothing to disconnect
@@ -143,6 +157,15 @@ def _via_removal_preserves_connectivity(
         a = _key(via.x, via.y, via.layers[0])
         b = _key(via.x, via.y, via.layers[1])
         _add(a, b)
+
+    # A remaining via's barrel also reaches the zone layers inside its span,
+    # even where no segment ends on that layer.
+    for via in hyp_vias:
+        if not via.layers:
+            continue
+        base = _key(via.x, via.y, via.layers[0])
+        for layer in _via_zone_span(via, zone_layer_set):
+            _add(base, _key(via.x, via.y, layer))
 
     # Same-net zone copper joins everything it touches on its layer.
     for layer in zone_layer_set:

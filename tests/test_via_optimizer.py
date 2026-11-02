@@ -1,5 +1,7 @@
 """Tests for via optimization in post-routing cleanup."""
 
+import pytest
+
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.optimizer import (
     LayerConnectivityError,
@@ -541,4 +543,24 @@ class TestViaRemovalKeepsPadAndZoneTies:
         # THT pad at the route end: F.Cu has copper there, B.Cu does not.
         opt.set_connection_context(anchors_by_net={1: [(11.0, 0.0, (Layer.F_CU, Layer.B_CU))]})
         result = opt.optimize_route(self._stub_route())
+        assert len(result.vias) == 0
+
+    @pytest.mark.parametrize("zone_layer", [Layer.IN1_CU, Layer.IN2_CU])
+    def test_inner_plane_pour_retains_through_vias(self, zone_layer):
+        # A router via is a through via: its barrel touches every inner plane.
+        opt = ViaOptimizer()
+        opt.set_connection_context(zone_layers_by_net={1: {zone_layer}})
+        result = opt.optimize_route(self._stub_route())
+        assert len(result.vias) == 2
+
+    def test_micro_via_span_short_of_pour_does_not_block_removal(self):
+        route = self._stub_route()
+        route.segments[1].layer = Layer.IN1_CU
+        route.vias[0].layers = (Layer.F_CU, Layer.IN1_CU)
+        route.vias[1].layers = (Layer.IN1_CU, Layer.F_CU)
+        for v in route.vias:
+            v.is_micro = True
+        opt = ViaOptimizer()
+        opt.set_connection_context(zone_layers_by_net={1: {Layer.B_CU}})
+        result = opt.optimize_route(route)
         assert len(result.vias) == 0
