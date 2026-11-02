@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Callable
 
 from ...core.layers import kicad_read_via_layers, warn_normalised_vias
 from ..layers import Layer
-from ..primitives import Segment, Via
+from ..primitives import Segment, Via, segment_45_enforcement_disabled
 from .config import NetOptimizationStats, OptimizationConfig, OptimizationStats
 from .geometry import count_corners, total_length
 
@@ -338,8 +338,14 @@ def replace_segments(
     pcb_text: str,
     original: dict[str, list[Segment]],
     optimized: dict[str, list[Segment]],
+    *,
+    scratch: bool = False,
 ) -> str:
     """Replace original segments with optimized ones in PCB text.
+
+    Issue #8219: ``scratch=True`` marks text built only for an intermediate
+    DRC trial (never written out); the off-angle 45-degree check is skipped
+    so each segment is warned about once, on the final serialization.
 
     Uses a balanced-parentheses walker to identify complete ``(segment ...)``
     blocks, then checks each block for a matching ``(net N)`` field.  This
@@ -380,9 +386,13 @@ def replace_segments(
 
     # Add optimized segments before the closing parenthesis
     new_segments_sexp = []
-    for net_name, segs in optimized.items():
-        for seg in segs:
-            new_segments_sexp.append(seg.to_sexp())
+    if scratch:
+        with segment_45_enforcement_disabled():
+            for segs in optimized.values():
+                new_segments_sexp.extend(seg.to_sexp() for seg in segs)
+    else:
+        for segs in optimized.values():
+            new_segments_sexp.extend(seg.to_sexp() for seg in segs)
 
     if new_segments_sexp:
         # Find the last ) and insert before it
@@ -601,7 +611,9 @@ def optimize_pcb(
     # DRC-aware per-net rollback
     if config.drc_aware and config.drc_manufacturer:
         # Build fully-optimized text and check DRC
-        full_optimized_text = replace_segments(pcb_text, segments_by_net, optimized_segments)
+        full_optimized_text = replace_segments(
+            pcb_text, segments_by_net, optimized_segments, scratch=True
+        )
         full_counts = _run_drc_error_count_by_category(
             full_optimized_text,
             manufacturer=config.drc_manufacturer,
@@ -638,7 +650,7 @@ def optimize_pcb(
                 # Try reverting this single net
                 trial = dict(final_segments)
                 trial[net] = segments_by_net[net]
-                trial_text = replace_segments(pcb_text, segments_by_net, trial)
+                trial_text = replace_segments(pcb_text, segments_by_net, trial, scratch=True)
                 trial_counts = _run_drc_error_count_by_category(
                     trial_text,
                     manufacturer=config.drc_manufacturer,
@@ -683,7 +695,9 @@ def optimize_pcb(
                         stats.nets_rolled_back += 1
                         rolled_back_nets.add(net)
                 stats.drc_failsafe_reverted = True
-                reverted_text = replace_segments(pcb_text, segments_by_net, final_segments)
+                reverted_text = replace_segments(
+                    pcb_text, segments_by_net, final_segments, scratch=True
+                )
                 full_errors = _run_drc_error_count_by_category(
                     reverted_text,
                     manufacturer=config.drc_manufacturer,
