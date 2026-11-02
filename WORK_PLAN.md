@@ -12,8 +12,7 @@ Prioritized roadmap generated from current GitHub label state. Maintained by the
 Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a human merge decision is missing.
 
 - **#8105**: docs(site): refresh kicad-tools.org homepage for v0.25.0
-- **#8181**: chore(loom): resync installed Loom to v0.19.1246
-- **#8184**: chore(loom): resync installed Loom to v0.19.1247
+- **#8189**: chore(loom): resync installed Loom to v0.19.1250
 
 ## Very Important
 
@@ -37,21 +36,20 @@ _None._
 
 Issues currently being built (`loom:building`).
 
-- **#8185**: Evaluate KiPI (drewsum/KiPI) for power-integrity analysis: headless path, trial on a fleet board, integration shape
+_None._
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#8186**: docs: evaluate KiPI power-integrity analyzer and add ecosystem entry
+_None._
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
 - **#8105**: docs(site): refresh kicad-tools.org homepage for v0.25.0
-- **#8181**: chore(loom): resync installed Loom to v0.19.1246
-- **#8184**: chore(loom): resync installed Loom to v0.19.1247
+- **#8189**: chore(loom): resync installed Loom to v0.19.1250
 
 ## Proposed
 
@@ -60,7 +58,6 @@ Issues carrying `loom:curated`.
 - **#5509**: Epic: one clearance kernel — search, commit, and final validation must agree with kicad-cli DRC *(curated)*
 - **#5539**: Champion: Merge-Risk Hold Digest *(curated)*
 - **#7487**: Re-rule or remove board 03 usb_geometry via-in-pad window exception by 2027-04-19 (#7457 / #7084 Q10) *(curated)*
-- **#8185**: Evaluate KiPI (drewsum/KiPI) for power-integrity analysis: headless path, trial on a fleet board, integration shape *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -76,14 +73,14 @@ _None._
 
 | Bucket | Count |
 |------|-------|
-| Operator merge-risk holds | 3 |
+| Operator merge-risk holds | 2 |
 | Very important | 0 |
 | Important | 0 |
 | Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 1 |
-| PRs awaiting review | 1 |
-| Approved PRs awaiting merge | 3 |
-| Curated | 4 |
+| In Progress (`loom:building`) | 0 |
+| PRs awaiting review | 0 |
+| Approved PRs awaiting merge | 2 |
+| Curated | 3 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 3 |
 <!-- guide:plan-body:end -->
