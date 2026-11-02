@@ -25,8 +25,9 @@ npm --prefix site run preview -- --host 127.0.0.1
 
 CI (the `Site` job in `.github/workflows/ci.yml`) runs `ci`, `test`, `check`,
 `build` and `check-links` (without `--external`) on every PR that touches
-`site/`, the benchmark results, board readiness files or the board JSON schema
-doc, including Dependabot `/site` bumps.
+`site/`, the benchmark results, board readiness files, `docs/`, `README.md` or
+the package files the homepage reads its facts from (below), including
+Dependabot `/site` bumps.
 
 The preview serves the production build. Check the printed URL, then inspect
 home, `/benchmarks/`, a board with assets and a development board such as
@@ -56,9 +57,20 @@ cannot make committed readiness evidence stale (Issue #7678).
 
 ## Pages and content ownership
 
-- `src/pages/index.astro`: capability introduction, documentation entry points
-  and gallery sections. Feature descriptions must match implemented behavior;
-  link to representative examples and identify experimental scope.
+- `src/pages/index.astro`: quick start, capability cards, agent skills,
+  documentation entry points and gallery sections. Feature descriptions must
+  match implemented behavior; link to representative examples and identify
+  experimental scope. Example commands should run as written against a demo
+  board (for example `boards/01-voltage-divider/output/`).
+- `src/data/projectFacts.ts`: facts the homepage states that change with the
+  package (Python floor and extras from `pyproject.toml`, harnesses from
+  `agent_surfaces.py`, the MCP tool count from the tool registry, and the skill
+  list from `src/kicad_tools/agent_skills/kct/*.md` front matter), read at build
+  time. Do not hand-write these numbers or lists into page copy; a fact that
+  cannot be parsed fails the build. `src/data/projectFactSources.ts` lists the
+  inputs, and fixture tests copy exactly those files.
+  `tests/readme-anchors.test.ts` fails when a homepage or header link names a
+  README anchor or a `blob/main/` path that no longer exists.
 - `src/components/Header.astro` and `src/styles/global.css`: shared navigation,
   typography, responsive layout and keyboard focus/skip navigation.
 - `src/components/BoardCard.astro` and `src/pages/[slug].astro`: board cards,

@@ -217,7 +217,9 @@ jobs:
       # output. Default `some` quantifier (any listed path), which is why this
       # is a separate step from the `every` steps above. The data inputs are
       # the files the site renders (benchmark results, board readiness,
-      # the board JSON schema doc).
+      # the board JSON schema doc), the package files the homepage reads its
+      # facts from (site/src/data/projectFactSources.ts, issue #8101), and the
+      # README/docs it links into (anchors and paths are tested).
       - uses: dorny/paths-filter@v4
         id: site
         with:
@@ -226,7 +228,12 @@ jobs:
               - 'site/**'
               - 'benchmarks/external/results/**'
               - 'boards/*/output/readiness.json'
-              - 'docs/board-json-schema.md'
+              - 'docs/**'
+              - 'README.md'
+              - 'pyproject.toml'
+              - 'src/kicad_tools/agent_surfaces.py'
+              - 'src/kicad_tools/mcp/tools/registry.py'
+              - 'src/kicad_tools/agent_skills/kct/**'
 
   # Issue #7665: run the website's own checks. Dependabot /site bumps are
   # ordinary pull_request events, so they trigger this via the `site` filter.

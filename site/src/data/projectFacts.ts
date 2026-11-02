@@ -1,99 +1,102 @@
 /**
- * Build-time project facts for the homepage quick start and capability cards.
+ * Project facts the homepage states, read at build time from the files that
+ * define them so the copy cannot drift from the package (issue #8101).
  *
- * Everything drift-prone (Python requirement, install extras, agent skills,
- * MCP tool names) is read from the repo's own source files so the page cannot
- * silently fall behind them. Every parser throws on a missing or reformatted
- * source rather than returning an empty list.
+ * Every parser throws on input it does not recognise: a build that cannot
+ * establish a fact fails visibly instead of publishing a stale or empty one.
  */
-import { readFileSync, readdirSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { PROJECT_FACT_SOURCES } from "./projectFactSources.ts";
 
-/** Skill files under `agent_skills/kct/` that are not themselves skills. */
-const NON_SKILL_FILES = new Set(["README.md", "help.md"]);
-
-/** Extras surfaced on the page: the user-facing installs, in this order. */
-const FEATURED_EXTRAS = ["mcp", "parts", "placement", "native", "models", "all"] as const;
-
-export interface ProjectFacts {
-  requiresPython: string;
-  extras: string[];
-  skills: string[];
-  mcpTools: string[];
-  partsTools: string[];
-}
+const repoRoot = resolve(process.cwd(), "..");
+const read = (rel: string): string => readFileSync(resolve(repoRoot, rel), "utf8");
 
 function projectTable(toml: string): string {
   const table = toml.split(/^\[project\][ \t]*$/m)[1]?.split(/^\[/m)[0];
-  if (!table) throw new Error("pyproject.toml must declare a [project] table");
+  if (!table) throw new Error("pyproject.toml has no [project] table");
   return table;
 }
 
-export function parseRequiresPython(toml: string): string {
-  const spec = projectTable(toml).match(/^requires-python\s*=\s*["']([^"']+)["']\s*$/m)?.[1];
-  if (!spec) throw new Error("pyproject.toml must declare project.requires-python");
+/** `requires-python = ">=3.10"` -> `"3.10"`. */
+export function parsePythonMinimum(toml: string): string {
+  const spec = projectTable(toml).match(/^requires-python\s*=\s*["']>=\s*(\d+\.\d+)["']\s*$/m)?.[1];
+  if (!spec) throw new Error("pyproject.toml must declare requires-python as \">=X.Y\"");
   return spec;
 }
 
-/** Names of `[project.optional-dependencies]` extras, in file order. */
+/** Keys of `[project.optional-dependencies]`, in file order. */
 export function parseExtras(toml: string): string[] {
-  const body = toml
-    .split(/^\[project\.optional-dependencies\][ \t]*$/m)[1]
-    ?.split(/^\[/m)[0];
-  if (!body) throw new Error("pyproject.toml must declare [project.optional-dependencies]");
-  const names = [...body.matchAll(/^([A-Za-z0-9_-]+)\s*=\s*\[/gm)].map((m) => m[1]);
-  if (names.length === 0) throw new Error("no optional-dependency extras found");
+  const table = toml.split(/^\[project\.optional-dependencies\][ \t]*$/m)[1]?.split(/^\[/m)[0];
+  const extras = table ? [...table.matchAll(/^([A-Za-z0-9_-]+)\s*=/gm)].map((m) => m[1]) : [];
+  if (extras.length === 0) throw new Error("pyproject.toml declares no optional-dependencies");
+  return extras;
+}
+
+/** `HARNESSES: tuple[str, ...] = ("claude-code", "codex", "opencode")`. */
+export function parseHarnesses(python: string): string[] {
+  const tuple = python.match(/^HARNESSES\s*:[^=\n]*=\s*\(([^)]*)\)/m)?.[1];
+  const names = tuple ? [...tuple.matchAll(/["']([a-z0-9-]+)["']/g)].map((m) => m[1]) : [];
+  if (names.length === 0) throw new Error("agent_surfaces.py must declare a HARNESSES tuple");
   return names;
 }
 
-export function featuredExtras(all: string[]): string[] {
-  const missing = FEATURED_EXTRAS.filter((e) => !all.includes(e));
-  if (missing.length > 0) {
-    throw new Error(`pyproject.toml no longer declares extras: ${missing.join(", ")}`);
+/** Tool names passed to module-level `register_tool(name=...)` calls. */
+export function parseMcpTools(python: string): string[] {
+  const names = [...python.matchAll(/^register_tool\(\s*name="([a-z0-9_]+)"/gm)].map((m) => m[1]);
+  if (names.length === 0) throw new Error("MCP registry declares no tools");
+  if (new Set(names).size !== names.length) throw new Error("MCP registry declares a tool twice");
+  return names;
+}
+
+export interface Skill {
+  name: string;
+  invocation: string;
+  summary: string;
+}
+
+/** Front matter of one packaged skill; `summary` is the description's first sentence. */
+export function parseSkill(markdown: string): Skill {
+  const front = markdown.match(/^---\n([\s\S]*?)\n---/)?.[1];
+  const field = (key: string) => front?.match(new RegExp(`^${key}:\\s*(.+)$`, "m"))?.[1].trim();
+  const name = field("name");
+  const invocation = field("invocation");
+  const description = field("description");
+  if (!name || !invocation || !description) {
+    throw new Error("skill front matter must declare name, invocation and description");
   }
-  return [...FEATURED_EXTRAS];
+  const summary = (description.match(/^.*?[.!?](?=\s|$)/)?.[0] ?? description).replace(/\s+—\s*$/, "");
+  return { name, invocation, summary };
 }
 
-/** Skill names from the `name:` frontmatter of each skill file. */
-export function parseSkills(files: Record<string, string>): string[] {
-  const skills: string[] = [];
-  for (const [file, text] of Object.entries(files)) {
-    if (NON_SKILL_FILES.has(file) || !file.endsWith(".md")) continue;
-    const name = text.match(/^---\n(?:[^\n]*\n)*?name:\s*([A-Za-z0-9_-]+)\s*\n/)?.[1];
-    if (!name) throw new Error(`skill file ${file} has no name: frontmatter`);
-    skills.push(name);
-  }
-  if (skills.length === 0) throw new Error("no agent skills found");
-  return skills.sort();
+const [PYPROJECT, SURFACES, MCP_REGISTRY, SKILLS_DIR] = PROJECT_FACT_SOURCES;
+
+function loadSkills(): Skill[] {
+  const files = readdirSync(resolve(repoRoot, SKILLS_DIR))
+    .filter((f) => f.endsWith(".md") && f !== "README.md")
+    .sort();
+  if (files.length === 0) throw new Error(`no packaged skills under ${SKILLS_DIR}`);
+  return files.map((f) => parseSkill(read(`${SKILLS_DIR}/${f}`)));
 }
 
-/** MCP tool names registered in `mcp/tools/registry.py` via `name="..."`. */
-export function parseMcpTools(py: string): string[] {
-  const names = [...py.matchAll(/^\s+name="([a-z][a-z0-9_]*)",\s*$/gm)].map((m) => m[1]);
-  if (names.length === 0) throw new Error("no MCP tools found in registry.py");
-  return [...new Set(names)];
+const pyproject = read(PYPROJECT);
+
+export const pythonMinimum = parsePythonMinimum(pyproject);
+export const extras = parseExtras(pyproject);
+export const harnesses = parseHarnesses(read(SURFACES));
+export const mcpTools = parseMcpTools(read(MCP_REGISTRY));
+export const skills = loadSkills();
+
+/** Extras the quick start names; the build fails if pyproject drops one. */
+export const QUICK_START_EXTRAS = ["mcp", "native", "all"] as const;
+for (const extra of QUICK_START_EXTRAS) {
+  if (!extras.includes(extra)) throw new Error(`pyproject.toml no longer declares the "${extra}" extra`);
 }
 
-export function loadProjectFacts(root = resolve(process.cwd(), "..")): ProjectFacts {
-  const toml = readFileSync(resolve(root, "pyproject.toml"), "utf8");
-  const skillDir = resolve(root, "src/kicad_tools/agent_skills/kct");
-  const skillFiles = Object.fromEntries(
-    readdirSync(skillDir)
-      .filter((f) => f.endsWith(".md"))
-      .map((f) => [f, readFileSync(resolve(skillDir, f), "utf8")]),
-  );
-  const mcpTools = parseMcpTools(
-    readFileSync(resolve(root, "src/kicad_tools/mcp/tools/registry.py"), "utf8"),
-  );
-  const partsTools = mcpTools.filter((t) => t.startsWith("parts_"));
-  if (partsTools.length === 0) throw new Error("registry.py exposes no parts_* MCP tools");
-  return {
-    requiresPython: parseRequiresPython(toml),
-    extras: featuredExtras(parseExtras(toml)),
-    skills: parseSkills(skillFiles),
-    mcpTools,
-    partsTools,
-  };
-}
-
-export const projectFacts = loadProjectFacts();
+/** Display names for the harness ids the installer accepts. */
+const HARNESS_LABELS: Record<string, string> = {
+  "claude-code": "Claude Code",
+  codex: "Codex CLI",
+  opencode: "opencode",
+};
+export const harnessLabel = (id: string): string => HARNESS_LABELS[id] ?? id;
