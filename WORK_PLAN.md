@@ -11,8 +11,7 @@ Prioritized roadmap generated from current GitHub label state. Maintained by the
 
 Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a human merge decision is missing.
 
-- **#8105**: docs(site): refresh kicad-tools.org homepage for v0.25.0
-- **#8194**: chore(loom): resync installed Loom to v0.19.1253
+_None._
 
 ## Very Important
 
@@ -30,26 +29,36 @@ _None._
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-_None._
+- **#8215**: optimizer via minimization removes vias that are still needed (unconnected pour stubs)
+- **#8216**: new cleanup pass: remove redundant copper (spurs, overlap-only off-centre ends, same-layer loops)
+- **#8217**: new cleanup pass: shorten detours when a straight or single-bend path is clear
+- **#8218**: run copper cleanup every time: a check rule plus a standard tapeout step (dedupe + optimize, kicad-cli refereed)
 
 ## In Progress
 
 Issues currently being built (`loom:building`).
 
-_None._
+- **#8203**: export: missing 'report' extra silently skips the design report and still exits 0
+- **#8204**: report generate: does not resolve the net-class-map sidecar, so sidecar-gated DRC rules run inactive
+- **#8207**: optimize-traces --drc-aware: every net rolled back on a clean HV board (0 -> 151 errors), summary still claims 84 optimized, no per-net diagnostics
+- **#8208**: parts availability: reports an export-auto-matched line as MISSING; '8/57 available' summary leaves most BOM lines unaccounted for
+- **#8214**: optimize-traces: collision-check each rewrite on finished boards instead of whole-net rollback
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-_None._
+- **#8205**: fix: resolve net-class-map sidecar in kct report generate
+- **#8206**: fix: fail export when the report extra is missing
+- **#8210**: fix(optimizer): match and emit name-only net refs in replace_segments
+- **#8212**: fix: report kept vs attempted nets and per-rule violations in optimize-traces --drc-aware
+- **#8213**: fix: auto-match LCSC in parts availability and account for all BOM lines
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-- **#8105**: docs(site): refresh kicad-tools.org homepage for v0.25.0
-- **#8194**: chore(loom): resync installed Loom to v0.19.1253
+_None._
 
 ## Proposed
 
@@ -58,6 +67,18 @@ Issues carrying `loom:curated`.
 - **#5509**: Epic: one clearance kernel — search, commit, and final validation must agree with kicad-cli DRC *(curated)*
 - **#5539**: Champion: Merge-Risk Hold Digest *(curated)*
 - **#7487**: Re-rule or remove board 03 usb_geometry via-in-pad window exception by 2027-04-19 (#7457 / #7084 Q10) *(curated)*
+- **#8203**: export: missing 'report' extra silently skips the design report and still exits 0 *(curated)*
+- **#8204**: report generate: does not resolve the net-class-map sidecar, so sidecar-gated DRC rules run inactive *(curated)*
+- **#8207**: optimize-traces --drc-aware: every net rolled back on a clean HV board (0 -> 151 errors), summary still claims 84 optimized, no per-net diagnostics *(curated)*
+- **#8208**: parts availability: reports an export-auto-matched line as MISSING; '8/57 available' summary leaves most BOM lines unaccounted for *(curated)*
+- **#8214**: optimize-traces: collision-check each rewrite on finished boards instead of whole-net rollback *(curated)*
+- **#8215**: optimizer via minimization removes vias that are still needed (unconnected pour stubs) *(curated)*
+- **#8216**: new cleanup pass: remove redundant copper (spurs, overlap-only off-centre ends, same-layer loops) *(curated)*
+- **#8217**: new cleanup pass: shorten detours when a straight or single-bend path is clear *(curated)*
+- **#8218**: run copper cleanup every time: a check rule plus a standard tapeout step (dedupe + optimize, kicad-cli refereed) *(curated)*
+- **#8219**: OffAngleSegmentWarning reports 'net 0' on name-only boards and repeats each warning *(curated)*
+- **#8220**: deploy-site.sh leaves the working tree dirty: re-renders committed board images, untracked .wrangler/ *(curated)*
+- **#8221**: deploy-site.sh header and verify default are stale: custom domain is live, token auth undocumented *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -73,14 +94,14 @@ _None._
 
 | Bucket | Count |
 |------|-------|
-| Operator merge-risk holds | 2 |
+| Operator merge-risk holds | 0 |
 | Very important | 0 |
 | Important | 0 |
-| Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 0 |
-| PRs awaiting review | 0 |
-| Approved PRs awaiting merge | 2 |
-| Curated | 3 |
+| Ready (`loom:issue`) | 4 |
+| In Progress (`loom:building`) | 5 |
+| PRs awaiting review | 5 |
+| Approved PRs awaiting merge | 0 |
+| Curated | 15 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 3 |
 <!-- guide:plan-body:end -->
