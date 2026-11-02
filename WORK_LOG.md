@@ -13,6 +13,12 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-11-02
+
+- **PR #8199**: chore(deps): Bump astro from 7.3.8 to 7.4.1 in /site
+- **PR #8198**: chore(deps-dev): Bump @astrojs/check from 0.9.10 to 0.9.11 in /site
+- **PR #8196**: chore(deps): Bump the uv-minor-patch group across 1 directory with 2 updates
+
 ### 2026-11-01
 
 - **PR #8186**: docs: evaluate KiPI power-integrity analyzer and add ecosystem entry
