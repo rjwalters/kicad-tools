@@ -1496,7 +1496,7 @@ fi
 - **`champion.mergeRisk.selfReleaseConfidence=1.0` never self-releases.** `self_release_clears` returns false for any threshold of 1.0.
 - **Nothing is carried over.** The confidence is formed on this pass against this head SHA; a self-release comment on an earlier head is never read as a release (the sticky precheck does not look for it), so a push after a self-release gets a fresh decision. The comment is an audit record of a decision made in the same pass as the merge, in the same comment as the reversal block, so it creates no new trusted-marker input (`comment-trust.md`).
 - **Not the shadow score.** The confidence is not the #8545 pre-score, which never changes a verdict ([`champion-merge-risk-shadow.md`](champion-merge-risk-shadow.md)).
-- **Telemetry on every decision.** The `park-record decision` calls above (and the `pass` call in the all-green row of the decision rule: `--outcome pass --confidence 1`) export the outcome and confidence as `hold.transition` records (`loom.hold.confidence_pct`), so calibration can be checked against later reverts and operator overrides. Best-effort: a failed call changes nothing. The 7-day revert comparison is tracked in #12952.
+- **Telemetry on every decision.** The `park-record decision` calls above (and the `pass` call in the all-green row of the decision rule: `--outcome pass --confidence 1`) export the outcome and confidence as `hold.transition` records (`loom.hold.confidence_pct`), so calibration can be checked against later reverts and operator overrides. Best-effort: a failed call changes nothing. The 7-day revert comparison is `loom-daemon champion-hold self-release-calibration` (#12952).
 
 **Optional shadow pre-score (#8545).** Only with `TYPESAFE_API_KEY` set, and only *after* your verdict above is final, log a score per [`champion-merge-risk-shadow.md`](champion-merge-risk-shadow.md) — telemetry about this rubric, never an input to it. Unset: skip; nothing changes.
 
@@ -2049,12 +2049,18 @@ version_only_diff() {
 # SUSPECT_LINE= / SUSPECT_SECTION= (kept for the FAIL line and the hold
 # comment); anything else -- patch missing/empty, unparseable hunk, forge error,
 # 2 (a daemon predating the verb), 126/127 (no binary) -- is a hold with no line.
-CRITERION3_SUSPECT_LINE=""; CRITERION3_SUSPECT_SECTION=""
+# The verb addresses `repos/<owner>/<repo>/…` explicitly (#13296): `--repo` from
+# $LOOM_REPO when set, else resolved from the cwd; never `gh`'s placeholder. Its
+# stderr (the held reason, with the forge's HTTP status on a read failure) is kept
+# in $CRITERION3_SUSPECT_ERROR for the hold comment.
+CRITERION3_SUSPECT_LINE=""; CRITERION3_SUSPECT_SECTION=""; CRITERION3_SUSPECT_ERROR=""
 suspect_critical_diff() {
-  local file="$1" number="$2" out rc
+  local file="$1" number="$2" out rc errf
   case "${file##*/}" in Cargo.toml|package.json) ;; *) return 1 ;; esac
-  out=$(loom-daemon forge suspect-critical-diff "$number" "$file" 2>/dev/null); rc=$?
-  if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -qx 'SUSPECT=0'; then return 0; fi
+  errf=$(mktemp); CRITERION3_SUSPECT_ERROR=""
+  out=$(loom-daemon forge suspect-critical-diff "$number" "$file" ${LOOM_REPO:+--repo "$LOOM_REPO"} 2>"$errf"); rc=$?
+  if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -qx 'SUSPECT=0'; then rm -f "$errf"; return 0; fi
+  CRITERION3_SUSPECT_ERROR=$(head -c 600 "$errf" | tr '\n' ' '); rm -f "$errf"
   CRITERION3_SUSPECT_LINE=$(printf '%s\n' "$out" | sed -n 's/^SUSPECT_LINE=//p' | head -1)
   CRITERION3_SUSPECT_SECTION=$(printf '%s\n' "$out" | sed -n 's/^SUSPECT_SECTION=//p' | head -1)
   return 1
@@ -2158,7 +2164,7 @@ generalize this pattern to any other critical file or any other kind of
 "trivial-looking" diff — it is scoped to exactly these 6 filenames and
 exactly a version-string line change.
 
-**Suspect-line carve-out (#12999, operator ruling 2026-10-21)**: a critical-file hit is not a blanket veto on every edit to it. For a `Cargo.toml`-family or `package.json`-family hit that `version_only_diff` did not clear, the check-loop calls `suspect_critical_diff`, which wraps `loom-daemon forge suspect-critical-diff <pr> <file>`. Only a clean exit 0 with `SUSPECT=0` passes. It holds when a changed line is in a dependency, dev/build/target dependency, `[patch.*]`, `[replace]` or `[features]` table, is a `build =` / `links =` / `git =` / `registry =` / `path =` source key (a target table's own `path =` under `[[bin]]`, `[[bench]]`, `[[test]]`, `[[example]]` or `[lib]` is not one), or, in `package.json`, sits under `dependencies` / `devDependencies` / `optionalDependencies` / `peerDependencies` / `overrides` / `resolutions` or is a `preinstall` / `install` / `postinstall` / `prepare` script. A suspect hit emits the FAIL line with the matched line and its section, and passes that line on to the hold comment as `$CRITERION3_SUSPECT_LINE` / `$CRITERION3_SUSPECT_SECTION`. Every other outcome is a hold: no patch, an unparseable hunk, an unreadable head file for a hunk whose section the patch does not show, a forge error, exit 2 from an older daemon, 126/127 for no binary. A `.github/workflows/*` hit passes only on `WF_BLAST=green` (the `merge-risk` criterion's `ci_workflow_blast_eval`); red, none, or an unreadable read holds. `migrations/` and `_migration.py` hits still hold on any change, unless an `additiveMigrations` class (#13102) applies. The carve-out never widens `CRITICAL_PATTERNS` and never judges anything but these two manifest families; `Cargo.lock` and `package-lock.json` keep today's version-only treatment.
+**Suspect-line carve-out (#12999, operator ruling 2026-10-21)**: a critical-file hit is not a blanket veto on every edit to it. For a `Cargo.toml`-family or `package.json`-family hit that `version_only_diff` did not clear, the check-loop calls `suspect_critical_diff`, which wraps `loom-daemon forge suspect-critical-diff <pr> <file>`. Only a clean exit 0 with `SUSPECT=0` passes. It holds when a changed line is in a dependency, dev/build/target dependency, `[patch.*]`, `[replace]` or `[features]` table, is a `build =` / `links =` / `git =` / `registry =` / `path =` source key (a target table's own `path =` under `[[bin]]`, `[[bench]]`, `[[test]]`, `[[example]]` or `[lib]` is not one), or, in `package.json`, sits under `dependencies` / `devDependencies` / `optionalDependencies` / `peerDependencies` / `overrides` / `resolutions` or is a `preinstall` / `install` / `postinstall` / `prepare` script. A suspect hit emits the FAIL line with the matched line and its section, and passes that line on to the hold comment as `$CRITERION3_SUSPECT_LINE` / `$CRITERION3_SUSPECT_SECTION`. The verb takes an explicit `OWNER/REPO` (`--repo`, else resolved from the cwd; it never sends a `{owner}/{repo}` placeholder), and a forge read failure keeps its HTTP status and message in the verb's stderr, which the hold comment shows as `$CRITERION3_SUSPECT_ERROR`. Every other outcome is a hold: no patch, an unparseable hunk, an unreadable head file for a hunk whose section the patch does not show, a forge error, exit 2 from an older daemon, 126/127 for no binary. A `.github/workflows/*` hit passes only on `WF_BLAST=green` (the `merge-risk` criterion's `ci_workflow_blast_eval`); red, none, or an unreadable read holds. `migrations/` and `_migration.py` hits still hold on any change, unless an `additiveMigrations` class (#13102) applies. The carve-out never widens `CRITICAL_PATTERNS` and never judges anything but these two manifest families; `Cargo.lock` and `package-lock.json` keep today's version-only treatment.
 
 **Standing-authorization class (#12528)**: the check-loop runs `standing_auth_eval critical` (defined under the `merge-risk` criterion) before it can emit FAIL. A `champion.standingAuthorizations` class with `"coversCriticalFiles": true` whose `filePatterns` cover **every** changed file, with no changed file in `excludeFilePatterns`, no added/removed line matching `forbiddenDiffPatterns`, no kept-set path, and every `conditions` entry (`judgeApproval`, `greenCi`) holding now, passes this criterion and names the class id. Any one file outside the class, an excluded file, a forbidden diff line, an unreadable diff or a kept-set path restores today's FAIL and the durable hold below. A class without the flag, or no class at all, changes nothing. The check is mechanical, never a judgment call.
 
@@ -3034,8 +3040,9 @@ esac
 case "$MERGE_RC ${QOUT%%$'\n'*}" in "0 "*) ;; # direct: merge-pr.sh below
   "7 LOOM-MERGE-QUEUE-"QUEUED*|"7 LOOM-MERGE-QUEUE-"DROPPED*|"7 LOOM-MERGE-QUEUE-"HANDED-OFF*|\
   "7 LOOM-MERGE-QUEUE-"MERGED*) echo "$QOUT (rc=$QRC)" ;; # queue protocol working: silent
-  *) QWHY="$(printf '%s' "$QOUT" | head -n2 | tr '\n' ' ')$QWHY (rc=$QRC)" # a stall: surface it, 1 notice/head
-     echo "CHAMPION-MERGE-QUEUE-STALL pr=$PR_NUMBER: $QWHY"; QM="<!-- champion:merge-queue-stall pr=$PR_NUMBER sha=$HEAD_SHA -->"
+  *) QWHY="$(printf '%s' "$QOUT" | head -n2 | tr '\n' ' ')$QWHY (rc=$QRC)" # a stall: surface it, 1 notice/head+reason
+     QH=$(printf '%s' "$QWHY" | cksum | cut -d' ' -f1) # a changed reason on the same head posts a new notice (#13357)
+     echo "CHAMPION-MERGE-QUEUE-STALL pr=$PR_NUMBER: $QWHY"; QM="<!-- champion:merge-queue-stall pr=$PR_NUMBER sha=$HEAD_SHA why=$QH -->"
      gh pr view "$PR_NUMBER" --json comments -q '.comments[].body' 2>/dev/null | grep -qF "$QM" || gh pr comment "$PR_NUMBER" \
        --body "**Champion: merge blocked** by \`forge merge-queue step\`: \`$QWHY\`. Not merged, still approved, retried next pass. \`unrecognized subcommand\`: upgrade \`loom-daemon\`.
 

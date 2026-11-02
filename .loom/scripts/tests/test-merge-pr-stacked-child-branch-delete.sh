@@ -39,7 +39,7 @@ run_case() { # mode auto_delete forge_type -> prints log
     info() { :; }; warning() { :; }; success() { :; }
     forge_check_auto_delete() { echo "$auto"; }
     forge_delete_branch() { echo "DELETE $2 forge=$FORGE_TYPE" >> "$STUB_LOG"; }
-    REPO_NWO=o/r; GH=gh; PR_BRANCH=feature/parent
+    REPO_NWO=o/r; GH=gh; PR_BRANCH=feature/parent; SCRIPT_DIR=/s/dir
     PR_JSON='{"base":{"ref":"main"}}'
     eval "$BLOCK"
   ) >/dev/null 2>&1
@@ -48,6 +48,7 @@ run_case() { # mode auto_delete forge_type -> prints log
 
 log="$(run_case none)"
 grep -q 'retarget-children --repo o/r --parent-branch feature/parent --base main' <<<"$log" && ok "verb called with parent base" || bad "verb args: $log"
+grep -q -- '--script-dir /s/dir' <<<"$log" && ok "verb gets --script-dir for non-stackable rebase (#13332)" || bad "script-dir missing: $log"
 grep -q '^DELETE feature/parent' <<<"$log" && ok "no children: branch deleted" || bad "no children should delete"
 
 log="$(run_case retarget)"

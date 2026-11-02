@@ -427,7 +427,10 @@ row; keep a per-pass visited set. Preserve PR origin during repairs.
 
 **Find approved PRs with merge conflicts that aren't already claimed and are
 not parked (`loom:blocked`, Champion's merge-risk / critical-file hold
-included; `loom:operator`; `loom:frozen`).**
+included; `loom:operator`; `loom:frozen`).
+**Exception (#13505):** a Champion ratification / merge-risk hold with a
+standing trusted marker on a CONFLICTING PR is Doctor work, hold intact: see
+"Find Champion-held PRs with merge conflicts" under Other PRs Needing Attention.**
 
 **Why earlier in the baseline?** They are approved but blocked, and conflicts only get
 harder over time.
@@ -452,6 +455,13 @@ explicit hold (`loom:blocked` / `loom:operator` / `loom:frozen`).**
 > hold marker) is in the queue. Work it as any feedback PR and leave
 > `loom:blocked` on: only a human removes it. An explicit user instruction naming a PR is a human decision, but
 > never overrides `loom:frozen` or `loom:operator`.
+>
+> **Held and CONFLICTING (#13505).** A second exception: a `loom:pr` +
+> `loom:blocked` PR with a standing trusted Champion ratification / merge-risk
+> hold marker that is CONFLICTING is Doctor work (separate selector under
+> "Other PRs Needing Attention"). Resolve and push; never remove `loom:blocked`
+> or `loom:pr`, never add `loom:changes-requested`. `loom:operator`,
+> `loom:frozen` and an unmarked `loom:blocked` stay excluded.
 
 ### Routing to a human
 
@@ -531,6 +541,36 @@ gh pr list --state=open --label=loom:merge-conflict --json number,labels,comment
   | jq -r '.[] | select(.labels | all(.name != "loom:operator" and .name != "loom:blocked" and .name != "loom:frozen" and .name != "loom:treating")) | select(any(.comments[]?; .body | contains("<!-- loom:orphan-stack flagged"))) | "#\(.number)"'
 ```
 (A candidate still needs its marker confirmed from a **trusted** author.)
+
+**Find Champion-held PRs with merge conflicts (#13505):** a `loom:pr` +
+`loom:blocked` PR under Champion's ratification or merge-risk hold goes
+CONFLICTING when siblings merge, and the shared queue hides it (hold exclusion),
+so nothing else would fix it. It is Doctor work: resolve the conflict, push, and
+**leave the hold alone**. Never remove `loom:blocked` or `loom:pr`, never add
+`loom:changes-requested`; the hold stays for the operator, and Judge re-reviews
+the new head through the Stale-Verdict Check. Admit a PR only when it carries
+`loom:pr` and `loom:blocked`, no `loom:operator` / `loom:frozen` /
+`loom:treating`, is CONFLICTING, and the **latest trusted** marker comment is a
+hold (`<!-- champion:ratification-hold -->` or
+`<!-- champion:merge-risk-hold -->`), not a released / cleared one. Label alone
+is not enough, and neither is a marker from an untrusted author.
+```bash
+CHAMPION_HELD_CONFLICT='def stands($h; $ends): ([.comments[].body] | (map(startswith($h)) | rindex(true)) as $a | (map(. as $b | any($ends[]; . as $e | $b | contains($e))) | rindex(true)) as $z | $a != null and ($z == null or $a > $z));
+  select(.mergeable == "CONFLICTING")
+  | select((.labels | map(.name)) as $l | ($l | index("loom:pr")) and ($l | index("loom:blocked")) and ($l | index("loom:operator") | not) and ($l | index("loom:frozen") | not) and ($l | index("loom:treating") | not))
+  | select(stands("<!-- champion:ratification-hold -->"; ["<!-- champion:ratification-hold-cleared -->", "<!-- champion:ratification-release-respected -->"]) or stands("<!-- champion:merge-risk-hold -->"; ["<!-- champion:merge-risk-hold-cleared -->"]))
+  | .number'
+for PR in $(gh pr list --state=open --label=loom:pr --label=loom:blocked --search '-label:loom:frozen' --json number,mergeable --jq '.[] | select(.mergeable == "CONFLICTING") | .number'); do
+  # Trusted comments only (#9548): an untrusted author's marker is prose, not state.
+  gh pr view "$PR" --json number,mergeable,labels \
+    | jq --argjson c "$(loom-daemon forge trusted-comments --fetch "$PR" --gh-shape)" '.comments = $c' \
+    | jq -r "$CHAMPION_HELD_CONFLICT"
+done
+```
+Claim it like any other PR (`loom:treating`, the Stale `loom:treating` Claim
+Check), and re-check the hold and `mergeable` just before you push: if the hold
+was released meanwhile, it is an ordinary approved conflict and the normal
+rules apply.
 
 **Find all open PRs:**
 ```bash
