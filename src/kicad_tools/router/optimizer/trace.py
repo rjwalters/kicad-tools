@@ -384,7 +384,9 @@ class TraceOptimizer:
             net_anchors: Optional map of net id to the (x, y) positions of that
                 net's pads and vias.  Together with *collision_checker* this
                 enables the whole-chain detour-shortening pass, which is a no-op
-                without both (Issue #8217).
+                without both (Issue #8217).  A net absent from the map is
+                left untouched by that pass (use this to exclude constrained
+                nets).
         """
         self.config = config or OptimizationConfig()
         self.collision_checker = collision_checker
@@ -594,12 +596,10 @@ class TraceOptimizer:
         """
         if self.collision_checker is None or self.net_anchors is None or not segments:
             return list(segments)
-        return shorten_detour_pass(
-            segments,
-            self.config,
-            self._path_is_clear,
-            self.net_anchors.get(segments[0].net, []),
-        )
+        anchors = self.net_anchors.get(segments[0].net)
+        if anchors is None:  # unknown / excluded net: leave it alone
+            return list(segments)
+        return shorten_detour_pass(segments, self.config, self._path_is_clear, anchors)
 
     def optimize_route(self, route: Route) -> Route:
         """Optimize a complete route.
