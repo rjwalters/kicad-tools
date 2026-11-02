@@ -5022,6 +5022,12 @@ def _add_parts_parser(subparsers) -> None:
     parts_avail.add_argument(
         "--issues-only", action="store_true", help="Only show parts with availability issues"
     )
+    parts_avail.add_argument(
+        "--no-auto-lcsc",
+        action="store_true",
+        help="Don't auto-match LCSC part numbers for lines lacking one "
+        "(auto-matching is on by default, like 'kct export')",
+    )
 
     # parts cache
     parts_cache = parts_subparsers.add_parser("cache", help="Cache management")
