@@ -113,3 +113,37 @@ def test_count_includes_zone_checks(monkeypatch):
     )
     assert counts["__total__"] == 0
     assert {"seg_zone", "via_zone"} <= set(calls)
+
+
+# --- Issue #8207: diagnostics -------------------------------------------
+
+
+def test_rollback_records_new_violations_and_kept(tmp_path, monkeypatch):
+    stats, _ = _run(tmp_path, monkeypatch, lambda text, **kw: _count_for(text, 0))
+    rows = {n.net: n for n in stats.per_net}
+    assert rows["A"].rolled_back
+    assert rows["A"].new_violations == {"clearance_segment_zone": 1}
+    assert rows["B"].new_violations == {}
+    assert stats.nets_kept == 1 and stats.nets_optimized == 2
+
+
+def test_failsafe_names_rules_and_writes_input_verbatim(tmp_path, monkeypatch):
+    def counter(text, **kw):
+        if text.count("(net 1)") == 2 and text.count("(net 2)") == 2:
+            return {"__total__": 0}
+        return {"__total__": 1, "clearance_net0_bridge": 1}
+
+    stats, _ = _run(tmp_path, monkeypatch, counter)
+    assert stats.drc_failsafe_reverted
+    assert stats.drc_failsafe_rules == {"clearance_net0_bridge": 1}
+    assert stats.drc_errors_after == stats.drc_errors_before
+    assert stats.nets_kept == 0
+    assert (tmp_path / "out.kicad_pcb").read_text() == _PCB
+
+
+def test_replace_segments_round_trips_unchanged_geometry():
+    from kicad_tools.router.optimizer.pcb import replace_segments
+
+    segs = parse_segments(_PCB)
+    again = parse_segments(replace_segments(_PCB, segs, segs))
+    assert again == segs
