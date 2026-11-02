@@ -76,6 +76,9 @@ class NetOptimizationStats:
     length_before: float = 0.0
     length_after: float = 0.0
     rolled_back: bool = False
+    # Issue #8207: rule id -> violations this net's rewrite introduced (only
+    # populated for nets the per-net rollback loop reverted).
+    new_violations: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -97,6 +100,11 @@ class OptimizationStats:
     # Issue #8052: DRC-aware rollback could not reach baseline; all changed
     # nets were reverted.
     drc_failsafe_reverted: bool = False
+    # Issue #8207: nets whose rewritten geometry differs from the input and
+    # survived rollback (``nets_optimized`` counts every net attempted).
+    nets_kept: int = 0
+    # Issue #8207: rule id -> count still above baseline when the failsafe fired.
+    drc_failsafe_rules: dict[str, int] = field(default_factory=dict)
     # Issue #6889: Kelvin-branch rewrites kept at their original geometry.
     kelvin_vetoes: int = 0
     # Issue #7065: one row per optimized net, built after any DRC rollback.
