@@ -667,3 +667,26 @@ class TestKicadProResolution:
         )
         assert result == 0
         mock_gen_cls.assert_not_called()
+
+
+class TestAutoCollectNetClassMap:
+    """_auto_collect must resolve the committed net-class-map sidecar (#8204)."""
+
+    @patch("kicad_tools.report.ReportDataCollector")
+    def test_stem_keyed_sidecar_is_passed_to_collector(self, mock_cls, tmp_path):
+        from kicad_tools.cli.report_cmd import _auto_collect
+
+        sidecar = tmp_path / "board.net_class_map.json"
+        sidecar.write_text("{}")
+
+        _auto_collect(tmp_path / "board.kicad_pcb", tmp_path / "reports", "jlcpcb", 5, True)
+
+        assert mock_cls.call_args.kwargs["net_class_map_path"] == sidecar
+
+    @patch("kicad_tools.report.ReportDataCollector")
+    def test_no_sidecar_passes_none(self, mock_cls, tmp_path):
+        from kicad_tools.cli.report_cmd import _auto_collect
+
+        _auto_collect(tmp_path / "board.kicad_pcb", tmp_path / "reports", "jlcpcb", 5, True)
+
+        assert mock_cls.call_args.kwargs["net_class_map_path"] is None
