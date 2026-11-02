@@ -43,6 +43,29 @@ def _fail(as_json: bool, pcb: str, message: str, *, text: str | None = None) -> 
     return 1
 
 
+def _build_collision_checker(pcb_path: Path):
+    """Build a collision checker from the board's own copper and rules.
+
+    Loads the board (existing routes included, netclass / ``.kicad_dru``
+    clearances honoured by the loader) and returns the shared checker the
+    router uses, so each optimizer rewrite is checked before it is accepted
+    (Issue #8214; one clearance kernel per #5509).  The loader's progress
+    lines go to stderr because ``--format json`` owns stdout.
+    """
+    import contextlib
+
+    from kicad_tools.router.io import load_pcb_for_routing
+    from kicad_tools.router.optimizer import make_collision_checker
+
+    with contextlib.redirect_stdout(sys.stderr):
+        router, _net_map = load_pcb_for_routing(
+            str(pcb_path),
+            validate_drc=False,
+            load_existing_routes=True,
+        )
+    return make_collision_checker(router.grid)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for trace optimization CLI."""
     parser = argparse.ArgumentParser(
@@ -191,7 +214,20 @@ Examples:
         drc_copper_oz=args.copper,
     )
 
-    optimizer = TraceOptimizer(config)
+    # Issue #8214: collision-check every rewrite against the board's own
+    # copper instead of relying on whole-net ``--drc-aware`` rollback.  A grid
+    # that cannot be built is reported, never silently downgraded to unchecked
+    # rewrites.
+    try:
+        checker = _build_collision_checker(pcb_path)
+    except Exception as e:
+        return _fail(
+            as_json,
+            str(pcb_path),
+            f"cannot build collision checker for {pcb_path}: {e}",
+        )
+
+    optimizer = TraceOptimizer(config, collision_checker=checker)
 
     if not quiet:
         print("=" * 50)

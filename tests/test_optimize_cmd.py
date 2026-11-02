@@ -48,8 +48,8 @@ SIMPLE_PCB = """\
 \t\t(at 100 50)
 \t\t(property "Reference" "R1" (at 0 -1.5) (layer "F.SilkS") (uuid "ref1"))
 \t\t(property "Value" "1k" (at 0 1.5) (layer "F.Fab") (uuid "val1"))
-\t\t(pad "1" smd roundrect (at -0.8 0) (size 0.9 0.95) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "NET1"))
-\t\t(pad "2" smd roundrect (at 0.8 0) (size 0.9 0.95) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "GND"))
+\t\t(pad "1" smd roundrect (at -0.8 0) (size 0.9 0.95) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "GND"))
+\t\t(pad "2" smd roundrect (at 0.8 0) (size 0.9 0.95) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "NET1"))
 \t)
 \t(footprint "R_0603"
 \t\t(layer "F.Cu")
@@ -757,3 +757,58 @@ class TestVerbosePerNet:
             assert rows["NET1"]["segments_after"] == 1
             assert rows["NET1"]["rolled_back"] is False
             assert data["stats"]["nets_optimized"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Tests: per-rewrite collision checking (Issue #8214)
+# ---------------------------------------------------------------------------
+
+
+class _BlockAll:
+    """Collision checker that refuses every candidate path."""
+
+    def path_is_clear(self, **kwargs) -> bool:
+        return False
+
+
+class TestCollisionCheckedRewrites:
+    def test_cli_passes_board_checker_to_optimizer(self, simple_pcb_path, monkeypatch):
+        seen = {}
+        from kicad_tools.router.optimizer import TraceOptimizer as Real
+
+        def spy(config=None, collision_checker=None):
+            seen["checker"] = collision_checker
+            return Real(config, collision_checker=collision_checker)
+
+        monkeypatch.setattr("kicad_tools.router.optimizer.TraceOptimizer", spy)
+        assert main([str(simple_pcb_path), "--dry-run", "--quiet"]) == 0
+        assert seen["checker"] is not None
+
+    def test_clear_path_is_still_merged(self, simple_pcb_path, capsys):
+        assert main([str(simple_pcb_path), "--dry-run", "--verbose"]) == 0
+        row = next(
+            ln for ln in capsys.readouterr().out.splitlines() if "NET1" in ln and "segments" in ln
+        )
+        assert "2 ->    1" in row
+
+    def test_blocked_rewrite_is_skipped(self, simple_pcb_path, monkeypatch, capsys):
+        monkeypatch.setattr(
+            "kicad_tools.cli.optimize_cmd._build_collision_checker", lambda p: _BlockAll()
+        )
+        assert main([str(simple_pcb_path), "--dry-run", "--verbose"]) == 0
+        row = next(
+            ln for ln in capsys.readouterr().out.splitlines() if "NET1" in ln and "segments" in ln
+        )
+        assert "2 ->    2" in row
+
+    def test_checker_build_failure_is_reported_not_bypassed(
+        self, simple_pcb_path, monkeypatch, capsys
+    ):
+        def boom(p):
+            raise ValueError("unparseable rules")
+
+        monkeypatch.setattr("kicad_tools.cli.optimize_cmd._build_collision_checker", boom)
+        out = simple_pcb_path.parent / "out.kicad_pcb"
+        assert main([str(simple_pcb_path), "-o", str(out)]) == 1
+        assert "unparseable rules" in capsys.readouterr().err
+        assert not out.exists()
