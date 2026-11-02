@@ -15,6 +15,14 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-02
 
+- **PR #8213**: fix: auto-match LCSC in parts availability and account for all BOM lines
+- **PR #8205**: fix: resolve net-class-map sidecar in kct report generate
+- **PR #8210**: fix(optimizer): match and emit name-only net refs in replace_segments
+- **PR #8206**: fix: fail export when the report extra is missing
+- **Issue #8208** (closed): parts availability: reports an export-auto-matched line as MISSING; '8/57 available' summary leaves most BOM lines unaccounted for
+- **Issue #8209** (closed): optimize-traces: on KiCad-10 name-only boards, replace_segments keeps the originals and appends (net 0) copper
+- **Issue #8204** (closed): report generate: does not resolve the net-class-map sidecar, so sidecar-gated DRC rules run inactive
+- **Issue #8203** (closed): export: missing 'report' extra silently skips the design report and still exits 0
 - **PR #8201**: chore(loom): resync installed Loom to v0.19.1254
 - **PR #8105**: docs(site): refresh kicad-tools.org homepage for v0.25.0
 - **PR #8197**: chore(deps-dev): Bump vitest from 5.0.4 to 5.0.5 in /site in the npm-minor-patch group across 1 directory
