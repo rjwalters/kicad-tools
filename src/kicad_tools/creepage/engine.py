@@ -854,7 +854,7 @@ def _witness(
     label (e.g. ``"Edge.Cuts"``).  ``None`` when either geometry is empty.
     """
     from shapely.geometry import Point
-    from shapely.ops import nearest_points
+    from shapely.ops import nearest_points  # type: ignore[import-untyped]
 
     if geom_a.is_empty or geom_b.is_empty:
         return None
@@ -878,7 +878,7 @@ def _witness(
 
 def _net_union_on_layer(pcb: PCB, layer_name: str) -> dict[int, Any]:
     """Union each net's copper geometries on ``layer_name`` into one shape."""
-    from shapely.ops import unary_union  # type: ignore[import-untyped]
+    from shapely.ops import unary_union
 
     return {
         net_number: unary_union(parts)
