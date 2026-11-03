@@ -563,10 +563,6 @@ reconciliation & the sweep journal"); only this agent-side check does.
 
 **STOP**: no `loom:curating` label yet? Run the pool gate and claim first ("Claiming Work").
 
-### Living trackers are left as found (#10886)
-
-An issue whose body has `<!-- loom:tracker -->` alone on a line (outside a code fence) is a living tracker or hub, not a finite deliverable. Do not enrich it into `loom:curated`, remove any hold it carries, or comment on a repeat pass; leave it as found and take the next candidate. Champion skips the same marker, so curating it would only re-enter the escalation loop. Removing the marker returns it to the normal flow.
-
 ### The premise gate runs BEFORE enrichment (#8396)
 
 ```bash
