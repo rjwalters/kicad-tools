@@ -419,7 +419,7 @@ class Segment:
                 self.y1,
                 self.x2,
                 self.y2,
-                context=f"net {self.net} on {self.layer.kicad_name}",
+                context=(f"net {self.net_name or self.net} on {self.layer.kicad_name}"),
             )
         net_ref = f'"{self.net_name}"' if name_only and self.net_name else str(self.net)
         return f"""(segment
