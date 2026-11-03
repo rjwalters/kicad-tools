@@ -174,6 +174,11 @@ class AccessLossWitness:
     blocking_nets: tuple[int, ...]
     blocking_net_names: tuple[str, ...]
     held_nets: tuple[int, ...]
+    closing_items: tuple[tuple[str, str], ...] = ()
+    """``(ref.pin label, kind)`` per closing copper item (Issue #8248), so the
+    rendering can say which closers a rip-up can remove.  Empty when the
+    producer did not supply it (older callers); rendering then falls back to
+    :attr:`closing_refs`."""
 
     @property
     def label(self) -> str:
@@ -183,6 +188,25 @@ class AccessLossWitness:
     def pad_labels(self) -> tuple[str, ...]:
         """``ref.pin`` (or ``ref``) labels of the stranded terminals."""
         return tuple(f"{ref}.{pin}" if pin else ref for ref, pin in self.stranded_pads)
+
+    def closing_summary(self) -> str:
+        """Closers, each marked rip-able (route copper) or fixed (Issue #8248).
+
+        ``closed by /GATE[rip-able], Q1.1[fixed], Q1.3[fixed]``.  A closer that
+        is route copper of one ref and a pad of another is listed once per
+        kind.  Without per-item kinds this is the bare ref list.
+        """
+        if not self.closing_items:
+            return ", ".join(self.closing_refs) or "(unattributed)"
+        seen: dict[str, str] = {}
+        for label, kind in self.closing_items:
+            mark = "rip-able" if kind in RIPPABLE_CLOSING_KINDS else "fixed"
+            seen.setdefault(f"{label}[{mark}]", mark)
+        return ", ".join(sorted(seen))
+
+    def signature(self) -> tuple[tuple[tuple[str, str], ...], tuple[str, ...]]:
+        """Identity of this seal: same stranded pads and same closing refs."""
+        return (self.stranded_pads, self.closing_refs)
 
     def one_line(self, held_back: Mapping[int, str] | None = None) -> str:
         """Compact human rendering for CLI / log output.
@@ -195,7 +219,7 @@ class AccessLossWitness:
                 filtered out, so the log claimed rips that never happened.
         """
         pads = ", ".join(self.pad_labels()) or "(no terminal)"
-        closing = ", ".join(self.closing_refs) or "(unattributed)"
+        closing = self.closing_summary()
         held_back = dict(held_back or {})
         if self.blocking_nets:
             names = dict(zip(self.blocking_nets, self.blocking_net_names, strict=False))
@@ -230,6 +254,7 @@ class AccessLossWitness:
             "blocking_nets": list(self.blocking_nets),
             "blocking_net_names": list(self.blocking_net_names),
             "held_nets": list(self.held_nets),
+            "closing_items": [list(item) for item in self.closing_items],
         }
 
 
@@ -284,6 +309,30 @@ class AccessLossTargeter:
         finally:
             self.seconds += time.perf_counter() - start
 
+    def peek_blockers_for(
+        self, failed_net: int, rippable_nets: Collection[int]
+    ) -> AccessLossWitness | None:
+        """:meth:`blockers_for` without recording it (Issue #8248).
+
+        Diagnostic callers (the relief repeat guard) need the current seal's
+        identity but must not add a witness for a rip-up that was never
+        attempted, nor spend the shared ``max_evaluations`` budget real
+        targeting draws on.  All bookkeeping the query touches is restored.
+        """
+        saved = (
+            self.queries,
+            self.hits,
+            self.evaluations,
+            self.truncated,
+            self.seconds,
+            len(self.witnesses),
+        )
+        try:
+            return self._blockers_for(failed_net, rippable_nets)
+        finally:
+            (self.queries, self.hits, self.evaluations, self.truncated, self.seconds) = saved[:5]
+            del self.witnesses[saved[5] :]
+
     def _blockers_for(
         self, failed_net: int, rippable_nets: Collection[int]
     ) -> AccessLossWitness | None:
@@ -307,6 +356,7 @@ class AccessLossTargeter:
         stranded: list[tuple[str, str]] = []
         refs: set[str] = set()
         kinds: set[str] = set()
+        items: set[tuple[str, str]] = set()
         targets: dict[int, str] = {}
         held: set[int] = set()
 
@@ -332,6 +382,9 @@ class AccessLossTargeter:
             stranded.append(key)
             refs.update(access.closing_refs())
             kinds.update(self._kinds(access.closing_copper))
+            for item in access.closing_copper:
+                label = f"{item.ref}.{item.pin}" if item.pin else str(item.ref)
+                items.add((label, str(item.kind)))
             pad_targets, pad_held = rippable_closing_nets(
                 access, failed_net=net, rippable_nets=rippable
             )
@@ -355,6 +408,7 @@ class AccessLossTargeter:
             blocking_nets=blocking,
             blocking_net_names=tuple(targets[target_net] for target_net in blocking),
             held_nets=tuple(sorted(held)),
+            closing_items=tuple(sorted(items)),
         )
         self.witnesses.append(witness)
         return witness
@@ -549,6 +603,29 @@ class RipupCycleGuard:
     relief_refusals: list[tuple[int, frozenset[int]]] = field(default_factory=list)
     relief_capped: list[int] = field(default_factory=list)
     """Nets whose (nested) relief rescue was skipped by the per-net cap."""
+
+    no_path_seen: dict[int, tuple[int, Any]] = field(default_factory=dict)
+    """``victim -> (iteration, witness signature)`` of its latest relief rescue
+    that ended in "no relief path" (Issue #8248)."""
+
+    futile_relief_skips: list[int] = field(default_factory=list)
+    """Victims whose relief rescue was skipped as a repeat of a futile one."""
+
+    def note_no_relief_path(self, victim: int, iteration: int, signature: Any) -> None:
+        """Record that ``victim``'s relief ended with no relief path."""
+        self.no_path_seen[int(victim)] = (int(iteration), signature)
+
+    def repeats_futile_relief(self, victim: int, iteration: int, signature: Any) -> bool:
+        """True when the previous *consecutive* iteration's relief for ``victim``
+        found no path under an identical witness (Issue #8248).
+
+        Only an identical signature in iteration ``N-1`` skips iteration ``N``:
+        a first failure, a gap, or a changed witness all re-attempt.
+        """
+        if signature is None:
+            return False
+        seen = self.no_path_seen.get(int(victim))
+        return seen is not None and seen[0] == int(iteration) - 1 and seen[1] == signature
 
     def admit_relief(self, net: int) -> bool:
         """Charge one relief attempt for ``net``; ``False`` once the cap is hit.
