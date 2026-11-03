@@ -885,6 +885,8 @@ class ManufacturingPackage:
             config=preflight_cfg,
             exclude_tht=exclude_tht,
             bom_source=self.config.bom_source,
+            merge_lcsc=self.config.merge_lcsc,
+            merge_lcsc_from=self.config.merge_lcsc_from,
         )
         return checker.run_all()
 

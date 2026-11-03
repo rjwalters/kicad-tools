@@ -4294,6 +4294,9 @@ def write_json_report(
     )
     if coverage is not None:
         summary_data.update(_coverage_summary(coverage))
+    # Issue #8262: parity with ``output_json`` -- gates reading the ``--output``
+    # file must see the attach-zone exemption state too.
+    summary_data.update(_attach_zone_summary(results))
 
     data: dict = {
         "file": portable_report_path(pcb_path),

@@ -555,6 +555,27 @@ def _pad_violations_grew(
     return False
 
 
+def dedupe_segments(segs: list[Segment]) -> tuple[list[Segment], int]:
+    """Drop exact-duplicate segments, keeping the first occurrence (Issue #8271).
+
+    Mirrors the key of ``kct pcb dedupe`` (``schema.pcb._segment_dedup_key``):
+    net, layer, width and the *unordered* endpoint pair rounded to ~1 um.
+    Returns ``(kept, removed_count)``.
+    """
+    seen: set[tuple] = set()
+    kept: list[Segment] = []
+    for seg in segs:
+        p1 = (round(seg.x1, 3), round(seg.y1, 3))
+        p2 = (round(seg.x2, 3), round(seg.y2, 3))
+        a, b = (p1, p2) if p1 <= p2 else (p2, p1)
+        key = (seg.net, seg.layer, round(seg.width, 3), a, b)
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(seg)
+    return kept, len(segs) - len(kept)
+
+
 def _copper_order(layer: object) -> int:
     """Stack position of a copper layer: F.Cu first, In<n>.Cu by n, B.Cu last."""
     name = getattr(layer, "kicad_name", None) or str(layer)
@@ -879,6 +900,12 @@ def optimize_pcb(
             optimized = list(segs)
             stats.nets_connectivity_discarded += 1
             stats.connectivity_discarded_nets.append(net)
+        # Issue #8271: never emit duplicates the rewrite introduced.  Nets the
+        # optimizer left unchanged (or whose rewrite was discarded above) are
+        # written verbatim.
+        if optimized != segs:
+            optimized, n_dupes = dedupe_segments(optimized)
+            stats.duplicates_removed += n_dupes
         optimized_segments[net] = optimized
         if on_net_optimized is not None:
             on_net_optimized(net, segs, optimized)

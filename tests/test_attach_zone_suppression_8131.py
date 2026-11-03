@@ -116,3 +116,56 @@ def test_route_dru_write_is_quiet_without_designer_rule(tmp_path, capsys):
     capsys.readouterr()
     _write(tmp_path, designer=False)
     assert "suppressed" not in capsys.readouterr().err
+
+
+# Issue #8262: the ``--output`` file report carries the same attach-zone keys.
+_ATTACH_KEYS = ("attach_zone_exemption", "attach_zone_exemption_reason", "attach_zone_unexempted")
+
+
+def _check_file(pcb: Path, out: Path, capsys) -> tuple[dict, dict, str]:
+    capsys.readouterr()
+    main(
+        [
+            str(pcb),
+            "--mfr",
+            "jlcpcb",
+            "--only",
+            "netclass_clearance_copper",
+            "--allow-incomplete",
+            "--no-net-class-map",
+            "--format",
+            "json",
+            "--output",
+            str(out),
+        ]
+    )
+    captured = capsys.readouterr()
+    stdout_summary = json.loads(captured.out)["summary"]
+    return json.loads(out.read_text())["summary"], stdout_summary, captured.err
+
+
+def _attach(summary: dict) -> dict:
+    return {k: summary[k] for k in _ATTACH_KEYS if k in summary}
+
+
+def test_output_file_matches_stdout_suppressed(tmp_path, capsys):
+    pcb = _write(tmp_path, designer=True)
+    file_s, out_s, err = _check_file(pcb, tmp_path / "r.json", capsys)
+    assert file_s["attach_zone_exemption"] == "suppressed"
+    assert _attach(file_s) == _attach(out_s)
+    assert f"{file_s['attach_zone_unexempted']} netclass_clearance_copper" in err
+
+
+def test_output_file_matches_stdout_active(tmp_path, capsys):
+    pcb = _write(tmp_path, designer=False)
+    file_s, out_s, _ = _check_file(pcb, tmp_path / "r.json", capsys)
+    assert file_s["attach_zone_exemption"] == "active"
+    assert "attach_zone_exemption_reason" not in file_s
+    assert _attach(file_s) == _attach(out_s)
+
+
+def test_output_file_matches_stdout_not_applicable(tmp_path, capsys):
+    pcb = _write(tmp_path, designer=True, classes=False)
+    file_s, out_s, _ = _check_file(pcb, tmp_path / "r.json", capsys)
+    assert file_s["attach_zone_exemption"] == "not_applicable"
+    assert _attach(file_s) == _attach(out_s)
