@@ -895,3 +895,144 @@ def shorten_detour_pass(
         if all(any(_point_segment_distance(ax, ay, s) <= reach for s in cand) for ax, ay in fixed):
             return cand
     return list(segments)
+
+
+def _unit(seg: Segment, tol: float) -> tuple[float, float] | None:
+    """Unit direction of *seg*, or ``None`` for a (near-)zero-length segment."""
+    dx, dy = seg.x2 - seg.x1, seg.y2 - seg.y1
+    norm = math.hypot(dx, dy)
+    if norm < tol:
+        return None
+    return dx / norm, dy / norm
+
+
+def _parallel(u: tuple[float, float], v: tuple[float, float]) -> bool:
+    """True if unit vectors *u* and *v* lie on one line (either sense)."""
+    return abs(u[0] * v[1] - u[1] * v[0]) < 1e-4
+
+
+def _retarget(seg: Segment, x1: float, y1: float, x2: float, y2: float) -> Segment:
+    """Copy of *seg* (width, layer, net) running from (x1, y1) to (x2, y2)."""
+    return Segment(
+        x1=x1,
+        y1=y1,
+        x2=x2,
+        y2=y2,
+        width=seg.width,
+        layer=seg.layer,
+        net=seg.net,
+        net_name=seg.net_name,
+    )
+
+
+def remove_lateral_jogs_pass(
+    segments: list[Segment],
+    config: OptimizationConfig,
+    path_is_clear: Callable[[Segment], bool] | None = None,
+    anchors: list[tuple[float, float]] | None = None,
+) -> list[Segment]:
+    """Remove short sideways steps between two parallel runs (Issue #8269).
+
+    A window ``A, s, B`` where ``A`` and ``B`` run the same way and the step
+    ``s`` is not parallel to them is a lateral jog: the run continues on a line
+    offset by ``s``.  The router leaves these at its grid pitch, and none of the
+    other passes removes them -- the runs are not collinear (``merge_collinear``),
+    ``pull_tight_pass`` only moves a segment whose *both* neighbours are parallel
+    to the move, and the step adds too little length for ``shorten_detour_pass``.
+
+    The jog is slid to the next corner instead.  If the segment ``C`` after ``B``
+    is parallel to ``s``, ``B`` is translated by ``-s`` and ``s`` reappears at
+    ``B``'s far end, where it merges into ``C`` (``C`` grows or shrinks by
+    ``|s|``); ``A`` and the moved ``B`` are then collinear and merge.  The
+    mirror image (the segment ``Z`` before ``A`` parallel to ``s``) translates
+    ``A`` by ``+s``.  Every angle is kept, total length never grows, and the
+    chain's endpoints never move.
+
+    Like ``shorten_detour_pass``, this is a **no-op** unless both
+    *path_is_clear* and *anchors* are supplied.  A rewrite is accepted only if
+    every new segment is clear and the new copper still passes over every
+    same-net pad/via anchor the replaced segments touched.
+
+    Args:
+        segments: Ordered chain of connected segments (single chain).
+        config: Optimization configuration (``max_jog_length``, ``tolerance``).
+        path_is_clear: Collision-check callback (required; ``None`` = no-op).
+        anchors: (x, y) positions of the net's pads and vias (required).
+
+    Returns:
+        The chain with every removable jog removed, or a copy of *segments*.
+    """
+    if len(segments) < 4 or path_is_clear is None or anchors is None:
+        return list(segments)
+
+    tol = config.tolerance
+    result = list(segments)
+
+    def accept(old: list[Segment], new: list[Segment]) -> bool:
+        if any(segment_length(s) <= tol for s in new):
+            return False
+        if sum(segment_length(s) for s in new) > sum(segment_length(s) for s in old) + tol:
+            return False
+        if not all(path_is_clear(s) for s in new):
+            return False
+        reach = old[0].width / 2 + tol
+        for ax, ay in anchors:
+            if any(_point_segment_distance(ax, ay, s) <= reach for s in old) and not any(
+                _point_segment_distance(ax, ay, s) <= reach for s in new
+            ):
+                return False
+        return True
+
+    changed = True
+    while changed:
+        changed = False
+        for i in range(1, len(result) - 1):
+            a, s, b = result[i - 1], result[i], result[i + 1]
+            if segment_length(s) > config.max_jog_length + tol:
+                continue
+            ua, us, ub = _unit(a, tol), _unit(s, tol), _unit(b, tol)
+            if ua is None or us is None or ub is None:
+                continue
+            if not _parallel(ua, ub) or ua[0] * ub[0] + ua[1] * ub[1] <= 0 or _parallel(ua, us):
+                continue
+            vx, vy = s.x2 - s.x1, s.y2 - s.y1
+
+            # Forward: B moves by -s, the step lands on C.
+            if i + 2 < len(result):
+                c = result[i + 2]
+                uc = _unit(c, tol)
+                if uc is not None and _parallel(us, uc):
+                    qx, qy = b.x2 - vx, b.y2 - vy
+                    new_b = _retarget(b, s.x1, s.y1, qx, qy)
+                    new_c = _retarget(c, qx, qy, c.x2, c.y2)
+                    nc = _unit(new_c, tol)
+                    if (
+                        nc is not None
+                        and nc[0] * uc[0] + nc[1] * uc[1] > 0
+                        and accept([s, b, c], [new_b, new_c])
+                    ):
+                        result[i : i + 3] = [new_b, new_c]
+                        changed = True
+                        break
+
+            # Backward: A moves by +s, the step lands on Z.
+            if i - 2 >= 0:
+                z = result[i - 2]
+                uz = _unit(z, tol)
+                if uz is not None and _parallel(us, uz):
+                    px, py = a.x1 + vx, a.y1 + vy
+                    new_z = _retarget(z, z.x1, z.y1, px, py)
+                    new_a = _retarget(a, px, py, s.x2, s.y2)
+                    nz = _unit(new_z, tol)
+                    if (
+                        nz is not None
+                        and nz[0] * uz[0] + nz[1] * uz[1] > 0
+                        and accept([z, a, s], [new_z, new_a])
+                    ):
+                        result[i - 2 : i + 1] = [new_z, new_a]
+                        changed = True
+                        break
+        if changed:
+            result = merge_collinear(result, config, path_is_clear)
+
+    return result

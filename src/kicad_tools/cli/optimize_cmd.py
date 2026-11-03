@@ -60,10 +60,48 @@ def _build_collision_checker(pcb_path: Path):
     with contextlib.redirect_stdout(sys.stderr):
         router, _net_map = load_pcb_for_routing(
             str(pcb_path),
+            rules=_declared_design_rules(pcb_path),
+            router_class_floors=False,
             validate_drc=False,
             load_existing_routes=True,
         )
     return router, make_collision_checker(router.grid)
+
+
+def _declared_design_rules(pcb_path: Path):
+    """The board's ``DesignRules`` with the clearance its own DRC enforces (#8269).
+
+    ``load_pcb_for_routing`` reads clearance only from the ``.kicad_pcb``.  A
+    KiCad 6+ board keeps its netclasses in the ``.kicad_pro`` (and custom rules
+    in the ``.kicad_dru``), so the loader fell back to the 0.20 mm dataclass
+    default: the checker then held every rewrite to 0.20 mm on a 0.1016 mm
+    board, refusing moves that stay on existing copper.  The optimizer checks
+    rewrites against the *requirement*, so the base is resolved with a zero
+    target -- the project, DRU and ``project.kct`` fab floor, never raised by
+    a router spacing preference.  The project's stricter named netclasses
+    still become per-net floors in the loader (#6243); the router's own
+    name-based classes do not (``router_class_floors=False``), because KiCad
+    does not enforce them on a board whose files do not declare them.
+    Returns ``None`` (the loader's own behaviour) when the board declares
+    nothing.
+    """
+    from dataclasses import replace
+
+    from kicad_tools.router.clearance_resolver import resolve_routing_clearances
+    from kicad_tools.router.io import parse_pcb_design_rules
+
+    resolved = resolve_routing_clearances(pcb_path, target_mm=0.0)
+    trace_mm = resolved.trace.required_mm
+    via_mm = resolved.via.required_mm
+    if trace_mm <= 0 or via_mm <= 0:
+        return None
+    rules = parse_pcb_design_rules(Path(pcb_path).read_text()).to_design_rules()
+    return replace(
+        rules,
+        trace_clearance=trace_mm,
+        via_clearance=via_mm,
+        grid_resolution=min(rules.grid_resolution, trace_mm / 2),
+    )
 
 
 def _seg_key(seg) -> tuple:
@@ -174,6 +212,11 @@ Examples:
         help="Disable 45-degree corner conversion",
     )
     parser.add_argument(
+        "--no-jogs",
+        action="store_true",
+        help="Disable lateral jog removal (sliding short sideways steps to the next corner)",
+    )
+    parser.add_argument(
         "--chamfer-size",
         type=float,
         default=0.5,
@@ -270,6 +313,7 @@ Examples:
         merge_collinear=not args.no_merge,
         eliminate_zigzags=not args.no_zigzag,
         convert_45_corners=not args.no_45,
+        remove_jogs=not args.no_jogs,
         corner_chamfer_size=args.chamfer_size,
         drc_aware=args.drc_aware,
         drc_manufacturer=args.mfr,
@@ -337,6 +381,7 @@ Examples:
         print(f"  - 45 corners: {'yes' if config.convert_45_corners else 'no'}")
         if config.convert_45_corners:
             print(f"    (chamfer size: {config.corner_chamfer_size}mm)")
+        print(f"  - Lateral jog removal: {'yes' if config.remove_jogs else 'no'}")
         if args.drc_aware:
             print(f"  - DRC-aware rollback: yes (mfr={args.mfr})")
         print()

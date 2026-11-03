@@ -16,11 +16,13 @@ from ..primitives import Route, Segment
 from .algorithms import (
     _find_staircase_end,
     _optimal_path,
+    _point_segment_distance,
     compress_staircase,
     convert_corners_45,
     eliminate_zigzags,
     merge_collinear,
     pull_tight_pass,
+    remove_lateral_jogs_pass,
     shorten_detour_pass,
 )
 from .chain import sort_into_chains
@@ -391,6 +393,11 @@ class TraceOptimizer:
         self.config = config or OptimizationConfig()
         self.collision_checker = collision_checker
         self.net_anchors = net_anchors
+        # Endpoints of the *other* chains in the current optimize_segments call
+        # (same net and layer). A branch can end on a chain's body (a T-join
+        # KiCad counts as connected), so whole-run rewrites must keep these on
+        # the copper as well as the net's pads and vias (Issue #8269).
+        self._branch_anchors: list[tuple[float, float]] = []
 
         # Initialize via optimizer with matching config
         via_config = ViaOptimizationConfig(
@@ -423,7 +430,8 @@ class TraceOptimizer:
         4. Staircase compression
         5. 45-degree corner conversion
         6. PullTight perpendicular segment translation
-        7. Detour shortening (whole-chain straight/single-bend replacement)
+        7. Lateral jog removal (slide a sideways step to the next corner)
+        8. Detour shortening (whole-chain straight/single-bend replacement)
 
         Args:
             segments: List of segments to optimize (may contain multiple chains).
@@ -449,33 +457,62 @@ class TraceOptimizer:
             for _, run in groupby(chain, key=lambda seg: (seg.width, seg.layer, seg.net))
         ]
 
+        chain_ends = [[(s.x1, s.y1) for s in c] + [(s.x2, s.y2) for s in c] for c in chains]
+
         # Optimize each chain independently
         all_optimized: list[Segment] = []
-        for chain in chains:
+        for index, chain in enumerate(chains):
             result = list(chain)
+            self._branch_anchors = [
+                point for other, ends in enumerate(chain_ends) if other != index for point in ends
+            ]
 
-            # Apply optimizations in order
-            if self.config.merge_collinear:
-                result = self.merge_collinear(result)
-
-            if self.config.eliminate_zigzags:
-                result = self.eliminate_zigzags(result)
-
-            if self.config.compress_staircase:
-                result = self.compress_staircase(result)
-
-            if self.config.convert_45_corners:
-                result = self.convert_corners_45(result)
-
-            if self.config.pull_tight:
-                result = self.pull_tight(result)
-
-            if self.config.shorten_detours:
-                result = self.shorten_detours(result)
+            # Apply optimizations in order. Each pass's rewrite of this chain
+            # is kept only if the chain still touches every anchor it touched
+            # before -- the net's pads/vias and the other chains' endpoints --
+            # so no pass can strand a T-joined branch or a mid-chain pad
+            # (Issues #8250, #8269).
+            passes = [
+                (self.config.merge_collinear, self.merge_collinear),
+                (self.config.eliminate_zigzags, self.eliminate_zigzags),
+                (self.config.compress_staircase, self.compress_staircase),
+                (self.config.convert_45_corners, self.convert_corners_45),
+                (self.config.pull_tight, self.pull_tight),
+                (self.config.remove_jogs, self.remove_jogs),
+                (self.config.shorten_detours, self.shorten_detours),
+            ]
+            for enabled, apply_pass in passes:
+                if enabled:
+                    rewritten = apply_pass(result)
+                    if self._keeps_anchors(result, rewritten):
+                        result = rewritten
 
             all_optimized.extend(result)
 
+        self._branch_anchors = []
         return all_optimized
+
+    def _keeps_anchors(self, old: list[Segment], new: list[Segment]) -> bool:
+        """True if *new* still covers every anchor *old* covered.
+
+        Anchors are the other chains' endpoints of the current
+        ``optimize_segments`` call plus, when known, the net's pads and vias.
+        A point counts as covered when it lies within half a trace width of a
+        segment.
+        """
+        if not old or old == new:
+            return True
+        anchors = list(self._branch_anchors)
+        if self.net_anchors is not None:
+            anchors += self.net_anchors.get(old[0].net, [])
+        if not anchors:
+            return True
+        reach = max(s.width for s in old) / 2 + self.config.tolerance
+
+        def covered(x: float, y: float, segs: list[Segment]) -> bool:
+            return any(_point_segment_distance(x, y, s) <= reach for s in segs)
+
+        return all(covered(x, y, new) for x, y in anchors if covered(x, y, old))
 
     def _path_is_clear(self, seg: Segment) -> bool:
         """Check if a segment's path is clear using the collision checker.
@@ -591,6 +628,27 @@ class TraceOptimizer:
         """
         return pull_tight_pass(segments, self.config, self._path_is_clear)
 
+    def remove_jogs(self, segments: list[Segment]) -> list[Segment]:
+        """Remove lateral jogs: short sideways steps between parallel runs.
+
+        Args:
+            segments: List of connected segments (single chain).
+
+        Returns:
+            The chain with its removable jogs slid into the next corner.
+            Always the chain unchanged unless both a collision checker and
+            ``net_anchors`` were supplied (the same contract as
+            ``shorten_detours``).
+        """
+        if self.collision_checker is None or self.net_anchors is None or not segments:
+            return list(segments)
+        anchors = self.net_anchors.get(segments[0].net)
+        if anchors is None:  # unknown / excluded net: leave it alone
+            return list(segments)
+        return remove_lateral_jogs_pass(
+            segments, self.config, self._path_is_clear, anchors + self._branch_anchors
+        )
+
     def shorten_detours(self, segments: list[Segment]) -> list[Segment]:
         """Replace a detouring chain with a shorter straight/single-bend path.
 
@@ -607,7 +665,9 @@ class TraceOptimizer:
         anchors = self.net_anchors.get(segments[0].net)
         if anchors is None:  # unknown / excluded net: leave it alone
             return list(segments)
-        return shorten_detour_pass(segments, self.config, self._path_is_clear, anchors)
+        return shorten_detour_pass(
+            segments, self.config, self._path_is_clear, anchors + self._branch_anchors
+        )
 
     def optimize_route(self, route: Route) -> Route:
         """Optimize a complete route.
