@@ -895,3 +895,129 @@ def shorten_detour_pass(
         if all(any(_point_segment_distance(ax, ay, s) <= reach for s in cand) for ax, ay in fixed):
             return cand
     return list(segments)
+
+
+def _unit(s: Segment, tol: float) -> tuple[float, float] | None:
+    """Unit direction of *s*, or ``None`` for a (near) zero-length segment."""
+    dx, dy = s.x2 - s.x1, s.y2 - s.y1
+    n = math.hypot(dx, dy)
+    if n <= tol:
+        return None
+    return dx / n, dy / n
+
+
+def _is_45_multiple(ux: float, uy: float, tol: float) -> bool:
+    """True when the unit vector lies on a 0/45/90/... degree axis."""
+    deg = math.degrees(math.atan2(uy, ux)) % 45.0
+    return min(deg, 45.0 - deg) <= max(tol, 1e-3) * 100
+
+
+def _slide_jog_forward(
+    segments: list[Segment],
+    config: OptimizationConfig,
+    path_is_clear: Callable[[Segment], bool],
+    fixed_all: list[tuple[float, float]],
+) -> list[Segment]:
+    """One left-to-right sweep of the A, s, B, C slide-jog rewrite."""
+    tol = config.tolerance
+    segs = list(segments)
+    i = 0
+    while i + 3 < len(segs):
+        a, s, b, c = segs[i : i + 4]
+        if not (a.layer == s.layer == b.layer == c.layer and a.net == s.net == b.net == c.net):
+            i += 1
+            continue
+        ua, us, ub, uc = _unit(a, tol), _unit(s, tol), _unit(b, tol), _unit(c, tol)
+        if ua is None or us is None or ub is None or uc is None:
+            i += 1
+            continue
+        if not (is_connected(a, s, tol) and is_connected(s, b, tol) and is_connected(b, c, tol)):
+            i += 1
+            continue
+        # A and B same direction; C same direction as s.
+        if abs(ua[0] * ub[1] - ua[1] * ub[0]) > tol or ua[0] * ub[0] + ua[1] * ub[1] <= 0:
+            i += 1
+            continue
+        if abs(us[0] * uc[1] - us[1] * uc[0]) > tol or us[0] * uc[0] + us[1] * uc[1] <= 0:
+            i += 1
+            continue
+        # s at 45 or 90 degrees to A (not parallel, not a hairpin); all angles on the 45 grid.
+        cross = ua[0] * us[1] - ua[1] * us[0]
+        dot = ua[0] * us[0] + ua[1] * us[1]
+        if abs(cross) <= tol or dot < -tol:
+            i += 1
+            continue
+        if not (_is_45_multiple(*ua, tol) and _is_45_multiple(*us, tol)):
+            i += 1
+            continue
+
+        vx, vy = s.x2 - s.x1, s.y2 - s.y1
+        mid = (b.x2 - vx, b.y2 - vy)  # B' end == new A/s joint
+        new_a = Segment(
+            x1=a.x1,
+            y1=a.y1,
+            x2=mid[0],
+            y2=mid[1],
+            width=a.width,
+            layer=a.layer,
+            net=a.net,
+            net_name=a.net_name,
+        )
+        new_s = Segment(
+            x1=mid[0],
+            y1=mid[1],
+            x2=c.x2,
+            y2=c.y2,
+            width=s.width,
+            layer=s.layer,
+            net=s.net,
+            net_name=s.net_name,
+        )
+        window = [a, s, b, c]
+        reach = a.width / 2 + tol
+        fixed = [
+            (ax, ay)
+            for ax, ay in fixed_all
+            if any(_point_segment_distance(ax, ay, w) <= reach for w in window)
+        ]
+        new = [new_a, new_s]
+        if (
+            sum(segment_length(n) for n in new) <= sum(segment_length(w) for w in window) + tol
+            and all(path_is_clear(n) for n in new)
+            and all(
+                any(_point_segment_distance(ax, ay, n) <= reach for n in new) for ax, ay in fixed
+            )
+        ):
+            segs[i : i + 4] = new
+            i = max(0, i - 1)  # the new A may now start another jog
+            continue
+        i += 1
+    return segs
+
+
+def slide_jog_pass(
+    segments: list[Segment],
+    config: OptimizationConfig,
+    path_is_clear: Callable[[Segment], bool] | None = None,
+    anchors: list[tuple[float, float]] | None = None,
+) -> list[Segment]:
+    """Slide a lateral jog along its chain so it merges into the next run.
+
+    Window ``A, s, B, C`` with ``A`` parallel to ``B`` (same direction), ``s`` at
+    45/90 degrees to them and ``C`` parallel to ``s``: translating ``B`` by
+    ``-s`` makes ``A`` and ``B'`` collinear and ``s`` collinear with ``C``, so the
+    four segments collapse to two with the same total length (Issue #8269).  The
+    mirrored case (jog preceded by a parallel run ``Z``) is handled by running the
+    same sweep over the reversed chain.  Chain endpoints never move and every
+    angle stays on the 45-degree grid.
+
+    Like :func:`shorten_detour_pass`, a rewrite is only safe with a collision
+    model and the net's own pads/vias, so the pass is a **no-op** unless both
+    *path_is_clear* and *anchors* are supplied; a rewrite is rejected unless the
+    new segments still touch every anchor the old window touched.
+    """
+    if len(segments) < 4 or path_is_clear is None or anchors is None:
+        return list(segments)
+    result = _slide_jog_forward(segments, config, path_is_clear, anchors)
+    rev = _slide_jog_forward(_reverse_path(result), config, path_is_clear, anchors)
+    return _reverse_path(rev)

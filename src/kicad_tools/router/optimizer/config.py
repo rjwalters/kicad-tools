@@ -29,6 +29,10 @@ class OptimizationConfig:
     """Replace a whole chain (>= 3 segments) with a shorter straight or
     single-bend 45-degree path between its endpoints when the path is clear."""
 
+    slide_jogs: bool = True
+    """Slide a lateral jog along its chain so it merges into the next parallel
+    run (A, s, B, C -> two segments, same length; Issue #8269)."""
+
     pull_tight_max_iterations: int = 10
     """Maximum number of PullTight iterations before stopping."""
 

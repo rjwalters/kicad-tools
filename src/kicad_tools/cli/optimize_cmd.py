@@ -169,6 +169,11 @@ Examples:
         help="Disable zigzag elimination",
     )
     parser.add_argument(
+        "--no-slide-jogs",
+        action="store_true",
+        help="Disable sliding lateral jogs into adjacent parallel runs",
+    )
+    parser.add_argument(
         "--no-45",
         action="store_true",
         help="Disable 45-degree corner conversion",
@@ -269,6 +274,7 @@ Examples:
     config = OptimizationConfig(
         merge_collinear=not args.no_merge,
         eliminate_zigzags=not args.no_zigzag,
+        slide_jogs=not args.no_slide_jogs,
         convert_45_corners=not args.no_45,
         corner_chamfer_size=args.chamfer_size,
         drc_aware=args.drc_aware,

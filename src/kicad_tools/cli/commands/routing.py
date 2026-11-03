@@ -950,6 +950,8 @@ def run_optimize_command(args) -> int:
         sub_argv.append("--no-merge")
     if args.no_zigzag:
         sub_argv.append("--no-zigzag")
+    if getattr(args, "no_slide_jogs", False):
+        sub_argv.append("--no-slide-jogs")
     if args.no_45:
         sub_argv.append("--no-45")
     if args.chamfer_size != 0.5:

@@ -2272,3 +2272,98 @@ class TestShortenDetours:
         cfg.shorten_detours = True
         out = self._opt(config=cfg).optimize_segments(tent)
         assert len(out) == 1 and self._len(out) == pytest.approx(6.0)
+
+
+class TestSlideJogs:
+    """Slide a lateral jog into the next parallel run (Issue #8269)."""
+
+    def _seg(self, x1, y1, x2, y2):
+        return Segment(x1=x1, y1=y1, x2=x2, y2=y2, width=0.2, layer=Layer.F_CU, net=1, net_name="N")
+
+    def _coords(self, segs):
+        return [(s.x1, s.y1, s.x2, s.y2) for s in segs]
+
+    def _len(self, segs):
+        return sum(((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2) ** 0.5 for s in segs)
+
+    def _opt(self, blocked=None, anchors=None, **cfg):
+        return TraceOptimizer(
+            config=OptimizationConfig(**cfg),
+            collision_checker=MockCollisionChecker(blocked_paths=blocked),
+            net_anchors={1: []} if anchors is None else anchors,
+        )
+
+    def _fwd45(self):
+        return [
+            self._seg(0, 0, 2, 0),
+            self._seg(2, 0, 3, 1),
+            self._seg(3, 1, 5, 1),
+            self._seg(5, 1, 6, 2),
+        ]
+
+    def test_forward_45_slide_merges(self):
+        chain = self._fwd45()
+        result = self._opt().slide_jogs(chain)
+        assert self._coords(result) == [(0, 0, 4, 0), (4, 0, 6, 2)]
+        assert self._len(result) == pytest.approx(self._len(chain))
+
+    def test_forward_90_slide_merges(self):
+        chain = [
+            self._seg(0, 0, 2, 0),
+            self._seg(2, 0, 2, 1),
+            self._seg(2, 1, 4, 1),
+            self._seg(4, 1, 4, 3),
+        ]
+        result = self._opt().slide_jogs(chain)
+        assert self._coords(result) == [(0, 0, 4, 0), (4, 0, 4, 3)]
+
+    def test_backward_slide_merges(self):
+        chain = [
+            self._seg(0, 0, 1, 1),
+            self._seg(1, 1, 3, 1),
+            self._seg(3, 1, 4, 2),
+            self._seg(4, 2, 6, 2),
+        ]
+        result = self._opt().slide_jogs(chain)
+        assert self._coords(result) == [(0, 0, 2, 2), (2, 2, 6, 2)]
+
+    def test_non_parallel_c_unchanged(self):
+        chain = [
+            self._seg(0, 0, 2, 0),
+            self._seg(2, 0, 3, 1),
+            self._seg(3, 1, 5, 1),
+            self._seg(5, 1, 6, 1),
+        ]
+        assert self._opt().slide_jogs(chain) == chain
+
+    def test_anchor_on_moved_vertex_unchanged(self):
+        chain = self._fwd45()
+        opt = self._opt(anchors={1: [(3, 1)]})
+        assert opt.slide_jogs(chain) == chain
+
+    def test_collision_on_new_segment_unchanged(self):
+        chain = self._fwd45()
+        opt = self._opt(blocked=[(3.0, -0.5, 3.5, 0.5)])
+        assert opt.slide_jogs(chain) == chain
+
+    def test_noop_without_checker_or_anchors(self):
+        chain = self._fwd45()
+        assert TraceOptimizer(config=OptimizationConfig()).slide_jogs(chain) == chain
+        opt = TraceOptimizer(config=OptimizationConfig(), collision_checker=MockCollisionChecker())
+        assert opt.slide_jogs(chain) == chain
+
+    def test_flag_off_leaves_chain(self):
+        chain = self._fwd45()
+        opt = self._opt(
+            slide_jogs=False,
+            shorten_detours=False,
+            pull_tight=False,
+            convert_45_corners=False,
+            compress_staircase=False,
+            eliminate_zigzags=False,
+        )
+        assert opt.optimize_segments(chain) == chain
+
+    def test_three_segment_chain_unchanged(self):
+        chain = self._fwd45()[:3]
+        assert self._opt().slide_jogs(chain) == chain

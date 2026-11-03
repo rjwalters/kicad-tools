@@ -22,6 +22,7 @@ from .algorithms import (
     merge_collinear,
     pull_tight_pass,
     shorten_detour_pass,
+    slide_jog_pass,
 )
 from .chain import sort_into_chains
 from .collision import CollisionChecker
@@ -473,6 +474,9 @@ class TraceOptimizer:
             if self.config.shorten_detours:
                 result = self.shorten_detours(result)
 
+            if self.config.slide_jogs:
+                result = self.slide_jogs(result)
+
             all_optimized.extend(result)
 
         return all_optimized
@@ -608,6 +612,18 @@ class TraceOptimizer:
         if anchors is None:  # unknown / excluded net: leave it alone
             return list(segments)
         return shorten_detour_pass(segments, self.config, self._path_is_clear, anchors)
+
+    def slide_jogs(self, segments: list[Segment]) -> list[Segment]:
+        """Slide lateral jogs into the following/preceding parallel run (Issue #8269).
+
+        A no-op unless both a collision checker and ``net_anchors`` were supplied.
+        """
+        if self.collision_checker is None or self.net_anchors is None or not segments:
+            return list(segments)
+        anchors = self.net_anchors.get(segments[0].net)
+        if anchors is None:
+            return list(segments)
+        return slide_jog_pass(segments, self.config, self._path_is_clear, anchors)
 
     def optimize_route(self, route: Route) -> Route:
         """Optimize a complete route.

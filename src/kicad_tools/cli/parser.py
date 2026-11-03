@@ -4424,6 +4424,11 @@ def _add_optimize_parser(subparsers) -> None:
     optimize_parser.add_argument(
         "--no-zigzag", action="store_true", help="Disable zigzag elimination"
     )
+    optimize_parser.add_argument(
+        "--no-slide-jogs",
+        action="store_true",
+        help="Disable sliding lateral jogs into adjacent parallel runs",
+    )
     optimize_parser.add_argument("--no-45", action="store_true", help="Disable 45-degree corners")
     optimize_parser.add_argument(
         "--chamfer-size",
