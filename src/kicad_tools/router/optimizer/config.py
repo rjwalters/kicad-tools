@@ -114,6 +114,10 @@ class OptimizationStats:
     drc_failsafe_rules: dict[str, int] = field(default_factory=dict)
     # Issue #6889: Kelvin-branch rewrites kept at their original geometry.
     kelvin_vetoes: int = 0
+    # Issue #8250: nets whose rewrite was discarded because it split a pad
+    # group that was connected in the input.
+    nets_connectivity_discarded: int = 0
+    connectivity_discarded_nets: list[str] = field(default_factory=list)
     # Issue #7065: one row per optimized net, built after any DRC rollback.
     per_net: list[NetOptimizationStats] = field(default_factory=list)
 
