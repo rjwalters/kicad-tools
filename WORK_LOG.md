@@ -15,6 +15,12 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-02
 
+- **PR #8225**: fix: restore tracked renders and warn on dirty tree in deploy-site.sh
+- **PR #8224**: docs: refresh deploy-site.sh auth docs and default verify URL to kicad-tools.org
+- **PR #8212**: fix: report kept vs attempted nets and per-rule violations in optimize-traces --drc-aware
+- **Issue #8220** (closed): deploy-site.sh leaves the working tree dirty: re-renders committed board images, untracked .wrangler/
+- **Issue #8221** (closed): deploy-site.sh header and verify default are stale: custom domain is live, token auth undocumented
+- **Issue #8207** (closed): optimize-traces --drc-aware: every net rolled back on a clean HV board (0 -> 151 errors), summary still claims 84 optimized, no per-net diagnostics
 - **PR #8213**: fix: auto-match LCSC in parts availability and account for all BOM lines
 - **PR #8205**: fix: resolve net-class-map sidecar in kct report generate
 - **PR #8210**: fix(optimizer): match and emit name-only net refs in replace_segments

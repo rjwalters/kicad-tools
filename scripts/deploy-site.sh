@@ -5,9 +5,12 @@
 #
 # This replaces the former CI auto-deploy workflow
 # (.github/workflows/gallery-deploy.yml).  The team deploys MANUALLY via a
-# locally authenticated `wrangler` (OAuth `wrangler login`) instead of GitHub
-# Actions, so no CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID secrets are
-# needed (see operator issue #3686).
+# locally authenticated `wrangler` instead of GitHub Actions, so no Cloudflare
+# secrets live in the repository or in CI.  Two auth paths are supported:
+#   * a scoped Cloudflare Pages API token in CLOUDFLARE_API_TOKEN.  If that is
+#     unset, the script auto-loads one from the operator's local credentials
+#     file (~/.cloudflare/rjwalters/pages-rjwalters.env) when it exists; or
+#   * interactive OAuth via `wrangler login` (no token needed).
 #
 # Pipeline (mirrors the old workflow, kept linear so data/render/build are
 # independent of the deploy step).  Renders run BEFORE board-metrics so the
@@ -34,10 +37,11 @@
 # Generated artifacts (board.json, renders, site/public/boards/, site/dist/)
 # are all git-ignored and never committed.
 #
-# Custom domain (kicad-tools.org -> kicad-tools.pages.dev) is operator issue
-# #3686 and is OUT OF SCOPE here: this script targets the default Pages
-# hostname kicad-tools.pages.dev (override the verification target with
-# KCT_SITE_BASE_URL if you need to check the custom domain instead).
+# Custom domain: kicad-tools.org is live and is the public URL.  The deployed
+# bytes are verified against https://kicad-tools.org by default; override the
+# verification target with KCT_SITE_BASE_URL (e.g.
+# KCT_SITE_BASE_URL=https://kicad-tools.pages.dev to check the default Pages
+# hostname instead).
 #
 # Usage:
 #   ./scripts/deploy-site.sh [--no-deploy] [--preview] [--no-3d] [--no-verify] [--help]
@@ -55,7 +59,8 @@
 # Prerequisites (the script warns clearly if any are missing):
 #   uv        -- required (board metrics + renders)
 #   node/npm  -- required (Astro build)
-#   wrangler  -- required unless --no-deploy (run `wrangler login` once)
+#   wrangler  -- required unless --no-deploy (authenticate via CLOUDFLARE_API_TOKEN
+#                or run `wrangler login` once)
 #   kicad-cli -- optional; if absent, renders are skipped and the site serves
 #                placeholder thumbnails (warn-then-continue, not an abort)
 #   curl      -- required for step 5 (deployed-artifact verification); if
@@ -134,7 +139,8 @@ assert_cloudflare_account() {
     if ! whoami_out="$("$@" whoami 2>&1)"; then
       err "Could not run 'wrangler whoami' (not logged in?). Output:"
       printf '%s\n' "${whoami_out}" >&2
-      err "Refusing to deploy. Run 'wrangler logout && wrangler login' to the"
+      err "Refusing to deploy. Set a scoped Pages token in CLOUDFLARE_API_TOKEN, or"
+      err "run 'wrangler logout && wrangler login' to the"
       err "correct personal Cloudflare account, then re-run this script."
       exit 1
     fi
@@ -148,7 +154,8 @@ assert_cloudflare_account() {
       err "Could not parse a Cloudflare account ID from 'wrangler whoami'."
       err "Are you logged in? Output was:"
       printf '%s\n' "${whoami_out}" >&2
-      err "Refusing to deploy. Run 'wrangler logout && wrangler login' to the"
+      err "Refusing to deploy. Set a scoped Pages token in CLOUDFLARE_API_TOKEN, or"
+      err "run 'wrangler logout && wrangler login' to the"
       err "correct personal Cloudflare account, then re-run this script."
       exit 1
     fi
@@ -175,7 +182,8 @@ assert_cloudflare_account() {
     err "Wrangler uses whatever account is globally logged in — a stray work"
     err "account would receive this deploy (or silently create a duplicate"
     err "project on the wrong account)."
-    err "Fix: run 'wrangler logout && wrangler login' and authenticate to the"
+    err "Fix: use a scoped Pages token for the intended account in CLOUDFLARE_API_TOKEN,"
+    err "or run 'wrangler logout && wrangler login' and authenticate to the"
     err "correct personal Cloudflare account, then"
     err "re-run this script. To intentionally target a different account, set"
     err "EXPECTED_CLOUDFLARE_ACCOUNT_ID to its ID."
@@ -294,7 +302,7 @@ fi
 
 if [ "${NO_DEPLOY}" -eq 0 ]; then
   if ! command -v wrangler >/dev/null 2>&1 && ! command -v npx >/dev/null 2>&1; then
-    err "'wrangler' (and 'npx') not found — required to deploy. Run 'wrangler login' once, or pass --no-deploy."
+    err "'wrangler' (and 'npx') not found — required to deploy. Authenticate via CLOUDFLARE_API_TOKEN or 'wrangler login' once, or pass --no-deploy."
     MISSING=1
   fi
 fi
@@ -480,7 +488,7 @@ elif ! command -v curl >/dev/null 2>&1; then
   warn "Manually confirm the public board asset(s) before trusting this deploy, or install curl and re-run './scripts/verify-site-deployment.sh' once it's available."
 else
   info "Step 5/5: verifying deployed board asset(s) match the just-built site..."
-  base_url="${KCT_SITE_BASE_URL:-https://kicad-tools.pages.dev}"
+  base_url="${KCT_SITE_BASE_URL:-https://kicad-tools.org}"
   if ! verify_deployed_assets "${base_url}" "${REPO_ROOT}/site/dist/boards"; then
     err "Deployed-artifact verification FAILED (see mismatches above)."
     err "The Cloudflare Pages deploy command reported success, but the"
