@@ -219,28 +219,168 @@ def _seg(x1, y1, x2, y2, width=0.2, net=1):
     )
 
 
-def test_freed_width_and_shortfall_are_measured_in_mm():
-    """Issue #8256: no more ``freed width unknown`` once ripped copper is in hand."""
-    router = _sealed_router()
-    line = router._relief_corridor_need(1, {1: [_seg(0, 0, 5, 0, width=0.1)]}, {})
-    assert "unknown" not in line, line
-    need = router.rules.trace_width + 2 * router.rules.trace_clearance
-    assert "freed 0.100 mm" in line, line
-    assert f"shortfall {need - 0.1:.3f} mm" in line, line
-    assert "not re-occupied" in line, line
+def _need(router) -> float:
+    return float(router._relief_corridor_need(1).split("needs a ")[1].split(" mm")[0])
 
 
-def test_nothing_ripped_and_unsupplied_are_stated_not_unknown():
+# --- Issue #8256: freed corridor and shortfall ------------------------------
+
+
+def test_equal_width_legally_spaced_blocker_gives_no_shortfall():
+    """A blocker as wide as the victim, held to the same clearance, vacated
+    w + 2c -- exactly the victim's corridor.  The old figure (the bare trace
+    width) reported a 2x-clearance shortfall for every such geometry."""
     router = _sealed_router()
-    assert "nothing ripped" in router._relief_corridor_need(1, {1: []}, {})
+    w, c = router.rules.trace_width, router.rules.trace_clearance
+    line = router._relief_corridor_need(1, {2: [_seg(0, 0, 5, 0, width=w, net=2)]}, {})
+    assert f"freed >= {w + 2 * c:.3f} mm" in line, line
+    assert "ripped N2" in line, line
+    assert "no width shortfall" in line, line
+    assert "shortfall <=" not in line, line
+
+
+def test_narrower_blocker_reports_an_upper_bound_shortfall():
+    router = _sealed_router()
+    c = router.rules.trace_clearance
+    line = router._relief_corridor_need(1, {2: [_seg(0, 0, 5, 0, width=0.1, net=2)]}, {})
+    freed = 0.1 + 2 * c
+    assert f"freed >= {freed:.3f} mm" in line, line
+    assert f"shortfall <= {_need(router) - freed:.3f} mm" in line, line
+
+
+def test_freed_band_uses_the_blockers_authored_floor():
+    """The clearance the ripped copper vacated is resolved with
+    ``clearance_for_nets``: a closer's HV floor widens the band it held."""
+    router = _sealed_router()
+    router.rules.net_clearance_floors = {2: 1.0, 3: 1.0, 4: 1.0, 5: 1.0}
+    line = router._relief_corridor_need(1, {2: [_seg(0, 0, 5, 0, width=0.2, net=2)]}, {})
+    assert f"freed >= {0.2 + 2 * 1.0:.3f} mm" in line, line
+    assert "resolved against closing nets" in line.split("freed")[1], line
+
+
+def test_nothing_ripped_is_said_without_a_shortfall_figure():
+    router = _sealed_router()
+    for ripped in ({}, {2: []}, {1: [_seg(0, 0, 5, 0, net=1)]}):  # victim's own copper
+        line = router._relief_corridor_need(1, ripped, {})
+        assert "no blocker ripped before the probe failed" in line, (ripped, line)
+        assert "shortfall" not in line and "freed >=" not in line, line
     line = router._relief_corridor_need(1)
     assert "not measured (no ripped copper supplied)" in line, line
 
 
-def test_reoccupation_names_the_net_in_the_corridor():
+# --- Issue #8256: re-occupation ---------------------------------------------
+
+
+def test_untouched_legal_neighbour_is_not_reoccupation():
+    """Judge's probe: a ripped 0.10 mm blocker and a never-moved net 3 at
+    exactly legal edge clearance.  Copper that was already there is not
+    placed since the rip, so it cannot have re-occupied anything."""
     router = _sealed_router()
-    freed = {1: [_seg(0, 0, 5, 0)]}
-    near = {7: [_seg(0, 0.1, 5, 0.1, net=7)]}
-    far = {7: [_seg(0, 5, 5, 5, net=7)]}
-    assert "re-occupied by net 7 before retry" in router._relief_corridor_need(1, freed, near)
-    assert "not re-occupied" in router._relief_corridor_need(1, freed, far)
+    c, w = router.rules.trace_clearance, router.rules.trace_width
+    d = 0.05 + c + w / 2
+    line = router._relief_corridor_need(
+        1,
+        {2: [_seg(0, 0, 5, 0, width=0.1, net=2)]},
+        {},  # net 3 untouched: not "placed"
+    )
+    assert "not re-occupied (no copper placed since the rip)" in line, line
+    # Even if net 3's copper HAD been placed since the rip, at a legal distance
+    # from the victim's path along the ripped centreline it does not occupy it.
+    legal = w / 2 + c + w / 2 + 0.01
+    line = router._relief_corridor_need(
+        1, {2: [_seg(0, 0, 5, 0, width=0.1, net=2)]}, {3: [_seg(0, legal, 5, legal, net=3)]}
+    )
+    assert "re-occupied since" not in line, line
+    assert "lies clear of the ripped traces" in line, line
+    assert d < legal  # the Judge's false positive sat inside the old limit
+
+
+def test_copper_placed_on_the_ripped_centreline_is_named():
+    router = _sealed_router()
+    line = router._relief_corridor_need(
+        1, {2: [_seg(0, 0, 5, 0, net=2)]}, {3: [_seg(0, 0.1, 5, 0.1, net=3)]}
+    )
+    assert "re-occupied since the rip by N3" in line, line
+
+
+def test_rescue_line_measures_ripped_blocker_not_the_victims_stub():
+    """End to end: the victim holds a partial stub, round 1 rips N2, round 2
+    finds no path.  The line describes N2 and nothing was placed meanwhile."""
+    from kicad_tools.router.core import Autorouter
+
+    from .test_relief_cycle_6363 import _rip_then_no_path, _seg_route
+
+    router, neg, net_routes, pads_by_net = _fixture()
+    stub = _seg_route(VICTIM, 3.0 + VICTIM * 4.0, x1=5.0, x2=6.0)
+    stub.segments[0].width = 0.5  # wider than N2: would win if it were measured
+    router._mark_route(stub)
+    net_routes[VICTIM] = [stub]
+    log: list[str] = []
+    with patch.object(Autorouter, "_relief_probe", side_effect=_rip_then_no_path({2})):
+        assert _relief(router, neg, net_routes, pads_by_net, RipupCycleGuard(), log) is False
+    line = next(m for m in log if "NO relief path" in m)
+    assert "(round 2;" in line, line
+    assert "ripped N2: width 0.200" in line, line
+    assert "not re-occupied (no copper placed since the rip)" in line, line
+
+
+def test_round_one_no_path_says_nothing_was_ripped():
+    router, neg, net_routes, pads_by_net = _fixture()
+    log: list[str] = []
+    with patch.object(router, "_relief_probe", return_value=([], set())):
+        _relief(router, neg, net_routes, pads_by_net, RipupCycleGuard(), log)
+    line = next(m for m in log if "NO relief path" in m)
+    assert "no blocker ripped before the probe failed" in line, line
+    assert "shortfall" not in line, line
+
+
+# --- Issue #8256: targeted rip-up reason ------------------------------------
+
+
+def test_targeted_ripup_line_distinguishes_rolled_back_refused_and_pads():
+    from kicad_tools.router.algorithms.negotiated import RIPUP_VICTIM_GEOMETRIC
+
+    from .test_ripup_cycle_6342 import _fake_neg_router
+
+    router = _sealed_router()
+    guard = RipupCycleGuard()
+    neg = _fake_neg_router(RIPUP_VICTIM_GEOMETRIC)
+    labels: list[str] = []
+    for _ in range(3):  # two real rolled-back rips, then the guard refuses
+        ok = router._guarded_targeted_ripup(
+            neg,
+            guard,
+            failed_net=1,
+            blocking_nets={2, 3},
+            net_routes={},
+            pads_by_net={},
+            present_cost_factor=1.0,
+            mark_route_callback=lambda r: None,
+            ripup_history={},
+            max_ripups_per_net=3,
+            per_net_timeout=1.0,
+        )
+        assert ok is False
+        labels.append(router._targeted_ripup_failure_label(router._last_guarded_ripup_reason))
+    assert labels == [
+        "rolled back, no path with blockers ripped",
+        "rolled back, no path with blockers ripped",
+        "refused by rip-up guard",
+    ]
+    labels.append("fewer than 2 pads")
+    suffix = router._targeted_ripup_reason_suffix(1, 5, labels)
+    assert suffix == (
+        " [unresolved: 2 rolled back, no path with blockers ripped; "
+        "1 fewer than 2 pads; 1 refused by rip-up guard]"
+    ), suffix
+    assert router._targeted_ripup_reason_suffix(3, 3, []) == ""
+    assert "1 no reason recorded" in router._targeted_ripup_reason_suffix(0, 1, [])
+
+
+def test_skipped_rip_is_not_called_a_roll_back():
+    from kicad_tools.router.access_ripup import PLAN_NOTHING
+
+    assert (
+        _sealed_router()._targeted_ripup_failure_label(PLAN_NOTHING)
+        == "rip skipped, all blockers protected"
+    )
