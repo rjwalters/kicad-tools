@@ -88,7 +88,7 @@ if TYPE_CHECKING:
     from kicad_tools.router.layer_intent import LayerIntentViolation
     from kicad_tools.router.net_names import NetClassMapResolution
     from kicad_tools.router.pairwise_clearance import AttachZone, PadGeometry, PairwiseViolation
-    from kicad_tools.router.primitives import Route
+    from kicad_tools.router.primitives import Pad, Route
     from kicad_tools.router.reporting import RouteAttemptResult
     from kicad_tools.router.routing_plan import OverflowReport, RoutingPlan
 
@@ -3057,7 +3057,7 @@ def _partial_net_stubs(router, tol: float = 1e-3) -> list[dict]:
                 if j != i and near(x, y, ends[j][0], ends[j][1])
             ]
 
-        def pad_covers(p, x: float, y: float) -> bool:
+        def pad_covers(p: "Pad", x: float, y: float) -> bool:
             hw, hh = pad_half_extents(p)
             return abs(x - p.x) <= hw + tol and abs(y - p.y) <= hh + tol
 
@@ -3086,6 +3086,26 @@ def _partial_net_stubs(router, tol: float = 1e-3) -> list[dict]:
             if key in seen:
                 continue
             seen.add(key)
+            stubs.append({"net": name, "layer": layer, "x": key[0], "y": key[1]})
+        # A via whose same-net copper sits on one layer only is dangling even
+        # when two same-layer segments fold back at it (the endpoint pass above
+        # skips those ends because they meet each other): DRC ``via_dangling``.
+        for v in vias:
+            at_via = [e for e in ends if near(e[0], e[1], v.x, v.y)]
+            covering = [p for p in net_pads if pad_covers(p, v.x, v.y)]
+            if any(p.through_hole for p in covering):
+                continue
+            layers = {e[2] for e in at_via} | {p.layer.name for p in covering}
+            if len(layers) != 1:
+                continue  # copper on 2+ layers joins it; none = nothing to name
+            (layer,) = layers
+            key = (round(v.x, 3), round(v.y, 3), layer)
+            if key in seen or any(
+                s["layer"] == layer and near(s["x"], s["y"], v.x, v.y) for s in stubs
+            ):
+                continue  # already listed as a lone end at this via
+            seen.add(key)
+            name = at_via[0][3] if at_via else (v.net_name or "")
             stubs.append({"net": name, "layer": layer, "x": key[0], "y": key[1]})
     stubs.sort(key=lambda d: (str(d["net"]), d["layer"], d["x"], d["y"]))
     return stubs

@@ -187,3 +187,83 @@ def test_pad_join_keeps_joint_when_t_branch_ends_there():
     segs = merged[0].segments
     # Joint (1.0, 1.0) is a junction: it survives, so the branch still meets copper.
     assert any((s.x2, s.y2) == (1.0, 1.0) or (s.x1, s.y1) == (1.0, 1.0) for s in segs)
+
+
+# --- Judge round 2 on PR #8283 ---
+def _via(x, y):
+    return Via(
+        x=x, y=y, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="N"
+    )
+
+
+def test_stub_list_reports_fold_back_via():
+    # Two F_CU segments meet at a via with nothing on B_CU: DRC ``via_dangling``.
+    pads = [_pad(0.0, 0.0), _pad(4.0, 0.0, ref="U2")]
+    route = Route(
+        net=1,
+        net_name="N",
+        segments=[_s(0.0, 0.0, 2.0, 0.0), _s(2.0, 0.0, 4.0, 0.0)],
+        vias=[_via(2.0, 0.0)],
+    )
+    stubs = _partial_net_stubs(_router([route], pads))
+    assert [(s["net"], s["layer"], s["x"], s["y"]) for s in stubs] == [("N", "F_CU", 2.0, 0.0)]
+
+
+def test_stub_list_lone_via_end_listed_once():
+    pads = [_pad(0.0, 0.0)]
+    route = Route(net=1, net_name="N", segments=[_s(0.0, 0.0, 2.0, 0.0)], vias=[_via(2.0, 0.0)])
+    assert len(_partial_net_stubs(_router([route], pads))) == 1
+
+
+class _SaveRouter:
+    """Just enough of an Autorouter for ``_save_partial_results``."""
+
+    def __init__(self, routes, pads):
+        self.routes = routes
+        self.pads = {(p.ref, p.pin): p for p in pads}
+        self.grid = SimpleNamespace(resolution=0.1)
+        self.rules = SimpleNamespace(trace_clearance=0.2)
+        self.routing_plan = None
+        self.commit_journal = None
+        self.net_names = {1: "N"}
+
+    def cleanup_artifacts(self):
+        pass
+
+    def to_sexp(self, name_only=False):
+        return "\n\t".join(r.to_sexp(name_only=name_only) for r in self.routes)
+
+    def get_statistics(self):
+        return {"nets_routed": 1, "segments": len(self.routes[0].segments), "vias": 0}
+
+
+def test_save_partial_results_writes_n_cell_run_as_one_segment(tmp_path):
+    import re
+
+    from kicad_tools.cli import route_cmd
+
+    src = tmp_path / "b.kicad_pcb"
+    src.write_text('(kicad_pcb\n  (version 20240108)\n  (net 0 "")\n  (net 1 "N")\n)\n')
+    out = tmp_path / "out.kicad_pcb"
+    segs = [_seg(i * 0.05, (i + 1) * 0.05) for i in range(100)]
+    router = _SaveRouter([Route(net=1, net_name="N", segments=segs)], [])
+    route_cmd._reset_partial_save_state()
+    route_cmd._interrupt_state.update(
+        router=router,
+        output_path=out,
+        pcb_path=src,
+        quiet=True,
+        interrupted=False,
+        best_completed_attempt=False,
+        dry_run=False,
+    )
+    try:
+        assert route_cmd._save_partial_results() is True
+    finally:
+        route_cmd._interrupt_state.update(router=None, output_path=None, pcb_path=None)
+        route_cmd._reset_partial_save_state()
+
+    text = (tmp_path / "out_partial.kicad_pcb").read_text()
+    assert len(re.findall(r"\(segment\b", text)) == 1
+    assert len(router.routes[0].segments) == 100  # live routes untouched
+    assert router.routes[0].segments is segs
