@@ -98,3 +98,48 @@ def test_via_joins_layers_for_connectivity():
 def test_stale_zone_fill_not_a_rollback_category():
     assert "clearance_segment_zone" in _STALE_FILL_RULES
     assert "clearance_segment_zone" not in _PAD_VIOLATION_CATEGORIES
+
+
+def test_through_via_joins_inner_layer_branch():
+    """Review fix: a through via (F.Cu..B.Cu) also joins In2.Cu copper."""
+    inner = Layer.IN2_CU
+    before = [_seg(0, 0, 5, 0), _seg(5, 0, 10, 0, inner)]
+    via = Via(
+        x=5.0, y=0.0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="N"
+    )
+    anchors = [(0.0, 0.0, (Layer.F_CU,)), (10.0, 0.0, (inner,))]
+    assert connectivity_preserved(before, before, [via], anchors, 0.01)
+    # inner branch cut short of the via: the pads fall apart
+    cut = [_seg(0, 0, 5, 0), _seg(7, 0, 10, 0, inner)]
+    assert not connectivity_preserved(before, cut, [via], anchors, 0.01)
+
+
+def test_padless_fragment_split_detected():
+    """Review fix: a split that strands pad-less copper still fails the gate."""
+    before = [_seg(0, 0, 5, 0), _seg(5, 0, 10, 0), _seg(5, 0, 5, 4)]  # stub branch
+    anchors = [(0.0, 0.0, (Layer.F_CU,)), (10.0, 0.0, (Layer.F_CU,))]
+    split = [_seg(0, 0, 5, 0), _seg(5, 0, 10, 0), _seg(5, 1, 5, 4)]  # stub detached
+    assert not connectivity_preserved(before, split, [], anchors, 0.01)
+
+
+def test_blocked_chamfer_leaves_no_gap():
+    """Review fix: when the chamfer path is blocked, neither neighbour is shortened."""
+    segs = [_seg(0, 0, 5, 0), _seg(5, 0, 5, 5), _seg(5, 5, 10, 5)]
+    out = convert_corners_45(segs, OptimizationConfig(), path_is_clear=lambda s: False)
+    assert out == segs
+
+
+def test_chamfer_chain_is_contiguous():
+    segs = [_seg(0, 0, 5, 0), _seg(5, 0, 5, 5), _seg(5, 5, 10, 5)]
+    out = convert_corners_45(segs, OptimizationConfig())
+    for a, b in zip(out, out[1:], strict=False):
+        assert abs(a.x2 - b.x1) < 1e-9 and abs(a.y2 - b.y1) < 1e-9
+
+
+def test_new_dangling_end_detected():
+    """Review fix: a stub that stops touching the trunk body is a new free end."""
+    before = [_seg(0, 0, 10, 0), _seg(5, 0.05, 5, 3)]  # branch ends on trunk body
+    after = [_seg(0, 0, 10, 0), _seg(5, 1.0, 5, 3)]
+    anchors = [(0.0, 0.0, (Layer.F_CU,)), (10.0, 0.0, (Layer.F_CU,))]
+    assert connectivity_preserved(before, before, [], anchors, 0.1)
+    assert not connectivity_preserved(before, after, [], anchors, 0.1)

@@ -555,11 +555,36 @@ def _pad_violations_grew(
     return False
 
 
+def _copper_order(layer: object) -> int:
+    """Stack position of a copper layer: F.Cu first, In<n>.Cu by n, B.Cu last."""
+    name = getattr(layer, "kicad_name", None) or str(layer)
+    if name.startswith("F."):
+        return 0
+    if name.startswith("B."):
+        return 10_000
+    digits = "".join(ch for ch in name if ch.isdigit())
+    return int(digits) if digits else 5_000
+
+
+def _via_layers(via: Via, copper_layers: set) -> list:
+    """Every copper layer in ``copper_layers`` that ``via`` electrically joins.
+
+    ``Via.layers`` is only the (start, end) pair, so a through via
+    ``(layers "F.Cu" "B.Cu")`` must be expanded to the inner layers it
+    crosses (blind/buried vias to their span).  Issue #8250 review.
+    """
+    ends = [_copper_order(lyr) for lyr in via.layers]
+    lo, hi = min(ends), max(ends)
+    span = [lyr for lyr in copper_layers if lo <= _copper_order(lyr) <= hi]
+    return span or list(via.layers)
+
+
 def _component_labels(
     segments: list[Segment],
     vias: list[Via],
     anchors: list[tuple[float, float, tuple[Layer, ...]]],
     tolerance: float,
+    n_components: list[int] | None = None,
 ) -> list[int]:
     """Label each anchor with the id of the copper component containing it.
 
@@ -567,12 +592,19 @@ def _component_labels(
     on the other item (within ``tolerance``), a via joins every segment on its
     layers that reaches its position.  An anchor (pad) attaches to any segment
     on one of its layers passing within half the width of it, or to a via at
-    it.  Anchors that attach to nothing get unique labels.
+    it.  Anchors that attach to nothing get unique labels.  If
+    ``n_components`` is given, the number of distinct copper components
+    (segments and vias, pad or no pad) is appended to it.
     """
     import math
 
     n_seg = len(segments)
     parent = list(range(n_seg + len(vias)))
+    copper_layers: set = {sg.layer for sg in segments}
+    for _ax, _ay, _lyrs in anchors:
+        copper_layers.update(_lyrs)
+    for _v in vias:
+        copper_layers.update(_v.layers)
 
     def find(i: int) -> int:
         while parent[i] != i:
@@ -612,10 +644,13 @@ def _component_labels(
                 if j != i and dist_to_seg(px, py, segments[j]) <= tolerance:
                     union(i, j)
     for k, v in enumerate(vias):
-        for lyr in v.layers:
+        for lyr in _via_layers(v, copper_layers):
             for i in candidates(lyr, v.x, v.y):
                 if dist_to_seg(v.x, v.y, segments[i]) <= tolerance:
                     union(n_seg + k, i)
+
+    if n_components is not None:
+        n_components.append(len({find(i) for i in range(len(parent))}))
 
     labels: list[int] = []
     for idx, (ax, ay, layers) in enumerate(anchors):
@@ -636,6 +671,73 @@ def _component_labels(
     return labels
 
 
+def _free_end_count(
+    segments: list[Segment],
+    vias: list[Via],
+    anchors: list[tuple[float, float, tuple[Layer, ...]]],
+    tolerance: float,
+) -> int:
+    """Count segment ends that touch no other copper, via or pad.
+
+    These are the ends KiCad flags as ``track_dangling``.  An exact duplicate
+    (or reverse duplicate) of the segment does not count as something the end
+    touches.  Issue #8250 review: a rewrite must not create new free ends.
+    """
+    import math
+
+    cell = 1.0
+    buckets: dict[tuple[object, int, int], list[int]] = {}
+    for i, sg in enumerate(segments):
+        pad = tolerance + sg.width / 2
+        for cx in range(
+            int((min(sg.x1, sg.x2) - pad) // cell), int((max(sg.x1, sg.x2) + pad) // cell) + 1
+        ):
+            for cy in range(
+                int((min(sg.y1, sg.y2) - pad) // cell), int((max(sg.y1, sg.y2) + pad) // cell) + 1
+            ):
+                buckets.setdefault((sg.layer, cx, cy), []).append(i)
+
+    def dist(px: float, py: float, s: Segment) -> float:
+        dx, dy = s.x2 - s.x1, s.y2 - s.y1
+        ll = dx * dx + dy * dy
+        t = 0.0 if ll == 0 else max(0.0, min(1.0, ((px - s.x1) * dx + (py - s.y1) * dy) / ll))
+        return math.hypot(px - (s.x1 + t * dx), py - (s.y1 + t * dy))
+
+    def same(a: Segment, b: Segment) -> bool:
+        bb = (b.x1, b.y1, b.x2, b.y2)
+        return any(
+            all(abs(u - v) <= tolerance for u, v in zip(pts, bb, strict=True))
+            for pts in ((a.x1, a.y1, a.x2, a.y2), (a.x2, a.y2, a.x1, a.y1))
+        )
+
+    free = 0
+    for i, sg in enumerate(segments):
+        for px, py in ((sg.x1, sg.y1), (sg.x2, sg.y2)):
+            touched = any(
+                abs(ax - px) <= tolerance
+                and abs(ay - py) <= tolerance
+                and (not lyrs or sg.layer in lyrs)
+                for ax, ay, lyrs in anchors
+            ) or any(
+                abs(v.x - px) <= tolerance
+                and abs(v.y - py) <= tolerance
+                and sg.layer in _via_layers(v, {sg.layer, *v.layers})
+                for v in vias
+            )
+            if not touched:
+                for j in buckets.get((sg.layer, int(px // cell), int(py // cell)), []):
+                    if (
+                        j != i
+                        and not same(sg, segments[j])
+                        and dist(px, py, segments[j]) <= tolerance
+                    ):
+                        touched = True
+                        break
+            if not touched:
+                free += 1
+    return free
+
+
 def connectivity_preserved(
     before: list[Segment],
     after: list[Segment],
@@ -645,14 +747,25 @@ def connectivity_preserved(
 ) -> bool:
     """True if every pair of anchors joined by copper before is still joined after.
 
-    Issue #8250.  Pad-to-pad only: pad-to-zone connections are not modelled
+    Also rejects a rewrite that increases the number of copper components
+    (a split that strands pad-less copper).  Issue #8250.  Pad-to-pad only: pad-to-zone connections are not modelled
     (a pad reached only through a pour is not required to stay joined by
     trace copper).
     """
-    if len(anchors) < 2:
-        return True
-    pre = _component_labels(before, vias, anchors, tolerance)
-    post = _component_labels(after, vias, anchors, tolerance)
+    pre_n: list[int] = []
+    post_n: list[int] = []
+    pre = _component_labels(before, vias, anchors, tolerance, pre_n)
+    post = _component_labels(after, vias, anchors, tolerance, post_n)
+    # A rewrite that strands a fragment holding no pad (trace-to-trace
+    # split) leaves every anchor label intact; the component count catches it.
+    if post_n[0] > pre_n[0]:
+        return False
+    # ...and one that leaves a track end touching nothing (KiCad
+    # ``track_dangling``) where the input had none.
+    if _free_end_count(after, vias, anchors, tolerance) > _free_end_count(
+        before, vias, anchors, tolerance
+    ):
+        return False
     first_post: dict[int, int] = {}
     for a, b in zip(pre, post, strict=True):
         if a < 0:

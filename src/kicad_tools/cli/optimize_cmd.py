@@ -56,6 +56,7 @@ def _build_collision_checker(pcb_path: Path):
 
     from kicad_tools.router.io import load_pcb_for_routing
     from kicad_tools.router.optimizer import make_collision_checker
+    from kicad_tools.router.optimizer.collision import CollisionChecker
 
     with contextlib.redirect_stdout(sys.stderr):
         router, _net_map = load_pcb_for_routing(
@@ -66,7 +67,7 @@ def _build_collision_checker(pcb_path: Path):
     # Issue #8250: rule-area keepouts are installed lazily by the route
     # flows, never at load, so install them before the checker reads the grid.
     router._install_grid_rule_area_keepouts()
-    checker = make_collision_checker(router.grid)
+    checker: CollisionChecker = make_collision_checker(router.grid)
 
     # Issue #8250: a bare NPTH registers no copper, so give the checker the
     # drilled holes explicitly.  0.25 mm is KiCad's default hole_clearance.
