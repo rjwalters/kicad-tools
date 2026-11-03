@@ -2809,6 +2809,27 @@ def _copy_checkpoint_constraint_sidecars(source: Path, output: Path) -> None:
         atomic_write_text(destination, content)
 
 
+def _merge_checkpoint_routes(routes):
+    """Collapse per-grid-cell segments of a checkpoint snapshot (Issue #8270).
+
+    Works on a deep copy, so the live ``best_routes`` the router keeps
+    iterating on is never mutated.  Copper geometry is unchanged (same-width,
+    same-layer, collinear chains only).  On any failure the raw routes are
+    returned.
+    """
+    import copy
+    from types import SimpleNamespace
+
+    from kicad_tools.router.optimizer.merge import merge_collinear_same_width
+
+    try:
+        view = SimpleNamespace(routes=copy.deepcopy(list(routes)))
+        merge_collinear_same_width(view)
+        return view.routes
+    except Exception:  # noqa: BLE001 - checkpoints must never abort routing
+        return routes
+
+
 def _make_checkpoint_callback(
     pcb_path: Path,
     output_path: Path,
@@ -2924,7 +2945,9 @@ def _make_checkpoint_callback(
         layer_count = router.grid.num_layers if router is not None else 2
 
         def _write(dest: Path) -> None:
-            route_sexp = "\n\t".join(r.to_sexp(name_only=name_only) for r in best_routes)
+            route_sexp = "\n\t".join(
+                r.to_sexp(name_only=name_only) for r in _merge_checkpoint_routes(best_routes)
+            )
             kept = _checkpoint_preserved(best_routes)
             if kept:
                 route_sexp = f"{route_sexp}\n\t{kept}" if route_sexp else kept
@@ -2983,7 +3006,9 @@ def _make_checkpoint_callback(
             # Materialize sexp from the snapshot (NOT self.routes).  Each
             # Route has its own to_sexp() so we can serialize directly without
             # touching the router's live state.
-            route_sexp = "\n\t".join(r.to_sexp(name_only=name_only) for r in best_routes)
+            route_sexp = "\n\t".join(
+                r.to_sexp(name_only=name_only) for r in _merge_checkpoint_routes(best_routes)
+            )
             # Issue #3155: carry preserved existing copper through every
             # checkpoint so the strip-then-rewrite (#2976) inside
             # _write_routed_pcb does not erase it from the staged input.
@@ -3060,7 +3085,9 @@ def _make_checkpoint_callback(
             record_stage("serialization")
             router = router_provider() if router_provider is not None else None
             layers = router.grid.num_layers if router is not None else 2
-            sexp = "\n\t".join(route.to_sexp(name_only=name_only) for route in routes)
+            sexp = "\n\t".join(
+                route.to_sexp(name_only=name_only) for route in _merge_checkpoint_routes(routes)
+            )
             kept = _checkpoint_preserved(routes)
             if kept:
                 sexp = f"{sexp}\n\t{kept}" if sexp else kept
