@@ -784,6 +784,33 @@ class BOMEntry(SpecModel):
     part: str = Field(..., description="Manufacturer Part Number (MPN)")
     source: str = Field(default="LCSC", description="Supplier name (e.g. 'LCSC', 'Digikey')")
     lcsc: str | None = Field(default=None, description="Explicit LCSC part number if known")
+    exempt: Literal["consigned", "hand_solder", "dnp_by_intent"] | None = Field(
+        default=None,
+        description=(
+            "Declare this ref deliberately not an LCSC-sourced part so the "
+            "unverifiable-LCSC gate (tapeout Gate 4) accepts it (issue #8261)"
+        ),
+    )
+    exempt_reason: str | None = Field(
+        default=None, description="Why the ref is exempt (required when 'exempt' is set)"
+    )
+
+    @model_validator(mode="after")
+    def _validate_exemption(self) -> BOMEntry:
+        if self.exempt is None:
+            if self.exempt_reason:
+                raise ValueError(f"bom_entries '{self.ref}': exempt_reason set without exempt")
+            return self
+        if not (self.exempt_reason and self.exempt_reason.strip()):
+            raise ValueError(
+                f"bom_entries '{self.ref}': exempt='{self.exempt}' requires a non-empty exempt_reason"
+            )
+        if self.lcsc:
+            raise ValueError(
+                f"bom_entries '{self.ref}': an exempt entry must not set lcsc "
+                f"(a part with an LCSC number is verified, not exempted)"
+            )
+        return self
 
 
 class Suggestions(SpecModel):

@@ -1433,9 +1433,15 @@ class PreflightChecker:
         unverified: list[str] = []
         header_unverified: list[str] = []
         sources: set[str] = set()
+        exemptions = self._spec_exemptions()
+        exempt_seen: dict[str, tuple[str, str]] = {}
         assigned = 0
         for item in items:
-            if item.is_virtual or item.dnp or not item.lcsc:
+            if item.is_virtual or item.dnp:
+                continue
+            if not item.lcsc:
+                if item.reference in exemptions:
+                    exempt_seen[item.reference] = exemptions[item.reference]
                 continue
             assigned += 1
             verdict = verify_lcsc_assignment(
@@ -1450,6 +1456,12 @@ class PreflightChecker:
             if verdict.source:
                 sources.add(verdict.source)
             if verdict.status == "unverified":
+                if item.reference in exemptions:
+                    # Declared non-LCSC part that still carries a number the
+                    # cache cannot verify: accepted, but recorded (issue #8261).
+                    exempt_seen[item.reference] = exemptions[item.reference]
+                    assigned -= 1
+                    continue
                 if verdict.reason in UNVERIFIED_HEADER_REASONS:
                     entry = f"{item.reference} -> {item.lcsc} ({verdict.reason})"
                     header_unverified.append(entry)
@@ -1480,7 +1492,9 @@ class PreflightChecker:
             return PreflightResult(
                 name="bom_lcsc_values",
                 status="OK",
-                message="No assigned LCSC parts to validate",
+                message="No assigned LCSC parts to validate"
+                + (f"; {len(exempt_seen)} declared exempt" if exempt_seen else ""),
+                details=self._format_exempt(exempt_seen) if exempt_seen else "",
             )
 
         verified = assigned - len(unverified)
@@ -1526,7 +1540,8 @@ class PreflightChecker:
                     f"{verified} of {assigned} assigned item(s) verified ({against}); "
                     f"{len(unverified)} unverifiable ({reasons})"
                 ),
-                details=f"unverified: {shown}{suffix}",
+                details=f"unverified: {shown}{suffix}"
+                + (f" | {self._format_exempt(exempt_seen)}" if exempt_seen else ""),
             )
 
         return PreflightResult(
@@ -1535,7 +1550,9 @@ class PreflightChecker:
             message=(
                 f"{assigned} of {assigned} assigned item(s) verified against {against}; "
                 f"no LCSC value/package mismatches"
+                + (f"; {len(exempt_seen)} declared exempt" if exempt_seen else "")
             ),
+            details=self._format_exempt(exempt_seen) if exempt_seen else "",
         )
 
     def check_bom_lcsc_stock(self) -> PreflightResult:
@@ -1586,10 +1603,13 @@ class PreflightChecker:
 
         from .lcsc_value_check import stock_shortfall, verify_lcsc_assignment
 
+        exemptions = self._spec_exemptions()
         refs_by_lcsc: dict[str, list[str]] = {}
         for item in items:
             if item.is_virtual or item.dnp or not item.lcsc:
                 continue
+            if item.reference in exemptions:
+                continue  # declared non-LCSC part (issue #8261)
             refs_by_lcsc.setdefault(item.lcsc, []).append(item.reference)
 
         if not refs_by_lcsc:
@@ -2197,6 +2217,31 @@ class PreflightChecker:
         except Exception as e:  # pragma: no cover - defensive
             logger.debug("Spec LCSC resolution failed (ignoring): %s", e)
             return set()
+
+    def _spec_exemptions(self) -> dict[str, tuple[str, str]]:
+        """Refs the ``.kct`` spec declares deliberately non-LCSC (issue #8261).
+
+        Best-effort like the overlay: no/invalid spec means no exemptions.
+        """
+        try:
+            from .bom_spec_overlay import declared_exemptions, find_spec_file
+
+            spec_file = find_spec_file(self.pcb_path.parent)
+            if spec_file is None:
+                return {}
+            from ..spec.parser import load_spec
+
+            spec = load_spec(spec_file)
+            return declared_exemptions(spec.bom_entries) if spec.bom_entries else {}
+        except Exception as e:
+            logger.debug("Spec exemption lookup failed (ignoring): %s", e)
+            return {}
+
+    @staticmethod
+    def _format_exempt(exempt_seen: dict[str, tuple[str, str]]) -> str:
+        return "exempt (declared): " + "; ".join(
+            f"{ref} [{cat}: {why}]" for ref, (cat, why) in sorted(exempt_seen.items())
+        )
 
     def _items_with_spec_overlay(self, bom) -> list:
         """Return copies of ``bom.items`` with the ``.kct`` overlay and CSV merge applied.
