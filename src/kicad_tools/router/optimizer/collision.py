@@ -1545,6 +1545,58 @@ class HoleClearanceChecker:
         return self.inner.path_is_clear(x1, y1, x2, y2, layer, width, exclude_net)
 
 
+class PairwiseCollisionChecker:
+    """AND-composes the ``--voltage-map`` pairwise requirement onto a checker.
+
+    Issue #8300: the scalar checkers hold every rewrite to
+    ``trace_clearance``, so ``optimize-traces`` could shorten a low-voltage
+    trace inside the creepage distance of an HV net.  This wrapper asks the
+    inner checker first, then the bound
+    :class:`~kicad_tools.router.pairwise_clearance.PairwisePathChecker`.  It is
+    called once per *candidate path* (one ``path_is_clear`` per proposed
+    segment move inside each optimizer pass), so a rejected candidate leaves
+    the other edits on the same net applied.
+
+    ``skips`` counts candidate paths the pairwise requirement vetoed after the
+    scalar checker had passed them, keyed by the order-independent net pair.
+    A pass may re-propose a rejected shape in a later form, so the counts are
+    rejected candidate checks, not unique geometric edits.
+
+    Args:
+        inner: The scalar checker consulted first.
+        pairwise: The bound pairwise path predicate.
+    """
+
+    def __init__(self, inner: CollisionChecker, pairwise: Any):
+        self.inner = inner
+        self.pairwise = pairwise
+        self.skips: dict[tuple[str, str], int] = {}
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.inner, name)
+
+    def path_is_clear(
+        self,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        layer: Layer,
+        width: float,
+        exclude_net: int,
+    ) -> bool:
+        if not self.inner.path_is_clear(x1, y1, x2, y2, layer, width, exclude_net):
+            return False
+        violation = self.pairwise.path_violation(x1, y1, x2, y2, layer, width, exclude_net)
+        if violation is None:
+            return True
+        from ..pairwise_clearance import violation_pair_key
+
+        key = violation_pair_key(violation)
+        self.skips[key] = self.skips.get(key, 0) + 1
+        return False
+
+
 def make_collision_checker(
     grid: RoutingGrid,
     ignore_overflow: bool = False,

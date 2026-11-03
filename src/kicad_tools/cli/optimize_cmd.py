@@ -301,6 +301,49 @@ Examples:
         default=1.0,
         help="Copper weight in oz for DRC checks (default: 1.0)",
     )
+
+    # HV creepage inputs (Issue #8300): same flags/defaults as ``kct route``.
+    parser.add_argument(
+        "--voltage-map",
+        dest="voltage_map",
+        default=None,
+        metavar="FILE",
+        help=(
+            "JSON per-net voltage map (same format and semantics as kct route). "
+            "A candidate edit that would bring a net pair below its pairwise "
+            "creepage requirement is rejected on its own; other edits on the "
+            "net are still applied. Absent, behaviour is unchanged"
+        ),
+    )
+    parser.add_argument(
+        "--creepage-standard",
+        dest="creepage_standard",
+        choices=["iec60664", "iec62368"],
+        default="iec60664",
+        help="Creepage standard for --voltage-map (default: iec60664)",
+    )
+    parser.add_argument(
+        "--pollution-degree",
+        dest="pollution_degree",
+        type=int,
+        choices=[1, 2, 3],
+        default=2,
+        help="IEC pollution degree for --voltage-map (default: 2)",
+    )
+    parser.add_argument(
+        "--material-group",
+        dest="material_group",
+        default="IIIa",
+        help="Insulation material group I/II/IIIa/IIIb for --voltage-map (default: IIIa)",
+    )
+    parser.add_argument(
+        "--hv-threshold",
+        dest="hv_threshold",
+        type=float,
+        default=30.0,
+        metavar="VOLTS",
+        help="Minimum net-pair |dV| that triggers creepage widening (default: 30.0)",
+    )
     add_format_flag(parser)
 
     args = parser.parse_args(argv)
@@ -330,6 +373,30 @@ Examples:
                 str(pcb_path),
                 f"Unknown manufacturer '{args.mfr}'. Valid options: {', '.join(valid_ids)}",
             )
+
+    # Issue #8300: validate --voltage-map before any board work, with the same
+    # messages and exit code as ``kct route``.  Its errors go to stderr as
+    # prose; JSON mode additionally owns stdout, so report a document there.
+    if args.voltage_map is not None:
+        import contextlib
+        import io
+
+        from kicad_tools.cli.route_cmd import _preload_voltage_map
+
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = _preload_voltage_map(args)
+        if rc != 0:
+            msg = err.getvalue().strip()
+            if as_json:
+                return _fail(True, str(pcb_path), msg.removeprefix("Error: "))
+            print(msg, file=sys.stderr)
+            return rc
+        if err.getvalue():  # warnings (e.g. unmapped pair-bound nets)
+            print(err.getvalue(), end="", file=sys.stderr)
+    else:
+        args._pairwise_voltages = None
+        args._pairwise_required = None
 
     # Import here to avoid circular imports
     from kicad_tools.cli.progress import spinner
@@ -367,6 +434,21 @@ Examples:
             str(pcb_path),
             f"cannot build collision checker for {pcb_path}: {e}",
         )
+
+    # Issue #8300: AND the --voltage-map pairwise requirement onto the checker
+    # so each candidate edit is vetted individually.  Dormant (checker
+    # untouched) without a voltage map or when it widens no pair.
+    pairwise_checker = None
+    if args.voltage_map is not None:
+        from kicad_tools.cli.route_cmd import _apply_pairwise_clearance
+        from kicad_tools.router.optimizer.collision import PairwiseCollisionChecker
+        from kicad_tools.router.pairwise_clearance import PairwisePathChecker
+
+        _apply_pairwise_clearance(router, args, quiet=True)
+        path_checker = PairwisePathChecker.from_router(router)
+        if path_checker is not None:
+            pairwise_checker = PairwiseCollisionChecker(checker, path_checker)
+            checker = pairwise_checker
 
     # Issue #8217: the detour pass needs every same-net pad/via of the loaded
     # board (the checker ignores same-net copper); length-matched nets are
@@ -455,6 +537,9 @@ Examples:
             text=f"Error during optimization: {e}",
         )
 
+    if pairwise_checker is not None:
+        stats.creepage_skips = dict(pairwise_checker.skips)
+
     # Issue #8286: the rewrite moved copper but the board still carries the
     # zone fills it was read with; ``kct check`` reads stored fills, so refill
     # once, after the final write, through the shared kicad-cli path.
@@ -476,63 +561,70 @@ Examples:
             )
 
     if as_json:
-        emit_json(
-            {
-                "command": "optimize-traces",
-                "pcb": str(pcb_path),
-                "output": args.output,
-                "net_filter": args.net,
-                "optimizations": {
-                    "merge_collinear": config.merge_collinear,
-                    "eliminate_zigzags": config.eliminate_zigzags,
-                    "convert_45_corners": config.convert_45_corners,
-                    "chamfer_size_mm": config.corner_chamfer_size,
-                },
-                "drc_aware": args.drc_aware,
-                "manufacturer": args.mfr,
-                "layers": args.layers,
-                "copper_oz": args.copper,
-                "stats": {
-                    "nets_optimized": stats.nets_optimized,
-                    "nets_rolled_back": stats.nets_rolled_back,
-                    "nets_attempted": stats.nets_optimized,
-                    "nets_kept": stats.nets_kept,
-                    "duplicates_removed": stats.duplicates_removed,
-                    "nets_connectivity_discarded": stats.nets_connectivity_discarded,
-                    "connectivity_discarded_nets": stats.connectivity_discarded_nets,
-                    "drc_failsafe_reverted": stats.drc_failsafe_reverted,
-                    "drc_failsafe_rules": stats.drc_failsafe_rules,
-                    "segments_before": stats.segments_before,
-                    "segments_after": stats.segments_after,
-                    "segment_reduction_pct": stats.segment_reduction,
-                    "corners_before": stats.corners_before,
-                    "corners_after": stats.corners_after,
-                    "length_before_mm": stats.length_before,
-                    "length_after_mm": stats.length_after,
-                    "length_reduction_pct": stats.length_reduction,
-                    "drc_errors_before": stats.drc_errors_before,
-                    "drc_errors_after": stats.drc_errors_after,
-                    "per_net": [
-                        {
-                            "net": n.net,
-                            "segments_before": n.segments_before,
-                            "segments_after": n.segments_after,
-                            "length_before_mm": n.length_before,
-                            "length_after_mm": n.length_after,
-                            "rolled_back": n.rolled_back,
-                            "new_violations": n.new_violations,
-                        }
-                        for n in stats.per_net
-                    ],
-                },
-                "dry_run": args.dry_run,
-                "saved": not args.dry_run,
-                "written_to": None if args.dry_run else (args.output or str(pcb_path)),
-                "zones_refilled": zones_refilled,
-                "zones_refill_error": refill_error,
-                "success": True,
-            }
-        )
+        document = {
+            "command": "optimize-traces",
+            "pcb": str(pcb_path),
+            "output": args.output,
+            "net_filter": args.net,
+            "optimizations": {
+                "merge_collinear": config.merge_collinear,
+                "eliminate_zigzags": config.eliminate_zigzags,
+                "convert_45_corners": config.convert_45_corners,
+                "chamfer_size_mm": config.corner_chamfer_size,
+            },
+            "drc_aware": args.drc_aware,
+            "manufacturer": args.mfr,
+            "layers": args.layers,
+            "copper_oz": args.copper,
+            "stats": {
+                "nets_optimized": stats.nets_optimized,
+                "nets_rolled_back": stats.nets_rolled_back,
+                "nets_attempted": stats.nets_optimized,
+                "nets_kept": stats.nets_kept,
+                "duplicates_removed": stats.duplicates_removed,
+                "nets_connectivity_discarded": stats.nets_connectivity_discarded,
+                "connectivity_discarded_nets": stats.connectivity_discarded_nets,
+                "drc_failsafe_reverted": stats.drc_failsafe_reverted,
+                "drc_failsafe_rules": stats.drc_failsafe_rules,
+                "segments_before": stats.segments_before,
+                "segments_after": stats.segments_after,
+                "segment_reduction_pct": stats.segment_reduction,
+                "corners_before": stats.corners_before,
+                "corners_after": stats.corners_after,
+                "length_before_mm": stats.length_before,
+                "length_after_mm": stats.length_after,
+                "length_reduction_pct": stats.length_reduction,
+                "drc_errors_before": stats.drc_errors_before,
+                "drc_errors_after": stats.drc_errors_after,
+                "per_net": [
+                    {
+                        "net": n.net,
+                        "segments_before": n.segments_before,
+                        "segments_after": n.segments_after,
+                        "length_before_mm": n.length_before,
+                        "length_after_mm": n.length_after,
+                        "rolled_back": n.rolled_back,
+                        "new_violations": n.new_violations,
+                    }
+                    for n in stats.per_net
+                ],
+            },
+            "dry_run": args.dry_run,
+            "saved": not args.dry_run,
+            "written_to": None if args.dry_run else (args.output or str(pcb_path)),
+            "zones_refilled": zones_refilled,
+            "zones_refill_error": refill_error,
+            "success": True,
+        }
+        # Issue #8300: only present with --voltage-map, so the no-flag document
+        # is unchanged.
+        if args.voltage_map is not None:
+            document["voltage_map"] = args.voltage_map
+            document["creepage_skipped"] = [
+                {"net_a": a, "net_b": b, "count": n}
+                for (a, b), n in sorted(stats.creepage_skips.items())
+            ]
+        emit_json(document)
         return 0
 
     if not quiet:
@@ -590,6 +682,11 @@ Examples:
                         f"{r} (+{c})" for r, c in sorted(stats.drc_failsafe_rules.items())
                     )
                     print(f"           rules above baseline: {rules}")
+        if args.voltage_map is not None:
+            total = sum(stats.creepage_skips.values())
+            print(f"  Edits skipped for creepage: {total}")
+            for (a, b), count in sorted(stats.creepage_skips.items()):
+                print(f"    {a} / {b}: {count}")
         print()
 
         if args.verbose and stats.per_net:

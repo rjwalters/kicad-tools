@@ -120,6 +120,9 @@ class OptimizationStats:
     # group that was connected in the input.
     nets_connectivity_discarded: int = 0
     connectivity_discarded_nets: list[str] = field(default_factory=list)
+    # Issue #8300: candidate edits rejected by the --voltage-map pairwise
+    # requirement, keyed by (net_a, net_b) (order-independent, sorted).
+    creepage_skips: dict[tuple[str, str], int] = field(default_factory=dict)
     # Issue #7065: one row per optimized net, built after any DRC rollback.
     per_net: list[NetOptimizationStats] = field(default_factory=list)
 
