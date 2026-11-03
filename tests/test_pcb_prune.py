@@ -373,3 +373,56 @@ def test_spur_is_kept_when_removal_would_disconnect_the_main_track(tmp_path):
     # Branch no longer reaches V2: it is not redundant, nothing may go.
     pcb, res = _run(_spur_board(tmp_path, branch_end=(109, 105.5)))
     assert res.stats["segments_removed"] == 0
+
+
+def test_removal_never_leaves_an_end_dangling_off_a_removed_body(tmp_path):
+    """#8249: a B.Cu track resting by its end on the removed branch's body must
+    not be left free (``--no-drc --unverified`` invariant: keep MORE copper)."""
+    p = _spur_board(tmp_path)
+    text = p.read_text().rstrip()
+    assert text.endswith(")")
+    text = text[:-1]
+    text += _seg((106.35, 103.5), (108, 102), "B.Cu", 0.4)
+    text += _seg((108, 102), (110, 105), "F.Cu", 0.4)
+    text += (
+        f'  (via (at 108 102) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") '
+        f'(net 1) (uuid "v-{next(_uid)}"))\n)\n'
+    )
+    p.write_text(text)
+    pcb, res = _run(p)
+    # the branch diagonal the new track's end rests on must survive (the main
+    # diagonal may legitimately go instead); never the 3-segment branch removal
+    assert any(s.start == (104.2, 101.5) and s.end == (108.5, 105.5) for s in pcb.segments)
+    assert res.stats["segments_removed"] <= 1
+
+
+def test_copper_arc_touching_a_detour_keeps_it(tmp_path):
+    """#8249: a copper arc feeding a pad is unmodelled; a detour whose body is
+    its only contact must be kept."""
+    body = HEADER + _fp("A", 100, 100) + _fp("B", 110, 100) + _fp("C", 104.5, 102.5)
+    for a, b in (
+        ((100, 100), (102, 100)),
+        ((102, 100), (103, 100)),
+        ((103, 100), (110, 100)),
+        ((102, 100), (102, 101)),
+        ((102, 101), (103, 101)),
+        ((103, 101), (103, 100)),
+    ):
+        body += _seg(a, b)
+    body += (
+        "  (arc (start 102.5 101) (mid 103.94 101.06) (end 104.5 102.5) (width 0.2) "
+        f'(layer "F.Cu") (net 1) (uuid "a-{next(_uid)}"))\n'
+    )
+    p = tmp_path / "arc.kicad_pcb"
+    p.write_text(body + ")\n")
+    pcb, _res = _run(p)
+
+    def _has_detour(b) -> bool:
+        return any(s.start == (102, 101) and s.end == (103, 101) for s in b.segments)
+
+    assert _has_detour(pcb)
+    # control: without the arc the detour is redundant and goes
+    q = tmp_path / "noarc.kicad_pcb"
+    q.write_text(body.split("  (arc ")[0] + ")\n")
+    pcb2, _res2 = _run(q)
+    assert not _has_detour(pcb2)

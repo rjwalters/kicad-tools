@@ -123,6 +123,24 @@ def _pad_position(fp, pad: Pad) -> tuple[float, float]:
     return (fp.position[0] + px, fp.position[1] + py)
 
 
+def _arc_reaches(arc: _Node, a: tuple[float, float], b: tuple[float, float], hw: float) -> bool:
+    """Does the capsule ``a``-``b`` (half-width ``hw``) come within reach of the arc?
+
+    ``arc.a`` / ``arc.radius`` give a cheap over-reaching disc; the arc itself
+    is then sampled.
+    """
+    if _pt_seg_dist(arc.a, a, b) > arc.radius + hw + _EPS:
+        return False
+    (cx, cy), r, start, sweep = arc.ref.circular_geometry()
+    hwa = arc.ref.width / 2.0
+    n = max(2, int(abs(sweep) * r / 0.1) + 1)
+    for k in range(n + 1):
+        th = start + sweep * k / n
+        if _pt_seg_dist((cx + r * math.cos(th), cy + r * math.sin(th)), a, b) <= hw + hwa + 0.05:
+            return True
+    return False
+
+
 def _is_cu(layer: str) -> bool:
     return layer.endswith(".Cu")
 
@@ -143,7 +161,7 @@ def _seg_samples(a: tuple[float, float], b: tuple[float, float], step: float = 0
 
 @dataclass
 class _Node:
-    kind: str  # "seg" | "via" | "pad" | "zone"
+    kind: str  # "seg" | "via" | "pad" | "zone" | "arc" (protection-only)
     layers: list[str]  # copper layers ("*" => every layer)
     a: tuple[float, float] = (0.0, 0.0)  # seg start / via / pad centre
     b: tuple[float, float] = (0.0, 0.0)  # seg end
@@ -253,6 +271,8 @@ class _NetModel:
 
     def _link(self, i: int, j: int) -> None:
         a, b = self.nodes[i], self.nodes[j]
+        if a.kind == "arc" or b.kind == "arc":
+            return  # copper arcs only protect; they are never a modelled join
         if a.kind != "seg" and b.kind == "seg":
             i, j, a, b = j, i, b, a
         if not _shared_layers(a, b):
@@ -341,6 +361,10 @@ class _NetModel:
                 if _shared_layers(s, o) and any(
                     _in_polygon(p, o.ref.polygon) for p in _seg_samples(s.a, s.b)
                 ):
+                    return True
+            elif o.kind == "arc":
+                # Unmodelled copper arc: a body contact may be what feeds it.
+                if _shared_layers(s, o) and _arc_reaches(o, s.a, s.b, hw):
                     return True
             elif _shared_layers(s, o):
                 reach = o.radius if o.kind == "via" else math.hypot(o.hx, o.hy)
@@ -434,6 +458,23 @@ class _NetModel:
         comp = self.components(removed | zones)
         return len({comp[k] for k in live}) == 1
 
+    def strands_end(self, group: set[int], removed: set[int]) -> bool:
+        """Would removing ``group`` leave a surviving track end that rests on a
+        removed body with no other non-zone anchor (a dangling end)?"""
+        gone = removed | group
+        for g in group:
+            n = self.nodes[g]
+            for k in self.overlap[g] - gone:
+                o = self.nodes[k]
+                if o.kind != "seg":
+                    continue
+                for x, p in enumerate((o.a, o.b)):
+                    if _pt_seg_dist(p, n.a, n.b) <= n.radius + o.radius + _EPS and not (
+                        self.hard_anchors(k, x) - gone
+                    ):
+                        return True
+        return False
+
     def offcentre_end(self, i: int) -> bool:
         s = self.nodes[i]
         for end, ends in zip((s.a, s.b), self.anch[i], strict=True):
@@ -498,6 +539,13 @@ def _build_net_models(pcb: PCB) -> dict[int, _NetModel]:
             continue
         by_net[zone.net_number].append(
             _Node("zone", [zone.layer], ref=zone, label=f"zone {zone.name or zone.layer}")
+        )
+    for arc in pcb.arcs:
+        if arc.net_number <= 0 or arc.net_number not in by_net or not _is_cu(arc.layer):
+            continue
+        centre, rad, _st, _sw = arc.circular_geometry()
+        by_net[arc.net_number].append(
+            _Node("arc", [arc.layer], a=centre, radius=rad + arc.width / 2.0, ref=arc)
         )
     return {net: _NetModel(nodes) for net, nodes in by_net.items()}
 
@@ -764,6 +812,7 @@ def _plan_net(model: _NetModel, net_number: int) -> NetPlan:
                 if (
                     model.partition(removed | group) != baseline
                     or not model.still_joined(touched, removed | group)
+                    or model.strands_end(group, removed)
                     or model.degrades_ends(touched, removed, removed | group)
                 ):
                     continue
