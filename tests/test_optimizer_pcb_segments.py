@@ -651,3 +651,98 @@ class TestReplaceSegmentsNameOnly:
         assert '(uuid "seg-a1")' in result
         assert '(uuid "seg-a2")' in result
         assert result.count('(net "GND")') == 1
+
+
+# ---------------------------------------------------------------------------
+# Issue #8271: optimize_pcb dedupes exact-duplicate segments it emits
+# ---------------------------------------------------------------------------
+
+_PCB_DEDUPE = """\
+(kicad_pcb
+  (net 0 "")
+  (net 1 "VCC")
+  (net 2 "GND")
+  (segment (start 100 100) (end 110 100) (width 0.25) (layer "F.Cu") (net 1))
+  (segment (start 110 100) (end 120 100) (width 0.25) (layer "F.Cu") (net 1))
+  (segment (start 200 200) (end 210 200) (width 0.25) (layer "B.Cu") (net 2))
+  (segment (start 200 200) (end 210 200) (width 0.25) (layer "B.Cu") (net 2))
+)
+"""
+
+
+def _dup_emitting_fn(segs):
+    """Fake optimizer that emits a segment plus a reversed-endpoint copy."""
+    first = segs[0]
+    reversed_copy = Segment(
+        x1=first.x2,
+        y1=first.y2,
+        x2=first.x1,
+        y2=first.y1,
+        width=first.width,
+        layer=first.layer,
+        net=first.net,
+        net_name=first.net_name,
+    )
+    other_layer = Segment(
+        x1=first.x1,
+        y1=first.y1,
+        x2=first.x2,
+        y2=first.y2,
+        width=first.width,
+        layer=Layer.B_CU,
+        net=first.net,
+        net_name=first.net_name,
+    )
+    return [first, reversed_copy, other_layer, *segs[1:]]
+
+
+def _count_segments(text: str) -> int:
+    return text.count("(segment ")
+
+
+def test_dedupe_segments_helper_keeps_distinct_layer_and_width():
+    from kicad_tools.router.optimizer.pcb import dedupe_segments
+
+    a = Segment(x1=0, y1=0, x2=1, y2=0, width=0.25, layer=Layer.F_CU, net=1)
+    rev = Segment(x1=1, y1=0, x2=0, y2=0, width=0.25, layer=Layer.F_CU, net=1)
+    wide = Segment(x1=0, y1=0, x2=1, y2=0, width=0.5, layer=Layer.F_CU, net=1)
+    back = Segment(x1=0, y1=0, x2=1, y2=0, width=0.25, layer=Layer.B_CU, net=1)
+    kept, removed = dedupe_segments([a, rev, wide, back])
+    assert removed == 1
+    assert kept == [a, wide, back]
+
+
+@pytest.mark.parametrize("net_filter", [None, "VCC"])
+def test_optimize_pcb_drops_duplicates_it_emits(tmp_path, net_filter):
+    from kicad_tools.router.optimizer.config import OptimizationConfig
+    from kicad_tools.router.optimizer.pcb import optimize_pcb
+
+    src = tmp_path / "in.pcb"
+    out = tmp_path / "out.pcb"
+    src.write_text(_PCB_DEDUPE)
+    stats = optimize_pcb(
+        str(src),
+        str(out),
+        _dup_emitting_fn,
+        OptimizationConfig(drc_aware=False),
+        net_filter=net_filter,
+    )
+    # VCC: 2 in -> 3 emitted -> reversed copy dropped -> 3 kept
+    assert stats.duplicates_removed >= 1
+    vcc = parse_segments(out.read_text())["VCC"]
+    # first + other-layer copy + second segment; reversed copy dropped.
+    assert len(vcc) == 3
+
+
+def test_optimize_pcb_unchanged_net_written_verbatim(tmp_path):
+    from kicad_tools.router.optimizer.config import OptimizationConfig
+    from kicad_tools.router.optimizer.pcb import optimize_pcb
+
+    src = tmp_path / "in.pcb"
+    out = tmp_path / "out.pcb"
+    src.write_text(_PCB_DEDUPE)
+    stats = optimize_pcb(
+        str(src), str(out), lambda segs: list(segs), OptimizationConfig(drc_aware=False)
+    )
+    # Pre-existing duplicate on GND is kept: that is `kct pcb dedupe`'s job.
+    assert stats.duplicates_removed == 0
