@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-03
 
+- **PR #8241**: feat(prune): merge collinear segment runs into one segment
+- **Issue #8236** (closed): kct pcb prune: remove overlapping redundant spurs and merge collinear grid-step runs (rest of #8216)
 - **PR #8238**: test(optimize): dense-board kicad-cli DRC check for checked trace rewrites
 - **PR #8229**: feat: add redundant_copper check and dedupe cleanup step in readiness/tapeout
 - **PR #8227**: feat: add kct pcb prune to drop redundant copper and snap off-centre ends
