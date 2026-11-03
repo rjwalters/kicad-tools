@@ -206,3 +206,41 @@ def test_corridor_without_witness_labels_the_class_fallback():
     router = _sealed_router()
     line = router._relief_corridor_need(999)  # no pads: no witness to resolve
     assert "class clearance only, no closing nets resolved" in line, line
+
+
+def _seg(x1, y1, x2, y2, width=0.2, net=1):
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Route, Segment
+
+    return Route(
+        net=net,
+        net_name=f"N{net}",
+        segments=[Segment(x1, y1, x2, y2, width, Layer.F_CU, net=net)],
+    )
+
+
+def test_freed_width_and_shortfall_are_measured_in_mm():
+    """Issue #8256: no more ``freed width unknown`` once ripped copper is in hand."""
+    router = _sealed_router()
+    line = router._relief_corridor_need(1, {1: [_seg(0, 0, 5, 0, width=0.1)]}, {})
+    assert "unknown" not in line, line
+    need = router.rules.trace_width + 2 * router.rules.trace_clearance
+    assert "freed 0.100 mm" in line, line
+    assert f"shortfall {need - 0.1:.3f} mm" in line, line
+    assert "not re-occupied" in line, line
+
+
+def test_nothing_ripped_and_unsupplied_are_stated_not_unknown():
+    router = _sealed_router()
+    assert "nothing ripped" in router._relief_corridor_need(1, {1: []}, {})
+    line = router._relief_corridor_need(1)
+    assert "not measured (no ripped copper supplied)" in line, line
+
+
+def test_reoccupation_names_the_net_in_the_corridor():
+    router = _sealed_router()
+    freed = {1: [_seg(0, 0, 5, 0)]}
+    near = {7: [_seg(0, 0.1, 5, 0.1, net=7)]}
+    far = {7: [_seg(0, 5, 5, 5, net=7)]}
+    assert "re-occupied by net 7 before retry" in router._relief_corridor_need(1, freed, near)
+    assert "not re-occupied" in router._relief_corridor_need(1, freed, far)

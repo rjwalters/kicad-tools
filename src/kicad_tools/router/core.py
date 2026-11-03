@@ -15070,9 +15070,18 @@ class Autorouter:
                         ):
                             perturbation_best_overflow = overflow
 
+                        _tr_reason = ""
+                        if targeted_ripup_count < len(nets_to_reroute):
+                            if failed_nets:
+                                _tr_reason = (
+                                    f" [no path: {len(failed_nets)} net(s) rolled back "
+                                    f"after targeted rip-up]"
+                                )
+                            else:
+                                _tr_reason = " [no path or no blockers for remaining nets]"
                         flush_print(
                             f"  Targeted rip-up resolved {targeted_ripup_count}/{len(nets_to_reroute)} nets, "
-                            f"overflow: {overflow} ({elapsed_str()})"
+                            f"overflow: {overflow}{_tr_reason} ({elapsed_str()})"
                         )
 
                         # Check for convergence in targeted mode
@@ -16773,8 +16782,13 @@ class Autorouter:
             budget, per_net, timeout, per_net_timeout
         )
 
-    def _relief_corridor_need(self, failed_net: int) -> str:
-        """Why-text for a "no relief path" outcome (Issue #8248).
+    def _relief_corridor_need(
+        self,
+        failed_net: int,
+        freed_routes: dict[int, list[Route]] | None = None,
+        other_routes: dict[int, list[Route]] | None = None,
+    ) -> str:
+        """Why-text for a "no relief path" outcome (Issues #8248, #8256).
 
         States the corridor the victim needs (its trace width plus the
         clearance on both sides).  When the access-loss witness names the
@@ -16783,8 +16797,13 @@ class Autorouter:
         authored ``net_clearance_floors`` via
         :meth:`DesignRules.clearance_for_nets` (the same composition routing
         itself uses).  Without a witness only the class value is known, and
-        the line says so.  The width actually freed is not measured by the
-        probe, so it is reported as ``unknown`` rather than guessed.
+        the line says so.
+
+        ``freed_routes`` (net -> the copper the rescue ripped, still in hand
+        before the rollback) lets the line state the freed corridor width and
+        the shortfall in mm; ``other_routes`` (net -> copper the rescue did not
+        touch) lets it name a net still sitting in that corridor.  Without
+        ``freed_routes`` the line says the width was not measured, and why.
         """
         try:
             name = self.net_names.get(failed_net, "")
@@ -16831,13 +16850,68 @@ class Autorouter:
                         scope = "resolved against closing nets"
             except Exception:  # pragma: no cover - fall back to the labelled class value
                 pass
-            need = f"{width + 2 * clearance:.3f} mm"
+            need_mm = width + 2 * clearance
+            need = f"{need_mm:.3f} mm"
+            try:
+                freed_text = self._relief_freed_text(freed_routes, other_routes, need_mm)
+            except Exception:  # pragma: no cover - never break a rescue's log line
+                freed_text = "freed width not measured (measurement failed)"
             return (
                 f"needs a {need} corridor (width {width:.3f} + 2x clearance "
-                f"{clearance:.3f}, {scope}); freed width unknown"
+                f"{clearance:.3f}, {scope}); {freed_text}"
             )
         except Exception:  # pragma: no cover - diagnostics must never break a rescue
-            return "required corridor width unknown; freed width unknown"
+            return "required corridor width not computed; freed width not measured"
+
+    @staticmethod
+    def _relief_freed_text(
+        freed_routes: dict[int, list[Route]] | None,
+        other_routes: dict[int, list[Route]] | None,
+        need_mm: float,
+    ) -> str:
+        """Measured freed width, shortfall and re-occupation (Issue #8256).
+
+        Freed width is the widest copper the rescue ripped (the corridor that
+        copper physically opened); it ignores clearance slack beside it, so the
+        shortfall is a lower bound on what is missing.  A net is reported as
+        occupying the corridor when its copper sits on the same layer closer to
+        a ripped centreline than the victim's corridor allows.
+        """
+        if freed_routes is None:
+            return "freed width not measured (no ripped copper supplied)"
+        from .plane_via_sites import _segment_segment_distance
+
+        freed_segs = [
+            (net, seg) for net, rs in freed_routes.items() for r in rs for seg in r.segments
+        ]
+        if not freed_segs:
+            return f"freed 0.000 mm (nothing ripped), shortfall {need_mm:.3f} mm; not re-occupied"
+        freed = max(seg.width for _, seg in freed_segs)
+        shortfall = max(0.0, need_mm - freed)
+        occupant: int | None = None
+        for net, rs in (other_routes or {}).items():
+            if net in freed_routes:
+                continue
+            for r in rs:
+                for o in r.segments:
+                    for _, f in freed_segs:
+                        if o.layer != f.layer:
+                            continue
+                        limit = need_mm / 2 + o.width / 2 - 1e-6
+                        d = _segment_segment_distance(
+                            f.x1, f.y1, f.x2, f.y2, o.x1, o.y1, o.x2, o.y2
+                        )
+                        if d < limit:
+                            occupant = net
+                            break
+                    if occupant is not None:
+                        break
+                if occupant is not None:
+                    break
+            if occupant is not None:
+                break
+        occ = "not re-occupied" if occupant is None else f"re-occupied by net {occupant}"
+        return f"freed {freed:.3f} mm, shortfall {shortfall:.3f} mm; {occ} before retry"
 
     def _relief_witness_signature(self, failed_net: int, net_routes: dict[int, list[Route]]):
         """Identity of ``failed_net``'s current access-loss seal, or ``None``."""
@@ -17162,7 +17236,8 @@ class Autorouter:
             if not probe_routes:
                 flush_print_fn(
                     f"  Relief rescue: {failed_name} has NO relief path "
-                    f"(round {round_idx + 1}; {self._relief_corridor_need(failed_net)}) "
+                    f"(round {round_idx + 1}; "
+                    f"{self._relief_corridor_need(failed_net, original_routes, net_routes)}) "
                     f"-- rolling back ({elapsed_fn()})"
                 )
                 _rollback()
