@@ -3581,10 +3581,9 @@ class PCB:
           the lowest unused positive integers.  This is stable across loads
           of the same file.
 
-        The synthesized ``(net N "name")`` declarations are also written back
-        into ``self._sexp`` (after the ``layers`` node, where KiCad keeps the
-        net table) so that ``PCB.save()`` round-trips a canonical file KiCad
-        can re-open.
+        The synthesized table is in-memory only: it is deliberately NOT written
+        back into ``self._sexp``, so ``PCB.save()`` preserves the file's
+        name-only dialect (KiCad 10 loads header-less boards natively; Issue #8239).
 
         No-op if a header table already exists or if there are no named
         inline references to recover from.
@@ -3638,34 +3637,6 @@ class PCB:
         for name in ordered_names:
             number = name_to_number[name]
             self._nets[number] = Net(number, name)
-
-        # ... and write the canonical header table back into self._sexp so
-        # PCB.save() emits a file KiCad can re-open.
-        self._write_net_declarations()
-
-    def _write_net_declarations(self) -> None:
-        """Insert ``(net N "name")`` header declarations into ``self._sexp``.
-
-        Writes one node per entry in ``self._nets`` (sorted by number),
-        placed immediately after the ``layers`` node -- the position KiCad
-        uses for the net table.  Falls back to appending at the end of the
-        top-level children if there is no ``layers`` node.
-        """
-        nodes = [SExp.list("net", number, self._nets[number].name) for number in sorted(self._nets)]
-        if not nodes:
-            return
-
-        # Find the layers node to anchor the insertion; KiCad orders the net
-        # table right after it (following setup, but before footprints).
-        insert_index: int | None = None
-        for i, child in enumerate(self._sexp.children):
-            if child.name in ("layers", "setup"):
-                insert_index = i + 1
-        if insert_index is None:
-            insert_index = len(self._sexp.children)
-
-        for offset, node in enumerate(nodes):
-            self._sexp.insert(insert_index + offset, node)
 
     def _parse_setup(self, sexp: SExp):
         """Parse setup/design rules."""
