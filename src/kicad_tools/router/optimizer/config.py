@@ -25,6 +25,10 @@ class OptimizationConfig:
     """Enable PullTight post-processing: translate interior segments perpendicular
     to their direction to shorten total chain length."""
 
+    shorten_detours: bool = True
+    """Replace a whole chain (>= 3 segments) with a shorter straight or
+    single-bend 45-degree path between its endpoints when the path is clear."""
+
     pull_tight_max_iterations: int = 10
     """Maximum number of PullTight iterations before stopping."""
 

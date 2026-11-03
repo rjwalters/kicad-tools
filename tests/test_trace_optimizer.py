@@ -2171,3 +2171,104 @@ class TestYJunctionConnectivityPreserved:
             "Guard failed to revert when branches were dropped"
         )
         assert len(result.segments) == 3
+
+
+class TestShortenDetours:
+    """Whole-chain detour replacement (Issue #8217)."""
+
+    def _seg(self, x1, y1, x2, y2):
+        return Segment(x1=x1, y1=y1, x2=x2, y2=y2, width=0.2, layer=Layer.F_CU, net=1, net_name="N")
+
+    def _tent(self):
+        # climb 45deg, flat, descent 45deg between (0,0) and (6,0)
+        return [self._seg(0, 0, 1, 1), self._seg(1, 1, 5, 1), self._seg(5, 1, 6, 0)]
+
+    def _len(self, segs):
+        return sum(((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2) ** 0.5 for s in segs)
+
+    def _opt(self, config=None, blocked=None, anchors=None):
+        return TraceOptimizer(
+            config=config or OptimizationConfig(),
+            collision_checker=MockCollisionChecker(blocked_paths=blocked),
+            net_anchors={1: []} if anchors is None else anchors,
+        )
+
+    def test_tent_collapses_to_straight(self):
+        result = self._opt().shorten_detours(self._tent())
+        assert len(result) == 1
+        assert (result[0].x1, result[0].y1, result[0].x2, result[0].y2) == (0, 0, 6, 0)
+        assert result[0].width == 0.2 and result[0].layer == Layer.F_CU and result[0].net == 1
+
+    def test_no_collision_checker_is_noop(self):
+        # Blocking 1: an unchecked whole-chain rewrite can short other nets.
+        opt = TraceOptimizer(config=OptimizationConfig(), net_anchors={1: []})
+        tent = self._tent()
+        assert opt.shorten_detours(tent) == tent
+        assert opt.optimize_segments(tent) == tent
+
+    def test_no_anchor_info_is_noop(self):
+        opt = TraceOptimizer(config=OptimizationConfig(), collision_checker=MockCollisionChecker())
+        tent = self._tent()
+        assert opt.shorten_detours(tent) == tent
+
+    def test_foreign_trace_not_crossed(self):
+        # A foreign-net trace sits across the straight path; tent must stay.
+        opt = self._opt(blocked=[(2.9, -1.0, 3.1, 0.5)])
+        tent = self._tent()
+        assert opt.optimize_segments(tent) == tent
+
+    def test_mid_chain_same_net_pad_stays_connected(self):
+        # Blocking 2: daisy-chain pad on the flat run at (3, 1) must stay on copper.
+        tent = [
+            self._seg(0, 0, 1, 1),
+            self._seg(1, 1, 3, 1),
+            self._seg(3, 1, 5, 1),
+            self._seg(5, 1, 6, 0),
+        ]
+        opt = self._opt(anchors={1: [(0, 0), (3, 1), (6, 0)]})
+        assert opt.shorten_detours(tent) == tent
+        # Same chain with no pad in the middle still collapses.
+        opt = self._opt(anchors={1: [(0, 0), (6, 0)]})
+        assert len(opt.shorten_detours(tent)) == 1
+
+    def test_obstacle_on_shorter_path_leaves_chain(self):
+        # Block everything touching y in [-0.1, 0.5] except the original tent top.
+        opt = self._opt(blocked=[(2.0, -0.1, 4.0, 0.5)])
+        tent = self._tent()
+        assert opt.shorten_detours(tent) == tent
+
+    def test_falls_back_to_next_candidate(self):
+        # Endpoints (0,0)->(6,2): diag-first bends at (2,2) (blocked), ortho-first at (4,0).
+        chain = [
+            self._seg(0, 0, 0, 3),
+            self._seg(0, 3, 6, 3),
+            self._seg(6, 3, 6, 2),
+        ]
+        opt = self._opt(blocked=[(0.5, 1.5, 1.5, 1.8)])
+        result = opt.shorten_detours(chain)
+        assert len(result) == 2
+        assert (result[0].x2, result[0].y2) == pytest.approx((4, 0))
+        assert (result[0].x1, result[-1].x2, result[-1].y2) == (0, 6, 2)
+
+    def test_already_optimal_unchanged(self):
+        chain = [self._seg(0, 0, 1, 0), self._seg(1, 0, 2, 0), self._seg(2, 0, 3, 0)]
+        assert self._opt().shorten_detours(chain) == chain
+
+    def test_loop_unchanged(self):
+        chain = [self._seg(0, 0, 1, 0), self._seg(1, 0, 1, 1), self._seg(1, 1, 0, 0)]
+        assert self._opt().shorten_detours(chain) == chain
+
+    def test_config_flag_disables(self):
+        cfg = OptimizationConfig(
+            merge_collinear=False,
+            eliminate_zigzags=False,
+            compress_staircase=False,
+            convert_45_corners=False,
+            pull_tight=False,
+            shorten_detours=False,
+        )
+        tent = self._tent()
+        assert len(self._opt(config=cfg).optimize_segments(tent)) == 3
+        cfg.shorten_detours = True
+        out = self._opt(config=cfg).optimize_segments(tent)
+        assert len(out) == 1 and self._len(out) == pytest.approx(6.0)
