@@ -103,3 +103,87 @@ def test_partial_net_stubs_lists_dangling_endpoint():
     stubs = _partial_net_stubs(_router([done, partial], [pad, _pad(2.0, 1.0, ref="U2")]))
     assert {(s["net"], s["layer"]) for s in stubs} == {("P", "F_CU")}
     assert len(stubs) == 2
+
+
+# --- Judge round 1 on PR #8283 ---
+from kicad_tools.router.primitives import Via  # noqa: E402
+
+
+def _s(x1, y1, x2, y2, layer=Layer.F_CU, net=1, name="N"):
+    return Segment(x1=x1, y1=y1, x2=x2, y2=y2, width=0.2, layer=layer, net=net, net_name=name)
+
+
+def test_stub_list_ignores_sub_tolerance_joint_split():
+    a = _s(0.0, 0.0, 164.6625, 96.5)
+    b = _s(164.66250610351562, 96.5, 170.0, 96.5)
+    pads = [_pad(0.0, 0.0), _pad(170.0, 96.5, ref="U2")]
+    route = Route(net=1, net_name="N", segments=[a, b])
+    assert _partial_net_stubs(_router([route], pads)) == []
+
+
+def test_stub_list_reports_lone_via_end():
+    pads = [_pad(0.0, 0.0)]
+    route = Route(
+        net=1,
+        net_name="N",
+        segments=[_s(0.0, 0.0, 2.0, 0.0)],
+        vias=[
+            Via(
+                x=2.0,
+                y=0.0,
+                drill=0.3,
+                diameter=0.6,
+                layers=(Layer.F_CU, Layer.B_CU),
+                net=1,
+                net_name="N",
+            )
+        ],
+    )
+    stubs = _partial_net_stubs(_router([route], pads))
+    assert [(s["layer"], s["x"], s["y"]) for s in stubs] == [("F_CU", 2.0, 0.0)]
+
+
+def test_stub_list_via_with_copper_on_other_layer_is_connected():
+    th = _pad(2.0, 2.0, ref="U2")
+    th.through_hole = True
+    pads = [_pad(0.0, 0.0), th]
+    route = Route(
+        net=1,
+        net_name="N",
+        segments=[_s(0.0, 0.0, 2.0, 0.0), _s(2.0, 0.0, 2.0, 2.0, layer=Layer.B_CU)],
+        vias=[
+            Via(
+                x=2.0,
+                y=0.0,
+                drill=0.3,
+                diameter=0.6,
+                layers=(Layer.F_CU, Layer.B_CU),
+                net=1,
+                net_name="N",
+            )
+        ],
+    )
+    assert _partial_net_stubs(_router([route], pads)) == []
+
+
+def test_pad_join_does_not_absorb_reversed_neighbour():
+    pad = _pad(1.03, 1.02)
+    jog = _s(1.03, 1.02, 1.0, 1.0)
+    rev = _s(1.0, 3.0, 1.0, 1.0)  # stored tail to head: does not start at the joint
+    route = Route(net=1, net_name="N", segments=[jog, rev])
+    merged = _merge_checkpoint_routes([route], _router([route], [pad]))
+    segs = merged[0].segments
+    assert any((s.x1, s.y1, s.x2, s.y2) == (1.0, 3.0, 1.0, 1.0) for s in segs)  # copper kept
+    assert all((s.x1, s.y1) != (s.x2, s.y2) for s in segs)
+
+
+def test_pad_join_keeps_joint_when_t_branch_ends_there():
+    pad = _pad(1.03, 1.02)
+    jog = _s(1.03, 1.02, 1.0, 1.0)
+    run = _s(1.0, 1.0, 5.0, 1.0)
+    branch = Route(net=1, net_name="N", segments=[_s(1.0, 1.0, 1.0, 4.0)])
+    route = Route(net=1, net_name="N", segments=[jog, run])
+    merged = _merge_checkpoint_routes([route, branch], _router([route, branch], [pad]))
+    segs = merged[0].segments
+    # Joint (1.0, 1.0) is a junction: it survives, so the branch still meets copper.
+    assert any((s.x2, s.y2) == (1.0, 1.0) or (s.x1, s.y1) == (1.0, 1.0) for s in segs)

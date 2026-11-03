@@ -2834,6 +2834,22 @@ def _merge_checkpoint_routes(routes, router=None):
         return routes
 
 
+def _ends_at_point(routes, net: int, x: float, y: float, tol: float = 1e-4) -> int:
+    """Count same-net segment ends (1 each) and vias (2 each) at ``(x, y)``."""
+    n = 0
+    for r in routes:
+        if r.net != net:
+            continue
+        for s in r.segments:
+            for px, py in ((s.x1, s.y1), (s.x2, s.y2)):
+                if abs(px - x) <= tol and abs(py - y) <= tol:
+                    n += 1
+        for v in r.vias:
+            if abs(v.x - x) <= tol and abs(v.y - y) <= tol:
+                n += 2
+    return n
+
+
 def _join_route_ends_to_pad_centres(routes, router) -> int:
     """Replace sub-grid jogs at route ends with a direct pad-centre join (#8270).
 
@@ -2841,6 +2857,9 @@ def _join_route_ends_to_pad_centres(routes, router) -> int:
     a same-net pad centre (but not on it) is moved onto the centre, absorbing a
     separate jog segment when one exists.  The candidate must clear every
     other-net segment, via and pad on its layer; otherwise it is left alone.
+    Clearance is checked against ``rules.trace_clearance`` only: net-class
+    clearances, board-edge clearance and preserved input copper are not
+    considered, which is acceptable for a checkpoint fix-up.
     Returns the number of ends joined.
     """
     import math
@@ -2916,14 +2935,24 @@ def _join_route_ends_to_pad_centres(routes, router) -> int:
                 for v in r.vias
             ):
                 continue
-            # A separate jog segment (pad centre -> grid point) is absorbed.
+            # A separate jog segment (pad centre -> grid point) is absorbed, but
+            # only when the next segment continues head to tail from the joint
+            # and nothing else of the net ends on that joint (the same
+            # ``ends <= 2`` rule ``merge_collinear_same_width`` applies).
+            # ``Route.segments`` order is not a contract, so this is checked
+            # rather than assumed; otherwise the end-only rewrite is used.
             jog = None
             if len(segs) > 1:
                 nxt = segs[1] if at_start else segs[-2]
+                jx, jy = (seg.x2, seg.y2) if at_start else (seg.x1, seg.y1)
+                nx, ny = (nxt.x1, nxt.y1) if at_start else (nxt.x2, nxt.y2)
                 if (
                     nxt.layer == seg.layer
                     and abs(nxt.width - seg.width) < 1e-6
                     and math.hypot(seg.x2 - seg.x1, seg.y2 - seg.y1) <= reach
+                    and abs(nx - jx) <= 1e-4
+                    and abs(ny - jy) <= 1e-4
+                    and _ends_at_point(routes, route.net, jx, jy) <= 2
                 ):
                     far = (nxt.x2, nxt.y2) if at_start else (nxt.x1, nxt.y1)
                     jog = (nxt, far)
@@ -2981,11 +3010,14 @@ def _join_route_ends_to_pad_centres(routes, router) -> int:
     return joined
 
 
-def _partial_net_stubs(router) -> list[dict]:
+def _partial_net_stubs(router, tol: float = 1e-3) -> list[dict]:
     """Dangling route endpoints per net: the stubs a partial result leaves (#8270).
 
-    An endpoint is dangling when it lies on no same-net pad, via or other
-    segment end.  Each entry is ``{"net", "layer", "x", "y"}``.
+    An endpoint is dangling when, within ``tol`` mm, it lies on no same-net pad
+    and no other same-net segment end on its layer.  A via counts as a
+    connection only when same-net copper meets it on another layer (a segment
+    end there, or a pad on another layer); a via with copper on one side only
+    is itself the dangling end.  Each entry is ``{"net", "layer", "x", "y"}``.
     """
     from kicad_tools.router.primitives import pad_half_extents
 
@@ -2994,32 +3026,67 @@ def _partial_net_stubs(router) -> list[dict]:
     for route in router.routes:
         by_net.setdefault(route.net, []).append(route)
     pads = list(getattr(router, "pads", {}).values())
+
+    def near(ax: float, ay: float, bx: float, by: float) -> bool:
+        return abs(ax - bx) <= tol and abs(ay - by) <= tol
+
     for net, routes in by_net.items():
-        degree: dict[tuple[float, float, str], int] = {}
-        meta: dict[tuple[float, float, str], tuple[str, str]] = {}
+        # (x, y, layer name, net name) for every segment endpoint of the net.
+        ends: list[tuple[float, float, str, str]] = []
         for route in routes:
             for s in route.segments:
-                for x, y in ((s.x1, s.y1), (s.x2, s.y2)):
-                    key = (round(x, 3), round(y, 3), s.layer.name)
-                    degree[key] = degree.get(key, 0) + 1
-                    meta[key] = (s.net_name or route.net_name, s.layer.name)
-        via_points = {(round(v.x, 3), round(v.y, 3)) for r in routes for v in r.vias}
+                name = s.net_name or route.net_name
+                ends.append((s.x1, s.y1, s.layer.name, name))
+                ends.append((s.x2, s.y2, s.layer.name, name))
+        vias = [v for r in routes for v in r.vias]
         net_pads = [p for p in pads if p.net == net]
-        for (x, y, layer), n in degree.items():
-            if n != 1 or (x, y) in via_points:
+        # Spatial hash: neighbouring cells cover every endpoint within ``tol``.
+        cell = max(tol, 1e-6)
+        grid: dict[tuple[int, int], list[int]] = {}
+        for i, (x, y, _l, _n) in enumerate(ends):
+            grid.setdefault((int(x // cell), int(y // cell)), []).append(i)
+
+        def neighbours(i: int) -> list[int]:
+            x, y = ends[i][0], ends[i][1]
+            cx, cy = int(x // cell), int(y // cell)
+            return [
+                j
+                for dx in (-1, 0, 1)
+                for dy in (-1, 0, 1)
+                for j in grid.get((cx + dx, cy + dy), ())
+                if j != i and near(x, y, ends[j][0], ends[j][1])
+            ]
+
+        def pad_covers(p, x: float, y: float) -> bool:
+            hw, hh = pad_half_extents(p)
+            return abs(x - p.x) <= hw + tol and abs(y - p.y) <= hh + tol
+
+        seen: set[tuple[float, float, str]] = set()
+        for i, (x, y, layer, name) in enumerate(ends):
+            if any(ends[j][2] == layer for j in neighbours(i)):
+                continue  # meets another same-net segment end on this layer
+            if any(
+                (p.through_hole or p.layer.name == layer) and pad_covers(p, x, y) for p in net_pads
+            ):
                 continue
-            on_pad = False
-            for p in net_pads:
-                hw, hh = pad_half_extents(p)
-                if (
-                    (p.through_hole or p.layer.name == layer)
-                    and abs(x - p.x) <= hw + 1e-3
-                    and abs(y - p.y) <= hh + 1e-3
-                ):
-                    on_pad = True
+            joined_via = False
+            for v in vias:
+                if not near(x, y, v.x, v.y):
+                    continue
+                other_copper = any(ends[j][2] != layer for j in neighbours(i)) or any(
+                    (p.through_hole or p.layer.name != layer) and pad_covers(p, v.x, v.y)
+                    for p in net_pads
+                )
+                if other_copper:
+                    joined_via = True
                     break
-            if not on_pad:
-                stubs.append({"net": meta[(x, y, layer)][0], "layer": layer, "x": x, "y": y})
+            if joined_via:
+                continue
+            key = (round(x, 3), round(y, 3), layer)
+            if key in seen:
+                continue
+            seen.add(key)
+            stubs.append({"net": name, "layer": layer, "x": key[0], "y": key[1]})
     stubs.sort(key=lambda d: (str(d["net"]), d["layer"], d["x"], d["y"]))
     return stubs
 
