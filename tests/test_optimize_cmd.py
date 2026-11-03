@@ -962,3 +962,46 @@ class TestDetourShortening:
         assert main([str(free), "--quiet"]) == 0
         assert main([str(blocked), "--quiet"]) == 0
         assert _tent_length(blocked) > _tent_length(free) + 1.0
+
+
+class TestDeclaredDesignRules:
+    """Issue #8269: the optimizer's checker uses the clearance the board's own
+    files declare, not the 0.20 mm dataclass default."""
+
+    @staticmethod
+    def _board(tmp_path, clearance=None):
+        import json
+
+        pcb = tmp_path / "b.kicad_pcb"
+        pcb.write_text(
+            '(kicad_pcb (version 20240108) (generator "t") (general (thickness 1.6)) '
+            '(layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user)) '
+            "(setup (pad_to_mask_clearance 0)))"
+        )
+        if clearance is not None:
+            (tmp_path / "b.kicad_pro").write_text(
+                json.dumps(
+                    {
+                        "board": {"design_settings": {"rules": {"min_clearance": clearance}}},
+                        "net_settings": {
+                            "classes": [{"name": "Default", "clearance": clearance}],
+                            "meta": {"version": 3},
+                        },
+                    }
+                )
+            )
+        return pcb
+
+    def test_project_clearance_replaces_the_dataclass_default(self, tmp_path):
+        from kicad_tools.cli.optimize_cmd import _declared_design_rules
+
+        rules = _declared_design_rules(self._board(tmp_path, 0.1016))
+        assert rules is not None
+        assert rules.trace_clearance == pytest.approx(0.1016)
+        assert rules.via_clearance == pytest.approx(0.1016)
+        assert rules.grid_resolution <= 0.1016 / 2 + 1e-9
+
+    def test_nothing_declared_keeps_the_loader_behaviour(self, tmp_path):
+        from kicad_tools.cli.optimize_cmd import _declared_design_rules
+
+        assert _declared_design_rules(self._board(tmp_path)) is None

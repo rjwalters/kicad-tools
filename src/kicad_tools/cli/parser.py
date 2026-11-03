@@ -4426,6 +4426,11 @@ def _add_optimize_parser(subparsers) -> None:
     )
     optimize_parser.add_argument("--no-45", action="store_true", help="Disable 45-degree corners")
     optimize_parser.add_argument(
+        "--no-jogs",
+        action="store_true",
+        help="Disable lateral jog removal (sliding short sideways steps to the next corner)",
+    )
+    optimize_parser.add_argument(
         "--chamfer-size",
         type=float,
         default=0.5,
