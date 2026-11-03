@@ -43,6 +43,22 @@ def _fail(as_json: bool, pcb: str, message: str, *, text: str | None = None) -> 
     return 1
 
 
+def _refill_written_board(written: Path) -> tuple[bool, str | None]:
+    """Refill zones in the written board; never raises (Issue #8286).
+
+    Returns ``(refilled, error)``; ``error`` is None on success.
+    """
+    from kicad_tools.cli.runner import run_refill_zones
+
+    try:
+        result = run_refill_zones(written)
+    except Exception as e:  # degrade like check_cmd: warn, exit code unchanged
+        return False, str(e)
+    if result.success:
+        return True, None
+    return False, result.stderr.strip() or "unknown error"
+
+
 def _build_collision_checker(pcb_path: Path):
     """Build a collision checker plus a grid-synced optimize function factory.
 
@@ -439,6 +455,26 @@ Examples:
             text=f"Error during optimization: {e}",
         )
 
+    # Issue #8286: the rewrite moved copper but the board still carries the
+    # zone fills it was read with; ``kct check`` reads stored fills, so refill
+    # once, after the final write, through the shared kicad-cli path.
+    zones_refilled: bool | None = None
+    refill_error: str | None = None
+    if not args.dry_run:
+        zones_refilled, refill_error = _refill_written_board(Path(args.output or pcb_path))
+        # --quiet suppresses progress, not a warning that the written file is
+        # inconsistent; JSON mode reports it via ``zones_refilled`` instead.
+        if zones_refilled is False and not as_json:
+            print(
+                "WARNING: zones were NOT refilled "
+                f"({refill_error}); the written board carries stale zone fills "
+                "and `kct check` may report phantom clearance_segment_zone "
+                "errors.  Fix with: kct check --refill-zones, or "
+                "kicad-cli pcb drc --refill-zones --save-board <pcb> "
+                "(issue #8286).",
+                file=sys.stderr,
+            )
+
     if as_json:
         emit_json(
             {
@@ -492,6 +528,8 @@ Examples:
                 "dry_run": args.dry_run,
                 "saved": not args.dry_run,
                 "written_to": None if args.dry_run else (args.output or str(pcb_path)),
+                "zones_refilled": zones_refilled,
+                "zones_refill_error": refill_error,
                 "success": True,
             }
         )
@@ -575,6 +613,11 @@ Examples:
             print(f"Saved to: {args.output}")
         else:
             print(f"Updated: {pcb_path}")
+
+        if zones_refilled:
+            print("Zones refilled via kicad-cli")
+        elif zones_refilled is False:
+            print("Zones NOT refilled (stale fill; see warning above)")
 
         print("=" * 50)
 
