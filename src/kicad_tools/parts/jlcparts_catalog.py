@@ -14,8 +14,10 @@ Two responsibilities live here:
   ``cache.z02``, ... sequential parts), reassemble and unzip it into
   ``~/.cache/kicad-tools/jlcparts.sqlite3``. This is a large, user-invoked
   download -- it is *never* triggered automatically as a side effect of a
-  lookup, and *never* runs in CI/tests (tests use a small hand-curated
-  fixture SQLite instead).
+  lookup, and *never* runs in the test suite (tests use a small
+  hand-curated fixture SQLite instead). The one CI exception is the Board 05
+  job in ``.github/workflows/ci.yml``, which syncs it explicitly (issue #8255)
+  so ``kct export --strict-preflight`` can verify LCSC stock.
 
 * :class:`JlcpartsCatalog` -- a read-only reader over the downloaded
   ``jlcparts.sqlite3`` that translates ``jlc_components`` rows into the

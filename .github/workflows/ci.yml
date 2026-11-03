@@ -2990,6 +2990,8 @@ jobs:
         run: echo "week=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
 
       - name: Cache jlcparts offline catalog
+        # Footprint: ~1.9 GB per weekly entry, no restore-keys, against the
+        # 10 GB repo cache cap -- revisit if more catalog consumers appear.
         uses: actions/cache@v6
         with:
           path: ~/.cache/kicad-tools/jlcparts.sqlite3
@@ -3000,6 +3002,9 @@ jobs:
         # stays strict for real exports, so a failed sync must fail this job
         # loudly instead of surfacing later as a missing routed board.  On a
         # cache hit this is a no-op (``sync_catalog`` skips an existing file).
+        # Note: the catalog is an unpinned, unchecksummed third-party scrape
+        # (yaqwsx/jlcparts on GitHub Pages) of live JLC stock, so this job's
+        # pass/fail now also depends on weekly stock data, not only routing.
         run: uv run kct parts sync-catalog
 
       - name: Regenerate + route board 05 from recipe (clean tmp directory)
