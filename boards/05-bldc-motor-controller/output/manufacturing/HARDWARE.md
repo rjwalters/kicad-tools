@@ -101,7 +101,7 @@ specified identity/package before accepting any substitution.
 | F1 | 1A 63V — SF-1206S100-2 | Fuse:Fuse_1206_3216Metric | [C3167176](https://www.lcsc.com/product-detail/C3167176.html) |
 | D1 | SS36 — SS36 | Diode_SMD:D_SMA | [C16015](https://www.lcsc.com/product-detail/C16015.html) |
 | D2 | SMBJ24A — SMBJ24A | Diode_SMD:D_SMB | [C224017](https://www.lcsc.com/product-detail/C224017.html) |
-| D3 | RED — 17-21SURC/S530-A2/TR8 | LED_SMD:LED_0805_2012Metric | [C131244](https://www.lcsc.com/product-detail/C131244.html) |
+| D3 | RED — NCD0805R1 | LED_SMD:LED_0805_2012Metric | [C84256](https://www.lcsc.com/product-detail/C84256.html) |
 | C1 | 220uF 50V — EEEFT1H221AP | Capacitor_SMD:CP_Elec_8x10.5 | [C178594](https://www.lcsc.com/product-detail/C178594.html) |
 | C2, C3, C5, C9, C10, C11, C12, C14, C15, C16 | 100nF — CC0805KRX7R9BB104 | Capacitor_SMD:C_0805_2012Metric | [C49678](https://www.lcsc.com/product-detail/C49678.html) |
 | C4, C13 | 10nF — CL21B103KBANNNC | Capacitor_SMD:C_0805_2012Metric | [C1710](https://www.lcsc.com/product-detail/C1710.html) |

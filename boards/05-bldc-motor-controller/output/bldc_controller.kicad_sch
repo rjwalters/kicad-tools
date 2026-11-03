@@ -4467,7 +4467,7 @@
 				)
 			)
 		)
-		(property "LCSC" "C131244"
+		(property "LCSC" "C84256"
 			(at 0 0 0)
 			(effects
 				(font
@@ -4475,7 +4475,7 @@
 				)
 				hide)
 		)
-		(property "MPN" "17-21SURC/S530-A2/TR8"
+		(property "MPN" "NCD0805R1"
 			(at 0 0 0)
 			(effects
 				(font
