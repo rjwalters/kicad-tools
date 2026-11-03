@@ -1104,6 +1104,8 @@ def _run_export_command(args) -> int:
         sub_argv.extend(["--spec", args.export_spec])
     if getattr(args, "export_no_merge_lcsc", False):
         sub_argv.append("--no-merge-lcsc")
+    if getattr(args, "export_merge_lcsc_from", None):
+        sub_argv.extend(["--merge-lcsc-from", args.export_merge_lcsc_from])
     if getattr(args, "export_skip_preflight", False):
         sub_argv.append("--skip-preflight")
     if getattr(args, "export_skip_drc_floor", False):

@@ -776,6 +776,19 @@ class TestExportCmdSchematicAutoDiscovery:
                 f"Expected no partial package on disk, found: {[p.name for p in written]}"
             )
 
+    def test_merge_lcsc_from_missing_file_precedence(self, tmp_path, capsys):
+        """A missing --merge-lcsc-from errors, unless --no-merge-lcsc wins (#8260)."""
+        pcb = tmp_path / "b.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        missing = str(tmp_path / "nope.csv")
+        base = [str(pcb), "--no-report", "--skip-preflight", "-o", str(tmp_path / "out")]
+
+        assert export_main([*base, "--merge-lcsc-from", missing]) == 1
+        assert "--merge-lcsc-from file not found" in capsys.readouterr().err
+
+        export_main([*base, "--no-merge-lcsc", "--merge-lcsc-from", missing])
+        assert "--merge-lcsc-from file not found" not in capsys.readouterr().err
+
     def test_missing_schematic_with_bom_source_pcb_succeeds(self, tmp_path, monkeypatch):
         """``--bom-source pcb`` is the documented escape hatch for the
         missing-schematic case.  It must not fail in AssemblyPackage.__init__.
@@ -1183,6 +1196,7 @@ _EXPORT_PASS_THROUGH_CASES = {
     "no_spec": (["--no-spec"], True),
     "spec": (["--spec", "project.kct"], "project.kct"),
     "no_merge_lcsc": (["--no-merge-lcsc"], True),
+    "merge_lcsc_from": (["--merge-lcsc-from", "prev_bom.csv"], "prev_bom.csv"),
     "skip_preflight": (["--skip-preflight"], True),
     "skip_drc_floor": (["--skip-drc-floor"], True),
     "strict_preflight": (["--strict-preflight"], True),
