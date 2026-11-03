@@ -2644,9 +2644,13 @@ def _add_pcb_parser(subparsers) -> None:
         "same-layer loops) and snap off-centre segment ends onto the same-net "
         "via/pad centre. Connectivity follows KiCad (endpoint-anchored track joins, "
         "ends inside a pad/via/zone); a segment is removed only if every pad and "
-        "zone terminal stays in the same component and no joint becomes overlap-only. With kicad-cli available each net's edits are checked "
-        "with 'pcb drc --refill-zones' and dropped if they add violations. "
-        "In-place by default; use -o to write elsewhere.",
+        "zone terminal stays in the same component and no joint becomes "
+        "overlap-only. Copper that touches other same-net copper away from a "
+        "shared endpoint (e.g. a spur beside a via) is intentionally kept, and "
+        "collinear grid-step runs are not merged. With kicad-cli available each "
+        "net's edits are checked with 'pcb drc --refill-zones' and dropped if "
+        "they add violations; without that check the file is only written with "
+        "--unverified. In-place by default; use -o to write elsewhere.",
     )
     pcb_prune.add_argument("pcb", help="Path to .kicad_pcb file")
     pcb_prune.add_argument("-o", "--output", dest="output", help="Output file path")

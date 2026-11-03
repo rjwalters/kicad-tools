@@ -26,6 +26,11 @@ is still connected to the others through modelled track / via / pad joins
 (so a join the model misses can never make a bridge look redundant), **and**
 every remaining track end that was anchored stays anchored -- the pass never
 creates an overlap-only joint.
+
+Not covered (intentionally, for now): a branch whose body touches other
+same-net copper away from a shared endpoint -- e.g. #8216's redundant spur
+that starts just beside a via -- is protected and therefore kept, and
+collinear grid-step runs are not merged into one segment.
 """
 
 from __future__ import annotations

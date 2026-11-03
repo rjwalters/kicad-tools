@@ -506,6 +506,10 @@ def _run_prune_command(args, pcb_path: Path) -> int:
     loops) and snaps off-centre ends onto via/pad centres, keeping every pad
     and zone terminal connected. Each net's edits are DRC-verified with
     ``kicad-cli pcb drc --refill-zones`` when kicad-cli is available.
+
+    Copper that touches other same-net copper without a shared endpoint (such
+    as a redundant spur beside a via) is intentionally kept, and collinear
+    grid-step runs are not merged; both remain open under issue #8216.
     """
     from kicad_tools.pcb_prune import prune_board
 
