@@ -1815,14 +1815,18 @@ def _committed_coupled_skip_nets(router) -> set[int] | None:
     return set(nets)
 
 
-def _detour_net_anchors(router: "Autorouter") -> dict[int, list[tuple[float, float]]]:
+def _detour_net_anchors(
+    router: "Autorouter", routes: Any = None
+) -> dict[int, list[tuple[float, float]]]:
     """Per-net pad/via positions for the detour-shortening pass (Issue #8217).
 
     The optimizer's collision checker ignores same-net copper, so
     ``shorten_detour_pass`` needs every same-net pad and via to keep a
     replacement path connected through them.  Nets that declare a
     ``length_match_group`` are left out of the map, which makes the pass skip
-    them (their length is deliberate).
+    them (their length is deliberate).  *routes* overrides the route list the
+    vias are read from (``kct optimize-traces`` keeps the board's copper in
+    ``router.existing_routes``).
     """
     matched = {
         name
@@ -1833,7 +1837,7 @@ def _detour_net_anchors(router: "Autorouter") -> dict[int, list[tuple[float, flo
     for pad in router.pads.values():
         if pad.net:
             anchors.setdefault(pad.net, []).append((pad.x, pad.y))
-    for route in router.routes:
+    for route in router.routes if routes is None else routes:
         for via in route.vias:
             if via.net:
                 anchors.setdefault(via.net, []).append((via.x, via.y))
