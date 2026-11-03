@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-03
 
+- **PR #8251**: fix: prune keeps tracks that would strand an end or feed a copper arc
+- **Issue #8249** (closed): kct pcb prune --unverified can leave a dangling end or cut an arc-fed pad (unmodelled body/arc joins)
 - **PR #8244**: feat(optimize-traces): run detour-shortening pass with board anchors
 - **Issue #8217** (closed): new cleanup pass: shorten detours when a straight or single-bend path is clear
 - **PR #8240**: fix(pcb): keep name-only boards header-less on PCB.save
