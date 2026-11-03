@@ -645,10 +645,10 @@ Overlapping PRs in a wave are thus **serialized-with-revalidation**; disjoint PR
 Use the merge script (CLAUDE.md "Merging PRs" mandate — never `gh pr merge`):
 
 ```bash
-LOOM_AUTO_MERGE_TIMEOUT=420 ./.loom/scripts/merge-pr.sh <PR_NUMBER> --auto
+./.loom/scripts/merge-pr.sh <PR_NUMBER> --auto
 ```
 
-**Give that call a 600000 ms Bash-tool timeout (#9395)**: the 420s pin must stay strictly under its caller's, or the tool kills the script and no exit code reaches the branches below. Raise neither alone. Why the pin but no `CHAMPION-MERGE-OUTCOME` sentinel (#9096): [exit codes](../../../.loom/docs/merge-pr-exit-code-exceptions.md).
+That call waits on no checks (#12063), so the default Bash-tool timeout suffices. Why no `CHAMPION-MERGE-OUTCOME` sentinel (#9096): [exit codes](../../../.loom/docs/merge-pr-exit-code-exceptions.md).
 
 It merges via the forge API and cleans the worktree. `--auto` waits for the head's check-runs to settle, re-validates `loom:pr` and the head SHA, then merges **in this process** — never via the server-side queue, which re-reads neither once armed (#8410). An already-settled head merges at once, so `--auto` is always safe to pass (#3820).
 
