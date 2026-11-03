@@ -379,8 +379,6 @@ def run_attempt(argv: list[str] | None = None) -> RouteAttemptResult:
             path = Path(value) if value else None
             setattr(parsed, attribute, path.stat() if path and path.exists() else None)
         code = _supervise([sys.executable, "-m", __name__, *argv], budget, control)
-        if code == TIMEOUT_EXIT:
-            _note_skipped_failed_export(parsed, state)
         disposition = disposition_from_control(_read_control(control))
         if code == TIMEOUT_EXIT and disposition is not None:
             parsed._placement_disposition = disposition
@@ -389,6 +387,10 @@ def run_attempt(argv: list[str] | None = None) -> RouteAttemptResult:
             # Even a checkpoint written before unwinding is unverified.
             parsed._placement_output_before = output.stat() if output.exists() else None
             finish(parsed, code)
+        if code == TIMEOUT_EXIT:
+            # After ``finish()``: it may write the ``--export-failed-nets``
+            # target itself, and the note must describe the final state.
+            _note_skipped_failed_export(parsed, state)
         return RouteAttemptResult(code, disposition)
 
 
@@ -406,15 +408,23 @@ def _note_skipped_failed_export(parsed, state: dict) -> None:
     try:
         data = json.loads(report.read_text())
         output = Path(state["output"])
-        data["export_failed_nets"] = {
+        sidecar = output.with_stem(output.stem + "_partial").with_suffix(".search_failures.json")
+        note = {
             "requested": str(path.absolute()),
             "written": False,
             "reason": "routing deadline exceeded; the failed-net set of an "
             "unverified partial result is not exported",
-            "search_failures": str(
-                output.with_stem(output.stem + "_partial").with_suffix(".search_failures.json")
-            ),
         }
+        # timeout.json never names a path that does not exist: the deadline can
+        # land before the search-failures sidecar is written.
+        if sidecar.exists():
+            note["search_failures"] = str(sidecar)
+        else:
+            note["search_failures"] = None
+            note["search_failures_reason"] = (
+                "no search-failures sidecar was written before the deadline"
+            )
+        data["export_failed_nets"] = note
         report.write_text(json.dumps(data, indent=2) + "\n")
     except (OSError, ValueError):
         pass
