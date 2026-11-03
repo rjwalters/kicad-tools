@@ -56,6 +56,7 @@ def _build_collision_checker(pcb_path: Path):
 
     from kicad_tools.router.io import load_pcb_for_routing
     from kicad_tools.router.optimizer import make_collision_checker
+    from kicad_tools.router.optimizer.collision import CollisionChecker
 
     with contextlib.redirect_stdout(sys.stderr):
         router, _net_map = load_pcb_for_routing(
@@ -63,7 +64,24 @@ def _build_collision_checker(pcb_path: Path):
             validate_drc=False,
             load_existing_routes=True,
         )
-    return router, make_collision_checker(router.grid)
+    # Issue #8250: rule-area keepouts are installed lazily by the route
+    # flows, never at load, so install them before the checker reads the grid.
+    router._install_grid_rule_area_keepouts()
+    checker: CollisionChecker = make_collision_checker(router.grid)
+
+    # Issue #8250: a bare NPTH registers no copper, so give the checker the
+    # drilled holes explicitly.  0.25 mm is KiCad's default hole_clearance.
+    holes = [
+        (p.x, p.y, p.drill / 2.0)
+        for p in router.pads.values()
+        if p.drill > 0 and not p.through_hole
+    ]
+    if holes:
+        from kicad_tools.router.optimizer.collision import HoleClearanceChecker
+
+        clearance = max(float(getattr(router.rules, "trace_clearance", 0.0)), 0.25)
+        checker = HoleClearanceChecker(checker, holes, clearance)
+    return router, checker
 
 
 def _seg_key(seg) -> tuple:
@@ -310,6 +328,22 @@ Examples:
         collision_checker=checker,
         net_anchors=net_anchors,
     )
+    # Issue #8250: vias and pads are attachments the 45° pass must not leave
+    # dangling, and the pad groups a rewrite must keep joined.
+    from kicad_tools.router.optimizer.pcb import parse_vias
+
+    pad_anchors: dict[str, list] = {}
+    for pad in router.pads.values():
+        if pad.net > 0 and pad.net_name and not pad.steiner_point:
+            layers = () if pad.through_hole else (pad.layer,)
+            pad_anchors.setdefault(pad.net_name, []).append((pad.x, pad.y, layers))
+    attachments: dict[str, list[tuple[float, float]]] = {
+        name: [(x, y) for x, y, _ in pts] for name, pts in pad_anchors.items()
+    }
+    for name, vias in parse_vias(pcb_path.read_text()).items():
+        attachments.setdefault(name, []).extend((v.x, v.y) for v in vias)
+    optimizer.set_attachment_points(attachments)
+
     # ``optimize_pcb`` calls ``self.optimize_segments`` per net; route that
     # through the grid-synced wrapper (see its docstring).  optimize_pcb has no
     # optimize_fn hook, so the instance method is deliberately rebound.
@@ -350,6 +384,7 @@ Examples:
                 net_filter=args.net,
                 dry_run=args.dry_run,
                 on_net_optimized=commit_net,
+                net_anchors_by_name=pad_anchors,
             )
     except Exception as e:
         return _fail(
@@ -381,6 +416,8 @@ Examples:
                     "nets_rolled_back": stats.nets_rolled_back,
                     "nets_attempted": stats.nets_optimized,
                     "nets_kept": stats.nets_kept,
+                    "nets_connectivity_discarded": stats.nets_connectivity_discarded,
+                    "connectivity_discarded_nets": stats.connectivity_discarded_nets,
                     "drc_failsafe_reverted": stats.drc_failsafe_reverted,
                     "drc_failsafe_rules": stats.drc_failsafe_rules,
                     "segments_before": stats.segments_before,
@@ -428,6 +465,12 @@ Examples:
             )
         else:
             print(f"  Nets optimized:  {stats.nets_optimized}")
+        if stats.nets_connectivity_discarded:
+            print(
+                f"  Discarded (would disconnect pads): {stats.nets_connectivity_discarded} "
+                f"({', '.join(stats.connectivity_discarded_nets[:5])}"
+                f"{', ...' if stats.nets_connectivity_discarded > 5 else ''})"
+            )
         print()
 
         print(
