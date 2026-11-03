@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 import tempfile
 from dataclasses import replace
@@ -796,6 +797,95 @@ def connectivity_preserved(
     return True
 
 
+def _seg_point_dist(px: float, py: float, s: Segment) -> float:
+    dx, dy = s.x2 - s.x1, s.y2 - s.y1
+    ll = dx * dx + dy * dy
+    if ll == 0.0:
+        return math.hypot(px - s.x1, py - s.y1)
+    t = max(0.0, min(1.0, ((px - s.x1) * dx + (py - s.y1) * dy) / ll))
+    return math.hypot(px - (s.x1 + t * dx), py - (s.y1 + t * dy))
+
+
+def _changed_regions(
+    before: list[Segment], after: list[Segment], tolerance: float
+) -> list[tuple[list[int], list[Segment]]]:
+    """Split a net rewrite into independent changed regions (Issue #8298).
+
+    Returns ``(removed_indices_into_before, added_segments)`` per region.
+    Changed items (segments only in ``before`` or only in ``after``) are
+    grouped when they touch on the same layer; regions are ordered by their
+    first removed segment's position in ``before`` (file order).
+    """
+    remaining = list(after)
+    removed: list[int] = []
+    for i, s in enumerate(before):
+        if s in remaining:
+            remaining.remove(s)
+        else:
+            removed.append(i)
+    # ``remaining`` now holds the added segments (multiset difference).
+    items: list[tuple[str, int, Segment]] = [("r", i, before[i]) for i in removed] + [
+        ("a", j, s) for j, s in enumerate(remaining)
+    ]
+    parent = list(range(len(items)))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def touches(a: Segment, b: Segment) -> bool:
+        if a.layer != b.layer:
+            return False
+        return any(_seg_point_dist(px, py, b) <= tolerance for px, py in (a.start, a.end)) or any(
+            _seg_point_dist(px, py, a) <= tolerance for px, py in (b.start, b.end)
+        )
+
+    for x in range(len(items)):
+        for y in range(x + 1, len(items)):
+            if touches(items[x][2], items[y][2]):
+                parent[find(x)] = find(y)
+    groups: dict[int, tuple[list[int], list[Segment]]] = {}
+    for k, (kind, idx, seg) in enumerate(items):
+        rem, add = groups.setdefault(find(k), ([], []))
+        if kind == "r":
+            rem.append(idx)
+        else:
+            add.append(seg)
+    regions = list(groups.values())
+    regions.sort(key=lambda r: (min(r[0]) if r[0] else len(before), len(r[1])))
+    return regions
+
+
+def keep_safe_regions(
+    before: list[Segment],
+    after: list[Segment],
+    vias: list[Via],
+    anchors: list[tuple[float, float, tuple[Layer, ...]]],
+    tolerance: float,
+) -> tuple[list[Segment], int, int]:
+    """Greedily keep each independent changed region that is safe on its own.
+
+    Returns ``(segments, kept_regions, total_regions)``.  Each region is
+    applied on top of the already-kept result and must pass
+    :func:`connectivity_preserved` against the *original* ``before``.
+    """
+    regions = _changed_regions(before, after, tolerance)
+    current = list(before)
+    kept = 0
+    for rem_idx, added in regions:
+        trial = list(current)
+        for seg in (before[i] for i in rem_idx):
+            if seg in trial:
+                trial.remove(seg)
+        trial.extend(added)
+        if connectivity_preserved(before, trial, vias, anchors, tolerance):
+            current = trial
+            kept += 1
+    return current, kept, len(regions)
+
+
 def optimize_pcb(
     pcb_path: str,
     output_path: str | None,
@@ -897,9 +987,22 @@ def optimize_pcb(
                 config.tolerance,
             )
         ):
-            optimized = list(segs)
-            stats.nets_connectivity_discarded += 1
-            stats.connectivity_discarded_nets.append(net)
+            # Issue #8298: one unsafe edit must not discard the safe ones.
+            salvaged, n_kept, _n_regions = keep_safe_regions(
+                segs,
+                optimized,
+                vias_by_net.get(net, []),
+                net_anchors_by_name.get(net, []),
+                config.tolerance,
+            )
+            if n_kept and salvaged != segs:
+                optimized = salvaged
+                stats.nets_connectivity_partial += 1
+                stats.connectivity_partial_nets.append(net)
+            else:
+                optimized = list(segs)
+                stats.nets_connectivity_discarded += 1
+                stats.connectivity_discarded_nets.append(net)
         # Issue #8271: never emit duplicates the rewrite introduced.  Nets the
         # optimizer left unchanged (or whose rewrite was discarded above) are
         # written verbatim.

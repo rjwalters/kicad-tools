@@ -138,6 +138,15 @@ def _declared_design_rules(pcb_path: Path):
     )
 
 
+def _pad_only_anchors(router, net_anchors: dict) -> dict:
+    """Per-net pad centres (no vias), restricted to nets in *net_anchors* (#8298)."""
+    out: dict[int, list[tuple[float, float]]] = {}
+    for pad in router.pads.values():
+        if pad.net and pad.net in net_anchors:
+            out.setdefault(pad.net, []).append((pad.x, pad.y))
+    return out
+
+
 def _seg_key(seg) -> tuple:
     return (seg.x1, seg.y1, seg.x2, seg.y2, seg.width, seg.layer, seg.net)
 
@@ -387,6 +396,8 @@ Examples:
         config,
         collision_checker=checker,
         net_anchors=net_anchors,
+        # Issue #8298: pad-only positions for the pad-entry jog pass.
+        pad_anchors=_pad_only_anchors(router, net_anchors),
     )
     # Issue #8250: vias and pads are attachments the 45° pass must not leave
     # dangling, and the pad groups a rewrite must keep joined.
@@ -500,6 +511,8 @@ Examples:
                     "duplicates_removed": stats.duplicates_removed,
                     "nets_connectivity_discarded": stats.nets_connectivity_discarded,
                     "connectivity_discarded_nets": stats.connectivity_discarded_nets,
+                    "nets_connectivity_partial": stats.nets_connectivity_partial,
+                    "connectivity_partial_nets": stats.connectivity_partial_nets,
                     "drc_failsafe_reverted": stats.drc_failsafe_reverted,
                     "drc_failsafe_rules": stats.drc_failsafe_rules,
                     "segments_before": stats.segments_before,
@@ -554,6 +567,12 @@ Examples:
                 f"  Discarded (would disconnect pads): {stats.nets_connectivity_discarded} "
                 f"({', '.join(stats.connectivity_discarded_nets[:5])}"
                 f"{', ...' if stats.nets_connectivity_discarded > 5 else ''})"
+            )
+        if stats.nets_connectivity_partial:
+            print(
+                f"  Partly kept (unsafe edits dropped): {stats.nets_connectivity_partial} "
+                f"({', '.join(stats.connectivity_partial_nets[:5])}"
+                f"{', ...' if stats.nets_connectivity_partial > 5 else ''})"
             )
         print()
 

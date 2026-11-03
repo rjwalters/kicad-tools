@@ -285,11 +285,25 @@ class _NetModel:
                         self.anch[i][ea].add(j)
                         self.anch[j][eb].add(i)
                         hit = True
+            # Issue #8298: KiCad also connects a track whose end (anchor) lies
+            # inside another same-layer track's body.
+            if a.layers == b.layers:
+                for x, y, ix, iy in ((a, b, i, j), (b, a, j, i)):
+                    for ex, px in enumerate((x.a, x.b)):
+                        if any(_same_pt(px, q) for q in (y.a, y.b)):
+                            continue
+                        if _pt_seg_dist(px, y.a, y.b) <= y.radius:
+                            self.anch[ix][ex].add(iy)
+                            hit = True
             if hit:
                 self.adj[i].add(j)
                 self.adj[j].add(i)
             return
         if a.kind == "seg":
+            # Issue #8298: a via / pad centre inside a track body is a join.
+            if b.kind in ("via", "pad") and _pt_seg_dist(b.a, a.a, a.b) <= a.radius:
+                self.adj[i].add(j)
+                self.adj[j].add(i)
             for ea, pa in enumerate((a.a, a.b)):
                 if b.kind == "zone":
                     ok = _in_polygon(pa, b.ref.polygon)
@@ -432,16 +446,24 @@ class _NetModel:
                 return True
         return False
 
-    def degrades_ends(self, touched: set[int], before: set[int], after: set[int]) -> bool:
-        """Would removing ``after - before`` leave a surviving track end
-        off-centre-only that was clean before?"""
-        for k in touched:
+    def degraded_ends(
+        self, touched: set[int], before: set[int], after: set[int]
+    ) -> list[tuple[int, int]]:
+        """Surviving track ends that removing ``after - before`` would leave
+        off-centre-only although they were clean before."""
+        out = []
+        for k in sorted(touched):
             if k in after or self.nodes[k].kind != "seg":
                 continue
             for x in (0, 1):
                 if self.clean_end(k, x, before) and not self.clean_end(k, x, after):
-                    return True
-        return False
+                    out.append((k, x))
+        return out
+
+    def degrades_ends(self, touched: set[int], before: set[int], after: set[int]) -> bool:
+        """Would removing ``after - before`` leave a surviving track end
+        off-centre-only that was clean before?"""
+        return bool(self.degraded_ends(touched, before, after))
 
     def still_joined(self, touched: set[int], removed: set[int]) -> bool:
         """Are all live nodes in ``touched`` in one component once ``removed``
@@ -464,7 +486,7 @@ class _NetModel:
         gone = removed | group
         for g in group:
             n = self.nodes[g]
-            for k in self.overlap[g] - gone:
+            for k in (self.overlap[g] | self.adj[g]) - gone:
                 o = self.nodes[k]
                 if o.kind != "seg":
                     continue
@@ -619,7 +641,8 @@ def _try_snap(
     e: int,
     removed: set[int],
     baseline: frozenset[frozenset[int]],
-) -> None:
+    dry: bool = False,
+) -> bool:
     """Snap end ``e`` of segment ``i`` -- and every track end sharing that
     point -- onto the nearest anchoring via/pad centre, if that is safe.
 
@@ -636,7 +659,7 @@ def _try_snap(
             if d > CENTRE_TOL and (target is None or d < target[0]):
                 target = (d, o.a)
     if target is None:
-        return
+        return False
     c = target[1]
     movers = [(i, e)]
     for k in model.anch[i][e]:
@@ -647,9 +670,9 @@ def _try_snap(
                 movers.append((k, x))
     for k, x in movers:
         if model.protected[k]:
-            return  # a sharer may hide a join: leave the joint alone
+            return False  # a sharer may hide a join: leave the joint alone
         if math.dist(_end_pt(model.nodes[k], 1 - x), c) <= CENTRE_TOL:
-            return  # would collapse a segment to zero length
+            return False  # would collapse a segment to zero length
     moved = {k for k, _ in movers}
     touched = set(moved)
     for k in moved:
@@ -683,16 +706,17 @@ def _try_snap(
             for x in (0, 1)
         )
     )
-    if ok:
+    if ok and not dry:
         for k, x in movers:
             plan.snaps.append((model.nodes[k].index, ("start", "end")[x], c))
-        return
+        return True
     for k in moved:
         model.nodes[k].a, model.nodes[k].b = old[k]
         model.relink(k)
     for k, (adj_k, anch_k) in saved.items():
         model.adj[k] = adj_k
         model.anch[k] = anch_k
+    return ok
 
 
 #: Max perpendicular deviation (mm) for a run to count as one straight line.
@@ -813,9 +837,19 @@ def _plan_net(model: _NetModel, net_number: int) -> NetPlan:
                     model.partition(removed | group) != baseline
                     or not model.still_joined(touched, removed | group)
                     or model.strands_end(group, removed)
-                    or model.degrades_ends(touched, removed, removed | group)
                 ):
                     continue
+                # Issue #8298 (#8259 geometry): an end left off-centre-only is
+                # acceptable when it can be snapped onto the via / pad centre.
+                degraded = model.degraded_ends(touched, removed, removed | group)
+                if degraded:
+                    after = removed | group
+                    if not all(
+                        _try_snap(model, plan, k, x, after, baseline, dry=True) for k, x in degraded
+                    ):
+                        continue
+                    for k, x in degraded:
+                        _try_snap(model, plan, k, x, after, baseline)
                 off = any(model.offcentre_end(g) for g in group)
                 removed |= group
                 progressed = True

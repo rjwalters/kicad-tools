@@ -1031,3 +1031,86 @@ def remove_lateral_jogs_pass(
             result = merge_collinear(result, config, path_is_clear)
 
     return result
+
+
+def straighten_pad_entry_jogs_pass(
+    segments: list[Segment],
+    config: OptimizationConfig,
+    path_is_clear: Callable[[Segment], bool] | None = None,
+    anchors: list[tuple[float, float]] | None = None,
+    pad_anchors: list[tuple[float, float]] | None = None,
+) -> list[Segment]:
+    """Straighten a jog that sits just before a chain end on a **pad** (#8298).
+
+    ``remove_lateral_jogs_pass`` slides a step into the next corner, but a step
+    right before the pad has no corner after it.  For a window ``A, m.., B``
+    where ``B`` ends at a pad centre, ``A`` and ``B`` run the same way and the
+    pieces ``m`` between them are short, the whole window is replaced by one
+    segment that continues ``A``'s line to the foot point of the pad centre.
+    That is only done when the pad centre is within half the trace width of
+    ``A``'s line (the trace still covers the centre), the new segment is clear,
+    its length does not exceed the window's, and every other pad/via anchor
+    the window covered stays covered.  Via ends are never touched: only chain
+    ends within tolerance of a *pad_anchors* position qualify.
+
+    A no-op unless *path_is_clear*, *anchors* and *pad_anchors* are all given.
+    """
+    if (
+        len(segments) < 3
+        or path_is_clear is None
+        or anchors is None
+        or not pad_anchors
+        or segments[0].layer != segments[-1].layer
+    ):
+        return list(segments)
+    tol = config.tolerance
+
+    def flip(chain: list[Segment]) -> list[Segment]:
+        return [_retarget(s, s.x2, s.y2, s.x1, s.y1) for s in reversed(chain)]
+
+    def straighten_tail(chain: list[Segment]) -> list[Segment]:
+        b = chain[-1]
+        pad = next(
+            (p for p in pad_anchors if math.hypot(p[0] - b.x2, p[1] - b.y2) <= tol),
+            None,
+        )
+        if pad is None:
+            return chain
+        ub = _unit(b, tol)
+        if ub is None:
+            return chain
+        for i in range(len(chain) - 2, -1, -1):
+            a = chain[i]
+            window = chain[i:]
+            mids = window[1:-1]
+            if sum(segment_length(m) for m in mids) > config.max_jog_length + tol:
+                break
+            ua = _unit(a, tol)
+            if ua is None or not _parallel(ua, ub) or ua[0] * ub[0] + ua[1] * ub[1] <= 0:
+                continue
+            # Foot of the pad centre on A's line.
+            t = (pad[0] - a.x1) * ua[0] + (pad[1] - a.y1) * ua[1]
+            fx, fy = a.x1 + t * ua[0], a.y1 + t * ua[1]
+            if math.hypot(pad[0] - fx, pad[1] - fy) > a.width / 2 + 1e-9:
+                continue
+            new = _retarget(a, a.x1, a.y1, fx, fy)
+            if segment_length(new) <= tol or t <= 0:
+                continue
+            if segment_length(new) > sum(segment_length(s) for s in window) + tol:
+                continue
+            if not path_is_clear(new):
+                continue
+            reach = a.width / 2 + tol
+            lost = any(
+                any(_point_segment_distance(ax, ay, s) <= reach for s in window)
+                and _point_segment_distance(ax, ay, new) > reach
+                for ax, ay in anchors
+            )
+            if lost:
+                continue
+            return chain[:i] + [new]
+        return chain
+
+    result = straighten_tail(list(segments))
+    result = flip(straighten_tail(flip(result)))
+    return result
