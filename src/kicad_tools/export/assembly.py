@@ -416,6 +416,7 @@ class AssemblyPackage:
 
         # Spec overlay: apply MPN/LCSC from .kct before auto-enrichment
         spec_refs: set[str] = set()
+        exempt_refs: set[str] = set()
         if not self.config.no_spec:
             try:
                 spec_file = self.config.spec_path
@@ -441,6 +442,11 @@ class AssemblyPackage:
                         # intent that must never be silently overwritten by a
                         # generic (value, footprint) LCSC guess (issue #4995).
                         spec_refs = resolved_refs(overlay_report)
+                        # Refs declared ``exempt`` (consigned / non-LCSC) must
+                        # never pick up an LCSC from the CSV merge (#8282).
+                        from .bom_spec_overlay import declared_exemptions
+
+                        exempt_refs = set(declared_exemptions(spec.bom_entries))
             except Exception as e:
                 logger.warning(f"Spec overlay failed (continuing without): {e}")
 
@@ -467,11 +473,18 @@ class AssemblyPackage:
                         parts_cache = PartsCache()
                     except Exception as e:
                         logger.debug("Parts cache unavailable for CSV-merge validation: %s", e)
+                    for item in items:
+                        if item.reference in exempt_refs:
+                            logger.info(
+                                "CSV merge: skipped %s (declared exempt in spec)",
+                                item.reference,
+                            )
                     merged_count, csv_merge_refs = apply_existing_lcsc_assignments(
                         [
                             item
                             for item in items
-                            if not (item.reference in spec_refs and item.mpn and not item.lcsc)
+                            if item.reference not in exempt_refs
+                            and not (item.reference in spec_refs and item.mpn and not item.lcsc)
                         ],
                         existing,
                         parts_cache=parts_cache,
