@@ -211,14 +211,16 @@ def install_native_spy(monkeypatch):
 
 
 def test_name_only_net_board_is_normalized_in_memory_without_touching_the_file(tmp_path):
-    """The issue's repro: 0 declarations on disk, 3 in the loaded object."""
+    """Name-only boards: 0 declarations on disk, in ``_sexp``; 3 nets in memory (#8239)."""
     path = write_board(tmp_path, NAME_ONLY_NET_BOARD)
     before = path.read_bytes()
 
     pcb = PCB.load(str(path))
 
     assert len(parse_string(before.decode()).find_children("net")) == 0
-    assert len(pcb._sexp.find_children("net")) == 3
+    # The synthesized net table is in-memory only (``pcb.nets``), never in _sexp.
+    assert len(pcb._sexp.find_children("net")) == 0
+    assert len(pcb.nets) == 3
     # Loading is read-only: the normalization lives only in the object.
     assert path.read_bytes() == before
 
@@ -231,10 +233,10 @@ def test_canonical_source_text_matches_a_freshly_loaded_object(tmp_path, dialect
     pcb = PCB.load(str(path))
 
     assert pcb._sexp.to_string() == canonical_source_text(before, path)
-    # ...and the plain re-parse the guard used to compare against does NOT
-    # match for the name-only dialect, which is the whole defect.
+    # Since #8239 the net table is no longer written into _sexp, so the loaded
+    # tree also matches a plain re-parse for every dialect.
     plain = parse_string(before.decode()).to_string()
-    assert (pcb._sexp.to_string() == plain) is (dialect != "name_only")
+    assert pcb._sexp.to_string() == plain
 
 
 @pytest.mark.parametrize("dialect", sorted(BOARDS))
@@ -307,7 +309,13 @@ def edit_pad_position(pcb):
 
 
 def edit_net_declaration(pcb):
-    pcb._sexp.find_children("net")[-1].set_atom(1, "RENAMED")
+    declarations = pcb._sexp.find_children("net")
+    if declarations:
+        declarations[-1].set_atom(1, "RENAMED")
+    else:
+        # Name-only dialect (#8239): no header table; reassign an inline pad
+        # reference through the supported API so PCB.save() accepts the edit.
+        assert pcb.assign_net_to_footprint_pad("NT3", "1", "RENAMED")
 
 
 def edit_add_copper(pcb):

@@ -4185,7 +4185,7 @@ class TestKiCad10NetNumberRecovery:
         assert result.total_nets > 0
 
     def test_save_board_fixture_round_trips_through_save(self, tmp_path):
-        """Loading + saving the --save-board fixture writes back a net table."""
+        """Loading + saving the --save-board fixture keeps it header-less (#8239)."""
         fixture_path = Path(__file__).parent / "fixtures" / "test_kicad10_save_board.kicad_pcb"
         assert fixture_path.exists()
 
@@ -4193,10 +4193,10 @@ class TestKiCad10NetNumberRecovery:
         out_path = tmp_path / "resaved.kicad_pcb"
         pcb.save(out_path)
 
-        # The saved file must contain a canonical (net N "name") header table.
+        # The name-only dialect is preserved: no numbered header is written.
         text = out_path.read_text()
-        assert '(net 0 "")' in text
-        assert "(net 1" in text
+        assert '(net 0 "")' not in text
+        assert not re.search(r'^\s*\(net\s+\d+\s+"', text, re.MULTILINE)
 
         # And re-loading recovers the same nets.
         reloaded = PCB.load(out_path)
