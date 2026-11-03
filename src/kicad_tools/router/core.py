@@ -16773,6 +16773,39 @@ class Autorouter:
             budget, per_net, timeout, per_net_timeout
         )
 
+    def _relief_corridor_need(self, failed_net: int) -> str:
+        """Why-text for a "no relief path" outcome (Issue #8248).
+
+        States the corridor the victim needs (its trace width plus the
+        class clearance on both sides).  The width actually freed is not
+        measured by the probe, so it is reported as ``unknown`` rather than
+        guessed.
+        """
+        try:
+            name = self.net_names.get(failed_net, "")
+            net_class = self.net_class_map.get(name)
+            width = net_class.trace_width if net_class else self.rules.trace_width
+            clearance = net_class.clearance if net_class else self.rules.trace_clearance
+            need = f"{width + 2 * clearance:.3f} mm"
+            return (
+                f"needs a {need} corridor (width {width:.3f} + 2x clearance "
+                f"{clearance:.3f}); freed width unknown"
+            )
+        except Exception:  # pragma: no cover - diagnostics must never break a rescue
+            return "required corridor width unknown; freed width unknown"
+
+    def _relief_witness_signature(self, failed_net: int, net_routes: dict[int, list[Route]]):
+        """Identity of ``failed_net``'s current access-loss seal, or ``None``."""
+        try:
+            gate = self._access_loss_gate()
+            if gate is None:
+                return None
+            rippable = {n for n, routes in net_routes.items() if routes and n != failed_net}
+            witness = gate.blockers_for(failed_net, rippable)
+            return witness.signature() if witness is not None else None
+        except Exception:  # pragma: no cover - diagnostics must never break a rescue
+            return None
+
     def _relief_rescue(
         self,
         failed_net: int,
@@ -16946,6 +16979,29 @@ class Autorouter:
                 f"budget, {RELIEF_RESCUE_TXN_FLOOR_S:.0f}s); issue #4781)"
             )
 
+        # Issue #8248: a relief that found no path under this exact seal in the
+        # previous iteration will find none now -- nothing the rescue can rip
+        # changes the fixed closers.  Skip once, loudly, instead of burning the
+        # rescue's budget again.
+        if guard is not None and depth == 0:
+            seen = guard.no_path_seen.get(int(failed_net))
+            iteration = self._commit_journal.iteration
+            if seen is not None and seen[0] == int(iteration) - 1:
+                signature = self._relief_witness_signature(failed_net, net_routes)
+                if guard.repeats_futile_relief(failed_net, iteration, signature):
+                    first_skip = failed_net not in guard.futile_relief_skips
+                    if first_skip:
+                        guard.futile_relief_skips.append(failed_net)
+                    guard.note_no_relief_path(failed_net, iteration, signature)
+                    if first_skip:  # logged once per victim
+                        flush_print_fn(
+                            f"  Relief rescue: "
+                            f"{self.net_names.get(failed_net, f'Net_{failed_net}')} "
+                            f"skipped -- no relief path last iteration under the "
+                            f"identical access-loss witness (issue #8248)"
+                        )
+                    return False
+
         subsearch_budget = self._relief_subsearch_budget(per_net_timeout, deterministic_rescue)
         max_rounds = 4
         snapshot_nets: set[int] = {failed_net}
@@ -17059,9 +17115,19 @@ class Autorouter:
             if not probe_routes:
                 flush_print_fn(
                     f"  Relief rescue: {failed_name} has NO relief path "
-                    f"(round {round_idx + 1}) -- rolling back ({elapsed_fn()})"
+                    f"(round {round_idx + 1}; {self._relief_corridor_need(failed_net)}) "
+                    f"-- rolling back ({elapsed_fn()})"
                 )
                 _rollback()
+                if guard is not None and depth == 0:
+                    # Issue #8248: remember the seal this futile rescue met, on
+                    # the restored grid, so an identical one next iteration is
+                    # not re-run.
+                    guard.note_no_relief_path(
+                        failed_net,
+                        self._commit_journal.iteration,
+                        self._relief_witness_signature(failed_net, net_routes),
+                    )
                 return False
 
             if not victims:
