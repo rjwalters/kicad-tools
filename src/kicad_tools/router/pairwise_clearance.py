@@ -1019,6 +1019,111 @@ def _shapely_gap_and_midpoint(poly_a: Any, poly_b: Any) -> tuple[float, float, f
     return gap, (x1 + x2) / 2.0, (y1 + y2) / 2.0
 
 
+def _attach_zone_residual(
+    poly_a: Any,
+    poly_b: Any,
+    zones: Sequence[AttachZone],
+    net_a: str,
+    net_b: str,
+    layer: object | None,
+    required: float,
+    tolerance: float,
+) -> tuple[float, float, float] | None:
+    """Residual shortfall of a pair the #4506 attach zone would waive (#8277).
+
+    ``AttachZone.exempts`` is a *point* test on the closest-gap midpoint, which
+    lies on the pad side of a trace running past a rated footprint, so a
+    segment that leaves the pad-bbox + margin zone was waived whole.  The
+    ``kct creepage --waive-attach-zone`` census instead clips the zone out of
+    both nets' copper and re-measures what remains (#8028,
+    ``Pair.residual_passed``).  Applying the same clip here keeps the in-run
+    gate and the census on one verdict.
+
+    Returns ``(gap, x, y)`` of the residual closest approach when the copper
+    outside every zone that exempts this net pair on ``layer`` is still closer
+    than ``required``; ``None`` when it clears or no copper remains outside.
+    """
+    import shapely  # type: ignore[import-untyped]
+
+    boxes = [
+        shapely.box(z.min_x, z.min_y, z.max_x, z.max_y)
+        for z in zones
+        if _norm_net_key(net_a) in z.net_names
+        and _norm_net_key(net_b) in z.net_names
+        and (layer is None or (z.covers_layer(net_a, layer) and z.covers_layer(net_b, layer)))
+    ]
+    if not boxes:
+        return None
+    clip = shapely.union_all(boxes)
+    rest_a = poly_a.difference(clip)
+    rest_b = poly_b.difference(clip)
+    if rest_a.is_empty or rest_b.is_empty:
+        return None
+    gap, gx, gy = _shapely_gap_and_midpoint(rest_a, rest_b)
+    if gap >= required - tolerance:
+        return None
+    return gap, gx, gy
+
+
+def _slack_points(
+    zone: AttachZone, points: Sequence[tuple[float, float]], slack: float
+) -> list[tuple[float, float]]:
+    """Clamp *points* within *slack* of *zone*'s box onto the box (edge noise)."""
+    out = []
+    for x, y in points:
+        near = (
+            zone.min_x - slack <= x <= zone.max_x + slack
+            and zone.min_y - slack <= y <= zone.max_y + slack
+        )
+        if near:
+            x = min(max(x, zone.min_x), zone.max_x)
+            y = min(max(y, zone.min_y), zone.max_y)
+        out.append((x, y))
+    return out
+
+
+def _attach_zone_verdict(
+    poly_a: Any,
+    poly_b: Any,
+    zones: Sequence[AttachZone],
+    net_a: str,
+    net_b: str,
+    layer: object | None,
+    required: float,
+    tolerance: float,
+) -> tuple[float, float, float] | None:
+    """Census-identical attach-zone verdict for a short pair (#8277).
+
+    Mirrors ``creepage.engine`` (#8028): the pair is waived only when BOTH
+    nearest points of the binding gap lie in one exempting zone (the router
+    used to test only the gap *midpoint*, which sits inside the zone whenever
+    the pad-side point does), and the copper left outside the zone must then
+    still clear ``required``.  Returns ``None`` when waived, else the
+    ``(gap, x, y)`` of the shortfall to report.
+    """
+    import shapely  # type: ignore[import-untyped]
+
+    gap, gx, gy = _shapely_gap_and_midpoint(poly_a, poly_b)
+    line = shapely.shortest_line(poly_a, poly_b)
+    if line is not None and not line.is_empty:
+        (x1, y1), (x2, y2) = line.coords[0], line.coords[-1]
+        # Zone edges are float-exact box bounds; a witness sitting ON the edge
+        # (copper tangent to the margin) must not flip on 1 ulp of noise.
+        slack = _PASS_TOLERANCE
+        both_in = any(
+            all(
+                z.exempts(x, y, net_a, net_b, layer)
+                for x, y in _slack_points(z, ((x1, y1), (x2, y2)), slack)
+            )
+            for z in zones
+        )
+    else:
+        both_in = _attach_zone_exempts(zones, gx, gy, net_a, net_b, layer)
+    if not both_in:
+        return (gap, gx, gy)
+    return _attach_zone_residual(poly_a, poly_b, zones, net_a, net_b, layer, required, tolerance)
+
+
 def _aabb_gap(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
     """Minimum distance between two axis-aligned bounding boxes (0 if they touch).
 
@@ -1202,7 +1307,12 @@ def _copper_pair_violation(
     if gap >= floor - tolerance and _attach_zone_exempts(
         attach_zones, gap_x, gap_y, net_a, net_b, layer
     ):
-        return None
+        verdict = _attach_zone_verdict(
+            poly_a, poly_b, attach_zones, net_a, net_b, layer, required, tolerance
+        )
+        if verdict is None:
+            return None
+        gap, gap_x, gap_y = verdict
     return PairwiseViolation(
         net_a=net_a,
         net_b=net_b,
@@ -1257,7 +1367,16 @@ def segment_pair_violation(
     if gap >= floor - tolerance and _attach_zone_exempts(
         attach_zones, gap_x, gap_y, a_name, b_name, seg_a.layer
     ):
-        return None
+        poly_a = _segment_copper_polygon(seg_a)
+        poly_b = _segment_copper_polygon(seg_b)
+        if poly_a is None or poly_b is None:
+            return None
+        verdict = _attach_zone_verdict(
+            poly_a, poly_b, attach_zones, a_name, b_name, seg_a.layer, required, tolerance
+        )
+        if verdict is None:
+            return None
+        gap, gap_x, gap_y = verdict
     return PairwiseViolation(
         net_a=a_name,
         net_b=b_name,

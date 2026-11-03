@@ -603,7 +603,14 @@ class TestAttachZoneExemptionCoordinateSpace:
         captured = capsys.readouterr().out
 
         assert rc == 0, f"origin {origin} exited {rc}\n{captured}"
-        assert "Routed: 2/2 nets" in captured
+        # Issue #8277: the route-time validator now applies the census rule
+        # (both nearest points in the zone, residual outside it must clear), so
+        # a first-pass HV stub ending 3.1 mm from the LV pad copper is rejected
+        # and the chained completion pass closes the net instead.  What this
+        # test pins is that the bridging footprint is NOT walled off: every
+        # signal net still ends up routed, with no pairwise violation.
+        assert "SUCCESS: All signal nets routed" in captured
+        assert "pairwise HV clearance violations" not in captured
 
     def test_zones_are_returned_in_sheet_absolute_millimetres(self, tmp_path: Path) -> None:
         """Pin the space directly: zones must be offset by ``pcb.board_origin``."""
