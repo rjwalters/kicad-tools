@@ -2798,7 +2798,14 @@ def _gate_bom(
     # Declared spec exemptions (issue #8261) are accepted but must be visible.
     warn_details = (
         f" [{part_details}]"
-        if part_details and (part_status == "WARN" or "exempt (declared)" in part_details)
+        if part_details
+        and (
+            part_status == "WARN"
+            or any(
+                m in part_details
+                for m in ("exempt (declared)", "stale exemption", "exempt ref carries")
+            )
+        )
         else ""
     )
     return CheckOutcome(

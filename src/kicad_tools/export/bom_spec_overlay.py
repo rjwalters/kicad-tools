@@ -141,10 +141,11 @@ def declared_exemptions(bom_entries: list[BOMEntry]) -> dict[str, tuple[str, str
     """
     out: dict[str, tuple[str, str]] = {}
     for entry in bom_entries:
-        if not getattr(entry, "exempt", None):
+        cat = entry.exempt
+        if cat is None:
             continue
         for ref in expand_ref_range(entry.ref):
-            out[ref] = (entry.exempt, entry.exempt_reason or "")
+            out[ref] = (str(cat), entry.exempt_reason or "")
     return out
 
 
