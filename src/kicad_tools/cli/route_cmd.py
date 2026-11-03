@@ -1815,6 +1815,35 @@ def _committed_coupled_skip_nets(router) -> set[int] | None:
     return set(nets)
 
 
+def _detour_net_anchors(router: "Autorouter") -> dict[int, list[tuple[float, float]]]:
+    """Per-net pad/via positions for the detour-shortening pass (Issue #8217).
+
+    The optimizer's collision checker ignores same-net copper, so
+    ``shorten_detour_pass`` needs every same-net pad and via to keep a
+    replacement path connected through them.  Nets that declare a
+    ``length_match_group`` are left out of the map, which makes the pass skip
+    them (their length is deliberate).
+    """
+    matched = {
+        name
+        for name, nc in getattr(router, "net_class_map", {}).items()
+        if nc.effective_length_match_group()
+    }
+    anchors: dict[int, list[tuple[float, float]]] = {}
+    for pad in router.pads.values():
+        if pad.net:
+            anchors.setdefault(pad.net, []).append((pad.x, pad.y))
+    for route in router.routes:
+        for via in route.vias:
+            if via.net:
+                anchors.setdefault(via.net, []).append((via.x, via.y))
+    if matched:
+        names = getattr(router, "net_names", {})
+        for net_id in [n for n in anchors if names.get(n) in matched]:
+            del anchors[net_id]
+    return anchors
+
+
 def _provide_via_connection_context(router: "Autorouter", optimizer: Any) -> None:
     """Hand pad positions and same-net pour layers to via minimisation (#8215).
 
@@ -1881,7 +1910,11 @@ def _optimize_traces(router: "Autorouter", args: argparse.Namespace, *, quiet: b
     # fragmenting routes through overused cells.
     has_overflow = router.grid.get_total_overflow() > 0
     collision_checker = make_collision_checker(router.grid, ignore_overflow=has_overflow)
-    optimizer = TraceOptimizer(config=opt_config, collision_checker=collision_checker)
+    optimizer = TraceOptimizer(
+        config=opt_config,
+        collision_checker=collision_checker,
+        net_anchors=_detour_net_anchors(router),
+    )
     _provide_via_connection_context(router, optimizer)
 
     # Issue #2596: snapshot per-net connectivity before optimize so any net
