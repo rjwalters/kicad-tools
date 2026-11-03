@@ -16777,19 +16777,24 @@ class Autorouter:
         """Why-text for a "no relief path" outcome (Issue #8248).
 
         States the corridor the victim needs (its trace width plus the
-        class clearance on both sides).  The width actually freed is not
-        measured by the probe, so it is reported as ``unknown`` rather than
-        guessed.
+        clearance on both sides).  When the access-loss witness names the
+        nets closing the victim in, the clearance is resolved per closer
+        pair: the resolver's class / pairwise term, raised to both nets'
+        authored ``net_clearance_floors`` via
+        :meth:`DesignRules.clearance_for_nets` (the same composition routing
+        itself uses).  Without a witness only the class value is known, and
+        the line says so.  The width actually freed is not measured by the
+        probe, so it is reported as ``unknown`` rather than guessed.
         """
         try:
             name = self.net_names.get(failed_net, "")
             net_class = self.net_class_map.get(name)
             width = net_class.trace_width if net_class else self.rules.trace_width
             clearance = net_class.clearance if net_class else self.rules.trace_clearance
-            scope = "class clearance only, HV pairwise not included"
-            # Resolve against the nets that actually close the victim in, via the
-            # clearance resolver (pairwise / net floors), so an HV pair is not
-            # understated by the class value.
+            scope = "class clearance only, no closing nets resolved"
+            # Resolve against the nets that actually close the victim in: the
+            # resolver's pairwise term plus each pair's authored net floors, so
+            # an HV pair is not understated by the class value.
             try:
                 gate = self._access_loss_gate()
                 witness = (
@@ -16800,9 +16805,27 @@ class Autorouter:
                 if witness is not None:
                     others = set(witness.blocking_nets) | set(witness.held_nets)
                     if others:
+                        from .clearance_resolver import CopperKind
+
                         resolver = self.rules.clearance_resolver(self.net_class_map)
+                        # The victim is a trace; a closer is route copper or a
+                        # fixed pad.  Items are not keyed by net, so when any
+                        # closer is a pad, resolve each net as both kinds.
+                        kinds = [CopperKind.TRACE]
+                        if "foreign_pad" in witness.closing_kinds:
+                            kinds.append(CopperKind.PAD)
                         resolved = max(
-                            resolver.required_mm(name, self.net_names.get(o, "")) for o in others
+                            self.rules.clearance_for_nets(
+                                failed_net,
+                                o,
+                                max(
+                                    resolver.required_mm(
+                                        name, self.net_names.get(o, ""), CopperKind.TRACE, k
+                                    )
+                                    for k in kinds
+                                ),
+                            )
+                            for o in others
                         )
                         clearance = max(clearance, resolved)
                         scope = "resolved against closing nets"

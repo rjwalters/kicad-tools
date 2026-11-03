@@ -170,3 +170,39 @@ def test_skip_fires_off_real_witness_without_recording_it():
     assert len(probes) == n, "identical real witness must skip the repeat"
     assert guard.futile_relief_skips == [VICTIM]
     assert router._access_loss_gate().witnesses == []
+
+
+def _corridor_clearance(line: str) -> float:
+    return float(line.split("2x clearance ")[1].split(",")[0])
+
+
+def test_corridor_resolves_pairwise_entry_against_closing_nets():
+    """A ``--voltage-map`` pair entry on a closer sets the printed clearance."""
+    from kicad_tools.router.pairwise_clearance import PairwiseClearanceTable
+
+    router = _sealed_router()
+    router.rules.pairwise_clearance = PairwiseClearanceTable(
+        dru=router.rules.trace_clearance,
+        net_voltages={"N1": 230.0, "N2": 0.0},
+        required_by_pair={("N1", "N2"): 2.5},
+    )
+    line = router._relief_corridor_need(1)
+    assert "resolved against closing nets" in line, line
+    assert _corridor_clearance(line) == 2.5, line
+
+
+def test_corridor_applies_authored_net_floor_of_a_closer():
+    """A closer's ``net_clearance_floors`` entry (a ``.kicad_pro`` HV netclass)
+    must raise the printed clearance, not just the resolver's class value."""
+    router = _sealed_router()
+    router.rules.net_clearance_floors = {3: 1.2}
+    line = router._relief_corridor_need(1)
+    assert "resolved against closing nets" in line, line
+    assert _corridor_clearance(line) == 1.2, line
+    assert "needs a " + f"{router.rules.trace_width + 2 * 1.2:.3f} mm corridor" in line
+
+
+def test_corridor_without_witness_labels_the_class_fallback():
+    router = _sealed_router()
+    line = router._relief_corridor_need(999)  # no pads: no witness to resolve
+    assert "class clearance only, no closing nets resolved" in line, line
