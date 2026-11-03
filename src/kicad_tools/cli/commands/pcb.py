@@ -508,8 +508,9 @@ def _run_prune_command(args, pcb_path: Path) -> int:
     ``kicad-cli pcb drc --refill-zones`` when kicad-cli is available.
 
     Copper that touches other same-net copper without a shared endpoint (such
-    as a redundant spur beside a via) is intentionally kept, and collinear
-    grid-step runs are not merged; both remain open under issue #8216.
+    as a redundant spur beside a via) is removed only when connectivity also
+    holds over those body-touching neighbours. Collinear grid-step runs are
+    not merged (tracked in issue #8236).
     """
     from kicad_tools.pcb_prune import prune_board
 

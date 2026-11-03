@@ -27,10 +27,14 @@ is still connected to the others through modelled track / via / pad joins
 every remaining track end that was anchored stays anchored -- the pass never
 creates an overlap-only joint.
 
-Not covered (intentionally, for now): a branch whose body touches other
-same-net copper away from a shared endpoint -- e.g. #8216's redundant spur
-that starts just beside a via -- is protected and therefore kept, and
-collinear grid-step runs are not merged into one segment.
+A segment protected *only* because its body touches other same-net segments
+(away from a shared endpoint) -- e.g. #8216's redundant spur that starts just
+beside a via -- may still be removed when ``still_joined`` holds over its
+endpoint neighbours **and** those body-touching neighbours, so the overlap
+join is never what keeps anything connected.  Such segments are still never
+snapped.
+
+Not covered: collinear grid-step runs are not merged into one segment.
 """
 
 from __future__ import annotations
@@ -220,7 +224,13 @@ class _NetModel:
                 for j in range(n):
                     if j != i and (nodes[j].kind == "seg" or j > i):
                         self._link(i, j)
-        self.protected = [self._is_protected(i) for i in range(n)]
+        #: per segment: same-net segments whose body touches it without a
+        #: shared endpoint (an unmodelled possible join)
+        self.overlap: list[set[int]] = [set() for _ in range(n)]
+        #: hard protection: never removed (free end, locked, zone/pad/via crossing)
+        self.hard_protected = [self._is_protected(i) for i in range(n)]
+        #: any protection, overlap-only included: never snapped
+        self.protected = [self.hard_protected[i] or bool(self.overlap[i]) for i in range(n)]
 
     @staticmethod
     def _cells(nd: _Node):
@@ -294,7 +304,13 @@ class _NetModel:
     # -- protection ---------------------------------------------------------
 
     def _is_protected(self, i: int) -> bool:
-        """May segment ``i`` hide a join the model does not see?"""
+        """May segment ``i`` hide a join the model does not see?
+
+        Returns ``True`` for *hard* protection.  A body that merely touches
+        other same-net segments is recorded in ``self.overlap[i]`` instead:
+        such a segment may still be removed when the connectivity holds over
+        those body-touching neighbours too (issue #8216's spur beside a via).
+        """
         s = self.nodes[i]
         if s.kind != "seg":
             return True
@@ -314,7 +330,7 @@ class _NetModel:
                         o.layers == s.layers
                         and _seg_seg_dist(s.a, s.b, o.a, o.b) <= hw + o.radius + _EPS
                     ):
-                        return True
+                        self.overlap[i].add(j)
             elif o.kind == "zone":
                 if _shared_layers(s, o) and any(
                     _in_polygon(p, o.ref.polygon) for p in _seg_samples(s.a, s.b)
@@ -508,7 +524,7 @@ def _group_for(model: _NetModel, seed: int, removed: set[int]) -> set[int] | Non
     Returns ``None`` when it does not, or when the removal would leave a
     protected segment with a free end.
     """
-    if model.protected[seed]:
+    if model.hard_protected[seed]:
         return None
     trial = removed | {seed}
     if not model.end_ok(seed, trial):
@@ -521,7 +537,7 @@ def _group_for(model: _NetModel, seed: int, removed: set[int]) -> set[int] | Non
             continue
         cur = removed | group
         if not model.end_ok(j, cur):
-            if model.protected[j]:
+            if model.hard_protected[j]:
                 return None
             group.add(j)
             work.extend(k for k in model.adj[j] if model.nodes[k].kind == "seg" and k not in cur)
@@ -638,7 +654,7 @@ def _plan_net(model: _NetModel, net_number: int) -> NetPlan:
         for _ in range(4):
             cands = []
             for s in seg_ids:
-                if s in removed or model.protected[s]:
+                if s in removed or model.hard_protected[s]:
                     continue
                 group = _group_for(model, s, removed)
                 if group:
@@ -652,7 +668,9 @@ def _plan_net(model: _NetModel, net_number: int) -> NetPlan:
                     group = _group_for(model, s, removed)
                     if not group:
                         continue
-                touched = {k for g in group for k in model.adj[g]} - group
+                # Endpoint neighbours *and* body-touching neighbours: an
+                # unmodelled overlap join must not be what holds anything.
+                touched = {k for g in group for k in model.adj[g] | model.overlap[g]} - group
                 if (
                     model.partition(removed | group) != baseline
                     or not model.still_joined(touched, removed | group)

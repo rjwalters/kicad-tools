@@ -294,3 +294,45 @@ def test_snap_moves_a_shared_off_centre_joint_together(tmp_path):
     ]
     assert res.stats["ends_snapped"] == 2
     assert ends == [(105, 100), (105, 100)]
+
+
+def _spur_board(tmp_path: Path, branch_end=(110, 105)) -> Path:
+    """#8216 pattern 1 (geometry from #8236 §1): a 4-layer board whose redundant
+    B.Cu branch starts 0.35 mm off V1's centre, so its body touches the main
+    0.4 mm diagonal without a shared endpoint."""
+    header = HEADER.replace(
+        '(0 "F.Cu" signal) (31 "B.Cu" signal)',
+        '(0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal) (31 "B.Cu" signal)',
+    )
+    body = header + _fp("P1", 100, 100.35) + _fp("P2", 112, 105)
+    w = 0.4
+    body += _seg((105, 100), (110, 105), "B.Cu", w)  # main diagonal V1 -> V2
+    body += _seg((110, 105), (112, 105), "F.Cu", w)
+    body += _seg((100, 100.35), (105, 100.35), "In1.Cu", w)  # ends 0.35 off V1
+    body += _seg((105, 100.35), (104.2, 101.5), "B.Cu", w)  # redundant branch
+    body += _seg((104.2, 101.5), (108.5, 105.5), "B.Cu", w)
+    body += _seg((108.5, 105.5), branch_end, "B.Cu", w)
+    for xy in ((100, 100.35), (105, 100), (110, 105)):
+        body += (
+            f'  (via (at {xy[0]} {xy[1]}) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") '
+            f'(net 1) (uuid "v-{next(_uid)}"))\n'
+        )
+    p = tmp_path / "spur.kicad_pcb"
+    p.write_text(body + ")\n")
+    return p
+
+
+def test_spur_beside_via_is_removed_and_main_diagonal_kept(tmp_path):
+    pcb, res = _run(_spur_board(tmp_path))
+    assert res.stats["segments_removed"] == 3
+    b_cu = [(s.start, s.end) for s in pcb.segments if s.layer == "B.Cu"]
+    assert b_cu == [((105, 100), (110, 105))]
+    # the inner-layer end that sat 0.35 mm off the via centre is snapped on
+    in1 = [s for s in pcb.segments if s.layer == "In1.Cu"]
+    assert [s.end for s in in1] == [(105, 100)]
+
+
+def test_spur_is_kept_when_removal_would_disconnect_the_main_track(tmp_path):
+    # Branch no longer reaches V2: it is not redundant, nothing may go.
+    pcb, res = _run(_spur_board(tmp_path, branch_end=(109, 105.5)))
+    assert res.stats["segments_removed"] == 0
