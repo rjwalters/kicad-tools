@@ -109,6 +109,10 @@ class OptimizationStats:
     kelvin_vetoes: int = 0
     # Issue #8271: exact-duplicate segments dropped from optimizer output.
     duplicates_removed: int = 0
+    # Issue #8250: nets whose rewrite was discarded because it split a pad
+    # group that was connected in the input.
+    nets_connectivity_discarded: int = 0
+    connectivity_discarded_nets: list[str] = field(default_factory=list)
     # Issue #7065: one row per optimized net, built after any DRC rollback.
     per_net: list[NetOptimizationStats] = field(default_factory=list)
 

@@ -1495,6 +1495,56 @@ class VectorCollisionChecker:
         return True
 
 
+class HoleClearanceChecker:
+    """Adds drilled-hole clearance to another :class:`CollisionChecker`.
+
+    Issue #8250: a bare NPTH (mounting hole) contributes no copper, so the
+    grid / kernel checkers never see it, and a rewrite could pass inside its
+    ``hole_clearance``.  Holes block every layer.
+
+    Args:
+        inner: The checker to delegate to first.
+        holes: ``(x, y, radius)`` per drilled hole to protect.
+        clearance: Minimum copper-edge to hole-edge distance (mm).
+    """
+
+    def __init__(
+        self,
+        inner: CollisionChecker,
+        holes: list[tuple[float, float, float]],
+        clearance: float,
+    ):
+        self.inner = inner
+        self.holes = holes
+        self.clearance = clearance
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.inner, name)
+
+    def path_is_clear(
+        self,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        layer: Layer,
+        width: float,
+        exclude_net: int,
+    ) -> bool:
+        dx, dy = x2 - x1, y2 - y1
+        len_sq = dx * dx + dy * dy
+        for hx, hy, hr in self.holes:
+            if len_sq == 0.0:
+                t = 0.0
+            else:
+                t = max(0.0, min(1.0, ((hx - x1) * dx + (hy - y1) * dy) / len_sq))
+            px, py = x1 + t * dx - hx, y1 + t * dy - hy
+            limit = hr + width / 2.0 + self.clearance
+            if px * px + py * py < limit * limit:
+                return False
+        return self.inner.path_is_clear(x1, y1, x2, y2, layer, width, exclude_net)
+
+
 def make_collision_checker(
     grid: RoutingGrid,
     ignore_overflow: bool = False,
