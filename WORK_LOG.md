@@ -15,6 +15,10 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-03
 
+- **PR #8244**: feat(optimize-traces): run detour-shortening pass with board anchors
+- **Issue #8217** (closed): new cleanup pass: shorten detours when a straight or single-bend path is clear
+- **PR #8240**: fix(pcb): keep name-only boards header-less on PCB.save
+- **Issue #8239** (closed): PCB.save adds a numbered (net N "name") table to name-only KiCad-10 boards
 - **PR #8241**: feat(prune): merge collinear segment runs into one segment
 - **Issue #8236** (closed): kct pcb prune: remove overlapping redundant spurs and merge collinear grid-step runs (rest of #8216)
 - **PR #8238**: test(optimize): dense-board kicad-cli DRC check for checked trace rewrites
