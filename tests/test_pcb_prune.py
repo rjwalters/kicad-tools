@@ -223,3 +223,74 @@ def test_cli_refuses_to_write_unverified_result(tmp_path, capsys):
     capsys.readouterr()
     assert _cli(tmp_path, p, "--no-drc", "--unverified") == 0
     assert p.read_text() != before
+
+
+def test_bridge_behind_unmodelled_join_is_kept(tmp_path):
+    """The pad-to-via stub is the pad's only connection.  The far side reaches
+    pad B through a mid-span T-junction the model does not treat as a join, so
+    the terminal partition already splits A from B; removing the stub must
+    still be refused because it disconnects the pad from the via."""
+    segs = [
+        ((100, 100), (100, 102)),  # the stub: pad A -> via V
+        ((100, 102), (106, 102), "B.Cu"),
+        ((104, 105), (104, 102), "B.Cu"),  # ends mid-span: unmodelled join
+        ((104, 105), (106, 105)),
+        ((106, 105), (108, 105)),
+        ((108, 105), (110, 105)),
+        # a loop so the planner runs at all
+        ((106, 105), (106, 107)),
+        ((106, 107), (108, 107)),
+        ((108, 107), (108, 105)),
+    ]
+    p = _board(tmp_path, [("A", 100, 100), ("B", 110, 105)], segs, vias=[(100, 102), (104, 105)])
+    pcb, _ = _run(p)
+    assert ((100, 100), (100, 102)) in {(s.start, s.end) for s in pcb.segments}
+
+
+def test_zone_outline_is_not_relied_on_to_keep_copper_connected(tmp_path):
+    """Every end sits inside a same-net zone outline, but the fill can void
+    there; the zone must not make the pad-to-pad track look redundant."""
+    zone = (
+        '  (zone (net 1) (net_name "SIG") (layer "F.Cu") (uuid "z1") (hatch edge 0.5)\n'
+        "    (connect_pads (clearance 0.2)) (min_thickness 0.25)\n"
+        "    (fill (thermal_gap 0.5) (thermal_bridge_width 0.5))\n"
+        "    (polygon (pts (xy 98 98) (xy 112 98) (xy 112 106) (xy 98 106))))\n"
+    )
+    segs = [
+        ((100, 100), (102, 102)),
+        ((102, 102), (106, 102)),
+        ((106, 102), (110, 100)),
+    ]
+    p = _board(tmp_path, [("A", 100, 100), ("B", 110, 100)], segs)
+    p.write_text(p.read_text()[: -len(")\n")] + zone + ")\n")
+    pcb, res = _run(p)
+    assert res.stats["segments_removed"] == 0
+    assert len(pcb.segments) == 3
+
+
+def test_snap_never_collapses_a_segment(tmp_path):
+    """A stub with both ends off-centre inside one via must not be snapped to
+    a zero-length segment."""
+    segs = [
+        ((100, 100), (105, 100)),
+        ((104.9, 100.1), (105.1, 100.1), "B.Cu"),
+    ]
+    p = _board(tmp_path, [("A", 100, 100)], segs, vias=[(105, 100)])
+    pcb, _ = _run(p)
+    assert all(s.start != s.end for s in pcb.segments)
+
+
+def test_snap_moves_a_shared_off_centre_joint_together(tmp_path):
+    """Two tracks meet at one off-centre point inside a via: both ends move to
+    the centre together, so neither is left joined only by overlap."""
+    segs = [
+        ((100, 100), (105.1, 100)),
+        ((105.1, 100), (105.1, 105)),
+    ]
+    p = _board(tmp_path, [("A", 100, 100), ("B", 105.1, 105)], segs, vias=[(105, 100)])
+    pcb, res = _run(p)
+    ends = [s.end for s in pcb.segments if s.start == (100, 100)] + [
+        s.start for s in pcb.segments if s.end == (105.1, 105)
+    ]
+    assert res.stats["ends_snapped"] == 2
+    assert ends == [(105, 100), (105, 100)]

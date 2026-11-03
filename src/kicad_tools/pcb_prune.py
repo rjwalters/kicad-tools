@@ -12,15 +12,20 @@ Connectivity here follows what KiCad treats as connected, and is deliberately
   tangency is never a join;
 * a track end joins a via / pad only when it lies inside the via's disc or the
   pad's *full* shape (rect / roundrect / oval / circle, rotation-aware);
-* a track end joins a zone when it lies inside the zone outline.
+* a track end joins a zone when it lies inside the zone outline -- but the
+  *fill* can have voids there, so a zone join is never relied on to keep copper
+  connected (it only marks the zone as a terminal).
 
 Anything that could be an *unmodelled* join (a track whose end is free, whose
 body touches other same-net copper without an endpoint join, or which crosses
 a same-net zone / pad / via without an end inside it) is **protected**: it is
 never removed or snapped, so an unseen join can only make the pass keep more
 copper.  A removal is accepted only when every pad / zone terminal stays in
-the same component as before **and** every remaining track end that was
-anchored stays anchored -- the pass never creates an overlap-only joint.
+the same component as before, every live item that touched the removed copper
+is still connected to the others through modelled track / via / pad joins
+(so a join the model misses can never make a bridge look redundant), **and**
+every remaining track end that was anchored stays anchored -- the pass never
+creates an overlap-only joint.
 """
 
 from __future__ import annotations
@@ -173,7 +178,12 @@ def _pad_geometry(pad: Pad) -> tuple[float, float, float]:
         return hx, hy, min(hx, hy)
     if shape == "roundrect":
         return hx, hy, pad.roundrect_rratio * min(pad.size)
-    return hx, hy, 0.0  # rect / trapezoid / custom: bounding rectangle
+    if shape == "rect":
+        return hx, hy, 0.0
+    # trapezoid / custom / unknown: the bounding rectangle can over-reach the
+    # real copper, so use the inscribed circle (under-estimates; safe).
+    r = min(hx, hy)
+    return r, r, r
 
 
 class _NetModel:
@@ -285,8 +295,10 @@ class _NetModel:
             return True
         if getattr(s.ref, "locked", False):
             return True
-        if not (self.anch[i][0] and self.anch[i][1]):
-            return True  # a free end: could be an unseen join
+        if not (self.hard_anchors(i, 0) and self.hard_anchors(i, 1)):
+            # A free end (could be an unseen join), or an end held only by a
+            # zone outline (the fill may have a void there).
+            return True
         hw = s.radius
         for j, o in enumerate(self.nodes):
             if j == i or j in self.adj[i]:
@@ -342,9 +354,58 @@ class _NetModel:
         comps = max(self.components(set()), default=-1) + 1
         return edges - len(self.nodes) + comps > 0
 
+    def hard_anchors(self, i: int, end: int) -> set[int]:
+        """Anchors of one end of segment ``i`` other than zones (fill may void)."""
+        return {k for k in self.anch[i][end] if self.nodes[k].kind != "zone"}
+
     def end_ok(self, i: int, removed: set[int]) -> bool:
-        """Is each end of segment ``i`` still anchored to something alive?"""
-        return all(any(k not in removed for k in ends) for ends in self.anch[i])
+        """Is each end of segment ``i`` still anchored to something alive
+        (a zone outline does not count)?"""
+        return all(
+            any(k not in removed and self.nodes[k].kind != "zone" for k in ends)
+            for ends in self.anch[i]
+        )
+
+    def clean_end(self, i: int, end: int, removed: set[int]) -> bool:
+        """Does this end still meet another track end, or a via / pad centre?
+
+        An end that only sits *inside* a via or pad, off its centre, is the
+        overlap-style joint issue #8216 asks this pass to remove.
+        """
+        p = (self.nodes[i].a, self.nodes[i].b)[end]
+        for k in self.anch[i][end]:
+            if k in removed:
+                continue
+            o = self.nodes[k]
+            if o.kind == "seg" or (o.kind in ("via", "pad") and math.dist(p, o.a) <= CENTRE_TOL):
+                return True
+        return False
+
+    def degrades_ends(self, touched: set[int], before: set[int], after: set[int]) -> bool:
+        """Would removing ``after - before`` leave a surviving track end
+        off-centre-only that was clean before?"""
+        for k in touched:
+            if k in after or self.nodes[k].kind != "seg":
+                continue
+            for x in (0, 1):
+                if self.clean_end(k, x, before) and not self.clean_end(k, x, after):
+                    return True
+        return False
+
+    def still_joined(self, touched: set[int], removed: set[int]) -> bool:
+        """Are all live nodes in ``touched`` in one component once ``removed``
+        is gone, using only track / via / pad joins?
+
+        This is the local redundancy test: it does not depend on the model
+        seeing every terminal, so a join the model misses can only make a
+        removal look *less* redundant.
+        """
+        zones = {k for k, nd in enumerate(self.nodes) if nd.kind == "zone"}
+        live = [k for k in touched if k not in removed and k not in zones]
+        if len(live) <= 1:
+            return True
+        comp = self.components(removed | zones)
+        return len({comp[k] for k in live}) == 1
 
     def offcentre_end(self, i: int) -> bool:
         s = self.nodes[i]
@@ -462,6 +523,100 @@ def _group_for(model: _NetModel, seed: int, removed: set[int]) -> set[int] | Non
     return group
 
 
+def _end_pt(n: _Node, e: int) -> tuple[float, float]:
+    return n.a if e == 0 else n.b
+
+
+def _set_end(n: _Node, e: int, p: tuple[float, float]) -> None:
+    if e == 0:
+        n.a = p
+    else:
+        n.b = p
+
+
+def _try_snap(
+    model: _NetModel,
+    plan: NetPlan,
+    i: int,
+    e: int,
+    removed: set[int],
+    baseline: frozenset[frozenset[int]],
+) -> None:
+    """Snap end ``e`` of segment ``i`` -- and every track end sharing that
+    point -- onto the nearest anchoring via/pad centre, if that is safe.
+
+    Moving the whole coincident group keeps the shared joint shared; moving
+    one end alone would strand its neighbours off-centre.
+    """
+    n = model.nodes[i]
+    p = _end_pt(n, e)
+    target = None
+    for j in model.anch[i][e]:
+        o = model.nodes[j]
+        if o.kind in ("via", "pad") and j not in removed:
+            d = math.dist(p, o.a)
+            if d > CENTRE_TOL and (target is None or d < target[0]):
+                target = (d, o.a)
+    if target is None:
+        return
+    c = target[1]
+    movers = [(i, e)]
+    for k in model.anch[i][e]:
+        if k in removed or model.nodes[k].kind != "seg":
+            continue
+        for x in (0, 1):
+            if _same_pt(_end_pt(model.nodes[k], x), p):
+                movers.append((k, x))
+    for k, x in movers:
+        if model.protected[k]:
+            return  # a sharer may hide a join: leave the joint alone
+        if math.dist(_end_pt(model.nodes[k], 1 - x), c) <= CENTRE_TOL:
+            return  # would collapse a segment to zero length
+    moved = {k for k, _ in movers}
+    touched = set(moved)
+    for k in moved:
+        touched |= model.adj[k]
+    saved = {k: (set(model.adj[k]), [set(a) for a in model.anch[k]]) for k in touched}
+    old = {k: (model.nodes[k].a, model.nodes[k].b) for k in moved}
+    clean_before = {
+        (k, x): model.clean_end(k, x, removed)
+        for k in touched
+        if k not in moved and model.nodes[k].kind == "seg"
+        for x in (0, 1)
+    }
+    for k, x in movers:
+        _set_end(model.nodes[k], x, c)
+    for k in moved:
+        model.relink(k)
+    ok = (
+        model.partition(removed) == baseline
+        and all(model.end_ok(k, removed) for k in moved)
+        and model.still_joined(touched, removed)
+        # no neighbour's end may be left off-centre-only (#8216)
+        and not any(
+            was and not model.clean_end(k, x, removed) for (k, x), was in clean_before.items()
+        )
+        # every hard-anchored end stays hard-anchored
+        and all(
+            not any(model.nodes[m].kind != "zone" for m in saved[k][1][x])
+            or bool(model.hard_anchors(k, x) - removed)
+            for k in touched
+            if model.nodes[k].kind == "seg"
+            for x in (0, 1)
+        )
+    )
+    if ok:
+        for k, x in movers:
+            plan.snaps.append((model.nodes[k].index, ("start", "end")[x], c))
+        return
+    for k in moved:
+        model.nodes[k].a, model.nodes[k].b = old[k]
+        model.relink(k)
+    for k, (adj_k, anch_k) in saved.items():
+        model.adj[k] = adj_k
+        model.anch[k] = anch_k
+
+
 def _plan_net(model: _NetModel, net_number: int) -> NetPlan:
     plan = NetPlan(net_number=net_number)
     baseline = model.partition(set())
@@ -492,7 +647,12 @@ def _plan_net(model: _NetModel, net_number: int) -> NetPlan:
                     group = _group_for(model, s, removed)
                     if not group:
                         continue
-                if model.partition(removed | group) != baseline:
+                touched = {k for g in group for k in model.adj[g]} - group
+                if (
+                    model.partition(removed | group) != baseline
+                    or not model.still_joined(touched, removed | group)
+                    or model.degrades_ends(touched, removed, removed | group)
+                ):
                     continue
                 off = any(model.offcentre_end(g) for g in group)
                 removed |= group
@@ -509,41 +669,9 @@ def _plan_net(model: _NetModel, net_number: int) -> NetPlan:
     for i in seg_ids:
         if i in removed or model.protected[i]:
             continue
-        n = model.nodes[i]
-        for which, e in (("start", 0), ("end", 1)):
-            end = n.a if e == 0 else n.b
-            target = None
-            for j in model.anch[i][e]:
-                o = model.nodes[j]
-                if o.kind in ("via", "pad") and j not in removed:
-                    d = math.dist(end, o.a)
-                    if d > CENTRE_TOL and (target is None or d < target[0]):
-                        target = (d, o.a)
-            if target is None:
-                continue
-            affected = {i} | set(model.adj[i])
-            saved = {k: (set(model.adj[k]), [set(x) for x in model.anch[k]]) for k in affected}
-            old = (n.a, n.b)
-            if e == 0:
-                n.a = target[1]
-            else:
-                n.b = target[1]
-            model.relink(i)
-            ok = model.partition(removed) == baseline and model.end_ok(i, removed)
-            ok = ok and all(
-                (not any(saved[k][1][x]) or any(m not in removed for m in model.anch[k][x]))
-                for k in affected
-                if model.nodes[k].kind == "seg"
-                for x in (0, 1)
-            )
-            if ok:
-                plan.snaps.append((n.index, which, target[1]))
-            else:
-                n.a, n.b = old
-                model.relink(i)
-                for k, (adj_k, anch_k) in saved.items():
-                    model.adj[k] = adj_k
-                    model.anch[k] = anch_k
+        for e in (0, 1):
+            _try_snap(model, plan, i, e, removed, baseline)
+
     return plan
 
 
