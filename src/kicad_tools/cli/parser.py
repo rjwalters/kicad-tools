@@ -813,7 +813,10 @@ def _add_creepage_parser(subparsers) -> None:
             "Exclude same-footprint pad pairs (component-internal spacing) from "
             "the exit-code gate.  They remain listed (annotated WAIVED) as "
             "component-rating residuals -- qualify them at the component, not the "
-            "layout.  Does NOT affect the kct audit manufacturing-readiness gate."
+            "layout.  A waived same-footprint row is NOT evidence the pair has no "
+            "board-level exposure: such pairs also get a separate board row "
+            "(#8232) that this flag never waives.  Does NOT affect the kct audit "
+            "manufacturing-readiness gate."
         ),
     )
     # Attach-zone waiver (#8028): the census-side counterpart of the router's
