@@ -436,7 +436,7 @@ class TestMergeLcscFrom:
     """Explicit LCSC merge source (issue #8260)."""
 
     @staticmethod
-    def _export(tmp_path, **cfg):
+    def _export(tmp_path, manufacturer="jlcpcb-tier1", **cfg):
         from unittest.mock import MagicMock, patch
 
         from kicad_tools.export.assembly import AssemblyConfig, AssemblyPackage
@@ -453,7 +453,7 @@ class TestMergeLcscFrom:
                 include_bom=True, include_pnp=False, include_gerbers=False, auto_lcsc=False, **cfg
             )
             package = AssemblyPackage(
-                pcb_path=BOARD06_PCB, manufacturer="jlcpcb-tier1", config=config
+                pcb_path=BOARD06_PCB, manufacturer=manufacturer, config=config
             )
             return package.export(output_dir=tmp_path / "out")
 
@@ -465,23 +465,55 @@ class TestMergeLcscFrom:
         result = self._export(tmp_path, merge_lcsc=False)
         assert "disabled" in result.lcsc_merge_source
 
-    def test_explicit_source_is_used(self, tmp_path):
+    @staticmethod
+    def _write_source(path, designator_lcsc):
+        """Write a JLCPCB-format source CSV for board 06's R1-R4 (100 ohm 0603)."""
         import csv
 
-        first = self._export(tmp_path)
-        src = tmp_path / "prev" / "bom_jlcpcb.csv"
-        src.parent.mkdir()
-        with first.bom_path.open(newline="") as f:
-            rows = list(csv.DictReader(f))
-        with src.open("w", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=list(rows[0]))
-            w.writeheader()
-            w.writerows(rows)
-        (tmp_path / "out" / "bom_jlcpcb.csv").unlink()
-        result = self._export(tmp_path, merge_lcsc_from=src)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["Comment", "Designator", "Footprint", "LCSC Part #"])
+            w.writerow(["100", "R1,R2,R3,R4", "Resistor_SMD:R_0603_1608Metric", designator_lcsc])
+        return path
+
+    def test_explicit_source_reaches_written_bom(self, tmp_path):
+        """With the spec off, no board 06 part has an LCSC; the source supplies one.
+
+        Pins the feature end to end (#8260): the merged number must land in
+        the written BOM, and the reported count must match it.
+        """
+        import csv
+
+        src = self._write_source(tmp_path / "prev" / "bom_jlcpcb.csv", "C25744")
+        baseline = self._export(tmp_path / "base", no_spec=True)
+        with baseline.bom_path.open(newline="") as f:
+            assert not any(r["LCSC Part #"] for r in csv.DictReader(f))
+        assert "C25744" not in baseline.bom_path.read_text()
+
+        result = self._export(tmp_path, no_spec=True, merge_lcsc_from=src)
+        assert result.lcsc_merge_count >= 1
         assert str(src) in result.lcsc_merge_source
-        assert "no existing BOM" not in result.lcsc_merge_source
-        assert f"({result.lcsc_merge_count} parts merged)" in result.lcsc_merge_source
+        assert result.lcsc_merge_source.endswith(f"({result.lcsc_merge_count} parts merged)")
+        with result.bom_path.open(newline="") as f:
+            rows = list(csv.DictReader(f))
+        r1 = next(r for r in rows if "R1" in r["Designator"].split(","))
+        assert r1["LCSC Part #"] == "C25744"
+        # Only the matching (value, footprint) group picked it up.
+        assert sum(1 for r in rows if r["LCSC Part #"] == "C25744") == 1
+        assert not result.lcsc_merge_conflicts
+
+    def test_merge_disabled_ignores_explicit_source(self, tmp_path):
+        src = self._write_source(tmp_path / "prev.csv", "C25744")
+        result = self._export(tmp_path, no_spec=True, merge_lcsc=False, merge_lcsc_from=src)
+        assert result.lcsc_merge_count == 0
+        assert "C25744" not in result.bom_path.read_text()
+
+    def test_non_jlcpcb_manufacturer_accepts_explicit_source(self, tmp_path):
+        src = self._write_source(tmp_path / "prev.csv", "C25744")
+        result = self._export(tmp_path, manufacturer="pcbway", no_spec=True, merge_lcsc_from=src)
+        assert result.success
+        assert str(src) in result.lcsc_merge_source
 
     def test_empty_source_reports_zero_merged(self, tmp_path):
         src = tmp_path / "empty.csv"
