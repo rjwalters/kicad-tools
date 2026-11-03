@@ -14,6 +14,11 @@ removes them -- never by rule name or count alone:
 * fewer findings than listed (a partial source fix) is accepted.
 
 Remove a board's entries when the cited fix lands.
+
+Advisory-only rules in :data:`NON_GATING_RULE_PREFIXES` (``redundant_copper_*``,
+Issue #8218) are never counted as unaccepted: they are warning-only quality
+hints about router output, not fab-blocking, so a strict "any warning fails"
+gate must not trip on them.
 """
 
 from __future__ import annotations
@@ -23,6 +28,9 @@ from typing import Any
 
 #: ``(rule_id, ref, pad)``.
 KnownWarningKey = tuple[str, str, str]
+
+#: Rule-id prefixes that are advisory hints and never fail a strict gate (#8218).
+NON_GATING_RULE_PREFIXES: tuple[str, ...] = ("redundant_copper",)
 
 
 def _field(violation: Any, name: str) -> Any:
@@ -79,6 +87,8 @@ def unaccepted_warnings(
     extra: list[str] = []
     for violation in violations:
         if not _is_active_warning(violation):
+            continue
+        if str(_field(violation, "rule_id") or "").startswith(NON_GATING_RULE_PREFIXES):
             continue
         key = warning_key(violation)
         if key is None or key not in known:
