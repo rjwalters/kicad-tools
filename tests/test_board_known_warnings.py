@@ -91,9 +91,13 @@ def test_waived_and_info_findings_are_ignored():
 
 
 def test_redundant_copper_advisories_never_fail_a_strict_gate():
-    """Issue #8218: ``redundant_copper_*`` are warning-only hints, not gating."""
+    """Issue #8218: ``redundant_copper_*`` are warning-only hints, not gating.
+
+    Real findings carry ``items == []`` (the net is only in the message), so the
+    fixture mirrors that shape.
+    """
     findings = [
-        {"rule_id": rid, "severity": "warning", "waived": False, "items": ["Net1"]}
+        {"rule_id": rid, "severity": "warning", "waived": False, "items": []}
         for rid in (
             "redundant_copper_fragments",
             "redundant_copper_detour",
