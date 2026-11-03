@@ -411,8 +411,13 @@ class PreflightChecker:
         bom_source: str = "schematic",
         parts_cache=None,
         parts_catalog=None,
+        merge_lcsc: bool = True,
+        merge_lcsc_from: str | Path | None = None,
     ):
         self.pcb_path = Path(pcb_path)
+        # LCSC merge source, mirroring AssemblyConfig (issue #8260).
+        self._merge_lcsc = merge_lcsc
+        self._merge_lcsc_from = Path(merge_lcsc_from) if merge_lcsc_from else None
         self.schematic_path = Path(schematic_path) if schematic_path else None
         self.manufacturer = manufacturer.lower()
         self.output_dir = Path(output_dir) if output_dir else None
@@ -2238,9 +2243,9 @@ class PreflightChecker:
                 )
 
                 cfg = AssemblyConfig()
-                if cfg.merge_lcsc:
-                    csv_path = self.output_dir / cfg.bom_filename.format(
-                        manufacturer=self._fab_family
+                if self._merge_lcsc:
+                    csv_path = self._merge_lcsc_from or (
+                        self.output_dir / cfg.bom_filename.format(manufacturer=self._fab_family)
                     )
                     if csv_path.is_file():
                         existing = read_existing_lcsc_assignments(csv_path)

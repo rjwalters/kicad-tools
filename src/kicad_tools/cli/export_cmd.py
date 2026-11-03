@@ -183,7 +183,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-merge-lcsc",
         action="store_true",
-        help="Disable merging LCSC part numbers from an existing BOM CSV",
+        help=(
+            "Disable merging LCSC part numbers from an existing BOM CSV. By default the "
+            "merge reads <output-dir>/bom_<mfr>.csv, so a new output directory has "
+            "nothing to merge (see --merge-lcsc-from)"
+        ),
+    )
+    parser.add_argument(
+        "--merge-lcsc-from",
+        metavar="BOM_CSV",
+        default=None,
+        help=(
+            "Merge LCSC part numbers from this BOM CSV (e.g. the previous revision's "
+            "verified bom_jlcpcb.csv) instead of <output-dir>/bom_<mfr>.csv. "
+            "A missing file is an error; --no-merge-lcsc takes precedence"
+        ),
     )
     parser.add_argument(
         "--skip-preflight",
@@ -317,6 +331,7 @@ def build_manufacturing_config(
     no_spec: bool = False,
     spec_path: Path | None = None,
     merge_lcsc: bool = True,
+    merge_lcsc_from: Path | None = None,
     bom_source: str = "schematic",
     skip_preflight: bool = False,
     skip_drc: bool = False,
@@ -385,6 +400,7 @@ def build_manufacturing_config(
         no_spec=no_spec,
         spec_path=spec_path,
         merge_lcsc=merge_lcsc,
+        merge_lcsc_from=merge_lcsc_from,
         bom_source=bom_source,
         preflight=preflight_cfg,
         strict_preflight=strict_preflight,
@@ -434,6 +450,12 @@ def run_export(args: argparse.Namespace) -> int:
         print(f"Error: Spec file not found: {spec_path}", file=sys.stderr)
         return 1
 
+    merge_from_arg = getattr(args, "merge_lcsc_from", None)
+    merge_lcsc_from = Path(merge_from_arg) if merge_from_arg else None
+    if merge_lcsc_from is not None and not merge_lcsc_from.is_file():
+        print(f"Error: --merge-lcsc-from file not found: {merge_lcsc_from}", file=sys.stderr)
+        return 1
+
     # Determine output directory
     output_dir = Path(args.output) if args.output else pcb_path.parent / "manufacturing"
 
@@ -449,6 +471,7 @@ def run_export(args: argparse.Namespace) -> int:
         no_spec=getattr(args, "no_spec", False),
         spec_path=spec_path,
         merge_lcsc=not getattr(args, "no_merge_lcsc", False),
+        merge_lcsc_from=merge_lcsc_from,
         bom_source=getattr(args, "bom_source", "schematic"),
         skip_preflight=getattr(args, "skip_preflight", False),
         skip_drc=getattr(args, "skip_drc", False),
@@ -546,6 +569,8 @@ def run_export(args: argparse.Namespace) -> int:
                 print()
                 for line in overlay.summary_lines():
                     print(f"  {line}")
+            if result.assembly_result.lcsc_merge_source:
+                print(f"  {result.assembly_result.lcsc_merge_source}")
             # Report LCSC enrichment results
             if result.assembly_result.lcsc_enrichment:
                 enrichment = result.assembly_result.lcsc_enrichment

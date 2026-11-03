@@ -80,6 +80,12 @@ class AssemblyConfig:
     # an existing BOM CSV when regenerating.  Enabled by default.
     merge_lcsc: bool = True
 
+    # Explicit LCSC merge source (issue #8260).  When set, replaces the
+    # default ``<output-dir>/bom_<mfr>.csv`` lookup so a new revision's bundle
+    # can name the previous verified BOM.  A missing file is an error.
+    # ``merge_lcsc=False`` (--no-merge-lcsc) takes precedence.
+    merge_lcsc_from: Path | None = None
+
     # Filtering
     exclude_references: list[str] = field(default_factory=list)
 
@@ -110,6 +116,9 @@ class AssemblyPackageResult:
     """Distinct (value, footprint, LCSC) part groups in the BOM."""
     bom_missing_lcsc: list[str] = field(default_factory=list)
     """References written to the BOM with no LCSC part number."""
+    lcsc_merge_source: str | None = None
+    """One-line description of the LCSC merge source used (issue #8260):
+    the CSV path, "no existing BOM to merge", or "disabled"."""
     pnp_placement_count: int = 0
     """Rows written to the CPL."""
     pnp_layers: list[str] = field(default_factory=list)
@@ -451,10 +460,20 @@ class AssemblyPackage:
         # overwritten. Explicit MPN-only selections also take priority over
         # old generic CSV assignments, even with auto-matching disabled.
         csv_merge_refs: set[str] = set()
-        if self.config.merge_lcsc:
+        merge_source = ""
+        if not self.config.merge_lcsc:
+            merge_source = "LCSC merge: disabled (--no-merge-lcsc)"
+        else:
             filename = self.config.bom_filename.format(manufacturer=self.fab_family)
-            existing_csv = output_dir / filename
+            if self.config.merge_lcsc_from is not None:
+                existing_csv = Path(self.config.merge_lcsc_from)
+                if not existing_csv.is_file():
+                    msg = f"--merge-lcsc-from file not found: {existing_csv}"
+                    raise FileNotFoundError(msg)
+            else:
+                existing_csv = output_dir / filename
             if existing_csv.is_file():
+                merge_source = f"LCSC merge source: {existing_csv}"
                 existing = read_existing_lcsc_assignments(existing_csv)
                 if existing:
                     # Validate read-back assignments against the local
@@ -481,6 +500,14 @@ class AssemblyPackage:
                             "CSV merge: preserved %d LCSC assignment(s) from existing BOM",
                             merged_count,
                         )
+            else:
+                merge_source = (
+                    f"LCSC merge source: no existing BOM to merge (looked for {existing_csv})"
+                )
+
+        if result is not None:
+            result.lcsc_merge_source = merge_source
+        logger.info(merge_source)
 
         # LCSC auto-matching for JLCPCB exports
         if self.config.auto_lcsc and self.fab_family == "jlcpcb":

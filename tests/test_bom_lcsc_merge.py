@@ -430,3 +430,67 @@ def test_snapshot_dir_ignores_transient_kicad_lock(tmp_path):
     (out / "stray.csv").unlink()
     (out / "diffpair_test.kicad_sch").write_text("(kicad_sch changed)")
     assert before != _snapshot_dir(tmp_path)
+
+
+class TestMergeLcscFrom:
+    """Explicit LCSC merge source (issue #8260)."""
+
+    @staticmethod
+    def _export(tmp_path, **cfg):
+        from unittest.mock import MagicMock, patch
+
+        from kicad_tools.export.assembly import AssemblyConfig, AssemblyPackage
+        from tests._board06_sourcing import BOARD06_PCB
+
+        mock = MagicMock()
+        mock.__enter__.return_value = mock
+        mock._get_client.return_value = None
+        with (
+            patch("kicad_tools.export.bom_enrich.PartSuggester", return_value=mock),
+            patch("kicad_tools.parts.cache.PartsCache", return_value=None),
+        ):
+            config = AssemblyConfig(
+                include_bom=True, include_pnp=False, include_gerbers=False, auto_lcsc=False, **cfg
+            )
+            package = AssemblyPackage(
+                pcb_path=BOARD06_PCB, manufacturer="jlcpcb-tier1", config=config
+            )
+            return package.export(output_dir=tmp_path / "out")
+
+    def test_fresh_dir_reports_no_existing_bom(self, tmp_path):
+        result = self._export(tmp_path)
+        assert "no existing BOM to merge" in result.lcsc_merge_source
+
+    def test_disabled_reports_disabled(self, tmp_path):
+        result = self._export(tmp_path, merge_lcsc=False)
+        assert "disabled" in result.lcsc_merge_source
+
+    def test_explicit_source_is_used(self, tmp_path):
+        import csv
+
+        first = self._export(tmp_path)
+        src = tmp_path / "prev" / "bom_jlcpcb.csv"
+        src.parent.mkdir()
+        with first.bom_path.open(newline="") as f:
+            rows = list(csv.DictReader(f))
+        rows[0]["LCSC Part #"] = "C12345"
+        with src.open("w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=list(rows[0]))
+            w.writeheader()
+            w.writerows(rows)
+        (tmp_path / "out" / "bom_jlcpcb.csv").unlink()
+        result = self._export(tmp_path, merge_lcsc_from=src)
+        assert str(src) in result.lcsc_merge_source
+        assert "no existing BOM" not in result.lcsc_merge_source
+
+    def test_no_merge_takes_precedence(self, tmp_path):
+        src = tmp_path / "prev.csv"
+        src.write_text("x\n")
+        result = self._export(tmp_path, merge_lcsc=False, merge_lcsc_from=src)
+        assert "disabled" in result.lcsc_merge_source
+        assert result.success
+
+    def test_missing_explicit_source_is_error(self, tmp_path):
+        result = self._export(tmp_path, merge_lcsc_from=tmp_path / "nope.csv")
+        assert not result.success
+        assert "--merge-lcsc-from file not found" in result.errors[0]

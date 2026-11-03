@@ -1183,6 +1183,7 @@ _EXPORT_PASS_THROUGH_CASES = {
     "no_spec": (["--no-spec"], True),
     "spec": (["--spec", "project.kct"], "project.kct"),
     "no_merge_lcsc": (["--no-merge-lcsc"], True),
+    "merge_lcsc_from": (["--merge-lcsc-from", "prev_bom.csv"], "prev_bom.csv"),
     "skip_preflight": (["--skip-preflight"], True),
     "skip_drc_floor": (["--skip-drc-floor"], True),
     "strict_preflight": (["--strict-preflight"], True),
