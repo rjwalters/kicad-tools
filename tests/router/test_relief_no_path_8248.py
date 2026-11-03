@@ -415,3 +415,139 @@ def test_skipped_rip_is_not_called_a_roll_back():
         _sealed_router()._targeted_ripup_failure_label(PLAN_NOTHING)
         == "rip skipped, all blockers protected"
     )
+
+
+# --- Issue #8256: every clearance source the blocker's neighbours honour -----
+
+
+def _diff_pair_blocker_router(intra=0.1):
+    """N2 is one leg of a declared diff pair with N6 (class gap ``intra``)."""
+    from kicad_tools.router.rules import NetClassRouting
+
+    router = _sealed_router()
+    router.add_component(
+        "J1",
+        [
+            {
+                "number": "1",
+                "x": 2.0,
+                "y": 2.0,
+                "width": 0.6,
+                "height": 0.6,
+                "net": 6,
+                "net_name": "N6",
+            }
+        ],
+    )
+    for net, partner in (("N2", "N6"), ("N6", "N2")):
+        router.net_class_map[net] = NetClassRouting(
+            name="DP",
+            trace_width=0.2,
+            clearance=0.2,
+            intra_pair_clearance=intra,
+            diffpair_partner=partner,
+        )
+    assert router._diff_pair_partner_net(2) == 6
+    return router
+
+
+def test_freed_band_honours_an_unripped_diff_pair_partners_gap():
+    """Judge's probe H: ripped N2's partner N6 stayed put and may legally sit
+    at the 0.1 mm intra-pair gap, so the 0.2 mm class clearance does not bound
+    the vacated band and "no width shortfall" would be a false fit."""
+    router = _diff_pair_blocker_router(intra=0.1)
+    line = router._relief_corridor_need(1, {2: [_seg(0, 0, 5, 0, width=0.2, net=2)]}, {})
+    freed = 0.2 + 2 * 0.1
+    assert f"freed >= {freed:.3f} mm" in line, line
+    assert "diff-pair gap to unripped partner N6" in line, line
+    assert f"shortfall <= {_need(router) - freed:.3f} mm" in line, line
+    assert "no width shortfall" not in line, line
+
+
+def test_ripped_partner_does_not_lower_the_band():
+    """Both legs ripped: the partner's copper is gone, so the gap no longer binds."""
+    router = _diff_pair_blocker_router(intra=0.1)
+    line = router._relief_corridor_need(
+        1,
+        {2: [_seg(0, 0, 5, 0, width=0.2, net=2)], 6: [_seg(0, 0.3, 5, 0.3, width=0.2, net=6)]},
+        {},
+    )
+    assert "diff-pair gap" not in line, line
+    assert "freed >= 0.600 mm" in line, line
+
+
+def test_classless_diff_pair_gap_is_not_measured():
+    """A detected pair with no class on either leg has no resolvable gap."""
+    router = _diff_pair_blocker_router()
+    router.net_class_map.clear()
+    with patch.object(type(router), "_diff_pair_partner_net", return_value=6):
+        line = router._relief_corridor_need(1, {2: [_seg(0, 0, 5, 0, width=0.2, net=2)]}, {})
+    assert "freed corridor not measured (diff-pair gap of N2/N6 not resolved" in line, line
+    assert "freed >=" not in line and "shortfall" not in line, line
+
+
+def test_fixed_fill_uses_the_blockers_unraised_class_clearance():
+    """Judge's probe J: the fixed-fill check holds a trace to its CLASS
+    clearance, not raised to the board's, so a 0.1 mm class lets the blocker
+    sit 0.1 mm from a fill on its layer."""
+    from shapely.geometry import box
+
+    from kicad_tools.router.fixed_copper import FixedFill, FixedFillObstacles
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.rules import NetClassRouting
+
+    router = _sealed_router()
+    router.net_class_map["N2"] = NetClassRouting(name="TIGHT", trace_width=0.2, clearance=0.1)
+    blocker = {2: [_seg(0, 0, 5, 0, width=0.2, net=2)]}
+    # No fill on the board: the class clearance is never consulted.
+    assert "freed >= 0.600 mm" in router._relief_corridor_need(1, blocker, {})
+    layer = router.grid.layer_to_index(Layer.F_CU.value)
+    router.grid.fixed_fills = FixedFillObstacles(
+        (FixedFill("N9", 9, layer, 0.0, box(15.0, 0.0, 19.0, 4.0)),)
+    )
+    line = router._relief_corridor_need(1, blocker, {})
+    assert "freed >= 0.400 mm" in line, line
+    assert "fixed-fill clearance" in line, line
+    assert "no width shortfall" not in line, line
+
+
+def test_foreign_pad_closer_than_the_rule_minimum_is_measured():
+    """A pad carve-out / fine-pitch clearance can put a foreign pad nearer the
+    blocker than any net rule; pads never move, so the real gap is used."""
+    router = _sealed_router()
+    router.add_component(
+        "U9",
+        [
+            {
+                "number": "7",
+                "x": 2.0,
+                "y": 0.45,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 8,
+                "net_name": "N8",
+            }
+        ],
+    )
+    # Pad edge at y=0.25, blocker edge at y=0.1: a 0.15 mm gap.
+    line = router._relief_corridor_need(1, {2: [_seg(0, 0, 5, 0, width=0.2, net=2)]}, {})
+    assert "freed >= 0.500 mm" in line, line
+    assert "measured gap to pad U9.7 (N8)" in line, line
+    assert "no width shortfall" not in line, line
+
+
+def test_unripped_copper_sharing_the_blockers_clearance_is_measured():
+    """Negotiated sharing can leave a foreign trace inside the blocker's
+    clearance; the band it vacated is bounded by that real gap."""
+    router = _sealed_router()
+    neighbour = _seg(0, 0.35, 5, 0.35, width=0.2, net=7)  # 0.15 mm edge gap
+    router.routes.append(neighbour)
+    line = router._relief_corridor_need(1, {2: [_seg(0, 0, 5, 0, width=0.2, net=2)]}, {})
+    assert "freed >= 0.500 mm" in line, line
+    assert "measured gap to Net_7 copper" in line, line
+    # The same copper, placed since the rip, is re-occupation -- not the band.
+    line = router._relief_corridor_need(
+        1, {2: [_seg(0, 0, 5, 0, width=0.2, net=2)]}, {7: [neighbour]}
+    )
+    assert "freed >= 0.600 mm" in line, line
+    assert "re-occupied since the rip by Net_7" in line, line

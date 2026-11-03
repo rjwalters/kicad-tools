@@ -16991,36 +16991,32 @@ class Autorouter:
         from .plane_via_sites import _segment_point_distance, _segment_segment_distance
 
         resolver = self.rules.clearance_resolver(self.net_class_map)
-        floors = self.rules.net_clearance_floors or {}
 
         def _name(net: int) -> str:
             return self.net_names.get(net, f"Net_{net}")
 
-        partners = [""] + sorted({n for n in self.net_names.values() if n})
-        partner_kinds = (CopperKind.TRACE, CopperKind.VIA, CopperKind.PAD)
-        best: tuple[float, float, float, int, bool] | None = None  # (freed, w, c, net, floored)
+        # Copper that is on the board now but was placed after the last rip
+        # is the re-occupation check's business, not the freed band's.
+        placed_ids = {id(r) for rs in (placed_since_rip or {}).values() for r in rs}
+        ripped_nets = set(ripped_routes)
+        best: tuple[float, float, float, int, str] | None = None  # (freed, w, c, net, source)
         for net, segs in ripped.items():
             w = min(seg.width for seg in segs)
             if w <= 0:
                 return "freed corridor not measured (a ripped segment has no width)"
-            try:
-                own = _name(net)
-                c_min = min(
-                    resolver.required_mm(own, o, CopperKind.TRACE, k)
-                    for o in partners
-                    if o != own
-                    for k in partner_kinds
-                )
-            except Exception:
-                return "freed corridor not measured (blocker clearance not resolved)"
-            floor = floors.get(net, 0.0)
-            c = max(c_min, floor)
+            c_or_reason = self._relief_blocker_min_clearance(
+                net, segs, failed_net, ripped_nets, placed_ids, resolver, CopperKind
+            )
+            if isinstance(c_or_reason, str):
+                return f"freed corridor not measured ({c_or_reason})"
+            c, source = c_or_reason
+            if c < 0:
+                return f"freed corridor not measured (ripped {_name(net)} overlaps {source})"
             freed = w + 2 * c
             if best is None or freed < best[0]:
-                best = (freed, w, c, net, floor > c_min)
+                best = (freed, w, c, net, source)
         assert best is not None
-        freed, w, c, blocker, floored = best
-        band_scope = "blocker's own authored floor" if floored else "blocker's minimum clearance"
+        freed, w, c, blocker, band_scope = best
         shortfall = need_mm - freed
         short_text = (
             f"shortfall <= {shortfall:.3f} mm"
@@ -17082,6 +17078,199 @@ class Autorouter:
             f"{freed_text}; not re-occupied (copper placed since the rip lies clear "
             f"of the ripped traces)"
         )
+
+    def _relief_blocker_min_clearance(
+        self,
+        net: int,
+        segs: list[Any],
+        failed_net: int,
+        ripped_nets: set[int],
+        placed_ids: set[int],
+        resolver: Any,
+        copper_kind: Any,
+    ) -> tuple[float, str] | str:
+        """Smallest gap any neighbour of ripped blocker ``net`` may legally hold (#8256).
+
+        Returns ``(clearance, source)`` -- the minimum over every clearance
+        source the router honours for this blocker's copper -- or a reason
+        string when one of them cannot be resolved (the caller then prints
+        "not measured" instead of a number).  The sources:
+
+        1. **Pairwise / net class / via asymmetry** -- the resolver's minimum
+           for the blocker over every partner net (and no net) and every
+           partner copper kind (trace, via, pad).
+        2. **Per-net authored floors** -- raise (1) to the blocker's own
+           floor, which binds every pair it is in.  When attach-zone floor
+           exemptions may be installed (#8048) a ROUTER-class floor can be
+           waived inside them, so only the DESIGNER floor raises then.
+        3. **Diff-pair partner gap** -- a blocker whose pair partner was NOT
+           ripped may have had that partner at the intra-pair gap
+           (``effective_intra_pair_clearance()`` of either leg's class), which
+           can be below (1).  Not raised by any floor.  A partner with no net
+           class on either leg has no resolvable gap: not measured.
+        4. **Fixed fills** -- the router holds a trace to fixed fill copper at
+           its class clearance (NOT raised to the board clearance) or the
+           board clearance when classless, raised to the floor of (2); applies
+           when a fill shares a layer with the ripped copper.
+        5. **Measured fixed and current copper** -- foreign pads (their
+           component / fine-pitch / escape clearances and same-component
+           carve-outs can sit below every rule above), board-edge segments,
+           and every unripped foreign trace or via on the board now (catches
+           negotiated sharing).  Pads and the edge never move inside a rescue
+           and current copper is where it is, so the measured edge-to-edge
+           gap is exact; it counts only when it is below the rule minimum.
+           Excluded: the blocker's own net and the victim's (the victim may
+           abut its own copper), and copper placed since the last rip
+           (reported as re-occupation instead).
+        """
+        from .grid import pad_segment_edge_clearance
+        from .plane_via_sites import _segment_point_distance, _segment_segment_distance
+
+        def _name(n: int) -> str:
+            return self.net_names.get(n, f"Net_{n}")
+
+        own = _name(net)
+        # (1) resolver minimum over partner nets and copper kinds.
+        try:
+            partners = [""] + sorted({n for n in self.net_names.values() if n})
+            kinds = (copper_kind.TRACE, copper_kind.VIA, copper_kind.PAD)
+            c_min = min(
+                resolver.required_mm(own, o, copper_kind.TRACE, k)
+                for o in partners
+                if o != own
+                for k in kinds
+            )
+        except Exception:
+            return "blocker clearance not resolved"
+
+        # (2) own authored floor; designer-only where attach zones may waive.
+        designer = self.rules.designer_clearance_floors
+        if designer is not None and getattr(self, "_pairwise_attach_zone_pcb_path", None):
+            floor = float(designer.get(net, 0.0))
+        else:
+            floor = float((self.rules.net_clearance_floors or {}).get(net, 0.0))
+        cands: list[tuple[float, str]] = [
+            (
+                max(c_min, floor),
+                "blocker's own authored floor" if floor > c_min else "blocker's minimum clearance",
+            )
+        ]
+
+        own_cls = (self.net_class_map or {}).get(own)
+
+        # (3) diff-pair partner left in place.
+        try:
+            pair_partners: set[int] = set()
+            detected = self._diff_pair_partner_net(net)
+            if detected is not None:
+                pair_partners.add(detected)
+            declared = getattr(own_cls, "diffpair_partner", None) if own_cls else None
+            if declared:
+                pair_partners.update(n for n, nm in self.net_names.items() if nm == declared)
+        except Exception:
+            return f"diff-pair partner of {own} not resolved"
+        for partner in sorted(pair_partners):
+            if partner in ripped_nets or partner in (net, failed_net):
+                continue
+            partner_cls = (self.net_class_map or {}).get(_name(partner))
+            gaps = [
+                float(cls.effective_intra_pair_clearance())
+                for cls in (own_cls, partner_cls)
+                if cls is not None
+            ]
+            if not gaps:
+                return f"diff-pair gap of {own}/{_name(partner)} not resolved: no net class"
+            cands.append((min(gaps), f"diff-pair gap to unripped partner {_name(partner)}"))
+
+        # (4) fixed fills on a layer the ripped copper uses.
+        fills = getattr(self.grid, "fixed_fills", None)
+        if fills:
+            try:
+                seg_layers = {self.grid.layer_to_index(s.layer.value) for s in segs}
+            except Exception:
+                return "ripped copper layer not resolved"
+            if any(f.layer in seg_layers for f in fills.fills):
+                base = float(own_cls.clearance) if own_cls else float(self.rules.trace_clearance)
+                cands.append((max(base, floor), "fixed-fill clearance"))
+
+        c_rule, _ = min(cands, key=lambda t: t[0])
+
+        # (5) measured gaps to fixed and current copper, below the rule minimum.
+        skip_nets = {net, failed_net}
+        reach = c_rule
+        min_x = min(min(s.x1, s.x2) - s.width / 2 for s in segs) - reach
+        max_x = max(max(s.x1, s.x2) + s.width / 2 for s in segs) + reach
+        min_y = min(min(s.y1, s.y2) - s.width / 2 for s in segs) - reach
+        max_y = max(max(s.y1, s.y2) + s.width / 2 for s in segs) + reach
+
+        def _near(x1: float, y1: float, x2: float, y2: float, pad: float) -> bool:
+            return not (
+                max(x1, x2) + pad < min_x
+                or min(x1, x2) - pad > max_x
+                or max(y1, y2) + pad < min_y
+                or min(y1, y2) - pad > max_y
+            )
+
+        measured: tuple[float, str] | None = None
+
+        def _note(gap: float, what: str) -> None:
+            nonlocal measured
+            if gap < reach - 1e-9 and (measured is None or gap < measured[0]):
+                measured = (gap, what)
+
+        for pad in (getattr(self, "pads", None) or {}).values():
+            if pad.steiner_point or pad.net in skip_nets:
+                continue
+            half = max(pad.width, pad.height) / 2 * 1.5  # covers any rotation
+            if not _near(pad.x, pad.y, pad.x, pad.y, half):
+                continue
+            for s in segs:
+                if not pad.through_hole and pad.layer != s.layer:
+                    continue
+                gap = pad_segment_edge_clearance(pad, s.x1, s.y1, s.x2, s.y2, s.width / 2)
+                _note(gap, f"measured gap to pad {pad.ref}.{pad.pin} ({_name(pad.net)})")
+
+        for (ex1, ey1), (ex2, ey2) in getattr(self, "_edge_segments", None) or ():
+            if not _near(ex1, ey1, ex2, ey2, 0.0):
+                continue
+            for s in segs:
+                gap = _segment_segment_distance(s.x1, s.y1, s.x2, s.y2, ex1, ey1, ex2, ey2)
+                _note(gap - s.width / 2, "measured gap to the board edge")
+
+        seen: set[int] = set()
+        for route in [
+            *(getattr(self, "routes", None) or ()),
+            *(getattr(self, "existing_routes", None) or ()),
+        ]:
+            if id(route) in seen or id(route) in placed_ids or route.net in skip_nets:
+                continue
+            seen.add(id(route))
+            for o in route.segments:
+                if o.net in skip_nets or not _near(o.x1, o.y1, o.x2, o.y2, o.width / 2):
+                    continue
+                for s in segs:
+                    if s.layer != o.layer:
+                        continue
+                    gap = (
+                        _segment_segment_distance(s.x1, s.y1, s.x2, s.y2, o.x1, o.y1, o.x2, o.y2)
+                        - (s.width + o.width) / 2
+                    )
+                    _note(gap, f"measured gap to {_name(route.net)} copper")
+            for v in route.vias:
+                if not _near(v.x, v.y, v.x, v.y, v.diameter / 2):
+                    continue
+                lo, hi = sorted(lyr.stack_order for lyr in v.drilled_layers)
+                for s in segs:
+                    if not lo <= s.layer.stack_order <= hi:
+                        continue
+                    gap = _segment_point_distance(s.x1, s.y1, s.x2, s.y2, v.x, v.y) - (
+                        s.width / 2 + v.diameter / 2
+                    )
+                    _note(gap, f"measured gap to {_name(route.net)} via")
+
+        if measured is not None:
+            cands.append(measured)
+        return min(cands, key=lambda t: t[0])
 
     def _relief_witness_signature(self, failed_net: int, net_routes: dict[int, list[Route]]):
         """Identity of ``failed_net``'s current access-loss seal, or ``None``."""
