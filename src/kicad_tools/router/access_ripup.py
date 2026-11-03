@@ -309,6 +309,30 @@ class AccessLossTargeter:
         finally:
             self.seconds += time.perf_counter() - start
 
+    def peek_blockers_for(
+        self, failed_net: int, rippable_nets: Collection[int]
+    ) -> AccessLossWitness | None:
+        """:meth:`blockers_for` without recording it (Issue #8248).
+
+        Diagnostic callers (the relief repeat guard) need the current seal's
+        identity but must not add a witness for a rip-up that was never
+        attempted, nor spend the shared ``max_evaluations`` budget real
+        targeting draws on.  All bookkeeping the query touches is restored.
+        """
+        saved = (
+            self.queries,
+            self.hits,
+            self.evaluations,
+            self.truncated,
+            self.seconds,
+            len(self.witnesses),
+        )
+        try:
+            return self._blockers_for(failed_net, rippable_nets)
+        finally:
+            (self.queries, self.hits, self.evaluations, self.truncated, self.seconds) = saved[:5]
+            del self.witnesses[saved[5] :]
+
     def _blockers_for(
         self, failed_net: int, rippable_nets: Collection[int]
     ) -> AccessLossWitness | None:

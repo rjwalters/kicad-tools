@@ -16786,10 +16786,32 @@ class Autorouter:
             net_class = self.net_class_map.get(name)
             width = net_class.trace_width if net_class else self.rules.trace_width
             clearance = net_class.clearance if net_class else self.rules.trace_clearance
+            scope = "class clearance only, HV pairwise not included"
+            # Resolve against the nets that actually close the victim in, via the
+            # clearance resolver (pairwise / net floors), so an HV pair is not
+            # understated by the class value.
+            try:
+                gate = self._access_loss_gate()
+                witness = (
+                    gate.peek_blockers_for(failed_net, [n for n in self.net_names if n])
+                    if gate is not None
+                    else None
+                )
+                if witness is not None:
+                    others = set(witness.blocking_nets) | set(witness.held_nets)
+                    if others:
+                        resolver = self.rules.clearance_resolver(self.net_class_map)
+                        resolved = max(
+                            resolver.required_mm(name, self.net_names.get(o, "")) for o in others
+                        )
+                        clearance = max(clearance, resolved)
+                        scope = "resolved against closing nets"
+            except Exception:  # pragma: no cover - fall back to the labelled class value
+                pass
             need = f"{width + 2 * clearance:.3f} mm"
             return (
                 f"needs a {need} corridor (width {width:.3f} + 2x clearance "
-                f"{clearance:.3f}); freed width unknown"
+                f"{clearance:.3f}, {scope}); freed width unknown"
             )
         except Exception:  # pragma: no cover - diagnostics must never break a rescue
             return "required corridor width unknown; freed width unknown"
@@ -16801,7 +16823,9 @@ class Autorouter:
             if gate is None:
                 return None
             rippable = {n for n, routes in net_routes.items() if routes and n != failed_net}
-            witness = gate.blockers_for(failed_net, rippable)
+            # Non-recording: a diagnostic must not add witnesses for rips that
+            # never happened nor spend the shared targeting budget (#8248).
+            witness = gate.peek_blockers_for(failed_net, rippable)
             return witness.signature() if witness is not None else None
         except Exception:  # pragma: no cover - diagnostics must never break a rescue
             return None

@@ -99,3 +99,74 @@ def test_changed_witness_is_reattempted():
             router._commit_journal.iteration = it
             _relief(router, neg, net_routes, pads_by_net, guard, [])
     assert len(probes) == 2
+
+
+def _sealed_router():
+    """Victim pad on net 1 boxed in by four foreign-net pads (a real seal)."""
+    from kicad_tools.router.core import Autorouter
+
+    router = Autorouter(width=20.0, height=20.0)
+
+    def pad(num, x, y, net):
+        return {
+            "number": str(num),
+            "x": x,
+            "y": y,
+            "width": 0.6,
+            "height": 0.6,
+            "net": net,
+            "net_name": f"N{net}",
+        }
+
+    router.add_component("U1", [pad(1, 10.0, 10.0, 1), pad(2, 18.0, 18.0, 1)])
+    router.add_component(
+        "Q1",
+        [
+            pad(1, 10.8, 10.0, 2),
+            pad(2, 9.2, 10.0, 3),
+            pad(3, 10.0, 10.8, 4),
+            pad(4, 10.0, 9.2, 5),
+        ],
+    )
+    return router
+
+
+def test_real_signature_is_stable_and_leaves_targeter_untouched():
+    router = _sealed_router()
+    net_routes = {n: [object()] for n in (2, 3, 4, 5)}  # rip-able stand-ins
+    gate = router._access_loss_gate()
+    before = (gate.queries, gate.hits, gate.evaluations, len(gate.witnesses))
+    sig1 = router._relief_witness_signature(1, net_routes)
+    sig2 = router._relief_witness_signature(1, net_routes)
+    assert sig1 is not None, "fixture must actually seal the victim pad"
+    assert sig1 == sig2
+    assert (gate.queries, gate.hits, gate.evaluations, len(gate.witnesses)) == before
+    assert gate.witnesses == []
+
+
+def test_skip_fires_off_real_witness_without_recording_it():
+    from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
+
+    router = _sealed_router()
+    neg = NegotiatedRouter(
+        grid=router.grid, router=router.router, rules=router.rules, net_class_map={}
+    )
+    net_routes = {1: [], **{n: [object()] for n in (2, 3, 4, 5)}}
+    pads_by_net = {n: [router.pads[p] for p in keys] for n, keys in router.nets.items() if n}
+    guard = RipupCycleGuard()
+    log: list[str] = []
+    probes: list[int] = []
+
+    def probe(net, pf, per_net_timeout=None, **_kw):
+        probes.append(net)
+        return [], set()
+
+    with patch.object(router, "_relief_probe", side_effect=probe):
+        router._commit_journal.iteration = 1
+        assert _relief(router, neg, net_routes, pads_by_net, guard, log) is False
+        n = len(probes)
+        router._commit_journal.iteration = 2
+        assert _relief(router, neg, net_routes, pads_by_net, guard, log) is False
+    assert len(probes) == n, "identical real witness must skip the repeat"
+    assert guard.futile_relief_skips == [VICTIM]
+    assert router._access_loss_gate().witnesses == []
