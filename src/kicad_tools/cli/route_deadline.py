@@ -284,8 +284,12 @@ def _supervise(
                 os.close(fd)
                 output.replace(name)
                 state["unverified_output"] = name
-                if state.get("checkpoint") == str(output):
-                    state["checkpoint"] = name
+                # Issue #8258: the worker prints the checkpoint as the user
+                # typed it (possibly relative); ``output`` is absolute.
+                checkpoint = state.get("checkpoint")
+                if isinstance(checkpoint, str) and checkpoint:
+                    if Path(checkpoint).resolve() == output.resolve():
+                        state["checkpoint"] = name
                 # Keep authored context beside the quarantined checkpoint. It
                 # remains unverified; these copies do not authorize promotion.
                 sidecars = []
@@ -375,6 +379,8 @@ def run_attempt(argv: list[str] | None = None) -> RouteAttemptResult:
             path = Path(value) if value else None
             setattr(parsed, attribute, path.stat() if path and path.exists() else None)
         code = _supervise([sys.executable, "-m", __name__, *argv], budget, control)
+        if code == TIMEOUT_EXIT:
+            _note_skipped_failed_export(parsed, state)
         disposition = disposition_from_control(_read_control(control))
         if code == TIMEOUT_EXIT and disposition is not None:
             parsed._placement_disposition = disposition
@@ -384,6 +390,34 @@ def run_attempt(argv: list[str] | None = None) -> RouteAttemptResult:
             parsed._placement_output_before = output.stat() if output.exists() else None
             finish(parsed, code)
         return RouteAttemptResult(code, disposition)
+
+
+def _note_skipped_failed_export(parsed, state: dict) -> None:
+    """Issue #8258: say so when ``--export-failed-nets`` wrote nothing on timeout."""
+    target = getattr(parsed, "export_failed_nets", None)
+    if not target:
+        return
+    path = Path(target)
+    if path.exists() and path.stat() != getattr(parsed, "_placement_failed_before", None):
+        return
+    report = Path(state["output"]).with_suffix(".timeout.json")
+    if not report.exists():
+        return
+    try:
+        data = json.loads(report.read_text())
+        output = Path(state["output"])
+        data["export_failed_nets"] = {
+            "requested": str(path.absolute()),
+            "written": False,
+            "reason": "routing deadline exceeded; the failed-net set of an "
+            "unverified partial result is not exported",
+            "search_failures": str(
+                output.with_stem(output.stem + "_partial").with_suffix(".search_failures.json")
+            ),
+        }
+        report.write_text(json.dumps(data, indent=2) + "\n")
+    except (OSError, ValueError):
+        pass
 
 
 def _worker() -> int:
