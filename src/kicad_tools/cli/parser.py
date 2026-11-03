@@ -6984,6 +6984,15 @@ def _add_readiness_parser(subparsers) -> None:
         ),
     )
     rd_parser.add_argument(
+        "--skip-cleanup",
+        dest="readiness_skip_cleanup",
+        action="store_true",
+        help=(
+            "Skip the exact-duplicate copper cleanup (pcb dedupe) that otherwise runs "
+            "before the checks; the skip is recorded in the report and README.txt"
+        ),
+    )
+    rd_parser.add_argument(
         "--checked-at",
         dest="readiness_checked_at",
         metavar="ISO",

@@ -1700,3 +1700,49 @@ def test_bundled_pcb_never_references_a_kiprjmod_model_missing_from_the_archive(
     with zipfile.ZipFile(manufacturing / "kicad_project.zip") as zf:
         assert zf.read("3dshapes/J2.wrl") == body.read_bytes()
         assert "3dshapes/absent.wrl" not in zf.namelist()
+
+
+# ---------------------------------------------------------------------------
+# Copper cleanup step (issue #8218)
+# ---------------------------------------------------------------------------
+
+
+def _cleanup_options(tmp_path, **kw):
+    pcb = tmp_path / "b.kicad_pcb"
+    pcb.write_text("not a pcb")
+    return readiness_cmd.ReadinessOptions(
+        board_dir=tmp_path,
+        pcb=pcb,
+        schematic=None,
+        project=None,
+        manufacturer="jlcpcb",
+        mode="pcb_only",
+        output_dir=tmp_path / "out",
+        evidence_dir=tmp_path / "ev",
+        **kw,
+    )
+
+
+def test_copper_cleanup_skip_is_recorded(tmp_path):
+    record = readiness_cmd._copper_cleanup(_cleanup_options(tmp_path, skip_cleanup=True))
+    assert record == {"copper_cleanup": "skipped"}
+
+
+def test_copper_cleanup_runs_dedupe_and_records_counts(tmp_path, monkeypatch):
+    from kicad_tools.schema import pcb as pcb_mod
+
+    saved = []
+
+    class _P:
+        def dedupe_copper(self):
+            return {"segments": 15, "vias": 1}
+
+        def save(self, path):
+            saved.append(path)
+
+    monkeypatch.setattr(pcb_mod.PCB, "load", classmethod(lambda cls, p: _P()))
+    gen = readiness_cmd._copper_cleanup(_cleanup_options(tmp_path, operation="generate"))
+    assert gen["removed"] == {"segments": 15, "vias": 1} and saved
+    saved.clear()
+    ver = readiness_cmd._copper_cleanup(_cleanup_options(tmp_path))
+    assert ver["copper_cleanup"] == "verify-count-only" and not saved

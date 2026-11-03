@@ -20,6 +20,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from kicad_tools.validate.known_warnings import NON_GATING_RULE_PREFIXES
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BOARD_DIR = REPO_ROOT / "boards/04-stm32-devboard"
 BOARD_04_ROUTED_PCB = BOARD_DIR / "output/stm32_devboard_routed.kicad_pcb"
@@ -34,11 +36,21 @@ BOARD_04_RELPATH = BOARD_04_ROUTED_PCB.relative_to(REPO_ROOT).as_posix()
 KNOWN_7220_WARNINGS: list[tuple[str, str]] = []
 
 
+def _active_warnings(report: dict) -> list[dict]:
+    return [v for v in report["violations"] if v["severity"] == "warning" and not v.get("waived")]
+
+
 def _warnings(report: dict) -> list[tuple[str, str]]:
+    """Gating warnings only.
+
+    Advisory ``redundant_copper_*`` findings (``NON_GATING_RULE_PREFIXES``) are
+    excluded, and ``items`` is empty on real findings (the net is only in the
+    message), so key on the first item when present and the message otherwise.
+    """
     return sorted(
-        (v["rule_id"], v["items"][0])
-        for v in report["violations"]
-        if v["severity"] == "warning" and not v.get("waived")
+        (v["rule_id"], (v.get("items") or [v.get("message", "")])[0])
+        for v in _active_warnings(report)
+        if not v["rule_id"].startswith(NON_GATING_RULE_PREFIXES)
     )
 
 
@@ -80,7 +92,11 @@ def test_board_04_reviewed_process_is_strictly_clean(board_04_mfr_check: dict) -
     meta = report["meta_checks"]
     for gate in ("drc", "erc", "lvs", "manifest"):
         assert meta[gate]["status"] == "PASSED", gate
-    assert meta["drc"]["detail"] == "0 errors, 0 warnings"
+    # Advisories are counted in the detail line but never gate (they are
+    # excluded from ``_warnings`` above), so the detail must equal exactly the
+    # advisory count -- any gating warning would make it larger.
+    advisories = len(_active_warnings(report)) - len(_warnings(report))
+    assert meta["drc"]["detail"] == f"0 errors, {advisories} warnings"
     assert report["fabrication_overrides"]["suppressed_findings"] == 0
     assert report["fabrication_overrides"]["paid_factory_option"] == "0.15 mm minimum via hole size"
     assert report["fabrication_overrides"]["via_type"] == "through"

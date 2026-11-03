@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from .impedance import ImpedanceRule, NetImpedanceSpec
     from .match_group_length_skew import MatchGroupLengthSkewRule
     from .pin1_marker import Pin1MarkerRule
+    from .redundant_copper import RedundantCopperRule
     from .schematic_fields import check_schematic_fields
     from .schematic_wire_symbol import check_schematic_wire_symbol
     from .silkscreen import (
@@ -61,6 +62,7 @@ _EXPORT_MODULES: dict[str, str] = {
     "NetImpedanceSpec": ".impedance",
     "MatchGroupLengthSkewRule": ".match_group_length_skew",
     "Pin1MarkerRule": ".pin1_marker",
+    "RedundantCopperRule": ".redundant_copper",
     "check_schematic_fields": ".schematic_fields",
     "check_schematic_wire_symbol": ".schematic_wire_symbol",
     "check_all_silkscreen": ".silkscreen",
@@ -98,6 +100,7 @@ __all__ = [
     "MatchGroupLengthSkewRule",
     "NetImpedanceSpec",
     "Pin1MarkerRule",
+    "RedundantCopperRule",
     "SinglePadNetRule",
     "SolderMaskPadRules",
     "ViaInPadRule",

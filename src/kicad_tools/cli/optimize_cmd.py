@@ -43,6 +43,92 @@ def _fail(as_json: bool, pcb: str, message: str, *, text: str | None = None) -> 
     return 1
 
 
+def _build_collision_checker(pcb_path: Path):
+    """Build a collision checker plus a grid-synced optimize function factory.
+
+    Loads the board (existing routes included, netclass / ``.kicad_dru``
+    clearances honoured by the loader) and returns ``(router, checker)``: the
+    shared checker the router uses, so each optimizer rewrite is checked
+    before it is accepted (Issue #8214; one clearance kernel per #5509).  The
+    loader's progress lines go to stderr because ``--format json`` owns stdout.
+    """
+    import contextlib
+
+    from kicad_tools.router.io import load_pcb_for_routing
+    from kicad_tools.router.optimizer import make_collision_checker
+
+    with contextlib.redirect_stdout(sys.stderr):
+        router, _net_map = load_pcb_for_routing(
+            str(pcb_path),
+            validate_drc=False,
+            load_existing_routes=True,
+        )
+    return router, make_collision_checker(router.grid)
+
+
+def _seg_key(seg) -> tuple:
+    return (seg.x1, seg.y1, seg.x2, seg.y2, seg.width, seg.layer, seg.net)
+
+
+def _make_grid_synced_optimize_fn(router, optimizer):
+    """Return ``(optimize, commit)`` wrapping ``optimizer.optimize_segments``.
+
+    * ``optimize``: net identity (Issue #8214 review).  The file parser yields
+      net id 0 for every segment on a KiCad-10 name-only board, while the grid
+      carries the loader's dialect-normalized ids.  The optimizer excludes
+      ``seg.net`` as "own net", so the segments are re-keyed to the grid id
+      (looked up by net *name*) for the optimization and restored afterwards.
+      It does **not** touch the grid.
+    * ``commit(net_name, original, kept)``: static grid (Issue #8214 review).
+      Nets are optimized in turn, so net B must be checked against net A's
+      *kept* rewrite.  ``optimize_pcb`` calls this once per net after the
+      Kelvin gate has accepted or vetoed branch rewrites, so the grid follows
+      the copper that is actually written, not what ``optimize`` returned.
+      The old copper is unmarked and the new copper marked (the transaction
+      ``apply_route_transform_grid_synced`` uses).
+
+    ``--drc-aware`` rollback runs after the per-net loop and is not reflected
+    in the grid; its DRC re-check backstops that.
+    """
+    from dataclasses import replace
+
+    grid = router.grid
+    base_optimize = optimizer.optimize_segments
+    by_name = {r.net_name: i for i, r in enumerate(router.existing_routes) if r.net > 0}
+
+    def optimize(segs):
+        if not segs:
+            return base_optimize(segs)
+        idx = by_name.get(segs[0].net_name)
+        if idx is None:
+            # Net has no copper in the grid (or neutralised ownership).
+            return base_optimize(segs)
+        gid = router.existing_routes[idx].net
+        out = base_optimize([replace(s, net=gid) for s in segs])
+        return [replace(s, net=segs[0].net) for s in out]
+
+    def commit(net_name, original, kept):
+        idx = by_name.get(net_name)
+        if idx is None or not original:
+            return
+        old = router.existing_routes[idx]
+        gid = old.net
+        work = [replace(s, net=gid) for s in original]
+        final = [replace(s, net=gid) for s in kept]
+        if [_seg_key(s) for s in final] == [_seg_key(s) for s in work]:
+            return
+        gone = {_seg_key(s) for s in work}
+        rest = [s for s in old.segments if _seg_key(s) not in gone]
+        new = replace(old, segments=rest + final)
+        grid.unmark_route(old)
+        grid.mark_route(new)
+        grid._mark_route_on_cpp_cells(new)
+        grid.resync_route_occupancy([(old, new)])
+        router.existing_routes[idx] = new
+
+    return optimize, commit
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for trace optimization CLI."""
     parser = argparse.ArgumentParser(
@@ -191,7 +277,26 @@ Examples:
         drc_copper_oz=args.copper,
     )
 
-    optimizer = TraceOptimizer(config)
+    # Issue #8214: collision-check every rewrite against the board's own
+    # copper instead of relying on whole-net ``--drc-aware`` rollback.  A grid
+    # that cannot be built is reported, never silently downgraded to unchecked
+    # rewrites.
+    try:
+        router, checker = _build_collision_checker(pcb_path)
+    except Exception as e:
+        return _fail(
+            as_json,
+            str(pcb_path),
+            f"cannot build collision checker for {pcb_path}: {e}",
+        )
+
+    optimizer = TraceOptimizer(config, collision_checker=checker)
+    # ``optimize_pcb`` calls ``self.optimize_segments`` per net; route that
+    # through the grid-synced wrapper (see its docstring).  optimize_pcb has no
+    # optimize_fn hook, so the instance method is deliberately rebound.
+    optimizer.optimize_segments, commit_net = _make_grid_synced_optimize_fn(  # type: ignore[method-assign]
+        router, optimizer
+    )
 
     if not quiet:
         print("=" * 50)
@@ -225,6 +330,7 @@ Examples:
                 output_path=args.output,
                 net_filter=args.net,
                 dry_run=args.dry_run,
+                on_net_optimized=commit_net,
             )
     except Exception as e:
         return _fail(

@@ -15,6 +15,11 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-03
 
+- **PR #8230**: feat: shorten detouring trace chains to a straight or single-bend path
+- **PR #8233**: fix(creepage): emit board-level row alongside same_footprint minimum
+- **PR #8228**: fix: name net in off-angle warning and skip it on scratch DRC serializations
+- **Issue #8232** (closed): creepage: one row per net pair keyed on the minimum hides board-level approaches behind a same_footprint row (waiver unsound in shape)
+- **Issue #8219** (closed): OffAngleSegmentWarning reports 'net 0' on name-only boards and repeats each warning
 - **PR #8226**: fix: keep vias that tie pads or same-net pours during via minimisation
 - **Issue #8215** (closed): optimizer via minimization removes vias that are still needed (unconnected pour stubs)
 

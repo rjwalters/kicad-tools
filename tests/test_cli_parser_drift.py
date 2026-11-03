@@ -1020,6 +1020,29 @@ def test_readiness_shim_forwards_generate_and_defaults_to_verify():
     )
 
 
+def test_readiness_skip_cleanup_reaches_inner_parser_through_kct_readiness():
+    """``kct readiness --skip-cleanup`` must parse on the outer parser and be
+
+    forwarded to the inner runner (#8218: the skip needs an explicit flag).
+    """
+    from kicad_tools.cli.commands.readiness import run_readiness_command
+    from kicad_tools.cli.parser import create_parser
+    from kicad_tools.cli.readiness_cmd import build_parser as standalone_build_parser
+
+    args = create_parser().parse_args(["readiness", "board", "--generate", "--skip-cleanup"])
+    with patch("kicad_tools.cli.readiness_cmd.main", return_value=0) as inner_main:
+        assert run_readiness_command(args) == 0
+    sub_argv = inner_main.call_args[0][0]
+    assert "--skip-cleanup" in sub_argv, f"shim dropped --skip-cleanup; got {sub_argv}"
+    assert standalone_build_parser().parse_args(sub_argv).skip_cleanup is True
+
+    # Not supplied: must not be forwarded (cleanup runs by default).
+    args = create_parser().parse_args(["readiness", "board", "--generate"])
+    with patch("kicad_tools.cli.readiness_cmd.main", return_value=0) as inner_main:
+        run_readiness_command(args)
+    assert "--skip-cleanup" not in inner_main.call_args[0][0]
+
+
 def test_readiness_explicit_verify_dispatches_like_standalone_default():
     """``kct readiness board --verify`` must dispatch identically to the
 
