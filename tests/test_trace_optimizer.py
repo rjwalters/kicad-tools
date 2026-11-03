@@ -2272,3 +2272,199 @@ class TestShortenDetours:
         cfg.shorten_detours = True
         out = self._opt(config=cfg).optimize_segments(tent)
         assert len(out) == 1 and self._len(out) == pytest.approx(6.0)
+
+
+class TestRemoveLateralJogs:
+    """Slide a short sideways step between parallel runs to the next corner (Issue #8269)."""
+
+    def _seg(self, x1, y1, x2, y2):
+        return Segment(x1=x1, y1=y1, x2=x2, y2=y2, width=0.2, layer=Layer.F_CU, net=1, net_name="N")
+
+    def _pts(self, segs):
+        return [(round(s.x1, 6), round(s.y1, 6), round(s.x2, 6), round(s.y2, 6)) for s in segs]
+
+    def _len(self, segs):
+        return sum(((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2) ** 0.5 for s in segs)
+
+    def _opt(self, config=None, blocked=None, anchors=None):
+        return TraceOptimizer(
+            config=config or OptimizationConfig(),
+            collision_checker=MockCollisionChecker(blocked_paths=blocked),
+            net_anchors={1: []} if anchors is None else anchors,
+        )
+
+    def _diag_jog(self):
+        # 45deg diagonal, 0.05 mm horizontal step, parallel diagonal, then a
+        # horizontal run: the shape left at a J2 header on a real board.
+        return [
+            self._seg(0, 0, 1, 1),
+            self._seg(1, 1, 1.05, 1),
+            self._seg(1.05, 1, 2.05, 2),
+            self._seg(2.05, 2, 5, 2),
+        ]
+
+    def test_diagonal_jog_slides_forward_into_horizontal(self):
+        chain = self._diag_jog()
+        result = self._opt().remove_jogs(chain)
+        assert self._pts(result) == [(0, 0, 2, 2), (2, 2, 5, 2)]
+        assert self._len(result) == pytest.approx(self._len(chain))
+
+    def test_orthogonal_jog_slides_forward_into_diagonal(self):
+        # horizontal, 0.071 mm diagonal step, horizontal, then a diagonal parallel to the step
+        chain = [
+            self._seg(0, 0, 2, 0),
+            self._seg(2, 0, 2.05, 0.05),
+            self._seg(2.05, 0.05, 4, 0.05),
+            self._seg(4, 0.05, 5, 1.05),
+        ]
+        result = self._opt().remove_jogs(chain)
+        assert self._pts(result) == [(0, 0, 3.95, 0), (3.95, 0, 5, 1.05)]
+
+    def test_jog_slides_backward_when_only_the_previous_corner_fits(self):
+        # vertical lead-in parallel to the step, then the jog, then a straight end
+        chain = [
+            self._seg(0, -1, 0, 0),
+            self._seg(0, 0, 2, 0),
+            self._seg(2, 0, 2, 0.05),
+            self._seg(2, 0.05, 4, 0.05),
+        ]
+        result = self._opt().remove_jogs(chain)
+        assert self._pts(result) == [(0, -1, 0, 0.05), (0, 0.05, 4, 0.05)]
+
+    def test_step_shrinks_an_opposite_corner(self):
+        # the step points against the next segment, so the slide shortens it
+        chain = [
+            self._seg(0, 0, 2, 0),
+            self._seg(2, 0, 2, 0.05),
+            self._seg(2, 0.05, 4, 0.05),
+            self._seg(4, 0.05, 4, -1),
+        ]
+        result = self._opt().remove_jogs(chain)
+        assert self._pts(result) == [(0, 0, 4, 0), (4, 0, 4, -1)]
+        assert self._len(result) < self._len(chain)
+
+    def test_no_parallel_corner_leaves_chain(self):
+        # neither neighbour of the jog window is parallel to the step
+        chain = [
+            self._seg(-1, -1, 0, 0),
+            self._seg(0, 0, 2, 0),
+            self._seg(2, 0, 2, 0.05),
+            self._seg(2, 0.05, 4, 0.05),
+            self._seg(4, 0.05, 5, 1.05),
+        ]
+        assert self._opt().remove_jogs(chain) == chain
+
+    def test_anchor_on_moved_vertex_leaves_chain(self):
+        # 0.5 mm jog with a same-net via at B's start (1.5, 1): the slid
+        # diagonal would pass 0.35 mm from it, off the copper, so keep the chain.
+        chain = [
+            self._seg(0, 0, 1, 1),
+            self._seg(1, 1, 1.5, 1),
+            self._seg(1.5, 1, 2.5, 2),
+            self._seg(2.5, 2, 5, 2),
+        ]
+        assert self._opt(anchors={1: [(0, 0), (1.5, 1), (5, 2)]}).remove_jogs(chain) == chain
+        # A via on the far corner (2.5, 2) stays on the new horizontal: allowed.
+        moved = self._opt(anchors={1: [(0, 0), (2.5, 2), (5, 2)]}).remove_jogs(chain)
+        assert self._pts(moved) == [(0, 0, 2, 2), (2, 2, 5, 2)]
+
+    def test_collision_on_moved_run_leaves_chain(self):
+        # a foreign obstacle sits where the moved diagonal would run
+        chain = self._diag_jog()
+        opt = self._opt(blocked=[(1.4, 1.38, 1.5, 1.42)])
+        assert opt.remove_jogs(chain) == chain
+
+    def test_step_longer_than_limit_leaves_chain(self):
+        cfg = OptimizationConfig(max_jog_length=0.04)
+        assert self._opt(config=cfg).remove_jogs(self._diag_jog()) == self._diag_jog()
+
+    def test_no_collision_checker_or_anchors_is_noop(self):
+        chain = self._diag_jog()
+        assert (
+            TraceOptimizer(config=OptimizationConfig(), net_anchors={1: []}).remove_jogs(chain)
+            == chain
+        )
+        no_anchors = TraceOptimizer(
+            config=OptimizationConfig(), collision_checker=MockCollisionChecker()
+        )
+        assert no_anchors.remove_jogs(chain) == chain
+
+    def test_chain_endpoints_never_move(self):
+        result = self._opt().remove_jogs(self._diag_jog())
+        assert (result[0].x1, result[0].y1) == (0, 0)
+        assert (result[-1].x2, result[-1].y2) == (5, 2)
+
+    def test_branch_ending_on_the_jogged_run_stays_connected(self):
+        # The board case: a 0.4 mm step between two diagonals, and a branch of the
+        # same net whose end rests on the second diagonal's body (a T-join KiCad
+        # counts as connected). Sliding the step would move that diagonal 0.28 mm
+        # off the branch's end, so optimize_segments must keep the chain.
+        chain = [
+            self._seg(0, 0, 3, 3),
+            self._seg(3, 3, 3, 3.4),
+            self._seg(3, 3.4, 4.2, 4.6),
+            self._seg(4.2, 4.6, 4.2, 5.6),
+        ]
+        branch = [self._seg(5, 3, 3.85, 4.25)]  # ends on (3, 3.4)-(4.2, 4.6), off its vertices
+        cfg = OptimizationConfig(
+            merge_collinear=False,
+            eliminate_zigzags=False,
+            compress_staircase=False,
+            convert_45_corners=False,
+            pull_tight=False,
+            shorten_detours=False,
+        )
+        out = self._opt(config=cfg).optimize_segments(chain + branch)
+        assert sorted(self._pts(out)) == sorted(self._pts(chain + branch))
+        # Without the branch the same chain is cleaned.
+        assert len(self._opt(config=cfg).optimize_segments(chain)) == 2
+
+    def test_no_pass_strands_a_branch_t_joined_to_the_chain(self):
+        # The exact board geometry: compress_staircase collapsed this chain
+        # 0.34 mm off a same-net branch ending on its body, leaving the branch
+        # dangling in kicad-cli. Every pass is now held to the anchor guard.
+        def seg(x1, y1, x2, y2):
+            return Segment(
+                x1=x1, y1=y1, x2=x2, y2=y2, width=0.2, layer=Layer.F_CU, net=1, net_name="N"
+            )
+
+        chain = [
+            seg(166.44, 110.2, 170.04, 113.8),
+            seg(170.04, 113.8, 170.04, 114.2),
+            seg(170.04, 114.2, 171.24, 115.4),
+            seg(171.24, 115.4, 171.24, 115.5),
+            seg(171.24, 115.5, 171.39, 115.65),
+        ]
+        branch = [
+            seg(171.39, 114.54, 171.09, 114.84),
+            seg(171.09, 114.84, 171.04, 114.84),
+            seg(171.04, 114.84, 170.89, 114.99),
+        ]
+        out = self._opt().optimize_segments(chain + branch)
+        tip = (170.89, 114.99)
+
+        def dist(s):
+            dx, dy = s.x2 - s.x1, s.y2 - s.y1
+            k = max(
+                0.0, min(1.0, ((tip[0] - s.x1) * dx + (tip[1] - s.y1) * dy) / (dx * dx + dy * dy))
+            )
+            return ((tip[0] - s.x1 - k * dx) ** 2 + (tip[1] - s.y1 - k * dy) ** 2) ** 0.5
+
+        # The chain's (+1, +1) diagonal must still run under the branch's tip
+        # (the branch itself runs the other way, so it cannot satisfy this).
+        diagonals = [s for s in out if (s.x2 - s.x1) * (s.y2 - s.y1) > 0]
+        assert min(dist(s) for s in diagonals) <= 0.1 + 1e-4
+
+    def test_config_flag_gates_the_pass_in_optimize_segments(self):
+        cfg = OptimizationConfig(
+            merge_collinear=False,
+            eliminate_zigzags=False,
+            compress_staircase=False,
+            convert_45_corners=False,
+            pull_tight=False,
+            shorten_detours=False,
+            remove_jogs=False,
+        )
+        assert len(self._opt(config=cfg).optimize_segments(self._diag_jog())) == 4
+        cfg.remove_jogs = True
+        assert len(self._opt(config=cfg).optimize_segments(self._diag_jog())) == 2

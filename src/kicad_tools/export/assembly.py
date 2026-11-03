@@ -125,6 +125,9 @@ class AssemblyPackageResult:
     """``REF (kept X, source Y)`` for rows whose already-assigned LCSC
     (schematic/spec) disagrees with the merge source (issue #8260).  The
     assigned value always wins; this only makes the disagreement visible."""
+    lcsc_merge_exempt_skipped: list[str] = field(default_factory=list)
+    """``REF (source Y)`` for spec-exempt refs the merge source would have
+    supplied a number for but which were excluded from the merge (issue #8282)."""
     pnp_placement_count: int = 0
     """Rows written to the CPL."""
     pnp_layers: list[str] = field(default_factory=list)
@@ -431,6 +434,7 @@ class AssemblyPackage:
 
         # Spec overlay: apply MPN/LCSC from .kct before auto-enrichment
         spec_refs: set[str] = set()
+        exempt_refs: set[str] = set()
         if not self.config.no_spec:
             try:
                 spec_file = self.config.spec_path
@@ -456,6 +460,11 @@ class AssemblyPackage:
                         # intent that must never be silently overwritten by a
                         # generic (value, footprint) LCSC guess (issue #4995).
                         spec_refs = resolved_refs(overlay_report)
+                        # Refs declared ``exempt`` (consigned / non-LCSC) must
+                        # never pick up an LCSC from the CSV merge (#8282).
+                        from .bom_spec_overlay import declared_exemptions
+
+                        exempt_refs = set(declared_exemptions(spec.bom_entries))
             except Exception as e:
                 logger.warning(f"Spec overlay failed (continuing without): {e}")
 
@@ -470,6 +479,7 @@ class AssemblyPackage:
         total_merged = 0
         source_is_file = False
         conflicts: list[str] = []
+        exempt_skipped: list[str] = []
         if not self.config.merge_lcsc:
             merge_source = "LCSC merge: disabled (--no-merge-lcsc)"
         else:
@@ -504,11 +514,18 @@ class AssemblyPackage:
                         src = existing.get((item.value, item.footprint))
                         if assigned and src and src != assigned:
                             conflicts.append(f"{item.reference} (kept {assigned}, source {src})")
+                    # Record exempt refs the source would have supplied a
+                    # number for (#8282); they are excluded from the merge.
+                    for item in items:
+                        src = existing.get((item.value, item.footprint))
+                        if item.reference in exempt_refs and src:
+                            exempt_skipped.append(f"{item.reference} (source {src})")
                     merged_count, csv_merge_refs = apply_existing_lcsc_assignments(
                         [
                             item
                             for item in items
-                            if not (item.reference in spec_refs and item.mpn and not item.lcsc)
+                            if item.reference not in exempt_refs
+                            and not (item.reference in spec_refs and item.mpn and not item.lcsc)
                         ],
                         existing,
                         parts_cache=parts_cache,
@@ -532,7 +549,14 @@ class AssemblyPackage:
                 len(conflicts),
                 ", ".join(conflicts),
             )
+        if exempt_skipped:
+            logger.info(
+                "LCSC merge skipped %d spec-exempt part(s): %s",
+                len(exempt_skipped),
+                ", ".join(exempt_skipped),
+            )
         if result is not None:
+            result.lcsc_merge_exempt_skipped = exempt_skipped
             result.lcsc_merge_source = merge_source
             result.lcsc_merge_count = total_merged
             result.lcsc_merge_conflicts = conflicts
@@ -546,6 +570,7 @@ class AssemblyPackage:
                     prefer_basic=self.config.auto_lcsc_prefer_basic,
                     min_stock=self.config.auto_lcsc_min_stock,
                     spec_refs=spec_refs | csv_merge_refs,
+                    exempt_refs=exempt_refs,
                 )
                 if result is not None:
                     result.lcsc_enrichment = enrichment

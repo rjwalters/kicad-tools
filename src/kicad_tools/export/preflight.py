@@ -2320,8 +2320,14 @@ class PreflightChecker:
 
         items = [copy.copy(i) for i in bom.items]
         spec_refs: set[str] = set()
+        exempt_refs: set[str] = set()
         try:
-            from .bom_spec_overlay import apply_spec_overlay, find_spec_file, resolved_refs
+            from .bom_spec_overlay import (
+                apply_spec_overlay,
+                declared_exemptions,
+                find_spec_file,
+                resolved_refs,
+            )
 
             spec_file = find_spec_file(self.pcb_path.parent)
             if spec_file is not None:
@@ -2330,6 +2336,7 @@ class PreflightChecker:
                 spec = load_spec(spec_file)
                 if spec.bom_entries:
                     spec_refs = resolved_refs(apply_spec_overlay(items, spec.bom_entries))
+                    exempt_refs = set(declared_exemptions(spec.bom_entries))
         except Exception as e:
             logger.warning("Spec overlay failed in preflight (continuing without): %s", e)
 
@@ -2356,7 +2363,8 @@ class PreflightChecker:
                                 [
                                     i
                                     for i in items
-                                    if not (i.reference in spec_refs and i.mpn and not i.lcsc)
+                                    if i.reference not in exempt_refs
+                                    and not (i.reference in spec_refs and i.mpn and not i.lcsc)
                                 ],
                                 existing,
                                 parts_cache=None,
