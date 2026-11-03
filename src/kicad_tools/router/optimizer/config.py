@@ -107,6 +107,8 @@ class OptimizationStats:
     drc_failsafe_rules: dict[str, int] = field(default_factory=dict)
     # Issue #6889: Kelvin-branch rewrites kept at their original geometry.
     kelvin_vetoes: int = 0
+    # Issue #8271: exact-duplicate segments dropped from optimizer output.
+    duplicates_removed: int = 0
     # Issue #7065: one row per optimized net, built after any DRC rollback.
     per_net: list[NetOptimizationStats] = field(default_factory=list)
 
