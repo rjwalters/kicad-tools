@@ -15,6 +15,12 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-03
 
+- **PR #8238**: test(optimize): dense-board kicad-cli DRC check for checked trace rewrites
+- **PR #8229**: feat: add redundant_copper check and dedupe cleanup step in readiness/tapeout
+- **PR #8227**: feat: add kct pcb prune to drop redundant copper and snap off-centre ends
+- **PR #8223**: fix: collision-check each optimize-traces rewrite against the board
+- **Issue #8218** (closed): run copper cleanup every time: a check rule plus a standard tapeout step (dedupe + optimize, kicad-cli refereed)
+- **Issue #8216** (closed): new cleanup pass: remove redundant copper (spurs, overlap-only off-centre ends, same-layer loops)
 - **PR #8230**: feat: shorten detouring trace chains to a straight or single-bend path
 - **PR #8233**: fix(creepage): emit board-level row alongside same_footprint minimum
 - **PR #8228**: fix: name net in off-angle warning and skip it on scratch DRC serializations
