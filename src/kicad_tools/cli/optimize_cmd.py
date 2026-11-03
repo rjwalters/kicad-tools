@@ -294,11 +294,21 @@ Examples:
     # board (the checker ignores same-net copper); length-matched nets are
     # left out of the map and so skipped.
     from kicad_tools.cli.route_cmd import _detour_net_anchors
+    from kicad_tools.router.optimizer.kelvin_gate import KelvinBoardGate
+
+    net_anchors = _detour_net_anchors(router, routes=router.existing_routes)
+    # Kelvin nets are skipped like length-matched ones (#8217 AC2): the Kelvin
+    # gate vets branch rewrites, but a whole-chain replacement is not its job.
+    kelvin = KelvinBoardGate.from_pcb_text(pcb_path.read_text())
+    if kelvin is not None:
+        kelvin_names = {name for name, nid in kelvin.net_ids.items() if nid in kelvin.gate.kelvin}
+        for net_id in [n for n in net_anchors if router.net_names.get(n) in kelvin_names]:
+            del net_anchors[net_id]
 
     optimizer = TraceOptimizer(
         config,
         collision_checker=checker,
-        net_anchors=_detour_net_anchors(router, routes=router.existing_routes),
+        net_anchors=net_anchors,
     )
     # ``optimize_pcb`` calls ``self.optimize_segments`` per net; route that
     # through the grid-synced wrapper (see its docstring).  optimize_pcb has no
