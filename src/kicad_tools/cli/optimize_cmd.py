@@ -417,7 +417,9 @@ Examples:
     refill_error: str | None = None
     if not args.dry_run:
         zones_refilled, refill_error = _refill_written_board(Path(args.output or pcb_path))
-        if zones_refilled is False and not quiet:
+        # --quiet suppresses progress, not a warning that the written file is
+        # inconsistent; JSON mode reports it via ``zones_refilled`` instead.
+        if zones_refilled is False and not as_json:
             print(
                 "WARNING: zones were NOT refilled "
                 f"({refill_error}); the written board carries stale zone fills "

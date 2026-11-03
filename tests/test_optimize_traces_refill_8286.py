@@ -62,3 +62,12 @@ def test_refill_failure_in_json(pcb, capsys):
     data = json.loads(capsys.readouterr().out)
     assert data["zones_refilled"] is False
     assert data["zones_refill_error"] == "boom"
+
+
+def test_refill_failure_warns_under_quiet(pcb, capsys):
+    res = KiCadCLIResult(success=False, stderr="kicad-cli not found")
+    with patch(TARGET, return_value=res):
+        assert main([str(pcb), "--quiet"]) == 0
+    cap = capsys.readouterr()
+    assert "zones were NOT refilled" in cap.err
+    assert "kicad-cli not found" in cap.err
