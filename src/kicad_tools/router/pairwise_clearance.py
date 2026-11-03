@@ -1008,7 +1008,7 @@ def _shapely_gap_and_midpoint(poly_a: Any, poly_b: Any) -> tuple[float, float, f
     negative-clearance HV shortfall can produce); this mirrors
     :func:`closest_gap_midpoint_xy`'s own tolerance of that situation.
     """
-    import shapely
+    import shapely  # type: ignore[import-untyped]
 
     gap = float(poly_a.distance(poly_b))
     line = shapely.shortest_line(poly_a, poly_b)
@@ -1577,6 +1577,46 @@ def _copper_vs_pad_violation(
     )
 
 
+def _fuse_collinear_runs(segments: Sequence[Segment], tol: float = 1e-4) -> list[Segment]:
+    """Fuse each contiguous collinear same-layer, same-width run into one segment.
+
+    Issue #8277: the attach-zone verdict asks where the binding gap's two
+    nearest points lie, and that answer depends on how a straight trace is
+    chopped.  The C++ grid hands the route-time validator one 0.1 mm segment
+    per grid step, so a fragment of an HV trace that ends just outside an
+    attach zone gets its own nearest point outside the zone, although the
+    trace as written (fused by the optimizer) has its nearest point inside.
+    The route-time validator then rejected copper the commit gate accepts
+    (the #4588 bridging board fell to 1/2 nets).  Fusing first makes the
+    verdict a property of the copper, not of its segmentation.  The fused
+    segment covers exactly the copper of the run it replaces (collinear
+    capsules sharing an endpoint union to one capsule), so nothing is waived
+    that the copper itself does not justify.
+    """
+    from dataclasses import replace
+
+    out: list[Segment] = []
+    for seg in segments:
+        if out:
+            prev = out[-1]
+            if (
+                prev.layer == seg.layer
+                and prev.width == seg.width
+                and prev.net == seg.net
+                and abs(prev.x2 - seg.x1) <= tol
+                and abs(prev.y2 - seg.y1) <= tol
+            ):
+                dx, dy = prev.x2 - prev.x1, prev.y2 - prev.y1
+                ex, ey = seg.x2 - prev.x1, seg.y2 - prev.y1
+                length = math.hypot(dx, dy)
+                ahead = (seg.x2 - seg.x1) * dx + (seg.y2 - seg.y1) * dy
+                if length > tol and ahead > 0.0 and abs(dx * ey - dy * ex) <= tol * length:
+                    out[-1] = replace(prev, x2=seg.x2, y2=seg.y2)
+                    continue
+        out.append(seg)
+    return out
+
+
 def _segments_pairwise_violation(
     segments: Sequence[Segment],
     moving_name: str,
@@ -1612,7 +1652,11 @@ def _segments_pairwise_violation(
     * ``segments``/``vias`` (moving) vs ``foreign_pads`` -- trace-vs-pad,
       via-vs-pad.  Checked once per pad (not per foreign route), since a pad
       is static board copper, not owned by any :class:`Route`.
+
+    Both sides' collinear runs are fused first (:func:`_fuse_collinear_runs`,
+    #8277) so this walk judges the same geometry the commit gate does.
     """
+    segments = _fuse_collinear_runs(segments)
     for other in foreign_routes:
         if other.net == exclude_net:
             continue
@@ -1622,8 +1666,9 @@ def _segments_pairwise_violation(
         required = table.required_clearance(moving_name, foreign_name)
         if required <= floor + tolerance:
             continue
+        other_segments = _fuse_collinear_runs(other.segments)
         for seg in segments:
-            for oseg in other.segments:
+            for oseg in other_segments:
                 violation = segment_pair_violation(
                     seg,
                     oseg,
@@ -1650,7 +1695,7 @@ def _segments_pairwise_violation(
                 if violation is not None:
                     return violation
         for via in vias:
-            for oseg in other.segments:
+            for oseg in other_segments:
                 violation = _moving_via_vs_foreign_segment(
                     via,
                     moving_name,
@@ -1927,6 +1972,9 @@ def find_pairwise_violations(
     *fail* that renders every HV board unroutable by construction.
     """
     materialised = list(routes)
+    # Issue #8277: judge fused collinear runs, exactly as the route-time
+    # validator (:func:`_segments_pairwise_violation`) does.
+    fused = [_fuse_collinear_runs(route.segments) for route in materialised]
     floor = table.dru if dru is None else dru
     out: list[PairwiseViolation] = []
     for i in range(len(materialised)):
@@ -1940,8 +1988,8 @@ def find_pairwise_violations(
             required = table.required_clearance(a_name, b_name)
             if required <= floor + tolerance:
                 continue
-            for seg in ra.segments:
-                for oseg in rb.segments:
+            for seg in fused[i]:
+                for oseg in fused[j]:
                     violation = segment_pair_violation(
                         seg,
                         oseg,
@@ -1968,7 +2016,7 @@ def find_pairwise_violations(
                     if violation is not None:
                         out.append(violation)
             for via in ra.vias:
-                for oseg in rb.segments:
+                for oseg in fused[j]:
                     violation = _moving_via_vs_foreign_segment(
                         via,
                         a_name,
@@ -1996,7 +2044,7 @@ def find_pairwise_violations(
                         out.append(violation)
 
     if foreign_pads:
-        for route in materialised:
+        for route, route_segments in zip(materialised, fused, strict=True):
             route_name = _resolve_net_name(id_to_name, route.net, route.net_name)
             # Skip the (expensive) polygon build entirely for a net that needs
             # no HV widening against ANY pad on the board -- the common case.
@@ -2006,7 +2054,7 @@ def find_pairwise_violations(
             ):
                 continue
             _copper_vs_pads_violation(
-                _copper_polygons(route.segments, route.vias),
+                _copper_polygons(route_segments, route.vias),
                 route_name,
                 foreign_pads,
                 table,
