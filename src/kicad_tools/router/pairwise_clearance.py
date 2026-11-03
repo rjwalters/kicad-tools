@@ -1008,7 +1008,7 @@ def _shapely_gap_and_midpoint(poly_a: Any, poly_b: Any) -> tuple[float, float, f
     negative-clearance HV shortfall can produce); this mirrors
     :func:`closest_gap_midpoint_xy`'s own tolerance of that situation.
     """
-    import shapely  # type: ignore[import-untyped]
+    import shapely
 
     gap = float(poly_a.distance(poly_b))
     line = shapely.shortest_line(poly_a, poly_b)
@@ -1028,6 +1028,7 @@ def _attach_zone_residual(
     layer: object | None,
     required: float,
     tolerance: float,
+    overhang: float = 0.0,
 ) -> tuple[float, float, float] | None:
     """Residual shortfall of a pair the #4506 attach zone would waive (#8277).
 
@@ -1043,7 +1044,7 @@ def _attach_zone_residual(
     outside every zone that exempts this net pair on ``layer`` is still closer
     than ``required``; ``None`` when it clears or no copper remains outside.
     """
-    import shapely  # type: ignore[import-untyped]
+    import shapely
 
     boxes = [
         shapely.box(z.min_x, z.min_y, z.max_x, z.max_y)
@@ -1055,6 +1056,11 @@ def _attach_zone_residual(
     if not boxes:
         return None
     clip = shapely.union_all(boxes)
+    if overhang > 0.0:
+        # A trace ending at the zone edge overhangs it by its round end cap
+        # (half the width); that cap belongs to the zone-terminating copper and
+        # must not be measured against the neighbour's cap outside the zone.
+        clip = clip.buffer(overhang, join_style="mitre")
     rest_a = poly_a.difference(clip)
     rest_b = poly_b.difference(clip)
     if rest_a.is_empty or rest_b.is_empty:
@@ -1091,6 +1097,7 @@ def _attach_zone_verdict(
     layer: object | None,
     required: float,
     tolerance: float,
+    overhang: float = 0.0,
 ) -> tuple[float, float, float] | None:
     """Census-identical attach-zone verdict for a short pair (#8277).
 
@@ -1101,7 +1108,7 @@ def _attach_zone_verdict(
     still clear ``required``.  Returns ``None`` when waived, else the
     ``(gap, x, y)`` of the shortfall to report.
     """
-    import shapely  # type: ignore[import-untyped]
+    import shapely
 
     gap, gx, gy = _shapely_gap_and_midpoint(poly_a, poly_b)
     line = shapely.shortest_line(poly_a, poly_b)
@@ -1121,7 +1128,9 @@ def _attach_zone_verdict(
         both_in = _attach_zone_exempts(zones, gx, gy, net_a, net_b, layer)
     if not both_in:
         return (gap, gx, gy)
-    return _attach_zone_residual(poly_a, poly_b, zones, net_a, net_b, layer, required, tolerance)
+    return _attach_zone_residual(
+        poly_a, poly_b, zones, net_a, net_b, layer, required, tolerance, overhang
+    )
 
 
 def _aabb_gap(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
@@ -1372,7 +1381,15 @@ def segment_pair_violation(
         if poly_a is None or poly_b is None:
             return None
         verdict = _attach_zone_verdict(
-            poly_a, poly_b, attach_zones, a_name, b_name, seg_a.layer, required, tolerance
+            poly_a,
+            poly_b,
+            attach_zones,
+            a_name,
+            b_name,
+            seg_a.layer,
+            required,
+            tolerance,
+            overhang=max(seg_a.width, seg_b.width) / 2.0,
         )
         if verdict is None:
             return None
