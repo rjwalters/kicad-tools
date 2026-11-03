@@ -575,7 +575,7 @@ CHAMPION_HELD_CONFLICT='def stands($h; $ends): ([.comments[].body] | (map(starts
   | select((.labels | map(.name)) as $l | ($l | index("loom:pr")) and ($l | index("loom:blocked")) and ($l | index("loom:operator") | not) and ($l | index("loom:frozen") | not) and ($l | index("loom:treating") | not))
   | select(stands("<!-- champion:ratification-hold -->"; ["<!-- champion:ratification-hold-cleared -->", "<!-- champion:ratification-release-respected -->"]) or stands("<!-- champion:merge-risk-hold -->"; ["<!-- champion:merge-risk-hold-cleared -->"]))
   | .number'
-for PR in $(gh pr list --state=open --label=loom:pr --label=loom:blocked --json number,mergeable --jq '.[] | select(.mergeable == "CONFLICTING") | .number'); do
+for PR in $(gh pr list --state=open --label=loom:pr --label=loom:blocked --search '-label:loom:frozen' --json number,mergeable --jq '.[] | select(.mergeable == "CONFLICTING") | .number'); do
   # Trusted comments only (#9548): an untrusted author's marker is prose, not state.
   gh pr view "$PR" --json number,mergeable,labels \
     | jq --argjson c "$(loom-daemon forge trusted-comments --fetch "$PR" --gh-shape)" '.comments = $c' \
