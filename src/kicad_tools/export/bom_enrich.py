@@ -145,6 +145,7 @@ def enrich_bom_lcsc(
     prefer_basic: bool = True,
     min_stock: int = 100,
     spec_refs: set[str] | None = None,
+    exempt_refs: set[str] | None = None,
 ) -> EnrichmentReport:
     """
     Populate missing LCSC part numbers on BOM items in-place.
@@ -309,6 +310,26 @@ def enrich_bom_lcsc(
             # generic search, or cache propagation. Protection belongs to the
             # selected references, not every item sharing value/footprint.
             explicit_refs = spec_refs or set()
+
+            # Refs the spec declares ``exempt`` (consigned / non-LCSC) must
+            # never receive a number via sibling propagation or a catalog
+            # match (#8282); split them out before either can run.
+            exempt = [it for it in group_items if exempt_refs and it.reference in exempt_refs]
+            if exempt:
+                report.entries.append(
+                    EnrichmentEntry(
+                        value=value,
+                        footprint=footprint,
+                        references=[it.reference for it in exempt],
+                        lcsc_part="",
+                        source="spec_exempt",
+                    )
+                )
+                group_items = [it for it in group_items if it not in exempt]
+                refs = [it.reference for it in group_items]
+                if not group_items:
+                    continue
+
             protected = [
                 it for it in group_items if it.reference in explicit_refs and it.mpn and not it.lcsc
             ]

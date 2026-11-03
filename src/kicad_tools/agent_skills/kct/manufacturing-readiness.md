@@ -145,7 +145,8 @@ kct export <board.kicad_pcb> --output <dir> --mfr <tier> --drc-report <pcb-dir>/
 - Produces gerbers, drill, BOM, CPL, a report, and `manifest.json`.
 - `--drc-report` hands Gate 2's report to the export preflight, whose safety floor refuses a board with shorts or unconnected items (exit 1, no manifest) independently of how Gates 1–2 were read. Without it the preflight only warns "No DRC report found" and exports anyway.
 - Deleting the old manifest first makes freshness mechanical: a `manifest.json` that exists after this block was written by this run. No manifest ⇒ no sign-off.
-- **Do not add flags outside the block** — no `--bom-source pcb`, `--skip-drc`, `--skip-drc-floor` or `--skip-preflight`. If the export refuses (for example because the BOM needs a schematic that does not exist), that refusal is the verdict.
+- **LCSC merge source (#8260).** The export merges LCSC numbers only from `<dir>/bom_<mfr>.csv`, so a **fresh** `<dir>` has nothing to merge and the BOM comes out worse than the previous verified revision's. When a previous verified BOM exists, add `--merge-lcsc-from <previous-bundle>/bom_<mfr>.csv` (the one sanctioned addition below; a missing file is an error) or copy it into `<dir>` first. The export summary's `LCSC merge source:` line says which source was used, or "no existing BOM to merge".
+- **Do not add flags outside the block** (other than `--merge-lcsc-from` above) — no `--bom-source pcb`, `--skip-drc`, `--skip-drc-floor` or `--skip-preflight`. If the export refuses (for example because the BOM needs a schematic that does not exist), that refusal is the verdict.
 
 ### Gate 4 — HV / isolation creepage gate (conditional: mains/HV boards only)
 

@@ -430,3 +430,167 @@ def test_snapshot_dir_ignores_transient_kicad_lock(tmp_path):
     (out / "stray.csv").unlink()
     (out / "diffpair_test.kicad_sch").write_text("(kicad_sch changed)")
     assert before != _snapshot_dir(tmp_path)
+
+
+class TestMergeLcscFrom:
+    """Explicit LCSC merge source (issue #8260)."""
+
+    @staticmethod
+    def _export(tmp_path, manufacturer="jlcpcb-tier1", **cfg):
+        from unittest.mock import MagicMock, patch
+
+        from kicad_tools.export.assembly import AssemblyConfig, AssemblyPackage
+        from tests._board06_sourcing import BOARD06_PCB
+
+        mock = MagicMock()
+        mock.__enter__.return_value = mock
+        mock._get_client.return_value = None
+        with (
+            patch("kicad_tools.export.bom_enrich.PartSuggester", return_value=mock),
+            patch("kicad_tools.parts.cache.PartsCache", return_value=None),
+        ):
+            config = AssemblyConfig(
+                include_bom=True, include_pnp=False, include_gerbers=False, auto_lcsc=False, **cfg
+            )
+            package = AssemblyPackage(
+                pcb_path=BOARD06_PCB, manufacturer=manufacturer, config=config
+            )
+            return package.export(output_dir=tmp_path / "out")
+
+    def test_fresh_dir_reports_no_existing_bom(self, tmp_path):
+        result = self._export(tmp_path)
+        assert "no existing BOM to merge" in result.lcsc_merge_source
+
+    def test_disabled_reports_disabled(self, tmp_path):
+        result = self._export(tmp_path, merge_lcsc=False)
+        assert "disabled" in result.lcsc_merge_source
+
+    @staticmethod
+    def _write_source(path, designator_lcsc):
+        """Write a JLCPCB-format source CSV for board 06's R1-R4 (100 ohm 0603)."""
+        import csv
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["Comment", "Designator", "Footprint", "LCSC Part #"])
+            w.writerow(["100", "R1,R2,R3,R4", "Resistor_SMD:R_0603_1608Metric", designator_lcsc])
+        return path
+
+    def test_explicit_source_reaches_written_bom(self, tmp_path):
+        """With the spec off, no board 06 part has an LCSC; the source supplies one.
+
+        Pins the feature end to end (#8260): the merged number must land in
+        the written BOM, and the reported count must match it.
+        """
+        import csv
+
+        src = self._write_source(tmp_path / "prev" / "bom_jlcpcb.csv", "C25744")
+        baseline = self._export(tmp_path / "base", no_spec=True)
+        with baseline.bom_path.open(newline="") as f:
+            assert not any(r["LCSC Part #"] for r in csv.DictReader(f))
+        assert "C25744" not in baseline.bom_path.read_text()
+
+        result = self._export(tmp_path, no_spec=True, merge_lcsc_from=src)
+        assert result.lcsc_merge_count >= 1
+        assert str(src) in result.lcsc_merge_source
+        assert result.lcsc_merge_source.endswith(f"({result.lcsc_merge_count} parts merged)")
+        with result.bom_path.open(newline="") as f:
+            rows = list(csv.DictReader(f))
+        r1 = next(r for r in rows if "R1" in r["Designator"].split(","))
+        assert r1["LCSC Part #"] == "C25744"
+        # Only the matching (value, footprint) group picked it up.
+        assert sum(1 for r in rows if r["LCSC Part #"] == "C25744") == 1
+        assert not result.lcsc_merge_conflicts
+
+    def test_merge_disabled_ignores_explicit_source(self, tmp_path):
+        src = self._write_source(tmp_path / "prev.csv", "C25744")
+        result = self._export(tmp_path, no_spec=True, merge_lcsc=False, merge_lcsc_from=src)
+        assert result.lcsc_merge_count == 0
+        assert "C25744" not in result.bom_path.read_text()
+
+    def test_non_jlcpcb_manufacturer_accepts_explicit_source(self, tmp_path):
+        src = self._write_source(tmp_path / "prev.csv", "C25744")
+        result = self._export(tmp_path, manufacturer="pcbway", no_spec=True, merge_lcsc_from=src)
+        assert result.success
+        assert str(src) in result.lcsc_merge_source
+
+    def test_empty_source_reports_zero_merged(self, tmp_path):
+        src = tmp_path / "empty.csv"
+        src.write_text("Comment,Designator,Footprint,LCSC Part #\n")
+        result = self._export(tmp_path, merge_lcsc_from=src)
+        assert result.lcsc_merge_count == 0
+        assert "(0 parts merged)" in result.lcsc_merge_source
+
+    def test_own_output_csv_as_explicit_source(self, tmp_path):
+        first = self._export(tmp_path)
+        result = self._export(tmp_path, merge_lcsc_from=first.bom_path)
+        assert result.success
+        assert str(first.bom_path) in result.lcsc_merge_source
+
+    def test_conflicting_source_is_reported_not_applied(self, tmp_path):
+        import csv
+
+        first = self._export(tmp_path)
+        with first.bom_path.open(newline="") as f:
+            rows = list(csv.DictReader(f))
+        assigned = [r for r in rows if r["LCSC Part #"]]
+        if not assigned:
+            pytest.skip("board06 fixture has no schematic LCSC numbers")
+        original = assigned[0]["LCSC Part #"]
+        assigned[0]["LCSC Part #"] = "C99999"
+        src = tmp_path / "prev.csv"
+        with src.open("w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=list(rows[0]))
+            w.writeheader()
+            w.writerows(rows)
+        result = self._export(tmp_path, merge_lcsc_from=src)
+        assert result.lcsc_merge_conflicts
+        assert any("C99999" in c for c in result.lcsc_merge_conflicts)
+        assert "C99999" not in result.bom_path.read_text()
+        assert original in result.bom_path.read_text()
+
+    def test_no_merge_takes_precedence(self, tmp_path):
+        src = tmp_path / "prev.csv"
+        src.write_text("x\n")
+        result = self._export(tmp_path, merge_lcsc=False, merge_lcsc_from=src)
+        assert "disabled" in result.lcsc_merge_source
+        assert result.success
+
+    def test_missing_explicit_source_is_error(self, tmp_path):
+        result = self._export(tmp_path, merge_lcsc_from=tmp_path / "nope.csv")
+        assert not result.success
+        assert "--merge-lcsc-from file not found" in result.errors[0]
+
+
+class TestPreflightMergeSource:
+    """Preflight honours the export's merge source (issue #8260)."""
+
+    @staticmethod
+    def _items(tmp_path, **kw):
+        from types import SimpleNamespace
+
+        from kicad_tools.export.preflight import PreflightChecker
+        from tests._board06_sourcing import BOARD06_PCB
+
+        checker = PreflightChecker(BOARD06_PCB, output_dir=tmp_path / "out", **kw)
+        item = SimpleNamespace(
+            reference="ZZ1", value="10k", footprint="R_0402", lcsc="", mpn="", dnp=False
+        )
+        bom = SimpleNamespace(items=[item])
+        return checker._items_with_spec_overlay(bom)
+
+    @staticmethod
+    def _csv(path):
+        path.write_text("Comment,Designator,Footprint,LCSC Part #\n10k,ZZ1,R_0402,C25744\n")
+        return path
+
+    def test_explicit_source_used(self, tmp_path):
+        src = self._csv(tmp_path / "prev.csv")
+        items = self._items(tmp_path, merge_lcsc_from=src)
+        assert items[0].lcsc == "C25744"
+
+    def test_disabled_skips_merge(self, tmp_path):
+        src = self._csv(tmp_path / "prev.csv")
+        items = self._items(tmp_path, merge_lcsc=False, merge_lcsc_from=src)
+        assert items[0].lcsc == ""

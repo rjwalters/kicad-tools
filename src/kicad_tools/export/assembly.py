@@ -80,6 +80,12 @@ class AssemblyConfig:
     # an existing BOM CSV when regenerating.  Enabled by default.
     merge_lcsc: bool = True
 
+    # Explicit LCSC merge source (issue #8260).  When set, replaces the
+    # default ``<output-dir>/bom_<mfr>.csv`` lookup so a new revision's bundle
+    # can name the previous verified BOM.  A missing file is an error.
+    # ``merge_lcsc=False`` (--no-merge-lcsc) takes precedence.
+    merge_lcsc_from: Path | None = None
+
     # Filtering
     exclude_references: list[str] = field(default_factory=list)
 
@@ -110,6 +116,18 @@ class AssemblyPackageResult:
     """Distinct (value, footprint, LCSC) part groups in the BOM."""
     bom_missing_lcsc: list[str] = field(default_factory=list)
     """References written to the BOM with no LCSC part number."""
+    lcsc_merge_source: str | None = None
+    """One-line description of the LCSC merge source used (issue #8260):
+    the CSV path, "no existing BOM to merge", or "disabled"."""
+    lcsc_merge_count: int = 0
+    """Parts that received an LCSC number from the merge source (issue #8260)."""
+    lcsc_merge_conflicts: list[str] = field(default_factory=list)
+    """``REF (kept X, source Y)`` for rows whose already-assigned LCSC
+    (schematic/spec) disagrees with the merge source (issue #8260).  The
+    assigned value always wins; this only makes the disagreement visible."""
+    lcsc_merge_exempt_skipped: list[str] = field(default_factory=list)
+    """``REF (source Y)`` for spec-exempt refs the merge source would have
+    supplied a number for but which were excluded from the merge (issue #8282)."""
     pnp_placement_count: int = 0
     """Rows written to the CPL."""
     pnp_layers: list[str] = field(default_factory=list)
@@ -457,10 +475,25 @@ class AssemblyPackage:
         # overwritten. Explicit MPN-only selections also take priority over
         # old generic CSV assignments, even with auto-matching disabled.
         csv_merge_refs: set[str] = set()
-        if self.config.merge_lcsc:
+        merge_source = ""
+        total_merged = 0
+        source_is_file = False
+        conflicts: list[str] = []
+        exempt_skipped: list[str] = []
+        if not self.config.merge_lcsc:
+            merge_source = "LCSC merge: disabled (--no-merge-lcsc)"
+        else:
             filename = self.config.bom_filename.format(manufacturer=self.fab_family)
-            existing_csv = output_dir / filename
+            if self.config.merge_lcsc_from is not None:
+                existing_csv = Path(self.config.merge_lcsc_from)
+                if not existing_csv.is_file():
+                    msg = f"--merge-lcsc-from file not found: {existing_csv}"
+                    raise FileNotFoundError(msg)
+            else:
+                existing_csv = output_dir / filename
             if existing_csv.is_file():
+                merge_source = f"LCSC merge source: {existing_csv}"
+                source_is_file = True
                 existing = read_existing_lcsc_assignments(existing_csv)
                 if existing:
                     # Validate read-back assignments against the local
@@ -473,12 +506,20 @@ class AssemblyPackage:
                         parts_cache = PartsCache()
                     except Exception as e:
                         logger.debug("Parts cache unavailable for CSV-merge validation: %s", e)
+                    # Make disagreements between the source and an already
+                    # assigned (schematic/spec) LCSC visible; precedence is
+                    # unchanged -- the assigned value wins (issue #8260).
                     for item in items:
-                        if item.reference in exempt_refs:
-                            logger.info(
-                                "CSV merge: skipped %s (declared exempt in spec)",
-                                item.reference,
-                            )
+                        assigned = getattr(item, "lcsc", "")
+                        src = existing.get((item.value, item.footprint))
+                        if assigned and src and src != assigned:
+                            conflicts.append(f"{item.reference} (kept {assigned}, source {src})")
+                    # Record exempt refs the source would have supplied a
+                    # number for (#8282); they are excluded from the merge.
+                    for item in items:
+                        src = existing.get((item.value, item.footprint))
+                        if item.reference in exempt_refs and src:
+                            exempt_skipped.append(f"{item.reference} (source {src})")
                     merged_count, csv_merge_refs = apply_existing_lcsc_assignments(
                         [
                             item
@@ -489,11 +530,37 @@ class AssemblyPackage:
                         existing,
                         parts_cache=parts_cache,
                     )
+                    total_merged = merged_count
                     if merged_count:
                         logger.info(
                             "CSV merge: preserved %d LCSC assignment(s) from existing BOM",
                             merged_count,
                         )
+            else:
+                merge_source = (
+                    f"LCSC merge source: no existing BOM to merge (looked for {existing_csv})"
+                )
+
+        if source_is_file:
+            merge_source += f" ({total_merged} parts merged)"
+        if conflicts:
+            logger.warning(
+                "LCSC merge source disagrees with assigned LCSC for %d part(s): %s",
+                len(conflicts),
+                ", ".join(conflicts),
+            )
+        if exempt_skipped:
+            logger.info(
+                "LCSC merge skipped %d spec-exempt part(s): %s",
+                len(exempt_skipped),
+                ", ".join(exempt_skipped),
+            )
+        if result is not None:
+            result.lcsc_merge_exempt_skipped = exempt_skipped
+            result.lcsc_merge_source = merge_source
+            result.lcsc_merge_count = total_merged
+            result.lcsc_merge_conflicts = conflicts
+        logger.info(merge_source)
 
         # LCSC auto-matching for JLCPCB exports
         if self.config.auto_lcsc and self.fab_family == "jlcpcb":
@@ -503,6 +570,7 @@ class AssemblyPackage:
                     prefer_basic=self.config.auto_lcsc_prefer_basic,
                     min_stock=self.config.auto_lcsc_min_stock,
                     spec_refs=spec_refs | csv_merge_refs,
+                    exempt_refs=exempt_refs,
                 )
                 if result is not None:
                     result.lcsc_enrichment = enrichment
