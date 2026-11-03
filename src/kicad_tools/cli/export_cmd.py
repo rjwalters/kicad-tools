@@ -577,6 +577,8 @@ def run_export(args: argparse.Namespace) -> int:
                 print(f"  {result.assembly_result.lcsc_merge_source}")
             for conflict in result.assembly_result.lcsc_merge_conflicts:
                 print(f"  [warn] LCSC merge source disagrees with assigned LCSC: {conflict}")
+            for skipped in result.assembly_result.lcsc_merge_exempt_skipped:
+                print(f"  LCSC merge skipped spec-exempt part: {skipped}")
             # Report LCSC enrichment results
             if result.assembly_result.lcsc_enrichment:
                 enrichment = result.assembly_result.lcsc_enrichment
