@@ -292,8 +292,11 @@ Examples:
 
     optimizer = TraceOptimizer(config, collision_checker=checker)
     # ``optimize_pcb`` calls ``self.optimize_segments`` per net; route that
-    # through the grid-synced wrapper (see its docstring).
-    optimizer.optimize_segments, commit_net = _make_grid_synced_optimize_fn(router, optimizer)
+    # through the grid-synced wrapper (see its docstring).  optimize_pcb has no
+    # optimize_fn hook, so the instance method is deliberately rebound.
+    optimizer.optimize_segments, commit_net = _make_grid_synced_optimize_fn(  # type: ignore[method-assign]
+        router, optimizer
+    )
 
     if not quiet:
         print("=" * 50)
