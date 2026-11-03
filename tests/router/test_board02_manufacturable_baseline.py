@@ -11,7 +11,7 @@ Baseline measurement at HEAD (worst-of-3 across seeds 42/43/44 with
 - **Routed: 8/8 signal nets (100%)** -- LINE_A-D + NODE_A-D
 - **Connected pads: 34/34 (100%)** including GND/VCC via auto-pour
 - **DRC: 0 errors, 0 warnings** at ``jlcpcb-tier1`` profile
-- **Deterministic output**: 22 routes / 20 vias / 320.62mm total
+- **Deterministic output**: 22 routes / 20 vias / 317.27mm total
   length identical across seeds 42/43/44 -- this small 2-layer board
   has fully converged.  (26 vias / 323.06mm before the Issue #6315
   re-baseline, which resolves pad clearance cells by exact geometry, so
@@ -928,7 +928,15 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     # 26 -> 20, length 323.06 -> 320.62 (-2.44 mm), and
     # ``test_drc_clean_at_jlcpcb_tier1`` above still reports 0 errors.
     # Prior pin (22, 213-segment-era, 26, 323.06).
-    EXPECTED_LENGTH = 320.62
+    #
+    # Re-baselined 2026-11-03 for Issue #8255 (detour shortening, #8230/#8217):
+    # ``kct route`` now shortens detouring trace chains in the optimizer.
+    # Seeds 42/43/44 all yield (22, 169, 20, 317.27) -- routes (22) and vias
+    # (20) UNCHANGED, length 320.62 -> 317.27 (-3.35 mm).  Attributed by
+    # reverting only #8230's src changes (cli/route_cmd.py and
+    # router/optimizer/{algorithms,config,trace}.py): the old 320.62 pin then
+    # passes again.  Shortening can only reduce length.
+    EXPECTED_LENGTH = 317.27
     # Re-baselined 2026-09-14 for Issue #5201: the escape router
     # (``EscapeRouter.via_in_pad_supported``) previously resolved
     # via-in-pad eligibility from the bare ``MfrLimits`` capability
@@ -1004,7 +1012,9 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     # the layer-change segment breaks around them: macOS-arm64 measures 189,
     # bit-identical across seeds 42/43/44 (the coarser direction again; the
     # exact routes/vias/length pins above are the regression guard).
-    EXPECTED_SEGMENTS_RANGE = (180, 240)
+    # #8255 (detour shortening, #8230): the LOWER bound is widened 180 -> 150.
+    # Collapsing detouring chains removes segments (189 -> 169 observed).
+    EXPECTED_SEGMENTS_RANGE = (150, 240)
     got_routes, got_segments, got_vias, got_length = ref
     exact = (got_routes, got_vias, got_length)
     expected_exact = (EXPECTED_ROUTES, EXPECTED_VIAS, EXPECTED_LENGTH)

@@ -2981,6 +2981,27 @@ jobs:
       - name: Build C++ router backend
         run: uv run kct build-native
 
+      - name: Compute weekly jlcparts catalog cache key
+        # Issue #8255: the recipe's ``kct export --strict-preflight`` really
+        # evaluates the BOM's LCSC stock (#8163) and aborts with "Stock not
+        # verified" when neither the parts cache nor the offline jlcparts
+        # catalog exists.  The catalog is refreshed at most weekly.
+        id: catalog_key
+        run: echo "week=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache jlcparts offline catalog
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/kicad-tools/jlcparts.sqlite3
+          key: jlcparts-catalog-${{ steps.catalog_key.outputs.week }}
+
+      - name: Sync jlcparts offline catalog (stock source for --strict-preflight)
+        # Deliberately NOT ``|| true`` / continue-on-error: --strict-preflight
+        # stays strict for real exports, so a failed sync must fail this job
+        # loudly instead of surfacing later as a missing routed board.  On a
+        # cache hit this is a no-op (``sync_catalog`` skips an existing file).
+        run: uv run kct parts sync-catalog
+
       - name: Regenerate + route board 05 from recipe (clean tmp directory)
         # Board 05's recipe is design.py (NOT generate_design.py) and takes
         # only an output-dir positional arg.  It routes PARTIAL by design and
