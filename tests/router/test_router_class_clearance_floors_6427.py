@@ -217,3 +217,17 @@ def test_authored_index_extends_on_append_and_rebuilds_on_removal():
     grid.unmark_route(second)
     assert grid_authored_index(grid) is not index, "a removal must rebuild"
     assert grid.authored_violation(probe, 2) is None
+
+
+def test_router_class_floors_can_be_skipped_for_existing_boards(tmp_path):
+    """Issue #8269: ``optimize-traces`` checks an existing board against its own
+    files, so the router's name-based classes must not become floors there."""
+    board = tmp_path / "board.kicad_pcb"
+    board.write_text(_board_text())
+    rules = DesignRules(trace_clearance=0.15, via_clearance=0.15)
+    router, _nets = load_pcb_for_routing(
+        str(board), rules=rules, force_python=True, validate_drc=False, router_class_floors=False
+    )
+    # The classification still exists for routing widths; it just binds nothing.
+    assert router.net_class_map["GND"].clearance == pytest.approx(0.2)
+    assert router.rules.net_clearance_floors == {}

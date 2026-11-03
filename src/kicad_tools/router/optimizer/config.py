@@ -29,6 +29,13 @@ class OptimizationConfig:
     """Replace a whole chain (>= 3 segments) with a shorter straight or
     single-bend 45-degree path between its endpoints when the path is clear."""
 
+    remove_jogs: bool = True
+    """Remove lateral jogs: slide a short sideways step between two parallel
+    runs to the next corner, where it merges into a segment parallel to it."""
+
+    max_jog_length: float = 1.0
+    """Longest sideways step (mm) the jog-removal pass will slide."""
+
     pull_tight_max_iterations: int = 10
     """Maximum number of PullTight iterations before stopping."""
 

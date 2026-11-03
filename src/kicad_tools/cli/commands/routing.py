@@ -952,6 +952,8 @@ def run_optimize_command(args) -> int:
         sub_argv.append("--no-zigzag")
     if args.no_45:
         sub_argv.append("--no-45")
+    if args.no_jogs:
+        sub_argv.append("--no-jogs")
     if args.chamfer_size != 0.5:
         sub_argv.extend(["--chamfer-size", str(args.chamfer_size)])
     if args.verbose:
