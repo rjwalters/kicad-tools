@@ -416,6 +416,7 @@ Examples:
                     "nets_rolled_back": stats.nets_rolled_back,
                     "nets_attempted": stats.nets_optimized,
                     "nets_kept": stats.nets_kept,
+                    "duplicates_removed": stats.duplicates_removed,
                     "nets_connectivity_discarded": stats.nets_connectivity_discarded,
                     "connectivity_discarded_nets": stats.connectivity_discarded_nets,
                     "drc_failsafe_reverted": stats.drc_failsafe_reverted,
@@ -478,6 +479,7 @@ Examples:
             f"({-stats.segment_reduction:+.1f}%)"
         )
         print(f"  Corners:         {stats.corners_before:>6} -> {stats.corners_after:>6}")
+        print(f"  Duplicates removed: {stats.duplicates_removed}")
         print(
             f"  Total length:    {stats.length_before:>6.1f}mm -> {stats.length_after:>6.1f}mm  "
             f"({-stats.length_reduction:+.1f}%)"

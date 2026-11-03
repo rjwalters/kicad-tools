@@ -9597,7 +9597,22 @@ def _add_export_parser(subparsers) -> None:
         "--no-merge-lcsc",
         dest="export_no_merge_lcsc",
         action="store_true",
-        help="Disable merging LCSC part numbers from an existing BOM CSV",
+        help=(
+            "Disable merging LCSC part numbers from an existing BOM CSV. By default the "
+            "merge reads <output-dir>/bom_<mfr>.csv, so a new output directory has "
+            "nothing to merge (see --merge-lcsc-from)"
+        ),
+    )
+    export_parser.add_argument(
+        "--merge-lcsc-from",
+        dest="export_merge_lcsc_from",
+        metavar="BOM_CSV",
+        default=None,
+        help=(
+            "Merge LCSC part numbers from this BOM CSV (e.g. the previous revision's "
+            "verified bom_jlcpcb.csv) instead of <output-dir>/bom_<mfr>.csv. "
+            "A missing file is an error; --no-merge-lcsc takes precedence"
+        ),
     )
     export_parser.add_argument(
         "--skip-preflight",
