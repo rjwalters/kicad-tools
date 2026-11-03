@@ -15,6 +15,19 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-03
 
+- **PR #8289**: test: pin optimize-traces connectivity decisions across hash seeds
+- **PR #8287**: fix: refill zones after optimize-traces writes the board
+- **PR #8284**: fix: exclude spec-exempt BOM refs from the LCSC CSV merge
+- **PR #8281**: fix(audit): evaluate ampacity at the board's declared stackup copper
+- **PR #8276**: feat(optimize-traces): remove lateral jogs; check rewrites against the board's declared rules
+- **PR #8273**: fix: dedupe exact-duplicate segments emitted by optimize-traces
+- **PR #8272**: fix: merge collinear segments in checkpoint writers
+- **PR #8266**: feat(export): add --merge-lcsc-from and report the LCSC merge source
+- **PR #8265**: feat: declare non-LCSC BOM refs via spec exempt fields
+- **PR #8264**: fix: include attach-zone exemption state in kct check --output JSON
+- **PR #8263**: fix: re-point timeout.json checkpoint for relative -o
+- **PR #8253**: fix: keep optimize-traces from breaking attachments, holes and connectivity
+- **PR #8252**: feat: explain futile relief rescues and skip identical repeats
 - **PR #8251**: fix: prune keeps tracks that would strand an end or feed a copper arc
 - **Issue #8249** (closed): kct pcb prune --unverified can leave a dangling end or cut an arc-fed pad (unmodelled body/arc joins)
 - **PR #8244**: feat(optimize-traces): run detour-shortening pass with board anchors
