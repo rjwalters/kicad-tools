@@ -90,6 +90,28 @@ def test_waived_and_info_findings_are_ignored():
     assert unaccepted_warnings([waived, info], known) == []
 
 
+def test_redundant_copper_advisories_never_fail_a_strict_gate():
+    """Issue #8218: ``redundant_copper_*`` are warning-only hints, not gating.
+
+    Real findings carry ``items == []`` (the net is only in the message), so the
+    fixture mirrors that shape.
+    """
+    findings = [
+        {"rule_id": rid, "severity": "warning", "waived": False, "items": []}
+        for rid in (
+            "redundant_copper_fragments",
+            "redundant_copper_detour",
+            "redundant_copper_duplicate",
+            "redundant_copper_via_offcentre",
+        )
+    ]
+    assert unaccepted_warnings(findings, {}) == []
+    # Other warnings in the same list are still unaccepted.
+    assert len(unaccepted_warnings([*findings, _via_edge("R11-1")], {})) == 1
+    # The report-level summary cross-check still counts them as listed warnings.
+    assert unaccepted_report_warnings(_report(findings), {}) == []
+
+
 # --------------------------------------------------------------------- board 04
 def test_board04_known_set_is_empty(board04):
     # Issue #7295 removed the nine 0805 ``thermal_asymmetry`` findings at the

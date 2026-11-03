@@ -39,7 +39,7 @@ Model resolves through the harness's normal precedence chain (explicit dispatch 
 
 **Arguments**: `$ARGUMENTS`
 
-`$ARGUMENTS` is `<board-path> [--mfr <tier>] [--assembly | --pcb-only] [--output <dir>] [--ack-warnings <rule,...>]`.
+`$ARGUMENTS` is `<board-path> [--mfr <tier>] [--assembly | --pcb-only] [--output <dir>] [--ack-warnings <rule,...>] [--skip-cleanup]`.
 
 | Token | Meaning |
 |-------|---------|
@@ -48,6 +48,7 @@ Model resolves through the harness's normal precedence chain (explicit dispatch 
 | `--assembly` | Produce a **full assembly package**: gerbers + drill **and** BOM + CPL with part-number resolution. In this mode the BOM gate (Gate 4) is a **hard gate** — any unresolved BOM line fails the tapeout. |
 | `--pcb-only` | Produce a **bare-board package**: gerbers + drill only. **Skips BOM and CPL entirely** (Gate 4 and the CPL half of Gate 3 are not run). Use when you are ordering the PCB alone and sourcing/assembling parts yourself. |
 | `--output <dir>` | Where the bundle is written. Optional; defaults to `<pcb-dir>/manufacturing/` (the `kct export` default). |
+| `--skip-cleanup` | **Optional.** Skip Gate 0 (copper cleanup). The skip is **recorded**: Gate 7 writes `copper_cleanup: skipped` to `README.txt` and Gate 8 to the manifest. Without this flag Gate 0 always runs. |
 | `--ack-warnings <rule,...>` | **Optional.** Explicitly acknowledge nonzero **assembly-affecting** warning counts for the named rules (comma-separated `rule_id`s, e.g. `--ack-warnings silk_over_copper,silk_edge_clearance`). Each acknowledged rule becomes a per-rule accepted-risk line in `README.txt` (Gate 7). Without an acknowledgement covering **every** assembly-affecting rule that has a nonzero warning count, Gate 4b **refuses** the tapeout. This is a *skill* argument (an acknowledgement ritual), not a `kct check` CLI flag. |
 
 **`--assembly` and `--pcb-only` are mutually exclusive.** If both are passed, refuse. **If neither is passed, default to `--assembly`** — the safe default is the *complete* package; a caller who wants the reduced bare-board package must ask for it explicitly.
@@ -73,6 +74,10 @@ uv run python -c "from kicad_tools.manufacturers import get_manufacturer_ids; pr
 If the resolved tier is not in that set, stop and ask — do not silently fall back to a default, because the fab tier is load-bearing (in-pad-via rescue rules, min trace/space floors, whether LCSC part-number resolution even applies, etc. differ by tier).
 
 ## The tapeout ritual (run in order; refuse on the first hard failure)
+
+### Gate 0 — copper cleanup (always runs unless `--skip-cleanup`)
+
+Before Gate 1, run `kct pcb dedupe <pcb>` (in place) to remove exact-duplicate segments and vias (issue #8218). It must precede Gate 1 so the `--refill-zones` cross-gate (Gate 2) judges the **cleaned** board, and nothing is hashed or exported from the uncleaned one. Record the removed counts (`kct pcb dedupe --format json` → `removed`; `0` is a valid result) for Gate 7/8. Cleanup passes beyond dedupe (spurs, snapping, loops) are #8216 and are wired in only after it lands. `kct check` also reports the remaining avoidable copper as `redundant_copper_*` warnings (advisory). `kct readiness --generate` performs the same step (`--skip-cleanup` to opt out).
 
 ### Pre-gates (Gates 1–3): delegate to `{{skill:manufacturing-readiness}}`, do not re-describe
 
@@ -179,6 +184,7 @@ Write `<dir>/README.txt` enumerating **every** deliverable in the bundle so a hu
 - A list of every file in the output directory with a one-line description (gerbers/drill archive, BOM, CPL, schematic PDF, assembly-view PDFs, renders, manifest).
 - **Hand-solder / THT items** (carried from the CPL's THT-exclusion note) — parts the assembler will *not* place and someone must hand-solder.
 - The **per-rule warning table** from Gate 4b (rule → warning count; not an aggregate total), and **one acknowledgement line per assembly-affecting rule with a nonzero count** — naming the rule, the count, and why the risk is accepted (from `--ack-warnings` or the recorded accepted-risk decision). If every assembly-affecting count is zero, state that explicitly.
+- A **Copper cleanup** line from Gate 0: segments/vias removed, or `copper_cleanup: skipped` when `--skip-cleanup` was passed.
 - Any **accepted-risk notes** carried forward from sign-off docs (e.g. a documented DRC waiver). Waived findings in Gate 1's report (`"status": "waived"`) are listed one per line with their `key`, `waiver_reason` and reviewer from the board's `<board>.kct-waivers.json`. If none, say "no accepted-risk waivers."
 
 **Gate condition:** `README.txt` exists, names the board file, the tier, and the mode, **and** contains the per-rule warning table plus one acknowledgement line per assembly-affecting rule with a nonzero count (or the explicit statement that all assembly-affecting counts are zero).
