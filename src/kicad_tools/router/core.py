@@ -16877,8 +16877,6 @@ class Autorouter:
             width = net_class.trace_width if net_class else self.rules.trace_width
             clearance = net_class.clearance if net_class else self.rules.trace_clearance
             scope = "class clearance only, no closing nets resolved"
-            closers: set[int] = set()
-            closer_kinds: list[Any] = []
             # Resolve against the nets that actually close the victim in: the
             # resolver's pairwise term plus each pair's authored net floors, so
             # an HV pair is not understated by the class value.
@@ -16916,8 +16914,6 @@ class Autorouter:
                         )
                         clearance = max(clearance, resolved)
                         scope = "resolved against closing nets"
-                        closers = others
-                        closer_kinds = kinds
             except Exception:  # pragma: no cover - fall back to the labelled class value
                 pass
             need_mm = width + 2 * clearance
@@ -16929,8 +16925,6 @@ class Autorouter:
                     need_mm,
                     ripped_routes,
                     placed_since_rip,
-                    closers,
-                    closer_kinds,
                 )
             except Exception:  # pragma: no cover - never break a rescue's log line
                 freed_text = "freed width not measured (measurement failed)"
@@ -16948,29 +16942,38 @@ class Autorouter:
         need_mm: float,
         ripped_routes: dict[int, list[Route]] | None,
         placed_since_rip: dict[int, list[Route]] | None,
-        closers: set[int],
-        closer_kinds: list[Any],
     ) -> str:
         """Freed corridor, shortfall and re-occupation (Issue #8256).
 
         **Freed corridor.**  A ripped blocker trace of width ``w`` sat legally,
-        so its neighbours were at least its clearance ``c`` away on each side:
-        removing it vacates at least ``w + 2c``.  ``c`` is resolved with
-        :meth:`DesignRules.clearance_for_nets` the same way the need side is
-        -- against the witness's closing nets (pairwise term and both nets'
-        authored floors, minimised over the closers and copper kinds, since
-        any one of them could be the neighbour), or, without a witness, the
-        blocker's own class value raised to its own floor (which binds every
-        pair it is in).  The widest ripped trace gives the figure.  It is a
-        **lower** bound (the real gap can be wider; vias are ignored), so the
-        shortfall ``need - freed`` is an **upper** bound, printed as such.
+        so every neighbour was at least the blocker's clearance ``c`` away on
+        each side: removing it vacates at least ``w + 2c`` *wherever it ran*.
+        The victim's probe failed at one place we do not know, so the bound
+        must hold at every point along the ripped copper:
+
+        * ``w`` is the **narrowest** ripped segment (a blocker 0.10 mm wide at
+          the seal and 0.50 mm on a far run vacated only 0.10 + 2c at the
+          seal), minimised over every ripped blocker.
+        * ``c`` is the **smallest** clearance the blocker itself can require
+          -- the resolver's minimum over every partner net and copper kind --
+          raised only to the blocker's *own* authored floor, which binds every
+          pair it is in.  The victim's closers' floors never raise it: the
+          blocker's neighbour need not be one of them, so a low-voltage
+          blocker may legally have sat at its own small clearance from a
+          low-voltage non-closer.
+
+        It is a **lower** bound (the real gap can be wider; vias are ignored),
+        so the shortfall ``need - freed`` is an **upper** bound, printed as
+        such.  When no sound bound can be resolved the line says "freed
+        corridor not measured" rather than printing a number.
 
         **Re-occupation.**  Only copper placed *after* the last rip
         (``placed_since_rip``) can re-occupy the vacated corridor; untouched
         copper was already there, legally spaced, when the blocker was ripped.
         Such copper re-occupies it when it sits closer to a ripped centreline
         than the victim's half width plus the victim/occupant pairwise
-        clearance.  Pads never move inside a rescue, so they cannot re-occupy
+        clearance -- "takes space the victim needs", even when it is legal
+        against the ripped blocker itself.  Pads never move inside a rescue, so they cannot re-occupy
         a corridor; a pad that closes it is already in the witness's closers.
         """
         if ripped_routes is None:
@@ -16993,35 +16996,31 @@ class Autorouter:
         def _name(net: int) -> str:
             return self.net_names.get(net, f"Net_{net}")
 
-        best: tuple[float, float, float, int] | None = None  # (freed, w, c, net)
-        band_scope = "class clearance only"
+        partners = [""] + sorted({n for n in self.net_names.values() if n})
+        partner_kinds = (CopperKind.TRACE, CopperKind.VIA, CopperKind.PAD)
+        best: tuple[float, float, float, int, bool] | None = None  # (freed, w, c, net, floored)
         for net, segs in ripped.items():
-            w = max(seg.width for seg in segs)
-            neighbours = closers - {net, failed_net}
-            if neighbours:
-                kinds = closer_kinds or [CopperKind.TRACE]
-                c = min(
-                    self.rules.clearance_for_nets(
-                        net,
-                        o,
-                        resolver.required_mm(_name(net), _name(o), CopperKind.TRACE, k),
-                    )
-                    for o in neighbours
-                    for k in kinds
+            w = min(seg.width for seg in segs)
+            if w <= 0:
+                return "freed corridor not measured (a ripped segment has no width)"
+            try:
+                own = _name(net)
+                c_min = min(
+                    resolver.required_mm(own, o, CopperKind.TRACE, k)
+                    for o in partners
+                    if o != own
+                    for k in partner_kinds
                 )
-                scope_here = "resolved against closing nets"
-            else:
-                c = max(
-                    resolver.required_mm(_name(net), "", CopperKind.TRACE, CopperKind.TRACE),
-                    floors.get(net, 0.0),
-                )
-                scope_here = "class clearance only"
+            except Exception:
+                return "freed corridor not measured (blocker clearance not resolved)"
+            floor = floors.get(net, 0.0)
+            c = max(c_min, floor)
             freed = w + 2 * c
-            if best is None or freed > best[0]:
-                best = (freed, w, c, net)
-                band_scope = scope_here
+            if best is None or freed < best[0]:
+                best = (freed, w, c, net, floor > c_min)
         assert best is not None
-        freed, w, c, blocker = best
+        freed, w, c, blocker, floored = best
+        band_scope = "blocker's own authored floor" if floored else "blocker's minimum clearance"
         shortfall = need_mm - freed
         short_text = (
             f"shortfall <= {shortfall:.3f} mm"
@@ -17029,7 +17028,7 @@ class Autorouter:
             else "no width shortfall (the ripped trace's own corridor fits the victim)"
         )
         freed_text = (
-            f"freed >= {freed:.3f} mm (ripped {_name(blocker)}: width {w:.3f} "
+            f"freed >= {freed:.3f} mm (ripped {_name(blocker)}: narrowest width {w:.3f} "
             f"+ 2x clearance {c:.3f}, {band_scope}), {short_text}"
         )
 

@@ -255,7 +255,38 @@ def test_freed_band_uses_the_blockers_authored_floor():
     router.rules.net_clearance_floors = {2: 1.0, 3: 1.0, 4: 1.0, 5: 1.0}
     line = router._relief_corridor_need(1, {2: [_seg(0, 0, 5, 0, width=0.2, net=2)]}, {})
     assert f"freed >= {0.2 + 2 * 1.0:.3f} mm" in line, line
-    assert "resolved against closing nets" in line.split("freed")[1], line
+    assert "blocker's own authored floor" in line.split("freed")[1], line
+
+
+def test_freed_band_ignores_the_closers_floors_when_the_blocker_has_none():
+    """Judge's probe F: an HV victim sealed by HV closers, but the ripped
+    blocker N2 is LV.  N2 may legally have sat 0.2 mm from an LV non-closer,
+    so the closers' 1.0 mm floor must not widen the band it vacated."""
+    router = _sealed_router()
+    router.rules.net_clearance_floors = {1: 1.0, 3: 1.0, 4: 1.0, 5: 1.0}
+    c = router.rules.trace_clearance
+    assert router.rules.clearance_for_nets(2, 6, c) == c  # the legal LV neighbour
+    line = router._relief_corridor_need(1, {2: [_seg(0, 0, 5, 0, width=0.2, net=2)]}, {})
+    freed = 0.2 + 2 * c
+    assert f"freed >= {freed:.3f} mm" in line, line
+    assert f"shortfall <= {_need(router) - freed:.3f} mm" in line, line
+    assert "no width shortfall" not in line, line
+
+
+def test_freed_band_uses_the_narrowest_ripped_segment():
+    """Judge's probe G: N2 is 0.10 mm where it passes the seal and 0.50 mm on
+    a far-away run.  The bound must hold at the seal, so the narrow segment
+    sets it -- the wide run must not produce a false "no width shortfall"."""
+    router = _sealed_router()
+    c = router.rules.trace_clearance
+    blocker = _seg(0, 0, 1, 0, width=0.1, net=2)
+    blocker.segments += _seg(30, 30, 40, 30, width=0.5, net=2).segments
+    line = router._relief_corridor_need(1, {2: [blocker]}, {})
+    freed = 0.1 + 2 * c
+    assert f"freed >= {freed:.3f} mm" in line, line
+    assert "narrowest width 0.100" in line, line
+    assert f"shortfall <= {_need(router) - freed:.3f} mm" in line, line
+    assert "no width shortfall" not in line, line
 
 
 def test_nothing_ripped_is_said_without_a_shortfall_figure():
@@ -320,7 +351,7 @@ def test_rescue_line_measures_ripped_blocker_not_the_victims_stub():
         assert _relief(router, neg, net_routes, pads_by_net, RipupCycleGuard(), log) is False
     line = next(m for m in log if "NO relief path" in m)
     assert "(round 2;" in line, line
-    assert "ripped N2: width 0.200" in line, line
+    assert "ripped N2: narrowest width 0.200" in line, line
     assert "not re-occupied (no copper placed since the rip)" in line, line
 
 
