@@ -1459,19 +1459,22 @@ class PreflightChecker:
             if verdict.source:
                 sources.add(verdict.source)
             if item.reference in exemptions:
-                assigned -= 1
                 if (
                     verdict.status == "unverified"
                     and verdict.reason not in UNVERIFIED_HEADER_REASONS
                 ):
                     # Declared non-LCSC part carrying a number no source knows:
-                    # accepted, but recorded (issue #8261).
+                    # accepted, but recorded (issue #8261).  This is the ONLY
+                    # verdict an exemption softens.
+                    assigned -= 1
                     exempt_seen[item.reference] = exemptions[item.reference]
-                else:
-                    # A real LCSC part is on the BOM row: spec and BOM disagree.
-                    ex_cat, ex_why = exemptions[item.reference]
-                    exempt_conflicts.append(f"{item.reference} -> {item.lcsc} [{ex_cat}: {ex_why}]")
-                continue
+                    continue
+                # A real LCSC part is on the BOM row: spec and BOM disagree.
+                # Record the conflict, then judge the part like any other ref
+                # -- an exemption must never hide a wrong part (#8113) or a
+                # strict header FAIL (issue #8261 review).
+                ex_cat, ex_why = exemptions[item.reference]
+                exempt_conflicts.append(f"{item.reference} -> {item.lcsc} [{ex_cat}: {ex_why}]")
             if verdict.status == "unverified":
                 if verdict.reason in UNVERIFIED_HEADER_REASONS:
                     entry = f"{item.reference} -> {item.lcsc} ({verdict.reason})"
@@ -1486,6 +1489,12 @@ class PreflightChecker:
                     f"{verdict.mismatch.describe()} [{verdict.source}]"
                 )
 
+        conflict_note = (
+            f"; {len(exempt_conflicts)} ref(s) declared exempt in the spec carry a "
+            f"verifiable LCSC part on the BOM (spec and BOM disagree)"
+            if exempt_conflicts
+            else ""
+        )
         if mismatches:
             shown = "; ".join(mismatches[:5])
             suffix = f" (and {len(mismatches) - 5} more)" if len(mismatches) > 5 else ""
@@ -1494,23 +1503,10 @@ class PreflightChecker:
                 status="FAIL",
                 message=(
                     f"{len(mismatches)} BOM item(s) assigned an LCSC part "
-                    f"whose value or package does not match the BOM row"
+                    f"whose value or package does not match the BOM row" + conflict_note
                 ),
                 details=f"{shown}{suffix}"
                 + self._exempt_suffix(exempt_seen, exempt_conflicts, stale_exempt),
-            )
-
-        if exempt_conflicts:
-            shown = "; ".join(exempt_conflicts[:5])
-            return PreflightResult(
-                name="bom_lcsc_values",
-                status="WARN",
-                message=(
-                    f"{len(exempt_conflicts)} ref(s) declared exempt in the spec carry a "
-                    f"verifiable LCSC part on the BOM (spec and BOM disagree)"
-                ),
-                details=f"exempt ref carries a verifiable LCSC part: {shown}"
-                + self._exempt_suffix(exempt_seen, [], stale_exempt),
             )
 
         if not assigned:
@@ -1535,9 +1531,10 @@ class PreflightChecker:
                 status="FAIL",
                 message=(
                     f"{n_hdr} pin header/socket part(s): pin count not verifiable "
-                    f"(strict preflight){also if others else ''}"
+                    f"(strict preflight){also if others else ''}" + conflict_note
                 ),
-                details=f"pin count not verifiable: {shown}{suffix}",
+                details=f"pin count not verifiable: {shown}{suffix}"
+                + self._exempt_suffix(exempt_seen, exempt_conflicts, stale_exempt),
             )
         if unverified:
             shown = ", ".join(unverified[:8])
@@ -1563,10 +1560,23 @@ class PreflightChecker:
                 status="WARN",
                 message=(
                     f"{verified} of {assigned} assigned item(s) verified ({against}); "
-                    f"{len(unverified)} unverifiable ({reasons})"
+                    f"{len(unverified)} unverifiable ({reasons})" + conflict_note
                 ),
                 details=f"unverified: {shown}{suffix}"
-                + self._exempt_suffix(exempt_seen, [], stale_exempt),
+                + self._exempt_suffix(exempt_seen, exempt_conflicts, stale_exempt),
+            )
+
+        if exempt_conflicts:
+            # Every part checked out, but the spec declares refs exempt that
+            # carry a verifiable LCSC part: never a clean OK (issue #8261).
+            return PreflightResult(
+                name="bom_lcsc_values",
+                status="WARN",
+                message=(
+                    f"{assigned} of {assigned} assigned item(s) verified against {against}; "
+                    f"no LCSC value/package mismatches" + conflict_note
+                ),
+                details=self._exempt_suffix(exempt_seen, exempt_conflicts, stale_exempt, lead=True),
             )
 
         return PreflightResult(
