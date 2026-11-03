@@ -112,6 +112,8 @@ The gate then:
    - `FAIL` → **refuse**, naming the mismatched lines from `details`.
    - Entry missing, or a status other than `OK`/`WARN` → **refuse** (the check did not run; unknown is not pass, #5946).
    - `WARN` with lines the check could not look up (`unverified`, "not in parts cache or offline catalog") → count those lines as **unresolved** and **refuse**; tell the human to run `kct parts lookup <LCSC>` (which fills the cache) and re-run.
+   - **Declared exemptions (issue #8261):** a ref the project `.kct` declares in `bom_entries` with `exempt: consigned | hand_solder | dnp_by_intent` plus a mandatory `exempt_reason` (and no `lcsc`) is not counted as unverified; the check reports it in an `exempt (declared): <ref> [<category>: <reason>]` segment of `details` and returns `OK` if nothing else is unverifiable. Only declared refs are accepted this way — an undeclared `unverified` line still refuses. Never accept an unverifiable line on judgement; if it is deliberately not an LCSC part, have the human declare it in the spec. Each exemption (ref, category, reason) is listed in the README and recorded in the manifest (Gates 7/8).
+   - `WARN` (or any status) whose `details` contain `exempt ref carries a verifiable LCSC part` → **refuse**, quoting that segment. The spec declares the ref non-LCSC but the BOM row carries a real LCSC part, so the order would either place a part the owner meant to supply, or the exemption is stale; the human must reconcile the spec (drop the exemption, or drop the LCSC number from the row) and re-run. The check still judges such a ref normally — a wrong part is still a `FAIL` — so the conflict segment can appear alongside `FAIL` or `unverified` lines; refuse on whichever applies.
 
 The distinction is load-bearing: **matcher-broken → refuse the whole tapeout** (the package is not trustworthy); **no-match on specific parts → unresolved report → refuse `--assembly`** (the human must pick parts before this can ship as an assembly order). Never let a silently-empty part-number column pass as "resolved."
 
@@ -182,6 +184,7 @@ Write `<dir>/README.txt` enumerating **every** deliverable in the bundle so a hu
 - The exact **board file** taped out and the **resolved fab tier**.
 - The mode (`--assembly` or `--pcb-only`) and what that implies (BOM/CPL present or intentionally absent).
 - A list of every file in the output directory with a one-line description (gerbers/drill archive, BOM, CPL, schematic PDF, assembly-view PDFs, renders, manifest).
+- **Declared BOM exemptions** (Gate 4, issue #8261) — one line per `exempt (declared)` ref from the `bom_lcsc_values` details: ref, category, reason. If none, say "no declared BOM exemptions."
 - **Hand-solder / THT items** (carried from the CPL's THT-exclusion note) — parts the assembler will *not* place and someone must hand-solder.
 - The **per-rule warning table** from Gate 4b (rule → warning count; not an aggregate total), and **one acknowledgement line per assembly-affecting rule with a nonzero count** — naming the rule, the count, and why the risk is accepted (from `--ack-warnings` or the recorded accepted-risk decision). If every assembly-affecting count is zero, state that explicitly.
 - A **Copper cleanup** line from Gate 0: segments/vias removed, or `copper_cleanup: skipped` when `--skip-cleanup` was passed.
@@ -196,6 +199,7 @@ The `manifest.json` `kct export` wrote in Gate 3 only covers **what `kct export`
 - Enumerate **all** files in `<dir>` (recursively), and record a checksum (e.g. SHA-256) for each.
 - Record the **exact board file** name and the **resolved tier**.
 - Record the mode (`--assembly` / `--pcb-only`).
+- Record the **declared BOM exemptions** from Gate 4 (a list of `{ref, category, reason}`; empty list if none).
 - Record the **per-rule warning counts** from Gate 4b (a `rule_id` → warning-count map, plus the list of acknowledged assembly-affecting rules), so a later re-verification can diff the warning population **per rule** rather than against an aggregate total. An aggregate-only warning number in the manifest is non-compliant for the same reason it is in Gate 4b.
 
 **Gate condition:** a `manifest.json` exists, is newer than every other file it lists, its file set equals the actual contents of `<dir>` (nothing in the directory is unchecksummed, nothing checksummed is missing), and it records the per-rule warning counts. A stale or partial manifest is a **failure** — it breaks the "upload as-is" contract.
@@ -224,7 +228,7 @@ Refuse the tapeout, loudly, when any of these hold:
 - **A stale evidence-bound waiver** — `summary.stale_waivers` is nonzero, or any finding carries `"waiver_status": "stale"`. The geometry or nets under a reviewed waiver changed, so the finding is active again; it must be re-reviewed (and re-waived with `kct check --waive <key> --waive-reason ... --waive-reviewer ...` only if still intentional), never carried forward as accepted risk.
 - **Unacknowledged assembly-affecting warnings (Gate 4b)** — any rule in the assembly-affecting set (`silk_over_copper`, `silkscreen_line_width`, `silk_edge_clearance`, `silk_overlap`, `courtyard_missing`, at minimum) has a nonzero warning count with no matching `--ack-warnings` entry or per-rule accepted-risk line. Quote the per-rule warning table in the refusal. "0 errors" is not "fit to fabricate" — these two claims must never be conflated by this skill.
 - **`--assembly` with unresolved BOM lines** — one or more components have no fab-orderable part number (human selection required). Surface the unresolved report; do not ship an incomplete assembly order.
-- **LCSC part/package check failed or unverified (Gate 4, `--assembly`)** — the manifest's `bom_lcsc_values` preflight entry is `FAIL`, is missing, or is `WARN` with `unverified` lines (issue #8113). Quote the offending `details` lines.
+- **LCSC part/package check failed or unverified (Gate 4, `--assembly`)** — the manifest's `bom_lcsc_values` preflight entry is `FAIL`, is missing, or is `WARN` with `unverified` lines not covered by a declared spec exemption, or reports an `exempt ref carries a verifiable LCSC part` conflict (issues #8113, #8261). Quote the offending `details` lines.
 
 - **BOM-resolution machinery unavailable** — the requested capability could not run: the `[parts]` extra is missing (so `--auto-lcsc` soft-fails to an empty column — **#4104**), or there is no network for part matching. This is a **refusal**, not a silently-empty BOM that exits 0.
 - **Requested capability unavailable** generally — e.g. `kicad-cli` cannot be found by the `find_kicad_cli()` resolution (drawings and the cross-gate cannot run), `jq` is missing, or the resolved tier is not in `get_manufacturer_ids()`.

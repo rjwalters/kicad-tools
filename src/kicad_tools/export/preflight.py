@@ -1433,9 +1433,18 @@ class PreflightChecker:
         unverified: list[str] = []
         header_unverified: list[str] = []
         sources: set[str] = set()
+        exemptions = self._spec_exemptions()
+        exempt_seen: dict[str, tuple[str, str]] = {}
+        exempt_conflicts: list[str] = []
+        bom_refs = {i.reference for i in items}
+        stale_exempt = sorted(r for r in exemptions if r not in bom_refs)
         assigned = 0
         for item in items:
-            if item.is_virtual or item.dnp or not item.lcsc:
+            if item.is_virtual or item.dnp:
+                continue
+            if not item.lcsc:
+                if item.reference in exemptions:
+                    exempt_seen[item.reference] = exemptions[item.reference]
                 continue
             assigned += 1
             verdict = verify_lcsc_assignment(
@@ -1449,6 +1458,23 @@ class PreflightChecker:
             )
             if verdict.source:
                 sources.add(verdict.source)
+            if item.reference in exemptions:
+                if (
+                    verdict.status == "unverified"
+                    and verdict.reason not in UNVERIFIED_HEADER_REASONS
+                ):
+                    # Declared non-LCSC part carrying a number no source knows:
+                    # accepted, but recorded (issue #8261).  This is the ONLY
+                    # verdict an exemption softens.
+                    assigned -= 1
+                    exempt_seen[item.reference] = exemptions[item.reference]
+                    continue
+                # A real LCSC part is on the BOM row: spec and BOM disagree.
+                # Record the conflict, then judge the part like any other ref
+                # -- an exemption must never hide a wrong part (#8113) or a
+                # strict header FAIL (issue #8261 review).
+                ex_cat, ex_why = exemptions[item.reference]
+                exempt_conflicts.append(f"{item.reference} -> {item.lcsc} [{ex_cat}: {ex_why}]")
             if verdict.status == "unverified":
                 if verdict.reason in UNVERIFIED_HEADER_REASONS:
                     entry = f"{item.reference} -> {item.lcsc} ({verdict.reason})"
@@ -1463,6 +1489,12 @@ class PreflightChecker:
                     f"{verdict.mismatch.describe()} [{verdict.source}]"
                 )
 
+        conflict_note = (
+            f"; {len(exempt_conflicts)} ref(s) declared exempt in the spec carry a "
+            f"verifiable LCSC part on the BOM (spec and BOM disagree)"
+            if exempt_conflicts
+            else ""
+        )
         if mismatches:
             shown = "; ".join(mismatches[:5])
             suffix = f" (and {len(mismatches) - 5} more)" if len(mismatches) > 5 else ""
@@ -1471,16 +1503,19 @@ class PreflightChecker:
                 status="FAIL",
                 message=(
                     f"{len(mismatches)} BOM item(s) assigned an LCSC part "
-                    f"whose value or package does not match the BOM row"
+                    f"whose value or package does not match the BOM row" + conflict_note
                 ),
-                details=f"{shown}{suffix}",
+                details=f"{shown}{suffix}"
+                + self._exempt_suffix(exempt_seen, exempt_conflicts, stale_exempt),
             )
 
         if not assigned:
             return PreflightResult(
                 name="bom_lcsc_values",
                 status="OK",
-                message="No assigned LCSC parts to validate",
+                message="No assigned LCSC parts to validate"
+                + (f"; {len(exempt_seen)} declared exempt" if exempt_seen else ""),
+                details=self._exempt_suffix(exempt_seen, [], stale_exempt, lead=True),
             )
 
         verified = assigned - len(unverified)
@@ -1496,9 +1531,10 @@ class PreflightChecker:
                 status="FAIL",
                 message=(
                     f"{n_hdr} pin header/socket part(s): pin count not verifiable "
-                    f"(strict preflight){also if others else ''}"
+                    f"(strict preflight){also if others else ''}" + conflict_note
                 ),
-                details=f"pin count not verifiable: {shown}{suffix}",
+                details=f"pin count not verifiable: {shown}{suffix}"
+                + self._exempt_suffix(exempt_seen, exempt_conflicts, stale_exempt),
             )
         if unverified:
             shown = ", ".join(unverified[:8])
@@ -1524,9 +1560,23 @@ class PreflightChecker:
                 status="WARN",
                 message=(
                     f"{verified} of {assigned} assigned item(s) verified ({against}); "
-                    f"{len(unverified)} unverifiable ({reasons})"
+                    f"{len(unverified)} unverifiable ({reasons})" + conflict_note
                 ),
-                details=f"unverified: {shown}{suffix}",
+                details=f"unverified: {shown}{suffix}"
+                + self._exempt_suffix(exempt_seen, exempt_conflicts, stale_exempt),
+            )
+
+        if exempt_conflicts:
+            # Every part checked out, but the spec declares refs exempt that
+            # carry a verifiable LCSC part: never a clean OK (issue #8261).
+            return PreflightResult(
+                name="bom_lcsc_values",
+                status="WARN",
+                message=(
+                    f"{assigned} of {assigned} assigned item(s) verified against {against}; "
+                    f"no LCSC value/package mismatches" + conflict_note
+                ),
+                details=self._exempt_suffix(exempt_seen, exempt_conflicts, stale_exempt, lead=True),
             )
 
         return PreflightResult(
@@ -1535,7 +1585,9 @@ class PreflightChecker:
             message=(
                 f"{assigned} of {assigned} assigned item(s) verified against {against}; "
                 f"no LCSC value/package mismatches"
+                + (f"; {len(exempt_seen)} declared exempt" if exempt_seen else "")
             ),
+            details=self._exempt_suffix(exempt_seen, [], stale_exempt, lead=True),
         )
 
     def check_bom_lcsc_stock(self) -> PreflightResult:
@@ -1586,10 +1638,16 @@ class PreflightChecker:
 
         from .lcsc_value_check import stock_shortfall, verify_lcsc_assignment
 
+        exemptions = self._spec_exemptions()
         refs_by_lcsc: dict[str, list[str]] = {}
         for item in items:
             if item.is_virtual or item.dnp or not item.lcsc:
                 continue
+            if item.reference in exemptions and (
+                verify_lcsc_assignment(cache, catalog, item.lcsc, "", item.reference).part is None
+            ):
+                continue  # declared non-LCSC part with an unknown number (issue #8261)
+            # An exempt ref with a real, known part still ships it: check its stock.
             refs_by_lcsc.setdefault(item.lcsc, []).append(item.reference)
 
         if not refs_by_lcsc:
@@ -2197,6 +2255,50 @@ class PreflightChecker:
         except Exception as e:  # pragma: no cover - defensive
             logger.debug("Spec LCSC resolution failed (ignoring): %s", e)
             return set()
+
+    def _spec_exemptions(self) -> dict[str, tuple[str, str]]:
+        """Refs the ``.kct`` spec declares deliberately non-LCSC (issue #8261).
+
+        Best-effort like the overlay: no/invalid spec means no exemptions.
+        """
+        try:
+            from .bom_spec_overlay import declared_exemptions, find_spec_file
+
+            spec_file = find_spec_file(self.pcb_path.parent)
+            if spec_file is None:
+                return {}
+            from ..spec.parser import load_spec
+
+            spec = load_spec(spec_file)
+            return declared_exemptions(spec.bom_entries) if spec.bom_entries else {}
+        except Exception as e:
+            logger.debug("Spec exemption lookup failed (ignoring): %s", e)
+            return {}
+
+    @classmethod
+    def _exempt_suffix(
+        cls,
+        exempt_seen: dict[str, tuple[str, str]],
+        conflicts: list[str],
+        stale: list[str],
+        lead: bool = False,
+    ) -> str:
+        """Details text for declared exemptions, conflicts and stale refs (#8261)."""
+        parts: list[str] = []
+        if exempt_seen:
+            parts.append(cls._format_exempt(exempt_seen))
+        if conflicts:
+            parts.append("exempt ref carries a verifiable LCSC part: " + "; ".join(conflicts))
+        if stale:
+            parts.append("stale exemption (no such ref): " + ", ".join(stale))
+        text = " | ".join(parts)
+        return text if lead or not text else f" | {text}"
+
+    @staticmethod
+    def _format_exempt(exempt_seen: dict[str, tuple[str, str]]) -> str:
+        return "exempt (declared): " + "; ".join(
+            f"{ref} [{cat}: {why}]" for ref, (cat, why) in sorted(exempt_seen.items())
+        )
 
     def _items_with_spec_overlay(self, bom) -> list:
         """Return copies of ``bom.items`` with the ``.kct`` overlay and CSV merge applied.

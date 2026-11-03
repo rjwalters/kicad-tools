@@ -2795,7 +2795,19 @@ def _gate_bom(
     )
     # Keep the WARN's refs and reasons (e.g. ``J1 -> C999999 (pin count not
     # stated by part)``, issue #7446), not just its summary message.
-    warn_details = f" [{part_details}]" if part_status == "WARN" and part_details else ""
+    # Declared spec exemptions (issue #8261) are accepted but must be visible.
+    warn_details = (
+        f" [{part_details}]"
+        if part_details
+        and (
+            part_status == "WARN"
+            or any(
+                m in part_details
+                for m in ("exempt (declared)", "stale exemption", "exempt ref carries")
+            )
+        )
+        else ""
+    )
     return CheckOutcome(
         name="bom",
         status=PASSED,

@@ -133,6 +133,22 @@ def resolved_refs(report: SpecOverlayReport) -> set[str]:
     return {e.reference for e in report.entries if e.matched and (e.mpn or e.lcsc)}
 
 
+def declared_exemptions(bom_entries: list[BOMEntry]) -> dict[str, tuple[str, str]]:
+    """Map each ref declared ``exempt`` in the spec to ``(category, reason)``.
+
+    Ranges (``Q1-Q4``) are expanded.  Only entries carrying ``exempt`` are
+    returned; the spec schema guarantees a non-empty reason (issue #8261).
+    """
+    out: dict[str, tuple[str, str]] = {}
+    for entry in bom_entries:
+        cat = entry.exempt
+        if cat is None:
+            continue
+        for ref in expand_ref_range(entry.ref):
+            out[ref] = (str(cat), entry.exempt_reason or "")
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Spec auto-detection
 # ---------------------------------------------------------------------------
