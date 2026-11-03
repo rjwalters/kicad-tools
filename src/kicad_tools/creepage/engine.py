@@ -874,6 +874,98 @@ class _FootprintPadIndex:
                 return "same_footprint"
         return "board"
 
+    def shared_pad_union(self, layer_name: str, net_a: int, net_b: int, net: int) -> Any | None:
+        """Union of ``net``'s pads on every footprint holding BOTH ``net_a`` and ``net_b``.
+
+        ``None`` when no footprint shares the pair on ``layer_name`` (#8232).
+        """
+        from shapely.ops import unary_union
+
+        by_net = self._by_net.get(layer_name)
+        pads = self._pads.get(layer_name)
+        if not by_net or pads is None:
+            return None
+        shared = by_net.get(net_a, set()) & by_net.get(net_b, set())
+        polys = [p for ref in shared for p in pads.get((ref, net), [])]
+        return unary_union(polys) if polys else None
+
+    def shared_footprint_pads(
+        self, layer_name: str, net_a: int, net_b: int
+    ) -> list[tuple[Any, Any]]:
+        """Per-footprint ``(net_a pads, net_b pads)`` unions for footprints holding both nets.
+
+        Empty when no footprint shares the pair on ``layer_name`` (#8232).
+        """
+        from shapely.ops import unary_union
+
+        by_net = self._by_net.get(layer_name)
+        pads = self._pads.get(layer_name)
+        if not by_net or pads is None:
+            return []
+        out: list[tuple[Any, Any]] = []
+        for ref in sorted(by_net.get(net_a, set()) & by_net.get(net_b, set())):
+            a_polys = pads.get((ref, net_a), [])
+            b_polys = pads.get((ref, net_b), [])
+            if a_polys and b_polys:
+                out.append((unary_union(a_polys), unary_union(b_polys)))
+        return out
+
+
+def _board_residual_after_same_footprint(
+    layer_unions: dict[str, dict[int, Any]],
+    fp_index: _FootprintPadIndex,
+    net_a: int,
+    net_b: int,
+    obstacles: list[Any],
+) -> tuple[float, float, str] | None:
+    """Smallest board-level ``(clearance, creepage, layer)`` for a ``same_footprint`` pair (#8232).
+
+    The pair's global minimum is a component-internal gap, which hides any
+    larger board-level approach on the same net pair.  To expose it, the pads
+    of the sharing footprint(s) are masked out of one net at a time (net A's
+    sharing pads vs. all of net B, then all of net A vs. net B's sharing
+    pads) and the pair is re-measured on every layer; the minimum creepage over
+    both variants and all layers is returned.  This drops the intra-footprint
+    pad pair but keeps e.g. a resistor pad -> neighbouring diode pad approach.
+    Cross-footprint approaches between two sharing footprints (A_i vs B_j,
+    i != j) are measured explicitly, and a layer where no footprint shares the
+    pair contributes its plain measurement.
+    A trace stub leaving a masked pad can still register a near-gap, which errs
+    conservative (more FAIL, never a false pass).  ``None`` when no residual
+    copper exists.
+    """
+    best: tuple[float, float, str] | None = None
+    for layer_name, unions in layer_unions.items():
+        geom_a = unions.get(net_a)
+        geom_b = unions.get(net_b)
+        if geom_a is None or geom_b is None:
+            continue
+        mask_a = fp_index.shared_pad_union(layer_name, net_a, net_b, net_a)
+        mask_b = fp_index.shared_pad_union(layer_name, net_a, net_b, net_b)
+        variants = []
+        if mask_a is None and mask_b is None:
+            # No footprint shares the pair here: the plain measurement is
+            # already a board-level gap.
+            variants.append((geom_a, geom_b))
+        if mask_a is not None:
+            variants.append((geom_a.difference(mask_a), geom_b))
+        if mask_b is not None:
+            variants.append((geom_a, geom_b.difference(mask_b)))
+        # Cross-footprint approaches (Ai vs Bj, i != j) lie in neither masked
+        # variant when two or more footprints share the pair.
+        sharing = fp_index.shared_footprint_pads(layer_name, net_a, net_b)
+        for i, (a_i, _b_i) in enumerate(sharing):
+            for j, (_a_j, b_j) in enumerate(sharing):
+                if i != j:
+                    variants.append((a_i, b_j))
+        for ga, gb in variants:
+            if ga.is_empty or gb.is_empty:
+                continue
+            clearance, creepage = surface_path_length(ga, gb, obstacles, _bridged=True)
+            if best is None or creepage < best[1]:
+                best = (clearance, creepage, layer_name)
+    return best
+
 
 def _attach_zone_residual(
     layer_unions: dict[str, dict[int, Any]],
@@ -1660,36 +1752,49 @@ def compute_creepage_census(
                     "residual_layer": r_layer,
                     "residual_witness_mm": r_wit,
                 }
-        if map_mode:
-            req_creep, req_clear, prov = _pair_requirement(net_a_name, net_b_name)
-            report.pairs.append(
-                _make_pair(
-                    req_creep=req_creep,
-                    req_clear=req_clear,
-                    prov=prov,
-                    net_a=net_a_name,
-                    net_b=net_b_name,
-                    kind="conductor",
-                    layer=layer_name,
-                    clearance_mm=clearance,
-                    creepage_mm=creepage,
-                    relationship=relationship,
-                    **residual,
-                )
+        rows: list[tuple[str, float, float, str, dict[str, Any]]] = [
+            (layer_name, clearance, creepage, relationship, residual)
+        ]
+        if relationship == "same_footprint":
+            # #8232: the minimum is component-internal; surface the smallest
+            # board-level approach on the same pair as its own row so a waiver
+            # of the same_footprint row cannot hide it.
+            board_row = _board_residual_after_same_footprint(
+                layer_unions, fp_index, hv_num, other_num, obstacles
             )
-        else:
-            report.pairs.append(
-                _make_pair(
-                    net_a=net_a_name,
-                    net_b=net_b_name,
-                    kind="conductor",
-                    layer=layer_name,
-                    clearance_mm=clearance,
-                    creepage_mm=creepage,
-                    relationship=relationship,
-                    **residual,
+            if board_row is not None:
+                rows.append((board_row[2], board_row[0], board_row[1], "board", {}))
+        for row_layer, row_clr, row_creep, row_rel, row_residual in rows:
+            if map_mode:
+                req_creep, req_clear, prov = _pair_requirement(net_a_name, net_b_name)
+                report.pairs.append(
+                    _make_pair(
+                        req_creep=req_creep,
+                        req_clear=req_clear,
+                        prov=prov,
+                        net_a=net_a_name,
+                        net_b=net_b_name,
+                        kind="conductor",
+                        layer=row_layer,
+                        clearance_mm=row_clr,
+                        creepage_mm=row_creep,
+                        relationship=row_rel,
+                        **row_residual,
+                    )
                 )
-            )
+            else:
+                report.pairs.append(
+                    _make_pair(
+                        net_a=net_a_name,
+                        net_b=net_b_name,
+                        kind="conductor",
+                        layer=row_layer,
+                        clearance_mm=row_clr,
+                        creepage_mm=row_creep,
+                        relationship=row_rel,
+                        **row_residual,
+                    )
+                )
 
     # --- HV-vs-board-edge pairs (copper union across all layers) ---
     edge_geom = board_edge_geometry(pcb)

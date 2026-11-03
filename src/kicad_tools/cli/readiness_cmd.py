@@ -842,6 +842,12 @@ class ReadinessOptions:
     # Timestamp recorded as ``checked_at`` (and as every native DRC report's
     # ``date``, Issue #6962).  ``None`` means "now", fixed once per run.
     checked_at: str | None = None
+    # Copper cleanup step (Issue #8218): ``pcb dedupe`` runs on the candidate
+    # before refill/check in ``generate``; ``verify`` only counts.  Skipping
+    # needs ``--skip-cleanup`` and is recorded.  ``cleanup_record`` is filled
+    # in by the run and rendered into README.txt / the report.
+    skip_cleanup: bool = False
+    cleanup_record: dict[str, Any] | None = None
 
     @property
     def root(self) -> Path:
@@ -1003,6 +1009,7 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
             operation="generate" if args.generate else "verify",
             project_root=project_root,
             checked_at=checked_at,
+            skip_cleanup=bool(getattr(args, "skip_cleanup", False)),
         ),
         None,
     )
@@ -2254,6 +2261,33 @@ def _verify_project_provenance(options: ReadinessOptions) -> list[str]:
     return problems
 
 
+def _copper_cleanup(options: ReadinessOptions) -> dict[str, Any]:
+    """Run (generate) or count (verify) the exact-duplicate copper cleanup.
+
+    Must run before any hashing/refill so the DRC cross-gate judges the
+    cleaned board (Issue #8218).  A skip is recorded, never silent.
+    """
+    if options.skip_cleanup:
+        return {"copper_cleanup": "skipped"}
+    from kicad_tools.schema.pcb import PCB
+
+    try:
+        pcb = PCB.load(str(options.pcb))
+    except Exception as exc:  # unparseable board: the check gates will fail it
+        return {
+            "copper_cleanup": "unavailable",
+            "removed": {"segments": 0, "vias": 0},
+            "detail": str(exc),
+        }
+    stats = pcb.dedupe_copper()
+    removed = {"segments": stats["segments"], "vias": stats["vias"]}
+    if options.operation == "generate":
+        if stats["segments"] or stats["vias"]:
+            pcb.save(str(options.pcb))
+        return {"copper_cleanup": "applied", "removed": removed}
+    return {"copper_cleanup": "verify-count-only", "removed": removed}
+
+
 def _write_readme(
     options: ReadinessOptions,
     warning_counts: dict[str, int],
@@ -2313,6 +2347,17 @@ def _write_readme(
             f"  ACCEPTED RISK: {rule} ({warning_counts[rule]} warning(s)) "
             "explicitly acknowledged via --ack-warnings."
         )
+    record = options.cleanup_record
+    if record is not None:
+        lines.extend(["", "Copper cleanup", "--------------"])
+        if record["copper_cleanup"] == "skipped":
+            lines.append("  copper_cleanup: skipped (--skip-cleanup)")
+        else:
+            removed = record["removed"]
+            lines.append(
+                f"  copper_cleanup: {record['copper_cleanup']}; exact-duplicate copper "
+                f"removed: {removed['segments']} segment(s), {removed['vias']} via(s)"
+            )
     lines.extend(["", "Accepted-risk waivers", "---------------------"])
     if acked:
         lines.append(f"  see the {len(acked)} line(s) above")
@@ -3236,6 +3281,10 @@ def _run_readiness_candidate(
     checks: list[CheckOutcome] = []
     metrics: dict[str, Any] = {}
 
+    cleanup = _copper_cleanup(options)
+    options = replace(options, cleanup_record=cleanup)
+    metrics["copper_cleanup"] = cleanup
+
     if options.operation == "generate":
         preparation = engines.refill(options.pcb)
         if not preparation.ok or preparation.returncode != 0:
@@ -3584,6 +3633,15 @@ def add_readiness_arguments(parser: argparse.ArgumentParser) -> None:
         help=(
             "Per-layer filled-copper area tolerance in mm^2 for the "
             f"saved-vs-refilled equivalence check (default: {DEFAULT_FILL_TOLERANCE_MM2})"
+        ),
+    )
+    parser.add_argument(
+        "--skip-cleanup",
+        dest="skip_cleanup",
+        action="store_true",
+        help=(
+            "Skip the exact-duplicate copper cleanup (pcb dedupe) that otherwise runs "
+            "before the checks; the skip is recorded in the report and README.txt"
         ),
     )
     parser.add_argument(

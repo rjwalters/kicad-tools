@@ -13,8 +13,24 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-11-03
+
+- **PR #8230**: feat: shorten detouring trace chains to a straight or single-bend path
+- **PR #8233**: fix(creepage): emit board-level row alongside same_footprint minimum
+- **PR #8228**: fix: name net in off-angle warning and skip it on scratch DRC serializations
+- **Issue #8232** (closed): creepage: one row per net pair keyed on the minimum hides board-level approaches behind a same_footprint row (waiver unsound in shape)
+- **Issue #8219** (closed): OffAngleSegmentWarning reports 'net 0' on name-only boards and repeats each warning
+- **PR #8226**: fix: keep vias that tie pads or same-net pours during via minimisation
+- **Issue #8215** (closed): optimizer via minimization removes vias that are still needed (unconnected pour stubs)
+
 ### 2026-11-02
 
+- **PR #8225**: fix: restore tracked renders and warn on dirty tree in deploy-site.sh
+- **PR #8224**: docs: refresh deploy-site.sh auth docs and default verify URL to kicad-tools.org
+- **PR #8212**: fix: report kept vs attempted nets and per-rule violations in optimize-traces --drc-aware
+- **Issue #8220** (closed): deploy-site.sh leaves the working tree dirty: re-renders committed board images, untracked .wrangler/
+- **Issue #8221** (closed): deploy-site.sh header and verify default are stale: custom domain is live, token auth undocumented
+- **Issue #8207** (closed): optimize-traces --drc-aware: every net rolled back on a clean HV board (0 -> 151 errors), summary still claims 84 optimized, no per-net diagnostics
 - **PR #8213**: fix: auto-match LCSC in parts availability and account for all BOM lines
 - **PR #8205**: fix: resolve net-class-map sidecar in kct report generate
 - **PR #8210**: fix(optimizer): match and emit name-only net refs in replace_segments

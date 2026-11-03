@@ -813,7 +813,10 @@ def _add_creepage_parser(subparsers) -> None:
             "Exclude same-footprint pad pairs (component-internal spacing) from "
             "the exit-code gate.  They remain listed (annotated WAIVED) as "
             "component-rating residuals -- qualify them at the component, not the "
-            "layout.  Does NOT affect the kct audit manufacturing-readiness gate."
+            "layout.  A waived same-footprint row is NOT evidence the pair has no "
+            "board-level exposure: such pairs also get a separate board row "
+            "(#8232) that this flag never waives.  Does NOT affect the kct audit "
+            "manufacturing-readiness gate."
         ),
     )
     # Attach-zone waiver (#8028): the census-side counterpart of the router's
@@ -6945,6 +6948,15 @@ def _add_readiness_parser(subparsers) -> None:
         help=(
             "Per-layer filled-copper area tolerance in mm^2 for the "
             "saved-vs-refilled equivalence check"
+        ),
+    )
+    rd_parser.add_argument(
+        "--skip-cleanup",
+        dest="readiness_skip_cleanup",
+        action="store_true",
+        help=(
+            "Skip the exact-duplicate copper cleanup (pcb dedupe) that otherwise runs "
+            "before the checks; the skip is recorded in the report and README.txt"
         ),
     )
     rd_parser.add_argument(

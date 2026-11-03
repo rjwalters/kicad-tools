@@ -21,6 +21,7 @@ from .algorithms import (
     eliminate_zigzags,
     merge_collinear,
     pull_tight_pass,
+    shorten_detour_pass,
 )
 from .chain import sort_into_chains
 from .collision import CollisionChecker
@@ -371,6 +372,7 @@ class TraceOptimizer:
         self,
         config: OptimizationConfig | None = None,
         collision_checker: CollisionChecker | None = None,
+        net_anchors: dict[int, list[tuple[float, float]]] | None = None,
     ):
         """Initialize the trace optimizer.
 
@@ -379,9 +381,16 @@ class TraceOptimizer:
             collision_checker: Optional collision checker for DRC-safe optimization.
                 When provided, optimizations that would create collisions are skipped.
                 When None, no collision checking is performed (original behavior).
+            net_anchors: Optional map of net id to the (x, y) positions of that
+                net's pads and vias.  Together with *collision_checker* this
+                enables the whole-chain detour-shortening pass, which is a no-op
+                without both (Issue #8217).  A net absent from the map is
+                left untouched by that pass (use this to exclude constrained
+                nets).
         """
         self.config = config or OptimizationConfig()
         self.collision_checker = collision_checker
+        self.net_anchors = net_anchors
 
         # Initialize via optimizer with matching config
         via_config = ViaOptimizationConfig(
@@ -396,6 +405,14 @@ class TraceOptimizer:
             collision_checker=collision_checker,
         )
 
+    def set_connection_context(
+        self,
+        anchors_by_net: dict[int, list[tuple[float, float, tuple[Layer, ...]]]] | None = None,
+        zone_layers_by_net: dict[int, set[Layer]] | None = None,
+    ) -> None:
+        """Tell via minimisation about pads and same-net pours (issue #8215)."""
+        self._via_optimizer.set_connection_context(anchors_by_net, zone_layers_by_net)
+
     def optimize_segments(self, segments: list[Segment]) -> list[Segment]:
         """Optimize a list of segments for a single net/layer.
 
@@ -406,6 +423,7 @@ class TraceOptimizer:
         4. Staircase compression
         5. 45-degree corner conversion
         6. PullTight perpendicular segment translation
+        7. Detour shortening (whole-chain straight/single-bend replacement)
 
         Args:
             segments: List of segments to optimize (may contain multiple chains).
@@ -451,6 +469,9 @@ class TraceOptimizer:
 
             if self.config.pull_tight:
                 result = self.pull_tight(result)
+
+            if self.config.shorten_detours:
+                result = self.shorten_detours(result)
 
             all_optimized.extend(result)
 
@@ -569,6 +590,24 @@ class TraceOptimizer:
             Optimised list of segments.
         """
         return pull_tight_pass(segments, self.config, self._path_is_clear)
+
+    def shorten_detours(self, segments: list[Segment]) -> list[Segment]:
+        """Replace a detouring chain with a shorter straight/single-bend path.
+
+        Args:
+            segments: List of connected segments (single chain).
+
+        Returns:
+            The shorter replacement path, or the chain unchanged.  Always the
+            chain unchanged unless both a collision checker and ``net_anchors``
+            were supplied.
+        """
+        if self.collision_checker is None or self.net_anchors is None or not segments:
+            return list(segments)
+        anchors = self.net_anchors.get(segments[0].net)
+        if anchors is None:  # unknown / excluded net: leave it alone
+            return list(segments)
+        return shorten_detour_pass(segments, self.config, self._path_is_clear, anchors)
 
     def optimize_route(self, route: Route) -> Route:
         """Optimize a complete route.

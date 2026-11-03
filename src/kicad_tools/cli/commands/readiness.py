@@ -90,6 +90,9 @@ def run_readiness_command(args) -> int:
     if fill_tolerance is not None:
         sub_argv.extend(["--fill-tolerance", str(fill_tolerance)])
 
+    if getattr(args, "readiness_skip_cleanup", False):
+        sub_argv.append("--skip-cleanup")
+
     checked_at = getattr(args, "readiness_checked_at", None)
     if checked_at:
         sub_argv.extend(["--checked-at", checked_at])
