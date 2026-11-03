@@ -1844,6 +1844,37 @@ def _detour_net_anchors(router: "Autorouter") -> dict[int, list[tuple[float, flo
     return anchors
 
 
+def _provide_via_connection_context(router: "Autorouter", optimizer: Any) -> None:
+    """Hand pad positions and same-net pour layers to via minimisation (#8215).
+
+    Without this the via optimiser only sees segment endpoints and can drop a
+    via that is the sole tie between a stub and a pad or zone fill.
+    """
+    from kicad_tools.router.layers import Layer
+
+    grid = router.grid
+    try:
+        all_layers = tuple(Layer(v) for v in getattr(grid, "_index_to_layer", {}).values())
+    except ValueError:
+        all_layers = ()
+
+    anchors: dict[int, list[tuple[float, float, tuple[Layer, ...]]]] = {}
+    for pad in getattr(router, "pads", {}).values():
+        layers = all_layers if pad.through_hole and all_layers else (pad.layer,)
+        anchors.setdefault(pad.net, []).append((pad.x, pad.y, tuple(layers)))
+
+    zone_layers: dict[int, set[Layer]] = {}
+    zone_manager = getattr(router, "zone_manager", None)
+    for fz in getattr(zone_manager, "filled_zones", ()) or ():
+        try:
+            layer = Layer(grid.index_to_layer(fz.layer_index))
+        except Exception:
+            continue
+        zone_layers.setdefault(fz.zone.net_number, set()).add(layer)
+
+    optimizer.set_connection_context(anchors, zone_layers)
+
+
 def _optimize_traces(router: "Autorouter", args: argparse.Namespace, *, quiet: bool) -> None:
     """The ``kct route`` trace-optimization pass, shared by every pipeline.
 
@@ -1884,6 +1915,7 @@ def _optimize_traces(router: "Autorouter", args: argparse.Namespace, *, quiet: b
         collision_checker=collision_checker,
         net_anchors=_detour_net_anchors(router),
     )
+    _provide_via_connection_context(router, optimizer)
 
     # Issue #2596: snapshot per-net connectivity before optimize so any net
     # whose pad-to-pad connectivity regresses can be reverted.

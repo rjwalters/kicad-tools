@@ -405,6 +405,14 @@ class TraceOptimizer:
             collision_checker=collision_checker,
         )
 
+    def set_connection_context(
+        self,
+        anchors_by_net: dict[int, list[tuple[float, float, tuple[Layer, ...]]]] | None = None,
+        zone_layers_by_net: dict[int, set[Layer]] | None = None,
+    ) -> None:
+        """Tell via minimisation about pads and same-net pours (issue #8215)."""
+        self._via_optimizer.set_connection_context(anchors_by_net, zone_layers_by_net)
+
     def optimize_segments(self, segments: list[Segment]) -> list[Segment]:
         """Optimize a list of segments for a single net/layer.
 
