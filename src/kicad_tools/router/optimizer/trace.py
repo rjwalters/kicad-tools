@@ -21,6 +21,7 @@ from .algorithms import (
     eliminate_zigzags,
     merge_collinear,
     pull_tight_pass,
+    shared_vertices,
     shorten_detour_pass,
 )
 from .chain import sort_into_chains
@@ -391,6 +392,10 @@ class TraceOptimizer:
         self.config = config or OptimizationConfig()
         self.collision_checker = collision_checker
         self.net_anchors = net_anchors
+        # Issue #8250: via / pad positions per net *name* where the 45° pass
+        # must not move a corner (see ``set_attachment_points``).
+        self._attachment_points: dict[str, list[tuple[float, float]]] = {}
+        self._protected_vertices: list[tuple[float, float]] = []
 
         # Initialize via optimizer with matching config
         via_config = ViaOptimizationConfig(
@@ -413,6 +418,16 @@ class TraceOptimizer:
         """Tell via minimisation about pads and same-net pours (issue #8215)."""
         self._via_optimizer.set_connection_context(anchors_by_net, zone_layers_by_net)
 
+    def set_attachment_points(
+        self, points_by_net_name: dict[str, list[tuple[float, float]]]
+    ) -> None:
+        """Register via/pad positions per net name that corners must not leave.
+
+        Issue #8250: the 45° pass moves corner vertices; a via or pad sitting
+        on a corner would be left dangling.
+        """
+        self._attachment_points = points_by_net_name
+
     def optimize_segments(self, segments: list[Segment]) -> list[Segment]:
         """Optimize a list of segments for a single net/layer.
 
@@ -433,6 +448,14 @@ class TraceOptimizer:
         """
         if not segments:
             return []
+
+        # Issue #8250: vertices other things attach to (T-junction branches,
+        # vias, pads) must not be moved by the 45° pass.
+        protected = shared_vertices(segments, self.config.tolerance)
+        protected.extend(self._attachment_points.get(segments[0].net_name, ()))
+        if self.net_anchors is not None:
+            protected.extend(self.net_anchors.get(segments[0].net, ()))
+        self._protected_vertices = protected
 
         # Sort segments into connected chains to prevent cross-chain shortcuts
         from itertools import groupby
@@ -574,7 +597,12 @@ class TraceOptimizer:
         Returns:
             List with corners converted to 45 degrees.
         """
-        return convert_corners_45(segments, self.config, self._path_is_clear)
+        return convert_corners_45(
+            segments,
+            self.config,
+            self._path_is_clear,
+            protected_vertices=self._protected_vertices,
+        )
 
     def pull_tight(self, segments: list[Segment]) -> list[Segment]:
         """PullTight post-processing: translate interior segments to shorten total length.
@@ -704,6 +732,7 @@ class TraceOptimizer:
         net_filter: str | None = None,
         dry_run: bool = False,
         on_net_optimized: Callable[[str, list[Segment], list[Segment]], None] | None = None,
+        net_anchors_by_name: dict[str, list] | None = None,
     ) -> OptimizationStats:
         """Optimize traces in a PCB file.
 
@@ -725,6 +754,7 @@ class TraceOptimizer:
             net_filter=net_filter,
             dry_run=dry_run,
             on_net_optimized=on_net_optimized,
+            net_anchors_by_name=net_anchors_by_name,
         )
 
     # =========================================================================

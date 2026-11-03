@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
 from typing import Callable
 
 from ..primitives import Segment
@@ -358,11 +359,51 @@ def _optimal_path(
     return result
 
 
+class VertexSet:
+    """Tolerance-aware membership test for 2-D points (Issue #8250)."""
+
+    def __init__(self, points: Iterable[tuple[float, float]] | None, tolerance: float):
+        self._cell = max(tolerance, 1e-3)
+        self._points: dict[tuple[int, int], list[tuple[float, float]]] = {}
+        for x, y in points or ():
+            key = (round(x / self._cell), round(y / self._cell))
+            self._points.setdefault(key, []).append((x, y))
+        self._tol = self._cell
+
+    def __bool__(self) -> bool:
+        return bool(self._points)
+
+    def __contains__(self, pt: tuple[float, float]) -> bool:
+        kx, ky = round(pt[0] / self._cell), round(pt[1] / self._cell)
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for px, py in self._points.get((kx + dx, ky + dy), ()):
+                    if abs(px - pt[0]) <= self._tol and abs(py - pt[1]) <= self._tol:
+                        return True
+        return False
+
+
+def shared_vertices(segments: list[Segment], tolerance: float) -> list[tuple[float, float]]:
+    """Endpoints used by more than two segment ends of the same layer.
+
+    These are T-junction / branch points.  Rounded to ``tolerance`` so
+    endpoints that differ by float noise count as one vertex.
+    """
+    cell = max(tolerance, 1e-3)
+    counts: dict[tuple[object, int, int], list] = {}
+    for seg in segments:
+        for x, y in ((seg.x1, seg.y1), (seg.x2, seg.y2)):
+            key = (seg.layer, round(x / cell), round(y / cell))
+            counts.setdefault(key, []).append((x, y))
+    return [pts[0] for pts in counts.values() if len(pts) > 2]
+
+
 def convert_corners_45(
     segments: list[Segment],
     config: OptimizationConfig,
     path_is_clear: Callable[[Segment], bool] | None = None,
     pad_positions: set[tuple[float, float]] | None = None,
+    protected_vertices: Iterable[tuple[float, float]] | None = None,
 ) -> list[Segment]:
     """Convert 90-degree corners to 45-degree chamfers.
 
@@ -382,12 +423,24 @@ def convert_corners_45(
             terminal endpoint restoration only fires for endpoints that are
             within tolerance of a pad position.  When ``None``, terminal
             endpoints are always restored (safe default).
+        protected_vertices: Optional points where something other than this
+            chain attaches (a via, a pad, a T-junction branch; Issue #8250).
+            A corner at such a point is never chamfered, because the
+            chamfer moves the corner vertex and would leave the attachment
+            dangling.
 
     Returns:
         List with corners converted to 45 degrees.
     """
     if len(segments) < 2:
         return list(segments)
+
+    protected = VertexSet(protected_vertices, config.tolerance)
+
+    def corner_at(a: Segment, b: Segment) -> bool:
+        if protected and (a.x2, a.y2) in protected:
+            return False
+        return is_90_degree_corner(a, b)
 
     # Record original terminal endpoints before any modification.
     orig_start = (segments[0].x1, segments[0].y1)
@@ -401,7 +454,7 @@ def convert_corners_45(
             # First segment - check if next segment forms 90-degree corner
             if i + 1 < len(segments):
                 next_seg = segments[i + 1]
-                if is_90_degree_corner(seg, next_seg):
+                if corner_at(seg, next_seg):
                     # Shorten this segment to leave room for chamfer
                     shortened = shorten_segment_end(seg, chamfer, config.min_segment_length)
                     if shortened:
@@ -416,7 +469,7 @@ def convert_corners_45(
         elif i == len(segments) - 1:
             # Last segment - check if prev segment forms 90-degree corner
             prev_seg = segments[i - 1]
-            if is_90_degree_corner(prev_seg, seg):
+            if corner_at(prev_seg, seg):
                 # Shorten start of this segment
                 shortened = shorten_segment_start(seg, chamfer, config.min_segment_length)
                 if shortened and result:
@@ -451,7 +504,7 @@ def convert_corners_45(
             modified_seg = seg
 
             # Handle corner with previous segment
-            if is_90_degree_corner(prev_seg, seg) and result:
+            if corner_at(prev_seg, seg) and result:
                 shortened = shorten_segment_start(modified_seg, chamfer, config.min_segment_length)
                 if shortened:
                     # Add chamfer
@@ -471,7 +524,7 @@ def convert_corners_45(
                         modified_seg = shortened
 
             # Handle corner with next segment
-            if is_90_degree_corner(seg, next_seg):
+            if corner_at(seg, next_seg):
                 # Only shorten if next segment can also be shortened for the chamfer.
                 # If next segment is too short (e.g., final approach to a pad),
                 # don't create a partial chamfer that would leave a gap.
