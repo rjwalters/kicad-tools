@@ -6,6 +6,8 @@ import json
 from itertools import count
 from pathlib import Path
 
+import pytest
+
 from kicad_tools.pcb_prune import prune_board
 from kicad_tools.schema.pcb import PCB
 
@@ -72,8 +74,9 @@ def test_redundant_branch_next_to_via_is_removed_and_main_kept(tmp_path):
     ]
     p = _board(tmp_path, [("A", 100, 100), ("B", 110, 100)], segs, vias=[(105, 100)])
     pcb, res = _run(p)
-    assert res.stats["segments_removed"] == 3
-    assert len(pcb.segments) == 3
+    # 3 branch segments + 1 from merging the collinear 100->102->105 main run
+    assert res.stats["segments_removed"] == 4
+    assert len(pcb.segments) == 2
     assert {s.start for s in pcb.segments} | {s.end for s in pcb.segments} >= {
         (100, 100),
         (110, 100),
@@ -103,8 +106,9 @@ def test_same_layer_loop_removes_longer_detour(tmp_path):
     ]
     p = _board(tmp_path, [("A", 100, 100), ("B", 110, 100)], segs)
     pcb, res = _run(p)
-    assert res.stats["segments_removed"] == 3
-    assert ((102, 100), (103, 100)) in {(s.start, s.end) for s in pcb.segments}
+    # detour removed (3), then the remaining collinear main run merges (2 more)
+    assert res.stats["segments_removed"] == 5
+    assert [(s.start, s.end) for s in pcb.segments] == [((100, 100), (110, 100))]
 
 
 def test_removal_that_would_disconnect_a_pad_is_kept(tmp_path):
@@ -138,7 +142,7 @@ def test_cli_dry_run_json_leaves_file_untouched(tmp_path, capsys):
 
     assert _run_prune_command(args, p) == 0
     out = json.loads(capsys.readouterr().out)
-    assert out["removed"]["segments"] == 3 and out["drc_verified"] is False
+    assert out["removed"]["segments"] == 5 and out["drc_verified"] is False
     assert p.read_text() == before
 
 
@@ -190,13 +194,46 @@ def test_tangent_capsule_jog_is_kept(tmp_path):
     assert len(pcb.segments) == 3
 
 
-def test_collinear_step_run_is_not_thinned(tmp_path):
-    """Removing alternate 0.05 mm steps would leave overlap-only joints."""
-    segs = [((100 + 0.05 * k, 100), (100 + 0.05 * (k + 1), 100)) for k in range(10)]
-    p = _board(tmp_path, [("A", 100, 100), ("B", 100.5, 100)], segs)
+def test_collinear_step_run_is_merged_into_one_segment(tmp_path):
+    """Ten 0.25 mm steps become one 2.5 mm segment spanning the same copper."""
+    segs = [((100 + 0.25 * k, 100), (100 + 0.25 * (k + 1), 100)) for k in range(10)]
+    p = _board(tmp_path, [("A", 100, 100, 0.2, 0.2), ("B", 102.5, 100, 0.2, 0.2)], segs)
+    pcb, res = _run(p)
+    assert res.stats == {"segments_removed": 9, "ends_snapped": 0}
+    assert len(pcb.segments) == 1
+    s = pcb.segments[0]
+    assert sorted([s.start, s.end]) == [pytest.approx((100, 100)), pytest.approx((102.5, 100))]
+
+
+def test_collinear_merge_keeps_joint_with_via(tmp_path):
+    segs = [((100, 100), (101, 100)), ((101, 100), (102, 100))]
+    p = _board(tmp_path, [("A", 100, 100), ("B", 102, 100)], segs, vias=[(101, 100)])
     pcb, res = _run(p)
     assert res.stats == {"segments_removed": 0, "ends_snapped": 0}
-    assert len(pcb.segments) == 10
+    assert len(pcb.segments) == 2
+
+
+def test_collinear_merge_keeps_joint_with_third_segment(tmp_path):
+    segs = [
+        ((100, 100), (101, 100)),
+        ((101, 100), (102, 100)),
+        ((101, 100), (101, 101)),
+    ]
+    p = _board(tmp_path, [("A", 100, 100), ("B", 102, 100), ("C", 101, 101)], segs)
+    pcb, res = _run(p)
+    assert res.stats == {"segments_removed": 0, "ends_snapped": 0}
+    assert len(pcb.segments) == 3
+
+
+def test_non_collinear_or_mixed_width_joint_is_not_merged(tmp_path):
+    segs = [((100, 100), (101, 100)), ((101, 100), (102, 100.5))]
+    p = _board(tmp_path, [("A", 100, 100), ("B", 102, 100.5)], segs)
+    pcb, res = _run(p)
+    assert len(pcb.segments) == 2
+    segs = [((100, 100), (101, 100), "F.Cu", 0.2), ((101, 100), (102, 100), "F.Cu", 0.3)]
+    p = _board(tmp_path, [("A", 100, 100), ("B", 102, 100)], segs)
+    pcb, res = _run(p)
+    assert len(pcb.segments) == 2
 
 
 def _cli(tmp_path, p, *extra):

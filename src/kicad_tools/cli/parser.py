@@ -2648,7 +2648,8 @@ def _add_pcb_parser(subparsers) -> None:
         "overlap-only. Copper that touches other same-net copper away from a "
         "shared endpoint (e.g. a spur beside a via) is removed only when "
         "connectivity also holds over those body-touching neighbours; "
-        "collinear grid-step runs are not merged. With kicad-cli available each "
+        "straight end-to-end runs of same-width segments (pure two-segment joints) "
+        "are merged into one segment. With kicad-cli available each "
         "net's edits are checked with 'pcb drc --refill-zones' and dropped if "
         "they add violations; without that check the file is only written with "
         "--unverified. In-place by default; use -o to write elsewhere.",

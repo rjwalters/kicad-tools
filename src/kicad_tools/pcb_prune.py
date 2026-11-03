@@ -34,7 +34,13 @@ endpoint neighbours **and** those body-touching neighbours, so the overlap
 join is never what keeps anything connected.  Such segments are still never
 snapped.
 
-Not covered: collinear grid-step runs are not merged into one segment.
+Collinear grid-step runs (issue #8236) are merged into one segment: a maximal
+run of same-net / same-layer / same-width segments joined end to end in a
+straight line, where every joint is a pure two-segment endpoint join (no via,
+pad, zone or third segment there).  The merged copper is identical, so a run
+is skipped if any member is hard-protected or its body touches same-net copper
+outside the run (a possible unmodelled join).  Merging applies after removals
+and snaps and never changes which ends are anchored.
 """
 
 from __future__ import annotations
@@ -511,10 +517,13 @@ class NetPlan:
     #: (segment index, "start"|"end", new xy)
     snaps: list[tuple[int, str, tuple[float, float]]] = field(default_factory=list)
     reasons: dict[int, str] = field(default_factory=dict)
+    #: collinear merges: (kept segment index, "start"|"end", new xy); the other
+    #: run members are listed in ``remove``
+    extends: list[tuple[int, str, tuple[float, float]]] = field(default_factory=list)
 
     @property
     def empty(self) -> bool:
-        return not self.remove and not self.snaps
+        return not self.remove and not self.snaps and not self.extends
 
 
 def _group_for(model: _NetModel, seed: int, removed: set[int]) -> set[int] | None:
@@ -638,6 +647,87 @@ def _try_snap(
         model.anch[k] = anch_k
 
 
+#: Max perpendicular deviation (mm) for a run to count as one straight line.
+_COLLINEAR_TOL = 1e-6
+
+
+def _joint_partner(model: _NetModel, i: int, e: int, removed: set[int]) -> tuple[int, int] | None:
+    """Return ``(j, f)`` when end ``e`` of segment ``i`` is a pure two-segment
+    straight-through join with end ``f`` of ``j`` (same layer / width)."""
+    if i in removed:
+        return None
+    anchors = model.anch[i][e] - removed
+    if len(anchors) != 1:
+        return None
+    j = next(iter(anchors))
+    n, o = model.nodes[i], model.nodes[j]
+    if o.kind != "seg" or j in removed or n.layers != o.layers:
+        return None
+    if abs(n.radius - o.radius) > 1e-9:
+        return None
+    p = _end_pt(n, e)
+    f = next((x for x in (0, 1) if _same_pt(_end_pt(o, x), p)), None)
+    if f is None or model.anch[j][f] - removed != {i}:
+        return None
+    # The other ends must not also meet (a degenerate two-segment loop).
+    qi, qj = _end_pt(n, 1 - e), _end_pt(o, 1 - f)
+    vi, vj = (qi[0] - p[0], qi[1] - p[1]), (qj[0] - p[0], qj[1] - p[1])
+    li, lj = math.hypot(*vi), math.hypot(*vj)
+    if li < _EPS or lj < _EPS:
+        return None
+    if (vi[0] * vj[0] + vi[1] * vj[1]) >= 0 or abs(vi[0] * vj[1] - vi[1] * vj[0]) / lj > (
+        _COLLINEAR_TOL
+    ):
+        return None
+    return j, f
+
+
+def _plan_collinear_merges(model: _NetModel, plan: NetPlan, removed: set[int]) -> None:
+    """Merge maximal straight runs of segments into their first member."""
+    seg_ids = [
+        i
+        for i, n in enumerate(model.nodes)
+        if n.kind == "seg" and i not in removed and not model.hard_protected[i]
+    ]
+    eligible = set(seg_ids)
+    link: dict[tuple[int, int], tuple[int, int]] = {}
+    for i in seg_ids:
+        for e in (0, 1):
+            hit = _joint_partner(model, i, e, removed)
+            if hit is not None and hit[0] in eligible:
+                link[(i, e)] = hit
+    visited: set[int] = set()
+    for s in seg_ids:
+        if s in visited:
+            continue
+        ends = [e for e in (0, 1) if (s, e) in link]
+        if len(ends) != 1:
+            continue  # not the end of a run (no joints, or mid-run)
+        out = ends[0]
+        run, cur = [s], s
+        while (cur, out) in link:
+            cur, f = link[(cur, out)]
+            run.append(cur)
+            out = 1 - f
+        visited.update(run)
+        far = _end_pt(model.nodes[cur], out)
+        start = _end_pt(model.nodes[s], 1 - ends[0])
+        members = set(run)
+        # Body-touching copper outside the run may hide a join: leave it alone.
+        if any(model.overlap[m] - members - removed for m in run):
+            continue
+        if any(
+            _pt_seg_dist(_end_pt(model.nodes[m], x), start, far) > _COLLINEAR_TOL
+            for m in run
+            for x in (0, 1)
+        ):
+            continue
+        plan.extends.append((model.nodes[s].index, ("start", "end")[ends[0]], far))
+        for m in run[1:]:
+            plan.remove.append(model.nodes[m].index)
+            plan.reasons[model.nodes[m].index] = "collinear run merged"
+
+
 def _plan_net(model: _NetModel, net_number: int) -> NetPlan:
     plan = NetPlan(net_number=net_number)
     baseline = model.partition(set())
@@ -695,6 +785,7 @@ def _plan_net(model: _NetModel, net_number: int) -> NetPlan:
         for e in (0, 1):
             _try_snap(model, plan, i, e, removed, baseline)
 
+    _plan_collinear_merges(model, plan, removed)
     return plan
 
 
@@ -727,7 +818,7 @@ def apply_plans(pcb: PCB, plans: list[NetPlan]) -> dict[str, int]:
     # Snaps must hit the sexp tree before removal changes matching keys; do it
     # by position among ``(segment ...)`` children, which mirrors pcb.segments.
     seg_nodes = [c for c in pcb._sexp.children if not c.is_atom and c.name == "segment"]
-    has_snaps = any(plan.snaps for plan in plans)
+    has_snaps = any(plan.snaps or plan.extends for plan in plans)
     if has_snaps and len(seg_nodes) != len(segs):
         raise RuntimeError(
             f"cannot snap segment ends: board has {len(seg_nodes)} (segment ...) nodes "
@@ -735,7 +826,7 @@ def apply_plans(pcb: PCB, plans: list[NetPlan]) -> dict[str, int]:
         )
     snapped = 0
     for plan in plans:
-        for idx, which, (x, y) in plan.snaps:
+        for idx, which, (x, y) in [*plan.snaps, *plan.extends]:
             node = seg_nodes[idx].find(which)
             if node is None:
                 raise RuntimeError(f"segment {idx} has no ({which} ...) node to snap")
@@ -746,7 +837,7 @@ def apply_plans(pcb: PCB, plans: list[NetPlan]) -> dict[str, int]:
                 seg.end = (x, y)
             node.set_value(0, x + ox)
             node.set_value(1, y + oy)
-            snapped += 1
+        snapped += len(plan.snaps)
     to_remove = [segs[i] for plan in plans for i in plan.remove]
     removed = pcb.remove_segments(to_remove) if to_remove else 0
     return {"segments_removed": removed, "ends_snapped": snapped}
