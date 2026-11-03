@@ -120,9 +120,16 @@ current=$(git symbolic-ref --short HEAD 2>/dev/null) || current=""
 git fetch origin --quiet
 default=$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
 
+# Cleanliness is three-valued. A failed `git status` prints nothing, which
+# `[ -z "$(...)" ]` would read as clean, so capture the exit code separately.
+rc=0; wt_status=$(git status --porcelain 2>/dev/null) || rc=$?
+if [ "$rc" -ne 0 ]; then wt_clean=unknown
+elif [ -z "$wt_status" ]; then wt_clean=yes
+else wt_clean=no; fi
+
 eligible=no
 if [ -n "$current" ] && [ -n "$default" ] && [ "$current" != "$default" ] \
-   && [ -z "$(git status --porcelain)" ]; then
+   && [ "$wt_clean" = yes ]; then
   # "Fully pushed" = HEAD has an upstream AND is not ahead of it.
   if git rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1; then
     ahead_of_upstream=$(git rev-list --count '@{u}..HEAD')
@@ -143,7 +150,7 @@ fi
 # never also set eligible=yes.
 diverged_on_default=no
 if [ -n "$current" ] && [ -n "$default" ] && [ "$current" = "$default" ] \
-   && [ -z "$(git status --porcelain)" ]; then
+   && [ "$wt_clean" = yes ]; then
   ahead_of_origin_default=$(git rev-list --count "origin/$default..HEAD")
   behind_origin_default=$(git rev-list --count "HEAD..origin/$default")
   if [ "$ahead_of_origin_default" -gt 0 ] && [ "$behind_origin_default" -gt 0 ]; then
@@ -159,7 +166,7 @@ switch could lose work or fail:
 |---|---|
 | On a branch (not detached), and it isn't already the default | Nothing to switch to; a detached HEAD has no upstream to reason about |
 | `origin/HEAD` resolves to a default branch | Without it there is no defensible switch target — leave the order alone. The fetch above runs first so a stale copy is refreshed in time; a repo that has never had `origin/HEAD` set locally at all (some `--single-branch` clones) needs a one-off `git remote set-head origin --auto`, and stays a no-op until then |
-| Working tree clean (`git status --porcelain` empty) | A dirty tree would have to be stashed to switch, and this run ends on the default branch, so there is no natural point to pop it back |
+| Working tree clean (`git status --porcelain` exits 0 **and** is empty) | A dirty tree would have to be stashed to switch, and this run ends on the default branch, so there is no natural point to pop it back. A `git status` that exits non-zero is `unknown`, not clean: fail closed and treat it as not eligible |
 | Branch **has an upstream** and is **0 commits ahead of it** | This is the literal "no unpushed commits". A branch that was **never pushed** has no upstream and is **not** eligible — treat it exactly like unpushed commits |
 | Branch is behind `origin/<default>` by at least one commit | If it isn't behind, the checkout is already current and switching buys nothing |
 | **Already on the default branch, and diverged from `origin/<default>`** (ahead **and** behind) | Not part of `eligible` — `current != default` already excludes it above — but not a silent no-op either. It fails this table's first row and is handled separately as `diverged_on_default`, below |
@@ -347,6 +354,12 @@ stale PRs. Use [[deps]]' base-manifest **and lockfile** comparison; a permissive
 manifest range alone cannot establish that a lockfile security update is stale.
 Full diff/CI triage remains with `/repo:deps --review`.
 
+**A repo with no workflows gets a `no CI` clause on the line, not a bare PR
+count.** [[deps]] step 8 reports CI as `none` there and substitutes a local
+check of each merge candidate's head; the `Deps:` line has to say so, because
+`3 open PRs (0 majors)` otherwise reads as three PRs that passed checks the
+repo does not have.
+
 This stage is always report-only, including under `--ask`: it does not deploy
 organization policy, change client files/settings, or merge PRs. Refer policy
 drift to [[org-policy]] and client adoption to [[deps]]. If origin is not GitHub,
@@ -407,6 +420,13 @@ Deps:         …, alerts ON, 0 open alerts, security PRs: …
 Deps:         …, alerts ON, 2 open alerts (1 high, 1 medium — 1 with no open fix PR), security PRs: …
 Deps:         …, alerts ON, open alerts UNKNOWN (needs security_events read), security PRs: …
 Deps:         …, alerts OFF, open alerts n/a (alerts disabled), security PRs: …
+```
+
+When the repo has no workflows, the PR clause carries `no CI` the same way —
+a PR count without it reads as checked PRs, and there were no checks:
+
+```
+Deps:         …, 3 open PRs (2 majors, no CI — local checks substituted; add a workflow)
 ```
 
 Name the uncovered packages in the line itself when there are only one or two

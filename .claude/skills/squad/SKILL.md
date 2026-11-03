@@ -10,10 +10,11 @@ Read [references/conventions.md](references/conventions.md) before using a workf
 Select the reference matching the user's request:
 
 - [Join](references/join.md): join the room and hold a live working conversation.
+- [Wait](references/wait.md): stay in the room loop (`squad wait`, then do its `next:`), or resume it without re-joining.
 - [Goals](references/goals.md): inspect, add, or reopen shared goals.
 - [Card](references/card.md): discover research nodes, connect dependencies/artifacts, or update Science Cards.
 - [Fanout](references/fanout.md): coordinate independently identified workers on disjoint assignments.
 - [Steward](references/steward.md): inspect authoritative integration/review/outline state and run bounded reminders.
 - [Clear](references/clear.md): reset the room with explicit user intent.
 
-Claude aliases are `/squad:join`, `/squad:goals`, `/squad:card`, `/squad:fanout`, `/squad:steward`, and `/squad:clear`. Codex can invoke `$squad` or request these workflows naturally; legacy `/squad-<workflow>` prompts forward here too. Interpret alias arguments as the user's request, using the same workflow in either runtime.
+Claude aliases are `/squad:join`, `/squad:wait`, `/squad:goals`, `/squad:card`, `/squad:fanout`, `/squad:steward`, and `/squad:clear`. Codex can invoke `$squad` or request these workflows naturally; legacy `/squad-<workflow>` prompts forward here too. Interpret alias arguments as the user's request, using the same workflow in either runtime.

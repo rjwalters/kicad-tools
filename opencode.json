@@ -1,0 +1,15 @@
+{
+  "mcp": {
+    "squad": {
+      "type": "local",
+      "command": [
+        "node",
+        ".claude/hooks/squad-mcp.mjs"
+      ],
+      "environment": {
+        "SQUAD_DIR": ".squad",
+        "SQUAD_RUNTIME": "../squad/dist/index.js"
+      }
+    }
+  }
+}

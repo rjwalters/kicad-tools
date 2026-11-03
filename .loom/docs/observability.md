@@ -214,9 +214,8 @@ then `meta-data/instance-type` and `meta-data/placement/region`) spawned at
 telemetry startup on Linux. It bypasses any `HTTP(S)_PROXY`, has a 1 s total
 budget, never retries and is never awaited — so startup is not delayed, and
 batches exported before it lands (or on a host where IMDS is unreachable)
-simply lack `host.type`/`cloud.*`. `eta.stage_outcome` records carry the
-*observing* host's shape, not the executing host's; join through the
-executing `host.id` on `sweep.*` records for that.
+simply lack `host.type`/`cloud.*`. Records carry the *observing* host's shape, not the executing
+host's; join through the executing `host.id` on `sweep.*` records for that.
 
 **Host load on sweep/phase spans (#12884).** `loom.sweep` and every
 `loom.phase` span carry the `lifecycle::host_attributes()` sample, including
@@ -890,8 +889,8 @@ every span also names the endpoint: `github.route` (a template such as
 `/repos/{owner}/{repo}/pulls/{n}`, from the same finite table as gh-shim's
 `github.api.route`), `http.request.method`, and `github.command` (`pr view`
 for an agent front read), so `api.rest` and `agent_gh_front` spend can be
-ranked by route. That pass also
-emits a `pass.summary` log per pass and a `pass.verdict` per artifact; Champion
+ranked by route. Role steps emit a
+`pass.verdict` per artifact; Champion
 steps add `pass.verdict` rows with `mechanism=step:champion`; see
 [`telemetry-schema.md`](telemetry-schema.md) and
 `defaults/observability/signoz/pass-queries.sql`.
