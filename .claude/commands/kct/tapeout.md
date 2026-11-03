@@ -95,7 +95,7 @@ Equivalently, run `{{skill:manufacturing-readiness}} <board-path> --mfr <tier> -
 
 **In `--pcb-only` mode, skip this gate entirely** (no BOM, no CPL — see Arguments). The rest of this section applies only to `--assembly` mode.
 
-`kct export` enriches the BOM with fab-orderable part numbers (LCSC for JLC-style tiers) via `--auto-lcsc` (the default; disabled by `--no-auto-lcsc`). See `src/kicad_tools/cli/export_cmd.py` and `src/kicad_tools/export/bom_enrich.py` for the current behavior. The tapeout BOM gate wraps that enrichment with a **completeness contract** `kct export`'s exit code does not currently give you.
+`kct export` enriches the BOM with fab-orderable part numbers (LCSC for JLC-style tiers) via `--auto-lcsc` (the default; disabled by `--no-auto-lcsc`). See `src/kicad_tools/cli/export_cmd.py` and `src/kicad_tools/export/bom_enrich.py` for the current behavior. **LCSC merge source (#8260):** the export also merges LCSC numbers from an existing `<output-dir>/bom_<mfr>.csv` (disabled by `--no-merge-lcsc`). A **new** bundle directory has nothing to merge, so it yields a worse BOM than the previous verified bundle. Run Gate 3 with `--merge-lcsc-from <previous-bundle>/bom_<mfr>.csv` (or seed the new directory with that file); the export summary's `LCSC merge source:` line names the source used, or says "no existing BOM to merge". The tapeout BOM gate wraps that enrichment with a **completeness contract** `kct export`'s exit code does not currently give you.
 
 Every BOM line must fall into exactly one bucket:
 

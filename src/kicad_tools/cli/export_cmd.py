@@ -452,7 +452,11 @@ def run_export(args: argparse.Namespace) -> int:
 
     merge_from_arg = getattr(args, "merge_lcsc_from", None)
     merge_lcsc_from = Path(merge_from_arg) if merge_from_arg else None
-    if merge_lcsc_from is not None and not merge_lcsc_from.is_file():
+    if (
+        merge_lcsc_from is not None
+        and not getattr(args, "no_merge_lcsc", False)
+        and not merge_lcsc_from.is_file()
+    ):
         print(f"Error: --merge-lcsc-from file not found: {merge_lcsc_from}", file=sys.stderr)
         return 1
 
@@ -571,6 +575,8 @@ def run_export(args: argparse.Namespace) -> int:
                     print(f"  {line}")
             if result.assembly_result.lcsc_merge_source:
                 print(f"  {result.assembly_result.lcsc_merge_source}")
+            for conflict in result.assembly_result.lcsc_merge_conflicts:
+                print(f"  [warn] LCSC merge source disagrees with assigned LCSC: {conflict}")
             # Report LCSC enrichment results
             if result.assembly_result.lcsc_enrichment:
                 enrichment = result.assembly_result.lcsc_enrichment
