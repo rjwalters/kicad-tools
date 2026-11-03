@@ -1284,12 +1284,23 @@ class ManufacturingAudit:
                         e,
                     )
 
+            # Issue #8278: ampacity must follow the board's declared stackup
+            # copper (as ``kct check`` does via ``stackup_copper_oz``), not the
+            # profile default -- otherwise a 1 oz inner stackup is evaluated at
+            # JLCPCB's 0.5 oz inner default and the report shows spurious
+            # ampacity errors that ``kct check`` does not.
+            from kicad_tools.cli.check_cmd import stackup_copper_oz
+
+            stackup_outer, stackup_inner = stackup_copper_oz(pcb)
+
             checker = DRCChecker(
                 pcb,
                 manufacturer=self.manufacturer,
                 layers=self.layers or 2,
                 copper_oz=self.copper_oz,
                 net_class_map=net_class_map,
+                copper_oz_outer=stackup_outer,
+                copper_oz_inner=stackup_inner,
             )
 
             # Match the ``kct check`` CLI's pad_grid tolerance policy
