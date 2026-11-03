@@ -304,6 +304,64 @@ def board_same_footprint_only_source() -> str:
     return "".join(parts)
 
 
+def board_same_footprint_hides_board_source(*, board_gap_mm: float) -> str:
+    """Same-footprint minimum hiding a larger board-level approach (#8232).
+
+    ``R1`` holds an ``L_MAINS`` pad and a ``DIV_MID`` pad 0.4 mm apart (the
+    ``same_footprint`` global minimum).  A separate ``D1`` ``DIV_MID`` pad sits
+    ``board_gap_mm`` from ``R1``'s ``L_MAINS`` pad -- a board-level approach on
+    the SAME net pair that is larger than the minimum, so a one-row-per-pair
+    report never emitted it.
+    """
+    parts = [_SAMEFP_HEADER, _OUTLINE]
+    parts.append(
+        _footprint2("R1", 110, 110, [("1", 1, "L_MAINS", 0, 0), ("2", 4, "DIV_MID", 0, 1.0)])
+    )
+    parts.append(_footprint2("D1", 110, 110 - 0.6 - board_gap_mm, [("1", 4, "DIV_MID", 0, 0)]))
+    parts.append(")\n")
+    return "".join(parts)
+
+
+def board_two_sharing_footprints_source() -> str:
+    """Two footprints sharing the pair; the cross-footprint approach is the board gap (#8232).
+
+    ``R1`` and ``R2`` each hold ``L_MAINS`` and ``DIV_MID`` pads 0.4 mm apart;
+    ``R2`` is ``R1`` mirrored and offset 1.4 mm so both cross-footprint gaps
+    (R1.L_MAINS -> R2.DIV_MID, R1.DIV_MID -> R2.L_MAINS) are 0.8 mm.
+    """
+    parts = [_SAMEFP_HEADER, _OUTLINE]
+    parts.append(
+        _footprint2("R1", 110, 110, [("1", 1, "L_MAINS", 0, 0), ("2", 4, "DIV_MID", 0, 1.0)])
+    )
+    parts.append(
+        _footprint2("R2", 111.4, 110, [("1", 4, "DIV_MID", 0, 0), ("2", 1, "L_MAINS", 0, 1.0)])
+    )
+    parts.append(")\n")
+    return "".join(parts)
+
+
+def board_other_layer_board_gap_source() -> str:
+    """Same-footprint minimum on F.Cu, board-level gap on B.Cu only (#8232).
+
+    ``R1`` (F.Cu) holds ``L_MAINS``/``DIV_MID`` pads 0.4 mm apart.  ``D1``
+    (``L_MAINS``) and ``D2`` (``DIV_MID``) are B.Cu pads 0.8 mm apart -- no
+    footprint shares the pair on B.Cu, so that plain gap is a board-level one.
+    """
+    parts = [_SAMEFP_HEADER, _OUTLINE]
+    parts.append(
+        _footprint2("R1", 110, 110, [("1", 1, "L_MAINS", 0, 0), ("2", 4, "DIV_MID", 0, 1.0)])
+    )
+    for ref, y, nn, name in (("D1", 130, 1, "L_MAINS"), ("D2", 130.0 + 1.4, 4, "DIV_MID")):
+        parts.append(
+            f'  (footprint "test:padb" (layer "F.Cu") (at 120 {y})\n'
+            f'    (property "Reference" "{ref}" (at 0 0 0) (layer "F.SilkS"))\n'
+            f'    (pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "B.Cu")\n'
+            f'      (net {nn} "{name}"))\n  )\n'
+        )
+    parts.append(")\n")
+    return "".join(parts)
+
+
 def board_attach_zone_source(*, outside_shortfall: bool) -> str:
     """TO-220-style attach-zone board (#8028).
 
