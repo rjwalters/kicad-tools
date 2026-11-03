@@ -48,8 +48,8 @@ SIMPLE_PCB = """\
 \t\t(at 100 50)
 \t\t(property "Reference" "R1" (at 0 -1.5) (layer "F.SilkS") (uuid "ref1"))
 \t\t(property "Value" "1k" (at 0 1.5) (layer "F.Fab") (uuid "val1"))
-\t\t(pad "1" smd roundrect (at -0.8 0) (size 0.9 0.95) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "NET1"))
-\t\t(pad "2" smd roundrect (at 0.8 0) (size 0.9 0.95) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "GND"))
+\t\t(pad "1" smd roundrect (at -0.8 0) (size 0.9 0.95) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "GND"))
+\t\t(pad "2" smd roundrect (at 0.8 0) (size 0.9 0.95) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "NET1"))
 \t)
 \t(footprint "R_0603"
 \t\t(layer "F.Cu")
@@ -757,3 +757,147 @@ class TestVerbosePerNet:
             assert rows["NET1"]["segments_after"] == 1
             assert rows["NET1"]["rolled_back"] is False
             assert data["stats"]["nets_optimized"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Tests: per-rewrite collision checking (Issue #8214)
+# ---------------------------------------------------------------------------
+
+
+class _BlockAll:
+    """Collision checker that refuses every candidate path."""
+
+    def path_is_clear(self, **kwargs) -> bool:
+        return False
+
+
+class TestCollisionCheckedRewrites:
+    def test_cli_passes_board_checker_to_optimizer(self, simple_pcb_path, monkeypatch):
+        seen = {}
+        from kicad_tools.router.optimizer import TraceOptimizer as Real
+
+        def spy(config=None, collision_checker=None):
+            seen["checker"] = collision_checker
+            return Real(config, collision_checker=collision_checker)
+
+        monkeypatch.setattr("kicad_tools.router.optimizer.TraceOptimizer", spy)
+        assert main([str(simple_pcb_path), "--dry-run", "--quiet"]) == 0
+        assert seen["checker"] is not None
+
+    def test_clear_path_is_still_merged(self, simple_pcb_path, capsys):
+        assert main([str(simple_pcb_path), "--dry-run", "--verbose"]) == 0
+        row = next(
+            ln for ln in capsys.readouterr().out.splitlines() if "NET1" in ln and "segments" in ln
+        )
+        assert "2 ->    1" in row
+
+    def test_blocked_rewrite_is_skipped(self, simple_pcb_path, monkeypatch, capsys):
+        from kicad_tools.cli import optimize_cmd
+
+        real_build = optimize_cmd._build_collision_checker
+        monkeypatch.setattr(
+            "kicad_tools.cli.optimize_cmd._build_collision_checker",
+            lambda p: (real_build(p)[0], _BlockAll()),
+        )
+        assert main([str(simple_pcb_path), "--dry-run", "--verbose"]) == 0
+        row = next(
+            ln for ln in capsys.readouterr().out.splitlines() if "NET1" in ln and "segments" in ln
+        )
+        assert "2 ->    2" in row
+
+    def test_checker_build_failure_is_reported_not_bypassed(
+        self, simple_pcb_path, monkeypatch, capsys
+    ):
+        def boom(p):
+            raise ValueError("unparseable rules")
+
+        monkeypatch.setattr("kicad_tools.cli.optimize_cmd._build_collision_checker", boom)
+        out = simple_pcb_path.parent / "out.kicad_pcb"
+        assert main([str(simple_pcb_path), "-o", str(out)]) == 1
+        assert "unparseable rules" in capsys.readouterr().err
+        assert not out.exists()
+
+
+def _name_only(text: str) -> str:
+    """SIMPLE_PCB as a KiCad-10 name-only board: no header net table."""
+    import re
+
+    text = re.sub(r'\t\(net \d+ "[^"]*"\)\n', "", text)
+    text = text.replace('(net 1 "NET1")', '(net "NET1")').replace('(net 2 "GND")', '(net "GND")')
+    return text.replace("(net 1)", '(net "NET1")')
+
+
+class TestNameOnlyBoardAndGridSync:
+    def test_name_only_board_still_merges_safe_collinear(self, tmp_path, capsys):
+        pcb = tmp_path / "name_only.kicad_pcb"
+        pcb.write_text(_name_only(SIMPLE_PCB))
+        assert "(net 1" not in pcb.read_text()
+        assert main([str(pcb), "--dry-run", "--verbose"]) == 0
+        row = next(
+            ln for ln in capsys.readouterr().out.splitlines() if "NET1" in ln and "segments" in ln
+        )
+        assert "2 ->    1" in row
+
+    @staticmethod
+    def _run_shifting_rewrite(pcb_path, monkeypatch, veto: bool):
+        """Run optimize_pcb with a base optimizer that moves NET1 copper 4 mm.
+
+        Returns a ``clear(y)`` probe: would a foreign net's path at row ``y``
+        be accepted by the checker the later nets are checked against?
+        """
+        from dataclasses import replace
+
+        from kicad_tools.cli.optimize_cmd import (
+            _build_collision_checker,
+            _make_grid_synced_optimize_fn,
+        )
+        from kicad_tools.router.layers import Layer
+        from kicad_tools.router.optimizer import OptimizationConfig, TraceOptimizer
+        from kicad_tools.router.optimizer.kelvin_gate import KelvinBoardGate
+
+        router, checker = _build_collision_checker(pcb_path)
+        optimizer = TraceOptimizer(OptimizationConfig(), collision_checker=checker)
+        optimizer.optimize_segments = lambda segs: [
+            replace(s, y1=s.y1 + 4, y2=s.y2 + 4) for s in segs
+        ]
+        optimize, commit = _make_grid_synced_optimize_fn(router, optimizer)
+        optimizer.optimize_segments = optimize
+
+        if veto:
+            # A Kelvin gate that runs the rewrite and then keeps the original
+            # branch (the #6889 / #5398 veto).
+            class _Vetoing:
+                class gate:  # noqa: N801
+                    vetoes = 0
+
+                    @staticmethod
+                    def report():
+                        pass
+
+                @staticmethod
+                def optimize_net(net_name, segments, optimize_fn):
+                    optimize_fn(list(segments))
+                    return list(segments)
+
+            monkeypatch.setattr(
+                KelvinBoardGate, "from_pcb_text", classmethod(lambda cls, text: _Vetoing())
+            )
+
+        optimizer.optimize_pcb(str(pcb_path), dry_run=True, on_net_optimized=commit)
+
+        def clear(y: float) -> bool:
+            return checker.path_is_clear(
+                x1=105, y1=y, x2=110, y2=y, layer=Layer.F_CU, width=0.25, exclude_net=999
+            )
+
+        return clear
+
+    def test_accepted_rewrite_is_synced_into_the_grid(self, simple_pcb_path, monkeypatch):
+        clear = self._run_shifting_rewrite(simple_pcb_path, monkeypatch, veto=False)
+        assert clear(50), "old copper must be unmarked once the rewrite is kept"
+        assert not clear(54), "new copper must be marked for later nets"
+
+    def test_vetoed_rewrite_is_not_committed_to_the_grid(self, simple_pcb_path, monkeypatch):
+        clear = self._run_shifting_rewrite(simple_pcb_path, monkeypatch, veto=True)
+        assert not clear(50), "vetoed branch's original copper must stay blocked"
+        assert clear(54), "rejected rewrite's copper must not be marked"
