@@ -290,7 +290,16 @@ Examples:
             f"cannot build collision checker for {pcb_path}: {e}",
         )
 
-    optimizer = TraceOptimizer(config, collision_checker=checker)
+    # Issue #8217: the detour pass needs every same-net pad/via of the loaded
+    # board (the checker ignores same-net copper); length-matched nets are
+    # left out of the map and so skipped.
+    from kicad_tools.cli.route_cmd import _detour_net_anchors
+
+    optimizer = TraceOptimizer(
+        config,
+        collision_checker=checker,
+        net_anchors=_detour_net_anchors(router, routes=router.existing_routes),
+    )
     # ``optimize_pcb`` calls ``self.optimize_segments`` per net; route that
     # through the grid-synced wrapper (see its docstring).  optimize_pcb has no
     # optimize_fn hook, so the instance method is deliberately rebound.

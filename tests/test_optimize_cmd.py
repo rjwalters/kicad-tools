@@ -776,13 +776,15 @@ class TestCollisionCheckedRewrites:
         seen = {}
         from kicad_tools.router.optimizer import TraceOptimizer as Real
 
-        def spy(config=None, collision_checker=None):
+        def spy(config=None, collision_checker=None, net_anchors=None):
             seen["checker"] = collision_checker
-            return Real(config, collision_checker=collision_checker)
+            seen["anchors"] = net_anchors
+            return Real(config, collision_checker=collision_checker, net_anchors=net_anchors)
 
         monkeypatch.setattr("kicad_tools.router.optimizer.TraceOptimizer", spy)
         assert main([str(simple_pcb_path), "--dry-run", "--quiet"]) == 0
         assert seen["checker"] is not None
+        assert seen["anchors"], "detour pass needs pad/via anchors (Issue #8217)"
 
     def test_clear_path_is_still_merged(self, simple_pcb_path, capsys):
         assert main([str(simple_pcb_path), "--dry-run", "--verbose"]) == 0
@@ -901,3 +903,62 @@ class TestNameOnlyBoardAndGridSync:
         clear = self._run_shifting_rewrite(simple_pcb_path, monkeypatch, veto=True)
         assert not clear(50), "vetoed branch's original copper must stay blocked"
         assert clear(54), "rejected rewrite's copper must not be marked"
+
+
+# ---------------------------------------------------------------------------
+# Issue #8217: detour pass reachable from optimize-traces
+# ---------------------------------------------------------------------------
+
+_TENT_PCB = (
+    SIMPLE_PCB.split("\t(segment")[0]
+    + "".join(
+        f'\t(segment (start {a}) (end {b}) (width 0.25) (layer "F.Cu") (net 1) (uuid "t{i}"))\n'
+        for i, (a, b) in enumerate(
+            [
+                ("100.8 50", "105 50"),
+                ("105 50", "108 47"),
+                ("108 47", "122 47"),
+                ("122 47", "125 50"),
+                ("125 50", "129.2 50"),
+            ]
+        )
+    )
+    + ")\n"
+)
+
+# A foreign-net via sitting on the straight path between the two pads.
+_OBSTACLE = (
+    '\t(via (at 115 50) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 2) (uuid "obs"))\n'
+)
+
+
+def _tent_length(pcb_path: Path) -> float:
+    import math
+    import re
+
+    text = pcb_path.read_text()
+    total = 0.0
+    num = r"(-?[\d.]+)"
+    pat = rf"\(segment\s+\(start {num} {num}\)\s+\(end {num} {num}\)"
+    for m in re.finditer(pat, text):
+        x1, y1, x2, y2 = map(float, m.groups())
+        total += math.hypot(x2 - x1, y2 - y1)
+    return total
+
+
+class TestDetourShortening:
+    def test_tent_detour_is_shortened(self, tmp_path):
+        pcb = tmp_path / "tent.kicad_pcb"
+        pcb.write_text(_TENT_PCB)
+        before = _tent_length(pcb)
+        assert main([str(pcb), "--quiet"]) == 0
+        assert _tent_length(pcb) < before - 1.0
+
+    def test_obstacle_on_shorter_path_leaves_tent_longer(self, tmp_path):
+        free = tmp_path / "free.kicad_pcb"
+        free.write_text(_TENT_PCB)
+        blocked = tmp_path / "blocked.kicad_pcb"
+        blocked.write_text(_TENT_PCB.rstrip().rstrip(")") + _OBSTACLE + ")\n")
+        assert main([str(free), "--quiet"]) == 0
+        assert main([str(blocked), "--quiet"]) == 0
+        assert _tent_length(blocked) > _tent_length(free) + 1.0
