@@ -13,6 +13,11 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-11-03
+
+- **PR #8226**: fix: keep vias that tie pads or same-net pours during via minimisation
+- **Issue #8215** (closed): optimizer via minimization removes vias that are still needed (unconnected pour stubs)
+
 ### 2026-11-02
 
 - **PR #8225**: fix: restore tracked renders and warn on dirty tree in deploy-site.sh
