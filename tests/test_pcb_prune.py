@@ -715,11 +715,10 @@ def test_run_looping_back_to_nowhere_is_kept(tmp_path):
     back = ((100, 100.4), (100, 100))
     p = _board(tmp_path, [("A", 100, 100, 0.2, 0.2)], [*steps, back])
     pcb, res = _run(p)
-    # Issue #8368: steps lying inside the 0.4 mm track may go as covered
-    # copper, but never the last one -- the track's far end stays joined.
-    assert any(s.start == (100, 100.4) and s.end == (100, 100) for s in pcb.segments)
-    assert any(s.end == (100, 100.4) for s in pcb.segments)
-    assert len(pcb.segments) >= 2
+    # No covered step goes either (issue #8368): removing any of them leaves a
+    # neighbouring step's end landing mid-span on the 0.4 mm track, which
+    # kicad-cli reports as dangling.
+    assert len(pcb.segments) == 5
 
 
 def test_rewritten_ends_keep_full_nm_precision(tmp_path):
@@ -993,12 +992,8 @@ def test_pure_pass_keeps_a_run_whose_copy_loops_back_to_nowhere(tmp_path):
         )
     )
     pcb, res = _run(p)
-    # No collinear merge; only steps covered by the 0.4 mm track may go
-    # (issue #8368), never the one holding its far end.
-    assert res.stats["ends_snapped"] == 0
-    assert set(res.plans[0].reasons.values()) <= {"covered by a collinear track"}
-    assert any(s.end == (100, 100.4) for s in pcb.segments)
-    assert any(s.start == (100, 100.4) and s.end == (100, 100) for s in pcb.segments)
+    assert res.stats == {"segments_removed": 0, "ends_snapped": 0}
+    assert len(pcb.segments) == 6
 
 
 # ---------------------------------------------------------------------------
@@ -1448,8 +1443,11 @@ def test_contained_collinear_subsegment_is_removed(tmp_path):
 
 def test_contained_subsegment_with_both_ends_interior_and_offaxis_continuation(tmp_path):
     """Kind 1, both ends interior: L (0,0)->(10,0) at 2.6 mm, S (4,0)->(6,0) at
-    0.5 mm continuing off-axis from (6,0).  Main kept S (no endpoint is shared,
-    so prune saw no loop); the audit split L at S's ends -> parallel edges."""
+    0.5 mm continuing off-axis from (6,0).  The audit splits L at S's ends ->
+    parallel edges.  Removing S would leave the continuation's end landing
+    mid-span on L, which kicad-cli may flag as ``track_dangling`` (PR #8392
+    review), so S is kept and the loop is reported instead -- prune and the
+    audit still agree."""
     segs = [
         ((100, 100), (110, 100), "F.Cu", 2.6),
         ((104, 100), (106, 100), "F.Cu", 0.5),
@@ -1461,14 +1459,42 @@ def test_contained_subsegment_with_both_ends_interior_and_offaxis_continuation(t
     assert before.status == "ambiguous"
     assert before.witness["start"] == [104.0, 100.0]
     pcb, res = _prune_declared(p, specs)
-    kept = {(s.start, s.end) for s in pcb.segments}
-    assert ((104, 100), (106, 100)) not in kept
-    # the continuation now lands exactly on the trunk centreline (a T join)
-    assert ((106, 100), (108, 102)) in kept and ((100, 100), (110, 100)) in kept
-    after = _resolve(pcb, specs, tmp_path)
-    assert after.status == "resolved", after.reason
-    assert res.uncut_loops == []
-    _assert_agree(res, after)
+    assert {(s.start, s.end) for s in pcb.segments} == {
+        ((100, 100), (110, 100)),
+        ((104, 100), (106, 100)),
+        ((106, 100), (108, 102)),
+    }
+    assert res.uncut_loops
+    _assert_agree(res, _resolve(pcb, specs, tmp_path))
+
+
+@pytest.mark.parametrize("knee", [0.2, 0.4])
+def test_covered_track_kept_when_removal_leaves_a_short_45_degree_landing(tmp_path, knee):
+    """PR #8392 review: L (0,0)->(10.4,0); S (0,0)->(6,0) inside it; a 45 deg
+    stub from S's end (6,0) to (6+k,-k), then a 1.2 mm leg to a pad.  With S
+    gone the stub's end lands mid-span on L: pinned kicad-cli 10.0.6 connects
+    it but reports ``track_dangling`` for k = 0.2 / 0.4 mm (clean with S).  A
+    landing that only exists after the removal is not a clean join, so S stays
+    -- in the covered-track pass and the generic loop pass alike."""
+    k = (106 + knee, 100 - knee)
+    segs = [
+        ((100, 100), (110.4, 100), "F.Cu", 0.5),
+        ((100, 100), (106, 100), "F.Cu", 0.5),
+        ((106, 100), k, "F.Cu", 0.5),
+        (k, (k[0] + 1.2, k[1]), "F.Cu", 0.5),
+    ]
+    pads = [("A", 100, 100), ("B", 110.4, 100), ("C", k[0] + 1.2, k[1])]
+    p = _board(tmp_path, pads, segs)
+    pcb, res = _run(p)
+    assert res.stats["segments_removed"] == 0
+    assert ((100, 100), (106, 100)) in {(s.start, s.end) for s in pcb.segments}
+
+    specs = _cp_specs(tmp_path)
+    pcb, res = _prune_declared(p, specs)
+    assert res.stats["segments_removed"] == 0
+    # the loop is kept, so it is reported -- prune and the audit agree
+    assert res.uncut_loops
+    _assert_agree(res, _resolve(pcb, specs, tmp_path))
 
 
 def test_contained_subsegment_starting_on_a_via_the_container_passes_over(tmp_path):

@@ -507,7 +507,15 @@ class _NetModel:
             if k in removed:
                 continue
             o = self.nodes[k]
-            if o.kind == "seg" or (o.kind in ("via", "pad") and math.dist(p, o.a) <= CENTRE_TOL):
+            if o.kind == "seg":
+                # Only a shared endpoint is clean.  A T landing (this end on
+                # another track's centreline, mid-span) is a modelled join
+                # (#8368), but kicad-cli flags a short angled stub ending
+                # there as ``track_dangling`` (PR #8392 review), so losing
+                # the endpoint partner and keeping only a landing degrades it.
+                if _same_pt(p, o.a) or _same_pt(p, o.b):
+                    return True
+            elif o.kind in ("via", "pad") and math.dist(p, o.a) <= CENTRE_TOL:
                 return True
         return False
 
@@ -1244,30 +1252,78 @@ def _plan_anchored_merges(
             plan.reasons[model.nodes[m].index] = "collinear run merged"
 
 
-def _container_for(model: _NetModel, s: int, removed: set[int]) -> int | None:
-    """A live same-layer segment whose copper fully covers segment ``s``.
+def _covers(model: _NetModel, s: int, k: int) -> bool:
+    """Does live segment ``k`` fully cover segment ``s`` (same layer)?
 
-    ``s`` is covered when both its ends lie on the other track's centreline
-    (so its whole centreline does) and it is no wider.  Of two identical
-    tracks the later one is the copy (``pcb dedupe`` territory, but cheap).
+    ``s`` is covered when both its ends lie on ``k``'s centreline (so its
+    whole centreline does) and it is no wider.  Of two identical tracks the
+    later one is the copy (``pcb dedupe`` territory, but cheap).
     """
-    n = model.nodes[s]
-    for k in model.adj[s] | model.badj[s]:
-        o = model.nodes[k]
-        if k in removed or o.kind != "seg" or o.layers != n.layers:
-            continue
-        if n.radius > o.radius + 1e-9:
-            continue
-        if any(_pt_seg_dist(p, o.a, o.b) > _COLLINEAR_TOL for p in (n.a, n.b)):
-            continue
-        if (
-            abs(n.radius - o.radius) <= 1e-9
-            and all(_pt_seg_dist(p, n.a, n.b) <= _COLLINEAR_TOL for p in (o.a, o.b))
-            and k > s
-        ):
-            continue  # mutual containment: drop only the later of the two
-        return k
-    return None
+    n, o = model.nodes[s], model.nodes[k]
+    if k == s or o.kind != "seg" or n.kind != "seg" or o.layers != n.layers:
+        return False
+    if n.radius > o.radius + 1e-9:
+        return False
+    if any(_pt_seg_dist(p, o.a, o.b) > _COLLINEAR_TOL for p in (n.a, n.b)):
+        return False
+    # mutual containment: drop only the later of the two
+    return not (
+        abs(n.radius - o.radius) <= 1e-9
+        and all(_pt_seg_dist(p, n.a, n.b) <= _COLLINEAR_TOL for p in (o.a, o.b))
+        and k > s
+    )
+
+
+def _joins_container(model: _NetModel, k: int, c: int) -> bool:
+    """Is node ``k`` joined to container ``c`` by a contact that already
+    exists while the covered track is still there?
+
+    A track counts only by a shared endpoint, or by the container's own end
+    landing on it.  A track end that lands mid-span on the container *only
+    once the covered track is gone* is not counted: kicad-cli 10.0.6 connects
+    it but reports ``track_dangling`` for it (a short 45 degree stub, or a
+    collinear track ending inside the container; PR #8392 review).  A via /
+    pad counts when joined to the container or centred on its centreline.
+    """
+    o, cont = model.nodes[k], model.nodes[c]
+    if o.kind == "seg":
+        return k in model.adj[c] and any(
+            _same_pt(pk, pc) or _pt_seg_dist(pc, o.a, o.b) <= JOIN_TOL
+            for pk in (o.a, o.b)
+            for pc in (cont.a, cont.b)
+        )
+    if k in model.adj[c]:
+        return True
+    return o.kind in ("via", "pad") and _pt_seg_dist(o.a, cont.a, cont.b) <= CENTRE_TOL
+
+
+def _try_remove_covered(
+    model: _NetModel, plan: NetPlan, removed: set[int], baseline, group: set[int], c: int
+) -> bool:
+    """Remove ``group`` (segments all covered by ``c``) if every guard holds."""
+    held = set().union(*(model.anch[s][0] | model.anch[s][1] | model.adj[s] for s in group))
+    for k in held - removed - group - {c}:
+        if model.nodes[k].kind == "zone":
+            continue  # zone joins are never relied on
+        if not _joins_container(model, k, c):
+            return False
+    touched = set().union(*(model.adj[s] | model.badj[s] | model.overlap[s] for s in group)) - group
+    strict = set().union(*(model.adj[s] for s in group)) - group
+    after = removed | group
+    if (
+        model.partition(after) != baseline
+        or not model.still_joined(strict | {c}, after)
+        or not model.still_joined(touched, after, body=True)
+        or model.strands_end(group, removed)
+        or model.degrades_ends(touched, removed, after)
+        or model.decentres(touched, removed, after)
+    ):
+        return False
+    removed |= group
+    for s in sorted(group):
+        plan.remove.append(model.nodes[s].index)
+        plan.reasons[model.nodes[s].index] = "covered by a collinear track"
+    return True
 
 
 def _plan_contained_segments(
@@ -1281,54 +1337,47 @@ def _plan_contained_segments(
     since the pair shares at most one endpoint.  Removing the covered track
     removes no copper, so no ampacity check applies; the usual guards still do:
 
-    * everything joined at the covered track's ends (a T landing on the
-      container's centreline, a via / pad holding the end) must also join the
-      container -- a via / pad by an end inside it or by its centre on the
-      container's centreline;
+    * everything joined at the covered tracks' ends must also join the
+      container by a contact that exists with them present
+      (:func:`_joins_container`): a track end left landing mid-span on the
+      container is ``track_dangling`` to kicad-cli, so such a track is kept
+      and its loop reported instead;
     * the terminal partition is unchanged and the neighbours stay joined;
-    * no surviving end is degraded or stranded, and no via / pad is de-centred
-      (:meth:`_NetModel.decentres`, issues #8278 / #8358).
+    * no surviving end is degraded (a shared track endpoint is the only clean
+      track join, :meth:`_NetModel.clean_end`) or stranded, and no via / pad
+      is de-centred (:meth:`_NetModel.decentres`, issues #8278 / #8358).
 
-    An explicit ``--wide`` on a declared net keeps its absolute meaning.
+    The tracks one container covers are tried together, per connected run
+    (a run of short steps under one long track goes as a whole, since each
+    step's interior end would otherwise be left landing on the container),
+    then one at a time.  An explicit ``--wide`` on a declared net keeps its
+    absolute meaning.
     """
-    for s, n in enumerate(model.nodes):
-        if n.kind != "seg" or s in removed or _width(model, s) >= wide:
+    for c, cont in enumerate(model.nodes):
+        if cont.kind != "seg" or c in removed:
             continue
-        if _merge_unsafe_member(model, s):
-            continue  # locked, or may feed an unmodelled arc
-        c = _container_for(model, s, removed)
-        if c is None:
-            continue
-        cont = model.nodes[c]
-        held = (model.anch[s][0] | model.anch[s][1] | model.adj[s]) - removed - {c}
-        ok = True
-        for k in held:
-            o = model.nodes[k]
-            if o.kind == "zone":
-                continue  # zone joins are never relied on
-            if k in model.adj[c]:
+        cov = {
+            s
+            for s in model.adj[c] | model.badj[c]
+            if s not in removed
+            and _width(model, s) < wide
+            and not _merge_unsafe_member(model, s)
+            and _covers(model, s, c)
+        }
+        while cov:
+            seed = min(cov)
+            comp, todo = {seed}, [seed]
+            while todo:
+                for k in model.adj[todo.pop()] & cov:
+                    if k not in comp:
+                        comp.add(k)
+                        todo.append(k)
+            cov -= comp
+            if len(comp) > 1 and _try_remove_covered(model, plan, removed, baseline, comp, c):
                 continue
-            if o.kind in ("via", "pad") and _pt_seg_dist(o.a, cont.a, cont.b) <= CENTRE_TOL:
-                continue
-            ok = False
-            break
-        if not ok:
-            continue
-        group = {s}
-        touched = (model.adj[s] | model.badj[s] | model.overlap[s]) - group
-        after = removed | group
-        if (
-            model.partition(after) != baseline
-            or not model.still_joined((model.adj[s] - group) | {c}, after)
-            or not model.still_joined(touched, after, body=True)
-            or model.strands_end(group, removed)
-            or model.degrades_ends(touched, removed, after)
-            or model.decentres(touched, removed, after)
-        ):
-            continue
-        removed.add(s)
-        plan.remove.append(n.index)
-        plan.reasons[n.index] = "covered by a collinear track"
+            for s in sorted(comp):
+                if s not in removed:
+                    _try_remove_covered(model, plan, removed, baseline, {s}, c)
 
 
 #: Default width (mm) at/above which a declared-net segment is never cut.
