@@ -2453,6 +2453,41 @@ def _add_pcb_parser(subparsers) -> None:
         action="store_true",
         help="Show what would be removed without modifying files",
     )
+    pcb_strip.add_argument(
+        "--from-report",
+        metavar="JSON",
+        help="Cut one victim track/via per finding in a kicad-cli DRC JSON "
+        "(clearance/shorting_items) or a 'kct creepage --format json' report "
+        "(rows with a witness only). Exclusive with --nets/--layers/--region.",
+    )
+    pcb_strip.add_argument(
+        "--protect-nets",
+        help="Comma-separated nets --from-report must never cut",
+    )
+    pcb_strip.add_argument(
+        "--radius",
+        type=float,
+        default=0.0,
+        help="With --from-report: also remove same-net track/via items of the "
+        "victim within this many mm of the finding (default: 0 = exact item)",
+    )
+    pcb_strip.add_argument(
+        "--dangling",
+        action="store_true",
+        help="Remove track_dangling/via_dangling copper, repeating until none "
+        "remain; a pass that raises the unconnected count is not applied",
+    )
+    pcb_strip.add_argument(
+        "--keep-via-min",
+        type=float,
+        default=None,
+        help="With --dangling: keep vias whose drill or diameter is >= this many mm (anchor PTHs)",
+    )
+    pcb_strip.add_argument(
+        "--unverified",
+        action="store_true",
+        help="Write even when kicad-cli DRC verification is unavailable",
+    )
 
     # pcb reinforce (issue #4220 -- Unit A of #4218)
     pcb_reinforce = pcb_subparsers.add_parser(
