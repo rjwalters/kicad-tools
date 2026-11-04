@@ -17,7 +17,7 @@ AVR ISP,J4,Connector_PinHeader_2.54mm:PinHeader_2x03_P2.54mm_Vertical,C65114
 DRV8313PWPR,U2,board05_revB:TI_PWP0028C_EP3.4x9.7_Mask3.1x5.18_ThermalVias,C92482
 HALL,J3,Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical,C37208
 MOTOR ABC,J2,Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical,C49257
-RED,D3,LED_SMD:LED_0805_2012Metric,C131244
+RED,D3,LED_SMD:LED_0805_2012Metric,C84256
 RUN SWITCH,J5,Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,C7501260
 SMBJ24A,D2,Diode_SMD:D_SMB,C224017
 SS36,D1,Diode_SMD:D_SMA,C16015

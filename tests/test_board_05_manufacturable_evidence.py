@@ -31,26 +31,23 @@ def test_native_refill_drc_has_no_findings_or_unconnected_items():
 def test_manufacturer_check_and_meta_gates_pass():
     check = _load("readiness/kct-check.json")
     assert check["summary"]["errors"] == 0
-    # Every warning must be a located, accepted known-issues entry (same rule
-    # and location), and the counts must match exactly -- not merely "few".
+    # No warning is accepted (#8308 re-routed the four track detours #8278
+    # had to record): the board carries zero findings and zero located
+    # known-issue allowances -- not merely "few".
     known = _load("readiness/known-issues.json")
     accepted = [
-        (w["rule"], tuple(w["at"]))
+        (issue["issue"], w["rule"], w.get("at"))
         for issue in known["known_issues"]
         for w in issue.get("warnings", [])
     ]
     found = [
-        (f["rule_id"], tuple(f["point"]))
+        (f["rule_id"], f["point"])
         for f in check["findings"]
         if f["severity"] == "warning" and not f.get("waived")
     ]
-
-    def near(a, b):
-        return a[0] == b[0] and all(abs(x - y) <= 0.01 for x, y in zip(a[1], b[1], strict=True))
-
-    assert check["summary"]["warnings"] == len(accepted) == len(found)
-    assert all(any(near(f, k) for k in accepted) for f in found), found
-    assert all(any(near(f, k) for f in found) for k in accepted), accepted
+    assert accepted == []
+    assert found == []
+    assert check["summary"]["warnings"] == 0
     for gate in ("drc", "erc", "lvs"):
         assert check["meta_checks"][gate]["status"] == "PASSED", gate
 

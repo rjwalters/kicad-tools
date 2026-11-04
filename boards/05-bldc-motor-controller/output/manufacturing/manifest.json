@@ -1,28 +1,28 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.27.0",
-  "generated_at": "2026-11-04T00:49:14.695403+00:00",
+  "generated_at": "2026-11-04T05:29:56.466553+00:00",
   "manufacturer": "jlcpcb",
   "files": {
     "HARDWARE.md": {
-      "sha256": "857e99b2fcf6f6c02e776b8a2ca7e5a144f86e2a42e4aaa55968a07140e1a267",
-      "size": 8878
+      "sha256": "657a0eaea2181bc221d71612abcb1ef96b83d55c8c6af1d44b1241674e43a5ec",
+      "size": 8864
     },
     "README.txt": {
-      "sha256": "823e35440fcf0951f6c007b7e1ad6a01402da2aa3c349f129ae4a89e8b5b9409",
-      "size": 1847
+      "sha256": "0b3433d4d59a85367724cc28f883180b34456c1e5d4f12e713e5fa8b81979d85",
+      "size": 1604
     },
     "assembly-back.pdf": {
-      "sha256": "890c0edcffb1fa785d0c9f6e0a886a803172bac120424887142b8091312cd3ea",
-      "size": 83460
+      "sha256": "0feb76edbb55912832029448d2ce68e0d81207015d53cc72c231dad14f68121d",
+      "size": 84266
     },
     "assembly-front.pdf": {
-      "sha256": "b22f8c34a31f6e3e7f4828cc754c0541458d4a147242f98f0841ec0c3b68c546",
-      "size": 131629
+      "sha256": "7587ff4697aeb4339893c99a95f33df76e68c9c8f0b6888e27bef39bea756342",
+      "size": 131888
     },
     "bom_jlcpcb.csv": {
-      "sha256": "6e04b5c78e81ebd85f18e72142d21906dda4165d5ca9b7f7d6159729b54c5506",
-      "size": 1442
+      "sha256": "46b0c941c5d04125c4c8d588ceea17d80036d774bda48caada6c149b312cc435",
+      "size": 1441
     },
     "check-report.json": {
       "sha256": "ccf68619f5e814fc64b786326a32967ac5ac094082782961a9100fdca457a4c6",
@@ -33,8 +33,8 @@
       "size": 3256
     },
     "design-source.zip": {
-      "sha256": "2e07952f10793f99446f742ea744d7b56a0d1cad23a93883266784e370cfa5ac",
-      "size": 362468
+      "sha256": "897c508c188db90702545486339a034b4623545295b96e3c78ba8db346da1587",
+      "size": 358395
     },
     "firmware/Makefile": {
       "sha256": "f105bf145347705a625a825aad34614c3e4001c7260793991f68cca37587516c",
@@ -53,68 +53,68 @@
       "size": 3516
     },
     "gerbers/gerbers.zip": {
-      "sha256": "6779795cd2d0d26c37559a59483c0cfa7548cebcaa76aaf13505aa686e85e08c",
-      "size": 202571
+      "sha256": "e8d175173563e65c7cb4fd931579d457f83ab79a62695c40cfa8c97bf0ad8f46",
+      "size": 203898
     },
     "images/assembly.png": {
-      "sha256": "ba2c039becca45ff0426b06f6040520d636a208636177ad3b365f5b6dc583779",
-      "size": 477273
+      "sha256": "1dea79f899f7d889f81b66cc6fbcd880f20d3be173d1dc4a6a6787e54f4501e3",
+      "size": 474561
     },
     "images/layer_B_Cu.png": {
-      "sha256": "0c547823995d407fc74df4b4c0455e14e2d9080fd3c35a027b8264718b2a3564",
-      "size": 303243
+      "sha256": "51d08601a9b702260aa0f9c243ab0f1bde21969fe2d86d0d3ece023d835ea192",
+      "size": 305164
     },
     "images/layer_F_Cu.png": {
-      "sha256": "7832583206bbaae619d75f5aae8f058ef6c6c917e0beecce402930e50705b833",
-      "size": 389250
+      "sha256": "543d7a183c83d575e83e9f8510975479906b95ae634e42c596cb7e30ff6f3e07",
+      "size": 388622
     },
     "images/layer_In1_Cu.png": {
-      "sha256": "246baced7f7c0189df564df652667d871f1cfb353aa71b64a35d4fc735a372a5",
-      "size": 304212
+      "sha256": "19fbf5a9dea59695755a491c3cb22e409e0b44d4777ef9f2edeef4bd9e697b27",
+      "size": 306168
     },
     "images/layer_In2_Cu.png": {
-      "sha256": "33fd3075b389e36c038116ce68e193c0b3919e8c522931ce275f423693221347",
-      "size": 309786
+      "sha256": "1dfad4c96de49a4c474827b63aa7b8400799434c19c8089959e13df54a5534f3",
+      "size": 311980
     },
     "images/pcb_back.png": {
-      "sha256": "b08132234238ebe894bcbb4c6a9fc504ed5bcfaa33c767ac027f9829a8bca2ad",
-      "size": 308107
+      "sha256": "f969b43b150ab1b17e38944ee2a7e9a661bd0155a482ab1d8286397fef48ff7d",
+      "size": 309395
     },
     "images/pcb_copper.png": {
-      "sha256": "43d7288ada3878809a9e10687d65bf022f971ed0b03e670804b7d85dca186248",
-      "size": 384707
+      "sha256": "292fb51df05b81ee98a9d73e686df84d11f6b73baffc3f69eddc89b3b09c5579",
+      "size": 383190
     },
     "images/pcb_front.png": {
-      "sha256": "bdde8a2acec828c7c8851f8450bc7dac507d619ca3aea692777d9f1c2cd01ba2",
-      "size": 497109
+      "sha256": "1145b1cce5732bfa65238dbee0acdec23694c847eea361759c10912e6ca27d90",
+      "size": 496726
     },
     "images/schematic_bldc_controller.png": {
       "sha256": "168b34d16070f2cb31711d3f784cbe45a07b45c57d0d777825c288499b2b8db3",
       "size": 443637
     },
     "kct-check.json": {
-      "sha256": "0f8258b540687262443657b1fb4ec2c536fdfc20a04c5260a153a9a459be1d7b",
-      "size": 17993
+      "sha256": "d30d9d0c9d34953de7772faed339bea0cb15137478279eb4850ebd9a0bad68f7",
+      "size": 14081
     },
     "kicad_project.zip": {
-      "sha256": "9c0b1737aea3e726695df6c8bb235dcb4e800de8c0bf86924b52c198dc22e462",
-      "size": 273000
+      "sha256": "af348bbd8b1af9f3a6b6d094d221136c94f98a643c15590f0441985c279202fd",
+      "size": 271185
     },
     "lvs.json": {
       "sha256": "52fed944df95bc4d3650b2774ce6b714e731e310d9d9a761553b25055b3e1a25",
       "size": 215
     },
     "native-drc.json": {
-      "sha256": "525a2910eb202a1c2eb8f3c8560a21e9cc8ef52f8a05c2f916fb7eba1f248fa1",
+      "sha256": "3189c1c736387f8eee39b960aaa535afa0acd0120042cc1a8a5acba43fddf108",
       "size": 1214
     },
     "native-erc.json": {
-      "sha256": "33f9a90e772b18465faae2214b1c8eb9e8e9ede3f8ae3e06a5fa7dc9531d4fd1",
+      "sha256": "d27f063d00bbf825675596064528d8071d45368f86762850b28feb0b85e2d609",
       "size": 988
     },
     "project.kct": {
-      "sha256": "ba6911aa5aefe513c5e4db8fac019c11723b4e627d1554329d69b9c5131917ae",
-      "size": 3930
+      "sha256": "705b06586e98449b312e49ca68e2736da1c9c4fd883ad363cc06e90a25ed86fe",
+      "size": 3917
     },
     "renders/3d-back.png": {
       "sha256": "ec0126e348b9f440792f9224a68b713dd86d59b15ad3c9c3b5a4de8de6fe1a8e",
@@ -133,16 +133,16 @@
       "size": 563884
     },
     "report.md": {
-      "sha256": "4f378bce146b890f6b7f8ebc2c91aa81789e2510d835b0c773e19a487c1edf2c",
-      "size": 5451
+      "sha256": "5497ba98f5f8bab101397e7997ce6cb41e744f0857ddc0ff746617b5c41c6534",
+      "size": 5287
     },
     "report.pdf": {
-      "sha256": "0af8050c7b34568455cf29d93b443f0720dc87efb09e2acaef4fc560622b9a2a",
-      "size": 3619089
+      "sha256": "b0b06a6f2079b9ae8891b9bb4fd1c227b91676dcd50b36f9bf17c0535bf3cd4b",
+      "size": 3621388
     },
     "schematic.pdf": {
-      "sha256": "8f3e651cc1b5729cdee11302d31a9fb7062236ef29dc6dfee5942c48bc059c7e",
-      "size": 159287
+      "sha256": "f179531980b224485e157eaf384cca1fce2b826000a84333e538376e1dcd9481",
+      "size": 159274
     }
   },
   "board": {
@@ -184,7 +184,7 @@
     {
       "name": "drill_holes",
       "status": "OK",
-      "message": "Drill holes present (136 vias, 50 TH pads)"
+      "message": "Drill holes present (137 vias, 50 TH pads)"
     },
     {
       "name": "stackup_copper",
@@ -221,9 +221,8 @@
     },
     {
       "name": "bom_lcsc_stock",
-      "status": "WARN",
-      "message": "1 LCSC part(s) show insufficient stock for 5 board(s) on unverified data (stale cache/offline catalog)",
-      "details": "D3 -> C131244: needs 5, stock 0 (unverified offline_catalog)"
+      "status": "OK",
+      "message": "21 LCSC part(s) have recorded stock for 5 board(s)"
     },
     {
       "name": "bom_pcb_match",

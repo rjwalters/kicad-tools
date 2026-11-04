@@ -5,42 +5,6 @@
       "kind": "advisory",
       "summary": "PHASE_A inner copper is sized for 1 oz; the order must request 1 oz inner copper (JLCPCB's default is 0.5 oz), and manufacturing/manifest.json does not yet record ordered_copper",
       "recorded": "2026-10-18"
-    },
-    {
-      "issue": 8308,
-      "kind": "advisory",
-      "summary": "Board 05 router track detours (+5V x2, VM, MOSI) pending re-route; advisory copper quality, DRC/LVS clean",
-      "recorded": "2026-11-04",
-      "warnings": [
-        {
-          "rule": "redundant_copper_detour",
-          "at": [
-            156.34,
-            99.6
-          ]
-        },
-        {
-          "rule": "redundant_copper_detour",
-          "at": [
-            162.5,
-            105.36
-          ]
-        },
-        {
-          "rule": "redundant_copper_detour",
-          "at": [
-            163.65,
-            75.97
-          ]
-        },
-        {
-          "rule": "redundant_copper_detour",
-          "at": [
-            165.86,
-            102.0
-          ]
-        }
-      ]
     }
   ]
 }

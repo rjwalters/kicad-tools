@@ -20,8 +20,8 @@ header-includes:
 | Layers | 4 copper (F.Cu, In1.Cu, In2.Cu, B.Cu) |
 | Footprints | 42 (36 SMD, 6 THT, 0 other) |
 | Nets | 37 |
-| Traces | 700 segments |
-| Vias | 136 |
+| Traces | 697 segments |
+| Vias | 137 |
 | Board Size | 70.0 x 90.0 mm |
 
 ## Stackup
@@ -126,7 +126,7 @@ Sensored BLDC Controller
 | 1uF | C_0805_2012Metric | 1 | C7 | CL21B105KBFNNNE | C28323 |
 | 220uF 50V | CP_Elec_8x10.5_PolarityMark | 1 | C1 | EEEFT1H221AP | C178594 |
 | 470nF | C_0805_2012Metric | 1 | C6 | CL21B474KBFNNNE | C13967 |
-| RED | LED_0805_2012Metric | 1 | D3 | 17-21SURC/S530-A2/TR8 | C131244 |
+| RED | LED_0805_2012Metric | 1 | D3 | NCD0805R1 | C84256 |
 | SMBJ24A | D_SMB | 1 | D2 | SMBJ24A | C224017 |
 | SS36 | D_SMA | 1 | D1 | SS36 | C16015 |
 | 1A 63V | Fuse_1206_3216Metric | 1 | F1 | SF-1206S100-2 | C3167176 |
@@ -154,16 +154,11 @@ Sensored BLDC Controller
 | Errors | 0 |
 | Errors: kct (`--mfr jlcpcb` rules) | 0 |
 | Errors: kicad-cli (geometric) | 0 |
-| Warnings | 4 |
+| Warnings | 0 |
 | Blocking | 0 |
 
 **Status**: PASS
 
-### Violations by Type
-
-| Violation Type | Count |
-|----------------|-------|
-| redundant_copper_detour | 4 |
 
 
 
@@ -171,13 +166,12 @@ Sensored BLDC Controller
 
 ## Manufacturing Readiness
 
-**Verdict**: WARNING
+**Verdict**: READY
 
 ### Action Items
 
 - **[OPTIONAL]** Refill zones to verify 2 zone-connected nets, then re-run kct audit
 - **[OPTIONAL]** Confirm mains-named net FUSED is not mains/HV: declared non-HV in the net-class map (12-24 V DC motor supply after F1 (1 A, 63 V fuse), SMBJ24A-clamped; SELV, not mains (issue #8278))
-- **[OPTIONAL]** Review 4 DRC warnings
 - **[OPTIONAL]** Analog net: GND_SENSE — analog signal; noise-sensitive, avoid crossing digital signals
 - **[OPTIONAL]** Analog net: SENSE_IN — analog signal; noise-sensitive, avoid crossing digital signals
 
