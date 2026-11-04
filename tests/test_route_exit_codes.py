@@ -1027,14 +1027,18 @@ def test_partial_snapshot_saves_current_geometry_without_claiming_a_stage(
     from kicad_tools.sexp import parse_string
 
     router = Autorouter(width=10, height=10, force_python=True)
+    # An L-bend: the #8270 collinear merge in the save path leaves it alone,
+    # but the trace optimiser chamfers the corner, so the two
+    # parametrisations still save visibly different geometry.
     route = Route(
         net=1,
         net_name="SIGNAL",
         segments=[
-            Segment(1, 1, 2, 1, 0.2, Layer.F_CU, net=1),
-            Segment(2, 1, 3, 1, 0.2, Layer.F_CU, net=1),
+            Segment(1, 1, 3, 1, 0.2, Layer.F_CU, net=1),
+            Segment(3, 1, 3, 3, 0.2, Layer.F_CU, net=1),
         ],
     )
+    unoptimised = [(1.0, 1.0, 3.0, 1.0), (3.0, 1.0, 3.0, 3.0)]
     router.routes.append(route)
     pcb_path = _make_minimal_pcb(tmp_path)
     source_bytes = pcb_path.read_bytes()
@@ -1051,13 +1055,30 @@ def test_partial_snapshot_saves_current_geometry_without_claiming_a_stage(
             "best_completed_attempt": False,
         },
     )
+    expected = unoptimised
     if after_optimization:
         router.routes[:] = [TraceOptimizer().optimize_route(route)]
-        assert len(router.routes[0].segments) == 1
+        expected = [
+            (round(s.x1, 4), round(s.y1, 4), round(s.x2, 4), round(s.y2, 4))
+            for s in router.routes[0].segments
+        ]
+        assert expected != unoptimised, "the optimiser no longer changes the L-bend"
     assert route_cmd._save_partial_results()
     partial = output_path.with_stem(output_path.stem + "_partial")
-    segments = parse_string(partial.read_text()).find_all("segment")
-    assert len(segments) == (1 if after_optimization else 2)
+    saved = []
+    for seg in parse_string(partial.read_text()).find_all("segment"):
+        start, end = seg.find("start"), seg.find("end")
+        saved.append(
+            (
+                round(float(start.get_float(0)), 4),
+                round(float(start.get_float(1)), 4),
+                round(float(end.get_float(0)), 4),
+                round(float(end.get_float(1)), 4),
+            )
+        )
+    # The snapshot is exactly the current geometry: the raw L before the
+    # postpass, the chamfered one after it.
+    assert sorted(saved) == sorted(expected)
     assert pcb_path.read_bytes() == source_bytes
     assert output_path.read_bytes() == source_bytes
     message = capsys.readouterr().out.lower()
