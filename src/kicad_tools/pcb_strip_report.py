@@ -135,6 +135,13 @@ def _net_of(item: Segment | Via) -> str:
     return item.net_name or (str(item.net_number) if item.net_number else "")
 
 
+def _all_copper(pcb: PCB) -> list[Segment | Via]:
+    items: list[Segment | Via] = []
+    items.extend(pcb.segments)
+    items.extend(pcb.vias)
+    return items
+
+
 def _seg_dist(p: tuple[float, float], a: tuple[float, float], b: tuple[float, float]) -> float:
     ax, ay = a
     dx, dy = b[0] - ax, b[1] - ay
@@ -176,8 +183,8 @@ def _candidates(pcb: PCB, finding: Finding, protect: set[str]) -> tuple[list[Seg
         # is one of the finding's nets (when it names any).
         loc = finding.location
         named = set(finding.nets)
-        near = []
-        for item in [*pcb.segments, *pcb.vias]:
+        near: list[tuple[float, Segment | Via]] = []
+        for item in _all_copper(pcb):
             if named and _net_of(item) not in named:
                 continue
             d = _item_dist(item, loc)
@@ -212,7 +219,7 @@ def plan_from_report(
         group: list[Segment | Via] = [victim]
         if radius > 0 and f.location is not None:
             vnet = _net_of(victim)
-            for item in [*pcb.segments, *pcb.vias]:
+            for item in _all_copper(pcb):
                 if item is victim or _net_of(item) != vnet:
                     continue
                 if _item_dist(item, f.location) <= radius:
@@ -222,7 +229,10 @@ def plan_from_report(
             if id(item) in seen:
                 continue
             seen.add(id(item))
-            (plan.vias if isinstance(item, Via) else plan.segments).append(item)
+            if isinstance(item, Via):
+                plan.vias.append(item)
+            else:
+                plan.segments.append(item)
             removed.append(_describe(item))
         plan.results.append(
             FindingResult(f, "cut", removed=removed, nets_cut=[_net_of(victim)] if removed else [])
@@ -340,7 +350,8 @@ def strip_dangling(
                 f"pass {res.passes + 1} would raise unconnected {before}->{after}; not applied"
             )
             break
-        nets.update(_net_of(i) for i in [*segs, *vias])
+        nets.update(_net_of(s) for s in segs)
+        nets.update(_net_of(v) for v in vias)
         pcb.remove_segments(segs)
         pcb.remove_vias(vias)
         res.passes += 1

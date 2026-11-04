@@ -212,3 +212,49 @@ def test_cli_refuses_without_kicad_cli(board, tmp_path, monkeypatch):
     out = tmp_path / "o.kicad_pcb"
     rc = run_pcb_command(_ns(board, from_report=str(rpt), output=str(out), unverified=False))
     assert rc == 1 and not out.exists()
+
+
+def _via(uid, x, y, net, size=0.8, drill=0.4):
+    return (
+        f"  (via (at {x} {y}) (size {size}) (drill {drill}) "
+        f'(layers "F.Cu" "B.Cu") (net {net}) (uuid "{uid}"))\n'
+    )
+
+
+@pytest.fixture
+def via_spur_board(tmp_path: Path) -> Path:
+    # A lone via at the end of a track: the via (and track) are dangling.
+    body = _seg("aaaaaaaa-0000-0000-0000-000000000021", 110, 110, 115, 110, 1, "MAINS") + _via(
+        "dddddddd-0000-0000-0000-000000000022", 115, 110, 1
+    )
+    p = tmp_path / "v.kicad_pcb"
+    p.write_text(HEADER + body + ")\n")
+    return p
+
+
+def test_keep_via_min_preserves_large_vias(via_spur_board):
+    kept = PCB.load(via_spur_board)
+    res = strip_dangling(kept, keep_via_min=0.3)
+    assert res.vias == 0
+    assert res.kept_vias >= 1
+    assert len(kept.vias) == 1
+
+    removed = PCB.load(via_spur_board)
+    res = strip_dangling(removed, keep_via_min=None)
+    assert res.kept_vias == 0
+    assert res.vias == 1
+    assert not removed.vias
+
+
+def test_cli_rollback_when_drc_worse(board, tmp_path, monkeypatch, capsys):
+    """New DRC violations after the edit: refuse, write nothing."""
+    import kicad_tools.cli.commands.pcb as pcb_cmd
+
+    monkeypatch.setattr(pcb_cmd, "_verify_strip_drc", lambda p, pcb: (True, "NEW violations", True))
+    rpt = _drc_json(tmp_path / "r.json", [UA, UB])
+    out = tmp_path / "o.kicad_pcb"
+    rc = run_pcb_command(_ns(board, from_report=str(rpt), output=str(out), unverified=False))
+    assert rc == 1
+    assert not out.exists()
+    assert len(PCB.load(board).segments) == 3
+    assert "Refusing to write" in capsys.readouterr().err
