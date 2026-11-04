@@ -446,24 +446,16 @@ class _NetModel:
                 return True
         return False
 
-    def degraded_ends(
-        self, touched: set[int], before: set[int], after: set[int]
-    ) -> list[tuple[int, int]]:
-        """Surviving track ends that removing ``after - before`` would leave
-        off-centre-only although they were clean before."""
-        out = []
-        for k in sorted(touched):
+    def degrades_ends(self, touched: set[int], before: set[int], after: set[int]) -> bool:
+        """Would removing ``after - before`` leave a surviving track end
+        off-centre-only that was clean before?"""
+        for k in touched:
             if k in after or self.nodes[k].kind != "seg":
                 continue
             for x in (0, 1):
                 if self.clean_end(k, x, before) and not self.clean_end(k, x, after):
-                    out.append((k, x))
-        return out
-
-    def degrades_ends(self, touched: set[int], before: set[int], after: set[int]) -> bool:
-        """Would removing ``after - before`` leave a surviving track end
-        off-centre-only that was clean before?"""
-        return bool(self.degraded_ends(touched, before, after))
+                    return True
+        return False
 
     def still_joined(self, touched: set[int], removed: set[int]) -> bool:
         """Are all live nodes in ``touched`` in one component once ``removed``
@@ -495,6 +487,30 @@ class _NetModel:
                         self.hard_anchors(k, x) - gone
                     ):
                         return True
+        return False
+
+    def _via_layers(self, v: int, gone: set[int]) -> set[str]:
+        """Layers a via is still joined on through live segments / pads."""
+        out: set[str] = set()
+        for k in self.adj[v] - gone:
+            o = self.nodes[k]
+            if o.kind == "seg":
+                out.update(o.layers)
+            elif o.kind == "pad":
+                out.update(("*a", "*b") if "*" in o.layers else o.layers)
+        return out
+
+    def strands_via_layer(self, group: set[int], removed: set[int]) -> bool:
+        """Would removing ``group`` leave a via joined on fewer than two layers
+        that was joined on two or more (a ``via_dangling``, Issue #8298)?"""
+        gone = removed | group
+        for g in group:
+            for v in self.adj[g]:
+                if self.nodes[v].kind != "via" or v in gone:
+                    continue
+                before = len(self._via_layers(v, removed))
+                if before >= 2 and len(self._via_layers(v, gone)) < 2:
+                    return True
         return False
 
     def offcentre_end(self, i: int) -> bool:
@@ -641,8 +657,7 @@ def _try_snap(
     e: int,
     removed: set[int],
     baseline: frozenset[frozenset[int]],
-    dry: bool = False,
-) -> bool:
+) -> None:
     """Snap end ``e`` of segment ``i`` -- and every track end sharing that
     point -- onto the nearest anchoring via/pad centre, if that is safe.
 
@@ -659,7 +674,7 @@ def _try_snap(
             if d > CENTRE_TOL and (target is None or d < target[0]):
                 target = (d, o.a)
     if target is None:
-        return False
+        return
     c = target[1]
     movers = [(i, e)]
     for k in model.anch[i][e]:
@@ -670,9 +685,9 @@ def _try_snap(
                 movers.append((k, x))
     for k, x in movers:
         if model.protected[k]:
-            return False  # a sharer may hide a join: leave the joint alone
+            return  # a sharer may hide a join: leave the joint alone
         if math.dist(_end_pt(model.nodes[k], 1 - x), c) <= CENTRE_TOL:
-            return False  # would collapse a segment to zero length
+            return  # would collapse a segment to zero length
     moved = {k for k, _ in movers}
     touched = set(moved)
     for k in moved:
@@ -706,17 +721,16 @@ def _try_snap(
             for x in (0, 1)
         )
     )
-    if ok and not dry:
+    if ok:
         for k, x in movers:
             plan.snaps.append((model.nodes[k].index, ("start", "end")[x], c))
-        return True
+        return
     for k in moved:
         model.nodes[k].a, model.nodes[k].b = old[k]
         model.relink(k)
     for k, (adj_k, anch_k) in saved.items():
         model.adj[k] = adj_k
         model.anch[k] = anch_k
-    return ok
 
 
 #: Max perpendicular deviation (mm) for a run to count as one straight line.
@@ -837,19 +851,10 @@ def _plan_net(model: _NetModel, net_number: int) -> NetPlan:
                     model.partition(removed | group) != baseline
                     or not model.still_joined(touched, removed | group)
                     or model.strands_end(group, removed)
+                    or model.strands_via_layer(group, removed)
+                    or model.degrades_ends(touched, removed, removed | group)
                 ):
                     continue
-                # Issue #8298 (#8259 geometry): an end left off-centre-only is
-                # acceptable when it can be snapped onto the via / pad centre.
-                degraded = model.degraded_ends(touched, removed, removed | group)
-                if degraded:
-                    after = removed | group
-                    if not all(
-                        _try_snap(model, plan, k, x, after, baseline, dry=True) for k, x in degraded
-                    ):
-                        continue
-                    for k, x in degraded:
-                        _try_snap(model, plan, k, x, after, baseline)
                 off = any(model.offcentre_end(g) for g in group)
                 removed |= group
                 progressed = True

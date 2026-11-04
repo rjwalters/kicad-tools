@@ -392,12 +392,10 @@ def test_removal_never_leaves_an_end_dangling_off_a_removed_body(tmp_path):
     pcb, res = _run(p)
     # the branch diagonal the new track's end rests on must survive (the main
     # diagonal may legitimately go instead); never the 3-segment branch removal
-    # Issue #8298: the stub's end inside the branch body is now a modelled
-    # join, so the stub may go first (it closes a loop) and then the branch;
-    # what must never happen is the stub surviving with the branch gone.
-    branch_kept = any(s.start == (104.2, 101.5) and s.end == (108.5, 105.5) for s in pcb.segments)
-    stub_kept = any(s.start == (106.35, 103.5) for s in pcb.segments)
-    assert branch_kept or not stub_kept
+    assert any(s.start == (104.2, 101.5) and s.end == (108.5, 105.5) for s in pcb.segments)
+    assert res.stats["segments_removed"] <= 1
+    # and the via at (108, 102) keeps its B.Cu stub: never joined on one layer
+    assert any(s.start == (106.35, 103.5) for s in pcb.segments)
 
 
 def test_copper_arc_touching_a_detour_keeps_it(tmp_path):
@@ -453,21 +451,3 @@ def test_anchor_in_body_loop_is_removed_8298(tmp_path):
     pcb, res = _run(p)
     assert res.stats["segments_removed"] >= 1
     assert any(s.start == (100, 100) for s in pcb.segments)
-
-
-def test_branch_removal_accepted_when_degraded_end_can_snap_8298(tmp_path):
-    """#8259 geometry: the redundant branch ends inside V1's disc, off-centre,
-    and an In1 track end shares that point.  Removing the branch would leave the
-    In1 end off-centre-only; snapping it to the centre makes it clean."""
-    text = _spur_board(tmp_path).read_text()
-    text = text.replace("(start 100 100.35) (end 105 100.35)", "(start 100 100.35) (end 105.1 100)")
-    text = text.replace(
-        "(start 105 100.35) (end 104.2 101.5)", "(start 105.1 100) (end 104.2 101.5)"
-    )
-    p = tmp_path / "snap8259.kicad_pcb"
-    p.write_text(text)
-    pcb, res = _run(p)
-    in1 = [s for s in pcb.segments if s.layer == "In1.Cu"]
-    b_cu = [(s.start, s.end) for s in pcb.segments if s.layer == "B.Cu"]
-    assert b_cu == [((105, 100), (110, 105))], b_cu
-    assert [s.end for s in in1] == [(105, 100)]

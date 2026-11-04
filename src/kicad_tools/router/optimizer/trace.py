@@ -25,7 +25,6 @@ from .algorithms import (
     remove_lateral_jogs_pass,
     shared_vertices,
     shorten_detour_pass,
-    straighten_pad_entry_jogs_pass,
 )
 from .chain import sort_into_chains
 from .collision import CollisionChecker
@@ -377,7 +376,6 @@ class TraceOptimizer:
         config: OptimizationConfig | None = None,
         collision_checker: CollisionChecker | None = None,
         net_anchors: dict[int, list[tuple[float, float]]] | None = None,
-        pad_anchors: dict[int, list[tuple[float, float]]] | None = None,
     ):
         """Initialize the trace optimizer.
 
@@ -396,9 +394,6 @@ class TraceOptimizer:
         self.config = config or OptimizationConfig()
         self.collision_checker = collision_checker
         self.net_anchors = net_anchors
-        # Issue #8298: pad-only positions per net id (a subset of
-        # ``net_anchors``); enables the pad-entry jog pass, a no-op without it.
-        self.pad_anchors = pad_anchors
         # Endpoints of the *other* chains in the current optimize_segments call
         # (same net and layer). A branch can end on a chain's body (a T-join
         # KiCad counts as connected), so whole-run rewrites must keep these on
@@ -507,7 +502,6 @@ class TraceOptimizer:
                 (self.config.convert_45_corners, self.convert_corners_45),
                 (self.config.pull_tight, self.pull_tight),
                 (self.config.remove_jogs, self.remove_jogs),
-                (self.config.remove_jogs, self.straighten_pad_entries),
                 (self.config.shorten_detours, self.shorten_detours),
             ]
             for enabled, apply_pass in passes:
@@ -681,27 +675,6 @@ class TraceOptimizer:
             return list(segments)
         return remove_lateral_jogs_pass(
             segments, self.config, self._path_is_clear, anchors + self._branch_anchors
-        )
-
-    def straighten_pad_entries(self, segments: list[Segment]) -> list[Segment]:
-        """Straighten a jog just before a chain end on a pad (Issue #8298)."""
-        if (
-            self.collision_checker is None
-            or self.net_anchors is None
-            or self.pad_anchors is None
-            or not segments
-        ):
-            return list(segments)
-        anchors = self.net_anchors.get(segments[0].net)
-        pads = self.pad_anchors.get(segments[0].net)
-        if anchors is None or not pads:
-            return list(segments)
-        return straighten_pad_entry_jogs_pass(
-            segments,
-            self.config,
-            self._path_is_clear,
-            anchors + self._branch_anchors,
-            pads,
         )
 
     def shorten_detours(self, segments: list[Segment]) -> list[Segment]:

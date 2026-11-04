@@ -1,7 +1,5 @@
 """Tests for the TraceOptimizer staircase compression feature."""
 
-import math
-
 import pytest
 
 from kicad_tools.router import (
@@ -2470,60 +2468,3 @@ class TestRemoveLateralJogs:
         assert len(self._opt(config=cfg).optimize_segments(self._diag_jog())) == 4
         cfg.remove_jogs = True
         assert len(self._opt(config=cfg).optimize_segments(self._diag_jog())) == 2
-
-
-class TestPadEntryJog8298:
-    """Issue #8298: a jog just before a pad is straightened into the run."""
-
-    @staticmethod
-    def _chain(layer=None):
-        from kicad_tools.router.layers import Layer
-        from kicad_tools.router.primitives import Segment
-
-        layer = layer or Layer.F_CU
-        d = 1 / 2**0.5
-        pad = (10.005, 10.127)
-        # diagonal run, 0.087 mm perpendicular sidestep (vertical 0.127 +
-        # horizontal 0.005), parallel diagonal into the pad centre.
-        p0 = (0.0, 0.0)
-        p1 = (5.0, 5.0)
-        p2 = (5.0, 5.127)
-        p3 = (5.005, 5.127)
-        p4 = (pad[0], pad[1])
-        pts = [p0, p1, p2, p3, p4]
-        # place the pad so B ends exactly at the pad centre
-        return (
-            pad,
-            [
-                Segment(a[0], a[1], b[0], b[1], 0.35, layer, net=1)
-                for a, b in zip(pts, pts[1:], strict=False)
-            ],
-            d,
-        )
-
-    def _run(self, pads):
-        from kicad_tools.router.optimizer import OptimizationConfig
-        from kicad_tools.router.optimizer.algorithms import straighten_pad_entry_jogs_pass
-
-        pad, segs, _ = self._chain()
-        cfg = OptimizationConfig()
-        return (
-            pad,
-            segs,
-            straighten_pad_entry_jogs_pass(segs, cfg, lambda s: True, [pad, (0.0, 0.0)], pads(pad)),
-        )
-
-    def test_straightens_into_pad(self):
-        pad, segs, out = self._run(lambda p: [p])
-        assert len(out) < len(segs)
-        assert out[0].x1 == 0.0 and out[0].y1 == 0.0
-        end = (out[-1].x2, out[-1].y2)
-        assert math.hypot(end[0] - pad[0], end[1] - pad[1]) <= 0.35 / 2 + 1e-9
-        assert sum(math.hypot(s.x2 - s.x1, s.y2 - s.y1) for s in out) <= sum(
-            math.hypot(s.x2 - s.x1, s.y2 - s.y1) for s in segs
-        )
-
-    def test_via_end_is_untouched(self):
-        # no pad anchors (the end is a via): chain unchanged
-        _, segs, out = self._run(lambda p: [])
-        assert out == segs
