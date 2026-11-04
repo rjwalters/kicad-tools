@@ -91,6 +91,7 @@ Indexes: [Research notes](research/README.md) (ecosystem evaluations, router exp
 | [copperhead Workflow Ideas](research/copperhead-workflow-ideas.md) | Adoptable workflow ideas from the copperhead PCB agent (#4520) |
 | [Placement GA Routability A/B](benchmarks/placement_ga_routability_ab.md) | Inner-loop routing quality vs spacing proxy in the placement GA (#2720) |
 | [Board 05 U10-17 Investigation (2026-06)](investigations/2026-06-board05-u10-17.md) | Negative-clearance pair root-cause investigation (#3236) |
+| [pcb strip live verification (#8337)](investigations/pcb-strip-live-verification-8337.md) | kicad-cli --refill-zones check of --from-report/--dangling; filed #8346, #8347 |
 | [Placement Optimizer Agent Prompt](PLACEMENT-OPTIMIZER-AGENT-PROMPT.md) | Continuation prompt for the physics-based placement optimizer |
 | [Konnect Item 1 Audit: MCP Toolsets (2026-09)](konnect-item1-toolset-economy-audit.md) | On-demand MCP toolsets for context economy (#4896, item 1 of the #4880 Konnect audit) |
 | [Konnect Item 8 Audit: Design-Rule Store (2026-09)](konnect-item8-design-rules-audit.md) | Natural-language design-rule store (#4902, item 8 of the #4880 Konnect audit) |

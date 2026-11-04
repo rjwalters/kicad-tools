@@ -1,0 +1,60 @@
+{
+  "board": "board.kicad_pcb",
+  "net_class": "HV",
+  "min_mm": 15.0,
+  "hv_nets": [
+    "L_MAINS"
+  ],
+  "pair_count": 2,
+  "pairs": [
+    {
+      "net_a": "L_MAINS",
+      "net_b": "GND",
+      "kind": "conductor",
+      "layer": "F.Cu",
+      "clearance_mm": 18.0,
+      "creepage_mm": 18.0,
+      "margin_mm": 3.0,
+      "relationship": "board",
+      "pass": true,
+      "witness": {
+        "point_a_mm": [
+          11.0,
+          11.0
+        ],
+        "point_b_mm": [
+          29.0,
+          11.0
+        ],
+        "item_a": "pad",
+        "item_b": "pad"
+      }
+    },
+    {
+      "net_a": "L_MAINS",
+      "net_b": "<board edge>",
+      "kind": "edge",
+      "layer": "*",
+      "clearance_mm": 9.0,
+      "creepage_mm": 9.0,
+      "margin_mm": -6.0,
+      "relationship": "board",
+      "pass": false,
+      "witness": {
+        "point_a_mm": [
+          11.0,
+          9.0
+        ],
+        "point_b_mm": [
+          11.0,
+          0.0
+        ],
+        "item_a": "pad",
+        "item_b": "Edge.Cuts"
+      }
+    }
+  ],
+  "passed": false,
+  "gate_passed": false,
+  "waived_count": 0
+}
