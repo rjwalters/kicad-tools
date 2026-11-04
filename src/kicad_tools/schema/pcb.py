@@ -7176,6 +7176,8 @@ class PCB:
 
         Because every removed element is geometrically and electrically
         identical to a copy that remains, net connectivity is unchanged.
+        Zero-length segments (start == end after rounding) are also dropped
+        (Issue #8397).
 
         Returns:
             ``{"segments": n_seg_removed, "vias": n_via_removed}``.
@@ -7186,6 +7188,13 @@ class PCB:
         kept_segments: list[Segment] = []
         for seg in self._segments:
             skey = _segment_dedup_key(seg.net_number, seg.layer, seg.start, seg.end, seg.width)
+            if skey[2][0] == skey[2][1]:
+                # Issue #8397: zero-length (start == end after ~1 um rounding)
+                # copper is a point already covered by the adjoining segment,
+                # pad or via endpoint -- drop it.
+                if seg.uuid:
+                    seg_uuids_to_remove.add(seg.uuid)
+                continue
             if skey in seen_seg_keys:
                 if seg.uuid:
                     seg_uuids_to_remove.add(seg.uuid)

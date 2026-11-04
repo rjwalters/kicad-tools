@@ -596,7 +596,8 @@ def dedupe_segments(segs: list[Segment]) -> tuple[list[Segment], int]:
 
     Mirrors the key of ``kct pcb dedupe`` (``schema.pcb._segment_dedup_key``):
     net, layer, width and the *unordered* endpoint pair rounded to ~1 um.
-    Returns ``(kept, removed_count)``.
+    Zero-length segments (endpoints equal after rounding) are dropped too
+    (Issue #8397).  Returns ``(kept, removed_count)``.
     """
     seen: set[tuple] = set()
     kept: list[Segment] = []
@@ -604,6 +605,9 @@ def dedupe_segments(segs: list[Segment]) -> tuple[list[Segment], int]:
         p1 = (round(seg.x1, 3), round(seg.y1, 3))
         p2 = (round(seg.x2, 3), round(seg.y2, 3))
         a, b = (p1, p2) if p1 <= p2 else (p2, p1)
+        if a == b:
+            # Issue #8397: zero-length segment -- never emit.
+            continue
         key = (seg.net, seg.layer, round(seg.width, 3), a, b)
         if key in seen:
             continue
