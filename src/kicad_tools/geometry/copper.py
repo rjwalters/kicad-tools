@@ -436,3 +436,43 @@ def pad_waiver_polygon(x: float, y: float, w: float, h: float, shape: str, rotat
     else:
         return None
     return translate(rotate(polygon, -rotation, origin=(0, 0)), x, y)
+
+
+@lru_cache(maxsize=4096)
+def pad_gate_polygon(
+    x: float, y: float, w: float, h: float, shape: str, rotation: float, rratio: float | None
+):
+    """Pad copper as the HV commit gate measures it, ``roundrect`` included (#8327).
+
+    :func:`pad_waiver_polygon` returns ``None`` for a ``roundrect`` pad, which
+    sent the lattice search's attach-zone waiver (``_pad_zone_waives``) to its
+    whole-segment-in-one-zone fallback for nearly every SMD pad: an edge that
+    crosses a rated footprint's attach-zone boundary near the foreign pad of
+    the same footprint was refused although the gate accepts its residual, so
+    a two-terminal tap part could become unreachable.  This models the
+    roundrect the way the clearance kernel does (``_pad_core_local``): the
+    file's ``rratio`` (clamped to KiCad's ``[0, 0.5]``) rounds the corners;
+    an unknown ratio is the enclosing rectangle, which holds the real copper
+    and so can only under-report a gap.  Every other shape defers to
+    :func:`pad_waiver_polygon`.
+    """
+    if shape != "roundrect":
+        return pad_waiver_polygon(x, y, w, h, shape, rotation)
+    from shapely.affinity import rotate, translate
+    from shapely.geometry import LineString, Point, box
+
+    if w <= 0 or h <= 0:
+        return None
+    radius = 0.0 if rratio is None else max(0.0, min(float(rratio), 0.5)) * min(w, h)
+    if radius <= 0.0:
+        polygon = box(-w / 2, -h / 2, w / 2, h / 2)
+    else:
+        hx, hy = w / 2 - radius, h / 2 - radius
+        if hx <= 1e-12 and hy <= 1e-12:
+            core = Point(0.0, 0.0)
+        elif hx <= 1e-12 or hy <= 1e-12:
+            core = LineString([(-max(hx, 0.0), -max(hy, 0.0)), (max(hx, 0.0), max(hy, 0.0))])
+        else:
+            core = box(-hx, -hy, hx, hy)
+        polygon = core.buffer(radius, quad_segs=32)
+    return translate(rotate(polygon, -rotation, origin=(0, 0)), x, y)
