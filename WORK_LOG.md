@@ -15,6 +15,9 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-04
 
+- **PR #8345**: feat: gate each kct route-link commit with per-link DRC and creepage rollback
+- **PR #8257**: ci: provision jlcparts catalog for board 05, re-pin board 02/03 baselines
+- **Issue #8314** (closed): route-link: per-link DRC + creepage gating with single-link rollback
 - **PR #8339**: perf: index blocker segments in relief measured-gap scan
 - **PR #8351**: fix: locate creepage strip findings from witness point_a/point_b
 - **PR #8348**: docs: record live kicad-cli verification of pcb strip modes
