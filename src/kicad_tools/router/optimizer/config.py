@@ -72,6 +72,13 @@ class OptimizationConfig:
     drc_copper_oz: float = 1.0
     """Copper weight in oz for DRC checks."""
 
+    drc_clearance_mm: float | None = None
+    """Clearance the board's own DRC enforces (Issue #8367).
+
+    Overrides the manufacturer preset's minimum clearance in the in-process
+    referee so keep/reject agrees with kicad-cli under the project rules.
+    ``None`` keeps the preset."""
+
 
 @dataclass
 class NetOptimizationStats:

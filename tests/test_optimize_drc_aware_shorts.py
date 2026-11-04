@@ -173,3 +173,42 @@ def test_failsafe_keeps_clean_nets_and_rejects_only_bad_one(tmp_path, monkeypatc
     assert stats.nets_rolled_back == 1
     assert stats.nets_kept == 1
     assert stats.drc_errors_after == 0
+
+
+# --- Issue #8367: referee uses the board's own clearance -------------------
+
+
+def test_referee_uses_board_clearance_not_preset(monkeypatch):
+    """A 0.1 mm board must not be refereed at the manufacturer preset."""
+    from kicad_tools.manufacturers import get_profile
+
+    seen = {}
+
+    class _Res:
+        errors: list = []
+
+        def merge(self, other):
+            return None
+
+    class _Checker:
+        def __init__(self, *a, **k):
+            self.design_rules = get_profile("jlcpcb").get_design_rules(2, 1.0)
+
+        def check_clearances(self):
+            seen["clearance"] = self.design_rules.min_clearance_mm
+            return _Res()
+
+        check_dimensions = check_segment_zone_clearances = check_via_zone_clearances = lambda self: (
+            _Res()
+        )
+
+    import kicad_tools.schema.pcb as schema_pcb
+    import kicad_tools.validate as validate
+
+    monkeypatch.setattr(schema_pcb.PCB, "load", staticmethod(lambda p: SimpleNamespace()))
+    monkeypatch.setattr(validate, "DRCChecker", _Checker)
+    kw = {"manufacturer": "jlcpcb", "layers": 2, "copper_oz": 1.0}
+    pcb_mod._run_drc_error_count_by_category(_PCB, **kw)
+    preset = seen["clearance"]
+    pcb_mod._run_drc_error_count_by_category(_PCB, min_clearance_mm=0.0508, **kw)
+    assert seen["clearance"] == 0.0508 != preset
