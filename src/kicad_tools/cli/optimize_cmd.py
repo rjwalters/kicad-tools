@@ -15,6 +15,7 @@ exit code unchanged.  See ``docs/reference/machine-output.md``.
 """
 
 import argparse
+import contextlib
 import sys
 from pathlib import Path
 
@@ -41,6 +42,43 @@ def _fail(as_json: bool, pcb: str, message: str, *, text: str | None = None) -> 
     else:
         print(text if text is not None else f"Error: {message}", file=sys.stderr)
     return 1
+
+
+@contextlib.contextmanager
+def _deterministic_uuids(pcb_path: Path, net_filter: str | None = None):
+    """Emit reproducible UUIDs for segments/vias the optimizer writes (Issue #8297).
+
+    The seed is derived from the input board bytes and the ``--net`` filter, not
+    a constant: a fixed seed restarts the same UUID stream on every invocation,
+    so re-running on an already-optimized board with ``--net`` handed the
+    filtered net UUIDs other nets still held from the first run (duplicates).
+    The same input and flags still give the same output.
+
+    The post-write kicad-cli refill (#8286) re-saves the board with items
+    ordered by UUID, so random UUIDs made the written ``(segment ...)`` order
+    -- and therefore the file -- differ run to run.  Seeds the global
+    ``random`` module (what the router's deterministic-UUID mode consumes) and
+    restores both it and the toggle afterwards.
+    """
+    import hashlib
+    import random
+
+    from kicad_tools.router.primitives import (
+        enable_deterministic_uuids,
+        is_deterministic_uuids_enabled,
+    )
+
+    prev_enabled = is_deterministic_uuids_enabled()
+    prev_state = random.getstate()
+    digest = hashlib.sha256(pcb_path.read_bytes())
+    digest.update(b"\0net-filter\0" + (net_filter or "").encode())
+    random.seed(int.from_bytes(digest.digest()[:8], "big"))
+    enable_deterministic_uuids(True)
+    try:
+        yield
+    finally:
+        enable_deterministic_uuids(prev_enabled)
+        random.setstate(prev_state)
 
 
 def _refill_written_board(written: Path) -> tuple[bool, str | None]:
@@ -438,7 +476,7 @@ Examples:
 
     # Run optimization
     try:
-        with spinner("Optimizing traces...", quiet=quiet):
+        with spinner("Optimizing traces...", quiet=quiet), _deterministic_uuids(pcb_path, args.net):
             stats = optimizer.optimize_pcb(
                 str(pcb_path),
                 output_path=args.output,
