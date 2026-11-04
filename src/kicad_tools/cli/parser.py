@@ -4653,6 +4653,14 @@ def _add_fix_silkscreen_parser(subparsers) -> None:
         help="Outer copper weight in oz (default: 1.0)",
     )
     fix_silk_parser.add_argument(
+        "--clip-to-pads",
+        action="store_true",
+        help=(
+            "Also trim or remove footprint silk lines closer to a pad than the "
+            "manufacturer's silk-to-pad clearance (pin-1 markers are never touched)"
+        ),
+    )
+    fix_silk_parser.add_argument(
         "--min-width",
         type=float,
         help="Minimum silkscreen line width in mm (overrides manufacturer rules)",

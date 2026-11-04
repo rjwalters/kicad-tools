@@ -992,3 +992,167 @@ def test_fp_poly_widened_5762(tmp_path: Path):
     )
     result = SilkscreenRepairer(pcb).repair_line_widths(0.15)
     assert [f.element_type for f in result.fixes] == ["fp_poly"]
+
+
+# --------------------------------------------------------------------------
+# --clip-to-pads (Issue #8312)
+# --------------------------------------------------------------------------
+
+
+def _clip_board(footprint_extra: str, layer: str = "F.SilkS", fp_layer: str = "F.Cu") -> str:
+    return f"""\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (36 "B.SilkS" user "B.Silkscreen")
+    (37 "F.SilkS" user "F.Silkscreen")
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "{fp_layer}")
+    (at 100 100)
+    (property "Reference" "R1")
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64)
+      (layers "F.Cu" "F.Mask" "F.Paste"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64)
+      (layers "F.Cu" "F.Mask" "F.Paste"))
+    {footprint_extra.replace("LAYER", layer)}
+  )
+)
+"""
+
+
+def _line(x0, y0, x1, y1, uuid="aaaaaaaa-0000-0000-0000-000000000001") -> str:
+    return (
+        f"(fp_line (start {x0} {y0}) (end {x1} {y1}) "
+        f'(stroke (width 0.15) (type solid)) (layer "LAYER") (uuid "{uuid}"))'
+    )
+
+
+def _silk_pad_findings(path: Path, minimum: float = 0.15):
+    from kicad_tools.manufacturers.base import DesignRules
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.factory_clearance import check_silk_pad_clearance
+
+    rules = DesignRules(
+        min_trace_width_mm=0.1,
+        min_clearance_mm=0.1,
+        min_via_drill_mm=0.3,
+        min_via_diameter_mm=0.6,
+        min_annular_ring_mm=0.15,
+        min_silk_to_pad_clearance_mm=minimum,
+    )
+    return list(check_silk_pad_clearance(PCB.load(path), rules))
+
+
+def _count_fp_lines(path: Path) -> int:
+    return len(parse_file(path).find_all("fp_line"))
+
+
+@pytest.fixture
+def clip_pcb(tmp_path: Path):
+    def make(extra: str, **kw) -> Path:
+        p = tmp_path / "clip.kicad_pcb"
+        p.write_text(_clip_board(extra, **kw))
+        return p
+
+    return make
+
+
+class TestClipToPads:
+    def test_trims_line_crossing_limit(self, clip_pcb):
+        # Runs along the top, 0.12 above pad copper at its ends -> must be shortened.
+        path = clip_pcb(_line(-1.5, 0.45, 1.5, 0.45))
+        assert _silk_pad_findings(path)
+        repairer = SilkscreenRepairer(path)
+        result = repairer.repair_pad_clearance(0.15)
+        repairer.save()
+        assert result.total_fixed == 1
+        assert result.fixes[0].action == "trimmed"
+        assert not _silk_pad_findings(path)
+        assert _count_fp_lines(path) >= 1
+
+    def test_removes_line_wholly_inside_limit(self, clip_pcb):
+        # Sits 0.13 above the pad copper (less than 0.15 + half the stroke).
+        path = clip_pcb(_line(-0.6, 0.45, -0.4, 0.45))
+        assert _count_fp_lines(path) == 1
+        repairer = SilkscreenRepairer(path)
+        result = repairer.repair_pad_clearance(0.15)
+        repairer.save()
+        assert [f.action for f in result.fixes] == ["removed"]
+        assert _count_fp_lines(path) == 0
+        assert not _silk_pad_findings(path)
+
+    def test_far_segment_untouched(self, clip_pcb):
+        path = clip_pcb(_line(-1.0, 2.0, 1.0, 2.0))
+        before = path.read_text()
+        repairer = SilkscreenRepairer(path)
+        result = repairer.repair_pad_clearance(0.15)
+        assert result.total_fixed == 0
+        assert path.read_text() == before
+
+    def test_dry_run_writes_nothing(self, clip_pcb):
+        path = clip_pcb(_line(-1.5, 0.45, 1.5, 0.45))
+        before = path.read_text()
+        assert main([str(path), "--clip-to-pads", "--dry-run"]) == 0
+        assert path.read_text() == before
+
+    def test_pin1_marker_preserved_and_reported(self, tmp_path):
+        # A U1-style IC with a short bar right next to pad 1 only.
+        text = _clip_board(_line(-0.9, 0.0, -0.9, 0.0)).replace(
+            "Resistor_SMD:R_0402_1005Metric", "Package_SO:SOIC-8"
+        )
+        # Add extra pads so min_pads=3 selects the footprint; marker hugs pad 1.
+        text = text.replace(
+            '(pad "2" smd',
+            '(pad "3" smd roundrect (at 0.51 1.5) (size 0.54 0.64) (layers "F.Cu" "F.Mask" "F.Paste"))\n'
+            '    (pad "2" smd',
+        )
+        marker = _line(-0.51, 0.45, -0.51, 0.8).replace("LAYER", "F.SilkS")
+        text = text.replace('(pad "3"', marker + '\n    (pad "3"', 1)
+        path = tmp_path / "pin1.kicad_pcb"
+        path.write_text(text)
+        repairer = SilkscreenRepairer(path)
+        result = repairer.repair_pad_clearance(0.15)
+        assert result.total_fixed == 0
+        assert [s.reason for s in result.skipped] == ["pin-1 / polarity marker"]
+
+    def test_back_silk_ignores_front_pads(self, clip_pcb):
+        path = clip_pcb(_line(-1.5, 0.45, 1.5, 0.45), layer="B.SilkS")
+        result = SilkscreenRepairer(path).repair_pad_clearance(0.15)
+        assert result.total_fixed == 0
+
+    def test_off_by_default(self, clip_pcb):
+        path = clip_pcb(_line(-1.5, 0.45, 1.5, 0.45))
+        before = path.read_text()
+        assert main([str(path)]) == 0
+        assert path.read_text() == before
+
+    def test_cli_json_lists_edits(self, clip_pcb, capsys):
+        path = clip_pcb(_line(-1.5, 0.45, 1.5, 0.45))
+        assert main([str(path), "--clip-to-pads", "--dry-run", "--format", "json"]) == 0
+        import json
+
+        data = json.loads(capsys.readouterr().out)
+        assert data["total_pad_clearance_fixed"] == 1
+        assert data["pad_clearance_fixes"][0]["footprint_ref"] == "R1"
+
+    def test_rotated_footprint(self, clip_pcb):
+        text = _clip_board(_line(-1.5, 0.45, 1.5, 0.45)).replace("(at 100 100)", "(at 100 100 90)")
+        # pad angles include footprint rotation in the file
+        text = text.replace("(at -0.51 0)", "(at -0.51 0 90)").replace(
+            "(at 0.51 0)", "(at 0.51 0 90)"
+        )
+        path = clip_pcb("")
+        path.write_text(text)
+        repairer = SilkscreenRepairer(path)
+        repairer.repair_pad_clearance(0.15)
+        repairer.save()
+        assert not _silk_pad_findings(path)
