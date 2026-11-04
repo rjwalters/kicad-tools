@@ -616,6 +616,20 @@ def test_attach_zone_waived_when_residual_passes(tmp_path, capsys):
     assert rc == 0
 
 
+@pytest.mark.parametrize("split_x", [None, 111.0, 112.0])
+def test_attach_zone_verdict_independent_of_trace_segmentation(tmp_path, capsys, split_x):
+    """#8303: a straight GND run split into collinear fragments judges as whole."""
+    pcb = _write(
+        tmp_path, board_attach_zone_source(outside_shortfall=False, tail=True, split_x=split_x)
+    )
+    rc = _run(_attach_argv(pcb, _hv_map_file(tmp_path), "--waive-attach-zone"))
+    row = _gnd_row(json.loads(capsys.readouterr().out))
+    assert row["relationship"] == "attach_zone"
+    assert row["waived"] is True
+    assert row["residual_pass"] is True
+    assert rc == 0
+
+
 def test_attach_zone_does_not_mask_shortfall_outside_zone(tmp_path, capsys):
     pcb = _write(tmp_path, board_attach_zone_source(outside_shortfall=True))
     rc = _run(_attach_argv(pcb, _hv_map_file(tmp_path), "--waive-attach-zone"))
