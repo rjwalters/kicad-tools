@@ -276,6 +276,29 @@ def segment_copper_polygon(
     return line.buffer(width / 2)
 
 
+def extends_collinear(
+    prev_start: tuple[float, float],
+    prev_end: tuple[float, float],
+    start: tuple[float, float],
+    end: tuple[float, float],
+    tol: float = 1e-4,
+) -> bool:
+    """True when ``start->end`` continues ``prev_start->prev_end`` as one straight run.
+
+    The single collinearity test behind trace-run fusion (#8277 router, #8303
+    creepage census): the second segment starts at the first one's end (within
+    ``tol``), points the same way, and lies on the first one's line.  Callers
+    own the layer / width / net equality checks, which differ by segment type.
+    """
+    if abs(prev_end[0] - start[0]) > tol or abs(prev_end[1] - start[1]) > tol:
+        return False
+    dx, dy = prev_end[0] - prev_start[0], prev_end[1] - prev_start[1]
+    ex, ey = end[0] - prev_start[0], end[1] - prev_start[1]
+    length = math.hypot(dx, dy)
+    ahead = (end[0] - start[0]) * dx + (end[1] - start[1]) * dy
+    return length > tol and ahead > 0.0 and abs(dx * ey - dy * ex) <= tol * length
+
+
 def point_segment_distance(
     point: tuple[float, float],
     seg_start: tuple[float, float],
