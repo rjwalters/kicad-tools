@@ -55,7 +55,7 @@ def _pad(x, y, net=1, ref="U1", pin="1"):
     return Pad(x=x, y=y, width=0.5, height=0.5, net=net, net_name="N", ref=ref, pin=pin)
 
 
-def test_off_grid_pad_end_joins_pad_centre_without_jog():
+def test_off_grid_pad_end_joins_pad_centre_with_aligned_dogleg():
     pad = _pad(1.03, 1.02)
     jog = Segment(
         x1=1.03, y1=1.02, x2=1.0, y2=1.0, width=0.2, layer=Layer.F_CU, net=1, net_name="N"
@@ -65,7 +65,13 @@ def test_off_grid_pad_end_joins_pad_centre_without_jog():
     merged = _merge_checkpoint_routes([route], _router([route], [pad]))
     first = merged[0].segments[0]
     assert (first.x1, first.y1) == (1.03, 1.02)
-    assert len(merged[0].segments) == 1  # no sub-grid diagonal left
+    # Issue #8296: only the end jog is rewritten (as a 45-aligned dogleg);
+    # the merged run is never re-angled.
+    from kicad_tools.router.quantize import is_45_aligned
+
+    segs = merged[0].segments
+    assert all(is_45_aligned(s.x2 - s.x1, s.y2 - s.y1) for s in segs)
+    assert (segs[-1].x1, segs[-1].y1, segs[-1].x2, segs[-1].y2) == (1.0, 1.0, 5.0, 1.0)
     assert len(route.segments) == 2  # live route untouched
 
 
@@ -80,7 +86,7 @@ def test_pad_join_skipped_when_it_violates_clearance():
         net_name="O",
         segments=[
             Segment(
-                x1=1.5, y1=1.12, x2=2.0, y2=1.12, width=0.2, layer=Layer.F_CU, net=2, net_name="O"
+                x1=1.2, y1=1.12, x2=2.0, y2=1.12, width=0.2, layer=Layer.F_CU, net=2, net_name="O"
             )
         ],
     )
