@@ -746,7 +746,7 @@ def _net_geoms_on_layer(pcb: PCB, layer_name: str) -> dict[int, list[Any]]:
     from shapely.geometry import Point  # type: ignore[import-untyped]
 
     from kicad_tools.core.layers import via_spans_layer
-    from kicad_tools.geometry.copper import segment_copper_polygon
+    from kicad_tools.geometry.copper import extends_collinear, segment_copper_polygon
     from kicad_tools.validate.connectivity import ConnectivityValidator
     from kicad_tools.validate.rules.clearance import _pad_polygon
 
@@ -757,9 +757,24 @@ def _net_geoms_on_layer(pcb: PCB, layer_name: str) -> dict[int, list[Any]]:
             return
         geoms.setdefault(net_number, []).append(geom)
 
-    # Trace segments
+    # Trace segments, with contiguous collinear same-width runs fused into one
+    # capsule first (#8303): the per-item cross terms judge where a pair's
+    # nearest points lie, which must not depend on how a straight trace was
+    # chopped (the router fuses the same way, #8277).
+    runs: list[list[Any]] = []  # [start, end, width, net_number]
     for seg in pcb.segments_on_layer(layer_name):
-        _add(seg.net_number, segment_copper_polygon(seg.start, seg.end, seg.width))
+        if runs:
+            prev = runs[-1]
+            if (
+                prev[2] == seg.width
+                and prev[3] == seg.net_number
+                and extends_collinear(prev[0], prev[1], seg.start, seg.end)
+            ):
+                prev[1] = seg.end
+                continue
+        runs.append([seg.start, seg.end, seg.width, seg.net_number])
+    for start, end, width, net_number in runs:
+        _add(net_number, segment_copper_polygon(start, end, width))
 
     # Pads (true roundrect/oval outline)
     for fp in pcb.footprints:

@@ -1595,6 +1595,8 @@ def _fuse_collinear_runs(segments: Sequence[Segment], tol: float = 1e-4) -> list
     """
     from dataclasses import replace
 
+    from kicad_tools.geometry.copper import extends_collinear
+
     out: list[Segment] = []
     for seg in segments:
         if out:
@@ -1603,16 +1605,12 @@ def _fuse_collinear_runs(segments: Sequence[Segment], tol: float = 1e-4) -> list
                 prev.layer == seg.layer
                 and prev.width == seg.width
                 and prev.net == seg.net
-                and abs(prev.x2 - seg.x1) <= tol
-                and abs(prev.y2 - seg.y1) <= tol
+                and extends_collinear(
+                    (prev.x1, prev.y1), (prev.x2, prev.y2), (seg.x1, seg.y1), (seg.x2, seg.y2), tol
+                )
             ):
-                dx, dy = prev.x2 - prev.x1, prev.y2 - prev.y1
-                ex, ey = seg.x2 - prev.x1, seg.y2 - prev.y1
-                length = math.hypot(dx, dy)
-                ahead = (seg.x2 - seg.x1) * dx + (seg.y2 - seg.y1) * dy
-                if length > tol and ahead > 0.0 and abs(dx * ey - dy * ex) <= tol * length:
-                    out[-1] = replace(prev, x2=seg.x2, y2=seg.y2)
-                    continue
+                out[-1] = replace(prev, x2=seg.x2, y2=seg.y2)
+                continue
         out.append(seg)
     return out
 
