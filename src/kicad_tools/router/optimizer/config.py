@@ -86,6 +86,8 @@ class NetOptimizationStats:
     # Issue #8207: rule id -> violations this net's rewrite introduced (only
     # populated for nets the per-net rollback loop reverted).
     new_violations: dict[str, int] = field(default_factory=dict)
+    # Issue #8299: the net's final geometry differs from the input.
+    changed: bool = False
 
 
 @dataclass

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import fnmatch
 import logging
 import math
 import re
 import tempfile
+from collections import Counter
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
@@ -556,6 +558,27 @@ def _pad_violations_grew(
     return False
 
 
+def _segment_multiset(segs: list[Segment]) -> Counter:
+    """Order- and orientation-insensitive multiset of ``segs`` (Issue #8299).
+
+    Duplicates are counted (not collapsed), so a rewrite that only re-chains,
+    reverses or reorders segments compares equal to its input, while one that
+    drops or adds a segment -- even an exact duplicate -- does not.
+    """
+    keys: Counter = Counter()
+    for seg in segs:
+        p1 = (round(seg.x1, 6), round(seg.y1, 6))
+        p2 = (round(seg.x2, 6), round(seg.y2, 6))
+        a, b = (p1, p2) if p1 <= p2 else (p2, p1)
+        keys[(seg.net, seg.layer, round(seg.width, 6), a, b)] += 1
+    return keys
+
+
+def _same_segments(a: list[Segment], b: list[Segment]) -> bool:
+    """True when ``a`` and ``b`` hold the same segments in any order/orientation."""
+    return a == b or (len(a) == len(b) and _segment_multiset(a) == _segment_multiset(b))
+
+
 def dedupe_segments(segs: list[Segment]) -> tuple[list[Segment], int]:
     """Drop exact-duplicate segments, keeping the first occurrence (Issue #8271).
 
@@ -892,6 +915,7 @@ def optimize_pcb(
     optimize_fn: Callable[[list[Segment]], list[Segment]],
     config: OptimizationConfig,
     net_filter: str | None = None,
+    net_pattern: str | None = None,
     dry_run: bool = False,
     on_net_optimized: Callable[[str, list[Segment], list[Segment]], None] | None = None,
     net_anchors_by_name: dict[str, list[tuple[float, float, tuple[Layer, ...]]]] | None = None,
@@ -915,7 +939,9 @@ def optimize_pcb(
         output_path: Path for output file. If None, modifies in place.
         optimize_fn: Function to optimize a list of segments.
         config: Optimization configuration.
-        net_filter: Only optimize nets matching this pattern.
+        net_filter: Only optimize the net with exactly this name (case-sensitive).
+        net_pattern: Only optimize nets whose name matches this ``fnmatch`` glob
+            (case-sensitive).  Mutually exclusive with ``net_filter`` (Issue #8299).
         dry_run: If True, calculate stats but don't write output.
         on_net_optimized: Optional per-net commit hook, called as
             ``(net_name, original_segments, kept_segments)`` once a net's
@@ -936,9 +962,15 @@ def optimize_pcb(
     segments_by_net = parse_segments(pcb_text)
 
     # Filter nets if requested
+    if net_filter and net_pattern:
+        raise ValueError("net_filter and net_pattern are mutually exclusive")
     if net_filter:
+        segments_by_net = {net: segs for net, segs in segments_by_net.items() if net == net_filter}
+    elif net_pattern:
         segments_by_net = {
-            net: segs for net, segs in segments_by_net.items() if net_filter.lower() in net.lower()
+            net: segs
+            for net, segs in segments_by_net.items()
+            if fnmatch.fnmatchcase(net, net_pattern)
         }
 
     # Calculate before stats
@@ -976,6 +1008,13 @@ def optimize_pcb(
         optimized = kelvin.optimize_net(net, segs, optimize_fn) if kelvin else None
         if optimized is None:
             optimized = optimize_fn(segs)
+        # Issue #8299: ``optimize_segments`` hands the chains back in
+        # ``sort_into_chains`` order/orientation even when no pass fired.
+        # A rewrite that is the same multiset of segments is *no* change:
+        # keep the input verbatim so the net skips the connectivity guard and
+        # dedupe below and is not reported as touched.
+        if optimized != segs and _same_segments(optimized, segs):
+            optimized = segs
         if (
             net_anchors_by_name
             and optimized != segs
@@ -1150,6 +1189,7 @@ def optimize_pcb(
                 length_after=total_length(after_segs),
                 rolled_back=net in rolled_back_nets,
                 new_violations=net_violations.get(net, {}),
+                changed=not _same_segments(after_segs, before_segs),
             )
         )
         if net not in rolled_back_nets and after_segs != before_segs:

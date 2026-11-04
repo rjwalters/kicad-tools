@@ -790,6 +790,7 @@ class TraceOptimizer:
         pcb_path: str,
         output_path: str | None = None,
         net_filter: str | None = None,
+        net_pattern: str | None = None,
         dry_run: bool = False,
         on_net_optimized: Callable[[str, list[Segment], list[Segment]], None] | None = None,
         net_anchors_by_name: dict[str, list] | None = None,
@@ -799,7 +800,8 @@ class TraceOptimizer:
         Args:
             pcb_path: Path to input .kicad_pcb file.
             output_path: Path for output file. If None, modifies in place.
-            net_filter: Only optimize nets matching this pattern.
+            net_filter: Only optimize the net with exactly this name.
+            net_pattern: Only optimize nets matching this ``fnmatch`` glob.
             dry_run: If True, calculate stats but don't write output.
             on_net_optimized: Per-net commit hook; see :func:`optimize_pcb`.
 
@@ -812,6 +814,7 @@ class TraceOptimizer:
             optimize_fn=self.optimize_segments,
             config=self.config,
             net_filter=net_filter,
+            net_pattern=net_pattern,
             dry_run=dry_run,
             on_net_optimized=on_net_optimized,
             net_anchors_by_name=net_anchors_by_name,
