@@ -33,6 +33,7 @@ from kicad_tools.creepage.engine import (
 from .fixtures import (
     board_mains_named_source,
     board_no_hv_source,
+    board_same_footprint_attach_residual_source,
     board_same_footprint_fail_source,
     board_same_footprint_hides_board_source,
     board_same_footprint_only_source,
@@ -1160,6 +1161,35 @@ def test_bridging_stub_at_30_degrees_and_two_bar_neck():
     a, b = box(-4, -3, -3.5, -2.5), box(3.5, -3, 4, -2.5)
     c1 = surface_path_length(a, b, obstacles=[neck], dimension_x_mm=1.0)[1]
     assert c1 <= _disc_opening_len(a, b, neck, 1.0) + 1e-3
+
+
+# ---------------------------------------------------------------------------
+# #8332: the #8232 residual ``board`` row gets attach-zone classification
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("jog", [False, True])
+def test_same_footprint_residual_row_in_attach_zone_is_classified(tmp_path, jog):
+    from kicad_tools.router.pairwise_clearance import build_attach_zones
+
+    pcb = _load(tmp_path, board_same_footprint_attach_residual_source(jog=jog))
+    hv = resolve_hv_nets(pcb, "HV", _hv_map())
+    plain = compute_creepage_census(pcb, hv, min_mm=1.0)
+    zoned = compute_creepage_census(
+        pcb, hv, min_mm=1.0, attach_zones=build_attach_zones(pcb.footprints)
+    )
+    gnd_plain = [p for p in plain.pairs if p.kind == "conductor" and p.net_b == "GND"]
+    gnd_zoned = [p for p in zoned.pairs if p.kind == "conductor" and p.net_b == "GND"]
+    assert [p.relationship for p in gnd_plain] == ["same_footprint", "board"]
+    # Without zones the residual row stays a plain board row (unchanged behaviour).
+    assert gnd_plain[1].residual_creepage_mm is None
+    # With zones the residual row is classified like a primary board minimum.
+    assert [p.relationship for p in gnd_zoned] == ["same_footprint", "attach_zone"]
+    row = gnd_zoned[1]
+    # Raw measurement is identical; only the classification differs.
+    assert row.creepage_mm == pytest.approx(gnd_plain[1].creepage_mm)
+    assert row.residual_layer is None or isinstance(row.residual_layer, str)
+    assert row.residual_creepage_mm is None  # all copper is inside the zone
 
 
 # ---------------------------------------------------------------------------

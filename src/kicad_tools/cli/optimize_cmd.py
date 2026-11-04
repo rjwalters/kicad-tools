@@ -259,6 +259,19 @@ def _seg_key(seg) -> tuple:
     return (seg.x1, seg.y1, seg.x2, seg.y2, seg.width, seg.layer, seg.net)
 
 
+def _creepage_keys(args, stats) -> dict:
+    """The ``--voltage-map`` JSON keys (Issue #8300); empty without the flag."""
+    if args.voltage_map is None:
+        return {}
+    return {
+        "voltage_map": args.voltage_map,
+        "creepage_skipped": [
+            {"net_a": a, "net_b": b, "count": n}
+            for (a, b), n in sorted(stats.creepage_skips.items())
+        ],
+    }
+
+
 def _make_grid_synced_optimize_fn(router, optimizer):
     """Return ``(optimize, commit)`` wrapping ``optimizer.optimize_segments``.
 
@@ -441,6 +454,49 @@ Examples:
         default=1.0,
         help="Copper weight in oz for DRC checks (default: 1.0)",
     )
+
+    # HV creepage inputs (Issue #8300): same flags/defaults as ``kct route``.
+    parser.add_argument(
+        "--voltage-map",
+        dest="voltage_map",
+        default=None,
+        metavar="FILE",
+        help=(
+            "JSON per-net voltage map (same format and semantics as kct route). "
+            "A candidate edit that would bring a net pair below its pairwise "
+            "creepage requirement is rejected on its own; other edits on the "
+            "net are still applied. Absent, behaviour is unchanged"
+        ),
+    )
+    parser.add_argument(
+        "--creepage-standard",
+        dest="creepage_standard",
+        choices=["iec60664", "iec62368"],
+        default="iec60664",
+        help="Creepage standard for --voltage-map (default: iec60664)",
+    )
+    parser.add_argument(
+        "--pollution-degree",
+        dest="pollution_degree",
+        type=int,
+        choices=[1, 2, 3],
+        default=2,
+        help="IEC pollution degree for --voltage-map (default: 2)",
+    )
+    parser.add_argument(
+        "--material-group",
+        dest="material_group",
+        default="IIIa",
+        help="Insulation material group I/II/IIIa/IIIb for --voltage-map (default: IIIa)",
+    )
+    parser.add_argument(
+        "--hv-threshold",
+        dest="hv_threshold",
+        type=float,
+        default=30.0,
+        metavar="VOLTS",
+        help="Minimum net-pair |dV| that triggers creepage widening (default: 30.0)",
+    )
     add_format_flag(parser)
 
     args = parser.parse_args(argv)
@@ -470,6 +526,30 @@ Examples:
                 str(pcb_path),
                 f"Unknown manufacturer '{args.mfr}'. Valid options: {', '.join(valid_ids)}",
             )
+
+    # Issue #8300: validate --voltage-map before any board work, with the same
+    # messages and exit code as ``kct route``.  Its errors go to stderr as
+    # prose; JSON mode additionally owns stdout, so report a document there.
+    if args.voltage_map is not None:
+        import contextlib
+        import io
+
+        from kicad_tools.cli.route_cmd import _preload_voltage_map
+
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = _preload_voltage_map(args)
+        if rc != 0:
+            msg = err.getvalue().strip()
+            if as_json:
+                return _fail(True, str(pcb_path), msg.removeprefix("Error: "))
+            print(msg, file=sys.stderr)
+            return rc
+        if err.getvalue():  # warnings (e.g. unmapped pair-bound nets)
+            print(err.getvalue(), end="", file=sys.stderr)
+    else:
+        args._pairwise_voltages = None
+        args._pairwise_required = None
 
     # Import here to avoid circular imports
     from kicad_tools.cli.progress import spinner
@@ -510,6 +590,53 @@ Examples:
             str(pcb_path),
             f"cannot build collision checker for {pcb_path}: {e}",
         )
+
+    # Issue #8300: AND the --voltage-map pairwise requirement onto the checker
+    # so each candidate edit is vetted individually.  Dormant (checker
+    # untouched) without a voltage map or when it widens no pair.
+    pairwise_checker = None
+    if args.voltage_map is not None:
+        from kicad_tools.cli.route_cmd import _apply_pairwise_clearance
+        from kicad_tools.router.optimizer.collision import PairwiseCollisionChecker
+        from kicad_tools.router.pairwise_clearance import PairwisePathChecker
+
+        _apply_pairwise_clearance(router, args, quiet=True)
+        if not args.quiet:
+            # Pairs below --hv-threshold keep the DRU floor here, as in
+            # ``kct route``; name them on stderr (stdout may be a JSON doc).
+            from kicad_tools.cli.route_cmd import _warn_subthreshold_coverage_gap
+
+            with contextlib.redirect_stdout(sys.stderr):
+                _warn_subthreshold_coverage_gap(
+                    args, args._pairwise_voltages, float(router.rules.trace_clearance)
+                )
+        path_checker = PairwisePathChecker.from_router(router)
+        if path_checker is not None:
+            # Moved traces must also clear foreign PAD copper (the #4507
+            # audit's trace-vs-pad walk, same attach-zone exemption).  Pads
+            # that are unreadable fail closed: a pad-blind check would pass
+            # the edits the audit then flags.
+            import dataclasses
+
+            from kicad_tools.cli.route_cmd import (
+                _pairwise_pad_geometry,
+                _pairwise_pad_geometry_reason,
+            )
+            from kicad_tools.router.pairwise_clearance import normalize_net_key
+
+            pads = _pairwise_pad_geometry(router)
+            if pads is None:
+                return _fail(
+                    as_json,
+                    str(pcb_path),
+                    "--voltage-map: cannot check edits against pad copper: "
+                    + (_pairwise_pad_geometry_reason(router) or "pad geometry unavailable"),
+                )
+            hv_nets = {n for pair in path_checker.table.required_by_pair for n in pair}
+            pads = tuple(p for p in pads if normalize_net_key(p.net_name) in hv_nets)
+            path_checker = dataclasses.replace(path_checker, foreign_pads=pads)
+            pairwise_checker = PairwiseCollisionChecker(checker, path_checker)
+            checker = pairwise_checker
 
     # Issue #8217: the detour pass needs every same-net pad/via of the loaded
     # board (the checker ignores same-net copper); length-matched nets are
@@ -613,6 +740,9 @@ Examples:
             text=f"Error during optimization: {e}",
         )
 
+    if pairwise_checker is not None:
+        stats.creepage_skips = dict(pairwise_checker.skips)
+
     # Issue #8286: the rewrite moved copper but the board still carries the
     # zone fills it was read with; ``kct check`` reads stored fills, so refill
     # once, after the final write, through the shared kicad-cli path.
@@ -711,6 +841,8 @@ Examples:
                 "zones_refill_error": refill_error,
                 "kicad_cli_drc": cli_drc,
                 "success": True,
+                # Issue #8300: only present with --voltage-map.
+                **_creepage_keys(args, stats),
             }
         )
         return exit_code
@@ -797,6 +929,11 @@ Examples:
             elif cli_drc:
                 why = f" ({cli_drc['reason']})" if cli_drc["reason"] else ""
                 print(f"  kicad-cli clearance cross-check unavailable{why}")
+        if args.voltage_map is not None:
+            total = sum(stats.creepage_skips.values())
+            print(f"  Edits skipped for creepage: {total}")
+            for (a, b), count in sorted(stats.creepage_skips.items()):
+                print(f"    {a} / {b}: {count}")
         print()
 
         touched = [n.net for n in stats.per_net if n.changed]

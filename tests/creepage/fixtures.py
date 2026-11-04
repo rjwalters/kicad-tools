@@ -393,3 +393,28 @@ def board_attach_zone_source(*, outside_shortfall: bool, edge_via: bool = False)
         parts.append(_footprint2("P4", 130, 111.4, [("1", 2, "GND", 0, 0)]))
     parts.append(")\n")
     return "".join(parts)
+
+
+def board_same_footprint_attach_residual_source(*, jog: bool) -> str:
+    """Same-footprint pair whose #8232 residual witness lies in an attach zone (#8332).
+
+    ``R1`` holds an ``L_MAINS`` pad and a ``GND`` pad 0.4 mm apart (the
+    ``same_footprint`` minimum).  A ``GND`` trace leaves the GND pad.  With the
+    GND pad masked, the nearest remaining GND copper is that trace where it
+    leaves the pad -- wholly inside R1's #4506 zone.  ``jog`` moves the trace
+    onto a different exit path (mimicking ``optimize-traces`` straightening a
+    jog); the witness stays in the zone either way.
+    """
+    parts = [_SAMEFP_HEADER, _OUTLINE]
+    parts.append(_footprint2("R1", 110, 110, [("1", 1, "L_MAINS", 0, 0), ("2", 2, "GND", 0, 1.0)]))
+    if jog:
+        parts.append(
+            '  (segment (start 110 111) (end 110.6 111) (width 0.25) (layer "F.Cu") (net 2))\n'
+            '  (segment (start 110.6 111) (end 110.6 112.5) (width 0.25) (layer "F.Cu") (net 2))\n'
+        )
+    else:
+        parts.append(
+            '  (segment (start 110 111) (end 110 112.5) (width 0.25) (layer "F.Cu") (net 2))\n'
+        )
+    parts.append(")\n")
+    return "".join(parts)
