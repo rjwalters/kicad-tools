@@ -426,3 +426,81 @@ def test_copper_arc_touching_a_detour_keeps_it(tmp_path):
     q.write_text(body.split("  (arc ")[0] + ")\n")
     pcb2, _res2 = _run(q)
     assert not _has_detour(pcb2)
+
+
+# ---------------------------------------------------------------------------
+# Issue #8323: the DRC referee must honour the board's own .kicad_dru
+# ---------------------------------------------------------------------------
+
+
+def _hv_board(tmp_path: Path, name: str = "hv") -> Path:
+    """Net HV track with an off-centre end beside its via, plus a SIG via.
+
+    The HV track is snapped onto its via centre by prune.  A custom DRU rule
+    (see ``_DRU``) governs the HV/SIG clearance.
+    """
+    header = HEADER.replace('(net 1 "SIG")', '(net 1 "SIG")\n  (net 2 "HV")')
+    pad = (
+        '  (footprint "X:P" (layer "F.Cu") (uuid "f-{r}") (at {x} 100)\n'
+        '    (property "Reference" "{r}" (at 0 0 0) (layer "F.SilkS"))\n'
+        '    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 2 "HV"))\n  )\n'
+    )
+    body = header + pad.format(r="A", x=100) + pad.format(r="B", x=110)
+    body += (
+        '  (segment (start 100 100) (end 104.8 100) (width 0.2) (layer "F.Cu") (net 2) '
+        '(uuid "s-hv1"))\n'
+        '  (segment (start 110 100) (end 105.2 100) (width 0.2) (layer "F.Cu") (net 2) '
+        '(uuid "s-hv2"))\n'
+        '  (via (at 105 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) '
+        '(uuid "v-hv"))\n'
+        '  (via (at 103 98) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) '
+        '(uuid "v-sig"))\n)\n'
+    )
+    p = tmp_path / f"{name}.kicad_pcb"
+    p.write_text(body)
+    return p
+
+
+_DRU = '(version 1)\n(rule "Reviewed clearance - HV" (constraint clearance (min 0.4mm)))\n'
+
+
+def test_worse_distinguishes_rule_and_nets_not_only_type():
+    from collections import Counter
+
+    from kicad_tools.pcb_prune import _worse
+
+    before = Counter({("clearance", "error", "default", ("A", "B")): 1})
+    swapped = Counter({("clearance", "error", "Reviewed clearance - HV", ("A", "B")): 1})
+    assert _worse(swapped, before)
+    assert not _worse(before, before)
+
+
+def test_missing_dru_is_reported_in_drc_note(tmp_path):
+    from kicad_tools.cli.runner import find_kicad_cli
+
+    if find_kicad_cli() is None:
+        pytest.skip("kicad-cli not available")
+    _, res = prune_board(_hv_board(tmp_path))
+    assert res.drc_verified
+    assert "hv.kicad_dru" in res.drc_note
+    assert "custom clearances were NOT evaluated" in res.drc_note
+
+
+def test_dru_present_is_not_flagged_and_output_has_no_new_error(tmp_path):
+    from kicad_tools.cli.runner import find_kicad_cli
+    from kicad_tools.pcb_prune import _drc_signature
+
+    if find_kicad_cli() is None:
+        pytest.skip("kicad-cli not available")
+    p = _hv_board(tmp_path)
+    p.with_suffix(".kicad_dru").write_text(_DRU)
+    pcb, res = prune_board(p)
+    assert res.drc_verified
+    assert "hv.kicad_dru" not in res.drc_note
+    out = tmp_path / "out" / "hv.kicad_pcb"
+    out.parent.mkdir()
+    pcb.save(out)
+    out.with_suffix(".kicad_dru").write_text(_DRU)
+    before, after = _drc_signature(p), _drc_signature(out)
+    assert before is not None and after is not None
+    assert not any(after[k] > before[k] for k in after if k[1] == "error")
