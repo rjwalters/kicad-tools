@@ -28,6 +28,9 @@ HEADER = """\
 
 # GND / PGND: two collinear segments each (merge candidates).
 # +3.3V: a staircase of alternating H / diagonal steps plus a detour chain.
+# SIG: the board 05 failure shape -- file order is not chain order, s2 is
+# reversed, and s1dup is an exact duplicate of s1. With every pass off the
+# output must keep all four segments (a set comparison would drop s1dup).
 SEGS = """\
 \t(segment (start 10 10) (end 20 10) (width 0.25) (layer "F.Cu") (net 1) (uuid "g1"))
 \t(segment (start 20 10) (end 30 10) (width 0.25) (layer "F.Cu") (net 1) (uuid "g2"))
@@ -40,6 +43,10 @@ SEGS = """\
 \t(segment (start 16 42) (end 18 42) (width 0.25) (layer "F.Cu") (net 3) (uuid "v5"))
 \t(segment (start 18 42) (end 18 45) (width 0.25) (layer "F.Cu") (net 3) (uuid "v6"))
 \t(segment (start 18 45) (end 22 45) (width 0.25) (layer "F.Cu") (net 3) (uuid "v7"))
+	(segment (start 40 52) (end 40 50) (width 0.25) (layer "F.Cu") (net 4) (uuid "s3"))
+	(segment (start 30 50) (end 35 50) (width 0.25) (layer "F.Cu") (net 4) (uuid "s1"))
+	(segment (start 40 50) (end 35 50) (width 0.25) (layer "F.Cu") (net 4) (uuid "s2"))
+	(segment (start 30 50) (end 35 50) (width 0.25) (layer "F.Cu") (net 4) (uuid "s1dup"))
 )
 """
 
