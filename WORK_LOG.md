@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-04
 
+- **PR #8350**: fix: exempt dangling and unconnected growth from strip DRC gate
+- **Issue #8347** (closed): kct pcb strip --from-report DRC gate rejects clearance fixes because dangling warnings count as worse
 - **PR #8345**: feat: gate each kct route-link commit with per-link DRC and creepage rollback
 - **PR #8257**: ci: provision jlcparts catalog for board 05, re-pin board 02/03 baselines
 - **Issue #8314** (closed): route-link: per-link DRC + creepage gating with single-link rollback
