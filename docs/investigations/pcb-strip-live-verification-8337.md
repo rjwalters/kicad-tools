@@ -5,7 +5,11 @@ Measured on `main` @ `8b944ab44`, 2026-11-04, kicad-cli 10.0.6 from
 (pinned image `kicad/kicad@sha256:18693567...dd3ec`, `Evidence toolchain: ok`).
 Board: `boards/05-bldc-motor-controller/regression-fixture/bldc_controller_routed.kicad_pcb`
 (11 `clearance` errors). Scratch copy only; no committed board was modified.
-The DRC rows below come from `kicad-cli pcb drc --refill-zones --format json`.
+The DRC rows below come from `kicad-cli pcb drc --refill-zones --format json`,
+run through the pinned-image kicad-cli shim that the `kicad_toolchain --check`
+evidence wrapper provides (not a bare host `kicad-cli`). The board's only
+footprint-library finding is `lib_footprint_mismatch`, so the #6962
+`lib_footprint_issues` refusal was not hit.
 
 ## Outcome: two modes verified working, one measured refutation, two defects filed
 
@@ -24,7 +28,7 @@ The DRC rows below come from `kicad-cli pcb drc --refill-zones --format json`.
 | track_dangling | 3 | 6 | 0 | 2 |
 | unconnected | 57 | 61 | 57 | 61 |
 | annular_width | 11 | 11 | 10 | 10 |
-| track_width / silk_* / lib_footprint_issues | unchanged | unchanged | unchanged | unchanged |
+| track_width / silk_* / lib_footprint_mismatch (55) | unchanged | unchanged | unchanged | unchanged |
 
 The "cut" board was produced by applying `plan_from_report` through the Python
 API and `PCB.save`, because the CLI refused to write it (see above).
@@ -33,6 +37,7 @@ API and `PCB.save`, because the CLI refused to write it (see above).
 
 ```bash
 export KCT_KICAD_DOCKER=1
+# `kicad-cli` below = the pinned-image shim from the evidence toolchain, on PATH
 kicad-cli pcb drc --refill-zones --format json -o drc.json bldc.kicad_pcb
 kct pcb strip bldc.kicad_pcb --from-report drc.json -o cut.kicad_pcb
 #   -> "Refusing to write: kicad-cli --refill-zones DRC reports NEW violations" (rc=1)
