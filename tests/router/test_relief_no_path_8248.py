@@ -551,3 +551,130 @@ def test_unripped_copper_sharing_the_blockers_clearance_is_measured():
     )
     assert "freed >= 0.600 mm" in line, line
     assert "re-occupied since the rip by Net_7" in line, line
+
+
+# --- Issue #8295: indexed source-5 scan and overlap wording -----------------
+
+
+class _BruteIndex:
+    """Reference index: every blocker segment is a candidate (linear scan)."""
+
+    def __init__(self, segs, reach):
+        self._segs = segs
+
+    def candidates(self, *_args):
+        return list(self._segs)
+
+
+def _via_route(x, y, net=9):
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Route, Via
+
+    return Route(
+        net=net,
+        net_name=f"N{net}",
+        vias=[Via(x=x, y=y, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=net)],
+    )
+
+
+def _pad(num, x, y, net):
+    return {
+        "number": str(num),
+        "x": x,
+        "y": y,
+        "width": 0.4,
+        "height": 0.4,
+        "net": net,
+        "net_name": f"N{net}",
+    }
+
+
+def test_negative_gap_wording_has_no_measured_gap_prefix():
+    blocker = [_seg(0, 0, 5, 0, width=0.2, net=2)]
+
+    router = _sealed_router()
+    router.add_component("U9", [_pad(7, 2.0, 0.1, 8)])
+    line = router._relief_corridor_need(1, {2: blocker}, {})
+    assert "ripped N2 overlaps pad U9.7 (N8)" in line, line
+    assert "measured gap to" not in line, line
+
+    router = _sealed_router()
+    router.routes.append(_seg(0, 0.1, 5, 0.1, width=0.2, net=7))
+    line = router._relief_corridor_need(1, {2: blocker}, {})
+    assert "ripped N2 overlaps Net_7 copper" in line, line
+    assert "measured gap to" not in line, line
+
+    router = _sealed_router()
+    router.routes.append(_via_route(2.0, 0.1))
+    line = router._relief_corridor_need(1, {2: blocker}, {})
+    assert "ripped N2 overlaps Net_9 via" in line, line
+    assert "measured gap to" not in line, line
+
+    router = _sealed_router()
+    router._edge_segments = [((0.0, 0.0), (5.0, 0.0))]
+    line = router._relief_corridor_need(1, {2: blocker}, {})
+    assert "ripped N2 overlaps the board edge" in line, line
+    assert "measured gap to" not in line, line
+
+
+def _board_spanning_router():
+    """3,000 route segs and 400 pads scattered over a 200 mm board."""
+    router = _sealed_router()
+    for i in range(3000):
+        x, y = (i % 60) * 3.3, (i // 60) * 4.0
+        router.routes.append(_seg(x, y, x + 1.0, y + 0.5, width=0.1, net=7 + i % 3))
+    router.add_component(
+        "U8", [_pad(i, 1.0 + (i % 20) * 10.0, 2.0 + (i // 20) * 9.7, 8) for i in range(400)]
+    )
+    return router
+
+
+def _spanning_blocker():
+    """150-segment chain whose bounding box covers the whole 200 mm board."""
+    return [
+        _seg(i * 1.3, i * 1.3, (i + 1) * 1.3, (i + 1) * 1.3 + 0.1, width=0.2, net=2).segments[0]
+        for i in range(150)
+    ]
+
+
+def test_board_spanning_blocker_scan_is_fast_and_matches_linear_scan():
+    import time
+
+    router = _board_spanning_router()
+    blocker = _spanning_blocker()
+
+    start = time.perf_counter()
+    fast = router._relief_blocker_min_clearance(
+        2, blocker, 1, {2}, set(), _resolver(router), _kind()
+    )
+    elapsed = time.perf_counter() - start
+
+    with patch("kicad_tools.router.core._BlockerSegIndex", _BruteIndex):
+        brute = router._relief_blocker_min_clearance(
+            2, blocker, 1, {2}, set(), _resolver(router), _kind()
+        )
+    assert fast == brute
+    assert elapsed < 0.1, f"indexed scan took {elapsed:.3f}s"
+
+
+def test_single_segment_blocker_and_cell_boundary_match_linear_scan():
+    for x in (2.0, 4.0, 4.0 + 1e-12):  # on / next to a cell boundary
+        router = _sealed_router()
+        router.add_component("U9", [_pad(7, x, 0.45, 8)])
+        router.routes.append(_via_route(x, -0.4))
+        blocker = [_seg(0, 0, 5, 0, width=0.2, net=2).segments[0]]
+        args = (2, blocker, 1, {2}, set(), _resolver(router), _kind())
+        fast = router._relief_blocker_min_clearance(*args)
+        with patch("kicad_tools.router.core._BlockerSegIndex", _BruteIndex):
+            assert router._relief_blocker_min_clearance(*args) == fast
+        assert isinstance(fast, tuple)
+
+
+def _resolver(router):
+    return router.rules.clearance_resolver(router.net_class_map)
+
+
+def _kind():
+    from kicad_tools.router.clearance_resolver import CopperKind
+
+    return CopperKind
