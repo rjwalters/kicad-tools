@@ -501,17 +501,42 @@ def test_declared_net_single_pad_loop_is_kept(tmp_path):
     assert res.stats["segments_removed"] == 0
 
 
+_VIA_LOOP_SEGS = [
+    ((100, 100), (100, 103), "F.Cu", 0.6),
+    ((100, 103), (110, 103), "F.Cu", 0.6),
+    ((110, 103), (110, 100), "F.Cu", 0.6),
+    ((100, 100), (102, 100), "F.Cu", 0.2),
+    ((102, 100), (108, 100), "B.Cu", 0.2),
+    ((108, 100), (110, 100), "F.Cu", 0.2),
+]
+
+
 def test_declared_net_single_pad_via_loop_is_kept(tmp_path):
-    segs = [
-        ((100, 100), (100, 103), "F.Cu", 0.6),
-        ((100, 103), (110, 103), "F.Cu", 0.6),
-        ((110, 103), (110, 100), "F.Cu", 0.6),
-        ((100, 100), (102, 100), "F.Cu", 0.2),
-        ((102, 100), (108, 100), "B.Cu", 0.2),
-        ((108, 100), (110, 100), "F.Cu", 0.2),
+    # wide=1.0 > the 0.6 trunk, so every segment is a cut candidate; only the
+    # two-terminal guard keeps the copper (fails if the guard is reverted).
+    p = _board(tmp_path, [("A", 100, 100)], _VIA_LOOP_SEGS, vias=[(102, 100), (108, 100)])
+    pcb, res = prune_board(p, verify_drc=False, declared_nets={"SIG"}, wide=1.0)
+    assert len(pcb.segments) == 6
+    assert len(pcb.vias) == 2
+    assert res.stats["segments_removed"] == 0
+
+
+def test_declared_net_zero_pad_loop_is_kept(tmp_path):
+    loop = [
+        ((100, 100), (105, 100)),
+        ((105, 100), (105, 105)),
+        ((105, 105), (100, 105)),
+        ((100, 105), (100, 100)),
     ]
-    p = _board(tmp_path, [("A", 100, 100)], segs, vias=[(102, 100), (108, 100)])
+    p = _board(tmp_path, [], loop)
     pcb, res = prune_board(p, verify_drc=False, declared_nets={"SIG"}, wide=0.5)
+    assert len(pcb.segments) == 4
+    assert res.stats["segments_removed"] == 0
+
+
+def test_declared_net_zero_pad_via_loop_is_kept(tmp_path):
+    p = _board(tmp_path, [], _VIA_LOOP_SEGS, vias=[(102, 100), (108, 100)])
+    pcb, res = prune_board(p, verify_drc=False, declared_nets={"SIG"}, wide=1.0)
     assert len(pcb.segments) == 6
     assert len(pcb.vias) == 2
     assert res.stats["segments_removed"] == 0
