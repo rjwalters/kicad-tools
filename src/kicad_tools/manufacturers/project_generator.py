@@ -1400,6 +1400,34 @@ def _warn_if_smd_pad_clearance_is_inert(rules: DesignRules, dru_path: Path) -> N
     )
 
 
+def dedupe_net_classes(
+    net_class_map: Mapping[str, NetClassRouting] | None,
+) -> list[NetClassRouting] | None:
+    """Collapse a board-net -> class map into one entry per class (#8393).
+
+    ``net_class_map`` is keyed by board-net name with the same class shared
+    across every net in that class (a ``--net-class-map`` sidecar
+    deserializes a distinct-but-same-``name`` object per net).  Feeding
+    ``.values()`` straight to ``generate_dru`` would emit one ampacity rule
+    pair per NET instead of per class (#4375), so dedup on ``.name`` --
+    identity-based dedup would not collapse the per-net objects -- keeping
+    first-seen order for deterministic output.
+
+    Shared by ``kct check --emit-dru`` and ``kct export`` so both write the
+    same net-class-derived rules.  Returns ``None`` for an empty/absent map.
+    """
+    if not net_class_map:
+        return None
+    seen: set[str] = set()
+    classes: list[NetClassRouting] = []
+    for nc in net_class_map.values():
+        if nc.name in seen:
+            continue
+        seen.add(nc.name)
+        classes.append(nc)
+    return classes
+
+
 def write_drc_constraints(
     pcb_path: str | Path,
     rules: DesignRules,

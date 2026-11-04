@@ -971,6 +971,8 @@ class ManufacturingPackage:
             else:
                 logger.info(fab_override_msg)
 
+        net_classes = self._load_net_classes(result)
+
         try:
             written = write_drc_constraints(
                 self.pcb_path,
@@ -978,6 +980,7 @@ class ManufacturingPackage:
                 manufacturer_id=profile.id,
                 layers=layers,
                 copper_oz=copper_oz,
+                net_classes=net_classes,
             )
         except OSError as e:
             logger.warning("Could not write DRC-constraint files: %s", e)
@@ -985,6 +988,38 @@ class ManufacturingPackage:
             return
 
         result.drc_constraint_paths = written
+
+    def _load_net_classes(self, result: ManufacturingResult) -> list | None:
+        """Load the board's net-class-map sidecar as deduped classes (#8393).
+
+        Mirrors ``kct check --emit-dru`` (same probe order, same loader,
+        same dedup) so the exported ``.kicad_dru`` keeps the ampacity
+        ``track_width`` floors that build-time DRC checked.  Returns
+        ``None`` when there is no sidecar or it is malformed (warned).
+        """
+        from ..cli.check_cmd import (
+            _discover_net_class_map_sidecar,
+            resolve_net_class_map_for_board,
+        )
+        from ..manufacturers.project_generator import dedupe_net_classes
+
+        ncm_path = _discover_net_class_map_sidecar(Path(self.pcb_path))
+        if ncm_path is None:
+            return None
+        try:
+            from ..router.rules import net_class_map_from_path
+            from ..schema.pcb import PCB
+
+            net_class_map = net_class_map_from_path(ncm_path, pcb_path=self.pcb_path)
+            net_class_map, _ = resolve_net_class_map_for_board(
+                net_class_map, PCB.load(str(self.pcb_path))
+            )
+        except Exception as e:
+            msg = f"ignoring malformed net-class-map sidecar {ncm_path}: {e}"
+            logger.warning(msg)
+            result.warnings.append(msg)
+            return None
+        return dedupe_net_classes(net_class_map)
 
     def _resolve_ordered_copper(self, result: ManufacturingResult) -> None:
         """Record the outer/inner copper weight the order requests (#7209).
