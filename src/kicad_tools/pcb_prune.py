@@ -1031,7 +1031,10 @@ def _plan_net(
     removed: set[int] = set()
     seg_ids = [i for i, n in enumerate(model.nodes) if n.kind == "seg"]
 
-    if declared and model.has_cycle():
+    # The declared-net pass shares the partition baseline, so it needs the same
+    # two-terminal floor as the generic pass below (Issue #8333): with fewer
+    # terminals the guard is vacuous and every loop would be deleted.
+    if declared and len(model.terminals) >= 2 and model.has_cycle():
         _plan_declared_loops(model, plan, removed, baseline, wide)
 
     # A net with fewer than two terminals has at most one partition group, so
