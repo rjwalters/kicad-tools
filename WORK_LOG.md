@@ -15,6 +15,12 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-04
 
+- **PR #8334**: fix: skip prune loop removal on nets with fewer than two terminals
+- **PR #8326**: fix: cross-check optimize-traces --drc-aware against kicad-cli before/after
+- **PR #8306**: feat: add closest-point witness to kct creepage rows
+- **Issue #8333** (closed): pcb prune: loop removal deletes all copper on a single-pad net
+- **Issue #8322** (closed): optimize-traces --drc-aware reports "no regressions" while kicad-cli (project DRU) finds 1→17 clearance errors and creepage 4→33
+- **Issue #8301** (closed): kct creepage: report a location witness (closest points + items) for every pair row, including board rows
 - **PR #8329**: fix: straighten pad-entry jogs and match gate pad-touch radius to component labels
 - **PR #8315**: feat: add report-driven rip-up and dangling removal to pcb strip
 - **PR #8305**: fix: keep safe optimize edits per region, straighten pad-entry jogs, model body joins in prune
