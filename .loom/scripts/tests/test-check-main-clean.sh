@@ -503,6 +503,45 @@ else
     fail "expected 2, got $RC"
 fi
 
+# -------- Test 24b: --quarantine without a usable baseline refuses (#13535) --------
+echo "Test 24b: --quarantine with no/missing baseline refuses, stashes nothing (exit 3)"
+for variant in none missing; do
+    REPO=$(make_repo_with_source)
+    printf 'operator design\n' > "$REPO/operator_design.md"
+    BEFORE=$(git -C "$REPO" stash list | wc -l)
+    LOGF="$REPO/q.log"
+    if [[ "$variant" == "none" ]]; then
+        out=$( cd "$REPO" && "$SCRIPT" --quarantine --log "$LOGF" 2>&1 ); RC=$?
+    else
+        out=$( cd "$REPO" && "$SCRIPT" --baseline "$REPO/nope.txt" --quarantine --log "$LOGF" 2>&1 ); RC=$?
+    fi
+    AFTER=$(git -C "$REPO" stash list | wc -l)
+    if [[ "$RC" -eq 3 && "$BEFORE" -eq "$AFTER" && -f "$REPO/operator_design.md" ]] \
+       && grep -q 'operator_design.md' <<<"$out" && grep -q refused_no_baseline "$LOGF"; then
+        pass "refused ($variant): exit 3, no stash, file kept, path listed, logged"
+    else
+        fail "refusal ($variant) wrong: rc=$RC stashes $BEFORE->$AFTER out=$out"
+    fi
+done
+
+# -------- Test 24c: --allow-no-baseline restores include-everything; report lists paths --------
+echo "Test 24c: --allow-no-baseline quarantines (exit 4) and the report names paths + restore"
+REPO=$(make_repo_with_source)
+printf 'x\n' > "$REPO/operator_design.md"
+out=$( cd "$REPO" && "$SCRIPT" --quarantine --allow-no-baseline 2>&1 ); RC=$?
+if [[ "$RC" -eq 4 && ! -e "$REPO/operator_design.md" ]] \
+   && grep -q 'operator_design.md' <<<"$out" && grep -q 'stash pop' <<<"$out"; then
+    pass "--allow-no-baseline quarantined; report lists path and stash pop"
+else
+    fail "expected exit 4 with path + stash pop in report; rc=$RC out=$out"
+fi
+
+# -------- Test 24d: clean main with no baseline still exits 0 --------
+echo "Test 24d: --quarantine on clean main without baseline exits 0"
+REPO=$(make_repo_with_source)
+( cd "$REPO" && "$SCRIPT" --quarantine >/dev/null 2>&1 ); RC=$?
+if [[ "$RC" -eq 0 ]]; then pass "clean main, no baseline: exit 0"; else fail "expected 0, got $RC"; fi
+
 # -------- Test 25: detection-only mode still exits 3 and forbids piecemeal restore --------
 echo "Test 25: without --quarantine, detection stays a hard-fail (exit 3)"
 echo "leak" > "$REPO/leaked.txt"

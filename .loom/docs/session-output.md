@@ -207,7 +207,7 @@ out instead of keeping a healthy run's p95 red forever.
 ### Querying end-to-end latency
 
 In SigNoz (ClickHouse `signoz_logs`), use `inserted_at_unix_milli` — the backend's
-**own insert clock** (`Int64` epoch ms; the store owner adds it, see `telemetry-replay.md`;
+**own insert clock** (`Int64` epoch ms; the store owner adds it;
 SigNoz's stock logs tables have none, checked 2026-10-11) — as the observation time. Three clocks are in play and only two
 of them are the producer's:
 
