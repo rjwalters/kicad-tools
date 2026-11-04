@@ -1218,6 +1218,25 @@ def _width(model: _NetModel, i: int) -> float:
     return model.nodes[i].radius * 2.0
 
 
+def _ampacity_ok(model: _NetModel, group: set[int], required: float) -> bool:
+    """Net-relative ``--wide`` (issue #8368): a cut is allowed only when every
+    segment still attached where the cut ends (the parallel branch that now
+    carries the current) is at least ``required`` mm wide.  ``required`` is
+    the IPC-2221 width of the net's declared current; ``0`` accepts any.
+    """
+    if required <= 0.0:
+        return True
+    near: set[int] = set()
+    for g in group:
+        near |= model.adj[g] | model.overlap[g]
+        for ends in model.anch[g]:
+            for a in ends:
+                near.add(a)
+                near |= model.adj[a]
+    near -= group
+    return all(_width(model, k) >= required for k in near if model.nodes[k].kind == "seg")
+
+
 def _dangling_remnants(
     model: _NetModel, seeds: set[int], removed: set[int], wide: float
 ) -> set[int]:
@@ -1315,7 +1334,12 @@ def _expand_cut(
 
 
 def _plan_declared_loops(
-    model: _NetModel, plan: NetPlan, removed: set[int], baseline, wide: float
+    model: _NetModel,
+    plan: NetPlan,
+    removed: set[int],
+    baseline,
+    wide: float,
+    required: float = 0.0,
 ) -> None:
     """Break loops (same-layer or closed through vias) on a declared net.
 
@@ -1331,6 +1355,8 @@ def _plan_declared_loops(
                 continue
             group = _group_for(model, s, removed)
             if not group or any(_width(model, g) >= wide for g in group):
+                continue
+            if not _ampacity_ok(model, group, required):
                 continue
             full = _expand_cut(model, group, removed, baseline, wide)
             if full is None:
@@ -1361,6 +1387,7 @@ def _plan_declared_loops(
             and _via_effects(model, group, removed) is not None
         ):
             stuck.add(s)
+    relative = math.isinf(wide)
     while stuck:
         comp = {stuck.pop()}
         work = list(comp)
@@ -1377,12 +1404,23 @@ def _plan_declared_loops(
                     for i in comp
                 ),
                 "min_width": round(min(_width(model, i) for i in comp), 6),
+                "reason": (
+                    f"cutting would leave a branch narrower than the declared "
+                    f"current needs ({required:.3g} mm)"
+                    if relative
+                    else "all segments >= --wide"
+                ),
             }
         )
 
 
 def _plan_net(
-    model: _NetModel, net_number: int, *, declared: bool = False, wide: float = DEFAULT_WIDE_MM
+    model: _NetModel,
+    net_number: int,
+    *,
+    declared: bool = False,
+    wide: float = DEFAULT_WIDE_MM,
+    required: float = 0.0,
 ) -> NetPlan:
     plan = NetPlan(net_number=net_number)
     baseline = model.partition(set())
@@ -1393,7 +1431,7 @@ def _plan_net(
     # two-terminal floor as the generic pass below (Issue #8333): with fewer
     # terminals the guard is vacuous and every loop would be deleted.
     if declared and len(model.terminals) >= 2 and model.has_cycle():
-        _plan_declared_loops(model, plan, removed, baseline, wide)
+        _plan_declared_loops(model, plan, removed, baseline, wide, required)
 
     # A net with fewer than two terminals has at most one partition group, so
     # the "partition unchanged" guard is vacuous and a loop would be deleted
@@ -1424,6 +1462,8 @@ def _plan_net(
                         continue
                 if declared and any(_width(model, g) >= wide for g in group):
                     continue  # never cut deliberate wide copper on a declared net
+                if declared and not _ampacity_ok(model, group, required):
+                    continue
                 # Endpoint neighbours *and* body-touching neighbours: an
                 # unmodelled overlap join must not be what holds anything.
                 strict = {k for g in group for k in model.adj[g]} - group
@@ -1468,15 +1508,22 @@ def plan_prune(
     pcb: PCB,
     *,
     declared_nets: set[str] | None = None,
-    wide: float = DEFAULT_WIDE_MM,
+    wide: float | None = DEFAULT_WIDE_MM,
     uncut_out: list[dict[str, Any]] | None = None,
+    required_widths: dict[str, float] | None = None,
 ) -> list[NetPlan]:
     """Compute per-net prune/snap plans without touching the board.
 
     ``declared_nets`` (net names from ``--current-paths``) enables the
     loop-breaking pass on those nets only; loops left because every segment is
     at/above ``wide`` are appended to ``uncut_out`` (issue #8313).
+
+    ``wide=None`` is the net-relative mode (issue #8368): the narrowest member
+    of each loop is cut whatever its width, provided every branch left joined
+    to the cut is at least ``required_widths[net]`` mm (the IPC-2221 width of
+    the net's declared current).  An explicit ``wide`` keeps absolute semantics.
     """
+    eff_wide = math.inf if wide is None else wide
     names = (
         {net.number: net.name for net in getattr(pcb, "nets", {}).values()}
         if isinstance(getattr(pcb, "nets", None), dict)
@@ -1487,7 +1534,13 @@ def plan_prune(
         seg0 = next((n.ref for n in model.nodes if n.kind == "seg"), None)
         net_name = names.get(net_number) or (seg0.net_name if seg0 else "")
         declared = declared_nets is not None and net_name in declared_nets
-        plan = _plan_net(model, net_number, declared=declared, wide=wide)
+        plan = _plan_net(
+            model,
+            net_number,
+            declared=declared,
+            wide=eff_wide,
+            required=(required_widths or {}).get(net_name, 0.0) if wide is None else 0.0,
+        )
         if uncut_out is not None:
             uncut_out.extend({"net": net_name or net_number, **u} for u in plan.uncut_loops)
         if not plan.empty:
@@ -1605,7 +1658,8 @@ def prune_board(
     verify_drc: bool = True,
     apply: bool = True,
     declared_nets: set[str] | None = None,
-    wide: float = DEFAULT_WIDE_MM,
+    wide: float | None = DEFAULT_WIDE_MM,
+    required_widths: dict[str, float] | None = None,
 ) -> tuple[PCB, PruneResult]:
     """Plan (and optionally apply) pruning for ``pcb_path``.
 
@@ -1617,7 +1671,13 @@ def prune_board(
 
     pcb = PCB.load(pcb_path)
     uncut: list[dict[str, Any]] = []
-    plans = plan_prune(pcb, declared_nets=declared_nets, wide=wide, uncut_out=uncut)
+    plans = plan_prune(
+        pcb,
+        declared_nets=declared_nets,
+        wide=wide,
+        uncut_out=uncut,
+        required_widths=required_widths,
+    )
     accepted = list(plans)
     rejected: list[NetPlan] = []
     drc_verified, note = False, "DRC verification skipped (--no-drc)"

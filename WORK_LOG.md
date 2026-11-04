@@ -15,6 +15,7 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-04
 
+- **PR #8373**: fix: net-relative --wide default for pcb prune and loop witness in current-paths audit
 - **PR #8374**: perf(router): skip repeat Python fallback for drained nets, record per-net fallback time
 - **PR #8372**: fix: carry project sidecars to -o outputs via shared helper
 - **PR #8371**: fix: reject bad nets individually when drc-aware rollback misses baseline

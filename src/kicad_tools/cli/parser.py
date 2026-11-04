@@ -2727,10 +2727,12 @@ def _add_pcb_parser(subparsers) -> None:
     pcb_prune.add_argument(
         "--wide",
         type=float,
-        default=0.5,
+        default=None,
         metavar="MM",
         help="With --current-paths: width (mm) at/above which a segment is never "
-        "cut (default: 0.5)",
+        "cut. Default (unset): net-relative -- cut each loop's narrowest segment "
+        "whatever its width, provided the branch left behind still meets the "
+        "declared current's IPC-2221 width; refused cuts are reported.",
     )
     pcb_prune.add_argument(
         "--unverified",

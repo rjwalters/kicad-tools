@@ -1590,13 +1590,16 @@ class CppPathfinder:
         self._python_fallback_proven_skips: int = 0
         self._python_fallback_seconds_saved: float = 0.0
         # Issue #8370: per-net fallback wall time (including failed
-        # fallbacks), and the nets whose Python A* has already drained
-        # (``last_route_exhausted``) after a C++ NO_PATH / PAIRWISE_BLOCKED.
-        # Unlike the #6098 memo this record is NOT stamped with the grid
-        # state, so it survives the grid changes negotiated rip-up makes
-        # between iterations.  Value: seconds the draining search took.
+        # fallbacks), and the pad-pair requests whose Python A* has already
+        # drained (``last_route_exhausted``) after a C++ NO_PATH /
+        # PAIRWISE_BLOCKED.  Keyed on the request (Issue #8377), not the net:
+        # on a multi-pad net a drained pair A must not suppress the first
+        # attempt of never-tried pair B.  Unlike the #6098 memo this record is
+        # NOT stamped with the grid state, so it survives the grid changes
+        # negotiated rip-up makes between iterations.  Key:
+        # :meth:`_python_unreachable_key`.  Value: seconds the search took.
         self._python_fallback_seconds_by_net: dict[str, float] = {}
-        self._python_drained_nets: dict[str, float] = {}
+        self._python_drained_nets: dict[tuple, float] = {}
         self._python_fallback_repeat_skips: int = 0
         # Issue #6329: nets whose search was ended by a per-net WALL-CLOCK
         # deadline while the tuned per-net iteration cap was active (i.e.
@@ -4394,17 +4397,14 @@ class CppPathfinder:
         # Python search could genuinely do better.  Opt out with
         # KICAD_ROUTER_SKIP_PROVEN_FALLBACK=0.
         _memo_enabled = os.environ.get("KICAD_ROUTER_SKIP_PROVEN_FALLBACK", "1").strip() != "0"
-        _memo_key = (
-            self._python_unreachable_key(
-                start,
-                end,
-                net_class=net_class,
-                negotiated_mode=negotiated_mode,
-                extra_goal_cells=extra_goal_cells,
-            )
-            if _memo_enabled
-            else None
+        _pair_key = self._python_unreachable_key(
+            start,
+            end,
+            net_class=net_class,
+            negotiated_mode=negotiated_mode,
+            extra_goal_cells=extra_goal_cells,
         )
+        _memo_key = _pair_key if _memo_enabled else None
         _proof = self._python_unreachable.get(_memo_key) if _memo_key is not None else None
         if _proof is not None and _proof[0] == self._py_grid_state_stamp(py_grid):
             self._python_fallback_proven_skips += 1
@@ -4434,15 +4434,15 @@ class CppPathfinder:
                 int(router_cpp.FAILURE_NO_PATH),
                 int(router_cpp.FAILURE_PAIRWISE_BLOCKED),
             )
-            and net_name in self._python_drained_nets
+            and _pair_key in self._python_drained_nets
             and os.environ.get("KICAD_ROUTER_SKIP_REPEAT_FALLBACK", "1").strip() != "0"
         ):
             self._python_fallback_repeat_skips += 1
-            self._python_fallback_seconds_saved += self._python_drained_nets[net_name]
+            self._python_fallback_seconds_saved += self._python_drained_nets[_pair_key]
             logger.debug(
                 "Net %s: C++ pathfinder gave up (%s); skipping Python fallback "
-                "-- the Python A* already drained its open set for this net "
-                "(issue #8370)",
+                "-- the Python A* already drained its open set for this pad-pair "
+                "request (issues #8370, #8377)",
                 net_name,
                 reason,
             )
@@ -4598,7 +4598,7 @@ class CppPathfinder:
         )
 
         # Issue #8370: per-net fallback time (successful or not), and remember
-        # nets whose Python A* drained for the repeat-only skip above.
+        # pad-pair requests whose Python A* drained for the repeat-only skip above.
         if not self._relief_mode:
             self._python_fallback_seconds_by_net[net_name] = (
                 self._python_fallback_seconds_by_net.get(net_name, 0.0) + dt
@@ -4614,7 +4614,7 @@ class CppPathfinder:
                 )
                 and getattr(self._py_router, "last_route_exhausted", False) is True
             ):
-                self._python_drained_nets[net_name] = dt
+                self._python_drained_nets[_pair_key] = dt
 
         # Issue #6098: record a drained search as an unreachability proof for
         # this request on the current grid state.  ``route`` does not mutate

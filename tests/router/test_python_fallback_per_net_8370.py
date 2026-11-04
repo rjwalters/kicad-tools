@@ -135,3 +135,26 @@ def test_non_drained_failure_does_not_record() -> None:
         _bump_grid(pf)
         _fallback(pf, code)
     assert spy.call_count == 2
+
+
+def test_untried_pad_pair_on_drained_net_still_falls_back() -> None:
+    """Issue #8377: the drained record is per pad-pair request, not per net."""
+    code = int(cpp_backend.router_cpp.FAILURE_NO_PATH)
+    pf = _pathfinder()
+    a, b = _pads("SIG")
+    c = Pad(x=2.0, y=5.0, width=0.6, height=0.6, net=1, net_name="SIG", layer=Layer.F_CU)
+
+    def call(start: Pad, end: Pad):
+        return pf._try_python_fallback(
+            start, end, reason="no path", cpp_failure_reason=code, negotiated_mode=True
+        )
+
+    with mock.patch.object(Router, "route", autospec=True, side_effect=Router.route) as spy:
+        assert call(a, b) is None  # drains pair (a, b)
+        _bump_grid(pf)
+        assert call(a, c) is not None  # never-tried pair: fallback runs and rescues it
+        assert spy.call_count == 2
+        _bump_grid(pf)
+        assert call(a, b) is None  # identical repeat: skipped
+        assert spy.call_count == 2
+    assert pf.fallback_stats["python_fallback_repeat_skips"] == 1
