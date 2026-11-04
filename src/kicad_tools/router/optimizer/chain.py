@@ -25,9 +25,18 @@ def _quantize(value: float, tolerance: float) -> int:
     return int(round(value / tolerance))
 
 
-def _vertex_key(x: float, y: float, tolerance: float) -> tuple[int, int]:
-    """Return a hashable key that two endpoints within ``tolerance`` share."""
-    return (_quantize(x, tolerance), _quantize(y, tolerance))
+def _vertex_key(
+    x: float, y: float, tolerance: float, layer: object = None
+) -> tuple[object, int, int]:
+    """Return a hashable key that two endpoints within ``tolerance`` share.
+
+    The key includes the copper layer: segments on different layers that end
+    at the same point do not join there (a via or pad joins them, and the
+    chain ends at it).  A layer-blind key read two routes that share their
+    vertices on two layers as four-way junctions and cut both into single
+    segments (Issue #8298).
+    """
+    return (layer, _quantize(x, tolerance), _quantize(y, tolerance))
 
 
 def sort_into_chains(segments: list[Segment], tolerance: float = 1e-4) -> list[list[Segment]]:
@@ -52,14 +61,14 @@ def sort_into_chains(segments: list[Segment], tolerance: float = 1e-4) -> list[l
 
     # Build a vertex -> list[(seg_idx, which_end)] adjacency.  ``which_end``
     # is 0 for the (x1, y1) endpoint of the segment and 1 for (x2, y2).
-    vertex_endpoints: dict[tuple[int, int], list[tuple[int, int]]] = defaultdict(list)
+    vertex_endpoints: dict[tuple[object, int, int], list[tuple[int, int]]] = defaultdict(list)
     for idx, seg in enumerate(segments):
-        vertex_endpoints[_vertex_key(seg.x1, seg.y1, tolerance)].append((idx, 0))
-        vertex_endpoints[_vertex_key(seg.x2, seg.y2, tolerance)].append((idx, 1))
+        vertex_endpoints[_vertex_key(seg.x1, seg.y1, tolerance, seg.layer)].append((idx, 0))
+        vertex_endpoints[_vertex_key(seg.x2, seg.y2, tolerance, seg.layer)].append((idx, 1))
 
     # A vertex is a "boundary" vertex (a sub-chain split point) if it has
     # degree != 2 -- i.e. either a leaf (1 endpoint) or a junction (>=3).
-    def is_boundary(key: tuple[int, int]) -> bool:
+    def is_boundary(key: tuple[object, int, int]) -> bool:
         return len(vertex_endpoints[key]) != 2
 
     # Walk linear sub-chains from each boundary vertex.  Each segment is
@@ -95,7 +104,7 @@ def sort_into_chains(segments: list[Segment], tolerance: float = 1e-4) -> list[l
 
 def _walk_linear_chain(
     segments: list[Segment],
-    vertex_endpoints: dict[tuple[int, int], list[tuple[int, int]]],
+    vertex_endpoints: dict[tuple[object, int, int], list[tuple[int, int]]],
     start_idx: int,
     start_which_end: int,
     visited: set[int],
@@ -135,7 +144,7 @@ def _walk_linear_chain(
     chain.append(seg)
 
     # Walk forward from seg's "end" vertex.
-    current_end_key = _vertex_key(seg.x2, seg.y2, tolerance)
+    current_end_key = _vertex_key(seg.x2, seg.y2, tolerance, seg.layer)
 
     while True:
         incident = vertex_endpoints[current_end_key]
@@ -162,7 +171,7 @@ def _walk_linear_chain(
         if next_which_end == 1:
             next_seg = _flip_segment(next_seg)
         chain.append(next_seg)
-        current_end_key = _vertex_key(next_seg.x2, next_seg.y2, tolerance)
+        current_end_key = _vertex_key(next_seg.x2, next_seg.y2, tolerance, next_seg.layer)
 
     return chain
 
