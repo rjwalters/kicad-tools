@@ -1589,6 +1589,15 @@ class CppPathfinder:
         self._python_unreachable: dict[tuple, tuple[tuple, float]] = {}
         self._python_fallback_proven_skips: int = 0
         self._python_fallback_seconds_saved: float = 0.0
+        # Issue #8370: per-net fallback wall time (including failed
+        # fallbacks), and the nets whose Python A* has already drained
+        # (``last_route_exhausted``) after a C++ NO_PATH / PAIRWISE_BLOCKED.
+        # Unlike the #6098 memo this record is NOT stamped with the grid
+        # state, so it survives the grid changes negotiated rip-up makes
+        # between iterations.  Value: seconds the draining search took.
+        self._python_fallback_seconds_by_net: dict[str, float] = {}
+        self._python_drained_nets: dict[str, float] = {}
+        self._python_fallback_repeat_skips: int = 0
         # Issue #6329: nets whose search was ended by a per-net WALL-CLOCK
         # deadline while the tuned per-net iteration cap was active (i.e.
         # under ``--deterministic-budget``).  Net name -> what bound.  Each
@@ -4409,6 +4418,36 @@ class CppPathfinder:
             )
             return None
 
+        # Issue #8370: repeat-only skip.  The first NO_PATH / PAIRWISE_BLOCKED
+        # hand-off of a net still falls back (it rescues real nets, #3456/
+        # #3956).  Once the Python A* has DRAINED its open set for this net,
+        # re-running it every negotiated iteration (the grid stamp changes with
+        # each rip-up, so the #6098 memo misses) cost 45-100 min/iteration on a
+        # 97-net HV board.  Never in relief-probe mode, which stresses the
+        # search without being committed.  Opt out: KICAD_ROUTER_SKIP_REPEAT_FALLBACK=0.
+        if (
+            not self._relief_mode
+            and cpp_failure_reason is not None
+            and router_cpp is not None
+            and int(cpp_failure_reason)
+            in (
+                int(router_cpp.FAILURE_NO_PATH),
+                int(router_cpp.FAILURE_PAIRWISE_BLOCKED),
+            )
+            and net_name in self._python_drained_nets
+            and os.environ.get("KICAD_ROUTER_SKIP_REPEAT_FALLBACK", "1").strip() != "0"
+        ):
+            self._python_fallback_repeat_skips += 1
+            self._python_fallback_seconds_saved += self._python_drained_nets[net_name]
+            logger.debug(
+                "Net %s: C++ pathfinder gave up (%s); skipping Python fallback "
+                "-- the Python A* already drained its open set for this net "
+                "(issue #8370)",
+                net_name,
+                reason,
+            )
+            return None
+
         # Issue #3456: the silent C++ -> Python downgrade is the bug.
         # A net grinding 3-7 minutes in the pure-Python A* is otherwise
         # indistinguishable from "router is slow" at default verbosity.
@@ -4557,6 +4596,25 @@ class CppPathfinder:
         self._python_fallback_seconds_by_reason[_fallback_bucket] = (
             self._python_fallback_seconds_by_reason.get(_fallback_bucket, 0.0) + dt
         )
+
+        # Issue #8370: per-net fallback time (successful or not), and remember
+        # nets whose Python A* drained for the repeat-only skip above.
+        if not self._relief_mode:
+            self._python_fallback_seconds_by_net[net_name] = (
+                self._python_fallback_seconds_by_net.get(net_name, 0.0) + dt
+            )
+            if (
+                route is None
+                and cpp_failure_reason is not None
+                and router_cpp is not None
+                and int(cpp_failure_reason)
+                in (
+                    int(router_cpp.FAILURE_NO_PATH),
+                    int(router_cpp.FAILURE_PAIRWISE_BLOCKED),
+                )
+                and getattr(self._py_router, "last_route_exhausted", False) is True
+            ):
+                self._python_drained_nets[net_name] = dt
 
         # Issue #6098: record a drained search as an unreachability proof for
         # this request on the current grid state.  ``route`` does not mutate
@@ -4857,6 +4915,12 @@ class CppPathfinder:
                   ended while the tuned per-net iteration cap was active
                   (``--deterministic-budget``).  Non-empty means the run's
                   copper can depend on machine load.
+                - python_fallback_seconds_by_net: Issue #8370.  Net name ->
+                  summed wall time of its Python fallbacks, successful or not.
+                - python_fallback_repeat_skips: Issue #8370.  Fallbacks skipped
+                  because the Python A* had already drained for that net after
+                  a C++ NO_PATH / PAIRWISE_BLOCKED (seconds saved are added to
+                  ``python_fallback_seconds_saved``).
         """
         return {
             "fallback_count": self._fallback_count,
@@ -4873,6 +4937,8 @@ class CppPathfinder:
             "python_fallback_seconds_by_reason": dict(self._python_fallback_seconds_by_reason),
             "python_fallback_proven_skips": self._python_fallback_proven_skips,
             "python_fallback_seconds_saved": self._python_fallback_seconds_saved,
+            "python_fallback_seconds_by_net": dict(self._python_fallback_seconds_by_net),
+            "python_fallback_repeat_skips": self._python_fallback_repeat_skips,
             "wall_bound_under_cap": dict(self._wall_bound_under_cap),
         }
 

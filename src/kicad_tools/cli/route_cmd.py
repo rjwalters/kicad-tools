@@ -4410,6 +4410,18 @@ def _save_partial_results() -> bool:
             info["partial_net_stubs"] = _partial_net_stubs(router)
         except Exception:  # noqa: BLE001 - reporting must not block the save
             info["partial_net_stubs"] = None
+        try:
+            # Issue #8370: top nets by pure-Python fallback wall time, so a
+            # timeout caused by fallback grinding is visible without logs.
+            _fb = (router.backend_info.get("fallback_stats") or {}).get(
+                "python_fallback_seconds_by_net"
+            ) or {}
+            info["python_fallback_top_nets"] = [
+                {"net": n, "seconds": round(s, 3)}
+                for n, s in sorted(_fb.items(), key=lambda kv: kv[1], reverse=True)[:10]
+            ]
+        except Exception:  # noqa: BLE001 - reporting must not block the save
+            info["python_fallback_top_nets"] = None
 
         # Issue #6322: ``_insert_sexp_before_closing`` below drops every
         # segment/via already in the placement text (a checkpoint's copper,
