@@ -519,3 +519,31 @@ def test_cli_current_paths_breaks_loop_and_reports_json(tmp_path, capsys):
     assert rc == 0
     out = json.loads(capsys.readouterr().out)
     assert out["removed"]["segments"] >= 1 and out["uncut_loops"] == []
+
+
+def test_via_closed_cut_removes_orphaned_vias(tmp_path):
+    """Cutting the jog must not leave vias with nothing attached (issue #8313)."""
+    p = _via_loop_board(tmp_path)
+    pcb, res = prune_board(p, verify_drc=False, declared_nets={"SIG"}, wide=0.5)
+    assert pcb.vias == []
+    assert res.stats["vias_removed"] == 2
+    assert _connected(pcb, (100, 100), (110, 100))
+
+
+def test_via_closed_cut_passes_real_drc(tmp_path):
+    """The default (DRC-verified) path accepts the plan and resolves the run."""
+    from kicad_tools.cli.runner import find_kicad_cli
+
+    if find_kicad_cli() is None:
+        pytest.skip("kicad-cli not available")
+    from kicad_tools.router.current_paths import load_current_path_specs, resolve_current_path
+
+    p = _via_loop_board(tmp_path)
+    pcb, res = prune_board(p, verify_drc=True, declared_nets={"SIG"}, wide=0.5)
+    assert res.drc_verified
+    assert [pl.net_name for pl in res.accepted] == ["SIG"] and res.rejected == []
+    assert pcb.vias == []
+    out = tmp_path / "out.kicad_pcb"
+    pcb.save(out)
+    (spec,) = load_current_path_specs(_specs(tmp_path))
+    assert resolve_current_path(PCB.load(out), spec).status == "resolved"

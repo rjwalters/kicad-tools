@@ -502,12 +502,12 @@ def _build_net_models(pcb: PCB) -> dict[int, _NetModel]:
                 label=f"segment {seg.start}->{seg.end} {seg.layer}",
             )
         )
-    for via in pcb.vias:
+    for vidx, via in enumerate(pcb.vias):
         if via.net_number <= 0:
             continue
         layers = ["*"] if via.via_type is None else list(via.layers)
         by_net[via.net_number].append(
-            _Node("via", layers, a=via.position, radius=via.size / 2.0, ref=via)
+            _Node("via", layers, a=via.position, radius=via.size / 2.0, ref=via, index=vidx)
         )
     for fp in pcb.footprints:
         for pad in fp.pads:
@@ -562,6 +562,8 @@ class NetPlan:
     net_number: int
     net_name: str = ""
     remove: list[int] = field(default_factory=list)
+    #: vias (index into ``pcb.vias``) a loop cut left with nothing attached
+    remove_vias: list[int] = field(default_factory=list)
     #: (segment index, "start"|"end", new xy)
     snaps: list[tuple[int, str, tuple[float, float]]] = field(default_factory=list)
     reasons: dict[int, str] = field(default_factory=dict)
@@ -574,7 +576,7 @@ class NetPlan:
 
     @property
     def empty(self) -> bool:
-        return not self.remove and not self.snaps and not self.extends
+        return not self.remove and not self.remove_vias and not self.snaps and not self.extends
 
 
 def _group_for(model: _NetModel, seed: int, removed: set[int]) -> set[int] | None:
@@ -845,6 +847,56 @@ def _dangling_remnants(
     return gone
 
 
+def _attach_layers(model: _NetModel, live: set[int]) -> int:
+    """How many copper layers the live attachments of a via cover (a
+    through/all-layer pad counts as two)."""
+    layers: set[str] = set()
+    for k in live:
+        for lyr in model.nodes[k].layers:
+            if lyr == "*":
+                return 2
+            layers.add(lyr)
+    return len(layers)
+
+
+def _via_effects(model: _NetModel, full: set[int], removed: set[int]) -> set[int] | None:
+    """Vias a cut of ``full`` leaves with nothing attached (to be removed too),
+    or ``None`` when the cut would strand a via on a single layer.
+
+    A via nothing touches is not a layer transition, so dropping it is safe.  A
+    via that keeps exactly one attachment layer after having had two is a
+    ``via_dangling`` finding, so such a cut is unacceptable (issue #8313).
+    """
+    gone = removed | full
+    orphans: set[int] = set()
+    for k in {v for g in full for v in model.adj[g]}:
+        if model.nodes[k].kind != "via" or k in gone:
+            continue
+        before = model.adj[k] - removed
+        live = model.adj[k] - gone
+        if not live:
+            orphans.add(k)
+        elif _attach_layers(model, before) >= 2 > _attach_layers(model, live):
+            return None
+    return orphans
+
+
+def _expand_cut(
+    model: _NetModel, group: set[int], removed: set[int], baseline, wide: float
+) -> set[int] | None:
+    """``group`` plus dangling remnants and orphaned vias, fully re-checked
+    (partition, joins, ends, via layers); ``None`` when no variant is safe."""
+    wider = group | _dangling_remnants(model, group, removed | group, wide)
+    for cand in (wider, group) if wider != group else (group,):
+        orphans = _via_effects(model, cand, removed)
+        if orphans is None:
+            continue
+        full = cand | orphans
+        if _cut_ok(model, full, removed, baseline):
+            return full
+    return None
+
+
 def _plan_declared_loops(
     model: _NetModel, plan: NetPlan, removed: set[int], baseline, wide: float
 ) -> None:
@@ -863,19 +915,20 @@ def _plan_declared_loops(
             group = _group_for(model, s, removed)
             if not group or any(_width(model, g) >= wide for g in group):
                 continue
-            if not _cut_ok(model, group, removed, baseline):
+            full = _expand_cut(model, group, removed, baseline, wide)
+            if full is None:
                 continue
             key = (_width(model, s), s)
             if best is None or key < best[0]:
-                best = (key, group)
+                best = (key, full)
         if best is None:
             break
         group = best[1]
-        group |= _dangling_remnants(model, group, removed | group, wide)
-        if model.partition(removed | group) != baseline:
-            group = best[1]  # never trade a terminal for tidiness
         removed |= group
         for g in sorted(group):
+            if model.nodes[g].kind == "via":
+                plan.remove_vias.append(model.nodes[g].index)
+                continue
             plan.remove.append(model.nodes[g].index)
             plan.reasons[model.nodes[g].index] = "declared-net loop (narrowest below --wide)"
 
@@ -885,7 +938,11 @@ def _plan_declared_loops(
         if s in removed or model.hard_protected[s]:
             continue
         group = _group_for(model, s, removed)
-        if group and _cut_ok(model, group, removed, baseline):
+        if (
+            group
+            and _cut_ok(model, group, removed, baseline)
+            and _via_effects(model, group, removed) is not None
+        ):
             stuck.add(s)
     while stuck:
         comp = {stuck.pop()}
@@ -1041,8 +1098,14 @@ def apply_plans(pcb: PCB, plans: list[NetPlan]) -> dict[str, int]:
             node.set_value(1, y + oy)
         snapped += len(plan.snaps)
     to_remove = [segs[i] for plan in plans for i in plan.remove]
+    vias = list(pcb.vias)
+    via_remove = [vias[i] for plan in plans for i in plan.remove_vias]
     removed = pcb.remove_segments(to_remove) if to_remove else 0
-    return {"segments_removed": removed, "ends_snapped": snapped}
+    vias_removed = pcb.remove_vias(via_remove) if via_remove else 0
+    stats = {"segments_removed": removed, "ends_snapped": snapped}
+    if vias_removed:  # key appears only when a loop cut orphaned vias (issue #8313)
+        stats["vias_removed"] = vias_removed
+    return stats
 
 
 # ---------------------------------------------------------------------------
@@ -1160,4 +1223,6 @@ def prune_board(
             "segments_removed": sum(len(p.remove) for p in accepted),
             "ends_snapped": sum(len(p.snaps) for p in accepted),
         }
+        if n_vias := sum(len(p.remove_vias) for p in accepted):
+            stats["vias_removed"] = n_vias
     return pcb, PruneResult(plans, accepted, rejected, drc_verified, note, stats, uncut)

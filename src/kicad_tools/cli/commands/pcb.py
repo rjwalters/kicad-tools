@@ -544,17 +544,25 @@ def _run_prune_command(args, pcb_path: Path) -> int:
         return {
             "net": p.net_name or p.net_number,
             "segments_removed": len(p.remove),
+            "vias_removed": len(p.remove_vias),
             "ends_snapped": len(p.snaps),
         }
 
-    changed = res.stats["segments_removed"] or res.stats["ends_snapped"]
+    changed = (
+        res.stats["segments_removed"]
+        or res.stats.get("vias_removed", 0)
+        or res.stats["ends_snapped"]
+    )
     result: dict[str, Any] = {
         "input": str(pcb_path),
         "output": str(output_path) if not dry_run else None,
         "dry_run": dry_run,
         "drc_verified": res.drc_verified,
         "drc_note": res.drc_note,
-        "removed": {"segments": res.stats["segments_removed"]},
+        "removed": {
+            "segments": res.stats["segments_removed"],
+            "vias": res.stats.get("vias_removed", 0),
+        },
         "snapped": res.stats["ends_snapped"],
         "nets": [_net(p) for p in res.accepted],
         "rejected_by_drc": [_net(p) for p in res.rejected],
@@ -567,6 +575,8 @@ def _run_prune_command(args, pcb_path: Path) -> int:
         print(f"  Input:  {pcb_path}")
         print(f"  DRC:    {res.drc_note}")
         print(f"  Segments removed: {res.stats['segments_removed']:,}")
+        if res.stats.get("vias_removed"):
+            print(f"  Vias removed:     {res.stats['vias_removed']:,}")
         print(f"  Ends snapped:     {res.stats['ends_snapped']:,}")
         for n in result["nets"]:
             print(f"    {n['net']}: -{n['segments_removed']} seg, {n['ends_snapped']} snapped")
