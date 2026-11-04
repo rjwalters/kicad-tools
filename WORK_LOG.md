@@ -15,6 +15,16 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-04
 
+- **PR #8324**: fix: derive pcb_retune UUID seed from input board and selected nets
+- **PR #8294**: fix(creepage): measure out-of-zone copper against in-zone pads in attach-zone residual
+- **PR #8290**: feat: report measured freed width, re-occupation and rip-up reason in relief diagnostics
+- **PR #8283**: fix(route): merge _partial output, join pad centres, list partial-net stubs
+- **PR #8280**: fix: apply census attach-zone rule in the router's pairwise HV gate
+- **Issue #8321** (closed): pcb_retune: fixed UUID_SEED may write duplicate UUIDs on repeated retunes (same pattern #8302 fixed)
+- **Issue #8292** (closed): creepage: --waive-attach-zone residual clips both nets, so out-of-zone copper vs in-zone foreign copper is never measured (router flags it, census waives)
+- **Issue #8277** (closed): kct route --complete commits copper that kct creepage (same attach-zone builder) fails: router vs census disagree on pad-adjacent HV pairs
+- **Issue #8270** (closed): kct route: timeout/best-so-far checkpoint emits one segment per grid cell (98% < 0.1 mm), off-centre pad joins, unmarked partial stubs
+- **Issue #8256** (closed): Relief rescue: measure freed width, re-occupation and rip-up reason (follow-up to #8248)
 - **PR #8302**: fix: make optimize-traces UUIDs deterministic so refilled board order is reproducible
 - **Issue #8297** (closed): main red: test_connectivity_decisions_identical_across_hash_seeds fails since #8287 merged (merge race with #8289)
 
