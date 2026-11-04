@@ -185,8 +185,13 @@ def run_creepage_command(args) -> int:
     # "B.Cu" against the board's ACTUAL copper count, exactly as `kct route`
     # does -- one sidecar must be valid for every consumer.
     net_class_map = None
+    # Mains-NAMED nets the map declares not mains/HV (issue #8278), exactly as
+    # ``kct audit`` reads them: they exempt only the name-based vacuity guard
+    # below, are always disclosed, and a malformed block is an error.
+    declared_non_hv: dict[str, str] = {}
     ncm_arg = getattr(args, "net_class_map", None)
     if ncm_arg:
+        from kicad_tools.creepage.engine import non_hv_nets_from_path
         from kicad_tools.router.rules import net_class_map_from_path
 
         ncm_path = Path(ncm_arg)
@@ -195,6 +200,7 @@ def run_creepage_command(args) -> int:
             return 1
         try:
             net_class_map = net_class_map_from_path(ncm_path, pcb_path=pcb_path)
+            declared_non_hv = non_hv_nets_from_path(ncm_path)
         except json.JSONDecodeError as e:
             print(f"Error: parsing net-class-map JSON: {e}", file=sys.stderr)
             return 1
@@ -283,7 +289,21 @@ def run_creepage_command(args) -> int:
     mains_suspects: list[str] = []
     guard_triggered = False
     if not report.has_hv_nets:
-        mains_suspects = mains_suspect_nets(pcb)
+        from kicad_tools.creepage.engine import _norm_net_key
+
+        declared = {_norm_net_key(k): v for k, v in declared_non_hv.items()}
+        exempt = {}
+        for name in mains_suspect_nets(pcb):
+            if _norm_net_key(name) in declared:
+                exempt[name] = declared[_norm_net_key(name)]
+            else:
+                mains_suspects.append(name)
+        if exempt:
+            print(
+                "Note: mains-named net(s) declared non-HV by the net-class map: "
+                + "; ".join(f"{k} ({v})" for k, v in sorted(exempt.items())),
+                file=sys.stderr,
+            )
         high_working_voltage = (
             working_voltage is not None and float(working_voltage) >= SELV_WORKING_VOLTAGE_V
         )

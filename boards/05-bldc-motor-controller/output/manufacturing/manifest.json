@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.27.0",
-  "generated_at": "2026-11-04T00:17:40.825178+00:00",
+  "generated_at": "2026-11-04T00:49:14.695403+00:00",
   "manufacturer": "jlcpcb",
   "files": {
     "HARDWARE.md": {
@@ -9,8 +9,8 @@
       "size": 8878
     },
     "README.txt": {
-      "sha256": "f8510390ec0dcdfd02b914a4061745d008705f809b6cb5b98cf77b542852885e",
-      "size": 1689
+      "sha256": "823e35440fcf0951f6c007b7e1ad6a01402da2aa3c349f129ae4a89e8b5b9409",
+      "size": 1847
     },
     "assembly-back.pdf": {
       "sha256": "890c0edcffb1fa785d0c9f6e0a886a803172bac120424887142b8091312cd3ea",
@@ -33,8 +33,8 @@
       "size": 3256
     },
     "design-source.zip": {
-      "sha256": "afa2036fcc2e21f5ba9f03d9ad42bdf8bf554e92f187a2873ca17a86f8a9cf98",
-      "size": 362368
+      "sha256": "2e07952f10793f99446f742ea744d7b56a0d1cad23a93883266784e370cfa5ac",
+      "size": 362468
     },
     "firmware/Makefile": {
       "sha256": "f105bf145347705a625a825aad34614c3e4001c7260793991f68cca37587516c",

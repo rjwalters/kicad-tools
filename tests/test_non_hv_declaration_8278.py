@@ -137,3 +137,53 @@ def test_declaration_never_removes_a_class_hv_net(tmp_path):
     result = ManufacturingAudit(_board(tmp_path), manufacturer="jlcpcb", net_class_map_path=p).run()
     assert result.isolation.hv_present is True
     assert "AC_LINE" in result.isolation.hv_nets
+
+
+# ---------------------------------------------------------------------------
+# ``kct creepage`` honours the same declaration (it ran its own guard and
+# disagreed with ``kct audit`` on Board 05's FUSED rail).
+# ---------------------------------------------------------------------------
+
+
+def _creepage(tmp_path, declared, *extra):
+    from kicad_tools._shapely import has_shapely
+    from kicad_tools.cli.commands.creepage import run_creepage_command
+    from kicad_tools.cli.parser import create_parser
+
+    if not has_shapely():
+        pytest.skip("creepage requires shapely")
+    argv = ["creepage", str(_board(tmp_path)), "--net-class-map", str(_map(tmp_path, declared))]
+    return run_creepage_command(create_parser().parse_args([*argv, *(extra or ("--min", "0.5"))]))
+
+
+def test_creepage_cli_exempts_declared_nets_and_says_so(tmp_path, capsys):
+    rc = _creepage(tmp_path, ALL_DECLARED)
+    err = capsys.readouterr().err
+    assert rc != 2
+    assert "declared non-HV" in err and "FUSED_LINE (24 V SELV test rail)" in err
+
+
+def test_creepage_cli_partial_declaration_still_trips_guard(tmp_path, capsys):
+    rc = _creepage(tmp_path, {"FUSED_LINE": "24 V rail"})
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "AC_LINE" in err
+
+
+def test_creepage_cli_mains_working_voltage_still_trips_guard(tmp_path, capsys):
+    rc = _creepage(
+        tmp_path,
+        ALL_DECLARED,
+        "--standard",
+        "iec60664",
+        "--working-voltage",
+        "250",
+        "--pollution-degree",
+        "2",
+    )
+    assert rc == 2
+
+
+def test_creepage_cli_malformed_declaration_is_an_error(tmp_path, capsys):
+    assert _creepage(tmp_path, {"FUSED_LINE": ""}) == 1
+    assert "non_hv_nets" in capsys.readouterr().err

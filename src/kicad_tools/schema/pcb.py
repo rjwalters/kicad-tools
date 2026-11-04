@@ -1917,6 +1917,11 @@ class Segment:
     # Mirrors the parser's ``_originally_bare`` round-trip flag at the element
     # level.  ``compare=False`` keeps dataclass equality identity-stable.
     net_name_only: bool = field(default=False, compare=False)
+    # Issue #8278: a user-locked track -- KiCad 7+ ``(locked yes)`` child or
+    # KiCad 6 bare ``(segment locked ...)`` token.  Read-only here: saving goes
+    # through the parsed tree, which keeps the original token.  ``kct pcb
+    # prune`` never removes, snaps or merges a locked track.
+    locked: bool = field(default=False, compare=False)
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> Segment:
@@ -1952,6 +1957,10 @@ class Segment:
                 seg.net_name_only = True
         if uuid := sexp.find("uuid"):
             seg.uuid = uuid.get_string(0) or ""
+        if (locked := sexp.find("locked")) is not None:
+            seg.locked = (locked.get_string(0) or "yes") != "no"
+        elif any(c.is_atom and c.value == "locked" for c in sexp.children):
+            seg.locked = True
 
         return seg
 

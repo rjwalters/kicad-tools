@@ -20,6 +20,8 @@ Program firmware/bldc.hex via slow AVR ISP, using factory internal-RC clock fuse
 Fresh native DRC/refill:0 violations/0opens; native ERC:0; label/copper LVS:0.
 Manufacturer checks: 0 errors; 4 advisory track-detour warnings (known issue
 #8308, router copper quality, not a fab limit). No DRC waivers.
+BOM line D3 (C131244) is out of stock (preflight bom_lcsc_stock WARN, stock 0);
+the swap to C84256 is pending in #8275 (#8267). Do not order before it lands.
 gerbers/gerbers.zip: fabrication; bom_jlcpcb.csv: procurement; cpl_jlcpcb.csv: SMT+THT.
 kicad_project.zip includes the exact PCB/schematic and local footprint/symbol libraries.
 schematic.pdf and assembly-front/back.pdf are production drawings.

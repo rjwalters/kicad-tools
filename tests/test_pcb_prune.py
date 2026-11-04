@@ -477,7 +477,12 @@ def test_loop_removal_keeps_the_via_centre_joint(tmp_path):
     """A diagonal stub to the via centre and a straight run whose free end
     merely sits inside the via disc form a loop.  Removing the stub would
     leave the via joined on F.Cu only off-centre (an overlap-only joint), so
-    the run's off-centre end piece goes instead."""
+    the run's off-centre end piece goes instead.
+
+    This pins the planner's *preference* for the off-centre branch, which wins
+    on ordering before ``decentres`` is consulted;
+    ``test_loop_removal_refuses_to_decentre_a_via`` is the fixture that
+    reaches ``decentres`` itself."""
     segs = [
         ((100, 100), (100.1, 99.9)),  # centred stub
         ((100.1, 99.8), (100.1, 99.9)),  # end inside the via, 0.224 mm off
@@ -528,3 +533,199 @@ def test_rewritten_ends_keep_full_nm_precision(tmp_path):
     text = out.read_text()
     assert "133.4125" in text and "132.9125" in text
     assert "133.412 " not in text and "132.912 " not in text
+
+
+# ---------------------------------------------------------------------------
+# Issue #8278 review: one fixture per safety predicate.  Each test below fails
+# when the guard it names is deleted from ``pcb_prune`` (mutation-checked).
+# ---------------------------------------------------------------------------
+
+
+def _append(p: Path, *items: str) -> Path:
+    text = p.read_text().rstrip()
+    assert text.endswith(")")
+    p.write_text(text[:-1] + "".join(items) + ")\n")
+    return p
+
+
+def _via_at(x, y, size=0.6) -> str:
+    return (
+        f'  (via (at {x} {y}) (size {size}) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) '
+        f'(uuid "v-{next(_uid)}"))\n'
+    )
+
+
+def _seg_pairs(pcb) -> set:
+    return {
+        (tuple(round(v, 4) for v in s.start), tuple(round(v, 4) for v in s.end))
+        for s in pcb.segments
+    }
+
+
+def test_loop_removal_refuses_to_decentre_a_via(tmp_path):
+    """``decentres``: a centred stub V->J and a detour J->V whose end lands
+    0.28 mm off V's centre form a loop.  The detour cannot go (it passes a
+    second via, so it may hide a join), which leaves the stub as the only
+    candidate; removing it would leave V joined on F.Cu only off-centre."""
+    segs = [
+        ((100, 100), (102, 100)),  # the centred stub
+        ((102, 100), (105, 100)),  # on to pad A
+        ((102, 100), (102, 101)),  # detour ...
+        ((102, 101), (100.2, 101)),  # ... past V2 (hard-protected)
+        ((100.2, 101), (100.2, 100.2)),  # ... ending inside V, off-centre
+    ]
+    p = _board(tmp_path, [("A", 105, 100, 0.2, 0.2)], segs, vias=[(100, 100), (101.2, 101.3)])
+    pcb, res = _run(p)
+    assert ((100, 100), (102, 100)) in _seg_pairs(pcb)
+    assert res.stats["segments_removed"] == 0
+
+
+def _t_junction_board(tmp_path: Path) -> Path:
+    """Eight 0.25 mm steps A->B, and a track from pad C whose end rests on the
+    body of one step (a T-junction KiCad joins, but the model does not)."""
+    segs = [((100 + 0.25 * k, 100), (100 + 0.25 * (k + 1), 100)) for k in range(8)]
+    segs.append(((101.1, 101), (101.1, 100.05)))
+    pads = [("A", 100, 100, 0.2, 0.2), ("B", 102, 100, 0.2, 0.2), ("C", 101.1, 101, 0.2, 0.2)]
+    return _board(tmp_path, pads, segs)
+
+
+def test_run_touched_by_an_unjoined_track_is_not_merged(tmp_path):
+    """Pure pass body-touch guard, and the anchored pass's ``still_joined``:
+    the T-junction track touches the run only by its body, so a run interior
+    joint could be what holds it.  Neither pass may merge the run."""
+    pcb, res = _run(_t_junction_board(tmp_path))
+    assert res.stats["segments_removed"] == 0
+    assert len(pcb.segments) == 9
+
+
+def test_pure_pass_merges_a_run_whose_grazing_track_is_otherwise_joined(tmp_path):
+    """The *relaxed* body-touch guard: in the pure pass alone (not rescued by
+    the anchored pass), a diagonal that grazes the last straight steps but is
+    joined to the run's end does not block the merge."""
+    from kicad_tools.pcb_prune import NetPlan, _build_net_models, _plan_collinear_merges
+
+    w = 0.2
+    straight = [((100 + 0.1 * k, 100), (100 + 0.1 * (k + 1), 100), "F.Cu", w) for k in range(20)]
+    diag = [
+        ((102 + 0.1 * k, 100 + 0.1 * k), (102 + 0.1 * (k + 1), 100 + 0.1 * (k + 1)), "F.Cu", w)
+        for k in range(10)
+    ]
+    # Pads well clear of the run so no step is hard-protected by a pad.
+    pads = [("A", 99, 100, 0.2, 0.2), ("B", 104, 102, 0.2, 0.2)]
+    lead_in = [((99, 100), (100, 100), "F.Cu", 0.3), ((103, 101), (104, 102), "F.Cu", 0.3)]
+    p = _board(tmp_path, pads, straight + diag + lead_in)
+    pcb = PCB.load(p)
+    (model,) = _build_net_models(pcb).values()
+    grazed = next(
+        i
+        for i, n in enumerate(model.nodes)
+        if n.kind == "seg" and _seg_ends(n) == ((101.9, 100), (102.0, 100))
+    )
+    assert model.overlap[grazed], "fixture: the diagonal must graze this step"
+    merged = _plan_collinear_merges(model, NetPlan(1), set())
+    assert grazed in merged
+
+
+def _seg_ends(n) -> tuple:
+    return tuple(tuple(round(v, 4) for v in pt) for pt in (n.a, n.b))
+
+
+def test_anchored_merge_keeps_a_zone_held_only_at_an_interior_joint(tmp_path):
+    """Anchored pass ``zones <= adj``: the run's interior joint is the only
+    track end inside a same-net zone (the zone also reaches pad C, so the
+    terminal partition alone would not notice).  Collapsing the run would
+    leave the zone with no track end in it."""
+    zone = (
+        '  (zone (net 1) (net_name "SIG") (layer "F.Cu") (uuid "z1") (hatch edge 0.5)\n'
+        "    (connect_pads (clearance 0.2)) (min_thickness 0.25)\n"
+        "    (fill (thermal_gap 0.5) (thermal_bridge_width 0.5))\n"
+        "    (polygon (pts (xy 101.8 99.5) (xy 102.2 99.5) (xy 102.2 103) (xy 101.8 103))))\n"
+    )
+    segs = [
+        ((100, 100), (102, 100)),
+        ((102, 100), (104, 100)),
+        ((102, 102.5), (104, 102.5)),  # pad C -> pad B, the other way round
+        ((104, 102.5), (104, 100)),
+    ]
+    pads = [("A", 100, 100), ("B", 104, 100), ("C", 102, 102.5)]
+    p = _append(_board(tmp_path, pads, segs), zone)
+    pcb, res = _run(p)
+    assert {((100, 100), (102, 100)), ((102, 100), (104, 100))} <= _seg_pairs(pcb)
+    assert res.stats["segments_removed"] == 0
+
+
+def test_anchored_merge_keeps_a_via_centred_on_its_layer(tmp_path):
+    """Anchored pass ``centred_layers``: V sits on the run's interior joint
+    and stays connected through a B.Cu track to V2 (at pad B), so the run
+    could collapse without disconnecting anything -- but V would lose its
+    only F.Cu track end on centre."""
+    segs = [
+        ((100, 100), (102, 100)),
+        ((102, 100), (104, 100)),
+        ((102, 100), (104, 100), "B.Cu"),
+    ]
+    # V3 grazes both 102->104 tracks, so loop removal may take neither.
+    p = _board(
+        tmp_path,
+        [("A", 100, 100), ("B", 104, 100)],
+        segs,
+        vias=[(102, 100), (104, 100), (103, 100.3)],
+    )
+    pcb, res = _run(p)
+    assert {((100, 100), (102, 100)), ((102, 100), (104, 100))} <= _seg_pairs(pcb)
+    assert res.stats["segments_removed"] == 0
+
+
+def test_anchored_merge_skips_a_run_touching_a_copper_arc(tmp_path):
+    """``_merge_unsafe_member`` (arc): both run members touch a copper arc,
+    an unmodelled join a lost interior joint could be feeding."""
+    segs = [((100, 100), (101, 100)), ((101, 100), (102, 100))]
+    p = _board(tmp_path, [("A", 100, 100, 0.2, 0.2), ("B", 102, 100, 0.2, 0.2)], segs)
+    _append(
+        p,
+        "  (arc (start 101 100.15) (mid 101.5 100.6) (end 102 101.5) (width 0.2) "
+        f'(layer "F.Cu") (net 1) (uuid "a-{next(_uid)}"))\n',
+    )
+    pcb, res = _run(p)
+    assert res.stats["segments_removed"] == 0
+    assert len(pcb.segments) == 2
+
+
+@pytest.mark.parametrize("syntax", ["(locked yes)", "legacy"])
+def test_locked_tracks_are_never_merged_or_removed(tmp_path, syntax):
+    """``_merge_unsafe_member`` (locked) and ``_is_protected``: a locked run is
+    left exactly as drawn, in both KiCad's ``(locked yes)`` and the KiCad 6
+    ``(segment locked ...)`` syntax."""
+    steps = [((100 + 0.25 * k, 100), (100 + 0.25 * (k + 1), 100)) for k in range(4)]
+    p = _board(tmp_path, [("A", 100, 100, 0.2, 0.2), ("B", 101, 100, 0.2, 0.2)], steps)
+    text = p.read_text()
+    if syntax == "legacy":
+        text = text.replace("  (segment (start", "  (segment locked (start")
+    else:
+        text = text.replace(
+            '(layer "F.Cu") (net 1) (uuid "s-', '(locked yes) (layer "F.Cu") (net 1) (uuid "s-'
+        )
+    p.write_text(text)
+    assert all(s.locked for s in PCB.load(p).segments)
+    pcb, res = _run(p)
+    assert res.stats == {"segments_removed": 0, "ends_snapped": 0}
+    assert len(pcb.segments) == 4
+
+
+def test_pure_pass_keeps_a_run_whose_copy_loops_back_to_nowhere(tmp_path):
+    """Pure pass ``copy == -1``: four 0.1 mm steps away from any pad, with a
+    (locked, so loop removal cannot take it) 0.4 mm track laid back over
+    them.  Merging would leave that track with a free end at the far point,
+    so the steps stay as they are."""
+    steps = [((100, 100 + 0.1 * k), (100, 100 + 0.1 * (k + 1))) for k in range(4)]
+    lead = ((100, 98), (100, 100))
+    back = ((100, 100.4), (100, 100))
+    p = _board(tmp_path, [("A", 100, 98, 0.2, 0.2)], [lead, *steps, back])
+    p.write_text(
+        p.read_text().replace(
+            "(start 100 100.4) (end 100 100)", "(start 100 100.4) (end 100 100) (locked yes)"
+        )
+    )
+    pcb, res = _run(p)
+    assert res.stats == {"segments_removed": 0, "ends_snapped": 0}
+    assert len(pcb.segments) == 6
