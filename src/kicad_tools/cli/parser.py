@@ -3523,6 +3523,36 @@ def _add_pcb_parser(subparsers) -> None:
         help="Also write an SVG overlay (removed red, added green, changed amber)",
     )
 
+    # pcb transplant (issue #8311)
+    pcb_transplant = pcb_subparsers.add_parser(
+        "transplant",
+        help="Copy the tracks/vias of named nets from one board revision onto another",
+        description="Replace DST's tracks and vias on the named nets with SRC's "
+        "(nets match by name; net numbers are remapped). All other DST content is "
+        "untouched and DST is never modified: the result is written to -o. Refused "
+        "when the pads of a named net sit at different positions in SRC and DST. "
+        "SRC and DST accept a path or a REV:path git spec.",
+    )
+    pcb_transplant.add_argument("src", help="SRC board: .kicad_pcb path or REV:path")
+    pcb_transplant.add_argument("dst", help="DST board: .kicad_pcb path or REV:path")
+    pcb_transplant.add_argument(
+        "--nets",
+        action="append",
+        required=True,
+        metavar="A,B",
+        help="Comma-separated net names to transplant (repeatable)",
+    )
+    pcb_transplant.add_argument("-o", "--output", help="Output .kicad_pcb path")
+    pcb_transplant.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Write nothing; print the change as a pcb diff of DST vs the result "
+        "(exit 0 none, 2 differs, 1 error)",
+    )
+    pcb_transplant.add_argument(
+        "--drc", action="store_true", help="Run kicad-cli DRC on the output (skipped if absent)"
+    )
+
     # pcb export-dsn
     pcb_export_dsn = pcb_subparsers.add_parser(
         "export-dsn",
