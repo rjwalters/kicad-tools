@@ -96,6 +96,21 @@ def test_overlap_only_off_centre_ends_are_snapped(tmp_path):
     assert sorted(s.end for s in PCB.load(out).segments) == [(105, 100), (105, 100)]
 
 
+def test_single_pad_net_loop_is_kept(tmp_path):
+    # Issue #8333: one-terminal nets have a vacuous partition guard; the whole
+    # loop used to be deleted, leaving the net with no copper.
+    loop = [
+        ((100, 100), (105, 100)),
+        ((105, 100), (105, 105)),
+        ((105, 105), (100, 105)),
+        ((100, 105), (100, 100)),
+    ]
+    p = _board(tmp_path, [("A", 100, 100)], loop)
+    pcb, res = _run(p)
+    assert len(pcb.segments) == 4
+    assert res.stats["segments_removed"] == 0
+
+
 def test_same_layer_loop_removes_longer_detour(tmp_path):
     segs = [
         ((100, 100), (102, 100)),
@@ -395,6 +410,8 @@ def test_removal_never_leaves_an_end_dangling_off_a_removed_body(tmp_path):
     # diagonal may legitimately go instead); never the 3-segment branch removal
     assert any(s.start == (104.2, 101.5) and s.end == (108.5, 105.5) for s in pcb.segments)
     assert res.stats["segments_removed"] <= 1
+    # and the via at (108, 102) keeps its B.Cu stub: never joined on one layer
+    assert any(s.start == (106.35, 103.5) for s in pcb.segments)
 
 
 def test_copper_arc_touching_a_detour_keeps_it(tmp_path):
@@ -729,3 +746,248 @@ def test_pure_pass_keeps_a_run_whose_copy_loops_back_to_nowhere(tmp_path):
     pcb, res = _run(p)
     assert res.stats == {"segments_removed": 0, "ends_snapped": 0}
     assert len(pcb.segments) == 6
+
+
+# ---------------------------------------------------------------------------
+# Issue #8323: the DRC referee must honour the board's own .kicad_dru
+# ---------------------------------------------------------------------------
+
+
+def _hv_board(tmp_path: Path, name: str = "hv") -> Path:
+    """Net HV track with an off-centre end beside its via, plus a SIG via.
+
+    The HV track is snapped onto its via centre by prune.  A custom DRU rule
+    (see ``_DRU``) governs the HV/SIG clearance.
+    """
+    header = HEADER.replace('(net 1 "SIG")', '(net 1 "SIG")\n  (net 2 "HV")')
+    pad = (
+        '  (footprint "X:P" (layer "F.Cu") (uuid "f-{r}") (at {x} 100)\n'
+        '    (property "Reference" "{r}" (at 0 0 0) (layer "F.SilkS"))\n'
+        '    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 2 "HV"))\n  )\n'
+    )
+    body = header + pad.format(r="A", x=100) + pad.format(r="B", x=110)
+    body += (
+        '  (segment (start 100 100) (end 104.8 100) (width 0.2) (layer "F.Cu") (net 2) '
+        '(uuid "s-hv1"))\n'
+        '  (segment (start 110 100) (end 105.2 100) (width 0.2) (layer "F.Cu") (net 2) '
+        '(uuid "s-hv2"))\n'
+        '  (via (at 105 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) '
+        '(uuid "v-hv"))\n'
+        '  (via (at 103 98) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) '
+        '(uuid "v-sig"))\n)\n'
+    )
+    p = tmp_path / f"{name}.kicad_pcb"
+    p.write_text(body)
+    return p
+
+
+_DRU = '(version 1)\n(rule "Reviewed clearance - HV" (constraint clearance (min 0.4mm)))\n'
+
+
+def test_worse_distinguishes_rule_and_nets_not_only_type():
+    from collections import Counter
+
+    from kicad_tools.pcb_prune import _worse
+
+    before = Counter({("clearance", "error", "default", ("A", "B")): 1})
+    swapped = Counter({("clearance", "error", "Reviewed clearance - HV", ("A", "B")): 1})
+    assert _worse(swapped, before)
+    assert not _worse(before, before)
+
+
+def _fake_drc(monkeypatch, tmp_path, violations):
+    """Make ``_drc_signature`` run without kicad-cli, on canned violations."""
+    from kicad_tools.cli import runner
+    from kicad_tools.drc.report import DRCReport
+    from kicad_tools.drc.violation import Severity, ViolationType  # noqa: F401
+
+    out = tmp_path / "fake-drc.json"
+    out.write_text("{}")
+    monkeypatch.setattr(runner, "find_kicad_cli", lambda: Path("kicad-cli"))
+    monkeypatch.setattr(
+        runner,
+        "run_drc",
+        lambda *a, **k: runner.KiCadCLIResult(success=True, output_path=out),
+    )
+    report = DRCReport(source_file="x", created_at=None, pcb_name="x", violations=list(violations))
+    monkeypatch.setattr(DRCReport, "load", classmethod(lambda cls, path: report))
+
+
+def _clearance(rule: str, nets: list[str]):
+    from kicad_tools.drc.violation import DRCViolation, Severity, ViolationType
+
+    return DRCViolation(
+        type=ViolationType.CLEARANCE,
+        type_str="clearance",
+        severity=Severity.ERROR,
+        message="clearance",
+        rule=rule,
+        nets=nets,
+    )
+
+
+def test_drc_signature_keeps_same_type_violations_with_different_rule_or_nets_apart(
+    monkeypatch, tmp_path
+):
+    """Fails on the old ``(type, severity)`` key: both collapse to one entry."""
+    from kicad_tools.pcb_prune import _drc_signature, _worse
+
+    board = tmp_path / "t.kicad_pcb"
+    board.write_text("")
+
+    _fake_drc(monkeypatch, tmp_path, [_clearance("default", ["A", "B"])])
+    before = _drc_signature(board)
+    # One violation fixed, a differently-ruled one on other nets introduced.
+    _fake_drc(monkeypatch, tmp_path, [_clearance("Reviewed clearance - HV", ["HV", "SIG"])])
+    after = _drc_signature(board)
+
+    assert before is not None and after is not None
+    assert set(before) != set(after)
+    assert sum(before.values()) == sum(after.values()) == 1
+    assert _worse(after, before)
+    assert not _worse(before, before)
+
+
+def test_missing_dru_is_reported_in_drc_note(tmp_path):
+    from kicad_tools.cli.runner import find_kicad_cli
+
+    if find_kicad_cli() is None:
+        pytest.skip("kicad-cli not available")
+    _, res = prune_board(_hv_board(tmp_path))
+    assert res.drc_verified
+    assert "hv.kicad_dru" in res.drc_note
+    assert "custom clearances were NOT evaluated" in res.drc_note
+
+
+def test_dru_present_is_not_flagged_and_output_has_no_new_error(tmp_path):
+    from kicad_tools.cli.runner import find_kicad_cli
+    from kicad_tools.pcb_prune import _drc_signature
+
+    if find_kicad_cli() is None:
+        pytest.skip("kicad-cli not available")
+    p = _hv_board(tmp_path)
+    p.with_suffix(".kicad_dru").write_text(_DRU)
+    pcb, res = prune_board(p)
+    assert res.drc_verified
+    assert "hv.kicad_dru" not in res.drc_note
+    out = tmp_path / "out" / "hv.kicad_pcb"
+    out.parent.mkdir()
+    pcb.save(out)
+    out.with_suffix(".kicad_dru").write_text(_DRU)
+    before, after = _drc_signature(p), _drc_signature(out)
+    assert before is not None and after is not None
+    assert not any(after[k] > before[k] for k in after if k[1] == "error")
+
+
+def test_anchor_in_body_loop_is_removed_8298(tmp_path):
+    """GNDD triangle: a trunk passes 0.05 mm from V1's centre; a stub from V1's
+    centre ends 0.05 mm from the trunk's centre line, on its body.  KiCad sees a
+    loop (via centre in trunk body + stub end in trunk body)."""
+    w = 0.2
+    body = HEADER + _fp("P1", 100, 100) + _fp("P2", 110, 100)
+    body += _seg((100, 100), (105, 100), "F.Cu", w)
+    body += _seg((105, 100), (110, 100), "F.Cu", w)
+    # V1 at (103, 100.05); stub down 0.5 and left 0.81 would end near the trunk
+    # only on a bent trunk; keep it simple: stub rises from V1 and ends on trunk
+    body += _seg((103, 100.05), (103, 100.5), "F.Cu", w)
+    body += _seg((103, 100.5), (103.8, 100.05), "F.Cu", w)
+    body += (
+        f'  (via (at 103 100.05) (size 0.4) (drill 0.2) (layers "F.Cu" "B.Cu") '
+        f'(net 1) (uuid "v-{next(_uid)}"))\n'
+    )
+    p = tmp_path / "gndd.kicad_pcb"
+    p.write_text(body + ")\n")
+    pcb, res = _run(p)
+    assert res.stats["segments_removed"] >= 1
+    assert any(s.start == (100, 100) for s in pcb.segments)
+
+
+def test_prune_keeps_micro_bridge_joint_for_optimize_8298(tmp_path):
+    """Two chains joined only by a ~1 um bridge: each chain end also lies in the
+    other's body, so a body-join cycle exists.  Prune must not trade the
+    endpoint join for an overlap-only one (optimize-traces models endpoint
+    joins only and would leave a dangling duplicate)."""
+    segs = [
+        ((100, 100), (105, 100)),
+        ((105, 100), (105.001, 100)),  # 1 um bridge
+        ((105.001, 100), (110, 105)),
+    ]
+    p = _board(tmp_path, [("A", 100, 100), ("B", 110, 105)], segs)
+    pcb, res = _run(p)
+    assert res.stats["segments_removed"] == 0
+    assert len(pcb.segments) == 3
+
+    from kicad_tools.router.optimizer import OptimizationConfig, TraceOptimizer
+    from kicad_tools.router.optimizer.pcb import optimize_pcb
+
+    out = tmp_path / "opt.kicad_pcb"
+    pcb.save(out)
+    cfg = OptimizationConfig()
+    opt = TraceOptimizer(cfg)
+    optimize_pcb(str(out), str(out), opt.optimize_segments, cfg)
+    after = PCB.load(str(out))
+    # still one connected run between the pads: no duplicate / dangling piece
+    xs = sorted({round(v, 3) for s in after.segments for v in (s.start[0], s.end[0])})
+    assert xs[0] == 100 and xs[-1] == 110
+    assert len(after.segments) <= 3
+    # every segment end is shared with another segment or sits on a pad
+    ends = [e for sg in after.segments for e in (sg.start, sg.end)]
+    for e in ends:
+        assert (
+            e in ((100, 100), (110, 105))
+            or sum(1 for o in ends if abs(o[0] - e[0]) < 2e-3 and abs(o[1] - e[1]) < 2e-3) >= 2
+        )
+
+
+def test_loop_closed_by_t_join_and_via_under_track_is_removed(tmp_path):
+    # Issue #8298, the board geometry: a trunk from pad A passes 0.05 mm from
+    # via V1's centre on its way to pad B; a stub leaves V1's centre and ends
+    # on the trunk's body (a T-join without a shared vertex).  KiCad joins
+    # both, so trunk + stub enclose a loop; the stub is the redundant part.
+    trunk = [
+        ((168.98, 100.0), (168.98, 98.5)),
+        ((168.98, 98.5), (169.48, 98.0)),
+        ((169.48, 98.0), (170.54, 98.0)),
+    ]
+    stub = [((169.74, 98.05), (169.74, 98.55)), ((169.74, 98.55), (168.93, 98.55))]
+    p = _board(
+        tmp_path,
+        [("A", 168.98, 100.0, 0.6, 0.6), ("B", 170.54, 98.0, 0.6, 0.6)],
+        trunk + stub,
+        vias=[(169.74, 98.05)],
+    )
+    pcb, res = _run(p)
+    assert res.stats["segments_removed"] == 2
+    left = {(s.start, s.end) for s in pcb.segments}
+    assert left == {(a, b) for a, b in trunk}
+    assert _connected(pcb, (168.98, 100.0), (170.54, 98.0))
+
+
+def test_t_join_end_is_not_a_clean_joint_for_removal(tmp_path):
+    # A run of short pieces whose ends each lie inside the piece after next
+    # (piece length below half the width) must not be thinned to
+    # overlap-only joints.
+    pts = [(100 + 0.07 * k, 100.0) for k in range(8)]
+    segs = [((pts[k][0], 100.0), (pts[k + 1][0], 100.0)) for k in range(7)]
+    segs += [((pts[-1][0], 100.0), (101.0, 100.0)), ((101.0, 100.0), (101.0, 101.0))]
+    p = _board(tmp_path, [("A", 100, 100, 0.3, 0.3), ("B", 101, 101, 0.3, 0.3)], segs)
+    pcb, res = _run(p)
+    ends = [s.start for s in pcb.segments] + [s.end for s in pcb.segments]
+    # every surviving joint is a shared vertex (or a pad)
+    for s in pcb.segments:
+        for e in (s.start, s.end):
+            assert ends.count(e) >= 2 or e in {(100, 100), (101, 101)}
+
+
+def test_removal_never_leaves_a_via_joined_on_one_layer(tmp_path):
+    # A loop A -> V (F.Cu), V -> W (B.Cu), W -> A (F.Cu): removing any part
+    # leaves a via joined on only one layer (KiCad via_dangling).
+    segs = [
+        ((100, 100), (105, 100)),
+        ((105, 100), (105, 105), "B.Cu"),
+        ((105, 105), (100, 105), "B.Cu"),
+        ((100, 105), (100, 100)),
+    ]
+    p = _board(tmp_path, [("A", 100, 100)], segs, vias=[(105, 100), (100, 105)])
+    _pcb, res = _run(p)
+    assert res.stats["segments_removed"] == 0

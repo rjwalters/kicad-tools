@@ -57,6 +57,7 @@ from typing import Any
 from kicad_tools.schema.pcb import PCB, Pad, Segment, _mm_atom
 
 #: End-to-centre distance (mm) at/below which an end counts as centred.
+_MICRO_BRIDGE = 0.01  # mm: a member this short is a bridge, not a step
 CENTRE_TOL = 1e-3
 #: Coordinate tolerance (mm) for two track endpoints to count as one point.
 JOIN_TOL = 2e-6
@@ -228,6 +229,12 @@ class _NetModel:
         self.nodes = nodes
         n = len(nodes)
         self.adj: list[set[int]] = [set() for _ in range(n)]
+        #: Issue #8298: anchor-in-body joins (track end / via / pad centre inside
+        #: another track's body).  Used only to *find* cycles; never to justify a
+        #: removal, because other tools only model endpoint joins.
+        self.badj: list[set[int]] = [set() for _ in range(n)]
+        #: per segment: tracks whose body holds (start, end) without a shared endpoint
+        self.banch: list[list[set[int]]] = [[set(), set()] for _ in range(n)]
         #: per segment: nodes anchored at (start, end)
         self.anch: list[list[set[int]]] = [[set(), set()] for _ in range(n)]
         self.terminals = [i for i, nd in enumerate(nodes) if nd.terminal]
@@ -287,11 +294,26 @@ class _NetModel:
                         self.anch[i][ea].add(j)
                         self.anch[j][eb].add(i)
                         hit = True
+            # Issue #8298: KiCad also connects a track whose end (anchor) lies
+            # inside another same-layer track's body.
+            if a.layers == b.layers:
+                for x, y, ix, iy in ((a, b, i, j), (b, a, j, i)):
+                    for ex, px in enumerate((x.a, x.b)):
+                        if any(_same_pt(px, q) for q in (y.a, y.b)):
+                            continue
+                        if _pt_seg_dist(px, y.a, y.b) <= y.radius:
+                            self.badj[ix].add(iy)
+                            self.badj[iy].add(ix)
+                            self.banch[ix][ex].add(iy)
             if hit:
                 self.adj[i].add(j)
                 self.adj[j].add(i)
             return
         if a.kind == "seg":
+            # Issue #8298: a via / pad centre inside a track body is a join.
+            if b.kind in ("via", "pad") and _pt_seg_dist(b.a, a.a, a.b) <= a.radius:
+                self.badj[i].add(j)
+                self.badj[j].add(i)
             for ea, pa in enumerate((a.a, a.b)):
                 if b.kind == "zone":
                     ok = _in_polygon(pa, b.ref.polygon)
@@ -323,6 +345,12 @@ class _NetModel:
             self.adj[k].discard(i)
             for ends in self.anch[k]:
                 ends.discard(i)
+        for k in list(self.badj[i]):
+            self.badj[k].discard(i)
+            for ends in self.banch[k]:
+                ends.discard(i)
+        self.banch[i] = [set(), set()]
+        self.badj[i] = set()
         self.adj[i] = set()
         self.anch[i] = [set(), set()]
         for k in range(len(self.nodes)):
@@ -378,7 +406,7 @@ class _NetModel:
 
     # -- queries -------------------------------------------------------------
 
-    def components(self, removed: set[int]) -> list[int]:
+    def components(self, removed: set[int], body: bool = False) -> list[int]:
         comp = [-1] * len(self.nodes)
         cid = 0
         for s in range(len(self.nodes)):
@@ -388,7 +416,7 @@ class _NetModel:
             comp[s] = cid
             while stack:
                 u = stack.pop()
-                for v in self.adj[u]:
+                for v in (self.adj[u] | self.badj[u]) if body else self.adj[u]:
                     if v not in removed and comp[v] == -1:
                         comp[v] = cid
                         stack.append(v)
@@ -403,20 +431,20 @@ class _NetModel:
         return frozenset(frozenset(g) for g in groups.values())
 
     def has_cycle(self) -> bool:
-        edges = sum(len(a) for a in self.adj) // 2
-        comps = max(self.components(set()), default=-1) + 1
+        edges = sum(len(a | b) for a, b in zip(self.adj, self.badj, strict=True)) // 2
+        comps = max(self.components(set(), body=True), default=-1) + 1
         return edges - len(self.nodes) + comps > 0
 
     def hard_anchors(self, i: int, end: int) -> set[int]:
         """Anchors of one end of segment ``i`` other than zones (fill may void)."""
-        return {k for k in self.anch[i][end] if self.nodes[k].kind != "zone"}
+        return {k for k in self.anch[i][end] | self.banch[i][end] if self.nodes[k].kind != "zone"}
 
     def end_ok(self, i: int, removed: set[int]) -> bool:
         """Is each end of segment ``i`` still anchored to something alive
         (a zone outline does not count)?"""
         return all(
-            any(k not in removed and self.nodes[k].kind != "zone" for k in ends)
-            for ends in self.anch[i]
+            any(k not in removed and self.nodes[k].kind != "zone" for k in a | b)
+            for a, b in zip(self.anch[i], self.banch[i], strict=True)
         )
 
     def clean_end(self, i: int, end: int, removed: set[int]) -> bool:
@@ -471,6 +499,23 @@ class _NetModel:
             if k in after or self.nodes[k].kind not in ("via", "pad"):
                 continue
             lost = self.centred_layers(k, before) - self.centred_layers(k, after)
+            # Only a surviving track end resting inside the via / pad with no
+            # track-end partner is the off-centre joint this guards against; a
+            # track passing over it, or ending at a corner joint (a body
+            # join, issue #8298), is not.
+            if lost and not any(
+                j not in after
+                and self.nodes[j].kind == "seg"
+                and any(
+                    _contains(self.nodes[k], pt)
+                    and not any(
+                        self.nodes[q].kind == "seg" and q not in after for q in self.anch[j][x]
+                    )
+                    for x, pt in enumerate((self.nodes[j].a, self.nodes[j].b))
+                )
+                for j in self.adj[k]
+            ):
+                continue
             if any(
                 j not in after and self.nodes[j].kind == "seg" and lost & set(self.nodes[j].layers)
                 for j in self.adj[k]
@@ -478,7 +523,7 @@ class _NetModel:
                 return True
         return False
 
-    def still_joined(self, touched: set[int], removed: set[int]) -> bool:
+    def still_joined(self, touched: set[int], removed: set[int], body: bool = False) -> bool:
         """Are all live nodes in ``touched`` in one component once ``removed``
         is gone, using only track / via / pad joins?
 
@@ -490,7 +535,7 @@ class _NetModel:
         live = [k for k in touched if k not in removed and k not in zones]
         if len(live) <= 1:
             return True
-        comp = self.components(removed | zones)
+        comp = self.components(removed | zones, body=body)
         return len({comp[k] for k in live}) == 1
 
     def strands_end(self, group: set[int], removed: set[int]) -> bool:
@@ -499,7 +544,7 @@ class _NetModel:
         gone = removed | group
         for g in group:
             n = self.nodes[g]
-            for k in self.overlap[g] - gone:
+            for k in (self.overlap[g] | self.adj[g]) - gone:
                 o = self.nodes[k]
                 if o.kind != "seg":
                     continue
@@ -508,6 +553,30 @@ class _NetModel:
                         self.hard_anchors(k, x) - gone
                     ):
                         return True
+        return False
+
+    def _via_layers(self, v: int, gone: set[int]) -> set[str]:
+        """Layers a via is still joined on through live segments / pads."""
+        out: set[str] = set()
+        for k in self.adj[v] - gone:
+            o = self.nodes[k]
+            if o.kind == "seg":
+                out.update(o.layers)
+            elif o.kind == "pad":
+                out.update(("*a", "*b") if "*" in o.layers else o.layers)
+        return out
+
+    def strands_via_layer(self, group: set[int], removed: set[int]) -> bool:
+        """Would removing ``group`` leave a via joined on fewer than two layers
+        that was joined on two or more (a ``via_dangling``, Issue #8298)?"""
+        gone = removed | group
+        for g in group:
+            for v in self.adj[g]:
+                if self.nodes[v].kind != "via" or v in gone:
+                    continue
+                before = len(self._via_layers(v, removed))
+                if before >= 2 and len(self._via_layers(v, gone)) < 2:
+                    return True
         return False
 
     def offcentre_end(self, i: int) -> bool:
@@ -622,7 +691,11 @@ def _group_for(model: _NetModel, seed: int, removed: set[int]) -> set[int] | Non
     if not model.end_ok(seed, trial):
         return None
     group = {seed}
-    work = [j for j in model.adj[seed] if model.nodes[j].kind == "seg" and j not in trial]
+    work = [
+        j
+        for j in model.adj[seed] | model.badj[seed]
+        if model.nodes[j].kind == "seg" and j not in trial
+    ]
     while work:
         j = work.pop()
         if j in group or j in removed:
@@ -632,7 +705,11 @@ def _group_for(model: _NetModel, seed: int, removed: set[int]) -> set[int] | Non
             if model.hard_protected[j]:
                 return None
             group.add(j)
-            work.extend(k for k in model.adj[j] if model.nodes[k].kind == "seg" and k not in cur)
+            work.extend(
+                k
+                for k in model.adj[j] | model.badj[j]
+                if model.nodes[k].kind == "seg" and k not in cur
+            )
     return group
 
 
@@ -837,6 +914,12 @@ def _plan_collinear_merges(model: _NetModel, plan: NetPlan, removed: set[int]) -
         # (issue #8278: the diagonal corner of a grid-step route grazes the
         # first few 0.1 mm steps of the straight run it turns into).
         outside = set().union(*(model.overlap[m] for m in run)) - members - removed
+        # A micro-bridge member (~um, issue #8298) holds a neighbour only at
+        # a coincidence the optimizer does not model: leave such runs alone.
+        if outside and any(
+            math.dist(model.nodes[m].a, model.nodes[m].b) < _MICRO_BRIDGE for m in run
+        ):
+            continue
         if outside and not model.still_joined(outside | {s}, removed):
             continue
         if any(
@@ -964,6 +1047,8 @@ def _plan_anchored_merges(
             continue
         if any(_merge_unsafe_member(model, m) for m in run):
             continue
+        if any(math.dist(model.nodes[m].a, model.nodes[m].b) < _MICRO_BRIDGE for m in run):
+            continue  # a micro-bridge joint stays for optimize-traces (#8298)
         touched: set[int] = set()
         for m in run:
             touched |= model.adj[m] | model.overlap[m]
@@ -1025,7 +1110,10 @@ def _plan_net(model: _NetModel, net_number: int) -> NetPlan:
     removed: set[int] = set()
     seg_ids = [i for i, n in enumerate(model.nodes) if n.kind == "seg"]
 
-    if model.has_cycle():
+    # A net with fewer than two terminals has at most one partition group, so
+    # the "partition unchanged" guard is vacuous and a loop would be deleted
+    # wholesale, leaving the net with no copper (Issue #8333).
+    if len(model.terminals) >= 2 and model.has_cycle():
 
         def _key(group: set[int]) -> tuple[int, float]:
             # Prefer the branch with an off-centre end, then the longer detour.
@@ -1051,11 +1139,17 @@ def _plan_net(model: _NetModel, net_number: int) -> NetPlan:
                         continue
                 # Endpoint neighbours *and* body-touching neighbours: an
                 # unmodelled overlap join must not be what holds anything.
+                strict = {k for g in group for k in model.adj[g]} - group
                 touched = {k for g in group for k in model.adj[g] | model.overlap[g]} - group
                 if (
                     model.partition(removed | group) != baseline
-                    or not model.still_joined(touched, removed | group)
+                    # Endpoint joins alone must keep the neighbours joined (a
+                    # removal may never leave a joint held only by overlap);
+                    # anchor-in-body joins may only add to that (Issue #8298).
+                    or not model.still_joined(strict, removed | group)
+                    or not model.still_joined(touched, removed | group, body=True)
                     or model.strands_end(group, removed)
+                    or model.strands_via_layer(group, removed)
                     or model.degrades_ends(touched, removed, removed | group)
                     or model.decentres(touched, removed, removed | group)
                 ):
@@ -1167,10 +1261,18 @@ def _drc_signature(pcb_path: Path) -> Counter | None:
     report = DRCReport.load(result.output_path)
     sig: Counter = Counter()
     for v in report.violations:
+        # Key on the rule and nets as well as the type: a custom ``.kicad_dru``
+        # clearance error between two nets must not be masked by an unrelated
+        # clearance error that the edit happened to fix (issue #8323).
         sig[
-            (v.type_str, v.severity.value if hasattr(v.severity, "value") else str(v.severity))
+            (
+                v.type_str,
+                v.severity.value if hasattr(v.severity, "value") else str(v.severity),
+                v.rule or "",
+                tuple(sorted(n for n in v.nets if n)),
+            )
         ] += 1
-    sig[("unconnected", "error")] += len(report.unconnected_items)
+    sig[("unconnected", "error", "", ())] += len(report.unconnected_items)
     return sig
 
 
@@ -1213,9 +1315,12 @@ def prune_board(
             trial_path = Path(tmp) / "trial.kicad_pcb"
             # DRC must run with the board's own rules (clearances, netclasses).
             src = Path(pcb_path)
+            missing: list[str] = []
             for ext in (".kicad_pro", ".kicad_dru"):
                 if src.with_suffix(ext).exists():
                     shutil.copy(src.with_suffix(ext), Path(tmp) / f"trial{ext}")
+                else:
+                    missing.append(src.with_suffix(ext).name)
             trial_path.write_text(src.read_text())
             baseline = _drc_signature(trial_path)
             if baseline is None:
@@ -1224,6 +1329,11 @@ def prune_board(
                 )
             else:
                 drc_verified, note = True, "verified with kicad-cli pcb drc --refill-zones"
+                if missing:
+                    note += (
+                        f" (no {' / '.join(missing)} next to the board: checked against "
+                        "default rules only, custom clearances were NOT evaluated)"
+                    )
 
                 def _trial_ok(group: list[NetPlan]) -> bool:
                     trial = PCB.load(pcb_path)

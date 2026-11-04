@@ -13,6 +13,35 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-11-04
+
+- **PR #8334**: fix: skip prune loop removal on nets with fewer than two terminals
+- **PR #8326**: fix: cross-check optimize-traces --drc-aware against kicad-cli before/after
+- **PR #8306**: feat: add closest-point witness to kct creepage rows
+- **Issue #8333** (closed): pcb prune: loop removal deletes all copper on a single-pad net
+- **Issue #8322** (closed): optimize-traces --drc-aware reports "no regressions" while kicad-cli (project DRU) finds 1→17 clearance errors and creepage 4→33
+- **Issue #8301** (closed): kct creepage: report a location witness (closest points + items) for every pair row, including board rows
+- **PR #8329**: fix: straighten pad-entry jogs and match gate pad-touch radius to component labels
+- **PR #8315**: feat: add report-driven rip-up and dangling removal to pcb strip
+- **PR #8305**: fix: keep safe optimize edits per region, straighten pad-entry jogs, model body joins in prune
+- **PR #8304**: feat(optimize-traces): switch every pass off, match --net exactly, list touched nets
+- **Issue #8325** (closed): optimize-traces: straighten a jog just before a pad end (split from #8298 AC 2)
+- **Issue #8309** (closed): pcb strip: report-driven rip-up (remove copper named by a DRC/creepage report) and iterative dangling removal
+- **Issue #8299** (closed): optimize-traces: rewrites a net with every reported pass disabled (unflagged detour pass); --net substring match edits unrequested nets
+- **Issue #8298** (closed): optimize-traces/prune: one unsafe edit discards a net's jog fixes; pad-entry jogs; anchor-in-shape loops survive prune
+- **PR #8324**: fix: derive pcb_retune UUID seed from input board and selected nets
+- **PR #8294**: fix(creepage): measure out-of-zone copper against in-zone pads in attach-zone residual
+- **PR #8290**: feat: report measured freed width, re-occupation and rip-up reason in relief diagnostics
+- **PR #8283**: fix(route): merge _partial output, join pad centres, list partial-net stubs
+- **PR #8280**: fix: apply census attach-zone rule in the router's pairwise HV gate
+- **Issue #8321** (closed): pcb_retune: fixed UUID_SEED may write duplicate UUIDs on repeated retunes (same pattern #8302 fixed)
+- **Issue #8292** (closed): creepage: --waive-attach-zone residual clips both nets, so out-of-zone copper vs in-zone foreign copper is never measured (router flags it, census waives)
+- **Issue #8277** (closed): kct route --complete commits copper that kct creepage (same attach-zone builder) fails: router vs census disagree on pad-adjacent HV pairs
+- **Issue #8270** (closed): kct route: timeout/best-so-far checkpoint emits one segment per grid cell (98% < 0.1 mm), off-centre pad joins, unmarked partial stubs
+- **Issue #8256** (closed): Relief rescue: measure freed width, re-occupation and rip-up reason (follow-up to #8248)
+- **PR #8302**: fix: make optimize-traces UUIDs deterministic so refilled board order is reproducible
+- **Issue #8297** (closed): main red: test_connectivity_decisions_identical_across_hash_seeds fails since #8287 merged (merge race with #8289)
+
 ### 2026-11-03
 
 - **PR #8289**: test: pin optimize-traces connectivity decisions across hash seeds
@@ -49,6 +78,17 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - **Issue #8219** (closed): OffAngleSegmentWarning reports 'net 0' on name-only boards and repeats each warning
 - **PR #8226**: fix: keep vias that tie pads or same-net pours during via minimisation
 - **Issue #8215** (closed): optimizer via minimization removes vias that are still needed (unconnected pour stubs)
+- **PR #8291**: chore: tool updates — Loom 0.19.1260, Repo Skills 0.25.4, squad 0.19.24
+- **Issue #8286** (closed): optimize-traces leaves a stale zone fill: kct check reports clearance_segment_zone that kicad-cli --refill-zones does not
+- **Issue #8282** (closed): Exempt BOM refs can pick up an LCSC number from the CSV merge source
+- **Issue #8271** (closed): optimize-traces: dedupe exact-duplicate segments it emits (split from #8250)
+- **Issue #8269** (closed): optimize-traces: remove lateral jogs (a short sideways step between parallel runs) by sliding the step to the next corner
+- **Issue #8262** (closed): kct check --output JSON lacks summary.attach_zone_exemption that the text output prints
+- **Issue #8261** (closed): Tapeout Gate 4 cannot declare intentionally non-LCSC BOM lines (consigned, hand-solder); bom_lcsc_values WARN always forces refusal
+- **Issue #8260** (closed): kct export: LCSC merge reads only a BOM CSV already in the output dir; undocumented in help and tapeout/readiness skills
+- **Issue #8258** (closed): kct route --timeout: timeout.json 'checkpoint' names a moved file when -o is relative; --export-failed-nets not written on timeout
+- **Issue #8250** (closed): optimize-traces still breaks connectivity on finished boards: 45° chamfer at shared vertices, keepouts/NPTH not modelled, no connectivity check
+- **Issue #8248** (closed): kct route: targeted rip-up frees the witnessed blocker but the access-loss victim still has no relief path (TO-220 centre pins under HV clearance), 0/15 rescued per iteration
 
 ### 2026-11-02
 

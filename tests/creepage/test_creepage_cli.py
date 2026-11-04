@@ -630,6 +630,23 @@ def test_attach_zone_does_not_mask_shortfall_outside_zone(tmp_path, capsys):
     assert rc != 0
 
 
+def test_attach_zone_cross_term_catches_out_of_zone_via(tmp_path, capsys):
+    """#8292: out-of-zone foreign copper vs an in-zone pad gates the pair."""
+    pcb = _write(tmp_path, board_attach_zone_source(outside_shortfall=False, edge_via=True))
+    rc = _run(_attach_argv(pcb, _hv_map_file(tmp_path), "--waive-attach-zone"))
+    payload = json.loads(capsys.readouterr().out)
+    row = _gnd_row(payload)
+    assert row["relationship"] == "attach_zone"
+    assert row["residual_pass"] is False
+    assert "waived" not in row
+    assert row["residual_creepage_mm"] == pytest.approx(0.7, abs=0.02)
+    assert row["residual_witness_mm"][0] == pytest.approx(
+        10.65, abs=0.05
+    )  # pad-edge/via-edge midpoint
+    assert payload["gate_passed"] is False
+    assert rc != 0
+
+
 # ---------------------------------------------------------------------------
 # #8232: a same_footprint minimum must not hide a board-level approach.
 # ---------------------------------------------------------------------------
@@ -718,3 +735,33 @@ def test_board_gap_on_layer_without_sharing_footprint_reported(tmp_path, capsys)
     assert abs(board["creepage_mm"] - 0.8) < 0.05
     assert payload["gate_passed"] is False
     assert rc == 1
+
+
+# ---------------------------------------------------------------------------
+# --witness (Issue #8301)
+# ---------------------------------------------------------------------------
+
+
+def test_json_rows_all_carry_witness(tmp_path, capsys):
+    pcb = _write(tmp_path, board_source(with_slot=False))
+    ncm = _hv_map_file(tmp_path)
+    _run(["creepage", str(pcb), "--net-class-map", str(ncm), "--min", "1.5", "--format", "json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["pairs"]
+    for row in payload["pairs"]:
+        assert set(row["witness"]) == {"point_a_mm", "point_b_mm", "item_a", "item_b"}
+
+
+def test_witness_column_only_with_flag(tmp_path, capsys):
+    pcb = _write(tmp_path, board_source(with_slot=False))
+    ncm = _hv_map_file(tmp_path)
+    base = ["creepage", str(pcb), "--net-class-map", str(ncm), "--min", "1.5"]
+    _run(base)
+    plain = capsys.readouterr().out
+    _run([*base, "--witness"])
+    with_w = capsys.readouterr().out
+    assert "Witness" not in plain
+    assert "Edge.Cuts" not in plain
+    assert "Witness" in with_w
+    assert "11.000," in with_w
+    assert "Edge.Cuts" in with_w

@@ -88,7 +88,7 @@ if TYPE_CHECKING:
     from kicad_tools.router.layer_intent import LayerIntentViolation
     from kicad_tools.router.net_names import NetClassMapResolution
     from kicad_tools.router.pairwise_clearance import AttachZone, PadGeometry, PairwiseViolation
-    from kicad_tools.router.primitives import Route
+    from kicad_tools.router.primitives import Pad, Route
     from kicad_tools.router.reporting import RouteAttemptResult
     from kicad_tools.router.routing_plan import OverflowReport, RoutingPlan
 
@@ -2809,13 +2809,15 @@ def _copy_checkpoint_constraint_sidecars(source: Path, output: Path) -> None:
         atomic_write_text(destination, content)
 
 
-def _merge_checkpoint_routes(routes):
+def _merge_checkpoint_routes(routes, router=None):
     """Collapse per-grid-cell segments of a checkpoint snapshot (Issue #8270).
 
     Works on a deep copy, so the live ``best_routes`` the router keeps
-    iterating on is never mutated.  Copper geometry is unchanged (same-width,
-    same-layer, collinear chains only).  On any failure the raw routes are
-    returned.
+    iterating on is never mutated.  Copper geometry is unchanged by the merge
+    (same-width, same-layer, collinear chains only).  When ``router`` is given,
+    a route end that reaches its pad through a sub-grid jog is then joined to
+    the exact pad centre, but only if the direct join is clearance-legal.  On
+    any failure the raw routes are returned.
     """
     import copy
     from types import SimpleNamespace
@@ -2825,9 +2827,315 @@ def _merge_checkpoint_routes(routes):
     try:
         view = SimpleNamespace(routes=copy.deepcopy(list(routes)))
         merge_collinear_same_width(view)
+        if router is not None:
+            _join_route_ends_to_pad_centres(view.routes, router)
         return view.routes
     except Exception:  # noqa: BLE001 - checkpoints must never abort routing
         return routes
+
+
+def _ends_at_point(routes, net: int, x: float, y: float, tol: float = 1e-4) -> int:
+    """Count same-net segment ends (1 each) and vias (2 each) at ``(x, y)``."""
+    n = 0
+    for r in routes:
+        if r.net != net:
+            continue
+        for s in r.segments:
+            for px, py in ((s.x1, s.y1), (s.x2, s.y2)):
+                if abs(px - x) <= tol and abs(py - y) <= tol:
+                    n += 1
+        for v in r.vias:
+            if abs(v.x - x) <= tol and abs(v.y - y) <= tol:
+                n += 2
+    return n
+
+
+def _join_route_ends_to_pad_centres(routes, router) -> int:
+    """Replace sub-grid jogs at route ends with a direct pad-centre join (#8270).
+
+    ``routes`` is a throwaway copy.  A route end within about one grid step of
+    a same-net pad centre (but not on it) is moved onto the centre, absorbing a
+    separate jog segment when one exists.  The candidate must clear every
+    other-net segment, via and pad on its layer; otherwise it is left alone.
+    Clearance is checked against ``rules.trace_clearance`` only: net-class
+    clearances, board-edge clearance and preserved input copper are not
+    considered, which is acceptable for a checkpoint fix-up.
+    Returns the number of ends joined.
+    """
+    import math
+
+    from kicad_tools.router.clearance_shapes import (
+        pad_shape,
+        segment_shape,
+        shapes_clear,
+        via_shape,
+    )
+    from kicad_tools.router.primitives import Segment
+    from kicad_tools.router.quantize import dogleg_points
+
+    pads = list(getattr(router, "pads", {}).values())
+    if not pads:
+        return 0
+    reach = 1.5 * float(getattr(router.grid, "resolution", 0.1))
+    clearance = float(router.rules.trace_clearance)
+
+    def clear(cand: Segment, net: int) -> bool:
+        shape = segment_shape(cand)
+        for other in routes:
+            if other.net == net:
+                continue
+            for seg in other.segments:
+                if seg.layer == cand.layer and not shapes_clear(
+                    shape, segment_shape(seg), clearance
+                ):
+                    return False
+            for via in other.vias:
+                if not shapes_clear(shape, via_shape(via), clearance):
+                    return False
+        for pad in pads:
+            if pad.net == net:
+                continue
+            if (pad.through_hole or pad.layer == cand.layer) and not shapes_clear(
+                shape, pad_shape(pad), clearance
+            ):
+                return False
+        return True
+
+    joined = 0
+    for route in routes:
+        if route.is_escape or not route.segments:
+            continue
+        for at_start in (True, False):
+            segs = route.segments
+            seg = segs[0] if at_start else segs[-1]
+            gx, gy = (seg.x1, seg.y1) if at_start else (seg.x2, seg.y2)
+            best = None
+            for pad in pads:
+                if pad.net != route.net or not (pad.through_hole or pad.layer == seg.layer):
+                    continue
+                d = math.hypot(pad.x - gx, pad.y - gy)
+                if d <= reach and (best is None or d < best[0]):
+                    best = (d, pad)
+            if best is None:
+                continue
+            pad = best[1]
+            # The end being rewritten must not be a junction with anything else.
+            gkey = (round(gx, 4), round(gy, 4))
+            if any(
+                s is not seg
+                and gkey in ((round(s.x1, 4), round(s.y1, 4)), (round(s.x2, 4), round(s.y2, 4)))
+                for r in routes
+                if r.net == route.net
+                for s in r.segments
+            ):
+                continue
+            if any(
+                round(v.x, 4) == round(gx, 4) and round(v.y, 4) == round(gy, 4)
+                for r in routes
+                if r.net == route.net
+                for v in r.vias
+            ):
+                continue
+            # A separate jog segment (pad centre -> grid point) is absorbed, but
+            # only when the next segment continues head to tail from the joint
+            # and nothing else of the net ends on that joint (the same
+            # ``ends <= 2`` rule ``merge_collinear_same_width`` applies).
+            # ``Route.segments`` order is not a contract, so this is checked
+            # rather than assumed; otherwise the end-only rewrite is used.
+            jog = None
+            if len(segs) > 1:
+                nxt = segs[1] if at_start else segs[-2]
+                jx, jy = (seg.x2, seg.y2) if at_start else (seg.x1, seg.y1)
+                nx, ny = (nxt.x1, nxt.y1) if at_start else (nxt.x2, nxt.y2)
+                if (
+                    nxt.layer == seg.layer
+                    and abs(nxt.width - seg.width) < 1e-6
+                    and math.hypot(seg.x2 - seg.x1, seg.y2 - seg.y1) <= reach
+                    and abs(nx - jx) <= 1e-4
+                    and abs(ny - jy) <= 1e-4
+                    and _ends_at_point(routes, route.net, jx, jy) <= 2
+                ):
+                    far = (nxt.x2, nxt.y2) if at_start else (nxt.x1, nxt.y1)
+                    jog = (nxt, far)
+
+            def make(p, q, seg=seg) -> Segment:
+                return Segment(
+                    x1=p[0],
+                    y1=p[1],
+                    x2=q[0],
+                    y2=q[1],
+                    width=seg.width,
+                    layer=seg.layer,
+                    net=seg.net,
+                    net_name=seg.net_name,
+                )
+
+            def collinear(
+                a: tuple[float, float], b: tuple[float, float], c: tuple[float, float]
+            ) -> bool:
+                """True if ``b`` lies on the ray a->c extended past ``a`` (same heading)."""
+                abx, aby = b[0] - a[0], b[1] - a[1]
+                acx, acy = c[0] - a[0], c[1] - a[1]
+                lab, lac = math.hypot(abx, aby), math.hypot(acx, acy)
+                if lab < 1e-9 or lac < 1e-9:
+                    return False
+                return bool(
+                    abs(abx * acy - aby * acx) / (lab * lac) < 1e-6 and (abx * acx + aby * acy) > 0
+                )
+
+            pc = (pad.x, pad.y)
+            if jog is not None:
+                nxt, far = jog
+                joint = (seg.x2, seg.y2) if at_start else (seg.x1, seg.y1)
+                # Merging jog + run into one pad->far segment is only safe when
+                # it leaves the run's heading unchanged (Issue #8296).
+                if collinear(pc, joint, far):
+                    merged = make(pc, far) if at_start else make(far, pc)
+                    if not clear(merged, route.net):
+                        continue
+                    route.segments = [merged, *segs[2:]] if at_start else [*segs[:-2], merged]
+                else:
+                    # Rewrite only the end jog as a 45-aligned dogleg; the
+                    # merged run itself is never moved.
+                    pts = dogleg_points(pc[0], pc[1], joint[0], joint[1])
+                    legs = [
+                        make(pts[i], pts[i + 1])
+                        for i in range(len(pts) - 1)
+                        if math.hypot(pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1]) > 1e-9
+                    ]
+                    if not at_start:
+                        legs = [make((l.x2, l.y2), (l.x1, l.y1)) for l in reversed(legs)]
+                    if not all(clear(l, route.net) for l in legs):
+                        continue
+                    route.segments = [*legs, *segs[1:]] if at_start else [*segs[:-1], *legs]
+            else:
+                if best[0] < 1e-6:
+                    continue  # already on the centre, nothing to absorb
+                anchor = (seg.x2, seg.y2) if at_start else (seg.x1, seg.y1)
+                end = (gx, gy)
+                if collinear(anchor, end, pc):
+                    # Pad centre lies straight ahead on the run's own heading:
+                    # extend it (heading unchanged).
+                    cand = make(pc, anchor) if at_start else make(anchor, pc)
+                    if not clear(cand, route.net):
+                        continue
+                    route.segments = [cand, *segs[1:]] if at_start else [*segs[:-1], cand]
+                else:
+                    # Keep the run intact; add a 45-aligned dogleg from its end.
+                    pts = dogleg_points(end[0], end[1], pc[0], pc[1])
+                    legs = [
+                        make(pts[i], pts[i + 1])
+                        for i in range(len(pts) - 1)
+                        if math.hypot(pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1]) > 1e-9
+                    ]
+                    if at_start:
+                        legs = [make((l.x2, l.y2), (l.x1, l.y1)) for l in reversed(legs)]
+                    if not all(clear(l, route.net) for l in legs):
+                        continue
+                    route.segments = [*legs, *segs] if at_start else [*segs, *legs]
+            joined += 1
+    return joined
+
+
+def _partial_net_stubs(router, tol: float = 1e-3) -> list[dict]:
+    """Dangling route endpoints per net: the stubs a partial result leaves (#8270).
+
+    An endpoint is dangling when, within ``tol`` mm, it lies on no same-net pad
+    and no other same-net segment end on its layer.  A via counts as a
+    connection only when same-net copper meets it on another layer (a segment
+    end there, or a pad on another layer); a via with copper on one side only
+    is itself the dangling end.  Each entry is ``{"net", "layer", "x", "y"}``.
+    """
+    from kicad_tools.router.primitives import pad_half_extents
+
+    stubs: list[dict] = []
+    by_net: dict[int, list] = {}
+    for route in router.routes:
+        by_net.setdefault(route.net, []).append(route)
+    pads = list(getattr(router, "pads", {}).values())
+
+    def near(ax: float, ay: float, bx: float, by: float) -> bool:
+        return abs(ax - bx) <= tol and abs(ay - by) <= tol
+
+    for net, routes in by_net.items():
+        # (x, y, layer name, net name) for every segment endpoint of the net.
+        ends: list[tuple[float, float, str, str]] = []
+        for route in routes:
+            for s in route.segments:
+                name = s.net_name or route.net_name
+                ends.append((s.x1, s.y1, s.layer.name, name))
+                ends.append((s.x2, s.y2, s.layer.name, name))
+        vias = [v for r in routes for v in r.vias]
+        net_pads = [p for p in pads if p.net == net]
+        # Spatial hash: neighbouring cells cover every endpoint within ``tol``.
+        cell = max(tol, 1e-6)
+        grid: dict[tuple[int, int], list[int]] = {}
+        for i, (x, y, _l, _n) in enumerate(ends):
+            grid.setdefault((int(x // cell), int(y // cell)), []).append(i)
+
+        def neighbours(i: int) -> list[int]:
+            x, y = ends[i][0], ends[i][1]
+            cx, cy = int(x // cell), int(y // cell)
+            return [
+                j
+                for dx in (-1, 0, 1)
+                for dy in (-1, 0, 1)
+                for j in grid.get((cx + dx, cy + dy), ())
+                if j != i and near(x, y, ends[j][0], ends[j][1])
+            ]
+
+        def pad_covers(p: "Pad", x: float, y: float) -> bool:
+            hw, hh = pad_half_extents(p)
+            return abs(x - p.x) <= hw + tol and abs(y - p.y) <= hh + tol
+
+        seen: set[tuple[float, float, str]] = set()
+        for i, (x, y, layer, name) in enumerate(ends):
+            if any(ends[j][2] == layer for j in neighbours(i)):
+                continue  # meets another same-net segment end on this layer
+            if any(
+                (p.through_hole or p.layer.name == layer) and pad_covers(p, x, y) for p in net_pads
+            ):
+                continue
+            joined_via = False
+            for v in vias:
+                if not near(x, y, v.x, v.y):
+                    continue
+                other_copper = any(ends[j][2] != layer for j in neighbours(i)) or any(
+                    (p.through_hole or p.layer.name != layer) and pad_covers(p, v.x, v.y)
+                    for p in net_pads
+                )
+                if other_copper:
+                    joined_via = True
+                    break
+            if joined_via:
+                continue
+            key = (round(x, 3), round(y, 3), layer)
+            if key in seen:
+                continue
+            seen.add(key)
+            stubs.append({"net": name, "layer": layer, "x": key[0], "y": key[1]})
+        # A via whose same-net copper sits on one layer only is dangling even
+        # when two same-layer segments fold back at it (the endpoint pass above
+        # skips those ends because they meet each other): DRC ``via_dangling``.
+        for v in vias:
+            at_via = [e for e in ends if near(e[0], e[1], v.x, v.y)]
+            covering = [p for p in net_pads if pad_covers(p, v.x, v.y)]
+            if any(p.through_hole for p in covering):
+                continue
+            layers = {e[2] for e in at_via} | {p.layer.name for p in covering}
+            if len(layers) != 1:
+                continue  # copper on 2+ layers joins it; none = nothing to name
+            (layer,) = layers
+            key = (round(v.x, 3), round(v.y, 3), layer)
+            if key in seen or any(
+                s["layer"] == layer and near(s["x"], s["y"], v.x, v.y) for s in stubs
+            ):
+                continue  # already listed as a lone end at this via
+            seen.add(key)
+            name = at_via[0][3] if at_via else (v.net_name or "")
+            stubs.append({"net": name, "layer": layer, "x": key[0], "y": key[1]})
+    stubs.sort(key=lambda d: (str(d["net"]), d["layer"], d["x"], d["y"]))
+    return stubs
 
 
 def _make_checkpoint_callback(
@@ -2946,7 +3254,8 @@ def _make_checkpoint_callback(
 
         def _write(dest: Path) -> None:
             route_sexp = "\n\t".join(
-                r.to_sexp(name_only=name_only) for r in _merge_checkpoint_routes(best_routes)
+                r.to_sexp(name_only=name_only)
+                for r in _merge_checkpoint_routes(best_routes, router)
             )
             kept = _checkpoint_preserved(best_routes)
             if kept:
@@ -3007,7 +3316,10 @@ def _make_checkpoint_callback(
             # Route has its own to_sexp() so we can serialize directly without
             # touching the router's live state.
             route_sexp = "\n\t".join(
-                r.to_sexp(name_only=name_only) for r in _merge_checkpoint_routes(best_routes)
+                r.to_sexp(name_only=name_only)
+                for r in _merge_checkpoint_routes(
+                    best_routes, router_provider() if router_provider is not None else None
+                )
             )
             # Issue #3155: carry preserved existing copper through every
             # checkpoint so the strip-then-rewrite (#2976) inside
@@ -3086,7 +3398,8 @@ def _make_checkpoint_callback(
             router = router_provider() if router_provider is not None else None
             layers = router.grid.num_layers if router is not None else 2
             sexp = "\n\t".join(
-                route.to_sexp(name_only=name_only) for route in _merge_checkpoint_routes(routes)
+                route.to_sexp(name_only=name_only)
+                for route in _merge_checkpoint_routes(routes, router)
             )
             kept = _checkpoint_preserved(routes)
             if kept:
@@ -4081,7 +4394,22 @@ def _save_partial_results() -> bool:
         # dialect so the interrupted save does not flip name-based copper to
         # numeric.  Detect from the content already in hand (avoid re-reading).
         name_only = bool(_NAME_ONLY_NET_RE.search(original_content))
-        route_sexp = router.to_sexp(name_only=name_only)
+        # Issue #8270: collapse per-grid-cell segments (on a copy) so the
+        # ``_partial`` board is editable.  ``cleanup_artifacts`` is what
+        # ``router.to_sexp`` runs first; keep it, then serialise merged routes.
+        try:
+            router.cleanup_artifacts()
+            route_sexp = "\n\t".join(
+                r.to_sexp(name_only=name_only)
+                for r in _merge_checkpoint_routes(router.routes, router)
+            )
+        except Exception:  # noqa: BLE001 - fall back to the raw serialisation
+            route_sexp = router.to_sexp(name_only=name_only)
+        try:
+            # Issue #8270: name the partially routed nets for the timeout report.
+            info["partial_net_stubs"] = _partial_net_stubs(router)
+        except Exception:  # noqa: BLE001 - reporting must not block the save
+            info["partial_net_stubs"] = None
 
         # Issue #6322: ``_insert_sexp_before_closing`` below drops every
         # segment/via already in the placement text (a checkpoint's copper,

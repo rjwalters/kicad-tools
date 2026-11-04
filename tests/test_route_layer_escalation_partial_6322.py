@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import re
 import signal
 from pathlib import Path
@@ -87,6 +88,39 @@ def _copper(text: str) -> tuple[int, int]:
     return text.count("(segment"), len(re.findall(r"\(via\s", text))
 
 
+def _copper_length(text: str) -> float:
+    """Total length of every ``(segment ...)`` in a board, in mm."""
+    from kicad_tools.sexp import parse_string
+
+    total = 0.0
+    for seg in parse_string(text).find_all("segment"):
+        start, end = seg.find("start"), seg.find("end")
+        total += math.hypot(
+            float(end.get_float(0)) - float(start.get_float(0)),
+            float(end.get_float(1)) - float(start.get_float(1)),
+        )
+    return total
+
+
+def _router_copper(router) -> tuple[tuple[int, int], float]:
+    """The router's copper as the ``_partial`` save writes it (issue #8270).
+
+    The save collapses collinear per-grid-cell runs before serialising (and
+    joins sub-grid pad jogs to the pad centre), so the counts and length to
+    expect are those of that *merged* geometry, computed here from the
+    router's own routes.  A dropped or duplicated route changes both.  The
+    merge itself must not lose copper: its length stays within the pad-join
+    slack (about one grid step per route end) of the router's raw length.
+    """
+    raw = router.to_sexp()  # runs cleanup_artifacts(), as the save does
+    merged = route_cmd._merge_checkpoint_routes(router.routes, router)
+    merged_sexp = "\n".join(r.to_sexp() for r in merged)
+    length = _copper_length(f"({merged_sexp})")
+    slack = 2 * 1.5 * float(router.grid.resolution) * max(1, len(router.routes))
+    assert abs(_copper_length(f"({raw})") - length) <= slack
+    return _copper(merged_sexp), length
+
+
 class _Interrupt:
     """Patch the routing call: route for real, checkpoint, then get cut short.
 
@@ -99,6 +133,7 @@ class _Interrupt:
         self.drop_net = drop_net
         self.router = None
         self.expected: tuple[int, int] | None = None
+        self.expected_length: float | None = None
         self.checkpointed = False
         original = Autorouter.route_all_negotiated
 
@@ -114,7 +149,7 @@ class _Interrupt:
                 callback(list(router.routes), metrics)
                 self.checkpointed = True
             self.router = router
-            self.expected = _copper(router.to_sexp())
+            self.expected, self.expected_length = _router_copper(router)
             if self.interrupt is not None:
                 self.interrupt()
             return result
@@ -157,7 +192,9 @@ class TestDeadlineDuringTheFirstAttempt:
         # The checkpoint really did land on the placement source...
         assert _copper(output.read_text())[0] > 0
         # ...and the partial holds the router's copper exactly once.
-        assert _copper(_partial(output).read_text()) == patch.expected
+        text = _partial(output).read_text()
+        assert _copper(text) == patch.expected
+        assert _copper_length(text) == pytest.approx(patch.expected_length)
 
     def test_preserved_input_copper_is_kept_exactly_once(self, monkeypatch, tmp_path, control):
         source = tmp_path / "input.kicad_pcb"
@@ -171,6 +208,8 @@ class TestDeadlineDuringTheFirstAttempt:
         text = _partial(output).read_text()
         segments, vias = patch.expected
         assert _copper(text) == (segments + 1, vias)
+        # The preserved 2 mm segment is there once, on top of the router's copper.
+        assert _copper_length(text) == pytest.approx(patch.expected_length + 2.0)
         assert len(re.findall(r"\(start 2(?:\.0+)? 2(?:\.0+)?\)", text)) == 1
 
 
@@ -227,6 +266,7 @@ class TestDeadlineAfterAKeptPlacementDelta:
         # This run's copper, exactly once (the moved board was read back from
         # the checkpointed ``<output>``, so it already carried copper).
         assert _copper(text) == patch.expected
+        assert _copper_length(text) == pytest.approx(patch.expected_length)
         assert patch.expected[0] > 0
 
 
@@ -243,7 +283,9 @@ class TestCtrlC:
             route_cmd._in_process_main_impl(_argv(source, output))
 
         assert excinfo.value.code == 5
-        assert _copper(_partial(output).read_text()) == patch.expected
+        text = _partial(output).read_text()
+        assert _copper(text) == patch.expected
+        assert _copper_length(text) == pytest.approx(patch.expected_length)
 
     def test_the_flow_restores_the_previous_handlers_itself(self, monkeypatch, board):
         """Not left to ``_process_state_guard``: that guard is disabled here."""

@@ -309,12 +309,13 @@ def run_creepage_command(args) -> int:
         )
         guard_triggered = bool(mains_suspects) or high_working_voltage
 
+    show_witness = bool(getattr(args, "witness", False))
     if fmt == "json":
         print(json.dumps(report.to_dict(), indent=2))
     elif report.uses_standard:
-        _render_table_standard(report, guard_triggered=guard_triggered)
+        _render_table_standard(report, guard_triggered=guard_triggered, show_witness=show_witness)
     else:
-        _render_table(report, guard_triggered=guard_triggered)
+        _render_table(report, guard_triggered=guard_triggered, show_witness=show_witness)
 
     if guard_triggered:
         _warn_hv_unclassified(report, mains_suspects, working_voltage)
@@ -390,6 +391,19 @@ def _print_gate_summary(report: CreepageReport, unit_desc: str) -> None:
     gate_failures = [p for p in report.pairs if not p.passed and not p.waived]
     same_fp = [p for p in report.pairs if p.relationship == "same_footprint"]
 
+    # Issue #8277: an ``attach-zn`` row is waived only when the copper OUTSIDE
+    # the zone still clears; say why one that is not waived still gates.
+    for p in report.pairs:
+        if p.relationship == "attach_zone" and not p.residual_passed:
+            where = ""
+            if p.residual_witness_mm is not None:
+                where = f" at ({p.residual_witness_mm[0]:.3f}, {p.residual_witness_mm[1]:.3f})"
+            print(
+                f"NOTE: {p.net_a} vs {p.net_b} is attach-zn but NOT waived: copper outside "
+                f"the attach zone is only {p.residual_creepage_mm:.3f} mm apart{where} "
+                f"(layer {p.residual_layer})."
+            )
+
     if waived:
         if gate_failures:
             print(
@@ -418,7 +432,18 @@ def _print_gate_summary(report: CreepageReport, unit_desc: str) -> None:
     print(line)
 
 
-def _render_table(report: CreepageReport, *, guard_triggered: bool = False) -> None:
+def _witness_cell(p: CreepagePair) -> str:
+    """``x,y item_a -> item_b`` for the ``--witness`` column (#8301)."""
+    w = p.witness
+    if not w:
+        return "-"
+    x, y = w["point_a_mm"]
+    return f"{x:.3f},{y:.3f} {w['item_a']} -> {w['item_b']}"
+
+
+def _render_table(
+    report: CreepageReport, *, guard_triggered: bool = False, show_witness: bool = False
+) -> None:
     """Print the human-readable census table (phase-1 / manual --min mode)."""
     if not report.has_hv_nets:
         print(
@@ -451,6 +476,8 @@ def _render_table(report: CreepageReport, *, guard_triggered: bool = False) -> N
         f"{'HV net':<16} {'Against':<16} {'Layer':<7} "
         f"{'Clearance':>10} {'Creepage':>10} {'Margin':>10} {'Rel':>10} {'Result':>7}"
     )
+    if show_witness:
+        header += "  Witness (A point, A item -> B item)"
     print(header)
     print("-" * len(header))
     for p in report.pairs:
@@ -459,13 +486,16 @@ def _render_table(report: CreepageReport, *, guard_triggered: bool = False) -> N
             f"{p.net_a:<16} {p.net_b:<16} {p.layer:<7} "
             f"{p.clearance_mm:>9.3f}  {p.creepage_mm:>9.3f}  "
             f"{p.margin_mm:>9.3f}  {_rel_token(p):>10}  {result:>7}"
+            + (f"  {_witness_cell(p)}" if show_witness else "")
         )
 
     print()
     _print_gate_summary(report, f"{report.min_mm:.3f} mm creepage")
 
 
-def _render_table_standard(report: CreepageReport, *, guard_triggered: bool = False) -> None:
+def _render_table_standard(
+    report: CreepageReport, *, guard_triggered: bool = False, show_witness: bool = False
+) -> None:
     """Print the census table with IEC-derived requirements (phase-2 mode)."""
     from kicad_tools.creepage.standards import DISCLAIMER
 
@@ -570,6 +600,8 @@ def _render_table_standard(report: CreepageReport, *, guard_triggered: bool = Fa
         f"{'Clnce':>8} {'ReqCl':>8} {'Creep':>8} {'ReqCr':>8} "
         f"{'Margin':>8} {'Govern':>8} {'Rel':>10} {'Result':>7}"
     )
+    if show_witness:
+        header += "  Witness (A point, A item -> B item)"
     print(header)
     print("-" * len(header))
     for p in report.pairs:
@@ -581,6 +613,7 @@ def _render_table_standard(report: CreepageReport, *, guard_triggered: bool = Fa
             f"{p.clearance_mm:>8.3f} {req_cl:>8.3f} "
             f"{p.creepage_mm:>8.3f} {req_cr:>8.3f} "
             f"{p.margin_mm:>8.3f} {p.governing_bound:>8} {_rel_token(p):>10} {result:>7}"
+            + (f"  {_witness_cell(p)}" if show_witness else "")
         )
 
     print()

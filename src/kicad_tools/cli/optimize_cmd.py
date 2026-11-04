@@ -81,6 +81,85 @@ def _deterministic_uuids(pcb_path: Path, net_filter: str | None = None):
         random.setstate(prev_state)
 
 
+def _kicad_cli_clearance_errors(pcb_path: Path, rules_from: Path | None = None) -> dict:
+    """Whole-board kicad-cli clearance error count; never raises (Issue #8322).
+
+    Counts every error whose type contains ``clearance`` (so
+    ``copper_edge_clearance`` and ``hole_clearance`` are included on purpose).
+    If ``rules_from`` is given, the board is checked as a temporary copy with
+    ``rules_from``'s sibling ``.kicad_pro``/``.kicad_dru`` staged beside it, so
+    an output written elsewhere is judged under the same rules as the input.
+
+    The in-process ``--drc-aware`` referee ignores the board's ``.kicad_dru``,
+    so this runs kicad-cli (``--refill-zones``, board not saved; the sibling
+    ``.kicad_pro``/``.kicad_dru`` are read in place) as the authority.
+    Returns ``{"available": bool, "clearance_errors": int | None,
+    "reason": str | None}``.
+    """
+    import json
+    import shutil
+    import tempfile
+
+    from kicad_tools.cli.runner import run_drc
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="kct_optdrc_") as td:
+            report = Path(td) / "drc.json"
+            target = pcb_path
+            if rules_from is not None:
+                stage = Path(td) / "stage"
+                stage.mkdir()
+                target = stage / pcb_path.name
+                shutil.copy2(pcb_path, target)
+                for suffix in (".kicad_pro", ".kicad_dru"):
+                    src = rules_from.with_suffix(suffix)
+                    if src.exists():
+                        shutil.copy2(src, target.with_suffix(suffix))
+            result = run_drc(
+                target,
+                output_path=report,
+                format="json",
+                schematic_parity=False,
+                refill_zones=True,
+            )
+            if not report.exists():
+                reason = (result.stderr or "").strip() or "kicad-cli wrote no DRC report"
+                return {"available": False, "clearance_errors": None, "reason": reason}
+            data = json.loads(report.read_text())
+    except Exception as e:
+        return {"available": False, "clearance_errors": None, "reason": str(e)}
+    count = sum(
+        1
+        for v in data.get("violations", [])
+        if "clearance" in str(v.get("type", "")) and v.get("severity", "error") == "error"
+    )
+    return {"available": True, "clearance_errors": count, "reason": None}
+
+
+def _kicad_cli_drc_summary(before: dict | None, after: dict | None, has_dru: bool) -> dict:
+    """Combine the before/after kicad-cli runs into the reported summary (#8322)."""
+    ok = (
+        before is not None
+        and after is not None
+        and bool(before["available"] and after["available"])
+    )
+    summary: dict = {
+        "available": ok,
+        "clearance_errors_before": before["clearance_errors"] if before else None,
+        "clearance_errors_after": after["clearance_errors"] if after else None,
+        "regression": False,
+        "dru_not_evaluated": (not ok) and has_dru,
+        "reason": None,
+    }
+    if before is not None and after is not None and ok:
+        summary["regression"] = after["clearance_errors"] > before["clearance_errors"]
+    else:
+        summary["reason"] = next(
+            (r["reason"] for r in (before, after) if r and not r["available"]), None
+        )
+    return summary
+
+
 def _refill_written_board(written: Path) -> tuple[bool, str | None]:
     """Refill zones in the written board; never raises (Issue #8286).
 
@@ -264,9 +343,17 @@ Examples:
         "--output",
         help="Output PCB file (default: modify in place)",
     )
-    parser.add_argument(
+    net_group = parser.add_mutually_exclusive_group()
+    net_group.add_argument(
         "--net",
-        help="Only optimize traces for nets matching this pattern",
+        help="Only optimize the net with exactly this name (case-sensitive; "
+        "'GND' does not match 'PGND'). Use --net-pattern for globs",
+    )
+    net_group.add_argument(
+        "--net-pattern",
+        metavar="GLOB",
+        help="Only optimize nets whose name matches this case-sensitive glob "
+        "(fnmatch), e.g. '*GND*'",
     )
     parser.add_argument(
         "--no-merge",
@@ -287,6 +374,21 @@ Examples:
         "--no-jogs",
         action="store_true",
         help="Disable lateral jog removal (sliding short sideways steps to the next corner)",
+    )
+    parser.add_argument(
+        "--no-staircase",
+        action="store_true",
+        help="Disable staircase compression",
+    )
+    parser.add_argument(
+        "--no-pull-tight",
+        action="store_true",
+        help="Disable PullTight (shortening chains by sliding interior segments)",
+    )
+    parser.add_argument(
+        "--no-detour",
+        action="store_true",
+        help="Disable detour shortening (replacing a chain with a shorter direct path)",
     )
     parser.add_argument(
         "--chamfer-size",
@@ -386,6 +488,9 @@ Examples:
         eliminate_zigzags=not args.no_zigzag,
         convert_45_corners=not args.no_45,
         remove_jogs=not args.no_jogs,
+        compress_staircase=not args.no_staircase,
+        pull_tight=not args.no_pull_tight,
+        shorten_detours=not args.no_detour,
         corner_chamfer_size=args.chamfer_size,
         drc_aware=args.drc_aware,
         drc_manufacturer=args.mfr,
@@ -440,6 +545,9 @@ Examples:
     }
     for name, vias in parse_vias(pcb_path.read_text()).items():
         attachments.setdefault(name, []).extend((v.x, v.y) for v in vias)
+    optimizer.set_pad_points(
+        {name: [(x, y) for x, y, _ in pts] for name, pts in pad_anchors.items()}
+    )
     optimizer.set_attachment_points(attachments)
 
     # ``optimize_pcb`` calls ``self.optimize_segments`` per net; route that
@@ -457,7 +565,9 @@ Examples:
         if args.output:
             print(f"Output: {args.output}")
         if args.net:
-            print(f"Filter: nets matching '{args.net}'")
+            print(f"Filter: net named '{args.net}'")
+        if args.net_pattern:
+            print(f"Filter: nets matching pattern '{args.net_pattern}'")
         if args.drc_aware:
             print(f"DRC:    aware (mfr={args.mfr}, layers={args.layers})")
         print()
@@ -470,9 +580,18 @@ Examples:
         if config.convert_45_corners:
             print(f"    (chamfer size: {config.corner_chamfer_size}mm)")
         print(f"  - Lateral jog removal: {'yes' if config.remove_jogs else 'no'}")
+        print(f"  - Staircase compression: {'yes' if config.compress_staircase else 'no'}")
+        print(f"  - PullTight: {'yes' if config.pull_tight else 'no'}")
+        print(f"  - Detour shortening: {'yes' if config.shorten_detours else 'no'}")
         if args.drc_aware:
             print(f"  - DRC-aware rollback: yes (mfr={args.mfr})")
         print()
+
+    # Issue #8322: kicad-cli baseline on the input, before it can be overwritten.
+    cli_before: dict | None = None
+    has_dru = pcb_path.with_suffix(".kicad_dru").exists()
+    if args.drc_aware and not args.dry_run:
+        cli_before = _kicad_cli_clearance_errors(pcb_path)
 
     # Run optimization
     try:
@@ -481,6 +600,7 @@ Examples:
                 str(pcb_path),
                 output_path=args.output,
                 net_filter=args.net,
+                net_pattern=args.net_pattern,
                 dry_run=args.dry_run,
                 on_net_optimized=commit_net,
                 net_anchors_by_name=pad_anchors,
@@ -513,6 +633,18 @@ Examples:
                 file=sys.stderr,
             )
 
+    cli_drc: dict | None = None
+    if args.drc_aware and not args.dry_run:
+        out_path = Path(args.output or pcb_path)
+        # Project/rule files are found beside the board; stage the input's
+        # next to a copy of the output so both runs use the same rule set.
+        same_board = out_path.resolve() == pcb_path.resolve()
+        cli_after = _kicad_cli_clearance_errors(
+            out_path, rules_from=None if same_board else pcb_path
+        )
+        cli_drc = _kicad_cli_drc_summary(cli_before, cli_after, has_dru)
+    exit_code = 2 if cli_drc and cli_drc["regression"] else 0
+
     if as_json:
         emit_json(
             {
@@ -520,10 +652,15 @@ Examples:
                 "pcb": str(pcb_path),
                 "output": args.output,
                 "net_filter": args.net,
+                "net_pattern": args.net_pattern,
                 "optimizations": {
                     "merge_collinear": config.merge_collinear,
                     "eliminate_zigzags": config.eliminate_zigzags,
                     "convert_45_corners": config.convert_45_corners,
+                    "remove_jogs": config.remove_jogs,
+                    "compress_staircase": config.compress_staircase,
+                    "pull_tight": config.pull_tight,
+                    "shorten_detours": config.shorten_detours,
                     "chamfer_size_mm": config.corner_chamfer_size,
                 },
                 "drc_aware": args.drc_aware,
@@ -538,6 +675,8 @@ Examples:
                     "duplicates_removed": stats.duplicates_removed,
                     "nets_connectivity_discarded": stats.nets_connectivity_discarded,
                     "connectivity_discarded_nets": stats.connectivity_discarded_nets,
+                    "nets_connectivity_partial": stats.nets_connectivity_partial,
+                    "connectivity_partial_nets": stats.connectivity_partial_nets,
                     "drc_failsafe_reverted": stats.drc_failsafe_reverted,
                     "drc_failsafe_rules": stats.drc_failsafe_rules,
                     "segments_before": stats.segments_before,
@@ -550,6 +689,7 @@ Examples:
                     "length_reduction_pct": stats.length_reduction,
                     "drc_errors_before": stats.drc_errors_before,
                     "drc_errors_after": stats.drc_errors_after,
+                    "nets_touched": [n.net for n in stats.per_net if n.changed],
                     "per_net": [
                         {
                             "net": n.net,
@@ -558,6 +698,7 @@ Examples:
                             "length_before_mm": n.length_before,
                             "length_after_mm": n.length_after,
                             "rolled_back": n.rolled_back,
+                            "changed": n.changed,
                             "new_violations": n.new_violations,
                         }
                         for n in stats.per_net
@@ -568,10 +709,11 @@ Examples:
                 "written_to": None if args.dry_run else (args.output or str(pcb_path)),
                 "zones_refilled": zones_refilled,
                 "zones_refill_error": refill_error,
+                "kicad_cli_drc": cli_drc,
                 "success": True,
             }
         )
-        return 0
+        return exit_code
 
     if not quiet:
         # Display results
@@ -593,6 +735,12 @@ Examples:
                 f"({', '.join(stats.connectivity_discarded_nets[:5])}"
                 f"{', ...' if stats.nets_connectivity_discarded > 5 else ''})"
             )
+        if stats.nets_connectivity_partial:
+            print(
+                f"  Partly kept (unsafe edits dropped): {stats.nets_connectivity_partial} "
+                f"({', '.join(stats.connectivity_partial_nets[:5])}"
+                f"{', ...' if stats.nets_connectivity_partial > 5 else ''})"
+            )
         print()
 
         print(
@@ -608,7 +756,15 @@ Examples:
 
         if args.drc_aware:
             delta = stats.drc_errors_after - stats.drc_errors_before
-            if delta > 0:
+            cli_regressed = bool(cli_drc and cli_drc["regression"])
+            cli_unchecked = bool(cli_drc and cli_drc["dru_not_evaluated"])
+            if cli_regressed or cli_unchecked:
+                # Never claim "no regressions" on the in-process referee alone.
+                if cli_regressed:
+                    suffix = "(in-process referee only; see kicad-cli line below)"
+                else:
+                    suffix = "(DRC referee does not evaluate project .kicad_dru rules)"
+            elif delta > 0:
                 suffix = f"({delta} new errors, {stats.nets_rolled_back} nets rolled back)"
             elif stats.nets_rolled_back > 0:
                 suffix = f"(no regressions, {stats.nets_rolled_back} nets rolled back)"
@@ -628,6 +784,32 @@ Examples:
                         f"{r} (+{c})" for r, c in sorted(stats.drc_failsafe_rules.items())
                     )
                     print(f"           rules above baseline: {rules}")
+            if cli_drc and cli_drc["available"]:
+                b = cli_drc["clearance_errors_before"]
+                a = cli_drc["clearance_errors_after"]
+                print(f"  kicad-cli clearance errors: {b:>6} -> {a:>6}")
+                if cli_drc["regression"]:
+                    print(
+                        f"  REGRESSION: kicad-cli reports {a - b} new clearance "
+                        "error(s) on the written board (project rules incl. "
+                        ".kicad_dru); the in-process referee did not see them"
+                    )
+            elif cli_drc:
+                why = f" ({cli_drc['reason']})" if cli_drc["reason"] else ""
+                print(f"  kicad-cli clearance cross-check unavailable{why}")
+        print()
+
+        touched = [n.net for n in stats.per_net if n.changed]
+        if not stats.per_net:
+            print(
+                "Nets touched: none (no net matched the filter)"
+                if (args.net or args.net_pattern)
+                else "Nets touched: none"
+            )
+        elif touched:
+            print(f"Nets touched ({len(touched)}): {', '.join(touched)}")
+        else:
+            print("Nets touched: none")
         print()
 
         if args.verbose and stats.per_net:
@@ -659,7 +841,7 @@ Examples:
 
         print("=" * 50)
 
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":
