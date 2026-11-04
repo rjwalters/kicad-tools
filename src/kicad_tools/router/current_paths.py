@@ -219,7 +219,7 @@ import math
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from kicad_tools.core.geometry import point_to_segment_distance, segments_intersect
 from kicad_tools.core.layers import COPPER_LAYER_ORDER, via_spans_layer
@@ -1477,11 +1477,11 @@ def _describe_witness(witness: dict[str, object]) -> str:
     if not witness:
         return ""
     if witness.get("kind") == "segment":
-        return (
-            f" [witness: segment {tuple(witness['start'])}->{tuple(witness['end'])} "  # type: ignore[call-overload]
-            f"on {witness['layer']}]"
-        )
-    return f" [witness: via barrel at {tuple(witness['position'])}]"  # type: ignore[call-overload]
+        start = tuple(cast("list[float]", witness["start"]))
+        end = tuple(cast("list[float]", witness["end"]))
+        return f" [witness: segment {start}->{end} on {witness['layer']}]"
+    position = tuple(cast("list[float]", witness["position"]))
+    return f" [witness: via barrel at {position}]"
 
 
 def _pad_covers(pcb: PCB, ref: str, pad_number: str, point: tuple[float, float]) -> bool:
