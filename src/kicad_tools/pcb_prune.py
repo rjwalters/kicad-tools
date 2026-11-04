@@ -8,10 +8,12 @@ only by overlap (off-centre of the via/pad they land on).
 Connectivity here follows what KiCad treats as connected, and is deliberately
 *under*-estimated wherever the two could differ:
 
-* track-to-track joins need **coincident endpoints** -- capsule overlap or
-  tangency is never a join;
+* track-to-track joins need **coincident endpoints**, or one track's end on
+  the other's centre line within its half-width (KiCad's anchor-in-shape rule,
+  issue #8298) -- capsule overlap or tangency alone is never a join;
 * a track end joins a via / pad only when it lies inside the via's disc or the
-  pad's *full* shape (rect / roundrect / oval / circle, rotation-aware);
+  pad's *full* shape (rect / roundrect / oval / circle, rotation-aware); a via
+  or pad also joins a track that passes over its centre (#8298);
 * a track end joins a zone when it lies inside the zone outline -- but the
   *fill* can have voids there, so a zone join is never relied on to keep copper
   connected (it only marks the zone as a terminal).
@@ -25,7 +27,9 @@ the same component as before, every live item that touched the removed copper
 is still connected to the others through modelled track / via / pad joins
 (so a join the model misses can never make a bridge look redundant), **and**
 every remaining track end that was anchored stays anchored -- the pass never
-creates an overlap-only joint.
+creates an overlap-only joint (an end left only off a via/pad centre or on
+another track's body) -- and no via is left joined on fewer layers than
+before (KiCad ``via_dangling``).
 
 A segment protected *only* because its body touches other same-net segments
 (away from a shared endpoint) -- e.g. #8216's redundant spur that starts just
@@ -285,6 +289,17 @@ class _NetModel:
                         self.anch[i][ea].add(j)
                         self.anch[j][eb].add(i)
                         hit = True
+            # Issue #8298: KiCad also joins a track end that lies on another
+            # track's centre line (inside its copper) -- a T-join without a
+            # shared vertex.
+            for x, y, ix in ((a, b, i), (b, a, j)):
+                for ex, px in enumerate((x.a, x.b)):
+                    if (
+                        not self.anch[ix][ex] & {i, j} - {ix}
+                        and _pt_seg_dist(px, y.a, y.b) <= y.radius + _EPS
+                    ):
+                        self.anch[ix][ex].add(j if ix == i else i)
+                        hit = True
             if hit:
                 self.adj[i].add(j)
                 self.adj[j].add(i)
@@ -299,6 +314,11 @@ class _NetModel:
                     self.anch[i][ea].add(j)
                     self.adj[i].add(j)
                     self.adj[j].add(i)
+            # Issue #8298: a via or pad whose centre lies under the track is
+            # joined to it (KiCad: the via/pad anchor is inside the track).
+            if b.kind in ("via", "pad") and _pt_seg_dist(b.a, a.a, a.b) <= a.radius + _EPS:
+                self.adj[i].add(j)
+                self.adj[j].add(i)
             return
         # non-segment pairs: the second node's centre inside the first's shape
         if a.kind == "zone" or b.kind == "zone":
@@ -420,15 +440,22 @@ class _NetModel:
     def clean_end(self, i: int, end: int, removed: set[int]) -> bool:
         """Does this end still meet another track end, or a via / pad centre?
 
-        An end that only sits *inside* a via or pad, off its centre, is the
-        overlap-style joint issue #8216 asks this pass to remove.
+        An end that only sits *inside* a via or pad, off its centre, or on
+        another track's body, is the overlap-style joint issue #8216 asks this
+        pass to remove.
         """
         p = (self.nodes[i].a, self.nodes[i].b)[end]
         for k in self.anch[i][end]:
             if k in removed:
                 continue
             o = self.nodes[k]
-            if o.kind == "seg" or (o.kind in ("via", "pad") and math.dist(p, o.a) <= CENTRE_TOL):
+            if o.kind == "seg":
+                # A shared vertex is clean; an end resting on another track's
+                # body (a T-join, #8298) is overlap-style, like an off-centre
+                # via end.
+                if _same_pt(p, o.a) or _same_pt(p, o.b):
+                    return True
+            elif o.kind in ("via", "pad") and math.dist(p, o.a) <= CENTRE_TOL:
                 return True
         return False
 
@@ -474,6 +501,28 @@ class _NetModel:
                     ):
                         return True
         return False
+
+    def strands_via(self, group: set[int], removed: set[int]) -> bool:
+        """Would removing ``group`` leave a via joined on fewer copper layers
+        than before (KiCad ``via_dangling`` when it drops to one)?
+
+        A via counts as an anchor for the track ends on it, so a loop through
+        a via can look redundant on one layer while the via is the only thing
+        the other layer's copper reaches (Issue #8298).
+        """
+        gone = removed | group
+        vias = {k for g in group for k in self.adj[g] if self.nodes[k].kind == "via"}
+
+        def layers(v: int, dead: set[int]) -> set[str]:
+            out: set[str] = set()
+            for k in self.adj[v]:
+                if k in dead or self.nodes[k].kind == "zone":
+                    continue
+                o = self.nodes[k]
+                out.update(o.layers if "*" not in o.layers else ["*"])
+            return out
+
+        return any(len(layers(v, gone)) < len(layers(v, removed)) for v in vias)
 
     def offcentre_end(self, i: int) -> bool:
         s = self.nodes[i]
@@ -814,6 +863,7 @@ def _plan_net(model: _NetModel, net_number: int) -> NetPlan:
                     or not model.still_joined(touched, removed | group)
                     or model.strands_end(group, removed)
                     or model.degrades_ends(touched, removed, removed | group)
+                    or model.strands_via(group, removed)
                 ):
                     continue
                 off = any(model.offcentre_end(g) for g in group)

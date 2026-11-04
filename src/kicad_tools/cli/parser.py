@@ -4428,7 +4428,10 @@ def _add_optimize_parser(subparsers) -> None:
     optimize_parser.add_argument(
         "--no-jogs",
         action="store_true",
-        help="Disable lateral jog removal (sliding short sideways steps to the next corner)",
+        help=(
+            "Disable lateral jog removal (sliding short sideways steps to the next "
+            "corner, and straightening a jog just before a pad)"
+        ),
     )
     optimize_parser.add_argument(
         "--chamfer-size",

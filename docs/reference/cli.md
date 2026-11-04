@@ -1868,7 +1868,7 @@ kct optimize-traces <pcb_file> [options]
 | `--no-merge` | Disable collinear merging |
 | `--no-zigzag` | Disable zigzag elimination |
 | `--no-45` | Disable 45-degree corners |
-| `--no-jogs` | Disable lateral jog removal (sliding short sideways steps to the next corner) |
+| `--no-jogs` | Disable lateral jog removal (sliding short sideways steps to the next corner, and straightening a jog just before a pad) |
 | `--chamfer-size` | 45-degree chamfer size in mm (default: 0.5) |
 | `--verbose`, `-v` | Print a per-net table (segments and length before/after, `(rolled back)` marker) after the summary |
 | `--dry-run` | Show results without writing |

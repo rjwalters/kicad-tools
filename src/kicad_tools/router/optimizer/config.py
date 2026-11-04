@@ -120,6 +120,11 @@ class OptimizationStats:
     # group that was connected in the input.
     nets_connectivity_discarded: int = 0
     connectivity_discarded_nets: list[str] = field(default_factory=list)
+    # Issue #8298: nets whose rewrite failed that check as a whole but kept
+    # the regions that preserve connectivity on their own.
+    nets_connectivity_partial: int = 0
+    connectivity_partial_nets: list[str] = field(default_factory=list)
+    connectivity_regions_dropped: int = 0
     # Issue #7065: one row per optimized net, built after any DRC rollback.
     per_net: list[NetOptimizationStats] = field(default_factory=list)
 

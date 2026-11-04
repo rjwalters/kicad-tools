@@ -248,7 +248,10 @@ Examples:
     parser.add_argument(
         "--no-jogs",
         action="store_true",
-        help="Disable lateral jog removal (sliding short sideways steps to the next corner)",
+        help=(
+            "Disable lateral jog removal (sliding short sideways steps to the next "
+            "corner, and straightening a jog just before a pad)"
+        ),
     )
     parser.add_argument(
         "--chamfer-size",
@@ -403,6 +406,8 @@ Examples:
     for name, vias in parse_vias(pcb_path.read_text()).items():
         attachments.setdefault(name, []).extend((v.x, v.y) for v in vias)
     optimizer.set_attachment_points(attachments)
+    # Issue #8298: pad centres let the jog pass straighten a jog at a pad entry.
+    optimizer.set_pad_points(pad_anchors)
 
     # ``optimize_pcb`` calls ``self.optimize_segments`` per net; route that
     # through the grid-synced wrapper (see its docstring).  optimize_pcb has no
@@ -500,6 +505,9 @@ Examples:
                     "duplicates_removed": stats.duplicates_removed,
                     "nets_connectivity_discarded": stats.nets_connectivity_discarded,
                     "connectivity_discarded_nets": stats.connectivity_discarded_nets,
+                    "nets_connectivity_partial": stats.nets_connectivity_partial,
+                    "connectivity_partial_nets": stats.connectivity_partial_nets,
+                    "connectivity_regions_dropped": stats.connectivity_regions_dropped,
                     "drc_failsafe_reverted": stats.drc_failsafe_reverted,
                     "drc_failsafe_rules": stats.drc_failsafe_rules,
                     "segments_before": stats.segments_before,
@@ -554,6 +562,13 @@ Examples:
                 f"  Discarded (would disconnect pads): {stats.nets_connectivity_discarded} "
                 f"({', '.join(stats.connectivity_discarded_nets[:5])}"
                 f"{', ...' if stats.nets_connectivity_discarded > 5 else ''})"
+            )
+        if stats.nets_connectivity_partial:
+            print(
+                f"  Partly kept (unsafe regions dropped): {stats.nets_connectivity_partial} "
+                f"({', '.join(stats.connectivity_partial_nets[:5])}"
+                f"{', ...' if stats.nets_connectivity_partial > 5 else ''}; "
+                f"{stats.connectivity_regions_dropped} region(s) dropped)"
             )
         print()
 

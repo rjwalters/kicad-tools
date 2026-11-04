@@ -25,6 +25,7 @@ from .algorithms import (
     remove_lateral_jogs_pass,
     shared_vertices,
     shorten_detour_pass,
+    straighten_pad_entries_pass,
 )
 from .chain import sort_into_chains
 from .collision import CollisionChecker
@@ -402,6 +403,9 @@ class TraceOptimizer:
         # Issue #8250: via / pad positions per net *name* where the 45° pass
         # must not move a corner (see ``set_attachment_points``).
         self._attachment_points: dict[str, list[tuple[float, float]]] = {}
+        # Issue #8298: pad centres (with their copper layers, ``()`` = every
+        # layer) by net name, for straightening jogs at a pad entry.
+        self._pad_points: dict[str, list[tuple[float, float, tuple[Layer, ...]]]] = {}
         self._protected_vertices: list[tuple[float, float]] = []
 
         # Initialize via optimizer with matching config
@@ -434,6 +438,14 @@ class TraceOptimizer:
         on a corner would be left dangling.
         """
         self._attachment_points = points_by_net_name
+
+    def set_pad_points(
+        self, points_by_net_name: dict[str, list[tuple[float, float, tuple[Layer, ...]]]]
+    ) -> None:
+        """Register each net's pad centres ``(x, y, layers)``; ``layers`` empty
+        means every copper layer (a through-hole pad).  Used by
+        ``remove_jogs`` to straighten a jog just before a pad (Issue #8298)."""
+        self._pad_points = points_by_net_name
 
     def optimize_segments(self, segments: list[Segment]) -> list[Segment]:
         """Optimize a list of segments for a single net/layer.
@@ -486,8 +498,15 @@ class TraceOptimizer:
         all_optimized: list[Segment] = []
         for index, chain in enumerate(chains):
             result = list(chain)
+            # Only same-layer chains can T-join this one; a chain on another
+            # layer joins through a via or pad, which are net anchors already
+            # (Issue #8298: a parallel route on the other layer of a THT pad
+            # pinned this chain's jog in place).
             self._branch_anchors = [
-                point for other, ends in enumerate(chain_ends) if other != index for point in ends
+                point
+                for other, ends in enumerate(chain_ends)
+                if other != index and chains[other][0].layer == chain[0].layer
+                for point in ends
             ]
 
             # Apply optimizations in order. Each pass's rewrite of this chain
@@ -663,9 +682,11 @@ class TraceOptimizer:
             segments: List of connected segments (single chain).
 
         Returns:
-            The chain with its removable jogs slid into the next corner.
-            Always the chain unchanged unless both a collision checker and
-            ``net_anchors`` were supplied (the same contract as
+            The chain with its removable jogs slid into the next corner, and
+            a jog just before a pad straightened into the pad (Issue #8298;
+            needs ``set_pad_points``).  Always the chain unchanged unless both
+            a collision checker and ``net_anchors`` were supplied (the same
+            contract as
             ``shorten_detours``).
         """
         if self.collision_checker is None or self.net_anchors is None or not segments:
@@ -673,9 +694,16 @@ class TraceOptimizer:
         anchors = self.net_anchors.get(segments[0].net)
         if anchors is None:  # unknown / excluded net: leave it alone
             return list(segments)
-        return remove_lateral_jogs_pass(
+        result = remove_lateral_jogs_pass(
             segments, self.config, self._path_is_clear, anchors + self._branch_anchors
         )
+        layer = segments[0].layer
+        pads = [
+            (x, y)
+            for x, y, layers in self._pad_points.get(segments[0].net_name, ())
+            if not layers or layer in layers
+        ]
+        return straighten_pad_entries_pass(result, self.config, self._path_is_clear, pads)
 
     def shorten_detours(self, segments: list[Segment]) -> list[Segment]:
         """Replace a detouring chain with a shorter straight/single-bend path.
