@@ -998,7 +998,7 @@ def plan_prune(
     for net_number, model in sorted(_build_net_models(pcb).items()):
         seg0 = next((n.ref for n in model.nodes if n.kind == "seg"), None)
         net_name = names.get(net_number) or (seg0.net_name if seg0 else "")
-        declared = bool(declared_nets) and net_name in declared_nets
+        declared = declared_nets is not None and net_name in declared_nets
         plan = _plan_net(model, net_number, declared=declared, wide=wide)
         if uncut_out is not None:
             uncut_out.extend({"net": net_name or net_number, **u} for u in plan.uncut_loops)
