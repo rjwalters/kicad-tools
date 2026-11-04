@@ -15,6 +15,14 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-04
 
+- **PR #8329**: fix: straighten pad-entry jogs and match gate pad-touch radius to component labels
+- **PR #8315**: feat: add report-driven rip-up and dangling removal to pcb strip
+- **PR #8305**: fix: keep safe optimize edits per region, straighten pad-entry jogs, model body joins in prune
+- **PR #8304**: feat(optimize-traces): switch every pass off, match --net exactly, list touched nets
+- **Issue #8325** (closed): optimize-traces: straighten a jog just before a pad end (split from #8298 AC 2)
+- **Issue #8309** (closed): pcb strip: report-driven rip-up (remove copper named by a DRC/creepage report) and iterative dangling removal
+- **Issue #8299** (closed): optimize-traces: rewrites a net with every reported pass disabled (unflagged detour pass); --net substring match edits unrequested nets
+- **Issue #8298** (closed): optimize-traces/prune: one unsafe edit discards a net's jog fixes; pad-entry jogs; anchor-in-shape loops survive prune
 - **PR #8324**: fix: derive pcb_retune UUID seed from input board and selected nets
 - **PR #8294**: fix(creepage): measure out-of-zone copper against in-zone pads in attach-zone residual
 - **PR #8290**: feat: report measured freed width, re-occupation and rip-up reason in relief diagnostics
