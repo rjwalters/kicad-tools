@@ -475,6 +475,59 @@ def test_worse_distinguishes_rule_and_nets_not_only_type():
     assert not _worse(before, before)
 
 
+def _fake_drc(monkeypatch, tmp_path, violations):
+    """Make ``_drc_signature`` run without kicad-cli, on canned violations."""
+    from kicad_tools.cli import runner
+    from kicad_tools.drc.report import DRCReport
+    from kicad_tools.drc.violation import Severity, ViolationType  # noqa: F401
+
+    out = tmp_path / "fake-drc.json"
+    out.write_text("{}")
+    monkeypatch.setattr(runner, "find_kicad_cli", lambda: Path("kicad-cli"))
+    monkeypatch.setattr(
+        runner,
+        "run_drc",
+        lambda *a, **k: runner.KiCadCLIResult(success=True, output_path=out),
+    )
+    report = DRCReport(source_file="x", created_at=None, pcb_name="x", violations=list(violations))
+    monkeypatch.setattr(DRCReport, "load", classmethod(lambda cls, path: report))
+
+
+def _clearance(rule: str, nets: list[str]):
+    from kicad_tools.drc.violation import DRCViolation, Severity, ViolationType
+
+    return DRCViolation(
+        type=ViolationType.CLEARANCE,
+        type_str="clearance",
+        severity=Severity.ERROR,
+        message="clearance",
+        rule=rule,
+        nets=nets,
+    )
+
+
+def test_drc_signature_keeps_same_type_violations_with_different_rule_or_nets_apart(
+    monkeypatch, tmp_path
+):
+    """Fails on the old ``(type, severity)`` key: both collapse to one entry."""
+    from kicad_tools.pcb_prune import _drc_signature, _worse
+
+    board = tmp_path / "t.kicad_pcb"
+    board.write_text("")
+
+    _fake_drc(monkeypatch, tmp_path, [_clearance("default", ["A", "B"])])
+    before = _drc_signature(board)
+    # One violation fixed, a differently-ruled one on other nets introduced.
+    _fake_drc(monkeypatch, tmp_path, [_clearance("Reviewed clearance - HV", ["HV", "SIG"])])
+    after = _drc_signature(board)
+
+    assert before is not None and after is not None
+    assert set(before) != set(after)
+    assert sum(before.values()) == sum(after.values()) == 1
+    assert _worse(after, before)
+    assert not _worse(before, before)
+
+
 def test_missing_dru_is_reported_in_drc_note(tmp_path):
     from kicad_tools.cli.runner import find_kicad_cli
 
