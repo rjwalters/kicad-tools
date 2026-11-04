@@ -2453,6 +2453,41 @@ def _add_pcb_parser(subparsers) -> None:
         action="store_true",
         help="Show what would be removed without modifying files",
     )
+    pcb_strip.add_argument(
+        "--from-report",
+        metavar="JSON",
+        help="Cut one victim track/via per finding in a kicad-cli DRC JSON "
+        "(clearance/shorting_items) or a 'kct creepage --format json' report "
+        "(rows with a witness only). Exclusive with --nets/--layers/--region.",
+    )
+    pcb_strip.add_argument(
+        "--protect-nets",
+        help="Comma-separated nets --from-report must never cut",
+    )
+    pcb_strip.add_argument(
+        "--radius",
+        type=float,
+        default=0.0,
+        help="With --from-report: also remove same-net track/via items of the "
+        "victim within this many mm of the finding (default: 0 = exact item)",
+    )
+    pcb_strip.add_argument(
+        "--dangling",
+        action="store_true",
+        help="Remove track_dangling/via_dangling copper, repeating until none "
+        "remain; a pass that raises the unconnected count is not applied",
+    )
+    pcb_strip.add_argument(
+        "--keep-via-min",
+        type=float,
+        default=None,
+        help="With --dangling: keep vias whose drill or diameter is >= this many mm (anchor PTHs)",
+    )
+    pcb_strip.add_argument(
+        "--unverified",
+        action="store_true",
+        help="Write even when kicad-cli DRC verification is unavailable",
+    )
 
     # pcb reinforce (issue #4220 -- Unit A of #4218)
     pcb_reinforce = pcb_subparsers.add_parser(
@@ -4417,7 +4452,18 @@ def _add_optimize_parser(subparsers) -> None:
     optimize_parser = subparsers.add_parser("optimize-traces", help="Optimize PCB traces")
     optimize_parser.add_argument("pcb", help="Path to .kicad_pcb file")
     optimize_parser.add_argument("-o", "--output", help="Output file (default: modify in place)")
-    optimize_parser.add_argument("--net", help="Only optimize traces matching this net pattern")
+    optimize_net_group = optimize_parser.add_mutually_exclusive_group()
+    optimize_net_group.add_argument(
+        "--net",
+        help="Only optimize the net with exactly this name (case-sensitive; "
+        "'GND' does not match 'PGND'). Use --net-pattern for globs",
+    )
+    optimize_net_group.add_argument(
+        "--net-pattern",
+        metavar="GLOB",
+        help="Only optimize nets whose name matches this case-sensitive glob "
+        "(fnmatch), e.g. '*GND*'",
+    )
     optimize_parser.add_argument(
         "--no-merge", action="store_true", help="Disable collinear merging"
     )
@@ -4429,6 +4475,19 @@ def _add_optimize_parser(subparsers) -> None:
         "--no-jogs",
         action="store_true",
         help="Disable lateral jog removal (sliding short sideways steps to the next corner)",
+    )
+    optimize_parser.add_argument(
+        "--no-staircase", action="store_true", help="Disable staircase compression"
+    )
+    optimize_parser.add_argument(
+        "--no-pull-tight",
+        action="store_true",
+        help="Disable PullTight (shortening chains by sliding interior segments)",
+    )
+    optimize_parser.add_argument(
+        "--no-detour",
+        action="store_true",
+        help="Disable detour shortening (replacing a chain with a shorter direct path)",
     )
     optimize_parser.add_argument(
         "--chamfer-size",

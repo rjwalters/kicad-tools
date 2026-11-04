@@ -212,6 +212,10 @@ class TestOptimizeTracesEmission:
             "merge_collinear": True,
             "eliminate_zigzags": True,
             "convert_45_corners": True,
+            "remove_jogs": True,
+            "compress_staircase": True,
+            "pull_tight": True,
+            "shorten_detours": True,
             "chamfer_size_mm": 0.5,
         }
         assert "segments_before" in payload["stats"]
