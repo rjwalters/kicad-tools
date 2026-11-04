@@ -25,6 +25,7 @@ from .algorithms import (
     remove_lateral_jogs_pass,
     shared_vertices,
     shorten_detour_pass,
+    straighten_pad_entry_pass,
 )
 from .chain import sort_into_chains
 from .collision import CollisionChecker
@@ -399,6 +400,9 @@ class TraceOptimizer:
         # KiCad counts as connected), so whole-run rewrites must keep these on
         # the copper as well as the net's pads and vias (Issue #8269).
         self._branch_anchors: list[tuple[float, float]] = []
+        # Issue #8325: pad-only positions per net *name* (no vias), set by
+        # ``set_pad_points``; the pad-entry straightening pass needs them.
+        self._pad_points: dict[str, list[tuple[float, float]]] = {}
         # Issue #8250: via / pad positions per net *name* where the 45° pass
         # must not move a corner (see ``set_attachment_points``).
         self._attachment_points: dict[str, list[tuple[float, float]]] = {}
@@ -434,6 +438,14 @@ class TraceOptimizer:
         on a corner would be left dangling.
         """
         self._attachment_points = points_by_net_name
+
+    def set_pad_points(self, points_by_net_name: dict[str, list[tuple[float, float]]]) -> None:
+        """Register pad-only positions per net name (Issue #8325).
+
+        The pad-entry straightening pass may only move a chain end that sits on
+        a pad, never one that sits on a via.
+        """
+        self._pad_points = points_by_net_name
 
     def optimize_segments(self, segments: list[Segment]) -> list[Segment]:
         """Optimize a list of segments for a single net/layer.
@@ -673,8 +685,16 @@ class TraceOptimizer:
         anchors = self.net_anchors.get(segments[0].net)
         if anchors is None:  # unknown / excluded net: leave it alone
             return list(segments)
-        return remove_lateral_jogs_pass(
-            segments, self.config, self._path_is_clear, anchors + self._branch_anchors
+        anchors = anchors + self._branch_anchors
+        result = remove_lateral_jogs_pass(segments, self.config, self._path_is_clear, anchors)
+        # Issue #8325: a jog the pass above cannot slide because the chain ends
+        # on the pad.
+        return straighten_pad_entry_pass(
+            result,
+            self.config,
+            self._path_is_clear,
+            anchors,
+            self._pad_points.get(segments[0].net_name, []),
         )
 
     def shorten_detours(self, segments: list[Segment]) -> list[Segment]:

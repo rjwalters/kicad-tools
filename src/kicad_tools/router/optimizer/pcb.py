@@ -758,9 +758,15 @@ def _free_end_count(
     free = 0
     for i, sg in enumerate(segments):
         for px, py in ((sg.x1, sg.y1), (sg.x2, sg.y2)):
+            # Same attach radius as ``_component_labels``: a pad is touched by
+            # an end within ``max(tolerance, w/2)`` of its centre, i.e. one that
+            # still lies on the pad copper (Issue #8325).
+            half_w = sg.width / 2
             touched = any(
-                abs(ax - px) <= tolerance
-                and abs(ay - py) <= tolerance
+                (
+                    (abs(ax - px) <= tolerance and abs(ay - py) <= tolerance)
+                    or math.hypot(ax - px, ay - py) <= half_w
+                )
                 and (not lyrs or sg.layer in lyrs)
                 for ax, ay, lyrs in anchors
             ) or any(
