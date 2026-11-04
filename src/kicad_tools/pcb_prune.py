@@ -48,7 +48,6 @@ never changes which ends are anchored.
 from __future__ import annotations
 
 import math
-import shutil
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
