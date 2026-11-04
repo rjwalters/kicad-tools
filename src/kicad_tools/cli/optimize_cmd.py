@@ -81,6 +81,64 @@ def _deterministic_uuids(pcb_path: Path, net_filter: str | None = None):
         random.setstate(prev_state)
 
 
+def _kicad_cli_clearance_errors(pcb_path: Path) -> dict:
+    """Whole-board kicad-cli clearance error count; never raises (Issue #8322).
+
+    The in-process ``--drc-aware`` referee ignores the board's ``.kicad_dru``,
+    so this runs kicad-cli (``--refill-zones``, board not saved; the sibling
+    ``.kicad_pro``/``.kicad_dru`` are read in place) as the authority.
+    Returns ``{"available": bool, "clearance_errors": int | None,
+    "reason": str | None}``.
+    """
+    import json
+    import tempfile
+
+    from kicad_tools.cli.runner import run_drc
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="kct_optdrc_") as td:
+            report = Path(td) / "drc.json"
+            result = run_drc(
+                pcb_path,
+                output_path=report,
+                format="json",
+                schematic_parity=False,
+                refill_zones=True,
+            )
+            if not report.exists():
+                reason = (result.stderr or "").strip() or "kicad-cli wrote no DRC report"
+                return {"available": False, "clearance_errors": None, "reason": reason}
+            data = json.loads(report.read_text())
+    except Exception as e:
+        return {"available": False, "clearance_errors": None, "reason": str(e)}
+    count = sum(
+        1
+        for v in data.get("violations", [])
+        if "clearance" in str(v.get("type", "")) and v.get("severity", "error") == "error"
+    )
+    return {"available": True, "clearance_errors": count, "reason": None}
+
+
+def _kicad_cli_drc_summary(before: dict | None, after: dict | None, has_dru: bool) -> dict:
+    """Combine the before/after kicad-cli runs into the reported summary (#8322)."""
+    ok = bool(before and after and before["available"] and after["available"])
+    summary: dict = {
+        "available": ok,
+        "clearance_errors_before": before["clearance_errors"] if before else None,
+        "clearance_errors_after": after["clearance_errors"] if after else None,
+        "regression": False,
+        "dru_not_evaluated": (not ok) and has_dru,
+        "reason": None,
+    }
+    if ok:
+        summary["regression"] = after["clearance_errors"] > before["clearance_errors"]
+    else:
+        summary["reason"] = next(
+            (r["reason"] for r in (before, after) if r and not r["available"]), None
+        )
+    return summary
+
+
 def _refill_written_board(written: Path) -> tuple[bool, str | None]:
     """Refill zones in the written board; never raises (Issue #8286).
 
@@ -474,6 +532,12 @@ Examples:
             print(f"  - DRC-aware rollback: yes (mfr={args.mfr})")
         print()
 
+    # Issue #8322: kicad-cli baseline on the input, before it can be overwritten.
+    cli_before: dict | None = None
+    has_dru = pcb_path.with_suffix(".kicad_dru").exists()
+    if args.drc_aware and not args.dry_run:
+        cli_before = _kicad_cli_clearance_errors(pcb_path)
+
     # Run optimization
     try:
         with spinner("Optimizing traces...", quiet=quiet), _deterministic_uuids(pcb_path, args.net):
@@ -512,6 +576,12 @@ Examples:
                 "(issue #8286).",
                 file=sys.stderr,
             )
+
+    cli_drc: dict | None = None
+    if args.drc_aware and not args.dry_run:
+        cli_after = _kicad_cli_clearance_errors(Path(args.output or pcb_path))
+        cli_drc = _kicad_cli_drc_summary(cli_before, cli_after, has_dru)
+    exit_code = 2 if cli_drc and cli_drc["regression"] else 0
 
     if as_json:
         emit_json(
@@ -568,10 +638,11 @@ Examples:
                 "written_to": None if args.dry_run else (args.output or str(pcb_path)),
                 "zones_refilled": zones_refilled,
                 "zones_refill_error": refill_error,
+                "kicad_cli_drc": cli_drc,
                 "success": True,
             }
         )
-        return 0
+        return exit_code
 
     if not quiet:
         # Display results
@@ -608,7 +679,15 @@ Examples:
 
         if args.drc_aware:
             delta = stats.drc_errors_after - stats.drc_errors_before
-            if delta > 0:
+            cli_regressed = bool(cli_drc and cli_drc["regression"])
+            cli_unchecked = bool(cli_drc and cli_drc["dru_not_evaluated"])
+            if cli_regressed or cli_unchecked:
+                # Never claim "no regressions" on the in-process referee alone.
+                if cli_regressed:
+                    suffix = "(in-process referee only; see kicad-cli line below)"
+                else:
+                    suffix = "(DRC referee does not evaluate project .kicad_dru rules)"
+            elif delta > 0:
                 suffix = f"({delta} new errors, {stats.nets_rolled_back} nets rolled back)"
             elif stats.nets_rolled_back > 0:
                 suffix = f"(no regressions, {stats.nets_rolled_back} nets rolled back)"
@@ -628,6 +707,19 @@ Examples:
                         f"{r} (+{c})" for r, c in sorted(stats.drc_failsafe_rules.items())
                     )
                     print(f"           rules above baseline: {rules}")
+            if cli_drc and cli_drc["available"]:
+                b = cli_drc["clearance_errors_before"]
+                a = cli_drc["clearance_errors_after"]
+                print(f"  kicad-cli clearance errors: {b:>6} -> {a:>6}")
+                if cli_drc["regression"]:
+                    print(
+                        f"  REGRESSION: kicad-cli reports {a - b} new clearance "
+                        "error(s) on the written board (project rules incl. "
+                        ".kicad_dru); the in-process referee did not see them"
+                    )
+            elif cli_drc:
+                why = f" ({cli_drc['reason']})" if cli_drc["reason"] else ""
+                print(f"  kicad-cli clearance cross-check unavailable{why}")
         print()
 
         if args.verbose and stats.per_net:
@@ -659,7 +751,7 @@ Examples:
 
         print("=" * 50)
 
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":
