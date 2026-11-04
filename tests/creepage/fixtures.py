@@ -362,7 +362,7 @@ def board_other_layer_board_gap_source() -> str:
     return "".join(parts)
 
 
-def board_attach_zone_source(*, outside_shortfall: bool) -> str:
+def board_attach_zone_source(*, outside_shortfall: bool, edge_via: bool = False) -> str:
     """TO-220-style attach-zone board (#8028).
 
     ``Q1`` carries an ``L_MAINS`` pad and a ``GND`` pad 5 mm apart (4.4 mm
@@ -373,6 +373,10 @@ def board_attach_zone_source(*, outside_shortfall: bool) -> str:
     With ``outside_shortfall`` a separate ``P3``/``P4`` pair
     (``L_MAINS``/``GND``, 0.8 mm gap) sits far from Q1: a REAL shortfall outside
     the zone that the in-zone witness (the pair's binding minimum, ~0.64 mm) must not mask.
+
+    With ``edge_via`` a ``GND`` via sits just outside Q1's zone (0.7 mm from the
+    ``L_MAINS`` pad, below the 1.0 mm requirement) -- the out-of-zone copper vs
+    in-zone pad approach the zone-clipped residual alone never measures (#8292).
     """
     parts = [_SAMEFP_HEADER, _OUTLINE]
     parts.append(_footprint2("Q1", 110, 110, [("1", 1, "L_MAINS", 0, 0), ("2", 2, "GND", 0, 5)]))
@@ -380,6 +384,10 @@ def board_attach_zone_source(*, outside_shortfall: bool) -> str:
         '  (segment (start 110 115) (end 110.6 115) (width 0.25) (layer "F.Cu") (net 2))\n'
         '  (segment (start 110.6 115) (end 110.6 111) (width 0.25) (layer "F.Cu") (net 2))\n'
     )
+    if edge_via:
+        parts.append(
+            '  (via (at 111.3 110) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2))\n'
+        )
     if outside_shortfall:
         parts.append(_footprint2("P3", 130, 110, [("1", 1, "L_MAINS", 0, 0)]))
         parts.append(_footprint2("P4", 130, 111.4, [("1", 2, "GND", 0, 0)]))

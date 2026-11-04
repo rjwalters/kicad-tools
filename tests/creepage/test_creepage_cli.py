@@ -630,6 +630,23 @@ def test_attach_zone_does_not_mask_shortfall_outside_zone(tmp_path, capsys):
     assert rc != 0
 
 
+def test_attach_zone_cross_term_catches_out_of_zone_via(tmp_path, capsys):
+    """#8292: out-of-zone foreign copper vs an in-zone pad gates the pair."""
+    pcb = _write(tmp_path, board_attach_zone_source(outside_shortfall=False, edge_via=True))
+    rc = _run(_attach_argv(pcb, _hv_map_file(tmp_path), "--waive-attach-zone"))
+    payload = json.loads(capsys.readouterr().out)
+    row = _gnd_row(payload)
+    assert row["relationship"] == "attach_zone"
+    assert row["residual_pass"] is False
+    assert "waived" not in row
+    assert row["residual_creepage_mm"] == pytest.approx(0.7, abs=0.02)
+    assert row["residual_witness_mm"][0] == pytest.approx(
+        10.65, abs=0.05
+    )  # pad-edge/via-edge midpoint
+    assert payload["gate_passed"] is False
+    assert rc != 0
+
+
 # ---------------------------------------------------------------------------
 # #8232: a same_footprint minimum must not hide a board-level approach.
 # ---------------------------------------------------------------------------
