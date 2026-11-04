@@ -15,6 +15,10 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-04
 
+- **PR #8374**: perf(router): skip repeat Python fallback for drained nets, record per-net fallback time
+- **PR #8372**: fix: carry project sidecars to -o outputs via shared helper
+- **PR #8371**: fix: reject bad nets individually when drc-aware rollback misses baseline
+- **Issue #8366** (closed): Board-writing commands drop the project .kicad_pro/.kicad_dru, so downstream DRC-verified stages silently check default rules
 - **Issue #8255** (closed): Release v0.28.0 blocked: three red main-CI jobs (board 05 strict stock preflight, board 02/03 baselines after #8229/#8230)
 - **PR #8363**: test: re-pin board 02 baseline to 316.57mm after atomic chamfer
 - **PR #8320**: fix(board-05): clean router copper, declare FUSED non-HV, re-issue evidence
