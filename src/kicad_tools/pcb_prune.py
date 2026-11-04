@@ -1740,3 +1740,32 @@ def prune_board(
         if n_vias := sum(len(p.remove_vias) for p in accepted):
             stats["vias_removed"] = n_vias
     return pcb, PruneResult(plans, accepted, rejected, drc_verified, note, stats, uncut)
+
+
+def cleanup_copper(routed: Path | str, max_passes: int = 10) -> dict[str, int]:
+    """Dedupe and DRC-verified prune ``routed`` in place, to a fixed point (#8399).
+
+    Same loop as board 05's ``cleanup_copper`` (#8278): each prune pass can
+    expose more redundant copper, so repeat until nothing changes.  Never
+    ``--unverified``: an accepted but unverified prune raises.
+    """
+    from kicad_tools.schema.pcb import PCB
+
+    routed = Path(routed)
+    totals = {"duplicates": 0, "segments_removed": 0, "ends_snapped": 0}
+    for _ in range(max_passes):
+        pcb = PCB.load(str(routed))
+        dup = pcb.dedupe_copper()
+        if dup["segments"] or dup["vias"]:
+            pcb.save(str(routed))
+        pruned, result = prune_board(routed)
+        if result.accepted and not result.drc_verified:
+            raise RuntimeError(f"Copper prune was not DRC-verified: {result.drc_note}")
+        if result.accepted:
+            pruned.save(str(routed))
+        totals["duplicates"] += dup["segments"] + dup["vias"]
+        totals["segments_removed"] += result.stats["segments_removed"]
+        totals["ends_snapped"] += result.stats["ends_snapped"]
+        if not (dup["segments"] or dup["vias"] or result.accepted):
+            return totals
+    raise RuntimeError(f"Copper cleanup did not converge in {max_passes} passes: {totals}")
