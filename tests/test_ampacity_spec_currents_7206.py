@@ -170,7 +170,11 @@ class TestCheckCli:
 
 def test_board05_publishes_ampacity_target_on_motor_power():
     ncm = json.loads((BOARD05.parent / "redesign" / "net_class_map.json").read_text())
-    motor = {n: c for n, c in ncm.items() if c["name"] == "Motor power"}
+    motor = {
+        n: c
+        for n, c in ncm.items()
+        if isinstance(c, dict) and c.get("name") == "Motor power"  # skip reserved keys
+    }
     assert set(motor) == {"VIN", "FUSED", "VM", "PHASE_A", "PHASE_B", "PHASE_C", "GND_SENSE"}
     assert all(c["target_ampacity"] == 0.5 and c["neck_trace_width"] == 0.3 for c in motor.values())
     assert (BOARD05 / "net_class_map.json").read_text() == (

@@ -38,9 +38,11 @@ Collinear grid-step runs (issue #8236) are merged into one segment: a maximal
 run of same-net / same-layer / same-width segments joined end to end in a
 straight line, where every joint is a pure two-segment endpoint join (no via,
 pad, zone or third segment there).  The merged copper is identical, so a run
-is skipped if any member is hard-protected or its body touches same-net copper
-outside the run (a possible unmodelled join).  Merging applies after removals
-and snaps and never changes which ends are anchored.
+is skipped if any member is hard-protected, or if its body touches same-net
+copper outside the run that is not otherwise joined to it through modelled
+track / via / pad joins (the contact could be an unmodelled join held by an
+interior joint; issue #8278).  Merging applies after removals and snaps and
+never changes which ends are anchored.
 """
 
 from __future__ import annotations
@@ -52,9 +54,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from kicad_tools.schema.pcb import PCB, Pad, Segment
+from kicad_tools.schema.pcb import PCB, Pad, Segment, _mm_atom
 
 #: End-to-centre distance (mm) at/below which an end counts as centred.
+_MICRO_BRIDGE = 0.01  # mm: a member this short is a bridge, not a step
 CENTRE_TOL = 1e-3
 #: Coordinate tolerance (mm) for two track endpoints to count as one point.
 JOIN_TOL = 2e-6
@@ -473,6 +476,56 @@ class _NetModel:
                     return True
         return False
 
+    def centred_layers(self, k: int, removed: set[int]) -> set[str]:
+        """Layers on which a live track end sits on the centre of via / pad ``k``."""
+        o = self.nodes[k]
+        out: set[str] = set()
+        for j in self.adj[k]:
+            if j in removed or self.nodes[j].kind != "seg":
+                continue
+            n = self.nodes[j]
+            if math.dist(n.a, o.a) <= CENTRE_TOL or math.dist(n.b, o.a) <= CENTRE_TOL:
+                out.update(n.layers)
+        return out
+
+    def decentres(self, touched: set[int], before: set[int], after: set[int]) -> bool:
+        """Would removing ``after - before`` leave a via / pad that had a track
+        end on its centre, on some layer, joined on that layer only by
+        off-centre (overlap) ends?
+
+        :meth:`degrades_ends` looks from the surviving track ends; this looks
+        from the via / pad side, per layer (issue #8278: a diagonal stub to a
+        via centre was removed as a loop branch, leaving a straight run whose
+        end merely sits inside the via disc).
+        """
+        for k in touched:
+            if k in after or self.nodes[k].kind not in ("via", "pad"):
+                continue
+            lost = self.centred_layers(k, before) - self.centred_layers(k, after)
+            # Only a surviving track end resting inside the via / pad with no
+            # track-end partner is the off-centre joint this guards against; a
+            # track passing over it, or ending at a corner joint (a body
+            # join, issue #8298), is not.
+            if lost and not any(
+                j not in after
+                and self.nodes[j].kind == "seg"
+                and any(
+                    _contains(self.nodes[k], pt)
+                    and not any(
+                        self.nodes[q].kind == "seg" and q not in after for q in self.anch[j][x]
+                    )
+                    for x, pt in enumerate((self.nodes[j].a, self.nodes[j].b))
+                )
+                for j in self.adj[k]
+            ):
+                continue
+            if any(
+                j not in after and self.nodes[j].kind == "seg" and lost & set(self.nodes[j].layers)
+                for j in self.adj[k]
+            ):
+                return True
+        return False
+
     def still_joined(self, touched: set[int], removed: set[int], body: bool = False) -> bool:
         """Are all live nodes in ``touched`` in one component once ``removed``
         is gone, using only track / via / pad joins?
@@ -768,6 +821,11 @@ def _try_snap(
             return  # a sharer may hide a join: leave the joint alone
         if math.dist(_end_pt(model.nodes[k], 1 - x), c) <= CENTRE_TOL:
             return  # would collapse a segment to zero length
+    for k, x in movers:
+        nk = model.nodes[k]
+        new = (c, nk.b) if x == 0 else (nk.a, c)
+        if _tilts(nk, *new):
+            return  # a snap must not take a track off the 45-degree set
     moved = {k for k, _ in movers}
     touched = set(moved)
     for k in moved:
@@ -813,6 +871,20 @@ def _try_snap(
         model.anch[k] = anch_k
 
 
+def _aligned(a: tuple[float, float], b: tuple[float, float]) -> bool:
+    """Is ``a -> b`` on the 0/45/90/135 set as the fleet census reads it
+    (4-decimal serialized coordinates)?  Zero length counts as aligned."""
+    from kicad_tools.router.quantize import _is_quantum_aligned
+
+    return _is_quantum_aligned(round(b[0], 4) - round(a[0], 4), round(b[1], 4) - round(a[1], 4))
+
+
+def _tilts(n: _Node, a: tuple[float, float], b: tuple[float, float]) -> bool:
+    """Would re-ending segment ``n`` as ``a -> b`` take an on-angle track off
+    the 45-degree set (issue #8278, the fleet angle census)?"""
+    return _aligned(n.a, n.b) and not _aligned(a, b)
+
+
 #: Max perpendicular deviation (mm) for a run to count as one straight line.
 _COLLINEAR_TOL = 1e-6
 
@@ -848,8 +920,41 @@ def _joint_partner(model: _NetModel, i: int, e: int, removed: set[int]) -> tuple
     return j, f
 
 
-def _plan_collinear_merges(model: _NetModel, plan: NetPlan, removed: set[int]) -> None:
-    """Merge maximal straight runs of segments into their first member."""
+def _existing_copy(
+    model: _NetModel,
+    s: int,
+    start: tuple[float, float],
+    far: tuple[float, float],
+    members: set[int],
+    gone: set[int],
+) -> int | None:
+    """A live segment outside the run that already spans ``start``-``far``
+    on the same layer with the same width (issue #8278: a 0.4 mm track laid
+    back over four 0.1 mm steps).  Merging would create an exact duplicate,
+    which KiCad reports as a dangling track.  Returns ``-1`` when such a copy
+    exists but would be left with an unanchored end without the run (the two
+    form a closed loop to nowhere): the run must then stay as it is."""
+    n = model.nodes[s]
+    for m in members:
+        for k in model.adj[m] | model.overlap[m]:
+            if k in members or k in gone:
+                continue
+            o = model.nodes[k]
+            if o.kind != "seg" or o.layers != n.layers or abs(o.radius - n.radius) > 1e-9:
+                continue
+            if (_same_pt(o.a, start) and _same_pt(o.b, far)) or (
+                _same_pt(o.a, far) and _same_pt(o.b, start)
+            ):
+                return k if model.end_ok(k, gone | members) else -1
+    return None
+
+
+def _plan_collinear_merges(model: _NetModel, plan: NetPlan, removed: set[int]) -> set[int]:
+    """Merge maximal straight runs of segments into their first member.
+
+    Returns the model ids of every segment in a merged run.
+    """
+    merged: set[int] = set()
     seg_ids = [
         i
         for i, n in enumerate(model.nodes)
@@ -879,8 +984,21 @@ def _plan_collinear_merges(model: _NetModel, plan: NetPlan, removed: set[int]) -
         far = _end_pt(model.nodes[cur], out)
         start = _end_pt(model.nodes[s], 1 - ends[0])
         members = set(run)
-        # Body-touching copper outside the run may hide a join: leave it alone.
-        if any(model.overlap[m] - members - removed for m in run):
+        # Merging drops only the run's interior joints; the copper itself is
+        # unchanged.  Same-net copper that touches the run's body may be held
+        # by one of those joints (an unmodelled join), so the run is skipped
+        # unless every such neighbour is already joined to the run through
+        # modelled track / via / pad joins -- then a lost contact is redundant
+        # (issue #8278: the diagonal corner of a grid-step route grazes the
+        # first few 0.1 mm steps of the straight run it turns into).
+        outside = set().union(*(model.overlap[m] for m in run)) - members - removed
+        # A micro-bridge member (~um, issue #8298) holds a neighbour only at
+        # a coincidence the optimizer does not model: leave such runs alone.
+        if outside and any(
+            math.dist(model.nodes[m].a, model.nodes[m].b) < _MICRO_BRIDGE for m in run
+        ):
+            continue
+        if outside and not model.still_joined(outside | {s}, removed):
             continue
         if any(
             _pt_seg_dist(_end_pt(model.nodes[m], x), start, far) > _COLLINEAR_TOL
@@ -888,7 +1006,187 @@ def _plan_collinear_merges(model: _NetModel, plan: NetPlan, removed: set[int]) -
             for x in (0, 1)
         ):
             continue
+        if (
+            _tilts(model.nodes[s], start, far)
+            or any(_aligned(model.nodes[m].a, model.nodes[m].b) for m in run)
+            and not _aligned(start, far)
+        ):
+            continue
+        copy = _existing_copy(model, s, start, far, members, removed)
+        if copy == -1:
+            continue
+        merged |= members
+        if copy is not None:
+            for m in run:
+                plan.remove.append(model.nodes[m].index)
+                plan.reasons[model.nodes[m].index] = "collinear run duplicates a track"
+            continue
         plan.extends.append((model.nodes[s].index, ("start", "end")[ends[0]], far))
+        for m in run[1:]:
+            plan.remove.append(model.nodes[m].index)
+            plan.reasons[model.nodes[m].index] = "collinear run merged"
+    return merged
+
+
+def _anchored_partner(
+    model: _NetModel, i: int, e: int, removed: set[int]
+) -> tuple[int, int] | None:
+    """Like :func:`_joint_partner`, but the joint may also sit on same-net
+    vias, pads or zones: exactly one other *segment* ends there, straight
+    through, with the same layer and width."""
+    if i in removed:
+        return None
+    segs = {k for k in model.anch[i][e] - removed if model.nodes[k].kind == "seg"}
+    if len(segs) != 1:
+        return None
+    j = next(iter(segs))
+    n, o = model.nodes[i], model.nodes[j]
+    if n.layers != o.layers or abs(n.radius - o.radius) > 1e-9:
+        return None
+    p = _end_pt(n, e)
+    f = next((x for x in (0, 1) if _same_pt(_end_pt(o, x), p)), None)
+    if f is None:
+        return None
+    if {k for k in model.anch[j][f] - removed if model.nodes[k].kind == "seg"} != {i}:
+        return None
+    qi, qj = _end_pt(n, 1 - e), _end_pt(o, 1 - f)
+    vi, vj = (qi[0] - p[0], qi[1] - p[1]), (qj[0] - p[0], qj[1] - p[1])
+    li, lj = math.hypot(*vi), math.hypot(*vj)
+    if li < _EPS or lj < _EPS:
+        return None
+    if (vi[0] * vj[0] + vi[1] * vj[1]) >= 0 or abs(vi[0] * vj[1] - vi[1] * vj[0]) / lj > (
+        _COLLINEAR_TOL
+    ):
+        return None
+    return j, f
+
+
+def _merge_unsafe_member(model: _NetModel, i: int) -> bool:
+    """Locked, or touching a copper arc (arcs are never modelled joins, so a
+    lost interior joint could be what fed one)."""
+    n = model.nodes[i]
+    if getattr(n.ref, "locked", False):
+        return True
+    return any(
+        o.kind == "arc" and _shared_layers(n, o) and _arc_reaches(o, n.a, n.b, n.radius)
+        for o in model.nodes
+    )
+
+
+def _plan_anchored_merges(
+    model: _NetModel, plan: NetPlan, removed: set[int], done: set[int]
+) -> None:
+    """Merge straight runs whose joints also sit on vias / pads / zones.
+
+    The pure pass (:func:`_plan_collinear_merges`) leaves these alone.  The
+    merged copper is identical; only the run's interior anchor points go.  So
+    each candidate is merged on the model and kept only when, with the run
+    collapsed to one segment (issue #8278):
+
+    * the pad / zone terminal partition is unchanged;
+    * everything the run touched (endpoint, via / pad / zone and body
+      neighbours) is still joined to it through modelled track / via / pad
+      joins -- a contact made only at an interior joint is then redundant;
+    * every zone that held a run end still holds one of the merged ends;
+    * no via / pad loses a track end on its centre on any layer, and no
+      neighbouring track end that met a track end or a centre loses it.
+
+    A failing candidate is restored exactly.
+    """
+    seg_ids = [
+        i
+        for i, n in enumerate(model.nodes)
+        if n.kind == "seg" and i not in removed and i not in done
+    ]
+    eligible = set(seg_ids)
+    link: dict[tuple[int, int], tuple[int, int]] = {}
+    for i in seg_ids:
+        for e in (0, 1):
+            hit = _anchored_partner(model, i, e, removed)
+            if hit is not None and hit[0] in eligible:
+                link[(i, e)] = hit
+    gone = set(removed)
+    visited: set[int] = set()
+    for s in seg_ids:
+        if s in visited:
+            continue
+        ends = [e for e in (0, 1) if (s, e) in link]
+        if len(ends) != 1:
+            continue
+        out = ends[0]
+        run, cur = [s], s
+        while (cur, out) in link:
+            cur, f = link[(cur, out)]
+            run.append(cur)
+            out = 1 - f
+        visited.update(run)
+        members = set(run)
+        far = _end_pt(model.nodes[cur], out)
+        start = _end_pt(model.nodes[s], 1 - ends[0])
+        if any(
+            _pt_seg_dist(_end_pt(model.nodes[m], x), start, far) > _COLLINEAR_TOL
+            for m in run
+            for x in (0, 1)
+        ):
+            continue
+        if any(_merge_unsafe_member(model, m) for m in run):
+            continue
+        if any(math.dist(model.nodes[m].a, model.nodes[m].b) < _MICRO_BRIDGE for m in run):
+            continue  # a micro-bridge joint stays for optimize-traces (#8298)
+        if any(_aligned(model.nodes[m].a, model.nodes[m].b) for m in run) and not _aligned(
+            start, far
+        ):
+            continue  # a merge must not take an on-angle run off the 45-degree set
+        touched: set[int] = set()
+        for m in run:
+            touched |= model.adj[m] | model.overlap[m]
+        touched -= members | gone
+        zones = {k for k in touched if model.nodes[k].kind == "zone"}
+        centred = {
+            k: model.centred_layers(k, gone)
+            for k in touched
+            if model.nodes[k].kind in ("via", "pad")
+        }
+        clean = {
+            (k, x)
+            for k in touched
+            if model.nodes[k].kind == "seg"
+            for x in (0, 1)
+            if model.clean_end(k, x, gone)
+        }
+        baseline = model.partition(gone)
+        after = gone | members - {s}
+        node = model.nodes[s]
+        old = (node.a, node.b)
+        _set_end(node, ends[0], far)
+        model.relink(s)
+        ok = (
+            model.partition(after) == baseline
+            and model.still_joined((touched - zones) | {s}, after)
+            and zones <= model.adj[s]
+            and all(model.centred_layers(k, after) >= lay for k, lay in centred.items())
+            and all(model.clean_end(k, x, after) for k, x in clean)
+        )
+        if not ok:
+            node.a, node.b = old
+            model.relink(s)
+            continue
+        copy = _existing_copy(model, s, start, far, members, gone)
+        if copy is not None:
+            # The collapsed run is joined exactly where the existing track
+            # is, so dropping it as well leaves the same joins -- unless that
+            # track would be left with a free end (copy == -1): keep the run.
+            node.a, node.b = old
+            model.relink(s)
+            if copy == -1:
+                continue
+            gone = gone | members
+            for m in run:
+                plan.remove.append(model.nodes[m].index)
+                plan.reasons[model.nodes[m].index] = "collinear run duplicates a track"
+            continue
+        gone = after
+        plan.extends.append((node.index, ("start", "end")[ends[0]], far))
         for m in run[1:]:
             plan.remove.append(model.nodes[m].index)
             plan.reasons[model.nodes[m].index] = "collinear run merged"
@@ -900,13 +1198,19 @@ DEFAULT_WIDE_MM = 0.5
 
 def _cut_ok(model: _NetModel, group: set[int], removed: set[int], baseline) -> bool:
     """The shared acceptance test for removing ``group`` (terminals unchanged,
-    neighbours still joined, no stranded or degraded ends)."""
+    neighbours still joined, no stranded, degraded or de-centred ends).
+
+    The via / pad-side :meth:`_NetModel.decentres` check applies here exactly
+    as in :func:`_plan_net`'s generic loop pass (issue #8358): a via-closed
+    loop cut must not leave a via held on a layer only by an off-centre end.
+    """
     touched = {k for g in group for k in model.adj[g] | model.overlap[g]} - group
     return not (
         model.partition(removed | group) != baseline
         or not model.still_joined(touched, removed | group)
         or model.strands_end(group, removed)
         or model.degrades_ends(touched, removed, removed | group)
+        or model.decentres(touched, removed, removed | group)
     )
 
 
@@ -1134,6 +1438,7 @@ def _plan_net(
                     or model.strands_end(group, removed)
                     or model.strands_via_layer(group, removed)
                     or model.degrades_ends(touched, removed, removed | group)
+                    or model.decentres(touched, removed, removed | group)
                 ):
                     continue
                 off = any(model.offcentre_end(g) for g in group)
@@ -1154,7 +1459,8 @@ def _plan_net(
         for e in (0, 1):
             _try_snap(model, plan, i, e, removed, baseline)
 
-    _plan_collinear_merges(model, plan, removed)
+    done = _plan_collinear_merges(model, plan, removed)
+    _plan_anchored_merges(model, plan, removed, done)
     return plan
 
 
@@ -1219,8 +1525,13 @@ def apply_plans(pcb: PCB, plans: list[NetPlan]) -> dict[str, int]:
                 seg.start = (x, y)
             else:
                 seg.end = (x, y)
-            node.set_value(0, x + ox)
-            node.set_value(1, y + oy)
+            # Written on KiCad's nm grid: a bare float goes through the
+            # serializer's 6-significant-digit format, which turned 133.4125
+            # into 133.412 and opened a 0.5 um gap at the joint (issue #8278).
+            while len(node.children) < 2:
+                node.children.append(_mm_atom(0.0))
+            node.children[0] = _mm_atom(x + ox)
+            node.children[1] = _mm_atom(y + oy)
         snapped += len(plan.snaps)
     to_remove = [segs[i] for plan in plans for i in plan.remove]
     vias = list(pcb.vias)

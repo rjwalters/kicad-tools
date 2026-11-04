@@ -77,6 +77,38 @@ def declare_router_netclasses(routed):
         raise RuntimeError(f"Router net classes not declared in the routed project: {declared}")
 
 
+def cleanup_copper(routed, max_passes=10):
+    """Remove avoidable router copper to a fixed point (issue #8278).
+
+    The grid router leaves 0.1 mm collinear steps, a few exact duplicates and
+    redundant loop branches, which ``kct check`` reports as
+    ``redundant_copper_*``.  ``kct pcb dedupe`` plus the DRC-verified
+    ``kct pcb prune`` (kicad-cli ``--refill-zones`` judges every net's edit)
+    remove them; each prune pass can expose more, so repeat until nothing
+    changes.  Never ``--unverified``: an unverified prune raises.
+    """
+    from kicad_tools.pcb_prune import prune_board
+    from kicad_tools.schema.pcb import PCB
+
+    totals = {"duplicates": 0, "segments_removed": 0, "ends_snapped": 0}
+    for _ in range(max_passes):
+        pcb = PCB.load(str(routed))
+        dup = pcb.dedupe_copper()
+        if dup["segments"] or dup["vias"]:
+            pcb.save(str(routed))
+        pruned, result = prune_board(routed)
+        if result.accepted and not result.drc_verified:
+            raise RuntimeError(f"Copper prune was not DRC-verified: {result.drc_note}")
+        if result.accepted:
+            pruned.save(str(routed))
+        totals["duplicates"] += dup["segments"] + dup["vias"]
+        totals["segments_removed"] += result.stats["segments_removed"]
+        totals["ends_snapped"] += result.stats["ends_snapped"]
+        if not (dup["segments"] or dup["vias"] or result.accepted):
+            return totals
+    raise RuntimeError(f"Copper cleanup did not converge in {max_passes} passes: {totals}")
+
+
 def build(output):
     output = Path(output).resolve()
     generate(output)
@@ -117,6 +149,7 @@ def build(output):
     stitch_evidence = Path(tempfile.mkdtemp(prefix="bldc-power-stitch-")) / "evidence"
     complete_power_connections(routed, evidence_dir=stitch_evidence)
     shutil.copytree(stitch_evidence, evidence / "stitch")
+    print(f"Copper cleanup (dedupe + verified prune): {cleanup_copper(routed)}")
     subprocess.run(
         [
             "kicad-cli",

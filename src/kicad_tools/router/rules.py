@@ -2395,7 +2395,9 @@ def net_class_map_from_dict(
     start with ``_`` in practice, this cannot shadow a real net entry.
     The ``spatial_keepouts`` key is likewise reserved (issue #4605): it
     carries per-rule-area net-class filters for KiCad keepout rule areas
-    and is parsed by the route CLI, not by this deserializer.
+    and is parsed by the route CLI, not by this deserializer.  The
+    ``non_hv_nets`` key is reserved too (issue #8278): explicit "not
+    mains/HV" declarations read by the HV isolation vacuity guard.
 
     Args:
         data: Mapping of ``net_name -> NetClassRouting-dict``.  Must be a
@@ -2423,6 +2425,11 @@ def net_class_map_from_dict(
     for net_name, entry in data.items():
         if isinstance(net_name, str) and net_name.startswith("_"):
             continue  # reserved for in-band documentation (_comment, _meta, ...)
+        if net_name == "non_hv_nets":
+            # Issue #8278: reserved block -- explicit per-net "not mains/HV"
+            # declarations for the HV vacuity guard, parsed by
+            # kicad_tools.creepage.engine.non_hv_nets_from_dict (never a net).
+            continue
         if net_name == "spatial_keepouts":
             # Issue #4605: reserved block -- per-rule-area net-class filters
             # for KiCad keepout rule areas, parsed by the route CLI (never a

@@ -11,7 +11,7 @@ Baseline measurement at HEAD (worst-of-3 across seeds 42/43/44 with
 - **Routed: 8/8 signal nets (100%)** -- LINE_A-D + NODE_A-D
 - **Connected pads: 34/34 (100%)** including GND/VCC via auto-pour
 - **DRC: 0 errors, 0 warnings** at ``jlcpcb-tier1`` profile
-- **Deterministic output**: 22 routes / 20 vias / 317.27mm total
+- **Deterministic output**: 22 routes / 20 vias / 316.57mm total
   length identical across seeds 42/43/44 -- this small 2-layer board
   has fully converged.  (26 vias / 323.06mm before the Issue #6315
   re-baseline, which resolves pad clearance cells by exact geometry, so
@@ -936,7 +936,17 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     # reverting only #8230's src changes (cli/route_cmd.py and
     # router/optimizer/{algorithms,config,trace}.py): the old 320.62 pin then
     # passes again.  Shortening can only reduce length.
-    EXPECTED_LENGTH = 317.27
+    #
+    # Re-baselined 2026-11-04 for Issue #8361 (#8253, atomic 45-degree
+    # chamfer): seeds 42/43/44 all yield (22, 83, 20, 316.57) -- routes (22),
+    # vias (20) and via positions UNCHANGED, length 317.27 -> 316.57
+    # (-0.70 mm), segments 169 -> 83.  #8253 made each ``convert_corners_45``
+    # chamfer atomic, so NODE_D's optimized geometry no longer fails
+    # ``optimize_route``'s endpoint-preservation guard and is no longer
+    # reverted to the raw 112-segment router staircase.  The whole delta is
+    # in NODE_D; nets 1-7 are identical per net and layer.  Prior pin
+    # (22, 169, 20, 317.27).
+    EXPECTED_LENGTH = 316.57
     # Re-baselined 2026-09-14 for Issue #5201: the escape router
     # (``EscapeRouter.via_in_pad_supported``) previously resolved
     # via-in-pad eligibility from the bare ``MfrLimits`` capability
@@ -1014,7 +1024,9 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     # exact routes/vias/length pins above are the regression guard).
     # #8255 (detour shortening, #8230): the LOWER bound is widened 180 -> 150.
     # Collapsing detouring chains removes segments (189 -> 169 observed).
-    EXPECTED_SEGMENTS_RANGE = (150, 240)
+    # #8253 (atomic chamfer, #8361): the LOWER bound is widened 150 -> 60.
+    # NODE_D no longer falls back to the raw staircase (169 -> 83 observed).
+    EXPECTED_SEGMENTS_RANGE = (60, 240)
     got_routes, got_segments, got_vias, got_length = ref
     exact = (got_routes, got_vias, got_length)
     expected_exact = (EXPECTED_ROUTES, EXPECTED_VIAS, EXPECTED_LENGTH)

@@ -32,6 +32,24 @@ KnownWarningKey = tuple[str, str, str]
 #: Rule-id prefixes that are advisory hints and never fail a strict gate (#8218).
 NON_GATING_RULE_PREFIXES: tuple[str, ...] = ("redundant_copper",)
 
+#: Warning rules whose findings name no ref/pad (track copper), keyed by board
+#: location instead: ``(rule, "", "@x/y")`` with x/y in mm rounded to 0.01
+#: (issue #8278).  Only these rules may carry a located ``{rule, at}``
+#: identity in a board's ``known_issues``.
+LOCATED_WARNING_RULES: frozenset[str] = frozenset(
+    {
+        "redundant_copper_detour",
+        "redundant_copper_duplicate",
+        "redundant_copper_fragments",
+        "redundant_copper_via_offcentre",
+    }
+)
+
+
+def located_pad(x: float, y: float) -> str:
+    """The ``pad`` slot of a located warning key: ``@x/y`` rounded to 0.01 mm."""
+    return f"@{round(float(x), 2) + 0.0:.2f}/{round(float(y), 2) + 0.0:.2f}"
+
 
 def _field(violation: Any, name: str) -> Any:
     if isinstance(violation, Mapping):
@@ -52,6 +70,8 @@ def warning_key(violation: Any) -> KnownWarningKey | None:
     * ``thermal_asymmetry``: ``items = (ref, solid_pad[, other_pad])``.
     * ``via_at_pad_edge``: ``items = (via_ident, pad)``; ref is the pad's
       ``<ref>-<number>`` prefix.
+    * :data:`LOCATED_WARNING_RULES` (track copper, no ref/pad): keyed by
+      location, ``(rule, "", "@x/y")`` (issue #8278).
     """
     rule = str(_field(violation, "rule_id") or "")
     items = tuple(str(i) for i in (_field(violation, "items") or ()))
@@ -64,6 +84,10 @@ def warning_key(violation: Any) -> KnownWarningKey | None:
         ref, sep, number = pad.rpartition("-")
         if sep and ref and number:
             return (rule, ref, pad)
+    elif rule in LOCATED_WARNING_RULES:
+        loc = _field(violation, "location")
+        if loc is not None and len(loc) == 2:
+            return (rule, "", located_pad(loc[0], loc[1]))
     return None
 
 

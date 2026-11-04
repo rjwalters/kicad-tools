@@ -26,9 +26,10 @@ requirements:
       regulated supply, 30mA maximum total 5V load; 20mA Hall allocation. Firmware
       25% duty cap.
   mechanical:
-    dimensions:
-      width: 70mm
-      height: 90mm
+    board_size:
+      width: 70
+      height: 90
+      unit: mm
   manufacturing:
     layers:
       preferred: 4
@@ -75,8 +76,8 @@ bom_entries:
   part: SMBJ24A
   lcsc: C224017
 - ref: D3
-  part: 17-21SURC/S530-A2/TR8
-  lcsc: C131244
+  part: NCD0805R1
+  lcsc: C84256
 - ref: C1
   part: EEEFT1H221AP
   lcsc: C178594
@@ -173,7 +174,7 @@ decisions:
   rationale: Original DRV8301 regulator/charge-pump/buck pins and procurement invalid,
     issue4993. Datasheet pin maps and native or TI-derived physical land patterns.
 progress:
-  phase: production
+  phase: manufacturing
   phases:
     schematic:
       status: completed
@@ -185,7 +186,3 @@ progress:
       checklist:
       - '[x] Physical component placement'
       - '[x] Native copper/DRC/manufacturing verification'
-    production:
-      status: completed
-      checklist:
-      - '[x] Manufacturing files generated'

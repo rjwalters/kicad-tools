@@ -31,6 +31,22 @@ def test_native_refill_drc_has_no_findings_or_unconnected_items():
 def test_manufacturer_check_and_meta_gates_pass():
     check = _load("readiness/kct-check.json")
     assert check["summary"]["errors"] == 0
+    # No warning is accepted (#8308 re-routed the four track detours #8278
+    # had to record): the board carries zero findings and zero located
+    # known-issue allowances -- not merely "few".
+    known = _load("readiness/known-issues.json")
+    accepted = [
+        (issue["issue"], w["rule"], w.get("at"))
+        for issue in known["known_issues"]
+        for w in issue.get("warnings", [])
+    ]
+    found = [
+        (f["rule_id"], f["point"])
+        for f in check["findings"]
+        if f["severity"] == "warning" and not f.get("waived")
+    ]
+    assert accepted == []
+    assert found == []
     assert check["summary"]["warnings"] == 0
     for gate in ("drc", "erc", "lvs"):
         assert check["meta_checks"][gate]["status"] == "PASSED", gate

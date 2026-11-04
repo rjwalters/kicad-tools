@@ -75,8 +75,8 @@ bom_entries:
   part: SMBJ24A
   lcsc: C224017
 - ref: D3
-  part: 17-21SURC/S530-A2/TR8
-  lcsc: C131244
+  part: NCD0805R1
+  lcsc: C84256
 - ref: C1
   part: EEEFT1H221AP
   lcsc: C178594

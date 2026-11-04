@@ -452,6 +452,11 @@ def output_table(result: AuditResult, verbose: bool = False) -> None:
     iso = result.isolation
     if iso.hv_present or getattr(iso, "mains_suspected_unclassified", False):
         _output_isolation_section(iso)
+    elif getattr(iso, "declared_non_hv_nets", None):
+        # Issue #8278: an explicit non-HV declaration is disclosed, never silent.
+        print("\n[i] HV / Isolation: mains-named net(s) declared non-HV by the net-class map")
+        for name, reason in sorted(iso.declared_non_hv_nets.items()):
+            print(f"    {name}: {reason}")
 
     # Layer utilization
     if verbose and result.layers.utilization:

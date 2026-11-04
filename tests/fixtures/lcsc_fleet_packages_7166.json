@@ -1,5 +1,5 @@
 {
-  "_comment": "Issue #7166: LCSC part records for every part assigned on fleet boards 00-07, captured 2026-10-18 from LCSC product detail (encapStandard -> package, productModel -> mfr_part, productIntroEn -> description). Two manual-assembly connectors absent from that capture come from elsewhere: C7095263 from the jlcparts offline catalog, C124375 from board 07's committed manual-assembly-bom.csv. Used offline by tests/test_lcsc_ic_package_guard_7166.py; never fetched in CI. C114147 (board 04 Y1, assigned only in project.kct) added for issue #7180 from the same LCSC product-detail source, 2026-10-18. C492401 and C492407 (board 06 J1-J3, XFCN PZ254V-11-02P / -08P, substituted for the Samtec TSW headers by #7426 under operator ruling #7268 Q2 = 3) added for issue #7445, copied verbatim from the LCSC records that #7426's `kct parts lookup --no-cache` wrote to the parts cache on 2026-10-19 and that its review checked against the LCSC product pages.",
+  "_comment": "Issue #7166: LCSC part records for every part assigned on fleet boards 00-07, captured 2026-10-18 from LCSC product detail (encapStandard -> package, productModel -> mfr_part, productIntroEn -> description). Two manual-assembly connectors absent from that capture come from elsewhere: C7095263 from the jlcparts offline catalog, C124375 from board 07's committed manual-assembly-bom.csv. Used offline by tests/test_lcsc_ic_package_guard_7166.py; never fetched in CI. C114147 (board 04 Y1, assigned only in project.kct) added for issue #7180 from the same LCSC product-detail source, 2026-10-18. C492401 and C492407 (board 06 J1-J3, XFCN PZ254V-11-02P / -08P, substituted for the Samtec TSW headers by #7426 under operator ruling #7268 Q2 = 3) added for issue #7445, copied verbatim from the LCSC records that #7426's `kct parts lookup --no-cache` wrote to the parts cache on 2026-10-19 and that its review checked against the LCSC product pages. C84256 (board 05 D3, NCD0805R1, swapped in for the out-of-stock C131244 by #8308 / #8267) added for PR #8320, copied from the LCSC product-detail record (encapStandard -> package, productModel -> mfr_part, productIntroEn -> description) on 2026-11-04; C131244 stays because boards 02 and 04 still use it.",
   "parts": {
     "C1588": {
       "package": "0603",
@@ -190,6 +190,11 @@
       "package": "0603",
       "mfr_part": "GRM188R71H103KA01D",
       "description": "10nF ±10% 50V Ceramic Capacitor X7R 0603"
+    },
+    "C84256": {
+      "package": "0805",
+      "mfr_part": "NCD0805R1",
+      "description": "Red 630nm LED Indication - Discrete 1.6V~2.6V 0805"
     },
     "C84808": {
       "package": "LQFP-144(20x20)",
