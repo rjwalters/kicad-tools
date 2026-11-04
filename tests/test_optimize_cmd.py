@@ -210,7 +210,9 @@ class TestDrcRollback:
 
         # Issue #3138: optimizer now uses _run_drc_error_count_by_category
         # (returns dict keyed by rule id with ``__total__``).  Mock that.
-        def mock_drc_error_count_by_category(pcb_text, manufacturer, layers, copper_oz):
+        def mock_drc_error_count_by_category(
+            pcb_text, manufacturer, layers, copper_oz, min_clearance_mm=None
+        ):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -279,7 +281,7 @@ class TestDrcRollback:
         call_count = 0
 
         # Issue #3138: optimizer now uses _run_drc_error_count_by_category.
-        def mock_drc(pcb_text, manufacturer, layers, copper_oz):
+        def mock_drc(pcb_text, manufacturer, layers, copper_oz, min_clearance_mm=None):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -348,7 +350,7 @@ class TestDrcRollback:
             ]
 
         # Issue #3138: optimizer now uses _run_drc_error_count_by_category.
-        def mock_drc(pcb_text, manufacturer, layers, copper_oz):
+        def mock_drc(pcb_text, manufacturer, layers, copper_oz, min_clearance_mm=None):
             # Always return 0 errors -- optimization is safe
             return {"__total__": 0}
 
@@ -417,7 +419,7 @@ class TestCategoryAwareRollback:
 
         call_count = 0
 
-        def mock_drc(pcb_text, manufacturer, layers, copper_oz):
+        def mock_drc(pcb_text, manufacturer, layers, copper_oz, min_clearance_mm=None):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -498,7 +500,7 @@ class TestCategoryAwareRollback:
 
         call_count = 0
 
-        def mock_drc(pcb_text, manufacturer, layers, copper_oz):
+        def mock_drc(pcb_text, manufacturer, layers, copper_oz, min_clearance_mm=None):
             nonlocal call_count
             call_count += 1
             # Always return the same categories: same total, only

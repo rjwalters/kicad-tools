@@ -599,6 +599,13 @@ Examples:
         drc_copper_oz=args.copper,
     )
 
+    # Issue #8367: the in-process referee must use the clearance the board's
+    # own DRC enforces, not just the --mfr preset.
+    if args.drc_aware:
+        declared = _declared_design_rules(pcb_path)
+        if declared is not None:
+            config.drc_clearance_mm = declared.trace_clearance
+
     # Issue #8214: collision-check every rewrite against the board's own
     # copper instead of relying on whole-net ``--drc-aware`` rollback.  A grid
     # that cannot be built is reported, never silently downgraded to unchecked
