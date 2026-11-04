@@ -917,8 +917,8 @@ def _board_residual_after_same_footprint(
     net_a: int,
     net_b: int,
     obstacles: list[Any],
-) -> tuple[float, float, str] | None:
-    """Smallest board-level ``(clearance, creepage, layer)`` for a ``same_footprint`` pair (#8232).
+) -> tuple[float, float, str, tuple[Any, Any]] | None:
+    """Smallest board-level ``(clearance, creepage, layer, (geom_a, geom_b))`` for a ``same_footprint`` pair (#8232).
 
     The pair's global minimum is a component-internal gap, which hides any
     larger board-level approach on the same net pair.  To expose it, the pads
@@ -933,8 +933,18 @@ def _board_residual_after_same_footprint(
     A trace stub leaving a masked pad can still register a near-gap, which errs
     conservative (more FAIL, never a false pass).  ``None`` when no residual
     copper exists.
+
+    What the minimum measures (#8332): with pad B masked, the nearest remaining
+    net-B copper is the trace where it leaves the (masked) pad B -- not the
+    pad-to-trace straight gap and not a cross-footprint variant.  Because that
+    exit point moves when a trace is re-routed (e.g. a jog straightened onto the
+    pad centreline), the row can move while the router's pairwise kernel, whose
+    witness lies in the #4506 attach zone, is unchanged.  The returned geometry
+    pair is the binding variant, so the caller can apply the same attach-zone
+    classification (:func:`_witness_in_attach_zone`) a primary ``board`` minimum
+    gets and the census and router agree.
     """
-    best: tuple[float, float, str] | None = None
+    best: tuple[float, float, str, tuple[Any, Any]] | None = None
     for layer_name, unions in layer_unions.items():
         geom_a = unions.get(net_a)
         geom_b = unions.get(net_b)
@@ -963,7 +973,7 @@ def _board_residual_after_same_footprint(
                 continue
             clearance, creepage = surface_path_length(ga, gb, obstacles, _bridged=True)
             if best is None or creepage < best[1]:
-                best = (clearance, creepage, layer_name)
+                best = (clearance, creepage, layer_name, (ga, gb))
     return best
 
 
@@ -1764,38 +1774,55 @@ def compute_creepage_census(
                 if prev is None or creepage < prev[1]:
                     best[key] = (clearance, creepage, layer_name)
 
+    def _attach_zone_row(
+        layer: str,
+        geom_a: Any,
+        geom_b: Any,
+        hv_num: int,
+        other_num: int,
+        net_a_name: str,
+        net_b_name: str,
+    ) -> dict[str, Any] | None:
+        """Residual fields when the binding witness lies in an attach zone, else ``None``."""
+        if not attach_zones or not _witness_in_attach_zone(
+            geom_a, geom_b, attach_zones, net_a_name, net_b_name, layer
+        ):
+            return None
+        if map_mode:
+            _rc = _pair_requirement(net_a_name, net_b_name)[0]
+        else:
+            _rc = required_creepage_mm or 0.0
+        r_clr, r_creep, r_layer, r_wit = _attach_zone_residual(
+            layer_unions,
+            attach_zones,
+            hv_num,
+            other_num,
+            net_a_name,
+            net_b_name,
+            obstacles,
+            item_geoms=_item_geoms,
+            bound_mm=max(min_mm or 0.0, _rc),
+        )
+        return {
+            "residual_clearance_mm": r_clr,
+            "residual_creepage_mm": r_creep,
+            "residual_layer": r_layer,
+            "residual_witness_mm": r_wit,
+        }
+
     for (hv_num, other_num), (clearance, creepage, layer_name) in best.items():
         net_a_name = hv_nets[hv_num]
         net_b_name = number_to_name.get(other_num, f"net{other_num}")
         relationship = fp_index.relationship(layer_name, hv_num, other_num, clearance)
         residual: dict[str, Any] = {}
-        if attach_zones and relationship == "board":
+        if relationship == "board":
             lu = layer_unions[layer_name]
-            if _witness_in_attach_zone(
-                lu[hv_num], lu[other_num], attach_zones, net_a_name, net_b_name, layer_name
-            ):
-                if map_mode:
-                    _rc = _pair_requirement(net_a_name, net_b_name)[0]
-                else:
-                    _rc = required_creepage_mm or 0.0
-                r_clr, r_creep, r_layer, r_wit = _attach_zone_residual(
-                    layer_unions,
-                    attach_zones,
-                    hv_num,
-                    other_num,
-                    net_a_name,
-                    net_b_name,
-                    obstacles,
-                    item_geoms=_item_geoms,
-                    bound_mm=max(min_mm or 0.0, _rc),
-                )
+            az = _attach_zone_row(
+                layer_name, lu[hv_num], lu[other_num], hv_num, other_num, net_a_name, net_b_name
+            )
+            if az is not None:
                 relationship = "attach_zone"
-                residual = {
-                    "residual_clearance_mm": r_clr,
-                    "residual_creepage_mm": r_creep,
-                    "residual_layer": r_layer,
-                    "residual_witness_mm": r_wit,
-                }
+                residual = az
         rows: list[tuple[str, float, float, str, dict[str, Any]]] = [
             (layer_name, clearance, creepage, relationship, residual)
         ]
@@ -1807,7 +1834,20 @@ def compute_creepage_census(
                 layer_unions, fp_index, hv_num, other_num, obstacles
             )
             if board_row is not None:
-                rows.append((board_row[2], board_row[0], board_row[1], "board", {}))
+                # #8332: classify the residual row like a primary board minimum.
+                row_rel, row_res = "board", {}
+                az = _attach_zone_row(
+                    board_row[2],
+                    board_row[3][0],
+                    board_row[3][1],
+                    hv_num,
+                    other_num,
+                    net_a_name,
+                    net_b_name,
+                )
+                if az is not None:
+                    row_rel, row_res = "attach_zone", az
+                rows.append((board_row[2], board_row[0], board_row[1], row_rel, row_res))
         for row_layer, row_clr, row_creep, row_rel, row_residual in rows:
             if map_mode:
                 req_creep, req_clear, prov = _pair_requirement(net_a_name, net_b_name)
