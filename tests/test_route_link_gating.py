@@ -208,3 +208,38 @@ def test_census_mode_reported_and_no_unchanged_copy(board, capsys, toolchain_ok,
     rc, doc = _run(capsys, str(board), "--link", LINK_A, "-o", str(out))
     assert rc == 1 and doc["census"] == "skipped" and doc["written"] is None
     assert not out.exists()
+
+
+def test_census_failures_keys_on_relationship(board, monkeypatch):
+    """The real ``_census_failures`` must keep same_footprint and board rows apart."""
+    from types import SimpleNamespace
+
+    from kicad_tools.creepage import engine
+
+    def pair(rel, mm, passed=False):
+        return SimpleNamespace(
+            net_a="HV",
+            net_b="GND",
+            kind="conductor",
+            relationship=rel,
+            creepage_mm=mm,
+            passed=passed,
+        )
+
+    report = SimpleNamespace(
+        pairs=[pair("same_footprint", 0.84), pair("board", 1.87), pair("board", 5.0, True)]
+    )
+    monkeypatch.setattr(engine, "resolve_hv_nets", lambda *a, **k: {"HV"})
+    monkeypatch.setattr(engine, "compute_creepage_census", lambda *a, **k: report)
+    args = SimpleNamespace(min=3.0, net_class="HV", net_class_map=None)
+
+    failing = route_link_cmd._census_failures(board, args)
+    assert failing == {
+        ("HV", "GND", "conductor", "same_footprint"): 0.84,
+        ("HV", "GND", "conductor", "board"): 1.87,
+    }
+    # Baseline had only the same-footprint failure: the board one is new.
+    base = {("HV", "GND", "conductor", "same_footprint"): 0.84}
+    assert route_link_cmd._new_census_failures(failing, base) == [
+        ("HV", "GND", "conductor", "board")
+    ]

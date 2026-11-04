@@ -475,7 +475,9 @@ def _new_census_failures(
     return sorted(k for k, v in census.items() if k not in base or v < base[k] - 1e-6)
 
 
-def _gate_state(pcb_path: Path, args: argparse.Namespace) -> tuple[Any, set | None]:
+def _gate_state(
+    pcb_path: Path, args: argparse.Namespace
+) -> tuple[Any, dict[tuple[str, str, str, str], float] | None]:
     return _drc_finding_counts(pcb_path), _census_failures(pcb_path, args)
 
 
