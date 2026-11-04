@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-04
 
+- **PR #8381**: feat: add --project and refuse default-rules DRC verification
+- **Issue #8369** (closed): DRC-verified kct commands: add --project and refuse default-rules verification (split from #8366)
 - **PR #8380**: fix: referee --drc-aware at the board's own clearance
 - **PR #8378**: fix(router): key Python-fallback repeat skip on pad-pair, not net
 - **Issue #8377** (closed): router: scope #8370 repeat-fallback skip to the pad pair, not the net
