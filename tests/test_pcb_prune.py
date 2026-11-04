@@ -441,7 +441,7 @@ def test_anchor_in_body_loop_is_removed_8298(tmp_path):
     # V1 at (103, 100.05); stub down 0.5 and left 0.81 would end near the trunk
     # only on a bent trunk; keep it simple: stub rises from V1 and ends on trunk
     body += _seg((103, 100.05), (103, 100.5), "F.Cu", w)
-    body += _seg((103, 100.5), (103.4, 100.05), "F.Cu", w)
+    body += _seg((103, 100.5), (103.8, 100.05), "F.Cu", w)
     body += (
         f'  (via (at 103 100.05) (size 0.4) (drill 0.2) (layers "F.Cu" "B.Cu") '
         f'(net 1) (uuid "v-{next(_uid)}"))\n'
@@ -451,3 +451,40 @@ def test_anchor_in_body_loop_is_removed_8298(tmp_path):
     pcb, res = _run(p)
     assert res.stats["segments_removed"] >= 1
     assert any(s.start == (100, 100) for s in pcb.segments)
+
+
+def test_prune_keeps_micro_bridge_joint_for_optimize_8298(tmp_path):
+    """Two chains joined only by a ~1 um bridge: each chain end also lies in the
+    other's body, so a body-join cycle exists.  Prune must not trade the
+    endpoint join for an overlap-only one (optimize-traces models endpoint
+    joins only and would leave a dangling duplicate)."""
+    segs = [
+        ((100, 100), (105, 100)),
+        ((105, 100), (105.001, 100)),  # 1 um bridge
+        ((105.001, 100), (110, 105)),
+    ]
+    p = _board(tmp_path, [("A", 100, 100), ("B", 110, 105)], segs)
+    pcb, res = _run(p)
+    assert res.stats["segments_removed"] == 0
+    assert len(pcb.segments) == 3
+
+    from kicad_tools.router.optimizer import OptimizationConfig, TraceOptimizer
+    from kicad_tools.router.optimizer.pcb import optimize_pcb
+
+    out = tmp_path / "opt.kicad_pcb"
+    pcb.save(out)
+    cfg = OptimizationConfig()
+    opt = TraceOptimizer(cfg)
+    optimize_pcb(str(out), str(out), opt.optimize_segments, cfg)
+    after = PCB.load(str(out))
+    # still one connected run between the pads: no duplicate / dangling piece
+    xs = sorted({round(v, 3) for s in after.segments for v in (s.start[0], s.end[0])})
+    assert xs[0] == 100 and xs[-1] == 110
+    assert len(after.segments) <= 3
+    # every segment end is shared with another segment or sits on a pad
+    ends = [e for sg in after.segments for e in (sg.start, sg.end)]
+    for e in ends:
+        assert (
+            e in ((100, 100), (110, 105))
+            or sum(1 for o in ends if abs(o[0] - e[0]) < 2e-3 and abs(o[1] - e[1]) < 2e-3) >= 2
+        )
