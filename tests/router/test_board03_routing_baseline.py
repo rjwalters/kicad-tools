@@ -292,6 +292,13 @@ EXPECTED_TOTAL_NETS = 13
 MAX_COMMITTED_DRC_ERRORS = 0
 EXPECTED_COMMITTED_DRC_RULES = {
     "silkscreen_text_height",
+    # Issue #8255 / #8229: the new advisory ``redundant_copper_detour`` and
+    # ``redundant_copper_duplicate`` rules flag redundant copper on the
+    # committed routing.  WARNING severity, so they do NOT raise the 0-error
+    # ceiling (MAX_COMMITTED_DRC_ERRORS); they only appear in the BY-RULE
+    # breakdown.  Tool-side rule addition, not a board regression.
+    "redundant_copper_detour",
+    "redundant_copper_duplicate",
     # Issue #3844: the new geometric silk_over_copper rule flags reference
     # designators printed over a neighbor's pad mask aperture on this board
     # (a real defect kicad-cli also reports).  It is WARNING severity, so it
