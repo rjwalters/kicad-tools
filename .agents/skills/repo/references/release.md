@@ -136,6 +136,7 @@ gh api "repos/{owner}/{repo}/pulls?state=open" --paginate --jq '.[] | "#\(.numbe
 git status --porcelain
 ```
 
+- `git status --porcelain` exits non-zero → stop and report the error; a failed status prints nothing, and a non-zero exit is not clean.
 - CI present and failing → stop, fix first.
 - CI absent → clean `git status` + no blocking open PRs is the gate.
 - Open PRs that should land first → ask.

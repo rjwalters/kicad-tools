@@ -36,6 +36,7 @@
 #   ./.loom/scripts/check-main-clean.sh --snapshot FILE  # record main's porcelain state to FILE, exit 0
 #   ./.loom/scripts/check-main-clean.sh --baseline FILE  # check main, ignoring dirt recorded in FILE
 #   ./.loom/scripts/check-main-clean.sh --baseline FILE --quarantine [--label TEXT] [--log FILE]
+#   ./.loom/scripts/check-main-clean.sh --quarantine --allow-no-baseline  # no baseline: stash ALL dirt
 #                                                        # ...and atomically stash any new dirt away
 #   ./.loom/scripts/check-main-clean.sh --list-quarantined [--json]
 #                                                        # report outstanding quarantine stashes
@@ -100,10 +101,15 @@
 #   - Exit 4 (not 3) on a SUCCESSFUL quarantine: main is provably back at the
 #     baseline, so the caller can log and continue rather than hard-blocking. If
 #     the quarantine could not be completed, the exit stays 3 (hard-block).
-#   - `--quarantine` is intended with `--baseline`. It is accepted without one,
-#     in which case ALL non-Loom-owned dirt in main is quarantined (still a
-#     rescue ref, but with no notion of "pre-existing" to protect). It is a
-#     usage error with `--snapshot`.
+#   - `--quarantine` requires a usable `--baseline FILE` (#13535). With no
+#     baseline, or a missing/unreadable one, it REFUSES: nothing is stashed, the
+#     candidate paths are listed, a `"result":"refused_no_baseline"` log line is
+#     written, and it exits 3. Without a baseline there is no notion of
+#     "pre-existing", so stashing everything would move operator-owned untracked
+#     files. `--allow-no-baseline` opts back in to quarantining ALL non-Loom-owned
+#     dirt (the manual builder recipe, where no sweep baseline exists); it can
+#     sweep up operator-owned untracked files. It is a usage error with
+#     `--snapshot`.
 #   - Immediately before the `git stash push`, the offending path set is
 #     RE-DERIVED from a fresh `git status` (#5185). The first snapshot is taken
 #     earlier in the run, and on a busy host the dirt it describes can be
@@ -336,6 +342,7 @@ json_escape() {
 MODE="plain"
 MODE_FILE=""
 QUARANTINE=0
+ALLOW_NO_BASELINE=0
 LIST_QUARANTINED=0
 LIST_JSON=0
 QUARANTINE_LABEL="${LOOM_QUARANTINE_LABEL:-}"
@@ -370,6 +377,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --quarantine)
             QUARANTINE=1
+            shift
+            ;;
+        --allow-no-baseline)
+            ALLOW_NO_BASELINE=1
             shift
             ;;
         --list-quarantined)
@@ -753,6 +764,32 @@ collect_offending_paths() {
     done <<< "$effective_status"
 }
 
+# Fail closed (#13535): without a usable baseline nothing distinguishes leaked
+# files from operator-owned pre-existing ones, so refuse unless opted in.
+if [[ -n "$effective_status" && "$QUARANTINE" -eq 1 && "$ALLOW_NO_BASELINE" -ne 1 ]] \
+    && { [[ "$MODE" != "baseline" ]] || [[ ! -r "$MODE_FILE" ]]; }; then
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+    # Side-effect-free candidate list (collect_offending_paths unstages deletions).
+    candidate_paths=()
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        candidate_paths+=("$(unquote_path "${line:3}")")
+    done <<< "$effective_status"
+    paths_json=""
+    for p in "${candidate_paths[@]}"; do
+        paths_json+="${paths_json:+,}\"$(json_escape "$p")\""
+    done
+    emit_quarantine_log "{\"event\":\"main-clean.quarantine\",\"ts\":\"$ts\",\"result\":\"refused_no_baseline\",\"label\":\"$(json_escape "$QUARANTINE_LABEL")\",\"main\":\"$(json_escape "$main_root")\",\"reason\":\"no usable --baseline; refusing to stash everything\",\"paths\":[$paths_json],\"count\":${#candidate_paths[@]}}"
+    echo "check-main-clean.sh: REFUSING --quarantine: no usable --baseline (missing, unreadable, or not given)." >&2
+    echo "       Without a baseline, operator-owned untracked files cannot be told apart from leaked ones." >&2
+    echo "       Nothing was stashed. Candidate path(s) in $main_root:" >&2
+    for p in "${candidate_paths[@]}"; do
+        echo "         $p" >&2
+    done
+    echo "       If these are all yours to move (manual builder recipe), re-run with --allow-no-baseline." >&2
+    exit "$EXIT_MAIN_DIRTY"
+fi
+
 if [[ -n "$effective_status" && "$QUARANTINE" -eq 1 ]]; then
     ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
     stash_msg="loom-quarantine: $QUARANTINE_LABEL"
@@ -932,6 +969,12 @@ if [[ -n "$effective_status" && "$QUARANTINE" -eq 1 ]]; then
     echo "       Rescue ref:    stash@{0} = $stash_sha  (\"$stash_msg\")" >&2
     echo "       Nothing was discarded — recover the diff with:" >&2
     echo "         git -C \"$main_root\" stash show -p $stash_sha" >&2
+    echo "       Stashed path(s):" >&2
+    for p in "${OFFENDING_PATHS[@]}"; do
+        echo "         $p" >&2
+    done
+    echo "       Restore them with:" >&2
+    echo "         git -C \"$main_root\" stash pop $stash_sha   # or: stash apply $stash_sha" >&2
     echo "       This entry stays outstanding until someone reconciles it; it is listed by" >&2
     echo "       './.loom/scripts/check-main-clean.sh --list-quarantined' and by 'loom status'." >&2
     exit "$EXIT_QUARANTINED"

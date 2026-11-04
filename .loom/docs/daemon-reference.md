@@ -4791,16 +4791,19 @@ they were the largest GitHub read cost a host made on its own initiative.
   `LOOM_RELEASE_STALE_BLOCKED_INTERVAL_SECS` and
   `LOOM_RELEASE_STALE_BLOCKED_MAX_WRITES` are no longer read.
   `host.health.managed_repos[].stale_blocked_release` is no longer sent.
-  `pass.summary` / `pass.verdict` stay registered but have no producer.
+  `pass.summary` is retired (#12094); `pass.verdict` stays registered for
+  role-step verdicts.
   The read-only `check-stale-blocked` advisory and `merge-pr.sh`'s
   `notify-cleared-blockers` comment are unchanged: both are on-demand verbs,
   not loops.
 - **The `fleet.state` producer** (`observability/fleet_state`, #10196). The
   collector pass and the post-tick pass no longer build, diff or send
   `fleet.state`, and so no longer derive `eta.stage_outcome` or `pr.resolved`
-  from consecutive views. All three kinds stay registered so stored records
-  decode, but nothing sends them. `telemetry-replay` and its `--check` read only
-  records already in the store. A consumer that needs fleet state computes it
+  from consecutive views. All three kinds, and `pass.summary`, were retired
+  from the registry (#12094); a spool or store still holding them is read
+  with those records ignored. The `telemetry-replay` CLI, its SigNoz replay
+  queries and their CI jobs are deleted (#12094): with no new anchors every
+  host would read `unknown`. A consumer that needs fleet state computes it
   from the facts the daemon still exports (`sweep.*`, `stage.work_started`,
   `pick.decision`, `host.health`) and from the forge's label
   history.

@@ -394,6 +394,13 @@
 #                                      never revokes this one's rule and locks
 #                                      it out (default: short hostname;
 #                                      rjwalters/loom#11616)
+#   REPO_REMOTE_SSH_STALE_DAYS         days a tool-owned tcp/22 rule for a
+#                                      DIFFERENT address is kept before `up`
+#                                      revokes it as stale (default 7; 0 =
+#                                      revoke immediately). Keeps both egress
+#                                      IPs of a caller whose address alternates
+#                                      (rjwalters/repo#703); an address still in
+#                                      use has its Description date refreshed
 #   REPO_REMOTE_SSH_READY_TIMEOUT      total seconds the end-of-run SSH
 #                                      reachability probe waits for a
 #                                      still-booting guest before failing
@@ -1723,13 +1730,23 @@ aws_authorize_ssh_ingress() {  # <sg-id> <cidr>
   desc="$(ssh_rule_description)"
   out="$(aws ec2 authorize-security-group-ingress --group-id "$sg" \
     --ip-permissions "IpProtocol=tcp,FromPort=22,ToPort=22,IpRanges=[{CidrIp=${cidr},Description=${desc}}]" 2>&1)"; rc=$?
-  if [[ $rc -ne 0 ]] && ! printf '%s' "$out" | grep -q 'InvalidPermission.Duplicate'; then
-    die 4 "aws ec2 authorize-security-group-ingress failed for ${sg} (tcp/22 from ${cidr}): ${out:-unknown error}"
+  if [[ $rc -ne 0 ]]; then
+    printf '%s' "$out" | grep -q 'InvalidPermission.Duplicate' \
+      || die 4 "aws ec2 authorize-security-group-ingress failed for ${sg} (tcp/22 from ${cidr}): ${out:-unknown error}"
+    # The rule already exists. If it is OURS, refresh its Description date so a
+    # rule for an address still in use never ages out of the stale-TTL window in
+    # aws_revoke_stale_ssh_ingress (rjwalters/repo#703). A rule without our
+    # marker (an operator's hand-added rule for the same /32) is left untouched.
+    if aws_tool_owned_ssh_cidrs "$sg" | cut -f1 | grep -qxF "$cidr"; then
+      out="$(aws ec2 update-security-group-rule-descriptions-ingress --group-id "$sg" \
+        --ip-permissions "IpProtocol=tcp,FromPort=22,ToPort=22,IpRanges=[{CidrIp=${cidr},Description=${desc}}]" 2>&1)" \
+        || log "NOTICE: could not refresh the Description date on the existing SSH ingress rule (tcp/22 from ${cidr}) on ${sg}: ${out:-unknown error}. It may be revoked as stale after ${REPO_REMOTE_SSH_STALE_DAYS:-7} day(s) of disuse."
+    fi
   fi
 }
 
-# List the CIDRs of tcp/22 rules on <sg> that THIS tooling wrote (their
-# Description starts with the repo-remote:<name>: marker), one per line.
+# List tcp/22 rules on <sg> that THIS tooling wrote (their Description starts
+# with the repo-remote:<name>: marker), one `CidrIp<TAB>Description` per line.
 # Rules with any other Description — or none at all — are somebody else's and
 # are deliberately excluded.
 #
@@ -1744,9 +1761,9 @@ aws_tool_owned_ssh_cidrs() {  # <sg-id>
   local sg="$1" marker
   marker="$(ssh_rule_marker_prefix)"
   aws ec2 describe-security-groups --group-ids "$sg" \
-    --query "SecurityGroups[0].IpPermissions[?ToPort==\`22\`].IpRanges[] | [?Description != null && starts_with(Description, '${marker}')].CidrIp" \
+    --query "SecurityGroups[0].IpPermissions[?ToPort==\`22\`].IpRanges[] | [?Description != null && starts_with(Description, '${marker}')].[CidrIp, Description]" \
     --output text 2>/dev/null \
-    | tr '[:space:]' '\n' | grep -vE '^(None)?$' || true
+    | grep -vE '^(None)?$' || true
 }
 
 # Replace, don't accumulate (repo#487). Each `up` from a new address used to
@@ -1761,9 +1778,33 @@ aws_tool_owned_ssh_cidrs() {  # <sg-id>
 # operator whose credentials lack RevokeSecurityGroupIngress should still be
 # able to provision.
 aws_revoke_stale_ssh_ingress() {  # <sg-id> <keep-cidr>
-  local sg="$1" keep="$2" cidr out rc
-  while read -r cidr; do
+  local sg="$1" keep="$2" cidr desc out rc days cutoff="" marker rdate
+  days="${REPO_REMOTE_SSH_STALE_DAYS:-7}"
+  if [[ ! "$days" =~ ^[0-9]+$ ]]; then
+    log "NOTICE: REPO_REMOTE_SSH_STALE_DAYS='${days}' is not a non-negative integer; using 7"
+    days=7
+  fi
+  if (( days > 0 )); then
+    cutoff="$(date -u -d "-${days} days" +%Y-%m-%d 2>/dev/null || date -u -v-"${days}"d +%Y-%m-%d 2>/dev/null || true)"
+    if [[ -z "$cutoff" ]]; then
+      log "NOTICE: could not compute the SSH ingress stale cutoff date; keeping all other tool-owned rules on ${sg}"
+      return 0
+    fi
+  fi
+  marker="$(ssh_rule_marker_prefix)"
+  while IFS=$'\t' read -r cidr desc; do
     [[ -n "$cidr" && "$cidr" != "$keep" ]] || continue
+    if (( days > 0 )); then
+      rdate="${desc#"$marker"}"
+      if [[ ! "$rdate" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+        log "keeping this tooling's SSH ingress rule on ${sg} (tcp/22 from ${cidr}): its Description has no parseable date"
+        continue
+      fi
+      if [[ ! "$rdate" < "$cutoff" ]]; then
+        log "keeping this tooling's other SSH ingress rule on ${sg} (tcp/22 from ${cidr}, last authorized ${rdate}): within the ${days}-day stale window (REPO_REMOTE_SSH_STALE_DAYS), so a caller whose address alternates is not locked out"
+        continue
+      fi
+    fi
     out="$(aws ec2 revoke-security-group-ingress --group-id "$sg" \
       --ip-permissions "IpProtocol=tcp,FromPort=22,ToPort=22,IpRanges=[{CidrIp=${cidr}}]" 2>&1)"; rc=$?
     if [[ $rc -ne 0 ]]; then
@@ -1772,6 +1813,29 @@ aws_revoke_stale_ssh_ingress() {  # <sg-id> <keep-cidr>
       log "revoked this tooling's stale SSH ingress rule on ${sg} (tcp/22 from ${cidr}) — superseded by ${keep}"
     fi
   done < <(aws_tool_owned_ssh_cidrs "$sg")
+}
+
+# Best-effort diagnostic for an SSH readiness failure (rjwalters/repo#703): print
+# the security group's current tcp/22 ingress CIDRs next to the address this run
+# authorized, so a caller-IP mismatch is obvious. Never fails and never masks the
+# error the caller is about to die with.
+aws_log_ssh_ingress_diag() {
+  local sg="${RESOLVED_SG:-${REPO_REMOTE_SECURITY_GROUP:-}}" rules
+  [[ -n "$sg" ]] || sg="$(aws_find_tagged_sg 2>/dev/null || true)"
+  [[ "$sg" == None ]] && sg=""
+  if [[ -z "$sg" ]]; then
+    log "diagnostic: no security group is known for this run, so its tcp/22 ingress could not be listed. Address authorized this run: ${RESOLVED_SSH_CIDR:-(none resolved)}"
+    return 0
+  fi
+  rules="$(aws ec2 describe-security-groups --group-ids "$sg" \
+    --query 'SecurityGroups[0].IpPermissions[?ToPort==`22`].IpRanges[].CidrIp' \
+    --output text 2>/dev/null | tr '[:space:]' ' ' | sed -E 's/ +$//')" || rules=""
+  if [[ -z "$rules" ]]; then
+    log "diagnostic: could not list tcp/22 ingress on ${sg} (describe failed or no rule). Address authorized this run: ${RESOLVED_SSH_CIDR:-(none resolved)}"
+  else
+    log "diagnostic: ${sg} currently allows tcp/22 from: ${rules}; address authorized this run: ${RESOLVED_SSH_CIDR:-(none resolved)}. If your SSH egress address is not listed, set REPO_REMOTE_SSH_CIDR or authorize it by hand."
+  fi
+  return 0
 }
 
 # Legacy (pre-per-caller) rules carry `repo-remote:<name>:<YYYY-MM-DD>` and no
@@ -2372,10 +2436,12 @@ aws_check_reachability() {  # <ssh-alias> <target> [ssm]
     fi
 
     if ! ssh_error_is_boot_in_progress "$err"; then
+      aws_log_ssh_ingress_diag
       die 4 "SSH reachability check failed for ${alias} (${ip}) after provisioning. The failure does not look like a host that is still booting, so waiting longer will not help: ${err:-(ssh produced no error output)}. Check the security group ingress rule (REPO_REMOTE_SSH_CIDR), REPO_REMOTE_SSH_KEY, and REPO_REMOTE_SSH_USER, or retry: ssh ${alias}"
     fi
 
     if [[ $(date +%s) -ge $deadline ]]; then
+      aws_log_ssh_ingress_diag
       die 4 "SSH reachability check failed for ${alias} (${ip}) after provisioning. The instance was created/started and its SSH alias written, but SSH did not respond within ${REPO_REMOTE_SSH_READY_TIMEOUT}s (${attempts} attempt(s)); last error: ${err:-(none)}. Check the security group ingress rule (REPO_REMOTE_SSH_CIDR), REPO_REMOTE_SSH_KEY, and REPO_REMOTE_SSH_USER, raise REPO_REMOTE_SSH_READY_TIMEOUT if this image is simply slow to boot, or retry: ssh ${alias}"
     fi
 
