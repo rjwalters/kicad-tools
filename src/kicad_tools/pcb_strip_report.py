@@ -34,6 +34,8 @@ class Finding:
     location: tuple[float, float] | None
     uuids: list[str] = field(default_factory=list)
     nets: list[str] = field(default_factory=list)
+    # Further candidate locations tried after ``location`` (creepage side B).
+    alt_locations: list[tuple[float, float]] = field(default_factory=list)
 
 
 @dataclass
@@ -108,8 +110,12 @@ def _creepage_rows(data: Any) -> list[dict]:
 def _creepage_findings(data: Any) -> list[Finding]:
     out: list[Finding] = []
     for row in _creepage_rows(data):
+        # A passing (or waived) pair is not a violation: never cut copper for it.
+        if row.get("pass") is True or row.get("waived"):
+            continue
         wit = row.get("witness")
         loc: tuple[float, float] | None = None
+        alts: list[tuple[float, float]] = []
         uuids: list[str] = []
         if isinstance(wit, dict):
             pt = wit.get("point") or wit.get("position")
@@ -117,12 +123,22 @@ def _creepage_findings(data: Any) -> list[Finding]:
                 loc = (float(pt[0]), float(pt[1]))
             elif "x" in wit and "y" in wit:
                 loc = (float(wit["x"]), float(wit["y"]))
+            # Real ``kct creepage --witness`` rows: both ends, side A first.
+            ends = [
+                (float(e[0]), float(e[1]))
+                for e in (wit.get("point_a_mm"), wit.get("point_b_mm"))
+                if isinstance(e, (list, tuple)) and len(e) >= 2
+            ]
+            if loc is None and ends:
+                loc, alts = ends[0], ends[1:]
+            else:
+                alts = ends
             for key in ("uuid", "item_uuid"):
                 if wit.get(key):
                     uuids.append(str(wit[key]))
             uuids.extend(str(u) for u in wit.get("uuids", []) or [])
         nets = [str(row[k]) for k in ("net_a", "net_b") if row.get(k)]
-        out.append(Finding("creepage", "creepage", loc, uuids, nets))
+        out.append(Finding("creepage", "creepage", loc, uuids, nets, alts))
     return out
 
 
@@ -181,17 +197,20 @@ def _candidates(pcb: PCB, finding: Finding, protect: set[str]) -> tuple[list[Seg
     if not found and finding.location is not None:
         # Location + net fallback: copper touching the finding point whose net
         # is one of the finding's nets (when it names any).
-        loc = finding.location
         named = set(finding.nets)
-        near: list[tuple[float, Segment | Via]] = []
-        for item in _all_copper(pcb):
-            if named and _net_of(item) not in named:
-                continue
-            d = _item_dist(item, loc)
-            if d <= 0.05:
-                near.append((d, item))
-        near.sort(key=lambda t: t[0])
-        found = [i for _, i in near]
+        # Side A's candidates come before side B's (nearest first within a side).
+        for loc in [finding.location, *finding.alt_locations]:
+            near: list[tuple[float, Segment | Via]] = []
+            for item in _all_copper(pcb):
+                if named and _net_of(item) not in named:
+                    continue
+                d = _item_dist(item, loc)
+                if d <= 0.05:
+                    near.append((d, item))
+            near.sort(key=lambda t: t[0])
+            for _, i in near:
+                if i not in found:
+                    found.append(i)
     protected_hit = any(_net_of(i) in protect for i in found)
     return [i for i in found if _net_of(i) not in protect], protected_hit
 
