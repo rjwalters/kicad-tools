@@ -8,6 +8,13 @@ from typing import Any
 __all__ = ["run_pcb_command"]
 
 
+def _carry_sidecars(src: Path, dst: Path) -> None:
+    """Carry the input's .kicad_pro/.kicad_dru to a ``-o`` output (#8366)."""
+    from kicad_tools.sidecars import copy_project_sidecars
+
+    copy_project_sidecars(src, dst)
+
+
 def run_pcb_command(args) -> int:
     """Handle PCB subcommands."""
     if not args.pcb_command:
@@ -441,6 +448,7 @@ def _run_strip_command(args, pcb_path: Path) -> int:
     if not dry_run:
         try:
             pcb.save(output_path)
+            _carry_sidecars(pcb_path, output_path)
             if output_format == "text":
                 print()
                 print(f"  Saved to: {output_path}")
@@ -624,6 +632,7 @@ def _run_strip_report_command(args, pcb_path: Path) -> int:
     if not dry_run and changed and rc == 0:
         try:
             pcb.save(output_path)
+            _carry_sidecars(pcb_path, output_path)
             if output_format == "text":
                 print(f"\n  Saved to: {output_path}")
         except Exception as e:
@@ -689,6 +698,7 @@ def _run_dedupe_command(args, pcb_path: Path) -> int:
     if not dry_run and (stats["segments"] or stats["vias"]):
         try:
             pcb.save(output_path)
+            _carry_sidecars(pcb_path, output_path)
             if output_format == "text":
                 print()
                 print(f"  Saved to: {output_path}")
@@ -801,6 +811,7 @@ def _run_prune_command(args, pcb_path: Path) -> int:
     if not dry_run and changed:
         try:
             pcb.save(output_path)
+            _carry_sidecars(pcb_path, output_path)
             if output_format == "text":
                 print(f"\n  Saved to: {output_path}")
         except Exception as e:
@@ -1052,6 +1063,7 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
     if not dry_run and outcome.placed_count:
         try:
             pcb.save(output_path)
+            _carry_sidecars(pcb_path, output_path)
             if output_format == "text":
                 print()
                 print(f"  Saved to: {output_path}")

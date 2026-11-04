@@ -740,6 +740,12 @@ Examples:
             text=f"Error during optimization: {e}",
         )
 
+    if args.output and not args.dry_run:
+        # Issue #8366: the written board keeps the input's project rules.
+        from kicad_tools.sidecars import copy_project_sidecars
+
+        copy_project_sidecars(pcb_path, Path(args.output))
+
     if pairwise_checker is not None:
         stats.creepage_skips = dict(pairwise_checker.skips)
 

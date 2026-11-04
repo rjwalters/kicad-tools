@@ -7579,11 +7579,10 @@ def _run_main(args: argparse.Namespace, as_json: bool) -> tuple[int, dict | None
 
             shutil.copy(pcb_path, output_path)
 
-            # Also copy project file for DRC compatibility
-            pro_path = pcb_path.with_suffix(".kicad_pro")
-            if pro_path.exists():
-                output_pro = output_path.with_suffix(".kicad_pro")
-                shutil.copy(pro_path, output_pro)
+            # Also carry .kicad_pro and .kicad_dru for DRC compatibility (#8366)
+            from kicad_tools.sidecars import copy_project_sidecars
+
+            copy_project_sidecars(pcb_path, output_path)
 
         pcb_path = output_path
 
