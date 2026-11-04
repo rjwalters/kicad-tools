@@ -518,11 +518,23 @@ def _run_prune_command(args, pcb_path: Path) -> int:
     dry_run = getattr(args, "dry_run", False)
     output_path = Path(args.output) if getattr(args, "output", None) else pcb_path
 
+    declared_nets: set[str] | None = None
+    if getattr(args, "current_paths", None):
+        from kicad_tools.router.current_paths import load_current_path_specs
+
+        try:
+            declared_nets = {spec.net_name for spec in load_current_path_specs(args.current_paths)}
+        except Exception as e:
+            print(f"Error loading current paths: {e}", file=sys.stderr)
+            return 1
+
     try:
         pcb, res = prune_board(
             pcb_path,
             verify_drc=not getattr(args, "no_drc", False),
             apply=not dry_run,
+            declared_nets=declared_nets,
+            wide=getattr(args, "wide", 0.5),
         )
     except Exception as e:
         print(f"Error pruning PCB: {e}", file=sys.stderr)
@@ -546,6 +558,7 @@ def _run_prune_command(args, pcb_path: Path) -> int:
         "snapped": res.stats["ends_snapped"],
         "nets": [_net(p) for p in res.accepted],
         "rejected_by_drc": [_net(p) for p in res.rejected],
+        "uncut_loops": res.uncut_loops,
     }
     if output_format == "json":
         print(json.dumps(result, indent=2))
@@ -559,6 +572,11 @@ def _run_prune_command(args, pcb_path: Path) -> int:
             print(f"    {n['net']}: -{n['segments_removed']} seg, {n['ends_snapped']} snapped")
         for n in result["rejected_by_drc"]:
             print(f"    {n['net']}: kept (edit would add DRC violations)")
+        for u in res.uncut_loops:
+            print(
+                f"    {u['net']}: loop left in place (all segments >= --wide, "
+                f"min width {u['min_width']} mm, {len(u['segments'])} segments)"
+            )
 
     if not dry_run and changed and not res.drc_verified and not getattr(args, "unverified", False):
         # Never write an unverified edit by default (issue #8216 review).
