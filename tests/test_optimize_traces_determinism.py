@@ -57,3 +57,34 @@ def test_connectivity_decisions_identical_across_hash_seeds(tmp_path):
     discarded1, text1 = _run(tmp_path, "1")
     assert discarded0 == discarded1
     assert text0 == text1
+
+
+def _optimize(src: Path, out: Path, *extra: str) -> None:
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "kicad_tools.cli",
+            "optimize-traces",
+            str(src),
+            "-o",
+            str(out),
+            *extra,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+@pytest.mark.skipif(not BOARD.exists(), reason="board 06 routed fixture missing")
+def test_filtered_rerun_has_unique_uuids(tmp_path):
+    """Issue #8297: a --net re-run on optimized output must not duplicate UUIDs."""
+    first = tmp_path / "a.kicad_pcb"
+    second = tmp_path / "b.kicad_pcb"
+    _optimize(BOARD, first)
+    _optimize(first, second, "--net", "OUT4")
+    uuids = re.findall(r'\(uuid "?([0-9a-fA-F-]+)"?\)', second.read_text())
+    assert uuids
+    assert len(uuids) == len(set(uuids))
