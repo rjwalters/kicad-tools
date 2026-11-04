@@ -440,6 +440,9 @@ Examples:
     }
     for name, vias in parse_vias(pcb_path.read_text()).items():
         attachments.setdefault(name, []).extend((v.x, v.y) for v in vias)
+    optimizer.set_pad_points(
+        {name: [(x, y) for x, y, _ in pts] for name, pts in pad_anchors.items()}
+    )
     optimizer.set_attachment_points(attachments)
 
     # ``optimize_pcb`` calls ``self.optimize_segments`` per net; route that
