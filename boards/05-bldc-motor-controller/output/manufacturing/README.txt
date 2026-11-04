@@ -18,7 +18,8 @@ Power from J1 only; limit Hall load to 20mA and total 5V load to 30mA.
 Program firmware/bldc.hex via slow AVR ISP, using factory internal-RC clock fuses.
 
 Fresh native DRC/refill:0 violations/0opens; native ERC:0; label/copper LVS:0.
-Manufacturer checks:0 errors/0warnings. No DRC waivers.
+Manufacturer checks: 0 errors; 4 advisory track-detour warnings (known issue
+#8308, router copper quality, not a fab limit). No DRC waivers.
 gerbers/gerbers.zip: fabrication; bom_jlcpcb.csv: procurement; cpl_jlcpcb.csv: SMT+THT.
 kicad_project.zip includes the exact PCB/schematic and local footprint/symbol libraries.
 schematic.pdf and assembly-front/back.pdf are production drawings.

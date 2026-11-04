@@ -37,6 +37,7 @@ import math
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from kicad_tools._shapely import has_shapely, require_shapely
@@ -298,6 +299,48 @@ MAINS_NAME_RE = re.compile(
 def is_mains_suspect_name(name: str | None) -> bool:
     """True when ``name`` carries a strong mains/HV signal (see MAINS_NAME_RE)."""
     return bool(name) and MAINS_NAME_RE.search(name) is not None  # type: ignore[arg-type]
+
+
+#: Reserved top-level key of a board's net-class-map sidecar (issue #8278):
+#: ``{"non_hv_nets": {"<net>": "<reason>", ...}}`` explicitly declares
+#: mains-*named* nets that are NOT mains/HV on this board (e.g. a 12-24 V
+#: ``FUSED`` rail).  It only exempts those nets from the name-based vacuity
+#: guard (issue #4354); it never removes a net that resolves to the HV group
+#: by class map or voltage, and every exemption is reported.
+NON_HV_NETS_KEY = "non_hv_nets"
+
+
+def non_hv_nets_from_dict(data: Any) -> dict[str, str]:
+    """Parse the ``non_hv_nets`` block of a net-class-map sidecar.
+
+    Returns ``{net_name: reason}`` (empty when the block is absent).  Raises
+    :class:`ValueError` when the block is malformed: it must be an object
+    whose keys are net names and whose values are non-empty reason strings,
+    so a declaration can never be made without saying why.
+    """
+    if not isinstance(data, dict) or NON_HV_NETS_KEY not in data:
+        return {}
+    block = data[NON_HV_NETS_KEY]
+    if not isinstance(block, dict) or not block:
+        raise ValueError(f"{NON_HV_NETS_KEY} must be a non-empty object of net name -> reason")
+    out: dict[str, str] = {}
+    for name, reason in block.items():
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(f"{NON_HV_NETS_KEY}: net names must be non-empty strings")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError(
+                f"{NON_HV_NETS_KEY}: {name!r} needs a non-empty reason string "
+                "(why this mains-named net is not mains/HV)"
+            )
+        out[name] = reason.strip()
+    return out
+
+
+def non_hv_nets_from_path(path: str | Path) -> dict[str, str]:
+    """:func:`non_hv_nets_from_dict` for a net-class-map JSON file."""
+    import json
+
+    return non_hv_nets_from_dict(json.loads(Path(path).read_text()))
 
 
 def mains_suspect_nets(pcb: PCB) -> list[str]:

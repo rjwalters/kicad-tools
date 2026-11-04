@@ -14,7 +14,10 @@ per-board record of those issues:
 
 Each entry is ``{"issue": N, "kind": ..., "summary": ..., "recorded": "YYYY-MM-DD"}``
 plus an optional ``"warnings": [{"rule", "ref", "pad"}, ...]`` naming the exact
-``kct check`` warning findings the issue accounts for (Issue #7389).  The
+``kct check`` warning findings the issue accounts for (Issue #7389).  Track-copper
+warnings that name no ref/pad (``redundant_copper_*``) use the located
+``{"rule", "at": [x_mm, y_mm]}`` shape instead, written ``rule@x/y`` on the
+command line (Issue #8278).  The
 identity is the one :func:`kicad_tools.validate.known_warnings.warning_key`
 yields, so a *different* warning of the same rule cannot hide behind a known
 one, and an identity that no longer fires is stale.  Board scripts that
@@ -85,7 +88,7 @@ _SHAPE_KEYS = {
 }
 _SORT_ORDER = {"pad": "(rule, ref, pad)", "at": "(rule, x, y)", "item": "(rule, item)"}
 #: The shapes each field accepts.  The matchers handle exactly these.
-_WARNING_SHAPES = ("pad",)
+_WARNING_SHAPES = ("pad", "at")
 _ERROR_SHAPES = ("at", "item")
 _ENTRY_KEYS = {"issue", "kind", "summary", "recorded", "warnings", "errors"}
 
@@ -210,6 +213,14 @@ def _check_entry(entry: Any) -> dict[str, Any]:
     out: dict[str, Any] = {"issue": issue, "kind": kind, "summary": summary, "recorded": recorded}
     if "warnings" in entry:
         out["warnings"] = _check_identities(entry["warnings"], "warnings", _WARNING_SHAPES)
+        from kicad_tools.validate.known_warnings import LOCATED_WARNING_RULES
+
+        for item in out["warnings"]:
+            if "at" in item and item["rule"] not in LOCATED_WARNING_RULES:
+                raise KnownIssueError(
+                    f"warning rule {item['rule']!r} is keyed by ref/pad, not a location "
+                    f"(located warning rules: {', '.join(sorted(LOCATED_WARNING_RULES))})"
+                )
     if "errors" in entry:
         if kind != "exception":
             raise KnownIssueError(
@@ -286,6 +297,11 @@ def parse_known_issue(spec: str, recorded: str) -> dict[str, Any]:
                 continue
             warnings = [] if warnings is None else warnings
             rule, _, pad = item.partition("@")
+            located = re.match(rf"^({_COORD})/({_COORD})$", pad)
+            if located:
+                # ``rule@x/y``: a located warning (track copper, issue #8278).
+                warnings.append(error_identity(rule, float(located[1]), float(located[2])))
+                continue
             ref, sep, number_part = pad.rpartition("-")
             if not sep or not ref or not number_part:
                 raise KnownIssueError(
@@ -365,10 +381,16 @@ def known_warning_allowance(
     this allowance (via :func:`match_warning_allowance`), so the tolerated
     warnings and their disclosure come from the same record.
     """
+    from kicad_tools.validate.known_warnings import located_pad
+
     allowance: dict[tuple[str, str, str], int] = {}
     for entry in entries:
         for item in entry.get("warnings") or ():
-            allowance[(item["rule"], item["ref"], item["pad"])] = int(entry["issue"])
+            if "at" in item:
+                key = (item["rule"], "", located_pad(*item["at"]))
+            else:
+                key = (item["rule"], item["ref"], item["pad"])
+            allowance[key] = int(entry["issue"])
     return dict(sorted(allowance.items()))
 
 

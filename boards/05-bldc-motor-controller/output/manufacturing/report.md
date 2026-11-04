@@ -1,8 +1,8 @@
 ---
 title: "bldc_controller_routed"
 subtitle: "Design Report"
-author: "kicad-tools 0.23.0"
-date: "Rev 1 | 2026-10-19 | jlcpcb"
+author: "kicad-tools 0.27.0"
+date: "Rev 1 | 2026-11-04 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -20,7 +20,7 @@ header-includes:
 | Layers | 4 copper (F.Cu, In1.Cu, In2.Cu, B.Cu) |
 | Footprints | 42 (36 SMD, 6 THT, 0 other) |
 | Nets | 37 |
-| Traces | 8119 segments |
+| Traces | 700 segments |
 | Vias | 136 |
 | Board Size | 70.0 x 90.0 mm |
 
@@ -154,10 +154,16 @@ Sensored BLDC Controller
 | Errors | 0 |
 | Errors: kct (`--mfr jlcpcb` rules) | 0 |
 | Errors: kicad-cli (geometric) | 0 |
-| Warnings | 0 |
+| Warnings | 4 |
 | Blocking | 0 |
 
 **Status**: PASS
+
+### Violations by Type
+
+| Violation Type | Count |
+|----------------|-------|
+| redundant_copper_detour | 4 |
 
 
 
@@ -170,6 +176,8 @@ Sensored BLDC Controller
 ### Action Items
 
 - **[OPTIONAL]** Refill zones to verify 2 zone-connected nets, then re-run kct audit
+- **[OPTIONAL]** Confirm mains-named net FUSED is not mains/HV: declared non-HV in the net-class map (12-24 V DC motor supply after F1 (1 A, 63 V fuse), SMBJ24A-clamped; SELV, not mains (issue #8278))
+- **[OPTIONAL]** Review 4 DRC warnings
 - **[OPTIONAL]** Analog net: GND_SENSE — analog signal; noise-sensitive, avoid crossing digital signals
 - **[OPTIONAL]** Analog net: SENSE_IN — analog signal; noise-sensitive, avoid crossing digital signals
 

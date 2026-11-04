@@ -1,19 +1,23 @@
 {
-  "file": "boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb",
+  "file": "bldc_controller_routed.kicad_pcb",
   "manufacturer": "jlcpcb",
-  "pcb_sha256": "8b4f1aadeed63d2bd2c9e67bd842b3e030830f3fbd63955018ef5b2da0495c73",
+  "pcb_sha256": "4e467c6ca57ad0feccfd805ecc6cc73e86a589e03efd2fa7d7d1633f0b882229",
   "layers": 4,
   "summary": {
     "errors": 0,
-    "warnings": 0,
+    "warnings": 4,
     "infos": 5,
     "waived": 0,
-    "rules_checked": 70,
+    "rules_checked": 72,
     "rules_checked_by_rule": {
       "connectivity": 1,
       "copper_sliver": 1,
       "track_dangling": 1,
       "via_dangling": 1,
+      "redundant_copper_duplicate": 1,
+      "redundant_copper_fragments": 1,
+      "redundant_copper_detour": 1,
+      "redundant_copper_via_offcentre": 1,
       "doc_drift_stale_pin": 1,
       "doc_drift_unresolvable_pin": 1,
       "isolated_copper": 1,
@@ -26,6 +30,7 @@
       "netclass_annular_ring": 1,
       "sch_field_offset": 1,
       "sch_field_overlap": 1,
+      "sch_wire_through_symbol": 1,
       "spec_conformance_dimensions": 1,
       "spec_conformance_layers": 1,
       "spec_conformance_min_trace": 1,
@@ -35,35 +40,16 @@
     },
     "passed": true,
     "stale_waivers": 0,
-    "coverage_checked": 30,
-    "coverage_skipped": 10,
+    "coverage_checked": 36,
+    "coverage_skipped": 5,
     "coverage_unknown": [
+      "model_coverage",
       "spec_conformance"
     ],
-    "coverage_blocking_unknown": []
+    "coverage_blocking_unknown": [],
+    "attach_zone_exemption": "not_applicable"
   },
   "violations": [
-    {
-      "rule_id": "connector_edge_distance",
-      "type": "unknown",
-      "severity": "info",
-      "message": "J2 (Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical): 4.23mm from nearest board edge",
-      "location": [
-        119.5,
-        97.5
-      ],
-      "layer": "F.Cu",
-      "actual_value": 4.23,
-      "required_value": null,
-      "items": [
-        "J2"
-      ],
-      "nets": [],
-      "status": "info",
-      "waived": false,
-      "key": "connector_edge_distance|J2||F.Cu",
-      "evidence_hash": "ev2:a1e93cd86d7b891c"
-    },
     {
       "rule_id": "connector_edge_distance",
       "type": "unknown",
@@ -84,27 +70,6 @@
       "waived": false,
       "key": "connector_edge_distance|J4||F.Cu",
       "evidence_hash": "ev2:98da26321ee131de"
-    },
-    {
-      "rule_id": "connector_edge_distance",
-      "type": "unknown",
-      "severity": "info",
-      "message": "J1 (Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical): 6.23mm from nearest board edge",
-      "location": [
-        121.5,
-        68.0
-      ],
-      "layer": "F.Cu",
-      "actual_value": 6.23,
-      "required_value": null,
-      "items": [
-        "J1"
-      ],
-      "nets": [],
-      "status": "info",
-      "waived": false,
-      "key": "connector_edge_distance|J1||F.Cu",
-      "evidence_hash": "ev2:22c5d19f57005804"
     },
     {
       "rule_id": "connector_edge_distance",
@@ -131,6 +96,27 @@
       "rule_id": "connector_edge_distance",
       "type": "unknown",
       "severity": "info",
+      "message": "J1 (Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical): 6.23mm from nearest board edge",
+      "location": [
+        121.5,
+        68.0
+      ],
+      "layer": "F.Cu",
+      "actual_value": 6.23,
+      "required_value": null,
+      "items": [
+        "J1"
+      ],
+      "nets": [],
+      "status": "info",
+      "waived": false,
+      "key": "connector_edge_distance|J1||F.Cu",
+      "evidence_hash": "ev2:22c5d19f57005804"
+    },
+    {
+      "rule_id": "connector_edge_distance",
+      "type": "unknown",
+      "severity": "info",
       "message": "J5 (Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical): 17.68mm from nearest board edge",
       "location": [
         157.5,
@@ -147,13 +133,283 @@
       "waived": false,
       "key": "connector_edge_distance|J5||F.Cu",
       "evidence_hash": "ev2:e8b93350811db870"
+    },
+    {
+      "rule_id": "connector_edge_distance",
+      "type": "unknown",
+      "severity": "info",
+      "message": "J2 (Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical): 4.23mm from nearest board edge",
+      "location": [
+        119.5,
+        97.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 4.23,
+      "required_value": null,
+      "items": [
+        "J2"
+      ],
+      "nets": [],
+      "status": "info",
+      "waived": false,
+      "key": "connector_edge_distance|J2||F.Cu",
+      "evidence_hash": "ev2:a1e93cd86d7b891c"
+    },
+    {
+      "rule_id": "redundant_copper_detour",
+      "type": "unknown",
+      "severity": "warning",
+      "message": "Track detour: [VM] on F.Cu routes 7.28 mm between points 1.95 mm apart (ratio 3.7)",
+      "location": [
+        163.65,
+        75.975
+      ],
+      "layer": "F.Cu",
+      "actual_value": 3.7353846153846124,
+      "required_value": 2.0,
+      "items": [],
+      "nets": [
+        "VM"
+      ],
+      "status": "warning",
+      "waived": false,
+      "key": "redundant_copper_detour||VM|F.Cu",
+      "evidence_hash": "ev2:5af47039d60c505d"
+    },
+    {
+      "rule_id": "redundant_copper_detour",
+      "type": "unknown",
+      "severity": "warning",
+      "message": "Track detour: [+5V] on F.Cu routes 5.60 mm between points 1.60 mm apart (ratio 3.5)",
+      "location": [
+        156.338,
+        99.6
+      ],
+      "layer": "F.Cu",
+      "actual_value": 3.5012499999999727,
+      "required_value": 2.0,
+      "items": [],
+      "nets": [
+        "+5V"
+      ],
+      "status": "warning",
+      "waived": false,
+      "key": "redundant_copper_detour||+5V|F.Cu",
+      "evidence_hash": "ev2:4e0740ad9b8166e8"
+    },
+    {
+      "rule_id": "redundant_copper_detour",
+      "type": "unknown",
+      "severity": "warning",
+      "message": "Track detour: [+5V] on B.Cu routes 24.40 mm between points 9.20 mm apart (ratio 2.7)",
+      "location": [
+        165.863,
+        102.0
+      ],
+      "layer": "B.Cu",
+      "actual_value": 2.651663748988445,
+      "required_value": 2.0,
+      "items": [],
+      "nets": [
+        "+5V"
+      ],
+      "status": "warning",
+      "waived": false,
+      "key": "redundant_copper_detour||+5V|B.Cu",
+      "evidence_hash": "ev2:089f4d9b869c810f"
+    },
+    {
+      "rule_id": "redundant_copper_detour",
+      "type": "unknown",
+      "severity": "warning",
+      "message": "Track detour: [MOSI] on B.Cu routes 44.56 mm between points 16.87 mm apart (ratio 2.6)",
+      "location": [
+        162.5,
+        105.363
+      ],
+      "layer": "B.Cu",
+      "actual_value": 2.641026815494661,
+      "required_value": 2.0,
+      "items": [],
+      "nets": [
+        "MOSI"
+      ],
+      "status": "warning",
+      "waived": false,
+      "key": "redundant_copper_detour||MOSI|B.Cu",
+      "evidence_hash": "ev2:7763a23fc8e5bc0a"
     }
   ],
   "mask_copper_assessments": [],
+  "schema_version": 1,
+  "findings": [
+    {
+      "schema_version": 1,
+      "rule_id": "connector_edge_distance",
+      "severity": "info",
+      "message": "J4 (Connector_PinHeader_2.54mm:PinHeader_2x03_P2.54mm_Vertical): 8.68mm from nearest board edge",
+      "refs": [
+        "J4"
+      ],
+      "pads": [],
+      "nets": [],
+      "point": [
+        170.5,
+        116.0
+      ],
+      "bbox": null,
+      "layer": "F.Cu",
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "connector_edge_distance",
+      "severity": "info",
+      "message": "J3 (Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical): 3.23mm from nearest board edge",
+      "refs": [
+        "J3"
+      ],
+      "pads": [],
+      "nets": [],
+      "point": [
+        178.5,
+        90.0
+      ],
+      "bbox": null,
+      "layer": "F.Cu",
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "connector_edge_distance",
+      "severity": "info",
+      "message": "J1 (Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical): 6.23mm from nearest board edge",
+      "refs": [
+        "J1"
+      ],
+      "pads": [],
+      "nets": [],
+      "point": [
+        121.5,
+        68.0
+      ],
+      "bbox": null,
+      "layer": "F.Cu",
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "connector_edge_distance",
+      "severity": "info",
+      "message": "J5 (Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical): 17.68mm from nearest board edge",
+      "refs": [
+        "J5"
+      ],
+      "pads": [],
+      "nets": [],
+      "point": [
+        157.5,
+        128.0
+      ],
+      "bbox": null,
+      "layer": "F.Cu",
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "connector_edge_distance",
+      "severity": "info",
+      "message": "J2 (Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical): 4.23mm from nearest board edge",
+      "refs": [
+        "J2"
+      ],
+      "pads": [],
+      "nets": [],
+      "point": [
+        119.5,
+        97.5
+      ],
+      "bbox": null,
+      "layer": "F.Cu",
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "redundant_copper_detour",
+      "severity": "warning",
+      "message": "Track detour: [VM] on F.Cu routes 7.28 mm between points 1.95 mm apart (ratio 3.7)",
+      "refs": [],
+      "pads": [],
+      "nets": [
+        "VM"
+      ],
+      "point": [
+        163.65,
+        75.975
+      ],
+      "bbox": null,
+      "layer": "F.Cu",
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "redundant_copper_detour",
+      "severity": "warning",
+      "message": "Track detour: [+5V] on F.Cu routes 5.60 mm between points 1.60 mm apart (ratio 3.5)",
+      "refs": [],
+      "pads": [],
+      "nets": [
+        "+5V"
+      ],
+      "point": [
+        156.338,
+        99.6
+      ],
+      "bbox": null,
+      "layer": "F.Cu",
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "redundant_copper_detour",
+      "severity": "warning",
+      "message": "Track detour: [+5V] on B.Cu routes 24.40 mm between points 9.20 mm apart (ratio 2.7)",
+      "refs": [],
+      "pads": [],
+      "nets": [
+        "+5V"
+      ],
+      "point": [
+        165.863,
+        102.0
+      ],
+      "bbox": null,
+      "layer": "B.Cu",
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "redundant_copper_detour",
+      "severity": "warning",
+      "message": "Track detour: [MOSI] on B.Cu routes 44.56 mm between points 16.87 mm apart (ratio 2.6)",
+      "refs": [],
+      "pads": [],
+      "nets": [
+        "MOSI"
+      ],
+      "point": [
+        162.5,
+        105.363
+      ],
+      "bbox": null,
+      "layer": "B.Cu",
+      "waived": false
+    }
+  ],
   "meta_checks": {
     "drc": {
       "status": "PASSED",
-      "detail": "70 rules checked, 0 error(s), 0 warning(s)"
+      "detail": "72 rules checked, 0 error(s), 4 warning(s)"
     },
     "erc": {
       "status": "PASSED",
@@ -169,31 +425,31 @@
       "netlist_vacuous": false
     },
     "manifest": {
-      "status": "PASSED",
-      "detail": "bundle SHA-256 hashes verified; archived PCB matches current content"
+      "status": "FAILED",
+      "detail": "STALE/unverified: routed PCB content differs from the manifest-bound project archive"
     },
-    "overall": "PASSED",
+    "overall": "FAILED",
     "schematic_missing": false
   },
   "routing_quality": {
-    "total_segments": 8119,
+    "total_segments": 700,
     "nets_with_copper": 37,
-    "segments_per_net": 219.43243243243242,
+    "segments_per_net": 18.91891891891892,
     "zero_length_count": 0,
-    "median_length_mm": 0.10000000000000853,
-    "fragment_count": 7729,
-    "fragment_fraction": 0.9519645276511886,
-    "orthogonal_count": 5106,
-    "diagonal_45_count": 3013,
-    "off_axis_count": 0,
-    "staircase_step_count": 25,
-    "staircase_fraction": 0.00307919694543663
+    "median_length_mm": 1.0070458146424448,
+    "fragment_count": 157,
+    "fragment_fraction": 0.22428571428571428,
+    "orthogonal_count": 402,
+    "diagonal_45_count": 289,
+    "off_axis_count": 9,
+    "staircase_step_count": 16,
+    "staircase_fraction": 0.022857142857142857
   },
   "coverage": {
     "ampacity": {
-      "status": "skipped:no_declared_targets",
-      "state": "skipped",
-      "reason": "no_declared_targets",
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
       "blocking": true
     },
     "clearance": {
@@ -239,21 +495,21 @@
       "blocking": true
     },
     "diffpair_length_skew": {
-      "status": "skipped:no_diff_pairs_detected",
-      "state": "skipped",
-      "reason": "no_diff_pairs_detected",
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
       "blocking": true
     },
     "diffpair_routing_continuity": {
-      "status": "skipped:no_diff_pairs_detected",
-      "state": "skipped",
-      "reason": "no_diff_pairs_detected",
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
       "blocking": true
     },
     "diffpair_uncoupled_length": {
-      "status": "skipped:no_diff_pairs_detected",
-      "state": "skipped",
-      "reason": "no_diff_pairs_detected",
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
       "blocking": true
     },
     "dimensions": {
@@ -293,10 +549,16 @@
       "blocking": true
     },
     "match_group_length_skew": {
-      "status": "skipped:no_net_class_map",
-      "state": "skipped",
-      "reason": "no_net_class_map",
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
       "blocking": true
+    },
+    "model_coverage": {
+      "status": "unknown:host_library_refs (42 footprint(s); per-host detail: kct pcb model-audit)",
+      "state": "unknown",
+      "reason": "host_library_refs (42 footprint(s); per-host detail: kct pcb model-audit)",
+      "blocking": false
     },
     "netclass_clearance_copper": {
       "status": "checked",
@@ -341,6 +603,12 @@
       "blocking": false
     },
     "placement": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "redundant_copper": {
       "status": "checked",
       "state": "checked",
       "reason": null,
@@ -437,6 +705,6 @@
       "blocking": true
     }
   },
-  "verdict": "pass",
-  "exit_code": 0
+  "verdict": "fail",
+  "exit_code": 2
 }

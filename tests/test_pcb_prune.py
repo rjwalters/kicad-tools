@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from itertools import count
 from pathlib import Path
 
@@ -426,3 +427,104 @@ def test_copper_arc_touching_a_detour_keeps_it(tmp_path):
     q.write_text(body.split("  (arc ")[0] + ")\n")
     pcb2, _res2 = _run(q)
     assert not _has_detour(pcb2)
+
+
+# ---------------------------------------------------------------------------
+# Issue #8278: grid-step runs Board 05's router left behind
+# ---------------------------------------------------------------------------
+
+
+def test_run_grazed_by_its_diagonal_corner_is_merged(tmp_path):
+    """A 0.1 mm grid-step run turning into a diagonal: the diagonal's capsule
+    grazes the first steps (body contact outside the run), but it is joined to
+    the run at the run's end, so the contact is redundant and both straight
+    runs merge."""
+    w = 0.2
+    straight = [((100 + 0.1 * k, 100), (100 + 0.1 * (k + 1), 100), "F.Cu", w) for k in range(20)]
+    diag = [
+        ((102 + 0.1 * k, 100 + 0.1 * k), (102 + 0.1 * (k + 1), 100 + 0.1 * (k + 1)), "F.Cu", w)
+        for k in range(10)
+    ]
+    pads = [("A", 100, 100, 0.2, 0.2), ("B", 103, 101, 0.2, 0.2)]
+    p = _board(tmp_path, pads, straight + diag)
+    pcb, res = _run(p)
+    # The pad's reach splits each straight at most once (pure pass + the
+    # anchored pass); no 0.1 mm fragment survives and the pads stay joined.
+    assert len(pcb.segments) <= 4
+    assert min(math.dist(s.start, s.end) for s in pcb.segments) > 0.1 + 1e-6
+    assert _connected(pcb, (100, 100), (103, 101))
+
+
+def test_run_inside_same_net_zone_is_merged(tmp_path):
+    """Every joint also sits inside a same-net zone outline (not a pure
+    joint); the collapsed run keeps both pad joins and its zone anchors."""
+    zone = (
+        '  (zone (net 1) (net_name "SIG") (layer "F.Cu") (uuid "z1") (hatch edge 0.5)\n'
+        "    (connect_pads (clearance 0.2)) (min_thickness 0.25)\n"
+        "    (fill (thermal_gap 0.5) (thermal_bridge_width 0.5))\n"
+        "    (polygon (pts (xy 98 98) (xy 104 98) (xy 104 102) (xy 98 102))))\n"
+    )
+    segs = [((100 + 0.25 * k, 100), (100 + 0.25 * (k + 1), 100)) for k in range(8)]
+    p = _board(tmp_path, [("A", 100, 100, 0.2, 0.2), ("B", 102, 100, 0.2, 0.2)], segs)
+    p.write_text(p.read_text()[: -len(")\n")] + zone + ")\n")
+    pcb, res = _run(p)
+    assert len(pcb.segments) == 1
+    s = pcb.segments[0]
+    assert sorted([s.start, s.end]) == [pytest.approx((100, 100)), pytest.approx((102, 100))]
+
+
+def test_loop_removal_keeps_the_via_centre_joint(tmp_path):
+    """A diagonal stub to the via centre and a straight run whose free end
+    merely sits inside the via disc form a loop.  Removing the stub would
+    leave the via joined on F.Cu only off-centre (an overlap-only joint), so
+    the run's off-centre end piece goes instead."""
+    segs = [
+        ((100, 100), (100.1, 99.9)),  # centred stub
+        ((100.1, 99.8), (100.1, 99.9)),  # end inside the via, 0.224 mm off
+        ((100.1, 99.9), (100.1, 102)),
+    ]
+    p = _board(tmp_path, [("A", 100.1, 102, 0.2, 0.2)], segs, vias=[(100, 100)])
+    pcb, res = _run(p)
+    kept = {
+        (tuple(round(v, 3) for v in s.start), tuple(round(v, 3) for v in s.end))
+        for s in pcb.segments
+    }
+    assert ((100.0, 100.0), (100.1, 99.9)) in kept
+    assert ((100.1, 99.8), (100.1, 99.9)) not in kept
+
+
+def test_run_that_a_longer_track_already_spans_is_dropped_not_duplicated(tmp_path):
+    """Four 0.1 mm steps with a 0.4 mm track laid back over them between a pad
+    and a via: merging would leave an exact (reversed) duplicate, which KiCad
+    reports as a dangling track.  The steps go; the 0.4 mm track stays."""
+    steps = [((100, 100 + 0.1 * k), (100, 100 + 0.1 * (k + 1))) for k in range(4)]
+    back = ((100, 100.4), (100, 100))
+    p = _board(tmp_path, [("A", 100, 100, 0.2, 0.2)], [*steps, back], vias=[(100, 100.4)])
+    pcb, res = _run(p)
+    assert len(pcb.segments) == 1
+    s = pcb.segments[0]
+    assert sorted([s.start, s.end]) == [pytest.approx((100, 100)), pytest.approx((100, 100.4))]
+
+
+def test_run_looping_back_to_nowhere_is_kept(tmp_path):
+    """The same loop, but nothing else at the far point: without the steps the
+    0.4 mm track would dangle there, so the run is left untouched."""
+    steps = [((100, 100 + 0.1 * k), (100, 100 + 0.1 * (k + 1))) for k in range(4)]
+    back = ((100, 100.4), (100, 100))
+    p = _board(tmp_path, [("A", 100, 100, 0.2, 0.2)], [*steps, back])
+    pcb, res = _run(p)
+    assert len(pcb.segments) == 5
+
+
+def test_rewritten_ends_keep_full_nm_precision(tmp_path):
+    """A merged/snapped end is written on KiCad's nm grid, not truncated to six
+    significant digits (133.4125 used to become 133.412, a 0.5 um gap)."""
+    segs = [((133.4125 - 0.1 * k, 140.1), (133.4125 - 0.1 * (k + 1), 140.1)) for k in range(5)]
+    p = _board(tmp_path, [("A", 133.4125, 140.1, 0.2, 0.2), ("B", 132.9125, 140.1, 0.2, 0.2)], segs)
+    board, res = prune_board(p, verify_drc=False)
+    assert res.stats["segments_removed"] == 4
+    out = tmp_path / "out.kicad_pcb"
+    board.save(out)
+    text = out.read_text()
+    assert "133.4125" in text and "132.9125" in text
+    assert "133.412 " not in text and "132.912 " not in text

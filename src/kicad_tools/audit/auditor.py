@@ -291,6 +291,10 @@ class IsolationStatus:
     mains_suspected_unclassified: bool = False
     # Net names that tripped the mains/HV suspicion (for the report + provenance).
     mains_suspect_nets: list[str] = field(default_factory=list)
+    # Mains-*named* nets the board's net-class map explicitly declares NOT
+    # mains/HV (``non_hv_nets``, issue #8278): ``{net: reason}``.  They are
+    # exempt from the vacuity guard only, and always reported -- never silent.
+    declared_non_hv_nets: dict[str, str] = field(default_factory=dict)
     passed: bool = True
     hv_nets: list[str] = field(default_factory=list)
     pair_count: int = 0
@@ -317,6 +321,7 @@ class IsolationStatus:
             "could_not_verify": self.could_not_verify,
             "mains_suspected_unclassified": self.mains_suspected_unclassified,
             "mains_suspect_nets": list(self.mains_suspect_nets),
+            "declared_non_hv_nets": dict(self.declared_non_hv_nets),
             "passed": self.passed,
             "hv_nets": list(self.hv_nets),
             "pair_count": self.pair_count,
@@ -379,13 +384,16 @@ def check_isolation(
     # silently run without its HV classes on a sidecar that `kct route`
     # accepts.
     resolved_net_class_map = None
+    declared_non_hv: dict[str, str] = {}
     if net_class_map_path is not None:
         try:
+            from kicad_tools.creepage.engine import non_hv_nets_from_path
             from kicad_tools.router.rules import net_class_map_from_path
 
             resolved_net_class_map = net_class_map_from_path(
                 Path(net_class_map_path), pcb_path=pcb_path
             )
+            declared_non_hv = non_hv_nets_from_path(net_class_map_path)
         except (OSError, ValueError, TypeError) as e:
             logger.warning(
                 "Isolation check: failed to load net-class-map from %s: %s",
@@ -414,10 +422,21 @@ def check_isolation(
         # #4011) rather than silently reporting READY.
         from kicad_tools.creepage.engine import (
             SELV_WORKING_VOLTAGE_V,
+            _norm_net_key,
             mains_suspect_nets,
         )
 
-        suspects = mains_suspect_nets(pcb)
+        # Explicit per-board "not mains/HV" declarations (issue #8278) exempt
+        # a mains-NAMED net from this name-based guard -- recorded, never
+        # silent.  A mains-level working voltage still trips the guard.
+        declared = {_norm_net_key(k): (k, v) for k, v in declared_non_hv.items()}
+        suspects = []
+        for name in mains_suspect_nets(pcb):
+            hit = declared.get(_norm_net_key(name))
+            if hit is not None:
+                status.declared_non_hv_nets[name] = hit[1]
+            else:
+                suspects.append(name)
         wv = hv_working_voltage
         high_working_voltage = wv is not None and float(wv) >= SELV_WORKING_VOLTAGE_V
         if suspects or high_working_voltage:
@@ -436,11 +455,17 @@ def check_isolation(
                 f"0 '{hv_net_class}' nets resolved but the board looks "
                 f"like mains/HV ({'; '.join(reasons)}) -- the HV insulation "
                 "path was NOT evaluated.  Map the mains nets to the HV class "
-                "(--net-class-map) or set --hv-net-class.  NOT_READY."
+                "(--net-class-map) or set --hv-net-class; a mains-NAMED net that "
+                "is not mains (e.g. a 24 V FUSED rail) can be declared in the "
+                "map's non_hv_nets block with a reason.  NOT_READY."
             )
             return status
         # No HV-class nets on a genuinely low-voltage board -> inert.
         status.details = f"No '{hv_net_class}' nets found -- HV/isolation audit skipped."
+        if status.declared_non_hv_nets:
+            status.details += " Mains-named net(s) declared non-HV by the net-class map: " + (
+                "; ".join(f"{k} ({v})" for k, v in sorted(status.declared_non_hv_nets.items()))
+            )
         return status
 
     status.hv_present = True
@@ -2087,6 +2112,19 @@ class ManufacturingAudit:
                         " then re-run kct audit"
                     ),
                     command=f"kct zones fill {self.pcb_path}",
+                )
+            )
+
+        # Explicit non-HV declarations (issue #8278): disclosed, never silent.
+        for net_name, reason in sorted(result.isolation.declared_non_hv_nets.items()):
+            items.append(
+                ActionItem(
+                    priority=3,
+                    description=(
+                        f"Confirm mains-named net {net_name} is not mains/HV: declared "
+                        f"non-HV in the net-class map ({reason})"
+                    ),
+                    command=None,
                 )
             )
 

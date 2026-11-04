@@ -641,11 +641,15 @@ def test_both_identity_shapes_share_one_checker_and_one_key():
     assert identity_key(pad) != identity_key(at)
     assert sorted([identity_key(pad), identity_key(at)]) == [identity_key(at), identity_key(pad)]
     entry = {"issue": 1, "kind": "exception", "summary": "s", "recorded": "2026-10-18"}
-    # Each field accepts only its own shape, with the same checker's errors.
+    # Each field accepts only its own shapes, with the same checker's errors.
+    # A located warning identity is reserved for track-copper rules that name
+    # no ref/pad (issue #8278); a ref/pad-keyed rule such as ``via`` refuses it.
+    with pytest.raises(KnownIssueError, match=r"keyed by ref/pad, not a location"):
+        validate_known_issues([{**entry, "warnings": [at]}])
     with pytest.raises(
         KnownIssueError, match=r"warnings identity must be exactly \{rule, ref, pad\}"
     ):
-        validate_known_issues([{**entry, "warnings": [at]}])
+        validate_known_issues([{**entry, "warnings": [{"rule": "via", "item": "x"}]}])
     with pytest.raises(KnownIssueError, match=r"errors identity must be exactly \{rule, at"):
         validate_known_issues([{**entry, "errors": [pad]}])
     # Sorting and ownership use the same key: a repeated key is rejected in either field.
@@ -684,3 +688,41 @@ def test_item_identities_validate_and_sort_by_the_one_canonical_key():
             validate_known_issues([{**base, "errors": bad}])
     with pytest.raises(KnownIssueError, match="only an exception"):
         validate_known_issues([{**base, "kind": "advisory", "errors": [item]}])
+
+
+# ---------------------------------------------------------------------------
+# Issue #8278: located warning identities for track-copper rules
+# ---------------------------------------------------------------------------
+
+
+def test_located_warning_identity_parses_and_matches_exactly():
+    from kicad_tools.cli.known_issues import known_warning_allowance, match_warning_allowance
+
+    entry = parse_known_issue(
+        "8278:router detours:advisory:redundant_copper_detour@156.338/99.6", "2026-11-03"
+    )
+    assert entry["warnings"] == [{"rule": "redundant_copper_detour", "at": [156.34, 99.6]}]
+    allowance = known_warning_allowance(validate_known_issues([entry]))
+
+    def finding(x, y, rule="redundant_copper_detour"):
+        return {"rule_id": rule, "severity": "warning", "location": [x, y], "items": []}
+
+    assert match_warning_allowance([finding(156.338, 99.6)], allowance) == ([], [])
+    # Elsewhere on the board, or another rule at the same spot: unaccepted, and
+    # the listed identity is stale.
+    unaccepted, stale = match_warning_allowance([finding(150.0, 99.6)], allowance)
+    assert unaccepted and stale
+    unaccepted, _ = match_warning_allowance(
+        [finding(156.338, 99.6, "redundant_copper_fragments")], allowance
+    )
+    assert unaccepted
+    # The same identity firing twice is never covered by one entry.
+    unaccepted, _ = match_warning_allowance(
+        [finding(156.338, 99.6), finding(156.338, 99.6)], allowance
+    )
+    assert unaccepted
+
+
+def test_located_warning_identity_is_refused_for_ref_pad_rules():
+    with pytest.raises(KnownIssueError, match="keyed by ref/pad"):
+        parse_known_issue("8278:s:advisory:thermal_asymmetry@1/2", "2026-11-03")

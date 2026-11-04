@@ -84,5 +84,8 @@
     "is_pour_net": true,
     "route_via": "pour",
     "zone_connection": "solid"
+  },
+  "non_hv_nets": {
+    "FUSED": "12-24 V DC motor supply after F1 (1 A, 63 V fuse), SMBJ24A-clamped; SELV, not mains (issue #8278)"
   }
 }
