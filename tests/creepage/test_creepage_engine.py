@@ -35,6 +35,7 @@ from .fixtures import (
     board_no_hv_source,
     board_same_footprint_attach_residual_source,
     board_same_footprint_fail_source,
+    board_same_footprint_hides_board_source,
     board_same_footprint_only_source,
     board_source,
 )
@@ -1189,3 +1190,55 @@ def test_same_footprint_residual_row_in_attach_zone_is_classified(tmp_path, jog)
     assert row.creepage_mm == pytest.approx(gnd_plain[1].creepage_mm)
     assert row.residual_layer is None or isinstance(row.residual_layer, str)
     assert row.residual_creepage_mm is None  # all copper is inside the zone
+
+
+# ---------------------------------------------------------------------------
+# Closest-point witness per row (Issue #8301)
+# ---------------------------------------------------------------------------
+
+
+def test_board_row_witness_points_and_items(tmp_path):
+    pcb = _load(tmp_path, board_source(with_slot=False))
+    report = compute_creepage_census(pcb, resolve_hv_nets(pcb, "HV", _hv_map()), min_mm=1.5)
+    row = _conductor_pair(report, "GND")
+    w = row.witness
+    assert w is not None
+    # L_MAINS pad edge at x=11, GND pad edge at x=29.
+    assert w["point_a_mm"][0] == pytest.approx(11.0, abs=1e-6)
+    assert w["point_b_mm"][0] == pytest.approx(29.0, abs=1e-6)
+    # Single-pad fixtures carry no refdes/uuid -> bare ``pad`` fallback label.
+    assert w["item_a"] == "pad"
+    assert w["item_b"] == "pad"
+    d = row.to_dict()["witness"]
+    assert set(d) == {"point_a_mm", "point_b_mm", "item_a", "item_b"}
+
+
+def test_edge_row_witness_names_edge_cuts(tmp_path):
+    pcb = _load(tmp_path, board_source(with_slot=False))
+    report = compute_creepage_census(pcb, resolve_hv_nets(pcb, "HV", _hv_map()), min_mm=1.5)
+    edge = next(p for p in report.pairs if p.kind == "edge")
+    assert edge.witness is not None
+    assert edge.witness["item_b"] == "Edge.Cuts"
+    assert edge.witness["item_a"] == "pad"
+    assert "witness" in edge.to_dict()
+
+
+def test_same_footprint_and_extra_board_row_have_distinct_witnesses(tmp_path):
+    pcb = _load(tmp_path, board_same_footprint_hides_board_source(board_gap_mm=0.8))
+    report = _census_samefp(pcb)
+    rows = [p for p in report.pairs if p.net_b == "DIV_MID"]
+    same = next(p for p in rows if p.relationship == "same_footprint")
+    board = next(p for p in rows if p.relationship == "board")
+    assert {same.witness["item_a"], same.witness["item_b"]} == {"R1.1", "R1.2"}
+    # The board row names the cross-footprint approach, not the waived pair.
+    assert board.witness["item_a"] == "R1.1"
+    assert board.witness["item_b"] == "D1.1"
+    assert board.witness["point_b_mm"][1] < same.witness["point_b_mm"][1]
+
+
+def test_segment_and_zone_item_labels_and_missing_uuid_fallback():
+    from kicad_tools.creepage.engine import _item_label
+
+    assert _item_label("segment", "abc") == "segment:abc"
+    assert _item_label("via", "") == "via"
+    assert _item_label("zone", None) == "zone"

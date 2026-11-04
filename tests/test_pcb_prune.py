@@ -95,6 +95,21 @@ def test_overlap_only_off_centre_ends_are_snapped(tmp_path):
     assert sorted(s.end for s in PCB.load(out).segments) == [(105, 100), (105, 100)]
 
 
+def test_single_pad_net_loop_is_kept(tmp_path):
+    # Issue #8333: one-terminal nets have a vacuous partition guard; the whole
+    # loop used to be deleted, leaving the net with no copper.
+    loop = [
+        ((100, 100), (105, 100)),
+        ((105, 100), (105, 105)),
+        ((105, 105), (100, 105)),
+        ((100, 105), (100, 100)),
+    ]
+    p = _board(tmp_path, [("A", 100, 100)], loop)
+    pcb, res = _run(p)
+    assert len(pcb.segments) == 4
+    assert res.stats["segments_removed"] == 0
+
+
 def test_same_layer_loop_removes_longer_detour(tmp_path):
     segs = [
         ((100, 100), (102, 100)),

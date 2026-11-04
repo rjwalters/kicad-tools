@@ -841,7 +841,10 @@ def _plan_net(model: _NetModel, net_number: int) -> NetPlan:
     removed: set[int] = set()
     seg_ids = [i for i, n in enumerate(model.nodes) if n.kind == "seg"]
 
-    if model.has_cycle():
+    # A net with fewer than two terminals has at most one partition group, so
+    # the "partition unchanged" guard is vacuous and a loop would be deleted
+    # wholesale, leaving the net with no copper (Issue #8333).
+    if len(model.terminals) >= 2 and model.has_cycle():
 
         def _key(group: set[int]) -> tuple[int, float]:
             # Prefer the branch with an off-centre end, then the longer detour.

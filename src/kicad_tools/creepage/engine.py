@@ -373,6 +373,11 @@ class CreepagePair:
     residual_creepage_mm: float | None = None
     residual_layer: str | None = None
     residual_witness_mm: tuple[float, float] | None = None
+    # Closest-point witness of the binding measurement (#8301): ``{"point_a_mm",
+    # "point_b_mm", "item_a", "item_b"}`` in board mm.  Straight-line closest
+    # points -- for slot-detour rows (creepage > clearance) they mark the
+    # clearance gap, not the detour path.
+    witness: dict[str, Any] | None = None
 
     @property
     def residual_passed(self) -> bool:
@@ -468,6 +473,13 @@ class CreepagePair:
         }
         if self.waived:
             base["waived"] = True
+        if self.witness is not None:
+            base["witness"] = {
+                "point_a_mm": [round(v, 4) for v in self.witness["point_a_mm"]],
+                "point_b_mm": [round(v, 4) for v in self.witness["point_b_mm"]],
+                "item_a": self.witness["item_a"],
+                "item_b": self.witness["item_b"],
+            }
         if self.relationship == "attach_zone":
             base["residual_pass"] = self.residual_passed
             if self.residual_creepage_mm is not None:
@@ -740,8 +752,26 @@ def resolve_hv_nets(
 def _net_geoms_on_layer(pcb: PCB, layer_name: str) -> dict[int, list[Any]]:
     """Collect per-net copper shapely geometries on a single copper layer.
 
+    Thin wrapper over :func:`_net_labelled_geoms_on_layer` that drops labels.
+    """
+    return {
+        net: [g for g, _ in items]
+        for net, items in _net_labelled_geoms_on_layer(pcb, layer_name).items()
+    }
+
+
+def _item_label(kind: str, uuid: str | None) -> str:
+    """``kind:uuid`` item label; a missing uuid falls back to the bare kind (#8301)."""
+    return f"{kind}:{uuid}" if uuid else kind
+
+
+def _net_labelled_geoms_on_layer(pcb: PCB, layer_name: str) -> dict[int, list[tuple[Any, str]]]:
+    """Collect per-net ``(geometry, item label)`` copper on a single copper layer.
+
     Reuses ``segment_copper_polygon`` (traces), ``_pad_polygon`` (pads, true
     outline), a buffered point (vias), and ``_fill_solid_region`` (zone fills).
+    Labels (#8301): pad ``REF.pin``; ``segment:<uuid>`` / ``via:<uuid>`` /
+    ``zone:<uuid>``.
     """
     from shapely.geometry import Point  # type: ignore[import-untyped]
 
@@ -750,29 +780,37 @@ def _net_geoms_on_layer(pcb: PCB, layer_name: str) -> dict[int, list[Any]]:
     from kicad_tools.validate.connectivity import ConnectivityValidator
     from kicad_tools.validate.rules.clearance import _pad_polygon
 
-    geoms: dict[int, list[Any]] = {}
+    geoms: dict[int, list[tuple[Any, str]]] = {}
 
-    def _add(net_number: int, geom: Any | None) -> None:
+    def _add(net_number: int, geom: Any | None, label: str) -> None:
         if geom is None or getattr(geom, "is_empty", False):
             return
-        geoms.setdefault(net_number, []).append(geom)
+        geoms.setdefault(net_number, []).append((geom, label))
 
     # Trace segments
     for seg in pcb.segments_on_layer(layer_name):
-        _add(seg.net_number, segment_copper_polygon(seg.start, seg.end, seg.width))
+        _add(
+            seg.net_number,
+            segment_copper_polygon(seg.start, seg.end, seg.width),
+            _item_label("segment", getattr(seg, "uuid", "")),
+        )
 
     # Pads (true roundrect/oval outline)
     for fp in pcb.footprints:
         for pad in fp.pads:
             if layer_name in pad.layers or "*.Cu" in pad.layers:
-                _add(pad.net_number, _pad_polygon(pad, fp))
+                _add(pad.net_number, _pad_polygon(pad, fp), _pad_label(fp, pad))
 
     # Vias (circular copper barrel on every spanned layer)
     for via in pcb.vias:
         if via_spans_layer(via.layers, layer_name):
             radius = max(getattr(via, "size", 0.0) or 0.0, 0.0) / 2.0
             if radius > 0:
-                _add(via.net_number, Point(via.position).buffer(radius))
+                _add(
+                    via.net_number,
+                    Point(via.position).buffer(radius),
+                    _item_label("via", getattr(via, "uuid", "")),
+                )
 
     # Zone fills (resolved to their net; hole-aware solid region)
     name_to_number = {net.name: net.number for net in pcb.nets.values() if net.name}
@@ -785,14 +823,62 @@ def _net_geoms_on_layer(pcb: PCB, layer_name: str) -> dict[int, list[Any]]:
         for i, pts in enumerate(zone.filled_polygons):
             if zone.filled_polygon_layer(i) != layer_name:
                 continue
-            _add(net_number, ConnectivityValidator._fill_solid_region(pts))
+            _add(
+                net_number,
+                ConnectivityValidator._fill_solid_region(pts),
+                _item_label("zone", getattr(zone, "uuid", "")),
+            )
 
     return geoms
 
 
+def _pad_label(fp: Any, pad: Any) -> str:
+    """Pad item label ``REF.pin`` (bare ``pad`` when the footprint has no refdes)."""
+    ref = getattr(fp, "reference", "") or ""
+    return f"{ref}.{pad.number}" if ref else _item_label("pad", getattr(pad, "uuid", ""))
+
+
+Labelled = dict[int, list[tuple[Any, str]]]
+
+
+def _witness(
+    geom_a: Any,
+    geom_b: Any,
+    items_a: Sequence[tuple[Any, str]],
+    items_b: Sequence[tuple[Any, str]] | str,
+) -> dict[str, Any] | None:
+    """Closest-point witness between two geometries (#8301).
+
+    Points are shapely's straight-line ``nearest_points``; each side's item is
+    the labelled geometry nearest to its point.  ``items_b`` may be a plain
+    label (e.g. ``"Edge.Cuts"``).  ``None`` when either geometry is empty.
+    """
+    from shapely.geometry import Point
+    from shapely.ops import nearest_points  # type: ignore[import-untyped]
+
+    if geom_a.is_empty or geom_b.is_empty:
+        return None
+    pa, pb = nearest_points(geom_a, geom_b)
+
+    def _nearest(pt: Any, items: Sequence[tuple[Any, str]] | str) -> str:
+        if isinstance(items, str):
+            return items
+        if not items:
+            return ""
+        p = Point(pt.x, pt.y)
+        return min(items, key=lambda it: it[0].distance(p))[1]
+
+    return {
+        "point_a_mm": (pa.x, pa.y),
+        "point_b_mm": (pb.x, pb.y),
+        "item_a": _nearest(pa, items_a),
+        "item_b": _nearest(pb, items_b),
+    }
+
+
 def _net_union_on_layer(pcb: PCB, layer_name: str) -> dict[int, Any]:
     """Union each net's copper geometries on ``layer_name`` into one shape."""
-    from shapely.ops import unary_union  # type: ignore[import-untyped]
+    from shapely.ops import unary_union
 
     return {
         net_number: unary_union(parts)
@@ -838,6 +924,8 @@ class _FootprintPadIndex:
         self._by_net: dict[str, dict[int, set[str]]] = {}
         # layer -> (fp_ref, net_number) -> [pad polygons].
         self._pads: dict[str, dict[tuple[str, int], list[Any]]] = {}
+        # Same shape as ``_pads`` but holding the ``REF.pin`` labels (#8301).
+        self._labels: dict[str, dict[tuple[str, int], list[str]]] = {}
 
         copper_layer_names = [layer.name for layer in pcb.copper_layers]
         for fp in pcb.footprints:
@@ -856,6 +944,9 @@ class _FootprintPadIndex:
                         self._pads.setdefault(layer_name, {}).setdefault(
                             (ref, pad.net_number), []
                         ).append(poly)
+                        self._labels.setdefault(layer_name, {}).setdefault(
+                            (ref, pad.net_number), []
+                        ).append(_pad_label(fp, pad))
 
     def relationship(self, layer_name: str, net_a: int, net_b: int, clearance_mm: float) -> str:
         """Classify a binding pair as ``"same_footprint"`` or ``"board"``."""
@@ -889,6 +980,27 @@ class _FootprintPadIndex:
         polys = [p for ref in shared for p in pads.get((ref, net), [])]
         return unary_union(polys) if polys else None
 
+    def shared_pad_labels(self, layer_name: str, net_a: int, net_b: int, net: int) -> set[str]:
+        """``REF.pin`` labels of the pads :meth:`shared_pad_union` unions (#8301)."""
+        by_net = self._by_net.get(layer_name) or {}
+        labels = self._labels.get(layer_name) or {}
+        shared = by_net.get(net_a, set()) & by_net.get(net_b, set())
+        return {lab for ref in shared for lab in labels.get((ref, net), [])}
+
+    def footprint_pad_labels(self, layer_name: str, ref: str, net: int) -> list[str]:
+        """Pad labels of footprint ``ref`` on ``net`` (#8301)."""
+        return list((self._labels.get(layer_name) or {}).get((ref, net), []))
+
+    def shared_footprint_refs(self, layer_name: str, net_a: int, net_b: int) -> list[str]:
+        """Sorted refdes of footprints with usable pads on both nets (#8301)."""
+        by_net = self._by_net.get(layer_name) or {}
+        pads = self._pads.get(layer_name) or {}
+        return [
+            ref
+            for ref in sorted(by_net.get(net_a, set()) & by_net.get(net_b, set()))
+            if pads.get((ref, net_a)) and pads.get((ref, net_b))
+        ]
+
     def shared_footprint_pads(
         self, layer_name: str, net_a: int, net_b: int
     ) -> list[tuple[Any, Any]]:
@@ -917,8 +1029,9 @@ def _board_residual_after_same_footprint(
     net_a: int,
     net_b: int,
     obstacles: list[Any],
-) -> tuple[float, float, str, tuple[Any, Any]] | None:
-    """Smallest board-level ``(clearance, creepage, layer, (geom_a, geom_b))`` for a ``same_footprint`` pair (#8232).
+    layer_items: dict[str, Labelled] | None = None,
+) -> tuple[float, float, str, tuple[Any, Any], dict[str, Any] | None] | None:
+    """Smallest board-level ``(clearance, creepage, layer, (geom_a, geom_b), witness)`` for a ``same_footprint`` pair (#8232).
 
     The pair's global minimum is a component-internal gap, which hides any
     larger board-level approach on the same net pair.  To expose it, the pads
@@ -932,7 +1045,8 @@ def _board_residual_after_same_footprint(
     pair contributes its plain measurement.
     A trace stub leaving a masked pad can still register a near-gap, which errs
     conservative (more FAIL, never a false pass).  ``None`` when no residual
-    copper exists.
+    copper exists.  The witness (#8301) is the closest-point pair of the
+    winning masked variant -- never the waived intra-footprint minimum.
 
     What the minimum measures (#8332): with pad B masked, the nearest remaining
     net-B copper is the trace where it leaves the (masked) pad B -- not the
@@ -944,7 +1058,7 @@ def _board_residual_after_same_footprint(
     classification (:func:`_witness_in_attach_zone`) a primary ``board`` minimum
     gets and the census and router agree.
     """
-    best: tuple[float, float, str, tuple[Any, Any]] | None = None
+    best: tuple[float, float, str, tuple[Any, Any], dict[str, Any] | None] | None = None
     for layer_name, unions in layer_unions.items():
         geom_a = unions.get(net_a)
         geom_b = unions.get(net_b)
@@ -952,28 +1066,47 @@ def _board_residual_after_same_footprint(
             continue
         mask_a = fp_index.shared_pad_union(layer_name, net_a, net_b, net_a)
         mask_b = fp_index.shared_pad_union(layer_name, net_a, net_b, net_b)
-        variants = []
+        items = (layer_items or {}).get(layer_name, {})
+        all_a = items.get(net_a, [])
+        all_b = items.get(net_b, [])
+        variants: list[tuple[Any, Any, Any, Any]] = []
         if mask_a is None and mask_b is None:
             # No footprint shares the pair here: the plain measurement is
             # already a board-level gap.
-            variants.append((geom_a, geom_b))
+            variants.append((geom_a, geom_b, all_a, all_b))
         if mask_a is not None:
-            variants.append((geom_a.difference(mask_a), geom_b))
+            drop = fp_index.shared_pad_labels(layer_name, net_a, net_b, net_a)
+            variants.append(
+                (geom_a.difference(mask_a), geom_b, [i for i in all_a if i[1] not in drop], all_b)
+            )
         if mask_b is not None:
-            variants.append((geom_a, geom_b.difference(mask_b)))
+            drop = fp_index.shared_pad_labels(layer_name, net_a, net_b, net_b)
+            variants.append(
+                (geom_a, geom_b.difference(mask_b), all_a, [i for i in all_b if i[1] not in drop])
+            )
         # Cross-footprint approaches (Ai vs Bj, i != j) lie in neither masked
         # variant when two or more footprints share the pair.
         sharing = fp_index.shared_footprint_pads(layer_name, net_a, net_b)
+        refs = fp_index.shared_footprint_refs(layer_name, net_a, net_b)
         for i, (a_i, _b_i) in enumerate(sharing):
             for j, (_a_j, b_j) in enumerate(sharing):
                 if i != j:
-                    variants.append((a_i, b_j))
-        for ga, gb in variants:
+                    labs_a = set(fp_index.footprint_pad_labels(layer_name, refs[i], net_a))
+                    labs_b = set(fp_index.footprint_pad_labels(layer_name, refs[j], net_b))
+                    variants.append(
+                        (
+                            a_i,
+                            b_j,
+                            [it for it in all_a if it[1] in labs_a],
+                            [it for it in all_b if it[1] in labs_b],
+                        )
+                    )
+        for ga, gb, ia, ib in variants:
             if ga.is_empty or gb.is_empty:
                 continue
             clearance, creepage = surface_path_length(ga, gb, obstacles, _bridged=True)
             if best is None or creepage < best[1]:
-                best = (clearance, creepage, layer_name, (ga, gb))
+                best = (clearance, creepage, layer_name, (ga, gb), _witness(ga, gb, ia, ib))
     return best
 
 
@@ -1725,9 +1858,18 @@ def compute_creepage_census(
     obstacles = _bridge_narrow_cutouts(board_slot_obstacles(pcb), x_mm)
 
     # Per-layer per-net copper unions.
+    from shapely.ops import unary_union as _unary_union
+
     layer_unions: dict[str, dict[int, Any]] = {}
+    # Labelled per-item geometry (#8301): lets a witness name the pad / segment /
+    # via / zone each closest point lies on, which the union erases.
+    layer_items: dict[str, Labelled] = {}
     for layer in pcb.copper_layers:
-        layer_unions[layer.name] = _net_union_on_layer(pcb, layer.name)
+        items = _net_labelled_geoms_on_layer(pcb, layer.name)
+        layer_items[layer.name] = items
+        layer_unions[layer.name] = {
+            net: _unary_union([g for g, _ in parts]) for net, parts in items.items() if parts
+        }
 
     # Footprint-membership index (#4403): recovers the pad->footprint identity
     # the per-net union erases, so each binding pair can be classified as a
@@ -1752,6 +1894,8 @@ def compute_creepage_census(
     # potentials (bank-vs-bank, phase-vs-phase) ARE evaluated; such pairs are
     # deduplicated to a single canonical direction (smaller net number first).
     best: dict[tuple[int, int], tuple[float, float, str]] = {}
+    # Same keys: the (a, b) union geometries of the binding layer, for the witness.
+    best_geoms: dict[tuple[int, int], tuple[Any, Any]] = {}
     for layer_name, unions in layer_unions.items():
         for hv_num in hv_nets:
             hv_geom = unions.get(hv_num)
@@ -1773,6 +1917,7 @@ def compute_creepage_census(
                 prev = best.get(key)
                 if prev is None or creepage < prev[1]:
                     best[key] = (clearance, creepage, layer_name)
+                    best_geoms[key] = (hv_geom, other_geom)
 
     def _attach_zone_row(
         layer: str,
@@ -1823,15 +1968,19 @@ def compute_creepage_census(
             if az is not None:
                 relationship = "attach_zone"
                 residual = az
-        rows: list[tuple[str, float, float, str, dict[str, Any]]] = [
-            (layer_name, clearance, creepage, relationship, residual)
+        li = layer_items[layer_name]
+        main_witness = _witness(
+            *best_geoms[(hv_num, other_num)], li.get(hv_num, []), li.get(other_num, [])
+        )
+        rows: list[tuple[str, float, float, str, dict[str, Any], dict[str, Any] | None]] = [
+            (layer_name, clearance, creepage, relationship, residual, main_witness)
         ]
         if relationship == "same_footprint":
             # #8232: the minimum is component-internal; surface the smallest
             # board-level approach on the same pair as its own row so a waiver
             # of the same_footprint row cannot hide it.
             board_row = _board_residual_after_same_footprint(
-                layer_unions, fp_index, hv_num, other_num, obstacles
+                layer_unions, fp_index, hv_num, other_num, obstacles, layer_items
             )
             if board_row is not None:
                 # #8332: classify the residual row like a primary board minimum.
@@ -1847,8 +1996,10 @@ def compute_creepage_census(
                 )
                 if az is not None:
                     row_rel, row_res = "attach_zone", az
-                rows.append((board_row[2], board_row[0], board_row[1], row_rel, row_res))
-        for row_layer, row_clr, row_creep, row_rel, row_residual in rows:
+                rows.append(
+                    (board_row[2], board_row[0], board_row[1], row_rel, row_res, board_row[4])
+                )
+        for row_layer, row_clr, row_creep, row_rel, row_residual, row_witness in rows:
             if map_mode:
                 req_creep, req_clear, prov = _pair_requirement(net_a_name, net_b_name)
                 report.pairs.append(
@@ -1863,6 +2014,7 @@ def compute_creepage_census(
                         clearance_mm=row_clr,
                         creepage_mm=row_creep,
                         relationship=row_rel,
+                        witness=row_witness,
                         **row_residual,
                     )
                 )
@@ -1876,6 +2028,7 @@ def compute_creepage_census(
                         clearance_mm=row_clr,
                         creepage_mm=row_creep,
                         relationship=row_rel,
+                        witness=row_witness,
                         **row_residual,
                     )
                 )
@@ -1891,6 +2044,8 @@ def compute_creepage_census(
                 continue
             hv_all = unary_union(parts)
             clearance, creepage = surface_path_length(hv_all, edge_geom, obstacles, _bridged=True)
+            hv_items = [it for li in layer_items.values() for it in li.get(hv_num, [])]
+            edge_witness = _witness(hv_all, edge_geom, hv_items, "Edge.Cuts")
             if map_mode:
                 req_creep, req_clear, prov = _pair_requirement(hv_nets[hv_num], None, edge=True)
                 report.pairs.append(
@@ -1904,6 +2059,7 @@ def compute_creepage_census(
                         layer="*",
                         clearance_mm=clearance,
                         creepage_mm=creepage,
+                        witness=edge_witness,
                     )
                 )
             else:
@@ -1915,6 +2071,7 @@ def compute_creepage_census(
                         layer="*",
                         clearance_mm=clearance,
                         creepage_mm=creepage,
+                        witness=edge_witness,
                     )
                 )
 

@@ -369,6 +369,47 @@ an improvement or an enforceable rule set from it: `optimize-placement`,
 | `reason` | `{"command": "reason", "pcb", "output", "dry_run", "warnings", "drc": {ran, source, …}, "board": {…}, "mode": "prompt"\|"analyze"\|"export-state"\|"auto-route", …, "success"}` — plus the mode's own payload: `prompt`, `analysis`, `state` + `state_output`, or `auto_route` (`attempted`/`routed`/`nets[]`) with `saved`/`written_to` |
 | `creepage-export-rules` | `{"command": "creepage-export-rules", "project", "pcb", "dru", "voltage_map", "standard", "pollution_degree", "material_group", "hv_threshold_v", "dru_floor_mm", "domains", "net_domains", "nets_assigned", "rules": [{name, condition, min_mm}], "bridging_exemptions", "dru_block", "dry_run", "written", "skipped_reason", "success"}` — `dru_block` is carried only on the `--dry-run` path (mirroring the prose that prints it instead of writing it) |
 
+### `kct creepage` pair rows: the `witness` object
+
+Every conductor and board-edge row of `kct creepage --format json` carries a
+`witness` key (Issue #8301), always on (no flag). It names where the row's
+measured distance was taken:
+
+```json
+"witness": {
+  "point_a_mm": [x, y],
+  "point_b_mm": [x, y],
+  "item_a": "R1.1",
+  "item_b": "segment:949b22c8-…"
+}
+```
+
+- **Coordinates** are board millimetres rounded to 4 decimals. The points are
+  straight-line closest points (`nearest_points`), so
+  `|point_a_mm - point_b_mm|` equals the row's `clearance_mm` to within
+  rounding. On a slot-detour row (`creepage_mm` > `clearance_mm`) they mark
+  the clearance gap, **not** the detour path.
+- **Item labels** name the copper item nearest each point on the row's layer:
+  a pad is `REF.pin`; otherwise `segment:<uuid>`, `via:<uuid>` or
+  `zone:<uuid>`. When the uuid is missing the label is the bare kind
+  (`segment`, `via`, `zone`). A board-edge row's `item_b` is `Edge.Cuts`.
+- **Which pair each row reports:**
+  - main rows: the binding layer's pair;
+  - the extra `board` row added for a waived minimum (Issue #8232): the
+    winning masked variant, so it does not name the waived pair (a
+    `same_footprint` row `D6.1->D6.2` and its extra `board` row can name
+    different items);
+  - `attach_zone` rows: the gating pair behind the row's own
+    `clearance_mm` / `creepage_mm`; `residual_witness_mm` is unchanged and is
+    still the residual midpoint.
+- An item can sit a few µm from its point (the masked-variant boundary of the
+  #8232 difference geometry), so the label is the right item to inspect, not a
+  containment guarantee.
+
+The table output is unchanged by default; `--witness` adds a
+`x,y item_a -> item_b` column to both table renderers. With `witness` removed,
+the JSON is identical to the pre-#8301 shape.
+
 ### `--lint-gate` verdict (`kct route`, `kct route-auto`)
 
 With `--lint-gate` (Issue #6054) the command's single document gains
