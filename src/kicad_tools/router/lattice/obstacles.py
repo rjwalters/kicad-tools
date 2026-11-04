@@ -142,6 +142,96 @@ def _pad_midpoint_envelope_exempt(
     return False
 
 
+def _pad_pair_zone_contains_both(
+    a: Pt,
+    b: Pt,
+    pad: Pad,
+    own_half: float,
+    net: int,
+    layer: int | None,
+    pairwise: LatticePairwise,
+) -> bool:
+    """Waive only when ONE zone holds the whole segment AND the whole pad (#8277).
+
+    The commit gate waives an attach-zone pair only when both nearest points
+    lie in a zone and the copper outside it still clears.  When one zone
+    contains both pieces entirely, both witnesses are in the zone and no
+    residual copper exists, so the gate waives it too: the search is never
+    more permissive than the gate.  It may be stricter (a segment leaving the
+    zone is declined here although the gate may accept its residual).
+    """
+    hw, hh = pad_half_extents(pad)
+    x0 = min(min(a[0], b[0]) - own_half, pad.x - hw)
+    y0 = min(min(a[1], b[1]) - own_half, pad.y - hh)
+    x1 = max(max(a[0], b[0]) + own_half, pad.x + hw)
+    y1 = max(max(a[1], b[1]) + own_half, pad.y + hh)
+    for zx0, zy0, zx1, zy1, ids, layers in pairwise.zones:
+        if not (
+            zx0 <= x0 and x1 <= zx1 and zy0 <= y0 and y1 <= zy1 and net in ids and pad.net in ids
+        ):
+            continue
+        if layer is None or not layers:
+            return True
+        a_layers, b_layers = layers.get(net), layers.get(pad.net)
+        if (a_layers is None or layer in a_layers) and (b_layers is None or layer in b_layers):
+            return True
+    return False
+
+
+def _pad_zone_waives(
+    a: Pt,
+    b: Pt,
+    pad: Pad,
+    own_half: float,
+    net: int,
+    layer: int | None,
+    req: float,
+    pairwise: LatticePairwise,
+) -> bool:
+    """Search-time twin of the commit gate's attach-zone verdict (#8277).
+
+    Runs the very same ``_attach_zone_verdict`` (both nearest points in one
+    zone AND the copper outside it clears) on the true segment/pad copper, so
+    search and gate cannot disagree.  An inexact pad model (roundrect without
+    its radius) falls back to requiring one zone to hold both pieces whole.
+    """
+    from kicad_tools.geometry.copper import segment_copper_polygon
+    from kicad_tools.router.pairwise_clearance import (
+        _PASS_TOLERANCE,
+        AttachZone,
+        _attach_zone_verdict,
+        _shapely_gap_and_midpoint,
+    )
+
+    polygon = _pad_waiver_polygon(pad.x, pad.y, pad.width, pad.height, pad.shape, pad.rotation)
+    copper = segment_copper_polygon(a, b, own_half * 2)
+    if polygon is None or copper is None:
+        return _pad_pair_zone_contains_both(a, b, pad, own_half, net, layer, pairwise)
+    gap, _, _ = _shapely_gap_and_midpoint(copper, polygon)
+    if gap >= req - _PASS_TOLERANCE:
+        return True
+    names = frozenset({str(net), str(pad.net)})
+    zones = []
+    for x0, y0, x1, y1, ids, layers in pairwise.zones:
+        if net not in ids or pad.net not in ids:
+            continue
+        if layer is not None and layers:
+            a_layers, b_layers = layers.get(net), layers.get(pad.net)
+            if not (
+                (a_layers is None or layer in a_layers) and (b_layers is None or layer in b_layers)
+            ):
+                continue
+        zones.append(AttachZone(x0, y0, x1, y1, names))
+    if not zones:
+        return False
+    return (
+        _attach_zone_verdict(
+            copper, polygon, zones, str(net), str(pad.net), None, req, _PASS_TOLERANCE, own_half
+        )
+        is None
+    )
+
+
 class LatticeObstacleModel:
     """Static per-layer pad masks over a built lattice (built once per board).
 
@@ -381,12 +471,7 @@ class LatticeObstacleModel:
             # rotation. Missing corner metadata cannot justify a point waiver.
             if not any(net in ids and pad.net in ids for *_, ids, _layers in pairwise.zones):
                 return True
-            probe = pad_waiver_probe_point(a, b, pad, own_half)
-            if probe is None:
-                waived = _pad_midpoint_envelope_exempt(a, b, pad, own_half, net, layer, pairwise)
-            else:
-                waived = pairwise.exempt(probe[0], probe[1], net, pad.net, layer)
-            if not waived:
+            if not _pad_zone_waives(a, b, pad, own_half, net, layer, req, pairwise):
                 return True
         return False
 

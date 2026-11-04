@@ -264,9 +264,17 @@ Examples:
         "--output",
         help="Output PCB file (default: modify in place)",
     )
-    parser.add_argument(
+    net_group = parser.add_mutually_exclusive_group()
+    net_group.add_argument(
         "--net",
-        help="Only optimize traces for nets matching this pattern",
+        help="Only optimize the net with exactly this name (case-sensitive; "
+        "'GND' does not match 'PGND'). Use --net-pattern for globs",
+    )
+    net_group.add_argument(
+        "--net-pattern",
+        metavar="GLOB",
+        help="Only optimize nets whose name matches this case-sensitive glob "
+        "(fnmatch), e.g. '*GND*'",
     )
     parser.add_argument(
         "--no-merge",
@@ -287,6 +295,21 @@ Examples:
         "--no-jogs",
         action="store_true",
         help="Disable lateral jog removal (sliding short sideways steps to the next corner)",
+    )
+    parser.add_argument(
+        "--no-staircase",
+        action="store_true",
+        help="Disable staircase compression",
+    )
+    parser.add_argument(
+        "--no-pull-tight",
+        action="store_true",
+        help="Disable PullTight (shortening chains by sliding interior segments)",
+    )
+    parser.add_argument(
+        "--no-detour",
+        action="store_true",
+        help="Disable detour shortening (replacing a chain with a shorter direct path)",
     )
     parser.add_argument(
         "--chamfer-size",
@@ -386,6 +409,9 @@ Examples:
         eliminate_zigzags=not args.no_zigzag,
         convert_45_corners=not args.no_45,
         remove_jogs=not args.no_jogs,
+        compress_staircase=not args.no_staircase,
+        pull_tight=not args.no_pull_tight,
+        shorten_detours=not args.no_detour,
         corner_chamfer_size=args.chamfer_size,
         drc_aware=args.drc_aware,
         drc_manufacturer=args.mfr,
@@ -440,6 +466,9 @@ Examples:
     }
     for name, vias in parse_vias(pcb_path.read_text()).items():
         attachments.setdefault(name, []).extend((v.x, v.y) for v in vias)
+    optimizer.set_pad_points(
+        {name: [(x, y) for x, y, _ in pts] for name, pts in pad_anchors.items()}
+    )
     optimizer.set_attachment_points(attachments)
 
     # ``optimize_pcb`` calls ``self.optimize_segments`` per net; route that
@@ -457,7 +486,9 @@ Examples:
         if args.output:
             print(f"Output: {args.output}")
         if args.net:
-            print(f"Filter: nets matching '{args.net}'")
+            print(f"Filter: net named '{args.net}'")
+        if args.net_pattern:
+            print(f"Filter: nets matching pattern '{args.net_pattern}'")
         if args.drc_aware:
             print(f"DRC:    aware (mfr={args.mfr}, layers={args.layers})")
         print()
@@ -470,6 +501,9 @@ Examples:
         if config.convert_45_corners:
             print(f"    (chamfer size: {config.corner_chamfer_size}mm)")
         print(f"  - Lateral jog removal: {'yes' if config.remove_jogs else 'no'}")
+        print(f"  - Staircase compression: {'yes' if config.compress_staircase else 'no'}")
+        print(f"  - PullTight: {'yes' if config.pull_tight else 'no'}")
+        print(f"  - Detour shortening: {'yes' if config.shorten_detours else 'no'}")
         if args.drc_aware:
             print(f"  - DRC-aware rollback: yes (mfr={args.mfr})")
         print()
@@ -481,6 +515,7 @@ Examples:
                 str(pcb_path),
                 output_path=args.output,
                 net_filter=args.net,
+                net_pattern=args.net_pattern,
                 dry_run=args.dry_run,
                 on_net_optimized=commit_net,
                 net_anchors_by_name=pad_anchors,
@@ -520,10 +555,15 @@ Examples:
                 "pcb": str(pcb_path),
                 "output": args.output,
                 "net_filter": args.net,
+                "net_pattern": args.net_pattern,
                 "optimizations": {
                     "merge_collinear": config.merge_collinear,
                     "eliminate_zigzags": config.eliminate_zigzags,
                     "convert_45_corners": config.convert_45_corners,
+                    "remove_jogs": config.remove_jogs,
+                    "compress_staircase": config.compress_staircase,
+                    "pull_tight": config.pull_tight,
+                    "shorten_detours": config.shorten_detours,
                     "chamfer_size_mm": config.corner_chamfer_size,
                 },
                 "drc_aware": args.drc_aware,
@@ -538,6 +578,8 @@ Examples:
                     "duplicates_removed": stats.duplicates_removed,
                     "nets_connectivity_discarded": stats.nets_connectivity_discarded,
                     "connectivity_discarded_nets": stats.connectivity_discarded_nets,
+                    "nets_connectivity_partial": stats.nets_connectivity_partial,
+                    "connectivity_partial_nets": stats.connectivity_partial_nets,
                     "drc_failsafe_reverted": stats.drc_failsafe_reverted,
                     "drc_failsafe_rules": stats.drc_failsafe_rules,
                     "segments_before": stats.segments_before,
@@ -550,6 +592,7 @@ Examples:
                     "length_reduction_pct": stats.length_reduction,
                     "drc_errors_before": stats.drc_errors_before,
                     "drc_errors_after": stats.drc_errors_after,
+                    "nets_touched": [n.net for n in stats.per_net if n.changed],
                     "per_net": [
                         {
                             "net": n.net,
@@ -558,6 +601,7 @@ Examples:
                             "length_before_mm": n.length_before,
                             "length_after_mm": n.length_after,
                             "rolled_back": n.rolled_back,
+                            "changed": n.changed,
                             "new_violations": n.new_violations,
                         }
                         for n in stats.per_net
@@ -592,6 +636,12 @@ Examples:
                 f"  Discarded (would disconnect pads): {stats.nets_connectivity_discarded} "
                 f"({', '.join(stats.connectivity_discarded_nets[:5])}"
                 f"{', ...' if stats.nets_connectivity_discarded > 5 else ''})"
+            )
+        if stats.nets_connectivity_partial:
+            print(
+                f"  Partly kept (unsafe edits dropped): {stats.nets_connectivity_partial} "
+                f"({', '.join(stats.connectivity_partial_nets[:5])}"
+                f"{', ...' if stats.nets_connectivity_partial > 5 else ''})"
             )
         print()
 
@@ -628,6 +678,19 @@ Examples:
                         f"{r} (+{c})" for r, c in sorted(stats.drc_failsafe_rules.items())
                     )
                     print(f"           rules above baseline: {rules}")
+        print()
+
+        touched = [n.net for n in stats.per_net if n.changed]
+        if not stats.per_net:
+            print(
+                "Nets touched: none (no net matched the filter)"
+                if (args.net or args.net_pattern)
+                else "Nets touched: none"
+            )
+        elif touched:
+            print(f"Nets touched ({len(touched)}): {', '.join(touched)}")
+        else:
+            print("Nets touched: none")
         print()
 
         if args.verbose and stats.per_net:

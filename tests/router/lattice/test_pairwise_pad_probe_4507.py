@@ -161,8 +161,13 @@ class TestSearchAndGateProbeTheSamePoint:
         assert blocked, "search waived proximity the #4588 gate reports"
 
     def test_a_zone_covering_the_true_closest_gap_point_still_waives(self):
-        """#4506 must keep working -- a rated footprint stays routable."""
-        pairwise = _pairwise(zone_min_y=7.0)
+        """#4506 must keep working -- a rated footprint stays routable.
+
+        Issue #8277: the gate (and now the search) waive only when BOTH nearest
+        points lie in the zone, so the zone must hold the trace end as well as
+        the pad -- a zone starting between them covers only the midpoint.
+        """
+        pairwise = _pairwise(zone_min_y=3.0)
         assert pairwise.exempt(10.0, COPPER_PROBE_Y, HV_NET, LV_NET, 0)
 
         blocked = _model().pairwise_pad_blocked(SEG_A, SEG_B, 0, HV_NET, OWN_HALF, 0.0, pairwise)
@@ -293,8 +298,20 @@ def test_shaped_pad_waiver_matches_actual_gate_at_boundary(shape, rotation, size
     gap, x, y = _shapely_gap_and_midpoint(_segment_copper_polygon(segment), polygon)
     assert gap < 3.2
     table = build_pairwise_clearance_table({"/HV": 300, "/LV": 0}, dru=0.2)
-    for shift, expected_block in [(0, False), (0.04, True)]:
-        zone = (x - 0.01, y - 0.01 + shift, x + 0.01, y + 0.01 + shift)
+    # Issue #8277: the gate waives only when BOTH nearest points are in the
+    # zone.  One zone holding the segment and the pad waives; a zone that holds
+    # only the pad (the segment-side witness lies outside it) must not.
+    px0, py0, px1, py1 = polygon.bounds
+    whole = (
+        min(px0, a[0], b[0]) - 0.2,
+        min(py0, a[1], b[1]) - 0.2,
+        max(px1, a[0], b[0]) + 0.2,
+        max(py1, a[1], b[1]) + 0.2,
+    )
+    for zone, expected_block in [
+        (whole, False),
+        ((px0 - 0.01, py0 - 0.01, px1 + 0.01, py1 + 0.01), True),
+    ]:
         pairwise = LatticePairwise(
             required_by_pair={(1, 2): 3.2},
             zones=((*zone, frozenset({1, 2}), None),),

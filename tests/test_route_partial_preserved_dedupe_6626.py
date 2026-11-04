@@ -12,8 +12,11 @@ import re
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from kicad_tools.cli import route_cmd, route_deadline
 from kicad_tools.router.primitives import Route, Segment
+from tests.test_route_layer_escalation_partial_6322 import _copper_length
 from tests.test_route_partial_preserved_copper_6553 import (  # noqa: F401
     _board_text,
     _CheckpointThenDeadline,
@@ -100,5 +103,6 @@ def test_partial_drops_preserved_copper_of_rerouted_net(monkeypatch, tmp_path: P
     text = output.with_stem(output.stem + "_partial").read_text()
     # Net 1 is re-routed, so its preserved segment and via are replaced, not doubled.
     assert _copper(text) == patch.expected
+    assert _copper_length(text) == pytest.approx(patch.expected_length)
     assert len(re.findall(r"\(start 2(?:\.0+)? 2(?:\.0+)?\)", text)) == 0
     assert len(re.findall(r"\(at 3(?:\.0+)? 17(?:\.0+)?\)", text)) == 0
