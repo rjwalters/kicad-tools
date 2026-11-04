@@ -131,3 +131,42 @@ def test_missing_voltage_map_json_mode(pcb, tmp_path, capsys):
     rc = main([str(pcb), "--voltage-map", str(tmp_path / "nope.json"), "--format", "json"])
     assert rc == 1
     assert json.loads(capsys.readouterr().out)["success"] is False
+
+
+def _pad_board() -> str:
+    """As :func:`_board`, but the HV copper is a PAD of another footprint.
+
+    No HV trace exists, so a trace-only pairwise check cannot see it: the
+    detour-1 shortcut along y=95 would pass ~1.2 mm (edge to edge) from the HV
+    pad, short of the 1.6 mm requirement (Issue #8300 review).
+    """
+    board = _board().replace(_seg(110, 96, 110, 110, 1), "")
+    hv_fp = (
+        '\t(footprint "HVPAD"\n\t\t(layer "F.Cu")\n\t\t(uuid "fp-hv")\n\t\t(at 110 96.5)\n'
+        '\t\t(property "Reference" "J1" (at 0 0) (layer "F.SilkS") (uuid "r-hv"))\n'
+        '\t\t(pad "1" smd rect (at 0 0) (size 0.4 0.4) (layers "F.Cu") (net 1 "HV"))\n'
+        "\t)\n"
+    )
+    return board[: board.rindex(")")] + hv_fp + ")\n"
+
+
+@pytest.fixture
+def pad_pcb(tmp_path: Path) -> Path:
+    p = tmp_path / "hv_pad.kicad_pcb"
+    p.write_text(_pad_board())
+    return p
+
+
+def test_hv_pad_baseline_takes_shortcut(pad_pcb, tmp_path, capsys):
+    segs = _run(pad_pcb, tmp_path)
+    capsys.readouterr()
+    assert not any(s.y1 == 90 or s.y2 == 90 for s in segs)
+
+
+def test_hv_pad_blocks_shortcut_with_voltage_map(pad_pcb, vmap, tmp_path, capsys):
+    segs = _run(pad_pcb, tmp_path, "--voltage-map", str(vmap))
+    data = json.loads(capsys.readouterr().out)
+    # The detour next to the HV pad survives; the far one is still optimised.
+    assert any(s.y1 == 90 or s.y2 == 90 for s in segs if s.x1 < 120 and s.x2 < 120)
+    assert not any(s.y1 == 90 or s.y2 == 90 for s in segs if s.x1 > 120 and s.x2 > 120)
+    assert {(r["net_a"], r["net_b"]) for r in data["creepage_skipped"]} == {("HV", "LV")}

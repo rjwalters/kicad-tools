@@ -1590,9 +1590,12 @@ class PairwiseCollisionChecker:
         violation = self.pairwise.path_violation(x1, y1, x2, y2, layer, width, exclude_net)
         if violation is None:
             return True
-        from ..pairwise_clearance import violation_pair_key
+        from ..pairwise_clearance import normalize_net_key
 
-        key = violation_pair_key(violation)
+        # Board net names (leading ``/`` kept), so the report joins with
+        # ``kct creepage``; ordered by the normalised key.
+        a, b = violation.net_a, violation.net_b
+        key = (a, b) if normalize_net_key(a) <= normalize_net_key(b) else (b, a)
         self.skips[key] = self.skips.get(key, 0) + 1
         return False
 

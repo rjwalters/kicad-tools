@@ -180,6 +180,19 @@ def _seg_key(seg) -> tuple:
     return (seg.x1, seg.y1, seg.x2, seg.y2, seg.width, seg.layer, seg.net)
 
 
+def _creepage_keys(args, stats) -> dict:
+    """The ``--voltage-map`` JSON keys (Issue #8300); empty without the flag."""
+    if args.voltage_map is None:
+        return {}
+    return {
+        "voltage_map": args.voltage_map,
+        "creepage_skipped": [
+            {"net_a": a, "net_b": b, "count": n}
+            for (a, b), n in sorted(stats.creepage_skips.items())
+        ],
+    }
+
+
 def _make_grid_synced_optimize_fn(router, optimizer):
     """Return ``(optimize, commit)`` wrapping ``optimizer.optimize_segments``.
 
@@ -483,8 +496,40 @@ Examples:
         from kicad_tools.router.pairwise_clearance import PairwisePathChecker
 
         _apply_pairwise_clearance(router, args, quiet=True)
+        if not args.quiet:
+            # Pairs below --hv-threshold keep the DRU floor here, as in
+            # ``kct route``; name them on stderr (stdout may be a JSON doc).
+            from kicad_tools.cli.route_cmd import _warn_subthreshold_coverage_gap
+
+            with contextlib.redirect_stdout(sys.stderr):
+                _warn_subthreshold_coverage_gap(
+                    args, args._pairwise_voltages, float(router.rules.trace_clearance)
+                )
         path_checker = PairwisePathChecker.from_router(router)
         if path_checker is not None:
+            # Moved traces must also clear foreign PAD copper (the #4507
+            # audit's trace-vs-pad walk, same attach-zone exemption).  Pads
+            # that are unreadable fail closed: a pad-blind check would pass
+            # the edits the audit then flags.
+            import dataclasses
+
+            from kicad_tools.cli.route_cmd import (
+                _pairwise_pad_geometry,
+                _pairwise_pad_geometry_reason,
+            )
+            from kicad_tools.router.pairwise_clearance import normalize_net_key
+
+            pads = _pairwise_pad_geometry(router)
+            if pads is None:
+                return _fail(
+                    as_json,
+                    str(pcb_path),
+                    "--voltage-map: cannot check edits against pad copper: "
+                    + (_pairwise_pad_geometry_reason(router) or "pad geometry unavailable"),
+                )
+            hv_nets = {n for pair in path_checker.table.required_by_pair for n in pair}
+            pads = tuple(p for p in pads if normalize_net_key(p.net_name) in hv_nets)
+            path_checker = dataclasses.replace(path_checker, foreign_pads=pads)
             pairwise_checker = PairwiseCollisionChecker(checker, path_checker)
             checker = pairwise_checker
 
@@ -599,70 +644,65 @@ Examples:
             )
 
     if as_json:
-        document = {
-            "command": "optimize-traces",
-            "pcb": str(pcb_path),
-            "output": args.output,
-            "net_filter": args.net,
-            "optimizations": {
-                "merge_collinear": config.merge_collinear,
-                "eliminate_zigzags": config.eliminate_zigzags,
-                "convert_45_corners": config.convert_45_corners,
-                "chamfer_size_mm": config.corner_chamfer_size,
-            },
-            "drc_aware": args.drc_aware,
-            "manufacturer": args.mfr,
-            "layers": args.layers,
-            "copper_oz": args.copper,
-            "stats": {
-                "nets_optimized": stats.nets_optimized,
-                "nets_rolled_back": stats.nets_rolled_back,
-                "nets_attempted": stats.nets_optimized,
-                "nets_kept": stats.nets_kept,
-                "duplicates_removed": stats.duplicates_removed,
-                "nets_connectivity_discarded": stats.nets_connectivity_discarded,
-                "connectivity_discarded_nets": stats.connectivity_discarded_nets,
-                "drc_failsafe_reverted": stats.drc_failsafe_reverted,
-                "drc_failsafe_rules": stats.drc_failsafe_rules,
-                "segments_before": stats.segments_before,
-                "segments_after": stats.segments_after,
-                "segment_reduction_pct": stats.segment_reduction,
-                "corners_before": stats.corners_before,
-                "corners_after": stats.corners_after,
-                "length_before_mm": stats.length_before,
-                "length_after_mm": stats.length_after,
-                "length_reduction_pct": stats.length_reduction,
-                "drc_errors_before": stats.drc_errors_before,
-                "drc_errors_after": stats.drc_errors_after,
-                "per_net": [
-                    {
-                        "net": n.net,
-                        "segments_before": n.segments_before,
-                        "segments_after": n.segments_after,
-                        "length_before_mm": n.length_before,
-                        "length_after_mm": n.length_after,
-                        "rolled_back": n.rolled_back,
-                        "new_violations": n.new_violations,
-                    }
-                    for n in stats.per_net
-                ],
-            },
-            "dry_run": args.dry_run,
-            "saved": not args.dry_run,
-            "written_to": None if args.dry_run else (args.output or str(pcb_path)),
-            "zones_refilled": zones_refilled,
-            "zones_refill_error": refill_error,
-            "success": True,
-        }
-        # Issue #8300: only present with --voltage-map, so the no-flag document
-        # is unchanged.
-        if args.voltage_map is not None:
-            document["voltage_map"] = args.voltage_map
-            document["creepage_skipped"] = [
-                {"net_a": a, "net_b": b, "count": n}
-                for (a, b), n in sorted(stats.creepage_skips.items())
-            ]
-        emit_json(document)
+        emit_json(
+            {
+                "command": "optimize-traces",
+                "pcb": str(pcb_path),
+                "output": args.output,
+                "net_filter": args.net,
+                "optimizations": {
+                    "merge_collinear": config.merge_collinear,
+                    "eliminate_zigzags": config.eliminate_zigzags,
+                    "convert_45_corners": config.convert_45_corners,
+                    "chamfer_size_mm": config.corner_chamfer_size,
+                },
+                "drc_aware": args.drc_aware,
+                "manufacturer": args.mfr,
+                "layers": args.layers,
+                "copper_oz": args.copper,
+                "stats": {
+                    "nets_optimized": stats.nets_optimized,
+                    "nets_rolled_back": stats.nets_rolled_back,
+                    "nets_attempted": stats.nets_optimized,
+                    "nets_kept": stats.nets_kept,
+                    "duplicates_removed": stats.duplicates_removed,
+                    "nets_connectivity_discarded": stats.nets_connectivity_discarded,
+                    "connectivity_discarded_nets": stats.connectivity_discarded_nets,
+                    "drc_failsafe_reverted": stats.drc_failsafe_reverted,
+                    "drc_failsafe_rules": stats.drc_failsafe_rules,
+                    "segments_before": stats.segments_before,
+                    "segments_after": stats.segments_after,
+                    "segment_reduction_pct": stats.segment_reduction,
+                    "corners_before": stats.corners_before,
+                    "corners_after": stats.corners_after,
+                    "length_before_mm": stats.length_before,
+                    "length_after_mm": stats.length_after,
+                    "length_reduction_pct": stats.length_reduction,
+                    "drc_errors_before": stats.drc_errors_before,
+                    "drc_errors_after": stats.drc_errors_after,
+                    "per_net": [
+                        {
+                            "net": n.net,
+                            "segments_before": n.segments_before,
+                            "segments_after": n.segments_after,
+                            "length_before_mm": n.length_before,
+                            "length_after_mm": n.length_after,
+                            "rolled_back": n.rolled_back,
+                            "new_violations": n.new_violations,
+                        }
+                        for n in stats.per_net
+                    ],
+                },
+                "dry_run": args.dry_run,
+                "saved": not args.dry_run,
+                "written_to": None if args.dry_run else (args.output or str(pcb_path)),
+                "zones_refilled": zones_refilled,
+                "zones_refill_error": refill_error,
+                "success": True,
+                # Issue #8300: only present with --voltage-map.
+                **_creepage_keys(args, stats),
+            }
+        )
         return 0
 
     if not quiet:
