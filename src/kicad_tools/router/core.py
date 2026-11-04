@@ -6569,6 +6569,7 @@ class Autorouter:
         # Issue #4268 (mesh-router P1): under ``--strategy mesh`` the net is
         # routed by the navmesh single-net pathfinder instead of the grid A*.
         # Default ``"grid"`` skips this branch entirely (byte-identical).
+        _route_net_started = time.monotonic()
         if getattr(self, "_strategy", "grid") == "mesh":
             return self._route_net_mesh(net)
         # Issue #4278 (mesh-router P2.7): the adaptive octilinear lattice
@@ -6929,8 +6930,11 @@ class Autorouter:
                 # produced some routes for this net (it can't add
                 # coverage; the failing edge is what we need to un-block,
                 # and only via-conflict resolution can do that).
+                # Issue #8414: the retries are part of this net's budget.
+                # Forward what is LEFT, not a fresh full budget.
+                retry_budget = self._remaining_net_budget(per_net_timeout, _route_net_started)
                 if not self.use_waypoint_injection and not new_routes:
-                    retry_routes = self._retry_net_with_subgrid(net)
+                    retry_routes = self._retry_net_with_subgrid(net, per_net_timeout=retry_budget)
                     if retry_routes:
                         routes.extend(retry_routes)
                         subgrid_recovered = True
@@ -6946,7 +6950,12 @@ class Autorouter:
                     # routes first, drops a via 0.317 mm from U1.3,
                     # XTAL2 fails PIN_ACCESS on the U1.3->C6.1 edge
                     # while Y1.2->C6.1 routes successfully.
-                    via_retry_routes = self._resolve_via_conflicts_for_net(net)
+                    via_retry_routes = self._resolve_via_conflicts_for_net(
+                        net,
+                        per_net_timeout=self._remaining_net_budget(
+                            per_net_timeout, _route_net_started
+                        ),
+                    )
                     if via_retry_routes:
                         routes.extend(via_retry_routes)
 
@@ -16480,12 +16489,29 @@ class Autorouter:
                     )
                 )
                 sweep_deadline = _wall_deadline.clamp_epoch_deadline(time.time() + sweep_budget)
-                sweep_rescued = self._post_negotiation_sweep(
-                    stranded_nets=sweep_stranded,
-                    net_routes=net_routes,
-                    pads_by_net=pads_by_net,
-                    per_net_timeout=sweep_per_net,
-                    deadline=sweep_deadline,
+                # Issue #8414: make "whole-sweep" true.  The sweep only
+                # checks ``deadline`` between nets, so install it as the
+                # wall deadline too: every nested A* (incl. the Python
+                # fallback) then clamps to it.  Deterministic-budget mode
+                # (backstop bound) is left alone -- a wall clock must not
+                # decide reach there (#4536/#4724).
+                _sweep_wall_s: float | None = (
+                    None
+                    if sweep_budget >= POST_NEGOTIATION_SWEEP_SAFETY_BACKSTOP_S
+                    else sweep_budget
+                )
+                _sweep_t0 = time.monotonic()
+                with _wall_deadline.deadline(_sweep_wall_s):
+                    sweep_rescued = self._post_negotiation_sweep(
+                        stranded_nets=sweep_stranded,
+                        net_routes=net_routes,
+                        pads_by_net=pads_by_net,
+                        per_net_timeout=sweep_per_net,
+                        deadline=sweep_deadline,
+                    )
+                flush_print(
+                    f"  Post-negotiation sweep: {time.monotonic() - _sweep_t0:.1f}s "
+                    f"(bound {sweep_budget:.1f}s)"
                 )
                 if sweep_rescued:
                     successful_nets = sum(1 for routes in net_routes.values() if routes)
@@ -25191,7 +25217,23 @@ class Autorouter:
 
         return escape_routes
 
-    def _retry_net_with_subgrid(self, net: int) -> list[Route]:
+    @staticmethod
+    def _remaining_net_budget(per_net_timeout: float | None, started: float) -> float | None:
+        """Issue #8414: per-net budget left after ``started`` (monotonic).
+
+        ``None`` (unbudgeted / deterministic-budget) stays ``None`` so those
+        runs are byte-identical.  Otherwise the unspent part, floored at
+        :data:`wall_deadline.MIN_SEARCH_TIMEOUT_S` so a spent budget makes the
+        nested search give up at once instead of running unbounded.
+        """
+        if per_net_timeout is None:
+            return None
+        left = per_net_timeout - (time.monotonic() - started)
+        return max(_wall_deadline.MIN_SEARCH_TIMEOUT_S, left)
+
+    def _retry_net_with_subgrid(
+        self, net: int, per_net_timeout: float | None = None
+    ) -> list[Route]:
         """Retry routing a net after applying sub-grid escapes for its pads.
 
         Called when route_net() fails with PIN_ACCESS for a specific net.
@@ -25246,7 +25288,7 @@ class Autorouter:
         self.routing_failures = [f for f in self.routing_failures if f.net != net]
 
         # Retry routing
-        retry_routes = self.route_net(net, _subgrid_retry=True)
+        retry_routes = self.route_net(net, _subgrid_retry=True, per_net_timeout=per_net_timeout)
         # Issue #3441: only report success when the retry actually routed
         # the net.  Returning bare escape stubs made route_net's
         # ``subgrid_recovered`` flag True and skipped the via-conflict
@@ -25275,7 +25317,9 @@ class Autorouter:
             self._via_manager = ViaConflictManager(grid=self.grid, rules=self.rules)
         return self._via_manager
 
-    def _resolve_via_conflicts_for_net(self, net: int) -> list[Route]:
+    def _resolve_via_conflicts_for_net(
+        self, net: int, per_net_timeout: float | None = None
+    ) -> list[Route]:
         """Resolve via conflicts blocking a net's pads, then retry routing.
 
         Issue #2838 (closes the gap left by closed #2761): Called from
@@ -25343,7 +25387,7 @@ class Autorouter:
         # ``route_net`` call from re-entering the via-conflict resolver
         # (and from re-entering the sub-grid retry path).
         def _route_net_fn(net_id: int) -> list[Route]:
-            return self.route_net(net_id, _subgrid_retry=True)
+            return self.route_net(net_id, _subgrid_retry=True, per_net_timeout=per_net_timeout)
 
         any_resolved = False
         net_name = self.net_names.get(net, f"Net {net}")
@@ -25521,7 +25565,9 @@ class Autorouter:
                     # window so any DRC regression it introduces also
                     # triggers rollback.
                     self.routing_failures = [f for f in self.routing_failures if f.net != net]
-                    retry_routes = self.route_net(net, _subgrid_retry=True)
+                    retry_routes = self.route_net(
+                        net, _subgrid_retry=True, per_net_timeout=per_net_timeout
+                    )
 
                     # Validate the full delta of new geometry committed
                     # since the snapshot (the helper's emit + the
@@ -25569,7 +25615,7 @@ class Autorouter:
         # branch resolved the net (the trace branch handles its own
         # post-success retry inside the transaction window).
         self.routing_failures = [f for f in self.routing_failures if f.net != net]
-        retry_routes = self.route_net(net, _subgrid_retry=True)
+        retry_routes = self.route_net(net, _subgrid_retry=True, per_net_timeout=per_net_timeout)
         return retry_routes
 
     def route_with_subgrid(
