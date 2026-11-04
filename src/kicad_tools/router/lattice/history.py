@@ -47,6 +47,8 @@ class PhysicalHistory(dict[tuple[object, ...], float]):
             if other_net in (net, partner_net) or weights.get(other_net, 0.0) >= weight:
                 continue
             required = max(clearance, other_clearance)
+            # #8408: a negotiation cost weight, not a commit gate -- the
+            # cheap midpoint probe is kept on purpose (no half-widths passed).
             if pairwise is not None and not pairwise.exempt_seg_seg(
                 a, b, c, d, net, other_net, layer
             ):

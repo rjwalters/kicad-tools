@@ -914,7 +914,7 @@ class CommittedCopper:
                 req = row.get(cnet, 0.0)
                 if req > max(own_clr, iclr):
                     if not ka.satisfies(edge_gap, req) and not pw.exempt_seg_seg(
-                        a, b, c, d, net, cnet, layer
+                        a, b, c, d, net, cnet, layer, half_a=own_half, half_b=hw, req=req
                     ):
                         return False
         # Issue #4597: honor the STORED via's class clearance the same way the
@@ -942,7 +942,15 @@ class CommittedCopper:
                     req = row.get(vnet, 0.0)
                     if req > max(own_clr, vclr):
                         if not ka.satisfies(via_gap, req) and not pw.exempt_seg_pt(
-                            a, b, point, net, vnet, layer
+                            a,
+                            b,
+                            point,
+                            net,
+                            vnet,
+                            layer,
+                            half=own_half,
+                            radius=self.via_radius,
+                            req=req,
                         ):
                             return False
             elif seg_body_crosses_pt(a, b, point):
@@ -1005,7 +1013,15 @@ class CommittedCopper:
                 req = row.get(cnet, 0.0)
                 if req > max(own_clr, iclr):
                     if not ka.satisfies(edge_gap, req) and not pw.exempt_seg_pt(
-                        c, d, point, net, cnet, layer
+                        c,
+                        d,
+                        point,
+                        net,
+                        cnet,
+                        layer,
+                        half=hw,
+                        radius=own_half,
+                        req=req,
                     ):
                         return False
         # Issue #4597: ``max(own_clr, stored_via_clr)`` -- see ``seg_clear``.
@@ -1019,7 +1035,14 @@ class CommittedCopper:
                 req = row.get(vnet, 0.0)
                 if req > max(own_clr, vclr):
                     if not ka.satisfies(via_gap, req) and not pw.exempt_pt_pt(
-                        point, vpt, net, vnet, layer
+                        point,
+                        vpt,
+                        net,
+                        vnet,
+                        layer,
+                        radius_p=own_half,
+                        radius_q=self.via_radius,
+                        req=req,
                     ):
                         return False
         return True
@@ -1081,7 +1104,15 @@ class CommittedCopper:
                     req = row.get(cnet, 0.0)
                     if req > max(own_clr, iclr):
                         if not ka.satisfies(edge_gap, req) and not pw.exempt_seg_pt(
-                            c, d, point, net, cnet, layer
+                            c,
+                            d,
+                            point,
+                            net,
+                            cnet,
+                            layer,
+                            half=hw,
+                            radius=self.via_radius,
+                            req=req,
                         ):
                             return False
         # The via-to-via requirements below are composed CENTRE-to-centre by
@@ -1119,7 +1150,13 @@ class CommittedCopper:
                 req = row.get(vnet, 0.0)
                 if req > 0.0:
                     if not ka.satisfies(barrel_gap, req) and not pw.exempt_pt_pt(
-                        point, vpt, net, vnet
+                        point,
+                        vpt,
+                        net,
+                        vnet,
+                        radius_p=self.via_radius,
+                        radius_q=self.via_radius,
+                        req=req,
                     ):
                         return False
         return True
