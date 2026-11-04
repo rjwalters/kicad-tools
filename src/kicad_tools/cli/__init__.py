@@ -19,6 +19,7 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools datasheet <command>    - Datasheet search, download, and PDF parsing
     kicad-tools route <pcb>            - Autoroute a PCB
     kicad-tools route-auto <pcb>       - Orchestrator-based smart routing for a net
+    kicad-tools route-link <pcb>       - Route individual links between chosen endpoints
     kicad-tools zones <command>        - Add and fill copper pour zones
     kicad-tools stitch <pcb>           - Auto-add stitching vias for plane connections
     kicad-tools reason <pcb>           - LLM-driven PCB layout reasoning
@@ -443,6 +444,11 @@ def _dispatch_command(args) -> int:
         from .commands.routing import run_route_auto_command
 
         return run_route_auto_command(args)
+
+    elif args.command == "route-link":
+        from .route_link_cmd import run_route_link_command
+
+        return run_route_link_command(args)
 
     elif args.command == "retune-lengths":
         from .commands.routing import run_retune_lengths_command
