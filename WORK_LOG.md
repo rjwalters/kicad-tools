@@ -15,6 +15,10 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-04
 
+- **PR #8380**: fix: referee --drc-aware at the board's own clearance
+- **PR #8378**: fix(router): key Python-fallback repeat skip on pad-pair, not net
+- **Issue #8377** (closed): router: scope #8370 repeat-fallback skip to the pad pair, not the net
+- **Issue #8367** (closed): optimize-traces --drc-aware keeps 0 of 77 nets: internal DRC
 - **PR #8373**: fix: net-relative --wide default for pcb prune and loop witness in current-paths audit
 - **PR #8374**: perf(router): skip repeat Python fallback for drained nets, record per-net fallback time
 - **PR #8372**: fix: carry project sidecars to -o outputs via shared helper
