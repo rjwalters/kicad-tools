@@ -451,13 +451,20 @@ def _run_strip_command(args, pcb_path: Path) -> int:
     return 0
 
 
+_STRIP_EXEMPT_DRC_TYPES = frozenset({"unconnected", "track_dangling", "via_dangling"})
+
+
 def _verify_strip_drc(pcb_path: Path, pcb) -> tuple[bool, str, bool]:
     """Compare refill-zones DRC before/after.  Returns (verified, note, worse).
 
-    ``unconnected`` is excluded from the comparison: cutting copper to open a
-    link intentionally raises it.
+    Signature keys whose type is ``unconnected``, ``track_dangling`` or
+    ``via_dangling`` are excluded from the comparison (whatever their
+    severity/rule/nets): cutting copper intentionally opens links and leaves
+    stub ends, which ``strip --dangling`` removes in a second step.  Growth in
+    any other type still counts as worse.
     """
     import tempfile
+    from collections import Counter
 
     from kicad_tools.pcb_prune import _drc_signature, _worse
 
@@ -475,8 +482,9 @@ def _verify_strip_drc(pcb_path: Path, pcb) -> tuple[bool, str, bool]:
         after = _drc_signature(trial)
         if after is None:
             return False, "kicad-cli DRC failed on the edited board", False
-        before.pop(("unconnected", "error"), None)
-        after.pop(("unconnected", "error"), None)
+        exempt = _STRIP_EXEMPT_DRC_TYPES
+        before = Counter({k: v for k, v in before.items() if k[0] not in exempt})
+        after = Counter({k: v for k, v in after.items() if k[0] not in exempt})
         if _worse(after, before):
             return True, "kicad-cli --refill-zones DRC reports NEW violations", True
         return True, "verified with kicad-cli pcb drc --refill-zones", False

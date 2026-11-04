@@ -258,3 +258,40 @@ def test_cli_rollback_when_drc_worse(board, tmp_path, monkeypatch, capsys):
     assert not out.exists()
     assert len(PCB.load(board).segments) == 3
     assert "Refusing to write" in capsys.readouterr().err
+
+
+def _sig(**counts):
+    from collections import Counter
+
+    return Counter({(t, "error", "", ()): n for t, n in counts.items()})
+
+
+def _run_verify(monkeypatch, tmp_path, before, after):
+    from kicad_tools import pcb_prune
+    from kicad_tools.cli.commands.pcb import _verify_strip_drc
+
+    seq = iter([before, after])
+    monkeypatch.setattr(pcb_prune, "_drc_signature", lambda _p: next(seq))
+    src = tmp_path / "b.kicad_pcb"
+    src.write_text("(kicad_pcb)")
+
+    class _P:
+        def save(self, path):
+            Path(path).write_text("(kicad_pcb)")
+
+    return _verify_strip_drc(src, _P())
+
+
+def test_verify_strip_ignores_dangling_and_unconnected_growth(monkeypatch, tmp_path):
+    before = _sig(clearance=11, track_dangling=3, unconnected=57)
+    after = _sig(clearance=0, track_dangling=6, unconnected=61, via_dangling=2)
+    verified, _note, worse = _run_verify(monkeypatch, tmp_path, before, after)
+    assert verified is True
+    assert worse is False
+
+
+def test_verify_strip_still_refuses_new_clearance(monkeypatch, tmp_path):
+    before = _sig(clearance=1, track_dangling=3)
+    after = _sig(clearance=2, track_dangling=6)
+    _verified, _note, worse = _run_verify(monkeypatch, tmp_path, before, after)
+    assert worse is True
