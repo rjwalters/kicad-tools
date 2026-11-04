@@ -985,10 +985,18 @@ def _drc_signature(pcb_path: Path) -> Counter | None:
     report = DRCReport.load(result.output_path)
     sig: Counter = Counter()
     for v in report.violations:
+        # Key on the rule and nets as well as the type: a custom ``.kicad_dru``
+        # clearance error between two nets must not be masked by an unrelated
+        # clearance error that the edit happened to fix (issue #8323).
         sig[
-            (v.type_str, v.severity.value if hasattr(v.severity, "value") else str(v.severity))
+            (
+                v.type_str,
+                v.severity.value if hasattr(v.severity, "value") else str(v.severity),
+                v.rule or "",
+                tuple(sorted(n for n in v.nets if n)),
+            )
         ] += 1
-    sig[("unconnected", "error")] += len(report.unconnected_items)
+    sig[("unconnected", "error", "", ())] += len(report.unconnected_items)
     return sig
 
 
@@ -1031,9 +1039,12 @@ def prune_board(
             trial_path = Path(tmp) / "trial.kicad_pcb"
             # DRC must run with the board's own rules (clearances, netclasses).
             src = Path(pcb_path)
+            missing: list[str] = []
             for ext in (".kicad_pro", ".kicad_dru"):
                 if src.with_suffix(ext).exists():
                     shutil.copy(src.with_suffix(ext), Path(tmp) / f"trial{ext}")
+                else:
+                    missing.append(src.with_suffix(ext).name)
             trial_path.write_text(src.read_text())
             baseline = _drc_signature(trial_path)
             if baseline is None:
@@ -1042,6 +1053,11 @@ def prune_board(
                 )
             else:
                 drc_verified, note = True, "verified with kicad-cli pcb drc --refill-zones"
+                if missing:
+                    note += (
+                        f" (no {' / '.join(missing)} next to the board: checked against "
+                        "default rules only, custom clearances were NOT evaluated)"
+                    )
 
                 def _trial_ok(group: list[NetPlan]) -> bool:
                     trial = PCB.load(pcb_path)
