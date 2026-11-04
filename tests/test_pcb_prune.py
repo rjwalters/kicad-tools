@@ -1004,3 +1004,50 @@ def test_snap_never_takes_an_on_angle_track_off_the_45_degree_set(tmp_path):
     assert res.stats["ends_snapped"] == 0
     (seg,) = pcb.segments
     assert seg.end == (105, 100)
+
+
+def test_collinear_merge_tolerates_half_micron_joint_mismatch(tmp_path):
+    """Issue #8356: a 0.5 um end gap merges like the exact-coincidence run."""
+    pads = [("A", 100, 100, 0.2, 0.2), ("B", 100.75, 100, 0.2, 0.2)]
+    exact = [
+        ((100, 100), (100.25, 100)),
+        ((100.25, 100), (100.5, 100)),
+        ((100.5, 100), (100.75, 100)),
+    ]
+    noisy = [
+        ((100, 100), (100.25, 100)),
+        ((100.25, 100), (100.5, 100)),
+        ((100.5005, 100), (100.75, 100)),
+    ]
+    pcb_e, res_e = _run(_board(tmp_path, pads, exact))
+    (tmp_path / "n").mkdir()
+    pcb_n, res_n = _run(_board(tmp_path / "n", pads, noisy))
+    assert res_n.stats == res_e.stats == {"segments_removed": 2, "ends_snapped": 0}
+    assert len(pcb_n.segments) == 1
+    s = pcb_n.segments[0]
+    assert sorted([s.start, s.end]) == [pytest.approx((100, 100)), pytest.approx((100.75, 100))]
+
+
+def test_collinear_merge_tolerates_mismatch_at_pad_neck(tmp_path):
+    pads = [("A", 100, 100, 0.2, 0.2), ("B", 100.75, 100, 0.2, 0.2)]
+    segs = [
+        ((100, 100), (100.25, 100)),
+        ((100.2505, 100), (100.5, 100)),
+        ((100.5, 100), (100.75, 100)),
+    ]
+    pcb, res = _run(_board(tmp_path, pads, segs))
+    assert len(pcb.segments) == 1
+
+
+def test_collinear_merge_ignores_gap_above_tolerance_and_perpendicular(tmp_path):
+    pads = [("A", 100, 100, 0.2, 0.2), ("B", 100.75, 100, 0.2, 0.2)]
+    for dx, dy in ((0.002, 0.0), (0.0, 0.0005)):
+        d = tmp_path / f"c{dx}{dy}"
+        d.mkdir()
+        segs = [
+            ((100, 100), (100.25, 100)),
+            ((100.25, 100), (100.5, 100)),
+            ((100.5 + dx, 100 + dy), (100.75, 100)),
+        ]
+        pcb, _ = _run(_board(d, pads, segs))
+        assert len(pcb.segments) >= 2

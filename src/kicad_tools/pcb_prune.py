@@ -61,6 +61,9 @@ _MICRO_BRIDGE = 0.01  # mm: a member this short is a bridge, not a step
 CENTRE_TOL = 1e-3
 #: Coordinate tolerance (mm) for two track endpoints to count as one point.
 JOIN_TOL = 2e-6
+#: Issue #8356: collinear same-width track ends closer than this (mm) are one
+#: joint for the *model* (router float noise); below ``CENTRE_TOL``.
+NEAR_JOIN_TOL = 7.5e-4
 _EPS = 1e-6
 #: Spatial-hash cell size (mm) used to find nearby segments.
 _CELL = 1.0
@@ -651,7 +654,58 @@ def _build_net_models(pcb: PCB) -> dict[int, _NetModel]:
         by_net[arc.net_number].append(
             _Node("arc", [arc.layer], a=centre, radius=rad + arc.width / 2.0, ref=arc)
         )
+    for nodes in by_net.values():
+        _snap_near_joints(nodes)
     return {net: _NetModel(nodes) for net, nodes in by_net.items()}
+
+
+def _snap_near_joints(nodes: list[_Node]) -> None:
+    """Issue #8356: make sub-micron end mismatches of straight-through joints exact.
+
+    Only the in-memory model changes: two same-layer, same-width segment ends
+    within ``NEAR_JOIN_TOL`` (but not ``JOIN_TOL``) that continue in one
+    straight line are pulled together so collinear-run merging sees a joint
+    instead of a body overlap.  Output geometry changes only via the merge.
+    """
+    segs = [n for n in nodes if n.kind == "seg"]
+    cell = 1e-3
+    grid: dict[tuple[int, int], list[tuple[_Node, int]]] = defaultdict(list)
+    for n in segs:
+        for e in (0, 1):
+            p = _end_pt(n, e)
+            grid[(int(math.floor(p[0] / cell)), int(math.floor(p[1] / cell)))].append((n, e))
+    for n in segs:
+        for e in (0, 1):
+            p = _end_pt(n, e)
+            cx, cy = int(math.floor(p[0] / cell)), int(math.floor(p[1] / cell))
+            near = [
+                (o, f)
+                for dx in (-1, 0, 1)
+                for dy in (-1, 0, 1)
+                for o, f in grid.get((cx + dx, cy + dy), ())
+                if o is not n
+            ]
+            near = [
+                (o, f)
+                for o, f in near
+                if max(abs(_end_pt(o, f)[0] - p[0]), abs(_end_pt(o, f)[1] - p[1])) <= NEAR_JOIN_TOL
+            ]
+            if len(near) != 1:
+                continue  # none, or ambiguous (a branch point): leave alone
+            o, f = near[0]
+            q = _end_pt(o, f)
+            if _same_pt(p, q) or n.layers != o.layers or abs(n.radius - o.radius) > 1e-9:
+                continue
+            vi = (_end_pt(n, 1 - e)[0] - p[0], _end_pt(n, 1 - e)[1] - p[1])
+            vj = (_end_pt(o, 1 - f)[0] - q[0], _end_pt(o, 1 - f)[1] - q[1])
+            li, lj = math.hypot(*vi), math.hypot(*vj)
+            if li < _EPS or lj < _EPS:
+                continue
+            if (vi[0] * vj[0] + vi[1] * vj[1]) >= 0:
+                continue  # not straight-through
+            if abs(vi[0] * vj[1] - vi[1] * vj[0]) / (li * lj) > 1e-3:
+                continue
+            _set_end(o, f, p)  # o's end moves; n's own end is handled from o's side
 
 
 # ---------------------------------------------------------------------------
