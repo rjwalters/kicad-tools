@@ -498,8 +498,15 @@ class TraceOptimizer:
         all_optimized: list[Segment] = []
         for index, chain in enumerate(chains):
             result = list(chain)
+            # Only same-layer chains can T-join this one; a chain on another
+            # layer joins through a via or pad, which are net anchors already
+            # (Issue #8298: a parallel route on the other layer of a THT pad
+            # pinned this chain's jog in place).
             self._branch_anchors = [
-                point for other, ends in enumerate(chain_ends) if other != index for point in ends
+                point
+                for other, ends in enumerate(chain_ends)
+                if other != index and chains[other][0].layer == chain[0].layer
+                for point in ends
             ]
 
             # Apply optimizations in order. Each pass's rewrite of this chain

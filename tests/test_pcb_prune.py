@@ -503,3 +503,57 @@ def test_prune_keeps_micro_bridge_joint_for_optimize_8298(tmp_path):
             e in ((100, 100), (110, 105))
             or sum(1 for o in ends if abs(o[0] - e[0]) < 2e-3 and abs(o[1] - e[1]) < 2e-3) >= 2
         )
+
+
+def test_loop_closed_by_t_join_and_via_under_track_is_removed(tmp_path):
+    # Issue #8298, the board geometry: a trunk from pad A passes 0.05 mm from
+    # via V1's centre on its way to pad B; a stub leaves V1's centre and ends
+    # on the trunk's body (a T-join without a shared vertex).  KiCad joins
+    # both, so trunk + stub enclose a loop; the stub is the redundant part.
+    trunk = [
+        ((168.98, 100.0), (168.98, 98.5)),
+        ((168.98, 98.5), (169.48, 98.0)),
+        ((169.48, 98.0), (170.54, 98.0)),
+    ]
+    stub = [((169.74, 98.05), (169.74, 98.55)), ((169.74, 98.55), (168.93, 98.55))]
+    p = _board(
+        tmp_path,
+        [("A", 168.98, 100.0, 0.6, 0.6), ("B", 170.54, 98.0, 0.6, 0.6)],
+        trunk + stub,
+        vias=[(169.74, 98.05)],
+    )
+    pcb, res = _run(p)
+    assert res.stats["segments_removed"] == 2
+    left = {(s.start, s.end) for s in pcb.segments}
+    assert left == {(a, b) for a, b in trunk}
+    assert _connected(pcb, (168.98, 100.0), (170.54, 98.0))
+
+
+def test_t_join_end_is_not_a_clean_joint_for_removal(tmp_path):
+    # A run of short pieces whose ends each lie inside the piece after next
+    # (piece length below half the width) must not be thinned to
+    # overlap-only joints.
+    pts = [(100 + 0.07 * k, 100.0) for k in range(8)]
+    segs = [((pts[k][0], 100.0), (pts[k + 1][0], 100.0)) for k in range(7)]
+    segs += [((pts[-1][0], 100.0), (101.0, 100.0)), ((101.0, 100.0), (101.0, 101.0))]
+    p = _board(tmp_path, [("A", 100, 100, 0.3, 0.3), ("B", 101, 101, 0.3, 0.3)], segs)
+    pcb, res = _run(p)
+    ends = [s.start for s in pcb.segments] + [s.end for s in pcb.segments]
+    # every surviving joint is a shared vertex (or a pad)
+    for s in pcb.segments:
+        for e in (s.start, s.end):
+            assert ends.count(e) >= 2 or e in {(100, 100), (101, 101)}
+
+
+def test_removal_never_leaves_a_via_joined_on_one_layer(tmp_path):
+    # A loop A -> V (F.Cu), V -> W (B.Cu), W -> A (F.Cu): removing any part
+    # leaves a via joined on only one layer (KiCad via_dangling).
+    segs = [
+        ((100, 100), (105, 100)),
+        ((105, 100), (105, 105), "B.Cu"),
+        ((105, 105), (100, 105), "B.Cu"),
+        ((100, 105), (100, 100)),
+    ]
+    p = _board(tmp_path, [("A", 100, 100)], segs, vias=[(105, 100), (100, 105)])
+    _pcb, res = _run(p)
+    assert res.stats["segments_removed"] == 0
