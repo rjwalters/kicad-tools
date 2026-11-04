@@ -43,13 +43,10 @@ import signal
 import tempfile
 import threading
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
-
-#: Fixed seed for the deterministic-uuid mode used while serialising new copper.
-UUID_SEED = 6885
 
 #: Default wall-clock budget for the tuning step (seconds).
 DEFAULT_TIMEOUT_S = 300.0
@@ -411,8 +408,21 @@ def _strip_selected(text: str, selected: set[str], net_ids: dict[str, int], name
     return "".join(out)
 
 
+def _uuid_seed(input_hash: str, net_names: Iterable[str]) -> int:
+    """UUID seed derived from the input board hash and the selected nets (#8321).
+
+    A constant seed restarts the same UUID stream on every run, so retuning a
+    second selection on an already-retuned board reissued UUIDs the first
+    run's copper still holds. Identical input + selection still gives the
+    same seed, hence byte-identical output.
+    """
+    digest = hashlib.sha256(input_hash.encode())
+    digest.update(b"\0nets\0" + "\0".join(sorted(net_names)).encode())
+    return int.from_bytes(digest.digest()[:8], "big")
+
+
 @contextlib.contextmanager
-def _deterministic_uuids() -> Iterator[None]:
+def _deterministic_uuids(seed: int) -> Iterator[None]:
     """Seeded uuids for new copper; the global RNG and uuid mode are restored."""
     from kicad_tools.router.primitives import (
         enable_deterministic_uuids,
@@ -422,7 +432,7 @@ def _deterministic_uuids() -> Iterator[None]:
 
     was_on = is_deterministic_uuids_enabled()
     state = random.getstate()
-    random.seed(UUID_SEED)
+    random.seed(seed)
     enable_deterministic_uuids(True)
     try:
         yield
@@ -981,7 +991,8 @@ def _retune_once(
     }
 
     name_only = _uses_name_only(text)
-    with _deterministic_uuids():
+    uuid_seed = _uuid_seed(input_hash, selection.net_names)
+    with _deterministic_uuids(uuid_seed):
         new_text = _splice(text, changed, net_ids, names_by_id, name_only) if changed else text
 
     # Scope proof: with the selected nets' copper removed, nothing else differs.
@@ -1056,7 +1067,7 @@ def _retune_once(
         },
         settings={
             "timeout_s": timeout_s,
-            "uuid_seed": UUID_SEED,
+            "uuid_seed": uuid_seed,
             "length_model": "router.kicad_length (kicad-cli exact, #6725)",
             "group_engage": "checker_limit",
             "diffpair_engage": "checker_skew_limit",

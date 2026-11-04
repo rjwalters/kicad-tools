@@ -35,7 +35,7 @@ from __future__ import annotations
 import heapq
 import math
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -1108,6 +1108,9 @@ def _attach_zone_residual(
     name_a: str,
     name_b: str,
     obstacles: list[Any],
+    *,
+    item_geoms: Callable[[str], dict[int, list[Any]]] | None = None,
+    bound_mm: float = 0.0,
 ) -> tuple[float | None, float | None, str | None, tuple[float, float] | None]:
     """Residual ``(clearance, creepage, layer, witness)`` outside the attach zones (#8028).
 
@@ -1115,12 +1118,31 @@ def _attach_zone_residual(
     of each net's copper and the pair is re-measured; the minimum over layers
     is returned.  ``creepage``/``clearance`` are ``None`` when no copper of one
     net remains outside the zone on any layer.
+
+    Cross terms (#8292): the clipped measurement never sees one net's copper
+    outside the zone against the other net's copper inside it.  When
+    ``item_geoms`` (``layer -> {net: [copper items]}``) is given, every copper
+    ITEM pair closer than ``bound_mm`` whose nearest points are NOT both inside
+    one exempting zone is measured too -- the router's own per-item-pair rule
+    (``board_pairwise_violations``), so an attach trace approaching its own
+    pad (both witnesses in the zone) stays waived while a stub skimming the
+    zone edge does not.
     """
     from shapely.geometry import box
     from shapely.ops import nearest_points, unary_union
 
     best: tuple[float, float, str, tuple[float, float]] | None = None
     min_clearance: float | None = None
+
+    def _record(
+        layer_name: str, clearance: float, creepage: float, wit: tuple[float, float]
+    ) -> None:
+        nonlocal best, min_clearance
+        if min_clearance is None or clearance < min_clearance:
+            min_clearance = clearance
+        if best is None or creepage < best[1]:
+            best = (clearance, creepage, layer_name, wit)
+
     for layer_name, unions in layer_unions.items():
         geom_a = unions.get(net_a)
         geom_b = unions.get(net_b)
@@ -1138,19 +1160,26 @@ def _attach_zone_residual(
             clip = unary_union(boxes)
             geom_a = geom_a.difference(clip)
             geom_b = geom_b.difference(clip)
-        if geom_a.is_empty or geom_b.is_empty:
-            continue
-        clearance, creepage = surface_path_length(geom_a, geom_b, obstacles, _bridged=True)
-        if min_clearance is None or clearance < min_clearance:
-            min_clearance = clearance
-        if best is None or creepage < best[1]:
+        if not (geom_a.is_empty or geom_b.is_empty):
+            clearance, creepage = surface_path_length(geom_a, geom_b, obstacles, _bridged=True)
             pa, pb = nearest_points(geom_a, geom_b)
-            best = (
-                clearance,
-                creepage,
-                layer_name,
-                ((pa.x + pb.x) / 2.0, (pa.y + pb.y) / 2.0),
-            )
+            _record(layer_name, clearance, creepage, ((pa.x + pb.x) / 2.0, (pa.y + pb.y) / 2.0))
+        if item_geoms is None or not boxes:
+            continue
+        items = item_geoms(layer_name)
+        for ia in items.get(net_a, ()):
+            for ib in items.get(net_b, ()):
+                pa, pb = nearest_points(ia, ib)
+                if pa.distance(pb) >= bound_mm:
+                    continue
+                if any(
+                    z.exempts(pa.x, pa.y, name_a, name_b, layer_name)
+                    and z.exempts(pb.x, pb.y, name_a, name_b, layer_name)
+                    for z in zones
+                ):
+                    continue
+                clearance, creepage = surface_path_length(ia, ib, obstacles, _bridged=True)
+                _record(layer_name, clearance, creepage, ((pa.x + pb.x) / 2.0, (pa.y + pb.y) / 2.0))
     if best is None:
         return None, None, None, None
     return min_clearance, best[1], best[2], best[3]
@@ -1837,6 +1866,15 @@ def compute_creepage_census(
     # board-fixable approach or a component-internal (same-footprint) gap.
     fp_index = _FootprintPadIndex(pcb)
 
+    # Per-layer copper ITEMS (pads/segments/vias/fills), built lazily for the
+    # attach-zone residual's cross terms (#8292).
+    _item_cache: dict[str, dict[int, list[Any]]] = {}
+
+    def _item_geoms(layer: str) -> dict[int, list[Any]]:
+        if layer not in _item_cache:
+            _item_cache[layer] = _net_geoms_on_layer(pcb, layer)
+        return _item_cache[layer]
+
     # --- HV-vs-other-conductor pairs (binding layer = smallest creepage) ---
     # (hv_number, other_number) -> (clearance, creepage, layer)
     #
@@ -1881,6 +1919,10 @@ def compute_creepage_census(
             if _witness_in_attach_zone(
                 lu[hv_num], lu[other_num], attach_zones, net_a_name, net_b_name, layer_name
             ):
+                if map_mode:
+                    _rc = _pair_requirement(net_a_name, net_b_name)[0]
+                else:
+                    _rc = required_creepage_mm or 0.0
                 r_clr, r_creep, r_layer, r_wit = _attach_zone_residual(
                     layer_unions,
                     attach_zones,
@@ -1889,6 +1931,8 @@ def compute_creepage_census(
                     net_a_name,
                     net_b_name,
                     obstacles,
+                    item_geoms=_item_geoms,
+                    bound_mm=max(min_mm or 0.0, _rc),
                 )
                 relationship = "attach_zone"
                 residual = {
