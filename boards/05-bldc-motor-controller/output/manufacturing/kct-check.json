@@ -1,7 +1,7 @@
 {
-  "file": "boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb",
+  "file": "bldc_controller_routed.kicad_pcb",
   "manufacturer": "jlcpcb",
-  "pcb_sha256": "791c9ac7581c98113fa4713eda7599b3c78ef577d18bfc8fb7a60cae41604c8b",
+  "pcb_sha256": "24c8110943b04329481d67bb94b3fe3c29532ed77b0dc29af7d34ab2e6561a98",
   "layers": 4,
   "summary": {
     "errors": 0,
@@ -47,7 +47,7 @@
       "spec_conformance"
     ],
     "coverage_blocking_unknown": [],
-    "attach_zone_exemption": "not_applicable"
+    "attach_zone_exemption": "active"
   },
   "violations": [
     {
@@ -269,10 +269,10 @@
       "netlist_vacuous": false
     },
     "manifest": {
-      "status": "FAILED",
-      "detail": "STALE/unverified: routed PCB content differs from the manifest-bound project archive"
+      "status": "NOT RUN",
+      "detail": "no manufacturing bundle; run `kct export` first"
     },
-    "overall": "FAILED",
+    "overall": "INCOMPLETE",
     "schematic_missing": false
   },
   "routing_quality": {
@@ -549,6 +549,6 @@
       "blocking": true
     }
   },
-  "verdict": "fail",
+  "verdict": "incomplete",
   "exit_code": 2
 }
