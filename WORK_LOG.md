@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-04
 
+- **PR #8359**: fix: let prune merge collinear runs across sub-micron end gaps
+- **Issue #8356** (closed): pcb prune: collinear merge refuses a straight run when a ~0.5 um end mismatch turns its joint into a body overlap
 - **PR #8350**: fix: exempt dangling and unconnected growth from strip DRC gate
 - **Issue #8347** (closed): kct pcb strip --from-report DRC gate rejects clearance fixes because dangling warnings count as worse
 - **PR #8345**: feat: gate each kct route-link commit with per-link DRC and creepage rollback

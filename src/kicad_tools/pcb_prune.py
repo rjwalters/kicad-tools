@@ -609,12 +609,12 @@ def _build_net_models(pcb: PCB) -> dict[int, _NetModel]:
                 label=f"segment {seg.start}->{seg.end} {seg.layer}",
             )
         )
-    for via in pcb.vias:
+    for vidx, via in enumerate(pcb.vias):
         if via.net_number <= 0:
             continue
         layers = ["*"] if via.via_type is None else list(via.layers)
         by_net[via.net_number].append(
-            _Node("via", layers, a=via.position, radius=via.size / 2.0, ref=via)
+            _Node("via", layers, a=via.position, radius=via.size / 2.0, ref=via, index=vidx)
         )
     for fp in pcb.footprints:
         for pad in fp.pads:
@@ -720,16 +720,21 @@ class NetPlan:
     net_number: int
     net_name: str = ""
     remove: list[int] = field(default_factory=list)
+    #: vias (index into ``pcb.vias``) a loop cut left with nothing attached
+    remove_vias: list[int] = field(default_factory=list)
     #: (segment index, "start"|"end", new xy)
     snaps: list[tuple[int, str, tuple[float, float]]] = field(default_factory=list)
     reasons: dict[int, str] = field(default_factory=dict)
     #: collinear merges: (kept segment index, "start"|"end", new xy); the other
     #: run members are listed in ``remove``
     extends: list[tuple[int, str, tuple[float, float]]] = field(default_factory=list)
+    #: loops on a declared net left in place because every segment is at/above
+    #: ``--wide`` (issue #8313): ``{"segments": [...], "min_width": mm}``
+    uncut_loops: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def empty(self) -> bool:
-        return not self.remove and not self.snaps and not self.extends
+        return not self.remove and not self.remove_vias and not self.snaps and not self.extends
 
 
 def _group_for(model: _NetModel, seed: int, removed: set[int]) -> set[int] | None:
@@ -1187,11 +1192,202 @@ def _plan_anchored_merges(
             plan.reasons[model.nodes[m].index] = "collinear run merged"
 
 
-def _plan_net(model: _NetModel, net_number: int) -> NetPlan:
+#: Default width (mm) at/above which a declared-net segment is never cut.
+DEFAULT_WIDE_MM = 0.5
+
+
+def _cut_ok(model: _NetModel, group: set[int], removed: set[int], baseline) -> bool:
+    """The shared acceptance test for removing ``group`` (terminals unchanged,
+    neighbours still joined, no stranded or degraded ends)."""
+    touched = {k for g in group for k in model.adj[g] | model.overlap[g]} - group
+    return not (
+        model.partition(removed | group) != baseline
+        or not model.still_joined(touched, removed | group)
+        or model.strands_end(group, removed)
+        or model.degrades_ends(touched, removed, removed | group)
+    )
+
+
+def _width(model: _NetModel, i: int) -> float:
+    return model.nodes[i].radius * 2.0
+
+
+def _dangling_remnants(
+    model: _NetModel, seeds: set[int], removed: set[int], wide: float
+) -> set[int]:
+    """Segments left dead-ended by a cut, walking outward from ``seeds``.
+
+    A cut inside a via-closed loop leaves the rest of that jog hanging off one
+    end (e.g. ``via -> B.Cu run -> via -> pad``); such a stub keeps the run
+    ambiguous for the current-path audit, so it goes with the cut.  An end is
+    dead when it rests on nothing alive, or only on vias nothing else touches.
+    Only narrow, unprotected segments are taken.
+    """
+    gone: set[int] = set()
+    work = [k for g in seeds for k in model.adj[g] | model.overlap[g]]
+    # a dead via may expose the segment on its far side: walk through vias too
+    seen: set[int] = set()
+    while work:
+        k = work.pop()
+        if k in seen:
+            continue
+        seen.add(k)
+        node = model.nodes[k]
+        if node.kind == "via":
+            work.extend(model.adj[k])
+            continue
+        if node.kind != "seg" or k in removed or k in gone:
+            continue
+        if model.hard_protected[k] or _width(model, k) >= wide:
+            continue
+        dead = False
+        for ends in model.anch[k]:
+            alive = [
+                a
+                for a in ends
+                if a not in removed
+                and a not in gone
+                and model.nodes[a].kind != "zone"
+                and not (model.nodes[a].kind == "via" and not (model.adj[a] - removed - gone - {k}))
+            ]
+            if not alive:
+                dead = True
+        if dead:
+            gone.add(k)
+            work.extend(model.adj[k])
+    return gone
+
+
+def _attach_layers(model: _NetModel, live: set[int]) -> int:
+    """How many copper layers the live attachments of a via cover (a
+    through/all-layer pad counts as two)."""
+    layers: set[str] = set()
+    for k in live:
+        for lyr in model.nodes[k].layers:
+            if lyr == "*":
+                return 2
+            layers.add(lyr)
+    return len(layers)
+
+
+def _via_effects(model: _NetModel, full: set[int], removed: set[int]) -> set[int] | None:
+    """Vias a cut of ``full`` leaves with nothing attached (to be removed too),
+    or ``None`` when the cut would strand a via on a single layer.
+
+    A via nothing touches is not a layer transition, so dropping it is safe.  A
+    via that keeps exactly one attachment layer after having had two is a
+    ``via_dangling`` finding, so such a cut is unacceptable (issue #8313).
+    """
+    gone = removed | full
+    orphans: set[int] = set()
+    for k in {v for g in full for v in model.adj[g]}:
+        if model.nodes[k].kind != "via" or k in gone:
+            continue
+        before = model.adj[k] - removed
+        live = model.adj[k] - gone
+        if not live:
+            orphans.add(k)
+        elif _attach_layers(model, before) >= 2 > _attach_layers(model, live):
+            return None
+    return orphans
+
+
+def _expand_cut(
+    model: _NetModel, group: set[int], removed: set[int], baseline, wide: float
+) -> set[int] | None:
+    """``group`` plus dangling remnants and orphaned vias, fully re-checked
+    (partition, joins, ends, via layers); ``None`` when no variant is safe."""
+    wider = group | _dangling_remnants(model, group, removed | group, wide)
+    for cand in (wider, group) if wider != group else (group,):
+        orphans = _via_effects(model, cand, removed)
+        if orphans is None:
+            continue
+        full = cand | orphans
+        if _cut_ok(model, full, removed, baseline):
+            return full
+    return None
+
+
+def _plan_declared_loops(
+    model: _NetModel, plan: NetPlan, removed: set[int], baseline, wide: float
+) -> None:
+    """Break loops (same-layer or closed through vias) on a declared net.
+
+    Each pass cuts, among the segments whose removal is safe, the narrowest one
+    below ``wide``; repeats until none is left.  A loop all of whose members
+    are at/above ``wide`` is not cut but recorded in ``plan.uncut_loops``.
+    """
+    seg_ids = [i for i, n in enumerate(model.nodes) if n.kind == "seg"]
+    for _ in range(len(seg_ids) + 1):
+        best = None
+        for s in seg_ids:
+            if s in removed or model.hard_protected[s] or _width(model, s) >= wide:
+                continue
+            group = _group_for(model, s, removed)
+            if not group or any(_width(model, g) >= wide for g in group):
+                continue
+            full = _expand_cut(model, group, removed, baseline, wide)
+            if full is None:
+                continue
+            key = (_width(model, s), s)
+            if best is None or key < best[0]:
+                best = (key, full)
+        if best is None:
+            break
+        group = best[1]
+        removed |= group
+        for g in sorted(group):
+            if model.nodes[g].kind == "via":
+                plan.remove_vias.append(model.nodes[g].index)
+                continue
+            plan.remove.append(model.nodes[g].index)
+            plan.reasons[model.nodes[g].index] = "declared-net loop (narrowest below --wide)"
+
+    # Report the loops that were deliberately left: cuttable but for width.
+    stuck = set()
+    for s in seg_ids:
+        if s in removed or model.hard_protected[s]:
+            continue
+        group = _group_for(model, s, removed)
+        if (
+            group
+            and _cut_ok(model, group, removed, baseline)
+            and _via_effects(model, group, removed) is not None
+        ):
+            stuck.add(s)
+    while stuck:
+        comp = {stuck.pop()}
+        work = list(comp)
+        while work:
+            u = work.pop()
+            for v in model.adj[u] & stuck:
+                stuck.discard(v)
+                comp.add(v)
+                work.append(v)
+        plan.uncut_loops.append(
+            {
+                "segments": sorted(
+                    f"{model.nodes[i].a}->{model.nodes[i].b} {model.nodes[i].layers[0]}"
+                    for i in comp
+                ),
+                "min_width": round(min(_width(model, i) for i in comp), 6),
+            }
+        )
+
+
+def _plan_net(
+    model: _NetModel, net_number: int, *, declared: bool = False, wide: float = DEFAULT_WIDE_MM
+) -> NetPlan:
     plan = NetPlan(net_number=net_number)
     baseline = model.partition(set())
     removed: set[int] = set()
     seg_ids = [i for i, n in enumerate(model.nodes) if n.kind == "seg"]
+
+    # The declared-net pass shares the partition baseline, so it needs the same
+    # two-terminal floor as the generic pass below (Issue #8333): with fewer
+    # terminals the guard is vacuous and every loop would be deleted.
+    if declared and len(model.terminals) >= 2 and model.has_cycle():
+        _plan_declared_loops(model, plan, removed, baseline, wide)
 
     # A net with fewer than two terminals has at most one partition group, so
     # the "partition unchanged" guard is vacuous and a loop would be deleted
@@ -1220,6 +1416,8 @@ def _plan_net(model: _NetModel, net_number: int) -> NetPlan:
                     group = _group_for(model, s, removed)
                     if not group:
                         continue
+                if declared and any(_width(model, g) >= wide for g in group):
+                    continue  # never cut deliberate wide copper on a declared net
                 # Endpoint neighbours *and* body-touching neighbours: an
                 # unmodelled overlap join must not be what holds anything.
                 strict = {k for g in group for k in model.adj[g]} - group
@@ -1260,8 +1458,19 @@ def _plan_net(model: _NetModel, net_number: int) -> NetPlan:
     return plan
 
 
-def plan_prune(pcb: PCB) -> list[NetPlan]:
-    """Compute per-net prune/snap plans without touching the board."""
+def plan_prune(
+    pcb: PCB,
+    *,
+    declared_nets: set[str] | None = None,
+    wide: float = DEFAULT_WIDE_MM,
+    uncut_out: list[dict[str, Any]] | None = None,
+) -> list[NetPlan]:
+    """Compute per-net prune/snap plans without touching the board.
+
+    ``declared_nets`` (net names from ``--current-paths``) enables the
+    loop-breaking pass on those nets only; loops left because every segment is
+    at/above ``wide`` are appended to ``uncut_out`` (issue #8313).
+    """
     names = (
         {net.number: net.name for net in getattr(pcb, "nets", {}).values()}
         if isinstance(getattr(pcb, "nets", None), dict)
@@ -1269,10 +1478,14 @@ def plan_prune(pcb: PCB) -> list[NetPlan]:
     )
     plans = []
     for net_number, model in sorted(_build_net_models(pcb).items()):
-        plan = _plan_net(model, net_number)
+        seg0 = next((n.ref for n in model.nodes if n.kind == "seg"), None)
+        net_name = names.get(net_number) or (seg0.net_name if seg0 else "")
+        declared = declared_nets is not None and net_name in declared_nets
+        plan = _plan_net(model, net_number, declared=declared, wide=wide)
+        if uncut_out is not None:
+            uncut_out.extend({"net": net_name or net_number, **u} for u in plan.uncut_loops)
         if not plan.empty:
-            seg0 = next((n.ref for n in model.nodes if n.kind == "seg"), None)
-            plan.net_name = names.get(net_number) or (seg0.net_name if seg0 else "")
+            plan.net_name = net_name
             plans.append(plan)
     return plans
 
@@ -1315,8 +1528,14 @@ def apply_plans(pcb: PCB, plans: list[NetPlan]) -> dict[str, int]:
             node.children[1] = _mm_atom(y + oy)
         snapped += len(plan.snaps)
     to_remove = [segs[i] for plan in plans for i in plan.remove]
+    vias = list(pcb.vias)
+    via_remove = [vias[i] for plan in plans for i in plan.remove_vias]
     removed = pcb.remove_segments(to_remove) if to_remove else 0
-    return {"segments_removed": removed, "ends_snapped": snapped}
+    vias_removed = pcb.remove_vias(via_remove) if via_remove else 0
+    stats = {"segments_removed": removed, "ends_snapped": snapped}
+    if vias_removed:  # key appears only when a loop cut orphaned vias (issue #8313)
+        stats["vias_removed"] = vias_removed
+    return stats
 
 
 # ---------------------------------------------------------------------------
@@ -1371,6 +1590,7 @@ class PruneResult:
     drc_verified: bool
     drc_note: str
     stats: dict[str, int]
+    uncut_loops: list[dict[str, Any]] = field(default_factory=list)
 
 
 def prune_board(
@@ -1378,6 +1598,8 @@ def prune_board(
     *,
     verify_drc: bool = True,
     apply: bool = True,
+    declared_nets: set[str] | None = None,
+    wide: float = DEFAULT_WIDE_MM,
 ) -> tuple[PCB, PruneResult]:
     """Plan (and optionally apply) pruning for ``pcb_path``.
 
@@ -1388,7 +1610,8 @@ def prune_board(
     import tempfile
 
     pcb = PCB.load(pcb_path)
-    plans = plan_prune(pcb)
+    uncut: list[dict[str, Any]] = []
+    plans = plan_prune(pcb, declared_nets=declared_nets, wide=wide, uncut_out=uncut)
     accepted = list(plans)
     rejected: list[NetPlan] = []
     drc_verified, note = False, "DRC verification skipped (--no-drc)"
@@ -1446,4 +1669,6 @@ def prune_board(
             "segments_removed": sum(len(p.remove) for p in accepted),
             "ends_snapped": sum(len(p.snaps) for p in accepted),
         }
-    return pcb, PruneResult(plans, accepted, rejected, drc_verified, note, stats)
+        if n_vias := sum(len(p.remove_vias) for p in accepted):
+            stats["vias_removed"] = n_vias
+    return pcb, PruneResult(plans, accepted, rejected, drc_verified, note, stats, uncut)

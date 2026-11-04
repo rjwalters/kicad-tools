@@ -448,6 +448,182 @@ def test_copper_arc_touching_a_detour_keeps_it(tmp_path):
     assert not _has_detour(pcb2)
 
 
+# --- declared-net loop breaking (issue #8313) --------------------------------
+
+
+def _via_loop_board(tmp_path: Path, trunk_w: float = 0.6, jog_w: float = 0.2) -> Path:
+    """A--B closed through vias (F.Cu/B.Cu/F.Cu jog) and a F.Cu detour trunk."""
+    segs = [
+        # wide detour trunk (kept)
+        ((100, 100), (100, 103), "F.Cu", trunk_w),
+        ((100, 103), (110, 103), "F.Cu", trunk_w),
+        ((110, 103), (110, 100), "F.Cu", trunk_w),
+        # via-closed jog
+        ((100, 100), (102, 100), "F.Cu", jog_w),
+        ((102, 100), (108, 100), "B.Cu", jog_w),
+        ((108, 100), (110, 100), "F.Cu", jog_w),
+    ]
+    return _board(tmp_path, [("A", 100, 100), ("B", 110, 100)], segs, vias=[(102, 100), (108, 100)])
+
+
+def _specs(tmp_path: Path) -> Path:
+    f = tmp_path / "cp.json"
+    f.write_text(
+        json.dumps(
+            {
+                "paths": [
+                    {
+                        "name": "p",
+                        "net": "SIG",
+                        "source": {"ref": "A", "pad": "1"},
+                        "sink": {"ref": "B", "pad": "1"},
+                        "continuous_a": 1.0,
+                    }
+                ]
+            }
+        )
+    )
+    return f
+
+
+def _has_cycle_connected(pcb) -> bool:
+    return _connected(pcb, (100, 100), (110, 100))
+
+
+def test_declared_net_single_pad_loop_is_kept(tmp_path):
+    # Issue #8333 guard must also hold for the declared-net pass (#8313).
+    loop = [
+        ((100, 100), (105, 100)),
+        ((105, 100), (105, 105)),
+        ((105, 105), (100, 105)),
+        ((100, 105), (100, 100)),
+    ]
+    p = _board(tmp_path, [("A", 100, 100)], loop)
+    pcb, res = prune_board(p, verify_drc=False, declared_nets={"SIG"}, wide=0.5)
+    assert len(pcb.segments) == 4
+    assert res.stats["segments_removed"] == 0
+
+
+_VIA_LOOP_SEGS = [
+    ((100, 100), (100, 103), "F.Cu", 0.6),
+    ((100, 103), (110, 103), "F.Cu", 0.6),
+    ((110, 103), (110, 100), "F.Cu", 0.6),
+    ((100, 100), (102, 100), "F.Cu", 0.2),
+    ((102, 100), (108, 100), "B.Cu", 0.2),
+    ((108, 100), (110, 100), "F.Cu", 0.2),
+]
+
+
+def test_declared_net_single_pad_via_loop_is_kept(tmp_path):
+    # wide=1.0 > the 0.6 trunk, so every segment is a cut candidate; only the
+    # two-terminal guard keeps the copper (fails if the guard is reverted).
+    p = _board(tmp_path, [("A", 100, 100)], _VIA_LOOP_SEGS, vias=[(102, 100), (108, 100)])
+    pcb, res = prune_board(p, verify_drc=False, declared_nets={"SIG"}, wide=1.0)
+    assert len(pcb.segments) == 6
+    assert len(pcb.vias) == 2
+    assert res.stats["segments_removed"] == 0
+
+
+def test_declared_net_zero_pad_loop_is_kept(tmp_path):
+    loop = [
+        ((100, 100), (105, 100)),
+        ((105, 100), (105, 105)),
+        ((105, 105), (100, 105)),
+        ((100, 105), (100, 100)),
+    ]
+    p = _board(tmp_path, [], loop)
+    pcb, res = prune_board(p, verify_drc=False, declared_nets={"SIG"}, wide=0.5)
+    assert len(pcb.segments) == 4
+    assert res.stats["segments_removed"] == 0
+
+
+def test_declared_net_zero_pad_via_loop_is_kept(tmp_path):
+    p = _board(tmp_path, [], _VIA_LOOP_SEGS, vias=[(102, 100), (108, 100)])
+    pcb, res = prune_board(p, verify_drc=False, declared_nets={"SIG"}, wide=1.0)
+    assert len(pcb.segments) == 6
+    assert len(pcb.vias) == 2
+    assert res.stats["segments_removed"] == 0
+
+
+def test_declared_net_via_closed_loop_is_broken_at_narrowest(tmp_path):
+    p = _via_loop_board(tmp_path)
+    pcb, res = prune_board(p, verify_drc=False, declared_nets={"SIG"}, wide=0.5)
+    widths = sorted(round(s.width, 3) for s in pcb.segments)
+    assert res.stats["segments_removed"] >= 1
+    assert widths.count(0.6) == 3  # wide trunk untouched
+    assert res.uncut_loops == []
+    # pads still connected through the trunk
+    assert _connected(pcb, (100, 100), (110, 100))
+    # the loop is gone: the audit no longer calls the run ambiguous
+    from kicad_tools.router.current_paths import load_current_path_specs, resolve_current_path
+
+    out = tmp_path / "out.kicad_pcb"
+    pcb.save(out)
+    (spec,) = load_current_path_specs(_specs(tmp_path))
+    assert resolve_current_path(PCB.load(out), spec).status == "resolved"
+
+
+def test_loop_is_untouched_without_declaring_the_net(tmp_path):
+    p = _via_loop_board(tmp_path)
+    pcb, res = prune_board(p, verify_drc=False, declared_nets={"OTHER"}, wide=0.5)
+    assert res.uncut_loops == []
+    # undeclared => the declared-net pass did not run
+    assert not any("declared-net" in r for pl in res.plans for r in pl.reasons.values())
+
+
+def test_all_wide_loop_is_reported_not_cut(tmp_path):
+    p = _via_loop_board(tmp_path, trunk_w=0.6, jog_w=0.6)
+    pcb, res = prune_board(p, verify_drc=False, declared_nets={"SIG"}, wide=0.5)
+    assert res.stats["segments_removed"] == 0
+    assert len(pcb.segments) == 6
+    assert res.uncut_loops and res.uncut_loops[0]["net"] == "SIG"
+    assert res.uncut_loops[0]["min_width"] == pytest.approx(0.6)
+
+
+def test_wide_smaller_than_every_segment_cuts_nothing(tmp_path):
+    p = _via_loop_board(tmp_path)
+    pcb, res = prune_board(p, verify_drc=False, declared_nets={"SIG"}, wide=0.1)
+    assert res.stats["segments_removed"] == 0
+    assert res.uncut_loops
+
+
+def test_cli_current_paths_breaks_loop_and_reports_json(tmp_path, capsys):
+    p = _via_loop_board(tmp_path)
+    cp = _specs(tmp_path)
+    rc = _cli(tmp_path, p, "--dry-run", "--no-drc", "--current-paths", str(cp), "--wide", "0.5")
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["removed"]["segments"] >= 1 and out["uncut_loops"] == []
+
+
+def test_via_closed_cut_removes_orphaned_vias(tmp_path):
+    """Cutting the jog must not leave vias with nothing attached (issue #8313)."""
+    p = _via_loop_board(tmp_path)
+    pcb, res = prune_board(p, verify_drc=False, declared_nets={"SIG"}, wide=0.5)
+    assert pcb.vias == []
+    assert res.stats["vias_removed"] == 2
+    assert _connected(pcb, (100, 100), (110, 100))
+
+
+def test_via_closed_cut_passes_real_drc(tmp_path):
+    """The default (DRC-verified) path accepts the plan and resolves the run."""
+    from kicad_tools.cli.runner import find_kicad_cli
+
+    if find_kicad_cli() is None:
+        pytest.skip("kicad-cli not available")
+    from kicad_tools.router.current_paths import load_current_path_specs, resolve_current_path
+
+    p = _via_loop_board(tmp_path)
+    pcb, res = prune_board(p, verify_drc=True, declared_nets={"SIG"}, wide=0.5)
+    assert res.drc_verified
+    assert [pl.net_name for pl in res.accepted] == ["SIG"] and res.rejected == []
+    assert pcb.vias == []
+    out = tmp_path / "out.kicad_pcb"
+    pcb.save(out)
+    (spec,) = load_current_path_specs(_specs(tmp_path))
+    assert resolve_current_path(PCB.load(out), spec).status == "resolved"
+
+
 # ---------------------------------------------------------------------------
 # Issue #8278: grid-step runs Board 05's router left behind
 # ---------------------------------------------------------------------------

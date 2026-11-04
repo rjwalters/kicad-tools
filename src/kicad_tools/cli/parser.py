@@ -2716,6 +2716,23 @@ def _add_pcb_parser(subparsers) -> None:
     )
     pcb_prune.add_argument("--no-drc", action="store_true", help="Skip kicad-cli DRC verification")
     pcb_prune.add_argument(
+        "--current-paths",
+        dest="current_paths",
+        metavar="FILE",
+        help="Declared current-path JSON. On the nets it names, also break copper "
+        "loops (including loops closed through vias) by removing each loop's "
+        "narrowest segment below --wide, so 'pcb reinforce' can anchor the run. "
+        "Loops whose segments are all >= --wide are reported, not cut.",
+    )
+    pcb_prune.add_argument(
+        "--wide",
+        type=float,
+        default=0.5,
+        metavar="MM",
+        help="With --current-paths: width (mm) at/above which a segment is never "
+        "cut (default: 0.5)",
+    )
+    pcb_prune.add_argument(
         "--unverified",
         action="store_true",
         help="Write the result even when it was not verified with kicad-cli DRC "
