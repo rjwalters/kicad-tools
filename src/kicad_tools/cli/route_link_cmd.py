@@ -407,17 +407,17 @@ def _drc_finding_counts(pcb_path: Path) -> Any:
     for v in data.get("violations", []):
         if v.get("severity") not in ("error", "warning"):
             continue
+        if v.get("type") == "unconnected_items":
+            # A link cannot create a connectivity error; its description moves with
+            # the ratsnest anchor, which would cause false rollbacks.
+            continue
         items = sorted(str(i.get("description", "")) for i in v.get("items", []))
         counts[(v.get("type"), v.get("severity"), tuple(items))] += 1
     return counts
 
 
-def _census_failures(pcb_path: Path, args: argparse.Namespace) -> set[tuple[str, str, str]] | None:
-    """Failing creepage pairs ``(net_a, net_b, kind)``; ``None`` if no census is configured."""
-    if getattr(args, "min", None) is None:
-        return None
-    from kicad_tools.creepage.engine import compute_creepage_census, resolve_hv_nets
-    from kicad_tools.schema.pcb import PCB
+def _hv_nets_for(pcb: Any, pcb_path: Path, args: argparse.Namespace) -> Any:
+    from kicad_tools.creepage.engine import resolve_hv_nets
 
     net_class_map = None
     ncm = getattr(args, "net_class_map", None)
@@ -425,15 +425,54 @@ def _census_failures(pcb_path: Path, args: argparse.Namespace) -> set[tuple[str,
         from kicad_tools.router.rules import net_class_map_from_path
 
         net_class_map = net_class_map_from_path(Path(ncm), pcb_path=pcb_path)
+    net_class = getattr(args, "net_class", "HV") or "HV"
+    return resolve_hv_nets(pcb, net_class, net_class_map)
+
+
+def _census_mode(pcb: Any, pcb_path: Path, args: argparse.Namespace) -> str:
+    """``skipped`` (no ``--min``), ``vacuous`` (no HV nets resolved) or ``checked``."""
+    if getattr(args, "min", None) is None:
+        return "skipped"
+    return "checked" if _hv_nets_for(pcb, pcb_path, args) else "vacuous"
+
+
+def _census_failures(
+    pcb_path: Path, args: argparse.Namespace
+) -> dict[tuple[str, str, str, str], float] | None:
+    """Failing creepage pairs, ``(net_a, net_b, kind, relationship) -> min creepage``.
+
+    ``relationship`` is part of the key so a new board-level failure is not hidden by
+    an already-failing same-footprint pair; the value lets the gate catch a pair that
+    got worse.  ``None`` if no census is configured.
+    """
+    if getattr(args, "min", None) is None:
+        return None
+    from kicad_tools.creepage.engine import compute_creepage_census
+    from kicad_tools.schema.pcb import PCB
+
     pcb = PCB.load(str(pcb_path))
     net_class = getattr(args, "net_class", "HV") or "HV"
-    hv_nets = resolve_hv_nets(pcb, net_class, net_class_map)
+    hv_nets = _hv_nets_for(pcb, pcb_path, args)
     if not hv_nets:
-        return set()
+        return {}
     report = compute_creepage_census(
         pcb, hv_nets, float(args.min), net_class=net_class, board=str(pcb_path)
     )
-    return {(p.net_a, p.net_b, p.kind) for p in report.pairs if not p.passed}
+    failing: dict[tuple[str, str, str, str], float] = {}
+    for p in report.pairs:
+        if p.passed:
+            continue
+        key = (p.net_a, p.net_b, p.kind, p.relationship)
+        failing[key] = min(p.creepage_mm, failing.get(key, p.creepage_mm))
+    return failing
+
+
+def _new_census_failures(
+    census: dict[tuple[str, str, str, str], float],
+    base: dict[tuple[str, str, str, str], float],
+) -> list[tuple[str, str, str, str]]:
+    """Failing pairs absent from ``base``, or already failing and now worse."""
+    return sorted(k for k, v in census.items() if k not in base or v < base[k] - 1e-6)
 
 
 def _gate_state(pcb_path: Path, args: argparse.Namespace) -> tuple[Any, set | None]:
@@ -497,13 +536,15 @@ def _commit_links(
                 reason = f"{sum(new_drc.values())} new DRC violation(s): " + ", ".join(
                     sorted({k[0] or "?" for k in new_drc})
                 )
-            elif census is not None and base_census is not None and census - base_census:
-                failed = "creepage"
-                reason = f"{len(census - base_census)} new failing creepage pair(s): " + ", ".join(
-                    f"{a}/{b}" for a, b, _ in sorted(census - base_census)
-                )
+            elif census is not None and base_census is not None:
+                new_pairs = _new_census_failures(census, base_census)
+                if new_pairs:
+                    failed = "creepage"
+                    reason = f"{len(new_pairs)} new/worse failing creepage pair(s): " + ", ".join(
+                        f"{a}/{b} ({rel})" for a, b, _k, rel in new_pairs
+                    )
         except Exception as exc:
-            failed = "drc"
+            failed = "gate-error"
             reason = f"gate could not run: {exc}"
         if failed is not None:
             out_path.write_bytes(snapshot)
@@ -513,6 +554,8 @@ def _commit_links(
         base_drc, base_census = drc, census
         _commit_to_model(model, route, net_ids[spec.net])
         n_committed += 1
+    if not n_committed and created:
+        out_path.unlink(missing_ok=True)  # nothing committed: leave no unchanged copy
     return (str(out_path) if n_committed else None), None
 
 
@@ -550,6 +593,7 @@ def run_route_link_command(args: argparse.Namespace) -> int:
         model = _build_model(pcb)
         net_ids = {net.name: num for num, net in pcb.nets.items() if net.name}
 
+        census_mode = _census_mode(pcb, pcb_path, args)
         entries: list[dict[str, Any]] = []
         written: str | None = None
         refused: str | None = None
@@ -585,6 +629,7 @@ def run_route_link_command(args: argparse.Namespace) -> int:
                 "ok": ok,
                 "probe": bool(args.probe),
                 "written": written,
+                "census": census_mode,
                 "links": entries,
             }
         )
@@ -607,6 +652,8 @@ def run_route_link_command(args: argparse.Namespace) -> int:
                         f"{b['distance_mm']:.3f} mm from the straight line; needs "
                         f">= {b['required_mm']:.3f} mm"
                     )
+        if not args.probe:
+            print(f"route-link: creepage census: {census_mode}")
         if written:
             print(
                 f"route-link: wrote {sum(e['status'] == 'committed' for e in entries)} link(s) to {written}"

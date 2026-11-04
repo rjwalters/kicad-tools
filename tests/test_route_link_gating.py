@@ -70,7 +70,9 @@ def _fake_gate(monkeypatch, *, bad_nets=(), census_bad_nets=()):
                 drc[("clearance", "error", (net,))] += 1
         census = None
         if census_bad_nets:
-            census = {("HV", net, "conductor") for net in census_bad_nets if net in routed}
+            census = {
+                ("HV", net, "conductor", "board"): 1.0 for net in census_bad_nets if net in routed
+            }
         return drc, census
 
     monkeypatch.setattr(route_link_cmd, "_gate_state", state)
@@ -158,3 +160,51 @@ def test_probe_is_ungated(board, capsys, monkeypatch):
     before = board.read_bytes()
     rc, doc = _run(capsys, str(board), "--link", LINK_A, "--probe")
     assert rc == 0 and board.read_bytes() == before
+
+
+def test_new_board_failure_not_masked_by_failing_same_footprint_pair(
+    board, capsys, toolchain_ok, monkeypatch
+):
+    """Baseline already fails (HV, GND) via same_footprint; a new board-level one must roll back."""
+
+    def state(path, args):
+        pcb = PCB.load(str(path))
+        routed = any(s.net_number == 1 for s in pcb.segments)
+        census = {("HV", "GND", "conductor", "same_footprint"): 0.84}
+        if routed:
+            census[("HV", "GND", "conductor", "board")] = 1.87
+        return Counter(), census
+
+    monkeypatch.setattr(route_link_cmd, "_gate_state", state)
+    rc, doc = _run(capsys, str(board), "--link", LINK_A, "--min", "3")
+    assert rc == 1
+    assert doc["links"][0]["status"] == "rolled-back"
+    assert doc["links"][0]["failed_check"] == "creepage"
+
+
+def test_already_failing_pair_made_worse_rolls_back():
+    base = {("HV", "GND", "conductor", "board"): 2.0}
+    assert route_link_cmd._new_census_failures({("HV", "GND", "conductor", "board"): 1.5}, base)
+    assert not route_link_cmd._new_census_failures({("HV", "GND", "conductor", "board"): 2.0}, base)
+
+
+def test_gate_crash_mid_run_reported_as_gate_error(board, capsys, toolchain_ok, monkeypatch):
+    calls = {"n": 0}
+
+    def state(path, args):
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise RuntimeError("kicad-cli crashed")
+        return Counter(), None
+
+    monkeypatch.setattr(route_link_cmd, "_gate_state", state)
+    rc, doc = _run(capsys, str(board), "--link", LINK_A)
+    assert rc == 1 and doc["links"][0]["failed_check"] == "gate-error"
+
+
+def test_census_mode_reported_and_no_unchanged_copy(board, capsys, toolchain_ok, monkeypatch):
+    _fake_gate(monkeypatch, bad_nets=["SIGA"])
+    out = board.parent / "out.kicad_pcb"
+    rc, doc = _run(capsys, str(board), "--link", LINK_A, "-o", str(out))
+    assert rc == 1 and doc["census"] == "skipped" and doc["written"] is None
+    assert not out.exists()
