@@ -11,7 +11,7 @@ Prioritized roadmap generated from current GitHub label state. Maintained by the
 
 Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a human merge decision is missing.
 
-- **#8257**: ci: provision jlcparts catalog for board 05, re-pin board 02/03 baselines
+_None._
 
 ## Very Important
 
@@ -35,51 +35,39 @@ _None._
 
 Issues currently being built (`loom:building`).
 
-- **#8255**: Release v0.28.0 blocked: three red main-CI jobs (board 05 strict stock preflight, board 02/03 baselines after #8229/#8230)
 - **#8267**: Board 05: D3 (C131244 red 0805 LED) shows stock 0 in jlcparts catalog; --strict-preflight bom_lcsc_stock fails
 - **#8278**: Board 05: regeneration/readiness refresh blocked by new ampacity + redundant_copper kct checks
-- **#8295**: Relief freed-band diagnostic: spatially bound the measured-gap scan (follow-up to #8256)
 - **#8313**: pcb prune: break via-closed loops on nets with declared current paths so reinforce can anchor them
-- **#8314**: route-link: per-link DRC + creepage gating with single-link rollback
-- **#8337**: Live-verify kct pcb strip --from-report/--dangling against real kicad-cli --refill-zones
-- **#8346**: kct pcb strip --from-report ignores real kct creepage witness shape (every row skipped)
-- **#8347**: kct pcb strip --from-report DRC gate rejects clearance fixes because dangling warnings count as worse
+- **#8356**: pcb prune: collinear merge refuses a straight run when a ~0.5 um end mismatch turns its joint into a body overlap
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#8317**: feat: break declared-net copper loops (incl. via-closed) in pcb prune$1
-- **#8339**: perf: index blocker segments in relief measured-gap scan$1
-- **#8345**: feat: gate each kct route-link commit with per-link DRC and creepage rollback$1
-- **#8350**: fix: exempt dangling and unconnected growth from strip DRC gate$1
-- **#8351**: fix: locate creepage strip findings from witness point_a/point_b$1
+- **#8320**: fix(board-05): clean router copper, declare FUSED non-HV, re-issue evidence
+- **#8359**: fix: let prune merge collinear runs across sub-micron end gaps
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-- **#8257**: ci: provision jlcparts catalog for board 05, re-pin board 02/03 baselines
+_None._
 
 ## Proposed
 
 Issues carrying `loom:curated`.
 
-- **#5509**: Epic: one clearance kernel — search, commit, and final validation must agree with kicad-cli DRC$1
-- **#5539**: Champion: Merge-Risk Hold Digest$1
-- **#7487**: Re-rule or remove board 03 usb_geometry via-in-pad window exception by 2027-04-19 (#7457 / #7084 Q10)$1
-- **#8214**: optimize-traces: collision-check each rewrite on finished boards instead of whole-net rollback$1
-- **#8255**: Release v0.28.0 blocked: three red main-CI jobs (board 05 strict stock preflight, board 02/03 baselines after #8229/#8230)$1
-- **#8267**: Board 05: D3 (C131244 red 0805 LED) shows stock 0 in jlcparts catalog; --strict-preflight bom_lcsc_stock fails$1
-- **#8278**: Board 05: regeneration/readiness refresh blocked by new ampacity + redundant_copper kct checks$1
-- **#8285**: optimize-traces: connectivity check discards a different set of nets across identical runs (nondeterminism)$1
-- **#8295**: Relief freed-band diagnostic: spatially bound the measured-gap scan (follow-up to #8256)$1
-- **#8313**: pcb prune: break via-closed loops on nets with declared current paths so reinforce can anchor them$1
-- **#8314**: route-link: per-link DRC + creepage gating with single-link rollback$1
-- **#8327**: route --complete: softstart rev-D loses /V_AC_SENSE_RAW R2.1-C31.1 after #8280 pairwise gate (9/11 -> 7/11 HV nets, link budget overrun)$1
-- **#8337**: Live-verify kct pcb strip --from-report/--dangling against real kicad-cli --refill-zones$1
-- **#8346**: kct pcb strip --from-report ignores real kct creepage witness shape (every row skipped)$1
-- **#8347**: kct pcb strip --from-report DRC gate rejects clearance fixes because dangling warnings count as worse$1
+- **#5509**: Epic: one clearance kernel — search, commit, and final validation must agree with kicad-cli DRC *(curated)*
+- **#5539**: Champion: Merge-Risk Hold Digest *(curated)*
+- **#7487**: Re-rule or remove board 03 usb_geometry via-in-pad window exception by 2027-04-19 (#7457 / #7084 Q10) *(curated)*
+- **#8214**: optimize-traces: collision-check each rewrite on finished boards instead of whole-net rollback *(curated)*
+- **#8255**: Release v0.28.0 blocked: three red main-CI jobs (board 05 strict stock preflight, board 02/03 baselines after #8229/#8230) *(curated)*
+- **#8267**: Board 05: D3 (C131244 red 0805 LED) shows stock 0 in jlcparts catalog; --strict-preflight bom_lcsc_stock fails *(curated)*
+- **#8278**: Board 05: regeneration/readiness refresh blocked by new ampacity + redundant_copper kct checks *(curated)*
+- **#8285**: optimize-traces: connectivity check discards a different set of nets across identical runs (nondeterminism) *(curated)*
+- **#8313**: pcb prune: break via-closed loops on nets with declared current paths so reinforce can anchor them *(curated)*
+- **#8327**: route --complete: softstart rev-D loses /V_AC_SENSE_RAW R2.1-C31.1 after #8280 pairwise gate (9/11 -> 7/11 HV nets, link budget overrun) *(curated)*
+- **#8356**: pcb prune: collinear merge refuses a straight run when a ~0.5 um end mismatch turns its joint into a body overlap *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -87,22 +75,22 @@ _None._
 
 ## Epics
 
-- **#4431**: route: per-net scalar clearance cannot express HV isolation — need class-pair (net-class × net-class) clearance rules in the router; both workarounds proven inadequate on a mains board$1
-- **#5509**: Epic: one clearance kernel — search, commit, and final validation must agree with kicad-cli DRC$1
-- **#5952**: Epic: Harness-neutral kicad-tools (Claude Code, Codex CLI, opencode)$1
+- **#4431**: route: per-net scalar clearance cannot express HV isolation — need class-pair (net-class × net-class) clearance rules in the router; both workarounds proven inadequate on a mains board
+- **#5509**: Epic: one clearance kernel — search, commit, and final validation must agree with kicad-cli DRC
+- **#5952**: Epic: Harness-neutral kicad-tools (Claude Code, Codex CLI, opencode)
 
 ## Backlog Balance
 
 | Bucket | Count |
 |------|-------|
-| Operator merge-risk holds | 1 |
+| Operator merge-risk holds | 0 |
 | Very important | 0 |
 | Important | 0 |
 | Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 9 |
-| PRs awaiting review | 5 |
-| Approved PRs awaiting merge | 1 |
-| Curated | 15 |
+| In Progress (`loom:building`) | 4 |
+| PRs awaiting review | 2 |
+| Approved PRs awaiting merge | 0 |
+| Curated | 11 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 3 |
 <!-- guide:plan-body:end -->

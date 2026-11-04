@@ -20,6 +20,8 @@ footprint-library finding is `lib_footprint_mismatch`, so the #6962
 | `--from-report` write gate | REFUTED as a usable workflow: refuses to write because `track_dangling` warnings rose 3 -> 6. `--unverified` does not override. Filed #8347. |
 | `kct creepage` witness vs `_creepage_findings` | MISMATCH: real witness is `{point_a_mm, point_b_mm, item_a, item_b}`; parser reads `point`/`position`/`x,y`/`uuid`. 114 rows, 0 located, 0 removed. Filed #8346. |
 
+> **Follow-up (#8347, PR #8350):** the write gate now exempts `track_dangling`/`via_dangling` growth on the nets the strip cut, and `unconnected` growth in `--from-report` mode only. A live `--from-report` write on this fixture then succeeded (11 segments and 5 vias removed, DRC verified), so the "REFUTED" row above no longer holds.
+
 ## DRC counts (type: original / cut / original+dangling / cut+dangling)
 
 | type | orig | cut | orig+dang | cut+dang |
