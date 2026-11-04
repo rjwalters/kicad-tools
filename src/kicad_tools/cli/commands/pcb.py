@@ -88,7 +88,14 @@ def run_pcb_command(args) -> int:
 
     # Handle prune command (remove redundant copper; issue #8216)
     if args.pcb_command == "prune":
-        return _run_prune_command(args, pcb_path)
+        from kicad_tools.cli.kicad_toolchain import run_pinned_if_docker
+
+        mounts = [pcb_path.parent]
+        for extra in (getattr(args, "output", None), getattr(args, "project", None)):
+            if extra:
+                mounts.append(Path(extra).parent)
+        # #8395: with KCT_KICAD_DOCKER=1 the per-edit DRC referee uses the pinned image.
+        return run_pinned_if_docker(lambda: _run_prune_command(args, pcb_path), mounts)
 
     # Handle reannotate command separately (doesn't use pcb_query)
     if args.pcb_command == "reannotate":

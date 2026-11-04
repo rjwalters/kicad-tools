@@ -332,7 +332,25 @@ def _make_grid_synced_optimize_fn(router, optimizer):
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Main entry point for trace optimization CLI."""
+    """Main entry point for trace optimization CLI.
+
+    With ``KCT_KICAD_DOCKER=1`` the run executes on the pinned KiCad image so the
+    kicad-cli DRC baseline/after summary matches the committed evidence (#8395).
+    """
+    from kicad_tools.cli.kicad_toolchain import docker_fallback_enabled, run_pinned_if_docker
+
+    if not docker_fallback_enabled():
+        return _main(argv)
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("pcb", nargs="?")
+    pre.add_argument("-o", "--output")
+    pre.add_argument("--project")
+    known, _ = pre.parse_known_args(argv)
+    mounts = [Path(p).parent for p in (known.pcb, known.output, known.project) if p]
+    return run_pinned_if_docker(lambda: _main(argv), mounts)
+
+
+def _main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="kct optimize-traces",
         description="Optimize PCB traces to minimize bends and reduce segment count",
