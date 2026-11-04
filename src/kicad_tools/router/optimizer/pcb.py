@@ -938,7 +938,9 @@ def optimize_pcb(
     total DRC error count is rolled back to its original segments.  The
     gate runs the clearance, dimension and segment/via-vs-zone-fill checks;
     growth in a pad- or short-class category also triggers rollback.  If
-    the rollback loop cannot reach baseline, all changed nets are reverted.
+    the rollback loop cannot reach baseline, nets are re-admitted one at a time
+    and only those that keep the board at baseline are kept (Issue #8367); if
+    none qualifies, all changed nets are reverted.
 
     Args:
         pcb_path: Path to input .kicad_pcb file.
@@ -1146,29 +1148,63 @@ def optimize_pcb(
                     ):
                         break
 
-            # Issue #8052: fail safe.  If the per-net loop could not get back
-            # to baseline (or a protected category is still above baseline),
-            # revert every remaining changed net rather than accept a pass
-            # that leaves new shorts / pad violations.
+            # Issue #8052 fail safe, refined by Issue #8367.  If the greedy
+            # loop could not get back to baseline (or a protected category is
+            # still above baseline), do NOT discard every net: rebuild from
+            # the input, admitting one changed net at a time and keeping it
+            # only if the cumulative board stays at/below baseline with no
+            # pad-class growth.  Nets whose own edits add errors are rejected
+            # individually; the all-revert fail-safe fires only when no
+            # changed net survives.
             if full_errors > baseline_errors or _pad_violations_grew(
                 baseline_counts, current_counts
             ):
-                for net in optimized_segments:
-                    if final_segments[net] != segments_by_net[net]:
-                        final_segments[net] = segments_by_net[net]
-                        stats.nets_rolled_back += 1
-                        rolled_back_nets.add(net)
-                stats.drc_failsafe_reverted = True
-                # Issue #8207: name the rules still above baseline.
-                stats.drc_failsafe_rules = {
+                above_rules = {
                     c: n - baseline_counts.get(c, 0)
                     for c, n in current_counts.items()
                     if c != "__total__" and n > baseline_counts.get(c, 0)
                 }
-                # Every net is back to its input geometry, and the output is
-                # the untouched input text (see below), so the post-failsafe
-                # count *is* the baseline -- no re-serialised copper involved.
-                full_errors = baseline_errors
+                changed_nets = [
+                    n for n in optimized_segments if optimized_segments[n] != segments_by_net[n]
+                ]
+                prev_rolled = set(rolled_back_nets)
+                final_segments = {n: segments_by_net[n] for n in optimized_segments}
+                kept_counts = dict(baseline_counts)
+                for net in changed_nets:
+                    trial = dict(final_segments)
+                    trial[net] = optimized_segments[net]
+                    trial_counts = _run_drc_error_count_by_category(
+                        replace_segments(pcb_text, segments_by_net, trial, scratch=True),
+                        manufacturer=config.drc_manufacturer,
+                        layers=config.drc_layers,
+                        copper_oz=config.drc_copper_oz,
+                    )
+                    if trial_counts["__total__"] <= baseline_errors and not _pad_violations_grew(
+                        baseline_counts, trial_counts
+                    ):
+                        final_segments[net] = optimized_segments[net]
+                        kept_counts = trial_counts
+                        rolled_back_nets.discard(net)
+                        net_violations.pop(net, None)
+                    else:
+                        rolled_back_nets.add(net)
+                        net_violations[net] = {
+                            c: n - baseline_counts.get(c, 0)
+                            for c, n in trial_counts.items()
+                            if c != "__total__" and n > baseline_counts.get(c, 0)
+                        }
+                # Recount nets_rolled_back from scratch (greedy phase counts
+                # are superseded by the rebuild).
+                stats.nets_rolled_back += len(rolled_back_nets - prev_rolled) - len(
+                    prev_rolled - rolled_back_nets
+                )
+                full_errors = kept_counts["__total__"]
+                if not any(final_segments[n] != segments_by_net[n] for n in final_segments):
+                    stats.drc_failsafe_reverted = True
+                    stats.drc_failsafe_rules = above_rules
+                    # Output is the untouched input text (see below), so the
+                    # count *is* the baseline.
+                    full_errors = baseline_errors
 
             optimized_segments = final_segments
 
