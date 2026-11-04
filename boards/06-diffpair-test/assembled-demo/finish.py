@@ -57,6 +57,27 @@ def check_process_geometry(path):
     assert not ViaInPadRule().check(board, None).violations, "Drill overlaps an SMT land"
 
 
+def relocate_pad_edge_vias(path):
+    """Slide vias out of the mask-dam zone beside SMD pads (Issue #8404).
+
+    The generator's tangential power vias sit 0.075 mm from the pad's mask
+    aperture, below JLCPCB's 0.100 mm dam, so ``via_at_pad_edge`` fires on the
+    finished board.  Same pass the board's ``generate_design.py`` finalize step
+    runs (Issue #7296); a via with no legal spot fails the build.
+    """
+    from kicad_tools.cli.relocate_in_pad_vias import relocate_pad_edge_vias as relocate
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.schema.pcb import PCB
+
+    board = PCB.load(path)
+    result = relocate(board, get_profile("jlcpcb").get_design_rules(layers=4))
+    if result.skipped or result.unresolvable:
+        raise RuntimeError(f"Pad-edge vias left in the mask-dam zone: {result}")
+    if result.changed:
+        board.save(path)
+    return len(result.moved)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path)
@@ -96,9 +117,13 @@ def main():
     # The off-land drill repairs drag attached endpoints. Quantize their
     # resulting chords before refill and all native/process checks.
     quantize_pcb_file(path)
+    moved = relocate_pad_edge_vias(path)
     result = _run_fill_zones_via_drc(path, None, "kicad-cli")
     check_process_geometry(path)
-    print(f"Transferred {transferred} signal primitives; refill: {result}")
+    print(
+        f"Transferred {transferred} signal primitives; moved {moved} pad-edge via(s); "
+        f"refill: {result}"
+    )
 
 
 if __name__ == "__main__":
