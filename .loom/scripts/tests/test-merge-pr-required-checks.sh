@@ -54,23 +54,12 @@ source "$FUNCS"
 
 # --- Structural wiring ---
 echo "Testing _check_required_checks wiring..."
-call_line="$(awk '/^unset _MPS_JSON _MPS_FRESH_SHA; \[\[ "\$AUTO_MERGE" == "true" \]\] \|\| _check_required_checks$/ { print NR; exit }' "$MERGE_PR_SRC")"
+call_line="$(awk '/^unset _MPS_JSON _MPS_FRESH_SHA; _check_required_checks$/ { print NR; exit }' "$MERGE_PR_SRC")"
 merge_line="$(awk '/forge_merge_pr "\$REPO_NWO" "\$PR_NUMBER" "\$MERGE_PRECONDITION_SHA"/ { print NR; exit }' "$MERGE_PR_SRC")"
-auto_line="$(awk '/^if \[\[ "\$AUTO_MERGE" == "true" \]\]; then$/ { print NR; exit }' "$MERGE_PR_SRC")"
 if [[ -n "$call_line" && -n "$merge_line" && "$call_line" -lt "$merge_line" ]]; then
-    ok "gate runs (non --auto only) before the forge merge call"
+    ok "gate runs before the forge merge call (#12063: --auto is a no-op, so every merge)"
 else
-    fail "gate runs (non --auto only) before the forge merge call" "call=$call_line merge=$merge_line"
-fi
-if [[ -n "$call_line" && -n "$auto_line" && "$call_line" -lt "$auto_line" ]]; then
-    ok "gate is decided before --auto flips AUTO_MERGE=false (the --auto path is unchanged)"
-else
-    fail "gate is decided before --auto flips AUTO_MERGE=false" "call=$call_line auto=$auto_line"
-fi
-if awk '/^_revalidate_merge_guards\(\) \{/ { inf=1 } inf && /_check_required_checks/ { found=1 } inf && /^\}/ { exit } END { exit found }' "$MERGE_PR_SRC"; then
-    ok "--auto's post-wait revalidation does not call the gate"
-else
-    fail "--auto's post-wait revalidation does not call the gate"
+    fail "gate runs before the forge merge call" "call=$call_line merge=$merge_line"
 fi
 assert_contains "$(grep -- '--allow-red-required)' "$MERGE_PR_SRC")" 'ALLOW_RED_REQUIRED+=("$2")' "--allow-red-required is repeatable (appends)"
 assert_contains "$(sed -n '1,/^set -euo pipefail/p' "$MERGE_PR_SRC")" "--allow-red-required <context>" "flag documented in the merge-pr.sh header"

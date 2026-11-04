@@ -296,6 +296,8 @@ REPO_REMOTE_SSH_CIDR=                     # optional: pin the SG's SSH-ingress C
                                            # overrides current-IP detection outright. Validated — see below
 REPO_REMOTE_SSH_MIN_PREFIX=32             # narrowest IPv4 prefix accepted for SSH ingress (default 32 = one address;
                                            # set e.g. 24 to allow a known ISP block)
+REPO_REMOTE_SSH_STALE_DAYS=7                # days a tool-owned rule for a DIFFERENT address is kept before `up` revokes it
+                                           # as stale (0 = revoke immediately); keeps both IPs of an alternating egress
 REPO_REMOTE_ALLOW_WORLD_SSH=              # "1" opts in, loudly, to a CIDR wider than the minimum (0.0.0.0/0, ::/0)
 REPO_REMOTE_CALLER=                       # optional: caller id stamped into this host's SSH rule Description
                                            # (default: short hostname); set it when hosts share a short hostname
@@ -906,11 +908,19 @@ landed before it ever calls `run-instances`:
    the other's rule. Conversely, give one operator the *same* value on every
    machine only if you want each `up` to reclaim the others' rules.
 
-   4a. **Replace, don't accumulate — but only your own rules.** Before
-   authorizing the current address, any tcp/22 rule on the group whose
-   `Description` starts with **this caller's** marker,
+   4a. **Replace, don't accumulate — but only your own rules, and only once
+   they are stale.** Before authorizing the current address, any tcp/22 rule on
+   the group whose `Description` starts with **this caller's** marker,
    `repo-remote:<repo-name>:<caller>:` — i.e. one *this host* wrote on an
-   earlier run — is revoked. Without this, every `up` from a new address added
+   earlier run — is revoked **if the date at the end of its `Description` is
+   older than `REPO_REMOTE_SSH_STALE_DAYS` (default 7)**. A rule for another
+   address authorized within that window is kept (and logged), because a caller
+   whose egress alternates between two addresses (e.g. an HTTPS proxy vs. the
+   direct SSH path) would otherwise revoke the address its next launch needs
+   and leave boxes unreachable (rjwalters/repo#703). Re-authorizing an address
+   whose rule already exists refreshes that rule's date, so an address still in
+   use never ages out; a rule whose date cannot be parsed is kept. Set
+   `REPO_REMOTE_SSH_STALE_DAYS=0` for the old immediate-revoke behaviour. Without this, every `up` from a new address added
    a `/32` and removed none, so a few weeks of roaming left a group admitting
    every address the operator had ever had. A rule for the address being
    authorized now is kept (a repeat run from the same place does not flap it).
@@ -933,6 +943,10 @@ landed before it ever calls `run-instances`:
    A revoke that fails (e.g. credentials without
    `RevokeSecurityGroupIngress`) is a loud notice with the manual command, not
    a failed `up`: it leaves a stale-but-narrow rule behind, never a wider one.
+
+   If SSH readiness fails, `up` logs a `diagnostic:` line with the group's
+   current tcp/22 CIDRs and the address authorized this run before exiting, so
+   a caller-address mismatch is visible at a glance.
 5. **Verify before spending money.** `describe-security-groups` on the
    resolved group must show a tcp/22 rule, or the run fails loudly (exit `4`)
    before `run-instances` is ever called — this is what would have caught the

@@ -27,13 +27,16 @@ Those land as two distinct senders and can see each other. Same command through 
 
 Alternatively, create a UUID once per CLI worker (for example, `node -e
 'console.log(require("node:crypto").randomUUID())'`) and pass it as
-`SQUAD_SESSION_ID` on **every** invocation, with actual `SQUAD_PROVIDER` and
-`SQUAD_MODEL` when known. Each worker gets an automatic name; never reuse the
-parent's session token. Metadata defaults to `unknown`, never a guessed model.
+`SQUAD_SESSION_ID` on **every** invocation, with the actual `SQUAD_MODEL` (and
+optionally `SQUAD_PROVIDER`) when known. Each worker gets an automatic
+`<label>-<4 random hex>` name; never reuse the parent's session token. With no
+`SQUAD_MODEL` the label is `agent` (e.g. `agent-be04`), never a guessed model.
 
 ## Naming: refine, don't rename
 
 Identities are `<base>-1 … <base>-N`, where `<base>` is this session's own persona (the pinned `SQUAD_PERSONA`, e.g. `codex` → `codex-1`, `codex-2`, `codex-3`).
+
+Scope: refinement (`<pinned>-N`) is only for sessions of the *same* workstream as the pinned seat. An unrelated agent outside the room's cast must not borrow the pin; it posts under its own persona, in its own room (`SQUAD_DIR`), or does not post (see `conventions.md`).
 
 A pinned identity is a **namespace**, not a fixed name: `codex-2` is accepted because it refines `codex`; `fable` is refused, so the pin still prevents impersonation. The separator is `-` only. If you rename an MCP connection this way (`squad_join` with `persona: "codex-2"` — the multi-session case below, not the subagent case), a refusal comes back as a `note` saying the name is not a refinement of your pinned identity.
 
@@ -66,7 +69,7 @@ Fanout pays off when each worker has its own front and the shared surface is nea
 
 ## The other fanout: separate sessions, not subagents
 
-Unpinned terminal sessions now receive distinct provider-model-session names automatically. No manual persona argument is needed. Legacy or intentional shared `SQUAD_PERSONA` pins still collide. Remove legacy installer pins as described in README, or use either explicit refinement:
+Unpinned terminal sessions now receive distinct `<label>-<random hex>` names automatically (pass your model as `squad_join`'s `model` argument to label it). No manual persona argument is needed. Legacy or intentional shared `SQUAD_PERSONA` pins still collide. Remove legacy installer pins as described in README, or use either explicit refinement:
 
 - Launch each session with its own refined pin: `SQUAD_PERSONA=codex-2` in that session's environment.
 - Or let the session rename itself on arrival: `squad_join` with `persona: "codex-2"`.

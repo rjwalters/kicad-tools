@@ -743,7 +743,8 @@ value, or a slot in one entry's plural `directories:` list, see below):
 | `github-actions` | `.github/workflows/*.yml`, `.github/actions/*/action.yml` |
 | `npm` | `package.json` (`pnpm-lock.yaml` / `yarn.lock` / `package-lock.json`) |
 | `cargo` | `Cargo.toml` |
-| `pip` | `requirements*.txt`, `pyproject.toml`, `Pipfile` |
+| `uv` | `uv.lock` beside a `pyproject.toml` — wins over `pip` for that directory |
+| `pip` | `requirements*.txt`, `Pipfile`, or a `pyproject.toml` with **no** `uv.lock` beside it |
 | `gomod` | `go.mod` |
 | `bundler` | `Gemfile` |
 | `composer` | `composer.json` |
@@ -753,7 +754,7 @@ value, or a slot in one entry's plural `directories:` list, see below):
 ```bash
 git ls-files '.github/workflows/*' '.github/actions/*' \
   '*package.json' '*Cargo.toml' '*go.mod' '*requirements*.txt' '*pyproject.toml' \
-  '*Pipfile' '*Gemfile' '*composer.json' '.gitmodules' '*Dockerfile' \
+  '*uv.lock' '*Pipfile' '*Gemfile' '*composer.json' '.gitmodules' '*Dockerfile' \
   '*docker-compose.yml'
 ```
 
@@ -763,6 +764,13 @@ ecosystems, and under `zsh` an unmatched glob like `ls .github/workflows/*.yaml`
 is a **hard error that aborts the whole command line**, so a repo with `.yml`
 workflows can end up reporting no Actions ecosystem at all. `2>/dev/null` does
 not save you — zsh fails before `ls` ever runs.
+
+**A `pyproject.toml` with a `uv.lock` next to it is one `uv` directory, not a
+`pip` entry plus a `uv` entry.** Dependabot's `pip` ecosystem does not update
+`uv.lock`, so a `pip` entry against that directory keeps the manifest current
+while the lockfile — the thing that is actually installed — stays stale, and
+every PR it raises conflicts with the lock. Classify the directory as `uv` and
+nothing else; a `pyproject.toml` with no `uv.lock` beside it stays `pip`.
 
 If **nothing** is detected, say there is nothing to scaffold; do not guess an
 ecosystem. Still report alerts/settings through the selected provider's path.
@@ -812,8 +820,8 @@ MANIFESTS
 | Manifest                | Ecosystem | Ownership                                        |
 |--------------------------|-----------|---------------------------------------------------|
 | pyproject.toml (root)   | pip       | repo-owned                                       |
-| .anvil/pyproject.toml   | pip       | installer-owned (anvil); use $repo-update-tools  |
-| .anvil/uv.lock          | pip       | installer-owned (anvil); use $repo-update-tools  |
+| .anvil/pyproject.toml   | uv        | installer-owned (anvil); use $repo-update-tools  |
+| .anvil/uv.lock          | uv        | installer-owned (anvil); use $repo-update-tools  |
 | package.json (root)     | npm       | repo-owned — but dependency-free (see below)     |
 ```
 
@@ -914,7 +922,7 @@ PR is how a risk-bearing dependency slips through unreviewed.
 | Ecosystem | Policy | Why |
 |---|---|---|
 | `github-actions` | group everything, majors included | low-risk, individually reviewing them is noise |
-| package ecosystems (`npm`, `cargo`, `pip`, …) | group minor + patch; **majors ungrouped** | a breaking change deserves its own reviewable PR |
+| package ecosystems (`npm`, `cargo`, `pip`, `uv`, …) | group minor + patch; **majors ungrouped** | a breaking change deserves its own reviewable PR |
 
 **Ask which dependencies are risk-bearing** rather than applying one policy to
 everything — deps coupled to an external binary or service (e.g.
@@ -957,6 +965,19 @@ updates:
         exclude-patterns: ["playwright-core"]   # risk-bearing → its own PR
         update-types: ["minor", "patch"]
     # majors are deliberately ungrouped: one reviewable PR each
+
+  - package-ecosystem: "uv"                 # pyproject.toml + uv.lock → uv, never pip
+    directory: "/tools/lab"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 14
+    groups:
+      uv-minor-patch:
+        patterns: ["*"]
+        exclude-patterns: ["onnxruntime"]       # native runtime coupling → its own PR
+        update-types: ["minor", "patch"]
+    # majors ungrouped here too
 ```
 
 For an ecosystem step 2 found in several directories, use the plural
@@ -1045,7 +1066,8 @@ land within minutes rather than on the stated interval.
 ### 8. Classify each PR
 
 For every PR report: **ecosystem**, **update type** (major vs minor/patch —
-majors flagged), **CI status**, **whether it's stale** (the manifest on the
+majors flagged), **CI status** (one of `green`, `red`, `pending`, or `none` —
+see the two CI sub-steps below), **whether it's stale** (the manifest on the
 base branch already satisfies it — see the sub-step below), **whether another
 open PR supersedes it** (see "Sibling supersession" below), and what actually
 changed.
@@ -1099,6 +1121,68 @@ PRs — added in response to issue #231, after the first docker Dependabot PR
 merged on a green check that had built nothing. Re-check this note against
 the workflow files each run rather than trusting this parenthetical, since
 either side of it can drift.)
+
+#### CI `none` — the repo has no workflows at all
+
+`pending` means checks exist and have not finished. `none` means **there are
+no checks to wait for**: the repo has no `.github/workflows/` (step 2's
+`git ls-files '.github/workflows/*'` probe comes back empty), so every bot PR
+sits with no checks reported, and `gh pr checks <N>` lists nothing rather than
+a failure. Report it as `none` — never as `green` (nothing passed), never as
+`pending` (nothing will ever finish), and not under the caveat above either
+(there is no check to be unverifiable). It is a fourth value, distinct from
+the three states a repo with workflows can produce.
+
+Substitute a **local check of the PR head** for every PR step 9 proposes to
+merge — only those, not the whole queue. Fetch the head into a temporary
+worktree and run the ecosystem's build or check command from the directory
+that holds the manifest the PR touches:
+
+```bash
+git fetch origin "pull/<N>/head:deps-pr-<N>"
+git worktree add "$SCRATCH/deps-pr-<N>" "deps-pr-<N>"
+( cd "$SCRATCH/deps-pr-<N>/<manifest dir>" && <ecosystem command> )
+git worktree remove "$SCRATCH/deps-pr-<N>" && git branch -D "deps-pr-<N>"
+```
+
+| Ecosystem | Local check |
+|---|---|
+| `cargo` | `cargo check --locked`, plus `cargo test --locked` when the crate has tests |
+| `uv` | `uv sync --locked && uv run python -m compileall -q .` |
+| `pip` | `pip install -r requirements.txt` into a fresh venv, then `python -m compileall -q .` |
+| `npm` | `npm ci && npm run build` (or `pnpm install --frozen-lockfile && pnpm build`) |
+| `gomod` | `go build ./... && go vet ./...` |
+| `github-actions`, `docker` | nothing cheap to run locally — record `none; unverified` |
+
+Record the outcome in the `CI` column as `none; local <command> ok` or
+`none; local <command> failed`, naming the command that ran, so a reader can
+tell a PR that was checked from one that merely had no checks:
+
+```
+| PR  | Ecosystem | Update             | Type  | CI                              | Note                                  |
+|-----|-----------|--------------------|-------|---------------------------------|---------------------------------------|
+| #2  | cargo     | rand 0.8 → 0.9     | MAJOR | none; local cargo check failed  | `rand::distributions` removed in 0.9  |
+| #3  | cargo     | base64 0.22 → 0.23 | MAJOR | none; local cargo check ok      |                                       |
+| #4  | uv        | 3 packages (patch) | patch | none; local uv sync ok          | grouped                               |
+```
+
+`none; local … failed` is handled exactly like red CI in step 9. The run
+behind this guidance had three first-scan majors on a repo with no workflows;
+one of them did not compile, and only the local check caught it — the title
+and the diff looked like the other two.
+
+Carry the state into the summary line as its own clause so callers (including
+`$repo-all`) repeat it rather than printing a bare PR count:
+
+```
+3 open, 2 majors, no CI — local checks substituted; add a workflow
+```
+
+And recommend adding CI in the report, naming the ecosystems step 2 detected
+so the reader knows what a minimal workflow has to cover (a `cargo check
+--locked` job per crate, a `uv sync --locked` job for the Python project, …).
+Pointing at the workflow is this command's job; writing one is a separate
+change the owner makes, never something this step scaffolds.
 
 #### Stale check — compare actual dependency state on the current base
 
@@ -1225,6 +1309,14 @@ Propose a merge set and get explicit approval. **Never** merge a major without
 its own separate confirmation, and never merge a PR whose CI is red or pending.
 Every PR classified **superseded by a sibling** in step 8 is proposed for
 closure with a cross-reference, not for merge.
+
+**A PR whose CI is `none` is never merged on its title alone.** The minimum
+is a passing local check of its head from step 8 (`none; local <command>
+ok`); `none; local … failed` is red and `none; unverified` is pending, and
+neither merges. A major still gets its own separate confirmation on top of
+that, as always. Say in the proposal that the evidence is a local check rather
+than CI, and keep recommending a workflow: a local check covers one PR on one
+machine once, where CI covers every PR after it.
 
 #### A lockfile-bearing ecosystem merges one PR at a time
 
@@ -1407,7 +1499,9 @@ natural wrong assumption, and it is safety-relevant:
    Dependabot to update. If every detected ecosystem is installer-owned or
    dependency-free, recommend not scaffolding and say why.
 6. **Never auto-merge a major** — majors get their own confirmation, always.
-   Red or pending CI is never merged.
+   Red or pending CI is never merged, and a PR with no CI at all (`none`) is
+   never merged on its title alone — a passing local check of its head is the
+   minimum.
 7. **Never merge a lockfile-bearing ecosystem's PRs in a batch** — one at a
    time, re-checking each survivor afterwards. Simultaneous `CLEAN` across
    several PRs proves nothing about their mutual compatibility.

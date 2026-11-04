@@ -204,10 +204,10 @@ source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
 loom_test_require_daemon_bin "$HELPERS_DIR" "merge-pr"
 
 CLASSIFIER_FILE="$(mktemp)"
-# `_classify_merge_response` is a single dense line in merge-pr.sh, so it is
-# captured by `print; next` rather than the brace-matching
-# error_head_moved needs — the same split test-merge-pr-head-sync-retry.sh makes
-# for _refresh_precondition_sha.
+# `_classify_merge_response` is a single dense line (merge-pr.sh is
+# ratchet-frozen and `shell-budget --check` refuses any growth of the portable
+# pool), so it is captured by `print; next` rather than the brace-matching
+# error_head_moved needs.
 awk '
   /^error_head_moved\(\) \{/ { capture_error=1; capture_error_open=1 }
   capture_error { print; if (/^}/) capture_error=0 }
@@ -375,27 +375,6 @@ retired "the awk source-order scan asserting _is_head_mismatch_response appeared
   "Both greps are gone. There is no longer a pair of 'if' blocks whose relative order decides the route: merge-pr.sh classifies ONCE into a route token, and the precedence lives in a single ordered 'match' in loom-daemon/src/merge_pr/response.rs::classify. The two arms in the loop now test disjoint string values, so reordering them cannot change any outcome — the property this scan protected has become unrepresentable rather than merely guarded. (A source scan could not have asserted it anyway once the matchers left the file.)" \
   "loom-daemon/src/merge_pr/response/tests.rs::head_mismatch_wins_over_base_modified and ::merge_in_progress_wins_over_everything assert the precedence directly, in both textual orders; loom-daemon/tests/merge_pr_response_differential.rs replays every ORDERED PAIR of the five markers under three separators against the frozen retired grep ladder (tests/fixtures/merge-pr-response-retired.sh) and additionally proves, in swapping_the_two_sha_routes_would_be_caught, that its corpus distinguishes the correct ladder from a reordered one. Part 2 of THIS suite drives the same precedence through the real binary via _classify_merge_response. Strictly stronger: the scan checked where a line SAT; these check what the classifier ANSWERS."
 
-# The `--auto` path no longer has a retry loop of its own (#8410); instead it
-# detects a head that moved DURING its check-settle wait, proactively, before
-# the merge call — a window the armed queue could not see at all. Assert that
-# re-validation exists and routes to the same exit-3 re-queue signal.
-_reval_body="$(awk '/^_revalidate_merge_guards\(\) \{/{f=1} f; f && /^}/{exit}' "$MERGE_PR_SRC")"
-retired "the grep for the in-shell 'fresh_sha\" != \"\$MERGE_PRECONDITION_SHA' comparison" \
-    "--auto compares the post-wait head against \$MERGE_PRECONDITION_SHA" \
-    "the comparison left merge-pr.sh in the #8191 revalidate-head slice; it is Rust in loom-daemon/src/merge_pr/revalidate_head.rs, so no grep of this file can pass" \
-    "loom-daemon/tests/merge_pr_revalidate_head_differential.rs (frozen retired comparison vs the verb), a_moved_head_reports_the_fresh_sha in src/merge_pr/revalidate_head/tests.rs, and test-merge-pr-auto-blocked-settle.sh AC3 (behavioural: exit 3 naming both SHAs)"
-TESTS_RUN=$((TESTS_RUN + 1))
-# Here-strings, never pipes: `grep -q` exits on first match and would SIGPIPE
-# the producer under `set -o pipefail` (#7771 class).
-if grep -qF -- 'merge-pr revalidate-head --precondition-sha "${MERGE_PRECONDITION_SHA:-}"' <<<"$_reval_body" && \
-   grep -qF -- 'error_head_moved' <<<"$_reval_body"; then
-    TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "  ${GREEN}PASS${NC}: --auto re-reads the head after its wait and routes a move to error_head_moved (exit 3, #8410)"
-else
-    TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "  ${RED}FAIL${NC}: --auto must compare the post-wait head against \$MERGE_PRECONDITION_SHA and call error_head_moved"
-fi
-
 TESTS_RUN=$((TESTS_RUN + 1))
 if grep -q '^#   3 = PR head moved' "$MERGE_PR_SRC"; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
@@ -494,7 +473,7 @@ else
 fi
 
 TESTS_RUN=$((TESTS_RUN + 1))
-if grep -q '^#   5 = --auto' "$MERGE_PR_SRC" \
+if grep -q '^#   5 = held' "$MERGE_PR_SRC" \
    && [[ -f "$EXIT_CODE_DOC" ]] && grep -q '^| `5` |' "$EXIT_CODE_DOC"; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
     echo -e "  ${GREEN}PASS${NC}: exit 5 is documented in merge-pr.sh's header table and the exceptions doc (#8896)"
@@ -525,23 +504,17 @@ else
     echo -e "  ${GREEN}PASS${NC}: no native auto-merge dispatch remains in merge-pr.sh"
 fi
 
-# _head_moved_or_resync() (#8164) is still live — not on the retired native
-# dispatch site, but on the synchronous-merge path every --auto AND plain
-# invocation now shares (#8410 made that path the ONLY merge path). Assert
-# its refusal half directly: the non-retry exit is still error_head_moved()
-# with both SHAs, i.e. exit 3, i.e. a re-queue, never a silent overwrite.
+# The self-sync retry (#8164) is gone with the branch update that caused it (#12063 slice 2): a
+# head-mismatch response in the merge loop is always a foreign move, so it must go straight to
+# error_head_moved() with both SHAs, i.e. exit 3, a re-queue, never a silent overwrite.
 TESTS_RUN=$((TESTS_RUN + 1))
-_hmr_refusal_probe=$(awk '
-  /^_head_moved_or_resync\(\) \{/ { infn=1 }
-  infn && /error_head_moved "PR #\$PR_NUMBER: \$1" "\$MERGE_PRECONDITION_SHA" "\$_CURRENT_HEAD_SHA"/ { print "ok"; exit }
-  infn && /^}$/ { exit }
-' "$MERGE_PR_SRC")
-if [[ "$_hmr_refusal_probe" == "ok" ]]; then
+if grep -q 'error_head_moved "PR #\$PR_NUMBER: \$MERGE_RESPONSE" "\$MERGE_PRECONDITION_SHA"' "$MERGE_PR_SRC" \
+   && ! grep -q '_head_moved_or_resync' "$MERGE_PR_SRC"; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "  ${GREEN}PASS${NC}: _head_moved_or_resync()'s non-retry path is error_head_moved() with both SHAs (exit 3)"
+    echo -e "  ${GREEN}PASS${NC}: a head-mismatch merge response goes straight to error_head_moved() with both SHAs (exit 3)"
 else
     TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "  ${RED}FAIL${NC}: _head_moved_or_resync() does not end in error_head_moved() — a head move could escape the re-queue path"
+    echo -e "  ${RED}FAIL${NC}: the merge loop's head-mismatch route does not end in error_head_moved() — a head move could escape the re-queue path"
 fi
 
 # ============================================================================

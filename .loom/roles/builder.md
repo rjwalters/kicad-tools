@@ -495,7 +495,7 @@ half-restored main checkout is worse than either extreme. Re-run the check with
 stash rescue ref in one operation, then replay that diff inside your worktree:
 
 ```bash
-./.loom/scripts/check-main-clean.sh --quarantine --label "issue=<N>"   # exit 4 ⇒ quarantined
+./.loom/scripts/check-main-clean.sh --quarantine --allow-no-baseline --label "issue=<N>"   # exit 4 ⇒ quarantined (--allow-no-baseline can also sweep up operator-owned untracked files)
 git -C "<MAIN_ROOT>" stash show -p stash@{0}                           # nothing was discarded
 ```
 

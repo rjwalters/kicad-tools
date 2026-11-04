@@ -62,7 +62,12 @@ here, instead of at step 4 — which also means the branch & worktree review in
 step 3 sees already-pruned remote-tracking refs rather than pruning them
 afterwards.
 
-If the tree is clean, this step is a no-op — go on to step 2.
+If `git status --porcelain` **exits non-zero**, stop and report the error. A
+failed status prints nothing, which is neither clean nor dirty — do not go on to
+step 2 on the strength of empty output. Check the exit code, not just the text.
+
+If the tree is clean (exit 0, empty output), this step is a no-op — go on to
+step 2.
 
 If the tree is dirty, stop and resolve it **first** — everything after this
 step assumes no work can be lost. Before presenting the choice, gather what the
