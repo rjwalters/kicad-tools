@@ -15,6 +15,7 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-04
 
+- **Issue #8255** (closed): Release v0.28.0 blocked: three red main-CI jobs (board 05 strict stock preflight, board 02/03 baselines after #8229/#8230)
 - **PR #8363**: test: re-pin board 02 baseline to 316.57mm after atomic chamfer
 - **PR #8320**: fix(board-05): clean router copper, declare FUSED non-HV, re-issue evidence
 - **Issue #8361** (closed): Board 02 baseline re-pin from #8257 is stale: main gives (22, 83, 20, 316.57) since #8253, Test (extended) still red
