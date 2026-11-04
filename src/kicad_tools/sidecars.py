@@ -54,6 +54,8 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 __all__ = [
+    "PROJECT_SIDECAR_SUFFIXES",
+    "copy_project_sidecars",
     "NET_CLASS_MAP_SIDECAR_BASENAME",
     "first_existing_net_class_map_sidecar",
     "net_class_map_sidecar_candidates",
@@ -171,3 +173,46 @@ def _candidate_paths(
             seen.add(candidate)
             candidates.append(candidate)
     return candidates
+
+
+#: DRC-relevant project sidecars that travel with a ``.kicad_pcb``.
+PROJECT_SIDECAR_SUFFIXES = (".kicad_pro", ".kicad_dru")
+
+
+def copy_project_sidecars(src_pcb: Path | str, dst_pcb: Path | str) -> list[Path]:
+    """Carry ``<src>.kicad_pro`` / ``.kicad_dru`` to ``<dst>.*`` verbatim (#8366).
+
+    A command that writes ``-o OUT.kicad_pcb`` must not strand the input's
+    project rules: later ``kicad-cli`` DRC runs would silently fall back to
+    KiCad's default rules.  Behaviour:
+
+    * no-op when ``dst`` is the same file as ``src`` (same directory + stem),
+    * a missing source sidecar is skipped (no error),
+    * an existing destination sidecar is never overwritten: a differing one
+      is kept (it may be newer / hand-edited) and a one-line note goes to
+      stderr; an identical one is left alone.
+
+    Returns the destination paths that were written.
+    """
+    import shutil
+    import sys
+
+    src, dst = Path(src_pcb), Path(dst_pcb)
+    if src.resolve().with_suffix("") == dst.resolve().with_suffix(""):
+        return []
+    written: list[Path] = []
+    for suffix in PROJECT_SIDECAR_SUFFIXES:
+        s, d = src.with_suffix(suffix), dst.with_suffix(suffix)
+        if not s.is_file():
+            continue
+        if d.exists() or d.is_symlink():
+            if d.is_file() and d.read_bytes() != s.read_bytes():
+                print(
+                    f"note: kept existing {d} (differs from {s}); not overwritten",
+                    file=sys.stderr,
+                )
+            continue
+        d.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(s, d)
+        written.append(d)
+    return written
