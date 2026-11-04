@@ -490,6 +490,7 @@ def _run_drc_error_count_by_category(
     manufacturer: str,
     layers: int,
     copper_oz: float,
+    min_clearance_mm: float | None = None,
 ) -> dict[str, int]:
     """Run DRC and return a dict of error counts keyed by rule id.
 
@@ -502,7 +503,16 @@ def _run_drc_error_count_by_category(
     optimizer trades a ``clearance_segment_segment`` violation for a
     ``clearance_pad_segment`` one (a route crossing a pad), the total
     is unchanged but the pad-violation category went up.
+
+    Issue #8367: ``min_clearance_mm`` is the clearance the board's own DRC
+    enforces (``.kicad_pro`` / ``.kicad_dru`` / netclasses).  The scratch
+    copy this function checks has no project files beside it, so without
+    it the referee holds the board to the ``manufacturer`` preset, which is
+    stricter than kicad-cli on a board authored to a tighter rule (+251
+    clearance errors where kicad-cli counted +2).
     """
+    from dataclasses import replace
+
     from kicad_tools.schema.pcb import PCB
     from kicad_tools.validate import DRCChecker
 
@@ -518,6 +528,8 @@ def _run_drc_error_count_by_category(
             layers=layers,
             copper_oz=copper_oz,
         )
+        if min_clearance_mm is not None and min_clearance_mm > 0:
+            checker.design_rules = replace(checker.design_rules, min_clearance_mm=min_clearance_mm)
         # Check clearances and dimensions (the DRC categories relevant to
         # trace optimization -- silkscreen and edge clearance are unaffected
         # by segment reshaping)
@@ -995,6 +1007,7 @@ def optimize_pcb(
             manufacturer=config.drc_manufacturer,
             layers=config.drc_layers,
             copper_oz=config.drc_copper_oz,
+            min_clearance_mm=config.drc_clearance_mm,
         )
         stats.drc_errors_before = baseline_counts["__total__"]
 
@@ -1078,6 +1091,7 @@ def optimize_pcb(
             manufacturer=config.drc_manufacturer,
             layers=config.drc_layers,
             copper_oz=config.drc_copper_oz,
+            min_clearance_mm=config.drc_clearance_mm,
         )
         full_errors = full_counts["__total__"]
         baseline_errors = baseline_counts["__total__"]
@@ -1115,6 +1129,7 @@ def optimize_pcb(
                     manufacturer=config.drc_manufacturer,
                     layers=config.drc_layers,
                     copper_oz=config.drc_copper_oz,
+                    min_clearance_mm=config.drc_clearance_mm,
                 )
 
                 # Issue #3138: a rollback is helpful if it lowers the total
@@ -1178,6 +1193,7 @@ def optimize_pcb(
                         manufacturer=config.drc_manufacturer,
                         layers=config.drc_layers,
                         copper_oz=config.drc_copper_oz,
+                        min_clearance_mm=config.drc_clearance_mm,
                     )
                     if trial_counts["__total__"] <= baseline_errors and not _pad_violations_grew(
                         baseline_counts, trial_counts
