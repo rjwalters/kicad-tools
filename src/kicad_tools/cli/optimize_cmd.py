@@ -15,6 +15,7 @@ exit code unchanged.  See ``docs/reference/machine-output.md``.
 """
 
 import argparse
+import contextlib
 import sys
 from pathlib import Path
 
@@ -43,6 +44,59 @@ def _fail(as_json: bool, pcb: str, message: str, *, text: str | None = None) -> 
     return 1
 
 
+@contextlib.contextmanager
+def _deterministic_uuids(pcb_path: Path, net_filter: str | None = None):
+    """Emit reproducible UUIDs for segments/vias the optimizer writes (Issue #8297).
+
+    The seed is derived from the input board bytes and the ``--net`` filter, not
+    a constant: a fixed seed restarts the same UUID stream on every invocation,
+    so re-running on an already-optimized board with ``--net`` handed the
+    filtered net UUIDs other nets still held from the first run (duplicates).
+    The same input and flags still give the same output.
+
+    The post-write kicad-cli refill (#8286) re-saves the board with items
+    ordered by UUID, so random UUIDs made the written ``(segment ...)`` order
+    -- and therefore the file -- differ run to run.  Seeds the global
+    ``random`` module (what the router's deterministic-UUID mode consumes) and
+    restores both it and the toggle afterwards.
+    """
+    import hashlib
+    import random
+
+    from kicad_tools.router.primitives import (
+        enable_deterministic_uuids,
+        is_deterministic_uuids_enabled,
+    )
+
+    prev_enabled = is_deterministic_uuids_enabled()
+    prev_state = random.getstate()
+    digest = hashlib.sha256(pcb_path.read_bytes())
+    digest.update(b"\0net-filter\0" + (net_filter or "").encode())
+    random.seed(int.from_bytes(digest.digest()[:8], "big"))
+    enable_deterministic_uuids(True)
+    try:
+        yield
+    finally:
+        enable_deterministic_uuids(prev_enabled)
+        random.setstate(prev_state)
+
+
+def _refill_written_board(written: Path) -> tuple[bool, str | None]:
+    """Refill zones in the written board; never raises (Issue #8286).
+
+    Returns ``(refilled, error)``; ``error`` is None on success.
+    """
+    from kicad_tools.cli.runner import run_refill_zones
+
+    try:
+        result = run_refill_zones(written)
+    except Exception as e:  # degrade like check_cmd: warn, exit code unchanged
+        return False, str(e)
+    if result.success:
+        return True, None
+    return False, result.stderr.strip() or "unknown error"
+
+
 def _build_collision_checker(pcb_path: Path):
     """Build a collision checker plus a grid-synced optimize function factory.
 
@@ -61,6 +115,8 @@ def _build_collision_checker(pcb_path: Path):
     with contextlib.redirect_stdout(sys.stderr):
         router, _net_map = load_pcb_for_routing(
             str(pcb_path),
+            rules=_declared_design_rules(pcb_path),
+            router_class_floors=False,
             validate_drc=False,
             load_existing_routes=True,
         )
@@ -82,6 +138,42 @@ def _build_collision_checker(pcb_path: Path):
         clearance = max(float(getattr(router.rules, "trace_clearance", 0.0)), 0.25)
         checker = HoleClearanceChecker(checker, holes, clearance)
     return router, checker
+
+
+def _declared_design_rules(pcb_path: Path):
+    """The board's ``DesignRules`` with the clearance its own DRC enforces (#8269).
+
+    ``load_pcb_for_routing`` reads clearance only from the ``.kicad_pcb``.  A
+    KiCad 6+ board keeps its netclasses in the ``.kicad_pro`` (and custom rules
+    in the ``.kicad_dru``), so the loader fell back to the 0.20 mm dataclass
+    default: the checker then held every rewrite to 0.20 mm on a 0.1016 mm
+    board, refusing moves that stay on existing copper.  The optimizer checks
+    rewrites against the *requirement*, so the base is resolved with a zero
+    target -- the project, DRU and ``project.kct`` fab floor, never raised by
+    a router spacing preference.  The project's stricter named netclasses
+    still become per-net floors in the loader (#6243); the router's own
+    name-based classes do not (``router_class_floors=False``), because KiCad
+    does not enforce them on a board whose files do not declare them.
+    Returns ``None`` (the loader's own behaviour) when the board declares
+    nothing.
+    """
+    from dataclasses import replace
+
+    from kicad_tools.router.clearance_resolver import resolve_routing_clearances
+    from kicad_tools.router.io import parse_pcb_design_rules
+
+    resolved = resolve_routing_clearances(pcb_path, target_mm=0.0)
+    trace_mm = resolved.trace.required_mm
+    via_mm = resolved.via.required_mm
+    if trace_mm <= 0 or via_mm <= 0:
+        return None
+    rules = parse_pcb_design_rules(Path(pcb_path).read_text()).to_design_rules()
+    return replace(
+        rules,
+        trace_clearance=trace_mm,
+        via_clearance=via_mm,
+        grid_resolution=min(rules.grid_resolution, trace_mm / 2),
+    )
 
 
 def _seg_key(seg) -> tuple:
@@ -192,6 +284,11 @@ Examples:
         help="Disable 45-degree corner conversion",
     )
     parser.add_argument(
+        "--no-jogs",
+        action="store_true",
+        help="Disable lateral jog removal (sliding short sideways steps to the next corner)",
+    )
+    parser.add_argument(
         "--chamfer-size",
         type=float,
         default=0.5,
@@ -288,6 +385,7 @@ Examples:
         merge_collinear=not args.no_merge,
         eliminate_zigzags=not args.no_zigzag,
         convert_45_corners=not args.no_45,
+        remove_jogs=not args.no_jogs,
         corner_chamfer_size=args.chamfer_size,
         drc_aware=args.drc_aware,
         drc_manufacturer=args.mfr,
@@ -371,13 +469,14 @@ Examples:
         print(f"  - 45 corners: {'yes' if config.convert_45_corners else 'no'}")
         if config.convert_45_corners:
             print(f"    (chamfer size: {config.corner_chamfer_size}mm)")
+        print(f"  - Lateral jog removal: {'yes' if config.remove_jogs else 'no'}")
         if args.drc_aware:
             print(f"  - DRC-aware rollback: yes (mfr={args.mfr})")
         print()
 
     # Run optimization
     try:
-        with spinner("Optimizing traces...", quiet=quiet):
+        with spinner("Optimizing traces...", quiet=quiet), _deterministic_uuids(pcb_path, args.net):
             stats = optimizer.optimize_pcb(
                 str(pcb_path),
                 output_path=args.output,
@@ -393,6 +492,26 @@ Examples:
             f"during optimization: {e}",
             text=f"Error during optimization: {e}",
         )
+
+    # Issue #8286: the rewrite moved copper but the board still carries the
+    # zone fills it was read with; ``kct check`` reads stored fills, so refill
+    # once, after the final write, through the shared kicad-cli path.
+    zones_refilled: bool | None = None
+    refill_error: str | None = None
+    if not args.dry_run:
+        zones_refilled, refill_error = _refill_written_board(Path(args.output or pcb_path))
+        # --quiet suppresses progress, not a warning that the written file is
+        # inconsistent; JSON mode reports it via ``zones_refilled`` instead.
+        if zones_refilled is False and not as_json:
+            print(
+                "WARNING: zones were NOT refilled "
+                f"({refill_error}); the written board carries stale zone fills "
+                "and `kct check` may report phantom clearance_segment_zone "
+                "errors.  Fix with: kct check --refill-zones, or "
+                "kicad-cli pcb drc --refill-zones --save-board <pcb> "
+                "(issue #8286).",
+                file=sys.stderr,
+            )
 
     if as_json:
         emit_json(
@@ -447,6 +566,8 @@ Examples:
                 "dry_run": args.dry_run,
                 "saved": not args.dry_run,
                 "written_to": None if args.dry_run else (args.output or str(pcb_path)),
+                "zones_refilled": zones_refilled,
+                "zones_refill_error": refill_error,
                 "success": True,
             }
         )
@@ -530,6 +651,11 @@ Examples:
             print(f"Saved to: {args.output}")
         else:
             print(f"Updated: {pcb_path}")
+
+        if zones_refilled:
+            print("Zones refilled via kicad-cli")
+        elif zones_refilled is False:
+            print("Zones NOT refilled (stale fill; see warning above)")
 
         print("=" * 50)
 

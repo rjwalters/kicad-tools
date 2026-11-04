@@ -326,15 +326,26 @@ under `--prune` exactly as it does without it. A branch wrongly kept costs one
 line of report noise; a branch wrongly deleted costs the work.
 
 For each worktree about to be removed, refuse if it has uncommitted changes —
-that work exists nowhere else:
+that work exists nowhere else. A `git status` that **exits non-zero** (a broken
+submodule gitfile, a corrupt index, a locked repo) prints nothing, which is not
+"clean": it is the same 5c failure as every other arm, so the worktree is
+UNKNOWN / KEEP and is never removed:
 
 ```bash
-if [ -n "$(git -C <path> status --porcelain)" ]; then
+rc=0; wt_status=$(git -C <path> status --porcelain 2>&1) || rc=$?
+if [ "$rc" -ne 0 ]; then
+  echo "KEEP <path>: unverifiable: git status failed ($wt_status)"   # UNKNOWN
+elif [ -n "$wt_status" ]; then
   echo "SKIP <path>: uncommitted changes — resolve before removing"
 else
   git worktree remove <path>          # no --force; only remove clean worktrees
 fi
 ```
+
+If the operator wants to retry past a submodule problem, `git status
+--porcelain --ignore-submodules=all` may be offered in the report as an
+explicit, operator-chosen retry — named as a fallback that hides submodule
+state. Never apply it implicitly.
 
 Then delete the branches that passed the loss check. **Which flag to use follows
 from the branch's step-4 tag, never from what git happens to accept:**

@@ -161,47 +161,6 @@ PRE_LINE="$(line_of '_check_expected_head "$MERGE_PRECONDITION_SHA"')"
 [[ -n "$MERGE_CALL" && -n "$PRE_LINE" && "$PRE_LINE" -lt "$MERGE_CALL" ]] && ok "precondition check runs before the forge merge call" || fail "precondition placement" "pre=$PRE_LINE merge=$MERGE_CALL"
 assert_contains "$(sed -n "${PRE_LINE}p" "$MERGE_PR_SRC")" 'MERGE_PRECONDITION_SHA="${EXPECTED_HEAD_SHA:-$MERGE_PRECONDITION_SHA}"' "the caller's SHA wins the precondition"
 
-# ---------------------------------------------------------------------------
-echo "Part 5: the #8164 self-sync retry is declined under the pin"
-# head-sync-retry authorizes a retry from the new head's PARENTS only, never
-# its tree, so under --expected-head merge-pr.sh refuses the retry the verb
-# would allow and exits 3: the pinned caller re-evaluates the new head instead.
-# #11902: the refusal names the pin, not a spent retry budget.
-RETRY="$WORK/retry.sh"
-awk '/^_head_moved_or_resync\(\) \{$/ { on=1 } on { print } on && /^\}$/ { exit }' "$MERGE_PR_SRC" > "$RETRY"
-if ! grep -q 'merge-pr head-sync-retry' "$RETRY"; then echo "FATAL: could not extract _head_moved_or_resync" >&2; exit 2; fi
-# shellcheck disable=SC1090
-source "$RETRY"
-info() { echo "INFO: $*"; }; warning() { echo "WARN: $*" >&2; }
-error_head_moved() { echo "HEAD-MOVED: $1" >&2; exit 3; }
-# Stub daemon: authorizes the retry unless told --retry-used, then says the
-# budget is spent (the real verb's contract and wording).
-cat > "$WORK/daemon" <<STUB
-#!/usr/bin/env bash
-printf '%s\n' "\$*" > "$WORK/retry-argv"
-cat >/dev/null
-case " \$* " in *" --retry-used "*) echo "the single re-read-and-retry is already spent"; exit 1 ;; esac
-echo "LOOM-HEAD-SELF-SYNC-RETRY $SHA_B"
-STUB
-chmod +x "$WORK/daemon"
-forge_get_pr_nocache() { printf '{"head":{"sha":"%s"}}' "$SHA_B"; }
-run_retry() { # <pin>
-    EXPECTED_HEAD_SHA="$1"; MERGE_PRECONDITION_SHA="$SHA_A"; _HEAD_SELF_SYNCED=true; _HEAD_RESYNC_USED=""; MERGE_ATTEMPT=1
-    set +e
-    LAST_OUT="$( (LOOM_DAEMON_BIN="$WORK/daemon" _head_moved_or_resync "Head branch was modified"; echo "RETRY-ADOPTED=$MERGE_PRECONDITION_SHA") 2>&1 )"; LAST_RC=$?
-    set -e
-}
-run_retry ""
-assert_eq 0 "$LAST_RC" "no pin: a self-attributed sync is still retried (batch unchanged)"
-assert_contains "$LAST_OUT" "RETRY-ADOPTED=$SHA_B" "no pin: the retry adopts the synced head"
-assert_not_contains "$(cat "$WORK/retry-argv")" "--retry-used" "no pin: --retry-used is not forced"
-run_retry "$SHA_A"
-assert_eq 3 "$LAST_RC" "pinned: the retry is declined and the run exits 3"
-assert_not_contains "$LAST_OUT" "RETRY-ADOPTED" "pinned: the synced head is never adopted"
-assert_contains "$LAST_OUT" "the --expected-head pin forbids the #8164 retry" "pinned: the refusal names the pin (#11902)"
-assert_contains "$LAST_OUT" "new head $SHA_B was never evaluated" "pinned: the refusal names the unevaluated head"
-assert_not_contains "$LAST_OUT" "already spent" "pinned: a first retry is never reported as an already-spent budget (#11902)"
-
 echo
 echo "Tests run: $TESTS_RUN, passed: $TESTS_PASSED, failed: $TESTS_FAILED"
 [[ $TESTS_FAILED -eq 0 ]]

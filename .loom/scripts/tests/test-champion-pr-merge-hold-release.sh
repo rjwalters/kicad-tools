@@ -86,6 +86,7 @@ gh() {
     case "$1 $2" in
         "pr view") printf '%s\n' "$FIX_PR" ;;
         "pr edit") echo "EDIT $*" >>"$STUB_LOG" ;;
+        "api repos/{owner}/{repo}/pulls/"*) echo "false false" ;;   # #13534: live state re-read: open
         "api repos/{owner}/{repo}/issues/"*)
             [[ "${FIX_EVENTS_FAIL:-0}" == 1 ]] && return 1
             local filter="" a

@@ -5302,6 +5302,7 @@ def load_pcb_for_routing(
     min_trace_width_floor: float | None = None,
     placement_disposition: RoutingPlacementDisposition | None = None,
     project_path: str | Path | None = None,
+    router_class_floors: bool = True,
 ) -> tuple[Autorouter, dict[str, int]]:
     """
     Load a KiCad PCB file and create an Autorouter with all components.
@@ -5314,6 +5315,12 @@ def load_pcb_for_routing(
             missing project keeps the legacy (floor-free) rules; a project
             whose stricter netclasses cannot be resolved raises
             :class:`~kicad_tools.core.project_clearance.ProjectClearanceError`.
+        router_class_floors: Merge the router's own (name-classified) net
+            classes into the per-net clearance floors (Issue #6427). Right for
+            copper ``kct route`` lays and writes those classes for. A tool that
+            checks edits to an existing board against what *its* files declare
+            (``kct optimize-traces``, Issue #8269) passes ``False``: the
+            project's own named classes still become floors (#6243).
         placement_disposition: Optional precomputed placement exclusion. Only
             its invalid nets are removed from targets (selection remains the
             caller's responsibility). Excluded pads and authored copper remain
@@ -5953,12 +5960,13 @@ def load_pcb_for_routing(
     # the #6243 per-net floors so the search, the native validator's stored
     # copper and the trace optimizer enforce the same pair rule -- not just
     # the routing net's own clearance.
-    rules = merge_named_floors(
-        rules,
-        class_clearances_by_name(net_class_map, clearance_base(rules)),
-        net_map,
-        components,
-    )
+    if router_class_floors:
+        rules = merge_named_floors(
+            rules,
+            class_clearances_by_name(net_class_map, clearance_base(rules)),
+            net_map,
+            components,
+        )
     # Issue #6449: the lattice's static pad masks grow by the designer floors
     # alone; the router-class pad side is held by #6395's class-pad repair.
     rules = replace(
