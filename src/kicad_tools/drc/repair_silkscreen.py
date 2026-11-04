@@ -1,4 +1,4 @@
-"""Silkscreen repair: line widths and text heights.
+"""Silkscreen repair: line widths, text heights and pad clearance.
 
 Walks the raw SExp tree to find silkscreen graphic elements (fp_line, fp_rect,
 fp_circle, fp_arc, fp_poly, gr_line, gr_rect, gr_circle, gr_arc) whose stroke width is
@@ -8,6 +8,10 @@ Also walks text elements (fp_text, property, gr_text) on silkscreen layers and
 scales undersized font heights (and proportionally widths/thickness) up to the
 manufacturer minimum.
 
+Finally, :meth:`SilkscreenRepairer.repair_pad_clearance` clips footprint
+``fp_line`` silk strokes back from same-side pad apertures, using the same
+geometry as the ``silk_pad_clearance`` check so the fix and the check agree.
+
 This operates on the raw SExp tree (not the read-only schema dataclasses) so
 that modifications can be written back to disk, following the same pattern as
 ``repair_clearance.py`` and ``fix_vias_cmd.py``.
@@ -15,6 +19,9 @@ that modifications can be written back to disk, following the same pattern as
 
 from __future__ import annotations
 
+import copy
+import math
+import uuid as _uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -87,6 +94,55 @@ class TextHeightRepairResult:
     @property
     def total_fixed(self) -> int:
         return len(self.fixes)
+
+
+@dataclass
+class PadClearanceFix:
+    """Record of one ``fp_line`` that was (or would be) trimmed or removed."""
+
+    footprint_ref: str
+    element_type: str  # always "fp_line" today
+    layer: str
+    action: str  # "trimmed" or "removed"
+    old_length: float
+    new_length: float  # total length of the kept part(s); 0.0 when removed
+    pieces: int = 0  # number of fp_line segments left in the file
+
+
+@dataclass
+class PadClearanceSkip:
+    """A violating element left alone (e.g. a pin-1 / polarity marker)."""
+
+    footprint_ref: str
+    element_type: str
+    layer: str
+    reason: str
+
+
+@dataclass
+class PadClearanceRepairResult:
+    """Aggregate result of a silk-to-pad clearance repair pass."""
+
+    min_clearance_mm: float = 0.0
+    fixes: list[PadClearanceFix] = field(default_factory=list)
+    skipped: list[PadClearanceSkip] = field(default_factory=list)
+
+    @property
+    def total_fixed(self) -> int:
+        return len(self.fixes)
+
+
+# Extra margin (mm) added to the keep-out so clipped endpoints land strictly
+# on the clear side of the check's tolerance despite polygonal buffers.
+_CLIP_EPSILON_MM = 1e-3
+
+_FP_GRAPHIC_KINDS = {
+    "fp_line": "line",
+    "fp_rect": "rect",
+    "fp_circle": "circle",
+    "fp_arc": "arc",
+    "fp_poly": "poly",
+}
 
 
 class SilkscreenRepairer:
@@ -197,6 +253,177 @@ class SilkscreenRepairer:
                 )
 
         return result
+
+    def repair_pad_clearance(
+        self,
+        min_clearance_mm: float,
+        dry_run: bool = False,
+    ) -> PadClearanceRepairResult:
+        """Trim or remove footprint silk lines too close to same-side pads.
+
+        Uses the geometry of the ``silk_pad_clearance`` check (stroke buffered
+        by half its width versus the pad's mask aperture), so a clipped line
+        no longer trips that check.  A line that crosses the limit is
+        shortened to its clear part(s) (a line cut in the middle becomes two
+        lines); a line wholly inside the limit is removed.  Elements the
+        ``pin1_marker`` rule accepts as the footprint's pin-1 / polarity mark
+        are never edited and are reported in ``result.skipped``.  Only
+        ``fp_line`` strokes are clipped.
+
+        Args:
+            min_clearance_mm: Required silk-to-pad clearance in mm.
+            dry_run: If ``True``, collect fixes but do not mutate the tree.
+        """
+        from kicad_tools._shapely import require_shapely
+
+        require_shapely("silk pad clearance repair")
+        from shapely.geometry import LineString  # type: ignore[import-untyped]
+        from shapely.ops import unary_union  # type: ignore[import-untyped]
+        from shapely.strtree import STRtree  # type: ignore[import-untyped]
+
+        from kicad_tools.schema.pcb import Footprint, FootprintGraphic
+        from kicad_tools.validate.rules.clearance import _pad_polygon
+        from kicad_tools.validate.rules.pin1_marker import Pin1MarkerRule
+        from kicad_tools.validate.rules.silkscreen import _fp_transform, _silk_side
+
+        result = PadClearanceRepairResult(min_clearance_mm=min_clearance_mm)
+
+        setup = self.doc.find("setup")
+        default_margin = 0.0
+        if setup is not None:
+            node = setup.find("pad_to_mask_clearance")
+            if node is not None and node.get_float(0) is not None:
+                default_margin = float(node.get_float(0))  # type: ignore[arg-type]
+
+        footprints = [(node, Footprint.from_sexp(node)) for node in _find_all_footprints(self.doc)]
+
+        # Pad apertures per side, exactly as check_silk_pad_clearance builds them.
+        per_side: dict[str, list] = {"F": [], "B": []}
+        for _node, fp in footprints:
+            for pad in fp.pads:
+                if pad.type not in ("smd", "thru_hole", "connect"):
+                    continue
+                margin = pad.solder_mask_margin
+                if margin is None:
+                    margin = default_margin
+                copper = _pad_polygon(pad, fp)
+                if copper is None:
+                    continue
+                for side in ("F", "B"):
+                    if "*.Cu" not in pad.layers and f"{side}.Cu" not in pad.layers:
+                        continue
+                    exposed = "*.Mask" in pad.layers or f"{side}.Mask" in pad.layers
+                    geom = copper.buffer(max(margin or 0, 0)) if exposed else copper
+                    if not geom.is_empty:
+                        per_side[side].append(geom)
+        trees = {side: STRtree(geoms) for side, geoms in per_side.items() if geoms}
+        if not trees:
+            return result
+
+        rule = Pin1MarkerRule()
+        for fp_node, fp in footprints:
+            nodes = [
+                n
+                for n in fp_node.children
+                if not n.is_atom
+                and n.name is not None
+                and n.name in _FP_GRAPHIC_KINDS
+                and self._is_silkscreen(n)
+            ]
+            if not any(n.name == "fp_line" for n in nodes):
+                continue
+            graphics = [
+                FootprintGraphic.from_sexp(n, _FP_GRAPHIC_KINDS[str(n.name)]) for n in nodes
+            ]
+            fwd = _fp_transform(fp)
+            theta = math.radians(fp.rotation)  # inverse of the -rotation forward map
+            cos_t, sin_t = math.cos(theta), math.sin(theta)
+
+            def inverse(pt, fp=fp, cos_t=cos_t, sin_t=sin_t):
+                dx, dy = pt[0] - fp.position[0], pt[1] - fp.position[1]
+                return (dx * cos_t - dy * sin_t, dx * sin_t + dy * cos_t)
+
+            markers: set[int] | None = None
+            fp_ref = self._footprint_reference(fp_node)
+            for idx, (node, graphic) in enumerate(zip(nodes, graphics, strict=True)):
+                if node.name != "fp_line" or graphic.stroke_width <= 0:
+                    continue
+                gside = _silk_side(graphic.layer)
+                if gside is None or gside not in trees:
+                    continue
+                p0, p1 = fwd(graphic.start), fwd(graphic.end)
+                if p0 == p1:
+                    continue
+                line = LineString([p0, p1])
+                width = graphic.stroke_width
+                reach = min_clearance_mm + width / 2.0
+                near = trees[gside].query(line.buffer(reach + _CLIP_EPSILON_MM))
+                if len(near) == 0:
+                    continue
+                keepout = unary_union([per_side[gside][int(i)] for i in near]).buffer(
+                    reach + _CLIP_EPSILON_MM, quad_segs=16
+                )
+                if not line.intersects(keepout):
+                    continue
+
+                if markers is None:
+                    markers = rule.marker_graphic_indices(fp, graphics)
+                if idx in markers:
+                    result.skipped.append(
+                        PadClearanceSkip(
+                            footprint_ref=fp_ref,
+                            element_type="fp_line",
+                            layer=graphic.layer,
+                            reason="pin-1 / polarity marker",
+                        )
+                    )
+                    continue
+
+                kept = line.difference(keepout)
+                parts = (
+                    [kept] if kept.geom_type == "LineString" else list(getattr(kept, "geoms", []))
+                )
+                # A sliver shorter than the stroke prints as a blob, not a line.
+                parts = [g for g in parts if not g.is_empty and g.length >= width]
+                new_length = sum(g.length for g in parts)
+                result.fixes.append(
+                    PadClearanceFix(
+                        footprint_ref=fp_ref,
+                        element_type="fp_line",
+                        layer=graphic.layer,
+                        action="trimmed" if parts else "removed",
+                        old_length=line.length,
+                        new_length=new_length,
+                        pieces=len(parts),
+                    )
+                )
+                if dry_run:
+                    continue
+                self._rewrite_line(fp_node, node, [[inverse(c) for c in g.coords] for g in parts])
+        return result
+
+    @staticmethod
+    def _rewrite_line(parent: SExp, node: SExp, pieces: list[list[tuple[float, float]]]) -> None:
+        """Replace ``node`` in ``parent`` by one fp_line per piece (none = delete)."""
+        index = parent.children.index(node)
+        if not pieces:
+            parent.children.pop(index)
+            return
+        originals = [copy.deepcopy(node) for _ in pieces[1:]]
+        targets = [node, *originals]
+        for target, coords in zip(targets, pieces, strict=True):
+            (sx, sy), (ex, ey) = coords[0], coords[-1]
+            start, end = target.find("start"), target.find("end")
+            assert start is not None and end is not None
+            start.set_atom(0, round(sx, 6))
+            start.set_atom(1, round(sy, 6))
+            end.set_atom(0, round(ex, 6))
+            end.set_atom(1, round(ey, 6))
+        for offset, clone in enumerate(originals, start=1):
+            uid = clone.find("uuid")
+            if uid is not None:
+                uid.set_atom(0, str(_uuid.uuid4()))
+            parent.children.insert(index + offset, clone)
 
     def save(self, output_path: str | Path | None = None) -> None:
         """Write the (possibly modified) SExp tree to disk."""

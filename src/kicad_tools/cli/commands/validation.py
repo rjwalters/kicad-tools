@@ -119,6 +119,8 @@ def run_fix_silkscreen_command(args) -> int:
         sub_argv.extend(["--copper", str(args.copper)])
     if getattr(args, "min_width", None):
         sub_argv.extend(["--min-width", str(args.min_width)])
+    if getattr(args, "clip_to_pads", False):
+        sub_argv.append("--clip-to-pads")
     if args.output:
         sub_argv.extend(["-o", args.output])
     if args.dry_run:
