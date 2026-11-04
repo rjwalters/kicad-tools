@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import heapq
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -57,8 +57,10 @@ __all__ = [
     "LinkTerminal",
     "append_link_route",
     "append_link_routes",
+    "explain_link_failure",
     "padless_components",
     "route_link",
+    "route_link_via",
 ]
 
 #: Route endpoints land at least this far inside the terminal copper (mm).
@@ -440,11 +442,16 @@ def route_link(
     rules: LinkRouteRules,
     *,
     model: _BoardModel | None = None,
+    allowed_layers: Collection[str] | None = None,
 ) -> LinkRoute | None:
     """Route copper from terminal ``a`` to terminal ``b`` on net ``net_number``.
 
     Returns ``None`` when no clearance-legal route exists inside the search
     window (or the window would exceed ``rules.max_cells``).
+
+    ``allowed_layers`` (Issue #8310) restricts the link to those copper
+    layers: tracks and vias keep off every other layer, and a terminal only
+    bonds on an allowed layer.  ``None`` keeps every layer.
     """
     import numpy as np
     import shapely
@@ -504,6 +511,8 @@ def route_link(
             blocked[li] |= mask_of(foreign.buffer(c + half_w + 0.005))
         if inside is not None:
             blocked[li] |= ~inside
+        if allowed_layers is not None and layer not in allowed_layers:
+            blocked[li] = True
         fills = [
             poly
             for net, poly in model.fills.get(layer, [])
@@ -654,6 +663,139 @@ def route_link(
                 if p.distance(foreign) < c + rules.via_size / 2 - 1e-4:
                     return None
     return route
+
+
+def _via_site_blocker(
+    model: _BoardModel, net_number: int, site: tuple[float, float], rules: LinkRouteRules
+) -> str | None:
+    """Why a through via cannot sit at ``site`` (board-relative), or ``None``.
+
+    The same legality :func:`route_link` applies to its own vias: clear of
+    foreign copper on every layer, of every pad, of every drill and of the
+    board edge.
+    """
+    from shapely.geometry import Point
+
+    p = Point(site)
+    for it in model.items:
+        if it.net == net_number:
+            continue
+        need = rules.clearance_for(it.net) + rules.via_size / 2
+        for layer, geom in it.layers.items():
+            if p.distance(geom) < need - 1e-4:
+                return f"via site is {p.distance(geom):.3f} mm from foreign copper on {layer} (needs {need:.3f} mm)"
+    for geom in model.pad_geoms:
+        if p.distance(geom) < rules.via_size / 2 + 0.05 - 1e-4:
+            return "via site is inside or against a pad (no via-in-pad)"
+    for dx, dy, dd in model.drills:
+        need = dd / 2 + rules.via_drill / 2 + rules.hole_to_hole + COORD_WRITE_GUARD_MM
+        if p.distance(Point(dx, dy)) < need - 1e-4:
+            return "via site violates the hole-to-hole rule against an existing drill"
+    if model.outline is not None and not model.outline.buffer(
+        -(rules.edge_clearance + rules.via_size / 2)
+    ).covers(p):
+        return "via site is too close to the board edge"
+    return None
+
+
+def route_link_via(
+    pcb: PCB,
+    net_number: int,
+    net_name: str,
+    a: LinkTerminal,
+    b: LinkTerminal,
+    via_at: tuple[float, float],
+    rules: LinkRouteRules,
+    *,
+    model: _BoardModel | None = None,
+    allowed_layers: Collection[str] | None = None,
+) -> LinkRoute | None:
+    """Route ``a`` -> forced via at ``via_at`` -> ``b`` (Issue #8310).
+
+    The search is split in two legs, each a :func:`route_link` call from a
+    terminal to the via's own copper, so every rule ``route_link`` applies
+    holds on both legs.  Returns ``None`` if the site is illegal or either leg
+    has no route.  ``via_at`` is board-relative (snapped to the 0.01 mm the
+    board writer keeps).
+    """
+    from shapely.geometry import Point
+
+    model = model or _build_model(pcb)
+    site = (round(via_at[0], 2), round(via_at[1], 2))
+    if _via_site_blocker(model, net_number, site, rules) is not None:
+        return None
+    layers = [layer for layer in model.copper if allowed_layers is None or layer in allowed_layers]
+    if len(layers) < 2:
+        return None  # a via needs two layers it may connect
+    disk = Point(site).buffer(rules.via_size / 2)
+    vt = LinkTerminal("via", site, dict.fromkeys(layers, disk))
+    leg1 = route_link(pcb, net_number, net_name, a, vt, rules, model=model, allowed_layers=layers)
+    leg2 = route_link(pcb, net_number, net_name, vt, b, rules, model=model, allowed_layers=layers)
+    if leg1 is None or leg2 is None:
+        return None
+    return LinkRoute(
+        net_number=net_number,
+        net_name=net_name,
+        width=rules.trace_width,
+        via_size=rules.via_size,
+        via_drill=rules.via_drill,
+        segments=leg1.segments + leg2.segments,
+        vias=[*leg1.vias, site, *leg2.vias],
+    )
+
+
+def explain_link_failure(
+    pcb: PCB,
+    net_number: int,
+    a: LinkTerminal,
+    b: LinkTerminal,
+    rules: LinkRouteRules,
+    *,
+    model: _BoardModel | None = None,
+    allowed_layers: Collection[str] | None = None,
+) -> dict[str, Any]:
+    """Why a link did not route (Issue #8310): a terminal fault or a blocker.
+
+    Returns ``{"reason": str}``, plus ``"blocker"`` when foreign copper is the
+    cause: the item nearest the straight ``a``-``b`` line -- net, layer, its
+    distance and the clearance it must keep.  The straight line is a
+    diagnostic yardstick, not the router's path.
+    """
+    from shapely.geometry import LineString, Point
+
+    model = model or _build_model(pcb)
+    for label, t in (("A", a), ("B", b)):
+        usable = [la for la in t.layers if allowed_layers is None or la in allowed_layers]
+        if not usable:
+            return {"reason": f"endpoint {label} ({t.label}) has no copper on the allowed layers"}
+    line = LineString([a.point, b.point]) if a.point != b.point else Point(a.point)
+    half_w = rules.trace_width / 2
+    best: tuple[float, dict[str, Any]] | None = None
+    for it in model.items:
+        if it.net == net_number:
+            continue
+        need = rules.clearance_for(it.net) + half_w
+        for layer, geom in it.layers.items():
+            if allowed_layers is not None and layer not in allowed_layers:
+                continue
+            d = line.distance(geom)
+            slack = d - need
+            if best is None or slack < best[0]:
+                name = getattr(pcb.nets.get(it.net), "name", "") or f"net {it.net}"
+                best = (
+                    slack,
+                    {
+                        "net": name,
+                        "layer": layer,
+                        "kind": "pad" if it.is_pad else "copper",
+                        "distance_mm": round(d, 3),
+                        "required_mm": round(need, 3),
+                    },
+                )
+    out: dict[str, Any] = {"reason": "no clearance-legal route inside the search window"}
+    if best is not None:
+        out["blocker"] = best[1]
+    return out
 
 
 def _octilinear(p: tuple[float, float], q: tuple[float, float]) -> bool:

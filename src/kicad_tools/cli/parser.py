@@ -242,6 +242,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_stitch_parser(subparsers)
     _add_route_stub(subparsers)
     _add_route_auto_parser(subparsers)
+    _add_route_link_parser(subparsers)
     _add_retune_lengths_parser(subparsers)
     _add_reason_parser(subparsers)
     _add_optimize_parser(subparsers)
@@ -4217,6 +4218,17 @@ def _add_retune_lengths_parser(subparsers) -> None:
         help="Provenance JSON path (default: <output>.retune.json)",
     )
     add_format_flag(p)
+
+
+def _add_route_link_parser(subparsers) -> None:
+    """Add route-link subcommand parser (Issue #8310)."""
+    from .route_link_cmd import add_route_link_arguments
+
+    route_link_parser = subparsers.add_parser(
+        "route-link",
+        help="Route individual links between chosen pads/points (with --probe, read-only)",
+    )
+    add_route_link_arguments(route_link_parser)
 
 
 def _add_route_auto_parser(subparsers) -> None:
