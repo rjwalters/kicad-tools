@@ -23,7 +23,7 @@ _None._
 
 `loom:important`; taken before unlabelled work.
 
-_None._
+- **#8361**: Board 02 baseline re-pin from #8257 is stale: main gives (22, 83, 20, 316.57) since #8253, Test (extended) still red
 
 ## Ready
 
@@ -37,15 +37,14 @@ Issues currently being built (`loom:building`).
 
 - **#8267**: Board 05: D3 (C131244 red 0805 LED) shows stock 0 in jlcparts catalog; --strict-preflight bom_lcsc_stock fails
 - **#8278**: Board 05: regeneration/readiness refresh blocked by new ampacity + redundant_copper kct checks
-- **#8313**: pcb prune: break via-closed loops on nets with declared current paths so reinforce can anchor them
-- **#8356**: pcb prune: collinear merge refuses a straight run when a ~0.5 um end mismatch turns its joint into a body overlap
+- **#8361**: Board 02 baseline re-pin from #8257 is stale: main gives (22, 83, 20, 316.57) since #8253, Test (extended) still red
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
 - **#8320**: fix(board-05): clean router copper, declare FUSED non-HV, re-issue evidence
-- **#8359**: fix: let prune merge collinear runs across sub-micron end gaps
+- **#8363**: test: re-pin board 02 baseline to 316.57mm after atomic chamfer
 
 ## Approved (Awaiting Merge)
 
@@ -65,9 +64,8 @@ Issues carrying `loom:curated`.
 - **#8267**: Board 05: D3 (C131244 red 0805 LED) shows stock 0 in jlcparts catalog; --strict-preflight bom_lcsc_stock fails *(curated)*
 - **#8278**: Board 05: regeneration/readiness refresh blocked by new ampacity + redundant_copper kct checks *(curated)*
 - **#8285**: optimize-traces: connectivity check discards a different set of nets across identical runs (nondeterminism) *(curated)*
-- **#8313**: pcb prune: break via-closed loops on nets with declared current paths so reinforce can anchor them *(curated)*
 - **#8327**: route --complete: softstart rev-D loses /V_AC_SENSE_RAW R2.1-C31.1 after #8280 pairwise gate (9/11 -> 7/11 HV nets, link budget overrun) *(curated)*
-- **#8356**: pcb prune: collinear merge refuses a straight run when a ~0.5 um end mismatch turns its joint into a body overlap *(curated)*
+- **#8361**: Board 02 baseline re-pin from #8257 is stale: main gives (22, 83, 20, 316.57) since #8253, Test (extended) still red *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -85,12 +83,12 @@ _None._
 |------|-------|
 | Operator merge-risk holds | 0 |
 | Very important | 0 |
-| Important | 0 |
+| Important | 1 |
 | Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 4 |
+| In Progress (`loom:building`) | 3 |
 | PRs awaiting review | 2 |
 | Approved PRs awaiting merge | 0 |
-| Curated | 11 |
+| Curated | 10 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 3 |
 <!-- guide:plan-body:end -->
