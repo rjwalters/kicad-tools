@@ -1828,6 +1828,8 @@ If EITHER is true, the PR is a **partial increment** of a larger tracked body of
   ```
 
   This is a **minor PR description fix** you should make directly (it does not need a Builder round-trip): edit the body so the keyword is no longer adjacent to the reference — `then close the issue`, or `then close issue #N`. An intervening word breaks the link; moving the phrase to a different line does not.
+
+**EXCEPTION — intentional no-issue PRs.** Some PRs legitimately have no issue (operator-session chore/hygiene work). Do not block one when BOTH hold: (1) the PR body references **no issue number at all** (no `Closes`, `Part of`, `Issue #N`, `Addresses #N`, `Related to #N`), and (2) the PR body, the Builder, or the operator **states** the PR is intentionally issue-less. Record `no linked issue: intentional` in your verdict and skip the missing-closing-keyword check. This requires the stated intent, not mere absence: a PR with no issue reference and no issue-less statement is still blocked as "Unclear which issue to reference". It also does not relax anything for a PR that references an issue with a non-closing word (`Issue #N`, `Addresses #N`, `Related to #N`) — those are handled exactly as above. Do not accept the statement at face value if the diff plainly implements an open issue; then treat the PR as referencing that issue and request the proper reference.
 - Evaluate the code on its own merits and approve/reject normally.
 
 **If PR description is missing "Closes #X" syntax (and the partial-increment exception above does NOT apply):**
@@ -1871,7 +1873,7 @@ EOF
 
 **Approval checklist must include:**
 
-- ✅ PR description uses "Closes #X" (or "Fixes #X" / "Resolves #X") — OR "Part of #X" / "Contributes to #X" for an intentional partial increment of a family/epic issue
+- ✅ PR description uses "Closes #X" (or "Fixes #X" / "Resolves #X") — OR "Part of #X" / "Contributes to #X" for an intentional partial increment of a family/epic issue — OR no issue reference at all with an explicit statement that the PR is intentionally issue-less (record `no linked issue: intentional`)
 - ✅ Issue number is correct and matches the work done
 - ✅ Code quality meets standards (see sections below)
 - ✅ Tests are adequate
@@ -1899,7 +1901,7 @@ For minor documentation issues in PR descriptions (not code), Judges are empower
 - Missing tests or failing CI
 - Code quality issues
 - Architectural concerns
-- Unclear which issue to reference
+- Unclear which issue to reference (an ambiguous reference, or no reference and no intentional-issue-less statement)
 - PR description doesn't match code changes
 - Anything requiring code changes
 

@@ -26,6 +26,7 @@ A comment or review is trusted when its author is:
 | This daemon's own identity | Compared with the same account kind: the user `x` is never the App `x[bot]`. |
 | A login in `forge.trustedCommenters` | An explicit allowlist, same account-kind rule (list `helper[bot]` to allow an App). |
 | A login on the **fleet admin roster**, `fleet/admins.json` in the fleet store | `{"admins": ["rjwalters", "example-admin"]}`, read through the fleet store reader (`fleet.repo`, `fleet.ref`), never from the repo being judged. User accounts only (App-spelled entries are ignored). Applies in every fleet repo (#10303). |
+| An App on the **fleet trusted Apps list**, the optional `apps` key of the same file | `{"apps": ["gateway[bot]"]}`, `name[bot]` spelled; the bare-slug user is not trusted. Applies in every fleet repo (#13545). |
 
 **Another Loom installation's markers are not ours.** A foreign fleet emits
 perfectly well-formed Loom markers; its Apps are not in this roster, so they
@@ -131,6 +132,18 @@ association, Apps and self rules are unchanged.
   behaviour). Each cause is logged once at warn, and
   `TrustPolicy::sources_consulted()` reports `fleet admin roster ...
   (unavailable: <reason>)` for the ignored-marker notice.
+
+### Fleet trusted Apps (#13545)
+
+The same file takes an optional `apps` list: `{"admins": [...], "apps":
+["gateway[bot]"]}`. Each entry is an App login spelled `name[bot]` and is
+trusted in every fleet repo, with the same account-kind rule as
+`forge.trustedCommenters` (the bare-slug user of the same name is **not**
+trusted; non-App-spelled entries are ignored). It is unioned with every other
+source and can only add trust. A missing or non-array `apps` is an empty list
+and does not invalidate a valid `admins`; the fail-closed cases above empty
+both. `sources_consulted()` names the list, and the trust-rules digest includes
+it only when non-empty, so a fleet without it keeps its current digest.
 
 ## Configuration
 

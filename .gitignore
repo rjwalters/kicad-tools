@@ -166,7 +166,7 @@ boards/*/*/output/*.kct.json
 .loom/gh-config-by-owner/
 .loom/gh-config-by-owner.*/
 .loom/gh-config-by-owner-*/
-.loom-local/
+/.loom-local/
 # <<< loom-managed <<<
 
 # pytest-benchmark storage
