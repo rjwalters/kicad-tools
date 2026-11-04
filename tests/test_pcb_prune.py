@@ -338,12 +338,13 @@ def test_snap_moves_a_shared_off_centre_joint_together(tmp_path):
     the centre together, so neither is left joined only by overlap."""
     segs = [
         ((100, 100), (105.1, 100)),
-        ((105.1, 100), (105.1, 105)),
+        # already off the 45-degree set, so moving its end cannot make it worse
+        ((105.1, 100), (105.5, 105)),
     ]
-    p = _board(tmp_path, [("A", 100, 100), ("B", 105.1, 105)], segs, vias=[(105, 100)])
+    p = _board(tmp_path, [("A", 100, 100), ("B", 105.5, 105)], segs, vias=[(105, 100)])
     pcb, res = _run(p)
     ends = [s.end for s in pcb.segments if s.start == (100, 100)] + [
-        s.start for s in pcb.segments if s.end == (105.1, 105)
+        s.start for s in pcb.segments if s.end == (105.5, 105)
     ]
     assert res.stats["ends_snapped"] == 2
     assert ends == [(105, 100), (105, 100)]
@@ -380,9 +381,10 @@ def test_spur_beside_via_is_removed_and_main_diagonal_kept(tmp_path):
     assert res.stats["segments_removed"] == 3
     b_cu = [(s.start, s.end) for s in pcb.segments if s.layer == "B.Cu"]
     assert b_cu == [((105, 100), (110, 105))]
-    # the inner-layer end that sat 0.35 mm off the via centre is snapped on
+    # the inner-layer end that sat 0.35 mm off the via centre is NOT snapped:
+    # that would tilt an on-angle track off the 45-degree set (#8278)
     in1 = [s for s in pcb.segments if s.layer == "In1.Cu"]
-    assert [s.end for s in in1] == [(105, 100)]
+    assert [s.end for s in in1] == [(105, 100.35)]
 
 
 def test_spur_is_kept_when_removal_would_disconnect_the_main_track(tmp_path):
@@ -991,3 +993,14 @@ def test_removal_never_leaves_a_via_joined_on_one_layer(tmp_path):
     p = _board(tmp_path, [("A", 100, 100)], segs, vias=[(105, 100), (100, 105)])
     _pcb, res = _run(p)
     assert res.stats["segments_removed"] == 0
+
+
+def test_snap_never_takes_an_on_angle_track_off_the_45_degree_set(tmp_path):
+    """#8278 (fleet angle census): snapping the end of a horizontal track onto
+    a via centre 0.1 mm away would tilt it ~1 degree; the snap is refused."""
+    segs = [((100, 100), (105, 100))]
+    p = _board(tmp_path, [("A", 100, 100)], segs, vias=[(105, 100.1)])
+    pcb, res = _run(p)
+    assert res.stats["ends_snapped"] == 0
+    (seg,) = pcb.segments
+    assert seg.end == (105, 100)

@@ -762,6 +762,11 @@ def _try_snap(
             return  # a sharer may hide a join: leave the joint alone
         if math.dist(_end_pt(model.nodes[k], 1 - x), c) <= CENTRE_TOL:
             return  # would collapse a segment to zero length
+    for k, x in movers:
+        nk = model.nodes[k]
+        new = (c, nk.b) if x == 0 else (nk.a, c)
+        if _tilts(nk, *new):
+            return  # a snap must not take a track off the 45-degree set
     moved = {k for k, _ in movers}
     touched = set(moved)
     for k in moved:
@@ -805,6 +810,20 @@ def _try_snap(
     for k, (adj_k, anch_k) in saved.items():
         model.adj[k] = adj_k
         model.anch[k] = anch_k
+
+
+def _aligned(a: tuple[float, float], b: tuple[float, float]) -> bool:
+    """Is ``a -> b`` on the 0/45/90/135 set as the fleet census reads it
+    (4-decimal serialized coordinates)?  Zero length counts as aligned."""
+    from kicad_tools.router.quantize import _is_quantum_aligned
+
+    return _is_quantum_aligned(round(b[0], 4) - round(a[0], 4), round(b[1], 4) - round(a[1], 4))
+
+
+def _tilts(n: _Node, a: tuple[float, float], b: tuple[float, float]) -> bool:
+    """Would re-ending segment ``n`` as ``a -> b`` take an on-angle track off
+    the 45-degree set (issue #8278, the fleet angle census)?"""
+    return _aligned(n.a, n.b) and not _aligned(a, b)
 
 
 #: Max perpendicular deviation (mm) for a run to count as one straight line.
@@ -928,6 +947,12 @@ def _plan_collinear_merges(model: _NetModel, plan: NetPlan, removed: set[int]) -
             for x in (0, 1)
         ):
             continue
+        if (
+            _tilts(model.nodes[s], start, far)
+            or any(_aligned(model.nodes[m].a, model.nodes[m].b) for m in run)
+            and not _aligned(start, far)
+        ):
+            continue
         copy = _existing_copy(model, s, start, far, members, removed)
         if copy == -1:
             continue
@@ -1049,6 +1074,10 @@ def _plan_anchored_merges(
             continue
         if any(math.dist(model.nodes[m].a, model.nodes[m].b) < _MICRO_BRIDGE for m in run):
             continue  # a micro-bridge joint stays for optimize-traces (#8298)
+        if any(_aligned(model.nodes[m].a, model.nodes[m].b) for m in run) and not _aligned(
+            start, far
+        ):
+            continue  # a merge must not take an on-angle run off the 45-degree set
         touched: set[int] = set()
         for m in run:
             touched |= model.adj[m] | model.overlap[m]
