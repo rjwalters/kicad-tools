@@ -23,6 +23,7 @@ import pytest
 
 from kicad_tools.cli import route_cmd, route_deadline
 from kicad_tools.router.core import Autorouter
+from tests.test_route_layer_escalation_partial_6322 import _copper_length, _router_copper
 
 _PARTS = {"R1": (10.0, 10.0), "R2": (30.0, 10.0)}
 _NET_OF = {("R1", "1"): 1, ("R2", "1"): 1, ("R1", "2"): 2, ("R2", "2"): 2}
@@ -81,6 +82,7 @@ class _CheckpointThenDeadline:
 
     def __init__(self, monkeypatch, *, deadline_on_call: int):
         self.expected: tuple[int, int] | None = None
+        self.expected_length: float | None = None
         self.checkpoints = 0
         self.calls = 0
         original = Autorouter.route_all_negotiated
@@ -97,7 +99,8 @@ class _CheckpointThenDeadline:
                 return result
             saved_router = route_cmd._interrupt_state["router"]
             assert saved_router is not None, "the flow bound no router for the partial save"
-            self.expected = _copper(saved_router.to_sexp())
+            # Issue #8270: the save merges collinear runs; expect that geometry.
+            self.expected, self.expected_length = _router_copper(saved_router)
             raise route_deadline.RouteDeadlineExpired()
 
         monkeypatch.setattr(Autorouter, "route_all_negotiated", route)
@@ -143,5 +146,7 @@ def test_partial_keeps_preserved_copper_exactly_once(monkeypatch, tmp_path, flow
     segments, vias = patch.expected
     # ... yet the partial carries it, exactly once, next to the router's copper.
     assert _copper(text) == (segments + 1, vias + 1)
+    # The preserved 2 mm segment is there once, on top of the router's copper.
+    assert _copper_length(text) == pytest.approx(patch.expected_length + 2.0)
     assert len(re.findall(r"\(start 2(?:\.0+)? 2(?:\.0+)?\)", text)) == 1
     assert len(re.findall(r"\(at 3(?:\.0+)? 17(?:\.0+)?\)", text)) == 1

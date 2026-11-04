@@ -13,6 +13,11 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-11-04
+
+- **PR #8302**: fix: make optimize-traces UUIDs deterministic so refilled board order is reproducible
+- **Issue #8297** (closed): main red: test_connectivity_decisions_identical_across_hash_seeds fails since #8287 merged (merge race with #8289)
+
 ### 2026-11-03
 
 - **PR #8289**: test: pin optimize-traces connectivity decisions across hash seeds
@@ -49,6 +54,17 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - **Issue #8219** (closed): OffAngleSegmentWarning reports 'net 0' on name-only boards and repeats each warning
 - **PR #8226**: fix: keep vias that tie pads or same-net pours during via minimisation
 - **Issue #8215** (closed): optimizer via minimization removes vias that are still needed (unconnected pour stubs)
+- **PR #8291**: chore: tool updates — Loom 0.19.1260, Repo Skills 0.25.4, squad 0.19.24
+- **Issue #8286** (closed): optimize-traces leaves a stale zone fill: kct check reports clearance_segment_zone that kicad-cli --refill-zones does not
+- **Issue #8282** (closed): Exempt BOM refs can pick up an LCSC number from the CSV merge source
+- **Issue #8271** (closed): optimize-traces: dedupe exact-duplicate segments it emits (split from #8250)
+- **Issue #8269** (closed): optimize-traces: remove lateral jogs (a short sideways step between parallel runs) by sliding the step to the next corner
+- **Issue #8262** (closed): kct check --output JSON lacks summary.attach_zone_exemption that the text output prints
+- **Issue #8261** (closed): Tapeout Gate 4 cannot declare intentionally non-LCSC BOM lines (consigned, hand-solder); bom_lcsc_values WARN always forces refusal
+- **Issue #8260** (closed): kct export: LCSC merge reads only a BOM CSV already in the output dir; undocumented in help and tapeout/readiness skills
+- **Issue #8258** (closed): kct route --timeout: timeout.json 'checkpoint' names a moved file when -o is relative; --export-failed-nets not written on timeout
+- **Issue #8250** (closed): optimize-traces still breaks connectivity on finished boards: 45° chamfer at shared vertices, keepouts/NPTH not modelled, no connectivity check
+- **Issue #8248** (closed): kct route: targeted rip-up frees the witnessed blocker but the access-loss victim still has no relief path (TO-220 centre pins under HV clearance), 0/15 rescued per iteration
 
 ### 2026-11-02
 
