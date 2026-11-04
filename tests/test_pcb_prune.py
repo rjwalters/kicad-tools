@@ -757,22 +757,87 @@ def _seg_pairs(pcb) -> set:
     }
 
 
-def test_loop_removal_refuses_to_decentre_a_via(tmp_path):
-    """``decentres``: a centred stub V->J and a detour J->V whose end lands
-    0.28 mm off V's centre form a loop.  The detour cannot go (it passes a
-    second via, so it may hide a join), which leaves the stub as the only
-    candidate; removing it would leave V joined on F.Cu only off-centre."""
+def _count_decentres(monkeypatch) -> dict[str, int]:
+    """Wrap ``_NetModel.decentres`` with a call / refusal counter, so a test
+    that relies on the guard fails loudly once its fixture stops reaching it
+    (issue #8358: the earlier fixture silently stopped reaching it)."""
+    from kicad_tools.pcb_prune import _NetModel
+
+    seen = {"calls": 0, "refused": 0}
+    orig = _NetModel.decentres
+
+    def counted(self, *args):
+        out = orig(self, *args)
+        seen["calls"] += 1
+        seen["refused"] += int(out)
+        return out
+
+    monkeypatch.setattr(_NetModel, "decentres", counted)
+    return seen
+
+
+def test_loop_removal_refuses_to_decentre_a_via(tmp_path, monkeypatch):
+    """``decentres`` in :func:`_plan_net`'s generic loop pass (issue #8358).
+
+    Fixture: a centred stub V->J and a detour J->V whose end lands 0.28 mm off
+    V's centre form a loop, with pads A and B on the J->A->B trunk.  The
+    second pad is what makes the loop pass run at all: with one terminal the
+    #8333 two-terminal floor skips it, which is how the earlier one-pad
+    fixture stopped reaching ``decentres``.  The detour cannot go (it passes
+    the hard-protected via V2, so it may hide a join), and the trunk steps
+    fail ``partition`` / ``still_joined``.  That leaves the stub, which clears
+    ``partition``, ``still_joined``, ``strands_end``, ``strands_via_layer``
+    and ``degrades_ends`` (its far end J stays track-joined, V keeps its only
+    layer); only ``decentres`` sees that V would be joined on F.Cu only
+    off-centre."""
+    seen = _count_decentres(monkeypatch)
     segs = [
         ((100, 100), (102, 100)),  # the centred stub
         ((102, 100), (105, 100)),  # on to pad A
+        ((105, 100), (108, 100)),  # on to pad B (second terminal)
         ((102, 100), (102, 101)),  # detour ...
         ((102, 101), (100.2, 101)),  # ... past V2 (hard-protected)
         ((100.2, 101), (100.2, 100.2)),  # ... ending inside V, off-centre
     ]
-    p = _board(tmp_path, [("A", 105, 100, 0.2, 0.2)], segs, vias=[(100, 100), (101.2, 101.3)])
+    pads = [("A", 105, 100, 0.2, 0.2), ("B", 108, 100, 0.2, 0.2)]
+    p = _board(tmp_path, pads, segs, vias=[(100, 100), (101.2, 101.3)])
     pcb, res = _run(p)
+    assert seen["refused"] >= 1, "fixture no longer reaches decentres"
     assert ((100, 100), (102, 100)) in _seg_pairs(pcb)
     assert res.stats["segments_removed"] == 0
+
+
+def test_via_closed_cut_refuses_to_decentre_a_via(tmp_path, monkeypatch):
+    """``decentres`` in :func:`_cut_ok`, the declared-net / via-closed path
+    (issues #8313, #8358).
+
+    Fixture: on declared net SIG, a 0.2 mm centred stub V->J on F.Cu and a
+    0.2 mm detour J->W (F.Cu), W->X (B.Cu), X->inside V 0.2 mm off-centre
+    (F.Cu) close a loop through vias W and X; the J->A->B trunk is 0.6 mm, at
+    or above ``--wide``, so it is never cut.  The declared pass tries the
+    narrowest seed first, by index, so the stub comes first.  It clears
+    ``partition``, ``still_joined``, ``strands_end``, ``degrades_ends`` and
+    the via-layer check (V only ever had F.Cu); only ``decentres`` refuses
+    it.  The pass then cuts the detour with its orphaned vias W and X
+    instead, leaving the stub centred on V."""
+    seen = _count_decentres(monkeypatch)
+    segs = [
+        ((100, 100), (102, 100), "F.Cu", 0.2),  # centred stub V->J
+        ((102, 100), (105, 100), "F.Cu", 0.6),  # wide trunk to pad A
+        ((105, 100), (108, 100), "F.Cu", 0.6),  # ... and pad B
+        ((102, 100), (102, 102), "F.Cu", 0.2),  # detour J->W
+        ((102, 102), (100.2, 102), "B.Cu", 0.2),  # W->X
+        ((100.2, 102), (100.2, 100.2), "F.Cu", 0.2),  # X->inside V, off-centre
+    ]
+    pads = [("A", 105, 100, 0.2, 0.2), ("B", 108, 100, 0.2, 0.2)]
+    p = _board(tmp_path, pads, segs, vias=[(100, 100), (102, 102), (100.2, 102)])
+    pcb, res = prune_board(p, verify_drc=False, declared_nets={"SIG"}, wide=0.5)
+    assert seen["refused"] >= 1, "fixture no longer reaches decentres"
+    assert ((100, 100), (102, 100)) in _seg_pairs(pcb)
+    assert [tuple(v.position) for v in pcb.vias] == [(100, 100)]
+    assert res.stats["segments_removed"] == 3
+    assert res.stats["vias_removed"] == 2
+    assert _connected(pcb, (100, 100), (108, 100))
 
 
 def _t_junction_board(tmp_path: Path) -> Path:

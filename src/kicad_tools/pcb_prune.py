@@ -1198,13 +1198,19 @@ DEFAULT_WIDE_MM = 0.5
 
 def _cut_ok(model: _NetModel, group: set[int], removed: set[int], baseline) -> bool:
     """The shared acceptance test for removing ``group`` (terminals unchanged,
-    neighbours still joined, no stranded or degraded ends)."""
+    neighbours still joined, no stranded, degraded or de-centred ends).
+
+    The via / pad-side :meth:`_NetModel.decentres` check applies here exactly
+    as in :func:`_plan_net`'s generic loop pass (issue #8358): a via-closed
+    loop cut must not leave a via held on a layer only by an off-centre end.
+    """
     touched = {k for g in group for k in model.adj[g] | model.overlap[g]} - group
     return not (
         model.partition(removed | group) != baseline
         or not model.still_joined(touched, removed | group)
         or model.strands_end(group, removed)
         or model.degrades_ends(touched, removed, removed | group)
+        or model.decentres(touched, removed, removed | group)
     )
 
 
