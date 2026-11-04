@@ -269,6 +269,11 @@ def _run_strip_command(args, pcb_path: Path) -> int:
 
     from kicad_tools.schema.pcb import PCB
 
+    from_report = getattr(args, "from_report", None)
+    dangling = getattr(args, "dangling", False)
+    if from_report or dangling:
+        return _run_strip_report_command(args, pcb_path)
+
     # Parse net names if provided
     nets = None
     if args.nets:
@@ -430,6 +435,158 @@ def _run_strip_command(args, pcb_path: Path) -> int:
             return 1
 
     return 0
+
+
+def _verify_strip_drc(pcb_path: Path, pcb) -> tuple[bool, str, bool]:
+    """Compare refill-zones DRC before/after.  Returns (verified, note, worse).
+
+    ``unconnected`` is excluded from the comparison: cutting copper to open a
+    link intentionally raises it.
+    """
+    import tempfile
+
+    from kicad_tools.pcb_prune import _drc_signature, _worse
+
+    with tempfile.TemporaryDirectory(prefix="kct_strip_drc_") as tmp:
+        base, trial = Path(tmp) / "base.kicad_pcb", Path(tmp) / "trial.kicad_pcb"
+        base.write_text(pcb_path.read_text())
+        for ext in (".kicad_pro", ".kicad_dru"):
+            if pcb_path.with_suffix(ext).exists():
+                for name in ("base", "trial"):
+                    (Path(tmp) / f"{name}{ext}").write_bytes(pcb_path.with_suffix(ext).read_bytes())
+        before = _drc_signature(base)
+        if before is None:
+            return False, "kicad-cli not available (or DRC failed): result is unverified", False
+        pcb.save(trial)
+        after = _drc_signature(trial)
+        if after is None:
+            return False, "kicad-cli DRC failed on the edited board", False
+        before.pop(("unconnected", "error"), None)
+        after.pop(("unconnected", "error"), None)
+        if _worse(after, before):
+            return True, "kicad-cli --refill-zones DRC reports NEW violations", True
+        return True, "verified with kicad-cli pcb drc --refill-zones", False
+
+
+def _run_strip_report_command(args, pcb_path: Path) -> int:
+    """'pcb strip --from-report' / '--dangling' (issue #8309)."""
+    from kicad_tools.pcb_strip_report import load_findings, plan_from_report, strip_dangling
+    from kicad_tools.schema.pcb import PCB
+
+    from_report = getattr(args, "from_report", None)
+    dangling = getattr(args, "dangling", False)
+    if from_report and dangling:
+        print("Error: --from-report and --dangling are mutually exclusive", file=sys.stderr)
+        return 2
+    for flag in ("nets", "layers", "region"):
+        if getattr(args, flag, None):
+            print(
+                f"Error: --{flag} cannot be combined with --from-report/--dangling",
+                file=sys.stderr,
+            )
+            return 2
+
+    output_format = getattr(args, "format", "text")
+    dry_run = getattr(args, "dry_run", False)
+    try:
+        pcb = PCB.load(pcb_path)
+    except Exception as e:
+        print(f"Error loading PCB: {e}", file=sys.stderr)
+        return 1
+
+    output_path = pcb_path
+    if args.output:
+        output_path = Path(args.output)
+    elif not dry_run:
+        output_path = pcb_path.with_stem(f"{pcb_path.stem}-stripped")
+
+    result: dict[str, Any] = {
+        "input": str(pcb_path),
+        "output": str(output_path) if not dry_run else None,
+        "dry_run": dry_run,
+    }
+    rc = 0
+    if from_report:
+        protect = {
+            n.strip() for n in (getattr(args, "protect_nets", None) or "").split(",") if n.strip()
+        }
+        try:
+            findings = load_findings(from_report)
+        except Exception as e:
+            print(f"Error reading report {from_report}: {e}", file=sys.stderr)
+            return 1
+        plan = plan_from_report(pcb, findings, protect, getattr(args, "radius", 0.0) or 0.0)
+        n_seg, n_via = len(plan.segments), len(plan.vias)
+        if not dry_run:
+            pcb.remove_segments(plan.segments)
+            pcb.remove_vias(plan.vias)
+        result.update(
+            mode="from_report",
+            findings=[r.to_dict() for r in plan.results],
+            nets_cut=plan.nets_cut,
+            removed={"segments": n_seg, "vias": n_via},
+        )
+    else:
+        res = strip_dangling(pcb, getattr(args, "keep_via_min", None))
+        n_seg, n_via = res.segments, res.vias
+        result.update(
+            mode="dangling",
+            passes=res.passes,
+            nets_cut=res.nets_cut,
+            removed={"segments": n_seg, "vias": n_via},
+            kept_vias=res.kept_vias,
+            refused=res.refused,
+            note=res.note,
+        )
+        if res.refused:
+            rc = 1
+
+    changed = bool(n_seg or n_via)
+    verified, note = False, "nothing to verify"
+    if changed and not dry_run:
+        verified, note, worse = _verify_strip_drc(pcb_path, pcb)
+        if worse:
+            print(f"Refusing to write: {note}", file=sys.stderr)
+            rc = 1
+            changed = False
+        elif not verified and not getattr(args, "unverified", False):
+            print(
+                f"Refusing to write: {note}. Re-run with kicad-cli available, or pass "
+                "--unverified to write anyway.",
+                file=sys.stderr,
+            )
+            rc = 1
+            changed = False
+    result["drc_verified"] = verified
+    result["drc_note"] = note
+
+    if output_format == "json":
+        print(json.dumps(result, indent=2))
+    else:
+        print(f"PCB Strip ({result['mode']}){' (dry run)' if dry_run else ''}")
+        print(f"  Input:  {pcb_path}")
+        print(f"  Removed: {n_seg} segment(s), {n_via} via(s)")
+        print(f"  Nets cut: {', '.join(result['nets_cut']) or '-'}")
+        for f in result.get("findings", []):
+            loc = f["location"]
+            where = f"({loc[0]:.3f}, {loc[1]:.3f})" if loc else "no location"
+            tail = ", ".join(f["removed"]) if f["status"] == "cut" else f"skipped: {f['reason']}"
+            print(f"    {f['type']} @ {where}: {tail}")
+        if result["mode"] == "dangling":
+            print(f"  Passes: {result['passes']}  Anchor vias kept: {result['kept_vias']}")
+            if result["note"]:
+                print(f"  {result['note']}")
+        print(f"  DRC: {note}")
+
+    if not dry_run and changed and rc == 0:
+        try:
+            pcb.save(output_path)
+            if output_format == "text":
+                print(f"\n  Saved to: {output_path}")
+        except Exception as e:
+            print(f"Error saving PCB: {e}", file=sys.stderr)
+            return 1
+    return rc
 
 
 def _run_dedupe_command(args, pcb_path: Path) -> int:

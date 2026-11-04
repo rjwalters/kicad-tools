@@ -86,6 +86,8 @@ class NetOptimizationStats:
     # Issue #8207: rule id -> violations this net's rewrite introduced (only
     # populated for nets the per-net rollback loop reverted).
     new_violations: dict[str, int] = field(default_factory=dict)
+    # Issue #8299: the net's final geometry differs from the input.
+    changed: bool = False
 
 
 @dataclass
@@ -123,6 +125,10 @@ class OptimizationStats:
     # Issue #8300: candidate edits rejected by the --voltage-map pairwise
     # requirement, keyed by (net_a, net_b) (order-independent, sorted).
     creepage_skips: dict[tuple[str, str], int] = field(default_factory=dict)
+    # Issue #8298: nets whose whole rewrite failed the connectivity check but
+    # where some independent changed regions were safe and kept.
+    nets_connectivity_partial: int = 0
+    connectivity_partial_nets: list[str] = field(default_factory=list)
     # Issue #7065: one row per optimized net, built after any DRC rollback.
     per_net: list[NetOptimizationStats] = field(default_factory=list)
 
