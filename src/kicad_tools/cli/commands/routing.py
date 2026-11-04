@@ -980,6 +980,17 @@ def run_optimize_command(args) -> int:
         sub_argv.extend(["--layers", str(args.layers)])
     if getattr(args, "copper", 1.0) != 1.0:
         sub_argv.extend(["--copper", str(args.copper)])
+    # HV creepage inputs (#8300)
+    if getattr(args, "voltage_map", None):
+        sub_argv.extend(["--voltage-map", args.voltage_map])
+        if getattr(args, "creepage_standard", "iec60664") != "iec60664":
+            sub_argv.extend(["--creepage-standard", args.creepage_standard])
+        if getattr(args, "pollution_degree", 2) != 2:
+            sub_argv.extend(["--pollution-degree", str(args.pollution_degree)])
+        if getattr(args, "material_group", "IIIa") != "IIIa":
+            sub_argv.extend(["--material-group", args.material_group])
+        if getattr(args, "hv_threshold", 30.0) != 30.0:
+            sub_argv.extend(["--hv-threshold", str(args.hv_threshold)])
     # Machine output (#4674): forward the canonical flag to the inner parser.
     if getattr(args, "format", "text") != "text":
         sub_argv.extend(["--format", args.format])

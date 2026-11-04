@@ -122,6 +122,9 @@ class OptimizationStats:
     # group that was connected in the input.
     nets_connectivity_discarded: int = 0
     connectivity_discarded_nets: list[str] = field(default_factory=list)
+    # Issue #8300: candidate edits rejected by the --voltage-map pairwise
+    # requirement, keyed by (net_a, net_b) (order-independent, sorted).
+    creepage_skips: dict[tuple[str, str], int] = field(default_factory=dict)
     # Issue #8298: nets whose whole rewrite failed the connectivity check but
     # where some independent changed regions were safe and kept.
     nets_connectivity_partial: int = 0

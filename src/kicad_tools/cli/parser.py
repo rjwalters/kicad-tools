@@ -4585,6 +4585,47 @@ def _add_optimize_parser(subparsers) -> None:
         default=1.0,
         help="Copper weight in oz for DRC checks (default: 1.0)",
     )
+    # HV creepage inputs (#8300): same semantics/defaults as ``kct route``.
+    optimize_parser.add_argument(
+        "--voltage-map",
+        dest="voltage_map",
+        default=None,
+        metavar="FILE",
+        help=(
+            "JSON per-net voltage map (as for kct route). Rejects individual "
+            "edits that would bring a net pair below its pairwise creepage "
+            "requirement. Absent, behaviour is unchanged"
+        ),
+    )
+    optimize_parser.add_argument(
+        "--creepage-standard",
+        dest="creepage_standard",
+        choices=["iec60664", "iec62368"],
+        default="iec60664",
+        help="Creepage standard for --voltage-map (default: iec60664)",
+    )
+    optimize_parser.add_argument(
+        "--pollution-degree",
+        dest="pollution_degree",
+        type=int,
+        choices=[1, 2, 3],
+        default=2,
+        help="IEC pollution degree for --voltage-map (default: 2)",
+    )
+    optimize_parser.add_argument(
+        "--material-group",
+        dest="material_group",
+        default="IIIa",
+        help="Insulation material group I/II/IIIa/IIIb for --voltage-map (default: IIIa)",
+    )
+    optimize_parser.add_argument(
+        "--hv-threshold",
+        dest="hv_threshold",
+        type=float,
+        default=30.0,
+        metavar="VOLTS",
+        help="Minimum net-pair |dV| that triggers creepage widening (default: 30.0)",
+    )
     add_format_flag(optimize_parser)
 
 

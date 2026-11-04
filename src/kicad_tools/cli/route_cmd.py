@@ -8781,6 +8781,71 @@ def _warn_rule_areas_other_engine(pcb_path: Path, engine: str) -> None:
             return
 
 
+def _preload_voltage_map(args) -> int:
+    """Validate/load ``--voltage-map`` and derive the pairwise matrix (#4431, #8300).
+
+    Shared by ``kct route`` and ``kct optimize-traces`` so both accept the same
+    inputs and fail with the same messages.  Stashes the result on
+    ``args._pairwise_voltages`` / ``args._pairwise_required`` (both ``None``
+    when ``--voltage-map`` was not supplied).  Returns 0, or 1 after printing
+    the error to stderr.
+    """
+    args._pairwise_voltages = None
+    args._pairwise_required = None
+    if getattr(args, "voltage_map", None) is not None:
+        from kicad_tools.creepage.standards import StandardLookupError
+        from kicad_tools.placement.hv_domains import build_required_by_domain_pair
+        from kicad_tools.router.pairwise_clearance import (
+            _norm_net_key,
+            load_pair_bounds,
+            load_signed_voltage_map,
+        )
+
+        vm_path = Path(args.voltage_map).resolve()
+        if not vm_path.exists():
+            print(f"Error: voltage-map file not found: {vm_path}", file=sys.stderr)
+            return 1
+        try:
+            # Issue #4867: read the sidecar SIGNED.  Placement's
+            # ``load_voltage_map`` collapses each net to ``max(|lo|, |hi|)``
+            # (its cross-domain model is magnitude-only) and this site then
+            # took ``abs()`` again -- so a +150 V net and a -150 V net
+            # differenced to 0 V, fell below ``--hv-threshold``, and dropped
+            # out of the matrix entirely: neither the search-time kernels nor
+            # the post-route audit could see the 300 V pair.  The census
+            # (``kct creepage``) reads the same file signed, so the router now
+            # agrees with the gate it is scored against.
+            _raw_voltages = load_signed_voltage_map(vm_path)
+            # Issue #8043: device-bounded pair caps from the same sidecar.
+            _pair_bounds = load_pair_bounds(vm_path)
+        except (ValueError, OSError) as e:
+            print(f"Error: invalid voltage-map: {e}", file=sys.stderr)
+            return 1
+        _voltages = {_norm_net_key(n): float(v) for n, v in _raw_voltages.items()}
+        from kicad_tools.creepage.engine import pair_bounds_unmapped_nets
+
+        for _n in pair_bounds_unmapped_nets(_pair_bounds, _voltages):
+            print(
+                f"Warning: _pair_bounds names net {_n!r} absent from the voltage map",
+                file=sys.stderr,
+            )
+        try:
+            _required = build_required_by_domain_pair(
+                _voltages,
+                standard_id=getattr(args, "creepage_standard", "iec60664"),
+                pollution_degree=getattr(args, "pollution_degree", 2),
+                material_group=getattr(args, "material_group", "IIIa"),
+                hv_threshold=getattr(args, "hv_threshold", 30.0),
+                pair_bounds=_pair_bounds or None,
+            )
+        except StandardLookupError as e:
+            print(f"Error: voltage-map creepage lookup failed: {e}", file=sys.stderr)
+            return 1
+        args._pairwise_voltages = _voltages
+        args._pairwise_required = _required
+    return 0
+
+
 def _apply_pairwise_clearance(router: "Autorouter", args, quiet: bool = False) -> None:
     """Attach the preloaded HV pairwise-clearance table to the router (#4431).
 
@@ -22166,59 +22231,9 @@ def _run_main_impl(args, parser, argv) -> int:
     # the router's actual DRU floor) via ``_apply_pairwise_clearance``.  Absent
     # the flag this is a no-op and routing stays byte-identical to the scalar
     # path.
-    args._pairwise_voltages = None
-    args._pairwise_required = None
-    if getattr(args, "voltage_map", None) is not None:
-        from kicad_tools.creepage.standards import StandardLookupError
-        from kicad_tools.placement.hv_domains import build_required_by_domain_pair
-        from kicad_tools.router.pairwise_clearance import (
-            _norm_net_key,
-            load_pair_bounds,
-            load_signed_voltage_map,
-        )
-
-        vm_path = Path(args.voltage_map).resolve()
-        if not vm_path.exists():
-            print(f"Error: voltage-map file not found: {vm_path}", file=sys.stderr)
-            return 1
-        try:
-            # Issue #4867: read the sidecar SIGNED.  Placement's
-            # ``load_voltage_map`` collapses each net to ``max(|lo|, |hi|)``
-            # (its cross-domain model is magnitude-only) and this site then
-            # took ``abs()`` again -- so a +150 V net and a -150 V net
-            # differenced to 0 V, fell below ``--hv-threshold``, and dropped
-            # out of the matrix entirely: neither the search-time kernels nor
-            # the post-route audit could see the 300 V pair.  The census
-            # (``kct creepage``) reads the same file signed, so the router now
-            # agrees with the gate it is scored against.
-            _raw_voltages = load_signed_voltage_map(vm_path)
-            # Issue #8043: device-bounded pair caps from the same sidecar.
-            _pair_bounds = load_pair_bounds(vm_path)
-        except (ValueError, OSError) as e:
-            print(f"Error: invalid voltage-map: {e}", file=sys.stderr)
-            return 1
-        _voltages = {_norm_net_key(n): float(v) for n, v in _raw_voltages.items()}
-        from kicad_tools.creepage.engine import pair_bounds_unmapped_nets
-
-        for _n in pair_bounds_unmapped_nets(_pair_bounds, _voltages):
-            print(
-                f"Warning: _pair_bounds names net {_n!r} absent from the voltage map",
-                file=sys.stderr,
-            )
-        try:
-            _required = build_required_by_domain_pair(
-                _voltages,
-                standard_id=getattr(args, "creepage_standard", "iec60664"),
-                pollution_degree=getattr(args, "pollution_degree", 2),
-                material_group=getattr(args, "material_group", "IIIa"),
-                hv_threshold=getattr(args, "hv_threshold", 30.0),
-                pair_bounds=_pair_bounds or None,
-            )
-        except StandardLookupError as e:
-            print(f"Error: voltage-map creepage lookup failed: {e}", file=sys.stderr)
-            return 1
-        args._pairwise_voltages = _voltages
-        args._pairwise_required = _required
+    rc = _preload_voltage_map(args)
+    if rc != 0:
+        return rc
 
     # Normalize --auto-fix-passes: explicit value implies --auto-fix
     if args.auto_fix_passes is not None:
