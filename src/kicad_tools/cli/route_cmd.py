@@ -2871,6 +2871,7 @@ def _join_route_ends_to_pad_centres(routes, router) -> int:
         via_shape,
     )
     from kicad_tools.router.primitives import Segment
+    from kicad_tools.router.quantize import dogleg_points
 
     pads = list(getattr(router, "pads", {}).values())
     if not pads:
@@ -2956,56 +2957,82 @@ def _join_route_ends_to_pad_centres(routes, router) -> int:
                 ):
                     far = (nxt.x2, nxt.y2) if at_start else (nxt.x1, nxt.y1)
                     jog = (nxt, far)
-            if jog is not None:
-                nxt, far = jog
-                cand = (
-                    Segment(
-                        x1=pad.x,
-                        y1=pad.y,
-                        x2=far[0],
-                        y2=far[1],
-                        width=seg.width,
-                        layer=seg.layer,
-                        net=seg.net,
-                        net_name=seg.net_name,
-                    )
-                    if at_start
-                    else Segment(
-                        x1=far[0],
-                        y1=far[1],
-                        x2=pad.x,
-                        y2=pad.y,
-                        width=seg.width,
-                        layer=seg.layer,
-                        net=seg.net,
-                        net_name=seg.net_name,
-                    )
-                )
-                if not clear(cand, route.net):
-                    continue
-                if at_start:
-                    route.segments = [cand, *segs[2:]]
-                else:
-                    route.segments = [*segs[:-2], cand]
-            else:
-                if best[0] < 1e-6:
-                    continue  # already on the centre, nothing to absorb
-                cand = Segment(
-                    x1=pad.x if at_start else seg.x1,
-                    y1=pad.y if at_start else seg.y1,
-                    x2=seg.x2 if at_start else pad.x,
-                    y2=seg.y2 if at_start else pad.y,
+
+            def make(p, q, seg=seg) -> Segment:
+                return Segment(
+                    x1=p[0],
+                    y1=p[1],
+                    x2=q[0],
+                    y2=q[1],
                     width=seg.width,
                     layer=seg.layer,
                     net=seg.net,
                     net_name=seg.net_name,
                 )
-                if not clear(cand, route.net):
-                    continue
-                if at_start:
-                    route.segments = [cand, *segs[1:]]
+
+            def collinear(
+                a: tuple[float, float], b: tuple[float, float], c: tuple[float, float]
+            ) -> bool:
+                """True if ``b`` lies on the ray a->c extended past ``a`` (same heading)."""
+                abx, aby = b[0] - a[0], b[1] - a[1]
+                acx, acy = c[0] - a[0], c[1] - a[1]
+                lab, lac = math.hypot(abx, aby), math.hypot(acx, acy)
+                if lab < 1e-9 or lac < 1e-9:
+                    return False
+                return bool(
+                    abs(abx * acy - aby * acx) / (lab * lac) < 1e-6 and (abx * acx + aby * acy) > 0
+                )
+
+            pc = (pad.x, pad.y)
+            if jog is not None:
+                nxt, far = jog
+                joint = (seg.x2, seg.y2) if at_start else (seg.x1, seg.y1)
+                # Merging jog + run into one pad->far segment is only safe when
+                # it leaves the run's heading unchanged (Issue #8296).
+                if collinear(pc, joint, far):
+                    merged = make(pc, far) if at_start else make(far, pc)
+                    if not clear(merged, route.net):
+                        continue
+                    route.segments = [merged, *segs[2:]] if at_start else [*segs[:-2], merged]
                 else:
-                    route.segments = [*segs[:-1], cand]
+                    # Rewrite only the end jog as a 45-aligned dogleg; the
+                    # merged run itself is never moved.
+                    pts = dogleg_points(pc[0], pc[1], joint[0], joint[1])
+                    legs = [
+                        make(pts[i], pts[i + 1])
+                        for i in range(len(pts) - 1)
+                        if math.hypot(pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1]) > 1e-9
+                    ]
+                    if not at_start:
+                        legs = [make((l.x2, l.y2), (l.x1, l.y1)) for l in reversed(legs)]
+                    if not all(clear(l, route.net) for l in legs):
+                        continue
+                    route.segments = [*legs, *segs[1:]] if at_start else [*segs[:-1], *legs]
+            else:
+                if best[0] < 1e-6:
+                    continue  # already on the centre, nothing to absorb
+                anchor = (seg.x2, seg.y2) if at_start else (seg.x1, seg.y1)
+                end = (gx, gy)
+                if collinear(anchor, end, pc):
+                    # Pad centre lies straight ahead on the run's own heading:
+                    # extend it (heading unchanged).
+                    cand = make(pc, anchor) if at_start else make(anchor, pc)
+                    if not clear(cand, route.net):
+                        continue
+                    route.segments = [cand, *segs[1:]] if at_start else [*segs[:-1], cand]
+                else:
+                    # Keep the run intact; add a 45-aligned dogleg from its end.
+                    pts = dogleg_points(end[0], end[1], pc[0], pc[1])
+                    legs = [
+                        make(pts[i], pts[i + 1])
+                        for i in range(len(pts) - 1)
+                        if math.hypot(pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1]) > 1e-9
+                    ]
+                    if at_start:
+                        legs = [make((l.x2, l.y2), (l.x1, l.y1)) for l in reversed(legs)]
+                    if not all(clear(l, route.net) for l in legs):
+                        continue
+                    route.segments = [*legs, *segs] if at_start else [*segs, *legs]
             joined += 1
     return joined
 
