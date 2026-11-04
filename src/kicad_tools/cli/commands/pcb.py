@@ -451,13 +451,28 @@ def _run_strip_command(args, pcb_path: Path) -> int:
     return 0
 
 
-def _verify_strip_drc(pcb_path: Path, pcb) -> tuple[bool, str, bool]:
+_STRIP_DANGLING_DRC_TYPES = frozenset({"track_dangling", "via_dangling"})
+
+
+def _verify_strip_drc(
+    pcb_path: Path,
+    pcb,
+    nets_cut=(),
+    exempt_unconnected: bool = False,
+) -> tuple[bool, str, bool]:
     """Compare refill-zones DRC before/after.  Returns (verified, note, worse).
 
-    ``unconnected`` is excluded from the comparison: cutting copper to open a
-    link intentionally raises it.
+    Cutting copper leaves stub ends, which ``strip --dangling`` removes in a
+    second step, so ``track_dangling`` / ``via_dangling`` keys are excluded
+    from the comparison only when every net on the key is in ``nets_cut``
+    (a dangling end on an untouched net is an unplanned edit and still counts
+    as worse).  ``unconnected`` growth is excluded only when
+    ``exempt_unconnected`` is set (``--from-report``: the cut intentionally
+    opens links); ``--dangling`` must not open any link.  Growth in any other
+    type still counts as worse.
     """
     import tempfile
+    from collections import Counter
 
     from kicad_tools.pcb_prune import _drc_signature, _worse
 
@@ -475,8 +490,17 @@ def _verify_strip_drc(pcb_path: Path, pcb) -> tuple[bool, str, bool]:
         after = _drc_signature(trial)
         if after is None:
             return False, "kicad-cli DRC failed on the edited board", False
-        before.pop(("unconnected", "error"), None)
-        after.pop(("unconnected", "error"), None)
+        cut = set(nets_cut or ())
+
+        def _exempt(key) -> bool:
+            if key[0] == "unconnected":
+                return exempt_unconnected
+            if key[0] in _STRIP_DANGLING_DRC_TYPES:
+                return bool(key[3]) and all(n in cut for n in key[3])
+            return False
+
+        before = Counter({k: v for k, v in before.items() if not _exempt(k)})
+        after = Counter({k: v for k, v in after.items() if not _exempt(k)})
         if _worse(after, before):
             return True, "kicad-cli --refill-zones DRC reports NEW violations", True
         return True, "verified with kicad-cli pcb drc --refill-zones", False
@@ -558,7 +582,12 @@ def _run_strip_report_command(args, pcb_path: Path) -> int:
     changed = bool(n_seg or n_via)
     verified, note = False, "nothing to verify"
     if changed and not dry_run:
-        verified, note, worse = _verify_strip_drc(pcb_path, pcb)
+        verified, note, worse = _verify_strip_drc(
+            pcb_path,
+            pcb,
+            nets_cut=result.get("nets_cut") or (),
+            exempt_unconnected=bool(from_report),
+        )
         if worse:
             print(f"Refusing to write: {note}", file=sys.stderr)
             rc = 1

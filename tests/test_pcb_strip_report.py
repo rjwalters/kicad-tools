@@ -250,7 +250,9 @@ def test_cli_rollback_when_drc_worse(board, tmp_path, monkeypatch, capsys):
     """New DRC violations after the edit: refuse, write nothing."""
     import kicad_tools.cli.commands.pcb as pcb_cmd
 
-    monkeypatch.setattr(pcb_cmd, "_verify_strip_drc", lambda p, pcb: (True, "NEW violations", True))
+    monkeypatch.setattr(
+        pcb_cmd, "_verify_strip_drc", lambda p, pcb, **kw: (True, "NEW violations", True)
+    )
     rpt = _drc_json(tmp_path / "r.json", [UA, UB])
     out = tmp_path / "o.kicad_pcb"
     rc = run_pcb_command(_ns(board, from_report=str(rpt), output=str(out), unverified=False))
@@ -258,6 +260,77 @@ def test_cli_rollback_when_drc_worse(board, tmp_path, monkeypatch, capsys):
     assert not out.exists()
     assert len(PCB.load(board).segments) == 3
     assert "Refusing to write" in capsys.readouterr().err
+
+
+def _sig(**counts):
+    """Counter keyed like ``_drc_signature``; ``type@NET`` puts the key on a net."""
+    from collections import Counter
+
+    sig = Counter()
+    for t, n in counts.items():
+        typ, _, net = t.partition("@")
+        sig[(typ, "error", "", (net,) if net else ())] = n
+    return sig
+
+
+def _run_verify(monkeypatch, tmp_path, before, after, **kw):
+    from kicad_tools import pcb_prune
+    from kicad_tools.cli.commands.pcb import _verify_strip_drc
+
+    seq = iter([before, after])
+    monkeypatch.setattr(pcb_prune, "_drc_signature", lambda _p: next(seq))
+    src = tmp_path / "b.kicad_pcb"
+    src.write_text("(kicad_pcb)")
+
+    class _P:
+        def save(self, path):
+            Path(path).write_text("(kicad_pcb)")
+
+    return _verify_strip_drc(src, _P(), **kw)
+
+
+def test_verify_strip_ignores_dangling_on_cut_nets_and_unconnected(monkeypatch, tmp_path):
+    before = _sig(clearance=11, **{"track_dangling@VIN": 3, "unconnected": 57})
+    after = _sig(
+        clearance=0,
+        **{"track_dangling@VIN": 6, "unconnected": 61, "via_dangling@GND": 2},
+    )
+    verified, _note, worse = _run_verify(
+        monkeypatch, tmp_path, before, after, nets_cut=["VIN", "GND"], exempt_unconnected=True
+    )
+    assert verified is True
+    assert worse is False
+
+
+def test_verify_strip_refuses_dangling_on_untouched_net(monkeypatch, tmp_path):
+    before = _sig(**{"track_dangling@VIN": 3})
+    for typ in ("track_dangling", "via_dangling"):
+        after = _sig(**{"track_dangling@VIN": 3, f"{typ}@VCC_3V3": 1})
+        _v, _n, worse = _run_verify(
+            monkeypatch, tmp_path, before, after, nets_cut=["VIN"], exempt_unconnected=True
+        )
+        assert worse is True
+
+
+def test_verify_strip_refuses_netless_dangling(monkeypatch, tmp_path):
+    _v, _n, worse = _run_verify(
+        monkeypatch, tmp_path, _sig(), _sig(track_dangling=1), nets_cut=["VIN"]
+    )
+    assert worse is True
+
+
+def test_verify_strip_dangling_mode_refuses_unconnected_growth(monkeypatch, tmp_path):
+    _v, _n, worse = _run_verify(
+        monkeypatch, tmp_path, _sig(unconnected=5), _sig(unconnected=6), nets_cut=["VIN"]
+    )
+    assert worse is True
+
+
+def test_verify_strip_still_refuses_new_clearance(monkeypatch, tmp_path):
+    before = _sig(clearance=1, track_dangling=3)
+    after = _sig(clearance=2, track_dangling=6)
+    _verified, _note, worse = _run_verify(monkeypatch, tmp_path, before, after)
+    assert worse is True
 
 
 # --- real `kct creepage --witness` payload (issue #8346) --------------------

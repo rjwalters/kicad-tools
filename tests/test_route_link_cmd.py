@@ -104,6 +104,19 @@ class TestProbe:
 
 
 class TestCommit:
+    @pytest.fixture(autouse=True)
+    def _stub_gate(self, monkeypatch):
+        # The per-link DRC/creepage gate is covered in test_route_link_gating.py.
+        import contextlib
+        from collections import Counter
+
+        from kicad_tools.cli import kicad_toolchain, route_link_cmd
+
+        monkeypatch.setattr(
+            kicad_toolchain, "evidence_toolchain", lambda *a, **k: contextlib.nullcontext()
+        )
+        monkeypatch.setattr(route_link_cmd, "_gate_state", lambda path, args: (Counter(), None))
+
     def test_commit_writes_copper(self, board, capsys):
         rc, doc = _run(capsys, str(board), "--link", LINK)
         assert rc == 0 and doc["written"] == str(board)
