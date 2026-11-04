@@ -2970,14 +2970,16 @@ def _join_route_ends_to_pad_centres(routes, router) -> int:
                     net_name=seg.net_name,
                 )
 
-            def collinear(a, b, c) -> bool:
+            def collinear(
+                a: tuple[float, float], b: tuple[float, float], c: tuple[float, float]
+            ) -> bool:
                 """True if ``b`` lies on the ray a->c extended past ``a`` (same heading)."""
                 abx, aby = b[0] - a[0], b[1] - a[1]
                 acx, acy = c[0] - a[0], c[1] - a[1]
                 lab, lac = math.hypot(abx, aby), math.hypot(acx, acy)
                 if lab < 1e-9 or lac < 1e-9:
                     return False
-                return (
+                return bool(
                     abs(abx * acy - aby * acx) / (lab * lac) < 1e-6 and (abx * acx + aby * acy) > 0
                 )
 
