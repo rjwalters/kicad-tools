@@ -974,6 +974,10 @@ def run_optimize_command(args) -> int:
     # DRC-aware mode arguments
     if getattr(args, "drc_aware", False):
         sub_argv.append("--drc-aware")
+    if getattr(args, "project", None):
+        sub_argv.extend(["--project", args.project])
+    if getattr(args, "allow_default_rules", False):
+        sub_argv.append("--allow-default-rules")
     if getattr(args, "mfr", None):
         sub_argv.extend(["--mfr", args.mfr])
     if getattr(args, "layers", 2) != 2:

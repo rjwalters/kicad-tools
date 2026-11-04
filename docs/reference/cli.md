@@ -1879,6 +1879,8 @@ kct optimize-traces <pcb_file> [options]
 | `--quiet`, `-q` | Suppress progress output |
 | `--drc-aware` | Roll back per-net optimizations that increase DRC violations (requires `--mfr`) |
 | `--mfr` | Target manufacturer for DRC rules (e.g. `jlcpcb`, `oshpark`); required with `--drc-aware` |
+| `--project` | Project (`.kicad_pro`, with its sibling `.kicad_dru`) whose rules DRC verification uses (default: the files beside the board) |
+| `--allow-default-rules` | Verify against KiCad default rules when no project rules are found (otherwise that is an error) |
 | `--layers` | Number of copper layers for DRC checks (default: 2) |
 | `--copper` | Copper weight in oz for DRC checks (default: 1.0) |
 | `--voltage-map` | Per-net voltage JSON (as for `kct route`); rejects individual edits that would bring a net pair below its pairwise creepage requirement. The summary lists skipped edits by net pair (`creepage_skipped` in JSON) |
