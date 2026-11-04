@@ -946,6 +946,8 @@ def run_optimize_command(args) -> int:
         sub_argv.extend(["-o", args.output])
     if args.net:
         sub_argv.extend(["--net", args.net])
+    if getattr(args, "net_pattern", None):
+        sub_argv.extend(["--net-pattern", args.net_pattern])
     if args.no_merge:
         sub_argv.append("--no-merge")
     if args.no_zigzag:
@@ -954,6 +956,12 @@ def run_optimize_command(args) -> int:
         sub_argv.append("--no-45")
     if args.no_jogs:
         sub_argv.append("--no-jogs")
+    if getattr(args, "no_staircase", False):
+        sub_argv.append("--no-staircase")
+    if getattr(args, "no_pull_tight", False):
+        sub_argv.append("--no-pull-tight")
+    if getattr(args, "no_detour", False):
+        sub_argv.append("--no-detour")
     if args.chamfer_size != 0.5:
         sub_argv.extend(["--chamfer-size", str(args.chamfer_size)])
     if args.verbose:

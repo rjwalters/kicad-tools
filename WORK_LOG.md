@@ -15,6 +15,24 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-04
 
+- **PR #8329**: fix: straighten pad-entry jogs and match gate pad-touch radius to component labels
+- **PR #8315**: feat: add report-driven rip-up and dangling removal to pcb strip
+- **PR #8305**: fix: keep safe optimize edits per region, straighten pad-entry jogs, model body joins in prune
+- **PR #8304**: feat(optimize-traces): switch every pass off, match --net exactly, list touched nets
+- **Issue #8325** (closed): optimize-traces: straighten a jog just before a pad end (split from #8298 AC 2)
+- **Issue #8309** (closed): pcb strip: report-driven rip-up (remove copper named by a DRC/creepage report) and iterative dangling removal
+- **Issue #8299** (closed): optimize-traces: rewrites a net with every reported pass disabled (unflagged detour pass); --net substring match edits unrequested nets
+- **Issue #8298** (closed): optimize-traces/prune: one unsafe edit discards a net's jog fixes; pad-entry jogs; anchor-in-shape loops survive prune
+- **PR #8324**: fix: derive pcb_retune UUID seed from input board and selected nets
+- **PR #8294**: fix(creepage): measure out-of-zone copper against in-zone pads in attach-zone residual
+- **PR #8290**: feat: report measured freed width, re-occupation and rip-up reason in relief diagnostics
+- **PR #8283**: fix(route): merge _partial output, join pad centres, list partial-net stubs
+- **PR #8280**: fix: apply census attach-zone rule in the router's pairwise HV gate
+- **Issue #8321** (closed): pcb_retune: fixed UUID_SEED may write duplicate UUIDs on repeated retunes (same pattern #8302 fixed)
+- **Issue #8292** (closed): creepage: --waive-attach-zone residual clips both nets, so out-of-zone copper vs in-zone foreign copper is never measured (router flags it, census waives)
+- **Issue #8277** (closed): kct route --complete commits copper that kct creepage (same attach-zone builder) fails: router vs census disagree on pad-adjacent HV pairs
+- **Issue #8270** (closed): kct route: timeout/best-so-far checkpoint emits one segment per grid cell (98% < 0.1 mm), off-centre pad joins, unmarked partial stubs
+- **Issue #8256** (closed): Relief rescue: measure freed width, re-occupation and rip-up reason (follow-up to #8248)
 - **PR #8302**: fix: make optimize-traces UUIDs deterministic so refilled board order is reproducible
 - **Issue #8297** (closed): main red: test_connectivity_decisions_identical_across_hash_seeds fails since #8287 merged (merge race with #8289)
 

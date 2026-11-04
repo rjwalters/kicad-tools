@@ -1864,11 +1864,15 @@ kct optimize-traces <pcb_file> [options]
 | Option | Description |
 |--------|-------------|
 | `--output`, `-o` | Output file (default: modify in place) |
-| `--net` | Only optimize traces matching this net pattern |
+| `--net` | Only optimize the net with exactly this name (case-sensitive; `GND` does not match `PGND`). Use `--net-pattern` for globs |
+| `--net-pattern` | Only optimize nets whose name matches this case-sensitive glob (fnmatch), e.g. `'*GND*'`. Mutually exclusive with `--net` |
 | `--no-merge` | Disable collinear merging |
 | `--no-zigzag` | Disable zigzag elimination |
 | `--no-45` | Disable 45-degree corners |
 | `--no-jogs` | Disable lateral jog removal (sliding short sideways steps to the next corner) |
+| `--no-staircase` | Disable staircase compression |
+| `--no-pull-tight` | Disable PullTight (shortening chains by sliding interior segments) |
+| `--no-detour` | Disable detour shortening (replacing a chain with a shorter direct path) |
 | `--chamfer-size` | 45-degree chamfer size in mm (default: 0.5) |
 | `--verbose`, `-v` | Print a per-net table (segments and length before/after, `(rolled back)` marker) after the summary |
 | `--dry-run` | Show results without writing |

@@ -95,6 +95,21 @@ def test_overlap_only_off_centre_ends_are_snapped(tmp_path):
     assert sorted(s.end for s in PCB.load(out).segments) == [(105, 100), (105, 100)]
 
 
+def test_single_pad_net_loop_is_kept(tmp_path):
+    # Issue #8333: one-terminal nets have a vacuous partition guard; the whole
+    # loop used to be deleted, leaving the net with no copper.
+    loop = [
+        ((100, 100), (105, 100)),
+        ((105, 100), (105, 105)),
+        ((105, 105), (100, 105)),
+        ((100, 105), (100, 100)),
+    ]
+    p = _board(tmp_path, [("A", 100, 100)], loop)
+    pcb, res = _run(p)
+    assert len(pcb.segments) == 4
+    assert res.stats["segments_removed"] == 0
+
+
 def test_same_layer_loop_removes_longer_detour(tmp_path):
     segs = [
         ((100, 100), (102, 100)),
@@ -394,6 +409,8 @@ def test_removal_never_leaves_an_end_dangling_off_a_removed_body(tmp_path):
     # diagonal may legitimately go instead); never the 3-segment branch removal
     assert any(s.start == (104.2, 101.5) and s.end == (108.5, 105.5) for s in pcb.segments)
     assert res.stats["segments_removed"] <= 1
+    # and the via at (108, 102) keeps its B.Cu stub: never joined on one layer
+    assert any(s.start == (106.35, 103.5) for s in pcb.segments)
 
 
 def test_copper_arc_touching_a_detour_keeps_it(tmp_path):
@@ -426,3 +443,63 @@ def test_copper_arc_touching_a_detour_keeps_it(tmp_path):
     q.write_text(body.split("  (arc ")[0] + ")\n")
     pcb2, _res2 = _run(q)
     assert not _has_detour(pcb2)
+
+
+def test_anchor_in_body_loop_is_removed_8298(tmp_path):
+    """GNDD triangle: a trunk passes 0.05 mm from V1's centre; a stub from V1's
+    centre ends 0.05 mm from the trunk's centre line, on its body.  KiCad sees a
+    loop (via centre in trunk body + stub end in trunk body)."""
+    w = 0.2
+    body = HEADER + _fp("P1", 100, 100) + _fp("P2", 110, 100)
+    body += _seg((100, 100), (105, 100), "F.Cu", w)
+    body += _seg((105, 100), (110, 100), "F.Cu", w)
+    # V1 at (103, 100.05); stub down 0.5 and left 0.81 would end near the trunk
+    # only on a bent trunk; keep it simple: stub rises from V1 and ends on trunk
+    body += _seg((103, 100.05), (103, 100.5), "F.Cu", w)
+    body += _seg((103, 100.5), (103.8, 100.05), "F.Cu", w)
+    body += (
+        f'  (via (at 103 100.05) (size 0.4) (drill 0.2) (layers "F.Cu" "B.Cu") '
+        f'(net 1) (uuid "v-{next(_uid)}"))\n'
+    )
+    p = tmp_path / "gndd.kicad_pcb"
+    p.write_text(body + ")\n")
+    pcb, res = _run(p)
+    assert res.stats["segments_removed"] >= 1
+    assert any(s.start == (100, 100) for s in pcb.segments)
+
+
+def test_prune_keeps_micro_bridge_joint_for_optimize_8298(tmp_path):
+    """Two chains joined only by a ~1 um bridge: each chain end also lies in the
+    other's body, so a body-join cycle exists.  Prune must not trade the
+    endpoint join for an overlap-only one (optimize-traces models endpoint
+    joins only and would leave a dangling duplicate)."""
+    segs = [
+        ((100, 100), (105, 100)),
+        ((105, 100), (105.001, 100)),  # 1 um bridge
+        ((105.001, 100), (110, 105)),
+    ]
+    p = _board(tmp_path, [("A", 100, 100), ("B", 110, 105)], segs)
+    pcb, res = _run(p)
+    assert res.stats["segments_removed"] == 0
+    assert len(pcb.segments) == 3
+
+    from kicad_tools.router.optimizer import OptimizationConfig, TraceOptimizer
+    from kicad_tools.router.optimizer.pcb import optimize_pcb
+
+    out = tmp_path / "opt.kicad_pcb"
+    pcb.save(out)
+    cfg = OptimizationConfig()
+    opt = TraceOptimizer(cfg)
+    optimize_pcb(str(out), str(out), opt.optimize_segments, cfg)
+    after = PCB.load(str(out))
+    # still one connected run between the pads: no duplicate / dangling piece
+    xs = sorted({round(v, 3) for s in after.segments for v in (s.start[0], s.end[0])})
+    assert xs[0] == 100 and xs[-1] == 110
+    assert len(after.segments) <= 3
+    # every segment end is shared with another segment or sits on a pad
+    ends = [e for sg in after.segments for e in (sg.start, sg.end)]
+    for e in ends:
+        assert (
+            e in ((100, 100), (110, 105))
+            or sum(1 for o in ends if abs(o[0] - e[0]) < 2e-3 and abs(o[1] - e[1]) < 2e-3) >= 2
+        )
