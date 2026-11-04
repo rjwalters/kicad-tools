@@ -400,6 +400,76 @@ class Pin1MarkerRule(DRCRule):
 
         return self._make_violation(footprint, pin1, obscured=candidates > 0)
 
+    def marker_graphic_indices(self, footprint: Footprint, graphics: list[Any]) -> set[int]:
+        """Return indices into ``graphics`` that this rule accepts as pin-1 marks.
+
+        Applies the same per-element and bent-component acceptance tests as
+        :meth:`_check_footprint` to ``graphics`` (the footprint's own silk
+        graphics, in the caller's order) so a repair can leave exactly the
+        elements the check relies on untouched.  Empty when the footprint is
+        not selected by the rule.  Needs shapely.
+        """
+        from shapely.ops import unary_union
+
+        from .clearance import _pad_polygon
+
+        if not self.selects(footprint):
+            return set()
+        pin1_numbers = {p.number for p in self.pin1_pads(footprint)}
+        pin1_geoms: list[Any] = []
+        other_geoms: list[Any] = []
+        for pad in footprint.pads:
+            if not _has_copper(pad):
+                continue
+            polygon = _pad_polygon(pad, footprint)
+            if polygon is None:
+                continue
+            if pad.number in pin1_numbers:
+                pin1_geoms.append(polygon)
+            elif pad.number:
+                other_geoms.append(polygon)
+        if not pin1_geoms:
+            return set()
+        pin1 = unary_union(pin1_geoms)
+        others = unary_union(other_geoms) if other_geoms else None
+        all_pads = unary_union(pin1_geoms + other_geoms)
+        body, _source = package_body_polygon(footprint)
+
+        side = footprint_side(footprint)
+        transform = _fp_transform(footprint)
+        indexed: list[tuple[int, Any]] = []
+        for idx, graphic in enumerate(graphics):
+            if _silk_side(graphic.layer) != side:
+                continue
+            geom = _graphic_geometry(graphic, transform)
+            if geom is not None and not geom.is_empty:
+                indexed.append((idx, geom))
+
+        accepted: set[int] = set()
+        for idx, geom in indexed:
+            d1 = geom.distance(pin1)
+            if d1 > self.search_radius_mm:
+                continue
+            if (
+                self.require_asymmetry
+                and others is not None
+                and geom.distance(others) <= d1 + _ASYMMETRY_MARGIN_MM
+            ):
+                continue
+            if self._is_visible(geom, all_pads, body):
+                accepted.add(idx)
+
+        if self.require_asymmetry and others is not None:
+            for component in self._bent_components([g for _, g in indexed]):
+                if component.distance(pin1) > self.search_radius_mm:
+                    continue
+                centroid = component.centroid
+                if centroid.distance(others) <= centroid.distance(pin1) + _ASYMMETRY_MARGIN_MM:
+                    continue
+                if self._is_visible(component, all_pads, body):
+                    accepted.update(i for i, g in indexed if g.intersects(component))
+        return accepted
+
     @staticmethod
     def _is_visible(geom: Any, all_pads: Any, body: Any | None) -> bool:
         visible = geom.difference(all_pads)

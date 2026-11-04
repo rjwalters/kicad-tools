@@ -15,6 +15,30 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-04
 
+- **PR #8339**: perf: index blocker segments in relief measured-gap scan
+- **PR #8351**: fix: locate creepage strip findings from witness point_a/point_b
+- **PR #8348**: docs: record live kicad-cli verification of pcb strip modes
+- **PR #8340**: fix(creepage): fuse collinear trace runs before attach-zone cross terms
+- **Issue #8295** (closed): Relief freed-band diagnostic: spatially bound the measured-gap scan (follow-up to #8256)
+- **Issue #8346** (closed): kct pcb strip --from-report ignores real kct creepage witness shape (every row skipped)
+- **Issue #8337** (closed): Live-verify kct pcb strip --from-report/--dangling against real kicad-cli --refill-zones
+- **Issue #8303** (closed): census attach-zone cross terms are segmentation-dependent (no collinear fusion, unlike router #8280)
+- **PR #8342**: fix(creepage): classify same-footprint residual row by attach zone
+- **PR #8338**: test(router): pin relief rescue outcomes on the sealed centre pin
+- **PR #8335**: fix: emit 45-aligned doglegs when joining route ends to pad centres
+- **PR #8330**: fix(optimizer): layer-aware chains and same-layer branch anchors
+- **PR #8328**: fix: key pcb prune DRC referee on rule and nets, warn when project rules are missing
+- **PR #8319**: feat: add --clip-to-pads to fix-silkscreen for silk-to-pad clearance
+- **PR #8318**: feat: add kct route-link for targeted single-link routing and probe
+- **PR #8316**: feat: add kct pcb transplant for per-net copper recovery
+- **PR #8307**: feat: reject optimize-traces edits that violate pairwise creepage
+- **Issue #8332** (closed): creepage: #8232 same_footprint 'board' residual row disagrees with router kernel inside attach zones (R25/R75 softstart)
+- **Issue #8312** (closed): fix-silkscreen: clip footprint silk that violates silk-to-pad clearance
+- **Issue #8311** (closed): pcb transplant: copy named nets' copper from one board into another of the same placement
+- **Issue #8310** (closed): route --complete: target individual links (endpoints, via waypoints, layer limits) with a probe mode and per-link gating
+- **Issue #8300** (closed): optimize-traces: accept --voltage-map / creepage inputs and reject edits that violate pairwise creepage
+- **Issue #8296** (closed): Pad-centre join in _partial save emits off-angle segments and tilts merged runs (follow-up to #8270)
+- **Issue #8288** (closed): Relief rescue: complete the sealed centre-pin case or report corridor shortfall (split from #8256)
 - **PR #8334**: fix: skip prune loop removal on nets with fewer than two terminals
 - **PR #8326**: fix: cross-check optimize-traces --drc-aware against kicad-cli before/after
 - **PR #8306**: feat: add closest-point witness to kct creepage rows
