@@ -616,6 +616,20 @@ def test_attach_zone_waived_when_residual_passes(tmp_path, capsys):
     assert rc == 0
 
 
+@pytest.mark.parametrize("split_x", [None, 111.0, 112.0])
+def test_attach_zone_verdict_independent_of_trace_segmentation(tmp_path, capsys, split_x):
+    """#8303: a straight GND run split into collinear fragments judges as whole."""
+    pcb = _write(
+        tmp_path, board_attach_zone_source(outside_shortfall=False, tail=True, split_x=split_x)
+    )
+    rc = _run(_attach_argv(pcb, _hv_map_file(tmp_path), "--waive-attach-zone"))
+    row = _gnd_row(json.loads(capsys.readouterr().out))
+    assert row["relationship"] == "attach_zone"
+    assert row["waived"] is True
+    assert row["residual_pass"] is True
+    assert rc == 0
+
+
 def test_attach_zone_does_not_mask_shortfall_outside_zone(tmp_path, capsys):
     pcb = _write(tmp_path, board_attach_zone_source(outside_shortfall=True))
     rc = _run(_attach_argv(pcb, _hv_map_file(tmp_path), "--waive-attach-zone"))
@@ -735,3 +749,33 @@ def test_board_gap_on_layer_without_sharing_footprint_reported(tmp_path, capsys)
     assert abs(board["creepage_mm"] - 0.8) < 0.05
     assert payload["gate_passed"] is False
     assert rc == 1
+
+
+# ---------------------------------------------------------------------------
+# --witness (Issue #8301)
+# ---------------------------------------------------------------------------
+
+
+def test_json_rows_all_carry_witness(tmp_path, capsys):
+    pcb = _write(tmp_path, board_source(with_slot=False))
+    ncm = _hv_map_file(tmp_path)
+    _run(["creepage", str(pcb), "--net-class-map", str(ncm), "--min", "1.5", "--format", "json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["pairs"]
+    for row in payload["pairs"]:
+        assert set(row["witness"]) == {"point_a_mm", "point_b_mm", "item_a", "item_b"}
+
+
+def test_witness_column_only_with_flag(tmp_path, capsys):
+    pcb = _write(tmp_path, board_source(with_slot=False))
+    ncm = _hv_map_file(tmp_path)
+    base = ["creepage", str(pcb), "--net-class-map", str(ncm), "--min", "1.5"]
+    _run(base)
+    plain = capsys.readouterr().out
+    _run([*base, "--witness"])
+    with_w = capsys.readouterr().out
+    assert "Witness" not in plain
+    assert "Edge.Cuts" not in plain
+    assert "Witness" in with_w
+    assert "11.000," in with_w
+    assert "Edge.Cuts" in with_w

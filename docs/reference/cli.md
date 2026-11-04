@@ -42,7 +42,7 @@ kct [--help] [--version] [--verbose] [-q] [--units {mm,mils}] <command> [options
 | **Repair** | `fix-drc` | Automated DRC violation repair (clearance + drill) |
 | | `fix-erc` | Automated ERC violation repair (PWR_FLAG + no-connect) |
 | | `fix-vias` | Fix vias to meet manufacturer specifications |
-| | `fix-silkscreen` | Fix silkscreen line widths to meet manufacturer specs |
+| | `fix-silkscreen` | Fix silkscreen line widths to meet manufacturer specs; `--clip-to-pads` also trims silk lines too close to pads |
 | | `place-silk-refs` | Move readable reference designators to clear silk/pad/edge collisions |
 | | `fix-footprints` | Fix footprint pad spacing issues |
 | | `repair-clearance` | Repair clearance violations by nudging traces |
@@ -1881,6 +1881,11 @@ kct optimize-traces <pcb_file> [options]
 | `--mfr` | Target manufacturer for DRC rules (e.g. `jlcpcb`, `oshpark`); required with `--drc-aware` |
 | `--layers` | Number of copper layers for DRC checks (default: 2) |
 | `--copper` | Copper weight in oz for DRC checks (default: 1.0) |
+| `--voltage-map` | Per-net voltage JSON (as for `kct route`); rejects individual edits that would bring a net pair below its pairwise creepage requirement. The summary lists skipped edits by net pair (`creepage_skipped` in JSON) |
+| `--creepage-standard` | Creepage standard for `--voltage-map` (`iec60664` or `iec62368`, default `iec60664`) |
+| `--pollution-degree` | IEC pollution degree for `--voltage-map` (1-3, default: 2) |
+| `--material-group` | Insulation material group for `--voltage-map` (default: `IIIa`) |
+| `--hv-threshold` | Minimum net-pair \|ΔV\| that triggers creepage widening (default: 30.0) |
 | `--format` | Output format (`text` or `json`); JSON shape in [machine-output.md](machine-output.md) |
 
 ---

@@ -551,3 +551,89 @@ def test_unripped_copper_sharing_the_blockers_clearance_is_measured():
     )
     assert "freed >= 0.600 mm" in line, line
     assert "re-occupied since the rip by Net_7" in line, line
+
+
+# --- Issue #8288: end-to-end outcome on the sealed centre pin ----------------
+
+
+def _real_rescue(router, trace_net, trace_y):
+    """Run the real (unpatched) rescue for victim 1 with one rippable trace."""
+    from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
+
+    router.add_component(
+        "J1",
+        [
+            {
+                "number": str(i),
+                "x": x,
+                "y": trace_y,
+                "width": 0.6,
+                "height": 0.6,
+                "net": trace_net,
+                "net_name": f"N{trace_net}",
+            }
+            for i, x in ((1, 2.0), (2, 18.0))
+        ],
+    )
+    blocker = _seg(2.0, trace_y, 18.0, trace_y, width=0.2, net=trace_net)
+    router._mark_route(blocker)
+    router.grid.mark_route_usage(blocker)
+    router.routes.append(blocker)
+    neg = NegotiatedRouter(
+        grid=router.grid, router=router.router, rules=router.rules, net_class_map={}
+    )
+    net_routes = {1: [], trace_net: [blocker]}
+    pads_by_net = {n: [router.pads[p] for p in keys] for n, keys in router.nets.items() if n}
+    log: list[str] = []
+    ok = router._relief_rescue(
+        failed_net=1,
+        neg_router=neg,
+        net_routes=net_routes,
+        pads_by_net=pads_by_net,
+        present_factor=1.0,
+        per_net_timeout=5.0,
+        flush_print_fn=log.append,
+        elapsed_fn=lambda: "0s",
+        guard=RipupCycleGuard(),
+    )
+    return ok, log, net_routes
+
+
+def test_sealed_by_fixed_pads_reports_corridor_and_nothing_to_rip():
+    """Four foreign pads close the centre pin on every side.  Pad metal never
+    moves, so ripping the foreign trace cannot open a path: the rescue rolls
+    back, the printed corridor need is the terminal reason, and the trace is
+    restored verbatim."""
+    router = _sealed_router()
+    ok, log, net_routes = _real_rescue(router, trace_net=6, trace_y=9.5)
+    assert ok is False
+    line = next(m for m in log if "NO relief path" in m)
+    assert "needs a 0.600 mm corridor" in line, line
+    assert "no blocker ripped before the probe failed" in line, line
+    assert len(net_routes[6]) == 1 and not net_routes[1]  # rolled back
+
+
+def test_open_side_victim_routes_once_the_blocker_is_ripped():
+    """With one side of the centre pin open, the rescue rips the blocker and
+    the victim routes (the other branch of the #8288 outcome)."""
+    from kicad_tools.router.core import Autorouter
+
+    router = Autorouter(width=20.0, height=20.0)
+
+    def pad(num, x, y, net):
+        return {
+            "number": str(num),
+            "x": x,
+            "y": y,
+            "width": 0.6,
+            "height": 0.6,
+            "net": net,
+            "net_name": f"N{net}",
+        }
+
+    router.add_component("U1", [pad(1, 10.0, 10.0, 1), pad(2, 18.0, 18.0, 1)])
+    router.add_component("Q1", [pad(1, 10.8, 10.0, 3), pad(2, 9.2, 10.0, 4), pad(3, 10.0, 10.8, 5)])
+    ok, log, net_routes = _real_rescue(router, trace_net=2, trace_y=8.8)
+    assert ok is True, log
+    assert net_routes[1], log
+    assert any("ROUTED via conflict-free relief path" in m for m in log), log

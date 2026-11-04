@@ -13,7 +13,7 @@ def run_pcb_command(args) -> int:
     if not args.pcb_command:
         print("Usage: kicad-tools pcb <command> [options] <file>")
         print(
-            "Commands: summary, footprints, nets, traces, stackup, zones, strip, reinforce, dedupe, prune, reannotate, sync-netlist, annotate-pintypes, add-3d-models, remove-footprint, move-footprint, move-via, page-fit, center-on-sheet, lock-footprints, unlock-footprints, add-zone, snap-rotation, edit-outline, net-audit, model-audit, diff, export-dsn, import-ses, current-paths-audit"
+            "Commands: summary, footprints, nets, traces, stackup, zones, strip, reinforce, dedupe, prune, reannotate, sync-netlist, annotate-pintypes, add-3d-models, remove-footprint, move-footprint, move-via, transplant, page-fit, center-on-sheet, lock-footprints, unlock-footprints, add-zone, snap-rotation, edit-outline, net-audit, model-audit, diff, export-dsn, import-ses, current-paths-audit"
         )
         return 1
 
@@ -28,6 +28,20 @@ def run_pcb_command(args) -> int:
             nets=args.net,
             layers=args.layer,
             svg=args.svg,
+        )
+
+    # ``transplant`` takes two boards (SRC, DST), not one.
+    if args.pcb_command == "transplant":
+        from ..pcb_transplant import run_pcb_transplant
+
+        return run_pcb_transplant(
+            args.src,
+            args.dst,
+            nets=args.nets,
+            output=args.output,
+            dry_run=args.dry_run,
+            drc=args.drc,
+            fmt=args.format,
         )
 
     pcb_path = Path(args.pcb)

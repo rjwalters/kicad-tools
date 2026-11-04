@@ -362,7 +362,13 @@ def board_other_layer_board_gap_source() -> str:
     return "".join(parts)
 
 
-def board_attach_zone_source(*, outside_shortfall: bool, edge_via: bool = False) -> str:
+def board_attach_zone_source(
+    *,
+    outside_shortfall: bool,
+    edge_via: bool = False,
+    tail: bool = False,
+    split_x: float | None = None,
+) -> str:
     """TO-220-style attach-zone board (#8028).
 
     ``Q1`` carries an ``L_MAINS`` pad and a ``GND`` pad 5 mm apart (4.4 mm
@@ -377,6 +383,13 @@ def board_attach_zone_source(*, outside_shortfall: bool, edge_via: bool = False)
     With ``edge_via`` a ``GND`` via sits just outside Q1's zone (0.7 mm from the
     ``L_MAINS`` pad, below the 1.0 mm requirement) -- the out-of-zone copper vs
     in-zone pad approach the zone-clipped residual alone never measures (#8292).
+
+    With ``tail`` the ``GND`` trace continues from (110.6, 111)'s corner as a
+    straight horizontal run along y=110 from x=113 to x=110.6, ending 0.175 mm
+    from the ``L_MAINS`` pad and leaving the attach zone to the right.  With
+    ``split_x`` that run is written as two collinear same-width segments
+    meeting at ``x=split_x`` -- the same copper, chopped differently (#8303);
+    the verdict must not depend on it.
     """
     parts = [_SAMEFP_HEADER, _OUTLINE]
     parts.append(_footprint2("Q1", 110, 110, [("1", 1, "L_MAINS", 0, 0), ("2", 2, "GND", 0, 5)]))
@@ -384,6 +397,12 @@ def board_attach_zone_source(*, outside_shortfall: bool, edge_via: bool = False)
         '  (segment (start 110 115) (end 110.6 115) (width 0.25) (layer "F.Cu") (net 2))\n'
         '  (segment (start 110.6 115) (end 110.6 111) (width 0.25) (layer "F.Cu") (net 2))\n'
     )
+    if tail:
+        xs = [113.0, 110.6] if split_x is None else [113.0, split_x, 110.6]
+        for x0, x1 in zip(xs, xs[1:], strict=False):
+            parts.append(
+                f'  (segment (start {x0} 110) (end {x1} 110) (width 0.25) (layer "F.Cu") (net 2))\n'
+            )
     if edge_via:
         parts.append(
             '  (via (at 111.3 110) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2))\n'
@@ -391,5 +410,30 @@ def board_attach_zone_source(*, outside_shortfall: bool, edge_via: bool = False)
     if outside_shortfall:
         parts.append(_footprint2("P3", 130, 110, [("1", 1, "L_MAINS", 0, 0)]))
         parts.append(_footprint2("P4", 130, 111.4, [("1", 2, "GND", 0, 0)]))
+    parts.append(")\n")
+    return "".join(parts)
+
+
+def board_same_footprint_attach_residual_source(*, jog: bool) -> str:
+    """Same-footprint pair whose #8232 residual witness lies in an attach zone (#8332).
+
+    ``R1`` holds an ``L_MAINS`` pad and a ``GND`` pad 0.4 mm apart (the
+    ``same_footprint`` minimum).  A ``GND`` trace leaves the GND pad.  With the
+    GND pad masked, the nearest remaining GND copper is that trace where it
+    leaves the pad -- wholly inside R1's #4506 zone.  ``jog`` moves the trace
+    onto a different exit path (mimicking ``optimize-traces`` straightening a
+    jog); the witness stays in the zone either way.
+    """
+    parts = [_SAMEFP_HEADER, _OUTLINE]
+    parts.append(_footprint2("R1", 110, 110, [("1", 1, "L_MAINS", 0, 0), ("2", 2, "GND", 0, 1.0)]))
+    if jog:
+        parts.append(
+            '  (segment (start 110 111) (end 110.6 111) (width 0.25) (layer "F.Cu") (net 2))\n'
+            '  (segment (start 110.6 111) (end 110.6 112.5) (width 0.25) (layer "F.Cu") (net 2))\n'
+        )
+    else:
+        parts.append(
+            '  (segment (start 110 111) (end 110 112.5) (width 0.25) (layer "F.Cu") (net 2))\n'
+        )
     parts.append(")\n")
     return "".join(parts)

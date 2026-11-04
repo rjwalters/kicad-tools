@@ -242,6 +242,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_stitch_parser(subparsers)
     _add_route_stub(subparsers)
     _add_route_auto_parser(subparsers)
+    _add_route_link_parser(subparsers)
     _add_retune_lengths_parser(subparsers)
     _add_reason_parser(subparsers)
     _add_optimize_parser(subparsers)
@@ -805,6 +806,19 @@ def _add_creepage_parser(subparsers) -> None:
     # exit-code gate so board-level defects are no longer buried.  This is a
     # STANDALONE-CLI opt-in only: it never relaxes the ``kct audit``
     # manufacturing-readiness gate (which keys off the raw, un-waived result).
+    creepage_parser.add_argument(
+        "--witness",
+        dest="witness",
+        action="store_true",
+        help=(
+            "Add a Witness column to the table: the A-side closest point (x,y in "
+            "board mm) and the items on each side (pad REF.pin, or "
+            "segment/via/zone:<uuid>, Edge.Cuts), so a failing pair can be located "
+            "in KiCad.  JSON always carries a 'witness' object per row.  Points "
+            "are straight-line closest points: for slot-detour rows (creepage > "
+            "clearance) they mark the clearance gap, not the detour path."
+        ),
+    )
     creepage_parser.add_argument(
         "--waive-same-footprint",
         dest="waive_same_footprint",
@@ -3575,6 +3589,37 @@ def _add_pcb_parser(subparsers) -> None:
         help="Also write an SVG overlay (removed red, added green, changed amber)",
     )
 
+    # pcb transplant (issue #8311)
+    pcb_transplant = pcb_subparsers.add_parser(
+        "transplant",
+        help="Copy the tracks/vias of named nets from one board revision onto another",
+        description="Replace DST's tracks and vias on the named nets with SRC's "
+        "(nets match by name; net numbers are remapped). All other DST content is "
+        "untouched and DST is never modified: the result is written to -o. Refused "
+        "when the pads of a named net sit at different positions in SRC and DST. "
+        "SRC and DST accept a path or a REV:path git spec.",
+    )
+    pcb_transplant.add_argument("src", help="SRC board: .kicad_pcb path or REV:path")
+    pcb_transplant.add_argument("dst", help="DST board: .kicad_pcb path or REV:path")
+    pcb_transplant.add_argument(
+        "--nets",
+        action="append",
+        required=True,
+        metavar="A,B",
+        help="Comma-separated net names to transplant (repeatable)",
+    )
+    pcb_transplant.add_argument("-o", "--output", help="Output .kicad_pcb path")
+    pcb_transplant.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Write nothing; print the change as a pcb diff of DST vs the result "
+        "(exit 0 none, 2 differs, 1 error)",
+    )
+    pcb_transplant.add_argument(
+        "--drc", action="store_true", help="Run kicad-cli DRC on the output (skipped if absent)"
+    )
+    pcb_transplant.add_argument("--format", choices=["text", "json"], default="text")
+
     # pcb export-dsn
     pcb_export_dsn = pcb_subparsers.add_parser(
         "export-dsn",
@@ -4223,6 +4268,17 @@ def _add_retune_lengths_parser(subparsers) -> None:
     add_format_flag(p)
 
 
+def _add_route_link_parser(subparsers) -> None:
+    """Add route-link subcommand parser (Issue #8310)."""
+    from .route_link_cmd import add_route_link_arguments
+
+    route_link_parser = subparsers.add_parser(
+        "route-link",
+        help="Route individual links between chosen pads/points (with --probe, read-only)",
+    )
+    add_route_link_arguments(route_link_parser)
+
+
 def _add_route_auto_parser(subparsers) -> None:
     """Add route-auto subcommand parser."""
     route_auto_parser = subparsers.add_parser(
@@ -4546,6 +4602,47 @@ def _add_optimize_parser(subparsers) -> None:
         default=1.0,
         help="Copper weight in oz for DRC checks (default: 1.0)",
     )
+    # HV creepage inputs (#8300): same semantics/defaults as ``kct route``.
+    optimize_parser.add_argument(
+        "--voltage-map",
+        dest="voltage_map",
+        default=None,
+        metavar="FILE",
+        help=(
+            "JSON per-net voltage map (as for kct route). Rejects individual "
+            "edits that would bring a net pair below its pairwise creepage "
+            "requirement. Absent, behaviour is unchanged"
+        ),
+    )
+    optimize_parser.add_argument(
+        "--creepage-standard",
+        dest="creepage_standard",
+        choices=["iec60664", "iec62368"],
+        default="iec60664",
+        help="Creepage standard for --voltage-map (default: iec60664)",
+    )
+    optimize_parser.add_argument(
+        "--pollution-degree",
+        dest="pollution_degree",
+        type=int,
+        choices=[1, 2, 3],
+        default=2,
+        help="IEC pollution degree for --voltage-map (default: 2)",
+    )
+    optimize_parser.add_argument(
+        "--material-group",
+        dest="material_group",
+        default="IIIa",
+        help="Insulation material group I/II/IIIa/IIIb for --voltage-map (default: IIIa)",
+    )
+    optimize_parser.add_argument(
+        "--hv-threshold",
+        dest="hv_threshold",
+        type=float,
+        default=30.0,
+        metavar="VOLTS",
+        help="Minimum net-pair |dV| that triggers creepage widening (default: 30.0)",
+    )
     add_format_flag(optimize_parser)
 
 
@@ -4727,6 +4824,14 @@ def _add_fix_silkscreen_parser(subparsers) -> None:
         type=float,
         default=1.0,
         help="Outer copper weight in oz (default: 1.0)",
+    )
+    fix_silk_parser.add_argument(
+        "--clip-to-pads",
+        action="store_true",
+        help=(
+            "Also trim or remove footprint silk lines closer to a pad than the "
+            "manufacturer's silk-to-pad clearance (pin-1 markers are never touched)"
+        ),
     )
     fix_silk_parser.add_argument(
         "--min-width",

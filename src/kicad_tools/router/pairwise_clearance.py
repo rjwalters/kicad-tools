@@ -1595,6 +1595,8 @@ def _fuse_collinear_runs(segments: Sequence[Segment], tol: float = 1e-4) -> list
     """
     from dataclasses import replace
 
+    from kicad_tools.geometry.copper import extends_collinear
+
     out: list[Segment] = []
     for seg in segments:
         if out:
@@ -1603,16 +1605,12 @@ def _fuse_collinear_runs(segments: Sequence[Segment], tol: float = 1e-4) -> list
                 prev.layer == seg.layer
                 and prev.width == seg.width
                 and prev.net == seg.net
-                and abs(prev.x2 - seg.x1) <= tol
-                and abs(prev.y2 - seg.y1) <= tol
+                and extends_collinear(
+                    (prev.x1, prev.y1), (prev.x2, prev.y2), (seg.x1, seg.y1), (seg.x2, seg.y2), tol
+                )
             ):
-                dx, dy = prev.x2 - prev.x1, prev.y2 - prev.y1
-                ex, ey = seg.x2 - prev.x1, seg.y2 - prev.y1
-                length = math.hypot(dx, dy)
-                ahead = (seg.x2 - seg.x1) * dx + (seg.y2 - seg.y1) * dy
-                if length > tol and ahead > 0.0 and abs(dx * ey - dy * ex) <= tol * length:
-                    out[-1] = replace(prev, x2=seg.x2, y2=seg.y2)
-                    continue
+                out[-1] = replace(prev, x2=seg.x2, y2=seg.y2)
+                continue
         out.append(seg)
     return out
 
@@ -1751,6 +1749,7 @@ def path_pairwise_violation(
     dru: float | None = None,
     attach_zones: Sequence[AttachZone] = (),
     tolerance: float = _PASS_TOLERANCE,
+    foreign_pads: Sequence[PadGeometry] = (),
 ) -> PairwiseViolation | None:
     """Check ONE candidate path against the pairwise (HV) requirement (#4507).
 
@@ -1769,10 +1768,10 @@ def path_pairwise_violation(
     gate agree by construction.  Issue #4507 widened that shared walk to also
     check the candidate against a foreign route's :attr:`Route.vias`
     (trace-vs-via); the candidate itself has no via of its own (it is one
-    in-flight segment move), and foreign PAD copper is not threaded through
-    this predicate -- callers that need pad coverage use
-    :func:`route_pairwise_violation` / :func:`find_pairwise_violations` with
-    an explicit ``foreign_pads``, as :func:`board_pairwise_violations` does.
+    in-flight segment move).  ``foreign_pads`` (issue #8300) adds
+    trace-vs-pad coverage through the same walk and #4506 attach-zone
+    exemption the audit uses; the default ``()`` keeps the trace/via-only
+    scope for callers that do not supply pad copper.
 
     The moving net's name resolves from ``net_name`` when supplied, else from
     ``id_to_name[exclude_net]``.  An unresolvable moving net returns ``None``
@@ -1804,6 +1803,7 @@ def path_pairwise_violation(
         floor=floor,
         attach_zones=attach_zones,
         tolerance=tolerance,
+        foreign_pads=foreign_pads,
     )
 
 
@@ -1844,6 +1844,11 @@ class PairwisePathChecker:
     attach_zones: Sequence[AttachZone] = ()
     dru: float | None = None
     tolerance: float = _PASS_TOLERANCE
+    #: Static foreign PAD copper to vet candidates against (issue #8300).
+    #: ``from_router`` leaves it empty (pads are not router state); a caller
+    #: that has the source board fills it, e.g. via ``dataclasses.replace``
+    #: with :func:`board_pad_geometry`.
+    foreign_pads: Sequence[PadGeometry] = ()
 
     @classmethod
     def from_router(cls, router: object) -> PairwisePathChecker | None:
@@ -1922,6 +1927,7 @@ class PairwisePathChecker:
             dru=self.dru,
             attach_zones=self.attach_zones,
             tolerance=self.tolerance,
+            foreign_pads=self.foreign_pads,
         )
 
     def path_is_clear(
