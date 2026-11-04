@@ -30,6 +30,13 @@ from kicad_tools.router.rules import DesignRules
 requires_cpp = pytest.mark.skipif(not is_cpp_available(), reason="C++ router backend unavailable")
 
 
+@pytest.fixture(autouse=True)
+def _no_repeat_net_skip(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests exercise the grid-state memo; the issue #8370 per-net
+    repeat skip would otherwise mask its invalidation cases."""
+    monkeypatch.setenv("KICAD_ROUTER_SKIP_REPEAT_FALLBACK", "0")
+
+
 def _rules() -> DesignRules:
     return DesignRules(
         trace_width=0.2,
