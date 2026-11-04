@@ -81,8 +81,14 @@ def _deterministic_uuids(pcb_path: Path, net_filter: str | None = None):
         random.setstate(prev_state)
 
 
-def _kicad_cli_clearance_errors(pcb_path: Path) -> dict:
+def _kicad_cli_clearance_errors(pcb_path: Path, rules_from: Path | None = None) -> dict:
     """Whole-board kicad-cli clearance error count; never raises (Issue #8322).
+
+    Counts every error whose type contains ``clearance`` (so
+    ``copper_edge_clearance`` and ``hole_clearance`` are included on purpose).
+    If ``rules_from`` is given, the board is checked as a temporary copy with
+    ``rules_from``'s sibling ``.kicad_pro``/``.kicad_dru`` staged beside it, so
+    an output written elsewhere is judged under the same rules as the input.
 
     The in-process ``--drc-aware`` referee ignores the board's ``.kicad_dru``,
     so this runs kicad-cli (``--refill-zones``, board not saved; the sibling
@@ -91,6 +97,7 @@ def _kicad_cli_clearance_errors(pcb_path: Path) -> dict:
     "reason": str | None}``.
     """
     import json
+    import shutil
     import tempfile
 
     from kicad_tools.cli.runner import run_drc
@@ -98,8 +105,18 @@ def _kicad_cli_clearance_errors(pcb_path: Path) -> dict:
     try:
         with tempfile.TemporaryDirectory(prefix="kct_optdrc_") as td:
             report = Path(td) / "drc.json"
+            target = pcb_path
+            if rules_from is not None:
+                stage = Path(td) / "stage"
+                stage.mkdir()
+                target = stage / pcb_path.name
+                shutil.copy2(pcb_path, target)
+                for suffix in (".kicad_pro", ".kicad_dru"):
+                    src = rules_from.with_suffix(suffix)
+                    if src.exists():
+                        shutil.copy2(src, target.with_suffix(suffix))
             result = run_drc(
-                pcb_path,
+                target,
                 output_path=report,
                 format="json",
                 schematic_parity=False,
@@ -121,7 +138,11 @@ def _kicad_cli_clearance_errors(pcb_path: Path) -> dict:
 
 def _kicad_cli_drc_summary(before: dict | None, after: dict | None, has_dru: bool) -> dict:
     """Combine the before/after kicad-cli runs into the reported summary (#8322)."""
-    ok = bool(before and after and before["available"] and after["available"])
+    ok = (
+        before is not None
+        and after is not None
+        and bool(before["available"] and after["available"])
+    )
     summary: dict = {
         "available": ok,
         "clearance_errors_before": before["clearance_errors"] if before else None,
@@ -130,7 +151,7 @@ def _kicad_cli_drc_summary(before: dict | None, after: dict | None, has_dru: boo
         "dru_not_evaluated": (not ok) and has_dru,
         "reason": None,
     }
-    if ok:
+    if before is not None and after is not None and ok:
         summary["regression"] = after["clearance_errors"] > before["clearance_errors"]
     else:
         summary["reason"] = next(
@@ -579,7 +600,13 @@ Examples:
 
     cli_drc: dict | None = None
     if args.drc_aware and not args.dry_run:
-        cli_after = _kicad_cli_clearance_errors(Path(args.output or pcb_path))
+        out_path = Path(args.output or pcb_path)
+        # Project/rule files are found beside the board; stage the input's
+        # next to a copy of the output so both runs use the same rule set.
+        same_board = out_path.resolve() == pcb_path.resolve()
+        cli_after = _kicad_cli_clearance_errors(
+            out_path, rules_from=None if same_board else pcb_path
+        )
         cli_drc = _kicad_cli_drc_summary(cli_before, cli_after, has_dru)
     exit_code = 2 if cli_drc and cli_drc["regression"] else 0
 

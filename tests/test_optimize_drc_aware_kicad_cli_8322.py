@@ -74,3 +74,52 @@ def test_dry_run_skips_kicad_cli(pcb, capsys):
     with patch(TARGET) as m:
         assert main([str(pcb), "--dry-run", "--drc-aware", "--mfr", "jlcpcb"]) == 0
     m.assert_not_called()
+
+
+def test_output_elsewhere_stages_input_rules_for_after_run(pcb, tmp_path, capsys):
+    out_dir = tmp_path / "elsewhere"
+    out_dir.mkdir()
+    args = [str(pcb), "-o", str(out_dir / "o.kicad_pcb"), "--drc-aware", "--mfr", "jlcpcb"]
+    with (
+        patch(TARGET, side_effect=[_ok(1), _ok(1)]) as m,
+        patch(REFILL, return_value=KiCadCLIResult(True)),
+    ):
+        assert main(args) == 0
+    capsys.readouterr()
+    assert m.call_args_list[0].kwargs.get("rules_from") is None
+    assert m.call_args_list[1].kwargs["rules_from"] == pcb
+
+
+def test_clearance_helper_stages_rules_beside_copy(tmp_path):
+    from kicad_tools.cli.optimize_cmd import _kicad_cli_clearance_errors
+
+    src = tmp_path / "in.kicad_pcb"
+    src.write_text("x")
+    src.with_suffix(".kicad_dru").write_text("(version 1)\n")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    out = out_dir / "o.kicad_pcb"
+    out.write_text("y")
+    seen = {}
+
+    def fake_run_drc(target, output_path, **kw):
+        seen["target"] = Path(target)
+        seen["dru"] = Path(target).with_suffix(".kicad_dru").exists()
+        output_path.write_text(
+            json.dumps(
+                {
+                    "violations": [
+                        {"type": "clearance", "severity": "error"},
+                        {"type": "copper_edge_clearance", "severity": "error"},
+                        {"type": "clearance", "severity": "warning"},
+                    ]
+                }
+            )
+        )
+        return KiCadCLIResult(True)
+
+    with patch("kicad_tools.cli.runner.run_drc", side_effect=fake_run_drc):
+        res = _kicad_cli_clearance_errors(out, rules_from=src)
+    assert res["clearance_errors"] == 2
+    assert seen["dru"] is True
+    assert seen["target"].parent != out_dir
