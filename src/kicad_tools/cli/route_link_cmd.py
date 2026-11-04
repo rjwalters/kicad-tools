@@ -83,8 +83,8 @@ def _parse_xy(text: str) -> tuple[float, float]:
 
 
 def _parse_end(token: str) -> EndSpec:
-    body, _, layer = token.partition("@")
-    layer = layer or None
+    body, _, layer_text = token.partition("@")
+    layer = layer_text or None
     if "@" in token and not layer:
         raise LinkSpecError(f"empty layer after '@' in {token!r}")
     if "," in body:
@@ -108,7 +108,7 @@ def parse_link_spec(text: str) -> LinkSpec:
 class LinkAction(argparse.Action):
     """``--link`` (repeatable): appends to the ordered ``links`` list."""
 
-    def __call__(self, parser, namespace, values, option_string=None):  # type: ignore[no-untyped-def]
+    def __call__(self, parser, namespace, values, option_string=None):
         try:
             spec = parse_link_spec(values)
         except LinkSpecError as exc:
@@ -121,17 +121,18 @@ class LinkAction(argparse.Action):
 class _ModifierAction(argparse.Action):
     """Base for options that modify the ``--link`` they follow."""
 
-    def _last(self, parser, namespace, option_string):  # type: ignore[no-untyped-def]
+    def _last(self, parser, namespace, option_string):
         links = getattr(namespace, "links", None)
         if not links:
             parser.error(f"{option_string} must follow the --link it applies to")
+        assert links  # parser.error() exits; narrows the Any | None for mypy
         return links[-1]
 
 
 class ViaAtAction(_ModifierAction):
     """``--via-at x,y``: force a waypoint via on the preceding ``--link``."""
 
-    def __call__(self, parser, namespace, values, option_string=None):  # type: ignore[no-untyped-def]
+    def __call__(self, parser, namespace, values, option_string=None):
         link = self._last(parser, namespace, option_string)
         try:
             link.via_at = _parse_xy(values)
@@ -142,7 +143,7 @@ class ViaAtAction(_ModifierAction):
 class LinkLayersAction(_ModifierAction):
     """``--link-layers F.Cu[,B.Cu]``: restrict the preceding ``--link``'s layers."""
 
-    def __call__(self, parser, namespace, values, option_string=None):  # type: ignore[no-untyped-def]
+    def __call__(self, parser, namespace, values, option_string=None):
         link = self._last(parser, namespace, option_string)
         layers = [v for v in values.split(",") if v]
         if not layers:
@@ -267,7 +268,7 @@ def _route_length(route: Any) -> float:
 
 def _commit_to_model(model: Any, route: Any, net_number: int) -> None:
     """Make later links see ``route``'s copper (mirrors the oracle's commit)."""
-    from shapely.geometry import LineString, Point
+    from shapely.geometry import LineString, Point  # type: ignore[import-untyped]
 
     from kicad_tools.router.link_router import _Item
 
