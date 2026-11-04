@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-04
 
+- **PR #8317**: feat: break declared-net copper loops (incl. via-closed) in pcb prune
+- **Issue #8313** (closed): pcb prune: break via-closed loops on nets with declared current paths so reinforce can anchor them
 - **PR #8359**: fix: let prune merge collinear runs across sub-micron end gaps
 - **Issue #8356** (closed): pcb prune: collinear merge refuses a straight run when a ~0.5 um end mismatch turns its joint into a body overlap
 - **PR #8350**: fix: exempt dangling and unconnected growth from strip DRC gate
