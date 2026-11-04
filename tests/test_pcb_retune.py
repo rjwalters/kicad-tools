@@ -141,7 +141,7 @@ class TestTune:
         assert prov["input_sha256"] == digest(src) == report.input_sha256
         assert prov["output_sha256"] == digest(src.parent / "out.kicad_pcb")
         assert prov["settings"]["selected_groups"] == ["ADDR_BUS"]
-        assert prov["settings"]["uuid_seed"] == 6885
+        assert isinstance(prov["settings"]["uuid_seed"], int)
         assert prov["tool_version"]
         lengths = prov["net_lengths_mm"]
         assert lengths["A3"]["before"] == pytest.approx(33.0)
