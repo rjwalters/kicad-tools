@@ -22,6 +22,8 @@
 (rule "Via Drill - jlcpcb"
   (condition "A.Type == 'via' && A.Via_Type != 'Micro'")
   (constraint hole_size (min 0.3mm)))
+(rule "Max Hole Size - jlcpcb"
+  (constraint hole_size (max 6.3mm)))
 (rule "Via Diameter - jlcpcb"
   (condition "A.Type == 'via' && A.Via_Type != 'Micro'")
   (constraint via_diameter (min 0.6mm)))
@@ -37,13 +39,31 @@
   (condition "(A.Type == 'via' || A.Type == 'pad') && B.Layer == 'Edge.Cuts'")
   (constraint physical_hole_clearance (min 0.5mm)))
 (rule "Silkscreen Width - jlcpcb"
-  (condition "A.Type == 'text' && A.Layer == 'F.Silkscreen'")
+  (condition "A.Type == 'text' && (A.Layer == 'F.Silkscreen' || A.Layer == 'B.Silkscreen')")
   (constraint text_thickness (min 0.15mm)))
 (rule "Silkscreen Height - jlcpcb"
-  (condition "A.Type == 'text' && A.Layer == 'F.Silkscreen'")
+  (condition "A.Type == 'text' && (A.Layer == 'F.Silkscreen' || A.Layer == 'B.Silkscreen')")
   (constraint text_height (min 1.0mm)))
 
 (rule "Reviewed clearance - Power"
   (condition "(A.NetClass == 'Power' || B.NetClass == 'Power') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference) && !A.isCoupledDiffPair()")
   (constraint clearance (min 0.2mm)))
 # END kct fab floors
+
+# BEGIN kct attach-zone router-class exemptions (Issue #8048) -- managed, do not edit
+# Copper attaching to a rated part is spaced by that part's own pin pitch:
+# inside a footprint's courtyard, between its pad nets, the router's net-class
+# floor drops to the board-wide base clearance. Designer minima are untouched.
+(rule "kct attach zone - J1"
+  (condition "A.intersectsCourtyard('J1') && B.intersectsCourtyard('J1') && ((A.NetName == 'GND') || (A.NetName == 'VIN')) && ((B.NetName == 'GND') || (B.NetName == 'VIN'))")
+  (constraint clearance (min 0.127mm)))
+(rule "kct attach zone - J2"
+  (condition "A.intersectsCourtyard('J2') && B.intersectsCourtyard('J2') && ((A.NetName == 'GND') || (A.NetName == 'VOUT')) && ((B.NetName == 'GND') || (B.NetName == 'VOUT'))")
+  (constraint clearance (min 0.127mm)))
+(rule "kct attach zone - R1"
+  (condition "A.intersectsCourtyard('R1') && B.intersectsCourtyard('R1') && ((A.NetName == 'VIN' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'VOUT' && (A.Type == 'Via' || A.Layer == 'F.Cu'))) && ((B.NetName == 'VIN' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'VOUT' && (B.Type == 'Via' || B.Layer == 'F.Cu')))")
+  (constraint clearance (min 0.127mm)))
+(rule "kct attach zone - R2"
+  (condition "A.intersectsCourtyard('R2') && B.intersectsCourtyard('R2') && ((A.NetName == 'GND' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'VOUT' && (A.Type == 'Via' || A.Layer == 'F.Cu'))) && ((B.NetName == 'GND' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'VOUT' && (B.Type == 'Via' || B.Layer == 'F.Cu')))")
+  (constraint clearance (min 0.127mm)))
+# END kct attach-zone router-class exemptions

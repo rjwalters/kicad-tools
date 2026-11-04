@@ -1,19 +1,23 @@
 {
   "file": "output/voltage_divider_routed.kicad_pcb",
   "manufacturer": "jlcpcb",
-  "pcb_sha256": "9a42943ac4b05d748ddfad96940c7363592fefec69ca65319a739ebbef530045",
+  "pcb_sha256": "822aec175f6366129e0be0854c7c7cec108898adcff3f71d25ab417363f1be79",
   "layers": 2,
   "summary": {
     "errors": 0,
     "warnings": 0,
     "infos": 2,
     "waived": 0,
-    "rules_checked": 66,
+    "rules_checked": 68,
     "rules_checked_by_rule": {
       "connectivity": 1,
       "copper_sliver": 1,
       "track_dangling": 1,
       "via_dangling": 1,
+      "redundant_copper_duplicate": 1,
+      "redundant_copper_fragments": 1,
+      "redundant_copper_detour": 1,
+      "redundant_copper_via_offcentre": 1,
       "doc_drift_stale_pin": 1,
       "doc_drift_unresolvable_pin": 1,
       "isolated_copper": 1,
@@ -26,6 +30,7 @@
       "netclass_annular_ring": 1,
       "sch_field_offset": 1,
       "sch_field_overlap": 1,
+      "sch_wire_through_symbol": 1,
       "spec_conformance_dimensions": 1,
       "spec_conformance_layers": 1,
       "spec_conformance_min_trace": 1,
@@ -35,12 +40,14 @@
     },
     "passed": true,
     "stale_waivers": 0,
-    "coverage_checked": 30,
+    "coverage_checked": 31,
     "coverage_skipped": 10,
     "coverage_unknown": [
+      "model_coverage",
       "spec_conformance"
     ],
-    "coverage_blocking_unknown": []
+    "coverage_blocking_unknown": [],
+    "attach_zone_exemption": "active"
   },
   "violations": [
     {
@@ -87,10 +94,49 @@
     }
   ],
   "mask_copper_assessments": [],
+  "schema_version": 1,
+  "findings": [
+    {
+      "schema_version": 1,
+      "rule_id": "connector_edge_distance",
+      "severity": "info",
+      "message": "J2 (Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical): 3.23mm from nearest board edge",
+      "refs": [
+        "J2"
+      ],
+      "pads": [],
+      "nets": [],
+      "point": [
+        158.5,
+        87.5
+      ],
+      "bbox": null,
+      "layer": "F.Cu",
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "connector_edge_distance",
+      "severity": "info",
+      "message": "J1 (Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical): 3.23mm from nearest board edge",
+      "refs": [
+        "J1"
+      ],
+      "pads": [],
+      "nets": [],
+      "point": [
+        138.5,
+        87.5
+      ],
+      "bbox": null,
+      "layer": "F.Cu",
+      "waived": false
+    }
+  ],
   "meta_checks": {
     "drc": {
       "status": "PASSED",
-      "detail": "66 rules checked, 0 error(s), 0 warning(s)"
+      "detail": "68 rules checked, 0 error(s), 0 warning(s)"
     },
     "erc": {
       "status": "PASSED",
@@ -235,6 +281,12 @@
       "reason": "no_net_class_map",
       "blocking": true
     },
+    "model_coverage": {
+      "status": "unknown:host_library_refs (4 footprint(s); per-host detail: kct pcb model-audit)",
+      "state": "unknown",
+      "reason": "host_library_refs (4 footprint(s); per-host detail: kct pcb model-audit)",
+      "blocking": false
+    },
     "netclass_clearance_copper": {
       "status": "checked",
       "state": "checked",
@@ -278,6 +330,12 @@
       "blocking": false
     },
     "placement": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "redundant_copper": {
       "status": "checked",
       "state": "checked",
       "reason": null,
