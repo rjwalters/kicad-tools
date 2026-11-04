@@ -538,6 +538,8 @@ Examples:
                     "duplicates_removed": stats.duplicates_removed,
                     "nets_connectivity_discarded": stats.nets_connectivity_discarded,
                     "connectivity_discarded_nets": stats.connectivity_discarded_nets,
+                    "nets_connectivity_partial": stats.nets_connectivity_partial,
+                    "connectivity_partial_nets": stats.connectivity_partial_nets,
                     "drc_failsafe_reverted": stats.drc_failsafe_reverted,
                     "drc_failsafe_rules": stats.drc_failsafe_rules,
                     "segments_before": stats.segments_before,
@@ -592,6 +594,12 @@ Examples:
                 f"  Discarded (would disconnect pads): {stats.nets_connectivity_discarded} "
                 f"({', '.join(stats.connectivity_discarded_nets[:5])}"
                 f"{', ...' if stats.nets_connectivity_discarded > 5 else ''})"
+            )
+        if stats.nets_connectivity_partial:
+            print(
+                f"  Partly kept (unsafe edits dropped): {stats.nets_connectivity_partial} "
+                f"({', '.join(stats.connectivity_partial_nets[:5])}"
+                f"{', ...' if stats.nets_connectivity_partial > 5 else ''})"
             )
         print()
 
