@@ -11,8 +11,14 @@ exactly one place.
 ``--probe`` is the read-only form: it reports a path (length, via count) or the
 blocking item per link and never writes the board.
 
-Per-link kicad-cli DRC / creepage gating and single-link rollback are Issue
-#8314, not this command.
+Without ``--probe`` links are committed one at a time (Issue #8314).  After
+each, kicad-cli DRC (on the pinned evidence toolchain) and the pairwise creepage
+census run on the board with that link added; a link that introduces a DRC
+violation or a failing census pair absent from the last accepted state is
+rolled back alone (the board file restored to its pre-link bytes) and later
+links route against the board as it really is.  Exit 1 if any link was rolled
+back or unroutable; exit 2 (nothing written) when the pinned kicad-cli is
+unavailable.
 
 Coordinates on the command line are the board file's (absolute) millimetres,
 as KiCad shows them.
@@ -185,6 +191,27 @@ def add_route_link_arguments(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Report per link a path (length, vias) or the blocking item; write nothing.",
     )
+    parser.add_argument(
+        "--net-class-map",
+        dest="net_class_map",
+        default=None,
+        help="Net-class sidecar JSON classifying the HV nets for the per-link creepage gate",
+    )
+    parser.add_argument(
+        "--net-class",
+        dest="net_class",
+        default="HV",
+        help="Net class naming the HV group for the creepage gate (default: HV)",
+    )
+    parser.add_argument(
+        "--min",
+        type=float,
+        default=None,
+        help=(
+            "Required minimum creepage (mm) for the per-link creepage gate; "
+            "without it the census gate is skipped"
+        ),
+    )
     parser.add_argument("-o", "--output", help="Write to this file instead of editing in place")
     parser.add_argument("--trace-width", type=float, default=0.2, help="Track width (mm)")
     parser.add_argument("--clearance", type=float, default=0.2, help="Clearance floor (mm)")
@@ -353,8 +380,147 @@ def _route_one(
     return entry, route
 
 
+def _drc_finding_counts(pcb_path: Path) -> Any:
+    """Counter of ``(type, severity, items)`` DRC findings for ``pcb_path``.
+
+    Runs kicad-cli on the pinned evidence toolchain (the caller holds
+    :func:`evidence_toolchain`).  Raises ``RuntimeError`` when DRC cannot run.
+    """
+    import json
+    import tempfile
+    from collections import Counter
+
+    from .kicad_toolchain import KiCadEnvironmentError, require_library_environment
+    from .runner import run_drc
+
+    with tempfile.TemporaryDirectory(prefix="kct-route-link-") as tmp:
+        report = Path(tmp) / "drc.json"
+        result = run_drc(pcb_path, report, format="json", schematic_parity=False)
+        if not result.success or not report.is_file():
+            raise RuntimeError((result.stderr or "kicad-cli DRC failed").strip())
+        data = json.loads(report.read_text())
+    try:
+        require_library_environment(data, source=f"native DRC of {pcb_path.name}")
+    except KiCadEnvironmentError as exc:
+        raise RuntimeError(str(exc)) from exc
+    counts: Any = Counter()
+    for v in data.get("violations", []):
+        if v.get("severity") not in ("error", "warning"):
+            continue
+        items = sorted(str(i.get("description", "")) for i in v.get("items", []))
+        counts[(v.get("type"), v.get("severity"), tuple(items))] += 1
+    return counts
+
+
+def _census_failures(pcb_path: Path, args: argparse.Namespace) -> set[tuple[str, str, str]] | None:
+    """Failing creepage pairs ``(net_a, net_b, kind)``; ``None`` if no census is configured."""
+    if getattr(args, "min", None) is None:
+        return None
+    from kicad_tools.creepage.engine import compute_creepage_census, resolve_hv_nets
+    from kicad_tools.schema.pcb import PCB
+
+    net_class_map = None
+    ncm = getattr(args, "net_class_map", None)
+    if ncm:
+        from kicad_tools.router.rules import net_class_map_from_path
+
+        net_class_map = net_class_map_from_path(Path(ncm), pcb_path=pcb_path)
+    pcb = PCB.load(str(pcb_path))
+    net_class = getattr(args, "net_class", "HV") or "HV"
+    hv_nets = resolve_hv_nets(pcb, net_class, net_class_map)
+    if not hv_nets:
+        return set()
+    report = compute_creepage_census(
+        pcb, hv_nets, float(args.min), net_class=net_class, board=str(pcb_path)
+    )
+    return {(p.net_a, p.net_b, p.kind) for p in report.pairs if not p.passed}
+
+
+def _gate_state(pcb_path: Path, args: argparse.Namespace) -> tuple[Any, set | None]:
+    return _drc_finding_counts(pcb_path), _census_failures(pcb_path, args)
+
+
+def _refuse(as_json: bool, message: str) -> int:
+    """Exit 2: the gate cannot run, so nothing is (or stays) written."""
+    if as_json:
+        emit_json({"command": "route-link", "ok": False, "refused": True, "error": message})
+    else:
+        print(f"route-link: REFUSED: {message}", file=sys.stderr)
+    return 2
+
+
+def _commit_links(
+    args: argparse.Namespace,
+    links: list[LinkSpec],
+    pcb: Any,
+    model: Any,
+    rules: Any,
+    origin: tuple[float, float],
+    net_ids: dict[str, int],
+    pcb_path: Path,
+    out_path: Path,
+    entries: list[dict[str, Any]],
+) -> tuple[str | None, str | None]:
+    """Commit ``links`` one at a time with a DRC + creepage gate per link.
+
+    Returns ``(written path | None, refusal message | None)``.
+    """
+    from kicad_tools.router.link_router import append_link_routes
+
+    created = out_path != pcb_path and not out_path.exists()
+    if out_path != pcb_path:
+        out_path.write_bytes(pcb_path.read_bytes())
+    try:
+        base_drc, base_census = _gate_state(out_path, args)
+    except Exception as exc:  # the gate cannot run: refuse, leave nothing behind
+        if created:
+            out_path.unlink(missing_ok=True)
+        return None, f"cannot establish the DRC/creepage baseline: {exc}"
+
+    n_committed = 0
+    for spec in links:
+        entry, route = _route_one(pcb, model, rules, spec, origin, net_ids)
+        entry["status"] = "unroutable"
+        entry["failed_check"] = None
+        entries.append(entry)
+        if route is None:
+            continue
+        snapshot = out_path.read_bytes()
+        failed: str | None = None
+        reason = ""
+        try:
+            append_link_routes(out_path, [route], origin)
+            drc, census = _gate_state(out_path, args)
+            new_drc = drc - base_drc
+            if new_drc:
+                failed = "drc"
+                reason = f"{sum(new_drc.values())} new DRC violation(s): " + ", ".join(
+                    sorted({k[0] or "?" for k in new_drc})
+                )
+            elif census is not None and base_census is not None and census - base_census:
+                failed = "creepage"
+                reason = f"{len(census - base_census)} new failing creepage pair(s): " + ", ".join(
+                    f"{a}/{b}" for a, b, _ in sorted(census - base_census)
+                )
+        except Exception as exc:
+            failed = "drc"
+            reason = f"gate could not run: {exc}"
+        if failed is not None:
+            out_path.write_bytes(snapshot)
+            entry.update(routable=False, status="rolled-back", failed_check=failed, reason=reason)
+            continue
+        entry["status"] = "committed"
+        base_drc, base_census = drc, census
+        _commit_to_model(model, route, net_ids[spec.net])
+        n_committed += 1
+    return (str(out_path) if n_committed else None), None
+
+
 def run_route_link_command(args: argparse.Namespace) -> int:
-    """Entry point for ``kct route-link``. Exit 1 if any link is unroutable."""
+    """Entry point for ``kct route-link``.
+
+    Exit 1 if any link is unroutable or rolled back; 2 if the gate cannot run.
+    """
     as_json = args.format == FORMAT_JSON
     links: list[LinkSpec] = list(getattr(args, "links", None) or [])
 
@@ -372,7 +538,7 @@ def run_route_link_command(args: argparse.Namespace) -> int:
         return fail(f"board not found: {pcb_path}")
 
     with stdout_to_stderr_when(as_json):
-        from kicad_tools.router.link_router import _build_model, append_link_routes
+        from kicad_tools.router.link_router import _build_model
         from kicad_tools.schema.pcb import PCB
 
         pcb = PCB.load(str(pcb_path))
@@ -385,24 +551,33 @@ def run_route_link_command(args: argparse.Namespace) -> int:
         net_ids = {net.name: num for num, net in pcb.nets.items() if net.name}
 
         entries: list[dict[str, Any]] = []
-        committed: list[Any] = []
-        for spec in links:
-            entry, route = _route_one(pcb, model, rules, spec, origin, net_ids)
-            entries.append(entry)
-            if route is not None:
-                # Later links (probe or commit) must see this copper.
-                _commit_to_model(model, route, net_ids[spec.net])
-                committed.append(route)
-
         written: str | None = None
-        if not args.probe and committed:
-            out_path = Path(args.output) if args.output else pcb_path
-            if out_path != pcb_path:
-                out_path.write_bytes(pcb_path.read_bytes())
-            append_link_routes(out_path, committed, origin)
-            written = str(out_path)
+        refused: str | None = None
+        if args.probe:
+            for spec in links:
+                entry, route = _route_one(pcb, model, rules, spec, origin, net_ids)
+                entry["status"] = "probed"
+                entry["failed_check"] = None
+                entries.append(entry)
+                if route is not None:
+                    # Later probes must see this copper.
+                    _commit_to_model(model, route, net_ids[spec.net])
+        else:
+            from .kicad_toolchain import KiCadEnvironmentError, evidence_toolchain
 
-    ok = all(e["routable"] for e in entries)
+            out_path = Path(args.output) if args.output else pcb_path
+            try:
+                with evidence_toolchain(mounts=[out_path.resolve().parent]):
+                    written, refused = _commit_links(
+                        args, links, pcb, model, rules, origin, net_ids, pcb_path, out_path, entries
+                    )
+            except KiCadEnvironmentError as exc:
+                refused = f"KiCad environment (Issue #6962): {exc}"
+
+    if refused is not None:
+        return _refuse(as_json, refused)
+
+    ok = all(e["routable"] and e["status"] != "rolled-back" for e in entries)
     if as_json:
         emit_json(
             {
@@ -415,8 +590,10 @@ def run_route_link_command(args: argparse.Namespace) -> int:
         )
     else:
         for e in entries:
-            if e["routable"]:
-                verb = "routable" if args.probe else "routed"
+            if e["status"] == "rolled-back":
+                print(f"  ROLLED BACK: {e['link']}: failed {e['failed_check']}: {e['reason']}")
+            elif e["routable"]:
+                verb = "routable" if args.probe else "committed"
                 print(
                     f"  {verb}: {e['link']}  {e['length_mm']:.3f} mm, {e['vias']} via(s), "
                     f"layers {','.join(e['layers'])}"
@@ -431,7 +608,9 @@ def run_route_link_command(args: argparse.Namespace) -> int:
                         f">= {b['required_mm']:.3f} mm"
                     )
         if written:
-            print(f"route-link: wrote {sum(e['routable'] for e in entries)} link(s) to {written}")
+            print(
+                f"route-link: wrote {sum(e['status'] == 'committed' for e in entries)} link(s) to {written}"
+            )
         elif args.probe:
             print("route-link: probe only; board not written")
     return 0 if ok else 1
