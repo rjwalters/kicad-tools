@@ -1033,82 +1033,98 @@ def remove_lateral_jogs_pass(
     return result
 
 
-def straighten_pad_entries_pass(
+def _reversed_chain(segments: list[Segment]) -> list[Segment]:
+    """The chain walked from its other end (each segment flipped)."""
+    return [_retarget(s, s.x2, s.y2, s.x1, s.y1) for s in reversed(segments)]
+
+
+def straighten_pad_entry_pass(
     segments: list[Segment],
     config: OptimizationConfig,
     path_is_clear: Callable[[Segment], bool] | None = None,
-    pads: list[tuple[float, float]] | None = None,
-    max_step_pieces: int = 3,
+    anchors: list[tuple[float, float]] | None = None,
+    pad_points: list[tuple[float, float]] | None = None,
 ) -> list[Segment]:
-    """Straighten a jog just before a chain end on a pad (Issue #8298).
+    """Straighten a short sidestep just before a chain ends on a pad (Issue #8325).
 
-    At a chain end on a pad centre ``C`` the tail can read ``A, s.., B`` with
-    ``B`` parallel to ``A`` and the short step pieces ``s..`` (at most
-    *max_step_pieces*, total length at most ``max_jog_length``) offsetting the
-    line.  ``remove_lateral_jogs_pass`` cannot slide that step: the chain ends
-    at ``B``, so there is no next corner.  Instead ``A`` is extended along its
-    own line to the foot point ``Q`` of ``C`` and ``s.., B`` are dropped.  The
-    end moves off the pad centre by the perpendicular offset, so this applies
-    only when the offset is within half the trace width: the trace still
-    covers ``C`` and its end lies inside any pad wider than the trace.
+    A run that enters a pad on a diagonal can sidestep by a hair just before the
+    pad -- ``D, s1, s2, L`` with ``D`` and ``L`` parallel and the steps ``s1, s2``
+    short.  ``remove_lateral_jogs_pass`` cannot take it out: the step is two
+    pieces and the chain ends at the pad, so there is no corner to slide it into.
 
-    Pads only, never vias: an off-centre end on a via is the overlap-only
-    joint ``kct pcb prune`` snaps away.  Like the other path-replacing passes
-    this is a **no-op** unless both *path_is_clear* and *pads* are supplied;
-    the new segment must be clear and the chain may not get longer.
+    Here ``D`` is extended along its own line to the point nearest the pad
+    centre and everything after it is dropped.  The new end sits off the centre
+    by the jog's lateral offset, which is accepted only when it is at most half
+    the trace width -- the end then still covers the centre, i.e. lies on the pad
+    copper.  The connectivity gate (``_free_end_count``) treats such an end as
+    touching the pad.
+
+    Only a chain end that lies on one of *pad_points* is touched (never a via
+    end), the chain never gets longer, every new segment must be clear, and the
+    rewrite must keep covering every anchor the replaced segments covered.  A
+    **no-op** unless *path_is_clear*, *anchors* and *pad_points* are all given.
 
     Args:
         segments: Ordered chain of connected segments (single chain).
         config: Optimization configuration (``max_jog_length``, ``tolerance``).
-        path_is_clear: Collision-check callback (required; ``None`` = no-op).
-        pads: (x, y) centres of the net's pads on this chain's layer.
-        max_step_pieces: Most step segments between ``A`` and ``B``.
+        path_is_clear: Collision-check callback.
+        anchors: (x, y) of the net's pads, vias and other chains' ends.
+        pad_points: (x, y) of the net's pads only.
 
     Returns:
-        The chain with its pad-entry jogs straightened, or a copy of *segments*.
+        The chain with each pad-entry jog straightened, or a copy of *segments*.
     """
-    if len(segments) < 3 or path_is_clear is None or not pads:
+    if len(segments) < 3 or path_is_clear is None or anchors is None or not pad_points:
         return list(segments)
     tol = config.tolerance
 
-    def reverse(chain: list[Segment]) -> list[Segment]:
-        return [_retarget(s, s.x2, s.y2, s.x1, s.y1) for s in reversed(chain)]
-
-    def straighten_tail(chain: list[Segment]) -> list[Segment]:
+    def straighten_end(chain: list[Segment]) -> list[Segment]:
         last = chain[-1]
-        half = last.width / 2
-        centre = next((c for c in pads if math.hypot(c[0] - last.x2, c[1] - last.y2) <= tol), None)
-        if centre is None:
+        pad = next(
+            (
+                (px, py)
+                for px, py in pad_points
+                if abs(px - last.x2) <= tol and abs(py - last.y2) <= tol
+            ),
+            None,
+        )
+        ul = _unit(last, tol)
+        if pad is None or ul is None:
             return chain
-        ub = _unit(last, tol)
-        if ub is None:
+        half_w = last.width / 2
+        steps = 0.0
+        for j in range(len(chain) - 2, -1, -1):
+            seg = chain[j]
+            if seg.width != last.width:
+                return chain
+            ud = _unit(seg, tol)
+            if j <= len(chain) - 3 and ud is not None and _parallel(ud, ul):
+                if ud[0] * ul[0] + ud[1] * ul[1] <= 0:
+                    return chain
+                break
+            steps += segment_length(seg)
+            if steps > config.max_jog_length + tol:
+                return chain
+        else:
             return chain
-        for k in range(1, max_step_pieces + 1):
-            if len(chain) < k + 2:
-                break
-            steps = chain[-1 - k : -1]
-            if sum(segment_length(s) for s in steps) > config.max_jog_length + tol:
-                break
-            a = chain[-2 - k]
-            ua = _unit(a, tol)
-            if ua is None or not _parallel(ua, ub) or ua[0] * ub[0] + ua[1] * ub[1] <= 0:
-                continue
-            along = (centre[0] - a.x1) * ua[0] + (centre[1] - a.y1) * ua[1]
-            if along <= segment_length(a) + tol:
-                continue
-            qx, qy = a.x1 + along * ua[0], a.y1 + along * ua[1]
-            if math.hypot(centre[0] - qx, centre[1] - qy) > half - tol:
-                continue
-            new_a = _retarget(a, a.x1, a.y1, qx, qy)
-            old = chain[-2 - k :]
-            if segment_length(new_a) > sum(segment_length(s) for s in old) + tol:
-                continue
-            if not path_is_clear(new_a):
-                continue
-            return chain[: -2 - k] + [new_a]
-        return chain
+        old = chain[j:]
+        sx, sy = seg.x1, seg.y1
+        t = (pad[0] - sx) * ud[0] + (pad[1] - sy) * ud[1]
+        ex, ey = sx + t * ud[0], sy + t * ud[1]
+        if t <= tol or math.hypot(pad[0] - ex, pad[1] - ey) > half_w:
+            return chain
+        new = _retarget(seg, sx, sy, ex, ey)
+        if sum(segment_length(s) for s in old) + tol < segment_length(new):
+            return chain
+        if not path_is_clear(new):
+            return chain
+        reach = half_w + tol
+        for ax, ay in anchors:
+            if any(_point_segment_distance(ax, ay, s) <= reach for s in old) and (
+                _point_segment_distance(ax, ay, new) > reach
+            ):
+                return chain
+        return [*chain[:j], new]
 
-    result = straighten_tail(list(segments))
-    flipped = reverse(result)
-    head = straighten_tail(flipped)
-    return result if head is flipped else reverse(head)
+    result = straighten_end(list(segments))
+    return _reversed_chain(straighten_end(_reversed_chain(result))) if len(result) >= 3 else result

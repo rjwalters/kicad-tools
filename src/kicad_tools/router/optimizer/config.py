@@ -86,6 +86,8 @@ class NetOptimizationStats:
     # Issue #8207: rule id -> violations this net's rewrite introduced (only
     # populated for nets the per-net rollback loop reverted).
     new_violations: dict[str, int] = field(default_factory=dict)
+    # Issue #8299: the net's final geometry differs from the input.
+    changed: bool = False
 
 
 @dataclass
@@ -120,11 +122,10 @@ class OptimizationStats:
     # group that was connected in the input.
     nets_connectivity_discarded: int = 0
     connectivity_discarded_nets: list[str] = field(default_factory=list)
-    # Issue #8298: nets whose rewrite failed that check as a whole but kept
-    # the regions that preserve connectivity on their own.
+    # Issue #8298: nets whose whole rewrite failed the connectivity check but
+    # where some independent changed regions were safe and kept.
     nets_connectivity_partial: int = 0
     connectivity_partial_nets: list[str] = field(default_factory=list)
-    connectivity_regions_dropped: int = 0
     # Issue #7065: one row per optimized net, built after any DRC rollback.
     per_net: list[NetOptimizationStats] = field(default_factory=list)
 

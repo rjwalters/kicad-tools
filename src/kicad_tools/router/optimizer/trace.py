@@ -25,7 +25,7 @@ from .algorithms import (
     remove_lateral_jogs_pass,
     shared_vertices,
     shorten_detour_pass,
-    straighten_pad_entries_pass,
+    straighten_pad_entry_pass,
 )
 from .chain import sort_into_chains
 from .collision import CollisionChecker
@@ -400,12 +400,12 @@ class TraceOptimizer:
         # KiCad counts as connected), so whole-run rewrites must keep these on
         # the copper as well as the net's pads and vias (Issue #8269).
         self._branch_anchors: list[tuple[float, float]] = []
+        # Issue #8325: pad-only positions per net *name* (no vias), set by
+        # ``set_pad_points``; the pad-entry straightening pass needs them.
+        self._pad_points: dict[str, list[tuple[float, float]]] = {}
         # Issue #8250: via / pad positions per net *name* where the 45° pass
         # must not move a corner (see ``set_attachment_points``).
         self._attachment_points: dict[str, list[tuple[float, float]]] = {}
-        # Issue #8298: pad centres (with their copper layers, ``()`` = every
-        # layer) by net name, for straightening jogs at a pad entry.
-        self._pad_points: dict[str, list[tuple[float, float, tuple[Layer, ...]]]] = {}
         self._protected_vertices: list[tuple[float, float]] = []
 
         # Initialize via optimizer with matching config
@@ -439,12 +439,12 @@ class TraceOptimizer:
         """
         self._attachment_points = points_by_net_name
 
-    def set_pad_points(
-        self, points_by_net_name: dict[str, list[tuple[float, float, tuple[Layer, ...]]]]
-    ) -> None:
-        """Register each net's pad centres ``(x, y, layers)``; ``layers`` empty
-        means every copper layer (a through-hole pad).  Used by
-        ``remove_jogs`` to straighten a jog just before a pad (Issue #8298)."""
+    def set_pad_points(self, points_by_net_name: dict[str, list[tuple[float, float]]]) -> None:
+        """Register pad-only positions per net name (Issue #8325).
+
+        The pad-entry straightening pass may only move a chain end that sits on
+        a pad, never one that sits on a via.
+        """
         self._pad_points = points_by_net_name
 
     def optimize_segments(self, segments: list[Segment]) -> list[Segment]:
@@ -682,11 +682,9 @@ class TraceOptimizer:
             segments: List of connected segments (single chain).
 
         Returns:
-            The chain with its removable jogs slid into the next corner, and
-            a jog just before a pad straightened into the pad (Issue #8298;
-            needs ``set_pad_points``).  Always the chain unchanged unless both
-            a collision checker and ``net_anchors`` were supplied (the same
-            contract as
+            The chain with its removable jogs slid into the next corner.
+            Always the chain unchanged unless both a collision checker and
+            ``net_anchors`` were supplied (the same contract as
             ``shorten_detours``).
         """
         if self.collision_checker is None or self.net_anchors is None or not segments:
@@ -694,16 +692,17 @@ class TraceOptimizer:
         anchors = self.net_anchors.get(segments[0].net)
         if anchors is None:  # unknown / excluded net: leave it alone
             return list(segments)
-        result = remove_lateral_jogs_pass(
-            segments, self.config, self._path_is_clear, anchors + self._branch_anchors
+        anchors = anchors + self._branch_anchors
+        result = remove_lateral_jogs_pass(segments, self.config, self._path_is_clear, anchors)
+        # Issue #8325: a jog the pass above cannot slide because the chain ends
+        # on the pad.
+        return straighten_pad_entry_pass(
+            result,
+            self.config,
+            self._path_is_clear,
+            anchors,
+            self._pad_points.get(segments[0].net_name, []),
         )
-        layer = segments[0].layer
-        pads = [
-            (x, y)
-            for x, y, layers in self._pad_points.get(segments[0].net_name, ())
-            if not layers or layer in layers
-        ]
-        return straighten_pad_entries_pass(result, self.config, self._path_is_clear, pads)
 
     def shorten_detours(self, segments: list[Segment]) -> list[Segment]:
         """Replace a detouring chain with a shorter straight/single-bend path.
@@ -818,6 +817,7 @@ class TraceOptimizer:
         pcb_path: str,
         output_path: str | None = None,
         net_filter: str | None = None,
+        net_pattern: str | None = None,
         dry_run: bool = False,
         on_net_optimized: Callable[[str, list[Segment], list[Segment]], None] | None = None,
         net_anchors_by_name: dict[str, list] | None = None,
@@ -827,7 +827,8 @@ class TraceOptimizer:
         Args:
             pcb_path: Path to input .kicad_pcb file.
             output_path: Path for output file. If None, modifies in place.
-            net_filter: Only optimize nets matching this pattern.
+            net_filter: Only optimize the net with exactly this name.
+            net_pattern: Only optimize nets matching this ``fnmatch`` glob.
             dry_run: If True, calculate stats but don't write output.
             on_net_optimized: Per-net commit hook; see :func:`optimize_pcb`.
 
@@ -840,6 +841,7 @@ class TraceOptimizer:
             optimize_fn=self.optimize_segments,
             config=self.config,
             net_filter=net_filter,
+            net_pattern=net_pattern,
             dry_run=dry_run,
             on_net_optimized=on_net_optimized,
             net_anchors_by_name=net_anchors_by_name,

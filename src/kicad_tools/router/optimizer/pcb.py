@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import fnmatch
 import logging
+import math
 import re
 import tempfile
+from collections import Counter
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
@@ -555,6 +558,27 @@ def _pad_violations_grew(
     return False
 
 
+def _segment_multiset(segs: list[Segment]) -> Counter:
+    """Order- and orientation-insensitive multiset of ``segs`` (Issue #8299).
+
+    Duplicates are counted (not collapsed), so a rewrite that only re-chains,
+    reverses or reorders segments compares equal to its input, while one that
+    drops or adds a segment -- even an exact duplicate -- does not.
+    """
+    keys: Counter = Counter()
+    for seg in segs:
+        p1 = (round(seg.x1, 6), round(seg.y1, 6))
+        p2 = (round(seg.x2, 6), round(seg.y2, 6))
+        a, b = (p1, p2) if p1 <= p2 else (p2, p1)
+        keys[(seg.net, seg.layer, round(seg.width, 6), a, b)] += 1
+    return keys
+
+
+def _same_segments(a: list[Segment], b: list[Segment]) -> bool:
+    """True when ``a`` and ``b`` hold the same segments in any order/orientation."""
+    return a == b or (len(a) == len(b) and _segment_multiset(a) == _segment_multiset(b))
+
+
 def dedupe_segments(segs: list[Segment]) -> tuple[list[Segment], int]:
     """Drop exact-duplicate segments, keeping the first occurrence (Issue #8271).
 
@@ -700,8 +724,7 @@ def _free_end_count(
 ) -> int:
     """Count segment ends that touch no other copper, via or pad.
 
-    These are the ends KiCad flags as ``track_dangling``.  An end touches a
-    pad or via when its centre lies within half the track width of the end.  An exact duplicate
+    These are the ends KiCad flags as ``track_dangling``.  An exact duplicate
     (or reverse duplicate) of the segment does not count as something the end
     touches.  Issue #8250 review: a rewrite must not create new free ends.
     """
@@ -734,16 +757,21 @@ def _free_end_count(
 
     free = 0
     for i, sg in enumerate(segments):
-        # Issue #8298: an end touches a pad or via whose centre lies under the
-        # track's end cap (KiCad joins an anchor inside the other item's
-        # shape), so a run ending just off a pad centre is not dangling.
-        reach = max(tolerance, sg.width / 2)
         for px, py in ((sg.x1, sg.y1), (sg.x2, sg.y2)):
+            # Same attach radius as ``_component_labels``: a pad is touched by
+            # an end within ``max(tolerance, w/2)`` of its centre, i.e. one that
+            # still lies on the pad copper (Issue #8325).
+            half_w = sg.width / 2
             touched = any(
-                math.hypot(ax - px, ay - py) <= reach and (not lyrs or sg.layer in lyrs)
+                (
+                    (abs(ax - px) <= tolerance and abs(ay - py) <= tolerance)
+                    or math.hypot(ax - px, ay - py) <= half_w
+                )
+                and (not lyrs or sg.layer in lyrs)
                 for ax, ay, lyrs in anchors
             ) or any(
-                math.hypot(v.x - px, v.y - py) <= reach
+                abs(v.x - px) <= tolerance
+                and abs(v.y - py) <= tolerance
                 and sg.layer in _via_layers(v, {sg.layer, *v.layers})
                 for v in vias
             )
@@ -798,131 +826,93 @@ def connectivity_preserved(
     return True
 
 
-def _segment_key(seg: Segment, tolerance: float) -> tuple:
-    """Orientation-free identity of a segment, quantised to *tolerance*."""
-    q = max(tolerance, 1e-6)
-    a = (round(seg.x1 / q), round(seg.y1 / q))
-    b = (round(seg.x2 / q), round(seg.y2 / q))
-    return (str(seg.layer), round(seg.width / q), *sorted((a, b)))
+def _seg_point_dist(px: float, py: float, s: Segment) -> float:
+    dx, dy = s.x2 - s.x1, s.y2 - s.y1
+    ll = dx * dx + dy * dy
+    if ll == 0.0:
+        return math.hypot(px - s.x1, py - s.y1)
+    t = max(0.0, min(1.0, ((px - s.x1) * dx + (py - s.y1) * dy) / ll))
+    return math.hypot(px - (s.x1 + t * dx), py - (s.y1 + t * dy))
 
 
-def _change_regions(
+def _changed_regions(
     before: list[Segment], after: list[Segment], tolerance: float
-) -> list[tuple[list[Segment], list[Segment]]]:
-    """Split a net's rewrite into independent ``(removed, added)`` regions.
+) -> list[tuple[list[int], list[Segment]]]:
+    """Split a net rewrite into independent changed regions (Issue #8298).
 
-    A region is a maximal set of removed and added segments that touch on
-    one layer (an end of one within *tolerance* of the other's body), so a
-    replaced chain and its replacement land in the same region.  Regions are
-    returned in a stable geometric order (Issue #8285: no hash-order).
+    Returns ``(removed_indices_into_before, added_segments)`` per region.
+    Changed items (segments only in ``before`` or only in ``after``) are
+    grouped when they touch on the same layer; regions are ordered by their
+    first removed segment's position in ``before`` (file order).
     """
-    import math
-    from collections import Counter
-
-    after_count = Counter(_segment_key(s, tolerance) for s in after)
-    before_count = Counter(_segment_key(s, tolerance) for s in before)
-    removed: list[Segment] = []
-    for s in before:
-        k = _segment_key(s, tolerance)
-        if after_count[k] > 0:
-            after_count[k] -= 1
+    remaining = list(after)
+    removed: list[int] = []
+    for i, s in enumerate(before):
+        if s in remaining:
+            remaining.remove(s)
         else:
-            removed.append(s)
-    added: list[Segment] = []
-    for s in after:
-        k = _segment_key(s, tolerance)
-        if before_count[k] > 0:
-            before_count[k] -= 1
-        else:
-            added.append(s)
-
-    items = removed + added
+            removed.append(i)
+    # ``remaining`` now holds the added segments (multiset difference).
+    items: list[tuple[str, int, Segment]] = [("r", i, before[i]) for i in removed] + [
+        ("a", j, s) for j, s in enumerate(remaining)
+    ]
     parent = list(range(len(items)))
 
-    def find(i: int) -> int:
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
 
-    def dist(px: float, py: float, s: Segment) -> float:
-        dx, dy = s.x2 - s.x1, s.y2 - s.y1
-        ll = dx * dx + dy * dy
-        t = 0.0 if ll == 0 else max(0.0, min(1.0, ((px - s.x1) * dx + (py - s.y1) * dy) / ll))
-        return math.hypot(px - (s.x1 + t * dx), py - (s.y1 + t * dy))
-
-    for i, a in enumerate(items):
-        for j in range(i + 1, len(items)):
-            b = items[j]
-            if a.layer != b.layer:
-                continue
-            if any(dist(px, py, b) <= tolerance for px, py in ((a.x1, a.y1), (a.x2, a.y2))) or any(
-                dist(px, py, a) <= tolerance for px, py in ((b.x1, b.y1), (b.x2, b.y2))
-            ):
-                parent[find(i)] = find(j)
-
-    groups: dict[int, list[int]] = {}
-    for i in range(len(items)):
-        groups.setdefault(find(i), []).append(i)
-    n_removed = len(removed)
-    regions = [
-        ([items[i] for i in g if i < n_removed], [items[i] for i in g if i >= n_removed])
-        for g in groups.values()
-    ]
-
-    def order(region: tuple[list[Segment], list[Segment]]) -> tuple:
-        segs = region[0] + region[1]
-        return (
-            min(str(s.layer) for s in segs),
-            min(min(s.x1, s.x2) for s in segs),
-            min(min(s.y1, s.y2) for s in segs),
+    def touches(a: Segment, b: Segment) -> bool:
+        if a.layer != b.layer:
+            return False
+        return any(_seg_point_dist(px, py, b) <= tolerance for px, py in (a.start, a.end)) or any(
+            _seg_point_dist(px, py, a) <= tolerance for px, py in (b.start, b.end)
         )
 
-    return sorted(regions, key=order)
+    for x in range(len(items)):
+        for y in range(x + 1, len(items)):
+            if touches(items[x][2], items[y][2]):
+                parent[find(x)] = find(y)
+    groups: dict[int, tuple[list[int], list[Segment]]] = {}
+    for k, (kind, idx, seg) in enumerate(items):
+        rem, add = groups.setdefault(find(k), ([], []))
+        if kind == "r":
+            rem.append(idx)
+        else:
+            add.append(seg)
+    regions = list(groups.values())
+    regions.sort(key=lambda r: (min(r[0]) if r[0] else len(before), len(r[1])))
+    return regions
 
 
-def salvage_connected_regions(
+def keep_safe_regions(
     before: list[Segment],
     after: list[Segment],
     vias: list[Via],
     anchors: list[tuple[float, float, tuple[Layer, ...]]],
     tolerance: float,
 ) -> tuple[list[Segment], int, int]:
-    """Keep the parts of a rejected rewrite that preserve connectivity.
+    """Greedily keep each independent changed region that is safe on its own.
 
-    ``connectivity_preserved`` judges a net's rewrite as a whole, so one bad
-    edit used to discard every good one on the net (Issue #8298).  The
-    rewrite is split into independent regions (``_change_regions``); each is
-    applied on top of the regions already kept and kept itself only if the
-    result still passes ``connectivity_preserved`` against *before*.
-
-    Returns ``(segments, regions_kept, regions_dropped)``.
+    Returns ``(segments, kept_regions, total_regions)``.  Each region is
+    applied on top of the already-kept result and must pass
+    :func:`connectivity_preserved` against the *original* ``before``.
     """
-    regions = _change_regions(before, after, tolerance)
+    regions = _changed_regions(before, after, tolerance)
     current = list(before)
-    kept = dropped = 0
-    for removed, added in regions:
-        drop: dict[tuple, int] = {}
-        for s in removed:
-            k = _segment_key(s, tolerance)
-            drop[k] = drop.get(k, 0) + 1
-        trial: list[Segment] = []
-        for s in current:
-            k = _segment_key(s, tolerance)
-            if drop.get(k, 0) > 0:
-                drop[k] -= 1
-                continue
-            trial.append(s)
+    kept = 0
+    for rem_idx, added in regions:
+        trial = list(current)
+        for seg in (before[i] for i in rem_idx):
+            if seg in trial:
+                trial.remove(seg)
         trial.extend(added)
-        if any(drop.values()):  # a removed segment is no longer present
-            dropped += 1
-            continue
         if connectivity_preserved(before, trial, vias, anchors, tolerance):
             current = trial
             kept += 1
-        else:
-            dropped += 1
-    return current, kept, dropped
+    return current, kept, len(regions)
 
 
 def optimize_pcb(
@@ -931,6 +921,7 @@ def optimize_pcb(
     optimize_fn: Callable[[list[Segment]], list[Segment]],
     config: OptimizationConfig,
     net_filter: str | None = None,
+    net_pattern: str | None = None,
     dry_run: bool = False,
     on_net_optimized: Callable[[str, list[Segment], list[Segment]], None] | None = None,
     net_anchors_by_name: dict[str, list[tuple[float, float, tuple[Layer, ...]]]] | None = None,
@@ -939,10 +930,8 @@ def optimize_pcb(
 
     ``net_anchors_by_name`` (Issue #8250) maps a net name to the pad positions
     ``(x, y, layers)`` of that net.  When given, a net's rewrite that splits
-    pads which were joined by trace copper in the input is cut back to the
-    regions of the rewrite that keep connectivity on their own (Issue #8298;
-    ``stats.nets_connectivity_partial``), or discarded and counted in
-    ``stats.nets_connectivity_discarded`` when no region does.
+    pads which were joined by trace copper in the input is discarded and
+    counted in ``stats.nets_connectivity_discarded``.
 
     When ``config.drc_aware`` is True, the optimizer runs DRC before and
     after optimization. Any net whose optimized segments increase the
@@ -956,7 +945,9 @@ def optimize_pcb(
         output_path: Path for output file. If None, modifies in place.
         optimize_fn: Function to optimize a list of segments.
         config: Optimization configuration.
-        net_filter: Only optimize nets matching this pattern.
+        net_filter: Only optimize the net with exactly this name (case-sensitive).
+        net_pattern: Only optimize nets whose name matches this ``fnmatch`` glob
+            (case-sensitive).  Mutually exclusive with ``net_filter`` (Issue #8299).
         dry_run: If True, calculate stats but don't write output.
         on_net_optimized: Optional per-net commit hook, called as
             ``(net_name, original_segments, kept_segments)`` once a net's
@@ -977,9 +968,15 @@ def optimize_pcb(
     segments_by_net = parse_segments(pcb_text)
 
     # Filter nets if requested
+    if net_filter and net_pattern:
+        raise ValueError("net_filter and net_pattern are mutually exclusive")
     if net_filter:
+        segments_by_net = {net: segs for net, segs in segments_by_net.items() if net == net_filter}
+    elif net_pattern:
         segments_by_net = {
-            net: segs for net, segs in segments_by_net.items() if net_filter.lower() in net.lower()
+            net: segs
+            for net, segs in segments_by_net.items()
+            if fnmatch.fnmatchcase(net, net_pattern)
         }
 
     # Calculate before stats
@@ -1017,6 +1014,13 @@ def optimize_pcb(
         optimized = kelvin.optimize_net(net, segs, optimize_fn) if kelvin else None
         if optimized is None:
             optimized = optimize_fn(segs)
+        # Issue #8299: ``optimize_segments`` hands the chains back in
+        # ``sort_into_chains`` order/orientation even when no pass fired.
+        # A rewrite that is the same multiset of segments is *no* change:
+        # keep the input verbatim so the net skips the connectivity guard and
+        # dedupe below and is not reported as touched.
+        if optimized != segs and _same_segments(optimized, segs):
+            optimized = segs
         if (
             net_anchors_by_name
             and optimized != segs
@@ -1028,19 +1032,18 @@ def optimize_pcb(
                 config.tolerance,
             )
         ):
-            # Issue #8298: keep the regions of the rewrite that are safe on
-            # their own instead of discarding the whole net.
-            optimized, kept_regions, dropped_regions = salvage_connected_regions(
+            # Issue #8298: one unsafe edit must not discard the safe ones.
+            salvaged, n_kept, _n_regions = keep_safe_regions(
                 segs,
                 optimized,
                 vias_by_net.get(net, []),
                 net_anchors_by_name.get(net, []),
                 config.tolerance,
             )
-            if kept_regions:
+            if n_kept and salvaged != segs:
+                optimized = salvaged
                 stats.nets_connectivity_partial += 1
                 stats.connectivity_partial_nets.append(net)
-                stats.connectivity_regions_dropped += dropped_regions
             else:
                 optimized = list(segs)
                 stats.nets_connectivity_discarded += 1
@@ -1192,6 +1195,7 @@ def optimize_pcb(
                 length_after=total_length(after_segs),
                 rolled_back=net in rolled_back_nets,
                 new_violations=net_violations.get(net, {}),
+                changed=not _same_segments(after_segs, before_segs),
             )
         )
         if net not in rolled_back_nets and after_segs != before_segs:
