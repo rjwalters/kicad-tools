@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -60,23 +61,32 @@ def pcb(tmp_path: Path) -> Path:
     return p
 
 
-def _geometry(path: Path) -> dict[str, set[tuple]]:
+def _geometry(path: Path) -> dict[str, Counter]:
     out = {}
     for net, segs in parse_segments(path.read_text()).items():
-        out[net] = {
+        out[net] = Counter(
             (
                 *sorted([(round(s.x1, 4), round(s.y1, 4)), (round(s.x2, 4), round(s.y2, 4))]),
                 s.layer,
                 s.width,
             )
             for s in segs
-        }
+        )
     return out
 
 
 def test_all_passes_disabled_preserves_geometry(pcb: Path, tmp_path: Path):
     out = tmp_path / "out.kicad_pcb"
     assert main([str(pcb), "-o", str(out), "--quiet", *NO_FLAGS]) == 0
+    assert _geometry(out) == _geometry(pcb)
+
+
+def test_all_passes_disabled_touches_no_nets(pcb: Path, tmp_path: Path, capsys):
+    out = tmp_path / "out.kicad_pcb"
+    args = [str(pcb), "-o", str(out), *NO_FLAGS, "--format", "json"]
+    assert main(args) == 0
+    stats = json.loads(capsys.readouterr().out)["stats"]
+    assert stats["nets_touched"] == []
     assert _geometry(out) == _geometry(pcb)
 
 
@@ -152,3 +162,21 @@ def test_nonexistent_net_reports_no_match(pcb: Path, capsys):
 def test_text_summary_lists_touched_nets(pcb: Path, capsys):
     assert main([str(pcb), "--dry-run", "--net", "GND"]) == 0
     assert "Nets touched (1): GND" in capsys.readouterr().out
+
+
+def test_flags_reachable_through_kct_entry_point(pcb: Path, capsys):
+    """The outer parser and forwarding shim must accept every new flag (#8299)."""
+    from kicad_tools.cli import main as kct_main
+
+    argv = ["optimize-traces", str(pcb), "--dry-run", "--format", "json", *NO_FLAGS]
+    assert kct_main(argv) == 0
+    payload = json.loads(capsys.readouterr().out)
+    opts = payload["optimizations"]
+    assert not any(opts[k] for k in opts if k != "chamfer_size_mm")
+    assert payload["stats"]["nets_touched"] == []
+
+    argv = ["optimize-traces", str(pcb), "--dry-run", "--format", "json", "--net-pattern", "*GND*"]
+    assert kct_main(argv) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["net_pattern"] == "*GND*"
+    assert sorted(payload["stats"]["nets_touched"]) == ["GND", "PGND"]

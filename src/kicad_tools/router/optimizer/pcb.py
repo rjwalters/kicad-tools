@@ -6,6 +6,7 @@ import fnmatch
 import logging
 import re
 import tempfile
+from collections import Counter
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
@@ -556,6 +557,27 @@ def _pad_violations_grew(
     return False
 
 
+def _segment_multiset(segs: list[Segment]) -> Counter:
+    """Order- and orientation-insensitive multiset of ``segs`` (Issue #8299).
+
+    Duplicates are counted (not collapsed), so a rewrite that only re-chains,
+    reverses or reorders segments compares equal to its input, while one that
+    drops or adds a segment -- even an exact duplicate -- does not.
+    """
+    keys: Counter = Counter()
+    for seg in segs:
+        p1 = (round(seg.x1, 6), round(seg.y1, 6))
+        p2 = (round(seg.x2, 6), round(seg.y2, 6))
+        a, b = (p1, p2) if p1 <= p2 else (p2, p1)
+        keys[(seg.net, seg.layer, round(seg.width, 6), a, b)] += 1
+    return keys
+
+
+def _same_segments(a: list[Segment], b: list[Segment]) -> bool:
+    """True when ``a`` and ``b`` hold the same segments in any order/orientation."""
+    return a == b or (len(a) == len(b) and _segment_multiset(a) == _segment_multiset(b))
+
+
 def dedupe_segments(segs: list[Segment]) -> tuple[list[Segment], int]:
     """Drop exact-duplicate segments, keeping the first occurrence (Issue #8271).
 
@@ -896,6 +918,13 @@ def optimize_pcb(
         optimized = kelvin.optimize_net(net, segs, optimize_fn) if kelvin else None
         if optimized is None:
             optimized = optimize_fn(segs)
+        # Issue #8299: ``optimize_segments`` hands the chains back in
+        # ``sort_into_chains`` order/orientation even when no pass fired.
+        # A rewrite that is the same multiset of segments is *no* change:
+        # keep the input verbatim so the net skips the connectivity guard and
+        # dedupe below and is not reported as touched.
+        if optimized != segs and _same_segments(optimized, segs):
+            optimized = segs
         if (
             net_anchors_by_name
             and optimized != segs
@@ -1057,7 +1086,7 @@ def optimize_pcb(
                 length_after=total_length(after_segs),
                 rolled_back=net in rolled_back_nets,
                 new_violations=net_violations.get(net, {}),
-                changed=after_segs != before_segs,
+                changed=not _same_segments(after_segs, before_segs),
             )
         )
         if net not in rolled_back_nets and after_segs != before_segs:
