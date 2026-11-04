@@ -258,3 +258,58 @@ def test_cli_rollback_when_drc_worse(board, tmp_path, monkeypatch, capsys):
     assert not out.exists()
     assert len(PCB.load(board).segments) == 3
     assert "Refusing to write" in capsys.readouterr().err
+
+
+# --- real `kct creepage --witness` payload (issue #8346) --------------------
+
+REAL_CREEPAGE = Path(__file__).parent / "fixtures" / "creepage_witness_real.json"
+
+
+def test_real_creepage_payload_gets_locations():
+    """Captured real output: witness.point_a_mm/point_b_mm, no uuids."""
+    findings = load_findings(REAL_CREEPAGE)
+    # The passing L_MAINS/GND pair (pass: true) is not a violation -> dropped.
+    assert len(findings) == 1
+    f = findings[0]
+    assert f.location == (11.0, 9.0)  # side A first
+    assert f.alt_locations == [(11.0, 0.0)]
+    assert f.uuids == []  # item_a/item_b are not uuids
+
+
+def test_real_creepage_payload_plans_cut(tmp_path):
+    body = (
+        # Violating pair, side A end (11, 9).
+        _seg("aaaaaaaa-0000-0000-0000-0000000000a1", 11, 9, 11, 5, 1, "L_MAINS")
+        # Passing pair's witness point (11, 11): must stay untouched.
+        + _seg("aaaaaaaa-0000-0000-0000-0000000000a2", 5, 11, 11, 11, 1, "L_MAINS")
+    )
+    p = tmp_path / "r.kicad_pcb"
+    p.write_text(HEADER.replace('(net 1 "MAINS")', '(net 1 "L_MAINS")') + body + ")\n")
+    plan = plan_from_report(PCB.load(p), load_findings(REAL_CREEPAGE))
+    assert [r.reason for r in plan.results] == [""]
+    assert not any(r.reason == "no location" for r in plan.results)
+    assert [s.uuid[-2:] for s in plan.segments] == ["a1"]
+
+
+def test_creepage_side_b_fallback(tmp_path):
+    row = {
+        "net_a": "MAINS",
+        "net_b": "GND",
+        "pass": False,
+        "witness": {
+            "point_a_mm": [50.0, 50.0],
+            "point_b_mm": [115.0, 110.0],
+            "item_a": "J1.1",
+            "item_b": "pad",
+        },
+    }
+    p = tmp_path / "x.kicad_pcb"
+    p.write_text(
+        HEADER
+        + _seg("aaaaaaaa-0000-0000-0000-0000000000b1", 110, 110, 120, 110, 1, "MAINS")
+        + ")\n"
+    )
+    from kicad_tools.pcb_strip_report import _creepage_findings
+
+    plan = plan_from_report(PCB.load(p), _creepage_findings({"pairs": [row]}))
+    assert [s.uuid[-2:] for s in plan.segments] == ["b1"]
