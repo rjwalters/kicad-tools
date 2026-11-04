@@ -147,3 +147,29 @@ def test_replace_segments_round_trips_unchanged_geometry():
     segs = parse_segments(_PCB)
     again = parse_segments(replace_segments(_PCB, segs, segs))
     assert again == segs
+
+
+# --- Issue #8367: partial keep when the greedy loop cannot reach baseline --
+
+
+def test_failsafe_keeps_clean_nets_and_rejects_only_bad_one(tmp_path, monkeypatch):
+    calls = {"n": 0}
+
+    def counter(text, **kw):
+        calls["n"] += 1
+        # Calls 2-4 are the full-board check and the greedy trials: a noisy
+        # referee reports +1 for all of them, so the greedy loop cannot get
+        # back to baseline.  Afterwards only net A's merge is truly bad.
+        if 2 <= calls["n"] <= 4:
+            return {"__total__": 1, "clearance_pad_segment": 1}
+        if text.count("(net 1)") < 2:
+            return {"__total__": 1, "clearance_pad_segment": 1}
+        return {"__total__": 0}
+
+    stats, segs = _run(tmp_path, monkeypatch, counter)
+    assert not stats.drc_failsafe_reverted
+    assert len(segs["A"]) == 2  # bad net rolled back
+    assert len(segs["B"]) == 1  # clean net kept
+    assert stats.nets_rolled_back == 1
+    assert stats.nets_kept == 1
+    assert stats.drc_errors_after == 0
