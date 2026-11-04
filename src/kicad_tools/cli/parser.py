@@ -3552,6 +3552,7 @@ def _add_pcb_parser(subparsers) -> None:
     pcb_transplant.add_argument(
         "--drc", action="store_true", help="Run kicad-cli DRC on the output (skipped if absent)"
     )
+    pcb_transplant.add_argument("--format", choices=["text", "json"], default="text")
 
     # pcb export-dsn
     pcb_export_dsn = pcb_subparsers.add_parser(

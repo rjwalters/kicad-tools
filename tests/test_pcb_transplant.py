@@ -160,3 +160,34 @@ def test_cli_dispatch(tmp_path):
     out = tmp_path / "out.kicad_pcb"
     rc = kct_main(["pcb", "transplant", str(src), str(dst), "--nets", "VIN,VOUT", "-o", str(out)])
     assert rc == 0 and out.exists()
+
+
+def test_format_json_single_document(tmp_path, capsys):
+    import json
+
+    src, dst = _make(tmp_path, src_edit=_widen_vin)
+    out = tmp_path / "out.kicad_pcb"
+    rc = run_pcb_transplant(str(src), str(dst), nets=["VIN"], output=str(out), fmt="json")
+    assert rc == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["output"] == str(out)
+    assert doc["nets"]["VIN"]["src_has_copper"] is True
+
+
+def test_format_json_error_document(tmp_path, capsys):
+    import json
+
+    src, dst = _make(tmp_path)
+    rc = run_pcb_transplant(str(src), str(dst), nets=["NOPE"], output=None, fmt="json")
+    assert rc == 1
+    assert "error" in json.loads(capsys.readouterr().out)
+
+
+def test_format_json_dry_run(tmp_path, capsys):
+    import json
+
+    src, dst = _make(tmp_path, src_edit=_widen_vin)
+    rc = run_pcb_transplant(str(src), str(dst), nets=["VIN"], output=None, dry_run=True, fmt="json")
+    assert rc == 2
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["dry_run"] is True and doc["diff"] is not None

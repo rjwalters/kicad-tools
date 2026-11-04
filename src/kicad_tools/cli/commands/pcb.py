@@ -41,6 +41,7 @@ def run_pcb_command(args) -> int:
             output=args.output,
             dry_run=args.dry_run,
             drc=args.drc,
+            fmt=args.format,
         )
 
     pcb_path = Path(args.pcb)
