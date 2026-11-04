@@ -15,6 +15,13 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-04
 
+- **PR #8363**: test: re-pin board 02 baseline to 316.57mm after atomic chamfer
+- **PR #8320**: fix(board-05): clean router copper, declare FUSED non-HV, re-issue evidence
+- **Issue #8361** (closed): Board 02 baseline re-pin from #8257 is stale: main gives (22, 83, 20, 316.57) since #8253, Test (extended) still red
+- **Issue #8358** (closed): pcb prune: decentres guard no longer pinned by any test after #8298 merge (fixture never reaches it)
+- **Issue #8308** (closed): Board 05: re-route 4 remaining track detours (+5V x2, VM, MOSI) and drop their known_issues allowance
+- **Issue #8278** (closed): Board 05: regeneration/readiness refresh blocked by new ampacity + redundant_copper kct checks
+- **Issue #8267** (closed): Board 05: D3 (C131244 red 0805 LED) shows stock 0 in jlcparts catalog; --strict-preflight bom_lcsc_stock fails
 - **PR #8317**: feat: break declared-net copper loops (incl. via-closed) in pcb prune
 - **Issue #8313** (closed): pcb prune: break via-closed loops on nets with declared current paths so reinforce can anchor them
 - **PR #8359**: fix: let prune merge collinear runs across sub-micron end gaps
