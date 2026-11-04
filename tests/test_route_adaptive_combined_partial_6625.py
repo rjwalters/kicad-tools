@@ -22,7 +22,9 @@ from tests.test_route_layer_escalation_partial_6322 import (  # noqa: F401
     _argv,
     _clean_state,
     _copper,
+    _copper_length,
     _partial,
+    _router_copper,
     board,
     control,
 )
@@ -42,6 +44,7 @@ class _Hook:
     def __init__(self, monkeypatch, *, interrupt, interrupt_on=1):
         self.calls = 0
         self.expected = None
+        self.expected_length = None
         self.state_at_interrupt = None
         self.routers = []
         original = Autorouter.route_all_negotiated
@@ -59,7 +62,7 @@ class _Hook:
             if self.calls < interrupt_on:
                 return result
             self.state_at_interrupt = dict(route_cmd._interrupt_state)
-            self.expected = _copper(router.to_sexp())
+            self.expected, self.expected_length = _router_copper(router)
             interrupt()
             return result
 
@@ -87,7 +90,9 @@ class TestFirstTierInterrupt:
         partial = _partial(output)
         assert partial.is_file(), f"{flow} flow saved no _partial from tier 1"
         assert hook.expected[0] > 0
-        assert _copper(partial.read_text()) == hook.expected
+        text = partial.read_text()
+        assert _copper(text) == hook.expected
+        assert _copper_length(text) == pytest.approx(hook.expected_length)
         record = json.loads(control.read_text())
         assert record["snapshot_saved"] is True
         assert record["snapshot"] == str(partial)
@@ -102,7 +107,9 @@ class TestFirstTierInterrupt:
             route_cmd._in_process_main_impl(_argv(source, output, *_FLOWS[flow]))
 
         assert excinfo.value.code == 5
-        assert _copper(_partial(output).read_text()) == hook.expected
+        text = _partial(output).read_text()
+        assert _copper(text) == hook.expected
+        assert _copper_length(text) == pytest.approx(hook.expected_length)
 
     def test_completed_tier_beats_worse_in_flight_tier(
         self,
