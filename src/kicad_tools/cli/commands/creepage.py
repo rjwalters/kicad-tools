@@ -370,6 +370,19 @@ def _print_gate_summary(report: CreepageReport, unit_desc: str) -> None:
     gate_failures = [p for p in report.pairs if not p.passed and not p.waived]
     same_fp = [p for p in report.pairs if p.relationship == "same_footprint"]
 
+    # Issue #8277: an ``attach-zn`` row is waived only when the copper OUTSIDE
+    # the zone still clears; say why one that is not waived still gates.
+    for p in report.pairs:
+        if p.relationship == "attach_zone" and not p.residual_passed:
+            where = ""
+            if p.residual_witness_mm is not None:
+                where = f" at ({p.residual_witness_mm[0]:.3f}, {p.residual_witness_mm[1]:.3f})"
+            print(
+                f"NOTE: {p.net_a} vs {p.net_b} is attach-zn but NOT waived: copper outside "
+                f"the attach zone is only {p.residual_creepage_mm:.3f} mm apart{where} "
+                f"(layer {p.residual_layer})."
+            )
+
     if waived:
         if gate_failures:
             print(

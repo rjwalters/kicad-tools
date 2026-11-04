@@ -143,3 +143,39 @@ def test_new_dangling_end_detected():
     anchors = [(0.0, 0.0, (Layer.F_CU,)), (10.0, 0.0, (Layer.F_CU,))]
     assert connectivity_preserved(before, before, [], anchors, 0.1)
     assert not connectivity_preserved(before, after, [], anchors, 0.1)
+
+
+def test_keep_safe_regions_salvages_independent_edits_8298():
+    from kicad_tools.router.optimizer.pcb import keep_safe_regions
+
+    # Region A (x 0..10): a collinear merge, safe.  Region B (x 30..40): the
+    # rewrite deletes a segment outright and splits the net.
+    before = [
+        _seg(0, 0, 5, 0),
+        _seg(5, 0, 10, 0),
+        _seg(10, 0, 30, 0),
+        _seg(30, 0, 35, 0),
+        _seg(35, 0, 40, 0),
+    ]
+    after = [_seg(0, 0, 10, 0), _seg(10, 0, 30, 0), _seg(30, 0, 35, 0)]
+    anchors = [(0.0, 0.0, (Layer.F_CU,)), (40.0, 0.0, (Layer.F_CU,))]
+    assert not connectivity_preserved(before, after, [], anchors, 0.01)
+    kept, n_kept, n_regions = keep_safe_regions(before, after, [], anchors, 0.01)
+    assert (n_kept, n_regions) == (1, 2)
+    assert kept == [
+        _seg(10, 0, 30, 0),
+        _seg(30, 0, 35, 0),
+        _seg(35, 0, 40, 0),
+        _seg(0, 0, 10, 0),
+    ]
+    assert connectivity_preserved(before, kept, [], anchors, 0.01)
+
+
+def test_keep_safe_regions_all_unsafe_keeps_nothing_8298():
+    from kicad_tools.router.optimizer.pcb import keep_safe_regions
+
+    before = [_seg(0, 0, 5, 0), _seg(5, 0, 10, 0)]
+    after = [_seg(0, 0, 4, 0), _seg(6, 0, 10, 0)]
+    anchors = [(0.0, 0.0, (Layer.F_CU,)), (10.0, 0.0, (Layer.F_CU,))]
+    kept, n_kept, _ = keep_safe_regions(before, after, [], anchors, 0.01)
+    assert n_kept == 0 and kept == before
