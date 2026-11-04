@@ -23,28 +23,27 @@ _None._
 
 `loom:important`; taken before unlabelled work.
 
-- **#8361**: Board 02 baseline re-pin from #8257 is stale: main gives (22, 83, 20, 316.57) since #8253, Test (extended) still red
+_None._
 
 ## Ready
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-_None._
+- **#8367**: optimize-traces --drc-aware keeps 0 of 77 nets: internal DRC counts +251 clearance violations where kicad-cli (project rules) counts +2
 
 ## In Progress
 
 Issues currently being built (`loom:building`).
 
-- **#8267**: Board 05: D3 (C131244 red 0805 LED) shows stock 0 in jlcparts catalog; --strict-preflight bom_lcsc_stock fails
-- **#8278**: Board 05: regeneration/readiness refresh blocked by new ampacity + redundant_copper kct checks
-- **#8361**: Board 02 baseline re-pin from #8257 is stale: main gives (22, 83, 20, 316.57) since #8253, Test (extended) still red
+- **#8327**: route --complete: softstart rev-D loses /V_AC_SENSE_RAW R2.1-C31.1 after #8280 pairwise gate (9/11 -> 7/11 HV nets, link budget overrun)
+- **#8357**: board 05: design.py emits #8048 attach-zone block into .kicad_dru that the committed artifact lacks (recipe not reproducible)
+- **#8368**: pcb prune --current-paths and current-paths-audit disagree on loops: 9/16 paths stay ambiguous after every loop is cut; --wide default never applies to power nets
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#8320**: fix(board-05): clean router copper, declare FUSED non-HV, re-issue evidence
-- **#8363**: test: re-pin board 02 baseline to 316.57mm after atomic chamfer
+- **#8387**: fix: keep prune snaps on the 45° grid; cut optimizer chains at vias
 
 ## Approved (Awaiting Merge)
 
@@ -60,12 +59,10 @@ Issues carrying `loom:curated`.
 - **#5539**: Champion: Merge-Risk Hold Digest *(curated)*
 - **#7487**: Re-rule or remove board 03 usb_geometry via-in-pad window exception by 2027-04-19 (#7457 / #7084 Q10) *(curated)*
 - **#8214**: optimize-traces: collision-check each rewrite on finished boards instead of whole-net rollback *(curated)*
-- **#8255**: Release v0.28.0 blocked: three red main-CI jobs (board 05 strict stock preflight, board 02/03 baselines after #8229/#8230) *(curated)*
-- **#8267**: Board 05: D3 (C131244 red 0805 LED) shows stock 0 in jlcparts catalog; --strict-preflight bom_lcsc_stock fails *(curated)*
-- **#8278**: Board 05: regeneration/readiness refresh blocked by new ampacity + redundant_copper kct checks *(curated)*
-- **#8285**: optimize-traces: connectivity check discards a different set of nets across identical runs (nondeterminism) *(curated)*
+- **#8259**: kct pcb prune keeps a branch whose free end only overlaps a via (spur beside a via survives) *(curated)*
 - **#8327**: route --complete: softstart rev-D loses /V_AC_SENSE_RAW R2.1-C31.1 after #8280 pairwise gate (9/11 -> 7/11 HV nets, link budget overrun) *(curated)*
-- **#8361**: Board 02 baseline re-pin from #8257 is stale: main gives (22, 83, 20, 316.57) since #8253, Test (extended) still red *(curated)*
+- **#8367**: optimize-traces --drc-aware keeps 0 of 77 nets: internal DRC counts +251 clearance violations where kicad-cli (project rules) counts +2 *(curated)*
+- **#8368**: pcb prune --current-paths and current-paths-audit disagree on loops: 9/16 paths stay ambiguous after every loop is cut; --wide default never applies to power nets *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -83,12 +80,12 @@ _None._
 |------|-------|
 | Operator merge-risk holds | 0 |
 | Very important | 0 |
-| Important | 1 |
-| Ready (`loom:issue`) | 0 |
+| Important | 0 |
+| Ready (`loom:issue`) | 1 |
 | In Progress (`loom:building`) | 3 |
-| PRs awaiting review | 2 |
+| PRs awaiting review | 1 |
 | Approved PRs awaiting merge | 0 |
-| Curated | 10 |
+| Curated | 8 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 3 |
 <!-- guide:plan-body:end -->

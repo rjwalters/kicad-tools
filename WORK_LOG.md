@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-04
 
+- **Issue #8323** (closed): pcb prune adds a clearance error under the project's custom DRU rule despite its built-in DRC check
+- **Issue #8285** (closed): optimize-traces: connectivity check discards a different set of nets across identical runs (nondeterminism)
 - **PR #8381**: feat: add --project and refuse default-rules DRC verification
 - **Issue #8369** (closed): DRC-verified kct commands: add --project and refuse default-rules verification (split from #8366)
 - **PR #8380**: fix: referee --drc-aware at the board's own clearance
