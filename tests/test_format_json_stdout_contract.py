@@ -180,6 +180,9 @@ CONTRACT_ARGV: dict[str, list[str]] = {
     "pcb net-audit": ["{pcb}"],
     "pcb model-audit": ["{pcb}"],
     "pcb diff": ["{pcb}", "{pcb}"],
+    # Dry-run on the fixture board: one JSON document (a diff payload, or an
+    # {"error": ...} document when the nets do not line up); nothing is written.
+    "pcb transplant": ["{pcb}", "{pcb}", "--dry-run"],
     "pcb export-dsn": ["{pcb}"],
     "pcb import-ses": ["{pcb}", "{dir}/missing.ses"],
     # -- lib ----------------------------------------------------------------
