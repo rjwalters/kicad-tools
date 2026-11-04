@@ -84,3 +84,37 @@ def test_a_twin_route_on_another_layer_does_not_pin_a_jog():
             (0, 0, 10, 0),
             (10, 0, 10, 5),
         ], _coords(out)
+
+
+def test_a_detour_ending_at_a_through_via_is_still_shortened():
+    # A consumer board's AUDIO_R on B.Cu: a 45-degree "tent" between two vias,
+    # with the route carrying on past the second via on the same layer.
+    # Layer-aware chain sorting no longer cuts the route at that via (no other
+    # layer's copper ends in the chain there), so the optimizer must cut it at
+    # the via itself, or detour shortening sees one chain from the first via
+    # to the far end and cannot replace the tent.
+    class _Clear:
+        def path_is_clear(self, *a, **k):
+            return True
+
+    v1, v2, far = (0.0, 0.0), (6.0, 0.0), (6.0, -5.0)
+    tent = [(0, 0, 1.5, -1.5), (1.5, -1.5, 4.5, -1.5), (4.5, -1.5, 6, 0)]
+    beyond = [(6, 0, 6, -5)]
+    opt = TraceOptimizer(
+        OptimizationConfig(),
+        collision_checker=_Clear(),
+        net_anchors={1: [v1, v2, far]},
+    )
+    out = opt.optimize_segments(_chain(tent + beyond, layer=Layer.B_CU, width=0.2))
+    assert sorted(_coords(out)) == [(0, 0, 6, 0), (6, 0, 6, -5)], _coords(out)
+
+
+def test_a_route_through_a_pad_centre_is_not_cut_there():
+    # Only vias cut a chain: a route running through a pad centre on one layer
+    # stays whole, as it did under layer-blind sorting.
+    opt = TraceOptimizer(OptimizationConfig(), net_anchors={1: [(5.0, 0.0), (9.0, 0.0)]})
+    opt.set_pad_points({"N1": [(5.0, 0.0)]})
+    chain = _chain([(0, 0, 5, 0), (5, 0, 9, 0)], layer=Layer.F_CU, width=0.2)
+    assert [len(p) for p in opt._split_at_anchors(chain)] == [2]
+    opt.set_pad_points({})
+    assert [len(p) for p in opt._split_at_anchors(chain)] == [1, 1]

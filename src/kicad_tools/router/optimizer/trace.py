@@ -489,7 +489,8 @@ class TraceOptimizer:
         chains = [
             list(run)
             for chain in self._sort_into_chains(segments)
-            for _, run in groupby(chain, key=lambda seg: (seg.width, seg.layer, seg.net))
+            for piece in self._split_at_anchors(chain)
+            for _, run in groupby(piece, key=lambda seg: (seg.width, seg.layer, seg.net))
         ]
 
         chain_ends = [[(s.x1, s.y1) for s in c] + [(s.x2, s.y2) for s in c] for c in chains]
@@ -859,6 +860,41 @@ class TraceOptimizer:
     def _sort_into_chains(self, segments: list[Segment]) -> list[list[Segment]]:
         """Sort segments into connected chains."""
         return sort_into_chains(segments, self.config.tolerance)
+
+    def _split_at_anchors(self, chain: list[Segment]) -> list[list[Segment]]:
+        """Cut *chain* at every interior vertex on one of its net's vias.
+
+        The whole-chain passes (``shorten_detours``) assume a chain runs
+        between fixed points.  Chain sorting is layer-aware (Issue #8298), so
+        a route that passes straight through a via on one layer is no longer
+        cut there by the other layers' copper; cut it here instead, or a
+        detour ending at the via is fused with the run beyond it and can no
+        longer be replaced.  Pad centres are not cut: layer-blind sorting
+        never cut a route passing through a pad on one layer either, and
+        cutting there lets a straightened exit run back over a stub on the
+        pad's other side.
+        """
+        if len(chain) < 2:
+            return [chain]
+        tol = self.config.tolerance
+        net, name = chain[0].net, chain[0].net_name
+        points = list(self._attachment_points.get(name, ()))
+        if self.net_anchors is not None:
+            points += self.net_anchors.get(net, [])
+        pads = self._pad_points.get(name, [])
+
+        def near(x: float, y: float, pts) -> bool:
+            return any(abs(x - px) <= tol and abs(y - py) <= tol for px, py in pts)
+
+        vias = [(x, y) for x, y in points if not near(x, y, pads)]
+        if not vias:
+            return [chain]
+        pieces: list[list[Segment]] = [[chain[0]]]
+        for prev, seg in zip(chain, chain[1:], strict=False):
+            if near(prev.x2, prev.y2, vias):
+                pieces.append([])
+            pieces[-1].append(seg)
+        return pieces
 
     def _total_length(self, segments: list[Segment]) -> float:
         """Calculate total length of segments."""
