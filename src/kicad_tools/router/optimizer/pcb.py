@@ -927,6 +927,51 @@ def keep_safe_regions(
     return current, kept, len(regions)
 
 
+def _arbitrate_changed_nets(
+    pcb_text: str,
+    segments_by_net: dict[str, list[Segment]],
+    optimized_segments: dict[str, list[Segment]],
+    changed_nets: list[str],
+    arbiter: Callable[[str], int | None],
+) -> set[str]:
+    """Pick the largest clean subset of changed nets using an external checker.
+
+    ``arbiter(board_text)`` returns the checker's clearance error count, or
+    ``None`` when it cannot run.  A net set is clean when its count is at or
+    below the input board's.  The set is bisected (O(k log n) runs), keeping
+    each clean half cumulatively, so one bad net costs ~log n extra runs
+    rather than n (Issue #8367).  Returns ``set()`` when the arbiter is
+    unavailable or nothing is clean.
+    """
+    base = arbiter(pcb_text)
+    if base is None:
+        return set()
+    kept: set[str] = set()
+
+    def count(nets: list[str]) -> int | None:
+        trial = {
+            n: (optimized_segments[n] if (n in kept or n in nets) else segments_by_net[n])
+            for n in optimized_segments
+        }
+        return arbiter(replace_segments(pcb_text, segments_by_net, trial, scratch=True))
+
+    def solve(nets: list[str]) -> bool:
+        c = count(nets)
+        if c is None:
+            return False
+        if c <= base:
+            kept.update(nets)
+            return True
+        if len(nets) == 1:
+            return True
+        mid = len(nets) // 2
+        return solve(nets[:mid]) and solve(nets[mid:])
+
+    if not solve(list(changed_nets)):
+        return set()
+    return kept
+
+
 def optimize_pcb(
     pcb_path: str,
     output_path: str | None,
@@ -1215,6 +1260,40 @@ def optimize_pcb(
                     prev_rolled - rolled_back_nets
                 )
                 full_errors = kept_counts["__total__"]
+                if (
+                    config.drc_arbiter is not None
+                    and changed_nets
+                    and not any(final_segments[n] != segments_by_net[n] for n in final_segments)
+                ):
+                    # Issue #8367: the in-process referee rejected every
+                    # changed net, which is the signature of a rule-model gap
+                    # (e.g. ``.kicad_dru`` pad exemptions it cannot see).
+                    # Arbitrate with the external checker instead.
+                    arb_kept = _arbitrate_changed_nets(
+                        pcb_text,
+                        segments_by_net,
+                        optimized_segments,
+                        changed_nets,
+                        config.drc_arbiter,
+                    )
+                    if arb_kept:
+                        before_arb = set(rolled_back_nets)
+                        for n in changed_nets:
+                            if n in arb_kept:
+                                final_segments[n] = optimized_segments[n]
+                                rolled_back_nets.discard(n)
+                                net_violations.pop(n, None)
+                        stats.nets_rolled_back -= len(before_arb - rolled_back_nets)
+                        # Report the in-process count of what is actually kept.
+                        full_errors = _run_drc_error_count_by_category(
+                            replace_segments(
+                                pcb_text, segments_by_net, final_segments, scratch=True
+                            ),
+                            manufacturer=config.drc_manufacturer,
+                            layers=config.drc_layers,
+                            copper_oz=config.drc_copper_oz,
+                            min_clearance_mm=config.drc_clearance_mm,
+                        )["__total__"]
                 if not any(final_segments[n] != segments_by_net[n] for n in final_segments):
                     stats.drc_failsafe_reverted = True
                     stats.drc_failsafe_rules = above_rules
