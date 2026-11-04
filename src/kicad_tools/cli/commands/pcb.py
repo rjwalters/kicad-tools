@@ -729,11 +729,20 @@ def _run_prune_command(args, pcb_path: Path) -> int:
     output_path = Path(args.output) if getattr(args, "output", None) else pcb_path
 
     declared_nets: set[str] | None = None
+    required_widths: dict[str, float] = {}
     if getattr(args, "current_paths", None):
+        from kicad_tools.physics.ampacity import width_for_current
         from kicad_tools.router.current_paths import load_current_path_specs
 
         try:
-            declared_nets = {spec.net_name for spec in load_current_path_specs(args.current_paths)}
+            specs = load_current_path_specs(args.current_paths)
+            declared_nets = {spec.net_name for spec in specs}
+            # Conservative: 1 oz copper, internal-layer derating.
+            for spec in specs:
+                need = width_for_current(
+                    spec.thermal_design_current().current_a, 1.0, layer="internal"
+                )
+                required_widths[spec.net_name] = max(required_widths.get(spec.net_name, 0.0), need)
         except Exception as e:
             print(f"Error loading current paths: {e}", file=sys.stderr)
             return 1
@@ -744,7 +753,8 @@ def _run_prune_command(args, pcb_path: Path) -> int:
             verify_drc=not getattr(args, "no_drc", False),
             apply=not dry_run,
             declared_nets=declared_nets,
-            wide=getattr(args, "wide", 0.5),
+            wide=getattr(args, "wide", None),
+            required_widths=required_widths,
             project=getattr(args, "project", None),
             allow_default_rules=getattr(args, "allow_default_rules", False),
         )
@@ -796,7 +806,7 @@ def _run_prune_command(args, pcb_path: Path) -> int:
             print(f"    {n['net']}: kept (edit would add DRC violations)")
         for u in res.uncut_loops:
             print(
-                f"    {u['net']}: loop left in place (all segments >= --wide, "
+                f"    {u['net']}: loop left in place ({u.get('reason', 'all segments >= --wide')}, "
                 f"min width {u['min_width']} mm, {len(u['segments'])} segments)"
             )
 
@@ -1136,6 +1146,7 @@ def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
                 "reinforcement_eligible": r.spec.reinforcement_eligible,
                 "status": r.status,
                 "reason": r.reason,
+                "witness": r.witness,
                 "segment_count": len(r.segments),
                 "length_mm": round(r.length_mm, 4),
             }

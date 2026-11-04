@@ -219,7 +219,7 @@ import math
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from kicad_tools.core.geometry import point_to_segment_distance, segments_intersect
 from kicad_tools.core.layers import COPPER_LAYER_ORDER, via_spans_layer
@@ -807,6 +807,10 @@ class PathResolution:
     segments: tuple[Segment, ...] = ()
     length_mm: float = 0.0
     sense_taps: tuple[Segment, ...] = ()
+    #: For a loop/parallel ambiguity (issue #8368): the closing edge that
+    #: proves the cycle, as ``{"kind": "segment"|"via", "layer", "start",
+    #: "end"}`` / ``{"kind": "via", "position"}``. Empty otherwise.
+    witness: dict[str, object] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -1423,6 +1427,63 @@ def _component_has_cycle(
     return len(seen_edges) > len(visited_roots) - 1
 
 
+def _component_cycle_witness(
+    graph: _CopperGraph, start: _Node, arrays: Sequence[_ViaArray] = ()
+) -> dict[str, object]:
+    """Name one edge that closes a loop in ``start``'s component (issue #8368).
+
+    Same contraction rules as :func:`_component_has_cycle`; the first edge
+    whose ends are already connected (union-find over contracted roots) is the
+    witness.  Empty dict when there is no cycle.
+    """
+    roots = {node: next(iter(array.nodes)) for array in arrays for node in array.nodes}
+    contracted = {edge for array in arrays for edge in array.edges}
+    parent: dict[_Node, _Node] = {}
+
+    def find(n: _Node) -> _Node:
+        parent.setdefault(n, n)
+        while parent[n] != n:
+            parent[n] = parent[parent[n]]
+            n = parent[n]
+        return n
+
+    seen_nodes, seen_edges = {start}, set()
+    stack = [start]
+    while stack:
+        cur = stack.pop()
+        for nxt, edge in graph.adjacency.get(cur, []):
+            if edge not in contracted and edge not in seen_edges:
+                seen_edges.add(edge)
+                ra, rb = find(roots.get(cur, cur)), find(roots.get(nxt, nxt))
+                if ra == rb:
+                    if edge.segment is not None:
+                        seg = edge.segment
+                        return {
+                            "kind": "segment",
+                            "layer": seg.layer,
+                            "start": list(seg.start),
+                            "end": list(seg.end),
+                            "width": seg.width,
+                        }
+                    return {"kind": "via", "layer": cur[2], "position": [cur[0], cur[1]]}
+                parent[ra] = rb
+            if nxt not in seen_nodes:
+                seen_nodes.add(nxt)
+                stack.append(nxt)
+    return {}
+
+
+def _describe_witness(witness: dict[str, object]) -> str:
+    if not witness:
+        return ""
+    if witness.get("kind") == "segment":
+        start = tuple(cast("list[float]", witness["start"]))
+        end = tuple(cast("list[float]", witness["end"]))
+        return f" [witness: segment {start}->{end} on {witness['layer']}]"
+    position = tuple(cast("list[float]", witness["position"]))
+    return f" [witness: via barrel at {position}]"
+
+
 def _pad_covers(pcb: PCB, ref: str, pad_number: str, point: tuple[float, float]) -> bool:
     """Test a uniquely authored endpoint; ambiguous selectors cannot pick a pad."""
     footprints = [fp for fp in pcb.footprints if fp.reference == ref]
@@ -1713,6 +1774,7 @@ def resolve_current_path(pcb: PCB, spec: CurrentPathSpec) -> PathResolution:
                     reason="endpoint via fanout is outside the proved local pad-to-trunk motif",
                 )
     if _component_has_cycle(adjacency, start, arrays):
+        witness = _component_cycle_witness(adjacency, start, arrays)
         return PathResolution(
             spec=spec,
             status=STATUS_AMBIGUOUS,
@@ -1720,9 +1782,11 @@ def resolve_current_path(pcb: PCB, spec: CurrentPathSpec) -> PathResolution:
                 "declared endpoints sit on a net whose routed copper contains a "
                 "loop/parallel return path reachable from them -- current split "
                 "between branches cannot be determined from a single resolved path"
+                + _describe_witness(witness)
             ),
             source=source,
             sink=sink,
+            witness=witness,
         )
 
     # Every member remains physical evidence checked at the full current.

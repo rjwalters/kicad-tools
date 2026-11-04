@@ -1294,3 +1294,78 @@ def test_collinear_merge_ignores_gap_above_tolerance_and_perpendicular(tmp_path)
         ]
         pcb, _ = _run(_board(d, pads, segs))
         assert len(pcb.segments) >= 2
+
+
+# --- net-relative --wide default + audit witness (issue #8368) ---------------
+
+
+def _wide_loop_with_duplicate_board(tmp_path: Path, w: float = 2.6) -> Path:
+    """Wide declared net: via-closed jog, detour trunk and a parallel duplicate run."""
+    segs = [
+        ((100, 100), (100, 103), "F.Cu", w),
+        ((100, 103), (110, 103), "F.Cu", w),
+        ((110, 103), (110, 100), "F.Cu", w),
+        ((100, 100), (102, 100), "F.Cu", w),
+        ((102, 100), (108, 100), "B.Cu", w),
+        ((108, 100), (110, 100), "F.Cu", w),
+        ((100, 103), (110, 103), "F.Cu", 1.0),  # parallel duplicate run
+    ]
+    return _board(tmp_path, [("A", 100, 100), ("B", 110, 100)], segs, vias=[(102, 100), (108, 100)])
+
+
+def _audit(pcb, tmp_path: Path):
+    from kicad_tools.router.current_paths import load_current_path_specs, resolve_current_path
+
+    out = tmp_path / "audited.kicad_pcb"
+    pcb.save(out)
+    (spec,) = load_current_path_specs(_specs(tmp_path))
+    return spec, resolve_current_path(PCB.load(out), spec)
+
+
+def test_default_wide_is_absolute_and_stalls_on_wide_net(tmp_path):
+    p = _wide_loop_with_duplicate_board(tmp_path)
+    pcb, res = prune_board(p, verify_drc=False, declared_nets={"SIG"}, wide=0.5)
+    assert res.stats["segments_removed"] == 0
+    assert res.uncut_loops
+
+
+def test_relative_wide_resolves_wide_net_and_reinforce_anchors(tmp_path):
+    from kicad_tools.pcb.reinforce import reinforce_net
+
+    p = _wide_loop_with_duplicate_board(tmp_path)
+    pcb, res = prune_board(
+        p, verify_drc=False, declared_nets={"SIG"}, wide=None, required_widths={"SIG": 0.3}
+    )
+    assert res.stats["segments_removed"] >= 1
+    assert res.uncut_loops == []
+    spec, resolution = _audit(pcb, tmp_path)
+    assert resolution.status == "resolved", resolution.reason
+    from dataclasses import replace
+
+    spec = replace(spec, reinforcement_eligible=True)
+    out = reinforce_net(pcb, "SIG", spacing_mm=2.0, current_paths=[spec])
+    assert len(out.placed) > 0
+
+
+def test_relative_wide_refuses_cut_that_breaks_ampacity(tmp_path):
+    p = _wide_loop_with_duplicate_board(tmp_path, w=0.4)
+    # remaining branch is 0.4 mm but the declared current needs 5 mm
+    pcb, res = prune_board(
+        p, verify_drc=False, declared_nets={"SIG"}, wide=None, required_widths={"SIG": 5.0}
+    )
+    assert res.stats["segments_removed"] == 0
+    assert res.uncut_loops and "declared current" in res.uncut_loops[0]["reason"]
+
+
+def test_audit_names_loop_witness(tmp_path):
+    segs = [
+        ((100, 100), (110, 100), "F.Cu", 0.5),
+        ((100, 100), (100, 103), "F.Cu", 0.5),
+        ((100, 103), (110, 103), "F.Cu", 0.5),
+        ((110, 103), (110, 100), "F.Cu", 0.5),
+    ]
+    p = _board(tmp_path, [("A", 100, 100), ("B", 110, 100)], segs)
+    _spec, resolution = _audit(PCB.load(p), tmp_path)
+    assert resolution.status == "ambiguous"
+    assert resolution.witness["kind"] in ("segment", "via")
+    assert "witness:" in resolution.reason
