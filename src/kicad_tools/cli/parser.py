@@ -2716,6 +2716,18 @@ def _add_pcb_parser(subparsers) -> None:
     )
     pcb_prune.add_argument("--no-drc", action="store_true", help="Skip kicad-cli DRC verification")
     pcb_prune.add_argument(
+        "--project",
+        metavar="PATH.kicad_pro",
+        help="Project whose rules (.kicad_pro and sibling .kicad_dru) DRC verifies under "
+        "(default: the files beside the board)",
+    )
+    pcb_prune.add_argument(
+        "--allow-default-rules",
+        action="store_true",
+        help="Verify against KiCad default rules when no project rules are found "
+        "(otherwise that is an error)",
+    )
+    pcb_prune.add_argument(
         "--current-paths",
         dest="current_paths",
         metavar="FILE",
@@ -4168,6 +4180,19 @@ def _add_stitch_parser(subparsers) -> None:
         help="Require native DRC with zero findings (implies --drc)",
     )
     stitch_parser.add_argument(
+        "--project",
+        dest="stitch_project",
+        metavar="PATH.kicad_pro",
+        help="Project whose rules (.kicad_pro and sibling .kicad_dru) --drc uses "
+        "(default: the files beside the board)",
+    )
+    stitch_parser.add_argument(
+        "--allow-default-rules",
+        action="store_true",
+        dest="stitch_allow_default_rules",
+        help="Run --drc against KiCad default rules when no project rules are found",
+    )
+    stitch_parser.add_argument(
         "--drc",
         action="store_true",
         dest="stitch_drc",
@@ -4592,6 +4617,18 @@ def _add_optimize_parser(subparsers) -> None:
     optimize_parser.add_argument(
         "--mfr",
         help="Target manufacturer for DRC rules (e.g., jlcpcb, oshpark). Required with --drc-aware",
+    )
+    optimize_parser.add_argument(
+        "--project",
+        metavar="PATH.kicad_pro",
+        help="Project whose rules (.kicad_pro and sibling .kicad_dru) DRC verification "
+        "uses (default: the files beside the board)",
+    )
+    optimize_parser.add_argument(
+        "--allow-default-rules",
+        action="store_true",
+        help="Verify against KiCad default rules when no project rules are found "
+        "(otherwise that is an error)",
     )
     optimize_parser.add_argument(
         "--layers",

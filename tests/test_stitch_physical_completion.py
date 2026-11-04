@@ -464,7 +464,7 @@ def test_public_cli_physical_completion(tmp_path, native_cli, case):
         "json",
     ]
     if case == "strict":
-        command.append("--drc-strict")
+        command.extend(["--drc-strict", "--allow-default-rules"])
     output = tmp_path / "existing.kicad_pcb"
     if case == "output":
         output.write_bytes(b"prior output")

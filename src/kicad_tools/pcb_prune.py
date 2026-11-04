@@ -1606,6 +1606,8 @@ def prune_board(
     apply: bool = True,
     declared_nets: set[str] | None = None,
     wide: float = DEFAULT_WIDE_MM,
+    project: Path | str | None = None,
+    allow_default_rules: bool = False,
 ) -> tuple[PCB, PruneResult]:
     """Plan (and optionally apply) pruning for ``pcb_path``.
 
@@ -1625,14 +1627,15 @@ def prune_board(
     if verify_drc and plans:
         with tempfile.TemporaryDirectory(prefix="kct_prune_") as tmp:
             trial_path = Path(tmp) / "trial.kicad_pcb"
-            # DRC must run with the board's own rules (clearances, netclasses).
+            # DRC must run with the project's rules (clearances, netclasses).
             src = Path(pcb_path)
-            missing: list[str] = []
-            for ext in (".kicad_pro", ".kicad_dru"):
-                if src.with_suffix(ext).exists():
-                    shutil.copy(src.with_suffix(ext), Path(tmp) / f"trial{ext}")
-                else:
-                    missing.append(src.with_suffix(ext).name)
+            from kicad_tools.sidecars import resolve_project_rules, stage_project_rules
+
+            rules = resolve_project_rules(src, project, allow_default=allow_default_rules)
+            stage_project_rules(rules, trial_path)
+            missing = (
+                [] if rules else [src.with_suffix(e).name for e in (".kicad_pro", ".kicad_dru")]
+            )
             trial_path.write_text(src.read_text())
             baseline = _drc_signature(trial_path)
             if baseline is None:

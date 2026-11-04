@@ -614,7 +614,9 @@ def test_via_closed_cut_passes_real_drc(tmp_path):
     from kicad_tools.router.current_paths import load_current_path_specs, resolve_current_path
 
     p = _via_loop_board(tmp_path)
-    pcb, res = prune_board(p, verify_drc=True, declared_nets={"SIG"}, wide=0.5)
+    pcb, res = prune_board(
+        p, verify_drc=True, declared_nets={"SIG"}, wide=0.5, allow_default_rules=True
+    )
     assert res.drc_verified
     assert [pl.net_name for pl in res.accepted] == ["SIG"] and res.rejected == []
     assert pcb.vias == []
@@ -1096,7 +1098,7 @@ def test_missing_dru_is_reported_in_drc_note(tmp_path):
 
     if find_kicad_cli() is None:
         pytest.skip("kicad-cli not available")
-    _, res = prune_board(_hv_board(tmp_path))
+    _, res = prune_board(_hv_board(tmp_path), allow_default_rules=True)
     assert res.drc_verified
     assert "hv.kicad_dru" in res.drc_note
     assert "custom clearances were NOT evaluated" in res.drc_note
@@ -1110,7 +1112,7 @@ def test_dru_present_is_not_flagged_and_output_has_no_new_error(tmp_path):
         pytest.skip("kicad-cli not available")
     p = _hv_board(tmp_path)
     p.with_suffix(".kicad_dru").write_text(_DRU)
-    pcb, res = prune_board(p)
+    pcb, res = prune_board(p, allow_default_rules=True)
     assert res.drc_verified
     assert "hv.kicad_dru" not in res.drc_note
     out = tmp_path / "out" / "hv.kicad_pcb"

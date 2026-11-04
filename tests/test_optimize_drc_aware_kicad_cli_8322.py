@@ -31,7 +31,15 @@ def pcb(tmp_path: Path) -> Path:
 
 
 def _run(pcb, tmp_path, results, capsys, fmt="text"):
-    args = [str(pcb), "-o", str(tmp_path / "o.kicad_pcb"), "--drc-aware", "--mfr", "jlcpcb"]
+    args = [
+        str(pcb),
+        "-o",
+        str(tmp_path / "o.kicad_pcb"),
+        "--drc-aware",
+        "--mfr",
+        "jlcpcb",
+        "--allow-default-rules",
+    ]
     if fmt == "json":
         args += ["--format", "json"]
     with patch(TARGET, side_effect=results), patch(REFILL, return_value=KiCadCLIResult(True)):
@@ -80,6 +88,7 @@ def test_output_elsewhere_stages_input_rules_for_after_run(pcb, tmp_path, capsys
     out_dir = tmp_path / "elsewhere"
     out_dir.mkdir()
     args = [str(pcb), "-o", str(out_dir / "o.kicad_pcb"), "--drc-aware", "--mfr", "jlcpcb"]
+    args.append("--allow-default-rules")
     with (
         patch(TARGET, side_effect=[_ok(1), _ok(1)]) as m,
         patch(REFILL, return_value=KiCadCLIResult(True)),
