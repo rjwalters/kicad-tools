@@ -735,3 +735,33 @@ def test_board_gap_on_layer_without_sharing_footprint_reported(tmp_path, capsys)
     assert abs(board["creepage_mm"] - 0.8) < 0.05
     assert payload["gate_passed"] is False
     assert rc == 1
+
+
+# ---------------------------------------------------------------------------
+# --witness (Issue #8301)
+# ---------------------------------------------------------------------------
+
+
+def test_json_rows_all_carry_witness(tmp_path, capsys):
+    pcb = _write(tmp_path, board_source(with_slot=False))
+    ncm = _hv_map_file(tmp_path)
+    _run(["creepage", str(pcb), "--net-class-map", str(ncm), "--min", "1.5", "--format", "json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["pairs"]
+    for row in payload["pairs"]:
+        assert set(row["witness"]) == {"point_a_mm", "point_b_mm", "item_a", "item_b"}
+
+
+def test_witness_column_only_with_flag(tmp_path, capsys):
+    pcb = _write(tmp_path, board_source(with_slot=False))
+    ncm = _hv_map_file(tmp_path)
+    base = ["creepage", str(pcb), "--net-class-map", str(ncm), "--min", "1.5"]
+    _run(base)
+    plain = capsys.readouterr().out
+    _run([*base, "--witness"])
+    with_w = capsys.readouterr().out
+    assert "Witness" not in plain
+    assert "Edge.Cuts" not in plain
+    assert "Witness" in with_w
+    assert "11.000," in with_w
+    assert "Edge.Cuts" in with_w

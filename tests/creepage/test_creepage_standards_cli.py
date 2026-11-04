@@ -315,6 +315,7 @@ def test_min_only_json_schema_unchanged(tmp_path, capsys):
             "creepage_mm",
             "margin_mm",
             "relationship",
+            "witness",  # always-on additive key (#8301)
             "pass",
         }
         assert pair["relationship"] == "board"

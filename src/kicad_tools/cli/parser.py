@@ -806,6 +806,19 @@ def _add_creepage_parser(subparsers) -> None:
     # STANDALONE-CLI opt-in only: it never relaxes the ``kct audit``
     # manufacturing-readiness gate (which keys off the raw, un-waived result).
     creepage_parser.add_argument(
+        "--witness",
+        dest="witness",
+        action="store_true",
+        help=(
+            "Add a Witness column to the table: the A-side closest point (x,y in "
+            "board mm) and the items on each side (pad REF.pin, or "
+            "segment/via/zone:<uuid>, Edge.Cuts), so a failing pair can be located "
+            "in KiCad.  JSON always carries a 'witness' object per row.  Points "
+            "are straight-line closest points: for slot-detour rows (creepage > "
+            "clearance) they mark the clearance gap, not the detour path."
+        ),
+    )
+    creepage_parser.add_argument(
         "--waive-same-footprint",
         dest="waive_same_footprint",
         action="store_true",
