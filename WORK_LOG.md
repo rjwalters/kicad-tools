@@ -15,6 +15,14 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-04
 
+- **PR #8339**: perf: index blocker segments in relief measured-gap scan
+- **PR #8351**: fix: locate creepage strip findings from witness point_a/point_b
+- **PR #8348**: docs: record live kicad-cli verification of pcb strip modes
+- **PR #8340**: fix(creepage): fuse collinear trace runs before attach-zone cross terms
+- **Issue #8295** (closed): Relief freed-band diagnostic: spatially bound the measured-gap scan (follow-up to #8256)
+- **Issue #8346** (closed): kct pcb strip --from-report ignores real kct creepage witness shape (every row skipped)
+- **Issue #8337** (closed): Live-verify kct pcb strip --from-report/--dangling against real kicad-cli --refill-zones
+- **Issue #8303** (closed): census attach-zone cross terms are segmentation-dependent (no collinear fusion, unlike router #8280)
 - **PR #8342**: fix(creepage): classify same-footprint residual row by attach zone
 - **PR #8338**: test(router): pin relief rescue outcomes on the sealed centre pin
 - **PR #8335**: fix: emit 45-aligned doglegs when joining route ends to pad centres
