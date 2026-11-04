@@ -1215,6 +1215,48 @@ def _run_monte_carlo_trial(config: dict) -> tuple[list, float, int]:
     return routes, score, trial_num
 
 
+class _BlockerSegIndex:
+    """Uniform hash grid over a ripped blocker's segments (#8295).
+
+    ``candidates`` returns, in original order, every blocker segment whose
+    ``reach``-inflated bounding box could overlap the query box.  It only
+    drops segments whose inflated box is disjoint from the query's, i.e.
+    pairs that cannot satisfy ``gap < reach``, so a scan over the result is
+    bit-identical to a scan over all segments.
+    """
+
+    def __init__(self, segs: list[Any], reach: float) -> None:
+        self._segs = segs
+        self._reach = reach
+        longest = max((max(abs(s.x2 - s.x1), abs(s.y2 - s.y1)) for s in segs), default=0.0)
+        self._cell = max(4.0 * reach, 1.0, longest / 64.0)
+        self._cells: dict[tuple[int, int], list[int]] = {}
+        for i, s in enumerate(segs):
+            m = s.width / 2 + reach + 1e-9
+            c0, r0, c1, r1 = self._span(
+                min(s.x1, s.x2) - m, min(s.y1, s.y2) - m, max(s.x1, s.x2) + m, max(s.y1, s.y2) + m
+            )
+            for cx in range(c0, c1 + 1):
+                for cy in range(r0, r1 + 1):
+                    self._cells.setdefault((cx, cy), []).append(i)
+
+    def _span(self, x0: float, y0: float, x1: float, y1: float) -> tuple[int, int, int, int]:
+        c = self._cell
+        return (math.floor(x0 / c), math.floor(y0 / c), math.floor(x1 / c), math.floor(y1 / c))
+
+    def candidates(self, x1: float, y1: float, x2: float, y2: float, pad: float) -> list[Any]:
+        """Blocker segments that may lie within ``reach`` of the padded query box."""
+        pad += 1e-9
+        c0, r0, c1, r1 = self._span(
+            min(x1, x2) - pad, min(y1, y2) - pad, max(x1, x2) + pad, max(y1, y2) + pad
+        )
+        hit: set[int] = set()
+        for cx in range(c0, c1 + 1):
+            for cy in range(r0, r1 + 1):
+                hit.update(self._cells.get((cx, cy), ()))
+        return [self._segs[i] for i in sorted(hit)]
+
+
 class _TraceResolverTransaction:
     """Snapshot/rollback wrapper for the trace rip-and-reroute window.
 
@@ -17011,7 +17053,8 @@ class Autorouter:
                 return f"freed corridor not measured ({c_or_reason})"
             c, source = c_or_reason
             if c < 0:
-                return f"freed corridor not measured (ripped {_name(net)} overlaps {source})"
+                what = source.removeprefix("measured gap to ")
+                return f"freed corridor not measured (ripped {_name(net)} overlaps {what})"
             freed = w + 2 * c
             if best is None or freed < best[0]:
                 best = (freed, w, c, net, source)
@@ -17211,6 +17254,7 @@ class Autorouter:
                 or min(y1, y2) - pad > max_y
             )
 
+        index = _BlockerSegIndex(segs, reach)
         measured: tuple[float, str] | None = None
 
         def _note(gap: float, what: str) -> None:
@@ -17224,7 +17268,7 @@ class Autorouter:
             half = max(pad.width, pad.height) / 2 * 1.5  # covers any rotation
             if not _near(pad.x, pad.y, pad.x, pad.y, half):
                 continue
-            for s in segs:
+            for s in index.candidates(pad.x, pad.y, pad.x, pad.y, half):
                 if not pad.through_hole and pad.layer != s.layer:
                     continue
                 gap = pad_segment_edge_clearance(pad, s.x1, s.y1, s.x2, s.y2, s.width / 2)
@@ -17233,7 +17277,7 @@ class Autorouter:
         for (ex1, ey1), (ex2, ey2) in getattr(self, "_edge_segments", None) or ():
             if not _near(ex1, ey1, ex2, ey2, 0.0):
                 continue
-            for s in segs:
+            for s in index.candidates(ex1, ey1, ex2, ey2, 0.0):
                 gap = _segment_segment_distance(s.x1, s.y1, s.x2, s.y2, ex1, ey1, ex2, ey2)
                 _note(gap - s.width / 2, "measured gap to the board edge")
 
@@ -17248,7 +17292,7 @@ class Autorouter:
             for o in route.segments:
                 if o.net in skip_nets or not _near(o.x1, o.y1, o.x2, o.y2, o.width / 2):
                     continue
-                for s in segs:
+                for s in index.candidates(o.x1, o.y1, o.x2, o.y2, o.width / 2):
                     if s.layer != o.layer:
                         continue
                     gap = (
@@ -17260,7 +17304,7 @@ class Autorouter:
                 if not _near(v.x, v.y, v.x, v.y, v.diameter / 2):
                     continue
                 lo, hi = sorted(lyr.stack_order for lyr in v.drilled_layers)
-                for s in segs:
+                for s in index.candidates(v.x, v.y, v.x, v.y, v.diameter / 2):
                     if not lo <= s.layer.stack_order <= hi:
                         continue
                     gap = _segment_point_distance(s.x1, s.y1, s.x2, s.y2, v.x, v.y) - (
