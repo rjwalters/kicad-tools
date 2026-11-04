@@ -755,6 +755,8 @@ def _run_prune_command(args, pcb_path: Path) -> int:
             declared_nets=declared_nets,
             wide=getattr(args, "wide", None),
             required_widths=required_widths,
+            project=getattr(args, "project", None),
+            allow_default_rules=getattr(args, "allow_default_rules", False),
         )
     except Exception as e:
         print(f"Error pruning PCB: {e}", file=sys.stderr)

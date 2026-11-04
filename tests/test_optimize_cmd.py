@@ -99,6 +99,7 @@ class TestDrcAwareArgValidation:
             [
                 str(simple_pcb_path),
                 "--drc-aware",
+                "--allow-default-rules",
                 "--mfr",
                 "jlcpcb",
                 "-o",
@@ -138,6 +139,7 @@ class TestDrcAwareOptimization:
             [
                 str(simple_pcb_path),
                 "--drc-aware",
+                "--allow-default-rules",
                 "--mfr",
                 "jlcpcb",
                 "--dry-run",
@@ -155,6 +157,7 @@ class TestDrcAwareOptimization:
             [
                 str(simple_pcb_path),
                 "--drc-aware",
+                "--allow-default-rules",
                 "--mfr",
                 "jlcpcb",
                 "-o",
@@ -172,6 +175,7 @@ class TestDrcAwareOptimization:
             [
                 str(simple_pcb_path),
                 "--drc-aware",
+                "--allow-default-rules",
                 "--mfr",
                 "jlcpcb",
                 "--net",
@@ -627,7 +631,16 @@ class TestDrcAwareDisplayMessage:
             "kicad_tools.router.optimizer.TraceOptimizer.optimize_pcb",
             return_value=stats,
         ):
-            result = main([str(simple_pcb_path), "--drc-aware", "--mfr", "jlcpcb", "--dry-run"])
+            result = main(
+                [
+                    str(simple_pcb_path),
+                    "--drc-aware",
+                    "--allow-default-rules",
+                    "--mfr",
+                    "jlcpcb",
+                    "--dry-run",
+                ]
+            )
         assert result == 0
         captured = capsys.readouterr()
         assert "5 new errors" in captured.out
@@ -650,7 +663,16 @@ class TestDrcAwareDisplayMessage:
             "kicad_tools.router.optimizer.TraceOptimizer.optimize_pcb",
             return_value=stats,
         ):
-            result = main([str(simple_pcb_path), "--drc-aware", "--mfr", "jlcpcb", "--dry-run"])
+            result = main(
+                [
+                    str(simple_pcb_path),
+                    "--drc-aware",
+                    "--allow-default-rules",
+                    "--mfr",
+                    "jlcpcb",
+                    "--dry-run",
+                ]
+            )
         assert result == 0
         captured = capsys.readouterr()
         assert "no regressions" in captured.out
@@ -673,7 +695,16 @@ class TestDrcAwareDisplayMessage:
             "kicad_tools.router.optimizer.TraceOptimizer.optimize_pcb",
             return_value=stats,
         ):
-            result = main([str(simple_pcb_path), "--drc-aware", "--mfr", "jlcpcb", "--dry-run"])
+            result = main(
+                [
+                    str(simple_pcb_path),
+                    "--drc-aware",
+                    "--allow-default-rules",
+                    "--mfr",
+                    "jlcpcb",
+                    "--dry-run",
+                ]
+            )
         assert result == 0
         captured = capsys.readouterr()
         assert "(no regressions)" in captured.out
@@ -698,7 +729,16 @@ class TestDrcAwareDisplayMessage:
             "kicad_tools.router.optimizer.TraceOptimizer.optimize_pcb",
             return_value=stats,
         ):
-            result = main([str(simple_pcb_path), "--drc-aware", "--mfr", "jlcpcb", "--dry-run"])
+            result = main(
+                [
+                    str(simple_pcb_path),
+                    "--drc-aware",
+                    "--allow-default-rules",
+                    "--mfr",
+                    "jlcpcb",
+                    "--dry-run",
+                ]
+            )
         assert result == 0
         captured = capsys.readouterr()
         assert "(no regressions)" in captured.out
@@ -720,7 +760,16 @@ class TestDrcAwareDisplayMessage:
             "kicad_tools.router.optimizer.TraceOptimizer.optimize_pcb",
             return_value=stats,
         ):
-            result = main([str(simple_pcb_path), "--drc-aware", "--mfr", "jlcpcb", "--dry-run"])
+            result = main(
+                [
+                    str(simple_pcb_path),
+                    "--drc-aware",
+                    "--allow-default-rules",
+                    "--mfr",
+                    "jlcpcb",
+                    "--dry-run",
+                ]
+            )
         assert result == 0
         captured = capsys.readouterr()
         # delta = 120 - 79 = 41

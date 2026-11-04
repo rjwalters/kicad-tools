@@ -443,6 +443,18 @@ Examples:
         help="Target manufacturer for DRC rules (e.g., jlcpcb, oshpark). Required with --drc-aware",
     )
     parser.add_argument(
+        "--project",
+        metavar="PATH.kicad_pro",
+        help="Project whose rules (.kicad_pro and sibling .kicad_dru) DRC verification "
+        "uses (default: the files beside the board)",
+    )
+    parser.add_argument(
+        "--allow-default-rules",
+        action="store_true",
+        help="Verify against KiCad default rules when no project rules are found "
+        "(otherwise that is an error)",
+    )
+    parser.add_argument(
         "--layers",
         type=int,
         default=2,
@@ -509,6 +521,15 @@ Examples:
             args.pcb,
             "--drc-aware requires --mfr to specify the manufacturer profile (e.g., --mfr jlcpcb)",
         )
+
+    # Issue #8369: the kicad-cli referee must run under project rules, not defaults.
+    if args.drc_aware and not args.dry_run:
+        from kicad_tools.sidecars import MissingProjectRulesError, resolve_project_rules
+
+        try:
+            resolve_project_rules(args.pcb, args.project, allow_default=args.allow_default_rules)
+        except MissingProjectRulesError as e:
+            return _fail(as_json, args.pcb, str(e))
 
     # Check input file exists
     pcb_path = Path(args.pcb)
@@ -725,7 +746,9 @@ Examples:
     cli_before: dict | None = None
     has_dru = pcb_path.with_suffix(".kicad_dru").exists()
     if args.drc_aware and not args.dry_run:
-        cli_before = _kicad_cli_clearance_errors(pcb_path)
+        cli_before = _kicad_cli_clearance_errors(
+            pcb_path, **({"rules_from": Path(args.project)} if args.project else {})
+        )
 
     # Run optimization
     try:
@@ -783,7 +806,8 @@ Examples:
         # next to a copy of the output so both runs use the same rule set.
         same_board = out_path.resolve() == pcb_path.resolve()
         cli_after = _kicad_cli_clearance_errors(
-            out_path, rules_from=None if same_board else pcb_path
+            out_path,
+            rules_from=Path(args.project) if args.project else (None if same_board else pcb_path),
         )
         cli_drc = _kicad_cli_drc_summary(cli_before, cli_after, has_dru)
     exit_code = 2 if cli_drc and cli_drc["regression"] else 0

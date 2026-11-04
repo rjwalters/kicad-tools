@@ -811,6 +811,10 @@ def _run_stitch_command(args) -> int:
         sub_argv.append("--drc-strict")
     if hasattr(args, "stitch_drc") and args.stitch_drc:
         sub_argv.append("--drc")
+    if getattr(args, "stitch_project", None):
+        sub_argv.extend(["--project", str(args.stitch_project)])
+    if getattr(args, "stitch_allow_default_rules", False):
+        sub_argv.append("--allow-default-rules")
     if hasattr(args, "stitch_mfr") and args.stitch_mfr is not None:
         sub_argv.extend(["--mfr", str(args.stitch_mfr)])
     if hasattr(args, "stitch_copper") and args.stitch_copper != 1.0:

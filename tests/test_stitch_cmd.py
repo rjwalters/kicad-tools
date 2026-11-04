@@ -2931,7 +2931,9 @@ class TestPostStitchDRC:
 
         # Mock find_kicad_cli to return None so DRC is skipped gracefully
         with patch("kicad_tools.cli.stitch_cmd.run_post_stitch_drc", return_value={"passed": True}):
-            exit_code = main([str(stitch_test_pcb), "--net", "GND", "--drc"])
+            exit_code = main(
+                [str(stitch_test_pcb), "--net", "GND", "--drc", "--allow-default-rules"]
+            )
 
         assert exit_code == 0
         captured = capsys.readouterr()
@@ -8360,7 +8362,15 @@ class TestStrictDrcContract:
 
         monkeypatch.setattr(runner, "run_drc", native)
         rc = main(
-            [str(pcb), "--net", "GND", "--format", "json", "--drc-strict" if strict else "--drc"]
+            [
+                str(pcb),
+                "--net",
+                "GND",
+                "--format",
+                "json",
+                "--drc-strict" if strict else "--drc",
+                "--allow-default-rules",
+            ]
         )
         doc = json.loads(capsys.readouterr().out)
         assert rc == doc["exit_code"] == (1 if strict and finding != "clean" else 0)

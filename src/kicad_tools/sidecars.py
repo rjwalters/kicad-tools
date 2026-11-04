@@ -55,6 +55,9 @@ from pathlib import Path
 
 __all__ = [
     "PROJECT_SIDECAR_SUFFIXES",
+    "MissingProjectRulesError",
+    "resolve_project_rules",
+    "stage_project_rules",
     "copy_project_sidecars",
     "NET_CLASS_MAP_SIDECAR_BASENAME",
     "first_existing_net_class_map_sidecar",
@@ -216,3 +219,50 @@ def copy_project_sidecars(src_pcb: Path | str, dst_pcb: Path | str) -> list[Path
         shutil.copyfile(s, d)
         written.append(d)
     return written
+
+
+class MissingProjectRulesError(ValueError):
+    """No project rules could be resolved for a DRC-verified command (#8369)."""
+
+
+def resolve_project_rules(
+    pcb_path: Path | str,
+    project: Path | str | None = None,
+    *,
+    allow_default: bool = False,
+) -> list[Path]:
+    """Return the ``.kicad_pro``/``.kicad_dru`` files DRC should run under (#8369).
+
+    An explicit ``project`` (``.kicad_pro``) wins; its sibling ``.kicad_dru`` is
+    used when present.  Otherwise the sidecars beside the board are used.  An
+    explicit ``project`` that does not exist is always an error.  When nothing
+    resolves, raise :class:`MissingProjectRulesError` unless ``allow_default``
+    (verification then runs against KiCad's default rules).
+    """
+    if project is not None:
+        pro = Path(project)
+        if not pro.is_file():
+            raise MissingProjectRulesError(f"--project file not found: {pro}")
+        base = pro
+    else:
+        base = Path(pcb_path)
+    found = [base.with_suffix(s) for s in PROJECT_SIDECAR_SUFFIXES if base.with_suffix(s).is_file()]
+    if not found and not allow_default:
+        name = Path(pcb_path).with_suffix(".kicad_pro").name
+        raise MissingProjectRulesError(
+            f"no project rules found for {Path(pcb_path).name} (looked for {name} / "
+            f"{Path(name).with_suffix('.kicad_dru').name} beside the board): DRC would run "
+            "against KiCad default rules and miss custom clearances. Pass "
+            "--project PATH.kicad_pro to use a project's rules, or "
+            "--allow-default-rules to verify against defaults anyway."
+        )
+    return found
+
+
+def stage_project_rules(rules: Iterable[Path], dst_pcb: Path | str) -> None:
+    """Copy resolved rule files beside ``dst_pcb`` under its stem (#8369)."""
+    import shutil
+
+    dst = Path(dst_pcb)
+    for r in rules:
+        shutil.copyfile(r, dst.with_suffix(r.suffix))

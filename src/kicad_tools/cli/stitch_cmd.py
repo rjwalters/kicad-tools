@@ -6895,7 +6895,9 @@ def _drc_not_run(reason: str) -> dict:
     }
 
 
-def run_post_stitch_drc(pcb_path: Path) -> dict:
+def run_post_stitch_drc(
+    pcb_path: Path, project: Path | str | None = None, allow_default_rules: bool = True
+) -> dict:
     """Run DRC on the PCB after stitching and display summary.
 
     ``ran`` means a native report was successfully parsed, independently of
@@ -6922,8 +6924,27 @@ def run_post_stitch_drc(pcb_path: Path) -> dict:
 
     print(f"\nRunning DRC on {pcb_path.name}...", file=sys.stderr)
 
-    result = run_drc(pcb_path, format="json", kicad_cli=kicad_cli)
+    if project is not None:
+        # Judge the board under the explicit project's rules (#8369).
+        import shutil
+        import tempfile
 
+        from kicad_tools.sidecars import resolve_project_rules, stage_project_rules
+
+        with tempfile.TemporaryDirectory(prefix="kct_stitchdrc_") as td:
+            staged = Path(td) / pcb_path.name
+            shutil.copyfile(pcb_path, staged)
+            stage_project_rules(
+                resolve_project_rules(pcb_path, project, allow_default=allow_default_rules),
+                staged,
+            )
+            result = run_drc(staged, format="json", kicad_cli=kicad_cli)
+            return _finish_post_stitch_drc(result, pcb_path)
+    result = run_drc(pcb_path, format="json", kicad_cli=kicad_cli)
+    return _finish_post_stitch_drc(result, pcb_path)
+
+
+def _finish_post_stitch_drc(result, pcb_path: Path) -> dict:
     if not result.success or result.return_code != 0:
         print(f"\nDRC failed to run: {result.stderr}", file=sys.stderr)
         if result.output_path:
@@ -7488,6 +7509,18 @@ def main(argv: list[str] | None = None) -> int:
         help="Report native DRC after stitching, including unchanged boards (diagnostic only)",
     )
     parser.add_argument(
+        "--project",
+        metavar="PATH.kicad_pro",
+        help="Project whose rules (.kicad_pro and sibling .kicad_dru) DRC verification "
+        "uses (default: the files beside the board)",
+    )
+    parser.add_argument(
+        "--allow-default-rules",
+        action="store_true",
+        help="Verify against KiCad default rules when no project rules are found "
+        "(otherwise that is an error)",
+    )
+    parser.add_argument(
         "--drc-strict",
         action="store_true",
         help="Imply --drc; exit nonzero on errors, warnings, unconnected items or unavailable check",
@@ -7565,6 +7598,15 @@ def _run_main(args: argparse.Namespace, as_json: bool) -> tuple[int, dict | None
 
     if pcb_path.suffix != ".kicad_pcb":
         return fail(f"Expected .kicad_pcb file, got: {pcb_path.suffix}")
+
+    # Issue #8369: a native DRC must not silently verify against default rules.
+    if (args.drc or args.drc_strict) and not args.dry_run:
+        from kicad_tools.sidecars import MissingProjectRulesError, resolve_project_rules
+
+        try:
+            resolve_project_rules(pcb_path, args.project, allow_default=args.allow_default_rules)
+        except MissingProjectRulesError as e:
+            return fail(str(e))
 
     if getattr(args, "complete", False) and args.output:
         return fail("--complete runs transactionally in the original project; omit --output")
@@ -7761,7 +7803,9 @@ def _run_main(args: argparse.Namespace, as_json: bool) -> tuple[int, dict | None
         # hypothetical geometry and therefore cannot pass the strict gate.
         drc = _drc_not_run("dry run" if args.drc and args.dry_run else "not requested")
         if args.drc and not args.dry_run:
-            drc = run_post_stitch_drc(pcb_path)
+            drc = run_post_stitch_drc(
+                pcb_path, args.project, allow_default_rules=args.allow_default_rules
+            )
 
         document = (
             result_document(

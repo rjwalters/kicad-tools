@@ -112,6 +112,7 @@ class TestCentralizedCliDrcAwareFlags:
                 "optimize-traces",
                 str(simple_pcb_path),
                 "--drc-aware",
+                "--allow-default-rules",
                 "--mfr",
                 "jlcpcb",
                 "--layers",
