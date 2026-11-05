@@ -4316,6 +4316,40 @@ def _restore_best_trial(router: Any, info: dict[str, Any]) -> None:
     info["snapshot_trial"] = meta.get("trial")
 
 
+_FALLBACK_RECEIPT_KEYS = (
+    "python_fallback_top_nets",
+    "python_fallback_repeat_skips",
+    "python_fallback_proven_skips",
+    "python_fallback_seconds_saved",
+    "fallback_count",
+)
+
+
+def _fallback_receipt_fields(router: Any) -> dict[str, Any]:
+    """Small fallback diagnostics for the timeout receipt (issues #8370, #8413).
+
+    Always returns every key in ``_FALLBACK_RECEIPT_KEYS``; a value is ``None``
+    when the stats are unavailable (no router, Python backend, or an error), so
+    a reader can tell "no stats" from "a version that never wrote them".
+    Reporting must never block a save or the deadline handler.
+    """
+    fields: dict[str, Any] = dict.fromkeys(_FALLBACK_RECEIPT_KEYS)
+    try:
+        stats = router.backend_info.get("fallback_stats")
+        if not stats:
+            return fields
+        by_net = stats.get("python_fallback_seconds_by_net") or {}
+        fields["python_fallback_top_nets"] = [
+            {"net": n, "seconds": round(s, 3)}
+            for n, s in sorted(by_net.items(), key=lambda kv: kv[1], reverse=True)[:10]
+        ]
+        for key in _FALLBACK_RECEIPT_KEYS[1:]:
+            fields[key] = stats.get(key)
+    except Exception:  # noqa: BLE001 - reporting must not block the save
+        return dict.fromkeys(_FALLBACK_RECEIPT_KEYS)
+    return fields
+
+
 def _save_partial_results() -> bool:
     """Save partial routing results if interrupted.
 
@@ -4410,18 +4444,7 @@ def _save_partial_results() -> bool:
             info["partial_net_stubs"] = _partial_net_stubs(router)
         except Exception:  # noqa: BLE001 - reporting must not block the save
             info["partial_net_stubs"] = None
-        try:
-            # Issue #8370: top nets by pure-Python fallback wall time, so a
-            # timeout caused by fallback grinding is visible without logs.
-            _fb = (router.backend_info.get("fallback_stats") or {}).get(
-                "python_fallback_seconds_by_net"
-            ) or {}
-            info["python_fallback_top_nets"] = [
-                {"net": n, "seconds": round(s, 3)}
-                for n, s in sorted(_fb.items(), key=lambda kv: kv[1], reverse=True)[:10]
-            ]
-        except Exception:  # noqa: BLE001 - reporting must not block the save
-            info["python_fallback_top_nets"] = None
+        info.update(_fallback_receipt_fields(router))
 
         # Issue #6322: ``_insert_sexp_before_closing`` below drops every
         # segment/via already in the placement text (a checkpoint's copper,
@@ -19035,6 +19058,11 @@ def _in_process_main_impl(argv: list[str] | None = None) -> int:
             # footprints may disagree); ``snapshot_placement`` is ``source`` or
             # ``moved`` (a kept placement delta is in the snapshot's footprints).
             snapshot_info = (_interrupt_state.get("partial_save_info") or {}) if saved else {}
+            # Issue #8413: fallback diagnostics are independent of ``saved``.
+            snapshot_info = {
+                **snapshot_info,
+                **_fallback_receipt_fields(_interrupt_state.get("router")),
+            }
             record_stage(
                 "partial-save",
                 snapshot_saved=saved,
