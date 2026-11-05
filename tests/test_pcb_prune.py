@@ -1857,3 +1857,75 @@ def test_ampacity_check_uses_each_branch_layer(tmp_path):
             assert loop_cuts
         else:
             assert not loop_cuts and res.uncut_loops
+
+
+def _multi_net_board(tmp_path: Path, nets: int = 12) -> Path:
+    """Many nets, each with two redundant branches around a via (issue #8438)."""
+    head = HEADER.replace(
+        '  (net 1 "SIG")\n', "".join(f'  (net {i} "N{i}")\n' for i in range(1, nets + 1))
+    )
+    body = head
+    for i in range(1, nets + 1):
+        y = 100 + i * 4
+        for ref, x in (("A", 100), ("B", 110)):
+            body += (
+                f'  (footprint "X:P" (layer "F.Cu") (uuid "f-{ref}{i}") (at {x} {y})\n'
+                f'    (property "Reference" "{ref}{i}" (at 0 0 0) (layer "F.SilkS"))\n'
+                f'    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net {i} "N{i}"))\n'
+                "  )\n"
+            )
+        body += (
+            f'  (via (at 105 {y}) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net {i}) '
+            f'(uuid "v-{i}"))\n'
+        )
+        pts = [
+            ((100, y), (102, y)),
+            ((102, y), (105, y)),
+            ((105, y), (110, y)),
+            ((102, y), (102, y + 1.5)),
+            ((102, y + 1.5), (105.15, y + 1.5)),
+            ((105.15, y + 1.5), (105.15, y + 0.25)),
+            ((102, y), (102, y - 1.5)),
+            ((102, y - 1.5), (105, y - 1.5)),
+            ((105, y - 1.5), (105, y)),
+        ]
+        for a, b in pts:
+            body += _seg(a, b).replace("(net 1)", f"(net {i})")
+    p = tmp_path / "multi.kicad_pcb"
+    p.write_text(body + ")\n")
+    return p
+
+
+def test_prune_output_is_byte_identical_across_hash_seeds(tmp_path):
+    """``PYTHONHASHSEED`` must not change what gets pruned (issue #8438)."""
+    import os
+    import subprocess
+    import sys
+
+    src = _multi_net_board(tmp_path)
+    outs = []
+    for seed in ("0", "1", "2"):
+        out = tmp_path / f"out{seed}.kicad_pcb"
+        env = {**os.environ, "PYTHONHASHSEED": seed}
+        r = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "kicad_tools.cli",
+                "pcb",
+                "prune",
+                str(src),
+                "--no-drc",
+                "--unverified",
+                "-o",
+                str(out),
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        assert r.returncode == 0, r.stderr
+        outs.append(out.read_bytes())
+    assert len(outs[0]) > 0
+    assert outs[0] == outs[1] == outs[2]
