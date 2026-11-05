@@ -91,3 +91,106 @@ def test_staircase_only_config_does_not_run_other_passes():
     segs = _staircase()
     out = TraceOptimizer(config=cfg).optimize_segments(segs)
     assert 0 < len(out) < len(segs)
+
+
+def _stub_staircase_helpers(monkeypatch):
+    monkeypatch.setattr(route_cmd, "_detour_net_anchors", lambda r: None)
+    monkeypatch.setattr(route_cmd, "_provide_via_connection_context", lambda r, o: None)
+    monkeypatch.setattr(route_cmd, "_committed_coupled_skip_nets", lambda r: set())
+    monkeypatch.setattr(route_cmd, "_connectivity_snapshot", lambda r: None)
+    monkeypatch.setattr(route_cmd, "_enforce_connectivity_invariant_or_exit", lambda *a, **k: None)
+    monkeypatch.setattr("kicad_tools.router.optimizer.make_collision_checker", lambda *a, **k: None)
+
+
+class _VetoGate:
+    """Stands in for the HV-pairwise / Kelvin accept gate: rejects every rewrite."""
+
+    def __init__(self):
+        self.calls = 0
+        self.vetoes = 0
+
+    def __call__(self, original, optimized):
+        self.calls += 1
+        self.vetoes += 1
+        return False
+
+    def report(self):
+        pass
+
+
+def test_staircase_only_pass_runs_the_veto_gates(monkeypatch):
+    """The ``--timeout`` path must honour the HV-pairwise / Kelvin gates (#4766, #5398)."""
+    route = Route(net=1, net_name="N", segments=_staircase(), vias=[])
+    original_segments = list(route.segments)
+    router = SimpleNamespace(routes=[route], grid=_Grid())
+    gate = _VetoGate()
+    _stub_staircase_helpers(monkeypatch)
+    monkeypatch.setattr("kicad_tools.router.optimizer.trace.pairwise_route_gate", lambda r: gate)
+    monkeypatch.setattr("kicad_tools.router.optimizer.trace.kelvin_branch_gate", lambda r: None)
+
+    route_cmd._compress_staircases_only(router, SimpleNamespace(), quiet=True)
+
+    assert gate.calls == 1
+    assert router._pairwise_optimize_vetoes == 1
+    # vetoed rewrite: original copper is kept
+    assert router.routes[0].segments == original_segments
+
+
+def test_staircase_only_pass_goes_through_grid_synced_wrapper(monkeypatch):
+    route = Route(net=1, net_name="N", segments=_staircase(), vias=[])
+    router = SimpleNamespace(routes=[route], grid=_Grid())
+    seen = {}
+
+    def fake(r, optimizer, skip_nets=None):
+        seen["skip"] = skip_nets
+        seen["cfg"] = optimizer.config
+        return r.routes
+
+    _stub_staircase_helpers(monkeypatch)
+    monkeypatch.setattr("kicad_tools.router.optimizer.optimize_routes_grid_synced", fake)
+
+    route_cmd._compress_staircases_only(router, SimpleNamespace(), quiet=True)
+
+    assert seen["skip"] == set()
+    assert seen["cfg"].compress_staircase is True
+    assert seen["cfg"].merge_collinear is False
+
+
+def _drive_pipeline_to_optimizer(monkeypatch, *, fits_budget, no_optimize):
+    calls = []
+    monkeypatch.setattr(
+        route_cmd, "_stage_boundary", lambda name: 99 if name == "drc-nudge" else None
+    )
+    monkeypatch.setattr(route_cmd, "_make_stage_quality_recorder", lambda a: None)
+    monkeypatch.setattr(route_cmd, "_record_stage_quality", lambda *a, **k: None)
+    monkeypatch.setattr(route_cmd, "_engine_post_passes_enabled", lambda a, quiet: True)
+    monkeypatch.setattr(route_cmd, "_mark_nongrid_routes_for_post_pass", lambda *a, **k: None)
+    monkeypatch.setattr(route_cmd, "_resolve_route_engine", lambda a: "grid")
+    monkeypatch.setattr(route_cmd, "_optimization_fits_budget", lambda a, quiet: fits_budget)
+    monkeypatch.setattr(route_cmd, "_optimize_traces", lambda *a, **k: calls.append("full"))
+    monkeypatch.setattr(
+        route_cmd, "_compress_staircases_only", lambda *a, **k: calls.append("staircase")
+    )
+    route = Route(net=1, net_name="N", segments=_staircase(), vias=[])
+    router = SimpleNamespace(routes=[route], grid=_Grid())
+    rc = route_cmd._run_post_route_pipeline(
+        router, SimpleNamespace(no_optimize=no_optimize), quiet=True
+    )
+    assert rc == 99
+    return calls
+
+
+def test_pipeline_budget_skip_runs_staircase_pass(monkeypatch):
+    assert _drive_pipeline_to_optimizer(monkeypatch, fits_budget=False, no_optimize=False) == [
+        "staircase"
+    ]
+
+
+def test_pipeline_within_budget_runs_full_optimizer_only(monkeypatch):
+    assert _drive_pipeline_to_optimizer(monkeypatch, fits_budget=True, no_optimize=False) == [
+        "full"
+    ]
+
+
+def test_pipeline_no_optimize_runs_neither(monkeypatch):
+    assert _drive_pipeline_to_optimizer(monkeypatch, fits_budget=False, no_optimize=True) == []

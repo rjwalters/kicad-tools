@@ -1958,8 +1958,8 @@ def _compress_staircases_only(
     from kicad_tools.router.optimizer import (
         OptimizationConfig,
         TraceOptimizer,
-        apply_route_transform_grid_synced,
         make_collision_checker,
+        optimize_routes_grid_synced,
     )
 
     opt_config = OptimizationConfig(
@@ -1982,11 +1982,9 @@ def _compress_staircases_only(
 
     before = sum(len(r.segments) for r in router.routes)
     snapshot = _connectivity_snapshot(router)
-    apply_route_transform_grid_synced(
-        router,
-        optimizer.optimize_route,
-        skip_nets=_committed_coupled_skip_nets(router),
-    )
+    # Same wrapper as the full optimizer, so the HV-pairwise (#4766) and
+    # Kelvin-branch (#5398) veto gates stay live on the ``--timeout`` path.
+    optimize_routes_grid_synced(router, optimizer, skip_nets=_committed_coupled_skip_nets(router))
     _enforce_connectivity_invariant_or_exit(
         router, snapshot, phase="staircase", args=args, quiet=quiet
     )
