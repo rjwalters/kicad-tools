@@ -20,7 +20,10 @@ working referee the pass refuses and edits nothing.
 
 Only the moved run's endpoints are re-pointed: same-net segments that meet it
 at an endpoint follow it (their end is stretched to the new point); a run that
-ends on a via, a pad or a locked segment is left alone.
+ends on a pad or a locked segment is left alone.  A run that ends on a
+*same-net* via keeps that end on the via and reaches the shifted line through a
+short 45-degree jog leg (Issue #8459); only axis-aligned runs are jogged, and a
+different-net via at an endpoint still refuses the run.
 """
 
 from __future__ import annotations
@@ -125,11 +128,14 @@ def _pad_positions(pcb: Any) -> list[tuple[tuple[float, float], float]]:
 
 def _plan_shift(
     pcb: Any, mover: Any, dx: float, dy: float, pads: list
-) -> tuple[list[tuple[Any, tuple, tuple]], str | None]:
+) -> tuple[list[tuple[Any, tuple, tuple, bool]], str | None]:
     """Plan new endpoints for ``mover`` shifted by ``(dx, dy)``.
 
-    Returns ``([(old_segment, new_start, new_end), ...], reason)``; ``reason``
-    is set (and the plan empty) when the run cannot be moved safely.
+    Returns ``([(segment, new_start, new_end, replaces), ...], reason)``.  When
+    ``replaces`` is true ``segment`` is removed and re-added at the new
+    endpoints; when false the entry is a *new* segment (a via jog leg) and
+    ``segment`` is only a template for its width/layer/net.  ``reason`` is set
+    (and the plan empty) when the run cannot be moved safely.
     """
     if getattr(mover, "locked", False):
         return [], "locked track"
@@ -142,17 +148,38 @@ def _plan_shift(
     edits: dict[int, list] = {id(mover): [mover, mover.start, mover.end]}
     edits[id(mover)][1], edits[id(mover)][2] = new_ends[0], new_ends[1]
 
+    jogs: list[tuple[Any, Any]] = []  # (new segment start, new segment end)
+    shift_len = math.hypot(dx, dy)
+    run_len = math.hypot(mover.end[0] - mover.start[0], mover.end[1] - mover.start[1])
     for idx, old_pt in ((0, mover.start), (1, mover.end)):
+        via_end = False
         for via in pcb.vias:
             if (
                 _near(old_pt, via.position)
                 or math.hypot(old_pt[0] - via.position[0], old_pt[1] - via.position[1])
                 <= via.size / 2
             ):
-                return [], "endpoint on a via"
+                if via.net_number != mover.net_number:
+                    return [], "endpoint on a via"
+                via_end = True
         for pos, radius in pads:
             if math.hypot(old_pt[0] - pos[0], old_pt[1] - pos[1]) <= max(radius, _TOL):
                 return [], "endpoint on a pad"
+        if via_end:
+            if (
+                abs(mover.end[0] - mover.start[0]) > _TOL
+                and abs(mover.end[1] - mover.start[1]) > _TOL
+            ):
+                return [], "via-ended run is not axis-aligned"
+            far = mover.end if idx == 0 else mover.start
+            ux, uy = (far[0] - old_pt[0]) / run_len, (far[1] - old_pt[1]) / run_len
+            knee = (
+                old_pt[0] + dx + ux * shift_len,
+                old_pt[1] + dy + uy * shift_len,
+            )
+            edits[id(mover)][1 + idx] = knee
+            jogs.append((old_pt, knee))
+            continue  # the via stays put; same-net neighbours stay connected to it
         for other in pcb.segments:
             if other is mover or other.layer != mover.layer:
                 continue
@@ -165,19 +192,24 @@ def _plan_shift(
                     return [], "connected to a locked track"
                 rec = edits.setdefault(id(other), [other, other.start, other.end])
                 rec[1 + which] = new_ends[idx]
+    if jogs and run_len - len(jogs) * shift_len < _TOL:
+        return [], "no room for jog"
     plan = []
     for seg, ns, ne in edits.values():
         if math.hypot(ne[0] - ns[0], ne[1] - ns[1]) < _TOL:
             return [], "move would collapse a connected track"
-        plan.append((seg, ns, ne))
+        plan.append((seg, ns, ne, True))
+    for a, b in jogs:
+        plan.append((mover, a, b, False))
     return plan, None
 
 
 def _apply(pcb: Any, plan: list) -> list[tuple[Any, Any]]:
     """Replace each planned segment; return ``[(old, new), ...]`` for undo."""
     done = []
-    for old, ns, ne in plan:
-        pcb.remove_segments([old])
+    for old, ns, ne, replaces in plan:
+        if replaces:
+            pcb.remove_segments([old])
         new = pcb.add_trace(
             (round(ns[0], 4), round(ns[1], 4)),
             (round(ne[0], 4), round(ne[1], 4)),
@@ -186,22 +218,23 @@ def _apply(pcb: Any, plan: list) -> list[tuple[Any, Any]]:
             net=old.net_name,
             dedupe=False,
         )
-        done.append((old, new))
+        done.append((old if replaces else None, new))
     return done
 
 
 def _undo(pcb: Any, done: list) -> None:
     for old, new in done:
         pcb.remove_segments(list(new))
-        pcb.add_trace(
-            old.start, old.end, width=old.width, layer=old.layer, net=old.net_name, dedupe=False
-        )
+        if old is not None:
+            pcb.add_trace(
+                old.start, old.end, width=old.width, layer=old.layer, net=old.net_name, dedupe=False
+            )
 
 
 def _clear_of_others(pcb: Any, plan: list, clearance: float) -> bool:
     """Cheap pre-check: moved copper keeps ``clearance`` from other-net copper."""
-    moved = {id(s) for s, _a, _b in plan}
-    for old, ns, ne in plan:
+    moved = {id(s) for s, _a, _b, _r in plan}
+    for old, ns, ne, _r in plan:
         probe = type("P", (), {"start": ns, "end": ne})()
         for other in pcb.segments:
             if id(other) in moved or other.layer != old.layer:
