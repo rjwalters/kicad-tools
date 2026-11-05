@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-05
 
+- **PR #8452**: feat: add refereed pour-slot spread/pack pass to optimize-traces
+- **Issue #8440** (closed): Pour-aware spacing cleanup pass: spread or pack parallel traces over pour slots
 - **PR #8448**: fix(route): run staircase-only pass on --complete lattice links
 - **PR #8447**: chore(loom): resync installed Loom to v0.19.1264
 - **PR #8446**: fix(prune): join tilt-refused via/pad ends with an on-grid stub
