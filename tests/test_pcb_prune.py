@@ -1953,6 +1953,46 @@ def test_prune_output_is_byte_identical_across_hash_seeds(tmp_path):
     assert outs[0] == outs[1] == outs[2]
 
 
+def test_dedupe_output_is_byte_identical_across_hash_seeds(tmp_path):
+    """``kct pcb dedupe`` must not depend on ``PYTHONHASHSEED`` (issue #8438)."""
+    import os
+    import re
+    import subprocess
+    import sys
+
+    src = _multi_net_board(tmp_path)
+    text = src.read_text()
+    extra = ""
+    for n, m in enumerate(
+        re.finditer(
+            r"  \(segment \(start ([\d.]+) ([\d.]+)\) \(end ([\d.]+) ([\d.]+)\)(.*?)\(uuid \"[^\"]*\"\)\)\n",
+            text,
+        )
+    ):
+        x1, y1, x2, y2, rest = m.groups()
+        # Reversed endpoints + fresh uuid: an exact duplicate by dedup key.
+        extra += f'  (segment (start {x2} {y2}) (end {x1} {y1}){rest}(uuid "dup-{n}"))\n'
+    assert extra
+    dup = tmp_path / "dup.kicad_pcb"
+    dup.write_text(text.rstrip().removesuffix(")") + extra + ")\n")
+
+    outs = []
+    for seed in ("0", "1", "2"):
+        out = tmp_path / f"dedupe{seed}.kicad_pcb"
+        r = subprocess.run(
+            [sys.executable, "-m", "kicad_tools.cli", "pcb", "dedupe", str(dup), "-o", str(out)],
+            env={**os.environ, "PYTHONHASHSEED": seed},
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        assert r.returncode == 0, r.stderr
+        outs.append(out.read_bytes())
+    assert len(outs[0]) > 0
+    assert outs[0] == outs[1] == outs[2]
+    assert b"dup-" not in outs[0]
+
+
 def _offaxis_via_loop_board(tmp_path: Path, via_dy: float = 0.25) -> Path:
     """Issue #8436: trunk A -> B runs past a same-net via whose centre lies
     outside the trunk's body (disc overlap only); a detour tapped off the trunk lands on the
