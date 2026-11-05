@@ -201,6 +201,86 @@ def _drc_summary_suffix(stats, cli_drc: dict | None) -> str:
     return "(no regressions)"
 
 
+def _kicad_cli_drc_counts(board: Path, rules_from: Path | None = None) -> dict[str, int] | None:
+    """Per-category kicad-cli DRC counts incl. ``unconnected``; ``None`` if it cannot run.
+
+    Like :func:`_kicad_cli_clearance_errors` (``--refill-zones``, sidecars of
+    ``rules_from`` staged beside a copy) but counts every violation type, so
+    the pour-slot referee notices any rule that rises (Issue #8440).
+    """
+    import json
+    import shutil
+    import tempfile
+    from collections import Counter
+
+    from kicad_tools.cli.runner import run_drc
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="kct_slotdrc_") as td:
+            stage = Path(td) / "stage"
+            stage.mkdir()
+            target = stage / board.name
+            shutil.copy2(board, target)
+            src_base = rules_from if rules_from is not None else board
+            for suffix in (".kicad_pro", ".kicad_dru"):
+                src = src_base.with_suffix(suffix)
+                if src.exists():
+                    shutil.copy2(src, target.with_suffix(suffix))
+            report = Path(td) / "drc.json"
+            run_drc(
+                target, output_path=report, format="json", schematic_parity=False, refill_zones=True
+            )
+            if not report.exists():
+                return None
+            data = json.loads(report.read_text())
+    except Exception:
+        return None
+    counts: Counter[str] = Counter(str(v.get("type", "")) for v in data.get("violations", []))
+    counts["unconnected"] = len(data.get("unconnected_items", []))
+    return dict(counts)
+
+
+def _run_pour_slot_pass(written: Path, rules_from: Path | None) -> dict:
+    """Run the refereed pour-slot cleanup on the written board (Issue #8440).
+
+    Returns the :meth:`PourSlotCleanupResult.to_dict` summary.  The board is
+    rewritten only when at least one edit was accepted; zones are refilled
+    afterwards through the shared kicad-cli path.
+    """
+    import tempfile
+
+    from kicad_tools.optim.pour_slot_cleanup import cleanup_pour_slots
+    from kicad_tools.schema.pcb import PCB
+
+    pcb = PCB.load(str(written))
+    clearances: dict[str, float] = {}
+    try:
+        from kicad_tools.core.project_clearance import authored_netclass_clearances
+        from kicad_tools.validate.rules.netclass_clearance_copper import load_project
+
+        project = load_project(written)
+        if project is not None:
+            names = [n.name for n in pcb.nets.values() if n.name]
+            clearances = {
+                n: v.clearance for n, v in authored_netclass_clearances(project, names).items()
+            }
+    except Exception:  # advisory-grade input: fall back to the zone clearance
+        clearances = {}
+
+    def referee(candidate):
+        with tempfile.TemporaryDirectory(prefix="kct_slotref_") as td:
+            probe = Path(td) / written.name
+            candidate.save(probe)
+            return _kicad_cli_drc_counts(probe, rules_from=rules_from or written)
+
+    result = cleanup_pour_slots(pcb, clearances, referee=referee)
+    summary = result.to_dict()
+    if result.changed:
+        pcb.save(str(written))
+        _refill_written_board(written)
+    return summary
+
+
 def _refill_written_board(written: Path) -> tuple[bool, str | None]:
     """Refill zones in the written board; never raises (Issue #8286).
 
@@ -502,6 +582,15 @@ Examples:
         metavar="PATH.kicad_pro",
         help="Project whose rules (.kicad_pro and sibling .kicad_dru) DRC verification "
         "uses (default: the files beside the board)",
+    )
+    parser.add_argument(
+        "--pour-slots",
+        dest="pour_slots",
+        action="store_true",
+        help="After optimizing, spread or pack parallel different-net tracks that leave "
+        "a slot in a copper pour (the `kct check` pour_slot advisory).  Every edit is "
+        "refereed by kicad-cli (--refill-zones) and reverted if any DRC or unconnected "
+        "count rises; refuses without kicad-cli.  Default: off",
     )
     parser.add_argument(
         "--allow-default-rules",
@@ -868,6 +957,12 @@ Examples:
                 file=sys.stderr,
             )
 
+    pour_slots: dict | None = None
+    if args.pour_slots and not args.dry_run:
+        pour_slots = _run_pour_slot_pass(
+            Path(args.output or pcb_path), Path(args.project) if args.project else None
+        )
+
     cli_drc: dict | None = None
     if args.drc_aware and not args.dry_run:
         out_path = Path(args.output or pcb_path)
@@ -946,6 +1041,7 @@ Examples:
                 "zones_refilled": zones_refilled,
                 "zones_refill_error": refill_error,
                 "kicad_cli_drc": cli_drc,
+                "pour_slots": pour_slots,
                 "success": True,
                 # Issues #8300/#8433: creepage_gate always; the rest only with --voltage-map.
                 **_creepage_keys(args, stats),
@@ -1062,6 +1158,18 @@ Examples:
             print(f"Saved to: {args.output}")
         else:
             print(f"Updated: {pcb_path}")
+
+        if pour_slots is not None:
+            if pour_slots["refused_reason"]:
+                print(f"Pour slots: not cleaned ({pour_slots['refused_reason']})")
+            else:
+                print(
+                    f"Pour slots: {pour_slots['spread']} spread, {pour_slots['packed']} packed, "
+                    f"{pour_slots['left_alone']} left alone "
+                    f"({pour_slots['pairs_before']} -> {pour_slots['pairs_after']} slot pairs)"
+                )
+        elif args.pour_slots and args.dry_run:
+            print("Pour slots: skipped (dry run)")
 
         if zones_refilled:
             print("Zones refilled via kicad-cli")

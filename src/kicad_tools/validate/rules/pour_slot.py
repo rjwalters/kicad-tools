@@ -25,14 +25,18 @@ track by ``clearance``; hence ``2 * clearance + min_thickness``.  This is a
 geometric advisory, not a native-DRC oracle, and it is independent of the
 board's file version.
 
-The repair pass (moving/packing traces) is the scope of #8440.
+The repair pass (moving/packing traces) is
+:mod:`kicad_tools.optim.pour_slot_cleanup` (Issue #8440); it consumes
+:func:`iter_pour_slot_pairs` so detection is implemented once and the cleanup
+cannot drift from this advisory.
 """
 
 from __future__ import annotations
 
 import math
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ..violations import DRCResults, DRCViolation
@@ -58,6 +62,28 @@ def _unit(seg: Any) -> tuple[float, float, float] | None:
     return dx / length, dy / length, length
 
 
+@dataclass(frozen=True)
+class PourSlotPair:
+    """One flagged track pair (Issue #8440): the segments behind a violation."""
+
+    layer: str
+    first: Any
+    second: Any
+    gap: float  #: edge-to-edge distance (mm)
+    threshold: float  #: ``2 * clearance + min_thickness``
+    clearance: float
+    thickness: float
+    overlap: float
+    location: tuple[float, float]
+
+
+def iter_pour_slot_pairs(
+    pcb: PCB, netclass_clearances: Mapping[str, float] | None = None
+) -> Iterator[PourSlotPair]:
+    """Yield every pair :class:`PourSlotRule` would report, with its segments."""
+    return PourSlotRule(netclass_clearances).iter_pairs(pcb)
+
+
 class PourSlotRule(DRCRule):
     """Report parallel different-net track pairs that leave a slot in a pour."""
 
@@ -76,9 +102,14 @@ class PourSlotRule(DRCRule):
         results = DRCResults()
         results.rules_checked = 1
         results.rules_checked_by_rule[RULE_ID] = 1
+        for pair in self.iter_pairs(pcb):
+            results.add(self._violation(pair))
+        return results
 
-        # layer -> (zone clearance, min_thickness): the widest requirement of
-        # the pours on that layer is the conservative (largest) threshold.
+    def iter_pairs(self, pcb: PCB) -> Iterator[PourSlotPair]:
+        """Yield each flagged pair (the single detection path, Issue #8440)."""
+        # layer -> zones: the widest requirement of the pours on that layer is
+        # the conservative (largest) threshold.
         zones: dict[str, list[Any]] = defaultdict(list)
         for zone in pcb.zones:
             if getattr(zone, "keepout", None) is not None:
@@ -87,7 +118,7 @@ class PourSlotRule(DRCRule):
                 if layer:
                     zones[layer].append(zone)
         if not zones:
-            return results
+            return
 
         by_layer: dict[str, list[tuple[Any, tuple[float, float, float]]]] = defaultdict(list)
         for seg in pcb.segments:
@@ -97,8 +128,28 @@ class PourSlotRule(DRCRule):
                     by_layer[seg.layer].append((seg, u))
 
         for layer, items in by_layer.items():
-            self._check_layer(layer, items, zones[layer], results)
-        return results
+            yield from self._check_layer(layer, items, zones[layer])
+
+    @staticmethod
+    def _violation(pair: PourSlotPair) -> DRCViolation:
+        a, b = pair.first, pair.second
+        na = a.net_name or f"net {a.net_number}"
+        nb = b.net_name or f"net {b.net_number}"
+        return DRCViolation(
+            rule_id=RULE_ID,
+            severity="warning",
+            message=(
+                f"Pour slot: [{na}] and [{nb}] run parallel on {pair.layer} for "
+                f"{pair.overlap:.2f} mm with {pair.gap:.3f} mm gap; the pour between them "
+                f"(< {pair.threshold:.3f} mm = 2 x {pair.clearance:.3f} clearance + "
+                f"{pair.thickness:.3f} min_thickness) cannot fill, leaving a slot"
+            ),
+            location=pair.location,
+            layer=pair.layer,
+            actual_value=pair.gap,
+            required_value=pair.threshold,
+            nets=(na, nb),
+        )
 
     # ------------------------------------------------------------------
 
@@ -115,8 +166,7 @@ class PourSlotRule(DRCRule):
         layer: str,
         items: list[tuple[Any, tuple[float, float, float]]],
         zlist: list[Any],
-        results: DRCResults,
-    ) -> None:
+    ) -> Iterator[PourSlotPair]:
         max_clear = max([z.clearance for z in zlist] + list(self.netclass_clearances.values()))
         max_thick = max(z.min_thickness for z in zlist)
         max_w = max(s.width for s, _u in items)
@@ -139,7 +189,9 @@ class PourSlotRule(DRCRule):
                     if key in seen:
                         continue
                     seen.add(key)
-                    self._check_pair(layer, items[key[0]], items[key[1]], zlist, results)
+                    pair = self._check_pair(layer, items[key[0]], items[key[1]], zlist)
+                    if pair is not None:
+                        yield pair
 
     def _check_pair(
         self,
@@ -147,14 +199,13 @@ class PourSlotRule(DRCRule):
         first: tuple[Any, tuple[float, float, float]],
         second: tuple[Any, tuple[float, float, float]],
         zlist: list[Any],
-        results: DRCResults,
-    ) -> None:
+    ) -> PourSlotPair | None:
         a, (ux, uy, la) = first
         b, (vx, vy, _lb) = second
         if a.net_number == b.net_number:
-            return
+            return None
         if abs(ux * vy - uy * vx) > PARALLEL_SIN_TOL:
-            return
+            return None
 
         # Project b's ends onto a's frame: t along a, d perpendicular to a.
         def frame(p: tuple[float, float]) -> tuple[float, float]:
@@ -165,32 +216,24 @@ class PourSlotRule(DRCRule):
         tb1, db1 = frame(b.end)
         overlap = min(la, max(tb0, tb1)) - max(0.0, min(tb0, tb1))
         if overlap < MIN_OVERLAP_MM:
-            return
+            return None
         centre_dist = abs((db0 + db1) / 2)
         gap = centre_dist - (a.width + b.width) / 2
         clearance, thickness = self._pair_clearance(zlist, a, b)
         threshold = 2 * clearance + thickness
         if gap <= 1e-6 or gap >= threshold - 1e-6:
-            return
+            return None
 
         mid_t = (max(0.0, min(tb0, tb1)) + min(la, max(tb0, tb1))) / 2
         loc = (a.start[0] + ux * mid_t, a.start[1] + uy * mid_t)
-        na = a.net_name or f"net {a.net_number}"
-        nb = b.net_name or f"net {b.net_number}"
-        results.add(
-            DRCViolation(
-                rule_id=RULE_ID,
-                severity="warning",
-                message=(
-                    f"Pour slot: [{na}] and [{nb}] run parallel on {layer} for "
-                    f"{overlap:.2f} mm with {gap:.3f} mm gap; the pour between them "
-                    f"(< {threshold:.3f} mm = 2 x {clearance:.3f} clearance + "
-                    f"{thickness:.3f} min_thickness) cannot fill, leaving a slot"
-                ),
-                location=loc,
-                layer=layer,
-                actual_value=gap,
-                required_value=threshold,
-                nets=(na, nb),
-            )
+        return PourSlotPair(
+            layer=layer,
+            first=a,
+            second=b,
+            gap=gap,
+            threshold=threshold,
+            clearance=clearance,
+            thickness=thickness,
+            overlap=overlap,
+            location=loc,
         )
