@@ -228,3 +228,32 @@ def test_idempotent():
     res = cleanup_pour_slots(pcb, referee=_ok)
     assert not res.changed
     assert sorted((s.start, s.end) for s in pcb.segments) == snap
+
+
+def _bus(n_runs=4, gap=0.7, walls=False):
+    pcb = PCB.create(width=50, height=50, center=False)
+    pcb.zones.append(_Zone())
+    for i in range(n_runs):
+        y = 10 + i * (gap + 0.2)
+        pcb.add_trace((10, y), (20, y), width=0.2, layer="F.Cu", net=f"N{i}")
+    if walls:  # exactly clearance-wide channel on both sides
+        top = 10 + (n_runs - 1) * (gap + 0.2)
+        pcb.add_trace((8, 9.5), (22, 9.5), width=0.2, layer="F.Cu", net="WL")
+        pcb.add_trace((8, top + 0.5), (22, top + 0.5), width=0.2, layer="F.Cu", net="WH")
+    return pcb
+
+
+def test_bus_is_repitched_jointly():
+    pcb = _bus()
+    res = cleanup_pour_slots(pcb, referee=_ok)
+    assert res.buses_repitched == 1
+    assert list(iter_pour_slot_pairs(pcb)) == []
+    ys = sorted(s.start[1] for s in pcb.segments)
+    assert all(b - a - 0.2 >= 0.85 for a, b in zip(ys, ys[1:], strict=False))
+
+
+def test_boxed_in_bus_reports_channel_message():
+    pcb = _bus(walls=True)
+    res = cleanup_pour_slots(pcb, referee=_ok)
+    assert res.buses_repitched == 0
+    assert any(r.startswith("channel too narrow: needs") and "has" in r for r in res.bus_reports)

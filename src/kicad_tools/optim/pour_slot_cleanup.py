@@ -18,6 +18,14 @@ Every edit is refereed: ``referee(pcb)`` returns per-category DRC counts
 count, or fails to reduce the number of slot pairs, is reverted.  With no
 working referee the pass refuses and edits nothing.
 
+A **bus** -- 3+ overlapping parallel same-layer runs chained by slot pairs --
+is re-pitched jointly first (:func:`_repitch_bus`): moving one run of a bus
+narrows the next gap, so the per-pair edit below cannot spread it.  Every gap
+is widened to ``threshold + SPREAD_MARGIN_MM`` (centre pitch ``threshold +
+width``) with the bus anchored at one edge, the other edge, or its centre,
+whichever fits; the whole bus is one refereed edit.  When no placement fits it
+reports ``channel too narrow: needs X mm, has Y mm``.
+
 Only the moved run's endpoints are re-pointed: same-net segments that meet it
 at an endpoint follow it (their end is stretched to the new point); a run that
 ends on a pad or a locked segment is left alone.  A run that ends on a
@@ -58,10 +66,12 @@ class PourSlotCleanupResult:
     refused_reason: str | None = None
     #: Reason of the final failed attempt, one entry per left-alone pair.
     left_alone_reasons: list[str] = field(default_factory=list)
+    buses_repitched: int = 0
+    bus_reports: list[str] = field(default_factory=list)
 
     @property
     def changed(self) -> bool:
-        return bool(self.spread or self.packed)
+        return bool(self.spread or self.packed or self.buses_repitched)
 
     @property
     def left_alone_by_reason(self) -> dict[str, int]:
@@ -80,6 +90,8 @@ class PourSlotCleanupResult:
             "pairs_before": self.pairs_before,
             "pairs_after": self.pairs_after,
             "refused_reason": self.refused_reason,
+            "buses_repitched": self.buses_repitched,
+            "bus_reports": list(self.bus_reports),
         }
 
 
@@ -280,6 +292,174 @@ def _pair_key(pair: PourSlotPair) -> tuple:
     return tuple(sorted((k(pair.first), k(pair.second))))
 
 
+#: Max |sin(angle)| between two runs for them to count as parallel.
+_PARALLEL_TOL = 0.02
+
+
+def _unit(s: Any) -> tuple[float, float]:
+    dx, dy = s.end[0] - s.start[0], s.end[1] - s.start[1]
+    n = math.hypot(dx, dy) or 1.0
+    return dx / n, dy / n
+
+
+def _parallel(a: Any, b: Any) -> bool:
+    ua, ub = _unit(a), _unit(b)
+    return abs(ua[0] * ub[1] - ua[1] * ub[0]) <= _PARALLEL_TOL
+
+
+def _seg_key(s: Any) -> tuple:
+    return (
+        round(s.start[0], 3),
+        round(s.start[1], 3),
+        round(s.end[0], 3),
+        round(s.end[1], 3),
+        s.layer,
+    )
+
+
+def _find_buses(pairs: list[PourSlotPair]) -> list[tuple[list, list[PourSlotPair]]]:
+    """Group slot pairs into buses: 3+ parallel runs chained by flagged pairs.
+
+    Returns ``[(runs_sorted_by_offset, pairs), ...]``.
+    """
+    parent: dict[int, int] = {}
+    segs: dict[int, Any] = {}
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for p in pairs:
+        if not _parallel(p.first, p.second):
+            continue
+        for s in (p.first, p.second):
+            parent.setdefault(id(s), id(s))
+            segs[id(s)] = s
+        parent[find(id(p.first))] = find(id(p.second))
+    comps: dict[int, list] = {}
+    for i, s in segs.items():
+        comps.setdefault(find(i), []).append(s)
+    buses = []
+    for runs in comps.values():
+        if len(runs) < 3:
+            continue
+        ref = runs[0]
+        ux, uy = _unit(ref)
+        nx, ny = -uy, ux
+        ox, oy = (ref.start[0] + ref.end[0]) / 2, (ref.start[1] + ref.end[1]) / 2
+
+        def off(s: Any, nx=nx, ny=ny, ox=ox, oy=oy) -> float:
+            return float(
+                (s.start[0] + s.end[0]) / 2 * nx
+                + (s.start[1] + s.end[1]) / 2 * ny
+                - (ox * nx + oy * ny)
+            )
+
+        runs.sort(key=off)
+        ids = {id(s) for s in runs}
+        buses.append((runs, [p for p in pairs if id(p.first) in ids and id(p.second) in ids]))
+    return buses
+
+
+def _bus_room(pcb: Any, runs: list, ids: set, n: tuple[float, float], side: float, clr: float):
+    """Free copper-to-copper room (mm) beyond the bus edge on ``side`` (+1/-1)."""
+    edge = max(
+        runs,
+        key=lambda s: (
+            side * ((s.start[0] + s.end[0]) / 2 * n[0] + (s.start[1] + s.end[1]) / 2 * n[1])
+        ),
+    )
+    ec = (edge.start[0] + edge.end[0]) / 2 * n[0] + (edge.start[1] + edge.end[1]) / 2 * n[1]
+    room = math.inf
+    for o in pcb.segments:
+        if id(o) in ids or o.layer != edge.layer or o.net_number == edge.net_number:
+            continue
+        oc = (o.start[0] + o.end[0]) / 2 * n[0] + (o.start[1] + o.end[1]) / 2 * n[1]
+        if side * (oc - ec) <= 0:
+            continue
+        room = min(room, _dist_seg_seg(edge, o) - (edge.width + o.width) / 2 - clr)
+    for v in pcb.vias:
+        if v.net_number == edge.net_number:
+            continue
+        vc = v.position[0] * n[0] + v.position[1] * n[1]
+        if side * (vc - ec) <= 0:
+            continue
+        room = min(room, _dist_pt_seg(v.position, edge) - (edge.width + v.size) / 2 - clr)
+    return max(room, 0.0)
+
+
+def _repitch_bus(
+    pcb: Any,
+    runs: list,
+    bus_pairs: list[PourSlotPair],
+    pads: list,
+) -> tuple[list | None, str | None]:
+    """Try to re-pitch ``runs`` jointly.
+
+    Returns ``(done, None)`` for an applied edit (the caller referees and
+    undoes it) or ``(None, reason)``.
+    """
+    ux, uy = _unit(runs[0])
+    n = (-uy, ux)
+    ids = {id(s) for s in runs}
+    thr = max(p.threshold for p in bus_pairs)
+    clr = max(p.clearance for p in bus_pairs)
+    mid = [
+        ((s.start[0] + s.end[0]) / 2) * n[0] + ((s.start[1] + s.end[1]) / 2) * n[1] for s in runs
+    ]
+    gaps = [
+        mid[i + 1] - mid[i] - (runs[i].width + runs[i + 1].width) / 2 for i in range(len(runs) - 1)
+    ]
+    target = thr + SPREAD_MARGIN_MM
+    grow = [max(0.0, target - g) for g in gaps]
+    needs = sum(grow)
+    if needs < MIN_SHIFT_MM:
+        return None, "bus already at pitch"
+    cum = [0.0]
+    for g in grow:
+        cum.append(cum[-1] + g)
+    room_lo = _bus_room(pcb, runs, ids, n, -1.0, clr)
+    room_hi = _bus_room(pcb, runs, ids, n, +1.0, clr)
+    has = room_lo + room_hi
+    if has < needs - 1e-6:
+        if math.isinf(has):
+            return None, "bus could not be re-pitched"
+        return None, f"channel too narrow: needs {needs:.3f} mm, has {has:.3f} mm"
+
+    last_why = "bus could not be re-pitched"
+    for anchor in (0.0, 1.0, 0.5):  # lowest edge fixed, highest edge fixed, centred
+        deltas = [c - anchor * cum[-1] for c in cum]
+        if anchor == 0.0 and room_hi < needs - 1e-6:
+            continue
+        if anchor == 1.0 and room_lo < needs - 1e-6:
+            continue
+        if anchor == 0.5 and (room_lo < needs / 2 - 1e-6 or room_hi < needs / 2 - 1e-6):
+            continue
+        plan: list = []
+        seen: set[int] = set()
+        why = None
+        for run, d in zip(runs, deltas, strict=True):
+            if abs(d) < MIN_SHIFT_MM:
+                continue
+            sub, why = _plan_shift(pcb, run, n[0] * d, n[1] * d, pads)
+            if why:
+                break
+            if any(id(s) in seen for s, _a, _b, rep in sub if rep):
+                why = "bus runs share a connected track"
+                break
+            seen.update(id(s) for s, _a, _b, rep in sub if rep)
+            plan.extend(sub)
+        if why:
+            last_why = why
+            continue
+        if not plan or not _clear_of_others(pcb, plan, clr):
+            continue
+        return _apply(pcb, plan), None
+    return None, last_why
+
+
 def cleanup_pour_slots(
     pcb: Any,
     netclass_clearances: Mapping[str, float] | None = None,
@@ -301,11 +481,35 @@ def cleanup_pour_slots(
     baseline = dict(baseline)
     pads = _pad_positions(pcb)
     dead: set[tuple] = set()
+    dead_buses: set[frozenset] = set()
 
     while True:
         pairs = [p for p in _slots(pcb, netclass_clearances) if _pair_key(p) not in dead]
         if not pairs:
             break
+        bus_step = False
+        for runs, bus_pairs in _find_buses(pairs):
+            bkey = frozenset(_seg_key(s) for s in runs)
+            if bkey in dead_buses:
+                continue
+            bus_step = True
+            before_n = len(_slots(pcb, netclass_clearances))
+            done, why = _repitch_bus(pcb, runs, bus_pairs, pads)
+            if done is not None:
+                after_n = len(_slots(pcb, netclass_clearances))
+                score = referee(pcb) if after_n < before_n else None
+                if score is not None and _no_worse(score, baseline):
+                    baseline = dict(score)
+                    result.buses_repitched += 1
+                    break
+                _undo(pcb, done)
+                why = "bus re-pitch rejected by referee or did not reduce slots"
+            dead_buses.add(bkey)
+            result.bus_reports.append(why or "bus not re-pitched")
+            result.left_alone_reasons.append(why or "bus not re-pitched")
+            break
+        if bus_step:
+            continue
         pair = pairs[0]
         resolved = False
         last_why = "no accepted edit (clearance or referee rejected it)"
