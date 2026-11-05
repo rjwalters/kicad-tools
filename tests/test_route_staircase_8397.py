@@ -37,6 +37,7 @@ def _short_per_mm(route: Route) -> float:
 class _Grid:
     def __init__(self):
         self.resyncs = []
+        self.routes = []
 
     def get_total_overflow(self):
         return 0
@@ -242,3 +243,25 @@ def test_complete_no_optimize_runs_nothing(monkeypatch):
         monkeypatch, complete=True, engine="lattice", no_optimize=True
     )
     assert calls == [] and marked == []
+
+
+def test_mark_complete_copper_skips_already_registered_routes_real_grid():
+    """Issue #8397 review: ``Grid.mark_route`` is not idempotent -- no duplicates."""
+    from kicad_tools.router.core import Autorouter
+    from kicad_tools.router.rules import DesignRules
+
+    router = Autorouter(width=10.0, height=10.0, rules=DesignRules())
+    seg = lambda net, y: Segment(  # noqa: E731
+        x1=1.0, y1=y, x2=3.0, y2=y, width=0.2, layer=Layer.F_CU, net=net, net_name=f"N{net}"
+    )
+    preserved = Route(net=2, net_name="N2", segments=[seg(2, 5.0)], vias=[])
+    new = Route(net=1, net_name="N1", segments=[seg(1, 2.0)], vias=[])
+    router._mark_route(preserved)  # as load_pcb_for_routing does
+    router.existing_routes = [preserved]
+    router.routes = [new]
+
+    route_cmd._mark_complete_copper_for_staircase_pass(router, quiet=True)
+    route_cmd._mark_complete_copper_for_staircase_pass(router, quiet=True)
+
+    ids = [id(r) for r in router.grid.routes]
+    assert len(ids) == len(set(ids)) == 2

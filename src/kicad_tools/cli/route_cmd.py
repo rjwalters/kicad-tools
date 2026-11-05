@@ -1963,13 +1963,29 @@ def _mark_complete_copper_for_staircase_pass(router: "Autorouter", *, quiet: boo
     The lattice engine commits routes without ``_mark_route`` (#4281), so the
     staircase pass' collision checker would otherwise validate every shortcut
     as clear, even across preserved copper.
+
+    ``Grid.mark_route`` is not idempotent (each call re-appends to
+    ``grid.routes``, re-inserts into the R-trees and bumps cell counts), and
+    preserved copper is normally already registered by
+    ``load_pcb_for_routing`` -- so only copper whose ``id`` is not yet in
+    ``grid.routes`` is marked here.
     """
     fixed = list(getattr(router, "existing_routes", None) or [])
-    for route in [*router.routes, *fixed]:
-        router._mark_route(route)
+    registered = {id(r) for r in router.grid.routes}
+    new_count = fixed_count = 0
+    for route in router.routes:
+        if id(route) not in registered:
+            router._mark_route(route)
+            registered.add(id(route))
+            new_count += 1
+    for route in fixed:
+        if id(route) not in registered:
+            router._mark_route(route)
+            registered.add(id(route))
+            fixed_count += 1
     if not quiet:
         print(
-            f"  --complete: marked {len(router.routes)} new and {len(fixed)} preserved "
+            f"  --complete: marked {new_count} new and {fixed_count} preserved "
             f"route(s) into the grid for staircase compression (#8397)"
         )
 
