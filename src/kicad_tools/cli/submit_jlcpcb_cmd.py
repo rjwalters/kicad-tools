@@ -11,13 +11,13 @@ import json
 import sys
 from pathlib import Path
 
-from .format_options import add_format_flag
 from ..export.submission_plan import SubmissionError
 from ..export.submission_workflow import (
     WorkflowError,
     format_stock_failures,
     run_submission,
 )
+from .format_options import add_format_flag
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
