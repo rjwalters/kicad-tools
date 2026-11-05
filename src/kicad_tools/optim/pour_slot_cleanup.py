@@ -446,10 +446,10 @@ def _repitch_bus(
             sub, why = _plan_shift(pcb, run, n[0] * d, n[1] * d, pads)
             if why:
                 break
-            if any(id(s) in seen for s, _a, _b in sub):
+            if any(id(s) in seen for s, _a, _b, rep in sub if rep):
                 why = "bus runs share a connected track"
                 break
-            seen.update(id(s) for s, _a, _b in sub)
+            seen.update(id(s) for s, _a, _b, rep in sub if rep)
             plan.extend(sub)
         if why:
             last_why = why
