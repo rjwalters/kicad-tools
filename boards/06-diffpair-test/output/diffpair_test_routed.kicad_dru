@@ -3,9 +3,9 @@
 # BEGIN kct fab floors (Issue #4600) -- managed, do not edit
 (rule "Trace Width - jlcpcb"
   (condition "A.Type == 'track'")
-  (constraint track_width (min 0.1016mm)))
+  (constraint track_width (min 0.15mm)))
 (rule "Clearance - jlcpcb"
-  (constraint clearance (min 0.1016mm)))
+  (constraint clearance (min 0.15mm)))
 (rule "Silk to Pad - jlcpcb"
   (condition "A.Type == 'Pad' || B.Type == 'Pad'")
   (constraint silk_clearance (min 0.15mm)))
@@ -22,6 +22,8 @@
 (rule "Via Drill - jlcpcb"
   (condition "A.Type == 'via' && A.Via_Type != 'Micro'")
   (constraint hole_size (min 0.2mm)))
+(rule "Max Hole Size - jlcpcb"
+  (constraint hole_size (max 6.3mm)))
 (rule "Via Diameter - jlcpcb"
   (condition "A.Type == 'via' && A.Via_Type != 'Micro'")
   (constraint via_diameter (min 0.45mm)))
@@ -37,19 +39,11 @@
   (condition "(A.Type == 'via' || A.Type == 'pad') && B.Layer == 'Edge.Cuts'")
   (constraint physical_hole_clearance (min 0.4mm)))
 (rule "Silkscreen Width - jlcpcb"
-  (condition "A.Type == 'text' && A.Layer == 'F.Silkscreen'")
+  (condition "A.Type == 'text' && (A.Layer == 'F.Silkscreen' || A.Layer == 'B.Silkscreen')")
   (constraint text_thickness (min 0.15mm)))
 (rule "Silkscreen Height - jlcpcb"
-  (condition "A.Type == 'text' && A.Layer == 'F.Silkscreen'")
+  (condition "A.Type == 'text' && (A.Layer == 'F.Silkscreen' || A.Layer == 'B.Silkscreen')")
   (constraint text_height (min 1.0mm)))
-
-(rule "Reviewed clearance - LVDS"
-  (condition "(A.NetClass == 'LVDS' || B.NetClass == 'LVDS') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference) && !A.isCoupledDiffPair()")
-  (constraint clearance (min 0.15mm)))
-
-(rule "Reviewed clearance - LVTTL"
-  (condition "(A.NetClass == 'LVTTL' || B.NetClass == 'LVTTL') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference) && !A.isCoupledDiffPair()")
-  (constraint clearance (min 0.15mm)))
 
 (rule "Reviewed clearance - Power"
   (condition "(A.NetClass == 'Power' || B.NetClass == 'Power') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference) && !A.isCoupledDiffPair()")
@@ -91,3 +85,117 @@
   (constraint skew (max 2.414465mm) (within_diff_pairs))
   (severity warning))
 # END kct router diff-pair gaps
+
+# BEGIN kct attach-zone router-class exemptions (Issue #8048) -- managed, do not edit
+# Copper attaching to a rated part is spaced by that part's own pin pitch:
+# inside a footprint's courtyard, between its pad nets, the router's net-class
+# floor drops to the board-wide base clearance. Designer minima are untouched.
+(rule "kct attach zone - C1"
+  (condition "A.intersectsCourtyard('C1') && B.intersectsCourtyard('C1') && ((A.NetName == '+3V3' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'GND' && (A.Type == 'Via' || A.Layer == 'F.Cu'))) && ((B.NetName == '+3V3' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'GND' && (B.Type == 'Via' || B.Layer == 'F.Cu')))")
+  (constraint clearance (min 0.15mm)))
+(rule "kct attach zone - C10"
+  (condition "A.intersectsCourtyard('C10') && B.intersectsCourtyard('C10') && ((A.NetName == '+3V3' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'GND' && (A.Type == 'Via' || A.Layer == 'F.Cu'))) && ((B.NetName == '+3V3' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'GND' && (B.Type == 'Via' || B.Layer == 'F.Cu')))")
+  (constraint clearance (min 0.15mm)))
+(rule "kct attach zone - C11"
+  (condition "A.intersectsCourtyard('C11') && B.intersectsCourtyard('C11') && ((A.NetName == '+3V3' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'GND' && (A.Type == 'Via' || A.Layer == 'F.Cu'))) && ((B.NetName == '+3V3' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'GND' && (B.Type == 'Via' || B.Layer == 'F.Cu')))")
+  (constraint clearance (min 0.15mm)))
+(rule "kct attach zone - C12"
+  (condition "A.intersectsCourtyard('C12') && B.intersectsCourtyard('C12') && ((A.NetName == '+3V3' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'GND' && (A.Type == 'Via' || A.Layer == 'F.Cu'))) && ((B.NetName == '+3V3' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'GND' && (B.Type == 'Via' || B.Layer == 'F.Cu')))")
+  (constraint clearance (min 0.15mm)))
+(rule "kct attach zone - C13"
+  (condition "A.intersectsCourtyard('C13') && B.intersectsCourtyard('C13') && ((A.NetName == '+3V3' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'GND' && (A.Type == 'Via' || A.Layer == 'F.Cu'))) && ((B.NetName == '+3V3' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'GND' && (B.Type == 'Via' || B.Layer == 'F.Cu')))")
+  (constraint clearance (min 0.15mm)))
+(rule "kct attach zone - C14"
+  (condition "A.intersectsCourtyard('C14') && B.intersectsCourtyard('C14') && ((A.NetName == '+3V3' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'GND' && (A.Type == 'Via' || A.Layer == 'F.Cu'))) && ((B.NetName == '+3V3' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'GND' && (B.Type == 'Via' || B.Layer == 'F.Cu')))")
+  (constraint clearance (min 0.15mm)))
+(rule "kct attach zone - C15"
+  (condition "A.intersectsCourtyard('C15') && B.intersectsCourtyard('C15') && ((A.NetName == '+3V3' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'GND' && (A.Type == 'Via' || A.Layer == 'F.Cu'))) && ((B.NetName == '+3V3' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'GND' && (B.Type == 'Via' || B.Layer == 'F.Cu')))")
+  (constraint clearance (min 0.15mm)))
+(rule "kct attach zone - C16"
+  (condition "A.intersectsCourtyard('C16') && B.intersectsCourtyard('C16') && ((A.NetName == '+3V3' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'GND' && (A.Type == 'Via' || A.Layer == 'F.Cu'))) && ((B.NetName == '+3V3' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'GND' && (B.Type == 'Via' || B.Layer == 'F.Cu')))")
+  (constraint clearance (min 0.15mm)))
+(rule "kct attach zone - C17"
+  (condition "A.intersectsCourtyard('C17') && B.intersectsCourtyard('C17') && ((A.NetName == '+3V3' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'GND' && (A.Type == 'Via' || A.Layer == 'F.Cu'))) && ((B.NetName == '+3V3' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'GND' && (B.Type == 'Via' || B.Layer == 'F.Cu')))")
+  (constraint clearance (min 0.15mm)))
+(rule "kct attach zone - C2"
+  (condition "A.intersectsCourtyard('C2') && B.intersectsCourtyard('C2') && ((A.NetName == '+3V3' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'GND' && (A.Type == 'Via' || A.Layer == 'F.Cu'))) && ((B.NetName == '+3V3' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'GND' && (B.Type == 'Via' || B.Layer == 'F.Cu')))")
+  (constraint clearance (min 0.15mm)))
+(rule "kct attach zone - C3"
+  (condition "A.intersectsCourtyard('C3') && B.intersectsCourtyard('C3') && ((A.NetName == '+3V3' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'GND' && (A.Type == 'Via' || A.Layer == 'F.Cu'))) && ((B.NetName == '+3V3' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'GND' && (B.Type == 'Via' || B.Layer == 'F.Cu')))")
+  (constraint clearance (min 0.15mm)))
+(rule "kct attach zone - C4"
+  (condition "A.intersectsCourtyard('C4') && B.intersectsCourtyard('C4') && ((A.NetName == '+3V3' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'GND' && (A.Type == 'Via' || A.Layer == 'F.Cu'))) && ((B.NetName == '+3V3' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'GND' && (B.Type == 'Via' || B.Layer == 'F.Cu')))")
+  (constraint clearance (min 0.15mm)))
+(rule "kct attach zone - C5"
+  (condition "A.intersectsCourtyard('C5') && B.intersectsCourtyard('C5') && ((A.NetName == '+3V3' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'GND' && (A.Type == 'Via' || A.Layer == 'F.Cu'))) && ((B.NetName == '+3V3' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'GND' && (B.Type == 'Via' || B.Layer == 'F.Cu')))")
+  (constraint clearance (min 0.15mm)))
+(rule "kct attach zone - C6"
+  (condition "A.intersectsCourtyard('C6') && B.intersectsCourtyard('C6') && ((A.NetName == '+3V3' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'GND' && (A.Type == 'Via' || A.Layer == 'F.Cu'))) && ((B.NetName == '+3V3' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'GND' && (B.Type == 'Via' || B.Layer == 'F.Cu')))")
+  (constraint clearance (min 0.15mm)))
+(rule "kct attach zone - C7"
+  (condition "A.intersectsCourtyard('C7') && B.intersectsCourtyard('C7') && ((A.NetName == '+3V3' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'GND' && (A.Type == 'Via' || A.Layer == 'F.Cu'))) && ((B.NetName == '+3V3' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'GND' && (B.Type == 'Via' || B.Layer == 'F.Cu')))")
+  (constraint clearance (min 0.15mm)))
+(rule "kct attach zone - C8"
+  (condition "A.intersectsCourtyard('C8') && B.intersectsCourtyard('C8') && ((A.NetName == '+3V3' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'GND' && (A.Type == 'Via' || A.Layer == 'F.Cu'))) && ((B.NetName == '+3V3' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'GND' && (B.Type == 'Via' || B.Layer == 'F.Cu')))")
+  (constraint clearance (min 0.15mm)))
+(rule "kct attach zone - C9"
+  (condition "A.intersectsCourtyard('C9') && B.intersectsCourtyard('C9') && ((A.NetName == '+3V3' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'GND' && (A.Type == 'Via' || A.Layer == 'F.Cu'))) && ((B.NetName == '+3V3' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'GND' && (B.Type == 'Via' || B.Layer == 'F.Cu')))")
+  (constraint clearance (min 0.15mm)))
+(rule "kct attach zone - J1"
+  (condition "A.intersectsCourtyard('J1') && B.intersectsCourtyard('J1') && ((A.NetName == '+3V3') || (A.NetName == 'GND')) && ((B.NetName == '+3V3') || (B.NetName == 'GND'))")
+  (constraint clearance (min 0.15mm)))
+(rule "kct attach zone - J2"
+  (condition "A.intersectsCourtyard('J2') && B.intersectsCourtyard('J2') && ((A.NetName == 'GND') || (A.NetName == 'IN1') || (A.NetName == 'IN2') || (A.NetName == 'IN3') || (A.NetName == 'IN4')) && ((B.NetName == 'GND') || (B.NetName == 'IN1') || (B.NetName == 'IN2') || (B.NetName == 'IN3') || (B.NetName == 'IN4'))")
+  (constraint clearance (min 0.15mm)))
+(rule "kct attach zone - J3"
+  (condition "A.intersectsCourtyard('J3') && B.intersectsCourtyard('J3') && ((A.NetName == 'GND') || (A.NetName == 'OUT1') || (A.NetName == 'OUT2') || (A.NetName == 'OUT3') || (A.NetName == 'OUT4')) && ((B.NetName == 'GND') || (B.NetName == 'OUT1') || (B.NetName == 'OUT2') || (B.NetName == 'OUT3') || (B.NetName == 'OUT4'))")
+  (constraint clearance (min 0.15mm)))
+(rule "kct attach zone - R1"
+  (condition "A.intersectsCourtyard('R1') && B.intersectsCourtyard('R1') && ((A.NetName == 'LVDS1_N' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'LVDS1_P' && (A.Type == 'Via' || A.Layer == 'F.Cu'))) && ((B.NetName == 'LVDS1_N' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'LVDS1_P' && (B.Type == 'Via' || B.Layer == 'F.Cu')))")
+  (constraint clearance (min 0.15mm)))
+(rule "kct attach zone - R2"
+  (condition "A.intersectsCourtyard('R2') && B.intersectsCourtyard('R2') && ((A.NetName == 'LVDS2_N' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'LVDS2_P' && (A.Type == 'Via' || A.Layer == 'F.Cu'))) && ((B.NetName == 'LVDS2_N' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'LVDS2_P' && (B.Type == 'Via' || B.Layer == 'F.Cu')))")
+  (constraint clearance (min 0.15mm)))
+(rule "kct attach zone - R3"
+  (condition "A.intersectsCourtyard('R3') && B.intersectsCourtyard('R3') && ((A.NetName == 'LVDS3_N' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'LVDS3_P' && (A.Type == 'Via' || A.Layer == 'F.Cu'))) && ((B.NetName == 'LVDS3_N' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'LVDS3_P' && (B.Type == 'Via' || B.Layer == 'F.Cu')))")
+  (constraint clearance (min 0.15mm)))
+(rule "kct attach zone - R4"
+  (condition "A.intersectsCourtyard('R4') && B.intersectsCourtyard('R4') && ((A.NetName == 'LVDS4_N' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'LVDS4_P' && (A.Type == 'Via' || A.Layer == 'F.Cu'))) && ((B.NetName == 'LVDS4_N' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'LVDS4_P' && (B.Type == 'Via' || B.Layer == 'F.Cu')))")
+  (constraint clearance (min 0.15mm)))
+(rule "kct attach zone - R5"
+  (condition "A.intersectsCourtyard('R5') && B.intersectsCourtyard('R5') && ((A.NetName == 'GND' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'IN1' && (A.Type == 'Via' || A.Layer == 'F.Cu'))) && ((B.NetName == 'GND' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'IN1' && (B.Type == 'Via' || B.Layer == 'F.Cu')))")
+  (constraint clearance (min 0.15mm)))
+(rule "kct attach zone - R6"
+  (condition "A.intersectsCourtyard('R6') && B.intersectsCourtyard('R6') && ((A.NetName == 'GND' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'IN2' && (A.Type == 'Via' || A.Layer == 'F.Cu'))) && ((B.NetName == 'GND' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'IN2' && (B.Type == 'Via' || B.Layer == 'F.Cu')))")
+  (constraint clearance (min 0.15mm)))
+(rule "kct attach zone - R7"
+  (condition "A.intersectsCourtyard('R7') && B.intersectsCourtyard('R7') && ((A.NetName == 'GND' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'IN3' && (A.Type == 'Via' || A.Layer == 'F.Cu'))) && ((B.NetName == 'GND' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'IN3' && (B.Type == 'Via' || B.Layer == 'F.Cu')))")
+  (constraint clearance (min 0.15mm)))
+(rule "kct attach zone - R8"
+  (condition "A.intersectsCourtyard('R8') && B.intersectsCourtyard('R8') && ((A.NetName == 'GND' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'IN4' && (A.Type == 'Via' || A.Layer == 'F.Cu'))) && ((B.NetName == 'GND' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'IN4' && (B.Type == 'Via' || B.Layer == 'F.Cu')))")
+  (constraint clearance (min 0.15mm)))
+(rule "kct attach zone - U1"
+  (condition "A.intersectsCourtyard('U1') && B.intersectsCourtyard('U1') && ((A.NetName == '+3V3' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'GND' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'IN1' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'LVDS1_N' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'LVDS1_P' && (A.Type == 'Via' || A.Layer == 'F.Cu'))) && ((B.NetName == '+3V3' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'GND' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'IN1' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'LVDS1_N' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'LVDS1_P' && (B.Type == 'Via' || B.Layer == 'F.Cu')))")
+  (constraint clearance (min 0.15mm)))
+(rule "kct attach zone - U2"
+  (condition "A.intersectsCourtyard('U2') && B.intersectsCourtyard('U2') && ((A.NetName == '+3V3' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'GND' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'LVDS1_N' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'LVDS1_P' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'OUT1' && (A.Type == 'Via' || A.Layer == 'F.Cu'))) && ((B.NetName == '+3V3' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'GND' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'LVDS1_N' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'LVDS1_P' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'OUT1' && (B.Type == 'Via' || B.Layer == 'F.Cu')))")
+  (constraint clearance (min 0.15mm)))
+(rule "kct attach zone - U3"
+  (condition "A.intersectsCourtyard('U3') && B.intersectsCourtyard('U3') && ((A.NetName == '+3V3' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'GND' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'IN2' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'LVDS2_N' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'LVDS2_P' && (A.Type == 'Via' || A.Layer == 'F.Cu'))) && ((B.NetName == '+3V3' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'GND' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'IN2' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'LVDS2_N' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'LVDS2_P' && (B.Type == 'Via' || B.Layer == 'F.Cu')))")
+  (constraint clearance (min 0.15mm)))
+(rule "kct attach zone - U4"
+  (condition "A.intersectsCourtyard('U4') && B.intersectsCourtyard('U4') && ((A.NetName == '+3V3' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'GND' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'LVDS2_N' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'LVDS2_P' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'OUT2' && (A.Type == 'Via' || A.Layer == 'F.Cu'))) && ((B.NetName == '+3V3' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'GND' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'LVDS2_N' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'LVDS2_P' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'OUT2' && (B.Type == 'Via' || B.Layer == 'F.Cu')))")
+  (constraint clearance (min 0.15mm)))
+(rule "kct attach zone - U5"
+  (condition "A.intersectsCourtyard('U5') && B.intersectsCourtyard('U5') && ((A.NetName == '+3V3' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'GND' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'IN3' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'LVDS3_N' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'LVDS3_P' && (A.Type == 'Via' || A.Layer == 'F.Cu'))) && ((B.NetName == '+3V3' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'GND' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'IN3' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'LVDS3_N' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'LVDS3_P' && (B.Type == 'Via' || B.Layer == 'F.Cu')))")
+  (constraint clearance (min 0.15mm)))
+(rule "kct attach zone - U6"
+  (condition "A.intersectsCourtyard('U6') && B.intersectsCourtyard('U6') && ((A.NetName == '+3V3' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'GND' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'LVDS3_N' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'LVDS3_P' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'OUT3' && (A.Type == 'Via' || A.Layer == 'F.Cu'))) && ((B.NetName == '+3V3' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'GND' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'LVDS3_N' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'LVDS3_P' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'OUT3' && (B.Type == 'Via' || B.Layer == 'F.Cu')))")
+  (constraint clearance (min 0.15mm)))
+(rule "kct attach zone - U7"
+  (condition "A.intersectsCourtyard('U7') && B.intersectsCourtyard('U7') && ((A.NetName == '+3V3' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'GND' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'IN4' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'LVDS4_N' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'LVDS4_P' && (A.Type == 'Via' || A.Layer == 'F.Cu'))) && ((B.NetName == '+3V3' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'GND' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'IN4' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'LVDS4_N' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'LVDS4_P' && (B.Type == 'Via' || B.Layer == 'F.Cu')))")
+  (constraint clearance (min 0.15mm)))
+(rule "kct attach zone - U8"
+  (condition "A.intersectsCourtyard('U8') && B.intersectsCourtyard('U8') && ((A.NetName == '+3V3' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'GND' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'LVDS4_N' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'LVDS4_P' && (A.Type == 'Via' || A.Layer == 'F.Cu')) || (A.NetName == 'OUT4' && (A.Type == 'Via' || A.Layer == 'F.Cu'))) && ((B.NetName == '+3V3' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'GND' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'LVDS4_N' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'LVDS4_P' && (B.Type == 'Via' || B.Layer == 'F.Cu')) || (B.NetName == 'OUT4' && (B.Type == 'Via' || B.Layer == 'F.Cu')))")
+  (constraint clearance (min 0.15mm)))
+# END kct attach-zone router-class exemptions

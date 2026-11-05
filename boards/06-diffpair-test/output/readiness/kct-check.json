@@ -1,19 +1,23 @@
 {
-  "file": "boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb",
+  "file": "output/diffpair_test_routed.kicad_pcb",
   "manufacturer": "jlcpcb-tier1",
-  "pcb_sha256": "6d81d32008dc45005236da689a706ff792b72f102fab4da49d8b15f64d8a22ca",
+  "pcb_sha256": "e2d97771391e759e6704c93eb312950f247d5da6001ad8fecd9ca4170b250b4b",
   "layers": 4,
   "summary": {
     "errors": 0,
     "warnings": 0,
     "infos": 11,
     "waived": 0,
-    "rules_checked": 82,
+    "rules_checked": 84,
     "rules_checked_by_rule": {
       "connectivity": 1,
       "copper_sliver": 1,
       "track_dangling": 1,
       "via_dangling": 1,
+      "redundant_copper_duplicate": 1,
+      "redundant_copper_fragments": 1,
+      "redundant_copper_detour": 1,
+      "redundant_copper_via_offcentre": 1,
       "diffpair_clearance_intra": 4,
       "diffpair_length_skew": 4,
       "diffpair_routing_continuity": 4,
@@ -30,6 +34,7 @@
       "netclass_annular_ring": 1,
       "sch_field_offset": 1,
       "sch_field_overlap": 1,
+      "sch_wire_through_symbol": 1,
       "spec_conformance_dimensions": 1,
       "spec_conformance_layers": 1,
       "spec_conformance_min_trace": 1,
@@ -39,34 +44,35 @@
     },
     "passed": true,
     "stale_waivers": 0,
-    "coverage_checked": 35,
+    "coverage_checked": 36,
     "coverage_skipped": 6,
     "coverage_unknown": [
       "model_coverage"
     ],
-    "coverage_blocking_unknown": []
+    "coverage_blocking_unknown": [],
+    "attach_zone_exemption": "active"
   },
   "violations": [
     {
       "rule_id": "connector_edge_distance",
       "type": "unknown",
       "severity": "info",
-      "message": "J1 (Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical): 5.23mm from nearest board edge",
+      "message": "J3 (Connector_PinHeader_2.54mm:PinHeader_1x08_P2.54mm_Vertical): 5.23mm from nearest board edge",
       "location": [
-        12.0,
-        12.0
+        88.0,
+        26.0
       ],
       "layer": "F.Cu",
-      "actual_value": 5.23,
+      "actual_value": 5.230000000000003,
       "required_value": null,
       "items": [
-        "J1"
+        "J3"
       ],
       "nets": [],
       "status": "info",
       "waived": false,
-      "key": "connector_edge_distance|J1||F.Cu",
-      "evidence_hash": "ev2:f63884ed583fc95e"
+      "key": "connector_edge_distance|J3||F.Cu",
+      "evidence_hash": "ev2:9b23038be30bc180"
     },
     {
       "rule_id": "connector_edge_distance",
@@ -93,22 +99,22 @@
       "rule_id": "connector_edge_distance",
       "type": "unknown",
       "severity": "info",
-      "message": "J3 (Connector_PinHeader_2.54mm:PinHeader_1x08_P2.54mm_Vertical): 5.23mm from nearest board edge",
+      "message": "J1 (Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical): 5.23mm from nearest board edge",
       "location": [
-        88.0,
-        26.0
+        12.0,
+        12.0
       ],
       "layer": "F.Cu",
-      "actual_value": 5.230000000000003,
+      "actual_value": 5.23,
       "required_value": null,
       "items": [
-        "J3"
+        "J1"
       ],
       "nets": [],
       "status": "info",
       "waived": false,
-      "key": "connector_edge_distance|J3||F.Cu",
-      "evidence_hash": "ev2:9b23038be30bc180"
+      "key": "connector_edge_distance|J1||F.Cu",
+      "evidence_hash": "ev2:f63884ed583fc95e"
     },
     {
       "rule_id": "diffpair_length_skew",
@@ -190,25 +196,6 @@
       "rule_id": "diffpair_routing_continuity",
       "type": "diffpair_routing_continuity",
       "severity": "info",
-      "message": "Engaged differential pair LVDS4_N/LVDS4_P coupled 85.1% of its length (>= 80.0% required)",
-      "location": null,
-      "layer": null,
-      "actual_value": 0.8507,
-      "required_value": 0.8,
-      "items": [],
-      "nets": [
-        "LVDS4_N",
-        "LVDS4_P"
-      ],
-      "status": "info",
-      "waived": false,
-      "key": "diffpair_routing_continuity||LVDS4_N,LVDS4_P|",
-      "evidence_hash": "ev2:d6e0ebb5ed4b8dee"
-    },
-    {
-      "rule_id": "diffpair_routing_continuity",
-      "type": "diffpair_routing_continuity",
-      "severity": "info",
       "message": "Engaged differential pair LVDS2_N/LVDS2_P coupled 85.1% of its length (>= 80.0% required)",
       "location": null,
       "layer": null,
@@ -228,20 +215,20 @@
       "rule_id": "diffpair_routing_continuity",
       "type": "diffpair_routing_continuity",
       "severity": "info",
-      "message": "Engaged differential pair LVDS3_N/LVDS3_P coupled 85.1% of its length (>= 80.0% required)",
+      "message": "Engaged differential pair LVDS4_N/LVDS4_P coupled 85.1% of its length (>= 80.0% required)",
       "location": null,
       "layer": null,
       "actual_value": 0.8507,
       "required_value": 0.8,
       "items": [],
       "nets": [
-        "LVDS3_N",
-        "LVDS3_P"
+        "LVDS4_N",
+        "LVDS4_P"
       ],
       "status": "info",
       "waived": false,
-      "key": "diffpair_routing_continuity||LVDS3_N,LVDS3_P|",
-      "evidence_hash": "ev2:284baab19f9d4196"
+      "key": "diffpair_routing_continuity||LVDS4_N,LVDS4_P|",
+      "evidence_hash": "ev2:d6e0ebb5ed4b8dee"
     },
     {
       "rule_id": "diffpair_routing_continuity",
@@ -261,13 +248,217 @@
       "waived": false,
       "key": "diffpair_routing_continuity||LVDS1_N,LVDS1_P|",
       "evidence_hash": "ev2:77aa12d12c6d5c0e"
+    },
+    {
+      "rule_id": "diffpair_routing_continuity",
+      "type": "diffpair_routing_continuity",
+      "severity": "info",
+      "message": "Engaged differential pair LVDS3_N/LVDS3_P coupled 85.1% of its length (>= 80.0% required)",
+      "location": null,
+      "layer": null,
+      "actual_value": 0.8507,
+      "required_value": 0.8,
+      "items": [],
+      "nets": [
+        "LVDS3_N",
+        "LVDS3_P"
+      ],
+      "status": "info",
+      "waived": false,
+      "key": "diffpair_routing_continuity||LVDS3_N,LVDS3_P|",
+      "evidence_hash": "ev2:284baab19f9d4196"
     }
   ],
   "mask_copper_assessments": [],
+  "schema_version": 1,
+  "findings": [
+    {
+      "schema_version": 1,
+      "rule_id": "connector_edge_distance",
+      "severity": "info",
+      "message": "J3 (Connector_PinHeader_2.54mm:PinHeader_1x08_P2.54mm_Vertical): 5.23mm from nearest board edge",
+      "refs": [
+        "J3"
+      ],
+      "pads": [],
+      "nets": [],
+      "point": [
+        88.0,
+        26.0
+      ],
+      "bbox": null,
+      "layer": "F.Cu",
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "connector_edge_distance",
+      "severity": "info",
+      "message": "J2 (Connector_PinHeader_2.54mm:PinHeader_1x08_P2.54mm_Vertical): 5.23mm from nearest board edge",
+      "refs": [
+        "J2"
+      ],
+      "pads": [],
+      "nets": [],
+      "point": [
+        12.0,
+        26.0
+      ],
+      "bbox": null,
+      "layer": "F.Cu",
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "connector_edge_distance",
+      "severity": "info",
+      "message": "J1 (Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical): 5.23mm from nearest board edge",
+      "refs": [
+        "J1"
+      ],
+      "pads": [],
+      "nets": [],
+      "point": [
+        12.0,
+        12.0
+      ],
+      "bbox": null,
+      "layer": "F.Cu",
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "diffpair_length_skew",
+      "severity": "info",
+      "message": "Engaged differential pair LVDS1_N/LVDS1_P propagation-delay skew 0.00 ps (length skew 0.000 mm) within budget 17.27 ps = 2.414 mm at the slowest layer [derived:-30 dB at knee 0.583 GHz (LVDS 0.4 Gb/s, protocol max rate); [LV1] SN65LVDS1/2 link: 400 Mb/s; [LV1] driver differential t_r typ 0.6 ns (no minimum published; typical used)]",
+      "refs": [],
+      "pads": [],
+      "nets": [
+        "LVDS1_N",
+        "LVDS1_P"
+      ],
+      "point": null,
+      "bbox": null,
+      "layer": null,
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "diffpair_length_skew",
+      "severity": "info",
+      "message": "Engaged differential pair LVDS2_N/LVDS2_P propagation-delay skew 0.00 ps (length skew 0.000 mm) within budget 17.27 ps = 2.414 mm at the slowest layer [derived:-30 dB at knee 0.583 GHz (LVDS 0.4 Gb/s, protocol max rate); [LV1] SN65LVDS1/2 link: 400 Mb/s; [LV1] driver differential t_r typ 0.6 ns (no minimum published; typical used)]",
+      "refs": [],
+      "pads": [],
+      "nets": [
+        "LVDS2_N",
+        "LVDS2_P"
+      ],
+      "point": null,
+      "bbox": null,
+      "layer": null,
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "diffpair_length_skew",
+      "severity": "info",
+      "message": "Engaged differential pair LVDS3_N/LVDS3_P propagation-delay skew 0.00 ps (length skew 0.000 mm) within budget 17.27 ps = 2.414 mm at the slowest layer [derived:-30 dB at knee 0.583 GHz (LVDS 0.4 Gb/s, protocol max rate); [LV1] SN65LVDS1/2 link: 400 Mb/s; [LV1] driver differential t_r typ 0.6 ns (no minimum published; typical used)]",
+      "refs": [],
+      "pads": [],
+      "nets": [
+        "LVDS3_N",
+        "LVDS3_P"
+      ],
+      "point": null,
+      "bbox": null,
+      "layer": null,
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "diffpair_length_skew",
+      "severity": "info",
+      "message": "Engaged differential pair LVDS4_N/LVDS4_P propagation-delay skew 0.00 ps (length skew 0.000 mm) within budget 17.27 ps = 2.414 mm at the slowest layer [derived:-30 dB at knee 0.583 GHz (LVDS 0.4 Gb/s, protocol max rate); [LV1] SN65LVDS1/2 link: 400 Mb/s; [LV1] driver differential t_r typ 0.6 ns (no minimum published; typical used)]",
+      "refs": [],
+      "pads": [],
+      "nets": [
+        "LVDS4_N",
+        "LVDS4_P"
+      ],
+      "point": null,
+      "bbox": null,
+      "layer": null,
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "diffpair_routing_continuity",
+      "severity": "info",
+      "message": "Engaged differential pair LVDS2_N/LVDS2_P coupled 85.1% of its length (>= 80.0% required)",
+      "refs": [],
+      "pads": [],
+      "nets": [
+        "LVDS2_N",
+        "LVDS2_P"
+      ],
+      "point": null,
+      "bbox": null,
+      "layer": null,
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "diffpair_routing_continuity",
+      "severity": "info",
+      "message": "Engaged differential pair LVDS4_N/LVDS4_P coupled 85.1% of its length (>= 80.0% required)",
+      "refs": [],
+      "pads": [],
+      "nets": [
+        "LVDS4_N",
+        "LVDS4_P"
+      ],
+      "point": null,
+      "bbox": null,
+      "layer": null,
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "diffpair_routing_continuity",
+      "severity": "info",
+      "message": "Engaged differential pair LVDS1_N/LVDS1_P coupled 85.1% of its length (>= 80.0% required)",
+      "refs": [],
+      "pads": [],
+      "nets": [
+        "LVDS1_N",
+        "LVDS1_P"
+      ],
+      "point": null,
+      "bbox": null,
+      "layer": null,
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "diffpair_routing_continuity",
+      "severity": "info",
+      "message": "Engaged differential pair LVDS3_N/LVDS3_P coupled 85.1% of its length (>= 80.0% required)",
+      "refs": [],
+      "pads": [],
+      "nets": [
+        "LVDS3_N",
+        "LVDS3_P"
+      ],
+      "point": null,
+      "bbox": null,
+      "layer": null,
+      "waived": false
+    }
+  ],
   "meta_checks": {
     "drc": {
       "status": "PASSED",
-      "detail": "82 rules checked, 0 error(s), 0 warning(s)"
+      "detail": "84 rules checked, 0 error(s), 0 warning(s)"
     },
     "erc": {
       "status": "PASSED",
@@ -290,18 +481,18 @@
     "schematic_missing": false
   },
   "routing_quality": {
-    "total_segments": 214,
+    "total_segments": 182,
     "nets_with_copper": 18,
-    "segments_per_net": 11.88888888888889,
+    "segments_per_net": 10.11111111111111,
     "zero_length_count": 0,
-    "median_length_mm": 1.0,
-    "fragment_count": 53,
-    "fragment_fraction": 0.24766355140186916,
-    "orthogonal_count": 151,
-    "diagonal_45_count": 63,
+    "median_length_mm": 1.1999999999999886,
+    "fragment_count": 31,
+    "fragment_fraction": 0.17032967032967034,
+    "orthogonal_count": 134,
+    "diagonal_45_count": 48,
     "off_axis_count": 0,
     "staircase_step_count": 2,
-    "staircase_fraction": 0.009345794392523364
+    "staircase_fraction": 0.01098901098901099
   },
   "fabrication_process": {
     "process_id": "jlcpcb-tier1-pofv-4l",
@@ -473,6 +664,12 @@
       "blocking": false
     },
     "placement": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "redundant_copper": {
       "status": "checked",
       "state": "checked",
       "reason": null,

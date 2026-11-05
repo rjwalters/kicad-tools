@@ -18,6 +18,7 @@
       1,
       2
     ],
+    "allow_plane_layers": null,
     "layer_cost_multiplier": 2.0,
     "length_constraint": null,
     "escape_clearance": null,
@@ -30,9 +31,17 @@
     "impedance_tolerance_percent": 10.0,
     "coupled_continuity_threshold": null,
     "skew_tolerance_mm": null,
+    "pair_protocol": null,
+    "data_rate_gbps": null,
+    "max_uncoupled_per_terminal_mm": null,
+    "max_uncoupled_total_mm": null,
+    "max_vias_per_net": null,
+    "chain_skew_tolerance_mm": null,
+    "gather_ignore": "courtyard",
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "IN2": {
     "name": "LVTTL",
@@ -53,6 +62,7 @@
       1,
       2
     ],
+    "allow_plane_layers": null,
     "layer_cost_multiplier": 2.0,
     "length_constraint": null,
     "escape_clearance": null,
@@ -65,9 +75,17 @@
     "impedance_tolerance_percent": 10.0,
     "coupled_continuity_threshold": null,
     "skew_tolerance_mm": null,
+    "pair_protocol": null,
+    "data_rate_gbps": null,
+    "max_uncoupled_per_terminal_mm": null,
+    "max_uncoupled_total_mm": null,
+    "max_vias_per_net": null,
+    "chain_skew_tolerance_mm": null,
+    "gather_ignore": "courtyard",
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "IN3": {
     "name": "LVTTL",
@@ -88,6 +106,7 @@
       1,
       2
     ],
+    "allow_plane_layers": null,
     "layer_cost_multiplier": 2.0,
     "length_constraint": null,
     "escape_clearance": null,
@@ -100,9 +119,17 @@
     "impedance_tolerance_percent": 10.0,
     "coupled_continuity_threshold": null,
     "skew_tolerance_mm": null,
+    "pair_protocol": null,
+    "data_rate_gbps": null,
+    "max_uncoupled_per_terminal_mm": null,
+    "max_uncoupled_total_mm": null,
+    "max_vias_per_net": null,
+    "chain_skew_tolerance_mm": null,
+    "gather_ignore": "courtyard",
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "IN4": {
     "name": "LVTTL",
@@ -123,6 +150,7 @@
       1,
       2
     ],
+    "allow_plane_layers": null,
     "layer_cost_multiplier": 2.0,
     "length_constraint": null,
     "escape_clearance": null,
@@ -135,9 +163,17 @@
     "impedance_tolerance_percent": 10.0,
     "coupled_continuity_threshold": null,
     "skew_tolerance_mm": null,
+    "pair_protocol": null,
+    "data_rate_gbps": null,
+    "max_uncoupled_per_terminal_mm": null,
+    "max_uncoupled_total_mm": null,
+    "max_vias_per_net": null,
+    "chain_skew_tolerance_mm": null,
+    "gather_ignore": "courtyard",
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "OUT1": {
     "name": "LVTTL",
@@ -158,6 +194,7 @@
       1,
       2
     ],
+    "allow_plane_layers": null,
     "layer_cost_multiplier": 2.0,
     "length_constraint": null,
     "escape_clearance": null,
@@ -170,9 +207,17 @@
     "impedance_tolerance_percent": 10.0,
     "coupled_continuity_threshold": null,
     "skew_tolerance_mm": null,
+    "pair_protocol": null,
+    "data_rate_gbps": null,
+    "max_uncoupled_per_terminal_mm": null,
+    "max_uncoupled_total_mm": null,
+    "max_vias_per_net": null,
+    "chain_skew_tolerance_mm": null,
+    "gather_ignore": "courtyard",
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "OUT2": {
     "name": "LVTTL",
@@ -193,6 +238,7 @@
       1,
       2
     ],
+    "allow_plane_layers": null,
     "layer_cost_multiplier": 2.0,
     "length_constraint": null,
     "escape_clearance": null,
@@ -205,9 +251,17 @@
     "impedance_tolerance_percent": 10.0,
     "coupled_continuity_threshold": null,
     "skew_tolerance_mm": null,
+    "pair_protocol": null,
+    "data_rate_gbps": null,
+    "max_uncoupled_per_terminal_mm": null,
+    "max_uncoupled_total_mm": null,
+    "max_vias_per_net": null,
+    "chain_skew_tolerance_mm": null,
+    "gather_ignore": "courtyard",
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "OUT3": {
     "name": "LVTTL",
@@ -228,6 +282,7 @@
       1,
       2
     ],
+    "allow_plane_layers": null,
     "layer_cost_multiplier": 2.0,
     "length_constraint": null,
     "escape_clearance": null,
@@ -240,9 +295,17 @@
     "impedance_tolerance_percent": 10.0,
     "coupled_continuity_threshold": null,
     "skew_tolerance_mm": null,
+    "pair_protocol": null,
+    "data_rate_gbps": null,
+    "max_uncoupled_per_terminal_mm": null,
+    "max_uncoupled_total_mm": null,
+    "max_vias_per_net": null,
+    "chain_skew_tolerance_mm": null,
+    "gather_ignore": "courtyard",
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "OUT4": {
     "name": "LVTTL",
@@ -263,6 +326,7 @@
       1,
       2
     ],
+    "allow_plane_layers": null,
     "layer_cost_multiplier": 2.0,
     "length_constraint": null,
     "escape_clearance": null,
@@ -275,9 +339,17 @@
     "impedance_tolerance_percent": 10.0,
     "coupled_continuity_threshold": null,
     "skew_tolerance_mm": null,
+    "pair_protocol": null,
+    "data_rate_gbps": null,
+    "max_uncoupled_per_terminal_mm": null,
+    "max_uncoupled_total_mm": null,
+    "max_vias_per_net": null,
+    "chain_skew_tolerance_mm": null,
+    "gather_ignore": "courtyard",
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "LVDS1_P": {
     "name": "LVDS",
@@ -295,6 +367,7 @@
     "route_via": "pathfinder",
     "preferred_layers": null,
     "avoid_layers": null,
+    "allow_plane_layers": null,
     "layer_cost_multiplier": 2.0,
     "length_constraint": null,
     "escape_clearance": null,
@@ -308,9 +381,16 @@
     "coupled_continuity_threshold": 0.8,
     "skew_tolerance_mm": null,
     "pair_protocol": "LVDS",
+    "data_rate_gbps": null,
+    "max_uncoupled_per_terminal_mm": null,
+    "max_uncoupled_total_mm": null,
+    "max_vias_per_net": null,
+    "chain_skew_tolerance_mm": null,
+    "gather_ignore": "courtyard",
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "LVDS1_N": {
     "name": "LVDS",
@@ -328,6 +408,7 @@
     "route_via": "pathfinder",
     "preferred_layers": null,
     "avoid_layers": null,
+    "allow_plane_layers": null,
     "layer_cost_multiplier": 2.0,
     "length_constraint": null,
     "escape_clearance": null,
@@ -341,9 +422,16 @@
     "coupled_continuity_threshold": 0.8,
     "skew_tolerance_mm": null,
     "pair_protocol": "LVDS",
+    "data_rate_gbps": null,
+    "max_uncoupled_per_terminal_mm": null,
+    "max_uncoupled_total_mm": null,
+    "max_vias_per_net": null,
+    "chain_skew_tolerance_mm": null,
+    "gather_ignore": "courtyard",
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "LVDS2_P": {
     "name": "LVDS",
@@ -361,6 +449,7 @@
     "route_via": "pathfinder",
     "preferred_layers": null,
     "avoid_layers": null,
+    "allow_plane_layers": null,
     "layer_cost_multiplier": 2.0,
     "length_constraint": null,
     "escape_clearance": null,
@@ -374,9 +463,16 @@
     "coupled_continuity_threshold": 0.8,
     "skew_tolerance_mm": null,
     "pair_protocol": "LVDS",
+    "data_rate_gbps": null,
+    "max_uncoupled_per_terminal_mm": null,
+    "max_uncoupled_total_mm": null,
+    "max_vias_per_net": null,
+    "chain_skew_tolerance_mm": null,
+    "gather_ignore": "courtyard",
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "LVDS2_N": {
     "name": "LVDS",
@@ -394,6 +490,7 @@
     "route_via": "pathfinder",
     "preferred_layers": null,
     "avoid_layers": null,
+    "allow_plane_layers": null,
     "layer_cost_multiplier": 2.0,
     "length_constraint": null,
     "escape_clearance": null,
@@ -407,9 +504,16 @@
     "coupled_continuity_threshold": 0.8,
     "skew_tolerance_mm": null,
     "pair_protocol": "LVDS",
+    "data_rate_gbps": null,
+    "max_uncoupled_per_terminal_mm": null,
+    "max_uncoupled_total_mm": null,
+    "max_vias_per_net": null,
+    "chain_skew_tolerance_mm": null,
+    "gather_ignore": "courtyard",
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "LVDS3_P": {
     "name": "LVDS",
@@ -427,6 +531,7 @@
     "route_via": "pathfinder",
     "preferred_layers": null,
     "avoid_layers": null,
+    "allow_plane_layers": null,
     "layer_cost_multiplier": 2.0,
     "length_constraint": null,
     "escape_clearance": null,
@@ -440,9 +545,16 @@
     "coupled_continuity_threshold": 0.8,
     "skew_tolerance_mm": null,
     "pair_protocol": "LVDS",
+    "data_rate_gbps": null,
+    "max_uncoupled_per_terminal_mm": null,
+    "max_uncoupled_total_mm": null,
+    "max_vias_per_net": null,
+    "chain_skew_tolerance_mm": null,
+    "gather_ignore": "courtyard",
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "LVDS3_N": {
     "name": "LVDS",
@@ -460,6 +572,7 @@
     "route_via": "pathfinder",
     "preferred_layers": null,
     "avoid_layers": null,
+    "allow_plane_layers": null,
     "layer_cost_multiplier": 2.0,
     "length_constraint": null,
     "escape_clearance": null,
@@ -473,9 +586,16 @@
     "coupled_continuity_threshold": 0.8,
     "skew_tolerance_mm": null,
     "pair_protocol": "LVDS",
+    "data_rate_gbps": null,
+    "max_uncoupled_per_terminal_mm": null,
+    "max_uncoupled_total_mm": null,
+    "max_vias_per_net": null,
+    "chain_skew_tolerance_mm": null,
+    "gather_ignore": "courtyard",
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "LVDS4_P": {
     "name": "LVDS",
@@ -493,6 +613,7 @@
     "route_via": "pathfinder",
     "preferred_layers": null,
     "avoid_layers": null,
+    "allow_plane_layers": null,
     "layer_cost_multiplier": 2.0,
     "length_constraint": null,
     "escape_clearance": null,
@@ -506,9 +627,16 @@
     "coupled_continuity_threshold": 0.8,
     "skew_tolerance_mm": null,
     "pair_protocol": "LVDS",
+    "data_rate_gbps": null,
+    "max_uncoupled_per_terminal_mm": null,
+    "max_uncoupled_total_mm": null,
+    "max_vias_per_net": null,
+    "chain_skew_tolerance_mm": null,
+    "gather_ignore": "courtyard",
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   },
   "LVDS4_N": {
     "name": "LVDS",
@@ -526,6 +654,7 @@
     "route_via": "pathfinder",
     "preferred_layers": null,
     "avoid_layers": null,
+    "allow_plane_layers": null,
     "layer_cost_multiplier": 2.0,
     "length_constraint": null,
     "escape_clearance": null,
@@ -539,8 +668,15 @@
     "coupled_continuity_threshold": 0.8,
     "skew_tolerance_mm": null,
     "pair_protocol": "LVDS",
+    "data_rate_gbps": null,
+    "max_uncoupled_per_terminal_mm": null,
+    "max_uncoupled_total_mm": null,
+    "max_vias_per_net": null,
+    "chain_skew_tolerance_mm": null,
+    "gather_ignore": "courtyard",
     "length_match_group": null,
     "length_match_reference": null,
-    "length_match_tolerance_mm": null
+    "length_match_tolerance_mm": null,
+    "swap_group": null
   }
 }

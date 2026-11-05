@@ -107,6 +107,18 @@ def _pt_seg_dist(p: tuple[float, float], a: tuple[float, float], b: tuple[float,
     return math.hypot(p[0] - (ax + t * dx), p[1] - (ay + t * dy))
 
 
+def _closest_on_seg(
+    p: tuple[float, float], a: tuple[float, float], b: tuple[float, float]
+) -> tuple[float, float]:
+    """The point of segment ``a``-``b`` nearest to ``p``."""
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    L2 = dx * dx + dy * dy
+    if L2 < 1e-18:
+        return a
+    t = max(0.0, min(1.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / L2))
+    return (a[0] + t * dx, a[1] + t * dy)
+
+
 def _ccw(a: tuple[float, float], b: tuple[float, float], c: tuple[float, float]) -> float:
     return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
 
@@ -268,7 +280,8 @@ class _NetModel:
         n = len(nodes)
         self.adj: list[set[int]] = [set() for _ in range(n)]
         #: Issue #8298: anchor-in-body joins (track end / via / pad centre inside
-        #: another track's body).  Used only to *find* cycles; never to justify a
+        #: another track's body; issue #8436: a track capsule overlapping a via /
+        #: pad shape).  Used only to *find* cycles; never to justify a
         #: removal, because other tools only model endpoint joins.
         self.badj: list[set[int]] = [set() for _ in range(n)]
         #: per segment: tracks whose body holds (start, end) without a shared endpoint
@@ -373,14 +386,24 @@ class _NetModel:
             return
         if a.kind == "seg":
             # Issue #8298: a via / pad centre inside a track body is a join.
-            if b.kind in ("via", "pad") and _pt_seg_dist(b.a, a.a, a.b) <= a.radius:
-                self.badj[i].add(j)
-                self.badj[j].add(i)
-                if b.kind == "via" and _pt_seg_dist(b.a, a.a, a.b) <= CENTRE_TOL:
-                    # Issue #8368: a via centred on the track's centreline is
-                    # a modelled join (the audit graph's via contact, 1 um).
-                    self.adj[i].add(j)
-                    self.adj[j].add(i)
+            if b.kind in ("via", "pad"):
+                d_ctr = _pt_seg_dist(b.a, a.a, a.b)
+                if d_ctr <= a.radius:
+                    self.badj[i].add(j)
+                    self.badj[j].add(i)
+                    if b.kind == "via" and d_ctr <= CENTRE_TOL:
+                        # Issue #8368: a via centred on the track's centreline
+                        # is a modelled join (the audit graph's via contact,
+                        # 1 um).
+                        self.adj[i].add(j)
+                        self.adj[j].add(i)
+                elif _contains(b, _closest_on_seg(b.a, a.a, a.b), margin=a.radius):
+                    # Issue #8436: the track capsule overlaps the via disc /
+                    # pad shape with its centre outside the body.  Like the
+                    # centre case it only *finds* cycles (``badj``); it never
+                    # justifies a removal.
+                    self.badj[i].add(j)
+                    self.badj[j].add(i)
             for ea, pa in enumerate((a.a, a.b)):
                 if b.kind == "zone":
                     ok = _in_polygon(pa, b.ref.polygon)
@@ -983,7 +1006,10 @@ def _try_snap(
         nk = model.nodes[k]
         new = (c, nk.b) if x == 0 else (nk.a, c)
         if _tilts(nk, *new):
-            return  # a snap must not take a track off the 45-degree set
+            # A snap must not take a track off the 45-degree set; keep the end
+            # and join it to the centre with an on-grid stub instead (#8437).
+            _add_grid_stub(plan, nk.layers[0], p, c, nk.radius * 2.0)
+            return
     moved = {k for k, _ in movers}
     touched = set(moved)
     for k in moved:
@@ -1057,7 +1083,8 @@ def _try_reanchor(
         return
     new = (c, n.b) if e == 0 else (n.a, c)
     if _tilts(n, *new):
-        plan.stubs.append((n.layers[0], c, p, n.radius * 2.0))
+        if not _add_grid_stub(plan, n.layers[0], p, c, n.radius * 2.0):
+            plan.stubs.append((n.layers[0], c, p, n.radius * 2.0))
         return
     old = (n.a, n.b)
     _set_end(n, e, c)
@@ -1075,6 +1102,46 @@ def _aligned(a: tuple[float, float], b: tuple[float, float]) -> bool:
     from kicad_tools.router.quantize import _is_quantum_aligned
 
     return _is_quantum_aligned(round(b[0], 4) - round(a[0], 4), round(b[1], 4) - round(a[1], 4))
+
+
+def _grid_stub(
+    p: tuple[float, float], c: tuple[float, float]
+) -> list[tuple[tuple[float, float], tuple[float, float]]] | None:
+    """Pieces joining centre ``c`` to end ``p`` that all lie on the 0/45/90 set.
+
+    One segment when ``c -> p`` is already aligned, else an axis-aligned piece
+    from ``c`` plus a 45-degree piece reaching ``p``.  ``None`` when no such
+    one- or two-piece path exists (issue #8437).
+    """
+    if _aligned(c, p):
+        return [(c, p)]
+    dx, dy = p[0] - c[0], p[1] - c[1]
+    m = min(abs(dx), abs(dy))
+    if m <= CENTRE_TOL:
+        return None
+    mid = (round(p[0] - math.copysign(m, dx), 4), round(p[1] - math.copysign(m, dy), 4))
+    pieces = [(c, mid), (mid, p)]
+    if any(math.dist(a, b) <= CENTRE_TOL or not _aligned(a, b) for a, b in pieces):
+        return None
+    return pieces
+
+
+def _add_grid_stub(
+    plan: NetPlan,
+    layer: str,
+    p: tuple[float, float],
+    c: tuple[float, float],
+    width: float,
+) -> bool:
+    """Queue an on-grid stub from centre ``c`` to end ``p``; False if none exists."""
+    pieces = _grid_stub(p, c)
+    if pieces is None:
+        return False
+    for a, b in pieces:
+        entry = (layer, a, b, width)
+        if entry not in plan.stubs:  # coincident sharers reach here once each
+            plan.stubs.append(entry)
+    return True
 
 
 def _tilts(n: _Node, a: tuple[float, float], b: tuple[float, float]) -> bool:

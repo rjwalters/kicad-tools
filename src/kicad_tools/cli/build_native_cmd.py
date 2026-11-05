@@ -987,6 +987,25 @@ def create_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _collect_extra_backend_info() -> dict[str, dict]:
+    """Availability of the placement and DRC backends for ``--check`` (Issue #8439)."""
+    result: dict[str, dict] = {}
+    for key, modname in (("placement", "placement"), ("drc", "drc")):
+        try:
+            module = __import__(f"kicad_tools.{modname}.cpp_backend", fromlist=["get_backend_info"])
+            raw = module.get_backend_info()
+            entry = {
+                "available": bool(raw.get("available")),
+                "version": raw.get("version") if raw.get("available") else None,
+            }
+            if not entry["available"]:
+                entry["unavailable_reason"] = raw.get("unavailable_reason")
+        except ImportError as e:
+            entry = {"available": False, "version": None, "unavailable_reason": str(e)}
+        result[key] = entry
+    return result
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for build-native command."""
     parser = create_parser()
@@ -1010,8 +1029,11 @@ def main(argv: list[str] | None = None) -> int:
 
             info = probe_backend_info()
             available = bool(info.get("available"))
+            extra_backends = _collect_extra_backend_info()
             if args.format == "json":
-                print(json.dumps(info, indent=2))
+                # Router keys stay top-level (existing consumers); the other
+                # backends are nested under their own keys (Issue #8439).
+                print(json.dumps({**info, **extra_backends}, indent=2))
             else:
                 if available:
                     print(f"C++ backend: available (version {info.get('version')})")
@@ -1034,43 +1056,17 @@ def main(argv: list[str] | None = None) -> int:
                         print(f"  reason: {reason}")
                     print("Run `kct build-native` to install.")
 
-                # Issue #5240: report the placement backend too. This is
-                # additive/informational only -- it does not affect the
-                # command's exit code, which stays governed by the router
-                # backend to preserve the documented `--check` contract.
-                try:
-                    from kicad_tools.placement.cpp_backend import get_backend_info
-
-                    placement_info = get_backend_info()
-                    if placement_info.get("available"):
-                        print(
-                            f"Placement backend: available "
-                            f"(version {placement_info.get('version')})"
-                        )
+                # Issues #5240/#8439: report the placement and DRC backends
+                # too. Informational only -- the exit code stays governed by
+                # the router backend.
+                for label, key in (("Placement", "placement"), ("DRC", "drc")):
+                    extra = extra_backends[key]
+                    if extra.get("available"):
+                        print(f"{label} backend: available (version {extra.get('version')})")
                     else:
-                        print("Placement backend: not installed")
-                        placement_reason = placement_info.get("unavailable_reason")
-                        if placement_reason:
-                            print(f"  reason: {placement_reason}")
-                except ImportError:
-                    print("Placement backend: not installed")
-
-                # Issue #5240: report the DRC backend too. Same contract as
-                # the placement report above -- additive/informational only,
-                # does not affect the exit code.
-                try:
-                    from kicad_tools.drc.cpp_backend import get_backend_info as get_drc_info
-
-                    drc_info = get_drc_info()
-                    if drc_info.get("available"):
-                        print(f"DRC backend: available (version {drc_info.get('version')})")
-                    else:
-                        print("DRC backend: not installed")
-                        drc_reason = drc_info.get("unavailable_reason")
-                        if drc_reason:
-                            print(f"  reason: {drc_reason}")
-                except ImportError:
-                    print("DRC backend: not installed")
+                        print(f"{label} backend: not built (build with: kct build-native)")
+                        if extra.get("unavailable_reason"):
+                            print(f"  reason: {extra['unavailable_reason']}")
             return 0 if available else 1
         except ImportError:
             if args.format == "json":

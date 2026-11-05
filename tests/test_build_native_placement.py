@@ -477,5 +477,5 @@ class TestCheckReportsPlacementStatus:
         assert bnc.main(["--check"]) == 0
         out = capsys.readouterr().out
         assert "C++ backend: available (version 1.0.0)" in out
-        assert "Placement backend: not installed" in out
+        assert "Placement backend: not built (build with: kct build-native)" in out
         assert "not built" in out
