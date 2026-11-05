@@ -2052,6 +2052,9 @@ class Autorouter:
         # pathfinder (see :meth:`_negotiate_lattice_netset`) so they survive
         # ``_release_routing_engine_state`` nulling ``_lattice_pathfinder``.
         self._lattice_failure_reasons: dict[object, str] = {}
+        # Issue #8396: ``--complete`` links rolled back for adding pairwise HV
+        # creepage shortfalls (set by ``_rollback_complete_creepage`` in route_cmd).
+        self._complete_creepage_refusals: list[dict] = []
 
         # Issue #5517 (Epic #5508 Phase 1b): ordered commit journal.  A pure
         # observer on the routing grid -- see
