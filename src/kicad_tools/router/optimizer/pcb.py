@@ -636,6 +636,27 @@ def _via_layers(via: Via, copper_layers: set) -> list:
     return span or list(via.layers)
 
 
+def _anchor_extent(anchor: tuple) -> tuple[float, float, float, float]:
+    """``(x, y, half_w, half_h)`` of an anchor; centre-only anchors have 0 extent.
+
+    Anchors are ``(x, y, layers)`` or ``(x, y, layers, half_w, half_h)`` where
+    the half-extents are the pad copper's board-space AABB (Issue #8419).
+    """
+    if len(anchor) >= 5:
+        return anchor[0], anchor[1], anchor[3], anchor[4]
+    return anchor[0], anchor[1], 0.0, 0.0
+
+
+def _end_on_pad_copper(anchor: tuple, px: float, py: float, tolerance: float) -> bool:
+    """True if point ``(px, py)`` lies on the anchor's pad copper (AABB + tolerance).
+
+    A track that terminates at the pad *edge* (fine-pitch pads) is attached
+    even though the pad centre is more than half a track width away.
+    """
+    ax, ay, hw, hh = _anchor_extent(anchor)
+    return abs(px - ax) <= hw + tolerance and abs(py - ay) <= hh + tolerance
+
+
 def _component_labels(
     segments: list[Segment],
     vias: list[Via],
@@ -658,8 +679,8 @@ def _component_labels(
     n_seg = len(segments)
     parent = list(range(n_seg + len(vias)))
     copper_layers: set = {sg.layer for sg in segments}
-    for _ax, _ay, _lyrs in anchors:
-        copper_layers.update(_lyrs)
+    for _anchor in anchors:
+        copper_layers.update(_anchor[2])
     for _v in vias:
         copper_layers.update(_v.layers)
 
@@ -710,12 +731,35 @@ def _component_labels(
         n_components.append(len({find(i) for i in range(len(parent))}))
 
     labels: list[int] = []
-    for idx, (ax, ay, layers) in enumerate(anchors):
+    for idx, anchor in enumerate(anchors):
+        ax, ay, hw, hh = _anchor_extent(anchor)
+        layers = anchor[2]
         hit: int | None = None
+        # Cells covering the pad copper, so an edge-entering track found by
+        # its end (not the pad centre) is a candidate (Issue #8419).
+        cells = [
+            (cx, cy)
+            for cx in range(
+                int((ax - hw - tolerance) // cell), int((ax + hw + tolerance) // cell) + 1
+            )
+            for cy in range(
+                int((ay - hh - tolerance) // cell), int((ay + hh + tolerance) // cell) + 1
+            )
+        ]
         for lyr in layers or {sg.layer for sg in segments}:
-            for i in candidates(lyr, ax, ay):
-                if dist_to_seg(ax, ay, segments[i]) <= max(tolerance, segments[i].width / 2):
-                    hit = i
+            for cx, cy in cells:
+                for i in buckets.get((lyr, cx, cy), []):
+                    sg = segments[i]
+                    if dist_to_seg(ax, ay, sg) <= max(tolerance, sg.width / 2) or (
+                        (hw or hh)
+                        and any(
+                            _end_on_pad_copper(anchor, ex, ey, tolerance)
+                            for ex, ey in ((sg.x1, sg.y1), (sg.x2, sg.y2))
+                        )
+                    ):
+                        hit = i
+                        break
+                if hit is not None:
                     break
             if hit is not None:
                 break
@@ -776,11 +820,12 @@ def _free_end_count(
             half_w = sg.width / 2
             touched = any(
                 (
-                    (abs(ax - px) <= tolerance and abs(ay - py) <= tolerance)
-                    or math.hypot(ax - px, ay - py) <= half_w
+                    (abs(a[0] - px) <= tolerance and abs(a[1] - py) <= tolerance)
+                    or math.hypot(a[0] - px, a[1] - py) <= half_w
+                    or _end_on_pad_copper(a, px, py, tolerance)
                 )
-                and (not lyrs or sg.layer in lyrs)
-                for ax, ay, lyrs in anchors
+                and (not a[2] or sg.layer in a[2])
+                for a in anchors
             ) or any(
                 abs(v.x - px) <= tolerance
                 and abs(v.y - py) <= tolerance

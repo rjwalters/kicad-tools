@@ -177,6 +177,30 @@ def _kicad_cli_drc_summary(before: dict | None, after: dict | None, has_dru: boo
     return summary
 
 
+def _drc_summary_suffix(stats, cli_drc: dict | None) -> str:
+    """Suffix for the ``DRC errors:`` summary line (Issues #8322, #8419)."""
+    delta = stats.drc_errors_after - stats.drc_errors_before
+    cli_regressed = bool(cli_drc and cli_drc["regression"])
+    cli_unchecked = bool(cli_drc and cli_drc["dru_not_evaluated"])
+    if cli_regressed:
+        # Never claim "no regressions" on the in-process referee alone.
+        return "(in-process referee only; see kicad-cli line below)"
+    if cli_unchecked:
+        return "(DRC referee does not evaluate project .kicad_dru rules)"
+    if delta > 0 and cli_drc and cli_drc["available"]:
+        # kicad-cli arbitrated and found no regression: the in-process delta
+        # is advisory only, never "N new errors".
+        return (
+            f"(in-process advisory: {delta} more; kicad-cli reports no regression, "
+            f"{stats.nets_rolled_back} nets rolled back)"
+        )
+    if delta > 0:
+        return f"({delta} new errors, {stats.nets_rolled_back} nets rolled back)"
+    if stats.nets_rolled_back > 0:
+        return f"(no regressions, {stats.nets_rolled_back} nets rolled back)"
+    return "(no regressions)"
+
+
 def _refill_written_board(written: Path) -> tuple[bool, str | None]:
     """Refill zones in the written board; never raises (Issue #8286).
 
@@ -712,19 +736,23 @@ Examples:
     # Issue #8250: vias and pads are attachments the 45° pass must not leave
     # dangling, and the pad groups a rewrite must keep joined.
     from kicad_tools.router.optimizer.pcb import parse_vias
+    from kicad_tools.router.primitives import pad_half_extents
 
     pad_anchors: dict[str, list] = {}
     for pad in router.pads.values():
         if pad.net > 0 and pad.net_name and not pad.steiner_point:
             layers = () if pad.through_hole else (pad.layer,)
-            pad_anchors.setdefault(pad.net_name, []).append((pad.x, pad.y, layers))
+            # Issue #8419: carry the pad copper extent so a track ending at the
+            # pad edge still counts as attached in the connectivity guard.
+            half_w, half_h = pad_half_extents(pad)
+            pad_anchors.setdefault(pad.net_name, []).append((pad.x, pad.y, layers, half_w, half_h))
     attachments: dict[str, list[tuple[float, float]]] = {
-        name: [(x, y) for x, y, _ in pts] for name, pts in pad_anchors.items()
+        name: [(p[0], p[1]) for p in pts] for name, pts in pad_anchors.items()
     }
     for name, vias in parse_vias(pcb_path.read_text()).items():
         attachments.setdefault(name, []).extend((v.x, v.y) for v in vias)
     optimizer.set_pad_points(
-        {name: [(x, y) for x, y, _ in pts] for name, pts in pad_anchors.items()}
+        {name: [(p[0], p[1]) for p in pts] for name, pts in pad_anchors.items()}
     )
     optimizer.set_attachment_points(attachments)
 
@@ -947,21 +975,7 @@ Examples:
         )
 
         if args.drc_aware:
-            delta = stats.drc_errors_after - stats.drc_errors_before
-            cli_regressed = bool(cli_drc and cli_drc["regression"])
-            cli_unchecked = bool(cli_drc and cli_drc["dru_not_evaluated"])
-            if cli_regressed or cli_unchecked:
-                # Never claim "no regressions" on the in-process referee alone.
-                if cli_regressed:
-                    suffix = "(in-process referee only; see kicad-cli line below)"
-                else:
-                    suffix = "(DRC referee does not evaluate project .kicad_dru rules)"
-            elif delta > 0:
-                suffix = f"({delta} new errors, {stats.nets_rolled_back} nets rolled back)"
-            elif stats.nets_rolled_back > 0:
-                suffix = f"(no regressions, {stats.nets_rolled_back} nets rolled back)"
-            else:
-                suffix = "(no regressions)"
+            suffix = _drc_summary_suffix(stats, cli_drc)
             print(
                 f"  DRC errors:      {stats.drc_errors_before:>6} -> "
                 f"{stats.drc_errors_after:>6}  {suffix}"
