@@ -1,4 +1,4 @@
-"""Boards 01, 02 and 04 commit the ``.kicad_dru`` their recipes emit (Issue #8385).
+"""Boards 01, 02, 04 and 06 commit the ``.kicad_dru`` their recipes emit (Issue #8385).
 
 The follow-up to #8357 (board 05, ``test_board05_recipe_dru_reproduces_8357.py``):
 under the same operator ruling (commit what the recipe emits, consistent with
@@ -9,12 +9,18 @@ Each recipe's *last* DRU write is replayed on the committed routed board in a
 scratch directory, starting -- as a fresh recipe run does -- from no
 ``.kicad_dru``, and the result is byte-compared with the committed file:
 
-* boards 01 and 02: ``generate_design.py``'s ``kct export --mfr jlcpcb``, whose
+* boards 01, 02 and 06: ``generate_design.py``'s (board 06: ``assembled-demo/build.py``'s
+  follow-on export) ``kct export --mfr jlcpcb``, whose
   ``ManufacturingPackage._write_drc_constraints`` re-runs the sidecar writer
   next to the routed board (after ``kct route`` wrote it first);
 * board 04: ``manufacturing_process.py:apply_native_floors``, which overwrites
   the stock tier1 floors ``kct route`` wrote with the reviewed paid-drill
   floors (its ``kct export`` runs with ``emit_drc_constraints=False``).
+
+Board 06 (Issue #8404): its committed board is the one ``assembled-demo/build.py``
+emits (182 segments / 55 vias, native DRC 0 on the pinned toolchain); the
+committed ``.kicad_dru`` is byte-identical to the one that build leaves on disk,
+and to this replay.
 
 Each replay was checked against a full recipe run on the pinned toolchain
 (``KCT_KICAD_DOCKER=1``, kicad-cli 10.0.6): byte-identical, both from no DRU and
@@ -30,9 +36,7 @@ failure that says to drop the marker.
 Boards not covered, and why (traced in #8385): board 00's recipe routes
 in-process and its routed ``.kicad_pro`` declares no router class, so it never
 emits the block; board 03 is suppressed by its own designer clearance rule;
-board 05 has its own test; board 06's committed board comes from
-``assembled-demo/build.py``, which no longer reproduces the committed copper;
-board 07's ``real_design/build.py`` emits the block inside a kicad-cli
+board 05 has its own test; board 07's ``real_design/build.py`` emits the block inside a kicad-cli
 validation run and is blocked on the same #8399 refusal.
 """
 
@@ -67,6 +71,19 @@ def _export_writer(routed: Path) -> None:
     assert routed.with_suffix(".kicad_dru") in result.drc_constraint_paths
 
 
+def _board06_pair_rules_then_export(routed: Path) -> None:
+    """``kct route`` writes the floors, ``build.py`` adds the LVDS pair block, then export.
+
+    Board 06 routes only IN/OUT, so the LVDS pairs need ``build.py``
+    (Issue #8404); the exporter keeps that block and re-ends the file with the
+    attach-zone block.
+    """
+    _export_writer(routed)
+    rules = runpy.run_path(str(BOARDS / "06-diffpair-test" / "assembled-demo" / "build.py"))
+    rules["write_pair_rules"](routed, BOARDS / "06-diffpair-test" / "output" / "net_class_map.json")
+    _export_writer(routed)
+
+
 def _board04_native_floors(routed: Path) -> None:
     process = runpy.run_path(str(BOARDS / "04-stm32-devboard" / "manufacturing_process.py"))
     process["apply_native_floors"](routed)
@@ -76,12 +93,14 @@ CASES: dict[str, tuple[str, Callable[[Path], None]]] = {
     "01-voltage-divider": ("voltage_divider_routed", _export_writer),
     "02-charlieplex-led": ("charlieplex_3x3_routed", _export_writer),
     "04-stm32-devboard": ("stm32_devboard_routed", _board04_native_floors),
+    "06-diffpair-test": ("diffpair_test_routed", _board06_pair_rules_then_export),
 }
 
 PARAMS = [
     pytest.param("01-voltage-divider", id="board01"),
     pytest.param("02-charlieplex-led", id="board02", marks=PENDING_REPIN),
     pytest.param("04-stm32-devboard", id="board04", marks=PENDING_REPIN),
+    pytest.param("06-diffpair-test", id="board06"),
 ]
 
 

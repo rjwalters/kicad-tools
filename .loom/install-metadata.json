@@ -1,6 +1,6 @@
 {
-  "loom_version": "0.19.1263",
-  "loom_commit": "7ae2720975e88008cfdf38034b94850e1be8552e",
+  "loom_version": "0.19.1264",
+  "loom_commit": "9e3ef4f96e11227c9119f1d551489e578c9e2f22",
   "install_date": "2026-08-10",
   "installed_files": [
     ".claude/agents/loom-architect.md",
@@ -676,7 +676,7 @@
     ".loom/scripts/tests/test-merge-pr-release-hold.sh",
     ".loom/scripts/spawn-gemini.sh"
   ],
-  "last_resync": "2026-11-04",
+  "last_resync": "2026-11-05",
   "loom_source_remote": "https://github.com/rjwalters/loom.git",
   "requires_daemon": "0.19.1146"
 }

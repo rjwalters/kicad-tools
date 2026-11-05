@@ -18883,7 +18883,10 @@ class Autorouter:
                 rescued net is fully connected before committing).
             per_net_timeout: Per-net A* budget for each solo attempt.
             deadline: Optional absolute ``time.time()`` ceiling for the
-                whole sweep.  Checked before each net.
+                whole sweep.  Checked before each net and again before
+                the per-net DRC pre-check (Issue #8414): a rescue that
+                finishes after the ceiling is rolled back unchecked
+                rather than paying for an uncapped geometry scan.
 
         Note:
             Both bounds decide WHICH stranded nets get their one attempt,
@@ -18977,10 +18980,19 @@ class Autorouter:
             # routed count AND never increases the blocking-DRC-error count.
             drc_clean = True
             if connected and candidate:
-                candidate_new = [r for r in candidate if r not in pre_routes]
-                drc_clean = not self._rescued_net_adds_blocking_drc(
-                    net, candidate_new, net_routes, neg_router
-                )
+                if deadline is not None and _time.time() >= deadline:
+                    # Issue #8414: the DRC pre-check scans every committed
+                    # route and no ``per_net_timeout`` / ``wall_deadline``
+                    # clamp reaches it (it is pure Python/numpy, not A*).
+                    # Once the sweep budget is spent it is skipped and the
+                    # rescue is rolled back -- never committed unchecked --
+                    # so the sweep stays additive for the DRC-error count.
+                    drc_clean = False
+                else:
+                    candidate_new = [r for r in candidate if r not in pre_routes]
+                    drc_clean = not self._rescued_net_adds_blocking_drc(
+                        net, candidate_new, net_routes, neg_router
+                    )
 
             if connected and candidate and drc_clean:
                 net_routes[net] = candidate
