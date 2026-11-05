@@ -1879,3 +1879,37 @@ def test_ampacity_check_uses_each_branch_layer(tmp_path):
             assert loop_cuts
         else:
             assert not loop_cuts and res.uncut_loops
+
+
+def _offaxis_via_loop_board(tmp_path: Path, via_dy: float = 0.25) -> Path:
+    """Issue #8436: trunk A -> B runs past a same-net via whose centre lies
+    outside the trunk's body (disc overlap only); a detour tapped off the trunk lands on the
+    via's centre.  The loop exists only through the overlap join."""
+    segs = [
+        ((100, 100), (110, 100), "F.Cu", 0.2),
+        ((102, 100), (102, 102), "F.Cu", 0.2),
+        ((102, 102), (105, 102), "F.Cu", 0.2),
+        ((105, 102), (105, 100 + via_dy), "F.Cu", 0.2),
+    ]
+    return _board(tmp_path, [("A", 100, 100), ("B", 110, 100)], segs, vias=[(105, 100 + via_dy)])
+
+
+def test_offaxis_via_overlap_closes_a_loop_in_the_prune_model(tmp_path):
+    from kicad_tools.pcb_prune import _build_net_models
+
+    (model,) = _build_net_models(PCB.load(_offaxis_via_loop_board(tmp_path))).values()
+    assert model.has_cycle()
+
+
+def test_offaxis_via_overlap_loop_never_justifies_removal(tmp_path):
+    """The overlap join only finds the loop: every segment stays."""
+    pcb, _res = _run(_offaxis_via_loop_board(tmp_path))
+    assert len(pcb.segments) == 4
+
+
+def test_offaxis_via_clear_of_the_trunk_is_not_a_loop(tmp_path):
+    from kicad_tools.pcb_prune import _build_net_models
+
+    p = _offaxis_via_loop_board(tmp_path, via_dy=0.6)  # disc clears the body
+    (model,) = _build_net_models(PCB.load(p)).values()
+    assert not model.has_cycle()

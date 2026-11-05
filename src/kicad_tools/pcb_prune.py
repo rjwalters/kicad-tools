@@ -107,6 +107,18 @@ def _pt_seg_dist(p: tuple[float, float], a: tuple[float, float], b: tuple[float,
     return math.hypot(p[0] - (ax + t * dx), p[1] - (ay + t * dy))
 
 
+def _closest_on_seg(
+    p: tuple[float, float], a: tuple[float, float], b: tuple[float, float]
+) -> tuple[float, float]:
+    """The point of segment ``a``-``b`` nearest to ``p``."""
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    L2 = dx * dx + dy * dy
+    if L2 < 1e-18:
+        return a
+    t = max(0.0, min(1.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / L2))
+    return (a[0] + t * dx, a[1] + t * dy)
+
+
 def _ccw(a: tuple[float, float], b: tuple[float, float], c: tuple[float, float]) -> float:
     return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
 
@@ -268,7 +280,8 @@ class _NetModel:
         n = len(nodes)
         self.adj: list[set[int]] = [set() for _ in range(n)]
         #: Issue #8298: anchor-in-body joins (track end / via / pad centre inside
-        #: another track's body).  Used only to *find* cycles; never to justify a
+        #: another track's body; issue #8436: a track capsule overlapping a via /
+        #: pad shape).  Used only to *find* cycles; never to justify a
         #: removal, because other tools only model endpoint joins.
         self.badj: list[set[int]] = [set() for _ in range(n)]
         #: per segment: tracks whose body holds (start, end) without a shared endpoint
@@ -373,14 +386,24 @@ class _NetModel:
             return
         if a.kind == "seg":
             # Issue #8298: a via / pad centre inside a track body is a join.
-            if b.kind in ("via", "pad") and _pt_seg_dist(b.a, a.a, a.b) <= a.radius:
-                self.badj[i].add(j)
-                self.badj[j].add(i)
-                if b.kind == "via" and _pt_seg_dist(b.a, a.a, a.b) <= CENTRE_TOL:
-                    # Issue #8368: a via centred on the track's centreline is
-                    # a modelled join (the audit graph's via contact, 1 um).
-                    self.adj[i].add(j)
-                    self.adj[j].add(i)
+            if b.kind in ("via", "pad"):
+                d_ctr = _pt_seg_dist(b.a, a.a, a.b)
+                if d_ctr <= a.radius:
+                    self.badj[i].add(j)
+                    self.badj[j].add(i)
+                    if b.kind == "via" and d_ctr <= CENTRE_TOL:
+                        # Issue #8368: a via centred on the track's centreline
+                        # is a modelled join (the audit graph's via contact,
+                        # 1 um).
+                        self.adj[i].add(j)
+                        self.adj[j].add(i)
+                elif _contains(b, _closest_on_seg(b.a, a.a, a.b), margin=a.radius):
+                    # Issue #8436: the track capsule overlaps the via disc /
+                    # pad shape with its centre outside the body.  Like the
+                    # centre case it only *finds* cycles (``badj``); it never
+                    # justifies a removal.
+                    self.badj[i].add(j)
+                    self.badj[j].add(i)
             for ea, pa in enumerate((a.a, a.b)):
                 if b.kind == "zone":
                     ok = _in_polygon(pa, b.ref.polygon)
