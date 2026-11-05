@@ -33,7 +33,16 @@ try:
     _CPP_AVAILABLE = True
 except ImportError as e:
     _CPP_AVAILABLE = False
-    _CPP_IMPORT_ERROR = str(e)
+    # Issue #8439: a missing extension surfaces as "cannot import name ...
+    # (most likely due to a circular import)" while the parent package is
+    # still mid-import. That wording reads like a packaging bug; say what is
+    # actually true. Other failures (ABI mismatch, missing shared library)
+    # keep their real message.
+    _msg = str(e)
+    if "partially initialized module" in _msg or "cannot import name" in _msg:
+        _CPP_IMPORT_ERROR = "extension placement_cpp not built"
+    else:
+        _CPP_IMPORT_ERROR = _msg
     placement_cpp = None  # type: ignore
 
 

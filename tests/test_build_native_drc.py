@@ -443,5 +443,67 @@ class TestCheckReportsDrcStatus:
         assert bnc.main(["--check"]) == 0
         out = capsys.readouterr().out
         assert "C++ backend: available (version 1.0.0)" in out
-        assert "DRC backend: not installed" in out
+        assert "DRC backend: not built (build with: kct build-native)" in out
         assert "not built" in out
+
+
+class TestCheckJsonAndReasonNormalization:
+    """Issue #8439: JSON carries placement/drc; reasons say the extension is missing."""
+
+    def _router_ok(self, monkeypatch) -> None:
+        from kicad_tools.router import cpp_backend as router_cpp_backend
+
+        monkeypatch.setattr(
+            router_cpp_backend,
+            "probe_backend_info",
+            lambda **_: {"available": True, "version": "1.0.0"},
+        )
+
+    def test_json_has_placement_and_drc_keys(self, monkeypatch, capsys) -> None:
+        import json
+
+        from kicad_tools.drc import cpp_backend as drc_cpp_backend
+        from kicad_tools.placement import cpp_backend as placement_cpp_backend
+
+        self._router_ok(monkeypatch)
+        monkeypatch.setattr(
+            drc_cpp_backend, "get_backend_info", lambda: {"available": True, "version": "2.0"}
+        )
+        monkeypatch.setattr(
+            placement_cpp_backend,
+            "get_backend_info",
+            lambda: {"available": False, "unavailable_reason": "extension placement_cpp not built"},
+        )
+
+        assert bnc.main(["--check", "--format", "json"]) == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["available"] is True and data["version"] == "1.0.0"  # router unchanged
+        assert data["drc"] == {"available": True, "version": "2.0"}
+        assert data["placement"]["available"] is False
+        assert data["placement"]["version"] is None
+        assert data["placement"]["unavailable_reason"] == "extension placement_cpp not built"
+
+    def test_circular_import_text_is_normalized(self, monkeypatch) -> None:
+        import importlib
+        import sys
+
+        from kicad_tools.drc import cpp_backend as mod
+
+        real_import = __builtins__["__import__"] if isinstance(__builtins__, dict) else __import__
+        msg = (
+            "cannot import name 'drc_cpp' from partially initialized module "
+            "'kicad_tools.drc' (most likely due to a circular import)"
+        )
+
+        def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if fromlist and "drc_cpp" in fromlist and level == 1:
+                raise ImportError(msg)
+            return real_import(name, globals, locals, fromlist, level)
+
+        monkeypatch.setattr("builtins.__import__", fake_import)
+        try:
+            reloaded = importlib.reload(mod)
+            assert reloaded.get_cpp_unavailable_reason() == "extension drc_cpp not built"
+        finally:
+            monkeypatch.undo()
+            importlib.reload(sys.modules["kicad_tools.drc.cpp_backend"])
