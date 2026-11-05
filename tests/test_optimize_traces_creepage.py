@@ -114,6 +114,43 @@ def test_no_flag_output_has_no_creepage_keys(pcb, tmp_path, capsys):
     assert "creepage_skipped" not in data and "voltage_map" not in data
 
 
+def test_no_map_json_reports_inactive_gate(pcb, tmp_path, capsys):
+    _run(pcb, tmp_path)
+    data = json.loads(capsys.readouterr().out)
+    assert data["creepage_gate"] == "inactive"
+    assert any("creepage gate inactive" in w for w in data["warnings"])
+
+
+def test_map_json_reports_active_gate_no_warning(pcb, vmap, tmp_path, capsys):
+    _run(pcb, tmp_path, "--voltage-map", str(vmap))
+    data = json.loads(capsys.readouterr().out)
+    assert data["creepage_gate"] == "active"
+    assert "warnings" not in data
+
+
+def test_no_map_text_warns_on_stderr(pcb, tmp_path, capsys):
+    out = tmp_path / "out.kicad_pcb"
+    with patch(REFILL, return_value=KiCadCLIResult(success=True)):
+        assert main([str(pcb), "-o", str(out)]) == 0
+    cap = capsys.readouterr()
+    assert "creepage gate inactive" in cap.err
+    assert "creepage gate inactive" not in cap.out
+
+
+def test_no_map_quiet_suppresses_text_warning(pcb, tmp_path, capsys):
+    out = tmp_path / "out.kicad_pcb"
+    with patch(REFILL, return_value=KiCadCLIResult(success=True)):
+        assert main([str(pcb), "-o", str(out), "--quiet"]) == 0
+    assert "creepage gate inactive" not in capsys.readouterr().err
+
+
+def test_map_text_has_no_warning(pcb, vmap, tmp_path, capsys):
+    out = tmp_path / "out.kicad_pcb"
+    with patch(REFILL, return_value=KiCadCLIResult(success=True)):
+        assert main([str(pcb), "-o", str(out), "--voltage-map", str(vmap)]) == 0
+    assert "creepage gate inactive" not in capsys.readouterr().err
+
+
 def test_missing_voltage_map_exits_nonzero(pcb, tmp_path, capsys):
     rc = main([str(pcb), "--voltage-map", str(tmp_path / "nope.json")])
     assert rc == 1
