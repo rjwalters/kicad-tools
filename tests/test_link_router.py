@@ -184,3 +184,42 @@ class TestPadlessComponents:
         floating = padless_components(model, 1, comps)
         assert len(floating) == 1
         assert floating[0]["F.Cu"].bounds == (20.0, 20.0, 24.0, 24.0)
+
+
+class TestDegenerateSegmentCommitCheck:
+    """Issue #8417: a start == end segment is a disc of the trace width."""
+
+    @staticmethod
+    def _route(x: float, y: float):
+        from kicad_tools.router.link_router import LinkRoute
+
+        r = LinkRoute(net_number=1, net_name="A", width=0.2, via_size=0.6, via_drill=0.3)
+        r.segments.append((x, y, x, y, "F.Cu"))
+        return r
+
+    @staticmethod
+    def _foreign():
+        from shapely.geometry import LineString
+
+        # Net B: 45-degree track, buffered by its half width, 0.2 mm clearance.
+        return {"F.Cu": [(LineString([(0, 0), (4, 4)]).buffer(0.1), 0.2)]}
+
+    def test_degenerate_segment_on_foreign_track_rejected(self):
+        from kicad_tools.router.link_router import _route_violates_foreign
+
+        assert _route_violates_foreign(self._route(2.0, 2.0), self._foreign(), 0.1)
+
+    def test_degenerate_segment_inside_clearance_rejected(self):
+        from kicad_tools.router.link_router import _route_violates_foreign
+
+        assert _route_violates_foreign(self._route(2.0, 2.2), self._foreign(), 0.1)
+
+    def test_degenerate_segment_clear_of_foreign_accepted(self):
+        from kicad_tools.router.link_router import _route_violates_foreign
+
+        assert not _route_violates_foreign(self._route(2.0, 4.0), self._foreign(), 0.1)
+
+    def test_no_foreign_copper_accepted(self):
+        from kicad_tools.router.link_router import _route_violates_foreign
+
+        assert not _route_violates_foreign(self._route(2.0, 2.0), {}, 0.1)
