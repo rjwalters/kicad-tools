@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-05
 
+- **PR #8449**: test: pin kct pcb dedupe output across PYTHONHASHSEED values
+- **Issue #8438** (closed): `pcb prune` gives different results on identical input across runs
 - **PR #8451**: test(route): cover --complete staircase collapse on a real grid
 - **Issue #8397** (closed): route/--complete emit grid-step staircases (~800–1300 sub-0.1 mm segments) and zero-length segments; dedupe and prune leave them
 - **PR #8452**: feat: add refereed pour-slot spread/pack pass to optimize-traces
