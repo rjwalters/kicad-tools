@@ -419,6 +419,30 @@ def consolidate_segments(
     return [seg for _i, seg in indexed], stats
 
 
+def _is_zero_length(seg: Segment, tolerance: float) -> bool:
+    """True when both endpoints quantize to the same point."""
+    return _qkey(seg.x1, seg.y1, tolerance) == _qkey(seg.x2, seg.y2, tolerance)
+
+
+def _drop_zero_length(routes: Sequence[Route], tolerance: float) -> tuple[list[Route], int]:
+    """Remove zero-length segments from ``routes`` (issue #8397).
+
+    Zero-length copper is a point already covered by an adjoining segment,
+    pad or via.  A route whose segments are *all* zero-length and that has no
+    vias is returned unchanged, so a lone stub is never erased.
+    """
+    out: list[Route] = []
+    dropped = 0
+    for route in routes:
+        kept = [sg for sg in route.segments if not _is_zero_length(sg, tolerance)]
+        if len(kept) == len(route.segments) or (not kept and not route.vias):
+            out.append(route)
+            continue
+        dropped += len(route.segments) - len(kept)
+        out.append(dataclasses.replace(route, segments=kept, vias=list(route.vias)))
+    return out, dropped
+
+
 def consolidate_net_routes(
     routes: Sequence[Route],
     *,
@@ -440,6 +464,11 @@ def consolidate_net_routes(
         ``(routes, stats)`` -- the original object where a route was
         unchanged, a new :class:`Route` where it was consolidated.
     """
+    # Issue #8397: a zero-length segment is a point already covered by the
+    # neighbouring copper; never let one survive into the written board.  A
+    # route whose only copper is a zero-length segment is left untouched.
+    routes, n_zero_dropped = _drop_zero_length(routes, tolerance)
+
     flat: list[Segment] = []
     owner_index: list[int] = []
     protected: list[tuple[float, float]] = list(pad_positions)
@@ -451,7 +480,9 @@ def consolidate_net_routes(
             protected.append((via.x, via.y))
 
     if len(flat) < 2:
-        return list(routes), ConsolidationStats(segments_before=len(flat), segments_after=len(flat))
+        return list(routes), ConsolidationStats(
+            segments_before=len(flat) + n_zero_dropped, segments_after=len(flat)
+        )
 
     indexed, raw = _consolidate_indexed(
         flat,
@@ -462,7 +493,7 @@ def consolidate_net_routes(
     )
     if raw.runs_merged == 0:
         return list(routes), ConsolidationStats(
-            segments_before=len(flat),
+            segments_before=len(flat) + n_zero_dropped,
             segments_after=len(flat),
             runs_vetoed=raw.runs_vetoed,
         )
@@ -485,7 +516,7 @@ def consolidate_net_routes(
         out.append(dataclasses.replace(route, segments=segs, vias=list(route.vias)))
 
     return out, ConsolidationStats(
-        segments_before=len(flat),
+        segments_before=len(flat) + n_zero_dropped,
         segments_after=len(indexed),
         runs_merged=raw.runs_merged,
         runs_vetoed=raw.runs_vetoed,
