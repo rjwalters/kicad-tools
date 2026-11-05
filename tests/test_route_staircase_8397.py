@@ -37,6 +37,7 @@ def _short_per_mm(route: Route) -> float:
 class _Grid:
     def __init__(self):
         self.resyncs = []
+        self.routes = []
 
     def get_total_overflow(self):
         return 0
@@ -194,3 +195,73 @@ def test_pipeline_within_budget_runs_full_optimizer_only(monkeypatch):
 
 def test_pipeline_no_optimize_runs_neither(monkeypatch):
     assert _drive_pipeline_to_optimizer(monkeypatch, fits_budget=False, no_optimize=True) == []
+
+
+def _drive_complete_pipeline(monkeypatch, *, complete, engine, no_optimize=False):
+    calls = []
+    monkeypatch.setattr(
+        route_cmd, "_stage_boundary", lambda name: 99 if name == "drc-nudge" else None
+    )
+    monkeypatch.setattr(route_cmd, "_make_stage_quality_recorder", lambda a: None)
+    monkeypatch.setattr(route_cmd, "_record_stage_quality", lambda *a, **k: None)
+    monkeypatch.setattr(route_cmd, "_engine_post_passes_enabled", lambda a, quiet: False)
+    monkeypatch.setattr(route_cmd, "_resolve_route_engine", lambda a: engine)
+    monkeypatch.setattr(route_cmd, "_optimize_traces", lambda *a, **k: calls.append("full"))
+    monkeypatch.setattr(
+        route_cmd, "_compress_staircases_only", lambda *a, **k: calls.append("staircase")
+    )
+    marked = []
+    route = Route(net=1, net_name="N", segments=_staircase(), vias=[])
+    fixed = Route(net=2, net_name="F", segments=[], vias=[])
+    router = SimpleNamespace(
+        routes=[route], existing_routes=[fixed], grid=_Grid(), _mark_route=marked.append
+    )
+    rc = route_cmd._run_post_route_pipeline(
+        router,
+        SimpleNamespace(complete=complete, no_optimize=no_optimize),
+        quiet=True,
+    )
+    assert rc == 99
+    return calls, marked, route, fixed
+
+
+def test_complete_lattice_runs_staircase_pass_with_nonblind_grid(monkeypatch):
+    calls, marked, route, fixed = _drive_complete_pipeline(
+        monkeypatch, complete=True, engine="lattice"
+    )
+    assert calls == ["staircase"]
+    assert marked == [route, fixed]
+
+
+def test_plain_lattice_run_stays_untouched(monkeypatch):
+    calls, marked, _r, _f = _drive_complete_pipeline(monkeypatch, complete=False, engine="lattice")
+    assert calls == [] and marked == []
+
+
+def test_complete_no_optimize_runs_nothing(monkeypatch):
+    calls, marked, _r, _f = _drive_complete_pipeline(
+        monkeypatch, complete=True, engine="lattice", no_optimize=True
+    )
+    assert calls == [] and marked == []
+
+
+def test_mark_complete_copper_skips_already_registered_routes_real_grid():
+    """Issue #8397 review: ``Grid.mark_route`` is not idempotent -- no duplicates."""
+    from kicad_tools.router.core import Autorouter
+    from kicad_tools.router.rules import DesignRules
+
+    router = Autorouter(width=10.0, height=10.0, rules=DesignRules())
+    seg = lambda net, y: Segment(  # noqa: E731
+        x1=1.0, y1=y, x2=3.0, y2=y, width=0.2, layer=Layer.F_CU, net=net, net_name=f"N{net}"
+    )
+    preserved = Route(net=2, net_name="N2", segments=[seg(2, 5.0)], vias=[])
+    new = Route(net=1, net_name="N1", segments=[seg(1, 2.0)], vias=[])
+    router._mark_route(preserved)  # as load_pcb_for_routing does
+    router.existing_routes = [preserved]
+    router.routes = [new]
+
+    route_cmd._mark_complete_copper_for_staircase_pass(router, quiet=True)
+    route_cmd._mark_complete_copper_for_staircase_pass(router, quiet=True)
+
+    ids = [id(r) for r in router.grid.routes]
+    assert len(ids) == len(set(ids)) == 2

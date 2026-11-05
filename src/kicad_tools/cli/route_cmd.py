@@ -1942,6 +1942,54 @@ def _optimize_traces(router: "Autorouter", args: argparse.Namespace, *, quiet: b
     )
 
 
+def _complete_staircase_pass_applies(args: argparse.Namespace, router: "Autorouter") -> bool:
+    """Whether ``--complete`` copper gets the staircase-only pass (issue #8397).
+
+    Only the ``--complete`` completion path whose engine skipped the full
+    post-passes qualifies; ``router.routes`` there holds just the newly added
+    links (preserved copper lives in ``router.existing_routes``).
+    """
+    return bool(
+        getattr(args, "complete", False)
+        and not getattr(args, "no_optimize", False)
+        and router.routes
+        and _resolve_route_engine(args) != "grid"
+    )
+
+
+def _mark_complete_copper_for_staircase_pass(router: "Autorouter", *, quiet: bool) -> None:
+    """Put lattice-committed links and fixed copper into the grid obstacle model.
+
+    The lattice engine commits routes without ``_mark_route`` (#4281), so the
+    staircase pass' collision checker would otherwise validate every shortcut
+    as clear, even across preserved copper.
+
+    ``Grid.mark_route`` is not idempotent (each call re-appends to
+    ``grid.routes``, re-inserts into the R-trees and bumps cell counts), and
+    preserved copper is normally already registered by
+    ``load_pcb_for_routing`` -- so only copper whose ``id`` is not yet in
+    ``grid.routes`` is marked here.
+    """
+    fixed = list(getattr(router, "existing_routes", None) or [])
+    registered = {id(r) for r in router.grid.routes}
+    new_count = fixed_count = 0
+    for route in router.routes:
+        if id(route) not in registered:
+            router._mark_route(route)
+            registered.add(id(route))
+            new_count += 1
+    for route in fixed:
+        if id(route) not in registered:
+            router._mark_route(route)
+            registered.add(id(route))
+            fixed_count += 1
+    if not quiet:
+        print(
+            f"  --complete: marked {new_count} new and {fixed_count} preserved "
+            f"route(s) into the grid for staircase compression (#8397)"
+        )
+
+
 def _compress_staircases_only(
     router: "Autorouter", args: argparse.Namespace, *, quiet: bool
 ) -> None:
@@ -2652,6 +2700,13 @@ def _run_post_route_pipeline(
     elif _post_passes_enabled and not args.no_optimize and router.routes:
         # Issue #8397: the budget gate dropped the full optimizer; the cheap
         # staircase-only pass still runs so grid staircases are not written.
+        _compress_staircases_only(router, args, quiet=quiet)
+        _record_stage_quality(_stage_quality, STAGE_POST_OPTIMIZE, router)
+    elif _complete_staircase_pass_applies(args, router):
+        # Issue #8397: ``--complete`` runs on the lattice engine, which skips
+        # the geometric post-passes (#4281).  The staircase-only pass still
+        # runs on the newly added links, with the grid made non-blind first.
+        _mark_complete_copper_for_staircase_pass(router, quiet=quiet)
         _compress_staircases_only(router, args, quiet=quiet)
         _record_stage_quality(_stage_quality, STAGE_POST_OPTIMIZE, router)
 
