@@ -307,7 +307,7 @@ def _find_buses(pairs: list[PourSlotPair]) -> list[tuple[list, list[PourSlotPair
         ox, oy = (ref.start[0] + ref.end[0]) / 2, (ref.start[1] + ref.end[1]) / 2
 
         def off(s: Any, nx=nx, ny=ny, ox=ox, oy=oy) -> float:
-            return (
+            return float(
                 (s.start[0] + s.end[0]) / 2 * nx
                 + (s.start[1] + s.end[1]) / 2 * ny
                 - (ox * nx + oy * ny)
