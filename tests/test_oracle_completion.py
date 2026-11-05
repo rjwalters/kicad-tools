@@ -1169,3 +1169,68 @@ class TestDeclaredViaExemption:
         after = GeometricDRCResult(ran=True, error_count=3, error_violations=_dimension_errors())
         assert gated_error_count(before, after, exempt) == 1
         assert gated_error_count(before, after, None) == 3
+
+
+# ---------------------------------------------------------------------------
+# Issue #8417: a closer whose copper adds tracks_crossing / shorting_items
+# ---------------------------------------------------------------------------
+
+CROSS_AT = (110.975, 134.905)
+
+
+def _short_error(type_str: str, at: tuple[float, float] = CROSS_AT) -> DRCViolation:
+    return DRCViolation(
+        type=ViolationType.UNKNOWN,
+        type_str=type_str,
+        severity=Severity.ERROR,
+        message=type_str,
+        locations=[Location(*at), Location(*at)],
+        items=[
+            "Track [SENSE] on F.Cu, length 0.0000 mm",
+            "Track [LOGIC] on F.Cu, length 5.6569 mm",
+        ],
+    )
+
+
+class TestForeignShortIsWithdrawn:
+    """A degenerate closer segment landing on foreign copper must not be kept."""
+
+    def _run(self, tmp_path: Path, shorts: list[DRCViolation]):
+        b = FakeBoard(tmp_path, 1)
+
+        def oracle(path):
+            links, errors = b.state()
+            geo = _geo(links, errors)
+            geo.error_violations = list(shorts) if errors else []
+            return geo
+
+        def closer(path, links, banned):
+            if "route:GND:C1.1|C2.1" in banned:
+                return ClosureAttempt()
+            path.write_text(f"0,{len(shorts)}")
+            x, y = CROSS_AT
+            return ClosureAttempt(
+                applied=1,
+                # Zero-length segment: start == end.
+                footprints={"route:GND:C1.1|C2.1": [(x, y, x, y, 0.1)]},
+            )
+
+        res = run_oracle_completion(b.path, oracle=oracle, closer=closer, nets={"GND"})
+        return res, b
+
+    @pytest.mark.parametrize("kind", ["tracks_crossing", "shorting_items"])
+    def test_added_short_is_withdrawn_and_reported(self, tmp_path, kind):
+        res, b = self._run(tmp_path, [_short_error(kind)])
+        assert "route:GND:C1.1|C2.1" in res.rounds[0].banned
+        assert b.state() == (1, 0)  # restored byte-for-byte
+        assert any(
+            "route:GND:C1.1|C2.1: withdrawn -- its copper raised KiCad DRC" in n
+            for n in res.closer_notes
+        )
+
+    def test_same_copper_away_from_the_error_is_not_blamed(self, tmp_path):
+        """Control: the same error far from the closer's copper blames nobody."""
+        res, b = self._run(tmp_path, [_short_error("tracks_crossing", (10.0, 10.0))])
+        assert res.rounds[0].banned == ()
+        assert res.stop_reason == STOP_DRC_REGRESSED
+        assert b.state() == (1, 0)
