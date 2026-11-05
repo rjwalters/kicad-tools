@@ -134,6 +134,9 @@ class TestBoard04PartialRouteFastFail:
             lvs_called.append(True)
             return (True, True)
 
+        # Issue #8399: route_pcb is stubbed, so no routed PCB exists for the
+        # copper cleanup (cleanup_copper) the recipe now runs after routing.
+        monkeypatch.setattr("kicad_tools.pcb_prune.cleanup_copper", lambda *a, **k: {})
         monkeypatch.setattr(module, "write_lvs_report", _fake_lvs)
         monkeypatch.setattr(module.sys, "argv", ["generate_design.py", str(tmp_path / "out")])
 
