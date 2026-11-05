@@ -36,6 +36,15 @@ endpoint neighbours **and** those body-touching neighbours, so the overlap
 join is never what keeps anything connected.  Such segments are still never
 snapped.
 
+An end that has *no* anchor but whose capsule overlaps a same-net via / pad
+(issue #8259: a spur whose end rests 0.35 mm off a 0.45 mm via) is *overlap-held*:
+a soft protection like the body-contact one above.  The overlap is still never a
+join -- it is not fed into ``adj`` / ``anch`` / ``still_joined`` or the terminal
+partition, so it can never be what keeps anything connected.  Such a segment may
+be removed when the modelled joins hold without it, and a surviving overlap-held
+end is moved onto the via / pad centre (or, if that would tilt an on-angle track,
+a short same-layer stub is added from the centre to the end).
+
 Collinear grid-step runs (issue #8236) are merged into one segment: a maximal
 run of same-net / same-layer / same-width segments joined end to end in a
 straight line, where every joint is a pure two-segment endpoint join (no via,
@@ -289,6 +298,12 @@ class _NetModel:
         #: per segment: same-net segments whose body touches it without a
         #: shared endpoint (an unmodelled possible join)
         self.overlap: list[set[int]] = [set() for _ in range(n)]
+        #: Issue #8259: per segment end, same-net vias / pads that an *anchorless*
+        #: end rests on by capsule overlap only.  Never a join (not in ``adj`` /
+        #: ``anch``); it only softens the free-end protection.
+        self.held: list[list[set[int]]] = [[set(), set()] for _ in range(n)]
+        for i in seg_ids:
+            self._find_held(i)
         #: hard protection: never removed (free end, locked, zone/pad/via crossing)
         self.hard_protected = [self._is_protected(i) for i in range(n)]
         #: any protection, overlap-only included: never snapped
@@ -408,6 +423,22 @@ class _NetModel:
 
     # -- protection ---------------------------------------------------------
 
+    def _find_held(self, i: int) -> None:
+        s = self.nodes[i]
+        for e, p in enumerate((s.a, s.b)):
+            if self.anch[i][e] or self.banch[i][e]:
+                continue
+            for j, o in enumerate(self.nodes):
+                if (
+                    o.kind in ("via", "pad")
+                    and _shared_layers(s, o)
+                    and _contains(o, p, margin=s.radius)
+                ):
+                    self.held[i][e].add(j)
+
+    def held_nodes(self, i: int) -> set[int]:
+        return self.held[i][0] | self.held[i][1]
+
     def _is_protected(self, i: int) -> bool:
         """May segment ``i`` hide a join the model does not see?
 
@@ -421,13 +452,17 @@ class _NetModel:
             return True
         if getattr(s.ref, "locked", False):
             return True
-        if not (self.hard_anchors(i, 0) and self.hard_anchors(i, 1)):
-            # A free end (could be an unseen join), or an end held only by a
-            # zone outline (the fill may have a void there).
-            return True
+        for e in (0, 1):
+            if not self.hard_anchors(i, e) and not (self.held[i][e] and not self.anch[i][e]):
+                # A free end (could be an unseen join), or an end held only by
+                # a zone outline (the fill may have a void there).  An end that
+                # rests on a same-net via / pad by overlap alone is soft
+                # (issue #8259): it is never a join, see ``held``.
+                return True
+        held = self.held_nodes(i)
         hw = s.radius
         for j, o in enumerate(self.nodes):
-            if j == i or j in self.adj[i]:
+            if j == i or j in self.adj[i] or j in held:
                 continue
             if o.kind == "seg":
                 if (i, j) in self._grid_pairs or (j, i) in self._grid_pairs:
@@ -785,6 +820,11 @@ class NetPlan:
     #: (segment index, "start"|"end", new xy)
     snaps: list[tuple[int, str, tuple[float, float]]] = field(default_factory=list)
     reasons: dict[int, str] = field(default_factory=dict)
+    #: stubs added from a via / pad centre to an overlap-held end (issue #8259):
+    #: (layer, centre xy, end xy, width)
+    stubs: list[tuple[str, tuple[float, float], tuple[float, float], float]] = field(
+        default_factory=list
+    )
     #: collinear merges: (kept segment index, "start"|"end", new xy); the other
     #: run members are listed in ``remove``
     extends: list[tuple[int, str, tuple[float, float]]] = field(default_factory=list)
@@ -794,7 +834,13 @@ class NetPlan:
 
     @property
     def empty(self) -> bool:
-        return not self.remove and not self.remove_vias and not self.snaps and not self.extends
+        return (
+            not self.remove
+            and not self.remove_vias
+            and not self.snaps
+            and not self.extends
+            and not self.stubs
+        )
 
 
 def _group_for(model: _NetModel, seed: int, removed: set[int]) -> set[int] | None:
@@ -929,6 +975,46 @@ def _try_snap(
     for k, (adj_k, anch_k) in saved.items():
         model.adj[k] = adj_k
         model.anch[k] = anch_k
+
+
+def _try_reanchor(
+    model: _NetModel,
+    plan: NetPlan,
+    i: int,
+    e: int,
+    removed: set[int],
+    baseline: frozenset[frozenset[int]],
+) -> None:
+    """Issue #8259: move an overlap-held end onto the via / pad centre, or add a
+    same-layer stub from the centre when moving it would tilt an on-angle track."""
+    n = model.nodes[i]
+    if getattr(n.ref, "locked", False) or model.overlap[i] or model.anch[i][e]:
+        return
+    p = _end_pt(n, e)
+    target = None
+    for j in model.held[i][e]:
+        o = model.nodes[j]
+        if j not in removed:
+            d = math.dist(p, o.a)
+            if d > CENTRE_TOL and (target is None or d < target[0]):
+                target = (d, o.a)
+    if target is None:
+        return
+    c = target[1]
+    if math.dist(_end_pt(n, 1 - e), c) <= CENTRE_TOL:
+        return
+    new = (c, n.b) if e == 0 else (n.a, c)
+    if _tilts(n, *new):
+        plan.stubs.append((n.layers[0], c, p, n.radius * 2.0))
+        return
+    old = (n.a, n.b)
+    _set_end(n, e, c)
+    model.relink(i)
+    if model.partition(removed) == baseline and model.end_ok(i, removed):
+        plan.snaps.append((n.index, ("start", "end")[e], c))
+        return
+    n.a, n.b = old
+    model.relink(i)
 
 
 def _aligned(a: tuple[float, float], b: tuple[float, float]) -> bool:
@@ -1722,7 +1808,10 @@ def _plan_net(
                 # Endpoint neighbours *and* body-touching neighbours: an
                 # unmodelled overlap join must not be what holds anything.
                 strict = {k for g in group for k in model.adj[g]} - group
-                touched = {k for g in group for k in model.adj[g] | model.overlap[g]} - group
+                touched = {
+                    k for g in group for k in model.adj[g] | model.overlap[g] | model.held_nodes(g)
+                }
+                touched -= group
                 if (
                     model.partition(removed | group) != baseline
                     # Endpoint joins alone must keep the neighbours joined (a
@@ -1753,6 +1842,14 @@ def _plan_net(
             continue
         for e in (0, 1):
             _try_snap(model, plan, i, e, removed, baseline)
+
+    # Overlap-held ends that survive: centre them on the via / pad (issue #8259).
+    for i in seg_ids:
+        if i in removed or model.hard_protected[i]:
+            continue
+        for e in (0, 1):
+            if model.held[i][e]:
+                _try_reanchor(model, plan, i, e, removed, baseline)
 
     done = _plan_collinear_merges(model, plan, removed)
     _plan_anchored_merges(model, plan, removed, done)
@@ -1841,12 +1938,18 @@ def apply_plans(pcb: PCB, plans: list[NetPlan]) -> dict[str, int]:
             node.children[0] = _mm_atom(x + ox)
             node.children[1] = _mm_atom(y + oy)
         snapped += len(plan.snaps)
+    stubs = 0
+    for plan in plans:
+        for layer, c, p, width in plan.stubs:
+            stubs += len(pcb.add_trace(c, p, width=width, layer=layer, net=plan.net_name or None))
     to_remove = [segs[i] for plan in plans for i in plan.remove]
     vias = list(pcb.vias)
     via_remove = [vias[i] for plan in plans for i in plan.remove_vias]
     removed = pcb.remove_segments(to_remove) if to_remove else 0
     vias_removed = pcb.remove_vias(via_remove) if via_remove else 0
     stats = {"segments_removed": removed, "ends_snapped": snapped}
+    if stubs:  # key appears only when an overlap-held end got a stub (issue #8259)
+        stats["stubs_added"] = stubs
     if vias_removed:  # key appears only when a loop cut orphaned vias (issue #8313)
         stats["vias_removed"] = vias_removed
     return stats
@@ -1994,6 +2097,8 @@ def prune_board(
             "segments_removed": sum(len(p.remove) for p in accepted),
             "ends_snapped": sum(len(p.snaps) for p in accepted),
         }
+        if n_stubs := sum(len(p.stubs) for p in accepted):
+            stats["stubs_added"] = n_stubs
         if n_vias := sum(len(p.remove_vias) for p in accepted):
             stats["vias_removed"] = n_vias
     if current_paths:

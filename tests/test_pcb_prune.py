@@ -387,6 +387,103 @@ def test_spur_beside_via_is_removed_and_main_diagonal_kept(tmp_path):
     assert [s.end for s in in1] == [(105, 100.35)]
 
 
+def _overlap_held_board(tmp_path: Path, trunk: bool = True, extra_pad: bool = False) -> Path:
+    """#8259: a redundant B.Cu branch V2 -> P -> Q whose free end Q rests on V1
+    by capsule overlap only (0.45 mm via, 0.4 mm track, Q 0.35 mm off centre),
+    plus an In2.Cu track whose only join to V1 is that same overlap."""
+    header = HEADER.replace(
+        '(0 "F.Cu" signal) (31 "B.Cu" signal)',
+        '(0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal) (31 "B.Cu" signal)',
+    )
+    x0, y0, w = 100.0, 100.0, 0.4
+
+    def o(x, y):
+        return (round(x0 + x, 4), round(y0 + y, 4))
+
+    body = header + _fp("P1", *o(0, 0)) + _fp("P2", *o(3.0, 1.45))
+    if extra_pad:  # a pad touched only by Q's overlap (never by a modelled join)
+        px, py = o(0.35, -0.25)
+        body += (
+            f'  (footprint "X:P" (layer "F.Cu") (uuid "f-P3") (at {px} {py})\n'
+            '    (property "Reference" "P3" (at 0 0 0) (layer "F.SilkS"))\n'
+            '    (pad "1" thru_hole rect (at 0 0) (size 0.2 0.2) (drill 0.1) '
+            '(layers "*.Cu") (net 1 "SIG"))\n  )\n'
+        )
+    if trunk:
+        body += _seg(o(0, 0), o(1.45, 1.45), "B.Cu", w)
+    body += _seg(o(1.45, 1.45), o(0.35, 0.35), "B.Cu", w)
+    body += _seg(o(0.35, 0.35), o(0.35, 0), "B.Cu", w)
+    body += _seg(o(1.45, 1.45), o(3.0, 1.45), "F.Cu", w)
+    if not extra_pad:
+        body += _seg(o(0.35, 0), o(1.70, -1.35), "In2.Cu", w)
+        body += _seg(o(1.70, -1.35), o(3.0, -1.35), "In2.Cu", w)
+        body += _seg(o(3.0, -1.35), o(3.0, 1.45), "In2.Cu", w)
+    for xy in (o(0, 0), o(1.45, 1.45), o(3.0, 1.45)):
+        body += (
+            f'  (via (at {xy[0]} {xy[1]}) (size 0.45) (drill 0.2) (layers "F.Cu" "B.Cu") '
+            f'(net 1) (uuid "v-{next(_uid)}"))\n'
+        )
+    p = tmp_path / "held.kicad_pcb"
+    p.write_text(body + ")\n")
+    return p
+
+
+def test_overlap_held_branch_is_removed_and_inner_end_gets_a_stub(tmp_path):
+    p = _overlap_held_board(tmp_path)
+    pcb, res = _run(p)
+    assert res.stats["segments_removed"] == 2
+    b_cu = [(s.start, s.end) for s in pcb.segments if s.layer == "B.Cu"]
+    assert b_cu == [((100.0, 100.0), (101.45, 101.45))]  # trunk kept
+    # The 45-degree In2.Cu track cannot be tilted onto the via centre, so a
+    # 0.35 mm stub from the centre to its end is added instead.
+    assert res.stats["stubs_added"] == 1
+    stubs = [s for s in pcb.segments if s.layer == "In2.Cu" and s.start == (100.0, 100.0)]
+    assert [s.end for s in stubs] == [(100.35, 100.0)]
+    assert stubs[0].width == pytest.approx(0.4)
+    # the result is saved and reloads with the stub in place
+    out = tmp_path / "out.kicad_pcb"
+    pcb.save(out)
+    assert any(s.layer == "In2.Cu" and s.start == (100.0, 100.0) for s in PCB.load(out).segments)
+
+
+def test_overlap_held_prune_is_drc_clean_with_kicad_cli(tmp_path):
+    import shutil
+
+    if shutil.which("kicad-cli") is None:
+        pytest.skip("kicad-cli not available")
+    from kicad_tools.pcb_prune import _drc_signature
+
+    p = _overlap_held_board(tmp_path)
+    before = _drc_signature(p)
+    if before is None:
+        pytest.skip("kicad-cli DRC unavailable")
+    pcb, res = prune_board(p, allow_default_rules=True)
+    assert res.drc_verified and res.rejected == []
+    assert res.stats["segments_removed"] == 2
+    out = tmp_path / "out.kicad_pcb"
+    pcb.save(out)
+    after = _drc_signature(out)
+    assert after is not None
+    assert after.get("unconnected_items", 0) == 0
+    assert sum(v for k, v in after.items() if k != "unconnected_items") <= sum(
+        v for k, v in before.items() if k != "unconnected_items"
+    )
+
+
+def test_overlap_held_branch_is_kept_when_it_is_the_only_path(tmp_path):
+    # No trunk V1 -> V2: the branch is the only link, nothing may be removed.
+    pcb, res = _run(_overlap_held_board(tmp_path, trunk=False))
+    assert res.stats["segments_removed"] == 0
+
+
+def test_overlap_held_branch_is_kept_when_a_terminal_hangs_on_the_overlap(tmp_path):
+    # A pad that Q touches by overlap alone is a terminal the model cannot see
+    # joined: removing the branch must not strand it.
+    pcb, res = _run(_overlap_held_board(tmp_path, extra_pad=True))
+    assert res.stats["segments_removed"] == 0
+    assert any(s.end == (100.35, 100.0) for s in pcb.segments if s.layer == "B.Cu")
+
+
 def test_spur_is_kept_when_removal_would_disconnect_the_main_track(tmp_path):
     # Branch no longer reaches V2: it is not redundant, nothing may go.
     pcb, res = _run(_spur_board(tmp_path, branch_end=(109, 105.5)))
