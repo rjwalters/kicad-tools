@@ -114,6 +114,25 @@ def test_tilting_snap_adds_on_grid_stub_to_via_centre(tmp_path):
     assert (104.82, 100.0) in ends and (105, 100.08) in ends
 
 
+def test_tilt_refused_end_segment_count_is_pinned_and_stable(tmp_path):
+    # Issue #8458: a routed board gained ~4% more segments after the first
+    # ``prune`` than at c9a45f80a.  Bisecting the first-prune count pinned the
+    # whole delta on 41e2387f9 (#8437): a tilt-refused via end now keeps its
+    # off-centre end and is joined to the via centre by on-grid stubs instead
+    # of being left overlap-held.  The extra segments are intended; pin the
+    # exact count (original + 2 stubs) and that a second prune adds no more,
+    # so the delta cannot silently grow or stop converging.
+    segs = [((100, 100), (104.82, 100))]
+    p = _board(tmp_path, [("A", 100, 100)], segs, vias=[(105, 100.08)])
+    pcb, res = _run(p)
+    assert len(pcb.segments) == 3
+    assert res.stats.get("stubs_added") == 2
+    pcb.save(p)
+    pcb2, res2 = _run(p)
+    assert len(pcb2.segments) == 3
+    assert not res2.stats.get("stubs_added")
+
+
 def test_single_pad_net_loop_is_kept(tmp_path):
     # Issue #8333: one-terminal nets have a vacuous partition guard; the whole
     # loop used to be deleted, leaving the net with no copper.

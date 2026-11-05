@@ -15,6 +15,14 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-05
 
+- **PR #8461**: test(prune): pin segment count and stability for tilt-refused via stubs
+- **Issue #8458** (closed): prune/optimize cleanup leaves ~4% more segments on main than at c9a45f80a (no fixed point in 3 rounds)
+- **PR #8462**: feat: jog pour-slot runs that end on same-net vias
+- **Issue #8459** (closed): pour-slots: spread via-ended inner-layer runs with a 45° jog
+- **PR #8463**: feat: make pour-slot packing opt-in and report left_alone per reason
+- **Issue #8457** (closed): optimize-traces --pour-slots: via-ended inner-layer runs and buses cannot be spread; packing counted as resolved
+- **PR #8469**: docs: record JLCPCB website-automation terms finding
+- **Issue #8467** (closed): docs: JLCPCB terms check for automated website use (part 2/3 of #8465)
 - **PR #8400**: fix: run prune/optimize-traces kicad-cli referees on pinned image under KCT_KICAD_DOCKER
 - **Issue #8395** (closed): pcb prune / optimize-traces DRC referee ignores KCT_KICAD_DOCKER and checks edits on the host kicad-cli
 - **PR #8449**: test: pin kct pcb dedupe output across PYTHONHASHSEED values

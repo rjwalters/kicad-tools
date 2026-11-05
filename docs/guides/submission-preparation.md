@@ -687,3 +687,13 @@ context through `FindingCoordinate`; no rounding or unit inference occurs.
 transcribed positions. `coordinates_available=None` means the report did not
 state availability. Missing axes, units, context, and thresholds remain `None`.
 Coordinate values and receipt provenance participate in the attachment hash.
+
+## Website ordering: no automated driver (#8467)
+
+kct does not automate the jlcpcb.com ordering website. A dated review
+(2026-11-05) found no retrievable terms text permitting scripted website use,
+and unclear is treated as forbidden; see
+[`docs/jlc-upload-protocol.md`](../jlc-upload-protocol.md#website-automation-terms-finding-8467-part-23-of-8465).
+Complete website steps yourself, in your own logged-in browser profile; kct
+handles no website credentials. Any browser tooling you choose to use alongside
+the guided checklist is your own to install and authorise.

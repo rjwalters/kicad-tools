@@ -82,3 +82,39 @@ Session sends, including that legacy path.
 No order, payment, quotation, guessed fabrication enums, BOM/CPL API or automatic
 human approval is implemented. PCBA submission remains an explicit website
 handoff. A real factory acceptance test has not been performed.
+
+## Website automation: terms finding (#8467, part 2/3 of #8465)
+
+**Finding date:** 2026-11-05 (pages fetched live that day; they may change).
+
+**Conclusion: UNCLEAR, therefore treated as FORBIDDEN.** Nothing retrieved
+affirmatively permits scripted use of the jlcpcb.com ordering website, and the
+only related text we could retrieve concerns the separate, application-gated
+JLCPCB API. Per the #8465 policy, unclear counts as forbidden: part 3
+(#8468) ships a **guided checklist**, not a website driver, unless a human
+operator rules otherwise (route that through `operator-decision`).
+
+| Source | What was retrieved |
+|---|---|
+| <https://jlcpcb.com/help/article/jlcpcb-online-api-available-now> ("JLCPCB Online API Access Application") | API partner guidelines: "Any violation of these guidelines will result in the immediate suspension of the violator's JLCPCB API access rights". Applies to API access granted on application; it says nothing permitting or forbidding scripted use of the ordering website. |
+| <https://jlcpcb.com/terms-and-conditions> | The fetched page rendered only a title and an empty "Account Restriction Notice" heading; no clause text on automated access, bots, scrapers or scripts was retrievable. |
+| <https://jlcpcb.com/help/article/Terms-and-Conditions> | Links to Terms & Conditions, Privacy and Cookies policies without their text; no automation clause retrievable. |
+
+Limits of this finding: the full Terms & Conditions body was not retrievable
+by the fetch tool (the page appears to load its text dynamically), so absence
+of a clause is **not** evidence of permission. A human who reads the full
+terms in a browser can replace this finding with a quoted allowed/forbidden
+ruling; until then the conservative reading stands.
+
+### Browser-tooling prerequisite and credentials
+
+The guided checklist is designed around the operator's own browser:
+
+- The operator drives (or supervises) their own, already logged-in browser
+  profile on jlcpcb.com. kct never receives, stores or logs a password, cookie,
+  session token or API secret for the website.
+- Any browser tooling (for example a browser-automation CLI attached to the
+  operator's profile) is the operator's responsibility to install and
+  authorise; kct does not bundle it and does not require it for the checklist.
+- The existing signed Gerber-upload transport above is a separate path and is
+  unaffected by this finding.
