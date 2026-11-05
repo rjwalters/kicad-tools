@@ -179,3 +179,42 @@ def test_keep_safe_regions_all_unsafe_keeps_nothing_8298():
     anchors = [(0.0, 0.0, (Layer.F_CU,)), (10.0, 0.0, (Layer.F_CU,))]
     kept, n_kept, _ = keep_safe_regions(before, after, [], anchors, 0.01)
     assert n_kept == 0 and kept == before
+
+
+def test_edge_entering_track_counts_as_pad_attached_8419():
+    """A track ending at the pad edge (centre > w/2 away) is attached to the pad."""
+    f = (Layer.F_CU,)
+    # 0.6 x 0.3 mm pad centred at (10, 0); track stops at the pad's left edge.
+    pad = (10.0, 0.0, f, 0.3, 0.15)
+    start = (0.0, 0.0, f)
+    before = [_seg(0, 0, 5, 0), _seg(5, 0, 9.7, 0)]
+    # Collinear merge that moves the end off the pad (stops 0.3 mm short).
+    short = [_seg(0, 0, 9.3, 0)]
+    # Centre-only anchors cannot see the loss (the pre-fix blind spot).
+    assert connectivity_preserved(before, short, [], [start, (10.0, 0.0, f)], 0.01)
+    # Extent-aware anchors catch it.
+    assert not connectivity_preserved(before, short, [], [start, pad], 0.01)
+    # A merge that keeps the end on the pad copper is still accepted.
+    assert connectivity_preserved(before, [_seg(0, 0, 9.7, 0)], [], [start, pad], 0.01)
+
+
+def test_centre_attached_track_unchanged_8419():
+    f = (Layer.F_CU,)
+    pad = (10.0, 0.0, f, 0.3, 0.15)
+    before = [_seg(0, 0, 5, 0), _seg(5, 0, 10, 0)]
+    assert connectivity_preserved(before, [_seg(0, 0, 10, 0)], [], [pad], 0.01)
+
+
+def test_summary_not_new_errors_when_cli_arbitrates_8419():
+    from types import SimpleNamespace
+
+    from kicad_tools.cli.optimize_cmd import _drc_summary_suffix
+
+    stats = SimpleNamespace(drc_errors_before=0, drc_errors_after=3, nets_rolled_back=1)
+    cli = {"available": True, "regression": False, "dru_not_evaluated": False}
+    out = _drc_summary_suffix(stats, cli)
+    assert "new errors" not in out and "advisory" in out
+    # No kicad-cli arbitration: in-process count stays authoritative.
+    assert "3 new errors" in _drc_summary_suffix(stats, None)
+    cli_bad = dict(cli, regression=True)
+    assert "in-process referee only" in _drc_summary_suffix(stats, cli_bad)
