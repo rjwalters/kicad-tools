@@ -340,7 +340,8 @@ Champion's content criteria say nothing about who wrote the issue. So before any
 `check-promotion-landed.sh --apply` backstop) it asks
 `loom-daemon forge promotion-author --number N`, which judges the issue **author**
 with the same predicate as [`comment-trust.md`](comment-trust.md) (repo insider, a
-fleet App, this daemon, `forge.trustedCommenters`, the fleet admin roster), with
+fleet App, this daemon, `forge.trustedCommenters`, the fleet admin roster, the fleet trusted Apps list
+`apps` in `fleet/admins.json`, #13545), with
 no second trust table. Only `TRUSTED` promotes. An `UNTRUSTED` author, or an
 `UNKNOWN` one (the issue could not be read), leaves the issue at `loom:curated`
 with one comment (keyed on its `<!-- loom:promotion-author-gate rev=… trust=… -->`

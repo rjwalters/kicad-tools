@@ -1895,7 +1895,7 @@ auto-merging:
 $CONCERN_BULLET
 
 **Next steps** — this hold stays in force until one of these happens; Champion re-reading the same diff will **not** clear it:
-- A human releases it: \`gh pr edit $PR_NUMBER --remove-label \"loom:blocked\"\`. Champion merges on its next tick unless it finds a concern this notice does not name; or run \`./.loom/scripts/merge-pr.sh $PR_NUMBER\` yourself after removing it (\`merge-pr.sh\` refuses \`loom:pr\` + \`loom:blocked\` together, #8112)
+- A human releases it and merges in one audited step: \`./.loom/scripts/merge-pr.sh $PR_NUMBER --release-hold\` (#13517). It refuses if the head moved since this hold or the Judge approval, and posts a comment naming you and the approved head. Bare \`merge-pr.sh\` still refuses \`loom:pr\` + \`loom:blocked\` together (#8112)
 - Or applies \`loom:auto-merge-ok\` to override the hold; Champion merges on the next tick
 - Or comments here to clear it explicitly — **start the comment with the instruction**: \`clear the hold — <why>\`, \`cleared: <why>\`, \`override: <why>\`, \`merge anyway, <why>\`, \`ok to merge — <why>\`. Phrasing that only mentions those words later in a sentence, negates them (\`do not merge anyway\`), or asks about them (\`is it ok to merge?\`) deliberately does **not** release the hold, and neither does a bare 'looks fine'
 - Or the situation actually changes: a new push that narrows the concern, or a deeper Judge re-review
@@ -2077,6 +2077,65 @@ STANDING_AUTH_ADDITIVE=0
 # pre-merge comment renders its critical-file bullet from these, so a waiver is
 # never reported as "No critical files modified".
 CRITERION3_WAIVER_ID=""; CRITERION3_WAIVER_SCOPE=""; CRITERION3_WAIVED_FILES=""
+
+# Repo-declared extra critical paths (#13542): `champion.extraCriticalPaths`, an
+# array of bash globs matched against the FULL repo path (`*` crosses `/`, so
+# `infra/bot/**` and `policy/*-policy.json` work as written), for `filename` and
+# `previous_filename`. Additive only: never appended to CRITICAL_PATTERNS (a
+# criticalFilesOnly class reads that array) and never to KEPT_SET_PATTERNS. It runs
+# BEFORE standing_auth_eval and exits 1 on a hit, so no class, the version-only /
+# suspect-line / WF_BLAST carve-outs or the merge-risk self-release can clear it:
+# only the human release of the sticky hold (#9944) does. A non-array value, or a
+# non-string / empty entry, is skipped with a WARN line and adds nothing. No key:
+# no output and no extra read, byte-for-byte as before.
+EXTRA_CRITICAL_PATHS=()
+CRITERION3_DECLARED_PATH=""; CRITERION3_DECLARED_FILE=""
+extra_critical_paths_load() {
+  local out raw="" ok=0 entry
+  if command -v loom-daemon >/dev/null 2>&1 && out=$(loom-daemon config get champion.extraCriticalPaths --json 2>/dev/null) \
+     && printf '%s' "$out" | jq -e . >/dev/null 2>&1; then
+    ok=1; raw=$(printf '%s' "$out" | jq -c 'select(.found == true) | .value' 2>/dev/null)
+  fi
+  [ "$ok" -eq 1 ] || raw=$(jq -c '.champion.extraCriticalPaths // empty' .loom/config.json 2>/dev/null)
+  [ -n "$raw" ] && [ "$raw" != null ] || return 0
+  if [ "$(printf '%s' "$raw" | jq -r type 2>/dev/null)" != array ]; then
+    echo "WARN: champion.extraCriticalPaths is not an array; ignored"; return 0
+  fi
+  while IFS= read -r entry; do
+    if [ "$(printf '%s' "$entry" | jq -r 'if type == "string" and length > 0 then "ok" else "bad" end')" = ok ]; then
+      EXTRA_CRITICAL_PATHS+=("$(printf '%s' "$entry" | jq -r .)")
+    else
+      echo "WARN: champion.extraCriticalPaths entry $entry is not a non-empty string; skipped"
+    fi
+  done < <(printf '%s' "$raw" | jq -c '.[]')
+}
+
+# stdin: filename and previous_filename lines. Sets CRITERION3_DECLARED_{PATH,FILE}.
+extra_critical_hit() {
+  local name p
+  while IFS= read -r name; do
+    [ -z "$name" ] && continue
+    for p in ${EXTRA_CRITICAL_PATHS[@]+"${EXTRA_CRITICAL_PATHS[@]}"}; do
+      # shellcheck disable=SC2053 # unquoted on purpose: $p is a glob
+      if [[ "$name" == $p ]]; then CRITERION3_DECLARED_PATH="$p"; CRITERION3_DECLARED_FILE="$name"; return 0; fi
+    done
+  done
+  return 1
+}
+
+extra_critical_paths_load
+if [ "${#EXTRA_CRITICAL_PATHS[@]}" -gt 0 ]; then
+  # Fresh paginated read, names only (filename + previous_filename). A failed or empty read fails closed.
+  if ! DECLARED_NAMES=$(gh api "repos/{owner}/{repo}/pulls/<number>/files" --paginate --jq '.[] | .filename, (.previous_filename // empty)') || [ -z "$DECLARED_NAMES" ]; then
+    echo "FAIL: Could not read the changed-file list to check champion.extraCriticalPaths"
+    exit 1
+  fi
+  if extra_critical_hit <<<"$DECLARED_NAMES"; then
+    echo "FAIL: Declared critical path modified: $CRITERION3_DECLARED_FILE (champion.extraCriticalPaths '$CRITERION3_DECLARED_PATH')"
+    exit 1
+  fi
+fi
+
 standing_auth_eval critical "$FILES"
 if [ "$STANDING_AUTH_RESULT" = "ELIGIBLE" ] && [ "$STANDING_AUTH_SCOPE" = "critical" ]; then
   CRITERION3_WAIVER_ID="$STANDING_AUTH_ID"; CRITERION3_WAIVER_SCOPE="critical"; CRITERION3_WAIVED_FILES="$STANDING_AUTH_COVERED"
@@ -2155,6 +2214,8 @@ exactly a version-string line change.
 **Critical-files-only class (#12648)**: a class with `"criticalFilesOnly": true` is matched against the **critical-file hits** only: the changed files this criterion's `CRITICAL_PATTERNS` flag, and the `previous_filename` of each on a rename. If every hit matches the class's `filePatterns`, no hit matches `excludeFilePatterns`, no added/removed line of a hit's patch matches `forbiddenDiffPatterns` (a hit with no patch fails closed), no changed file at all is a kept-set path, and every condition holds now, this criterion passes and the PASS line names the class (`#12648`) and the critical files. The other changed files are not matched against the class; the `merge-risk` criterion judged them, and the whole PR, on the four axes, because such a class is never eligible there. A rename into a covered path from outside the class or from a kept-set path, a forbidden line in the workflow patch, or an excluded workflow restores the FAIL and the durable hold. An open hold episode closes through the ordinary PASS row.
 
 **Per-hit composition (#13042)**: each `criticalFilesOnly` class is checked over **its own** hits only (a hit whose name and `previous_filename` match its `filePatterns` and no `excludeFilePatterns`), with its own forbidden-line, privileged-content and condition checks. The `critical-files` criterion passes when every critical-file hit is covered by at least one passing class, so a workflow + `package.json` PR passes under `workflow-critical-only` plus `package-scripts` and the PASS line names both ids (comma-joined). A class that fails on a hit leaves only that hit uncovered; a hit no class covers, a kept-set path anywhere, or an unreadable read still fails. The hold-state `auth=` digest is the existing `config get champion.standingAuthorizations --digest` of the whole class list, which changes whenever any class used changes. On a FAIL the block prints `STANDING_AUTH_WHY`, one line per class and hit with the failed check (pattern, exclude, forbidden or privileged line, condition, kept set) or "no criticalFilesOnly or coversCriticalFiles class is configured"; the hold comment quotes it, and Champion must never write "no class covers" without that output.
+
+**Declared critical paths (#13542)**: `champion.extraCriticalPaths` in `.loom/config.json` (read via `loom-daemon config get champion.extraCriticalPaths --json`, committed file as the fallback) lets a repo add its own critical paths without editing Loom-managed files. Entries are bash globs matched against the full repo path (`*` crosses `/`; anchored, not substring), for both `filename` and `previous_filename`, so a rename out of a declared path holds. The check runs before `standing_auth_eval critical` and holds on **any** edit: no `standingAuthorizations` class, carve-out (version-only, suspect-line, `WF_BLAST`) or `merge-risk` self-release clears it, and declared paths are never added to `CRITICAL_PATTERNS` or the kept set. It can only add: a built-in pattern still holds with the key set. A non-array value, or an empty or non-string entry, is skipped with a `WARN` line and adds nothing. The FAIL line and the hold comment name the matched glob (`$CRITERION3_DECLARED_PATH`).
 
 **Rationale**: Changes to these files require careful human review due to high impact.
 

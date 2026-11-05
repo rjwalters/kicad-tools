@@ -25,6 +25,15 @@ Rationale: `.loom/docs/critical-file-hold.md`.
 - The release is scoped to a **diff, not a commit id** (#9416): this verdict is a
   pure function of the file list, so the operator decided about that change.
 
+## Repo-declared critical paths (#13542)
+
+A repo may add its own critical paths in `.loom/config.json` → `champion.extraCriticalPaths`
+(bash globs on the full path, matched against `filename` and `previous_filename`). A hit
+fails `critical-files` on any edit and enters this machine like a built-in hit; the hold
+comment names the matched glob. It is checked before `standing_auth_eval`, so no
+standing-authorization class or carve-out can waive it, and it never joins the kept set:
+the human release below is the only release.
+
 ## A covering standing authorization means no hold (#12528)
 
 The FAIL above is "one-way terminal" only for a PR no operator pre-authorized.
@@ -234,6 +243,12 @@ if [ "$CRITICAL_FILES_RESULT" = "FAIL" ]; then
       [ -n "${CRITERION3_SUSPECT_ERROR:-}" ] &&
         CF_SUSPECT_NOTE="${CF_SUSPECT_NOTE}
 - **Suspect-line check error**: \`${CRITERION3_SUSPECT_ERROR}\`"
+      # #13542: a repo-declared path (`champion.extraCriticalPaths`) held it: name the glob. Such a
+      # hold is never waivable by a class; only the operator's release applies. Empty otherwise.
+      CF_DECLARED_NOTE=""
+      [ -n "${CRITERION3_DECLARED_PATH:-}" ] &&
+        CF_DECLARED_NOTE="
+- **Declared critical path** (\`champion.extraCriticalPaths\`): \`${CRITERION3_DECLARED_FILE}\` matches \`${CRITERION3_DECLARED_PATH}\`"
       CF_WF_NOTE=""   # #10539
       gh pr diff "$PR_NUMBER" --name-only 2>/dev/null | grep -q '^\.github/workflows/' &&
         CF_WF_NOTE="
@@ -249,14 +264,15 @@ Merging workflow files needs the \`workflow\` token scope: \`gh auth refresh -h 
 
 ${CF_REARM_NOTE}This PR modifies a critical file and cannot be automatically merged:
 
-- **Critical File Exclusion Check**: <FILE_PATH> matches critical-file pattern \`<PATTERN>\`${CF_SUSPECT_NOTE}
+- **Critical File Exclusion Check**: <FILE_PATH> matches critical-file pattern \`<PATTERN>\`${CF_SUSPECT_NOTE}${CF_DECLARED_NOTE}
 
-**Next steps** — to merge it yourself, two commands, in either order, no race:
+**Next steps** — to merge it yourself, one audited command (#13517):
 
 \`\`\`bash
-gh pr edit $PR_NUMBER --remove-label \"loom:blocked\"
-./.loom/scripts/merge-pr.sh $PR_NUMBER
+./.loom/scripts/merge-pr.sh $PR_NUMBER --release-hold
 \`\`\`
+
+It refuses if the head moved since this hold or the Judge approval, and records who released it.
 
 On a merge-queue repo, skip \`merge-pr.sh\`: after your release Champion hands the PR to the queue itself (#13321).
 

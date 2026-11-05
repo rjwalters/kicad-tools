@@ -317,7 +317,8 @@ worktree-contains open -
 pr-state open -
 merge-route open -
 workflow-scope open -
-post-merge-cleanup open -"
+post-merge-cleanup open -
+release-hold open -"
 
 # Shared comparison, so the controls below exercise the SAME logic the real
 # assertion does rather than a paraphrase of it. `sort -V` over a here-string
@@ -437,6 +438,50 @@ while read -r _hint_verb; do
     assert_eq "open" "${_dir:-<unclassified>}" \
       "daemon-verb-hint for 'merge-pr $_hint_verb' annotates a fail-OPEN verb (message text only, never a gate)"
 done <<<"$(sed -n 's/^# daemon-verb-hint: merge-pr \([a-z][a-z0-9-]*\) >= .*/\1/p' "$FUNCS_FILE")"
+
+echo ""
+echo "Testing the hint when the daemon is NEWER than the installed scripts (#13548)…"
+
+# A consumer whose installed scripts predate the host binary: a verb they call
+# may have been deleted, so "roll/rebuild the daemon" cannot work. The hint must
+# name resync-installed.sh instead. Equal/older/unreadable keep the roll hint.
+mkdir -p "$WORKDIR/consumer/.loom"
+_fake_daemon() { # <name> <version-line>
+    cat >"$WORKDIR/$1" <<FAKE
+#!/usr/bin/env bash
+[[ "\${1:-}" == "--version" ]] && { echo "$2"; exit 0; }
+exit 2
+FAKE
+    chmod +x "$WORKDIR/$1"
+}
+_fake_daemon newer-loom-daemon "loom-daemon 0.19.1261 (commit abc1234, built 2026-11-04T00:00:00Z)"
+_fake_daemon equal-loom-daemon "loom-daemon 0.19.498 (commit abc1234)"
+printf '{"loom_version":"0.19.498"}\n' >"$WORKDIR/consumer/.loom/install-metadata.json"
+
+HINT_NEWER="$(REPO_ROOT="$WORKDIR/consumer" SCRIPT_DIR="$HELPERS_DIR" _mp_daemon_roll_hint merge-pr "$WORKDIR/newer-loom-daemon")"
+assert_contains "$HINT_NEWER" "resync-installed.sh" "newer daemon: hint names resync-installed.sh"
+assert_contains "$HINT_NEWER" "stale relative to the daemon" "newer daemon: hint says installed scripts are stale"
+assert_not_contains "$HINT_NEWER" "loom-daemon-update.sh --fetch" "newer daemon: no roll-the-daemon remedy"
+assert_not_contains "$HINT_NEWER" "cargo build" "newer daemon: no build-the-daemon remedy"
+
+HINT_OLDER="$(REPO_ROOT="$WORKDIR/consumer" SCRIPT_DIR="$HELPERS_DIR" _mp_daemon_roll_hint merge-pr "$WORKDIR/stale-loom-daemon")"
+assert_contains "$HINT_OLDER" "cli/loom-daemon-update.sh --fetch" "older daemon: existing roll hint unchanged"
+assert_not_contains "$HINT_OLDER" "resync-installed.sh" "older daemon: no resync hint"
+
+HINT_EQUAL="$(REPO_ROOT="$WORKDIR/consumer" SCRIPT_DIR="$HELPERS_DIR" _mp_daemon_roll_hint merge-pr "$WORKDIR/equal-loom-daemon")"
+assert_contains "$HINT_EQUAL" "cli/loom-daemon-update.sh --fetch" "equal versions: existing roll hint unchanged"
+
+HINT_NOMETA="$(REPO_ROOT="$WORKDIR/nonexistent" SCRIPT_DIR="$HELPERS_DIR" _mp_daemon_roll_hint merge-pr "$WORKDIR/newer-loom-daemon")"
+assert_contains "$HINT_NOMETA" "cli/loom-daemon-update.sh --fetch" "missing install-metadata.json: existing roll hint unchanged"
+printf 'not json' >"$WORKDIR/consumer/.loom/install-metadata.json"
+HINT_BADMETA="$(REPO_ROOT="$WORKDIR/consumer" SCRIPT_DIR="$HELPERS_DIR" _mp_daemon_roll_hint merge-pr "$WORKDIR/newer-loom-daemon")"
+assert_contains "$HINT_BADMETA" "cli/loom-daemon-update.sh --fetch" "unparseable install-metadata.json: existing roll hint unchanged"
+
+HINT_NEWER_SE="$(set -euo pipefail; REPO_ROOT="$WORKDIR/consumer" SCRIPT_DIR="$HELPERS_DIR"; printf '{"loom_version":"0.19.498"}' >"$WORKDIR/consumer/.loom/install-metadata.json"; _mp_daemon_roll_hint merge-pr "$WORKDIR/newer-loom-daemon")"
+assert_contains "$HINT_NEWER_SE" "resync-installed.sh" "newer-daemon hint survives set -euo pipefail"
+
+assert_contains "$(grep -F 'loom-pr-guard' "$MERGE_PR_SRC" | grep -F 'exited $rc without a recognized verdict')" "_mp_daemon_roll_hint" \
+  "loom-pr-guard's could-not-run message uses the shared hint helper"
 
 echo ""
 echo "Testing the merge.reverifyStaleChecks floor warning is gone (#12063 slice 1)…"

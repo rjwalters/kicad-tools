@@ -42,6 +42,12 @@
 #                          could bypass branch protection. Warns and, on a
 #                          real merge, posts a PR audit comment, like
 #                          --allow-unapproved. See #10688.
+#   --release-hold         Release Champion's human-merge hold (loom:pr +
+#                          loom:blocked) and merge, as the operator it waits
+#                          for (#13517). Refuses unless the head still equals
+#                          both Champion's hold-state head and the Judge-approved
+#                          head; posts an audit comment naming the operator;
+#                          --dry-run reports without writing.
 #   --allow-unapproved     Bypass the pre-merge loom:pr review-signal guard,
 #                          which otherwise hard-blocks merging a PR whose
 #                          current head carries no loom:pr label (no
@@ -325,7 +331,7 @@ CLEANUP_PRIMARY_CHECKOUT=true; DRY_RUN=false; WORKTREE_PATH_OVERRIDE=""; ALLOW_S
 # ALLOW_RED_TREE (#10026): bypasses _check_tree_checks. ALLOW_RED_REQUIRED (#10688): contexts
 # _check_required_checks may merge over red. MERGE_METHOD_REQUESTED (#8845): explicit
 # --merge-method override, resolved against REPO_MERGE_METHOD once parsing is done.
-ALLOW_UNAPPROVED=false; ALLOW_RED_TREE=false; ALLOW_RED_REQUIRED=(); MERGE_METHOD_REQUESTED=""; EXPECTED_HEAD_SHA=""
+RELEASE_HOLD=false; ALLOW_UNAPPROVED=false; ALLOW_RED_TREE=false; ALLOW_RED_REQUIRED=(); MERGE_METHOD_REQUESTED=""; EXPECTED_HEAD_SHA=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -340,6 +346,7 @@ while [[ $# -gt 0 ]]; do
     --auto) warning "--auto is a no-op (#12063 slice 2): merge-pr no longer waits for checks"; shift ;;
     --allow-stacked-children) ALLOW_STACKED_CHILDREN=true; shift ;;
     --allow-unapproved) ALLOW_UNAPPROVED=true; shift ;;
+    --release-hold) RELEASE_HOLD=true; shift ;;
     --allow-red-tree) ALLOW_RED_TREE=true; shift ;;
     --allow-red-required) [[ $# -lt 2 || -z "$2" ]] && error "--allow-red-required requires a context name"; ALLOW_RED_REQUIRED+=("$2"); shift 2 ;;
     # #8845's --merge-method arm; the `*)` positional arm below is flattened
@@ -701,7 +708,7 @@ _check_loom_pr_label() {
     fi
     return 0
   fi
-  [[ $rc -eq 1 && "$msg" == "Merge blocked:"* ]] || msg="Merge blocked: PR #$PR_NUMBER's loom:pr review-signal guard (#7419) could not run — '${LOOM_DAEMON_BIN:-loom-daemon} merge-pr loom-pr-guard' exited $rc without a recognized verdict. A guard that cannot run refuses the merge rather than passing it: a caller cannot tell 'reviewed' from 'never checked', so only a positive signal is accepted. Build or install loom-daemon (cargo build --release -p loom-daemon, or re-run the Loom installer), then re-run this merge."
+  [[ $rc -eq 1 && "$msg" == "Merge blocked:"* ]] || msg="Merge blocked: PR #$PR_NUMBER's loom:pr review-signal guard (#7419) could not run — '${LOOM_DAEMON_BIN:-loom-daemon} merge-pr loom-pr-guard' exited $rc without a recognized verdict. A guard that cannot run refuses the merge rather than passing it: a caller cannot tell 'reviewed' from 'never checked', so only a positive signal is accepted. $(_mp_daemon_roll_hint merge-pr "$(command -v "${LOOM_DAEMON_BIN:-loom-daemon}" 2>/dev/null || true)")"
   if [[ "$DRY_RUN" == "true" ]]; then
     warning "[dry-run] Would BLOCK merge of PR #$PR_NUMBER: $msg"
     return 0
@@ -709,6 +716,26 @@ _check_loom_pr_label() {
   error "$msg"
 }
 
+#
+# _mp_daemon_roll_hint <subcommand> [resolved-bin] [verb] -- the concrete,
+# host-local remediation for "your loom-daemon is too old for <subcommand>":
+# the declared floor, what the resolved binary actually reports, the
+# artifact-first roll command for THIS host, and the two fallbacks when no
+# artifact carries the floor yet. [verb] is the sub-subcommand that actually
+# failed: when it has a `daemon-verb-hint:` above, the message names
+# '<subcommand> <verb>' and that verb's own version; otherwise the family
+# floor. Written as a one-liner because merge-pr.sh is frozen by the
+# file-size ratchet (scripts/check-file-size-budget.sh) and may not grow.
+#
+# Both reads carry `|| true` deliberately. merge-pr.sh runs under `set -euo
+# pipefail`, and a bare `x="$(cmd)"` assignment adopts cmd's status — so an
+# unreadable ${BASH_SOURCE[0]} or a `--version` that exits non-zero would abort
+# THIS function partway, and the caller (an `error "… $(…)"` argument) would
+# print a refusal with the remediation silently truncated off the end. A
+# best-effort diagnostic must never be able to degrade the message it is
+# decorating. (The `if` over a `[[ … ]] && { … }` is for the same reason stated
+# defensively; bash exempts AND-lists from `set -e`, so that one is style.)
+_mp_daemon_roll_hint() { local sub="${1:-}" bin="${2:-}" verb="${3:-}" min="" have=""; [[ -z "$verb" ]] || min="$(sed -n "/^# daemon-verb-hint: ${sub} ${verb} >= /{s|^# daemon-verb-hint: ${sub} ${verb} >= \\([0-9][0-9.]*\\).*|\\1|p;q;}" "${BASH_SOURCE[0]}" 2>/dev/null || true)"; if [[ -n "$min" ]]; then sub="$sub $verb"; else min="$(sed -n "/^# requires-daemon: ${sub} >= /{s|^# requires-daemon: ${sub} >= \\([0-9][0-9.]*\\).*|\\1|p;q;}" "${BASH_SOURCE[0]}" 2>/dev/null || true)"; fi; if [[ -n "$bin" && -x "$bin" ]]; then have="$("$bin" --version 2>/dev/null || true)"; have="${have%%$'\n'*}"; fi; local hv iv; hv="$(sed -n 's/^[^0-9]*\([0-9][0-9]*\.[0-9][0-9.]*\).*/\1/p;q' <<<"$have" 2>/dev/null || true)"; iv="$(jq -r '.loom_version // empty' "${REPO_ROOT:-.}/.loom/install-metadata.json" 2>/dev/null || true)"; if [[ -n "$hv" && -n "$iv" && "$hv" != "$iv" && "$(printf '%s\n%s\n' "$hv" "$iv" | sort -V | tail -n 1)" == "$hv" ]]; then printf "REMEDIATION: the resolved loom-daemon (%s) is NEWER than the installed Loom surfaces (%s), so these installed scripts are stale relative to the daemon — a verb they call may have been removed. Rolling or rebuilding loom-daemon will NOT help. Refresh the installed scripts: %s/resync-installed.sh, then re-run this merge." "$hv" "$iv" "${SCRIPT_DIR:-.loom/scripts}"; return 0; fi; printf "REMEDIATION: this script requires loom-daemon >= %s for '%s'%s. Roll THIS host, artifact-first: %s/cli/loom-daemon-update.sh --fetch — it resolves the newest published release >= the installed version, verifies its checksum (and signature when present), provisions it and restarts the daemon under its supervisor; then re-run this merge. If no release artifact carries %s yet (releases are cut at fleet-rollable boundaries, not on every VERSION bump — see .loom/docs/release-cadence.md), either build it yourself — cargo build --release -p loom-daemon — and export LOOM_DAEMON_BIN=<repo>/target/release/loom-daemon, or pin LOOM_DAEMON_BIN to an existing build that already has '%s'. Confirm before re-running: %s --version && %s %s --help" "${min:-<undeclared>}" "$sub" "${have:+ (the resolved binary reports: $have)}" "${SCRIPT_DIR:-.loom/scripts}" "${min:-that version}" "$sub" "${bin:-loom-daemon}" "${bin:-loom-daemon}" "$sub"; }
 # Invoke the guard before either merge path attempts the actual merge API
 # call — same reasoning as the two guards above.
 _check_loom_pr_label
@@ -802,27 +829,10 @@ _check_loom_pr_label
 # version is `git show <landing commit>:VERSION` + 1. An unannotated verb falls
 # back to the family floor, which is exactly the pre-#9377 message.
 # daemon-verb-hint: merge-pr-refs loom-issue-trailer-warnings >= 0.19.512   d8fafb19a (merge of #9501, #9465), first released in v0.19.512
-#
-# _mp_daemon_roll_hint <subcommand> [resolved-bin] [verb] -- the concrete,
-# host-local remediation for "your loom-daemon is too old for <subcommand>":
-# the declared floor, what the resolved binary actually reports, the
-# artifact-first roll command for THIS host, and the two fallbacks when no
-# artifact carries the floor yet. [verb] is the sub-subcommand that actually
-# failed: when it has a `daemon-verb-hint:` above, the message names
-# '<subcommand> <verb>' and that verb's own version; otherwise the family
-# floor. Written as a one-liner because merge-pr.sh is frozen by the
-# file-size ratchet (scripts/check-file-size-budget.sh) and may not grow.
-#
-# Both reads carry `|| true` deliberately. merge-pr.sh runs under `set -euo
-# pipefail`, and a bare `x="$(cmd)"` assignment adopts cmd's status — so an
-# unreadable ${BASH_SOURCE[0]} or a `--version` that exits non-zero would abort
-# THIS function partway, and the caller (an `error "… $(…)"` argument) would
-# print a refusal with the remediation silently truncated off the end. A
-# best-effort diagnostic must never be able to degrade the message it is
-# decorating. (The `if` over a `[[ … ]] && { … }` is for the same reason stated
-# defensively; bash exempts AND-lists from `set -e`, so that one is style.)
-_mp_daemon_roll_hint() { local sub="${1:-}" bin="${2:-}" verb="${3:-}" min="" have=""; [[ -z "$verb" ]] || min="$(sed -n "/^# daemon-verb-hint: ${sub} ${verb} >= /{s|^# daemon-verb-hint: ${sub} ${verb} >= \\([0-9][0-9.]*\\).*|\\1|p;q;}" "${BASH_SOURCE[0]}" 2>/dev/null || true)"; if [[ -n "$min" ]]; then sub="$sub $verb"; else min="$(sed -n "/^# requires-daemon: ${sub} >= /{s|^# requires-daemon: ${sub} >= \\([0-9][0-9.]*\\).*|\\1|p;q;}" "${BASH_SOURCE[0]}" 2>/dev/null || true)"; fi; if [[ -n "$bin" && -x "$bin" ]]; then have="$("$bin" --version 2>/dev/null || true)"; have="${have%%$'\n'*}"; fi; printf "REMEDIATION: this script requires loom-daemon >= %s for '%s'%s. Roll THIS host, artifact-first: %s/cli/loom-daemon-update.sh --fetch — it resolves the newest published release >= the installed version, verifies its checksum (and signature when present), provisions it and restarts the daemon under its supervisor; then re-run this merge. If no release artifact carries %s yet (releases are cut at fleet-rollable boundaries, not on every VERSION bump — see .loom/docs/release-cadence.md), either build it yourself — cargo build --release -p loom-daemon — and export LOOM_DAEMON_BIN=<repo>/target/release/loom-daemon, or pin LOOM_DAEMON_BIN to an existing build that already has '%s'. Confirm before re-running: %s --version && %s %s --help" "${min:-<undeclared>}" "$sub" "${have:+ (the resolved binary reports: $have)}" "${SCRIPT_DIR:-.loom/scripts}" "${min:-that version}" "$sub" "${bin:-loom-daemon}" "${bin:-loom-daemon}" "$sub"; }
 _check_verdict_label_contradiction() { local msg rc=0; msg="$(printf '%s\n' "$PR_LABELS" | LOOM_SEQUENCED_HOLD_REPO="${REPO_NWO:-}" "${LOOM_DAEMON_BIN:-loom-daemon}" merge-pr verdict-contradiction --pr "$PR_NUMBER" --head-sha "$PR_HEAD_SHA" 2>/dev/null)" || rc=$?; [[ $rc -eq 0 && "$msg" == "LOOM-VERDICT-CLEAN" ]] && return 0; if [[ $rc -eq 7 && "$msg" == "LOOM-SEQUENCED-HOLD "* ]]; then [[ "$DRY_RUN" != "true" ]] || { warning "[dry-run] Would HOLD merge of PR #$PR_NUMBER (exit 7): $msg"; return 0; }; echo "${msg%%$'\n'*}"; warning "${msg#*$'\n'}" >&2; warning "Exiting 7: held by a sequencing order (#11330); nothing was written. Re-queue — never a failure comment." >&2; exit 7; fi; [[ $rc -eq 1 && "$msg" == "Merge blocked:"* ]] || msg="Merge blocked: PR #$PR_NUMBER's verdict-label contradiction guard (#8112) could not run — '${LOOM_DAEMON_BIN:-loom-daemon} merge-pr verdict-contradiction' exited $rc without the LOOM-VERDICT-CLEAN signal. A guard that cannot run refuses the merge rather than passing it: a caller cannot tell 'found nothing' from 'never ran', so only a positive clean signal is accepted. $(_mp_daemon_roll_hint merge-pr "$(command -v "${LOOM_DAEMON_BIN:-loom-daemon}" 2>/dev/null || true)")"; if [[ "$DRY_RUN" == "true" ]]; then warning "[dry-run] Would BLOCK merge of PR #$PR_NUMBER: $msg"; return 0; fi; error "$msg"; }
+# #13517: --release-hold. `loom-daemon merge-pr release-hold` decides (labels, trusted hold-state + verdict markers, head); this only does the forge IO. Fails closed: any non-OK answer refuses and writes nothing.
+_release_champion_hold() { [[ "$RELEASE_HOLD" == "true" ]] || return 0; local op out rc=0 cm; op="$(gh api user --jq .login 2>/dev/null || true)"; cm="$(_trusted_pr_comments "$REPO_NWO" "$PR_NUMBER")"; out="$(printf '%s\n' "$cm" | "${LOOM_DAEMON_BIN:-loom-daemon}" merge-pr release-hold --pr "$PR_NUMBER" --head-sha "$PR_HEAD_SHA" --operator "$op" --labels "$PR_LABELS" 2>/dev/null)" || rc=$?; if [[ $rc -ne 0 || "${out%%$'\n'*}" != "LOOM-HOLD-RELEASE-OK" ]]; then [[ $rc -eq 1 && "$out" == "Merge blocked:"* ]] || out="Merge blocked: --release-hold refused for PR #$PR_NUMBER: '${LOOM_DAEMON_BIN:-loom-daemon} merge-pr release-hold' exited $rc without the LOOM-HOLD-RELEASE-OK signal (a loom-daemon predating #13517 has no such verb). Nothing was written. $(_mp_daemon_roll_hint merge-pr "$(command -v "${LOOM_DAEMON_BIN:-loom-daemon}" 2>/dev/null || true)" release-hold)"; if [[ "$DRY_RUN" == "true" ]]; then warning "[dry-run] Would BLOCK merge of PR #$PR_NUMBER: $out"; return 0; fi; error "$out"; fi; if [[ "$DRY_RUN" == "true" ]]; then warning "[dry-run] Would release the Champion hold on PR #$PR_NUMBER as @$op (comment + remove loom:blocked), then merge"; else forge_gh_comment_rl_safe "$REPO_NWO" "$PR_NUMBER" "${out#*$'\n'}" 1 || error "--release-hold: could not post the audit comment on PR #$PR_NUMBER; loom:blocked was NOT removed."; forge_gh_remove_label_rl_safe "$REPO_NWO" "$PR_NUMBER" "loom:blocked" || error "--release-hold: audit comment posted but could not remove loom:blocked from PR #$PR_NUMBER; remove it and re-run."; success "Released Champion hold on PR #$PR_NUMBER as @$op"; fi; PR_LABELS="$(printf '%s\n' "$PR_LABELS" | grep -vx 'loom:blocked' || true)"; }
+_release_champion_hold
 _check_verdict_label_contradiction
 
 # The #8248 required-check freshness guard, its #8508 re-date remedy (exit 4),

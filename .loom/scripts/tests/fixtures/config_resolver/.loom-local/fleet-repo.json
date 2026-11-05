@@ -1,0 +1,12 @@
+{
+  "autonomous": {
+    "workFinder": {
+      "intervalSecs": 30
+    }
+  },
+  "guards": {
+    "sqlDdl": null
+  },
+  "overriddenByFleetRepo": "fleet-repo-value",
+  "overriddenByLocal": "fleet-repo-value"
+}

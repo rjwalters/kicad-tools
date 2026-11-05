@@ -494,6 +494,14 @@ criterion), the `merge-risk` criterion passes without scoring the four axes — 
 shape as the docs-only fast path, generalized to an operator-declared,
 per-repo class instead of a hardcoded, always-safe one.
 
+**Repo-declared critical paths (#13542)**: a separate, optional `champion.extraCriticalPaths` array
+(e.g. `["infra/bot/**", "policy/*-policy.json"]`) adds repo-specific critical paths to the
+`critical-files` criterion. Entries are anchored bash globs on the full path (`*` crosses `/`),
+matched against `filename` and `previous_filename`. It only adds: built-ins still hold, a non-array
+value or an empty/non-string entry is skipped with a warning, and it holds on any edit. No
+standing-authorization class, carve-out or merge-risk self-release can waive a declared hit; only the
+human release of the critical-file hold does. See `champion-pr-merge.md` → `critical-files`.
+
 **Precedence and interactions** (all preserved exactly):
 
 - **Sticky-hold precheck runs first, always.** A standing authorization
