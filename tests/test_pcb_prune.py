@@ -96,6 +96,24 @@ def test_overlap_only_off_centre_ends_are_snapped(tmp_path):
     assert sorted(s.end for s in PCB.load(out).segments) == [(105, 100), (105, 100)]
 
 
+def test_tilting_snap_adds_on_grid_stub_to_via_centre(tmp_path):
+    # Issue #8437: snapping the end onto the via centre would tilt a horizontal
+    # track, so prune keeps the end and joins it to the centre with a 45-degree
+    # piece plus an axis-aligned piece instead of leaving it overlap-held.
+    from kicad_tools.pcb_prune import _aligned
+
+    segs = [((100, 100), (104.82, 100))]
+    p = _board(tmp_path, [("A", 100, 100)], segs, vias=[(105, 100.08)])
+    pcb, res = _run(p)
+    assert res.stats.get("stubs_added") == 2
+    assert all(_aligned(s.start, s.end) for s in pcb.segments)
+    stubs = [s for s in pcb.segments if math.dist(s.start, s.end) < 0.5]
+    lengths = sorted(round(math.dist(s.start, s.end), 3) for s in stubs)
+    assert lengths == [0.1, 0.113]
+    ends = {pt for s in pcb.segments for pt in (s.start, s.end)}
+    assert (104.82, 100.0) in ends and (105, 100.08) in ends
+
+
 def test_single_pad_net_loop_is_kept(tmp_path):
     # Issue #8333: one-terminal nets have a vacuous partition guard; the whole
     # loop used to be deleted, leaving the net with no copper.
@@ -382,9 +400,11 @@ def test_spur_beside_via_is_removed_and_main_diagonal_kept(tmp_path):
     b_cu = [(s.start, s.end) for s in pcb.segments if s.layer == "B.Cu"]
     assert b_cu == [((105, 100), (110, 105))]
     # the inner-layer end that sat 0.35 mm off the via centre is NOT snapped:
-    # that would tilt an on-angle track off the 45-degree set (#8278)
+    # that would tilt an on-angle track off the 45-degree set (#8278); an
+    # on-grid stub from the via centre to the end is added instead (#8437)
     in1 = [s for s in pcb.segments if s.layer == "In1.Cu"]
-    assert [s.end for s in in1] == [(105, 100.35)]
+    assert (105, 100.35) in {pt for s in in1 for pt in (s.start, s.end)}
+    assert (105, 100) in {pt for s in in1 for pt in (s.start, s.end)}
 
 
 def _overlap_held_board(tmp_path: Path, trunk: bool = True, extra_pad: bool = False) -> Path:
@@ -1340,13 +1360,15 @@ def test_removal_never_leaves_a_via_joined_on_one_layer(tmp_path):
 
 def test_snap_never_takes_an_on_angle_track_off_the_45_degree_set(tmp_path):
     """#8278 (fleet angle census): snapping the end of a horizontal track onto
-    a via centre 0.1 mm away would tilt it ~1 degree; the snap is refused."""
+    a via centre 0.1 mm away would tilt it ~1 degree; the snap is refused and
+    (#8437) a 0.1 mm axis-aligned stub reaches the centre instead."""
     segs = [((100, 100), (105, 100))]
     p = _board(tmp_path, [("A", 100, 100)], segs, vias=[(105, 100.1)])
     pcb, res = _run(p)
     assert res.stats["ends_snapped"] == 0
-    (seg,) = pcb.segments
-    assert seg.end == (105, 100)
+    track, stub = sorted(pcb.segments, key=lambda s: math.dist(s.start, s.end), reverse=True)
+    assert track.end == (105, 100)
+    assert {stub.start, stub.end} == {(105, 100), (105, 100.1)}
 
 
 def test_collinear_merge_tolerates_half_micron_joint_mismatch(tmp_path):
