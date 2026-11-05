@@ -71,6 +71,19 @@ def _export_writer(routed: Path) -> None:
     assert routed.with_suffix(".kicad_dru") in result.drc_constraint_paths
 
 
+def _board06_pair_rules_then_export(routed: Path) -> None:
+    """``kct route`` writes the floors, ``build.py`` adds the LVDS pair block, then export.
+
+    Board 06 routes only IN/OUT, so the LVDS pairs need ``build.py``
+    (Issue #8404); the exporter keeps that block and re-ends the file with the
+    attach-zone block.
+    """
+    _export_writer(routed)
+    rules = runpy.run_path(str(BOARDS / "06-diffpair-test" / "assembled-demo" / "build.py"))
+    rules["write_pair_rules"](routed, BOARDS / "06-diffpair-test" / "output" / "net_class_map.json")
+    _export_writer(routed)
+
+
 def _board04_native_floors(routed: Path) -> None:
     process = runpy.run_path(str(BOARDS / "04-stm32-devboard" / "manufacturing_process.py"))
     process["apply_native_floors"](routed)
@@ -80,7 +93,7 @@ CASES: dict[str, tuple[str, Callable[[Path], None]]] = {
     "01-voltage-divider": ("voltage_divider_routed", _export_writer),
     "02-charlieplex-led": ("charlieplex_3x3_routed", _export_writer),
     "04-stm32-devboard": ("stm32_devboard_routed", _board04_native_floors),
-    "06-diffpair-test": ("diffpair_test_routed", _export_writer),
+    "06-diffpair-test": ("diffpair_test_routed", _board06_pair_rules_then_export),
 }
 
 PARAMS = [

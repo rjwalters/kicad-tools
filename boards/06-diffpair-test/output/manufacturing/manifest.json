@@ -9,11 +9,11 @@
       "size": 1109
     },
     "assembly-back.pdf": {
-      "sha256": "7d7400cdad47f8e5ffd432859b58412514fba95ca47d3d7b8fcdd689a8a67214",
+      "sha256": "38b7d086560f84f465f653ccd33e14b4a43b3e7a89ffcea6bcbea697a34dc761",
       "size": 28827
     },
     "assembly-front.pdf": {
-      "sha256": "34123fd15b248cef5fdb5ee45bb31a719a66dd3b90d331617e6abaf38288af88",
+      "sha256": "ec1e3d36467549b81cbf279a3949c1a845df7820e9a61b950562399277bb6e6d",
       "size": 49407
     },
     "bom_jlcpcb.csv": {
@@ -29,16 +29,16 @@
       "size": 2750
     },
     "design-source.zip": {
-      "sha256": "46472d979a30c86b843567abd4da3d7247b62ca80b3a4b0ab3867d1f5fcb1afb",
-      "size": 13669
+      "sha256": "b1a0f408066b5c786275855077c8bb3ca04ebfbcd0bc1425bd92a4fc71202d94",
+      "size": 14284
     },
     "fill-consistency.json": {
       "sha256": "6aea658a7d30a148c08b041c382b38c562024696eda159f25addb85c3d45b944",
       "size": 37
     },
     "gerbers/gerbers.zip": {
-      "sha256": "07e4c598feaf9136d4af89ebd05ac35fde68810a5ffccca55cdb2a146fed3227",
-      "size": 37355
+      "sha256": "40555439ead55e8122d8e18cec6cc8ca48877578fb7215a7ddece43ee81101cd",
+      "size": 37357
     },
     "images/assembly.png": {
       "sha256": "8aa9b85eea8de9efb8420099cf855df2e73598c27c64e96decd937446441953b",
@@ -77,8 +77,8 @@
       "size": 262609
     },
     "kicad_project.zip": {
-      "sha256": "27028bee48e376b8c119145937bb75d4f36aa037e08beb8c9769b6b883a2bfbf",
-      "size": 74116
+      "sha256": "e7fe3e98686eec61fe7c430b37a9e568ad80fc599627cf47ddcad2b4d046d134",
+      "size": 74458
     },
     "lvs.json": {
       "sha256": "8a44e465f8db5c6f95b19b46257bd87290819ef27e8b68a85cbf490bd0f47a68",
@@ -101,11 +101,11 @@
       "size": 3316
     },
     "report.pdf": {
-      "sha256": "caa76a572a674ec622b5dfb3df25552c4950e9be1a21513b2780fff46707aa63",
+      "sha256": "32b7b11d0d5670591c0b6d1b224c7f0bb88c15f71b5376f4eb250dbe9df51c28",
       "size": 1939688
     },
     "schematic.pdf": {
-      "sha256": "2949d13f1636f43f5482dbc72b8226a10594f46266232177aa2c65004b10568f",
+      "sha256": "072fa86f57bfa38219b098c551d67e394b5ca0cd7d6e9378c23de3489c6786f8",
       "size": 133124
     }
   },
