@@ -27,6 +27,7 @@ from .rules.impedance import ImpedanceRule
 from .rules.match_group_length_skew import MatchGroupLengthSkewRule
 from .rules.path_ampacity import PathAmpacityRule
 from .rules.placement import FootprintOutsideBoardRule
+from .rules.pour_slot import PourSlotRule
 from .rules.redundant_copper import RedundantCopperRule
 from .rules.silkscreen import check_all_silkscreen
 from .rules.via_in_pad import ViaInPadRule
@@ -34,7 +35,7 @@ from .rules.zone_fill import IsolatedCopperRule, ZoneFillRule
 from .violations import DRCResults, DRCViolation
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
     from pathlib import Path
 
     from kicad_tools.router.current_paths import CurrentPathSpec
@@ -363,6 +364,7 @@ class DRCChecker:
         "check_copper_slivers",
         "check_courtyard_overlap",
         "check_dangling_copper",
+        "check_pour_slot",
         "check_redundant_copper",
         "check_diffpair_clearance_intra",
         "check_diffpair_length_skew",
@@ -506,6 +508,7 @@ class DRCChecker:
         # Redundant copper (Issue #8218): warning-only advisories for
         # avoidable copper (duplicates, fragment runs, detours, off-centre
         # via ends).  Explicit entries keep them out of fab-blocking prefixes.
+        "pour_slot": CATEGORY_ADVISORY,
         "redundant_copper": CATEGORY_ADVISORY,
         "redundant_copper_duplicate": CATEGORY_ADVISORY,
         "redundant_copper_fragments": CATEGORY_ADVISORY,
@@ -931,6 +934,15 @@ class DRCChecker:
             warnings.
         """
         rule = DanglingCopperRule()
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_pour_slot(self, netclass_clearances: Mapping[str, float] | None = None) -> DRCResults:
+        """Report parallel tracks too close for the zone fill (Issue #8435).
+
+        Own CLI category (``pour_slot``) so ``--skip pour_slot`` works.
+        ``netclass_clearances`` maps net name to authored netclass clearance.
+        """
+        rule = PourSlotRule(netclass_clearances)
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_redundant_copper(self) -> DRCResults:

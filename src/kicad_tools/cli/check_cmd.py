@@ -3392,6 +3392,26 @@ def run_selected_checks(
 
         return check_netclass_clearance_copper(pcb_path, checker.pcb, checker.design_rules)
 
+    # Issue #8435: pour-slot advisory.  CLI-level closure because the netclass
+    # clearances come from the sibling ``.kicad_pro`` (needs the PCB *path*).
+    def _pour_slot_check() -> DRCResults:
+        clearances: dict[str, float] = {}
+        if pcb_path is not None:
+            try:
+                from kicad_tools.core.project_clearance import authored_netclass_clearances
+                from kicad_tools.validate.rules.netclass_clearance_copper import load_project
+
+                project = load_project(pcb_path)
+                if project is not None:
+                    names = [n.name for n in checker.pcb.nets.values() if n.name]
+                    clearances = {
+                        n: v.clearance
+                        for n, v in authored_netclass_clearances(project, names).items()
+                    }
+            except Exception:  # advisory: fall back to the zone clearance alone
+                clearances = {}
+        return checker.check_pour_slot(clearances)
+
     # Issue #7292: ``project.kct`` requirements vs the routed board.  CLI-level
     # closure (like ``netclass_floor``) because it needs the PCB *path* to
     # locate ``project.kct``; NOT a ``DRCChecker`` method.
@@ -3479,6 +3499,7 @@ def run_selected_checks(
         "copper_sliver": checker.check_copper_slivers,
         "courtyard_overlap": checker.check_courtyard_overlap,
         "dangling_copper": checker.check_dangling_copper,
+        "pour_slot": _pour_slot_check,
         "redundant_copper": checker.check_redundant_copper,
         "diffpair_clearance_intra": checker.check_diffpair_clearance_intra,
         "diffpair_length_skew": checker.check_diffpair_length_skew,
