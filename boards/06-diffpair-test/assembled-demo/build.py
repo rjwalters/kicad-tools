@@ -8,6 +8,39 @@ import sys
 from pathlib import Path
 
 
+# Only IN/OUT are routed by ``main``, so ``kct route`` never engages the LVDS pairs
+# and writes no native pair gap/skew block although the board carries four coupled
+# pairs that #6443 / #7894 enforce natively.  ``write_pair_rules`` writes the block
+# from the routed board's own pairs, through the resolvers ``kct route`` uses
+# (``route_cmd._router_pair_gaps`` / ``_router_pair_limits``) (Issue #8404).  It runs
+# before the export writer, which keeps an existing block.
+def write_pair_rules(routed: Path, net_class_map_json: Path) -> None:
+    from kicad_tools.cli import route_cmd
+    from kicad_tools.manufacturers.netclass_dru import (
+        merge_pair_gap_block,
+        pair_gap_block_rules,
+        pair_limit_rules,
+    )
+    from kicad_tools.manufacturers.project_generator import board_net_names
+    from kicad_tools.router.rules import net_class_map_from_path
+
+    routed = Path(routed)
+    class_map = net_class_map_from_path(net_class_map_json, layer_stack=None)
+    pairs = route_cmd._router_coupled_pairs(routed, class_map, None)
+    gaps = route_cmd._router_pair_gaps(pairs, class_map, None)
+    limits = route_cmd._router_pair_limits(pairs, class_map, routed)
+    on_board = board_net_names(routed)
+    dru = routed.with_suffix(".kicad_dru")
+    existing = dru.read_text(encoding="utf-8") if dru.exists() else None
+    merged = merge_pair_gap_block(
+        existing,
+        pair_gap_block_rules(gaps or [], on_board),
+        pair_limit_rules(limits or [], on_board),
+    )
+    if merged is not None:
+        dru.write_text(merged, encoding="utf-8")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", nargs="?", type=Path)
@@ -50,6 +83,10 @@ def main():
     )
     if not routed.exists():
         return route.returncode or 1
+    # Only IN/OUT are routed here, so kct route never engages the LVDS pairs and
+    # writes no native pair gap/skew block; emit it from the board's own pairs
+    # (Issue #8404, restoring what #6443 / #7894 enforce on this board).
+    write_pair_rules(routed, out / "net_class_map.json")
     # Resolve the project's actual fabrication floors before filling copper.
     # This intermediate check only emits rules; the finished board is gated below.
     subprocess.run(

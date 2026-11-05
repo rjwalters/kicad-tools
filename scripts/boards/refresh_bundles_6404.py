@@ -172,6 +172,20 @@ BUNDLES: dict[str, BundleConfig] = {
         gerber_members=(COPPER_MEMBER, SILK_MEMBER),
         recipe_drc="generate_design.py",
     ),
+    # Board 06 (Issue #8404): the routed board is the one
+    # ``assembled-demo/build.py`` emits; the bundle follows it via a plain
+    # ``kct export`` at the board's tier.
+    "06-diffpair-test": BundleConfig(
+        manufacturer="jlcpcb-tier1",
+        fill_consistency=(
+            "output/readiness/fill-consistency.json",
+            "output/manufacturing/fill-consistency.json",
+        ),
+        check_reports=(
+            "output/readiness/kct-check.json",
+            "output/manufacturing/check-report.json",
+        ),
+    ),
     "07-matchgroup-test": BundleConfig(
         manufacturer="jlcpcb",
         fill_consistency=(
@@ -576,6 +590,10 @@ def stage_replot(staged: Path, cfg: rr.BoardConfig, bundle: BundleConfig) -> lis
             project,
             ignore=shutil.ignore_patterns("manufacturing", "manufacturing.zip", "renders"),
         )
+        # ``kct export`` resolves LCSC numbers from the board-root spec overlay
+        # (board 06, Issue #8404); without it every BOM row is unmatched.
+        if (routed.parent.parent / "project.kct").is_file():
+            shutil.copy2(routed.parent.parent / "project.kct", Path(tmp) / "project.kct")
         export = Path(tmp) / "export"
         proc = run(
             rr.kct(
