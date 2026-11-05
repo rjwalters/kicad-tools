@@ -60,7 +60,7 @@ from __future__ import annotations
 import math
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -293,6 +293,9 @@ class _NetModel:
         self.hard_protected = [self._is_protected(i) for i in range(n)]
         #: any protection, overlap-only included: never snapped
         self.protected = [self.hard_protected[i] or bool(self.overlap[i]) for i in range(n)]
+        #: pieces made by a covered-track split (issue #8406): never merged,
+        #: snapped or removed by a later pass (they have no board index yet)
+        self.frozen: set[int] = set()
 
     @staticmethod
     def _cells(nd: _Node):
@@ -387,6 +390,31 @@ class _NetModel:
                 self.adj[ix].add(iy)
                 self.adj[iy].add(ix)
                 return
+
+    def add_node(self, node: _Node) -> int:
+        """Append ``node`` (a split piece, issue #8406) and link it."""
+        i = len(self.nodes)
+        self.nodes.append(node)
+        self.adj.append(set())
+        self.badj.append(set())
+        self.overlap.append(set())
+        self.banch.append([set(), set()])
+        self.anch.append([set(), set()])
+        self.hard_protected.append(False)
+        self.protected.append(False)
+        self.relink(i)
+        return i
+
+    def drop_last(self) -> None:
+        """Remove the node :meth:`add_node` appended last, unlinking it."""
+        i = len(self.nodes) - 1
+        self.nodes[i].layers = []  # shares no layer: relink() finds no edge
+        self.relink(i)
+        for lst in (self.nodes, self.adj, self.badj, self.overlap, self.banch, self.anch):
+            lst.pop()
+        self.hard_protected.pop()
+        self.protected.pop()
+        self.frozen.discard(i)
 
     def relink(self, i: int) -> None:
         """Recompute every edge of node ``i`` after its geometry changed."""
@@ -791,10 +819,20 @@ class NetPlan:
     #: loops on a declared net left in place because every segment is at/above
     #: ``--wide`` (issue #8313): ``{"segments": [...], "min_width": mm}``
     uncut_loops: list[dict[str, Any]] = field(default_factory=list)
+    #: covered-track splits (issue #8406): (container segment index, split xy).
+    #: The container keeps its start, ends at the first split point and a new
+    #: same-width, same-layer segment is added for every further piece.
+    splits: list[tuple[int, tuple[float, float]]] = field(default_factory=list)
 
     @property
     def empty(self) -> bool:
-        return not self.remove and not self.remove_vias and not self.snaps and not self.extends
+        return (
+            not self.remove
+            and not self.remove_vias
+            and not self.snaps
+            and not self.extends
+            and not self.splits
+        )
 
 
 def _group_for(model: _NetModel, seed: int, removed: set[int]) -> set[int] | None:
@@ -1018,7 +1056,10 @@ def _plan_collinear_merges(model: _NetModel, plan: NetPlan, removed: set[int]) -
     seg_ids = [
         i
         for i, n in enumerate(model.nodes)
-        if n.kind == "seg" and i not in removed and not model.hard_protected[i]
+        if n.kind == "seg"
+        and i not in removed
+        and not model.hard_protected[i]
+        and i not in model.frozen
     ]
     eligible = set(seg_ids)
     link: dict[tuple[int, int], tuple[int, int]] = {}
@@ -1156,7 +1197,7 @@ def _plan_anchored_merges(
     seg_ids = [
         i
         for i, n in enumerate(model.nodes)
-        if n.kind == "seg" and i not in removed and i not in done
+        if n.kind == "seg" and i not in removed and i not in done and i not in model.frozen
     ]
     eligible = set(seg_ids)
     link: dict[tuple[int, int], tuple[int, int]] = {}
@@ -1326,6 +1367,104 @@ def _try_remove_covered(
     return True
 
 
+def _try_split_covered(
+    model: _NetModel, plan: NetPlan, removed: set[int], baseline, s: int, c: int
+) -> bool:
+    """Split container ``c`` at the end(s) of covered ``s`` that a third track
+    lands on, then remove ``s`` (issue #8406).
+
+    A track ``T`` ending at an interior end of ``s`` is, once ``s`` is gone,
+    left landing mid-span on ``c`` -- ``track_dangling`` to kicad-cli (PR
+    #8392).  Cutting ``c`` into collinear pieces at that point turns the
+    landing into a shared endpoint, the one clean track join, and changes no
+    copper.  The pieces are tried on the model and kept only when the usual
+    covered-removal guards pass with ``s`` gone (:func:`_try_remove_covered`);
+    otherwise the model is restored exactly.  Locked or arc-adjacent
+    containers are never split.
+    """
+    n, cont = model.nodes[s], model.nodes[c]
+    if c in model.frozen or cont.index < 0 or _merge_unsafe_member(model, c):
+        return False
+    points: list[tuple[float, float]] = []
+    for e in (0, 1):
+        p = _end_pt(n, e)
+        blocked = {
+            k
+            for k in model.anch[s][e] - removed - {s, c}
+            if model.nodes[k].kind != "zone" and not _joins_container(model, k, c)
+        }
+        if not blocked:
+            continue
+        # only a track ending exactly at s's end, strictly inside c, is fixed
+        # by a split; anything else (a via off c's centreline, ...) is not
+        if any(model.nodes[k].kind != "seg" for k in blocked):
+            return False
+        if any(_same_pt(p, q) for q in (cont.a, cont.b)):
+            return False
+        points.append(p)
+    # a non-anchored blocker (reached only through adj) cannot be split away
+    held = set().union(*(model.anch[s][0] | model.anch[s][1], model.adj[s]))
+    for k in held - removed - {s, c}:
+        if model.nodes[k].kind != "zone" and not _joins_container(model, k, c):
+            if not any(k in model.anch[s][e] for e in (0, 1)):
+                return False
+    if not points:
+        return False
+
+    done: list[tuple[int, tuple[float, float], int]] = []  # (piece, old end, new)
+    pieces = [c]
+
+    def _undo() -> None:
+        for q, old_end, _new in reversed(done):
+            model.drop_last()
+            model.nodes[q].b = old_end
+            model.relink(q)
+
+    for p in points:
+        q = next(
+            (
+                q
+                for q in pieces
+                if _pt_seg_dist(p, model.nodes[q].a, model.nodes[q].b) <= _COLLINEAR_TOL
+                and not _same_pt(p, model.nodes[q].a)
+                and not _same_pt(p, model.nodes[q].b)
+            ),
+            None,
+        )
+        if q is None:
+            _undo()
+            return False
+        node = model.nodes[q]
+        piece = replace(node, a=p, index=-1)
+        old_end = node.b
+        node.b = p
+        model.relink(q)
+        new = model.add_node(piece)
+        pieces.append(new)
+        done.append((q, old_end, new))
+    host = next(
+        (
+            q
+            for q in pieces
+            if all(
+                _pt_seg_dist(x, model.nodes[q].a, model.nodes[q].b) <= _COLLINEAR_TOL
+                for x in (n.a, n.b)
+            )
+        ),
+        None,
+    )
+    if host is None or not _try_remove_covered(model, plan, removed, baseline, {s}, host):
+        _undo()
+        return False
+    for q in pieces:
+        model.frozen.add(q)
+        model.hard_protected[q] = model.protected[q] = True
+    for p in points:
+        plan.splits.append((cont.index, p))
+    plan.reasons[n.index] = "covered by a collinear track (split at a joint)"
+    return True
+
+
 def _plan_contained_segments(
     model: _NetModel, plan: NetPlan, removed: set[int], baseline, wide: float
 ) -> None:
@@ -1361,6 +1500,7 @@ def _plan_contained_segments(
             for s in model.adj[c] | model.badj[c]
             if s not in removed
             and _width(model, s) < wide
+            and s not in model.frozen
             and not _merge_unsafe_member(model, s)
             and _covers(model, s, c)
         }
@@ -1376,8 +1516,10 @@ def _plan_contained_segments(
             if len(comp) > 1 and _try_remove_covered(model, plan, removed, baseline, comp, c):
                 continue
             for s in sorted(comp):
-                if s not in removed:
-                    _try_remove_covered(model, plan, removed, baseline, {s}, c)
+                if s not in removed and not _try_remove_covered(
+                    model, plan, removed, baseline, {s}, c
+                ):
+                    _try_split_covered(model, plan, removed, baseline, s, c)
 
 
 #: Default width (mm) at/above which a declared-net segment is never cut.
@@ -1816,7 +1958,7 @@ def apply_plans(pcb: PCB, plans: list[NetPlan]) -> dict[str, int]:
     # Snaps must hit the sexp tree before removal changes matching keys; do it
     # by position among ``(segment ...)`` children, which mirrors pcb.segments.
     seg_nodes = [c for c in pcb._sexp.children if not c.is_atom and c.name == "segment"]
-    has_snaps = any(plan.snaps or plan.extends for plan in plans)
+    has_snaps = any(plan.snaps or plan.extends or plan.splits for plan in plans)
     if has_snaps and len(seg_nodes) != len(segs):
         raise RuntimeError(
             f"cannot snap segment ends: board has {len(seg_nodes)} (segment ...) nodes "
@@ -1842,11 +1984,52 @@ def apply_plans(pcb: PCB, plans: list[NetPlan]) -> dict[str, int]:
             node.children[1] = _mm_atom(y + oy)
         snapped += len(plan.snaps)
     to_remove = [segs[i] for plan in plans for i in plan.remove]
+    split_pieces = 0
+    for plan in plans:
+        by_seg: dict[int, list[tuple[float, float]]] = defaultdict(list)
+        for idx, pt in plan.splits:
+            by_seg[idx].append(pt)
+        for idx, pts in by_seg.items():
+            seg = segs[idx]
+            sx, sy = seg.start
+            pts = sorted(set(pts), key=lambda q: math.dist(q, (sx, sy)))
+            old_end = seg.end
+            node = seg_nodes[idx].find("end")
+            if node is None:
+                raise RuntimeError(f"segment {idx} has no (end ...) node to split")
+            seg.end = pts[0]
+            while len(node.children) < 2:
+                node.children.append(_mm_atom(0.0))
+            node.children[0] = _mm_atom(pts[0][0] + ox)
+            node.children[1] = _mm_atom(pts[0][1] + oy)
+            chain = [*pts, old_end]
+            for a, b in zip(chain, chain[1:], strict=False):
+                piece = Segment(
+                    start=a,
+                    end=b,
+                    width=seg.width,
+                    layer=seg.layer,
+                    net_number=seg.net_number,
+                    net_name=seg.net_name,
+                    net_name_only=seg.net_name_only,
+                    uuid=pcb.mint_uuid("segment", seg.net_number, seg.layer, *a, *b, seg.width),
+                )
+                sexp = piece.to_sexp(offset=(ox, oy))
+                for tag, pt in (("start", a), ("end", b)):
+                    child = sexp.find(tag)
+                    assert child is not None
+                    child.children[0] = _mm_atom(pt[0] + ox)
+                    child.children[1] = _mm_atom(pt[1] + oy)
+                pcb._segments.append(piece)
+                pcb._sexp.append(sexp)
+                split_pieces += 1
     vias = list(pcb.vias)
     via_remove = [vias[i] for plan in plans for i in plan.remove_vias]
     removed = pcb.remove_segments(to_remove) if to_remove else 0
     vias_removed = pcb.remove_vias(via_remove) if via_remove else 0
     stats = {"segments_removed": removed, "ends_snapped": snapped}
+    if split_pieces:  # key appears only when a covered track was split (issue #8406)
+        stats["segments_split"] = split_pieces
     if vias_removed:  # key appears only when a loop cut orphaned vias (issue #8313)
         stats["vias_removed"] = vias_removed
     return stats
