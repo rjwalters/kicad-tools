@@ -7,8 +7,9 @@ a slot.  This pass resolves such pairs by shifting one run perpendicular to
 itself:
 
 * **spread** -- widen the gap to the rule's threshold (the strip then fills);
-* **pack** -- otherwise tighten the gap to the pair's clearance (no strip is
-  left to drop);
+* **pack** -- opt-in (``pack=True``): tighten the gap to the pair's clearance.
+  This removes the slot by removing the ground strip, and the pair is still
+  flagged by the advisory, so it is never the default;
 * otherwise the pair is **left alone**.
 
 Detection is :func:`iter_pour_slot_pairs`, the same code the advisory uses.
@@ -52,17 +53,27 @@ class PourSlotCleanupResult:
     pairs_before: int = 0
     pairs_after: int = 0
     refused_reason: str | None = None
+    #: Reason of the final failed attempt, one entry per left-alone pair.
     left_alone_reasons: list[str] = field(default_factory=list)
 
     @property
     def changed(self) -> bool:
         return bool(self.spread or self.packed)
 
+    @property
+    def left_alone_by_reason(self) -> dict[str, int]:
+        """``{reason: pairs}``; counts sum to :attr:`left_alone`."""
+        counts: dict[str, int] = {}
+        for why in self.left_alone_reasons:
+            counts[why] = counts.get(why, 0) + 1
+        return counts
+
     def to_dict(self) -> dict:
         return {
             "spread": self.spread,
             "packed": self.packed,
             "left_alone": self.left_alone,
+            "left_alone_by_reason": self.left_alone_by_reason,
             "pairs_before": self.pairs_before,
             "pairs_after": self.pairs_after,
             "refused_reason": self.refused_reason,
@@ -241,8 +252,9 @@ def cleanup_pour_slots(
     netclass_clearances: Mapping[str, float] | None = None,
     *,
     referee: Referee,
+    pack: bool = False,
 ) -> PourSlotCleanupResult:
-    """Spread/pack pour-slot pairs on ``pcb`` in place, refereed per edit."""
+    """Spread (and, with ``pack=True``, pack) pour-slot pairs in place, refereed per edit."""
     result = PourSlotCleanupResult()
     pairs = _slots(pcb, netclass_clearances)
     result.pairs_before = result.pairs_after = len(pairs)
@@ -263,13 +275,14 @@ def cleanup_pour_slots(
             break
         pair = pairs[0]
         resolved = False
+        last_why = "no accepted edit (clearance or referee rejected it)"
         key = _pair_key(pair)
         a, b = pair.first, pair.second
         la = math.hypot(a.end[0] - a.start[0], a.end[1] - a.start[1])
         lb = math.hypot(b.end[0] - b.start[0], b.end[1] - b.start[1])
         mover_order = (1, 0) if lb <= la else (0, 1)  # move the shorter run first
         for mover_idx in mover_order:
-            for kind in ("spread", "pack"):
+            for kind in ("spread", "pack") if pack else ("spread",):
                 # An undone attempt re-adds fresh segment objects, so look the
                 # pair up again rather than holding stale references.
                 cur = next(
@@ -296,9 +309,10 @@ def cleanup_pour_slots(
                     continue
                 plan, why = _plan_shift(pcb, mover, nx * shift, ny * shift, pads)
                 if why:
-                    result.left_alone_reasons.append(why)
+                    last_why = why
                     continue
                 if not _clear_of_others(pcb, plan, cur.clearance):
+                    last_why = "no clear room for the shifted run"
                     continue
                 before_n = len(_slots(pcb, netclass_clearances))
                 done = _apply(pcb, plan)
@@ -318,6 +332,7 @@ def cleanup_pour_slots(
         if not resolved:
             dead.add(_pair_key(pair))
             result.left_alone += 1
+            result.left_alone_reasons.append(last_why)
 
     result.pairs_after = len(_slots(pcb, netclass_clearances))
     return result
