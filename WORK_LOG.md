@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-05
 
+- **PR #8469**: docs: record JLCPCB website-automation terms finding
+- **Issue #8467** (closed): docs: JLCPCB terms check for automated website use (part 2/3 of #8465)
 - **PR #8400**: fix: run prune/optimize-traces kicad-cli referees on pinned image under KCT_KICAD_DOCKER
 - **Issue #8395** (closed): pcb prune / optimize-traces DRC referee ignores KCT_KICAD_DOCKER and checks edits on the host kicad-cli
 - **PR #8449**: test: pin kct pcb dedupe output across PYTHONHASHSEED values

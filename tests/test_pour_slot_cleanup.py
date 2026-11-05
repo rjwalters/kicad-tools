@@ -60,10 +60,37 @@ def test_pack_when_spread_blocked_by_third_trace():
         pcb.add_via(15, 9.3, size=0.6, net="C")  # blocks spreading A
 
     pcb = _board(0.7, extra=[blocker])
-    res = cleanup_pour_slots(pcb, referee=_ok)
+    res = cleanup_pour_slots(pcb, referee=_ok, pack=True)
     assert res.packed == 1 and res.spread == 0
     gap = abs(_seg(pcb, "B").start[1] - _seg(pcb, "A").start[1]) - 0.2
     assert abs(gap - 0.3) < 1e-3
+
+
+def test_pack_is_off_by_default():
+    def blocker(pcb):
+        pcb.add_via(15, 11.4, size=0.6, net="C")
+        pcb.add_via(15, 9.3, size=0.6, net="C")
+
+    pcb = _board(0.7, extra=[blocker])
+    before = [(s.start, s.end) for s in pcb.segments]
+    res = cleanup_pour_slots(pcb, referee=_ok)
+    assert res.packed == 0 and res.spread == 0
+    assert res.left_alone == 1 and not res.changed
+    assert [(s.start, s.end) for s in pcb.segments] == before
+
+
+def test_left_alone_by_reason_counts_each_pair_once():
+    def blocker(pcb):
+        pcb.add_via(15, 11.4, size=0.6, net="C")
+        pcb.add_via(15, 9.3, size=0.6, net="C")
+        pcb.add_via(15, 10.4, size=0.6, net="D")
+
+    pcb = _board(0.7, extra=[blocker])
+    res = cleanup_pour_slots(pcb, referee=_ok, pack=True)
+    by_reason = res.to_dict()["left_alone_by_reason"]
+    assert res.left_alone >= 1
+    assert sum(by_reason.values()) == res.left_alone
+    assert len(res.left_alone_reasons) == res.left_alone
 
 
 def test_left_alone_when_neither_is_clean():
@@ -113,14 +140,77 @@ def test_connected_neighbour_follows_moved_run():
     assert stub_seg.start == run.end  # connectivity preserved
 
 
-def test_run_ending_on_via_is_left_alone():
+def _via_ends(pcb):
+    pcb.add_via(20, 10.9, net="B")
+    pcb.add_via(20, 10.0, net="A")
+    pcb.add_via(10, 10.9, net="B")
+    pcb.add_via(10, 10.0, net="A")
+
+
+def test_via_ended_runs_are_spread_with_45_degree_jogs():
+    pcb = _board(0.7, extra=[_via_ends])
+    vias = sorted(v.position for v in pcb.vias)
+    res = cleanup_pour_slots(pcb, referee=_ok)
+    assert res.changed and res.left_alone == 0
+    assert sorted(v.position for v in pcb.vias) == vias  # vias never move
+    assert list(iter_pour_slot_pairs(pcb)) == []
+    for name in ("A", "B"):
+        for via_xy in [v.position for v in pcb.vias if v.net_name == name]:
+            # some same-net segment still ends exactly on the via
+            assert any(
+                s.net_name == name
+                and (
+                    (abs(s.start[0] - via_xy[0]) < 1e-3 and abs(s.start[1] - via_xy[1]) < 1e-3)
+                    or (abs(s.end[0] - via_xy[0]) < 1e-3 and abs(s.end[1] - via_xy[1]) < 1e-3)
+                )
+                for s in pcb.segments
+            )
+    diag = [
+        s
+        for s in pcb.segments
+        if abs(abs(s.end[0] - s.start[0]) - abs(s.end[1] - s.start[1])) < 1e-3
+        and abs(s.end[0] - s.start[0]) > 1e-3
+    ]
+    assert len(diag) >= 2
+
+
+def test_via_ended_run_left_alone_when_jog_blocked():
+    def blocker(pcb):
+        _via_ends(pcb)
+        for y in (9.3, 11.4):  # blocks every spread leg
+            pcb.add_via(17, y, size=0.6, net="C")
+            pcb.add_via(13, y, size=0.6, net="C")
+        pcb.add_via(15, 10.45, size=0.6, net="D")  # blocks packing
+
+    pcb = _board(0.7, extra=[blocker])
+    before = [(s.start, s.end) for s in pcb.segments]
+    res = cleanup_pour_slots(pcb, referee=_ok)
+    assert not res.changed and res.left_alone >= 1
+    assert [(s.start, s.end) for s in pcb.segments] == before
+
+
+def test_different_net_via_at_endpoint_refuses():
     def via(pcb):
-        pcb.add_via(20, 10.9, net="B")
-        pcb.add_via(20, 10.0, net="A")
+        pcb.add_via(20, 10.9, net="C")
+        pcb.add_via(20, 10.0, net="C")
 
     pcb = _board(0.7, extra=[via])
     res = cleanup_pour_slots(pcb, referee=_ok)
     assert not res.changed and res.left_alone == 1
+
+
+def test_via_jog_referee_regression_reverts():
+    calls = []
+
+    def referee(_pcb):
+        calls.append(1)
+        return {"unconnected": 0} if len(calls) == 1 else {"unconnected": 1}
+
+    pcb = _board(0.7, extra=[_via_ends])
+    before = sorted((s.start, s.end) for s in pcb.segments)
+    res = cleanup_pour_slots(pcb, referee=referee)
+    assert not res.changed
+    assert sorted((s.start, s.end) for s in pcb.segments) == before
 
 
 def test_detection_shared_with_rule():
