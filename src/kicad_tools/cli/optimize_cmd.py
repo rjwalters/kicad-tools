@@ -136,6 +136,23 @@ def _kicad_cli_clearance_errors(pcb_path: Path, rules_from: Path | None = None) 
     return {"available": True, "clearance_errors": count, "reason": None}
 
 
+def _make_kicad_cli_arbiter(rules_from: Path):
+    """Board-text -> kicad-cli clearance error count under ``rules_from``'s rules.
+
+    Returns ``None`` when kicad-cli cannot run (Issue #8367).
+    """
+    import tempfile
+
+    def arbiter(board_text: str) -> int | None:
+        with tempfile.TemporaryDirectory(prefix="kct_optarb_") as td:
+            board = Path(td) / "arb.kicad_pcb"
+            board.write_text(board_text)
+            res = _kicad_cli_clearance_errors(board, rules_from=rules_from)
+        return res["clearance_errors"] if res["available"] else None
+
+    return arbiter
+
+
 def _kicad_cli_drc_summary(before: dict | None, after: dict | None, has_dru: bool) -> dict:
     """Combine the before/after kicad-cli runs into the reported summary (#8322)."""
     ok = (
@@ -605,6 +622,12 @@ Examples:
         declared = _declared_design_rules(pcb_path)
         if declared is not None:
             config.drc_clearance_mm = declared.trace_clearance
+        # Issue #8367: with a project ``.kicad_dru`` the in-process referee is
+        # blind to its pad exemptions; let kicad-cli arbitrate when the
+        # in-process count rejects every changed net.
+        rules_base = Path(args.project) if args.project else pcb_path
+        if rules_base.with_suffix(".kicad_dru").exists():
+            config.drc_arbiter = _make_kicad_cli_arbiter(rules_base)
 
     # Issue #8214: collision-check every rewrite against the board's own
     # copper instead of relying on whole-net ``--drc-aware`` rollback.  A grid

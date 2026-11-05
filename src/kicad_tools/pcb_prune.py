@@ -8,8 +8,10 @@ only by overlap (off-centre of the via/pad they land on).
 Connectivity here follows what KiCad treats as connected, and is deliberately
 *under*-estimated wherever the two could differ:
 
-* track-to-track joins need **coincident endpoints** -- capsule overlap or
-  tangency is never a join;
+* track-to-track joins need **coincident endpoints**, or a track end lying
+  exactly on another same-layer track's centreline (a T landing, issue #8368)
+  -- capsule overlap or tangency is never a join;
+* a via whose centre lies exactly on a track's centreline joins it (#8368);
 * a track end joins a via / pad only when it lies inside the via's disc or the
   pad's *full* shape (rect / roundrect / oval / circle, rotation-aware);
 * a track end joins a zone when it lies inside the zone outline -- but the
@@ -43,17 +45,29 @@ copper outside the run that is not otherwise joined to it through modelled
 track / via / pad joins (the contact could be an unmodelled join held by an
 interior joint; issue #8278).  Merging applies after removals and snaps and
 never changes which ends are anchored.
+
+Issue #8368 aligns the loop model with the current-path audit's copper graph
+(``router/current_paths.py``): a track lying wholly inside a collinear,
+no-narrower same-net track is removed as covered copper (no copper area is
+lost), and a mid-span same-layer centreline crossing counts as a body join
+when looking for cycles.  With ``current_paths`` given, any loop the audit
+still sees after pruning is reported with the audit's witness, so prune and
+``pcb current-paths-audit`` never disagree about a remaining loop.
 """
 
 from __future__ import annotations
 
 import math
 from collections import Counter, defaultdict
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 from kicad_tools.schema.pcb import PCB, Pad, Segment, _mm_atom
+
+if TYPE_CHECKING:
+    from kicad_tools.router.current_paths import CurrentPathSpec
 
 #: End-to-centre distance (mm) at/below which an end counts as centred.
 _MICRO_BRIDGE = 0.01  # mm: a member this short is a bridge, not a step
@@ -86,6 +100,19 @@ def _pt_seg_dist(p: tuple[float, float], a: tuple[float, float], b: tuple[float,
 
 def _ccw(a: tuple[float, float], b: tuple[float, float], c: tuple[float, float]) -> float:
     return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+
+
+def _crosses(
+    a1: tuple[float, float],
+    a2: tuple[float, float],
+    b1: tuple[float, float],
+    b2: tuple[float, float],
+) -> bool:
+    """Do two centrelines cross properly (strictly inside both, issue #8368)?"""
+    d1, d2 = _ccw(a1, a2, b1), _ccw(a1, a2, b2)
+    d3, d4 = _ccw(b1, b2, a1), _ccw(b1, b2, a2)
+    eps = 1e-12
+    return d1 * d2 < -eps and d3 * d4 < -eps
 
 
 def _seg_seg_dist(
@@ -299,14 +326,29 @@ class _NetModel:
             # Issue #8298: KiCad also connects a track whose end (anchor) lies
             # inside another same-layer track's body.
             if a.layers == b.layers:
+                body = False
                 for x, y, ix, iy in ((a, b, i, j), (b, a, j, i)):
                     for ex, px in enumerate((x.a, x.b)):
                         if any(_same_pt(px, q) for q in (y.a, y.b)):
                             continue
-                        if _pt_seg_dist(px, y.a, y.b) <= y.radius:
+                        d = _pt_seg_dist(px, y.a, y.b)
+                        if d <= JOIN_TOL:
+                            # Issue #8368: an end exactly on another track's
+                            # centreline (a T landing) is a modelled join, the
+                            # same contact the current-path audit graph uses.
+                            self.anch[ix][ex].add(iy)
+                            hit = True
+                        elif d <= y.radius:
+                            body = True
                             self.badj[ix].add(iy)
                             self.badj[iy].add(ix)
                             self.banch[ix][ex].add(iy)
+                if not hit and not body and _crosses(a.a, a.b, b.a, b.b):
+                    # Issue #8368: a mid-span centreline crossing joins the
+                    # copper (the audit counts it), so it can close a loop.
+                    # Like other body joins it only *finds* cycles.
+                    self.badj[i].add(j)
+                    self.badj[j].add(i)
             if hit:
                 self.adj[i].add(j)
                 self.adj[j].add(i)
@@ -316,6 +358,11 @@ class _NetModel:
             if b.kind in ("via", "pad") and _pt_seg_dist(b.a, a.a, a.b) <= a.radius:
                 self.badj[i].add(j)
                 self.badj[j].add(i)
+                if b.kind == "via" and _pt_seg_dist(b.a, a.a, a.b) <= CENTRE_TOL:
+                    # Issue #8368: a via centred on the track's centreline is
+                    # a modelled join (the audit graph's via contact, 1 um).
+                    self.adj[i].add(j)
+                    self.adj[j].add(i)
             for ea, pa in enumerate((a.a, a.b)):
                 if b.kind == "zone":
                     ok = _in_polygon(pa, b.ref.polygon)
@@ -460,7 +507,15 @@ class _NetModel:
             if k in removed:
                 continue
             o = self.nodes[k]
-            if o.kind == "seg" or (o.kind in ("via", "pad") and math.dist(p, o.a) <= CENTRE_TOL):
+            if o.kind == "seg":
+                # Only a shared endpoint is clean.  A T landing (this end on
+                # another track's centreline, mid-span) is a modelled join
+                # (#8368), but kicad-cli flags a short angled stub ending
+                # there as ``track_dangling`` (PR #8392 review), so losing
+                # the endpoint partner and keeping only a landing degrades it.
+                if _same_pt(p, o.a) or _same_pt(p, o.b):
+                    return True
+            elif o.kind in ("via", "pad") and math.dist(p, o.a) <= CENTRE_TOL:
                 return True
         return False
 
@@ -518,8 +573,14 @@ class _NetModel:
                 for j in self.adj[k]
             ):
                 continue
+            # Only a track *ending* inside the via / pad can be the off-centre
+            # joint; one merely running over its centre is joined there
+            # through its body (issue #8368), not by an off-centre end.
             if any(
-                j not in after and self.nodes[j].kind == "seg" and lost & set(self.nodes[j].layers)
+                j not in after
+                and self.nodes[j].kind == "seg"
+                and lost & set(self.nodes[j].layers)
+                and any(_contains(self.nodes[k], pt) for pt in (self.nodes[j].a, self.nodes[j].b))
                 for j in self.adj[k]
             ):
                 return True
@@ -1191,6 +1252,134 @@ def _plan_anchored_merges(
             plan.reasons[model.nodes[m].index] = "collinear run merged"
 
 
+def _covers(model: _NetModel, s: int, k: int) -> bool:
+    """Does live segment ``k`` fully cover segment ``s`` (same layer)?
+
+    ``s`` is covered when both its ends lie on ``k``'s centreline (so its
+    whole centreline does) and it is no wider.  Of two identical tracks the
+    later one is the copy (``pcb dedupe`` territory, but cheap).
+    """
+    n, o = model.nodes[s], model.nodes[k]
+    if k == s or o.kind != "seg" or n.kind != "seg" or o.layers != n.layers:
+        return False
+    if n.radius > o.radius + 1e-9:
+        return False
+    if any(_pt_seg_dist(p, o.a, o.b) > _COLLINEAR_TOL for p in (n.a, n.b)):
+        return False
+    # mutual containment: drop only the later of the two
+    return not (
+        abs(n.radius - o.radius) <= 1e-9
+        and all(_pt_seg_dist(p, n.a, n.b) <= _COLLINEAR_TOL for p in (o.a, o.b))
+        and k > s
+    )
+
+
+def _joins_container(model: _NetModel, k: int, c: int) -> bool:
+    """Is node ``k`` joined to container ``c`` by a contact that already
+    exists while the covered track is still there?
+
+    A track counts only by a shared endpoint, or by the container's own end
+    landing on it.  A track end that lands mid-span on the container *only
+    once the covered track is gone* is not counted: kicad-cli 10.0.6 connects
+    it but reports ``track_dangling`` for it (a short 45 degree stub, or a
+    collinear track ending inside the container; PR #8392 review).  A via /
+    pad counts when joined to the container or centred on its centreline.
+    """
+    o, cont = model.nodes[k], model.nodes[c]
+    if o.kind == "seg":
+        return k in model.adj[c] and any(
+            _same_pt(pk, pc) or _pt_seg_dist(pc, o.a, o.b) <= JOIN_TOL
+            for pk in (o.a, o.b)
+            for pc in (cont.a, cont.b)
+        )
+    if k in model.adj[c]:
+        return True
+    return o.kind in ("via", "pad") and _pt_seg_dist(o.a, cont.a, cont.b) <= CENTRE_TOL
+
+
+def _try_remove_covered(
+    model: _NetModel, plan: NetPlan, removed: set[int], baseline, group: set[int], c: int
+) -> bool:
+    """Remove ``group`` (segments all covered by ``c``) if every guard holds."""
+    held = set().union(*(model.anch[s][0] | model.anch[s][1] | model.adj[s] for s in group))
+    for k in held - removed - group - {c}:
+        if model.nodes[k].kind == "zone":
+            continue  # zone joins are never relied on
+        if not _joins_container(model, k, c):
+            return False
+    touched = set().union(*(model.adj[s] | model.badj[s] | model.overlap[s] for s in group)) - group
+    strict = set().union(*(model.adj[s] for s in group)) - group
+    after = removed | group
+    if (
+        model.partition(after) != baseline
+        or not model.still_joined(strict | {c}, after)
+        or not model.still_joined(touched, after, body=True)
+        or model.strands_end(group, removed)
+        or model.degrades_ends(touched, removed, after)
+        or model.decentres(touched, removed, after)
+    ):
+        return False
+    removed |= group
+    for s in sorted(group):
+        plan.remove.append(model.nodes[s].index)
+        plan.reasons[model.nodes[s].index] = "covered by a collinear track"
+    return True
+
+
+def _plan_contained_segments(
+    model: _NetModel, plan: NetPlan, removed: set[int], baseline, wide: float
+) -> None:
+    """Remove segments lying wholly inside a collinear same-net track (#8368).
+
+    A shorter track on the centreline of a longer, no-narrower one adds no
+    copper, but the current-path audit splits the longer track at the short
+    one's ends and sees two parallel edges -- a loop prune could not see,
+    since the pair shares at most one endpoint.  Removing the covered track
+    removes no copper, so no ampacity check applies; the usual guards still do:
+
+    * everything joined at the covered tracks' ends must also join the
+      container by a contact that exists with them present
+      (:func:`_joins_container`): a track end left landing mid-span on the
+      container is ``track_dangling`` to kicad-cli, so such a track is kept
+      and its loop reported instead;
+    * the terminal partition is unchanged and the neighbours stay joined;
+    * no surviving end is degraded (a shared track endpoint is the only clean
+      track join, :meth:`_NetModel.clean_end`) or stranded, and no via / pad
+      is de-centred (:meth:`_NetModel.decentres`, issues #8278 / #8358).
+
+    The tracks one container covers are tried together, per connected run
+    (a run of short steps under one long track goes as a whole, since each
+    step's interior end would otherwise be left landing on the container),
+    then one at a time.  An explicit ``--wide`` on a declared net keeps its
+    absolute meaning.
+    """
+    for c, cont in enumerate(model.nodes):
+        if cont.kind != "seg" or c in removed:
+            continue
+        cov = {
+            s
+            for s in model.adj[c] | model.badj[c]
+            if s not in removed
+            and _width(model, s) < wide
+            and not _merge_unsafe_member(model, s)
+            and _covers(model, s, c)
+        }
+        while cov:
+            seed = min(cov)
+            comp, todo = {seed}, [seed]
+            while todo:
+                for k in model.adj[todo.pop()] & cov:
+                    if k not in comp:
+                        comp.add(k)
+                        todo.append(k)
+            cov -= comp
+            if len(comp) > 1 and _try_remove_covered(model, plan, removed, baseline, comp, c):
+                continue
+            for s in sorted(comp):
+                if s not in removed:
+                    _try_remove_covered(model, plan, removed, baseline, {s}, c)
+
+
 #: Default width (mm) at/above which a declared-net segment is never cut.
 DEFAULT_WIDE_MM = 0.5
 
@@ -1217,13 +1406,32 @@ def _width(model: _NetModel, i: int) -> float:
     return model.nodes[i].radius * 2.0
 
 
-def _ampacity_ok(model: _NetModel, group: set[int], required: float) -> bool:
+#: Net-relative ampacity requirement: one width (mm) for every layer, or a
+#: per-copper-layer map (outer and inner layers need different widths).
+Required = float | Mapping[str, float]
+
+
+def _required_on(required: Required, layer: str) -> float:
+    if isinstance(required, Mapping):
+        return float(required.get(layer, max(required.values(), default=0.0)))
+    return float(required)
+
+
+def _required_max(required: Required) -> float:
+    if isinstance(required, Mapping):
+        return max(required.values(), default=0.0)
+    return float(required)
+
+
+def _ampacity_ok(model: _NetModel, group: set[int], required: Required) -> bool:
     """Net-relative ``--wide`` (issue #8368): a cut is allowed only when every
     segment still attached where the cut ends (the parallel branch that now
-    carries the current) is at least ``required`` mm wide.  ``required`` is
-    the IPC-2221 width of the net's declared current; ``0`` accepts any.
+    carries the current) is at least the required width on its own layer.
+    ``required`` is the IPC-2221 width of the net's declared current, either
+    one value or a per-layer map (:func:`required_widths_for`); ``0`` accepts
+    any.
     """
-    if required <= 0.0:
+    if _required_max(required) <= 0.0:
         return True
     near: set[int] = set()
     for g in group:
@@ -1233,7 +1441,11 @@ def _ampacity_ok(model: _NetModel, group: set[int], required: float) -> bool:
                 near.add(a)
                 near |= model.adj[a]
     near -= group
-    return all(_width(model, k) >= required for k in near if model.nodes[k].kind == "seg")
+    return all(
+        _width(model, k) >= _required_on(required, model.nodes[k].layers[0])
+        for k in near
+        if model.nodes[k].kind == "seg"
+    )
 
 
 def _dangling_remnants(
@@ -1332,13 +1544,53 @@ def _expand_cut(
     return None
 
 
+def _describe_required(required: Required, comp: set[int], model: _NetModel) -> str:
+    if not isinstance(required, Mapping):
+        return f"{required:.3g} mm"
+    layers = sorted({model.nodes[i].layers[0] for i in comp})
+    return ", ".join(f"{_required_on(required, lyr):.3g} mm on {lyr}" for lyr in layers)
+
+
+def required_widths_for(pcb: PCB, current_a: float) -> dict[str, float]:
+    """IPC-2221 width (mm) a declared current needs on each copper layer.
+
+    Outer layers (``F.Cu`` / ``B.Cu``) use the external constant, inner layers
+    the internal one, each at the board's own copper weight from an explicit
+    stackup (``Stackup.outer_inner_copper_oz``; 1 oz where none is declared).
+    Issue #8368: a flat "internal, 1 oz" figure overstated the outer-layer
+    width of a 2 oz board several times over, so every cut was refused.
+    """
+    from kicad_tools.physics.ampacity import width_for_current
+
+    outer_oz = inner_oz = 1.0
+    try:
+        from kicad_tools.physics.stackup import Stackup
+
+        derived = Stackup.from_pcb(pcb).outer_inner_copper_oz()
+    except Exception:  # noqa: BLE001 - a malformed stackup falls back to 1 oz
+        derived = None
+    if derived is not None:
+        outer_oz = derived[0] or outer_oz
+        inner_oz = derived[1] or inner_oz
+    names = [layer.name for layer in pcb.copper_layers] or ["F.Cu", "B.Cu"]
+    out: dict[str, float] = {}
+    for name in names:
+        external = name in ("F.Cu", "B.Cu")
+        out[name] = width_for_current(
+            current_a,
+            outer_oz if external else inner_oz,
+            layer="external" if external else "internal",
+        )
+    return out
+
+
 def _plan_declared_loops(
     model: _NetModel,
     plan: NetPlan,
     removed: set[int],
     baseline,
     wide: float,
-    required: float = 0.0,
+    required: Required = 0.0,
 ) -> None:
     """Break loops (same-layer or closed through vias) on a declared net.
 
@@ -1405,7 +1657,7 @@ def _plan_declared_loops(
                 "min_width": round(min(_width(model, i) for i in comp), 6),
                 "reason": (
                     f"cutting would leave a branch narrower than the declared "
-                    f"current needs ({required:.3g} mm)"
+                    f"current needs ({_describe_required(required, comp, model)})"
                     if relative
                     else "all segments >= --wide"
                 ),
@@ -1419,12 +1671,16 @@ def _plan_net(
     *,
     declared: bool = False,
     wide: float = DEFAULT_WIDE_MM,
-    required: float = 0.0,
+    required: Required = 0.0,
 ) -> NetPlan:
     plan = NetPlan(net_number=net_number)
     baseline = model.partition(set())
     removed: set[int] = set()
     seg_ids = [i for i, n in enumerate(model.nodes) if n.kind == "seg"]
+
+    # Issue #8368: a track lying inside a collinear, no-narrower track adds no
+    # copper but closes a two-edge loop in the current-path audit's graph.
+    _plan_contained_segments(model, plan, removed, baseline, wide if declared else math.inf)
 
     # The declared-net pass shares the partition baseline, so it needs the same
     # two-terminal floor as the generic pass below (Issue #8333): with fewer
@@ -1509,7 +1765,7 @@ def plan_prune(
     declared_nets: set[str] | None = None,
     wide: float | None = DEFAULT_WIDE_MM,
     uncut_out: list[dict[str, Any]] | None = None,
-    required_widths: dict[str, float] | None = None,
+    required_widths: Mapping[str, Required] | None = None,
 ) -> list[NetPlan]:
     """Compute per-net prune/snap plans without touching the board.
 
@@ -1658,8 +1914,9 @@ def prune_board(
     apply: bool = True,
     declared_nets: set[str] | None = None,
     wide: float | None = DEFAULT_WIDE_MM,
-    required_widths: dict[str, float] | None = None,
+    required_widths: Mapping[str, Required] | None = None,
     project: Path | str | None = None,
+    current_paths: Sequence[CurrentPathSpec] | None = None,
     allow_default_rules: bool = False,
 ) -> tuple[PCB, PruneResult]:
     """Plan (and optionally apply) pruning for ``pcb_path``.
@@ -1739,4 +1996,53 @@ def prune_board(
         }
         if n_vias := sum(len(p.remove_vias) for p in accepted):
             stats["vias_removed"] = n_vias
+    if current_paths:
+        result = pcb if apply else PCB.load(pcb_path)
+        if not apply and accepted:
+            apply_plans(result, accepted)
+        uncut.extend(audit_loops_left(result, current_paths, uncut))
     return pcb, PruneResult(plans, accepted, rejected, drc_verified, note, stats, uncut)
+
+
+def audit_loops_left(
+    pcb: PCB,
+    specs: Sequence[CurrentPathSpec],
+    reported: Sequence[dict[str, Any]] = (),
+) -> list[dict[str, Any]]:
+    """Loops the current-path audit still sees on the pruned board (#8368).
+
+    The audit's copper graph is the reference model for "is this declared path
+    ambiguous": any ``loop/parallel`` verdict left after pruning is reported
+    as an uncut loop (with the audit's witness) on a net prune has not already
+    reported one for, so a prune run that reports no remaining loops never
+    disagrees with ``pcb current-paths-audit``.  Copper is never cut here.
+    """
+    from kicad_tools.router.current_paths import (
+        STATUS_AMBIGUOUS,
+        _describe_witness,
+        resolve_current_path,
+    )
+
+    seen = {str(u.get("net")) for u in reported}
+    out: list[dict[str, Any]] = []
+    for spec in specs:
+        if spec.net_name in seen:
+            continue
+        res = resolve_current_path(pcb, spec)
+        if res.status != STATUS_AMBIGUOUS or not res.witness:
+            continue
+        seen.add(spec.net_name)
+        w = res.witness
+        out.append(
+            {
+                "net": spec.net_name,
+                "segments": [_describe_witness(w).strip(" []").removeprefix("witness: ")],
+                "min_width": round(float(cast("float", w.get("width", 0.0))), 6),
+                "reason": (
+                    "the current-path audit still sees a loop/parallel path that "
+                    "prune has no safe cut for"
+                ),
+                "witness": w,
+            }
+        )
+    return out

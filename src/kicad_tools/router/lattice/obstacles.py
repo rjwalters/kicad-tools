@@ -38,6 +38,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from kicad_tools.geometry.copper import pad_gate_polygon as _pad_gate_polygon
 from kicad_tools.geometry.copper import pad_waiver_polygon as _pad_waiver_polygon
 
 from ..clearance_shapes import pad_kernel_params
@@ -192,8 +193,10 @@ def _pad_zone_waives(
 
     Runs the very same ``_attach_zone_verdict`` (both nearest points in one
     zone AND the copper outside it clears) on the true segment/pad copper, so
-    search and gate cannot disagree.  An inexact pad model (roundrect without
-    its radius) falls back to requiring one zone to hold both pieces whole.
+    search and gate cannot disagree.  A ``roundrect`` pad is measured with
+    its corner radius (or as its enclosing rectangle when the ratio is
+    unknown), as the gate does (#8327); only a shape with no polygon falls
+    back to requiring one zone to hold both pieces whole.
     """
     from kicad_tools.geometry.copper import segment_copper_polygon
     from kicad_tools.router.pairwise_clearance import (
@@ -203,7 +206,9 @@ def _pad_zone_waives(
         _shapely_gap_and_midpoint,
     )
 
-    polygon = _pad_waiver_polygon(pad.x, pad.y, pad.width, pad.height, pad.shape, pad.rotation)
+    polygon = _pad_gate_polygon(
+        pad.x, pad.y, pad.width, pad.height, pad.shape, pad.rotation, pad.roundrect_rratio
+    )
     copper = segment_copper_polygon(a, b, own_half * 2)
     if polygon is None or copper is None:
         return _pad_pair_zone_contains_both(a, b, pad, own_half, net, layer, pairwise)
@@ -224,9 +229,13 @@ def _pad_zone_waives(
         zones.append(AttachZone(x0, y0, x1, y1, names))
     if not zones:
         return False
+    # No end-cap overhang (#8327): the trace-vs-pad gate
+    # (``_copper_pair_violation``) clips the zone without one, and now that
+    # roundrect pads reach this verdict too, passing ``own_half`` would let
+    # the search waive copper the gate refuses.
     return (
         _attach_zone_verdict(
-            copper, polygon, zones, str(net), str(pad.net), None, req, _PASS_TOLERANCE, own_half
+            copper, polygon, zones, str(net), str(pad.net), None, req, _PASS_TOLERANCE
         )
         is None
     )

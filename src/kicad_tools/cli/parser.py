@@ -2734,7 +2734,8 @@ def _add_pcb_parser(subparsers) -> None:
         help="Declared current-path JSON. On the nets it names, also break copper "
         "loops (including loops closed through vias) by removing each loop's "
         "narrowest segment below --wide, so 'pcb reinforce' can anchor the run. "
-        "Loops whose segments are all >= --wide are reported, not cut.",
+        "Loops whose segments are all >= --wide are reported, not cut, as is any "
+        "loop the current-path audit still sees afterwards (with its witness).",
     )
     pcb_prune.add_argument(
         "--wide",
@@ -2744,7 +2745,9 @@ def _add_pcb_parser(subparsers) -> None:
         help="With --current-paths: width (mm) at/above which a segment is never "
         "cut. Default (unset): net-relative -- cut each loop's narrowest segment "
         "whatever its width, provided the branch left behind still meets the "
-        "declared current's IPC-2221 width; refused cuts are reported.",
+        "declared current's IPC-2221 width on its own layer (external for "
+        "F.Cu/B.Cu, internal otherwise, at the stackup's copper weight); refused "
+        "cuts are reported.",
     )
     pcb_prune.add_argument(
         "--unverified",
