@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-05
 
+- **PR #8470**: feat(submit-jlcpcb): add preflight, stock gate, API leg and review page workflow
+- **Issue #8466** (closed): feat(submit-jlcpcb): preflight, stock gate, API leg, dry-run and review page (part 1/3 of #8465)
 - **PR #8464**: feat: re-pitch parallel pour-slot buses jointly
 - **Issue #8460** (closed): pour-slots: re-pitch parallel-run buses as a group
 - **PR #8461**: test(prune): pin segment count and stability for tilt-refused via stubs
