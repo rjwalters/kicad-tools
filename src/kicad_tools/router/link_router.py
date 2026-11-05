@@ -455,7 +455,7 @@ def route_link(
     """
     import numpy as np
     import shapely
-    from shapely.geometry import LineString, Point, box
+    from shapely.geometry import Point, box
     from shapely.ops import unary_union
 
     model = model or _build_model(pcb)
@@ -648,21 +648,43 @@ def route_link(
         xy = [(float(xs[i]), float(ys[j])) for i, j in pts]
         xy = _shortcut(xy, foreign_by_layer.get(copper[li], []), half_w, legal_area)
         for (x_a, y_a), (x_b, y_b) in zip(xy, xy[1:], strict=False):
+            if (x_a, y_a) == (x_b, y_b):
+                continue  # Issue #8417: never emit a zero-length track
             route.segments.append((x_a, y_a, x_b, y_b, copper[li]))
 
     # Exact check: grid quantisation must never leak a sub-clearance segment.
+    if _route_violates_foreign(route, foreign_by_layer, half_w):
+        return None
+    return route
+
+
+def _route_violates_foreign(
+    route: LinkRoute,
+    foreign_by_layer: dict[str, list[tuple[Any, float]]],
+    half_w: float,
+) -> bool:
+    """True if any segment or via of ``route`` is too close to foreign copper.
+
+    A segment with ``start == end`` is measured as a disc of the trace width
+    (a point buffered by ``half_w``), exactly like a real track, so a
+    degenerate segment lying on foreign copper is rejected (Issue #8417).
+    """
+    from shapely.geometry import LineString, Point
+
     for x_a, y_a, x_b, y_b, layer in route.segments:
-        line = LineString([(x_a, y_a), (x_b, y_b)])
+        shape = (
+            Point(x_a, y_a) if (x_a, y_a) == (x_b, y_b) else LineString([(x_a, y_a), (x_b, y_b)])
+        )
         for foreign, c in foreign_by_layer.get(layer, []):
-            if line.distance(foreign) < c + half_w - 1e-4:
-                return None
+            if shape.distance(foreign) < c + half_w - 1e-4:
+                return True
     for vx, vy in route.vias:
         p = Point(vx, vy)
         for groups in foreign_by_layer.values():
             for foreign, c in groups:
-                if p.distance(foreign) < c + rules.via_size / 2 - 1e-4:
-                    return None
-    return route
+                if p.distance(foreign) < c + route.via_size / 2 - 1e-4:
+                    return True
+    return False
 
 
 def _via_site_blocker(
