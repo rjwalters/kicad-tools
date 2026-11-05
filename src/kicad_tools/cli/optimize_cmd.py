@@ -300,11 +300,25 @@ def _seg_key(seg) -> tuple:
     return (seg.x1, seg.y1, seg.x2, seg.y2, seg.width, seg.layer, seg.net)
 
 
+_CREEPAGE_GATE_INACTIVE_WARNING = (
+    "creepage gate inactive: no --voltage-map given, so edits are not checked "
+    "against pairwise creepage (pass --voltage-map to enable it)"
+)
+
+
 def _creepage_keys(args, stats) -> dict:
-    """The ``--voltage-map`` JSON keys (Issue #8300); empty without the flag."""
+    """The creepage-gate JSON keys (Issues #8300, #8433).
+
+    Without ``--voltage-map`` the gate is off: report that explicitly so the
+    silence is not mistaken for "no creepage regressions".
+    """
     if args.voltage_map is None:
-        return {}
+        return {
+            "creepage_gate": "inactive",
+            "warnings": [_CREEPAGE_GATE_INACTIVE_WARNING],
+        }
     return {
+        "creepage_gate": "active",
         "voltage_map": args.voltage_map,
         "creepage_skipped": [
             {"net_a": a, "net_b": b, "count": n}
@@ -612,6 +626,10 @@ Examples:
     else:
         args._pairwise_voltages = None
         args._pairwise_required = None
+        # Issue #8433: the gate is silently off without a map; say so on
+        # stderr (stdout may carry the table or the JSON document).
+        if not args.quiet and not as_json:
+            print(f"Warning: {_CREEPAGE_GATE_INACTIVE_WARNING}", file=sys.stderr)
 
     # Import here to avoid circular imports
     from kicad_tools.cli.progress import spinner
@@ -929,7 +947,7 @@ Examples:
                 "zones_refill_error": refill_error,
                 "kicad_cli_drc": cli_drc,
                 "success": True,
-                # Issue #8300: only present with --voltage-map.
+                # Issues #8300/#8433: creepage_gate always; the rest only with --voltage-map.
                 **_creepage_keys(args, stats),
             }
         )
