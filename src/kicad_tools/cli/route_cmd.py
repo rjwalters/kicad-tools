@@ -1942,6 +1942,59 @@ def _optimize_traces(router: "Autorouter", args: argparse.Namespace, *, quiet: b
     )
 
 
+def _compress_staircases_only(
+    router: "Autorouter", args: argparse.Namespace, *, quiet: bool
+) -> None:
+    """Cheap staircase-only clean-up for runs that skipped the full optimizer.
+
+    Issue #8397: under ``--timeout`` pressure :func:`_optimization_fits_budget`
+    drops the whole trace optimizer, which left grid staircases (alternating
+    orthogonal / diagonal one-cell steps) in the written copper.  The
+    staircase compression is a single linear pass per route, so it is exempt
+    from that budget gate.  It reuses ``compress_staircase`` through a
+    :class:`TraceOptimizer` with every other pass disabled, inside the same
+    grid transaction and connectivity invariant the full optimizer uses.
+    """
+    from kicad_tools.router.optimizer import (
+        OptimizationConfig,
+        TraceOptimizer,
+        apply_route_transform_grid_synced,
+        make_collision_checker,
+    )
+
+    opt_config = OptimizationConfig(
+        merge_collinear=False,
+        eliminate_zigzags=False,
+        compress_staircase=True,
+        convert_45_corners=False,
+        pull_tight=False,
+        remove_jogs=False,
+        shorten_detours=False,
+        minimize_vias=False,
+    )
+    has_overflow = router.grid.get_total_overflow() > 0
+    optimizer = TraceOptimizer(
+        config=opt_config,
+        collision_checker=make_collision_checker(router.grid, ignore_overflow=has_overflow),
+        net_anchors=_detour_net_anchors(router),
+    )
+    _provide_via_connection_context(router, optimizer)
+
+    before = sum(len(r.segments) for r in router.routes)
+    snapshot = _connectivity_snapshot(router)
+    apply_route_transform_grid_synced(
+        router,
+        optimizer.optimize_route,
+        skip_nets=_committed_coupled_skip_nets(router),
+    )
+    _enforce_connectivity_invariant_or_exit(
+        router, snapshot, phase="staircase", args=args, quiet=quiet
+    )
+    after = sum(len(r.segments) for r in router.routes)
+    if not quiet and after < before:
+        print(f"  Staircase compression: {before} -> {after} segments (issue #8397)")
+
+
 def _connectivity_snapshot(router: "Autorouter"):
     """Capture per-net connectivity + deep-copied routes (issue #2596).
 
@@ -2597,6 +2650,11 @@ def _run_post_route_pipeline(
         and _optimization_fits_budget(args, quiet=quiet)
     ):
         _optimize_traces(router, args, quiet=quiet)
+        _record_stage_quality(_stage_quality, STAGE_POST_OPTIMIZE, router)
+    elif _post_passes_enabled and not args.no_optimize and router.routes:
+        # Issue #8397: the budget gate dropped the full optimizer; the cheap
+        # staircase-only pass still runs so grid staircases are not written.
+        _compress_staircases_only(router, args, quiet=quiet)
         _record_stage_quality(_stage_quality, STAGE_POST_OPTIMIZE, router)
 
     _stop_rc = _stage_boundary("drc-nudge")  # issue #6324
