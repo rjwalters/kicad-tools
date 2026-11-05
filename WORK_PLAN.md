@@ -29,21 +29,19 @@ _None._
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-- **#8367**: optimize-traces --drc-aware keeps 0 of 77 nets: internal DRC counts +251 clearance violations where kicad-cli (project rules) counts +2
+_None._
 
 ## In Progress
 
 Issues currently being built (`loom:building`).
 
-- **#8327**: route --complete: softstart rev-D loses /V_AC_SENSE_RAW R2.1-C31.1 after #8280 pairwise gate (9/11 -> 7/11 HV nets, link budget overrun)
-- **#8357**: board 05: design.py emits #8048 attach-zone block into .kicad_dru that the committed artifact lacks (recipe not reproducible)
-- **#8368**: pcb prune --current-paths and current-paths-audit disagree on loops: 9/16 paths stay ambiguous after every loop is cut; --wide default never applies to power nets
+_None._
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#8387**: fix: keep prune snaps on the 45° grid; cut optimizer chains at vias
+_None._
 
 ## Approved (Awaiting Merge)
 
@@ -59,10 +57,12 @@ Issues carrying `loom:curated`.
 - **#5539**: Champion: Merge-Risk Hold Digest *(curated)*
 - **#7487**: Re-rule or remove board 03 usb_geometry via-in-pad window exception by 2027-04-19 (#7457 / #7084 Q10) *(curated)*
 - **#8214**: optimize-traces: collision-check each rewrite on finished boards instead of whole-net rollback *(curated)*
-- **#8259**: kct pcb prune keeps a branch whose free end only overlaps a via (spur beside a via survives) *(curated)*
-- **#8327**: route --complete: softstart rev-D loses /V_AC_SENSE_RAW R2.1-C31.1 after #8280 pairwise gate (9/11 -> 7/11 HV nets, link budget overrun) *(curated)*
-- **#8367**: optimize-traces --drc-aware keeps 0 of 77 nets: internal DRC counts +251 clearance violations where kicad-cli (project rules) counts +2 *(curated)*
-- **#8368**: pcb prune --current-paths and current-paths-audit disagree on loops: 9/16 paths stay ambiguous after every loop is cut; --wide default never applies to power nets *(curated)*
+- **#8396**: route --complete commits cross-footprint copper that fails pairwise HV creepage (+16 pairs, down to 0.40 mm vs 1.6 mm) that the negotiated pass respects *(curated)*
+- **#8399**: Boards 02/04/07: evidence refresh refused on main by unaccepted redundant_copper warnings (#8218), blocks #8385 *(curated)*
+- **#8414**: Post-negotiation sweep overruns its announced 60 s bound until the global timeout *(curated)*
+- **#8422**: Live-verify --complete creepage rollback on a real mains board (follow-up to #8396) *(curated)*
+- **#8425**: Live-verify covered-track split (#8406) on pinned kicad-cli and #8368 board B *(curated)*
+- **#8434**: Changelog Fragment Check re-runs on every label change; Loom role label churn keeps it queued *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -81,11 +81,11 @@ _None._
 | Operator merge-risk holds | 0 |
 | Very important | 0 |
 | Important | 0 |
-| Ready (`loom:issue`) | 1 |
-| In Progress (`loom:building`) | 3 |
-| PRs awaiting review | 1 |
+| Ready (`loom:issue`) | 0 |
+| In Progress (`loom:building`) | 0 |
+| PRs awaiting review | 0 |
 | Approved PRs awaiting merge | 0 |
-| Curated | 8 |
+| Curated | 10 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 3 |
 <!-- guide:plan-body:end -->
