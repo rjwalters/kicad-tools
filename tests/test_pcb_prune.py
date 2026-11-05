@@ -1474,6 +1474,68 @@ def test_audit_names_loop_witness(tmp_path):
     assert "witness:" in resolution.reason
 
 
+# --- cleanup_copper (#8399) -------------------------------------------------
+
+
+class _FakePCB:
+    """Stands in for ``PCB`` so ``cleanup_copper`` loop logic is tested alone."""
+
+    dup_script: list[dict[str, int]] = []
+
+    @classmethod
+    def load(cls, _path):
+        return cls()
+
+    def dedupe_copper(self):
+        return self.dup_script.pop(0) if self.dup_script else {"segments": 0, "vias": 0}
+
+    def save(self, _path):
+        pass
+
+
+def _fake_result(accepted, verified=True, removed=0, snapped=0):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        accepted=accepted,
+        drc_verified=verified,
+        drc_note="note",
+        stats={"segments_removed": removed, "ends_snapped": snapped},
+    )
+
+
+def _patch_cleanup(monkeypatch, results, dups=()):
+    import kicad_tools.pcb_prune as mod
+
+    _FakePCB.dup_script = list(dups)
+    queue = list(results)
+    monkeypatch.setattr("kicad_tools.schema.pcb.PCB", _FakePCB)
+    monkeypatch.setattr(mod, "prune_board", lambda _p: (_FakePCB(), queue.pop(0)))
+    return mod
+
+
+def test_cleanup_copper_runs_to_fixed_point(monkeypatch, tmp_path):
+    mod = _patch_cleanup(
+        monkeypatch,
+        [_fake_result([1], removed=2, snapped=1), _fake_result([])],
+        dups=[{"segments": 1, "vias": 0}],
+    )
+    totals = mod.cleanup_copper(tmp_path / "r.kicad_pcb")
+    assert totals == {"duplicates": 1, "segments_removed": 2, "ends_snapped": 1}
+
+
+def test_cleanup_copper_raises_on_unverified_prune(monkeypatch, tmp_path):
+    mod = _patch_cleanup(monkeypatch, [_fake_result([1], verified=False)])
+    with pytest.raises(RuntimeError, match="not DRC-verified"):
+        mod.cleanup_copper(tmp_path / "r.kicad_pcb")
+
+
+def test_cleanup_copper_raises_when_not_converging(monkeypatch, tmp_path):
+    mod = _patch_cleanup(monkeypatch, [_fake_result([1], removed=1)] * 3)
+    with pytest.raises(RuntimeError, match="did not converge"):
+        mod.cleanup_copper(tmp_path / "r.kicad_pcb", max_passes=3)
+
+
 # --- prune / audit loop-model agreement (issue #8368, criterion 1) -----------
 #
 # Synthetic stand-ins for the two edge kinds the real-board check found behind

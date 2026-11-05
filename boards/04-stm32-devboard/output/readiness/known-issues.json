@@ -166,6 +166,21 @@
           "item": "netclass:Default"
         }
       ]
+    },
+    {
+      "issue": 8399,
+      "kind": "advisory",
+      "summary": "Genuine 0.76 mm SWCLK pad-escape detour that dedupe and DRC-verified prune cannot remove; removing it needs a re-route",
+      "recorded": "2026-11-04",
+      "warnings": [
+        {
+          "rule": "redundant_copper_detour",
+          "at": [
+            152.25,
+            85.34
+          ]
+        }
+      ]
     }
   ]
 }

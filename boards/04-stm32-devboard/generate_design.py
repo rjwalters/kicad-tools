@@ -2512,6 +2512,11 @@ def main() -> int:
         # the GND filled_polygon points change.  Must run after stitch_pcb
         # (which adds copper) and before run_drc (so DRC measures the
         # refreshed pour).
+        # Issue #8399: remove avoidable router copper (``redundant_copper_*``)
+        # with dedupe + DRC-verified prune, then re-pour over the edited copper.
+        from kicad_tools.pcb_prune import cleanup_copper
+
+        print(f"   Copper cleanup: {cleanup_copper(routed_path)}")
         fill_success = fill_zones(routed_path)
 
         # Step 7: Run DRC.  Issue #3912: run_drc still runs for its

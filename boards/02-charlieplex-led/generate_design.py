@@ -405,6 +405,12 @@ def main() -> int:
                 "diagnostics above. The PCB has not qualified for manufacturing export."
             )
 
+        # Step 5.5 (#8399): remove avoidable router copper (``redundant_copper_*``
+        # warnings) with dedupe + DRC-verified prune, never ``--unverified``.
+        from kicad_tools.pcb_prune import cleanup_copper
+
+        print(f"   Copper cleanup: {cleanup_copper(routed_path)}")
+
         # Step 6: Run DRC
         drc_success = run_drc(routed_path)
 

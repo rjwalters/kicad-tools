@@ -9500,6 +9500,103 @@ def _audit_pairwise_clearance(
     return deduped
 
 
+def _route_distance_to_point(route: "Route", x: float, y: float) -> float:
+    """Smallest copper-edge distance (mm) from ``(x, y)`` to *route*'s copper."""
+    from kicad_tools.router.pairwise_clearance import segment_to_segment_distance
+
+    best = float("inf")
+    for seg in route.segments:
+        d = segment_to_segment_distance(seg.x1, seg.y1, seg.x2, seg.y2, x, y, x, y)
+        best = min(best, d - seg.width / 2.0)
+    for via in route.vias:
+        best = min(best, ((via.x - x) ** 2 + (via.y - y) ** 2) ** 0.5 - via.diameter / 2.0)
+    return best
+
+
+def _route_endpoints(route: "Route") -> "dict | None":
+    if not route.segments:
+        return None
+    first, last = route.segments[0], route.segments[-1]
+    return {
+        "start": f"({first.x1:.3f}, {first.y1:.3f})",
+        "end": f"({last.x2:.3f}, {last.y2:.3f})",
+    }
+
+
+def _rollback_complete_creepage(
+    router: "Autorouter", args, *, id_to_name=None, quiet: bool = False
+) -> list[dict]:
+    """Roll back ``--complete`` links that add a pairwise (HV creepage) shortfall (#8396).
+
+    The lattice search consults the pairwise table, but a link can still commit
+    copper the board-level audit (the same gate ``kct creepage`` is scored
+    against) fails.  Mirrors ``kct route-link``'s per-link rollback (#8303):
+    audit the fresh copper, and for every shortfall that is NEW relative to the
+    input board (an audit with no fresh copper is the baseline) drop the nearest
+    fresh route of a freshly routed net -- the link stays open and is reported --
+    then re-audit until clean.  Strict no-op without ``--voltage-map``/``--complete``.
+
+    Returns the refusal entries; also stored on ``router._complete_creepage_refusals``
+    for :func:`_build_complete_link_report`.
+    """
+    refusals: list[dict] = []
+    router._complete_creepage_refusals = refusals
+    if not getattr(args, "complete", False) or getattr(args, "_pairwise_required", None) is None:
+        return refusals
+    fresh = [r for r in (getattr(router, "routes", None) or []) if r.segments or r.vias]
+    if not fresh:
+        return refusals
+
+    def _key(v):
+        return (v.net_a, v.net_b, round(v.x, 3), round(v.y, 3))
+
+    saved = list(router.routes)
+    try:
+        router.routes = []
+        baseline = {_key(v) for v in _audit_pairwise_clearance(router, args, id_to_name=id_to_name)}
+    finally:
+        router.routes = saved
+
+    for _ in range(len(saved) + 1):
+        violations = _audit_pairwise_clearance(router, args, id_to_name=id_to_name)
+        if any(v.net_b == PAD_AUDIT_INCOMPLETE for v in violations):
+            break  # audit could not run; cannot judge, leave copper alone
+        new = [v for v in violations if _key(v) not in baseline]
+        fresh_names = {r.net_name for r in router.routes}
+        target = None
+        for v in new:
+            for name in (v.net_a, v.net_b):
+                if name in fresh_names:
+                    cands = [r for r in router.routes if r.net_name == name]
+                    route = min(cands, key=lambda r: _route_distance_to_point(r, v.x, v.y))
+                    target = (v, name, route)
+                    break
+            if target:
+                break
+        if target is None:
+            break
+        v, name, route = target
+        router.routes = [r for r in router.routes if r is not route]
+        other = v.net_b if name == v.net_a else v.net_a
+        refusals.append(
+            {
+                "net": name,
+                "reason": "creepage-rolled-back",
+                "link": _route_endpoints(route),
+                "blocking_net": other,
+                "required_mm": round(v.required_mm, 4),
+                "measured_mm": round(v.actual_mm, 4),
+                "at": [round(v.x, 3), round(v.y, 3)],
+            }
+        )
+        if not quiet:
+            print(
+                f"  --complete: rolled back a {name} link -- {name} vs {other}: "
+                f"{v.actual_mm:.3f}mm < required {v.required_mm:.3f}mm"
+            )
+    return refusals
+
+
 def _format_pairwise_violations(violations: "Sequence[PairwiseViolation]", limit: int = 10) -> str:
     """Render pairwise violations in the ``router/io.py`` clearance-report shape.
 
@@ -18308,7 +18405,9 @@ def _build_complete_link_report(router: "Autorouter", pcb_path: Path) -> dict | 
     if stats is None:
         return None
     reasons: dict[object, str] = dict(getattr(router, "_lattice_failure_reasons", {}) or {})
-    if not reasons:
+    # Issue #8396: links committed by the search but rolled back for creepage.
+    creepage_refusals: list[dict] = list(getattr(router, "_complete_creepage_refusals", []) or [])
+    if not reasons and not creepage_refusals:
         return None
 
     endpoints: dict[object, tuple[str, str]] = (
@@ -18390,6 +18489,21 @@ def _build_complete_link_report(router: "Autorouter", pcb_path: Path) -> dict | 
             entry["tier_limit_note"] = tier_limit_note
         links.append(entry)
 
+    for ref in creepage_refusals:
+        links.append(
+            {
+                **ref,
+                "deadline_hit": False,
+                "layer_constrained": False,
+                "elapsed_s": round(stats.elapsed_s, 3),
+                "budget_s": round(stats.budget_s, 3) if stats.budget_s is not None else None,
+                "blocking_copper": [ref["blocking_net"]],
+                "nearest_blocker_mm": ref["measured_mm"],
+                "stuck_classification": None,
+                "stuck_evidence": "",
+            }
+        )
+
     return {
         "pcb": str(pcb_path),
         "manufacturer": mfr,
@@ -18417,6 +18531,11 @@ def _print_complete_link_report(report: dict) -> None:
         link = entry["link"]
         ep = f"{link['start']} <-> {link['end']}" if link else "(pads unknown)"
         print(f"  [{entry['net']}] {ep} -- {entry['reason']}")
+        if entry.get("required_mm") is not None:
+            print(
+                f"      creepage: {entry['net']} vs {entry['blocking_net']}: "
+                f"{entry['measured_mm']:.3f}mm < required {entry['required_mm']:.3f}mm"
+            )
         if entry.get("layer_constrained"):
             # Issue #4979: name the constraint that produced the residual, so
             # the reader is not left to guess whether this was congestion.
@@ -24320,6 +24439,13 @@ def _run_main_impl(args, parser, argv) -> int:
     )
     if _stop_rc is not None:
         return _stop_rc
+
+    # Issue #8396: per-link creepage rollback for ``--complete`` before the
+    # copper is serialised (no-op without --complete/--voltage-map).
+    if not args.dry_run:
+        _rollback_complete_creepage(
+            router, args, id_to_name={v: k for k, v in net_map.items()}, quiet=quiet
+        )
 
     # Finalize: cleanup -> sexp -> stats (canonical ordering)
     multi_pad_net_ids = set(multi_pad_nets)
