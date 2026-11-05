@@ -247,6 +247,11 @@ def staged_board_05(tmp_path) -> Path:
         source = BOARD_05_PCB.with_suffix(suffix)
         if source.is_file():
             shutil.copy2(source, stage / source.name)
+    # The class-rule sidecar export reads (#8393): without it the committed
+    # Motor power rules would be dropped from the rewritten .kicad_dru.
+    sidecar = BOARD_05_PCB.parent / "net_class_map.json"
+    if sidecar.is_file():
+        shutil.copy2(sidecar, stage / sidecar.name)
     return stage / BOARD_05_PCB.name
 
 
