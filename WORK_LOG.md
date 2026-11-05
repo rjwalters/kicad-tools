@@ -13,8 +13,27 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-11-05
+
+- **PR #8403**: fix(route): roll back --complete links that add pairwise HV creepage shortfalls
+- **PR #8401**: fix(router): drop zero-length copper segments in dedupe and consolidation
+- **PR #8387**: fix: cut optimizer chains at interior vias (detour shortening at through-vias)
+- **Issue #8386** (closed): optimize/prune: snap tilts tracks off 45°; detour shortening misses tents ending at a through-via
+- **PR #8415**: fix(route): keep fallback stats in timeout receipt when snapshot is unsaved
+- **Issue #8413** (closed): Route receipt loses python-fallback stats when the partial snapshot is not saved
+- **PR #8391**: fix: prune overlap-held spurs and centre their inner-layer ends
+- **Issue #8259** (closed): kct pcb prune keeps a branch whose free end only overlaps a via (spur beside a via survives)
+- **PR #8402**: fix(board-01): commit the .kicad_dru the recipe emits (#8385)
+- **PR #8392**: fix(prune): share the current-path audit's loop model (#8368)
+- **Issue #8368** (closed): pcb prune --current-paths and current-paths-audit disagree on loops
+- **PR #8409**: fix(router): measure roundrect pads in the lattice attach-zone waiver (#8327)
+- **Issue #8327** (closed): route --complete: softstart rev-D loses /V_AC_SENSE_RAW R2.1-C31.1 after #8280 pairwise gate
+- **PR #8389**: fix: arbitrate drc-aware rollback with kicad-cli when .kicad_dru hides rules
+
 ### 2026-11-04
 
+- **Issue #8370** (closed): route: C++ A* open-set exhaustion on wide HV power nets falls back to pure-Python A* every iteration
+- **Issue #8411** (closed): Boards 00/02/04/06/07 committed .kicad_dru lag the exporter
 - **PR #8390**: fix(board-05): commit the .kicad_dru the recipe emits (#8357)
 - **Issue #8357** (closed): board 05: design.py emits #8048 attach-zone block into .kicad_dru that the committed artifact lacks (recipe not reproducible)
 - **Issue #8323** (closed): pcb prune adds a clearance error under the project's custom DRU rule despite its built-in DRC check
