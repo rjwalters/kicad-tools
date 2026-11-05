@@ -430,6 +430,25 @@ def evidence_toolchain(
             _reset_kicad_cli_lookup()
 
 
+def run_pinned_if_docker(main: Callable[[], int], mounts: Iterable[Path] = ()) -> int:
+    """Run an in-process kicad-cli referee on the pinned image when opted in (#8395).
+
+    Without ``KCT_KICAD_DOCKER`` this just calls *main* (behaviour unchanged).
+    With it, *main* runs inside :func:`evidence_toolchain` so ``find_kicad_cli()``
+    resolves the Docker shim.  These commands are not readiness evidence, so the
+    pinned *version* is not enforced.  A missing Docker/kicad-cli prints
+    ``Error: ...`` and returns 1 rather than falling back to the host kicad-cli.
+    """
+    if not docker_fallback_enabled():
+        return main()
+    try:
+        with evidence_toolchain(mounts, required_version=None):
+            return main()
+    except KiCadEnvironmentError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+
 def run_on_evidence_toolchain(main: Callable[[], int | None], mounts: Iterable[Path] = ()) -> int:
     """Run an evidence script's ``main`` inside :func:`evidence_toolchain`.
 
