@@ -71,3 +71,23 @@ def test_node_clear_refuses_what_midpoint_probe_waived() -> None:
     # Net-1 node (disc of trace half-width) at (9.5, 9.5), net-2 trace outside
     # the zone: midpoint inside the zone, trace-side nearest point outside.
     assert not cc.node_clear((9.5, 9.5), 0, 1)
+
+
+def test_node_disc_tangent_to_zone_edge_is_still_waived() -> None:
+    """A lattice node disc tangent to the zone edge must not be refused.
+
+    shapely's 16-segment circle puts its nearest point past the tangent edge by
+    more than the gate's 1e-4 slack; without the approximation allowance the
+    first node beyond a bridging pad's zone is denied and the net cannot leave
+    the footprint (``test_route_pairwise_gate_4588`` regression).
+    """
+    pw = LatticePairwise(
+        required_by_pair={(1, 2): 3.2},
+        zones=((13.3, 4.3, 16.7, 5.7, frozenset({1, 2}), None),),
+        max_by_net={1: 3.2, 2: 3.2},
+    )
+    # Net-1 trace ends in the zone at x~13.9; net-2 node disc centred 16.8
+    # (left edge exactly on the zone edge x=16.7).  Rest copper is 3.4 apart.
+    assert pw.exempt_seg_pt(
+        (8.0, 4.9), (13.8, 4.9), (16.8, 4.8), 2, 1, half=0.1, radius=0.1, req=3.2
+    )

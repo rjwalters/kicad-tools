@@ -145,17 +145,34 @@ class LatticePairwise:
         layer: int | None,
         req: float,
         overhang: float,
+        round_r: float = 0.0,
     ) -> bool:
         """Census-identical waiver on true copper (#8408).
 
         Runs the gate's own ``_attach_zone_verdict`` (both nearest points in
         one zone AND the copper outside it still clears ``req``), so the
         search is never more permissive than the #8277 gate.
+
+        ``round_r`` is the largest round-copper radius in the pair.  A lattice
+        node's disc routinely sits exactly tangent to the zone edge, and shapely's
+        16-segment circle puts its nearest point up to ``r*(1-cos(pi/32))`` past
+        that edge -- beyond the gate's 1e-4 slack -- so the both-nearest-points
+        test is run on zones grown by that approximation error (and only that
+        test: the residual clearance is re-measured on the exact zones).
         """
-        from ..pairwise_clearance import _PASS_TOLERANCE, AttachZone, _attach_zone_verdict
+        import math
+
+        from ..pairwise_clearance import (
+            _PASS_TOLERANCE,
+            AttachZone,
+            _attach_zone_residual,
+            _attach_zone_verdict,
+        )
 
         names = frozenset({str(net_a), str(net_b)})
         zones = []
+        grown = []
+        eps = round_r * (1.0 - math.cos(math.pi / 32.0))
         for x0, y0, x1, y1, ids, layers in self.zones:
             if net_a not in ids or net_b not in ids:
                 continue
@@ -167,10 +184,32 @@ class LatticePairwise:
                 ):
                     continue
             zones.append(AttachZone(x0, y0, x1, y1, names))
+            grown.append(AttachZone(x0 - eps, y0 - eps, x1 + eps, y1 + eps, names))
         if not zones:
             return False
+
+        def verdict(zs: list) -> object:
+            return _attach_zone_verdict(
+                copper_a,
+                copper_b,
+                zs,
+                str(net_a),
+                str(net_b),
+                None,
+                req,
+                _PASS_TOLERANCE,
+                overhang,
+            )
+
+        if verdict(zones) is None:
+            return True
+        if eps <= 0.0 or verdict(grown) is not None:
+            return False
+        # Tangent-disc case: both nearest points are in the zone once the
+        # approximation error is allowed for; the residual copper must still
+        # clear on the EXACT zones (the slack never loosens the clearance).
         return (
-            _attach_zone_verdict(
+            _attach_zone_residual(
                 copper_a,
                 copper_b,
                 zones,
@@ -220,7 +259,16 @@ class LatticePairwise:
         pb = segment_copper_polygon(c, d, half_b * 2)
         if pa is None or pb is None:
             return True
-        return self._copper_verdict_waives(pa, pb, net_a, net_b, layer, req, max(half_a, half_b))
+        return self._copper_verdict_waives(
+            pa,
+            pb,
+            net_a,
+            net_b,
+            layer,
+            req,
+            max(half_a, half_b),
+            round_r=max(half_a, half_b),
+        )
 
     def exempt_seg_pt(
         self,
@@ -259,7 +307,14 @@ class LatticePairwise:
         if pa is None:
             return True
         return self._copper_verdict_waives(
-            pa, Point(p[0], p[1]).buffer(radius), net_a, net_b, layer, req, 0.0
+            pa,
+            Point(p[0], p[1]).buffer(radius),
+            net_a,
+            net_b,
+            layer,
+            req,
+            0.0,
+            round_r=max(half, radius),
         )
 
     def exempt_pt_pt(
@@ -291,6 +346,7 @@ class LatticePairwise:
             layer,
             req,
             0.0,
+            round_r=max(radius_p, radius_q),
         )
 
 
