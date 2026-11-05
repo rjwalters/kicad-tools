@@ -24,8 +24,8 @@
         "min_copper_edge_clearance": 0.3,
         "solder_mask_clearance": 0.0,
         "solder_mask_min_width": 0.0,
-        "min_clearance": 0.1016,
-        "min_track_width": 0.1016,
+        "min_clearance": 0.15,
+        "min_track_width": 0.15,
         "min_via_diameter": 0.45,
         "min_microvia_diameter": 0.2,
         "min_via_annular_width": 0.05,
@@ -56,7 +56,7 @@
     "pinned_symbol_libs": []
   },
   "meta": {
-    "filename": "diffpair_test_routed.kicad_pro",
+    "filename": "diffpair_test.kicad_pro",
     "version": 1,
     "manufacturer": "jlcpcb",
     "kct_router_netclasses": {
@@ -86,7 +86,7 @@
         "OUT4"
       ]
     },
-    "kct_sidecar_sha256": "e0971bfe86c72ae668befd3e47ea8648636e7d5c9d7d4d99326e21d509300367"
+    "kct_sidecar_sha256": "b062fe0aa7e6050b4130ce343b9a12703bb26167e3ae3cea30a8b540444fda67"
   },
   "net_settings": {
     "classes": [

@@ -13,6 +13,7 @@ from shapely.geometry import LineString, Point
 from shapely.ops import unary_union
 from shapely.prepared import prep
 
+from kicad_tools.manufacturers.attach_zone_dru import strip_attach_zone_block
 from kicad_tools.manufacturers.dru_generator import (
     DRU_FLOORS_BLOCK_BEGIN,
     DRU_FLOORS_BLOCK_END,
@@ -174,6 +175,11 @@ def _kct_managed_floor_minima(dru_text: str) -> dict[str, float] | None:
     The one other block tolerated is the router's managed diff-pair block
     (Issue #6443, :func:`_split_pair_block`), itself parsed strictly.
     """
+    # The router's attach-zone block (#8048, #8029) only *relaxes* clearance for
+    # the nets attaching to a rated part, inside its courtyard.  Ignoring it
+    # keeps the search at the stricter board-wide floor -- conservative -- so it
+    # is dropped rather than failing the whole file closed (Issue #8404).
+    dru_text = strip_attach_zone_block(dru_text)
     split = _split_pair_block(dru_text)
     if split is None:
         return None
