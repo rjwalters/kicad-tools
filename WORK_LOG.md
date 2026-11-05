@@ -15,6 +15,36 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-05
 
+- **PR #8448**: fix(route): run staircase-only pass on --complete lattice links
+- **PR #8447**: chore(loom): resync installed Loom to v0.19.1264
+- **PR #8446**: fix(prune): join tilt-refused via/pad ends with an on-grid stub
+- **PR #8445**: test(prune): pin byte-identical output across PYTHONHASHSEED
+- **PR #8444**: feat(check): add pour_slot advisory for tracks too close for the zone fill
+- **PR #8443**: fix(cli): report unbuilt placement/DRC backends clearly in build-native --check
+- **PR #8442**: fix(prune): count trace overlap of a same-net via/pad shape as a loop-finding join
+- **PR #8441**: feat(optimize-traces): warn when the creepage gate is inactive
+- **PR #8432**: fix(router): skip sweep DRC pre-check once the sweep deadline is spent
+- **PR #8431**: test(router): pin partial save on deadline inside post-negotiation sweep
+- **PR #8429**: test: take fastest of 3 samples in C++ deadline audit tests
+- **PR #8428**: fix(board-06): regenerate committed board from its recipe and pin the emitted .kicad_dru
+- **PR #8426**: test: pin oracle-completion withdrawal of closers adding tracks_crossing/shorting_items
+- **PR #8423**: fix: run staircase-only compression when --timeout skips the trace optimizer
+- **PR #8421**: feat(prune): split a container at a covered track's joint before removing it
+- **PR #8420**: fix(optimize): attach pads by copper extent in connectivity guard
+- **PR #8416**: fix(router): bound post-negotiation sweep retries by per-net and sweep budgets
+- **PR #8412**: chore(loom): resync installed Loom to v0.19.1263
+- **PR #8410**: fix(router): lattice trace/via attach-zone waivers use the census verdict
+- **Issue #8439** (closed): `build-native --check` reports placement/DRC backends "not installed" with a misleading circular-import reason
+- **Issue #8437** (closed): prune: when it keeps a run on 45° and stops short of a via centre, add an on-grid stub instead
+- **Issue #8436** (closed): prune: same-net joins made only by overlap (trace body over a pad or via) hide redundant paths
+- **Issue #8435** (closed): Pour-aware spacing: parallel traces too close for the zone fill leave slots in the plane
+- **Issue #8433** (closed): optimize-traces: warn when the creepage gate is inactive because no --voltage-map was given
+- **Issue #8427** (closed): test flake: test_cpp_pathfinder_enable_records_calls fails on Test (wall-clock budget)
+- **Issue #8419** (closed): optimize-traces (post-#8389) disconnects a fine-pitch MCU pad; the would-disconnect guard does not fire; summary shows in-process '320 new errors' while kicad-cli is 0→0
+- **Issue #8417** (closed): route --complete commits a zero-length track on a foreign-net track (kicad-cli tracks_crossing short); commit check misses degenerate segments
+- **Issue #8408** (closed): router(lattice): trace/via attach-zone exemptions still probe the gap midpoint; the #8277 gate refuses what they waive
+- **Issue #8406** (closed): pcb prune: split the container at a covered track's interior joint so the covered track can be removed (#8368 follow-up)
+- **Issue #8404** (closed): Board 06: assembled-demo/build.py no longer reproduces the committed routed board (166/55 vs 214/63 segments/vias, gate exit 2)
 - **PR #8418**: fix(router): never emit zero-length link tracks; measure point segments as discs
 - **PR #8405**: fix(board-06): move assembled-demo power vias off the mask dam in finish.py
 - **PR #8394**: fix(export): keep net-class-map ampacity rules in exported .kicad_dru
