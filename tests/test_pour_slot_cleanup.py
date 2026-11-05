@@ -60,10 +60,37 @@ def test_pack_when_spread_blocked_by_third_trace():
         pcb.add_via(15, 9.3, size=0.6, net="C")  # blocks spreading A
 
     pcb = _board(0.7, extra=[blocker])
-    res = cleanup_pour_slots(pcb, referee=_ok)
+    res = cleanup_pour_slots(pcb, referee=_ok, pack=True)
     assert res.packed == 1 and res.spread == 0
     gap = abs(_seg(pcb, "B").start[1] - _seg(pcb, "A").start[1]) - 0.2
     assert abs(gap - 0.3) < 1e-3
+
+
+def test_pack_is_off_by_default():
+    def blocker(pcb):
+        pcb.add_via(15, 11.4, size=0.6, net="C")
+        pcb.add_via(15, 9.3, size=0.6, net="C")
+
+    pcb = _board(0.7, extra=[blocker])
+    before = [(s.start, s.end) for s in pcb.segments]
+    res = cleanup_pour_slots(pcb, referee=_ok)
+    assert res.packed == 0 and res.spread == 0
+    assert res.left_alone == 1 and not res.changed
+    assert [(s.start, s.end) for s in pcb.segments] == before
+
+
+def test_left_alone_by_reason_counts_each_pair_once():
+    def blocker(pcb):
+        pcb.add_via(15, 11.4, size=0.6, net="C")
+        pcb.add_via(15, 9.3, size=0.6, net="C")
+        pcb.add_via(15, 10.4, size=0.6, net="D")
+
+    pcb = _board(0.7, extra=[blocker])
+    res = cleanup_pour_slots(pcb, referee=_ok, pack=True)
+    by_reason = res.to_dict()["left_alone_by_reason"]
+    assert res.left_alone >= 1
+    assert sum(by_reason.values()) == res.left_alone
+    assert len(res.left_alone_reasons) == res.left_alone
 
 
 def test_left_alone_when_neither_is_clean():

@@ -240,7 +240,7 @@ def _kicad_cli_drc_counts(board: Path, rules_from: Path | None = None) -> dict[s
     return dict(counts)
 
 
-def _run_pour_slot_pass(written: Path, rules_from: Path | None) -> dict:
+def _run_pour_slot_pass(written: Path, rules_from: Path | None, pack: bool = False) -> dict:
     """Run the refereed pour-slot cleanup on the written board (Issue #8440).
 
     Returns the :meth:`PourSlotCleanupResult.to_dict` summary.  The board is
@@ -273,7 +273,7 @@ def _run_pour_slot_pass(written: Path, rules_from: Path | None) -> dict:
             candidate.save(probe)
             return _kicad_cli_drc_counts(probe, rules_from=rules_from or written)
 
-    result = cleanup_pour_slots(pcb, clearances, referee=referee)
+    result = cleanup_pour_slots(pcb, clearances, referee=referee, pack=pack)
     summary = result.to_dict()
     if result.changed:
         pcb.save(str(written))
@@ -608,7 +608,16 @@ Examples:
         help="After optimizing, spread or pack parallel different-net tracks that leave "
         "a slot in a copper pour (the `kct check` pour_slot advisory).  Every edit is "
         "refereed by kicad-cli (--refill-zones) and reverted if any DRC or unconnected "
-        "count rises; refuses without kicad-cli.  Default: off",
+        "count rises; refuses without kicad-cli.  Spreads only unless --pour-slots-pack "
+        "is given.  Default: off",
+    )
+    parser.add_argument(
+        "--pour-slots-pack",
+        dest="pour_slots_pack",
+        action="store_true",
+        help="With --pour-slots, also pack pairs that cannot be spread (tighten the gap "
+        "to clearance).  Packing removes the slot by removing the ground strip between "
+        "the tracks, and packed pairs still raise the pour_slot advisory.  Default: off",
     )
     parser.add_argument(
         "--allow-default-rules",
@@ -978,7 +987,9 @@ Examples:
     pour_slots: dict | None = None
     if args.pour_slots and not args.dry_run:
         pour_slots = _run_pour_slot_pass(
-            Path(args.output or pcb_path), Path(args.project) if args.project else None
+            Path(args.output or pcb_path),
+            Path(args.project) if args.project else None,
+            pack=args.pour_slots_pack,
         )
 
     cli_drc: dict | None = None
@@ -1186,6 +1197,13 @@ Examples:
                     f"{pour_slots['left_alone']} left alone "
                     f"({pour_slots['pairs_before']} -> {pour_slots['pairs_after']} slot pairs)"
                 )
+                if pour_slots["packed"]:
+                    print(
+                        f"  Note: {pour_slots['packed']} packed pair(s) keep their pour_slot "
+                        "advisory and have no ground strip between them"
+                    )
+                for why, count in sorted(pour_slots.get("left_alone_by_reason", {}).items()):
+                    print(f"  left alone: {count} x {why}")
         elif args.pour_slots and args.dry_run:
             print("Pour slots: skipped (dry run)")
 
