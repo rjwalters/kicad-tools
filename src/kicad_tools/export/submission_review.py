@@ -317,6 +317,37 @@ def _stock_upload_sections(
     return lines
 
 
+def _site_section(site: Mapping[str, Any] | None) -> list[str]:
+    """Display-only record of an attended website-driver run (#8468)."""
+    if site is None:
+        return []
+    lines = [
+        "## Website cart hand-off (attended driver)",
+        f'State: {site.get("state", "unknown")} ("ordered" is only ever set by the human)',
+        f"Driver: {site.get('driver_version')}",
+        f"Cart URL: {site.get('cart_url')}",
+        f"Quote as displayed: {site.get('quote_total')}",
+        f"Lead time as displayed: {site.get('lead_time')}",
+        "",
+        "Uploaded file hashes:",
+        *(f"- {n}: {h}" for n, h in sorted(dict(site.get("uploaded_hashes", {})).items())),
+        "",
+        "Part-matching diff vs plan:",
+        *(
+            [f"- {i}" for i in site.get("match_diff", ())]
+            or ["(no differences: every expected reference matched exactly)"]
+        ),
+        "",
+        "Step screenshots:",
+        *(f"- {s['name']}: {s['screenshot'] or '(none)'}" for s in site.get("steps", ())),
+        "",
+        "Remaining human steps:",
+        *(f"- [ ] {step}" for step in site.get("remaining_human_steps", ())),
+        "",
+    ]
+    return lines
+
+
 def render_review_page(
     plan: SubmissionPlan,
     *,
@@ -326,8 +357,13 @@ def render_review_page(
     assets_root: Path | None = None,
     stock: Mapping[str, Any] | None = None,
     upload: Mapping[str, Any] | None = None,
+    site: Mapping[str, Any] | None = None,
 ) -> ReviewPage:
     """Publish a portable local review page for ``plan``.
+
+    ``site`` (``SiteResult.as_dict()`` from the attended website driver) is
+    rendered display-only as a "Website cart hand-off" section and sets the
+    ``cart`` state to ``in-cart``; it never sets ``order``.
 
     ``stock`` (``{"status": "pass"|"blocked", "lines": [...]}``, each line
     ``{"catalog_id", "need", "stock", "status", ...}``) and ``upload``
@@ -435,6 +471,9 @@ def render_review_page(
         states["stock_check"] = "stock-checked" if stock.get("status") == "pass" else "blocked"
     if upload is not None:
         states["upload"] = str(upload.get("state", "not-performed"))
+    if site is not None:
+        states["factory_matching"] = "factory-matched"
+        states["cart"] = str(site.get("state", "in-cart"))
 
     index_lines = [
         "# Local submission review page",
@@ -466,6 +505,7 @@ def render_review_page(
     index_lines += [
         "",
         *_stock_upload_sections(stock, upload),
+        *_site_section(site),
         "## Upload/download file set",
         *(f"- uploads/{name}" for name in output_names),
         "",

@@ -209,3 +209,27 @@ class MockTransport:
 
     def post_json(self, url, *, headers, body):
         return self._next()
+
+
+def test_review_page_renders_site_handoff_without_order_state(env):
+    from kicad_tools.export.submission_review import render_review_page
+
+    write_manifest(env)
+    result = run(env, Source({"C1": 100, "C2": 100}), dry_run=True)
+    site = {
+        "state": "in-cart",
+        "driver_version": "jlc-site-driver-1",
+        "cart_url": "https://cart.jlcpcb.com/x",
+        "quote_total": "$42.10",
+        "lead_time": "5 days",
+        "uploaded_hashes": {"bom.csv": "ab" * 32},
+        "steps": [{"name": "upload-bom", "screenshot": "01-upload-bom.png", "detail": {}}],
+        "match_diff": [],
+        "remaining_human_steps": ["Place and pay for the order yourself"],
+    }
+    page = render_review_page(result.plan, destination=env["out"] / "cart-page", site=site)
+    text = (page.directory / "index.md").read_text()
+    assert "https://cart.jlcpcb.com/x" in text and "$42.10" in text and "5 days" in text
+    assert "- cart: in-cart" in text and "- factory_matching: factory-matched" in text
+    assert "order: ordered" not in text
+    assert "- [ ] Place and pay for the order yourself" in text
