@@ -281,7 +281,7 @@ class LatticePairwise:
             return False
         if radius_p is None or radius_q is None or req is None:
             return True
-        from shapely.geometry import Point  # type: ignore[import-untyped]
+        from shapely.geometry import Point
 
         return self._copper_verdict_waives(
             Point(p[0], p[1]).buffer(radius_p),
