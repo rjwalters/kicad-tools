@@ -729,20 +729,24 @@ def _run_prune_command(args, pcb_path: Path) -> int:
     output_path = Path(args.output) if getattr(args, "output", None) else pcb_path
 
     declared_nets: set[str] | None = None
-    required_widths: dict[str, float] = {}
+    required_widths: dict[str, dict[str, float]] = {}
+    specs = None
     if getattr(args, "current_paths", None):
-        from kicad_tools.physics.ampacity import width_for_current
+        from kicad_tools.pcb_prune import required_widths_for
         from kicad_tools.router.current_paths import load_current_path_specs
+        from kicad_tools.schema.pcb import PCB
 
         try:
             specs = load_current_path_specs(args.current_paths)
             declared_nets = {spec.net_name for spec in specs}
-            # Conservative: 1 oz copper, internal-layer derating.
+            # Issue #8368: per copper layer, at the board's stackup copper
+            # weight (outer layers external, inner layers internal).
+            board = PCB.load(pcb_path)
             for spec in specs:
-                need = width_for_current(
-                    spec.thermal_design_current().current_a, 1.0, layer="internal"
-                )
-                required_widths[spec.net_name] = max(required_widths.get(spec.net_name, 0.0), need)
+                need = required_widths_for(board, spec.thermal_design_current().current_a)
+                have = required_widths.setdefault(spec.net_name, {})
+                for layer, width in need.items():
+                    have[layer] = max(have.get(layer, 0.0), width)
         except Exception as e:
             print(f"Error loading current paths: {e}", file=sys.stderr)
             return 1
@@ -757,6 +761,7 @@ def _run_prune_command(args, pcb_path: Path) -> int:
             required_widths=required_widths,
             project=getattr(args, "project", None),
             allow_default_rules=getattr(args, "allow_default_rules", False),
+            current_paths=specs,
         )
     except Exception as e:
         print(f"Error pruning PCB: {e}", file=sys.stderr)
