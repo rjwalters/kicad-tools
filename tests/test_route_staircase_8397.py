@@ -265,3 +265,57 @@ def test_mark_complete_copper_skips_already_registered_routes_real_grid():
 
     ids = [id(r) for r in router.grid.routes]
     assert len(ids) == len(set(ids)) == 2
+
+
+def test_complete_links_collapse_on_real_grid():
+    """Issue #8397: unmocked grid/collision checker over a lattice-style link.
+
+    The link is committed without ``_mark_route`` (as the lattice engine does);
+    the ``--complete`` helpers must register it and the staircase-only pass must
+    then collapse it, leaving the preserved copper untouched.
+    """
+    from kicad_tools.router.core import Autorouter
+    from kicad_tools.router.rules import DesignRules
+
+    router = Autorouter(width=10.0, height=10.0, rules=DesignRules(grid_resolution=PITCH))
+    link = Route(
+        net=1,
+        net_name="N",
+        segments=[
+            Segment(
+                x1=s.x1 + 2.0,
+                y1=s.y1 + 2.0,
+                x2=s.x2 + 2.0,
+                y2=s.y2 + 2.0,
+                width=0.2,
+                layer=Layer.F_CU,
+                net=1,
+                net_name="N",
+            )
+            for s in _staircase(24)
+        ],
+        vias=[],
+    )
+    preserved = Route(
+        net=2,
+        net_name="F",
+        segments=[
+            Segment(
+                x1=1.0, y1=8.0, x2=4.0, y2=8.0, width=0.2, layer=Layer.F_CU, net=2, net_name="F"
+            )
+        ],
+        vias=[],
+    )
+    router._mark_route(preserved)
+    router.existing_routes = [preserved]
+    router.routes = [link]
+    before = _short_per_mm(link)
+    preserved_before = [(s.x1, s.y1, s.x2, s.y2) for s in preserved.segments]
+
+    route_cmd._mark_complete_copper_for_staircase_pass(router, quiet=True)
+    route_cmd._compress_staircases_only(router, SimpleNamespace(), quiet=True)
+
+    out = router.routes[0]
+    assert len(out.segments) < 24
+    assert _short_per_mm(out) < before / 2
+    assert [(s.x1, s.y1, s.x2, s.y2) for s in preserved.segments] == preserved_before
