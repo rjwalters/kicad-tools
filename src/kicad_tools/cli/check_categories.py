@@ -17,6 +17,7 @@ CHECK_CATEGORIES = [
     "copper_sliver",
     "courtyard_overlap",
     "dangling_copper",
+    "pour_slot",
     "redundant_copper",
     "diffpair_clearance_intra",
     "diffpair_length_skew",
