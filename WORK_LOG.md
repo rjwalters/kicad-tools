@@ -15,6 +15,11 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-05
 
+- **PR #8418**: fix(router): never emit zero-length link tracks; measure point segments as discs
+- **PR #8405**: fix(board-06): move assembled-demo power vias off the mask dam in finish.py
+- **PR #8394**: fix(export): keep net-class-map ampacity rules in exported .kicad_dru
+- **Issue #8393** (closed): Board 05 recipe: kct export drops the Motor power ampacity rules that kct check --emit-dru writes, so build-time DRC checks a stricter .kicad_dru than ships (follow-up to #8357)
+- **PR #8407**: fix(boards): clean redundant router copper on boards 02 and 04
 - **PR #8403**: fix(route): roll back --complete links that add pairwise HV creepage shortfalls
 - **PR #8401**: fix(router): drop zero-length copper segments in dedupe and consolidation
 - **PR #8387**: fix: cut optimizer chains at interior vias (detour shortening at through-vias)
