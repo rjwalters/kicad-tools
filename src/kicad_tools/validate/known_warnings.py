@@ -16,7 +16,7 @@ removes them -- never by rule name or count alone:
 Remove a board's entries when the cited fix lands.
 
 Advisory-only rules in :data:`NON_GATING_RULE_PREFIXES` (``redundant_copper_*``,
-Issue #8218) are never counted as unaccepted: they are warning-only quality
+Issue #8218; ``pour_slot``, Issue #8435) are never counted as unaccepted: they are warning-only quality
 hints about router output, not fab-blocking, so a strict "any warning fails"
 gate must not trip on them.
 """
@@ -29,8 +29,9 @@ from typing import Any
 #: ``(rule_id, ref, pad)``.
 KnownWarningKey = tuple[str, str, str]
 
-#: Rule-id prefixes that are advisory hints and never fail a strict gate (#8218).
-NON_GATING_RULE_PREFIXES: tuple[str, ...] = ("redundant_copper",)
+#: Rule-id prefixes that are advisory hints and never fail a strict gate (#8218,
+#: #8435: ``pour_slot`` is a geometric advisory, not a native-DRC oracle).
+NON_GATING_RULE_PREFIXES: tuple[str, ...] = ("redundant_copper", "pour_slot")
 
 #: Warning rules whose findings name no ref/pad (track copper), keyed by board
 #: location instead: ``(rule, "", "@x/y")`` with x/y in mm rounded to 0.01
