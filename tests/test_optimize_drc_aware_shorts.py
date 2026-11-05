@@ -212,3 +212,54 @@ def test_referee_uses_board_clearance_not_preset(monkeypatch):
     preset = seen["clearance"]
     pcb_mod._run_drc_error_count_by_category(_PCB, min_clearance_mm=0.0508, **kw)
     assert seen["clearance"] == 0.0508 != preset
+
+
+# --- Issue #8367: external arbitration when the referee is rule-blind ------
+
+_PCB3 = _PCB.replace('(net 2 "B")', '(net 2 "B")\n  (net 3 "C")').replace(
+    "\n)\n",
+    '\n  (segment (start 100 300) (end 110 300) (width 0.25) (layer "F.Cu") (net 3))'
+    '\n  (segment (start 110 300) (end 120 300) (width 0.25) (layer "F.Cu") (net 3))\n)\n',
+)
+
+
+def _run3(tmp_path, monkeypatch, arbiter):
+    src = tmp_path / "in.kicad_pcb"
+    out = tmp_path / "out.kicad_pcb"
+    src.write_text(_PCB3)
+    # Rule-blind referee: any change to any net reads as a new violation.
+    monkeypatch.setattr(
+        pcb_mod,
+        "_run_drc_error_count_by_category",
+        lambda text, **kw: (
+            {"__total__": 0}
+            if all(text.count(f"(net {i})") == 2 for i in (1, 2, 3))
+            else {"__total__": 1, "clearance_pad_segment": 1}
+        ),
+    )
+    cfg = OptimizationConfig(drc_aware=True, drc_manufacturer="jlcpcb", drc_arbiter=arbiter)
+    stats = optimize_pcb(str(src), str(out), _merge, cfg)
+    return stats, parse_segments(out.read_text())
+
+
+def test_arbiter_keeps_clean_nets_when_referee_rejects_all(tmp_path, monkeypatch):
+    # kicad-cli only objects to net C's merge.
+    arb = lambda text: 1 if text.count("(net 3)") < 2 else 0  # noqa: E731
+    stats, segs = _run3(tmp_path, monkeypatch, arb)
+    assert not stats.drc_failsafe_reverted
+    assert len(segs["A"]) == 1 and len(segs["B"]) == 1  # kept
+    assert len(segs["C"]) == 2  # rejected
+    assert stats.nets_kept == 2 and stats.nets_rolled_back == 1
+
+
+def test_arbiter_all_bad_still_reverts_everything(tmp_path, monkeypatch):
+    arb = lambda text: 0 if all(text.count(f"(net {i})") == 2 for i in (1, 2, 3)) else 1  # noqa: E731
+    stats, segs = _run3(tmp_path, monkeypatch, arb)
+    assert stats.drc_failsafe_reverted
+    assert all(len(v) == 2 for v in segs.values())
+
+
+def test_arbiter_unavailable_keeps_in_process_behaviour(tmp_path, monkeypatch):
+    stats, segs = _run3(tmp_path, monkeypatch, lambda text: None)
+    assert stats.drc_failsafe_reverted
+    assert all(len(v) == 2 for v in segs.values())
