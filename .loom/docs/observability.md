@@ -1086,6 +1086,29 @@ A host-process run carries no container keys: unknown is absent, never zero.
 A sweep-dispatched Judge or Doctor has no `loom.role_attempt`; read its
 `loom.phase` span, which carries the PR through the sweep.
 
+### Tokens per step, per PR or issue (#13563)
+
+`sweep.completed` no longer carries per-unit tokens under step dispatch. The
+source now is the step's close **log record**, `role_tick.outcome` with
+`loom.role_tick.source = step`. It is built from the step's session
+transcripts by the same decoder `burn.rs` uses (deduped on `message.id`), so
+totals match by construction. `loom.dispatch.step` is an instant span emitted
+at spawn and cannot carry them; `loom.llm.tokens.*` metrics stay unlabelled by
+repo/issue to bound cardinality.
+
+| Key | Meaning |
+|---|---|
+| `loom.repo`, `loom.sweep_id`, `loom.role` | the repo, step and role |
+| `loom.issue` / `loom.pr_number` | the step's item: a PR for Judge / Champion-merge-style steps, else an issue |
+| `loom.models_used`, `loom.tokens_by_model` | observed models and per-model rows (never inferred from config) |
+| `loom.tokens.input` / `.output` / `.cache_read` / `.cache_write` | flat sums of the rows (`cache_write` = 5m + 1h) |
+
+A step with no readable transcript carries no token keys: absent, never zero.
+**Known gap:** summing per-step counts undercounts `loom.llm.tokens.*` by the
+tokens used outside steps (role-runner ticks, which have no item) and by
+runtimes whose transcripts the scan does not read. The hourly comparison
+against `loom.llm.tokens.*` is a post-roll live check and has not been run.
+
 ## 3d. Agent telemetry relay (Issue #10964)
 
 An agent CLI the daemon launches can export its own OTLP telemetry — model
