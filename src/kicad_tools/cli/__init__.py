@@ -35,6 +35,7 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools pipeline <pcb>          - End-to-end repair pipeline for existing PCBs
     kicad-tools create-pcb <schematic>  - Create PCB from schematic
     kicad-tools readiness <board>      - Manufacturing-readiness sign-off + readiness.json
+    kicad-tools submit-jlcpcb <bundle> - Prepare JLCPCB PCBA submission (never orders)
     kicad-tools init <project>         - Initialize project with manufacturer rules
     kicad-tools run <script>           - Run Python script with kicad-tools interpreter
     kicad-tools bench external         - Zero-touch DeepPCB-comparable board benchmarks
@@ -596,6 +597,11 @@ def _dispatch_command(args) -> int:
         from .commands.board_metrics import run_board_metrics_command
 
         return run_board_metrics_command(args)
+
+    elif args.command == "submit-jlcpcb":
+        from .submit_jlcpcb_cmd import run as submit_jlcpcb_run
+
+        return submit_jlcpcb_run(args)
 
     elif args.command == "readiness":
         from .commands.readiness import run_readiness_command

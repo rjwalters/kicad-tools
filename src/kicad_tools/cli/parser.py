@@ -277,6 +277,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_export_formats_parser(subparsers)
     _add_board_metrics_parser(subparsers)
     _add_readiness_parser(subparsers)
+    _add_submit_jlcpcb_parser(subparsers)
     _add_clean_parser(subparsers)
     _add_impedance_parser(subparsers)
     _add_mcp_parser(subparsers)
@@ -7014,6 +7015,18 @@ def _add_board_metrics_parser(subparsers) -> None:
         help="Print board.json to stdout without writing any file",
     )
     add_format_flag(bm_parser)
+
+
+def _add_submit_jlcpcb_parser(subparsers) -> None:
+    """Add ``submit-jlcpcb`` (agent-prepared JLCPCB submission, #8466)."""
+    from .submit_jlcpcb_cmd import add_arguments
+
+    add_arguments(
+        subparsers.add_parser(
+            "submit-jlcpcb",
+            help="Prepare a JLCPCB PCBA submission from a tapeout bundle (never orders)",
+        )
+    )
 
 
 def _add_readiness_parser(subparsers) -> None:

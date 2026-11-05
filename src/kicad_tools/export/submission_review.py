@@ -296,6 +296,27 @@ def verify_review(
     return record_core
 
 
+def _stock_upload_sections(
+    stock: Mapping[str, Any] | None, upload: Mapping[str, Any] | None
+) -> list[str]:
+    lines: list[str] = []
+    if stock is not None:
+        lines += ["## Stock check", f"Status: {stock.get('status', 'unknown')}"]
+        for item in stock.get("lines", ()):
+            lines.append(
+                "- {catalog_id}: need {need}, stock {stock}, {status}".format(
+                    catalog_id=item.get("catalog_id"),
+                    need=item.get("need"),
+                    stock="unknown" if item.get("stock") is None else item.get("stock"),
+                    status=item.get("status"),
+                )
+            )
+        lines.append("")
+    if upload is not None:
+        lines += ["## Upload"] + [f"- {k}: {upload[k]}" for k in sorted(upload)] + [""]
+    return lines
+
+
 def render_review_page(
     plan: SubmissionPlan,
     *,
@@ -303,8 +324,18 @@ def render_review_page(
     record: ReviewRecord | None = None,
     assets: Mapping[str, ReviewAsset] | None = None,
     assets_root: Path | None = None,
+    stock: Mapping[str, Any] | None = None,
+    upload: Mapping[str, Any] | None = None,
 ) -> ReviewPage:
     """Publish a portable local review page for ``plan``.
+
+    ``stock`` (``{"status": "pass"|"blocked", "lines": [...]}``, each line
+    ``{"catalog_id", "need", "stock", "status", ...}``) and ``upload``
+    (``{"state": ..., "file_key": ..., ...}``) are optional, caller-supplied
+    workflow results rendered as their own sections and as distinct
+    ``stock_check`` / ``upload`` states (prepared -> stock-checked ->
+    uploaded). They are display-only: this function never contacts a network
+    and never sets an ``order`` state.
 
     If ``record`` is supplied it is independently reverified against
     ``plan`` (see :func:`verify_review`) before anything is written; a stale
@@ -399,6 +430,11 @@ def render_review_page(
     }
 
     states = dict(record_core["states"]) if record_core is not None else dict(core["states"])
+    states["prepared"] = "prepared"
+    if stock is not None:
+        states["stock_check"] = "stock-checked" if stock.get("status") == "pass" else "blocked"
+    if upload is not None:
+        states["upload"] = str(upload.get("state", "not-performed"))
 
     index_lines = [
         "# Local submission review page",
@@ -429,6 +465,7 @@ def render_review_page(
         ]
     index_lines += [
         "",
+        *_stock_upload_sections(stock, upload),
         "## Upload/download file set",
         *(f"- uploads/{name}" for name in output_names),
         "",
