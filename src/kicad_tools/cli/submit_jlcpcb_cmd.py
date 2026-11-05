@@ -7,9 +7,11 @@ Composes the existing submission plan / stock / upload / review pieces via
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
+from .format_options import add_format_flag
 from ..export.submission_plan import SubmissionError
 from ..export.submission_workflow import (
     WorkflowError,
@@ -41,6 +43,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         help="Upload the exact Gerber bytes via the API (needs JLC credentials and --reviewer)",
     )
     parser.add_argument("--reviewer", help="Your name; confirms the upload checklist")
+    add_format_flag(parser)
 
 
 def run(args: argparse.Namespace) -> int:
@@ -66,9 +69,23 @@ def run(args: argparse.Namespace) -> int:
     except (WorkflowError, SubmissionError) as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 2
+    failures = list(format_stock_failures(result.stock))
+    if getattr(args, "format", "text") == "json":
+        print(
+            json.dumps(
+                {
+                    "states": dict(result.states),
+                    "stock_failures": failures,
+                    "review_page": str(result.page.directory),
+                    "stock_blocked": bool(result.stock.blocked),
+                },
+                indent=2,
+            )
+        )
+        return 1 if result.stock.blocked else 0
     for key, value in result.states.items():
         print(f"{key}: {value}")
-    for failure in format_stock_failures(result.stock):
+    for failure in failures:
         print(f"  STOCK: {failure}")
     print(f"review page: {result.page.directory}")
     return 1 if result.stock.blocked else 0
