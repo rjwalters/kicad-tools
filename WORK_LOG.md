@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-05
 
+- **PR #8400**: fix: run prune/optimize-traces kicad-cli referees on pinned image under KCT_KICAD_DOCKER
+- **Issue #8395** (closed): pcb prune / optimize-traces DRC referee ignores KCT_KICAD_DOCKER and checks edits on the host kicad-cli
 - **PR #8449**: test: pin kct pcb dedupe output across PYTHONHASHSEED values
 - **Issue #8438** (closed): `pcb prune` gives different results on identical input across runs
 - **PR #8451**: test(route): cover --complete staircase collapse on a real grid
