@@ -1,8 +1,8 @@
 ---
 title: "voltage_divider_routed"
 subtitle: "Design Report"
-author: "kicad-tools 0.23.0"
-date: "Rev 1 | 2026-10-18 | jlcpcb"
+author: "kicad-tools 0.27.0"
+date: "Rev 1 | 2026-11-04 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -110,6 +110,7 @@ Simple 2-resistor voltage divider
 | Blocking | 0 |
 
 **Status**: PASS
+
 
 
 

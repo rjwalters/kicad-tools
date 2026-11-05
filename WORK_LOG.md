@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-04
 
+- **PR #8390**: fix(board-05): commit the .kicad_dru the recipe emits (#8357)
+- **Issue #8357** (closed): board 05: design.py emits #8048 attach-zone block into .kicad_dru that the committed artifact lacks (recipe not reproducible)
 - **Issue #8323** (closed): pcb prune adds a clearance error under the project's custom DRU rule despite its built-in DRC check
 - **Issue #8285** (closed): optimize-traces: connectivity check discards a different set of nets across identical runs (nondeterminism)
 - **PR #8381**: feat: add --project and refuse default-rules DRC verification

@@ -387,6 +387,103 @@ def test_spur_beside_via_is_removed_and_main_diagonal_kept(tmp_path):
     assert [s.end for s in in1] == [(105, 100.35)]
 
 
+def _overlap_held_board(tmp_path: Path, trunk: bool = True, extra_pad: bool = False) -> Path:
+    """#8259: a redundant B.Cu branch V2 -> P -> Q whose free end Q rests on V1
+    by capsule overlap only (0.45 mm via, 0.4 mm track, Q 0.35 mm off centre),
+    plus an In2.Cu track whose only join to V1 is that same overlap."""
+    header = HEADER.replace(
+        '(0 "F.Cu" signal) (31 "B.Cu" signal)',
+        '(0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal) (31 "B.Cu" signal)',
+    )
+    x0, y0, w = 100.0, 100.0, 0.4
+
+    def o(x, y):
+        return (round(x0 + x, 4), round(y0 + y, 4))
+
+    body = header + _fp("P1", *o(0, 0)) + _fp("P2", *o(3.0, 1.45))
+    if extra_pad:  # a pad touched only by Q's overlap (never by a modelled join)
+        px, py = o(0.35, -0.25)
+        body += (
+            f'  (footprint "X:P" (layer "F.Cu") (uuid "f-P3") (at {px} {py})\n'
+            '    (property "Reference" "P3" (at 0 0 0) (layer "F.SilkS"))\n'
+            '    (pad "1" thru_hole rect (at 0 0) (size 0.2 0.2) (drill 0.1) '
+            '(layers "*.Cu") (net 1 "SIG"))\n  )\n'
+        )
+    if trunk:
+        body += _seg(o(0, 0), o(1.45, 1.45), "B.Cu", w)
+    body += _seg(o(1.45, 1.45), o(0.35, 0.35), "B.Cu", w)
+    body += _seg(o(0.35, 0.35), o(0.35, 0), "B.Cu", w)
+    body += _seg(o(1.45, 1.45), o(3.0, 1.45), "F.Cu", w)
+    if not extra_pad:
+        body += _seg(o(0.35, 0), o(1.70, -1.35), "In2.Cu", w)
+        body += _seg(o(1.70, -1.35), o(3.0, -1.35), "In2.Cu", w)
+        body += _seg(o(3.0, -1.35), o(3.0, 1.45), "In2.Cu", w)
+    for xy in (o(0, 0), o(1.45, 1.45), o(3.0, 1.45)):
+        body += (
+            f'  (via (at {xy[0]} {xy[1]}) (size 0.45) (drill 0.2) (layers "F.Cu" "B.Cu") '
+            f'(net 1) (uuid "v-{next(_uid)}"))\n'
+        )
+    p = tmp_path / "held.kicad_pcb"
+    p.write_text(body + ")\n")
+    return p
+
+
+def test_overlap_held_branch_is_removed_and_inner_end_gets_a_stub(tmp_path):
+    p = _overlap_held_board(tmp_path)
+    pcb, res = _run(p)
+    assert res.stats["segments_removed"] == 2
+    b_cu = [(s.start, s.end) for s in pcb.segments if s.layer == "B.Cu"]
+    assert b_cu == [((100.0, 100.0), (101.45, 101.45))]  # trunk kept
+    # The 45-degree In2.Cu track cannot be tilted onto the via centre, so a
+    # 0.35 mm stub from the centre to its end is added instead.
+    assert res.stats["stubs_added"] == 1
+    stubs = [s for s in pcb.segments if s.layer == "In2.Cu" and s.start == (100.0, 100.0)]
+    assert [s.end for s in stubs] == [(100.35, 100.0)]
+    assert stubs[0].width == pytest.approx(0.4)
+    # the result is saved and reloads with the stub in place
+    out = tmp_path / "out.kicad_pcb"
+    pcb.save(out)
+    assert any(s.layer == "In2.Cu" and s.start == (100.0, 100.0) for s in PCB.load(out).segments)
+
+
+def test_overlap_held_prune_is_drc_clean_with_kicad_cli(tmp_path):
+    import shutil
+
+    if shutil.which("kicad-cli") is None:
+        pytest.skip("kicad-cli not available")
+    from kicad_tools.pcb_prune import _drc_signature
+
+    p = _overlap_held_board(tmp_path)
+    before = _drc_signature(p)
+    if before is None:
+        pytest.skip("kicad-cli DRC unavailable")
+    pcb, res = prune_board(p, allow_default_rules=True)
+    assert res.drc_verified and res.rejected == []
+    assert res.stats["segments_removed"] == 2
+    out = tmp_path / "out.kicad_pcb"
+    pcb.save(out)
+    after = _drc_signature(out)
+    assert after is not None
+    assert after.get("unconnected_items", 0) == 0
+    assert sum(v for k, v in after.items() if k != "unconnected_items") <= sum(
+        v for k, v in before.items() if k != "unconnected_items"
+    )
+
+
+def test_overlap_held_branch_is_kept_when_it_is_the_only_path(tmp_path):
+    # No trunk V1 -> V2: the branch is the only link, nothing may be removed.
+    pcb, res = _run(_overlap_held_board(tmp_path, trunk=False))
+    assert res.stats["segments_removed"] == 0
+
+
+def test_overlap_held_branch_is_kept_when_a_terminal_hangs_on_the_overlap(tmp_path):
+    # A pad that Q touches by overlap alone is a terminal the model cannot see
+    # joined: removing the branch must not strand it.
+    pcb, res = _run(_overlap_held_board(tmp_path, extra_pad=True))
+    assert res.stats["segments_removed"] == 0
+    assert any(s.end == (100.35, 100.0) for s in pcb.segments if s.layer == "B.Cu")
+
+
 def test_spur_is_kept_when_removal_would_disconnect_the_main_track(tmp_path):
     # Branch no longer reaches V2: it is not redundant, nothing may go.
     pcb, res = _run(_spur_board(tmp_path, branch_end=(109, 105.5)))
@@ -715,6 +812,9 @@ def test_run_looping_back_to_nowhere_is_kept(tmp_path):
     back = ((100, 100.4), (100, 100))
     p = _board(tmp_path, [("A", 100, 100, 0.2, 0.2)], [*steps, back])
     pcb, res = _run(p)
+    # No covered step goes either (issue #8368): removing any of them leaves a
+    # neighbouring step's end landing mid-span on the 0.4 mm track, which
+    # kicad-cli reports as dangling.
     assert len(pcb.segments) == 5
 
 
@@ -1353,7 +1453,10 @@ def test_relative_wide_refuses_cut_that_breaks_ampacity(tmp_path):
     pcb, res = prune_board(
         p, verify_drc=False, declared_nets={"SIG"}, wide=None, required_widths={"SIG": 5.0}
     )
-    assert res.stats["segments_removed"] == 0
+    # Only the 0.4 mm run covered by the 1 mm duplicate may go (no copper is
+    # lost, issue #8368); no loop member is cut.
+    assert res.stats["segments_removed"] <= 1
+    assert all(r == "covered by a collinear track" for pl in res.plans for r in pl.reasons.values())
     assert res.uncut_loops and "declared current" in res.uncut_loops[0]["reason"]
 
 
@@ -1431,3 +1534,271 @@ def test_cleanup_copper_raises_when_not_converging(monkeypatch, tmp_path):
     mod = _patch_cleanup(monkeypatch, [_fake_result([1], removed=1)] * 3)
     with pytest.raises(RuntimeError, match="did not converge"):
         mod.cleanup_copper(tmp_path / "r.kicad_pcb", max_passes=3)
+
+
+# --- prune / audit loop-model agreement (issue #8368, criterion 1) -----------
+#
+# Synthetic stand-ins for the two edge kinds the real-board check found behind
+# every ``ambiguous: loop/parallel`` path left after ``prune --current-paths``.
+
+
+def _cp_specs(tmp_path: Path, source: str = "A", sink: str = "B"):
+    from kicad_tools.router.current_paths import load_current_path_specs
+
+    f = tmp_path / "cp8368.json"
+    f.write_text(
+        json.dumps(
+            {
+                "paths": [
+                    {
+                        "name": "p",
+                        "net": "SIG",
+                        "source": {"ref": source, "pad": "1"},
+                        "sink": {"ref": sink, "pad": "1"},
+                        "continuous_a": 1.0,
+                    }
+                ]
+            }
+        )
+    )
+    return load_current_path_specs(f)
+
+
+def _resolve(pcb, specs, tmp_path: Path):
+    from kicad_tools.router.current_paths import resolve_current_path
+
+    out = tmp_path / "resolved8368.kicad_pcb"
+    pcb.save(out)
+    return resolve_current_path(PCB.load(out), specs[0])
+
+
+def _prune_declared(p: Path, specs):
+    return prune_board(p, verify_drc=False, declared_nets={"SIG"}, wide=None, current_paths=specs)
+
+
+def _assert_agree(res, resolution) -> None:
+    """The acceptance criterion: no uncut loop reported => audit not ambiguous."""
+    if not res.uncut_loops:
+        assert resolution.status == "resolved", resolution.reason
+
+
+def test_contained_collinear_subsegment_is_removed(tmp_path):
+    """Kind 1: S (0,0)->(0.8,0) lies inside L (0,0)->(3.2,0), same width."""
+    p = _board(
+        tmp_path,
+        [("A", 100, 100), ("B", 103.2, 100)],
+        [((100, 100), (103.2, 100), "F.Cu", 0.5), ((100, 100), (100.8, 100), "F.Cu", 0.5)],
+    )
+    specs = _cp_specs(tmp_path)
+    before = _resolve(PCB.load(p), specs, tmp_path)
+    assert before.status == "ambiguous"
+    pcb, res = _prune_declared(p, specs)
+    assert [(s.start, s.end) for s in pcb.segments] == [((100, 100), (103.2, 100))]
+    assert res.uncut_loops == []
+    after = _resolve(pcb, specs, tmp_path)
+    assert after.status == "resolved", after.reason
+    _assert_agree(res, after)
+
+
+def test_contained_subsegment_with_both_ends_interior_and_offaxis_continuation(tmp_path):
+    """Kind 1, both ends interior: L (0,0)->(10,0) at 2.6 mm, S (4,0)->(6,0) at
+    0.5 mm continuing off-axis from (6,0).  The audit splits L at S's ends ->
+    parallel edges.  Removing S would leave the continuation's end landing
+    mid-span on L, which kicad-cli may flag as ``track_dangling`` (PR #8392
+    review), so S is kept and the loop is reported instead -- prune and the
+    audit still agree."""
+    segs = [
+        ((100, 100), (110, 100), "F.Cu", 2.6),
+        ((104, 100), (106, 100), "F.Cu", 0.5),
+        ((106, 100), (108, 102), "F.Cu", 0.5),
+    ]
+    p = _board(tmp_path, [("A", 100, 100), ("B", 110, 100), ("C", 108, 102)], segs)
+    specs = _cp_specs(tmp_path)
+    before = _resolve(PCB.load(p), specs, tmp_path)
+    assert before.status == "ambiguous"
+    assert before.witness["start"] == [104.0, 100.0]
+    pcb, res = _prune_declared(p, specs)
+    assert {(s.start, s.end) for s in pcb.segments} == {
+        ((100, 100), (110, 100)),
+        ((104, 100), (106, 100)),
+        ((106, 100), (108, 102)),
+    }
+    assert res.uncut_loops
+    _assert_agree(res, _resolve(pcb, specs, tmp_path))
+
+
+@pytest.mark.parametrize("knee", [0.2, 0.4])
+def test_covered_track_kept_when_removal_leaves_a_short_45_degree_landing(tmp_path, knee):
+    """PR #8392 review: L (0,0)->(10.4,0); S (0,0)->(6,0) inside it; a 45 deg
+    stub from S's end (6,0) to (6+k,-k), then a 1.2 mm leg to a pad.  With S
+    gone the stub's end lands mid-span on L: pinned kicad-cli 10.0.6 connects
+    it but reports ``track_dangling`` for k = 0.2 / 0.4 mm (clean with S).  A
+    landing that only exists after the removal is not a clean join, so S stays
+    -- in the covered-track pass and the generic loop pass alike."""
+    k = (106 + knee, 100 - knee)
+    segs = [
+        ((100, 100), (110.4, 100), "F.Cu", 0.5),
+        ((100, 100), (106, 100), "F.Cu", 0.5),
+        ((106, 100), k, "F.Cu", 0.5),
+        (k, (k[0] + 1.2, k[1]), "F.Cu", 0.5),
+    ]
+    pads = [("A", 100, 100), ("B", 110.4, 100), ("C", k[0] + 1.2, k[1])]
+    p = _board(tmp_path, pads, segs)
+    pcb, res = _run(p)
+    assert res.stats["segments_removed"] == 0
+    assert ((100, 100), (106, 100)) in {(s.start, s.end) for s in pcb.segments}
+
+    specs = _cp_specs(tmp_path)
+    pcb, res = _prune_declared(p, specs)
+    assert res.stats["segments_removed"] == 0
+    # the loop is kept, so it is reported -- prune and the audit agree
+    assert res.uncut_loops
+    _assert_agree(res, _resolve(pcb, specs, tmp_path))
+
+
+def test_contained_subsegment_starting_on_a_via_the_container_passes_over(tmp_path):
+    """Kind 1 with a via: S starts on a via that L runs straight over (the
+    real board's net G).  The via stays joined by its centre on L."""
+    segs = [
+        ((100, 100), (103, 100), "F.Cu", 0.5),
+        ((103, 100), (103, 103), "B.Cu", 0.5),  # S, starts on via 1
+        ((103, 99), (103, 103), "B.Cu", 0.5),  # L, passes over via 1
+        ((103, 99), (106, 99), "F.Cu", 0.5),
+        ((103, 103), (106, 103), "F.Cu", 0.5),
+    ]
+    p = _board(
+        tmp_path,
+        [("A", 100, 100), ("B", 106, 103), ("C", 106, 99)],
+        segs,
+        vias=[(103, 100), (103, 99), (103, 103)],
+    )
+    specs = _cp_specs(tmp_path)
+    assert _resolve(PCB.load(p), specs, tmp_path).status == "ambiguous"
+    pcb, res = _prune_declared(p, specs)
+    kept = {(s.start, s.end, s.layer) for s in pcb.segments}
+    assert ((103, 100), (103, 103), "B.Cu") not in kept
+    assert ((103, 99), (103, 103), "B.Cu") in kept
+    assert len(pcb.vias) == 3
+    after = _resolve(pcb, specs, tmp_path)
+    assert after.status == "resolved", after.reason
+    _assert_agree(res, after)
+
+
+def test_contained_subsegment_wider_than_track_is_kept(tmp_path):
+    """A wider "contained" track carries copper the narrower one lacks."""
+    segs = [((100, 100), (103.2, 100), "F.Cu", 0.5), ((100, 100), (100.8, 100), "F.Cu", 1.0)]
+    p = _board(tmp_path, [("A", 100, 100, 2, 2), ("B", 103.2, 100)], segs)
+    _pcb, res = _run(p)
+    assert all(r != "covered by a collinear track" for pl in res.plans for r in pl.reasons.values())
+
+
+def test_explicit_wide_keeps_contained_wide_subsegment_on_declared_net(tmp_path):
+    segs = [((100, 100), (110, 100), "F.Cu", 2.6), ((104, 100), (106, 100), "F.Cu", 0.6)]
+    p = _board(tmp_path, [("A", 100, 100), ("B", 110, 100)], segs)
+    pcb, _res = prune_board(p, verify_drc=False, declared_nets={"SIG"}, wide=0.5)
+    assert len(pcb.segments) == 2
+
+
+def _crossing_board(tmp_path: Path) -> Path:
+    """Kind 2: pad A -> 1.2 mm stub -> 2.6 mm trunk to pad B; a 0.5 mm
+    diagonal from inside pad A to pad C crosses the trunk mid-span."""
+    segs = [
+        ((100, 104), (100, 100), "F.Cu", 1.2),
+        ((100, 100), (104, 100), "F.Cu", 2.6),
+        ((100.06, 103.8), (109.4, 94.4), "F.Cu", 0.5),
+    ]
+    return _board(tmp_path, [("A", 100, 104), ("B", 104, 100), ("C", 109.4, 94.4)], segs)
+
+
+def test_midspan_crossing_closes_a_loop_in_the_prune_model(tmp_path):
+    from kicad_tools.pcb_prune import _build_net_models
+
+    (model,) = _build_net_models(PCB.load(_crossing_board(tmp_path))).values()
+    assert model.has_cycle()
+
+
+def test_midspan_crossing_loop_is_reported_not_silently_kept(tmp_path):
+    """No segment removal breaks this loop without disconnecting a pad, so
+    prune keeps the copper -- but reports the loop with the audit's witness
+    instead of claiming there is none."""
+    p = _crossing_board(tmp_path)
+    specs = _cp_specs(tmp_path)
+    before = _resolve(PCB.load(p), specs, tmp_path)
+    assert before.status == "ambiguous"
+    pcb, res = _prune_declared(p, specs)
+    assert len(pcb.segments) == 3
+    (loop,) = res.uncut_loops
+    assert loop["net"] == "SIG"
+    assert loop["witness"] == before.witness
+    assert "audit" in loop["reason"]
+    _assert_agree(res, _resolve(pcb, specs, tmp_path))
+
+
+def test_cli_prune_reports_audit_loop_in_json(tmp_path, capsys):
+    from kicad_tools.cli import main
+
+    p = _crossing_board(tmp_path)
+    specs_path = tmp_path / "cp.json"
+    _cp_specs(tmp_path)
+    specs_path.write_text((tmp_path / "cp8368.json").read_text())
+    rc = main(
+        [
+            "pcb",
+            "prune",
+            str(p),
+            "--current-paths",
+            str(specs_path),
+            "--no-drc",
+            "--dry-run",
+            "--format",
+            "json",
+        ]
+    )
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["uncut_loops"] and out["uncut_loops"][0]["witness"]["kind"] == "segment"
+
+
+def test_required_widths_follow_layer_and_stackup_copper_weight(tmp_path):
+    """The net-relative ``--wide`` ampacity check sized every layer as an
+    internal 1 oz layer (28 mm for 13.4 A); outer layers of a 2 oz board need
+    far less."""
+    from kicad_tools.pcb_prune import required_widths_for
+    from kicad_tools.physics.ampacity import width_for_current
+
+    p = _board(tmp_path, [("A", 100, 100)], [((100, 100), (101, 100))])
+    internal_1oz = width_for_current(13.4, 1.0, layer="internal")
+    plain = required_widths_for(PCB.load(p), 13.4)
+    assert plain["F.Cu"] == pytest.approx(width_for_current(13.4, 1.0, layer="external"))
+    assert plain["F.Cu"] < internal_1oz
+    p.write_text(
+        p.read_text().replace(
+            '(paper "A4")',
+            '(paper "A4")\n  (setup (stackup (layer "F.Cu" (type "copper") (thickness 0.07))'
+            ' (layer "dielectric 1" (type "core") (thickness 1.5))'
+            ' (layer "B.Cu" (type "copper") (thickness 0.07))))',
+        )
+    )
+    two_oz = required_widths_for(PCB.load(p), 13.4)
+    assert two_oz["B.Cu"] == pytest.approx(width_for_current(13.4, 2.0, layer="external"))
+    assert two_oz["B.Cu"] < plain["B.Cu"]
+
+
+def test_ampacity_check_uses_each_branch_layer(tmp_path):
+    """A per-layer requirement: the same loop cut is allowed when the branch
+    left is wide enough on *its* layer, refused when it is not."""
+    ok_dir, bad_dir = tmp_path / "ok", tmp_path / "bad"
+    ok_dir.mkdir()
+    bad_dir.mkdir()
+    for d, need in ((ok_dir, {"F.Cu": 0.3, "B.Cu": 9.0}), (bad_dir, {"F.Cu": 9.0, "B.Cu": 0.3})):
+        p = _wide_loop_with_duplicate_board(d)
+        _pcb, res = prune_board(
+            p, verify_drc=False, declared_nets={"SIG"}, wide=None, required_widths={"SIG": need}
+        )
+        loop_cuts = [
+            r for pl in res.plans for r in pl.reasons.values() if r.startswith("declared-net loop")
+        ]
+        if d is ok_dir:
+            assert loop_cuts
+        else:
+            assert not loop_cuts and res.uncut_loops

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 
@@ -78,6 +79,12 @@ class OptimizationConfig:
     Overrides the manufacturer preset's minimum clearance in the in-process
     referee so keep/reject agrees with kicad-cli under the project rules.
     ``None`` keeps the preset."""
+
+    drc_arbiter: Callable[[str], int | None] | None = None
+    """External clearance checker used when the in-process referee rejects
+    every changed net (Issue #8367).  Takes board text, returns the checker's
+    clearance error count or ``None`` if unavailable.  Set only when a project
+    ``.kicad_dru`` exists, which the in-process referee cannot read."""
 
 
 @dataclass
