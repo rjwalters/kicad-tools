@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-05
 
+- **PR #8464**: feat: re-pitch parallel pour-slot buses jointly
+- **Issue #8460** (closed): pour-slots: re-pitch parallel-run buses as a group
 - **PR #8461**: test(prune): pin segment count and stability for tilt-refused via stubs
 - **Issue #8458** (closed): prune/optimize cleanup leaves ~4% more segments on main than at c9a45f80a (no fixed point in 3 rounds)
 - **PR #8462**: feat: jog pour-slot runs that end on same-net vias
