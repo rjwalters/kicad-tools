@@ -17,32 +17,6 @@
 
 set -euo pipefail
 
-# Find repository root
-find_repo_root() {
-    local dir="$PWD"
-    while [[ "$dir" != "/" ]]; do
-        if [[ -d "$dir/.loom" ]]; then
-            echo "$dir"
-            return 0
-        fi
-        if [[ -f "$dir/.git" ]]; then
-            local gitdir
-            gitdir=$(sed 's/^gitdir: //' "$dir/.git")
-            local main_repo
-            main_repo=$(dirname "$(dirname "$(dirname "$gitdir")")")
-            if [[ -d "$main_repo/.loom" ]]; then
-                echo "$main_repo"
-                return 0
-            fi
-        fi
-        dir="$(dirname "$dir")"
-    done
-    echo ""
-}
-
-# shellcheck disable=SC2034  # Used for validation side-effect of find_repo_root
-REPO_ROOT=$(find_repo_root)
-
 # ANSI colors
 if [[ -t 1 ]]; then
     RED='\033[0;31m'

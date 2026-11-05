@@ -910,17 +910,18 @@ assert_doc_contains "$CRITICAL_HOLD_MD" \
     'CF_ACTION=rearm' \
     "the tick re-arms the hold when the head moved past the released one"
 
-# The operator-facing procedure has to be the one that actually works: remove
-# the label, then run merge-pr.sh, with an explicit promise that Champion will
-# not put the label back at this head. The pre-#9016 wording promised a
-# `merge-pr.sh` run the #8112 guard refused.
+# The operator-facing procedure has to be the one that actually works: since
+# #13517 it is one audited command, `merge-pr.sh <N> --release-hold`, which
+# verifies the hold and Judge-approved heads and removes loom:blocked itself
+# (the pre-#13517 hand `gh pr edit --remove-label` recorded nothing), with an
+# explicit promise that Champion will not put the label back at this head.
 assert_doc_contains "$CRITICAL_HOLD_MD" \
-    'gh pr edit $PR_NUMBER --remove-label \"loom:blocked\"' \
-    "the hold notice's Next steps tell the operator to remove loom:blocked first"
+    './.loom/scripts/merge-pr.sh $PR_NUMBER --release-hold' \
+    "the hold notice's Next steps name the one audited release-and-merge command (#13517)"
 
-assert_doc_contains "$CRITICAL_HOLD_MD" \
-    './.loom/scripts/merge-pr.sh $PR_NUMBER' \
-    "the hold notice's Next steps name the merge command that follows the removal"
+assert_doc_lacks "$CRITICAL_HOLD_MD" \
+    'gh pr edit $PR_NUMBER --remove-label \"loom:blocked\"' \
+    "the hold notice no longer tells the operator to hand-remove loom:blocked (#13517)"
 
 # One line, not a two-line needle: `grep -F` splits a needle on newlines and
 # ORs the parts, so a multi-line pin silently degrades to "either line".
@@ -1009,6 +1010,86 @@ assert_not_contains "$OUT" "champion:critical-file-waiver" "no waiver emits no m
 
 assert_doc_contains "$CHAMPION_MD" '- $CRITICAL_BULLET' "the pre-merge comment template renders the bullet from CRITERION3_WAIVER_*"
 assert_doc_lacks "$CHAMPION_MD" '- No critical files modified' "the pre-merge comment no longer hardcodes the no-critical-files bullet"
+
+# ---------------------------------------------------------------------
+# (#13542) Repo-declared extra critical paths (champion.extraCriticalPaths).
+# The shipped loader and matcher are extracted from the markdown and run, not
+# mirrored. A stub loom-daemon answers `config get` from $STUB_CONFIG_OUT.
+# ---------------------------------------------------------------------
+echo
+echo "Declared critical paths (#13542):"
+CFG_STUB="$STUB_DIR/cfg"; mkdir -p "$CFG_STUB"
+printf '%s\n' "#!$(command -v bash)" \
+    '[ "$1 $2" = "config get" ] || exit 64' \
+    '[ -n "${STUB_CONFIG_RC:-}" ] || exit 1' \
+    'printf "%s" "${STUB_CONFIG_OUT:-}"; exit "$STUB_CONFIG_RC"' >"$CFG_STUB/loom-daemon"
+chmod +x "$CFG_STUB/loom-daemon"
+eval "$(sed -n '/^extra_critical_paths_load() {$/,/^}$/p' "$CHAMPION_MD")"
+eval "$(sed -n '/^extra_critical_hit() {$/,/^}$/p' "$CHAMPION_MD")"
+assert_contains "$(type -t extra_critical_hit)$(type -t extra_critical_paths_load)" "functionfunction" "the shipped loader and matcher extract from the markdown"
+
+# run_declared <config-json-for-verb|-> <file-json-or-empty> <names...>: prints loader output, then HIT/MISS.
+run_declared() {
+    local verb_out="$1" file_cfg="$2"; shift 2
+    local d; d=$(mktemp -d); mkdir -p "$d/.loom"
+    [ -n "$file_cfg" ] && printf '%s' "$file_cfg" >"$d/.loom/config.json"
+    (
+        cd "$d" || exit 1
+        EXTRA_CRITICAL_PATHS=(); CRITERION3_DECLARED_PATH=""; CRITERION3_DECLARED_FILE=""
+        if [ "$verb_out" = "-" ]; then PATH="$STUB_DIR/empty:$PATH"; else export STUB_CONFIG_RC=0 STUB_CONFIG_OUT="$verb_out"; PATH="$CFG_STUB:$PATH"; fi
+        extra_critical_paths_load
+        if extra_critical_hit <<<"$(printf '%s\n' "$@")"; then echo "HIT $CRITERION3_DECLARED_FILE via $CRITERION3_DECLARED_PATH"; else echo "MISS"; fi
+    )
+    rm -rf "$d"
+}
+
+OUT=$(run_declared '{"found":true,"value":["infra/bot/**","policy/*-policy.json"]}' "" "src/a.rs" "infra/bot/charter/allow.json")
+assert_contains "$OUT" "HIT infra/bot/charter/allow.json via infra/bot/**" "a declared path holds and the hit names the glob"
+OUT=$(run_declared '{"found":true,"value":["infra/bot/**","policy/*-policy.json"]}' "" "policy/x-policy.json")
+assert_contains "$OUT" "via policy/*-policy.json" "a declared single-level glob holds"
+OUT=$(run_declared '{"found":true,"value":["bot"]}' "" "robot/x.txt")
+assert_eq "MISS" "$OUT" "globs are anchored: a declared 'bot' does not match 'robot/x.txt'"
+OUT=$(run_declared '{"found":true,"value":["infra/bot/**"]}' "" "docs/x.md" "infra/other/y")
+assert_eq "MISS" "$OUT" "a file outside every declared glob does not hold"
+OUT=$(run_declared '{"found":true,"value":["infra/bot/**"]}' "" "archive/charter.json" "infra/bot/charter.json")
+assert_contains "$OUT" "HIT infra/bot/charter.json" "a rename out of a declared path holds (previous_filename is in the list)"
+
+OUT=$(run_declared '{"found":true,"value":"oops"}' "" "infra/bot/a")
+assert_contains "$OUT" "WARN: champion.extraCriticalPaths is not an array; ignored" "a non-array value is ignored with a warning"
+assert_contains "$OUT" "MISS" "a non-array value adds nothing"
+OUT=$(run_declared '{"found":true,"value":["", 7, null, "infra/bot/**"]}' "" "infra/bot/a" "other")
+assert_contains "$OUT" "WARN: champion.extraCriticalPaths entry \"\" is not a non-empty string; skipped" "an empty entry is skipped with a warning"
+assert_contains "$OUT" "entry 7 is not" "a non-string entry is skipped with a warning"
+assert_contains "$OUT" "HIT infra/bot/a" "valid entries beside bad ones still apply"
+OUT=$(run_declared '{"found":true,"value":["",5]}' "" "anything" "x/y")
+assert_contains "$OUT" "MISS" "only bad entries: nothing is added, nothing widened"
+
+OUT=$(run_declared '{"found":false}' "" "infra/bot/a")
+assert_eq "MISS" "$OUT" "no key (verb says not found): no output, no hold"
+OUT=$(run_declared "-" "" "infra/bot/a")
+assert_eq "MISS" "$OUT" "no key and no committed file: no output, no hold (unchanged behavior)"
+OUT=$(run_declared "-" '{"champion":{"extraCriticalPaths":["infra/bot/**"]}}' "infra/bot/a")
+assert_contains "$OUT" "HIT infra/bot/a via infra/bot/**" "no verb: the committed .loom/config.json is the fallback"
+OUT=$(run_declared "-" '{"champion":{"extraCriticalPaths":"oops"}}' "x")
+assert_contains "$OUT" "WARN: champion.extraCriticalPaths is not an array" "malformed key in the committed file is ignored with a warning"
+
+# Built-ins are untouched by the key: the shipped CRITICAL_PATTERNS array has no declared entries
+# and the declared check never writes to it or to the kept set.
+EXTRA_CRITICAL_PATHS=("infra/bot/**")
+assert_eq "FAIL: .github/workflows/ci.yml" "$(printf '.github/workflows/ci.yml\n' | champion_critical_file_check)" "a built-in path still holds with the key set"
+assert_eq "PASS" "$(printf 'infra/bot/a\n' | champion_critical_file_check)" "declared paths are not in CRITICAL_PATTERNS (a criticalFilesOnly class never sees them)"
+# shellcheck disable=SC2034 # read by champion_critical_file_check
+EXTRA_CRITICAL_PATHS=()
+
+# Ordering and wiring pinned against the shipped block.
+DECL_LINE=$(grep -n '^extra_critical_paths_load$' "$CHAMPION_MD" | head -1 | cut -d: -f1)
+EVAL_LINE=$(grep -n '^standing_auth_eval critical "\$FILES"$' "$CHAMPION_MD" | head -1 | cut -d: -f1)
+assert_eq "yes" "$([ -n "$DECL_LINE" ] && [ -n "$EVAL_LINE" ] && [ "$DECL_LINE" -lt "$EVAL_LINE" ] && echo yes || echo no)" "the declared-path check runs before standing_auth_eval, so a class cannot waive it"
+assert_doc_contains "$CHAMPION_MD" 'FAIL: Declared critical path modified: $CRITERION3_DECLARED_FILE (champion.extraCriticalPaths' "the FAIL line names the declared glob"
+assert_doc_contains "$CHAMPION_MD" 'previous_filename // empty' "the declared check reads previous_filename too"
+assert_doc_contains "$CRITICAL_HOLD_MD" '${CRITERION3_DECLARED_PATH}' "the hold comment names the declared glob"
+assert_doc_contains "$PROMPT_DIR/champion-reference.md" 'champion.extraCriticalPaths' "the champion config reference documents the key"
+assert_doc_lacks "$CHAMPION_MD" 'CRITICAL_PATTERNS+=' "declared paths are never appended to CRITICAL_PATTERNS"
 
 echo
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed"

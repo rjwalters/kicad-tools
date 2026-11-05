@@ -136,21 +136,154 @@ class LatticePairwise:
                 return True
         return False
 
+    def _copper_verdict_waives(
+        self,
+        copper_a: object,
+        copper_b: object,
+        net_a: int,
+        net_b: int,
+        layer: int | None,
+        req: float,
+        overhang: float,
+        round_r: float = 0.0,
+    ) -> bool:
+        """Census-identical waiver on true copper (#8408).
+
+        Runs the gate's own ``_attach_zone_verdict`` (both nearest points in
+        one zone AND the copper outside it still clears ``req``), so the
+        search is never more permissive than the #8277 gate.
+
+        ``round_r`` is the largest round-copper radius in the pair.  A lattice
+        node's disc routinely sits exactly tangent to the zone edge, and shapely's
+        16-segment circle puts its nearest point up to ``r*(1-cos(pi/32))`` past
+        that edge -- beyond the gate's 1e-4 slack -- so the both-nearest-points
+        test is run on zones grown by that approximation error (and only that
+        test: the residual clearance is re-measured on the exact zones).
+        """
+        import math
+
+        from ..pairwise_clearance import (
+            _PASS_TOLERANCE,
+            AttachZone,
+            _attach_zone_residual,
+            _attach_zone_verdict,
+        )
+
+        names = frozenset({str(net_a), str(net_b)})
+        zones = []
+        grown = []
+        eps = round_r * (1.0 - math.cos(math.pi / 32.0))
+        for x0, y0, x1, y1, ids, layers in self.zones:
+            if net_a not in ids or net_b not in ids:
+                continue
+            if layer is not None and layers:
+                a_layers, b_layers = layers.get(net_a), layers.get(net_b)
+                if not (
+                    (a_layers is None or layer in a_layers)
+                    and (b_layers is None or layer in b_layers)
+                ):
+                    continue
+            zones.append(AttachZone(x0, y0, x1, y1, names))
+            grown.append(AttachZone(x0 - eps, y0 - eps, x1 + eps, y1 + eps, names))
+        if not zones:
+            return False
+
+        def verdict(zs: list) -> object:
+            return _attach_zone_verdict(
+                copper_a,
+                copper_b,
+                zs,
+                str(net_a),
+                str(net_b),
+                None,
+                req,
+                _PASS_TOLERANCE,
+                overhang,
+            )
+
+        if verdict(zones) is None:
+            return True
+        if eps <= 0.0 or verdict(grown) is not None:
+            return False
+        # Tangent-disc case: both nearest points are in the zone once the
+        # approximation error is allowed for; the residual copper must still
+        # clear on the EXACT zones (the slack never loosens the clearance).
+        return (
+            _attach_zone_residual(
+                copper_a,
+                copper_b,
+                zones,
+                str(net_a),
+                str(net_b),
+                None,
+                req,
+                _PASS_TOLERANCE,
+                overhang,
+            )
+            is None
+        )
+
     # -- probe-point helpers (closest-gap midpoints, gate-compatible) -------
+    #
+    # Issue #8408: when the caller passes the copper extents (``half_*`` /
+    # ``radius`` plus the pair requirement ``req``) the midpoint probe is only
+    # the cheap necessary condition; the waiver is then the gate's
+    # both-nearest-points + residual verdict on the true copper.  Without them
+    # the legacy midpoint-only verdict is kept (cost weights, hand-built tests).
 
     def exempt_seg_seg(
-        self, a: Pt, b: Pt, c: Pt, d: Pt, net_a: int, net_b: int, layer: int | None = None
+        self,
+        a: Pt,
+        b: Pt,
+        c: Pt,
+        d: Pt,
+        net_a: int,
+        net_b: int,
+        layer: int | None = None,
+        *,
+        half_a: float | None = None,
+        half_b: float | None = None,
+        req: float | None = None,
     ) -> bool:
-        """Zone exemption probed at the two segments' closest-gap midpoint."""
+        """Zone exemption for two segments (midpoint probe, then census verdict)."""
         if not self.zones:
             return False
         x, y = closest_gap_midpoint_xy(a[0], a[1], b[0], b[1], c[0], c[1], d[0], d[1])
-        return self.exempt(x, y, net_a, net_b, layer)
+        if not self.exempt(x, y, net_a, net_b, layer):
+            return False
+        if half_a is None or half_b is None or req is None:
+            return True
+        from kicad_tools.geometry.copper import segment_copper_polygon
+
+        pa = segment_copper_polygon(a, b, half_a * 2)
+        pb = segment_copper_polygon(c, d, half_b * 2)
+        if pa is None or pb is None:
+            return True
+        return self._copper_verdict_waives(
+            pa,
+            pb,
+            net_a,
+            net_b,
+            layer,
+            req,
+            max(half_a, half_b),
+            round_r=max(half_a, half_b),
+        )
 
     def exempt_seg_pt(
-        self, a: Pt, b: Pt, p: Pt, net_a: int, net_b: int, layer: int | None = None
+        self,
+        a: Pt,
+        b: Pt,
+        p: Pt,
+        net_a: int,
+        net_b: int,
+        layer: int | None = None,
+        *,
+        half: float | None = None,
+        radius: float | None = None,
+        req: float | None = None,
     ) -> bool:
-        """Zone exemption probed midway between segment ``a-b`` and point ``p``."""
+        """Zone exemption for segment ``a-b`` vs a round site ``p``."""
         if not self.zones:
             return False
         ax, ay = a
@@ -162,13 +295,59 @@ class LatticePairwise:
             t = ((p[0] - ax) * dx + (p[1] - ay) * dy) / length2
             t = max(0.0, min(1.0, t))
             cx, cy = ax + t * dx, ay + t * dy
-        return self.exempt((cx + p[0]) / 2.0, (cy + p[1]) / 2.0, net_a, net_b, layer)
+        if not self.exempt((cx + p[0]) / 2.0, (cy + p[1]) / 2.0, net_a, net_b, layer):
+            return False
+        if half is None or radius is None or req is None:
+            return True
+        from shapely.geometry import Point  # type: ignore[import-untyped]
 
-    def exempt_pt_pt(self, p: Pt, q: Pt, net_a: int, net_b: int, layer: int | None = None) -> bool:
-        """Zone exemption probed at the midpoint of two point sites."""
+        from kicad_tools.geometry.copper import segment_copper_polygon
+
+        pa = segment_copper_polygon(a, b, half * 2)
+        if pa is None:
+            return True
+        return self._copper_verdict_waives(
+            pa,
+            Point(p[0], p[1]).buffer(radius),
+            net_a,
+            net_b,
+            layer,
+            req,
+            0.0,
+            round_r=max(half, radius),
+        )
+
+    def exempt_pt_pt(
+        self,
+        p: Pt,
+        q: Pt,
+        net_a: int,
+        net_b: int,
+        layer: int | None = None,
+        *,
+        radius_p: float | None = None,
+        radius_q: float | None = None,
+        req: float | None = None,
+    ) -> bool:
+        """Zone exemption for two round sites."""
         if not self.zones:
             return False
-        return self.exempt((p[0] + q[0]) / 2.0, (p[1] + q[1]) / 2.0, net_a, net_b, layer)
+        if not self.exempt((p[0] + q[0]) / 2.0, (p[1] + q[1]) / 2.0, net_a, net_b, layer):
+            return False
+        if radius_p is None or radius_q is None or req is None:
+            return True
+        from shapely.geometry import Point
+
+        return self._copper_verdict_waives(
+            Point(p[0], p[1]).buffer(radius_p),
+            Point(q[0], q[1]).buffer(radius_q),
+            net_a,
+            net_b,
+            layer,
+            req,
+            0.0,
+            round_r=max(radius_p, radius_q),
+        )
 
 
 def build_lattice_pairwise(

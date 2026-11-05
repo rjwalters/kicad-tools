@@ -576,7 +576,8 @@ retired "merge-pr.sh's partial-increment label reset uses forge_gh_swap_label_rl
     "post_merge_bookkeeping::tests::partial_reset_swaps_and_comments asserts the exact wrapper call, and test-merge-pr-partial-increment.sh T1/T2 assert the recorded gh call"
 
 comment_call_count="$(grep -c 'forge_gh_comment_rl_safe "\$REPO_NWO"' "$MERGE_PR_SRC" || true)"
-assert_eq "1" "$comment_call_count" "merge-pr.sh's remaining comment call site (PR override) goes through forge_gh_comment_rl_safe"
+# 2 sites: the PR-override comment and the --release-hold audit comment (#13517).
+assert_eq "2" "$comment_call_count" "merge-pr.sh's remaining comment call sites (PR override, --release-hold audit) go through forge_gh_comment_rl_safe"
 
 retired "merge-pr.sh's stacked-child deferred-reconciliation comment uses forge_gh_comment_rl_safe" \
     "the stacked-child PR comment is posted through the #4856 rate-limit-safe wrapper, never a raw gh pr comment" \

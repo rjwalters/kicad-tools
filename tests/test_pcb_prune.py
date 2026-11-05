@@ -1603,10 +1603,10 @@ def test_contained_collinear_subsegment_is_removed(tmp_path):
 def test_contained_subsegment_with_both_ends_interior_and_offaxis_continuation(tmp_path):
     """Kind 1, both ends interior: L (0,0)->(10,0) at 2.6 mm, S (4,0)->(6,0) at
     0.5 mm continuing off-axis from (6,0).  The audit splits L at S's ends ->
-    parallel edges.  Removing S would leave the continuation's end landing
-    mid-span on L, which kicad-cli may flag as ``track_dangling`` (PR #8392
-    review), so S is kept and the loop is reported instead -- prune and the
-    audit still agree."""
+    parallel edges.  Dropping S alone would leave the continuation landing
+    mid-span on L (``track_dangling``, PR #8392 review), so L is split at (6,0)
+    first (issue #8406): the continuation then shares an endpoint with both
+    pieces and S goes, resolving the audit."""
     segs = [
         ((100, 100), (110, 100), "F.Cu", 2.6),
         ((104, 100), (106, 100), "F.Cu", 0.5),
@@ -1619,22 +1619,23 @@ def test_contained_subsegment_with_both_ends_interior_and_offaxis_continuation(t
     assert before.witness["start"] == [104.0, 100.0]
     pcb, res = _prune_declared(p, specs)
     assert {(s.start, s.end) for s in pcb.segments} == {
-        ((100, 100), (110, 100)),
-        ((104, 100), (106, 100)),
+        ((100, 100), (106, 100)),
+        ((106, 100), (110, 100)),
         ((106, 100), (108, 102)),
     }
-    assert res.uncut_loops
+    assert not res.uncut_loops
     _assert_agree(res, _resolve(pcb, specs, tmp_path))
+    assert _resolve(pcb, specs, tmp_path).status == "resolved"
 
 
 @pytest.mark.parametrize("knee", [0.2, 0.4])
-def test_covered_track_kept_when_removal_leaves_a_short_45_degree_landing(tmp_path, knee):
-    """PR #8392 review: L (0,0)->(10.4,0); S (0,0)->(6,0) inside it; a 45 deg
-    stub from S's end (6,0) to (6+k,-k), then a 1.2 mm leg to a pad.  With S
-    gone the stub's end lands mid-span on L: pinned kicad-cli 10.0.6 connects
-    it but reports ``track_dangling`` for k = 0.2 / 0.4 mm (clean with S).  A
-    landing that only exists after the removal is not a clean join, so S stays
-    -- in the covered-track pass and the generic loop pass alike."""
+def test_covered_track_with_short_45_degree_landing_is_split_not_kept(tmp_path, knee):
+    """PR #8392 review / issue #8406: L (0,0)->(10.4,0); S (0,0)->(6,0) inside
+    it; a 45 deg stub from S's end (6,0) to (6+k,-k), then a 1.2 mm leg to a
+    pad.  With S simply gone the stub's end lands mid-span on L (pinned
+    kicad-cli 10.0.6: ``track_dangling``), so the pass splits L at (6,0) --
+    same width and layer, no copper change -- and then drops S.  The anchored
+    merge pass must not glue the pieces back across the three-way joint."""
     k = (106 + knee, 100 - knee)
     segs = [
         ((100, 100), (110.4, 100), "F.Cu", 0.5),
@@ -1645,15 +1646,69 @@ def test_covered_track_kept_when_removal_leaves_a_short_45_degree_landing(tmp_pa
     pads = [("A", 100, 100), ("B", 110.4, 100), ("C", k[0] + 1.2, k[1])]
     p = _board(tmp_path, pads, segs)
     pcb, res = _run(p)
-    assert res.stats["segments_removed"] == 0
-    assert ((100, 100), (106, 100)) in {(s.start, s.end) for s in pcb.segments}
+    ends = {(s.start, s.end, s.width, s.layer) for s in pcb.segments}
+    assert ends == {
+        ((100, 100), (106, 100), 0.5, "F.Cu"),
+        ((106, 100), (110.4, 100), 0.5, "F.Cu"),
+        ((106, 100), k, 0.5, "F.Cu"),
+        (k, (k[0] + 1.2, k[1]), 0.5, "F.Cu"),
+    }
+    assert res.stats["segments_removed"] == 1
+    assert res.stats["segments_split"] == 1
+    assert _connected(pcb, (100, 100), (k[0] + 1.2, k[1]))
+    assert _connected(pcb, (110.4, 100), (k[0] + 1.2, k[1]))
 
     specs = _cp_specs(tmp_path)
     pcb, res = _prune_declared(p, specs)
+    assert not res.uncut_loops
+    assert _resolve(pcb, specs, tmp_path).status == "resolved"
+
+
+def test_covered_track_split_and_overlap_held_stub_on_the_same_net(tmp_path):
+    """Issues #8406 + #8259 on one net: the overlap-held board's branch removal
+    (which adds a stub) and a covered-track split elsewhere on the same net.
+    The split trial grows then shrinks the model's per-node lists, which must
+    stay in step with the held-end bookkeeping (``IndexError`` in
+    ``_NetModel.components`` on the merge of both)."""
+    p = _overlap_held_board(tmp_path)
+    k = (106.2, 119.8)
+    items = [
+        _fp("A", 100, 120),
+        _fp("B", 110.4, 120),
+        _fp("C", k[0] + 1.2, k[1]),
+        _seg((100, 120), (110.4, 120), "F.Cu", 0.5),
+        _seg((100, 120), (106, 120), "F.Cu", 0.5),
+        _seg((106, 120), k, "F.Cu", 0.5),
+        _seg(k, (k[0] + 1.2, k[1]), "F.Cu", 0.5),
+    ]
+    _append(p, *items)
+    pcb, res = _run(p)
+    assert res.stats["stubs_added"] == 1
+    assert res.stats["segments_split"] == 1
+    f_cu = {(s.start, s.end) for s in pcb.segments if s.layer == "F.Cu" and s.start[1] == 120}
+    assert ((100, 120), (106, 120)) in f_cu and ((106, 120), (110.4, 120)) in f_cu
+    assert any(s.layer == "In2.Cu" and s.start == (100.0, 100.0) for s in pcb.segments)
+
+
+def test_covered_track_split_skips_locked_container(tmp_path):
+    """A locked container is never split, so S stays."""
+    k = (106.2, 99.8)
+    segs = [
+        ((100, 100), (110.4, 100), "F.Cu", 0.5),
+        ((100, 100), (106, 100), "F.Cu", 0.5),
+        ((106, 100), k, "F.Cu", 0.5),
+        (k, (k[0] + 1.2, k[1]), "F.Cu", 0.5),
+    ]
+    pads = [("A", 100, 100), ("B", 110.4, 100), ("C", k[0] + 1.2, k[1])]
+    p = _board(tmp_path, pads, segs)
+    lines = p.read_text().splitlines(keepends=True)
+    for i, ln in enumerate(lines):
+        if "(end 110.4 100)" in ln:
+            lines[i] = ln.replace("(uuid", "(locked yes) (uuid", 1)
+    p.write_text("".join(lines))
+    pcb, res = _run(p)
     assert res.stats["segments_removed"] == 0
-    # the loop is kept, so it is reported -- prune and the audit agree
-    assert res.uncut_loops
-    _assert_agree(res, _resolve(pcb, specs, tmp_path))
+    assert "segments_split" not in res.stats
 
 
 def test_contained_subsegment_starting_on_a_via_the_container_passes_over(tmp_path):
