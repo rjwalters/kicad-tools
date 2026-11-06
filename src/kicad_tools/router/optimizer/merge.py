@@ -152,7 +152,11 @@ def merge_collinear_same_width(
 
         for seg in route.segments[1:]:
             trial = [*chain, seg]
-            if mergeable(chain[-1], seg) and _chain_is_straight(trial, tolerance_mm):
+            if (
+                mergeable(chain[-1], seg)
+                and _chain_is_straight(trial, tolerance_mm)
+                and _fused_is_45_legal(trial)
+            ):
                 chain.append(seg)
             else:
                 flush()
@@ -160,6 +164,30 @@ def merge_collinear_same_width(
         flush()
         route.segments = merged
     return removed
+
+
+def _fused_is_45_legal(chain) -> bool:
+    """True when fusing ``chain`` yields a segment that is 45-legal as written.
+
+    Issue #8488: ``tolerance_mm`` lets a joint sit up to 1 um off the fused
+    line, so a vertical run plus a 1 um jog fused into one ~4 mm segment that
+    is 0.0143 deg off the 0/45/90/135 set -- off-angle copper the chain's own
+    45-legal segments never contained.  Fusing is skipped unless the result
+    passes the same check ``Segment.to_sexp`` applies at serialization.
+    """
+    from ..quantize import (
+        ANGLE_TOL_DEG,
+        _is_quantum_aligned,
+        _rounded_4,
+        off_angle_degrees,
+    )
+
+    first, last = chain[0], chain[-1]
+    dx = _rounded_4(last.x2) - _rounded_4(first.x1)
+    dy = _rounded_4(last.y2) - _rounded_4(first.y1)
+    if dx == 0 and dy == 0:
+        return True
+    return _is_quantum_aligned(dx, dy) or off_angle_degrees(dx, dy) <= ANGLE_TOL_DEG
 
 
 def _chain_is_straight(chain, tolerance_mm: float) -> bool:
