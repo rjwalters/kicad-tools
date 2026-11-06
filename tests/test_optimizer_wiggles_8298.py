@@ -154,3 +154,53 @@ def test_identical_copper_on_another_net_or_layer_is_not_a_duplicate():
     other_net = Route(net=2, net_name="N2", segments=[_seg(0, 0, 5, 0, width=0.35, net=2)], vias=[])
     for route in (base, other_layer, other_net):
         assert _drop_repeated_segments(route, emitted, 1e-4) is route
+
+
+def test_a_vetoed_route_does_not_make_a_later_route_drop_copper(monkeypatch):
+    """The veto keeps route A's ORIGINAL copper; B must keep what A no longer carries."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from kicad_tools.router.optimizer import trace
+    from kicad_tools.router.primitives import Route
+
+    shared = (1.0, 0.0, 2.0, 0.0)
+    a_original = Route(net=1, net_name="N1", segments=_chain([(0, 0, 2, 0)]), vias=[])
+    a_optimized = Route(net=1, net_name="N1", segments=_chain([shared]), vias=[])
+    route_b = Route(net=1, net_name="N1", segments=_chain([shared, (2, 0, 3, 0)]), vias=[])
+    # Route A's rewrite is vetoed (e.g. by the HV pairwise gate); B passes through.
+    optimizer = SimpleNamespace(
+        optimize_route=lambda r: a_optimized if r is a_original else r,
+        config=SimpleNamespace(tolerance=1e-4),
+    )
+    gate = MagicMock(vetoes=1)
+    gate.side_effect = lambda original, optimized: original is not a_original
+    monkeypatch.setattr(trace, "pairwise_route_gate", lambda _router: gate)
+    monkeypatch.setattr(trace, "kelvin_branch_gate", lambda _router: None)
+    router = SimpleNamespace(routes=[a_original, route_b], grid=MagicMock())
+
+    routes = trace.optimize_routes_grid_synced(router, optimizer)
+
+    assert routes[0] is a_original
+    # A kept (0,0)-(2,0), not the optimized (1,0)-(2,0), so B still carries it.
+    assert _coords(routes[1].segments) == [(1.0, 0.0, 2.0, 0.0), (2.0, 0.0, 3.0, 0.0)]
+
+
+def test_an_accepted_route_still_lets_a_later_route_drop_its_copper(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from kicad_tools.router.optimizer import trace
+    from kicad_tools.router.primitives import Route
+
+    shared = (1.0, 0.0, 2.0, 0.0)
+    a = Route(net=1, net_name="N1", segments=_chain([shared]), vias=[])
+    b = Route(net=1, net_name="N1", segments=_chain([shared, (2, 0, 3, 0)]), vias=[])
+    optimizer = SimpleNamespace(optimize_route=lambda r: r, config=SimpleNamespace(tolerance=1e-4))
+    monkeypatch.setattr(trace, "pairwise_route_gate", lambda _router: None)
+    monkeypatch.setattr(trace, "kelvin_branch_gate", lambda _router: None)
+    router = SimpleNamespace(routes=[a, b], grid=MagicMock())
+
+    routes = trace.optimize_routes_grid_synced(router, optimizer)
+
+    assert _coords(routes[1].segments) == [(2.0, 0.0, 3.0, 0.0)]

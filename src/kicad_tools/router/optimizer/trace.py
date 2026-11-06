@@ -168,8 +168,31 @@ def pairwise_route_gate(router: object) -> PairwiseRouteGate | None:
     return PairwiseRouteGate(checker)
 
 
+def _segment_key(seg: Segment, step: float) -> tuple:
+    """Direction-insensitive (layer, width, endpoints) key of *seg* on a *step* grid."""
+    ends = sorted(
+        [
+            (round(seg.x1 / step), round(seg.y1 / step)),
+            (round(seg.x2 / step), round(seg.y2 / step)),
+        ]
+    )
+    return (seg.layer, round(seg.width / step), *ends)
+
+
+def _record_segments(route: Route, emitted: dict[int, set[tuple]], tolerance: float) -> None:
+    """Register the copper *route* keeps, so later same-net routes can dedupe against it."""
+    step = tolerance if tolerance > 0 else 1e-4
+    seen = emitted.setdefault(route.net, set())
+    for seg in route.segments:
+        seen.add(_segment_key(seg, step))
+
+
 def _drop_repeated_segments(
-    route: Route, emitted: dict[int, set[tuple]], tolerance: float
+    route: Route,
+    emitted: dict[int, set[tuple]],
+    tolerance: float,
+    *,
+    record: bool = True,
 ) -> Route:
     """Drop segments a same-net route optimized earlier already carries (#8505).
 
@@ -179,25 +202,23 @@ def _drop_repeated_segments(
     *emitted* maps net id to the (layer, width, endpoints) keys already kept;
     the first route to carry a segment keeps it, later routes lose their copy.
     The copper is unchanged, so connectivity and the grid are unaffected.
+
+    With ``record=False`` the keys of *route* are NOT added to *emitted*; the
+    caller registers them (via :func:`_record_segments`) only once it knows
+    which geometry the board actually keeps.  A route whose optimization is
+    vetoed keeps its original segments, so registering the optimized ones
+    first would let a later same-net route drop copper no route carries.
     """
     step = tolerance if tolerance > 0 else 1e-4
     seen = emitted.setdefault(route.net, set())
 
-    def key(seg: Segment) -> tuple:
-        ends = sorted(
-            [
-                (round(seg.x1 / step), round(seg.y1 / step)),
-                (round(seg.x2 / step), round(seg.y2 / step)),
-            ]
-        )
-        return (seg.layer, round(seg.width / step), *ends)
-
     kept = []
     for seg in route.segments:
-        k = key(seg)
+        k = _segment_key(seg, step)
         if k not in seen:
             kept.append(seg)
-        seen.add(k)
+        if record:
+            seen.add(k)
     if len(kept) == len(route.segments):
         return route
     return Route(
@@ -284,13 +305,23 @@ def optimize_routes_grid_synced(
         accept = gate if gate is not None else kelvin
     emitted: dict[int, set[tuple]] = {}
 
+    tolerance = optimizer.config.tolerance
+
     def optimize_deduped(route: Route) -> Route:
+        # Keys are registered in ``on_kept`` (after the veto), not here.
         return _drop_repeated_segments(
-            optimizer.optimize_route(route), emitted, optimizer.config.tolerance
+            optimizer.optimize_route(route), emitted, tolerance, record=False
         )
 
+    def register_kept(kept: Route) -> None:
+        _record_segments(kept, emitted, tolerance)
+
     routes = apply_route_transform_grid_synced(
-        router, optimize_deduped, skip_nets=skip_nets, accept=accept
+        router,
+        optimize_deduped,
+        skip_nets=skip_nets,
+        accept=accept,
+        on_kept=register_kept,
     )
     if gate is not None:
         # Issue #4766 AC8: record the coarse-veto cost on the router (for
@@ -309,6 +340,7 @@ def apply_route_transform_grid_synced(
     *,
     skip_nets: set[int] | None = None,
     accept: Callable[[Route, Route], bool] | None = None,
+    on_kept: Callable[[Route], None] | None = None,
 ) -> list[Route]:
     """Replace every route with ``transform(route)`` keeping the grid in sync.
 
@@ -336,6 +368,11 @@ def apply_route_transform_grid_synced(
             the copper-preserving consolidation pass uses -- disables the
             hook entirely, so callers that opt out are byte-identical to the
             pre-#4766 path.
+        on_kept: Issue #8505: optional callback invoked once per transformed
+            (non-skipped) route with the route that is actually kept -- the
+            transform's result, or the original when ``accept`` vetoed it or
+            the geometry was unchanged.  It runs after the veto, so stateful
+            transforms can record only copper the board really receives.
 
     Returns:
         The new ``router.routes`` list (also assigned on the router).
@@ -364,6 +401,8 @@ def apply_route_transform_grid_synced(
             # -- a fresh-but-equal object would leave the grid holding a
             # stale twin that later resyncs would re-mark.
             optimized = route
+        if on_kept is not None:
+            on_kept(optimized)
         optimized_routes.append(optimized)
         if optimized is route:
             continue
