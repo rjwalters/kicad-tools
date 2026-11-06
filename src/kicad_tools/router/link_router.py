@@ -907,11 +907,13 @@ def append_link_routes(
 
 def _append_route_nodes(doc: Any, route: LinkRoute, origin: tuple[float, float]) -> None:
     from kicad_tools.cli.stitch_cmd import _stitch_uuid
-    from kicad_tools.sexp.builders import segment_node, via_node
+    from kicad_tools.sexp.builders import fmt, segment_node, via_node
 
     ox, oy = origin
     for x_a, y_a, x_b, y_b, layer in route.segments:
-        if (x_a, y_a) == (x_b, y_b):
+        # Issue #8495: compare after the rounding ``segment_node`` applies, so a
+        # sub-resolution sliver is not serialized as a zero-length segment.
+        if (fmt(x_a + ox), fmt(y_a + oy)) == (fmt(x_b + ox), fmt(y_b + oy)):
             continue
         doc.append(
             segment_node(
