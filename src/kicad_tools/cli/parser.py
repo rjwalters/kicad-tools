@@ -2715,6 +2715,17 @@ def _add_pcb_parser(subparsers) -> None:
     pcb_prune.add_argument(
         "--dry-run", action="store_true", help="Report changes without modifying files"
     )
+    pcb_prune.add_argument(
+        "--nets",
+        metavar="NET[,NET...]",
+        help="Only prune these nets (comma-separated names); other copper is untouched",
+    )
+    pcb_prune.add_argument(
+        "--region",
+        metavar="x1,y1,x2,y2",
+        help="Only apply a net's plan when every edit lies inside this box (mm); "
+        "plans straddling it are skipped and reported as region_skipped",
+    )
     pcb_prune.add_argument("--no-drc", action="store_true", help="Skip kicad-cli DRC verification")
     pcb_prune.add_argument(
         "--project",
@@ -4972,6 +4983,11 @@ def _add_place_silk_refs_parser(subparsers) -> None:
         help="Also try a 90-degree rotated orientation when the original does not fit",
     )
     place_refs_parser.add_argument(
+        "--refs",
+        metavar="REF[,REF...]",
+        help="Comma-separated reference designators to move; others stay put as obstacles",
+    )
+    place_refs_parser.add_argument(
         "-o", "--output", help="Output file path (default: overwrite input)"
     )
     place_refs_parser.add_argument(
@@ -5262,6 +5278,11 @@ def _add_parts_parser(subparsers) -> None:
     )
     parts_avail.add_argument(
         "--issues-only", action="store_true", help="Only show parts with availability issues"
+    )
+    parts_avail.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Bypass the parts cache and fetch every part live",
     )
     parts_avail.add_argument(
         "--no-auto-lcsc",

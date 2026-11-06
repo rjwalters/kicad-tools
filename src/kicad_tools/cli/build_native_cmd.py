@@ -447,6 +447,18 @@ def _install_extension_atomically(source: Path, target: Path) -> None:
         raise
 
 
+def _extension_build_hint(source_dir: Path | None) -> str:
+    """Hint for building an optional (placement/DRC) extension (Issue #8519).
+
+    ``kct build-native`` only builds placement/DRC when the root
+    ``CMakeLists.txt`` and that extension's C++ source are both present;
+    otherwise the command cannot help and the Python fallback is in use.
+    """
+    if source_dir is not None and _get_project_root() is not None:
+        return "build with: kct build-native"
+    return "optional; Python fallback in use"
+
+
 def _get_project_root() -> Path | None:
     """Get the project root directory (where CMakeLists.txt is)."""
     # Walk up from package root to find CMakeLists.txt
@@ -771,6 +783,7 @@ def build_native(
         # (pip-installed package without the placement subdirectory), this
         # build never compiled a placement extension at all, so the globs
         # below simply find nothing -- not an error, nothing to install.
+        placement_install_failed = False
         try:
             placement_so_files = sorted(build_dir.glob("**/placement_cpp.*.so"))
             if not placement_so_files:
@@ -789,6 +802,7 @@ def build_native(
             # Do not fail the whole build over the placement extension: the
             # router extension above is already installed and verified
             # below. Surface it as a warning so it is visible, not silent.
+            placement_install_failed = True
             result.warnings.append(
                 f"Placement C++ extension was built but could not be installed: "
                 f"{type(e).__name__}: {e}"
@@ -803,6 +817,7 @@ def build_native(
         # was instead the router-only ``cpp_dir`` fallback (pip-installed
         # package without the drc subdirectory), the globs below simply find
         # nothing -- not an error, nothing to install.
+        drc_install_failed = False
         try:
             drc_so_files = sorted(build_dir.glob("**/drc_cpp.*.so"))
             if not drc_so_files:
@@ -821,8 +836,32 @@ def build_native(
             # Do not fail the whole build over the DRC extension: the router
             # extension above is already installed and verified below.
             # Surface it as a warning so it is visible, not silent.
+            drc_install_failed = True
             result.warnings.append(
                 f"DRC C++ extension was built but could not be installed: {type(e).__name__}: {e}"
+            )
+
+        # Issue #8519: say so when placement/DRC source exists but no
+        # extension was installed (router-only fallback build, or a silent
+        # compile failure) instead of leaving ``--check`` to report it later.
+        for label, so_path, failed, src_dir in (
+            (
+                "Placement",
+                result.placement_so_path,
+                placement_install_failed,
+                _get_placement_cpp_source_dir(),
+            ),
+            ("DRC", result.drc_so_path, drc_install_failed, _get_drc_cpp_source_dir()),
+        ):
+            if so_path is not None or failed or src_dir is None:
+                continue
+            if project_root is None:
+                reason = "no root CMakeLists.txt was found, so only the router was built"
+            else:
+                reason = "the CMake build produced no extension (check the compiler output)"
+            result.warnings.append(
+                f"{label} C++ extension was not built: {reason}. "
+                f"The pure-Python {label.lower()} fallback will be used."
             )
 
         # Verify the installation in a FRESH INTERPRETER (Issue #4589).
@@ -895,15 +934,32 @@ def build_native(
     return result
 
 
+def _format_warning_lines(warnings: list[str]) -> list[str]:
+    """Render warnings as indented ``Warning:`` blocks."""
+    lines: list[str] = []
+    for warning in warnings:
+        # Issue #4589: warnings are multi-line (reason / probed .so path /
+        # interpreter).  Indent continuation lines so the detail stays
+        # attached to its "Warning:" header.
+        first, *rest = warning.split("\n")
+        lines.append(f"  Warning: {first}")
+        for extra in rest:
+            lines.append(f"    {extra}")
+    return lines
+
+
 def format_result_text(result: BuildResult) -> str:
     """Format build result as text."""
     lines = []
 
     if result.success:
-        if result.skipped:
-            lines.append(
-                "C++ backend already installed -- SKIPPED rebuild (use --force to recompile)"
-            )
+        if result.skipped or result.backend_installed:
+            if result.skipped:
+                lines.append(
+                    "C++ backend already installed -- SKIPPED rebuild (use --force to recompile)"
+                )
+            else:
+                lines.append("C++ backend installed successfully!")
             lines.append("")
             if result.so_path:
                 lines.append(f"  Extension: {result.so_path.name}")
@@ -913,28 +969,16 @@ def format_result_text(result: BuildResult) -> str:
                 lines.append(f"  DRC extension: {result.drc_so_path.name}")
             lines.append("")
             lines.append("Run `kct route --backend cpp` to use the C++ backend.")
-        elif result.backend_installed:
-            lines.append("C++ backend installed successfully!")
-            lines.append("")
-            if result.so_path:
-                lines.append(f"  Extension: {result.so_path.name}")
-            if result.placement_so_path:
-                lines.append(f"  Placement extension: {result.placement_so_path.name}")
-            if result.drc_so_path:
-                lines.append(f"  DRC extension: {result.drc_so_path.name}")
-            lines.append("")
-            lines.append("Run `kct route --backend cpp` to use the C++ backend.")
+            # Issue #8519: warnings (e.g. placement/DRC extension not built)
+            # must be visible even when the router backend installed fine.
+            if result.warnings:
+                lines.append("")
+                lines.append("Warnings:")
+                lines.extend(_format_warning_lines(result.warnings))
         else:
             lines.append("Build completed with warnings.")
             lines.append("")
-            for warning in result.warnings:
-                # Issue #4589: warnings are now multi-line (reason / probed
-                # .so path / interpreter).  Indent continuation lines so the
-                # detail stays attached to its "Warning:" header.
-                first, *rest = warning.split("\n")
-                lines.append(f"  Warning: {first}")
-                for extra in rest:
-                    lines.append(f"    {extra}")
+            lines.extend(_format_warning_lines(result.warnings))
     else:
         lines.append("Build failed.")
         lines.append("")
@@ -1059,12 +1103,15 @@ def main(argv: list[str] | None = None) -> int:
                 # Issues #5240/#8439: report the placement and DRC backends
                 # too. Informational only -- the exit code stays governed by
                 # the router backend.
-                for label, key in (("Placement", "placement"), ("DRC", "drc")):
+                for label, key, src in (
+                    ("Placement", "placement", _get_placement_cpp_source_dir()),
+                    ("DRC", "drc", _get_drc_cpp_source_dir()),
+                ):
                     extra = extra_backends[key]
                     if extra.get("available"):
                         print(f"{label} backend: available (version {extra.get('version')})")
                     else:
-                        print(f"{label} backend: not built (build with: kct build-native)")
+                        print(f"{label} backend: not built ({_extension_build_hint(src)})")
                         if extra.get("unavailable_reason"):
                             print(f"  reason: {extra['unavailable_reason']}")
             return 0 if available else 1

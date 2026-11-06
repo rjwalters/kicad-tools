@@ -289,10 +289,41 @@ class TestFamilyClassification:
         assert warnings[0].items == ("J1",)
 
     def test_non_connector_footprint_ignored_entirely(self):
-        fp = self._mid_board_fp("Resistor_SMD:R_0402_1005Metric")
+        fp = self._mid_board_fp("Resistor_SMD:R_0402_1005Metric", reference="R1")
         results = _run(_pcb_with_outline(fp), emit_inventory=True)
         assert _warnings(results) == []
         assert _infos(results) == []
+
+
+class TestRenamedConnectorInventory:
+    """A ``J`` part in a non-``Connector_`` library keeps its inventory row (#8529)."""
+
+    def _fp(self, name: str, reference: str) -> Footprint:
+        return _make_footprint(
+            name=name,
+            reference=reference,
+            position=_MID_BOARD,
+            graphics=list(_CENTERED_CRTYD),
+        )
+
+    def test_j_reference_in_project_library_is_inventoried(self):
+        fp = self._fp("chorus:RPi_HAT_2x20_P2.54mm_MountingHoles", "J2")
+        results = _run(_pcb_with_outline(fp), emit_inventory=True)
+        infos = _infos(results)
+        assert len(infos) == 1
+        assert infos[0].items == ("J2",)
+        # Tier-A findings are unchanged: the header is not an edge-access family.
+        assert _warnings(results) == []
+
+    def test_non_j_reference_in_project_library_stays_out(self):
+        fp = self._fp("chorus:SomethingElse", "U3")
+        results = _run(_pcb_with_outline(fp), emit_inventory=True)
+        assert _infos(results) == []
+        assert _warnings(results) == []
+
+    def test_connector_lib_with_non_j_reference_still_inventoried(self):
+        fp = self._fp("Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical", "P1")
+        assert len(_infos(_run(_pcb_with_outline(fp), emit_inventory=True))) == 1
 
 
 # ---------------------------------------------------------------------------

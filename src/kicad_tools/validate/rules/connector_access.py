@@ -53,6 +53,7 @@ stacks) are waived via the general ``.kct_waivers.json`` mechanism
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 from kicad_tools._shapely import require_shapely
@@ -116,6 +117,17 @@ EDGE_ACCESS_FAMILIES: dict[str, str] = {
 # Library-prefix marker for the Tier-B inventory: every footprint whose
 # library name starts with this is a connector worth inventorying.
 _CONNECTOR_LIB_PREFIX = "Connector_"
+
+
+# KiCad reserves ``J<n>`` reference designators for connectors, so a composite
+# part in a project-local library (e.g. ``chorus:RPi_HAT_2x20_...``) is still
+# inventoried when its library is not ``Connector_*`` (Issue #8529).
+_CONNECTOR_REF_RE = re.compile(r"^J\d")
+
+
+def _is_connector(lib: str, reference: str) -> bool:
+    """True when the footprint belongs in the connector inventory."""
+    return lib.startswith(_CONNECTOR_LIB_PREFIX) or bool(_CONNECTOR_REF_RE.match(reference or ""))
 
 
 def _library_prefix(footprint_name: str) -> str:
@@ -215,7 +227,7 @@ class ConnectorEdgeAccessRule(DRCRule):
 
         for footprint in pcb.footprints:
             lib = _library_prefix(footprint.name)
-            if not lib.startswith(_CONNECTOR_LIB_PREFIX):
+            if not _is_connector(lib, footprint.reference):
                 continue
 
             geometry = self._footprint_geometry(footprint)
