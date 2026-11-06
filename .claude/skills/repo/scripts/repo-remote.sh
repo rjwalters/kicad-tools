@@ -3048,9 +3048,12 @@ ssh_alias_hostname() {  # <cfg> <alias>
 # or trailing-space header is both reported and actually stripped.
 strip_ssh_alias_blocks() {  # <cfg> <out> <alias>...
   local cfg="$1" out="$2"; shift 2
-  local list; list="$(printf '%s\n' "$@")"
+  # Space-joined, never newline-joined: BSD awk (macOS) rejects a newline in a
+  # -v value, which used to leave <out> empty. Aliases are validated
+  # ^[A-Za-z0-9._-]+$ by the caller, so a space cannot occur inside one.
+  local list; list="$*"
   awk -v list="$list" '
-    BEGIN { n = split(list, l, "\n"); for (i = 1; i <= n; i++) drop[l[i]] = 1 }
+    BEGIN { n = split(list, l, " "); for (i = 1; i <= n; i++) drop[l[i]] = 1 }
     /^[[:space:]]*(Host|Match)[[:space:]]/ { skip = ($1 == "Host" && NF == 2 && ($2 in drop)) }
     skip { next }
     { print }
@@ -3079,7 +3082,11 @@ remove_ssh_alias_blocks() {  # <alias>...
     h="$(ssh_alias_hostname "$cfg" "$a")"
     [[ -n "$h" ]] && hosts+="${h}"$'\n'
   done
-  strip_ssh_alias_blocks "$cfg" "$tmp" "$@"
+  if ! strip_ssh_alias_blocks "$cfg" "$tmp" "$@"; then
+    log "awk failed while removing the alias block(s) -- leaving ${cfg} untouched"
+    rm -f "$tmp"; release_ssh_alias_lock "$cfg"
+    return 1
+  fi
   if cmp -s "$cfg" "$tmp"; then
     rm -f "$tmp"; release_ssh_alias_lock "$cfg"; return 0
   fi

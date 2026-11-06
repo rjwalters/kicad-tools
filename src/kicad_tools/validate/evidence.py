@@ -66,14 +66,19 @@ KEY_SEPARATOR = "|"
 # (Issue #6055 fixed ev2 in place, before any release carried it: pads used
 # to be compared in the board-relative frame, so on a board whose outline
 # does not start at (0, 0) the nearby-pad set came out empty).
+# ``ev3`` (Issue #8517): the evidence recipe is unchanged, but the locations it
+# hashes changed frame -- ``netclass_clearance_copper``, via and silkscreen
+# messages now report sheet-absolute coordinates (Issue #8493) where they used
+# to be board-relative.  On an origin-offset board every such hash moved, which
+# a same-version waiver would misreport as ``evidence_changed``.
 # Waivers recorded against an older version go stale exactly once after an
 # upgrade, and are reported as such (see :func:`is_outdated_evidence_hash`).
-EVIDENCE_HASH_VERSION = "ev2"
+EVIDENCE_HASH_VERSION = "ev3"
 EVIDENCE_HASH_PREFIX = EVIDENCE_HASH_VERSION + ":"
 
 # ``kct detect-mistakes`` hashes (Issue #6006) add the check's structured
 # measurements to the recipe above, so they carry a compound version
-# ``<evidence version>.<measurement recipe>`` (``ev2.m1``).  Bumping either
+# ``<evidence version>.<measurement recipe>`` (``ev3.m1``).  Bumping either
 # part makes mistake waivers report ``outdated_evidence_version``; bumping
 # only the ``m`` part leaves every ``kct check`` waiver untouched.
 #
@@ -178,7 +183,7 @@ def net_evidence_radius(rule_id: str) -> float | None:
 
 
 def evidence_hash_version(evidence_hash: str | None) -> str | None:
-    """Return the version tag (``"ev1"``, ``"ev2"``, ...) of an evidence hash."""
+    """Return the version tag (``"ev1"``, ``"ev3"``, ...) of an evidence hash."""
     if not evidence_hash or ":" not in evidence_hash:
         return None
     return evidence_hash.split(":", 1)[0]
@@ -187,7 +192,7 @@ def evidence_hash_version(evidence_hash: str | None) -> str | None:
 def current_evidence_hash_version(evidence_hash: str | None) -> str:
     """The version this kct computes for hashes of ``evidence_hash``'s family.
 
-    A compound version (``ev1.m1``, ``ev2.m1``) is a ``kct detect-mistakes``
+    A compound version (``ev1.m1``, ``ev3.m1``) is a ``kct detect-mistakes``
     hash, compared against :data:`MISTAKE_EVIDENCE_HASH_VERSION`; anything
     else is a ``kct check`` hash, compared against
     :data:`EVIDENCE_HASH_VERSION`.

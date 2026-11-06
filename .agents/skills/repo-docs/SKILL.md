@@ -223,8 +223,11 @@ exactly as before, and print none of the text below.
 
 2. **Commit them on a `chore/repo-hygiene-<date>` branch in a worktree off
    `origin/<default>`, then offer to push and open a PR** — when the run has no
-   issue number **and** either the default branch is PR-protected or the operator
-   explicitly asked for a branch + PR this run.
+   issue number **and** either the default branch is PR-protected, or the repo is
+   Loom-managed (its merge contract is PR-only: `loom:pr` + `merge-pr.sh`, so a
+   local commit on the default branch cannot be landed even when the forge
+   reports no protection), or the operator explicitly asked for a branch + PR
+   this run.
 
    This arm sits *above* arms 3 and 4 on purpose. A routine hygiene pass on a
    PR-protected repo has no issue number, usually sits on the default branch, and
@@ -283,7 +286,11 @@ exactly as before, and print none of the text below.
        PROTECTION_SOURCE="legacy branch protection (PR reviews / status checks required)"
        return 0
      fi
-     return 1   # the forge definitively answered "no rules"
+     # The forge definitively answered "no rules". This function is only consulted
+     # once the repo is known Loom-managed, and Loom's merge contract is PR-only by
+     # convention, so a commit on $DEFAULT would be unlandable: take arm 2 anyway.
+     PROTECTION_SOURCE="Loom-managed: merges only via merge-pr.sh (no forge protection reported)"
+     return 0
    }
    ```
 
@@ -333,11 +340,11 @@ exactly as before, and print none of the text below.
    holds your fixes and none of the operator's. Report the branch and the short
    sha. Add one clause when the current branch is the default branch: the primary
    clone is now a commit ahead of its upstream until someone pushes it. (On a
-   PR-protected default branch arm 2 has already taken this case, precisely so
-   that unpushable commit is never created.)
+   PR-protected or Loom-managed default branch arm 2 has already taken this
+   case, precisely so that unpushable commit is never created.)
 
-4. **Leave them uncommitted and warn.** A dirty tree with no issue number and an
-   unprotected default branch lands here. Do not stash the operator's unrelated
+4. **Leave them uncommitted and warn.** A dirty tree with no issue number and a default
+   branch arm 2 did not claim (detection could not run: Gitea or no `gh`) lands here. Do not stash the operator's unrelated
    edits to manufacture a clean commit — that is the same working-tree rewrite
    this section exists to avoid. Print the warning once, on its own line:
 

@@ -412,7 +412,7 @@ The command writes a keyed entry, bound to the current hash, to
   "waivers": [
     {
       "key": "courtyards_overlap|C52,U10||F.Cu",
-      "evidence_hash": "ev2:3f0c9a1d2b7e4c55",
+      "evidence_hash": "ev3:3f0c9a1d2b7e4c55",
       "reason": "EE-mandated tight decoupling",
       "reviewer": "rjwalters",
       "date": "2026-10-06"
@@ -429,7 +429,7 @@ When the copper or nets under the finding change, the waiver goes **stale**:
 
 Re-review the finding, and re-run `--waive` only if it is still intentional.
 
-The hash prefix (`ev2:`) names the evidence recipe. When an upgrade changes
+The hash prefix (`ev3:`) names the evidence recipe. When an upgrade changes
 the recipe, every waiver recorded with an older prefix goes stale once, even
 on an unchanged board. Those are reported as `STALE waiver (outdated evidence
 version)`, and the finding's JSON carries
@@ -464,7 +464,7 @@ does not, and neither does tuning a policy threshold (the 3 mm bypass limit,
 the 0.3 mm power-trace minimum): thresholds are not hashed, because a waiver
 records that someone accepted *this* measurement.
 
-Mistake hashes carry their own compound prefix, `ev2.m1:`: the `kct check`
+Mistake hashes carry their own compound prefix, `ev3.m1:`: the `kct check`
 evidence version plus the measurement recipe version. An upgrade that changes
 either part reports existing mistake waivers as `outdated_evidence_version`;
 an upgrade that changes only the measurement recipe leaves `kct check`
@@ -493,7 +493,7 @@ kct check --diff HEAD~1:b/b.kicad_pcb b/b.kicad_pcb --format sarif > kct-diff.sa
 - **Fingerprints.** The finding `key` is `partialFingerprints["kctFindingKey/v1"]`,
   so one alert is tracked across commits. The `evidence_hash` is
   `fingerprints["kctEvidence/<version>"]`, where `<version>` is the hash's
-  prefix (`ev2` for `kct check`, `ev2.m1` for `kct detect-mistakes`), so the
+  prefix (`ev3` for `kct check`, `ev3.m1` for `kct detect-mistakes`), so the
   name follows the evidence version.
 - **Locations.** Each result points at the board file, at the line of the first
   footprint (or else net) the finding names. The finding's position, in mm in
