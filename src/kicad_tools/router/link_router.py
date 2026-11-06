@@ -941,9 +941,28 @@ def collapse_link_route(route: LinkRoute) -> LinkRoute:
     out: list[tuple[float, float, float, float, str]] = []
     i = 0
     segs = route.segments
+    via_r = route.via_size / 2.0 + 1e-6
+    tol = 1e-6
+
+    def _in_via(x: float, y: float) -> bool:
+        return any(math.hypot(x - vx, y - vy) <= via_r for vx, vy in route.vias)
+
+    def _breaks_after(k: int) -> bool:
+        # A run must stay one contiguous chain: ``compress_staircase`` joins the
+        # first start to the last end and would bridge a gap (e.g. the two legs
+        # of ``route_link_via``, which touch the via disk at different points)
+        # and strand the via with no track end point inside it.  Vias are
+        # always run boundaries so their incident end points survive.
+        a, b = segs[k], segs[k + 1]
+        if a[4] != b[4]:
+            return True
+        if abs(a[2] - b[0]) > tol or abs(a[3] - b[1]) > tol:
+            return True
+        return _in_via(a[2], a[3]) or _in_via(b[0], b[1])
+
     while i < len(segs):
-        j = i
-        while j < len(segs) and segs[j][4] == segs[i][4]:
+        j = i + 1
+        while j < len(segs) and not _breaks_after(j - 1):
             j += 1
         layer = segs[i][4]
         run = [

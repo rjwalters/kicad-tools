@@ -88,3 +88,35 @@ def test_collapse_diagonal_staircase():
 def test_collapse_single_segment_and_layers_kept():
     r = LinkRoute(1, "SIG", 0.3, 0.6, 0.3, segments=[(0, 0, 1, 0, "F.Cu"), (1, 0, 1, 1, "B.Cu")])
     assert collapse_link_route(r).segments == r.segments
+
+
+def _stair(x0, y0, n=10, s=0.05):
+    segs = []
+    x, y = x0, y0
+    for _ in range(n):
+        segs.append((x, y, x + s, y, "F.Cu"))
+        segs.append((x + s, y, x + 2 * s, y + s, "F.Cu"))
+        x, y = x + 2 * s, y + s
+    return segs, (x, y)
+
+
+def test_collapse_keeps_endpoints_inside_via_across_gap():
+    """Two same-layer legs meeting a via through a gap must not be bridged."""
+    import math
+
+    leg1, end1 = _stair(0.0, 0.0)
+    via = (end1[0] + 0.05, end1[1])  # leg1 ends 0.05 mm from the via centre
+    start2 = (via[0] + 0.1, via[1])  # leg2 starts elsewhere inside the disk
+    leg2, _ = _stair(*start2)
+    r = LinkRoute(1, "SIG", 0.3, 0.6, 0.3, segments=leg1 + leg2, vias=[via])
+    c = collapse_link_route(r)
+    ends = [(s[2], s[3]) for s in c.segments]
+    starts = [(s[0], s[1]) for s in c.segments]
+    assert any(math.hypot(x - via[0], y - via[1]) <= 0.3 for x, y in ends)
+    assert any(math.hypot(x - via[0], y - via[1]) <= 0.3 for x, y in starts)
+    assert len(c.segments) < len(r.segments)
+    # every adjacent pair is either contiguous or separated by the via
+    for a, b in zip(c.segments, c.segments[1:], strict=False):
+        if math.hypot(a[2] - b[0], a[3] - b[1]) > 1e-6:
+            assert math.hypot(a[2] - via[0], a[3] - via[1]) <= 0.3
+            assert math.hypot(b[0] - via[0], b[1] - via[1]) <= 0.3
