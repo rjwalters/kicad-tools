@@ -32,6 +32,7 @@ from kicad_tools.creepage.engine import (
 
 from .fixtures import (
     board_mains_named_source,
+    board_net0_island_source,
     board_no_hv_source,
     board_same_footprint_attach_residual_source,
     board_same_footprint_fail_source,
@@ -1242,3 +1243,57 @@ def test_segment_and_zone_item_labels_and_missing_uuid_fallback():
     assert _item_label("segment", "abc") == "segment:abc"
     assert _item_label("via", "") == "via"
     assert _item_label("zone", None) == "zone"
+
+
+# ---------------------------------------------------------------------------
+# Net-0 (netless) copper as floating conductors (#8548)
+# ---------------------------------------------------------------------------
+
+
+def _island_report(tmp_path, islands, min_mm=5.0):
+    pcb = _load(tmp_path, board_net0_island_source(islands))
+    hv = resolve_hv_nets(pcb, "HV", _hv_map())
+    return compute_creepage_census(pcb, hv, min_mm=min_mm)
+
+
+def test_floating_island_between_hv_and_lv_fails_pair(tmp_path):
+    # Direct gap 6 mm passes min 5; island 2 mm from each side -> 4 mm path fails.
+    report = _island_report(tmp_path, [(114, 110)])
+    pair = _conductor_pair(report, "GND")
+    assert pair.creepage_mm == pytest.approx(4.0, abs=1e-3)
+    assert not pair.passed
+    d = pair.to_dict()
+    assert d["via_floating"] == "pad"  # fixture footprints carry no refdes
+    assert report.netless_items == 1
+    out = report.to_dict()
+    assert out["netless_items"] == 1
+    assert out["netless_treatment"] == "floating"
+    assert out["pair_count"] == len(report.pairs)
+
+
+def test_floating_island_far_away_leaves_pair_unchanged(tmp_path):
+    baseline = _island_report(tmp_path, [])
+    report = _island_report(tmp_path, [(114, 118)])
+    pair = _conductor_pair(report, "GND")
+    assert pair.creepage_mm == pytest.approx(_conductor_pair(baseline, "GND").creepage_mm)
+    assert pair.passed
+    assert "via_floating" not in pair.to_dict()
+    assert len(report.pairs) == len(baseline.pairs)
+    assert report.netless_items == 1
+
+
+def test_disjoint_floating_islands_are_not_one_conductor(tmp_path):
+    # A is 2 mm from HV only, B is 2 mm from GND only; merged they would give 4 mm.
+    report = _island_report(tmp_path, [(111, 106), (117, 106)])
+    pair = _conductor_pair(report, "GND")
+    assert pair.passed
+    assert pair.creepage_mm == pytest.approx(6.0, abs=1e-3)
+    assert "via_floating" not in pair.to_dict()
+    assert report.netless_items == 2
+
+
+def test_no_netless_copper_reports_zero(tmp_path):
+    report = _island_report(tmp_path, [])
+    assert report.netless_items == 0
+    assert report.to_dict()["netless_items"] == 0
+    assert report.to_dict()["netless_treatment"] == "floating"

@@ -437,3 +437,19 @@ def board_same_footprint_attach_residual_source(*, jog: bool) -> str:
         )
     parts.append(")\n")
     return "".join(parts)
+
+
+def board_net0_island_source(islands: list[tuple[float, float]]) -> str:
+    """HV pad and GND pad 6 mm apart (edge-to-edge) plus net-0 floating pads (#8548).
+
+    ``L_MAINS`` pad centred at x=110 (copper edge x=111), ``GND`` pad centred at
+    x=118 (edge x=117), both at y=110.  Each ``(x, y)`` in ``islands`` is a
+    2x2 mm pad on net 0 (no net) centred there.
+    """
+    parts = [_HEADER, _OUTLINE]
+    parts.append(_footprint("U1", 110, 110, 1, "L_MAINS"))
+    parts.append(_footprint("U2", 118, 110, 2, "GND"))
+    for i, (x, y) in enumerate(islands, start=1):
+        parts.append(_footprint(f"FID{i}", x, y, 0, ""))
+    parts.append(")\n")
+    return "".join(parts)
