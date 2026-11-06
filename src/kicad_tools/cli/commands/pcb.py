@@ -914,6 +914,16 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
                 return 1
             net_class_clearances = {name: v.clearance for name, v in authored.items()}
 
+    # Issue #8494: the .kicad_dru custom rules (condition-based NetClass rules
+    # included), evaluated with kicad-cli semantics, as route-auto does.
+    board_rules = None
+    if pcb_path.with_suffix(".kicad_dru").is_file():
+        from kicad_tools.router.board_clearance_rules import BoardClearanceRules
+
+        board_rules = BoardClearanceRules.from_board(pcb_path)
+        if board_rules.dru_error:
+            print(f"Warning: {board_rules.dru_error}", file=sys.stderr)
+
     pairwise = None
     voltage_map_arg = getattr(args, "voltage_map", None)
     if voltage_map_arg:
@@ -955,6 +965,7 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             current_paths=current_paths,
             net_class_clearances=net_class_clearances,
             pairwise_clearance=pairwise,
+            board_rules=board_rules,
         )
     except ReinforceError as e:
         print(f"Error: {e}", file=sys.stderr)
