@@ -168,6 +168,46 @@ def pairwise_route_gate(router: object) -> PairwiseRouteGate | None:
     return PairwiseRouteGate(checker)
 
 
+def _drop_repeated_segments(
+    route: Route, emitted: dict[int, set[tuple]], tolerance: float
+) -> Route:
+    """Drop segments a same-net route optimized earlier already carries (#8505).
+
+    Two routes of one net can start from the same pad and run the same first
+    stretch; each is optimized on its own and keeps its own copy, so the board
+    ends up with identical copper twice (and ``Total length`` counts both).
+    *emitted* maps net id to the (layer, width, endpoints) keys already kept;
+    the first route to carry a segment keeps it, later routes lose their copy.
+    The copper is unchanged, so connectivity and the grid are unaffected.
+    """
+    step = tolerance if tolerance > 0 else 1e-4
+    seen = emitted.setdefault(route.net, set())
+
+    def key(seg: Segment) -> tuple:
+        ends = sorted(
+            [
+                (round(seg.x1 / step), round(seg.y1 / step)),
+                (round(seg.x2 / step), round(seg.y2 / step)),
+            ]
+        )
+        return (seg.layer, round(seg.width / step), *ends)
+
+    kept = []
+    for seg in route.segments:
+        k = key(seg)
+        if k not in seen:
+            kept.append(seg)
+        seen.add(k)
+    if len(kept) == len(route.segments):
+        return route
+    return Route(
+        net=route.net,
+        net_name=route.net_name,
+        segments=kept,
+        vias=list(route.vias),
+    )
+
+
 def optimize_routes_grid_synced(
     router, optimizer: TraceOptimizer, skip_nets: set[int] | None = None
 ) -> list[Route]:
@@ -242,8 +282,15 @@ def optimize_routes_grid_synced(
 
     else:
         accept = gate if gate is not None else kelvin
+    emitted: dict[int, set[tuple]] = {}
+
+    def optimize_deduped(route: Route) -> Route:
+        return _drop_repeated_segments(
+            optimizer.optimize_route(route), emitted, optimizer.config.tolerance
+        )
+
     routes = apply_route_transform_grid_synced(
-        router, optimizer.optimize_route, skip_nets=skip_nets, accept=accept
+        router, optimize_deduped, skip_nets=skip_nets, accept=accept
     )
     if gate is not None:
         # Issue #4766 AC8: record the coarse-veto cost on the router (for

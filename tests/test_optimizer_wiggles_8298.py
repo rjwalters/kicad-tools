@@ -118,3 +118,39 @@ def test_a_route_through_a_pad_centre_is_not_cut_there():
     assert [len(p) for p in opt._split_at_anchors(chain)] == [2]
     opt.set_pad_points({})
     assert [len(p) for p in opt._split_at_anchors(chain)] == [1, 1]
+
+
+# -- Issue #8505: two routes of one net sharing a pad stub --------------------
+
+
+def test_second_route_of_a_net_drops_a_stub_the_first_already_carries():
+    from kicad_tools.router.optimizer.trace import _drop_repeated_segments
+    from kicad_tools.router.primitives import Route
+
+    stub = [(132.5, 98.0, 133.0, 97.5), (133.0, 97.5, 133.465, 97.4)]
+    first = Route(net=1, net_name="N1", segments=_chain(stub), vias=[])
+    # Same copper, one segment written in the opposite direction.
+    second = Route(
+        net=1,
+        net_name="N1",
+        segments=_chain([stub[0], (133.465, 97.4, 133.0, 97.5), (133.465, 97.4, 140.0, 97.4)]),
+        vias=[],
+    )
+    emitted: dict = {}
+    kept_first = _drop_repeated_segments(first, emitted, 1e-4)
+    kept_second = _drop_repeated_segments(second, emitted, 1e-4)
+    assert kept_first is first
+    assert _coords(kept_second.segments) == [(133.465, 97.4, 140.0, 97.4)]
+
+
+def test_identical_copper_on_another_net_or_layer_is_not_a_duplicate():
+    from kicad_tools.router.optimizer.trace import _drop_repeated_segments
+    from kicad_tools.router.primitives import Route
+
+    pts = [(0, 0, 5, 0)]
+    emitted: dict = {}
+    base = Route(net=1, net_name="N1", segments=_chain(pts), vias=[])
+    other_layer = Route(net=1, net_name="N1", segments=_chain(pts, layer=Layer.B_CU), vias=[])
+    other_net = Route(net=2, net_name="N2", segments=[_seg(0, 0, 5, 0, width=0.35, net=2)], vias=[])
+    for route in (base, other_layer, other_net):
+        assert _drop_repeated_segments(route, emitted, 1e-4) is route

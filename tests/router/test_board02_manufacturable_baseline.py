@@ -946,7 +946,13 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     # reverted to the raw 112-segment router staircase.  The whole delta is
     # in NODE_D; nets 1-7 are identical per net and layer.  Prior pin
     # (22, 169, 20, 317.27).
-    EXPECTED_LENGTH = 316.57
+    # Re-baselined 2026-11-06 for Issue #8505: two NODE_A routes both start
+    # from the same pad and carry the same 1.18 mm pad-to-via stub; each was
+    # optimized alone and kept its own copy, so the stub was emitted twice and
+    # counted twice.  ``optimize_routes_grid_synced`` now drops a segment a
+    # same-net route already kept.  Routes (22), vias (20) UNCHANGED, length
+    # 316.57 -> 315.21.  Prior pin 316.57 (316.39 on main after #8387).
+    EXPECTED_LENGTH = 315.21
     # Re-baselined 2026-09-14 for Issue #5201: the escape router
     # (``EscapeRouter.via_in_pad_supported``) previously resolved
     # via-in-pad eligibility from the bare ``MfrLimits`` capability
