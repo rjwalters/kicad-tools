@@ -48,6 +48,7 @@ from kicad_tools.physics.wire_gauge import (
     anchor_drill_for_awg,
     anchor_pad_for_drill,
 )
+from kicad_tools.router.board_clearance_rules import BoardClearanceRules
 from kicad_tools.router.current_paths import CurrentPathSpec, reinforcement_eligible_segment_ids
 from kicad_tools.router.optimizer.algorithms import merge_collinear
 from kicad_tools.router.optimizer.chain import sort_into_chains
@@ -99,6 +100,7 @@ _FALLBACK_DESIGN_RULES = DesignRules(  # noqa: MFR001 reason="intentional manufa
 RULE_HOLE_TO_HOLE = "hole_to_hole"
 RULE_DRU_CLASS_FLOOR = "dru_class_floor"
 RULE_VOLTAGE_MAP_PAIRWISE = "voltage_map_pairwise"
+RULE_DRU_CONDITIONAL = "dru_conditional"
 
 _RULE_EPS = 1e-9
 
@@ -111,7 +113,7 @@ class RefusedAnchor:
     y: float
     reason: str
     #: Governing rule (``hole_to_hole`` / ``dru_class_floor`` /
-    #: ``voltage_map_pairwise``) of the first candidate tried at this position.
+    #: ``dru_conditional`` / ``voltage_map_pairwise``) of the first candidate tried at this position.
     rule: str = ""
     #: Requirement of that rule (mm) and the measured gap (mm); ``0.0`` unknown.
     required_mm: float = 0.0
@@ -491,6 +493,9 @@ class _ClearancePolicy:
     target_net: str
     class_floors: Mapping[str, float]
     pairwise: PairwiseClearanceTable | None
+    #: The board's ``.kicad_pro`` / ``.kicad_dru`` resolver (#8494); its
+    #: per-pair requirement (incl. condition-based custom rules) is max-ed in.
+    board_rules: BoardClearanceRules | None = None
 
     def required(self, obstacle_net: str) -> tuple[float, str]:
         floor = max(
@@ -503,6 +508,13 @@ class _ClearancePolicy:
             if self.pairwise is not None and obstacle_net
             else 0.0
         )
+        dru = (
+            self.board_rules.net_requirement(self.target_net, [obstacle_net])
+            if self.board_rules is not None
+            else 0.0
+        )
+        if dru > max(floor, pair) + _RULE_EPS:
+            return dru, RULE_DRU_CONDITIONAL
         if pair > floor + _RULE_EPS:
             return pair, RULE_VOLTAGE_MAP_PAIRWISE
         return floor, RULE_DRU_CLASS_FLOOR
@@ -694,6 +706,7 @@ def reinforce_net(
     current_paths: Sequence[CurrentPathSpec] | None = None,
     net_class_clearances: Mapping[str, float] | None = None,
     pairwise_clearance: PairwiseClearanceTable | None = None,
+    board_rules: BoardClearanceRules | None = None,
 ) -> ReinforceResult:
     """Emit a spaced same-net PTH anchor row along a routed net's trace.
 
@@ -745,6 +758,9 @@ def reinforce_net(
         net_class_clearances: ``{net_name: mm}`` authored net-class clearance
             floors (the source ``kct check`` uses, #8085). The clearance to an
             other-net obstacle is at least the larger of the two nets' floors.
+        board_rules: Optional :class:`BoardClearanceRules` (#8494): the board's
+            ``.kicad_dru`` custom rules incl. condition-based ones, max-ed
+            with the floors above; never lowers a requirement.
         pairwise_clearance: Optional ``--voltage-map`` pairwise table (#8085);
             when given, the requirement for (target, obstacle) is raised to
             the table's value. ``None`` keeps the scalar-floor behavior.
@@ -866,6 +882,7 @@ def reinforce_net(
         target_net=net_name,
         class_floors=net_class_clearances or {},
         pairwise=pairwise_clearance,
+        board_rules=board_rules,
     )
 
     # Cross-run dedup floor: two placed anchors must be at least a pad diameter
