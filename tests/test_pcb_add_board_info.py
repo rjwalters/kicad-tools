@@ -121,3 +121,36 @@ def test_json_output(tmp_path, capsys):
     assert _run(p, auto=True, dry_run=True, output_format="json") == 0
     data = json.loads(capsys.readouterr().out)
     assert data["items"][0]["layer"] == "F.SilkS"
+
+
+_LOGO = (
+    '(gr_text "LOGO TEXT HERE" (at 110 128.9) (layer "F.SilkS") '
+    "(effects (font (size 1 1) (thickness 0.15))))"
+)
+
+
+def test_auto_avoids_board_level_silk_on_nonzero_origin(tmp_path):
+    p = _write(tmp_path, extra=_LOGO)
+    assert _run(p, auto=True) == 0
+    pcb = PCB.load(p)
+    from kicad_tools.manufacturers import get_profile
+
+    rules = get_profile("jlcpcb").get_design_rules(2)
+    res = check_silk_overlap(pcb, rules)
+    assert not res.violations, [v.message for v in res.violations]
+
+
+@pytest.mark.parametrize("kw", [{"auto": True}, {"at": (120.0, 115.0)}])
+def test_rerun_is_idempotent(tmp_path, kw):
+    p = _write(tmp_path)
+    for _ in range(3):
+        assert _run(p, **kw) == 0
+    stamps = [t for t in PCB.load(p).texts if t.text == "Widget B 2026-11-06"]
+    assert len(stamps) == 1
+
+
+def test_explicit_at_warns_when_not_clear(tmp_path, capsys):
+    p = _write(tmp_path)
+    assert _run(p, at=(103.0, 127.0), output_format="json") == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["warnings"]

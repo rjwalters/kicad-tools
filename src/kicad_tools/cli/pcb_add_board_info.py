@@ -94,19 +94,30 @@ def _build_node(text: str, x: float, y: float, layer: str, size: float, thicknes
 
 def _obstacles(pcb, side: str, mask_clearance_mm: float):
     """Collect ``(apertures, silk, courtyards, material, outline)`` for *side*."""
+    from shapely.affinity import translate  # type: ignore[import-untyped]
     from shapely.geometry import MultiLineString, Polygon  # type: ignore[import-untyped]
 
     from kicad_tools.geometry.courtyard import _courtyard_polygon, _side_has_geometry
     from kicad_tools.silkscreen.place_refs import (
         _board_material,
-        _iter_static_silk_obstacles,
+        _iter_owned_static_silk,
     )
     from kicad_tools.validate.rules.silkscreen import _iter_pad_apertures, _iter_via_apertures
 
     apertures = [
         (g, lbl) for s, g, lbl in _iter_pad_apertures(pcb, mask_clearance_mm) if s == side
     ] + [(g, lbl) for s, g, lbl in _iter_via_apertures(pcb, mask_clearance_mm) if s == side]
-    silk = [(g, lbl) for s, g, lbl in _iter_static_silk_obstacles(pcb) if s == side]
+    # Footprint silk is already board-relative, but board-level gr_text /
+    # gr_* graphics (owner None) keep the file's sheet-absolute coordinates;
+    # shift them into the board-relative frame the search runs in.
+    ox, oy = pcb._board_origin
+    silk = []
+    for s, g, lbl, owner in _iter_owned_static_silk(pcb):
+        if s != side:
+            continue
+        if owner is None and (ox or oy):
+            g = translate(g, xoff=-ox, yoff=-oy)
+        silk.append((g, lbl))
     # Reference text is movable in place_refs, but here it is fixed: include it.
     from kicad_tools.silkscreen.place_refs import _visible_reference
 
@@ -220,6 +231,8 @@ def run_add_board_info(
         print(f"  PCB: {pcb_path}")
         for item in result["items"]:
             print(f"  {item['layer']}: {item['text']!r} at ({item['x']:.3f}, {item['y']:.3f})")
+        for w in result.get("warnings", []):
+            print(f"  Warning: {w}", file=sys.stderr)
         if result["written"]:
             print(f"  Saved to: {result['output']}")
     return 0
@@ -257,8 +270,7 @@ def _run(
         if not math.isfinite(value) or value <= 0:
             raise BoardInfoError(f"{name} must be positive")
 
-    doc = parse_file(pcb_path)
-    pcb = _SilkscreenPCB(doc, pcb_path)
+    pcb = _SilkscreenPCB(parse_file(pcb_path), pcb_path)
     text = resolve_fields(template, pcb, pcb_path)
     if not text.strip():
         raise BoardInfoError("resolved text is empty")
@@ -266,10 +278,24 @@ def _run(
     if order_placeholder:
         texts.append(order_placeholder)
 
+    # Idempotence: drop any earlier stamp with the same text on this layer, then
+    # rebuild the PCB view so the old stamp is neither duplicated nor an obstacle.
+    doc = parse_file(pcb_path)
+    for node in list(doc.find_all("gr_text")):
+        node_layer = node.find("layer")
+        if (
+            node.get_string(0) in texts
+            and node_layer is not None
+            and node_layer.get_string(0) == layer
+        ):
+            doc.remove(node)
+    pcb = _SilkscreenPCB(doc, pcb_path)
+
     ox, oy = pcb._board_origin  # schema coords are board-relative; file coords add this
     side = "F" if layer == "F.SilkS" else "B"
     line_pitch = font_size + 0.5
     placements: list[tuple[str, float, float]] = []  # file coordinates
+    warnings: list[str] = []
 
     if auto:
         require_shapely("board-info placement")
@@ -297,12 +323,14 @@ def _run(
         assert at is not None
         for i, t in enumerate(texts):
             placements.append((t, at[0], at[1] + i * line_pitch))
+        warnings.extend(_check_explicit(pcb, placements, side, layer, font_size, font_thickness))
 
     result: dict[str, Any] = {
         "pcb": str(pcb_path),
         "dry_run": dry_run,
         "items": [{"text": t, "layer": layer, "x": x, "y": y} for t, x, y in placements],
         "written": False,
+        "warnings": warnings,
     }
     if not dry_run:
         for t, x, y in placements:
@@ -312,6 +340,46 @@ def _run(
         result["written"] = True
         result["output"] = str(save_path)
     return result
+
+
+def _check_explicit(pcb, placements, side, layer, size, thickness) -> list[str]:
+    """Warn when an explicit ``--at`` stamp is not clear of pads/silk/courtyards/edge."""
+    try:
+        from kicad_tools._shapely import require_shapely
+
+        require_shapely("board-info clearance check")
+        from kicad_tools.silkscreen._silk_defaults import (
+            DEFAULT_CLEARANCE_MM,
+            SILK_EDGE_CLEARANCE_MM,
+        )
+        from kicad_tools.silkscreen.place_refs import _candidate_clear
+        from kicad_tools.validate.rules.silkscreen import _text_bbox_geometry
+
+        apertures, silk, courtyards, material, outline = _obstacles(pcb, side, 0.05)
+    except Exception:  # check is best-effort; never block an explicit placement
+        return []
+    ox, oy = pcb._board_origin
+    out: list[str] = []
+    placed: list = []
+    for t, x, y in placements:
+        geom = _text_bbox_geometry(t, (size, size), thickness, (x - ox, y - oy))
+        if geom is None:
+            continue
+        ok, why = _candidate_clear(
+            geom,
+            apertures=apertures,
+            silk_obstacles=silk + placed,
+            courtyards=courtyards,
+            outline=outline,
+            board_material=material,
+            outline_error="",
+            clearance_mm=DEFAULT_CLEARANCE_MM,
+            edge_clearance_mm=SILK_EDGE_CLEARANCE_MM,
+        )
+        placed.append((geom, "board-info"))
+        if not ok:
+            out.append(f"{t!r} at ({x:.3f}, {y:.3f}) on {layer} is not clear: {why}")
+    return out
 
 
 def _print_error(message: str, output_format: str) -> None:
