@@ -80,6 +80,21 @@ def _crtyd_lines(
     return graphics
 
 
+def _crtyd_circle(
+    *,
+    radius: float,
+    center: tuple[float, float] = (0.0, 0.0),
+    layer: str = "F.CrtYd",
+) -> FootprintGraphic:
+    return FootprintGraphic(
+        graphic_type="circle",
+        layer=layer,
+        stroke_width=0.05,
+        center=center,
+        radius=radius,
+    )
+
+
 def _crtyd_poly(
     points: list[tuple[float, float]],
     *,
@@ -253,6 +268,56 @@ class TestCourtyardOverlap:
         )
         results = _run(_pcb_with(a, b))
         assert len(results.filter_by_rule(COURTYARD_RULE_ID)) == 1
+
+    def test_circle_courtyard_overlap_resolved(self):
+        """fp_circle courtyards resolve, so overlap is checked (#8540)."""
+        fid = _make_footprint(
+            reference="FID1", position=(0.0, 0.0), graphics=[_crtyd_circle(radius=1.0)]
+        )
+        other = _make_footprint(
+            reference="J1",
+            position=(1.5, 0.0),
+            graphics=[_crtyd_rect(start=(-1.0, -1.0), end=(1.0, 1.0))],
+        )
+        results = _run(_pcb_with(fid, other))
+        assert len(results.filter_by_rule(COURTYARD_RULE_ID)) == 1
+        assert results.filter_by_rule(COURTYARD_UNRESOLVED_RULE_ID) == []
+
+    def test_circle_courtyard_no_overlap_clean(self):
+        fid = _make_footprint(
+            reference="FID1", position=(0.0, 0.0), graphics=[_crtyd_circle(radius=1.0)]
+        )
+        other = _make_footprint(
+            reference="J1",
+            position=(5.0, 0.0),
+            graphics=[_crtyd_rect(start=(-1.0, -1.0), end=(1.0, 1.0))],
+        )
+        results = _run(_pcb_with(fid, other))
+        assert results.filter_by_rule(COURTYARD_RULE_ID) == []
+        assert results.filter_by_rule(COURTYARD_UNRESOLVED_RULE_ID) == []
+
+    def test_circle_courtyard_back_side_only_conflicts_with_back(self):
+        fid = _make_footprint(
+            reference="FID1",
+            graphics=[_crtyd_circle(radius=1.0, layer="B.CrtYd")],
+        )
+        front = _make_footprint(
+            reference="J1",
+            position=(0.5, 0.0),
+            graphics=[_crtyd_rect(start=(-1.0, -1.0), end=(1.0, 1.0))],
+        )
+        back = _make_footprint(
+            reference="J2",
+            position=(0.5, 0.0),
+            graphics=[_crtyd_rect(start=(-1.0, -1.0), end=(1.0, 1.0), layer="B.CrtYd")],
+        )
+        assert _run(_pcb_with(fid, front)).filter_by_rule(COURTYARD_RULE_ID) == []
+        assert len(_run(_pcb_with(fid, back)).filter_by_rule(COURTYARD_RULE_ID)) == 1
+
+    def test_zero_radius_circle_stays_unresolved(self):
+        fid = _make_footprint(reference="FID1", graphics=[_crtyd_circle(radius=0.0)])
+        results = _run(_pcb_with(fid))
+        assert len(results.filter_by_rule(COURTYARD_UNRESOLVED_RULE_ID)) == 1
 
     def test_unresolved_fp_arc_courtyard_info(self):
         """A courtyard with only unsupported geometry -> info finding."""
