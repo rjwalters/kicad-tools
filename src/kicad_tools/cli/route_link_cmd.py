@@ -508,7 +508,7 @@ def _commit_links(
 
     Returns ``(written path | None, refusal message | None)``.
     """
-    from kicad_tools.router.link_router import append_link_routes
+    from kicad_tools.router.link_router import append_link_routes, collapse_link_route
 
     created = out_path != pcb_path and not out_path.exists()
     if out_path != pcb_path:
@@ -531,31 +531,43 @@ def _commit_links(
         snapshot = out_path.read_bytes()
         failed: str | None = None
         reason = ""
-        try:
-            append_link_routes(out_path, [route], origin)
-            drc, census = _gate_state(out_path, args)
-            new_drc = drc - base_drc
-            if new_drc:
-                failed = "drc"
-                reason = f"{sum(new_drc.values())} new DRC violation(s): " + ", ".join(
-                    sorted({k[0] or "?" for k in new_drc})
-                )
-                detail = [
-                    f"{k[0] or '?'}: " + "; ".join(k[2])
-                    for k in sorted(new_drc, key=lambda k: (k[0] or "", k[2]))[:3]
-                ]
-                if detail:
-                    reason += " [" + " | ".join(detail) + "]"
-            elif census is not None and base_census is not None:
-                new_pairs = _new_census_failures(census, base_census)
-                if new_pairs:
-                    failed = "creepage"
-                    reason = f"{len(new_pairs)} new/worse failing creepage pair(s): " + ", ".join(
-                        f"{a}/{b} ({rel})" for a, b, _k, rel in new_pairs
+        # Issue #8523: commit the collapsed geometry (collinear runs and grid
+        # staircases merged); if the gate refuses it, retry the raw route so a
+        # collapse can never cost a link that would otherwise commit.
+        collapsed = collapse_link_route(route)
+        candidates = [collapsed, route] if collapsed.segments != route.segments else [route]
+        for candidate in candidates:
+            failed, reason = None, ""
+            out_path.write_bytes(snapshot)
+            try:
+                append_link_routes(out_path, [candidate], origin)
+                drc, census = _gate_state(out_path, args)
+                new_drc = drc - base_drc
+                if new_drc:
+                    failed = "drc"
+                    reason = f"{sum(new_drc.values())} new DRC violation(s): " + ", ".join(
+                        sorted({k[0] or "?" for k in new_drc})
                     )
-        except Exception as exc:
-            failed = "gate-error"
-            reason = f"gate could not run: {exc}"
+                    detail = [
+                        f"{k[0] or '?'}: " + "; ".join(k[2])
+                        for k in sorted(new_drc, key=lambda k: (k[0] or "", k[2]))[:3]
+                    ]
+                    if detail:
+                        reason += " [" + " | ".join(detail) + "]"
+                elif census is not None and base_census is not None:
+                    new_pairs = _new_census_failures(census, base_census)
+                    if new_pairs:
+                        failed = "creepage"
+                        reason = (
+                            f"{len(new_pairs)} new/worse failing creepage pair(s): "
+                            + ", ".join(f"{a}/{b} ({rel})" for a, b, _k, rel in new_pairs)
+                        )
+            except Exception as exc:
+                failed = "gate-error"
+                reason = f"gate could not run: {exc}"
+            if failed is None:
+                route = candidate
+                break
         if failed is not None:
             out_path.write_bytes(snapshot)
             entry.update(routable=False, status="rolled-back", failed_check=failed, reason=reason)

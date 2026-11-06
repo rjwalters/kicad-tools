@@ -1040,6 +1040,7 @@ kct footprint generate <type> [options]
 | `sot` | SOT packages |
 | `dip` | DIP packages |
 | `pin-header` | Pin headers |
+| `rpi-hat` | Raspberry Pi HAT: 2x20 header + four mounting holes |
 
 **Examples:**
 ```bash
