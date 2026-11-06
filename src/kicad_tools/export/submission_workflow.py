@@ -10,6 +10,7 @@ Tapeout manifest contract read by :func:`preflight` (``manifest.json``, written 
 
     {"files": {"<name>": {"sha256": ..., "size": ...}, ...},
      "tapeout": {"board_sha256": "<sha256 of the board file>",
+                 "readiness_sha256": "<sha256 of the passing readiness.json receipt>",
                  "human_signoff": {"reviewer": "<name>", "signed_at": "<ISO 8601>"}}}
 
 Nothing here calls checkout, payment or parts purchase, and "ordered" is never
@@ -185,17 +186,75 @@ def _load_manifest(bundle_root: Path) -> dict[str, Any]:
     return manifest
 
 
+#: Receipt checks that must be present and ``passed`` before a bundle can be signed.
+REQUIRED_GATE_CHECKS = ("kct_check", "native_drc", "artifacts", "bom")
+
+
+def _load_readiness(readiness: Path, board_sha: str, bundle_shas: dict[str, str]) -> str:
+    """Refuse unless a ``kct readiness`` receipt proves every gate passed for this board.
+
+    Returns the receipt's sha256. The receipt must be ``ready``, every check
+    ``passed`` (including :data:`REQUIRED_GATE_CHECKS`), its ``inputs`` must
+    hash a ``.kicad_pcb`` equal to ``--board``, and every bundle file (bar
+    ``manifest.json``, which sign-off itself rewrites) must appear in ``inputs``
+    by sha256, so the receipt covers exactly these bytes.
+    """
+    if not readiness.is_file():
+        raise WorkflowError(f"Readiness receipt not found: {readiness}")
+    raw = readiness.read_bytes()
+    try:
+        data = json.loads(raw)
+    except ValueError as exc:
+        raise WorkflowError("Readiness receipt is not valid JSON") from exc
+    if not isinstance(data, dict):
+        raise WorkflowError("Readiness receipt is not a JSON object")
+    if data.get("status") != "ready":
+        raise WorkflowError(
+            f"Readiness receipt status is {data.get('status')!r}, not 'ready'; "
+            "run the tapeout gates (kct readiness --verify) until it is"
+        )
+    checks = data.get("checks")
+    if not isinstance(checks, list) or any(not isinstance(c, dict) for c in checks):
+        raise WorkflowError("Readiness receipt has no valid 'checks' list")
+    status = {c.get("name"): c.get("status") for c in checks}
+    missing = [n for n in REQUIRED_GATE_CHECKS if n not in status]
+    failed = sorted(str(n) for n, st in status.items() if st != "passed")
+    if missing or failed:
+        raise WorkflowError(
+            f"Readiness receipt gates not all passed (missing: {missing or 'none'}; "
+            f"not passed: {failed or 'none'})"
+        )
+    inputs = data.get("inputs")
+    if not isinstance(inputs, dict) or not inputs:
+        raise WorkflowError("Readiness receipt has no 'inputs' hash map")
+    boards = {v for k, v in inputs.items() if str(k).endswith(".kicad_pcb")}
+    if board_sha not in boards:
+        raise WorkflowError("Readiness receipt was not produced for this --board (sha256 differs)")
+    covered = set(inputs.values())
+    uncovered = sorted(name for name, sha in bundle_shas.items() if sha not in covered)
+    if uncovered:
+        raise WorkflowError(f"Readiness receipt does not cover bundle files: {uncovered}")
+    return _sha(raw)
+
+
 def sign_off_bundle(
-    bundle_root: Path, board: Path, reviewer: str, *, signed_at: str | None = None
+    bundle_root: Path,
+    board: Path,
+    reviewer: str,
+    *,
+    readiness: Path,
+    signed_at: str | None = None,
 ) -> dict[str, Any]:
     """Record an explicit human sign-off in ``manifest.json`` (the one producer of it).
 
-    Verifies the manifest's file set equals the bundle directory and every
-    recorded sha256/size, then writes ``tapeout.{board_sha256, human_signoff}``.
+    Refuses (manifest untouched) unless the bundle is intact and a passing
+    ``kct readiness`` receipt (``readiness``) is bound to ``board`` and covers
+    every bundle file; then writes
+    ``tapeout.{board_sha256, readiness_sha256, human_signoff}``.
     Re-running is idempotent apart from ``signed_at``. The reviewer is never
     invented: a blank name is refused.
     """
-    bundle_root, board = Path(bundle_root), Path(board)
+    bundle_root, board, readiness = Path(bundle_root), Path(board), Path(readiness)
     if not (reviewer or "").strip():
         raise WorkflowError("Sign-off needs a non-blank --reviewer (a human's name)")
     if not board.is_file():
@@ -212,8 +271,13 @@ def sign_off_bundle(
             f"listed but absent: {missing or 'none'})"
         )
     _verify_file_records(bundle_root, files)
+    board_sha = _file_sha(board)
+    receipt_sha = _load_readiness(
+        readiness, board_sha, {n: r["sha256"] for n, r in files.items() if n != "manifest.json"}
+    )
     tapeout: dict[str, Any] = {
-        "board_sha256": _file_sha(board),
+        "board_sha256": board_sha,
+        "readiness_sha256": receipt_sha,
         "human_signoff": {
             "reviewer": reviewer.strip(),
             "signed_at": signed_at or datetime.now(timezone.utc).isoformat(),
@@ -246,6 +310,11 @@ def preflight(bundle_root: Path, board: Path) -> Preflight:
         or not str(signoff.get("signed_at", "")).strip()
     ):
         raise WorkflowError("No recorded human sign-off in the tapeout manifest")
+    if not re.fullmatch(r"[0-9a-f]{64}", str(tapeout.get("readiness_sha256", ""))):
+        raise WorkflowError(
+            "Tapeout manifest records no readiness receipt (tapeout.readiness_sha256); "
+            "re-run kct tapeout-sign-off --readiness <readiness.json>"
+        )
     if not board.is_file():
         raise WorkflowError(f"Board file not found: {board}")
     board_sha = _file_sha(board)
