@@ -123,10 +123,14 @@ def test_json_output(tmp_path, capsys):
     assert data["items"][0]["layer"] == "F.SilkS"
 
 
-_LOGO = (
-    '(gr_text "LOGO TEXT HERE" (at 110 128.9) (layer "F.SilkS") '
-    "(effects (font (size 1 1) (thickness 0.15))))"
-)
+def _logo(x: float, y: float) -> str:
+    return (
+        f'(gr_text "LOGO TEXT HERE" (at {x} {y}) (layer "F.SilkS") '
+        "(effects (font (size 1 1) (thickness 0.15))))"
+    )
+
+
+_LOGO = _logo(110, 128.9)  # file coords for a board whose origin is (100, 100)
 
 
 def test_auto_avoids_board_level_silk_on_nonzero_origin(tmp_path):
@@ -186,7 +190,9 @@ def _kicad_cli_silk_findings(pcb: Path) -> list[str]:
 )
 def test_auto_output_is_clean_under_kicad_cli(tmp_path, origin, layer):
     """AC5: --auto output has 0 silk findings from kicad-cli pcb drc (#8533)."""
-    p = _write(tmp_path, origin=origin, extra=_LOGO)
+    # Keep LOGO on the 40x30 board for either origin (10, 28.9 board-relative).
+    logo = _logo(origin[0] + 10, origin[1] + 28.9)
+    p = _write(tmp_path, origin=origin, extra=logo)
     assert _kicad_cli_silk_findings(p) == []
     assert _run(p, auto=True, order_placeholder="JLCJLCJLCJLC", layer=layer) == 0
     assert _kicad_cli_silk_findings(p) == []

@@ -94,7 +94,6 @@ def _build_node(text: str, x: float, y: float, layer: str, size: float, thicknes
 
 def _obstacles(pcb, side: str, mask_clearance_mm: float):
     """Collect ``(apertures, silk, courtyards, material, outline)`` for *side*."""
-    from shapely.affinity import translate  # type: ignore[import-untyped]
     from shapely.geometry import MultiLineString, Polygon  # type: ignore[import-untyped]
 
     from kicad_tools.geometry.courtyard import _courtyard_polygon, _side_has_geometry
@@ -107,17 +106,9 @@ def _obstacles(pcb, side: str, mask_clearance_mm: float):
     apertures = [
         (g, lbl) for s, g, lbl in _iter_pad_apertures(pcb, mask_clearance_mm) if s == side
     ] + [(g, lbl) for s, g, lbl in _iter_via_apertures(pcb, mask_clearance_mm) if s == side]
-    # Footprint silk is already board-relative, but board-level gr_text /
-    # gr_* graphics (owner None) keep the file's sheet-absolute coordinates;
-    # shift them into the board-relative frame the search runs in.
-    ox, oy = pcb._board_origin
-    silk = []
-    for s, g, lbl, owner in _iter_owned_static_silk(pcb):
-        if s != side:
-            continue
-        if owner is None and (ox or oy):
-            g = translate(g, xoff=-ox, yoff=-oy)
-        silk.append((g, lbl))
+    # _iter_owned_static_silk already yields board-level silk in the
+    # board-relative frame (#8561); do not shift it again here.
+    silk = [(g, lbl) for s, g, lbl, _owner in _iter_owned_static_silk(pcb) if s == side]
     # Reference text is movable in place_refs, but here it is fixed: include it.
     from kicad_tools.silkscreen.place_refs import _visible_reference
 
