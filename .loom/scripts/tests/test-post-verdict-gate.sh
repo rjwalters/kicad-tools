@@ -459,11 +459,20 @@ pv 12614 approved "$HEAD" --body "Approved: covered by the new tests." --review-
 check "issue body unchanged: exit 0" 0 "$RC"
 check "issue body unchanged: posted" 12614 "$POSTED"
 
+# #13600: a hash of the raw `gh --jq .body` output (trailing newline kept) is accepted.
+NL_HASH="$(printf '%s\n' 'the design as reviewed' | sha256sum | cut -d' ' -f1)"
+state "[]" loom:review-requested loom:reviewing
+pv 12614 approved "$HEAD" --body "Approved: covered by the new tests." --review-started "$PAST_T" --issue-body-sha "50=$NL_HASH"
+check "trailing-newline body hash: exit 0" 0 "$RC"
+check "trailing-newline body hash: posted" 12614 "$POSTED"
+
 echo '{"body":"rescoped to a daemon-only design"}' > "$STUB_DIR/issue-50.json"
 state "[]" loom:review-requested loom:reviewing
 pv 12614 approved "$HEAD" --body "Approved: covered by the new tests." --review-started "$PAST_T" --issue-body-sha "50=$OLD_HASH"
 check "issue body rescoped: exit 7" 7 "$RC"
 contains "names the issue" "$OUT" "issue #50's body changed"
+contains "refusal says what was hashed" "$OUT" "trailing newlines trimmed"
+contains "refusal shows the recipe" "$OUT" "sha256sum"
 check "issue body rescoped: nothing posted" "" "$POSTED"
 
 echo '{"body":"the design as reviewed"}' > "$STUB_DIR/issue-50.json"

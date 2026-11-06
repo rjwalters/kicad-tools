@@ -67,6 +67,12 @@
 #                     either because the newest matching marker's SHA equals the
 #                     current head SHA, or because the head moved but the two
 #                     commits' TREES are byte-identical (#9576 — see below).
+#  4b. FRESH (operator send-back, #13586) — `loom:changes-requested` only: the
+#                     marker is older than the head, but the latest `labeled`
+#                     timeline event for the label is by a trusted actor, newer
+#                     than the marker, with no commit / force-push after it. A
+#                     human's direct label writes no marker of its own. Any
+#                     unreadable or untrusted evidence falls through to 5.
 #   5. STALE        — the newest matching marker's SHA differs from the current
 #                     head SHA AND the trees differ (or the comparison could not
 #                     be made). The verdict describes a tree that no longer
@@ -614,6 +620,49 @@ elif [[ -n "$MARKER_SHA" ]]; then
   fi
   EQUIV_WHY="$(sed -n 's/.* Why: //p' "$GH_STDERR" | head -n 1)"; if [[ -n "$EQUIV_KIND" ]]; then
     FRESH_REASON="verdict $VERDICT_LABEL was rendered against $MARKER_SHA and head is now $HEAD_SHA, but the change this PR makes is unchanged across the move (equivalence kind: $EQUIV_KIND) — so the verdict still describes it (#9576, #9416). CI still re-runs against $HEAD_SHA; only the review carries over."
+  fi
+fi
+
+# --- Step 4b: a trusted actor's own send-back at THIS head (#13586) ----------
+# A human applying `loom:changes-requested` directly writes no marker, so the
+# newest marker names an OLDER verdict's SHA and step 4 reads the operator's
+# send-back as stale. The evidence that it was applied at the current head is
+# the timeline: the latest `labeled loom:changes-requested` event, by a trusted
+# actor, newer than the marker comment, with no commit / force-push after it.
+# `loom:changes-requested` only: an approval keeps the strict marker rule.
+# Fail closed: an unreadable timeline, an untrusted or unverifiable actor, or any
+# missing field leaves FRESH_REASON empty, so the marker-vs-head result stands.
+# Plain `gh` (no cache), like the comment read above.
+if [[ -z "$FRESH_REASON" && -n "$MARKER_SHA" && "$VERDICT_TOKEN" == changes-requested ]]; then
+  MARKER_AT="$(tail -n 1 <<<"$MARKER_LINES" | cut -f1)"
+  TIMELINE_JSON="$(gh api "repos/{owner}/{repo}/issues/$PR/timeline" --paginate 2>/dev/null)" || TIMELINE_JSON=""
+  # Chronological array; take the latest matching `labeled` event, then check no
+  # head-moving event follows it (by position, not by commit date, which can
+  # predate the push).
+  LABEL_EVT="$(jq -rs --arg l "$VERDICT_LABEL" '
+    [.[] | if type == "array" then .[] else . end] as $t
+    | ([range(0; $t | length) | select($t[.].event == "labeled" and $t[.].label.name == $l)] | last) as $i
+    | if $i == null then empty
+      else [$t[$i].actor.login // "", $t[$i].created_at // "",
+            ([$t[($i + 1):][] | select(.event == "committed" or .event == "head_ref_force_pushed")] | length | tostring)] | @tsv
+      end
+  ' <<<"$TIMELINE_JSON" 2>/dev/null || true)"
+  if [[ -n "$LABEL_EVT" ]]; then
+    IFS=$'\t' read -r LABEL_ACTOR LABEL_AT LABEL_MOVED <<<"$LABEL_EVT"
+    if [[ -n "$LABEL_ACTOR" && -n "$LABEL_AT" && "$LABEL_MOVED" == 0 && -n "$MARKER_AT" && "$LABEL_AT" > "$MARKER_AT" ]]; then
+      # Trust is the daemon's predicate (#9548), fed a one-item listing. A
+      # timeline event carries no author_association, so a repo insider is
+      # proved by write+ permission on the repo.
+      ASSOC="NONE"
+      PERM="$(gh api "repos/{owner}/{repo}/collaborators/$LABEL_ACTOR/permission" --jq '.permission' 2>/dev/null || true)"
+      case "$PERM" in admin|maintain|write) ASSOC="COLLABORATOR" ;; esac
+      # requires-daemon: forge optional   Without `trusted-comments` the actor counts as untrusted and the marker comparison stands (STALE) — the fail-safe answer.
+      TRUSTED_ACTOR="$(jq -nc --arg u "$LABEL_ACTOR" --arg a "$ASSOC" '[{user:{login:$u},author_association:$a}]' \
+        | "${LOOM_DAEMON_BIN:-loom-daemon}" forge trusted-comments 2>/dev/null | jq -r 'length' 2>/dev/null || true)"
+      if [[ "$TRUSTED_ACTOR" == 1 ]]; then
+        FRESH_REASON="verdict $VERDICT_LABEL was applied by trusted actor $LABEL_ACTOR at $LABEL_AT after the newest marker (for $MARKER_SHA), and the head has not moved since — so it describes the current head $HEAD_SHA (#13586)"
+      fi
+    fi
   fi
 fi
 

@@ -57,7 +57,7 @@ on one tap (`claude/opus`, `claude/fable`) share its availability.
 ## Layers and per-host override
 
 The daemon reads each config tier separately: machine defaults
-(`~/.local/share/loom/config/defaults.json`, where fleet-gitops renders
+(`~/.local/share/loom/config/defaults.json`, where the fleet state store renders
 `config.defaults` plus host-class and host overrides), `.loom/config.json`,
 `.loom-project/project.json`, the per-repo fleet tier
 `.loom-local/fleet-repo.json` (the fleet config's `repos[].config`, written by
@@ -68,7 +68,7 @@ that role (or, for `roleDraw: null`, every role). `excludeProviders` follows the
 ordinary rule: the highest tier that sets it wins.
 
 Inside the machine-defaults file the tiers have already been merged by
-fleet-gitops, whose generic deep merge replaces lists. There, use the
+the fleet state store, whose generic deep merge replaces lists. There, use the
 **object form** to override one attempt: it merges per attempt and per
 candidate (set a candidate to `0` to switch it off on that host).
 

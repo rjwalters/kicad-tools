@@ -305,7 +305,7 @@ class ComponentGroup:
 # =============================================================================
 
 
-def create_hat_regions(width: float = 65.0, height: float = 56.0) -> list[SpatialRegion]:
+def create_hat_regions(width: float = 65.0, height: float = 56.5) -> list[SpatialRegion]:
     """Create standard regions for a Raspberry Pi HAT layout."""
     # Assuming origin at top-left, Y increasing downward (KiCad convention)
     regions = [

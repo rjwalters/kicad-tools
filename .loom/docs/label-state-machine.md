@@ -720,6 +720,13 @@ hold); factual findings get one Curator disposition round first.
 `loom:triage` (`labels migrate` also strips `loom:curated`). Contract and
 bound: [`promotion-throughput.md`](promotion-throughput.md).
 
+**Awaiting-revision parks (#10936)**: a `loom:blocked` issue parked only as
+"awaiting (Architect) revision" / "awaiting a design epic", with no named
+blocker, is converted by Guide onto this same revise path (`loom:triage`, park
+record removed, a `champion:revise:body-<HASH>` ask). No new label. A park that
+names a blocker, or carries `loom:operator` / `loom:frozen` / `loom:building` /
+`loom:curating` / a permanent-block marker, is left alone.
+
 ## Fact-based de-escalation of a Champion `proposal-escalated` hold (#7650, retired by #11861)
 
 Curator used to remove `loom:operator` from Champion's escalation once it had

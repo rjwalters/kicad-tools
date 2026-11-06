@@ -29,9 +29,9 @@ Consumers infer it. When an item (issue or PR) advanced and no daemon effort
 dashboard consumers should treat "advanced with no daemon span" as
 operator-driven, not as stalled.
 
-The `operator.presence` kind and its OTLP mapping remain in the schema only so
-rows already stored in a backend still decode ([telemetry-schema](telemetry-schema.md#operatorpresence)).
-Nothing produces new ones.
+There is no `operator.presence` telemetry kind: it was deleted (#13626) after
+#12121 left it with no producer. Rows already stored in a backend keep their
+`loom.presence.*` attributes; nothing writes new ones.
 
 ## Retiring the old wiring
 

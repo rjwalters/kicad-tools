@@ -116,10 +116,10 @@ peers advertise over the peer-claim view, read at the start of the tick and
 not updated as the tick spawns. It is as fleet-wide as the peers' claim
 adverts reach; a peer that does not advertise is not counted.
 
-**Knobs live in fleet-gitops.** Set the six hyperparameter keys in
+**Knobs live in the fleet state store.** Set the six hyperparameter keys in
 `fleet/defaults.json` or a host overlay like any other `hyperparameters` key
 (they are in the strict validated block, enter `loom.hyperparams.digest`, and
-are re-read every tick, so a fleet-gitops merge applies without a restart).
+are re-read every tick, so the fleet state store merge applies without a restart).
 `dispatch.backlogExponent` must be in `[0, 1]` and `dispatch.busyExponent`
 in `[0, 100]`; `--validate` rejects a value outside, a non-number, or an
 unknown `dispatch` key. The exponents are read from the primary workspace's

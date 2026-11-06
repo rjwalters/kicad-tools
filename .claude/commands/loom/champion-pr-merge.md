@@ -3288,7 +3288,7 @@ cannot distinguish from a correctly-passing filter.
 **Per-repo switch: `champion.outOfBandAcGate` (#12703).** Boolean, **absent =
 `true`** (the gate as described below). A repo that tests on its live deployment
 and does not want a human hold waiting on a confirmation of a real run sets it
-`false` through the normal config tiers (for fleet-gitops: the repo's override
+`false` through the normal config tiers (for the fleet state store: the repo's override
 in `fleet.yml`; no new plumbing, same resolution as `champion.standingAuthorizations`).
 First use case: 2AMLogic/loom-ui. With `false`, Step 4 runs neither the
 classifier nor `hold_issue_on_unverified_ac` for any linked issue: no
