@@ -245,3 +245,48 @@ class TestGateUsesVoltageMap:
         assert failing and any({"SIG", "HV"} <= set(k[:2]) for k in failing)
         # Without --min or --voltage-map the gate stays off (unchanged behaviour).
         assert _census_failures(p, _parse(str(p), "--link", "SIG R1.1 R1.1")) is None
+
+
+class TestCollapseKeepsMapFloor:
+    """#8524 interaction: a collapsed route the census refuses falls back to the raw route."""
+
+    def test_collapse_cutting_into_floor_commits_raw_route(self, tmp_path, capsys, monkeypatch):
+        import contextlib
+        from collections import Counter
+        from dataclasses import replace
+
+        from kicad_tools.cli import kicad_toolchain, route_link_cmd
+        from kicad_tools.router import link_router
+
+        monkeypatch.setattr(
+            kicad_toolchain, "evidence_toolchain", lambda *a, **k: contextlib.nullcontext()
+        )
+        marker_x = 101.0
+
+        def fake_collapse(route):  # stands in for a staircase cut into the HV floor
+            return replace(
+                route, segments=[*route.segments, (marker_x, 101.0, 102.0, 101.0, "F.Cu")]
+            )
+
+        def gate(path, args):
+            pcb = PCB.load(str(path))
+            cut = any(abs(s.start[0] - marker_x) < 1e-6 for s in pcb.segments)
+            return Counter(), ({("HV", "SIG", "conductor", "board"): 0.5} if cut else {})
+
+        monkeypatch.setattr(link_router, "collapse_link_route", fake_collapse)
+        monkeypatch.setattr(route_link_cmd, "_gate_state", gate)
+        vm = tmp_path / "vm.json"
+        vm.write_text(json.dumps({"HV": 300}))
+        body = (
+            _pad(1, 105, 110, 1, "SIG")
+            + _pad(2, 125, 110, 1, "SIG")
+            + _seg(1, 108, 118, 122, 118, 2)
+        )
+        p = _write(tmp_path, body)
+        rc = main(
+            ["route-link", "--format", "json", str(p), "--link", "SIG R1.1 R2.1",
+             "--link-layers", "F.Cu", "--voltage-map", str(vm)]
+        )  # fmt: skip
+        doc = json.loads(capsys.readouterr().out)
+        assert rc == 0 and doc["links"][0]["status"] == "committed"
+        assert not any(abs(s.start[0] - marker_x) < 1e-6 for s in PCB.load(str(p)).segments)
