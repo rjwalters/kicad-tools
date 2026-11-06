@@ -140,6 +140,7 @@ from .parallel import (
 )
 from .path import create_intra_ic_routes, reduce_pads_after_intra_ic
 from .placement_feedback import (
+    PD_ABANDON_ROUTED_MARGIN,
     PlacementDeltaFeedbackLoop,
     PlacementDeltaFeedbackResult,
     PlacementFeedbackLoop,
@@ -23698,6 +23699,9 @@ class Autorouter:
         require_no_keepout_intrusion: bool = True,
         net_class_map: Any = None,
         loop_observer: Any = None,
+        timeout_provider: Callable[[], float | None] | None = None,
+        min_trial_budget: float = 0.0,
+        abandon_margin: int | None = PD_ABANDON_ROUTED_MARGIN,
     ) -> PlacementDeltaFeedbackResult | PlacementFeedbackResult:
         """Close the router<->placement loop with classifier-driven deltas (#4467).
 
@@ -23810,6 +23814,9 @@ class Autorouter:
             require_no_clearance_regression=require_no_clearance_regression,
             require_no_creepage_regression=require_no_creepage_regression,
             require_no_keepout_intrusion=require_no_keepout_intrusion,
+            timeout_provider=timeout_provider,
+            min_trial_budget=min_trial_budget,
+            abandon_margin=abandon_margin,
         )
         if delta_output_path is not None:
             write_placement_delta_json(
