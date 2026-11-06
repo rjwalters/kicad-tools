@@ -5276,6 +5276,11 @@ def _add_parts_parser(subparsers) -> None:
         "--issues-only", action="store_true", help="Only show parts with availability issues"
     )
     parts_avail.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Bypass the parts cache and fetch every part live",
+    )
+    parts_avail.add_argument(
         "--no-auto-lcsc",
         action="store_true",
         help="Don't auto-match LCSC part numbers for lines lacking one "
