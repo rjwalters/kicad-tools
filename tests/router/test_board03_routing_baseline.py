@@ -299,6 +299,14 @@ EXPECTED_COMMITTED_DRC_RULES = {
     # breakdown.  Tool-side rule addition, not a board regression.
     "redundant_copper_detour",
     "redundant_copper_duplicate",
+    # Issue #8435 (PR #8444) / #8503: the new advisory ``pour_slot`` rule flags
+    # parallel different-net tracks too close for the zone fill between them
+    # (39 distinct pairs on the committed routing once duplicate segment copies
+    # are collapsed).  WARNING severity and listed in NON_GATING_RULE_PREFIXES,
+    # so it does NOT raise the 0-error ceiling (MAX_COMMITTED_DRC_ERRORS); it
+    # only appears in the BY-RULE breakdown.  Tool-side rule addition, not a
+    # board regression; pour-aware spacing cleanup is #8440.
+    "pour_slot",
     # Issue #3844: the new geometric silk_over_copper rule flags reference
     # designators printed over a neighbor's pad mask aperture on this board
     # (a real defect kicad-cli also reports).  It is WARNING severity, so it
