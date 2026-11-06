@@ -196,8 +196,11 @@ class BOMAvailabilityResult:
         """Get summary statistics."""
         return {
             "total_items": len(self.items),
-            "available": len(self.available),
-            "low_stock": len(self.low_stock),
+            # Count by per-item ``status`` so the summary always partitions
+            # the same way the items are labelled (a LOW_STOCK item with enough
+            # quantity is still "low_stock", never "available").
+            "available": sum(item.status == AvailabilityStatus.AVAILABLE for item in self.items),
+            "low_stock": sum(item.status == AvailabilityStatus.LOW_STOCK for item in self.items),
             "out_of_stock": len(self.out_of_stock),
             "missing": len(self.missing),
             "unverified": sum(item.status == AvailabilityStatus.UNKNOWN for item in self.items),
@@ -254,10 +257,64 @@ class LCSCAvailabilityChecker:
             self._client = LCSCClient()
         return self._client
 
+    def _fetch_parts(
+        self,
+        client,
+        lcsc_parts: list[str],
+        bypass_cache: bool = False,
+    ) -> tuple[dict[str, Part], set[str], dict[str, str]]:
+        """Bulk-fetch parts, refetching live any whose cached stock is unverified.
+
+        Cache entries older than the stock-verification window (24 h) but younger
+        than the cache TTL (7 d) would otherwise be reported ``unknown`` forever.
+
+        Returns:
+            ``(parts_map, unavailable, refresh_errors)`` where ``refresh_errors``
+            maps an upper-cased LCSC number to why its live refetch failed.
+        """
+        from ..parts.lcsc import LCSCUnavailableError
+
+        unique = list(set(lcsc_parts))
+        unavailable: set[str] = set()
+        refresh_errors: dict[str, str] = {}
+        if not unique:
+            return {}, unavailable, refresh_errors
+
+        try:
+            parts_map = dict(client.lookup_many(unique, bypass_cache=bypass_cache))
+        except LCSCUnavailableError as exc:
+            parts_map = dict(exc.partial_results)
+            unavailable = set(exc.unavailable_parts)
+
+        if bypass_cache:
+            return parts_map, unavailable, refresh_errors
+
+        stale = [pn for pn, part in parts_map.items() if not part.stock_verified]
+        if not stale:
+            return parts_map, unavailable, refresh_errors
+
+        try:
+            fresh = client.lookup_many(stale, bypass_cache=True)
+        except LCSCUnavailableError as exc:
+            fresh = exc.partial_results
+            for pn in exc.unavailable_parts or set(stale):
+                refresh_errors[pn.upper()] = f"Live refetch failed: {exc}"
+        except Exception as exc:  # network/HTTP errors must not abort the report
+            fresh = {}
+            for pn in stale:
+                refresh_errors[pn.upper()] = f"Live refetch failed: {type(exc).__name__}: {exc}"
+        # Keep the cached part whenever the refetch did not return one.
+        parts_map.update(fresh)
+        for pn in stale:
+            if pn not in fresh and pn.upper() not in refresh_errors:
+                refresh_errors[pn.upper()] = "Live refetch returned no result"
+        return parts_map, unavailable, refresh_errors
+
     def check_bom(
         self,
         bom: BOM,
         quantity: int = 1,
+        bypass_cache: bool = False,
     ) -> BOMAvailabilityResult:
         """
         Check availability for all items in a BOM.
@@ -265,6 +322,7 @@ class LCSCAvailabilityChecker:
         Args:
             bom: Bill of Materials to check
             quantity: Number of boards (multiplies component quantities)
+            bypass_cache: Force a live fetch for every part (``--no-cache``)
 
         Returns:
             BOMAvailabilityResult with availability status for each item
@@ -279,15 +337,10 @@ class LCSCAvailabilityChecker:
             if group.lcsc:
                 lcsc_parts.append(group.lcsc)
 
-        # Bulk fetch parts
-        from ..parts.lcsc import LCSCUnavailableError
-
-        unavailable: set[str] = set()
-        try:
-            parts_map = client.lookup_many(list(set(lcsc_parts))) if lcsc_parts else {}
-        except LCSCUnavailableError as exc:
-            parts_map = exc.partial_results
-            unavailable = exc.unavailable_parts
+        # Bulk fetch parts (stale-unverified cache entries are refetched live)
+        parts_map, unavailable, refresh_errors = self._fetch_parts(
+            client, lcsc_parts, bypass_cache=bypass_cache
+        )
 
         # Check each group
         for group in groups:
@@ -305,6 +358,7 @@ class LCSCAvailabilityChecker:
                 quantity_needed=qty_needed,
                 parts_map=parts_map,
                 unavailable=unavailable,
+                refresh_errors=refresh_errors,
             )
             results.append(result)
 
@@ -318,6 +372,7 @@ class LCSCAvailabilityChecker:
         self,
         items: list[BOMItem],
         quantity: int = 1,
+        bypass_cache: bool = False,
     ) -> BOMAvailabilityResult:
         """
         Check availability for a list of BOM items.
@@ -335,15 +390,10 @@ class LCSCAvailabilityChecker:
         # Collect LCSC numbers
         lcsc_parts = [item.lcsc for item in items if item.lcsc]
 
-        # Bulk fetch parts
-        from ..parts.lcsc import LCSCUnavailableError
-
-        unavailable: set[str] = set()
-        try:
-            parts_map = client.lookup_many(list(set(lcsc_parts))) if lcsc_parts else {}
-        except LCSCUnavailableError as exc:
-            parts_map = exc.partial_results
-            unavailable = exc.unavailable_parts
+        # Bulk fetch parts (stale-unverified cache entries are refetched live)
+        parts_map, unavailable, refresh_errors = self._fetch_parts(
+            client, lcsc_parts, bypass_cache=bypass_cache
+        )
 
         # Check each item
         for item in items:
@@ -362,6 +412,7 @@ class LCSCAvailabilityChecker:
                 quantity_needed=qty_needed,
                 parts_map=parts_map,
                 unavailable=unavailable,
+                refresh_errors=refresh_errors,
             )
             results.append(result)
 
@@ -381,6 +432,7 @@ class LCSCAvailabilityChecker:
         quantity_needed: int,
         parts_map: dict[str, Part],
         unavailable: set[str] | None = None,
+        refresh_errors: dict[str, str] | None = None,
     ) -> PartAvailabilityResult:
         """Check availability for a single item."""
         # No LCSC part number
@@ -449,7 +501,10 @@ class LCSCAvailabilityChecker:
             lead_time_days=None,  # LCSC API doesn't provide this currently
             alternatives=alternatives,
             inventory=part.inventory_provenance(),
-            error=None if part.stock_verified else "Stock unverified: refresh live inventory",
+            error=None
+            if part.stock_verified
+            else (refresh_errors or {}).get(lcsc.upper())
+            or "Stock unverified: refresh live inventory",
         )
 
     def _determine_status(self, stock: int, needed: int) -> AvailabilityStatus:
