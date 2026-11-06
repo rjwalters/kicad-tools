@@ -1506,7 +1506,7 @@ class TestReinforceCLIBoardRules:
         # Absolute Edge.Cuts extent of the board.
         x0, y0, x1, y1 = ox, oy, ox + 200, oy + 100
 
-        args = dict(dry_run=True, voltage_map=str(vm))
+        args = {"dry_run": True, "voltage_map": str(vm)}
         assert run_pcb_command(_reinforce_args(pcb_path, format="json", **args)) == 0
         refused = json.loads(capsys.readouterr().out)["refused"]
         assert refused
