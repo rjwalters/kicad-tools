@@ -2163,6 +2163,11 @@ class Autorouter:
 
         # Physics integration
         self._stackup = stackup
+        # Issue #8564: net name -> validator regex that synthesized its
+        # impedance target, and net name -> human-readable reason its width
+        # was set by impedance sizing (rather than kept at the class width).
+        self._synthesized_impedance_patterns: dict[str, str] = {}
+        self._width_provenance: dict[str, str] = {}
         self._impedance_source_pcb_path: str | None = None
         self._physics_enabled = physics_enabled
         self._transmission_line: TransmissionLine | None = None
@@ -7105,7 +7110,7 @@ class Autorouter:
 
     def _record_routing_decision(self, net: int, routes: list[Route]) -> None:
         """Record a routing decision for a net."""
-        if not self._decision_store:
+        if self._decision_store is None:
             return
 
         from kicad_tools.explain.decisions import Decision
@@ -7131,6 +7136,9 @@ class Autorouter:
             if net_class.priority <= 1:
                 rationale_parts.append(f"High-priority net ({net_class.__class__.__name__})")
             rationale_parts.append(f"Routed with {net_class.trace_width}mm trace width")
+            width_reason = self._width_provenance.get(net_name)
+            if width_reason:
+                rationale_parts.append(width_reason)
             if net_class.clearance:
                 rationale_parts.append(f"{net_class.clearance}mm clearance")
 
@@ -8422,6 +8430,7 @@ class Autorouter:
                 )
 
             self.net_class_map[net_name] = new_nc
+            self._synthesized_impedance_patterns[net_name] = matched_spec.net_pattern
             synthesized_count += 1
 
             # INFO-level log: surface the bridge firing so users see the
@@ -8569,6 +8578,7 @@ class Autorouter:
             logger.exception("impedance-driven sizing failed; using per-class literals")
             return
 
+        self._record_width_provenance(self.net_class_map, resolved)
         self.net_class_map = resolved
 
         # Surface diagnostics through logger.  Mirrors the existing
@@ -8578,6 +8588,42 @@ class Autorouter:
             logger.warning("impedance-driven sizing: %s", warn.message)
         for err in clamp_errors:
             logger.error("impedance-driven sizing clamp: %s", err.message)
+
+    def _record_width_provenance(
+        self,
+        before: dict[str, NetClassRouting],
+        after: dict[str, NetClassRouting],
+    ) -> None:
+        """Record and log which nets had their width set by impedance sizing.
+
+        Issue #8564: the resolver silently replaces a class's literal
+        ``trace_width`` with the impedance-solved width.  Nets whose class
+        object was replaced (identity differs) were sized by impedance; the
+        target is *synthesized* when the validator regex bridge supplied it
+        and *declared* otherwise.  Visibility only -- widths are unchanged.
+        """
+        for net_name, new_nc in after.items():
+            old_nc = before.get(net_name)
+            if old_nc is None or new_nc is old_nc or net_name in self._width_provenance:
+                continue
+            if new_nc.target_single_impedance is not None:
+                target = f"{new_nc.target_single_impedance:g}\u03a9 single-ended"
+            elif new_nc.target_diff_impedance is not None:
+                target = f"{new_nc.target_diff_impedance:g}\u03a9 differential"
+            else:
+                continue
+            pattern = self._synthesized_impedance_patterns.get(net_name)
+            if pattern is not None:
+                origin = f"synthesized from validator default pattern {pattern!r}"
+            else:
+                origin = "declared"
+            reason = (
+                f"width {new_nc.trace_width:g}mm set by impedance sizing "
+                f"(class width {old_nc.trace_width:g}mm overridden; "
+                f"target {target}, {origin})"
+            )
+            self._width_provenance[net_name] = reason
+            logger.warning("Net %s: %s", net_name, reason)
 
     def _build_manufacturer_design_rules(self):
         """Construct a manufacturer ``DesignRules`` for the impedance
