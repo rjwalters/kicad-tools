@@ -855,6 +855,7 @@ def _iter_via_apertures(
     -> board setup default -> measured absent-token default).
     """
     setup = pcb.setup
+    ox, oy = getattr(pcb, "board_origin", None) or (0.0, 0.0)
     for via in pcb.vias:
         if via.size <= 0:
             continue
@@ -866,7 +867,7 @@ def _iter_via_apertures(
                 geom = _via_aperture_geometry(via, min_mask_clearance)
             x, y = via.position
             net = f" [{via.net_name}]" if via.net_name else ""
-            label = f"via{net} at ({x:.3f}, {y:.3f})"
+            label = f"via{net} at ({x + ox:.3f}, {y + oy:.3f})"
             yield side, geom, label
 
 

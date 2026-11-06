@@ -85,6 +85,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from .rules import DesignRules
 
 __all__ = [
+    "KNOWN_FAILURE_BACKOFF_AFTER",
+    "KNOWN_FAILURE_BACKOFF_FLOOR_S",
     "MAX_PAIR_RIPUPS",
     "MAX_TARGETING_EVALUATIONS",
     "RIPPABLE_CLOSING_KINDS",
@@ -104,6 +106,21 @@ __all__ = [
 #: failing, every iteration -- rather than the normal one.  Past the cap the
 #: targeter names nothing and says so (:attr:`AccessLossTargeter.truncated`).
 MAX_TARGETING_EVALUATIONS = 8_000
+
+#: Issue #8486: consecutive iterations a net must have spent its whole per-net
+#: search cap without a path, under an unchanged seal signature, before its
+#: next search budget is halved.  Each further such iteration halves it again.
+KNOWN_FAILURE_BACKOFF_AFTER = 2
+
+#: Issue #8486: the back-off never cuts a per-net search below this many
+#: seconds (nor raises a cap that was already smaller).  Matches the negotiated
+#: loop's own remaining-budget floor (``PER_NET_CAP_FLOOR_S``).
+KNOWN_FAILURE_BACKOFF_FLOOR_S = 5.0
+
+#: Issue #8486: a search that returned no path after at least this fraction of
+#: its cap counts as "ran to the cap" (the C++ wall clock is checked between
+#: expansion batches, so a capped search ends a little either side of it).
+KNOWN_FAILURE_CAPPED_FRACTION = 0.9
 
 #: Closing-copper kinds a rip-up can actually remove: route copper of a net the
 #: negotiated loop owns.  Everything else that closes a pad's access --
@@ -610,6 +627,133 @@ class RipupCycleGuard:
 
     futile_relief_skips: list[int] = field(default_factory=list)
     """Victims whose relief rescue was skipped as a repeat of a futile one."""
+
+    # -- Known failures (issue #8486) ----------------------------------------
+    futile_rescue: dict[int, Any] = field(default_factory=dict)
+    """``net -> seal signature`` at the end of its latest overflow-silent
+    rescue (targeted rip-up + relief) that resolved nothing.  The rescue is not
+    re-run for that net while its signature is unchanged."""
+
+    futile_rescue_skips: dict[int, int] = field(default_factory=dict)
+    """``net -> overflow-silent rescues skipped as a repeat of a futile one``."""
+
+    entry_signature: dict[int, Any] = field(default_factory=dict)
+    """``net -> seal signature`` of each unrouted net at the top of the current
+    iteration (:meth:`begin_iteration`); keys the per-net search back-off."""
+
+    capped_streak: dict[int, tuple[int, Any, int]] = field(default_factory=dict)
+    """``net -> (iteration, entry signature, streak)``: the net's latest
+    negotiated search ran to its cap with no path, ``streak`` consecutive
+    iterations in a row under that same entry signature."""
+
+    backoffs: list[tuple[int, int, float]] = field(default_factory=list)
+    """``(iteration, net, cap)`` for every search the back-off shortened."""
+
+    known_fail_seconds: dict[int, float] = field(default_factory=dict)
+    """``iteration -> seconds`` spent searching or rescuing nets already known
+    to fail (a capped no-path search, or a futile rescue, under the same
+    signature in an earlier iteration)."""
+
+    def begin_iteration(self, iteration: int, failed: Mapping[int, Any]) -> None:
+        """Record the entry seal of each unrouted net; forget routed ones.
+
+        ``failed`` maps every net that is unrouted at the top of ``iteration``
+        to its seal signature (``None`` when it has none).  A net absent from
+        it was routed since: its known-failure memos are cleared, so a later
+        failure starts from scratch.
+        """
+        self.entry_signature = {int(n): sig for n, sig in failed.items()}
+        for memo in (self.capped_streak, self.futile_rescue):
+            for net in [n for n in memo if n not in self.entry_signature]:
+                memo.pop(net)
+
+    def _known_capped(self, net: int, iteration: int) -> tuple[int, Any, int] | None:
+        """The capped-search record still valid for ``net`` at ``iteration``."""
+        sig = self.entry_signature.get(int(net))
+        rec = self.capped_streak.get(int(net))
+        if sig is None or rec is None or rec[0] != int(iteration) - 1 or rec[1] != sig:
+            return None
+        return rec
+
+    def search_cap(self, net: int, iteration: int, cap: float | None) -> float | None:
+        """Per-net search cap for ``net`` this iteration (issue #8486).
+
+        Full ``cap`` unless the net ran to its cap with no path in the last
+        :data:`KNOWN_FAILURE_BACKOFF_AFTER` (or more) consecutive iterations
+        under the same entry signature; then the cap halves per extra such
+        iteration, floored at :data:`KNOWN_FAILURE_BACKOFF_FLOOR_S`.  ``None``
+        (no wall-clock cap, the deterministic arm) is never touched.
+        """
+        if cap is None:
+            return None
+        rec = self._known_capped(net, iteration)
+        if rec is None or rec[2] < KNOWN_FAILURE_BACKOFF_AFTER:
+            return cap
+        shrunk = cap * 0.5 ** (rec[2] - KNOWN_FAILURE_BACKOFF_AFTER + 1)
+        reduced = max(min(cap, KNOWN_FAILURE_BACKOFF_FLOOR_S), shrunk)
+        if reduced < cap:
+            self.backoffs.append((int(iteration), int(net), reduced))
+        return reduced
+
+    def note_search(
+        self,
+        net: int,
+        iteration: int,
+        cap: float | None,
+        elapsed: float,
+        routed: bool,
+    ) -> None:
+        """Feed one negotiated search back (issue #8486).
+
+        A search that routed, ended well short of its cap (a proven or cheap
+        failure, not a budget one), or ran with no entry signature resets the
+        net's streak.  Seconds spent on a net already known to fail are added
+        to :attr:`known_fail_seconds`.
+        """
+        net, iteration = int(net), int(iteration)
+        prev = self._known_capped(net, iteration)
+        if prev is not None:
+            self.add_known_fail_seconds(iteration, elapsed)
+        sig = self.entry_signature.get(net)
+        capped = cap is not None and elapsed >= KNOWN_FAILURE_CAPPED_FRACTION * cap
+        if routed or not capped or sig is None:
+            self.capped_streak.pop(net, None)
+            return
+        streak = prev[2] + 1 if prev is not None else 1
+        self.capped_streak[net] = (iteration, sig, streak)
+
+    def add_known_fail_seconds(self, iteration: int, seconds: float) -> None:
+        key = int(iteration)
+        self.known_fail_seconds[key] = self.known_fail_seconds.get(key, 0.0) + float(seconds)
+
+    def repeats_futile_rescue(self, net: int, signature: Any) -> bool:
+        """True when ``net``'s latest overflow-silent rescue resolved nothing
+        under this identical signature (issue #8486).  ``None`` never matches."""
+        return signature is not None and self.futile_rescue.get(int(net), None) == signature
+
+    def note_futile_rescue(self, net: int, signature: Any) -> None:
+        """Remember the seal a rescue that resolved nothing left ``net`` in."""
+        if signature is None:
+            self.futile_rescue.pop(int(net), None)
+        else:
+            self.futile_rescue[int(net)] = signature
+
+    def forget_failure(self, net: int) -> None:
+        """``net`` routed: drop every known-failure memo for it."""
+        for memo in (self.futile_rescue, self.capped_streak, self.no_path_seen):
+            memo.pop(int(net), None)
+
+    def known_failure_line(self) -> str:
+        """Per-iteration seconds spent on nets already known to fail."""
+        per_iter = ", ".join(
+            f"iter {it}: {secs:.1f}s" for it, secs in sorted(self.known_fail_seconds.items())
+        )
+        return (
+            f"Known-failing nets (issue #8486): "
+            f"{sum(self.known_fail_seconds.values()):.1f}s spent "
+            f"[{per_iter or 'none'}]; {len(self.backoffs)} search(es) backed off, "
+            f"{sum(self.futile_rescue_skips.values())} rescue(s) skipped as repeats"
+        )
 
     def note_no_relief_path(self, victim: int, iteration: int, signature: Any) -> None:
         """Record that ``victim``'s relief ended with no relief path."""

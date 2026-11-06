@@ -223,3 +223,27 @@ class TestDegenerateSegmentCommitCheck:
         from kicad_tools.router.link_router import _route_violates_foreign
 
         assert not _route_violates_foreign(self._route(2.0, 2.0), {}, 0.1)
+
+
+class TestSubResolutionSliverNotWritten:
+    """Issue #8495: a sliver that rounds to start == end must not be written."""
+
+    @staticmethod
+    def _written(segments, origin=(0.0, 0.0)):
+        from kicad_tools.router.link_router import LinkRoute, _append_route_nodes
+
+        r = LinkRoute(net_number=1, net_name="A", width=0.2, via_size=0.6, via_drill=0.3)
+        r.segments.extend(segments)
+        doc: list = []
+        _append_route_nodes(doc, r, origin)
+        return doc
+
+    def test_sliver_dropped(self):
+        assert self._written([(188.981, 69.0, 188.984, 69.002, "F.Cu")]) == []
+
+    def test_sliver_dropped_with_origin(self):
+        assert self._written([(8.981, 9.0, 8.984, 9.002, "F.Cu")], origin=(180.0, 60.0)) == []
+
+    def test_genuine_short_segment_kept(self):
+        assert len(self._written([(188.98, 69.0, 189.0, 69.0, "F.Cu")])) == 1
+        assert len(self._written([(188.98, 69.0, 188.99, 69.0, "F.Cu")])) == 1

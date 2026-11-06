@@ -11,9 +11,12 @@ Baseline measurement at HEAD (worst-of-3 across seeds 42/43/44 with
 - **Routed: 8/8 signal nets (100%)** -- LINE_A-D + NODE_A-D
 - **Connected pads: 34/34 (100%)** including GND/VCC via auto-pour
 - **DRC: 0 errors, 0 warnings** at ``jlcpcb-tier1`` profile
-- **Deterministic output**: 22 routes / 20 vias / 316.57mm total
+- **Deterministic output**: 22 routes / 20 vias / 316.39mm total
   length identical across seeds 42/43/44 -- this small 2-layer board
-  has fully converged.  (26 vias / 323.06mm before the Issue #6315
+  has fully converged.  (316.57mm before the Issue #8502 re-baseline:
+  #8387 cuts optimizer chains at interior vias, which re-shortens
+  NODE_A's leg past its through-via; no other net moved -- see the
+  #8502 note in ``test_routing_output_deterministic_across_seeds``.)  (26 vias / 323.06mm before the Issue #6315
   re-baseline, which resolves pad clearance cells by exact geometry, so
   traces pass a neighbour pin's halo on the same layer instead of
   changing layer around it.)  (24 vias / 321.75mm before the Issue #6272
@@ -946,12 +949,29 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     # reverted to the raw 112-segment router staircase.  The whole delta is
     # in NODE_D; nets 1-7 are identical per net and layer.  Prior pin
     # (22, 169, 20, 317.27).
+    #
+    # Re-baselined 2026-11-05 for Issue #8502 (#8386 / PR #8387, chains cut
+    # at interior vias): seeds 42/43/44 all yield (22, 80, 20, 316.39) --
+    # routes (22), vias (20) and via positions UNCHANGED, length
+    # 316.57 -> 316.39 (-0.18 mm), segments 83 -> 80.  Per-net diff at seed
+    # 42 (trace.py at 73fa8f3c2^ vs main): only NODE_A moved (88.894 ->
+    # 88.722 mm); LINE_A-D and NODE_B-D are identical per net.  NODE_A's
+    # F.Cu chain from the pad stub at (132.5, 98.0) to (139.5, 78.0) used to
+    # run past its through-via at (133.465, 97.4); it is now cut there and
+    # the via-to-(139.5, 78.0) leg is re-shortened (23.46 -> 22.10 mm of
+    # unique copper, -1.36 mm).  The net delta is only -0.18 mm because the
+    # split leaves the 1.18 mm pad-to-via stub (132.5, 98.0) -> (133.0,
+    # 97.5) -> (133.465, 97.4) emitted TWICE (two identical F.Cu segments,
+    # absent before #8387), and the reported total counts both copies.  The
+    # fix for that duplication (#8505) should re-pin to ~315.21.  Attributed
+    # by reverting only 73fa8f3c2's src/kicad_tools/router/optimizer/trace.py
+    # change: the old 316.57 pin then passes again.  Prior pin (22, 83, 20, 316.57).
     # Re-baselined 2026-11-06 for Issue #8505: two NODE_A routes both start
     # from the same pad and carry the same 1.18 mm pad-to-via stub; each was
     # optimized alone and kept its own copy, so the stub was emitted twice and
     # counted twice.  ``optimize_routes_grid_synced`` now drops a segment a
     # same-net route already kept.  Routes (22), vias (20) UNCHANGED, length
-    # 316.57 -> 315.21.  Prior pin 316.57 (316.39 on main after #8387).
+    # 316.57 -> 315.21.  Prior pin 316.39 (#8502 / #8387).
     EXPECTED_LENGTH = 315.21
     # Re-baselined 2026-09-14 for Issue #5201: the escape router
     # (``EscapeRouter.via_in_pad_supported``) previously resolved
@@ -1032,6 +1052,7 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     # Collapsing detouring chains removes segments (189 -> 169 observed).
     # #8253 (atomic chamfer, #8361): the LOWER bound is widened 150 -> 60.
     # NODE_D no longer falls back to the raw staircase (169 -> 83 observed).
+    # #8387 (chains cut at interior vias, #8502): 83 -> 80 observed, band unchanged.
     EXPECTED_SEGMENTS_RANGE = (60, 240)
     got_routes, got_segments, got_vias, got_length = ref
     exact = (got_routes, got_vias, got_length)

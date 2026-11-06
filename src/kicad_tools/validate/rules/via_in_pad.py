@@ -333,7 +333,7 @@ class ViaInPadRule(DRCRule):
             rule_id=VIA_AT_PAD_EDGE_RULE_ID,
             severity="warning",
             message=(
-                f"Via at ({via.position[0]:.3f}, {via.position[1]:.3f}) "
+                f"Via at ({via.position[0] + self._origin[0]:.3f}, {via.position[1] + self._origin[1]:.3f}) "
                 f"(drill {via.drill:.3f}mm) is at the edge of pad {ref_label} "
                 f"(net '{net_name}'): drill edge to the pad's mask aperture "
                 f"(copper + {margin:.3f}mm) is {gap_text}, below the "
@@ -396,7 +396,7 @@ class ViaInPadRule(DRCRule):
             rule_id="via_in_pad",
             severity="error",
             message=(
-                f"Via at ({via.position[0]:.3f}, {via.position[1]:.3f}) "
+                f"Via at ({via.position[0] + self._origin[0]:.3f}, {via.position[1] + self._origin[1]:.3f}) "
                 f"drilled inside pad {ref_label} (net '{net_name}'); "
                 f"current manufacturer profile does not support via-in-pad. "
                 f"Switch to jlcpcb-tier1 or pcbway, or move the via off the pad."
@@ -428,7 +428,7 @@ class ViaInPadRule(DRCRule):
             rule_id="via_in_pad_process_missing",
             severity="error",
             message=(
-                f"Via at ({via.position[0]:.3f}, {via.position[1]:.3f}) drilled "
+                f"Via at ({via.position[0] + self._origin[0]:.3f}, {via.position[1] + self._origin[1]:.3f}) drilled "
                 f"inside pad {ref_label} (net '{net_name}') requires a "
                 f"filled-and-capped via-in-pad process, but {detail}. A bare "
                 f"via_in_pad_supported=True capability flag is not sufficient -- "
@@ -461,7 +461,7 @@ class ViaInPadRule(DRCRule):
             rule_id="via_in_pad_process_ineligible",
             severity="error",
             message=(
-                f"Via at ({via.position[0]:.3f}, {via.position[1]:.3f}) drilled "
+                f"Via at ({via.position[0] + self._origin[0]:.3f}, {via.position[1] + self._origin[1]:.3f}) drilled "
                 f"inside pad {ref_label} (net '{net_name}') does not meet the "
                 f"declared process {process.process_id!r} ({process.name}) "
                 f"eligibility requirements: {reason_text}. Source: {process.source}"

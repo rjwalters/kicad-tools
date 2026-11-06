@@ -39,6 +39,8 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from kicad_tools.schema.pcb import _segment_dedup_key
+
 from ..violations import DRCResults, DRCViolation
 from .base import DRCRule
 
@@ -120,11 +122,21 @@ class PourSlotRule(DRCRule):
         if not zones:
             return
 
+        # Exact duplicate copies of a segment (same net, layer, width and
+        # unordered endpoints) are already reported by
+        # ``redundant_copper_duplicate``; collect each geometry once so a
+        # duplicated track does not report the same slot once per copy
+        # (Issue #8503).
         by_layer: dict[str, list[tuple[Any, tuple[float, float, float]]]] = defaultdict(list)
+        collected: set[Any] = set()
         for seg in pcb.segments:
             if seg.layer in zones and seg.width > 0 and seg.net_number:
+                key = _segment_dedup_key(seg.net_number, seg.layer, seg.start, seg.end, seg.width)
+                if key in collected:
+                    continue
                 u = _unit(seg)
                 if u is not None:
+                    collected.add(key)
                     by_layer[seg.layer].append((seg, u))
 
         for layer, items in by_layer.items():
