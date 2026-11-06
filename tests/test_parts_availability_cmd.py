@@ -209,6 +209,42 @@ def test_refetch_offline_fallback_keeps_cached_live_part():
     assert "Stock unverified: refresh live inventory" not in item.error
 
 
+def test_failed_refetch_does_not_clobber_cached_live_part_on_disk(tmp_path):
+    """Offline fallback during a refetch must not overwrite a cached live row."""
+    from datetime import datetime, timedelta
+    from unittest.mock import MagicMock
+
+    from kicad_tools.parts.cache import PartsCache
+    from kicad_tools.parts.lcsc import LCSCClient
+    from kicad_tools.parts.models import Part
+
+    cache = PartsCache(db_path=tmp_path / "parts.db")
+    live = Part(lcsc_part="C1", stock=5000, stock_source="live")
+    live.fetched_at = datetime.now() - timedelta(days=3)
+    cache.put(live)
+
+    offline = Part(lcsc_part="C1", stock=7, stock_source="offline_catalog")
+    catalog = MagicMock()
+    catalog.available = True
+    catalog.lookup_many.return_value = {"C1": offline}
+
+    client = LCSCClient(cache=cache, rate_limit=0)
+    with (
+        patch.object(client, "_fetch_part", side_effect=RuntimeError("403")),
+        patch.object(client, "_get_catalog", return_value=catalog),
+        patch.object(client, "_get_official_client", return_value=None),
+        patch("kicad_tools.parts.lcsc._requests_installed", return_value=True),
+    ):
+        for _ in range(2):
+            res = _checker(client).check_bom(_one_bom())
+            item = res.items[0]
+            assert item.quantity_available == 5000
+            assert "Live refetch failed" in item.error
+
+    row = cache.get("C1", ignore_expiry=True)
+    assert row.stock_source == "live" and row.stock == 5000
+
+
 def test_bypass_cache_forwarded_to_lookup_many():
     from unittest.mock import MagicMock
 
