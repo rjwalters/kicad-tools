@@ -149,6 +149,7 @@ def _website_leg(args: argparse.Namespace, result, out: Path) -> int:
 
 def run(args: argparse.Namespace) -> int:
     from ..parts.jlcpcb_api import JLCCredentials, JLCOpenAPIClient
+    from ..parts.lcsc_inventory import LCSCInventorySource
 
     if args.dry_run and args.website:
         # Issue #8465: a dry run never touches the website. Refuse before the
@@ -160,15 +161,13 @@ def run(args: argparse.Namespace) -> int:
         )
         return 2
     credentials = JLCCredentials.from_env()
-    inventory_source = None
+    inventory_source: JLCOpenAPIClient | LCSCInventorySource | None = None
     if credentials:
         inventory_source = JLCOpenAPIClient(credentials)
     else:
         # Issue #8539: no OpenAPI keys -> anonymous LCSC reads unblock the
         # dry-run / website / guided legs. They never satisfy --upload, which
         # keeps requiring credentials (enforced by run_submission).
-        from ..parts.lcsc_inventory import LCSCInventorySource
-
         inventory_source = LCSCInventorySource()
     upload = bool(args.upload)
     covered = [c for c in args.inventory_covered.split(",") if c.strip()]
