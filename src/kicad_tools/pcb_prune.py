@@ -1008,7 +1008,7 @@ def _try_snap(
         if _tilts(nk, *new):
             # A snap must not take a track off the 45-degree set; keep the end
             # and join it to the centre with an on-grid stub instead (#8437).
-            _add_grid_stub(plan, nk.layers[0], p, c, nk.radius * 2.0)
+            _add_grid_stub(model, removed, plan, nk.layers[0], p, c, nk.radius * 2.0)
             return
     moved = {k for k, _ in movers}
     touched = set(moved)
@@ -1083,8 +1083,9 @@ def _try_reanchor(
         return
     new = (c, n.b) if e == 0 else (n.a, c)
     if _tilts(n, *new):
-        if not _add_grid_stub(plan, n.layers[0], p, c, n.radius * 2.0):
-            plan.stubs.append((n.layers[0], c, p, n.radius * 2.0))
+        if not _add_grid_stub(model, removed, plan, n.layers[0], p, c, n.radius * 2.0):
+            if not _has_segment(model, removed, n.layers[0], c, p, n.radius * 2.0):
+                plan.stubs.append((n.layers[0], c, p, n.radius * 2.0))
         return
     old = (n.a, n.b)
     _set_end(n, e, c)
@@ -1126,18 +1127,54 @@ def _grid_stub(
     return pieces
 
 
+def _has_segment(
+    model: _NetModel,
+    removed: set[int],
+    layer: str,
+    a: tuple[float, float],
+    b: tuple[float, float],
+    width: float,
+) -> bool:
+    """Does the net already hold a live ``layer`` track of ``width`` joining
+    ``a`` and ``b`` (either direction, ends within ``CENTRE_TOL``)?
+
+    Compared by distance, not by ``_segment_dedup_key``: a 0.0125 mm-grid
+    coordinate can sit on a half-quantum of that key's rounding (x = 40.9125
+    planned vs 40.912499999999994 reloaded), so the bucket keys differ for the
+    same copper and the stub was re-added on every pass (issue #8501).
+    """
+    for j, o in enumerate(model.nodes):
+        if o.kind != "seg" or j in removed or layer not in o.layers:
+            continue
+        if abs(o.radius * 2.0 - width) > CENTRE_TOL:
+            continue
+        if (math.dist(o.a, a) <= CENTRE_TOL and math.dist(o.b, b) <= CENTRE_TOL) or (
+            math.dist(o.a, b) <= CENTRE_TOL and math.dist(o.b, a) <= CENTRE_TOL
+        ):
+            return True
+    return False
+
+
 def _add_grid_stub(
+    model: _NetModel,
+    removed: set[int],
     plan: NetPlan,
     layer: str,
     p: tuple[float, float],
     c: tuple[float, float],
     width: float,
 ) -> bool:
-    """Queue an on-grid stub from centre ``c`` to end ``p``; False if none exists."""
+    """Queue an on-grid stub from centre ``c`` to end ``p``; False if none exists.
+
+    Pieces the net already has are skipped (issue #8501), so a plan whose stub
+    is all present stays empty and ``plan_prune`` drops it.
+    """
     pieces = _grid_stub(p, c)
     if pieces is None:
         return False
     for a, b in pieces:
+        if _has_segment(model, removed, layer, a, b, width):
+            continue
         entry = (layer, a, b, width)
         if entry not in plan.stubs:  # coincident sharers reach here once each
             plan.stubs.append(entry)
