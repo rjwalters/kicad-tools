@@ -1007,7 +1007,12 @@ class ManufacturingPackage:
 
     @staticmethod
     def _ampacity_block(dru_path: Path) -> list[str]:
-        """Return the ampacity rule blocks of a ``.kicad_dru`` (empty if none)."""
+        """Return the ampacity rule blocks of a ``.kicad_dru`` (empty if none).
+
+        The regex assumes each rule spans exactly three lines (name, condition,
+        constraint), matching ``generate_dru`` in ``dru_generator.py``; change
+        them together.
+        """
         try:
             text = dru_path.read_text(encoding="utf-8")
         except OSError:
@@ -1024,12 +1029,14 @@ class ManufacturingPackage:
         try:
             from dataclasses import replace as _replace
 
+            from ..physics.stackup import Stackup
             from ..schema.pcb import PCB
-            from .preflight import resolve_ordered_copper
 
-            info = resolve_ordered_copper(PCB.load(str(self.pcb_path)), self.manufacturer)
-            outer = info.get("stackup_outer_oz")
-            inner = info.get("stackup_inner_oz")
+            # Read the declared stackup directly (as ``kct check`` does): the
+            # fab-profile-matched lookup returns nothing for layer counts the
+            # profile has no copper option for, silently reverting to 1 oz.
+            derived = Stackup.from_pcb(PCB.load(str(self.pcb_path))).outer_inner_copper_oz()
+            outer, inner = derived if derived is not None else (None, None)
             updates = {}
             if outer:
                 updates["outer_copper_oz"] = float(outer)

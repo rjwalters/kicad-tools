@@ -1425,13 +1425,10 @@ def dedupe_net_classes(
 
     classes: list[NetClassRouting] = []
     for entries in members.values():
-        targets = {nc.target_ampacity for _, nc in entries}
-        if len(targets) == 1:
-            # Uniform (or absent) target: a genuine class-level target.
-            classes.append(entries[0][1])
-            continue
-        # Mixed targets (#8527): a per-net target must never become a
-        # class-wide floor.  One net-scoped entry per distinct target.
+        # Always net-scoped (#8527): the sidecar declares ``target_ampacity``
+        # per NET only, and ``A.NetClass`` would match every net in the
+        # ``.kicad_pro`` netclass -- including ones the sidecar never lists.
+        # Nets sharing a target are grouped into one ``||`` rule.
         by_target: dict[float, list[str]] = {}
         proto: dict[float, NetClassRouting] = {}
         for net, nc in entries:
