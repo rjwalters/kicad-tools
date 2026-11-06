@@ -43,11 +43,11 @@ kct submit-jlcpcb <dir> --board <pcb> --schematic <sch> \
 ## Website leg (optional, after step 3)
 
 ```bash
-kct submit-jlcpcb <dir> --board <pcb> --schematic <sch> -o <out> --dry-run \
+kct submit-jlcpcb <dir> --board <pcb> --schematic <sch> -o <out> \
     --website --thickness-mm 1.6 --outer-copper-oz 1 [--inner-copper-oz 1] [--has-tht] \
     --match-mapping mapping.json
 ```
 
-Start Chrome yourself with `--remote-debugging-port=9222 --user-data-dir=<dedicated dir>` (Chrome 136+ refuses the default profile), sign in, open the quote page. The driver uploads the frozen gerbers, sets fields (aborting on any it cannot map exactly), enables PCBA, uploads BOM/CPL, then asks for the path of JLC's part-matching export. Any omitted, extra, substituted or unselected reference blocks the cart (`export/factory_selection.py`). The result is a second review page, `<out>/review-page-cart`.
+Start Chrome yourself with `--remote-debugging-port=9222 --user-data-dir=<dedicated dir>` (Chrome 136+ refuses the default profile), sign in, open the quote page. The driver uploads the frozen gerbers, sets fields (aborting on any it cannot map exactly), enables PCBA, uploads BOM/CPL, then asks for the path of JLC's part-matching export. Any omitted, extra, substituted or unselected reference blocks the cart (`export/factory_selection.py`). The result is a second review page, `<out>/review-page-cart`. `--website` is refused with `--dry-run` (a dry run never touches the website); without `--upload` nothing goes to the API. Only one driver may hold a debug browser at a time: a lock in `~/.kct/locks` (`--lock-dir`) refuses a second run on the same `--cdp-port` until the first exits, or until the lock is two hours old or its process is dead.
 
 **Kill switch:** `--guided` prints the same steps as a manual checklist, and any failed assertion drops into it. If JLC objects or restricts an account, disable the driver rather than patching it. Install the optional `playwright` package for the CDP attach. Selectors in `manufacturers/jlc_site_driver.py` are unverified against the live site until the first attended run.
