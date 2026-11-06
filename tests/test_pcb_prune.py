@@ -2044,3 +2044,85 @@ def test_offaxis_via_clear_of_the_trunk_is_not_a_loop(tmp_path):
     p = _offaxis_via_loop_board(tmp_path, via_dy=0.6)  # disc clears the body
     (model,) = _build_net_models(PCB.load(p)).values()
     assert not model.has_cycle()
+
+
+# Issue #8501: board 05's copper cleanup never converged.  A pad centre built
+# from footprint position + pad offset is exactly x = 40.9125, while the same
+# point reloaded from a segment end (absolute 154.4125 - origin 113.5) is
+# 40.912499999999994.  That is a half-quantum of ``_segment_dedup_key``, so the
+# bucket keys differ and ``add_trace`` appended a copy of a stub the board
+# already had (walked the other way); ``dedupe_copper`` then removed it, and
+# the stub-only plan was "accepted" on every pass.  Prune now compares
+# existing copper by distance and queues no stub the net already has.
+_ORIGIN = (113.5, 60.0)
+# the existing on-grid stub pieces, pad centre -> track end, walked backwards
+_REVERSED_STUB = [
+    ((154.9, 111.2), (154.7, 111.0)),
+    ((154.7, 111.0), (154.4125, 111.0)),
+]
+
+
+def _half_quantum_board(tmp_path: Path, stub) -> Path:
+    ox, oy = _ORIGIN
+    body = HEADER
+    body += (
+        f"  (gr_rect (start {ox} {oy}) (end {ox + 60} {oy + 60}) "
+        '(stroke (width 0.1) (type default)) (fill none) (layer "Edge.Cuts") '
+        '(uuid "edge-1"))\n'
+    )
+    # pad R.2 centre: (153.5 + 0.9125) - 113.5 == 40.9125 exactly
+    body += (
+        '  (footprint "X:R" (layer "F.Cu") (uuid "f-R") (at 153.5 111)\n'
+        '    (property "Reference" "R" (at 0 0 0) (layer "F.SilkS"))\n'
+        '    (pad "2" smd rect (at 0.9125 0) (size 1.025 1.4) (layers "F.Cu") '
+        '(net 1 "SIG"))\n'
+        "  )\n"
+    )
+    body += _fp("B", 160.0, 111.2)
+    # track end (41.4, 51.2) rests in the pad; snapping it onto the centre
+    # would tilt the horizontal track, so prune joins it with a stub (#8437)
+    body += _seg((160.0, 111.2), (154.9, 111.2))
+    body += "".join(_seg(a, b) for a, b in stub) + ")\n"
+    p = tmp_path / "b.kicad_pcb"
+    p.write_text(body)
+    return p
+
+
+def _keys(pcb: PCB) -> list:
+    from kicad_tools.schema.pcb import _segment_dedup_key
+
+    return sorted(
+        _segment_dedup_key(s.net_number, s.layer, s.start, s.end, s.width) for s in pcb.segments
+    )
+
+
+def test_existing_reversed_half_quantum_stub_is_not_re_added(tmp_path):
+    p = _half_quantum_board(tmp_path, _REVERSED_STUB)
+    before = PCB.load(p)
+    stored = [pt for s in before.segments for pt in (s.start, s.end) if abs(pt[0] - 40.9125) < 1e-9]
+    assert stored and all(pt[0] != 40.9125 for pt in stored)  # the half-quantum miss
+    for _ in range(2):  # prune is idempotent on its own output
+        pcb, res = _run(p)
+        assert res.accepted == []
+        assert not res.stats.get("stubs_added")
+        assert len(pcb.segments) == 3 and _keys(pcb) == _keys(before)
+        pcb.save(p)
+
+
+def test_only_the_missing_stub_piece_is_queued(tmp_path):
+    from kicad_tools.pcb_prune import plan_prune
+
+    p = _half_quantum_board(tmp_path, _REVERSED_STUB[1:])
+    plans = plan_prune(PCB.load(p))
+    stubs = [s for pl in plans for s in pl.stubs]
+    assert len(stubs) == 1
+    _layer, a, b, _w = stubs[0]
+    ends = {(round(a[0], 4), round(a[1], 4)), (round(b[0], 4), round(b[1], 4))}
+    assert ends == {(41.2, 51.0), (41.4, 51.2)}
+
+
+def test_missing_half_quantum_stub_is_still_added(tmp_path):
+    p = _half_quantum_board(tmp_path, [])
+    pcb, res = _run(p)
+    assert res.stats.get("stubs_added") == 2
+    assert len(pcb.segments) == 3
