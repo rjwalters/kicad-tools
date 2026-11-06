@@ -41,13 +41,13 @@ Issues currently being built (`loom:building`).
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#8476**: feat(submit-jlcpcb): attended website driver to a saved JLCPCB cart
+_None._
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-_None._
+- **#8476**: feat(submit-jlcpcb): attended website driver to a saved JLCPCB cart
 
 ## Proposed
 
@@ -84,8 +84,8 @@ _None._
 | Important | 0 |
 | Ready (`loom:issue`) | 0 |
 | In Progress (`loom:building`) | 1 |
-| PRs awaiting review | 1 |
-| Approved PRs awaiting merge | 0 |
+| PRs awaiting review | 0 |
+| Approved PRs awaiting merge | 1 |
 | Curated | 11 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 3 |
