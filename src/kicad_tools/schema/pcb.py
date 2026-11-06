@@ -6727,6 +6727,11 @@ class PCB:
         net = Net(number=next_num, name=net_name)
         self._nets[next_num] = net
 
+        # Issue #8550: KiCad 10 name-only boards have no top-level net table;
+        # pads reference nets by name. Keep the net in memory only.
+        if self._net_name_only_dialect:
+            return net
+
         # Add to the S-expression tree - insert after the last net, not at the end
         # KiCad requires nets to be declared before footprints
         net_sexp = SExp.list("net", next_num, net_name)
@@ -7436,7 +7441,11 @@ class PCB:
                         pad_sexp.remove(net_node)
 
                     # Add new net node
-                    new_net_node = SExp.list("net", net.number, net.name)
+                    # Issue #8550: name-only boards use (net "name") on pads.
+                    if self._net_name_only_dialect:
+                        new_net_node = SExp.list("net", net.name)
+                    else:
+                        new_net_node = SExp.list("net", net.number, net.name)
                     pad_sexp.append(new_net_node)
                     sexp_pad_found = True
 

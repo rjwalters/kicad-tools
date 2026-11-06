@@ -3448,3 +3448,49 @@ class TestNetlistByproductLocation:
 
         assert not list(sch.parent.glob("*-netlist.kicad_net"))
         assert {p.name for p in sch.parent.iterdir()} == before
+
+
+# --- Issue #8550: KiCad 10 name-only boards must keep (net "name") on pads ---
+
+NAME_ONLY_BOARD = """(kicad_pcb
+  (version 20260101)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal) (2 "B.Cu" signal))
+  (footprint "Capacitor_SMD:C_0402" (layer "F.Cu")
+    (at 10 10)
+    (property "Reference" "C1" (at 0 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net "OLD"))
+    (pad "2" smd rect (at 1 0) (size 1 1) (layers "F.Cu") (net "OLD"))
+  )
+)
+"""
+
+
+class TestNameOnlyDialectPadNets:
+    def _load(self, tmp_path):
+        from kicad_tools.schema.pcb import PCB
+
+        path = tmp_path / "b.kicad_pcb"
+        path.write_text(NAME_ONLY_BOARD)
+        return PCB.load(path), path
+
+    def test_assign_net_writes_name_only_and_no_net_table(self, tmp_path):
+        from kicad_tools.schema.pcb import PCB
+
+        pcb, path = self._load(tmp_path)
+        assert pcb._net_name_only_dialect
+        assert pcb.assign_net_to_footprint_pad("C1", "2", "GND")
+        out = tmp_path / "out.kicad_pcb"
+        pcb.save(out)
+        text = out.read_text()
+        assert '(net "GND")' in text
+        assert not any(c.name == "net" for c in PCB.load(out)._sexp.children)
+
+    def test_legacy_board_still_numeric(self):
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.create(width=50, height=50)
+        pcb.add_footprint("Capacitor_SMD:C_0805_2012Metric", "C1", 10, 10)
+        assert pcb.assign_net_to_footprint_pad("C1", "1", "GND")
+        assert any(c.name == "net" for c in pcb._sexp.children)
