@@ -2126,3 +2126,105 @@ def test_missing_half_quantum_stub_is_still_added(tmp_path):
     pcb, res = _run(p)
     assert res.stats.get("stubs_added") == 2
     assert len(pcb.segments) == 3
+
+
+# ---------------------------------------------------------------------------
+# --nets / --region scoping (issue #8547)
+# ---------------------------------------------------------------------------
+
+
+def _two_net_board(tmp_path: Path, x_offset_b: float = 0.0) -> Path:
+    """Two nets (SIG at y=100, SIG2 at y=120), each with a prunable loop."""
+
+    def net_block(net: int, name: str, y: float, dx: float) -> str:
+        pads = "".join(
+            f'  (footprint "X:P" (layer "F.Cu") (uuid "f-{name}{r}") (at {x + dx} {y})\n'
+            f'    (property "Reference" "{name}{r}" (at 0 0 0) (layer "F.SilkS"))\n'
+            f'    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net {net} "{name}"))\n'
+            "  )\n"
+            for r, x in (("A", 100), ("B", 110))
+        )
+        pts = [
+            ((100, y), (102, y)),
+            ((102, y), (103, y)),
+            ((103, y), (110, y)),
+            ((102, y), (102, y + 1)),
+            ((102, y + 1), (103, y + 1)),
+            ((103, y + 1), (103, y)),
+        ]
+        segs = "".join(
+            f"  (segment (start {a[0] + dx} {a[1]}) (end {b[0] + dx} {b[1]}) (width 0.2) "
+            f'(layer "F.Cu") (net {net}) (uuid "s-{next(_uid)}"))\n'
+            for a, b in pts
+        )
+        return pads + segs
+
+    body = HEADER.replace('(net 1 "SIG")', '(net 1 "SIG")\n  (net 2 "SIG2")')
+    body += net_block(1, "SIG", 100, 0.0) + net_block(2, "SIG2", 120, x_offset_b) + ")\n"
+    p = tmp_path / "two.kicad_pcb"
+    p.write_text(body)
+    return p
+
+
+def _seg_keys(pcb: PCB, net: int):
+    return sorted((s.start, s.end, s.layer) for s in pcb.segments if s.net_number == net)
+
+
+def test_nets_scope_changes_only_named_net(tmp_path):
+    p = _two_net_board(tmp_path)
+    full, full_res = prune_board(p, verify_drc=False)
+    assert {pl.net_name for pl in full_res.accepted} == {"SIG", "SIG2"}
+
+    pcb, res = prune_board(p, verify_drc=False, nets=["SIG"])
+    orig = PCB.load(p)
+    assert [pl.net_name for pl in res.accepted] == ["SIG"]
+    assert _seg_keys(pcb, 2) == _seg_keys(orig, 2)  # net 2 copper untouched
+    assert _seg_keys(pcb, 1) == _seg_keys(full, 1)  # net 1 pruned as in full run
+    assert len(_seg_keys(pcb, 1)) < len(_seg_keys(orig, 1))
+
+
+def test_region_applies_inside_and_skips_straddling_plans(tmp_path):
+    p = _two_net_board(tmp_path)
+    # Box covers net SIG (y 100..101) but not SIG2 (y 120..121).
+    region = (95.0, 95.0, 115.0, 105.0)
+    pcb, res = prune_board(p, verify_drc=False, region=region)
+    assert [pl.net_name for pl in res.accepted] == ["SIG"]
+    assert [pl.net_name for pl in res.region_skipped] == ["SIG2"]
+    orig = PCB.load(p)
+    assert _seg_keys(pcb, 2) == _seg_keys(orig, 2)
+
+    # A box that clips part of SIG's edits skips it entirely (never partial).
+    pcb2, res2 = prune_board(p, verify_drc=False, nets=["SIG"], region=(95, 95, 102.5, 105))
+    assert res2.accepted == [] and [pl.net_name for pl in res2.region_skipped] == ["SIG"]
+    assert _seg_keys(pcb2, 1) == _seg_keys(orig, 1)
+
+
+def _cli_prune(p: Path, *extra: str) -> int:
+    from kicad_tools.cli.commands.pcb import _run_prune_command
+    from kicad_tools.cli.parser import create_parser
+
+    args = create_parser().parse_args(
+        ["pcb", "prune", str(p), "--dry-run", "--no-drc", "--format", "json", *extra]
+    )
+    return _run_prune_command(args, p)
+
+
+def test_cli_nets_and_region_json_scope(tmp_path, capsys):
+    p = _two_net_board(tmp_path)
+    assert _cli_prune(p, "--nets", "SIG2", "--region", "95,115,115,125") == 0
+    out = json.loads(capsys.readouterr().out)
+    assert [n["net"] for n in out["nets"]] == ["SIG2"]
+    assert out["scope"] == {"nets": ["SIG2"], "region": [95.0, 115.0, 115.0, 125.0]}
+    assert out["region_skipped"] == []
+
+    assert _cli_prune(p, "--region", "95,95,115,105") == 0
+    out = json.loads(capsys.readouterr().out)
+    assert [n["net"] for n in out["region_skipped"]] == ["SIG2"]
+
+
+def test_cli_rejects_unknown_net_and_bad_region(tmp_path, capsys):
+    p = _two_net_board(tmp_path)
+    assert _cli_prune(p, "--nets", "NOPE") == 1
+    assert "NOPE" in capsys.readouterr().err
+    assert _cli_prune(p, "--region", "10,10,5,20") == 1
+    assert "x1 < x2" in capsys.readouterr().err
