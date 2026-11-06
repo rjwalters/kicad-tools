@@ -31,6 +31,7 @@ from ..parts.jlcpcb_api import (
     JLCDependencyError,
     JLCIncompleteResponseError,
     JLCIPNotWhitelistedError,
+    JLCNoInventorySourceError,
     JLCPermissionError,
     JLCQuotaError,
 )
@@ -691,6 +692,8 @@ def _observe(source: InventorySource, codes: list[str], read_at: str) -> dict:
     status = None
     try:
         result = source.get_component_inventory(codes) if codes else ComponentInventory((), None)
+    except JLCNoInventorySourceError:
+        status = "no-inventory-source"
     except JLCIncompleteResponseError:
         status = "incomplete-response"
     except (JLCIPNotWhitelistedError, JLCPermissionError, JLCAuthError):
@@ -712,7 +715,7 @@ def _observe(source: InventorySource, codes: list[str], read_at: str) -> dict:
         lcsc_part="",
         stock_source=result.source
         if isinstance(result.source, str)
-        and result.source in {"live", "offline", "offline_catalog", "unknown"}
+        and result.source in {"live", "lcsc-anonymous", "offline", "offline_catalog", "unknown"}
         else "unknown",
         fetched_at=result.observed_at if isinstance(result.observed_at, datetime) else None,
         from_cache=result.from_cache is True,
