@@ -49,7 +49,7 @@ categories. Only include work that was actually surfaced — do not invent tasks
   intentionally punted work.
 - **Documentation gaps** — missing/stale/wrong docs noticed while working.
 - **Upstream tool limitations** — a bug, missing feature, or rough edge in an
-  installed tool (Loom, Anvil, Repo Skills, kicad-tools) hit while using it.
+  installed tool (Loom, Anvil, Repo Skills, squad, kicad-tools) hit while using it.
 
 For each candidate capture: a one-line title, the context / where it came up in
 the session (repro if it's a bug), and suggested acceptance criteria.
@@ -127,6 +127,16 @@ Every candidate has to land in *some* repo. Build the routing table by reusing
   degrades to "source unknown" exactly like a fresh clone, not an error, and
   the slug can be read straight off `source_ref` (a `<git-url>@<tag-or-rev>`
   string) without a `git -C <source> config` lookup.
+
+  **squad's sidecar `source` is a release install, not a git clone.** When
+  the sidecar `source` resolves to a directory with no git remote (so
+  `git -C <source> config --get remote.origin.url` yields nothing) **and**
+  `.claude/skills/squad/install-metadata.json` names `package: @rjwalters/squad`,
+  resolve the slug from a recorded repository URL if the metadata has one, else
+  from the package name (`@scope/name` → `scope/name`, i.e. `rjwalters/squad`),
+  stating that it is inferred. The target is then not UNKNOWN. If `package` is
+  absent or names another package, it stays UNKNOWN. Full detail:
+  `/repo:update-tools` step 1.
 
   **Loom's sidecar is named differently, but still conforms to C6's ladder.**
   Where C6 step 1 names the sidecar `<tool-root>/.install-local.json`, Loom's
