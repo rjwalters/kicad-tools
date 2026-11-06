@@ -328,6 +328,14 @@ class TestCreateHatRegions:
         regions = create_hat_regions()
         assert len(regions) > 0
 
+    def test_default_size_matches_hat_spec(self):
+        """Default board is the 65 x 56.5 mm HAT outline (Issue #8529)."""
+        import inspect
+
+        params = inspect.signature(create_hat_regions).parameters
+        assert params["width"].default == 65.0
+        assert params["height"].default == 56.5
+
     def test_has_gpio_header(self):
         """Has GPIO header region."""
         regions = create_hat_regions()
