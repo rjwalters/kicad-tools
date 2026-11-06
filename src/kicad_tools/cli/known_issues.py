@@ -410,7 +410,10 @@ def match_warning_allowance(
     ``DRCViolation`` objects.  Errors and waived findings are not examined.
     """
     from kicad_tools.validate.known_warnings import (
+        LOCATED_WARNING_RULES,
+        NON_GATING_RULE_PREFIXES,
         _describe,
+        _field,
         _is_active_warning,
         warning_key,
     )
@@ -419,6 +422,13 @@ def match_warning_allowance(
     unaccepted: list[str] = []
     for violation in violations:
         if not _is_active_warning(violation):
+            continue
+        # Advisory rules (#8435) are neither accepted nor unaccepted; mirrors
+        # unaccepted_warnings so the two matchers cannot diverge (#8559).  A
+        # located rule (#8278) may be *recorded* by identity, so it keeps being
+        # matched against the allowance instead of skipped.
+        rule_id = str(_field(violation, "rule_id") or "")
+        if rule_id.startswith(NON_GATING_RULE_PREFIXES) and rule_id not in LOCATED_WARNING_RULES:
             continue
         key = warning_key(violation)
         if key is None or key not in allowance or key in seen:
