@@ -35,15 +35,13 @@ _None._
 
 Issues currently being built (`loom:building`).
 
-- **#8460**: pour-slots: re-pitch parallel-run buses as a group
-- **#8466**: feat(submit-jlcpcb): preflight, stock gate, API leg, dry-run and review page (part 1/3 of #8465)
+- **#8468**: feat(submit-jlcpcb): website leg, factory-match gate, cart hand-off (part 3/3 of #8465)
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#8464**: feat: re-pitch parallel pour-slot buses jointly
-- **#8470**: feat(submit-jlcpcb): add preflight, stock gate, API leg and review page workflow
+- **#8476**: feat(submit-jlcpcb): attended website driver to a saved JLCPCB cart
 
 ## Approved (Awaiting Merge)
 
@@ -65,8 +63,7 @@ Issues carrying `loom:curated`.
 - **#8422**: Live-verify --complete creepage rollback on a real mains board (follow-up to #8396) *(curated)*
 - **#8425**: Live-verify covered-track split (#8406) on pinned kicad-cli and #8368 board B *(curated)*
 - **#8434**: Changelog Fragment Check re-runs on every label change; Loom role label churn keeps it queued *(curated)*
-- **#8460**: pour-slots: re-pitch parallel-run buses as a group *(curated)*
-- **#8466**: feat(submit-jlcpcb): preflight, stock gate, API leg, dry-run and review page (part 1/3 of #8465) *(curated)*
+- **#8468**: feat(submit-jlcpcb): website leg, factory-match gate, cart hand-off (part 3/3 of #8465) *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -86,10 +83,10 @@ _None._
 | Very important | 0 |
 | Important | 0 |
 | Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 2 |
-| PRs awaiting review | 2 |
+| In Progress (`loom:building`) | 1 |
+| PRs awaiting review | 1 |
 | Approved PRs awaiting merge | 0 |
-| Curated | 12 |
+| Curated | 11 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 3 |
 <!-- guide:plan-body:end -->
