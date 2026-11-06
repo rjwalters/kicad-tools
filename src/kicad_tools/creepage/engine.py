@@ -425,6 +425,10 @@ class CreepagePair:
     # ``HV->island + island->other`` path is shorter than the direct gap and so
     # binds this row.  ``None`` (and omitted from JSON) when the direct gap binds.
     via_floating: str | None = None
+    # NB (#8548): when ``via_floating`` is set, ``witness`` still marks the
+    # direct HV<->other gap, not the island path; ``clearance_mm`` /
+    # ``creepage_mm`` are the (shorter) island-path values.  Chains through
+    # several islands are not searched (single hop only).
 
     @property
     def residual_passed(self) -> bool:
@@ -657,7 +661,7 @@ class CreepageReport:
                 "gate_passed": self.gate_passed,
                 "waived_count": waived_count,
                 "netless_items": self.netless_items,
-                "netless_treatment": "floating",
+                "netless_treatment": "floating_single_hop",
             }
         d: dict[str, Any] = {
             "board": self.board,
@@ -689,7 +693,7 @@ class CreepageReport:
             "gate_passed": self.gate_passed,
             "waived_count": waived_count,
             "netless_items": self.netless_items,
-            "netless_treatment": "floating",
+            "netless_treatment": "floating_single_hop",
         }
         # Per-net voltage mode (#4371): the requirement varies per pair, so the
         # report-level scalar requirement / working voltage are null (already set
@@ -877,6 +881,8 @@ def _net_labelled_geoms_on_layer(pcb: PCB, layer_name: str) -> dict[int, list[tu
     for fp in pcb.footprints:
         for pad in fp.pads:
             if layer_name in pad.layers or "*.Cu" in pad.layers:
+                if _is_copperless_hole(pad):
+                    continue
                 _add(pad.net_number, _pad_polygon(pad, fp), _pad_label(fp, pad))
 
     # Vias (circular copper barrel on every spanned layer)
@@ -930,6 +936,50 @@ def _floating_islands(items: Sequence[tuple[Any, str]]) -> list[tuple[Any, str]]
         labels = sorted(lab for g, lab in items if g.intersects(part))
         islands.append((part, labels[0] if labels else ""))
     return islands
+
+
+def _is_copperless_hole(pad: Any) -> bool:
+    """True for a bare ``np_thru_hole`` pad with no annular copper (#8548).
+
+    Mounting / isolation holes (``size`` <= ``drill``) carry no copper, so they
+    are neither a conductor nor a floating island.  An NPTH with an annular
+    ring (``size`` > ``drill``) does have copper and is kept.
+    """
+    if getattr(pad, "type", "") != "np_thru_hole":
+        return False
+    drill = getattr(pad, "drill", 0.0) or 0.0
+    size = getattr(pad, "size", (0.0, 0.0))
+    return min(size) <= drill + 1e-9
+
+
+def _island_hop(
+    geom_a: Any,
+    geom_b: Any,
+    islands: Sequence[tuple[Any, str]],
+    obstacles: list[Any],
+    clearance: float,
+    creepage: float,
+) -> tuple[float, float, str | None]:
+    """Best single-hop ``A -> island -> B`` path vs. the direct gap (#8548).
+
+    Returns ``(clearance, creepage, label)``: the (never larger) bounds and the
+    label of the island that binds either one, ``None`` when the direct gap wins.
+    """
+    eff_clr, eff_creep = clearance, creepage
+    label: str | None = None
+    for isl_geom, isl_label in islands:
+        # via_creep >= via_clear, so an island whose air gaps already sum to
+        # >= the direct creepage can improve neither bound.
+        if geom_a.distance(isl_geom) + isl_geom.distance(geom_b) >= creepage:
+            continue
+        c1, cr1 = surface_path_length(geom_a, isl_geom, obstacles, _bridged=True)
+        c2, cr2 = surface_path_length(isl_geom, geom_b, obstacles, _bridged=True)
+        if cr1 + cr2 < eff_creep - _PASS_TOLERANCE:
+            eff_creep, label = cr1 + cr2, isl_label
+        eff_clr = min(eff_clr, c1 + c2)
+        if label is None and c1 + c2 < clearance - _PASS_TOLERANCE:
+            label = isl_label
+    return eff_clr, eff_creep, label
 
 
 def _pad_label(fp: Any, pad: Any) -> str:
@@ -1130,6 +1180,7 @@ def _board_residual_after_same_footprint(
     net_b: int,
     obstacles: list[Any],
     layer_items: dict[str, Labelled] | None = None,
+    layer_islands: dict[str, list[tuple[Any, str]]] | None = None,
 ) -> tuple[float, float, str, tuple[Any, Any], dict[str, Any] | None] | None:
     """Smallest board-level ``(clearance, creepage, layer, (geom_a, geom_b), witness)`` for a ``same_footprint`` pair (#8232).
 
@@ -1205,6 +1256,11 @@ def _board_residual_after_same_footprint(
             if ga.is_empty or gb.is_empty:
                 continue
             clearance, creepage = surface_path_length(ga, gb, obstacles, _bridged=True)
+            # Floating-island hop (#8548): a net-0 conductor on the board path
+            # must not let a same_footprint waiver hide a shorter bridged path.
+            clearance, creepage, _via = _island_hop(
+                ga, gb, (layer_islands or {}).get(layer_name, ()), obstacles, clearance, creepage
+            )
             if best is None or creepage < best[1]:
                 best = (clearance, creepage, layer_name, (ga, gb), _witness(ga, gb, ia, ib))
     return best
@@ -1221,6 +1277,7 @@ def _attach_zone_residual(
     *,
     item_geoms: Callable[[str], dict[int, list[Any]]] | None = None,
     bound_mm: float = 0.0,
+    layer_islands: dict[str, list[tuple[Any, str]]] | None = None,
 ) -> tuple[float | None, float | None, str | None, tuple[float, float] | None]:
     """Residual ``(clearance, creepage, layer, witness)`` outside the attach zones (#8028).
 
@@ -1266,12 +1323,16 @@ def _attach_zone_residual(
             and _norm_net_key(name_a) in z.net_names
             and _norm_net_key(name_b) in z.net_names
         ]
+        islands_here = (layer_islands or {}).get(layer_name, ())
         if boxes:
             clip = unary_union(boxes)
             geom_a = geom_a.difference(clip)
             geom_b = geom_b.difference(clip)
         if not (geom_a.is_empty or geom_b.is_empty):
             clearance, creepage = surface_path_length(geom_a, geom_b, obstacles, _bridged=True)
+            clearance, creepage, _via = _island_hop(
+                geom_a, geom_b, islands_here, obstacles, clearance, creepage
+            )
             pa, pb = nearest_points(geom_a, geom_b)
             _record(layer_name, clearance, creepage, ((pa.x + pb.x) / 2.0, (pa.y + pb.y) / 2.0))
         if item_geoms is None or not boxes:
@@ -1280,15 +1341,22 @@ def _attach_zone_residual(
         for ia in items.get(net_a, ()):
             for ib in items.get(net_b, ()):
                 pa, pb = nearest_points(ia, ib)
-                if pa.distance(pb) >= bound_mm:
-                    continue
-                if any(
-                    z.exempts(pa.x, pa.y, name_a, name_b, layer_name)
-                    and z.exempts(pb.x, pb.y, name_a, name_b, layer_name)
-                    for z in zones
-                ):
-                    continue
                 clearance, creepage = surface_path_length(ia, ib, obstacles, _bridged=True)
+                clearance, creepage, via = _island_hop(
+                    ia, ib, islands_here, obstacles, clearance, creepage
+                )
+                if via is None:
+                    # Direct gap binds: the zone exemption / bound filter apply.
+                    if pa.distance(pb) >= bound_mm:
+                        continue
+                    if any(
+                        z.exempts(pa.x, pa.y, name_a, name_b, layer_name)
+                        and z.exempts(pb.x, pb.y, name_a, name_b, layer_name)
+                        for z in zones
+                    ):
+                        continue
+                elif min(creepage, clearance) >= bound_mm:
+                    continue
                 _record(layer_name, clearance, creepage, ((pa.x + pb.x) / 2.0, (pa.y + pb.y) / 2.0))
     if best is None:
         return None, None, None, None
@@ -1981,7 +2049,15 @@ def compute_creepage_census(
     layer_islands: dict[str, list[tuple[Any, str]]] = {
         name: _floating_islands(li.get(0, [])) for name, li in layer_items.items()
     }
-    report.netless_items = sum(len(li.get(0, [])) for li in layer_items.values())
+    # Distinct items (a THT net-0 pad appears on every copper layer): dedupe by
+    # label + footprint-independent bounds.
+    report.netless_items = len(
+        {
+            (lab, tuple(round(v, 4) for v in g.bounds))
+            for li in layer_items.values()
+            for g, lab in li.get(0, [])
+        }
+    )
 
     # Per-layer copper ITEMS (pads/segments/vias/fills), built lazily for the
     # attach-zone residual's cross terms (#8292).
@@ -2023,20 +2099,14 @@ def compute_creepage_census(
                     hv_geom, other_geom, obstacles, _bridged=True
                 )
                 # Single-hop floating-island path (#8548): HV -> island -> other.
-                via_label: str | None = None
-                eff_clr, eff_creep = clearance, creepage
-                for isl_geom, isl_label in layer_islands.get(layer_name, ()):
-                    # via_creep >= via_clear, so an island whose air gaps already
-                    # sum to >= the direct creepage can improve neither bound.
-                    if hv_geom.distance(isl_geom) + isl_geom.distance(other_geom) >= creepage:
-                        continue
-                    c1, cr1 = surface_path_length(hv_geom, isl_geom, obstacles, _bridged=True)
-                    c2, cr2 = surface_path_length(isl_geom, other_geom, obstacles, _bridged=True)
-                    if cr1 + cr2 < eff_creep - _PASS_TOLERANCE:
-                        eff_creep, via_label = cr1 + cr2, isl_label
-                    eff_clr = min(eff_clr, c1 + c2)
-                    if via_label is None and c1 + c2 < clearance - _PASS_TOLERANCE:
-                        via_label = isl_label
+                eff_clr, eff_creep, via_label = _island_hop(
+                    hv_geom,
+                    other_geom,
+                    layer_islands.get(layer_name, ()),
+                    obstacles,
+                    clearance,
+                    creepage,
+                )
                 key = (hv_num, other_num)
                 prev = best.get(key)
                 if prev is None or eff_creep < prev[1]:
@@ -2075,6 +2145,7 @@ def compute_creepage_census(
             obstacles,
             item_geoms=_item_geoms,
             bound_mm=max(min_mm or 0.0, _rc),
+            layer_islands=layer_islands,
         )
         return {
             "residual_clearance_mm": r_clr,
@@ -2114,7 +2185,7 @@ def compute_creepage_census(
             # board-level approach on the same pair as its own row so a waiver
             # of the same_footprint row cannot hide it.
             board_row = _board_residual_after_same_footprint(
-                layer_unions, fp_index, hv_num, other_num, obstacles, layer_items
+                layer_unions, fp_index, hv_num, other_num, obstacles, layer_items, layer_islands
             )
             if board_row is not None:
                 # #8332: classify the residual row like a primary board minimum.

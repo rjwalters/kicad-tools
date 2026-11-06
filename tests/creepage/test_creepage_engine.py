@@ -33,11 +33,13 @@ from kicad_tools.creepage.engine import (
 from .fixtures import (
     board_mains_named_source,
     board_net0_island_source,
+    board_net0_npth_source,
     board_no_hv_source,
     board_same_footprint_attach_residual_source,
     board_same_footprint_fail_source,
     board_same_footprint_hides_board_source,
     board_same_footprint_only_source,
+    board_samefp_with_island_source,
     board_source,
 )
 
@@ -1267,7 +1269,7 @@ def test_floating_island_between_hv_and_lv_fails_pair(tmp_path):
     assert report.netless_items == 1
     out = report.to_dict()
     assert out["netless_items"] == 1
-    assert out["netless_treatment"] == "floating"
+    assert out["netless_treatment"] == "floating_single_hop"
     assert out["pair_count"] == len(report.pairs)
 
 
@@ -1296,4 +1298,42 @@ def test_no_netless_copper_reports_zero(tmp_path):
     report = _island_report(tmp_path, [])
     assert report.netless_items == 0
     assert report.to_dict()["netless_items"] == 0
-    assert report.to_dict()["netless_treatment"] == "floating"
+    assert report.to_dict()["netless_treatment"] == "floating_single_hop"
+
+
+def test_samefp_waiver_does_not_hide_island_path_on_board_row(tmp_path):
+    # Direct board gap 7.4 mm passes min 6, but the island path is 5.4 mm (#8548).
+    pcb = _load(tmp_path, board_samefp_with_island_source())
+    hv = resolve_hv_nets(pcb, "HV", _hv_map())
+    report = compute_creepage_census(pcb, hv, min_mm=6.0)
+    gnd = [p for p in report.pairs if p.net_b == "GND"]
+    same = [p for p in gnd if p.relationship == "same_footprint"]
+    board = [p for p in gnd if p.relationship != "same_footprint"]
+    assert same and board
+    assert board[0].creepage_mm == pytest.approx(5.4, abs=1e-3)
+    assert not board[0].passed
+    for p in same:
+        p.waived = True
+    assert report.gate_passed is False
+
+
+def test_bare_npth_hole_is_not_a_floating_conductor(tmp_path):
+    pcb = _load(tmp_path, board_net0_npth_source(copper_ring=False))
+    hv = resolve_hv_nets(pcb, "HV", _hv_map())
+    report = compute_creepage_census(pcb, hv, min_mm=5.0)
+    pair = _conductor_pair(report, "GND")
+    assert pair.creepage_mm == pytest.approx(6.0, abs=1e-3)
+    assert pair.passed
+    assert "via_floating" not in pair.to_dict()
+    assert report.netless_items == 0
+
+
+def test_npth_with_annular_copper_is_a_floating_conductor(tmp_path):
+    # Ring edges at x=111.8 / 116.2: 0.8 + ... bridged path shorter than 6 mm.
+    pcb = _load(tmp_path, board_net0_npth_source(copper_ring=True))
+    hv = resolve_hv_nets(pcb, "HV", _hv_map())
+    report = compute_creepage_census(pcb, hv, min_mm=5.0)
+    pair = _conductor_pair(report, "GND")
+    assert pair.creepage_mm == pytest.approx(0.8 + 0.8, abs=1e-2)
+    assert not pair.passed
+    assert report.netless_items == 1

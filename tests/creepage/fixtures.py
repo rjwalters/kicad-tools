@@ -453,3 +453,42 @@ def board_net0_island_source(islands: list[tuple[float, float]]) -> str:
         parts.append(_footprint(f"FID{i}", x, y, 0, ""))
     parts.append(")\n")
     return "".join(parts)
+
+
+def board_samefp_with_island_source() -> str:
+    """Same-footprint pair plus a board path bridged by a net-0 island (#8548).
+
+    ``FET1`` holds an ``L_MAINS`` pad and a ``GND`` pad 0.4 mm apart (the
+    waivable same_footprint minimum).  Separately ``U1`` (``L_MAINS``, edge
+    x=110.3) and ``U2`` (``GND``, edge x=117.7) are 7.4 mm apart with a 2x2 mm
+    net-0 pad centred between them (2.7 mm to each side, 5.4 mm via the island).
+    """
+    parts = [_SAMEFP_HEADER, _OUTLINE]
+    parts.append(
+        _footprint2("FET1", 135, 102, [("1", 1, "L_MAINS", 0, 0), ("2", 2, "GND", 0, 1.0)])
+    )
+    parts.append(_footprint2("U1", 110, 110, [("1", 1, "L_MAINS", 0, 0)]))
+    parts.append(_footprint2("U2", 118, 110, [("1", 2, "GND", 0, 0)]))
+    parts.append(_footprint("FID1", 114, 110, 0, ""))
+    parts.append(")\n")
+    return "".join(parts)
+
+
+def board_net0_npth_source(*, copper_ring: bool) -> str:
+    """HV and GND pads 6 mm apart (edge-to-edge) with a 3.2 mm NPTH hole between (#8548).
+
+    With ``copper_ring`` False the hole is bare (``size == drill``): no copper,
+    so it must not act as a floating conductor.  With True it has an annular
+    ring (``size`` 4.4 > drill 3.2) on net 0, which IS copper.
+    """
+    size = 4.4 if copper_ring else 3.2
+    parts = [_HEADER, _OUTLINE]
+    parts.append(_footprint("U1", 110, 110, 1, "L_MAINS"))
+    parts.append(_footprint("U2", 118, 110, 2, "GND"))
+    parts.append(
+        '  (footprint "test:mount" (layer "F.Cu") (at 114 110)\n'
+        f'    (pad "" np_thru_hole circle (at 0 0) (size {size} {size}) (drill 3.2)'
+        ' (layers "*.Cu" "*.Mask"))\n  )\n'
+    )
+    parts.append(")\n")
+    return "".join(parts)
