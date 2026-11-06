@@ -38,6 +38,7 @@ from kicad_tools.library.generators import (
     create_pin_header,
     create_qfn,
     create_qfp,
+    create_rpi_hat,
     create_soic,
     create_sot,
 )
@@ -89,6 +90,12 @@ GENERATORS = {
         "function": create_pin_header,
         "params": ["pins", "rows", "pitch"],
         "example": "kct footprint generate pin-header --pins 10 --rows 2",
+    },
+    "rpi-hat": {
+        "description": "Raspberry Pi HAT: 2x20 header + four mounting holes (one rigid part)",
+        "function": create_rpi_hat,
+        "params": ["keepout_diameter"],
+        "example": "kct footprint generate rpi-hat --output RPi_HAT.kicad_mod",
     },
 }
 
@@ -188,6 +195,9 @@ def build_footprint(footprint_type: str, params: dict[str, Any]):
     if footprint_type == "dip":
         require("pins", "--pins", "DIP")
         return create_dip(pins=p("pins"), pitch=p("pitch"), row_spacing=p("row_spacing"), name=name)
+    if footprint_type == "rpi-hat":
+        keepout = p("keepout_diameter")
+        return create_rpi_hat(keepout_diameter=6.2 if keepout is None else keepout, name=name)
     # pin-header
     require("pins", "--pins", "pin-header")
     return create_pin_header(
@@ -212,6 +222,7 @@ def _generate_from_args(footprint_type: str, args) -> int:
             "variant",
             "row_spacing",
             "rows",
+            "keepout_diameter",
             "name",
         )
     }
@@ -256,6 +267,11 @@ def generate_dip(args) -> int:
 def generate_pin_header(args) -> int:
     """Generate pin header footprint."""
     return _generate_from_args("pin-header", args)
+
+
+def generate_rpi_hat(args) -> int:
+    """Generate Raspberry Pi HAT footprint (2x20 header + four mounting holes)."""
+    return _generate_from_args("rpi-hat", args)
 
 
 def _output_footprint(fp, args) -> int:
@@ -443,6 +459,23 @@ def main(argv: list[str] | None = None) -> int:
     )
     header_parser.set_defaults(func=generate_pin_header)
 
+    # Raspberry Pi HAT subcommand
+    hat_parser = subparsers.add_parser(
+        "rpi-hat", help="Generate Raspberry Pi HAT footprint (2x20 header + 4 mounting holes)"
+    )
+    hat_parser.add_argument(
+        "--keepout-diameter",
+        type=float,
+        dest="keepout_diameter",
+        help="Copper keep-out diameter around each mounting hole in mm (default: 6.2, the spec minimum land; 0=none)",
+    )
+    hat_parser.add_argument("--name", help="Custom footprint name")
+    hat_parser.add_argument("-o", "--output", help="Output file path")
+    hat_parser.add_argument(
+        "--json", action="store_true", help="Output as JSON (same as --format json)"
+    )
+    hat_parser.set_defaults(func=generate_rpi_hat)
+
     # Canonical machine-output spelling on every shape subparser
     # (--format json; the per-shape --json flags above are legacy aliases).
     # See docs/reference/machine-output.md.
@@ -454,6 +487,7 @@ def main(argv: list[str] | None = None) -> int:
         sot_parser,
         dip_parser,
         header_parser,
+        hat_parser,
     ):
         add_format_flag(shape_parser)
 
