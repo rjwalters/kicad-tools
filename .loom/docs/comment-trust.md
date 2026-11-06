@@ -123,7 +123,7 @@ per-repo list extends the roster and neither can remove the other. The
 association, Apps and self rules are unchanged.
 
 - Source: `fleet/admins.json` in the store named by `fleet.repo` /
-  `LOOM_FLEET_REPO` (proposed contract; fleet-gitops publishes it).
+  `LOOM_FLEET_REPO` (proposed contract; the fleet state store publishes it).
 - Cache: resolved once per process per store and kept for
   `forge.fleetAdminsTtlSecs` (default 300). A stale on-disk snapshot is served
   only while younger than 24h, else the roster is unavailable.
