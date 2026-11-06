@@ -693,3 +693,19 @@ class TestViaAtPadEdge:
         rule = ViaInPadRule(report_pad_edge=True)
         monkeypatch.setattr(rule, "_pofv_eligible", lambda *a, **k: True)
         assert rule.check(_edge_board(10.65), _EdgeRules()).violations == []
+
+
+class TestMessageFrameMatchesOrigin:
+    """Issue #8493: message coordinates use the sheet-absolute frame."""
+
+    def test_pad_edge_message_adds_board_origin(self):
+        pcb = _edge_board(10.65)
+        pcb.board_origin = (68.5, 55.0)
+        results = _EDGE.check(pcb, _EdgeRules())
+        (v,) = _by_rule(results, "via_at_pad_edge")
+        assert "Via at (79.150, 65.000)" in v.message
+
+    def test_zero_origin_message_unchanged(self):
+        results = _EDGE.check(_edge_board(10.65), _EdgeRules())
+        (v,) = _by_rule(results, "via_at_pad_edge")
+        assert "Via at (10.650, 10.000)" in v.message

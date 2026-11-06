@@ -971,6 +971,10 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
+    # Refusal anchors are board-relative internally; report sheet-absolute
+    # coordinates like ``kct check`` / kicad-cli DRC (Issue #8493).
+    origin_x, origin_y = getattr(pcb, "board_origin", None) or (0.0, 0.0)
+
     result: dict[str, Any] = {
         "input": str(pcb_path),
         "output": str(output_path) if not dry_run else None,
@@ -988,8 +992,8 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
         "anchors_refused": outcome.refused_count,
         "refused": [
             {
-                "x": round(r.x, 4),
-                "y": round(r.y, 4),
+                "x": round(r.x + origin_x, 4),
+                "y": round(r.y + origin_y, 4),
                 "reason": r.reason,
                 "rule": r.rule,
                 "required_mm": round(r.required_mm, 4),
@@ -1086,7 +1090,9 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
                 if r.rule
                 else ""
             )
-            print(f"    refused at ({r.x:.2f}, {r.y:.2f}): {r.reason}{detail}")
+            print(
+                f"    refused at ({r.x + origin_x:.2f}, {r.y + origin_y:.2f}): {r.reason}{detail}"
+            )
         if not dry_run and outcome.placed_count:
             print()
             print(

@@ -3390,7 +3390,11 @@ def run_selected_checks(
             check_netclass_clearance_copper,
         )
 
-        return check_netclass_clearance_copper(pcb_path, checker.pcb, checker.design_rules)
+        # The rule reports board-relative locations; convert to sheet-absolute
+        # like every ``checker.check_*`` method (Issue #8493).
+        return checker._absolutize(
+            check_netclass_clearance_copper(pcb_path, checker.pcb, checker.design_rules)
+        )
 
     # Issue #8435: pour-slot advisory.  CLI-level closure because the netclass
     # clearances come from the sibling ``.kicad_pro`` (needs the PCB *path*).
