@@ -14041,6 +14041,18 @@ class Autorouter:
                     else:
                         iter_per_net_cap = derive_iter_per_net_cap(per_net_timeout, iter_remaining)
 
+                    # Issue #8486: the seal each still-unrouted net enters this
+                    # iteration under.  Keys the per-net search back-off below
+                    # and drops every known-failure memo of a net routed since.
+                    ripup_guard.begin_iteration(
+                        iteration,
+                        {
+                            n: self._relief_witness_signature(n, net_routes)
+                            for n in net_order
+                            if not net_routes.get(n) and len(pads_by_net.get(n, [])) >= 2
+                        },
+                    )
+
                     # Issue #2540 + #2803: Snapshot state at top of each iteration
                     # BEFORE any destructive ``rip_up_nets`` call.  If a
                     # mid-iteration timeout escapes the per-net reroute loop, the
@@ -15422,7 +15434,9 @@ class Autorouter:
                             def route_fn(
                                 net: int, pf: float, _cap: float | None = iter_per_net_cap
                             ) -> list[Route]:
-                                return self._route_net_negotiated(net, pf, per_net_timeout=_cap)
+                                return self._route_net_known_failure_aware(
+                                    net, pf, _cap, ripup_guard, iteration
+                                )
 
                             def mark_fn(route: Route) -> None:
                                 self.grid.mark_route_usage(route)
@@ -15457,8 +15471,8 @@ class Autorouter:
                                     f"    Re-routing net {i + 1}/{len(nets_to_reroute)}: {net_name}... ({elapsed_str()})"
                                 )
 
-                                routes = self._route_net_negotiated(
-                                    net, present_factor, per_net_timeout=iter_per_net_cap
+                                routes = self._route_net_known_failure_aware(
+                                    net, present_factor, iter_per_net_cap, ripup_guard, iteration
                                 )
                                 if routes:
                                     net_routes[net] = routes
@@ -15807,62 +15821,11 @@ class Autorouter:
                                         timed_out = True
                                         break
 
-                                    # 1) Targeted rip-up of direct-line blockers
-                                    # (same Bresenham scan as the overflow==0
-                                    # chain; transactional inside targeted_ripup).
-                                    pads_for_net = pads_by_net.get(failed_net, [])
-                                    blocking_nets: set[int] = set()
-                                    for j in range(len(pads_for_net) - 1):
-                                        blockers = neg_router.find_blocking_nets_for_connection(
-                                            pads_for_net[j], pads_for_net[j + 1]
-                                        )
-                                        blocking_nets.update(blockers)
-                                    # Issue #5913 (Epic #5508 Phase 3a): an
-                                    # overflow-silent hard failure is the
-                                    # access-loss shape's natural home -- a
-                                    # sealed pad emits no overflow at all.
-                                    blocking_nets |= self._access_loss_blockers(
+                                    # Issue #8486: skip a rescue that already
+                                    # resolved nothing under this identical seal.
+                                    if self._silent_rescue_memoized(
                                         failed_net,
-                                        net_routes,
-                                        flush_print,
-                                        ripup_history=ripup_history,
-                                        max_ripups_per_net=max_ripups_per_net,
-                                        guard=ripup_guard,
-                                    )
-                                    if blocking_nets:
-
-                                        def _mark_route_silent(route: Route) -> None:
-                                            self._mark_route(route)
-
-                                        if self._guarded_targeted_ripup(
-                                            neg_router,
-                                            ripup_guard,
-                                            failed_net=failed_net,
-                                            blocking_nets=blocking_nets,
-                                            net_routes=net_routes,
-                                            pads_by_net=pads_by_net,
-                                            present_cost_factor=present_factor,
-                                            mark_route_callback=_mark_route_silent,
-                                            ripup_history=ripup_history,
-                                            max_ripups_per_net=max_ripups_per_net,
-                                            per_net_timeout=iter_per_net_cap,
-                                            log=flush_print,
-                                        ):
-                                            silent_resolved += 1
-                                            continue
-
-                                    # 2) Relief rescue (clearance-halo seals the
-                                    # Bresenham scan cannot see).
-                                    if (
-                                        relief_probe_attempts.get(failed_net, 0)
-                                        >= max_relief_probes_per_net
-                                    ):
-                                        continue
-                                    relief_probe_attempts[failed_net] = (
-                                        relief_probe_attempts.get(failed_net, 0) + 1
-                                    )
-                                    if self._relief_rescue(
-                                        failed_net,
+                                        iteration,
                                         neg_router,
                                         net_routes,
                                         pads_by_net,
@@ -15870,9 +15833,13 @@ class Autorouter:
                                         iter_per_net_cap,
                                         flush_print,
                                         elapsed_str,
-                                        deadline=relief_deadline,
+                                        ripup_guard=ripup_guard,
+                                        ripup_history=ripup_history,
+                                        max_ripups_per_net=max_ripups_per_net,
+                                        relief_probe_attempts=relief_probe_attempts,
+                                        max_relief_probes_per_net=max_relief_probes_per_net,
+                                        relief_deadline=relief_deadline,
                                         deterministic_rescue=deterministic_rescue,
-                                        guard=ripup_guard,
                                     ):
                                         silent_resolved += 1
                                 if silent_resolved > 0:
@@ -16263,6 +16230,13 @@ class Autorouter:
         print(f"  Total time: {total_elapsed:.1f}s")
         # Issue #6363: make the #6342 guard's activity visible in the log.
         print(f"  {ripup_guard.summary_line()}")
+        # Issue #8486: what nets already known to fail still cost, per iteration.
+        if (
+            ripup_guard.known_fail_seconds
+            or ripup_guard.backoffs
+            or ripup_guard.futile_rescue_skips
+        ):
+            print(f"  {ripup_guard.known_failure_line()}")
         if timed_out:
             print("  ⚠ Stopped due to timeout - returning best partial result")
             # Issue #6329: the `--deterministic-budget` banner promises this
@@ -17346,7 +17320,17 @@ class Autorouter:
         return min(cands, key=lambda t: t[0])
 
     def _relief_witness_signature(self, failed_net: int, net_routes: dict[int, list[Route]]):
-        """Identity of ``failed_net``'s current access-loss seal, or ``None``."""
+        """Identity of ``failed_net``'s current seal, or ``None``.
+
+        The access-loss witness's ``(stranded pads, closing refs)`` when a
+        terminal is sealed in.  Issue #8486: when no terminal is sealed (no
+        witness -- a net that fails for corridor reasons, e.g. the narrow
+        signals on the reported board whose relief logged "no closing nets
+        resolved"), the copper fingerprint of :meth:`_failure_neighbourhood_print`
+        instead, so the futile-relief / futile-rescue memos and the search
+        back-off can key on those nets too.  ``None`` only on an error, a
+        net without terminals, or when no gate exists.
+        """
         try:
             gate = self._access_loss_gate()
             if gate is None:
@@ -17355,9 +17339,228 @@ class Autorouter:
             # Non-recording: a diagnostic must not add witnesses for rips that
             # never happened nor spend the shared targeting budget (#8248).
             witness = gate.peek_blockers_for(failed_net, rippable)
-            return witness.signature() if witness is not None else None
+            if witness is not None:
+                return ("seal", witness.signature())
+            fingerprint = self._failure_neighbourhood_print(failed_net, net_routes)
+            return None if fingerprint is None else ("copper", fingerprint)
         except Exception:  # pragma: no cover - diagnostics must never break a rescue
             return None
+
+    #: Issue #8486: margin (mm) added around a failed net's terminal bounding
+    #: box when fingerprinting the copper that could block it.
+    FAILURE_NEIGHBOURHOOD_MARGIN_MM = 3.0
+
+    def _failure_neighbourhood_print(
+        self, failed_net: int, net_routes: dict[int, list[Route]]
+    ) -> tuple | None:
+        """Exact geometry of the foreign copper near ``failed_net`` (#8486).
+
+        Every other net's segment and via whose extent meets the bounding box
+        of ``failed_net``'s terminals grown by
+        :attr:`FAILURE_NEIGHBOURHOOD_MARGIN_MM`, as a sorted tuple.  Any rip,
+        re-route or nudge of copper in that window changes it, so a memo keyed
+        on it is never reused across a change that could open a path there.
+        ``None`` when the net has no terminals.
+        """
+        keys = self.nets.get(int(failed_net)) or []
+        pads = [self.pads[k] for k in keys if k in self.pads]
+        if not pads:
+            return None
+        m = self.FAILURE_NEIGHBOURHOOD_MARGIN_MM
+        x0 = min(p.x - p.width / 2 for p in pads) - m
+        x1 = max(p.x + p.width / 2 for p in pads) + m
+        y0 = min(p.y - p.height / 2 for p in pads) - m
+        y1 = max(p.y + p.height / 2 for p in pads) + m
+        items: list[tuple] = []
+        for net, routes in net_routes.items():
+            if net == failed_net or not routes:
+                continue
+            for route in routes:
+                for s in route.segments:
+                    h = s.width / 2
+                    if (
+                        min(s.x1, s.x2) - h <= x1
+                        and max(s.x1, s.x2) + h >= x0
+                        and min(s.y1, s.y2) - h <= y1
+                        and max(s.y1, s.y2) + h >= y0
+                    ):
+                        items.append((net, "s", str(s.layer), s.x1, s.y1, s.x2, s.y2, s.width))
+                for v in route.vias:
+                    h = v.diameter / 2
+                    if v.x - h <= x1 and v.x + h >= x0 and v.y - h <= y1 and v.y + h >= y0:
+                        items.append((net, "v", str(v.layers), v.x, v.y, v.diameter, 0.0, 0.0))
+        return tuple(sorted(items))
+
+    def _route_net_known_failure_aware(
+        self,
+        net: int,
+        present_factor: float,
+        cap: float | None,
+        guard: RipupCycleGuard,
+        iteration: int,
+    ) -> list[Route]:
+        """The main reroute's negotiated search, with the #8486 back-off.
+
+        A net that ran to its per-net cap with no path in consecutive
+        iterations under an unchanged entry seal gets a shrinking cap
+        (:meth:`RipupCycleGuard.search_cap`); the outcome is fed back so the
+        streak resets the moment the net routes, fails fast, or its seal
+        changes.  ``cap is None`` (the deterministic arm) is passed through.
+        """
+        used = guard.search_cap(net, iteration, cap)
+        if used is not None and cap is not None and used < cap:
+            print(
+                f"      back-off: {self.net_names.get(net, f'Net_{net}')} search capped at "
+                f"{used:.1f}s (was {cap:.1f}s) -- ran to its cap with no path under "
+                f"an unchanged seal (issue #8486)",
+                flush=True,
+            )
+        t0 = time.time()
+        routes = self._route_net_negotiated(net, present_factor, per_net_timeout=used)
+        guard.note_search(net, iteration, used, time.time() - t0, bool(routes))
+        return routes
+
+    def _silent_rescue_memoized(
+        self,
+        failed_net: int,
+        iteration: int,
+        neg_router: NegotiatedRouter,
+        net_routes: dict[int, list[Route]],
+        pads_by_net: dict[int, list[Pad]],
+        present_factor: float,
+        iter_per_net_cap: float | None,
+        flush_print,
+        elapsed_str,
+        *,
+        ripup_guard: RipupCycleGuard,
+        **rescue_kwargs: Any,
+    ) -> bool:
+        """:meth:`_silent_rescue_one`, skipped when it is a known repeat (#8486).
+
+        A rescue that resolved nothing for ``failed_net`` and left it under
+        this identical seal (:meth:`_relief_witness_signature`) resolves
+        nothing now: skip BOTH steps -- on the reported board the targeted
+        rip-up, not the relief, was the bulk of each re-run -- until a closer
+        or the copper around the net changes.  Logged once per net.
+        """
+        name = self.net_names.get(failed_net, f"Net_{failed_net}")
+        signature = self._relief_witness_signature(failed_net, net_routes)
+        known_futile = failed_net in ripup_guard.futile_rescue
+        if ripup_guard.repeats_futile_rescue(failed_net, signature):
+            skips = ripup_guard.futile_rescue_skips
+            skips[failed_net] = skips.get(failed_net, 0) + 1
+            if skips[failed_net] == 1:
+                flush_print(
+                    f"  Overflow-silent rescue: {name} skipped -- its last rescue "
+                    f"resolved nothing under the identical seal (issue #8486)"
+                )
+            return False
+        t0 = time.time()
+        resolved = self._silent_rescue_one(
+            failed_net,
+            neg_router,
+            net_routes,
+            pads_by_net,
+            present_factor,
+            iter_per_net_cap,
+            flush_print,
+            elapsed_str,
+            ripup_guard=ripup_guard,
+            **rescue_kwargs,
+        )
+        if resolved:
+            ripup_guard.forget_failure(failed_net)
+        else:
+            ripup_guard.note_futile_rescue(
+                failed_net, self._relief_witness_signature(failed_net, net_routes)
+            )
+        if known_futile:
+            ripup_guard.add_known_fail_seconds(iteration, time.time() - t0)
+        return resolved
+
+    def _silent_rescue_one(
+        self,
+        failed_net: int,
+        neg_router: NegotiatedRouter,
+        net_routes: dict[int, list[Route]],
+        pads_by_net: dict[int, list[Pad]],
+        present_factor: float,
+        iter_per_net_cap: float | None,
+        flush_print,
+        elapsed_str,
+        *,
+        ripup_guard: RipupCycleGuard,
+        ripup_history: dict[int, int],
+        max_ripups_per_net: int,
+        relief_probe_attempts: dict[int, int],
+        max_relief_probes_per_net: int,
+        relief_deadline: float | None,
+        deterministic_rescue: bool,
+    ) -> bool:
+        """One net of the overflow-silent hard-failure rescue (issue #3413).
+
+        Targeted rip-up of the named blockers, then the relief rescue.  Moved
+        out of the negotiated loop unchanged by issue #8486 so the loop can
+        memoize its verdict per net; ``True`` when the net was resolved.
+        """
+        # 1) Targeted rip-up of direct-line blockers (same Bresenham scan as
+        # the overflow==0 chain; transactional inside targeted_ripup).
+        pads_for_net = pads_by_net.get(failed_net, [])
+        blocking_nets: set[int] = set()
+        for j in range(len(pads_for_net) - 1):
+            blockers = neg_router.find_blocking_nets_for_connection(
+                pads_for_net[j], pads_for_net[j + 1]
+            )
+            blocking_nets.update(blockers)
+        # Issue #5913 (Epic #5508 Phase 3a): an overflow-silent hard failure is
+        # the access-loss shape's natural home -- a sealed pad emits no
+        # overflow at all.
+        blocking_nets |= self._access_loss_blockers(
+            failed_net,
+            net_routes,
+            flush_print,
+            ripup_history=ripup_history,
+            max_ripups_per_net=max_ripups_per_net,
+            guard=ripup_guard,
+        )
+        if blocking_nets:
+
+            def _mark_route_silent(route: Route) -> None:
+                self._mark_route(route)
+
+            if self._guarded_targeted_ripup(
+                neg_router,
+                ripup_guard,
+                failed_net=failed_net,
+                blocking_nets=blocking_nets,
+                net_routes=net_routes,
+                pads_by_net=pads_by_net,
+                present_cost_factor=present_factor,
+                mark_route_callback=_mark_route_silent,
+                ripup_history=ripup_history,
+                max_ripups_per_net=max_ripups_per_net,
+                per_net_timeout=iter_per_net_cap,
+                log=flush_print,
+            ):
+                return True
+
+        # 2) Relief rescue (clearance-halo seals the Bresenham scan cannot see).
+        if relief_probe_attempts.get(failed_net, 0) >= max_relief_probes_per_net:
+            return False
+        relief_probe_attempts[failed_net] = relief_probe_attempts.get(failed_net, 0) + 1
+        return self._relief_rescue(
+            failed_net,
+            neg_router,
+            net_routes,
+            pads_by_net,
+            present_factor,
+            iter_per_net_cap,
+            flush_print,
+            elapsed_str,
+            deadline=relief_deadline,
+            deterministic_rescue=deterministic_rescue,
+            guard=ripup_guard,
+        )
 
     def _relief_rescue(
         self,
