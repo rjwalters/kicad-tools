@@ -15,6 +15,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-06
 
+- **PR #8508**: fix(optimizer): drop segments a same-net route already carries
+- **Issue #8505** (closed): Optimizer chain split at interior via (#8387) emits duplicate stub segments
 - **PR #8484**: feat(submit-jlcpcb): add optional [submit] extra for the playwright driver
 - **Issue #8481** (closed): submit-jlcpcb: ship Playwright as a kicad-tools[submit] optional extra (follow-up to #8465)
 - **PR #8487**: docs(submit-jlcpcb): record the attended-driver ruling in the website guides
