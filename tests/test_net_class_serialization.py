@@ -232,6 +232,10 @@ class TestNetClassRoutingRoundTrip:
         assert nc2.swap_group is None
 
 
+# Fields derived at export time, never authored or serialized (#8527).
+DERIVED_FIELDS = frozenset({"net_scope"})
+
+
 class TestDriftPrevention:
     """Lock the :meth:`to_dict` / :meth:`from_dict` contract against drift.
 
@@ -252,7 +256,7 @@ class TestDriftPrevention:
 
     def test_to_dict_covers_all_netclassrouting_fields(self):
         """Every declared field on :class:`NetClassRouting` is in ``to_dict`` output."""
-        all_field_names = {f.name for f in fields(NetClassRouting)}
+        all_field_names = {f.name for f in fields(NetClassRouting)} - DERIVED_FIELDS
         to_dict_keys = set(NetClassRouting(name="x").to_dict().keys())
         missing = all_field_names - to_dict_keys
         extra = to_dict_keys - all_field_names
@@ -344,7 +348,7 @@ class TestDriftPrevention:
         # If the dataclass adds a field that the kwargs map doesn't
         # cover, fail loudly here -- this forces the test author to
         # extend the sentinel map alongside the field addition.
-        declared = {f.name for f in fields(NetClassRouting)}
+        declared = {f.name for f in fields(NetClassRouting)} - DERIVED_FIELDS
         assert declared == set(kwargs.keys()), (
             f"Drift sentinel map out of sync with NetClassRouting fields.  "
             f"Missing from kwargs: {sorted(declared - set(kwargs.keys()))}.  "
