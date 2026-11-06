@@ -169,7 +169,9 @@ def _is_unresolvable_numeric_ref(
     if not name_only_board:
         return False
     m_net = _RE_NET.search(block)
-    return bool(m_net) and int(m_net.group(1)) not in net_names
+    if m_net is None:
+        return False
+    return int(m_net.group(1)) not in net_names
 
 
 # Public alias so the other copper-block scanners
