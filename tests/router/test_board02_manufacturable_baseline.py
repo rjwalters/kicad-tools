@@ -966,7 +966,13 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     # fix for that duplication (#8505) should re-pin to ~315.21.  Attributed
     # by reverting only 73fa8f3c2's src/kicad_tools/router/optimizer/trace.py
     # change: the old 316.57 pin then passes again.  Prior pin (22, 83, 20, 316.57).
-    EXPECTED_LENGTH = 316.39
+    # Re-baselined 2026-11-06 for Issue #8505: two NODE_A routes both start
+    # from the same pad and carry the same 1.18 mm pad-to-via stub; each was
+    # optimized alone and kept its own copy, so the stub was emitted twice and
+    # counted twice.  ``optimize_routes_grid_synced`` now drops a segment a
+    # same-net route already kept.  Routes (22), vias (20) UNCHANGED, length
+    # 316.57 -> 315.21.  Prior pin 316.39 (#8502 / #8387).
+    EXPECTED_LENGTH = 315.21
     # Re-baselined 2026-09-14 for Issue #5201: the escape router
     # (``EscapeRouter.via_in_pad_supported``) previously resolved
     # via-in-pad eligibility from the bare ``MfrLimits`` capability
