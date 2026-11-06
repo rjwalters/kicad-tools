@@ -994,6 +994,15 @@ allow (the rule is inert). `cargo --config build.target-dir=…` and an inline
 
 `guard-worktree-paths.sh` (issue #4007) denies Edit/Write tool calls whose target resolves into the **main** repository checkout while a Loom-managed worktree exists (path-derived — see the guard inventory bullet above for the mechanism). This is the mechanical enforcement behind "never work on main branch": a builder that used a repo-relative path after a cwd reset, or that otherwise escaped its issue worktree, is denied instead of silently corrupting the main checkout.
 
+**One rule across tools (#13569).** Edit/Write and Bash are confined by the
+same rule, and **gitignored status does not exempt a path**: a write into the
+main checkout (an ignored `.notes/` journal included) is denied from either
+tool while a managed worktree exists, and allowed from both when none does.
+Repo-local scratch, notes, or journal files belong under your issue worktree or
+under `/tmp` (session scratch); both deny messages say so.
+`tests/hooks/test-guard-worktree-edit-bash-parity.sh` feeds identical targets to
+both hooks and fails on any verdict divergence.
+
 **Bash-tool write confinement (issue #4178).** The same toggle *also* gates a
 second, independent check inside `guard-destructive-generic.sh` (the `Bash`
 matcher): it denies the common Bash write idioms — `>`/`>>` redirection,
@@ -1769,7 +1778,15 @@ The config read is best-effort: a missing, empty, or malformed `.loom/config.jso
 
 It asks when **both** hold:
 
-- **A remote invocation aimed at a fleet host**: `ssh`, `tailscale ssh`, `scp`, `rsync`, `aws ssm send-command` / `start-session` — also fanned out by `xargs` / `parallel`, where a host or command read from stdin (`xargs -I{} ssh {} …`, `parallel ssh {} … ::: hosts`) counts as unresolvable — or nested in another hop's remote command (`ssh bastion ssh <fleet> …`, `ssh devvm "tailscale ssh <fleet> …"`; a script fed to the outer hop runs on the inner one, and a hop nested too deep to follow asks). A fleet host is a tailnet name or address (`*.ts.net`, IPv4 in `100.64.0.0/10`, IPv6 in `fd7a:115c:a1e0::/48`); a name on the Loom fleet registry (`LOOM_FLEET_PATH`, else `~/.loom/fleet.json`: `ssh_host`, `tailnet_name`; `provider_instance_id` for SSM); a `tailscale status --json` peer; or an entry in the extend-only `guards.remoteFleetHosts` array (list the hosts a roster file such as a fleet-gitops `hosts.yml` names there). An ssh alias is resolved through `ssh -G` first. A host spelled with a variable or substitution (`ubuntu@$IP`, `ubuntu@$(getent hosts x.ts.net …)`) and SSM `--targets` cannot be resolved, so they count as fleet hosts.
+- **A remote invocation aimed at a fleet host**: `ssh`, `tailscale ssh`, `scp`, `rsync`, `aws ssm send-command` / `start-session` — also fanned out by `xargs` / `parallel`, where a host or command read from stdin (`xargs -I{} ssh {} …`, `parallel ssh {} … ::: hosts`) counts as unresolvable — or nested in another hop's remote command (`ssh bastion ssh <fleet> …`, `ssh devvm "tailscale ssh <fleet> …"`; a script fed to the outer hop runs on the inner one, and a hop nested too deep to follow asks). A fleet host is a tailnet name or address (`*.ts.net`, IPv4 in `100.64.0.0/10`, IPv6 in `fd7a:115c:a1e0::/48`); a name on the Loom fleet registry (`LOOM_FLEET_PATH`, else `~/.loom/fleet.json`: `ssh_host`, `tailnet_name`; `provider_instance_id` for SSM); a `tailscale status --json` peer; or an entry in the extend-only `guards.remoteFleetHosts` array (list the hosts a roster file such as the fleet state store `hosts.yml` names there). An ssh alias is resolved through `ssh -G` first. A host spelled with a variable or substitution (`ubuntu@$IP`, `ubuntu@$(getent hosts x.ts.net …)`) and SSM `--targets` cannot be resolved, so they count as fleet hosts.
+
+  **Scoping out unmanaged hosts (`guards.remoteUnmanagedHosts`).** A disposable test network that happens to sit in a tailnet range is not fleet. List its exact names/addresses and/or IPv4/IPv6 CIDRs in the repo-local array and the guard stops asking about them:
+
+  ```json
+  { "guards": { "remoteUnmanagedHosts": ["100.100.0.0/16", "lab-1.ts.net"] } }
+  ```
+
+  The list only removes the *range-based* tailnet classification (matched on the literal spelling and the `ssh -G` hostname). A host on the fleet registry, a `tailscale status` peer, or `guards.remoteFleetHosts` stays protected even if also listed, and break-glass is still required for it. Malformed CIDR entries match nothing. Unresolvable targets (`$VAR`, SSM `--targets`) cannot be listed; their ask text says they were *unresolved* and tells you to spell the host literally and list it.
 - **A payload that is not read-only**: the inline remote command, or — when the remote side is a shell reading stdin (`bash -s`, `sudo bash`, no remote command) — the script it is fed via `< file`, a heredoc, a here-string, or `cat file |` / `echo … |`. Destructive patterns: `reset --hard`, `clean -f`, `rm -r`, `rebase --abort`, `stash drop|clear`, `branch -D`, `push --force` / `-f` / `+ref`, `systemctl stop|disable|mask|kill`, `launchctl bootout|unload|disable|remove`, host power-off/restart commands, and writes under `~/.loom` or `~/loom-daemon`. A script it **cannot read** (missing file, variable path, output of another program) **asks**, and so does a payload **built at run time**: a local `$( … )` / backtick anywhere in it (`ssh h "$(cat fix.sh)"`, `<<< "$(cat fix.sh)"`, an unquoted heredoc whose body is `$(cat fix.sh)`), or an expansion as a command, `sh -c` script, `eval` or `source` argument (`ssh h "$CMD"`, `printf '%s\n' "$CMD" | ssh h bash`). A variable that is only an argument of a known command (`ssh h "ls $DIR"`) does not. An `scp`/`rsync` push onto a fleet host is an outward change and asks; a pull does not.
 
 It sees through `bash -c`, `eval`, wrappers (`sudo`, `timeout`, `env`, …), `$( … )` and heredocs fed to a local shell. `ssh host 'git status'`, a read-only script, and any host off the roster (a dev VM) are unaffected; prose in a `--body` / `-m` value is never an invocation, because the classifier's lexer is quote-aware.
@@ -2023,7 +2040,7 @@ The decision log sized that gap. **Which log matters**: the hook writes to
 `<its own checkout>/.loom/logs/guard-decisions.log`, so every worktree keeps a
 separate one and no single file is authoritative for the host. The figure below
 is from the **primary clone's** log
-(`/Users/joseph/dev/loom/.loom/logs/guard-decisions.log`) over
+(`.loom/logs/guard-decisions.log`) over
 2026-09-16T03:12Z–2026-09-17T05:12Z: **17 of 18 ASKs were `force-op:all`**,
 every one an own-branch force op. (The 18th is a `force-op:detached` ask —
 which `"protected"` still raises, by design.) A reviewer on another checkout
@@ -2093,6 +2110,33 @@ LOOM_FORCE_SCOPE=protected git push --force origin feature/x   # allowed
 # Force the old always-ask behaviour even when the repo opts into protected:
 LOOM_FORCE_SCOPE=all git reset --hard HEAD~1   # ASK
 ```
+
+### Primary-Checkout Mutation Guard (`guards.primaryCheckoutMutation` / `LOOM_GUARD_PRIMARY_CHECKOUT_MUTATION`)
+
+**An agent step never commits or switches branches in a workspace's primary
+checkout (#13589).** A stray `git commit` / `git checkout <branch>` there parks
+the primary clone off the default branch (observed on loom-worker-4,
+2026-11-04) and holds fleet sync with a `wrong-branch` hold (self-heal: #13588).
+Builder and Doctor work in `.loom/worktrees/issue-<N>`.
+
+- **Agent step** = `LOOM_SWEEP_ID` or `LOOM_WORKTREE_PATH` is exported (set by
+  the dispatcher). An operator's interactive session has neither and is untouched.
+- **Denied** (tier: deny, since headless runs cannot answer an ask) when the
+  resolved cwd — honouring `cd X &&` and `git -C X` — is a primary checkout:
+  `git commit`, `git switch <x>`/`-c`, `git checkout -b|-B <x>`, `--detach`,
+  and `git checkout <branch|sha>`. The message names
+  `./.loom/scripts/worktree.sh <issue-number>` and this toggle.
+- **Allowed**: everything inside a linked worktree; checkout/switch whose target
+  is `main`/`master` (the Auditor's `git checkout -B main origin/main`);
+  `git checkout -- <path>` and `git checkout <path>` file restores; `-h/--help`;
+  read-only git. `worktree.sh`, `check-main-clean.sh --quarantine`,
+  `resync-installed.sh`, `merge-pr.sh` and `scripts/version.sh` are unaffected:
+  the hook only sees the top-level command text, not their internal git calls.
+- **Decision-log tag**: `primary-checkout-mutation:<commit|switch|checkout>`.
+- **Toggle**: `LOOM_GUARD_PRIMARY_CHECKOUT_MUTATION=0` (env, agent's own
+  environment) or `"guards": {"primaryCheckoutMutation": false}` in
+  `.loom/config.json`. Default on.
+- Tests: `tests/hooks/test-guard-destructive-primary-checkout.sh`.
 
 ### Stash-Stack Scope Guard (`guards.stashScope` / `LOOM_GUARD_STASH_SCOPE`)
 
