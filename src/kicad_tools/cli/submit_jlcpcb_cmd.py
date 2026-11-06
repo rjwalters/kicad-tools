@@ -43,7 +43,102 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         help="Upload the exact Gerber bytes via the API (needs JLC credentials and --reviewer)",
     )
     parser.add_argument("--reviewer", help="Your name; confirms the upload checklist")
+    site = parser.add_argument_group(
+        "website leg (attended only; stops at the saved cart, never orders)"
+    )
+    site.add_argument(
+        "--website",
+        action="store_true",
+        help="Drive your own signed-in Chrome (CDP) to a saved cart; needs a TTY and the fields below",
+    )
+    site.add_argument(
+        "--guided",
+        action="store_true",
+        help="Print the manual website checklist instead (fallback / kill switch)",
+    )
+    site.add_argument("--cdp-port", type=int, default=9222, help="Chrome debugging port")
+    site.add_argument("--thickness-mm", help="Board thickness, e.g. 1.6 (never guessed)")
+    site.add_argument("--outer-copper-oz", help="Outer copper weight, e.g. 1")
+    site.add_argument("--inner-copper-oz", help="Inner copper weight (4+ layer boards)")
+    site.add_argument("--has-tht", action="store_true", help="BOM has THT lines (Standard PCBA)")
+    site.add_argument(
+        "--match-mapping",
+        help="JSON file with SelectionMapping fields describing JLC's part-matching CSV columns",
+    )
     add_format_flag(parser)
+
+
+def _website_leg(args: argparse.Namespace, result, out: Path) -> int:
+    import json as _json
+
+    from ..export.factory_selection import ExpectedPart, SelectionMapping
+    from ..export.submission_review import render_review_page
+    from ..manufacturers import jlc_site_driver as drv
+
+    plan = result.plan
+    core = _json.loads(plan.plan_bytes)
+    sides = core["settings"]["assembly_sides"]
+    side = "both" if len(sides) > 1 else sides[0]
+    spec = drv.SiteOrderSpec(
+        layers=core["settings"]["board_layers"],
+        quantity=core["board_quantity"],
+        thickness_mm=args.thickness_mm or "",
+        outer_copper_oz=args.outer_copper_oz or "",
+        inner_copper_oz=args.inner_copper_oz,
+        assembly_side=side,
+        has_tht=bool(args.has_tht),
+    )
+    names = {"gerber": "gerbers.zip", "bom": "bom.csv", "cpl": "cpl.csv"}
+    inputs = drv.SiteInputs(
+        gerber=plan.directory / names["gerber"],
+        bom=plan.directory / names["bom"],
+        cpl=plan.directory / names["cpl"],
+        sha256={r: core["outputs"][n]["sha256"] for r, n in names.items()},
+    )
+    if args.guided:
+        print("Guided checklist (do these yourself; stop at the saved cart):")
+        for line in drv.guided_checklist(spec, inputs):
+            print(f"  {line}")
+        return 0
+    if not args.match_mapping:
+        print("REFUSED: --website needs --match-mapping", file=sys.stderr)
+        return 2
+    mapping = SelectionMapping(**_json.loads(Path(args.match_mapping).read_text()))
+    expected = [
+        ExpectedPart(reference=m["reference"], catalog_id=m["catalog_id"])
+        for m in _json.loads((plan.directory / "expected-matches.json").read_text())
+    ]
+
+    def get_match_csv() -> bytes:
+        path = input("Download JLC's part-matching export, then enter its path: ").strip()
+        return Path(path).read_bytes()
+
+    try:
+        drv.require_attended()
+        page, close = drv.connect_attended_page(args.cdp_port)
+        try:
+            site = drv.run_driver(
+                page, spec, inputs, expected, mapping, get_match_csv, out / "site-screenshots"
+            )
+        finally:
+            close()
+    except drv.DriverAbort as exc:
+        print(f"ABORTED at {exc.step}: {exc.reason}", file=sys.stderr)
+        if exc.screenshot:
+            print(f"screenshot: {out / 'site-screenshots' / exc.screenshot}", file=sys.stderr)
+        print("Nothing was submitted. Continue by hand (--guided):", file=sys.stderr)
+        for line in drv.guided_checklist(spec, inputs):
+            print(f"  {line}", file=sys.stderr)
+        return 2
+    page_out = render_review_page(
+        plan,
+        destination=out / "review-page-cart",
+        stock=result.stock.as_dict(),
+        site=site.as_dict(),
+    )
+    print(f"cart: {site.cart_url}  (state: {site.state})")
+    print(f"review page: {page_out.directory}")
+    return 0
 
 
 def run(args: argparse.Namespace) -> int:
@@ -70,6 +165,8 @@ def run(args: argparse.Namespace) -> int:
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 2
     failures = list(format_stock_failures(result.stock))
+    if (args.website or args.guided) and not result.stock.blocked:
+        return _website_leg(args, result, Path(args.output))
     if getattr(args, "format", "text") == "json":
         print(
             json.dumps(
