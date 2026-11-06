@@ -129,3 +129,34 @@ def test_each_pair_reported_once():
     segs = _pair(0.5) + [_Seg((0, 1.4), (10, 1.4), net_number=3, net_name="C")]
     # A-B gap 0.5 and B-C gap 0.7 (both flagged); A-C gap 1.2 clean.
     assert len(_run(segs).violations) == 2
+
+
+def test_duplicated_segment_reports_slot_once():
+    # Issue #8503: two identical copies of a track (already reported by
+    # redundant_copper_duplicate) next to a neighbour are one slot, not two.
+    segs = _pair(0.5)
+    segs.append(_Seg((0, 0), (10, 0)))
+    assert len(_run(segs).violations) == 1
+    # Reversed endpoint order is the same copper too.
+    segs.append(_Seg((10, 0), (0, 0)))
+    assert len(_run(segs).violations) == 1
+
+
+def test_duplicate_of_both_tracks_reports_slot_once():
+    segs = _pair(0.5) + _pair(0.5)
+    assert len(_run(segs).violations) == 1
+
+
+def test_parallel_copy_with_different_width_is_distinct():
+    # Not an exact duplicate (different width): it is distinct geometry.
+    segs = _pair(0.5)
+    segs.append(_Seg((0, 0), (10, 0), width=0.25))
+    assert len(_run(segs).violations) == 2
+
+
+def test_two_zones_on_one_layer_report_each_pair_once():
+    # Issue #8503: several pours sharing a layer must not multiply findings.
+    res = _run(_pair(0.5), zones=[_Zone(), _Zone(clearance=0.2)])
+    assert len(res.violations) == 1
+    # The widest requirement of the layer's pours applies.
+    assert abs(res.violations[0].required_value - 0.85) < 1e-6
