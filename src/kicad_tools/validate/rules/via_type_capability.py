@@ -97,8 +97,8 @@ class ViaTypeCapabilityRule(DRCRule):
             rule_id=self.rule_id,
             severity="error",
             message=(
-                f"{via_type.capitalize()} via at ({via.position[0]:.3f}, "
-                f"{via.position[1]:.3f}) on {span} (net '{net_name}'): the "
+                f"{via_type.capitalize()} via at ({via.position[0] + origin[0]:.3f}, "
+                f"{via.position[1] + origin[1]:.3f}) on {span} (net '{net_name}'): the "
                 f"current manufacturer profile does not support {label} "
                 f"({attr}=False). Replace it with a through via or choose a "
                 f"profile that offers {label}."
