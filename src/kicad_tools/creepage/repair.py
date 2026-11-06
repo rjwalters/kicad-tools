@@ -442,6 +442,13 @@ class CreepageRepairer(ClearanceRepairer):
         if lost is not None:
             self._rollback(journal)
             return f"the move would {lost}"
+        # The census only measures HV-vs-other pairs, so a move that shorts or
+        # under-clears two non-HV nets is invisible to it; reuse the
+        # clearance repairer's foreign-copper check.
+        collateral = self._collateral_damage(journal)
+        if collateral is not None:
+            self._rollback(journal)
+            return f"the move would {collateral}"
 
         new = census_fn(self._pcb())
         old_pairs, new_pairs = _index_pairs(current), _index_pairs(new)
@@ -466,11 +473,23 @@ class CreepageRepairer(ClearanceRepairer):
                     f"would worsen {after.net_a} vs {after.net_b} "
                     f"(margin {_headroom(before):+.4f} -> {_headroom(after):+.4f} mm)"
                 )
+        for nkey, after in new_pairs.items():
+            if nkey == key or nkey in old_pairs or after.waived or after.passed:
+                continue
+            self._rollback(journal)
+            return (
+                f"would create a failing pair {after.net_a} vs {after.net_b} "
+                f"(margin {_headroom(after):+.4f} mm)"
+            )
 
         new_drc = drc_count
         if drc_fn is not None and drc_count is not None:
             new_drc = drc_fn(serialize_sexp(self.doc, preserve_source=True))
-            if new_drc is not None and new_drc > drc_count:
+            if new_drc is None:
+                # Never let the DRC gate switch itself off mid-run unnoticed.
+                self._rollback(journal)
+                return "DRC could not be run after the move; the move was not verified"
+            if new_drc > drc_count:
                 self._rollback(journal)
                 return f"DRC regression: {drc_count} -> {new_drc} errors after the move"
 

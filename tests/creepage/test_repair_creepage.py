@@ -214,3 +214,43 @@ def test_missing_threshold_is_usage_error(tmp_path, capsys):
     pcb = tmp_path / "b.kicad_pcb"
     pcb.write_text(_board())
     assert _run(["repair-creepage", str(pcb)]) == 2
+
+
+def _foreign_neighbour_board() -> str:
+    """HV pad (never moved), a GND track 1.25 mm below it, a SIG track just beyond.
+
+    Moving the GND track away from the HV pad would overlap the SIG track
+    (LV-vs-LV), which the HV-only census cannot see.
+    """
+    header = _HEADER.replace('(net 2 "GND")', '(net 2 "GND")\n  (net 3 "SIG")')
+    return (
+        header
+        + _OUTLINE
+        + _footprint("U1", 110, 110, 1, "L_MAINS")
+        + '  (segment (start 108 112.35) (end 114 112.35) (width 0.2) (layer "F.Cu") (net 2)'
+        ' (uuid "33333333-3333-3333-3333-333333333333"))\n'
+        '  (segment (start 108 112.7) (end 114 112.7) (width 0.2) (layer "F.Cu") (net 3)'
+        ' (uuid "44444444-4444-4444-4444-444444444444"))\n)\n'
+    )
+
+
+def test_move_shorting_two_non_hv_nets_is_rolled_back(tmp_path, capsys):
+    source = _foreign_neighbour_board()
+    pcb, argv = _setup(tmp_path, source)
+    rc = _run(argv)
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 1, out
+    assert out["moves"] == []
+    assert any("SIG" in r["reason"] for r in out["rejected"]), out["rejected"]
+    assert pcb.read_text() == source  # rolled back, nothing written
+
+
+def test_drc_failing_mid_run_rolls_back(tmp_path, capsys):
+    source = _board()
+    pcb, argv = _setup(tmp_path, source)
+    counts = iter([0, None])
+    rc = _run(argv, drc_fn=lambda _text: next(counts))
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert any("DRC could not be run" in r["reason"] for r in out["rejected"])
+    assert pcb.read_text() == source
