@@ -83,7 +83,12 @@ Q<n>. <the decision in one line, as a question>
 - Put the dated, time-critical fact in the question itself (a price change,
   a beta ending, a deadline).
 - Link the issue or PR where the ruling will be recorded. If a project uses
-  Loom, that's the issue labelled `loom:operator-decision`.
+  Loom, that's an issue labelled `loom:operator` whose body carries a
+  `decision` block, written with `loom-daemon operator-decision apply <N>
+  --input d.json` when the daemon is available. Each question maps to the
+  `decision` JSON as `question`, `context`, `options[{id,label,why}]` (ranked,
+  first = `recommended`), and `recommended`; `.loom/docs/operator-decision.md`
+  is the reference.
 
 ### 5. Deliver
 
@@ -101,7 +106,7 @@ Q<n>. <the decision in one line, as a question>
 
 When the operator answers, write the ruling where the decision lives (the
 linked issue, a decision log, the doc that states the policy), not only in
-chat. Chat scrolls away, and the next session reads the repo.
+chat. On Loom, the issue's `decision` block is what `apply` rewrites. Chat scrolls away, and the next session reads the repo.
 
 ## Example
 

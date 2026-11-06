@@ -61,7 +61,7 @@ Evidence-bound waivers (schema ``version == 3``, Issue #5946)::
       "waivers": [
         {
           "key": "courtyards_overlap|C52,U10||F.Cu",
-          "evidence_hash": "ev2:3f0c9a1d2b7e4c55",
+          "evidence_hash": "ev3:3f0c9a1d2b7e4c55",
           "reason": "EE-mandated tight decoupling",
           "reviewer": "rjwalters",
           "date": "2026-10-06"
