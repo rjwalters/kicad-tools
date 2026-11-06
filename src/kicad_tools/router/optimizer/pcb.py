@@ -156,6 +156,24 @@ def _resolve_block_net(
     return None
 
 
+def _is_unresolvable_numeric_ref(
+    block: str, net_names: dict[int, str], name_only_board: bool
+) -> bool:
+    """True for a numeric ``(net N)`` ref that cannot be mapped to a net name.
+
+    Issue #8492: on a name-only board (no ``(net N "name")`` header table) the
+    resolver can only invent ``Net<N>`` for such a reference, and the
+    optimizer then re-serializes it as ``(net "Net<N>")`` -- a net that does
+    not exist.  Callers leave these blocks untouched instead of rewriting them.
+    """
+    if not name_only_board:
+        return False
+    m_net = _RE_NET.search(block)
+    if m_net is None:
+        return False
+    return int(m_net.group(1)) not in net_names
+
+
 # Public alias so the other copper-block scanners
 # (``partial_rescue.strip_net_copper``, ``io._remove_conflicting_vias``,
 # ``quantize``) resolve both net-reference dialects through this single
@@ -178,6 +196,7 @@ def parse_segments(pcb_text: str) -> dict[str, list[Segment]]:
     # ``(net "NAME")`` references resolve to numeric ids -- issue #4413).
     net_names = parse_net_names(pcb_text)
     name_to_id = {name: nid for nid, name in net_names.items()}
+    name_only_board = bool(_RE_NET_NAME.search(pcb_text))
 
     for _start, _end, block in _extract_balanced_blocks(pcb_text, "segment"):
         m_start = _RE_START.search(block)
@@ -185,6 +204,9 @@ def parse_segments(pcb_text: str) -> dict[str, list[Segment]]:
         m_width = _RE_WIDTH.search(block)
         m_layer = _RE_LAYER.search(block)
         resolved_net = _resolve_block_net(block, net_names, name_to_id)
+        if _is_unresolvable_numeric_ref(block, net_names, name_only_board):
+            logger.warning("Leaving segment with unresolvable numeric net ref untouched (#8492)")
+            continue
 
         # All five core fields are required; skip malformed blocks.  The
         # net resolver handles both the numeric ``(net N)`` and name-based
@@ -243,6 +265,7 @@ def parse_vias(pcb_text: str) -> dict[str, list[Via]]:
     # ``(net "NAME")`` dialect -- issue #4413).
     net_names = parse_net_names(pcb_text)
     name_to_id = {name: nid for nid, name in net_names.items()}
+    name_only_board = bool(_RE_NET_NAME.search(pcb_text))
 
     # Issue #3414 / #3155: use the same balanced-parentheses walker as
     # ``parse_segments`` so that fields may appear in any order and extra
@@ -278,6 +301,9 @@ def parse_vias(pcb_text: str) -> dict[str, list[Via]]:
         m_drill = _re_drill.search(block)
         m_layers = _re_layers.search(block)
         resolved_net = _resolve_block_net(block, net_names, name_to_id)
+        if _is_unresolvable_numeric_ref(block, net_names, name_only_board):
+            logger.warning("Leaving via with unresolvable numeric net ref untouched (#8492)")
+            continue
 
         # All five core fields are required; skip malformed blocks.  The
         # net resolver handles both the numeric ``(net N)`` and name-based
