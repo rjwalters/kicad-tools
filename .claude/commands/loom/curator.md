@@ -1640,6 +1640,8 @@ Unanswered: skip the premise gate. Claim it (`loom:curating`), read that trusted
 - **A PO-level call**: `loom-daemon operator-decision apply` with 2-4 ranked
   options (`.loom/docs/operator-decision.md`), then remove `loom:triage`.
 
+**Guide-converted parks (#10936):** Guide moves a `loom:blocked` issue parked only as "awaiting (Architect) revision" / "awaiting a design epic" (no named blocker) onto this path: `loom:triage`, park record removed, and a `Guide: NEEDS REVISION` comment carrying the same `champion:revise:body-<H>` marker. Treat it exactly like a Champion send-back; the park reason in that comment is the finding. Rule: `guide.md` "Awaiting-Revision Parks → Revise Path".
+
 A routing comment carrying `<!-- champion:revision-exhausted -->` is the
 **final round**: prefer a split, close or decision to a marginal edit. A
 preference or authority failure goes to the operator; a factual one gets a

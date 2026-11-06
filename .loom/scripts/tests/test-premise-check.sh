@@ -262,6 +262,40 @@ run "a prose mention is not a record" 10 -- --body-file "$WORK/incident.md" \
 has_line "  still reports RECORD=absent" '^RECORD=absent$'
 
 # ---------------------------------------------------------------------------
+# 11b. hermit.reversalNeedsOperator (#13620). Default `always` is unchanged;
+#      `protected-only` lets a loom:hermit removal attesting `premise-protected:
+#      none` clear, while a named protected class stays malformed.
+# ---------------------------------------------------------------------------
+{
+    marker "exists=yes deliberate=yes reversal=yes verdict=clear"
+    printf 'premise-evidence: src/watchdog.rs:1 — kept for later\npremise-protected: none\n'
+} >"$WORK/record-hermit-clear.md"
+{
+    marker "exists=yes deliberate=yes reversal=yes verdict=clear"
+    printf 'premise-evidence: src/watchdog.rs:1 — kept for later\npremise-protected: public-api of a published package\n'
+} >"$WORK/record-hermit-class.md"
+PO_TREE="$WORK/protected-only-tree"
+mkdir -p "$PO_TREE/src" "$PO_TREE/.loom"
+printf '// x\n' >"$PO_TREE/src/watchdog.rs"
+printf '{"hermit":{"reversalNeedsOperator":"protected-only"}}\n' >"$PO_TREE/.loom/config.json"
+JUNK_TREE="$WORK/junk-tree"
+mkdir -p "$JUNK_TREE/src" "$JUNK_TREE/.loom"
+printf '// x\n' >"$JUNK_TREE/src/watchdog.rs"
+printf '{"hermit":{"reversalNeedsOperator":"sometimes"}}\n' >"$JUNK_TREE/.loom/config.json"
+printf '## Remove dead helper\n' >"$WORK/hermit-body.md"
+
+run "default always: hermit reversal+clear stays malformed" 12 -- --body-file "$WORK/hermit-body.md" \
+    --labels loom:hermit --record-file "$WORK/record-hermit-clear.md" --repo-root "$FIXTURE" --no-scan
+run "unknown config value fails closed to always" 12 -- --body-file "$WORK/hermit-body.md" \
+    --labels loom:hermit --record-file "$WORK/record-hermit-clear.md" --repo-root "$JUNK_TREE" --no-scan
+run "protected-only: premise-protected none clears" 0 -- --body-file "$WORK/hermit-body.md" \
+    --labels loom:hermit --record-file "$WORK/record-hermit-clear.md" --repo-root "$PO_TREE" --no-scan
+run "protected-only: a named protected class is malformed" 12 -- --body-file "$WORK/hermit-body.md" \
+    --labels loom:hermit --record-file "$WORK/record-hermit-class.md" --repo-root "$PO_TREE" --no-scan
+run "protected-only does not widen to non-hermit issues" 12 -- --body-file "$WORK/hermit-body.md" \
+    --labels loom:architect --record-file "$WORK/record-hermit-clear.md" --repo-root "$PO_TREE" --no-scan
+
+# ---------------------------------------------------------------------------
 # 12. #8499: a citation resolves against the INVOKING WORKING TREE, not the
 #     shared primary clone it was created from.
 #

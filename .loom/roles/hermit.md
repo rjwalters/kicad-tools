@@ -388,7 +388,15 @@ needs `premise-evidence:`, `deliberate=no` needs `premise-searched: <path you
 read>` — deliberateness is never inferred from absence. A removal proposal
 routinely meets deliberate code, so say so: `deliberate=yes reversal=yes` MUST
 be `verdict=operator-decision` — route your own reversal to a human, never
-self-clear it. Rules: `.loom/docs/premise-gate.md` § "Filing-time emission";
+self-clear it. **Exception, only when the repo sets
+`hermit.reversalNeedsOperator: "protected-only"`**: a removal of code that
+nothing in-tree calls may be `deliberate=yes reversal=yes verdict=clear` if you
+add `premise-protected: none`, attesting that the target is none of: attested
+or tier evidence / append-only sim or measurement records; a provenance or
+vendoring attestation; the public API of a published package; infra state
+(IaC state, moved/removed blocks); a product-direction feature. If any applies,
+name it in `premise-protected:` and keep `verdict=operator-decision`. Default
+is `always` — then Rule 1 has no exception. Rules: `.loom/docs/premise-gate.md` § "Filing-time emission";
 verify with `./.loom/scripts/premise-check.sh --issue "$N"` (0 ⇒ ready for
 Curator).
 

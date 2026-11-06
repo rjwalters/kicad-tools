@@ -341,6 +341,76 @@ class TestBuildNativeInstallsDrcExtension:
         assert "DRC C++ extension" in result.warnings[0]
 
 
+class TestMissingDrcExtensionWarning:
+    """Issue #8519: source present but no extension installed -> warn."""
+
+    def test_warns_on_compile_failure_when_source_present(
+        self, tmp_path: Path, monkeypatch, isolated_replace_flag
+    ) -> None:
+        package_root = _stub_build_pipeline(monkeypatch, tmp_path, include_drc_so=False)
+        (package_root / "drc" / "cpp").mkdir(parents=True)
+        _stub_router_probe(monkeypatch, isolated_replace_flag)
+
+        result = bnc.build_native(force=True)
+
+        assert result.success is True
+        assert any(
+            "DRC C++ extension was not built" in w and "no extension" in w for w in result.warnings
+        )
+
+    def test_warns_router_only_when_no_root_cmake(
+        self, tmp_path: Path, monkeypatch, isolated_replace_flag
+    ) -> None:
+        package_root = _stub_build_pipeline(monkeypatch, tmp_path, include_drc_so=False)
+        (package_root / "drc" / "cpp").mkdir(parents=True)
+        (package_root / "router" / "cpp").mkdir(parents=True)
+        (package_root / "router" / "cpp" / "CMakeLists.txt").write_text("cmake\n")
+        monkeypatch.setattr(bnc, "_get_project_root", lambda: None)
+        _stub_router_probe(monkeypatch, isolated_replace_flag)
+
+        result = bnc.build_native(force=True)
+
+        assert any("only the router was built" in w for w in result.warnings)
+
+
+class TestCheckHintAccuracy:
+    def test_hint_builds_when_root_and_source_present(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setattr(bnc, "_get_project_root", lambda: tmp_path)
+        assert bnc._extension_build_hint(tmp_path) == "build with: kct build-native"
+
+    def test_hint_optional_without_root_cmake(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setattr(bnc, "_get_project_root", lambda: None)
+        assert "optional" in bnc._extension_build_hint(tmp_path)
+
+    def test_hint_optional_without_extension_source(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setattr(bnc, "_get_project_root", lambda: tmp_path)
+        assert "optional" in bnc._extension_build_hint(None)
+
+    def test_check_prints_optional_hint_for_placement_and_drc(self, monkeypatch, capsys) -> None:
+        from kicad_tools.drc import cpp_backend as drc_cpp_backend
+        from kicad_tools.placement import cpp_backend as placement_cpp_backend
+        from kicad_tools.router import cpp_backend as router_cpp_backend
+
+        monkeypatch.setattr(
+            router_cpp_backend,
+            "probe_backend_info",
+            lambda **_: {
+                "available": True,
+                "version": "1.0.0",
+                "probe": {"mode": "in-process", "interpreter": "/py", "failed": False},
+            },
+        )
+        unavailable = lambda: {"available": False, "unavailable_reason": "not built"}  # noqa: E731
+        monkeypatch.setattr(drc_cpp_backend, "get_backend_info", unavailable)
+        monkeypatch.setattr(placement_cpp_backend, "get_backend_info", unavailable)
+        monkeypatch.setattr(bnc, "_get_project_root", lambda: None)
+
+        assert bnc.main(["--check"]) == 0
+        out = capsys.readouterr().out
+        assert "Placement backend: not built (optional; Python fallback in use)" in out
+        assert "DRC backend: not built (optional; Python fallback in use)" in out
+
+
 # ---------------------------------------------------------------------------
 # BuildResult / format_result_text surface the drc extension
 # ---------------------------------------------------------------------------
@@ -507,3 +577,26 @@ class TestCheckJsonAndReasonNormalization:
         finally:
             monkeypatch.undo()
             importlib.reload(sys.modules["kicad_tools.drc.cpp_backend"])
+
+
+class TestMissingExtensionWarningInTextOutput:
+    """Issue #8519: warnings must reach the text output on the installed path."""
+
+    @pytest.mark.parametrize("skipped", [False, True])
+    def test_warning_shown_when_backend_installed(self, skipped: bool) -> None:
+        result = bnc.BuildResult(success=True)
+        result.backend_installed = True
+        result.skipped = skipped
+        result.so_path = Path("router_cpp.x.so")
+        result.warnings.append(
+            "DRC C++ extension was not built: no root CMakeLists.txt was found.\nsecond detail line"
+        )
+        text = bnc.format_result_text(result)
+        assert "Warning: DRC C++ extension was not built" in text
+        assert "no root CMakeLists.txt" in text
+        assert "    second detail line" in text
+
+    def test_no_warnings_block_when_clean(self) -> None:
+        result = bnc.BuildResult(success=True)
+        result.backend_installed = True
+        assert "Warning" not in bnc.format_result_text(result)

@@ -20,6 +20,7 @@
 - [3c. Operational signals from daemon loops (Issue #8860)](#3c-operational-signals-from-daemon-loops-issue-8860)
 - [3d. Agent telemetry relay (Issue #10964)](#3d-agent-telemetry-relay-issue-10964)
 - [3e. Alerts as `alert.transition` telemetry (Issues #11295, #12806)](#3e-alerts-as-alerttransition-telemetry-issues-11295-12806)
+- [3f. Telemetry kind inventory (Issue #12117)](#3f-telemetry-kind-inventory-issue-12117)
 - [4. The backend: deploy your own Cloudflare Worker](#4-the-backend-deploy-your-own-cloudflare-worker)
 - [5. Authenticated vs. public: two views, one redaction policy](#5-authenticated-vs-public-two-views-one-redaction-policy)
 - [5b. Doc-maintenance throughput (Guide, local-only, issue #6136)](#5b-doc-maintenance-throughput-guide-local-only-issue-6136)
@@ -194,7 +195,7 @@ host-shape attributes in the next table:
 | `host.name` | the envelope's `host_id` (#10977) |
 | `service.version` | the reporting daemon's version (a `host.health` record's `daemon_version`, else the exporting build's) |
 | `loom.daemon.revision` | the exporting build's full git SHA (`unknown` for a tarball build) — the same value every span carries (#11197) |
-| `loom.fleet.config_sha` | the fleet-gitops commit whose rendered config tiers are **on disk on this host right now**: a 40-hex SHA, `unknown` (a fleet host where no applied commit is established yet, e.g. during a startup-pass timeout), or `none` (no fleet store, `fleet.repo` unset). Never empty, never omitted (#11197) |
+| `loom.fleet.config_sha` | the fleet state store commit whose rendered config tiers are **on disk on this host right now**: a 40-hex SHA, `unknown` (a fleet host where no applied commit is established yet, e.g. during a startup-pass timeout), or `none` (no fleet store, `fleet.repo` unset). Never empty, never omitted (#11197) |
 
 **Host shape (#12874).** The emitting host's static shape, so a sweep or phase
 span resolves to its host's size with no join against the
@@ -1362,7 +1363,63 @@ go out once the exporters are up. llm-monitor's quota step-change alert is not
 in `ranking.json` yet, so it is not sent.
 
 `fleet_alert` only runs when `autonomous.fleetAlert.enabled` is on (off by
-default here); the fleet defaults (fleet-gitops) are where to enable it.
+default here); the fleet defaults (the fleet state store) are where to enable it.
+
+## 3f. Telemetry kind inventory (Issue #12117)
+
+Every kind in `TELEMETRY_KINDS` (`loom-daemon/src/telemetry/kinds.rs`). Origin: **daemon** = observed or emitted by the daemon itself; **CLI** = emitted by an agent- or operator-invoked CLI. Signal is the OTLP table the kind lands in. All kinds currently export over OTLP; none is `NotExported`. Producer paths are relative to `loom-daemon/src/` and show the main construction sites, not every one.
+
+Guards: `kind_producer.rs` fails when a kind loses its last producer; `kind_export.rs` fails when a kind has neither an OTLP mapping arm nor an entry on `NOT_EXPORTED_KINDS`, and when this table lacks a row for a registered kind; `kind_silence.rs` holds the per-kind silence thresholds.
+
+| Kind | Producer | Origin | Signal | Notes |
+|---|---|---|---|---|
+| `sweep.started` | observability/collector.rs | daemon | logs |  |
+| `sweep.identity` | observability/collector/identity.rs | daemon | logs |  |
+| `sweep.phase` | observability/collector.rs | daemon | logs |  |
+| `sweep.completed` | observability/collector.rs | daemon | logs |  |
+| `sweep.outcome` | sweep_outcome_summary.rs, observability/collector.rs | daemon | logs |  |
+| `tokens.snapshot` | observability/collector.rs | daemon | metrics (gauges) |  |
+| `host.health` | observability/sender.rs, observability/collector.rs | daemon | metrics (gauges) |  |
+| `role_tick.outcome` | role_tick_telemetry.rs, sweep_outcomes.rs | daemon | logs | Exported (mapped since #11858). The 7-day zero-row window to 2026-10-14 predates that fix; live rows not re-verified here. |
+| `session.summary` | observability/session_summary.rs | daemon | logs |  |
+| `session.analysis` | observability/session_analysis.rs | daemon | logs |  |
+| `daemon.event` | observability/daemon_event.rs, observability/daemon_lifecycle.rs | daemon | logs |  |
+| `trace.span` | ci_telemetry/records.rs, ci_telemetry/nextest.rs | daemon | spans |  |
+| `ci.run` | ci_telemetry/records.rs | daemon | logs |  |
+| `ci.job` | ci_telemetry/records.rs | daemon | logs |  |
+| `ci.duration` | ci_telemetry/records.rs | daemon | metrics (histogram) |  |
+| `ci.job.log` | ci_telemetry/logs.rs | daemon | logs | Gated off by default: `autonomous.ciTelemetry.logCaptureEnabled` (see [ci-observability](ci-observability.md)). Zero rows on a host without it is expected. |
+| `metric.points` | observability/ops.rs | daemon | metrics (grouped points) |  |
+| `session.output` | observability/session_output.rs | daemon | logs | Gated off by default: `observability.liveOutput.enabled` / `LOOM_OBSERVABILITY_LIVE_OUTPUT=1`, and needs an OTLP exporter (see [session-output](session-output.md)). Zero rows on a host without it is expected. |
+| `auto_update.tick` | auto_update/tick_telemetry.rs | daemon | logs |  |
+| `pick.decision` | observability/pick_decision.rs | daemon | logs |  |
+| `pass.verdict` | observability/step_verdict.rs | daemon | logs |  |
+| `token_ranking.refresh` | token_ranking_refresh/telemetry.rs | daemon | logs |  |
+| `host.export` | observability/collector.rs | daemon | logs |  |
+| `checkout.external_change` | fleet_sync/checkout_ff/external_change.rs | daemon | logs |  |
+| `roster.change` | fleet_sync/roster_clone.rs | daemon | logs |  |
+| `issue.estimate` | telemetry/kinds/issue_estimate/observe.rs | daemon | logs | Observed from curated issues by the intake pass (#12118). |
+| `stage.work_started` | observability/work_started.rs | daemon | logs |  |
+| `completion.narrated` | safehouse/completion_runtime.rs | daemon | logs |  |
+| `write_scope.refused` | write_scope.rs | daemon | logs |  |
+| `daemon.exit` | observability/daemon_exit.rs | daemon | logs |  |
+| `daemon.run_state_request` | observability/run_state_request.rs | daemon | logs |  |
+| `scope.memory` | observability/ops/scope_memory.rs | daemon | logs |  |
+| `host.status` | observability/collector.rs | daemon | metrics (gauges) |  |
+| `checkout.freshness` | fleet_sync/checkout_ff/freshness.rs, daemon_root_freshness.rs | daemon | logs |  |
+| `merge_queue.event` | forge_merge_queue/events.rs | daemon | logs |  |
+| `merge.authorization.evaluated` | forge_merge_queue/group_run.rs | daemon | logs |  |
+| `hold.transition` | observability/hold_transition.rs | daemon | logs |  |
+| `merge.lane_wait` | observability/lane_wait.rs | daemon | logs |  |
+| `champion.run` | observability/step_verdict.rs | daemon | logs |  |
+| `merge.queue.observed` | forge_merge_queue/group_github.rs | daemon | logs |  |
+| `merge.queue.regime` | forge_merge_queue/group_run.rs | daemon | logs |  |
+| `eta.dispatch_eligibility` | observability/dispatch_eligibility.rs | daemon | logs |  |
+| `eta.dispatch_state` | observability/dispatch_state.rs | daemon | logs |  |
+| `alert.transition` | alerts/mod.rs, observability/standalone_ops.rs | daemon | logs |  |
+| `eta.stage_occupancy` | observability/stage_occupancy.rs | daemon | logs |  |
+| `eta.stage_entry` | observability/stage_entry_fact.rs | daemon | logs |  |
+
 
 ## 4. The backend: deploy your own Cloudflare Worker
 
