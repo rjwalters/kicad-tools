@@ -1085,6 +1085,53 @@ class TestRemoveOrphans:
         board = PCB.load(pcb)
         assert board.get_footprint("D1") is None
 
+    @staticmethod
+    def _pcb_with_furniture(attr: str) -> str:
+        base = PCB_WITH_ORPHAN.rstrip()
+        assert base.endswith(")")
+        extra = (
+            '  (footprint "Fiducial:Fid_1mm"\n'
+            '    (layer "F.Cu")\n    (uuid "fp-fid1")\n    (at 90 90)\n'
+            f"    (attr {attr})\n"
+            '    (property "Reference" "FID1" (at 0 -1.5 0) (layer "F.SilkS"))\n'
+            '    (property "Value" "Fiducial" (at 0 1.5 0) (layer "F.Fab"))\n'
+            '    (pad "1" smd circle (at 0 0) (size 1 1) (layers "F.Cu"))\n'
+            "  )\n"
+        )
+        return base[:-1] + extra + ")\n"
+
+    @pytest.mark.parametrize("force", [False, True])
+    def test_board_only_footprint_survives_remove_orphans(self, tmp_path, force):
+        """board_only furniture is never an orphan; a real orphan is still removed (#8551)."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+        from kicad_tools.schema.pcb import PCB
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(MINIMAL_SCHEMATIC)
+        pcb.write_text(self._pcb_with_furniture("smd board_only"))
+
+        result = sync_netlist(sch, pcb, dry_run=False, remove_orphans=True, force=force)
+
+        assert [r.reference for r in result.removed] == ["D1"]
+        assert not any(o.reference == "FID1" for o in result.orphaned)
+        board = PCB.load(pcb)
+        assert board.get_footprint("FID1") is not None
+        assert board.get_footprint("D1") is None
+
+    def test_non_board_only_attr_still_orphan(self, tmp_path):
+        """Footprints with other attrs (exclude_from_bom) are still orphans (#8551)."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(MINIMAL_SCHEMATIC)
+        pcb.write_text(self._pcb_with_furniture("smd exclude_from_bom"))
+
+        result = sync_netlist(sch, pcb, dry_run=True, remove_orphans=True)
+
+        assert sorted(r.reference for r in result.removed) == ["D1", "FID1"]
+
     def test_remove_orphans_no_orphans_is_noop(self, tmp_path):
         """--remove-orphans with no orphans is a clean no-op."""
         from kicad_tools.cli.pcb_sync_netlist import sync_netlist

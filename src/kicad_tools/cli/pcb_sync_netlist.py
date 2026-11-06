@@ -151,8 +151,13 @@ def sync_netlist(
 
     # Build PCB component dict: ref -> footprint info
     pcb_refs: dict[str, dict[str, str]] = {}
+    board_only_refs: set[str] = set()
     for fp in pcb.footprints:
         if fp.reference and not fp.reference.startswith("#"):
+            if "board_only" in fp.attr_flags:
+                # Fiducials, mounting holes, logos: intentionally have no
+                # schematic symbol, so they are never orphans (issue #8551).
+                board_only_refs.add(fp.reference)
             pcb_refs[fp.reference] = {
                 "footprint": fp.name,
                 "value": fp.value,
@@ -214,7 +219,7 @@ def sync_netlist(
 
     # --- Detect renames via value+footprint matching ---
     missing_refs = sch_ref_set - pcb_ref_set
-    extra_refs = pcb_ref_set - sch_ref_set
+    extra_refs = pcb_ref_set - sch_ref_set - board_only_refs
 
     # Try to match missing schematic refs to extra PCB refs by value+footprint
     rename_map: dict[str, str] = {}  # pcb_old_ref -> sch_new_ref
