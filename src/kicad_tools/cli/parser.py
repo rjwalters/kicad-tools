@@ -2715,6 +2715,17 @@ def _add_pcb_parser(subparsers) -> None:
     pcb_prune.add_argument(
         "--dry-run", action="store_true", help="Report changes without modifying files"
     )
+    pcb_prune.add_argument(
+        "--nets",
+        metavar="NET[,NET...]",
+        help="Only prune these nets (comma-separated names); other copper is untouched",
+    )
+    pcb_prune.add_argument(
+        "--region",
+        metavar="x1,y1,x2,y2",
+        help="Only apply a net's plan when every edit lies inside this box (mm); "
+        "plans straddling it are skipped and reported as region_skipped",
+    )
     pcb_prune.add_argument("--no-drc", action="store_true", help="Skip kicad-cli DRC verification")
     pcb_prune.add_argument(
         "--project",
@@ -4970,6 +4981,11 @@ def _add_place_silk_refs_parser(subparsers) -> None:
         "--allow-rotate",
         action="store_true",
         help="Also try a 90-degree rotated orientation when the original does not fit",
+    )
+    place_refs_parser.add_argument(
+        "--refs",
+        metavar="REF[,REF...]",
+        help="Comma-separated reference designators to move; others stay put as obstacles",
     )
     place_refs_parser.add_argument(
         "-o", "--output", help="Output file path (default: overwrite input)"

@@ -608,3 +608,40 @@ def test_placer_clear_rotated_reference_is_checker_clear(tmp_path, angle, fp_ang
     report = check_all_silkscreen(PCB.load(path), _rules())
     flagged = [v for v in report.violations if v.rule_id in ("silk_over_copper", "silk_overlap")]
     assert flagged == [], [tuple(v.items) for v in flagged]
+
+
+# ---------------------------------------------------------------------------
+# --refs scoping (issue #8547)
+# ---------------------------------------------------------------------------
+
+
+class TestRefsScope:
+    @staticmethod
+    def _positions(path: Path) -> dict[str, tuple[float, float]]:
+        pcb = PCB.load(path)
+        out = {}
+        for fp in pcb.footprints:
+            t = next((t for t in fp.texts if t.text_type == "reference"), None)
+            if t is not None:
+                out[fp.reference] = (t.position[0], t.position[1])
+        return out
+
+    def test_refs_moves_only_named_ref(self, dense_pcb: Path, tmp_path: Path):
+        full = tmp_path / "full.kicad_pcb"
+        assert cli_main([str(dense_pcb), "-o", str(full), "--quiet"]) == 0
+        before = self._positions(dense_pcb)
+        moved = {r for r, p in self._positions(full).items() if p != before[r]}
+        assert len(moved) >= 2, "fixture must move several refs for this test to mean anything"
+
+        target = sorted(moved)[0]
+        scoped = tmp_path / "scoped.kicad_pcb"
+        assert cli_main([str(dense_pcb), "--refs", target, "-o", str(scoped), "--quiet"]) == 0
+        after = self._positions(scoped)
+        assert {r for r, p in after.items() if p != before[r]} == {target}
+
+    def test_unknown_or_empty_refs_error(self, dense_pcb: Path, capsys):
+        original = dense_pcb.read_bytes()
+        assert cli_main([str(dense_pcb), "--refs", "ZZ99"]) == 1
+        assert "ZZ99" in capsys.readouterr().err
+        assert cli_main([str(dense_pcb), "--refs", " , "]) == 1
+        assert dense_pcb.read_bytes() == original
