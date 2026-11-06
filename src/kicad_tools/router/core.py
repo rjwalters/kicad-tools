@@ -99,7 +99,13 @@ from .cache import (
     transform_routes,
 )
 from .congestion_estimator import CongestionEstimator
-from .cpp_backend import CppGrid, CppPathfinder, create_hybrid_router, get_backend_info
+from .cpp_backend import (
+    STAGE_FALLBACK_BUDGET_FRACTION,
+    CppGrid,
+    CppPathfinder,
+    create_hybrid_router,
+    get_backend_info,
+)
 from .diffpair import DifferentialPair, DifferentialPairConfig, LengthMismatchWarning
 from .diffpair_length import DiffPairLengthTracker
 from .diffpair_length_tuning import DiffPairTuneResult
@@ -12769,6 +12775,15 @@ class Autorouter:
             # Floored above 0: a falsy ``timeout`` means "unbudgeted" below.
             _excursion_left = max(_wall_deadline.MIN_SEARCH_TIMEOUT_S, _excursion_left)
             timeout = min(timeout, _excursion_left) if timeout else _excursion_left
+
+        # Issue #8485: cap this stage's total pure-Python fallback spend at a
+        # fraction of its budget.  Past the cap only REPEAT fallbacks (of
+        # requests whose Python A* already failed) are skipped; first
+        # attempts still run.  Untimed stages stay uncapped.
+        if hasattr(self.router, "set_python_fallback_stage_budget"):
+            self.router.set_python_fallback_stage_budget(
+                STAGE_FALLBACK_BUDGET_FRACTION * float(timeout) if timeout else None
+            )
 
         # If hierarchical mode is requested, delegate to two-phase routing.
         #

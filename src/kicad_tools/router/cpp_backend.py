@@ -44,6 +44,19 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Issue #8485: Python-fallback repeat bounds.  A REPEAT fallback of a request
+# whose Python A* already failed runs on ``FRACTION`` of the first attempt's
+# wall time (never below ``FLOOR``) instead of the full per-net timeout, and a
+# timed negotiated stage caps its total fallback spend at ``STAGE_FRACTION``
+# of the stage ``--timeout``; past that cap repeats are skipped outright.
+# First attempts of never-tried requests always keep their full budget.
+REPEAT_FALLBACK_BUDGET_FRACTION: float = 0.10
+REPEAT_FALLBACK_BUDGET_FLOOR_S: float = 5.0
+# Under ``--deterministic-budget`` the repeat is bounded by
+# ``FRACTION`` of the tuned per-net iteration cap instead (never below this).
+REPEAT_FALLBACK_ITERATION_FLOOR: int = 10_000
+STAGE_FALLBACK_BUDGET_FRACTION: float = 0.15
+
 # Required C++ binding-surface version (Issue #2501).
 #
 # This MUST match ``ROUTER_CPP_BUILD_VERSION`` in
@@ -1601,6 +1614,24 @@ class CppPathfinder:
         self._python_fallback_seconds_by_net: dict[str, float] = {}
         self._python_drained_nets: dict[tuple, float] = {}
         self._python_fallback_repeat_skips: int = 0
+        # Issue #8485: every pad-pair request whose Python A* returned no
+        # route for ANY reason -- drained or, the case the two memos above
+        # miss, ended by the per-net wall-clock deadline.  A deadline-ended
+        # search records no proof, so before #8485 it re-ran at the full
+        # per-net budget (100-650 s on a 97-net HV board) every negotiated
+        # iteration.  Key: :meth:`_python_unreachable_key`.  Value: seconds
+        # the FIRST failed attempt took (kept, so the reduced repeat budget
+        # does not decay).  Cleared for a request when a fallback routes it.
+        self._python_failed_attempts: dict[tuple, float] = {}
+        self._python_fallback_reduced_repeats: int = 0
+        self._python_fallback_reduced_seconds_saved: float = 0.0
+        # Issue #8485: stage-level fallback budget.  ``None`` = no cap (the
+        # default outside a timed negotiated stage).  Once the stage's
+        # fallback spend reaches it, REPEAT fallbacks of already-failed
+        # requests are skipped; first attempts of new requests still run.
+        self._python_fallback_stage_budget: float | None = None
+        self._python_fallback_stage_spent: float = 0.0
+        self._python_fallback_stage_budget_skips: int = 0
         # Issue #6329: nets whose search was ended by a per-net WALL-CLOCK
         # deadline while the tuned per-net iteration cap was active (i.e.
         # under ``--deterministic-budget``).  Net name -> what bound.  Each
@@ -4473,6 +4504,60 @@ class CppPathfinder:
                 min(per_net_timeout, remaining) if per_net_timeout is not None else remaining
             )
 
+        # Issue #8485: bound REPEAT fallbacks of a request whose Python A*
+        # already failed without a proof (typically ended by the per-net
+        # wall-clock deadline, which the #6098 / #8370 memos never record).
+        # The first attempt of every request keeps its full budget -- the
+        # Python search's different expansion rescues real nets there
+        # (#3456/#3956) and a C++ drain is NOT a proof for it.  A repeat gets
+        # a small fraction of what the first attempt spent, and none at all
+        # once the stage's fallback budget is spent.  Never in relief-probe
+        # mode.  Opt out: KICAD_ROUTER_SKIP_REPEAT_FALLBACK=0.
+        _bound_repeats = (
+            not self._relief_mode
+            and os.environ.get("KICAD_ROUTER_SKIP_REPEAT_FALLBACK", "1").strip() != "0"
+        )
+        _prior_failed_s = self._python_failed_attempts.get(_pair_key) if _bound_repeats else None
+        _reduced_budget: float | None = None
+        _reduced_iterations: int | None = None
+        if _prior_failed_s is not None and self._per_net_iteration_cap_active:
+            # ``--deterministic-budget``: bound the repeat by a fraction of the
+            # tuned iteration cap, not by wall time, so the result stays
+            # load-independent (#3881/#6329).  The stage cap is wall-time
+            # based and is therefore not applied here.
+            _reduced_iterations = max(
+                REPEAT_FALLBACK_ITERATION_FLOOR,
+                int(REPEAT_FALLBACK_BUDGET_FRACTION * self._effective_search_iterations),
+            )
+            if _reduced_iterations >= self._effective_search_iterations:
+                _reduced_iterations = None
+        elif _prior_failed_s is not None:
+            if (
+                self._python_fallback_stage_budget is not None
+                and self._python_fallback_stage_spent >= self._python_fallback_stage_budget
+            ):
+                self._python_fallback_stage_budget_skips += 1
+                self._python_fallback_seconds_saved += _prior_failed_s
+                logger.debug(
+                    "Net %s: C++ pathfinder gave up (%s); skipping repeat Python "
+                    "fallback -- stage fallback budget spent (%.1f of %.1fs, "
+                    "issue #8485)",
+                    net_name,
+                    reason,
+                    self._python_fallback_stage_spent,
+                    self._python_fallback_stage_budget,
+                )
+                return None
+            if per_net_timeout is not None and per_net_timeout > 0:
+                _reduced_budget = max(
+                    REPEAT_FALLBACK_BUDGET_FLOOR_S,
+                    REPEAT_FALLBACK_BUDGET_FRACTION * _prior_failed_s,
+                )
+                if _reduced_budget < per_net_timeout:
+                    per_net_timeout = _reduced_budget
+                else:
+                    _reduced_budget = None
+
         # The fallback is actually going to run -- make it LOUD.  This
         # sits after the deadline-exhaustion early-return above so a
         # skipped fallback (no grind) stays quiet, and is suppressed in
@@ -4527,7 +4612,9 @@ class CppPathfinder:
         # route in Python while cutting off the grinders deterministically
         # (load-independent), so more nets get a turn.  ``None`` (no tuned cap)
         # preserves the historical ``cols*rows*4`` self-bound.
-        if self._per_net_iteration_cap_active:
+        if _reduced_iterations is not None:
+            self._py_router._max_iterations_override = _reduced_iterations
+        elif self._per_net_iteration_cap_active:
             self._py_router._max_iterations_override = self._effective_search_iterations
         else:
             self._py_router._max_iterations_override = None
@@ -4615,6 +4702,20 @@ class CppPathfinder:
                 and getattr(self._py_router, "last_route_exhausted", False) is True
             ):
                 self._python_drained_nets[_pair_key] = dt
+            # Issue #8485: failed-attempt record (any failure cause), the
+            # reduced-repeat saving, and the stage fallback spend.
+            self._python_fallback_stage_spent += dt
+            if route is None:
+                self._python_failed_attempts.setdefault(_pair_key, dt)
+            else:
+                self._python_failed_attempts.pop(_pair_key, None)
+            if _prior_failed_s is not None and (
+                _reduced_budget is not None or _reduced_iterations is not None
+            ):
+                self._python_fallback_reduced_repeats += 1
+                _saved = max(0.0, _prior_failed_s - dt)
+                self._python_fallback_reduced_seconds_saved += _saved
+                self._python_fallback_seconds_saved += _saved
 
         # Issue #6098: record a drained search as an unreachability proof for
         # this request on the current grid state.  ``route`` does not mutate
@@ -4845,6 +4946,21 @@ class CppPathfinder:
             hash(tuple(repr(z) for z in self._attach_zones)),
         )
 
+    def set_python_fallback_stage_budget(self, seconds: float | None) -> None:
+        """Start a fallback stage with a total fallback-seconds cap (Issue #8485).
+
+        Resets the stage spend.  ``None`` / ``<= 0`` removes the cap.  Once
+        the stage's fallback spend reaches the cap, repeat fallbacks of
+        requests whose Python A* already failed are skipped; first attempts
+        of never-tried requests still run.  Reported as
+        ``python_fallback_stage_budget_s`` / ``python_fallback_stage_spent_s``
+        in :attr:`fallback_stats`.
+        """
+        self._python_fallback_stage_budget = (
+            float(seconds) if seconds is not None and seconds > 0 else None
+        )
+        self._python_fallback_stage_spent = 0.0
+
     def set_relief_mode(self, enabled: bool) -> None:
         """Enable/disable the relief-probe mode (Issue #3438).
 
@@ -4921,6 +5037,22 @@ class CppPathfinder:
                   because the Python A* had already drained for that net after
                   a C++ NO_PATH / PAIRWISE_BLOCKED (seconds saved are added to
                   ``python_fallback_seconds_saved``).
+                - python_fallback_reduced_repeats: Issue #8485.  Repeat
+                  fallbacks of a request whose Python A* already failed (any
+                  cause, including the per-net deadline) that ran on the
+                  reduced repeat budget instead of the full per-net timeout.
+                - python_fallback_reduced_seconds_saved: Issue #8485.  First
+                  attempt seconds minus reduced-repeat seconds, summed (also
+                  added to ``python_fallback_seconds_saved``).
+                - python_fallback_stage_budget_s: Issue #8485.  Stage-level
+                  fallback budget in seconds, or ``None`` when uncapped.
+                - python_fallback_stage_spent_s: Issue #8485.  Fallback
+                  seconds spent in the current stage (since the budget was
+                  last set; whole run when it never was).
+                - python_fallback_stage_budget_skips: Issue #8485.  Repeat
+                  fallbacks skipped because the stage budget was spent (their
+                  first-attempt seconds are added to
+                  ``python_fallback_seconds_saved``).
         """
         return {
             "fallback_count": self._fallback_count,
@@ -4939,6 +5071,11 @@ class CppPathfinder:
             "python_fallback_seconds_saved": self._python_fallback_seconds_saved,
             "python_fallback_seconds_by_net": dict(self._python_fallback_seconds_by_net),
             "python_fallback_repeat_skips": self._python_fallback_repeat_skips,
+            "python_fallback_reduced_repeats": self._python_fallback_reduced_repeats,
+            "python_fallback_reduced_seconds_saved": self._python_fallback_reduced_seconds_saved,
+            "python_fallback_stage_budget_s": self._python_fallback_stage_budget,
+            "python_fallback_stage_spent_s": self._python_fallback_stage_spent,
+            "python_fallback_stage_budget_skips": self._python_fallback_stage_budget_skips,
             "wall_bound_under_cap": dict(self._wall_bound_under_cap),
         }
 
