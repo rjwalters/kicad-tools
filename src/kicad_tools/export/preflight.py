@@ -1743,11 +1743,21 @@ class PreflightChecker:
         # BOM references (non-virtual, non-DNP)
         bom_refs = {item.reference for item in bom.items if not item.is_virtual and not item.dnp}
 
-        # PCB footprint references
+        # PCB footprint references.  Footprints that declare themselves absent
+        # from the BOM (``exclude_from_bom``) or board-only (``board_only``),
+        # e.g. fiducials, are intentionally not in the BOM, so they are not
+        # orphans.  Only the orphan (PCB-not-BOM) side is relaxed: a BOM ref
+        # is matched against *every* footprint, so it never FAILs because of
+        # attributes.
         pcb_refs = {fp.reference for fp in self._pcb.footprints}
+        orphan_candidates = {
+            fp.reference
+            for fp in self._pcb.footprints
+            if not (fp.exclude_from_bom or "board_only" in fp.attr_flags)
+        }
 
         in_bom_not_pcb = bom_refs - pcb_refs
-        in_pcb_not_bom = pcb_refs - bom_refs
+        in_pcb_not_bom = orphan_candidates - bom_refs
 
         issues: list[str] = []
         status: Literal["OK", "WARN", "FAIL"] = "OK"
