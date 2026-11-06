@@ -9,6 +9,9 @@ Binding constraints (each is enforced in code and covered by a test):
 * **Attended only.** :func:`require_attended` refuses without an interactive TTY;
   the page comes from the operator's own signed-in Chrome over CDP
   (:func:`connect_attended_page`). There is no headless or CI entry point.
+* **One driver per browser.** :func:`browser_lock` holds a per-CDP-port lock
+  file (stale after :data:`LOCK_STALE_AFTER_S` or a dead holder) so a second
+  agent cannot drive the same signed-in session mid-order (issue #8465).
 * **Human pace.** One action at a time, :meth:`SitePage.wait_settled` after each,
   no parallel tabs, no polling loop, no retry.
 * **UI only.** The :class:`SitePage` protocol has no navigation and no raw HTTP
@@ -31,8 +34,13 @@ attended run is tracked separately.
 from __future__ import annotations
 
 import hashlib
+import json
+import os
+import platform
 import sys
-from collections.abc import Callable, Mapping, Sequence
+import time
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -386,6 +394,86 @@ def guided_checklist(spec: SiteOrderSpec, inputs: SiteInputs) -> list[str]:
         "8. Save to cart and STOP; review the gerber viewer, then place the order yourself",
     ]
     return lines
+
+
+#: A lock older than this is presumed abandoned (a crashed or killed driver).
+LOCK_STALE_AFTER_S = 2 * 60 * 60
+
+
+def default_lock_dir() -> Path:
+    """Where :func:`browser_lock` keeps its lock files (``~/.kct/locks``)."""
+    return Path.home() / ".kct" / "locks"
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+@contextmanager
+def browser_lock(
+    port: int,
+    *,
+    lock_dir: Path | None = None,
+    stale_after_s: float = LOCK_STALE_AFTER_S,
+    now: Callable[[], float] = time.time,
+    pid_alive: Callable[[int], bool] = _pid_alive,
+) -> Iterator[Path]:
+    """Hold the one-driver-per-debug-browser lock for CDP ``port``.
+
+    A second driver attached to the same Chrome could interleave actions on
+    the operator's order mid-flow, so this refuses (``DriverAbort("lock")``)
+    while another driver holds the lock. A lock is taken over only when it is
+    stale: older than ``stale_after_s``, written by a dead process on this
+    host, or unreadable. The lock file is removed on exit only if it is still
+    ours. Nothing here touches the network.
+    """
+    directory = lock_dir or default_lock_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"jlc-cdp-{port}.lock"
+    host = platform.node()
+    mine = {"pid": os.getpid(), "host": host, "port": port, "acquired_at": now()}
+    payload = json.dumps(mine).encode()
+    for attempt in range(2):
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            try:
+                held = json.loads(path.read_text())
+                age = now() - float(held["acquired_at"])
+                holder = int(held["pid"])
+                same_host = held.get("host") == host
+            except (OSError, ValueError, KeyError, TypeError):
+                held, age, holder, same_host = {}, float("inf"), -1, True
+            stale = age > stale_after_s or (same_host and not pid_alive(holder))
+            if not stale or attempt:
+                raise DriverAbort(
+                    "lock",
+                    f"another driver holds the CDP port {port} browser "
+                    f"(pid {held.get('pid', '?')} on {held.get('host', '?')}, "
+                    f"{int(age)}s ago); wait for it, or remove {path} if it is "
+                    "certainly dead",
+                ) from None
+            path.unlink(missing_ok=True)
+            continue
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+        break
+    try:
+        yield path
+    finally:
+        try:
+            if json.loads(path.read_text()).get("pid") == mine["pid"]:
+                path.unlink()
+        except (OSError, ValueError):
+            pass
 
 
 def connect_attended_page(

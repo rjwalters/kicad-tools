@@ -1,4 +1,4 @@
-"""``kct submit-jlcpcb``: agent-prepared JLCPCB PCBA submission (issue #8466).
+"""``kct submit-jlcpcb``: agent-prepared JLCPCB PCBA submission (issues #8465, #8466).
 
 Composes the existing submission plan / stock / upload / review pieces via
 :mod:`kicad_tools.export.submission_workflow`. It never places an order.
@@ -57,6 +57,10 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         help="Print the manual website checklist instead (fallback / kill switch)",
     )
     site.add_argument("--cdp-port", type=int, default=9222, help="Chrome debugging port")
+    site.add_argument(
+        "--lock-dir",
+        help="Directory for the one-driver-per-browser lock (default: ~/.kct/locks)",
+    )
     site.add_argument("--thickness-mm", help="Board thickness, e.g. 1.6 (never guessed)")
     site.add_argument("--outer-copper-oz", help="Outer copper weight, e.g. 1")
     site.add_argument("--inner-copper-oz", help="Inner copper weight (4+ layer boards)")
@@ -115,13 +119,15 @@ def _website_leg(args: argparse.Namespace, result, out: Path) -> int:
 
     try:
         drv.require_attended()
-        page, close = drv.connect_attended_page(args.cdp_port)
-        try:
-            site = drv.run_driver(
-                page, spec, inputs, expected, mapping, get_match_csv, out / "site-screenshots"
-            )
-        finally:
-            close()
+        lock_dir = Path(args.lock_dir) if args.lock_dir else None
+        with drv.browser_lock(args.cdp_port, lock_dir=lock_dir):
+            page, close = drv.connect_attended_page(args.cdp_port)
+            try:
+                site = drv.run_driver(
+                    page, spec, inputs, expected, mapping, get_match_csv, out / "site-screenshots"
+                )
+            finally:
+                close()
     except drv.DriverAbort as exc:
         print(f"ABORTED at {exc.step}: {exc.reason}", file=sys.stderr)
         if exc.screenshot:
@@ -144,6 +150,15 @@ def _website_leg(args: argparse.Namespace, result, out: Path) -> int:
 def run(args: argparse.Namespace) -> int:
     from ..parts.jlcpcb_api import JLCCredentials, JLCOpenAPIClient
 
+    if args.dry_run and args.website:
+        # Issue #8465: a dry run never touches the website. Refuse before the
+        # preflight so nothing is written and nothing is contacted.
+        print(
+            "REFUSED: --dry-run never touches the website; drop --dry-run to run "
+            "--website (without --upload nothing is sent to the API), or use --guided",
+            file=sys.stderr,
+        )
+        return 2
     credentials = JLCCredentials.from_env()
     upload = bool(args.upload)
     covered = [c for c in args.inventory_covered.split(",") if c.strip()]
@@ -167,6 +182,8 @@ def run(args: argparse.Namespace) -> int:
     failures = list(format_stock_failures(result.stock))
     if (args.website or args.guided) and not result.stock.blocked:
         return _website_leg(args, result, Path(args.output))
+    if args.website or args.guided:
+        print("website leg skipped: the stock gate is blocked", file=sys.stderr)
     if getattr(args, "format", "text") == "json":
         print(
             json.dumps(
