@@ -4433,11 +4433,16 @@ _FALLBACK_RECEIPT_KEYS = (
     "python_fallback_proven_skips",
     "python_fallback_seconds_saved",
     "fallback_count",
+    # Issue #8485: reduced-budget repeats and the stage fallback cap.
+    "python_fallback_reduced_repeats",
+    "python_fallback_stage_budget_s",
+    "python_fallback_stage_spent_s",
+    "python_fallback_stage_budget_skips",
 )
 
 
 def _fallback_receipt_fields(router: Any) -> dict[str, Any]:
-    """Small fallback diagnostics for the timeout receipt (issues #8370, #8413).
+    """Small fallback diagnostics for the timeout receipt (issues #8370, #8413, #8485).
 
     Always returns every key in ``_FALLBACK_RECEIPT_KEYS``; a value is ``None``
     when the stats are unavailable (no router, Python backend, or an error), so
