@@ -243,3 +243,32 @@ def test_census_failures_keys_on_relationship(board, monkeypatch):
     assert route_link_cmd._new_census_failures(failing, base) == [
         ("HV", "GND", "conductor", "board")
     ]
+
+
+def test_drc_finding_counts_refills_zones(tmp_path: Path, monkeypatch) -> None:
+    """The gate must DRC against refilled zones (Issue #8525)."""
+    from types import SimpleNamespace
+
+    from kicad_tools.cli import runner
+
+    seen: dict = {}
+
+    def fake_run_drc(pcb_path, report, **kwargs):
+        seen.update(kwargs)
+        report.write_text(json.dumps({"violations": []}))
+        return SimpleNamespace(success=True, stderr="")
+
+    monkeypatch.setattr(runner, "run_drc", fake_run_drc)
+    monkeypatch.setattr(kicad_toolchain, "require_library_environment", lambda *a, **k: None)
+    route_link_cmd._drc_finding_counts(tmp_path / "x.kicad_pcb")
+    assert seen["refill_zones"] is True
+
+
+def test_drc_rollback_reason_names_items(board, capsys, toolchain_ok, monkeypatch):
+    """The rollback reason keeps the type prefix and names the offending items."""
+    _fake_gate(monkeypatch, bad_nets=["SIGA"])
+    rc, doc = _run(capsys, str(board), "--link", LINK_A)
+    assert rc == 1
+    reason = doc["links"][0]["reason"]
+    assert reason.startswith("1 new DRC violation(s): clearance")
+    assert "[clearance: SIGA]" in reason

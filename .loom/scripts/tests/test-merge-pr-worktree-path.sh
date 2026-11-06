@@ -910,6 +910,47 @@ for ni_branch in fix/foo-bar feature/issue-8195-slice-13; do
     fi
 done
 
+# --- Test 11: ignored-data guard on the --worktree-path override (#13599) ---
+#
+# `git status --porcelain` never lists ignored files, so a non-Loom worktree
+# whose only valuable content is gitignored used to be force-removed. The REAL
+# wrapper and verb against a real override worktree.
+ig_run() { # <ignored-file-rel-path> <remove-ignored:true|false> -> sets IG_OUT, IG_WT
+    sim_repo
+    IG_WT="$SIM_D/ovr"; sim_wt "$IG_WT" "feature/ovr" false
+    printf 'node_modules/\nresults/\n' >> "$R/.git/info/exclude"
+    mkdir -p "$IG_WT/$(dirname "$1")"; echo data > "$IG_WT/$1"
+    # shellcheck disable=SC2034  # read by the extracted wrapper
+    REPO_ROOT="$R"; PR_NUMBER=777; PR_BRANCH="feature/ovr"; PR_HEAD_SHA="0000000000000000000000000000000000000000"
+    CLEANUP_WORKTREE=true; WORKTREE_PATH_OVERRIDE="$IG_WT"
+    PMC_CLOSE_TARGETS="999"; PMC_ISSUE_STATE=""
+    REMOVE_IGNORED="$2"
+    IG_OUT="$(LOOM_PRESERVE_WORKTREE=0 _post_merge_cleanup 2>&1)" || true
+    REMOVE_IGNORED=false
+}
+
+ig_run "results/out.json" false
+if [[ -f "$IG_WT/results/out.json" && "$IG_OUT" == *"ignored-data guard"* && "$IG_OUT" == *"results/"* \
+      && "$IG_OUT" == *"KiB"* && "$IG_OUT" == *"--remove-ignored"* && "$IG_OUT" != *"Removing worktree"* ]]; then
+    pass "T11a: ignored non-artifact data keeps the override worktree, lists it with a size, names the flag"
+else
+    fail "T11a: expected a kept worktree and a guard message; got: $IG_OUT"
+fi
+
+ig_run "results/out.json" true
+if [[ ! -d "$IG_WT" ]]; then
+    pass "T11b: --remove-ignored removes the same worktree"
+else
+    fail "T11b: expected removal with --remove-ignored; got: $IG_OUT"
+fi
+
+ig_run "node_modules/pkg/index.js" false
+if [[ ! -d "$IG_WT" ]]; then
+    pass "T11c: only allowlisted artifacts (node_modules) are ignored -> removed without the flag"
+else
+    fail "T11c: node_modules must not trigger the guard; got: $IG_OUT"
+fi
+
 # --- Summary ---
 echo ""
 echo "Tests run: $TESTS_RUN, Passed: $TESTS_PASSED, Failed: $TESTS_FAILED"

@@ -216,7 +216,7 @@ supplied the value.
 
 ## Where fleet config lives
 
-Tier 1 (fleet-gitops `config.defaults` / `config.hosts.<h>`, rendered to the
+Tier 1 (the fleet state store `config.defaults` / `config.hosts.<h>`, rendered to the
 machine-level `defaults.json`) is where fleet-wide settings are decided. Config
 resolution is plain tier order and nothing else: tier 1 < `.loom/config.json`
 < `.loom-project/project.json` < `.loom-local/fleet-repo.json` (the per-repo
