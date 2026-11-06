@@ -359,7 +359,7 @@ def test_legacy_uuid_keyed_waiver_lists_geometry_keys(tmp_path, capsys):
         pcb,
         {
             "key": "clearance_segment_via|Trace-7ebe780f,Via-3b0d0dc9|GND,NET1|F.Cu",
-            "evidence_hash": "ev2:0123456789abcdef",
+            "evidence_hash": "ev3:0123456789abcdef",
             "reason": "r",
             "reviewer": "ee",
             "date": "2026-10-06",
@@ -397,7 +397,7 @@ def test_unused_geometry_keyed_waiver_gets_no_rewaive_hint(tmp_path, capsys):
                 "clearance_segment_via|Trace@F.Cu:w0.25:1/1~2/1,"
                 "Via@9/9:F.Cu-B.Cu:d0.3/s0.6|GND,NET1|F.Cu"
             ),
-            "evidence_hash": "ev2:0123456789abcdef",
+            "evidence_hash": "ev3:0123456789abcdef",
             "reason": "r",
             "reviewer": "ee",
             "date": "2026-10-06",

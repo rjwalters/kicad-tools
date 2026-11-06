@@ -149,7 +149,7 @@ def test_stale_evidence_waiver_leaves_finding_blocking(tmp_path, monkeypatch):
                         "items": ["C1", "R1"],
                         "reason": "ok",
                         "issue": "x#1",
-                        "evidence_hash": "ev2:0000000000000000",
+                        "evidence_hash": "ev3:0000000000000000",
                     }
                 ],
             }
