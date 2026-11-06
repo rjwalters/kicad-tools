@@ -923,7 +923,7 @@ def _floating_islands(items: Sequence[tuple[Any, str]]) -> list[tuple[Any, str]]
     separate (a union of far-apart fiducials is NOT one conductor).  Each island
     is labelled by the lexicographically first item label that intersects it.
     """
-    from shapely.ops import unary_union
+    from shapely.ops import unary_union  # type: ignore[import-untyped]
 
     if not items:
         return []
@@ -1004,7 +1004,7 @@ def _witness(
     label (e.g. ``"Edge.Cuts"``).  ``None`` when either geometry is empty.
     """
     from shapely.geometry import Point
-    from shapely.ops import nearest_points  # type: ignore[import-untyped]
+    from shapely.ops import nearest_points
 
     if geom_a.is_empty or geom_b.is_empty:
         return None
