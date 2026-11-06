@@ -34,6 +34,7 @@ import hashlib
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlparse
@@ -267,13 +268,14 @@ class _Run:
             raise DriverAbort(key, f"selector missing: {selector}")
         return selector
 
-    def set_enum(self, key: str, wanted: str) -> None:
+    def set_enum(self, key: str, wanted: str) -> dict[str, Any]:
         selector = self.need(key)
         if wanted not in list(self.page.options(selector)):
             raise DriverAbort(key, f"option {wanted!r} not offered; refusing to guess")
         self.page.select(selector, wanted)
         if self.page.value(selector) != wanted:
             raise DriverAbort(key, f"read-back {self.page.value(selector)!r} != {wanted!r}")
+        return {"value": wanted}
 
     def upload(self, key: str, path: Path, expected_sha: str, hashes: dict[str, str]) -> None:
         digest = _sha(path)
@@ -308,18 +310,15 @@ def run_driver(
     )
     for key in ("layers", "thickness", "outer_copper", "inner_copper", "quantity"):
         if key in fields:
-            run.step(f"set-{key}", lambda k=key: run.set_enum(k, fields[k]) or {"value": fields[k]})
+            run.step(f"set-{key}", partial(run.set_enum, key, fields[key]))
     run.step("enable-pcba", lambda: run.page.click(run.need("pcba_toggle")))
     run.step(
         "set-pcba-type",
-        lambda: run.set_enum("pcba_type", fields["pcba_type"]) or {"value": fields["pcba_type"]},
+        lambda: run.set_enum("pcba_type", fields["pcba_type"]),
     )
     run.step(
         "set-assembly-side",
-        lambda: (
-            run.set_enum("assembly_side", fields["assembly_side"])
-            or {"value": fields["assembly_side"]}
-        ),
+        lambda: run.set_enum("assembly_side", fields["assembly_side"]),
     )
     run.step(
         "upload-bom", lambda: run.upload("bom_input", inputs.bom, inputs.sha256["bom"], hashes)
@@ -327,7 +326,11 @@ def run_driver(
     run.step(
         "upload-cpl", lambda: run.upload("cpl_input", inputs.cpl, inputs.sha256["cpl"], hashes)
     )
-    run.step("await-match", lambda: run.need("match_ready") and None)
+
+    def await_match() -> None:
+        run.need("match_ready")
+
+    run.step("await-match", await_match)
 
     # The operator downloads JLC's part-matching export themselves; we only read the bytes.
     report = compare_factory_selection(
@@ -395,7 +398,7 @@ def connect_attended_page(
     """
     require_attended()
     try:
-        from playwright.sync_api import sync_playwright
+        from playwright.sync_api import sync_playwright  # type: ignore[import-not-found]
     except ImportError as exc:
         raise DriverAbort("connect", "playwright is not installed; use --guided") from exc
     pw = sync_playwright().start()

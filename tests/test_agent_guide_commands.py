@@ -51,6 +51,7 @@ PLACEHOLDERS = {
     "<board>": "boards/demo",
     "<board.kicad_pcb>": "board.kicad_pcb",
     "<dir>": "out",
+    "<out>": "out",
     "<mm>": "6.4",
     "<csv>": "F.Cu,B.Cu",
     "<hv-net>": "HV_BUS",
