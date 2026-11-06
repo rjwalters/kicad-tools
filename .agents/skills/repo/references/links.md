@@ -478,7 +478,7 @@ is branch-blind.
 fixes where a sweep cannot take them".** Follow it exactly as written — the
 `loom_managed` detection, the four destinations in order (dedicated issue
 worktree / `chore/repo-hygiene-<date>` branch + PR in a worktree off
-`origin/<default>` when the default branch is PR-protected or the operator asks
+`origin/<default>` when the default branch is PR-protected (or the repo is Loom-managed) or the operator asks
 / commit on an otherwise-clean current branch / uncommitted plus a warning), the
 `.loom-managed`-sentinel rule for the hygiene worktree, and the quarantine
 recovery path. It is not restated here so the two copies cannot drift apart.

@@ -11,6 +11,7 @@ import pytest
 from kicad_tools.validate import DRCResults, DRCViolation
 from kicad_tools.validate.evidence import (
     EVIDENCE_HASH_PREFIX,
+    EVIDENCE_HASH_VERSION,
     EvidenceContext,
     compute_evidence_hash,
     evidence_payload,
@@ -369,11 +370,12 @@ class TestExactRuleRadius:
 
 
 class TestVersionedHash:
-    def test_prefix_is_ev2(self):
-        assert EVIDENCE_HASH_PREFIX == "ev2:"
-        assert _hash(_board()).startswith("ev2:")
+    def test_prefix_is_ev3(self):
+        assert EVIDENCE_HASH_PREFIX == "ev3:"
+        assert _hash(_board()).startswith("ev3:")
         assert is_outdated_evidence_hash("ev1:abcdef")
-        assert not is_outdated_evidence_hash("ev2:abcdef")
+        assert is_outdated_evidence_hash("ev2:abcdef")
+        assert not is_outdated_evidence_hash("ev3:abcdef")
         assert not is_outdated_evidence_hash(None)
 
     def _apply(self, recorded: str):
@@ -395,11 +397,42 @@ class TestVersionedHash:
         finding, stale = self._apply("ev1:0123456789abcdef")
         assert not finding.waived
         assert "outdated evidence version" in stale.message
-        assert "ev1" in stale.message and "ev2" in stale.message
+        assert "ev1" in stale.message and "ev3" in stale.message
         assert finding.to_dict()["stale_waiver_cause"] == "outdated_evidence_version"
 
+    def test_ev2_waiver_on_origin_offset_board_reports_outdated_version(self):
+        # Issue #8517: ev2 hashes were computed from board-relative locations;
+        # the frame is sheet-absolute now, so an ev2 waiver is outdated, not
+        # "evidence changed".
+        v = _finding(location=(110.5, 120.0))
+        entry = {
+            "key": v.key,
+            "evidence_hash": "ev2:0123456789abcdef",
+            "reason": "reviewed",
+            "reviewer": "ee",
+            "date": "2026-10-06",
+        }
+        results = DRCResults(violations=[replace(v, evidence_hash=_hash(_board(), v))])
+        apply_waivers(results, waivers_from_dict({"version": 3, "waivers": [entry]}))
+        finding = next(f for f in results.violations if f.rule_id == v.rule_id)
+        (stale,) = [f for f in results.violations if f.rule_id == WAIVER_STALE_RULE_ID]
+        assert "outdated evidence version" in stale.message
+        assert finding.to_dict()["stale_waiver_cause"] == "outdated_evidence_version"
+
+    def test_mistake_hash_ev2_m1_is_outdated(self):
+        assert is_outdated_evidence_hash("ev2.m1:abcdef")
+        assert not is_outdated_evidence_hash("ev3.m1:abcdef")
+
+    def test_golden_hash_pins_recipe_and_version(self):
+        # If this fails, you changed the evidence recipe (or the frame of the
+        # locations it hashes): bump ``EVIDENCE_HASH_VERSION`` and update the
+        # pinned hash below together.
+        v = _finding(location=(110.5, 120.0), closest_locations=((110.4, 120.0),))
+        assert EVIDENCE_HASH_VERSION == "ev3"
+        assert compute_evidence_hash(v, EvidenceContext(_board())) == "ev3:8647db0e67f57d7d"
+
     def test_same_version_mismatch_reports_evidence_change(self):
-        finding, stale = self._apply("ev2:0123456789abcdef")
+        finding, stale = self._apply("ev3:0123456789abcdef")
         assert "outdated evidence version" not in stale.message
         assert "geometry or nets" in stale.message
         assert finding.to_dict()["stale_waiver_cause"] == "evidence_changed"
@@ -437,4 +470,4 @@ def test_real_board_keys_and_hashes_are_stable(rel, capsys):
 
     assert ids(first) == ids(second)
     assert first["violations"]
-    assert all(v["evidence_hash"].startswith("ev2:") for v in first["violations"])
+    assert all(v["evidence_hash"].startswith("ev3:") for v in first["violations"])
