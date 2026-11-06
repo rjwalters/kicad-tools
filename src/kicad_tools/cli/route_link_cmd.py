@@ -395,7 +395,9 @@ def _drc_finding_counts(pcb_path: Path) -> Any:
 
     with tempfile.TemporaryDirectory(prefix="kct-route-link-") as tmp:
         report = Path(tmp) / "drc.json"
-        result = run_drc(pcb_path, report, format="json", schematic_parity=False)
+        # Refill zones (in-memory; the board file is not saved) so a new via is
+        # checked against fresh plane copper, matching the sign-off convention.
+        result = run_drc(pcb_path, report, format="json", schematic_parity=False, refill_zones=True)
         if not result.success or not report.is_file():
             raise RuntimeError((result.stderr or "kicad-cli DRC failed").strip())
         data = json.loads(report.read_text())
@@ -538,6 +540,12 @@ def _commit_links(
                 reason = f"{sum(new_drc.values())} new DRC violation(s): " + ", ".join(
                     sorted({k[0] or "?" for k in new_drc})
                 )
+                detail = [
+                    f"{k[0] or '?'}: " + "; ".join(k[2])
+                    for k in sorted(new_drc, key=lambda k: (k[0] or "", k[2]))[:3]
+                ]
+                if detail:
+                    reason += " [" + " | ".join(detail) + "]"
             elif census is not None and base_census is not None:
                 new_pairs = _new_census_failures(census, base_census)
                 if new_pairs:
