@@ -61,6 +61,8 @@ PLACEHOLDERS = {
     "<path/to/net_class_map.json>": "net_class_map.json",
     "\u2039board name\u203a": "Demo board",
     "<harness>": HARNESSES[0],
+    "<readiness.json>": "readiness.json",
+    "<name>": "Ann",
 }
 
 # Spans that stand for "some kct command", not a runnable one: ``kct <command>
