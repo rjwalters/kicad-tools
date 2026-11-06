@@ -16,16 +16,6 @@ from typing import TYPE_CHECKING
 
 from kicad_tools.exceptions import ConfigurationError
 
-
-def bare_footprint(footprint: str) -> str:
-    """Strip a ``Library:`` prefix and whitespace from a footprint name.
-
-    JLCPCB's CPL convention is the bare footprint name; the BOM and CPL must
-    agree on one form (Issue #8538).
-    """
-    return footprint.split(":", 1)[-1].strip()
-
-
 if TYPE_CHECKING:
     from ..schema.pcb import Footprint
 
@@ -186,7 +176,7 @@ class JLCPCBPnPFormatter(PnPFormatter):
                 [
                     transformed.reference,
                     transformed.value,
-                    bare_footprint(transformed.footprint),
+                    transformed.footprint,
                     f"{transformed.x:.4f}mm",
                     f"{transformed.y:.4f}mm",
                     f"{transformed.rotation:.1f}",

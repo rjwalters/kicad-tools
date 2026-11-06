@@ -32,7 +32,6 @@ from .pnp import (
     PlacementData,
     PnPExportConfig,
     _aux_origin_of,
-    bare_footprint,
     count_rotation_corrections,
     export_pnp,
     extract_placements,
@@ -512,13 +511,13 @@ class AssemblyPackage:
                     # unchanged -- the assigned value wins (issue #8260).
                     for item in items:
                         assigned = getattr(item, "lcsc", "")
-                        src = existing.get((item.value, bare_footprint(item.footprint)))
+                        src = existing.get((item.value, item.footprint))
                         if assigned and src and src != assigned:
                             conflicts.append(f"{item.reference} (kept {assigned}, source {src})")
                     # Record exempt refs the source would have supplied a
                     # number for (#8282); they are excluded from the merge.
                     for item in items:
-                        src = existing.get((item.value, bare_footprint(item.footprint)))
+                        src = existing.get((item.value, item.footprint))
                         if item.reference in exempt_refs and src:
                             exempt_skipped.append(f"{item.reference} (source {src})")
                     merged_count, csv_merge_refs = apply_existing_lcsc_assignments(

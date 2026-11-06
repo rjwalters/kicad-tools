@@ -40,7 +40,13 @@ from ._fsutil import open_nofollow as _open_nofollow
 from ._fsutil import posix_dir_flags as _posix_dir_flags
 from ._fsutil import supports_dir_fd as _supports_dir_fd
 from .bom_formats import JLCPCBBOMFormatter
-from .pnp import JLCPCBPnPFormatter, bare_footprint
+from .pnp import JLCPCBPnPFormatter
+
+
+def bare_footprint(footprint: str) -> str:
+    """Strip a ``Library:`` prefix and whitespace from a footprint name (Issue #8538)."""
+    return footprint.split(":", 1)[-1].strip()
+
 
 _ROLES = {"gerber", "bom", "cpl"}
 _RESERVED = {"plan.json", "plan.sha256", "expected-matches.json", "bundle-manifest.json"}
