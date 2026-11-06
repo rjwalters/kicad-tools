@@ -1418,13 +1418,29 @@ def dedupe_net_classes(
     """
     if not net_class_map:
         return None
-    seen: set[str] = set()
+    # Group member nets per class, first-seen order (deterministic output).
+    members: dict[str, list[tuple[str, NetClassRouting]]] = {}
+    for net, nc in net_class_map.items():
+        members.setdefault(nc.name, []).append((net, nc))
+
     classes: list[NetClassRouting] = []
-    for nc in net_class_map.values():
-        if nc.name in seen:
+    for entries in members.values():
+        targets = {nc.target_ampacity for _, nc in entries}
+        if len(targets) == 1:
+            # Uniform (or absent) target: a genuine class-level target.
+            classes.append(entries[0][1])
             continue
-        seen.add(nc.name)
-        classes.append(nc)
+        # Mixed targets (#8527): a per-net target must never become a
+        # class-wide floor.  One net-scoped entry per distinct target.
+        by_target: dict[float, list[str]] = {}
+        proto: dict[float, NetClassRouting] = {}
+        for net, nc in entries:
+            if nc.target_ampacity is None:
+                continue
+            by_target.setdefault(nc.target_ampacity, []).append(net)
+            proto.setdefault(nc.target_ampacity, nc)
+        for target, nets in by_target.items():
+            classes.append(replace(proto[target], net_scope=tuple(nets)))
     return classes
 
 
