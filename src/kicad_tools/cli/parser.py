@@ -2980,6 +2980,53 @@ def _add_pcb_parser(subparsers) -> None:
         "dangling_in_library and nothing is inserted",
     )
 
+    # pcb add-fiducials
+    pcb_add_fid = pcb_subparsers.add_parser(
+        "add-fiducials",
+        help="Place global fiducials near the board corners",
+        description="Place >=3 asymmetric, non-collinear global fiducials per "
+        "requested side at copper-free sites outside every courtyard and at "
+        "least --edge-margin from the board edge. Placed footprints are flagged "
+        "board_only/exclude_from_bom/exclude_from_pos_files. Fails without "
+        "writing if any side has no free site.",
+    )
+    pcb_add_fid.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_add_fid.add_argument(
+        "--sides",
+        default="front,back",
+        help="Sides to populate: 'front', 'back', 'front,back' or 'populated' "
+        "(sides that carry BOM parts). Default: front,back",
+    )
+    pcb_add_fid.add_argument("--count", type=int, default=3, help="Fiducials per side (default: 3)")
+    pcb_add_fid.add_argument(
+        "--footprint",
+        default="Fiducial_1mm_Mask2mm",
+        help="Footprint name or Library:Name (default: Fiducial:Fiducial_1mm_Mask2mm)",
+    )
+    pcb_add_fid.add_argument(
+        "--keepout",
+        type=float,
+        default=2.0,
+        metavar="MM",
+        help="Copper-free radius around each fiducial in mm (default: 2.0)",
+    )
+    pcb_add_fid.add_argument(
+        "--edge-margin",
+        type=float,
+        default=3.0,
+        metavar="MM",
+        help="Minimum distance from the board edge in mm (default: 3.0)",
+    )
+    pcb_add_fid.add_argument(
+        "-o", "--output", dest="output", help="Output file path (default: overwrite input PCB)"
+    )
+    pcb_add_fid.add_argument(
+        "--format", choices=["text", "json"], default="text", help="Output format for results"
+    )
+    pcb_add_fid.add_argument(
+        "--dry-run", action="store_true", help="Report chosen sites without writing the PCB"
+    )
+
     # pcb remove-footprint
     pcb_remove_fp = pcb_subparsers.add_parser(
         "remove-footprint",

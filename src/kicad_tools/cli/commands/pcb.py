@@ -20,7 +20,7 @@ def run_pcb_command(args) -> int:
     if not args.pcb_command:
         print("Usage: kicad-tools pcb <command> [options] <file>")
         print(
-            "Commands: summary, footprints, nets, traces, stackup, zones, strip, reinforce, dedupe, prune, reannotate, sync-netlist, annotate-pintypes, add-3d-models, remove-footprint, move-footprint, move-via, transplant, page-fit, center-on-sheet, lock-footprints, unlock-footprints, add-zone, snap-rotation, edit-outline, net-audit, model-audit, diff, export-dsn, import-ses, current-paths-audit"
+            "Commands: summary, footprints, nets, traces, stackup, zones, strip, reinforce, dedupe, prune, reannotate, sync-netlist, annotate-pintypes, add-3d-models, remove-footprint, add-fiducials, move-footprint, move-via, transplant, page-fit, center-on-sheet, lock-footprints, unlock-footprints, add-zone, snap-rotation, edit-outline, net-audit, model-audit, diff, export-dsn, import-ses, current-paths-audit"
         )
         return 1
 
@@ -112,6 +112,10 @@ def run_pcb_command(args) -> int:
     # Handle add-3d-models command
     if args.pcb_command == "add-3d-models":
         return _run_add_3d_models_command(args, pcb_path)
+
+    # Handle add-fiducials command
+    if args.pcb_command == "add-fiducials":
+        return _run_add_fiducials_command(args, pcb_path)
 
     # Handle remove-footprint command
     if args.pcb_command == "remove-footprint":
@@ -1620,6 +1624,24 @@ def _run_add_3d_models_command(args, pcb_path: Path) -> int:
         lcsc_from_bom=getattr(args, "lcsc_from_bom", True),
         bom=Path(args.bom) if getattr(args, "bom", None) else None,
         procurement=Path(args.procurement) if getattr(args, "procurement", None) else None,
+    )
+
+
+def _run_add_fiducials_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb add-fiducials' command."""
+    from kicad_tools.cli.pcb_add_fiducials import run_add_fiducials
+
+    output = getattr(args, "output", None)
+    return run_add_fiducials(
+        pcb_path=pcb_path,
+        sides=args.sides,
+        count=args.count,
+        footprint=args.footprint,
+        keepout=args.keepout,
+        edge_margin=args.edge_margin,
+        dry_run=getattr(args, "dry_run", False),
+        output_path=Path(output) if output else None,
+        output_format=getattr(args, "format", "text"),
     )
 
 
