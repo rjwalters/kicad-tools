@@ -577,3 +577,26 @@ class TestCheckJsonAndReasonNormalization:
         finally:
             monkeypatch.undo()
             importlib.reload(sys.modules["kicad_tools.drc.cpp_backend"])
+
+
+class TestMissingExtensionWarningInTextOutput:
+    """Issue #8519: warnings must reach the text output on the installed path."""
+
+    @pytest.mark.parametrize("skipped", [False, True])
+    def test_warning_shown_when_backend_installed(self, skipped: bool) -> None:
+        result = bnc.BuildResult(success=True)
+        result.backend_installed = True
+        result.skipped = skipped
+        result.so_path = Path("router_cpp.x.so")
+        result.warnings.append(
+            "DRC C++ extension was not built: no root CMakeLists.txt was found.\nsecond detail line"
+        )
+        text = bnc.format_result_text(result)
+        assert "Warning: DRC C++ extension was not built" in text
+        assert "no root CMakeLists.txt" in text
+        assert "    second detail line" in text
+
+    def test_no_warnings_block_when_clean(self) -> None:
+        result = bnc.BuildResult(success=True)
+        result.backend_installed = True
+        assert "Warning" not in bnc.format_result_text(result)

@@ -934,15 +934,32 @@ def build_native(
     return result
 
 
+def _format_warning_lines(warnings: list[str]) -> list[str]:
+    """Render warnings as indented ``Warning:`` blocks."""
+    lines: list[str] = []
+    for warning in warnings:
+        # Issue #4589: warnings are multi-line (reason / probed .so path /
+        # interpreter).  Indent continuation lines so the detail stays
+        # attached to its "Warning:" header.
+        first, *rest = warning.split("\n")
+        lines.append(f"  Warning: {first}")
+        for extra in rest:
+            lines.append(f"    {extra}")
+    return lines
+
+
 def format_result_text(result: BuildResult) -> str:
     """Format build result as text."""
     lines = []
 
     if result.success:
-        if result.skipped:
-            lines.append(
-                "C++ backend already installed -- SKIPPED rebuild (use --force to recompile)"
-            )
+        if result.skipped or result.backend_installed:
+            if result.skipped:
+                lines.append(
+                    "C++ backend already installed -- SKIPPED rebuild (use --force to recompile)"
+                )
+            else:
+                lines.append("C++ backend installed successfully!")
             lines.append("")
             if result.so_path:
                 lines.append(f"  Extension: {result.so_path.name}")
@@ -952,28 +969,16 @@ def format_result_text(result: BuildResult) -> str:
                 lines.append(f"  DRC extension: {result.drc_so_path.name}")
             lines.append("")
             lines.append("Run `kct route --backend cpp` to use the C++ backend.")
-        elif result.backend_installed:
-            lines.append("C++ backend installed successfully!")
-            lines.append("")
-            if result.so_path:
-                lines.append(f"  Extension: {result.so_path.name}")
-            if result.placement_so_path:
-                lines.append(f"  Placement extension: {result.placement_so_path.name}")
-            if result.drc_so_path:
-                lines.append(f"  DRC extension: {result.drc_so_path.name}")
-            lines.append("")
-            lines.append("Run `kct route --backend cpp` to use the C++ backend.")
+            # Issue #8519: warnings (e.g. placement/DRC extension not built)
+            # must be visible even when the router backend installed fine.
+            if result.warnings:
+                lines.append("")
+                lines.append("Warnings:")
+                lines.extend(_format_warning_lines(result.warnings))
         else:
             lines.append("Build completed with warnings.")
             lines.append("")
-            for warning in result.warnings:
-                # Issue #4589: warnings are now multi-line (reason / probed
-                # .so path / interpreter).  Indent continuation lines so the
-                # detail stays attached to its "Warning:" header.
-                first, *rest = warning.split("\n")
-                lines.append(f"  Warning: {first}")
-                for extra in rest:
-                    lines.append(f"    {extra}")
+            lines.extend(_format_warning_lines(result.warnings))
     else:
         lines.append("Build failed.")
         lines.append("")
