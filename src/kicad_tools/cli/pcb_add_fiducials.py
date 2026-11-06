@@ -18,6 +18,7 @@ import json
 import math
 import sys
 from pathlib import Path
+from typing import Any
 
 DEFAULT_FOOTPRINT = "Fiducial_1mm_Mask2mm"
 DEFAULT_LIBRARY = "Fiducial"
@@ -52,7 +53,7 @@ def _side_layers(side: str) -> tuple[str, str]:
 
 def _build_obstacles(pcb, side: str, keepout: float):
     """Return shapely geometries (already inflated by ``keepout``) to avoid on ``side``."""
-    from shapely.geometry import LineString, Point, Polygon, box
+    from shapely.geometry import LineString, Point, Polygon, box  # type: ignore[import-untyped]
 
     from kicad_tools.geometry.courtyard import _courtyard_polygon
     from kicad_tools.validate.rules.via_pad_geometry import pad_absolute_bbox
@@ -106,7 +107,7 @@ def find_sites(pcb, side: str, count: int, keepout: float, edge_margin: float):
         ValueError: if fewer than ``count`` sites exist or they are collinear.
     """
     from shapely.geometry import Point, Polygon
-    from shapely.strtree import STRtree
+    from shapely.strtree import STRtree  # type: ignore[import-untyped]
 
     # PCB.load exposes outline, footprints, tracks and vias in one board-relative frame.
     outline = pcb.get_board_outline()
@@ -166,7 +167,7 @@ def _populated_sides(pcb) -> list[str]:
     sides = []
     for side, layer in (("front", "F.Cu"), ("back", "B.Cu")):
         for fp in pcb.footprints:
-            flags = getattr(fp, "attr_flags", frozenset())
+            flags: frozenset[str] | set[str] = getattr(fp, "attr_flags", frozenset())
             if fp.layer == layer and not fp.exclude_from_bom and "board_only" not in flags:
                 sides.append(side)
                 break
@@ -175,7 +176,8 @@ def _populated_sides(pcb) -> list[str]:
 
 def _next_refs(pcb, n: int) -> list[str]:
     used = {fp.reference for fp in pcb.footprints}
-    refs, i = [], 1
+    refs: list[str] = []
+    i = 1
     while len(refs) < n:
         if f"FID{i}" not in used:
             refs.append(f"FID{i}")
@@ -229,7 +231,7 @@ def run_add_fiducials(
         return 1
 
     refs = _next_refs(pcb, sum(len(v) for v in plan.values()))
-    placed = []
+    placed: list[dict[str, Any]] = []
     lib_id = footprint if ":" in footprint else f"{DEFAULT_LIBRARY}:{footprint}"
     ref_iter = iter(refs)
     if not dry_run:
@@ -252,7 +254,7 @@ def run_add_fiducials(
             for x, y in sites:
                 placed.append({"reference": next(ref_iter), "side": side, "x": x, "y": y})
 
-    result = {
+    result: dict[str, Any] = {
         "pcb": str(pcb_path),
         "footprint": lib_id,
         "dry_run": dry_run,
