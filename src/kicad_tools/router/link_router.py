@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import heapq
 import math
+import re
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -57,6 +58,7 @@ __all__ = [
     "LinkTerminal",
     "append_link_route",
     "append_link_routes",
+    "collapse_link_route",
     "explain_link_failure",
     "padless_components",
     "route_link",
@@ -899,17 +901,70 @@ def append_link_routes(
         return
     from kicad_tools.core.sexp_file import load_pcb, save_pcb
 
+    # Issue #8523: write copper in the board's own net dialect.
+    name_only = _board_is_name_only(pcb_path)
     doc = load_pcb(pcb_path)
     for route in routes:
-        _append_route_nodes(doc, route, origin)
+        _append_route_nodes(doc, route, origin, name_only=name_only)
     save_pcb(doc, pcb_path)
 
 
-def _append_route_nodes(doc: Any, route: LinkRoute, origin: tuple[float, float]) -> None:
+_NAME_ONLY_NET_RE = re.compile(r'\(net\s+"')
+
+
+def _board_is_name_only(pcb_path: Path) -> bool:
+    """True when the board uses KiCad-10 ``(net "name")`` refs (same test as #4416).
+
+    A numeric ``(net N "name")`` table always has a digit after ``(net``, so a
+    quoted-first ref appears only on name-based boards.
+    """
+    try:
+        return bool(_NAME_ONLY_NET_RE.search(Path(pcb_path).read_text()))
+    except OSError:
+        return False
+
+
+def collapse_link_route(route: LinkRoute) -> LinkRoute:
+    """Return a copy of ``route`` with collinear runs and staircases merged (#8523).
+
+    Reuses the ``merge_collinear`` + ``compress_staircase`` passes from #8397,
+    per consecutive same-layer run.  Vias and endpoints are preserved.  No
+    clearance oracle is available here; callers gate the result with DRC.
+    """
+    from dataclasses import replace
+
+    from .optimizer.algorithms import compress_staircase, merge_collinear
+    from .optimizer.config import OptimizationConfig
+    from .primitives import Segment
+
+    cfg = OptimizationConfig()
+    out: list[tuple[float, float, float, float, str]] = []
+    i = 0
+    segs = route.segments
+    while i < len(segs):
+        j = i
+        while j < len(segs) and segs[j][4] == segs[i][4]:
+            j += 1
+        layer = segs[i][4]
+        run = [
+            Segment(x1, y1, x2, y2, route.width, layer, route.net_number, route.net_name)  # type: ignore[arg-type]
+            for x1, y1, x2, y2, _l in segs[i:j]
+        ]
+        run = compress_staircase(merge_collinear(run, cfg), cfg)
+        run = merge_collinear(run, cfg)
+        out.extend((s.x1, s.y1, s.x2, s.y2, layer) for s in run)
+        i = j
+    return replace(route, segments=out, vias=list(route.vias))
+
+
+def _append_route_nodes(
+    doc: Any, route: LinkRoute, origin: tuple[float, float], name_only: bool = False
+) -> None:
     from kicad_tools.cli.stitch_cmd import _stitch_uuid
     from kicad_tools.sexp.builders import fmt, segment_node, via_node
 
     ox, oy = origin
+    net_name = route.net_name if name_only and route.net_name else None
     for x_a, y_a, x_b, y_b, layer in route.segments:
         # Issue #8495: compare after the rounding ``segment_node`` applies, so a
         # sub-resolution sliver is not serialized as a zero-length segment.
@@ -924,6 +979,7 @@ def _append_route_nodes(doc: Any, route: LinkRoute, origin: tuple[float, float])
                 width=route.width,
                 layer=layer,
                 net=route.net_number,
+                net_name=net_name,
                 uuid_str=_stitch_uuid("oracle-seg", x_a, y_a, x_b, y_b, layer, route.net_number),
             )
         )
@@ -936,6 +992,7 @@ def _append_route_nodes(doc: Any, route: LinkRoute, origin: tuple[float, float])
                 drill=route.via_drill,
                 layers=("F.Cu", "B.Cu"),
                 net=route.net_number,
+                net_name=net_name,
                 uuid_str=_stitch_uuid("oracle-via", vx, vy, route.net_number),
             )
         )
