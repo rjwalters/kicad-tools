@@ -177,7 +177,9 @@ def _load_manifest(bundle_root: Path) -> dict[str, Any]:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except ValueError as exc:
         raise WorkflowError("Tapeout manifest.json is not valid JSON") from exc
-    files = manifest.get("files") if isinstance(manifest, dict) else None
+    if not isinstance(manifest, dict):
+        raise WorkflowError("Tapeout manifest.json is not a JSON object")
+    files = manifest.get("files")
     if not isinstance(files, dict) or not files:
         raise WorkflowError("Tapeout manifest lists no files")
     return manifest
@@ -210,17 +212,18 @@ def sign_off_bundle(
             f"listed but absent: {missing or 'none'})"
         )
     _verify_file_records(bundle_root, files)
-    manifest["tapeout"] = {
+    tapeout: dict[str, Any] = {
         "board_sha256": _file_sha(board),
         "human_signoff": {
             "reviewer": reviewer.strip(),
             "signed_at": signed_at or datetime.now(timezone.utc).isoformat(),
         },
     }
+    manifest["tapeout"] = tapeout
     (bundle_root / "manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=False) + "\n", encoding="utf-8"
     )
-    return manifest["tapeout"]
+    return tapeout
 
 
 def preflight(bundle_root: Path, board: Path) -> Preflight:
@@ -237,7 +240,8 @@ def preflight(bundle_root: Path, board: Path) -> Preflight:
     tapeout = manifest.get("tapeout")
     signoff = tapeout.get("human_signoff") if isinstance(tapeout, dict) else None
     if (
-        not isinstance(signoff, dict)
+        not isinstance(tapeout, dict)
+        or not isinstance(signoff, dict)
         or not str(signoff.get("reviewer", "")).strip()
         or not str(signoff.get("signed_at", "")).strip()
     ):
