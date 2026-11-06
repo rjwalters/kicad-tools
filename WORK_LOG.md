@@ -22,6 +22,27 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - **Issue #8465** (closed): Agent-prepared JLCPCB PCBA order up to a saved cart (/kct:submit-jlcpcb): compose the #5056 pieces and drive the website hand-off
 - **Issue #8468** (closed): feat(submit-jlcpcb): website leg, factory-match gate, cart hand-off (part 3/3 of #8465)
 - **PR #8476**: feat(submit-jlcpcb): attended website driver to a saved JLCPCB cart
+- **PR #8507**: fix(prune): don't queue a via/pad stub the net already has
+- **PR #8506**: test: re-pin board 02 routed length to 316.39 after #8387
+- **PR #8504**: fix(check): pour_slot reports each distinct track pair once
+- **PR #8500**: perf(router): skip re-rescuing and back off searching nets known to fail (#8486)
+- **PR #8499**: fix(optimize): leave unresolvable numeric net refs untouched on name-only boards
+- **PR #8498**: fix(reinforce): apply .kicad_dru conditional clearance rules to anchor vias
+- **PR #8497**: fix(check): report coordinates in the sheet-absolute frame
+- **PR #8496**: fix(router): drop link segments that round to zero length
+- **PR #8490**: perf(router): bound repeat Python fallbacks that failed without a proof (#8485)
+- **PR #8489**: fix(router): skip collinear fuse when the fused segment would be off-angle
+- **PR #8483**: fix(route): bound placement-delta trials by live stage budget and abandon worse trials
+- **Issue #8503** (closed): Board 03 committed-PCB DRC guard fails on new pour_slot advisory; pour_slot double-reports findings (Test (extended) red)
+- **Issue #8502** (closed): Board 02 baseline length 316.57 -> 316.39 after #8387 via-anchor chain split (Test (extended) red)
+- **Issue #8501** (closed): prune never reaches a fixed point after #8446: tilt-refused stub re-added every pass (board 05 CI red)
+- **Issue #8495** (closed): Regression of #8417 after #8418: route --complete still commits a zero-length track crossing a foreign-net track
+- **Issue #8494** (closed): pcb reinforce anchor vias ignore conditional .kicad_dru NetClass clearance rules; 2 of 15 anchors fail kicad-cli DRC
+- **Issue #8493** (closed): kct check netclass_clearance_copper (and via_in_pad message, reinforce refusals) report coordinates relative to the board origin, not absolute
+- **Issue #8492** (closed): optimize-traces rewrites GND / +3.3V copper under nonexistent net names ("Net7"/"Net8"); 798 of 861 kct check errors are phantom shorts
+- **Issue #8488** (closed): router: an emitter still produces off-angle segments (1 µm endpoint mismatch, 0.0143°) left to the legacy quantize repair after #3907
+- **Issue #8485** (closed): route perf: pure-Python A* fallback costs ~30% of a 6 h route and never rescues the nets it runs on; skip it when the C++ drain is already a proof
+- **Issue #8480** (closed): route: default-on placement-delta feedback spends the whole remaining budget on from-scratch trials that are never accepted, turning a converged route into a timeout
 
 ### 2026-11-05
 
