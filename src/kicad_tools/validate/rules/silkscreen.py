@@ -1549,7 +1549,11 @@ def check_silk_ref_obscured(
     require_shapely("silk-ref-obscured geometry")
     from shapely.geometry import Polygon
 
-    from kicad_tools.geometry.courtyard import _courtyard_polygon, _side_has_geometry
+    from kicad_tools.geometry.courtyard import (
+        _courtyard_polygon,
+        _side_has_geometry,
+        is_fiducial_footprint,
+    )
     from kicad_tools.silkscreen.place_refs import (
         _find_reference_node,
         _oriented_text_geometry,
@@ -1564,6 +1568,8 @@ def check_silk_ref_obscured(
             continue
         item = f"{footprint.reference} (reference)"
         if ref_text.hidden:
+            if is_fiducial_footprint(footprint):
+                continue  # hiding fiducial references is the convention (#8540)
             results.add(
                 DRCViolation(
                     rule_id="silk_ref_obscured",
