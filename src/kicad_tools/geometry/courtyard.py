@@ -16,12 +16,14 @@ Having both checkers resolve courtyards through the same helpers is exactly
 what the reconciliation issue (#4182) asks for: ``kct placement check`` and
 ``kct check`` should agree on courtyard overlaps.
 
-Courtyard-outline extraction supports three representations:
+Courtyard-outline extraction supports four representations:
 
 * ``fp_rect`` — a single axis-aligned rectangle (fast path).
 * ``fp_poly`` — a closed polygon whose vertices are recorded in
   :attr:`FootprintGraphic.points`.
 * ``fp_line`` — a closed loop of line segments chained by endpoint matching.
+* ``fp_circle`` — a single circle (stock fiducial / mounting-hole
+  courtyards, #8540); ``fp_arc`` courtyards are not modeled.
 
 A courtyard that cannot be resolved from these (no CrtYd geometry, a
 non-closing ``fp_line`` chain, or fewer than three vertices) resolves to

@@ -91,3 +91,20 @@ def test_hidden_reference_without_fiducial_property_still_flagged(rules, tmp_pat
     pcb = _fiducial_board("", tmp_path)
     found = check_silk_ref_obscured(pcb, rules).violations
     assert [v.items for v in found] == [("FID1 (reference)", "hidden")]
+
+
+def _attr_board(attr: str, tmp_path):
+    path = tmp_path / "attr.kicad_pcb"
+    path.write_text(_FIDUCIAL_FP.replace("(attr smd)", f"(attr {attr})"))
+    return PCB.load(path)
+
+
+def test_board_only_exclude_from_pos_files_attr_exempts_fiducial(rules, tmp_path):
+    pcb = _attr_board("smd board_only exclude_from_pos_files", tmp_path)
+    assert check_silk_ref_obscured(pcb, rules).violations == []
+
+
+@pytest.mark.parametrize("attr", ["smd board_only", "smd exclude_from_pos_files"])
+def test_single_attr_flag_still_flagged(rules, tmp_path, attr):
+    found = check_silk_ref_obscured(_attr_board(attr, tmp_path), rules).violations
+    assert [v.items for v in found] == [("FID1 (reference)", "hidden")]
