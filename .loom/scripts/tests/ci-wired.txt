@@ -126,6 +126,7 @@ test-guide-docs-pr-exclude-refresh.sh
 test-guide-docs-pr-race.sh
 test-guide-docs-telemetry.sh
 test-guide-operator-attention-fold.sh
+test-guide-awaiting-revision-park.sh
 test-guide-blocked-unblock-limit.sh
 test-guide-operator-hold-exclude.sh
 test-guide-plan-body-stable-sort.sh
@@ -199,6 +200,7 @@ test-resync-installed-retired-dry-run.sh
 test-resync-installed-retired-migrate.sh
 test-resync-installed-dogfood-symlink.sh
 test-resync-installed-stamp.sh
+test-resync-installed-agents-md-create.sh
 test-resync-installed-output-staging.sh
 test-resync-installed.sh
 test-resync-installed-payload-fallback.sh
@@ -264,6 +266,7 @@ tests/hooks/test-guard-destructive-masking.sh
 tests/hooks/test-guard-destructive-matching-precision.sh
 tests/hooks/test-guard-destructive-mkdir-confinement.sh
 tests/hooks/test-guard-destructive-mktemp-canon.sh
+tests/hooks/test-guard-destructive-primary-checkout.sh
 tests/hooks/test-guard-destructive-readonly-fastpath.sh
 tests/hooks/test-guard-destructive-rm-scope.sh
 tests/hooks/test-guard-destructive-sed-operands.sh
@@ -271,6 +274,7 @@ tests/hooks/test-guard-destructive-session-scratch.sh
 tests/hooks/test-guard-destructive-stash-scope.sh
 tests/hooks/test-guard-destructive-write-confinement.sh
 tests/hooks/test-guard-loom-workflow.sh
+tests/hooks/test-guard-worktree-edit-bash-parity.sh
 # Not a Claude-path guard, but the same repo-root tests/hooks/ location and
 # hermetic-fixture pattern (throwaway `git worktree add` trees, fake binaries,
 # no network/forge calls) — covers .loom/hooks/post-worktree.sh's redirected-
@@ -355,3 +359,4 @@ test-repo-root-alias.sh
 test-create-issue-curated.sh
 # #13414: guide unblock sweep honors a park record over AC checkboxes. Hermetic.
 test-guide-park-record-precedence.sh
+test-guide-transient-first-at.sh

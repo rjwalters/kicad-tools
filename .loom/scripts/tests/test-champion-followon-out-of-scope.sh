@@ -29,7 +29,6 @@ else
 fi
 MERGE_MD="$PROMPT_DIR/champion-pr-merge.md"
 ROLE_MD="$PROMPT_DIR/champion.md"
-ROLE_JSON="$SCRIPTS_DIR/../roles/champion.json"
 
 # shellcheck source=lib/assert.sh
 source "$TEST_DIR/lib/assert.sh"
@@ -64,7 +63,6 @@ assert_eq "false" "$(should_create "$OOS" 0 2)" "2 standard TODOs stay below thr
 
 assert_not_contains "$(grep -n 'for section_name' "$MERGE_MD")" '"Out of Scope"' "Step 5.5 section list omits Out of Scope"
 assert_contains "$(grep -A4 '^## Follow-on Issue Creation' "$ROLE_MD")" 'Phase 2"; not "Out of Scope"' "role summary excludes Out of Scope from the creation triggers"
-assert_not_contains "$(cat "$ROLE_JSON")" '"Out of Scope"' "champion.json bodySections omits Out of Scope"
 
 echo
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed"

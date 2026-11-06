@@ -17,6 +17,9 @@
 #                          responsibility). Also deletes the matching local
 #                          branch via `git branch -d` (refuses on unmerged
 #                          commits — Git's own safety check).
+#   --remove-ignored       With --worktree-path: also remove the worktree when it
+#                          holds gitignored files that are not regenerable build
+#                          artifacts (#13599). Without it such a worktree is kept.
 #   --dry-run              Show what would happen without merging
 #   --auto                 No-op (#12063 slice 2): merge-pr no longer waits for checks;
 #                          GitHub's required checks gate the merge call itself.
@@ -324,7 +327,7 @@ PR_NUMBER=""; CLEANUP_WORKTREE=true
 # CLEANUP_PRIMARY_CHECKOUT (#5015): gates the automatic primary-checkout
 # branch cleanup performed by `merge-pr post-merge-cleanup`. Defaults on
 # (mirrors CLEANUP_WORKTREE's default); --no-cleanup-primary opts out.
-CLEANUP_PRIMARY_CHECKOUT=true; DRY_RUN=false; WORKTREE_PATH_OVERRIDE=""; ALLOW_STACKED_CHILDREN=false
+CLEANUP_PRIMARY_CHECKOUT=true; DRY_RUN=false; WORKTREE_PATH_OVERRIDE=""; REMOVE_IGNORED=false; ALLOW_STACKED_CHILDREN=false
 # ALLOW_UNAPPROVED (#7419): bypasses the loom:pr review-signal guard
 # (_check_loom_pr_label below). Off by default — a missing loom:pr label
 # hard-blocks the merge unless the operator explicitly opts in here.
@@ -342,6 +345,7 @@ while [[ $# -gt 0 ]]; do
     # The two --worktree-path arms are joined onto one line each.
     --worktree-path) [[ $# -lt 2 ]] && error "--worktree-path requires a value"; WORKTREE_PATH_OVERRIDE="$2"; shift 2 ;;
     --worktree-path=*) WORKTREE_PATH_OVERRIDE="${1#--worktree-path=}"; [[ -z "$WORKTREE_PATH_OVERRIDE" ]] && error "--worktree-path= requires a value"; shift ;;
+    --remove-ignored) REMOVE_IGNORED=true; shift ;;
     --dry-run) DRY_RUN=true; shift ;;
     --auto) warning "--auto is a no-op (#12063 slice 2): merge-pr no longer waits for checks"; shift ;;
     --allow-stacked-children) ALLOW_STACKED_CHILDREN=true; shift ;;
@@ -359,7 +363,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -z "$PR_NUMBER" ]] && error "Usage: merge-pr.sh <pr-number> [--no-cleanup-worktree] [--no-cleanup-primary] [--worktree-path <dir>] [--dry-run] [--auto] [--allow-stacked-children] [--allow-unapproved] [--allow-red-tree] [--allow-red-required <context>]... [--merge-method squash|merge|rebase] [--expected-head <sha>]"
+[[ -z "$PR_NUMBER" ]] && error "Usage: merge-pr.sh <pr-number> [--no-cleanup-worktree] [--no-cleanup-primary] [--worktree-path <dir>] [--remove-ignored] [--dry-run] [--auto] [--allow-stacked-children] [--allow-unapproved] [--allow-red-tree] [--allow-red-required <context>]... [--merge-method squash|merge|rebase] [--expected-head <sha>]"
 [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] || error "PR number must be numeric: $PR_NUMBER"
 
 # #8845: an explicit --merge-method overrides REPO_MERGE_METHOD's auto-detect
@@ -1580,6 +1584,7 @@ _post_merge_cleanup() {
   [[ "${CLEANUP_PRIMARY_CHECKOUT:-true}" == "true" ]] || base+=(--no-cleanup-primary)
   [[ "${LOOM_PRESERVE_WORKTREE:-0}" != "1" ]] || base+=(--preserve-env)
   [[ -z "$WORKTREE_PATH_OVERRIDE" ]] || base+=(--worktree-path "$WORKTREE_PATH_OVERRIDE")
+  [[ "${REMOVE_IGNORED:-false}" != "true" ]] || base+=(--remove-ignored)
   local facts=() out="" rc=0 level text need
   for _ in 1 2 3 4; do
     rc=0; out="$("$bin" "${base[@]}" ${facts[@]+"${facts[@]}"})" || rc=$?

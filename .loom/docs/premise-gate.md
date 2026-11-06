@@ -119,6 +119,9 @@ Companion lines, in the **same** comment as the marker:
 - `premise-evidence: <path>[:line] — <what it asserts>`
 - `premise-searched: <path>` — what you read
 - `premise-extends: <why this extends rather than reverses>`
+- `premise-protected: none` — only under `hermit.reversalNeedsOperator:
+  "protected-only"` (see rule 1); otherwise names the protected class that
+  applies
 
 ### The rules, and what each one buys
 
@@ -129,6 +132,20 @@ is always allowed; *declining* to route is what needs a consistent story.
    This is the whole gate. #7855's Curator wrote, in prose, "it reverses the
    documented report-only design … the filing is the ruling" and proceeded. In
    this format that sentence does not parse.
+
+   **Opt-in exception (#13620).** `hermit.reversalNeedsOperator` in
+   `.loom/config.json` (or the fleet tier) is `"always"` (default) or
+   `"protected-only"`; any other value fails closed to `always`. Under
+   `protected-only`, and only for issues labelled `loom:hermit`, a record may be
+   `deliberate=yes reversal=yes verdict=clear` when it carries
+   `premise-protected: none` — the Hermit's attestation that no in-tree caller
+   exists and the target is outside the protected classes: attested/tier
+   evidence and append-only sim/measurement records; provenance or vendoring
+   attestations; the public API of a published package; infra state (IaC state,
+   moved/removed blocks); product-direction features. A record naming a class
+   in `premise-protected:` with `verdict=clear` is malformed (exit `12`), and a
+   missing line is unchanged. The class check is prose-attested, like
+   deliberateness itself; the parser cannot detect callers or classes.
 2. **`deliberate=yes` ⇒ at least one `premise-evidence:` citation that resolves
    against the tree.** A deliberateness claim with no locator is not evidence.
    #8310 was closed `premise-false` for exactly the citation half of this: a

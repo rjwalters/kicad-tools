@@ -1067,7 +1067,7 @@ Implemented per #7657.]
 
 | Case | Action |
 |---|---|
-| The gap is a product-level call: whether the work is wanted, or a choice between legitimate directions that no fact settles (#10001) | File a ranked decision (below) |
+| The gap is a product-level call: whether the work is wanted, or a choice between legitimate directions that no fact settles (#10001) | File a ranked decision (below). **Exception (#13620):** with `hermit.reversalNeedsOperator: "protected-only"` and a `loom:hermit` removal whose premise record is `verdict=clear` with `premise-protected: none` (gate exit `0`), an unreferenced "kept for later" note is not a product-level call: evaluate it as normal. A protected-class hit (attested/tier or append-only sim records, provenance/vendoring, published public API, infra state, product direction) still files the ranked decision |
 | No trusted `<!-- champion:revision-exhausted -->` comment on this issue yet | Final Curator round: the revise verdict below, with that marker on the line after `$REVISE_MARKER` |
 | The final round came back and still fails, and you can name an independently identified preference or authority question (the axis two well-informed people would still disagree on, shown to be a preference, not a fact) | File a ranked decision on that question |
 | The final round came back and still fails, every remaining finding is factual (a wrong path, a missing registry audit, an unverifiable citation), and no trusted `<!-- champion:revision-disposition -->` comment exists yet | Disposition round: the revise verdict below, with that marker on the line after `$REVISE_MARKER`, saying that Curator must end in a terminal disposition (close, split, or decision), not another edit |
