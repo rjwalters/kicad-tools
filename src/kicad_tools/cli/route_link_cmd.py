@@ -335,7 +335,8 @@ def _rules_for_link(args: argparse.Namespace, pcb: Any, base: Any, spec: LinkSpe
     unchanged).
     """
     required = getattr(args, "_pairwise_required", None)
-    if not required and not spec.net_clearance:
+    voltages = getattr(args, "_pairwise_voltages", None)
+    if voltages is None and not spec.net_clearance:
         return base
     names = {net.name: num for num, net in pcb.nets.items() if getattr(net, "name", None)}
     floors: dict[int, float] = dict(base.clearance_by_net or {})
@@ -343,15 +344,37 @@ def _rules_for_link(args: argparse.Namespace, pcb: Any, base: Any, spec: LinkSpe
     def raise_floor(num: int, mm: float) -> None:
         floors[num] = max(floors.get(num, 0.0), mm)
 
-    if required:
+    if voltages is not None:
+        from kicad_tools.creepage.standards import StandardLookupError
+        from kicad_tools.placement.hv_domains import build_required_by_domain_pair
         from kicad_tools.router.pairwise_clearance import _norm_net_key
 
+        threshold = getattr(args, "hv_threshold", 30.0)
         me = _norm_net_key(spec.net)
         for name, num in names.items():
             other = _norm_net_key(name)
             if other == me:
                 continue
-            mm = required.get(tuple(sorted((me, other))))
+            mm = (required or {}).get(tuple(sorted((me, other))))
+            if mm is None and (me not in voltages or other not in voltages):
+                # A net absent from the map is 0 V, as in the creepage census
+                # (compute_creepage_census); fail closed on the same pair the gate
+                # checks instead of silently falling back to --clearance (#8546).
+                dv = abs(voltages.get(me, 0.0) - voltages.get(other, 0.0))
+                if dv == 0.0 or dv < threshold:
+                    continue
+                try:
+                    mm = build_required_by_domain_pair(
+                        {me: voltages.get(me, 0.0), other: voltages.get(other, 0.0)},
+                        standard_id=getattr(args, "creepage_standard", "iec60664"),
+                        pollution_degree=getattr(args, "pollution_degree", 2),
+                        material_group=getattr(args, "material_group", "IIIa"),
+                        hv_threshold=threshold,
+                    ).get(tuple(sorted((me, other))))
+                except StandardLookupError as exc:
+                    raise LinkSpecError(
+                        f"--voltage-map creepage lookup failed for {spec.net!r} vs {name!r}: {exc}"
+                    ) from exc
             if mm:
                 raise_floor(num, float(mm))
     for num, mm in _parse_net_clearances(spec.net_clearance, names).items():

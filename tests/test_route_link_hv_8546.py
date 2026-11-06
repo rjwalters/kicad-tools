@@ -170,6 +170,39 @@ class TestVoltageMapFloors:
         assert _preload_voltage_map(b) == 0
         assert _rules_for_link(b, pcb, _rules_from_args(b, pcb), b.links[0]).clearance_for(2) == 99
 
+    def test_unmapped_link_net_gets_hv_floor(self, tmp_path):
+        """Map lists only HV: the unmapped link net is 0 V, so the 300 V floor applies."""
+        from kicad_tools.cli.route_cmd import _preload_voltage_map
+
+        vm = tmp_path / "vm.json"
+        vm.write_text(json.dumps({"HV": 300}))
+        p = _write(tmp_path, self.BODY)
+        pcb = PCB.load(str(p))
+        a = _parse(str(p), "--voltage-map", str(vm), "--link", "SIG R1.1 R2.1")
+        assert _preload_voltage_map(a) == 0
+        base = _rules_from_args(a, pcb)
+        assert _rules_for_link(a, pcb, base, a.links[0]).clearance_for(2) > 1.0
+
+    def test_unmapped_link_net_probe_detours(self, tmp_path, capsys):
+        vm = tmp_path / "vm.json"
+        vm.write_text(json.dumps({"HV": 300}))
+        rc, out = self._probe(tmp_path, capsys, "--voltage-map", str(vm))
+        link = out["links"][0]
+        assert not link["routable"] or link["length_mm"] > 20.5
+
+    def test_unmapped_neighbour_gets_hv_floor(self, tmp_path):
+        """Link net is the HV one; an unmapped neighbour is 0 V and still gets the floor."""
+        from kicad_tools.cli.route_cmd import _preload_voltage_map
+
+        vm = tmp_path / "vm.json"
+        vm.write_text(json.dumps({"SIG": 300}))
+        p = _write(tmp_path, self.BODY)
+        pcb = PCB.load(str(p))
+        a = _parse(str(p), "--voltage-map", str(vm), "--link", "SIG R1.1 R2.1")
+        assert _preload_voltage_map(a) == 0
+        base = _rules_from_args(a, pcb)
+        assert _rules_for_link(a, pcb, base, a.links[0]).clearance_for(2) > 1.0
+
 
 class TestCorridorBound:
     def _explain(self, tmp_path, gap_half: float):
