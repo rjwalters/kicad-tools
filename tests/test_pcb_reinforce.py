@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 from pathlib import Path
 
 import pytest
@@ -1477,6 +1478,49 @@ class TestReinforceCLIBoardRules:
         assert data["refused"]
         assert data["refused"][0]["rule"] == "voltage_map_pairwise"
         assert data["refused"][0]["required_mm"] > 0.44
+
+    def test_cli_refusal_coordinates_are_sheet_absolute(self, tmp_path, capsys):
+        """Refusal x/y (JSON and text) are sheet-absolute on a shifted board (#8511).
+
+        Guards the ``board_origin`` re-add in ``_run_reinforce_command`` (#8493).
+        """
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        # A centred board has a non-zero origin; traces use board-relative coords.
+        pcb = PCB.create(width=200, height=100, center=True)
+        pad_radius = anchor_pad_for_drill(anchor_drill_for_awg(16), 0.25) / 2
+        for i in range(4):
+            pcb.add_trace(
+                (20 + 25 * i, 50), (45 + 25 * i, 50), width=2.0, layer="F.Cu", net="FUSED_LINE"
+            )
+        dy = 0.44 + pad_radius + 0.1
+        pcb.add_trace((27, 50 + dy), (43, 50 + dy), width=0.2, layer="F.Cu", net="OTHER")
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb.save(pcb_path)
+        vm = tmp_path / "vm.json"
+        vm.write_text(json.dumps({"FUSED_LINE": 150.0, "OTHER": 3.3}))
+
+        loaded = PCB.load(pcb_path)
+        ox, oy = loaded.board_origin
+        assert ox > 0 and oy > 0
+        # Absolute Edge.Cuts extent of the board.
+        x0, y0, x1, y1 = ox, oy, ox + 200, oy + 100
+
+        args = {"dry_run": True, "voltage_map": str(vm)}
+        assert run_pcb_command(_reinforce_args(pcb_path, format="json", **args)) == 0
+        refused = json.loads(capsys.readouterr().out)["refused"]
+        assert refused
+        for r in refused:
+            assert x0 <= r["x"] <= x1 and y0 <= r["y"] <= y1
+        # The refused anchor sits at board-relative (35, 50).
+        assert (refused[0]["x"], refused[0]["y"]) == pytest.approx((35 + ox, 50 + oy), abs=0.5)
+
+        assert run_pcb_command(_reinforce_args(pcb_path, format="text", **args)) == 0
+        text = re.findall(r"refused at \(([-\d.]+), ([-\d.]+)\)", capsys.readouterr().out)
+        assert len(text) == len(refused)
+        for (tx, ty), r in zip(text, refused, strict=True):
+            assert float(tx) == pytest.approx(r["x"], abs=0.01)
+            assert float(ty) == pytest.approx(r["y"], abs=0.01)
 
     def test_cli_missing_voltage_map_errors(self, tmp_path):
         from kicad_tools.cli.commands.pcb import run_pcb_command
