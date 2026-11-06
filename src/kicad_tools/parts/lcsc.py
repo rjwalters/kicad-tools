@@ -917,6 +917,13 @@ class LCSCClient:
             ],
         )
 
+    def _cached_live_observation(self, lcsc_part: str) -> bool:
+        """True if the cache holds a live-sourced stock observation (even if expired)."""
+        if not self.cache:
+            return False
+        cached = self.cache.get(lcsc_part, ignore_expiry=True)
+        return cached is not None and cached.stock_source == "live"
+
     def lookup_many(
         self,
         lcsc_parts: list[str],
@@ -1041,7 +1048,9 @@ class LCSCClient:
                 for part_num, part in offline_parts.items():
                     result[part_num] = part
                     result.sources[part_num] = "offline"
-                    if self.cache:
+                    if self.cache and not self._cached_live_observation(part_num):
+                        # Never let an offline snapshot overwrite a cached live
+                        # stock observation (it would also reset cached_at).
                         self.cache.put(part)
 
         # Summarize any live-API failures in a single line. If the catalog

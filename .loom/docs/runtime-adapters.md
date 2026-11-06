@@ -1349,7 +1349,7 @@ profile declares a provider for that harness. `loom-daemon validate` rejects an
 `excludedRoles` entry that is not a known role name.
 
 **GLM-first Builder and Doctor (fleet policy, tier 1).** The routing comes
-from fleet-gitops `config.defaults`, rendered into each host's machine tier
+from the fleet state store `config.defaults`, rendered into each host's machine tier
 (`~/.local/share/loom/config/defaults.json`), not from this repo's
 `.loom/config.json`, which carries no fleet keys (#11450, #11441). It sets
 `defaultModelProfile: "zai-flash"`, `rolePreference.builder` to
