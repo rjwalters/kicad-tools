@@ -643,6 +643,10 @@ class Reconciler:
                 # benign-but-noisy PCB-only drift (issue #3496).
                 if _is_mounting_hole(fp.reference, fp.name or ""):
                     continue
+                # board_only footprints (fiducials, logos, ...) have no
+                # schematic symbol by design (issue #8551).
+                if "board_only" in fp.attr_flags:
+                    continue
                 components[fp.reference] = {
                     "value": fp.value or "",
                     "footprint": fp.name or "",
