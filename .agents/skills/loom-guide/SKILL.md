@@ -755,6 +755,8 @@ check_and_unblock() {
   # Pull requests (#8925): a SEPARATE enumeration (`gh issue list` never
   # surfaces a PR) — see "Problem: Stuck Blocked Issues".
   check_and_unblock_prs
+  convert_awaiting_revision_parks  # #10936: unnamed awaiting-revision parks -> revise path
+  release_due_transient_parks      # #13606: expired `--transient` parks release by `until`
 }
 ```
 
@@ -766,6 +768,113 @@ PR's. `check_and_unblock_prs`, `pr_has_superseding_block` and
 `previous_review_label` are defined in full, with a worked example, in
 `.loom/docs/park-record.md#the-unblock-sweeps-pr-side-functions`
 — read on demand, not inlined here.
+
+### Awaiting-Revision Parks → Revise Path (#10936)
+
+A `loom:blocked` **issue** whose park names no blocker and whose reason is only
+"awaiting (Architect) revision" / "awaiting a design epic" is read by no role:
+this sweep needs a named blocker, Curator's queues exclude `loom:blocked`. Move
+it onto the revise path Curator already handles ("Revising a Champion
+send-back" in `curator.md`) — no new label. `convert_awaiting_revision_parks`
+runs right after `check_and_unblock`; it converts in one step (remove
+`loom:blocked`, add `loom:triage`, strip the park record, post the revision ask)
+and leaves **alone** anything that:
+
+- names any `Blocked by:` ref (open or cross-repo; the normal sweep owns it) or
+  whose reason is not an awaiting-revision/design-epic one;
+- carries `loom:operator`, `loom:frozen`, `loom:building`, `loom:curating`, or a
+  `<!-- loom:permanent-block` marker (`has_permanent_block`);
+- has a park record whose `at=` is more than 5 min older than the latest
+  `loom:blocked` application (the block was re-applied for another reason);
+- is a pull request (`gh issue list` never returns one, and PRs are not converted).
+
+```bash
+awaiting_revision_park() {  # $1=body [$2=ISO time of latest loom:blocked label]; 0 = convertible
+  local body="$1" blocked_at="${2:-}" rec at a b
+  rec=$(grep -E '^[[:space:]]*<!-- loom:park ' <<<"$body" | tail -1)
+  [ -n "$rec" ] || return 1
+  grep -qE 'Blocked by:[*_[:space:]]*\(unstated\)' <<<"$rec" || return 1  # any named ref => normal sweep
+  grep -qiE 'reason="[^"]*(awaiting[^"]*revision|awaiting[^"]*design epic)' <<<"$rec" || return 1
+  if [ -n "$blocked_at" ]; then
+    at=$(sed -nE 's/.* at=([^ ]+).*/\1/p' <<<"$rec")
+    a=$(date -u -d "$at" +%s 2>/dev/null || date -u -j -f %Y-%m-%dT%H:%M:%SZ "$at" +%s 2>/dev/null) || return 1
+    b=$(date -u -d "$blocked_at" +%s 2>/dev/null || date -u -j -f %Y-%m-%dT%H:%M:%SZ "$blocked_at" +%s 2>/dev/null) || return 1
+    [ "$a" -ge $((b - 300)) ] || return 1  # stale record: block re-applied since
+  fi
+  return 0
+}
+
+release_due_transient_parks() {
+  # #13606: a park written with `park-record apply --transient <cause>` carries
+  # its own retry time. Releasing it needs no dependency and no person.
+  # Preventing: capacity refusals (batch_no_capacity) parked as a plain reason
+  # never released, stranding seven issues on 2026-11-05.
+  # Only the LAST park record counts (a later blocker/reason park supersedes it);
+  # a legacy park (`transient` null) is never touched here.
+  "$GH_READ" issue list --label "loom:blocked" --state open --limit 1000 --json number,body,labels \
+    | jq -c '.[] | select(any(.labels[]?.name; IN("loom:operator","loom:frozen","loom:building","loom:curating")) | not)' \
+    | while read -r issue; do
+    local number body recs t cause attempt first_at age_days
+    number=$(jq -r '.number' <<<"$issue"); body=$(jq -r '.body // ""' <<<"$issue")
+    grep -q 'transient=' <<<"$body" || continue   # cheap body check before any API call
+    recs=$(loom-daemon park-record parse --json <<<"$body") || continue
+    t=$(jq -c '.records | last | .transient // empty' <<<"$recs")
+    [ -n "$t" ] || continue                                  # last record is not transient
+    cause=$(jq -r '.cause' <<<"$t"); attempt=$(jq -r '.attempt' <<<"$t")
+    # `due` is computed by the daemon (transient_due): a missing/garbled `until` is due.
+    [ "$(jq -r '.due' <<<"$t")" = "true" ] || continue       # unexpired: leave alone
+    [ "$(has_permanent_block "$number")" = "true" ] && continue
+    [ "$(has_restore_note "$number")" = "true" ] && continue
+
+    # Escalate once at attempt >= 6 or park age >= 7 days: a comment, never a hold.
+    # Age runs from the start of the TRAILING chain (last attempt==1 record for the
+    # cause): apply.rs resets the chain after TRANSIENT_CHAIN_RESET_SECS, so older
+    # records from a prior chain must not count (#13615).
+    first_at=$(jq -r --arg c "$cause" '[.records[] | select(.transient.cause == $c)] | (map(.transient.attempt == 1) | rindex(true) // 0) as $i | .[$i].at // empty' <<<"$recs")
+    age_days=0
+    if [ -n "$first_at" ]; then
+      local fe; fe=$(date -u -d "$first_at" +%s 2>/dev/null || date -u -j -f %Y-%m-%dT%H:%M:%SZ "$first_at" +%s 2>/dev/null) \
+        && age_days=$(( ($(date -u +%s) - fe) / 86400 ))
+    fi
+    if [ "$(jq -r '.escalate' <<<"$t")" = "true" ] || [ "$age_days" -ge 7 ]; then
+      local esc="<!-- loom:transient-escalated cause=$cause -->"   # one per issue+cause
+      if [ "$(loom-daemon forge trusted-comments --fetch "$number" --with-body 2>/dev/null | jq -r --arg m "$esc" 'any(.[]; (.body // "") | contains($m))')" != "true" ]; then
+        ./.loom/scripts/post-comment.sh "$number" --body "**Guide: transient park not clearing** — \`$cause\` has refused $attempt time(s) over ~${age_days}d. Retrying continues at the 24 h cap; no hold is added. A person may want to look at the cause itself.
+$esc"
+      fi
+    fi
+
+    if [ "$(was_previously_approved "$number")" = "true" ]; then
+      gh issue edit "$number" --remove-label "loom:blocked" --add-label "loom:issue" || continue
+    else
+      gh issue edit "$number" --remove-label "loom:blocked" || continue
+    fi
+    ./.loom/scripts/post-comment.sh "$number" --body "🔓 **Unblocked**: transient park \`$cause\` (attempt $attempt) reached its retry time. The park record stays in the body so a re-park counts attempt $((attempt + 1))."
+    echo "Released transient park #$number cause=$cause attempt=$attempt"
+  done
+}
+
+convert_awaiting_revision_parks() {
+  "$GH_READ" issue list --label "loom:blocked" --state open --limit 1000 --json number,title,body,labels \
+    | jq -c '.[] | select(any(.labels[]?.name; IN("loom:operator","loom:frozen","loom:building","loom:curating")) | not)' \
+    | while read -r issue; do
+    local number title body blocked_at newbody H
+    number=$(jq -r '.number' <<<"$issue"); title=$(jq -r '.title' <<<"$issue"); body=$(jq -r '.body // ""' <<<"$issue")
+    awaiting_revision_park "$body" || continue   # cheap body check before any API call
+    [ "$(has_permanent_block "$number")" = "true" ] && continue
+    blocked_at=$(gh api --paginate "repos/{owner}/{repo}/issues/${number}/events?per_page=100" \
+      --jq '.[] | select(.event=="labeled" and .label.name=="loom:blocked") | .created_at' | tail -1)
+    awaiting_revision_park "$body" "$blocked_at" || continue
+    newbody=$(grep -vE '^[[:space:]]*<!-- loom:park .* -->[[:space:]]*$' <<<"$body")
+    gh issue edit "$number" --body "$newbody" && gh issue edit "$number" --remove-label "loom:blocked" --add-label "loom:triage" || continue
+    # Curator keys on the hash of the CURRENT title + body (curator.md "Revising a Champion send-back")
+    H=$(printf '%s\n%s' "$title" "$newbody" | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-16)
+    ./.loom/scripts/post-comment.sh "$number" --body "**Guide: NEEDS REVISION** — this issue was parked only as awaiting a revision/design epic, with no named blocker, so no role would act on it. Moved to the revise path (\`loom:triage\`, park record removed). Curator: revise the body per the park reason, or split/close/decide per \`curator.md\` \"Revising a Champion send-back\".
+<!-- champion:revise:body-$H -->"
+    echo "Converted #$number to revise path: $title"
+  done
+}
+```
 
 ### Example Unblocking Flow
 

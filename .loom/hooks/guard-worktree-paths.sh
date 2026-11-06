@@ -606,7 +606,7 @@ if [[ -n "$WORKTREE_PATH" ]]; then
         exit 0
     fi
 
-    emit_deny "BLOCKED: Edit/Write path '${NORM_PATH}' is outside worktree '${WORKTREE_PATH}'. Use paths within the worktree directory."
+    emit_deny "BLOCKED: Edit/Write path '${NORM_PATH}' is outside worktree '${WORKTREE_PATH}'. Use paths within the worktree directory. Gitignored status does not exempt a path: Edit/Write and Bash writes are confined by the same rule. For repo-local scratch/notes/journal files, write under your issue worktree or under /tmp (session scratch) instead."
 fi
 
 # --------------------------------------------------------------------------
@@ -616,4 +616,4 @@ if path_derived_allow "$NORM_PATH"; then
     exit 0
 fi
 
-emit_deny "BLOCKED: Edit/Write path '${NORM_PATH}' resolves to the main repository checkout ('${MAIN_ROOT}'), but a Loom-managed worktree exists elsewhere in this repository (this check cannot verify it belongs to the acting session — see #4245). Builders must write inside their issue worktree ($(worktree_hint)), never the main checkout. Do NOT retry this write via Bash redirection/tee/sed -i/cp/mv -- that is also confined (guard-destructive-generic.sh, #4178) and denied for the same reason. cd into your issue worktree and write there instead. Not a Builder and need to write here directly? Set guards.worktreeIsolation:false in .loom/config.json for the session -- an inline 'LOOM_GUARD_WORKTREE_ISOLATION=0 <command>' prefix does NOT work (this hook runs as a separate process). (#4007)"
+emit_deny "BLOCKED: Edit/Write path '${NORM_PATH}' resolves to the main repository checkout ('${MAIN_ROOT}'), but a Loom-managed worktree exists elsewhere in this repository (this check cannot verify it belongs to the acting session — see #4245). Builders must write inside their issue worktree ($(worktree_hint)), never the main checkout. Do NOT retry this write via Bash redirection/tee/sed -i/cp/mv -- that is also confined (guard-destructive-generic.sh, #4178) and denied for the same reason. cd into your issue worktree and write there instead. Gitignored status does not exempt a path: Edit/Write and Bash writes are confined by the same rule. For repo-local scratch/notes/journal files, write under your issue worktree or under /tmp (session scratch) instead. Not a Builder and need to write here directly? Set guards.worktreeIsolation:false in .loom/config.json for the session -- an inline 'LOOM_GUARD_WORKTREE_ISOLATION=0 <command>' prefix does NOT work (this hook runs as a separate process). (#4007)"
