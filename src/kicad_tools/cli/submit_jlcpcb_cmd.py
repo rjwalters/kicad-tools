@@ -67,7 +67,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     site.add_argument("--has-tht", action="store_true", help="BOM has THT lines (Standard PCBA)")
     site.add_argument(
         "--match-mapping",
-        help="JSON file with SelectionMapping fields describing JLC's part-matching CSV columns",
+        help="JSON file giving the column schema (SelectionMapping fields) of JLC's part-matching CSV; supplied up front, while the CSV itself is requested mid-run",
     )
     add_format_flag(parser)
 
@@ -160,6 +160,16 @@ def run(args: argparse.Namespace) -> int:
         )
         return 2
     credentials = JLCCredentials.from_env()
+    inventory_source = None
+    if credentials:
+        inventory_source = JLCOpenAPIClient(credentials)
+    else:
+        # Issue #8539: no OpenAPI keys -> anonymous LCSC reads unblock the
+        # dry-run / website / guided legs. They never satisfy --upload, which
+        # keeps requiring credentials (enforced by run_submission).
+        from ..parts.lcsc_inventory import LCSCInventorySource
+
+        inventory_source = LCSCInventorySource()
     upload = bool(args.upload)
     covered = [c for c in args.inventory_covered.split(",") if c.strip()]
     try:
@@ -170,7 +180,7 @@ def run(args: argparse.Namespace) -> int:
             quantity=args.quantity,
             output_dir=Path(args.output),
             dry_run=bool(args.dry_run),
-            inventory_source=JLCOpenAPIClient(credentials) if credentials else None,
+            inventory_source=inventory_source,
             inventory_covered=covered,
             upload=upload,
             reviewer=args.reviewer,
@@ -180,9 +190,17 @@ def run(args: argparse.Namespace) -> int:
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 2
     failures = list(format_stock_failures(result.stock))
-    if (args.website or args.guided) and not result.stock.blocked:
+    if args.guided:
+        # The manual checklist never touches the site, so a blocked stock gate
+        # does not stop it; the stock state is printed beside it instead.
+        state = "BLOCKED" if result.stock.blocked else "pass"
+        print(f"stock gate: {state}")
+        for failure in failures:
+            print(f"  STOCK: {failure}")
         return _website_leg(args, result, Path(args.output))
-    if args.website or args.guided:
+    if args.website and not result.stock.blocked:
+        return _website_leg(args, result, Path(args.output))
+    if args.website:
         print("website leg skipped: the stock gate is blocked", file=sys.stderr)
     if getattr(args, "format", "text") == "json":
         print(
