@@ -38,9 +38,11 @@ can be evaluated.
 
 Note on ``fp_poly``: the schema parser now records ``fp_poly`` vertices in
 :attr:`FootprintGraphic.points`.  This rule *does* consume them when present
-(a closed polygon is directly usable), so the "unresolved" info finding is
-reserved for genuinely-degenerate outlines (non-closing line chains, arc-only
-outlines, or fewer than three vertices); a footprint with no CrtYd geometry at
+(a closed polygon is directly usable).  ``fp_circle`` courtyards (stock
+fiducials / mounting holes) also resolve now, via the radius the parser derives
+from ``center``/``end``; ``fp_arc`` courtyards do not.  The "unresolved" info
+finding is reserved for genuinely-degenerate outlines (non-closing line chains,
+arc-only outlines, zero-radius circles, or fewer than three vertices); a footprint with no CrtYd geometry at
 all gets ``courtyard_missing`` instead.
 """
 

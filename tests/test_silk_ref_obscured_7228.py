@@ -62,3 +62,49 @@ def test_reference_off_board_is_flagged_as_outside(rules):
 def test_overhanging_footprint_outline_is_not_flagged_outside(rules):
     """Board 03's J1 body strokes overhang the edge by design (#6494)."""
     assert check_silk_edge_clearance(PCB.load(BOARD03), rules).violations == []
+
+
+_FIDUCIAL_FP = """(kicad_pcb (version 20240108) (generator "test")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (37 "F.SilkS" user))
+  (footprint "Fiducial:Fiducial_1mm_Mask2mm" (layer "F.Cu") (at 10 10)
+    (attr smd)
+    (property "Reference" "FID1" (at 0 -1.5 0) (layer "F.SilkS") (hide yes)
+      (effects (font (size 1 1) (thickness 0.15))))
+    (fp_circle (center 0 0) (end 1 0) (layer "F.CrtYd") (width 0.05))
+    (pad "" smd circle (at 0 0) (size 1 1) (layers "F.Cu" "F.Mask") %s)))
+"""
+
+
+def _fiducial_board(prop: str, tmp_path: Path) -> PCB:
+    path = tmp_path / "fid.kicad_pcb"
+    path.write_text(_FIDUCIAL_FP % prop)
+    return PCB.load(path)
+
+
+@pytest.mark.parametrize("prop", ["pad_prop_fiducial_glob", "pad_prop_fiducial_loc"])
+def test_hidden_fiducial_reference_not_flagged(rules, tmp_path, prop):
+    pcb = _fiducial_board(f"(property {prop})", tmp_path)
+    assert check_silk_ref_obscured(pcb, rules).violations == []
+
+
+def test_hidden_reference_without_fiducial_property_still_flagged(rules, tmp_path):
+    pcb = _fiducial_board("", tmp_path)
+    found = check_silk_ref_obscured(pcb, rules).violations
+    assert [v.items for v in found] == [("FID1 (reference)", "hidden")]
+
+
+def _attr_board(attr: str, tmp_path):
+    path = tmp_path / "attr.kicad_pcb"
+    path.write_text(_FIDUCIAL_FP.replace("(attr smd)", f"(attr {attr})"))
+    return PCB.load(path)
+
+
+def test_board_only_exclude_from_pos_files_attr_exempts_fiducial(rules, tmp_path):
+    pcb = _attr_board("smd board_only exclude_from_pos_files", tmp_path)
+    assert check_silk_ref_obscured(pcb, rules).violations == []
+
+
+@pytest.mark.parametrize("attr", ["smd board_only", "smd exclude_from_pos_files"])
+def test_single_attr_flag_still_flagged(rules, tmp_path, attr):
+    found = check_silk_ref_obscured(_attr_board(attr, tmp_path), rules).violations
+    assert [v.items for v in found] == [("FID1 (reference)", "hidden")]

@@ -703,13 +703,17 @@ class TestPreflightERC:
 class TestPreflightBomPcbMatchSeverity:
     """Tests for bom_pcb_match FAIL vs WARN based on mismatch direction."""
 
-    def _make_checker_with_mocks(self, monkeypatch, bom_items, pcb_refs):
+    def _make_checker_with_mocks(
+        self, monkeypatch, bom_items, pcb_refs, exclude_from_bom=(), board_only=()
+    ):
         """Create a PreflightChecker with mocked BOM and PCB data.
 
         Args:
             monkeypatch: pytest monkeypatch fixture.
             bom_items: list of BOMItem instances for the BOM.
             pcb_refs: list of reference strings for PCB footprints.
+            exclude_from_bom: refs whose footprint has ``exclude_from_bom``.
+            board_only: refs whose footprint has the ``board_only`` attr flag.
         """
         from unittest.mock import MagicMock
 
@@ -724,6 +728,10 @@ class TestPreflightBomPcbMatchSeverity:
         for ref in pcb_refs:
             fp = MagicMock()
             fp.reference = ref
+            # Explicit values: a bare MagicMock attribute is truthy and would
+            # silently exempt every footprint.
+            fp.exclude_from_bom = ref in exclude_from_bom
+            fp.attr_flags = frozenset({"board_only"}) if ref in board_only else frozenset()
             fps.append(fp)
         mock_pcb.footprints = fps
         checker._pcb = mock_pcb
@@ -835,6 +843,45 @@ class TestPreflightBomPcbMatchSeverity:
         result = checker._check_bom_footprint_match()
         assert result.status == "WARN"
         assert PreflightChecker.has_failures([result]) is False
+
+    def test_excluded_fiducials_do_not_warn(self, monkeypatch):
+        """Footprints flagged exclude_from_bom / board_only are not orphans."""
+        items = [self._make_bom_item("C1")]
+        checker = self._make_checker_with_mocks(
+            monkeypatch,
+            items,
+            ["C1", "FID1", "FID2", "TP1"],
+            exclude_from_bom={"FID1"},
+            board_only={"FID2", "TP1"},
+        )
+
+        result = checker._check_bom_footprint_match()
+        assert result.status == "OK"
+
+    def test_footprint_without_exempt_attrs_still_warns(self, monkeypatch):
+        """A non-exempt footprint missing from the BOM still warns."""
+        items = [self._make_bom_item("C1")]
+        checker = self._make_checker_with_mocks(
+            monkeypatch,
+            items,
+            ["C1", "FID1", "R7"],
+            exclude_from_bom={"FID1"},
+        )
+
+        result = checker._check_bom_footprint_match()
+        assert result.status == "WARN"
+        assert "R7" in result.details
+        assert "FID1" not in result.details
+
+    def test_excluded_footprint_in_bom_still_matches(self, monkeypatch):
+        """An exempt footprint that is also in the BOM is not a FAIL."""
+        items = [self._make_bom_item("C1"), self._make_bom_item("FID1")]
+        checker = self._make_checker_with_mocks(
+            monkeypatch, items, ["C1", "FID1"], exclude_from_bom={"FID1"}
+        )
+
+        result = checker._check_bom_footprint_match()
+        assert result.status == "OK"
 
 
 # ---------------------------------------------------------------------------
