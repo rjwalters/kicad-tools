@@ -197,7 +197,7 @@ def build_footprint(footprint_type: str, params: dict[str, Any]):
         return create_dip(pins=p("pins"), pitch=p("pitch"), row_spacing=p("row_spacing"), name=name)
     if footprint_type == "rpi-hat":
         keepout = p("keepout_diameter")
-        return create_rpi_hat(keepout_diameter=6.0 if keepout is None else keepout, name=name)
+        return create_rpi_hat(keepout_diameter=6.2 if keepout is None else keepout, name=name)
     # pin-header
     require("pins", "--pins", "pin-header")
     return create_pin_header(
@@ -467,7 +467,7 @@ def main(argv: list[str] | None = None) -> int:
         "--keepout-diameter",
         type=float,
         dest="keepout_diameter",
-        help="Copper keep-out diameter around each mounting hole in mm (default: 6.0, 0=none)",
+        help="Copper keep-out diameter around each mounting hole in mm (default: 6.2, the spec minimum land; 0=none)",
     )
     hat_parser.add_argument("--name", help="Custom footprint name")
     hat_parser.add_argument("-o", "--output", help="Output file path")

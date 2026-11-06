@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 
 import pytest
 
 from kicad_tools.cli.footprint_generate import GENERATORS, main
 from kicad_tools.export.pnp import _tht_centroid_offset
-from kicad_tools.library.generators import create_rpi_hat
+from kicad_tools.library.generators import create_pin_header, create_rpi_hat
 from kicad_tools.schema.pcb import PCB
 
 _HOLES = {(1.27, -4.87), (-47.73, -4.87), (1.27, 53.13), (-47.73, 53.13)}
@@ -26,12 +27,39 @@ def test_geometry_matches_hat_spec():
     assert {(round(p.x, 3), round(p.y, 3)) for p in holes} == _HOLES
     for h in holes:
         assert h.pad_type == "np_thru_hole"
-        assert h.drill == 2.7
+        assert h.drill == 2.75
 
     xs = sorted({round(h.x, 2) for h in holes})
     ys = sorted({round(h.y, 2) for h in holes})
     assert round(xs[1] - xs[0], 2) == 49.0
     assert round(ys[1] - ys[0], 2) == 58.0
+
+
+def test_pad_numbering_alternates_columns():
+    """Odd pins in the inner column (x=0), even in the outer (x=2.54), like a Pi."""
+    fp = create_rpi_hat()
+    pos = {p.name: (round(p.x, 2), round(p.y, 2)) for p in fp.pads if p.name}
+    assert pos["1"] == (0, 0)
+    assert pos["2"] == (2.54, 0)
+    assert pos["3"] == (0, 2.54)
+    assert pos["4"] == (2.54, 2.54)
+    assert pos["39"] == (0, 48.26)
+    assert pos["40"] == (2.54, 48.26)
+    for n in range(1, 41):
+        assert pos[str(n)] == ((n - 1) % 2 * 2.54, round((n - 1) // 2 * 2.54, 2))
+
+
+def test_pin_header_two_rows_matches_kicad_stock_numbering():
+    fp = create_pin_header(pins=6, rows=2)
+    pos = {p.name: (round(p.x, 2), round(p.y, 2)) for p in fp.pads}
+    assert pos == {
+        "1": (-1.27, -2.54),
+        "2": (1.27, -2.54),
+        "3": (-1.27, 0),
+        "4": (1.27, 0),
+        "5": (-1.27, 2.54),
+        "6": (1.27, 2.54),
+    }
 
 
 def test_outline_and_keepouts():
@@ -42,10 +70,19 @@ def test_outline_and_keepouts():
         56.5,
         65.0,
     ]
+    # 3.5 mm hole margin on the far edge, 4.0 mm on the header (+x) side.
+    xs_o = sorted([outline.start_x, outline.end_x])
+    assert xs_o[0] == pytest.approx(-47.73 - 3.5)
+    assert xs_o[1] == pytest.approx(1.27 + 4.0)
     assert len(fp.zones) == 4
     for zone in fp.zones:
         xs = [x for x, _ in zone.points]
-        assert max(xs) - min(xs) == pytest.approx(6.0, abs=0.01)
+        cx, cy = (max(xs) + min(xs)) / 2, sum(y for _, y in zone.points) / len(zone.points)
+        pts = zone.points
+        # Mid-edge (flat) distance from centre must still cover the 6.2 mm land.
+        for (ax, ay), (bx, by) in zip(pts, pts[1:] + pts[:1], strict=True):
+            assert math.hypot((ax + bx) / 2 - cx, (ay + by) / 2 - cy) >= 3.1 - 1e-6
+        assert zone.layers == ("*.Cu",)
     assert len(re.findall(r"\(zone\b", fp.to_sexp())) == 4
     assert create_rpi_hat(keepout_diameter=0).zones == []
 
