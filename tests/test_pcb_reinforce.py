@@ -1414,6 +1414,51 @@ class TestBoardRulesClearance:
         assert mid and mid[0].rule == "hole_to_hole"
         assert mid[0].required_mm == pytest.approx(0.5)
 
+    def test_conditional_dru_rule_refuses_hv_pair(self, tmp_path):
+        """A `.kicad_dru` NetClass-conditional clearance is honoured (#8494)."""
+        from kicad_tools.router.board_clearance_rules import BoardClearanceRules, parse_dru
+
+        dru = tmp_path / "b.kicad_dru"
+        dru.write_text(
+            "(version 1)\n"
+            '(rule "Reviewed clearance - HV"\n'
+            "  (condition \"A.NetClass == 'HV' || B.NetClass == 'HV'\")\n"
+            "  (constraint clearance (min 0.4mm)))\n"
+        )
+        rules_list, err = parse_dru(dru)
+        assert err is None
+        board_rules = BoardClearanceRules(
+            dru_rules=rules_list, netclass_assignments={"FUSED_LINE": "HV"}
+        )
+        # 0.3 mm clears the 0.2 mm fallback ...
+        baseline = reinforce_net(_blocked_by_foreign_track(0.3), "FUSED_LINE", spacing_mm=15.0)
+        assert baseline.refused_count == 0
+        # ... but not the conditional 0.4 mm rule.
+        result = reinforce_net(
+            _blocked_by_foreign_track(0.3),
+            "FUSED_LINE",
+            spacing_mm=15.0,
+            board_rules=board_rules,
+        )
+        assert result.refused_count >= 1
+        r = result.refused[0]
+        assert r.rule == "dru_conditional"
+        assert r.required_mm == pytest.approx(0.4)
+        assert r.actual_mm == pytest.approx(0.3, abs=0.01)
+
+    def test_board_rules_without_dru_leave_result_unchanged(self):
+        from kicad_tools.router.board_clearance_rules import BoardClearanceRules
+
+        plain = reinforce_net(_blocked_by_foreign_track(0.3), "FUSED_LINE", spacing_mm=15.0)
+        with_rules = reinforce_net(
+            _blocked_by_foreign_track(0.3),
+            "FUSED_LINE",
+            spacing_mm=15.0,
+            board_rules=BoardClearanceRules(),
+        )
+        assert with_rules.refused_count == plain.refused_count
+        assert len(with_rules.placed) == len(plain.placed)
+
 
 class TestReinforceCLIBoardRules:
     def test_cli_voltage_map_reports_rule_in_json(self, tmp_path, capsys):

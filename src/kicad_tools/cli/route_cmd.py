@@ -148,6 +148,10 @@ logger = logging.getLogger(__name__)
 
 
 _AUTO_FIX_RESERVE_FRACTION = 0.20
+# Issue #8480: placement-delta feedback never starts a trial with less than
+# this much budget left (capped at half the first trial's budget so small
+# ``--timeout`` runs still probe).
+_DELTA_MIN_TRIAL_BUDGET_SEC = 60.0
 _AUTO_FIX_RESERVE_FLOOR_SEC = 60.0
 
 # Issue #6273: post-route finishing reserve.  See :func:`_post_route_reserve`.
@@ -4433,11 +4437,16 @@ _FALLBACK_RECEIPT_KEYS = (
     "python_fallback_proven_skips",
     "python_fallback_seconds_saved",
     "fallback_count",
+    # Issue #8485: reduced-budget repeats and the stage fallback cap.
+    "python_fallback_reduced_repeats",
+    "python_fallback_stage_budget_s",
+    "python_fallback_stage_spent_s",
+    "python_fallback_stage_budget_skips",
 )
 
 
 def _fallback_receipt_fields(router: Any) -> dict[str, Any]:
-    """Small fallback diagnostics for the timeout receipt (issues #8370, #8413).
+    """Small fallback diagnostics for the timeout receipt (issues #8370, #8413, #8485).
 
     Always returns every key in ``_FALLBACK_RECEIPT_KEYS``; a value is ``None``
     when the stats are unavailable (no router, Python backend, or an error), so
@@ -7068,6 +7077,10 @@ def _run_placement_delta_feedback(
     max_movement = float(getattr(args, "placement_feedback_max_movement", 5.0) or 5.0)
     use_negotiated = getattr(args, "strategy", "negotiated") == "negotiated"
     timeout = _delta_probe_timeout(args, quiet=quiet)
+    # Issue #8480: smallest per-trial budget worth starting a re-route with.
+    min_trial_budget = (
+        min(_DELTA_MIN_TRIAL_BUDGET_SEC, 0.5 * timeout) if timeout is not None else 0.0
+    )
     # Issue #5266: attribute a timeout inside a probe to this loop rather than
     # to the initial search stage (or a stale checkpoint ``serialization``).
     record_stage("placement-delta-feedback")
@@ -7139,6 +7152,11 @@ def _run_placement_delta_feedback(
             # Issue #6314: reach the loop so an interrupted run can restore
             # its last accepted state before saving.
             loop_observer=loops.append,
+            # Issue #8480: re-read the budget at each trial's start so a later
+            # trial is clamped to what the stage still has (and skipped when
+            # that is too little) instead of inheriting the first trial's.
+            timeout_provider=lambda: _delta_probe_timeout(args),
+            min_trial_budget=min_trial_budget,
         )
     except Exception as exc:
         # The loop died mid-flight and the run carries on, so the state has to

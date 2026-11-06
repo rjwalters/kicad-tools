@@ -67,6 +67,12 @@ class _PadNetSnapshot:
 
 _SEXP_MISSING = object()
 
+# Issue #8480: a placement-delta trial whose iteration-0 routed count is more
+# than this many nets below the accepted result is abandoned and its delta
+# reverted, rather than spending its remaining iterations (a from-scratch
+# re-negotiation can cost as much as the original run) on a clearly worse start.
+PD_ABANDON_ROUTED_MARGIN = 3
+
 
 # Delta kinds whose applicator path rewrites footprint silk/fab in a way the
 # placement restore cannot undo (issue #6557): ``mirror`` flips the cosmetics
@@ -2711,6 +2717,9 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
         require_no_clearance_regression: bool = True,
         require_no_creepage_regression: bool = True,
         require_no_keepout_intrusion: bool = True,
+        timeout_provider: Callable[[], float | None] | None = None,
+        min_trial_budget: float = 0.0,
+        abandon_margin: int | None = PD_ABANDON_ROUTED_MARGIN,
     ) -> PlacementDeltaFeedbackResult:
         """Run the classifier-driven placement-delta feedback loop.
 
@@ -2721,6 +2730,18 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                 ``route_all``) for every routing pass.
             timeout / per_net_timeout: Forwarded to the negotiated router so each
                 re-route respects the caller's wall-clock budget.
+            timeout_provider: Issue #8480.  Called at the start of every trial
+                to read the LIVE per-trial budget (the caller clamps it to the
+                time the stage still has).  Overrides ``timeout`` when it
+                returns a value; ``None`` keeps the fixed ``timeout``.
+            min_trial_budget: A trial whose live budget is below this many
+                seconds is not started; the loop stops with
+                ``exit_reason == "pd_budget_exhausted"`` and the accepted
+                state is left untouched.
+            abandon_margin: A trial whose iteration-0 routed count is more than
+                this many nets below the accepted result is abandoned (and its
+                delta reverted) instead of running its remaining iterations.
+                ``None`` disables the early abandon.
             reuse_existing_routes: When True and the router already carries
                 routes, adopt them as the baseline instead of re-routing from
                 scratch (issue #4468).  The CLI invokes this loop immediately
@@ -2768,15 +2789,35 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
         if per_net_timeout is not None:
             negotiated_kwargs["per_net_timeout"] = per_net_timeout
 
-        def _route() -> list[Route]:
-            self._clear_routes()
-            if use_negotiated:
-                return self.router.route_all_negotiated(**negotiated_kwargs)
-            return self.router.route_all()
-
         def _routed_count() -> int:
             total = len(self.router.nets) - 1  # -1 for net 0
             return total - len(self.router.get_failed_nets())
+
+        # Issue #8480: reference count the current trial's iteration 0 is
+        # judged against (``None`` = no early abandon armed).
+        abandon_below: list[int | None] = [None]
+        abandoned_early: list[bool] = [False]
+
+        def _trial_progress(progress: float, message: str, cont: bool) -> bool:
+            # The negotiated router calls this at the top of each rip-up
+            # iteration; the first such call is the end of iteration 0.
+            ref = abandon_below[0]
+            if ref is None or not message.startswith("Iteration "):
+                return True
+            abandon_below[0] = None  # judge iteration 0 only
+            if _routed_count() < ref:
+                abandoned_early[0] = True
+                return False
+            return True
+
+        def _route() -> list[Route]:
+            self._clear_routes()
+            if use_negotiated:
+                kwargs = dict(negotiated_kwargs)
+                if abandon_below[0] is not None:
+                    kwargs["progress_callback"] = _trial_progress
+                return self.router.route_all_negotiated(**kwargs)
+            return self.router.route_all()
 
         # ``applied`` is the loop's own attribute, not a local, so a partial
         # save that interrupts the loop can tell whether the accepted placement
@@ -2832,6 +2873,24 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
             if self.pcb is None:
                 exit_reason = "pd_no_pcb"
                 break
+
+            # Issue #8480: re-read the per-trial budget NOW.  A fixed value
+            # resolved before the loop can exceed the time the stage has left
+            # by the time a later trial starts, guaranteeing the stage
+            # deadline kills it.
+            if timeout_provider is not None:
+                live_timeout = timeout_provider()
+                if live_timeout is not None:
+                    if live_timeout < min_trial_budget:
+                        exit_reason = "pd_budget_exhausted"
+                        if self.verbose:
+                            print(
+                                f"  Only {live_timeout:.0f}s of stage budget left "
+                                f"(< {min_trial_budget:.0f}s minimum per trial); "
+                                "stopping with the accepted result."
+                            )
+                        break
+                    negotiated_kwargs["timeout"] = live_timeout
 
             deltas = self._propose_deltas()
             proposed.extend(deltas)
@@ -2931,7 +2990,14 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                 interrupted_delta = delta
                 break
 
+            abandon_below[0] = (
+                pre_count - abandon_margin
+                if abandon_margin is not None and use_negotiated
+                else None
+            )
+            abandoned_early[0] = False
             _route()
+            abandon_below[0] = None
             new_count = _routed_count()
             post_violations = self._clearance_violation_count()
 
@@ -3040,6 +3106,11 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                     reason = (
                         f"zone-carried pad connectivity {pre_zone_pads} -> {post_zone_pads} "
                         f"on {delta.target_ref}"
+                    )
+                elif abandoned_early[0]:
+                    reason = (
+                        f"abandoned after iteration 0: routed {new_count} is more than "
+                        f"{abandon_margin} below the accepted {pre_count}"
                     )
                 else:
                     reason = "no strict routed-net increase"
