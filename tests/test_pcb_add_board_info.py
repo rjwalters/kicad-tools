@@ -154,3 +154,39 @@ def test_explicit_at_warns_when_not_clear(tmp_path, capsys):
     assert _run(p, at=(103.0, 127.0), output_format="json") == 0
     data = json.loads(capsys.readouterr().out)
     assert data["warnings"]
+
+
+def _kicad_cli_silk_findings(pcb: Path) -> list[str]:
+    import subprocess
+
+    out = pcb.with_suffix(".drc.json")
+    cfg = pcb.parent / "kicad-cfg"
+    cfg.mkdir(exist_ok=True)
+    subprocess.run(
+        ["kicad-cli", "pcb", "drc", "--format", "json", "--severity-all", "-o", str(out), str(pcb)],
+        check=True,
+        capture_output=True,
+        timeout=120,
+        env={**__import__("os").environ, "KICAD_CONFIG_HOME": str(cfg)},
+    )
+    data = json.loads(out.read_text())
+    return [
+        f"{v['type']}: {v['description']}"
+        for v in data.get("violations", [])
+        if v["type"].startswith("silk_")
+    ]
+
+
+@pytest.mark.skipif(
+    __import__("shutil").which("kicad-cli") is None, reason="kicad-cli not installed"
+)
+@pytest.mark.parametrize(
+    "origin,layer",
+    [((100.0, 100.0), "F.SilkS"), ((0.0, 0.0), "F.SilkS"), ((100.0, 100.0), "B.SilkS")],
+)
+def test_auto_output_is_clean_under_kicad_cli(tmp_path, origin, layer):
+    """AC5: --auto output has 0 silk findings from kicad-cli pcb drc (#8533)."""
+    p = _write(tmp_path, origin=origin, extra=_LOGO)
+    assert _kicad_cli_silk_findings(p) == []
+    assert _run(p, auto=True, order_placeholder="JLCJLCJLCJLC", layer=layer) == 0
+    assert _kicad_cli_silk_findings(p) == []

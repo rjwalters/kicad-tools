@@ -138,6 +138,25 @@ def _obstacles(pcb, side: str, mask_clearance_mm: float):
     return apertures, silk, courtyards, material, outline
 
 
+# kicad-cli's stroke-font extent is wider than the shared 0.7 em/char estimate
+# (measured against kicad-cli 10.0.6 DRC, #8533 review): ~0.9 em per character,
+# plus a small edge margin.  Placement uses this conservative box so ``--auto``
+# output is also clean under kicad-cli, not just ``kct check``.
+_KICAD_CHAR_WIDTH_FACTOR = 0.9
+_KICAD_EDGE_MARGIN_MM = 0.9
+_KICAD_CLEARANCE_MARGIN_MM = 0.5
+
+
+def _stamp_geometry(text: str, size: float, thickness: float, center: tuple[float, float]):
+    """Conservative (kicad-cli-safe) bounding box for a stamp line."""
+    from shapely.geometry import box
+
+    half_w = (len(text) * size * _KICAD_CHAR_WIDTH_FACTOR + thickness) / 2.0
+    half_h = (size + thickness) / 2.0
+    cx, cy = center
+    return box(cx - half_w, cy - half_h, cx + half_w, cy + half_h)
+
+
 def _find_free_spot(
     text: str,
     size: float,
@@ -149,11 +168,10 @@ def _find_free_spot(
 ) -> tuple[float, float] | None:
     """Return the clear text centre nearest the bottom-left of the board."""
     from kicad_tools.silkscreen.place_refs import _candidate_clear
-    from kicad_tools.validate.rules.silkscreen import _text_bbox_geometry
 
     apertures, silk, courtyards, material, outline = obstacles
     min_x, min_y, max_x, max_y = material.bounds
-    half_w = (len(text) * size * 0.7 + thickness) / 2.0
+    half_w = (len(text) * size * _KICAD_CHAR_WIDTH_FACTOR + thickness) / 2.0
     half_h = (size + thickness) / 2.0
     xs: list[float] = []
     x = min_x + half_w
@@ -171,9 +189,7 @@ def _find_free_spot(
         key=lambda p: (p[0] - min_x) + (max_y - p[1]),
     )
     for cx, cy in candidates:
-        geom = _text_bbox_geometry(text, (size, size), thickness, (cx, cy))
-        if geom is None:
-            continue
+        geom = _stamp_geometry(text, size, thickness, (cx, cy))
         ok, _why = _candidate_clear(
             geom,
             apertures=apertures,
@@ -182,8 +198,8 @@ def _find_free_spot(
             outline=outline,
             board_material=material,
             outline_error="",
-            clearance_mm=clearance_mm,
-            edge_clearance_mm=edge_clearance_mm,
+            clearance_mm=clearance_mm + _KICAD_CLEARANCE_MARGIN_MM,
+            edge_clearance_mm=edge_clearance_mm + _KICAD_EDGE_MARGIN_MM,
         )
         if ok:
             return cx, cy
@@ -258,7 +274,6 @@ def _run(
         SILK_EDGE_CLEARANCE_MM,
     )
     from kicad_tools.silkscreen.place_refs import _SilkscreenPCB
-    from kicad_tools.validate.rules.silkscreen import _text_bbox_geometry
 
     if layer not in _VALID_LAYERS:
         raise BoardInfoError(f"--layer must be one of {', '.join(_VALID_LAYERS)}")
@@ -316,7 +331,7 @@ def _run(
                     f"no free silkscreen region on {layer} fits {t!r} "
                     f"(clear of pads, silk, courtyards and the board edge)"
                 )
-            geom = _text_bbox_geometry(t, (font_size, font_size), font_thickness, spot)
+            geom = _stamp_geometry(t, font_size, font_thickness, spot)
             placed_geoms.append((geom, "board-info"))
             placements.append((t, spot[0] + ox, spot[1] + oy))
     else:
