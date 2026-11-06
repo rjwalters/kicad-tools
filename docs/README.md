@@ -28,6 +28,7 @@ Step-by-step guides for common tasks:
 | [Match Groups](guides/match-groups/README.md) | Length-match parallel-bus groups (DDR, MIPI, HDMI) |
 | [Hybrid Figure-of-Merit (FOM)](guides/fom.md) | Layered routability/quality scoring function |
 | [LCSC/EasyEDA 3D Models](guides/lcsc-3d-models.md) | Fetch-on-demand 3D models for LCSC parts |
+| [Parametric 3D Models](guides/parametric-3d-models.md) | Generate missing STEP bodies with `kct models generate` |
 | [Routing Benchmark Suite](guides/benchmarking.md) | Measure router quality and detect regressions |
 | [MCP Server](mcp/README.md) | Enable AI agents to interact via Model Context Protocol |
 | [Stackup Presets](guides/stackup-presets.md) | Named JLCPCB stackups and legacy migration |
@@ -57,6 +58,7 @@ Detailed reference documentation:
 | [RoutingPlan Sidecar](reference/routing-plan.md) | `<output_stem>.routing_plan.json` written by every default `kct route` |
 | [Commit-Journal Sidecar](reference/commit-journal.md) | `<output_stem>.access_witness.json` pad-access witness |
 | [KiCad Lock Policy](reference/kicad-lock-policy.md) | KiCad lock-marker advisories on save |
+| [Route Opt-In Flags](reference/route-opt-in-flags.md) | When an opt-in `kct route` flag graduates or is deprecated |
 | [`board.json` Schema](board-json-schema.md) | Normalized per-board data contract (`kct board-metrics`) |
 | [External Benchmark Report Schema](benchmark-external-report-schema.md) | Per-board report contract for `kct bench external` |
 | [Agent Surfaces](agent-surfaces.md) | What each `kct` skill needs from its harness |
