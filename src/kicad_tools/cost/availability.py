@@ -309,11 +309,27 @@ class LCSCAvailabilityChecker:
             fresh = {}
             for pn in stale:
                 refresh_errors[pn.upper()] = f"Live refetch failed: {type(exc).__name__}: {exc}"
-        # Keep the cached part whenever the refetch did not return one.
-        parts_map.update(fresh)
+        # Merge only genuine live observations. lookup_many(bypass_cache=True)
+        # can fall back to the offline catalog without raising; such a part must
+        # not replace the cached live observation.
+        fresh_diag = "; ".join(getattr(fresh, "diagnostics", None) or [])
         for pn in stale:
-            if pn not in fresh and pn.upper() not in refresh_errors:
-                refresh_errors[pn.upper()] = "Live refetch returned no result"
+            if pn.upper() in refresh_errors:
+                continue
+            part = fresh.get(pn)
+            if part is not None and part.stock_verified:
+                parts_map[pn] = part
+                continue
+            cached = parts_map[pn]
+            when = getattr(cached, "fetched_at", None)
+            when_txt = f" from {when:%Y-%m-%d %H:%M}" if hasattr(when, "strftime") else ""
+            if part is None:
+                reason = fresh_diag or "no result"
+            else:
+                reason = fresh_diag or f"fell back to {part.stock_source} data"
+            refresh_errors[pn.upper()] = (
+                f"Live refetch failed: {reason}; showing cached observation{when_txt}"
+            )
         return parts_map, unavailable, refresh_errors
 
     def check_bom(

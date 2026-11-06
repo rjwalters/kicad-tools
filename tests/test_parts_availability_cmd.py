@@ -192,6 +192,23 @@ def test_refetch_failure_is_named_per_item():
     assert "Live refetch failed" in item.error and "429" in item.error
 
 
+def test_refetch_offline_fallback_keeps_cached_live_part():
+    from datetime import datetime, timedelta
+    from unittest.mock import MagicMock
+
+    cached = _part(5000, False)
+    cached.fetched_at = datetime.now() - timedelta(days=3)
+    offline = _part(0, False)
+    offline.stock_source = "offline_catalog"
+    client = MagicMock()
+    client.lookup_many.side_effect = [{"C1": cached}, {"C1": offline}]
+    item = _checker(client).check_bom(_one_bom()).items[0]
+    assert item.quantity_available == 5000
+    assert "Live refetch failed" in item.error
+    assert "offline_catalog" in item.error
+    assert "Stock unverified: refresh live inventory" not in item.error
+
+
 def test_bypass_cache_forwarded_to_lookup_many():
     from unittest.mock import MagicMock
 
