@@ -252,6 +252,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_fix_silkscreen_parser(subparsers)
     _add_place_silk_refs_parser(subparsers)
     _add_repair_clearance_parser(subparsers)
+    _add_repair_creepage_parser(subparsers)
     _add_fix_drc_parser(subparsers)
     _add_fix_erc_parser(subparsers)
     _add_parts_parser(subparsers)
@@ -5044,6 +5045,17 @@ def _add_repair_clearance_parser(subparsers) -> None:
         default="text",
         help="Output format (default: text)",
     )
+
+
+def _add_repair_creepage_parser(subparsers) -> None:
+    """Add repair-creepage subcommand parser (Issue #8545)."""
+    from .repair_creepage_cmd import add_repair_creepage_args
+
+    parser = subparsers.add_parser(
+        "repair-creepage",
+        help="Repair HV creepage shortfalls by translating wide traces/vias (keeps width)",
+    )
+    add_repair_creepage_args(parser)
 
 
 def _add_fix_drc_parser(subparsers) -> None:
