@@ -77,6 +77,28 @@ def test_flags_the_045_gap(tmp_path: Path, capsys) -> None:
     assert "'HV'" in hits[0]["message"] and "KCT_PRESERVE" not in hits[0]["message"]
 
 
+def test_hit_locations_are_sheet_absolute(tmp_path: Path, capsys) -> None:
+    """Findings sit on the absolute HV trace/wall, not offset by ``-board_origin`` (#8511).
+
+    Guards the ``checker._absolutize`` wrap in ``_netclass_clearance_copper_check``
+    (#8493).  The wall board's Edge.Cuts starts at (100, 100), so a missing
+    re-add shifts every location by 100 mm.
+    """
+    from kicad_tools.schema.pcb import PCB
+
+    pcb = _board(tmp_path, STRAIGHT)
+    ox, oy = PCB.load(str(pcb)).board_origin
+    assert ox != 0 and oy != 0
+
+    _, report = _check(pcb, tmp_path, capsys)
+    hits = _hits(report)
+    assert hits
+    for h in hits:
+        x, y = h["location"]
+        assert 103 <= x <= 127
+        assert abs(y - wall.HV_Y) < 1.0
+
+
 def test_fab_floor_rule_does_not_see_it(tmp_path: Path, capsys) -> None:
     """The existing family is blind to it -- the gap this category closes."""
     pcb = _board(tmp_path, STRAIGHT)

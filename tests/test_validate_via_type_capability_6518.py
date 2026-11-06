@@ -222,6 +222,20 @@ class TestCheckerWiring:
         assert len(found) == 1
         assert found[0].location == (105.0, 100.0)
 
+    def test_message_coordinates_match_location_on_shifted_board(self, tmp_path):
+        """Message coords equal the finding's sheet-absolute location (#8511).
+
+        Guards the origin added in ``via_type_capability._make_violation`` (#8493).
+        """
+        # Edge.Cuts starts at (90, 90), so the origin is non-zero.
+        pcb = _pcb(tmp_path, "blind")
+        assert pcb.board_origin != (0.0, 0.0)
+        checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=4)
+        found = checker.check_via_type_capability().filter_by_rule(RULE_ID)
+        assert len(found) == 1
+        x, y = found[0].location
+        assert f"({x:.3f}, {y:.3f})" in found[0].message
+
 
 @pytest.mark.parametrize("via_type", ["blind", "buried", "micro"])
 def test_cli_json_reports_error(tmp_path, capsys, via_type):
