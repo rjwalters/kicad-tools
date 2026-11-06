@@ -13,6 +13,16 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-11-06
+
+- **PR #8484**: feat(submit-jlcpcb): add optional [submit] extra for the playwright driver
+- **Issue #8481** (closed): submit-jlcpcb: ship Playwright as a kicad-tools[submit] optional extra (follow-up to #8465)
+- **PR #8487**: docs(submit-jlcpcb): record the attended-driver ruling in the website guides
+- **PR #8482**: feat(submit-jlcpcb): one-driver browser lock and dry-run website refusal
+- **Issue #8465** (closed): Agent-prepared JLCPCB PCBA order up to a saved cart (/kct:submit-jlcpcb): compose the #5056 pieces and drive the website hand-off
+- **Issue #8468** (closed): feat(submit-jlcpcb): website leg, factory-match gate, cart hand-off (part 3/3 of #8465)
+- **PR #8476**: feat(submit-jlcpcb): attended website driver to a saved JLCPCB cart
+
 ### 2026-11-05
 
 - **PR #8470**: feat(submit-jlcpcb): add preflight, stock gate, API leg and review page workflow
