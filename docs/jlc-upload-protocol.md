@@ -106,15 +106,38 @@ of a clause is **not** evidence of permission. A human who reads the full
 terms in a browser can replace this finding with a quoted allowed/forbidden
 ruling; until then the conservative reading stands.
 
+### Operator ruling (2026-11-05): attended driver allowed
+
+The operator read the full Terms & Conditions in a rendered browser
+(effective Aug 28, 2026) and ruled on #8468. That ruling supersedes the
+conservative reading above:
+
+- No clause addresses automated or scripted use of the website, to permit or
+  to forbid it. The risk is discretionary account action: §III makes the user
+  responsible for all account activity and lets JLCPCB disable an account at
+  its sole discretion, and §XIV lets JLCPCB judge compliance.
+- `https://jlcpcb.com/robots.txt` disallows `/api`, `/user-center/` and the
+  `…/downloadNoMatchBomList` paths, among others.
+
+So `kct submit-jlcpcb --website` ships as an **attended** driver
+(`manufacturers/jlc_site_driver.py`, PR #8476). It runs only in the operator's
+own signed-in Chrome on a dedicated CDP profile, with the operator watching. It
+goes one action at a time, never requests a robots.txt-disallowed path (the
+operator downloads the part-matching export), and stops at the saved cart.
+`--guided` stays as the fallback and kill switch. If JLCPCB objects or restricts
+an account, the driver is disabled, not patched. Its selectors are unverified
+against the live site until the first attended run (#8478).
+
 ### Browser-tooling prerequisite and credentials
 
-The guided checklist is designed around the operator's own browser:
+Both the attended driver and the guided checklist use the operator's own browser:
 
 - The operator drives (or supervises) their own, already logged-in browser
   profile on jlcpcb.com. kct never receives, stores or logs a password, cookie,
   session token or API secret for the website.
-- Any browser tooling (for example a browser-automation CLI attached to the
-  operator's profile) is the operator's responsibility to install and
-  authorise; kct does not bundle it and does not require it for the checklist.
+- The driver attaches over CDP to a Chrome the operator started with
+  `--remote-debugging-port` and a dedicated `--user-data-dir` (Chrome 136+
+  refuses the default profile). It needs the optional `playwright` package;
+  the guided checklist needs no browser tooling at all.
 - The existing signed Gerber-upload transport above is a separate path and is
   unaffected by this finding.

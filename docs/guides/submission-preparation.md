@@ -688,12 +688,16 @@ transcribed positions. `coordinates_available=None` means the report did not
 state availability. Missing axes, units, context, and thresholds remain `None`.
 Coordinate values and receipt provenance participate in the attachment hash.
 
-## Website ordering: no automated driver (#8467)
+## Website ordering: attended driver (#8468)
 
-kct does not automate the jlcpcb.com ordering website. A dated review
-(2026-11-05) found no retrievable terms text permitting scripted website use,
-and unclear is treated as forbidden; see
+`kct submit-jlcpcb --website` can fill the jlcpcb.com PCBA order form and stop
+at a saved cart, but only as an **attended** driver. It runs in your own
+signed-in Chrome on a dedicated CDP profile while you watch, one action at a
+time. It never requests a robots.txt-disallowed path (you download JLC's
+part-matching export and the driver checks it), and it never checks out or pays.
+kct handles no website credentials. `--guided` prints the same steps as a manual
+checklist, and any failed assertion drops into it. The terms review and the
+2026-11-05 operator ruling behind this are in
 [`docs/jlc-upload-protocol.md`](../jlc-upload-protocol.md#website-automation-terms-finding-8467-part-23-of-8465).
-Complete website steps yourself, in your own logged-in browser profile; kct
-handles no website credentials. Any browser tooling you choose to use alongside
-the guided checklist is your own to install and authorise.
+The driver's selectors are unverified against the live site until the first
+attended run (#8478); see the `/kct:submit-jlcpcb` skill for usage.
