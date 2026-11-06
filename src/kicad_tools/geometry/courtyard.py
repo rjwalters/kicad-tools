@@ -166,7 +166,7 @@ def _courtyard_polygon(footprint: Footprint, side: str, Polygon: Any):
         circle = circles[0]
         if circle.center is not None and circle.radius and circle.radius > 0:
             cx, cy = transform(circle.center)
-            from shapely.geometry import Point
+            from shapely.geometry import Point  # type: ignore[import-untyped]
 
             polygon = Point(cx, cy).buffer(circle.radius)
             return polygon if not polygon.is_empty and polygon.area > 0 else None
