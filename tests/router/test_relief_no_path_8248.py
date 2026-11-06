@@ -764,3 +764,68 @@ def test_open_side_victim_routes_once_the_blocker_is_ripped():
     assert ok is True, log
     assert net_routes[1], log
     assert any("ROUTED via conflict-free relief path" in m for m in log), log
+
+
+# --- Issue #8486: the #8248 skip was blind to unsealed failures --------------
+#
+# Root cause, from the reported run's log: iteration 3 printed "skipped -- no
+# relief path last iteration under the identical access-loss witness" for the
+# nine wide nets whose pads were sealed, but re-ran the relief for the six
+# narrow nets whose line read "no closing nets resolved".  Those nets had no
+# access-loss witness at all, so ``_relief_witness_signature`` returned
+# ``None`` and ``repeats_futile_relief(None)`` never skips (candidate (a)).
+# The bulk of each re-run was the unmemoized targeted rip-up before the
+# relief (candidate (b)) -- covered in ``test_known_failure_8486.py``.
+
+
+def test_unsealed_failure_gets_a_copper_signature_and_its_repeat_is_skipped():
+    router, neg, net_routes, pads_by_net = _fixture()
+    rippable = {n for n, rs in net_routes.items() if rs and n != VICTIM}
+    assert router._access_loss_gate().peek_blockers_for(VICTIM, rippable) is None, (
+        "fixture must fail without a sealed pad (no witness)"
+    )
+    sig = router._relief_witness_signature(VICTIM, net_routes)
+    assert sig is not None and sig[0] == "copper"
+
+    guard = RipupCycleGuard()
+    probes: list[int] = []
+
+    def probe(net, pf, per_net_timeout=None, **_kw):
+        probes.append(net)
+        return [], set()
+
+    log: list[str] = []
+    with patch.object(router, "_relief_probe", side_effect=probe):
+        router._commit_journal.iteration = 1
+        assert _relief(router, neg, net_routes, pads_by_net, guard, log) is False
+        n = len(probes)
+        router._commit_journal.iteration = 2
+        assert _relief(router, neg, net_routes, pads_by_net, guard, log) is False
+    assert len(probes) == n, "an unchanged unsealed failure must not re-run its relief"
+    assert guard.futile_relief_skips == [VICTIM]
+
+
+def test_copper_signature_tracks_only_nearby_copper():
+    router, _neg, net_routes, _pads = _fixture()
+    base = router._relief_witness_signature(VICTIM, net_routes)
+    # Far copper (net 5 at y=23, victim pads at y=7) moving changes nothing.
+    net_routes[5] = [_seg(8.0, 24.0, 32.0, 24.0, net=5)]
+    assert router._relief_witness_signature(VICTIM, net_routes) == base
+    # Copper landing next to a victim pad changes the signature.
+    net_routes[2] = [_seg(4.0, 8.0, 9.0, 8.0, net=2)]
+    near = router._relief_witness_signature(VICTIM, net_routes)
+    assert near != base
+    # ...and so does nudging it, or the victim's own copper being ignored.
+    net_routes[2] = [_seg(4.0, 8.2, 9.0, 8.2, net=2)]
+    assert router._relief_witness_signature(VICTIM, net_routes) not in (base, near)
+    net_routes[VICTIM] = [_seg(5.0, 7.0, 6.0, 7.0, net=VICTIM)]
+    assert router._relief_witness_signature(VICTIM, {**net_routes, VICTIM: []}) == (
+        router._relief_witness_signature(VICTIM, net_routes)
+    )
+
+
+def test_sealed_signature_still_keys_on_the_witness():
+    router = _sealed_router()
+    net_routes = {n: [object()] for n in (2, 3, 4, 5)}
+    sig = router._relief_witness_signature(1, net_routes)
+    assert sig is not None and sig[0] == "seal"
