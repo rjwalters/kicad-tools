@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING
 
 from kicad_tools.exceptions import ConfigurationError
 
+from .pnp import bare_footprint
+
 if TYPE_CHECKING:
     from ..parts.cache import PartsCache
     from ..schema.bom import BOMItem
@@ -99,7 +101,8 @@ class JLCPCBBOMFormatter(BOMFormatter):
             grouped = self._group_items(filtered)
         else:
             grouped = {
-                (item.value, item.footprint, getattr(item, "lcsc", "")): [item] for item in filtered
+                (item.value, bare_footprint(item.footprint), getattr(item, "lcsc", "")): [item]
+                for item in filtered
             }
 
         output = io.StringIO()
@@ -118,7 +121,7 @@ class JLCPCBBOMFormatter(BOMFormatter):
         groups: dict[tuple, list[BOMItem]] = {}
         for item in items:
             lcsc = getattr(item, "lcsc", "")
-            key = (item.value, item.footprint, lcsc)
+            key = (item.value, bare_footprint(item.footprint), lcsc)
             if key not in groups:
                 groups[key] = []
             groups[key].append(item)
@@ -373,7 +376,7 @@ def read_existing_lcsc_assignments(csv_path: Path) -> dict[tuple[str, str], str]
                 footprint = (row.get(footprint_col) or "").strip()
                 lcsc = (row.get(lcsc_col) or "").strip()
                 if value and footprint and lcsc:
-                    assignments[(value, footprint)] = lcsc
+                    assignments[(value, bare_footprint(footprint))] = lcsc
     except (OSError, UnicodeDecodeError, csv.Error):
         # If the file can't be read or parsed, return empty — the
         # caller will simply regenerate without merging.
@@ -417,7 +420,7 @@ def apply_existing_lcsc_assignments(
     for item in items:
         if getattr(item, "lcsc", "") or getattr(item, "dnp", False):
             continue
-        key = (item.value, item.footprint)
+        key = (item.value, bare_footprint(item.footprint))
         if key in rejected:
             continue
         lcsc = existing.get(key)

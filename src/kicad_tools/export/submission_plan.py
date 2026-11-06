@@ -40,7 +40,7 @@ from ._fsutil import open_nofollow as _open_nofollow
 from ._fsutil import posix_dir_flags as _posix_dir_flags
 from ._fsutil import supports_dir_fd as _supports_dir_fd
 from .bom_formats import JLCPCBBOMFormatter
-from .pnp import JLCPCBPnPFormatter
+from .pnp import JLCPCBPnPFormatter, bare_footprint
 
 _ROLES = {"gerber", "bom", "cpl"}
 _RESERVED = {"plan.json", "plan.sha256", "expected-matches.json", "bundle-manifest.json"}
@@ -414,8 +414,16 @@ def _population(
             raise SubmissionError("Duplicate or extra CPL reference")
         seen.add(ref)
         assignment = assignments[ref]
-        if row["Val"] != assignment["value"] or row["Package"] != assignment["footprint"]:
-            raise SubmissionError("BOM/CPL value or footprint disagrees")
+        if row["Val"] != assignment["value"]:
+            raise SubmissionError(
+                f"BOM/CPL value disagrees for {ref}: "
+                f"BOM {assignment['value']!r} vs CPL {row['Val']!r}"
+            )
+        if bare_footprint(row["Package"]) != bare_footprint(assignment["footprint"]):
+            raise SubmissionError(
+                f"BOM/CPL footprint disagrees for {ref}: "
+                f"BOM {assignment['footprint']!r} vs CPL {row['Package']!r}"
+            )
         side = {"Top": "top", "Bottom": "bottom"}.get(row["Layer"])
         if side not in sides:
             raise SubmissionError("CPL layer differs from explicit assembly sides")
