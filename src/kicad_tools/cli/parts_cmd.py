@@ -100,6 +100,11 @@ def main(argv: list[str] | None = None) -> int:
     avail_parser.add_argument(
         "--issues-only", action="store_true", help="Only show parts with availability issues"
     )
+    avail_parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Bypass the parts cache and fetch every part live",
+    )
 
     # suggest subcommand
     suggest_parser = subparsers.add_parser(
@@ -776,7 +781,10 @@ def _availability(args) -> int:
     )
 
     try:
-        result = checker.check_bom(bom, quantity=args.quantity)
+        if getattr(args, "no_cache", False):
+            result = checker.check_bom(bom, quantity=args.quantity, bypass_cache=True)
+        else:
+            result = checker.check_bom(bom, quantity=args.quantity)
     finally:
         checker.close()
 
