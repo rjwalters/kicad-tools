@@ -289,7 +289,13 @@ class LCSCAvailabilityChecker:
         if bypass_cache:
             return parts_map, unavailable, refresh_errors
 
-        stale = [pn for pn, part in parts_map.items() if not part.stock_verified]
+        # Offline-catalog parts are unverified by origin, not by cache age; a
+        # live refetch would not be a "stale cache" refresh, so leave them alone.
+        stale = [
+            pn
+            for pn, part in parts_map.items()
+            if not part.stock_verified and not part.stock_source.startswith("offline")
+        ]
         if not stale:
             return parts_map, unavailable, refresh_errors
 

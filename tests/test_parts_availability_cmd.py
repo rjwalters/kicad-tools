@@ -134,6 +134,7 @@ def _part(stock: int, verified: bool):
     p = MagicMock()
     p.stock = stock
     p.stock_verified = verified
+    p.stock_source = "live"  # stale cache entries keep their live origin
     p.prices = []
     p.mfr_part = "MPN"
     p.min_order = 1
