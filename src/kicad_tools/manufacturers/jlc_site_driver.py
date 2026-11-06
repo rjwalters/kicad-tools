@@ -400,7 +400,10 @@ def connect_attended_page(
     try:
         from playwright.sync_api import sync_playwright  # type: ignore[import-not-found]
     except ImportError as exc:
-        raise DriverAbort("connect", "playwright is not installed; use --guided") from exc
+        raise DriverAbort(
+            "connect",
+            "playwright is not installed; run pip install 'kicad-tools[submit]' (or use --guided)",
+        ) from exc
     pw = sync_playwright().start()
     try:
         browser = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")

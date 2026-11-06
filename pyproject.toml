@@ -198,6 +198,12 @@ report = [
 models = [
     "cadquery>=2.4; python_version < '3.14'",
 ]
+# JLCPCB attended order driver (`kct submit-jlcpcb`).  Playwright attaches to
+# the user's own Chrome over CDP, so `playwright install` is NOT needed.
+# Deliberately NOT part of `all` (heavy, niche dependency).
+submit = [
+    "playwright>=1.40",
+]
 # All optional features
 all = [
     "rtree>=1.0",
