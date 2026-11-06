@@ -1484,3 +1484,10 @@ def test_pin_helper_rejects_toml_1_1_escapes(tmp_path: Path, escape: str) -> Non
     path = tmp_path / "pyproject.toml"
     path.write_text(text)
     assert _pin(path, "state").returncode != 0
+
+
+def test_submit_jlcpcb_skill_is_vendored(target_repo: Path, fake_uv_env: dict[str, str]) -> None:
+    """Regression (#8537): the submit-jlcpcb skill reaches consumer repos."""
+    result = run_installer(target_repo, "--path", str(REPO_ROOT), env=fake_uv_env)
+    assert result.returncode == 0, result.stderr
+    assert (target_repo / ".claude" / "commands" / "kct" / "submit-jlcpcb.md").is_file()

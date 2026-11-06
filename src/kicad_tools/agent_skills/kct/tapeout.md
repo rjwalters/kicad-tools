@@ -202,6 +202,22 @@ The `manifest.json` `kct export` wrote in Gate 3 only covers **what `kct export`
 - Record the **declared BOM exemptions** from Gate 4 (a list of `{ref, category, reason}`; empty list if none).
 - Record the **per-rule warning counts** from Gate 4b (a `rule_id` → warning-count map, plus the list of acknowledged assembly-affecting rules), so a later re-verification can diff the warning population **per rule** rather than against an aggregate total. An aggregate-only warning number in the manifest is non-compliant for the same reason it is in Gate 4b.
 
+**Exact schema `kct submit-jlcpcb` consumes** (the same module, `export/submission_workflow.py`, reads and writes it):
+
+```json
+{"files": {"<bundle-relative path>": {"sha256": "<hex>", "size": <bytes>}},
+ "tapeout": {"board_sha256": "<sha256 of the board .kicad_pcb>",
+             "human_signoff": {"reviewer": "<name>", "signed_at": "<ISO 8601>"}}}
+```
+
+Per-file records use the keys `sha256` and `size` (not `bytes`). The `tapeout` block is **not** written by `kct export` or by this skill: it is a human act. After the gates pass, the human (or the agent on their explicit instruction, with their name) records it:
+
+```bash
+kct tapeout-sign-off <dir> --board <board.kicad_pcb> --reviewer "<name>"
+```
+
+It verifies the manifest's file set equals `<dir>` and every `sha256`/`size`, then writes `tapeout`. Never invent a reviewer. Re-run it after any change to the bundle or board.
+
 **Gate condition:** a `manifest.json` exists, is newer than every other file it lists, its file set equals the actual contents of `<dir>` (nothing in the directory is unchecksummed, nothing checksummed is missing), and it records the per-rule warning counts. A stale or partial manifest is a **failure** — it breaks the "upload as-is" contract.
 
 ## Tapeout verdict

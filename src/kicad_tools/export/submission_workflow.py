@@ -6,7 +6,7 @@ Thin orchestration over the existing, individually-tested pieces
 published plan, stock snapshot, review record, upload ledger and review page
 are the records.
 
-Tapeout manifest contract read by :func:`preflight` (``manifest.json``)::
+Tapeout manifest contract read by :func:`preflight` (``manifest.json``, written by :func:`sign_off_bundle` / ``kct tapeout-sign-off``)::
 
     {"files": {"<name>": {"sha256": ..., "size": ...}, ...},
      "tapeout": {"board_sha256": "<sha256 of the board file>",
@@ -144,13 +144,32 @@ def _pick(files: Collection[str], pattern: str, role: str) -> str:
     return hits[0]
 
 
-def preflight(bundle_root: Path, board: Path) -> Preflight:
-    """Refuse, offline, unless the tapeout bundle is intact, signed off and matches ``board``.
+def _verify_file_records(bundle_root: Path, files: dict[str, Any]) -> None:
+    """Check every ``files`` record against disk, naming the file and the field at fault."""
+    for name, record in sorted(files.items()):
+        path = bundle_root / name
+        if not isinstance(record, dict):
+            raise WorkflowError(
+                f"Manifest record for {name} is not an object with 'sha256' and 'size'"
+            )
+        for key in ("sha256", "size"):
+            if key not in record:
+                raise WorkflowError(
+                    f"Manifest record for {name} is missing required key '{key}' "
+                    "(expected files.<name>.{sha256, size})"
+                )
+        if not path.is_file():
+            raise WorkflowError(f"Manifest lists {name} but it is not in the bundle")
+        data = path.read_bytes()
+        if _sha(data) != record["sha256"]:
+            raise WorkflowError(f"Manifest sha256 mismatch for {name}")
+        if len(data) != record["size"]:
+            raise WorkflowError(
+                f"Manifest size mismatch for {name} (manifest {record['size']}, disk {len(data)})"
+            )
 
-    Order is deliberate and everything here is local file I/O: a refusal can
-    never have been preceded by a network call.
-    """
-    bundle_root, board = Path(bundle_root), Path(board)
+
+def _load_manifest(bundle_root: Path) -> dict[str, Any]:
     manifest_path = bundle_root / "manifest.json"
     if not manifest_path.is_file():
         raise WorkflowError("Tapeout manifest.json not found in bundle")
@@ -161,13 +180,59 @@ def preflight(bundle_root: Path, board: Path) -> Preflight:
     files = manifest.get("files") if isinstance(manifest, dict) else None
     if not isinstance(files, dict) or not files:
         raise WorkflowError("Tapeout manifest lists no files")
-    for name, record in sorted(files.items()):
-        path = bundle_root / name
-        if not isinstance(record, dict) or not path.is_file():
-            raise WorkflowError(f"Manifest file missing or malformed: {name}")
-        data = path.read_bytes()
-        if _sha(data) != record.get("sha256") or len(data) != record.get("size"):
-            raise WorkflowError(f"Manifest sha256/size mismatch for {name}")
+    return manifest
+
+
+def sign_off_bundle(
+    bundle_root: Path, board: Path, reviewer: str, *, signed_at: str | None = None
+) -> dict[str, Any]:
+    """Record an explicit human sign-off in ``manifest.json`` (the one producer of it).
+
+    Verifies the manifest's file set equals the bundle directory and every
+    recorded sha256/size, then writes ``tapeout.{board_sha256, human_signoff}``.
+    Re-running is idempotent apart from ``signed_at``. The reviewer is never
+    invented: a blank name is refused.
+    """
+    bundle_root, board = Path(bundle_root), Path(board)
+    if not (reviewer or "").strip():
+        raise WorkflowError("Sign-off needs a non-blank --reviewer (a human's name)")
+    if not board.is_file():
+        raise WorkflowError(f"Board file not found: {board}")
+    manifest = _load_manifest(bundle_root)
+    files = manifest["files"]
+    on_disk = {
+        p.relative_to(bundle_root).as_posix() for p in bundle_root.rglob("*") if p.is_file()
+    } - {"manifest.json"}
+    if on_disk != set(files):
+        extra, missing = sorted(on_disk - set(files)), sorted(set(files) - on_disk)
+        raise WorkflowError(
+            f"Bundle files differ from manifest (not in manifest: {extra or 'none'}; "
+            f"listed but absent: {missing or 'none'})"
+        )
+    _verify_file_records(bundle_root, files)
+    manifest["tapeout"] = {
+        "board_sha256": _file_sha(board),
+        "human_signoff": {
+            "reviewer": reviewer.strip(),
+            "signed_at": signed_at or datetime.now(timezone.utc).isoformat(),
+        },
+    }
+    (bundle_root / "manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=False) + "\n", encoding="utf-8"
+    )
+    return manifest["tapeout"]
+
+
+def preflight(bundle_root: Path, board: Path) -> Preflight:
+    """Refuse, offline, unless the tapeout bundle is intact, signed off and matches ``board``.
+
+    Order is deliberate and everything here is local file I/O: a refusal can
+    never have been preceded by a network call.
+    """
+    bundle_root, board = Path(bundle_root), Path(board)
+    manifest = _load_manifest(bundle_root)
+    files = manifest["files"]
+    _verify_file_records(bundle_root, files)
 
     tapeout = manifest.get("tapeout")
     signoff = tapeout.get("human_signoff") if isinstance(tapeout, dict) else None
@@ -183,7 +248,7 @@ def preflight(bundle_root: Path, board: Path) -> Preflight:
     if tapeout.get("board_sha256") != board_sha:
         raise WorkflowError("Board file sha256 differs from tapeout.board_sha256")
 
-    gerber = _pick(files, r"\.zip$", "gerber")
+    gerber = _pick(files, r"gerber.*\.zip$", "gerber")
     bom = _pick(files, r"bom.*\.csv$", "BOM")
     cpl = _pick(files, r"(cpl|pos|placement).*\.csv$", "CPL")
     sides = _cpl_sides((bundle_root / cpl).read_bytes())

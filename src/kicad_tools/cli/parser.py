@@ -278,6 +278,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_board_metrics_parser(subparsers)
     _add_readiness_parser(subparsers)
     _add_submit_jlcpcb_parser(subparsers)
+    _add_tapeout_signoff_parser(subparsers)
     _add_clean_parser(subparsers)
     _add_impedance_parser(subparsers)
     _add_mcp_parser(subparsers)
@@ -7025,6 +7026,18 @@ def _add_submit_jlcpcb_parser(subparsers) -> None:
         subparsers.add_parser(
             "submit-jlcpcb",
             help="Prepare a JLCPCB PCBA submission from a tapeout bundle (never orders)",
+        )
+    )
+
+
+def _add_tapeout_signoff_parser(subparsers) -> None:
+    """Add ``tapeout-sign-off`` (records the human sign-off, #8537)."""
+    from .tapeout_signoff_cmd import add_arguments
+
+    add_arguments(
+        subparsers.add_parser(
+            "tapeout-sign-off",
+            help="Record a human sign-off in a tapeout bundle's manifest.json",
         )
     )
 

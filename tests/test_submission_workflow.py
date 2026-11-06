@@ -233,3 +233,95 @@ def test_review_page_renders_site_handoff_without_order_state(env):
     assert "- cart: in-cart" in text and "- factory_matching: factory-matched" in text
     assert "order: ordered" not in text
     assert "- [ ] Place and pay for the order yourself" in text
+
+
+# --- Issue #8537: sign-off producer, split preflight errors, stock export shape ---
+
+
+def export_shaped_manifest(env):
+    """Manifest as ``kct export`` writes it: files only, no ``tapeout`` block."""
+    bundle = env["bundle"]
+    files = {
+        p.relative_to(bundle).as_posix(): {"sha256": sha(p.read_bytes()), "size": p.stat().st_size}
+        for p in bundle.rglob("*")
+        if p.is_file() and p.name != "manifest.json"
+    }
+    (bundle / "manifest.json").write_text(json.dumps({"version": "1.0", "files": files}))
+
+
+def test_export_bundle_plus_signoff_passes_preflight_and_dry_run(env):
+    (env["bundle"] / "gerbers").mkdir()
+    (env["bundle"] / "gerbers" / "gerbers.zip").write_bytes(b"PK\x03\x04gerber")
+    (env["bundle"] / "gerbers.zip").unlink()
+    (env["bundle"] / "kicad_project.zip").write_bytes(b"PK\x03\x04project")
+    export_shaped_manifest(env)
+    board = env["src"] / "b.kicad_pcb"
+    with pytest.raises(wf.WorkflowError, match="human sign-off"):
+        wf.preflight(env["bundle"], board)
+    wf.sign_off_bundle(env["bundle"], board, "Ann")
+    facts = wf.preflight(env["bundle"], board)
+    assert facts.artifacts["gerber"] == "gerbers/gerbers.zip"
+    result = run(env, Source({"C1": 100, "C2": 100}), dry_run=True)
+    assert not result.stock.blocked
+
+
+def test_signoff_is_idempotent_and_updates_signed_at(env):
+    export_shaped_manifest(env)
+    board = env["src"] / "b.kicad_pcb"
+    wf.sign_off_bundle(env["bundle"], board, "Ann", signed_at="2026-01-01T00:00:00Z")
+    rec = wf.sign_off_bundle(env["bundle"], board, "Bob", signed_at="2026-02-01T00:00:00Z")
+    assert rec["human_signoff"] == {"reviewer": "Bob", "signed_at": "2026-02-01T00:00:00Z"}
+    wf.preflight(env["bundle"], board)
+
+
+@pytest.mark.parametrize("reviewer", ["", "   "])
+def test_signoff_refuses_blank_reviewer(env, reviewer):
+    export_shaped_manifest(env)
+    with pytest.raises(wf.WorkflowError, match="reviewer"):
+        wf.sign_off_bundle(env["bundle"], env["src"] / "b.kicad_pcb", reviewer)
+    assert "tapeout" not in json.loads((env["bundle"] / "manifest.json").read_text())
+
+
+def test_signoff_refuses_extra_or_missing_bundle_file(env):
+    export_shaped_manifest(env)
+    board = env["src"] / "b.kicad_pcb"
+    (env["bundle"] / "extra.txt").write_text("x")
+    with pytest.raises(wf.WorkflowError, match="extra.txt"):
+        wf.sign_off_bundle(env["bundle"], board, "Ann")
+    (env["bundle"] / "extra.txt").unlink()
+    (env["bundle"] / "cpl.csv").unlink()
+    with pytest.raises(wf.WorkflowError, match="cpl.csv"):
+        wf.sign_off_bundle(env["bundle"], board, "Ann")
+
+
+def test_board_changed_after_signoff_refuses(env):
+    export_shaped_manifest(env)
+    board = env["src"] / "b.kicad_pcb"
+    wf.sign_off_bundle(env["bundle"], board, "Ann")
+    board.write_text(PCB + "; edited\n")
+    with pytest.raises(wf.WorkflowError, match="board_sha256"):
+        wf.preflight(env["bundle"], board)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda m: m["files"].__setitem__("bom.csv", "oops"), "bom.csv is not an object"),
+        (lambda m: m["files"]["bom.csv"].pop("size"), "bom.csv is missing required key 'size'"),
+        (lambda m: m["files"]["bom.csv"].pop("sha256"), "bom.csv is missing required key 'sha256'"),
+        (
+            lambda m: m["files"]["bom.csv"].__setitem__("sha256", "0" * 64),
+            "sha256 mismatch for bom.csv",
+        ),
+        (lambda m: m["files"]["bom.csv"].__setitem__("size", 1), "size mismatch for bom.csv"),
+    ],
+)
+def test_preflight_distinct_record_errors(env, mutate, message):
+    write_manifest(env)
+    path = env["bundle"] / "manifest.json"
+    manifest = json.loads(path.read_text())
+    mutate(manifest)
+    path.write_text(json.dumps(manifest))
+    with pytest.raises(wf.WorkflowError) as err:
+        wf.preflight(env["bundle"], env["src"] / "b.kicad_pcb")
+    assert message.replace(" is not an object", "") in str(err.value) or message in str(err.value)
