@@ -14,6 +14,53 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-11-07
+
+- **PR #8595**: chore(loom): resync installed Loom to v0.19.1273
+- **PR #8594**: fix(readiness): accept non-output bundle layout and --verify receipt in tapeout sign-off
+- **PR #8593**: fix(stitch): ignore foreign inner-layer fill as via/stub obstacle
+- **PR #8590**: fix: harden repair-creepage vanished-target, island reason, partial-repair output
+- **PR #8589**: fix(creepage): search chains of floating net-0 islands
+- **PR #8588**: fix(stitch): reject via sites and stubs inside keep-out rule areas
+- **PR #8586**: chore(loom): resync installed Loom to v0.19.1272
+- **PR #8584**: fix: relax route-link map floors in attach zones and re-check collapsed routes
+- **PR #8583**: fix(pcb): flip pads, graphics and text for back-side footprint placement
+- **PR #8582**: fix: hash readiness manifest input without the tapeout sign-off key
+- **PR #8578**: test: guard withdrawn pour welds leave no copper on name-only boards
+- **PR #8575**: feat: accept a voltage map and census waivers in kct readiness HV gate
+- **PR #8574**: fix: name missing manufacturing.zip in readiness artifacts blocker
+- **PR #8572**: fix: converge BOM Footprint and CPL Package on qualified lib:name form
+- **PR #8568**: fix: reject placement deltas that add pad/courtyard overlaps
+- **PR #8567**: fix(router): explain impedance-driven net widths in log and rationale
+- **PR #8565**: fix: write stitch/weld copper in the board's net dialect
+- **PR #8558**: feat: add repair-creepage to translate wide HV copper out of creepage shortfalls
+- **PR #8557**: fix: keep pad nets name-only on KiCad 10 boards during sync
+- **PR #8556**: feat(route-link): HV-aware floors from a voltage map, per-link --net-clearance
+- **PR #8554**: fix: model net-0 copper as floating conductors in creepage census
+- **PR #8541**: feat: add kct tapeout-sign-off and split submit-jlcpcb preflight errors
+- **PR #8536**: feat(cli): add kct pcb add-board-info silkscreen stamp
+- **PR #8535**: feat(pcb): add kct pcb add-fiducials to place global fiducials
+- **PR #8528**: fix: scope ampacity DRU rules to declaring nets and honour stackup copper
+- **Issue #8592** (closed): readiness → tapeout-sign-off handoff: hard-coded output/manufacturing path, --verify receipt location rejected, relative --readiness path not resolved
+- **Issue #8591** (closed): stitch: foreign inner-plane zone fill counted as a via-site obstacle (pads skipped on solid-plane stacks)
+- **Issue #8587** (closed): stitch: places vias and escape traces inside keep-out rule areas (items_not_allowed)
+- **Issue #8581** (closed): fix(pcb): add_footprint_from_file leaves pads/graphics on F.* when placing on B.Cu
+- **Issue #8580** (closed): readiness: tapeout sign-off rewrites manifest.json, so a signed board reads as unverified
+- **Issue #8579** (closed): creepage: floating-island chains and IEC X-rule not modelled (follow-up to #8548)
+- **Issue #8571** (closed): readiness --verify rejects a /kct:tapeout bundle: expects an undocumented manufacturing.zip outer archive and a top-level preflight[]
+- **Issue #8570** (closed): readiness hv_isolation can't take a voltage map: non-isolated mains boards false-fail
+- **Issue #8569** (closed): export/jlcpcb: BOM Footprint and CPL Package use different library-prefix forms (writer-side consistency)
+- **Issue #8566** (closed): route: placement-delta feedback keeps a U5 translate that shorts its pads to three neighbours
+- **Issue #8564** (closed): route: clock nets routed wider than their net-class width, with no logged reason
+- **Issue #8550** (closed): pcb sync-netlist writes legacy (net <code> "name") pads on KiCad 10 boards, so KiCad sees no net
+- **Issue #8548** (closed): creepage census silently ignores net-0 copper (fiducials, islands); floating conductors near HV never assessed
+- **Issue #8546** (closed): route-link: no --voltage-map/creepage flags; --net-clearance is run-global, not per link
+- **Issue #8545** (closed): No creepage-aware repair: census finds a wide-trace HV shortfall but repair-clearance only reads DRC reports
+- **Issue #8537** (closed): submit-jlcpcb preflight requires tapeout.human_signoff/board_sha256 + files{sha256,size}, but no kct producer writes them
+- **Issue #8533** (closed): kct pcb add-board-info: stamp project/rev/date silkscreen
+- **Issue #8531** (closed): kct pcb add-fiducials: place global fiducials on the board
+- **Issue #8527** (closed): export: ampacity DRU rules promote a per-net target_ampacity to a class-wide track_width floor
+
 ### 2026-11-06
 
 - **PR #8562**: fix: shift board-level silk into board-relative frame in silk DRC and ref placement
