@@ -2138,6 +2138,8 @@ def identify_nearest_obstacle(
 
     # Check other-net filled polygons
     for fp in other_net_filled_polygons:
+        if _is_inner_layer_fill(fp):
+            continue
         # Quick bounding-box check
         if (
             pad.x + via_radius + clearance < fp.min_x
@@ -4472,6 +4474,23 @@ def _polygon_index(points: list[tuple[float, float]]) -> "_PolygonIndex | None":
     return index
 
 
+_OUTER_COPPER_LAYER_NAMES = frozenset({"F.Cu", "B.Cu"})
+
+
+def _is_inner_layer_fill(fp: FilledPolygon) -> bool:
+    """True for a non-keepout fill on an inner copper layer (Issue #8591).
+
+    A through via (or an outer-layer stub) crossing a foreign inner-plane
+    fill is legal: KiCad cuts an antipad when the zone refills.  Only
+    outer-layer (F.Cu/B.Cu) foreign fill is a real obstacle.  Keepouts are
+    never "inner fills" -- they keep blocking on every layer they cover.
+    """
+    if isinstance(fp, KeepoutPolygon):
+        return False
+    layer = getattr(fp, "layer", None)
+    return bool(layer) and layer not in _OUTER_COPPER_LAYER_NAMES
+
+
 def _check_point_filled_polygon_clearance(
     px: float,
     py: float,
@@ -4496,6 +4515,8 @@ def _check_point_filled_polygon_clearance(
             # that forbids vias: its annulus must not touch the area.
             if fp.blocks_vias and _circle_touches_polygon(px, py, radius, fp):
                 return False
+            continue
+        if _is_inner_layer_fill(fp):
             continue
         required = radius + clearance
         # Bounding-box pre-filter
@@ -4715,6 +4736,8 @@ def _check_segment_filled_polygon_clearance(
                 and _segment_touches_polygon(sx, sy, ex, ey, half_width, fp)
             ):
                 return False
+            continue
+        if _is_inner_layer_fill(fp):
             continue
         # Bounding-box pre-filter for the segment
         seg_min_x = min(sx, ex) - required
