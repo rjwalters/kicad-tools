@@ -11,7 +11,7 @@ from .qfn import create_qfn
 from .qfp import create_qfp
 from .soic import create_soic
 from .sot import create_sot
-from .through_hole import create_dip, create_pin_header
+from .through_hole import create_dip, create_pin_header, create_rpi_hat
 
 __all__ = [
     "create_soic",
@@ -21,6 +21,7 @@ __all__ = [
     "create_chip",
     "create_dip",
     "create_pin_header",
+    "create_rpi_hat",
     "create_bga",
     "create_bga_standard",
     "create_dfn",

@@ -68,7 +68,7 @@ from __future__ import annotations
 
 import math
 from collections import Counter, defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -2116,6 +2116,32 @@ def _plan_net(
     return plan
 
 
+Region = tuple[float, float, float, float]
+
+
+def _plan_points(pcb: PCB, plan: NetPlan) -> list[tuple[float, float]]:
+    """Every board point a plan reads-then-edits (for ``--region`` scoping)."""
+    segs = pcb.segments
+    pts: list[tuple[float, float]] = []
+    for i in plan.remove:
+        pts += [segs[i].start, segs[i].end]
+    for i in plan.remove_vias:
+        pts.append(pcb.vias[i].position)
+    for i, which, xy in [*plan.snaps, *plan.extends]:
+        pts += [segs[i].start if which == "start" else segs[i].end, xy]
+    for _layer, centre, end, _w in plan.stubs:
+        pts += [centre, end]
+    for i, xy in plan.splits:
+        pts += [segs[i].start, segs[i].end, xy]
+    return pts
+
+
+def plan_in_region(pcb: PCB, plan: NetPlan, region: Region) -> bool:
+    """True when every edit of ``plan`` lies inside ``region`` (x1,y1,x2,y2)."""
+    x1, y1, x2, y2 = region
+    return all(x1 <= x <= x2 and y1 <= y <= y2 for x, y in _plan_points(pcb, plan))
+
+
 def plan_prune(
     pcb: PCB,
     *,
@@ -2123,6 +2149,9 @@ def plan_prune(
     wide: float | None = DEFAULT_WIDE_MM,
     uncut_out: list[dict[str, Any]] | None = None,
     required_widths: Mapping[str, Required] | None = None,
+    nets: Collection[str] | None = None,
+    region: Region | None = None,
+    region_skipped_out: list[NetPlan] | None = None,
 ) -> list[NetPlan]:
     """Compute per-net prune/snap plans without touching the board.
 
@@ -2134,6 +2163,11 @@ def plan_prune(
     of each loop is cut whatever its width, provided every branch left joined
     to the cut is at least ``required_widths[net]`` mm (the IPC-2221 width of
     the net's declared current).  An explicit ``wide`` keeps absolute semantics.
+
+    ``nets`` (net names) restricts planning to those nets; other nets' models
+    are never planned.  ``region`` applies a net plan only when *every* edit
+    lies inside the box (plans are group-atomic, never clipped); plans that
+    straddle it are appended to ``region_skipped_out``.
     """
     eff_wide = math.inf if wide is None else wide
     names = (
@@ -2145,6 +2179,8 @@ def plan_prune(
     for net_number, model in sorted(_build_net_models(pcb).items()):
         seg0 = next((n.ref for n in model.nodes if n.kind == "seg"), None)
         net_name = names.get(net_number) or (seg0.net_name if seg0 else "")
+        if nets is not None and net_name not in nets:
+            continue
         declared = declared_nets is not None and net_name in declared_nets
         plan = _plan_net(
             model,
@@ -2157,6 +2193,10 @@ def plan_prune(
             uncut_out.extend({"net": net_name or net_number, **u} for u in plan.uncut_loops)
         if not plan.empty:
             plan.net_name = net_name
+            if region is not None and not plan_in_region(pcb, plan, region):
+                if region_skipped_out is not None:
+                    region_skipped_out.append(plan)
+                continue
             plans.append(plan)
     return plans
 
@@ -2309,6 +2349,8 @@ class PruneResult:
     drc_note: str
     stats: dict[str, int]
     uncut_loops: list[dict[str, Any]] = field(default_factory=list)
+    #: plans not applied because an edit fell outside ``--region``
+    region_skipped: list[NetPlan] = field(default_factory=list)
 
 
 def prune_board(
@@ -2322,6 +2364,8 @@ def prune_board(
     project: Path | str | None = None,
     current_paths: Sequence[CurrentPathSpec] | None = None,
     allow_default_rules: bool = False,
+    nets: Collection[str] | None = None,
+    region: Region | None = None,
 ) -> tuple[PCB, PruneResult]:
     """Plan (and optionally apply) pruning for ``pcb_path``.
 
@@ -2333,12 +2377,16 @@ def prune_board(
 
     pcb = PCB.load(pcb_path)
     uncut: list[dict[str, Any]] = []
+    region_skipped: list[NetPlan] = []
     plans = plan_prune(
         pcb,
         declared_nets=declared_nets,
         wide=wide,
         uncut_out=uncut,
         required_widths=required_widths,
+        nets=nets,
+        region=region,
+        region_skipped_out=region_skipped,
     )
     accepted = list(plans)
     rejected: list[NetPlan] = []
@@ -2407,7 +2455,9 @@ def prune_board(
         if not apply and accepted:
             apply_plans(result, accepted)
         uncut.extend(audit_loops_left(result, current_paths, uncut))
-    return pcb, PruneResult(plans, accepted, rejected, drc_verified, note, stats, uncut)
+    return pcb, PruneResult(
+        plans, accepted, rejected, drc_verified, note, stats, uncut, region_skipped
+    )
 
 
 def cleanup_copper(routed: Path | str, max_passes: int = 10) -> dict[str, int]:

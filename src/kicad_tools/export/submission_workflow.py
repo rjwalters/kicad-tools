@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ..parts.jlcpcb_api import JLCAPIError, JLCCredentials
+from ..parts.jlcpcb_api import JLCCredentials, JLCNoInventorySourceError
 from .submission_plan import (
     FactorySettings,
     InventorySource,
@@ -75,6 +75,7 @@ class StockLine:
     need: int
     stock: int | None
     status: str  # ok | short | unknown | covered
+    reason: str = ""  # why a line is unknown, when the source says so
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -82,6 +83,7 @@ class StockLine:
             "need": self.need,
             "stock": self.stock,
             "status": self.status,
+            **({"reason": self.reason} if self.reason else {}),
         }
 
 
@@ -117,11 +119,14 @@ def _file_sha(path: Path) -> str:
     return _sha(path.read_bytes())
 
 
+NO_INVENTORY_MESSAGE = "no inventory source: JLC OpenAPI credentials not set"
+
+
 class _NoInventory:
     """Stands in when no credentials were supplied: every code reads as unknown."""
 
     def get_component_inventory(self, codes: list[str]) -> Any:
-        raise JLCAPIError("no inventory source supplied")
+        raise JLCNoInventorySourceError(NO_INVENTORY_MESSAGE)
 
 
 def _count_copper_layers(board: Path) -> int:
@@ -245,7 +250,10 @@ def stock_gate(
             status = "unknown"
         else:
             status = "ok" if stock >= need else "short"
-        lines.append(StockLine(code, need, stock, status))
+        reason = ""
+        if status == "unknown" and obs.get("status") == "no-inventory-source":
+            reason = NO_INVENTORY_MESSAGE
+        lines.append(StockLine(code, need, stock, status, reason))
     return StockReport(tuple(lines))
 
 
@@ -253,6 +261,7 @@ def format_stock_failures(report: StockReport) -> list[str]:
     return [
         f"{line.catalog_id}: need {line.need}, stock "
         f"{'unknown' if line.stock is None else line.stock} ({line.status})"
+        + (f": {line.reason}" if line.reason else "")
         for line in report.lines
         if line.status in ("short", "unknown")
     ]

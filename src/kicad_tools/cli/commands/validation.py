@@ -154,6 +154,8 @@ def run_place_silk_refs_command(args) -> int:
         sub_argv.extend(["--step", str(args.step)])
     if getattr(args, "allow_rotate", False):
         sub_argv.append("--allow-rotate")
+    if getattr(args, "refs", None) is not None:
+        sub_argv.extend(["--refs", args.refs])
     if args.output:
         sub_argv.extend(["-o", args.output])
     if args.dry_run:

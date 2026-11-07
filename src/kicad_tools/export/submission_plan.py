@@ -31,6 +31,7 @@ from ..parts.jlcpcb_api import (
     JLCDependencyError,
     JLCIncompleteResponseError,
     JLCIPNotWhitelistedError,
+    JLCNoInventorySourceError,
     JLCPermissionError,
     JLCQuotaError,
 )
@@ -41,6 +42,12 @@ from ._fsutil import posix_dir_flags as _posix_dir_flags
 from ._fsutil import supports_dir_fd as _supports_dir_fd
 from .bom_formats import JLCPCBBOMFormatter
 from .pnp import JLCPCBPnPFormatter
+
+
+def bare_footprint(footprint: str) -> str:
+    """Strip a ``Library:`` prefix and whitespace from a footprint name (Issue #8538)."""
+    return footprint.split(":", 1)[-1].strip()
+
 
 _ROLES = {"gerber", "bom", "cpl"}
 _RESERVED = {"plan.json", "plan.sha256", "expected-matches.json", "bundle-manifest.json"}
@@ -414,8 +421,16 @@ def _population(
             raise SubmissionError("Duplicate or extra CPL reference")
         seen.add(ref)
         assignment = assignments[ref]
-        if row["Val"] != assignment["value"] or row["Package"] != assignment["footprint"]:
-            raise SubmissionError("BOM/CPL value or footprint disagrees")
+        if row["Val"] != assignment["value"]:
+            raise SubmissionError(
+                f"BOM/CPL value disagrees for {ref}: "
+                f"BOM {assignment['value']!r} vs CPL {row['Val']!r}"
+            )
+        if bare_footprint(row["Package"]) != bare_footprint(assignment["footprint"]):
+            raise SubmissionError(
+                f"BOM/CPL footprint disagrees for {ref}: "
+                f"BOM {assignment['footprint']!r} vs CPL {row['Package']!r}"
+            )
         side = {"Top": "top", "Bottom": "bottom"}.get(row["Layer"])
         if side not in sides:
             raise SubmissionError("CPL layer differs from explicit assembly sides")
@@ -677,6 +692,8 @@ def _observe(source: InventorySource, codes: list[str], read_at: str) -> dict:
     status = None
     try:
         result = source.get_component_inventory(codes) if codes else ComponentInventory((), None)
+    except JLCNoInventorySourceError:
+        status = "no-inventory-source"
     except JLCIncompleteResponseError:
         status = "incomplete-response"
     except (JLCIPNotWhitelistedError, JLCPermissionError, JLCAuthError):
@@ -698,7 +715,7 @@ def _observe(source: InventorySource, codes: list[str], read_at: str) -> dict:
         lcsc_part="",
         stock_source=result.source
         if isinstance(result.source, str)
-        and result.source in {"live", "offline", "offline_catalog", "unknown"}
+        and result.source in {"live", "lcsc-anonymous", "offline", "offline_catalog", "unknown"}
         else "unknown",
         fetched_at=result.observed_at if isinstance(result.observed_at, datetime) else None,
         from_cache=result.from_cache is True,
