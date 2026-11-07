@@ -84,7 +84,6 @@ def test_export_without_sidecar_unchanged(tmp_path: Path) -> None:
 
 def test_dedupe_net_classes_one_per_name() -> None:
     from kicad_tools.manufacturers.project_generator import dedupe_net_classes
-
     from kicad_tools.router.rules import NetClassRouting
 
     def _c(name: str, amps: float | None = 3.0) -> NetClassRouting:
