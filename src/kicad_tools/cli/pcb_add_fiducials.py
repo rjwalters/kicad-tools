@@ -56,30 +56,6 @@ def _is_fiducial(fp) -> bool:
     return str(getattr(fp, "name", "")).startswith("Fiducial:")
 
 
-def _flip_footprint_children(fp_node) -> None:
-    """Mirror a freshly inserted footprint's child layers F.*<->B.* for back placement.
-
-    ``add_footprint_from_file`` only rewrites the footprint's own ``(layer)``; pads,
-    graphics and property layers would otherwise stay on the front side.
-    """
-    from kicad_tools.schema.pcb import _flip_layer_node, _flip_side_layer
-    from kicad_tools.sexp import SExp
-
-    for child in fp_node.iter_children():
-        if child.tag == "pad":
-            layers = child.find_child("layers")
-            if layers is not None:
-                layers.children = [
-                    SExp.quoted_atom(_flip_side_layer(a.value))
-                    if a.is_atom and isinstance(a.value, str)
-                    else a
-                    for a in layers.children
-                ]
-        elif child.tag.startswith("fp_") or child.tag == "property":
-            _flip_layer_node(child.find_child("layer"))
-        # the footprint's own top-level (layer ...) is already B.Cu
-
-
 def _build_obstacles(pcb, side: str, keepout: float):
     """Return shapely geometries to avoid on ``side``.
 
@@ -307,8 +283,6 @@ def run_add_fiducials(
                 for x, y in sites:
                     ref = next(ref_iter)
                     fp = pcb.add_footprint(lib_id, ref, x, y, layer=layer, value="Fiducial")
-                    if layer == "B.Cu" and fp._sexp_node is not None:
-                        _flip_footprint_children(fp._sexp_node)
                     fp.exclude_from_bom = True
                     fp.exclude_from_pos_files = True
                     if "board_only" not in fp._attr_unknown_tokens:

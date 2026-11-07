@@ -128,6 +128,31 @@ class TestAddFiducials:
                 assert "F.Cu" not in pad.layers and "B.Cu" in pad.layers
                 assert "B.Mask" in pad.layers
 
+    def test_back_fiducial_text_is_mirrored(self, tmp_path):
+        trk = '(segment (start 1 3.5) (end 20 3.5) (width 0.25) (layer "F.Cu") (net 0) (uuid "t1"))'
+        p = _write(tmp_path, _board(extra=trk))
+        assert run_add_fiducials(p, sides="back") == 0
+        from kicad_tools.sexp import parse_sexp
+
+        root = parse_sexp(p.read_text())
+        checked = 0
+        for fp in root.find_all("footprint"):
+            if fp.find_child("layer").get_string(0) != "B.Cu":
+                continue
+            for t in fp.iter_children():
+                if t.tag in ("property", "fp_text"):
+                    layer = t.find_child("layer")
+                    if layer is None or not layer.get_string(0).startswith("B."):
+                        continue
+                    if t.find_child("effects") is None:
+                        continue
+                    just = t.find_child("effects").find_child("justify")
+                    assert just is not None and any(
+                        c.is_atom and c.value == "mirror" for c in just.children
+                    ), t.to_string()[:80]
+                    checked += 1
+        assert checked >= 6
+
     def test_bad_sides(self, tmp_path):
         p = _write(tmp_path, _board())
         assert run_add_fiducials(p, sides="top") == 1
