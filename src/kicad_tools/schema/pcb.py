@@ -556,7 +556,7 @@ def flip_footprint_children_to_back(footprint_node: SExp, rotation: float = 0.0)
                 local = at_node.get_float(2) or 0.0
                 _set_text_at_angle(at_node, _normalize_text_angle(180.0 + rotation - local), None)
             _mirror_text_effects(child)
-        elif tag.startswith(_FP_GRAPHIC_TAG_PREFIXES):
+        elif tag is not None and tag.startswith(_FP_GRAPHIC_TAG_PREFIXES):
             _flip_layer_children(child)
             if tag == "fp_text_box":
                 _mirror_text_effects(child)
