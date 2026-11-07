@@ -355,7 +355,8 @@ def _rules_for_link(args: argparse.Namespace, pcb: Any, base: Any, spec: LinkSpe
             other = _norm_net_key(name)
             if other == me:
                 continue
-            mm = (required or {}).get(tuple(sorted((me, other))))
+            pair = (me, other) if me <= other else (other, me)
+            mm = (required or {}).get(pair)
             if mm is None and (me not in voltages or other not in voltages):
                 # A net absent from the map is 0 V, as in the creepage census
                 # (compute_creepage_census); fail closed on the same pair the gate
@@ -370,7 +371,7 @@ def _rules_for_link(args: argparse.Namespace, pcb: Any, base: Any, spec: LinkSpe
                         pollution_degree=getattr(args, "pollution_degree", 2),
                         material_group=getattr(args, "material_group", "IIIa"),
                         hv_threshold=threshold,
-                    ).get(tuple(sorted((me, other))))
+                    ).get(pair)
                 except StandardLookupError as exc:
                     raise LinkSpecError(
                         f"--voltage-map creepage lookup failed for {spec.net!r} vs {name!r}: {exc}"
