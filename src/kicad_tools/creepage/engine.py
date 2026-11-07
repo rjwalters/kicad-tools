@@ -960,25 +960,74 @@ def _island_hop(
     clearance: float,
     creepage: float,
 ) -> tuple[float, float, str | None]:
-    """Best single-hop ``A -> island -> B`` path vs. the direct gap (#8548).
+    """Shortest ``A -> island* -> B`` path vs. the direct gap (#8548, #8579).
+
+    Islands are nodes of a per-layer graph; an edge is the bridged surface path
+    between two conductors.  Chains through several islands are searched, so a
+    row is never optimistic about a multi-island bridge.
 
     Returns ``(clearance, creepage, label)``: the (never larger) bounds and the
-    label of the island that binds either one, ``None`` when the direct gap wins.
+    label of the first island on the path that binds either one, ``None`` when
+    the direct gap wins.
+
+    NOTE (#8579 Gate 2): IEC 60664-1 may treat floating-part segments narrower
+    than dimension X as zero.  The standard text has not been read (see the
+    UNVERIFIED note on ``DIMENSION_X_MM``), so that rule is deliberately NOT
+    applied to island segments here.
     """
+    # A path through island i is at least dist(A,i) + dist(i,B) (triangle
+    # inequality on straight lines), and via_creep >= via_clear, so an island
+    # whose air gaps already sum to >= the direct creepage can never help.
+    cand = [(g, lbl) for g, lbl in islands if geom_a.distance(g) + g.distance(geom_b) < creepage]
+    if not cand:
+        return clearance, creepage, None
+
+    n = len(cand)
+    geoms = [geom_a] + [g for g, _ in cand] + [geom_b]
+    target = n + 1
+    cache: dict[tuple[int, int], tuple[float, float]] = {}
+
+    def edge(i: int, j: int) -> tuple[float, float]:
+        key = (i, j) if i < j else (j, i)
+        if key not in cache:
+            cache[key] = surface_path_length(geoms[key[0]], geoms[key[1]], obstacles, _bridged=True)
+        return cache[key]
+
+    def shortest(which: int) -> tuple[float, int | None]:
+        """Dijkstra over A(0), islands(1..n), B(n+1); returns (cost, first island)."""
+        import heapq
+
+        dist = {0: 0.0}
+        first: dict[int, int | None] = {0: None}
+        heap: list[tuple[float, int]] = [(0.0, 0)]
+        done: set[int] = set()
+        while heap:
+            d, u = heapq.heappop(heap)
+            if u in done:
+                continue
+            done.add(u)
+            if u == target:
+                return d, first[u]
+            for v in range(1, n + 2):
+                if v == u or v in done or (u == 0 and v == target):
+                    continue
+                nd = d + edge(u, v)[which]
+                if nd < dist.get(v, float("inf")):
+                    dist[v] = nd
+                    first[v] = v if u == 0 else first[u]
+                    heapq.heappush(heap, (nd, v))
+        return float("inf"), None
+
     eff_clr, eff_creep = clearance, creepage
     label: str | None = None
-    for isl_geom, isl_label in islands:
-        # via_creep >= via_clear, so an island whose air gaps already sum to
-        # >= the direct creepage can improve neither bound.
-        if geom_a.distance(isl_geom) + isl_geom.distance(geom_b) >= creepage:
-            continue
-        c1, cr1 = surface_path_length(geom_a, isl_geom, obstacles, _bridged=True)
-        c2, cr2 = surface_path_length(isl_geom, geom_b, obstacles, _bridged=True)
-        if cr1 + cr2 < eff_creep - _PASS_TOLERANCE:
-            eff_creep, label = cr1 + cr2, isl_label
-        eff_clr = min(eff_clr, c1 + c2)
-        if label is None and c1 + c2 < clearance - _PASS_TOLERANCE:
-            label = isl_label
+    cost, via = shortest(1)
+    if via is not None and cost < eff_creep - _PASS_TOLERANCE:
+        eff_creep, label = cost, cand[via - 1][1]
+    cost, via = shortest(0)
+    if via is not None:
+        eff_clr = min(eff_clr, cost)
+        if label is None and cost < clearance - _PASS_TOLERANCE:
+            label = cand[via - 1][1]
     return eff_clr, eff_creep, label
 
 
