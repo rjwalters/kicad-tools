@@ -6934,6 +6934,20 @@ class Autorouter:
                 f.net == net and f.failure_cause == FailureCause.PIN_ACCESS
                 for f in self.routing_failures
             )
+            # Issue #8414 (post-#8416 remainder): a spent per-net or wall
+            # budget skips the retries outright.  Forwarding the floored
+            # remaining budget (``MIN_SEARCH_TIMEOUT_S``) only bounded the
+            # nested A*; the pad-escape generation, escape marking, the
+            # nested ``route_net`` bookkeeping and the via/trace resolver
+            # all still ran on an already-spent budget, which is how the
+            # post-negotiation sweep logged ``133.3s (bound 60.0s)``.
+            # Unbudgeted / deterministic-budget runs never take this
+            # branch (``_net_budget_spent`` is False without a wall clock).
+            _retry_t0 = time.monotonic()
+            if has_pin_access_failure and Autorouter._net_budget_spent(
+                per_net_timeout, _route_net_started
+            ):
+                has_pin_access_failure = False
             if has_pin_access_failure:
                 subgrid_recovered = False
                 # Sub-grid retry is only useful when waypoint injection is
@@ -6965,14 +6979,18 @@ class Autorouter:
                     # routes first, drops a via 0.317 mm from U1.3,
                     # XTAL2 fails PIN_ACCESS on the U1.3->C6.1 edge
                     # while Y1.2->C6.1 routes successfully.
-                    via_retry_routes = self._resolve_via_conflicts_for_net(
-                        net,
-                        per_net_timeout=self._remaining_net_budget(
-                            per_net_timeout, _route_net_started
-                        ),
-                    )
-                    if via_retry_routes:
-                        routes.extend(via_retry_routes)
+                    if not Autorouter._net_budget_spent(per_net_timeout, _route_net_started):
+                        via_retry_routes = self._resolve_via_conflicts_for_net(
+                            net,
+                            per_net_timeout=self._remaining_net_budget(
+                                per_net_timeout, _route_net_started
+                            ),
+                        )
+                        if via_retry_routes:
+                            routes.extend(via_retry_routes)
+            # Issue #8414: what the PIN_ACCESS retries cost this call, so the
+            # post-negotiation sweep can attribute a per-net overrun.
+            self._last_pin_access_retry_s = time.monotonic() - _retry_t0
 
         # Issue #2336: Store freshly routed solution in sub-problem cache
         if sub_sig is not None and new_routes and self._sub_problem_cache is not None:
@@ -16572,9 +16590,15 @@ class Autorouter:
                         per_net_timeout=sweep_per_net,
                         deadline=sweep_deadline,
                     )
+                # Issue #8414: say what the bound enforces.  Every step checks
+                # it before starting (A* searches clamp to it); the residual
+                # past it is the step in flight when it expired plus the
+                # rip-up rollback, which is exempt so the grid stays
+                # consistent.
                 flush_print(
                     f"  Post-negotiation sweep: {time.monotonic() - _sweep_t0:.1f}s "
-                    f"(bound {sweep_budget:.1f}s)"
+                    f"(bound {sweep_budget:.1f}s; checked before every step, "
+                    "the in-flight step and rollback may finish past it)"
                 )
                 if sweep_rescued:
                     successful_nets = sum(1 for routes in net_routes.values() if routes)
@@ -19244,7 +19268,12 @@ class Autorouter:
             pre_routes = list(net_routes.get(net, []))
             failures_len = len(self.routing_failures)
 
+            # Issue #8414: time each step so a per-net overrun is attributed.
+            _net_t0 = _time.monotonic()
+            self._last_pin_access_retry_s = 0.0
             new_routes = self.route_net(net, per_net_timeout=per_net_timeout)
+            _route_s = _time.monotonic() - _net_t0
+            _retry_s = float(getattr(self, "_last_pin_access_retry_s", 0.0) or 0.0)
 
             # ``route_net`` returns this net's routes (existing + new) and has
             # marked the new ones on the grid.  Verify the net is now fully
@@ -19279,8 +19308,19 @@ class Autorouter:
                     drc_clean = False
                 else:
                     candidate_new = [r for r in candidate if r not in pre_routes]
+                    # Issue #8414: the scan itself also stops at the sweep
+                    # deadline (reported dirty -> rolled back).
+                    _sweep_deadline = deadline
                     drc_clean = not self._rescued_net_adds_blocking_drc(
-                        net, candidate_new, net_routes, neg_router
+                        net,
+                        candidate_new,
+                        net_routes,
+                        neg_router,
+                        should_stop=(
+                            None
+                            if _sweep_deadline is None
+                            else (lambda: _time.time() >= _sweep_deadline)
+                        ),
                     )
 
             if connected and candidate and drc_clean:
@@ -19307,6 +19347,19 @@ class Autorouter:
                         self.routes.append(route)
                 del self.routing_failures[failures_len:]
 
+            # Issue #8414: name a net that ran past its per-net bound and
+            # where the time went, so a residual overrun is attributable from
+            # the log alone (the rip-up rollback is exempt from the bounds:
+            # it must finish to leave the grid consistent).
+            _net_s = _time.monotonic() - _net_t0
+            if per_net_timeout is not None and _net_s > per_net_timeout + 1.0:
+                flush_print(
+                    f"  Post-negotiation sweep: {self.net_names.get(net, net)} took "
+                    f"{_net_s:.1f}s (per-net bound {per_net_timeout:.1f}s): "
+                    f"route_net {_route_s:.1f}s (PIN_ACCESS retries {_retry_s:.1f}s), "
+                    f"connectivity/DRC/rollback {_net_s - _route_s:.1f}s (issue #8414)"
+                )
+
         return rescued
 
     def _rescued_net_adds_blocking_drc(
@@ -19315,8 +19368,16 @@ class Autorouter:
         new_routes: list[Route],
         net_routes: dict[int, list[Route]],
         neg_router: NegotiatedRouter,
+        should_stop: Callable[[], bool] | None = None,
     ) -> bool:
         """Return True if a rescued net's fresh copper adds a blocking DRC error.
+
+        Issue #8414: ``should_stop`` (the sweep's deadline probe) is checked
+        between checks and between the rescued copper's segments/vias.  Once
+        it fires the check reports the copper as dirty, so the caller rolls
+        the rescue back rather than commit it unchecked -- the scan's cost
+        grows with the rescue's segment count (a wide power net on a fine
+        grid emits thousands) and nothing else bounds it.
 
         Issue #4159 (Judge #4192): the post-negotiation sweep re-routes a
         stranded net SOLO via :meth:`route_net`, which does NOT run the
@@ -19374,6 +19435,9 @@ class Autorouter:
         if not new_routes:
             return False
 
+        def _stop() -> bool:
+            return should_stop is not None and should_stop()
+
         nudge_reach = self.grid.resolution
         pitches = self.component_pitches
         own_refs = {ref for ref, _pin in self.nets.get(net, [])}
@@ -19396,6 +19460,8 @@ class Autorouter:
         # is the authority for that exact pair with the correct
         # ``effective_intra_pair_clearance()`` threshold, so exclude the
         # ``(net, partner)`` pair here and let that check adjudicate it.
+        if _stop():
+            return True
         extra = self._collect_extra_routes_for_revalidation(net_routes)
         overlap_pairs = neg_router.find_segment_segment_violation_pairs(
             net_routes,
@@ -19414,6 +19480,8 @@ class Autorouter:
         # --- Copper-vs-foreign-pad clearance beyond nudge reach (#3545/#3566) ---
         for route in new_routes:
             for seg in route.segments:
+                if _stop():
+                    return True
                 deficit, _loc = self.grid.worst_segment_pad_deficit(
                     seg,
                     exclude_net=net,
@@ -19423,6 +19491,8 @@ class Autorouter:
                 if deficit > nudge_reach:
                     return True
             for via in route.vias:
+                if _stop():
+                    return True
                 deficit, _loc = self.grid.worst_via_pad_deficit(
                     via,
                     exclude_net=net,
@@ -19436,6 +19506,8 @@ class Autorouter:
         committed = [r for routes in net_routes.values() for r in routes]
         for route in new_routes:
             for via in route.vias:
+                if _stop():
+                    return True
                 deficit, _loc = self.grid.worst_via_segment_deficit(
                     via,
                     exclude_net=net,
@@ -19448,6 +19520,8 @@ class Autorouter:
         # --- Differential-pair intra-pair clearance (#3023 / board-07) ---
         # A solo ``route_net`` re-route of a diff-pair leg ignores the coupled
         # within-pair spacing floor; check the rescued leg against its partner.
+        if _stop():
+            return True
         if self._rescued_leg_breaks_intra_pair_clearance(net, net_routes):
             return True
 
@@ -25546,6 +25620,24 @@ class Autorouter:
         left = per_net_timeout - (time.monotonic() - started)
         return max(_wall_deadline.MIN_SEARCH_TIMEOUT_S, left)
 
+    @staticmethod
+    def _net_budget_spent(per_net_timeout: float | None, started: float) -> bool:
+        """Issue #8414: True once this net's per-net or the wall budget is gone.
+
+        The wall budget is the installed :mod:`wall_deadline` (the
+        post-negotiation sweep installs its whole-sweep bound there).  With
+        ``per_net_timeout=None`` and no deadline installed (unbudgeted /
+        deterministic-budget runs) this is always False, so those runs keep
+        their exact pre-#8414 behaviour.  Used to gate the pure-Python steps
+        (pad-escape generation, via/trace conflict surgery, nested retries)
+        that no A* search clamp reaches.
+        """
+        if _wall_deadline.expired():
+            return True
+        if per_net_timeout is None:
+            return False
+        return time.monotonic() - started >= per_net_timeout
+
     def _retry_net_with_subgrid(
         self, net: int, per_net_timeout: float | None = None
     ) -> list[Route]:
@@ -25566,6 +25658,18 @@ class Autorouter:
         if net not in self.nets:
             return []
 
+        # Issue #8414: ``per_net_timeout`` is what is LEFT of the caller's
+        # per-net budget.  Every step below checks it (and the installed wall
+        # deadline) before starting, so a spent budget stops the retry at the
+        # next step boundary instead of running it to completion.
+        started = time.monotonic()
+
+        def _spent() -> bool:
+            return Autorouter._net_budget_spent(per_net_timeout, started)
+
+        if _spent():
+            return []
+
         # Get only this net's pads
         net_pad_keys = self.nets[net]
         net_pads = [self.pads[key] for key in net_pad_keys if key in self.pads]
@@ -25580,10 +25684,17 @@ class Autorouter:
         if not analysis.has_off_grid_pads:
             return []
 
-        result = subgrid.generate_escape_segments(analysis)
+        # Pad-escape attempts: checked between pads (a pad not reached is
+        # recorded as failed with reason ``budget_spent``).
+        result = subgrid.generate_escape_segments(analysis, should_stop=_spent)
+        if _spent():
+            # Nothing applied to the grid yet: drop the escapes unapplied.
+            return []
         subgrid.apply_escape_segments(result)
 
-        if result.success_count == 0:
+        # Stop here (before marking routes or clearing the net's failure
+        # records) so a spent budget leaves the net's failure records intact.
+        if result.success_count == 0 or _spent():
             return []
 
         net_name = self.net_names.get(net, f"Net {net}")
@@ -25602,8 +25713,12 @@ class Autorouter:
         # Remove the failure records for this net before retrying
         self.routing_failures = [f for f in self.routing_failures if f.net != net]
 
-        # Retry routing
-        retry_routes = self.route_net(net, _subgrid_retry=True, per_net_timeout=per_net_timeout)
+        # Retry routing on what is left (the escape work above spent some).
+        retry_routes = self.route_net(
+            net,
+            _subgrid_retry=True,
+            per_net_timeout=Autorouter._remaining_net_budget(per_net_timeout, started),
+        )
         # Issue #3441: only report success when the retry actually routed
         # the net.  Returning bare escape stubs made route_net's
         # ``subgrid_recovered`` flag True and skipped the via-conflict
@@ -25665,6 +25780,19 @@ class Autorouter:
         if net not in self.nets:
             return []
 
+        # Issue #8414: ``per_net_timeout`` is what is LEFT of the caller's
+        # per-net budget.  Each conflict attempt, each nested ``route_net``
+        # and the final retry check it (and the installed wall deadline)
+        # first, and every nested ``route_net`` gets the remainder, not the
+        # entry value -- K conflicts used to be able to spend K x budget.
+        started = time.monotonic()
+
+        def _spent() -> bool:
+            return Autorouter._net_budget_spent(per_net_timeout, started)
+
+        if _spent():
+            return []
+
         # Find the most recent failure for this net and confirm it's a
         # PIN_ACCESS failure with at least one via blocker.  This gates
         # the resolver so we never run on BLOCKED_PATH / CONGESTION
@@ -25702,7 +25830,11 @@ class Autorouter:
         # ``route_net`` call from re-entering the via-conflict resolver
         # (and from re-entering the sub-grid retry path).
         def _route_net_fn(net_id: int) -> list[Route]:
-            return self.route_net(net_id, _subgrid_retry=True, per_net_timeout=per_net_timeout)
+            return self.route_net(
+                net_id,
+                _subgrid_retry=True,
+                per_net_timeout=Autorouter._remaining_net_budget(per_net_timeout, started),
+            )
 
         any_resolved = False
         net_name = self.net_names.get(net, f"Net {net}")
@@ -25747,6 +25879,8 @@ class Autorouter:
                 # retry -- the resolver doesn't need to clear every conflict,
                 # just unblock the pad enough for A* to find a path.
                 for conflict in unique_conflicts:
+                    if _spent():
+                        break
                     relocation = manager.try_relocate(conflict)
                     if relocation.success:
                         any_resolved = True
@@ -25798,6 +25932,7 @@ class Autorouter:
             has_trace_blocker
             and not any_resolved
             and _via_conflict_module.TRACE_RIP_REROUTE_ENABLED
+            and not _spent()
         ):
             all_trace_conflicts = []
             for pad in net_pads:
@@ -25851,6 +25986,8 @@ class Autorouter:
                 # Traces have no "relocate" sibling (a segment is not a
                 # point), so the only resolution strategy is rip-and-reroute.
                 for conflict in unique_trace_conflicts:
+                    if _spent():
+                        break
                     rip_result = manager.try_trace_rip_reroute(
                         conflict,
                         route_net_fn=_route_net_fn,
@@ -25880,8 +26017,13 @@ class Autorouter:
                     # window so any DRC regression it introduces also
                     # triggers rollback.
                     self.routing_failures = [f for f in self.routing_failures if f.net != net]
+                    # Issue #8414: the transaction must close (validate or
+                    # roll back) to keep the grid consistent, so only the
+                    # retry is budgeted: on the remainder.
                     retry_routes = self.route_net(
-                        net, _subgrid_retry=True, per_net_timeout=per_net_timeout
+                        net,
+                        _subgrid_retry=True,
+                        per_net_timeout=Autorouter._remaining_net_budget(per_net_timeout, started),
                     )
 
                     # Validate the full delta of new geometry committed
@@ -25930,7 +26072,11 @@ class Autorouter:
         # branch resolved the net (the trace branch handles its own
         # post-success retry inside the transaction window).
         self.routing_failures = [f for f in self.routing_failures if f.net != net]
-        retry_routes = self.route_net(net, _subgrid_retry=True, per_net_timeout=per_net_timeout)
+        retry_routes = self.route_net(
+            net,
+            _subgrid_retry=True,
+            per_net_timeout=Autorouter._remaining_net_budget(per_net_timeout, started),
+        )
         return retry_routes
 
     def route_with_subgrid(
