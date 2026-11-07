@@ -2431,6 +2431,11 @@ def _verify_finished_artifacts(options: ReadinessOptions) -> CheckOutcome:
                     problems.append("outer archive inventory differs from finished package")
                 elif any(zf.read(name) != content for name, content in expected.items()):
                     problems.append("outer archive bytes differ from finished package")
+        except FileNotFoundError:
+            problems.append(
+                f"bundle has no {_ARCHIVE_NAME} next to {options.output_dir.name}/; "
+                f"produce it with 'kct readiness ...' (generate) or pass --no-archive"
+            )
         except (OSError, zipfile.BadZipFile) as exc:
             problems.append(f"outer archive is unreadable: {exc}")
     return CheckOutcome(

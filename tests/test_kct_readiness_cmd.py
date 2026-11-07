@@ -1508,6 +1508,52 @@ def test_verify_mode_reads_the_retained_manifest_lcsc_check(tmp_path):
     assert any("C51118" in b for b in report["blockers"])
 
 
+def _verify_report(board: Path, fake: FakeEngines, *extra: str) -> tuple[int, dict]:
+    code = readiness_cmd.main([str(board), "--mfr", "jlcpcb", *extra], engines=fake.bundle())
+    out = board / "output"
+    path = out / ("readiness-attempt/readiness.json" if code else "readiness.json")
+    path = path if path.is_file() else out / "readiness-verification" / "readiness.json"
+    return code, json.loads(path.read_text())
+
+
+def test_verify_missing_outer_archive_names_artifact_not_temp_path_8571(tmp_path):
+    board = make_board(tmp_path)
+    assert run(board, FakeEngines(board))[0] == 0
+    (board / "output" / "manufacturing.zip").unlink()
+
+    code, report = _verify_report(board, FakeEngines(board))
+
+    assert code != 0
+    assert check_status(report, "artifacts") == "failed"
+    blockers = [b for b in report["blockers"] if "manufacturing.zip" in b]
+    assert blockers
+    assert all("kct-readiness-candidate-" not in b for b in blockers)
+    assert any("--no-archive" in b for b in blockers)
+
+
+def test_verify_corrupt_outer_archive_keeps_unreadable_message_8571(tmp_path):
+    board = make_board(tmp_path)
+    assert run(board, FakeEngines(board))[0] == 0
+    (board / "output" / "manufacturing.zip").write_bytes(b"not a zip")
+
+    code, report = _verify_report(board, FakeEngines(board))
+
+    assert code != 0
+    assert any("outer archive is unreadable" in b for b in report["blockers"])
+
+
+def test_verify_tapeout_layout_without_archive_passes_with_no_archive_8571(tmp_path):
+    """A bundle laid out per tapeout.md passes artifacts + bom when the archive is opted out."""
+    board = make_board(tmp_path)
+    assert run(board, FakeEngines(board))[0] == 0
+    (board / "output" / "manufacturing.zip").unlink()
+
+    code, report = _verify_report(board, FakeEngines(board), "--no-archive")
+
+    assert check_status(report, "artifacts") == "passed"
+    assert _bom_check(report)["status"] == "passed"
+
+
 class TestDiscoverTierFromSpec:
     """Issue #7250: _discover_tier reads target_fab through load_spec."""
 

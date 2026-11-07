@@ -204,6 +204,14 @@ The `manifest.json` `kct export` wrote in Gate 3 only covers **what `kct export`
 
 **Gate condition:** a `manifest.json` exists, is newer than every other file it lists, its file set equals the actual contents of `<dir>` (nothing in the directory is unchecksummed, nothing checksummed is missing), and it records the per-rule warning counts. A stale or partial manifest is a **failure** — it breaks the "upload as-is" contract.
 
+### Readiness compatibility (`kct readiness --verify` accepts this bundle)
+
+`kct readiness --verify` re-checks a tapeout bundle's `artifacts` and `bom` gates. Keep this layout so both sign-off routes agree (issue #8571):
+
+- `manufacturing.zip` sits **beside** the bundle directory (`<pcb-dir>/manufacturing.zip` next to `<pcb-dir>/manufacturing/`), with members either flat or `manufacturing/`-prefixed, byte-identical to the bundle files. Tapeout does not write it; `kct readiness --generate` does. Without it, `artifacts` fails with `bundle has no manufacturing.zip next to ...`; pass `--no-archive` to skip the outer-archive comparison.
+- `manifest.json` keeps `files{name: {sha256, size}}` for every file, and a **top-level** `preflight[]` (do not nest it) carrying the `bom_lcsc_values` entry that Gate 4 reads and the `bom` gate re-reads.
+- `README.txt` and `gerbers/gerbers.zip` (with Gerber and drill members) are present.
+
 ## Tapeout verdict
 
 Emit a **complete, orderable package** (manifest written, exit 0) **only if all applicable gates hold**:
