@@ -23,6 +23,7 @@
       ],
       "files": [
         "out.access_witness.json",
+        "out.decisions.json",
         "out.fab_profile.json",
         "out.kicad_dru",
         "out.kicad_pcb",
@@ -54,6 +55,7 @@
       ],
       "files": [
         "out.access_witness.json",
+        "out.decisions.json",
         "out.fab_profile.json",
         "out.kicad_dru",
         "out.kicad_pcb",
@@ -86,6 +88,7 @@
       ],
       "files": [
         "out.access_witness.json",
+        "out.decisions.json",
         "out.fab_profile.json",
         "out.kicad_dru",
         "out.kicad_pcb",
@@ -118,6 +121,7 @@
       ],
       "files": [
         "out.access_witness.json",
+        "out.decisions.json",
         "out.fab_profile.json",
         "out.kicad_dru",
         "out.kicad_pcb",
@@ -158,6 +162,7 @@
       "files": [
         "failed_nets.json",
         "out.access_witness.json",
+        "out.decisions.json",
         "out.fab_profile.json",
         "out.kicad_dru",
         "out.kicad_pcb",
@@ -196,6 +201,7 @@
       "files": [
         "failed_nets.json",
         "out.access_witness.json",
+        "out.decisions.json",
         "out.fab_profile.json",
         "out.kicad_dru",
         "out.kicad_pcb",
@@ -235,6 +241,7 @@
       "files": [
         "failed_nets.json",
         "out.access_witness.json",
+        "out.decisions.json",
         "out.fab_profile.json",
         "out.kicad_dru",
         "out.kicad_pcb",
@@ -275,6 +282,7 @@
       "files": [
         "failed_nets.json",
         "out.access_witness.json",
+        "out.decisions.json",
         "out.fab_profile.json",
         "out.kicad_dru",
         "out.kicad_pcb",
@@ -284,6 +292,7 @@
         "out.routing_plan.json",
         "out.search_failures.json",
         "out_partial.access_witness.json",
+        "out_partial.decisions.json",
         "out_partial.kicad_pcb",
         "out_partial.route.json",
         "out_partial.routing_plan.json",
