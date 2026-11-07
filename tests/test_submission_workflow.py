@@ -3,6 +3,7 @@
 import hashlib
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -446,6 +447,30 @@ def test_signoff_refuses_receipt_outside_board_output_dir(env):
     moved = env["src"] / "elsewhere.json"
     moved.write_bytes(receipt.read_bytes())
     with pytest.raises(wf.WorkflowError, match="output/readiness.json"):
+        wf.sign_off_bundle(env["bundle"], env["src"] / "b.kicad_pcb", "Ann", readiness=moved)
+
+
+def test_signoff_accepts_verify_receipt_location_and_relative_path(env, monkeypatch):
+    """Issue #8592: `--verify`'s receipt location and a relative --readiness both work."""
+    export_shaped_manifest(env)
+    board = env["src"] / "b.kicad_pcb"
+    receipt = write_receipt(env)
+    verify_dir = env["src"] / "output" / "readiness-verification"
+    verify_dir.mkdir()
+    moved = verify_dir / "readiness.json"
+    moved.write_bytes(receipt.read_bytes())
+    receipt.unlink()
+    monkeypatch.chdir(verify_dir)
+    wf.sign_off_bundle(env["bundle"], board, "Ann", readiness=Path("readiness.json"))
+    wf.preflight(env["bundle"], board)
+
+
+def test_signoff_refusal_names_both_receipt_locations(env):
+    export_shaped_manifest(env)
+    moved = env["src"] / "elsewhere" / "readiness.json"
+    moved.parent.mkdir()
+    moved.write_bytes(write_receipt(env).read_bytes())
+    with pytest.raises(wf.WorkflowError, match="readiness-verification/readiness.json"):
         wf.sign_off_bundle(env["bundle"], env["src"] / "b.kicad_pcb", "Ann", readiness=moved)
 
 

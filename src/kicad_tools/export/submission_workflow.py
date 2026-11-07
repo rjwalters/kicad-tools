@@ -228,12 +228,19 @@ def _rehash_receipt_inputs(
             )
 
 
+_READINESS_LOCATION_MSG = (
+    "Readiness receipt must be <board>/output/readiness.json or "
+    "<board>/output/readiness-verification/readiness.json (where `kct readiness --verify` writes it)"
+)
+
+
 def _load_readiness(
     readiness: Path, board_sha: str, bundle_shas: dict[str, str], bundle_root: Path
 ) -> str:
     """Refuse unless a ``kct readiness`` receipt proves every gate passed for this board.
 
-    Returns the receipt's sha256. The receipt must be ``<board>/output/readiness.json``,
+    Returns the receipt's sha256. The receipt must be ``<board>/output/readiness.json`` or
+    ``<board>/output/readiness-verification/readiness.json`` (``--verify``'s location),
     ``schema_version`` 1, ``ready`` with no ``blockers``, every check ``passed``
     (including :data:`REQUIRED_GATE_CHECKS`). Every ``inputs`` / ``external_inputs``
     entry is re-hashed against disk (as ``read_readiness`` does), exempting only
@@ -273,9 +280,18 @@ def _load_readiness(
     inputs = data.get("inputs")
     if not isinstance(inputs, dict) or not inputs:
         raise WorkflowError("Readiness receipt has no 'inputs' hash map")
-    if readiness.name != "readiness.json" or readiness.parent.name != "output":
-        raise WorkflowError("Readiness receipt must be <board>/output/readiness.json")
-    board_dir = readiness.parent.parent
+    readiness = readiness.resolve()
+    if readiness.name != "readiness.json":
+        raise WorkflowError(_READINESS_LOCATION_MSG)
+    if readiness.parent.name == "output":
+        board_dir = readiness.parent.parent
+    elif (
+        readiness.parent.name == "readiness-verification"
+        and readiness.parent.parent.name == "output"
+    ):
+        board_dir = readiness.parent.parent.parent
+    else:
+        raise WorkflowError(_READINESS_LOCATION_MSG)
     exempt = (bundle_root / "manifest.json").resolve()
     _rehash_receipt_inputs(board_dir, inputs, exempt, "inputs", relative_to="board-relative")
     external = data.get("external_inputs")
