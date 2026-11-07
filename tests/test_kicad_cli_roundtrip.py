@@ -994,3 +994,90 @@ class TestKiCad10SaveBoardReaderRoundtrip:
         # And the false-clean regression is guarded.
         result = ConnectivityValidator(pcb).validate()
         assert result.total_nets > 0
+
+
+class TestNameOnlyPadNetsRoundTrip:
+    """Issue #8550: pad nets written on a name-only board must survive KiCad.
+
+    ``kicad-cli pcb drc --save-board`` rewrites a board in the KiCad 10
+    name-only dialect (``(net "GND")`` refs, no net table).  Assigning pad
+    nets through the PCB API on such a board must stay name-only, so KiCad's
+    own resave keeps every pad->net association (no ``<no net>`` pads).
+    """
+
+    @staticmethod
+    def _kicad_resave(board: Path, tmp_path: Path) -> None:
+        cli = find_kicad_cli()
+        proc = subprocess.run(
+            [
+                str(cli),
+                "pcb",
+                "drc",
+                "--refill-zones",
+                "--save-board",
+                "-o",
+                str(tmp_path / "drc.json"),
+                "--format",
+                "json",
+                str(board),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode in (0, 5), proc.stderr
+
+    @staticmethod
+    def _pad_map(board: Path) -> dict[tuple[str, str], str]:
+        pcb = PCB.load(board)
+        return {(fp.reference, pad.number): pad.net_name for fp in pcb.footprints for pad in fp.pads}
+
+    def test_assigned_pad_nets_survive_kicad_resave(self, tmp_path: Path) -> None:
+        board = tmp_path / "b.kicad_pcb"
+        board.write_text(
+            textwrap.dedent("""\
+            (kicad_pcb
+                (version 20240108)
+                (generator "kicad_tools")
+                (generator_version "9.0")
+                (general (thickness 1.6) (legacy_teardrops no))
+                (paper "A4")
+                (layers
+                    (0 "F.Cu" signal)
+                    (31 "B.Cu" signal)
+                    (44 "Edge.Cuts" user)
+                )
+                (setup)
+                (net 0 "")
+                (net 1 "GND")
+                (net 2 "12")
+                (footprint "Test:C"
+                    (layer "F.Cu")
+                    (uuid "fp-uuid-1")
+                    (at 30 30)
+                    (property "Reference" "C1" (at 0 -2) (layer "F.SilkS"))
+                    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "GND"))
+                    (pad "2" smd rect (at 2 0) (size 1 1) (layers "F.Cu") (net 2 "12"))
+                )
+            )
+            """)
+        )
+        self._kicad_resave(board, tmp_path)
+        original = self._pad_map(board)
+        if not PCB.load(board)._net_name_only_dialect:
+            pytest.skip("this kicad-cli does not save the name-only dialect")
+        assert original == {("C1", "1"): "GND", ("C1", "2"): "12"}
+
+        pcb = PCB.load(board)
+        # Perturb: swap the nets, then restore them through the API.
+        assert pcb.assign_net_to_footprint_pad("C1", "1", "12")
+        assert pcb.assign_net_to_footprint_pad("C1", "2", "GND")
+        assert pcb.assign_net_to_footprint_pad("C1", "1", "GND")
+        assert pcb.assign_net_to_footprint_pad("C1", "2", "12")
+        pcb.save(board)
+
+        text = board.read_text()
+        assert '(net "GND")' in text and '(net "12")' in text
+        assert "(net 1 " not in text
+
+        self._kicad_resave(board, tmp_path)
+        assert self._pad_map(board) == original
