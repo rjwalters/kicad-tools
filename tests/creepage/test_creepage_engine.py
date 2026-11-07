@@ -1269,7 +1269,7 @@ def test_floating_island_between_hv_and_lv_fails_pair(tmp_path):
     assert report.netless_items == 1
     out = report.to_dict()
     assert out["netless_items"] == 1
-    assert out["netless_treatment"] == "floating_single_hop"
+    assert out["netless_treatment"] == "floating"
     assert out["pair_count"] == len(report.pairs)
 
 
@@ -1298,7 +1298,7 @@ def test_no_netless_copper_reports_zero(tmp_path):
     report = _island_report(tmp_path, [])
     assert report.netless_items == 0
     assert report.to_dict()["netless_items"] == 0
-    assert report.to_dict()["netless_treatment"] == "floating_single_hop"
+    assert report.to_dict()["netless_treatment"] == "floating"
 
 
 def test_samefp_waiver_does_not_hide_island_path_on_board_row(tmp_path):

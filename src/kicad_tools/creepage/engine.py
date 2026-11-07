@@ -661,7 +661,7 @@ class CreepageReport:
                 "gate_passed": self.gate_passed,
                 "waived_count": waived_count,
                 "netless_items": self.netless_items,
-                "netless_treatment": "floating_single_hop",
+                "netless_treatment": "floating",
             }
         d: dict[str, Any] = {
             "board": self.board,
@@ -693,7 +693,7 @@ class CreepageReport:
             "gate_passed": self.gate_passed,
             "waived_count": waived_count,
             "netless_items": self.netless_items,
-            "netless_treatment": "floating_single_hop",
+            "netless_treatment": "floating",
         }
         # Per-net voltage mode (#4371): the requirement varies per pair, so the
         # report-level scalar requirement / working voltage are null (already set
