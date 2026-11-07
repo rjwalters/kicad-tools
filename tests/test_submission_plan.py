@@ -969,3 +969,32 @@ def test_real_official_client_missing_requests_is_dependency_failure(inputs, tmp
     assert {row["status"] for row in rows} == {"dependency-error"}
     assert all(row["raw_stock"] is None for row in rows)
     assert client._session is None
+
+
+@pytest.mark.parametrize(
+    ("bom_fp", "cpl_fp"),
+    [
+        ("Resistor_SMD:R_0402", "R_0402"),  # BOM qualified, CPL bare
+        ("R_0402", "Resistor_SMD:R_0402"),  # BOM bare, CPL qualified
+        ("Resistor_SMD:R_0402", "Resistor_SMD:R_0402"),
+    ],
+)
+def test_footprint_library_prefix_is_normalised_before_compare(inputs, bom_fp, cpl_fp):
+    """Issue #8538: lib-qualified vs bare footprint must not refuse."""
+    rewrite_csv(inputs, "bom", lambda rows: [r.__setitem__(2, bom_fp) for r in rows[1:]])
+    rewrite_csv(inputs, "cpl", lambda rows: [r.__setitem__(2, cpl_fp) for r in rows[1:]])
+    plan = sp.prepare_submission(**inputs)
+    assert len(json.loads((plan.directory / "expected-matches.json").read_bytes())) == 85
+
+
+def test_genuine_footprint_mismatch_names_ref_and_values(inputs):
+    rewrite_csv(
+        inputs, "bom", lambda rows: [r.__setitem__(2, "Resistor_SMD:R_0402") for r in rows[1:]]
+    )
+    rewrite_csv(inputs, "cpl", lambda rows: rows[1].__setitem__(2, "R_0603"))
+    with pytest.raises(sp.SubmissionError) as exc:
+        sp.prepare_submission(**inputs)
+    message = str(exc.value)
+    assert "R1" in message
+    assert "Resistor_SMD:R_0402" in message
+    assert "R_0603" in message

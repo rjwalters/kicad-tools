@@ -7182,6 +7182,8 @@ def _run_placement_delta_feedback(
             # that is too little) instead of inheriting the first trial's.
             timeout_provider=lambda: _delta_probe_timeout(args),
             min_trial_budget=min_trial_budget,
+            # Issue #8566: nets outside a ``--nets`` pass were never routed.
+            route_only_nets=getattr(args, "_route_only_nets", None),
         )
     except Exception as exc:
         # The loop died mid-flight and the run carries on, so the state has to
