@@ -1110,6 +1110,31 @@ tokens used outside steps (role-runner ticks, which have no item) and by
 runtimes whose transcripts the scan does not read. The hourly comparison
 against `loom.llm.tokens.*` is a post-roll live check and has not been run.
 
+### Resync landings: who, which path, what result (#13674)
+
+Each attempt to land a workspace-resync PR emits one instant
+`workspace_resync.landing` span (its own root). Attributes: `github.repo`,
+`github.number`, `loom.head_sha`, `path` (`queue_handoff` or `waiver`),
+`outcome` (`Queued`, `Waiting`, `Failed`, `Merged`, `NotQueueMode`), `reason`
+(bounded) and `gate_paths_included` (`false` until #13665 lets a gate path
+land). The waiver path's result maps `Landed` to `Merged`, `Lane` to `Failed`
+and `Held` to `Waiting`. A pass whose waiver does not land goes on to the
+queue hand-off, so it can emit one span per path. The `merge_queue.enqueue`
+and `merge_queue.dequeue` `invoke github` spans carry `github.number`. This
+week's landings by path and outcome:
+
+```sql
+SELECT attributes_string['path'] AS path, attributes_string['outcome'] AS outcome, count() AS landings
+FROM signoz_traces.signoz_index_v3
+WHERE name = 'workspace_resync.landing' AND timestamp >= now() - INTERVAL 7 DAY
+GROUP BY path, outcome ORDER BY landings DESC
+```
+
+The daemon's `log::info!` landing lines are **not** exported to the logs
+store: no generic log bridge exists, and exporting them needs a new telemetry
+record kind. The span is the queryable record. Not yet run against a live
+daemon.
+
 ## 3d. Agent telemetry relay (Issue #10964)
 
 An agent CLI the daemon launches can export its own OTLP telemetry — model

@@ -132,6 +132,7 @@ For each issue `N` in the wave, before any role skill is invoked:
      --jq '{state, labels: [.labels[].name], linked_prs: [.closedByPullRequestsReferences[].url]}'
    ```
    - If the issue is closed, skip it (log a warning). It does NOT contribute to this wave.
+   - **Split-parent skip (#13635).** Run `loom-daemon forge parent split-state --parent N` before claiming. Exit `0` (`SPLIT_ALL_CLOSED #a #b`: children exist and every one is closed) means the children carry the code: skip it, log "split parent, all children closed", and release any `loom:building` claim WITHOUT adding `loom:issue` (it re-enters intake/curation, where Curator closes it as already covered). Exit `1` (no children, or one is open) proceeds. Any other exit is unanswered, not an all-clear: treat it like exit `0` for the label rules above (never add `loom:issue` on its account). Does NOT contribute to this wave.
    - **`loom:epic` skip (#8881).** If the issue carries the label `loom:epic` — exact match; `loom:epic-phase` is a normal buildable unit and is NOT skipped — skip it: a tracking container has no buildable work. Log a warning with reason "needs decomposition (run Champion/Architect)". Does NOT contribute to this wave. (Conservative skip: under the `all` override above the taxonomy's fan-out row applies instead.) **This overrides Step 1a below**: an epic is skipped even when `--claim-owned` / `LOOM_SWEEP_CLAIM_OWNED` names `N`, and even when the operator listed `N` explicitly. It does not dispute that the claim is this session's own — it releases it. **NEVER add `loom:issue` to a skipped epic**: that re-arms the work finder, which re-claims it — a claim/release loop.
      ```bash
      # CLAIM_OWNED = the N of `--claim-owned N`, when passed.
@@ -413,7 +414,7 @@ If the builder failed (no PR opened), do NOT write a checkpoint — leave the ch
      ./.loom/scripts/record-noop-release.sh N --reason "$(head -c 200 .loom/worktrees/issue-N/.no-changes-needed)"
      ```
      This call is best-effort and defensive, mirroring `build-gate.sh`'s `dispatch-backoff record` arm (#6192): a missing, unreachable, or older `loom-daemon` makes it a silent no-op and never fails the sweep.
-  2. **Release the claim** back to `loom:issue` — do NOT close the issue (the marker records "nothing to do this pass," not "this issue is resolved"):
+  2. **Release the claim** back to `loom:issue` — do NOT close the issue (the marker records "nothing to do this pass," not "this issue is resolved"). **Exception — split parent (#13635):** if `loom-daemon forge parent split-state --parent N` exits `0` (children exist and all are closed) or `2` (children unreadable, fail closed), do NOT add `loom:issue`: only `gh issue edit N --remove-label "loom:building"`, and say in the comment that the children carry the code, so Curator can close it as already covered. Returning it to `loom:issue` is what let the same tracker be re-dispatched.
      ```bash
      gh issue edit N --remove-label "loom:building" --add-label "loom:issue"
      ./.loom/scripts/post-comment.sh N --body "Builder found no actionable changes this pass: $(head -c 200 .loom/worktrees/issue-N/.no-changes-needed). Releasing the claim; a self-reported no-op cooldown was recorded so this issue is not immediately re-offered (#6670)."

@@ -740,7 +740,22 @@ check_and_unblock() {
       # was blocked. An issue blocked pre-approval (e.g. Curator-blocked) must
       # NOT be promoted into the Builder queue — just clear loom:blocked and let
       # it re-enter the curation/approval flow.
-      if [ "$(was_previously_approved "$number")" = "true" ]; then
+      # Split-parent gate (#13635): a tracker whose children are all closed is
+      # not work. `loom:issue` in its history can be an operator's accidental
+      # add/remove, so approval archaeology alone would promote it to a Builder.
+      # Exit 0 = split + all closed; 1 = not split; anything else = unreadable,
+      # which fails closed (no promotion).
+      split_out=$(loom-daemon forge parent split-state --parent "$number" 2>/dev/null); split_rc=$?
+      if [ "$split_rc" != "1" ]; then
+        gh issue edit "$number" --remove-label "loom:blocked"
+        if [ "$split_rc" = "0" ]; then
+          ./.loom/scripts/post-comment.sh "$number" --body "🔓 **Unblocked**: Dependencies resolved ($resolved_deps), and this is a split tracker whose children are all closed (${split_out#SPLIT_ALL_CLOSED }). Not restoring \`loom:issue\`: the children carry the code, so a Builder has nothing to build. It re-enters intake/curation, where Curator can close it as already covered."
+          echo "Unblocked #$number (split parent, children all closed; no loom:issue): $title"
+        else
+          ./.loom/scripts/post-comment.sh "$number" --body "🔓 **Unblocked**: Dependencies resolved ($resolved_deps). Could not read this issue's children, so \`loom:issue\` was not restored (fail closed); it re-enters intake/curation."
+          echo "Unblocked #$number (children unreadable; no loom:issue): $title"
+        fi
+      elif [ "$(was_previously_approved "$number")" = "true" ]; then
         gh issue edit "$number" --remove-label "loom:blocked" --add-label "loom:issue"
         ./.loom/scripts/post-comment.sh "$number" --body "🔓 **Unblocked**: Dependencies resolved ($resolved_deps). Restored \`loom:issue\` (previously approved). Ready for implementation."
         echo "Unblocked #$number (restored loom:issue): $title"
