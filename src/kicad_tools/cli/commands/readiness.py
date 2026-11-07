@@ -59,6 +59,12 @@ def run_readiness_command(args) -> int:
     if getattr(args, "readiness_include_tht", False):
         sub_argv.append("--include-tht")
 
+    if getattr(args, "readiness_skip_fiducials", False):
+        sub_argv.append("--skip-fiducials")
+
+    if getattr(args, "readiness_skip_board_info", False):
+        sub_argv.append("--skip-board-info")
+
     if getattr(args, "readiness_no_archive", False):
         sub_argv.append("--no-archive")
 

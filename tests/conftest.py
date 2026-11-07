@@ -494,12 +494,35 @@ DRC_CLEAN_PCB = """(kicad_pcb
 """
 
 
+def make_assembly_ready(pcb_file: Path) -> Path:
+    """Add a title block, global fiducials and a board ID to ``pcb_file``.
+
+    Satisfies the ``fiducials_missing`` / ``board_id_missing`` assembly-prep
+    rules (Issue #8532) so a fixture meant to be "clean" stays clean under
+    ``kct check --strict``.
+    """
+    from kicad_tools.cli.pcb_add_board_info import run_add_board_info
+    from kicad_tools.cli.pcb_add_fiducials import run_add_fiducials
+
+    text = pcb_file.read_text()
+    if "(title_block" not in text:
+        text = text.replace(
+            '(paper "A4")',
+            '(paper "A4")\n  (title_block (title "fixture") (date "2026-11-07") (rev "A"))',
+            1,
+        )
+        pcb_file.write_text(text)
+    assert run_add_fiducials(pcb_file, sides="populated") == 0
+    assert run_add_board_info(pcb_file, auto=True) == 0
+    return pcb_file
+
+
 @pytest.fixture
 def drc_clean_pcb(tmp_path: Path) -> Path:
     """Create a PCB file that passes all DRC checks."""
     pcb_file = tmp_path / "drc_clean.kicad_pcb"
     pcb_file.write_text(DRC_CLEAN_PCB)
-    return pcb_file
+    return make_assembly_ready(pcb_file)
 
 
 # 4-layer PCB for testing layer auto-detection
