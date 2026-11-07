@@ -1006,6 +1006,14 @@ MIGRATED_KERNEL_CALLERS: frozenset[str] = frozenset(
         # numbered epic group, so no ``MIGRATED_GROUPS`` row (same as
         # ``router/foreign_copper.py`` and ``panel/vscore.py``).
         "drc/repair_clearance.py",
+        # Issue #8545: ``kct repair-creepage``.  ``creepage/repair.py`` reuses
+        # ``ClearanceRepairer``'s move machinery and imports ``KVia`` /
+        # ``copper_gap`` to re-measure copper-to-copper gaps after a
+        # translation (collateral-damage and lost-contact gates), so a repair
+        # is judged with the same kernel ``kct check`` reports with.  A new
+        # consumer, not a numbered epic group, so no ``MIGRATED_GROUPS`` row
+        # (same as ``drc/repair_clearance.py``).
+        "creepage/repair.py",
     }
 )
 """Python modules allowed to reference the kernel, one entry per migration.
