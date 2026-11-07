@@ -1869,7 +1869,11 @@ class PourLinkCloser:
             passes.append(stitch(skipped, force & skipped, True))
 
         for result in passes:
-            traces = {id(t.pad): t for t in result.traces_added}
+            # Pair each stub with ITS via (pad identity + via position), not
+            # just the pad: a pad that gets several vias must record every
+            # stub, or ``withdraw_copper`` leaves the unrecorded ones behind
+            # (Issue #8563).
+            traces = {(id(t.pad), t.via_x, t.via_y): t for t in result.traces_added}
             for placement in result.vias_added:
                 pad = placement.pad
                 key = f"pad:{pad.net_name}:{pad.reference}.{pad.pad_number}"
@@ -1887,7 +1891,7 @@ class PourLinkCloser:
                         placement.size / 2,
                     )
                 )
-                trace = traces.get(id(pad))
+                trace = traces.get((id(pad), placement.via_x, placement.via_y))
                 if trace is not None:
                     for seg in trace_to_track_segments(trace):
                         caps.append((seg.start_x, seg.start_y, seg.end_x, seg.end_y, seg.width / 2))
