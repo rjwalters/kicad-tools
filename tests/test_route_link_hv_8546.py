@@ -290,3 +290,138 @@ class TestCollapseKeepsMapFloor:
         doc = json.loads(capsys.readouterr().out)
         assert rc == 0 and doc["links"][0]["status"] == "committed"
         assert not any(abs(s.start[0] - marker_x) < 1e-6 for s in PCB.load(str(p)).segments)
+
+
+def _two_net_pad(n: int, x: float, y: float) -> str:
+    """One footprint carrying a SIG pad and an HV pad (an attach zone for both)."""
+    return (
+        f'  (footprint "Q" (layer "F.Cu") (uuid "00000000-0000-0000-0000-00000000010{n}") (at {x} {y})\n'
+        f'    (fp_text reference "Q{n}" (at 0 -3) (layer "F.SilkS"))\n'
+        '    (pad "1" smd rect (at 0 0) (size 0.8 0.8) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "SIG"))\n'
+        '    (pad "2" smd rect (at 0 1.2) (size 0.8 0.8) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "HV")))\n'
+    )
+
+
+class TestAttachZoneRelaxedFloor:
+    """Issue #8573 item 1: map-derived floor relaxes inside an attach zone only."""
+
+    def _rules(self, tmp_path, body):
+        from kicad_tools.cli.route_cmd import _preload_voltage_map
+
+        vm = tmp_path / "vm.json"
+        vm.write_text(json.dumps({"SIG": 0, "HV": 300}))
+        p = _write(tmp_path, body)
+        pcb = PCB.load(str(p))
+        a = _parse(str(p), "--voltage-map", str(vm), "--link", "SIG Q1.1 R2.1")
+        assert _preload_voltage_map(a) == 0
+        return pcb, _rules_for_link(a, pcb, _rules_from_args(a, pcb), a.links[0])
+
+    def test_pad_in_zone_relaxed_but_track_outside_keeps_floor(self, tmp_path):
+        body = (
+            _two_net_pad(1, 105, 110)
+            + _pad(2, 125, 110, 1, "SIG")
+            + _seg(1, 108, 118, 122, 118, 2)  # HV track far outside the zone
+        )
+        pcb, rules = self._rules(tmp_path, body)
+        assert rules.clearance_for(2) > 1.0
+        model = _build_model(pcb)
+        hv = [it for it in model.items if it.net == 2]
+        pad_it = next(it for it in hv if it.is_pad)
+        trk_it = next(it for it in hv if not it.is_pad)
+        pad_parts = rules.clearance_parts("SIG", 2, "F.Cu", pad_it.layers["F.Cu"])
+        assert [c for _g, c in pad_parts] == [rules.clearance]
+        trk_parts = rules.clearance_parts("SIG", 2, "F.Cu", trk_it.layers["F.Cu"])
+        assert [c for _g, c in trk_parts] == [rules.clearance_for(2)]
+
+    def test_track_crossing_zone_is_split(self, tmp_path):
+        body = (
+            _two_net_pad(1, 105, 110)
+            + _pad(2, 125, 110, 1, "SIG")
+            + _seg(1, 100.5, 111.2, 120, 111.2, 2)  # starts inside the zone, leaves it
+        )
+        pcb, rules = self._rules(tmp_path, body)
+        trk = next(it for it in _build_model(pcb).items if it.net == 2 and not it.is_pad)
+        cs = sorted(c for _g, c in rules.clearance_parts("SIG", 2, "F.Cu", trk.layers["F.Cu"]))
+        assert cs == [rules.clearance, rules.clearance_for(2)]
+
+    def test_explicit_net_clearance_is_not_relaxed(self, tmp_path):
+        from kicad_tools.cli.route_cmd import _preload_voltage_map
+
+        vm = tmp_path / "vm.json"
+        vm.write_text(json.dumps({"SIG": 0, "HV": 300}))
+        p = _write(tmp_path, _two_net_pad(1, 105, 110) + _pad(2, 125, 110, 1, "SIG"))
+        pcb = PCB.load(str(p))
+        a = _parse(
+            str(p), "--voltage-map", str(vm), "--link", "SIG Q1.1 R2.1",
+            "--net-clearance", "HV=99",
+        )  # fmt: skip
+        assert _preload_voltage_map(a) == 0
+        rules = _rules_for_link(a, pcb, _rules_from_args(a, pcb), a.links[0])
+        pad_it = next(it for it in _build_model(pcb).items if it.net == 2)
+        parts = rules.clearance_parts("SIG", 2, "F.Cu", pad_it.layers["F.Cu"])
+        assert [c for _g, c in parts] == [99]
+
+    def test_no_attach_zones_keeps_full_floor(self, tmp_path):
+        body = (
+            _pad(1, 105, 110, 1, "SIG") + _pad(2, 125, 110, 1, "SIG") + _pad(3, 115, 112, 2, "HV")
+        )
+        pcb, rules = self._rules(tmp_path, body)
+        it = next(i for i in _build_model(pcb).items if i.net == 2)
+        parts = rules.clearance_parts("SIG", 2, "F.Cu", it.layers["F.Cu"])
+        assert [c for _g, c in parts] == [rules.clearance_for(2)]
+
+
+class TestCollapsedRouteFloorRecheck:
+    """Issue #8573 item 2: a collapse that cuts into a --net-clearance floor is not committed."""
+
+    BODY = (
+        _pad(1, 105, 110, 1, "SIG") + _pad(2, 125, 110, 1, "SIG") + _seg(1, 108, 113, 122, 113, 2)
+    )
+
+    def _setup(self, tmp_path):
+        p = _write(tmp_path, self.BODY)
+        pcb = PCB.load(str(p))
+        a = _parse(str(p), "--link", "SIG R1.1 R2.1", "--net-clearance", "HV=2")
+        return pcb, _rules_for_link(a, pcb, _rules_from_args(a, pcb), a.links[0])
+
+    def test_route_clears_floors(self, tmp_path):
+        from kicad_tools.router.link_router import LinkRoute, route_clears_floors
+
+        pcb, rules = self._setup(tmp_path)
+        model = _build_model(pcb)
+        mk = lambda y: LinkRoute(1, "SIG", 0.2, 0.6, 0.3, [(5.0, y, 25.0, y, "F.Cu")])  # noqa: E731  (board-relative)
+        assert route_clears_floors(mk(10.0), model, rules)  # 3 mm off the HV track
+        assert not route_clears_floors(mk(11.5), model, rules)  # 1.5 mm < 2 + 0.1 floor
+
+    def test_commit_falls_back_to_raw_route(self, tmp_path, capsys, monkeypatch):
+        import contextlib
+        from collections import Counter
+        from dataclasses import replace
+
+        from kicad_tools.cli import kicad_toolchain, route_link_cmd
+        from kicad_tools.router import link_router
+
+        monkeypatch.setattr(
+            kicad_toolchain, "evidence_toolchain", lambda *a, **k: contextlib.nullcontext()
+        )
+        monkeypatch.setattr(route_link_cmd, "_gate_state", lambda path, args: (Counter(), None))
+        marker_x = 109.37
+
+        def fake_collapse(route):  # a "collapse" that cuts across the HV track's floor
+            return replace(
+                route,
+                segments=[
+                    *route.segments,
+                    (marker_x - 100.0, 13.0, 10.0, 13.0, "F.Cu"),
+                ],  # board-relative
+            )
+
+        monkeypatch.setattr(link_router, "collapse_link_route", fake_collapse)
+        p = _write(tmp_path, self.BODY)
+        rc = main(
+            ["route-link", "--format", "json", str(p), "--link", "SIG R1.1 R2.1",
+             "--link-layers", "F.Cu", "--net-clearance", "HV=2"]
+        )  # fmt: skip
+        doc = json.loads(capsys.readouterr().out)
+        assert rc == 0 and doc["links"][0]["status"] == "committed"
+        assert not any(abs(s.start[0] - marker_x) < 1e-6 for s in PCB.load(str(p)).segments)
