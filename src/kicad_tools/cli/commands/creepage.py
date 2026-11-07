@@ -43,6 +43,7 @@ def run_creepage_command(args) -> int:
     from kicad_tools._shapely import has_shapely
     from kicad_tools.creepage.engine import (
         SELV_WORKING_VOLTAGE_V,
+        apply_census_waivers,
         compute_creepage_census,
         mains_suspect_nets,
         pair_bounds_from_dict,
@@ -264,21 +265,13 @@ def run_creepage_command(args) -> int:
         print(f"Error: standard-table lookup failed: {e}", file=sys.stderr)
         return 1
 
-    # Same-footprint waiver (#4403): mark component-internal pairs as waived so
-    # they drop out of the exit-code gate (report.gate_passed) while remaining
-    # listed (annotated WAIVED).  This is a STANDALONE-CLI opt-in only -- it
-    # never touches report.passed, so the kct audit manufacturing-readiness gate
+    # Same-footprint (#4403) / attach-zone (#8028) waivers: shared with
+    # ``kct readiness`` so both gates mark waivers identically.  Standalone-CLI
+    # opt-in only -- never touches report.passed, so the ``kct audit`` gate
     # (which keys off the raw, un-waived result) is unaffected.
-    if getattr(args, "waive_same_footprint", False):
-        for pair in report.pairs:
-            if pair.relationship == "same_footprint":
-                pair.waived = True
-    # Attach-zone waiver (#8028): only rows the census classified ``attach_zone``
-    # (flag-gated, see ``attach_zones`` above) and only when the copper outside
-    # the zone still passes; a failing residual keeps the pair FAIL.
-    for pair in report.pairs:
-        if pair.relationship == "attach_zone" and pair.residual_passed:
-            pair.waived = True
+    apply_census_waivers(
+        report, waive_same_footprint=bool(getattr(args, "waive_same_footprint", False))
+    )
 
     # Vacuity guard (issue #4354): a census that resolves ZERO HV nets is only
     # legitimately "nothing to audit" on a genuinely low-voltage board.  When

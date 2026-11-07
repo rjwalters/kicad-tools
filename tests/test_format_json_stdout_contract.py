@@ -68,6 +68,7 @@ CONTRACT_ARGV: dict[str, list[str]] = {
     "check": ["{pcb}"],
     "creepage": ["{pcb}", "--min", "1.0"],
     "creepage-export-rules": ["{pro}"],
+    "repair-creepage": ["{pcb}", "--min", "1.0", "--dry-run"],
     # -- sch family ---------------------------------------------------------
     "sch summary": ["{sch}"],
     "sch hierarchy": ["{sch}"],
