@@ -40,9 +40,9 @@ class Boom:
 
 @pytest.fixture
 def env(tmp_path):
-    bundle, src = tmp_path / "bundle", tmp_path / "src"
-    bundle.mkdir()
-    src.mkdir()
+    src = tmp_path / "src"
+    bundle = src / "output" / "manufacturing"
+    bundle.mkdir(parents=True)
     (src / "b.kicad_pcb").write_text(PCB)
     (src / "b.kicad_sch").write_text("(kicad_sch)\n")
     (bundle / "bom.csv").write_bytes(
@@ -255,18 +255,45 @@ def export_shaped_manifest(env):
 GATES = ("kct_check", "native_drc", "artifacts", "bom")
 
 
-def write_receipt(env, *, status="ready", board=None, gates=GATES, failed=(), cover=True, name="r"):
-    """A ``kct readiness``-shaped receipt keyed by content hash of board + bundle files."""
+def write_receipt(
+    env,
+    *,
+    status="ready",
+    board=None,
+    gates=GATES,
+    failed=(),
+    cover=True,
+    blockers=(),
+    extra_inputs=(),
+):
+    """A ``kct readiness``-shaped receipt at ``<board>/output/readiness.json``.
+
+    ``inputs`` are board-relative paths hashed from disk (board, bundle files,
+    manifest.json, plus any ``extra_inputs`` paths).
+    """
     bundle = env["bundle"]
     board_file = env["src"] / "b.kicad_pcb"
+    src = env["src"]
     inputs = {"b.kicad_pcb": sha(board if board is not None else board_file.read_bytes())}
     if cover:
         for p in bundle.rglob("*"):
-            if p.is_file() and p.name != "manifest.json":
-                inputs["out/" + p.relative_to(bundle).as_posix()] = sha(p.read_bytes())
+            if p.is_file():
+                inputs[p.relative_to(src).as_posix()] = sha(p.read_bytes())
+    for extra in extra_inputs:
+        inputs[extra] = sha((src / extra).read_bytes())
     checks = [{"name": g, "status": "failed" if g in failed else "passed"} for g in gates]
-    path = env["src"] / f"{name}.json"
-    path.write_text(json.dumps({"status": status, "checks": checks, "inputs": inputs}))
+    path = src / "output" / "readiness.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": status,
+                "blockers": list(blockers),
+                "checks": checks,
+                "inputs": inputs,
+            }
+        )
+    )
     return path
 
 
@@ -360,8 +387,9 @@ def test_preflight_distinct_record_errors(env, mutate, message):
         ({"status": "blocked"}, "not 'ready'"),
         ({"failed": ("native_drc",)}, "not passed"),
         ({"gates": ("kct_check", "bom")}, "missing"),
-        ({"board": b"(kicad_pcb)\n"}, "not produced for this --board"),
+        ({"board": b"(kicad_pcb)\n"}, "stale: b.kicad_pcb"),
         ({"cover": False}, "does not cover bundle files"),
+        ({"blockers": ["something open"]}, "has blockers"),
     ],
 )
 def test_signoff_refuses_bad_receipt_and_leaves_manifest_untouched(env, kwargs, message):
@@ -377,7 +405,10 @@ def test_signoff_refuses_missing_receipt(env):
     export_shaped_manifest(env)
     with pytest.raises(wf.WorkflowError, match="receipt not found"):
         wf.sign_off_bundle(
-            env["bundle"], env["src"] / "b.kicad_pcb", "Ann", readiness=env["src"] / "nope.json"
+            env["bundle"],
+            env["src"] / "b.kicad_pcb",
+            "Ann",
+            readiness=env["src"] / "output" / "nope.json",
         )
 
 
@@ -393,3 +424,46 @@ def test_signoff_records_receipt_sha_and_preflight_requires_it(env):
     path.write_text(json.dumps(manifest))
     with pytest.raises(wf.WorkflowError, match="readiness receipt"):
         wf.preflight(env["bundle"], board)
+
+
+@pytest.mark.parametrize("victim", ["b.kicad_sch", "rules.kicad_dru"])
+def test_signoff_refuses_receipt_stale_for_design_inputs(env, victim):
+    """A schematic/rules file edited after the receipt must refuse, manifest untouched."""
+    (env["src"] / "rules.kicad_dru").write_text("(version 1)\n")
+    (env["src"] / "b.kicad_sch").write_text("(kicad_sch)\n")
+    export_shaped_manifest(env)
+    receipt = write_receipt(env, extra_inputs=("b.kicad_sch", "rules.kicad_dru"))
+    (env["src"] / victim).write_text("; edited after receipt\n")
+    manifest = (env["bundle"] / "manifest.json").read_bytes()
+    with pytest.raises(wf.WorkflowError, match=f"stale: {victim}"):
+        wf.sign_off_bundle(env["bundle"], env["src"] / "b.kicad_pcb", "Ann", readiness=receipt)
+    assert (env["bundle"] / "manifest.json").read_bytes() == manifest
+
+
+def test_signoff_refuses_receipt_outside_board_output_dir(env):
+    export_shaped_manifest(env)
+    receipt = write_receipt(env)
+    moved = env["src"] / "elsewhere.json"
+    moved.write_bytes(receipt.read_bytes())
+    with pytest.raises(wf.WorkflowError, match="output/readiness.json"):
+        wf.sign_off_bundle(env["bundle"], env["src"] / "b.kicad_pcb", "Ann", readiness=moved)
+
+
+def test_resigning_signed_bundle_still_succeeds_with_manifest_in_receipt(env):
+    """The receipt hashes manifest.json (as kct readiness does); sign-off rewrites it."""
+    export_shaped_manifest(env)
+    board = env["src"] / "b.kicad_pcb"
+    receipt = write_receipt(env)
+    assert "output/manufacturing/manifest.json" in json.loads(receipt.read_text())["inputs"]
+    wf.sign_off_bundle(env["bundle"], board, "Ann", readiness=receipt)
+    wf.sign_off_bundle(env["bundle"], board, "Bob", readiness=receipt)
+    wf.preflight(env["bundle"], board)
+
+
+def test_signoff_refuses_receipt_for_a_different_board_file(env):
+    export_shaped_manifest(env)
+    receipt = write_receipt(env)
+    other = env["src"] / "other.kicad_pcb"
+    other.write_text(PCB + "; a different board\n")
+    with pytest.raises(wf.WorkflowError, match="not produced for this --board"):
+        wf.sign_off_bundle(env["bundle"], other, "Ann", readiness=receipt)

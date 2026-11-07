@@ -195,14 +195,51 @@ def _load_manifest(bundle_root: Path) -> dict[str, Any]:
 REQUIRED_GATE_CHECKS = ("kct_check", "native_drc", "artifacts", "bom")
 
 
-def _load_readiness(readiness: Path, board_sha: str, bundle_shas: dict[str, str]) -> str:
+def _rehash_receipt_inputs(
+    base: Path, hashes: Any, exempt: Path, kind: str, *, relative_to: str
+) -> None:
+    """Re-hash receipt ``hashes`` (name -> sha256) under ``base``; refuse on any change.
+
+    Mirrors ``board_readiness.read_readiness``; only ``exempt`` (the bundle
+    manifest sign-off itself rewrites) is skipped.
+    """
+    if not isinstance(hashes, dict):
+        raise WorkflowError(f"Readiness receipt has an invalid '{kind}' hash map")
+    root = base.resolve()
+    for name, expected in hashes.items():
+        rel = Path(str(name))
+        if rel.is_absolute() or ".." in rel.parts or "\\" in str(name):
+            raise WorkflowError(f"Readiness receipt {kind} path must be {relative_to}: {name}")
+        target = (root / rel).resolve()
+        if not target.is_relative_to(root):
+            raise WorkflowError(f"Readiness receipt {kind} path leaves {relative_to} root: {name}")
+        if target == exempt:
+            continue
+        try:
+            actual = _sha(target.read_bytes())
+        except OSError as exc:
+            raise WorkflowError(
+                f"Readiness receipt is stale: {name} cannot be read ({exc.__class__.__name__})"
+            ) from exc
+        if actual != expected:
+            raise WorkflowError(
+                f"Readiness receipt is stale: {name} changed after the receipt was written; "
+                "re-run kct readiness --verify"
+            )
+
+
+def _load_readiness(
+    readiness: Path, board_sha: str, bundle_shas: dict[str, str], bundle_root: Path
+) -> str:
     """Refuse unless a ``kct readiness`` receipt proves every gate passed for this board.
 
-    Returns the receipt's sha256. The receipt must be ``ready``, every check
-    ``passed`` (including :data:`REQUIRED_GATE_CHECKS`), its ``inputs`` must
-    hash a ``.kicad_pcb`` equal to ``--board``, and every bundle file (bar
-    ``manifest.json``, which sign-off itself rewrites) must appear in ``inputs``
-    by sha256, so the receipt covers exactly these bytes.
+    Returns the receipt's sha256. The receipt must be ``<board>/output/readiness.json``,
+    ``schema_version`` 1, ``ready`` with no ``blockers``, every check ``passed``
+    (including :data:`REQUIRED_GATE_CHECKS`). Every ``inputs`` / ``external_inputs``
+    entry is re-hashed against disk (as ``read_readiness`` does), exempting only
+    the bundle ``manifest.json`` that sign-off rewrites. Its ``inputs`` must hash
+    a ``.kicad_pcb`` equal to ``--board``, and every bundle file (bar
+    ``manifest.json``) must appear in ``inputs`` by sha256.
     """
     if not readiness.is_file():
         raise WorkflowError(f"Readiness receipt not found: {readiness}")
@@ -213,11 +250,15 @@ def _load_readiness(readiness: Path, board_sha: str, bundle_shas: dict[str, str]
         raise WorkflowError("Readiness receipt is not valid JSON") from exc
     if not isinstance(data, dict):
         raise WorkflowError("Readiness receipt is not a JSON object")
+    if data.get("schema_version") != 1:
+        raise WorkflowError("Readiness receipt schema_version is not 1")
     if data.get("status") != "ready":
         raise WorkflowError(
             f"Readiness receipt status is {data.get('status')!r}, not 'ready'; "
             "run the tapeout gates (kct readiness --verify) until it is"
         )
+    if data.get("blockers") != []:
+        raise WorkflowError(f"Readiness receipt has blockers: {data.get('blockers')!r}")
     checks = data.get("checks")
     if not isinstance(checks, list) or any(not isinstance(c, dict) for c in checks):
         raise WorkflowError("Readiness receipt has no valid 'checks' list")
@@ -232,6 +273,20 @@ def _load_readiness(readiness: Path, board_sha: str, bundle_shas: dict[str, str]
     inputs = data.get("inputs")
     if not isinstance(inputs, dict) or not inputs:
         raise WorkflowError("Readiness receipt has no 'inputs' hash map")
+    if readiness.name != "readiness.json" or readiness.parent.name != "output":
+        raise WorkflowError("Readiness receipt must be <board>/output/readiness.json")
+    board_dir = readiness.parent.parent
+    exempt = (bundle_root / "manifest.json").resolve()
+    _rehash_receipt_inputs(board_dir, inputs, exempt, "inputs", relative_to="board-relative")
+    external = data.get("external_inputs")
+    if external is not None:
+        declared = data.get("project_root")
+        if not isinstance(declared, str):
+            raise WorkflowError("Readiness receipt has external_inputs but no project_root")
+        project_root = (board_dir.resolve() / declared).resolve()
+        _rehash_receipt_inputs(
+            project_root, external, exempt, "external_inputs", relative_to="project-root-relative"
+        )
     boards = {v for k, v in inputs.items() if str(k).endswith(".kicad_pcb")}
     if board_sha not in boards:
         raise WorkflowError("Readiness receipt was not produced for this --board (sha256 differs)")
@@ -278,7 +333,10 @@ def sign_off_bundle(
     _verify_file_records(bundle_root, files)
     board_sha = _file_sha(board)
     receipt_sha = _load_readiness(
-        readiness, board_sha, {n: r["sha256"] for n, r in files.items() if n != "manifest.json"}
+        readiness,
+        board_sha,
+        {n: r["sha256"] for n, r in files.items() if n != "manifest.json"},
+        bundle_root,
     )
     tapeout: dict[str, Any] = {
         "board_sha256": board_sha,
@@ -299,7 +357,9 @@ def preflight(bundle_root: Path, board: Path) -> Preflight:
     """Refuse, offline, unless the tapeout bundle is intact, signed off and matches ``board``.
 
     Order is deliberate and everything here is local file I/O: a refusal can
-    never have been preceded by a network call.
+    never have been preceded by a network call. It does not re-verify the
+    readiness receipt; ``sign_off_bundle`` is the gate that does, and this only
+    checks that a receipt hash was recorded.
     """
     bundle_root, board = Path(bundle_root), Path(board)
     manifest = _load_manifest(bundle_root)
