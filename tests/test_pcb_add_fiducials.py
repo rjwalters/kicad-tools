@@ -109,12 +109,24 @@ class TestAddFiducials:
         assert p.read_text() == before
         assert "free fiducial sites" in capsys.readouterr().err
 
-    def test_second_run_uses_fresh_refs(self, tmp_path):
+    def test_second_run_is_idempotent(self, tmp_path, capsys):
         p = _write(tmp_path, _board(width=120, height=80))
-        assert run_add_fiducials(p, sides="front") == 0
-        assert run_add_fiducials(p, sides="front") == 0
-        refs = [f.reference for f in _fids(p)]
-        assert len(refs) == len(set(refs)) == 6
+        assert run_add_fiducials(p) == 0
+        before = p.read_text()
+        assert run_add_fiducials(p) == 0
+        assert p.read_text() == before
+        assert len(_fids(p)) == 6
+        assert "already satisfied" in capsys.readouterr().out
+
+    def test_back_fiducial_pads_on_back_layers(self, tmp_path):
+        trk = '(segment (start 1 3.5) (end 20 3.5) (width 0.25) (layer "F.Cu") (net 0) (uuid "t1"))'
+        p = _write(tmp_path, _board(extra=trk))
+        assert run_add_fiducials(p, sides="back") == 0
+        for f in _fids(p):
+            assert f.layer == "B.Cu"
+            for pad in f.pads:
+                assert "F.Cu" not in pad.layers and "B.Cu" in pad.layers
+                assert "B.Mask" in pad.layers
 
     def test_bad_sides(self, tmp_path):
         p = _write(tmp_path, _board())
