@@ -13,6 +13,17 @@ from .known_issues import KNOWN_ISSUES_FILENAME, defects, validate_known_issues
 MANUFACTURING_MANIFEST = "output/manufacturing/manifest.json"
 
 
+def is_manufacturing_manifest(rel_name: str) -> bool:
+    """True for the verified bundle's ``manifest.json`` input (Issue #8592).
+
+    The bundle is ``<board>/output/manufacturing/`` or, when the PCB sits
+    directly in its board directory, ``<board>/manufacturing/`` (readiness's own
+    ``--output`` default).  Hashing and the Ready gate share this one predicate.
+    """
+    path = Path(rel_name)
+    return path.name == "manifest.json" and path.parent.name == "manufacturing"
+
+
 def _canonical_manifest_bytes(raw: bytes) -> bytes | None:
     """Manifest bytes minus the top-level ``tapeout`` sign-off key (Issue #8580).
 
@@ -35,7 +46,7 @@ def readiness_input_hash(rel_name: str, raw: bytes) -> str:
 
     Every other input (and an unparseable manifest) keeps the raw-bytes hash.
     """
-    if Path(rel_name).as_posix() == MANUFACTURING_MANIFEST:
+    if is_manufacturing_manifest(rel_name):
         canonical = _canonical_manifest_bytes(raw)
         if canonical is not None:
             return hashlib.sha256(canonical).hexdigest()
@@ -47,10 +58,7 @@ def _input_hash_matches(name: str, raw: bytes, expected: object) -> bool:
         return True
     # Receipts written before #8580 pinned the raw manifest bytes; they stay
     # valid until the manifest changes (a signed one needs `kct readiness`).
-    return (
-        Path(name).as_posix() == MANUFACTURING_MANIFEST
-        and hashlib.sha256(raw).hexdigest() == expected
-    )
+    return is_manufacturing_manifest(name) and hashlib.sha256(raw).hexdigest() == expected
 
 
 def read_readiness(board_dir: Path) -> dict:
@@ -161,7 +169,7 @@ def read_readiness(board_dir: Path) -> dict:
             if (
                 not any(n.endswith(".kicad_pcb") for n in inputs)
                 or not any(n.endswith(".kicad_sch") for n in (*inputs, *(external or ())))
-                or "output/manufacturing/manifest.json" not in inputs
+                or not any(is_manufacturing_manifest(n) for n in inputs)
             ):
                 raise ValueError("Ready requires PCB, schematic and manufacturing evidence")
             if data["blockers"] or any(c["status"] != "passed" for c in checks):

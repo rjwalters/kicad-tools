@@ -16,7 +16,11 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--readiness",
         required=True,
-        help="Passing `kct readiness` receipt (readiness.json) covering --board and the bundle",
+        help=(
+            "Passing `kct readiness` receipt covering --board and the bundle: "
+            "<board>/output/readiness.json or the `--verify` receipt at "
+            "<board>/output/readiness-verification/readiness.json"
+        ),
     )
     parser.add_argument(
         "--reviewer", required=True, help="Your name; recorded as the human sign-off"

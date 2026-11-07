@@ -63,3 +63,32 @@ def test_legacy_raw_hash_receipt_still_valid(tmp_path):
     report["inputs"][MANIFEST] = hashlib.sha256(path.read_bytes()).hexdigest()
     save(tmp_path, report)
     assert read_readiness(tmp_path)["status"] == "ready"
+
+
+def _relocate_manifest(root, report, new):
+    old = root / MANIFEST
+    (root / new).parent.mkdir(parents=True, exist_ok=True)
+    (root / new).write_bytes(old.read_bytes())
+    report["inputs"][new] = report["inputs"].pop(MANIFEST)
+    save(root, report)
+
+
+def test_bundle_beside_pcb_reaches_ready_and_survives_signoff(tmp_path):
+    """Issue #8592: ``<dir>/manufacturing/manifest.json`` satisfies the Ready gate."""
+    _ready_board(tmp_path, {"files": {}})
+    report = json.loads((tmp_path / "output/readiness.json").read_text())
+    new = "manufacturing/manifest.json"
+    _relocate_manifest(tmp_path, report, new)
+    assert read_readiness(tmp_path)["status"] == "ready"
+    (tmp_path / new).write_text(json.dumps({"tapeout": {"x": 1}, "files": {}}))
+    assert read_readiness(tmp_path)["status"] == "ready"
+
+
+def test_receipt_without_manifest_input_still_blocked(tmp_path):
+    _ready_board(tmp_path, {"files": {}})
+    report = json.loads((tmp_path / "output/readiness.json").read_text())
+    del report["inputs"][MANIFEST]
+    save(tmp_path, report)
+    result = read_readiness(tmp_path)
+    assert result["status"] == "unverified"
+    assert "manufacturing evidence" in result["blockers"][0]
