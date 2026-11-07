@@ -124,6 +124,9 @@ ASSEMBLY_AFFECTING_RULES = frozenset(
         # Issue #7204: a footprint with no courtyard was never tested for
         # overlap, which is a pick-and-place risk until someone looks.
         "courtyard_missing",
+        # Issue #8532: no global fiducials / no revision on the silkscreen.
+        "fiducials_missing",
+        "board_id_missing",
     }
 )
 
@@ -852,6 +855,12 @@ class ReadinessOptions:
     # in by the run and rendered into README.txt / the report.
     skip_cleanup: bool = False
     cleanup_record: dict[str, Any] | None = None
+    # Assembly-prep step (Issue #8532): ``generate`` runs ``pcb add-fiducials``
+    # and ``pcb add-board-info`` on the candidate; ``verify`` never mutates.
+    # Each opt-out is recorded (README.txt + report), never silent.
+    skip_fiducials: bool = False
+    skip_board_info: bool = False
+    assembly_prep_record: dict[str, str] | None = None
 
     @property
     def root(self) -> Path:
@@ -1037,6 +1046,8 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
             project_root=project_root,
             checked_at=checked_at,
             skip_cleanup=bool(getattr(args, "skip_cleanup", False)),
+            skip_fiducials=bool(getattr(args, "skip_fiducials", False)),
+            skip_board_info=bool(getattr(args, "skip_board_info", False)),
         ),
         None,
     )
@@ -2328,6 +2339,43 @@ def _copper_cleanup(options: ReadinessOptions) -> dict[str, Any]:
     return {"copper_cleanup": "verify-count-only", "removed": removed}
 
 
+def _assembly_prep(options: ReadinessOptions) -> dict[str, str]:
+    """Run (generate) or record (verify) fiducial + board-ID placement.
+
+    Mirrors :func:`_copper_cleanup`: runs before any hashing/refill so the
+    checks judge the finished board; ``verify`` never touches the board; an
+    opt-out or a failed placement is recorded, never silent (Issue #8532).
+    """
+    import contextlib
+    import io
+
+    record: dict[str, str] = {}
+    for key, skipped, flag in (
+        ("fiducials", options.skip_fiducials, "--skip-fiducials"),
+        ("board_info", options.skip_board_info, "--skip-board-info"),
+    ):
+        if skipped:
+            record[key] = f"skipped ({flag})"
+        elif options.operation != "generate":
+            record[key] = "verify-not-modified"
+        else:
+            from kicad_tools.cli.pcb_add_board_info import run_add_board_info
+            from kicad_tools.cli.pcb_add_fiducials import run_add_fiducials
+
+            sink = io.StringIO()
+            with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+                if key == "fiducials":
+                    rc = run_add_fiducials(options.pcb, sides="populated")
+                else:
+                    rc = run_add_board_info(options.pcb, auto=True)
+            if rc == 0:
+                record[key] = "applied"
+            else:
+                detail = " ".join(sink.getvalue().split())[:200]
+                record[key] = f"failed: {detail}"
+    return record
+
+
 def _write_readme(
     options: ReadinessOptions,
     warning_counts: dict[str, int],
@@ -2398,6 +2446,11 @@ def _write_readme(
                 f"  copper_cleanup: {record['copper_cleanup']}; exact-duplicate copper "
                 f"removed: {removed['segments']} segment(s), {removed['vias']} via(s)"
             )
+    prep = options.assembly_prep_record
+    if prep is not None:
+        lines.extend(["", "Assembly prep", "-------------"])
+        for key in ("fiducials", "board_info"):
+            lines.append(f"  {key}: {prep[key]}")
     lines.extend(["", "Accepted-risk waivers", "---------------------"])
     if acked:
         lines.append(f"  see the {len(acked)} line(s) above")
@@ -3359,6 +3412,10 @@ def _run_readiness_candidate(
     options = replace(options, cleanup_record=cleanup)
     metrics["copper_cleanup"] = cleanup
 
+    prep = _assembly_prep(options)
+    options = replace(options, assembly_prep_record=prep)
+    metrics["assembly_prep"] = prep
+
     if options.operation == "generate":
         preparation = engines.refill(options.pcb)
         if not preparation.ok or preparation.returncode != 0:
@@ -3739,6 +3796,24 @@ def add_readiness_arguments(parser: argparse.ArgumentParser) -> None:
         help=(
             "Skip the exact-duplicate copper cleanup (pcb dedupe) that otherwise runs "
             "before the checks; the skip is recorded in the report and README.txt"
+        ),
+    )
+    parser.add_argument(
+        "--skip-fiducials",
+        dest="skip_fiducials",
+        action="store_true",
+        help=(
+            "Skip adding global fiducials (pcb add-fiducials) during --generate; "
+            "the skip is recorded in the report and README.txt"
+        ),
+    )
+    parser.add_argument(
+        "--skip-board-info",
+        dest="skip_board_info",
+        action="store_true",
+        help=(
+            "Skip adding the board-ID silkscreen text (pcb add-board-info) during "
+            "--generate; the skip is recorded in the report and README.txt"
         ),
     )
     parser.add_argument(
