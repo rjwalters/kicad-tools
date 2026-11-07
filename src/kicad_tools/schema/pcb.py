@@ -485,6 +485,117 @@ def _flip_layer_node(node: SExp | None) -> None:
         node.children[0] = SExp.quoted_atom(_flip_side_layer(name))
 
 
+# Nodes holding a footprint-local ``y`` that a back-side placement mirrors.
+_BACK_MIRROR_XY_TAGS = frozenset({"start", "end", "mid", "center", "xy", "offset"})
+# ``(chamfer ...)`` corners swap top <-> bottom when the y axis is mirrored.
+_CHAMFER_CORNER_SWAP = {
+    "top_left": "bottom_left",
+    "bottom_left": "top_left",
+    "top_right": "bottom_right",
+    "bottom_right": "top_right",
+}
+_FP_GRAPHIC_TAG_PREFIXES = ("fp_", "gr_")
+
+
+def _negate_node_y(node: SExp) -> None:
+    """Negate the ``y`` of an ``(at x y ...)``/``(xy x y)`` style node."""
+    y = node.get_float(1)
+    if y is not None:
+        node.children[1] = _mm_atom(-y)
+
+
+def _mirror_local_y(node: SExp) -> None:
+    """Mirror every footprint-local point under *node* across the x axis."""
+    for child in node.iter_children():
+        if child.tag in _BACK_MIRROR_XY_TAGS:
+            _negate_node_y(child)
+        else:
+            _mirror_local_y(child)
+
+
+def flip_footprint_children_to_back(footprint_node: SExp, rotation: float = 0.0) -> None:
+    """Re-express a front-authored raw ``(footprint ...)`` for a back placement.
+
+    A library footprint is authored for the front.  KiCad stores a footprint
+    on ``B.Cu`` with every side-specific layer swapped (``F.* <-> B.*``), its
+    local geometry mirrored across the x axis, pad angles negated (the
+    footprint's own *rotation* is added on top by the caller), and texts
+    mirrored (``(justify mirror)``) with angle ``180 + rotation - local``.
+    Verified black-box against ``pcbnew`` 10.0.6 ``Flip`` output (Issue #8581).
+    Side-neutral layers (``*.Cu``, ``In1.Cu``, ``Edge.Cuts``) are unchanged.
+    """
+    for child in footprint_node.iter_children():
+        tag = child.tag
+        if tag == "pad":
+            _flip_layer_children(child)
+            at_node = child.find_child("at")
+            if at_node is not None:
+                _negate_node_y(at_node)
+                angle = at_node.get_float(2)
+                if angle:
+                    at_node.children[2] = _mm_atom(-angle)
+            drill = child.find_child("drill")
+            if drill is not None:
+                _mirror_local_y(drill)
+            chamfer = child.find_child("chamfer")
+            if chamfer is not None:
+                chamfer.children = [
+                    SExp.atom(_CHAMFER_CORNER_SWAP[c.value])
+                    if c.is_atom and c.value in _CHAMFER_CORNER_SWAP
+                    else c
+                    for c in chamfer.children
+                ]
+            primitives = child.find_child("primitives")
+            if primitives is not None:
+                _mirror_local_y(primitives)
+        elif tag in _FP_TEXT_TAGS:
+            _flip_layer_children(child)
+            at_node = child.find_child("at")
+            if at_node is not None:
+                _negate_node_y(at_node)
+                local = at_node.get_float(2) or 0.0
+                _set_text_at_angle(at_node, _normalize_text_angle(180.0 + rotation - local), None)
+            _mirror_text_effects(child)
+        elif tag is not None and tag.startswith(_FP_GRAPHIC_TAG_PREFIXES):
+            _flip_layer_children(child)
+            if tag == "fp_text_box":
+                _mirror_text_effects(child)
+            _mirror_local_y(child)
+        elif tag == "zone":
+            _flip_layer_children(child)
+            _mirror_local_y(child)
+            for poly in child.iter_children():
+                if poly.tag == "filled_polygon":
+                    _flip_layer_node(poly.find_child("layer"))
+
+
+def _flip_layer_children(node: SExp) -> None:
+    """Swap the sides of a node's direct ``(layer ...)``/``(layers ...)`` children."""
+    for child in node.iter_children():
+        if child.tag == "layer":
+            _flip_layer_node(child)
+        elif child.tag == "layers":
+            child.children = [
+                SExp.quoted_atom(_flip_side_layer(atom.value))
+                if atom.is_atom and isinstance(atom.value, str)
+                else atom
+                for atom in child.children
+            ]
+
+
+def _mirror_text_effects(text_node: SExp) -> None:
+    """Add ``mirror`` to a text's ``(effects (justify ...))`` (creating it)."""
+    effects = text_node.find_child("effects")
+    if effects is None:
+        effects = SExp.list("effects")
+        text_node.append(effects)
+    justify = effects.find_child("justify")
+    if justify is None:
+        effects.append(SExp.list("justify", "mirror"))
+    elif not any(c.is_atom and c.value == "mirror" for c in justify.children):
+        justify.append(SExp.atom("mirror"))
+
+
 def transform_footprint_zone_nodes(
     footprint_node: SExp,
     old_frame: _FootprintFrame,
@@ -6456,6 +6567,13 @@ class PCB:
             # Fallback: append to end (shouldn't happen for valid footprints)
             fp_sexp.append(at_sexp)
 
+        # A back-side placement needs the whole footprint re-expressed for the
+        # back (layers, mirrored local geometry/text), not just its (layer)
+        # node (Issue #8581). Front placements are untouched.
+        is_back = _is_back_layer(layer)
+        if is_back:
+            flip_footprint_children_to_back(fp_sexp, rotation)
+
         # Rewrite each pad's angle to ABSOLUTE (board-frame) rotation.
         #
         # KiCad stores a pad's ``(at x y ANGLE)`` with the angle expressed in
@@ -6522,6 +6640,8 @@ class PCB:
             font.append(SExp.list("thickness", 0.15))
             effects.append(font)
             ref_prop.append(effects)
+            if is_back:
+                _mirror_text_effects(ref_prop)
             fp_sexp.append(ref_prop)
 
         if not val_updated:
@@ -6536,6 +6656,8 @@ class PCB:
             font.append(SExp.list("thickness", 0.15))
             effects.append(font)
             val_prop.append(effects)
+            if is_back:
+                _mirror_text_effects(val_prop)
             fp_sexp.append(val_prop)
 
         # Append footprint to PCB S-expression tree
