@@ -1418,13 +1418,26 @@ def dedupe_net_classes(
     """
     if not net_class_map:
         return None
-    seen: set[str] = set()
+    # Group member nets per class, first-seen order (deterministic output).
+    members: dict[str, list[tuple[str, NetClassRouting]]] = {}
+    for net, nc in net_class_map.items():
+        members.setdefault(nc.name, []).append((net, nc))
+
     classes: list[NetClassRouting] = []
-    for nc in net_class_map.values():
-        if nc.name in seen:
-            continue
-        seen.add(nc.name)
-        classes.append(nc)
+    for entries in members.values():
+        # Always net-scoped (#8527): the sidecar declares ``target_ampacity``
+        # per NET only, and ``A.NetClass`` would match every net in the
+        # ``.kicad_pro`` netclass -- including ones the sidecar never lists.
+        # Nets sharing a target are grouped into one ``||`` rule.
+        by_target: dict[float, list[str]] = {}
+        proto: dict[float, NetClassRouting] = {}
+        for net, nc in entries:
+            if nc.target_ampacity is None:
+                continue
+            by_target.setdefault(nc.target_ampacity, []).append(net)
+            proto.setdefault(nc.target_ampacity, nc)
+        for target, nets in by_target.items():
+            classes.append(replace(proto[target], net_scope=tuple(nets)))
     return classes
 
 

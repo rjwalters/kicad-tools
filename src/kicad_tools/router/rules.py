@@ -1500,6 +1500,16 @@ class NetClassRouting:
     literal is used.
     """
 
+    net_scope: tuple[str, ...] = ()
+    """Board nets this entry's ``target_ampacity`` applies to (#8527).
+
+    Empty (default) means the target is class-wide.  Set by
+    :func:`~kicad_tools.manufacturers.project_generator.dedupe_net_classes`
+    when only some nets of a class declare the target, so DRU generation emits
+    a net-scoped rule instead of a class-wide ``track_width`` floor.  Not
+    serialized: it is derived from the net-class map, never authored.
+    """
+
     target_ampacity: float | None = None
     """Target current-carrying capacity in amps (e.g. 15.0 for a 15 A fused line).
 

@@ -171,8 +171,8 @@ def test_emit_dedups_shared_ampacity_class_to_one_rule_pair(board_copy: Path) ->
     )
 
     dru = board_copy.with_suffix(".kicad_dru").read_text(encoding="utf-8")
-    assert dru.count("Ampacity Min Width (POWER, external)") == 1
-    assert dru.count("Ampacity Min Width (POWER, internal)") == 1
+    assert dru.count("Ampacity Min Width (POWER 15A, external)") == 1
+    assert dru.count("Ampacity Min Width (POWER 15A, internal)") == 1
     # Byte-identical to a SINGLE deduplicated class -- the DRU carries no
     # per-net redundancy.
     expected = merge_dru_floors(
@@ -180,7 +180,11 @@ def test_emit_dedups_shared_ampacity_class_to_one_rule_pair(board_copy: Path) ->
         generate_dru(
             checker.design_rules,
             manufacturer_name="jlcpcb",
-            net_classes=[NetClassRouting(name="POWER", target_ampacity=15.0)],
+            net_classes=[
+                NetClassRouting(
+                    name="POWER", target_ampacity=15.0, net_scope=("VBUS", "+5V", "GND")
+                )
+            ],
         ),
     )
     assert dru == expected
@@ -213,10 +217,10 @@ def test_emit_preserves_distinct_ampacity_classes(board_copy: Path) -> None:
     )
 
     dru = board_copy.with_suffix(".kicad_dru").read_text(encoding="utf-8")
-    assert dru.count("Ampacity Min Width (POWER, external)") == 1
-    assert dru.count("Ampacity Min Width (POWER, internal)") == 1
-    assert dru.count("Ampacity Min Width (MOTOR, external)") == 1
-    assert dru.count("Ampacity Min Width (MOTOR, internal)") == 1
+    assert dru.count("Ampacity Min Width (POWER 15A, external)") == 1
+    assert dru.count("Ampacity Min Width (POWER 15A, internal)") == 1
+    assert dru.count("Ampacity Min Width (MOTOR 8A, external)") == 1
+    assert dru.count("Ampacity Min Width (MOTOR 8A, internal)") == 1
 
 
 # ---------------------------------------------------------------------------
