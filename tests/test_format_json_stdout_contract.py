@@ -477,6 +477,7 @@ EXEMPT: dict[str, str] = {
     "models sync": "network: fetches the pinned kicad-packages3D subset (stubbed run in tests/test_models_sync.py)",
     "placement refine": "interactive: --format json is a stdin/stdout JSON Lines session",
     "submit-jlcpcb": "network: stock gate queries the LCSC/JLCPCB API and needs a tapeout bundle (JSON result unit-tested in tests/test_submission_workflow.py)",
+    "tapeout-sign-off": "needs a signed tapeout bundle with a fresh readiness receipt (JSON result unit-tested in tests/test_submission_workflow.py)",
 }
 
 # Leaves whose fixture run shells out to kicad-cli; skipped when it is absent
