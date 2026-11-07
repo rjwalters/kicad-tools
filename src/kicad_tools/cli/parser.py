@@ -2715,6 +2715,17 @@ def _add_pcb_parser(subparsers) -> None:
     pcb_prune.add_argument(
         "--dry-run", action="store_true", help="Report changes without modifying files"
     )
+    pcb_prune.add_argument(
+        "--nets",
+        metavar="NET[,NET...]",
+        help="Only prune these nets (comma-separated names); other copper is untouched",
+    )
+    pcb_prune.add_argument(
+        "--region",
+        metavar="x1,y1,x2,y2",
+        help="Only apply a net's plan when every edit lies inside this box (mm); "
+        "plans straddling it are skipped and reported as region_skipped",
+    )
     pcb_prune.add_argument("--no-drc", action="store_true", help="Skip kicad-cli DRC verification")
     pcb_prune.add_argument(
         "--project",
@@ -3243,6 +3254,63 @@ def _add_pcb_parser(subparsers) -> None:
         "--dry-run",
         action="store_true",
         help="Report the would-be transform without modifying the PCB file",
+    )
+
+    # pcb add-board-info
+    pcb_board_info = pcb_subparsers.add_parser(
+        "add-board-info",
+        help="Stamp project/rev/date board identification on silkscreen",
+        description=(
+            "Add a board-level silkscreen gr_text whose {project}, {rev} and "
+            "{date} fields come from the PCB title block. Use --at X Y for "
+            "explicit placement or --auto to find a free region clear of "
+            "pads, other silk, courtyards and the board edge."
+        ),
+    )
+    pcb_board_info.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_board_info.add_argument(
+        "--text",
+        default="{project} {rev} {date}",
+        help="Text template; fields: {project} {rev} {date} (default: '%(default)s')",
+    )
+    pcb_board_info.add_argument(
+        "--layer",
+        choices=["F.SilkS", "B.SilkS"],
+        default="F.SilkS",
+        help="Silkscreen layer (B.SilkS text is mirrored)",
+    )
+    pcb_board_info.add_argument(
+        "--at",
+        nargs=2,
+        type=float,
+        metavar=("X", "Y"),
+        help="Text centre in KiCad file coordinates (mm)",
+    )
+    pcb_board_info.add_argument(
+        "--auto",
+        action="store_true",
+        help="Pick a free region automatically (nearest the bottom-left corner)",
+    )
+    pcb_board_info.add_argument(
+        "--order-placeholder",
+        nargs="?",
+        const="JLCJLCJLCJLC",
+        default=None,
+        metavar="TEXT",
+        help="Also stamp a fab order-number placeholder (default text: JLCJLCJLCJLC)",
+    )
+    pcb_board_info.add_argument("--font-size", type=float, default=1.0, help="Font size (mm)")
+    pcb_board_info.add_argument(
+        "--font-thickness", type=float, default=0.15, help="Font stroke thickness (mm)"
+    )
+    pcb_board_info.add_argument(
+        "-o", "--output", dest="output", help="Output file path (default: overwrite input PCB)"
+    )
+    pcb_board_info.add_argument(
+        "--format", choices=["text", "json"], default="text", help="Output format"
+    )
+    pcb_board_info.add_argument(
+        "--dry-run", action="store_true", help="Preview without modifying the PCB file"
     )
 
     # pcb lock-footprints / unlock-footprints
@@ -4972,6 +5040,11 @@ def _add_place_silk_refs_parser(subparsers) -> None:
         help="Also try a 90-degree rotated orientation when the original does not fit",
     )
     place_refs_parser.add_argument(
+        "--refs",
+        metavar="REF[,REF...]",
+        help="Comma-separated reference designators to move; others stay put as obstacles",
+    )
+    place_refs_parser.add_argument(
         "-o", "--output", help="Output file path (default: overwrite input)"
     )
     place_refs_parser.add_argument(
@@ -5262,6 +5335,11 @@ def _add_parts_parser(subparsers) -> None:
     )
     parts_avail.add_argument(
         "--issues-only", action="store_true", help="Only show parts with availability issues"
+    )
+    parts_avail.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Bypass the parts cache and fetch every part live",
     )
     parts_avail.add_argument(
         "--no-auto-lcsc",

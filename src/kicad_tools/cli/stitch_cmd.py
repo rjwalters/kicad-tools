@@ -3819,8 +3819,19 @@ def _stitch_uuid(*parts: object) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_OID, "kct-stitch:" + ":".join(str(p) for p in parts)))
 
 
-def add_via_to_pcb(sexp: SExp, placement: ViaPlacement) -> None:
-    """Add a via to the PCB S-expression."""
+def _pcb_is_name_only(pcb_path: Path) -> bool:
+    """True when the board uses KiCad-10 ``(net "name")`` refs (issue #8563)."""
+    from kicad_tools.router.link_router import _board_is_name_only
+
+    return _board_is_name_only(pcb_path)
+
+
+def add_via_to_pcb(sexp: SExp, placement: ViaPlacement, name_only: bool = False) -> None:
+    """Add a via to the PCB S-expression.
+
+    With ``name_only`` the net is written as ``(net "NAME")`` (KiCad-10
+    name-only boards); a legacy ``(net <n>)`` there reads as no net (#8563).
+    """
     via = via_node(
         x=placement.via_x,
         y=placement.via_y,
@@ -3838,6 +3849,7 @@ def add_via_to_pcb(sexp: SExp, placement: ViaPlacement) -> None:
             placement.pad.net_number,
         ),
         via_type=placement.via_type,
+        net_name=placement.pad.net_name if name_only else None,
     )
     sexp.append(via)
 
@@ -3872,7 +3884,7 @@ def trace_points(trace: TraceSegment) -> list[tuple[float, float]]:
     return legalize_stub_path(points)
 
 
-def add_trace_to_pcb(sexp: SExp, trace: TraceSegment) -> None:
+def add_trace_to_pcb(sexp: SExp, trace: TraceSegment, name_only: bool = False) -> None:
     """Add trace segment(s) from pad center to via center.
 
     Writes the legs of :func:`trace_points`: one for a straight trace, two
@@ -3900,6 +3912,7 @@ def add_trace_to_pcb(sexp: SExp, trace: TraceSegment) -> None:
                 trace.layer,
                 trace.pad.net_number,
             ),
+            net_name=trace.pad.net_name if name_only else None,
         )
         sexp.append(seg)
 
@@ -5483,8 +5496,9 @@ def run_thermal_stitch(
 
     # Apply changes if not dry run.
     if not dry_run and result.vias_added:
+        name_only = _pcb_is_name_only(pcb_path)
         for placement in result.vias_added:
-            add_via_to_pcb(sexp, placement)
+            add_via_to_pcb(sexp, placement, name_only)
         save_pcb(sexp, pcb_path)
         verify_pcb_write(pcb_path, expected_vias=len(result.vias_added))
 
@@ -5735,8 +5749,9 @@ def run_blanket_stitch(
 
     # Apply changes if not dry run
     if not dry_run and result.vias_added:
+        name_only = _pcb_is_name_only(pcb_path)
         for placement in result.vias_added:
-            add_via_to_pcb(sexp, placement)
+            add_via_to_pcb(sexp, placement, name_only)
         save_pcb(sexp, pcb_path)
 
         # Post-write verification
@@ -6819,10 +6834,11 @@ def run_stitch(
 
     # Apply changes if not dry run
     if not dry_run and result.vias_added:
+        name_only = _pcb_is_name_only(pcb_path)
         for placement in result.vias_added:
-            add_via_to_pcb(sexp, placement)
+            add_via_to_pcb(sexp, placement, name_only)
         for trace in result.traces_added:
-            add_trace_to_pcb(sexp, trace)
+            add_trace_to_pcb(sexp, trace, name_only)
         save_pcb(sexp, pcb_path)
 
         # Post-write verification

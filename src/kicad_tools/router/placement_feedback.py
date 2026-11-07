@@ -1817,6 +1817,7 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
         delta_proposer: Callable[[PCB], list[PlacementDelta]] | None = None,
         excluded_nets: frozenset[str] | set[str] | list[str] | None = None,
         net_class_map: dict[str, NetClassRouting] | None = None,
+        route_only_nets: frozenset[str] | set[str] | list[str] | None = None,
     ):
         super().__init__(
             router=router,
@@ -1824,6 +1825,12 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
             verbose=verbose,
             fixed_refs=fixed_refs,
             max_movement=max_movement,
+        )
+        # Issue #8566: the ``--nets`` set the pass was limited to, or ``None``
+        # for an unrestricted pass.  Nets outside it were never routed, so a
+        # "routed-count improvement" says nothing about a part that carries them.
+        self.route_only_nets: frozenset[str] | None = (
+            frozenset(route_only_nets) if route_only_nets else None
         )
         # Injectable so tests can drive the keep/revert logic with a known delta
         # without constructing a full classifier fixture.  Defaults to the real
@@ -2232,6 +2239,15 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                 # explicit board-level lock outranks a stale proposal.
                 _skip(delta, f"target {delta.target_ref} is locked on the board")
                 continue
+            out_of_scope = self._out_of_scope_nets(delta.target_key)
+            if out_of_scope:
+                _skip(
+                    delta,
+                    f"target {delta.target_ref} carries nets outside the --nets set "
+                    f"({', '.join(out_of_scope[:4])}"
+                    f"{', ...' if len(out_of_scope) > 4 else ''}); their reach was not measured",
+                )
+                continue
             strategy = self._strategy_from_delta(delta)
             if strategy is None:
                 _skip(delta, f"no applyable strategy for kind={delta.kind!r}")
@@ -2595,6 +2611,112 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                     break
         return count
 
+    def _out_of_scope_nets(self, ref: str) -> list[str]:
+        """Nets of ``ref`` outside the ``--nets`` set (Issue #8566), sorted.
+
+        Empty when the pass was not limited with ``--nets``.  Pour/plane nets
+        the router was told to skip (``excluded_nets``) and unconnected pads
+        are not counted: they are never routed in any pass.
+        """
+        if self.route_only_nets is None:
+            return []
+        found: set[str] = set()
+        for pad in self._router_pads():
+            if (getattr(pad, "component_id", "") or getattr(pad, "ref", "")) != ref:
+                continue
+            name = getattr(pad, "net_name", "") or ""
+            if name and name not in self.route_only_nets and name not in self.excluded_nets:
+                found.add(name)
+        return sorted(found)
+
+    def _footprint_collision_count(self, ref: str) -> int:
+        """Pad-pad overlaps plus courtyard overlaps between ``ref`` and the rest.
+
+        Issue #8566.  Every other accept guard scores copper or authored zones,
+        so a translate that stacks the moved footprint's pads on a neighbour's
+        passed them all whenever routing improved.  Counts, for the footprint
+        identified by ``ref`` (physical key), each overlapping pad pair and
+        each overlapping courtyard.  Pad boxes are axis-aligned (the router's
+        own pad model); touching edges are not an overlap.  Measured before and
+        after a trial, so a board that is already illegal is not blanket-rejected.
+        """
+        count = 0
+        mine: list[Any] = []
+        others: list[Any] = []
+        for pad in self._router_pads():
+            key = getattr(pad, "component_id", "") or getattr(pad, "ref", "")
+            (mine if key == ref else others).append(pad)
+
+        def box(pad: Any) -> tuple[float, float, float, float]:
+            hw = float(getattr(pad, "width", 0.0) or 0.0) / 2.0
+            hh = float(getattr(pad, "height", 0.0) or 0.0) / 2.0
+            return (float(pad.x) - hw, float(pad.y) - hh, float(pad.x) + hw, float(pad.y) + hh)
+
+        def same_copper(a: Any, b: Any) -> bool:
+            if getattr(a, "through_hole", False) or getattr(b, "through_hole", False):
+                return True
+            return getattr(a, "layer", None) == getattr(b, "layer", None)
+
+        eps = 1e-6
+        # Pad doubles without a size (tests) have no footprint to collide.
+        other_boxes = [(o, box(o)) for o in others if getattr(o, "width", 0.0)]
+        for pad in mine:
+            if not getattr(pad, "width", 0.0):
+                continue
+            ax0, ay0, ax1, ay1 = box(pad)
+            for other, (bx0, by0, bx1, by1) in other_boxes:
+                if (
+                    ax0 < bx1 - eps
+                    and bx0 < ax1 - eps
+                    and ay0 < by1 - eps
+                    and by0 < ay1 - eps
+                    and same_copper(pad, other)
+                ):
+                    count += 1
+        return count + self._courtyard_collision_count(ref)
+
+    def _courtyard_collision_count(self, ref: str) -> int:
+        """Courtyards of other same-side footprints that overlap ``ref``'s."""
+        if self.pcb is None:
+            return 0
+        try:
+            from kicad_tools._shapely import has_shapely
+
+            if not has_shapely():
+                return 0
+            from shapely.geometry import Polygon  # type: ignore[import-untyped]
+
+            from kicad_tools.geometry.courtyard import _courtyard_polygon, _side_has_geometry
+        except Exception:
+            return 0
+
+        def poly(fp: Any) -> Any | None:
+            try:
+                side = "B" if str(fp.layer).startswith("B") else "F"
+                if not _side_has_geometry(fp, side):
+                    return None
+                return _courtyard_polygon(fp, side, Polygon)
+            except Exception:
+                return None
+
+        target = self._find_footprint(ref)
+        if target is None:
+            return 0
+        mine = poly(target)
+        if mine is None:
+            return 0
+        target_side = str(getattr(target, "layer", "")).startswith("B")
+        count = 0
+        for fp in getattr(self.pcb, "footprints", []):
+            if fp is target or str(getattr(fp, "layer", "")).startswith("B") != target_side:
+                continue
+            theirs = poly(fp)
+            if theirs is None or not mine.intersects(theirs):
+                continue
+            if mine.intersection(theirs).area > 1e-6:
+                count += 1
+        return count
+
     def _apply_delta_to_router_pads(self, delta: PlacementDelta) -> None:
         """Mutate the router's flat pad coordinates to match an applied delta.
 
@@ -2720,6 +2842,7 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
         timeout_provider: Callable[[], float | None] | None = None,
         min_trial_budget: float = 0.0,
         abandon_margin: int | None = PD_ABANDON_ROUTED_MARGIN,
+        require_no_footprint_collision: bool = True,
     ) -> PlacementDeltaFeedbackResult:
         """Run the classifier-driven placement-delta feedback loop.
 
@@ -2776,6 +2899,9 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                 MORE of the target's pads into a track-blocking
                 ``(zone ... (keepout ...))`` rule area (Issue #5890).  Dormant
                 on a board that declares no such areas.
+            require_no_footprint_collision: Keep a delta only if it does not
+                increase the number of pad-pad overlaps and courtyard overlaps
+                between the moved footprint and other footprints (Issue #8566).
 
         Returns:
             A :class:`PlacementDeltaFeedbackResult`.  The returned routes/placement
@@ -2932,6 +3058,12 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                 if require_no_keepout_intrusion
                 else None
             )
+            # Issue #8566: pad/courtyard collisions with other footprints.
+            pre_collision = (
+                self._footprint_collision_count(delta.target_key)
+                if require_no_footprint_collision
+                else None
+            )
             # Issue #4968: a rotation swings power/mounting pads that are
             # carried by copper pour rather than by routed traces, so the
             # reach count cannot see them break.  Measured only for the
@@ -3030,6 +3162,17 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                 pre_keepout is not None and post_keepout is not None and post_keepout > pre_keepout
             )
 
+            post_collision = (
+                self._footprint_collision_count(delta.target_key)
+                if pre_collision is not None
+                else None
+            )
+            regressed_collision = (
+                pre_collision is not None
+                and post_collision is not None
+                and post_collision > pre_collision
+            )
+
             # Issue #6314, checkpoint 2 of 3 -- the trial may have been
             # discarded during the re-route or the measurements above.  The
             # counts just taken then describe a re-route that carried on over
@@ -3045,6 +3188,7 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                 and not regressed_zone_pads
                 and not regressed_creepage
                 and not regressed_keepout
+                and not regressed_collision
             ):
                 # Record the keep BEFORE retiring the snapshot (issue #6314):
                 # an interrupt between the two then restores the pre-trial
@@ -3096,6 +3240,11 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                     reason = (
                         f"pairwise creepage fails {pre_creepage} -> {post_creepage} "
                         f"(pad-vs-pad, HV/signal-spacing table)"
+                    )
+                elif regressed_collision:
+                    reason = (
+                        f"{delta.target_ref} pad/courtyard overlaps with other footprints "
+                        f"{pre_collision} -> {post_collision}"
                     )
                 elif regressed_keepout:
                     reason = (

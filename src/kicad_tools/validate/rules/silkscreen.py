@@ -890,7 +890,8 @@ def _iter_silk_elements(
 
     ``side`` is ``"F"`` or ``"B"``.  ``geom`` is a shapely geometry in board
     coordinates.  Covers footprint texts/graphics (transformed from local) and
-    board-level gr_text/gr_graphics (already board-relative).  Hidden text is
+    board-level gr_text/gr_graphics (shifted by the board origin into the
+    same board-relative frame).  Hidden text is
     skipped; zero-length text and unmodeled graphics are skipped.  ``uuid`` is
     the element's own KiCad UUID (``""`` when unset, e.g. synthetic fixtures)
     -- consumers that need to disambiguate same-label siblings (multiple
@@ -935,22 +936,31 @@ def _iter_silk_elements(
             item = f"{footprint.reference} ({_graphic_descriptor('fp', graphic)})"
             yield side, geom, label, footprint.position, graphic.layer, graphic.uuid, item
 
-    # Board-level silk (already board-relative)
+    # Board-level silk.  Footprints (and so pads/outline) were shifted to the
+    # board-relative frame at load, but gr_text / gr_* keep the file's
+    # sheet-absolute coordinates -- shift them here (Issue #8561).
+    ox, oy = getattr(pcb, "_board_origin", (0.0, 0.0))
+
+    def to_board(p: tuple[float, float]) -> tuple[float, float]:
+        return (p[0] - ox, p[1] - oy)
+
+    board_xf = to_board if (ox or oy) else None
     for text in pcb.texts:
         side = _silk_side(text.layer)
         if side is None or text.hidden:
             continue
-        geom = _text_bbox_geometry(text.text, text.font_size, text.font_thickness, text.position)
+        center = to_board(text.position)
+        geom = _text_bbox_geometry(text.text, text.font_size, text.font_thickness, center)
         if geom is None:
             continue
         label = text.text[:20] if text.text else "gr_text"
-        yield side, geom, label, text.position, text.layer, text.uuid, label
+        yield side, geom, label, center, text.layer, text.uuid, label
 
     for board_graphic in pcb.graphics:
         side = _silk_side(board_graphic.layer)
         if side is None:
             continue
-        geom = _stroke_geometry(board_graphic, None)
+        geom = _stroke_geometry(board_graphic, board_xf)
         if geom is None:
             continue
         label = f"gr_{board_graphic.graphic_type}"
@@ -958,7 +968,7 @@ def _iter_silk_elements(
             side,
             geom,
             label,
-            board_graphic.start,
+            to_board(board_graphic.start),
             board_graphic.layer,
             board_graphic.uuid,
             _graphic_descriptor("gr", board_graphic),
@@ -1549,7 +1559,11 @@ def check_silk_ref_obscured(
     require_shapely("silk-ref-obscured geometry")
     from shapely.geometry import Polygon
 
-    from kicad_tools.geometry.courtyard import _courtyard_polygon, _side_has_geometry
+    from kicad_tools.geometry.courtyard import (
+        _courtyard_polygon,
+        _side_has_geometry,
+        is_fiducial_footprint,
+    )
     from kicad_tools.silkscreen.place_refs import (
         _find_reference_node,
         _oriented_text_geometry,
@@ -1564,6 +1578,8 @@ def check_silk_ref_obscured(
             continue
         item = f"{footprint.reference} (reference)"
         if ref_text.hidden:
+            if is_fiducial_footprint(footprint):
+                continue  # hiding fiducial references is the convention (#8540)
             results.add(
                 DRCViolation(
                     rule_id="silk_ref_obscured",

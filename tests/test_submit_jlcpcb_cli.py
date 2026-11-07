@@ -14,7 +14,7 @@ from kicad_tools.manufacturers import jlc_site_driver as drv
 from kicad_tools.parts import jlcpcb_api
 
 # `env` is the shared pytest fixture, re-exported here; its parameter uses are not redefinitions.
-from tests.test_submission_workflow import Source, env, write_manifest  # noqa: F401
+from tests.test_submission_workflow import Source, env, run, write_manifest  # noqa: F401
 
 # ruff: noqa: F811
 
@@ -157,3 +157,102 @@ def test_held_lock_aborts_website_leg_without_attaching(env, monkeypatch, tmp_pa
     err = capsys.readouterr().err
     assert rc == 2
     assert "ABORTED at lock" in err and "Nothing was submitted" in err
+
+
+# --- Issue #8539: no-credentials stock path -------------------------------
+
+
+class _FakeLCSC:
+    """Stands in for LCSCClient: anonymous live rows, as lookup_many returns them."""
+
+    def __init__(self, stock, source="anonymous", fail=False):
+        self.stock, self.source, self.fail = stock, source, fail
+        self.bypass = None
+
+    def lookup_many(self, codes, bypass_cache=False):
+        from kicad_tools.parts.models import BatchLookupResult, Part
+
+        self.bypass = bypass_cache
+        if self.fail:
+            raise RuntimeError("network down")
+        result = BatchLookupResult()
+        for c in codes:
+            if c in self.stock:
+                result[c] = Part(lcsc_part=c, stock=self.stock[c])
+                result.sources[c] = self.source
+        return result
+
+
+def test_no_inventory_source_message_is_explicit(env):
+    from kicad_tools.export import submission_workflow as wf
+
+    write_manifest(env)
+    result = run(env, None, dry_run=True)
+    assert result.stock.blocked
+    failures = wf.format_stock_failures(result.stock)
+    assert failures and all("JLC OpenAPI credentials not set" in f for f in failures)
+    snap = json.loads((env["out"] / "inventory-snapshot.json").read_text())
+    assert {o["status"] for o in snap["observations"]} == {"no-inventory-source"}
+    assert "transport-error" not in json.dumps(snap)
+
+
+def test_lcsc_anonymous_source_verifies_in_stock_parts(env):
+    from kicad_tools.parts.lcsc_inventory import LCSCInventorySource
+
+    write_manifest(env)
+    fake = _FakeLCSC({"C1": 100, "C2": 100})
+    result = run(env, LCSCInventorySource(fake), dry_run=True)
+    assert not result.stock.blocked
+    assert fake.bypass is True
+    snap = json.loads((env["out"] / "inventory-snapshot.json").read_text())
+    assert snap["provenance"]["source"] == "lcsc-anonymous"
+    assert snap["provenance"]["stock_verified"] is True
+
+
+def test_lcsc_source_ignores_offline_rows_and_survives_outage(env):
+    from kicad_tools.parts.lcsc_inventory import LCSCInventorySource
+
+    write_manifest(env)
+    offline = run(
+        env, LCSCInventorySource(_FakeLCSC({"C1": 100, "C2": 100}, "offline")), dry_run=True
+    )
+    assert offline.stock.blocked  # offline catalog rows are not stock evidence
+
+
+def test_lcsc_outage_reads_as_transport_error(env):
+    from kicad_tools.parts.lcsc_inventory import LCSCInventorySource
+
+    write_manifest(env)
+    result = run(env, LCSCInventorySource(_FakeLCSC({}, fail=True)), dry_run=True)
+    assert result.stock.blocked
+    snap = json.loads((env["out"] / "inventory-snapshot.json").read_text())
+    assert {o["status"] for o in snap["observations"]} == {"transport-error"}
+
+
+def test_cli_uses_lcsc_fallback_without_credentials(env, monkeypatch):
+    from kicad_tools.parts import lcsc_inventory
+
+    write_manifest(env)
+    monkeypatch.setattr(jlcpcb_api.JLCCredentials, "from_env", classmethod(lambda cls: None))
+    monkeypatch.setattr(lcsc_inventory, "LCSCClient", lambda **k: _FakeLCSC({"C1": 100, "C2": 100}))
+    assert cmd.main(_argv(env, "--dry-run")) == 0
+
+
+def test_upload_still_requires_credentials_with_lcsc_fallback(env, monkeypatch, capsys):
+    from kicad_tools.parts import lcsc_inventory
+
+    write_manifest(env)
+    monkeypatch.setattr(jlcpcb_api.JLCCredentials, "from_env", classmethod(lambda cls: None))
+    monkeypatch.setattr(lcsc_inventory, "LCSCClient", lambda **k: _FakeLCSC({"C1": 100, "C2": 100}))
+    assert cmd.main(_argv(env, "--upload", "--reviewer", "me")) == 2
+    assert "credentials" in capsys.readouterr().err
+
+
+def test_guided_runs_with_blocked_stock_and_prints_state(env, monkeypatch, capsys):
+    write_manifest(env)
+    _no_browser(monkeypatch)
+    _stock(monkeypatch, {"C1": 5})  # blocked
+    rc = cmd.main(_argv(env, "--guided"))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "stock gate: BLOCKED" in out and "STOCK:" in out and "Guided checklist" in out

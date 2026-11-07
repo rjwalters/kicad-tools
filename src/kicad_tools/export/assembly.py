@@ -590,6 +590,17 @@ class AssemblyPackage:
             except Exception as e:
                 logger.warning(f"LCSC auto-matching failed (continuing without): {e}")
 
+        # Converge BOM/CPL library-prefix forms (issue #8569).
+        self._cpl_footprint_overrides = {}
+        try:
+            from ..schema.pcb import PCB as _PCB
+            from .footprint_form import reconcile_bom_items
+
+            _names = {fp.reference: fp.name for fp in _PCB.load(str(self.pcb_path)).footprints}
+            self._cpl_footprint_overrides = reconcile_bom_items(items, _names)
+        except Exception as e:
+            logger.warning("BOM/CPL footprint-form reconciliation skipped: %s", e)
+
         # Generate BOM
         bom_config = self.config.bom_config or BOMExportConfig()
         bom_csv = export_bom(items, self.fab_family, bom_config)
@@ -633,6 +644,20 @@ class AssemblyPackage:
         # Filter excluded references
         if self.config.exclude_references:
             footprints = [fp for fp in footprints if not self._is_excluded(fp.reference)]
+
+        # Qualify bare CPL names to match the BOM's lib:name form (issue #8569).
+        overrides = getattr(self, "_cpl_footprint_overrides", None) or {}
+        if overrides:
+            import copy
+
+            patched = []
+            for fp in footprints:
+                new_name = overrides.get(fp.reference)
+                if new_name:
+                    fp = copy.copy(fp)
+                    fp.name = new_name
+                patched.append(fp)
+            footprints = patched
 
         # Resolve per-footprint rotation corrections from manufacturer profile
         rotation_corrections = self._get_rotation_corrections()

@@ -50,6 +50,8 @@ def run_parts_command(args) -> int:
             sub_argv.append("--no-alternatives")
         if args.issues_only:
             sub_argv.append("--issues-only")
+        if getattr(args, "no_cache", False):
+            sub_argv.append("--no-cache")
         return parts_main(sub_argv) or 0
 
     elif args.parts_command == "import":
