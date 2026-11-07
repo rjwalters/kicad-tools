@@ -173,6 +173,10 @@ class JLCDependencyError(JLCAPIError):
     """An optional transport dependency is unavailable (no request was sent)."""
 
 
+class JLCNoInventorySourceError(JLCAPIError):
+    """No stock source is configured at all (no credentials, no fallback answered)."""
+
+
 class JLCIncompleteResponseError(JLCAPIError):
     """The HTTP/business envelope succeeded but the payload shape is unusable.
 

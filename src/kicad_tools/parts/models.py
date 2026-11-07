@@ -55,6 +55,12 @@ class PartPrice:
         return self.quantity * self.unit_price
 
 
+# "lcsc-anonymous" is a live read of LCSC's public API (no JLC credentials);
+# it verifies stock for the dry-run/website legs but never gates ``--upload``,
+# which keeps requiring OpenAPI credentials (Issue #8539).
+LIVE_STOCK_SOURCES = frozenset({"live", "lcsc-anonymous"})
+
+
 @dataclass
 class Part:
     """
@@ -108,7 +114,7 @@ class Part:
     @property
     def stock_verified(self) -> bool:
         """Live observation within 24 hours; not a supplier reservation guarantee."""
-        if self.stock_source != "live" or self.fetched_at is None:
+        if self.stock_source not in LIVE_STOCK_SOURCES or self.fetched_at is None:
             return False
         age = datetime.now(tz=self.fetched_at.tzinfo) - self.fetched_at
         return timedelta(0) <= age <= timedelta(hours=24)
