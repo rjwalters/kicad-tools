@@ -244,7 +244,7 @@ Check for an argument passed via the slash command:
 
 If a number is provided (e.g., `/builder 42`):
 1. Treat that number as the target **issue** to work on; **skip** "Finding Work"
-2. **Guard before any write** (#11863): `loom-daemon forge check-claim <number>`. Exit `1`: claim. Exit `0` prints a token: `TARGET_IS_PR` (an issue role, #9929), `CLOSED`, `FROZEN`, `OPERATOR`, `OPEN_PR`, `MERGED_PR` (#12615) or `TRIAGE` (#12713) → refuse, writing nothing, and end with `LOOM_STEP_OUTCOME role=builder target=<n> class=refused reason=<token lowercased, e.g. merged_pr|triage>` so the step-outcome ledger can back off a repeated refusal. `BUILDING` / `LEASE_ALREADY_HELD` / `BRANCH_EXISTS` → refuse unless your invoker holds this claim (`LOOM_SWEEP_CLAIM_OWNED` names the number, or your brief says `This /loom:sweep pre-flighted #<number>`) or the operator told you to resume or force it: that overrides these three, never the seven above. Any other exit: stop. A hard-excluded label (Label Workflow) refuses too
+2. **Guard before any write** (#11863): `loom-daemon forge check-claim <number>`. Exit `1`: claim. Exit `0` prints a token: `TARGET_IS_PR` (an issue role, #9929), `CLOSED`, `FROZEN`, `OPERATOR`, `OPEN_PR`, `MERGED_PR` (#12615) or `TRIAGE` (#12713) → refuse, writing nothing, and end with `LOOM_STEP_OUTCOME role=builder target=<n> class=refused reason=<token lowercased, e.g. merged_pr|triage>` so the step-outcome ledger can back off a repeated refusal. `BUILDING` / `LEASE_ALREADY_HELD` / `BRANCH_EXISTS` → refuse unless your invoker holds this claim (`LOOM_SWEEP_CLAIM_OWNED` names the number, or your brief says `This /loom:sweep pre-flighted #<number>`) or the operator told you to resume or force it: that overrides these three, never the seven above. Any other exit: stop. A hard-excluded label (Label Workflow) refuses too. **Split-parent refusal (#13635)**, before claiming: `loom-daemon forge parent split-state --parent <number>`; exit `0` (`SPLIT_ALL_CLOSED`: children exist and all are closed) → refuse, claim nothing, end with `class=refused reason=split_parent_children_closed`. Exit `1` proceeds; another exit is unanswered, not an all-clear
 3. Claim the issue: `gh issue edit <number> --remove-label "loom:issue" --add-label "loom:building"` (`worktree.sh` leases it)
 4. Proceed directly to implementation
 5. End with the outcome line from `.loom/docs/targeted-role-invocation.md`: `LOOM_STEP_OUTCOME role=builder target=<n> class=<verdict|noop|refused|failed> reason=<token>`
@@ -616,6 +616,8 @@ If after analyzing the issue you determine that **no code changes are required**
 ```bash
 echo "Bug is already fixed on main — verified by running the test suite" > .no-changes-needed
 ```
+
+**Split parent (#13635):** if every child the issue was split into is closed, say so in the marker. Orchestration then releases `loom:building` WITHOUT restoring `loom:issue` (checked via `loom-daemon forge parent split-state`), so the tracker is not re-dispatched.
 
 **IMPORTANT: Do NOT commit the marker file.** Leave it as an untracked file in the worktree. Sweep orchestration checks for the marker file on disk — if you `git add` and commit it, the commit shows as work done and defeats the detection mechanism.
 
