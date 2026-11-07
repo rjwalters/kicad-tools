@@ -836,12 +836,13 @@ def repin_staged(
         if p.is_file() and p.name.endswith("net_class_map.json"):
             report["inputs"].setdefault(p.relative_to(staged).as_posix(), "")
     # Renders are presentation artifacts, not evidence (Issue #7678).
+    from kicad_tools.cli.board_readiness import readiness_input_hash
     from kicad_tools.cli.readiness_cmd import _is_render_artifact
 
     for name in [n for n in report["inputs"] if _is_render_artifact(Path(n))]:
         del report["inputs"][name]
     for name in report["inputs"]:
-        report["inputs"][name] = sha256(staged / name)
+        report["inputs"][name] = readiness_input_hash(name, (staged / name).read_bytes())
     report["checked_at"] = checked_at
     report_path.write_text(json.dumps(report, indent=2) + "\n")
     verdict = read_readiness(staged)

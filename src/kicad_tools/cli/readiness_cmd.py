@@ -56,7 +56,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from .board_readiness import read_readiness
+from .board_readiness import read_readiness, readiness_input_hash
 from .format_options import FORMAT_JSON, add_format_flag, emit_json, stdout_to_stderr_when
 from .kicad_toolchain import (
     KiCadEnvironmentError,
@@ -2980,7 +2980,10 @@ def build_report(
         if not resolved.is_file() or not resolved.is_relative_to(root):
             raise ValueError(f"extra readiness input is not a board file: {path}")
         hashed.add(resolved)
-    report["inputs"] = {_rel(options, path): _sha256_file(path) for path in sorted(hashed)}
+    report["inputs"] = {
+        _rel(options, path): readiness_input_hash(_rel(options, path), path.read_bytes())
+        for path in sorted(hashed)
+    }
     # Issue #7277: record which source bytes each report readiness itself
     # produced was computed from, so report binding can tell "produced for
     # this PCB" from merely "pinned beside it".
