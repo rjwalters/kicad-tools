@@ -267,3 +267,101 @@ loom_wave_size_from_disk() {
     echo "$k"
     echo "$reason"
 }
+
+# loom_detect_ram_gb
+#
+# Integer GB of memory currently available to new processes (#13663). Honors
+# LOOM_RAM_GB_OVERRIDE first (deterministic testing/tuning), then Linux
+# /proc/meminfo MemAvailable, then macOS `vm_stat` (free + inactive pages).
+#
+# Unknown != zero (#4164): when nothing can be measured this prints NOTHING and
+# returns 1, so a caller can skip the RAM clamp rather than treat a broken
+# probe as "0 GB free". A genuine 0 still prints "0" with exit 0.
+loom_detect_ram_gb() {
+    if [[ -n "${LOOM_RAM_GB_OVERRIDE:-}" ]]; then
+        echo "$LOOM_RAM_GB_OVERRIDE"
+        return 0
+    fi
+    local kb
+    if [[ -r /proc/meminfo ]]; then
+        kb="$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null)"
+        if [[ "$kb" =~ ^[0-9]+$ ]]; then
+            echo "$(( kb / 1024 / 1024 ))"
+            return 0
+        fi
+    fi
+    if command -v vm_stat >/dev/null 2>&1; then
+        local out page pages
+        out="$(vm_stat 2>/dev/null)"
+        page="$(printf '%s\n' "$out" | sed -n 's/.*page size of \([0-9][0-9]*\) bytes.*/\1/p')"
+        pages="$(printf '%s\n' "$out" | awk '/^Pages (free|inactive):/ {gsub(/\./,"",$3); s+=$3} END {if (NR>0) print s+0}')"
+        if [[ "$page" =~ ^[0-9]+$ && "$pages" =~ ^[0-9]+$ ]]; then
+            echo "$(( pages * page / 1024 / 1024 / 1024 ))"
+            return 0
+        fi
+    fi
+    echo "loom_detect_ram_gb: could not measure available memory" >&2
+    return 1
+}
+
+# loom_localhost_parallelism <cores> <ram_gb|unknown> <free_gb|unknown> <candidate_count> [max_parallel]
+#
+# Pure integer arithmetic (no I/O) for /loom:accelerate (#13663). Echoes the
+# issue-set --builders-per-wave on line 1 and the limiting factor on line 2.
+#
+#   ceiling = loom_subagent_target_from_cores(cores)   (3..6, #3693)
+#             or max_parallel when given (an explicit operator value replaces the
+#             ceiling, so it is the only way past 6)
+#   k       = min(ceiling, ram_gb / LOOM_PER_BUILDER_RAM_GB (default 4),
+#                 free_gb / LOOM_PER_WORKTREE_GB, candidate_count), floor 1
+#
+# ram_gb / free_gb may be the literal "unknown": that clamp is skipped (a broken
+# probe is not a measured 0, #4164).
+# Reason tokens: cores | max_parallel | candidates | ram | disk | floor.
+loom_localhost_parallelism() {
+    local cores="$1" ram_gb="$2" free_gb="$3" candidates="$4" max_par="${5:-}"
+    local per_disk="${LOOM_PER_WORKTREE_GB:-8}" per_ram="${LOOM_PER_BUILDER_RAM_GB:-4}"
+
+    local n
+    for n in "$cores" "$candidates" "$per_disk" "$per_ram"; do
+        if [[ ! "$n" =~ ^[0-9]+$ ]]; then
+            echo "loom_localhost_parallelism: non-integer input '$n'" >&2
+            return 2
+        fi
+    done
+    for n in "$ram_gb" "$free_gb"; do
+        if [[ "$n" != "unknown" && ! "$n" =~ ^[0-9]+$ ]]; then
+            echo "loom_localhost_parallelism: non-integer input '$n'" >&2
+            return 2
+        fi
+    done
+    if [[ -n "$max_par" && ! "$max_par" =~ ^[1-9][0-9]*$ ]]; then
+        echo "loom_localhost_parallelism: max_parallel must be a positive integer (got '$max_par')" >&2
+        return 2
+    fi
+    if (( per_disk < 1 || per_ram < 1 )); then
+        echo "loom_localhost_parallelism: per-unit GB constants must be >= 1" >&2
+        return 2
+    fi
+
+    local k reason="cores"
+    k="$(loom_subagent_target_from_cores "$cores")" || return 2
+    if [[ -n "$max_par" ]]; then
+        k="$max_par"
+        reason="max_parallel"
+    fi
+    if (( candidates < k )); then
+        k="$candidates"; reason="candidates"
+    fi
+    if [[ "$ram_gb" != "unknown" ]] && (( ram_gb / per_ram < k )); then
+        k=$(( ram_gb / per_ram )); reason="ram"
+    fi
+    if [[ "$free_gb" != "unknown" ]] && (( free_gb / per_disk < k )); then
+        k=$(( free_gb / per_disk )); reason="disk"
+    fi
+    if (( k < 1 )); then
+        k=1; reason="floor"
+    fi
+    echo "$k"
+    echo "$reason"
+}

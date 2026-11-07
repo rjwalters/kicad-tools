@@ -10,7 +10,6 @@
 #   stop      Graceful shutdown
 #   attach    Open live tmux session
 #   send      Send command to agent session
-#   scale     Dynamic agent scaling
 #   logs      Tail agent output
 #   help      Show help
 #
@@ -21,7 +20,6 @@
 #   ./.loom/bin/loom attach shepherd-1      Connect to terminal
 #   ./.loom/bin/loom stop                   Graceful shutdown
 #   ./.loom/bin/loom stop --force           Force kill all sessions
-#   ./.loom/bin/loom scale shepherd 3       Scale shepherd pool to 3
 #   ./.loom/bin/loom logs terminal-1        Tail agent output
 #
 # For more details:
@@ -150,15 +148,6 @@ case "${1:-help}" in
             exit 1
         fi
         ;;
-    scale)
-        shift
-        if [[ -f "$CLI_DIR/loom-scale.sh" ]]; then
-            exec "$CLI_DIR/loom-scale.sh" "$@"
-        else
-            echo -e "${RED}Error: loom-scale.sh not found${NC}" >&2
-            exit 1
-        fi
-        ;;
     logs)
         shift
         if [[ -f "$CLI_DIR/loom-logs.sh" ]]; then
@@ -196,7 +185,6 @@ COMMANDS:
     stop      Graceful shutdown (or --force to kill immediately)
     attach    Open live tmux session for an agent
     send      Send command to agent session
-    scale     Dynamic agent scaling
     logs      Tail agent output
     help      Show this help message
 
@@ -210,7 +198,6 @@ EXAMPLES:
     ./.loom/bin/loom stop                   Graceful shutdown
     ./.loom/bin/loom stop --force           Force kill all sessions
     ./.loom/bin/loom stop shepherd-1        Stop single agent
-    ./.loom/bin/loom scale shepherd 3       Scale shepherd pool to 3
     ./.loom/bin/loom logs terminal-1        Tail agent output
     ./.loom/bin/loom logs --all             Tail all agent logs
 

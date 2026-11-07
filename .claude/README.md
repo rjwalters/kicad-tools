@@ -118,6 +118,7 @@ see #3345):
 | Command | Role | Purpose |
 |---------|------|---------|
 | `/loom:sweep` | Sweep | Drives one issue through the full Curator → Builder → Judge → Doctor → Merge lifecycle |
+| `/loom:accelerate` | Accelerate | Session-only loop of `/loom:sweep all` and `all --prs`, sized to this machine, to add local capacity alongside the fleet |
 | `/loom:builder` | Builder | Implements features for `loom:issue` issues and creates PRs |
 | `/loom:judge` | Judge | Reviews PRs with `loom:review-requested` label |
 | `/loom:curator` | Curator | Enhances issues and marks them as `loom:curated` |

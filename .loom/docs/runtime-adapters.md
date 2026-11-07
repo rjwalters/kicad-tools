@@ -845,8 +845,6 @@ tick is refused as `RoleTickOutcome::ModelRuntimeMismatch` before any spawn:
 - A distinct outcome, deliberately never folded into the generic `Failure`
   tally — same argument as `NoTokenPool` (#4642): this is a permanent config
   conflict detected pre-spawn, not a transient invocation failure.
-- Its own `MODEL_RUNTIME_MISMATCH_SKIP_COUNT` counter
-  (`model_runtime_mismatch_skip_count()`).
 - A one-line operator-facing `detail()` — `"model/runtime mismatch: … (model
   source=…); set autonomous.roleRunner.roleModels.<role> …"` — that
   `record_role_tick` stores on the health ring, which `assess_roles` in
